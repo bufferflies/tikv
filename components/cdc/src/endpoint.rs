@@ -26,6 +26,8 @@ use kvproto::cdcpb::{
 use kvproto::kvrpcpb::ExtraOp as TxnExtraOp;
 use kvproto::metapb::{Region, RegionEpoch};
 use pd_client::PdClient;
+#[cfg(not(feature = "prost-codec"))]
+use protobuf::Message;
 use raftstore::coprocessor::CmdBatch;
 use raftstore::router::RaftStoreRouter;
 use raftstore::store::fsm::{ChangeCmd, ObserveID, StoreMeta};
@@ -655,6 +657,9 @@ impl<T: 'static + RaftStoreRouter> Endpoint<T> {
                 }
             }
         };
+        // rust-protobuf caches message size internally, we can calculate
+        // resolved ts size before broadcasting to save CPU.
+        resolved_ts.compute_size();
         for conn in self.connections.values() {
             let features = if let Some(features) = conn.get_feature() {
                 features
