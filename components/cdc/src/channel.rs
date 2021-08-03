@@ -15,9 +15,11 @@ use futures03::{
 };
 use grpcio::WriteFlags;
 use kvproto::cdcpb::ChangeDataEvent;
+use prometheus::IntCounter;
 
 use tikv_util::warn;
 
+use crate::metrics::*;
 use crate::service::{CdcEvent, EventBatcher};
 
 const CDC_MSG_MAX_BATCH_SIZE: usize = 128;
@@ -83,6 +85,10 @@ impl MemoryQuota {
 pub fn channel(buffer: usize, memory_quota: MemoryQuota) -> (Sink, Drain) {
     let (unbounded_sender, unbounded_receiver) = unbounded();
     let (bounded_sender, bounded_receiver) = bounded(buffer);
+
+    let total_event_bytes = CDC_GRPC_ACCUMULATE_MESSAGE_BYTES.with_label_values(&["event"]);
+    let total_resolved_ts_bytes =
+        CDC_GRPC_ACCUMULATE_MESSAGE_BYTES.with_label_values(&["resolved_ts"]);
     (
         Sink {
             unbounded_sender,
@@ -93,6 +99,8 @@ pub fn channel(buffer: usize, memory_quota: MemoryQuota) -> (Sink, Drain) {
             unbounded_receiver,
             bounded_receiver,
             memory_quota,
+            total_event_bytes,
+            total_resolved_ts_bytes,
         },
     )
 }
@@ -189,6 +197,9 @@ pub struct Drain {
     unbounded_receiver: UnboundedReceiver<(CdcEvent, usize)>,
     bounded_receiver: Receiver<(CdcEvent, usize)>,
     memory_quota: MemoryQuota,
+
+    total_event_bytes: IntCounter,
+    total_resolved_ts_bytes: IntCounter,
 }
 
 impl<'a> Drain {
@@ -211,6 +222,7 @@ impl<'a> Drain {
     where
         S: futures03::Sink<(ChangeDataEvent, WriteFlags), Error = E> + Unpin,
     {
+        let (mut total_event_bytes, mut total_resolved_ts_bytes) = (0, 0);
         let memory_quota = self.memory_quota.clone();
         let mut chunks = self.drain().ready_chunks(CDC_MSG_MAX_BATCH_SIZE);
         while let Some(events) = chunks.next().await {
@@ -220,6 +232,9 @@ impl<'a> Drain {
                 bytes += size;
                 batcher.push(e);
             });
+            let (event_bytes, resolved_ts_bytes) = batcher.statistics();
+            total_event_bytes += event_bytes;
+            total_resolved_ts_bytes += resolved_ts_bytes;
             let resps = batcher.build();
             let last_idx = resps.len() - 1;
             // Events are about to be sent, free pending events memory counter.
@@ -231,6 +246,10 @@ impl<'a> Drain {
             }
             sink.flush().await?;
         }
+        drop(chunks);
+        self.total_event_bytes.inc_by(total_event_bytes as i64);
+        self.total_resolved_ts_bytes
+            .inc_by(total_resolved_ts_bytes as i64);
         Ok(())
     }
 }
