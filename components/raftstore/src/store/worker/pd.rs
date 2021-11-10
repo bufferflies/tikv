@@ -505,9 +505,9 @@ where
     }
 }
 
-const HOTSPOT_KEY_RATE_THRESHOLD: u64 = 128;
-const HOTSPOT_QUERY_RATE_THRESHOLD: u64 = 128;
-const HOTSPOT_BYTE_RATE_THRESHOLD: u64 = 8 * 1024;
+const HOTSPOT_KEY_RATE_THRESHOLD: u64 = 128/4;
+const HOTSPOT_QUERY_RATE_THRESHOLD: u64 = 128/4;
+const HOTSPOT_BYTE_RATE_THRESHOLD: u64 = 8 * 1024/4;
 const HOTSPOT_REPORT_CAPACITY: usize = 1000;
 
 // TODO: support dynamic configure threshold in future.
