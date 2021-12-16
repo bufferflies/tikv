@@ -10,6 +10,7 @@ use tikv_util::config::ReadableSize;
 use super::super::error::Result;
 use super::super::{Coprocessor, KeyEntry, ObserverContext, SplitCheckObserver, SplitChecker};
 use super::Host;
+use crate::coprocessor::config::DEFAULT_SPLIT_SIZE;
 
 const BUCKET_NUMBER_LIMIT: usize = 1024;
 const BUCKET_SIZE_LIMIT_MB: u64 = 512;
@@ -116,8 +117,13 @@ pub fn get_region_approximate_middle(
     let end_key = keys::enc_end_key(region);
     let range = Range::new(&start_key, &end_key);
     Ok(box_try!(
-        db.get_range_approximate_split_keys(range, 1)
-            .map(|mut v| v.pop())
+        db.get_range_approximate_split_keys(
+            range,
+            DEFAULT_SPLIT_SIZE.0,
+            DEFAULT_SPLIT_SIZE.0 * 3 / 2,
+            1,
+        )
+        .map(|mut v| v.pop())
     ))
 }
 

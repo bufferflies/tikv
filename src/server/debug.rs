@@ -24,6 +24,7 @@ use engine_traits::{
     RangePropertiesExt, SeekKey, SyncMutable, WriteBatch, WriteOptions,
 };
 use engine_traits::{MvccProperties, Range, WriteBatchExt, CF_DEFAULT, CF_LOCK, CF_RAFT, CF_WRITE};
+use raftstore::coprocessor::config::DEFAULT_SPLIT_SIZE;
 use raftstore::coprocessor::get_region_approximate_middle;
 use raftstore::store::util as raftstore_util;
 use raftstore::store::PeerStorage;
@@ -1317,7 +1318,12 @@ fn divide_db(db: &Arc<DB>, parts: usize) -> raftstore::Result<Vec<Vec<u8>>> {
     let end = keys::data_end_key(b"");
     let range = Range::new(&start, &end);
     Ok(box_try!(
-        RocksEngine::from_db(db.clone()).get_range_approximate_split_keys(range, parts - 1)
+        RocksEngine::from_db(db.clone()).get_range_approximate_split_keys(
+            range,
+            DEFAULT_SPLIT_SIZE.0,
+            DEFAULT_SPLIT_SIZE.0 * 3 / 2,
+            parts - 1
+        )
     ))
 }
 

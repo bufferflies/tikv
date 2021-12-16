@@ -71,7 +71,7 @@ pub trait RaftEngine: RaftEngineReadOnly + Clone + Sync + Send + 'static {
     /// GC the builtin entry cache.
     fn gc_entry_cache(&self, _raft_group_id: u64, _to: u64) {}
 
-    fn flush_metrics(&self, _instance: &str) {}
+    fn flush_metrics(&self, _instance: &str, _all: bool) {}
     fn flush_stats(&self) -> Option<CacheStats> {
         None
     }

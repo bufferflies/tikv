@@ -56,7 +56,7 @@ pub enum ConsistencyCheckMethod {
 }
 
 /// Default region split size.
-pub const SPLIT_SIZE_MB: u64 = 96;
+pub const DEFAULT_SPLIT_SIZE: ReadableSize = ReadableSize::gb(16);
 /// Default region split keys.
 pub const SPLIT_KEYS: u64 = 960000;
 /// Default batch split limit.
@@ -64,12 +64,11 @@ pub const BATCH_SPLIT_LIMIT: u64 = 10;
 
 impl Default for Config {
     fn default() -> Config {
-        let split_size = ReadableSize::mb(SPLIT_SIZE_MB);
         Config {
             split_region_on_table: false,
             batch_split_limit: BATCH_SPLIT_LIMIT,
-            region_split_size: split_size,
-            region_max_size: split_size / 2 * 3,
+            region_split_size: DEFAULT_SPLIT_SIZE,
+            region_max_size: DEFAULT_SPLIT_SIZE / 2 * 3,
             region_split_keys: SPLIT_KEYS,
             region_max_keys: SPLIT_KEYS / 2 * 3,
             consistency_check_method: ConsistencyCheckMethod::Mvcc,

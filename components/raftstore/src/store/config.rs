@@ -243,7 +243,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Config {
-        let split_size = ReadableSize::mb(coprocessor::config::SPLIT_SIZE_MB);
+        let split_size = coprocessor::config::DEFAULT_SPLIT_SIZE;
         Config {
             prevote: true,
             raftdb_path: String::new(),

@@ -211,8 +211,8 @@ impl RaftEngine for RocksEngine {
         false
     }
 
-    fn flush_metrics(&self, instance: &str) {
-        KvEngine::flush_metrics(self, instance)
+    fn flush_metrics(&self, instance: &str, all: bool) {
+        KvEngine::flush_metrics(self, instance, all)
     }
 
     fn reset_statistics(&self) {

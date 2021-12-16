@@ -2,6 +2,7 @@
 
 use crate::engine::PanicEngine;
 use engine_traits::{DeleteStrategy, MiscExt, Range, Result};
+use std::path::PathBuf;
 
 impl MiscExt for PanicEngine {
     fn flush(&self, sync: bool) -> Result<()> {
@@ -25,6 +26,14 @@ impl MiscExt for PanicEngine {
     }
 
     fn get_engine_used_size(&self) -> Result<u64> {
+        panic!()
+    }
+
+    fn get_engine_total_keys(&self) -> Result<u64> {
+        panic!()
+    }
+
+    fn get_engine_memory_usage(&self) -> u64 {
         panic!()
     }
 
@@ -70,6 +79,10 @@ impl MiscExt for PanicEngine {
     }
 
     fn is_stalled_or_stopped(&self) -> bool {
+        panic!()
+    }
+
+    fn checkpoint_to(&self, path: &[PathBuf], size_to_flush: u64) -> Result<()> {
         panic!()
     }
 }

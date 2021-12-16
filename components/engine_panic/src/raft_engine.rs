@@ -81,7 +81,7 @@ impl RaftEngine for PanicEngine {
         panic!()
     }
 
-    fn flush_metrics(&self, instance: &str) {
+    fn flush_metrics(&self, instance: &str, all: bool) {
         panic!()
     }
 

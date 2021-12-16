@@ -101,6 +101,7 @@ pub mod file_system;
 
 mod raft_engine;
 
+pub use rocksdb::rocksdb_options::Statistics;
 pub use rocksdb::set_perf_level;
 pub use rocksdb::PerfContext;
 

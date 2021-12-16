@@ -1507,8 +1507,8 @@ impl<EK: KvEngine, R: RaftEngine> EngineMetricsManager<EK, R> {
     }
 
     pub fn flush(&mut self, now: Instant) {
-        KvEngine::flush_metrics(&self.engines.kv, "kv");
-        self.engines.raft.flush_metrics("raft");
+        KvEngine::flush_metrics(&self.engines.kv, "kv", false);
+        self.engines.raft.flush_metrics("raft", true);
         if now.saturating_duration_since(self.last_reset) >= DEFAULT_ENGINE_METRICS_RESET_INTERVAL {
             KvEngine::reset_statistics(&self.engines.kv);
             self.engines.raft.reset_statistics();

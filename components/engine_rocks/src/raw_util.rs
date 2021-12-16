@@ -9,8 +9,8 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
-use engine_traits::Result;
 use engine_traits::CF_DEFAULT;
+use engine_traits::{Error, Result};
 use rocksdb::load_latest_options;
 use rocksdb::{CColumnFamilyDescriptor, ColumnFamilyOptions, DBOptions, Env, DB};
 use tikv_util::warn;
@@ -23,6 +23,10 @@ pub struct CFOptions<'a> {
 impl<'a> CFOptions<'a> {
     pub fn new(cf: &'a str, options: ColumnFamilyOptions) -> CFOptions<'a> {
         CFOptions { cf, options }
+    }
+
+    pub fn options_mut(&mut self) -> &mut ColumnFamilyOptions {
+        &mut self.options
     }
 }
 
@@ -181,6 +185,74 @@ pub fn new_engine_opt(
         ))?;
     }
     Ok(db)
+}
+
+pub fn new_engine_readonly_opt(
+    path: &str,
+    mut db_opt: DBOptions,
+    cfs_opts: Vec<CFOptions<'_>>,
+) -> Result<DB> {
+    // Creates a new db if it doesn't exist.
+    if !db_exist(path) {
+        return Err(Error::Engine(format!("db not exist at {}", path)));
+    }
+
+    db_opt.create_if_missing(false);
+
+    // Lists all column families in current db.
+    let cfs_list = DB::list_column_families(&db_opt, path)?;
+    let existed: Vec<&str> = cfs_list.iter().map(|v| v.as_str()).collect();
+    let needed: Vec<&str> = cfs_opts.iter().map(|x| x.cf).collect();
+
+    let cf_descs = if !existed.is_empty() {
+        let env = match db_opt.env() {
+            Some(env) => env,
+            None => Arc::new(Env::default()),
+        };
+        // panic if OPTIONS not found for existing instance?
+        let (_, tmp) = load_latest_options(path, &env, true)
+            .unwrap_or_else(|e| panic!("failed to load_latest_options {:?}", e))
+            .unwrap_or_else(|| panic!("couldn't find the OPTIONS file"));
+        tmp
+    } else {
+        vec![]
+    };
+
+    // If all column families exist, just open db.
+    if existed != needed {
+        return Err(Error::Engine(format!(
+            "cf not match for {}, want {:?}, got {:?}",
+            path, needed, existed
+        )));
+    }
+
+    let mut cfs_v = vec![];
+    let mut cfs_opts_v = vec![];
+    for mut x in cfs_opts {
+        adjust_dynamic_level_bytes(&cf_descs, &mut x);
+        cfs_v.push(x.cf);
+        cfs_opts_v.push(x.options);
+    }
+
+    let db = DB::open_cf_for_read_only(
+        db_opt,
+        path,
+        cfs_v.into_iter().zip(cfs_opts_v).collect(),
+        false,
+    )?;
+    Ok(db)
+}
+
+pub fn destroy_engine(path: &str, db_opt: DBOptions, cfs_opts: Vec<CFOptions<'_>>) -> Result<()> {
+    let mut cfs_v = vec![];
+    let mut cfs_opts_v = vec![];
+    for x in cfs_opts {
+        cfs_v.push(x.cf);
+        cfs_opts_v.push(x.options);
+    }
+
+    DB::destroy_cf(&db_opt, path, cfs_v.into_iter().zip(cfs_opts_v).collect())?;
+    Ok(())
 }
 
 pub(crate) fn db_exist(path: &str) -> bool {

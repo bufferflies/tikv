@@ -90,6 +90,8 @@ where
         Ok(box_try!(get_approximate_split_keys(
             engine,
             region,
+            self.split_size,
+            self.max_size,
             self.batch_split_limit,
         )))
     }
@@ -212,6 +214,8 @@ pub fn get_region_approximate_size(
 fn get_approximate_split_keys(
     db: &impl KvEngine,
     region: &Region,
+    split_size: u64,
+    max_size: u64,
     batch_split_limit: u64,
 ) -> Result<Vec<Vec<u8>>> {
     let start_key = keys::enc_start_key(region);
@@ -219,6 +223,8 @@ fn get_approximate_split_keys(
     let range = Range::new(&start_key, &end_key);
     Ok(box_try!(db.get_range_approximate_split_keys(
         range,
+        split_size,
+        max_size,
         batch_split_limit as usize
     )))
 }
@@ -561,7 +567,7 @@ pub mod tests {
 
         let region = make_region(1, vec![], vec![]);
         assert_eq!(
-            get_approximate_split_keys(&engine, &region, 1).is_err(),
+            get_approximate_split_keys(&engine, &region, 3, 5, 1).is_err(),
             true
         );
 
@@ -574,7 +580,7 @@ pub mod tests {
             engine.flush_cf(CF_DEFAULT, true).unwrap();
         }
         assert_eq!(
-            get_approximate_split_keys(&engine, &region, 1).is_err(),
+            get_approximate_split_keys(&engine, &region, 3, 5, 1).is_err(),
             true
         );
     }
@@ -608,7 +614,7 @@ pub mod tests {
         let region = make_region(1, vec![], vec![]);
 
         assert_eq!(
-            get_approximate_split_keys(&engine, &region, 0)
+            get_approximate_split_keys(&engine, &region, 3, 5, 0)
                 .unwrap()
                 .into_iter()
                 .map(|k| {
@@ -627,7 +633,7 @@ pub mod tests {
             // Flush for every key so that we can know the exact middle key.
             engine.flush_cf(data_cf, true).unwrap();
         }
-        let split_keys = get_approximate_split_keys(&engine, &region, 1)
+        let split_keys = get_approximate_split_keys(&engine, &region, 3, 5, 1)
             .unwrap()
             .into_iter()
             .map(|k| {
@@ -646,7 +652,7 @@ pub mod tests {
             // Flush for every key so that we can know the exact middle key.
             engine.flush_cf(data_cf, true).unwrap();
         }
-        let split_keys = get_approximate_split_keys(&engine, &region, 2)
+        let split_keys = get_approximate_split_keys(&engine, &region, 3, 5, 2)
             .unwrap()
             .into_iter()
             .map(|k| {
@@ -665,7 +671,7 @@ pub mod tests {
             // Flush for every key so that we can know the exact middle key.
             engine.flush_cf(data_cf, true).unwrap();
         }
-        let split_keys = get_approximate_split_keys(&engine, &region, 5)
+        let split_keys = get_approximate_split_keys(&engine, &region, 3, 5, 5)
             .unwrap()
             .into_iter()
             .map(|k| {

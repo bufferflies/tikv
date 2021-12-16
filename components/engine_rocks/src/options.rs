@@ -17,6 +17,7 @@ impl From<engine_traits::ReadOptions> for RocksReadOptions {
     fn from(opts: engine_traits::ReadOptions) -> Self {
         let mut r = RawReadOptions::default();
         r.fill_cache(opts.fill_cache());
+        r.set_read_tier(opts.read_tier() as i32);
         RocksReadOptions(r)
     }
 }
@@ -40,6 +41,7 @@ impl From<engine_traits::WriteOptions> for RocksWriteOptions {
         let mut r = RawWriteOptions::default();
         r.set_sync(opts.sync());
         r.set_no_slowdown(opts.no_slowdown());
+        r.disable_wal(opts.disable_wal());
         RocksWriteOptions(r)
     }
 }

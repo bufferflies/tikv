@@ -1,6 +1,7 @@
 // Copyright 2020 TiKV Project Authors. Licensed under Apache-2.0.
 
 use crate::rocks_metrics_defs::*;
+use collections::HashMap;
 use engine_traits::CF_DEFAULT;
 use lazy_static::lazy_static;
 use prometheus::*;
@@ -1118,6 +1119,250 @@ pub fn flush_engine_properties(engine: &DB, name: &str, shared_block_cache: bool
         STORE_ENGINE_BLOCK_CACHE_USAGE_GAUGE_VEC
             .with_label_values(&[name, "all"])
             .set(block_cache_usage as i64);
+    }
+}
+
+#[derive(Default)]
+pub struct LevelProperties {
+    compression_ratio: f64,
+    num_files: i64,
+    blob_files: i64,
+}
+
+impl LevelProperties {
+    pub fn reset(&mut self) {
+        self.compression_ratio = 0f64;
+        self.num_files = 0;
+        self.blob_files = 0;
+    }
+}
+
+#[derive(Default)]
+pub struct CfProperties {
+    size: i64,
+    block_cache: i64,
+    blob_cache: i64,
+    readers_mem: i64,
+    mem_tables: i64,
+    keys: i64,
+    pending_compaction_bytes: i64,
+    level_props: Vec<LevelProperties>,
+    immutable_mem_table: i64,
+}
+
+impl CfProperties {
+    #[inline]
+    fn reset(&mut self) {
+        self.size = 0;
+        self.block_cache = 0;
+        self.blob_cache = 0;
+        self.readers_mem = 0;
+        self.mem_tables = 0;
+        self.keys = 0;
+        self.pending_compaction_bytes = 0;
+        for prop in &mut self.level_props {
+            prop.reset();
+        }
+        self.immutable_mem_table = 0;
+    }
+}
+
+#[derive(Default)]
+pub struct EngineProperties {
+    cfs: HashMap<String, CfProperties>,
+    snapshot: i64,
+    oldest_snapshot_time: u64,
+    block_cache: i64,
+    write_stall: [i64; ROCKSDB_IOSTALL_KEY.len()],
+}
+
+impl EngineProperties {
+    pub fn reset(&mut self) {
+        for prop in self.cfs.values_mut() {
+            prop.reset();
+        }
+        self.snapshot = 0;
+        self.oldest_snapshot_time = 0;
+        self.block_cache = 0;
+        self.write_stall = [0; ROCKSDB_IOSTALL_KEY.len()];
+    }
+}
+
+pub fn collect_engine_properties(
+    engine: &DB,
+    shared_block_cache: bool,
+    target: &mut EngineProperties,
+) {
+    for cf in engine.cf_names() {
+        if !target.cfs.contains_key(cf) {
+            target.cfs.insert(cf.to_string(), CfProperties::default());
+        }
+        let cfp = target.cfs.get_mut(cf).unwrap();
+        let handle = crate::util::get_cf_handle(engine, cf).unwrap();
+        // It is important to monitor each cf's size, especially the "raft" and "lock" column
+        // families.
+        let cf_used_size = crate::util::get_engine_cf_used_size(engine, handle);
+        cfp.size += cf_used_size as i64;
+
+        if !shared_block_cache {
+            let block_cache_usage = engine.get_block_cache_usage_cf(handle);
+            cfp.block_cache += block_cache_usage as i64;
+        }
+
+        let blob_cache_usage = engine.get_blob_cache_usage_cf(handle);
+        cfp.blob_cache += blob_cache_usage as i64;
+
+        // TODO: find a better place to record these metrics.
+        // Refer: https://github.com/facebook/rocksdb/wiki/Memory-usage-in-RocksDB
+        // For index and filter blocks memory
+        if let Some(readers_mem) = engine.get_property_int_cf(handle, ROCKSDB_TABLE_READERS_MEM) {
+            cfp.readers_mem += readers_mem as i64;
+        }
+
+        // For memtable
+        if let Some(mem_table) = engine.get_property_int_cf(handle, ROCKSDB_CUR_SIZE_ALL_MEM_TABLES)
+        {
+            cfp.mem_tables += mem_table as i64;
+        }
+
+        // TODO: add cache usage and pinned usage.
+
+        if let Some(num_keys) = engine.get_property_int_cf(handle, ROCKSDB_ESTIMATE_NUM_KEYS) {
+            cfp.keys += num_keys as i64;
+        }
+
+        // Pending compaction bytes
+        if let Some(pending_compaction_bytes) =
+            crate::util::get_cf_pending_compaction_bytes(engine, handle)
+        {
+            cfp.pending_compaction_bytes += pending_compaction_bytes as i64;
+        }
+
+        let opts = engine.get_options_cf(handle);
+        for level in 0..opts.get_num_levels() {
+            if cfp.level_props.len() == level {
+                cfp.level_props.push(Default::default());
+            }
+            let level_prop = &mut cfp.level_props[level];
+            // Compression ratio at levels
+            if let Some(v) =
+                crate::util::get_engine_compression_ratio_at_level(engine, handle, level)
+            {
+                level_prop.compression_ratio = v as f64;
+            }
+
+            // Num files at levels
+            if let Some(v) = crate::util::get_cf_num_files_at_level(engine, handle, level) {
+                level_prop.num_files += v as i64;
+            }
+
+            // Titan Num blob files at levels
+            if let Some(v) = crate::util::get_cf_num_blob_files_at_level(engine, handle, level) {
+                level_prop.blob_files += v as i64;
+            }
+        }
+
+        // Num immutable mem-table
+        if let Some(v) = crate::util::get_cf_num_immutable_mem_table(engine, handle) {
+            cfp.immutable_mem_table += v as i64;
+        }
+
+        if let Some(info) = engine.get_map_property_cf(handle, ROCKSDB_CFSTATS) {
+            for i in 0..ROCKSDB_IOSTALL_KEY.len() {
+                let value = info.get_property_int_value(ROCKSDB_IOSTALL_KEY[i]);
+                target.write_stall[i] += value as i64;
+            }
+        }
+    }
+
+    // For snapshot
+    if let Some(n) = engine.get_property_int(ROCKSDB_NUM_SNAPSHOTS) {
+        target.snapshot += n as i64;
+    }
+    if let Some(t) = engine.get_property_int(ROCKSDB_OLDEST_SNAPSHOT_TIME) {
+        // RocksDB returns 0 if no snapshots.
+        if target.oldest_snapshot_time == 0 {
+            target.oldest_snapshot_time = t;
+        } else {
+            target.oldest_snapshot_time = std::cmp::min(t, target.oldest_snapshot_time);
+        }
+    }
+
+    if shared_block_cache {
+        // Since block cache is shared, getting cache size from any CF is fine. Here we get from
+        // default CF.
+        let handle = crate::util::get_cf_handle(engine, CF_DEFAULT).unwrap();
+        let block_cache_usage = engine.get_block_cache_usage_cf(handle);
+        target.block_cache = block_cache_usage as i64;
+    }
+}
+
+pub fn report_engine_properties(name: &str, shared_block_cache: bool, target: &EngineProperties) {
+    for (cf, stats) in target.cfs.iter() {
+        STORE_ENGINE_SIZE_GAUGE_VEC
+            .with_label_values(&[name, cf])
+            .set(stats.size);
+        if !shared_block_cache {
+            STORE_ENGINE_BLOCK_CACHE_USAGE_GAUGE_VEC
+                .with_label_values(&[name, cf])
+                .set(stats.block_cache);
+        }
+        STORE_ENGINE_BLOB_CACHE_USAGE_GAUGE_VEC
+            .with_label_values(&[name, cf])
+            .set(stats.blob_cache);
+        STORE_ENGINE_MEMORY_GAUGE_VEC
+            .with_label_values(&[name, cf, "readers-mem"])
+            .set(stats.readers_mem);
+        STORE_ENGINE_MEMORY_GAUGE_VEC
+            .with_label_values(&[name, cf, "mem-tables"])
+            .set(stats.mem_tables);
+        STORE_ENGINE_ESTIMATE_NUM_KEYS_VEC
+            .with_label_values(&[name, cf])
+            .set(stats.keys);
+        STORE_ENGINE_PENDING_COMPACTION_BYTES_VEC
+            .with_label_values(&[name, cf])
+            .set(stats.pending_compaction_bytes);
+        for (level, prop) in stats.level_props.iter().enumerate() {
+            let level_str = level.to_string();
+            STORE_ENGINE_COMPRESSION_RATIO_VEC
+                .with_label_values(&[name, cf, &level_str])
+                .set(prop.compression_ratio);
+            STORE_ENGINE_NUM_FILES_AT_LEVEL_VEC
+                .with_label_values(&[name, cf, &level_str])
+                .set(prop.num_files);
+            STORE_ENGINE_TITANDB_NUM_BLOB_FILES_AT_LEVEL_VEC
+                .with_label_values(&[name, cf, &level_str])
+                .set(prop.blob_files);
+        }
+        STORE_ENGINE_NUM_IMMUTABLE_MEM_TABLE_VEC
+            .with_label_values(&[name, cf])
+            .set(stats.immutable_mem_table);
+    }
+    STORE_ENGINE_NUM_SNAPSHOTS_GAUGE_VEC
+        .with_label_values(&[name])
+        .set(target.snapshot);
+    let age = if target.oldest_snapshot_time == 0 {
+        0
+    } else {
+        let now = time::get_time().sec as u64;
+        if now > target.oldest_snapshot_time {
+            now - target.oldest_snapshot_time
+        } else {
+            0
+        }
+    };
+    STORE_ENGINE_OLDEST_SNAPSHOT_DURATION_GAUGE_VEC
+        .with_label_values(&[name])
+        .set(age as i64);
+    if shared_block_cache {
+        STORE_ENGINE_BLOCK_CACHE_USAGE_GAUGE_VEC
+            .with_label_values(&[name, "all"])
+            .set(target.block_cache);
+    }
+    for i in 0..ROCKSDB_IOSTALL_KEY.len() {
+        STORE_ENGINE_WRITE_STALL_REASON_GAUGE_VEC
+            .with_label_values(&[name, ROCKSDB_IOSTALL_TYPE[i]])
+            .set(target.write_stall[i]);
     }
 }
 

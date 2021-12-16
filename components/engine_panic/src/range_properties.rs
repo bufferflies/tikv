@@ -33,6 +33,8 @@ impl RangePropertiesExt for PanicEngine {
     fn get_range_approximate_split_keys(
         &self,
         range: Range,
+        split_size: u64,
+        max_size: u64,
         key_count: usize,
     ) -> Result<Vec<Vec<u8>>> {
         panic!()
@@ -42,6 +44,8 @@ impl RangePropertiesExt for PanicEngine {
         &self,
         cfname: &str,
         range: Range,
+        split_size: u64,
+        max_size: u64,
         key_count: usize,
     ) -> Result<Vec<Vec<u8>>> {
         panic!()

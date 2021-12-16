@@ -9,6 +9,7 @@ use crate::cf_names::CFNamesExt;
 use crate::errors::Result;
 use crate::flow_control_factors::FlowControlFactorsExt;
 use crate::range::Range;
+use std::path::PathBuf;
 
 #[derive(Clone, Debug)]
 pub enum DeleteStrategy {
@@ -52,6 +53,10 @@ pub trait MiscExt: CFNamesExt + FlowControlFactorsExt {
     ///
     fn get_engine_used_size(&self) -> Result<u64>;
 
+    fn get_engine_total_keys(&self) -> Result<u64>;
+
+    fn get_engine_memory_usage(&self) -> u64;
+
     /// Roughly deletes files in multiple ranges.
     ///
     /// Note:
@@ -90,4 +95,6 @@ pub trait MiscExt: CFNamesExt + FlowControlFactorsExt {
     ) -> Result<Option<(u64, u64)>>;
 
     fn is_stalled_or_stopped(&self) -> bool;
+
+    fn checkpoint_to(&self, path: &[PathBuf], size_to_flush: u64) -> Result<()>;
 }

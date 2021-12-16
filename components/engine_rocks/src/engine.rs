@@ -13,8 +13,9 @@ use rocksdb::{DBIterator, Writable, DB};
 use crate::db_vector::RocksDBVector;
 use crate::options::RocksReadOptions;
 use crate::rocks_metrics::{
-    flush_engine_histogram_metrics, flush_engine_iostall_properties, flush_engine_properties,
-    flush_engine_ticker_metrics,
+    collect_engine_properties, flush_engine_histogram_metrics, flush_engine_iostall_properties,
+    flush_engine_properties, flush_engine_ticker_metrics, report_engine_properties,
+    EngineProperties,
 };
 use crate::rocks_metrics_defs::{
     ENGINE_HIST_TYPES, ENGINE_TICKER_TYPES, TITAN_ENGINE_HIST_TYPES, TITAN_ENGINE_TICKER_TYPES,
@@ -48,8 +49,8 @@ impl RocksEngine {
         self.db.clone()
     }
 
-    pub fn exists(path: &str) -> bool {
-        let path = Path::new(path);
+    pub fn exists(path: impl AsRef<Path>) -> bool {
+        let path = path.as_ref();
         if !path.exists() || !path.is_dir() {
             return false;
         }
@@ -62,6 +63,14 @@ impl RocksEngine {
 
     pub fn set_shared_block_cache(&mut self, enable: bool) {
         self.shared_block_cache = enable;
+    }
+
+    pub fn collect_engine_properties_to(&self, target: &mut EngineProperties) {
+        collect_engine_properties(&self.db, self.shared_block_cache, target)
+    }
+
+    pub fn report_engine_properties(&self, instance: &str, target: &EngineProperties) {
+        report_engine_properties(instance, self.shared_block_cache, target);
     }
 }
 
@@ -76,7 +85,7 @@ impl KvEngine for RocksEngine {
         self.db.sync_wal().map_err(Error::Engine)
     }
 
-    fn flush_metrics(&self, instance: &str) {
+    fn flush_metrics(&self, instance: &str, all: bool) {
         for t in ENGINE_TICKER_TYPES {
             let v = self.db.get_and_reset_statistics_ticker_count(*t);
             flush_engine_ticker_metrics(*t, v, instance);
@@ -99,6 +108,10 @@ impl KvEngine for RocksEngine {
         }
         flush_engine_properties(&self.db, instance, self.shared_block_cache);
         flush_engine_iostall_properties(&self.db, instance);
+        if all {
+            flush_engine_properties(&self.db, instance, self.shared_block_cache);
+            flush_engine_iostall_properties(&self.db, instance);
+        }
     }
 
     fn reset_statistics(&self) {
