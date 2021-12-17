@@ -3,7 +3,7 @@
 // #[PerformanceCriticalPath]
 use std::borrow::Cow;
 use std::cmp::{Ord, Ordering as CmpOrdering};
-use std::collections::VecDeque;
+use std::collections::{vec_deque, VecDeque};
 use std::fmt::{self, Debug, Formatter};
 use std::marker::PhantomData;
 use std::mem;
@@ -18,8 +18,8 @@ use std::vec::Drain;
 use std::{cmp, usize};
 
 use batch_system::{
-    BasicMailbox, BatchRouter, BatchSystem, Fsm, HandleResult, HandlerBuilder, PollHandler,
-    Priority,
+    BasicMailbox, BatchRouter, BatchSystem, CheckPointType, Fsm, HandleResult, HandlerBuilder,
+    PollHandler, Priority,
 };
 use collections::{HashMap, HashMapEntry, HashSet};
 use crossbeam::channel::{TryRecvError, TrySendError};
@@ -27,9 +27,9 @@ use engine_traits::PerfContext;
 use engine_traits::PerfContextKind;
 use engine_traits::{
     DeleteStrategy, KvEngine, RaftEngine, RaftEngineReadOnly, Range as EngineRange, Snapshot,
-    WriteBatch,
+    TabletFactory, WriteBatch,
 };
-use engine_traits::{SSTMetaInfo, ALL_CFS, CF_DEFAULT, CF_LOCK, CF_RAFT, CF_WRITE};
+use engine_traits::{PerfLevel, SSTMetaInfo, ALL_CFS, CF_DEFAULT, CF_LOCK, CF_RAFT, CF_WRITE};
 use fail::fail_point;
 use kvproto::import_sstpb::SstMeta;
 use kvproto::kvrpcpb::ExtraOp as TxnExtraOp;
@@ -42,6 +42,7 @@ use kvproto::raft_serverpb::{
     MergeState, PeerState, RaftApplyState, RaftTruncatedState, RegionLocalState,
 };
 use prometheus::local::LocalHistogram;
+use protobuf::{CodedOutputStream, Message};
 use raft::eraftpb::{
     ConfChange, ConfChangeType, ConfChangeV2, Entry, EntryType, Snapshot as RaftSnapshot,
 };
@@ -70,7 +71,7 @@ use crate::store::metrics::*;
 use crate::store::msg::{Callback, PeerMsg, ReadResponse, SignificantMsg};
 use crate::store::peer::Peer;
 use crate::store::peer_storage::{
-    self, write_initial_apply_state, write_peer_state, CachedEntries,
+    self, write_initial_apply_state, write_peer_state, CachedEntries, RAFT_INIT_LOG_INDEX,
 };
 use crate::store::util::{
     admin_cmd_epoch_lookup, check_region_epoch, compare_region_epoch, is_learner, ChangePeerI,
@@ -82,7 +83,6 @@ use crate::{bytes_capacity, Error, Result};
 use super::metrics::*;
 
 const DEFAULT_APPLY_WB_SIZE: usize = 4 * 1024;
-const APPLY_WB_SHRINK_SIZE: usize = 1024 * 1024;
 const SHRINK_PENDING_CMD_QUEUE_CAP: usize = 64;
 const MAX_APPLY_BATCH_SIZE: usize = 64 * 1024 * 1024;
 
@@ -244,6 +244,7 @@ pub enum ExecResult<S> {
         regions: Vec<Region>,
         derived: Region,
         new_split_regions: HashMap<u64, NewSplitPeer>,
+        split_index: u64,
     },
     PrepareMerge {
         region: Region,
@@ -337,7 +338,7 @@ impl<S: Snapshot> ApplyCallbackBatch<S> {
 }
 
 pub trait Notifier<EK: KvEngine>: Send {
-    fn notify(&self, apply_res: Vec<ApplyRes<EK::Snapshot>>);
+    fn notify(&self, apply_res: vec_deque::Drain<ApplyRes<EK::Snapshot>>);
     fn notify_one(&self, region_id: u64, msg: PeerMsg<EK>);
     fn clone_box(&self) -> Box<dyn Notifier<EK>>;
 }
@@ -351,16 +352,15 @@ where
     timer: Option<Instant>,
     host: CoprocessorHost<EK>,
     importer: Arc<SSTImporter>,
-    region_scheduler: Scheduler<RegionTask<EK::Snapshot>>,
+    region_scheduler: Scheduler<RegionTask>,
     router: ApplyRouter<EK>,
     notifier: Box<dyn Notifier<EK>>,
-    engine: EK,
     applied_batch: ApplyCallbackBatch<EK::Snapshot>,
-    apply_res: Vec<ApplyRes<EK::Snapshot>>,
+    apply_res: VecDeque<ApplyRes<EK::Snapshot>>,
     exec_log_index: u64,
     exec_log_term: u64,
 
-    kv_wb: W,
+    kv_wb: Option<W>,
     kv_wb_last_bytes: u64,
     kv_wb_last_keys: u64,
 
@@ -370,8 +370,9 @@ where
     sync_log_hint: bool,
     // Whether to use the delete range API instead of deleting one by one.
     use_delete_range: bool,
+    disable_tablet_wal: bool,
 
-    perf_context: EK::PerfContext,
+    perf_level: PerfLevel,
 
     yield_duration: Duration,
 
@@ -395,6 +396,9 @@ where
 
     /// The ssts waiting to be ingested in `write_to_db`.
     pending_ssts: Vec<SSTMetaInfo>,
+    write_times: usize,
+    tablet_factory: Box<dyn TabletFactory<EK> + Send>,
+    after_write: Vec<Box<dyn FnOnce() + Send>>,
 
     /// The pending inspector should be cleaned at the end of a write.
     pending_latency_inspect: Vec<LatencyInspector>,
@@ -413,39 +417,35 @@ where
         tag: String,
         host: CoprocessorHost<EK>,
         importer: Arc<SSTImporter>,
-        region_scheduler: Scheduler<RegionTask<EK::Snapshot>>,
-        engine: EK,
+        region_scheduler: Scheduler<RegionTask>,
         router: ApplyRouter<EK>,
         notifier: Box<dyn Notifier<EK>>,
         cfg: &Config,
         store_id: u64,
         pending_create_peers: Arc<Mutex<HashMap<u64, (u64, bool)>>>,
         priority: Priority,
+        tablet_factory: Box<dyn TabletFactory<EK> + Send>,
     ) -> ApplyContext<EK, W> {
-        // If `enable_multi_batch_write` was set true, we create `RocksWriteBatchVec`.
-        // Otherwise create `RocksWriteBatch`.
-        let kv_wb = W::with_capacity(&engine, DEFAULT_APPLY_WB_SIZE);
-
         ApplyContext {
             tag,
             timer: None,
             host,
             importer,
             region_scheduler,
-            engine: engine.clone(),
+            perf_level: cfg.perf_level,
             router,
             notifier,
-            kv_wb,
             applied_batch: ApplyCallbackBatch::new(),
-            apply_res: vec![],
+            kv_wb: None,
+            apply_res: VecDeque::with_capacity(1024),
             exec_log_index: 0,
             exec_log_term: 0,
             kv_wb_last_bytes: 0,
             kv_wb_last_keys: 0,
             committed_count: 0,
             sync_log_hint: false,
+            disable_tablet_wal: cfg.disable_tablet_wal,
             use_delete_range: cfg.use_delete_range,
-            perf_context: engine.get_perf_context(cfg.perf_level, PerfContextKind::RaftstoreApply),
             yield_duration: cfg.apply_yield_duration.0,
             delete_ssts: vec![],
             store_id,
@@ -453,6 +453,9 @@ where
             priority,
             yield_high_latency_operation: cfg.apply_batch_system.low_priority_pool_size > 0,
             pending_ssts: vec![],
+            write_times: 0,
+            tablet_factory,
+            after_write: vec![],
             pending_latency_inspect: vec![],
             apply_wait: APPLY_TASK_WAIT_TIME_HISTOGRAM.local(),
             apply_time: APPLY_TIME_HISTOGRAM.local(),
@@ -476,7 +479,7 @@ where
     /// This call is valid only when it's between a `prepare_for` and `finish_for`.
     pub fn commit(&mut self, delegate: &mut ApplyDelegate<EK>) {
         if delegate.last_flush_applied_index < delegate.apply_state.get_applied_index() {
-            delegate.write_apply_state(self.kv_wb_mut());
+            delegate.write_apply_state(self.kv_wb_mut(delegate));
         }
         self.commit_opt(delegate, true);
     }
@@ -484,17 +487,17 @@ where
     fn commit_opt(&mut self, delegate: &mut ApplyDelegate<EK>, persistent: bool) {
         delegate.update_metrics(self);
         if persistent {
-            self.write_to_db();
+            self.write_to_db(delegate);
             self.prepare_for(delegate);
             delegate.last_flush_applied_index = delegate.apply_state.get_applied_index()
         }
-        self.kv_wb_last_bytes = self.kv_wb().data_size() as u64;
-        self.kv_wb_last_keys = self.kv_wb().count() as u64;
+        self.kv_wb_last_bytes = self.kv_wb_mut(delegate).data_size() as u64;
+        self.kv_wb_last_keys = self.kv_wb_mut(delegate).count() as u64;
     }
 
     /// Writes all the changes into RocksDB.
     /// If it returns true, all pending writes are persisted in engines.
-    pub fn write_to_db(&mut self) -> bool {
+    pub fn write_to_db(&mut self, delegate: &ApplyDelegate<EK>) -> bool {
         let need_sync = self.sync_log_hint;
         // There may be put and delete requests after ingest request in the same fsm.
         // To guarantee the correct order, we must ingest the pending_sst first, and
@@ -502,7 +505,7 @@ where
         if !self.pending_ssts.is_empty() {
             let tag = self.tag.clone();
             self.importer
-                .ingest(&self.pending_ssts, &self.engine)
+                .ingest(&self.pending_ssts, delegate.tablet.as_ref().unwrap())
                 .unwrap_or_else(|e| {
                     panic!(
                         "{} failed to ingest ssts {:?}: {:?}",
@@ -511,23 +514,36 @@ where
                 });
             self.pending_ssts = vec![];
         }
-        if !self.kv_wb_mut().is_empty() {
+        let perf_level = self.perf_level;
+        let disable_tablet_wal = self.disable_tablet_wal;
+        let wb = self.kv_wb_mut(delegate);
+        if !wb.is_empty() {
+            let mut perf_context = delegate
+                .tablet
+                .as_ref()
+                .unwrap()
+                .get_perf_context(perf_level, PerfContextKind::RaftstoreApply);
+            perf_context.start_observe();
             let mut write_opts = engine_traits::WriteOptions::new();
-            write_opts.set_sync(need_sync);
-            self.kv_wb().write_opt(&write_opts).unwrap_or_else(|e| {
+            write_opts.set_sync(!disable_tablet_wal && need_sync);
+            write_opts.set_disable_wal(disable_tablet_wal);
+            wb.write_opt(&write_opts).unwrap_or_else(|e| {
                 panic!("failed to write to engine: {:?}", e);
             });
-            self.perf_context.report_metrics();
-            self.sync_log_hint = false;
-            let data_size = self.kv_wb().data_size();
-            if data_size > APPLY_WB_SHRINK_SIZE {
-                // Control the memory usage for the WriteBatch. Whether it's `RocksWriteBatch` or
-                // `RocksWriteBatchVec` depends on the `enable_multi_batch_write` configuration.
-                self.kv_wb = W::with_capacity(&self.engine, DEFAULT_APPLY_WB_SIZE);
-            } else {
-                // Clear data, reuse the WriteBatch, this can reduce memory allocations and deallocations.
-                self.kv_wb_mut().clear();
+            if disable_tablet_wal && need_sync {
+                delegate
+                    .tablet
+                    .as_ref()
+                    .unwrap()
+                    .flush(true)
+                    .unwrap_or_else(|e| {
+                        panic!("failed to flush to engine: {:?}", e);
+                    });
             }
+            // Clear data, reuse the WriteBatch, this can reduce memory allocations and deallocations.
+            wb.clear();
+            perf_context.report_metrics();
+            self.sync_log_hint = false;
             self.kv_wb_last_bytes = 0;
             self.kv_wb_last_keys = 0;
         }
@@ -539,15 +555,22 @@ where
                 });
             }
         }
+        for cb in self.after_write.drain(..) {
+            cb();
+        }
         // Take the applied commands and their callback
         let ApplyCallbackBatch {
             cmd_batch,
             batch_max_level,
             mut cb_batch,
         } = mem::replace(&mut self.applied_batch, ApplyCallbackBatch::new());
+        self.write_times += 1;
         // Call it before invoking callback for preventing Commit is executed before Prewrite is observed.
-        self.host
-            .on_flush_applied_cmd_batch(batch_max_level, cmd_batch, &self.engine);
+        self.host.on_flush_applied_cmd_batch(
+            batch_max_level,
+            cmd_batch,
+            delegate.tablet.as_ref().unwrap(),
+        );
         // Invoke callbacks
         let now = Instant::now();
         for (cb, resp) in cb_batch.drain(..) {
@@ -561,6 +584,12 @@ where
         }
         self.apply_time.flush();
         self.apply_wait.flush();
+        if !self.apply_res.is_empty() {
+            self.notifier.notify(self.apply_res.drain(..));
+            if self.apply_res.capacity() > 8192 {
+                self.apply_res = VecDeque::new();
+            }
+        }
         need_sync
     }
 
@@ -571,10 +600,10 @@ where
         results: VecDeque<ExecResult<EK::Snapshot>>,
     ) {
         if !delegate.pending_remove {
-            delegate.write_apply_state(self.kv_wb_mut());
+            delegate.write_apply_state(self.kv_wb_mut(delegate));
         }
         self.commit_opt(delegate, false);
-        self.apply_res.push(ApplyRes {
+        self.apply_res.push_back(ApplyRes {
             region_id: delegate.region_id(),
             apply_state: delegate.apply_state.clone(),
             exec_res: results,
@@ -584,26 +613,29 @@ where
     }
 
     pub fn delta_bytes(&self) -> u64 {
-        self.kv_wb().data_size() as u64 - self.kv_wb_last_bytes
+        self.kv_wb.as_ref().map_or(0, |w| w.data_size()) as u64 - self.kv_wb_last_bytes
     }
 
     pub fn delta_keys(&self) -> u64 {
-        self.kv_wb().count() as u64 - self.kv_wb_last_keys
+        self.kv_wb.as_ref().map_or(0, |w| w.count()) as u64 - self.kv_wb_last_keys
     }
 
     #[inline]
-    pub fn kv_wb(&self) -> &W {
-        &self.kv_wb
-    }
-
-    #[inline]
-    pub fn kv_wb_mut(&mut self) -> &mut W {
-        &mut self.kv_wb
+    pub fn kv_wb_mut(&mut self, delegate: &ApplyDelegate<EK>) -> &mut W {
+        if self.kv_wb.is_none() {
+            // If `enable_multi_batch_write` was set true, we create `RocksWriteBatchVec`.
+            // Otherwise create `RocksWriteBatch`.
+            self.kv_wb = Some(W::with_capacity(
+                delegate.tablet.as_ref().unwrap(),
+                DEFAULT_APPLY_WB_SIZE,
+            ));
+        }
+        self.kv_wb.as_mut().unwrap()
     }
 
     /// Flush all pending writes to engines.
     /// If it returns true, all pending writes are persisted in engines.
-    pub fn flush(&mut self) -> bool {
+    pub fn flush(&mut self, delegate: &ApplyDelegate<EK>) -> bool {
         // TODO: this check is too hacky, need to be more verbose and less buggy.
         let t = match self.timer.take() {
             Some(t) => t,
@@ -615,12 +647,7 @@ where
         // take raft log gc for example, we write kv WAL first, then write raft WAL,
         // if power failure happen, raft WAL may synced to disk, but kv WAL may not.
         // so we use sync-log flag here.
-        let is_synced = self.write_to_db();
-
-        if !self.apply_res.is_empty() {
-            let apply_res = mem::take(&mut self.apply_res);
-            self.notifier.notify(apply_res);
-        }
+        let is_synced = self.write_to_db(delegate);
 
         let elapsed = t.saturating_elapsed();
         STORE_APPLY_LOG_HISTOGRAM.observe(duration_to_sec(elapsed) as f64);
@@ -873,6 +900,7 @@ where
     applied_index_term: u64,
     /// The latest flushed applied index.
     last_flush_applied_index: u64,
+    tablet: Option<EK>,
 
     /// Info about cmd observer.
     observe_info: CmdObserveInfo,
@@ -895,7 +923,7 @@ impl<EK> ApplyDelegate<EK>
 where
     EK: KvEngine,
 {
-    fn from_registration(reg: Registration) -> ApplyDelegate<EK> {
+    fn from_registration(reg: Registration<EK>) -> ApplyDelegate<EK> {
         ApplyDelegate {
             id: reg.id,
             tag: format!("[region {}] {}", reg.region.get_id(), reg.id),
@@ -914,6 +942,7 @@ where
             pending_cmds: PendingCmdQueue::new(),
             metrics: Default::default(),
             last_merge_version: 0,
+            tablet: reg.tablet,
             pending_request_snapshot_count: reg.pending_request_snapshot_count,
             // use a default `CmdObserveInfo` because observing is disable by default
             observe_info: CmdObserveInfo::default(),
@@ -1046,7 +1075,10 @@ where
             let mut has_unflushed_data =
                 self.last_flush_applied_index != self.apply_state.get_applied_index();
             if has_unflushed_data && should_write_to_engine(&cmd)
-                || apply_ctx.kv_wb().should_write_to_engine()
+                || apply_ctx
+                    .kv_wb
+                    .as_ref()
+                    .map_or(false, |wb| wb.should_write_to_engine())
             {
                 apply_ctx.commit(self);
                 if let Some(start) = self.handle_start.as_ref() {
@@ -1223,13 +1255,13 @@ where
 
         ctx.exec_log_index = index;
         ctx.exec_log_term = term;
-        ctx.kv_wb_mut().set_save_point();
+        ctx.kv_wb_mut(self).set_save_point();
         let mut origin_epoch = None;
         // Remember if the raft cmd fails to be applied, it must have no side effects.
         // E.g. `RaftApplyState` must not be changed.
         let (resp, exec_result) = match self.exec_raft_cmd(ctx, req) {
             Ok(a) => {
-                ctx.kv_wb_mut().pop_save_point().unwrap();
+                ctx.kv_wb_mut(self).pop_save_point().unwrap();
                 if req.has_admin_request() {
                     origin_epoch = Some(self.region.get_region_epoch().clone());
                 }
@@ -1237,7 +1269,7 @@ where
             }
             Err(e) => {
                 // clear dirty values.
-                ctx.kv_wb_mut().rollback_to_save_point().unwrap();
+                ctx.kv_wb_mut(self).rollback_to_save_point().unwrap();
                 match e {
                     Error::EpochNotMatch(..) => debug!(
                         "epoch not match";
@@ -1439,7 +1471,7 @@ where
                 CmdType::Put => self.handle_put(ctx, req),
                 CmdType::Delete => self.handle_delete(ctx, req),
                 CmdType::DeleteRange => {
-                    self.handle_delete_range(&ctx.engine, req, &mut ranges, ctx.use_delete_range)
+                    self.handle_delete_range(req, &mut ranges, ctx.use_delete_range)
                 }
                 CmdType::IngestSst => self.handle_ingest_sst(ctx, req, &mut ssts),
                 // Readonly commands are handled in raftstore directly.
@@ -1505,7 +1537,9 @@ where
         util::check_key_in_region(key, &self.region)?;
 
         keys::data_key_with_buffer(key, &mut ctx.key_buffer);
+        ctx.kv_wb_mut(self);
         let key = ctx.key_buffer.as_slice();
+        let kv_wb = ctx.kv_wb.as_mut().unwrap();
 
         self.metrics.size_diff_hint += key.len() as i64;
         self.metrics.size_diff_hint += value.len() as i64;
@@ -1517,7 +1551,7 @@ where
                 self.metrics.lock_cf_written_bytes += value.len() as u64;
             }
             // TODO: check whether cf exists or not.
-            ctx.kv_wb.put_cf(cf, key, value).unwrap_or_else(|e| {
+            kv_wb.put_cf(cf, key, value).unwrap_or_else(|e| {
                 panic!(
                     "{} failed to write ({}, {}) to cf {}: {:?}",
                     self.tag,
@@ -1528,7 +1562,7 @@ where
                 )
             });
         } else {
-            ctx.kv_wb.put(key, value).unwrap_or_else(|e| {
+            kv_wb.put(key, value).unwrap_or_else(|e| {
                 panic!(
                     "{} failed to write ({}, {}): {:?}",
                     self.tag,
@@ -1551,14 +1585,16 @@ where
         util::check_key_in_region(key, &self.region)?;
 
         keys::data_key_with_buffer(key, &mut ctx.key_buffer);
+        ctx.kv_wb_mut(self);
         let key = ctx.key_buffer.as_slice();
+        let kv_wb = ctx.kv_wb.as_mut().unwrap();
 
         // since size_diff_hint is not accurate, so we just skip calculate the value size.
         self.metrics.size_diff_hint -= key.len() as i64;
         if !req.get_delete().get_cf().is_empty() {
             let cf = req.get_delete().get_cf();
             // TODO: check whether cf exists or not.
-            ctx.kv_wb.delete_cf(cf, key).unwrap_or_else(|e| {
+            kv_wb.delete_cf(cf, key).unwrap_or_else(|e| {
                 panic!(
                     "{} failed to delete {}: {}",
                     self.tag,
@@ -1574,7 +1610,7 @@ where
                 self.metrics.delete_keys_hint += 1;
             }
         } else {
-            ctx.kv_wb.delete(key).unwrap_or_else(|e| {
+            kv_wb.delete(key).unwrap_or_else(|e| {
                 panic!(
                     "{} failed to delete {}: {}",
                     self.tag,
@@ -1590,7 +1626,6 @@ where
 
     fn handle_delete_range(
         &mut self,
-        engine: &EK,
         req: &Request,
         ranges: &mut Vec<Range>,
         use_delete_range: bool,
@@ -1636,7 +1671,8 @@ where
                     e
                 )
             };
-            engine
+            let tablet = self.tablet.as_ref().unwrap();
+            tablet
                 .delete_ranges_cf(cf, DeleteStrategy::DeleteFiles, &range)
                 .unwrap_or_else(|e| fail_f(e, DeleteStrategy::DeleteFiles));
 
@@ -1646,10 +1682,10 @@ where
                 DeleteStrategy::DeleteByKey
             };
             // Delete all remaining keys.
-            engine
+            tablet
                 .delete_ranges_cf(cf, strategy.clone(), &range)
                 .unwrap_or_else(move |e| fail_f(e, strategy));
-            engine
+            tablet
                 .delete_ranges_cf(cf, DeleteStrategy::DeleteBlobs, &range)
                 .unwrap_or_else(move |e| fail_f(e, DeleteStrategy::DeleteBlobs));
         }
@@ -1907,7 +1943,8 @@ where
         } else {
             PeerState::Normal
         };
-        if let Err(e) = write_peer_state(ctx.kv_wb_mut(), &region, state, None) {
+        let cur_index = ctx.exec_log_index;
+        if let Err(e) = write_peer_state(ctx.kv_wb_mut(self), &region, state, None, cur_index, 0) {
             panic!("{} failed to update region state: {:?}", self.tag, e);
         }
 
@@ -1952,7 +1989,8 @@ where
             PeerState::Normal
         };
 
-        if let Err(e) = write_peer_state(ctx.kv_wb_mut(), &region, state, None) {
+        let cur_index = ctx.exec_log_index;
+        if let Err(e) = write_peer_state(ctx.kv_wb_mut(self), &region, state, None, cur_index, 0) {
             panic!("{} failed to update region state: {:?}", self.tag, e);
         }
 
@@ -1961,7 +1999,7 @@ where
         Ok((
             resp,
             ApplyResult::Res(ExecResult::ChangePeer(ChangePeer {
-                index: ctx.exec_log_index,
+                index: cur_index,
                 conf_change: Default::default(),
                 changes,
                 region,
@@ -2297,22 +2335,24 @@ where
         let mut already_exist_regions = Vec::new();
         for (region_id, new_split_peer) in new_split_regions.iter_mut() {
             let region_state_key = keys::region_state_key(*region_id);
-            match ctx
-                .engine
+            match self
+                .tablet
+                .as_ref()
+                .unwrap()
                 .get_msg_cf::<RegionLocalState>(CF_RAFT, &region_state_key)
             {
                 Ok(None) => (),
                 Ok(Some(state)) => {
                     if replace_regions.get(region_id).is_some() {
                         // This peer must be the first one on local store. So if this peer is created on the other side,
-                        // it means no `RegionLocalState` in kv engine.
+                        // it means no `RegionLocalState` in kv tablet.
                         panic!(
-                            "{} failed to replace region {} peer {} because state {:?} alread exist in kv engine",
+                            "{} failed to replace region {} peer {} because state {:?} already exist in kv tablet",
                             self.tag, region_id, new_split_peer.peer_id, state
                         );
                     }
                     already_exist_regions.push((*region_id, new_split_peer.peer_id));
-                    new_split_peer.result = Some(format!("state {:?} exist in kv engine", state));
+                    new_split_peer.result = Some(format!("state {:?} exist in kv tablet", state));
                 }
                 e => panic!(
                     "{} failed to get regions state of {}: {:?}",
@@ -2331,7 +2371,10 @@ where
             }
         }
 
-        let kv_wb_mut = ctx.kv_wb_mut();
+        let cur_index = ctx.exec_log_index;
+        let mut to_cloned = Vec::with_capacity(regions.len());
+        let kv_wb_mut = ctx.kv_wb.as_mut().unwrap();
+        let mut apply_result = vec![keys::APPLY_RESULT_SPLIT];
         for new_region in &regions {
             if new_region.get_id() == derived.get_id() {
                 continue;
@@ -2348,18 +2391,46 @@ where
                 );
                 continue;
             }
-            write_peer_state(kv_wb_mut, new_region, PeerState::Normal, None)
-                .and_then(|_| write_initial_apply_state(kv_wb_mut, new_region.get_id()))
-                .unwrap_or_else(|e| {
-                    panic!(
-                        "{} fails to save split region {:?}: {:?}",
-                        self.tag, new_region, e
-                    )
-                });
+            write_peer_state(
+                kv_wb_mut,
+                new_region,
+                PeerState::Normal,
+                None,
+                RAFT_INIT_LOG_INDEX,
+                0,
+            )
+            .and_then(|_| write_initial_apply_state(kv_wb_mut, new_region.get_id()))
+            .unwrap_or_else(|e| {
+                panic!(
+                    "{} fails to save split region {:?}: {:?}",
+                    self.tag, new_region, e
+                )
+            });
+            let tablet_path = ctx
+                .tablet_factory
+                .tablet_path(new_region.get_id(), RAFT_INIT_LOG_INDEX);
+            to_cloned.push(tablet_path);
+            let mut output_stream = CodedOutputStream::vec(&mut apply_result);
+            new_region
+                .write_length_delimited_to(&mut output_stream)
+                .unwrap();
+            output_stream.flush().unwrap();
         }
-        write_peer_state(kv_wb_mut, &derived, PeerState::Normal, None).unwrap_or_else(|e| {
-            panic!("{} fails to update region {:?}: {:?}", self.tag, derived, e)
-        });
+        let mut output_stream = CodedOutputStream::vec(&mut apply_result);
+        derived
+            .write_length_delimited_to(&mut output_stream)
+            .unwrap();
+        output_stream.flush().unwrap();
+        let apply_res_key = keys::region_apply_result_key(derived.get_id(), cur_index);
+        write_peer_state(kv_wb_mut, &derived, PeerState::Normal, None, cur_index, 0)
+            .and_then(|_| {
+                kv_wb_mut
+                    .put_cf(CF_RAFT, &apply_res_key, &apply_result)
+                    .map_err(From::from)
+            })
+            .unwrap_or_else(|e| {
+                panic!("{} fails to update region {:?}: {:?}", self.tag, derived, e)
+            });
         let mut resp = AdminResponse::default();
         resp.mut_splits().set_regions(regions.clone().into());
         PEER_ADMIN_CMD_COUNTER.batch_split.success.inc();
@@ -2370,12 +2441,18 @@ where
             |_| { unreachable!() }
         );
 
+        let tablet = self.tablet.as_ref().unwrap().clone();
+        ctx.after_write.push(Box::new(move || {
+            tablet.checkpoint_to(&to_cloned, 0).unwrap();
+        }));
+
         Ok((
             resp,
             ApplyResult::Res(ExecResult::SplitRegion {
                 regions,
                 derived,
                 new_split_regions,
+                split_index: cur_index,
             }),
         ))
     }
@@ -2419,11 +2496,14 @@ where
         merging_state.set_min_index(index);
         merging_state.set_target(prepare_merge.get_target().to_owned());
         merging_state.set_commit(ctx.exec_log_index);
+        let cur_index = ctx.exec_log_index;
         write_peer_state(
-            ctx.kv_wb_mut(),
+            ctx.kv_wb_mut(self),
             &region,
             PeerState::Merging,
             Some(merging_state.clone()),
+            cur_index,
+            0,
         )
         .unwrap_or_else(|e| {
             panic!(
@@ -2524,7 +2604,12 @@ where
         self.ready_source_region_id = 0;
 
         let region_state_key = keys::region_state_key(source_region_id);
-        let state: RegionLocalState = match ctx.engine.get_msg_cf(CF_RAFT, &region_state_key) {
+        let state: RegionLocalState = match self
+            .tablet
+            .as_ref()
+            .unwrap()
+            .get_msg_cf(CF_RAFT, &region_state_key)
+        {
             Ok(Some(s)) => s,
             e => panic!(
                 "{} failed to get regions state of {:?}: {:?}",
@@ -2556,8 +2641,9 @@ where
         } else {
             region.set_start_key(source_region.get_start_key().to_vec());
         }
-        let kv_wb_mut = ctx.kv_wb_mut();
-        write_peer_state(kv_wb_mut, &region, PeerState::Normal, None)
+        let cur_index = ctx.exec_log_index;
+        let kv_wb_mut = ctx.kv_wb_mut(self);
+        write_peer_state(kv_wb_mut, &region, PeerState::Normal, None, cur_index, 0)
             .and_then(|_| {
                 // TODO: maybe all information needs to be filled?
                 let mut merging_state = MergeState::default();
@@ -2567,6 +2653,8 @@ where
                     source_region,
                     PeerState::Tombstone,
                     Some(merging_state),
+                    u64::MAX,
+                    0,
                 )
             })
             .unwrap_or_else(|e| {
@@ -2598,7 +2686,12 @@ where
 
         PEER_ADMIN_CMD_COUNTER.rollback_merge.all.inc();
         let region_state_key = keys::region_state_key(self.region_id());
-        let state: RegionLocalState = match ctx.engine.get_msg_cf(CF_RAFT, &region_state_key) {
+        let state: RegionLocalState = match self
+            .tablet
+            .as_ref()
+            .unwrap()
+            .get_msg_cf(CF_RAFT, &region_state_key)
+        {
             Ok(Some(s)) => s,
             e => panic!("{} failed to get regions state: {:?}", self.tag, e),
         };
@@ -2614,7 +2707,16 @@ where
         let version = region.get_region_epoch().get_version();
         // Update version to avoid duplicated rollback requests.
         region.mut_region_epoch().set_version(version + 1);
-        write_peer_state(ctx.kv_wb_mut(), &region, PeerState::Normal, None).unwrap_or_else(|e| {
+        let cur_index = ctx.exec_log_index;
+        write_peer_state(
+            ctx.kv_wb_mut(self),
+            &region,
+            PeerState::Normal,
+            None,
+            cur_index,
+            0,
+        )
+        .unwrap_or_else(|e| {
             panic!(
                 "{} failed to rollback merge {:?}: {:?}",
                 self.tag, rollback, e
@@ -2711,7 +2813,7 @@ where
                 // open files in rocksdb.
                 // TODO: figure out another way to do consistency check without snapshot
                 // or short life snapshot.
-                snap: ctx.engine.snapshot(),
+                snap: self.tablet.as_ref().unwrap().snapshot(),
             }),
         ))
     }
@@ -2806,7 +2908,7 @@ pub fn compact_raft_log(
     compact_index: u64,
     compact_term: u64,
 ) -> Result<()> {
-    debug!("{} compact log entries to prior to {}", tag, compact_index);
+    info!("{} compact log entries to prior to {}", tag, compact_index);
 
     if compact_index <= state.get_truncated_state().get_index() {
         return Err(box_err!("try to truncate compacted entries"));
@@ -2907,7 +3009,7 @@ impl<S: Snapshot> Apply<S> {
     }
 }
 
-pub struct Registration {
+pub struct Registration<EK> {
     pub id: u64,
     pub term: u64,
     pub apply_state: RaftApplyState,
@@ -2916,10 +3018,11 @@ pub struct Registration {
     pub pending_request_snapshot_count: Arc<AtomicUsize>,
     pub is_merging: bool,
     raft_engine: Box<dyn RaftEngineReadOnly>,
+    pub tablet: Option<EK>,
 }
 
-impl Registration {
-    pub fn new<EK: KvEngine, ER: RaftEngine>(peer: &Peer<EK, ER>) -> Registration {
+impl<EK: KvEngine> Registration<EK> {
+    pub fn new<ER: RaftEngine>(peer: &Peer<EK, ER>) -> Registration<EK> {
         Registration {
             id: peer.peer_id(),
             term: peer.term(),
@@ -2929,6 +3032,7 @@ impl Registration {
             pending_request_snapshot_count: peer.pending_request_snapshot_count.clone(),
             is_merging: peer.pending_merge_state.is_some(),
             raft_engine: Box::new(peer.get_store().engines.raft.clone()),
+            tablet: peer.tablet().cloned(),
         }
     }
 }
@@ -2973,6 +3077,7 @@ pub struct CatchUpLogs {
 
 pub struct GenSnapTask {
     pub(crate) region_id: u64,
+    tablet_suffix: u64,
     // Fill it after the RocksDB snapshot is taken.
     pub index: Arc<AtomicU64>,
     // Fetch it to cancel the task if necessary.
@@ -2986,12 +3091,14 @@ pub struct GenSnapTask {
 impl GenSnapTask {
     pub fn new(
         region_id: u64,
+        tablet_suffix: u64,
         index: Arc<AtomicU64>,
         canceled: Arc<AtomicBool>,
         snap_notifier: SyncSender<RaftSnapshot>,
     ) -> GenSnapTask {
         GenSnapTask {
             region_id,
+            tablet_suffix,
             index,
             canceled,
             snap_notifier,
@@ -3003,28 +3110,16 @@ impl GenSnapTask {
         self.for_balance = true;
     }
 
-    pub fn generate_and_schedule_snapshot<EK>(
+    pub fn generate_and_schedule_snapshot(
         self,
-        kv_snap: EK::Snapshot,
-        last_applied_index_term: u64,
-        last_applied_state: RaftApplyState,
-        region_sched: &Scheduler<RegionTask<EK::Snapshot>>,
-    ) -> Result<()>
-    where
-        EK: KvEngine,
-    {
-        self.index
-            .store(last_applied_state.applied_index, Ordering::SeqCst);
+        region_sched: &Scheduler<RegionTask>,
+    ) -> Result<()> {
         let snapshot = RegionTask::Gen {
             region_id: self.region_id,
+            tablet_suffix: self.tablet_suffix,
             notifier: self.snap_notifier,
             for_balance: self.for_balance,
-            last_applied_index_term,
-            last_applied_state,
             canceled: self.canceled,
-            // This snapshot may be held for a long time, which may cause too many
-            // open files in rocksdb.
-            kv_snap,
         };
         box_try!(region_sched.schedule(snapshot));
         Ok(())
@@ -3072,7 +3167,7 @@ where
         start: Instant,
         apply: Apply<EK::Snapshot>,
     },
-    Registration(Registration),
+    Registration(Registration<EK>),
     LogsUpToDate(CatchUpLogs),
     Noop,
     Destroy(Destroy),
@@ -3196,7 +3291,9 @@ where
         ApplyFsm::from_registration(reg)
     }
 
-    fn from_registration(reg: Registration) -> (LooseBoundedSender<Msg<EK>>, Box<ApplyFsm<EK>>) {
+    fn from_registration(
+        reg: Registration<EK>,
+    ) -> (LooseBoundedSender<Msg<EK>>, Box<ApplyFsm<EK>>) {
         let (tx, rx) = loose_bounded(usize::MAX);
         let delegate = ApplyDelegate::from_registration(reg);
         (
@@ -3210,7 +3307,7 @@ where
     }
 
     /// Handles peer registration. When a peer is created, it will register an apply delegate.
-    fn handle_registration(&mut self, reg: Registration) {
+    fn handle_registration(&mut self, reg: Registration<EK>) {
         info!(
             "re-register to apply delegates";
             "region_id" => self.delegate.region_id(),
@@ -3326,7 +3423,7 @@ where
         let region_id = self.delegate.region_id();
         if ctx.apply_res.iter().any(|res| res.region_id == region_id) {
             // Flush before destroying to avoid reordering messages.
-            ctx.flush();
+            ctx.flush(&self.delegate);
         }
         fail_point!(
             "before_peer_destroy_1003",
@@ -3451,23 +3548,19 @@ where
             if apply_ctx.timer.is_none() {
                 apply_ctx.timer = Some(Instant::now_coarse());
             }
-            self.delegate.write_apply_state(apply_ctx.kv_wb_mut());
+            self.delegate
+                .write_apply_state(apply_ctx.kv_wb_mut(&self.delegate));
             fail_point!(
                 "apply_on_handle_snapshot_1_1",
                 self.delegate.id == 1 && self.delegate.region_id() == 1,
                 |_| unimplemented!()
             );
 
-            apply_ctx.flush();
+            apply_ctx.flush(&self.delegate);
             self.delegate.last_flush_applied_index = applied_index;
         }
 
-        if let Err(e) = snap_task.generate_and_schedule_snapshot::<EK>(
-            apply_ctx.engine.snapshot(),
-            self.delegate.applied_index_term,
-            self.delegate.apply_state.clone(),
-            &apply_ctx.region_scheduler,
-        ) {
+        if let Err(e) = snap_task.generate_and_schedule_snapshot(&apply_ctx.region_scheduler) {
             error!(
                 "schedule snapshot failed";
                 "error" => ?e,
@@ -3536,13 +3629,13 @@ where
         ) {
             Ok(()) => {
                 // Commit the writebatch for ensuring the following snapshot can get all previous writes.
-                if apply_ctx.kv_wb().count() > 0 {
+                if apply_ctx.kv_wb_mut(&self.delegate).count() > 0 {
                     apply_ctx.commit(&mut self.delegate);
                 }
                 ReadResponse {
                     response: Default::default(),
                     snapshot: Some(RegionSnapshot::from_snapshot(
-                        Arc::new(apply_ctx.engine.snapshot()),
+                        Arc::new(self.delegate.tablet.as_ref().unwrap().snapshot()),
                         Arc::new(self.delegate.region.clone()),
                     )),
                     txn_extra_op: TxnExtraOp::Noop,
@@ -3735,6 +3828,21 @@ where
     trace_event: TraceEvent,
 }
 
+impl<EK, W> ApplyPoller<EK, W>
+where
+    EK: KvEngine,
+    W: WriteBatch<EK>,
+{
+    #[inline]
+    fn before_returning(&mut self, f: &mut ApplyFsm<EK>) {
+        self.apply_ctx.flush(&f.delegate);
+        self.apply_ctx.kv_wb.take();
+        f.delegate.last_flush_applied_index = f.delegate.apply_state.get_applied_index();
+        f.delegate.update_memory_trace(&mut self.trace_event);
+        MEMTRACE_APPLYS.trace(mem::take(&mut self.trace_event));
+    }
+}
+
 impl<EK, W> PollHandler<ApplyFsm<EK>, ControlFsm> for ApplyPoller<EK, W>
 where
     EK: KvEngine,
@@ -3754,7 +3862,6 @@ where
                 _ => {}
             }
         }
-        self.apply_ctx.perf_context.start_observe();
     }
 
     fn handle_control(&mut self, control: &mut ControlFsm) -> Option<usize> {
@@ -3783,24 +3890,27 @@ where
 
     fn handle_normal(&mut self, normal: &mut impl DerefMut<Target = ApplyFsm<EK>>) -> HandleResult {
         let mut handle_result = HandleResult::KeepProcessing;
+        let last_write_times = self.apply_ctx.write_times;
         normal.delegate.handle_start = Some(Instant::now_coarse());
         if normal.delegate.yield_state.is_some() {
             if normal.delegate.wait_merge_state.is_some() {
                 // We need to query the length first, otherwise there is a race
                 // condition that new messages are queued after resuming and before
                 // query the length.
-                handle_result = HandleResult::stop_at(normal.receiver.len(), false);
+                handle_result = HandleResult::stop_at(normal.receiver.len(), CheckPointType::None);
             }
             normal.resume_pending(&mut self.apply_ctx);
             if normal.delegate.wait_merge_state.is_some() {
                 // Yield due to applying CommitMerge, this fsm can be released if its
                 // channel msg count equals to last count because it will receive
                 // a new message if its source region has applied all needed logs.
+                self.before_returning(normal);
                 return handle_result;
             } else if normal.delegate.yield_state.is_some() {
                 // Yield due to other reasons, this fsm must not be released because
                 // it's possible that no new message will be sent to itself.
                 // The remaining messages will be handled in next rounds.
+                self.before_returning(normal);
                 return HandleResult::KeepProcessing;
             }
             handle_result = HandleResult::KeepProcessing;
@@ -3817,12 +3927,12 @@ where
             match normal.receiver.try_recv() {
                 Ok(msg) => self.msg_buf.push(msg),
                 Err(TryRecvError::Empty) => {
-                    handle_result = HandleResult::stop_at(0, false);
+                    handle_result = HandleResult::stop_at(0, CheckPointType::None);
                     break;
                 }
                 Err(TryRecvError::Disconnected) => {
                     normal.delegate.stopped = true;
-                    handle_result = HandleResult::stop_at(0, false);
+                    handle_result = HandleResult::stop_at(0, CheckPointType::None);
                     break;
                 }
             }
@@ -3832,22 +3942,22 @@ where
 
         if normal.delegate.wait_merge_state.is_some() {
             // Check it again immediately as catching up logs can be very fast.
-            handle_result = HandleResult::stop_at(0, false);
+            handle_result = HandleResult::stop_at(0, CheckPointType::None);
         } else if normal.delegate.yield_state.is_some() {
             // Let it continue to run next time.
             handle_result = HandleResult::KeepProcessing;
         }
+        self.before_returning(normal);
+        if let HandleResult::StopAt { skip_end, .. } = &mut handle_result {
+            if self.apply_ctx.write_times != last_write_times {
+                // TODO: make also check if current peer has flushed.
+                *skip_end = CheckPointType::ExcludeCurrent;
+            }
+        }
         handle_result
     }
 
-    fn end(&mut self, fsms: &mut [Option<impl DerefMut<Target = ApplyFsm<EK>>>]) {
-        self.apply_ctx.flush();
-        for fsm in fsms.iter_mut().flatten() {
-            fsm.delegate.last_flush_applied_index = fsm.delegate.apply_state.get_applied_index();
-            fsm.delegate.update_memory_trace(&mut self.trace_event);
-        }
-        MEMTRACE_APPLYS.trace(mem::take(&mut self.trace_event));
-    }
+    fn end(&mut self, _fsms: &mut [Option<impl DerefMut<Target = ApplyFsm<EK>>>]) {}
 
     fn get_priority(&self) -> Priority {
         self.apply_ctx.priority
@@ -3859,13 +3969,13 @@ pub struct Builder<EK: KvEngine, W: WriteBatch<EK>> {
     cfg: Arc<VersionTrack<Config>>,
     coprocessor_host: CoprocessorHost<EK>,
     importer: Arc<SSTImporter>,
-    region_scheduler: Scheduler<RegionTask<<EK as KvEngine>::Snapshot>>,
-    engine: EK,
+    region_scheduler: Scheduler<RegionTask>,
     sender: Box<dyn Notifier<EK>>,
     router: ApplyRouter<EK>,
     _phantom: PhantomData<W>,
     store_id: u64,
     pending_create_peers: Arc<Mutex<HashMap<u64, (u64, bool)>>>,
+    tablet_factory: Box<dyn TabletFactory<EK> + Send>,
 }
 
 impl<EK: KvEngine, W> Builder<EK, W>
@@ -3883,12 +3993,12 @@ where
             coprocessor_host: builder.coprocessor_host.clone(),
             importer: builder.importer.clone(),
             region_scheduler: builder.region_scheduler.clone(),
-            engine: builder.engines.kv.clone(),
             _phantom: PhantomData,
             sender,
             router,
             store_id: builder.store.get_id(),
             pending_create_peers: builder.pending_create_peers.clone(),
+            tablet_factory: builder.engines.tablets.clone(),
         }
     }
 }
@@ -3909,13 +4019,13 @@ where
                 self.coprocessor_host.clone(),
                 self.importer.clone(),
                 self.region_scheduler.clone(),
-                self.engine.clone(),
                 self.router.clone(),
                 self.sender.clone_box(),
                 &cfg,
                 self.store_id,
                 self.pending_create_peers.clone(),
                 priority,
+                self.tablet_factory.clone(),
             ),
             messages_per_tick: cfg.messages_per_tick,
             cfg_tracker: self.cfg.clone().tracker(self.tag.clone()),
@@ -4188,7 +4298,7 @@ mod tests {
     use crate::store::util::{new_learner_peer, new_peer};
     use engine_panic::PanicEngine;
     use engine_test::kv::{new_engine, KvTestEngine, KvTestSnapshot, KvTestWriteBatch};
-    use engine_traits::{Peekable as PeekableTrait, WriteBatchExt};
+    use engine_traits::{DummyFactory, Peekable as PeekableTrait, WriteBatchExt};
     use kvproto::metapb::{self, RegionEpoch};
     use kvproto::raft_cmdpb::*;
     use protobuf::Message;
@@ -4207,7 +4317,7 @@ mod tests {
         fn new_for_test(region_id: u64, snap_notifier: SyncSender<RaftSnapshot>) -> GenSnapTask {
             let index = Arc::new(AtomicU64::new(0));
             let canceled = Arc::new(AtomicBool::new(false));
-            Self::new(region_id, index, canceled, snap_notifier)
+            Self::new(region_id, 0, index, canceled, snap_notifier)
         }
     }
 
@@ -4252,7 +4362,7 @@ mod tests {
     }
 
     impl<EK: KvEngine> Notifier<EK> for TestNotifier<EK> {
-        fn notify(&self, apply_res: Vec<ApplyRes<EK::Snapshot>>) {
+        fn notify(&self, apply_res: vec_deque::Drain<ApplyRes<EK::Snapshot>>) {
             for r in apply_res {
                 let res = TaskRes::Apply(r);
                 let _ = self.tx.send(PeerMsg::ApplyRes { res });
@@ -4266,22 +4376,13 @@ mod tests {
         }
     }
 
-    impl Default for Registration {
+    impl Default for Registration<KvTestEngine> {
         fn default() -> Self {
-            Registration {
-                id: Default::default(),
-                term: Default::default(),
-                apply_state: Default::default(),
-                applied_index_term: Default::default(),
-                region: Default::default(),
-                pending_request_snapshot_count: Default::default(),
-                is_merging: Default::default(),
-                raft_engine: Box::new(PanicEngine),
-            }
+            unimplemented!()
         }
     }
 
-    impl Registration {
+    impl Registration<KvTestEngine> {
         fn dup(&self) -> Self {
             Registration {
                 id: self.id,
@@ -4292,6 +4393,7 @@ mod tests {
                 pending_request_snapshot_count: self.pending_request_snapshot_count.clone(),
                 is_merging: self.is_merging,
                 raft_engine: Box::new(PanicEngine),
+                tablet: self.tablet.clone(),
             }
         }
     }
@@ -4465,7 +4567,6 @@ mod tests {
     fn test_basic_flow() {
         let (tx, rx) = mpsc::channel();
         let sender = Box::new(TestNotifier { tx });
-        let (_tmp, engine) = create_tmp_engine("apply-basic");
         let (_dir, importer) = create_tmp_importer("apply-basic");
         let (region_scheduler, mut snapshot_rx) = dummy_scheduler();
         let cfg = Arc::new(VersionTrack::new(Config::default()));
@@ -4478,11 +4579,11 @@ mod tests {
             importer,
             region_scheduler,
             sender,
-            engine,
             router: router.clone(),
             _phantom: Default::default(),
             store_id: 1,
             pending_create_peers,
+            tablet_factory: Box::new(DummyFactory),
         };
         system.spawn("test-basic".to_owned(), builder);
 
@@ -4564,16 +4665,11 @@ mod tests {
             }) => res,
             e => panic!("unexpected apply result: {:?}", e),
         };
-        let apply_state_key = keys::apply_state_key(2);
-        let apply_state = match snapshot_rx.recv_timeout(Duration::from_secs(3)) {
-            Ok(Some(RegionTask::Gen { kv_snap, .. })) => kv_snap
-                .get_msg_cf(CF_RAFT, &apply_state_key)
-                .unwrap()
-                .unwrap(),
+        match snapshot_rx.recv_timeout(Duration::from_secs(3)) {
+            Ok(Some(RegionTask::Gen { .. })) => (),
             e => panic!("unexpected apply result: {:?}", e),
-        };
+        }
         assert_eq!(apply_res.region_id, 2);
-        assert_eq!(apply_res.apply_state, apply_state);
         assert_eq!(apply_res.apply_state.get_applied_index(), 5);
         assert!(apply_res.exec_res.is_empty());
         // empty entry will make applied_index step forward and should write apply state to engine.
@@ -4814,11 +4910,11 @@ mod tests {
             region_scheduler,
             coprocessor_host: host,
             importer: importer.clone(),
-            engine: engine.clone(),
             router: router.clone(),
             _phantom: Default::default(),
             store_id: 1,
             pending_create_peers,
+            tablet_factory: Box::new(DummyFactory),
         };
         system.spawn("test-handle-raft".to_owned(), builder);
 
@@ -5158,11 +5254,11 @@ mod tests {
             region_scheduler,
             coprocessor_host: host,
             importer: importer.clone(),
-            engine: engine.clone(),
             router: router.clone(),
             _phantom: Default::default(),
             store_id: 1,
             pending_create_peers,
+            tablet_factory: Box::new(DummyFactory),
         };
         system.spawn("test-ingest".to_owned(), builder);
 
@@ -5313,7 +5409,6 @@ mod tests {
 
     #[test]
     fn test_cmd_observer() {
-        let (_path, engine) = create_tmp_engine("test-delegate");
         let (_import_dir, importer) = create_tmp_importer("test-delegate");
         let mut host = CoprocessorHost::<KvTestEngine>::default();
         let mut obs = ApplyObserver::default();
@@ -5335,11 +5430,11 @@ mod tests {
             region_scheduler,
             coprocessor_host: host,
             importer,
-            engine,
             router: router.clone(),
             _phantom: Default::default(),
             store_id: 1,
             pending_create_peers,
+            tablet_factory: Box::new(DummyFactory),
         };
         system.spawn("test-handle-raft".to_owned(), builder);
 
@@ -5624,11 +5719,11 @@ mod tests {
             importer,
             region_scheduler,
             coprocessor_host: host,
-            engine: engine.clone(),
             router: router.clone(),
             _phantom: Default::default(),
             store_id: 2,
             pending_create_peers,
+            tablet_factory: Box::new(DummyFactory),
         };
         system.spawn("test-split".to_owned(), builder);
 

@@ -125,8 +125,9 @@ where
     }
 }
 
-pub enum Task {
+pub enum Task<EK> {
     SplitCheckTask {
+        tablet: EK,
         region: Region,
         auto_split: bool,
         policy: CheckPolicy,
@@ -136,9 +137,15 @@ pub enum Task {
     Validate(Box<dyn FnOnce(&Config) + Send>),
 }
 
-impl Task {
-    pub fn split_check(region: Region, auto_split: bool, policy: CheckPolicy) -> Task {
+impl<EK> Task<EK> {
+    pub fn split_check(
+        tablet: EK,
+        region: Region,
+        auto_split: bool,
+        policy: CheckPolicy,
+    ) -> Task<EK> {
         Task::SplitCheckTask {
+            tablet,
             region,
             auto_split,
             policy,
@@ -146,7 +153,7 @@ impl Task {
     }
 }
 
-impl Display for Task {
+impl<EK> Display for Task<EK> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Task::SplitCheckTask {
@@ -168,7 +175,6 @@ pub struct Runner<E, S>
 where
     E: KvEngine,
 {
-    engine: E,
     router: S,
     coprocessor: CoprocessorHost<E>,
 }
@@ -178,16 +184,15 @@ where
     E: KvEngine,
     S: CasualRouter<E>,
 {
-    pub fn new(engine: E, router: S, coprocessor: CoprocessorHost<E>) -> Runner<E, S> {
+    pub fn new(_engine: E, router: S, coprocessor: CoprocessorHost<E>) -> Runner<E, S> {
         Runner {
-            engine,
             router,
             coprocessor,
         }
     }
 
     /// Checks a Region with split checkers to produce split keys and generates split admin command.
-    fn check_split(&mut self, region: &Region, auto_split: bool, policy: CheckPolicy) {
+    fn check_split(&mut self, tablet: E, region: &Region, auto_split: bool, policy: CheckPolicy) {
         let region_id = region.get_id();
         let start_key = keys::enc_start_key(region);
         let end_key = keys::enc_end_key(region);
@@ -199,9 +204,9 @@ where
         );
         CHECK_SPILT_COUNTER.all.inc();
 
-        let mut host =
-            self.coprocessor
-                .new_split_checker_host(region, &self.engine, auto_split, policy);
+        let mut host = self
+            .coprocessor
+            .new_split_checker_host(region, &tablet, auto_split, policy);
         if host.skip() {
             debug!("skip split check"; "region_id" => region.get_id());
             return;
@@ -209,7 +214,7 @@ where
 
         let split_keys = match host.policy() {
             CheckPolicy::Scan => {
-                match self.scan_split_keys(&mut host, region, &start_key, &end_key) {
+                match self.scan_split_keys(&mut host, &tablet, region, &start_key, &end_key) {
                     Ok(keys) => keys,
                     Err(e) => {
                         error!(%e; "failed to scan split key"; "region_id" => region_id,);
@@ -217,7 +222,7 @@ where
                     }
                 }
             }
-            CheckPolicy::Approximate => match host.approximate_split_keys(region, &self.engine) {
+            CheckPolicy::Approximate => match host.approximate_split_keys(region, &tablet) {
                 Ok(keys) => keys
                     .into_iter()
                     .map(|k| keys::origin_key(&k).to_vec())
@@ -227,7 +232,7 @@ where
                         "failed to get approximate split key, try scan way";
                         "region_id" => region_id,
                     );
-                    match self.scan_split_keys(&mut host, region, &start_key, &end_key) {
+                    match self.scan_split_keys(&mut host, &tablet, region, &start_key, &end_key) {
                         Ok(keys) => keys,
                         Err(e) => {
                             error!(%e; "failed to scan split key"; "region_id" => region_id,);
@@ -262,17 +267,14 @@ where
     fn scan_split_keys(
         &self,
         host: &mut SplitCheckerHost<'_, E>,
+        tablet: &E,
         region: &Region,
         start_key: &[u8],
         end_key: &[u8],
     ) -> Result<Vec<Vec<u8>>> {
         let timer = CHECK_SPILT_HISTOGRAM.start_coarse_timer();
         MergedIterator::<<E as Iterable>::Iterator>::new(
-            &self.engine,
-            LARGE_CFS,
-            start_key,
-            end_key,
-            false,
+            tablet, LARGE_CFS, start_key, end_key, false,
         )
         .map(|mut iter| {
             let mut size = 0;
@@ -320,15 +322,16 @@ where
     E: KvEngine,
     S: CasualRouter<E>,
 {
-    type Task = Task;
-    fn run(&mut self, task: Task) {
+    type Task = Task<E>;
+    fn run(&mut self, task: Task<E>) {
         let _io_type_guard = WithIOType::new(IOType::LoadBalance);
         match task {
             Task::SplitCheckTask {
+                tablet,
                 region,
                 auto_split,
                 policy,
-            } => self.check_split(&region, auto_split, policy),
+            } => self.check_split(tablet, &region, auto_split, policy),
             Task::ChangeConfig(c) => self.change_cfg(c),
             #[cfg(any(test, feature = "testexport"))]
             Task::Validate(f) => f(&self.coprocessor.cfg),

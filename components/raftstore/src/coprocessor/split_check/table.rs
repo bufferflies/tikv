@@ -347,6 +347,7 @@ mod tests {
                 region.set_start_key(encoded_start_key.unwrap_or_else(Vec::new));
                 region.set_end_key(encoded_end_key.unwrap_or_else(Vec::new));
                 runnable.run(SplitCheckTask::split_check(
+                    engine.clone(),
                     region.clone(),
                     true,
                     CheckPolicy::Scan,

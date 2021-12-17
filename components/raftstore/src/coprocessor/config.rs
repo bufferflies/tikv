@@ -58,9 +58,9 @@ pub enum ConsistencyCheckMethod {
 /// Default region split size.
 pub const DEFAULT_SPLIT_SIZE: ReadableSize = ReadableSize::gb(16);
 /// Default region split keys.
-pub const SPLIT_KEYS: u64 = 960000;
+pub const SPLIT_KEYS: u64 = 96000000;
 /// Default batch split limit.
-pub const BATCH_SPLIT_LIMIT: u64 = 10;
+pub const BATCH_SPLIT_LIMIT: u64 = 3;
 
 impl Default for Config {
     fn default() -> Config {
@@ -97,9 +97,9 @@ impl Config {
     }
 }
 
-pub struct SplitCheckConfigManager(pub Scheduler<SplitCheckTask>);
+pub struct SplitCheckConfigManager<EK: Send + 'static>(pub Scheduler<SplitCheckTask<EK>>);
 
-impl ConfigManager for SplitCheckConfigManager {
+impl<EK: Send> ConfigManager for SplitCheckConfigManager<EK> {
     fn dispatch(
         &mut self,
         change: ConfigChange,
@@ -109,8 +109,8 @@ impl ConfigManager for SplitCheckConfigManager {
     }
 }
 
-impl std::ops::Deref for SplitCheckConfigManager {
-    type Target = Scheduler<SplitCheckTask>;
+impl<EK: Send> std::ops::Deref for SplitCheckConfigManager<EK> {
+    type Target = Scheduler<SplitCheckTask<EK>>;
 
     fn deref(&self) -> &Self::Target {
         &self.0

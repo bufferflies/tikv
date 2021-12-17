@@ -57,7 +57,7 @@ pub trait Simulator {
         node_id: u64,
         cfg: Config,
         engines: Engines<RocksEngine, RocksEngine>,
-        store_meta: Arc<Mutex<StoreMeta>>,
+        store_meta: Arc<Mutex<StoreMeta<RocksEngine>>>,
         key_manager: Option<Arc<DataKeyManager>>,
         router: RaftRouter<RocksEngine, RocksEngine>,
         system: RaftBatchSystem<RocksEngine, RocksEngine>,
@@ -142,7 +142,7 @@ pub struct Cluster<T: Simulator> {
 
     pub paths: Vec<TempDir>,
     pub dbs: Vec<Engines<RocksEngine, RocksEngine>>,
-    pub store_metas: HashMap<u64, Arc<Mutex<StoreMeta>>>,
+    pub store_metas: HashMap<u64, Arc<Mutex<StoreMeta<RocksEngine>>>>,
     key_managers: Vec<Option<Arc<DataKeyManager>>>,
     pub io_rate_limiter: Option<Arc<IORateLimiter>>,
     pub engines: HashMap<u64, Engines<RocksEngine, RocksEngine>>,

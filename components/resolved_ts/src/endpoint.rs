@@ -247,7 +247,7 @@ impl ObserveRegion {
 pub struct Endpoint<T, E: KvEngine, C> {
     cfg: ResolvedTsConfig,
     cfg_version: usize,
-    store_meta: Arc<Mutex<StoreMeta>>,
+    store_meta: Arc<Mutex<StoreMeta<E>>>,
     region_read_progress: RegionReadProgressRegistry,
     regions: HashMap<u64, ObserveRegion>,
     scanner_pool: ScannerPool<T, E>,
@@ -267,7 +267,7 @@ where
         cfg: &ResolvedTsConfig,
         scheduler: Scheduler<Task<E::Snapshot>>,
         raft_router: T,
-        store_meta: Arc<Mutex<StoreMeta>>,
+        store_meta: Arc<Mutex<StoreMeta<E>>>,
         pd_client: Arc<dyn PdClient>,
         concurrency_manager: ConcurrencyManager,
         env: Arc<Environment>,

@@ -194,7 +194,7 @@ struct TiKVServer<ER: RaftEngine> {
 
 struct TiKVEngines<EK: KvEngine, ER: RaftEngine> {
     engines: Engines<EK, ER>,
-    store_meta: Arc<Mutex<StoreMeta>>,
+    store_meta: Arc<Mutex<StoreMeta<EK>>>,
     engine: RaftKv<EK, ServerRaftStoreRouter<EK, ER>>,
 }
 
@@ -511,7 +511,7 @@ impl<ER: RaftEngine> TiKVServer<ER> {
         let engine = RaftKv::new(
             ServerRaftStoreRouter::new(
                 self.router.clone(),
-                LocalReader::new(engines.kv.clone(), store_meta.clone(), self.router.clone()),
+                LocalReader::new(store_meta.clone(), self.router.clone()),
             ),
             engines.kv.clone(),
         );

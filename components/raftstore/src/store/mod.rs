@@ -25,12 +25,12 @@ mod snap;
 mod worker;
 
 pub use self::bootstrap::{
-    bootstrap_store, clear_prepare_bootstrap_cluster, clear_prepare_bootstrap_key, initial_region,
-    prepare_bootstrap_cluster,
+    bootstrap_store, clear_prepare_bootstrap_cluster, clear_prepare_bootstrap_key,
+    initial_first_tablet, initial_region, prepare_bootstrap_cluster,
 };
 pub use self::compaction_guard::CompactionGuardGeneratorFactory;
 pub use self::config::Config;
-pub use self::fsm::{DestroyPeerJob, RaftRouter, StoreInfo};
+pub use self::fsm::{DestroyPeerJob, RaftRouter};
 pub use self::hibernate_state::{GroupState, HibernateState};
 pub use self::memory::*;
 pub use self::msg::{

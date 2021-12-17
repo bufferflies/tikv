@@ -226,7 +226,7 @@ impl fmt::Debug for Task {
 
 const METRICS_FLUSH_INTERVAL: u64 = 10_000; // 10s
 
-pub struct Endpoint<T, E> {
+pub struct Endpoint<T, E: KvEngine> {
     cluster_id: u64,
 
     capture_regions: HashMap<u64, Delegate>,
@@ -239,7 +239,7 @@ pub struct Endpoint<T, E> {
     pd_client: Arc<dyn PdClient>,
     timer: SteadyTimer,
     tso_worker: Runtime,
-    store_meta: Arc<Mutex<StoreMeta>>,
+    store_meta: Arc<Mutex<StoreMeta<E>>>,
     /// The concurrency manager for transactions. It's needed for CDC to check locks when
     /// calculating resolved_ts.
     concurrency_manager: ConcurrencyManager,
@@ -276,7 +276,7 @@ impl<T: 'static + RaftStoreRouter<E>, E: KvEngine> Endpoint<T, E> {
         scheduler: Scheduler<Task>,
         raft_router: T,
         observer: CdcObserver,
-        store_meta: Arc<Mutex<StoreMeta>>,
+        store_meta: Arc<Mutex<StoreMeta<E>>>,
         concurrency_manager: ConcurrencyManager,
         env: Arc<Environment>,
         security_mgr: Arc<SecurityManager>,
@@ -934,7 +934,7 @@ impl<T: 'static + RaftStoreRouter<E>, E: KvEngine> Endpoint<T, E> {
 
     async fn region_resolved_ts_store(
         regions: Vec<(u64, ObserveID)>,
-        store_meta: Arc<Mutex<StoreMeta>>,
+        store_meta: Arc<Mutex<StoreMeta<E>>>,
         pd_client: Arc<dyn PdClient>,
         security_mgr: Arc<SecurityManager>,
         env: Arc<Environment>,
@@ -1702,6 +1702,7 @@ mod tests {
                 0,
                 "".to_owned(),
             )),
+            tablet: Arc::default(),
         };
         store_meta.lock().unwrap().readers.insert(1, read_delegate);
         let (task_sched, task_rx) = dummy_scheduler();

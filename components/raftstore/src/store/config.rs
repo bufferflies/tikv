@@ -32,6 +32,9 @@ with_prefix!(prefix_store "store-");
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
 pub struct Config {
+    /// ID for unsafe recover. TiKV will use this ID to bootstrap the node.
+    #[online_config(skip)]
+    pub id: u64,
     // minimizes disruption when a partitioned node rejoins the cluster by using a two phase election.
     #[online_config(skip)]
     pub prevote: bool,
@@ -185,6 +188,13 @@ pub struct Config {
     pub dev_assert: bool,
     #[online_config(hidden)]
     pub apply_yield_duration: ReadableDuration,
+    #[online_config(skip)]
+    pub disable_tablet_wal: bool,
+    #[online_config(skip)]
+    pub skip_commit_index: bool,
+    pub flush_threshold: ReadableSize,
+    pub flush_tablet_interval: ReadableDuration,
+    pub flush_min_interval: ReadableDuration,
 
     #[serde(with = "engine_config::perf_level_serde")]
     #[online_config(skip)]
@@ -245,6 +255,7 @@ impl Default for Config {
     fn default() -> Config {
         let split_size = coprocessor::config::DEFAULT_SPLIT_SIZE;
         Config {
+            id: 0,
             prevote: true,
             raftdb_path: String::new(),
             capacity: ReadableSize(0),
@@ -315,6 +326,11 @@ impl Default for Config {
             io_reschedule_concurrent_max_count: 4,
             io_reschedule_hotpot_duration: ReadableDuration::secs(5),
             raft_msg_flush_interval: ReadableDuration::micros(250),
+            disable_tablet_wal: false,
+            skip_commit_index: false,
+            flush_threshold: ReadableSize::mb(20),
+            flush_tablet_interval: ReadableDuration::secs(30),
+            flush_min_interval: ReadableDuration::secs(5),
 
             // They are preserved for compatibility check.
             region_max_size: ReadableSize(0),

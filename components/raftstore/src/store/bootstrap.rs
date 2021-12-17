@@ -1,7 +1,8 @@
 // Copyright 2016 TiKV Project Authors. Licensed under Apache-2.0.
 
 use super::peer_storage::{
-    write_initial_apply_state, write_initial_raft_state, INIT_EPOCH_CONF_VER, INIT_EPOCH_VER,
+    write_initial_apply_state, write_initial_raft_state, write_peer_state, INIT_EPOCH_CONF_VER,
+    INIT_EPOCH_VER, RAFT_INIT_LOG_INDEX,
 };
 use super::util::new_peer;
 use crate::Result;
@@ -9,7 +10,7 @@ use engine_traits::{Engines, KvEngine, Mutable, RaftEngine, WriteBatch};
 use engine_traits::{CF_DEFAULT, CF_RAFT};
 
 use kvproto::metapb;
-use kvproto::raft_serverpb::{RaftLocalState, RegionLocalState, StoreIdent};
+use kvproto::raft_serverpb::{PeerState, RaftLocalState, StoreIdent};
 use tikv_util::{box_err, box_try};
 
 pub fn initial_region(store_id: u64, region_id: u64, peer_id: u64) -> metapb::Region {
@@ -72,12 +73,16 @@ pub fn prepare_bootstrap_cluster(
     engines: &Engines<impl KvEngine, impl RaftEngine>,
     region: &metapb::Region,
 ) -> Result<()> {
-    let mut state = RegionLocalState::default();
-    state.set_region(region.clone());
-
     let mut wb = engines.kv.write_batch();
     box_try!(wb.put_msg(keys::PREPARE_BOOTSTRAP_KEY, region));
-    box_try!(wb.put_msg_cf(CF_RAFT, &keys::region_state_key(region.get_id()), &state));
+    box_try!(write_peer_state(
+        &mut wb,
+        region,
+        PeerState::Normal,
+        None,
+        RAFT_INIT_LOG_INDEX,
+        RAFT_INIT_LOG_INDEX,
+    ));
     write_initial_apply_state(&mut wb, region.get_id())?;
     wb.write()?;
     engines.sync_kv()?;
@@ -85,6 +90,22 @@ pub fn prepare_bootstrap_cluster(
     let mut raft_wb = engines.raft.log_batch(1024);
     write_initial_raft_state(&mut raft_wb, region.get_id())?;
     box_try!(engines.raft.consume(&mut raft_wb, true));
+    Ok(())
+}
+
+pub fn initial_first_tablet(engine: &impl KvEngine, region: &metapb::Region) -> Result<()> {
+    let mut wb = engine.write_batch();
+    box_try!(write_peer_state(
+        &mut wb,
+        region,
+        PeerState::Normal,
+        None,
+        RAFT_INIT_LOG_INDEX,
+        RAFT_INIT_LOG_INDEX,
+    ));
+    write_initial_apply_state(&mut wb, region.get_id())?;
+    wb.write()?;
+    engine.flush_cf(CF_RAFT, true)?;
     Ok(())
 }
 

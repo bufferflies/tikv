@@ -2,6 +2,7 @@
 
 use crate::store::fsm::store::StoreMeta;
 use crate::store::util::RegionReadProgressRegistry;
+use engine_traits::KvEngine;
 use fail::fail_point;
 use keys::{data_end_key, data_key, enc_start_key};
 use kvproto::kvrpcpb::{KeyRange, LeaderInfo};
@@ -11,8 +12,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use tikv_util::worker::Runnable;
 
-pub struct Runner {
-    store_meta: Arc<Mutex<StoreMeta>>,
+pub struct Runner<EK: KvEngine> {
+    store_meta: Arc<Mutex<StoreMeta<EK>>>,
     region_read_progress: RegionReadProgressRegistry,
 }
 
@@ -45,8 +46,8 @@ impl fmt::Display for Task {
     }
 }
 
-impl Runner {
-    pub fn new(store_meta: Arc<Mutex<StoreMeta>>) -> Runner {
+impl<EK: KvEngine> Runner<EK> {
+    pub fn new(store_meta: Arc<Mutex<StoreMeta<EK>>>) -> Runner<EK> {
         let region_read_progress = store_meta.lock().unwrap().region_read_progress.clone();
         Runner {
             region_read_progress,
@@ -93,7 +94,7 @@ impl Runner {
     }
 }
 
-impl Runnable for Runner {
+impl<EK: KvEngine> Runnable for Runner<EK> {
     type Task = Task;
     fn run(&mut self, task: Task) {
         match task {
@@ -118,12 +119,18 @@ impl Runnable for Runner {
 mod tests {
     use super::*;
     use crate::store::util::RegionReadProgress;
+    use engine_test::kv::KvTestEngine;
     use keys::enc_end_key;
     use kvproto::metapb::Region;
 
     #[test]
     fn test_get_range_min_safe_ts() {
-        fn add_region(meta: &Arc<Mutex<StoreMeta>>, id: u64, kr: KeyRange, safe_ts: u64) {
+        fn add_region(
+            meta: &Arc<Mutex<StoreMeta<KvTestEngine>>>,
+            id: u64,
+            kr: KeyRange,
+            safe_ts: u64,
+        ) {
             let mut meta = meta.lock().unwrap();
             let mut region = Region::default();
             region.set_id(id);
@@ -145,7 +152,7 @@ mod tests {
             kr
         }
 
-        let meta = Arc::new(Mutex::new(StoreMeta::new(0)));
+        let meta: Arc<Mutex<StoreMeta<KvTestEngine>>> = Arc::new(Mutex::new(StoreMeta::new(0)));
         let runner = Runner::new(meta.clone());
         assert_eq!(0, runner.get_range_safe_ts(key_range(b"", b"")));
         add_region(&meta, 1, key_range(b"", b"k1"), 100);

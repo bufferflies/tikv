@@ -122,7 +122,7 @@ impl<EK: KvEngine, ER: RaftEngine, R: CasualRouter<EK>> Runner<EK, ER, R> {
                             self.report_collected(0);
                         }
                         Ok(n) => {
-                            debug!("gc log entries"; "region_id" => region_id, "entry_count" => n);
+                            debug!("gc log entries"; "region_id" => region_id, "entry_count" => n, "start_idx" => start_idx, "end_idx" => end_idx);
                             self.report_collected(n);
                         }
                     }

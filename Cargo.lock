@@ -3805,6 +3805,7 @@ dependencies = [
  "openssl",
  "ordered-float 2.7.0",
  "panic_hook",
+ "parking_lot",
  "pd_client",
  "prometheus",
  "prometheus-static-metric",

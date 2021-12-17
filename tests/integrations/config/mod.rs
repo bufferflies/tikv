@@ -152,6 +152,7 @@ fn test_serde_custom_tikv_config() {
     store_batch_system.pool_size = 3;
     store_batch_system.reschedule_duration = ReadableDuration::secs(2);
     value.raft_store = RaftstoreConfig {
+        id: 2,
         prevote: false,
         raftdb_path: "/var".to_owned(),
         capacity: ReadableSize(123),
@@ -211,9 +212,14 @@ fn test_serde_custom_tikv_config() {
         store_io_notify_capacity: 123456,
         future_poll_size: 2,
         hibernate_regions: false,
+        disable_tablet_wal: true,
+        skip_commit_index: true,
         dev_assert: true,
         apply_yield_duration: ReadableDuration::millis(333),
         perf_level: PerfLevel::Disable,
+        flush_threshold: ReadableSize::mb(1),
+        flush_tablet_interval: ReadableDuration::secs(1),
+        flush_min_interval: ReadableDuration::secs(4),
         evict_cache_on_memory_ratio: 0.8,
         cmd_batch: false,
         cmd_batch_concurrent_ready_max_count: 123,

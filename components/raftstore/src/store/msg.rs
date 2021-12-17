@@ -188,6 +188,7 @@ bitflags! {
         const CHECK_MERGE            = 0b00010000;
         const CHECK_PEER_STALE_STATE = 0b00100000;
         const ENTRY_CACHE_EVICT      = 0b01000000;
+        const FLUSH_TABLET           = 0b10000000;
     }
 }
 
@@ -202,6 +203,7 @@ impl PeerTicks {
             PeerTicks::CHECK_MERGE => "check_merge",
             PeerTicks::CHECK_PEER_STALE_STATE => "check_peer_stale_state",
             PeerTicks::ENTRY_CACHE_EVICT => "entry_cache_evict",
+            PeerTicks::FLUSH_TABLET => "flush_tablet",
             _ => unreachable!(),
         }
     }
@@ -214,6 +216,7 @@ impl PeerTicks {
             PeerTicks::CHECK_MERGE,
             PeerTicks::CHECK_PEER_STALE_STATE,
             PeerTicks::ENTRY_CACHE_EVICT,
+            PeerTicks::FLUSH_TABLET,
         ];
         TICKS
     }

@@ -56,6 +56,9 @@ pub const SNAPSHOT_RAFT_STATE_SUFFIX: u8 = 0x04;
 
 // For region meta
 pub const REGION_STATE_SUFFIX: u8 = 0x01;
+pub const REGION_STATE_APPLY_RESULT_SUFFIX: u8 = 0x02;
+
+pub const APPLY_RESULT_SPLIT: u8 = 0x01;
 
 #[inline]
 fn make_region_prefix(region_id: u64, suffix: u8) -> [u8; 11] {
@@ -197,6 +200,32 @@ pub fn region_meta_prefix(region_id: u64) -> [u8; 10] {
 
 pub fn region_state_key(region_id: u64) -> [u8; 11] {
     make_region_meta_key(region_id, REGION_STATE_SUFFIX)
+}
+
+pub fn region_apply_result_key(region_id: u64, apply_index: u64) -> [u8; 19] {
+    let mut key = [0; 19];
+    key[0..2].copy_from_slice(REGION_META_PREFIX_KEY);
+    BigEndian::write_u64(&mut key[2..10], region_id);
+    key[10] = REGION_STATE_APPLY_RESULT_SUFFIX;
+    BigEndian::write_u64(&mut key[11..19], apply_index);
+    key
+}
+
+pub fn decode_region_apply_result_key(key: &[u8]) -> Result<(u64, u64)> {
+    let suffix_idx = REGION_META_PREFIX_KEY.len() + mem::size_of::<u64>();
+    let expect_key_len = suffix_idx + mem::size_of::<u8>() + mem::size_of::<u64>();
+    if key.len() != expect_key_len
+        || !key.starts_with(REGION_META_PREFIX_KEY)
+        || key[suffix_idx] != REGION_STATE_APPLY_RESULT_SUFFIX
+    {
+        return Err(Error::InvalidRegionPrefix(
+            "apply result".to_owned(),
+            key.to_owned(),
+        ));
+    }
+    let region_id = BigEndian::read_u64(&key[REGION_META_PREFIX_KEY.len()..suffix_idx]);
+    let index = BigEndian::read_u64(&key[suffix_idx + mem::size_of::<u8>()..]);
+    Ok((region_id, index))
 }
 
 pub fn validate_data_key(key: &[u8]) -> bool {

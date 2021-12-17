@@ -28,7 +28,7 @@ use crate::metrics::{CHECK_LEADER_REQ_ITEM_COUNT_HISTOGRAM, CHECK_LEADER_REQ_SIZ
 const DEFAULT_CHECK_LEADER_TIMEOUT_MILLISECONDS: u64 = 5_000; // 5s
 
 pub struct AdvanceTsWorker<E: KvEngine> {
-    store_meta: Arc<Mutex<StoreMeta>>,
+    store_meta: Arc<Mutex<StoreMeta<E>>>,
     region_read_progress: RegionReadProgressRegistry,
     pd_client: Arc<dyn PdClient>,
     timer: SteadyTimer,
@@ -47,7 +47,7 @@ impl<E: KvEngine> AdvanceTsWorker<E> {
     pub fn new(
         pd_client: Arc<dyn PdClient>,
         scheduler: Scheduler<Task<E::Snapshot>>,
-        store_meta: Arc<Mutex<StoreMeta>>,
+        store_meta: Arc<Mutex<StoreMeta<E>>>,
         region_read_progress: RegionReadProgressRegistry,
         concurrency_manager: ConcurrencyManager,
         env: Arc<Environment>,
@@ -141,7 +141,7 @@ impl<E: KvEngine> AdvanceTsWorker<E> {
     // current peer has a quorum which accept its leadership.
     async fn region_resolved_ts_store(
         regions: Vec<u64>,
-        store_meta: Arc<Mutex<StoreMeta>>,
+        store_meta: Arc<Mutex<StoreMeta<E>>>,
         region_read_progress: RegionReadProgressRegistry,
         pd_client: Arc<dyn PdClient>,
         security_mgr: Arc<SecurityManager>,

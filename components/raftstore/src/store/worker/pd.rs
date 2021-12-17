@@ -11,7 +11,7 @@ use std::thread::{Builder, JoinHandle};
 use std::time::{Duration, Instant};
 use std::{cmp, io};
 
-use engine_traits::{KvEngine, RaftEngine, CF_RAFT};
+use engine_traits::{Engines, KvEngine, RaftEngine, CF_RAFT};
 #[cfg(feature = "failpoints")]
 use fail::fail_point;
 use kvproto::kvrpcpb::DiskFullOpt;
@@ -37,7 +37,7 @@ use crate::store::worker::split_controller::{SplitInfo, TOP_N};
 use crate::store::worker::{AutoSplitController, ReadStats, WriteStats};
 use crate::store::{
     Callback, CasualMessage, Config, PeerMsg, RaftCmdExtraOpts, RaftCommand, RaftRouter,
-    SnapManager, StoreInfo, StoreMsg,
+    SnapManager, StoreMsg,
 };
 
 use collections::HashMap;
@@ -78,10 +78,9 @@ pub trait FlowStatsReporter: Send + Clone + Sync + 'static {
     fn report_write_stats(&self, write_stats: WriteStats);
 }
 
-impl<EK, ER> FlowStatsReporter for Scheduler<Task<EK, ER>>
+impl<EK> FlowStatsReporter for Scheduler<Task<EK>>
 where
     EK: KvEngine,
-    ER: RaftEngine,
 {
     fn report_read_stats(&self, read_stats: ReadStats) {
         if let Err(e) = self.schedule(Task::ReadStats { read_stats }) {
@@ -110,10 +109,9 @@ pub struct HeartbeatTask {
 }
 
 /// Uses an asynchronous thread to tell PD something.
-pub enum Task<EK, ER>
+pub enum Task<EK>
 where
     EK: KvEngine,
-    ER: RaftEngine,
 {
     AskSplit {
         region: metapb::Region,
@@ -137,7 +135,7 @@ where
     Heartbeat(HeartbeatTask),
     StoreHeartbeat {
         stats: pdpb::StoreStats,
-        store_info: StoreInfo<EK, ER>,
+        capacity: u64,
         send_detailed_report: bool,
     },
     ReportBatchSplit {
@@ -264,10 +262,9 @@ impl PartialOrd for PeerCmpReadStat {
     }
 }
 
-impl<EK, ER> Display for Task<EK, ER>
+impl<EK> Display for Task<EK>
 where
     EK: KvEngine,
-    ER: RaftEngine,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match *self {
@@ -366,12 +363,11 @@ fn convert_record_pairs(m: HashMap<String, u64>) -> RecordPairVec {
         .collect()
 }
 
-struct StatsMonitor<EK, ER>
+struct StatsMonitor<EK>
 where
     EK: KvEngine,
-    ER: RaftEngine,
 {
-    scheduler: Scheduler<Task<EK, ER>>,
+    scheduler: Scheduler<Task<EK>>,
     handle: Option<JoinHandle<()>>,
     timer: Option<Sender<bool>>,
     sender: Option<Sender<ReadStats>>,
@@ -380,12 +376,11 @@ where
     collect_interval: Duration,
 }
 
-impl<EK, ER> StatsMonitor<EK, ER>
+impl<EK> StatsMonitor<EK>
 where
     EK: KvEngine,
-    ER: RaftEngine,
 {
-    pub fn new(interval: Duration, scheduler: Scheduler<Task<EK, ER>>) -> Self {
+    pub fn new(interval: Duration, scheduler: Scheduler<Task<EK>>) -> Self {
         StatsMonitor {
             scheduler,
             handle: None,
@@ -627,28 +622,25 @@ impl SlowScore {
 }
 
 // RegionCPUMeteringCollector is used to collect the region-related CPU info.
-struct RegionCPUMeteringCollector<EK, ER>
+struct RegionCPUMeteringCollector<EK>
 where
     EK: KvEngine,
-    ER: RaftEngine,
 {
-    scheduler: Scheduler<Task<EK, ER>>,
+    scheduler: Scheduler<Task<EK>>,
 }
 
-impl<EK, ER> RegionCPUMeteringCollector<EK, ER>
+impl<EK> RegionCPUMeteringCollector<EK>
 where
     EK: KvEngine,
-    ER: RaftEngine,
 {
-    fn new(scheduler: Scheduler<Task<EK, ER>>) -> RegionCPUMeteringCollector<EK, ER> {
+    fn new(scheduler: Scheduler<Task<EK>>) -> RegionCPUMeteringCollector<EK> {
         RegionCPUMeteringCollector { scheduler }
     }
 }
 
-impl<EK, ER> Collector for RegionCPUMeteringCollector<EK, ER>
+impl<EK> Collector for RegionCPUMeteringCollector<EK>
 where
     EK: KvEngine,
-    ER: RaftEngine,
 {
     fn collect(&self, records: Arc<RawRecords>) {
         self.scheduler
@@ -666,6 +658,7 @@ where
     store_id: u64,
     pd_client: Arc<T>,
     router: RaftRouter<EK, ER>,
+    engines: Engines<EK, ER>,
     region_peers: HashMap<u64, PeerStat>,
     store_stat: StoreStat,
     is_hb_receiver_scheduled: bool,
@@ -675,8 +668,8 @@ where
     // use for Runner inner handle function to send Task to itself
     // actually it is the sender connected to Runner's Worker which
     // calls Runner's run() on Task received.
-    scheduler: Scheduler<Task<EK, ER>>,
-    stats_monitor: StatsMonitor<EK, ER>,
+    scheduler: Scheduler<Task<EK>>,
+    stats_monitor: StatsMonitor<EK>,
 
     _region_cpu_records_collector: CollectorHandle,
     // region_id -> total_cpu_time_ms (since last region heartbeat)
@@ -701,7 +694,8 @@ where
         store_id: u64,
         pd_client: Arc<T>,
         router: RaftRouter<EK, ER>,
-        scheduler: Scheduler<Task<EK, ER>>,
+        engines: Engines<EK, ER>,
+        scheduler: Scheduler<Task<EK>>,
         store_heartbeat_interval: Duration,
         auto_split_controller: AutoSplitController,
         concurrency_manager: ConcurrencyManager,
@@ -721,6 +715,7 @@ where
             store_id,
             pd_client,
             router,
+            engines,
             is_hb_receiver_scheduled: false,
             region_peers: HashMap::default(),
             store_stat: StoreStat::default(),
@@ -792,7 +787,7 @@ where
     // be called in an asynchronous context.
     fn handle_ask_batch_split(
         router: RaftRouter<EK, ER>,
-        scheduler: Scheduler<Task<EK, ER>>,
+        scheduler: Scheduler<Task<EK>>,
         pd_client: Arc<T>,
         mut region: metapb::Region,
         mut split_keys: Vec<Vec<u8>>,
@@ -923,14 +918,14 @@ where
     fn handle_store_heartbeat(
         &mut self,
         mut stats: pdpb::StoreStats,
-        store_info: StoreInfo<EK, ER>,
+        capacity: u64,
         send_detailed_report: bool,
     ) {
-        let disk_stats = match fs2::statvfs(store_info.kv_engine.path()) {
+        let disk_stats = match fs2::statvfs(self.engines.kv.path()) {
             Err(e) => {
                 error!(
                     "get disk stat for rocksdb failed";
-                    "engine_path" => store_info.kv_engine.path(),
+                    "engine_path" => self.engines.kv.path(),
                     "err" => ?e
                 );
                 return;
@@ -967,15 +962,22 @@ where
         stats = collect_report_read_peer_stats(HOTSPOT_REPORT_CAPACITY, report_peers, stats);
 
         let disk_cap = disk_stats.total_space();
-        let capacity = if store_info.capacity == 0 || disk_cap < store_info.capacity {
+        let capacity = if capacity == 0 || disk_cap < capacity {
             disk_cap
         } else {
-            store_info.capacity
+            capacity
         };
         stats.set_capacity(capacity);
 
-        let used_size = self.snap_mgr.get_total_snap_size().unwrap()
-            + store_info.kv_engine.get_engine_used_size().expect("cf");
+        let mut used_size = self.snap_mgr.get_total_snap_size().unwrap();
+        used_size += self.engines.kv.get_engine_used_size().expect("cf");
+        self.engines
+            .tablets
+            .loop_tablet_cache(Box::new(|id, suffix, tablet: &EK| {
+                used_size += tablet.get_engine_used_size().unwrap_or_else(|e| {
+                    panic!("failed to load size of {}_{}: {:?}", id, suffix, e);
+                });
+            }));
         stats.set_used_size(used_size);
 
         let mut available = capacity.checked_sub(used_size).unwrap_or_default();
@@ -1034,8 +1036,8 @@ where
         let mut optional_report = None;
         if send_detailed_report {
             let mut store_report = pdpb::StoreReport::new();
-            store_info
-                .kv_engine
+            self.engines
+                .kv
                 .scan_cf(
                     CF_RAFT,
                     keys::REGION_META_MIN_KEY,
@@ -1052,8 +1054,9 @@ where
                         if region_local_state.get_state() == PeerState::Tombstone {
                             return Ok(true);
                         }
-                        let raft_local_state = match store_info
-                            .raft_engine
+                        let raft_local_state = match self
+                            .engines
+                            .raft
                             .get_raft_state(region_local_state.get_region().get_id())
                             .unwrap()
                         {
@@ -1084,7 +1087,7 @@ where
                         info!("required to send detailed report in the next heartbeat");
                         let task = Task::StoreHeartbeat {
                             stats: stats_copy,
-                            store_info,
+                            capacity,
                             send_detailed_report: true,
                         };
                         if let Err(e) = scheduler.schedule(task) {
@@ -1117,7 +1120,7 @@ where
                         }
                         let task = Task::StoreHeartbeat {
                             stats: stats_copy,
-                            store_info,
+                            capacity,
                             send_detailed_report: true,
                         };
                         if let Err(e) = scheduler.schedule(task) {
@@ -1492,9 +1495,9 @@ where
     ER: RaftEngine,
     T: PdClient,
 {
-    type Task = Task<EK, ER>;
+    type Task = Task<EK>;
 
-    fn run(&mut self, task: Task<EK, ER>) {
+    fn run(&mut self, task: Task<EK>) {
         debug!("executing task"; "task" => %task);
 
         if !self.is_hb_receiver_scheduled {
@@ -1664,9 +1667,9 @@ where
             }
             Task::StoreHeartbeat {
                 stats,
-                store_info,
+                capacity,
                 send_detailed_report,
-            } => self.handle_store_heartbeat(stats, store_info, send_detailed_report),
+            } => self.handle_store_heartbeat(stats, capacity, send_detailed_report),
             Task::ReportBatchSplit { regions } => self.handle_report_batch_split(regions),
             Task::ValidatePeer { region, peer } => self.handle_validate_peer(region, peer),
             Task::ReadStats { read_stats } => self.handle_read_stats(read_stats),
@@ -1943,20 +1946,20 @@ mod tests {
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn test_collect_stats() {
-        use engine_test::{kv::KvTestEngine, raft::RaftTestEngine};
+        use engine_test::kv::KvTestEngine;
         use std::sync::Mutex;
         use std::time::Instant;
         use tikv_util::worker::LazyWorker;
 
         struct RunnerTest {
             store_stat: Arc<Mutex<StoreStat>>,
-            stats_monitor: StatsMonitor<KvTestEngine, RaftTestEngine>,
+            stats_monitor: StatsMonitor<KvTestEngine>,
         }
 
         impl RunnerTest {
             fn new(
                 interval: u64,
-                scheduler: Scheduler<Task<KvTestEngine, RaftTestEngine>>,
+                scheduler: Scheduler<Task<KvTestEngine>>,
                 store_stat: Arc<Mutex<StoreStat>>,
             ) -> RunnerTest {
                 let mut stats_monitor = StatsMonitor::new(Duration::from_secs(interval), scheduler);
@@ -1985,9 +1988,9 @@ mod tests {
         }
 
         impl Runnable for RunnerTest {
-            type Task = Task<KvTestEngine, RaftTestEngine>;
+            type Task = Task<KvTestEngine>;
 
-            fn run(&mut self, task: Task<KvTestEngine, RaftTestEngine>) {
+            fn run(&mut self, task: Task<KvTestEngine>) {
                 if let Task::StoreInfos {
                     cpu_usages,
                     read_io_rates,

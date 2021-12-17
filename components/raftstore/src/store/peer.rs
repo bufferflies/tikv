@@ -64,7 +64,7 @@ use tikv_alloc::trace::TraceEvent;
 use tikv_util::codec::number::decode_u64;
 use tikv_util::sys::disk::DiskUsage;
 use tikv_util::time::{duration_to_sec, monotonic_raw_now};
-use tikv_util::time::{Instant as TiInstant, InstantExt, ThreadReadId};
+use tikv_util::time::{Instant as TiInstant, InstantExt, ThreadReadId, UnixSecs};
 use tikv_util::worker::Scheduler;
 use tikv_util::Either;
 use tikv_util::{box_err, debug, error, info, warn};
@@ -578,6 +578,8 @@ where
 
     pub region_merge_proposal_index: u64,
 
+    pub handled_proposals: usize,
+
     pub read_progress: Arc<RegionReadProgress>,
 
     pub memtrace_raft_entries: usize,
@@ -603,7 +605,7 @@ where
     pub fn new(
         store_id: u64,
         cfg: &Config,
-        sched: Scheduler<RegionTask<EK::Snapshot>>,
+        sched: Scheduler<RegionTask>,
         engines: Engines<EK, ER>,
         region: &metapb::Region,
         peer: metapb::Peer,
@@ -703,6 +705,7 @@ where
             unpersisted_ready: None,
             persisted_number: 0,
             apply_snap_ctx: None,
+            handled_proposals: 0,
         };
 
         // If this region has only one peer and I am the one, campaign directly.
@@ -928,6 +931,8 @@ where
             &region,
             PeerState::Tombstone,
             self.pending_merge_state.clone(),
+            u64::MAX,
+            self.get_store().tablet_suffix().unwrap_or(0),
         )?;
         // write kv rocksdb first in case of restart happen between two write
         let mut write_opts = WriteOptions::new();
@@ -1081,7 +1086,7 @@ where
     pub fn set_region(
         &mut self,
         host: &CoprocessorHost<impl KvEngine>,
-        reader: &mut ReadDelegate,
+        reader: &mut ReadDelegate<EK>,
         region: metapb::Region,
     ) {
         if self.region().get_region_epoch().get_version() < region.get_region_epoch().get_version()
@@ -1172,6 +1177,10 @@ where
         self.region().get_peers().iter().any(|p| {
             p.get_role() == PeerRole::IncomingVoter || p.get_role() == PeerRole::DemotingVoter
         })
+    }
+
+    pub fn tablet(&self) -> Option<&EK> {
+        self.get_store().tablet()
     }
 
     #[inline]
@@ -1529,6 +1538,47 @@ where
         false
     }
 
+    pub fn flush_tablet<T>(&mut self, ctx: &mut PollContext<EK, ER, T>) -> Option<bool> {
+        let tablet = self.get_store().tablet();
+        let usage = tablet.map_or(0, |t| t.get_engine_memory_usage());
+        if self.handled_proposals > 0 {
+            if self.handled_proposals < 1024 {
+                let after_usage = if usage >= ctx.cfg.flush_threshold.0 {
+                    let secs = UnixSecs::now().into_inner();
+                    let res = ctx.last_flush_time.fetch_update(
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                        |u| {
+                            if u + ctx.cfg.flush_min_interval.as_secs() < secs {
+                                Some(secs)
+                            } else {
+                                None
+                            }
+                        },
+                    );
+                    if res.is_err() {
+                        None
+                    } else {
+                        tablet.map(|t| t.flush(false));
+                        tablet.map(|t| t.get_engine_memory_usage())
+                    }
+                } else {
+                    None
+                };
+                info!("flushed"; "peer_id" => self.peer.get_id(), "region_id" => self.region_id, "memory" => usage, "after flush" => ?after_usage);
+                self.handled_proposals = 0;
+                after_usage.map(|_| true)
+            } else {
+                info!("handled proposals"; "count" => self.handled_proposals, "peer_id" => self.peer.get_id(), "region_id" => self.region_id, "memory" => usage);
+                self.handled_proposals = 1;
+                Some(false)
+            }
+        } else {
+            info!("pending memory usage"; "peer_id" => self.peer.get_id(), "region_id" => self.region_id, "memory" => usage);
+            None
+        }
+    }
+
     pub fn check_stale_state<T>(&mut self, ctx: &mut PollContext<EK, ER, T>) -> StaleState {
         if self.is_leader() {
             // Leaders always have valid state.
@@ -1840,6 +1890,7 @@ where
                     self.send_raft_messages(ctx, msgs);
 
                     // Snapshot has been applied.
+                    debug!("advance apply"; "apply_index" => self.last_applying_idx, "region_id" => self.region_id, "peer_id" => self.peer_id());
                     self.last_applying_idx = self.get_store().truncated_index();
                     self.raft_group.advance_apply_to(self.last_applying_idx);
                     self.cmd_epoch_checker.advance_apply(
@@ -1848,6 +1899,19 @@ where
                         self.raft_group.store().region(),
                     );
                 }
+                let mut kv_wb = ctx.engines.kv.write_batch();
+                write_peer_state(
+                    &mut kv_wb,
+                    self.region(),
+                    PeerState::Normal,
+                    None,
+                    self.get_store().applied_index(),
+                    self.get_store().tablet_suffix().unwrap(),
+                )
+                .unwrap();
+                let mut write_opts = WriteOptions::new();
+                write_opts.set_sync(true);
+                kv_wb.write_opt(&write_opts).unwrap();
                 // If `apply_snap_ctx` is none, it means this snapshot does not
                 // come from the ready but comes from the unfinished snapshot task
                 // after restarting.
@@ -2306,7 +2370,8 @@ where
         let persist_res = snap_ctx.persist_res.take().unwrap();
         // Schedule snapshot to apply
         snap_ctx.scheduled = true;
-        self.mut_store().persist_snapshot(&persist_res);
+        self.mut_store()
+            .persist_snapshot(&persist_res, &ctx.snap_mgr);
 
         // The peer may change from learner to voter after snapshot persisted.
         let peer = self
@@ -2403,6 +2468,7 @@ where
         self.persisted_number = ready.number();
 
         if !ready.snapshot().is_empty() {
+            debug!("setting apply index"; "apply_index" => self.last_applying_idx, "region_id" => self.region_id, "peer_id" => self.peer_id());
             self.raft_group.advance_append_async(ready);
             // The ready is persisted, but we don't want to handle following light
             // ready immediately to avoid flow out of control, so use
@@ -2459,12 +2525,7 @@ where
         !self.unpersisted_readies.is_empty()
     }
 
-    fn response_read<T>(
-        &self,
-        read: &mut ReadIndexRequest<EK::Snapshot>,
-        ctx: &mut PollContext<EK, ER, T>,
-        replica_read: bool,
-    ) {
+    fn response_read(&self, read: &mut ReadIndexRequest<EK::Snapshot>, replica_read: bool) {
         debug!(
             "handle reads with a read index";
             "request_id" => ?read.id,
@@ -2502,12 +2563,12 @@ where
                     }
                     _ => {}
                 }
-                cb.invoke_read(self.handle_read(ctx, req, true, read_index));
+                cb.invoke_read(self.handle_read(req, true, read_index));
                 continue;
             }
             if req.get_header().get_replica_read() {
                 // We should check epoch since the range could be changed.
-                cb.invoke_read(self.handle_read(ctx, req, true, read.read_index));
+                cb.invoke_read(self.handle_read(req, true, read.read_index));
             } else {
                 // The request could be proposed when the peer was leader.
                 // TODO: figure out that it's necessary to notify stale or not.
@@ -2544,9 +2605,9 @@ where
                 && read.cmds()[0].0.get_requests()[0].get_cmd_type() == CmdType::ReadIndex;
 
             if is_read_index_request {
-                self.response_read(&mut read, ctx, false);
+                self.response_read(&mut read, false);
             } else if self.ready_to_handle_unsafe_replica_read(read.read_index.unwrap()) {
-                self.response_read(&mut read, ctx, true);
+                self.response_read(&mut read, true);
             } else {
                 // TODO: `ReadIndex` requests could be blocked.
                 self.pending_reads.push_front(read);
@@ -2606,7 +2667,7 @@ where
             propose_time = self.pending_reads.last_ready().map(|r| r.propose_time);
             if self.ready_to_handle_read() {
                 while let Some(mut read) = self.pending_reads.pop_front() {
-                    self.response_read(&mut read, ctx, false);
+                    self.response_read(&mut read, false);
                 }
             }
         }
@@ -2656,6 +2717,9 @@ where
                 .compact_cache_to(apply_state.applied_index + 1);
         }
 
+        if apply_metrics.size_diff_hint != 0 {
+            self.handled_proposals += (applied_index - self.get_store().applied_index()) as usize;
+        }
         let progress_to_be_updated = self.mut_store().applied_index_term() != applied_index_term;
         self.mut_store().set_applied_state(apply_state);
         self.mut_store().set_applied_term(applied_index_term);
@@ -2673,7 +2737,7 @@ where
             self.post_pending_read_index_on_replica(ctx)
         } else if self.ready_to_handle_read() {
             while let Some(mut read) = self.pending_reads.pop_front() {
-                self.response_read(&mut read, ctx, false);
+                self.response_read(&mut read, false);
             }
         }
         self.pending_reads.gc();
@@ -2749,7 +2813,7 @@ where
         }
     }
 
-    fn maybe_update_read_progress(&self, reader: &mut ReadDelegate, progress: ReadProgress) {
+    fn maybe_update_read_progress(&self, reader: &mut ReadDelegate<EK>, progress: ReadProgress) {
         if self.pending_remove {
             return;
         }
@@ -3142,7 +3206,7 @@ where
         cb: Callback<EK::Snapshot>,
     ) {
         ctx.raft_metrics.propose.local_read += 1;
-        cb.invoke_read(self.handle_read(ctx, req, false, Some(self.get_store().commit_index())))
+        cb.invoke_read(self.handle_read(req, false, Some(self.get_store().commit_index())))
     }
 
     fn pre_read_index(&self) -> Result<()> {
@@ -3790,9 +3854,8 @@ where
         Ok(propose_index)
     }
 
-    fn handle_read<T>(
+    fn handle_read(
         &self,
-        ctx: &mut PollContext<EK, ER, T>,
         req: RaftCmdRequest,
         check_epoch: bool,
         read_index: Option<u64>,
@@ -3835,7 +3898,7 @@ where
             }
         }
 
-        let mut resp = ctx.execute(&req, &Arc::new(region), read_index, None);
+        let mut resp = self.execute(&req, &Arc::new(region), read_index, None);
         if let Some(snap) = resp.snapshot.as_mut() {
             snap.max_ts_sync_status = Some(self.max_ts_sync_status.clone());
         }
@@ -4348,7 +4411,7 @@ where
         self.send_extra_message(extra_msg, &mut ctx.trans, &to_peer);
     }
 
-    pub fn require_updating_max_ts(&self, pd_scheduler: &Scheduler<PdTask<EK, ER>>) {
+    pub fn require_updating_max_ts(&self, pd_scheduler: &Scheduler<PdTask<EK>>) {
         let epoch = self.region().get_region_epoch();
         let term_low_bits = self.term() & ((1 << 32) - 1); // 32 bits
         let version_lot_bits = epoch.get_version() & ((1 << 31) - 1); // 31 bits
@@ -4487,17 +4550,17 @@ where
     }
 }
 
-impl<EK, ER, T> ReadExecutor<EK> for PollContext<EK, ER, T>
+impl<EK, ER> ReadExecutor<EK> for Peer<EK, ER>
 where
     EK: KvEngine,
     ER: RaftEngine,
 {
     fn get_engine(&self) -> &EK {
-        &self.engines.kv
+        self.get_store().tablet().unwrap()
     }
 
-    fn get_snapshot(&mut self, _: Option<ThreadReadId>) -> Arc<EK::Snapshot> {
-        Arc::new(self.engines.kv.snapshot())
+    fn get_snapshot(&self, _: Option<ThreadReadId>) -> Arc<EK::Snapshot> {
+        Arc::new(self.get_store().raw_snapshot())
     }
 }
 

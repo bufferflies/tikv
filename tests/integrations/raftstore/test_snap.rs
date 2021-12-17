@@ -7,7 +7,6 @@ use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use engine_traits::KvEngine;
 use file_system::{IOOp, IOType};
 use futures::executor::block_on;
 use grpcio::Environment;
@@ -522,21 +521,13 @@ fn test_gen_during_heavy_recv() {
     cluster.must_transfer_leader(r2, new_peer(2, 1002));
 
     let snap_mgr = cluster.get_snap_mgr(2);
-    let engine = cluster.engines[&2].kv.clone();
+    let engine = cluster.engines[&2].clone();
     let snap_term = cluster.raft_local_state(r2, 2).get_hard_state().term;
     let snap_apply_state = cluster.apply_state(r2, 2);
     let mut snap_index = snap_apply_state.applied_index;
+    let suffix = cluster.region_local_state(r2, 2).get_tablet_suffix();
 
-    let snap = do_snapshot(
-        snap_mgr.clone(),
-        &engine,
-        engine.snapshot(),
-        r2,
-        snap_term,
-        snap_apply_state,
-        true,
-    )
-    .unwrap();
+    let snap = do_snapshot(snap_mgr.clone(), &engine, r2, suffix, true, Arc::default()).unwrap();
 
     // Keep sending snapshots to store 1.
     let s1_addr = cluster.sim.rl().get_addr(1);
