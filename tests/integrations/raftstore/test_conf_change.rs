@@ -12,8 +12,6 @@ use kvproto::raft_cmdpb::{RaftCmdResponse, RaftResponseHeader};
 use kvproto::raft_serverpb::*;
 use raft::eraftpb::{ConfChangeType, MessageType};
 
-use engine_rocks::Compat;
-use engine_traits::{Peekable, CF_RAFT};
 use pd_client::PdClient;
 use raftstore::store::util::is_learner;
 use raftstore::Result;
@@ -35,8 +33,8 @@ fn test_simple_conf_change<T: Simulator>(cluster: &mut Cluster<T>) {
     cluster.must_put(key, value);
     assert_eq!(cluster.get(key), Some(value.to_vec()));
 
-    let engine_2 = cluster.get_engine(2);
-    must_get_none(&engine_2, b"k1");
+    let engine_2 = cluster.engine(2).clone();
+    must_get_none_in(&engine_2, r1, b"k1");
     // add peer (2,2) to region 1.
     pd_client.must_add_peer(r1, new_peer(2, 2));
 
@@ -45,8 +43,8 @@ fn test_simple_conf_change<T: Simulator>(cluster: &mut Cluster<T>) {
     assert_eq!(cluster.get(key), Some(value.to_vec()));
 
     // now peer 2 must have v1 and v2;
-    must_get_equal(&engine_2, b"k1", b"v1");
-    must_get_equal(&engine_2, b"k2", b"v2");
+    must_get_equal_in(&engine_2, r1, b"k1", b"v1");
+    must_get_equal_in(&engine_2, r1, b"k2", b"v2");
 
     let epoch = cluster.pd_client.get_region_epoch(r1);
 
@@ -54,12 +52,12 @@ fn test_simple_conf_change<T: Simulator>(cluster: &mut Cluster<T>) {
     assert!(epoch.get_conf_ver() > 1);
 
     // peer 5 must not exist
-    let engine_5 = cluster.get_engine(5);
-    must_get_none(&engine_5, b"k1");
+    let engine_5 = cluster.engine(5).clone();
+    must_get_none_in(&engine_5, r1, b"k1");
 
     // add peer (3, 3) to region 1.
     pd_client.must_add_peer(r1, new_peer(3, 3));
-    must_get_equal(&cluster.get_engine(3), b"k1", b"v1");
+    must_get_equal_in(cluster.engine(3), r1, b"k1", b"v1");
     // Remove peer (2, 2) from region 1.
     pd_client.must_remove_peer(r1, new_peer(2, 2));
 
@@ -67,17 +65,17 @@ fn test_simple_conf_change<T: Simulator>(cluster: &mut Cluster<T>) {
     cluster.must_put(key, value);
     assert_eq!(cluster.get(key), Some(value.to_vec()));
     // now peer 3 must have v1, v2 and v3
-    let engine_3 = cluster.get_engine(3);
-    must_get_equal(&engine_3, b"k1", b"v1");
-    must_get_equal(&engine_3, b"k2", b"v2");
-    must_get_equal(&engine_3, b"k3", b"v3");
+    let engine_3 = cluster.engine(3).clone();
+    must_get_equal_in(&engine_3, r1, b"k1", b"v1");
+    must_get_equal_in(&engine_3, r1, b"k2", b"v2");
+    must_get_equal_in(&engine_3, r1, b"k3", b"v3");
 
     // peer 2 has nothing
-    must_get_none(&engine_2, b"k1");
-    must_get_none(&engine_2, b"k2");
+    must_get_none_in(&engine_2, r1, b"k1");
+    must_get_none_in(&engine_2, r1, b"k2");
 
     // peer 3 must exist
-    must_get_equal(&engine_3, b"k3", b"v3");
+    must_get_equal_in(&engine_3, r1, b"k3", b"v3");
 
     // add peer 2 then remove it again.
     pd_client.must_add_peer(r1, new_peer(2, 2));
@@ -87,16 +85,16 @@ fn test_simple_conf_change<T: Simulator>(cluster: &mut Cluster<T>) {
     cluster.must_put(key, value);
     assert_eq!(cluster.get(key), Some(value.to_vec()));
 
-    let engine_2 = cluster.get_engine(2);
+    let engine_2 = cluster.engine(2).clone();
 
-    must_get_equal(&engine_2, b"k1", b"v1");
-    must_get_equal(&engine_2, b"k2", b"v2");
-    must_get_equal(&engine_2, b"k3", b"v3");
+    must_get_equal_in(&engine_2, r1, b"k1", b"v1");
+    must_get_equal_in(&engine_2, r1, b"k2", b"v2");
+    must_get_equal_in(&engine_2, r1, b"k3", b"v3");
 
     // Make sure peer 2 is not in probe mode.
     cluster.must_put(b"k4", b"v4");
     assert_eq!(cluster.get(b"k4"), Some(b"v4".to_vec()));
-    must_get_equal(&engine_2, b"k4", b"v4");
+    must_get_equal_in(&engine_2, r1, b"k4", b"v4");
 
     let resp = call_conf_change(cluster, r1, ConfChangeType::AddNode, new_peer(2, 2)).unwrap();
     let exec_res = resp
@@ -116,7 +114,7 @@ fn test_simple_conf_change<T: Simulator>(cluster: &mut Cluster<T>) {
     // add peer (2, 4) to region 1.
     pd_client.must_add_peer(r1, new_peer(2, 4));
     cluster.must_put(b"add_2_4", b"add_2_4");
-    must_get_equal(&engine_2, b"add_2_4", b"add_2_4");
+    must_get_equal_in(&engine_2, r1, b"add_2_4", b"add_2_4");
 
     // Remove peer (3, 3) from region 1.
     pd_client.must_remove_peer(r1, new_peer(3, 3));
@@ -125,14 +123,14 @@ fn test_simple_conf_change<T: Simulator>(cluster: &mut Cluster<T>) {
     cluster.must_put(key, value);
     assert_eq!(cluster.get(key), Some(value.to_vec()));
     // now peer 4 in store 2 must have v1, v2, v3, v4, we check v1 and v4 here.
-    let engine_2 = cluster.get_engine(2);
+    let engine_2 = cluster.engine(2).clone();
 
-    must_get_equal(&engine_2, b"k1", b"v1");
-    must_get_equal(&engine_2, b"k4", b"v4");
+    must_get_equal_in(&engine_2, r1, b"k1", b"v1");
+    must_get_equal_in(&engine_2, r1, b"k4", b"v4");
 
     // peer 3 has nothing, we check v1 and v4 here.
-    must_get_none(&engine_3, b"k1");
-    must_get_none(&engine_3, b"k4");
+    must_get_none_in(&engine_3, r1, b"k1");
+    must_get_none_in(&engine_3, r1, b"k4");
 
     // TODO: add more tests.
 }
@@ -172,14 +170,8 @@ fn test_pd_conf_change<T: Simulator>(cluster: &mut Cluster<T>) {
     assert_eq!(cluster.get(key), Some(value.to_vec()));
 
     let peer2 = new_conf_change_peer(&stores[1], &pd_client);
-    let engine_2 = cluster.get_engine(peer2.get_store_id());
-    assert!(
-        engine_2
-            .c()
-            .get_value(&keys::data_key(b"k1"))
-            .unwrap()
-            .is_none()
-    );
+    let engine_2 = cluster.engine(peer2.get_store_id()).clone();
+    must_get_none_in(&engine_2, region_id, b"k1");
     // add new peer to first region.
     pd_client.must_add_peer(region_id, peer2.clone());
 
@@ -188,14 +180,14 @@ fn test_pd_conf_change<T: Simulator>(cluster: &mut Cluster<T>) {
     assert_eq!(cluster.get(key), Some(value.to_vec()));
 
     // now peer 2 must have v1 and v2;
-    must_get_equal(&engine_2, b"k1", b"v1");
-    must_get_equal(&engine_2, b"k2", b"v2");
+    must_get_equal_in(&engine_2, region_id, b"k1", b"v1");
+    must_get_equal_in(&engine_2, region_id, b"k2", b"v2");
 
     // add new peer to first region.
     let peer3 = new_conf_change_peer(&stores[2], &pd_client);
-    let engine_3 = cluster.get_engine(peer3.get_store_id());
+    let engine_3 = cluster.engine(peer3.get_store_id()).clone();
     pd_client.must_add_peer(region_id, peer3.clone());
-    must_get_equal(&engine_3, b"k1", b"v1");
+    must_get_equal_in(&engine_3, region_id, b"k1", b"v1");
 
     // Remove peer2 from first region.
     pd_client.must_remove_peer(region_id, peer2);
@@ -204,13 +196,13 @@ fn test_pd_conf_change<T: Simulator>(cluster: &mut Cluster<T>) {
     cluster.must_put(key, value);
     assert_eq!(cluster.get(key), Some(value.to_vec()));
     // now peer 3 must have v1, v2 and v3
-    must_get_equal(&engine_3, b"k1", b"v1");
-    must_get_equal(&engine_3, b"k2", b"v2");
-    must_get_equal(&engine_3, b"k3", b"v3");
+    must_get_equal_in(&engine_3, region_id, b"k1", b"v1");
+    must_get_equal_in(&engine_3, region_id, b"k2", b"v2");
+    must_get_equal_in(&engine_3, region_id, b"k3", b"v3");
 
     // peer 2 has nothing
-    must_get_none(&engine_2, b"k1");
-    must_get_none(&engine_2, b"k2");
+    must_get_none_in(&engine_2, region_id, b"k1");
+    must_get_none_in(&engine_2, region_id, b"k2");
     // add peer4 to first region 1.
     let peer4 = new_conf_change_peer(&stores[1], &pd_client);
     pd_client.must_add_peer(region_id, peer4.clone());
@@ -221,14 +213,14 @@ fn test_pd_conf_change<T: Simulator>(cluster: &mut Cluster<T>) {
     cluster.must_put(key, value);
     assert_eq!(cluster.get(key), Some(value.to_vec()));
     // now peer4 must have v1, v2, v3, v4, we check v1 and v4 here.
-    let engine_2 = cluster.get_engine(peer4.get_store_id());
+    let engine_2 = cluster.engine(peer4.get_store_id());
 
-    must_get_equal(&engine_2, b"k1", b"v1");
-    must_get_equal(&engine_2, b"k4", b"v4");
+    must_get_equal_in(&engine_2, region_id, b"k1", b"v1");
+    must_get_equal_in(&engine_2, region_id, b"k4", b"v4");
 
     // peer 3 has nothing, we check v1 and v4 here.
-    must_get_none(&engine_3, b"k1");
-    must_get_none(&engine_3, b"k4");
+    must_get_none_in(&engine_3, region_id, b"k1");
+    must_get_none_in(&engine_3, region_id, b"k4");
 
     // TODO: add more tests.
 }
@@ -303,17 +295,17 @@ fn test_auto_adjust_replica<T: Simulator>(cluster: &mut Cluster<T>) {
         .unwrap();
 
     for peer in region.get_peers() {
-        must_get_equal(&cluster.get_engine(peer.get_store_id()), b"k1", b"v1");
+        must_get_equal_in(cluster.engine(peer.get_store_id()), region_id, b"k1", b"v1");
     }
 
     let mut peer = new_conf_change_peer(&stores[i], &pd_client);
     peer.set_role(PeerRole::Learner);
-    let engine = cluster.get_engine(peer.get_store_id());
-    must_get_none(&engine, b"k1");
+    let engine = cluster.engine(peer.get_store_id());
+    must_get_none_in(&engine, region_id, b"k1");
 
     pd_client.must_add_peer(region_id, peer.clone());
     wait_till_reach_count(Arc::clone(&pd_client), region_id, 6);
-    must_get_equal(&engine, b"k1", b"v1");
+    must_get_equal_in(&engine, region_id, b"k1", b"v1");
     peer.set_role(PeerRole::Voter);
     pd_client.must_add_peer(region_id, peer);
 
@@ -358,9 +350,9 @@ fn test_after_remove_itself<T: Simulator>(cluster: &mut Cluster<T>) {
     let r1 = cluster.run_conf_change();
     cluster.must_put(b"kk", b"vv");
     pd_client.must_add_peer(r1, new_peer(2, 2));
-    must_get_equal(&cluster.get_engine(2), b"kk", b"vv");
+    must_get_equal_in(cluster.engine(2), r1, b"kk", b"vv");
     pd_client.must_add_peer(r1, new_peer(3, 3));
-    must_get_equal(&cluster.get_engine(3), b"kk", b"vv");
+    must_get_equal_in(cluster.engine(3), r1, b"kk", b"vv");
 
     // 1, stop node 2
     // 2, add data to guarantee leader has more logs
@@ -373,10 +365,10 @@ fn test_after_remove_itself<T: Simulator>(cluster: &mut Cluster<T>) {
 
     cluster.must_put(b"k1", b"v1");
 
-    let engine1 = cluster.get_engine(1);
-    let engine3 = cluster.get_engine(3);
-    must_get_equal(&engine1, b"k1", b"v1");
-    must_get_equal(&engine3, b"k1", b"v1");
+    let engine1 = cluster.engine(1).clone();
+    let engine3 = cluster.engine(3).clone();
+    must_get_equal_in(&engine1, r1, b"k1", b"v1");
+    must_get_equal_in(&engine3, r1, b"k1", b"v1");
 
     cluster.stop_node(3);
 
@@ -400,21 +392,13 @@ fn test_after_remove_itself<T: Simulator>(cluster: &mut Cluster<T>) {
     cluster.run_node(3).unwrap();
 
     for _ in 0..250 {
-        let region: RegionLocalState = engine1
-            .c()
-            .get_msg_cf(CF_RAFT, &keys::region_state_key(r1))
-            .unwrap()
-            .unwrap();
+        let region = cluster.region_local_state(r1, 1);
         if region.get_state() == PeerState::Tombstone {
             return;
         }
         sleep_ms(20);
     }
-    let region: RegionLocalState = engine1
-        .c()
-        .get_msg_cf(CF_RAFT, &keys::region_state_key(r1))
-        .unwrap()
-        .unwrap();
+    let region = cluster.region_local_state(r1, 1);
     assert_eq!(region.get_state(), PeerState::Tombstone);
 
     // TODO: add split after removing itself test later.
@@ -443,15 +427,15 @@ fn test_split_brain<T: Simulator>(cluster: &mut Cluster<T>) {
 
     cluster.must_put(b"k0", b"v0");
     pd_client.must_add_peer(r1, new_peer(2, 2));
-    must_get_equal(&cluster.get_engine(2), b"k0", b"v0");
+    must_get_equal_in(cluster.engine(2), r1, b"k0", b"v0");
     pd_client.must_add_peer(r1, new_peer(3, 3));
-    must_get_equal(&cluster.get_engine(3), b"k0", b"v0");
+    must_get_equal_in(cluster.engine(3), r1, b"k0", b"v0");
 
     cluster.must_transfer_leader(r1, new_peer(2, 2));
     cluster.must_put(b"kk0", b"vv0");
-    must_get_equal(&cluster.get_engine(1), b"kk0", b"vv0");
-    must_get_equal(&cluster.get_engine(2), b"kk0", b"vv0");
-    must_get_equal(&cluster.get_engine(3), b"kk0", b"vv0");
+    must_get_equal_in(cluster.engine(1), r1, b"kk0", b"vv0");
+    must_get_equal_in(cluster.engine(2), r1, b"kk0", b"vv0");
+    must_get_equal_in(cluster.engine(3), r1, b"kk0", b"vv0");
 
     // leader isolation
     cluster.add_send_filter(IsolationFilterFactory::new(1));
@@ -461,17 +445,17 @@ fn test_split_brain<T: Simulator>(cluster: &mut Cluster<T>) {
 
     // add [4,5,6] and remove [2,3]
     pd_client.must_add_peer(r1, new_peer(4, 4));
-    must_get_equal(&cluster.get_engine(4), b"k1", b"v1");
+    must_get_equal_in(cluster.engine(4), r1, b"k1", b"v1");
     pd_client.must_add_peer(r1, new_peer(5, 5));
-    must_get_equal(&cluster.get_engine(5), b"k1", b"v1");
+    must_get_equal_in(cluster.engine(5), r1, b"k1", b"v1");
     pd_client.must_add_peer(r1, new_peer(6, 6));
-    must_get_equal(&cluster.get_engine(6), b"k1", b"v1");
+    must_get_equal_in(cluster.engine(6), r1, b"k1", b"v1");
     cluster.must_transfer_leader(r1, new_peer(6, 6));
     pd_client.must_remove_peer(r1, new_peer(2, 2));
     pd_client.must_remove_peer(r1, new_peer(3, 3));
 
     cluster.must_put(b"k2", b"v2");
-    must_get_equal(&cluster.get_engine(6), b"k2", b"v2");
+    must_get_equal_in(cluster.engine(6), r1, b"k2", b"v2");
     let region_detail = cluster.region_detail(r1, 1);
     let region_peers = region_detail.get_region().get_peers();
     assert_eq!(region_peers.len(), 3);
@@ -539,9 +523,9 @@ fn test_conf_change_safe<T: Simulator>(cluster: &mut Cluster<T>) {
     // Ensure it works to add one node to a cluster that has only one node.
     cluster.must_put(b"k0", b"v0");
     pd_client.must_add_peer(region_id, new_peer(2, 2));
-    must_get_equal(&cluster.get_engine(2), b"k0", b"v0");
+    must_get_equal_in(cluster.engine(2), region_id, b"k0", b"v0");
     pd_client.must_add_peer(region_id, new_peer(3, 3));
-    must_get_equal(&cluster.get_engine(3), b"k0", b"v0");
+    must_get_equal_in(cluster.engine(3), region_id, b"k0", b"v0");
 
     // Isolate the leader.
     cluster.must_transfer_leader(region_id, new_peer(1, 1));
@@ -599,11 +583,11 @@ fn test_transfer_leader_safe<T: Simulator>(cluster: &mut Cluster<T>) {
     cluster.must_put(b"k1", b"v1");
 
     // Test adding nodes.
-    must_get_equal(&cluster.get_engine(1), b"k1", b"v1");
+    must_get_equal_in(cluster.engine(1), region_id, b"k1", b"v1");
     pd_client.must_add_peer(region_id, new_peer(2, 2));
-    must_get_equal(&cluster.get_engine(2), b"k1", b"v1");
+    must_get_equal_in(cluster.engine(2), region_id, b"k1", b"v1");
     pd_client.must_add_peer(region_id, new_peer(3, 3));
-    must_get_equal(&cluster.get_engine(3), b"k1", b"v1");
+    must_get_equal_in(cluster.engine(3), region_id, b"k1", b"v1");
 
     // Any up-to-date follower can become leader.
     cluster.transfer_leader(region_id, new_peer(3, 3));
@@ -644,11 +628,11 @@ fn test_learner_conf_change<T: Simulator>(cluster: &mut Cluster<T>) {
     pd_client.must_add_peer(r1, new_peer(2, 2));
 
     // Add learner (4, 10) to region 1.
-    let engine_4 = cluster.get_engine(4);
+    let engine_4 = cluster.engine(4).clone();
     pd_client.must_add_peer(r1, new_learner_peer(4, 10));
     cluster.must_put(b"k2", b"v2");
-    must_get_equal(&engine_4, b"k1", b"v1");
-    must_get_equal(&engine_4, b"k2", b"v2");
+    must_get_equal_in(&engine_4, r1, b"k1", b"v1");
+    must_get_equal_in(&engine_4, r1, b"k2", b"v2");
 
     // Can't add duplicate learner.
     let resp = call_conf_change(
@@ -663,21 +647,21 @@ fn test_learner_conf_change<T: Simulator>(cluster: &mut Cluster<T>) {
 
     // Remove learner (4, 10) from region 1.
     pd_client.must_remove_peer(r1, new_learner_peer(4, 10));
-    must_get_none(&engine_4, b"k2"); // Wait for the region is cleaned.
+    must_get_none_in(&engine_4, r1, b"k2"); // Wait for the region is cleaned.
     pd_client.must_add_peer(r1, new_learner_peer(4, 12));
-    must_get_equal(&engine_4, b"k2", b"v2");
+    must_get_equal_in(&engine_4, r1, b"k2", b"v2");
 
     // Can't transfer leader to learner.
     pd_client.transfer_leader(r1, new_learner_peer(4, 12));
     cluster.must_put(b"k3", b"v3");
-    must_get_equal(&cluster.get_engine(4), b"k3", b"v3");
+    must_get_equal_in(cluster.engine(4), r1, b"k3", b"v3");
     pd_client.region_leader_must_be(r1, new_peer(1, 1));
 
     // Promote learner (4, 12) to voter.
     pd_client.must_add_peer(r1, new_peer(4, 12));
     pd_client.must_none_pending_peer(new_peer(4, 12));
     cluster.must_put(b"k3", b"v3");
-    must_get_equal(&engine_4, b"k3", b"v3");
+    must_get_equal_in(&engine_4, r1, b"k3", b"v3");
 
     // Transfer leader to (4, 12) and check pd heartbeats from it to ensure
     // that `Peer::peer` has be updated correctly after the peer is promoted.
@@ -839,12 +823,12 @@ fn test_learner_with_slow_snapshot() {
 
     // Clear snapshot filter and promote peer 2 to voter.
     filter.store(false, Ordering::SeqCst);
-    must_get_equal(&cluster.get_engine(2), b"k1", b"v1");
+    must_get_equal_in(cluster.engine(2), r1, b"k1", b"v1");
     pd_client.must_add_peer(r1, new_peer(2, 2));
 
     // Add a learner peer and test promoting it with snapshot instead of proposal.
     pd_client.must_add_peer(r1, new_learner_peer(3, 3));
-    must_get_equal(&cluster.get_engine(3), b"k1", b"v1");
+    must_get_equal_in(cluster.engine(3), r1, b"k1", b"v1");
 
     cluster.stop_node(3);
     pd_client.must_add_peer(r1, new_peer(3, 3));
@@ -854,7 +838,7 @@ fn test_learner_with_slow_snapshot() {
     // peer 3 will be promoted by snapshot instead of normal proposal.
     count.store(0, Ordering::SeqCst);
     cluster.run_node(3).unwrap();
-    must_get_equal(&cluster.get_engine(3), b"k2", b"v2");
+    must_get_equal_in(cluster.engine(3), r1, b"k2", b"v2");
     // Transfer leader so that peer 3 can report to pd with `Peer` in memory.
     pd_client.transfer_leader(r1, new_peer(3, 3));
     pd_client.region_leader_must_be(r1, new_peer(3, 3));
@@ -867,22 +851,22 @@ fn test_stale_peer<T: Simulator>(cluster: &mut Cluster<T>) {
 
     let r1 = cluster.run_conf_change();
     cluster.must_put(b"k1", b"v1");
-    must_get_equal(&cluster.get_engine(1), b"k1", b"v1");
+    must_get_equal_in(cluster.engine(1), r1, b"k1", b"v1");
 
     pd_client.must_add_peer(r1, new_peer(2, 2));
-    must_get_equal(&cluster.get_engine(2), b"k1", b"v1");
+    must_get_equal_in(cluster.engine(2), r1, b"k1", b"v1");
     pd_client.must_add_peer(r1, new_peer(3, 3));
-    must_get_equal(&cluster.get_engine(3), b"k1", b"v1");
+    must_get_equal_in(cluster.engine(3), r1, b"k1", b"v1");
 
     // replace peer 3 with peer 4 while peer 3 is isolated.
     cluster.add_send_filter(IsolationFilterFactory::new(3));
     pd_client.must_remove_peer(r1, new_peer(3, 3));
     pd_client.must_add_peer(r1, new_peer(4, 4));
-    must_get_equal(&cluster.get_engine(4), b"k1", b"v1");
+    must_get_equal_in(cluster.engine(4), r1, b"k1", b"v1");
 
     // After the peer gets back to the cluster, it knows it's removed.
     cluster.clear_send_filters();
-    must_get_none(&cluster.get_engine(3), b"k1");
+    must_get_none_in(cluster.engine(3), r1, b"k1");
 }
 
 #[test]
@@ -924,6 +908,6 @@ fn test_conf_change_fast() {
     // hence it must timeout.
     pd_client.must_add_peer(r1, new_learner_peer(2, 2));
     pd_client.must_add_peer(r1, new_peer(2, 2));
-    must_get_equal(&cluster.get_engine(2), b"k1", b"v1");
+    must_get_equal_in(cluster.engine(2), r1, b"k1", b"v1");
     assert!(timer.saturating_elapsed() < Duration::from_secs(5));
 }

@@ -13,17 +13,18 @@ pub trait TabletFactory<EK> {
     fn destroy_tablet(&self, _id: u64, _suffix: u64) -> crate::Result<()> {
         Ok(())
     }
-    fn create_tablet(&self, id: u64, suffix: u64) -> EK;
+    fn create_tablet(&self, id: u64, suffix: u64) -> Option<EK>;
     fn open_tablet(&self, id: u64, suffix: u64) -> EK {
         self.open_tablet_raw(&self.tablet_path(id, suffix), false)
+            .unwrap()
     }
     fn open_tablet_cache(&self, id: u64, suffix: u64) -> Option<EK> {
-        Some(self.open_tablet_raw(&self.tablet_path(id, suffix), false))
+        self.open_tablet_raw(&self.tablet_path(id, suffix), false)
     }
     fn open_tablet_cache_any(&self, id: u64) -> Option<EK> {
-        Some(self.open_tablet_raw(&self.tablet_path(id, 0), false))
+        self.open_tablet_raw(&self.tablet_path(id, 0), false)
     }
-    fn open_tablet_raw(&self, path: &Path, readonly: bool) -> EK;
+    fn open_tablet_raw(&self, path: &Path, readonly: bool) -> Option<EK>;
     fn create_root_db(&self) -> EK;
     #[inline]
     fn exists(&self, id: u64, suffix: u64) -> bool {
@@ -45,10 +46,10 @@ pub trait TabletFactory<EK> {
 pub struct DummyFactory;
 
 impl<EK> TabletFactory<EK> for DummyFactory {
-    fn create_tablet(&self, _id: u64, _suffix: u64) -> EK {
+    fn create_tablet(&self, _id: u64, _suffix: u64) -> Option<EK> {
         unimplemented!()
     }
-    fn open_tablet_raw(&self, _path: &Path, _readonly: bool) -> EK {
+    fn open_tablet_raw(&self, _path: &Path, _readonly: bool) -> Option<EK> {
         unimplemented!()
     }
     fn create_root_db(&self) -> EK {

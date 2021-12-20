@@ -31,8 +31,8 @@ use concurrency_manager::ConcurrencyManager;
 use encryption_export::{data_key_manager_from_config, DataKeyManager};
 use engine_rocks::{from_rocks_compression_type, get_env, FlowInfo, RocksEngine};
 use engine_traits::{
-    compaction_job::CompactionJobInfo, CFOptionsExt, ColumnFamilyOptions, Engines,
-    FlowControlFactorsExt, KvEngine, MiscExt, RaftEngine, CF_DEFAULT, CF_LOCK, CF_WRITE,
+    CFOptionsExt, ColumnFamilyOptions, Engines, FlowControlFactorsExt, KvEngine, MiscExt,
+    RaftEngine, TabletFactory, CF_DEFAULT, CF_LOCK, CF_WRITE,
 };
 use error_code::ErrorCodeExt;
 use file_system::{
@@ -60,12 +60,12 @@ use raftstore::{
         fsm::store::{RaftBatchSystem, RaftRouter, StoreMeta, PENDING_MSG_CAP},
         memory::MEMTRACE_ROOT as MEMTRACE_RAFTSTORE,
         AutoSplitController, CheckLeaderRunner, GlobalReplicationState, LocalReader, SnapManager,
-        SnapManagerBuilder, SplitCheckRunner, SplitConfigManager, StoreMsg,
+        SnapManagerBuilder, SplitCheckRunner, SplitConfigManager,
     },
 };
 use security::SecurityManager;
 use tikv::{
-    config::{ConfigController, DBConfigManger, DBType, TiKvConfig, DEFAULT_ROCKSDB_SUB_DIR},
+    config::{ConfigController, DBConfigManger, DBType, TiKvConfig},
     coprocessor::{self, MEMTRACE_ROOT as MEMTRACE_COPROCESSOR},
     coprocessor_v2,
     import::{ImportSSTService, SSTImporter},
@@ -77,6 +77,7 @@ use tikv::{
         create_raft_storage,
         gc_worker::{AutoGcConfig, GcWorker},
         lock_manager::LockManager,
+        node::KvEngineFactory,
         resolve,
         service::{DebugService, DiagnosticsService},
         status_server::StatusServer,
@@ -147,8 +148,9 @@ pub fn run_tikv(config: TiKvConfig) {
             tikv.run_server(server_config);
             tikv.run_status_server();
 
-            signal_handler::wait_for_signal(Some(tikv.engines.take().unwrap().engines));
-            tikv.stop();
+            let engines = tikv.engines.take().unwrap().engines.clone();
+            signal_handler::wait_for_signal(Some(engines.clone()));
+            tikv.stop(engines);
         }};
     }
 
@@ -469,34 +471,6 @@ impl<ER: RaftEngine> TiKVServer<ER> {
         })
         .unwrap()
         .map(Arc::new);
-    }
-
-    fn create_raftstore_compaction_listener(&self) -> engine_rocks::CompactionListener {
-        fn size_change_filter(info: &engine_rocks::RocksCompactionJobInfo) -> bool {
-            // When calculating region size, we only consider write and default
-            // column families.
-            let cf = info.cf_name();
-            if cf != CF_WRITE && cf != CF_DEFAULT {
-                return false;
-            }
-            // Compactions in level 0 and level 1 are very frequently.
-            if info.output_level() < 2 {
-                return false;
-            }
-
-            true
-        }
-
-        let ch = Mutex::new(self.router.clone());
-        let compacted_handler =
-            Box::new(move |compacted_event: engine_rocks::RocksCompactedEvent| {
-                let ch = ch.lock().unwrap();
-                let event = StoreMsg::CompactedEvent(compacted_event);
-                if let Err(e) = ch.send_control(event) {
-                    error_unknown!(?e; "send compaction finished event to raftstore failed");
-                }
-            });
-        engine_rocks::CompactionListener::new(compacted_handler, Some(size_change_filter))
     }
 
     fn init_flow_receiver(&mut self) -> engine_rocks::FlowListener {
@@ -1073,9 +1047,8 @@ impl<ER: RaftEngine> TiKVServer<ER> {
         fetcher: BytesFetcher,
         engines_info: Arc<EnginesResourceInfo>,
     ) {
-        let mut engine_metrics = EngineMetricsManager::<RocksEngine, ER>::new(
-            self.engines.as_ref().unwrap().engines.clone(),
-        );
+        let mut engine_metrics =
+            EngineMetricsManager::<ER>::new(self.engines.as_ref().unwrap().engines.clone());
         let mut io_metrics = IOMetricsManager::new(fetcher);
         let engines_info_clone = engines_info.clone();
         self.background_worker
@@ -1220,7 +1193,7 @@ impl<ER: RaftEngine> TiKVServer<ER> {
         }
     }
 
-    fn stop(self) {
+    fn stop(self, engines: Engines<RocksEngine, ER>) {
         tikv_util::thread_group::mark_shutdown();
         let mut servers = self.servers.unwrap();
         servers
@@ -1234,6 +1207,15 @@ impl<ER: RaftEngine> TiKVServer<ER> {
         servers.lock_mgr.stop();
 
         self.to_stop.into_iter().for_each(|s| s.stop());
+        if self.config.raft_store.disable_tablet_wal {
+            engines.tablets.loop_tablet_cache(Box::new(|id, suffix, tablet| {
+                if let Err(e) = tablet.flush(true) {
+                    error!("failed to flush kv engine"; "error" => ?e, "id" => id, "suffix" => suffix);
+                } else {
+                    info!("flushed kv engine"; "id" => id, "suffix" => suffix);
+                }
+            }));
+        }
     }
 }
 
@@ -1258,30 +1240,23 @@ impl TiKVServer<RocksEngine> {
         )
         .unwrap_or_else(|s| fatal!("failed to create raft engine: {}", s));
 
-        // Create kv engine.
-        let mut kv_db_opts = self.config.rocksdb.build_opt();
-        kv_db_opts.set_env(env);
-        kv_db_opts.add_event_listener(self.create_raftstore_compaction_listener());
-        kv_db_opts.add_event_listener(flow_listener);
-        let kv_cfs_opts = self.config.rocksdb.build_cf_opts(
-            &block_cache,
-            Some(&self.region_info_accessor),
-            self.config.storage.enable_ttl,
-        );
-        let db_path = self.store_path.join(Path::new(DEFAULT_ROCKSDB_SUB_DIR));
-        let kv_engine = engine_rocks::raw_util::new_engine_opt(
-            db_path.to_str().unwrap(),
-            kv_db_opts,
-            kv_cfs_opts,
-        )
-        .unwrap_or_else(|s| fatal!("failed to create kv engine: {}", s));
-
-        let mut kv_engine = RocksEngine::from_db(Arc::new(kv_engine));
-        let mut raft_engine = RocksEngine::from_db(Arc::new(raft_engine));
         let shared_block_cache = block_cache.is_some();
-        kv_engine.set_shared_block_cache(shared_block_cache);
+
+        let db_factory = Box::new(KvEngineFactory::new(
+            Some(env),
+            &self.config,
+            Some(self.region_info_accessor.clone()),
+            block_cache,
+            self.store_path.clone(),
+            Some(self.router.clone()),
+            Some(flow_listener),
+        ));
+        let kv_engine = db_factory.create_root_db();
+
+        let mut raft_engine = RocksEngine::from_db(Arc::new(raft_engine));
         raft_engine.set_shared_block_cache(shared_block_cache);
-        let engines = Engines::new(kv_engine, raft_engine);
+        let mut engines = Engines::new(kv_engine, raft_engine);
+        engines.tablets = db_factory;
 
         check_and_dump_raft_engine(&self.config, &engines.raft, 8);
 
@@ -1333,27 +1308,19 @@ impl TiKVServer<RaftLogEngine> {
         check_and_dump_raft_db(&self.config, &raft_engine, &env, 8);
 
         // Create kv engine.
-        let mut kv_db_opts = self.config.rocksdb.build_opt();
-        kv_db_opts.set_env(env);
-        kv_db_opts.add_event_listener(self.create_raftstore_compaction_listener());
-        kv_db_opts.add_event_listener(flow_listener);
-        let kv_cfs_opts = self.config.rocksdb.build_cf_opts(
-            &block_cache,
-            Some(&self.region_info_accessor),
-            self.config.storage.enable_ttl,
-        );
-        let db_path = self.store_path.join(Path::new(DEFAULT_ROCKSDB_SUB_DIR));
-        let kv_engine = engine_rocks::raw_util::new_engine_opt(
-            db_path.to_str().unwrap(),
-            kv_db_opts,
-            kv_cfs_opts,
-        )
-        .unwrap_or_else(|s| fatal!("failed to create kv engine: {}", s));
+        let db_factory = Box::new(KvEngineFactory::new(
+            Some(env),
+            &self.config,
+            Some(self.region_info_accessor.clone()),
+            block_cache,
+            self.store_path.clone(),
+            Some(self.router.clone()),
+            Some(flow_listener),
+        ));
+        let kv_engine = db_factory.create_root_db();
 
-        let mut kv_engine = RocksEngine::from_db(Arc::new(kv_engine));
-        let shared_block_cache = block_cache.is_some();
-        kv_engine.set_shared_block_cache(shared_block_cache);
-        let engines = Engines::new(kv_engine, raft_engine);
+        let mut engines = Engines::new(kv_engine, raft_engine);
+        engines.tablets = db_factory;
 
         let cfg_controller = self.cfg_controller.as_mut().unwrap();
         cfg_controller.register(
@@ -1493,22 +1460,34 @@ impl<T: fmt::Display + Send + 'static> Stop for LazyWorker<T> {
     }
 }
 
-pub struct EngineMetricsManager<EK: KvEngine, R: RaftEngine> {
-    engines: Engines<EK, R>,
+pub struct EngineMetricsManager<R: RaftEngine> {
+    engines: Engines<RocksEngine, R>,
     last_reset: Instant,
+    target: engine_rocks::EngineProperties,
 }
 
-impl<EK: KvEngine, R: RaftEngine> EngineMetricsManager<EK, R> {
-    pub fn new(engines: Engines<EK, R>) -> Self {
+impl<R: RaftEngine> EngineMetricsManager<R> {
+    pub fn new(engines: Engines<RocksEngine, R>) -> Self {
         EngineMetricsManager {
             engines,
             last_reset: Instant::now(),
+            target: engine_rocks::EngineProperties::default(),
         }
     }
 
     pub fn flush(&mut self, now: Instant) {
         KvEngine::flush_metrics(&self.engines.kv, "kv", false);
         self.engines.raft.flush_metrics("raft", true);
+        self.target.reset();
+        let target = &mut self.target;
+        self.engines.kv.collect_engine_properties_to(target);
+
+        self.engines
+            .tablets
+            .loop_tablet_cache(Box::new(|_, _, tablet| {
+                tablet.collect_engine_properties_to(target)
+            }));
+        self.engines.kv.report_engine_properties("kv", target);
         if now.saturating_duration_since(self.last_reset) >= DEFAULT_ENGINE_METRICS_RESET_INTERVAL {
             KvEngine::reset_statistics(&self.engines.kv);
             self.engines.raft.reset_statistics();

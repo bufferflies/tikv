@@ -30,7 +30,7 @@ fn test_overlap_cleanup() {
     pd_client.must_add_peer(region_id, new_peer(2, 2));
 
     cluster.must_put(b"k1", b"v1");
-    must_get_equal(&cluster.get_engine(2), b"k1", b"v1");
+    must_get_equal_in(cluster.engine(2), region_id, b"k1", b"v1");
 
     cluster.must_transfer_leader(region_id, new_peer(2, 2));
     // This will only pause the bootstrapped region, so the split region
@@ -41,8 +41,9 @@ fn test_overlap_cleanup() {
     assert_snapshot(&cluster.get_snap_dir(2), region_id, true);
     let region1 = cluster.get_region(b"k1");
     cluster.must_split(&region1, b"k2");
+    let region2 = cluster.get_region(b"k1");
     // Wait till the snapshot of split region is applied, whose range is ["", "k2").
-    must_get_equal(&cluster.get_engine(3), b"k1", b"v1");
+    must_get_equal_in(cluster.engine(3), region2.get_id(), b"k1", b"v1");
     // Resume the fail point and pause it again. So only the paused snapshot is generated.
     // And the paused snapshot's range is ["", ""), hence overlap.
     fail::cfg(gen_snapshot_fp, "pause").unwrap();
@@ -89,8 +90,8 @@ fn test_server_snapshot_on_resolve_failure() {
     ready_notify.store(true, Ordering::SeqCst);
     notify_rx.recv_timeout(Duration::from_secs(3)).unwrap();
 
-    let engine2 = cluster.get_engine(2);
-    must_get_none(&engine2, b"k1");
+    let engine2 = cluster.engine(2);
+    must_get_none_in(&engine2, 1, b"k1");
 
     // If snapshot status is reported correctly, sending snapshot should be retried.
     notify_rx.recv_timeout(Duration::from_secs(3)).unwrap();
@@ -117,7 +118,7 @@ fn test_generate_snapshot() {
 
     // Let store 4 inform leader to generate a snapshot.
     cluster.run_node(4).unwrap();
-    must_get_equal(&cluster.get_engine(4), b"k2", b"v2");
+    must_get_equal_in(cluster.engine(4), 1, b"k2", b"v2");
 
     fail::cfg("snapshot_enter_do_build", "pause").unwrap();
     cluster.run_node(5).unwrap();
@@ -126,12 +127,12 @@ fn test_generate_snapshot() {
     fail::cfg("snapshot_delete_after_send", "off").unwrap();
     must_empty_dir(cluster.get_snap_dir(1));
 
-    // The task is droped so that we can't get the snapshot on store 5.
+    // The task is dropped so that we can't get the snapshot on store 5.
     fail::cfg("snapshot_enter_do_build", "pause").unwrap();
-    must_get_none(&cluster.get_engine(5), b"k2");
+    must_get_none_in(cluster.engine(5), 1, b"k2");
 
     fail::cfg("snapshot_enter_do_build", "off").unwrap();
-    must_get_equal(&cluster.get_engine(5), b"k2", b"v2");
+    must_get_equal_in(cluster.engine(5), 1, b"k2", b"v2");
 
     fail::remove("snapshot_enter_do_build");
     fail::remove("snapshot_delete_after_send");
@@ -201,7 +202,7 @@ fn test_destroy_peer_on_pending_snapshot() {
 
     cluster.must_put(b"k1", b"v1");
     // Ensure peer 3 is initialized.
-    must_get_equal(&cluster.get_engine(3), b"k1", b"v1");
+    must_get_equal_in(cluster.engine(3), r1, b"k1", b"v1");
 
     cluster.must_transfer_leader(1, new_peer(1, 1));
 
@@ -240,7 +241,7 @@ fn test_destroy_peer_on_pending_snapshot() {
 
     cluster.must_put(b"k120", b"v1");
     // After peer 4 has applied snapshot, data should be got.
-    must_get_equal(&cluster.get_engine(3), b"k120", b"v1");
+    must_get_equal_in(cluster.engine(3), r1, b"k120", b"v1");
 }
 
 #[test]
@@ -309,7 +310,7 @@ fn test_receive_old_snapshot() {
 
     cluster.must_put(b"k00", b"v1");
     // Ensure peer 2 is initialized.
-    must_get_equal(&cluster.get_engine(2), b"k00", b"v1");
+    must_get_equal_in(cluster.engine(2), r1, b"k00", b"v1");
 
     cluster.add_send_filter(IsolationFilterFactory::new(2));
 
@@ -350,7 +351,7 @@ fn test_receive_old_snapshot() {
     for i in 20..40 {
         cluster.must_put(format!("k{}", i).as_bytes(), b"v1");
     }
-    must_get_equal(&cluster.get_engine(2), b"k39", b"v1");
+    must_get_equal_in(cluster.engine(2), r1, b"k39", b"v1");
 
     let router = cluster.sim.wl().get_router(2).unwrap();
     // Send the old snapshot
@@ -359,11 +360,11 @@ fn test_receive_old_snapshot() {
     }
 
     cluster.must_put(b"k40", b"v1");
-    must_get_equal(&cluster.get_engine(2), b"k40", b"v1");
+    must_get_equal_in(cluster.engine(2), r1, b"k40", b"v1");
 
     pd_client.must_remove_peer(r1, new_peer(2, 2));
 
-    must_get_none(&cluster.get_engine(2), b"k40");
+    must_get_none_in(&cluster.engine(2), r1, b"k40");
 
     let region = cluster.get_region(b"k1");
     cluster.must_split(&region, b"k5");
@@ -374,7 +375,7 @@ fn test_receive_old_snapshot() {
     cluster.must_put(b"k11", b"v1");
     // If peer 2 handles previous old snapshot properly and does not leave over metadata
     // in `pending_snapshot_regions`, peer 4 should be created normally.
-    must_get_equal(&cluster.get_engine(2), b"k11", b"v1");
+    must_get_equal_in(cluster.engine(2), left.get_id(), b"k11", b"v1");
 
     fail::remove(peer_2_handle_snap_mgr_gc_fp);
 }
@@ -410,7 +411,7 @@ fn test_gen_snapshot_with_no_committed_entries_ready() {
     cluster.clear_send_filters();
     // Snapshot should be generated and sent after leader 1 receives the heartbeat
     // response from peer 3.
-    must_get_equal(&cluster.get_engine(3), b"k9", b"v1");
+    must_get_equal_in(cluster.engine(3), 1, b"k9", b"v1");
 }
 
 // Test snapshot generating can be canceled by Raft log GC correctly. It does
@@ -433,15 +434,15 @@ fn test_cancel_snapshot_generating() {
 
     pd_client.must_add_peer(rid, new_peer(2, 2));
     cluster.must_put(b"k0", b"v0");
-    must_get_equal(&cluster.get_engine(2), b"k0", b"v0");
+    must_get_equal_in(cluster.engine(2), rid, b"k0", b"v0");
     pd_client.must_add_peer(rid, new_peer(3, 3));
     cluster.must_put(b"k1", b"v1");
-    must_get_equal(&cluster.get_engine(3), b"k1", b"v1");
+    must_get_equal_in(cluster.engine(3), rid, b"k1", b"v1");
 
     // Remove snapshot files generated for initial configuration changes.
     for entry in fs::read_dir(&snap_dir).unwrap() {
         let entry = entry.unwrap();
-        fs::remove_file(entry.path()).unwrap();
+        fs::remove_dir_all(entry.path()).unwrap();
     }
 
     fail::cfg("before_region_gen_snap", "pause").unwrap();
@@ -483,7 +484,7 @@ fn test_snapshot_gc_after_failed() {
     let r1 = cluster.run_conf_change();
     cluster.must_put(b"k1", b"v1");
     pd_client.must_add_peer(r1, new_peer(2, 2));
-    must_get_equal(&cluster.get_engine(2), b"k1", b"v1");
+    must_get_equal_in(cluster.engine(2), r1, b"k1", b"v1");
     pd_client.must_add_peer(r1, new_peer(3, 3));
     let snap_dir = cluster.get_snap_dir(3);
     fail::cfg("get_snapshot_for_gc", "return(0)").unwrap();
@@ -549,7 +550,7 @@ fn test_sending_fail_with_net_error() {
     let pd_client = Arc::clone(&cluster.pd_client);
     // Disable default max peer count check.
     pd_client.disable_default_operator();
-    cluster.run_conf_change();
+    let r1 = cluster.run_conf_change();
 
     cluster.must_put(b"k1", b"v1");
     let ready_notify = Arc::default();
@@ -570,8 +571,8 @@ fn test_sending_fail_with_net_error() {
     // We are ready to recv notify.
     ready_notify.store(true, Ordering::SeqCst);
     notify_rx.recv_timeout(Duration::from_secs(3)).unwrap();
-    let engine2 = cluster.get_engine(2);
-    must_get_none(&engine2, b"k1");
+    let engine2 = cluster.engine(2);
+    must_get_none_in(engine2, r1, b"k1");
 
     assert_eq!(cluster.get_snap_mgr(1).stats().sending_count, 0);
     assert_eq!(cluster.get_snap_mgr(2).stats().receiving_count, 0);

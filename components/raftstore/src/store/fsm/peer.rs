@@ -2724,7 +2724,12 @@ where
                 .engines
                 .tablets
                 .tablet_path(new_region.get_id(), RAFT_INIT_LOG_INDEX);
-            let tablet = self.ctx.engines.tablets.open_tablet_raw(&tablet_path, true);
+            let tablet = self
+                .ctx
+                .engines
+                .tablets
+                .open_tablet_raw(&tablet_path, true)
+                .unwrap();
             // Avoid potential compactions
             peer_storage::clear_extra_data(new_region, &tablet);
         }

@@ -351,6 +351,10 @@ impl<T: Simulator> Cluster<T> {
         Arc::clone(self.engines[&node_id].kv.as_inner())
     }
 
+    pub fn engine(&self, node_id: u64) -> &Engines<RocksEngine, RocksEngine> {
+        &self.engines[&node_id]
+    }
+
     pub fn get_raft_engine(&self, node_id: u64) -> Arc<DB> {
         Arc::clone(self.engines[&node_id].raft.as_inner())
     }
@@ -1091,8 +1095,12 @@ impl<T: Simulator> Cluster<T> {
 
     pub fn apply_state(&self, region_id: u64, store_id: u64) -> RaftApplyState {
         let key = keys::apply_state_key(region_id);
-        self.get_engine(store_id)
-            .c()
+        let tablet = self
+            .engine(store_id)
+            .tablets
+            .open_tablet_cache_any(region_id)
+            .unwrap();
+        tablet
             .get_msg_cf::<RaftApplyState>(engine_traits::CF_RAFT, &key)
             .unwrap()
             .unwrap()
@@ -1108,8 +1116,12 @@ impl<T: Simulator> Cluster<T> {
     }
 
     pub fn region_local_state(&self, region_id: u64, store_id: u64) -> RegionLocalState {
-        self.get_engine(store_id)
-            .c()
+        let tablet = self
+            .engine(store_id)
+            .tablets
+            .open_tablet_cache_any(region_id)
+            .unwrap();
+        tablet
             .get_msg_cf::<RegionLocalState>(
                 engine_traits::CF_RAFT,
                 &keys::region_state_key(region_id),

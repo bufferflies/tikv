@@ -106,8 +106,6 @@ impl KvEngine for RocksEngine {
                 }
             }
         }
-        flush_engine_properties(&self.db, instance, self.shared_block_cache);
-        flush_engine_iostall_properties(&self.db, instance);
         if all {
             flush_engine_properties(&self.db, instance, self.shared_block_cache);
             flush_engine_iostall_properties(&self.db, instance);

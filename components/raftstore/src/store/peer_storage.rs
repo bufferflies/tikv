@@ -1802,7 +1802,15 @@ where
             )));
         }
     }
-    let mut tablet = engines.tablets.open_tablet_raw(Path::new(&path), true);
+    let mut tablet = match engines.tablets.open_tablet_raw(Path::new(&path), true) {
+        Some(t) => t,
+        None => {
+            return Err(storage_error(format!(
+                "failed to open tablet at {}",
+                path.display()
+            )));
+        }
+    };
 
     let msg = tablet
         .get_msg_cf(CF_RAFT, &keys::apply_state_key(region_id))
@@ -1839,7 +1847,15 @@ where
     let reused = engines.tablets.exists_raw(&final_path);
     if reused {
         drop(tablet);
-        tablet = engines.tablets.open_tablet_raw(&final_path, true);
+        tablet = match engines.tablets.open_tablet_raw(&final_path, true) {
+            Some(t) => t,
+            None => {
+                return Err(storage_error(format!(
+                    "failed to open tablet at {}",
+                    final_path.display()
+                )));
+            }
+        };
     }
 
     mgr.register(key.clone(), SnapEntry::Generating);

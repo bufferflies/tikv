@@ -318,3 +318,34 @@ fn test_tombstone_block_list() {
         raft_client.send(message).unwrap_err()
     );
 }
+
+/// It's too late to notify the connection when queue is full, which can cause
+/// message drop and unexpected latency jitter. This case test raft client should
+/// notify the queue before it becomes full.
+#[test]
+fn test_notify_early() {
+    let msg_count = Arc::new(AtomicUsize::new(0));
+    let batch_msg_count = Arc::new(AtomicUsize::new(0));
+    let service = MockKvForRaft::new(Arc::clone(&msg_count), Arc::clone(&batch_msg_count), true);
+    let (mock_server, port) = create_mock_server(service, 60200, 60300).unwrap();
+
+    let mut raft_client = get_raft_client_by_port(port);
+    // Build connection.
+    raft_client.send(RaftMessage::default()).unwrap();
+    // Sleep sometime so future thread can sleep.
+    thread::sleep(Duration::from_millis(10));
+    // `send` should success if it's notified early.
+    let queue_capacity = raft_client.queue_capacity();
+    for _ in 0..queue_capacity * 3 {
+        raft_client.send(RaftMessage::default()).unwrap();
+    }
+    // Building connection increase msg count to 1, notification should increase it to
+    // 2 or larger.
+    check_msg_count(500, &msg_count, 2);
+
+    raft_client.flush();
+    check_msg_count(500, &msg_count, queue_capacity * 3 + 1);
+    drop(raft_client);
+    drop(mock_server);
+    assert_eq!(msg_count.load(Ordering::SeqCst), queue_capacity * 3 + 1);
+}
