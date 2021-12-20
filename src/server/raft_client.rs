@@ -742,9 +742,12 @@ struct ConnectionPool {
 struct CachedQueue {
     queue: Arc<Queue>,
     /// If a msg is enqueued, but the queue has not been notified for polling,
-    /// it will be marked to true. And all dirty queues are expected to be
-    /// notified during flushing.
-    dirty: bool,
+    /// it will be considered as pending. And all queues containing pending
+    /// messages are expected to be notified during flushing. `0` means there
+    /// is no pending messages, `1` means some messages are pending, but all of
+    /// them are notified, `n > 1` means there are n - 1 messages that have not
+    /// been notified.
+    pending: u16,
     /// Mark if the connection is full.
     full: bool,
 }
@@ -764,12 +767,13 @@ struct CachedQueue {
 pub struct RaftClient<S, R, E> {
     pool: Arc<Mutex<ConnectionPool>>,
     cache: LruCache<(u64, usize), CachedQueue>,
-    need_flush: Vec<(u64, usize)>,
-    full_stores: Vec<(u64, usize)>,
+    /// (store_id, conn_id, true/false: need_flush/full)
+    accessed_streams: Vec<(u64, usize, bool)>,
     future_pool: Arc<ThreadPool<TaskCell>>,
     builder: ConnectionBuilder<S, R>,
     engine: PhantomData<E>,
     last_hash: (u64, u64),
+    flush_cnt: u64,
 }
 
 impl<S, R, E> RaftClient<S, R, E>
@@ -787,13 +791,17 @@ where
         RaftClient {
             pool: Arc::default(),
             cache: LruCache::with_capacity_and_sample(0, 7),
-            need_flush: vec![],
-            full_stores: vec![],
+            accessed_streams: vec![],
             future_pool,
             builder,
             engine: PhantomData::<E>,
             last_hash: (0, 0),
+            flush_cnt: 0,
         }
+    }
+
+    pub fn queue_capacity(&self) -> usize {
+        self.builder.cfg.raft_client_queue_size
     }
 
     /// Loads connection from pool.
@@ -813,9 +821,7 @@ where
                 .connections
                 .entry((store_id, conn_id))
                 .or_insert_with(|| {
-                    let queue = Arc::new(Queue::with_capacity(
-                        self.builder.cfg.raft_client_queue_size,
-                    ));
+                    let queue = Arc::new(Queue::with_capacity(self.queue_capacity()));
                     let back_end = StreamBackEnd {
                         store_id,
                         queue: queue.clone(),
@@ -834,7 +840,7 @@ where
             (store_id, conn_id),
             CachedQueue {
                 queue: s,
-                dirty: false,
+                pending: 0,
                 full: false,
             },
         );
@@ -885,18 +891,28 @@ where
             if let Some(s) = self.cache.get_mut(&(store_id, conn_id)) {
                 match s.queue.push(msg) {
                     Ok(_) => {
-                        if !s.dirty {
-                            s.dirty = true;
-                            self.need_flush.push((store_id, conn_id));
+                        s.pending += 1;
+                        if s.pending == 1 {
+                            s.pending += 1;
+                            self.accessed_streams.push((store_id, conn_id, true));
+                        } else if s.pending as usize
+                            >= self.builder.cfg.raft_client_queue_size / 4 * 3
+                        {
+                            s.queue.notify();
+                            self.flush_cnt += 1;
+                            // Marking it as 1 to avoid mutate `need_flush` again.
+                            s.pending = 1;
                         }
                         return Ok(());
                     }
                     Err(DiscardReason::Full) => {
                         s.queue.notify();
-                        s.dirty = false;
+                        self.flush_cnt += 1;
+                        // Only set it to 1 when there has been pending messages.
+                        s.pending = (s.pending != 0) as u16;
                         if !s.full {
                             s.full = true;
-                            self.full_stores.push((store_id, conn_id));
+                            self.accessed_streams.push((store_id, conn_id, false));
                         }
                         return Err(DiscardReason::Full);
                     }
@@ -913,55 +929,45 @@ where
     }
 
     pub fn need_flush(&self) -> bool {
-        !self.need_flush.is_empty() || !self.full_stores.is_empty()
-    }
-
-    fn flush_full_metrics(&mut self) {
-        if self.full_stores.is_empty() {
-            return;
-        }
-
-        for id in &self.full_stores {
-            if let Some(s) = self.cache.get_mut(id) {
-                s.full = false;
-            }
-            REPORT_FAILURE_MSG_COUNTER
-                .with_label_values(&["full", &id.0.to_string()])
-                .inc();
-        }
-        self.full_stores.clear();
-        if self.full_stores.capacity() > 2048 {
-            self.full_stores.shrink_to(512);
-        }
+        !self.accessed_streams.is_empty()
     }
 
     /// Flushes all buffered messages.
     pub fn flush(&mut self) {
-        self.flush_full_metrics();
-        if self.need_flush.is_empty() {
+        if self.accessed_streams.is_empty() {
             return;
         }
-        let mut counter = 0;
-        for id in &self.need_flush {
-            if let Some(s) = self.cache.get_mut(id) {
-                if s.dirty {
-                    s.dirty = false;
-                    counter += 1;
-                    s.queue.notify();
+        for (store_id, conn_id, need_flush) in &self.accessed_streams {
+            let id = (*store_id, *conn_id);
+            if let Some(s) = self.cache.get_mut(&id) {
+                if *need_flush {
+                    if s.pending > 1 {
+                        s.queue.notify();
+                        self.flush_cnt += 1;
+                    }
+                    s.pending = 0;
+                    continue;
+                } else {
+                    s.full = false;
+                }
+            } else if *need_flush {
+                let l = self.pool.lock().unwrap();
+                if let Some(q) = l.connections.get(&id) {
+                    q.notify();
+                    self.flush_cnt += 1;
                 }
                 continue;
             }
-            let l = self.pool.lock().unwrap();
-            if let Some(q) = l.connections.get(id) {
-                counter += 1;
-                q.notify();
-            }
+            REPORT_FAILURE_MSG_COUNTER
+                .with_label_values(&["full", &store_id.to_string()])
+                .inc();
         }
-        self.need_flush.clear();
-        if self.need_flush.capacity() > 2048 {
-            self.need_flush.shrink_to(512);
+        RAFT_MESSAGE_FLUSH_COUNTER.inc_by(self.flush_cnt);
+        self.flush_cnt = 0;
+        self.accessed_streams.clear();
+        if self.accessed_streams.capacity() > 2048 {
+            self.accessed_streams.shrink_to(512);
         }
-        RAFT_MESSAGE_FLUSH_COUNTER.inc_by(counter);
     }
 }
 
@@ -974,12 +980,12 @@ where
         RaftClient {
             pool: self.pool.clone(),
             cache: LruCache::with_capacity_and_sample(0, 7),
-            need_flush: vec![],
-            full_stores: vec![],
+            accessed_streams: vec![],
             future_pool: self.future_pool.clone(),
             builder: self.builder.clone(),
             engine: PhantomData::<E>,
             last_hash: (0, 0),
+            flush_cnt: 0,
         }
     }
 }

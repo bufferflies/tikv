@@ -129,6 +129,7 @@ endpoints = [
 job = "tikv_1"
 
 [raftstore]
+id = 3
 prevote = false
 raftdb-path = "/var"
 capacity = 123
@@ -194,6 +195,8 @@ future-poll-size = 2
 hibernate-regions = false
 dev-assert = true
 perf-level = 1
+disable-tablet-wal = true
+skip-commit-index = true
 evict-cache-on-memory-ratio = 0.8
 cmd-batch = false
 cmd-batch-concurrent-ready-max-count = 123
@@ -225,6 +228,7 @@ max-background-flushes = 4
 max-manifest-file-size = "12MB"
 create-if-missing = false
 max-open-files = 12345
+db-write-buffer-size = 2
 enable-statistics = false
 stats-dump-period = "12m"
 compaction-readahead-size = "1KB"
@@ -236,12 +240,14 @@ rate-bytes-per-sec = "1KB"
 rate-limiter-refill-period = "10ms"
 rate-limiter-mode = 3
 rate-limiter-auto-tuned = false
+share-rate-limiter = true
 bytes-per-sync = "1MB"
 wal-bytes-per-sync = "32KB"
 max-sub-compactions = 12
 writable-file-max-buffer-size = "12MB"
 use-direct-io-for-flush-and-compaction = true
 enable-pipelined-write = false
+allow-concurrent-memtable-write = false
 enable-unordered-write = true
 enable-multi-batch-write = false
 
@@ -277,6 +283,7 @@ bottommost-level-compression = "disable"
 bottommost-zstd-compression-dict-size = 1024
 bottommost-zstd-compression-sample-size = 1024
 write-buffer-size = "1MB"
+memtable-prefix-bloom-size-ratio = 0.2
 max-write-buffer-number = 12
 min-write-buffer-number-to-merge = 12
 max-bytes-for-level-base = "12KB"
@@ -339,6 +346,7 @@ compression-per-level = [
     "lz4",
 ]
 write-buffer-size = "1MB"
+memtable-prefix-bloom-size-ratio = 0.2
 max-write-buffer-number = 12
 min-write-buffer-number-to-merge = 12
 max-bytes-for-level-base = "12KB"
@@ -385,6 +393,7 @@ compression-per-level = [
     "lz4",
 ]
 write-buffer-size = "1MB"
+memtable-prefix-bloom-size-ratio = 0.2
 max-write-buffer-number = 12
 min-write-buffer-number-to-merge = 12
 max-bytes-for-level-base = "12KB"
@@ -431,6 +440,7 @@ compression-per-level = [
     "lz4",
 ]
 write-buffer-size = "1MB"
+memtable-prefix-bloom-size-ratio = 0.2
 max-write-buffer-number = 12
 min-write-buffer-number-to-merge = 12
 max-bytes-for-level-base = "12KB"
@@ -510,6 +520,7 @@ compression-per-level = [
     "lz4",
 ]
 write-buffer-size = "1MB"
+memtable-prefix-bloom-size-ratio = 0.2
 max-write-buffer-number = 12
 min-write-buffer-number-to-merge = 12
 max-bytes-for-level-base = "12KB"

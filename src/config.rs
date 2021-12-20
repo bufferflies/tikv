@@ -21,7 +21,7 @@ use engine_rocks::properties::MvccPropertiesCollectorFactory;
 use engine_rocks::raw::{
     BlockBasedOptions, Cache, ColumnFamilyOptions, CompactionFilterFactory, CompactionPriority,
     DBCompactionStyle, DBCompressionType, DBOptions, DBRateLimiterMode, DBRecoveryMode,
-    LRUCacheOptions, TitanDBOptions,
+    FifoCompactionOptions, LRUCacheOptions, RateLimiter, TitanDBOptions, WriteBufferManager,
 };
 use engine_rocks::raw_util::CFOptions;
 use engine_rocks::util::{
@@ -29,8 +29,8 @@ use engine_rocks::util::{
 };
 use engine_rocks::{
     RaftDBLogger, RangePropertiesCollectorFactory, RocksEngine, RocksEventListener,
-    RocksSstPartitionerFactory, RocksdbLogger, TtlPropertiesCollectorFactory,
-    DEFAULT_PROP_KEYS_INDEX_DISTANCE, DEFAULT_PROP_SIZE_INDEX_DISTANCE,
+    RocksSstPartitionerFactory, TtlPropertiesCollectorFactory, DEFAULT_PROP_KEYS_INDEX_DISTANCE,
+    DEFAULT_PROP_SIZE_INDEX_DISTANCE,
 };
 use engine_traits::{CFOptionsExt, ColumnFamilyOptions as ColumnFamilyOptionsTrait, DBOptionsExt};
 use engine_traits::{CF_DEFAULT, CF_LOCK, CF_RAFT, CF_WRITE};
@@ -63,6 +63,7 @@ use crate::server::CONFIG_ROCKSDB_GAUGE;
 use crate::storage::config::{Config as StorageConfig, DEFAULT_DATA_DIR};
 
 pub const DEFAULT_ROCKSDB_SUB_DIR: &str = "db";
+pub const DEFAULT_TABLETS_SUB_DIR: &str = "tablets";
 
 /// By default, block cache size will be set to 45% of system memory.
 pub const BLOCK_CACHE_RATE: f64 = 0.45;
@@ -255,6 +256,7 @@ macro_rules! cf_config {
             #[online_config(skip)]
             pub compression_per_level: [DBCompressionType; 7],
             pub write_buffer_size: ReadableSize,
+            pub memtable_prefix_bloom_size_ratio: f64,
             pub max_write_buffer_number: i32,
             #[online_config(skip)]
             pub min_write_buffer_number_to_merge: i32,
@@ -277,6 +279,8 @@ macro_rules! cf_config {
             pub compaction_style: DBCompactionStyle,
             pub disable_auto_compactions: bool,
             pub disable_write_stall: bool,
+            pub fifo_compaction_max_table_files_size: ReadableSize,
+            pub fifo_compaction_allow_compaction: bool,
             pub soft_pending_compaction_bytes_limit: ReadableSize,
             pub hard_pending_compaction_bytes_limit: ReadableSize,
             #[online_config(skip)]
@@ -513,6 +517,10 @@ macro_rules! build_cf_opt {
                 warn!("compaction guard is disabled due to region info provider not available")
             }
         }
+        let mut fifo_opt = FifoCompactionOptions::new();
+        fifo_opt.set_max_table_files_size($opt.fifo_compaction_max_table_files_size.0);
+        fifo_opt.set_allow_compaction($opt.fifo_compaction_allow_compaction);
+        cf_opts.set_fifo_compaction_options(fifo_opt);
         cf_opts
     }};
 }
@@ -545,6 +553,7 @@ impl Default for DefaultCfConfig {
                 DBCompressionType::Zstd,
             ],
             write_buffer_size: ReadableSize::mb(128),
+            memtable_prefix_bloom_size_ratio: 0.1,
             max_write_buffer_number: 5,
             min_write_buffer_number_to_merge: 1,
             max_bytes_for_level_base: ReadableSize::mb(512),
@@ -573,6 +582,8 @@ impl Default for DefaultCfConfig {
             bottommost_level_compression: DBCompressionType::Zstd,
             bottommost_zstd_compression_dict_size: 0,
             bottommost_zstd_compression_sample_size: 0,
+            fifo_compaction_max_table_files_size: ReadableSize::gb(1),
+            fifo_compaction_allow_compaction: false,
         }
     }
 }
@@ -641,6 +652,7 @@ impl Default for WriteCfConfig {
                 DBCompressionType::Zstd,
             ],
             write_buffer_size: ReadableSize::mb(128),
+            memtable_prefix_bloom_size_ratio: 0.1,
             max_write_buffer_number: 5,
             min_write_buffer_number_to_merge: 1,
             max_bytes_for_level_base: ReadableSize::mb(512),
@@ -669,6 +681,8 @@ impl Default for WriteCfConfig {
             bottommost_level_compression: DBCompressionType::Zstd,
             bottommost_zstd_compression_dict_size: 0,
             bottommost_zstd_compression_sample_size: 0,
+            fifo_compaction_max_table_files_size: ReadableSize::gb(1),
+            fifo_compaction_allow_compaction: false,
         }
     }
 }
@@ -686,7 +700,7 @@ impl WriteCfConfig {
             .set_prefix_extractor("FixedSuffixSliceTransform", e)
             .unwrap();
         // Create prefix bloom filter for memtable.
-        cf_opts.set_memtable_prefix_bloom_size_ratio(0.1);
+        cf_opts.set_memtable_prefix_bloom_size_ratio(self.memtable_prefix_bloom_size_ratio);
         // Collects user defined properties.
         let f = Box::new(MvccPropertiesCollectorFactory::default());
         cf_opts.add_table_properties_collector_factory("tikv.mvcc-properties-collector", f);
@@ -732,6 +746,7 @@ impl Default for LockCfConfig {
             read_amp_bytes_per_bit: 0,
             compression_per_level: [DBCompressionType::No; 7],
             write_buffer_size: ReadableSize::mb(32),
+            memtable_prefix_bloom_size_ratio: 0.1,
             max_write_buffer_number: 5,
             min_write_buffer_number_to_merge: 1,
             max_bytes_for_level_base: ReadableSize::mb(128),
@@ -760,6 +775,8 @@ impl Default for LockCfConfig {
             bottommost_level_compression: DBCompressionType::Disable,
             bottommost_zstd_compression_dict_size: 0,
             bottommost_zstd_compression_sample_size: 0,
+            fifo_compaction_max_table_files_size: ReadableSize::gb(1),
+            fifo_compaction_allow_compaction: false,
         }
     }
 }
@@ -777,7 +794,7 @@ impl LockCfConfig {
             prop_keys_index_distance: self.prop_keys_index_distance,
         });
         cf_opts.add_table_properties_collector_factory("tikv.range-properties-collector", f);
-        cf_opts.set_memtable_prefix_bloom_size_ratio(0.1);
+        cf_opts.set_memtable_prefix_bloom_size_ratio(self.memtable_prefix_bloom_size_ratio);
         cf_opts.set_titandb_options(&self.titan.build_opts());
         cf_opts
     }
@@ -806,6 +823,7 @@ impl Default for RaftCfConfig {
             read_amp_bytes_per_bit: 0,
             compression_per_level: [DBCompressionType::No; 7],
             write_buffer_size: ReadableSize::mb(128),
+            memtable_prefix_bloom_size_ratio: 0.1,
             max_write_buffer_number: 5,
             min_write_buffer_number_to_merge: 1,
             max_bytes_for_level_base: ReadableSize::mb(128),
@@ -834,6 +852,8 @@ impl Default for RaftCfConfig {
             bottommost_level_compression: DBCompressionType::Disable,
             bottommost_zstd_compression_dict_size: 0,
             bottommost_zstd_compression_sample_size: 0,
+            fifo_compaction_max_table_files_size: ReadableSize::mb(50),
+            fifo_compaction_allow_compaction: false,
         }
     }
 }
@@ -842,11 +862,13 @@ impl RaftCfConfig {
     pub fn build_opt(&self, cache: &Option<Cache>) -> ColumnFamilyOptions {
         let no_region_info_accessor: Option<&RegionInfoAccessor> = None;
         let mut cf_opts = build_cf_opt!(self, CF_RAFT, cache, no_region_info_accessor);
-        let f = Box::new(NoopSliceTransform);
-        cf_opts
-            .set_prefix_extractor("NoopSliceTransform", f)
-            .unwrap();
-        cf_opts.set_memtable_prefix_bloom_size_ratio(0.1);
+        if self.memtable_prefix_bloom_size_ratio > 0f64 {
+            let f = Box::new(NoopSliceTransform);
+            cf_opts
+                .set_prefix_extractor("NoopSliceTransform", f)
+                .unwrap();
+            cf_opts.set_memtable_prefix_bloom_size_ratio(self.memtable_prefix_bloom_size_ratio);
+        }
         cf_opts.set_titandb_options(&self.titan.build_opts());
         cf_opts
     }
@@ -935,6 +957,7 @@ pub struct DbConfig {
     #[serde(with = "rocks_config::rate_limiter_mode_serde")]
     #[online_config(skip)]
     pub rate_limiter_mode: DBRateLimiterMode,
+    pub share_rate_limiter: bool,
     // deprecated. use rate_limiter_auto_tuned.
     #[online_config(skip)]
     #[doc(hidden)]
@@ -945,11 +968,14 @@ pub struct DbConfig {
     pub wal_bytes_per_sync: ReadableSize,
     #[online_config(skip)]
     pub max_sub_compactions: u32,
+    pub db_write_buffer_size: ReadableSize,
     pub writable_file_max_buffer_size: ReadableSize,
     #[online_config(skip)]
     pub use_direct_io_for_flush_and_compaction: bool,
     #[online_config(skip)]
     pub enable_pipelined_write: bool,
+    #[online_config(skip)]
+    pub allow_concurrent_memtable_write: bool,
     #[online_config(skip)]
     pub enable_multi_batch_write: bool,
     #[online_config(skip)]
@@ -997,12 +1023,15 @@ impl Default for DbConfig {
             rate_limiter_mode: DBRateLimiterMode::WriteOnly,
             auto_tuned: None, // deprecated
             rate_limiter_auto_tuned: true,
+            share_rate_limiter: false,
+            db_write_buffer_size: ReadableSize::gb(0),
             bytes_per_sync: ReadableSize::mb(1),
             wal_bytes_per_sync: ReadableSize::kb(512),
             max_sub_compactions: bg_job_limits.max_sub_compactions as u32,
             writable_file_max_buffer_size: ReadableSize::mb(1),
             use_direct_io_for_flush_and_compaction: false,
             enable_pipelined_write: true,
+            allow_concurrent_memtable_write: true,
             enable_multi_batch_write: true,
             enable_unordered_write: false,
             defaultcf: DefaultCfConfig::default(),
@@ -1015,7 +1044,56 @@ impl Default for DbConfig {
 }
 
 impl DbConfig {
+    pub fn build_rate_limiter(&self) -> Option<Arc<RateLimiter>> {
+        if self.rate_bytes_per_sec.0 > 0 {
+            if self.rate_limiter_auto_tuned {
+                Some(Arc::new(RateLimiter::new_writeampbased_with_auto_tuned(
+                    self.rate_bytes_per_sec.0 as i64,
+                    (self.rate_limiter_refill_period.as_millis() * 1000) as i64,
+                    10,
+                    self.rate_limiter_mode,
+                    self.rate_limiter_auto_tuned,
+                )))
+            } else {
+                Some(Arc::new(RateLimiter::new_with_auto_tuned(
+                    self.rate_bytes_per_sec.0 as i64,
+                    (self.rate_limiter_refill_period.as_millis() * 1000) as i64,
+                    10,
+                    self.rate_limiter_mode,
+                    self.rate_limiter_auto_tuned,
+                )))
+            }
+        } else {
+            None
+        }
+    }
+
+    pub fn build_write_buffer_manager(&self) -> Option<WriteBufferManager> {
+        if self.db_write_buffer_size.0 == 0 {
+            return None;
+        }
+        if self.db_write_buffer_size.0 >= ReadableSize::mb(1).0 {
+            return Some(WriteBufferManager::new(
+                self.db_write_buffer_size.0 as usize,
+                None,
+            ));
+        }
+        let mut calculated = self.lockcf.write_buffer_size.0
+            * self.lockcf.max_write_buffer_number as u64
+            + self.raftcf.write_buffer_size.0 * self.raftcf.max_write_buffer_number as u64
+            + self.defaultcf.write_buffer_size.0 * self.defaultcf.max_write_buffer_number as u64
+            + self.writecf.write_buffer_size.0 * self.writecf.max_write_buffer_number as u64;
+        if calculated >= ReadableSize::gb(5).0 {
+            calculated = ReadableSize::gb(5).0;
+        }
+        Some(WriteBufferManager::new(calculated as usize, None))
+    }
+
     pub fn build_opt(&self) -> DBOptions {
+        self.build_opt_for_target(true)
+    }
+
+    pub fn build_opt_for_target(&self, root: bool) -> DBOptions {
         let mut opts = DBOptions::new();
         opts.set_wal_recovery_mode(self.wal_recovery_mode);
         if !self.wal_dir.is_empty() {
@@ -1037,23 +1115,6 @@ impl DbConfig {
         opts.set_max_log_file_size(self.info_log_max_size.0);
         opts.set_log_file_time_to_roll(self.info_log_roll_time.as_secs());
         opts.set_keep_log_file_num(self.info_log_keep_log_file_num);
-        if self.rate_bytes_per_sec.0 > 0 {
-            if self.rate_limiter_auto_tuned {
-                opts.set_writeampbasedratelimiter_with_auto_tuned(
-                    self.rate_bytes_per_sec.0 as i64,
-                    (self.rate_limiter_refill_period.as_millis() * 1000) as i64,
-                    self.rate_limiter_mode,
-                    self.rate_limiter_auto_tuned,
-                );
-            } else {
-                opts.set_ratelimiter_with_auto_tuned(
-                    self.rate_bytes_per_sec.0 as i64,
-                    (self.rate_limiter_refill_period.as_millis() * 1000) as i64,
-                    self.rate_limiter_mode,
-                    self.rate_limiter_auto_tuned,
-                );
-            }
-        }
 
         opts.set_bytes_per_sync(self.bytes_per_sync.0 as u64);
         opts.set_wal_bytes_per_sync(self.wal_bytes_per_sync.0 as u64);
@@ -1067,9 +1128,11 @@ impl DbConfig {
                 && !self.enable_unordered_write,
         );
         opts.enable_multi_batch_write(self.enable_multi_batch_write);
+        if !self.allow_concurrent_memtable_write && !root {
+            opts.allow_concurrent_memtable_write(false);
+        }
         opts.enable_unordered_write(self.enable_unordered_write);
         opts.add_event_listener(RocksEventListener::new("kv"));
-        opts.set_info_log(RocksdbLogger::default());
         opts.set_info_log_level(self.info_log_level.into());
         if self.titan.enabled {
             opts.set_titandb_options(&self.titan.build_opts());
@@ -1152,6 +1215,7 @@ impl Default for RaftDefaultCfConfig {
                 DBCompressionType::Zstd,
             ],
             write_buffer_size: ReadableSize::mb(128),
+            memtable_prefix_bloom_size_ratio: 0.1,
             max_write_buffer_number: 5,
             min_write_buffer_number_to_merge: 1,
             max_bytes_for_level_base: ReadableSize::mb(512),
@@ -1180,6 +1244,8 @@ impl Default for RaftDefaultCfConfig {
             bottommost_level_compression: DBCompressionType::Disable,
             bottommost_zstd_compression_dict_size: 0,
             bottommost_zstd_compression_sample_size: 0,
+            fifo_compaction_max_table_files_size: ReadableSize::gb(1),
+            fifo_compaction_allow_compaction: false,
         }
     }
 }
