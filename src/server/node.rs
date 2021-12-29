@@ -20,12 +20,12 @@ use collections::HashMap;
 use concurrency_manager::ConcurrencyManager;
 use engine_rocks::raw::{Cache, Env, RateLimiter, WriteBufferManager};
 use engine_rocks::{
-    CompactionListener, RocksCompactedEvent, RocksCompactionJobInfo, RocksEngine, RocksdbLogger,
-    Statistics,
+    CompactionListener, RocksCompactedEvent, RocksCompactionJobInfo, RocksEngine,
+    RocksWriteBufferManager, RocksdbLogger, Statistics,
 };
 use engine_traits::{
-    CompactionJobInfo, Engines, Iterable, KvEngine, RaftEngine, TabletFactory, CF_DEFAULT,
-    CF_WRITE, DATA_CFS, DATA_KEY_PREFIX_LEN,
+    CompactionJobInfo, Engines, GlobalWriteBufferStats, Iterable, KvEngine, RaftEngine,
+    TabletFactory, CF_DEFAULT, CF_WRITE, DATA_CFS, DATA_KEY_PREFIX_LEN,
 };
 use kvproto::kvrpcpb::ApiVersion;
 use kvproto::metapb;
@@ -57,7 +57,7 @@ struct FactoryInner {
     enable_ttl: bool,
     statistics: Option<Statistics>,
     rate_limiter: Option<Arc<RateLimiter>>,
-    write_buffer_manager: Option<WriteBufferManager>,
+    write_buffer_manager: Arc<WriteBufferManager>,
     registry: Mutex<HashMap<(u64, u64), RocksEngine>>,
     flow_listener: Option<engine_rocks::FlowListener>,
 }
@@ -89,7 +89,7 @@ impl<ER: RaftEngine> KvEngineFactory<ER> {
         } else {
             None
         };
-        let write_buffer_manager = config.rocksdb.build_write_buffer_manager();
+        let write_buffer_manager = Arc::new(config.rocksdb.build_write_buffer_manager());
         let tablets_dir = store_path.join("tablets");
         if !tablets_dir.exists() {
             std::fs::create_dir_all(&tablets_dir).unwrap();
@@ -177,9 +177,7 @@ impl<ER: RaftEngine> KvEngineFactory<ER> {
             }
         }
         if !root {
-            if let Some(mgr) = &self.inner.write_buffer_manager {
-                kv_db_opts.set_write_buffer_manager(mgr);
-            }
+            kv_db_opts.set_write_buffer_manager(&self.inner.write_buffer_manager);
             if self.inner.disable_tablet_wal {
                 kv_db_opts.set_atomic_flush(true);
             }
@@ -386,6 +384,13 @@ impl<ER: RaftEngine> TabletFactory<RocksEngine> for KvEngineFactory<ER> {
         debug!("open tablet"; "key" => ?(id, suffix));
         reg.insert((id, suffix), db.clone());
         db
+    }
+
+    #[inline]
+    fn write_buffer_states(&self) -> Box<dyn GlobalWriteBufferStats> {
+        Box::new(RocksWriteBufferManager::new(
+            self.inner.write_buffer_manager.clone(),
+        ))
     }
 }
 

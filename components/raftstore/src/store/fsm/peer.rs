@@ -930,9 +930,7 @@ where
     }
 
     fn on_flush_tablet_tick(&mut self) {
-        if Some(false) == self.fsm.peer.flush_tablet(self.ctx) {
-            self.register_flush_tablet_tick();
-        }
+        self.fsm.peer.flush_tablet(self.ctx);
     }
 
     fn on_tick(&mut self, tick: PeerTicks) {

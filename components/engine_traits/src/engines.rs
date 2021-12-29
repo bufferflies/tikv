@@ -8,6 +8,11 @@ use crate::write_batch::WriteBatch;
 use std::fmt::{self, Debug};
 use std::path::{Path, PathBuf};
 
+pub trait GlobalWriteBufferStats: Send {
+    fn memory_usage(&self) -> usize;
+    fn mutable_memtable_memory_usage(&self) -> usize;
+}
+
 pub trait TabletFactory<EK> {
     fn loop_tablet_cache(&self, _f: Box<dyn FnMut(u64, u64, &EK) + '_>) {}
     fn destroy_tablet(&self, _id: u64, _suffix: u64) -> crate::Result<()> {
@@ -40,6 +45,9 @@ pub trait TabletFactory<EK> {
     fn mark_tombstone(&self, _region_id: u64, _suffix: u64) {}
     fn is_tombstoned(&self, _region_id: u64, _suffix: u64) -> bool {
         false
+    }
+    fn write_buffer_states(&self) -> Box<dyn GlobalWriteBufferStats> {
+        panic!()
     }
 }
 

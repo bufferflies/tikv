@@ -14,6 +14,7 @@ mod region;
 mod split_check;
 mod split_config;
 mod split_controller;
+mod write_buffer_manager;
 
 pub use self::check_leader::{Runner as CheckLeaderRunner, Task as CheckLeaderTask};
 pub use self::cleanup::{Runner as CleanupRunner, Task as CleanupTask};
@@ -30,3 +31,6 @@ pub use self::region::{Runner as RegionRunner, Task as RegionTask};
 pub use self::split_check::{KeyEntry, Runner as SplitCheckRunner, Task as SplitCheckTask};
 pub use self::split_config::{SplitConfig, SplitConfigManager};
 pub use self::split_controller::{AutoSplitController, ReadStats, WriteStats};
+pub use self::write_buffer_manager::{
+    Config as WriteBufferConfig, Msg as WriteBufferRecord, Runner as WriteBufferRunner,
+};

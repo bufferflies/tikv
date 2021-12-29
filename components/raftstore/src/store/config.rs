@@ -5,6 +5,7 @@ use std::time::Duration;
 use std::u64;
 use time::Duration as TimeDuration;
 
+use crate::store::worker::WriteBufferConfig;
 use crate::{coprocessor, Result};
 use batch_system::Config as BatchSystemConfig;
 use engine_traits::config as engine_config;
@@ -192,9 +193,8 @@ pub struct Config {
     pub disable_tablet_wal: bool,
     #[online_config(skip)]
     pub skip_commit_index: bool,
-    pub flush_threshold: ReadableSize,
+
     pub flush_tablet_interval: ReadableDuration,
-    pub flush_min_interval: ReadableDuration,
 
     #[serde(with = "engine_config::perf_level_serde")]
     #[online_config(skip)]
@@ -253,6 +253,9 @@ pub struct Config {
 
     // Interval to inspect the latency of raftstore for slow store detection.
     pub inspect_interval: ReadableDuration,
+
+    #[online_config(skip)]
+    pub write_buffer_monitor: WriteBufferConfig,
 }
 
 impl Default for Config {
@@ -332,9 +335,8 @@ impl Default for Config {
             raft_msg_flush_interval: ReadableDuration::micros(250),
             disable_tablet_wal: false,
             skip_commit_index: false,
-            flush_threshold: ReadableSize::mb(20),
+            write_buffer_monitor: WriteBufferConfig::default(),
             flush_tablet_interval: ReadableDuration::secs(30),
-            flush_min_interval: ReadableDuration::secs(5),
 
             // They are preserved for compatibility check.
             region_max_size: ReadableSize(0),

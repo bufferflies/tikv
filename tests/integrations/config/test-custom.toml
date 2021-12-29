@@ -208,6 +208,13 @@ io-reschedule-hotpot-duration = "4321s"
 inspect-interval = "444ms"
 raft-msg-flush-interval = "2333us"
 
+[raftstore.write-buffer-monitor]
+total-limit = "4GiB"
+soft-limit = "1GiB"
+flush-threshold = "12MiB"
+evict-life-time = "10m"
+max-flush-batch = 4
+
 [coprocessor]
 split-region-on-table = false
 batch-split-limit = 1

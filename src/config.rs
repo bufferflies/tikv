@@ -1068,25 +1068,24 @@ impl DbConfig {
         }
     }
 
-    pub fn build_write_buffer_manager(&self) -> Option<WriteBufferManager> {
-        if self.db_write_buffer_size.0 == 0 {
-            return None;
-        }
-        if self.db_write_buffer_size.0 >= ReadableSize::mb(1).0 {
-            return Some(WriteBufferManager::new(
-                self.db_write_buffer_size.0 as usize,
-                None,
-            ));
-        }
-        let mut calculated = self.lockcf.write_buffer_size.0
-            * self.lockcf.max_write_buffer_number as u64
-            + self.raftcf.write_buffer_size.0 * self.raftcf.max_write_buffer_number as u64
-            + self.defaultcf.write_buffer_size.0 * self.defaultcf.max_write_buffer_number as u64
-            + self.writecf.write_buffer_size.0 * self.writecf.max_write_buffer_number as u64;
-        if calculated >= ReadableSize::gb(5).0 {
-            calculated = ReadableSize::gb(5).0;
-        }
-        Some(WriteBufferManager::new(calculated as usize, None))
+    pub fn build_write_buffer_manager(&self) -> WriteBufferManager {
+        let buffer_limit = if self.db_write_buffer_size.0 == 0 {
+            usize::MAX
+        } else if self.db_write_buffer_size.0 >= ReadableSize::mb(1).0 {
+            self.db_write_buffer_size.0 as usize
+        } else {
+            let mut calculated = self.lockcf.write_buffer_size.0
+                * self.lockcf.max_write_buffer_number as u64
+                + self.raftcf.write_buffer_size.0 * self.raftcf.max_write_buffer_number as u64
+                + self.defaultcf.write_buffer_size.0
+                    * self.defaultcf.max_write_buffer_number as u64
+                + self.writecf.write_buffer_size.0 * self.writecf.max_write_buffer_number as u64;
+            if calculated >= ReadableSize::gb(5).0 {
+                calculated = ReadableSize::gb(5).0;
+            }
+            calculated as usize
+        };
+        WriteBufferManager::new(buffer_limit, None)
     }
 
     pub fn build_opt(&self) -> DBOptions {

@@ -53,7 +53,9 @@ use crate::store::hibernate_state::GroupState;
 use crate::store::memory::{needs_evict_entry_cache, MEMTRACE_RAFT_ENTRIES};
 use crate::store::msg::RaftCommand;
 use crate::store::util::{admin_cmd_epoch_lookup, RegionReadProgress};
-use crate::store::worker::{HeartbeatTask, ReadDelegate, ReadExecutor, ReadProgress, RegionTask};
+use crate::store::worker::{
+    HeartbeatTask, ReadDelegate, ReadExecutor, ReadProgress, RegionTask, WriteBufferRecord,
+};
 use crate::store::{
     Callback, Config, GlobalReplicationState, PdTask, ReadIndexContext, ReadResponse,
 };
@@ -64,7 +66,7 @@ use tikv_alloc::trace::TraceEvent;
 use tikv_util::codec::number::decode_u64;
 use tikv_util::sys::disk::DiskUsage;
 use tikv_util::time::{duration_to_sec, monotonic_raw_now};
-use tikv_util::time::{Instant as TiInstant, InstantExt, ThreadReadId, UnixSecs};
+use tikv_util::time::{Instant as TiInstant, InstantExt, ThreadReadId};
 use tikv_util::worker::Scheduler;
 use tikv_util::Either;
 use tikv_util::{box_err, debug, error, info, warn};
@@ -1538,44 +1540,25 @@ where
         false
     }
 
-    pub fn flush_tablet<T>(&mut self, ctx: &mut PollContext<EK, ER, T>) -> Option<bool> {
+    pub fn flush_tablet<T>(&mut self, ctx: &mut PollContext<EK, ER, T>) {
         let tablet = self.get_store().tablet();
-        let usage = tablet.map_or(0, |t| t.get_engine_memory_usage());
+        if let Some(tablet) = tablet {
+            let _ = ctx
+                .write_buffer_monitor
+                .schedule(WriteBufferRecord::RecordSize {
+                    region_id: self.region_id,
+                    size: tablet.get_engine_memory_usage() as usize,
+                });
+        }
+
         if self.handled_proposals > 0 {
-            if self.handled_proposals < 1024 {
-                let after_usage = if usage >= ctx.cfg.flush_threshold.0 {
-                    let secs = UnixSecs::now().into_inner();
-                    let res = ctx.last_flush_time.fetch_update(
-                        Ordering::Relaxed,
-                        Ordering::Relaxed,
-                        |u| {
-                            if u + ctx.cfg.flush_min_interval.as_secs() < secs {
-                                Some(secs)
-                            } else {
-                                None
-                            }
-                        },
-                    );
-                    if res.is_err() {
-                        None
-                    } else {
-                        tablet.map(|t| t.flush(false));
-                        tablet.map(|t| t.get_engine_memory_usage())
-                    }
-                } else {
-                    None
-                };
-                info!("flushed"; "peer_id" => self.peer.get_id(), "region_id" => self.region_id, "memory" => usage, "after flush" => ?after_usage);
-                self.handled_proposals = 0;
-                after_usage.map(|_| true)
-            } else {
-                info!("handled proposals"; "count" => self.handled_proposals, "peer_id" => self.peer.get_id(), "region_id" => self.region_id, "memory" => usage);
-                self.handled_proposals = 1;
-                Some(false)
-            }
-        } else {
-            info!("pending memory usage"; "peer_id" => self.peer.get_id(), "region_id" => self.region_id, "memory" => usage);
-            None
+            let _ = ctx
+                .write_buffer_monitor
+                .schedule(WriteBufferRecord::RecordAccess {
+                    region_id: self.region_id,
+                    time: Instant::now(),
+                });
+            self.handled_proposals = 0;
         }
     }
 

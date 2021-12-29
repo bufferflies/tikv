@@ -20,6 +20,7 @@ use kvproto::encryptionpb::EncryptionMethod;
 use pd_client::Config as PdConfig;
 use raftstore::coprocessor::{Config as CopConfig, ConsistencyCheckMethod};
 use raftstore::store::Config as RaftstoreConfig;
+use raftstore::store::WriteBufferConfig;
 use security::SecurityConfig;
 use tikv::config::*;
 use tikv::import::Config as ImportConfig;
@@ -218,9 +219,14 @@ fn test_serde_custom_tikv_config() {
         dev_assert: true,
         apply_yield_duration: ReadableDuration::millis(333),
         perf_level: PerfLevel::Disable,
-        flush_threshold: ReadableSize::mb(1),
+        write_buffer_monitor: WriteBufferConfig {
+            total_limit: ReadableSize::gb(4),
+            soft_limit: ReadableSize::gb(1),
+            flush_threshold: ReadableSize::mb(12),
+            evict_life_time: ReadableDuration::minutes(10),
+            max_flush_batch: 4,
+        },
         flush_tablet_interval: ReadableDuration::secs(1),
-        flush_min_interval: ReadableDuration::secs(4),
         evict_cache_on_memory_ratio: 0.8,
         cmd_batch: false,
         cmd_batch_concurrent_ready_max_count: 123,

@@ -6,9 +6,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use engine_traits::{
-    Error, IterOptions, Iterable, KvEngine, Peekable, ReadOptions, Result, SyncMutable,
+    Error, GlobalWriteBufferStats, IterOptions, Iterable, KvEngine, Peekable, ReadOptions, Result,
+    SyncMutable,
 };
-use rocksdb::{DBIterator, Writable, DB};
+use rocksdb::{write_buffer_manager::WriteBufferManager, DBIterator, Writable, DB};
 
 use crate::db_vector::RocksDBVector;
 use crate::options::RocksReadOptions;
@@ -22,6 +23,26 @@ use crate::rocks_metrics_defs::{
 };
 use crate::util::get_cf_handle;
 use crate::{RocksEngineIterator, RocksSnapshot};
+
+pub struct RocksWriteBufferManager {
+    mgr: Arc<WriteBufferManager>,
+}
+
+impl RocksWriteBufferManager {
+    pub fn new(mgr: Arc<WriteBufferManager>) -> RocksWriteBufferManager {
+        RocksWriteBufferManager { mgr }
+    }
+}
+
+impl GlobalWriteBufferStats for RocksWriteBufferManager {
+    fn memory_usage(&self) -> usize {
+        self.mgr.memory_usage()
+    }
+
+    fn mutable_memtable_memory_usage(&self) -> usize {
+        self.mgr.mutable_memtable_memory_usage()
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct RocksEngine {
