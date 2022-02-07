@@ -2429,7 +2429,7 @@ dependencies = [
 [[package]]
 name = "librocksdb_sys"
 version = "0.1.0"
-source = "git+https://github.com/busyjay/rust-rocksdb?branch=test-cloud-5.3#9949b2d245679367295aba582d360c27b03df1ac"
+source = "git+https://github.com/busyjay/rust-rocksdb?branch=test-cloud-5.3#631bb62e9b9c565b5b9259ce483d0158b3477cdd"
 dependencies = [
  "bindgen",
  "bzip2-sys",
@@ -2448,7 +2448,7 @@ dependencies = [
 [[package]]
 name = "libtitan_sys"
 version = "0.0.1"
-source = "git+https://github.com/busyjay/rust-rocksdb?branch=test-cloud-5.3#9949b2d245679367295aba582d360c27b03df1ac"
+source = "git+https://github.com/busyjay/rust-rocksdb?branch=test-cloud-5.3#631bb62e9b9c565b5b9259ce483d0158b3477cdd"
 dependencies = [
  "bzip2-sys",
  "cc",
@@ -4205,7 +4205,7 @@ dependencies = [
 [[package]]
 name = "rocksdb"
 version = "0.3.0"
-source = "git+https://github.com/busyjay/rust-rocksdb?branch=test-cloud-5.3#9949b2d245679367295aba582d360c27b03df1ac"
+source = "git+https://github.com/busyjay/rust-rocksdb?branch=test-cloud-5.3#631bb62e9b9c565b5b9259ce483d0158b3477cdd"
 dependencies = [
  "libc 0.2.106",
  "librocksdb_sys",

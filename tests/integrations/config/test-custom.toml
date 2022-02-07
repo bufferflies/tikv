@@ -214,6 +214,7 @@ soft-limit = "1GiB"
 flush-threshold = "12MiB"
 evict-life-time = "10m"
 max-flush-batch = 4
+check-interval = "1m"
 
 [coprocessor]
 split-region-on-table = false

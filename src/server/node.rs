@@ -20,11 +20,11 @@ use collections::HashMap;
 use concurrency_manager::ConcurrencyManager;
 use engine_rocks::raw::{Cache, Env, RateLimiter, WriteBufferManager};
 use engine_rocks::{
-    CompactionListener, RocksCompactedEvent, RocksCompactionJobInfo, RocksEngine,
-    RocksWriteBufferManager, RocksdbLogger, Statistics,
+    CompactionListener, RocksCompactedEvent, RocksCompactionJobInfo, RocksEngine, RocksdbLogger,
+    Statistics,
 };
 use engine_traits::{
-    CompactionJobInfo, Engines, GlobalWriteBufferStats, Iterable, KvEngine, RaftEngine,
+    CompactionJobInfo, Engines, GlobalWriteBufferStats, Iterable, KvEngine, MiscExt, RaftEngine,
     TabletFactory, CF_DEFAULT, CF_WRITE, DATA_CFS, DATA_KEY_PREFIX_LEN,
 };
 use kvproto::kvrpcpb::ApiVersion;
@@ -66,6 +66,24 @@ struct FactoryInner {
 pub struct KvEngineFactory<ER: RaftEngine> {
     inner: Arc<FactoryInner>,
     router: Option<RaftRouter<RocksEngine, ER>>,
+}
+
+impl<ER: RaftEngine> GlobalWriteBufferStats for KvEngineFactory<ER> {
+    fn memory_usage(&self) -> usize {
+        let mut size = 0;
+        self.loop_tablet_cache(Box::new(|_, _, tablet| {
+            size += tablet.get_engine_memory_usage();
+        }));
+        size as usize
+    }
+
+    fn mutable_memtable_memory_usage(&self) -> usize {
+        let mut size = 0;
+        self.loop_tablet_cache(Box::new(|_, _, tablet| {
+            size += tablet.get_engine_mutable_memory_usage();
+        }));
+        size as usize
+    }
 }
 
 impl<ER: RaftEngine> KvEngineFactory<ER> {
@@ -388,9 +406,7 @@ impl<ER: RaftEngine> TabletFactory<RocksEngine> for KvEngineFactory<ER> {
 
     #[inline]
     fn write_buffer_states(&self) -> Box<dyn GlobalWriteBufferStats> {
-        Box::new(RocksWriteBufferManager::new(
-            self.inner.write_buffer_manager.clone(),
-        ))
+        Box::new(Clone::clone(self))
     }
 }
 

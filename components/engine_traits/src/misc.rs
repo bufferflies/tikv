@@ -56,6 +56,7 @@ pub trait MiscExt: CFNamesExt + FlowControlFactorsExt {
     fn get_engine_total_keys(&self) -> Result<u64>;
 
     fn get_engine_memory_usage(&self) -> u64;
+    fn get_engine_mutable_memory_usage(&self) -> u64;
 
     /// Roughly deletes files in multiple ranges.
     ///

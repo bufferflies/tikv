@@ -1,5 +1,6 @@
 // Copyright 2016 TiKV Project Authors. Licensed under Apache-2.0.
 
+#![feature(binary_heap_into_iter_sorted)]
 #![cfg_attr(test, feature(test))]
 #![feature(cell_update)]
 #![feature(shrink_to)]

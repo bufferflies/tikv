@@ -20,6 +20,7 @@ pub struct Config {
     pub flush_threshold: ReadableSize,
     pub evict_life_time: ReadableDuration,
     pub max_flush_batch: usize,
+    pub check_interval: ReadableDuration,
 }
 
 impl Default for Config {
@@ -31,6 +32,7 @@ impl Default for Config {
             flush_threshold: ReadableSize::mb(1),
             evict_life_time: ReadableDuration::minutes(30),
             max_flush_batch: 8,
+            check_interval: ReadableDuration::secs(10),
         }
     }
 }
@@ -68,6 +70,13 @@ impl WriteBufferManager {
             return vec![];
         }
 
+        info!(
+            "trigger tablet flush";
+            "mem_usage" => mem_usage,
+            "mutable_mem_usage" => mutable_mem_usage,
+            "soft_limit" => self.cfg.soft_limit.0,
+            "total_limit" => self.cfg.total_limit.0
+        );
         if mutable_mem_usage < self.cfg.soft_limit.0 {
             match self.pick_one() {
                 Some(id) => return vec![id],
@@ -75,7 +84,7 @@ impl WriteBufferManager {
             }
         }
 
-        self.pick_batch()
+        self.pick_batch(mutable_mem_usage)
     }
 
     fn pick_one(&self) -> Option<u64> {
@@ -105,11 +114,9 @@ impl WriteBufferManager {
         }
     }
 
-    fn pick_batch(&self) -> Vec<u64> {
+    fn fetch_by_access_time(&self, accesses: &[(u64, Instant)]) -> Vec<u64> {
         let mut candidates = BinaryHeap::with_capacity(self.cfg.max_flush_batch);
-        let mut accesses: Vec<_> = self.last_access.iter().map(|(a, b)| (*a, *b)).collect();
-        accesses.sort_by_key(|(_, time)| *time);
-        for (id, time) in &accesses {
+        for (id, time) in accesses {
             if time.saturating_elapsed() >= self.cfg.evict_life_time.0 {
                 let size = match self.write_buffers.get(id) {
                     Some(s) => *s,
@@ -119,19 +126,64 @@ impl WriteBufferManager {
                     continue;
                 }
                 if candidates.len() < self.cfg.max_flush_batch {
-                    candidates.push((*id, -(size as i64)));
+                    candidates.push((-(size as i64), *id));
                 } else {
                     let mut head = candidates.peek_mut().unwrap();
-                    if head.1 > -(size as i64) {
-                        *head = (*id, -(size as i64));
+                    if head.0 > -(size as i64) {
+                        *head = (-(size as i64), *id);
                     }
                 }
             } else {
                 break;
             }
         }
+        candidates.iter().map(|(_, id)| *id).collect()
+    }
+
+    fn fetch_by_size(&self, accesses: &[(u64, Instant)], mutable_mem_usage: u64) -> Vec<u64> {
+        let mut candidates = Vec::with_capacity(self.cfg.max_flush_batch);
+        for (id, _) in accesses {
+            let size = match self.write_buffers.get(id) {
+                Some(s) => *s,
+                None => continue,
+            };
+            if size < self.cfg.flush_threshold.0 {
+                continue;
+            }
+            candidates.push((size, *id));
+        }
+        let mut choose_limit = if mutable_mem_usage > self.cfg.total_limit.0 {
+            mutable_mem_usage / 2
+        } else {
+            self.cfg.soft_limit.0 / 2
+        };
+        info!("choose by size"; "candidates" => ?candidates, "choose_limit" => choose_limit);
+        candidates.pop();
+        let mut priority_arr = Vec::with_capacity(candidates.len());
+        for (pos, (size, id)) in candidates.iter().enumerate() {
+            priority_arr.push(((*size) + 1024 * (candidates.len() - pos) as u64, *size, *id))
+        }
+        let heap = BinaryHeap::from(priority_arr);
+        let mut result = vec![];
+        for (_, size, id) in heap.into_iter_sorted() {
+            result.push(id);
+            if size >= choose_limit {
+                break;
+            }
+            choose_limit -= size;
+        }
+        result
+    }
+
+    fn pick_batch(&self, mutable_mem_usage: u64) -> Vec<u64> {
+        let mut accesses: Vec<_> = self.last_access.iter().map(|(a, b)| (*a, *b)).collect();
+        accesses.sort_by_key(|(_, time)| *time);
+        let mut candidates = self.fetch_by_access_time(&accesses);
+        if candidates.is_empty() {
+            candidates = self.fetch_by_size(&accesses, mutable_mem_usage);
+        }
         if !candidates.is_empty() {
-            return candidates.iter().map(|(id, _)| *id).collect();
+            return candidates;
         }
         let count = std::cmp::min(accesses.len() / 2, self.cfg.max_flush_batch);
         accesses.iter().take(count).map(|(id, _)| *id).collect()
@@ -202,7 +254,7 @@ impl<EK: KvEngine, ER: RaftEngine> RunnableWithTimer for Runner<EK, ER> {
             };
             let before = tablet.get_engine_memory_usage();
             let time = Instant::now();
-            if let Err(e) = tablet.flush(false) {
+            if let Err(e) = tablet.flush(true) {
                 warn!("failed to flush tablet"; "region_id" => region_id, "err" => ?e);
             }
             let after = tablet.get_engine_memory_usage();
@@ -212,6 +264,6 @@ impl<EK: KvEngine, ER: RaftEngine> RunnableWithTimer for Runner<EK, ER> {
         }
     }
     fn get_interval(&self) -> Duration {
-        Duration::from_secs(10)
+        self.mgr.cfg.check_interval.0
     }
 }

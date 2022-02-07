@@ -942,6 +942,7 @@ pub struct DbConfig {
     pub enable_statistics: bool,
     #[online_config(skip)]
     pub stats_dump_period: ReadableDuration,
+    pub stats_history_buffer_size: ReadableSize,
     pub compaction_readahead_size: ReadableSize,
     #[online_config(skip)]
     pub info_log_max_size: ReadableSize,
@@ -1012,6 +1013,7 @@ impl Default for DbConfig {
             max_open_files: 40960,
             enable_statistics: true,
             stats_dump_period: ReadableDuration::minutes(10),
+            stats_history_buffer_size: ReadableSize::kb(0),
             compaction_readahead_size: ReadableSize::kb(0),
             info_log_max_size: ReadableSize::gb(1),
             info_log_roll_time: ReadableDuration::secs(0),
@@ -1110,6 +1112,7 @@ impl DbConfig {
         opts.set_max_open_files(self.max_open_files);
         opts.enable_statistics(self.enable_statistics);
         opts.set_stats_dump_period_sec(self.stats_dump_period.as_secs() as usize);
+        opts.set_stats_history_buffer_size(self.stats_history_buffer_size.0 as usize);
         opts.set_compaction_readahead_size(self.compaction_readahead_size.0);
         opts.set_max_log_file_size(self.info_log_max_size.0);
         opts.set_log_file_time_to_roll(self.info_log_roll_time.as_secs());

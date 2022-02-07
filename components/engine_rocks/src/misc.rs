@@ -3,7 +3,10 @@
 use crate::engine::RocksEngine;
 use crate::rocks_metrics_defs::*;
 use crate::sst::RocksSstWriterBuilder;
-use crate::{util, RocksSstWriter, ROCKSDB_CUR_SIZE_ALL_MEM_TABLES, ROCKSDB_ESTIMATE_NUM_KEYS};
+use crate::{
+    util, RocksSstWriter, ROCKSDB_CUR_SIZE_ALIVE_MEM_TABLES, ROCKSDB_CUR_SIZE_ALL_MEM_TABLES,
+    ROCKSDB_ESTIMATE_NUM_KEYS,
+};
 use engine_traits::{
     CFNamesExt, DeleteStrategy, ImportExt, IterOptions, Iterable, Iterator, MiscExt, Mutable,
     Range, Result, SstWriter, SstWriterBuilder, WriteBatch, WriteBatchExt, ALL_CFS,
@@ -246,6 +249,18 @@ impl MiscExt for RocksEngine {
             total_mem += self
                 .as_inner()
                 .get_property_int_cf(handle, ROCKSDB_CUR_SIZE_ALL_MEM_TABLES)
+                .unwrap_or(0);
+        }
+        total_mem
+    }
+
+    fn get_engine_mutable_memory_usage(&self) -> u64 {
+        let mut total_mem: u64 = 0;
+        for cf in ALL_CFS {
+            let handle = util::get_cf_handle(self.as_inner(), cf).unwrap();
+            total_mem += self
+                .as_inner()
+                .get_property_int_cf(handle, ROCKSDB_CUR_SIZE_ALIVE_MEM_TABLES)
                 .unwrap_or(0);
         }
         total_mem
