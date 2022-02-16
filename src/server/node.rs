@@ -196,7 +196,9 @@ impl<ER: RaftEngine> KvEngineFactory<ER> {
         }
         if !root {
             kv_db_opts.set_write_buffer_manager(&self.inner.write_buffer_manager);
-            if self.inner.disable_tablet_wal {
+            if self.inner.disable_tablet_wal
+                && self.inner.rocksdb_config.enable_atomic_flush.is_none()
+            {
                 kv_db_opts.set_atomic_flush(true);
             }
         }

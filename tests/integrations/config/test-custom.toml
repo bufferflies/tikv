@@ -259,6 +259,7 @@ enable-pipelined-write = false
 allow-concurrent-memtable-write = false
 enable-unordered-write = true
 enable-multi-batch-write = false
+enable-atomic-flush = false
 
 [rocksdb.titan]
 enabled = true

@@ -981,6 +981,8 @@ pub struct DbConfig {
     pub enable_multi_batch_write: bool,
     #[online_config(skip)]
     pub enable_unordered_write: bool,
+    #[online_config(skip)]
+    pub enable_atomic_flush: Option<bool>,
     #[online_config(submodule)]
     pub defaultcf: DefaultCfConfig,
     #[online_config(submodule)]
@@ -1036,6 +1038,7 @@ impl Default for DbConfig {
             allow_concurrent_memtable_write: true,
             enable_multi_batch_write: true,
             enable_unordered_write: false,
+            enable_atomic_flush: None,
             defaultcf: DefaultCfConfig::default(),
             writecf: WriteCfConfig::default(),
             lockcf: LockCfConfig::default(),
@@ -1136,6 +1139,9 @@ impl DbConfig {
         opts.enable_unordered_write(self.enable_unordered_write);
         opts.add_event_listener(RocksEventListener::new("kv"));
         opts.set_info_log_level(self.info_log_level.into());
+        if self.enable_atomic_flush == Some(true) {
+            opts.set_atomic_flush(true);
+        }
         if self.titan.enabled {
             opts.set_titandb_options(&self.titan.build_opts());
         }
