@@ -2497,6 +2497,14 @@ where
             self.handle_raft_committed_entries(ctx, light_rd.take_committed_entries());
         }
 
+        let li = self.raft_group.raft.raft_log.last_index();
+        if li != self.get_store().commit_index() {
+            panic!("{} unexpected result: {} != {}", self.tag, li, self.get_store().commit_index());
+        }
+        if !self.proposals.is_empty() {
+            panic!("{} unexpected pending queue: {}, {:?}", self.tag, li, self.proposals);
+        }
+
         None
     }
 
@@ -2965,10 +2973,11 @@ where
         mut p: Proposal<EK::Snapshot>,
     ) {
         // Try to renew leader lease on every consistent read/write request.
+        let now = monotonic_raw_now();
         if poll_ctx.current_time.is_none() {
-            poll_ctx.current_time = Some(monotonic_raw_now());
+            poll_ctx.current_time = Some(now);
         }
-        p.propose_time = poll_ctx.current_time;
+        p.propose_time = Some(now);
 
         self.proposals.push(p);
     }
@@ -4449,6 +4458,10 @@ pub trait RequestInspector {
             if get_transfer_leader_cmd(req).is_some() {
                 return Ok(RequestPolicy::ProposeTransferLeader);
             }
+            return Ok(RequestPolicy::ProposeNormal);
+        }
+
+        if req.has_blob_request() {
             return Ok(RequestPolicy::ProposeNormal);
         }
 

@@ -21,7 +21,7 @@ use kvproto::{
     metapb,
     raft_cmdpb::{
         CmdType, DeleteRangeRequest, DeleteRequest, PutRequest, RaftCmdRequest, RaftCmdResponse,
-        RaftRequestHeader, Request, Response,
+        RaftRequestHeader, Request, Response, BlobRequest,
     },
 };
 use raftstore::{
@@ -256,7 +256,7 @@ where
             raftkv_early_error_report_fp()?;
         }
 
-        let reqs = modifies_to_requests(batch.modifies);
+        let blob_request = modifies_to_blob_requests(batch.modifies);
         let txn_extra = batch.extra;
         let mut header = self.new_request_header(ctx);
         if txn_extra.one_pc {
@@ -265,7 +265,10 @@ where
 
         let mut cmd = RaftCmdRequest::default();
         cmd.set_header(header);
-        cmd.set_requests(reqs.into());
+        match blob_request {
+            Ok(r) => cmd.set_blob_request(r),
+            Err(r) => cmd.set_requests(r.into()),
+        }
 
         if let Some(tx) = self.txn_extra_scheduler.as_ref() {
             if !txn_extra.is_empty() {
@@ -559,6 +562,66 @@ impl ReadIndexObserver for ReplicaReadLockChecker {
             msg.mut_entries()[0].set_data(rctx.to_bytes().into());
         }
     }
+}
+
+#[inline]
+fn encode_num(buf: &mut Vec<u8>, mut num: u64) {
+    if num < 0x80 {
+        buf.push(num as u8);
+        return;
+    }
+    if num < 0x40000000 {
+        num |= 0x80000000;
+        buf.extend_from_slice(&((num as u32).to_be_bytes()));
+        return;
+    }
+    if num < 0x2000000000000000 {
+        num |= 0xC000000000000000;
+        buf.extend_from_slice(&((num as u32).to_be_bytes()));
+        return;
+    }
+    todo!()
+}
+
+#[inline]
+fn encode_bytes(buf: &mut Vec<u8>, bytes: &[u8]) {
+    encode_num(buf, bytes.len() as u64);
+    if !bytes.is_empty() {
+        buf.extend_from_slice(bytes);
+    }
+}
+
+pub fn modifies_to_blob_requests(modifies: Vec<Modify>) -> std::result::Result<BlobRequest, Vec<Request>> {
+    let mut req = Vec::with_capacity(256);
+    for m in &modifies {
+        match m {
+            Modify::Delete(cf, k) => {
+                req.push(b'd');
+                if *cf != CF_DEFAULT {
+                    encode_bytes(&mut req, cf.as_bytes());
+                } else {
+                    req.push(0);
+                }
+                encode_bytes(&mut req, k.as_encoded());
+            }
+            Modify::Put(cf, k, v) => {
+                req.push(b'p');
+                if *cf != CF_DEFAULT {
+                    encode_bytes(&mut req, cf.as_bytes());
+                } else {
+                    req.push(0);
+                }
+                encode_bytes(&mut req, k.as_encoded());
+                encode_bytes(&mut req, &v);
+            }
+            Modify::DeleteRange(_, _, _, _) => {
+                return Err(modifies_to_requests(modifies));
+            }
+        }
+    }
+    let mut b = BlobRequest::default();
+    b.set_mutations(req);
+    Ok(b)
 }
 
 pub fn modifies_to_requests(modifies: Vec<Modify>) -> Vec<Request> {

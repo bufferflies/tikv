@@ -2361,7 +2361,7 @@ dependencies = [
 [[package]]
 name = "kvproto"
 version = "0.0.2"
-source = "git+https://github.com/busyjay/kvproto?branch=test-cloud-5.3#4a79db50d4514be36ca694ec1572d7dd435fbc41"
+source = "git+https://github.com/busyjay/kvproto?branch=test-cloud-5.3#33aacba2d5a144be1ae4fd04ee90f15b42e13821"
 dependencies = [
  "futures 0.3.15",
  "grpcio",

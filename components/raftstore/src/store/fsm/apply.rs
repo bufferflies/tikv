@@ -4,6 +4,7 @@
 use std::borrow::Cow;
 use std::cmp::{Ord, Ordering as CmpOrdering};
 use std::collections::{vec_deque, VecDeque};
+use std::convert::TryInto;
 use std::fmt::{self, Debug, Formatter};
 use std::marker::PhantomData;
 use std::mem;
@@ -1399,6 +1400,8 @@ where
         check_region_epoch(req, &self.region, include_region)?;
         if req.has_admin_request() {
             self.exec_admin_cmd(ctx, req)
+        } else if req.has_blob_request() {
+            self.exec_blob_cmd(ctx, req)
         } else {
             self.exec_write_cmd(ctx, req)
         }
@@ -1446,6 +1449,48 @@ where
         }
         resp.set_admin_response(response);
         Ok((resp, exec_result))
+    }
+
+    fn exec_blob_cmd<W: WriteBatch<EK>>(
+        &mut self,
+        ctx: &mut ApplyContext<EK, W>,
+        req: &RaftCmdRequest,
+    ) -> Result<(RaftCmdResponse, ApplyResult<EK::Snapshot>)> {
+        fail_point!(
+            "on_apply_write_cmd",
+            cfg!(release) || self.id() == 3,
+            |_| {
+                unimplemented!();
+            }
+        );
+
+        let mut requests = req.get_blob_request().get_mutations();
+        while !requests.is_empty() {
+            let (act, rest) = requests.split_first().unwrap();
+            requests = rest;
+            let cf = std::str::from_utf8(decode_bytes(&mut requests)).unwrap();
+            let key = decode_bytes(&mut requests);
+            match act {
+                b'p' => {
+                    let value = decode_bytes(&mut requests);
+                    self.handle_put_raw(ctx, cf, key, value)?;
+                }
+                b'd' => {
+                    self.handle_delete_raw(ctx, cf, key)?;
+                }
+                _ => panic!("unrecoginized action {}", act),
+            }
+        }
+
+        let mut resp = RaftCmdResponse::default();
+        if !req.get_header().get_uuid().is_empty() {
+            let uuid = req.get_header().get_uuid().to_vec();
+            resp.mut_header().set_uuid(uuid);
+        }
+
+        let exec_res = ApplyResult::None;
+
+        Ok((resp, exec_res))
     }
 
     fn exec_write_cmd<W: WriteBatch<EK>>(
@@ -1522,20 +1567,50 @@ where
     }
 }
 
+#[inline]
+fn decode_num(buf: &mut &[u8]) -> u64 {
+    if buf.len() >= 1 {
+        if buf[0] < 0x80 {
+            let (n, r) = buf.split_first().unwrap();
+            *buf = r;
+            return *n as u64;
+        }
+        if buf[0] < 0xc0 {
+            let (n, r) = buf.split_at(4);
+            *buf = r;
+            return (u32::from_be_bytes(n.try_into().unwrap()) - 0x80000000) as u64;
+        }
+        if buf[0] < 0xe0 {
+            let (n, r) = buf.split_at(8);
+            *buf = r;
+            return (u64::from_be_bytes(n.try_into().unwrap()) - 0xc0000000) as u64;
+        }
+    }
+    unreachable!("{:?}", buf);
+}
+
+#[inline]
+fn decode_bytes<'a>(buf: &mut &'a [u8]) -> &'a [u8] {
+    let len = decode_num(buf);
+    let (h, rest) = buf.split_at(len as usize);
+    *buf = rest;
+    h
+}
+
 // Write commands related.
 impl<EK> ApplyDelegate<EK>
 where
     EK: KvEngine,
 {
-    fn handle_put<W: WriteBatch<EK>>(
+    fn handle_put_raw<W: WriteBatch<EK>>(
         &mut self,
         ctx: &mut ApplyContext<EK, W>,
-        req: &Request,
+        cf: &str,
+        key: &[u8],
+        value: &[u8],
     ) -> Result<()> {
-        let (key, value) = (req.get_put().get_key(), req.get_put().get_value());
         // region key range has no data prefix, so we must use origin key to check.
         util::check_key_in_region(key, &self.region)?;
-
         keys::data_key_with_buffer(key, &mut ctx.key_buffer);
         ctx.kv_wb_mut(self);
         let key = ctx.key_buffer.as_slice();
@@ -1543,8 +1618,7 @@ where
 
         self.metrics.size_diff_hint += key.len() as i64;
         self.metrics.size_diff_hint += value.len() as i64;
-        if !req.get_put().get_cf().is_empty() {
-            let cf = req.get_put().get_cf();
+        if !cf.is_empty() {
             // TODO: don't allow write preseved cfs.
             if cf == CF_LOCK {
                 self.metrics.lock_cf_written_bytes += key.len() as u64;
@@ -1575,12 +1649,21 @@ where
         Ok(())
     }
 
-    fn handle_delete<W: WriteBatch<EK>>(
+    #[inline]
+    fn handle_put<W: WriteBatch<EK>>(
         &mut self,
         ctx: &mut ApplyContext<EK, W>,
         req: &Request,
     ) -> Result<()> {
-        let key = req.get_delete().get_key();
+        self.handle_put_raw(ctx, req.get_put().get_cf(), req.get_put().get_key(), req.get_put().get_value())
+    }
+
+    fn handle_delete_raw<W: WriteBatch<EK>>(
+        &mut self,
+        ctx: &mut ApplyContext<EK, W>,
+        cf: &str,
+        key: &[u8],
+    ) -> Result<()> {
         // region key range has no data prefix, so we must use origin key to check.
         util::check_key_in_region(key, &self.region)?;
 
@@ -1591,8 +1674,7 @@ where
 
         // since size_diff_hint is not accurate, so we just skip calculate the value size.
         self.metrics.size_diff_hint -= key.len() as i64;
-        if !req.get_delete().get_cf().is_empty() {
-            let cf = req.get_delete().get_cf();
+        if !cf.is_empty() {
             // TODO: check whether cf exists or not.
             kv_wb.delete_cf(cf, key).unwrap_or_else(|e| {
                 panic!(
@@ -1622,6 +1704,14 @@ where
         }
 
         Ok(())
+    }
+
+    fn handle_delete<W: WriteBatch<EK>>(
+        &mut self,
+        ctx: &mut ApplyContext<EK, W>,
+        req: &Request,
+    ) -> Result<()> {
+        self.handle_delete_raw(ctx, req.get_delete().get_cf(), req.get_delete().get_key())
     }
 
     fn handle_delete_range(
