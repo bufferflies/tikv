@@ -2497,14 +2497,6 @@ where
             self.handle_raft_committed_entries(ctx, light_rd.take_committed_entries());
         }
 
-        let li = self.raft_group.raft.raft_log.last_index();
-        if li != self.get_store().commit_index() {
-            panic!("{} unexpected result: {} != {}", self.tag, li, self.get_store().commit_index());
-        }
-        if !self.proposals.is_empty() {
-            panic!("{} unexpected pending queue: {}, {:?}", self.tag, li, self.proposals);
-        }
-
         None
     }
 
