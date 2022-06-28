@@ -203,6 +203,7 @@ struct RecvSnapContext {
     file: Option<Box<Snapshot>>,
     raft_msg: RaftMessage,
     io_type: IOType,
+    start: Instant,
 }
 
 impl RecvSnapContext {
@@ -249,6 +250,7 @@ impl RecvSnapContext {
             file: snap,
             raft_msg: meta,
             io_type,
+            start:Instant::now()
         })
     }
 
@@ -266,6 +268,7 @@ impl RecvSnapContext {
         if let Err(e) = raft_router.send_raft_msg(self.raft_msg) {
             return Err(box_err!("{} failed to send snapshot to raft: {}", key, e));
         }
+        info!("saving all snapshot files";"snap_key" => %key,"duration" => ?self.start.saturating_elapsed());
         Ok(())
     }
 }
@@ -431,6 +434,7 @@ where
             }
             Task::Send { addr, msg, cb } => {
                 fail_point!("send_snapshot");
+                let region_id=msg.get_region_id();
                 if self.sending_count.load(Ordering::SeqCst) >= self.cfg.concurrent_send_snap_limit
                 {
                     warn!(
@@ -466,7 +470,7 @@ where
                             cb(Ok(()));
                         }
                         Err(e) => {
-                            error!("failed to send snap"; "to_addr" => addr, "err" => ?e);
+                            error!("failed to send snap"; "to_addr" => addr, "region_id"=>region_id,"err" => ?e);
                             cb(Err(e));
                         }
                     };

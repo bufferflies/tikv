@@ -21,6 +21,7 @@ use tikv_util::{
     box_try,
     codec::bytes::{BytesEncoder, CompactBytesFromFileDecoder},
     debug, info,
+    time::Instant,
     time::Limiter,
 };
 
@@ -159,11 +160,17 @@ where
                 }
             }
         }
+        let instant=Instant::now();
         while entry_len > remained_quota {
             // It's possible to acquire more than necessary, but let it be.
             io_limiter.blocking_consume(IO_LIMITER_CHUNK_SIZE);
             remained_quota += IO_LIMITER_CHUNK_SIZE;
+           
         }
+        info!("snap generator limit";
+            "duration"=>?instant.saturating_elapsed(),
+            "entry_len"=>entry_len,
+            "path"=>path.clone());
         remained_quota -= entry_len;
 
         stats.key_count += 1;
