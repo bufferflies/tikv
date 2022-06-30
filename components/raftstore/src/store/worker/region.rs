@@ -308,8 +308,12 @@ where
         notifier: SyncSender<RaftSnapshot>,
         for_balance: bool,
         allow_multi_files_snapshot: bool,
+        start:Instant
     ) {
         fail_point!("before_region_gen_snap", |_| ());
+        SNAP_HISTOGRAM
+        .pending
+        .observe(start.saturating_elapsed_secs());
         SNAP_COUNTER.generate.all.inc();
         if canceled.load(Ordering::Relaxed) {
             info!("generate snap is canceled"; "region_id" => region_id);
@@ -737,7 +741,8 @@ where
                         allow_multi_files_snapshot = !is_tiflash;
                     }
                 }
-
+                SNAP_COUNTER.pending.all.inc();
+                let instant=Instant::now();
                 self.pool.spawn(async move {
                     tikv_alloc::add_thread_memory_accessor();
                     ctx.handle_gen(
@@ -749,9 +754,11 @@ where
                         notifier,
                         for_balance,
                         allow_multi_files_snapshot,
+                        instant,
                     );
                     tikv_alloc::remove_thread_memory_accessor();
                 });
+                SNAP_COUNTER.pending.success.inc();
             }
             task @ Task::Apply { .. } => {
                 fail_point!("on_region_worker_apply", true, |_| {});

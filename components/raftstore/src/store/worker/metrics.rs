@@ -8,6 +8,7 @@ make_auto_flush_static_metric! {
     pub label_enum SnapType {
        generate,
        apply,
+       pending,
     }
 
     pub label_enum SnapStatus {

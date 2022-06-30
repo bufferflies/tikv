@@ -134,6 +134,7 @@ where
         .to_string();
     let sst_writer = RefCell::new(create_sst_file_writer::<E>(engine, cf, &path)?);
     let mut file_length: usize = 0;
+    let instant=Instant::now();
     box_try!(snap.scan_cf(cf, start_key, end_key, false, |key, value| {
         let entry_len = key.len() + value.len();
         if file_length + entry_len > raw_size_per_file as usize {
@@ -160,17 +161,13 @@ where
                 }
             }
         }
-        let instant=Instant::now();
+       
         while entry_len > remained_quota {
             // It's possible to acquire more than necessary, but let it be.
             io_limiter.blocking_consume(IO_LIMITER_CHUNK_SIZE);
             remained_quota += IO_LIMITER_CHUNK_SIZE;
            
         }
-        info!("snap generator limit";
-            "duration"=>?instant.saturating_elapsed(),
-            "entry_len"=>entry_len,
-            "path"=>path.clone());
         remained_quota -= entry_len;
 
         stats.key_count += 1;
@@ -187,12 +184,13 @@ where
         box_try!(sst_writer.into_inner().finish());
         box_try!(File::open(path).and_then(|f| f.sync_all()));
         info!(
-            "build_sst_cf_file_list builds {} files in cf {}. Total keys {}, total size {}. raw_size_per_file {}",
+            "build_sst_cf_file_list builds {} files in cf {}. Total keys {}, total size {}. raw_size_per_file {},duration {:?}",
             file_id + 1,
             cf,
             stats.key_count,
             stats.total_size,
             raw_size_per_file,
+            instant.saturating_elapsed(),
         );
     } else {
         box_try!(fs::remove_file(path));
