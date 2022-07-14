@@ -7,11 +7,11 @@ use prometheus_static_metric::*;
 make_auto_flush_static_metric! {
     pub label_enum SnapType {
        generate,
-       apply,
-       pending,
+       apply
     }
 
     pub label_enum SnapStatus {
+        total,
         all,
         success,
         abort,
