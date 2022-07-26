@@ -253,7 +253,7 @@ impl RecvSnapContext {
             file: snap,
             raft_msg: meta,
             io_type,
-            start:Instant::now()
+            start: Instant::now(),
         })
     }
 
@@ -271,7 +271,7 @@ impl RecvSnapContext {
         if let Err(e) = raft_router.send_raft_msg(self.raft_msg) {
             return Err(box_err!("{} failed to send snapshot to raft: {}", key, e));
         }
-        info!("saving all snapshot files";"snap_key" => %key,"duration" => ?self.start.saturating_elapsed());
+        info!("saving all snapshot files";"snap_key" => %key, "takes" => ?self.start.saturating_elapsed());
         Ok(())
     }
 }
@@ -437,7 +437,7 @@ where
             }
             Task::Send { addr, msg, cb } => {
                 fail_point!("send_snapshot");
-                let region_id=msg.get_region_id();
+                let region_id = msg.get_region_id();
                 if self.sending_count.load(Ordering::SeqCst) >= self.cfg.concurrent_send_snap_limit
                 {
                     warn!(
@@ -454,7 +454,7 @@ where
                 let security_mgr = Arc::clone(&self.security_mgr);
                 let sending_count = Arc::clone(&self.sending_count);
                 sending_count.fetch_add(1, Ordering::SeqCst);
-                let send_task = send_snap(env, mgr, security_mgr, &self.cfg.clone(), &addr, msg);             
+                let send_task = send_snap(env, mgr, security_mgr, &self.cfg.clone(), &addr, msg);
                 let task = async move {
                     let res = match send_task {
                         Err(e) => Err(e),

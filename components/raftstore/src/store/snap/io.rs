@@ -21,8 +21,7 @@ use tikv_util::{
     box_try,
     codec::bytes::{BytesEncoder, CompactBytesFromFileDecoder},
     debug, info,
-    time::Instant,
-    time::Limiter,
+    time::{Instant, Limiter},
 };
 
 use super::{CfFile, Error, IO_LIMITER_CHUNK_SIZE};
@@ -134,7 +133,7 @@ where
         .to_string();
     let sst_writer = RefCell::new(create_sst_file_writer::<E>(engine, cf, &path)?);
     let mut file_length: usize = 0;
-    let instant=Instant::now();
+    let instant = Instant::now();
     box_try!(snap.scan_cf(cf, start_key, end_key, false, |key, value| {
         let entry_len = key.len() + value.len();
         if file_length + entry_len > raw_size_per_file as usize {
@@ -161,12 +160,11 @@ where
                 }
             }
         }
-       
+
         while entry_len > remained_quota {
             // It's possible to acquire more than necessary, but let it be.
             io_limiter.blocking_consume(IO_LIMITER_CHUNK_SIZE);
             remained_quota += IO_LIMITER_CHUNK_SIZE;
-           
         }
         remained_quota -= entry_len;
 
@@ -184,7 +182,7 @@ where
         box_try!(sst_writer.into_inner().finish());
         box_try!(File::open(path).and_then(|f| f.sync_all()));
         info!(
-            "build_sst_cf_file_list builds {} files in cf {}. Total keys {}, total size {}. raw_size_per_file {},duration {:?}",
+            "build_sst_cf_file_list builds {} files in cf {}. Total keys {}, total size {}. raw_size_per_file {}, total takes {:?}",
             file_id + 1,
             cf,
             stats.key_count,
