@@ -240,7 +240,9 @@ impl<E: KvEngine> Initializer<E> {
             let (raw_key_prefix, raw_key_prefix_end) = ApiV2::get_rawkv_range();
             iter_opt.set_lower_bound(&[raw_key_prefix], DATA_KEY_PREFIX_LEN);
             iter_opt.set_upper_bound(&[raw_key_prefix_end], DATA_KEY_PREFIX_LEN);
-            let mut iter = RawMvccSnapshot::from_snapshot(snap).iter(iter_opt).unwrap();
+            let mut iter = RawMvccSnapshot::from_snapshot(snap)
+                .iter(CF_DEFAULT, iter_opt)
+                .unwrap();
 
             iter.seek_to_first()?;
             Scanner::RawKvScanner(iter)
@@ -445,7 +447,7 @@ impl<E: KvEngine> Initializer<E> {
 
     fn finish_building_resolver(&self, mut resolver: Resolver, region: Region) {
         let observe_id = self.observe_id;
-        let rts = resolver.resolve(TimeStamp::zero());
+        let rts = resolver.resolve(TimeStamp::zero()).min();
         info!(
             "cdc resolver initialized and schedule resolver ready";
             "region_id" => region.get_id(),

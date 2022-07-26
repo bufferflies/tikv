@@ -424,6 +424,22 @@ pub struct PeerTickBatch {
     pub wait_duration: Duration,
 }
 
+impl PeerTickBatch {
+    #[inline]
+    pub fn schedule(&mut self, timer: &SteadyTimer) {
+        if self.ticks.is_empty() {
+            return;
+        }
+        let peer_ticks = mem::take(&mut self.ticks);
+        let f = timer.delay(self.wait_duration).compat().map(move |_| {
+            for tick in peer_ticks {
+                tick();
+            }
+        });
+        poll_future_notify(f);
+    }
+}
+
 impl Clone for PeerTickBatch {
     fn clone(&self) -> PeerTickBatch {
         PeerTickBatch {
@@ -760,21 +776,7 @@ impl<EK: KvEngine, ER: RaftEngine, T: Transport> RaftPoller<EK, ER, T> {
     fn flush_ticks(&mut self) {
         for t in PeerTick::get_all_ticks() {
             let idx = *t as usize;
-            if self.poll_ctx.tick_batch[idx].ticks.is_empty() {
-                continue;
-            }
-            let peer_ticks = mem::take(&mut self.poll_ctx.tick_batch[idx].ticks);
-            let f = self
-                .poll_ctx
-                .timer
-                .delay(self.poll_ctx.tick_batch[idx].wait_duration)
-                .compat()
-                .map(move |_| {
-                    for tick in peer_ticks {
-                        tick();
-                    }
-                });
-            poll_future_notify(f);
+            self.poll_ctx.tick_batch[idx].schedule(&self.poll_ctx.timer);
         }
     }
 }
@@ -1082,7 +1084,7 @@ impl<EK: KvEngine, ER: RaftEngine, T> RaftPollerBuilder<EK, ER, T> {
         let mut merging_count = 0;
         let mut meta = self.store_meta.lock().unwrap();
         let mut replication_state = self.global_replication_state.lock().unwrap();
-        kv_engine.scan_cf(CF_RAFT, start_key, end_key, false, |key, value| {
+        kv_engine.scan(CF_RAFT, start_key, end_key, false, |key, value| {
             let (region_id, suffix) = box_try!(keys::decode_region_meta_key(key));
             if suffix != keys::REGION_STATE_SUFFIX {
                 return Ok(true);

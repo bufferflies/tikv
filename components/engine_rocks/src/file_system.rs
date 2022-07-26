@@ -5,20 +5,23 @@ use std::sync::Arc;
 use engine_traits::{EngineFileSystemInspector, FileSystemInspector};
 use rocksdb::FileSystemInspector as DBFileSystemInspector;
 
-use crate::raw::Env;
+use crate::{e2r, r2e, raw::Env};
 
 // Use engine::Env directly since Env is not abstracted.
 pub(crate) fn get_env(
     base_env: Option<Arc<Env>>,
     limiter: Option<Arc<file_system::IORateLimiter>>,
-) -> Result<Arc<Env>, String> {
+) -> engine_traits::Result<Arc<Env>> {
     let base_env = base_env.unwrap_or_else(|| Arc::new(Env::default()));
-    Ok(Arc::new(Env::new_file_system_inspected_env(
-        base_env,
-        WrappedFileSystemInspector {
-            inspector: EngineFileSystemInspector::from_limiter(limiter),
-        },
-    )?))
+    Ok(Arc::new(
+        Env::new_file_system_inspected_env(
+            base_env,
+            WrappedFileSystemInspector {
+                inspector: EngineFileSystemInspector::from_limiter(limiter),
+            },
+        )
+        .map_err(r2e)?,
+    ))
 }
 
 pub struct WrappedFileSystemInspector<T: FileSystemInspector> {
@@ -27,11 +30,11 @@ pub struct WrappedFileSystemInspector<T: FileSystemInspector> {
 
 impl<T: FileSystemInspector> DBFileSystemInspector for WrappedFileSystemInspector<T> {
     fn read(&self, len: usize) -> Result<usize, String> {
-        self.inspector.read(len)
+        self.inspector.read(len).map_err(e2r)
     }
 
     fn write(&self, len: usize) -> Result<usize, String> {
-        self.inspector.write(len)
+        self.inspector.write(len).map_err(e2r)
     }
 }
 
@@ -70,7 +73,9 @@ mod tests {
 
     #[test]
     fn test_inspected_compact() {
-        let value_size = 1024;
+        // NOTICE: Specific to RocksDB version.
+        let amplification_bytes = 2560;
+        let value_size = amplification_bytes * 2;
         let temp_dir = Builder::new()
             .prefix("test_inspected_compact")
             .tempdir()
@@ -81,15 +86,16 @@ mod tests {
 
         db.put(&data_key(b"a1"), &value).unwrap();
         db.put(&data_key(b"a2"), &value).unwrap();
+        assert_eq!(stats.fetch(IOType::Flush, IOOp::Write), 0);
         db.flush(true /*sync*/).unwrap();
         assert!(stats.fetch(IOType::Flush, IOOp::Write) > value_size * 2);
-        assert!(stats.fetch(IOType::Flush, IOOp::Write) < value_size * 3);
+        assert!(stats.fetch(IOType::Flush, IOOp::Write) < value_size * 2 + amplification_bytes);
         stats.reset();
         db.put(&data_key(b"a2"), &value).unwrap();
         db.put(&data_key(b"a3"), &value).unwrap();
         db.flush(true /*sync*/).unwrap();
         assert!(stats.fetch(IOType::Flush, IOOp::Write) > value_size * 2);
-        assert!(stats.fetch(IOType::Flush, IOOp::Write) < value_size * 3);
+        assert!(stats.fetch(IOType::Flush, IOOp::Write) < value_size * 2 + amplification_bytes);
         stats.reset();
         db.c()
             .compact_range(
@@ -100,8 +106,14 @@ mod tests {
             )
             .unwrap();
         assert!(stats.fetch(IOType::LevelZeroCompaction, IOOp::Read) > value_size * 4);
-        assert!(stats.fetch(IOType::LevelZeroCompaction, IOOp::Read) < value_size * 5);
+        assert!(
+            stats.fetch(IOType::LevelZeroCompaction, IOOp::Read)
+                < value_size * 4 + amplification_bytes
+        );
         assert!(stats.fetch(IOType::LevelZeroCompaction, IOOp::Write) > value_size * 3);
-        assert!(stats.fetch(IOType::LevelZeroCompaction, IOOp::Write) < value_size * 4);
+        assert!(
+            stats.fetch(IOType::LevelZeroCompaction, IOOp::Write)
+                < value_size * 3 + amplification_bytes
+        );
     }
 }

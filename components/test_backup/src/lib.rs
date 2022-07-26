@@ -94,6 +94,7 @@ impl TestSuite {
                 },
                 sim.get_concurrency_manager(*id),
                 api_version,
+                None,
             );
             let mut worker = bg_worker.lazy_build(format!("backup-{}", id));
             worker.start(backup_endpoint);
@@ -391,7 +392,7 @@ impl TestSuite {
         if !end.is_empty() {
             iter_opt.set_upper_bound(&end, DATA_KEY_PREFIX_LEN);
         }
-        let mut iter = snapshot.iter_cf(cf, iter_opt).unwrap();
+        let mut iter = snapshot.iter(cf, iter_opt).unwrap();
 
         if !iter.seek(&start).unwrap() {
             return (0, 0, 0);

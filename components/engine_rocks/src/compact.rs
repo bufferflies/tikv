@@ -5,7 +5,7 @@ use std::cmp;
 use engine_traits::{CFNamesExt, CompactExt, Result};
 use rocksdb::{CompactOptions, CompactionOptions, DBCompressionType};
 
-use crate::{engine::RocksEngine, util};
+use crate::{engine::RocksEngine, r2e, util};
 
 impl CompactExt for RocksEngine {
     type CompactedEvent = crate::compact_listener::RocksCompactedEvent;
@@ -130,8 +130,8 @@ impl CompactExt for RocksEngine {
         opts.set_max_subcompactions(max_subcompactions as i32);
         opts.set_output_file_size_limit(output_file_size_limit);
 
-        db.compact_files_cf(handle, &opts, &files, output_level)?;
-        Ok(())
+        db.compact_files_cf(handle, &opts, &files, output_level)
+            .map_err(r2e)
     }
 }
 
@@ -228,27 +228,6 @@ mod tests {
             assert_eq!(level_n.len(), 1);
             assert_eq!(level_n[0].get_smallestkey(), &[0]);
             assert_eq!(level_n[0].get_largestkey(), &[4]);
-        }
-
-        for cf_name in db.cf_names() {
-            let mut files = vec![];
-            let cf = db.cf_handle(cf_name).unwrap();
-            let cf_meta = db.get_column_family_meta_data(cf);
-            let cf_levels = cf_meta.get_levels();
-
-            for level in cf_levels.into_iter().rev() {
-                files.extend(level.get_files().iter().map(|f| f.get_name()));
-            }
-
-            assert_eq!(files.len(), 2);
-            db.c()
-                .compact_files_cf(cf_name, files.clone(), Some(3), 0, true)
-                .unwrap();
-
-            let cf_meta = db.get_column_family_meta_data(cf);
-            let cf_levels = cf_meta.get_levels();
-            assert_eq!(cf_levels[0].get_files().len(), 1);
-            assert_eq!(cf_levels[3].get_files().len(), 1);
         }
     }
 }
