@@ -79,11 +79,44 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{RwLock,Arc};
+
+    use tikv_util::HandyRwLock;
+    use std::{thread,time};
     use super::*;
 
     #[test]
     fn test_pd_cfg() {
         let cfg = Config::default();
         cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn test_mutex(){
+        let count= Arc::new(RwLock::new(5));
+        let mut handles = vec![];
+
+        // let counter = Arc::clone(&count);
+        
+        let handler=thread::spawn(move||{
+            let _copy=count.rl();
+            thread::sleep(time::Duration::from_millis(10));
+            let copy1=count.wl();
+            println!("count {},thread:1",copy1);
+        });
+        handles.push(handler);
+
+        // let counter1 = Arc::clone(&count);
+        let handler=thread::spawn(move||{
+            let _copy=count.wl();
+            thread::sleep(time::Duration::from_millis(10));
+            let copy1=count.rl();
+            println!("count {},thread:2",copy1);
+        });
+        handles.push(handler);
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
     }
 }

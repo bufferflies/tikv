@@ -102,6 +102,7 @@ impl Stream for SnapChunk {
         let result = self.snap.read_exact(buf.as_mut_slice());
         match result {
             Ok(_) => {
+                SNAPSHOT_TRANSPORT_LIMIT_COUNT_VEC.with_label_values(&["send"]).inc_by(buf.len() as u64);
                 self.remain_bytes -= buf.len();
                 let mut chunk = SnapshotChunk::default();
                 chunk.set_data(buf);
@@ -295,6 +296,7 @@ fn recv_snap<R: RaftStoreRouter<impl KvEngine> + 'static>(
             });
             let mut chunk = item?;
             let data = chunk.take_data();
+            SNAPSHOT_TRANSPORT_LIMIT_COUNT_VEC.with_label_values(&["recv"]).inc_by(data.len() as u64);
             if data.is_empty() {
                 return Err(box_err!("{} receive chunk with empty data", context.key));
             }

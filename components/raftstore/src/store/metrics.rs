@@ -769,4 +769,10 @@ lazy_static! {
     .unwrap();
     pub static ref RAFT_LOG_GC_SKIPPED: RaftLogGcSkippedVec =
         auto_flush_from!(RAFT_LOG_GC_SKIPPED_VEC, RaftLogGcSkippedVec);
+
+    pub static ref SNAPSHOT_GENERATE_LIMIT_COUNT_VEC: IntCounter = register_int_counter!(
+        "tikv_genrate_snapshot_limit_count",
+        "Total limit used",
+    )
+    .unwrap();
 }
