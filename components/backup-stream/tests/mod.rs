@@ -159,9 +159,10 @@ impl SuiteBuilder {
             suite.start_endpoint(id, use_v3);
         }
         // TODO: The current mock metastore (slash_etc) doesn't supports multi-version.
-        //       We must wait until the endpoints get ready to watching the metastore, or some modifies may be lost.
-        //       Either make Endpoint::with_client wait until watch did start or make slash_etc support multi-version,
-        //       then we can get rid of this sleep.
+        // We must wait until the endpoints get ready to watching the metastore, or some
+        // modifies may be lost. Either make Endpoint::with_client wait until watch did
+        // start or make slash_etc support multi-version, then we can get rid of this
+        // sleep.
         std::thread::sleep(Duration::from_secs(1));
         suite
     }
@@ -597,7 +598,7 @@ fn run_async_test<T>(test: impl Future<Output = T>) -> T {
 
 #[cfg(test)]
 mod test {
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use backup_stream::{
         errors::Error, metadata::MetadataClient, router::TaskSelector, GetCheckpointResult,
@@ -671,8 +672,8 @@ mod test {
     }
 
     #[test]
-    /// This case tests whehter the checkpoint ts (next backup ts) can be advanced correctly
-    /// when async commit is enabled.
+    /// This case tests whether the checkpoint ts (next backup ts) can be
+    /// advanced correctly when async commit is enabled.
     fn async_commit() {
         let mut suite = super::SuiteBuilder::new_named("async_commit")
             .nodes(3)
@@ -768,8 +769,9 @@ mod test {
         suite.force_flush_files("inflight_message");
         fail::cfg("delay_on_start_observe", "pause").unwrap();
         suite.must_shuffle_leader(1);
-        // Handling the `StartObserve` message and doing flush are executed asynchronously.
-        // Make a delay of unblocking flush thread for make sure we have handled the `StartObserve`.
+        // Handling the `StartObserve` message and doing flush are executed
+        // asynchronously. Make a delay of unblocking flush thread for make sure
+        // we have handled the `StartObserve`.
         std::thread::sleep(Duration::from_secs(1));
         fail::cfg("delay_on_flush", "off").unwrap();
         suite.wait_for_flush();
@@ -790,7 +792,8 @@ mod test {
                 .global_progress_of_task("inflight_message"),
         )
         .unwrap();
-        // The checkpoint should be advanced as expection when the inflight message has been consumed.
+        // The checkpoint should be advanced as expected when the inflight message has
+        // been consumed.
         assert!(checkpoint > 512, "checkpoint = {}", checkpoint);
     }
 
@@ -868,6 +871,38 @@ mod test {
         suite.check_for_write_records(
             suite.flushed_files.path(),
             keys.union(&keys2).map(|s| s.as_slice()),
+        );
+    }
+
+    #[test]
+    fn upload_checkpoint_exits_in_time() {
+        defer! {{
+            std::env::remove_var("LOG_BACKUP_UGC_SLEEP_AND_RETURN");
+        }}
+        let suite = SuiteBuilder::new_named("upload_checkpoint_exits_in_time")
+            .nodes(1)
+            .build();
+        std::env::set_var("LOG_BACKUP_UGC_SLEEP_AND_RETURN", "meow");
+        let (_, victim) = suite.endpoints.iter().next().unwrap();
+        let sched = victim.scheduler();
+        sched
+            .schedule(Task::UpdateGlobalCheckpoint("greenwoods".to_owned()))
+            .unwrap();
+        let start = Instant::now();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        sched
+            .schedule(Task::Sync(
+                Box::new(move || {
+                    tx.send(Instant::now()).unwrap();
+                }),
+                Box::new(|_| true),
+            ))
+            .unwrap();
+        let end = run_async_test(rx).unwrap();
+        assert!(
+            end - start < Duration::from_secs(10),
+            "take = {:?}",
+            end - start
         );
     }
 
