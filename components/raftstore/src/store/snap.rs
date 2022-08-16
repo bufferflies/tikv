@@ -1341,6 +1341,8 @@ pub enum SnapEntry {
 pub struct SnapStats {
     pub sending_count: usize,
     pub receiving_count: usize,
+    pub pending_receiving_size: u64,
+    pub received_size: u64,
 }
 
 #[derive(Clone)]
@@ -1354,6 +1356,9 @@ struct SnapManagerCore {
     encryption_key_manager: Option<Arc<DataKeyManager>>,
     max_per_file_size: Arc<AtomicU64>,
     enable_multi_snapshot_files: Arc<AtomicBool>,
+
+    pending_receiving_size: Arc<AtomicU64>,
+    received_size: Arc<AtomicU64>,
 }
 
 /// `SnapManagerCore` trace all current processing snapshots.
@@ -1637,12 +1642,17 @@ impl SnapManager {
         self.core.limiter.speed_limit()
     }
 
-    pub fn register(&self, key: SnapKey, entry: SnapEntry) {
+    pub fn register(&self, key: SnapKey, entry: SnapEntry, total_size: u64) {
         debug!(
             "register snapshot";
             "key" => %key,
             "entry" => ?entry,
         );
+        if entry == SnapEntry::Receiving {
+            self.core
+                .pending_receiving_size
+                .fetch_add(total_size, Ordering::SeqCst);
+        }
         match self.core.registry.wl().entry(key) {
             Entry::Occupied(mut e) => {
                 if e.get().contains(&entry) {
@@ -1660,7 +1670,7 @@ impl SnapManager {
         }
     }
 
-    pub fn deregister(&self, key: &SnapKey, entry: &SnapEntry) {
+    pub fn deregister(&self, key: &SnapKey, entry: &SnapEntry, total_size: u64) {
         debug!(
             "deregister snapshot";
             "key" => %key,
@@ -1668,6 +1678,16 @@ impl SnapManager {
         );
         let mut need_clean = false;
         let mut handled = false;
+        match *entry {
+            SnapEntry::Receiving => self
+                .core
+                .received_size
+                .fetch_add(total_size, Ordering::SeqCst),
+            SnapEntry::Generating | SnapEntry::Sending | SnapEntry::Applying => 0,
+        };
+        // if entry == &SnapEntry::Receiving {
+        //     self.core.sent_size.fetch_add(total_size, Ordering::SeqCst);
+        // }
         let registry = &mut self.core.registry.wl();
         if let Some(e) = registry.get_mut(key) {
             let last_len = e.len();
@@ -1710,6 +1730,8 @@ impl SnapManager {
         SnapStats {
             sending_count: sending_cnt,
             receiving_count: receiving_cnt,
+            pending_receiving_size: self.core.pending_receiving_size.load(Ordering::SeqCst),
+            received_size: self.core.received_size.load(Ordering::SeqCst),
         }
     }
 
@@ -1868,6 +1890,8 @@ impl SnapManagerBuilder {
                 enable_multi_snapshot_files: Arc::new(AtomicBool::new(
                     self.enable_multi_snapshot_files,
                 )),
+                pending_receiving_size: Arc::new(AtomicU64::new(0)),
+                received_size: Arc::new(AtomicU64::new(0)),
             },
             max_total_size: Arc::new(AtomicU64::new(max_total_size)),
         };
@@ -2085,6 +2109,8 @@ pub mod tests {
             encryption_key_manager: None,
             max_per_file_size: Arc::new(AtomicU64::new(max_per_file_size)),
             enable_multi_snapshot_files: Arc::new(AtomicBool::new(true)),
+            pending_receiving_size: Arc::new(AtomicU64::new(0)),
+            received_size: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -2741,7 +2767,7 @@ pub mod tests {
         let snap_keys = mgr.list_idle_snap().unwrap();
         assert!(snap_keys.is_empty());
         assert!(mgr.has_registered(key));
-        mgr.deregister(key, entry);
+        mgr.deregister(key, entry, 0);
         let mut snap_keys = mgr.list_idle_snap().unwrap();
         assert_eq!(snap_keys.len(), 1);
         let snap_key = snap_keys.pop().unwrap().0;
@@ -2770,7 +2796,7 @@ pub mod tests {
         let region = gen_test_region(1, 1, 1);
 
         // Ensure the snapshot being built will not be deleted on GC.
-        src_mgr.register(key.clone(), SnapEntry::Generating);
+        src_mgr.register(key.clone(), SnapEntry::Generating, 0);
         let mut s1 = src_mgr.get_snapshot_for_building(&key).unwrap();
         let mut snap_data = RaftSnapshotData::default();
         snap_data.set_region(region.clone());
@@ -2782,7 +2808,7 @@ pub mod tests {
         check_registry_around_deregister(&src_mgr, &key, &SnapEntry::Generating);
 
         // Ensure the snapshot being sent will not be deleted on GC.
-        src_mgr.register(key.clone(), SnapEntry::Sending);
+        src_mgr.register(key.clone(), SnapEntry::Sending, 0);
         let mut s2 = src_mgr.get_snapshot_for_sending(&key).unwrap();
         let expected_size = s2.total_size().unwrap();
 
@@ -2795,7 +2821,7 @@ pub mod tests {
         dst_mgr.init().unwrap();
 
         // Ensure the snapshot being received will not be deleted on GC.
-        dst_mgr.register(key.clone(), SnapEntry::Receiving);
+        dst_mgr.register(key.clone(), SnapEntry::Receiving, 0);
         let mut s3 = dst_mgr.get_snapshot_for_receiving(&key, &v[..]).unwrap();
         let n = io::copy(&mut s2, &mut s3).unwrap();
         assert_eq!(n, expected_size);
@@ -2810,7 +2836,7 @@ pub mod tests {
         let snap_key = snap_keys.pop().unwrap().0;
         assert_eq!(snap_key, key);
         assert!(!dst_mgr.has_registered(&snap_key));
-        dst_mgr.register(key.clone(), SnapEntry::Applying);
+        dst_mgr.register(key.clone(), SnapEntry::Applying, 0);
         let s4 = dst_mgr.get_snapshot_for_applying(&key).unwrap();
         let s5 = dst_mgr.get_snapshot_for_applying(&key).unwrap();
         dst_mgr.delete_snapshot(&key, s4.as_ref(), false);

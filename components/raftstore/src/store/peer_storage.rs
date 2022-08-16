@@ -1022,8 +1022,8 @@ where
         apply_state.get_applied_index(),
     );
 
-    mgr.register(key.clone(), SnapEntry::Generating);
-    defer!(mgr.deregister(&key, &SnapEntry::Generating));
+    mgr.register(key.clone(), SnapEntry::Generating, 0);
+    defer!(mgr.deregister(&key, &SnapEntry::Generating, 0));
 
     let state: RegionLocalState = kv_snap
         .get_msg_cf(CF_RAFT, &keys::region_state_key(key.region_id))

@@ -480,6 +480,13 @@ lazy_static! {
             &["type"]
         ).unwrap();
 
+    pub static ref STORE_SNAPSHOT_LIMIT_GAUGE_VEC: IntGaugeVec =
+        register_int_gauge_vec!(
+            "tikv_raftstore_snapshot_limiter_total",
+            "Total number of raftstore snapshot limit.",
+            &["type"]
+        ).unwrap();
+
     pub static ref STORE_SNAPSHOT_VALIDATION_FAILURE_COUNTER_VEC: IntCounterVec =
         register_int_counter_vec!(
             "tikv_raftstore_snapshot_validation_failure_total",

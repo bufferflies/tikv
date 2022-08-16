@@ -140,10 +140,10 @@ pub fn send_snap(
         SnapKey::from_snap(snap)?
     };
 
-    mgr.register(key.clone(), SnapEntry::Sending);
+    mgr.register(key.clone(), SnapEntry::Sending, 0);
     let deregister = {
         let (mgr, key) = (mgr.clone(), key.clone());
-        DeferContext::new(move || mgr.deregister(&key, &SnapEntry::Sending))
+        DeferContext::new(move || mgr.deregister(&key, &SnapEntry::Sending, 0))
     };
 
     let s = box_try!(mgr.get_snapshot_for_sending(&key));
@@ -247,7 +247,6 @@ impl RecvSnapContext {
                 Some(s)
             }
         };
-
         Ok(RecvSnapContext {
             key,
             file: snap,
@@ -288,8 +287,9 @@ fn recv_snap<R: RaftStoreRouter<impl KvEngine> + 'static>(
             return context.finish(raft_router);
         }
         let context_key = context.key.clone();
-        snap_mgr.register(context.key.clone(), SnapEntry::Receiving);
-        defer!(snap_mgr.deregister(&context_key, &SnapEntry::Receiving));
+        let total_size = context.file.as_ref().unwrap().total_size()?;
+        snap_mgr.register(context.key.clone(), SnapEntry::Receiving, total_size);
+        defer!(snap_mgr.deregister(&context_key, &SnapEntry::Receiving, total_size));
         while let Some(item) = stream.next().await {
             fail_point!("receiving_snapshot_net_error", |_| {
                 Err(box_err!("{} failed to receive snapshot", context_key))
