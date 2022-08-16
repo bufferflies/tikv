@@ -426,6 +426,13 @@ lazy_static! {
         "Count for rejected Raft append messages"
     )
     .unwrap();
+
+    pub static ref SNAPSHOT_TRANSPORT_LIMIT_COUNT_VEC: IntCounterVec = register_int_counter_vec!(
+        "tikv_transport_snapshot_limit_count",
+        "Total limit used",
+        &["type"],
+    )
+    .unwrap();
 }
 
 make_auto_flush_static_metric! {

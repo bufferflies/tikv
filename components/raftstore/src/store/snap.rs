@@ -44,7 +44,7 @@ use crate::{
     store::{
         metrics::{
             CfNames, INGEST_SST_DURATION_SECONDS, SNAPSHOT_BUILD_TIME_HISTOGRAM,
-            SNAPSHOT_CF_KV_COUNT, SNAPSHOT_CF_SIZE,
+            SNAPSHOT_CF_KV_COUNT, SNAPSHOT_CF_SIZE, SNAPSHOT_GENERATE_LIMIT_COUNT_VEC,
         },
         peer_storage::JOB_STATUS_CANCELLING,
     },
@@ -892,6 +892,7 @@ impl Snapshot {
                     &self.mgr.limiter,
                 )?
             };
+            SNAPSHOT_GENERATE_LIMIT_COUNT_VEC.inc_by(cf_stat.total_size as u64);
             cf_file.kv_count = cf_stat.key_count as u64;
             if cf_file.kv_count > 0 {
                 // Use `kv_count` instead of file size to check empty files because encrypted
