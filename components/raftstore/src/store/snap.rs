@@ -1342,8 +1342,10 @@ pub enum SnapEntry {
 pub struct SnapStats {
     pub sending_count: usize,
     pub receiving_count: usize,
-    pub pending_receiving_size: u64,
+    pub unreceived_size: u64,
     pub received_size: u64,
+    pub sent_size: u64,
+    pub unsent_size: u64,
 }
 
 #[derive(Clone)]
@@ -1358,8 +1360,9 @@ struct SnapManagerCore {
     max_per_file_size: Arc<AtomicU64>,
     enable_multi_snapshot_files: Arc<AtomicBool>,
 
-    pending_receiving_size: Arc<AtomicU64>,
+    unreceived_size: Arc<AtomicU64>,
     received_size: Arc<AtomicU64>,
+    sent_size: Arc<AtomicU64>,
 }
 
 /// `SnapManagerCore` trace all current processing snapshots.
@@ -1651,7 +1654,7 @@ impl SnapManager {
         );
         if entry == SnapEntry::Receiving {
             self.core
-                .pending_receiving_size
+                .unreceived_size
                 .fetch_add(total_size, Ordering::SeqCst);
         }
         match self.core.registry.wl().entry(key) {
@@ -1684,11 +1687,9 @@ impl SnapManager {
                 .core
                 .received_size
                 .fetch_add(total_size, Ordering::SeqCst),
-            SnapEntry::Generating | SnapEntry::Sending | SnapEntry::Applying => 0,
+            SnapEntry::Sending => self.core.sent_size.fetch_add(total_size, Ordering::SeqCst),
+            SnapEntry::Generating | SnapEntry::Applying => 0,
         };
-        // if entry == &SnapEntry::Receiving {
-        //     self.core.sent_size.fetch_add(total_size, Ordering::SeqCst);
-        // }
         let registry = &mut self.core.registry.wl();
         if let Some(e) = registry.get_mut(key) {
             let last_len = e.len();
@@ -1731,8 +1732,10 @@ impl SnapManager {
         SnapStats {
             sending_count: sending_cnt,
             receiving_count: receiving_cnt,
-            pending_receiving_size: self.core.pending_receiving_size.load(Ordering::SeqCst),
+            unreceived_size: self.core.unreceived_size.load(Ordering::SeqCst),
             received_size: self.core.received_size.load(Ordering::SeqCst),
+            sent_size: self.core.sent_size.load(Ordering::SeqCst),
+            unsent_size: 0,
         }
     }
 
@@ -1891,8 +1894,9 @@ impl SnapManagerBuilder {
                 enable_multi_snapshot_files: Arc::new(AtomicBool::new(
                     self.enable_multi_snapshot_files,
                 )),
-                pending_receiving_size: Arc::new(AtomicU64::new(0)),
+                unreceived_size: Arc::new(AtomicU64::new(0)),
                 received_size: Arc::new(AtomicU64::new(0)),
+                sent_size: Arc::new(AtomicU64::new(0)),
             },
             max_total_size: Arc::new(AtomicU64::new(max_total_size)),
         };

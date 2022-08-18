@@ -102,7 +102,9 @@ impl Stream for SnapChunk {
         let result = self.snap.read_exact(buf.as_mut_slice());
         match result {
             Ok(_) => {
-                SNAPSHOT_TRANSPORT_LIMIT_COUNT_VEC.with_label_values(&["send"]).inc_by(buf.len() as u64);
+                SNAPSHOT_TRANSPORT_LIMIT_COUNT_VEC
+                    .with_label_values(&["send"])
+                    .inc_by(buf.len() as u64);
                 self.remain_bytes -= buf.len();
                 let mut chunk = SnapshotChunk::default();
                 chunk.set_data(buf);
@@ -140,18 +142,16 @@ pub fn send_snap(
         let snap = msg.get_message().get_snapshot();
         SnapKey::from_snap(snap)?
     };
-
-    mgr.register(key.clone(), SnapEntry::Sending, 0);
-    let deregister = {
-        let (mgr, key) = (mgr.clone(), key.clone());
-        DeferContext::new(move || mgr.deregister(&key, &SnapEntry::Sending, 0))
-    };
-
     let s = box_try!(mgr.get_snapshot_for_sending(&key));
     if !s.exists() {
         return Err(box_err!("missing snap file: {:?}", s.path()));
     }
     let total_size = s.total_size()?;
+    mgr.register(key.clone(), SnapEntry::Sending, 0);
+    let deregister = {
+        let (mgr, key) = (mgr.clone(), key.clone());
+        DeferContext::new(move || mgr.deregister(&key, &SnapEntry::Sending, total_size))
+    };
 
     let mut chunks = {
         let mut first_chunk = SnapshotChunk::default();
@@ -297,7 +297,9 @@ fn recv_snap<R: RaftStoreRouter<impl KvEngine> + 'static>(
             });
             let mut chunk = item?;
             let data = chunk.take_data();
-            SNAPSHOT_TRANSPORT_LIMIT_COUNT_VEC.with_label_values(&["recv"]).inc_by(data.len() as u64);
+            SNAPSHOT_TRANSPORT_LIMIT_COUNT_VEC
+                .with_label_values(&["recv"])
+                .inc_by(data.len() as u64);
             if data.is_empty() {
                 return Err(box_err!("{} receive chunk with empty data", context.key));
             }
