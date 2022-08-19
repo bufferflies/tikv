@@ -2329,9 +2329,7 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> StoreFsmDelegate<'a, EK, ER
         let snap_stats = self.ctx.snap_mgr.stats();
         stats.set_sending_snap_count(snap_stats.sending_count as u32);
         stats.set_receiving_snap_count(snap_stats.receiving_count as u32);
-        stats.set_unreceived_size(snap_stats.unreceived_size);
         stats.set_received_size(snap_stats.received_size);
-        stats.set_sent_size(snap_stats.sent_size);
 
         STORE_SNAPSHOT_TRAFFIC_GAUGE_VEC
             .with_label_values(&["sending"])
@@ -2340,9 +2338,6 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> StoreFsmDelegate<'a, EK, ER
             .with_label_values(&["receiving"])
             .set(snap_stats.receiving_count as i64);
 
-        STORE_SNAPSHOT_LIMIT_GAUGE_VEC
-            .with_label_values(&["pending_receiving_size"])
-            .set(snap_stats.unreceived_size as i64);
         STORE_SNAPSHOT_LIMIT_GAUGE_VEC
             .with_label_values(&["received_size"])
             .set(snap_stats.received_size as i64);

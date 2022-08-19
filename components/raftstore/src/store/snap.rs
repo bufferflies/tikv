@@ -1337,15 +1337,41 @@ pub enum SnapEntry {
     Receiving = 3,
     Applying = 4,
 }
+#[derive(Clone)]
+pub struct SnapRecord {
+    pub size: u64,
+    pub start: Instant,
+    pub key: SnapKey,
+    pub duration_sec: u64,
+}
+
+impl SnapRecord {
+    pub fn new(key: SnapKey) -> SnapRecord {
+        SnapRecord {
+            key,
+            start: Instant::now(),
+            duration_sec: 0,
+            size: 0,
+        }
+    }
+
+    pub fn set_size(&mut self, size: u64) {
+        self.size = size
+    }
+
+    pub fn end(&mut self) {
+        self.duration_sec = Instant::now()
+            .saturating_duration_since(self.start)
+            .as_secs();
+    }
+}
 
 /// `SnapStats` is for snapshot statistics.
 pub struct SnapStats {
     pub sending_count: usize,
     pub receiving_count: usize,
-    pub unreceived_size: u64,
     pub received_size: u64,
-    pub sent_size: u64,
-    pub unsent_size: u64,
+    pub records: Vec<SnapRecord>,
 }
 
 #[derive(Clone)]
@@ -1360,9 +1386,8 @@ struct SnapManagerCore {
     max_per_file_size: Arc<AtomicU64>,
     enable_multi_snapshot_files: Arc<AtomicBool>,
 
-    unreceived_size: Arc<AtomicU64>,
     received_size: Arc<AtomicU64>,
-    sent_size: Arc<AtomicU64>,
+    snap_records: Arc<RwLock<HashMap<SnapKey, SnapRecord>>>,
 }
 
 /// `SnapManagerCore` trace all current processing snapshots.
@@ -1652,11 +1677,23 @@ impl SnapManager {
             "key" => %key,
             "entry" => ?entry,
         );
-        if entry == SnapEntry::Receiving {
-            self.core
-                .unreceived_size
-                .fetch_add(total_size, Ordering::SeqCst);
-        }
+        let records = &mut self.core.snap_records.wl();
+        match entry {
+            SnapEntry::Generating => records.insert(key.clone(), SnapRecord::new(key.clone())),
+            SnapEntry::Receiving => {
+                if let Some(r) = records.get_mut(&key) {
+                    r.set_size(total_size);
+                }
+                self.core
+                    .received_size
+                    .fetch_add(total_size, Ordering::SeqCst);
+                None
+            }
+            _ => None,
+        };
+        drop(records);
+        if entry == SnapEntry::Generating {};
+
         match self.core.registry.wl().entry(key) {
             Entry::Occupied(mut e) => {
                 if e.get().contains(&entry) {
@@ -1682,14 +1719,14 @@ impl SnapManager {
         );
         let mut need_clean = false;
         let mut handled = false;
-        match *entry {
-            SnapEntry::Receiving => self
-                .core
-                .received_size
-                .fetch_add(total_size, Ordering::SeqCst),
-            SnapEntry::Sending => self.core.sent_size.fetch_add(total_size, Ordering::SeqCst),
-            SnapEntry::Generating | SnapEntry::Applying => 0,
-        };
+        let records = &mut self.core.snap_records.wl();
+        if *entry == SnapEntry::Applying {
+            if let Some(r) = records.get_mut(key) {
+                r.end();
+            }
+        }
+        drop(records);
+
         let registry = &mut self.core.registry.wl();
         if let Some(e) = registry.get_mut(key) {
             let last_len = e.len();
@@ -1729,13 +1766,19 @@ impl SnapManager {
             }
         }
 
+        let mut records = vec![];
+
+        for v in self.core.snap_records.wl().values_mut() {
+            if v.duration_sec > 0 {
+                records.push(v.clone())
+            }
+        }
+        self.core.snap_records.wl().retain(|_, v| v.size > 0);
         SnapStats {
             sending_count: sending_cnt,
             receiving_count: receiving_cnt,
-            unreceived_size: self.core.unreceived_size.load(Ordering::SeqCst),
             received_size: self.core.received_size.load(Ordering::SeqCst),
-            sent_size: self.core.sent_size.load(Ordering::SeqCst),
-            unsent_size: 0,
+            records,
         }
     }
 
@@ -1894,9 +1937,8 @@ impl SnapManagerBuilder {
                 enable_multi_snapshot_files: Arc::new(AtomicBool::new(
                     self.enable_multi_snapshot_files,
                 )),
-                unreceived_size: Arc::new(AtomicU64::new(0)),
                 received_size: Arc::new(AtomicU64::new(0)),
-                sent_size: Arc::new(AtomicU64::new(0)),
+                snap_records: Default::default(),
             },
             max_total_size: Arc::new(AtomicU64::new(max_total_size)),
         };
@@ -2114,8 +2156,8 @@ pub mod tests {
             encryption_key_manager: None,
             max_per_file_size: Arc::new(AtomicU64::new(max_per_file_size)),
             enable_multi_snapshot_files: Arc::new(AtomicBool::new(true)),
-            pending_receiving_size: Arc::new(AtomicU64::new(0)),
             received_size: Arc::new(AtomicU64::new(0)),
+            snap_records: Default::default(),
         }
     }
 
