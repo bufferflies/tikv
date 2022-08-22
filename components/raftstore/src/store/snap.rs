@@ -1340,18 +1340,24 @@ pub enum SnapEntry {
 #[derive(Clone)]
 pub struct SnapRecord {
     pub size: u64,
-    pub start: Instant,
-    pub key: SnapKey,
-    pub duration_sec: u64,
+    pub region_id: u64,
+    pub gen_start: Instant,
+    pub gen_duration_sec: u64,
+    pub send_start: Instant,
+    pub send_duration_sec: u64,
+    pub finished: bool,
 }
 
 impl SnapRecord {
     pub fn new(key: SnapKey) -> SnapRecord {
         SnapRecord {
-            key,
-            start: Instant::now(),
-            duration_sec: 0,
+            region_id: key.region_id,
+            gen_start: Instant::now(),
+            gen_duration_sec: 0,
+            send_start: Instant::now(),
+            send_duration_sec: 0,
             size: 0,
+            finished: false,
         }
     }
 
@@ -1359,10 +1365,32 @@ impl SnapRecord {
         self.size = size
     }
 
-    pub fn end(&mut self) {
-        self.duration_sec = Instant::now()
-            .saturating_duration_since(self.start)
-            .as_secs();
+    pub fn step(&mut self, entry: &SnapEntry, finished: bool) {
+        if self.finished {
+            return;
+        }
+        match entry {
+            SnapEntry::Generating => {
+                if !finished {
+                    self.gen_start = Instant::now();
+                } else {
+                    self.gen_duration_sec = Instant::now()
+                        .saturating_duration_since(self.gen_start)
+                        .as_secs();
+                }
+            }
+            SnapEntry::Sending => {
+                if !finished {
+                    self.send_start = Instant::now();
+                } else {
+                    self.send_duration_sec = Instant::now()
+                        .saturating_duration_since(self.send_start)
+                        .as_secs();
+                    self.finished = true;
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -1678,19 +1706,14 @@ impl SnapManager {
             "entry" => ?entry,
         );
         let records = &mut self.core.snap_records.wl();
-        match entry {
-            SnapEntry::Generating => records.insert(key.clone(), SnapRecord::new(key.clone())),
-            SnapEntry::Receiving => {
-                if let Some(r) = records.get_mut(&key) {
-                    r.set_size(total_size);
-                }
-                self.core
-                    .received_size
-                    .fetch_add(total_size, Ordering::SeqCst);
-                None
+        if entry == SnapEntry::Generating {
+            records.insert(key.clone(), SnapRecord::new(key.clone()));
+        } else {
+            if let Some(s) = records.get_mut(&key) {
+                s.step(&entry, false);
             }
-            _ => None,
-        };
+        }
+
         drop(records);
         if entry == SnapEntry::Generating {};
 
@@ -1720,10 +1743,8 @@ impl SnapManager {
         let mut need_clean = false;
         let mut handled = false;
         let records = &mut self.core.snap_records.wl();
-        if *entry == SnapEntry::Applying {
-            if let Some(r) = records.get_mut(key) {
-                r.end();
-            }
+        if let Some(s) = records.get_mut(&key) {
+            s.step(entry, true);
         }
         drop(records);
 
@@ -1769,11 +1790,11 @@ impl SnapManager {
         let mut records = vec![];
 
         for v in self.core.snap_records.wl().values_mut() {
-            if v.duration_sec > 0 {
+            if v.finished {
                 records.push(v.clone())
             }
         }
-        self.core.snap_records.wl().retain(|_, v| v.size > 0);
+        self.core.snap_records.wl().retain(|_, v| v.finished);
         SnapStats {
             sending_count: sending_cnt,
             receiving_count: receiving_cnt,
