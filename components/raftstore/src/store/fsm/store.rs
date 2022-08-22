@@ -33,7 +33,7 @@ use keys::{self, data_end_key, data_key, enc_end_key, enc_start_key};
 use kvproto::{
     import_sstpb::{SstMeta, SwitchMode},
     metapb::{self, Region, RegionEpoch},
-    pdpb::{self, QueryStats, StoreStats},
+    pdpb::{self, QueryStats, SnapShotStat, StoreStats},
     raft_cmdpb::{AdminCmdType, AdminRequest},
     raft_serverpb::{ExtraMessageType, PeerState, RaftMessage, RegionLocalState},
     replication_modepb::{ReplicationMode, ReplicationStatus},
@@ -2355,7 +2355,16 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> StoreFsmDelegate<'a, EK, ER
         let snap_stats = self.ctx.snap_mgr.stats();
         stats.set_sending_snap_count(snap_stats.sending_count as u32);
         stats.set_receiving_snap_count(snap_stats.receiving_count as u32);
-        stats.set_received_size(snap_stats.received_size);
+
+        let snapshot_stats = stats.mut_snapshot_stats();
+        for record in snap_stats.records {
+            let mut ss = SnapShotStat::default();
+            ss.set_region_id(record.region_id);
+            ss.set_gen_duration(record.gen_duration_sec);
+            ss.set_send_duation(record.send_duration_sec);
+            ss.set_snapshot_size(record.size);
+            snapshot_stats.push(ss)
+        }
 
         STORE_SNAPSHOT_TRAFFIC_GAUGE_VEC
             .with_label_values(&["sending"])

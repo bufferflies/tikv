@@ -398,7 +398,7 @@ where
         let snap_key = SnapKey::new(region_id, term, idx);
         self.mgr.register(snap_key.clone(), SnapEntry::Applying, 0);
         defer!({
-            self.mgr.deregister(&snap_key, &SnapEntry::Applying, 0);
+            self.mgr.deregister(&snap_key, &SnapEntry::Applying);
         });
         let mut s = box_try!(self.mgr.get_snapshot_for_applying(&snap_key));
         if !s.exists() {

@@ -1366,9 +1366,15 @@ impl SnapRecord {
     }
 
     pub fn step(&mut self, entry: &SnapEntry, finished: bool) {
+        info!("snap record step";
+            "region_id"=>self.region_id,
+            "entry"=>?entry,
+            "finish"=>finished,
+        );
         if self.finished {
             return;
         }
+
         match entry {
             SnapEntry::Generating => {
                 if !finished {
@@ -1711,6 +1717,9 @@ impl SnapManager {
         } else {
             if let Some(s) = records.get_mut(&key) {
                 s.step(&entry, false);
+                if total_size > 0 {
+                    s.set_size(total_size)
+                }
             }
         }
 
@@ -1734,7 +1743,7 @@ impl SnapManager {
         }
     }
 
-    pub fn deregister(&self, key: &SnapKey, entry: &SnapEntry, total_size: u64) {
+    pub fn deregister(&self, key: &SnapKey, entry: &SnapEntry) {
         debug!(
             "deregister snapshot";
             "key" => %key,
@@ -1794,7 +1803,7 @@ impl SnapManager {
                 records.push(v.clone())
             }
         }
-        self.core.snap_records.wl().retain(|_, v| v.finished);
+        self.core.snap_records.wl().retain(|_, v| !v.finished);
         SnapStats {
             sending_count: sending_cnt,
             receiving_count: receiving_cnt,
@@ -2835,7 +2844,7 @@ pub mod tests {
         let snap_keys = mgr.list_idle_snap().unwrap();
         assert!(snap_keys.is_empty());
         assert!(mgr.has_registered(key));
-        mgr.deregister(key, entry, 0);
+        mgr.deregister(key, entry);
         let mut snap_keys = mgr.list_idle_snap().unwrap();
         assert_eq!(snap_keys.len(), 1);
         let snap_key = snap_keys.pop().unwrap().0;

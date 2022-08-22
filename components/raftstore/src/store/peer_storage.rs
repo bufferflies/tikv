@@ -1023,7 +1023,7 @@ where
     );
 
     mgr.register(key.clone(), SnapEntry::Generating, 0);
-    defer!(mgr.deregister(&key, &SnapEntry::Generating, 0));
+    defer!(mgr.deregister(&key, &SnapEntry::Generating));
 
     let state: RegionLocalState = kv_snap
         .get_msg_cf(CF_RAFT, &keys::region_state_key(key.region_id))
