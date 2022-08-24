@@ -10,10 +10,11 @@ use tikv_util::time::Instant;
 make_auto_flush_static_metric! {
     pub label_enum SnapType {
        generate,
-       apply,
+       apply
     }
 
     pub label_enum SnapStatus {
+        total,
         all,
         success,
         abort,

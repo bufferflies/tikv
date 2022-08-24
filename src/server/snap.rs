@@ -102,9 +102,6 @@ impl Stream for SnapChunk {
         let result = self.snap.read_exact(buf.as_mut_slice());
         match result {
             Ok(_) => {
-                SNAPSHOT_TRANSPORT_LIMIT_COUNT_VEC
-                    .with_label_values(&["send"])
-                    .inc_by(buf.len() as u64);
                 self.remain_bytes -= buf.len();
                 let mut chunk = SnapshotChunk::default();
                 chunk.set_data(buf);
@@ -153,6 +150,9 @@ pub fn send_snap(
         DeferContext::new(move || mgr.deregister(&key, &SnapEntry::Sending, true))
     };
 
+    SNAPSHOT_LIMIT_TRANSPORT_BYTES_VEC
+        .with_label_values(&["send"])
+        .inc_by(total_size);
     let mut chunks = {
         let mut first_chunk = SnapshotChunk::default();
         first_chunk.set_message(msg);
@@ -208,6 +208,7 @@ struct RecvSnapContext {
     file: Option<Box<Snapshot>>,
     raft_msg: RaftMessage,
     io_type: IoType,
+    start: Instant,
 }
 
 impl RecvSnapContext {
@@ -253,6 +254,7 @@ impl RecvSnapContext {
             file: snap,
             raft_msg: meta,
             io_type,
+            start: Instant::now(),
         })
     }
 
@@ -270,6 +272,7 @@ impl RecvSnapContext {
         if let Err(e) = raft_router.send_raft_msg(self.raft_msg) {
             return Err(box_err!("{} failed to send snapshot to raft: {}", key, e));
         }
+        info!("saving all snapshot files";"snap_key" => %key, "takes" => ?self.start.saturating_elapsed());
         Ok(())
     }
 }
@@ -289,17 +292,19 @@ fn recv_snap<R: RaftStoreRouter<impl KvEngine> + 'static>(
         }
         let context_key = context.key.clone();
         let total_size = context.file.as_ref().unwrap().total_size()?;
-        snap_mgr.register(context.key.clone(), SnapEntry::Receiving, total_size);
-        defer!(snap_mgr.deregister(&context_key, &SnapEntry::Receiving, true));
+
+        SNAPSHOT_LIMIT_TRANSPORT_BYTES_VEC
+            .with_label_values(&["recv"])
+            .inc_by(total_size);
+        snap_mgr.register(context.key.clone(), SnapEntry::Receiving,total_size);
+        defer!(snap_mgr.deregister(&context_key, &SnapEntry::Receiving,true));
+
         while let Some(item) = stream.next().await {
             fail_point!("receiving_snapshot_net_error", |_| {
                 Err(box_err!("{} failed to receive snapshot", context_key))
             });
             let mut chunk = item?;
             let data = chunk.take_data();
-            SNAPSHOT_TRANSPORT_LIMIT_COUNT_VEC
-                .with_label_values(&["recv"])
-                .inc_by(data.len() as u64);
             if data.is_empty() {
                 return Err(box_err!("{} receive chunk with empty data", context.key));
             }
@@ -439,6 +444,7 @@ where
             }
             Task::Send { addr, msg, cb } => {
                 fail_point!("send_snapshot");
+                let region_id = msg.get_region_id();
                 if self.sending_count.load(Ordering::SeqCst) >= self.cfg.concurrent_send_snap_limit
                 {
                     warn!(
@@ -455,7 +461,6 @@ where
                 let security_mgr = Arc::clone(&self.security_mgr);
                 let sending_count = Arc::clone(&self.sending_count);
                 sending_count.fetch_add(1, Ordering::SeqCst);
-
                 let send_task = send_snap(env, mgr, security_mgr, &self.cfg.clone(), &addr, msg);
                 let task = async move {
                     let res = match send_task {
@@ -474,7 +479,7 @@ where
                             cb(Ok(()));
                         }
                         Err(e) => {
-                            error!("failed to send snap"; "to_addr" => addr, "err" => ?e);
+                            error!("failed to send snap"; "to_addr" => addr, "region_id"=>region_id,"err" => ?e);
                             cb(Err(e));
                         }
                     };

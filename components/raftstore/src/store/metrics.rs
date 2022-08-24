@@ -778,9 +778,9 @@ lazy_static! {
         &["type"]
     ).unwrap();
 
-    pub static ref SNAPSHOT_GENERATE_LIMIT_COUNT_VEC: IntCounter = register_int_counter!(
-        "tikv_genrate_snapshot_limit_count",
-        "Total limit used",
+    pub static ref SNAPSHOT_LIMIT_GENERATE_BYTES: IntCounter = register_int_counter!(
+        "tikv_snapshot_limit_generate_bytes",
+        "Total snapshot generate limit  used",
     )
     .unwrap();
 }

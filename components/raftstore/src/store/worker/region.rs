@@ -7,7 +7,6 @@ use std::{
         HashMap, VecDeque,
     },
     fmt::{self, Display, Formatter},
-    rc::Rc,
     slice::SliceIndex,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -15,7 +14,7 @@ use std::{
         Arc,
     },
     time::Duration,
-    u64, borrow::BorrowMut,
+    u64,
 };
 
 use engine_traits::{DeleteStrategy, KvEngine, Mutable, Range, WriteBatch, CF_LOCK, CF_RAFT};
@@ -398,7 +397,7 @@ where
         let term = apply_state.get_truncated_state().get_term();
         let idx = apply_state.get_truncated_state().get_index();
         let snap_key = SnapKey::new(region_id, term, idx);
-        let flag = &mut true;
+        let flag=true;
         self.mgr.register(snap_key.clone(), SnapEntry::Applying, 0);
         defer!({
             self.mgr.deregister(&snap_key, &SnapEntry::Applying, flag);
@@ -417,7 +416,7 @@ where
             coprocessor_host: self.coprocessor_host.clone(),
         };
 
-        s.apply(options).map_err(|e| flag=false;e);
+        s.apply(options)?;
 
         let mut wb = self.engine.write_batch();
         region_state.set_state(PeerState::Normal);
@@ -749,7 +748,7 @@ where
                         allow_multi_files_snapshot = !is_tiflash;
                     }
                 }
-
+                SNAP_COUNTER.generate.total.inc();
                 self.pool.spawn(async move {
                     tikv_alloc::add_thread_memory_accessor();
                     ctx.handle_gen(

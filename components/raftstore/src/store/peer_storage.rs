@@ -1022,7 +1022,7 @@ where
         apply_state.get_applied_index(),
     );
 
-    let  flag =true;
+    let flag = true;
     mgr.register(key.clone(), SnapEntry::Generating, 0);
     defer!(mgr.deregister(&key, &SnapEntry::Generating, flag));
 
@@ -1050,16 +1050,13 @@ where
     let conf_state = util::conf_state_from_region(state.get_region());
     snapshot.mut_metadata().set_conf_state(conf_state);
 
-    let mut c= &flag;
-    let mut s = mgr.get_snapshot_for_building(&key).map_err(|e| {
-        c = false;
+    let mut s = mgr.get_snapshot_for_building(&key).map_err(|e| {       
         e
     })?;
     // Set snapshot data.
     let mut snap_data = RaftSnapshotData::default();
     snap_data.set_region(state.get_region().clone());
     let mut stat = SnapshotStatistics::new();
-    let mut c= &flag;
     s.build(
         engine,
         &kv_snap,
@@ -1069,7 +1066,6 @@ where
         allow_multi_files_snapshot,
     )
     .map_err(|e| {
-        c = false;
         e
     })?;
     snap_data.mut_meta().set_for_balance(for_balance);
