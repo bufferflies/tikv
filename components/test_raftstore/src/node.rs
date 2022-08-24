@@ -103,10 +103,10 @@ impl Transport for ChannelTransport {
                 let core = self.core.lock().unwrap();
                 core.snap_paths[&from_store]
                     .0
-                    .deregister(&key, &SnapEntry::Sending);
+                    .deregister(&key, &SnapEntry::Sending,true);
                 core.snap_paths[&to_store]
                     .0
-                    .deregister(&key, &SnapEntry::Receiving);
+                    .deregister(&key, &SnapEntry::Receiving,true);
             });
 
             copy_snapshot(from, to)?;

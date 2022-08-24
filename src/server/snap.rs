@@ -150,7 +150,7 @@ pub fn send_snap(
     mgr.register(key.clone(), SnapEntry::Sending, 0);
     let deregister = {
         let (mgr, key) = (mgr.clone(), key.clone());
-        DeferContext::new(move || mgr.deregister(&key, &SnapEntry::Sending))
+        DeferContext::new(move || mgr.deregister(&key, &SnapEntry::Sending, true))
     };
 
     let mut chunks = {
@@ -290,7 +290,7 @@ fn recv_snap<R: RaftStoreRouter<impl KvEngine> + 'static>(
         let context_key = context.key.clone();
         let total_size = context.file.as_ref().unwrap().total_size()?;
         snap_mgr.register(context.key.clone(), SnapEntry::Receiving, total_size);
-        defer!(snap_mgr.deregister(&context_key, &SnapEntry::Receiving));
+        defer!(snap_mgr.deregister(&context_key, &SnapEntry::Receiving, true));
         while let Some(item) = stream.next().await {
             fail_point!("receiving_snapshot_net_error", |_| {
                 Err(box_err!("{} failed to receive snapshot", context_key))

@@ -7,13 +7,15 @@ use std::{
         HashMap, VecDeque,
     },
     fmt::{self, Display, Formatter},
+    rc::Rc,
+    slice::SliceIndex,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc::SyncSender,
         Arc,
     },
     time::Duration,
-    u64,
+    u64, borrow::BorrowMut,
 };
 
 use engine_traits::{DeleteStrategy, KvEngine, Mutable, Range, WriteBatch, CF_LOCK, CF_RAFT};
@@ -396,9 +398,10 @@ where
         let term = apply_state.get_truncated_state().get_term();
         let idx = apply_state.get_truncated_state().get_index();
         let snap_key = SnapKey::new(region_id, term, idx);
+        let flag = &mut true;
         self.mgr.register(snap_key.clone(), SnapEntry::Applying, 0);
         defer!({
-            self.mgr.deregister(&snap_key, &SnapEntry::Applying);
+            self.mgr.deregister(&snap_key, &SnapEntry::Applying, flag);
         });
         let mut s = box_try!(self.mgr.get_snapshot_for_applying(&snap_key));
         if !s.exists() {
@@ -413,7 +416,8 @@ where
             write_batch_size: self.batch_size,
             coprocessor_host: self.coprocessor_host.clone(),
         };
-        s.apply(options)?;
+
+        s.apply(options).map_err(|e| flag=false;e);
 
         let mut wb = self.engine.write_batch();
         region_state.set_state(PeerState::Normal);
