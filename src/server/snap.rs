@@ -479,7 +479,7 @@ where
                             cb(Ok(()));
                         }
                         Err(e) => {
-                            error!("failed to send snap"; "to_addr" => addr, "region_id"=>region_id,"err" => ?e);
+                            error!("failed to send snap"; "to_addr" => addr, "region_id"=>region_id, "err" => ?e);
                             cb(Err(e));
                         }
                     };
