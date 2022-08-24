@@ -1770,7 +1770,7 @@ impl SnapManager {
         }
     }
 
-    pub fn deregister(&self, key: &SnapKey, entry: &SnapEntry, _: bool) {
+    pub fn deregister(&self, key: &SnapKey, entry: &SnapEntry, _: &bool) {
         debug!(
             "deregister snapshot";
             "key" => %key,

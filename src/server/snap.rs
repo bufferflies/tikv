@@ -296,8 +296,8 @@ fn recv_snap<R: RaftStoreRouter<impl KvEngine> + 'static>(
         SNAPSHOT_LIMIT_TRANSPORT_BYTES_VEC
             .with_label_values(&["recv"])
             .inc_by(total_size);
-        snap_mgr.register(context.key.clone(), SnapEntry::Receiving,total_size);
-        defer!(snap_mgr.deregister(&context_key, &SnapEntry::Receiving,true));
+        snap_mgr.register(context.key.clone(), SnapEntry::Receiving, total_size);
+        defer!(snap_mgr.deregister(&context_key, &SnapEntry::Receiving, true));
 
         while let Some(item) = stream.next().await {
             fail_point!("receiving_snapshot_net_error", |_| {
@@ -479,7 +479,7 @@ where
                             cb(Ok(()));
                         }
                         Err(e) => {
-                            error!("failed to send snap"; "to_addr" => addr, "region_id"=>region_id,"err" => ?e);
+                            error!("failed to send snap"; "to_addr" => addr, "region_id"=>region_id, "err" => ?e);
                             cb(Err(e));
                         }
                     };

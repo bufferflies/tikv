@@ -2,9 +2,11 @@
 
 // #[PerformanceCriticalPath]
 use std::{
+    borrow::BorrowMut,
     cell::RefCell,
     error,
     ops::{Deref, DerefMut},
+    rc::Rc,
     sync::{
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         mpsc::{self, Receiver, TryRecvError},
@@ -827,6 +829,7 @@ where
         let task = RegionTask::Apply {
             region_id: self.get_region_id(),
             status,
+            peer_id: self.peer_id,
         };
 
         // Don't schedule the snapshot to region worker.
@@ -1022,11 +1025,10 @@ where
         apply_state.get_applied_index(),
     );
 
-    let flag = true;
+    let mut flag = true;
     mgr.register(key.clone(), SnapEntry::Generating, 0);
-    defer!(mgr.deregister(&key, &SnapEntry::Generating, flag));
-
-    let state: RegionLocalState = kv_snap
+    defer!(mgr.deregister(&key, &SnapEntry::Generating, flag.as_ref()));
+        let state: RegionLocalState = kv_snap
         .get_msg_cf(CF_RAFT, &keys::region_state_key(key.region_id))
         .and_then(|res| match res {
             None => Err(box_err!("region {} could not find region info", region_id)),
@@ -1050,7 +1052,9 @@ where
     let conf_state = util::conf_state_from_region(state.get_region());
     snapshot.mut_metadata().set_conf_state(conf_state);
 
-    let mut s = mgr.get_snapshot_for_building(&key).map_err(|e| {       
+    // let c = flag.clone();
+    let mut s = mgr.get_snapshot_for_building(&key).map_err(|e| {
+        flag= false;
         e
     })?;
     // Set snapshot data.
@@ -1065,9 +1069,7 @@ where
         &mut stat,
         allow_multi_files_snapshot,
     )
-    .map_err(|e| {
-        e
-    })?;
+    .map_err(|e| e)?;
     snap_data.mut_meta().set_for_balance(for_balance);
     let v = snap_data.write_to_bytes()?;
     snapshot.set_data(v.into());

@@ -780,7 +780,7 @@ lazy_static! {
 
     pub static ref SNAPSHOT_LIMIT_GENERATE_BYTES: IntCounter = register_int_counter!(
         "tikv_snapshot_limit_generate_bytes",
-        "Total snapshot generate limit  used",
+        "Total snapshot generate limit used",
     )
     .unwrap();
 }
