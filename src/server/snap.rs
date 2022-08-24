@@ -151,7 +151,9 @@ pub fn send_snap(
         return Err(box_err!("missing snap file: {:?}", s.path()));
     }
     let total_size = s.total_size()?;
-
+    SNAPSHOT_LIMIT_TRANSPORT_BYTES_VEC
+        .with_label_values(&["send"])
+        .inc_by(total_size);
     let mut chunks = {
         let mut first_chunk = SnapshotChunk::default();
         first_chunk.set_message(msg);
@@ -291,6 +293,10 @@ fn recv_snap<R: RaftStoreRouter<impl KvEngine> + 'static>(
             return context.finish(raft_router);
         }
         let context_key = context.key.clone();
+        let total_size = context.file.as_ref().unwrap().total_size()?;
+        SNAPSHOT_LIMIT_TRANSPORT_BYTES_VEC
+            .with_label_values(&["recv"])
+            .inc_by(total_size);
         snap_mgr.register(context.key.clone(), SnapEntry::Receiving);
         defer!(snap_mgr.deregister(&context_key, &SnapEntry::Receiving));
         while let Some(item) = stream.next().await {
