@@ -1354,15 +1354,16 @@ pub struct SnapRecord {
 
 impl SnapRecord {
     pub fn new(key: SnapKey) -> SnapRecord {
+        let now = Instant::now();
         SnapRecord {
             region_id: key.region_id,
-            gen_start: Instant::now(),
+            gen_start: now,
             gen_duration_sec: 0,
-            send_start: Instant::now(),
+            send_start: now,
             send_duration_sec: 0,
-            recv_start: Instant::now(),
+            recv_start: now,
             recv_duration_sec: 0,
-            apply_start: Instant::now(),
+            apply_start: now,
             apply_duration_sec: 0,
             size: 0,
             finished: false,
@@ -1370,6 +1371,7 @@ impl SnapRecord {
     }
 
     pub fn set_size(&mut self, size: u64) {
+        info!("set snap size";"region_id"=>self.region_id);
         self.size = size
     }
 
@@ -1408,9 +1410,8 @@ impl SnapRecord {
                     self.recv_start = Instant::now();
                 } else {
                     self.send_duration_sec = Instant::now()
-                        .saturating_duration_since(self.send_start)
+                        .saturating_duration_since(self.recv_start)
                         .as_secs();
-                    self.finished = true;
                 }
             }
             SnapEntry::Applying => {
@@ -1418,7 +1419,7 @@ impl SnapRecord {
                     self.apply_start = Instant::now();
                 } else {
                     self.apply_duration_sec = Instant::now()
-                        .saturating_duration_since(self.send_start)
+                        .saturating_duration_since(self.apply_start)
                         .as_secs();
                     self.finished = true;
                 }
@@ -1733,7 +1734,7 @@ impl SnapManager {
     }
 
     pub fn register(&self, key: SnapKey, entry: SnapEntry, total_size: u64) {
-        debug!(
+        info!(
             "register snapshot";
             "key" => %key,
             "entry" => ?entry,
@@ -1770,7 +1771,7 @@ impl SnapManager {
         }
     }
 
-    pub fn deregister(&self, key: &SnapKey, entry: &SnapEntry, _: &bool) {
+    pub fn deregister(&self, key: &SnapKey, entry: &SnapEntry) {
         debug!(
             "deregister snapshot";
             "key" => %key,

@@ -2,11 +2,9 @@
 
 // #[PerformanceCriticalPath]
 use std::{
-    borrow::BorrowMut,
     cell::RefCell,
     error,
     ops::{Deref, DerefMut},
-    rc::Rc,
     sync::{
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         mpsc::{self, Receiver, TryRecvError},
@@ -1027,8 +1025,8 @@ where
 
     let mut flag = true;
     mgr.register(key.clone(), SnapEntry::Generating, 0);
-    defer!(mgr.deregister(&key, &SnapEntry::Generating, flag.as_ref()));
-        let state: RegionLocalState = kv_snap
+    defer!(mgr.deregister(&key, &SnapEntry::Generating));
+    let state: RegionLocalState = kv_snap
         .get_msg_cf(CF_RAFT, &keys::region_state_key(key.region_id))
         .and_then(|res| match res {
             None => Err(box_err!("region {} could not find region info", region_id)),
@@ -1054,7 +1052,7 @@ where
 
     // let c = flag.clone();
     let mut s = mgr.get_snapshot_for_building(&key).map_err(|e| {
-        flag= false;
+        flag = false;
         e
     })?;
     // Set snapshot data.

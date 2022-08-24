@@ -85,14 +85,14 @@ impl Transport for ChannelTransport {
             let key = SnapKey::from_snap(snap).unwrap();
             let from = match self.core.lock().unwrap().snap_paths.get(&from_store) {
                 Some(p) => {
-                    p.0.register(key.clone(), SnapEntry::Sending);
+                    p.0.register(key.clone(), SnapEntry::Sending, 0);
                     p.0.get_snapshot_for_sending(&key).unwrap()
                 }
                 None => return Err(box_err!("missing temp dir for store {}", from_store)),
             };
             let to = match self.core.lock().unwrap().snap_paths.get(&to_store) {
                 Some(p) => {
-                    p.0.register(key.clone(), SnapEntry::Receiving);
+                    p.0.register(key.clone(), SnapEntry::Receiving, 0);
                     let data = msg.get_message().get_snapshot().get_data();
                     p.0.get_snapshot_for_receiving(&key, data).unwrap()
                 }
@@ -103,10 +103,10 @@ impl Transport for ChannelTransport {
                 let core = self.core.lock().unwrap();
                 core.snap_paths[&from_store]
                     .0
-                    .deregister(&key, &SnapEntry::Sending, true);
+                    .deregister(&key, &SnapEntry::Sending);
                 core.snap_paths[&to_store]
                     .0
-                    .deregister(&key, &SnapEntry::Receiving, true);
+                    .deregister(&key, &SnapEntry::Receiving);
             });
 
             copy_snapshot(from, to)?;

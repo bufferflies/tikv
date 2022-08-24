@@ -7,7 +7,6 @@ use std::{
         HashMap, VecDeque,
     },
     fmt::{self, Display, Formatter},
-    slice::SliceIndex,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc::SyncSender,
@@ -410,10 +409,9 @@ where
         let term = apply_state.get_truncated_state().get_term();
         let idx = apply_state.get_truncated_state().get_index();
         let snap_key = SnapKey::new(region_id, term, idx);
-        let flag = true;
         self.mgr.register(snap_key.clone(), SnapEntry::Applying, 0);
         defer!({
-            self.mgr.deregister(&snap_key, &SnapEntry::Applying, &flag);
+            self.mgr.deregister(&snap_key, &SnapEntry::Applying);
         });
         let mut s = box_try!(self.mgr.get_snapshot_for_applying(&snap_key));
         if !s.exists() {

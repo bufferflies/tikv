@@ -144,10 +144,10 @@ pub fn send_snap(
         return Err(box_err!("missing snap file: {:?}", s.path()));
     }
     let total_size = s.total_size()?;
-    mgr.register(key.clone(), SnapEntry::Sending, 0);
+    mgr.register(key.clone(), SnapEntry::Sending, total_size);
     let deregister = {
         let (mgr, key) = (mgr.clone(), key.clone());
-        DeferContext::new(move || mgr.deregister(&key, &SnapEntry::Sending, true))
+        DeferContext::new(move || mgr.deregister(&key, &SnapEntry::Sending))
     };
 
     SNAPSHOT_LIMIT_TRANSPORT_BYTES_VEC
@@ -297,7 +297,7 @@ fn recv_snap<R: RaftStoreRouter<impl KvEngine> + 'static>(
             .with_label_values(&["recv"])
             .inc_by(total_size);
         snap_mgr.register(context.key.clone(), SnapEntry::Receiving, total_size);
-        defer!(snap_mgr.deregister(&context_key, &SnapEntry::Receiving, true));
+        defer!(snap_mgr.deregister(&context_key, &SnapEntry::Receiving));
 
         while let Some(item) = stream.next().await {
             fail_point!("receiving_snapshot_net_error", |_| {
