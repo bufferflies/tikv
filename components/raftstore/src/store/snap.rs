@@ -1738,6 +1738,7 @@ impl SnapManager {
             "register snapshot";
             "key" => %key,
             "entry" => ?entry,
+            "total_size"=>total_size,
         );
         let records = &mut self.core.snap_records.wl();
         if records.get_mut(&key).is_none() {
