@@ -14,7 +14,7 @@ concurrency:
 jobs:
   dev:
     name: Run clippy and rustfmt then build and test
-    runs-on: large-quota
+    runs-on: self-hosted
     env:
       RUSTFLAGS: -Dwarnings
       FAIL_POINT: "1"

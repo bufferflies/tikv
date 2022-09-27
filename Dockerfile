@@ -76,12 +76,12 @@ COPY components/ ./components/
 COPY src/ ./src/
 
 # Build binaries now
-RUN source /opt/rh/devtoolset-8/enable && make build_dist_debug
+RUN source /opt/rh/devtoolset-8/enable && make build_dist_release
 
 # Export to a clean image
 FROM amazonlinux:2022.0.20220504.1
-COPY --from=builder /tikv/target/debug/tikv-server /tikv-server
-COPY --from=builder /tikv/target/debug/tikv-ctl /tikv-ctl
+COPY --from=builder /tikv/target/release/tikv-server /tikv-server
+COPY --from=builder /tikv/target/release/tikv-ctl /tikv-ctl
 
 EXPOSE 20160 20180
 
