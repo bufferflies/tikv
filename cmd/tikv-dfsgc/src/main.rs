@@ -8,7 +8,10 @@ use std::{
     fs,
     path::PathBuf,
     str::FromStr,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
@@ -25,6 +28,8 @@ use kvproto::metapb::Store;
 use pd_client::{PdClient, RpcClient};
 use security::{SecurityConfig, SecurityManager};
 use slog_global::{error, info};
+
+static REMOVED: AtomicUsize = AtomicUsize::new(0);
 
 fn main() {
     init_logger();
@@ -154,6 +159,7 @@ impl GcWorker {
             }
         }
         info!("start remove garbage files after {}", start_after);
+        let mut checked = 0;
         loop {
             let s3fs = self.s3fs.clone();
             let (files, has_more) = self
@@ -166,6 +172,7 @@ impl GcWorker {
                 if !self.valid_files.contains(&file_id) {
                     // Remove the files one by one to prevent reach API rate limit.
                     self.remove_garbage_file(file_id);
+                    checked += 1;
                 }
             }
             if !files.is_empty() {
@@ -179,6 +186,13 @@ impl GcWorker {
         if self.progress_file_path.exists() {
             fs::remove_file(self.progress_file_path.as_path()).unwrap();
         }
+
+        info!(
+            "{} files valid, {} files checked, {} files removed",
+            self.valid_files.len(),
+            checked,
+            REMOVED.load(Ordering::SeqCst)
+        );
         info!("finished");
     }
 
@@ -188,9 +202,10 @@ impl GcWorker {
         self.s3fs.get_runtime().block_on(async move {
             if !s3fs.is_removed(id).await {
                 s3fs.remove(id, opts).await;
+                REMOVED.fetch_add(1, Ordering::SeqCst);
+                info!("removed {}", id);
             }
         });
-        info!("removed {}", id);
     }
 }
 
