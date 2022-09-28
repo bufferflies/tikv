@@ -537,6 +537,17 @@ impl<'a> PeerMsgHandler<'a> {
                 .handle_stale_msg(msg, self.fsm.peer.region().get_region_epoch().clone(), None);
             return true;
         }
+        if !self.peer.is_initialized() {
+            match msg.get_message().get_msg_type() {
+                MessageType::MsgRequestVote | MessageType::MsgRequestPreVote => {
+                    // An uninitialized peer may be replaced by split later, if we vote for one peer
+                    // and later replaced by split, we may vote for another peer on the same term,
+                    // break the raft protocol.
+                    return true;
+                }
+                _ => {}
+            }
+        }
 
         let target = msg.get_to_peer();
         match target.get_id().cmp(&self.fsm.peer.peer_id()) {
