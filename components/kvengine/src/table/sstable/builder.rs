@@ -9,7 +9,7 @@ use xorf::BinaryFuse8;
 
 use super::super::table::Value;
 
-pub const CRC32_IEEE: u8 = 1;
+pub const CRC32C: u8 = 1;
 pub const PROP_KEY_SMALLEST: &str = "smallest";
 pub const PROP_KEY_BIGGEST: &str = "biggest";
 pub const PROP_KEY_MAX_TS: &str = "max_ts";
@@ -121,7 +121,7 @@ impl Builder {
     pub fn new(fid: u64, block_size: usize, compression_tp: u8) -> Self {
         let mut x = Self::default();
         x.fid = fid;
-        x.checksum_tp = CRC32_IEEE;
+        x.checksum_tp = CRC32C;
         x.block_size = block_size;
         x.block_builder.compression_tp = compression_tp;
         x.old_builder.compression_tp = compression_tp;
@@ -240,8 +240,8 @@ impl Builder {
         buf.put_u32_le(AUX_INDEX_BINARY_FUSE8);
         buf.put_u32_le(fuse8.len() as u32);
         buf.extend_from_slice(fuse8);
-        if self.checksum_tp == CRC32_IEEE {
-            let checksum = crc32fast::hash(&buf[(origin_len + 4)..]);
+        if self.checksum_tp == CRC32C {
+            let checksum = crc32c::crc32c(&buf[(origin_len + 4)..]);
             LittleEndian::write_u32(&mut buf[origin_len..], checksum);
         }
     }
@@ -260,8 +260,8 @@ impl Builder {
             &self.old_entries.to_le_bytes(),
         );
         Builder::add_property(buf, PROP_KEY_TOMBS.as_bytes(), &self.tombs.to_le_bytes());
-        if self.checksum_tp == CRC32_IEEE {
-            let checksum = crc32fast::hash(&buf[(origin_len + 4)..]);
+        if self.checksum_tp == CRC32C {
+            let checksum = crc32c::crc32c(&buf[(origin_len + 4)..]);
             LittleEndian::write_u32(&mut buf[origin_len..], checksum);
         }
     }
@@ -447,8 +447,8 @@ impl BlockBuilder {
             _ => panic!("unexpected compression type {}", self.compression_tp),
         }
         let mut checksum = 0u32;
-        if checksum_tp == CRC32_IEEE {
-            checksum = crc32fast::hash(&self.buf[begin_off..]);
+        if checksum_tp == CRC32C {
+            checksum = crc32c::crc32c(&self.buf[begin_off..]);
         }
         let slice = self.buf.as_mut_slice();
         LittleEndian::write_u32(&mut slice[(begin_off - 4)..], checksum);
@@ -508,9 +508,9 @@ impl BlockBuilder {
             let block_key = self.block_keys.get_entry(i);
             self.buf.extend_from_slice(&block_key[common_prefix_len..]);
         }
-        if checksum_tp == CRC32_IEEE {
+        if checksum_tp == CRC32C {
             let slice = self.buf.as_mut_slice();
-            LittleEndian::write_u32(slice, crc32fast::hash(&slice[4..]))
+            LittleEndian::write_u32(slice, crc32c::crc32c(&slice[4..]))
         }
     }
 

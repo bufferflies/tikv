@@ -470,10 +470,8 @@ fn validate_checksum(data: &[u8], checksum_type: u8) -> Result<()> {
     }
     let checksum = LittleEndian::read_u32(data);
     let content = &data[4..];
-    if checksum_type == CRC32_IEEE {
-        let mut hasher = crc32fast::Hasher::new();
-        hasher.update(content);
-        let got_checksum = hasher.finalize();
+    if checksum_type == CRC32C {
+        let got_checksum = crc32c::crc32c(content);
         if checksum != got_checksum {
             return Err(table::Error::InvalidChecksum(format!(
                 "checksum mismatch expect {} got {}",
