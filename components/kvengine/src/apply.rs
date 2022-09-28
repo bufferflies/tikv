@@ -343,6 +343,9 @@ impl EngineCore {
     }
 
     fn remove_dfs_files(&self, shard: &Shard, del_files: HashMap<u64, bool>) {
+        if !shard.is_active() {
+            return;
+        }
         let fs = self.fs.clone();
         let opts = dfs::Options::new(shard.id, shard.ver);
         let runtime = fs.get_runtime();
