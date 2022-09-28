@@ -440,7 +440,7 @@ impl EngineCore {
                     let fs = self.fs.clone();
                     let atx = tx.clone();
                     self.fs.get_runtime().spawn(async move {
-                        if let Err(err) = fs.create(id, buf.freeze(), opts).await {
+                        if let Err(err) = fs.create(dfs::TENANT, id, buf.freeze(), opts).await {
                             atx.send(Err(err)).unwrap();
                         } else {
                             atx.send(Ok(())).unwrap();

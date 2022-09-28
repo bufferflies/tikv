@@ -220,6 +220,7 @@ impl Engine {
         self.fs.get_runtime().spawn(async move {
             let res = fs
                 .create(
+                    dfs::TENANT,
                     l0_builder.get_fid(),
                     l0_data,
                     dfs::Options::new(id_ver.id, id_ver.ver),

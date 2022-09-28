@@ -82,7 +82,7 @@ impl EngineCore {
             let fs = self.fs.clone();
             let tx = result_tx.clone();
             runtime.spawn(async move {
-                let res = fs.read_file(id, opts).await;
+                let res = fs.read_file(dfs::TENANT, id, opts).await;
                 tx.send(res.map(|data| (id, is_l0, data))).unwrap();
             });
             msg_count += 1;

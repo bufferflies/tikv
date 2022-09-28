@@ -677,7 +677,7 @@ pub(crate) fn compact_l0(
 
             fs.get_runtime().spawn(async move {
                 atx.send(
-                    afs.create(tbl_create.id, data, opts)
+                    afs.create(dfs::TENANT, tbl_create.id, data, opts)
                         .await
                         .map(|_| tbl_create),
                 )
@@ -714,7 +714,7 @@ pub(crate) fn load_table_files(
         let afs = fs.clone();
         fs.get_runtime().spawn(async move {
             let res = afs
-                .read_file(aid, opts)
+                .read_file( dfs::TENANT, aid, opts)
                 .await
                 .map(|data| (aid, data))
                 .map_err(|e| Error::DFSError(e));
@@ -985,7 +985,7 @@ pub(crate) fn compact_tables(
         let atx = tx.clone();
         fs.get_runtime().spawn(async move {
             atx.send(
-                afs.create(tbl_create.id, buf.freeze(), opts)
+                afs.create(dfs::TENANT, tbl_create.id, buf.freeze(), opts)
                     .await
                     .map(|_| tbl_create),
             )
@@ -1189,7 +1189,7 @@ fn compact_destroy_range(
         let tx = tx.clone();
         let dfs_clone = dfs.clone();
         dfs.get_runtime().spawn(async move {
-            tx.send(dfs_clone.create(new_id, data, opts).await).unwrap();
+            tx.send(dfs_clone.create(dfs::TENANT, new_id, data, opts).await).unwrap();
         });
         let mut delete = pb::TableDelete::new();
         delete.set_id(id);

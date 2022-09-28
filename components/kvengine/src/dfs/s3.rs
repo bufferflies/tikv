@@ -4,6 +4,7 @@ use std::{ops::Deref, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use farmhash::fingerprint64;
 use rusoto_core::{Region, RusotoError};
 use rusoto_s3::{
     util::{AddressingStyle, S3Config},
@@ -124,11 +125,19 @@ impl S3FSCore {
         }
     }
 
-    fn file_key(&self, file_id: u64) -> String {
-        format!("{}/{:08x}/{:016x}.sst", self.prefix, 0, file_id)
+    fn file_key(&self, tenant: &str, file_id: u64) -> String {
+        let idx = (fingerprint64(file_id.to_le_bytes().as_slice())) as u8;
+        format!("{}/{}/{:02x}/{:016x}.sst", self.prefix, tenant, idx, file_id)
     }
 
-    fn parse_file_id(&self, key: &str) -> u64 {
+    fn parse_suffix(&self, key: &str) -> String {
+        let end_idx = key.len();
+        let start_idx = end_idx - 4 - 16 - 1 - 2;
+        let suffix = &key[start_idx..end_idx];
+        suffix.to_string()
+    }
+
+    pub fn parse_file_id(&self, key: &str) -> u64 {
         let end_idx = key.len() - 4;
         let start_idx = end_idx - 16;
         let file_part = &key[start_idx..end_idx];
@@ -165,13 +174,13 @@ impl S3FSCore {
 
     // list gets a list of file ids greater than start_after.
     // The result contains a vector of file ids and a boolean indicate if there is more.
-    pub async fn list(&self, start_after: u64) -> crate::dfs::Result<(Vec<u64>, bool)> {
+    pub async fn list(&self, tenant: &str, start_after: &str) -> crate::dfs::Result<(Vec<String>, bool)> {
         let mut retry_cnt = 0;
         loop {
             let mut req = ListObjectsV2Request::default();
-            req.prefix = Some(self.prefix.clone());
+            req.prefix = Some(format!("{}/{}/", self.prefix.clone(), tenant));
             req.bucket = self.bucket.clone();
-            req.start_after = Some(self.file_key(start_after));
+            req.start_after = Some(format!("{}/{}/{}", self.prefix.clone(), tenant, start_after));
             let result = self.s3c.list_objects_v2(req).await;
             if result.is_ok() {
                 let output = result.unwrap();
@@ -179,7 +188,7 @@ impl S3FSCore {
                 output.contents.map(|objects| {
                     for obj in objects {
                         let key = obj.key.unwrap();
-                        files.push(self.parse_file_id(&key))
+                        files.push(self.parse_suffix(&key))
                     }
                 });
                 return Ok((files, output.is_truncated.unwrap_or(false)));
@@ -201,11 +210,11 @@ impl S3FSCore {
         }
     }
 
-    pub async fn is_removed(&self, file_id: u64) -> bool {
+    pub async fn is_removed(&self, tenant: &str, file_id: u64) -> bool {
         let mut retry_cnt = 0;
         loop {
             let bucket = self.bucket.clone();
-            let key = self.file_key(file_id);
+            let key = self.file_key(tenant, file_id);
             let mut req = rusoto_s3::GetObjectTaggingRequest::default();
             req.key = key;
             req.bucket = bucket;
@@ -240,13 +249,13 @@ impl S3FSCore {
 
 #[async_trait]
 impl DFS for S3FS {
-    async fn read_file(&self, file_id: u64, _opts: Options) -> crate::dfs::Result<Bytes> {
+    async fn read_file(&self, tenant: &str, file_id: u64, _opts: Options) -> crate::dfs::Result<Bytes> {
         let mut retry_cnt = 0;
         let start_time = Instant::now_coarse();
         loop {
             let mut req = rusoto_s3::GetObjectRequest::default();
             req.bucket = self.bucket.clone();
-            req.key = self.file_key(file_id);
+            req.key = self.file_key(tenant, file_id);
             let result = self.s3c.get_object(req).await;
             if result.is_ok() {
                 let output = result.unwrap();
@@ -285,13 +294,13 @@ impl DFS for S3FS {
         }
     }
 
-    async fn create(&self, file_id: u64, data: Bytes, _opts: Options) -> crate::dfs::Result<()> {
+    async fn create(&self, tenant: &str, file_id: u64, data: Bytes, _opts: Options) -> crate::dfs::Result<()> {
         let mut retry_cnt = 0;
         let start_time = Instant::now();
         let data_len = data.len();
         loop {
             let mut req = rusoto_s3::PutObjectRequest::default();
-            req.key = self.file_key(file_id);
+            req.key = self.file_key(tenant, file_id);
             req.bucket = self.bucket.clone();
             req.content_length = Some(data_len as i64);
             let data = data.clone();
@@ -328,11 +337,11 @@ impl DFS for S3FS {
         }
     }
 
-    async fn remove(&self, file_id: u64, _opts: Options) {
+    async fn remove(&self, tenant: &str, file_id: u64, _opts: Options) {
         let mut retry_cnt = 0;
         loop {
             let bucket = self.bucket.clone();
-            let key = self.file_key(file_id);
+            let key = self.file_key(tenant, file_id);
             let mut req = rusoto_s3::CopyObjectRequest::default();
             req.copy_source = format!("{}/{}", &bucket, &key);
             req.key = key;
@@ -370,6 +379,7 @@ mod tests {
     use rusoto_mock::{
         MockCredentialsProvider, MockRequestDispatcher, MultipleMockRequestDispatcher,
     };
+    use crate::dfs::TENANT;
 
     use super::*;
     use crate::table::sstable::{new_filename, File, LocalFile};
@@ -401,7 +411,7 @@ mod tests {
         let file_data2 = file_data.clone();
         let f = async move {
             match fs
-                .create(321, bytes::Bytes::from(file_data2), Options::new(1, 1))
+                .create(TENANT, 321, bytes::Bytes::from(file_data2), Options::new(1, 1))
                 .await
             {
                 Ok(_) => {
@@ -422,7 +432,7 @@ mod tests {
         let move_local_file = local_file.clone();
         let f = async move {
             let opts = Options::new(1, 1);
-            match fs.read_file(321, opts).await {
+            match fs.read_file(TENANT, 321, opts).await {
                 Ok(data) => {
                     let mut file = std::fs::File::create(&move_local_file).unwrap();
                     file.write_all(data.chunk()).unwrap();
@@ -447,7 +457,7 @@ mod tests {
         let fs = s3fs.clone();
         let (tx, rx) = tikv_util::mpsc::bounded(1);
         let f = async move {
-            fs.remove(321, Options::new(1, 1)).await;
+            fs.remove("0", 321, Options::new(1, 1)).await;
             tx.send(true).unwrap();
         };
         s3fs.runtime.spawn(f);

@@ -353,7 +353,7 @@ impl EngineCore {
             if cover {
                 self.remove_local_file(id);
                 let fs_n = fs.clone();
-                runtime.spawn(async move { fs_n.remove(id, opts).await });
+                runtime.spawn(async move { fs_n.remove(dfs::TENANT, id, opts).await });
             }
         }
     }

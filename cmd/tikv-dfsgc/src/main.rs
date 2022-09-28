@@ -15,7 +15,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use byteorder::{ByteOrder, LittleEndian};
 use clap::{App, Arg};
 use grpcio::EnvBuilder;
 use http::Uri;
@@ -47,15 +46,12 @@ fn main() {
         .arg(
             Arg::with_name("start")
                 .long("start")
-                .help("The start file id to GC")
+                .help("The start file suffix to GC")
                 .default_value("0"),
         )
         .get_matches();
     let config_path = matches.value_of_os("config").unwrap();
-    let start_after = matches
-        .value_of("start")
-        .map(|s| u64::from_str_radix(s, 10).unwrap_or(0))
-        .unwrap_or(0);
+    let start_after = matches.value_of("start").unwrap();
     let result = std::fs::read(PathBuf::from(config_path));
     if result.is_err() {
         error!("failed to read config file {:?}", result.unwrap_err());
@@ -84,7 +80,7 @@ fn main() {
     let progress_file_path = PathBuf::from(format!("{}/{}", &config.data_dir, "dfsgc.progress"));
     let mut gc_worker = GcWorker::new(pd_client, s3fs, progress_file_path);
     gc_worker.collect_valid_files();
-    gc_worker.remove_garbage_files(start_after);
+    gc_worker.remove_garbage_files("0", start_after.to_string());
 }
 
 struct GcWorker {
@@ -147,9 +143,9 @@ impl GcWorker {
         serde_json::from_slice(body.chunk()).unwrap()
     }
 
-    fn remove_garbage_files(&self, mut start_after: u64) {
-        if let Ok(data) = fs::read(self.progress_file_path.as_path()) {
-            let state_start_after = LittleEndian::read_u64(&data);
+    fn remove_garbage_files(&self, tenant: &str, mut start_after: String) {
+        if let Ok(data) = fs::read_to_string(self.progress_file_path.as_path()) {
+            let state_start_after = data;
             if start_after < state_start_after {
                 info!(
                     "update start_after {} to {} from state file",
@@ -165,19 +161,20 @@ impl GcWorker {
             let (files, has_more) = self
                 .s3fs
                 .get_runtime()
-                .block_on(s3fs.list(start_after))
+                .block_on(s3fs.list(tenant, start_after.as_str()))
                 .unwrap();
             info!("listed {} files", files.len());
-            for &file_id in &files {
+            for file_suffix in &files {
+                let file_id = self.s3fs.parse_file_id(file_suffix.as_str());
                 if !self.valid_files.contains(&file_id) {
                     // Remove the files one by one to prevent reach API rate limit.
-                    self.remove_garbage_file(file_id);
+                    self.remove_garbage_file(tenant, file_id);
                     checked += 1;
                 }
             }
             if !files.is_empty() {
-                start_after = *files.last().unwrap();
-                fs::write(self.progress_file_path.as_path(), start_after.to_le_bytes()).unwrap();
+                start_after = (*files.last().unwrap()).clone();
+                fs::write(self.progress_file_path.as_path(), start_after.as_bytes()).unwrap();
             }
             if !has_more || files.is_empty() {
                 break;
@@ -196,12 +193,12 @@ impl GcWorker {
         info!("finished");
     }
 
-    fn remove_garbage_file(&self, id: u64) {
+    fn remove_garbage_file(&self, tenant: &str, id: u64) {
         let opts = dfs::Options::new(0, 0);
         let s3fs = self.s3fs.clone();
         self.s3fs.get_runtime().block_on(async move {
-            if !s3fs.is_removed(id).await {
-                s3fs.remove(id, opts).await;
+            if !s3fs.is_removed(tenant, id).await {
+                s3fs.remove(tenant, id, opts).await;
                 REMOVED.fetch_add(1, Ordering::SeqCst);
                 info!("removed {}", id);
             }
