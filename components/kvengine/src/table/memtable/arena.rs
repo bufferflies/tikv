@@ -271,7 +271,7 @@ impl Drop for ArenaSegment {
                 break;
             }
             unsafe {
-                ptr::drop_in_place(block);
+                drop(Box::from_raw(block));
             }
         }
     }
