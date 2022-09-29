@@ -1294,6 +1294,7 @@ impl<'a> StoreMsgHandler<'a> {
                 "tag" => peer_fsm.peer.tag(),
                 "peer_id" => peer_fsm.peer_id(),
             );
+            peer_fsm.peer.delay_destroy = true;
             return;
         }
 
@@ -1452,9 +1453,10 @@ impl<'a> StoreMsgHandler<'a> {
             None => return,
         };
         let peer_fsm = peer.peer_fsm.lock().unwrap();
-        if !peer_fsm.peer.pending_remove {
+        if !peer_fsm.peer.delay_destroy {
             return;
         }
+        assert!(peer_fsm.peer.pending_remove);
         info!(
             "Dependents become empty, continue to destroy peer";
             "tag" => peer_fsm.peer.tag(),
