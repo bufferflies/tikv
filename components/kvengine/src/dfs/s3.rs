@@ -275,6 +275,7 @@ impl DFS for S3FS {
                     }
                     Err(err) => {
                         if self.sleep_for_retry(&mut retry_cnt, file_id).await {
+                            warn!("retry read file {}, error {:?}", file_id, &err);
                             continue;
                         }
                         Err(crate::dfs::Error::S3(err.to_string()))
@@ -323,6 +324,7 @@ impl DFS for S3FS {
                     retry_cnt += 1;
                     let retry_sleep = 2u64.pow(retry_cnt) * RETRY_SLEEP_MS;
                     tokio::time::sleep(Duration::from_millis(retry_sleep)).await;
+                    warn!("retry create file {}, error {:?}", file_id, &err);
                     continue;
                 } else {
                     error!(
@@ -354,6 +356,7 @@ impl DFS for S3FS {
                     retry_cnt += 1;
                     let retry_sleep = 2u64.pow(retry_cnt as u32) * RETRY_SLEEP_MS;
                     tokio::time::sleep(Duration::from_millis(retry_sleep)).await;
+                    warn!("retry remove file {}, error {:?}", file_id, &err);
                     continue;
                 } else {
                     error!(
