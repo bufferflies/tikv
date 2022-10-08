@@ -627,9 +627,9 @@ checksum = "cfa8873f51c92e232f9bac4065cddef41b714152812bfc5f7672ba16d6ef8cd9"
 
 [[package]]
 name = "bstr"
-version = "0.2.8"
+version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8d6c2c5b58ab920a4f5aeaaca34b4488074e8cc7596af94e6f8c6ff247c60245"
+checksum = "ba3569f383e8f1598449f1a423e72e99569137b47740b1da11ef19af3d5c3223"
 dependencies = [
  "lazy_static",
  "memchr",
@@ -2674,7 +2674,7 @@ dependencies = [
  "lazy_static",
  "log",
  "num-format",
- "quick-xml",
+ "quick-xml 0.22.0",
  "rgb",
  "str_stack",
 ]
@@ -2812,6 +2812,7 @@ dependencies = [
  "async-trait",
  "aws",
  "bincode",
+ "bstr",
  "byteorder",
  "bytes",
  "crc32c",
@@ -2837,6 +2838,7 @@ dependencies = [
  "prometheus",
  "prometheus-static-metric",
  "protobuf",
+ "quick-xml 0.23.1",
  "rand 0.8.3",
  "rocksdb",
  "rusoto_core",
@@ -3168,9 +3170,9 @@ checksum = "490cc448043f947bae3cbee9c203358d62dbee0db12107a74be5c30ccfd09771"
 
 [[package]]
 name = "memchr"
-version = "2.4.1"
+version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "308cc39be01b73d0d18f82a0e7b2a3df85245f84af96fdddc5d202d27e47b86a"
+checksum = "2dffe52ecf27772e601905b7522cb4ef790d2cc203488bbd0e2fe85fcb74566d"
 dependencies = [
  "libc 0.2.125",
 ]
@@ -4388,6 +4390,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8533f14c8382aaad0d592c812ac3b826162128b65662331e1127b45c3d18536b"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "quick-xml"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "11bafc859c6815fbaffbbbf4229ecb767ac913fecb27f9ad4343662e9ef099ea"
+dependencies = [
+ "memchr",
+ "serde",
 ]
 
 [[package]]

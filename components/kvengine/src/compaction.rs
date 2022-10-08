@@ -714,7 +714,7 @@ pub(crate) fn load_table_files(
         let afs = fs.clone();
         fs.get_runtime().spawn(async move {
             let res = afs
-                .read_file( dfs::TENANT, aid, opts)
+                .read_file(dfs::TENANT, aid, opts)
                 .await
                 .map(|data| (aid, data))
                 .map_err(|e| Error::DFSError(e));
@@ -1189,7 +1189,8 @@ fn compact_destroy_range(
         let tx = tx.clone();
         let dfs_clone = dfs.clone();
         dfs.get_runtime().spawn(async move {
-            tx.send(dfs_clone.create(dfs::TENANT, new_id, data, opts).await).unwrap();
+            tx.send(dfs_clone.create(dfs::TENANT, new_id, data, opts).await)
+                .unwrap();
         });
         let mut delete = pb::TableDelete::new();
         delete.set_id(id);
