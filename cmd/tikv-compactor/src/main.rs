@@ -1,6 +1,10 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    io,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use clap::{App, Arg};
 use hyper::service::{make_service_fn, service_fn};
@@ -8,7 +12,7 @@ use kvengine::dfs::DFSConfig;
 use slog_global::{error, info};
 
 fn main() {
-    init_logger();
+    init_logger(io::stdout());
     let matches = App::new("tikv-compactor")
         .about("tikv remote compactor")
         .arg(
@@ -31,6 +35,11 @@ fn main() {
     let mut config: Config = toml::from_slice(&data).unwrap();
     if config.port == 0 {
         config.port = 19000;
+    }
+    if !config.log_file.is_empty() {
+        let log = tikv_util::logger::file_writer(&config.log_file, 300, 0, 0, rename_by_timestamp)
+            .unwrap();
+        init_logger(log);
     }
     info!("config is {:?}", &config);
     let dfs = Arc::new(kvengine::dfs::S3FS::new(
@@ -74,9 +83,9 @@ fn main() {
     rx.recv().unwrap().unwrap();
 }
 
-fn init_logger() {
+fn init_logger<W: 'static + io::Write + Send>(writer: W) {
     use slog::Drain;
-    let decorator = slog_term::PlainDecorator::new(std::io::stdout());
+    let decorator = slog_term::PlainDecorator::new(writer);
     let drain = slog_term::CompactFormat::new(decorator).build();
     let drain = std::sync::Mutex::new(drain).fuse();
     let logger = slog::Logger::root(drain, slog::o!());
@@ -91,5 +100,19 @@ extern crate serde_derive;
 #[serde(rename_all = "kebab-case")]
 pub struct Config {
     pub port: u16,
+    pub log_file: String,
     pub dfs: DFSConfig,
+}
+
+fn rename_by_timestamp(path: &Path) -> io::Result<PathBuf> {
+    let mut new_path = path.parent().unwrap().to_path_buf();
+    let mut new_fname = path.file_stem().unwrap().to_os_string();
+    let dt = chrono::Local::now().format("%Y-%m-%dT%H-%M-%S%.3f");
+    new_fname.push(format!("-{}", dt));
+    if let Some(ext) = path.extension() {
+        new_fname.push(".");
+        new_fname.push(ext);
+    };
+    new_path.push(new_fname);
+    Ok(new_path)
 }

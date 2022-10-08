@@ -6607,6 +6607,7 @@ dependencies = [
 name = "tikv-compactor"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "clap 2.33.0",
  "file_system",
  "hyper",
@@ -6617,6 +6618,7 @@ dependencies = [
  "slog",
  "slog-global",
  "slog-term",
+ "tikv_util",
  "tokio",
  "toml",
 ]
