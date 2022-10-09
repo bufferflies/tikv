@@ -123,6 +123,7 @@ mod encryption_method_serde {
             EncryptionMethod::Aes128Ctr => serializer.serialize_str(AES128_CTR),
             EncryptionMethod::Aes192Ctr => serializer.serialize_str(AES192_CTR),
             EncryptionMethod::Aes256Ctr => serializer.serialize_str(AES256_CTR),
+            EncryptionMethod::Sm4Ctr => unimplemented!(),
         }
     }
 

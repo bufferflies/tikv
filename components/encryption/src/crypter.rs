@@ -17,6 +17,7 @@ pub fn encryption_method_to_db_encryption_method(method: EncryptionMethod) -> DB
         EncryptionMethod::Aes192Ctr => DBEncryptionMethod::Aes192Ctr,
         EncryptionMethod::Aes256Ctr => DBEncryptionMethod::Aes256Ctr,
         EncryptionMethod::Unknown => DBEncryptionMethod::Unknown,
+        EncryptionMethod::Sm4Ctr => unimplemented!(),
     }
 }
 

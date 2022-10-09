@@ -16,6 +16,10 @@ use grpcio::{
 use kvproto::{
     coprocessor::*,
     kvrpcpb::*,
+    mpp::{
+        CancelTaskRequest, CancelTaskResponse, DispatchTaskRequest, DispatchTaskResponse,
+        EstablishMppConnectionRequest, IsAliveRequest, IsAliveResponse, MppDataPacket,
+    },
     raft_cmdpb::{CmdType, RaftCmdRequest, RaftRequestHeader, Request as RaftRequest},
     raft_serverpb::*,
     tikvpb::*,
@@ -785,6 +789,183 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
         .map(|_| ());
         ctx.spawn(task);
     }
+
+    fn raw_get(&mut self, _: RpcContext, _: RawGetRequest, _: UnarySink<RawGetResponse>) {
+        unimplemented!()
+    }
+
+    fn raw_batch_get(
+        &mut self,
+        _: RpcContext,
+        _: RawBatchGetRequest,
+        _: UnarySink<RawBatchGetResponse>,
+    ) {
+        unimplemented!()
+    }
+
+    fn raw_put(&mut self, _: RpcContext, _: RawPutRequest, _: UnarySink<RawPutResponse>) {
+        unimplemented!()
+    }
+
+    fn raw_batch_put(
+        &mut self,
+        _: RpcContext,
+        _: RawBatchPutRequest,
+        _: UnarySink<RawBatchPutResponse>,
+    ) {
+        unimplemented!()
+    }
+
+    fn raw_delete(&mut self, _: RpcContext, _: RawDeleteRequest, _: UnarySink<RawDeleteResponse>) {
+        unimplemented!()
+    }
+
+    fn raw_batch_delete(
+        &mut self,
+        _: RpcContext,
+        _: RawBatchDeleteRequest,
+        _: UnarySink<RawBatchDeleteResponse>,
+    ) {
+        unimplemented!()
+    }
+
+    fn raw_scan(&mut self, _: RpcContext, _: RawScanRequest, _: UnarySink<RawScanResponse>) {
+        unimplemented!()
+    }
+
+    fn raw_delete_range(
+        &mut self,
+        _: RpcContext,
+        _: RawDeleteRangeRequest,
+        _: UnarySink<RawDeleteRangeResponse>,
+    ) {
+        unimplemented!()
+    }
+
+    fn raw_batch_scan(
+        &mut self,
+        _: RpcContext,
+        _: RawBatchScanRequest,
+        _: UnarySink<RawBatchScanResponse>,
+    ) {
+        unimplemented!()
+    }
+
+    fn raw_get_key_ttl(
+        &mut self,
+        _: RpcContext,
+        _: RawGetKeyTtlRequest,
+        _: UnarySink<RawGetKeyTtlResponse>,
+    ) {
+        unimplemented!()
+    }
+
+    fn raw_compare_and_swap(
+        &mut self,
+        _: RpcContext,
+        _: RawCasRequest,
+        _: UnarySink<RawCasResponse>,
+    ) {
+        unimplemented!()
+    }
+
+    fn raw_checksum(
+        &mut self,
+        _: RpcContext,
+        _: RawChecksumRequest,
+        _: UnarySink<RawChecksumResponse>,
+    ) {
+        unimplemented!()
+    }
+
+    fn register_lock_observer(
+        &mut self,
+        _: RpcContext,
+        _: RegisterLockObserverRequest,
+        _: UnarySink<RegisterLockObserverResponse>,
+    ) {
+        unimplemented!()
+    }
+
+    fn check_lock_observer(
+        &mut self,
+        _: RpcContext,
+        _: CheckLockObserverRequest,
+        _: UnarySink<CheckLockObserverResponse>,
+    ) {
+        unimplemented!()
+    }
+
+    fn remove_lock_observer(
+        &mut self,
+        _: RpcContext,
+        _: RemoveLockObserverRequest,
+        _: UnarySink<RemoveLockObserverResponse>,
+    ) {
+        unimplemented!()
+    }
+
+    fn physical_scan_lock(
+        &mut self,
+        _: RpcContext,
+        _: PhysicalScanLockRequest,
+        _: UnarySink<PhysicalScanLockResponse>,
+    ) {
+        unimplemented!()
+    }
+
+    fn raw_coprocessor(
+        &mut self,
+        _: RpcContext,
+        _: RawCoprocessorRequest,
+        _: UnarySink<RawCoprocessorResponse>,
+    ) {
+        unimplemented!()
+    }
+
+    fn snapshot(
+        &mut self,
+        _: RpcContext,
+        _: RequestStream<SnapshotChunk>,
+        _: ClientStreamingSink<Done>,
+    ) {
+        unimplemented!()
+    }
+
+    fn dispatch_mpp_task(
+        &mut self,
+        _: RpcContext,
+        _: DispatchTaskRequest,
+        _: UnarySink<DispatchTaskResponse>,
+    ) {
+        unimplemented!()
+    }
+
+    fn cancel_mpp_task(
+        &mut self,
+        _: RpcContext,
+        _: CancelTaskRequest,
+        _: UnarySink<CancelTaskResponse>,
+    ) {
+        unimplemented!()
+    }
+
+    fn establish_mpp_connection(
+        &mut self,
+        _: RpcContext,
+        _: EstablishMppConnectionRequest,
+        _: ServerStreamingSink<MppDataPacket>,
+    ) {
+        unimplemented!()
+    }
+
+    fn is_alive(&mut self, _: RpcContext, _: IsAliveRequest, _: UnarySink<IsAliveResponse>) {
+        unimplemented!()
+    }
+
+    fn compact(&mut self, _: RpcContext, _: CompactRequest, _: UnarySink<CompactResponse>) {
+        unimplemented!()
+    }
 }
 
 fn response_batch_commands_request<F, T>(
@@ -1182,10 +1363,9 @@ fn future_get<L: LockManager, F: KvFormat>(
                     stats.stats.write_scan_detail(scan_detail_v2);
                     stats.perf_stats.write_scan_detail(scan_detail_v2);
                     let time_detail = exec_detail_v2.mut_time_detail();
-                    time_detail.set_kv_read_wall_time_ms(duration_ms as i64);
-                    time_detail.set_wait_wall_time_ms(stats.latency_stats.wait_wall_time_ms as i64);
-                    time_detail
-                        .set_process_wall_time_ms(stats.latency_stats.process_wall_time_ms as i64);
+                    time_detail.set_kv_read_wall_time_ms(duration_ms);
+                    time_detail.set_wait_wall_time_ms(stats.latency_stats.wait_wall_time_ms);
+                    time_detail.set_process_wall_time_ms(stats.latency_stats.process_wall_time_ms);
                     match val {
                         Some(val) => resp.set_value(val),
                         None => resp.set_not_found(true),
@@ -1262,10 +1442,9 @@ fn future_batch_get<L: LockManager, F: KvFormat>(
                     stats.stats.write_scan_detail(scan_detail_v2);
                     stats.perf_stats.write_scan_detail(scan_detail_v2);
                     let time_detail = exec_detail_v2.mut_time_detail();
-                    time_detail.set_kv_read_wall_time_ms(duration_ms as i64);
-                    time_detail.set_wait_wall_time_ms(stats.latency_stats.wait_wall_time_ms as i64);
-                    time_detail
-                        .set_process_wall_time_ms(stats.latency_stats.process_wall_time_ms as i64);
+                    time_detail.set_kv_read_wall_time_ms(duration_ms);
+                    time_detail.set_wait_wall_time_ms(stats.latency_stats.wait_wall_time_ms);
+                    time_detail.set_process_wall_time_ms(stats.latency_stats.process_wall_time_ms);
                     resp.set_pairs(pairs.into());
                 }
                 Err(e) => {
