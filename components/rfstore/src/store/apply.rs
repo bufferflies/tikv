@@ -221,7 +221,9 @@ pub(crate) struct Applier {
 
     pub(crate) paused_apply_queue: Vec<MsgApply>,
 
-    pub(crate) scheduled_change_sets: VecDeque<u64>,
+    // The sequence of snapshot change set can be equal to other types, so we use
+    // (sequence, is_snapshot) to track.
+    pub(crate) scheduled_change_sets: VecDeque<(u64, bool)>,
 
     pub(crate) prepared_change_sets: HashMap<u64, kvengine::ChangeSet>,
 
@@ -931,7 +933,7 @@ impl Applier {
         if !self
             .scheduled_change_sets
             .iter()
-            .any(|&seq| seq == cs.sequence)
+            .any(|&(seq, is_snapshot)| seq == cs.sequence && is_snapshot == cs.has_snapshot())
         {
             info!(
                 "{} discard outdated change set {:?}",
@@ -965,7 +967,7 @@ impl Applier {
     }
 
     fn take_prepared_change_set(&mut self) -> Option<ChangeSet> {
-        if let Some(sequence) = self.scheduled_change_sets.front() {
+        if let Some((sequence, _)) = self.scheduled_change_sets.front() {
             if let Some(cs) = self.prepared_change_sets.remove(sequence) {
                 self.scheduled_change_sets.pop_front();
                 return Some(cs);
@@ -1033,7 +1035,8 @@ impl Applier {
             }
             self.paused = true;
         }
-        self.scheduled_change_sets.push_back(cs.sequence);
+        self.scheduled_change_sets
+            .push_back((cs.sequence, cs.has_snapshot()));
         let engine = ctx.engine.clone();
         let router = ctx.router.clone().unwrap();
         let is_leader = self.is_leader();

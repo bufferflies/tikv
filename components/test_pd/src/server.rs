@@ -12,8 +12,8 @@ use std::{
 use fail::fail_point;
 use futures::{future, SinkExt, TryFutureExt, TryStreamExt};
 use grpcio::{
-    DuplexSink, EnvBuilder, RequestStream, RpcContext, RpcStatus, RpcStatusCode,
-    Server as GrpcServer, ServerBuilder, ServerStreamingSink, UnarySink, WriteFlags,
+    ClientStreamingSink, DuplexSink, EnvBuilder, RequestStream, RpcContext, RpcStatus,
+    RpcStatusCode, Server as GrpcServer, ServerBuilder, ServerStreamingSink, UnarySink, WriteFlags,
 };
 use kvproto::pdpb::*;
 use pd_client::Error as PdError;
@@ -515,6 +515,33 @@ impl<C: PdMocker + Send + Sync + 'static> Pd for PdMock<C> {
         _: RpcContext<'_>,
         _: kvproto::pdpb::GetDcLocationInfoRequest,
         _: UnarySink<kvproto::pdpb::GetDcLocationInfoResponse>,
+    ) {
+        unimplemented!()
+    }
+
+    fn split_and_scatter_regions(
+        &mut self,
+        _: RpcContext<'_>,
+        _: kvproto::pdpb::SplitAndScatterRegionsRequest,
+        _: UnarySink<kvproto::pdpb::SplitAndScatterRegionsResponse>,
+    ) {
+        unimplemented!()
+    }
+
+    fn report_buckets(
+        &mut self,
+        _: RpcContext<'_>,
+        _: RequestStream<kvproto::pdpb::ReportBucketsRequest>,
+        _: ClientStreamingSink<kvproto::pdpb::ReportBucketsResponse>,
+    ) {
+        unimplemented!()
+    }
+
+    fn report_min_resolved_ts(
+        &mut self,
+        _: RpcContext<'_>,
+        _: kvproto::pdpb::ReportMinResolvedTsRequest,
+        _: UnarySink<kvproto::pdpb::ReportMinResolvedTsResponse>,
     ) {
         unimplemented!()
     }
