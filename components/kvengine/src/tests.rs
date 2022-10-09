@@ -105,8 +105,9 @@ fn test_destroy_range() {
             .is_empty()
     );
     // Memtable is switched because it contains data covered by the delete-prefixes.
+    let stats = engine.get_shard_stat(1);
     assert_eq!(
-        engine.get_shard_stat(1).mem_table_count,
+        stats.mem_table_count + stats.l0_table_count,
         mem_table_count + 1
     );
     let wait_for_destroying_range = || {
