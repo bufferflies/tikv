@@ -14,7 +14,7 @@ concurrency:
 jobs:
   dev:
     name: Run clippy and rustfmt then build and test
-    runs-on: self-hosted
+    runs-on: x64
     env:
       RUSTFLAGS: -Dwarnings
       FAIL_POINT: "1"

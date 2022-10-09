@@ -191,17 +191,19 @@ impl ServerCluster {
             let (region, leader) = block_on(self.pd_client.get_region_leader_by_id(id_ver.id))
                 .unwrap()
                 .unwrap();
-            if leader.store_id == store_id {
-                let target = region
+            let target = if leader.store_id != store_id {
+                &leader
+            } else {
+                region
                     .get_peers()
                     .iter()
                     .find(|x| x.store_id != store_id)
-                    .unwrap();
-                self.pd_client
-                    .transfer_leader(region.id, target.clone(), vec![]);
-                self.pd_client
-                    .region_leader_must_be(region.id, target.clone());
-            }
+                    .unwrap()
+            };
+            self.pd_client
+                .transfer_leader(region.id, target.clone(), vec![]);
+            self.pd_client
+                .region_leader_must_be(region.id, target.clone());
             if let Some(peer) = find_peer(&region, store_id) {
                 self.pd_client.must_remove_peer(region.id, peer.clone());
             }
