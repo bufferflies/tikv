@@ -263,7 +263,9 @@ impl ApiV2 {
     }
 
     pub fn get_u32_keyspace_id(keyspace_id: [u8; KEYSPACE_ID_LEN]) -> u32 {
-        [0, keyspace_id[0], keyspace_id[1], keyspace_id[2]].as_slice().get_u32()
+        [0, keyspace_id[0], keyspace_id[1], keyspace_id[2]]
+            .as_slice()
+            .get_u32()
     }
 
     pub fn get_keyspace_id_str(key: &[u8]) -> String {
@@ -317,8 +319,7 @@ fn decode_raw_key_timestamp(encoded_key: &Key, with_ts: bool) -> Result<Option<T
 mod tests {
     use txn_types::{Key, TimeStamp};
 
-    use crate::{ApiV2, KvFormat, RawValue};
-    use crate::api_v2::TXN_KEY_PREFIX;
+    use crate::{api_v2::TXN_KEY_PREFIX, ApiV2, KvFormat, RawValue};
 
     #[test]
     fn test_key_decode_err() {
@@ -471,7 +472,7 @@ mod tests {
     fn test_keyspace_id_to_string() {
         let keyspace_id_pd_alloc = 1 as u32;
         let keyspace_id_pd_alloc_str = keyspace_id_pd_alloc.to_string();
-        let mut keyspace_id_bytes = keyspace_id_pd_alloc.to_be_bytes();
+        let keyspace_id_bytes = keyspace_id_pd_alloc.to_be_bytes();
         let user_key_prefix = &[
             TXN_KEY_PREFIX,
             keyspace_id_bytes[1],

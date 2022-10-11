@@ -8,6 +8,7 @@ use crate::storage::{
         metrics::MVCC_CHECK_TXN_STATUS_COUNTER_VEC, reader::OverlappedWrite, ErrorInner, LockType,
         MvccTxn, ReleasedLock, Result, SnapshotReader, TxnCommitRecord,
     },
+    txn::commands::find_mvcc_infos_by_key,
     Snapshot, TxnStatus,
 };
 
@@ -152,7 +153,11 @@ pub fn rollback_lock(
     let overlapped_write = match reader.get_txn_commit_record(&key)? {
         TxnCommitRecord::None { overlapped_write } => overlapped_write,
         TxnCommitRecord::SingleRecord { write, .. } if write.write_type != WriteType::Rollback => {
-            panic!("txn record found but not expected: {:?}", txn)
+            let (_, writes, _) = find_mvcc_infos_by_key(reader, &key, txn.start_ts).unwrap();
+            panic!(
+                "txn record found but not expected: ts: {:?}, record: {:?}, lock: {:?}, writes: {:?}",
+                txn, write, lock, writes
+            );
         }
         _ => return Ok(txn.unlock_key(key, is_pessimistic_txn)),
     };

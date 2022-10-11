@@ -261,6 +261,31 @@ impl CloudReader {
         }
         Ok(None)
     }
+
+    pub fn get_extras(&mut self, key: &Key) -> Vec<(TimeStamp, Write)> {
+        let raw_key = key.to_raw().unwrap();
+        let mut writes = vec![];
+        let mut extra_iter = self
+            .snapshot
+            .new_iterator(EXTRA_CF, false, false, None, true);
+        extra_iter.seek(&raw_key);
+        while extra_iter.valid() {
+            if !extra_iter.key().starts_with(&raw_key) {
+                break;
+            }
+            if extra_iter.key().len() == raw_key.len() + 8 {
+                let item = extra_iter.item();
+                let um = UserMeta::from_slice(item.user_meta());
+                let (ts, write_type) = if um.commit_ts == 0 {
+                    (um.start_ts, WriteType::Rollback)
+                } else {
+                    (um.commit_ts, WriteType::Lock)
+                };
+                writes.push((ts.into(), Write::new(write_type, um.start_ts.into(), None)));
+            }
+        }
+        writes
+    }
 }
 
 fn parse_write(item: kvengine::Item<'_>) -> (TimeStamp, Write) {

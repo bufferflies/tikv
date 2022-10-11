@@ -437,7 +437,7 @@ type LockWritesVals = (
     Vec<(TimeStamp, Value)>,
 );
 
-fn find_mvcc_infos_by_key<S: Snapshot>(
+pub(crate) fn find_mvcc_infos_by_key<S: Snapshot>(
     reader: &mut SnapshotReader<S>,
     key: &Key,
     mut ts: TimeStamp,
@@ -457,6 +457,9 @@ fn find_mvcc_infos_by_key<S: Snapshot>(
             }
             None => break,
         };
+    }
+    if let Some(reader) = reader.cloud_reader.as_mut() {
+        writes.extend(reader.get_extras(key));
     }
     for (ts, v) in reader.scan_values_in_default(key)? {
         values.push((ts, v));

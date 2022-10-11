@@ -8,6 +8,7 @@ use crate::storage::{
         metrics::{MVCC_CONFLICT_COUNTER, MVCC_DUPLICATE_CMD_COUNTER_VEC},
         ErrorInner, LockType, MvccTxn, ReleasedLock, Result as MvccResult, SnapshotReader,
     },
+    txn::commands::find_mvcc_infos_by_key,
     Snapshot,
 };
 
@@ -47,11 +48,13 @@ pub fn commit<S: Snapshot>(
             // this lock again(due to WriteConflict). If the transaction is committed, we
             // should commit this pessimistic lock too.
             if lock.lock_type == LockType::Pessimistic {
+                let (_, writes, _) = find_mvcc_infos_by_key(reader, &key, reader.start_ts).unwrap();
                 warn!(
                     "commit a pessimistic lock with Lock type";
                     "key" => %key,
                     "start_ts" => reader.start_ts,
                     "commit_ts" => commit_ts,
+                    "writes" => ?writes,
                 );
                 // Commit with WriteType::Lock.
                 lock.lock_type = LockType::Lock;
