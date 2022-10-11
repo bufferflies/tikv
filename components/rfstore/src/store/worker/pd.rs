@@ -9,6 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use api_version::{ApiV2, KeyMode, KvFormat};
 use concurrency_manager::ConcurrencyManager;
 use engine_traits::{CFNamesExt, MiscExt};
 #[cfg(feature = "failpoints")]
@@ -419,6 +420,26 @@ impl PdRunner {
         self.store_stat
             .region_keys_read
             .observe(region_stat.read_keys as f64);
+
+        // If the api-version of region range is api v2,
+        // it will collect region store size by keyspace id label.
+        let startkey = region.start_key.clone();
+        let endkey = region.end_key.clone();
+
+        let start_key_mode = ApiV2::parse_key_mode(startkey.as_slice());
+        let end_key_mode = ApiV2::parse_key_mode(endkey.as_slice());
+
+        if (start_key_mode == KeyMode::Raw || start_key_mode == KeyMode::Txn)
+            && (end_key_mode == KeyMode::Raw || end_key_mode == KeyMode::Txn)
+        {
+            let keyspace_id_string = ApiV2::get_keyspace_id_str(startkey.as_slice());
+            let keyspace_id_str = keyspace_id_string.as_str();
+
+            REGION_STORE_ENGINE_SIZE_GAUGE_VEC
+                .with_label_values(&[keyspace_id_str])
+                .inc_by(region_stat.approximate_size as u64);
+        }
+
         STORE_ENGINE_FLOW_VEC
             .with_label_values(&["kv", "bytes_read"])
             .inc_by(region_stat.read_bytes as u64);

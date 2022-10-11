@@ -81,6 +81,7 @@ name = "api_version"
 version = "0.1.0"
 dependencies = [
  "bitflags",
+ "bytes",
  "codec",
  "engine_traits",
  "kvproto",
@@ -4939,6 +4940,7 @@ dependencies = [
 name = "rfstore"
 version = "0.0.1"
 dependencies = [
+ "api_version",
  "bitflags",
  "byteorder",
  "bytes",

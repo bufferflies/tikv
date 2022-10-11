@@ -8,6 +8,7 @@ publish = false
 testexport = []
 
 [dependencies]
+bytes = "1.0"
 bitflags = "1.0.1"
 codec = { path = "../codec", default-features = false }
 engine_traits = { path = "../engine_traits", default-features = false }

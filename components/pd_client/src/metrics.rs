@@ -58,6 +58,12 @@ lazy_static! {
         &["db", "type"]
     )
     .unwrap();
+    pub static ref REGION_STORE_ENGINE_SIZE_GAUGE_VEC: IntCounterVec = register_int_counter_vec!(
+        "tikv_region_store_size_bytes",
+        "Sizes of each column families",
+        &["keyspace_id"]
+    )
+    .unwrap();
     pub static ref STORE_ENGINE_FLOW_VEC: IntCounterVec = register_int_counter_vec!(
         "tikv_engine_flow_bytes",
         "Bytes and keys of read/written",
