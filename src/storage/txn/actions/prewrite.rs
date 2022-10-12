@@ -340,14 +340,13 @@ impl<'a> PrewriteMutation<'a> {
         &self,
         reader: &mut SnapshotReader<S>,
     ) -> Result<Option<(Write, TimeStamp)>> {
-        // check rollback
-        if let Some(cloud_reader) = reader.cloud_reader.as_mut() {
-            if cloud_reader.get_rollback(&self.key, self.txn_props.start_ts) {
-                self.write_conflict_error(
-                    &Write::new(WriteType::Rollback, self.txn_props.start_ts, None),
-                    self.txn_props.start_ts,
-                )?;
-            }
+        // check extra-cf
+        if let Some((commit_ts, write)) = reader
+            .cloud_reader
+            .as_mut()
+            .and_then(|reader| reader.get_extra(&self.key, self.txn_props.start_ts))
+        {
+            self.write_conflict_error(&write, commit_ts)?;
         }
         // The get_newer API returns None if there is no conflict,
         // so it can not be used to check if key exists or get the value of the key.
@@ -695,17 +694,26 @@ fn amend_pessimistic_lock<S: Snapshot>(
             .into());
         }
     }
-    if let Some(cloud_reader) = reader.cloud_reader.as_mut() {
-        if cloud_reader.get_rollback(&mutation.key, reader.start_ts) {
-            MVCC_CONFLICT_COUNTER
-                .pipelined_acquire_pessimistic_lock_amend_fail
-                .inc();
-            return Err(ErrorInner::PessimisticLockNotFound {
-                start_ts: reader.start_ts,
-                key: mutation.key.clone().into_raw()?,
-            }
-            .into());
+    let start_ts = reader.start_ts;
+    if let Some((commit_ts, _)) = reader
+        .cloud_reader
+        .as_mut()
+        .and_then(|reader| reader.get_extra(&mutation.key, start_ts))
+    {
+        warn!(
+            "prewrite failed (pessimistic lock not found)";
+            "start_ts" => start_ts,
+            "commit_ts" => commit_ts,
+            "key" => %mutation.key
+        );
+        MVCC_CONFLICT_COUNTER
+            .pipelined_acquire_pessimistic_lock_amend_fail
+            .inc();
+        return Err(ErrorInner::PessimisticLockNotFound {
+            start_ts: reader.start_ts,
+            key: mutation.key.clone().into_raw()?,
         }
+        .into());
     }
     // Used pipelined pessimistic lock acquiring in this txn but failed
     // Luckily no other txn modified this lock, amend it by treat it as optimistic txn.

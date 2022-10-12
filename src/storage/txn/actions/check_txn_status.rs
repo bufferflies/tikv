@@ -153,10 +153,10 @@ pub fn rollback_lock(
     let overlapped_write = match reader.get_txn_commit_record(&key)? {
         TxnCommitRecord::None { overlapped_write } => overlapped_write,
         TxnCommitRecord::SingleRecord { write, .. } if write.write_type != WriteType::Rollback => {
-            let (_, writes, _) = find_mvcc_infos_by_key(reader, &key, txn.start_ts).unwrap();
+            let (_, writes, _) = find_mvcc_infos_by_key(reader, &key, TimeStamp::max()).unwrap();
             panic!(
-                "txn record found but not expected: ts: {:?}, record: {:?}, lock: {:?}, writes: {:?}",
-                txn, write, lock, writes
+                "txn record found but not expected: {:?}, key: {:?}, record: {:?}, lock: {:?}, writes: {:?}",
+                txn, key, write, lock, writes
             );
         }
         _ => return Ok(txn.unlock_key(key, is_pessimistic_txn)),

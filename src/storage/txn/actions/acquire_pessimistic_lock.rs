@@ -235,15 +235,29 @@ pub fn acquire_pessimistic_lock<S: Snapshot>(
         }
     }
 
-    // check rollback
-    if let Some(cloud_reader) = reader.cloud_reader.as_mut() {
-        if cloud_reader.get_rollback(&key, reader.start_ts) {
-            return Err(ErrorInner::PessimisticLockRolledBack {
-                start_ts: reader.start_ts,
+    // check extra-cf
+    let start_ts = reader.start_ts;
+    if let Some((commit_ts, write)) = reader
+        .cloud_reader
+        .as_mut()
+        .and_then(|reader| reader.get_extra(&key, start_ts))
+    {
+        return if write.write_type == WriteType::Rollback {
+            Err(ErrorInner::PessimisticLockRolledBack {
+                start_ts,
                 key: key.into_raw()?,
             }
-            .into());
-        }
+            .into())
+        } else {
+            Err(ErrorInner::WriteConflict {
+                start_ts,
+                conflict_start_ts: write.start_ts,
+                conflict_commit_ts: commit_ts,
+                key: key.into_raw()?,
+                primary: primary.to_vec(),
+            }
+            .into())
+        };
     }
 
     let old_value = load_old_value(

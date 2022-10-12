@@ -67,36 +67,31 @@ impl CloudReader {
             }
             data_iter.next();
         }
-        let rollback_key =
-            rfstore::mvcc::encode_extra_txn_status_key(&raw_key, start_ts.into_inner());
-        let item = self.snapshot.get(EXTRA_CF, &rollback_key, 0);
-        if item.value_len() == 0 {
-            return Ok(TxnCommitRecord::None {
+        match self.get_extra(&key, start_ts) {
+            Some((commit_ts, write)) => Ok(TxnCommitRecord::SingleRecord { commit_ts, write }),
+            None => Ok(TxnCommitRecord::None {
                 overlapped_write: None,
-            });
+            }),
         }
-        let user_meta = UserMeta::from_slice(item.user_meta());
-        let write = if user_meta.commit_ts == 0 {
-            Write::new(WriteType::Rollback, start_ts, None)
-        } else {
-            Write::new(WriteType::Lock, start_ts, None)
-        };
-        Ok(TxnCommitRecord::SingleRecord {
-            commit_ts: TimeStamp::new(user_meta.commit_ts),
-            write,
-        })
     }
 
-    pub fn get_rollback(&mut self, key: &Key, start_ts: TimeStamp) -> bool {
+    pub fn get_extra(&mut self, key: &Key, start_ts: TimeStamp) -> Option<(TimeStamp, Write)> {
         let raw_key = key.to_raw().unwrap();
-        let rollback_key =
+        let extra_key =
             rfstore::mvcc::encode_extra_txn_status_key(&raw_key, start_ts.into_inner());
-        let item = self.snapshot.get(EXTRA_CF, &rollback_key, 0);
+        let item = self.snapshot.get(EXTRA_CF, &extra_key, 0);
         if item.user_meta_len() == 0 {
-            return false;
+            return None;
         }
         let user_meta = UserMeta::from_slice(item.user_meta());
-        user_meta.commit_ts == 0
+        Some(if user_meta.commit_ts == 0 {
+            (start_ts, Write::new(WriteType::Rollback, start_ts, None))
+        } else {
+            (
+                user_meta.commit_ts.into(),
+                Write::new(WriteType::Lock, start_ts, None),
+            )
+        })
     }
 
     pub fn load_lock(&mut self, key: &Key) -> Result<Option<Lock>> {
