@@ -77,8 +77,7 @@ impl CloudReader {
 
     pub fn get_extra(&mut self, key: &Key, start_ts: TimeStamp) -> Option<(TimeStamp, Write)> {
         let raw_key = key.to_raw().unwrap();
-        let extra_key =
-            rfstore::mvcc::encode_extra_txn_status_key(&raw_key, start_ts.into_inner());
+        let extra_key = rfstore::mvcc::encode_extra_txn_status_key(&raw_key, start_ts.into_inner());
         let item = self.snapshot.get(EXTRA_CF, &extra_key, 0);
         if item.user_meta_len() == 0 {
             return None;

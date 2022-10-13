@@ -324,8 +324,11 @@ impl Applier {
                 } else {
                     self.engine.meta_committed(&cs, false);
                     unwrap_or_return!(
-                        self.engine
-                            .apply_change_set(self.engine.prepare_change_set(cs, false).unwrap()),
+                        self.engine.apply_change_set(
+                            self.engine
+                                .prepare_change_set("0".into(), cs, false)
+                                .unwrap()
+                        ),
                         "applier apply changeset"
                     );
                 }

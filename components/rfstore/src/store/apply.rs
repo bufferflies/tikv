@@ -10,7 +10,7 @@ use std::{
 
 use bytes::Buf;
 use fail::fail_point;
-use kvengine::{ChangeSet, Engine, SnapAccess};
+use kvengine::{dfs::get_tenant_prefix, ChangeSet, Engine, SnapAccess};
 use kvproto::{
     metapb,
     metapb::{PeerRole, Region},
@@ -1040,9 +1040,10 @@ impl Applier {
         let engine = ctx.engine.clone();
         let router = ctx.router.clone().unwrap();
         let is_leader = self.is_leader();
+        let tenant = get_tenant_prefix(&self.region.start_key);
         std::thread::spawn(move || {
             let id = cs.shard_id;
-            let res = engine.prepare_change_set(cs, !is_leader);
+            let res = engine.prepare_change_set(tenant, cs, !is_leader);
             router.send(id, PeerMsg::PrepareChangeSetResult(res));
         });
     }

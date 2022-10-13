@@ -594,10 +594,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::{
-        dfs::TENANT,
-        table::sstable::{new_filename, File, LocalFile},
-    };
+    use crate::table::sstable::{new_filename, File, LocalFile};
 
     #[test]
     fn test_s3() {
@@ -623,12 +620,7 @@ mod tests {
         let file_data2 = file_data.clone();
         let f = async move {
             match fs
-                .create(
-                    TENANT,
-                    321,
-                    bytes::Bytes::from(file_data2),
-                    Options::new(1, 1),
-                )
+                .create("0", 321, bytes::Bytes::from(file_data2), Options::new(1, 1))
                 .await
             {
                 Ok(_) => {
@@ -649,7 +641,7 @@ mod tests {
         let move_local_file = local_file.clone();
         let f = async move {
             let opts = Options::new(1, 1);
-            match fs.read_file(TENANT, 321, opts).await {
+            match fs.read_file("0", 321, opts).await {
                 Ok(data) => {
                     let mut file = std::fs::File::create(&move_local_file).unwrap();
                     file.write_all(data.chunk()).unwrap();

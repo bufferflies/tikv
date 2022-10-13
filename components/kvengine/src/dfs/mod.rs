@@ -23,8 +23,6 @@ use thiserror::Error;
 use tikv_util::time::Instant;
 use tokio::runtime::Runtime;
 
-pub const TENANT: &str = "0";
-
 // DFS represents a distributed file system.
 #[async_trait]
 pub trait DFS: Sync + Send {
@@ -245,6 +243,14 @@ impl<E: Debug> From<rusoto_core::RusotoError<E>> for Error {
     }
 }
 
+pub fn get_tenant_prefix(start_key: &[u8]) -> String {
+    let prefix = api_version::ApiV2::get_keyspace_id_str(start_key);
+    if prefix.is_empty() {
+        return "0".to_string();
+    }
+    prefix
+}
+
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::MetadataExt;
@@ -266,7 +272,7 @@ mod tests {
         let f = async move {
             match fs
                 .create(
-                    TENANT,
+                    "0",
                     file_id,
                     bytes::Bytes::from(file_data_clone),
                     Options::new(1, 1),
@@ -289,7 +295,7 @@ mod tests {
         let (tx, rx) = tikv_util::mpsc::bounded(1);
         let f = async move {
             let opts = Options::new(1, 1);
-            match fs.read_file(TENANT, file_id, opts).await {
+            match fs.read_file("0", file_id, opts).await {
                 Ok(data) => {
                     assert_eq!(&data, &file_data);
                     tx.send(true).unwrap();
@@ -310,7 +316,7 @@ mod tests {
         let fs = localfs.clone();
         let (tx, rx) = tikv_util::mpsc::bounded(1);
         let f = async move {
-            fs.remove(TENANT, file_id, Options::new(1, 1)).await;
+            fs.remove("0", file_id, Options::new(1, 1)).await;
             tx.send(true).unwrap();
         };
         localfs.runtime.spawn(f);
