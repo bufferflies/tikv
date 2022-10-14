@@ -15,6 +15,7 @@ pub mod engine;
 pub mod iterator;
 pub mod load;
 mod log_batch;
+pub mod manifest;
 mod metrics;
 pub mod traits;
 pub mod worker;
@@ -25,7 +26,6 @@ use std::num::ParseIntError;
 
 pub use engine::*;
 use iterator::*;
-use load::*;
 use metrics::*;
 use thiserror::Error as ThisError;
 pub use traits::*;

@@ -292,7 +292,6 @@ impl Node {
     }
 
     fn bootstrap_cluster(&mut self, engines: &Engines, first_region: metapb::Region) -> Result<()> {
-        let region_id = first_region.get_id();
         let mut retry = 0;
         while retry < MAX_CHECK_CLUSTER_BOOTSTRAPPED_RETRY_COUNT {
             match self
@@ -313,12 +312,7 @@ impl Node {
                             store::clear_prepare_bootstrap_state(engines)?;
                         } else {
                             info!("cluster is already bootstrapped"; "cluster_id" => self.cluster_id);
-                            let epoch = region.get_region_epoch();
-                            let region_ver = epoch.get_version();
-                            let conf_ver = epoch.get_conf_ver();
-                            store::clear_prepare_bootstrap_cluster(
-                                engines, region_id, region_ver, conf_ver,
-                            )?;
+                            store::clear_prepare_bootstrap_cluster(engines, &region)?;
                         }
                         return Ok(());
                     }

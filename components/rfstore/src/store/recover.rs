@@ -1,9 +1,8 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use bytes::Buf;
-use engine_traits::RaftEngineReadOnly;
 use kvengine::{dfs::get_tenant_prefix, Engine, Shard, ShardMeta};
 use kvenginepb::ChangeSet;
 use kvproto::{metapb, raft_cmdpb::RaftCmdRequest, raft_serverpb};
@@ -13,15 +12,15 @@ use slog_global::info;
 use tikv_util::warn;
 
 use crate::store::{
-    load_raft_truncated_state, parse_region_state_key, raft_state_key, rlog, Applier, ApplyContext,
-    PeerTag, RaftApplyState, RaftState, RegionIDVer, KV_ENGINE_META_KEY, REGION_META_KEY_BYTE,
-    STORE_IDENT_KEY, TERM_KEY,
+    load_raft_truncated_state, raft_state_key, region_state_key, rlog, Applier, ApplyContext,
+    PeerTag, RaftApplyState, RaftState, RegionIDVer, KV_ENGINE_META_KEY, STORE_IDENT_KEY, TERM_KEY,
 };
 
 #[derive(Clone)]
 pub struct RecoverHandler {
     rf_engine: rfengine::RfEngine,
     store_id: u64,
+    region_peer_map: HashMap<u64, u64>,
 }
 
 impl RecoverHandler {
@@ -30,70 +29,52 @@ impl RecoverHandler {
             Some(ident) => ident.store_id,
             None => 0,
         };
+        let region_peer_map = rf_engine.get_region_peer_map();
         Self {
             rf_engine,
             store_id,
+            region_peer_map,
         }
     }
 
-    fn load_region_meta(
-        &self,
-        shard_id: u64,
-        shard_ver: u64,
-    ) -> kvengine::Result<(metapb::Region, u64)> {
-        let mut region: Option<metapb::Region> = None;
-        let _ =
-            self.rf_engine
-                .iterate_region_states(shard_id, true, |k, v| -> rfengine::Result<()> {
-                    if k[0] != REGION_META_KEY_BYTE {
-                        return Ok(());
-                    }
-                    let (meta_ver, _) = parse_region_state_key(k);
-                    if meta_ver != shard_ver {
-                        return Ok(());
-                    }
-                    let mut state = raft_serverpb::RegionLocalState::new();
-                    if state.merge_from_bytes(v).is_err() {
-                        return Err(rfengine::Error::ParseError);
-                    }
-                    region = Some(state.take_region());
-                    Err(rfengine::Error::EOF)
-                });
+    fn load_region_meta(&self, shard_id: u64, shard_ver: u64) -> (metapb::Region, u64) {
+        let &peer_id = self.region_peer_map.get(&shard_id).unwrap();
         let tag = PeerTag::new(self.store_id, RegionIDVer::new(shard_id, shard_ver));
-        if let Some(region) = region {
-            let raft_state_key = raft_state_key(region.get_region_epoch().get_version());
-            let val = self
-                .rf_engine
-                .get_state(region.get_id(), &raft_state_key)
-                .unwrap_or_else(|| {
-                    panic!(
-                        "{} failed to get raft state key, state keys {:?}",
-                        tag,
-                        self.get_state_keys(shard_id)
-                    );
-                });
-            let mut raft_state = RaftState::default();
-            raft_state.unmarshal(val.as_ref());
-            return Ok((region, raft_state.last_preprocessed_index));
-        }
-        let err_msg = format!(
-            "{} failed to load region meta, state keys {:?}",
-            tag,
-            self.get_state_keys(shard_id),
-        );
-        Err(kvengine::Error::ErrOpen(err_msg))
+        let region_state_key = region_state_key(shard_ver);
+        let region_state_val = self
+            .rf_engine
+            .get_state(peer_id, &region_state_key)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{} failed to get region state, state keys {:?}",
+                    tag,
+                    self.get_state_keys(peer_id)
+                );
+            });
+        let mut region_state = raft_serverpb::RegionLocalState::new();
+        region_state.merge_from_bytes(&region_state_val).unwrap();
+        let region = region_state.take_region();
+        let raft_state_key = raft_state_key(shard_ver);
+        let raft_state_val = self
+            .rf_engine
+            .get_state(peer_id, &raft_state_key)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{} failed to get raft state, state keys {:?}",
+                    tag,
+                    self.get_state_keys(peer_id)
+                );
+            });
+        let mut raft_state = RaftState::default();
+        raft_state.unmarshal(raft_state_val.as_ref());
+        (region, raft_state.last_preprocessed_index)
     }
 
-    fn get_state_keys(&self, region_id: u64) -> Vec<Vec<u8>> {
+    fn get_state_keys(&self, peer_id: u64) -> Vec<Vec<u8>> {
         let mut state_keys = vec![];
-        let _ = self.rf_engine.iterate_region_states(
-            region_id,
-            false,
-            |k, _| -> rfengine::Result<()> {
-                state_keys.push(k.to_vec());
-                Ok(())
-            },
-        );
+        self.rf_engine.iterate_peer_states(peer_id, false, |k, _| {
+            state_keys.push(k.to_vec());
+        });
         state_keys
     }
 
@@ -131,7 +112,7 @@ impl kvengine::RecoverHandler for RecoverHandler {
         let mut ctx = ApplyContext::new(engine.clone(), None);
         let applied_index_term = shard.get_property(TERM_KEY).unwrap().get_u64_le();
         let apply_state = RaftApplyState::new(applied_index, applied_index_term);
-        let (region_meta, preprocessed_index) = self.load_region_meta(shard.id, shard.ver)?;
+        let (region_meta, preprocessed_index) = self.load_region_meta(shard.id, shard.ver);
         let low_idx = applied_index + 1;
         let high_idx = preprocessed_index + 1;
         info!(
@@ -141,11 +122,12 @@ impl kvengine::RecoverHandler for RecoverHandler {
             preprocessed_index,
         );
         let mut entries = Vec::with_capacity((high_idx.saturating_sub(low_idx)) as usize);
+        let &peer_id = self.region_peer_map.get(&shard.id).unwrap();
         self.rf_engine
-            .fetch_entries_to(shard.id, low_idx, high_idx, None, &mut entries)
+            .fetch_raft_entries_to(peer_id, low_idx, high_idx, None, &mut entries)
             .map_err(|e| {
-                let stats = self.rf_engine.get_region_stats(shard.id);
-                let truncated_state = load_raft_truncated_state(&self.rf_engine, shard.id);
+                let stats = self.rf_engine.get_peer_stats(peer_id);
+                let truncated_state = load_raft_truncated_state(&self.rf_engine, peer_id);
                 let err_msg = format!(
                     "{} entries unavailable err: {:?}, stats {:?}, truncated_state: {:?}, low: {}, high {}",
                     shard.tag(),
@@ -208,21 +190,15 @@ impl kvengine::MetaIterator for RecoverHandler {
     where
         F: FnMut(ChangeSet),
     {
-        let mut err_msg = None;
-        self.rf_engine
-            .iterate_all_states(false, |_region_id, key, val| {
-                if key[0] == KV_ENGINE_META_KEY[0] {
-                    let mut cs = kvenginepb::ChangeSet::new();
-                    if let Err(e) = cs.merge_from_bytes(val) {
-                        err_msg = Some(e.to_string());
-                        return false;
-                    }
-                    f(cs);
+        let region_to_peers = self.rf_engine.get_region_peer_map();
+        for (_, peer_id) in region_to_peers {
+            if let Some(val) = self.rf_engine.get_state(peer_id, KV_ENGINE_META_KEY) {
+                let mut cs = kvenginepb::ChangeSet::new();
+                if let Err(e) = cs.merge_from_bytes(&val) {
+                    return Err(kvengine::Error::ErrOpen(e.to_string()));
                 }
-                true
-            });
-        if let Some(err) = err_msg {
-            return Err(kvengine::Error::ErrOpen(err));
+                f(cs);
+            }
         }
         Ok(())
     }

@@ -1,0 +1,40 @@
+// Copyright 2022-present PingCAP, Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Use ./gen.sh to generate .pb.go files.
+syntax = "proto3";
+
+package rfpb;
+
+message ChangeSet {
+    uint32 epoch_id = 1;
+    repeated PeerMeta peers = 2;
+}
+
+message PeerMeta {
+    uint64 peer_id = 1;
+    uint64 region_id = 2;
+    uint64 truncated_index = 3;
+    repeated PeerState states = 4;
+    repeated RaftLogFile files = 5;
+}
+
+message PeerState {
+    bytes key = 1;
+    bytes value = 2;
+}
+
+message RaftLogFile {
+    uint64 first_index = 1;
+    uint64 last_index = 2;
+}

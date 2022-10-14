@@ -1178,7 +1178,7 @@ impl<'a> PeerMsgHandler<'a> {
 
     fn on_raft_log_gc_tick(&mut self) {
         self.ticker.schedule(PEER_TICK_RAFT_LOG_GC);
-
+        let peer_id = self.peer_id();
         let region_id = self.region_id();
         let engines = &self.ctx.global.engines;
         if !self.peer.is_initialized()
@@ -1241,7 +1241,7 @@ impl<'a> PeerMsgHandler<'a> {
                         "advance data sequence from {} to {}", persisted_log_idx, applied_idx;
                         "region" => self.peer.tag(),
                     );
-                    write_engine_meta(&mut self.ctx.raft_wb, &shard_meta);
+                    write_engine_meta(&mut self.ctx.raft_wb, peer_id, &shard_meta);
                     persisted_log_idx = applied_idx;
                 }
             }

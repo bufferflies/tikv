@@ -10,7 +10,7 @@ use bytes::{Buf, BytesMut};
 
 use crate::{
     worker::wal_file_name,
-    write_batch::RegionBatch,
+    write_batch::PeerBatch,
     writer::{DmaBuffer, WalHeader, BATCH_HEADER_SIZE},
     Error, Result,
 };
@@ -36,7 +36,7 @@ impl WALIterator {
 
     pub(crate) fn iterate<F>(&mut self, mut f: F) -> Result<()>
     where
-        F: FnMut(RegionBatch),
+        F: FnMut(PeerBatch),
     {
         let filename = wal_file_name(self.dir.as_path(), self.epoch_id);
         let fd = fs::File::open(filename)?;
@@ -62,9 +62,9 @@ impl WALIterator {
                         return Ok(());
                     }
                     while !batch.is_empty() {
-                        let region_data = RegionBatch::decode(batch);
-                        batch = &batch[region_data.encoded_len()..];
-                        f(region_data);
+                        let peer_data = PeerBatch::decode(batch);
+                        batch = &batch[peer_data.encoded_len()..];
+                        f(peer_data);
                     }
                 }
             }
@@ -120,7 +120,7 @@ impl WALIterator {
         self.buf.resize(remained_length, 0);
         reader.read_exact(&mut self.buf[..])?;
         let batch = &self.buf[..length];
-        if checksum != crc32fast::hash(batch) {
+        if checksum != crc32c::crc32c(batch) {
             return Err(Error::Corruption("checksum mismatch".to_owned()));
         }
         self.offset += aligned_length as u64;

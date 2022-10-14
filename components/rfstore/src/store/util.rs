@@ -5,7 +5,6 @@ use std::{
     fmt::{Debug, Display, Formatter},
 };
 
-use byteorder::{BigEndian, ByteOrder};
 use bytes::{BufMut, Bytes, BytesMut};
 use kvproto::{metapb, raft_cmdpb::RaftCmdRequest};
 use protobuf::Message;
@@ -267,18 +266,11 @@ pub(crate) fn raft_state_key(version: u64) -> Bytes {
     key.freeze()
 }
 
-pub(crate) fn region_state_key(version: u64, conf_ver: u64) -> Bytes {
-    let mut key = BytesMut::with_capacity(9);
+pub(crate) fn region_state_key(version: u64) -> Bytes {
+    let mut key = BytesMut::with_capacity(5);
     key.put_u8(REGION_META_KEY_BYTE);
     key.put_u32(version as u32);
-    key.put_u32(conf_ver as u32);
     key.freeze()
-}
-
-pub(crate) fn parse_region_state_key(key: &[u8]) -> (u64, u64) {
-    let ver = BigEndian::read_u32(&key[1..]);
-    let conf_ver = BigEndian::read_u32(&key[5..]);
-    (ver as u64, conf_ver as u64)
 }
 
 // Get the `start_key` of current region in raw form.

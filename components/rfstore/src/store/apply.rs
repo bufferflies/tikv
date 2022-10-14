@@ -1204,6 +1204,14 @@ pub fn get_peer_idx_by_store_id(region: &metapb::Region, store_id: u64) -> usize
     peer_idx
 }
 
+pub fn get_peer_id_by_store_id(region: &metapb::Region, store_id: u64) -> Option<u64> {
+    region
+        .peers
+        .iter()
+        .find(|x| x.store_id == store_id)
+        .map(|x| x.id)
+}
+
 pub fn get_peer_idx_by_peer_id(region: &metapb::Region, peer_id: u64) -> usize {
     let mut peer_idx = region.peers.len();
     for (i, peer) in region.peers.iter().enumerate() {

@@ -1,88 +1,100 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::{
+    collections::{HashMap, VecDeque},
+    ops::{Deref, DerefMut},
+};
 
-use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, BufMut, Bytes};
 use raft_proto::eraftpb;
 
-use crate::{log_batch::RaftLogOp, Truncate};
+use crate::{log_batch::RaftLogOp, PeerMeta};
 
 /// `WriteBatch` contains multiple regions' `RegionBatch`.
 #[derive(Default)]
 pub struct WriteBatch {
-    pub(crate) regions: HashMap<u64, RegionBatch>,
-    pub(crate) truncates: Vec<Truncate>,
+    pub(crate) peers: HashMap<u64, PeerBatch>,
 }
 
 impl WriteBatch {
     pub fn new() -> Self {
         Self {
-            regions: Default::default(),
-            truncates: vec![],
+            peers: Default::default(),
         }
     }
 
-    pub(crate) fn get_region(&mut self, region_id: u64) -> &mut RegionBatch {
-        self.regions
-            .entry(region_id)
-            .or_insert_with(|| RegionBatch::new(region_id))
+    pub(crate) fn get_peer(&mut self, peer_id: u64, region_id: u64) -> &mut PeerBatch {
+        self.peers
+            .entry(peer_id)
+            .or_insert_with(|| PeerBatch::new(peer_id, region_id))
     }
 
-    pub fn append_raft_log(&mut self, region_id: u64, entry: &eraftpb::Entry) {
+    pub fn append_raft_log(&mut self, peer_id: u64, region_id: u64, entry: &eraftpb::Entry) {
         let op = RaftLogOp::new(entry);
-        self.get_region(region_id).append_raft_log(op);
+        self.get_peer(peer_id, region_id).append_raft_log(op);
     }
 
-    pub fn truncate_raft_log(&mut self, region_id: u64, index: u64) {
-        self.get_region(region_id).truncate(index);
+    pub fn truncate_raft_log(&mut self, peer_id: u64, region_id: u64, index: u64) {
+        self.get_peer(peer_id, region_id).truncate(index);
     }
 
-    pub fn set_state(&mut self, region_id: u64, key: &[u8], val: &[u8]) {
-        self.get_region(region_id).set_state(key, val);
+    pub fn set_state(&mut self, peer_id: u64, region_id: u64, key: &[u8], val: &[u8]) {
+        self.get_peer(peer_id, region_id).set_state(key, val);
     }
 
-    pub fn get_state(&mut self, region_id: u64, key: &[u8]) -> Option<&[u8]> {
-        self.get_region(region_id).get_state(key)
+    pub fn get_state(&mut self, peer_id: u64, region_id: u64, key: &[u8]) -> Option<&[u8]> {
+        self.get_peer(peer_id, region_id).get_state(key)
     }
 
-    pub fn clear_region(&mut self, region_id: u64) {
-        self.get_region(region_id).clear();
+    pub fn clear_peer(&mut self, peer_id: u64) {
+        self.peers.remove(&peer_id);
     }
 
     pub fn reset(&mut self) {
-        self.regions.clear()
+        self.peers.clear()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.regions.is_empty()
+        self.peers.is_empty()
     }
 
-    pub(crate) fn merge_region(&mut self, region_batch: RegionBatch) {
-        self.get_region(region_batch.region_id).merge(region_batch);
+    pub(crate) fn merge_peer(&mut self, peer_batch: PeerBatch) {
+        self.get_peer(peer_batch.peer_id, peer_batch.meta.region_id)
+            .merge(peer_batch);
     }
 }
 
 /// `RegionBatch` is a batch of modifications in one region.
-pub(crate) struct RegionBatch {
-    pub(crate) region_id: u64,
-    pub(crate) truncated_idx: u64,
-    pub(crate) states: BTreeMap<Bytes, Bytes>,
+pub(crate) struct PeerBatch {
+    pub(crate) peer_id: u64,
+    pub(crate) meta: PeerMeta,
     pub(crate) raft_logs: VecDeque<RaftLogOp>,
 }
 
-impl RegionBatch {
-    pub(crate) fn new(region_id: u64) -> Self {
+impl Deref for PeerBatch {
+    type Target = PeerMeta;
+    fn deref(&self) -> &Self::Target {
+        &self.meta
+    }
+}
+
+impl DerefMut for PeerBatch {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.meta
+    }
+}
+
+impl PeerBatch {
+    pub(crate) fn new(peer_id: u64, region_id: u64) -> Self {
         Self {
-            region_id,
-            truncated_idx: 0,
-            states: Default::default(),
+            peer_id,
+            meta: PeerMeta::new(region_id),
             raft_logs: Default::default(),
         }
     }
 
     pub(crate) fn truncate(&mut self, idx: u64) {
-        if idx <= self.truncated_idx {
+        if idx < self.truncated_idx {
             return;
         }
         while let Some(true) = self.raft_logs.front().map(|l| l.index <= idx) {
@@ -121,22 +133,16 @@ impl RegionBatch {
         self.raft_logs.push_back(op);
     }
 
-    pub fn merge(&mut self, other: RegionBatch) {
-        debug_assert_eq!(self.region_id, other.region_id);
-        self.truncated_idx = other.truncated_idx;
-        self.states.extend(other.states);
+    pub fn merge(&mut self, other: PeerBatch) {
+        debug_assert_eq!(self.peer_id, other.peer_id);
+        self.meta.merge(&other.meta, true);
         for op in other.raft_logs {
             self.append_raft_log(op);
         }
     }
 
-    pub(crate) fn clear(&mut self) {
-        self.states.clear();
-        self.raft_logs.clear();
-    }
-
     pub(crate) fn encoded_len(&self) -> usize {
-        let mut len = 8 /* region_id */ + 8 /* start_index */ + 8 /* end_index */ + 4 /* states_len */;
+        let mut len = 8 /* peer_id */ + 8 /* region_id */ + 8 /* truncated_idx */ + 8 /* start_index */ + 8 /* end_index */ + 4 /* states_len */;
         for (key, val) in &self.states {
             len += 2 /* key_len */ + key.len() + 4 /* val_len */ + val.len();
         }
@@ -146,17 +152,19 @@ impl RegionBatch {
             .fold(len, |acc, l| acc + l.encoded_len())
     }
 
-    ///  +-------------+---------------+--------------+--------------+-----------------+------------+-------------------+--------------+-----+------------------+-----+--------------+-----+
-    ///  |region_id(8B)|first_index(8B)|last_index(8B)|states_len(4B)|state_key_len(2B)|state_key(n)|state_value_len(4B)|state_value(n)| ... |log_end_offset(4B)| ... |raft_log_op(n)| ... |
-    ///  +-------------+---------------+--------------+--------------+-----------------+------------+-------------------+--------------+-----+------------------+-----+--------------+-----+
+    ///  +-----------+-------------+-----------------+---------------+--------------+--------------+-----------------+------------+-------------------+--------------+-----+------------------+-----+--------------+-----+
+    ///  |peer_id(8B)|region_id(8B)|truncated_idx(8B)|first_index(8B)|last_index(8B)|states_len(4B)|state_key_len(2B)|state_key(n)|state_value_len(4B)|state_value(n)| ... |log_end_offset(4B)| ... |raft_log_op(n)| ... |
+    ///  +-----------+-------------+-----------------+---------------+--------------+--------------+-----------------+------------+-------------------+--------------+-----+------------------+-----+--------------+-----+
     pub(crate) fn encode_to(&self, buf: &mut impl BufMut) {
+        buf.put_u64_le(self.peer_id);
         buf.put_u64_le(self.region_id);
+        buf.put_u64_le(self.truncated_idx);
         let first = self.raft_logs.front().map_or(0, |x| x.index);
         let end = self.raft_logs.back().map_or(0, |x| x.index + 1);
         buf.put_u64_le(first);
         buf.put_u64_le(end);
         buf.put_u32_le(self.states.len() as u32);
-        for (key, val) in &self.states {
+        for (key, val) in &self.meta.states {
             buf.put_u16_le(key.len() as u16);
             buf.put_slice(key.chunk());
             buf.put_u32_le(val.len() as u32);
@@ -173,22 +181,18 @@ impl RegionBatch {
     }
 
     pub(crate) fn decode(mut buf: &[u8]) -> Self {
-        let mut batch = RegionBatch::new(0);
-        batch.region_id = LittleEndian::read_u64(buf);
-        buf = &buf[8..];
-        let first = LittleEndian::read_u64(buf);
-        buf = &buf[8..];
-        let end = LittleEndian::read_u64(buf);
-        buf = &buf[8..];
-        let states_len = LittleEndian::read_u32(buf);
-        buf = &buf[4..];
+        let mut batch = PeerBatch::new(0, 0);
+        batch.peer_id = buf.get_u64_le();
+        batch.region_id = buf.get_u64_le();
+        batch.truncated_idx = buf.get_u64_le();
+        let first = buf.get_u64_le();
+        let end = buf.get_u64_le();
+        let states_len = buf.get_u32_le();
         for _ in 0..states_len {
-            let key_len = LittleEndian::read_u16(buf) as usize;
-            buf = &buf[2..];
+            let key_len = buf.get_u16_le() as usize;
             let key = Bytes::copy_from_slice(&buf[..key_len]);
             buf = &buf[key_len..];
-            let val_len = LittleEndian::read_u32(buf) as usize;
-            buf = &buf[4..];
+            let val_len = buf.get_u32_le() as usize;
             let val = Bytes::copy_from_slice(&buf[..val_len]);
             buf = &buf[val_len..];
             batch.states.insert(key, val);
@@ -199,8 +203,7 @@ impl RegionBatch {
         buf = &buf[log_index_len..];
         let mut start_index = 0;
         for _ in 0..num_logs {
-            let end_index = LittleEndian::read_u32(log_index_buf) as usize;
-            log_index_buf = &log_index_buf[4..];
+            let end_index = log_index_buf.get_u32_le() as usize;
             let log_op = RaftLogOp::decode(&buf[start_index..end_index]);
             start_index = end_index;
             batch.raft_logs.push_back(log_op);
@@ -227,7 +230,7 @@ mod tests {
 
     #[test]
     fn test_region_batch() {
-        let mut region_batch = RegionBatch::new(1);
+        let mut region_batch = PeerBatch::new(1, 2);
 
         let mut logs = vec![];
         for i in 1..=10 {
@@ -245,7 +248,7 @@ mod tests {
         let mut buf = vec![];
         region_batch.encode_to(&mut buf);
         assert_eq!(buf.len(), region_batch.encoded_len());
-        let decoded = RegionBatch::decode(&buf);
+        let decoded = PeerBatch::decode(&buf);
         assert_eq!(decoded.region_id, region_batch.region_id);
         assert_eq!(decoded.states, region_batch.states);
         assert_eq!(decoded.raft_logs, region_batch.raft_logs);
@@ -256,7 +259,7 @@ mod tests {
         assert_eq!(region_batch.raft_logs.len(), 1);
         assert_eq!(region_batch.raft_logs[0], log);
 
-        let mut region_batch = RegionBatch::new(1);
+        let mut region_batch = PeerBatch::new(1, 2);
         for log in &logs[..5] {
             region_batch.append_raft_log(log.clone());
         }

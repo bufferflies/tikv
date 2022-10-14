@@ -4912,7 +4912,7 @@ version = "0.0.1"
 dependencies = [
  "byteorder",
  "bytes",
- "crc32fast",
+ "crc32c",
  "dashmap 4.0.2",
  "engine_traits",
  "error_code",
@@ -4925,6 +4925,7 @@ dependencies = [
  "protobuf",
  "raft",
  "raft-proto",
+ "rfenginepb",
  "serde",
  "serde_derive",
  "serde_json",
@@ -4935,6 +4936,14 @@ dependencies = [
  "thiserror",
  "tikv_alloc",
  "tikv_util",
+]
+
+[[package]]
+name = "rfenginepb"
+version = "0.1.0"
+dependencies = [
+ "protobuf",
+ "protobuf-codegen-pure",
 ]
 
 [[package]]

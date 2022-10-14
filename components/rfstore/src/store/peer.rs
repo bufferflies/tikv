@@ -594,7 +594,7 @@ impl Peer {
             "tag" => self.tag(),
             "peer_id" => self.peer.get_id(),
         );
-        raft_wb.clear_region(self.region_id);
+        raft_wb.clear_peer(self.peer_id());
         self.mut_store().clear_meta(raft_wb, true);
 
         // StoreMsgHandler::check_msg use both epoch and region peer list to check whether
@@ -609,8 +609,9 @@ impl Peer {
         tomb_stone.set_state(PeerState::Tombstone);
         tomb_stone.set_region(region);
         raft_wb.set_state(
+            self.peer_id(),
             self.region_id,
-            &region_state_key(epoch.version, epoch.conf_ver),
+            &region_state_key(epoch.version),
             &tomb_stone.write_to_bytes().unwrap(),
         );
 
@@ -1410,6 +1411,7 @@ impl Peer {
         let custom_log = rlog::CustomRaftLog::new_from_data(custom_req.get_data());
         let mut cs = custom_log.get_change_set().unwrap();
         cs.set_sequence(entry.get_index());
+        let peer_id = self.peer_id();
         let region_id = self.region_id;
         let tag = self.tag();
         let opt_parent_id = self.mut_store().parent_id();
@@ -1440,8 +1442,12 @@ impl Peer {
             "shard meta apply change set {:?}", &cs;
             "region" => tag,
         );
-        ctx.raft_wb
-            .set_state(region_id, KV_ENGINE_META_KEY, &shard_meta.marshal());
+        ctx.raft_wb.set_state(
+            peer_id,
+            region_id,
+            KV_ENGINE_META_KEY,
+            &shard_meta.marshal(),
+        );
         if cs.has_initial_flush() || cs.has_snapshot() {
             if let Some(parent_id) = opt_parent_id {
                 if ctx
@@ -1486,9 +1492,15 @@ impl Peer {
         cs.set_sequence(entry.index);
         ctx.apply_msgs.msgs.push(ApplyMsg::PendingSplit(cs));
         for (new_meta, new_region) in new_metas.iter().zip(regions.iter()) {
+            let new_peer_id = get_peer_id_by_store_id(&new_region, self.peer.store_id).unwrap();
             if new_meta.id == self.region_id {
-                write_peer_state(&mut ctx.raft_wb, self.peer.store_id, new_region);
-                write_engine_meta(&mut ctx.raft_wb, new_meta);
+                write_peer_state(
+                    &mut ctx.raft_wb,
+                    self.peer.store_id,
+                    new_peer_id,
+                    new_region,
+                );
+                write_engine_meta(&mut ctx.raft_wb, new_peer_id, new_meta);
                 // The raft state key changed when region version change, we need to set it here.
                 // We handle committed entries before update peer storage's raft state, so the peer
                 // storage's raft state may not be update to date, we set the hard state of raft.
@@ -1507,13 +1519,13 @@ impl Peer {
             } else {
                 let raft = &ctx.global.engines.raft;
                 // The peer has been created or destroyed.
-                if load_last_peer_state(raft, new_region.id).is_some()
+                if load_last_peer_state(raft, new_peer_id).is_some()
                     || ctx.global.destroying.contains(&new_region.id)
                     // The new region may restore snapshot in the same batch, so we should check
                     // raft_wb too.
                     || ctx
                         .raft_wb
-                        .get_state(new_region.id, KV_ENGINE_META_KEY)
+                        .get_state(new_peer_id, new_region.id, KV_ENGINE_META_KEY)
                         .is_some()
                 {
                     info!(
@@ -1523,10 +1535,20 @@ impl Peer {
                     );
                     continue;
                 }
-                write_peer_state(&mut ctx.raft_wb, self.peer.store_id, new_region);
-                write_engine_meta(&mut ctx.raft_wb, new_meta);
+                write_peer_state(
+                    &mut ctx.raft_wb,
+                    self.peer.store_id,
+                    new_peer_id,
+                    new_region,
+                );
+                write_engine_meta(&mut ctx.raft_wb, new_peer_id, new_meta);
                 let region_version = new_region.get_region_epoch().get_version();
-                write_initial_raft_state(&mut ctx.raft_wb, new_region.get_id(), region_version);
+                write_initial_raft_state(
+                    &mut ctx.raft_wb,
+                    new_peer_id,
+                    new_region.get_id(),
+                    region_version,
+                );
             }
             ctx.global
                 .engines
@@ -1559,7 +1581,12 @@ impl Peer {
             self.tag(),
         ) {
             if region_has_peer(&region, self.peer_id()) {
-                write_peer_state(&mut ctx.raft_wb, self.peer.store_id, &region);
+                write_peer_state(
+                    &mut ctx.raft_wb,
+                    self.peer.store_id,
+                    self.peer_id(),
+                    &region,
+                );
             } else {
                 // It's a remove self conf change, it will be updated in destroy method with
                 // tombstone state.

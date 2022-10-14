@@ -408,9 +408,9 @@ impl StatusServer {
     ) -> hyper::Result<Response<Body>> {
         let path = req.uri().path();
         let last = get_last_path_segment(path);
-        let res = if let Ok(region_id) = u64::from_str(last) {
-            let region_stats = engine.get_region_stats(region_id);
-            serde_json::to_string_pretty(&region_stats)
+        let res = if let Ok(peer_id) = u64::from_str(last) {
+            let peer_stats = engine.get_peer_stats(peer_id);
+            serde_json::to_string_pretty(&peer_stats)
         } else {
             let engine_stats = engine.get_engine_stats();
             serde_json::to_string_pretty(&engine_stats)

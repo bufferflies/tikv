@@ -88,7 +88,7 @@ fn test_raft_log_gc() {
         .map(|id| {
             cluster
                 .get_rfengine(*id)
-                .get_region_stats(region_id)
+                .get_peer_stats(region_id)
                 .truncated_idx
         })
         .collect::<Vec<_>>();
@@ -113,7 +113,7 @@ fn test_raft_log_gc() {
                 .map(|id| {
                     cluster
                         .get_rfengine(*id)
-                        .get_region_stats(region_id)
+                        .get_peer_stats(region_id)
                         .truncated_idx
                 })
                 .collect::<Vec<_>>();
@@ -199,7 +199,7 @@ fn test_raft_log_gc() {
     assert_eq!(
         cluster
             .get_rfengine(node_ids[0])
-            .get_region_stats(region_id)
+            .get_peer_stats(region_id)
             .truncated_idx,
         curr_truncated_idxes[0]
     );
@@ -207,7 +207,7 @@ fn test_raft_log_gc() {
     std::thread::sleep(Duration::from_secs(3));
     let truncated_idx = cluster
         .get_rfengine(node_ids[0])
-        .get_region_stats(region_id)
+        .get_peer_stats(region_id)
         .truncated_idx;
     assert!(
         truncated_idx > curr_truncated_idxes[0],
@@ -238,7 +238,7 @@ fn test_raft_log_gc_size_limit() {
     std::thread::sleep(Duration::from_millis(300));
     let prev_truncated_idx = cluster
         .get_rfengine(node_ids[0])
-        .get_region_stats(region_id)
+        .get_peer_stats(region_id)
         .truncated_idx;
     for i in 0..50 {
         client.put_kv(i * 20..(i + 1) * 20, gen_key, gen_val);
@@ -247,7 +247,7 @@ fn test_raft_log_gc_size_limit() {
         || {
             let curr_truncated_idx = cluster
                 .get_rfengine(node_ids[0])
-                .get_region_stats(region_id)
+                .get_peer_stats(region_id)
                 .truncated_idx;
             curr_truncated_idx > prev_truncated_idx && curr_truncated_idx > 40
         },

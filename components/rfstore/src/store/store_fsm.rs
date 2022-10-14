@@ -28,7 +28,6 @@ use raftstore::{
     },
     store::{local_metrics::RaftMetrics, util, util::is_initial_msg},
 };
-use rfengine::TRUNCATE_ALL_INDEX;
 use sst_importer::SstImporter;
 use tikv_util::{
     box_err,
@@ -239,33 +238,25 @@ impl RaftBatchSystem {
     fn load_peers(&self, ctx: &GlobalContext, store_meta: &mut StoreMeta) -> Result<Vec<PeerFsm>> {
         // Scan region meta to get saved regions.
         let mut regions = vec![];
-        let mut last_region_id: u64 = 0;
-        let mut wb = rfengine::WriteBatch::new();
+        let mut last_peer_id: u64 = 0;
         let rfengine = &ctx.engines.raft;
-        rfengine.iterate_all_states(true, |region_id, key, val| -> bool {
-            if region_id == last_region_id {
-                return true;
-            }
-            if key[0] != REGION_META_KEY_BYTE {
-                return true;
-            }
-            last_region_id = region_id;
-            let mut local_state = RegionLocalState::default();
-            local_state.merge_from_bytes(val).unwrap();
-            if local_state.state != PeerState::Tombstone {
-                regions.push(local_state.get_region().clone());
-            } else if rfengine.get_last_index(region_id).is_some()
-                && load_raft_truncated_state(&rfengine, region_id)
-                    .map(|ts| ts.truncated_index == TRUNCATE_ALL_INDEX)
-                    .unwrap_or_default()
-            {
-                // The peer is tombstone and still has raft logs. Truncate it all again.
-                wb.truncate_raft_log(region_id, TRUNCATE_ALL_INDEX);
-            }
-            true
-        });
-        rfengine.apply(&mut wb);
-        rfengine.schedule_truncate_tasks(wb);
+        let regions_to_peers = rfengine.get_region_peer_map();
+        for (_, peer_id) in regions_to_peers {
+            rfengine.iterate_peer_states(peer_id, true, |key, val| {
+                if peer_id == last_peer_id {
+                    return;
+                }
+                if key[0] != REGION_META_KEY_BYTE {
+                    return;
+                }
+                last_peer_id = peer_id;
+                let mut local_state = RegionLocalState::default();
+                local_state.merge_from_bytes(val).unwrap();
+                if local_state.state != PeerState::Tombstone {
+                    regions.push(local_state.get_region().clone());
+                }
+            });
+        }
         let mut peers = vec![];
         let store_id = ctx.store.id;
         for region in &regions {
@@ -659,7 +650,7 @@ impl<'a> StoreMsgHandler<'a> {
         let to_peer_id = msg.get_to_peer().get_id();
 
         // Check if the target peer is tombstone.
-        let local_state = match load_last_peer_state(&self.ctx.global.engines.raft, region_id) {
+        let local_state = match load_last_peer_state(&self.ctx.global.engines.raft, to_peer_id) {
             Some(state) => state,
             None => return Ok(CheckMsgStatus::NewPeerFirst),
         };
@@ -981,6 +972,7 @@ impl<'a> StoreMsgHandler<'a> {
         }
         let mut new_peers = vec![];
         for new_region in regions {
+            let new_peer_id = get_peer_id_by_store_id(&new_region, self.store.id).unwrap();
             let new_region_id = new_region.get_id();
 
             if new_region_id == region_id {
@@ -1014,7 +1006,7 @@ impl<'a> StoreMsgHandler<'a> {
                         .remove_dependent(region_id, new_region_id);
                     continue;
                 }
-            } else if load_last_peer_state(&self.ctx.global.engines.raft, new_region_id)
+            } else if load_last_peer_state(&self.ctx.global.engines.raft, new_peer_id)
                 .map(|state| state.get_state() == PeerState::Tombstone)
                 .unwrap_or(false)
                 || self.ctx.global.destroying.contains(&new_region_id)

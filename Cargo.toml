@@ -258,6 +258,7 @@ members = [
   "components/resolved_ts",
   "components/resource_metering",
   "components/rfengine",
+  "components/rfenginepb",
   "components/rfstore",
   "components/server",
   "components/server",

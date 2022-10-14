@@ -1,10 +1,8 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use engine_traits::{Error, RaftEngine, RaftEngineReadOnly, RaftLogBatch, Result};
+use engine_traits::{RaftEngine, RaftEngineReadOnly, RaftLogBatch, Result};
 use kvproto::raft_serverpb::RaftLocalState;
-use protobuf::Message;
 use raft::eraftpb::Entry;
-use tikv_util::time::Instant;
 
 use crate::{metrics::*, RfEngine, WriteBatch};
 
@@ -13,47 +11,19 @@ impl RaftEngineReadOnly for RfEngine {
         panic!()
     }
 
-    fn get_entry(&self, raft_group_id: u64, index: u64) -> Result<Option<Entry>> {
-        Ok(self
-            .regions
-            .get(&raft_group_id)
-            .and_then(|data| data.read().unwrap().get(index)))
+    fn get_entry(&self, _raft_group_id: u64, _index: u64) -> Result<Option<Entry>> {
+        panic!()
     }
 
     fn fetch_entries_to(
         &self,
-        region_id: u64,
-        low: u64,
-        high: u64,
-        max_size: Option<usize>, // size limit of fetched entries
-        buf: &mut Vec<Entry>,
+        _region_id: u64,
+        _low: u64,
+        _high: u64,
+        _max_size: Option<usize>, // size limit of fetched entries
+        _buf: &mut Vec<Entry>,
     ) -> Result<usize> /* entry count */ {
-        if high <= low {
-            return Ok(0);
-        }
-        let old_len = buf.len();
-        let region_data = self
-            .regions
-            .get(&region_id)
-            .ok_or(Error::EntriesCompacted)?;
-        let region_data = region_data.read().unwrap();
-        if low <= region_data.truncated_idx {
-            return Err(Error::EntriesCompacted);
-        }
-
-        let timer = Instant::now_coarse();
-        let mut total_size = 0;
-        for i in low..high {
-            let entry = region_data.get(i).ok_or(Error::EntriesUnavailable)?;
-            total_size += entry.compute_size() as usize;
-            buf.push(entry);
-            if max_size.map_or(false, |s| total_size >= s) {
-                // At least return one entry regardless of size limit.
-                break;
-            }
-        }
-        ENGINE_FETCH_ENTRIES_DURATION_HISTOGRAM.observe(timer.saturating_elapsed_secs());
-        Ok(buf.len() - old_len)
+        panic!()
     }
 
     fn get_all_entries_to(&self, _region_id: u64, _buf: &mut Vec<Entry>) -> Result<()> {

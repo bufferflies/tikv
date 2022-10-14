@@ -5,7 +5,6 @@ use std::cell::RefCell;
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use collections::HashSet;
-use engine_traits::RaftEngineReadOnly;
 use kvengine::ShardMeta;
 use kvproto::{
     raft_serverpb::{PeerState, RaftMessage},
@@ -135,9 +134,9 @@ impl raft::Storage for PeerStorage {
         if low == high {
             return Ok(ents);
         }
-        let region_id = self.get_region_id();
-        self.engines.raft.fetch_entries_to(
-            region_id,
+        let peer_id = self.peer_id;
+        self.engines.raft.fetch_raft_entries_to(
+            peer_id,
             low,
             high,
             max_size.into().map(|x| x as usize),
@@ -160,14 +159,15 @@ impl raft::Storage for PeerStorage {
         if self.truncated_term() == self.last_term {
             return Ok(self.last_term);
         }
+        let peer_id = self.peer_id;
         Ok(self
             .engines
             .raft
-            .get_term(self.get_region_id(), idx)
+            .get_term(peer_id, idx)
             .unwrap_or_else(|| {
                 panic!(
                     "failed to get term: region {}, idx {}, first_index {}, last_index {}, applied_index {}, truncated_index {}, region_stats: {:?}",
-                    self.tag(), idx, self.first_index(), self.last_index(), self.applied_index(), self.truncated_index(), self.engines.raft.get_region_stats(self.get_region_id())
+                    self.tag(), idx, self.first_index(), self.last_index(), self.applied_index(), self.truncated_index(), self.engines.raft.get_peer_stats(peer_id)
                 );
             }))
     }
@@ -224,19 +224,19 @@ impl PeerStorage {
         peer_id: u64,
         store_id: u64,
     ) -> Result<PeerStorage> {
-        let raft_state = init_raft_state(&engines.raft, &region)?;
+        let raft_state = init_raft_state(&engines.raft, peer_id, &region)?;
         let apply_state = init_apply_state(&engines.kv, &region);
-        let truncated_state = init_truncated_state(&engines.raft, &region);
+        let truncated_state = init_truncated_state(&engines.raft, peer_id, &region);
         let mut shard_meta: Option<ShardMeta> = None;
         if apply_state.applied_index > 0 {
-            let res = engines.raft.get_state(region.get_id(), KV_ENGINE_META_KEY);
+            let res = engines.raft.get_state(peer_id, KV_ENGINE_META_KEY);
             let shard_meta_bin = res.unwrap();
             let mut change_set = kvenginepb::ChangeSet::default();
             change_set.merge_from_bytes(&shard_meta_bin).unwrap();
             let meta = kvengine::ShardMeta::new(store_id, &change_set);
             shard_meta = Some(meta);
         }
-        let last_term = init_last_term(&engines, &region, raft_state)?;
+        let last_term = init_last_term(&engines, peer_id, &region, raft_state)?;
         let mut initial_flushed = false;
         if let Some(shard) = engines.kv.get_shard(region.get_id()) {
             initial_flushed = shard.get_initial_flushed();
@@ -274,8 +274,9 @@ impl PeerStorage {
     ) {
         self.truncated_state.truncated_index = index;
         self.truncated_state.truncated_index_term = term;
-        wb.truncate_raft_log(self.get_region_id(), index);
+        wb.truncate_raft_log(self.peer_id, self.get_region_id(), index);
         wb.set_state(
+            self.peer_id,
             self.get_region_id(),
             RAFT_TRUNCATED_STATE_KEY,
             &self.truncated_state.marshal(),
@@ -283,14 +284,13 @@ impl PeerStorage {
     }
 
     pub(crate) fn clear_meta(&mut self, rwb: &mut rfengine::WriteBatch, truncate_logs: bool) {
-        let region_id = self.region.get_id();
+        let peer_id = self.peer_id;
+        let region_id = self.region().id;
         self.engines
             .raft
-            .iterate_region_states(region_id, false, |k, _| {
-                rwb.set_state(region_id, k, &[]);
-                Ok(())
-            })
-            .unwrap();
+            .iterate_peer_states(peer_id, false, |k, _| {
+                rwb.set_state(peer_id, region_id, k, &[]);
+            });
         if truncate_logs {
             self.truncate_raft_log(rwb, rfengine::TRUNCATE_ALL_INDEX, self.raft_state.term);
         }
@@ -448,7 +448,7 @@ impl PeerStorage {
         debug!("{} write raft state {:?}", tag, self.raft_state);
         let key = raft_state_key(meta.ver);
         ctx.raft_wb
-            .set_state(meta.id, &key, &self.raft_state.marshal());
+            .set_state(self.peer_id, meta.id, &key, &self.raft_state.marshal());
     }
 
     fn restore_snapshot(&mut self, ready: &Ready, ctx: &mut RaftContext) -> Result<()> {
@@ -487,7 +487,7 @@ impl PeerStorage {
             // we can only delete the old data when the peer is initialized.
             self.clear_meta(&mut ctx.raft_wb, false);
         }
-        write_peer_state(&mut ctx.raft_wb, self.store_id, &region);
+        write_peer_state(&mut ctx.raft_wb, self.store_id, self.peer_id, &region);
         let last_index = snap.get_metadata().get_index();
         let last_term = snap.get_metadata().get_term();
         self.raft_state.last_index = last_index;
@@ -498,7 +498,7 @@ impl PeerStorage {
         self.apply_state.applied_index = last_index;
         self.apply_state.applied_index_term = last_term;
         let shard_meta = ShardMeta::new(self.store_id, &change_set);
-        write_engine_meta(&mut ctx.raft_wb, &shard_meta);
+        write_engine_meta(&mut ctx.raft_wb, self.peer_id, &shard_meta);
         self.truncate_raft_log(&mut ctx.raft_wb, last_index, last_term);
         self.shard_meta = Some(shard_meta);
         self.region = region;
@@ -512,7 +512,7 @@ impl PeerStorage {
             return;
         }
         for e in &entries {
-            raft_wb.append_raft_log(self.get_region_id(), e);
+            raft_wb.append_raft_log(self.peer_id, self.get_region_id(), e);
         }
         let last_entry = entries.last().unwrap();
         self.raft_state.last_index = last_entry.get_index();
@@ -536,20 +536,27 @@ impl PeerStorage {
     }
 }
 
-fn init_raft_state(raft_engine: &rfengine::RfEngine, region: &metapb::Region) -> Result<RaftState> {
+fn init_raft_state(
+    raft_engine: &rfengine::RfEngine,
+    peer_id: u64,
+    region: &metapb::Region,
+) -> Result<RaftState> {
     let mut rs = RaftState::default();
+    if region.peers.is_empty() {
+        return Ok(rs);
+    }
     let rs_key = raft_state_key(region.get_region_epoch().get_version());
-    let rs_val = raft_engine.get_state(region.id, rs_key.chunk());
+    let rs_val = raft_engine.get_state(peer_id, rs_key.chunk());
     if let Some(val) = rs_val {
         rs.unmarshal(&val);
-    } else if !region.peers.is_empty() {
+    } else {
         // new split region.
         rs.last_index = RAFT_INIT_LOG_INDEX;
         rs.term = RAFT_INIT_LOG_TERM;
         rs.commit = RAFT_INIT_LOG_INDEX;
         rs.last_preprocessed_index = RAFT_INIT_LOG_INDEX;
         let mut wb = rfengine::WriteBatch::new();
-        wb.set_state(region.id, rs_key.chunk(), rs.marshal().chunk());
+        wb.set_state(peer_id, region.id, rs_key.chunk(), rs.marshal().chunk());
         raft_engine.write(wb)?;
     }
     Ok(rs)
@@ -569,9 +576,10 @@ fn init_apply_state(kv_engine: &kvengine::Engine, region: &metapb::Region) -> Ra
 
 fn init_truncated_state(
     raft_engine: &rfengine::RfEngine,
+    peer_id: u64,
     region: &metapb::Region,
 ) -> RaftTruncatedState {
-    match load_raft_truncated_state(raft_engine, region.get_id()) {
+    match load_raft_truncated_state(raft_engine, peer_id) {
         Some(ts) if ts.truncated_index != rfengine::TRUNCATE_ALL_INDEX => ts,
         _ => {
             let mut ts = RaftTruncatedState::default();
@@ -586,6 +594,7 @@ fn init_truncated_state(
 
 fn init_last_term(
     engines: &Engines,
+    peer_id: u64,
     region: &metapb::Region,
     raft_state: RaftState,
 ) -> Result<u64> {
@@ -597,7 +606,7 @@ fn init_last_term(
     } else {
         assert!(last_index > RAFT_INIT_LOG_INDEX)
     }
-    let term = engines.raft.get_term(region.get_id(), last_index);
+    let term = engines.raft.get_term(peer_id, last_index);
     if let Some(term) = term {
         return Ok(term);
     }
@@ -615,6 +624,7 @@ fn init_last_term(
 // When we bootstrap the region we must call this to initialize region local state first.
 pub fn write_initial_raft_state(
     raft_wb: &mut rfengine::WriteBatch,
+    peer_id: u64,
     region_id: u64,
     region_version: u64,
 ) {
@@ -626,6 +636,7 @@ pub fn write_initial_raft_state(
         last_preprocessed_index: RAFT_INIT_LOG_INDEX,
     };
     raft_wb.set_state(
+        peer_id,
         region_id,
         &raft_state_key(region_version),
         &raft_state.marshal(),
@@ -635,6 +646,7 @@ pub fn write_initial_raft_state(
 pub fn write_peer_state(
     raft_wb: &mut rfengine::WriteBatch,
     store_id: u64,
+    peer_id: u64,
     region: &metapb::Region,
 ) {
     let tag = PeerTag::new(store_id, RegionIDVer::from_region(region));
@@ -644,13 +656,13 @@ pub fn write_peer_state(
     region_state.set_region(region.clone());
     let state_bin = region_state.write_to_bytes().unwrap();
     let epoch = region.get_region_epoch();
-    let key = region_state_key(epoch.get_version(), epoch.get_conf_ver());
-    raft_wb.set_state(region.get_id(), &key, &state_bin);
+    let key = region_state_key(epoch.get_version());
+    raft_wb.set_state(peer_id, region.get_id(), &key, &state_bin);
 }
 
-pub fn write_engine_meta(raft_wb: &mut rfengine::WriteBatch, meta: &ShardMeta) {
+pub fn write_engine_meta(raft_wb: &mut rfengine::WriteBatch, peer_id: u64, meta: &ShardMeta) {
     info!("{} write engine meta, sequence: {}", meta.tag(), meta.seq);
-    raft_wb.set_state(meta.id, KV_ENGINE_META_KEY, &meta.marshal());
+    raft_wb.set_state(peer_id, meta.id, KV_ENGINE_META_KEY, &meta.marshal());
 }
 
 pub fn encode_snap_data(region: &metapb::Region, change_set: &kvenginepb::ChangeSet) -> Bytes {
@@ -678,8 +690,8 @@ pub fn decode_snap_data(data: &[u8]) -> Result<(metapb::Region, kvenginepb::Chan
     Ok((region, change_set))
 }
 
-pub fn load_last_peer_state(raft: &rfengine::RfEngine, region_id: u64) -> Option<RegionLocalState> {
-    raft.get_last_state_with_prefix(region_id, REGION_META_KEY_PREFIX)
+pub fn load_last_peer_state(raft: &rfengine::RfEngine, peer_id: u64) -> Option<RegionLocalState> {
+    raft.get_last_state_with_prefix(peer_id, REGION_META_KEY_PREFIX)
         .map(|v| {
             let mut state = RegionLocalState::default();
             state.merge_from_bytes(&v).unwrap();
@@ -689,12 +701,11 @@ pub fn load_last_peer_state(raft: &rfengine::RfEngine, region_id: u64) -> Option
 
 pub(crate) fn load_raft_truncated_state(
     raft: &rfengine::RfEngine,
-    region_id: u64,
+    peer_id: u64,
 ) -> Option<RaftTruncatedState> {
-    raft.get_state(region_id, RAFT_TRUNCATED_STATE_KEY)
-        .map(|v| {
-            let mut state = RaftTruncatedState::default();
-            state.unmarshal(&v);
-            state
-        })
+    raft.get_state(peer_id, RAFT_TRUNCATED_STATE_KEY).map(|v| {
+        let mut state = RaftTruncatedState::default();
+        state.unmarshal(&v);
+        state
+    })
 }
