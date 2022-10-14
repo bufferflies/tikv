@@ -12,7 +12,6 @@ protobuf-codec = [
 ]
 
 [dependencies]
-api_version = { path = "../api_version" }
 async-trait = "0.1"
 aws = { path = "../cloud/aws" }
 bincode = "1.3"

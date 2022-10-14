@@ -164,12 +164,9 @@ impl S3FSCore {
         }
     }
 
-    fn file_key(&self, tenant: &str, file_id: u64) -> String {
+    fn file_key(&self, file_id: u64) -> String {
         let idx = (fingerprint64(file_id.to_le_bytes().as_slice())) as u8;
-        format!(
-            "{}/{}/{:02x}/{:016x}.sst",
-            self.prefix, tenant, idx, file_id
-        )
+        format!("{}/{:02x}/{:016x}.sst", self.prefix, idx, file_id)
     }
 
     fn parse_suffix(&self, key: &str) -> String {
@@ -216,13 +213,9 @@ impl S3FSCore {
 
     // list gets a list of file ids greater than start_after.
     // The result contains a vector of file ids and a boolean indicate if there is more.
-    pub async fn list(
-        &self,
-        tenant: &str,
-        start_after: &str,
-    ) -> crate::dfs::Result<(Vec<String>, bool)> {
-        let prefix = format!("{}/{}/", self.prefix.clone(), tenant);
-        let start_after = format!("{}/{}/{}", self.prefix.clone(), tenant, start_after);
+    pub async fn list(&self, start_after: &str) -> crate::dfs::Result<(Vec<String>, bool)> {
+        let prefix = format!("{}/", self.prefix.clone());
+        let start_after = format!("{}/{}", self.prefix.clone(), start_after);
         let mut retry_cnt = 0;
         loop {
             let mut req = self.new_request("GET", "");
@@ -265,10 +258,10 @@ impl S3FSCore {
         }
     }
 
-    pub async fn is_removed(&self, tenant: &str, file_id: u64) -> bool {
+    pub async fn is_removed(&self, file_id: u64) -> bool {
         let mut retry_cnt = 0;
         loop {
-            let key = self.file_key(tenant, file_id);
+            let key = self.file_key(file_id);
             let mut req = self.new_request("GET", &key);
             let mut params = Params::new();
             params.put_key("tagging");
@@ -354,16 +347,11 @@ impl S3FSCore {
 
 #[async_trait]
 impl DFS for S3FS {
-    async fn read_file(
-        &self,
-        tenant: &str,
-        file_id: u64,
-        _opts: Options,
-    ) -> crate::dfs::Result<Bytes> {
+    async fn read_file(&self, file_id: u64, _opts: Options) -> crate::dfs::Result<Bytes> {
         let mut retry_cnt = 0;
         let start_time = Instant::now_coarse();
         loop {
-            let key = self.file_key(tenant, file_id);
+            let key = self.file_key(file_id);
             let req = self.new_request("GET", &key);
             let mut result = self.dispatch(req, GetObjectError::from_response).await;
             if result.is_ok() {
@@ -397,18 +385,12 @@ impl DFS for S3FS {
         }
     }
 
-    async fn create(
-        &self,
-        tenant: &str,
-        file_id: u64,
-        data: Bytes,
-        _opts: Options,
-    ) -> crate::dfs::Result<()> {
+    async fn create(&self, file_id: u64, data: Bytes, _opts: Options) -> crate::dfs::Result<()> {
         let mut retry_cnt = 0;
         let start_time = Instant::now();
         let data_len = data.len();
         loop {
-            let key = self.file_key(tenant, file_id);
+            let key = self.file_key(file_id);
             let mut req = self.new_request("PUT", &key);
             req.add_header("Content-Length", &format!("{}", data.len()));
             let data = data.clone();
@@ -446,11 +428,11 @@ impl DFS for S3FS {
         }
     }
 
-    async fn remove(&self, tenant: &str, file_id: u64, _opts: Options) {
+    async fn remove(&self, file_id: u64, _opts: Options) {
         let mut retry_cnt = 0;
         let mut copied = false;
         loop {
-            let key = self.file_key(tenant, file_id);
+            let key = self.file_key(file_id);
             // copy object
             if !copied {
                 let mut req = self.new_request("PUT", &key);
@@ -620,7 +602,7 @@ mod tests {
         let file_data2 = file_data.clone();
         let f = async move {
             match fs
-                .create("0", 321, bytes::Bytes::from(file_data2), Options::new(1, 1))
+                .create(321, bytes::Bytes::from(file_data2), Options::new(1, 1))
                 .await
             {
                 Ok(_) => {
@@ -641,7 +623,7 @@ mod tests {
         let move_local_file = local_file.clone();
         let f = async move {
             let opts = Options::new(1, 1);
-            match fs.read_file("0", 321, opts).await {
+            match fs.read_file(321, opts).await {
                 Ok(data) => {
                     let mut file = std::fs::File::create(&move_local_file).unwrap();
                     file.write_all(data.chunk()).unwrap();
@@ -666,7 +648,7 @@ mod tests {
         let fs = s3fs.clone();
         let (tx, rx) = tikv_util::mpsc::bounded(1);
         let f = async move {
-            fs.remove("0", 321, Options::new(1, 1)).await;
+            fs.remove(321, Options::new(1, 1)).await;
             tx.send(true).unwrap();
         };
         s3fs.runtime.spawn(f);

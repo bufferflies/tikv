@@ -24,7 +24,6 @@ use tikv_util::mpsc;
 
 use crate::{
     apply::ChangeSet,
-    dfs::get_tenant_prefix,
     meta::ShardMeta,
     table::{
         memtable::CFTable,
@@ -224,8 +223,7 @@ impl EngineCore {
             }
         }
         info!("load shard {}", meta.tag());
-        let tenant = get_tenant_prefix(&meta.start);
-        let change_set = self.prepare_change_set(tenant, meta.to_change_set(), false)?;
+        let change_set = self.prepare_change_set(meta.to_change_set(), false)?;
         self.ingest(change_set, false)?;
         let shard = self.get_shard(meta.id);
         Ok(shard.unwrap())
@@ -441,9 +439,8 @@ impl EngineCore {
                     tbl_cnt += 1;
                     let fs = self.fs.clone();
                     let atx = tx.clone();
-                    let tenant = get_tenant_prefix(&meta.start);
                     self.fs.get_runtime().spawn(async move {
-                        if let Err(err) = fs.create(&tenant, id, buf.freeze(), opts).await {
+                        if let Err(err) = fs.create(id, buf.freeze(), opts).await {
                             atx.send(Err(err)).unwrap();
                         } else {
                             atx.send(Ok(())).unwrap();

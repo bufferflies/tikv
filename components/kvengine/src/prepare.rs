@@ -10,7 +10,6 @@ use crate::{apply::ChangeSet, table::sstable::LocalFile, EngineCore, *};
 impl EngineCore {
     pub fn prepare_change_set(
         &self,
-        tenant: String,
         cs: kvenginepb::ChangeSet,
         use_direct_io: bool,
     ) -> Result<ChangeSet> {
@@ -50,14 +49,7 @@ impl EngineCore {
                 ids.insert(tbl.id, false);
             }
         }
-        self.load_tables_by_ids(
-            tenant,
-            cs.shard_id,
-            cs.shard_ver,
-            ids,
-            &mut cs,
-            use_direct_io,
-        )?;
+        self.load_tables_by_ids(cs.shard_id, cs.shard_ver, ids, &mut cs, use_direct_io)?;
         Ok(cs)
     }
 
@@ -72,7 +64,6 @@ impl EngineCore {
 
     fn load_tables_by_ids(
         &self,
-        tenant: String,
         shard_id: u64,
         shard_ver: u64,
         ids: HashMap<u64, bool>,
@@ -90,9 +81,8 @@ impl EngineCore {
             }
             let fs = self.fs.clone();
             let tx = result_tx.clone();
-            let ten = tenant.clone();
             runtime.spawn(async move {
-                let res = fs.read_file(&ten, id, opts).await;
+                let res = fs.read_file(id, opts).await;
                 tx.send(res.map(|data| (id, is_l0, data))).unwrap();
             });
             msg_count += 1;

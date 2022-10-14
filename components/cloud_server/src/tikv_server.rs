@@ -184,7 +184,8 @@ impl TiKVServer {
             config.dfs.s3_key_id = env::var("DFS_S3_KEY_ID").unwrap_or_default();
             config.dfs.s3_secret_key = env::var("DFS_S3_SECRET_KEY").unwrap_or_default();
             config.dfs.s3_region = env::var("DFS_S3_REGION").unwrap_or_default();
-            config.dfs.remote_compactor_addr = env::var("DFS_REMOTE_COMPACTOR_ADDR").unwrap_or_default();
+            config.dfs.remote_compactor_addr =
+                env::var("DFS_REMOTE_COMPACTOR_ADDR").unwrap_or_default();
         }
 
         let dfs_conf = &config.dfs;

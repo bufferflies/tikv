@@ -13,7 +13,6 @@ use tikv_util::{
 };
 
 use crate::{
-    dfs::get_tenant_prefix,
     table::{memtable, memtable::CFTable, sstable, sstable::L0Builder},
     *,
 };
@@ -113,8 +112,7 @@ impl Engine {
             return Ok(cs);
         }
         let (tx, rx) = tikv_util::mpsc::bounded(1);
-        let tenant = get_tenant_prefix(&task.start);
-        self.persist_l0_table(tenant, l0_builder, tx, task.id_ver);
+        self.persist_l0_table(l0_builder, tx, task.id_ver);
         let l0_create = rx.recv().unwrap()?;
         flush.set_l0_create(l0_create);
         Ok(cs)
@@ -155,8 +153,7 @@ impl Engine {
         let num_mem_tables = l0_builders.len();
         let (tx, rx) = tikv_util::mpsc::bounded(num_mem_tables);
         for l0_builder in l0_builders {
-            let tenant = get_tenant_prefix(&task.start);
-            self.persist_l0_table(tenant, l0_builder, tx.clone(), task.id_ver);
+            self.persist_l0_table(l0_builder, tx.clone(), task.id_ver);
         }
         let mut errs = vec![];
         for _ in 0..num_mem_tables {
@@ -213,7 +210,6 @@ impl Engine {
 
     pub(crate) fn persist_l0_table(
         &self,
-        tenant: String,
         mut l0_builder: L0Builder,
         tx: tikv_util::mpsc::Sender<Result<pb::L0Create>>,
         id_ver: IDVer,
@@ -224,7 +220,6 @@ impl Engine {
         self.fs.get_runtime().spawn(async move {
             let res = fs
                 .create(
-                    &tenant,
                     l0_builder.get_fid(),
                     l0_data,
                     dfs::Options::new(id_ver.id, id_ver.ver),

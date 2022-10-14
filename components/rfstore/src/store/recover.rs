@@ -3,7 +3,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use bytes::Buf;
-use kvengine::{dfs::get_tenant_prefix, Engine, Shard, ShardMeta};
+use kvengine::{Engine, Shard, ShardMeta};
 use kvenginepb::ChangeSet;
 use kvproto::{metapb, raft_cmdpb::RaftCmdRequest, raft_serverpb};
 use protobuf::Message;
@@ -169,8 +169,7 @@ impl kvengine::RecoverHandler for RecoverHandler {
                     cs.sequence = e.get_index();
                     if meta.ver == cs.get_shard_ver() && !meta.is_duplicated_change_set(&mut cs) {
                         // We don't have a background region worker now, should do it synchronously.
-                        let tenant = get_tenant_prefix(&meta.start);
-                        let cs = engine.prepare_change_set(tenant, cs, false)?;
+                        let cs = engine.prepare_change_set(cs, false)?;
                         engine.apply_change_set(cs)?;
                     }
                 } else if let Err(e) = applier.exec_custom_log(&mut ctx, &custom) {

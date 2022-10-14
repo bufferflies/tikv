@@ -28,14 +28,14 @@ use tokio::runtime::Runtime;
 pub trait DFS: Sync + Send {
     /// read_file reads the whole file to memory.
     /// It can be used by remote compaction server that doesn't have local disk.
-    async fn read_file(&self, tenant: &str, file_id: u64, opts: Options) -> Result<Bytes>;
+    async fn read_file(&self, file_id: u64, opts: Options) -> Result<Bytes>;
 
     /// Create creates a new File.
     /// The shard_id and shard_ver can be used determine where to write the file.
-    async fn create(&self, tenant: &str, file_id: u64, data: Bytes, opts: Options) -> Result<()>;
+    async fn create(&self, file_id: u64, data: Bytes, opts: Options) -> Result<()>;
 
     /// remove removes the file from the DFS.
-    async fn remove(&self, tenant: &str, file_id: u64, opts: Options);
+    async fn remove(&self, file_id: u64, opts: Options);
 
     /// get_runtime gets the tokio runtime for the DFS.
     fn get_runtime(&self) -> &tokio::runtime::Runtime;
@@ -69,19 +69,19 @@ impl InMemFS {
 
 #[async_trait]
 impl DFS for InMemFS {
-    async fn read_file(&self, _tenant: &str, file_id: u64, _opts: Options) -> Result<Bytes> {
+    async fn read_file(&self, file_id: u64, _opts: Options) -> Result<Bytes> {
         if let Some(file) = self.files.get(&file_id).as_deref() {
             return Ok(file.clone());
         }
         Err(Error::NotExists(file_id))
     }
 
-    async fn create(&self, _tenant: &str, file_id: u64, data: Bytes, _opts: Options) -> Result<()> {
+    async fn create(&self, file_id: u64, data: Bytes, _opts: Options) -> Result<()> {
         self.files.insert(file_id, data);
         Ok(())
     }
 
-    async fn remove(&self, _tenant: &str, file_id: u64, _opts: Options) {
+    async fn remove(&self, file_id: u64, _opts: Options) {
         if self.pending_remove.contains_key(&file_id) {
             return;
         }
@@ -165,7 +165,7 @@ impl LocalFSCore {
 
 #[async_trait]
 impl DFS for LocalFS {
-    async fn read_file(&self, _tenant: &str, file_id: u64, _opts: Options) -> Result<Bytes> {
+    async fn read_file(&self, file_id: u64, _opts: Options) -> Result<Bytes> {
         let local_file_name = self.local_file_path(file_id);
         let fd = std::fs::File::open(local_file_name)?;
         let mut reader = BufReader::new(fd);
@@ -174,7 +174,7 @@ impl DFS for LocalFS {
         Ok(Bytes::from(buf))
     }
 
-    async fn create(&self, _tenant: &str, file_id: u64, data: Bytes, _opts: Options) -> Result<()> {
+    async fn create(&self, file_id: u64, data: Bytes, _opts: Options) -> Result<()> {
         let local_file_name = self.local_file_path(file_id);
         let tmp_file_name = self.tmp_file_path(file_id);
         let mut file = std::fs::File::create(&tmp_file_name)?;
@@ -191,7 +191,7 @@ impl DFS for LocalFS {
         Ok(())
     }
 
-    async fn remove(&self, _tenant: &str, file_id: u64, _opts: Options) {
+    async fn remove(&self, file_id: u64, _opts: Options) {
         let local_file_path = self.local_file_path(file_id);
         if let Err(err) = std::fs::remove_file(&local_file_path) {
             error!("failed to remove local file {:?}", err);
@@ -243,14 +243,6 @@ impl<E: Debug> From<rusoto_core::RusotoError<E>> for Error {
     }
 }
 
-pub fn get_tenant_prefix(start_key: &[u8]) -> String {
-    let prefix = api_version::ApiV2::get_keyspace_id_str(start_key);
-    if prefix.is_empty() {
-        return "0".to_string();
-    }
-    prefix
-}
-
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::MetadataExt;
@@ -272,7 +264,6 @@ mod tests {
         let f = async move {
             match fs
                 .create(
-                    "0",
                     file_id,
                     bytes::Bytes::from(file_data_clone),
                     Options::new(1, 1),
@@ -295,7 +286,7 @@ mod tests {
         let (tx, rx) = tikv_util::mpsc::bounded(1);
         let f = async move {
             let opts = Options::new(1, 1);
-            match fs.read_file("0", file_id, opts).await {
+            match fs.read_file(file_id, opts).await {
                 Ok(data) => {
                     assert_eq!(&data, &file_data);
                     tx.send(true).unwrap();
@@ -316,7 +307,7 @@ mod tests {
         let fs = localfs.clone();
         let (tx, rx) = tikv_util::mpsc::bounded(1);
         let f = async move {
-            fs.remove("0", file_id, Options::new(1, 1)).await;
+            fs.remove(file_id, Options::new(1, 1)).await;
             tx.send(true).unwrap();
         };
         localfs.runtime.spawn(f);

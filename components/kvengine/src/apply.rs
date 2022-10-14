@@ -11,7 +11,6 @@ use bytes::{Buf, Bytes};
 use moka::sync::SegmentedCache;
 
 use crate::{
-    dfs::get_tenant_prefix,
     meta::is_move_down,
     table::sstable::{BlockCacheKey, L0Table, LocalFile, SSTable},
     *,
@@ -354,8 +353,7 @@ impl EngineCore {
             if cover {
                 self.remove_local_file(id);
                 let fs_n = fs.clone();
-                let tenant = get_tenant_prefix(&shard.start);
-                runtime.spawn(async move { fs_n.remove(&tenant, id, opts).await });
+                runtime.spawn(async move { fs_n.remove(id, opts).await });
             }
         }
     }

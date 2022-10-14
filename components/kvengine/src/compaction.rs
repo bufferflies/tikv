@@ -17,7 +17,6 @@ use tikv_util::mpsc;
 
 use crate::{
     dfs,
-    dfs::get_tenant_prefix,
     table::{
         search,
         sstable::{self, InMemFile, L0Builder, SSTable},
@@ -636,14 +635,13 @@ pub(crate) fn compact_l0(
     fs: Arc<dyn dfs::DFS>,
 ) -> Result<Vec<pb::TableCreate>> {
     let opts = dfs::Options::new(req.shard_id, req.shard_ver);
-    let tenant = get_tenant_prefix(&req.start);
-    let l0_files = load_table_files(tenant.clone(), &req.tops, fs.clone(), opts)?;
+    let l0_files = load_table_files(&req.tops, fs.clone(), opts)?;
     let mut l0_tbls = in_mem_files_to_l0_tables(l0_files);
     l0_tbls.sort_by(|a, b| b.version().cmp(&a.version()));
     let mut mult_cf_bot_tbls = vec![];
     for cf in 0..NUM_CFS {
         let bot_ids = &req.multi_cf_bottoms[cf];
-        let bot_files = load_table_files(tenant.clone(), bot_ids, fs.clone(), opts)?;
+        let bot_files = load_table_files(bot_ids, fs.clone(), opts)?;
         let mut bot_tbls = in_mem_files_to_tables(bot_files);
         bot_tbls.sort_by(|a, b| a.smallest().cmp(b.smallest()));
         mult_cf_bot_tbls.push(bot_tbls);
@@ -676,10 +674,9 @@ pub(crate) fn compact_l0(
             }
             let afs = fs.clone();
             let atx = tx.clone();
-            let tenant = tenant.clone();
             fs.get_runtime().spawn(async move {
                 atx.send(
-                    afs.create(&tenant, tbl_create.id, data, opts)
+                    afs.create(tbl_create.id, data, opts)
                         .await
                         .map(|_| tbl_create),
                 )
@@ -704,7 +701,6 @@ pub(crate) fn compact_l0(
 }
 
 pub(crate) fn load_table_files(
-    tenant: String,
     tbl_ids: &[u64],
     fs: Arc<dyn dfs::DFS>,
     opts: dfs::Options,
@@ -715,10 +711,9 @@ pub(crate) fn load_table_files(
         let aid = *id;
         let atx = tx.clone();
         let afs = fs.clone();
-        let tenant = tenant.clone();
         fs.get_runtime().spawn(async move {
             let res = afs
-                .read_file(&tenant, aid, opts)
+                .read_file(aid, opts)
                 .await
                 .map(|data| (aid, data))
                 .map_err(|e| Error::DFSError(e));
@@ -883,12 +878,11 @@ pub(crate) fn compact_tables(
         "{} compact req tops {:?}, bots {:?}",
         tag, &req.tops, &req.bottoms
     );
-    let tenant = get_tenant_prefix(&req.start);
     let opts = dfs::Options::new(req.shard_id, req.shard_ver);
-    let top_files = load_table_files(tenant.clone(), &req.tops, fs.clone(), opts)?;
+    let top_files = load_table_files(&req.tops, fs.clone(), opts)?;
     let mut top_tables = in_mem_files_to_tables(top_files);
     top_tables.sort_by(|a, b| a.smallest().cmp(b.smallest()));
-    let bot_files = load_table_files(tenant.clone(), &req.bottoms, fs.clone(), opts)?;
+    let bot_files = load_table_files(&req.bottoms, fs.clone(), opts)?;
     let mut bot_tables = in_mem_files_to_tables(bot_files);
     bot_tables.sort_by(|a, b| a.smallest().cmp(b.smallest()));
     let top_iter = Box::new(ConcatIterator::new_with_tables(top_tables, false, false));
@@ -988,10 +982,9 @@ pub(crate) fn compact_tables(
         tbl_create.set_biggest(res.biggest);
         let afs = fs.clone();
         let atx = tx.clone();
-        let ten = tenant.clone();
         fs.get_runtime().spawn(async move {
             atx.send(
-                afs.create(&ten, tbl_create.id, buf.freeze(), opts)
+                afs.create(tbl_create.id, buf.freeze(), opts)
                     .await
                     .map(|_| tbl_create),
             )
@@ -1133,9 +1126,7 @@ fn compact_destroy_range(
     assert_eq!(req.in_place_compact_files.len(), req.file_ids.len());
 
     let opts = dfs::Options::new(req.shard_id, req.shard_ver);
-    let tenant = get_tenant_prefix(&req.start);
     let mut files: HashMap<u64, InMemFile> = load_table_files(
-        tenant.clone(),
         &req.in_place_compact_files
             .iter()
             .map(|(id, ..)| *id)
@@ -1196,10 +1187,8 @@ fn compact_destroy_range(
         };
         let tx = tx.clone();
         let dfs_clone = dfs.clone();
-        let tenant = tenant.clone();
         dfs.get_runtime().spawn(async move {
-            tx.send(dfs_clone.create(&tenant, new_id, data, opts).await)
-                .unwrap();
+            tx.send(dfs_clone.create(new_id, data, opts).await).unwrap();
         });
         let mut delete = pb::TableDelete::new();
         delete.set_id(id);

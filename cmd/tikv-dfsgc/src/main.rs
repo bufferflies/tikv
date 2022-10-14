@@ -80,7 +80,7 @@ fn main() {
     let progress_file_path = PathBuf::from(format!("{}/{}", &config.data_dir, "dfsgc.progress"));
     let mut gc_worker = GcWorker::new(pd_client, s3fs, progress_file_path);
     gc_worker.collect_valid_files();
-    gc_worker.remove_garbage_files("0", start_after.to_string());
+    gc_worker.remove_garbage_files(start_after.to_string());
 }
 
 struct GcWorker {
@@ -143,7 +143,7 @@ impl GcWorker {
         serde_json::from_slice(body.chunk()).unwrap()
     }
 
-    fn remove_garbage_files(&self, tenant: &str, mut start_after: String) {
+    fn remove_garbage_files(&self, mut start_after: String) {
         if let Ok(data) = fs::read_to_string(self.progress_file_path.as_path()) {
             let state_start_after = data;
             if start_after < state_start_after {
@@ -161,14 +161,14 @@ impl GcWorker {
             let (files, has_more) = self
                 .s3fs
                 .get_runtime()
-                .block_on(s3fs.list(tenant, start_after.as_str()))
+                .block_on(s3fs.list(start_after.as_str()))
                 .unwrap();
             info!("listed {} files", files.len());
             for file_suffix in &files {
                 let file_id = self.s3fs.parse_file_id(file_suffix.as_str());
                 if !self.valid_files.contains(&file_id) {
                     // Remove the files one by one to prevent reach API rate limit.
-                    self.remove_garbage_file(tenant, file_id);
+                    self.remove_garbage_file(file_id);
                     checked += 1;
                 }
             }
@@ -193,12 +193,12 @@ impl GcWorker {
         info!("finished");
     }
 
-    fn remove_garbage_file(&self, tenant: &str, id: u64) {
+    fn remove_garbage_file(&self, id: u64) {
         let opts = dfs::Options::new(0, 0);
         let s3fs = self.s3fs.clone();
         self.s3fs.get_runtime().block_on(async move {
-            if !s3fs.is_removed(tenant, id).await {
-                s3fs.remove(tenant, id, opts).await;
+            if !s3fs.is_removed(id).await {
+                s3fs.remove(id, opts).await;
                 REMOVED.fetch_add(1, Ordering::SeqCst);
                 info!("removed {}", id);
             }
