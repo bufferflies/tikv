@@ -173,6 +173,20 @@ impl TiKVServer {
         let pd_client =
             TiKVServer::connect_to_pd_cluster(config, env.clone(), Arc::clone(&security_mgr));
 
+        let dfs_s3_bucket = env::var("DFS_S3_BUCKET").unwrap_or_default();
+        if config.dfs.s3_bucket.is_empty()
+            && config.dfs.s3_endpoint.is_empty()
+            && !dfs_s3_bucket.is_empty()
+        {
+            config.dfs.s3_bucket = dfs_s3_bucket;
+            config.dfs.s3_endpoint = env::var("DFS_S3_ENDPOINT").unwrap_or_default();
+            config.dfs.prefix = env::var("DFS_PREFIX").unwrap_or_default();
+            config.dfs.s3_key_id = env::var("DFS_S3_KEY_ID").unwrap_or_default();
+            config.dfs.s3_secret_key = env::var("DFS_S3_SECRET_KEY").unwrap_or_default();
+            config.dfs.s3_region = env::var("DFS_S3_REGION").unwrap_or_default();
+            config.dfs.remote_compactor_addr = env::var("DFS_REMOTE_COMPACTOR_ADDR").unwrap_or_default();
+        }
+
         let dfs_conf = &config.dfs;
         let dfs: Arc<dyn DFS> = if dfs_conf.s3_bucket.is_empty() && dfs_conf.s3_endpoint.is_empty()
             || dfs_conf.s3_endpoint == "local"
