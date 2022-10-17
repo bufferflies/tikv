@@ -420,6 +420,9 @@ impl RfEngine {
             }
             if peer_data.truncated_idx != TRUNCATE_ALL_INDEX {
                 region_to_peer.insert(peer_data.region_id, peer_id);
+            } else {
+                // The newer peer is already destroyed, the old peer is invalid too.
+                region_to_peer.remove(&peer_data.region_id);
             }
         }
         region_to_peer
