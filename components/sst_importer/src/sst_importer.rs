@@ -26,7 +26,10 @@ use kvproto::{
     kvrpcpb::ApiVersion,
 };
 use tikv_util::{
-    codec::stream_event::{EventIterator, Iterator as EIterator},
+    codec::{
+        bytes::{decode_bytes_in_place, encode_bytes},
+        stream_event::{EventIterator, Iterator as EIterator},
+    },
     time::{Instant, Limiter},
 };
 use txn_types::{Key, TimeStamp, WriteRef};
@@ -180,6 +183,7 @@ impl SstImporter {
     // file created, or returns None if the SST is empty.
     pub fn download<E: KvEngine>(
         &self,
+        request_type: DownloadRequestType,
         meta: &SstMeta,
         backend: &StorageBackend,
         name: &str,
@@ -188,7 +192,7 @@ impl SstImporter {
         speed_limiter: Limiter,
         engine: E,
     ) -> Result<Option<Range>> {
-        debug!("download start";
+        info!("download start";
             "meta" => ?meta,
             "url" => ?backend,
             "name" => name,
@@ -196,6 +200,7 @@ impl SstImporter {
             "speed_limit" => speed_limiter.speed_limit(),
         );
         match self.do_download::<E>(
+            request_type,
             meta,
             backend,
             name,
@@ -456,6 +461,7 @@ impl SstImporter {
 
     fn do_download<E: KvEngine>(
         &self,
+        request_type: DownloadRequestType,
         meta: &SstMeta,
         backend: &StorageBackend,
         name: &str,
@@ -489,7 +495,7 @@ impl SstImporter {
         let sst_reader = RocksSstReader::open_with_env(dst_file_name, Some(env))?;
         sst_reader.verify_checksum()?;
 
-        debug!("downloaded file and verified";
+        info!("downloaded file and verified";
             "meta" => ?meta,
             "name" => name,
             "path" => dst_file_name,
@@ -498,6 +504,12 @@ impl SstImporter {
         // undo key rewrite so we could compare with the keys inside SST
         let old_prefix = rewrite_rule.get_old_key_prefix();
         let new_prefix = rewrite_rule.get_new_key_prefix();
+
+        info!(
+            "rewrite key";
+            "old prefix" => log_wrappers::Value::key(old_prefix),
+            "new prefix" => log_wrappers::Value::key(new_prefix)
+        );
 
         let range_start = meta.get_range().get_start();
         let range_end = meta.get_range().get_end();
@@ -508,20 +520,25 @@ impl SstImporter {
             key_to_bound(range_end)
         };
 
-        let range_start =
+        let mut range_start =
             keys::rewrite::rewrite_prefix_of_start_bound(new_prefix, old_prefix, range_start_bound)
                 .map_err(|_| Error::WrongKeyPrefix {
                     what: "SST start range",
                     key: range_start.to_vec(),
                     prefix: new_prefix.to_vec(),
                 })?;
-        let range_end =
+        let mut range_end =
             keys::rewrite::rewrite_prefix_of_end_bound(new_prefix, old_prefix, range_end_bound)
                 .map_err(|_| Error::WrongKeyPrefix {
                     what: "SST end range",
                     key: range_end.to_vec(),
                     prefix: new_prefix.to_vec(),
                 })?;
+
+        if request_type == DownloadRequestType::Keyspace {
+            range_start = keys::rewrite::encode_bound(range_start);
+            range_end = keys::rewrite::encode_bound(range_end);
+        }
 
         let start_rename_rewrite = Instant::now();
         // read the first and last keys from the SST, determine if we could
@@ -536,8 +553,14 @@ impl SstImporter {
             }
             if !iter.seek(SeekKey::Start)? {
                 // the SST is empty, so no need to iterate at all (should be impossible?)
-                return Ok(Some(meta.get_range().clone()));
+                let mut range = meta.get_range().clone();
+                if request_type == DownloadRequestType::Keyspace {
+                    *range.mut_start() = encode_bytes(&range.take_start());
+                    *range.mut_end() = encode_bytes(&range.take_end());
+                }
+                return Ok(Some(range));
             }
+
             let start_key = keys::origin_key(iter.key());
             if is_before_start_bound(start_key, &range_start) {
                 // SST's start is before the range to consume, so needs to iterate to skip over
@@ -581,8 +604,10 @@ impl SstImporter {
         }
 
         // perform iteration and key rewrite.
-        let mut key = keys::data_key(new_prefix);
-        let new_prefix_data_key_len = key.len();
+        let mut data_key = keys::DATA_PREFIX_KEY.to_vec();
+        let data_key_prefix_len = data_key.len();
+        let mut user_key = new_prefix.to_vec();
+        let user_key_prefix_len = user_key.len();
         let mut first_key = None;
 
         match range_start {
@@ -602,10 +627,22 @@ impl SstImporter {
             .unwrap();
 
         while iter.valid()? {
-            let old_key = keys::origin_key(iter.key());
-            if is_after_end_bound(old_key, &range_end) {
+            let mut old_key = Cow::Borrowed(keys::origin_key(iter.key()));
+            let mut ts = None;
+
+            if is_after_end_bound(old_key.as_ref(), &range_end) {
                 break;
             }
+
+            if request_type == DownloadRequestType::Keyspace {
+                ts = Some(Key::decode_raw_ts_from(old_key.as_ref())?.to_owned());
+                old_key = {
+                    let mut key = old_key.to_vec();
+                    decode_bytes_in_place(&mut key, false)?;
+                    Cow::Owned(key)
+                };
+            }
+
             if !old_key.starts_with(old_prefix) {
                 return Err(Error::WrongKeyPrefix {
                     what: "Key in SST",
@@ -613,12 +650,21 @@ impl SstImporter {
                     prefix: old_prefix.to_vec(),
                 });
             }
-            key.truncate(new_prefix_data_key_len);
-            key.extend_from_slice(&old_key[old_prefix.len()..]);
+
+            data_key.truncate(data_key_prefix_len);
+            user_key.truncate(user_key_prefix_len);
+            user_key.extend_from_slice(&old_key[old_prefix.len()..]);
+            if request_type == DownloadRequestType::Keyspace {
+                data_key.extend(encode_bytes(&user_key));
+                data_key.extend(ts.unwrap());
+            } else {
+                data_key.extend_from_slice(&user_key);
+            }
+
             let mut value = Cow::Borrowed(iter.value());
 
             if rewrite_rule.new_timestamp != 0 {
-                key = Key::from_encoded(key)
+                data_key = Key::from_encoded(data_key)
                     .truncate_ts()
                     .map_err(|e| {
                         Error::BadFormat(format!(
@@ -642,10 +688,10 @@ impl SstImporter {
                 }
             }
 
-            sst_writer.put(&key, &value)?;
+            sst_writer.put(&data_key, &value)?;
             iter.next()?;
             if first_key.is_none() {
-                first_key = Some(keys::origin_key(&key).to_vec());
+                first_key = Some(keys::origin_key(&data_key).to_vec());
             }
         }
 
@@ -664,7 +710,7 @@ impl SstImporter {
 
             let mut final_range = Range::default();
             final_range.set_start(start_key);
-            final_range.set_end(keys::origin_key(&key).to_vec());
+            final_range.set_end(keys::origin_key(&data_key).to_vec());
             Ok(Some(final_range))
         } else {
             // nothing is written: prevents finishing the SST at all.
@@ -772,6 +818,7 @@ mod tests {
         SeekKey, SstReader, SstWriter, CF_DEFAULT, DATA_CFS,
     };
     use file_system::File;
+    use keys::rewrite::rewrite_prefix;
     use openssl::hash::{Hasher, MessageDigest};
     use tempfile::Builder;
     use test_sst_importer::*;
@@ -1006,6 +1053,31 @@ mod tests {
         Ok((dir, backend, meta))
     }
 
+    fn create_tidb_sample_external_sst_file(
+        data: &[(&[u8], &[u8])],
+        ts: u64,
+    ) -> Result<(tempfile::TempDir, StorageBackend, SstMeta)> {
+        let data = data
+            .iter()
+            .map(|(k, v)| (get_encoded_key(k, ts), v.to_vec()))
+            .collect::<Vec<_>>();
+
+        let (dir, backend, meta) = create_external_sst_file_with_write_fn(|writer| {
+            for (k, v) in data {
+                writer.put(&k, &v)?;
+            }
+            Ok(())
+        })?;
+
+        Ok((dir, backend, meta))
+    }
+
+    fn get_encoded_user_key(key: &[u8], ts: u64) -> Vec<u8> {
+        txn_types::Key::from_raw(key)
+            .append_ts(TimeStamp::new(ts))
+            .into_encoded()
+    }
+
     fn get_encoded_key(key: &[u8], ts: u64) -> Vec<u8> {
         keys::data_key(
             txn_types::Key::from_raw(key)
@@ -1173,6 +1245,7 @@ mod tests {
 
         let range = importer
             .download::<TestEngine>(
+                DownloadRequestType::Legacy,
                 &meta,
                 &backend,
                 "sample.sst",
@@ -1232,6 +1305,7 @@ mod tests {
 
         let range = importer
             .download::<TestEngine>(
+                DownloadRequestType::Legacy,
                 &meta,
                 &backend,
                 "sample.sst",
@@ -1281,6 +1355,7 @@ mod tests {
 
         let range = importer
             .download::<TestEngine>(
+                DownloadRequestType::Legacy,
                 &meta,
                 &backend,
                 "sample.sst",
@@ -1329,6 +1404,7 @@ mod tests {
 
         let _ = importer
             .download::<TestEngine>(
+                DownloadRequestType::Legacy,
                 &meta,
                 &backend,
                 "sample_default.sst",
@@ -1373,6 +1449,7 @@ mod tests {
 
         let _ = importer
             .download::<TestEngine>(
+                DownloadRequestType::Legacy,
                 &meta,
                 &backend,
                 "sample_write.sst",
@@ -1436,6 +1513,7 @@ mod tests {
 
             let range = importer
                 .download::<TestEngine>(
+                    DownloadRequestType::Legacy,
                     &meta,
                     &backend,
                     "sample.sst",
@@ -1511,6 +1589,7 @@ mod tests {
 
         let range = importer
             .download::<TestEngine>(
+                DownloadRequestType::Legacy,
                 &meta,
                 &backend,
                 "sample.sst",
@@ -1556,6 +1635,7 @@ mod tests {
 
         let range = importer
             .download::<TestEngine>(
+                DownloadRequestType::Legacy,
                 &meta,
                 &backend,
                 "sample.sst",
@@ -1601,6 +1681,7 @@ mod tests {
         let backend = external_storage_export::make_local_backend(ext_sst_dir.path());
 
         let result = importer.download::<TestEngine>(
+            DownloadRequestType::Legacy,
             &meta,
             &backend,
             "sample.sst",
@@ -1627,6 +1708,7 @@ mod tests {
         meta.mut_range().set_end(vec![b'y']);
 
         let result = importer.download::<TestEngine>(
+            DownloadRequestType::Legacy,
             &meta,
             &backend,
             "sample.sst",
@@ -1651,6 +1733,7 @@ mod tests {
         let db = create_sst_test_engine().unwrap();
 
         let result = importer.download::<TestEngine>(
+            DownloadRequestType::Legacy,
             &meta,
             &backend,
             "sample.sst",
@@ -1689,6 +1772,7 @@ mod tests {
 
         let range = importer
             .download::<TestEngine>(
+                DownloadRequestType::Legacy,
                 &meta,
                 &backend,
                 "sample.sst",
@@ -1748,6 +1832,7 @@ mod tests {
 
         let range = importer
             .download::<TestEngine>(
+                DownloadRequestType::Legacy,
                 &meta,
                 &backend,
                 "sample.sst",
@@ -1803,6 +1888,7 @@ mod tests {
 
         let range = importer
             .download::<TestEngine>(
+                DownloadRequestType::Legacy,
                 &meta,
                 &backend,
                 "sample.sst",
@@ -1851,6 +1937,7 @@ mod tests {
 
         importer
             .download::<TestEngine>(
+                DownloadRequestType::Legacy,
                 &meta,
                 &backend,
                 "sample.sst",
@@ -1920,5 +2007,139 @@ mod tests {
             };
             assert_eq!(sst_reader.compression_name(), expected_compression_name);
         }
+    }
+
+    fn test_download_sst_in_keyspace_mode_impl(
+        data: &[(&[u8], &[u8])],
+        old_prefix: &[u8],
+        new_prefix: &[u8],
+        old_ts: u64,
+        new_ts: u64,
+    ) {
+        let (_ext_sst_dir, backend, meta) =
+            create_tidb_sample_external_sst_file(data, old_ts).unwrap();
+
+        // Create an importer in keyspace mode
+        let importer_dir = tempfile::tempdir().unwrap();
+        let cfg = Config::default();
+        let importer = SstImporter::new(&cfg, &importer_dir, None, ApiVersion::V2).unwrap();
+
+        let db = create_sst_test_engine().unwrap();
+
+        // Download and rewrite the SST file with a new keyspace id and a new table/index id.
+        let range = importer
+            .download::<TestEngine>(
+                DownloadRequestType::Keyspace,
+                &meta,
+                &backend,
+                "sample.sst",
+                &new_rewrite_rule(old_prefix, new_prefix, new_ts),
+                None,
+                Limiter::new(f64::INFINITY),
+                db,
+            )
+            .unwrap()
+            .unwrap();
+
+        let expected_start = get_encoded_user_key(
+            &rewrite_prefix(old_prefix, new_prefix, data[0].0).unwrap(),
+            new_ts,
+        );
+
+        assert_eq!(expected_start, range.get_start());
+
+        let expected_end = get_encoded_user_key(
+            &rewrite_prefix(old_prefix, new_prefix, data[data.len() - 1].0).unwrap(),
+            new_ts,
+        );
+
+        assert_eq!(expected_end, range.get_end());
+
+        // verifies that the file is saved to the correct place.
+        let sst_file_path = importer.dir.join(&meta).unwrap().save;
+        let sst_file_metadata = sst_file_path.metadata().unwrap();
+        assert!(sst_file_metadata.is_file());
+
+        // verifies the SST content is correct.
+        let sst_reader = new_sst_reader(sst_file_path.to_str().unwrap(), None);
+        sst_reader.verify_checksum().unwrap();
+        let mut iter = sst_reader.iter();
+        iter.seek(SeekKey::Start).unwrap();
+        assert_eq!(
+            collect(iter),
+            data.iter()
+                .map(|(k, v)| {
+                    let k = rewrite_prefix(old_prefix, new_prefix, k).unwrap();
+                    (get_encoded_key(&k, new_ts), v.to_vec())
+                })
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_download_sst_in_keyspace_mode() {
+        // Download v1 data and rewrite them to v2
+        test_download_sst_in_keyspace_mode_impl(
+            &[
+                (b"t123_r01".as_slice(), b"abc".as_slice()),
+                (b"t123_r04".as_slice(), b"xyz".as_slice()),
+                (b"t123_r07".as_slice(), b"pqrst".as_slice()),
+                (b"t123_r10".as_slice(), b"12345".as_slice()),
+                (b"t123_r13".as_slice(), b"www".as_slice()),
+                (b"t123_r16".as_slice(), b"xyz".as_slice()),
+            ],
+            b"t123_r",
+            b"x123t321_r",
+            37,
+            61,
+        );
+
+        // Download v2 data and rewrite them to v2
+        test_download_sst_in_keyspace_mode_impl(
+            &[
+                (b"x123t123_r01".as_slice(), b"abc".as_slice()),
+                (b"x123t123_r04".as_slice(), b"xyz".as_slice()),
+                (b"x123t123_r07".as_slice(), b"pqrst".as_slice()),
+                (b"x123t123_r10".as_slice(), b"12345".as_slice()),
+                (b"x123t123_r13".as_slice(), b"www".as_slice()),
+                (b"x123t123_r16".as_slice(), b"xyz".as_slice()),
+            ],
+            b"x123t123_r",
+            b"x321t321_r",
+            23333,
+            66666,
+        );
+
+        // Download v2 data and rewrite them to v1
+        test_download_sst_in_keyspace_mode_impl(
+            &[
+                (b"x123t123_r01".as_slice(), b"abc".as_slice()),
+                (b"x123t123_r04".as_slice(), b"xyz".as_slice()),
+                (b"x123t123_r07".as_slice(), b"pqrst".as_slice()),
+                (b"x123t123_r10".as_slice(), b"12345".as_slice()),
+                (b"x123t123_r13".as_slice(), b"www".as_slice()),
+                (b"x123t123_r16".as_slice(), b"xyz".as_slice()),
+            ],
+            b"x123t123_r",
+            b"t321_r",
+            12306,
+            12345,
+        );
+
+        // Download v1 data and rewrite them to v1
+        test_download_sst_in_keyspace_mode_impl(
+            &[
+                (b"t123_r01".as_slice(), b"abc".as_slice()),
+                (b"t123_r04".as_slice(), b"xyz".as_slice()),
+                (b"t123_r07".as_slice(), b"pqrst".as_slice()),
+                (b"t123_r10".as_slice(), b"12345".as_slice()),
+                (b"t123_r13".as_slice(), b"www".as_slice()),
+                (b"t123_r16".as_slice(), b"xyz".as_slice()),
+            ],
+            b"t123_r",
+            b"t321_r",
+            110,
+            911,
+        );
     }
 }

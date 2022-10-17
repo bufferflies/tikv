@@ -1,6 +1,6 @@
 // Copyright 2018 TiKV Project Authors. Licensed under Apache-2.0.
 
-use api_version::KvFormat;
+use api_version::ApiV1;
 use async_trait::async_trait;
 use kvproto::coprocessor::{KeyRange, Response};
 use protobuf::Message;
@@ -21,12 +21,12 @@ use crate::{
 };
 
 // `ChecksumContext` is used to handle `ChecksumRequest`
-pub struct ChecksumContext<S: Snapshot, F: KvFormat> {
+pub struct ChecksumContext<S: Snapshot> {
     req: ChecksumRequest,
-    scanner: RangesScanner<TiKvStorage<CloudStore<S>>, F>,
+    scanner: RangesScanner<TiKvStorage<CloudStore<S>>, ApiV1>,
 }
 
-impl<S: Snapshot, F: KvFormat> ChecksumContext<S, F> {
+impl<S: Snapshot> ChecksumContext<S> {
     pub fn new(
         req: ChecksumRequest,
         ranges: Vec<KeyRange>,
@@ -40,6 +40,7 @@ impl<S: Snapshot, F: KvFormat> ChecksumContext<S, F> {
             req_ctx.bypass_locks.clone(),
             !req_ctx.context.get_not_fill_cache(),
         );
+        info!("checksum ranges"; "ranges" => ?ranges);
         let scanner = RangesScanner::new(RangesScannerOptions {
             storage: TiKvStorage::new(store, false),
             ranges: ranges
@@ -55,7 +56,7 @@ impl<S: Snapshot, F: KvFormat> ChecksumContext<S, F> {
 }
 
 #[async_trait]
-impl<S: Snapshot, F: KvFormat> RequestHandler for ChecksumContext<S, F> {
+impl<S: Snapshot> RequestHandler for ChecksumContext<S> {
     async fn handle_request(&mut self) -> Result<MemoryTraceGuard<Response>> {
         let algorithm = self.req.get_algorithm();
         if algorithm != ChecksumAlgorithm::Crc64Xor {
@@ -92,7 +93,7 @@ impl<S: Snapshot, F: KvFormat> RequestHandler for ChecksumContext<S, F> {
                 return Err(box_err!("Wrong prefix expect: {:?}", new_prefix));
             }
             checksum =
-                checksum_crc64_xor(checksum, prefix_digest.clone(), &k[new_prefix.len()..], &v);
+                checksum_crc64_xor(checksum, prefix_digest.clone(), &k[new_prefix.len()..], v);
             total_kvs += 1;
             total_bytes += k.len() + v.len() + old_prefix.len() - new_prefix.len();
         }

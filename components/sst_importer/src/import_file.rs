@@ -13,6 +13,7 @@ use encryption::{DataKeyManager, EncrypterWriter};
 use engine_rocks::{get_env, RocksSstReader};
 use engine_traits::{EncryptionKeyManager, Iterable, KvEngine, SstMetaInfo, SstReader};
 use file_system::{get_io_rate_limiter, sync_dir, File, OpenOptions};
+use keys::{data_end_key, data_key};
 use kvproto::{import_sstpb::*, kvrpcpb::ApiVersion};
 use tikv_util::time::Instant;
 use uuid::{Builder as UuidBuilder, Uuid};
@@ -325,10 +326,15 @@ impl ImportDir {
 
                     for &(start, end) in TIDB_RANGES_COMPLEMENT {
                         let mut unexpected_data_key = None;
-                        sst_reader.scan(start, end, false, |key, _| {
-                            unexpected_data_key = Some(key.to_vec());
-                            Ok(false)
-                        })?;
+                        sst_reader.scan(
+                            &data_key(start),
+                            &data_end_key(end),
+                            false,
+                            |key, _| {
+                                unexpected_data_key = Some(key.to_vec());
+                                Ok(false)
+                            },
+                        )?;
 
                         if let Some(unexpected_data_key) = unexpected_data_key {
                             error!(

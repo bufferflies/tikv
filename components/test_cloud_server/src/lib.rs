@@ -1,7 +1,5 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
-extern crate core;
-
 pub mod client;
 pub mod cluster;
 pub mod scheduler;
