@@ -617,11 +617,11 @@ impl<E: Engine> Endpoint<E> {
         req: coppb::Request,
         peer: Option<String>,
     ) -> impl futures::stream::Stream<Item = coppb::Response> {
-        let result_of_stream =
-            self.parse_request_and_check_memory_locks(req, peer, true)
-                .and_then(|(handler_builder, req_ctx)| {
-                    self.handle_stream_request(req_ctx, handler_builder)
-                }); // Result<Stream<Resp, Error>, Error>
+        let result_of_stream = self
+            .parse_request_and_check_memory_locks(req, peer, true)
+            .and_then(|(handler_builder, req_ctx)| {
+                self.handle_stream_request(req_ctx, handler_builder)
+            }); // Result<Stream<Resp, Error>, Error>
 
         futures::stream::once(futures::future::ready(result_of_stream)) // Stream<Stream<Resp, Error>, Error>
             .try_flatten() // Stream<Resp, Error>
