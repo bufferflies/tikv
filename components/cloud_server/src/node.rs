@@ -312,7 +312,7 @@ impl Node {
                             store::clear_prepare_bootstrap_state(engines)?;
                         } else {
                             info!("cluster is already bootstrapped"; "cluster_id" => self.cluster_id);
-                            store::clear_prepare_bootstrap_cluster(engines, &region)?;
+                            store::clear_prepare_bootstrap_cluster(engines, &first_region)?;
                         }
                         return Ok(());
                     }
