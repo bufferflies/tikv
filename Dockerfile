@@ -74,6 +74,8 @@ COPY Makefile ./
 COPY cmd/ ./cmd/
 COPY components/ ./components/
 COPY src/ ./src/
+RUN yum install -y git
+COPY .git .git
 
 # Build binaries now
 RUN source /opt/rh/devtoolset-8/enable && make build_dist_release
