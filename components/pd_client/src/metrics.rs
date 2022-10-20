@@ -45,7 +45,7 @@ lazy_static! {
     )
     .unwrap();
     pub static ref STORE_SIZE_GAUGE_VEC: IntGaugeVec =
-        register_int_gauge_vec!("tikv_store_size_bytes", "Size of storage.", &["type"]).unwrap();
+        register_int_gauge_vec!("tikv_store_size_bytes", "Size of storage.", &["type","region_id","keyspace_id"]).unwrap();
     pub static ref REGION_READ_KEYS_HISTOGRAM: Histogram = register_histogram!(
         "tikv_region_read_keys",
         "Histogram of keys written for regions",
@@ -56,12 +56,6 @@ lazy_static! {
         "tikv_engine_size_bytes",
         "Sizes of each column families",
         &["db", "type"]
-    )
-    .unwrap();
-    pub static ref REGION_STORE_ENGINE_SIZE_GAUGE_VEC: IntCounterVec = register_int_counter_vec!(
-        "tikv_region_store_size_bytes",
-        "Sizes of each column families",
-        &["keyspace_id"]
     )
     .unwrap();
     pub static ref STORE_ENGINE_FLOW_VEC: IntCounterVec = register_int_counter_vec!(
