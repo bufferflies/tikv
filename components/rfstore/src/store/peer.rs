@@ -4,10 +4,7 @@ use std::{
     cell::RefCell,
     cmp,
     collections::VecDeque,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
+    sync::{atomic::Ordering, Arc},
     time::{Duration, Instant},
 };
 
@@ -444,16 +441,6 @@ pub(crate) struct Peer {
     /// Transaction extensions related to this peer.
     pub txn_ext: Arc<TxnExt>,
 
-    /// The max timestamp recorded in the concurrency manager is only updated at leader.
-    /// So if a peer becomes leader from a follower, the max timestamp can be outdated.
-    /// We need to update the max timestamp with a latest timestamp from PD before this
-    /// peer can work.
-    /// From the least significant to the most, 1 bit marks whether the timestamp is
-    /// updated, 31 bits for the current epoch version, 32 bits for the current term.
-    /// The version and term are stored to prevent stale UpdateMaxTimestamp task from
-    /// marking the lowest bit.
-    pub max_ts_sync_status: Arc<AtomicU64>,
-
     /// Check whether this proposal can be proposed based on its epoch.
     cmd_epoch_checker: CmdEpochChecker,
 
@@ -539,7 +526,6 @@ impl Peer {
             ),
             peer_stat: PeerStat::default(),
             txn_ext: Arc::new(TxnExt::default()),
-            max_ts_sync_status: Arc::new(Default::default()),
             cmd_epoch_checker: Default::default(),
             need_campaign: false,
             lead_transferee: raft::INVALID_ID,
@@ -2709,6 +2695,9 @@ impl Peer {
             }
         }
         let mut resp = ctx.execute(&req, &Arc::new(region), read_index, None);
+        if let Some(snap) = resp.snapshot.as_mut() {
+            snap.txn_ext = Some(self.txn_ext.clone());
+        }
         cmd_resp::bind_term(&mut resp.response, self.term());
         resp
     }
@@ -2809,12 +2798,7 @@ impl ReadExecutor for RaftContext {
     fn get_snapshot(&self, region_id: u64, region_ver: u64) -> Result<RegionSnapshot> {
         if let Some(snap) = self.global.engines.kv.get_snap_access(region_id) {
             if snap.get_version() == region_ver {
-                return Ok(RegionSnapshot {
-                    snap,
-                    max_ts_sync_status: None,
-                    term: None,
-                    txn_extra_op: TxnExtraOp::Noop,
-                });
+                return Ok(RegionSnapshot::from_snapshot(snap));
             }
         }
         Err(Error::StaleCommand)

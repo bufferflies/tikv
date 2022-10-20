@@ -1,11 +1,16 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
+use std::{num::NonZeroU64, sync::Arc};
+
 use engine_traits::{CfName, IterOptions, ReadOptions};
 use kvengine::SnapAccess;
+use kvproto::kvrpcpb::ExtraOp as TxnExtraOp;
+use pd_client::BucketMeta;
+use raftstore::store::TxnExt;
 use rfstore::Error as RaftServerError;
 use txn_types::{Key, Value};
 
-use crate::{self as kv, DummySnapshotExt, Error, ErrorInner, Iterator, Snapshot};
+use crate::{self as kv, Error, ErrorInner, Iterator, Snapshot, SnapshotExt};
 
 impl From<RaftServerError> for Error {
     fn from(e: RaftServerError) -> Error {
@@ -13,28 +18,62 @@ impl From<RaftServerError> for Error {
     }
 }
 
-#[allow(unused)]
+pub struct RegionSnapshotExt<'a> {
+    snapshot: &'a rfstore::store::RegionSnapshot,
+}
+
+impl<'a> SnapshotExt for RegionSnapshotExt<'a> {
+    #[inline]
+    fn get_data_version(&self) -> Option<u64> {
+        None
+    }
+
+    fn is_max_ts_synced(&self) -> bool {
+        self.snapshot
+            .txn_ext
+            .as_ref()
+            .map(|txn_ext| txn_ext.is_max_ts_synced())
+            .unwrap_or(false)
+    }
+
+    fn get_term(&self) -> Option<NonZeroU64> {
+        self.snapshot.term
+    }
+
+    fn get_txn_extra_op(&self) -> TxnExtraOp {
+        self.snapshot.txn_extra_op
+    }
+
+    fn get_txn_ext(&self) -> Option<&Arc<TxnExt>> {
+        self.snapshot.txn_ext.as_ref()
+    }
+
+    fn get_buckets(&self) -> Option<Arc<BucketMeta>> {
+        None
+    }
+}
+
 impl Snapshot for rfstore::store::RegionSnapshot {
     type Iter = rfstore::store::RegionSnapshotIterator;
-    type Ext<'a> = DummySnapshotExt;
+    type Ext<'a> = RegionSnapshotExt<'a>;
 
-    fn get(&self, key: &Key) -> kv::Result<Option<Value>> {
+    fn get(&self, _key: &Key) -> kv::Result<Option<Value>> {
         unreachable!()
     }
 
-    fn get_cf(&self, cf: CfName, key: &Key) -> kv::Result<Option<Value>> {
+    fn get_cf(&self, _cf: CfName, _key: &Key) -> kv::Result<Option<Value>> {
         unreachable!()
     }
 
-    fn get_cf_opt(&self, opts: ReadOptions, cf: CfName, key: &Key) -> kv::Result<Option<Value>> {
+    fn get_cf_opt(&self, _opts: ReadOptions, _cf: CfName, _key: &Key) -> kv::Result<Option<Value>> {
         unreachable!()
     }
 
-    fn iter(&self, iter_opt: IterOptions) -> kv::Result<Self::Iter> {
+    fn iter(&self, _iter_opt: IterOptions) -> kv::Result<Self::Iter> {
         unreachable!()
     }
 
-    fn iter_cf(&self, cf: CfName, iter_opt: IterOptions) -> kv::Result<Self::Iter> {
+    fn iter_cf(&self, _cf: CfName, _iter_opt: IterOptions) -> kv::Result<Self::Iter> {
         unreachable!()
     }
 
@@ -48,8 +87,8 @@ impl Snapshot for rfstore::store::RegionSnapshot {
         unreachable!()
     }
 
-    fn ext(&self) -> DummySnapshotExt {
-        DummySnapshotExt
+    fn ext(&self) -> RegionSnapshotExt<'_> {
+        RegionSnapshotExt { snapshot: self }
     }
 
     fn get_kvengine_snap(&self) -> Option<&SnapAccess> {

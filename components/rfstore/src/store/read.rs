@@ -17,6 +17,7 @@ use kvproto::{
 use raftstore::store::{
     util::{LeaseState, RemoteLease},
     worker_metrics::*,
+    TxnExt,
 };
 use tikv_util::{
     debug, error,
@@ -157,7 +158,7 @@ pub struct ReadDelegate {
     pub last_valid_ts: Timespec,
 
     pub tag: String,
-    pub max_ts_sync_status: Arc<AtomicU64>,
+    pub txn_ext: Arc<TxnExt>,
 
     // `track_ver` used to keep the local `ReadDelegate` in `LocalReader`
     // up-to-date with the global `ReadDelegate` stored at `StoreMeta`
@@ -179,7 +180,7 @@ impl ReadDelegate {
             leader_lease: None,
             last_valid_ts: Timespec::new(0, 0),
             tag: format!("[region {}] {}", region_id, peer_id),
-            max_ts_sync_status: peer.max_ts_sync_status.clone(),
+            txn_ext: peer.txn_ext.clone(),
             track_ver: TrackVer::new(),
         }
     }
@@ -393,7 +394,7 @@ impl LocalReader {
                 };
                 cmd_resp::bind_term(&mut response.response, delegate.term);
                 if let Some(snap) = response.snapshot.as_mut() {
-                    snap.max_ts_sync_status = Some(delegate.max_ts_sync_status.clone());
+                    snap.txn_ext = Some(delegate.txn_ext.clone());
                 }
                 cb.invoke_read(response);
             }

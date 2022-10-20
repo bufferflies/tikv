@@ -1,12 +1,10 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{
-    num::NonZeroU64,
-    sync::{atomic::AtomicU64, Arc},
-};
+use std::{num::NonZeroU64, sync::Arc};
 
 use kvengine::SnapAccess;
 use kvproto::{kvrpcpb::ExtraOp as TxnExtraOp, metapb::Region};
+use raftstore::store::TxnExt;
 use tikv_util::{metrics::CRITICAL_ERROR, panic_when_unexpected_key_or_data, set_panic_mark};
 
 /// Snapshot of a region.
@@ -15,8 +13,8 @@ use tikv_util::{metrics::CRITICAL_ERROR, panic_when_unexpected_key_or_data, set_
 #[derive(Debug)]
 pub struct RegionSnapshot {
     pub snap: SnapAccess,
-    // `None` means the snapshot does not care about max_ts
-    pub max_ts_sync_status: Option<Arc<AtomicU64>>,
+    // `None` means the snapshot does not provide peer related transaction extensions.
+    pub txn_ext: Option<Arc<TxnExt>>,
     pub term: Option<NonZeroU64>,
     pub txn_extra_op: TxnExtraOp,
 }
@@ -30,7 +28,7 @@ impl RegionSnapshot {
     pub fn from_snapshot(snap: SnapAccess) -> RegionSnapshot {
         RegionSnapshot {
             snap,
-            max_ts_sync_status: None,
+            txn_ext: None,
             term: None,
             txn_extra_op: TxnExtraOp::Noop,
         }
@@ -51,7 +49,7 @@ impl Clone for RegionSnapshot {
     fn clone(&self) -> Self {
         RegionSnapshot {
             snap: self.snap.clone(),
-            max_ts_sync_status: self.max_ts_sync_status.clone(),
+            txn_ext: self.txn_ext.clone(),
             term: self.term,
             txn_extra_op: self.txn_extra_op,
         }
