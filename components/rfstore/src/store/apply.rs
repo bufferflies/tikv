@@ -64,14 +64,14 @@ pub(crate) struct PendingCmdQueue {
 }
 
 impl PendingCmdQueue {
-    pub(crate) fn pop_normal(&mut self, term: u64) -> Option<PendingCmd> {
-        if self.normals.is_empty() {
-            return None;
-        }
-        if self.normals[0].term > term {
-            return None;
-        };
-        self.normals.pop_front()
+    pub(crate) fn pop_normal(&mut self, index: u64, term: u64) -> Option<PendingCmd> {
+        self.normals.pop_front().and_then(|cmd| {
+            if (cmd.term, cmd.index) > (term, index) {
+                self.normals.push_front(cmd);
+                return None;
+            }
+            Some(cmd)
+        })
     }
 
     pub(crate) fn append_normal(&mut self, cmd: PendingCmd) {
@@ -613,18 +613,24 @@ impl Applier {
             }
             return None;
         }
-        loop {
-            let head = self.pending_cmds.pop_normal(term);
-            if head.is_none() {
-                break;
+        while let Some(head) = self.pending_cmds.pop_normal(index, term) {
+            if head.term == term {
+                if head.index == index {
+                    return Some(head.cb);
+                } else {
+                    panic!(
+                        "{} unexpected callback at term {}, found index {}, expected {}",
+                        self.tag(),
+                        term,
+                        head.index,
+                        index
+                    );
+                }
+            } else {
+                // Because of the lack of original RaftCmdRequest, we skip calling
+                // coprocessor here.
+                notify_stale_req(term, head.cb, "term not match");
             }
-            let head = head.unwrap();
-            if head.term == term && head.index == index {
-                return Some(head.cb);
-            }
-            // Because of the lack of original RaftCmdRequest, we skip calling
-            // coprocessor here.
-            notify_stale_req(term, head.cb, "term not match");
         }
         None
     }
@@ -653,18 +659,13 @@ impl Applier {
             self.handle_apply_result(ctx, resp, &result, false);
             return result;
         }
-        // when a peer become leader, it will send an empty entry.
         self.apply_state.applied_index = index;
         self.apply_state.applied_index_term = term;
         assert!(term > 0);
-        loop {
-            let cmd = self.pending_cmds.pop_normal(term - 1);
-            if cmd.is_none() {
-                break;
-            }
-            // apparently, all the callbacks whose term is less than entry's term are stale.
-            cmd.unwrap()
-                .cb
+        // when a peer become leader, it will send an empty entry.
+        // apparently, all the callbacks whose term is less than entry's term are stale.
+        while let Some(cmd) = self.pending_cmds.pop_normal(u64::MAX, term - 1) {
+            cmd.cb
                 .invoke_with_response(err_resp(Error::StaleCommand, term));
         }
         ApplyResult::None
