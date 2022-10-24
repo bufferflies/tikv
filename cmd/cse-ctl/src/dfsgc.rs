@@ -13,7 +13,7 @@ use std::{
 };
 
 use bytes::Buf;
-use clap::ArgMatches;
+use clap::Args;
 use grpcio::EnvBuilder;
 use http::Uri;
 use kvengine::{
@@ -26,14 +26,25 @@ use security::{SecurityConfig, SecurityManager};
 use slog_global::error;
 use tikv_util::info;
 
-pub(crate) fn execute_dfsgc(matches: &ArgMatches) {
-    let config_path = matches.value_of_os("config").unwrap();
-    let start_after = matches.value_of("start").unwrap();
-    let result = std::fs::read(PathBuf::from(config_path));
+/// DFSGC arguments
+#[derive(Args)]
+pub struct DFSGCArgs {
+    /// The path of the config file.
+    #[clap(long)]
+    pub config: PathBuf,
+
+    /// GC after the start file prefix string.
+    #[clap(long)]
+    pub start: Option<String>,
+}
+
+pub(crate) fn execute_dfsgc(arg: DFSGCArgs) {
+    let result = std::fs::read(arg.config);
     if result.is_err() {
         error!("failed to read config file {:?}", result.unwrap_err());
         return;
     }
+    let start_after = arg.start.unwrap_or_default();
     let data = result.unwrap();
     let mut config: DFSGCConfig = toml::from_slice(&data).unwrap();
     if config.data_dir.is_empty() {
@@ -57,7 +68,7 @@ pub(crate) fn execute_dfsgc(matches: &ArgMatches) {
     let progress_file_path = PathBuf::from(format!("{}/{}", &config.data_dir, "dfsgc.progress"));
     let mut gc_worker = GcWorker::new(pd_client, s3fs, progress_file_path);
     gc_worker.collect_valid_files();
-    gc_worker.remove_garbage_files(start_after.to_string());
+    gc_worker.remove_garbage_files(start_after);
 }
 
 static REMOVED: AtomicUsize = AtomicUsize::new(0);

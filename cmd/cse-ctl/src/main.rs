@@ -8,48 +8,24 @@ mod unsafe_recover;
 
 use std::io;
 
-use clap::{arg, Command};
+use clap::{Parser, Subcommand};
 
-use crate::{dfsgc::execute_dfsgc, unsafe_recover::execute_unsafe_recover};
-
-fn cli() -> Command<'static> {
-    Command::new("cse-ctl")
-        .about("command-line tool for cloud storage engine")
-        .subcommand_required(true)
-        .arg_required_else_help(true)
-        .allow_external_subcommands(true)
-        .subcommand(
-            Command::new("unsafe-recover")
-                .about("unsafe recover")
-                .args(&[
-                    arg!(--path <DIR> "the path of the raft engine").required(true),
-                    arg!(--region <ID> "the region id to operate"),
-                    arg!(--keyspace <ID> "the APIv2 keyspace id to operate"),
-                    arg!(--table <ID> "the table id to operate"),
-                    arg!(--all "operate on all regions"),
-                    arg!(--destroy "destroy the filtered regions"),
-                    arg!(--remove-stores <STORE_IDS> "remove the peers on the stores"),
-                    arg!(--commit "commit the change"),
-                ])
-                .arg_required_else_help(true),
-        )
-        .subcommand(Command::new("dfsgc").about("gc DFS files").args(&[
-            arg!(--config <FILE> "the config file"),
-            arg!(--start <STRING> "The start file suffix to GC"),
-        ]))
-}
+use crate::{
+    dfsgc::{execute_dfsgc, DFSGCArgs},
+    unsafe_recover::{execute_unsafe_recover, UnsafeRecoverArgs},
+    Commands::{UnsafeRecover, DFSGC},
+};
 
 fn main() {
     init_logger(io::stdout());
-    let matches = cli().get_matches();
-    match matches.subcommand() {
-        Some(("unsafe-recover", recover_matches)) => {
-            execute_unsafe_recover(recover_matches);
+    let x: Cli = Cli::parse();
+    match x.command {
+        DFSGC(dfsgc_arg) => {
+            execute_dfsgc(dfsgc_arg);
         }
-        Some(("dfsgc", dfsgc_matches)) => {
-            execute_dfsgc(dfsgc_matches);
+        UnsafeRecover(unsafe_recover) => {
+            execute_unsafe_recover(unsafe_recover);
         }
-        _ => unreachable!(),
     }
 }
 
@@ -60,4 +36,19 @@ fn init_logger<W: 'static + io::Write + Send>(writer: W) {
     let drain = std::sync::Mutex::new(drain).fuse();
     let logger = slog::Logger::root(drain, slog::o!());
     slog_global::set_global(logger);
+}
+
+#[derive(Parser)]
+#[clap(author, version, about, long_about = None)]
+pub struct Cli {
+    #[clap(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+pub enum Commands {
+    /// Scan and mark the unused DFS files as deleted.
+    DFSGC(DFSGCArgs),
+    /// Unsafely recover the cluster by directly modifying the data on the raft engine.
+    UnsafeRecover(UnsafeRecoverArgs),
 }

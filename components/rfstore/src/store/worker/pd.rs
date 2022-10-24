@@ -435,12 +435,12 @@ impl PdRunner {
             let keyspace_id_string = ApiV2::get_keyspace_id_str(startkey.as_slice());
             let keyspace_id_str = keyspace_id_string.as_str();
 
-            let region_id=region.get_id();
-            let region_id_string=region_id.to_string();
-            let region_id_str=region_id_string.as_str();
+            let region_id = region.get_id();
+            let region_id_string = region_id.to_string();
+            let region_id_str = region_id_string.as_str();
 
             STORE_SIZE_GAUGE_VEC
-                .with_label_values(&["used",region_id_str,keyspace_id_str])
+                .with_label_values(&["used", region_id_str, keyspace_id_str])
                 .set(region_stat.approximate_size as i64);
         }
 
@@ -580,13 +580,13 @@ impl PdRunner {
         self.store_stat.region_keys_read.flush();
 
         STORE_SIZE_GAUGE_VEC
-            .with_label_values(&["capacity","",""])
+            .with_label_values(&["capacity", "", ""])
             .set(capacity as i64);
         STORE_SIZE_GAUGE_VEC
-            .with_label_values(&["available","",""])
+            .with_label_values(&["available", "", ""])
             .set(available as i64);
         STORE_SIZE_GAUGE_VEC
-            .with_label_values(&["all_used","",""])
+            .with_label_values(&["all_used", "", ""])
             .set(used_size as i64);
 
         let kv_all_shard_stats = store_info.kv_engine.get_all_shard_stats();

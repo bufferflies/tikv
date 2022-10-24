@@ -7,7 +7,7 @@ edition = "2021"
 [dependencies]
 byteorder = "1.2"
 bytes = "1.0"
-clap = "3.2.22"
+clap = { version = "3.2", features = ["derive"] }
 grpcio = { version = "0.10", default-features = false, features = ["openssl-vendored", "protobuf-codec"] }
 http = "0.2"
 hyper = "0.14"
