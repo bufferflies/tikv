@@ -20,7 +20,7 @@ use dashmap::mapref::one::Ref;
 use file_system::open_direct_file;
 use protobuf::Message;
 use raft_proto::{eraftpb, eraftpb::Entry};
-use tikv_util::{info, time::Instant};
+use tikv_util::{info, time::Instant, warn};
 
 use crate::{
     log_batch::{RaftLogBlock, RaftLogs},
@@ -572,6 +572,13 @@ impl PeerData {
         if self.truncated_idx < truncated_index {
             self.truncated_idx = truncated_index;
             truncated_blocks.extend(self.raft_logs.truncate(truncated_index));
+        }
+        if self.truncated_idx == TRUNCATE_ALL_INDEX && truncated_index > 0 {
+            warn!(
+                "region: {} peer:{} restore truncate all index to index {}",
+                self.region_id, self.peer_id, truncated_index,
+            );
+            self.truncated_idx = truncated_index;
         }
         for (key, val) in &batch.states {
             if val.is_empty() {

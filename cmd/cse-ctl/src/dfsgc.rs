@@ -1,8 +1,5 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
-#[macro_use]
-extern crate serde_derive;
-
 use std::{
     collections::HashSet,
     fs,
@@ -15,10 +12,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use clap::{App, Arg};
+use bytes::Buf;
+use clap::ArgMatches;
 use grpcio::EnvBuilder;
 use http::Uri;
-use hyper::body::Buf;
 use kvengine::{
     dfs,
     dfs::{DFSConfig, DFS, S3FS},
@@ -26,30 +23,10 @@ use kvengine::{
 use kvproto::metapb::Store;
 use pd_client::{PdClient, RpcClient};
 use security::{SecurityConfig, SecurityManager};
-use slog_global::{error, info};
+use slog_global::error;
+use tikv_util::info;
 
-static REMOVED: AtomicUsize = AtomicUsize::new(0);
-
-fn main() {
-    init_logger();
-    let matches = App::new("tikv-dfsgc")
-        .about("tikv dfs gc worker")
-        .arg(
-            Arg::with_name("config")
-                .short("C")
-                .long("config")
-                .value_name("FILE")
-                .help("Set the configuration file")
-                .takes_value(true)
-                .required(true),
-        )
-        .arg(
-            Arg::with_name("start")
-                .long("start")
-                .help("The start file suffix to GC")
-                .default_value("0"),
-        )
-        .get_matches();
+pub(crate) fn execute_dfsgc(matches: &ArgMatches) {
     let config_path = matches.value_of_os("config").unwrap();
     let start_after = matches.value_of("start").unwrap();
     let result = std::fs::read(PathBuf::from(config_path));
@@ -58,7 +35,7 @@ fn main() {
         return;
     }
     let data = result.unwrap();
-    let mut config: Config = toml::from_slice(&data).unwrap();
+    let mut config: DFSGCConfig = toml::from_slice(&data).unwrap();
     if config.data_dir.is_empty() {
         config.data_dir = ".".to_string();
     }
@@ -81,6 +58,21 @@ fn main() {
     let mut gc_worker = GcWorker::new(pd_client, s3fs, progress_file_path);
     gc_worker.collect_valid_files();
     gc_worker.remove_garbage_files(start_after.to_string());
+}
+
+static REMOVED: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug, Default)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+pub struct DFSGCConfig {
+    pub pd: pd_client::Config,
+    pub security: SecurityConfig,
+    pub dfs: DFSConfig,
+
+    // If the task is not finished, a progress file is stored in the data dir, the next run
+    // will load the progress and continue the task.
+    pub data_dir: String,
 }
 
 struct GcWorker {
@@ -204,26 +196,4 @@ impl GcWorker {
             }
         });
     }
-}
-
-fn init_logger() {
-    use slog::Drain;
-    let decorator = slog_term::PlainDecorator::new(std::io::stdout());
-    let drain = slog_term::CompactFormat::new(decorator).build();
-    let drain = std::sync::Mutex::new(drain).fuse();
-    let logger = slog::Logger::root(drain, slog::o!());
-    slog_global::set_global(logger);
-}
-
-#[derive(Clone, Serialize, Deserialize, PartialEq, Debug, Default)]
-#[serde(default)]
-#[serde(rename_all = "kebab-case")]
-pub struct Config {
-    pub pd: pd_client::Config,
-    pub security: SecurityConfig,
-    pub dfs: DFSConfig,
-
-    // If the task is not finished, a progress file is stored in the data dir, the next run
-    // will load the progress and continue the task.
-    pub data_dir: String,
 }

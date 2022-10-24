@@ -94,7 +94,7 @@ pub fn prepare_bootstrap_cluster(engines: &Engines, region: &metapb::Region) -> 
     Ok(())
 }
 
-fn initial_change_set(region_id: u64, shard_ver: u64) -> kvengine::ChangeSet {
+pub fn initial_change_set(region_id: u64, shard_ver: u64) -> kvengine::ChangeSet {
     let mut change_set = kvenginepb::ChangeSet::default();
     change_set.set_shard_id(region_id);
     change_set.set_shard_ver(shard_ver);

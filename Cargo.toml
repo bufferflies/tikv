@@ -217,9 +217,9 @@ kvproto = { git = "https://github.com/tidbcloud/kvproto.git", branch = "release-
 # will _not_ propagate the feature `x` into `cmd`'s direct dependencies.
 resolver = "2"
 members = [
+  "cmd/cse-ctl",
   "cmd/tikv-compactor",
   "cmd/tikv-ctl",
-  "cmd/tikv-dfsgc",
   "cmd/tikv-server",
   "components/api_version",
   "components/backup",
@@ -288,7 +288,7 @@ members = [
   "fuzz/fuzzer-libfuzzer",
   "tests",
 ]
-default-members = ["cmd/tikv-server", "cmd/tikv-compactor", "cmd/tikv-dfsgc"]
+default-members = ["cmd/tikv-server", "cmd/tikv-compactor", "cmd/cse-ctl"]
 
 [profile.dev.package.grpcio-sys]
 debug = false
