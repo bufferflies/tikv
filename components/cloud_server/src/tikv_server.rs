@@ -66,10 +66,13 @@ use tikv_kv::Engine;
 use tikv_util::{
     check_environment_variables,
     config::{ensure_dir_exist, VersionTrack},
+    panic_mark_file_exists,
     quota_limiter::{QuotaLimitConfigManager, QuotaLimiter},
+    set_panic_mark,
     sys::{register_memory_usage_high_water, SysQuota},
     thread_group::GroupProperties,
     time::{Duration, Instant, Monitor},
+    unset_panic_mark,
     worker::{Builder as WorkerBuilder, LazyWorker, Worker},
 };
 use tokio::runtime::Builder;
@@ -883,6 +886,13 @@ impl TiKVServer {
         dfs: Arc<dyn DFS>,
         rate_limiter: Arc<IORateLimiter>,
     ) -> Engines {
+        if panic_mark_file_exists(&conf.storage.data_dir) {
+            error!("The panic mark file is exists. Pause the process");
+            loop {
+                std::thread::sleep(Duration::from_secs(600))
+            }
+        }
+        set_panic_mark();
         // Create raft engine.
         let raft_db_path = Path::new(&conf.raft_store.raftdb_path);
         let kv_engine_path = PathBuf::from(&conf.storage.data_dir).join(Path::new("db"));
@@ -923,6 +933,7 @@ impl TiKVServer {
             rate_limiter,
         )
         .unwrap();
+        unset_panic_mark();
         Engines::new(kv_engine, rf_engine, (sender, receiver))
     }
 }

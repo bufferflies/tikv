@@ -75,6 +75,10 @@ pub fn set_panic_mark() {
     PANIC_MARK.store(true, Ordering::SeqCst);
 }
 
+pub fn unset_panic_mark() {
+    PANIC_MARK.store(false, Ordering::SeqCst);
+}
+
 pub fn panic_mark_is_on() -> bool {
     PANIC_MARK.load(Ordering::SeqCst)
 }
