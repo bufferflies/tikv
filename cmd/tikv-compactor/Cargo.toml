@@ -8,8 +8,13 @@ edition = "2018"
 chrono = "0.4"
 clap = "2.32"
 file_system = { path = "../../components/file_system" }
+grpcio = { version = "0.10", default-features = false, features = ["openssl-vendored", "protobuf-codec"] }
+http = "0.2"
 hyper = { version = "0.14", features = ["full"] }
 kvengine = { path = "../../components/kvengine" }
+kvproto = { git = "https://github.com/pingcap/kvproto.git" }
+pd_client = { path = "../../components/pd_client", default-features = false }
+security = { path = "../../components/security", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_derive = "1.0"
 serde_ignored = "0.1"

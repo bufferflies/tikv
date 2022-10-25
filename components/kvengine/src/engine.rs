@@ -197,7 +197,7 @@ pub struct EngineCore {
     pub(crate) compact_tx: mpsc::Sender<CompactMsg>,
     pub(crate) fs: Arc<dyn dfs::DFS>,
     pub(crate) cache: SegmentedCache<BlockCacheKey, Bytes>,
-    pub(crate) comp_client: CompactionClient,
+    pub comp_client: CompactionClient,
     pub(crate) id_allocator: Arc<dyn IDAllocator>,
     pub(crate) managed_safe_ts: AtomicU64,
     pub(crate) tmp_file_id: AtomicU64,

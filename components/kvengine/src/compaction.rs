@@ -4,8 +4,9 @@ use std::{
     cmp::Ordering as CmpOrdering,
     collections::{HashMap, HashSet},
     iter::Iterator as StdIterator,
-    sync::{atomic::Ordering, Arc},
-    time::Duration,
+    ops::Sub,
+    sync::{atomic::Ordering, Arc, Mutex},
+    time::{Duration, Instant},
 };
 
 use byteorder::{ByteOrder, LittleEndian};
@@ -25,46 +26,149 @@ use crate::{
     Iterator, *,
 };
 
-#[derive(Clone)]
-pub(crate) struct CompactionClient {
-    dfs: Arc<dyn dfs::DFS>,
+static RETRY_INTERVAL: Duration = Duration::from_secs(600);
+
+#[derive(Default, Eq, PartialEq, Hash, Clone)]
+pub struct RemoteCompactor {
     remote_url: String,
+    permanent: bool,
+}
+
+impl RemoteCompactor {
+    pub fn new(remote_url: String, permanent: bool) -> Self {
+        Self {
+            remote_url,
+            permanent,
+        }
+    }
+}
+
+pub struct RemoteCompactors {
+    remote_urls: Vec<RemoteCompactor>,
+    index: usize,
+    last_failure: Instant,
+}
+
+impl RemoteCompactors {
+    pub fn new(remote_url: String) -> Self {
+        let mut remote_urls = Vec::new();
+        if !remote_url.is_empty() {
+            remote_urls.push(RemoteCompactor::new(remote_url, true));
+        };
+        Self {
+            remote_urls,
+            index: 0,
+            last_failure: Instant::now().sub(RETRY_INTERVAL),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct CompactionClient {
+    dfs: Arc<dyn dfs::DFS>,
+    remote_compactors: Arc<Mutex<RemoteCompactors>>,
     client: Option<hyper::Client<hyper::client::HttpConnector>>,
 }
 
 impl CompactionClient {
     pub(crate) fn new(dfs: Arc<dyn dfs::DFS>, remote_url: String) -> Self {
-        let client = if remote_url.is_empty() {
-            None
-        } else {
-            Some(hyper::Client::new())
-        };
+        let remote_compactors = RemoteCompactors::new(remote_url);
         Self {
             dfs,
-            remote_url,
-            client,
+            remote_compactors: Arc::new(Mutex::new(remote_compactors)),
+            client: Some(hyper::Client::new()),
+        }
+    }
+
+    pub fn add_remote_compactor(&mut self, remote_url: String) {
+        if !remote_url.is_empty() {
+            let mut remote_compactors = self.remote_compactors.lock().unwrap();
+            remote_compactors.last_failure = Instant::now().sub(RETRY_INTERVAL);
+            if remote_compactors
+                .remote_urls
+                .iter()
+                .any(|x| x.remote_url == remote_url.clone())
+            {
+                return;
+            }
+            remote_compactors
+                .remote_urls
+                .push(RemoteCompactor::new(remote_url.clone(), false));
+            info!(
+                "add remote compactor {}, total {}",
+                remote_url,
+                remote_compactors.remote_urls.len()
+            );
+        };
+    }
+
+    pub fn delete_remote_compactor(&mut self, remote_compactor: &RemoteCompactor) {
+        let mut remote_compactors = self.remote_compactors.lock().unwrap();
+        if !remote_compactor.permanent {
+            remote_compactors
+                .remote_urls
+                .retain(|x| x.remote_url != remote_compactor.remote_url);
+            info!(
+                "delete remote compactor {}, total {}",
+                remote_compactor.remote_url,
+                remote_compactors.remote_urls.len()
+            );
+        } else if remote_compactors.remote_urls.len() == 1 {
+            remote_compactors.last_failure = Instant::now();
+        }
+    }
+
+    pub fn get_remote_compactors(&self) -> Vec<String> {
+        self.remote_compactors
+            .lock()
+            .unwrap()
+            .remote_urls
+            .clone()
+            .into_iter()
+            .map(|r| r.remote_url.clone())
+            .collect()
+    }
+
+    pub fn get_remote_compactor(&self) -> RemoteCompactor {
+        let mut remote_compactors = self.remote_compactors.lock().unwrap();
+        if remote_compactors.remote_urls.is_empty()
+            || remote_compactors.last_failure.elapsed().le(&RETRY_INTERVAL)
+        {
+            RemoteCompactor::default()
+        } else {
+            remote_compactors.index += 1;
+            if remote_compactors.index >= remote_compactors.remote_urls.len() {
+                remote_compactors.index = 0;
+            }
+            remote_compactors.remote_urls[remote_compactors.index].clone()
         }
     }
 
     pub(crate) fn compact(&self, req: CompactionRequest) -> Result<pb::ChangeSet> {
-        if self.client.is_none() {
-            local_compact(self.dfs.clone(), req)
+        let mut remote_compactor = self.get_remote_compactor();
+        if remote_compactor.remote_url.is_empty() {
+            local_compact(self.dfs.clone(), &req)
         } else {
-            let client = self.clone();
+            let mut client = self.clone();
             let (tx, rx) = tikv_util::mpsc::bounded(1);
             self.dfs.get_runtime().spawn(async move {
                 let mut retry_cnt = 0;
                 let result = loop {
-                    match client.remote_compact(&req).await {
+                    match client.remote_compact(&req, remote_compactor.remote_url.clone()).await {
                         result @ Ok(_) => break result,
                         Err(e) => {
                             retry_cnt += 1;
-                            if retry_cnt >= 5 {
-                                break Err(e);
+                            if remote_compactor.permanent && retry_cnt >= 5 || !remote_compactor.permanent && retry_cnt >= 3 {
+                                retry_cnt = 0;
+                                client.delete_remote_compactor(&remote_compactor);
+                                remote_compactor = client.get_remote_compactor();
                             }
                             let tag = ShardTag::from_comp_req(&req);
-                            error!("shard {} cf: {} level: {} remote compaction failed {:?}, retrying {} ",
-                                   tag, req.cf, req.level, e, retry_cnt);
+                            error!("shard {} cf: {} level: {} remote compaction failed {:?}, retrying {} remote compactor {}",
+                                   tag, req.cf, req.level, e, retry_cnt, remote_compactor.remote_url);
+                            if remote_compactor.remote_url.is_empty() {
+                                break local_compact(client.dfs.clone(), &req)
+                            }
                             tokio::time::sleep(Duration::from_secs(1)).await;
                         }
                     }
@@ -75,11 +179,15 @@ impl CompactionClient {
         }
     }
 
-    async fn remote_compact(&self, comp_req: &CompactionRequest) -> Result<pb::ChangeSet> {
+    async fn remote_compact(
+        &self,
+        comp_req: &CompactionRequest,
+        remote_url: String,
+    ) -> Result<pb::ChangeSet> {
         let body_str = serde_json::to_string(&comp_req).unwrap();
         let req = hyper::Request::builder()
             .method(hyper::Method::POST)
-            .uri(self.remote_url.clone())
+            .uri(remote_url)
             .header("content-type", "application/json")
             .body(hyper::Body::from(body_str))?;
         let tag = ShardTag::from_comp_req(comp_req);
@@ -1060,7 +1168,7 @@ pub async fn handle_remote_compaction(
     let comp_req: CompactionRequest = result.unwrap();
     let (tx, rx) = tokio::sync::oneshot::channel();
     std::thread::spawn(move || {
-        let result = local_compact(dfs, comp_req);
+        let result = local_compact(dfs, &comp_req);
         tx.send(result).unwrap();
     });
     match rx.await.unwrap() {
@@ -1080,7 +1188,7 @@ pub async fn handle_remote_compaction(
     }
 }
 
-fn local_compact(dfs: Arc<dyn dfs::DFS>, req: CompactionRequest) -> Result<pb::ChangeSet> {
+fn local_compact(dfs: Arc<dyn dfs::DFS>, req: &CompactionRequest) -> Result<pb::ChangeSet> {
     let mut cs = pb::ChangeSet::new();
     cs.set_shard_id(req.shard_id);
     cs.set_shard_ver(req.shard_ver);
@@ -1101,14 +1209,14 @@ fn local_compact(dfs: Arc<dyn dfs::DFS>, req: CompactionRequest) -> Result<pb::C
         info!("start compact L0 for {}", tag);
         let tbls = compact_l0(&req, dfs.clone())?;
         comp.set_table_creates(tbls.into());
-        let bot_dels = req.multi_cf_bottoms.into_iter().flatten().collect();
+        let bot_dels = req.multi_cf_bottoms.clone().into_iter().flatten().collect();
         comp.set_bottom_deletes(bot_dels);
         info!("finish compacting L0 for {}", tag);
     } else {
         info!("start compacting L{} CF{} for {}", req.level, req.cf, tag);
         let tbls = compact_tables(&req, dfs.clone())?;
         comp.set_table_creates(tbls.into());
-        comp.set_bottom_deletes(req.bottoms);
+        comp.set_bottom_deletes(req.bottoms.clone());
         info!("finish compacting L{} CF{} for {}", req.level, req.cf, tag);
     }
     cs.set_compaction(comp);

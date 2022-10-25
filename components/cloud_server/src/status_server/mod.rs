@@ -388,6 +388,9 @@ impl StatusServer {
                 })
                 .collect();
             res = serde_json::to_string(&all_shard_files);
+        } else if path.starts_with("/kvengine/compactor") {
+            let remote_urls = engine.comp_client.get_remote_compactors();
+            res = serde_json::to_string_pretty(&remote_urls);
         } else {
             let all_shard_stats = engine.get_all_shard_stats();
             let engine_stats = kvengine::Engine::get_engine_stats(all_shard_stats);
@@ -399,6 +402,31 @@ impl StatusServer {
                 .body(Body::from(json))
                 .unwrap(),
             Err(_) => make_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error"),
+        })
+    }
+
+    async fn add_remote_compactor(
+        req: Request<Body>,
+        mut comp_client: kvengine::CompactionClient,
+    ) -> hyper::Result<Response<Body>> {
+        let mut body = Vec::new();
+        req.into_body()
+            .try_for_each(|bytes| {
+                body.extend(bytes);
+                ok(())
+            })
+            .await?;
+        Ok(match String::from_utf8(body) {
+            Ok(remote_url) => {
+                comp_client.add_remote_compactor(remote_url);
+                let mut resp = Response::default();
+                *resp.status_mut() = StatusCode::OK;
+                resp
+            }
+            Err(e) => make_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to decode, error: {:?}", e),
+            ),
         })
     }
 
@@ -585,6 +613,9 @@ impl StatusServer {
                             }
                             (Method::GET, path) if path.starts_with("/rfengine") => {
                                 Self::dump_rfengine_stats(req, rfengine).await
+                            }
+                            (Method::POST, path) if path.starts_with("/kvengine/compactor") => {
+                                Self::add_remote_compactor(req, engine.comp_client.clone()).await
                             }
                             _ => Ok(make_response(StatusCode::NOT_FOUND, "path not found")),
                         }

@@ -3,13 +3,21 @@
 use std::{
     io,
     path::{Path, PathBuf},
+    str::FromStr,
     sync::Arc,
+    time::Instant,
 };
 
 use clap::{App, Arg};
+use grpcio::EnvBuilder;
+use http::Uri;
 use hyper::service::{make_service_fn, service_fn};
-use kvengine::dfs::DFSConfig;
+use kvengine::dfs::{DFSConfig, DFS, S3FS};
+use kvproto::metapb::Store;
+use pd_client::{PdClient, RpcClient};
+use security::{SecurityConfig, SecurityManager};
 use slog_global::{error, info};
+use tikv_util::config::ReadableDuration;
 
 fn main() {
     init_logger(io::stdout());
@@ -32,10 +40,7 @@ fn main() {
         return;
     }
     let data = result.unwrap();
-    let mut config: Config = toml::from_slice(&data).unwrap();
-    if config.port == 0 {
-        config.port = 19000;
-    }
+    let config: Config = toml::from_slice(&data).unwrap();
     if !config.log_file.is_empty() {
         let log = tikv_util::logger::file_writer(&config.log_file, 300, 0, 0, rename_by_timestamp)
             .unwrap();
@@ -50,6 +55,7 @@ fn main() {
         config.dfs.s3_region,
         config.dfs.s3_bucket,
     ));
+    let dfsclone = dfs.clone();
 
     let thread_pool = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -57,7 +63,7 @@ fn main() {
         .thread_name("compaction-server")
         .build()
         .unwrap();
-    let addr = ([0, 0, 0, 0], config.port).into();
+    let addr = config.addr.parse().expect("Unable to parse socket address");
 
     let incoming = {
         let _enter = thread_pool.enter();
@@ -75,6 +81,27 @@ fn main() {
             }))
         }
     }));
+
+    if !config.pd.endpoints.is_empty() {
+        let security_mgr = Arc::new(
+            SecurityManager::new(&config.security)
+                .unwrap_or_else(|e| panic!("failed to create security manager: {:?}", e)),
+        );
+        let env = Arc::new(EnvBuilder::new().cq_count(1).build());
+        let pd_client = Arc::new(
+            RpcClient::new(&config.pd, Some(env), security_mgr)
+                .unwrap_or_else(|e| panic!("failed to create rpc client: {:?}", e)),
+        );
+        let remote_url = format!("http://{}", config.addr);
+        let duration = config.update_interval.0;
+        std::thread::spawn(move || {
+            loop {
+                register_to_all_stores(pd_client.clone(), dfsclone.clone(), remote_url.clone());
+                std::thread::sleep(duration);
+            }
+        });
+    }
+
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     thread_pool.spawn(async move {
         let res = server.await;
@@ -92,16 +119,80 @@ fn init_logger<W: 'static + io::Write + Send>(writer: W) {
     slog_global::set_global(logger);
 }
 
+fn register_to_all_stores(pd: Arc<RpcClient>, dfs: Arc<S3FS>, remote_url: String) {
+    let all_stores = pd
+        .get_all_stores(true)
+        .unwrap_or_else(|e| panic!("failed get all stores {:?}", e));
+    let start_time = Instant::now();
+    let stores_len = all_stores.len();
+    let (tx, rx) = std::sync::mpsc::sync_channel(stores_len);
+    for store in all_stores {
+        let tx = tx.clone();
+        let remote_url = remote_url.clone();
+        dfs.get_runtime().spawn(async move {
+            tx.send(register_to_store(store, remote_url.clone()).await)
+                .unwrap();
+        });
+    }
+    let mut finish_cnt = 0;
+    for _ in 0..stores_len {
+        let ok = rx.recv().unwrap();
+        if ok {
+            finish_cnt += 1;
+        }
+    }
+    let elapsed = start_time.elapsed();
+    let remain = stores_len - finish_cnt;
+    info!(
+        "register compactor to {} stores in {:?}, remain {} stores",
+        stores_len, elapsed, remain
+    );
+}
+
+async fn register_to_store(store: Store, remote_url: String) -> bool {
+    let uri = Uri::from_str(&format!(
+        "http://{}/kvengine/compactor",
+        &store.status_address
+    ))
+    .unwrap();
+    let client = hyper::Client::new();
+    let req = hyper::Request::builder()
+        .method(hyper::Method::POST)
+        .uri(uri)
+        .body(hyper::Body::from(remote_url))
+        .expect("request builder");
+    let resp = client.request(req).await.unwrap();
+    resp.status() == hyper::StatusCode::OK
+}
+
 #[macro_use]
 extern crate serde_derive;
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Debug, Default)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
 pub struct Config {
-    pub port: u16,
-    pub log_file: String,
+    pub addr: String,
+    pub pd: pd_client::Config,
+    pub security: SecurityConfig,
+    pub update_interval: ReadableDuration,
     pub dfs: DFSConfig,
+    pub log_file: String,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        let mut pd = pd_client::Config::default();
+        pd.endpoints.clear();
+        Config {
+            addr: String::from("127.0.0.1:19000"),
+            pd,
+            security: SecurityConfig::default(),
+            update_interval: ReadableDuration::minutes(10),
+            dfs: DFSConfig::default(),
+            log_file: String::default(),
+        }
+    }
 }
 
 fn rename_by_timestamp(path: &Path) -> io::Result<PathBuf> {
