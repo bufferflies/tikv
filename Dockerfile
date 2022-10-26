@@ -82,6 +82,8 @@ RUN source /opt/rh/devtoolset-8/enable && make build_dist_release
 FROM amazonlinux:2022.0.20220504.1
 COPY --from=builder /tikv/target/release/tikv-server /tikv-server
 COPY --from=builder /tikv/target/release/tikv-ctl /tikv-ctl
+COPY --from=builder /tikv/target/release/cse-ctl /cse-ctl
+COPY --from=builder /tikv/target/release/tikv-compactor /tikv-compactor
 
 EXPOSE 20160 20180
 
