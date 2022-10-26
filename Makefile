@@ -420,7 +420,7 @@ x-build-dist: export X_CARGO_FEATURES=${ENABLE_FEATURES}
 x-build-dist: export X_CARGO_RELEASE=1
 x-build-dist: export X_CARGO_CONFIG_FILE=${DIST_CONFIG}
 x-build-dist: export X_CARGO_TARGET_DIR=${CARGO_TARGET_DIR}
-x-build-dist: export X_PACKAGE=tikv-server tikv-ctl
+x-build-dist: export X_PACKAGE=tikv-server tikv-ctl tikv-compactor cse-ctl
 x-build-dist:
 	bash scripts/run-cargo.sh
 
@@ -449,7 +449,7 @@ x-build-dist-debug: export X_CARGO_FEATURES=${ENABLE_FEATURES}
 x-build-dist-debug: export X_CARGO_RELEASE=0
 x-build-dist-debug: export X_CARGO_CONFIG_FILE=${DIST_CONFIG}
 x-build-dist-debug: export X_CARGO_TARGET_DIR=${CARGO_TARGET_DIR}
-x-build-dist-debug: export X_PACKAGE=tikv-server tikv-ctl
+x-build-dist-debug: export X_PACKAGE=tikv-server tikv-ctl tikv-compactor cse-ctl
 x-build-dist-debug:
 	bash scripts/run-cargo.sh
 
