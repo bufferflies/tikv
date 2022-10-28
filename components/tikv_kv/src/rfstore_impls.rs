@@ -49,7 +49,7 @@ impl<'a> SnapshotExt for RegionSnapshotExt<'a> {
     }
 
     fn get_buckets(&self) -> Option<Arc<BucketMeta>> {
-        None
+        self.snapshot.bucket_meta.clone()
     }
 }
 

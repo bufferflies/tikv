@@ -5274,7 +5274,7 @@ where
         // bucket version layout
         //   term       logical counter
         // |-----------|-----------|
-        //  high bits     low bits
+        //   high bits    low bits
         // term: given 10s election timeout, the 32 bit means 1362 year running time
         let gen_bucket_version = |term, current_version| {
             let current_version_term = current_version >> 32;

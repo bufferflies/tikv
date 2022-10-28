@@ -5,6 +5,7 @@ use std::{
     cmp::Ordering as CmpOrdering,
     collections::HashMap,
     fmt::{self, Display, Formatter},
+    mem,
     sync::{atomic::Ordering, Arc},
     time::{Duration, Instant},
 };
@@ -26,7 +27,7 @@ use kvproto::{
     raft_serverpb::RaftMessage,
     replication_modepb::RegionReplicationStatus,
 };
-use pd_client::{metrics::*, PdClient, RegionStat};
+use pd_client::{merge_bucket_stats, metrics::*, BucketStat, PdClient, RegionStat};
 use prometheus::local::LocalHistogram;
 use raft::eraftpb::ConfChangeType;
 use raftstore::store::{util, util::ConfChangeKind, QueryStats, ReadStats, TxnExt, WriteStats};
@@ -124,6 +125,7 @@ pub enum PdTask {
         txn_ext: Arc<TxnExt>,
     },
     UpdateSafeTS,
+    ReportBuckets(BucketStat),
 }
 
 #[derive(Default, Clone)]
@@ -214,6 +216,59 @@ pub struct PeerStat {
     pub approximate_size: u64,
 }
 
+#[derive(Default)]
+pub struct ReportBucket {
+    current_stat: BucketStat,
+    last_report_stat: Option<BucketStat>,
+    last_report_ts: UnixSecs,
+}
+
+impl ReportBucket {
+    #[allow(unused)]
+    fn new(current_stat: BucketStat) -> Self {
+        Self {
+            current_stat,
+            ..Default::default()
+        }
+    }
+
+    fn new_report(&mut self, report_ts: UnixSecs) -> BucketStat {
+        self.last_report_ts = report_ts;
+        match self.last_report_stat.replace(self.current_stat.clone()) {
+            Some(last) => {
+                let mut delta = BucketStat::new(
+                    self.current_stat.meta.clone(),
+                    pd_client::new_bucket_stats(&self.current_stat.meta),
+                );
+                // Buckets may be changed, recalculate last stats according to current meta.
+                merge_bucket_stats(
+                    &delta.meta.keys,
+                    &mut delta.stats,
+                    &last.meta.keys,
+                    &last.stats,
+                );
+                for i in 0..delta.meta.keys.len() - 1 {
+                    delta.stats.write_bytes[i] =
+                        self.current_stat.stats.write_bytes[i] - delta.stats.write_bytes[i];
+                    delta.stats.write_keys[i] =
+                        self.current_stat.stats.write_keys[i] - delta.stats.write_keys[i];
+                    delta.stats.write_qps[i] =
+                        self.current_stat.stats.write_qps[i] - delta.stats.write_qps[i];
+
+                    delta.stats.read_bytes[i] =
+                        self.current_stat.stats.read_bytes[i] - delta.stats.read_bytes[i];
+                    delta.stats.read_keys[i] =
+                        self.current_stat.stats.read_keys[i] - delta.stats.read_keys[i];
+                    delta.stats.read_qps[i] =
+                        self.current_stat.stats.read_qps[i] - delta.stats.read_qps[i];
+                }
+                delta
+            }
+            None => self.current_stat.clone(),
+        }
+    }
+}
+
 impl Display for PdTask {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match *self {
@@ -257,6 +312,9 @@ impl Display for PdTask {
                 region_id
             ),
             PdTask::UpdateSafeTS => write!(f, "update safe ts"),
+            PdTask::ReportBuckets(ref buckets) => {
+                write!(f, "report buckets: {:?}", buckets)
+            }
         }
     }
 }
@@ -266,6 +324,7 @@ pub struct PdRunner {
     pd_client: Arc<dyn PdClient>,
     router: RaftRouter,
     region_peers: HashMap<u64, PeerStat>,
+    region_buckets: HashMap<u64, ReportBucket>,
     store_stat: StoreStat,
     is_hb_receiver_scheduled: bool,
     // Records the boot time.
@@ -332,6 +391,7 @@ impl PdRunner {
             router,
             is_hb_receiver_scheduled: false,
             region_peers: HashMap::default(),
+            region_buckets: HashMap::default(),
             store_stat: StoreStat::default(),
             start_ts: UnixSecs::now(),
             scheduler,
@@ -816,6 +876,9 @@ impl PdRunner {
                 .engine_total_query_num
                 .add_query_stats(&region_info.query_stats.0);
         }
+        for (_, region_buckets) in mem::take(&mut read_stats.region_buckets) {
+            self.merge_buckets(region_buckets);
+        }
         if !read_stats.region_infos.is_empty() {
             // TODO(x) send stats
             /*
@@ -944,6 +1007,62 @@ impl PdRunner {
             }
         };
         self.remote.spawn(f);
+    }
+
+    fn handle_report_region_buckets(&mut self, region_buckets: BucketStat) {
+        let region_id = region_buckets.meta.region_id;
+        self.merge_buckets(region_buckets);
+        let report_buckets = self.region_buckets.get_mut(&region_id).unwrap();
+        let last_report_ts = if report_buckets.last_report_ts.is_zero() {
+            self.start_ts
+        } else {
+            report_buckets.last_report_ts
+        };
+        let now = UnixSecs::now();
+        let interval_second = now.into_inner() - last_report_ts.into_inner();
+        let delta = report_buckets.new_report(now);
+        let resp = self
+            .pd_client
+            .report_region_buckets(&delta, Duration::from_secs(interval_second));
+        let f = async move {
+            if let Err(e) = resp.await {
+                debug!(
+                    "failed to send buckets";
+                    "region_id" => region_id,
+                    "version" => delta.meta.version,
+                    "region_epoch" => ?delta.meta.region_epoch,
+                    "err" => ?e
+                );
+            }
+        };
+        self.remote.spawn(f);
+    }
+
+    fn merge_buckets(&mut self, buckets: BucketStat) {
+        let region_id = buckets.meta.region_id;
+        let report_bucket = self.region_buckets.entry(region_id).or_default();
+        let current = &mut report_bucket.current_stat;
+        if current.meta < buckets.meta {
+            let mut new_stat = BucketStat::new(
+                buckets.meta.clone(),
+                pd_client::new_bucket_stats(&buckets.meta),
+            );
+            if !current.meta.keys.is_empty() {
+                merge_bucket_stats(
+                    &new_stat.meta.keys,
+                    &mut new_stat.stats,
+                    &current.meta.keys,
+                    &current.stats,
+                );
+            }
+            *current = new_stat;
+        }
+        merge_bucket_stats(
+            &current.meta.keys,
+            &mut current.stats,
+            &buckets.meta.keys,
+            &buckets.stats,
+        );
     }
 }
 
@@ -1083,6 +1202,9 @@ impl Runnable for PdRunner {
                 txn_ext,
             } => self.handle_update_max_timestamp(region_id, initial_status, txn_ext),
             PdTask::UpdateSafeTS => self.handle_update_safe_ts(),
+            PdTask::ReportBuckets(buckets) => {
+                self.handle_report_region_buckets(buckets);
+            }
         };
     }
 

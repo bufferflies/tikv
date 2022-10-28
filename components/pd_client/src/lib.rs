@@ -27,7 +27,10 @@ pub use self::{
     config::Config,
     errors::{Error, Result},
     feature_gate::{Feature, FeatureGate},
-    util::{merge_bucket_stats, new_bucket_stats, PdConnector, REQUEST_RECONNECT_INTERVAL},
+    util::{
+        merge_bucket_stats, new_bucket_stats, new_bucket_write_stats,
+        simple_merge_bucket_write_stats, PdConnector, REQUEST_RECONNECT_INTERVAL,
+    },
 };
 
 pub type Key = Vec<u8>;
@@ -109,6 +112,37 @@ impl Ord for BucketMeta {
 }
 
 impl BucketMeta {
+    pub fn new(
+        region: &metapb::Region,
+        bucket_keys: Vec<Vec<u8>>,
+        bucket_initial_size: u64,
+    ) -> Self {
+        assert!(bucket_keys.len() >= 2);
+        let bucket_count = bucket_keys.len() - 1;
+        Self {
+            region_id: region.get_id(),
+            version: 0,
+            region_epoch: region.get_region_epoch().clone(),
+            keys: bucket_keys,
+            sizes: vec![bucket_initial_size; bucket_count],
+        }
+    }
+
+    pub fn incr_version(&mut self, term: u64) {
+        // bucket version layout
+        //     term     logical counter
+        // |-----------|---------------|
+        //   high bits     low bits
+        // term: given 10s election timeout, the 32 bit means 1362 year running time
+        let current_version_term = self.version >> 32;
+        let bucket_version: u64 = if current_version_term == term {
+            self.version + 1
+        } else {
+            term << 32
+        };
+        self.version = bucket_version;
+    }
+
     pub fn split(&mut self, idx: usize, key: Vec<u8>) {
         assert!(idx != 0);
         self.keys.insert(idx, key);
@@ -146,6 +180,10 @@ impl BucketStat {
             stats,
             create_time: Instant::now(),
         }
+    }
+
+    pub fn count(&self) -> usize {
+        self.meta.keys.len() - 1
     }
 
     pub fn write_key(&mut self, key: &[u8], value_size: u64) {

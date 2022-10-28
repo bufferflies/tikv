@@ -198,6 +198,34 @@ impl Shard {
         Some(Bytes::copy_from_slice(max_level.tables[tbl_idx].smallest()))
     }
 
+    pub fn get_evenly_split_keys(&self, count: usize) -> Option<Vec<Bytes>> {
+        if count <= 1 {
+            return None;
+        }
+        let data = self.get_data();
+        let max_level = data
+            .get_cf(0)
+            .levels
+            .iter()
+            .max_by_key(|level| level.tables.len())?;
+        if max_level.tables.len() <= 1 {
+            return None;
+        }
+        let step = (max_level.tables.len() / count).max(1);
+        Some(
+            max_level
+                .tables
+                .iter()
+                .step_by(step)
+                .skip(1)
+                .filter_map(|tbl| {
+                    (self.overlap_key(tbl.smallest()))
+                        .then(|| Bytes::copy_from_slice(tbl.smallest()))
+                })
+                .collect(),
+        )
+    }
+
     pub fn overlap_table(&self, smallest: &[u8], biggest: &[u8]) -> bool {
         self.start <= biggest && smallest < self.end
     }

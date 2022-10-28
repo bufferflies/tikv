@@ -33,6 +33,9 @@ impl Ticker {
             ),
             TickSchedule::new(config.raft_log_gc_tick_interval.as_millis() / base_interval),
             TickSchedule::new(config.peer_stale_state_check_interval.as_millis() / base_interval),
+            TickSchedule::new(
+                config.report_region_buckets_tick_interval.as_millis() / base_interval,
+            ),
         ];
         Self { tick: 1, schedules }
     }
@@ -91,6 +94,7 @@ pub(crate) const PEER_TICK_PD_HEARTBEAT: PeerTick = PeerTick { idx: 2 };
 pub(crate) const PEER_TICK_SWITCH_MEM_TABLE_CHECK: PeerTick = PeerTick { idx: 3 };
 pub(crate) const PEER_TICK_RAFT_LOG_GC: PeerTick = PeerTick { idx: 4 };
 pub(crate) const PEER_TICK_CHECK_STALE_STATE: PeerTick = PeerTick { idx: 5 };
+pub(crate) const PEER_TICK_REPORT_REGION_BUCKETS: PeerTick = PeerTick { idx: 6 };
 
 #[derive(Eq, PartialEq)]
 pub struct StoreTick {

@@ -4,6 +4,7 @@ use std::{num::NonZeroU64, sync::Arc};
 
 use kvengine::SnapAccess;
 use kvproto::{kvrpcpb::ExtraOp as TxnExtraOp, metapb::Region};
+use pd_client::BucketMeta;
 use raftstore::store::TxnExt;
 use tikv_util::{metrics::CRITICAL_ERROR, panic_when_unexpected_key_or_data, set_panic_mark};
 
@@ -17,6 +18,7 @@ pub struct RegionSnapshot {
     pub txn_ext: Option<Arc<TxnExt>>,
     pub term: Option<NonZeroU64>,
     pub txn_extra_op: TxnExtraOp,
+    pub bucket_meta: Option<Arc<BucketMeta>>,
 }
 
 impl RegionSnapshot {
@@ -31,6 +33,7 @@ impl RegionSnapshot {
             txn_ext: None,
             term: None,
             txn_extra_op: TxnExtraOp::Noop,
+            bucket_meta: None,
         }
     }
 
@@ -52,6 +55,7 @@ impl Clone for RegionSnapshot {
             txn_ext: self.txn_ext.clone(),
             term: self.term,
             txn_extra_op: self.txn_extra_op,
+            bucket_meta: self.bucket_meta.clone(),
         }
     }
 }

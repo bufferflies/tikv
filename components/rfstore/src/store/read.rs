@@ -14,6 +14,7 @@ use kvproto::{
     metapb,
     raft_cmdpb::{CmdType, RaftCmdRequest, RaftCmdResponse, ReadIndexResponse, Request, Response},
 };
+use pd_client::BucketMeta;
 use raftstore::store::{
     util::{LeaseState, RemoteLease},
     worker_metrics::*,
@@ -40,6 +41,7 @@ pub enum ReadProgress {
     Term(u64),
     AppliedIndexTerm(u64),
     LeaderLease(RemoteLease),
+    RegionBuckets(Arc<BucketMeta>),
 }
 
 impl ReadProgress {
@@ -57,6 +59,10 @@ impl ReadProgress {
 
     pub fn leader_lease(lease: RemoteLease) -> ReadProgress {
         ReadProgress::LeaderLease(lease)
+    }
+
+    pub fn region_buckets(bucket_meta: Arc<BucketMeta>) -> ReadProgress {
+        ReadProgress::RegionBuckets(bucket_meta)
     }
 }
 
@@ -159,6 +165,7 @@ pub struct ReadDelegate {
 
     pub tag: String,
     pub txn_ext: Arc<TxnExt>,
+    pub bucket_meta: Option<Arc<BucketMeta>>,
 
     // `track_ver` used to keep the local `ReadDelegate` in `LocalReader`
     // up-to-date with the global `ReadDelegate` stored at `StoreMeta`
@@ -181,6 +188,7 @@ impl ReadDelegate {
             last_valid_ts: Timespec::new(0, 0),
             tag: format!("[region {}] {}", region_id, peer_id),
             txn_ext: peer.txn_ext.clone(),
+            bucket_meta: peer.buckets.as_ref().map(|b| b.meta.clone()),
             track_ver: TrackVer::new(),
         }
     }
@@ -204,6 +212,9 @@ impl ReadDelegate {
             }
             ReadProgress::LeaderLease(leader_lease) => {
                 self.leader_lease = Some(leader_lease);
+            }
+            ReadProgress::RegionBuckets(bucket_meta) => {
+                self.bucket_meta = Some(bucket_meta);
             }
         }
     }
@@ -395,6 +406,7 @@ impl LocalReader {
                 cmd_resp::bind_term(&mut response.response, delegate.term);
                 if let Some(snap) = response.snapshot.as_mut() {
                     snap.txn_ext = Some(delegate.txn_ext.clone());
+                    snap.bucket_meta = delegate.bucket_meta.clone();
                 }
                 cb.invoke_read(response);
             }

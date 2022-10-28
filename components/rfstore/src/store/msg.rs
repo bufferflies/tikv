@@ -1,6 +1,6 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{borrow::Cow, collections::VecDeque, fmt, fmt::Debug};
+use std::{borrow::Cow, collections::VecDeque, fmt, fmt::Debug, sync::Arc};
 
 use kvproto::{
     kvrpcpb::ExtraOp as TxnExtraOp,
@@ -9,6 +9,7 @@ use kvproto::{
     raft_serverpb as rspb,
     raft_serverpb::RaftMessage,
 };
+use pd_client::{BucketMeta, BucketStat};
 use raft_proto::eraftpb;
 use raftstore::store::util::KeysInfoFormatter;
 use tikv_util::time::Instant;
@@ -129,6 +130,7 @@ pub struct MsgApply {
     pub(crate) entries: Vec<eraftpb::Entry>,
     pub(crate) new_role: Option<raft::StateRole>,
     pub(crate) cbs: Vec<Proposal>,
+    pub(crate) bucket_meta: Option<Arc<BucketMeta>>,
 }
 
 #[derive(Debug)]
@@ -137,6 +139,7 @@ pub struct MsgApplyResult {
     pub(crate) results: VecDeque<ExecResult>,
     pub(crate) apply_state: RaftApplyState,
     pub(crate) metrics: ApplyMetrics,
+    pub(crate) bucket_stat: Option<Box<BucketStat>>,
 }
 
 #[derive(Debug)]

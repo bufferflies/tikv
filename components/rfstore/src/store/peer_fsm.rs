@@ -20,6 +20,7 @@ use kvproto::{
     },
     raft_serverpb::RaftMessage,
 };
+use pd_client::{new_bucket_write_stats, BucketMeta, BucketStat};
 use raft::{self, eraftpb::MessageType, Storage};
 use raft_proto::eraftpb;
 use raftstore::store::util;
@@ -37,9 +38,9 @@ use crate::{
         peer::{Peer, StaleState},
         util as _util, write_engine_meta, ApplyMetrics, ApplyMsg, CasualMessage, Config,
         CustomBuilder, Engines, MsgApplyResult, MsgRegistration, PdTask, PeerMsg, PersistReady,
-        RaftApplyState, RaftContext, SignificantMsg, SnapState, StoreMsg, Ticker,
+        RaftApplyState, RaftContext, ReadProgress, SignificantMsg, SnapState, StoreMsg, Ticker,
         PEER_TICK_CHECK_STALE_STATE, PEER_TICK_PD_HEARTBEAT, PEER_TICK_RAFT, PEER_TICK_RAFT_LOG_GC,
-        PEER_TICK_SPLIT_CHECK, PEER_TICK_SWITCH_MEM_TABLE_CHECK,
+        PEER_TICK_REPORT_REGION_BUCKETS, PEER_TICK_SPLIT_CHECK, PEER_TICK_SWITCH_MEM_TABLE_CHECK,
     },
     DiscardReason, Error, RaftStoreRouter, Result,
 };
@@ -268,6 +269,9 @@ impl<'a> PeerMsgHandler<'a> {
         if self.ticker.is_on_tick(PEER_TICK_CHECK_STALE_STATE) {
             self.on_check_peer_stale_state_tick();
         }
+        if self.ticker.is_on_tick(PEER_TICK_REPORT_REGION_BUCKETS) {
+            self.on_report_region_buckets_tick();
+        }
     }
 
     fn start(&mut self) {
@@ -277,6 +281,7 @@ impl<'a> PeerMsgHandler<'a> {
         self.ticker.schedule(PEER_TICK_SWITCH_MEM_TABLE_CHECK);
         self.ticker.schedule(PEER_TICK_RAFT_LOG_GC);
         self.ticker.schedule(PEER_TICK_CHECK_STALE_STATE);
+        self.ticker.schedule(PEER_TICK_REPORT_REGION_BUCKETS);
     }
 
     fn on_significant_msg(&mut self, msg: SignificantMsg) {
@@ -779,8 +784,10 @@ impl<'a> PeerMsgHandler<'a> {
     fn on_split_region_check_tick(&mut self) {
         self.ticker.schedule(PEER_TICK_SPLIT_CHECK);
         if let Some(shard) = self.ctx.global.engines.kv.get_shard(self.region_id()) {
-            self.peer.peer_stat.approximate_size = shard.get_estimated_size();
-            self.peer.peer_stat.approximate_keys = shard.get_estimated_entries();
+            let estimated_size = shard.get_estimated_size();
+            let estimated_entries = shard.get_estimated_entries();
+            self.peer.peer_stat.approximate_size = estimated_size;
+            self.peer.peer_stat.approximate_keys = estimated_entries;
             if !self.fsm.peer.is_leader() {
                 return;
             }
@@ -801,23 +808,55 @@ impl<'a> PeerMsgHandler<'a> {
             }
             let region_max_size = self.ctx.cfg.region_split_size.0 * 3 / 2;
             let region_max_entries = region_max_size / 100;
-            let estimated_size = shard.get_estimated_size();
-            let estimated_entries = shard.get_estimated_entries();
             raftstore::coprocessor::metrics::REGION_SIZE_HISTOGRAM.observe(estimated_size as f64);
             raftstore::coprocessor::metrics::REGION_KEYS_HISTOGRAM
                 .observe(estimated_entries as f64);
-            if estimated_size < region_max_size && estimated_entries < region_max_entries {
+            if estimated_size >= region_max_size || estimated_entries >= region_max_entries {
+                if let Some(k) = shard.get_suggest_split_key() {
+                    info!(
+                        "region {} split, estimated size {}, estimated entries {}, max_size {}",
+                        self.peer.tag(),
+                        estimated_size,
+                        estimated_entries,
+                        region_max_size,
+                    );
+                    self.schedule_ask_split(vec![Key::from_raw(k.chunk()).into_encoded()]);
+                }
                 return;
             }
-            if let Some(k) = shard.get_suggest_split_key() {
-                info!(
-                    "region {} split, estimated size {}, estimated entries {}, max_size {}",
-                    self.peer.tag(),
-                    estimated_size,
-                    estimated_entries,
-                    region_max_size,
-                );
-                self.schedule_ask_split(vec![Key::from_raw(k.chunk()).as_encoded().to_vec()]);
+            if self.ctx.cfg.enable_region_bucket {
+                let bucket_size = self.ctx.cfg.region_bucket_size.0;
+                let size_diff = estimated_size.abs_diff(self.peer.last_bucket_split_region_size);
+                if size_diff < bucket_size {
+                    return;
+                }
+                let expected_bucket_count = (estimated_size + bucket_size - 1) / bucket_size;
+                let mut bucket_keys = vec![self.region().get_start_key().to_vec()];
+                if let Some(keys) = shard.get_evenly_split_keys(expected_bucket_count as usize) {
+                    bucket_keys.extend(
+                        keys.into_iter()
+                            .map(|k| Key::from_raw(k.chunk()).into_encoded()),
+                    );
+                }
+                bucket_keys.push(self.region().get_end_key().to_vec());
+                let prev_version = self
+                    .peer
+                    .buckets
+                    .as_ref()
+                    .map(|b| b.meta.version)
+                    .unwrap_or_default();
+                let mut bucket_meta = BucketMeta::new(self.region(), bucket_keys, bucket_size);
+                bucket_meta.version = prev_version;
+                bucket_meta.incr_version(self.peer.term());
+                let stats = new_bucket_write_stats(&bucket_meta);
+                let bucket_stat = BucketStat::new(Arc::new(bucket_meta), stats);
+                self.peer.buckets = Some(bucket_stat);
+                self.peer.last_bucket_split_region_size = estimated_size;
+                if let Some(mut reader) = self.ctx.global.readers.get_mut(&self.region_id()) {
+                    reader.update(ReadProgress::RegionBuckets(
+                        self.peer.buckets.as_ref().unwrap().meta.clone(),
+                    ));
+                }
             }
         }
     }
@@ -843,7 +882,7 @@ impl<'a> PeerMsgHandler<'a> {
         let mut keys = vec![];
         while iter.valid() {
             if i > 0 && i % split_keys == 0 {
-                keys.push(Key::from_raw(iter.key()).as_encoded().to_vec());
+                keys.push(Key::from_raw(iter.key()).into_encoded());
             }
             i += 1;
             iter.next();
@@ -1085,6 +1124,7 @@ impl<'a> PeerMsgHandler<'a> {
                     results: VecDeque::new(),
                     apply_state,
                     metrics: ApplyMetrics::default(),
+                    bucket_stat: None,
                 };
                 info!(
                     "{} apply snapshot finished, snapshot index {}",
@@ -1335,6 +1375,36 @@ impl<'a> PeerMsgHandler<'a> {
                     )
                 }
             }
+        }
+    }
+
+    fn on_report_region_buckets_tick(&mut self) {
+        self.ticker.schedule(PEER_TICK_REPORT_REGION_BUCKETS);
+        if !self.fsm.peer.is_leader() || self.fsm.peer.buckets.is_none() {
+            return;
+        }
+
+        let region_id = self.region_id();
+        let peer_id = self.fsm.peer_id();
+        let buckets = self.fsm.peer.buckets.as_mut().unwrap();
+        let stats = std::mem::replace(&mut buckets.stats, new_bucket_write_stats(&buckets.meta));
+        let for_report = BucketStat {
+            meta: buckets.meta.clone(),
+            stats,
+            create_time: buckets.create_time,
+        };
+        if let Err(e) = self
+            .ctx
+            .global
+            .pd_scheduler
+            .schedule(PdTask::ReportBuckets(for_report))
+        {
+            error!(
+                "failed to report region buckets";
+                "region_id" => region_id,
+                "peer_id" => peer_id,
+                "err" => ?e,
+            );
         }
     }
 }

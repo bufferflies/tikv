@@ -959,6 +959,7 @@ impl<'a> StoreMsgHandler<'a> {
                 );
             }
         }
+        peer_fsm.peer.reset_buckets();
 
         let last_key = raw_end_key(regions.last().unwrap());
         if self

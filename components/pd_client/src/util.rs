@@ -37,8 +37,8 @@ use tikv_util::{
 use tokio_timer::timer::Handle;
 
 use super::{
-    metrics::*, tso::TimestampOracle, BucketMeta, Config, Error, FeatureGate, PdFuture, Result,
-    REQUEST_TIMEOUT,
+    metrics::*, tso::TimestampOracle, BucketMeta, BucketStat, Config, Error, FeatureGate, PdFuture,
+    Result, REQUEST_TIMEOUT,
 };
 
 const RETRY_INTERVAL: Duration = Duration::from_secs(1); // 1s
@@ -865,6 +865,14 @@ pub fn new_bucket_stats(meta: &BucketMeta) -> BucketStats {
     stats
 }
 
+pub fn new_bucket_write_stats(meta: &BucketMeta) -> BucketStats {
+    let count = meta.keys.len() - 1;
+    let mut stats = BucketStats::default();
+    stats.set_write_bytes(vec![0; count]);
+    stats.set_write_keys(vec![0; count]);
+    stats
+}
+
 pub fn find_bucket_index<S: AsRef<[u8]>>(key: &[u8], bucket_keys: &[S]) -> Option<usize> {
     let last_key = bucket_keys.last().unwrap().as_ref();
     let search_keys = &bucket_keys[..bucket_keys.len() - 1];
@@ -962,6 +970,28 @@ pub fn merge_bucket_stats<C: AsRef<[u8]>, I: AsRef<[u8]>>(
                 stats_add!(cur_stats, cur_idx, delta_stats, new_idx, write_keys);
             }
         }
+    }
+}
+
+pub fn simple_merge_bucket_write_stats(cur: &mut BucketStat, incoming: &BucketStat) {
+    if cur.meta != incoming.meta {
+        return;
+    }
+    for (cur, incoming) in cur
+        .stats
+        .write_keys
+        .iter_mut()
+        .zip(incoming.stats.write_keys.iter())
+    {
+        *cur += incoming;
+    }
+    for (cur, incoming) in cur
+        .stats
+        .write_bytes
+        .iter_mut()
+        .zip(incoming.stats.write_bytes.iter())
+    {
+        *cur += incoming;
     }
 }
 

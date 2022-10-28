@@ -24,6 +24,7 @@ use kvproto::{
     raft_serverpb::{PeerState, RaftMessage, RegionLocalState},
     *,
 };
+use pd_client::{simple_merge_bucket_write_stats, BucketStat};
 use protobuf::Message;
 use raft::{
     self, Changer, LightReady, ProgressState, ProgressTracker, RawNode, Ready, SnapshotStatus,
@@ -446,6 +447,12 @@ pub(crate) struct Peer {
 
     /// lead_transferee if the peer is in a leadership transferring.
     pub lead_transferee: u64,
+
+    /// Record the region size at the time of last buckets splitting. If the diff between current
+    /// region size and this exceeds a threshold, buckets will be refreshed.
+    pub(crate) last_bucket_split_region_size: u64,
+
+    pub buckets: Option<BucketStat>,
 }
 
 impl Peer {
@@ -529,6 +536,8 @@ impl Peer {
             cmd_epoch_checker: Default::default(),
             need_campaign: false,
             lead_transferee: raft::INVALID_ID,
+            last_bucket_split_region_size: 0,
+            buckets: None,
         };
         // If this region has only one peer and I am the one, campaign directly.
         if region.get_peers().len() == 1 && region.get_peers()[0].get_store_id() == store_id {
@@ -1055,6 +1064,11 @@ impl Peer {
         }
     }
 
+    pub(crate) fn reset_buckets(&mut self) {
+        self.buckets = None;
+        self.last_bucket_split_region_size = 0;
+    }
+
     fn on_role_changed(&mut self, ctx: &mut RaftContext, ready: &Ready) {
         // Update leader lease when the Raft state changes.
         if let Some(ss) = ready.ss() {
@@ -1113,6 +1127,7 @@ impl Peer {
                 .snapshot_not_ready_peers
                 .borrow_mut()
                 .clear();
+            self.reset_buckets();
         }
         self.lead_transferee = self.raft_group.raft.lead_transferee.unwrap_or_default();
     }
@@ -1367,6 +1382,7 @@ impl Peer {
             entries: committed_entries,
             new_role,
             cbs,
+            bucket_meta: self.buckets.as_ref().map(|b| b.meta.clone()),
         });
         ctx.apply_msgs.msgs.push(apply_msg);
         fail_point!("after_send_to_apply_1003", self.peer_id() == 1003, |_| {});
@@ -1608,6 +1624,11 @@ impl Peer {
         self.mut_store().set_applied_state(apply_state);
         self.peer_stat.written_keys += apply_result.metrics.written_keys;
         self.peer_stat.written_bytes += apply_result.metrics.written_bytes;
+        if let (Some(delta), Some(buckets)) =
+            (apply_result.bucket_stat.as_ref(), self.buckets.as_mut())
+        {
+            simple_merge_bucket_write_stats(buckets, delta);
+        }
         if !self.is_leader() {
             // TODO(x) post_pending_read_index_on_replica
         } else if self.ready_to_handle_read() {
@@ -2697,6 +2718,7 @@ impl Peer {
         let mut resp = ctx.execute(&req, &Arc::new(region), read_index, None);
         if let Some(snap) = resp.snapshot.as_mut() {
             snap.txn_ext = Some(self.txn_ext.clone());
+            snap.bucket_meta = self.buckets.as_ref().map(|b| b.meta.clone());
         }
         cmd_resp::bind_term(&mut resp.response, self.term());
         resp

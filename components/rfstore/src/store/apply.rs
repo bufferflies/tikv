@@ -19,6 +19,7 @@ use kvproto::{
         ChangePeerRequest, RaftCmdRequest, RaftCmdResponse, RaftRequestHeader, RaftResponseHeader,
     },
 };
+use pd_client::{new_bucket_write_stats, BucketStat};
 use prometheus::local::LocalHistogram;
 use protobuf::RepeatedField;
 use raft::{
@@ -234,6 +235,8 @@ pub(crate) struct Applier {
     last_property_term: u64,
 
     last_ingest_seq: u64,
+
+    buckets: Option<BucketStat>,
 }
 
 impl Applier {
@@ -442,6 +445,14 @@ impl Applier {
         Ok((resp, exec_result))
     }
 
+    fn record_write_stat(&mut self, k: &[u8], v: &[u8]) {
+        self.metrics.written_keys += 1;
+        self.metrics.written_bytes += (k.len() + v.len()) as u64;
+        if let Some(s) = self.buckets.as_mut() {
+            s.write_key(k, v.len() as u64);
+        }
+    }
+
     pub(crate) fn exec_custom_log(
         &mut self,
         ctx: &mut ApplyContext,
@@ -459,8 +470,7 @@ impl Applier {
         match cl.get_type() {
             TYPE_PREWRITE => cl.iterate_lock(|k, v| {
                 wb.put(mvcc::LOCK_CF, k, v, 0, &[], 0);
-                self.metrics.written_keys += 1;
-                self.metrics.written_bytes += (k.len() + v.len()) as u64;
+                self.record_write_stat(k, v);
                 self.lock_cache.insert(k.to_vec(), v.to_vec());
             }),
             TYPE_PESSIMISTIC_LOCK => cl.iterate_lock(|k, v| {
@@ -470,8 +480,7 @@ impl Applier {
                 self.commit_lock(engine, wb, k, commit_ts, log_index);
             }),
             TYPE_ONE_PC => cl.iterate_one_pc(|k, v, is_extra, del_lock, start_ts, commit_ts| {
-                self.metrics.written_keys += 1;
-                self.metrics.written_bytes += (k.len() + v.len()) as u64;
+                self.record_write_stat(k, v);
                 let user_meta = UserMeta::new(start_ts, commit_ts).to_array();
                 if is_extra {
                     let op_lock_key = mvcc::encode_extra_txn_status_key(k, start_ts);
@@ -917,9 +926,13 @@ impl Applier {
             self.paused_apply_queue.push(apply);
             return;
         }
+        self.metrics = ApplyMetrics::default();
+        if let Some(meta) = apply.bucket_meta.clone() {
+            let bucket_stats = new_bucket_write_stats(&meta);
+            self.buckets = Some(BucketStat::new(meta, bucket_stats));
+        }
         self.term = apply.term;
         self.append_proposal(apply.cbs.drain(..));
-        self.metrics = ApplyMetrics::default();
         self.handle_raft_committed_entries(ctx, apply.entries.drain(..));
         self.snap.take();
         if let Some(state) = apply.new_role {
@@ -1025,7 +1038,7 @@ impl Applier {
             let mut results = VecDeque::new();
             results.push_back(ExecResult::UnsafeDestroy);
             self.destroy(ctx);
-            ctx.finish_for(&self, results);
+            ctx.finish_for(self, results);
         }
     }
 
@@ -1530,13 +1543,14 @@ impl ApplyContext {
         }
     }
 
-    pub fn finish_for(&self, applier: &Applier, results: VecDeque<ExecResult>) {
+    pub fn finish_for(&self, applier: &mut Applier, results: VecDeque<ExecResult>) {
         if let Some(router) = &self.router {
             let apply_res = MsgApplyResult {
                 peer_id: applier.id(),
                 results,
                 apply_state: applier.apply_state,
                 metrics: applier.metrics.clone(),
+                bucket_stat: applier.buckets.take().map(Box::new),
             };
             let region_id = applier.region.get_id();
             let msg = PeerMsg::ApplyResult(apply_res);
