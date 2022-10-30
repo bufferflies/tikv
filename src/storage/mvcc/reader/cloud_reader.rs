@@ -62,6 +62,12 @@ impl CloudReader {
             if key != raw_key {
                 break;
             }
+            let user_meta = UserMeta::from_slice(data_iter.item().user_meta());
+            if user_meta.commit_ts < start_ts.into_inner() {
+                // A transaction's commit_ts must be greater than start_ts, if current commit_ts
+                // is already smaller than the start_ts, we don't need to look for older version.
+                break;
+            }
             if let Some(record) = Self::get_commit_by_item(&data_iter.item(), start_ts) {
                 return Ok(record);
             }
