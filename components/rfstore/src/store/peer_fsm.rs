@@ -467,7 +467,7 @@ impl<'a> PeerMsgHandler<'a> {
             self.on_transfer_leader_msg(msg.get_message());
             Ok(())
         } else {
-            self.fsm.peer.step(msg.take_message())
+            self.fsm.peer.step(self.ctx, msg.take_message())
         };
 
         if is_snapshot && self.fsm.peer.has_pending_snapshot() {

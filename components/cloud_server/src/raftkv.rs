@@ -476,8 +476,10 @@ impl ReplicaReadLockChecker {
 impl Coprocessor for ReplicaReadLockChecker {}
 
 impl ReadIndexObserver for ReplicaReadLockChecker {
-    fn on_step(&self, msg: &mut eraftpb::Message, _role: StateRole) {
-        if msg.get_msg_type() != MessageType::MsgReadIndex {
+    fn on_step(&self, msg: &mut eraftpb::Message, role: StateRole) {
+        // Only check and return result if the current peer is a leader.
+        // If it's not a leader, the read index request will be redirected to the leader later.
+        if msg.get_msg_type() != MessageType::MsgReadIndex || role != StateRole::Leader {
             return;
         }
         assert_eq!(msg.get_entries().len(), 1);

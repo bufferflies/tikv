@@ -854,7 +854,7 @@ impl Peer {
     }
 
     /// Steps the raft message.
-    pub fn step(&mut self, mut m: eraftpb::Message) -> Result<()> {
+    pub fn step(&mut self, ctx: &mut RaftContext, mut m: eraftpb::Message) -> Result<()> {
         fail_point!(
             "step_message_3_1",
             self.peer.get_store_id() == 3 && self.region_id == 1,
@@ -871,7 +871,9 @@ impl Peer {
         let msg_type = m.get_msg_type();
         if msg_type == MessageType::MsgReadIndex {
             fail_point!("on_step_read_index_msg");
-            // TODO: ctx.coprocessor_host.on_step_read_index(&mut m);
+            ctx.global
+                .coprocessor_host
+                .on_step_read_index(&mut m, self.get_role());
             // Must use the commit index of `PeerStorage` instead of the commit index
             // in raft-rs which may be greater than the former one.
             // For more details, see the annotations above `on_leader_commit_idx_changed`.
