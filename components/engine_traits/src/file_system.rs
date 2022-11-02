@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use bytes::Bytes;
 use file_system::{get_io_rate_limiter, get_io_type, IOOp, IORateLimiter};
 
 pub trait FileSystemInspector: Sync + Send {
@@ -50,4 +51,9 @@ impl FileSystemInspector for EngineFileSystemInspector {
             Ok(len)
         }
     }
+}
+
+pub trait ObjectStorage: Sync + Send {
+    fn put_objects(&self, objects: Vec<(String, Bytes)>) -> Result<(), String>;
+    fn get_objects(&self, keys: Vec<String>) -> Result<Vec<(String, Bytes)>, String>;
 }

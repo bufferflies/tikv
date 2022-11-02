@@ -48,7 +48,7 @@ unsafe impl Send for DmaBuffer {}
 impl DmaBuffer {
     const DMA_ALIGN: usize = 4096;
 
-    fn new(cap: usize) -> Self {
+    pub(crate) fn new(cap: usize) -> Self {
         debug_assert!(0 < cap && cap <= isize::MAX as usize);
         let layout = Layout::from_size_align(cap, Self::DMA_ALIGN)
             .unwrap()
@@ -98,7 +98,7 @@ impl DmaBuffer {
     }
 
     /// Pads the length of buf to the alignment. It doesn't pad zeros.
-    fn pad_to_align(&mut self) {
+    pub(crate) fn pad_to_align(&mut self) {
         self.len = Self::aligned_len(self.len);
         assert!(self.len <= self.capacity());
     }
@@ -212,7 +212,7 @@ pub(crate) struct WalWriter {
     fd: Option<File>,
     buf: DmaBuffer,
     // file_off is always aligned.
-    file_off: u64,
+    pub(crate) file_off: u64,
     pub(crate) compacted_epoch: Arc<AtomicU32>,
 }
 

@@ -9,7 +9,7 @@ use tikv_util::info;
 
 use crate::{log_batch::RaftLogOp, manifest::Manifest, *};
 
-impl RfEngine {
+impl RfEngineCore {
     pub(crate) fn load(&mut self, manifest: &Manifest) -> Result<()> {
         for (&peer_id, peer_meta) in &manifest.peers {
             let peer_ref = self.get_or_init_peer_data(peer_id, peer_meta.region_id);

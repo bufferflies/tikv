@@ -55,7 +55,7 @@ use resource_metering::Config as ResourceMeteringConfig;
 use security::SecurityConfig;
 use tikv_util::{
     config::{
-        self, LogFormat, RaftDataStateMachine, ReadableDuration, ReadableSize, TomlWriter, GIB, MIB,
+        self, LogFormat, ReadableDuration, ReadableSize, TomlWriter, GIB, MIB,
     },
     sys::SysQuota,
     time::duration_to_sec,
@@ -2855,13 +2855,6 @@ impl TiKvConfig {
         if kv_db_wal_path == raft_db_wal_path {
             return Err("raftdb.wal_dir can't be same as rocksdb.wal_dir".into());
         }
-
-        RaftDataStateMachine::new(
-            &self.storage.data_dir,
-            &self.raft_store.raftdb_path,
-            &self.raft_engine.config.dir,
-        )
-        .validate(RocksEngine::exists(&kv_db_path))?;
 
         // Check blob file dir is empty when titan is disabled
         if !self.rocksdb.titan.enabled {

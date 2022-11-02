@@ -50,13 +50,7 @@ pub(crate) fn execute_dfsgc(arg: DFSGCArgs) {
     if config.data_dir.is_empty() {
         config.data_dir = ".".to_string();
     }
-    let security_mgr = Arc::new(
-        SecurityManager::new(&config.security)
-            .unwrap_or_else(|e| panic!("failed to create security manager: {:?}", e)),
-    );
-    let env = Arc::new(EnvBuilder::new().cq_count(1).build());
-    let pd_client = RpcClient::new(&config.pd, Some(env), security_mgr)
-        .unwrap_or_else(|e| panic!("failed to create rpc client: {:?}", e));
+    let pd_client = create_pd_client(&config.security, &config.pd);
     let s3fs = S3FS::new(
         config.dfs.prefix,
         config.dfs.s3_endpoint,
@@ -207,4 +201,17 @@ impl GcWorker {
             }
         });
     }
+}
+
+pub(crate) fn create_pd_client(
+    security_conf: &SecurityConfig,
+    pd_conf: &pd_client::Config,
+) -> RpcClient {
+    let security_mgr = Arc::new(
+        SecurityManager::new(security_conf)
+            .unwrap_or_else(|e| panic!("failed to create security manager: {:?}", e)),
+    );
+    let env = Arc::new(EnvBuilder::new().cq_count(1).build());
+    RpcClient::new(pd_conf, Some(env), security_mgr)
+        .unwrap_or_else(|e| panic!("failed to create rpc client: {:?}", e))
 }

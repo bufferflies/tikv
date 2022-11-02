@@ -29,7 +29,7 @@ use iterator::*;
 use metrics::*;
 use thiserror::Error as ThisError;
 pub use traits::*;
-use worker::*;
+pub use worker::*;
 pub use write_batch::WriteBatch;
 pub use writer::*;
 

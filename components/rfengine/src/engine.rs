@@ -3,13 +3,13 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fmt::{Display, Formatter},
-    fs::create_dir_all,
+    fs,
+    fs::{create_dir_all, OpenOptions},
     ops::{Deref, DerefMut},
-    os::unix::fs::MetadataExt,
+    os::unix::fs::{FileExt, MetadataExt},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU32, AtomicU64, Ordering},
-        mpsc::SyncSender,
         Arc, Mutex, RwLock,
     },
     thread::{self, JoinHandle},
@@ -17,14 +17,16 @@ use std::{
 
 use bytes::{Buf, Bytes};
 use dashmap::mapref::one::Ref;
+use engine_traits::ObjectStorage;
 use file_system::open_direct_file;
 use protobuf::Message;
 use raft_proto::{eraftpb, eraftpb::Entry};
-use tikv_util::{info, time::Instant, warn};
+use rfenginepb::ClusterBackupMeta;
+use tikv_util::{info, mpsc::Sender, time::Instant, warn};
 
 use crate::{
     log_batch::{RaftLogBlock, RaftLogs},
-    manifest::Manifest,
+    manifest::{manifest_path, persist_change_set, Manifest},
     metrics::*,
     write_batch::{PeerBatch, WriteBatch},
     *,
@@ -78,44 +80,65 @@ pub const TRUNCATE_ALL_INDEX: u64 = u64::MAX;
 /// truncated index will be removed.
 #[derive(Clone)]
 pub struct RfEngine {
+    core: Arc<RfEngineCore>,
+}
+
+impl Deref for RfEngine {
+    type Target = RfEngineCore;
+
+    fn deref(&self) -> &Self::Target {
+        &self.core
+    }
+}
+
+impl RfEngine {
+    pub fn open(dir: &Path, wal_size: usize) -> Result<Self> {
+        let core = RfEngineCore::open(dir, wal_size)?;
+        Ok(Self {
+            core: Arc::new(core),
+        })
+    }
+}
+
+pub struct RfEngineCore {
     pub dir: PathBuf,
 
-    pub(crate) writer: Arc<Mutex<WalWriter>>,
+    pub(crate) writer: Mutex<WalWriter>,
 
-    pub(crate) peers: Arc<dashmap::DashMap<u64, RwLock<PeerData>>>,
+    pub(crate) peers: dashmap::DashMap<u64, RwLock<PeerData>>,
 
-    pub(crate) dependants: Arc<dashmap::DashMap<u64, RwLock<HashSet<u64>>>>,
+    pub(crate) dependants: dashmap::DashMap<u64, RwLock<HashSet<u64>>>,
 
-    pub(crate) task_sender: SyncSender<Task>,
+    pub(crate) task_sender: Sender<Task>,
 
-    pub(crate) worker_handle: Arc<Mutex<WorkerHandle>>,
+    pub(crate) worker_handle: Mutex<WorkerHandle>,
 
     pub(crate) engine_id: Arc<AtomicU64>,
 }
 
 pub(crate) struct WorkerHandle {
-    task_sender: SyncSender<Task>,
+    task_sender: Sender<Task>,
     handle: Option<JoinHandle<()>>,
 }
 
-impl RfEngine {
-    pub fn open(dir: &Path, wal_size: usize) -> Result<Self> {
+impl RfEngineCore {
+    fn open(dir: &Path, wal_size: usize) -> Result<Self> {
         maybe_create_wal_files(dir)?;
         let engine_id = Arc::new(AtomicU64::new(0));
         let manifest = Manifest::open(dir, engine_id.clone())?;
-        let (tx, rx) = std::sync::mpsc::sync_channel(4096);
+        let (tx, rx) = tikv_util::mpsc::unbounded();
         let compacted_epoch = Arc::new(AtomicU32::new(manifest.epoch_id));
         let writer = WalWriter::new(dir, wal_size, compacted_epoch.clone());
         let mut en = Self {
             dir: dir.to_owned(),
-            peers: Arc::default(),
-            dependants: Arc::default(),
-            writer: Arc::new(Mutex::new(writer)),
+            peers: Default::default(),
+            dependants: Default::default(),
+            writer: Mutex::new(writer),
             task_sender: tx.clone(),
-            worker_handle: Arc::new(Mutex::new(WorkerHandle {
+            worker_handle: Mutex::new(WorkerHandle {
                 task_sender: tx,
                 handle: None,
-            })),
+            }),
             engine_id: engine_id.clone(),
         };
         en.load(&manifest)?;
@@ -177,7 +200,6 @@ impl RfEngine {
             writer.append_region_data(data);
         }
         let (size, rotated) = writer.flush()?;
-        drop(writer);
         if rotated {
             self.task_sender.send(Task::Rotate { epoch_id }).unwrap();
         }
@@ -471,6 +493,73 @@ impl RfEngine {
         ENGINE_FETCH_ENTRIES_DURATION_HISTOGRAM.observe(timer.saturating_elapsed_secs());
         Ok(buf.len() - old_len)
     }
+
+    pub fn backup(&self, mut task: BackupTask) {
+        let writer = self.writer.lock().unwrap();
+        task.file_off = writer.file_off;
+        self.task_sender.send(Task::Backup(task)).unwrap();
+    }
+}
+
+pub fn restore(
+    object_storage: Box<dyn ObjectStorage>,
+    cluster_backup: &ClusterBackupMeta,
+    store_id: u64,
+    dir: &Path,
+) {
+    let store_meta = cluster_backup
+        .get_stores()
+        .iter()
+        .find(|x| x.store_id == store_id)
+        .expect("store not found");
+    maybe_create_wal_files(dir).unwrap();
+    let wal_chunks = store_meta.get_wal_chunks();
+    if !wal_chunks.is_empty() {
+        let keys: Vec<String> = wal_chunks
+            .iter()
+            .map(|chunk| wal_file_key(store_id, chunk.epoch, chunk.start_off, chunk.end_off))
+            .collect();
+        let mut objects = object_storage.get_objects(keys).unwrap();
+        objects.sort_by(|(a, _), (b, _)| a.cmp(b));
+        let wal_path = wal_file_name(dir, store_meta.get_manifest().epoch_id + 1);
+        let file = OpenOptions::new().write(true).open(&wal_path).unwrap();
+        let mut i = 0;
+        for (_, data) in objects {
+            file.write_at(&data, store_meta.get_wal_chunks()[i].start_off)
+                .unwrap();
+            i += 1;
+        }
+        let end_off = wal_chunks.last().unwrap().end_off;
+        let eof = vec![0u8; 4096];
+        file.write_at(&eof, end_off).unwrap();
+        file.sync_data().unwrap();
+    }
+    let mut key_path_map = HashMap::new();
+    for peer in store_meta.get_manifest().get_peers() {
+        for file in peer.get_files() {
+            let rlog_key = raft_log_file_key(
+                store_id,
+                peer.get_peer_id(),
+                file.get_first_index(),
+                file.get_last_index(),
+            );
+            let path = raft_log_file_name(dir, peer.peer_id, file.first_index, file.last_index);
+            key_path_map.insert(rlog_key, path);
+        }
+    }
+    let keys: Vec<String> = key_path_map.keys().cloned().collect();
+    let objects = object_storage.get_objects(keys).unwrap();
+    for (key, data) in objects {
+        let path = key_path_map.get(&key).unwrap();
+        fs::write(path, &data).unwrap();
+    }
+    let manifest_file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&manifest_path(dir))
+        .unwrap();
+    persist_change_set(&manifest_file, 0, store_meta.get_manifest()).unwrap();
 }
 
 pub(crate) fn maybe_create_wal_files(dir: &Path) -> Result<()> {

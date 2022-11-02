@@ -38,3 +38,23 @@ message RaftLogFile {
     uint64 first_index = 1;
     uint64 last_index = 2;
 }
+
+message StoreBackupMeta {
+    uint64 store_id = 1;
+    ChangeSet manifest = 2;
+    repeated WalChunk wal_chunks = 3;
+}
+
+message WalChunk {
+    uint32 epoch = 1;
+    uint64 start_off = 2;
+    uint64 end_off = 3;
+}
+
+message ClusterBackupMeta {
+    repeated StoreBackupMeta stores = 1;
+    uint64 cluster_id = 2;
+    uint64 backup_ts = 3;
+    uint64 alloc_id = 4;
+    uint64 safe_ts = 5;
+}

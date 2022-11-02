@@ -3,7 +3,9 @@
 #[macro_use]
 extern crate serde_derive;
 
+mod backup;
 mod dfsgc;
+mod restore;
 mod unsafe_recover;
 
 use std::io;
@@ -11,9 +13,11 @@ use std::io;
 use clap::{Parser, Subcommand};
 
 use crate::{
+    backup::{execute_backup, BackupArgs},
     dfsgc::{execute_dfsgc, DFSGCArgs},
+    restore::{execute_restore, RestoreArgs},
     unsafe_recover::{execute_unsafe_recover, UnsafeRecoverArgs},
-    Commands::{UnsafeRecover, DFSGC},
+    Commands::{Backup, Restore, UnsafeRecover, DFSGC},
 };
 
 fn main() {
@@ -25,6 +29,12 @@ fn main() {
         }
         UnsafeRecover(unsafe_recover) => {
             execute_unsafe_recover(unsafe_recover);
+        }
+        Backup(backup_args) => {
+            execute_backup(backup_args);
+        }
+        Restore(restore_args) => {
+            execute_restore(restore_args);
         }
     }
 }
@@ -51,4 +61,8 @@ pub enum Commands {
     DFSGC(DFSGCArgs),
     /// Unsafely recover the cluster by directly modifying the data on the raft engine.
     UnsafeRecover(UnsafeRecoverArgs),
+    /// Backup backups the cluster.
+    Backup(BackupArgs),
+    /// Restore a backup.
+    Restore(RestoreArgs),
 }

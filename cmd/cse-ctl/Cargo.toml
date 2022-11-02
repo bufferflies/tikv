@@ -8,6 +8,7 @@ edition = "2021"
 byteorder = "1.2"
 bytes = "1.0"
 clap = { version = "3.2", features = ["derive"] }
+futures = "0.3"
 grpcio = { version = "0.10", default-features = false, features = ["openssl-vendored", "protobuf-codec"] }
 http = "0.2"
 hyper = "0.14"
@@ -17,6 +18,7 @@ kvproto = { git = "https://github.com/pingcap/kvproto.git" }
 pd_client = { path = "../../components/pd_client", default-features = false }
 protobuf = "2.8"
 rfengine = { path = "../../components/rfengine" }
+rfenginepb = { path = "../../components/rfenginepb" }
 security = { path = "../../components/security", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_derive = "1.0"

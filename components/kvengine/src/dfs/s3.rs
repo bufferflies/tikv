@@ -10,6 +10,7 @@ use std::{
 use async_trait::async_trait;
 use bstr::ByteSlice;
 use bytes::{Buf, Bytes};
+use engine_traits::ObjectStorage;
 use farmhash::fingerprint64;
 use futures::StreamExt;
 use rusoto_core::{
@@ -196,7 +197,7 @@ impl S3FSCore {
         }
     }
 
-    async fn sleep_for_retry(&self, retry_cnt: &mut u32, file_id: u64) -> bool {
+    async fn sleep_for_retry(&self, retry_cnt: &mut u32, file_name: &str) -> bool {
         if *retry_cnt < MAX_RETRY_COUNT {
             *retry_cnt += 1;
             let retry_sleep = 2u64.pow(*retry_cnt) * RETRY_SLEEP_MS;
@@ -205,7 +206,7 @@ impl S3FSCore {
         } else {
             error!(
                 "read file {}, reach max retry count {}",
-                file_id, MAX_RETRY_COUNT
+                file_name, MAX_RETRY_COUNT
             );
             false
         }
@@ -343,15 +344,11 @@ impl S3FSCore {
         }
         Ok(Bytes::from(buf))
     }
-}
 
-#[async_trait]
-impl DFS for S3FS {
-    async fn read_file(&self, file_id: u64, _opts: Options) -> crate::dfs::Result<Bytes> {
+    pub async fn get_object(&self, key: String, file_name: String) -> crate::dfs::Result<Bytes> {
         let mut retry_cnt = 0;
         let start_time = Instant::now_coarse();
         loop {
-            let key = self.file_key(file_id);
             let req = self.new_request("GET", &key);
             let mut result = self.dispatch(req, GetObjectError::from_response).await;
             if result.is_ok() {
@@ -361,7 +358,7 @@ impl DFS for S3FS {
                     Ok(data) => {
                         info!(
                             "read file {}, size {}, takes {:?}, retry {}",
-                            file_id,
+                            &file_name,
                             data.len(),
                             start_time.saturating_elapsed(),
                             retry_cnt
@@ -373,11 +370,11 @@ impl DFS for S3FS {
             }
             let err = result.unwrap_err();
             if let RusotoError::Service(GetObjectError::NoSuchKey(key)) = err {
-                panic!("file {} not exist, S3 key {}", file_id, key);
+                panic!("file {} not exist, S3 key {}", &file_name, key);
             }
             if self.is_err_retryable(&err) {
-                if self.sleep_for_retry(&mut retry_cnt, file_id).await {
-                    warn!("retry read file {}, error {:?}", file_id, &err);
+                if self.sleep_for_retry(&mut retry_cnt, &file_name).await {
+                    warn!("retry read file {}, error {:?}", &file_name, &err);
                     continue;
                 }
             }
@@ -385,12 +382,16 @@ impl DFS for S3FS {
         }
     }
 
-    async fn create(&self, file_id: u64, data: Bytes, _opts: Options) -> crate::dfs::Result<()> {
+    pub async fn put_object(
+        &self,
+        key: String,
+        data: Bytes,
+        file_name: String,
+    ) -> crate::dfs::Result<()> {
         let mut retry_cnt = 0;
         let start_time = Instant::now();
         let data_len = data.len();
         loop {
-            let key = self.file_key(file_id);
             let mut req = self.new_request("PUT", &key);
             req.add_header("Content-Length", &format!("{}", data.len()));
             let data = data.clone();
@@ -400,7 +401,7 @@ impl DFS for S3FS {
             if result.is_ok() {
                 info!(
                     "create file {}, size {}, takes {:?}, retry {}",
-                    file_id,
+                    &file_name,
                     data_len,
                     start_time.saturating_elapsed(),
                     retry_cnt
@@ -413,12 +414,12 @@ impl DFS for S3FS {
                     retry_cnt += 1;
                     let retry_sleep = 2u64.pow(retry_cnt) * RETRY_SLEEP_MS;
                     tokio::time::sleep(Duration::from_millis(retry_sleep)).await;
-                    warn!("retry create file {}, error {:?}", file_id, &err);
+                    warn!("retry create file {}, error {:?}", &file_name, &err);
                     continue;
                 } else {
                     error!(
                         "create file {}, takes {:?}, reach max retry count {}",
-                        file_id,
+                        &file_name,
                         start_time.saturating_elapsed(),
                         MAX_RETRY_COUNT
                     );
@@ -426,6 +427,84 @@ impl DFS for S3FS {
             }
             return Err(err.into());
         }
+    }
+}
+
+impl ObjectStorage for S3FS {
+    fn put_objects(&self, objects: Vec<(String, Bytes)>) -> Result<(), String> {
+        let runtime = self.get_runtime();
+        let len = objects.len();
+        let (tx, rx) = tikv_util::mpsc::bounded(len);
+        for (key, data) in objects {
+            let full_key = format!("{}/{}", self.prefix, key);
+            let fs = self.clone();
+            let tx = tx.clone();
+            runtime.spawn(async move {
+                let result = fs
+                    .put_object(full_key, data, key.clone())
+                    .await
+                    .map_err(|err| format!("put {} failed {:?}", &key, err));
+                tx.send(result).unwrap();
+            });
+        }
+        let mut errs = vec![];
+        for _ in 0..len {
+            if let Err(err) = rx.recv().unwrap() {
+                errs.push(err)
+            }
+        }
+        if errs.len() > 0 {
+            return Err(format!("{:?}", errs))
+        }
+        Ok(())
+    }
+
+    fn get_objects(&self, keys: Vec<String>) -> Result<Vec<(String, Bytes)>, String> {
+        let runtime = self.get_runtime();
+        let len = keys.len();
+        let (tx, rx) = tikv_util::mpsc::bounded(len);
+        let mut objects = vec![];
+        for key in keys {
+            let full_key = format!("{}/{}", self.prefix, key);
+            let fs = self.clone();
+            let tx = tx.clone();
+            runtime.spawn(async move {
+                let result = fs
+                    .get_object(full_key, key.clone())
+                    .await
+                    .map_err(|err| format!("put {} failed {:?}", &key, err))
+                    .map(|data| (key.clone(), data));
+                tx.send(result).unwrap();
+            });
+        }
+        let mut errs = vec![];
+        for _ in 0..len {
+            match rx.recv().unwrap() {
+                Ok((key, data)) => {
+                    objects.push((key, data));
+                }
+                Err(err) => {
+                    errs.push(err);
+                }
+            }
+        }
+        if errs.len() > 0 {
+            return Err(format!("{:?}", errs))
+        }
+        Ok(objects)
+    }
+}
+
+#[async_trait]
+impl DFS for S3FS {
+    async fn read_file(&self, file_id: u64, _opts: Options) -> crate::dfs::Result<Bytes> {
+        self.get_object(self.file_key(file_id), file_id.to_string())
+            .await
+    }
+
+    async fn create(&self, file_id: u64, data: Bytes, _opts: Options) -> crate::dfs::Result<()> {
+        self.put_object(self.file_key(file_id), data, file_id.to_string())
+            .await
     }
 
     async fn remove(&self, file_id: u64, _opts: Options) {

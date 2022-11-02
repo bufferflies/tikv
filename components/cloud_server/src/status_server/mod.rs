@@ -12,6 +12,7 @@ use std::{
 };
 
 use async_stream::stream;
+use bytes::Buf;
 use collections::HashMap;
 use flate2::{write::GzEncoder, Compression};
 use futures::{
@@ -30,6 +31,8 @@ use hyper::{
     service::{make_service_fn, service_fn},
     Body, Method, Request, Response, Server, StatusCode,
 };
+use kvengine::dfs::DFSConfig;
+use kvproto::raft_serverpb::StoreIdent;
 use online_config::OnlineConfig;
 use openssl::{
     ssl::{Ssl, SslAcceptor, SslFiletype, SslMethod, SslVerifyMode},
@@ -37,6 +40,7 @@ use openssl::{
 };
 use pin_project::pin_project;
 use prometheus::TEXT_FORMAT;
+use protobuf::Message;
 use rfstore::RaftRouter;
 use security::{self, SecurityConfig};
 use serde_json::Value;
@@ -48,6 +52,7 @@ use tikv::{
     },
 };
 use tikv_util::{
+    future::paired_future_callback,
     logger::set_log_level,
     metrics::{dump, dump_to},
     timer::GLOBAL_TIMER_HANDLE,
@@ -452,6 +457,66 @@ impl StatusServer {
         })
     }
 
+    async fn backup_rfengine(
+        req: Request<Body>,
+        engine: rfengine::RfEngine,
+        dfs_conf: DFSConfig,
+    ) -> hyper::Result<Response<Body>> {
+        let mut body = Vec::new();
+        req.into_body()
+            .try_for_each(|bytes| {
+                body.extend(bytes);
+                ok(())
+            })
+            .await?;
+        let args = decode_json(&body).unwrap_or_default();
+        let cluster_id = args
+            .get("cluster_id")
+            .map(|v| u64::from_str(v).unwrap_or_default())
+            .unwrap_or_default();
+        let mut store_ident = StoreIdent::default();
+        let data = engine
+            .get_state(0, rfstore::store::STORE_IDENT_KEY)
+            .unwrap_or_default();
+        store_ident.merge_from_bytes(data.chunk()).unwrap();
+        if store_ident.cluster_id != cluster_id {
+            warn!(
+                "{}: backup id mismatch expect {:?}, got {}",
+                store_ident.store_id, store_ident.cluster_id, cluster_id
+            );
+            return Ok(make_response(
+                StatusCode::BAD_REQUEST,
+                "cluster id mismatch",
+            ));
+        }
+        let s3fs = kvengine::dfs::S3FS::new(
+            dfs_conf.prefix,
+            dfs_conf.s3_endpoint,
+            dfs_conf.s3_key_id,
+            dfs_conf.s3_secret_key,
+            dfs_conf.s3_region,
+            dfs_conf.s3_bucket,
+        );
+        let (callback, future) = paired_future_callback();
+        let task = rfengine::BackupTask::new(Box::new(s3fs), callback);
+        engine.backup(task);
+        Ok(match future.await.unwrap() {
+            Ok(meta) => {
+                info!("{}: backup finished", meta.store_id);
+                Response::builder()
+                    .body(Body::from(meta.write_to_bytes().unwrap()))
+                    .unwrap()
+            }
+            Err(err) => {
+                error!("{}: backup failed {:?}", store_ident.store_id, &err);
+                make_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Internal Server Error {}", err),
+                )
+            }
+        })
+    }
+
     pub fn stop(self) {
         let _ = self.tx.send(());
         self.thread_pool.shutdown_timeout(Duration::from_secs(3));
@@ -613,6 +678,14 @@ impl StatusServer {
                             }
                             (Method::GET, path) if path.starts_with("/rfengine") => {
                                 Self::dump_rfengine_stats(req, rfengine).await
+                            }
+                            (Method::POST, path) if path.starts_with("/rfengine/backup") => {
+                                Self::backup_rfengine(
+                                    req,
+                                    rfengine,
+                                    cfg_controller.get_current().dfs.clone(),
+                                )
+                                .await
                             }
                             (Method::POST, path) if path.starts_with("/kvengine/compactor") => {
                                 Self::add_remote_compactor(req, engine.comp_client.clone()).await

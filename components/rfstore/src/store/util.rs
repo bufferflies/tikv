@@ -252,7 +252,7 @@ impl RegionIDVer {
 pub(crate) const RAFT_STATE_KEY_BYTE: u8 = 1;
 pub(crate) const REGION_META_KEY_BYTE: u8 = 2;
 pub(crate) const REGION_META_KEY_PREFIX: &[u8] = &[REGION_META_KEY_BYTE];
-pub(crate) const STORE_IDENT_KEY: &[u8] = &[3];
+pub const STORE_IDENT_KEY: &[u8] = &[3];
 pub(crate) const PREPARE_BOOTSTRAP_KEY: &[u8] = &[4];
 pub(crate) const KV_ENGINE_META_KEY: &[u8] = &[5];
 pub(crate) const RAFT_TRUNCATED_STATE_KEY: &[u8] = &[6];

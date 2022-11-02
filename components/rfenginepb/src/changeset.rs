@@ -1049,6 +1049,883 @@ impl ::protobuf::reflect::ProtobufValue for RaftLogFile {
     }
 }
 
+#[derive(PartialEq,Clone,Default)]
+pub struct StoreBackupMeta {
+    // message fields
+    pub store_id: u64,
+    pub manifest: ::protobuf::SingularPtrField<ChangeSet>,
+    pub wal_chunks: ::protobuf::RepeatedField<WalChunk>,
+    // special fields
+    pub unknown_fields: ::protobuf::UnknownFields,
+    pub cached_size: ::protobuf::CachedSize,
+}
+
+impl<'a> ::std::default::Default for &'a StoreBackupMeta {
+    fn default() -> &'a StoreBackupMeta {
+        <StoreBackupMeta as ::protobuf::Message>::default_instance()
+    }
+}
+
+impl StoreBackupMeta {
+    pub fn new() -> StoreBackupMeta {
+        ::std::default::Default::default()
+    }
+
+    // uint64 store_id = 1;
+
+
+    pub fn get_store_id(&self) -> u64 {
+        self.store_id
+    }
+    pub fn clear_store_id(&mut self) {
+        self.store_id = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_store_id(&mut self, v: u64) {
+        self.store_id = v;
+    }
+
+    // .rfpb.ChangeSet manifest = 2;
+
+
+    pub fn get_manifest(&self) -> &ChangeSet {
+        self.manifest.as_ref().unwrap_or_else(|| ChangeSet::default_instance())
+    }
+    pub fn clear_manifest(&mut self) {
+        self.manifest.clear();
+    }
+
+    pub fn has_manifest(&self) -> bool {
+        self.manifest.is_some()
+    }
+
+    // Param is passed by value, moved
+    pub fn set_manifest(&mut self, v: ChangeSet) {
+        self.manifest = ::protobuf::SingularPtrField::some(v);
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_manifest(&mut self) -> &mut ChangeSet {
+        if self.manifest.is_none() {
+            self.manifest.set_default();
+        }
+        self.manifest.as_mut().unwrap()
+    }
+
+    // Take field
+    pub fn take_manifest(&mut self) -> ChangeSet {
+        self.manifest.take().unwrap_or_else(|| ChangeSet::new())
+    }
+
+    // repeated .rfpb.WalChunk wal_chunks = 3;
+
+
+    pub fn get_wal_chunks(&self) -> &[WalChunk] {
+        &self.wal_chunks
+    }
+    pub fn clear_wal_chunks(&mut self) {
+        self.wal_chunks.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_wal_chunks(&mut self, v: ::protobuf::RepeatedField<WalChunk>) {
+        self.wal_chunks = v;
+    }
+
+    // Mutable pointer to the field.
+    pub fn mut_wal_chunks(&mut self) -> &mut ::protobuf::RepeatedField<WalChunk> {
+        &mut self.wal_chunks
+    }
+
+    // Take field
+    pub fn take_wal_chunks(&mut self) -> ::protobuf::RepeatedField<WalChunk> {
+        ::std::mem::replace(&mut self.wal_chunks, ::protobuf::RepeatedField::new())
+    }
+}
+
+impl ::protobuf::Message for StoreBackupMeta {
+    fn is_initialized(&self) -> bool {
+        for v in &self.manifest {
+            if !v.is_initialized() {
+                return false;
+            }
+        };
+        for v in &self.wal_chunks {
+            if !v.is_initialized() {
+                return false;
+            }
+        };
+        true
+    }
+
+    fn merge_from(&mut self, is: &mut ::protobuf::CodedInputStream) -> ::protobuf::ProtobufResult<()> {
+        while !is.eof()? {
+            let (field_number, wire_type) = is.read_tag_unpack()?;
+            match field_number {
+                1 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.store_id = tmp;
+                },
+                2 => {
+                    ::protobuf::rt::read_singular_message_into(wire_type, is, &mut self.manifest)?;
+                },
+                3 => {
+                    ::protobuf::rt::read_repeated_message_into(wire_type, is, &mut self.wal_chunks)?;
+                },
+                _ => {
+                    ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
+                },
+            };
+        }
+        ::std::result::Result::Ok(())
+    }
+
+    // Compute sizes of nested messages
+    #[allow(unused_variables)]
+    fn compute_size(&self) -> u32 {
+        let mut my_size = 0;
+        if self.store_id != 0 {
+            my_size += ::protobuf::rt::value_size(1, self.store_id, ::protobuf::wire_format::WireTypeVarint);
+        }
+        if let Some(ref v) = self.manifest.as_ref() {
+            let len = v.compute_size();
+            my_size += 1 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
+        }
+        for value in &self.wal_chunks {
+            let len = value.compute_size();
+            my_size += 1 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
+        };
+        my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
+        self.cached_size.set(my_size);
+        my_size
+    }
+
+    fn write_to_with_cached_sizes(&self, os: &mut ::protobuf::CodedOutputStream) -> ::protobuf::ProtobufResult<()> {
+        if self.store_id != 0 {
+            os.write_uint64(1, self.store_id)?;
+        }
+        if let Some(ref v) = self.manifest.as_ref() {
+            os.write_tag(2, ::protobuf::wire_format::WireTypeLengthDelimited)?;
+            os.write_raw_varint32(v.get_cached_size())?;
+            v.write_to_with_cached_sizes(os)?;
+        }
+        for v in &self.wal_chunks {
+            os.write_tag(3, ::protobuf::wire_format::WireTypeLengthDelimited)?;
+            os.write_raw_varint32(v.get_cached_size())?;
+            v.write_to_with_cached_sizes(os)?;
+        };
+        os.write_unknown_fields(self.get_unknown_fields())?;
+        ::std::result::Result::Ok(())
+    }
+
+    fn get_cached_size(&self) -> u32 {
+        self.cached_size.get()
+    }
+
+    fn get_unknown_fields(&self) -> &::protobuf::UnknownFields {
+        &self.unknown_fields
+    }
+
+    fn mut_unknown_fields(&mut self) -> &mut ::protobuf::UnknownFields {
+        &mut self.unknown_fields
+    }
+
+    fn as_any(&self) -> &dyn (::std::any::Any) {
+        self as &dyn (::std::any::Any)
+    }
+    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
+        self as &mut dyn (::std::any::Any)
+    }
+    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+        self
+    }
+
+    fn descriptor(&self) -> &'static ::protobuf::reflect::MessageDescriptor {
+        Self::descriptor_static()
+    }
+
+    fn new() -> StoreBackupMeta {
+        StoreBackupMeta::new()
+    }
+
+    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
+        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy {
+            lock: ::protobuf::lazy::ONCE_INIT,
+            ptr: 0 as *const ::protobuf::reflect::MessageDescriptor,
+        };
+        unsafe {
+            descriptor.get(|| {
+                let mut fields = ::std::vec::Vec::new();
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                    "store_id",
+                    |m: &StoreBackupMeta| { &m.store_id },
+                    |m: &mut StoreBackupMeta| { &mut m.store_id },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_singular_ptr_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<ChangeSet>>(
+                    "manifest",
+                    |m: &StoreBackupMeta| { &m.manifest },
+                    |m: &mut StoreBackupMeta| { &mut m.manifest },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_repeated_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<WalChunk>>(
+                    "wal_chunks",
+                    |m: &StoreBackupMeta| { &m.wal_chunks },
+                    |m: &mut StoreBackupMeta| { &mut m.wal_chunks },
+                ));
+                ::protobuf::reflect::MessageDescriptor::new::<StoreBackupMeta>(
+                    "StoreBackupMeta",
+                    fields,
+                    file_descriptor_proto()
+                )
+            })
+        }
+    }
+
+    fn default_instance() -> &'static StoreBackupMeta {
+        static mut instance: ::protobuf::lazy::Lazy<StoreBackupMeta> = ::protobuf::lazy::Lazy {
+            lock: ::protobuf::lazy::ONCE_INIT,
+            ptr: 0 as *const StoreBackupMeta,
+        };
+        unsafe {
+            instance.get(StoreBackupMeta::new)
+        }
+    }
+}
+
+impl ::protobuf::Clear for StoreBackupMeta {
+    fn clear(&mut self) {
+        self.store_id = 0;
+        self.manifest.clear();
+        self.wal_chunks.clear();
+        self.unknown_fields.clear();
+    }
+}
+
+impl ::protobuf::PbPrint for StoreBackupMeta {
+    #[allow(unused_variables)]
+    fn fmt(&self, name: &str, buf: &mut String) {
+        ::protobuf::push_message_start(name, buf);
+        let old_len = buf.len();
+        ::protobuf::PbPrint::fmt(&self.store_id, "store_id", buf);
+        ::protobuf::PbPrint::fmt(&self.manifest, "manifest", buf);
+        ::protobuf::PbPrint::fmt(&self.wal_chunks, "wal_chunks", buf);
+        if old_len < buf.len() {
+          buf.push(' ');
+        }
+        buf.push('}');
+    }
+}
+impl ::std::fmt::Debug for StoreBackupMeta {
+    #[allow(unused_variables)]
+    fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
+        let mut s = String::new();
+        ::protobuf::PbPrint::fmt(&self.store_id, "store_id", &mut s);
+        ::protobuf::PbPrint::fmt(&self.manifest, "manifest", &mut s);
+        ::protobuf::PbPrint::fmt(&self.wal_chunks, "wal_chunks", &mut s);
+        write!(f, "{}", s)
+    }
+}
+
+impl ::protobuf::reflect::ProtobufValue for StoreBackupMeta {
+    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef {
+        ::protobuf::reflect::ProtobufValueRef::Message(self)
+    }
+}
+
+#[derive(PartialEq,Clone,Default)]
+pub struct WalChunk {
+    // message fields
+    pub epoch: u32,
+    pub start_off: u64,
+    pub end_off: u64,
+    // special fields
+    pub unknown_fields: ::protobuf::UnknownFields,
+    pub cached_size: ::protobuf::CachedSize,
+}
+
+impl<'a> ::std::default::Default for &'a WalChunk {
+    fn default() -> &'a WalChunk {
+        <WalChunk as ::protobuf::Message>::default_instance()
+    }
+}
+
+impl WalChunk {
+    pub fn new() -> WalChunk {
+        ::std::default::Default::default()
+    }
+
+    // uint32 epoch = 1;
+
+
+    pub fn get_epoch(&self) -> u32 {
+        self.epoch
+    }
+    pub fn clear_epoch(&mut self) {
+        self.epoch = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_epoch(&mut self, v: u32) {
+        self.epoch = v;
+    }
+
+    // uint64 start_off = 2;
+
+
+    pub fn get_start_off(&self) -> u64 {
+        self.start_off
+    }
+    pub fn clear_start_off(&mut self) {
+        self.start_off = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_start_off(&mut self, v: u64) {
+        self.start_off = v;
+    }
+
+    // uint64 end_off = 3;
+
+
+    pub fn get_end_off(&self) -> u64 {
+        self.end_off
+    }
+    pub fn clear_end_off(&mut self) {
+        self.end_off = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_end_off(&mut self, v: u64) {
+        self.end_off = v;
+    }
+}
+
+impl ::protobuf::Message for WalChunk {
+    fn is_initialized(&self) -> bool {
+        true
+    }
+
+    fn merge_from(&mut self, is: &mut ::protobuf::CodedInputStream) -> ::protobuf::ProtobufResult<()> {
+        while !is.eof()? {
+            let (field_number, wire_type) = is.read_tag_unpack()?;
+            match field_number {
+                1 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint32()?;
+                    self.epoch = tmp;
+                },
+                2 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.start_off = tmp;
+                },
+                3 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.end_off = tmp;
+                },
+                _ => {
+                    ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
+                },
+            };
+        }
+        ::std::result::Result::Ok(())
+    }
+
+    // Compute sizes of nested messages
+    #[allow(unused_variables)]
+    fn compute_size(&self) -> u32 {
+        let mut my_size = 0;
+        if self.epoch != 0 {
+            my_size += ::protobuf::rt::value_size(1, self.epoch, ::protobuf::wire_format::WireTypeVarint);
+        }
+        if self.start_off != 0 {
+            my_size += ::protobuf::rt::value_size(2, self.start_off, ::protobuf::wire_format::WireTypeVarint);
+        }
+        if self.end_off != 0 {
+            my_size += ::protobuf::rt::value_size(3, self.end_off, ::protobuf::wire_format::WireTypeVarint);
+        }
+        my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
+        self.cached_size.set(my_size);
+        my_size
+    }
+
+    fn write_to_with_cached_sizes(&self, os: &mut ::protobuf::CodedOutputStream) -> ::protobuf::ProtobufResult<()> {
+        if self.epoch != 0 {
+            os.write_uint32(1, self.epoch)?;
+        }
+        if self.start_off != 0 {
+            os.write_uint64(2, self.start_off)?;
+        }
+        if self.end_off != 0 {
+            os.write_uint64(3, self.end_off)?;
+        }
+        os.write_unknown_fields(self.get_unknown_fields())?;
+        ::std::result::Result::Ok(())
+    }
+
+    fn get_cached_size(&self) -> u32 {
+        self.cached_size.get()
+    }
+
+    fn get_unknown_fields(&self) -> &::protobuf::UnknownFields {
+        &self.unknown_fields
+    }
+
+    fn mut_unknown_fields(&mut self) -> &mut ::protobuf::UnknownFields {
+        &mut self.unknown_fields
+    }
+
+    fn as_any(&self) -> &dyn (::std::any::Any) {
+        self as &dyn (::std::any::Any)
+    }
+    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
+        self as &mut dyn (::std::any::Any)
+    }
+    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+        self
+    }
+
+    fn descriptor(&self) -> &'static ::protobuf::reflect::MessageDescriptor {
+        Self::descriptor_static()
+    }
+
+    fn new() -> WalChunk {
+        WalChunk::new()
+    }
+
+    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
+        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy {
+            lock: ::protobuf::lazy::ONCE_INIT,
+            ptr: 0 as *const ::protobuf::reflect::MessageDescriptor,
+        };
+        unsafe {
+            descriptor.get(|| {
+                let mut fields = ::std::vec::Vec::new();
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint32>(
+                    "epoch",
+                    |m: &WalChunk| { &m.epoch },
+                    |m: &mut WalChunk| { &mut m.epoch },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                    "start_off",
+                    |m: &WalChunk| { &m.start_off },
+                    |m: &mut WalChunk| { &mut m.start_off },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                    "end_off",
+                    |m: &WalChunk| { &m.end_off },
+                    |m: &mut WalChunk| { &mut m.end_off },
+                ));
+                ::protobuf::reflect::MessageDescriptor::new::<WalChunk>(
+                    "WalChunk",
+                    fields,
+                    file_descriptor_proto()
+                )
+            })
+        }
+    }
+
+    fn default_instance() -> &'static WalChunk {
+        static mut instance: ::protobuf::lazy::Lazy<WalChunk> = ::protobuf::lazy::Lazy {
+            lock: ::protobuf::lazy::ONCE_INIT,
+            ptr: 0 as *const WalChunk,
+        };
+        unsafe {
+            instance.get(WalChunk::new)
+        }
+    }
+}
+
+impl ::protobuf::Clear for WalChunk {
+    fn clear(&mut self) {
+        self.epoch = 0;
+        self.start_off = 0;
+        self.end_off = 0;
+        self.unknown_fields.clear();
+    }
+}
+
+impl ::protobuf::PbPrint for WalChunk {
+    #[allow(unused_variables)]
+    fn fmt(&self, name: &str, buf: &mut String) {
+        ::protobuf::push_message_start(name, buf);
+        let old_len = buf.len();
+        ::protobuf::PbPrint::fmt(&self.epoch, "epoch", buf);
+        ::protobuf::PbPrint::fmt(&self.start_off, "start_off", buf);
+        ::protobuf::PbPrint::fmt(&self.end_off, "end_off", buf);
+        if old_len < buf.len() {
+          buf.push(' ');
+        }
+        buf.push('}');
+    }
+}
+impl ::std::fmt::Debug for WalChunk {
+    #[allow(unused_variables)]
+    fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
+        let mut s = String::new();
+        ::protobuf::PbPrint::fmt(&self.epoch, "epoch", &mut s);
+        ::protobuf::PbPrint::fmt(&self.start_off, "start_off", &mut s);
+        ::protobuf::PbPrint::fmt(&self.end_off, "end_off", &mut s);
+        write!(f, "{}", s)
+    }
+}
+
+impl ::protobuf::reflect::ProtobufValue for WalChunk {
+    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef {
+        ::protobuf::reflect::ProtobufValueRef::Message(self)
+    }
+}
+
+#[derive(PartialEq,Clone,Default)]
+pub struct ClusterBackupMeta {
+    // message fields
+    pub stores: ::protobuf::RepeatedField<StoreBackupMeta>,
+    pub cluster_id: u64,
+    pub backup_ts: u64,
+    pub alloc_id: u64,
+    pub safe_ts: u64,
+    // special fields
+    pub unknown_fields: ::protobuf::UnknownFields,
+    pub cached_size: ::protobuf::CachedSize,
+}
+
+impl<'a> ::std::default::Default for &'a ClusterBackupMeta {
+    fn default() -> &'a ClusterBackupMeta {
+        <ClusterBackupMeta as ::protobuf::Message>::default_instance()
+    }
+}
+
+impl ClusterBackupMeta {
+    pub fn new() -> ClusterBackupMeta {
+        ::std::default::Default::default()
+    }
+
+    // repeated .rfpb.StoreBackupMeta stores = 1;
+
+
+    pub fn get_stores(&self) -> &[StoreBackupMeta] {
+        &self.stores
+    }
+    pub fn clear_stores(&mut self) {
+        self.stores.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_stores(&mut self, v: ::protobuf::RepeatedField<StoreBackupMeta>) {
+        self.stores = v;
+    }
+
+    // Mutable pointer to the field.
+    pub fn mut_stores(&mut self) -> &mut ::protobuf::RepeatedField<StoreBackupMeta> {
+        &mut self.stores
+    }
+
+    // Take field
+    pub fn take_stores(&mut self) -> ::protobuf::RepeatedField<StoreBackupMeta> {
+        ::std::mem::replace(&mut self.stores, ::protobuf::RepeatedField::new())
+    }
+
+    // uint64 cluster_id = 2;
+
+
+    pub fn get_cluster_id(&self) -> u64 {
+        self.cluster_id
+    }
+    pub fn clear_cluster_id(&mut self) {
+        self.cluster_id = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_cluster_id(&mut self, v: u64) {
+        self.cluster_id = v;
+    }
+
+    // uint64 backup_ts = 3;
+
+
+    pub fn get_backup_ts(&self) -> u64 {
+        self.backup_ts
+    }
+    pub fn clear_backup_ts(&mut self) {
+        self.backup_ts = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_backup_ts(&mut self, v: u64) {
+        self.backup_ts = v;
+    }
+
+    // uint64 alloc_id = 4;
+
+
+    pub fn get_alloc_id(&self) -> u64 {
+        self.alloc_id
+    }
+    pub fn clear_alloc_id(&mut self) {
+        self.alloc_id = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_alloc_id(&mut self, v: u64) {
+        self.alloc_id = v;
+    }
+
+    // uint64 safe_ts = 5;
+
+
+    pub fn get_safe_ts(&self) -> u64 {
+        self.safe_ts
+    }
+    pub fn clear_safe_ts(&mut self) {
+        self.safe_ts = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_safe_ts(&mut self, v: u64) {
+        self.safe_ts = v;
+    }
+}
+
+impl ::protobuf::Message for ClusterBackupMeta {
+    fn is_initialized(&self) -> bool {
+        for v in &self.stores {
+            if !v.is_initialized() {
+                return false;
+            }
+        };
+        true
+    }
+
+    fn merge_from(&mut self, is: &mut ::protobuf::CodedInputStream) -> ::protobuf::ProtobufResult<()> {
+        while !is.eof()? {
+            let (field_number, wire_type) = is.read_tag_unpack()?;
+            match field_number {
+                1 => {
+                    ::protobuf::rt::read_repeated_message_into(wire_type, is, &mut self.stores)?;
+                },
+                2 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.cluster_id = tmp;
+                },
+                3 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.backup_ts = tmp;
+                },
+                4 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.alloc_id = tmp;
+                },
+                5 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.safe_ts = tmp;
+                },
+                _ => {
+                    ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
+                },
+            };
+        }
+        ::std::result::Result::Ok(())
+    }
+
+    // Compute sizes of nested messages
+    #[allow(unused_variables)]
+    fn compute_size(&self) -> u32 {
+        let mut my_size = 0;
+        for value in &self.stores {
+            let len = value.compute_size();
+            my_size += 1 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
+        };
+        if self.cluster_id != 0 {
+            my_size += ::protobuf::rt::value_size(2, self.cluster_id, ::protobuf::wire_format::WireTypeVarint);
+        }
+        if self.backup_ts != 0 {
+            my_size += ::protobuf::rt::value_size(3, self.backup_ts, ::protobuf::wire_format::WireTypeVarint);
+        }
+        if self.alloc_id != 0 {
+            my_size += ::protobuf::rt::value_size(4, self.alloc_id, ::protobuf::wire_format::WireTypeVarint);
+        }
+        if self.safe_ts != 0 {
+            my_size += ::protobuf::rt::value_size(5, self.safe_ts, ::protobuf::wire_format::WireTypeVarint);
+        }
+        my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
+        self.cached_size.set(my_size);
+        my_size
+    }
+
+    fn write_to_with_cached_sizes(&self, os: &mut ::protobuf::CodedOutputStream) -> ::protobuf::ProtobufResult<()> {
+        for v in &self.stores {
+            os.write_tag(1, ::protobuf::wire_format::WireTypeLengthDelimited)?;
+            os.write_raw_varint32(v.get_cached_size())?;
+            v.write_to_with_cached_sizes(os)?;
+        };
+        if self.cluster_id != 0 {
+            os.write_uint64(2, self.cluster_id)?;
+        }
+        if self.backup_ts != 0 {
+            os.write_uint64(3, self.backup_ts)?;
+        }
+        if self.alloc_id != 0 {
+            os.write_uint64(4, self.alloc_id)?;
+        }
+        if self.safe_ts != 0 {
+            os.write_uint64(5, self.safe_ts)?;
+        }
+        os.write_unknown_fields(self.get_unknown_fields())?;
+        ::std::result::Result::Ok(())
+    }
+
+    fn get_cached_size(&self) -> u32 {
+        self.cached_size.get()
+    }
+
+    fn get_unknown_fields(&self) -> &::protobuf::UnknownFields {
+        &self.unknown_fields
+    }
+
+    fn mut_unknown_fields(&mut self) -> &mut ::protobuf::UnknownFields {
+        &mut self.unknown_fields
+    }
+
+    fn as_any(&self) -> &dyn (::std::any::Any) {
+        self as &dyn (::std::any::Any)
+    }
+    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
+        self as &mut dyn (::std::any::Any)
+    }
+    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+        self
+    }
+
+    fn descriptor(&self) -> &'static ::protobuf::reflect::MessageDescriptor {
+        Self::descriptor_static()
+    }
+
+    fn new() -> ClusterBackupMeta {
+        ClusterBackupMeta::new()
+    }
+
+    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
+        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy {
+            lock: ::protobuf::lazy::ONCE_INIT,
+            ptr: 0 as *const ::protobuf::reflect::MessageDescriptor,
+        };
+        unsafe {
+            descriptor.get(|| {
+                let mut fields = ::std::vec::Vec::new();
+                fields.push(::protobuf::reflect::accessor::make_repeated_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<StoreBackupMeta>>(
+                    "stores",
+                    |m: &ClusterBackupMeta| { &m.stores },
+                    |m: &mut ClusterBackupMeta| { &mut m.stores },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                    "cluster_id",
+                    |m: &ClusterBackupMeta| { &m.cluster_id },
+                    |m: &mut ClusterBackupMeta| { &mut m.cluster_id },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                    "backup_ts",
+                    |m: &ClusterBackupMeta| { &m.backup_ts },
+                    |m: &mut ClusterBackupMeta| { &mut m.backup_ts },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                    "alloc_id",
+                    |m: &ClusterBackupMeta| { &m.alloc_id },
+                    |m: &mut ClusterBackupMeta| { &mut m.alloc_id },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                    "safe_ts",
+                    |m: &ClusterBackupMeta| { &m.safe_ts },
+                    |m: &mut ClusterBackupMeta| { &mut m.safe_ts },
+                ));
+                ::protobuf::reflect::MessageDescriptor::new::<ClusterBackupMeta>(
+                    "ClusterBackupMeta",
+                    fields,
+                    file_descriptor_proto()
+                )
+            })
+        }
+    }
+
+    fn default_instance() -> &'static ClusterBackupMeta {
+        static mut instance: ::protobuf::lazy::Lazy<ClusterBackupMeta> = ::protobuf::lazy::Lazy {
+            lock: ::protobuf::lazy::ONCE_INIT,
+            ptr: 0 as *const ClusterBackupMeta,
+        };
+        unsafe {
+            instance.get(ClusterBackupMeta::new)
+        }
+    }
+}
+
+impl ::protobuf::Clear for ClusterBackupMeta {
+    fn clear(&mut self) {
+        self.stores.clear();
+        self.cluster_id = 0;
+        self.backup_ts = 0;
+        self.alloc_id = 0;
+        self.safe_ts = 0;
+        self.unknown_fields.clear();
+    }
+}
+
+impl ::protobuf::PbPrint for ClusterBackupMeta {
+    #[allow(unused_variables)]
+    fn fmt(&self, name: &str, buf: &mut String) {
+        ::protobuf::push_message_start(name, buf);
+        let old_len = buf.len();
+        ::protobuf::PbPrint::fmt(&self.stores, "stores", buf);
+        ::protobuf::PbPrint::fmt(&self.cluster_id, "cluster_id", buf);
+        ::protobuf::PbPrint::fmt(&self.backup_ts, "backup_ts", buf);
+        ::protobuf::PbPrint::fmt(&self.alloc_id, "alloc_id", buf);
+        ::protobuf::PbPrint::fmt(&self.safe_ts, "safe_ts", buf);
+        if old_len < buf.len() {
+          buf.push(' ');
+        }
+        buf.push('}');
+    }
+}
+impl ::std::fmt::Debug for ClusterBackupMeta {
+    #[allow(unused_variables)]
+    fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
+        let mut s = String::new();
+        ::protobuf::PbPrint::fmt(&self.stores, "stores", &mut s);
+        ::protobuf::PbPrint::fmt(&self.cluster_id, "cluster_id", &mut s);
+        ::protobuf::PbPrint::fmt(&self.backup_ts, "backup_ts", &mut s);
+        ::protobuf::PbPrint::fmt(&self.alloc_id, "alloc_id", &mut s);
+        ::protobuf::PbPrint::fmt(&self.safe_ts, "safe_ts", &mut s);
+        write!(f, "{}", s)
+    }
+}
+
+impl ::protobuf::reflect::ProtobufValue for ClusterBackupMeta {
+    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef {
+        ::protobuf::reflect::ProtobufValueRef::Message(self)
+    }
+}
+
 static file_descriptor_proto_data: &'static [u8] = b"\
     \n\x0fchangeset.proto\x12\x04rfpb\"B\n\tChangeSet\x12\x12\n\x08epoch_id\
     \x18\x01\x20\x01(\rB\0\x12\x1f\n\x05peers\x18\x02\x20\x03(\x0b2\x0e.rfpb\
@@ -1059,7 +1936,16 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     fpb.RaftLogFileB\0:\0\"-\n\tPeerState\x12\r\n\x03key\x18\x01\x20\x01(\
     \x0cB\0\x12\x0f\n\x05value\x18\x02\x20\x01(\x0cB\0:\0\"<\n\x0bRaftLogFil\
     e\x12\x15\n\x0bfirst_index\x18\x01\x20\x01(\x04B\0\x12\x14\n\nlast_index\
-    \x18\x02\x20\x01(\x04B\0:\0B\0b\x06proto3\
+    \x18\x02\x20\x01(\x04B\0:\0\"r\n\x0fStoreBackupMeta\x12\x12\n\x08store_i\
+    d\x18\x01\x20\x01(\x04B\0\x12#\n\x08manifest\x18\x02\x20\x01(\x0b2\x0f.r\
+    fpb.ChangeSetB\0\x12$\n\nwal_chunks\x18\x03\x20\x03(\x0b2\x0e.rfpb.WalCh\
+    unkB\0:\0\"E\n\x08WalChunk\x12\x0f\n\x05epoch\x18\x01\x20\x01(\rB\0\x12\
+    \x13\n\tstart_off\x18\x02\x20\x01(\x04B\0\x12\x11\n\x07end_off\x18\x03\
+    \x20\x01(\x04B\0:\0\"\x90\x01\n\x11ClusterBackupMeta\x12'\n\x06stores\
+    \x18\x01\x20\x03(\x0b2\x15.rfpb.StoreBackupMetaB\0\x12\x14\n\ncluster_id\
+    \x18\x02\x20\x01(\x04B\0\x12\x13\n\tbackup_ts\x18\x03\x20\x01(\x04B\0\
+    \x12\x12\n\x08alloc_id\x18\x04\x20\x01(\x04B\0\x12\x11\n\x07safe_ts\x18\
+    \x05\x20\x01(\x04B\0:\0B\0b\x06proto3\
 ";
 
 static mut file_descriptor_proto_lazy: ::protobuf::lazy::Lazy<::protobuf::descriptor::FileDescriptorProto> = ::protobuf::lazy::Lazy {

@@ -86,7 +86,7 @@ impl From<&rfenginepb::RaftLogFile> for PeerFile {
 
 impl Manifest {
     pub(crate) fn open(dir: &Path, engine_id: Arc<AtomicU64>) -> crate::Result<Self> {
-        let file_path = dir.join("MANIFEST");
+        let file_path = manifest_path(dir);
         let file = OpenOptions::new()
             .create(true)
             .write(true)
@@ -147,7 +147,7 @@ impl Manifest {
     }
 
     fn persist_change_set(&mut self, cs: rfenginepb::ChangeSet) -> io::Result<()> {
-        self.offset = persist_change_set(&self.file, self.offset, cs)?;
+        self.offset = persist_change_set(&self.file, self.offset, &cs)?;
         return Ok(());
     }
 
@@ -187,7 +187,7 @@ impl Manifest {
         let tmp_path = self.file_path.with_extension("tmp");
         let tmp_file = File::create(&tmp_path)?;
         let change_set = self.to_change_set();
-        self.offset = persist_change_set(&tmp_file, 0, change_set)?;
+        self.offset = persist_change_set(&tmp_file, 0, &change_set)?;
         fs::rename(&tmp_path, &self.file_path)?;
         file_system::sync_dir(dir)?;
         self.file = OpenOptions::new()
@@ -197,7 +197,7 @@ impl Manifest {
         Ok(())
     }
 
-    fn to_change_set(&self) -> rfenginepb::ChangeSet {
+    pub(crate) fn to_change_set(&self) -> rfenginepb::ChangeSet {
         let mut cs = rfenginepb::ChangeSet::default();
         cs.epoch_id = self.epoch_id;
         for (&peer_id, peer_meta) in &self.peers {
@@ -252,7 +252,15 @@ impl Manifest {
     }
 }
 
-fn persist_change_set(file: &File, mut offset: u64, cs: rfenginepb::ChangeSet) -> io::Result<u64> {
+pub(crate) fn manifest_path(dir: &Path) -> PathBuf {
+    dir.join("MANIFEST")
+}
+
+pub(crate) fn persist_change_set(
+    file: &File,
+    mut offset: u64,
+    cs: &rfenginepb::ChangeSet,
+) -> io::Result<u64> {
     let buf = cs.write_to_bytes().unwrap();
     let mut header_buf = Vec::with_capacity(8);
     header_buf.put_u32_le(crc32c::crc32c(&buf));

@@ -1,20 +1,28 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
+    cmp::min,
+    fs,
+    fs::File,
+    io::Read,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU32, Ordering},
-        mpsc::Receiver,
         Arc,
     },
+    thread,
 };
 
-use bytes::{Buf, BufMut};
+use bytes::{Buf, BufMut, Bytes};
+use engine_traits::ObjectStorage;
 use file_system::{DirectWriter, IORateLimitMode, IOType};
+use rfenginepb::{StoreBackupMeta, WalChunk};
 use slog_global::*;
-use tikv_util::time::Instant;
+use tikv_util::{mpsc::Receiver, time::Instant};
 
 use crate::{log_batch::RaftLogBlock, manifest::Manifest, write_batch::PeerBatch, *};
+
+const MAX_WAL_CHUNK_SIZE: u64 = 8 * 1024 * 1024;
 
 pub(crate) struct Worker {
     dir: PathBuf,
@@ -63,6 +71,9 @@ impl Worker {
                 }
                 Task::Truncates(truncates) => drop(truncates),
                 Task::Close => return,
+                Task::Backup(backup_task) => {
+                    self.backup(backup_task);
+                }
             }
         }
     }
@@ -133,6 +144,82 @@ impl Worker {
         file.last_index = last;
         Ok(file)
     }
+
+    fn backup(&mut self, task: BackupTask) {
+        let engine_id = self.manifest.get_engine_id();
+        info!("{}: start backup task", engine_id);
+        let wal_epoch = self.manifest.epoch_id + 1;
+        let wal_file_name = wal_file_name(&self.dir, wal_epoch);
+        let mut wal_file = File::open(&wal_file_name).unwrap();
+        let mut chunks = vec![];
+        let mut total_size = 0;
+        while total_size < task.file_off {
+            let chunk_size = min(MAX_WAL_CHUNK_SIZE, task.file_off - total_size);
+            let chunk = vec![0u8; chunk_size as usize];
+            chunks.push(chunk);
+            total_size += chunk_size;
+        }
+        let mut objects = vec![];
+        let mut offset = 0;
+        let mut backup_meta = StoreBackupMeta::default();
+        backup_meta.set_store_id(self.manifest.get_engine_id());
+        for mut chunk in chunks.drain(..) {
+            if let Err(err) = wal_file.read_exact(chunk.as_mut_slice()) {
+                (task.callback)(Err(format!("read wal failed {:?}", err)));
+                return;
+            }
+            let mut wal_chunk = WalChunk::default();
+            wal_chunk.set_epoch(wal_epoch);
+            wal_chunk.set_start_off(offset as u64);
+            wal_chunk.set_end_off((offset + chunk.len()) as u64);
+            let wal_key = wal_file_key(
+                backup_meta.get_store_id(),
+                wal_chunk.get_epoch(),
+                wal_chunk.get_start_off(),
+                wal_chunk.get_end_off(),
+            );
+            backup_meta.mut_wal_chunks().push(wal_chunk);
+            offset += chunk.len();
+            objects.push((wal_key, Bytes::from(chunk)));
+        }
+        let manifest = self.manifest.to_change_set();
+        for peer in manifest.get_peers() {
+            for file in peer.get_files() {
+                let file_name =
+                    raft_log_file_name(&self.dir, peer.peer_id, file.first_index, file.last_index);
+                match fs::read(&file_name) {
+                    Ok(rlog_data) => {
+                        let rlog_key = raft_log_file_key(
+                            backup_meta.get_store_id(),
+                            peer.get_peer_id(),
+                            file.first_index,
+                            file.last_index,
+                        );
+                        objects.push((rlog_key, Bytes::from(rlog_data)));
+                    }
+                    Err(err) => {
+                        (task.callback)(Err(format!("read {:?} failed {:?}", &file_name, err)));
+                        return;
+                    }
+                }
+            }
+        }
+        backup_meta.set_manifest(manifest);
+        let total_size: usize = objects.iter().map(|(_, data)| data.len()).sum();
+        info!(
+            "backup read file count: {}, size: {}",
+            objects.len(),
+            total_size
+        );
+        // Starts a background task in case the object storage is slow and blocking WAL compaction.
+        thread::spawn(move || {
+            if let Err(err) = task.object_storage.put_objects(objects) {
+                (task.callback)(Err(err));
+                return;
+            }
+            (task.callback)(Ok(backup_meta));
+        });
+    }
 }
 
 pub(crate) fn raft_log_file_name(dir: &Path, peer_id: u64, first: u64, last: u64) -> PathBuf {
@@ -140,6 +227,20 @@ pub(crate) fn raft_log_file_name(dir: &Path, peer_id: u64, first: u64, last: u64
         "{:016x}_{:016x}_{:016x}.rlog",
         peer_id, first, last,
     ))
+}
+
+pub(crate) fn raft_log_file_key(store_id: u64, peer_id: u64, first: u64, last: u64) -> String {
+    format!(
+        "{:016x}/p{:016x}/{:016x}_{:016x}.rlog",
+        store_id, peer_id, first, last
+    )
+}
+
+pub(crate) fn wal_file_key(store_id: u64, epoch_id: u32, start_off: u64, end_off: u64) -> String {
+    format!(
+        "{:016x}/e{:08x}/{:016x}_{:016x}.wal",
+        store_id, epoch_id, start_off, end_off
+    )
 }
 
 /// Magic Number of rlog files. It's picked by running
@@ -205,4 +306,24 @@ pub(crate) enum Task {
     Rotate { epoch_id: u32 },
     Truncates(Vec<Vec<RaftLogBlock>>),
     Close,
+    Backup(BackupTask),
+}
+
+pub struct BackupTask {
+    pub object_storage: Box<dyn ObjectStorage>,
+    pub callback: Box<dyn FnOnce(std::result::Result<StoreBackupMeta, String>) + Send>,
+    pub(crate) file_off: u64,
+}
+
+impl BackupTask {
+    pub fn new(
+        object_storage: Box<dyn ObjectStorage>,
+        callback: Box<dyn FnOnce(std::result::Result<StoreBackupMeta, String>) + Send>,
+    ) -> Self {
+        Self {
+            file_off: 0,
+            object_storage,
+            callback,
+        }
+    }
 }
