@@ -228,16 +228,15 @@ impl ShardMeta {
                 return true;
             }
         }
-        if cs.has_destroy_range() {
-            if cs
+        if cs.has_destroy_range()
+            && cs
                 .get_destroy_range()
                 .get_table_deletes()
                 .iter()
                 .any(|deleted| !self.files.contains_key(&deleted.get_id()))
-            {
-                info!("{} skip duplicated destroy range {:?}", self.tag(), cs);
-                return true;
-            }
+        {
+            info!("{} skip duplicated destroy range {:?}", self.tag(), cs);
+            return true;
         }
         if cs.has_ingest_files() {
             let ingest_files = cs.get_ingest_files();

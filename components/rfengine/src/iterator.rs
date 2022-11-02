@@ -76,7 +76,7 @@ impl WALIterator {
         reader.read_exact(&mut buf)?;
         self.offset += WalHeader::len() as u64;
         match WalHeader::decode(&buf) {
-            Ok(header) => return Ok(header),
+            Ok(header) => Ok(header),
             Err(err) => {
                 // Haven't written the header.
                 if buf.iter().all(|v| *v == 0) {
@@ -90,7 +90,7 @@ impl WALIterator {
                     return Err(Error::EOF);
                 }
                 // Header corruption.
-                return Err(err);
+                Err(err)
             }
         }
     }

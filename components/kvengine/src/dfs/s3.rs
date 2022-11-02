@@ -144,7 +144,7 @@ impl S3FSCore {
             .unwrap_or(&endpoint);
         // local deployed s3 service like minio does not support virtual host addressing, it always
         // has a port defined at the end.
-        let virtual_host = !no_schema_endpoint.contains(":");
+        let virtual_host = !no_schema_endpoint.contains(':');
         let hostname = if virtual_host {
             format!("{}.{}", &bucket, no_schema_endpoint)
         } else {
@@ -232,7 +232,7 @@ impl S3FSCore {
                 if body_res.is_ok() {
                     let body = body_res.unwrap();
                     let body_str = body.to_str().unwrap();
-                    let list: ListObjects = quick_xml::de::from_str(&body_str).unwrap();
+                    let list: ListObjects = quick_xml::de::from_str(body_str).unwrap();
                     let mut files = vec![];
                     for content in list.contents {
                         files.push(self.parse_suffix(&content.key));
@@ -243,13 +243,11 @@ impl S3FSCore {
                 }
             }
             let err = result.unwrap_err();
-            if self.is_err_retryable(&err) {
-                if retry_cnt < MAX_RETRY_COUNT {
-                    retry_cnt += 1;
-                    let retry_sleep = 2u64.pow(retry_cnt) * RETRY_SLEEP_MS;
-                    tokio::time::sleep(Duration::from_millis(retry_sleep)).await;
-                    continue;
-                }
+            if self.is_err_retryable(&err) && retry_cnt < MAX_RETRY_COUNT {
+                retry_cnt += 1;
+                let retry_sleep = 2u64.pow(retry_cnt) * RETRY_SLEEP_MS;
+                tokio::time::sleep(Duration::from_millis(retry_sleep)).await;
+                continue;
             }
             error!(
                 "failed to list files start after {}, reach max retry count {}, err {:?}",
@@ -290,13 +288,11 @@ impl S3FSCore {
             if let RusotoError::Service(_) = err {
                 return true;
             }
-            if self.is_err_retryable(&err) {
-                if retry_cnt < MAX_RETRY_COUNT {
-                    retry_cnt += 1;
-                    let retry_sleep = 2u64.pow(retry_cnt) * RETRY_SLEEP_MS;
-                    tokio::time::sleep(Duration::from_millis(retry_sleep)).await;
-                    continue;
-                }
+            if self.is_err_retryable(&err) && retry_cnt < MAX_RETRY_COUNT {
+                retry_cnt += 1;
+                let retry_sleep = 2u64.pow(retry_cnt) * RETRY_SLEEP_MS;
+                tokio::time::sleep(Duration::from_millis(retry_sleep)).await;
+                continue;
             }
             error!(
                 "failed to get tagging for file {}, reach max retry count {}, err {:?}",
@@ -372,11 +368,10 @@ impl S3FSCore {
             if let RusotoError::Service(GetObjectError::NoSuchKey(key)) = err {
                 panic!("file {} not exist, S3 key {}", &file_name, key);
             }
-            if self.is_err_retryable(&err) {
-                if self.sleep_for_retry(&mut retry_cnt, &file_name).await {
-                    warn!("retry read file {}, error {:?}", &file_name, &err);
-                    continue;
-                }
+            if self.is_err_retryable(&err) && self.sleep_for_retry(&mut retry_cnt, &file_name).await
+            {
+                warn!("retry read file {}, error {:?}", &file_name, &err);
+                continue;
             }
             return Err(err.into());
         }
@@ -454,7 +449,7 @@ impl ObjectStorage for S3FS {
             }
         }
         if errs.len() > 0 {
-            return Err(format!("{:?}", errs))
+            return Err(format!("{:?}", errs));
         }
         Ok(())
     }
@@ -489,7 +484,7 @@ impl ObjectStorage for S3FS {
             }
         }
         if errs.len() > 0 {
-            return Err(format!("{:?}", errs))
+            return Err(format!("{:?}", errs));
         }
         Ok(objects)
     }

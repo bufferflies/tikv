@@ -54,9 +54,7 @@ use raftstore::{
 use resource_metering::Config as ResourceMeteringConfig;
 use security::SecurityConfig;
 use tikv_util::{
-    config::{
-        self, LogFormat, ReadableDuration, ReadableSize, TomlWriter, GIB, MIB,
-    },
+    config::{self, LogFormat, ReadableDuration, ReadableSize, TomlWriter, GIB, MIB},
     sys::SysQuota,
     time::duration_to_sec,
     yatp_pool,

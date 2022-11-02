@@ -1496,7 +1496,7 @@ impl Peer {
         cs.set_sequence(entry.index);
         ctx.apply_msgs.msgs.push(ApplyMsg::PendingSplit(cs));
         for (new_meta, new_region) in new_metas.iter().zip(regions.iter()) {
-            let new_peer_id = get_peer_id_by_store_id(&new_region, self.peer.store_id).unwrap();
+            let new_peer_id = get_peer_id_by_store_id(new_region, self.peer.store_id).unwrap();
             if new_meta.id == self.region_id {
                 write_peer_state(
                     &mut ctx.raft_wb,
@@ -1600,7 +1600,9 @@ impl Peer {
     }
 
     pub(crate) fn get_preprocessed_region(&self) -> &Region {
-        self.preprocessed_region.as_ref().unwrap_or(self.region())
+        self.preprocessed_region
+            .as_ref()
+            .unwrap_or_else(|| self.region())
     }
 
     pub(crate) fn post_apply(&mut self, ctx: &mut RaftContext, apply_result: &MsgApplyResult) {

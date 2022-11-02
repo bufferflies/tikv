@@ -1115,28 +1115,26 @@ impl<'a> PeerMsgHandler<'a> {
             assert!(!change.has_snapshot(), "{:?}", change);
             return;
         }
-        if change.has_snapshot() {
-            if self.peer.mut_store().is_applying_snapshot() {
-                self.peer.mut_store().snap_state = SnapState::Relax;
-                let apply_state = RaftApplyState::from_snapshot(change.get_snapshot());
-                let apply_result = MsgApplyResult {
-                    peer_id: self.peer.peer_id(),
-                    results: VecDeque::new(),
-                    apply_state,
-                    metrics: ApplyMetrics::default(),
-                    bucket_stat: None,
-                };
-                info!(
-                    "{} apply snapshot finished, snapshot index {}",
-                    tag, apply_state.applied_index
-                );
-                self.fsm.peer.post_apply(self.ctx, &apply_result);
-                let on_apply_snapshot_msgs =
-                    std::mem::take(&mut self.peer.mut_store().on_apply_snapshot_msgs);
-                for msg in on_apply_snapshot_msgs {
-                    if let Err(err) = self.ctx.global.trans.send(msg) {
-                        error!("failed to send on apply snapshot msg {:?}", err);
-                    }
+        if change.has_snapshot() && self.peer.mut_store().is_applying_snapshot() {
+            self.peer.mut_store().snap_state = SnapState::Relax;
+            let apply_state = RaftApplyState::from_snapshot(change.get_snapshot());
+            let apply_result = MsgApplyResult {
+                peer_id: self.peer.peer_id(),
+                results: VecDeque::new(),
+                apply_state,
+                metrics: ApplyMetrics::default(),
+                bucket_stat: None,
+            };
+            info!(
+                "{} apply snapshot finished, snapshot index {}",
+                tag, apply_state.applied_index
+            );
+            self.fsm.peer.post_apply(self.ctx, &apply_result);
+            let on_apply_snapshot_msgs =
+                std::mem::take(&mut self.peer.mut_store().on_apply_snapshot_msgs);
+            for msg in on_apply_snapshot_msgs {
+                if let Err(err) = self.ctx.global.trans.send(msg) {
+                    error!("failed to send on apply snapshot msg {:?}", err);
                 }
             }
         }

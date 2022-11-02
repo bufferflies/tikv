@@ -141,7 +141,7 @@ impl Engine {
                 let id_ver = IDVer::new(parent.id, parent.ver);
                 if !parents.contains_key(&id_ver) {
                     info!("load parent of {}", meta.tag());
-                    let parent_shard = self.load_shard(&parent)?;
+                    let parent_shard = self.load_shard(parent)?;
                     recoverer.recover(self, &parent_shard, parent)?;
                     parents.insert(IDVer::new(parent.id, parent.ver), parent_shard);
                     // Do not keep the parent in the engine as we only use the parent's mem-table
@@ -169,7 +169,9 @@ impl Engine {
             });
             std::thread::spawn(move || {
                 let shard = engine.load_shard(&meta).unwrap();
-                parent_shard.map(|parent| shard.add_parent_mem_tbls(parent));
+                if let Some(parent) = parent_shard {
+                    shard.add_parent_mem_tbls(parent)
+                }
                 recoverer.recover(&engine, &shard, &meta).unwrap();
                 token_tx.send(true).unwrap();
             });

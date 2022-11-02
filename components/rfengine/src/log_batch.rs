@@ -490,7 +490,7 @@ mod tests {
             ));
             raft_logs.append(log);
         }
-        assert!(raft_logs.blocks.len() > 0);
+        assert!(!raft_logs.blocks.is_empty());
         assert_eq!(
             raft_logs.index_to_truncate_to_size(0),
             raft_logs.last_index()

@@ -156,7 +156,7 @@ impl MvccTxn {
         _is_protected: bool,
     ) {
         // No need to do it because of the extra-cf.
-        return;
+
         /*
         assert_ne!(lock.ts, self.start_ts);
 

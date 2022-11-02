@@ -278,7 +278,7 @@ impl ApiV2 {
             let keyspace_id_string = keyspace_id_u32.to_string();
             return keyspace_id_string;
         }
-        return String::new();
+        String::new()
     }
 
     pub const ENCODED_LOGICAL_DELETE: [u8; 1] = [ValueMeta::DELETE_FLAG.bits];
@@ -470,7 +470,7 @@ mod tests {
 
     #[test]
     fn test_keyspace_id_to_string() {
-        let keyspace_id_pd_alloc = 1 as u32;
+        let keyspace_id_pd_alloc = 1_u32;
         let keyspace_id_pd_alloc_str = keyspace_id_pd_alloc.to_string();
         let keyspace_id_bytes = keyspace_id_pd_alloc.to_be_bytes();
         let user_key_prefix = &[

@@ -110,7 +110,7 @@ impl ClusterClient {
         let start_ts = self.get_ts();
 
         let mut mutations = vec![];
-        for i in rng.clone() {
+        for i in rng {
             let mut m = Mutation::default();
             m.set_op(Op::Put);
             m.set_key(gen_key(i));
@@ -331,7 +331,7 @@ impl ClusterClient {
             let region = self.regions.get_mut(&region_id).unwrap();
             if region_err.get_not_leader().has_leader() {
                 let leader = region_err.get_not_leader().get_leader();
-                if region.update_leader(&leader) {
+                if region.update_leader(leader) {
                     sleep(Duration::from_millis(100));
                     return true;
                 }

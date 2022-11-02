@@ -86,10 +86,10 @@ impl ServerCluster {
         );
         server.run();
         let store_id = server.get_store_id();
-        if !self.channels.contains_key(&store_id) {
+        if let std::collections::hash_map::Entry::Vacant(e) = self.channels.entry(store_id) {
             let addr = node_addr(node_id);
             let channel = ChannelBuilder::new(self.env.clone()).connect(&addr);
-            self.channels.insert(store_id, channel);
+            e.insert(channel);
         }
         self.servers.insert(node_id, server);
     }
@@ -374,9 +374,9 @@ impl RegionShardStats {
         if self.shard_stats.len() <= 1 {
             return Ok(());
         }
-        let store_ids: Vec<u64> = self.shard_stats.keys().map(|id| *id).collect();
+        let store_ids: Vec<u64> = self.shard_stats.keys().copied().collect();
         let first_id = &store_ids[0];
-        let first_stats = self.shard_stats.get(&first_id).unwrap();
+        let first_stats = self.shard_stats.get(first_id).unwrap();
         for store_id in &store_ids[1..] {
             let stats = self.shard_stats.get(store_id).unwrap();
             if stats.total_size != first_stats.total_size

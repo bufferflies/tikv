@@ -199,7 +199,7 @@ impl KvEngine for Engine {
         panic!()
     }
     fn flush_metrics(&self, instance: &str) {
-        metrics::flush_engine_properties(&self, instance);
+        metrics::flush_engine_properties(self, instance);
     }
 }
 

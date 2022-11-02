@@ -969,12 +969,10 @@ impl Applier {
             };
             let router = ctx.router.as_ref().unwrap();
             router.send(self.region_id(), PeerMsg::ApplyChangeSetResult(result));
-            if is_ingest_files {
-                if self.last_ingest_seq == seq {
-                    self.paused = false;
-                    for apply in std::mem::take(&mut self.paused_apply_queue) {
-                        self.handle_apply(ctx, apply);
-                    }
+            if is_ingest_files && self.last_ingest_seq == seq {
+                self.paused = false;
+                for apply in std::mem::take(&mut self.paused_apply_queue) {
+                    self.handle_apply(ctx, apply);
                 }
             }
         }

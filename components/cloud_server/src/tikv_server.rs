@@ -780,12 +780,12 @@ impl TiKVServer {
         let stats_collector_enabled = file_system::init_io_stats_collector()
             .map_err(|e| warn!("failed to init I/O stats collector: {}", e))
             .is_ok();
-        let fetcher = if stats_collector_enabled {
+
+        if stats_collector_enabled {
             BytesFetcher::FromIOStatsCollector()
         } else {
             BytesFetcher::FromRateLimiter(self.io_rate_limiter.statistics().unwrap())
-        };
-        fetcher
+        }
     }
 
     fn init_metrics_flusher(&mut self, fetcher: BytesFetcher) {

@@ -1363,12 +1363,7 @@ impl TestPdClient {
     }
 
     pub fn get_all_regions(&self) -> Vec<metapb::Region> {
-        self.cluster
-            .rl()
-            .regions
-            .values()
-            .map(|r| r.clone())
-            .collect()
+        self.cluster.rl().regions.values().cloned().collect()
     }
 }
 

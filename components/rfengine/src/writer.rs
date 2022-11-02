@@ -224,7 +224,7 @@ impl WalWriter {
         unsafe {
             buf.advance_mut(BATCH_HEADER_SIZE);
         }
-        let writer = Self {
+        Self {
             dir: dir.to_path_buf(),
             epoch_id: 0,
             wal_size: DmaBuffer::aligned_len(wal_size),
@@ -232,8 +232,7 @@ impl WalWriter {
             buf,
             file_off: 0,
             compacted_epoch,
-        };
-        writer
+        }
     }
 
     pub(crate) fn open_file(&mut self, epoch_id: u32, file_off: u64) -> Result<()> {

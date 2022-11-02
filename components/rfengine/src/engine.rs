@@ -139,11 +139,11 @@ impl RfEngineCore {
                 task_sender: tx,
                 handle: None,
             }),
-            engine_id: engine_id.clone(),
+            engine_id,
         };
         en.load(&manifest)?;
         {
-            let mut worker = Worker::new(dir.to_owned(), rx, manifest, compacted_epoch.clone());
+            let mut worker = Worker::new(dir.to_owned(), rx, manifest, compacted_epoch);
             let join_handle = thread::spawn(move || worker.run());
             en.worker_handle.lock().unwrap().handle = Some(join_handle);
         }
@@ -596,7 +596,7 @@ impl PeerMeta {
             self.truncated_idx = other.truncated_idx;
         }
         for (key, val) in &other.states {
-            if keep_empty || val.len() > 0 {
+            if keep_empty || !val.is_empty() {
                 self.states.insert(key.clone(), val.clone());
             } else {
                 self.states.remove(key);

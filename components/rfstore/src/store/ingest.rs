@@ -38,6 +38,7 @@ pub(crate) fn convert_sst(
     Ok(cs)
 }
 
+#[allow(clippy::type_complexity)]
 fn collect_default_values(
     importer: &SstImporter,
     req: &RaftCmdRequest,
@@ -89,10 +90,12 @@ struct SstIterator {
     current_value: Vec<u8>,
     start_ts: u64,
     commit_ts: u64,
+    #[allow(clippy::type_complexity)]
     default_values: Arc<HashMap<(Vec<u8>, u64), Vec<u8>>>,
 }
 
 impl SstIterator {
+    #[allow(clippy::type_complexity)]
     fn new(
         meta: SstMeta,
         reader: RocksSstReader,
@@ -231,7 +234,7 @@ impl kvengine::table::Iterator for ConcatIterator {
 
     fn value(&self) -> Value {
         let current = self.get_current();
-        if current.current_value.len() == 0 {
+        if current.current_value.is_empty() {
             panic!("current value is empty");
         }
         Value::decode(&current.current_value)

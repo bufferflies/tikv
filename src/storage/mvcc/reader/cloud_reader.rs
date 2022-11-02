@@ -73,7 +73,7 @@ impl CloudReader {
             }
             data_iter.next();
         }
-        match self.get_extra(&key, start_ts) {
+        match self.get_extra(key, start_ts) {
             Some((commit_ts, write)) => Ok(TxnCommitRecord::SingleRecord { commit_ts, write }),
             None => Ok(TxnCommitRecord::None {
                 overlapped_write: None,

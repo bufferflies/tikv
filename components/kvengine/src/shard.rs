@@ -870,7 +870,7 @@ impl std::fmt::Debug for DeletePrefixes {
                 &self
                     .prefixes
                     .iter()
-                    .map(|p| log_wrappers::Value::key(&p))
+                    .map(|p| log_wrappers::Value::key(p))
                     .collect::<Vec<_>>(),
             )
             .finish()
@@ -969,7 +969,7 @@ impl DeletePrefixes {
     pub fn cover_range(&self, start: &[u8], end: &[u8]) -> bool {
         self.prefixes
             .iter()
-            .any(|p| start.starts_with(&p) && end.starts_with(&p))
+            .any(|p| start.starts_with(p) && end.starts_with(p))
     }
 
     pub fn delete_ranges(&self) -> impl Iterator<Item = (&[u8], &[u8])> {

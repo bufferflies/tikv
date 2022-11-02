@@ -790,52 +790,57 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
         ctx.spawn(task);
     }
 
-    fn raw_get(&mut self, _: RpcContext, _: RawGetRequest, _: UnarySink<RawGetResponse>) {
+    fn raw_get(&mut self, _: RpcContext<'_>, _: RawGetRequest, _: UnarySink<RawGetResponse>) {
         unimplemented!()
     }
 
     fn raw_batch_get(
         &mut self,
-        _: RpcContext,
+        _: RpcContext<'_>,
         _: RawBatchGetRequest,
         _: UnarySink<RawBatchGetResponse>,
     ) {
         unimplemented!()
     }
 
-    fn raw_put(&mut self, _: RpcContext, _: RawPutRequest, _: UnarySink<RawPutResponse>) {
+    fn raw_put(&mut self, _: RpcContext<'_>, _: RawPutRequest, _: UnarySink<RawPutResponse>) {
         unimplemented!()
     }
 
     fn raw_batch_put(
         &mut self,
-        _: RpcContext,
+        _: RpcContext<'_>,
         _: RawBatchPutRequest,
         _: UnarySink<RawBatchPutResponse>,
     ) {
         unimplemented!()
     }
 
-    fn raw_delete(&mut self, _: RpcContext, _: RawDeleteRequest, _: UnarySink<RawDeleteResponse>) {
+    fn raw_delete(
+        &mut self,
+        _: RpcContext<'_>,
+        _: RawDeleteRequest,
+        _: UnarySink<RawDeleteResponse>,
+    ) {
         unimplemented!()
     }
 
     fn raw_batch_delete(
         &mut self,
-        _: RpcContext,
+        _: RpcContext<'_>,
         _: RawBatchDeleteRequest,
         _: UnarySink<RawBatchDeleteResponse>,
     ) {
         unimplemented!()
     }
 
-    fn raw_scan(&mut self, _: RpcContext, _: RawScanRequest, _: UnarySink<RawScanResponse>) {
+    fn raw_scan(&mut self, _: RpcContext<'_>, _: RawScanRequest, _: UnarySink<RawScanResponse>) {
         unimplemented!()
     }
 
     fn raw_delete_range(
         &mut self,
-        _: RpcContext,
+        _: RpcContext<'_>,
         _: RawDeleteRangeRequest,
         _: UnarySink<RawDeleteRangeResponse>,
     ) {
@@ -844,7 +849,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
 
     fn raw_batch_scan(
         &mut self,
-        _: RpcContext,
+        _: RpcContext<'_>,
         _: RawBatchScanRequest,
         _: UnarySink<RawBatchScanResponse>,
     ) {
@@ -853,7 +858,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
 
     fn raw_get_key_ttl(
         &mut self,
-        _: RpcContext,
+        _: RpcContext<'_>,
         _: RawGetKeyTtlRequest,
         _: UnarySink<RawGetKeyTtlResponse>,
     ) {
@@ -862,7 +867,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
 
     fn raw_compare_and_swap(
         &mut self,
-        _: RpcContext,
+        _: RpcContext<'_>,
         _: RawCasRequest,
         _: UnarySink<RawCasResponse>,
     ) {
@@ -871,7 +876,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
 
     fn raw_checksum(
         &mut self,
-        _: RpcContext,
+        _: RpcContext<'_>,
         _: RawChecksumRequest,
         _: UnarySink<RawChecksumResponse>,
     ) {
@@ -880,7 +885,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
 
     fn register_lock_observer(
         &mut self,
-        _: RpcContext,
+        _: RpcContext<'_>,
         _: RegisterLockObserverRequest,
         _: UnarySink<RegisterLockObserverResponse>,
     ) {
@@ -889,7 +894,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
 
     fn check_lock_observer(
         &mut self,
-        _: RpcContext,
+        _: RpcContext<'_>,
         _: CheckLockObserverRequest,
         _: UnarySink<CheckLockObserverResponse>,
     ) {
@@ -898,7 +903,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
 
     fn remove_lock_observer(
         &mut self,
-        _: RpcContext,
+        _: RpcContext<'_>,
         _: RemoveLockObserverRequest,
         _: UnarySink<RemoveLockObserverResponse>,
     ) {
@@ -907,7 +912,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
 
     fn physical_scan_lock(
         &mut self,
-        _: RpcContext,
+        _: RpcContext<'_>,
         _: PhysicalScanLockRequest,
         _: UnarySink<PhysicalScanLockResponse>,
     ) {
@@ -916,7 +921,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
 
     fn raw_coprocessor(
         &mut self,
-        _: RpcContext,
+        _: RpcContext<'_>,
         _: RawCoprocessorRequest,
         _: UnarySink<RawCoprocessorResponse>,
     ) {
@@ -925,7 +930,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
 
     fn snapshot(
         &mut self,
-        _: RpcContext,
+        _: RpcContext<'_>,
         _: RequestStream<SnapshotChunk>,
         _: ClientStreamingSink<Done>,
     ) {
@@ -934,7 +939,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
 
     fn dispatch_mpp_task(
         &mut self,
-        _: RpcContext,
+        _: RpcContext<'_>,
         _: DispatchTaskRequest,
         _: UnarySink<DispatchTaskResponse>,
     ) {
@@ -943,7 +948,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
 
     fn cancel_mpp_task(
         &mut self,
-        _: RpcContext,
+        _: RpcContext<'_>,
         _: CancelTaskRequest,
         _: UnarySink<CancelTaskResponse>,
     ) {
@@ -952,18 +957,18 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
 
     fn establish_mpp_connection(
         &mut self,
-        _: RpcContext,
+        _: RpcContext<'_>,
         _: EstablishMppConnectionRequest,
         _: ServerStreamingSink<MppDataPacket>,
     ) {
         unimplemented!()
     }
 
-    fn is_alive(&mut self, _: RpcContext, _: IsAliveRequest, _: UnarySink<IsAliveResponse>) {
+    fn is_alive(&mut self, _: RpcContext<'_>, _: IsAliveRequest, _: UnarySink<IsAliveResponse>) {
         unimplemented!()
     }
 
-    fn compact(&mut self, _: RpcContext, _: CompactRequest, _: UnarySink<CompactResponse>) {
+    fn compact(&mut self, _: RpcContext<'_>, _: CompactRequest, _: UnarySink<CompactResponse>) {
         unimplemented!()
     }
 }

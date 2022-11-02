@@ -363,7 +363,7 @@ impl SSTableCore {
         let mut split_key = BytesMut::new();
         split_key.extend_from_slice(self.idx.common_prefix.chunk());
         split_key.extend_from_slice(diff_key);
-        return Some(split_key.freeze());
+        Some(split_key.freeze())
     }
 
     pub fn compression_type(&self) -> u8 {

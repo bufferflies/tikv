@@ -154,7 +154,7 @@ impl<S: Snapshot, F: KvFormat> AnalyzeContext<S, F> {
                 }
                 row_count = 0;
             }
-            let mut key = &key[..];
+            let mut key = key;
             if is_common_handle {
                 table::check_record_key(key)?;
                 key = &key[table::PREFIX_LEN..];

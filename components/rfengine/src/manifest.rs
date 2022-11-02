@@ -148,7 +148,7 @@ impl Manifest {
 
     fn persist_change_set(&mut self, cs: rfenginepb::ChangeSet) -> io::Result<()> {
         self.offset = persist_change_set(&self.file, self.offset, &cs)?;
-        return Ok(());
+        Ok(())
     }
 
     fn apply_change_set(&mut self, cs: &rfenginepb::ChangeSet) -> crate::Result<()> {
@@ -270,5 +270,5 @@ pub(crate) fn persist_change_set(
     file.write_at(&buf, offset)?;
     offset += buf.len() as u64;
     file.sync_data()?;
-    return Ok(offset);
+    Ok(offset)
 }

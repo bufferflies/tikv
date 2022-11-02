@@ -61,15 +61,15 @@ pub(crate) fn execute_unsafe_recover(args: UnsafeRecoverArgs) {
         vec![(peer_id, region_id, cs.shard_ver)]
     } else if let Some(keyspace_id) = args.keyspace {
         let mut keyspace = keyspace_id.to_be_bytes();
-        keyspace[0] = 'x' as u8;
+        keyspace[0] = b'x';
         let mut prefix = keyspace.to_vec();
         if let Some(table_id) = args.table {
-            prefix.put_u8('t' as u8);
+            prefix.put_u8(b't');
             prefix.encode_i64(table_id as i64).unwrap();
         }
         collect_prefix_regions(&rf, &prefix)
     } else if let Some(table_id) = args.table {
-        let mut prefix = vec!['t' as u8];
+        let mut prefix = vec![b't'];
         prefix.encode_i64(table_id as i64).unwrap();
         collect_prefix_regions(&rf, &prefix)
     } else if args.all {
@@ -143,7 +143,7 @@ fn collect_prefix_regions(rf: &RfEngine, prefix: &[u8]) -> Vec<(u64, u64, u64)> 
 
 fn parse_stores(stores_str: &str) -> HashSet<u64> {
     stores_str
-        .split(",")
+        .split(',')
         .map(|x| u64::from_str(x).unwrap())
         .collect()
 }

@@ -125,7 +125,7 @@ impl CompactionClient {
             .remote_urls
             .clone()
             .into_iter()
-            .map(|r| r.remote_url.clone())
+            .map(|r| r.remote_url)
             .collect()
     }
 
@@ -420,7 +420,7 @@ impl Engine {
         pri: CompactionPriority,
     ) -> Option<(CompactionRequest, Option<CompactDef>)> {
         if pri.cf == -1 {
-            return self.build_compact_l0_request(&shard).map(|req| (req, None));
+            return self.build_compact_l0_request(shard).map(|req| (req, None));
         }
         let data = shard.get_data();
         let scf = data.get_cf(pri.cf as usize);
@@ -432,7 +432,7 @@ impl Engine {
             return None;
         }
         scf.set_has_overlapping(&mut cd);
-        Some((self.build_compact_ln_request(&shard, &cd), Some(cd)))
+        Some((self.build_compact_ln_request(shard, &cd), Some(cd)))
     }
 
     pub(crate) fn compact(&self, id_ver: IDVer) -> Option<Result<pb::ChangeSet>> {
@@ -537,7 +537,7 @@ impl Engine {
     }
 
     pub(crate) fn set_alloc_ids_for_request(&self, req: &mut CompactionRequest, total_size: u64) {
-        let tag = ShardTag::from_comp_req(&req);
+        let tag = ShardTag::from_comp_req(req);
         // We must ensure there are enough ids for remote compactor to use, so we need to allocate
         // more ids than needed.
         let mut old_ids_num = 0usize;
@@ -654,7 +654,7 @@ impl Engine {
             cs.mut_destroy_range().set_table_deletes(deletes.into());
             cs
         } else {
-            let mut req = self.new_compact_request(&shard, 0, 0);
+            let mut req = self.new_compact_request(shard, 0, 0);
             req.destroy_range = true;
             req.in_place_compact_files = overlaps;
             req.del_prefixes = data.del_prefixes.marshal();
@@ -1192,10 +1192,10 @@ fn local_compact(dfs: Arc<dyn dfs::DFS>, req: &CompactionRequest) -> Result<pb::
     let mut cs = pb::ChangeSet::new();
     cs.set_shard_id(req.shard_id);
     cs.set_shard_ver(req.shard_ver);
-    let tag = ShardTag::from_comp_req(&req);
+    let tag = ShardTag::from_comp_req(req);
     if req.destroy_range {
         info!("start destroying range for {}", tag);
-        let dr = compact_destroy_range(&req, dfs)?;
+        let dr = compact_destroy_range(req, dfs)?;
         cs.set_destroy_range(dr);
         info!("finish destroying range for {}", tag);
         return Ok(cs);
@@ -1207,14 +1207,14 @@ fn local_compact(dfs: Arc<dyn dfs::DFS>, req: &CompactionRequest) -> Result<pb::
     comp.set_level(req.level as u32);
     if req.level == 0 {
         info!("start compact L0 for {}", tag);
-        let tbls = compact_l0(&req, dfs.clone())?;
+        let tbls = compact_l0(req, dfs.clone())?;
         comp.set_table_creates(tbls.into());
         let bot_dels = req.multi_cf_bottoms.clone().into_iter().flatten().collect();
         comp.set_bottom_deletes(bot_dels);
         info!("finish compacting L0 for {}", tag);
     } else {
         info!("start compacting L{} CF{} for {}", req.level, req.cf, tag);
-        let tbls = compact_tables(&req, dfs.clone())?;
+        let tbls = compact_tables(req, dfs.clone())?;
         comp.set_table_creates(tbls.into());
         comp.set_bottom_deletes(req.bottoms.clone());
         info!("finish compacting L{} CF{} for {}", req.level, req.cf, tag);
@@ -1335,7 +1335,8 @@ pub(crate) enum CompactMsg {
     Finish {
         task_id: u64,
         id_ver: IDVer,
-        result: Option<Result<pb::ChangeSet>>,
+        // This variant is too large(256 bytes). Box it to reduce size.
+        result: Box<Option<Result<pb::ChangeSet>>>,
     },
 
     /// The compaction change set is applied to the engine, so the shard is ready
@@ -1386,7 +1387,7 @@ impl CompactRunner {
                     task_id,
                     id_ver,
                     result,
-                } => self.compaction_finished(id_ver, task_id, result),
+                } => self.compaction_finished(id_ver, task_id, *result),
 
                 CompactMsg::Applied(id_ver) => self.compaction_applied(id_ver),
 
@@ -1409,7 +1410,7 @@ impl CompactRunner {
         self.running.insert(id_ver, task_id);
         let engine = self.engine.clone();
         std::thread::spawn(move || {
-            let result = engine.compact(id_ver);
+            let result = Box::new(engine.compact(id_ver));
             engine
                 .compact_tx
                 .send(CompactMsg::Finish {
@@ -1515,7 +1516,7 @@ impl CompactRunner {
                     .ok()
                     .and_then(|shard| shard.get_compaction_priority())
             })
-            .map(|id_ver| *id_ver)
+            .copied()
     }
 
     fn is_full(&self) -> bool {
