@@ -1,6 +1,7 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
+    cmp::min,
     collections::{HashMap, VecDeque},
     fmt::{self, Debug, Formatter},
     sync::{atomic::AtomicU64, Arc, Mutex},
@@ -1147,6 +1148,7 @@ const STANDARD_MEMORY_SIZE_DURATION: u64 = 128 * BYTES_MB * 10;
 
 // 1MB mem-table idle for 30 minutes get flushed.
 const STANDARD_IDLE_SECONDS: u64 = 30 * 60;
+const MAX_IDLE_SECONDS: u64 = 12 * 60 * 60;
 const PROPOSE_SWITCH_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl MemTableState {
@@ -1189,7 +1191,10 @@ impl MemTableState {
     // idle duration applies to small mem-table
     // The large mem-table has less max idle time.
     fn max_idle_duration(&self) -> Duration {
-        Duration::from_secs(STANDARD_IDLE_SECONDS * BYTES_MB / self.mem_table_size)
+        min(
+            Duration::from_secs(MAX_IDLE_SECONDS),
+            Duration::from_secs(STANDARD_IDLE_SECONDS * BYTES_MB / self.mem_table_size),
+        )
     }
 
     fn get_duration_since_last_switch(&self, now: Instant) -> Duration {
