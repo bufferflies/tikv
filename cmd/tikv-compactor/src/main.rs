@@ -8,7 +8,7 @@ use std::{
     time::Instant,
 };
 
-use clap::{App, Arg};
+use clap::{App, Arg, ArgMatches};
 use grpcio::EnvBuilder;
 use http::Uri;
 use hyper::service::{make_service_fn, service_fn};
@@ -30,22 +30,87 @@ fn main() {
                 .value_name("FILE")
                 .help("Set the configuration file")
                 .takes_value(true)
-                .required(true),
+                .required(false),
+        )
+        .arg(
+            Arg::with_name("addr")
+                .short("A")
+                .long("addr")
+                .takes_value(true)
+                .value_name("IP:PORT")
+                .help("Set the listening address"),
+        )
+        .arg(
+            Arg::with_name("log-file")
+                .short("f")
+                .long("log-file")
+                .value_name("LOGFILE")
+                .help("Sets log file")
+                .long_help("Set the log file path. If not set, logs will output to stderr"),
+        )
+        .arg(
+            Arg::with_name("pd-endpoints")
+                .long("pd-endpoints")
+                .takes_value(true)
+                .value_name("PD_URL")
+                .multiple(true)
+                .use_delimiter(true)
+                .require_delimiter(true)
+                .value_delimiter(",")
+                .help("Sets PD endpoints")
+                .long_help("Set the PD endpoints to use. Use `,` to separate multiple PDs"),
+        )
+        .arg(
+            Arg::with_name("cacert")
+                .long("cacert")
+                .takes_value(true)
+                .value_name("CERT")
+                .help("Path of file that contains list of trusted SSL CAs"),
+        )
+        .arg(
+            Arg::with_name("cert")
+                .long("cert")
+                .takes_value(true)
+                .value_name("CERT")
+                .help("Path of file that contains X509 certificate in PEM format"),
+        )
+        .arg(
+            Arg::with_name("key")
+                .long("key")
+                .takes_value(true)
+                .value_name("KEY")
+                .help("Path of file that contains X509 key in PEM format"),
+        )
+        .arg(
+            Arg::with_name("update-interval")
+                .long("update-interval")
+                .takes_value(true)
+                .value_name("INTERVAL")
+                .help("Sets registration update interval"),
         )
         .get_matches();
-    let config_path = matches.value_of_os("config").unwrap();
-    let result = std::fs::read(PathBuf::from(config_path));
-    if result.is_err() {
-        error!("failed to read config file {:?}", result.unwrap_err());
-        return;
-    }
-    let data = result.unwrap();
-    let config: Config = toml::from_slice(&data).unwrap();
+
+    let mut config: Config = match matches.value_of_os("config") {
+        Some(config_path) => {
+            let result = std::fs::read(PathBuf::from(config_path));
+            if result.is_err() {
+                error!("failed to read config file {:?}", result.unwrap_err());
+                return;
+            }
+            let data = result.unwrap();
+            toml::from_slice(&data).unwrap()
+        }
+        None => Config::default(),
+    };
+
     if !config.log_file.is_empty() {
         let log = tikv_util::logger::file_writer(&config.log_file, 300, 0, 0, rename_by_timestamp)
             .unwrap();
         init_logger(log);
     }
+    override_from_args(&mut config, &matches);
+    config.dfs.override_from_env();
+
     info!("config is {:?}", &config);
     let dfs = Arc::new(kvengine::dfs::S3FS::new(
         config.dfs.prefix,
@@ -77,7 +142,15 @@ fn main() {
             // Create a status service.
             Ok::<_, hyper::Error>(service_fn(move |req: hyper::Request<hyper::Body>| {
                 let dfs = dfs.clone();
-                async move { kvengine::handle_remote_compaction(dfs, req).await }
+                async move {
+                    match req.uri().path() {
+                        "/healthz" => Ok(hyper::Response::builder()
+                            .status(200)
+                            .body(hyper::Body::from("ok"))
+                            .unwrap()),
+                        _ => kvengine::handle_remote_compaction(dfs, req).await,
+                    }
+                }
             }))
         }
     }));
@@ -185,7 +258,7 @@ impl Default for Config {
         let mut pd = pd_client::Config::default();
         pd.endpoints.clear();
         Config {
-            addr: String::from("127.0.0.1:19000"),
+            addr: String::from("0.0.0.0:19000"),
             pd,
             security: SecurityConfig::default(),
             update_interval: ReadableDuration::minutes(10),
@@ -206,4 +279,34 @@ fn rename_by_timestamp(path: &Path) -> io::Result<PathBuf> {
     };
     new_path.push(new_fname);
     Ok(new_path)
+}
+
+fn override_from_args(config: &mut Config, matches: &ArgMatches<'_>) {
+    if let Some(file) = matches.value_of("log-file") {
+        config.log_file = file.to_owned();
+    }
+
+    if let Some(addr) = matches.value_of("addr") {
+        config.addr = addr.to_owned();
+    }
+
+    if let Some(endpoints) = matches.values_of("pd-endpoints") {
+        config.pd.endpoints = endpoints.map(ToOwned::to_owned).collect();
+    }
+
+    if let Some(cacert) = matches.value_of("cacert") {
+        config.security.ca_path = cacert.to_owned();
+    }
+
+    if let Some(cert) = matches.value_of("cert") {
+        config.security.cert_path = cert.to_owned();
+    }
+
+    if let Some(key) = matches.value_of("key") {
+        config.security.key_path = key.to_owned();
+    }
+
+    if let Some(interval) = matches.value_of("interval") {
+        config.update_interval = ReadableDuration::secs(interval.parse().unwrap());
+    }
 }
