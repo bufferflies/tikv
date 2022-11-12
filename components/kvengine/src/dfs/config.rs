@@ -28,15 +28,19 @@ impl Config {
         Ok(())
     }
 
-    pub fn override_from_env(&mut self) {
-        let dfs_s3_bucket = env::var("DFS_S3_BUCKET").unwrap_or_default();
-        if self.s3_bucket.is_empty() && self.s3_endpoint.is_empty() && !dfs_s3_bucket.is_empty() {
-            self.s3_bucket = dfs_s3_bucket;
-            self.s3_endpoint = env::var("DFS_S3_ENDPOINT").unwrap_or_default();
-            self.prefix = env::var("DFS_PREFIX").unwrap_or_default();
-            self.s3_key_id = env::var("DFS_S3_KEY_ID").unwrap_or_default();
-            self.s3_secret_key = env::var("DFS_S3_SECRET_KEY").unwrap_or_default();
-            self.s3_region = env::var("DFS_S3_REGION").unwrap_or_default();
+    fn env_or_default(name: &str, val: &mut String) {
+        if let Ok(v) = env::var(name) {
+            *val = v;
         }
+    }
+
+    pub fn override_from_env(&mut self) {
+        Self::env_or_default("DFS_S3_BUCKET", &mut self.s3_bucket);
+        Self::env_or_default("DFS_S3_ENDPOINT", &mut self.s3_endpoint);
+        Self::env_or_default("DFS_PREFIX", &mut self.prefix);
+        Self::env_or_default("DFS_S3_KEY_ID", &mut self.s3_key_id);
+        Self::env_or_default("DFS_S3_SECRET_KEY", &mut self.s3_secret_key);
+        Self::env_or_default("DFS_S3_REGION", &mut self.s3_region);
+        Self::env_or_default("DFS_REMOTE_COMPACTOR_ADDR", &mut self.remote_compactor_addr);
     }
 }
