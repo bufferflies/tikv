@@ -13,6 +13,7 @@ use bytes::{Buf, Bytes};
 use engine_traits::ObjectStorage;
 use farmhash::fingerprint64;
 use futures::StreamExt;
+use hyper_tls::HttpsConnector;
 use rusoto_core::{
     param::{Params, ServiceParams},
     request::{BufferedHttpResponse, HttpResponse},
@@ -30,6 +31,9 @@ use crate::dfs::{Options, DFS};
 
 const MAX_RETRY_COUNT: u32 = 7;
 const RETRY_SLEEP_MS: u64 = 500;
+const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
+const DISPATCH_TIMEOUT: Duration = Duration::from_secs(15);
+const READ_BODY_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 pub struct S3FS {
@@ -98,15 +102,17 @@ impl S3FSCore {
         let default_provider = aws::CredentialsProvider::new().unwrap();
         let static_provider =
             rusoto_credential::StaticProvider::new(key_id.clone(), secret_key, None, None);
+        let mut http_connector = hyper::client::connect::HttpConnector::new();
+        http_connector.set_connect_timeout(Some(CONNECTION_TIMEOUT));
         let s3c = if use_tls {
-            let http_client = HttpClient::new_with_config(config).unwrap();
+            let https_connector = HttpsConnector::new_with_connector(http_connector);
+            let http_client = HttpClient::from_connector_with_config(https_connector, config);
             if key_id.is_empty() {
                 rusoto_core::Client::new_with(default_provider, http_client)
             } else {
                 rusoto_core::Client::new_with(static_provider, http_client)
             }
         } else {
-            let http_connector = hyper::client::connect::HttpConnector::new();
             let http_client = HttpClient::from_connector_with_config(http_connector, config);
             if key_id.is_empty() {
                 rusoto_core::Client::new_with(default_provider, http_client)
@@ -319,7 +325,10 @@ impl S3FSCore {
         from_response: fn(BufferedHttpResponse) -> RusotoError<E>,
     ) -> Result<Response, RusotoError<E>> {
         req.set_hostname(Some(self.hostname.clone()));
-        let mut resp = self.s3c.sign_and_dispatch(req).await?;
+        let mut resp = self
+            .s3c
+            .sign_and_dispatch_timeout(req, DISPATCH_TIMEOUT)
+            .await?;
         if !resp.status.is_success() {
             let buffered = resp.buffer().await.map_err(RusotoError::HttpDispatch)?;
             return Err(from_response(buffered));
@@ -334,7 +343,10 @@ impl S3FSCore {
             .map(|value| value.parse::<usize>().unwrap())
             .unwrap_or_default();
         let mut buf = Vec::with_capacity(cap);
-        while let Some(res) = resp.body.next().await {
+        while let Some(res) = tokio::time::timeout(READ_BODY_TIMEOUT, resp.body.next())
+            .await
+            .map_err(|e| HttpDispatchError::new(format!("read body timeout {:?}", e)))?
+        {
             let chunk = res.map_err(|e| HttpDispatchError::new(format!("{:?}", e)))?;
             buf.extend_from_slice(chunk.chunk());
         }
