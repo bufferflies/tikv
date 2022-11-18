@@ -176,7 +176,7 @@ mod tests {
             ("k1".to_string(), "a1".to_string()),
             ("k2".to_string(), "a2".to_string()),
         ]);
-        let t = SSTable::new(tf, new_test_cache()).unwrap();
+        let t = SSTable::new(tf, new_test_cache(), true).unwrap();
         let tables = vec![t];
         let mut it = ConcatIterator::new_with_tables(tables, false, true);
         it.rewind();
@@ -192,9 +192,9 @@ mod tests {
         let tf1 = build_test_table_with_prefix("keya", 10000);
         let tf2 = build_test_table_with_prefix("keyb", 10000);
         let tf3 = build_test_table_with_prefix("keyc", 10000);
-        let t1 = SSTable::new(tf1, new_test_cache()).unwrap();
-        let t2 = SSTable::new(tf2, new_test_cache()).unwrap();
-        let t3 = SSTable::new(tf3, new_test_cache()).unwrap();
+        let t1 = SSTable::new(tf1, new_test_cache(), true).unwrap();
+        let t2 = SSTable::new(tf2, new_test_cache(), true).unwrap();
+        let t3 = SSTable::new(tf3, new_test_cache(), true).unwrap();
         let tables = vec![t1, t2, t3];
         {
             let mut it = ConcatIterator::new_with_tables(tables.clone(), false, true);

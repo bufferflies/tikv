@@ -18,20 +18,20 @@ impl EngineCore {
         if cs.has_flush() {
             let flush = cs.get_flush();
             if flush.has_l0_create() {
-                ids.insert(flush.get_l0_create().id, true);
+                ids.insert(flush.get_l0_create().id, 0);
             }
         }
         if cs.has_compaction() {
             let comp = cs.get_compaction();
             if !is_move_down(comp) {
                 for tbl in &comp.table_creates {
-                    ids.insert(tbl.id, false);
+                    ids.insert(tbl.id, tbl.level);
                 }
             }
         }
         if cs.has_destroy_range() {
             for t in cs.get_destroy_range().get_table_creates() {
-                ids.insert(t.id, t.level == 0);
+                ids.insert(t.id, t.level);
             }
         }
         if cs.has_snapshot() {
@@ -43,22 +43,22 @@ impl EngineCore {
         if cs.has_ingest_files() {
             let ingest_files = cs.get_ingest_files();
             for l0 in ingest_files.get_l0_creates() {
-                ids.insert(l0.id, true);
+                ids.insert(l0.id, 0);
             }
             for tbl in ingest_files.get_table_creates() {
-                ids.insert(tbl.id, false);
+                ids.insert(tbl.id, tbl.level);
             }
         }
         self.load_tables_by_ids(cs.shard_id, cs.shard_ver, ids, &mut cs, use_direct_io)?;
         Ok(cs)
     }
 
-    fn collect_snap_ids(&self, snap: &kvenginepb::Snapshot, ids: &mut HashMap<u64, bool>) {
+    fn collect_snap_ids(&self, snap: &kvenginepb::Snapshot, ids: &mut HashMap<u64, u32>) {
         for l0 in snap.get_l0_creates() {
-            ids.insert(l0.id, true);
+            ids.insert(l0.id, 0);
         }
         for ln in snap.get_table_creates() {
-            ids.insert(ln.id, false);
+            ids.insert(ln.id, ln.level);
         }
     }
 
@@ -66,7 +66,7 @@ impl EngineCore {
         &self,
         shard_id: u64,
         shard_ver: u64,
-        ids: HashMap<u64, bool>,
+        ids: HashMap<u64, u32>,
         cs: &mut ChangeSet,
         use_direct_io: bool,
     ) -> Result<()> {
@@ -74,29 +74,29 @@ impl EngineCore {
         let runtime = self.fs.get_runtime();
         let opts = dfs::Options::new(shard_id, shard_ver);
         let mut msg_count = 0;
-        for (&id, &is_l0) in &ids {
+        for (&id, &level) in &ids {
             if let Ok(file) = self.open_sstable_file(id) {
-                cs.add_file(id, file, is_l0, self.cache.clone())?;
+                cs.add_file(id, file, level, self.cache.clone())?;
                 continue;
             }
             let fs = self.fs.clone();
             let tx = result_tx.clone();
             runtime.spawn(async move {
                 let res = fs.read_file(id, opts).await;
-                tx.send(res.map(|data| (id, is_l0, data))).unwrap();
+                tx.send(res.map(|data| (id, level, data))).unwrap();
             });
             msg_count += 1;
         }
         let mut errors = vec![];
         for _ in 0..msg_count {
             match result_rx.recv().unwrap() {
-                Ok((id, is_l0, data)) => {
+                Ok((id, level, data)) => {
                     if let Err(err) = self.write_local_file(id, data, use_direct_io) {
                         error!("write local file failed {:?}", &err);
                         errors.push(err.into());
                     } else {
                         let file = self.open_sstable_file(id)?;
-                        cs.add_file(id, file, is_l0, self.cache.clone())?;
+                        cs.add_file(id, file, level, self.cache.clone())?;
                     }
                 }
                 Err(err) => {

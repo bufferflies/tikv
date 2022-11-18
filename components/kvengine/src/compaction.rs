@@ -854,7 +854,7 @@ fn in_mem_files_to_l0_tables(files: Vec<InMemFile>) -> Vec<sstable::L0Table> {
 fn in_mem_files_to_tables(files: Vec<InMemFile>) -> Vec<sstable::SSTable> {
     files
         .into_iter()
-        .map(|f| sstable::SSTable::new(Arc::new(f), None).unwrap())
+        .map(|f| sstable::SSTable::new(Arc::new(f), None, false).unwrap())
         .collect()
 }
 
@@ -1275,7 +1275,7 @@ fn compact_destroy_range(
             let (smallest, biggest) = builder.smallest_biggest();
             (data, smallest.to_vec(), biggest.to_vec())
         } else {
-            let t = sstable::SSTable::new(Arc::new(file), None).unwrap();
+            let t = sstable::SSTable::new(Arc::new(file), None, false).unwrap();
             let mut builder = sstable::Builder::new(new_id, req.block_size, t.compression_type());
             let mut iter = t.new_iterator(false, false);
             iter.rewind();
