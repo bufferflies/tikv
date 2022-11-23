@@ -1892,6 +1892,7 @@ where
                         query_stats,
                         approximate_size,
                         approximate_keys,
+                        approximate_kv_size: 0,
                         last_report_ts,
                         cpu_usage,
                     },

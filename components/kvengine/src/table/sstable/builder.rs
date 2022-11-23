@@ -16,6 +16,7 @@ pub const PROP_KEY_MAX_TS: &str = "max_ts";
 pub const PROP_KEY_ENTRIES: &str = "entries";
 pub const PROP_KEY_OLD_ENTRIES: &str = "old_entries";
 pub const PROP_KEY_TOMBS: &str = "tombs";
+pub const PROP_KEY_KV_SIZE: &str = "kv_size";
 pub const AUX_INDEX_BINARY_FUSE8: u32 = 1;
 pub const INDEX_FORMAT_V1: u32 = 1;
 pub const BLOCK_FORMAT_V1: u32 = 1;
@@ -115,6 +116,8 @@ pub struct Builder {
     max_ts: u64,
     old_entries: u32,
     tombs: u32,
+    // Total size of key-value before compression of latest entries, excluding meta and version field.
+    kv_size: u64,
 }
 
 impl Builder {
@@ -137,6 +140,7 @@ impl Builder {
         self.biggest.truncate(0);
         self.max_ts = 0;
         self.tombs = 0;
+        self.kv_size = 0;
     }
 
     fn add_property(buf: &mut BytesMut, key: &[u8], val: &[u8]) {
@@ -168,6 +172,7 @@ impl Builder {
             if self.max_ts < val.version {
                 self.max_ts = val.version;
             }
+            self.kv_size += (key.len() + val.value_len()) as u64;
         }
         if val.value_len() == 0 {
             self.tombs += 1;
@@ -260,6 +265,11 @@ impl Builder {
             &self.old_entries.to_le_bytes(),
         );
         Builder::add_property(buf, PROP_KEY_TOMBS.as_bytes(), &self.tombs.to_le_bytes());
+        Builder::add_property(
+            buf,
+            PROP_KEY_KV_SIZE.as_bytes(),
+            &self.kv_size.to_le_bytes(),
+        );
         if self.checksum_tp == CRC32C {
             let checksum = crc32c::crc32c(&buf[(origin_len + 4)..]);
             LittleEndian::write_u32(&mut buf[origin_len..], checksum);

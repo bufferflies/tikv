@@ -45,6 +45,7 @@ pub struct Shard {
 
     pub(crate) estimated_size: AtomicU64,
     pub(crate) estimated_entries: AtomicU64,
+    pub(crate) estimated_kv_size: AtomicU64,
 
     // meta_seq is the raft log index of the applied change set.
     // Because change set are applied in the worker thread, the value is usually smaller
@@ -89,6 +90,7 @@ impl Shard {
             base_version: Default::default(),
             estimated_size: Default::default(),
             estimated_entries: Default::default(),
+            estimated_kv_size: Default::default(),
             meta_seq: Default::default(),
             write_sequence: Default::default(),
             compaction_priority: RwLock::new(None),
@@ -144,15 +146,19 @@ impl Shard {
 
     fn refresh_estimated_size_and_entries(&self) {
         let data = self.get_data();
-        let mut size = data.get_l0_total_size();
-        let mut entries = data.get_l0_total_entries();
-        data.for_each_level(|_, l| {
-            size += data.get_level_total_size(l);
-            entries += data.get_level_total_entries(l);
+        let (mut size, mut entries, mut kv_size) = data.get_l0_stats();
+        data.for_each_level(|cf, l| {
+            let (lv_size, lv_entries, lv_kv_size) = data.get_level_stats(l);
+            size += lv_size;
+            entries += lv_entries;
+            if cf == WRITE_CF {
+                kv_size += lv_kv_size;
+            }
             false
         });
         store_u64(&self.estimated_size, size);
         store_u64(&self.estimated_entries, entries);
+        store_u64(&self.estimated_kv_size, kv_size);
     }
 
     pub(crate) fn set_del_prefix(&self, val: &[u8]) {
@@ -295,6 +301,10 @@ impl Shard {
 
     pub fn get_estimated_entries(&self) -> u64 {
         self.estimated_entries.load(Ordering::Relaxed)
+    }
+
+    pub fn get_estimated_kv_size(&self) -> u64 {
+        self.estimated_kv_size.load(Ordering::Relaxed)
     }
 
     pub fn get_initial_flushed(&self) -> bool {
@@ -488,59 +498,47 @@ impl ShardDataCore {
     }
 
     pub(crate) fn get_l0_total_size(&self) -> u64 {
-        self.l0_tbls
-            .iter()
-            .map(|l0| {
-                if self.cover_full_table(l0.smallest(), l0.biggest()) {
-                    l0.size()
-                } else {
-                    l0.size() / 2
-                }
-            })
-            .sum()
+        let (total_size, ..) = self.get_l0_stats();
+        total_size
     }
 
-    pub(crate) fn get_l0_total_entries(&self) -> u64 {
-        self.l0_tbls
-            .iter()
-            .map(|l0| {
-                if self.cover_full_table(l0.smallest(), l0.biggest()) {
-                    l0.entries()
-                } else {
-                    l0.entries() / 2
-                }
-            })
-            .sum()
+    // Return (total_size, total_entries, total_kv_size).
+    pub(crate) fn get_l0_stats(&self) -> (u64, u64, u64) {
+        let (mut total_size, mut total_entries, mut total_kv_size) = (0, 0, 0);
+        self.l0_tbls.iter().for_each(|l0| {
+            if self.cover_full_table(l0.smallest(), l0.biggest()) {
+                total_size += l0.size();
+                total_entries += l0.entries();
+                total_kv_size += l0.kv_size();
+            } else {
+                total_size += l0.size() / 2;
+                total_entries += l0.entries() / 2;
+                total_kv_size += l0.kv_size() / 2;
+            }
+        });
+        (total_size, total_entries, total_kv_size)
     }
 
     pub(crate) fn get_level_total_size(&self, level: &LevelHandler) -> u64 {
-        level
-            .tables
-            .iter()
-            .enumerate()
-            .map(|(i, tbl)| {
-                if self.is_over_bound_table(level, i, tbl) {
-                    tbl.size() / 2
-                } else {
-                    tbl.size()
-                }
-            })
-            .sum()
+        let (total_size, ..) = self.get_level_stats(level);
+        total_size
     }
 
-    pub(crate) fn get_level_total_entries(&self, level: &LevelHandler) -> u64 {
-        level
-            .tables
-            .iter()
-            .enumerate()
-            .map(|(i, tbl)| {
-                if self.is_over_bound_table(level, i, tbl) {
-                    tbl.entries as u64 / 2
-                } else {
-                    tbl.entries as u64
-                }
-            })
-            .sum()
+    // Return (total_size, total_entries, total_kv_size).
+    pub(crate) fn get_level_stats(&self, level: &LevelHandler) -> (u64, u64, u64) {
+        let (mut total_size, mut total_entries, mut total_kv_size) = (0, 0, 0);
+        level.tables.iter().enumerate().for_each(|(i, tbl)| {
+            if self.is_over_bound_table(level, i, tbl) {
+                total_size += tbl.size() / 2;
+                total_entries += tbl.entries as u64 / 2;
+                total_kv_size += tbl.kv_size / 2;
+            } else {
+                total_size += tbl.size();
+                total_entries += tbl.entries as u64;
+                total_kv_size += tbl.kv_size;
+            }
+        });
+        (total_size, total_entries, total_kv_size)
     }
 
     fn is_over_bound_table(&self, level: &LevelHandler, i: usize, tbl: &SSTable) -> bool {

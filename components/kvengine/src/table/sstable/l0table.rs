@@ -9,7 +9,7 @@ use moka::sync::SegmentedCache;
 use super::*;
 use crate::{
     table::{table::Result, Value},
-    NUM_CFS,
+    NUM_CFS, WRITE_CF,
 };
 
 const L0_FOOTER_SIZE: usize = std::mem::size_of::<L0Footer>();
@@ -59,6 +59,7 @@ pub struct L0TableCore {
     file: Arc<dyn File>,
     cfs: [Option<sstable::SSTable>; NUM_CFS],
     entries: u64,
+    kv_size: u64,
     smallest: Bytes,
     biggest: Bytes,
 }
@@ -80,6 +81,7 @@ impl L0TableCore {
         }
         let mut cfs: [Option<SSTable>; NUM_CFS] = [None, None, None];
         let mut entries = 0;
+        let mut kv_size = 0;
         for i in 0..NUM_CFS {
             let start_off = cf_offs[i] as u64;
             let mut end_off = cf_offs_off;
@@ -91,6 +93,10 @@ impl L0TableCore {
             }
             let tbl = sstable::SSTable::new_l0_cf(file.clone(), start_off, end_off, cache.clone())?;
             entries += tbl.entries as u64;
+            if i == WRITE_CF {
+                kv_size += tbl.kv_size;
+            }
+
             cfs[i] = Some(tbl)
         }
         let (smallest, biggest) = Self::compute_smallest_biggest(&cfs);
@@ -99,6 +105,7 @@ impl L0TableCore {
             file,
             cfs,
             entries,
+            kv_size,
             smallest,
             biggest,
         })
@@ -142,6 +149,10 @@ impl L0TableCore {
 
     pub fn entries(&self) -> u64 {
         self.entries
+    }
+
+    pub fn kv_size(&self) -> u64 {
+        self.kv_size
     }
 
     pub fn smallest(&self) -> &[u8] {

@@ -131,6 +131,7 @@ pub struct SSTableCore {
     pub entries: u32,
     pub old_entries: u32,
     pub tombs: u32,
+    pub kv_size: u64,
     pub idx: Index,
     pub old_idx: Index,
 }
@@ -173,6 +174,7 @@ impl SSTableCore {
         let mut entries = 0;
         let mut old_entries = 0;
         let mut tombs = 0;
+        let mut kv_size = None;
         while !prop_slice.is_empty() {
             let (key, val, remain) = parse_prop_data(prop_slice);
             prop_slice = remain;
@@ -188,6 +190,8 @@ impl SSTableCore {
                 old_entries = LittleEndian::read_u32(val);
             } else if key == PROP_KEY_TOMBS.as_bytes() {
                 tombs = LittleEndian::read_u32(val);
+            } else if key == PROP_KEY_KV_SIZE.as_bytes() {
+                kv_size = Some(LittleEndian::read_u64(val));
             }
         }
         let mut core = Self {
@@ -202,6 +206,7 @@ impl SSTableCore {
             entries,
             old_entries,
             tombs,
+            kv_size: kv_size.unwrap_or(size),
             idx,
             old_idx,
         };

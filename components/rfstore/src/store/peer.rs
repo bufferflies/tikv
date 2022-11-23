@@ -207,6 +207,7 @@ pub struct PeerStat {
     pub written_keys: u64,
     pub approximate_size: u64,
     pub approximate_keys: u64,
+    pub approximate_kv_size: u64,
     pub written_query_stats: QueryStats,
 }
 
@@ -1174,6 +1175,7 @@ impl Peer {
             written_query_stats: self.peer_stat.written_query_stats.clone(),
             approximate_size: self.peer_stat.approximate_size,
             approximate_keys: self.peer_stat.approximate_keys,
+            approximate_kv_size: self.peer_stat.approximate_kv_size,
             replication_status: None,
         });
         if let Err(e) = ctx.global.pd_scheduler.schedule(task) {

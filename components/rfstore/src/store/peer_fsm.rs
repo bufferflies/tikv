@@ -786,8 +786,10 @@ impl<'a> PeerMsgHandler<'a> {
         if let Some(shard) = self.ctx.global.engines.kv.get_shard(self.region_id()) {
             let estimated_size = shard.get_estimated_size();
             let estimated_entries = shard.get_estimated_entries();
+            let estimated_kv_size = shard.get_estimated_kv_size();
             self.peer.peer_stat.approximate_size = estimated_size;
             self.peer.peer_stat.approximate_keys = estimated_entries;
+            self.peer.peer_stat.approximate_kv_size = estimated_kv_size;
             if !self.fsm.peer.is_leader() {
                 return;
             }

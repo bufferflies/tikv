@@ -23,7 +23,7 @@ use crate::{
         sstable::{self, InMemFile, L0Builder, SSTable},
     },
     Error::RemoteCompaction,
-    Iterator, *,
+    Iterator, EXTRA_CF, LOCK_CF, WRITE_CF, *,
 };
 
 static RETRY_INTERVAL: Duration = Duration::from_secs(600);
@@ -1120,10 +1120,6 @@ enum Decision {
     MarkTombStone,
     Drop,
 }
-
-const WRITE_CF: usize = 0;
-const LOCK_CF: usize = 1;
-const EXTRA_CF: usize = 2;
 
 // filter implements the badger.CompactionFilter interface.
 // Since we use txn ts as badger version, we only need to filter Delete, Rollback and Op_Lock.

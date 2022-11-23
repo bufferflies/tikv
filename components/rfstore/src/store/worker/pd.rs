@@ -84,6 +84,7 @@ pub struct HeartbeatTask {
     pub written_query_stats: QueryStats,
     pub approximate_size: u64,
     pub approximate_keys: u64,
+    pub approximate_kv_size: u64,
     pub replication_status: Option<RegionReplicationStatus>,
 }
 
@@ -214,6 +215,7 @@ pub struct PeerStat {
     pub last_store_report_query_stats: QueryStats,
     pub approximate_keys: u64,
     pub approximate_size: u64,
+    pub approximate_kv_size: u64,
 }
 
 #[derive(Default)]
@@ -501,7 +503,7 @@ impl PdRunner {
 
             STORE_SIZE_GAUGE_VEC
                 .with_label_values(&["used", region_id_str, keyspace_id_str])
-                .set(region_stat.approximate_size as i64);
+                .set(region_stat.approximate_kv_size as i64);
         }
 
         STORE_ENGINE_FLOW_VEC
@@ -1114,6 +1116,7 @@ impl Runnable for PdRunner {
                         .or_insert_with(PeerStat::default);
                     peer_stat.approximate_size = hb_task.approximate_size;
                     peer_stat.approximate_keys = hb_task.approximate_keys;
+                    peer_stat.approximate_kv_size = hb_task.approximate_kv_size;
 
                     let read_bytes_delta =
                         peer_stat.read_bytes - peer_stat.last_region_report_read_bytes;
@@ -1180,6 +1183,7 @@ impl Runnable for PdRunner {
                         query_stats,
                         approximate_size: hb_task.approximate_size,
                         approximate_keys: hb_task.approximate_keys,
+                        approximate_kv_size: hb_task.approximate_kv_size,
                         last_report_ts,
                         cpu_usage: 0,
                     },

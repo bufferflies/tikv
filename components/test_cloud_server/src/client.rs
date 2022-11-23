@@ -509,4 +509,8 @@ impl ClusterClient {
             );
         }
     }
+
+    pub fn ref_store_contains_key(&self, key: &[u8]) -> bool {
+        self.ref_store.lock().unwrap().contains_key(key)
+    }
 }

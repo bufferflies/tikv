@@ -2,7 +2,7 @@
 
 use bytes::Buf;
 
-use crate::{load_bool, NUM_CFS};
+use crate::{load_bool, NUM_CFS, WRITE_CF};
 
 #[derive(Default, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -27,6 +27,7 @@ pub struct EngineStats {
     pub entries: usize,
     pub old_entries: usize,
     pub tombs: usize,
+    pub kv_size: u64,
     pub top_10_write: Vec<ShardStats>,
 }
 
@@ -79,6 +80,7 @@ impl super::Engine {
             engine_stats.entries += shard.entries;
             engine_stats.old_entries += shard.old_entries;
             engine_stats.tombs += shard.tombs;
+            engine_stats.kv_size += shard.kv_size;
             for cf in 0..NUM_CFS {
                 let shard_cf_stat = &shard.cfs[cf];
                 for (i, level_stat) in shard_cf_stat.levels.iter().enumerate() {
@@ -121,6 +123,7 @@ pub struct ShardStats {
     pub entries: usize,
     pub old_entries: usize,
     pub tombs: usize,
+    pub kv_size: u64,
     pub base_version: u64,
     pub meta_sequence: u64,
     pub write_sequence: u64,
@@ -152,6 +155,7 @@ pub struct LevelStats {
     pub entries: usize,
     pub old_entries: usize,
     pub tombs: usize,
+    pub kv_size: u64,
 }
 
 impl super::Shard {
@@ -162,6 +166,7 @@ impl super::Shard {
         let mut entries = 0;
         let mut old_entries = 0;
         let mut tombs = 0;
+        let mut kv_size = 0;
         let data = self.get_data();
         let mem_table_count = data.mem_tbls.len();
         let mut mem_table_size = 0;
@@ -186,6 +191,9 @@ impl super::Shard {
                     entries += cf_tbl.entries as usize;
                     old_entries += cf_tbl.old_entries as usize;
                     tombs += cf_tbl.tombs as usize;
+                    if cf == WRITE_CF {
+                        kv_size += cf_tbl.kv_size;
+                    }
                 }
             }
         }
@@ -207,6 +215,9 @@ impl super::Shard {
                         level_stats.entries += t.entries as usize;
                         level_stats.old_entries += t.old_entries as usize;
                         level_stats.tombs += t.tombs as usize;
+                        if cf == WRITE_CF {
+                            level_stats.kv_size += t.kv_size;
+                        }
                     } else {
                         level_stats.data_size += t.size() / 2;
                         level_stats.index_size += t.index_size() / 2;
@@ -214,6 +225,9 @@ impl super::Shard {
                         level_stats.entries += t.entries as usize / 2;
                         level_stats.old_entries += t.old_entries as usize / 2;
                         level_stats.tombs += t.tombs as usize / 2;
+                        if cf == WRITE_CF {
+                            level_stats.kv_size += t.kv_size / 2;
+                        }
                         partial_tbls += 1;
                     }
                 }
@@ -223,6 +237,7 @@ impl super::Shard {
                 entries += level_stats.entries;
                 old_entries += level_stats.old_entries;
                 tombs += level_stats.tombs;
+                kv_size += level_stats.kv_size;
                 cf_stat.levels.push(level_stats);
             }
             cfs.push(cf_stat);
@@ -253,6 +268,7 @@ impl super::Shard {
             entries,
             old_entries,
             tombs,
+            kv_size,
             partial_l0s,
             partial_tbls,
             compaction_cf,

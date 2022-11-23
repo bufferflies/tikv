@@ -1,5 +1,7 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
+mod test_stats;
+
 use std::{thread, time::Duration};
 
 use test_cloud_server::{try_wait, ServerCluster};

@@ -53,3 +53,7 @@ pub use write::*;
 const NUM_CFS: usize = 3;
 const CF_LEVELS: [usize; NUM_CFS] = [3, 2, 1];
 const CF_MANAGED: [bool; NUM_CFS] = [true, false, true];
+
+const WRITE_CF: usize = 0;
+const LOCK_CF: usize = 1;
+const EXTRA_CF: usize = 2;
