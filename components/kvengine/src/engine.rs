@@ -452,8 +452,14 @@ impl EngineCore {
                 }
             }
         }
+        let mut errs = vec![];
         for _ in 0..tbl_cnt {
-            rx.recv().unwrap()?
+            if let Err(err) = rx.recv().unwrap() {
+                errs.push(err)
+            }
+        }
+        if !errs.is_empty() {
+            return Err(errs.pop().unwrap().into());
         }
         Ok(cs)
     }
