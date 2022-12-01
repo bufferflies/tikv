@@ -414,10 +414,6 @@ pub(crate) struct Peer {
     pub(crate) last_urgent_proposal_idx: u64,
     // The index of the latest committed split command.
     pub(crate) last_committed_split_idx: u64,
-    // The preprocessed_region applies all the committed conf change, we should use it instead of
-    // the current region to do preprocessed_split and preprocessed_conf_change because the current
-    // region may be outdated due to slow apply.
-    pub(crate) preprocessed_region: Option<Region>,
     // preprocessed_index is used to avoid duplicated preprocess execution.
     pub(crate) preprocessed_index: u64,
 
@@ -526,7 +522,6 @@ impl Peer {
             last_applying_idx: applied_index,
             last_urgent_proposal_idx: u64::MAX,
             last_committed_split_idx: 0,
-            preprocessed_region: None,
             preprocessed_index: 0,
             leader_lease: Lease::new(
                 cfg.raft_store_max_leader_lease(),
@@ -1262,7 +1257,7 @@ impl Peer {
             last_preprocessed_index,
             &mut store_meta,
         ) {
-            self.preprocessed_region = None;
+            self.mut_store().preprocessed_region = None;
             // The peer may change from learner to voter after snapshot persisted.
             let peer = self
                 .region()
@@ -1396,16 +1391,38 @@ impl Peer {
         if self.preprocessed_index > 0 && entry.index <= self.preprocessed_index {
             return;
         }
+        let mut need_try_advance_meta = entry.data.is_empty();
         if let Some(cmd) = get_preprocess_cmd(entry) {
             if cmd.has_custom_request() {
                 self.preprocess_change_set(ctx, entry, cmd.get_custom_request());
+                need_try_advance_meta = true;
             } else {
                 self.preprocess_pending_splits(ctx, entry, &cmd);
             }
         } else if entry.entry_type != eraftpb::EntryType::EntryNormal {
             self.preprocess_conf_change(ctx, entry);
+            need_try_advance_meta = true;
+        }
+        if need_try_advance_meta {
+            self.try_advance_meta(ctx, entry);
         }
         self.preprocessed_index = entry.index;
+    }
+
+    pub(crate) fn try_advance_meta(&mut self, ctx: &mut RaftContext, entry: &Entry) {
+        let peer_id = self.peer_id();
+        let store = self.mut_store();
+        let shard_meta = store.mut_engine_meta();
+        if shard_meta.data_sequence + 1 == entry.index {
+            shard_meta.data_sequence += 1;
+            shard_meta.set_property(TERM_KEY, &entry.term.to_le_bytes());
+            write_engine_meta(&mut ctx.raft_wb, peer_id, shard_meta);
+            info!(
+                "{} shard meta advanced data sequence to {}",
+                self.tag(),
+                entry.index
+            );
+        }
     }
 
     pub(crate) fn preprocess_change_set(
@@ -1521,7 +1538,7 @@ impl Peer {
                 // shard_meta has updated, we also need to set the new version's raft state.
                 store.write_raft_state(ctx);
                 store.initial_flushed = false;
-                self.preprocessed_region = Some(new_region.clone());
+                store.preprocessed_region = Some(new_region.clone());
             } else {
                 let raft = &ctx.global.engines.raft;
                 // The peer has been created or destroyed.
@@ -1597,12 +1614,13 @@ impl Peer {
                 // It's a remove self conf change, it will be updated in destroy method with
                 // tombstone state.
             }
-            self.preprocessed_region = Some(region);
+            self.mut_store().preprocessed_region = Some(region);
         }
     }
 
     pub(crate) fn get_preprocessed_region(&self) -> &Region {
-        self.preprocessed_region
+        self.get_store()
+            .preprocessed_region
             .as_ref()
             .unwrap_or_else(|| self.region())
     }

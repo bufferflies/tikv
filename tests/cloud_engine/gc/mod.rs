@@ -1,6 +1,6 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{fs, time::Duration};
+use std::{collections::HashMap, fs, time::Duration};
 
 use collections::HashSet;
 use kvengine::{new_tmp_filename, table::sstable::new_filename, ShardStats};
@@ -83,12 +83,19 @@ fn test_raft_log_gc() {
     let mut client = cluster.new_client();
 
     let region_id = client.get_region_id(&[]);
+    let mut peer_ids = HashMap::new();
+    for &node_id in &node_ids {
+        let store_id = cluster.get_store_id(node_id);
+        let peer_id = client.get_peer_id(&[], store_id);
+        peer_ids.insert(node_id, peer_id);
+    }
     let before_truncated_idxes = node_ids
         .iter()
         .map(|id| {
+            let &peer_id = peer_ids.get(id).unwrap();
             cluster
                 .get_rfengine(*id)
-                .get_peer_stats(region_id)
+                .get_peer_stats(peer_id)
                 .truncated_idx
         })
         .collect::<Vec<_>>();
@@ -111,9 +118,10 @@ fn test_raft_log_gc() {
             curr_truncated_idxes = node_ids
                 .iter()
                 .map(|id| {
+                    let &peer_id = peer_ids.get(id).unwrap();
                     cluster
                         .get_rfengine(*id)
-                        .get_peer_stats(region_id)
+                        .get_peer_stats(peer_id)
                         .truncated_idx
                 })
                 .collect::<Vec<_>>();
@@ -196,10 +204,11 @@ fn test_raft_log_gc() {
     flush_memtable(&cluster, &node_ids);
     std::thread::sleep(Duration::from_millis(200));
     // Leader's truncated index doesn't change immediately.
+    let &peer_id = peer_ids.get(&node_ids[0]).unwrap();
     assert_eq!(
         cluster
             .get_rfengine(node_ids[0])
-            .get_peer_stats(region_id)
+            .get_peer_stats(peer_id)
             .truncated_idx,
         curr_truncated_idxes[0]
     );
@@ -207,7 +216,7 @@ fn test_raft_log_gc() {
     std::thread::sleep(Duration::from_secs(3));
     let truncated_idx = cluster
         .get_rfengine(node_ids[0])
-        .get_peer_stats(region_id)
+        .get_peer_stats(peer_id)
         .truncated_idx;
     assert!(
         truncated_idx > curr_truncated_idxes[0],
@@ -234,11 +243,12 @@ fn test_raft_log_gc_size_limit() {
     cluster.stop_node(node_ids[2]);
 
     let mut client = cluster.new_client();
-    let region_id = client.get_region_id(&[]);
+    let store_id = cluster.get_store_id(node_ids[0]);
+    let peer_id = client.get_peer_id(&[], store_id);
     std::thread::sleep(Duration::from_millis(300));
     let prev_truncated_idx = cluster
         .get_rfengine(node_ids[0])
-        .get_peer_stats(region_id)
+        .get_peer_stats(peer_id)
         .truncated_idx;
     for i in 0..50 {
         client.put_kv(i * 20..(i + 1) * 20, gen_key, gen_val);
@@ -247,7 +257,7 @@ fn test_raft_log_gc_size_limit() {
         || {
             let curr_truncated_idx = cluster
                 .get_rfengine(node_ids[0])
-                .get_peer_stats(region_id)
+                .get_peer_stats(peer_id)
                 .truncated_idx;
             curr_truncated_idx > prev_truncated_idx && curr_truncated_idx > 40
         },

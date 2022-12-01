@@ -30,15 +30,14 @@ use txn_types::{Key, WriteBatchFlags};
 
 use crate::{
     store::{
-        apply::TERM_KEY,
         cmd_resp::{bind_term, new_error},
         ingest::convert_sst,
         msg::Callback,
         notify_req_region_removed,
         peer::{Peer, StaleState},
-        util as _util, write_engine_meta, ApplyMetrics, ApplyMsg, CasualMessage, Config,
-        CustomBuilder, Engines, MsgApplyResult, MsgRegistration, PdTask, PeerMsg, PersistReady,
-        RaftApplyState, RaftContext, ReadProgress, SignificantMsg, SnapState, StoreMsg, Ticker,
+        util as _util, ApplyMetrics, ApplyMsg, CasualMessage, Config, CustomBuilder, Engines,
+        MsgApplyResult, MsgRegistration, PdTask, PeerMsg, PersistReady, RaftApplyState,
+        RaftContext, ReadProgress, SignificantMsg, SnapState, StoreMsg, Ticker,
         PEER_TICK_CHECK_STALE_STATE, PEER_TICK_PD_HEARTBEAT, PEER_TICK_RAFT, PEER_TICK_RAFT_LOG_GC,
         PEER_TICK_REPORT_REGION_BUCKETS, PEER_TICK_SPLIT_CHECK, PEER_TICK_SWITCH_MEM_TABLE_CHECK,
     },
@@ -1218,7 +1217,6 @@ impl<'a> PeerMsgHandler<'a> {
 
     fn on_raft_log_gc_tick(&mut self) {
         self.ticker.schedule(PEER_TICK_RAFT_LOG_GC);
-        let peer_id = self.peer_id();
         let region_id = self.region_id();
         let engines = &self.ctx.global.engines;
         if !self.peer.is_initialized()
@@ -1248,46 +1246,20 @@ impl<'a> PeerMsgHandler<'a> {
             last_idx
         };
         let size_limit_index = engines.raft.index_to_truncate_to_size(
-            self.region_id(),
+            self.peer_id(),
             self.ctx.cfg.raft_log_gc_size_limit.unwrap().0 as usize,
         );
-        let applied_idx = self.peer.get_store().applied_index();
 
         // If raft logs occupies too much memory, truncates them regardless of lagged replicas to avoid OOM.
         let mut to_truncate_idx = cmp::max(size_limit_index, replicated_idx);
         // Shouldn't truncate unapplied logs.
+        let applied_idx = self.peer.get_store().applied_index();
         to_truncate_idx = cmp::min(to_truncate_idx, applied_idx);
 
-        // persisted_log_idx is the upper limit of truncated_idx.
-        let mut persisted_log_idx = self.peer.get_store().data_persisted_log_index().unwrap();
-        if to_truncate_idx > persisted_log_idx {
-            let applied_term = self.peer.get_store().applied_index_term();
-            // Try to advance applied_idx.
-            if persisted_log_idx < applied_idx {
-                let shard_data_all_persisted = engines
-                    .kv
-                    .get_shard(region_id)
-                    .unwrap()
-                    .data_all_persisted();
-                if shard_data_all_persisted {
-                    // Advance persisted log index to applied index manually because some raft logs(ChangeSet
-                    // and ConfChange) don't write data to kvengine, so they can't trigger memtable
-                    // flush which results in unGCed logs.
-                    let shard_meta = self.peer.mut_store().mut_engine_meta();
-                    shard_meta.data_sequence = applied_idx;
-                    shard_meta.set_property(TERM_KEY, &applied_term.to_le_bytes());
-                    let shard_meta = shard_meta.clone();
-                    info!(
-                        "advance data sequence from {} to {}", persisted_log_idx, applied_idx;
-                        "region" => self.peer.tag(),
-                    );
-                    write_engine_meta(&mut self.ctx.raft_wb, peer_id, &shard_meta);
-                    persisted_log_idx = applied_idx;
-                }
-            }
-            to_truncate_idx = cmp::min(to_truncate_idx, persisted_log_idx);
-        };
-        assert!(to_truncate_idx <= persisted_log_idx && to_truncate_idx <= applied_idx);
+        // Shouldn't truncate unpersisted logs.
+        let persisted_log_idx = self.peer.get_store().data_persisted_log_index().unwrap();
+        to_truncate_idx = cmp::min(to_truncate_idx, persisted_log_idx);
+
         let truncated_idx = self.peer.get_store().truncated_index();
         if to_truncate_idx > truncated_idx {
             let to_truncate_term = self.peer.get_store().term(to_truncate_idx).unwrap();

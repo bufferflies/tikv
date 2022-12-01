@@ -277,6 +277,16 @@ impl ClusterClient {
         region.id
     }
 
+    pub fn get_peer_id(&mut self, key: &[u8], store_id: u64) -> u64 {
+        let region = self.get_region_by_key(key);
+        region
+            .peers
+            .iter()
+            .find(|x| x.store_id == store_id)
+            .unwrap()
+            .id
+    }
+
     fn get_region_by_key(&mut self, key: &[u8]) -> RawRegion {
         if let Some(region) = self.get_region_from_cache(key) {
             return region;

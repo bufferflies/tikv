@@ -79,6 +79,10 @@ pub(crate) struct PeerStorage {
     pub(crate) peer_id: u64,
     pub(crate) store_id: u64,
     region: metapb::Region,
+    // The preprocessed_region applies all the committed conf change, we should use it instead of
+    // the current region to do preprocessed_split and preprocessed_conf_change because the current
+    // region may be outdated due to slow apply.
+    pub(crate) preprocessed_region: Option<metapb::Region>,
     pub(crate) raft_state: RaftState,
     apply_state: RaftApplyState,
     truncated_state: RaftTruncatedState,
@@ -198,7 +202,8 @@ impl raft::Storage for PeerStorage {
 
         let mut snap = eraftpb::Snapshot::default();
         let change_set = self.shard_meta.as_ref().unwrap().to_change_set();
-        let snap_data = encode_snap_data(self.region(), &change_set);
+        let region = self.preprocessed_region.as_ref().unwrap_or(self.region());
+        let snap_data = encode_snap_data(region, &change_set);
         snap.set_data(snap_data);
         let mut snap_meta = eraftpb::SnapshotMetadata::default();
         snap_meta.set_index(snap_index);
@@ -249,6 +254,7 @@ impl PeerStorage {
             peer_id,
             store_id,
             region,
+            preprocessed_region: None,
             raft_state,
             apply_state,
             truncated_state,
