@@ -633,11 +633,10 @@ impl<'a> StoreMsgHandler<'a> {
             "unreachable_store_id" => store_id,
         );
         self.store.last_unreachable_report.insert(store_id, now);
-        // It's possible to acquire the lock and only send notification to
-        // involved regions. However loop over all the regions can take a
-        // lot of time, which may block other operations.
-        for id in self.ctx.peers.keys() {
-            self.ctx.global.router.report_unreachable(*id, store_id);
+        for (id, region) in &self.ctx.store_meta.regions {
+            if region.get_peers().iter().any(|p| p.store_id == store_id) {
+                self.ctx.global.router.report_unreachable(*id, store_id);
+            }
         }
     }
 
