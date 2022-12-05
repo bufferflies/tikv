@@ -8,6 +8,7 @@ use moka::sync::SegmentedCache;
 
 use super::*;
 use crate::{
+    max_ts_by_cf,
     table::{table::Result, Value},
     NUM_CFS, WRITE_CF,
 };
@@ -58,6 +59,7 @@ pub struct L0TableCore {
     footer: L0Footer,
     file: Arc<dyn File>,
     cfs: [Option<sstable::SSTable>; NUM_CFS],
+    max_ts: u64,
     entries: u64,
     kv_size: u64,
     smallest: Bytes,
@@ -99,11 +101,12 @@ impl L0TableCore {
 
             cfs[i] = Some(tbl)
         }
-        let (smallest, biggest) = Self::compute_smallest_biggest(&cfs);
+        let (smallest, biggest, max_ts) = Self::compute_smallest_biggest(&cfs);
         Ok(Self {
             footer,
             file,
             cfs,
+            max_ts,
             entries,
             kv_size,
             smallest,
@@ -111,9 +114,11 @@ impl L0TableCore {
         })
     }
 
-    fn compute_smallest_biggest(cfs: &[Option<SSTable>; NUM_CFS]) -> (Bytes, Bytes) {
+    // Return: smallest, biggest, max_ts
+    fn compute_smallest_biggest(cfs: &[Option<SSTable>; NUM_CFS]) -> (Bytes, Bytes, u64) {
         let mut smallest_buf = BytesMut::new();
         let mut biggest_buf = BytesMut::new();
+        let mut max_ts = 0;
         for i in 0..NUM_CFS {
             if let Some(cf_tbl) = &cfs[i] {
                 let smallest = cf_tbl.smallest();
@@ -128,11 +133,12 @@ impl L0TableCore {
                     biggest_buf.truncate(0);
                     biggest_buf.extend_from_slice(biggest);
                 }
+                max_ts = max_ts_by_cf(max_ts, i, cf_tbl.max_ts);
             }
         }
         assert!(!smallest_buf.is_empty());
         assert!(!biggest_buf.is_empty());
-        (smallest_buf.freeze(), biggest_buf.freeze())
+        (smallest_buf.freeze(), biggest_buf.freeze(), max_ts)
     }
 
     pub fn id(&self) -> u64 {
@@ -145,6 +151,10 @@ impl L0TableCore {
 
     pub fn size(&self) -> u64 {
         self.file.size()
+    }
+
+    pub fn max_ts(&self) -> u64 {
+        self.max_ts
     }
 
     pub fn entries(&self) -> u64 {

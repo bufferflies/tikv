@@ -1,6 +1,7 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
+    cmp,
     iter::Iterator,
     ops::Deref,
     sync::{
@@ -13,6 +14,7 @@ use bytes::{Buf, BufMut, Bytes};
 use dashmap::DashMap;
 use kvenginepb as pb;
 use slog_global::*;
+use tikv_util::codec::number::U64_SIZE;
 
 use crate::{
     table::{
@@ -45,6 +47,7 @@ pub struct Shard {
 
     pub(crate) estimated_size: AtomicU64,
     pub(crate) estimated_entries: AtomicU64,
+    pub(crate) max_ts: AtomicU64,
     pub(crate) estimated_kv_size: AtomicU64,
 
     // meta_seq is the raft log index of the applied change set.
@@ -62,6 +65,7 @@ pub struct Shard {
 
 pub const INGEST_ID_KEY: &str = "_ingest_id";
 pub const DEL_PREFIXES_KEY: &str = "_del_prefixes";
+pub const TRUNCATE_TS_KEY: &str = "_truncate_ts";
 
 impl Shard {
     pub fn new(
@@ -90,6 +94,7 @@ impl Shard {
             base_version: Default::default(),
             estimated_size: Default::default(),
             estimated_entries: Default::default(),
+            max_ts: Default::default(),
             estimated_kv_size: Default::default(),
             meta_seq: Default::default(),
             write_sequence: Default::default(),
@@ -98,6 +103,12 @@ impl Shard {
         };
         if let Some(val) = get_shard_property(DEL_PREFIXES_KEY, props) {
             shard.set_del_prefix(&val);
+        }
+        if let Some(val) = get_shard_property(TRUNCATE_TS_KEY, props) {
+            // when load shard from Meta, the value maybe empty.
+            if val.len() != 0 {
+                shard.set_truncate_ts(&val);
+            }
         }
         shard
     }
@@ -146,10 +157,15 @@ impl Shard {
 
     fn refresh_estimated_size_and_entries(&self) {
         let data = self.get_data();
-        let (mut size, mut entries, mut kv_size) = data.get_l0_stats();
+        let mut max_ts = data.get_mem_table_max_ts();
+
+        let (mut size, mut entries, mut kv_size, l0_max_ts) = data.get_l0_stats();
+        max_ts = cmp::max(max_ts, l0_max_ts);
+
         data.for_each_level(|cf, l| {
-            let (lv_size, lv_entries, lv_kv_size) = data.get_level_stats(l);
+            let (lv_size, lv_entries, lv_kv_size, lv_max_ts) = data.get_level_stats(l);
             size += lv_size;
+            max_ts = max_ts_by_cf(max_ts, cf, lv_max_ts);
             entries += lv_entries;
             if cf == WRITE_CF {
                 kv_size += lv_kv_size;
@@ -158,6 +174,7 @@ impl Shard {
         });
         store_u64(&self.estimated_size, size);
         store_u64(&self.estimated_entries, entries);
+        store_u64(&self.max_ts, max_ts);
         store_u64(&self.estimated_kv_size, kv_size);
     }
 
@@ -167,6 +184,7 @@ impl Shard {
             data.start.clone(),
             data.end.clone(),
             DeletePrefixes::unmarshal(val),
+            data.truncate_ts,
             data.mem_tbls.clone(),
             data.l0_tbls.clone(),
             data.cfs.clone(),
@@ -180,11 +198,43 @@ impl Shard {
             data.start.clone(),
             data.end.clone(),
             data.del_prefixes.merge(prefix),
+            data.truncate_ts,
             data.mem_tbls.clone(),
             data.l0_tbls.clone(),
             data.cfs.clone(),
         );
         self.set_data(new_data);
+    }
+
+    pub(crate) fn set_truncate_ts(&self, val: &[u8]) -> bool {
+        let truncate_ts = TruncateTs::unmarshal(val);
+        let data = self.get_data();
+        if let Some(curr_truncate_ts) = data.truncate_ts {
+            if curr_truncate_ts <= truncate_ts {
+                warn!("ignore another PiTR before the current one has completed";
+                    "current truncated_ts" => ?curr_truncate_ts, "incoming truncated_ts" => ?truncate_ts,
+                    "shard" => ?self.tag());
+                return false;
+            } else {
+                warn!("overwrite truncate_ts";
+                    "current truncated_ts" => ?curr_truncate_ts, "incoming truncated_ts" => ?truncate_ts,
+                    "shard" => ?self.tag());
+            }
+        }
+
+        let new_data = ShardData::new(
+            data.start.clone(),
+            data.end.clone(),
+            data.del_prefixes.clone(),
+            Some(truncate_ts),
+            data.mem_tbls.clone(),
+            data.l0_tbls.clone(),
+            data.cfs.clone(),
+        );
+        self.set_data(new_data);
+
+        info!("ready to truncate ts"; "truncate_ts" => ?truncate_ts, "shard" => ?self.tag());
+        true
     }
 
     pub fn get_suggest_split_key(&self) -> Option<Bytes> {
@@ -280,6 +330,7 @@ impl Shard {
             self.start.clone(),
             self.end.clone(),
             old_data.del_prefixes.clone(),
+            old_data.truncate_ts,
             new_mem_tbls,
             old_data.l0_tbls.clone(),
             old_data.cfs.clone(),
@@ -301,6 +352,15 @@ impl Shard {
 
     pub fn get_estimated_entries(&self) -> u64 {
         self.estimated_entries.load(Ordering::Relaxed)
+    }
+
+    // Note: `get_max_ts` would be not up-to-date.
+    // Invoke `Shard::refresh_states` to refresh it.
+    pub fn get_max_ts(&self) -> u64 {
+        cmp::max(
+            self.max_ts.load(Ordering::Relaxed),
+            self.get_data().get_mem_table_max_ts(),
+        )
     }
 
     pub fn get_estimated_kv_size(&self) -> u64 {
@@ -382,7 +442,8 @@ impl Shard {
         self.is_active()
             && self.get_initial_flushed()
             && (self.get_compaction_priority().is_some()
-                || self.get_data().ready_to_destroy_range())
+                || self.get_data().ready_to_destroy_range()
+                || self.get_data().ready_to_truncate_ts())
     }
 
     pub(crate) fn add_parent_mem_tbls(&self, parent: Arc<Shard>) {
@@ -395,6 +456,7 @@ impl Shard {
             shard_data.start.clone(),
             shard_data.end.clone(),
             shard_data.del_prefixes.clone(),
+            shard_data.truncate_ts,
             mem_tbls,
             shard_data.l0_tbls.clone(),
             shard_data.cfs.clone(),
@@ -422,6 +484,7 @@ impl ShardData {
             start,
             end,
             DeletePrefixes::default(),
+            None,
             vec![CFTable::new()],
             vec![],
             [ShardCF::new(0), ShardCF::new(1), ShardCF::new(2)],
@@ -432,6 +495,7 @@ impl ShardData {
         start: Bytes,
         end: Bytes,
         del_prefixes: DeletePrefixes,
+        truncate_ts: Option<TruncateTs>,
         mem_tbls: Vec<memtable::CFTable>,
         l0_tbls: Vec<L0Table>,
         cfs: [ShardCF; 3],
@@ -442,6 +506,7 @@ impl ShardData {
                 start,
                 end,
                 del_prefixes,
+                truncate_ts,
                 mem_tbls,
                 l0_tbls,
                 cfs,
@@ -454,6 +519,7 @@ pub(crate) struct ShardDataCore {
     pub(crate) start: Bytes,
     pub(crate) end: Bytes,
     pub(crate) del_prefixes: DeletePrefixes,
+    pub(crate) truncate_ts: Option<TruncateTs>,
     pub(crate) mem_tbls: Vec<memtable::CFTable>,
     pub(crate) l0_tbls: Vec<L0Table>,
     pub(crate) cfs: [ShardCF; 3],
@@ -497,14 +563,23 @@ impl ShardDataCore {
         }
     }
 
+    // Return (max_ts).
+    pub(crate) fn get_mem_table_max_ts(&self) -> u64 {
+        let mut max_ts = 0;
+        self.mem_tbls.iter().for_each(|t| {
+            max_ts = cmp::max(max_ts, t.data_max_ts());
+        });
+        max_ts
+    }
+
     pub(crate) fn get_l0_total_size(&self) -> u64 {
         let (total_size, ..) = self.get_l0_stats();
         total_size
     }
 
-    // Return (total_size, total_entries, total_kv_size).
-    pub(crate) fn get_l0_stats(&self) -> (u64, u64, u64) {
-        let (mut total_size, mut total_entries, mut total_kv_size) = (0, 0, 0);
+    // Return (total_size, total_entries, total_kv_size, max_ts).
+    pub(crate) fn get_l0_stats(&self) -> (u64, u64, u64, u64) {
+        let (mut total_size, mut total_entries, mut total_kv_size, mut max_ts) = (0, 0, 0, 0);
         self.l0_tbls.iter().for_each(|l0| {
             if self.cover_full_table(l0.smallest(), l0.biggest()) {
                 total_size += l0.size();
@@ -515,8 +590,9 @@ impl ShardDataCore {
                 total_entries += l0.entries() / 2;
                 total_kv_size += l0.kv_size() / 2;
             }
+            max_ts = cmp::max(max_ts, l0.max_ts());
         });
-        (total_size, total_entries, total_kv_size)
+        (total_size, total_entries, total_kv_size, max_ts)
     }
 
     pub(crate) fn get_level_total_size(&self, level: &LevelHandler) -> u64 {
@@ -524,9 +600,9 @@ impl ShardDataCore {
         total_size
     }
 
-    // Return (total_size, total_entries, total_kv_size).
-    pub(crate) fn get_level_stats(&self, level: &LevelHandler) -> (u64, u64, u64) {
-        let (mut total_size, mut total_entries, mut total_kv_size) = (0, 0, 0);
+    // Return (total_size, total_entries, total_kv_size, max_ts).
+    pub(crate) fn get_level_stats(&self, level: &LevelHandler) -> (u64, u64, u64, u64) {
+        let (mut total_size, mut total_entries, mut total_kv_size, mut max_ts) = (0, 0, 0, 0);
         level.tables.iter().enumerate().for_each(|(i, tbl)| {
             if self.is_over_bound_table(level, i, tbl) {
                 total_size += tbl.size() / 2;
@@ -537,8 +613,9 @@ impl ShardDataCore {
                 total_entries += tbl.entries as u64;
                 total_kv_size += tbl.kv_size;
             }
+            max_ts = cmp::max(max_ts, tbl.max_ts);
         });
-        (total_size, total_entries, total_kv_size)
+        (total_size, total_entries, total_kv_size, max_ts)
     }
 
     fn is_over_bound_table(&self, level: &LevelHandler, i: usize, tbl: &SSTable) -> bool {
@@ -569,6 +646,19 @@ impl ShardDataCore {
                     .delete_ranges()
                     .any(|(start, end)| mem_tbl.has_data_in_range(start, end))
             })
+    }
+
+    pub fn writable_mem_table_need_truncate_ts(&self) -> bool {
+        let mem_tbl = self.get_writable_mem_table();
+        mem_tbl.data_max_ts() > self.truncate_ts.unwrap().inner()
+    }
+
+    pub fn ready_to_truncate_ts(&self) -> bool {
+        self.truncate_ts.is_some()
+        // No memtable contains data with version > truncate_ts.
+        && !self.mem_tbls.iter().any(|mem_tbl| {
+            mem_tbl.data_max_ts() > self.truncate_ts.unwrap().inner()
+        })
     }
 }
 
@@ -978,110 +1068,159 @@ impl DeletePrefixes {
     }
 }
 
-#[test]
-fn test_delete_prefix() {
-    let assert_prefix_invariant = |del_prefix: &DeletePrefixes| {
-        assert_eq!(del_prefix.prefixes.len(), del_prefix.prefixes_nexts.len());
-        assert_eq!(
-            del_prefix.prefixes.len(),
-            del_prefix.delete_ranges().count()
-        );
-        assert!(del_prefix.delete_ranges().all(|(p, p_n)| {
-            let mut p_c = p.to_vec();
-            tidb_query_common::util::convert_to_prefix_next(&mut p_c);
-            p_c == p_n
-        }));
-    };
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[repr(transparent)]
+pub struct TruncateTs(u64);
 
-    let mut del_prefix = DeletePrefixes::default();
-    assert_prefix_invariant(&del_prefix);
-    assert!(del_prefix.is_empty());
-    del_prefix = del_prefix.merge("101".as_bytes());
-    assert!(!del_prefix.is_empty());
-    assert_eq!(del_prefix.prefixes.len(), 1);
-    assert_prefix_invariant(&del_prefix);
-    for prefix in ["1010", "101"] {
-        assert!(del_prefix.cover_prefix(prefix.as_bytes()));
-    }
-    for prefix in ["10", "103"] {
-        assert!(!del_prefix.cover_prefix(prefix.as_bytes()));
+impl TruncateTs {
+    pub fn marshal(&self) -> [u8; 8] {
+        self.0.to_le_bytes()
     }
 
-    del_prefix = del_prefix.merge("105".as_bytes());
-    assert_prefix_invariant(&del_prefix);
-    let bin = del_prefix.marshal();
-    del_prefix = DeletePrefixes::unmarshal(&bin);
-    assert_prefix_invariant(&del_prefix);
-    assert_eq!(del_prefix.prefixes.len(), 2);
-    for prefix in ["1010", "101", "1050", "105"] {
-        assert!(del_prefix.cover_prefix(prefix.as_bytes()));
-    }
-    for prefix in ["10", "103"] {
-        assert!(!del_prefix.cover_prefix(prefix.as_bytes()));
+    pub fn unmarshal(mut data: &[u8]) -> Self {
+        assert_eq!(data.len(), U64_SIZE);
+        Self(data.get_u64_le())
     }
 
-    del_prefix = del_prefix.merge("10".as_bytes());
-    assert_prefix_invariant(&del_prefix);
-    assert_eq!(del_prefix.prefixes.len(), 1);
-    for prefix in ["10", "101", "103", "104"] {
-        assert!(del_prefix.cover_prefix(prefix.as_bytes()));
+    #[inline]
+    pub fn inner(&self) -> u64 {
+        self.0
     }
-    for prefix in ["1", "11"] {
-        assert!(!del_prefix.cover_prefix(prefix.as_bytes()));
+}
+
+impl From<u64> for TruncateTs {
+    fn from(ts: u64) -> Self {
+        Self(ts)
     }
+}
 
-    del_prefix = DeletePrefixes::default();
-    del_prefix = del_prefix.merge("101".as_bytes());
-    del_prefix = del_prefix.merge("102".as_bytes());
-    assert_prefix_invariant(&del_prefix);
-    for (start, end) in [("101", "1011"), ("102", "1022")] {
-        assert!(del_prefix.cover_range(start.as_bytes(), end.as_bytes()));
+pub(crate) fn need_update_truncate_ts(cur: Option<TruncateTs>, new: TruncateTs) -> bool {
+    if cur.is_none() {
+        return true;
     }
-    for (start, end) in [("99", "100"), ("101", "102"), ("102", "103")] {
-        assert!(!del_prefix.cover_range(start.as_bytes(), end.as_bytes()));
-    }
+    new <= cur.unwrap()
+}
 
-    del_prefix = DeletePrefixes::default();
-    del_prefix = del_prefix.merge("101".as_bytes());
-    del_prefix = del_prefix.merge("1033".as_bytes());
-    del_prefix = del_prefix.merge("1055".as_bytes());
-    del_prefix = del_prefix.merge("107".as_bytes());
-    assert_prefix_invariant(&del_prefix);
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let split_del_range = del_prefix.build_split("1033".as_bytes(), "1055".as_bytes());
-    assert_prefix_invariant(&split_del_range);
-    assert_eq!(split_del_range.prefixes.len(), 1);
-    assert_eq!(&split_del_range.prefixes[0], "1033".as_bytes());
+    #[test]
+    fn test_delete_prefix() {
+        let assert_prefix_invariant = |del_prefix: &DeletePrefixes| {
+            assert_eq!(del_prefix.prefixes.len(), del_prefix.prefixes_nexts.len());
+            assert_eq!(
+                del_prefix.prefixes.len(),
+                del_prefix.delete_ranges().count()
+            );
+            assert!(del_prefix.delete_ranges().all(|(p, p_n)| {
+                let mut p_c = p.to_vec();
+                tidb_query_common::util::convert_to_prefix_next(&mut p_c);
+                p_c == p_n
+            }));
+        };
 
-    let split_del_range = del_prefix.build_split("1034".as_bytes(), "1055".as_bytes());
-    assert_prefix_invariant(&split_del_range);
-    assert_eq!(split_del_range.prefixes.len(), 0);
+        let mut del_prefix = DeletePrefixes::default();
+        assert_prefix_invariant(&del_prefix);
+        assert!(del_prefix.is_empty());
+        del_prefix = del_prefix.merge("101".as_bytes());
+        assert!(!del_prefix.is_empty());
+        assert_eq!(del_prefix.prefixes.len(), 1);
+        assert_prefix_invariant(&del_prefix);
+        for prefix in ["1010", "101"] {
+            assert!(del_prefix.cover_prefix(prefix.as_bytes()));
+        }
+        for prefix in ["10", "103"] {
+            assert!(!del_prefix.cover_prefix(prefix.as_bytes()));
+        }
 
-    let split_del_range = del_prefix.build_split("10334".as_bytes(), "10555".as_bytes());
-    assert_prefix_invariant(&split_del_range);
-    assert_eq!(split_del_range.prefixes.len(), 2);
-    assert_eq!(&split_del_range.prefixes[0], "1033".as_bytes());
-    assert_eq!(&split_del_range.prefixes[1], "1055".as_bytes());
+        del_prefix = del_prefix.merge("105".as_bytes());
+        assert_prefix_invariant(&del_prefix);
+        let bin = del_prefix.marshal();
+        del_prefix = DeletePrefixes::unmarshal(&bin);
+        assert_prefix_invariant(&del_prefix);
+        assert_eq!(del_prefix.prefixes.len(), 2);
+        for prefix in ["1010", "101", "1050", "105"] {
+            assert!(del_prefix.cover_prefix(prefix.as_bytes()));
+        }
+        for prefix in ["10", "103"] {
+            assert!(!del_prefix.cover_prefix(prefix.as_bytes()));
+        }
 
-    del_prefix = DeletePrefixes::default()
-        .merge("100".as_bytes())
-        .merge("200".as_bytes())
-        .merge("300".as_bytes());
-    assert_prefix_invariant(&del_prefix);
-    del_prefix = del_prefix.split(&DeletePrefixes::default().merge("100".as_bytes()));
-    assert_prefix_invariant(&del_prefix);
-    assert_eq!(del_prefix.prefixes.len(), 2);
-    assert!(!del_prefix.cover_prefix("100".as_bytes()));
-    assert!(del_prefix.cover_prefix("200".as_bytes()));
-    assert!(del_prefix.cover_prefix("300".as_bytes()));
-    del_prefix = del_prefix.split(
-        &DeletePrefixes::default()
+        del_prefix = del_prefix.merge("10".as_bytes());
+        assert_prefix_invariant(&del_prefix);
+        assert_eq!(del_prefix.prefixes.len(), 1);
+        for prefix in ["10", "101", "103", "104"] {
+            assert!(del_prefix.cover_prefix(prefix.as_bytes()));
+        }
+        for prefix in ["1", "11"] {
+            assert!(!del_prefix.cover_prefix(prefix.as_bytes()));
+        }
+
+        del_prefix = DeletePrefixes::default();
+        del_prefix = del_prefix.merge("101".as_bytes());
+        del_prefix = del_prefix.merge("102".as_bytes());
+        assert_prefix_invariant(&del_prefix);
+        for (start, end) in [("101", "1011"), ("102", "1022")] {
+            assert!(del_prefix.cover_range(start.as_bytes(), end.as_bytes()));
+        }
+        for (start, end) in [("99", "100"), ("101", "102"), ("102", "103")] {
+            assert!(!del_prefix.cover_range(start.as_bytes(), end.as_bytes()));
+        }
+
+        del_prefix = DeletePrefixes::default();
+        del_prefix = del_prefix.merge("101".as_bytes());
+        del_prefix = del_prefix.merge("1033".as_bytes());
+        del_prefix = del_prefix.merge("1055".as_bytes());
+        del_prefix = del_prefix.merge("107".as_bytes());
+        assert_prefix_invariant(&del_prefix);
+
+        let split_del_range = del_prefix.build_split("1033".as_bytes(), "1055".as_bytes());
+        assert_prefix_invariant(&split_del_range);
+        assert_eq!(split_del_range.prefixes.len(), 1);
+        assert_eq!(&split_del_range.prefixes[0], "1033".as_bytes());
+
+        let split_del_range = del_prefix.build_split("1034".as_bytes(), "1055".as_bytes());
+        assert_prefix_invariant(&split_del_range);
+        assert_eq!(split_del_range.prefixes.len(), 0);
+
+        let split_del_range = del_prefix.build_split("10334".as_bytes(), "10555".as_bytes());
+        assert_prefix_invariant(&split_del_range);
+        assert_eq!(split_del_range.prefixes.len(), 2);
+        assert_eq!(&split_del_range.prefixes[0], "1033".as_bytes());
+        assert_eq!(&split_del_range.prefixes[1], "1055".as_bytes());
+
+        del_prefix = DeletePrefixes::default()
+            .merge("100".as_bytes())
             .merge("200".as_bytes())
-            .merge("300".as_bytes()),
-    );
-    assert_prefix_invariant(&del_prefix);
-    assert_eq!(del_prefix.prefixes.len(), 0);
-    assert!(!del_prefix.cover_prefix("100".as_bytes()));
-    assert!(!del_prefix.cover_prefix("200".as_bytes()));
-    assert!(!del_prefix.cover_prefix("300".as_bytes()));
+            .merge("300".as_bytes());
+        assert_prefix_invariant(&del_prefix);
+        del_prefix = del_prefix.split(&DeletePrefixes::default().merge("100".as_bytes()));
+        assert_prefix_invariant(&del_prefix);
+        assert_eq!(del_prefix.prefixes.len(), 2);
+        assert!(!del_prefix.cover_prefix("100".as_bytes()));
+        assert!(del_prefix.cover_prefix("200".as_bytes()));
+        assert!(del_prefix.cover_prefix("300".as_bytes()));
+        del_prefix = del_prefix.split(
+            &DeletePrefixes::default()
+                .merge("200".as_bytes())
+                .merge("300".as_bytes()),
+        );
+        assert_prefix_invariant(&del_prefix);
+        assert_eq!(del_prefix.prefixes.len(), 0);
+        assert!(!del_prefix.cover_prefix("100".as_bytes()));
+        assert!(!del_prefix.cover_prefix("200".as_bytes()));
+        assert!(!del_prefix.cover_prefix("300".as_bytes()));
+    }
+
+    #[test]
+    fn test_truncate_ts() {
+        let ts = 437598164238729283;
+        let truncate_ts = TruncateTs(ts);
+        assert_eq!(
+            TruncateTs::unmarshal(truncate_ts.marshal().as_slice()),
+            truncate_ts
+        );
+        assert_eq!(truncate_ts.inner(), ts);
+    }
 }

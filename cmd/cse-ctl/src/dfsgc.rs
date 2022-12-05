@@ -5,16 +5,12 @@ use std::{
     fs,
     path::PathBuf,
     str::FromStr,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
+    sync::atomic::{AtomicUsize, Ordering},
     time::{Duration, Instant},
 };
 
 use bytes::Buf;
 use clap::Args;
-use grpcio::EnvBuilder;
 use http::Uri;
 use kvengine::{
     dfs,
@@ -22,9 +18,11 @@ use kvengine::{
 };
 use kvproto::metapb::Store;
 use pd_client::{PdClient, RpcClient};
-use security::{SecurityConfig, SecurityManager};
+use security::SecurityConfig;
 use slog_global::error;
 use tikv_util::info;
+
+use crate::common::create_pd_client;
 
 /// DFSGC arguments
 #[derive(Args)]
@@ -201,17 +199,4 @@ impl GcWorker {
             }
         });
     }
-}
-
-pub(crate) fn create_pd_client(
-    security_conf: &SecurityConfig,
-    pd_conf: &pd_client::Config,
-) -> RpcClient {
-    let security_mgr = Arc::new(
-        SecurityManager::new(security_conf)
-            .unwrap_or_else(|e| panic!("failed to create security manager: {:?}", e)),
-    );
-    let env = Arc::new(EnvBuilder::new().cq_count(1).build());
-    RpcClient::new(pd_conf, Some(env), security_mgr)
-        .unwrap_or_else(|e| panic!("failed to create rpc client: {:?}", e))
 }

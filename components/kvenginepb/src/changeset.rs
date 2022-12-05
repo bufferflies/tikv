@@ -43,7 +43,8 @@ pub struct ChangeSet {
     pub property_key: ::std::string::String,
     pub property_value: ::std::vec::Vec<u8>,
     pub property_merge: bool,
-    pub destroy_range: ::protobuf::SingularPtrField<DestroyRange>,
+    pub destroy_range: ::protobuf::SingularPtrField<TableChange>,
+    pub truncate_ts: ::protobuf::SingularPtrField<TableChange>,
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
     pub cached_size: ::protobuf::CachedSize,
@@ -418,11 +419,11 @@ impl ChangeSet {
         self.property_merge = v;
     }
 
-    // .enginepb.DestroyRange destroy_range = 18;
+    // .enginepb.TableChange destroy_range = 18;
 
 
-    pub fn get_destroy_range(&self) -> &DestroyRange {
-        self.destroy_range.as_ref().unwrap_or_else(|| DestroyRange::default_instance())
+    pub fn get_destroy_range(&self) -> &TableChange {
+        self.destroy_range.as_ref().unwrap_or_else(|| TableChange::default_instance())
     }
     pub fn clear_destroy_range(&mut self) {
         self.destroy_range.clear();
@@ -433,13 +434,13 @@ impl ChangeSet {
     }
 
     // Param is passed by value, moved
-    pub fn set_destroy_range(&mut self, v: DestroyRange) {
+    pub fn set_destroy_range(&mut self, v: TableChange) {
         self.destroy_range = ::protobuf::SingularPtrField::some(v);
     }
 
     // Mutable pointer to the field.
     // If field is not initialized, it is initialized with default value first.
-    pub fn mut_destroy_range(&mut self) -> &mut DestroyRange {
+    pub fn mut_destroy_range(&mut self) -> &mut TableChange {
         if self.destroy_range.is_none() {
             self.destroy_range.set_default();
         }
@@ -447,8 +448,41 @@ impl ChangeSet {
     }
 
     // Take field
-    pub fn take_destroy_range(&mut self) -> DestroyRange {
-        self.destroy_range.take().unwrap_or_else(|| DestroyRange::new())
+    pub fn take_destroy_range(&mut self) -> TableChange {
+        self.destroy_range.take().unwrap_or_else(|| TableChange::new())
+    }
+
+    // .enginepb.TableChange truncate_ts = 19;
+
+
+    pub fn get_truncate_ts(&self) -> &TableChange {
+        self.truncate_ts.as_ref().unwrap_or_else(|| TableChange::default_instance())
+    }
+    pub fn clear_truncate_ts(&mut self) {
+        self.truncate_ts.clear();
+    }
+
+    pub fn has_truncate_ts(&self) -> bool {
+        self.truncate_ts.is_some()
+    }
+
+    // Param is passed by value, moved
+    pub fn set_truncate_ts(&mut self, v: TableChange) {
+        self.truncate_ts = ::protobuf::SingularPtrField::some(v);
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_truncate_ts(&mut self) -> &mut TableChange {
+        if self.truncate_ts.is_none() {
+            self.truncate_ts.set_default();
+        }
+        self.truncate_ts.as_mut().unwrap()
+    }
+
+    // Take field
+    pub fn take_truncate_ts(&mut self) -> TableChange {
+        self.truncate_ts.take().unwrap_or_else(|| TableChange::new())
     }
 }
 
@@ -490,6 +524,11 @@ impl ::protobuf::Message for ChangeSet {
             }
         };
         for v in &self.destroy_range {
+            if !v.is_initialized() {
+                return false;
+            }
+        };
+        for v in &self.truncate_ts {
             if !v.is_initialized() {
                 return false;
             }
@@ -566,6 +605,9 @@ impl ::protobuf::Message for ChangeSet {
                 18 => {
                     ::protobuf::rt::read_singular_message_into(wire_type, is, &mut self.destroy_range)?;
                 },
+                19 => {
+                    ::protobuf::rt::read_singular_message_into(wire_type, is, &mut self.truncate_ts)?;
+                },
                 _ => {
                     ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
                 },
@@ -628,6 +670,10 @@ impl ::protobuf::Message for ChangeSet {
             my_size += 3;
         }
         if let Some(ref v) = self.destroy_range.as_ref() {
+            let len = v.compute_size();
+            my_size += 2 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
+        }
+        if let Some(ref v) = self.truncate_ts.as_ref() {
             let len = v.compute_size();
             my_size += 2 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
         }
@@ -695,6 +741,11 @@ impl ::protobuf::Message for ChangeSet {
         }
         if let Some(ref v) = self.destroy_range.as_ref() {
             os.write_tag(18, ::protobuf::wire_format::WireTypeLengthDelimited)?;
+            os.write_raw_varint32(v.get_cached_size())?;
+            v.write_to_with_cached_sizes(os)?;
+        }
+        if let Some(ref v) = self.truncate_ts.as_ref() {
+            os.write_tag(19, ::protobuf::wire_format::WireTypeLengthDelimited)?;
             os.write_raw_varint32(v.get_cached_size())?;
             v.write_to_with_cached_sizes(os)?;
         }
@@ -810,10 +861,15 @@ impl ::protobuf::Message for ChangeSet {
                     |m: &ChangeSet| { &m.property_merge },
                     |m: &mut ChangeSet| { &mut m.property_merge },
                 ));
-                fields.push(::protobuf::reflect::accessor::make_singular_ptr_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<DestroyRange>>(
+                fields.push(::protobuf::reflect::accessor::make_singular_ptr_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<TableChange>>(
                     "destroy_range",
                     |m: &ChangeSet| { &m.destroy_range },
                     |m: &mut ChangeSet| { &mut m.destroy_range },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_singular_ptr_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<TableChange>>(
+                    "truncate_ts",
+                    |m: &ChangeSet| { &m.truncate_ts },
+                    |m: &mut ChangeSet| { &mut m.truncate_ts },
                 ));
                 ::protobuf::reflect::MessageDescriptor::new::<ChangeSet>(
                     "ChangeSet",
@@ -852,6 +908,7 @@ impl ::protobuf::Clear for ChangeSet {
         self.property_value.clear();
         self.property_merge = false;
         self.destroy_range.clear();
+        self.truncate_ts.clear();
         self.unknown_fields.clear();
     }
 }
@@ -876,6 +933,7 @@ impl ::protobuf::PbPrint for ChangeSet {
         ::protobuf::PbPrint::fmt(&self.property_value, "property_value", buf);
         ::protobuf::PbPrint::fmt(&self.property_merge, "property_merge", buf);
         ::protobuf::PbPrint::fmt(&self.destroy_range, "destroy_range", buf);
+        ::protobuf::PbPrint::fmt(&self.truncate_ts, "truncate_ts", buf);
         if old_len < buf.len() {
           buf.push(' ');
         }
@@ -901,6 +959,7 @@ impl ::std::fmt::Debug for ChangeSet {
         ::protobuf::PbPrint::fmt(&self.property_value, "property_value", &mut s);
         ::protobuf::PbPrint::fmt(&self.property_merge, "property_merge", &mut s);
         ::protobuf::PbPrint::fmt(&self.destroy_range, "destroy_range", &mut s);
+        ::protobuf::PbPrint::fmt(&self.truncate_ts, "truncate_ts", &mut s);
         write!(f, "{}", s)
     }
 }
@@ -3711,7 +3770,7 @@ impl ::protobuf::reflect::ProtobufValue for Properties {
 }
 
 #[derive(PartialEq,Clone,Default)]
-pub struct DestroyRange {
+pub struct TableChange {
     // message fields
     pub table_deletes: ::protobuf::RepeatedField<TableDelete>,
     pub table_creates: ::protobuf::RepeatedField<TableCreate>,
@@ -3720,14 +3779,14 @@ pub struct DestroyRange {
     pub cached_size: ::protobuf::CachedSize,
 }
 
-impl<'a> ::std::default::Default for &'a DestroyRange {
-    fn default() -> &'a DestroyRange {
-        <DestroyRange as ::protobuf::Message>::default_instance()
+impl<'a> ::std::default::Default for &'a TableChange {
+    fn default() -> &'a TableChange {
+        <TableChange as ::protobuf::Message>::default_instance()
     }
 }
 
-impl DestroyRange {
-    pub fn new() -> DestroyRange {
+impl TableChange {
+    pub fn new() -> TableChange {
         ::std::default::Default::default()
     }
 
@@ -3782,7 +3841,7 @@ impl DestroyRange {
     }
 }
 
-impl ::protobuf::Message for DestroyRange {
+impl ::protobuf::Message for TableChange {
     fn is_initialized(&self) -> bool {
         for v in &self.table_deletes {
             if !v.is_initialized() {
@@ -3873,8 +3932,8 @@ impl ::protobuf::Message for DestroyRange {
         Self::descriptor_static()
     }
 
-    fn new() -> DestroyRange {
-        DestroyRange::new()
+    fn new() -> TableChange {
+        TableChange::new()
     }
 
     fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
@@ -3887,16 +3946,16 @@ impl ::protobuf::Message for DestroyRange {
                 let mut fields = ::std::vec::Vec::new();
                 fields.push(::protobuf::reflect::accessor::make_repeated_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<TableDelete>>(
                     "tableDeletes",
-                    |m: &DestroyRange| { &m.table_deletes },
-                    |m: &mut DestroyRange| { &mut m.table_deletes },
+                    |m: &TableChange| { &m.table_deletes },
+                    |m: &mut TableChange| { &mut m.table_deletes },
                 ));
                 fields.push(::protobuf::reflect::accessor::make_repeated_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<TableCreate>>(
                     "tableCreates",
-                    |m: &DestroyRange| { &m.table_creates },
-                    |m: &mut DestroyRange| { &mut m.table_creates },
+                    |m: &TableChange| { &m.table_creates },
+                    |m: &mut TableChange| { &mut m.table_creates },
                 ));
-                ::protobuf::reflect::MessageDescriptor::new::<DestroyRange>(
-                    "DestroyRange",
+                ::protobuf::reflect::MessageDescriptor::new::<TableChange>(
+                    "TableChange",
                     fields,
                     file_descriptor_proto()
                 )
@@ -3904,18 +3963,18 @@ impl ::protobuf::Message for DestroyRange {
         }
     }
 
-    fn default_instance() -> &'static DestroyRange {
-        static mut instance: ::protobuf::lazy::Lazy<DestroyRange> = ::protobuf::lazy::Lazy {
+    fn default_instance() -> &'static TableChange {
+        static mut instance: ::protobuf::lazy::Lazy<TableChange> = ::protobuf::lazy::Lazy {
             lock: ::protobuf::lazy::ONCE_INIT,
-            ptr: 0 as *const DestroyRange,
+            ptr: 0 as *const TableChange,
         };
         unsafe {
-            instance.get(DestroyRange::new)
+            instance.get(TableChange::new)
         }
     }
 }
 
-impl ::protobuf::Clear for DestroyRange {
+impl ::protobuf::Clear for TableChange {
     fn clear(&mut self) {
         self.table_deletes.clear();
         self.table_creates.clear();
@@ -3923,7 +3982,7 @@ impl ::protobuf::Clear for DestroyRange {
     }
 }
 
-impl ::protobuf::PbPrint for DestroyRange {
+impl ::protobuf::PbPrint for TableChange {
     #[allow(unused_variables)]
     fn fmt(&self, name: &str, buf: &mut String) {
         ::protobuf::push_message_start(name, buf);
@@ -3936,7 +3995,7 @@ impl ::protobuf::PbPrint for DestroyRange {
         buf.push('}');
     }
 }
-impl ::std::fmt::Debug for DestroyRange {
+impl ::std::fmt::Debug for TableChange {
     #[allow(unused_variables)]
     fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
         let mut s = String::new();
@@ -3946,14 +4005,14 @@ impl ::std::fmt::Debug for DestroyRange {
     }
 }
 
-impl ::protobuf::reflect::ProtobufValue for DestroyRange {
+impl ::protobuf::reflect::ProtobufValue for TableChange {
     fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef {
         ::protobuf::reflect::ProtobufValueRef::Message(self)
     }
 }
 
 static file_descriptor_proto_data: &'static [u8] = b"\
-    \n\x0fchangeset.proto\x12\x08enginepb\"\xf7\x03\n\tChangeSet\x12\x11\n\
+    \n\x0fchangeset.proto\x12\x08enginepb\"\xa4\x04\n\tChangeSet\x12\x11\n\
     \x07shardID\x18\x01\x20\x01(\x04B\0\x12\x12\n\x08shardVer\x18\x02\x20\
     \x01(\x04B\0\x12*\n\ncompaction\x18\x04\x20\x01(\x0b2\x14.enginepb.Compa\
     ctionB\0\x12\x20\n\x05flush\x18\x05\x20\x01(\x0b2\x0f.enginepb.FlushB\0\
@@ -3965,9 +4024,10 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     \x12-\n\x0cingest_files\x18\x0e\x20\x01(\x0b2\x15.enginepb.IngestFilesB\
     \0\x12\x16\n\x0cproperty_key\x18\x0f\x20\x01(\tB\0\x12\x18\n\x0eproperty\
     _value\x18\x10\x20\x01(\x0cB\0\x12\x18\n\x0eproperty_merge\x18\x11\x20\
-    \x01(\x08B\0\x12/\n\rdestroy_range\x18\x12\x20\x01(\x0b2\x16.enginepb.De\
-    stroyRangeB\0:\0\"\xa1\x01\n\nCompaction\x12\x0c\n\x02cf\x18\x01\x20\x01\
-    (\x05B\0\x12\x0f\n\x05level\x18\x02\x20\x01(\rB\0\x12-\n\x0ctableCreates\
+    \x01(\x08B\0\x12.\n\rdestroy_range\x18\x12\x20\x01(\x0b2\x15.enginepb.Ta\
+    bleChangeB\0\x12,\n\x0btruncate_ts\x18\x13\x20\x01(\x0b2\x15.enginepb.Ta\
+    bleChangeB\0:\0\"\xa1\x01\n\nCompaction\x12\x0c\n\x02cf\x18\x01\x20\x01(\
+    \x05B\0\x12\x0f\n\x05level\x18\x02\x20\x01(\rB\0\x12-\n\x0ctableCreates\
     \x18\x03\x20\x03(\x0b2\x15.enginepb.TableCreateB\0\x12\x14\n\ntopDeletes\
     \x18\x04\x20\x03(\x04B\0\x12\x17\n\rbottomDeletes\x18\x05\x20\x03(\x04B\
     \0\x12\x14\n\nconflicted\x18\x06\x20\x01(\x08B\0:\0\"p\n\x05Flush\x12&\n\
@@ -3993,10 +4053,10 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     s\x18\x02\x20\x03(\x0b2\x15.enginepb.TableCreateB\0\x12*\n\nproperties\
     \x18\x03\x20\x01(\x0b2\x14.enginepb.PropertiesB\0:\0\"C\n\nProperties\
     \x12\x11\n\x07shardID\x18\x01\x20\x01(\x04B\0\x12\x0e\n\x04keys\x18\x02\
-    \x20\x03(\tB\0\x12\x10\n\x06values\x18\x03\x20\x03(\x0cB\0:\0\"n\n\x0cDe\
-    stroyRange\x12-\n\x0ctableDeletes\x18\x01\x20\x03(\x0b2\x15.enginepb.Tab\
-    leDeleteB\0\x12-\n\x0ctableCreates\x18\x02\x20\x03(\x0b2\x15.enginepb.Ta\
-    bleCreateB\0:\0B\0b\x06proto3\
+    \x20\x03(\tB\0\x12\x10\n\x06values\x18\x03\x20\x03(\x0cB\0:\0\"m\n\x0bTa\
+    bleChange\x12-\n\x0ctableDeletes\x18\x01\x20\x03(\x0b2\x15.enginepb.Tabl\
+    eDeleteB\0\x12-\n\x0ctableCreates\x18\x02\x20\x03(\x0b2\x15.enginepb.Tab\
+    leCreateB\0:\0B\0b\x06proto3\
 ";
 
 static mut file_descriptor_proto_lazy: ::protobuf::lazy::Lazy<::protobuf::descriptor::FileDescriptorProto> = ::protobuf::lazy::Lazy {

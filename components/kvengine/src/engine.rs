@@ -240,6 +240,7 @@ impl EngineCore {
             shard.start.clone(),
             shard.end.clone(),
             shard.get_data().del_prefixes.clone(),
+            shard.get_data().truncate_ts,
             vec![CFTable::new()],
             l0s,
             scfs,
@@ -497,7 +498,7 @@ impl EngineCore {
                 .send(FlushMsg::Committed((id_ver, table_version)))
                 .unwrap();
         }
-        if rejected && (cs.has_compaction() || cs.has_destroy_range()) {
+        if rejected && (cs.has_compaction() || cs.has_destroy_range() || cs.has_truncate_ts()) {
             // Notify the compaction runner otherwise the shard can't be compacted any more.
             self.compact_tx
                 .send(CompactMsg::Applied(IDVer::new(cs.shard_id, cs.shard_ver)))

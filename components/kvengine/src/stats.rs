@@ -1,8 +1,10 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
+use std::cmp;
+
 use bytes::Buf;
 
-use crate::{load_bool, NUM_CFS, WRITE_CF};
+use crate::{load_bool, EXTRA_CF, NUM_CFS, WRITE_CF};
 
 #[derive(Default, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -24,6 +26,7 @@ pub struct EngineStats {
     pub level_total_sizes: Vec<u64>,
     pub tbl_index_size: u64,
     pub tbl_filter_size: u64,
+    pub max_ts: u64, // Use to check whether PiTR has completed.
     pub entries: usize,
     pub old_entries: usize,
     pub tombs: usize,
@@ -77,6 +80,7 @@ impl super::Engine {
             engine_stats.partial_ln_count += shard.partial_tbls;
             engine_stats.tbl_index_size += shard.tbl_index_size;
             engine_stats.tbl_filter_size += shard.tbl_filter_size;
+            engine_stats.max_ts = cmp::max(engine_stats.max_ts, shard.max_ts);
             engine_stats.entries += shard.entries;
             engine_stats.old_entries += shard.old_entries;
             engine_stats.tombs += shard.tombs;
@@ -120,6 +124,7 @@ pub struct ShardStats {
     pub cfs: Vec<CFStats>,
     pub tbl_index_size: u64,
     pub tbl_filter_size: u64,
+    pub max_ts: u64,
     pub entries: usize,
     pub old_entries: usize,
     pub tombs: usize,
@@ -152,10 +157,21 @@ pub struct LevelStats {
     pub data_size: u64,
     pub index_size: u64,
     pub filter_size: u64,
+    pub max_ts: u64,
     pub entries: usize,
     pub old_entries: usize,
     pub tombs: usize,
     pub kv_size: u64,
+}
+
+#[derive(Default, Serialize, Deserialize, Debug)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+pub struct ShardTruncateTsStats {
+    pub id: u64,
+    pub ver: u64,
+    pub cur_max_ts: u64,
+    pub truncate_ts: u64,
 }
 
 impl super::Shard {
@@ -163,6 +179,7 @@ impl super::Shard {
         let mut total_size = 0;
         let mut tbl_index_size = 0;
         let mut tbl_filter_size = 0;
+        let mut max_ts = 0;
         let mut entries = 0;
         let mut old_entries = 0;
         let mut tombs = 0;
@@ -172,6 +189,7 @@ impl super::Shard {
         let mut mem_table_size = 0;
         for mem_tbl in data.mem_tbls.as_slice() {
             mem_table_size += mem_tbl.size() as u64;
+            max_ts = cmp::max(max_ts, mem_tbl.data_max_ts());
         }
         total_size += mem_table_size;
         let mut partial_l0s = 0;
@@ -188,6 +206,7 @@ impl super::Shard {
                 if let Some(cf_tbl) = l0_tbl.get_cf(cf) {
                     tbl_index_size += cf_tbl.index_size();
                     tbl_filter_size += cf_tbl.filter_size();
+                    max_ts = max_ts_by_cf(max_ts, cf, cf_tbl.max_ts);
                     entries += cf_tbl.entries as usize;
                     old_entries += cf_tbl.old_entries as usize;
                     tombs += cf_tbl.tombs as usize;
@@ -230,10 +249,12 @@ impl super::Shard {
                         }
                         partial_tbls += 1;
                     }
+                    level_stats.max_ts = max_ts_by_cf(level_stats.max_ts, cf, t.max_ts);
                 }
                 total_size += level_stats.data_size;
                 tbl_index_size += level_stats.index_size;
                 tbl_filter_size += level_stats.filter_size;
+                max_ts = cmp::max(max_ts, level_stats.max_ts);
                 entries += level_stats.entries;
                 old_entries += level_stats.old_entries;
                 tombs += level_stats.tombs;
@@ -265,6 +286,7 @@ impl super::Shard {
             total_size,
             tbl_index_size,
             tbl_filter_size,
+            max_ts,
             entries,
             old_entries,
             tombs,
@@ -275,6 +297,37 @@ impl super::Shard {
             compaction_level,
             compaction_score,
             delete_prefixes: format!("{:?}", data.del_prefixes),
+        }
+    }
+}
+
+#[inline]
+pub fn max_ts_by_cf(max_ts: u64, cf: usize, cf_max_ts: u64) -> u64 {
+    // Ignore LOCK_CF, as `ts` in LOCK_CF is not a TSO.
+    if (cf == WRITE_CF || cf == EXTRA_CF) && max_ts < cf_max_ts {
+        cf_max_ts
+    } else {
+        max_ts
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::LOCK_CF;
+
+    #[test]
+    fn test_max_ts_by_cf() {
+        let cases = vec![
+            (100, WRITE_CF, 200, 200),
+            (100, LOCK_CF, 200, 100),
+            (100, EXTRA_CF, 200, 200),
+            (200, WRITE_CF, 100, 200),
+            (200, LOCK_CF, 100, 200),
+            (200, EXTRA_CF, 100, 200),
+        ];
+        for (max_ts, cf, cf_max_ts, expected) in cases {
+            assert_eq!(max_ts_by_cf(max_ts, cf, cf_max_ts), expected,);
         }
     }
 }

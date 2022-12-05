@@ -13,7 +13,7 @@ use bytes::Buf;
 use file_system::IORateLimiter;
 use kvenginepb as pb;
 use tempfile::TempDir;
-use tikv_util::mpsc;
+use tikv_util::{mpsc, time::Instant};
 
 use crate::{dfs::InMemFS, *};
 
@@ -77,9 +77,9 @@ fn test_engine() {
     // splitter.run();
     // });
     let (begin, end) = (0, 10000);
-    load_data(begin, end, applier_tx);
+    load_data(begin, end, 1, applier_tx);
     // handle.join().unwrap();
-    check_get(begin, end, &[0, 1, 2], &engine, true);
+    check_get(begin, end, 2, &[0, 1, 2], &engine, true, None);
     check_iterater(begin, end, &engine);
 }
 
@@ -87,7 +87,7 @@ fn test_engine() {
 fn test_destroy_range() {
     init_logger();
     let (engine, applier_tx) = new_test_engine();
-    load_data(10, 50, applier_tx.clone());
+    load_data(10, 50, 1, applier_tx.clone());
     let mem_table_count = engine.get_shard_stat(1).mem_table_count;
     // Unsafe destroy keys [10, 30).
     for prefix in [10, 20] {
@@ -133,13 +133,13 @@ fn test_destroy_range() {
     };
     wait_for_destroying_range();
     // After destroying range, key [10, 30) should be removed.
-    check_get(10, 30, &[0, 1, 2], &engine, false);
-    check_get(30, 50, &[0, 1, 2], &engine, true);
+    check_get(10, 30, 2, &[0, 1, 2], &engine, false, None);
+    check_get(30, 50, 2, &[0, 1, 2], &engine, true, None);
     check_iterater(30, 50, &engine);
 
     // Trigger L0 compaction.
     for i in 1..=10 {
-        load_data(50 + (i - 1) * 10, 50 + i * 10, applier_tx.clone());
+        load_data(50 + (i - 1) * 10, 50 + i * 10, 1, applier_tx.clone());
         let mut wb = WriteBatch::new(1);
         wb.set_switch_mem_table();
         write_data(wb, &applier_tx);
@@ -158,21 +158,164 @@ fn test_destroy_range() {
     wb.set_property(DEL_PREFIXES_KEY, &key[..key.len() - 2]);
     write_data(wb, &applier_tx);
     wait_for_destroying_range();
-    check_get(100, 150, &[0, 1, 2], &engine, false);
-    check_get(50, 100, &[0, 1, 2], &engine, true);
+    check_get(100, 150, 2, &[0, 1, 2], &engine, false, None);
+    check_get(50, 100, 2, &[0, 1, 2], &engine, true, None);
 
     // Clean all data.
     let mut wb = WriteBatch::new(1);
     wb.set_property(DEL_PREFIXES_KEY, b"key");
     write_data(wb, &applier_tx);
     wait_for_destroying_range();
-    check_get(10, 150, &[0, 1, 2], &engine, false);
+    check_get(10, 150, 2, &[0, 1, 2], &engine, false, None);
 
     // No data exists and delete-prefixes can be cleaned too.
     let mut wb = WriteBatch::new(1);
     wb.set_property(DEL_PREFIXES_KEY, b"key");
     write_data(wb, &applier_tx);
     wait_for_destroying_range();
+}
+
+#[test]
+fn test_truncate_ts_request() {
+    init_logger();
+    // TODO: disable compaction, otherwise this case would be unstable.
+    let (engine, applier_tx) = new_test_engine();
+    let version = 1000;
+    load_data(10, 50, version, applier_tx.clone());
+    // truncate ts.
+    let mut wb = WriteBatch::new(1);
+    let truncate_ts = TruncateTs::from(version + 10);
+    wb.set_property(TRUNCATE_TS_KEY, truncate_ts.marshal().as_slice());
+    write_data(wb, &applier_tx);
+    assert_eq!(
+        Some(truncate_ts),
+        engine.get_shard(1).unwrap().get_data().truncate_ts
+    );
+    assert_eq!(
+        truncate_ts.marshal().as_slice(),
+        engine
+            .get_shard(1)
+            .unwrap()
+            .get_property(TRUNCATE_TS_KEY)
+            .unwrap()
+    );
+    let mut cs = pb::ChangeSet::new();
+    cs.set_shard_id(1);
+    cs.set_shard_ver(1);
+    cs.set_sequence(2);
+    let tc = pb::TableChange::new();
+    cs.set_truncate_ts(tc);
+    cs.set_property_key(TRUNCATE_TS_KEY.to_owned());
+
+    // truncated_ts is larger than current truncate ts, don't change it.
+    let truncated_ts = TruncateTs::from(version + 20);
+    cs.set_property_value(truncated_ts.marshal().to_vec());
+    let ret = engine.apply_change_set(apply::ChangeSet::new(cs.clone()));
+    assert!(ret.is_ok());
+    assert_eq!(
+        Some(truncate_ts),
+        engine.get_shard(1).unwrap().get_data().truncate_ts
+    );
+
+    // truncated_ts is equal than current truncate ts, remove truncate ts in shard.
+    let truncated_ts = TruncateTs::from(version + 10);
+    cs.set_sequence(3);
+    cs.set_property_value(truncated_ts.marshal().to_vec());
+    let ret = engine.apply_change_set(apply::ChangeSet::new(cs));
+    assert!(ret.is_ok());
+    assert_eq!(None, engine.get_shard(1).unwrap().get_data().truncate_ts);
+}
+
+#[test]
+fn test_truncate_ts() {
+    init_logger();
+    let (engine, applier_tx) = new_test_engine();
+
+    let set_truncate_ts = |ts: u64| {
+        let mut wb = WriteBatch::new(1);
+        let truncate_ts = TruncateTs::from(ts);
+        wb.set_property(TRUNCATE_TS_KEY, truncate_ts.marshal().as_slice());
+        write_data(wb, &applier_tx);
+        assert_eq!(
+            Some(truncate_ts),
+            engine.get_shard(1).unwrap().get_data().truncate_ts
+        );
+        assert_eq!(
+            truncate_ts.marshal().as_slice(),
+            engine
+                .get_shard(1)
+                .unwrap()
+                .get_property(TRUNCATE_TS_KEY)
+                .unwrap()
+        );
+    };
+
+    let wait_for_truncate_ts = || {
+        let ok = try_wait(
+            || {
+                engine
+                    .get_shard(1)
+                    .unwrap()
+                    .get_data()
+                    .truncate_ts
+                    .is_none()
+            },
+            10,
+        );
+        assert!(
+            ok,
+            "wait_for_truncate_ts timeout, shard:{:?}",
+            engine.get_shard_stat(1)
+        );
+        let shard = engine.get_shard(1).unwrap();
+        let length = shard
+            .get_property(TRUNCATE_TS_KEY)
+            .map(|v| v.len())
+            .unwrap_or_default();
+        assert_eq!(length, 0);
+    };
+
+    load_data(0, 300, 1000, applier_tx.clone());
+    load_data(100, 400, 2000, applier_tx.clone());
+    load_data(200, 500, 3000, applier_tx.clone());
+
+    const ALL_CFS: &[usize] = &[0, 1, 2];
+    const WRT_EXT_CFS: &[usize] = &[0, 2];
+
+    {
+        // No truncate.
+        set_truncate_ts(3000);
+        thread::sleep(Duration::from_secs(1));
+        wait_for_truncate_ts();
+        check_get(0, 100, u64::MAX, ALL_CFS, &engine, true, Some(1000));
+        check_get(100, 300, 1000, ALL_CFS, &engine, true, Some(1000));
+        check_get(100, 200, u64::MAX, ALL_CFS, &engine, true, Some(2000));
+        check_get(200, 400, 2000, ALL_CFS, &engine, true, Some(2000));
+        check_get(200, 500, u64::MAX, ALL_CFS, &engine, true, Some(3000));
+    }
+
+    for truncate_ts in [2999, 2000] {
+        set_truncate_ts(truncate_ts);
+        wait_for_truncate_ts();
+        check_get(0, 100, u64::MAX, ALL_CFS, &engine, true, Some(1000));
+        check_get(100, 300, 1000, ALL_CFS, &engine, true, Some(1000));
+        check_get(100, 400, u64::MAX, ALL_CFS, &engine, true, Some(2000));
+        check_get(400, 500, u64::MAX, WRT_EXT_CFS, &engine, false, None);
+    }
+
+    for truncate_ts in [1999, 1000] {
+        set_truncate_ts(truncate_ts as u64);
+        wait_for_truncate_ts();
+        check_get(0, 300, u64::MAX, ALL_CFS, &engine, true, Some(1000));
+        check_get(300, 500, u64::MAX, WRT_EXT_CFS, &engine, false, None);
+    }
+
+    {
+        // Truncate all.
+        set_truncate_ts(999);
+        wait_for_truncate_ts();
+        check_get(0, 500, u64::MAX, WRT_EXT_CFS, &engine, false, None);
+    }
 }
 
 #[derive(Clone)]
@@ -265,8 +408,8 @@ impl IDAllocator for EngineTesterCore {
 }
 
 struct MetaListener {
-    meta_rx: mpsc::Receiver<pb::ChangeSet>,
     applier_tx: mpsc::Sender<ApplyTask>,
+    meta_rx: mpsc::Receiver<pb::ChangeSet>,
 }
 
 impl MetaListener {
@@ -451,13 +594,13 @@ fn i_to_key(i: i32) -> Vec<u8> {
     format!("key{:06}", i).into_bytes()
 }
 
-fn load_data(begin: usize, end: usize, tx: mpsc::Sender<ApplyTask>) {
+fn load_data(begin: usize, end: usize, version: u64, tx: mpsc::Sender<ApplyTask>) {
     let mut wb = WriteBatch::new(1);
     for i in begin..end {
         let key = format!("key{:06}", i);
         for cf in 0..3 {
             let val = key.repeat(cf + 2);
-            let version = if cf == 1 { 0 } else { 1 };
+            let version = if cf == 1 { 0 } else { version };
             wb.put(cf, key.as_bytes(), val.as_bytes(), 0, &[], version);
         }
         if i % 100 == 99 {
@@ -481,16 +624,24 @@ fn write_data(wb: WriteBatch, applier_tx: &mpsc::Sender<ApplyTask>) {
     result_rx.recv().unwrap().unwrap();
 }
 
-fn check_get(begin: usize, end: usize, cfs: &[usize], en: &Engine, exsit: bool) {
+fn check_get(
+    begin: usize,
+    end: usize,
+    version: u64,
+    cfs: &[usize],
+    en: &Engine,
+    exist: bool,
+    check_version: Option<u64>,
+) {
     for i in begin..end {
         let key = format!("key{:06}", i);
         let shard = get_shard_for_key(key.as_bytes(), en);
         let snap = SnapAccess::new(&shard);
         for &cf in cfs {
-            let version = if cf == 1 { 0 } else { 2 };
+            let version = if cf == 1 { 0 } else { version };
             let item = snap.get(cf, key.as_bytes(), version);
             if item.is_valid() {
-                if !exsit {
+                if !exist {
                     let shard_stats = shard.get_stats();
                     panic!(
                         "got key {}, shard {}:{}, cf {}, stats {:?}",
@@ -498,7 +649,10 @@ fn check_get(begin: usize, end: usize, cfs: &[usize], en: &Engine, exsit: bool) 
                     );
                 }
                 assert_eq!(item.get_value(), key.repeat(cf + 2).as_bytes());
-            } else if exsit {
+                if cf != 1 && check_version.is_some() {
+                    assert_eq!(item.version, check_version.unwrap());
+                }
+            } else if exist {
                 let shard_stats = shard.get_stats();
                 panic!(
                     "failed to get key {}, shard {}, stats {:?}",
@@ -556,4 +710,19 @@ pub(crate) fn init_logger() {
     let drain = std::sync::Mutex::new(drain).fuse();
     let logger = slog::Logger::root(drain, o!());
     slog_global::set_global(logger);
+}
+
+fn try_wait<F>(f: F, seconds: usize) -> bool
+where
+    F: Fn() -> bool,
+{
+    let begin = Instant::now_coarse();
+    let timeout = Duration::from_secs(seconds as u64);
+    while begin.saturating_elapsed() < timeout {
+        if f() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(100))
+    }
+    false
 }

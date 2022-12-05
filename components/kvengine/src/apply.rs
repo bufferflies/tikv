@@ -8,6 +8,7 @@ use std::{
 };
 
 use bytes::{Buf, Bytes};
+use kvenginepb as pb;
 use moka::sync::SegmentedCache;
 
 use crate::{
@@ -92,11 +93,13 @@ impl EngineCore {
         }
         if cs.has_flush() {
             self.apply_flush(&shard, &cs);
-        } else if cs.has_compaction() || cs.has_destroy_range() {
+        } else if cs.has_compaction() || cs.has_destroy_range() || cs.has_truncate_ts() {
             if cs.has_compaction() {
                 self.apply_compaction(&shard, &cs);
-            } else {
+            } else if cs.has_destroy_range() {
                 self.apply_destroy_range(&shard, &cs);
+            } else {
+                self.apply_truncate_ts(&shard, &cs);
             }
             store_bool(&shard.compacting, false);
             self.compact_tx
@@ -137,6 +140,7 @@ impl EngineCore {
                 shard.start.clone(),
                 shard.end.clone(),
                 old_data.del_prefixes.clone(),
+                old_data.truncate_ts,
                 new_mem_tbls,
                 new_l0_tbls,
                 old_data.cfs.clone(),
@@ -164,6 +168,7 @@ impl EngineCore {
             shard.start.clone(),
             shard.end.clone(),
             data.del_prefixes.clone(),
+            data.truncate_ts,
             mem_tbls,
             l0s,
             scfs,
@@ -219,6 +224,7 @@ impl EngineCore {
             shard.start.clone(),
             shard.end.clone(),
             data.del_prefixes.clone(),
+            data.truncate_ts,
             data.mem_tbls.clone(),
             new_l0s,
             new_cfs,
@@ -227,22 +233,24 @@ impl EngineCore {
         self.remove_dfs_files(shard, del_files);
     }
 
-    fn apply_destroy_range(&self, shard: &Shard, cs: &ChangeSet) {
-        assert!(cs.has_destroy_range());
-        let dr = cs.get_destroy_range();
-        let data = shard.get_data();
+    fn get_sstables_from_table_change(
+        &self,
+        data: &ShardData,
+        cs: &ChangeSet,
+        tc: &pb::TableChange,
+    ) -> (Vec<L0Table>, [ShardCF; 3]) {
         let mut new_l0s = data.l0_tbls.clone();
         let mut new_cfs = data.cfs.clone();
         // Group files by cf and level.
         let mut grouped = HashMap::new();
-        for deleted in dr.get_table_deletes() {
+        for deleted in tc.get_table_deletes() {
             grouped
                 .entry((deleted.get_cf() as usize, deleted.get_level() as usize))
                 .or_insert_with(|| (Vec::new(), Vec::new()))
                 .0
                 .push(deleted.get_id());
         }
-        for created in dr.get_table_creates() {
+        for created in tc.get_table_creates() {
             grouped
                 .entry((created.get_cf() as usize, created.get_level() as usize))
                 .or_insert_with(|| (Vec::new(), Vec::new()))
@@ -273,12 +281,23 @@ impl EngineCore {
                 new_cfs[cf].set_level(new_level);
             }
         }
+
+        (new_l0s, new_cfs)
+    }
+
+    fn apply_destroy_range(&self, shard: &Shard, cs: &ChangeSet) {
+        assert!(cs.has_destroy_range());
+        let data = shard.get_data();
+        let tc = cs.get_destroy_range();
+        let (new_l0s, new_cfs) = self.get_sstables_from_table_change(&data, cs, tc);
+
         assert_eq!(cs.get_property_key(), DEL_PREFIXES_KEY);
         let done = DeletePrefixes::unmarshal(cs.get_property_value());
         let new_data = ShardData::new(
             shard.start.clone(),
             shard.end.clone(),
             data.del_prefixes.split(&done),
+            data.truncate_ts,
             data.mem_tbls.clone(),
             new_l0s,
             new_cfs,
@@ -286,7 +305,42 @@ impl EngineCore {
         let new_del_prefixes = new_data.del_prefixes.marshal();
         shard.set_data(new_data);
         shard.set_property(DEL_PREFIXES_KEY, &new_del_prefixes);
-        let del_files = dr
+        let del_files = tc
+            .get_table_deletes()
+            .iter()
+            .map(|deleted| (deleted.get_id(), true))
+            .collect();
+        self.remove_dfs_files(shard, del_files);
+    }
+
+    fn apply_truncate_ts(&self, shard: &Shard, cs: &ChangeSet) {
+        debug!("apply truncate ts in engine, shard {:?}", shard.tag());
+        assert!(cs.has_truncate_ts());
+        let data = shard.get_data();
+        let tc = cs.get_truncate_ts();
+        let (new_l0s, new_cfs) = self.get_sstables_from_table_change(&data, cs, tc);
+
+        assert_eq!(cs.get_property_key(), TRUNCATE_TS_KEY);
+        let mut new_truncate_ts = data.truncate_ts;
+        let truncated_ts = TruncateTs::unmarshal(cs.get_property_value());
+        // if applied truncate_ts is smaller than truncate ts in shard, remove it.
+        if need_update_truncate_ts(data.truncate_ts, truncated_ts) {
+            new_truncate_ts = None;
+        }
+        let new_data = ShardData::new(
+            shard.start.clone(),
+            shard.end.clone(),
+            data.del_prefixes.clone(),
+            new_truncate_ts,
+            data.mem_tbls.clone(),
+            new_l0s,
+            new_cfs,
+        );
+        shard.set_data(new_data);
+        if new_truncate_ts.is_none() {
+            shard.set_property(TRUNCATE_TS_KEY, b"");
+        }
+        let del_files = tc
             .get_table_deletes()
             .iter()
             .map(|deleted| (deleted.get_id(), true))
@@ -427,6 +481,7 @@ impl EngineCore {
             shard.start.clone(),
             shard.end.clone(),
             old_data.del_prefixes.clone(),
+            old_data.truncate_ts,
             old_data.mem_tbls.clone(),
             new_l0s,
             new_cfs,

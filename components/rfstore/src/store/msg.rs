@@ -313,6 +313,12 @@ pub enum CasualMessage {
         prefix: Vec<u8>,
         callback: Callback,
     },
+    /// Truncate all data larger than ts.
+    TruncateTs {
+        ts: u64,
+        shard_ver: u64,
+        callback: Callback,
+    },
 }
 
 impl fmt::Debug for CasualMessage {
@@ -333,6 +339,9 @@ impl fmt::Debug for CasualMessage {
             }
             CasualMessage::DeletePrefix { prefix, .. } => {
                 write!(fmt, "delete prefix {:?}", prefix)
+            }
+            CasualMessage::TruncateTs { ts, shard_ver, .. } => {
+                write!(fmt, "truncate ts {:?}, shard ver {:?}", ts, shard_ver)
             }
         }
     }

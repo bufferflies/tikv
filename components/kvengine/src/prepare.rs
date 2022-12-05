@@ -34,6 +34,11 @@ impl EngineCore {
                 ids.insert(t.id, t.level);
             }
         }
+        if cs.has_truncate_ts() {
+            for t in cs.get_truncate_ts().get_table_creates() {
+                ids.insert(t.id, t.level);
+            }
+        }
         if cs.has_snapshot() {
             self.collect_snap_ids(cs.get_snapshot(), &mut ids);
         }

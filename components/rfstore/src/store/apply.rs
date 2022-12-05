@@ -503,7 +503,10 @@ impl Applier {
             }
             TYPE_ENGINE_META => {
                 let cs = cl.get_change_set().unwrap();
-                if !cs.get_property_key().is_empty() && !cs.has_destroy_range() {
+                if !cs.get_property_key().is_empty()
+                    && !cs.has_destroy_range()
+                    && !cs.has_truncate_ts()
+                {
                     wb.set_property(cs.get_property_key(), cs.get_property_value());
                 }
             }

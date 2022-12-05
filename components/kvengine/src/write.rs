@@ -117,6 +117,7 @@ impl Engine {
             shard.start.clone(),
             shard.end.clone(),
             data.del_prefixes.clone(),
+            data.truncate_ts,
             new_mem_tbls,
             data.l0_tbls.clone(),
             data.cfs.clone(),
@@ -156,6 +157,15 @@ impl Engine {
                 shard
                     .properties
                     .set(k.as_str(), &data.del_prefixes.marshal());
+            } else if k == TRUNCATE_TS_KEY {
+                if shard.set_truncate_ts(v.chunk()) {
+                    let data = shard.get_data();
+                    if data.writable_mem_table_need_truncate_ts() {
+                        wb.set_switch_mem_table();
+                    }
+                    self.refresh_shard_states(&shard);
+                    shard.properties.set(k.as_str(), v.chunk());
+                }
             } else {
                 shard.properties.set(k.as_str(), v.chunk());
             }

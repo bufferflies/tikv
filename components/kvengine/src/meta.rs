@@ -142,6 +142,10 @@ impl ShardMeta {
             self.apply_destroy_range(cs);
             return;
         }
+        if cs.has_truncate_ts() {
+            self.apply_truncate_ts(cs);
+            return;
+        }
         if cs.has_ingest_files() {
             self.apply_ingest_files(cs.get_ingest_files());
             return;
@@ -161,6 +165,24 @@ impl ShardMeta {
                         .merge(prefix)
                         .marshal(),
                 );
+            } else if cs.get_property_key() == TRUNCATE_TS_KEY {
+                let truncate_ts = TruncateTs::unmarshal(cs.get_property_value());
+                match self.get_property(TRUNCATE_TS_KEY) {
+                    Some(v) => {
+                        let cur_truncate_ts = if v.is_empty() {
+                            None
+                        } else {
+                            Some(TruncateTs::unmarshal(v.chunk()))
+                        };
+                        if need_update_truncate_ts(cur_truncate_ts, truncate_ts) {
+                            self.properties
+                                .set(cs.get_property_key(), cs.get_property_value());
+                        }
+                    }
+                    None => self
+                        .properties
+                        .set(cs.get_property_key(), cs.get_property_value()),
+                };
             } else {
                 self.properties
                     .set(cs.get_property_key(), cs.get_property_value());
@@ -236,6 +258,16 @@ impl ShardMeta {
                 .any(|deleted| !self.files.contains_key(&deleted.get_id()))
         {
             info!("{} skip duplicated destroy range {:?}", self.tag(), cs);
+            return true;
+        }
+        if cs.has_truncate_ts()
+            && cs
+                .get_truncate_ts()
+                .get_table_deletes()
+                .iter()
+                .any(|deleted| !self.files.contains_key(&deleted.get_id()))
+        {
+            info!("{} skip duplicated truncate ts {:?}", self.tag(), cs);
             return true;
         }
         if cs.has_ingest_files() {
@@ -323,13 +355,11 @@ impl ShardMeta {
         }
     }
 
-    fn apply_destroy_range(&mut self, cs: &pb::ChangeSet) {
-        assert!(cs.has_destroy_range());
-        let dr = cs.get_destroy_range();
-        for deleted in dr.get_table_deletes() {
+    fn apply_table_change(&mut self, tc: &pb::TableChange) {
+        for deleted in tc.get_table_deletes() {
             self.delete_file(deleted.get_id());
         }
-        for created in dr.get_table_creates() {
+        for created in tc.get_table_creates() {
             self.add_file(
                 created.id,
                 created.cf,
@@ -338,6 +368,11 @@ impl ShardMeta {
                 created.get_biggest(),
             );
         }
+    }
+
+    fn apply_destroy_range(&mut self, cs: &pb::ChangeSet) {
+        assert!(cs.has_destroy_range());
+        self.apply_table_change(cs.get_destroy_range());
         // ChangeSet of DestroyRange contains the corresponding delete-prefixes which should be
         // cleaned up.
         assert_eq!(cs.get_property_key(), DEL_PREFIXES_KEY);
@@ -346,6 +381,28 @@ impl ShardMeta {
             let done = DeletePrefixes::unmarshal(cs.get_property_value());
             self.properties
                 .set(DEL_PREFIXES_KEY, &old.split(&done).marshal());
+        }
+    }
+
+    fn apply_truncate_ts(&mut self, cs: &pb::ChangeSet) {
+        debug!("apply truncate ts in meta {:?}", self.id);
+        assert!(cs.has_truncate_ts());
+        self.apply_table_change(cs.get_truncate_ts());
+
+        // ChangeSet of TruncateTs contains the corresponding ts which should be cleaned up.
+        assert_eq!(cs.get_property_key(), TRUNCATE_TS_KEY);
+        if self.get_property(TRUNCATE_TS_KEY).is_some() {
+            let truncated_ts = TruncateTs::unmarshal(cs.get_property_value());
+            let v = self.get_property(TRUNCATE_TS_KEY).unwrap();
+            let cur_truncate_ts = if v.is_empty() {
+                None
+            } else {
+                Some(TruncateTs::unmarshal(v.chunk()))
+            };
+            // if applied truncate_ts is smaller than truncate ts in Meta, remove it.
+            if need_update_truncate_ts(cur_truncate_ts, truncated_ts) {
+                self.set_property(TRUNCATE_TS_KEY, b"");
+            }
         }
     }
 

@@ -15,7 +15,7 @@ use rfenginepb::{ClusterBackupMeta, StoreBackupMeta};
 use security::SecurityConfig;
 use slog_global::{error, info};
 
-use crate::dfsgc::create_pd_client;
+use crate::common::{create_pd_client, send_request_to_store};
 
 #[derive(Args)]
 pub struct BackupArgs {
@@ -57,7 +57,7 @@ pub(crate) fn execute_backup(args: BackupArgs) {
         body_map.insert("cluster_id".to_string(), cluster_id.to_string());
         let json_string = serde_json::to_string(&body_map).unwrap();
         let req = Request::post(uri).body(Body::from(json_string)).unwrap();
-        runtime.spawn(send_request_to_store(req, store, tx));
+        runtime.spawn(request_backup_store(req, store, tx));
     }
     let mut errs = vec![];
     for _ in 0..num_stores {
@@ -116,35 +116,19 @@ pub(crate) fn execute_backup(args: BackupArgs) {
     info!("finished build backup file {}", backup_key);
 }
 
-pub(crate) async fn send_request_to_store(
+pub(crate) async fn request_backup_store(
     req: Request<Body>,
     store: Store,
     tx: SyncSender<Result<StoreBackupMeta, String>>,
 ) {
-    let client = hyper::Client::new();
-    let resp = client.request(req).await;
-    if resp.is_err() {
-        tx.send(Err(format!("{:?} {:?}", &store, resp.unwrap_err())))
-            .unwrap();
-        return;
+    match send_request_to_store(req, store).await {
+        Ok(resp) => {
+            let mut store_backup_meta = StoreBackupMeta::default();
+            store_backup_meta.merge_from_bytes(&resp).unwrap();
+            tx.send(Ok(store_backup_meta)).unwrap()
+        }
+        Err(e) => tx.send(Err(e)).unwrap(),
     }
-    let resp = resp.unwrap();
-    if !resp.status().is_success() {
-        tx.send(Err(format!("{:?} {:?}", &store, resp.status())))
-            .unwrap();
-        return;
-    }
-    let body = hyper::body::to_bytes(resp.into_body()).await;
-    if body.is_err() {
-        tx.send(Err(format!("{:?}  {:?}", &store, body.unwrap_err())))
-            .unwrap();
-        return;
-    }
-    let body = body.unwrap();
-    info!("store {} got body size {}", store.id, body.len());
-    let mut store_backup_meta = StoreBackupMeta::default();
-    store_backup_meta.merge_from_bytes(&body).unwrap();
-    tx.send(Ok(store_backup_meta)).unwrap()
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug, Default)]

@@ -90,6 +90,7 @@ impl Engine {
                 new_shard.start.clone(),
                 new_shard.end.clone(),
                 new_del_prefixes,
+                old_data.truncate_ts, // TODO: maybe not necessary to truncate ts on the new shard.
                 new_mem_tbls,
                 new_l0s,
                 new_cfs,

@@ -6,7 +6,10 @@ use std::{
         Bound::{Excluded, Unbounded},
         Range,
     },
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
     thread::sleep,
     time::Duration,
 };
@@ -40,6 +43,7 @@ pub struct ClusterClient {
     /// region_id -> region
     pub(crate) regions: HashMap<u64, RawRegion>,
     pub(crate) ref_store: Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>>,
+    pub(crate) max_ts: AtomicU64,
 }
 
 #[derive(Clone)]
@@ -125,6 +129,7 @@ impl ClusterClient {
         let first = mutations.first().unwrap();
         self.verify_key_value(first.get_key(), first.get_value(), put_time);
         self.put_kv_in_ref_store(mutations);
+        self.set_max_ts(commit_ts.into_inner());
     }
 
     fn put_kv_in_ref_store(&mut self, mutations: Vec<Mutation>) {
@@ -132,6 +137,14 @@ impl ClusterClient {
         for mut m in mutations {
             ref_store.insert(m.take_key(), m.take_value());
         }
+    }
+
+    fn set_max_ts(&mut self, max_ts: u64) {
+        self.max_ts.fetch_max(max_ts, Ordering::Relaxed);
+    }
+
+    pub fn max_ts(&mut self) -> u64 {
+        self.max_ts.load(Ordering::Relaxed)
     }
 
     pub fn kv_prewrite(&mut self, muts: Vec<Mutation>, pk: Vec<u8>, ts: TimeStamp) {
@@ -448,6 +461,10 @@ impl ClusterClient {
     }
 
     pub fn must_get_key(&mut self, key: &[u8], put_time: Instant) -> Vec<u8> {
+        self.must_get_key_version(key, u64::MAX, put_time)
+    }
+
+    pub fn must_get_key_version(&mut self, key: &[u8], version: u64, put_time: Instant) -> Vec<u8> {
         let start_time = Instant::now();
         let timeout = Duration::from_secs(15);
         let mut region_id = 0;
@@ -460,7 +477,7 @@ impl ClusterClient {
             let mut get_req = GetRequest::default();
             get_req.set_context(ctx);
             get_req.set_key(key.to_vec());
-            get_req.set_version(u64::MAX);
+            get_req.set_version(version);
             let result = client.kv_get(&get_req);
             if result.is_err() {
                 store_id_errors.push((store_id, format!("{:?}", result.unwrap_err())));

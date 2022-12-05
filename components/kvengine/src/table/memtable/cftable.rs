@@ -1,6 +1,7 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
+    cmp,
     iter::Iterator as StdIterator,
     ops::Deref,
     sync::{
@@ -10,7 +11,7 @@ use std::{
 };
 
 use super::{Arena, SkipList};
-use crate::{Iterator, NUM_CFS};
+use crate::{Iterator, EXTRA_CF, NUM_CFS, WRITE_CF};
 
 #[derive(Clone)]
 pub struct CFTable {
@@ -131,5 +132,14 @@ impl CFTableCore {
             }
         }
         false
+    }
+
+    pub(crate) fn data_max_ts(&self) -> u64 {
+        // Ignore LOCK_CF, as `ts` in LOCK_CF is not a TSO.
+        // TODO: in async_commit, LOCK_CF may contains data, need handle it later.
+        cmp::max(
+            self.tbls[WRITE_CF].data_max_ts(),
+            self.tbls[EXTRA_CF].data_max_ts(),
+        )
     }
 }

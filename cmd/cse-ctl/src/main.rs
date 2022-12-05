@@ -4,8 +4,10 @@
 extern crate serde_derive;
 
 mod backup;
+mod common;
 mod dfsgc;
 mod restore;
+mod truncate_ts;
 mod unsafe_recover;
 
 use std::io;
@@ -16,8 +18,9 @@ use crate::{
     backup::{execute_backup, BackupArgs},
     dfsgc::{execute_dfsgc, DFSGCArgs},
     restore::{execute_restore, RestoreArgs},
+    truncate_ts::{execute_truncate_ts, TruncateTsArgs},
     unsafe_recover::{execute_unsafe_recover, UnsafeRecoverArgs},
-    Commands::{Backup, Restore, UnsafeRecover, DFSGC},
+    Commands::{Backup, Restore, TruncateTs, UnsafeRecover, DFSGC},
 };
 
 fn main() {
@@ -35,6 +38,9 @@ fn main() {
         }
         Restore(restore_args) => {
             execute_restore(restore_args);
+        }
+        TruncateTs(args) => {
+            execute_truncate_ts(args);
         }
     }
 }
@@ -65,4 +71,6 @@ pub enum Commands {
     Backup(BackupArgs),
     /// Restore a backup.
     Restore(RestoreArgs),
+    /// Truncate newer data than given ts
+    TruncateTs(TruncateTsArgs),
 }

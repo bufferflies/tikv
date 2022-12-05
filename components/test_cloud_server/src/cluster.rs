@@ -234,6 +234,7 @@ impl ServerCluster {
             region_ranges: Default::default(),
             regions: Default::default(),
             ref_store: self.ref_store.clone(),
+            max_ts: Default::default(),
         }
     }
 

@@ -13,6 +13,7 @@ mod backup;
 mod delete_range;
 mod engine_basic;
 mod gc;
+mod truncate_ts;
 
 static NODE_ALLOCATOR: AtomicU16 = AtomicU16::new(1);
 

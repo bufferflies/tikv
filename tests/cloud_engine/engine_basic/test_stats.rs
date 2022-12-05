@@ -1,5 +1,7 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
+use std::cmp;
+
 use rand::Rng;
 use rfstore::WRITE_CF;
 use test_cloud_server::ServerCluster;
@@ -7,6 +9,22 @@ use tikv_util::config::ReadableSize;
 
 use super::*;
 use crate::alloc_node_id;
+
+// Returns (estimated_kv_size, max_ts).
+// Note: Results would change over time due to compaction.
+fn get_stats_by_shard_interface(engine: &kvengine::Engine) -> (u64, u64) {
+    engine
+        .get_all_shard_id_vers()
+        .into_iter()
+        .map(|id_ver| engine.get_shard(id_ver.id))
+        .fold((0u64, 0u64), |acc, x| {
+            let shard = x.unwrap();
+            (
+                acc.0 + shard.get_estimated_kv_size(),
+                cmp::max(acc.1, shard.get_max_ts()),
+            )
+        })
+}
 
 #[test]
 fn test_shard_stats() {
@@ -55,22 +73,22 @@ fn test_shard_stats() {
         }
 
         let all_shard_stats = engine.get_all_shard_stats();
-        let (kv_size, mem_table_size, total_size, kv_size_lower_l0) =
-            all_shard_stats
-                .iter()
-                .fold((0u64, 0u64, 0u64, 0u64), |acc, x| {
-                    let kv_size_lower_l0: u64 = x.cfs[WRITE_CF]
-                        .levels
-                        .iter()
-                        .map(|lv_stats| lv_stats.kv_size)
-                        .sum();
-                    (
-                        acc.0 + x.kv_size,
-                        acc.1 + x.mem_table_size,
-                        acc.2 + x.total_size,
-                        acc.3 + kv_size_lower_l0,
-                    )
-                });
+        let (kv_size, mem_table_size, total_size, kv_size_lower_l0, max_ts) = all_shard_stats
+            .iter()
+            .fold((0u64, 0u64, 0u64, 0u64, 0u64), |acc, x| {
+                let kv_size_lower_l0: u64 = x.cfs[WRITE_CF]
+                    .levels
+                    .iter()
+                    .map(|lv_stats| lv_stats.kv_size)
+                    .sum();
+                (
+                    acc.0 + x.kv_size,
+                    acc.1 + x.mem_table_size,
+                    acc.2 + x.total_size,
+                    acc.3 + kv_size_lower_l0,
+                    cmp::max(acc.4, x.max_ts),
+                )
+            });
 
         // Multiple latest versions of a key in different SSTs are not deduplicated.
         // `mem_table_size` dose NOT calculate into `kv_size`.
@@ -82,6 +100,7 @@ fn test_shard_stats() {
             mem_table_size,
             all_shard_stats,
         );
+        assert_eq!(max_ts, client.max_ts());
 
         // `total_size` contains size of WRITE_CF & LOCK_CF.
         assert!(
@@ -109,17 +128,10 @@ fn test_shard_stats() {
             "engine.kv_size wrong, engine:{:?}",
             engine_stats
         );
+        assert_eq!(engine_stats.max_ts, client.max_ts());
 
-        // Verify `Shard.get_estimated_kv_size()` interface.
-        // Retry as the `kv_size` would change over time due to compaction.
-        let get_estimated_kv_size = || -> u64 {
-            engine
-                .get_all_shard_id_vers()
-                .into_iter()
-                .map(|id_ver| engine.get_shard(id_ver.id))
-                .map(|shard| shard.unwrap().get_estimated_kv_size())
-                .sum()
-        };
+        // Verify `Shard.get_estimated_kv_size()` & `Shard.get_max_ts` interface.
+        let expected_max_ts = client.max_ts();
         let ok = try_wait(
             || {
                 let kv_size: u64 = engine
@@ -127,14 +139,15 @@ fn test_shard_stats() {
                     .into_iter()
                     .map(|x| x.kv_size)
                     .sum();
-                get_estimated_kv_size() == kv_size
+                let (estimated_kv_size, max_ts) = get_stats_by_shard_interface(&engine);
+                estimated_kv_size == kv_size && max_ts == expected_max_ts
             },
             10,
         );
         assert!(
             ok,
-            "estimated_kv_size wrong, estimated_kv_size:{}, shards:{:?}",
-            get_estimated_kv_size(),
+            "shard stats interface wrong, shard_interface:{:?}, shards:{:?}",
+            get_stats_by_shard_interface(&engine),
             engine.get_all_shard_stats()
         );
     }

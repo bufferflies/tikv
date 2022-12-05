@@ -667,6 +667,10 @@ impl SkipListCore {
         self.user_data_size.load(Acquire)
     }
 
+    pub(crate) fn data_max_ts(&self) -> u64 {
+        self.data_max_ts.load(Ordering::Acquire)
+    }
+
     fn delete_with_hint(&self, key: &[u8], h: &mut Hint) -> bool {
         let list_height = self.get_height();
         let recompute_height = self.calculate_recompute_height(key, h, list_height);
