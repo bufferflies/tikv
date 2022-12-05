@@ -1619,10 +1619,7 @@ impl Peer {
     }
 
     pub(crate) fn get_preprocessed_region(&self) -> &Region {
-        self.get_store()
-            .preprocessed_region
-            .as_ref()
-            .unwrap_or_else(|| self.region())
+        self.get_store().get_preprocessed_region()
     }
 
     pub(crate) fn post_apply(&mut self, ctx: &mut RaftContext, apply_result: &MsgApplyResult) {

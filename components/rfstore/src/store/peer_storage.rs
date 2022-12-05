@@ -192,6 +192,17 @@ impl raft::Storage for PeerStorage {
                 StorageError::SnapshotTemporarilyUnavailable,
             ));
         }
+        if util::is_epoch_stale(
+            self.region().get_region_epoch(),
+            self.get_preprocessed_region().get_region_epoch(),
+        ) {
+            // If the region is staler than preprocessed region, the preprocessed region may not
+            // contain the to peer, cause the to peer panic. Or the region epoch version may not
+            // equal to the shard meta version, cause inconsistency.
+            return Err(raft::Error::Store(
+                StorageError::SnapshotTemporarilyUnavailable,
+            ));
+        }
         let snap_index = self.snapshot_index();
         if snap_index < request_index {
             info!("requesting index is too high"; "region" => self.tag(),
@@ -202,8 +213,7 @@ impl raft::Storage for PeerStorage {
 
         let mut snap = eraftpb::Snapshot::default();
         let change_set = self.shard_meta.as_ref().unwrap().to_change_set();
-        let region = self.preprocessed_region.as_ref().unwrap_or(self.region());
-        let snap_data = encode_snap_data(region, &change_set);
+        let snap_data = encode_snap_data(self.region(), &change_set);
         snap.set_data(snap_data);
         let mut snap_meta = eraftpb::SnapshotMetadata::default();
         snap_meta.set_index(snap_index);
@@ -539,6 +549,10 @@ impl PeerStorage {
     /// The last index of raft logs that have been applied and persisted to the state machine.
     pub(crate) fn data_persisted_log_index(&self) -> Option<u64> {
         self.shard_meta.as_ref().map(|meta| meta.data_sequence)
+    }
+
+    pub(crate) fn get_preprocessed_region(&self) -> &metapb::Region {
+        self.preprocessed_region.as_ref().unwrap_or(self.region())
     }
 }
 
