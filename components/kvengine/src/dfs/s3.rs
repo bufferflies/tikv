@@ -32,8 +32,8 @@ use crate::dfs::{Options, DFS};
 const MAX_RETRY_COUNT: u32 = 7;
 const RETRY_SLEEP_MS: u64 = 500;
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
-const DISPATCH_TIMEOUT: Duration = Duration::from_secs(15);
-const READ_BODY_TIMEOUT: Duration = Duration::from_secs(10);
+const DISPATCH_TIMEOUT: Duration = Duration::from_secs(20);
+const READ_BODY_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Clone)]
 pub struct S3FS {
@@ -198,7 +198,7 @@ impl S3FSCore {
             RusotoError::Credentials(_) => false,
             RusotoError::Validation(_) => false,
             RusotoError::ParseError(_) => false,
-            RusotoError::Unknown(resp) => resp.status.is_server_error(),
+            RusotoError::Unknown(_) => true,
             RusotoError::Blocking => false,
         }
     }
