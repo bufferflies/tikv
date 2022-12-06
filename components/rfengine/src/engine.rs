@@ -432,19 +432,21 @@ impl RfEngineCore {
 
     pub fn get_region_peer_map(&self) -> HashMap<u64, u64> {
         let mut region_to_peer = HashMap::with_capacity(self.peers.len());
+        let mut id_pairs = Vec::with_capacity(self.peers.len());
         for peer_ref in self.peers.iter() {
-            let peer_id = *peer_ref.key();
             let peer_data = peer_ref.read().unwrap();
-            if let Some(&existing_peer_id) = region_to_peer.get(&peer_data.region_id) {
-                if existing_peer_id > peer_id {
-                    continue;
-                }
-            }
-            if peer_data.truncated_idx != TRUNCATE_ALL_INDEX {
-                region_to_peer.insert(peer_data.region_id, peer_id);
-            } else {
+            let is_truncated = peer_data.truncated_idx == TRUNCATE_ALL_INDEX;
+            id_pairs.push((peer_data.peer_id, peer_data.region_id, is_truncated));
+        }
+        // ensure the newer peer_id appear after the older peer_id, so it can replace older.
+        id_pairs.sort_by(|(peer_a, ..), (peer_b, ..)| peer_a.cmp(peer_b));
+        for (peer_id, region_id, truncated) in id_pairs {
+            if truncated {
                 // The newer peer is already destroyed, the old peer is invalid too.
-                region_to_peer.remove(&peer_data.region_id);
+                region_to_peer.remove(&region_id);
+            } else {
+                // new peer_id replaces the older peer_id.
+                region_to_peer.insert(region_id, peer_id);
             }
         }
         region_to_peer
