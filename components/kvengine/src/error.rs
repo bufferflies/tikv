@@ -30,6 +30,8 @@ pub enum Error {
     ApplyChangeSet(String),
     #[error("ingest files {0}")]
     IngestFiles(String),
+    #[error("check merge {0}")]
+    CheckMerge(String),
 }
 
 impl From<table::Error> for Error {

@@ -121,7 +121,7 @@ fn test_backup_and_import() {
     let mut client2 = cluster2.new_client();
     let store_id = client2.get_stores().pop().unwrap();
     let region_id = client2.get_region_id(b"");
-    let context = client2.new_rpc_ctx(region_id);
+    let context = client2.new_rpc_ctx(region_id).unwrap();
     let channel = client2.get_client_channel(store_id);
     let import_sst_client = ImportSstClient::new(channel);
     let mut switch_mode_req = SwitchModeRequest::default();

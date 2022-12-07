@@ -7,7 +7,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use collections::HashSet;
 use kvengine::ShardMeta;
 use kvproto::{
-    raft_serverpb::{PeerState, RaftMessage},
+    raft_serverpb::{MergeState, PeerState, RaftMessage},
     *,
 };
 use protobuf::Message;
@@ -26,8 +26,8 @@ use crate::{
     errors::*,
     store::{
         region_state_key, Engines, PeerTag, RaftApplyState, RaftContext, RaftState,
-        RaftTruncatedState, RegionIDVer, StoreMeta, StoreMsg, KV_ENGINE_META_KEY,
-        REGION_META_KEY_PREFIX, TERM_KEY,
+        RaftTruncatedState, RegionIDVer, StoreMsg, KV_ENGINE_META_KEY, REGION_META_KEY_PREFIX,
+        TERM_KEY,
     },
 };
 
@@ -90,7 +90,6 @@ pub(crate) struct PeerStorage {
 
     pub(crate) snap_state: SnapState,
 
-    pub(crate) initial_flushed: bool,
     pub(crate) shard_meta: Option<kvengine::ShardMeta>,
     pub(crate) restored_snapshot: Option<(kvenginepb::ChangeSet, u64)>,
     pub(crate) on_apply_snapshot_msgs: Vec<RaftMessage>,
@@ -185,7 +184,7 @@ impl raft::Storage for PeerStorage {
     }
 
     fn snapshot(&self, request_index: u64, to: u64) -> raft::Result<eraftpb::Snapshot> {
-        if !self.initial_flushed || self.shard_meta.is_none() {
+        if !self.initial_flushed() {
             info!("shard has not flushed for generating snapshot"; "region" => self.tag(), "to" => to);
             self.snapshot_not_ready_peers.borrow_mut().insert(to);
             return Err(raft::Error::Store(
@@ -244,21 +243,13 @@ impl PeerStorage {
         let truncated_state = init_truncated_state(&engines.raft, peer_id, &region);
         let mut shard_meta: Option<ShardMeta> = None;
         if apply_state.applied_index > 0 {
-            let res = engines.raft.get_state(peer_id, KV_ENGINE_META_KEY);
-            let shard_meta_bin = res.unwrap();
-            let mut change_set = kvenginepb::ChangeSet::default();
-            change_set.merge_from_bytes(&shard_meta_bin).unwrap();
-            let meta = kvengine::ShardMeta::new(store_id, &change_set);
+            let meta = load_engine_meta(&engines.raft, store_id, peer_id).unwrap();
+            if let Some(parent) = &meta.parent {
+                engines.raft.add_dependent(parent.id, meta.id);
+            }
             shard_meta = Some(meta);
         }
         let last_term = init_last_term(&engines, peer_id, &region, raft_state)?;
-        let mut initial_flushed = false;
-        if let Some(shard) = engines.kv.get_shard(region.get_id()) {
-            initial_flushed = shard.get_initial_flushed();
-            if !initial_flushed {
-                engines.raft.add_dependent(shard.parent_id, shard.id);
-            }
-        }
         Ok(PeerStorage {
             engines,
             peer_id,
@@ -270,7 +261,6 @@ impl PeerStorage {
             truncated_state,
             last_term,
             snap_state: SnapState::Relax,
-            initial_flushed,
             shard_meta,
             restored_snapshot: None,
             on_apply_snapshot_msgs: vec![],
@@ -318,6 +308,12 @@ impl PeerStorage {
 
     pub(crate) fn is_initialized(&self) -> bool {
         self.shard_meta.is_some()
+    }
+
+    pub(crate) fn initial_flushed(&self) -> bool {
+        self.shard_meta
+            .as_ref()
+            .map_or(false, |m| m.parent.is_none())
     }
 
     #[inline]
@@ -422,13 +418,10 @@ impl PeerStorage {
         ctx: &mut RaftContext,
         ready: &mut raft::Ready,
         last_preprocessed_index: u64,
-        store_meta: &mut Option<&mut StoreMeta>,
     ) -> Option<RestoreSnapResult> {
         let mut res = None;
         let prev_raft_state = self.raft_state;
         if !ready.snapshot().is_empty() {
-            let meta = store_meta.take().unwrap();
-            *store_meta = Some(meta);
             let prev_region = self.region().clone();
             self.restore_snapshot(ready, ctx).unwrap();
             let region = self.region.clone();
@@ -503,7 +496,13 @@ impl PeerStorage {
             // we can only delete the old data when the peer is initialized.
             self.clear_meta(&mut ctx.raft_wb, false);
         }
-        write_peer_state(&mut ctx.raft_wb, self.store_id, self.peer_id, &region);
+        write_peer_state(
+            &mut ctx.raft_wb,
+            self.peer_id,
+            &region,
+            PeerState::Normal,
+            None,
+        );
         let last_index = snap.get_metadata().get_index();
         let last_term = snap.get_metadata().get_term();
         self.raft_state.last_index = last_index;
@@ -665,15 +664,17 @@ pub fn write_initial_raft_state(
 
 pub fn write_peer_state(
     raft_wb: &mut rfengine::WriteBatch,
-    store_id: u64,
     peer_id: u64,
     region: &metapb::Region,
+    peer_state: PeerState,
+    merge_state: Option<MergeState>,
 ) {
-    let tag = PeerTag::new(store_id, RegionIDVer::from_region(region));
-    info!("{} write peer state", tag);
     let mut region_state = RegionLocalState::default();
-    region_state.set_state(PeerState::Normal);
+    region_state.set_state(peer_state);
     region_state.set_region(region.clone());
+    if let Some(merge_state) = merge_state {
+        region_state.set_merge_state(merge_state);
+    }
     let state_bin = region_state.write_to_bytes().unwrap();
     let epoch = region.get_region_epoch();
     let key = region_state_key(epoch.get_version());
@@ -683,6 +684,17 @@ pub fn write_peer_state(
 pub fn write_engine_meta(raft_wb: &mut rfengine::WriteBatch, peer_id: u64, meta: &ShardMeta) {
     info!("{} write engine meta, sequence: {}", meta.tag(), meta.seq);
     raft_wb.set_state(peer_id, meta.id, KV_ENGINE_META_KEY, &meta.marshal());
+}
+
+pub fn load_engine_meta(
+    raft: &rfengine::RfEngine,
+    store_id: u64,
+    peer_id: u64,
+) -> Option<ShardMeta> {
+    let shard_meta_bin = raft.get_state(peer_id, KV_ENGINE_META_KEY)?;
+    let mut change_set = kvenginepb::ChangeSet::default();
+    change_set.merge_from_bytes(&shard_meta_bin).unwrap();
+    Some(ShardMeta::new(store_id, &change_set))
 }
 
 pub fn encode_snap_data(region: &metapb::Region, change_set: &kvenginepb::ChangeSet) -> Bytes {

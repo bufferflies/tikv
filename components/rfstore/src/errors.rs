@@ -30,6 +30,9 @@ pub type Result<T> = core::result::Result<T, Error>;
 
 #[derive(Debug, Error)]
 pub enum Error {
+    #[error("{0} peer in merging mode, can't do proposal")]
+    ProposalInMergingMode(u64),
+
     #[error("read index not ready, reason {}, region {}", .reason, .region_id)]
     ReadIndexNotReady {
         reason: &'static str,
@@ -224,6 +227,11 @@ impl From<Error> for errorpb::Error {
                 e.set_region_id(region_id);
                 errorpb.set_region_not_initialized(e);
             }
+            Error::ProposalInMergingMode(region_id) => {
+                errorpb
+                    .mut_proposal_in_merging_mode()
+                    .set_region_id(region_id);
+            }
             _ => {}
         };
 
@@ -242,6 +250,7 @@ impl ErrorCodeExt for Error {
             Error::StaleCommand => error_code::raftstore::STALE_COMMAND,
             Error::RegionNotInitialized(_) => error_code::raftstore::REGION_NOT_INITIALIZED,
             Error::KeyNotInRegion(..) => error_code::raftstore::KEY_NOT_IN_REGION,
+            Error::ProposalInMergingMode(..) => error_code::raftstore::PROPOSAL_IN_MERGING_MODE,
             Error::Io(_) => error_code::raftstore::IO,
             Error::Engine(e) => e.error_code(),
             Error::Protobuf(_) => error_code::raftstore::PROTOBUF,

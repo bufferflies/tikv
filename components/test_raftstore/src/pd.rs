@@ -1170,6 +1170,15 @@ impl TestPdClient {
         self.schedule_operator(target, op);
     }
 
+    pub fn try_merge_region(&self, from: u64, target: u64) {
+        let op = Operator::MergeRegion {
+            source_region_id: from,
+            target_region_id: target,
+            policy: Arc::new(RwLock::new(SchedulePolicy::Repeat(5))),
+        };
+        self.schedule_operator(from, op.clone());
+    }
+
     pub fn must_merge(&self, from: u64, target: u64) {
         self.merge_region(from, target);
 

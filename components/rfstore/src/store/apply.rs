@@ -149,6 +149,9 @@ pub enum ExecResult {
     SplitRegion { regions: Vec<Region> },
     DeleteRange { ranges: Vec<Range> },
     UnsafeDestroy,
+    PrepareMerge { region: Region },
+    CommitMerge { region: Region, source: Region },
+    RollbackMerge { region: Region, commit: u64 },
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -219,7 +222,17 @@ pub(crate) struct Applier {
 
     pub(crate) pending_split: HashMap<u64, kvenginepb::ChangeSet>,
 
-    pub(crate) paused: bool,
+    pub(crate) paused_for_ingest: bool,
+
+    pub(crate) prepare_merge_parent_snap: Option<kvenginepb::Snapshot>,
+
+    pub(crate) paused_for_commit_merge: bool,
+
+    pub(crate) paused_for_rollback_merge: bool,
+
+    pub(crate) commit_merge_parent_snaps: VecDeque<kvenginepb::Snapshot>,
+
+    pub(crate) commit_merge_source_tables: HashMap<u64, ChangeSet>,
 
     pub(crate) paused_apply_queue: Vec<MsgApply>,
 
@@ -416,7 +429,7 @@ impl Applier {
     ) -> Result<(RaftCmdResponse, ApplyResult)> {
         let request = req.get_admin_request();
         let cmd_type = request.get_cmd_type();
-        if cmd_type != AdminCmdType::CompactLog && cmd_type != AdminCmdType::CommitMerge {
+        if cmd_type != AdminCmdType::CompactLog {
             info!(
                 "execute admin command";
                 "tag" => self.tag(),
@@ -432,6 +445,9 @@ impl Applier {
             AdminCmdType::ChangePeerV2 => self.exec_change_peer_v2(ctx, request),
             AdminCmdType::BatchSplit => self.exec_split(ctx, request),
             AdminCmdType::TransferLeader => Err(box_err!("transfer leader won't exec")),
+            AdminCmdType::PrepareMerge => self.exec_prepare_merge(ctx),
+            AdminCmdType::RollbackMerge => self.exec_rollback_merge(ctx, req.get_admin_request()),
+            AdminCmdType::CommitMerge => self.exec_commit_merge(ctx, req.get_admin_request()),
             // TODO: is it backward compatible to add new cmd_type?
             _ => Err(box_err!("unsupported admin command type")),
         }?;
@@ -604,6 +620,15 @@ impl Applier {
                 }
                 ExecResult::DeleteRange { .. } => {}
                 ExecResult::UnsafeDestroy { .. } => {}
+                ExecResult::PrepareMerge { region } => {
+                    self.region = region.clone();
+                }
+                ExecResult::CommitMerge { region, .. } => {
+                    self.region = region.clone();
+                }
+                ExecResult::RollbackMerge { region, .. } => {
+                    self.region = region.clone();
+                }
             }
         }
         // TODO: if we have exec_result, maybe we should return this callback too. Outer
@@ -835,6 +860,71 @@ impl Applier {
         Ok((resp, result))
     }
 
+    fn exec_prepare_merge(
+        &mut self,
+        ctx: &mut ApplyContext,
+    ) -> Result<(AdminResponse, ApplyResult)> {
+        let parent_snap = self.prepare_merge_parent_snap.take().unwrap();
+        ctx.engine.prepare_merge(
+            self.region_id(),
+            self.region.get_region_epoch().get_version(),
+            parent_snap,
+            ctx.exec_log_index,
+        );
+        let mut region = self.region.clone();
+        let epoch = region.mut_region_epoch();
+        epoch.version += 1;
+        epoch.conf_ver += 1;
+        Ok((
+            AdminResponse::default(),
+            ApplyResult::Res(ExecResult::PrepareMerge { region }),
+        ))
+    }
+
+    fn exec_rollback_merge(
+        &mut self,
+        ctx: &mut ApplyContext,
+        request: &AdminRequest,
+    ) -> Result<(AdminResponse, ApplyResult)> {
+        ctx.engine.rollback_merge(
+            self.region_id(),
+            self.region.get_region_epoch().version,
+            ctx.exec_log_index,
+        );
+        let mut region = self.region.clone();
+        let epoch = region.mut_region_epoch();
+        epoch.version += 1;
+        let commit = request.get_rollback_merge().commit;
+        Ok((
+            AdminResponse::default(),
+            ApplyResult::Res(ExecResult::RollbackMerge { region, commit }),
+        ))
+    }
+
+    fn exec_commit_merge(
+        &mut self,
+        ctx: &mut ApplyContext,
+        request: &AdminRequest,
+    ) -> Result<(AdminResponse, ApplyResult)> {
+        let parent_snap = self.commit_merge_parent_snaps.pop_front().unwrap();
+        let source_id = request.get_commit_merge().get_source().get_id();
+        let source_tables = self.commit_merge_source_tables.remove(&source_id).unwrap();
+        let region_ver = self.region.get_region_epoch().get_version();
+        ctx.engine.commit_merge(
+            self.region_id(),
+            region_ver,
+            parent_snap,
+            &source_tables,
+            ctx.exec_log_index,
+        )?;
+        let source = request.get_commit_merge().get_source().clone();
+        let region = new_merged_region(&source, &self.region);
+        Ok((
+            AdminResponse::default(),
+            ApplyResult::Res(ExecResult::CommitMerge { region, source }),
+        ))
+    }
+
     /// Handles proposals, and appends the commands to the apply delegate.
     fn append_proposal(&mut self, props_drainer: Drain<'_, Proposal>) {
         let propose_num = props_drainer.len();
@@ -919,6 +1009,10 @@ impl Applier {
         self.role == StateRole::Leader
     }
 
+    fn is_paused(&self) -> bool {
+        self.paused_for_ingest || self.paused_for_commit_merge || self.paused_for_rollback_merge
+    }
+
     fn handle_apply(&mut self, ctx: &mut ApplyContext, mut apply: MsgApply) {
         if (apply.entries.is_empty() && apply.new_role.is_none())
             || self.pending_remove
@@ -926,7 +1020,7 @@ impl Applier {
         {
             return;
         }
-        if self.paused {
+        if self.is_paused() {
             self.paused_apply_queue.push(apply);
             return;
         }
@@ -943,7 +1037,7 @@ impl Applier {
             self.on_role_changed(ctx, state);
         }
         if self.pending_remove {
-            self.destroy(ctx);
+            self.destroy();
         }
     }
 
@@ -961,10 +1055,20 @@ impl Applier {
             return;
         }
         self.prepared_change_sets.insert(cs.sequence, cs);
+        if self.paused_for_commit_merge {
+            // If the apply is paused we my apply the change set earlier than commit merge.
+            // So we need to wait for resume commit merge to apply the change set.
+            return;
+        }
+        self.apply_prepared_change_set(ctx);
+    }
+
+    fn apply_prepared_change_set(&mut self, ctx: &mut ApplyContext) {
         while let Some(cs) = self.take_prepared_change_set() {
             let seq = cs.sequence;
             let cs_pb = cs.change_set.clone();
             let is_ingest_files = cs.has_ingest_files();
+            let is_initial_flush = cs.has_initial_flush();
             let result = if cs.has_snapshot() {
                 self.apply_state = RaftApplyState::from_snapshot(cs.get_snapshot());
                 ctx.engine.ingest(cs, false).map(|()| cs_pb)
@@ -974,7 +1078,12 @@ impl Applier {
             let router = ctx.router.as_ref().unwrap();
             router.send(self.region_id(), PeerMsg::ApplyChangeSetResult(result));
             if is_ingest_files && self.last_ingest_seq == seq {
-                self.paused = false;
+                self.paused_for_ingest = false;
+            }
+            if is_initial_flush && self.paused_for_rollback_merge {
+                self.paused_for_rollback_merge = false;
+            }
+            if !self.is_paused() && !self.paused_apply_queue.is_empty() {
                 for apply in std::mem::take(&mut self.paused_apply_queue) {
                     self.handle_apply(ctx, apply);
                 }
@@ -1017,7 +1126,7 @@ impl Applier {
         *self = Applier::new_from_reg(reg);
     }
 
-    fn destroy(&mut self, _: &mut ApplyContext) {
+    pub(crate) fn destroy(&mut self) {
         let peer_id = self.get_peer().get_id();
         fail_point!("before_peer_destroy_1003", peer_id == 1003, |_| {});
         info!(
@@ -1039,7 +1148,7 @@ impl Applier {
         if !self.stopped {
             let mut results = VecDeque::new();
             results.push_back(ExecResult::UnsafeDestroy);
-            self.destroy(ctx);
+            self.destroy();
             ctx.finish_for(self, results);
         }
     }
@@ -1049,7 +1158,7 @@ impl Applier {
             if cs.sequence > self.last_ingest_seq {
                 self.last_ingest_seq = cs.sequence;
             }
-            self.paused = true;
+            self.paused_for_ingest = true;
         }
         self.scheduled_change_sets
             .push_back((cs.sequence, cs.has_snapshot()));
@@ -1105,6 +1214,61 @@ impl Applier {
         req
     }
 
+    fn handle_prepare_commit_merge(
+        &mut self,
+        ctx: &mut ApplyContext,
+        parent_snap: kvenginepb::Snapshot,
+        source: kvenginepb::ChangeSet,
+    ) {
+        self.commit_merge_parent_snaps.push_back(parent_snap);
+        let is_leader = self.is_leader();
+        if let Ok(source_shard) = ctx
+            .engine
+            .get_shard_with_ver(source.shard_id, source.shard_ver)
+        {
+            if source_shard.get_meta_sequence() == source.sequence {
+                // TODO(optimize):
+                // All the files already in the local disk, prepare_change_set is non-blocking.
+                // But we still need to load block index for each file, later we can optimize to copy
+                // the opened tables from source shard.
+                let source_tables = ctx.engine.prepare_change_set(source, !is_leader).unwrap();
+                self.commit_merge_source_tables
+                    .insert(source_shard.id, source_tables);
+                return;
+            }
+        }
+        let engine = ctx.engine.clone();
+        self.paused_for_commit_merge = true;
+        let region_id = self.region_id();
+        let router = ctx.router.as_ref().unwrap().clone();
+        std::thread::spawn(move || {
+            let res = engine.prepare_change_set(source, !is_leader);
+            router.send(region_id, PeerMsg::PrepareCommitMergeResult(res));
+        });
+    }
+
+    fn handle_resume_commit_merge(&mut self, ctx: &mut ApplyContext, source: ChangeSet) {
+        self.commit_merge_source_tables
+            .insert(source.shard_id, source);
+        if self.commit_merge_source_tables.len() == self.commit_merge_parent_snaps.len() {
+            self.paused_for_commit_merge = false;
+        }
+        if !self.is_paused() {
+            for apply in std::mem::take(&mut self.paused_apply_queue) {
+                self.handle_apply(ctx, apply);
+            }
+            self.apply_prepared_change_set(ctx);
+        }
+    }
+
+    fn handle_prepare_rollback_merge(&mut self, ctx: &mut ApplyContext) {
+        let shard = ctx.engine.get_shard(self.region_id()).unwrap();
+        if !shard.get_initial_flushed() {
+            // Wait for initial flush before apply rollback merge.
+            self.paused_for_rollback_merge = true;
+        }
+    }
+
     pub(crate) fn handle_msg(&mut self, ctx: &mut ApplyContext, msg: ApplyMsg) {
         match msg {
             ApplyMsg::Apply(apply) => {
@@ -1128,6 +1292,21 @@ impl Applier {
             }
             ApplyMsg::CheckSwitchMemTable { region_id } => {
                 self.handle_check_switch_mem_table(ctx, region_id);
+            }
+            ApplyMsg::PendingPrepareMerge(parent_snap) => {
+                self.prepare_merge_parent_snap = Some(parent_snap);
+            }
+            ApplyMsg::PrepareCommitMerge {
+                parent_snap,
+                source,
+            } => {
+                self.handle_prepare_commit_merge(ctx, parent_snap, source);
+            }
+            ApplyMsg::ResumeCommitMerge { source } => {
+                self.handle_resume_commit_merge(ctx, source);
+            }
+            ApplyMsg::PrepareRollbackMerge => {
+                self.handle_prepare_rollback_merge(ctx);
             }
         }
     }

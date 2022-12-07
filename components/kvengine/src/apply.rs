@@ -125,9 +125,10 @@ impl EngineCore {
             let last_version = last.get_version();
             if last_version != l0_tbl.version() {
                 panic!(
-                    "{} mem table last version {} not match L0 version {}, shard meta seq {}, flush seq {}",
+                    "{} mem table last version {}, size {} not match L0 version {}, shard meta seq {}, flush seq {}",
                     shard.tag(),
                     last_version,
+                    last.size(),
                     l0_tbl.version(),
                     shard.get_meta_sequence(),
                     cs.sequence,

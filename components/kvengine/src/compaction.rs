@@ -291,13 +291,22 @@ impl CompactDef {
 
     pub(crate) fn fill_table(
         &mut self,
+        shard: &Shard,
         this_level: &LevelHandler,
         next_level: &LevelHandler,
     ) -> bool {
         if this_level.tables.len() == 0 {
             return false;
         }
-        let this = this_level.tables.clone();
+        let this = if this_level.has_over_bound_data(&shard.start, &shard.end) {
+            if this_level.tables.first().unwrap().smallest() < &shard.start {
+                Arc::new(vec![this_level.tables.first().unwrap().clone()])
+            } else {
+                Arc::new(vec![this_level.tables.last().unwrap().clone()])
+            }
+        } else {
+            this_level.tables.clone()
+        };
         let next = next_level.tables.clone();
 
         // First pick one table has max topSize/bottomSize ratio.
@@ -431,7 +440,7 @@ impl Engine {
         let this_level = &scf.levels[pri.level - 1];
         let next_level = &scf.levels[pri.level];
         let mut cd = CompactDef::new(pri.cf as usize, pri.level);
-        let filled = cd.fill_table(this_level, next_level);
+        let filled = cd.fill_table(shard, this_level, next_level);
         if !filled {
             return None;
         }

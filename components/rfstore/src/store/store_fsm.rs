@@ -16,6 +16,7 @@ use fail::fail_point;
 use kvproto::{
     metapb::{self, Region, RegionEpoch},
     pdpb,
+    raft_cmdpb::RaftCmdRequest,
     raft_serverpb::{ExtraMessageType, PeerState, RaftMessage, RegionLocalState},
 };
 use pd_client::PdClient;
@@ -26,8 +27,13 @@ use raftstore::{
         split_observer::SplitObserver, BoxAdminObserver, CoprocessorHost, RegionChangeEvent,
         RegionChangeReason,
     },
-    store::{local_metrics::RaftMetrics, util, util::is_initial_msg},
+    store::{
+        local_metrics::RaftMetrics,
+        util,
+        util::{is_initial_msg, is_region_initialized},
+    },
 };
+use rfengine::TRUNCATE_ALL_INDEX;
 use sst_importer::SstImporter;
 use tikv_util::{
     box_err,
@@ -237,10 +243,11 @@ impl RaftBatchSystem {
     /// WARN: This store should not be used before initialized.
     fn load_peers(&self, ctx: &GlobalContext, store_meta: &mut StoreMeta) -> Result<Vec<PeerFsm>> {
         // Scan region meta to get saved regions.
-        let mut regions = vec![];
+        let mut local_states = vec![];
         let mut last_peer_id: u64 = 0;
         let rfengine = &ctx.engines.raft;
         let regions_to_peers = rfengine.get_region_peer_map();
+        let mut tomb_stone_peers = vec![];
         for (_, peer_id) in regions_to_peers {
             rfengine.iterate_peer_states(peer_id, true, |key, val| {
                 if peer_id == last_peer_id {
@@ -253,21 +260,29 @@ impl RaftBatchSystem {
                 let mut local_state = RegionLocalState::default();
                 local_state.merge_from_bytes(val).unwrap();
                 if local_state.state != PeerState::Tombstone {
-                    regions.push(local_state.get_region().clone());
+                    local_states.push(local_state);
+                } else {
+                    ctx.engines
+                        .kv
+                        .remove_shard(local_state.get_region().get_id());
+                    tomb_stone_peers.push((peer_id, local_state.get_region().get_id()));
                 }
             });
         }
+        // When a source peer is merged, the tombstone state is set, but it's not truncated at the
+        // same time, on restart we need to truncate the peers.
+        self.clear_tombstone_peers_on_restart(rfengine, tomb_stone_peers);
         let mut peers = vec![];
         let store_id = ctx.store.id;
-        for region in &regions {
+        for local_state in &local_states {
+            let region = local_state.get_region();
             let mut peer =
                 PeerFsm::create(store_id, &ctx.cfg.value(), ctx.engines.clone(), region)?;
-            let shard = ctx.engines.kv.get_shard(region.get_id()).unwrap();
-            let peer_store = peer.peer.mut_store();
-            peer_store.initial_flushed = shard.get_initial_flushed();
-            store_meta
-                .region_ranges
-                .insert(raw_end_key(region), region.get_id());
+            if local_state.get_state() == PeerState::Merging {
+                info!("{} region is merging", peer.peer.tag());
+                peer.peer.pending_merge_state = Some(local_state.get_merge_state().to_owned());
+            }
+            store_meta.update_region_ranges(region);
             store_meta.regions.insert(region.get_id(), region.clone());
             ctx.coprocessor_host.on_region_changed(
                 region,
@@ -277,6 +292,20 @@ impl RaftBatchSystem {
             peers.push(peer);
         }
         Ok(peers)
+    }
+
+    fn clear_tombstone_peers_on_restart(
+        &self,
+        rfengine: &rfengine::RfEngine,
+        tombstone_peers: Vec<(u64, u64)>,
+    ) {
+        let mut rwb = rfengine::WriteBatch::new();
+        for (peer_id, region_id) in tombstone_peers {
+            rfengine.iterate_peer_states(peer_id, false, |k, _| {
+                rwb.set_state(peer_id, region_id, k, &[]);
+            });
+            rwb.truncate_raft_log(peer_id, region_id, TRUNCATE_ALL_INDEX);
+        }
     }
 }
 
@@ -290,6 +319,7 @@ pub struct StoreMeta {
     /// store id
     pub store_id: Option<u64>,
     /// region_end_key -> region_id
+    /// It may have less entries than regions because some entries are removed on overlap.
     pub region_ranges: BTreeMap<Vec<u8>, u64>,
     /// region_id -> region
     pub regions: HashMap<u64, Region>,
@@ -323,14 +353,80 @@ impl StoreMeta {
         reason: RegionChangeReason,
     ) {
         let region_id = region.get_id();
-        let prev = self.regions.insert(region_id, region.clone());
-        if prev.map_or(true, |r| r.get_id() != region_id) {
-            // TODO: may not be a good idea to panic when holding a lock.
-            panic!("{} region corrupted", peer.region_id);
-        }
+        self.update_region_ranges(&region);
+        self.regions.insert(region_id, region.clone());
         peer.set_region(&self.cop_host, region, reason);
         self.readers
             .insert(region_id, ReadDelegate::from_peer(peer));
+    }
+
+    pub(crate) fn destroy_region(&mut self, region: &Region) {
+        if !self.regions.contains_key(&region.id) {
+            return;
+        }
+        if is_region_initialized(region) {
+            let end_key = raw_end_key(region);
+            if let Some(&id) = self.region_ranges.get(&end_key) {
+                if id == region.id {
+                    self.region_ranges.remove(&end_key);
+                }
+            }
+        }
+        self.regions.remove(&region.id);
+        self.readers.remove(&region.id);
+    }
+
+    pub(crate) fn update_region_ranges(&mut self, region: &Region) {
+        let region_id = region.get_id();
+        let prev = self.regions.get(&region_id);
+        let range_change = prev.map_or(true, |prev_region| {
+            prev_region.get_region_epoch().get_version() != region.get_region_epoch().get_version()
+        });
+        if range_change && is_region_initialized(&region) {
+            if let Some(overlap_regions) = self.get_overlap_regions(&region) {
+                for (_, end_key) in overlap_regions {
+                    self.region_ranges.remove(&end_key);
+                }
+                self.region_ranges.insert(raw_end_key(&region), region_id);
+            }
+        }
+    }
+
+    pub(crate) fn get_overlap_regions(
+        &mut self,
+        new_region: &Region,
+    ) -> Option<Vec<(u64, Vec<u8>)>> {
+        let start_key = raw_start_key(new_region);
+        let end_key = raw_end_key(new_region);
+        let new_version = new_region.get_region_epoch().get_version();
+        let mut regions = vec![];
+        let mut outdated_keys = vec![];
+        for (range_end_key, region_id) in self.region_ranges.range((Excluded(start_key), Unbounded))
+        {
+            let region = self.regions.get(region_id);
+            if region.is_none() {
+                outdated_keys.push(range_end_key.clone());
+                continue;
+            }
+            let region = self.regions.get(region_id).unwrap();
+            let region_start_key = raw_start_key(region);
+            if region_start_key >= end_key {
+                break;
+            }
+            if region.get_region_epoch().get_version() >= new_version {
+                warn!(
+                    "region {:?} overlap {:?} has newer epoch version",
+                    new_region, region
+                );
+                return None;
+            }
+            let raw_end_key = raw_end_key(region);
+            regions.push((*region_id, raw_end_key));
+        }
+        for outdated_key in outdated_keys {
+            self.region_ranges.remove(&outdated_key);
+        }
+        Some(regions)
     }
 }
 
@@ -444,7 +540,7 @@ impl RaftContext {
         if let Err(e) = self.global.trans.send(gc_msg) {
             error!(?e;
                 "send gc message failed";
-                "region_id" => region_id,
+                "tag" => tag,
             );
         }
     }
@@ -525,6 +621,12 @@ impl<'a> StoreMsgHandler<'a> {
             }
             StoreMsg::DependentsEmpty(region_id) => {
                 self.on_dependents_empty(region_id);
+            }
+            StoreMsg::PrepareMerge { region_id, req } => {
+                self.on_prepare_merge_request(region_id, req);
+            }
+            StoreMsg::CheckMerge(region_id) => {
+                self.on_check_merge(region_id);
             }
             StoreMsg::Stop => {
                 self.store.stopped = true;
@@ -682,6 +784,37 @@ impl<'a> StoreMsgHandler<'a> {
         );
         let region = local_state.get_region();
         let region_epoch = region.get_region_epoch();
+        if local_state.has_merge_state() {
+            info!(
+                "merged peer receives a stale message";
+                "region" => tag,
+                "current_region_epoch" => ?region_epoch,
+                "msg_type" => ?msg_type,
+            );
+
+            let merge_target = if let Some(peer) = util::find_peer(region, from_store_id) {
+                // Maybe the target is promoted from learner to voter, but the follower
+                // doesn't know it. So we only compare peer id.
+                if peer.get_id() < msg.get_from_peer().get_id() {
+                    panic!(
+                        "peer id increased after region is merged, message peer id {}, local peer id {}, region {:?}",
+                        msg.get_from_peer().get_id(),
+                        peer.get_id(),
+                        region
+                    );
+                }
+                // Let stale peer decides whether it should wait for merging or just remove
+                // itself.
+                Some(local_state.get_merge_state().get_target().to_owned())
+            } else {
+                // If a peer is isolated before prepare_merge and conf remove, it should just
+                // remove itself.
+                None
+            };
+            self.ctx
+                .handle_stale_msg(msg, region_epoch.clone(), merge_target);
+            return Ok(CheckMsgStatus::DropMsg);
+        }
         // The region in this peer is already destroyed
         if util::is_epoch_stale(from_epoch, region_epoch) {
             info!(
@@ -960,29 +1093,12 @@ impl<'a> StoreMsgHandler<'a> {
         }
         peer_fsm.peer.reset_buckets();
 
-        let last_key = raw_end_key(regions.last().unwrap());
-        if self
-            .ctx
-            .store_meta
-            .region_ranges
-            .remove(&last_key)
-            .is_none()
-        {
-            panic!("{} original region should exist", tag);
-        }
         let mut new_peers = vec![];
         for new_region in regions {
             let new_peer_id = get_peer_id_by_store_id(&new_region, self.store.id).unwrap();
             let new_region_id = new_region.get_id();
 
             if new_region_id == region_id {
-                let not_exist = self
-                    .ctx
-                    .store_meta
-                    .region_ranges
-                    .insert(raw_end_key(&new_region), new_region_id)
-                    .is_none();
-                assert!(not_exist, "[region {}] should not exist", new_region_id);
                 continue;
             }
             if let Some(existing) = self.ctx.peers.get(&new_region_id) {
@@ -1066,17 +1182,11 @@ impl<'a> StoreMsgHandler<'a> {
                 RegionChangeEvent::Create,
                 new_peer.peer.get_role(),
             );
+            self.ctx.store_meta.update_region_ranges(&new_region);
             self.ctx
                 .store_meta
                 .regions
                 .insert(new_region_id, new_region.clone());
-            let not_exist = self
-                .ctx
-                .store_meta
-                .region_ranges
-                .insert(raw_end_key(&new_region), new_region_id)
-                .is_none();
-            assert!(not_exist, "[region {}] should not exist", new_region_id);
             let read_delegate = ReadDelegate::from_peer(new_peer.get_peer());
             self.ctx
                 .store_meta
@@ -1214,7 +1324,7 @@ impl<'a> StoreMsgHandler<'a> {
             .handle_raft_ready(&mut self.ctx.raft_ctx, None);
         if remove_self {
             drop(peer_fsm);
-            self.on_destroy_peer(region_id, false);
+            self.on_destroy_peer(region_id);
         }
         remove_self
     }
@@ -1244,7 +1354,7 @@ impl<'a> StoreMsgHandler<'a> {
         }
     }
 
-    fn on_destroy_peer(&mut self, region_id: u64, keep_data: bool) {
+    fn on_destroy_peer(&mut self, region_id: u64) {
         let peer = self.get_peer(region_id);
         let mut peer_fsm = peer.peer_fsm.lock().unwrap();
         fail_point!("destroy_peer");
@@ -1291,7 +1401,7 @@ impl<'a> StoreMsgHandler<'a> {
         }
 
         // Destroy read delegates.
-        self.ctx.store_meta.readers.remove(&region_id);
+        self.ctx.store_meta.destroy_region(peer_fsm.peer.region());
 
         // Trigger region change observer
         self.ctx.global.coprocessor_host.on_region_changed(
@@ -1307,21 +1417,6 @@ impl<'a> StoreMsgHandler<'a> {
                 "peer_id" => peer_fsm.peer_id(),
                 "err" => %e,
             );
-        }
-        let is_initialized = peer_fsm.peer.is_initialized();
-        if is_initialized
-            && !keep_data
-            && self
-                .ctx
-                .store_meta
-                .region_ranges
-                .remove(&raw_end_key(peer_fsm.peer.region()))
-                .is_none()
-        {
-            panic!("{} meta corruption detected", peer_fsm.peer.tag());
-        }
-        if self.ctx.store_meta.regions.remove(&region_id).is_none() && !keep_data {
-            panic!("{} meta corruption detected", peer_fsm.peer.tag())
         }
         if let Err(e) = peer_fsm.peer.destroy(&mut self.ctx.raft_wb) {
             // If not panic here, the peer will be recreated in the next restart,
@@ -1361,7 +1456,11 @@ impl<'a> StoreMsgHandler<'a> {
             .region_ranges
             .range((Excluded(start), Unbounded))
         {
-            let region = self.ctx.store_meta.regions.get(region_id).unwrap();
+            let region = self.ctx.store_meta.regions.get(region_id);
+            if region.is_none() {
+                continue;
+            }
+            let region = region.unwrap();
             let region_start_key = raw_start_key(region);
             if region_start_key >= end {
                 break;
@@ -1420,8 +1519,17 @@ impl<'a> StoreMsgHandler<'a> {
                         // TODO: clean user properties?
                     }
                     ExecResult::UnsafeDestroy => {
-                        self.on_destroy_peer(region_id, false);
+                        self.on_destroy_peer(region_id);
                         return None;
+                    }
+                    ExecResult::PrepareMerge { region } => {
+                        self.on_prepare_merge_result(region);
+                    }
+                    ExecResult::CommitMerge { region, source } => {
+                        self.on_commit_merge_result(region, source);
+                    }
+                    ExecResult::RollbackMerge { region, commit } => {
+                        self.on_rollback_merge(region, commit);
                     }
                 }
             }
@@ -1455,6 +1563,118 @@ impl<'a> StoreMsgHandler<'a> {
             "peer_id" => peer_fsm.peer_id(),
         );
         drop(peer_fsm);
-        self.on_destroy_peer(region_id, false);
+        self.on_destroy_peer(region_id);
+    }
+
+    fn on_prepare_merge_request(&mut self, region_id: u64, req: RaftCmdRequest) {
+        let peer = match self.ctx.peers.get(&region_id) {
+            Some(peer) => peer,
+            None => return,
+        };
+        let mut peer_fsm = peer.peer_fsm.lock().unwrap();
+        let raft_ctx = &mut self.ctx.raft_ctx;
+        let store_meta = &mut self.ctx.store_meta;
+        let mut handler = PeerMsgHandler::new(&mut peer_fsm, raft_ctx);
+        handler.propose_raft_command(req, Callback::None, Some(store_meta));
+    }
+
+    fn on_prepare_merge_result(&mut self, region: Region) {
+        let peer = match self.ctx.peers.get(&region.id) {
+            Some(peer) => peer,
+            None => return,
+        };
+        let mut peer_fsm = peer.peer_fsm.lock().unwrap();
+        let is_leader = peer_fsm.peer.is_leader();
+        self.ctx
+            .global
+            .engines
+            .kv
+            .set_shard_active(region.id, is_leader);
+        self.ctx.store_meta.set_region(
+            region,
+            &mut peer_fsm.peer,
+            RegionChangeReason::PrepareMerge,
+        );
+    }
+
+    fn on_check_merge(&mut self, region_id: u64) {
+        let peer = match self.ctx.peers.get(&region_id) {
+            Some(peer) => peer,
+            None => return,
+        };
+        let mut peer_fsm = peer.peer_fsm.lock().unwrap();
+        let store_meta = &mut self.ctx.store_meta;
+        let ctx = &mut self.ctx.raft_ctx;
+        let mut handler = PeerMsgHandler::new(&mut peer_fsm, ctx);
+        handler.on_check_merge(store_meta);
+    }
+
+    fn on_commit_merge_result(&mut self, region: Region, source: Region) {
+        let peer = match self.ctx.peers.get(&region.id) {
+            Some(peer) => peer,
+            None => return,
+        };
+        let mut peer_fsm = peer.peer_fsm.lock().unwrap();
+        let is_leader = peer_fsm.peer.is_leader();
+        self.ctx
+            .global
+            .engines
+            .kv
+            .set_shard_active(region.id, is_leader);
+        let old_region = self.ctx.store_meta.regions.get(&region.id).unwrap();
+        self.ctx
+            .store_meta
+            .region_ranges
+            .remove(&raw_end_key(&old_region));
+        self.ctx
+            .store_meta
+            .region_ranges
+            .insert(raw_end_key(&region), region.id);
+        self.ctx
+            .store_meta
+            .set_region(region, &mut peer_fsm.peer, RegionChangeReason::CommitMerge);
+        let tag = peer_fsm.peer.tag();
+        if is_leader {
+            peer_fsm.peer.heartbeat_pd(self.ctx);
+            // Notify pd immediately to let it update the region meta.
+            info!(
+                "notify pd with commit merge";
+                "tag" => tag,
+                "peer_id" => peer_fsm.peer_id(),
+            );
+        }
+        peer_fsm.peer.reset_buckets();
+        drop(peer_fsm);
+        if let Some(source_peer) = self.ctx.peers.get(&source.get_id()) {
+            let mut applier = source_peer.applier.lock().unwrap();
+            applier.destroy();
+            drop(applier);
+            self.on_destroy_peer(source.id);
+        }
+    }
+
+    fn on_rollback_merge(&mut self, region: Region, commit: u64) {
+        let peer = match self.ctx.peers.get(&region.id) {
+            Some(peer) => peer,
+            None => return,
+        };
+        let mut peer_fsm = peer.peer_fsm.lock().unwrap();
+        // Clear merge releted data
+        peer_fsm.peer.pending_merge_state = None;
+        peer_fsm.peer.want_rollback_merge_peers.clear();
+        self.ctx.store_meta.set_region(
+            region,
+            &mut peer_fsm.peer,
+            RegionChangeReason::RollbackMerge,
+        );
+        if peer_fsm.peer.is_leader() {
+            info!(
+                "notify pd with rollback merge";
+                "tag" => peer_fsm.peer.tag(),
+                "peer_id" => peer_fsm.peer_id(),
+                "commit_index" => commit,
+            );
+            peer_fsm.peer.heartbeat_pd(self.ctx);
+        }
     }
 }

@@ -23,7 +23,7 @@ use crate::{
         search,
         sstable::{L0Table, SSTable},
     },
-    *,
+    Iterator as TableIterator, *,
 };
 
 pub struct Shard {
@@ -394,6 +394,15 @@ impl Shard {
         for cf in 0..NUM_CFS {
             let scf = data.get_cf(cf);
             for lh in &scf.levels[..scf.levels.len() - 1] {
+                if lh.has_over_bound_data(&self.start, &self.end) {
+                    // set higher priority for over bound table.
+                    max_pri.score += 1.8;
+                    max_pri.cf = cf as isize;
+                    max_pri.level = lh.level;
+                    let mut lock = self.compaction_priority.write().unwrap();
+                    *lock = Some(max_pri);
+                    return;
+                }
                 let level_total_size = data.get_level_total_size(lh);
                 let score = level_total_size as f64
                     / ((self.opt.base_size as f64) * 10f64.powf((lh.level - 1) as f64));
@@ -428,6 +437,10 @@ impl Shard {
     pub fn get_writable_mem_table_size(&self) -> u64 {
         let guard = self.data.read().unwrap();
         guard.mem_tbls[0].size()
+    }
+
+    pub fn has_over_bound_data(&self) -> bool {
+        self.get_data().has_over_bound_data()
     }
 
     pub fn data_all_persisted(&self) -> bool {
@@ -646,6 +659,46 @@ impl ShardDataCore {
                     .delete_ranges()
                     .any(|(start, end)| mem_tbl.has_data_in_range(start, end))
             })
+    }
+
+    pub(crate) fn has_mem_over_bound_data(&self) -> bool {
+        for mem_tbl in &self.mem_tbls {
+            for cf in 0..NUM_CFS {
+                let skl = mem_tbl.get_cf(cf);
+                let mut iter = skl.new_iterator(false);
+                iter.rewind();
+                if iter.valid() && iter.key() < &self.start {
+                    return true;
+                }
+                let mut rev_iter = skl.new_iterator(true);
+                rev_iter.rewind();
+                if iter.valid() && iter.key() >= &self.end {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    pub(crate) fn has_file_over_bound_data(&self) -> bool {
+        for l0 in &self.l0_tbls {
+            if l0.smallest() < &self.start || l0.biggest() >= &self.end {
+                return true;
+            }
+        }
+        for cf in 0..NUM_CFS {
+            let scf = &self.cfs[cf];
+            for level in &scf.levels {
+                if level.has_over_bound_data(self.start.chunk(), self.end.chunk()) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    pub fn has_over_bound_data(&self) -> bool {
+        self.has_mem_over_bound_data() || self.has_file_over_bound_data()
     }
 
     pub fn writable_mem_table_need_truncate_ts(&self) -> bool {
@@ -867,6 +920,15 @@ impl LevelHandler {
             return tbl.get_newer(key, version, key_hash);
         }
         table::Value::new()
+    }
+
+    pub(crate) fn has_over_bound_data(&self, start: &[u8], end: &[u8]) -> bool {
+        if self.tables.is_empty() {
+            return false;
+        }
+        let first = self.tables.first().unwrap();
+        let last = self.tables.last().unwrap();
+        first.smallest() < start || last.biggest() >= end
     }
 }
 

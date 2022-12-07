@@ -3,7 +3,7 @@
 use bytes::{Buf, BufMut};
 use kvproto::{
     metapb,
-    raft_serverpb::{RegionLocalState, StoreIdent},
+    raft_serverpb::{PeerState, RegionLocalState, StoreIdent},
 };
 use protobuf::{Message, RepeatedField};
 use raftstore::store::util;
@@ -15,7 +15,7 @@ use super::{
 };
 use crate::{
     store::{
-        raft_state_key, region_state_key, Engines, EMPTY_KEY, KV_ENGINE_META_KEY,
+        raft_state_key, region_state_key, write_peer_state, Engines, EMPTY_KEY, KV_ENGINE_META_KEY,
         RAFT_INIT_LOG_INDEX, RAFT_INIT_LOG_TERM, STORE_IDENT_KEY, TERM_KEY,
     },
     Result,
@@ -77,14 +77,8 @@ pub fn prepare_bootstrap_cluster(engines: &Engines, region: &metapb::Region) -> 
     let mut raft_wb = rfengine::WriteBatch::new();
     let val = state.write_to_bytes().unwrap();
     raft_wb.set_state(0, 0, PREPARE_BOOTSTRAP_KEY, val.as_slice());
+    write_peer_state(&mut raft_wb, peer_id, region, PeerState::Normal, None);
     let region_version = region.get_region_epoch().get_version();
-    let region_state_key = region_state_key(region_version);
-    raft_wb.set_state(
-        peer_id,
-        region.get_id(),
-        region_state_key.chunk(),
-        val.as_slice(),
-    );
     write_initial_raft_state(&mut raft_wb, peer_id, region.get_id(), region_version);
     let change_set = initial_change_set(region.get_id(), region_version);
     let cs_bin = change_set.write_to_bytes().unwrap();

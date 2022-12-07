@@ -12,6 +12,7 @@ use bitflags::bitflags;
 use collections::{HashMap, HashSet};
 use error_code::ErrorCodeExt;
 use fail::fail_point;
+use kvengine::ShardMeta;
 use kvproto::{
     disk_usage::DiskUsage,
     kvrpcpb::ExtraOp as TxnExtraOp,
@@ -21,14 +22,14 @@ use kvproto::{
         AdminCmdType, AdminResponse, ChangePeerRequest, CmdType, CustomRequest, RaftCmdRequest,
         RaftCmdResponse, TransferLeaderRequest, TransferLeaderResponse,
     },
-    raft_serverpb::{PeerState, RaftMessage, RegionLocalState},
+    raft_serverpb::{ExtraMessage, ExtraMessageType, MergeState, PeerState, RaftMessage},
     *,
 };
 use pd_client::{simple_merge_bucket_write_stats, BucketStat};
 use protobuf::Message;
 use raft::{
     self, Changer, LightReady, ProgressState, ProgressTracker, RawNode, Ready, SnapshotStatus,
-    StateRole, Storage, INVALID_ID,
+    StateRole, Storage, INVALID_ID, INVALID_INDEX,
 };
 use raft_proto::{
     eraftpb::{ConfChangeType, Entry, MessageType},
@@ -41,7 +42,7 @@ use raftstore::{
         local_metrics::*,
         metrics::*,
         util::{
-            admin_cmd_epoch_lookup, is_initial_msg, is_region_initialized, AdminCmdEpochState,
+            admin_cmd_epoch_lookup, is_epoch_stale, is_initial_msg, AdminCmdEpochState,
             ChangePeerI, ConfChangeKind, Lease, LeaseState,
         },
         QueryStats, TxnExt,
@@ -414,6 +415,8 @@ pub(crate) struct Peer {
     pub(crate) last_urgent_proposal_idx: u64,
     // The index of the latest committed split command.
     pub(crate) last_committed_split_idx: u64,
+    /// The index of last sent snapshot
+    last_sent_snapshot_idx: u64,
     // preprocessed_index is used to avoid duplicated preprocess execution.
     pub(crate) preprocessed_index: u64,
 
@@ -450,6 +453,14 @@ pub(crate) struct Peer {
     pub(crate) last_bucket_split_region_size: u64,
 
     pub buckets: Option<BucketStat>,
+
+    pub(crate) pending_merge_state: Option<MergeState>,
+    /// The rollback merge proposal can be proposed only when the number
+    /// of peers is greater than the majority of all peers.
+    /// There are more details in the annotation above
+    /// `test_node_merge_write_data_to_source_region_after_merging`
+    /// The peers who want to rollback merge.
+    pub want_rollback_merge_peers: HashSet<u64>,
 }
 
 impl Peer {
@@ -522,6 +533,7 @@ impl Peer {
             last_applying_idx: applied_index,
             last_urgent_proposal_idx: u64::MAX,
             last_committed_split_idx: 0,
+            last_sent_snapshot_idx: 0,
             preprocessed_index: 0,
             leader_lease: Lease::new(
                 cfg.raft_store_max_leader_lease(),
@@ -534,6 +546,8 @@ impl Peer {
             lead_transferee: raft::INVALID_ID,
             last_bucket_split_region_size: 0,
             buckets: None,
+            pending_merge_state: None,
+            want_rollback_merge_peers: Default::default(),
         };
         // If this region has only one peer and I am the one, campaign directly.
         if region.get_peers().len() == 1 && region.get_peers()[0].get_store_id() == store_id {
@@ -549,6 +563,22 @@ impl Peer {
 
     pub(crate) fn term(&self) -> u64 {
         self.raft_group.raft.term
+    }
+
+    pub fn maybe_add_want_rollback_merge_peer(&mut self, peer_id: u64, extra_msg: &ExtraMessage) {
+        if !self.is_leader() {
+            return;
+        }
+        if let Some(ref state) = self.pending_merge_state {
+            if state.get_commit() == extra_msg.get_premerge_commit() {
+                self.add_want_rollback_merge_peer(peer_id);
+            }
+        }
+    }
+
+    pub fn add_want_rollback_merge_peer(&mut self, peer_id: u64) {
+        assert!(self.pending_merge_state.is_some());
+        self.want_rollback_merge_peers.insert(peer_id);
     }
 
     pub(crate) fn next_proposal_index(&self) -> u64 {
@@ -595,15 +625,12 @@ impl Peer {
         if !self.get_store().is_initialized() {
             region.mut_peers().push(self.peer.clone());
         }
-        let epoch = region.get_region_epoch().clone();
-        let mut tomb_stone = RegionLocalState::new();
-        tomb_stone.set_state(PeerState::Tombstone);
-        tomb_stone.set_region(region);
-        raft_wb.set_state(
+        write_peer_state(
+            raft_wb,
             self.peer_id(),
-            self.region_id,
-            &region_state_key(epoch.version),
-            &tomb_stone.write_to_bytes().unwrap(),
+            &region,
+            PeerState::Tombstone,
+            self.pending_merge_state.clone(),
         );
 
         self.pending_reads.clear_all(Some(self.region_id));
@@ -645,6 +672,12 @@ impl Peer {
         {
             // Epoch version changed, disable read on the localreader for this region.
             self.leader_lease.expire_remote_lease();
+        }
+        if is_epoch_stale(
+            self.get_preprocessed_region().get_region_epoch(),
+            region.get_region_epoch(),
+        ) {
+            self.mut_store().preprocessed_region = None;
         }
         self.mut_store().set_region(region);
 
@@ -747,6 +780,12 @@ impl Peer {
     pub fn send_raft_messages(&mut self, ctx: &mut RaftContext, msgs: Vec<RaftMessage>) {
         for msg in msgs {
             let msg_type = msg.get_message().get_msg_type();
+            if msg_type == MessageType::MsgSnapshot {
+                let snap_index = msg.get_message().get_snapshot().get_metadata().get_index();
+                if snap_index > self.last_sent_snapshot_idx {
+                    self.last_sent_snapshot_idx = snap_index;
+                }
+            }
             if msg_type == MessageType::MsgTimeoutNow && self.is_leader() {
                 // After a leader transfer procedure is triggered, the lease for
                 // the old leader may be expired earlier than usual, since a new leader
@@ -1037,6 +1076,25 @@ impl Peer {
         }
     }
 
+    pub fn send_want_rollback_merge(&self, premerge_commit: u64, ctx: &mut RaftContext) {
+        let to_peer = match self.get_peer_from_cache(self.leader_id()) {
+            Some(p) => p,
+            None => {
+                warn!(
+                    "failed to look up recipient peer";
+                    "tag" => self.tag(),
+                    "peer_id" => self.peer.get_id(),
+                    "to_peer" => self.leader_id(),
+                );
+                return;
+            }
+        };
+        let mut extra_msg = ExtraMessage::default();
+        extra_msg.set_type(ExtraMessageType::MsgWantRollbackMerge);
+        extra_msg.set_premerge_commit(premerge_commit);
+        self.send_extra_message(extra_msg, &mut ctx.global.trans, &to_peer);
+    }
+
     pub fn require_updating_max_ts(&self, pd_scheduler: &Scheduler<PdTask>) {
         let epoch = self.region().get_region_epoch();
         let term_low_bits = self.term() & ((1 << 32) - 1); // 32 bits
@@ -1098,6 +1156,7 @@ impl Peer {
                     // prewrites or commits will be just a waste.
                     self.last_urgent_proposal_idx = self.raft_group.raft.raft_log.last_index();
                     self.raft_group.skip_bcast_commit(false);
+                    self.last_sent_snapshot_idx = self.raft_group.raft.raft_log.last_index();
 
                     // A more recent read may happen on the old leader. So max ts should
                     // be updated after a peer becomes leader.
@@ -1194,10 +1253,37 @@ impl Peer {
         send_msg
     }
 
+    pub fn send_extra_message(
+        &self,
+        msg: ExtraMessage,
+        trans: &mut Box<dyn Transport>,
+        to: &metapb::Peer,
+    ) {
+        let mut send_msg = self.prepare_raft_message();
+        let ty = msg.get_type();
+        debug!("send extra msg";
+            "tag" => self.tag(),
+            "peer_id" => self.peer.get_id(),
+            "msg_type" => ?ty,
+            "to" => to.get_id()
+        );
+        send_msg.set_extra_msg(msg);
+        send_msg.set_to_peer(to.clone());
+        if let Err(e) = trans.send(send_msg) {
+            error!(?e;
+                "failed to send extra message";
+                "type" => ?ty,
+                "tag" => self.tag(),
+                "peer_id" => self.peer.get_id(),
+                "target" => ?to,
+            );
+        }
+    }
+
     pub(crate) fn handle_raft_ready(
         &mut self,
         ctx: &mut RaftContext,
-        mut store_meta: Option<&mut StoreMeta>,
+        store_meta: Option<&mut StoreMeta>,
     ) {
         if self.pending_remove {
             return;
@@ -1251,12 +1337,10 @@ impl Peer {
         let new_role = ready.ss().map(|ss| ss.raft_state);
         self.handle_raft_committed_entries(ctx, ready.take_committed_entries(), new_role);
         let last_preprocessed_index = self.last_applying_idx;
-        if let Some(snap_res) = self.mut_store().handle_raft_ready(
-            ctx,
-            &mut ready,
-            last_preprocessed_index,
-            &mut store_meta,
-        ) {
+        if let Some(snap_res) =
+            self.mut_store()
+                .handle_raft_ready(ctx, &mut ready, last_preprocessed_index)
+        {
             self.mut_store().preprocessed_region = None;
             // The peer may change from learner to voter after snapshot persisted.
             let peer = self
@@ -1342,9 +1426,24 @@ impl Peer {
                 }
             }
         }
-        for entry in committed_entries.iter() {
-            self.preprocess_committed_entry(ctx, entry);
+        for (pos, entry) in committed_entries.iter().enumerate() {
+            let split_entries = self.preprocess_committed_entry(ctx, pos, entry);
+            if split_entries {
+                let (first, second) = committed_entries.split_at(pos);
+                self.build_apply_msg(ctx, first.to_vec(), None);
+                self.handle_raft_committed_entries(ctx, second.to_vec(), new_role);
+                return;
+            }
         }
+        self.build_apply_msg(ctx, committed_entries, new_role);
+    }
+
+    fn build_apply_msg(
+        &mut self,
+        ctx: &mut RaftContext,
+        committed_entries: Vec<Entry>,
+        new_role: Option<raft::StateRole>,
+    ) {
         if let Some(last_entry) = committed_entries.last() {
             self.last_applying_idx = last_entry.get_index();
             if self.last_applying_idx >= self.last_urgent_proposal_idx {
@@ -1353,6 +1452,7 @@ impl Peer {
                 self.last_urgent_proposal_idx = u64::MAX;
             }
         }
+        let tag = self.tag();
         let cbs = if !self.proposals.is_empty() {
             let current_term = self.term();
             let cbs = committed_entries
@@ -1387,9 +1487,14 @@ impl Peer {
         fail_point!("after_send_to_apply_1003", self.peer_id() == 1003, |_| {});
     }
 
-    pub(crate) fn preprocess_committed_entry(&mut self, ctx: &mut RaftContext, entry: &Entry) {
+    pub(crate) fn preprocess_committed_entry(
+        &mut self,
+        ctx: &mut RaftContext,
+        pos: usize,
+        entry: &Entry,
+    ) -> bool {
         if self.preprocessed_index > 0 && entry.index <= self.preprocessed_index {
-            return;
+            return false;
         }
         let mut need_try_advance_meta = entry.data.is_empty();
         if let Some(cmd) = get_preprocess_cmd(entry) {
@@ -1397,7 +1502,34 @@ impl Peer {
                 self.preprocess_change_set(ctx, entry, cmd.get_custom_request());
                 need_try_advance_meta = true;
             } else {
-                self.preprocess_pending_splits(ctx, entry, &cmd);
+                if let Err(err) = check_region_epoch(&cmd, self.get_preprocessed_region(), false) {
+                    warn!("preprocess pending admin failed {:?}", err);
+                    return false;
+                }
+                let admin = cmd.get_admin_request();
+                if admin.has_splits() {
+                    self.preprocess_pending_splits(ctx, entry, &cmd);
+                } else if admin.has_prepare_merge() {
+                    self.preprocess_prepare_merge(ctx, entry, &cmd);
+                } else if admin.has_rollback_merge() {
+                    if pos != 0 {
+                        // rollback merge need to insert an ApplyMsg::PrepareRollbackMerge to pause
+                        // the applier. Split the committed entries to ensure all the previous
+                        // entries are applied before the pause.
+                        return true;
+                    }
+                    self.preprocess_rollback_merge(ctx, entry, &cmd);
+                } else if admin.has_commit_merge() {
+                    if pos != 0 {
+                        // commit merge need to insert an ApplyMsg::PrepareCommitMerge which pause
+                        // the applier, if it's not the first entry it will also pause the
+                        // previously applied entries.
+                        // So split the committed entries to ensure all the previous entries are
+                        // applied before the pause.
+                        return true;
+                    }
+                    self.preprocess_commit_merge(ctx, entry, &cmd);
+                }
             }
         } else if entry.entry_type != eraftpb::EntryType::EntryNormal {
             self.preprocess_conf_change(ctx, entry);
@@ -1407,6 +1539,7 @@ impl Peer {
             self.try_advance_meta(ctx, entry);
         }
         self.preprocessed_index = entry.index;
+        false
     }
 
     pub(crate) fn try_advance_meta(&mut self, ctx: &mut RaftContext, entry: &Entry) {
@@ -1487,7 +1620,7 @@ impl Peer {
                 }
             }
         }
-        ctx.apply_msgs.msgs.push(ApplyMsg::PrepareChangeSet(cs))
+        ctx.apply_msgs.msgs.push(ApplyMsg::PrepareChangeSet(cs));
     }
 
     pub(crate) fn preprocess_pending_splits(
@@ -1517,28 +1650,7 @@ impl Peer {
         for (new_meta, new_region) in new_metas.iter().zip(regions.iter()) {
             let new_peer_id = get_peer_id_by_store_id(new_region, self.peer.store_id).unwrap();
             if new_meta.id == self.region_id {
-                write_peer_state(
-                    &mut ctx.raft_wb,
-                    self.peer.store_id,
-                    new_peer_id,
-                    new_region,
-                );
-                write_engine_meta(&mut ctx.raft_wb, new_peer_id, new_meta);
-                // The raft state key changed when region version change, we need to set it here.
-                // We handle committed entries before update peer storage's raft state, so the peer
-                // storage's raft state may not be update to date, we set the hard state of raft.
-                // This is the final raft state of the old version.
-                let hard_state = self.raft_group.raft.hard_state();
-                let store = self.mut_store();
-                store.raft_state.set_hard_state(&hard_state);
-                store.raft_state.last_preprocessed_index = entry.index;
-                store.write_raft_state(ctx);
-                store.shard_meta = Some(new_meta.clone());
-                // PeerStore use the shard meta's version to persist raft state, since the
-                // shard_meta has updated, we also need to set the new version's raft state.
-                store.write_raft_state(ctx);
-                store.initial_flushed = false;
-                store.preprocessed_region = Some(new_region.clone());
+                self.update_meta_on_version_change(ctx, new_meta, new_region, None);
             } else {
                 let raft = &ctx.global.engines.raft;
                 // The peer has been created or destroyed.
@@ -1560,9 +1672,10 @@ impl Peer {
                 }
                 write_peer_state(
                     &mut ctx.raft_wb,
-                    self.peer.store_id,
                     new_peer_id,
                     new_region,
+                    PeerState::Normal,
+                    None,
                 );
                 write_engine_meta(&mut ctx.raft_wb, new_peer_id, new_meta);
                 let region_version = new_region.get_region_epoch().get_version();
@@ -1578,6 +1691,146 @@ impl Peer {
                 .raft
                 .add_dependent(self.region_id, new_region.get_id());
         }
+    }
+
+    pub(crate) fn update_meta_on_version_change(
+        &mut self,
+        ctx: &mut RaftContext,
+        new_meta: &ShardMeta,
+        new_region: &Region,
+        merge_state: Option<MergeState>,
+    ) {
+        let peer_state = if merge_state.is_some() {
+            PeerState::Merging
+        } else {
+            PeerState::Normal
+        };
+        write_peer_state(
+            &mut ctx.raft_wb,
+            self.peer_id(),
+            new_region,
+            peer_state,
+            merge_state,
+        );
+        write_engine_meta(&mut ctx.raft_wb, self.peer_id(), new_meta);
+        // The raft state key changed when region version change, we need to set it here.
+        // We handle committed entries before update peer storage's raft state, so the peer
+        // storage's raft state may not be update to date, we set the hard state of raft.
+        // This is the final raft state of the old version.
+        let hard_state = self.raft_group.raft.hard_state();
+        let store = self.mut_store();
+        store.raft_state.set_hard_state(&hard_state);
+        store.raft_state.last_preprocessed_index = new_meta.seq;
+        store.write_raft_state(ctx);
+        store.shard_meta = Some(new_meta.clone());
+        // PeerStore use the shard meta's version to persist raft state, since the
+        // shard_meta has updated, we also need to set the new version's raft state.
+        store.write_raft_state(ctx);
+        store.preprocessed_region = Some(new_region.clone());
+    }
+
+    pub(crate) fn preprocess_prepare_merge(
+        &mut self,
+        ctx: &mut RaftContext,
+        entry: &Entry,
+        req: &RaftCmdRequest,
+    ) {
+        let prepare_merge = req.get_admin_request().get_prepare_merge();
+        let mut region = self.get_preprocessed_region().clone();
+        let region_version = region.get_region_epoch().get_version() + 1;
+        region.mut_region_epoch().set_version(region_version);
+        // In theory conf version should not be increased when executing prepare_merge.
+        // However, we don't want to do conf change after prepare_merge is committed.
+        // This can also be done by iterating all proposal to find if prepare_merge is
+        // proposed before proposing conf change, but it make things complicated.
+        // Another way is make conf change also check region version, but this is not
+        // backward compatible.
+        let conf_version = region.get_region_epoch().get_conf_ver() + 1;
+        region.mut_region_epoch().set_conf_ver(conf_version);
+        let mut merge_state = MergeState::default();
+        merge_state.set_target(prepare_merge.get_target().to_owned());
+        merge_state.set_commit(entry.index);
+        merge_state.set_min_index(prepare_merge.get_min_index());
+        let parent_meta = self.get_store().shard_meta.as_ref().unwrap().clone();
+        let parent_snap = parent_meta.to_change_set().take_snapshot();
+        ctx.apply_msgs
+            .msgs
+            .push(ApplyMsg::PendingPrepareMerge(parent_snap));
+        let mut new_meta = parent_meta;
+        new_meta.prepare_merge(entry.index);
+        self.update_meta_on_version_change(ctx, &new_meta, &region, Some(merge_state.clone()));
+        self.pending_merge_state = Some(merge_state);
+    }
+
+    pub(crate) fn preprocess_rollback_merge(
+        &mut self,
+        ctx: &mut RaftContext,
+        entry: &Entry,
+        req: &RaftCmdRequest,
+    ) {
+        let commit = req.get_admin_request().get_rollback_merge().get_commit();
+        let pending_commit = self.pending_merge_state.as_ref().unwrap().get_commit();
+        if commit != 0 && pending_commit != commit {
+            panic!(
+                "{} rollbacks a wrong merge: {} != {}",
+                self.tag(),
+                pending_commit,
+                commit
+            );
+        }
+        let mut region = self.get_preprocessed_region().clone();
+        let version = region.get_region_epoch().get_version();
+        // Update version to avoid duplicated rollback requests.
+        region.mut_region_epoch().set_version(version + 1);
+        let mut new_meta = self.get_store().shard_meta.as_ref().unwrap().clone();
+        new_meta.rollback_merge(entry.index);
+        self.update_meta_on_version_change(ctx, &new_meta, &region, None);
+        ctx.apply_msgs.msgs.push(ApplyMsg::PrepareRollbackMerge);
+    }
+
+    pub(crate) fn preprocess_commit_merge(
+        &mut self,
+        ctx: &mut RaftContext,
+        entry: &Entry,
+        req: &RaftCmdRequest,
+    ) {
+        let commit_merge = req.get_admin_request().get_commit_merge();
+        let source_region = commit_merge.get_source();
+        let source_peer_id = get_peer_id_by_store_id(source_region, self.peer.store_id).unwrap();
+        let mut new_meta = self.get_store().shard_meta.as_ref().unwrap().clone();
+        let mut source = kvenginepb::ChangeSet::new();
+        source
+            .merge_from_bytes(commit_merge.get_source_meta())
+            .unwrap();
+        let source_meta = ShardMeta::new(self.peer.store_id, &source);
+        new_meta.commit_merge(&source_meta, entry.index);
+        let merged_region = new_merged_region(source_region, self.get_preprocessed_region());
+        self.update_meta_on_version_change(ctx, &new_meta, &merged_region, None);
+
+        // set target to tombstone in the same batch, so the commit merge and destroy source would
+        // be atomic.
+        let rwb = &mut ctx.raft_wb;
+        let mut merge_state = MergeState::new();
+        merge_state.set_commit(commit_merge.commit);
+        merge_state.set_target(self.region().clone());
+        write_peer_state(
+            rwb,
+            source_peer_id,
+            source_region,
+            PeerState::Tombstone,
+            Some(merge_state),
+        );
+        let parent_snap = new_meta
+            .parent
+            .as_ref()
+            .unwrap()
+            .to_change_set()
+            .take_snapshot();
+        let apply_msg = ApplyMsg::PrepareCommitMerge {
+            parent_snap,
+            source,
+        };
+        ctx.apply_msgs.msgs.push(apply_msg);
     }
 
     pub(crate) fn preprocess_conf_change(&mut self, ctx: &mut RaftContext, entry: &Entry) {
@@ -1606,9 +1859,10 @@ impl Peer {
             if region_has_peer(&region, self.peer_id()) {
                 write_peer_state(
                     &mut ctx.raft_wb,
-                    self.peer.store_id,
                     self.peer_id(),
                     &region,
+                    PeerState::Normal,
+                    None,
                 );
             } else {
                 // It's a remove self conf change, it will be updated in destroy method with
@@ -1909,7 +2163,6 @@ impl Peer {
         restore_snap_result: RestoreSnapResult,
         meta: &mut StoreMeta,
     ) -> bool {
-        let prev_region = restore_snap_result.prev_region;
         let region = restore_snap_result.region;
         info!(
             "snapshot is restored";
@@ -1919,43 +2172,10 @@ impl Peer {
         );
 
         // TODO(x) update commit group
-        if let Some(meta_region) = meta.regions.get(&self.region_id) {
-            if !is_region_initialized(&prev_region) && is_region_initialized(meta_region) {
-                // The region is updated by split, the peer is already replaced.
-                return false;
-            }
-        }
-        debug!("meta reader insert read delegate {}", self.region_id);
+        meta.update_region_ranges(&region);
+        meta.regions.insert(region.get_id(), region.clone());
         meta.readers
-            .insert(self.region_id, ReadDelegate::from_peer(self));
-
-        if is_region_initialized(&prev_region) {
-            info!(
-                "region changed after restored snapshot";
-                "tag" => self.tag(),
-                "peer_id" => self.peer_id(),
-                "prev_region" => ?prev_region,
-                "region" => ?region,
-            );
-            let prev = meta.region_ranges.remove(&raw_end_key(&prev_region));
-            if prev != Some(region.get_id()) {
-                panic!(
-                    "{} meta corrupted, expect {:?} got {:?}",
-                    self.tag(),
-                    prev_region,
-                    prev,
-                );
-            }
-        }
-
-        if let Some(r) = meta
-            .region_ranges
-            .insert(raw_end_key(&region), region.get_id())
-        {
-            panic!("{} unexpected region {:?}", self.tag(), r);
-        }
-        let prev = meta.regions.insert(region.get_id(), region);
-        assert_eq!(prev, Some(prev_region));
+            .insert(region.get_id(), ReadDelegate::from_peer(self));
         true
     }
 
@@ -2464,6 +2684,67 @@ impl Peer {
         true
     }
 
+    /// Returns (minimal matched, minimal committed_index)
+    ///
+    /// For now, it is only used in merge.
+    pub fn get_min_progress(&self) -> Result<(u64, u64)> {
+        let (mut min_m, mut min_c) = (None, None);
+        if let Some(progress) = self.raft_group.status().progress {
+            for (id, pr) in progress.iter() {
+                // Reject merge if there is any pending request snapshot,
+                // because a target region may merge a source region which is in
+                // an invalid state.
+                if pr.state == ProgressState::Snapshot
+                    || pr.pending_request_snapshot != INVALID_INDEX
+                {
+                    return Err(box_err!(
+                        "there is a pending snapshot peer {} [{:?}], skip merge",
+                        id,
+                        pr
+                    ));
+                }
+                if min_m.unwrap_or(u64::MAX) > pr.matched {
+                    min_m = Some(pr.matched);
+                }
+                if min_c.unwrap_or(u64::MAX) > pr.committed_index {
+                    min_c = Some(pr.committed_index);
+                }
+            }
+        }
+        let (mut min_m, min_c) = (min_m.unwrap_or(0), min_c.unwrap_or(0));
+        if min_m < min_c {
+            warn!(
+                "min_matched < min_committed, raft progress is inaccurate";
+                "tag" => self.tag(),
+                "peer_id" => self.peer.get_id(),
+                "min_matched" => min_m,
+                "min_committed" => min_c,
+            );
+            // Reset `min_matched` to `min_committed`, since the raft log at `min_committed` is
+            // known to be committed in all peers, all of the peers should also have replicated it
+            min_m = min_c;
+        }
+        Ok((min_m, min_c))
+    }
+
+    fn pre_propose_prepare_merge(&self, req: &mut RaftCmdRequest) -> Result<()> {
+        let last_index = self.raft_group.raft.raft_log.last_index();
+        let (min_matched, min_committed) = self.get_min_progress()?;
+        if last_index != min_matched {
+            return Err(box_err!(
+                "log gap too large, skip merge: matched: {}, committed: {}, last index: {}, last_snapshot: {}",
+                min_matched,
+                min_committed,
+                last_index,
+                self.last_sent_snapshot_idx
+            ));
+        }
+        req.mut_admin_request()
+            .mut_prepare_merge()
+            .set_min_index(min_matched + 1);
+        Ok(())
+    }
+
     fn pre_propose(
         &self,
         raft_ctx: &mut RaftContext,
@@ -2487,6 +2768,13 @@ impl Peer {
                     }
                     ctx.insert(ProposalContext::PRE_PROCESS);
                 }
+                AdminCmdType::PrepareMerge => {
+                    self.pre_propose_prepare_merge(req)?;
+                    ctx.insert(ProposalContext::PRE_PROCESS);
+                }
+                AdminCmdType::CommitMerge | AdminCmdType::RollbackMerge => {
+                    ctx.insert(ProposalContext::PRE_PROCESS);
+                }
                 _ => {}
             }
         }
@@ -2503,6 +2791,23 @@ impl Peer {
         raft_ctx: &mut RaftContext,
         mut req: RaftCmdRequest,
     ) -> Result<Either<u64, u64>> {
+        if self.pending_merge_state.is_some() {
+            if req.has_admin_request() {
+                if req.get_admin_request().get_cmd_type() != AdminCmdType::RollbackMerge {
+                    return Err(Error::ProposalInMergingMode(self.region_id));
+                }
+            } else if req.has_custom_request() {
+                let custom_log = CustomRaftLog::new_from_data(req.get_custom_request().get_data());
+                if custom_log.get_type() != TYPE_ENGINE_META {
+                    return Err(Error::ProposalInMergingMode(self.region_id));
+                }
+                let cs = custom_log.get_change_set().unwrap();
+                if !cs.has_initial_flush() {
+                    return Err(Error::ProposalInMergingMode(self.region_id));
+                }
+            }
+        }
+
         if self.has_applied_to_current_term() {
             // Only when applied index's term is equal to current leader's term, the information
             // in epoch checker is up to date and can be used to check epoch.
@@ -2726,7 +3031,7 @@ impl Peer {
         let region = self.region().clone();
         if check_epoch {
             if let Err(e) = check_region_epoch(&req, &region, true) {
-                debug!("epoch not match"; "region_id" => region.get_id(), "err" => ?e);
+                debug!("epoch not match"; "tag" => self.tag(), "err" => ?e);
                 let mut response = cmd_resp::new_error(e);
                 cmd_resp::bind_term(&mut response, self.term());
                 return ReadResponse {
@@ -2922,6 +3227,22 @@ impl std::fmt::Display for ReadyDebug<'_> {
             entries,
         )
     }
+}
+
+pub(crate) fn new_merged_region(source: &Region, target: &Region) -> Region {
+    let mut merged = target.clone();
+    // Use a max value so that pd can ensure overlapped region has a priority.
+    let version = cmp::max(
+        source.get_region_epoch().get_version(),
+        target.get_region_epoch().get_version(),
+    ) + 1;
+    merged.mut_region_epoch().set_version(version);
+    if keys::enc_end_key(&merged) == keys::enc_start_key(source) {
+        merged.set_end_key(source.get_end_key().to_vec());
+    } else {
+        merged.set_start_key(source.get_start_key().to_vec());
+    }
+    merged
 }
 
 #[cfg(test)]

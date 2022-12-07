@@ -314,9 +314,9 @@ where
     panic!("{}", fail_msg);
 }
 
-pub fn try_wait<F>(f: F, seconds: usize) -> bool
+pub fn try_wait<F>(mut f: F, seconds: usize) -> bool
 where
-    F: Fn() -> bool,
+    F: FnMut() -> bool,
 {
     let begin = Instant::now_coarse();
     let timeout = Duration::from_secs(seconds as u64);

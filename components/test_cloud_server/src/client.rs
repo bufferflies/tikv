@@ -3,7 +3,7 @@
 use std::{
     collections::{BTreeMap, HashMap},
     ops::{
-        Bound::{Excluded, Unbounded},
+        Bound::{Excluded, Included, Unbounded},
         Range,
     },
     sync::{
@@ -33,7 +33,7 @@ use tikv_util::{
     time::Instant,
 };
 
-use crate::must_wait;
+use crate::try_wait;
 
 pub struct ClusterClient {
     pub pd_client: Arc<TestPdClient>,
@@ -166,11 +166,14 @@ impl ClusterClient {
         let start_time = Instant::now();
         let timeout = Duration::from_secs(15);
         while start_time.saturating_elapsed() < timeout {
-            let ctx = self.new_rpc_ctx(region_id);
-            if ctx.get_region_epoch().get_version() != id_ver.ver() {
+            let ctx = self
+                .new_rpc_ctx(region_id)
+                .filter(|x| x.get_region_epoch().get_version() == id_ver.ver());
+            if ctx.is_none() {
                 self.kv_prewrite(muts, pk, ts);
                 return;
             }
+            let ctx = ctx.unwrap();
             let store_id = ctx.get_peer().get_store_id();
             let kv_client = self.get_kv_client(store_id);
             let mut prewrite_req = PrewriteRequest::default();
@@ -194,7 +197,7 @@ impl ClusterClient {
                     store_id_errors.push((store_id, format!("{:?}", region_err)));
                     continue;
                 }
-                if self.handle_region_epoch_not_match(region_err) {
+                if self.handle_region_epoch_not_match_or_not_found(region_err) {
                     self.kv_prewrite(muts, pk, ts);
                     return;
                 }
@@ -224,11 +227,14 @@ impl ClusterClient {
         let start_time = Instant::now();
         let timeout = Duration::from_secs(15);
         while start_time.saturating_elapsed() < timeout {
-            let ctx = self.new_rpc_ctx(region_id);
-            if ctx.get_region_epoch().get_version() != id_ver.ver() {
+            let ctx = self
+                .new_rpc_ctx(region_id)
+                .filter(|x| x.get_region_epoch().get_version() == id_ver.ver());
+            if ctx.is_none() {
                 self.kv_commit(keys, start_ts, commit_ts);
                 return;
             }
+            let ctx = ctx.unwrap();
             let store_id = ctx.get_peer().get_store_id();
             let kv_client = self.get_kv_client(store_id);
             let mut commit_req = CommitRequest::default();
@@ -250,7 +256,7 @@ impl ClusterClient {
                     store_id_errors.push((store_id, format!("{:?}", region_err)));
                     continue;
                 }
-                if self.handle_region_epoch_not_match(region_err) {
+                if self.handle_region_epoch_not_match_or_not_found(region_err) {
                     self.kv_commit(keys, start_ts, commit_ts);
                     return;
                 }
@@ -309,16 +315,17 @@ impl ClusterClient {
             .get_region(&encode_bytes(key))
             .unwrap()
             .into();
+        for (raw_end, id) in self.get_regions_in_range(&region.raw_start, &region.raw_end) {
+            self.region_ranges.remove(&raw_end);
+            self.regions.remove(&id);
+        }
         self.region_ranges
             .insert(region.raw_end.clone(), region.id_ver());
-        self.regions.insert(region.id, region);
+        self.regions.insert(region.id, region.clone());
         self.get_region_from_cache(key).unwrap()
     }
 
     fn update_cache_by_id(&mut self, region_id: u64, opt_region: Option<RawRegion>) {
-        if let Some(x) = self.regions.remove(&region_id) {
-            self.region_ranges.remove(&x.raw_end);
-        }
         let region: RawRegion = if let Some(region) = opt_region {
             region
         } else if let Some((region, leader)) =
@@ -330,6 +337,10 @@ impl ClusterClient {
         } else {
             return;
         };
+        for (raw_end, id) in self.get_regions_in_range(&region.raw_start, &region.raw_end) {
+            self.region_ranges.remove(&raw_end);
+            self.regions.remove(&id);
+        }
         self.region_ranges
             .insert(region.raw_end.clone(), region.id_ver());
         self.regions.insert(region.id, region);
@@ -341,12 +352,20 @@ impl ClusterClient {
             .range((Excluded(key.to_vec()), Unbounded))
             .next()
         {
-            let region = self.regions.get(&id_ver.id()).unwrap();
-            if region.id_ver() == id_ver && region.raw_start.as_slice() <= key {
-                return Some(region.clone());
+            if let Some(region) = self.regions.get(&id_ver.id()) {
+                if region.id_ver() == id_ver && region.raw_start.as_slice() <= key {
+                    return Some(region.clone());
+                }
             }
         }
         None
+    }
+
+    fn get_regions_in_range(&self, start: &[u8], end: &[u8]) -> Vec<(Vec<u8>, u64)> {
+        self.region_ranges
+            .range((Excluded(start.to_vec()), Included(end.to_vec())))
+            .map(|(raw_end, &id_ver)| (raw_end.clone(), id_ver.id()))
+            .collect()
     }
 
     fn handle_retryable_error(&mut self, region_id: u64, region_err: &Error) -> bool {
@@ -363,8 +382,8 @@ impl ClusterClient {
             self.update_cache_by_id(region_id, None);
             return true;
         }
-        if region_err.has_region_not_found() {
-            self.update_cache_by_id(region_id, None);
+        if region_err.has_proposal_in_merging_mode() {
+            sleep(Duration::from_millis(100));
             return true;
         }
         if region_err.has_stale_command() {
@@ -392,11 +411,18 @@ impl ClusterClient {
         false
     }
 
-    fn handle_region_epoch_not_match(&mut self, region_err: &Error) -> bool {
+    fn handle_region_epoch_not_match_or_not_found(&mut self, region_err: &Error) -> bool {
         if region_err.has_epoch_not_match() {
             let not_match = region_err.get_epoch_not_match();
             for region in not_match.get_current_regions() {
                 self.update_cache_by_id(region.id, Some(region.clone().into()));
+            }
+            return true;
+        }
+        if region_err.has_region_not_found() {
+            let region_id = region_err.get_region_not_found().get_region_id();
+            if let Some(region) = self.regions.remove(&region_id) {
+                self.region_ranges.remove(&region.raw_end);
             }
             return true;
         }
@@ -415,29 +441,30 @@ impl ClusterClient {
         self.channels.keys().copied().collect()
     }
 
-    pub fn new_rpc_ctx(&mut self, region_id: u64) -> Context {
+    pub fn new_rpc_ctx(&mut self, region_id: u64) -> Option<Context> {
         if !self.regions.contains_key(&region_id) {
-            must_wait(
+            if !try_wait(
                 || {
                     self.update_cache_by_id(region_id, None);
                     self.regions.contains_key(&region_id)
                 },
                 3,
-                "region not found",
-            );
+            ) {
+                return None;
+            }
         }
         let region = self.regions.get(&region_id).unwrap();
         let mut ctx = Context::new();
         ctx.set_region_id(region_id);
         ctx.set_region_epoch(region.epoch.clone());
         ctx.set_peer(region.get_leader());
-        ctx
+        Some(ctx)
     }
 
     pub fn split(&mut self, key: &[u8]) {
         for _ in 0..10 {
             let region_id = self.get_region_id(key);
-            let ctx = self.new_rpc_ctx(region_id);
+            let ctx = self.new_rpc_ctx(region_id).unwrap();
             let client = self.get_kv_client(ctx.get_peer().get_store_id());
             let mut split_req = SplitRegionRequest::default();
             split_req.set_context(ctx);
@@ -449,7 +476,7 @@ impl ClusterClient {
                     sleep(Duration::from_millis(100));
                     continue;
                 }
-                if self.handle_region_epoch_not_match(region_err) {
+                if self.handle_region_epoch_not_match_or_not_found(region_err) {
                     sleep(Duration::from_millis(100));
                     continue;
                 }
@@ -460,11 +487,24 @@ impl ClusterClient {
         panic!("failed to split key {:?}", key);
     }
 
-    pub fn must_get_key(&mut self, key: &[u8], put_time: Instant) -> Vec<u8> {
+    pub fn merge(&mut self, source_key: &[u8], target_key: &[u8]) {
+        let source_region = self.pd_client.get_region(source_key).unwrap();
+        let target_region = self.pd_client.get_region(target_key).unwrap();
+        assert_ne!(source_region.id, target_region.id);
+        self.pd_client
+            .merge_region(source_region.id, target_region.id);
+    }
+
+    pub fn must_get_key(&mut self, key: &[u8], put_time: Instant) -> (Vec<u8>, Context) {
         self.must_get_key_version(key, u64::MAX, put_time)
     }
 
-    pub fn must_get_key_version(&mut self, key: &[u8], version: u64, put_time: Instant) -> Vec<u8> {
+    pub fn must_get_key_version(
+        &mut self,
+        key: &[u8],
+        version: u64,
+        put_time: Instant,
+    ) -> (Vec<u8>, Context) {
         let start_time = Instant::now();
         let timeout = Duration::from_secs(15);
         let mut region_id = 0;
@@ -472,10 +512,14 @@ impl ClusterClient {
         while start_time.saturating_elapsed() < timeout {
             region_id = self.get_region_id(key);
             let ctx = self.new_rpc_ctx(region_id);
+            if ctx.is_none() {
+                continue;
+            }
+            let ctx = ctx.unwrap();
             let store_id = ctx.get_peer().get_store_id();
             let client = self.get_kv_client(store_id);
             let mut get_req = GetRequest::default();
-            get_req.set_context(ctx);
+            get_req.set_context(ctx.clone());
             get_req.set_key(key.to_vec());
             get_req.set_version(version);
             let result = client.kv_get(&get_req);
@@ -491,7 +535,7 @@ impl ClusterClient {
                 if self.handle_retryable_error(region_id, region_err) {
                     continue;
                 }
-                if self.handle_region_epoch_not_match(region_err) {
+                if self.handle_region_epoch_not_match_or_not_found(region_err) {
                     continue;
                 }
                 panic!("unexpected error {:?}", region_err);
@@ -504,7 +548,7 @@ impl ClusterClient {
                     put_time.saturating_elapsed()
                 );
             }
-            return resp.take_value();
+            return (resp.take_value(), ctx);
         }
         panic!(
             "region {} failed to get key {:?}, errors {:?}, put elapsed {:?}",
@@ -524,13 +568,15 @@ impl ClusterClient {
     }
 
     pub fn verify_key_value(&mut self, key: &[u8], expect_val: &[u8], put_time: Instant) {
-        let val = self.must_get_key(key, put_time);
+        let (val, ctx) = self.must_get_key(key, put_time);
         if val.as_slice() != expect_val {
-            let region_id = self.get_region_id(key);
+            let region_id = ctx.region_id;
+            let region_ver = ctx.get_region_epoch().get_version();
             panic!(
-                "val not equal for key {:?} on region {}, db_len:{}, ref_store_len:{}",
+                "val not equal for key {:?} on region {}:{}, db_len:{}, ref_store_len:{}",
                 key,
                 region_id,
+                region_ver,
                 val.len(),
                 expect_val.len()
             );

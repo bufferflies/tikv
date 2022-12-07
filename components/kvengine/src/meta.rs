@@ -1,6 +1,6 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::collections::HashMap;
+use std::{cmp::max, collections::HashMap};
 
 use bytes::{Buf, Bytes};
 use kvenginepb as pb;
@@ -549,6 +549,40 @@ impl ShardMeta {
 
     pub(crate) fn data_version(&self) -> u64 {
         self.base_version + self.data_sequence
+    }
+
+    pub fn prepare_merge(&mut self, sequence: u64) {
+        let parent = self.clone();
+        self.ver += 1;
+        self.seq = sequence;
+        self.parent = Some(Box::new(parent));
+    }
+
+    pub fn rollback_merge(&mut self, sequence: u64) {
+        self.ver += 1;
+        self.seq = sequence;
+    }
+
+    pub fn commit_merge(&mut self, source: &ShardMeta, sequence: u64) {
+        let mut parent = self.clone();
+        // Include the source files in the parent for future initial flush.
+        for (&id, source_file) in &source.files {
+            parent.files.insert(id, source_file.clone());
+        }
+        for (&id, source_file) in &source.files {
+            self.files.insert(id, source_file.clone());
+        }
+        if &self.end == &source.start {
+            self.end = source.end.clone();
+        } else {
+            self.start = source.start.clone();
+        }
+        self.ver = max(self.ver, source.ver) + 1;
+        let source_mem_tbl_version = source.base_version + source.seq;
+        let target_mem_tbl_version = self.base_version + sequence;
+        self.base_version = max(source_mem_tbl_version, target_mem_tbl_version) - sequence;
+        self.parent = Some(Box::new(parent));
+        self.seq = sequence;
     }
 }
 

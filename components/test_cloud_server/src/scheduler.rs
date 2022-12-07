@@ -1,6 +1,9 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::HashSet,
+    sync::{Arc, Mutex},
+};
 
 use dashmap::DashMap;
 use futures::executor::block_on;
@@ -181,5 +184,45 @@ impl Scheduler {
             .entry(region_id)
             .or_insert(Arc::new(Mutex::default()))
             .clone()
+    }
+
+    pub fn merge_random_region(&self) -> bool {
+        let mut regions = self.pd.get_all_regions();
+        regions.sort_by(|a, b| a.start_key.cmp(&b.start_key));
+        let merge_idx = rand::thread_rng().gen_range(0..regions.len());
+        let mut candidate = None;
+        for i in merge_idx + 1..regions.len() {
+            let left = &regions[i - 1];
+            let right = &regions[i];
+            if left.end_key.eq(&right.start_key) {
+                let left_stores: HashSet<u64> =
+                    left.get_peers().iter().map(|p| p.store_id).collect();
+                if right
+                    .get_peers()
+                    .iter()
+                    .all(|p| left_stores.contains(&p.store_id))
+                {
+                    candidate = Some((left.clone(), right.clone()));
+                    break;
+                }
+            }
+        }
+        if candidate.is_none() {
+            return false;
+        }
+        let (left, right) = candidate.unwrap();
+        let (source, target) = if merge_idx % 2 == 0 {
+            (left.get_id(), right.get_id())
+        } else {
+            (right.get_id(), left.get_id())
+        };
+        self.pd.try_merge_region(source, target);
+        try_wait(
+            || {
+                let region = block_on(self.pd.get_region_by_id(target)).unwrap().unwrap();
+                region.start_key.eq(&left.start_key) && region.end_key.eq(&right.end_key)
+            },
+            10,
+        )
     }
 }

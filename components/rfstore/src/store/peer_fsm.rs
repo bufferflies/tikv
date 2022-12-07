@@ -9,21 +9,23 @@ use std::{
 };
 
 use bytes::Buf;
+use error_code::ErrorCodeExt;
 use fail::fail_point;
 use kvengine::{Shard, TruncateTs, DEL_PREFIXES_KEY, TRUNCATE_TS_KEY};
 use kvproto::{
     import_sstpb::SwitchMode,
     metapb::{self, Region, RegionEpoch},
     raft_cmdpb::{
-        CmdType, RaftCmdRequest, RaftCmdResponse, RaftRequestHeader, Request, StatusCmdType,
-        StatusResponse,
+        AdminCmdType, AdminRequest, CmdType, RaftCmdRequest, RaftCmdResponse, RaftRequestHeader,
+        Request, StatusCmdType, StatusResponse,
     },
-    raft_serverpb::RaftMessage,
+    raft_serverpb::{ExtraMessageType, PeerState, RaftMessage},
 };
 use pd_client::{new_bucket_write_stats, BucketMeta, BucketStat};
+use protobuf::Message;
 use raft::{self, eraftpb::MessageType, Storage};
 use raft_proto::eraftpb;
-use raftstore::store::util;
+use raftstore::store::{util, util::is_learner};
 use rand::{thread_rng, Rng};
 use tikv_util::{box_err, debug, error, info, time::duration_to_sec, trace, warn};
 use txn_types::{Key, WriteBatchFlags};
@@ -32,14 +34,16 @@ use crate::{
     store::{
         cmd_resp::{bind_term, new_error},
         ingest::convert_sst,
+        load_last_peer_state,
         msg::Callback,
         notify_req_region_removed,
         peer::{Peer, StaleState},
         util as _util, ApplyMetrics, ApplyMsg, CasualMessage, Config, CustomBuilder, Engines,
         MsgApplyResult, MsgRegistration, PdTask, PeerMsg, PersistReady, RaftApplyState,
-        RaftContext, ReadProgress, SignificantMsg, SnapState, StoreMsg, Ticker,
-        PEER_TICK_CHECK_STALE_STATE, PEER_TICK_PD_HEARTBEAT, PEER_TICK_RAFT, PEER_TICK_RAFT_LOG_GC,
-        PEER_TICK_REPORT_REGION_BUCKETS, PEER_TICK_SPLIT_CHECK, PEER_TICK_SWITCH_MEM_TABLE_CHECK,
+        RaftCommand, RaftContext, ReadProgress, SignificantMsg, SnapState, StoreMeta, StoreMsg,
+        Ticker, PEER_TICK_CHECK_STALE_STATE, PEER_TICK_PD_HEARTBEAT, PEER_TICK_RAFT,
+        PEER_TICK_RAFT_LOG_GC, PEER_TICK_REPORT_REGION_BUCKETS, PEER_TICK_SPLIT_CHECK,
+        PEER_TICK_SWITCH_MEM_TABLE_CHECK,
     },
     DiscardReason, Error, RaftStoreRouter, Result,
 };
@@ -191,7 +195,7 @@ impl<'a> PeerMsgHandler<'a> {
                         .propose
                         .request_wait_time
                         .observe(duration_to_sec(cmd.send_time.saturating_elapsed()) as f64);
-                    self.propose_raft_command(cmd.request, cmd.callback);
+                    self.propose_raft_command(cmd.request, cmd.callback, None);
                 }
                 PeerMsg::Tick => self.on_tick(),
                 PeerMsg::ApplyResult(res) => {
@@ -209,6 +213,9 @@ impl<'a> PeerMsgHandler<'a> {
                 }
                 PeerMsg::PrepareChangeSetResult(res) => {
                     self.on_prepared_change_set(res);
+                }
+                PeerMsg::PrepareCommitMergeResult(res) => {
+                    self.on_prepared_commit_merge(res);
                 }
             }
         }
@@ -329,6 +336,12 @@ impl<'a> PeerMsgHandler<'a> {
         if peer.is_applying_snapshot() || peer.has_pending_snapshot() {
             // need to check if snapshot is applied.
             return;
+        }
+        if peer.pending_merge_state.is_some() && peer.get_store().initial_flushed() {
+            self.ctx
+                .global
+                .router
+                .send_store(StoreMsg::CheckMerge(peer.region_id));
         }
         let snapshot_not_ready_peers = &peer.get_store().snapshot_not_ready_peers;
         if !snapshot_not_ready_peers.borrow().is_empty() {
@@ -453,6 +466,12 @@ impl<'a> PeerMsgHandler<'a> {
             return Ok(());
         }
 
+        if msg.has_merge_target() {
+            fail_point!("on_has_merge_target", |_| Ok(()));
+            self.on_stale_merge(msg.get_merge_target().get_id());
+            return Ok(());
+        }
+
         if self.check_msg(&msg) {
             return Ok(());
         }
@@ -480,8 +499,16 @@ impl<'a> PeerMsgHandler<'a> {
         result
     }
 
-    fn on_extra_message(&mut self, _msg: RaftMessage) {
-        // TODO(x)
+    fn on_extra_message(&mut self, msg: RaftMessage) {
+        match msg.get_extra_msg().get_type() {
+            ExtraMessageType::MsgWantRollbackMerge => {
+                self.fsm.peer.maybe_add_want_rollback_merge_peer(
+                    msg.get_from_peer().get_id(),
+                    msg.get_extra_msg(),
+                );
+            }
+            _ => {} // TODO
+        }
     }
 
     // return false means the message is invalid, and can be ignored.
@@ -615,6 +642,30 @@ impl<'a> PeerMsgHandler<'a> {
         }
     }
 
+    fn on_stale_merge(&mut self, target_region_id: u64) {
+        if self.fsm.peer.pending_remove {
+            return;
+        }
+        info!(
+            "successful merge can't be continued, try to gc stale peer";
+            "tag" => self.peer.tag(),
+            "peer_id" => self.fsm.peer_id(),
+            "target_region_id" => target_region_id,
+            "merge_state" => ?self.fsm.peer.pending_merge_state,
+        );
+        // Because of the checking before proposing `PrepareMerge`, which is
+        // no `CompactLog` proposal between the smallest commit index and the latest index.
+        // If the merge succeed, all source peers are impossible in apply snapshot state
+        // and must be initialized.
+        // So `maybe_destroy` must succeed here.
+        if self.fsm.peer.maybe_destroy() {
+            // Destroy the apply fsm first, wait for the reply msg from apply fsm
+            self.ctx.apply_msgs.msgs.push(ApplyMsg::UnsafeDestroy {
+                region_id: self.region_id(),
+            });
+        }
+    }
+
     // Returns `Vec<(u64, bool)>` indicated (source_region_id, merge_to_this_peer) if the `msg`
     // doesn't contain a snapshot or this snapshot doesn't conflict with any other snapshots or regions.
     // Otherwise a `SnapKey` is returned.
@@ -629,6 +680,88 @@ impl<'a> PeerMsgHandler<'a> {
     fn destroy_regions_for_snapshot(&mut self, regions_to_destroy: Vec<(u64, bool)>) {
         if regions_to_destroy.is_empty() {}
         // TODO(x)
+    }
+
+    /// Check if a request is valid if it has valid prepare_merge/commit_merge proposal.
+    fn check_merge_proposal(
+        &self,
+        msg: &RaftCmdRequest,
+        store_meta: Option<&mut StoreMeta>,
+    ) -> Result<()> {
+        if !msg.has_admin_request() {
+            return Ok(());
+        }
+        let admin_req = msg.get_admin_request();
+        let region = self.fsm.peer.get_preprocessed_region();
+        if admin_req.has_prepare_merge() {
+            let store_meta = store_meta.unwrap();
+            // Just for simplicity, do not start region merge while in joint state
+            if self.fsm.peer.in_joint_state() {
+                return Err(box_err!(
+                    "{} region in joint state, can not propose merge command, command: {:?}",
+                    self.fsm.peer.tag(),
+                    msg.get_admin_request()
+                ));
+            }
+            let target_region = admin_req.get_prepare_merge().get_target();
+            {
+                match store_meta.regions.get(&target_region.get_id()) {
+                    Some(r) => {
+                        if r != target_region {
+                            return Err(box_err!(
+                                "target region not matched, skip proposing: {:?} != {:?}",
+                                r,
+                                target_region
+                            ));
+                        }
+                    }
+                    None => {
+                        return Err(box_err!(
+                            "target region {} doesn't exist.",
+                            target_region.get_id()
+                        ));
+                    }
+                }
+            }
+            if !util::is_sibling_regions(target_region, region) {
+                return Err(box_err!(
+                    "{:?} and {:?} are not sibling, skip proposing.",
+                    target_region,
+                    region
+                ));
+            }
+            if !util::region_on_same_stores(target_region, region) {
+                return Err(box_err!(
+                    "peers doesn't match {:?} != {:?}, reject merge",
+                    region.get_peers(),
+                    target_region.get_peers()
+                ));
+            }
+            let id = self.region_id();
+            let version = msg.get_header().get_region_epoch().get_version();
+            let target_id = target_region.get_id();
+            let target_version = target_region.get_region_epoch().get_version();
+            let kv = &self.ctx.global.engines.kv;
+            kv.check_merge(id, version, target_id, target_version)?;
+        } else if admin_req.has_commit_merge() {
+            let source_region = msg.get_admin_request().get_commit_merge().get_source();
+            if !util::is_sibling_regions(source_region, region) {
+                return Err(box_err!(
+                    "{:?} and {:?} should be sibling",
+                    source_region,
+                    region
+                ));
+            }
+            if !util::region_on_same_stores(source_region, region) {
+                return Err(box_err!(
+                    "peers not matched: {:?} {:?}",
+                    source_region,
+                    region
+                ));
+            }
+        }
+
+        Ok(())
     }
 
     fn pre_propose_raft_command(
@@ -717,7 +850,17 @@ impl<'a> PeerMsgHandler<'a> {
         }
     }
 
-    fn propose_raft_command(&mut self, msg: RaftCmdRequest, cb: Callback) {
+    pub(crate) fn propose_raft_command(
+        &mut self,
+        mut msg: RaftCmdRequest,
+        cb: Callback,
+        store_meta: Option<&mut StoreMeta>,
+    ) {
+        if self.fsm.peer.pending_remove {
+            notify_req_region_removed(self.region_id(), cb);
+            return;
+        }
+
         match self.pre_propose_raft_command(&msg) {
             Ok(Some(resp)) => {
                 cb.invoke_with_response(resp);
@@ -737,8 +880,15 @@ impl<'a> PeerMsgHandler<'a> {
             _ => (),
         }
 
-        if self.fsm.peer.pending_remove {
-            notify_req_region_removed(self.region_id(), cb);
+        if let Err(e) = self.check_merge_proposal(&mut msg, store_meta) {
+            warn!(
+                "failed to propose merge";
+                "tag" => self.peer.tag(),
+                "peer_id" => self.fsm.peer_id(),
+                "message" => ?msg,
+                "err" => %e,
+            );
+            cb.invoke_with_response(new_error(e));
             return;
         }
         if !msg.get_requests().is_empty() && msg.get_requests()[0].has_ingest_sst() {
@@ -1017,7 +1167,7 @@ impl<'a> PeerMsgHandler<'a> {
                 vec![region.to_owned()],
             ));
         }
-        if !self.peer.get_store().initial_flushed {
+        if !self.peer.get_store().initial_flushed() {
             return Err(Error::Transport(DiscardReason::Full));
         }
         Ok(())
@@ -1043,7 +1193,7 @@ impl<'a> PeerMsgHandler<'a> {
         let mut custom_builder = CustomBuilder::new();
         custom_builder.set_change_set(&cs);
         cmd.set_custom_request(custom_builder.build());
-        self.propose_raft_command(cmd, callback);
+        self.propose_raft_command(cmd, callback, None);
     }
 
     fn on_truncate_ts(&mut self, truncate_ts: u64, shard_ver: u64, callback: Callback) {
@@ -1066,7 +1216,7 @@ impl<'a> PeerMsgHandler<'a> {
         let mut custom_builder = CustomBuilder::new();
         custom_builder.set_change_set(&cs);
         cmd.set_custom_request(custom_builder.build());
-        self.propose_raft_command(cmd, callback);
+        self.propose_raft_command(cmd, callback, None);
     }
 
     fn on_pd_heartbeat_tick(&mut self) {
@@ -1106,7 +1256,7 @@ impl<'a> PeerMsgHandler<'a> {
                 info!("{} proposed meta change event", tag);
             }
         }));
-        self.propose_raft_command(req, cb);
+        self.propose_raft_command(req, cb, None);
     }
 
     fn new_raft_cmd_request(&self) -> RaftCmdRequest {
@@ -1167,9 +1317,6 @@ impl<'a> PeerMsgHandler<'a> {
                 }
             }
         }
-        if change.has_snapshot() || change.has_initial_flush() {
-            self.peer.mut_store().initial_flushed = true;
-        }
     }
 
     fn on_persisted(&mut self, ready: PersistReady) {
@@ -1216,6 +1363,20 @@ impl<'a> PeerMsgHandler<'a> {
             .push(ApplyMsg::ApplyChangeSet(res.unwrap()));
     }
 
+    pub(crate) fn on_prepared_commit_merge(&mut self, res: kvengine::Result<kvengine::ChangeSet>) {
+        if res.is_err() {
+            // TODO(x): properly handle this error.
+            panic!(
+                "{} failed to prepare change set {:?}",
+                self.peer.tag(),
+                res.unwrap_err()
+            );
+        }
+        self.ctx.apply_msgs.msgs.push(ApplyMsg::ResumeCommitMerge {
+            source: res.unwrap(),
+        });
+    }
+
     pub(crate) fn update_max_lag_metrics(&mut self) {
         if !self.fsm.peer.is_leader() {
             return;
@@ -1250,6 +1411,7 @@ impl<'a> PeerMsgHandler<'a> {
         if !self.peer.is_initialized()
             || self.peer.is_applying_snapshot()
             || engines.raft.has_dependents(region_id)
+            || self.peer.pending_merge_state.is_some()
         {
             return;
         }
@@ -1369,7 +1531,7 @@ impl<'a> PeerMsgHandler<'a> {
                 if let Err(e) = self.ctx.global.pd_scheduler.schedule(task) {
                     error!(
                         "failed to notify pd";
-                        "region_id" => self.fsm.region_id(),
+                        "tag" => self.peer.tag(),
                         "peer_id" => self.fsm.peer_id(),
                         "err" => %e,
                     )
@@ -1384,7 +1546,6 @@ impl<'a> PeerMsgHandler<'a> {
             return;
         }
 
-        let region_id = self.region_id();
         let peer_id = self.fsm.peer_id();
         let buckets = self.fsm.peer.buckets.as_mut().unwrap();
         let stats = std::mem::replace(&mut buckets.stats, new_bucket_write_stats(&buckets.meta));
@@ -1401,10 +1562,266 @@ impl<'a> PeerMsgHandler<'a> {
         {
             error!(
                 "failed to report region buckets";
-                "region_id" => region_id,
+                "tag" => self.peer.tag(),
                 "peer_id" => peer_id,
                 "err" => ?e,
             );
+        }
+    }
+
+    /// Check if merge target region is staler than the local one in kv engine.
+    /// It should be called when target region is not in region map in memory.
+    /// If everything is ok, the answer should always be true because PD should ensure all target peers exist.
+    /// So if not, error log will be printed and return false.
+    fn is_merge_target_region_stale(&self, target_region: &metapb::Region) -> Result<bool> {
+        let target_peer_id = util::find_peer(target_region, self.ctx.store_id())
+            .unwrap()
+            .get_id();
+        if let Some(target_state) =
+            load_last_peer_state(&self.ctx.global.engines.raft, target_peer_id)
+        {
+            let state_epoch = target_state.get_region().get_region_epoch();
+            if util::is_epoch_stale(target_region.get_region_epoch(), state_epoch) {
+                return Ok(true);
+            }
+            // The local target region epoch is staler than target region's.
+            // In the case where the peer is destroyed by receiving gc msg rather than applying conf change,
+            // the epoch may staler but it's legal, so check peer id to assure that.
+            if let Some(local_target_peer_id) =
+                util::find_peer(target_state.get_region(), self.ctx.store_id()).map(|r| r.get_id())
+            {
+                match local_target_peer_id.cmp(&target_peer_id) {
+                    cmp::Ordering::Equal => {
+                        if target_state.get_state() == PeerState::Tombstone {
+                            // The local target peer has already been destroyed.
+                            return Ok(true);
+                        }
+                        error!(
+                            "the local target peer state is not tombstone in kv engine";
+                            "target_peer_id" => target_peer_id,
+                            "target_peer_state" => ?target_state.get_state(),
+                            "target_region" => ?target_region,
+                            "tag" => self.peer.tag(),
+                            "peer_id" => self.fsm.peer_id(),
+                        );
+                    }
+                    cmp::Ordering::Greater => {
+                        if state_epoch.get_version() == 0 && state_epoch.get_conf_ver() == 0 {
+                            // There is a new peer and it's destroyed without being initialised.
+                            return Ok(true);
+                        }
+                        // The local target peer id is greater than the one in target region, but its epoch
+                        // is staler than target_region's. That is contradictory.
+                        panic!("{} local target peer id {} is greater than the one in target region {}, but its epoch is staler, local target region {:?},
+                                    target region {:?}", self.fsm.peer.tag(), local_target_peer_id, target_peer_id, target_state.get_region(), target_region);
+                    }
+                    cmp::Ordering::Less => {
+                        error!(
+                            "the local target peer id in kv engine is less than the one in target region";
+                            "local_target_peer_id" => local_target_peer_id,
+                            "target_peer_id" => target_peer_id,
+                            "target_region" => ?target_region,
+                            "tag" => self.peer.tag(),
+                            "peer_id" => self.fsm.peer_id(),
+                        );
+                    }
+                }
+            } else {
+                // Can't get local target peer id probably because this target peer is removed by applying conf change
+                error!(
+                    "the local target peer does not exist in target region state";
+                    "target_region" => ?target_region,
+                    "local_target" => ?target_state.get_region(),
+                    "tag" => self.peer.tag(),
+                    "peer_id" => self.fsm.peer_id(),
+                );
+            }
+        } else {
+            error!(
+                "failed to load target peer's RegionLocalState from kv engine";
+                "target_peer_id" => target_peer_id,
+                "target_region" => ?target_region,
+                "tag" => self.peer.tag(),
+                "peer_id" => self.fsm.peer_id(),
+            );
+        }
+        Ok(false)
+    }
+
+    fn validate_merge_peer(
+        &self,
+        target_region: &metapb::Region,
+        store_meta: &mut StoreMeta,
+    ) -> Result<bool> {
+        let target_region_id = target_region.get_id();
+        let exist_region = { store_meta.regions.get(&target_region_id).cloned() };
+        if let Some(r) = exist_region {
+            let exist_epoch = r.get_region_epoch();
+            let expect_epoch = target_region.get_region_epoch();
+            // exist_epoch > expect_epoch
+            if util::is_epoch_stale(expect_epoch, exist_epoch) {
+                return Err(box_err!(
+                    "target region changed {:?} -> {:?}",
+                    target_region,
+                    r
+                ));
+            }
+            // exist_epoch < expect_epoch
+            if util::is_epoch_stale(exist_epoch, expect_epoch) {
+                info!(
+                    "target region still not catch up, skip.";
+                    "tag" => self.peer.tag(),
+                    "peer_id" => self.fsm.peer_id(),
+                    "target_region" => ?target_region,
+                    "exist_region" => ?r,
+                );
+                return Ok(false);
+            }
+            return Ok(true);
+        }
+
+        // All of the target peers must exist before merging which is guaranteed by PD.
+        // Now the target peer is not in region map.
+        match self.is_merge_target_region_stale(target_region) {
+            Err(e) => {
+                error!(%e;
+                    "failed to load region state, ignore";
+                    "tag" => self.peer.tag(),
+                    "peer_id" => self.fsm.peer_id(),
+                    "target_region_id" => target_region_id,
+                );
+                Ok(false)
+            }
+            Ok(true) => Err(box_err!("region {} is destroyed", target_region_id)),
+            Ok(false) => {
+                error!(
+                    "something is wrong, maybe PD do not ensure all target peers exist before merging"
+                );
+                Ok(false)
+            }
+        }
+    }
+
+    fn schedule_merge(&mut self, store_meta: &mut StoreMeta) -> Result<()> {
+        fail_point!("on_schedule_merge", |_| Ok(()));
+        let (request, target_id) = {
+            let state = self.fsm.peer.pending_merge_state.as_ref().unwrap();
+            let expect_region = state.get_target();
+
+            if !self.validate_merge_peer(expect_region, store_meta)? {
+                // Wait till next round.
+                return Ok(());
+            }
+            let target_id = expect_region.get_id();
+            let sibling_region = expect_region;
+
+            let sibling_peer = util::find_peer(sibling_region, self.store_id()).unwrap();
+            let mut request = new_admin_request(sibling_region.get_id(), sibling_peer.clone());
+            request
+                .mut_header()
+                .set_region_epoch(sibling_region.get_region_epoch().clone());
+            let mut admin = AdminRequest::default();
+            admin.set_cmd_type(AdminCmdType::CommitMerge);
+            admin
+                .mut_commit_merge()
+                .set_source(self.fsm.peer.region().clone());
+            admin.mut_commit_merge().set_commit(state.get_commit());
+            let source_meta = self
+                .fsm
+                .peer
+                .get_store()
+                .shard_meta
+                .as_ref()
+                .unwrap()
+                .to_change_set();
+            admin
+                .mut_commit_merge()
+                .set_source_meta(source_meta.write_to_bytes().unwrap());
+            request.set_admin_request(admin);
+            (request, target_id)
+        };
+        // Please note that, here assumes that the unit of network isolation is store rather than
+        // peer. So a quorum stores of source region should also be the quorum stores of target
+        // region. Otherwise we need to enable proposal forwarding.
+        self.ctx.global.router.send(
+            target_id,
+            PeerMsg::RaftCommand(RaftCommand::new(request, Callback::None)),
+        );
+        Ok(())
+    }
+
+    fn rollback_merge(&mut self) {
+        let req = {
+            let state = self.fsm.peer.pending_merge_state.as_ref().unwrap();
+            let mut request =
+                new_admin_request(self.fsm.peer.region().get_id(), self.fsm.peer.peer.clone());
+            request
+                .mut_header()
+                .set_region_epoch(self.fsm.peer.region().get_region_epoch().clone());
+            let mut admin = AdminRequest::default();
+            admin.set_cmd_type(AdminCmdType::RollbackMerge);
+            admin.mut_rollback_merge().set_commit(state.get_commit());
+            request.set_admin_request(admin);
+            request
+        };
+        self.propose_raft_command(req, Callback::None, None);
+    }
+
+    pub(crate) fn on_check_merge(&mut self, store_meta: &mut StoreMeta) {
+        if self.fsm.stopped
+            || self.fsm.peer.pending_remove
+            || self.fsm.peer.pending_merge_state.is_none()
+        {
+            return;
+        }
+        fail_point!(
+            "on_check_merge_not_1001",
+            self.fsm.peer_id() != 1001,
+            |_| {}
+        );
+        if let Err(e) = self.schedule_merge(store_meta) {
+            if self.fsm.peer.is_leader() {
+                self.fsm
+                    .peer
+                    .add_want_rollback_merge_peer(self.fsm.peer_id());
+                if self
+                    .fsm
+                    .peer
+                    .raft_group
+                    .raft
+                    .prs()
+                    .has_quorum(&self.fsm.peer.want_rollback_merge_peers)
+                {
+                    info!(
+                        "failed to schedule merge, rollback";
+                        "tag" => self.peer.tag(),
+                        "peer_id" => self.fsm.peer_id(),
+                        "err" => %e,
+                        "error_code" => %e.error_code(),
+                    );
+                    self.rollback_merge();
+                }
+            } else if !is_learner(&self.fsm.peer.peer) {
+                info!(
+                    "want to rollback merge";
+                    "tag" => self.peer.tag(),
+                    "peer_id" => self.fsm.peer_id(),
+                    "leader_id" => self.fsm.peer.leader_id(),
+                    "err" => %e,
+                    "error_code" => %e.error_code(),
+                );
+                if self.fsm.peer.leader_id() != raft::INVALID_ID {
+                    self.fsm.peer.send_want_rollback_merge(
+                        self.fsm
+                            .peer
+                            .pending_merge_state
+                            .as_ref()
+                            .unwrap()
+                            .get_commit(),
+                        self.ctx,
+                    );
+                }
+            }
         }
     }
 }

@@ -31,6 +31,7 @@ pub enum PeerMsg {
     GenerateEngineChangeSet(kvenginepb::ChangeSet),
     ApplyChangeSetResult(kvengine::Result<kvenginepb::ChangeSet>),
     PrepareChangeSetResult(kvengine::Result<kvengine::ChangeSet>),
+    PrepareCommitMergeResult(kvengine::Result<kvengine::ChangeSet>),
     Persisted(PersistReady),
 }
 
@@ -63,8 +64,21 @@ pub(crate) enum ApplyMsg {
     PendingSplit(kvenginepb::ChangeSet),
     ApplyChangeSet(kvengine::ChangeSet),
     PrepareChangeSet(kvenginepb::ChangeSet),
-    UnsafeDestroy { region_id: u64 },
-    CheckSwitchMemTable { region_id: u64 },
+    PendingPrepareMerge(kvenginepb::Snapshot),
+    PrepareCommitMerge {
+        parent_snap: kvenginepb::Snapshot,
+        source: kvenginepb::ChangeSet,
+    },
+    ResumeCommitMerge {
+        source: kvengine::ChangeSet,
+    },
+    PrepareRollbackMerge,
+    UnsafeDestroy {
+        region_id: u64,
+    },
+    CheckSwitchMemTable {
+        region_id: u64,
+    },
 }
 
 pub enum StoreMsg {
@@ -88,6 +102,11 @@ pub enum StoreMsg {
         peer_id: u64,
     },
     DependentsEmpty(u64 /* region id*/),
+    PrepareMerge {
+        region_id: u64,
+        req: RaftCmdRequest,
+    },
+    CheckMerge(u64),
     Stop,
 }
 

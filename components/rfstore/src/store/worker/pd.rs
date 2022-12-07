@@ -42,7 +42,7 @@ use tikv_util::{
 use yatp::Remote;
 
 use crate::{
-    store::{Callback, CasualMessage, PeerMsg, PeerTag, RegionIDVer, StoreInfo},
+    store::{Callback, CasualMessage, PeerMsg, PeerTag, RegionIDVer, StoreInfo, StoreMsg},
     RaftRouter, RaftStoreRouter,
 };
 
@@ -841,7 +841,13 @@ impl PdRunner {
                     };
                     router.send(region_id, PeerMsg::CasualMessage(msg));
                 } else if resp.has_merge() {
-                    // TODO(x) handle merge.
+                    PD_HEARTBEAT_COUNTER_VEC.with_label_values(&["merge"]).inc();
+
+                    let merge = resp.take_merge();
+                    info!("try to merge"; "region" => tag, "merge" => ?merge);
+                    let request = new_merge_request(merge);
+                    let req = new_admin_command(region_id, epoch, peer, request);
+                    router.send_store(StoreMsg::PrepareMerge {region_id, req});
                 } else {
                     PD_HEARTBEAT_COUNTER_VEC.with_label_values(&["noop"]).inc();
                 }
@@ -1270,6 +1276,28 @@ fn new_transfer_leader_request(peer: metapb::Peer) -> AdminRequest {
     req
 }
 
+fn new_merge_request(merge: pdpb::Merge) -> AdminRequest {
+    let mut req = AdminRequest::default();
+    req.set_cmd_type(AdminCmdType::PrepareMerge);
+    req.mut_prepare_merge()
+        .set_target(merge.get_target().to_owned());
+    req
+}
+
+fn new_admin_command(
+    region_id: u64,
+    epoch: metapb::RegionEpoch,
+    peer: metapb::Peer,
+    request: AdminRequest,
+) -> RaftCmdRequest {
+    let mut req = RaftCmdRequest::default();
+    req.mut_header().set_region_id(region_id);
+    req.mut_header().set_region_epoch(epoch);
+    req.mut_header().set_peer(peer);
+    req.set_admin_request(request);
+    req
+}
+
 fn send_admin_request(
     router: &RaftRouter,
     region_id: u64,
@@ -1278,13 +1306,7 @@ fn send_admin_request(
     request: AdminRequest,
     callback: Callback,
 ) {
-    let mut req = RaftCmdRequest::default();
-    req.mut_header().set_region_id(region_id);
-    req.mut_header().set_region_epoch(epoch);
-    req.mut_header().set_peer(peer);
-
-    req.set_admin_request(request);
-
+    let req = new_admin_command(region_id, epoch, peer, request);
     router.send_command(req, callback);
 }
 
