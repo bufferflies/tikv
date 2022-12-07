@@ -1724,7 +1724,7 @@ impl<'a> PeerMsgHandler<'a> {
             admin.set_cmd_type(AdminCmdType::CommitMerge);
             admin
                 .mut_commit_merge()
-                .set_source(self.fsm.peer.region().clone());
+                .set_source(self.fsm.peer.get_preprocessed_region().clone());
             admin.mut_commit_merge().set_commit(state.get_commit());
             let source_meta = self
                 .fsm

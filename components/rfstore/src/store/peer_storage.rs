@@ -669,6 +669,14 @@ pub fn write_peer_state(
     peer_state: PeerState,
     merge_state: Option<MergeState>,
 ) {
+    let store_id = region
+        .get_peers()
+        .iter()
+        .find(|p| p.id == peer_id)
+        .map(|p| p.store_id)
+        .unwrap_or(0);
+    let tag = PeerTag::new(store_id, RegionIDVer::from_region(region));
+    info!("{} write peer state", tag);
     let mut region_state = RegionLocalState::default();
     region_state.set_state(peer_state);
     region_state.set_region(region.clone());
