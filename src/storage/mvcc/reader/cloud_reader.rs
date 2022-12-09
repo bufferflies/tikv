@@ -288,7 +288,7 @@ impl CloudReader {
     }
 }
 
-fn parse_write(item: kvengine::Item<'_>) -> (TimeStamp, Write) {
+pub fn parse_write(item: kvengine::Item<'_>) -> (TimeStamp, Write) {
     let user_meta = UserMeta::from_slice(item.user_meta());
     let commit_ts = user_meta.commit_ts;
     let write_type: WriteType;

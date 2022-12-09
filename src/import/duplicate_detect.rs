@@ -1,13 +1,17 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use engine_traits::{IterOptions, CF_DEFAULT, CF_WRITE, DATA_KEY_PREFIX_LEN};
-use kvproto::import_sstpb::{DuplicateDetectResponse, KvPair};
-use sst_importer::{Error, Result};
-use tikv_kv::{Iterator as kvIterator, Snapshot};
-use tikv_util::keybuilder::KeyBuilder;
-use txn_types::{Key, TimeStamp, WriteRef, WriteType};
+use std::marker::PhantomData;
 
-use crate::storage::mvcc::Write;
+use bytes::Bytes;
+use kvproto::import_sstpb::{DuplicateDetectResponse, KvPair};
+
+use kvengine::read::Iterator as KvIterator;
+use rfstore::{UserMeta, WRITE_CF};
+use sst_importer::{Error, Result};
+use tikv_kv::Snapshot;
+use txn_types::{TimeStamp, Write, WriteType};
+
+use crate::storage::mvcc::parse_write;
 
 #[cfg(test)]
 const MAX_SCAN_BATCH_COUNT: usize = 256;
@@ -16,11 +20,11 @@ const MAX_SCAN_BATCH_COUNT: usize = 256;
 const MAX_SCAN_BATCH_COUNT: usize = 4096;
 
 pub struct DuplicateDetector<S: Snapshot> {
-    snapshot: S,
-    iter: S::Iter,
+    iter: KvIterator,
     key_only: bool,
     valid: bool,
     min_commit_ts: TimeStamp,
+    _phantom: PhantomData<S>,
 }
 
 impl<S: Snapshot> DuplicateDetector<S> {
@@ -31,31 +35,32 @@ impl<S: Snapshot> DuplicateDetector<S> {
         min_commit_ts: u64,
         key_only: bool,
     ) -> Result<DuplicateDetector<S>> {
-        let start_key = Key::from_raw(&start_key);
-        let l_bound =
-            KeyBuilder::from_vec(start_key.clone().into_encoded(), DATA_KEY_PREFIX_LEN, 0);
-        let u_bound = end_key.map(|k| {
-            let key = Key::from_raw(&k);
-            KeyBuilder::from_vec(key.into_encoded(), DATA_KEY_PREFIX_LEN, 0)
-        });
-        let mut iter_opt = IterOptions::new(Some(l_bound), u_bound, false);
-        iter_opt.set_key_only(key_only);
-        let mut iter = snapshot
-            .iter_cf(CF_WRITE, iter_opt)
-            .map_err(from_kv_error)?;
-        iter.seek(&start_key).map_err(from_kv_error)?;
+        let snap = snapshot.get_kvengine_snap().unwrap();
+        let mut iter = snap.new_iterator(WRITE_CF, false, true, None, true);
+        iter.seek(&start_key);
+        if let Some(end_key) = end_key {
+            iter.set_bound(Bytes::from(end_key), false);
+        }
+        debug!(
+            "snapshot meta";
+            "start_key" => hex::encode_upper(&snap.get_start_key()),
+            "end_key" => hex::encode_upper(&snap.get_end_key()),
+            "request_start" => hex::encode_upper(&start_key),
+            "request_end" => hex::encode_upper(&end_key.as_ref().unwrap_or(&vec![])),
+            "valid" => iter.valid(),
+        );
         Ok(DuplicateDetector {
-            snapshot,
             iter,
             key_only,
             min_commit_ts: TimeStamp::new(min_commit_ts),
             valid: true,
+            _phantom: PhantomData,
         })
     }
 
     pub fn try_next(&mut self) -> Result<Option<Vec<KvPair>>> {
         let mut ret = vec![];
-        while let Some((current_key, commit_ts)) = self.move_to_next_import_key()? {
+        while let Some((current_key, commit_ts)) = self.move_to_next_import_key() {
             self.collect_current_key_duplicate(current_key, commit_ts, &mut ret)?;
             if ret.len() >= MAX_SCAN_BATCH_COUNT {
                 return Ok(Some(ret));
@@ -67,15 +72,17 @@ impl<S: Snapshot> DuplicateDetector<S> {
         Ok(Some(ret))
     }
 
-    fn move_to_next_import_key(&mut self) -> Result<Option<(Vec<u8>, TimeStamp)>> {
-        while self.iter.valid().map_err(from_kv_error)? {
-            let (current_key, commit_ts) = Key::split_on_ts_for(self.iter.key())?;
+    fn move_to_next_import_key(&mut self) -> Option<(Vec<u8>, TimeStamp)> {
+        while self.iter.valid() {
+            let item = self.iter.item();
+            let user_meta = UserMeta::from_slice(item.user_meta());
+            let (current_key, commit_ts) = (self.iter.key(), TimeStamp::from(user_meta.commit_ts));
             if commit_ts > self.min_commit_ts {
-                return Ok(Some((current_key.to_vec(), commit_ts)));
+                return Some((current_key.to_vec(), commit_ts));
             }
-            self.iter.next().map_err(from_kv_error)?;
+            self.iter.next();
         }
-        Ok(None)
+        None
     }
 
     fn collect_current_key_duplicate(
@@ -84,111 +91,74 @@ impl<S: Snapshot> DuplicateDetector<S> {
         end_commit_ts: TimeStamp,
         duplicate_pairs: &mut Vec<KvPair>,
     ) -> Result<()> {
-        let write = WriteRef::parse(self.iter.value()).map_err(from_txn_types_error)?;
-        let mut write_info = match write.write_type {
-            WriteType::Delete | WriteType::Rollback | WriteType::Lock => {
-                return Err(Error::Engine(box_err!(
-                    "found a {:?} key with commits ts {} larger than min_commit_ts of importer {}",
-                    write.write_type,
-                    end_commit_ts,
-                    self.min_commit_ts
-                )));
-            }
-            WriteType::Put => {
-                if self.key_only {
-                    None
-                } else {
-                    Some(write.to_owned())
-                }
-            }
+        let (_, latest_write) = parse_write(self.iter.item());
+        if latest_write.write_type == WriteType::Delete {
+            return Err(Error::Engine(box_err!(
+                "found a {:?} key with commits ts {} larger than min_commit_ts of importer {}",
+                latest_write.write_type,
+                end_commit_ts,
+                self.min_commit_ts
+            )));
+        }
+
+        let mut latest_write = if self.key_only {
+            None
+        } else {
+            Some(latest_write)
         };
 
-        while let Some(current_write) = self.skip_lock_and_rollback(&start_key)? {
-            let (current_key, commit_ts) = Key::split_on_ts_for(self.iter.key())?;
-            if current_write.write_type == WriteType::Put {
-                if commit_ts <= self.min_commit_ts
-                    && !current_write
-                        .as_ref()
-                        .check_gc_fence_as_latest_version(self.min_commit_ts)
-                {
-                    self.skip_all_version(&start_key)?;
-                    return Ok(());
-                }
-
-                let write_value = if self.key_only {
-                    None
-                } else {
-                    Some(current_write)
-                };
-                if write_info.is_some() {
-                    duplicate_pairs.push(self.make_kv_pair(
-                        &start_key,
-                        write_info.take(),
-                        end_commit_ts,
-                    )?);
-                }
-                duplicate_pairs.push(self.make_kv_pair(current_key, write_value, commit_ts)?);
-            }
+        self.iter.next();
+        while self.iter.valid() && self.iter.key() == start_key {
+            let (commit_ts, write) = parse_write(self.iter.item());
             if commit_ts <= self.min_commit_ts {
-                self.skip_all_version(&start_key)?;
+                self.skip_all_version(&start_key);
                 return Ok(());
             }
+            if write.write_type == WriteType::Delete {
+                self.iter.next();
+                continue;
+            }
+
+            let write = if self.key_only { None } else { Some(write) };
+
+            if latest_write.is_some() {
+                duplicate_pairs.push(self.make_kv_pair(
+                    &start_key,
+                    latest_write.take(),
+                    end_commit_ts,
+                ));
+            }
+            duplicate_pairs.push(self.make_kv_pair(&start_key, write, commit_ts));
+            self.iter.next();
+
+            debug!(
+                "found duplicate key";
+                "key" => hex::encode_upper(&start_key),
+                "latest_commit_ts" => end_commit_ts,
+                "commit_ts" => commit_ts,
+            );
         }
+
         Ok(())
     }
 
-    fn skip_lock_and_rollback(&mut self, start_key: &[u8]) -> Result<Option<Write>> {
-        self.iter.next().map_err(from_kv_error)?;
-        while self.iter.valid().map_err(from_kv_error)? {
-            let (current_key, _) = Key::split_on_ts_for(self.iter.key())?;
-            if current_key != start_key {
-                return Ok(None);
-            } else {
-                let write = WriteRef::parse(self.iter.value()).map_err(from_txn_types_error)?;
-                match write.write_type {
-                    WriteType::Put | WriteType::Delete => return Ok(Some(write.to_owned())),
-                    WriteType::Lock | WriteType::Rollback => {
-                        self.iter.next().map_err(from_kv_error)?;
-                    }
-                }
-            }
+    fn skip_all_version(&mut self, start_key: &[u8]) {
+        self.iter.next();
+        while self.iter.valid() && self.iter.key() == start_key {
+            self.iter.next();
         }
-        Ok(None)
     }
 
-    fn skip_all_version(&mut self, start_key: &[u8]) -> Result<()> {
-        self.iter.next().map_err(from_kv_error)?;
-        while self.iter.valid().map_err(from_kv_error)? {
-            let (current_key, _) = Key::split_on_ts_for(self.iter.key())?;
-            if current_key != start_key {
-                break;
-            }
-            self.iter.next().map_err(from_kv_error)?;
-        }
-        Ok(())
-    }
-
-    fn make_kv_pair(&self, key: &[u8], write: Option<Write>, ts: TimeStamp) -> Result<KvPair> {
+    fn make_kv_pair(&self, key: &[u8], write: Option<Write>, ts: TimeStamp) -> KvPair {
         let mut pair = KvPair::default();
-        let user_key = Key::from_encoded_slice(key);
-        pair.set_key(user_key.to_raw()?);
+        pair.set_key(key.to_vec());
         pair.set_commit_ts(ts.into_inner());
         if let Some(write) = write {
-            match write.short_value {
-                Some(value) => pair.set_value(value),
-                None => {
-                    let value = self
-                        .snapshot
-                        .get_cf(CF_DEFAULT, &user_key.append_ts(write.start_ts))
-                        .map_err(from_kv_error)?;
-                    match value {
-                        Some(val) => pair.set_value(val.to_vec()),
-                        None => return Err(Error::RocksDB("Not found defaultcf value".to_owned())),
-                    }
-                }
-            }
+            // always fetch the value from `short_value`,
+            // since there is no value length limit in cse.
+            pair.set_value(write.short_value.unwrap());
         }
-        Ok(pair)
+        pair
     }
 }
 
@@ -216,35 +186,22 @@ impl<S: Snapshot> Iterator for DuplicateDetector<S> {
     }
 }
 
-fn from_kv_error(e: tikv_kv::Error) -> Error {
-    match e {
-        tikv_kv::Error(box tikv_kv::ErrorInner::Other(err)) => Error::Engine(err),
-        _ => Error::RocksDB("unkown error when request rocksdb".to_owned()),
-    }
-}
-
-fn from_txn_types_error(e: txn_types::Error) -> Error {
-    match e {
-        txn_types::Error(box txn_types::ErrorInner::Codec(err)) => Error::CodecError(err),
-        _ => Error::BadFormat("parse write type error".to_owned()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::mpsc::channel;
 
-    use api_version::KvFormat;
     use kvproto::kvrpcpb::Context;
+
     use tikv_kv::Engine;
     use txn_types::Mutation;
 
-    use super::*;
     use crate::storage::{
         lock_manager::{DummyLockManager, LockManager},
-        txn::commands,
-        Storage, TestStorageBuilderApiV1,
+        Storage,
+        TestStorageBuilderApiV1, txn::commands,
     };
+
+    use super::*;
 
     fn prewrite_data<E: Engine, L: LockManager, F: KvFormat>(
         storage: &Storage<E, L, F>,
@@ -380,7 +337,7 @@ mod tests {
             0,
             false,
         )
-        .unwrap();
+            .unwrap();
         let mut expected_kvs = vec![];
         for i in 0..400 {
             let key = format!("{}", i * 2);
