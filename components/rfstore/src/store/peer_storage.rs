@@ -191,10 +191,7 @@ impl raft::Storage for PeerStorage {
                 StorageError::SnapshotTemporarilyUnavailable,
             ));
         }
-        if util::is_epoch_stale(
-            self.region().get_region_epoch(),
-            self.get_preprocessed_region().get_region_epoch(),
-        ) {
+        if !self.region_match_preprocessed() {
             // If the region is staler than preprocessed region, the preprocessed region may not
             // contain the to peer, cause the to peer panic. Or the region epoch version may not
             // equal to the shard meta version, cause inconsistency.
@@ -220,12 +217,6 @@ impl raft::Storage for PeerStorage {
         let conf_state = conf_state_from_region(self.region());
         snap_meta.set_conf_state(conf_state);
         snap.set_metadata(snap_meta);
-        info!(
-            "{} peer storage generate snapshot index:{}, term:{}",
-            self.tag(),
-            snap_index,
-            snap_term
-        );
         self.snapshot_not_ready_peers.borrow_mut().remove(&to);
         Ok(snap)
     }
@@ -552,6 +543,13 @@ impl PeerStorage {
 
     pub(crate) fn get_preprocessed_region(&self) -> &metapb::Region {
         self.preprocessed_region.as_ref().unwrap_or(self.region())
+    }
+
+    pub(crate) fn region_match_preprocessed(&self) -> bool {
+        self.preprocessed_region
+            .as_ref()
+            .map(|p| p.get_region_epoch() == self.region.get_region_epoch())
+            .unwrap_or(true)
     }
 }
 

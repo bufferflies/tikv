@@ -155,10 +155,18 @@ fn test_random_merge() {
     cluster
         .get_pd_client()
         .must_split_region(region, CheckPolicy::Usekey, keys);
+    let move_scheduler = cluster.new_scheduler();
+    for _ in 0..20 {
+        move_scheduler.move_random_region();
+    }
     let mut handles = vec![];
     handles.push(spawn_write(0, cluster.new_client()));
     handles.push(spawn_merge(cluster.new_scheduler()));
     handles.push(spawn_transfer(cluster.new_scheduler()));
+    handles.push(spawn_move(
+        cluster.new_scheduler(),
+        Arc::new(RwLock::new(())),
+    ));
     let start_time = Instant::now();
     let pd_client = cluster.get_pd_client();
     while start_time.saturating_elapsed() < TIMEOUT {
@@ -194,11 +202,12 @@ fn test_random_merge() {
     cluster.stop();
     let total_write_count = WRITE_COUNTER.load(Ordering::SeqCst);
     let total_merge_count = MERGE_COUNTER.load(Ordering::SeqCst);
+    let total_move_count = MOVE_COUNTER.load(Ordering::SeqCst);
     let total_transfer_count = TRANSFER_COUNTER.load(Ordering::SeqCst);
     let region_number = pd_client.get_regions_number();
     info!(
-        "total_write_count {}, region number {}, merge count {}, transfer count {}",
-        total_write_count, region_number, total_merge_count, total_transfer_count,
+        "total_write_count {}, region number {}, merge count {}, move count {}, transfer count {}",
+        total_write_count, region_number, total_merge_count, total_move_count, total_transfer_count,
     );
 }
 
@@ -236,7 +245,6 @@ fn spawn_merge(scheduler: Scheduler) -> JoinHandle<()> {
     std::thread::spawn(move || {
         let start_time = Instant::now();
         while start_time.saturating_elapsed() < TIMEOUT {
-            sleep(Duration::from_millis(1000));
             if scheduler.merge_random_region() {
                 MERGE_COUNTER.fetch_add(1, Ordering::SeqCst);
             }

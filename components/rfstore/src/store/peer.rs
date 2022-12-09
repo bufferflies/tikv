@@ -417,6 +417,9 @@ pub(crate) struct Peer {
     pub(crate) last_committed_split_idx: u64,
     /// The index of last sent snapshot
     last_sent_snapshot_idx: u64,
+    /// The range of no kv index, used to advance shard meta data sequence.
+    first_no_kv_idx: u64,
+    last_no_kv_idx: u64,
     // preprocessed_index is used to avoid duplicated preprocess execution.
     pub(crate) preprocessed_index: u64,
 
@@ -534,6 +537,8 @@ impl Peer {
             last_urgent_proposal_idx: u64::MAX,
             last_committed_split_idx: 0,
             last_sent_snapshot_idx: 0,
+            first_no_kv_idx: truncated,
+            last_no_kv_idx: truncated,
             preprocessed_index: 0,
             leader_lease: Lease::new(
                 cfg.raft_store_max_leader_lease(),
@@ -597,6 +602,16 @@ impl Peer {
         if self.is_applying_snapshot() {
             info!(
                 "stale peer is applying snapshot, will destroy next time";
+                "tag" => self.tag(),
+                "peer_id" => self.peer.get_id(),
+            );
+            return false;
+        }
+        if !self.get_store().region_match_preprocessed() {
+            // If we don't wait for region applied to latest epoch, the split may failed to execute,
+            // So the dependent may failed to clean up, the destroy would delay forever.
+            info!(
+                "region has not applied to preprocessed epoch, wait for apply";
                 "tag" => self.tag(),
                 "peer_id" => self.peer.get_id(),
             );
@@ -785,6 +800,16 @@ impl Peer {
                 if snap_index > self.last_sent_snapshot_idx {
                     self.last_sent_snapshot_idx = snap_index;
                 }
+                let to_peer_id = msg.get_to_peer().get_id();
+                let pr = self.raft_group.raft.prs().get(to_peer_id).unwrap();
+                let store = self.get_store();
+                let truncated_idx = store.truncated_index();
+                let truncated_term = store.truncated_term();
+                let tag = store.tag();
+                info!(
+                    "{} send snapshot idx {} to_peer {}, truncated_idx {}, truncated term {}, progress {:?}",
+                    tag, snap_index, to_peer_id, truncated_idx, truncated_term, pr,
+                )
             }
             if msg_type == MessageType::MsgTimeoutNow && self.is_leader() {
                 // After a leader transfer procedure is triggered, the lease for
@@ -1496,11 +1521,11 @@ impl Peer {
         if self.preprocessed_index > 0 && entry.index <= self.preprocessed_index {
             return false;
         }
-        let mut need_try_advance_meta = entry.data.is_empty();
+        let mut no_kv = entry.data.is_empty();
         if let Some(cmd) = get_preprocess_cmd(entry) {
+            no_kv = true;
             if cmd.has_custom_request() {
                 self.preprocess_change_set(ctx, entry, cmd.get_custom_request());
-                need_try_advance_meta = true;
             } else {
                 if let Err(err) = check_region_epoch(&cmd, self.get_preprocessed_region(), false) {
                     warn!("preprocess pending admin failed {:?}", err);
@@ -1533,9 +1558,9 @@ impl Peer {
             }
         } else if entry.entry_type != eraftpb::EntryType::EntryNormal {
             self.preprocess_conf_change(ctx, entry);
-            need_try_advance_meta = true;
+            no_kv = true;
         }
-        if need_try_advance_meta {
+        if no_kv {
             self.try_advance_meta(ctx, entry);
         }
         self.preprocessed_index = entry.index;
@@ -1543,11 +1568,21 @@ impl Peer {
     }
 
     pub(crate) fn try_advance_meta(&mut self, ctx: &mut RaftContext, entry: &Entry) {
+        if entry.index != self.last_no_kv_idx + 1 {
+            // There is kv raft log, reset first.
+            self.first_no_kv_idx = entry.index;
+        }
+        self.last_no_kv_idx = entry.index;
+        let first_no_kv_idx = self.first_no_kv_idx;
+        let last_no_kv_idx = self.last_no_kv_idx;
         let peer_id = self.peer_id();
         let store = self.mut_store();
         let shard_meta = store.mut_engine_meta();
-        if shard_meta.data_sequence + 1 == entry.index {
-            shard_meta.data_sequence += 1;
+        if shard_meta.parent.is_none()
+            && shard_meta.data_sequence + 1 >= first_no_kv_idx
+            && shard_meta.data_sequence != last_no_kv_idx
+        {
+            shard_meta.data_sequence = last_no_kv_idx;
             shard_meta.set_property(TERM_KEY, &entry.term.to_le_bytes());
             write_engine_meta(&mut ctx.raft_wb, peer_id, shard_meta);
             info!(

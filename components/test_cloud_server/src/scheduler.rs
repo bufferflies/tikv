@@ -7,7 +7,7 @@ use std::{
 
 use dashmap::DashMap;
 use futures::executor::block_on;
-use kvproto::metapb::{Peer, PeerRole};
+use kvproto::metapb::{Peer, PeerRole, Region};
 use pd_client::PdClient;
 use rand::Rng;
 use test_raftstore::TestPdClient;
@@ -39,12 +39,22 @@ impl Scheduler {
                 !contains
             })
             .unwrap();
+        let mutex = self.get_region_mutex(region.id);
+        let _guard = mutex.lock().unwrap();
+        if self.is_region_changed(region) {
+            return;
+        }
         self.move_peer(region.id, target_store_id);
     }
 
+    fn is_region_changed(&self, region: &Region) -> bool {
+        let new_region = block_on(self.pd.get_region_by_id(region.id)).unwrap();
+        new_region
+            .map(|n| n.get_region_epoch().ne(region.get_region_epoch()))
+            .unwrap_or(true)
+    }
+
     fn move_peer(&self, region_id: u64, store_id: u64) {
-        let mutex = self.get_region_mutex(region_id);
-        let _guard = mutex.lock().unwrap();
         let peer_id = self.pd.alloc_id().unwrap();
         let mut peer = Peer::new();
         peer.store_id = store_id;
@@ -189,40 +199,39 @@ impl Scheduler {
     pub fn merge_random_region(&self) -> bool {
         let mut regions = self.pd.get_all_regions();
         regions.sort_by(|a, b| a.start_key.cmp(&b.start_key));
-        let merge_idx = rand::thread_rng().gen_range(0..regions.len());
-        let mut candidate = None;
-        for i in merge_idx + 1..regions.len() {
-            let left = &regions[i - 1];
-            let right = &regions[i];
-            if left.end_key.eq(&right.start_key) {
-                let left_stores: HashSet<u64> =
-                    left.get_peers().iter().map(|p| p.store_id).collect();
-                if right
-                    .get_peers()
-                    .iter()
-                    .all(|p| left_stores.contains(&p.store_id))
-                {
-                    candidate = Some((left.clone(), right.clone()));
-                    break;
-                }
-            }
-        }
-        if candidate.is_none() {
+        let merge_idx = rand::thread_rng().gen_range(1..regions.len());
+        let left = &regions[merge_idx - 1];
+        let right = &regions[merge_idx];
+        if !left.end_key.eq(&right.start_key) {
             return false;
         }
-        let (left, right) = candidate.unwrap();
         let (source, target) = if merge_idx % 2 == 0 {
-            (left.get_id(), right.get_id())
+            (left, right)
         } else {
-            (right.get_id(), left.get_id())
+            (right, left)
         };
-        self.pd.try_merge_region(source, target);
+        let mutex = self.get_region_mutex(source.id);
+        let _guard = mutex.lock().unwrap();
+        if self.is_region_changed(source) {
+            return false;
+        }
+        let source_stores: HashSet<u64> = source.get_peers().iter().map(|p| p.store_id).collect();
+        let target_stores: Vec<u64> = target.get_peers().iter().map(|p| p.store_id).collect();
+        for target_store_id in &target_stores {
+            if !source_stores.contains(target_store_id) {
+                self.move_peer(source.id, *target_store_id);
+                break;
+            }
+        }
+        self.pd.try_merge_region(source.id, target.id);
         try_wait(
             || {
-                let region = block_on(self.pd.get_region_by_id(target)).unwrap().unwrap();
+                let region = block_on(self.pd.get_region_by_id(target.id))
+                    .unwrap()
+                    .unwrap();
                 region.start_key.eq(&left.start_key) && region.end_key.eq(&right.end_key)
             },
-            10,
+            5,
         )
     }
 }
