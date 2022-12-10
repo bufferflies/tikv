@@ -378,7 +378,10 @@ impl S3FSCore {
             }
             let err = result.unwrap_err();
             if let RusotoError::Service(GetObjectError::NoSuchKey(err_msg)) = err {
-                panic!("file {} not exist, S3 key {}, err_msg {}", &file_name, key, err_msg);
+                panic!(
+                    "file {} not exist, S3 key {}, err_msg {}",
+                    &file_name, key, err_msg
+                );
             }
             if self.is_err_retryable(&err) && self.sleep_for_retry(&mut retry_cnt, &file_name).await
             {

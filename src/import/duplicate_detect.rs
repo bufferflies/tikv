@@ -3,9 +3,8 @@
 use std::marker::PhantomData;
 
 use bytes::Bytes;
-use kvproto::import_sstpb::{DuplicateDetectResponse, KvPair};
-
 use kvengine::read::Iterator as KvIterator;
+use kvproto::import_sstpb::{DuplicateDetectResponse, KvPair};
 use rfstore::{UserMeta, WRITE_CF};
 use sst_importer::{Error, Result};
 use tikv_kv::Snapshot;
@@ -38,17 +37,19 @@ impl<S: Snapshot> DuplicateDetector<S> {
         let snap = snapshot.get_kvengine_snap().unwrap();
         let mut iter = snap.new_iterator(WRITE_CF, false, true, None, true);
         iter.seek(&start_key);
+
+        debug!(
+            "snapshot meta";
+            "start_key" => log_wrappers::Value::key(snap.get_start_key()),
+            "end_key" => log_wrappers::Value::key(snap.get_end_key()),
+            "request_start" => log_wrappers::Value::key(&start_key),
+            "request_end" => end_key.as_ref().map(|k| log_wrappers::Value::key(k)),
+            "valid" => iter.valid(),
+        );
+
         if let Some(end_key) = end_key {
             iter.set_bound(Bytes::from(end_key), false);
         }
-        debug!(
-            "snapshot meta";
-            "start_key" => hex::encode_upper(&snap.get_start_key()),
-            "end_key" => hex::encode_upper(&snap.get_end_key()),
-            "request_start" => hex::encode_upper(&start_key),
-            "request_end" => hex::encode_upper(&end_key.as_ref().unwrap_or(&vec![])),
-            "valid" => iter.valid(),
-        );
         Ok(DuplicateDetector {
             iter,
             key_only,
@@ -133,7 +134,7 @@ impl<S: Snapshot> DuplicateDetector<S> {
 
             debug!(
                 "found duplicate key";
-                "key" => hex::encode_upper(&start_key),
+                "key" => log_wrappers::Value::key(&start_key),
                 "latest_commit_ts" => end_commit_ts,
                 "commit_ts" => commit_ts,
             );
@@ -191,17 +192,16 @@ mod tests {
     use std::sync::mpsc::channel;
 
     use kvproto::kvrpcpb::Context;
-
+    use api_version::KvFormat;
     use tikv_kv::Engine;
-    use txn_types::Mutation;
-
-    use crate::storage::{
-        lock_manager::{DummyLockManager, LockManager},
-        Storage,
-        TestStorageBuilderApiV1, txn::commands,
-    };
+    use txn_types::{Key, Mutation};
 
     use super::*;
+    use crate::storage::{
+        lock_manager::{DummyLockManager, LockManager},
+        txn::commands,
+        Storage, TestStorageBuilderApiV1,
+    };
 
     fn prewrite_data<E: Engine, L: LockManager, F: KvFormat>(
         storage: &Storage<E, L, F>,
@@ -337,7 +337,7 @@ mod tests {
             0,
             false,
         )
-            .unwrap();
+        .unwrap();
         let mut expected_kvs = vec![];
         for i in 0..400 {
             let key = format!("{}", i * 2);
