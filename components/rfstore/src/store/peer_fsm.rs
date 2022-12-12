@@ -1296,6 +1296,8 @@ impl<'a> PeerMsgHandler<'a> {
         }
         if change.has_snapshot() && self.peer.mut_store().is_applying_snapshot() {
             self.peer.mut_store().snap_state = SnapState::Relax;
+            // After applying a snapshot, merge is rollbacked implicitly.
+            self.peer.clear_merge_in_mem_data();
             let apply_state = RaftApplyState::from_snapshot(change.get_snapshot());
             let apply_result = MsgApplyResult {
                 peer_id: self.peer.peer_id(),

@@ -191,8 +191,8 @@ impl<S: Snapshot> Iterator for DuplicateDetector<S> {
 mod tests {
     use std::sync::mpsc::channel;
 
-    use kvproto::kvrpcpb::Context;
     use api_version::KvFormat;
+    use kvproto::kvrpcpb::Context;
     use tikv_kv::Engine;
     use txn_types::{Key, Mutation};
 

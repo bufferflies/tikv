@@ -1659,9 +1659,7 @@ impl<'a> StoreMsgHandler<'a> {
             None => return,
         };
         let mut peer_fsm = peer.peer_fsm.lock().unwrap();
-        // Clear merge releted data
-        peer_fsm.peer.pending_merge_state = None;
-        peer_fsm.peer.want_rollback_merge_peers.clear();
+        peer_fsm.peer.clear_merge_in_mem_data();
         self.ctx.store_meta.set_region(
             region,
             &mut peer_fsm.peer,

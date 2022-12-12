@@ -2118,7 +2118,7 @@ impl Peer {
             // the new region may already elected a new leader while
             // the old leader still think it owns the split range.
             && !self.is_splitting()
-        // TODO(x) && !self.is_merging()
+            && !self.is_merging()
     }
 
     fn ready_to_handle_unsafe_replica_read(&self, read_index: u64) -> bool {
@@ -2142,7 +2142,7 @@ impl Peer {
 
     #[inline]
     fn is_merging(&self) -> bool {
-        false // TODO(x)
+        self.pending_merge_state.is_some()
     }
 
     /// Try to renew leader lease.
@@ -2552,6 +2552,12 @@ impl Peer {
         if self.is_splitting() {
             return Err(Error::ReadIndexNotReady {
                 reason: "can not read index due to split",
+                region_id: self.region_id,
+            });
+        }
+        if self.is_merging() {
+            return Err(Error::ReadIndexNotReady {
+                reason: "can not read index due to merge",
                 region_id: self.region_id,
             });
         }
@@ -3092,6 +3098,13 @@ impl Peer {
     pub fn ping(&mut self) {
         if self.is_leader() {
             self.raft_group.ping();
+        }
+    }
+
+    pub(crate) fn clear_merge_in_mem_data(&mut self) {
+        if self.pending_merge_state.is_some() {
+            self.pending_merge_state = None;
+            self.want_rollback_merge_peers.clear();
         }
     }
 }
