@@ -83,7 +83,7 @@ FROM amazonlinux:2022.0.20220504.1
 COPY --from=builder /tikv/target/release/tikv-server /tikv-server
 COPY --from=builder /tikv/target/release/tikv-ctl /tikv-ctl
 COPY --from=builder /tikv/target/release/cse-ctl /cse-ctl
-COPY --from=builder /tikv/target/release/tikv-compactor /tikv-compactor
+COPY --from=builder /tikv/target/release/tikv-worker /tikv-worker
 
 EXPOSE 20160 20180
 

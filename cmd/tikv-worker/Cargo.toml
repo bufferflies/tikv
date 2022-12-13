@@ -1,5 +1,5 @@
 [package]
-name = "tikv-compactor"
+name = "tikv-worker"
 version = "0.1.0"
 edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -12,15 +12,20 @@ grpcio = { version = "0.10", default-features = false, features = ["openssl-vend
 http = "0.2"
 hyper = { version = "0.14", features = ["full"] }
 kvengine = { path = "../../components/kvengine" }
+kvenginepb = { path = "../../components/kvenginepb" }
+rfstore = { path = "../../components/rfstore" }
 kvproto = { git = "https://github.com/pingcap/kvproto.git" }
 pd_client = { path = "../../components/pd_client", default-features = false }
+protobuf = "2.8"
 security = { path = "../../components/security", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_derive = "1.0"
+serde_json = "1.0"
 serde_ignored = "0.1"
 slog = { version = "2.3", features = ["max_level_trace", "release_max_level_debug"] }
 slog-global = { version = "0.1", git = "https://github.com/breeswish/slog-global.git", rev = "d592f88e4dbba5eb439998463054f1a44fbf17b9" }
 slog-term = "2.4"
+tikv = { path = "../../", default-features = false }
 tikv_util = { path = "../../components/tikv_util" }
 tokio = { version = "1.12", features = ["full"] }
 toml = "0.5"

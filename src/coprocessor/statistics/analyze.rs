@@ -1,9 +1,10 @@
 // Copyright 2017 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{cmp::Reverse, collections::BinaryHeap, marker::PhantomData, mem, sync::Arc};
+use std::{cmp::Reverse, collections::BinaryHeap, marker::PhantomData, mem, ops::Add, sync::Arc};
 
 use api_version::KvFormat;
 use async_trait::async_trait;
+use bytes::{Buf, Bytes};
 use kvproto::coprocessor::{KeyRange, Response};
 use protobuf::Message;
 use rand::{rngs::StdRng, Rng};
@@ -44,6 +45,7 @@ use crate::{
 
 const ANALYZE_VERSION_V1: i32 = 1;
 const ANALYZE_VERSION_V2: i32 = 2;
+const REMOTE_ANALYZE_TIMEOUT: Duration = Duration::from_secs(300);
 
 // `AnalyzeContext` is used to handle `AnalyzeReq`
 pub struct AnalyzeContext<S: Snapshot, F: KvFormat> {
@@ -53,6 +55,7 @@ pub struct AnalyzeContext<S: Snapshot, F: KvFormat> {
     storage_stats: Statistics,
     quota_limiter: Arc<QuotaLimiter>,
     _phantom: PhantomData<F>,
+    remote_ctx: Option<RemoteContext>,
 }
 
 impl<S: Snapshot, F: KvFormat> AnalyzeContext<S, F> {
@@ -63,7 +66,25 @@ impl<S: Snapshot, F: KvFormat> AnalyzeContext<S, F> {
         snap: S,
         req_ctx: &ReqContext,
         quota_limiter: Arc<QuotaLimiter>,
+        remote_ctx: Option<RemoteContext>,
     ) -> Result<Self> {
+        let remote_ctx = remote_ctx.map(|mut ctx| {
+            let mut kv_ranges = Vec::new();
+            for range in ranges.clone() {
+                let kv_range = (
+                    Bytes::from(range.start.clone()),
+                    Bytes::from(range.end.clone()),
+                );
+                kv_ranges.push(kv_range)
+            }
+            let (key, snap_bytes) = snap
+                .get_kvengine_snap()
+                .unwrap()
+                .marshal(kv_ranges.as_slice());
+            ctx.remote_req.key = key;
+            ctx.remote_req.snap_bytes = snap_bytes;
+            ctx
+        });
         let store = CloudStore::new(
             snap,
             start_ts,
@@ -77,6 +98,7 @@ impl<S: Snapshot, F: KvFormat> AnalyzeContext<S, F> {
             storage_stats: Statistics::default(),
             quota_limiter,
             _phantom: PhantomData,
+            remote_ctx,
         })
     }
 
@@ -217,12 +239,9 @@ impl<S: Snapshot, F: KvFormat> AnalyzeContext<S, F> {
         let dt = box_try!(res.write_to_bytes());
         Ok(dt)
     }
-}
 
-#[async_trait]
-impl<S: Snapshot, F: KvFormat> RequestHandler for AnalyzeContext<S, F> {
-    async fn handle_request(&mut self) -> Result<MemoryTraceGuard<Response>> {
-        let ret = match self.req.get_tp() {
+    pub async fn local_handle_request(&mut self) -> Result<Vec<u8>> {
+        match self.req.get_tp() {
             AnalyzeType::TypeIndex | AnalyzeType::TypeCommonHandle => {
                 let req = self.req.take_idx_req();
                 let ranges = std::mem::take(&mut self.ranges);
@@ -288,20 +307,131 @@ impl<S: Snapshot, F: KvFormat> RequestHandler for AnalyzeContext<S, F> {
             AnalyzeType::TypeSampleIndex => Err(Error::Other(
                 "Analyze of this kind not implemented".to_string(),
             )),
+        }
+    }
+}
+
+async fn remote_analyze(remote_ctx: RemoteContext, deadline: Instant) -> Result<Vec<u8>> {
+    let body_str = serde_json::to_string(&remote_ctx.remote_req).unwrap();
+    let req = hyper::Request::builder()
+        .method(hyper::Method::POST)
+        .uri(remote_ctx.remote_url)
+        .header("content-type", "application/json")
+        .body(hyper::Body::from(body_str))
+        .map_err(|e| Error::Other(e.to_string()))?;
+    let client = remote_ctx.client.clone();
+    tokio::time::timeout(
+        deadline.saturating_duration_since(Instant::now()),
+        async move {
+            let response = client
+                .request(req)
+                .await
+                .map_err(|e| Error::Other(e.to_string()))?;
+            let success = response.status().is_success();
+            let body = hyper::body::to_bytes(response.into_body())
+                .await
+                .map_err(|e| Error::Other(e.to_string()))?;
+            if !success {
+                return Err(Error::Other(
+                    String::from_utf8_lossy(body.chunk()).to_string(),
+                ));
+            }
+            Ok(body.to_vec())
+        },
+    )
+    .await
+    .map_err(|elapsed| Error::Other(elapsed.to_string()))?
+}
+
+#[derive(Clone)]
+pub struct RemoteContext {
+    pub remote_url: String,
+    pub remote_req: RemoteAnalysisRequest,
+    pub runtime: Arc<tokio::runtime::Runtime>,
+    pub analyze_cache: moka::future::Cache<String, Result<Vec<u8>>>,
+    pub client: hyper::Client<hyper::client::HttpConnector>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+pub struct RemoteAnalysisRequest {
+    pub key: String,
+    pub req_bytes: Vec<u8>,
+    pub snap_bytes: Vec<u8>,
+    pub max_handle_duration: Duration,
+    pub peer: String,
+}
+
+impl Default for RemoteAnalysisRequest {
+    fn default() -> Self {
+        Self {
+            key: String::default(),
+            req_bytes: Vec::default(),
+            snap_bytes: Vec::default(),
+            max_handle_duration: Duration::default(),
+            peer: String::default(),
+        }
+    }
+}
+
+#[async_trait]
+impl<S: Snapshot, F: KvFormat> RequestHandler for AnalyzeContext<S, F> {
+    async fn handle_request(&mut self) -> Result<MemoryTraceGuard<Response>> {
+        let start_time = Instant::now();
+        let mut is_remote = self.remote_ctx.is_some();
+        info!("handle analyze request, is remote {}", is_remote);
+        let ret = if is_remote {
+            let remote_ctx = self.remote_ctx.as_ref().unwrap();
+            let ctx = remote_ctx.clone();
+            let analyze_cache = remote_ctx.analyze_cache.clone();
+            let key = remote_ctx.remote_req.key.clone();
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            remote_ctx.runtime.spawn(async move {
+                let result = analyze_cache
+                    .get_with(key, async move {
+                        remote_analyze(ctx, start_time.add(REMOTE_ANALYZE_TIMEOUT)).await
+                    })
+                    .await;
+                tx.send(result).unwrap();
+            });
+            match rx.await.unwrap() {
+                result @ Ok(_) => result,
+                Err(err) => {
+                    warn!(
+                        "remote analyze [{}] error {:?}, fall back to local analysis",
+                        remote_ctx.remote_url, err
+                    );
+                    is_remote = false;
+                    self.local_handle_request().await
+                }
+            }
+        } else {
+            self.local_handle_request().await
         };
         match ret {
             Ok(data) => {
+                info!(
+                    "analyze response data size {}, takes {:?}, is remote {}",
+                    data.len(),
+                    start_time.saturating_elapsed(),
+                    is_remote,
+                );
                 let memory_size = data.capacity();
                 let mut resp = Response::default();
                 resp.set_data(data);
                 Ok(MEMTRACE_ANALYZE.trace_guard(resp, memory_size))
             }
             Err(Error::Other(e)) => {
+                error!("analyze other error {}", e,);
                 let mut resp = Response::default();
                 resp.set_other_error(e);
                 Ok(resp.into())
             }
-            Err(e) => Err(e),
+            Err(e) => {
+                error!("analyze error {:?}", e,);
+                Err(e)
+            }
         }
     }
 

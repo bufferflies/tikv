@@ -612,19 +612,21 @@ impl TiKVServer {
             .unwrap_or_else(|e| fatal!("failed to bootstrap node id: {}", e));
         info!("store bootstrapped");
 
+        let mut copr = coprocessor::Endpoint::new(
+            &server_config.value(),
+            cop_read_pool_handle,
+            self.concurrency_manager.clone(),
+            resource_tag_factory,
+            Arc::new(QuotaLimiter::default()),
+        );
+        copr.set_remote_url(self.config.dfs.remote_analyzer_addr.clone());
         // Create server
         let server = Server::new(
             node.id(),
             &server_config,
             &self.security_mgr,
             storage,
-            coprocessor::Endpoint::new(
-                &server_config.value(),
-                cop_read_pool_handle,
-                self.concurrency_manager.clone(),
-                resource_tag_factory,
-                Arc::new(QuotaLimiter::default()),
-            ),
+            copr,
             coprocessor_v2::Endpoint::new(&self.config.coprocessor_v2),
             self.router.clone(),
             self.resolver.clone(),

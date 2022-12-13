@@ -64,6 +64,34 @@ impl ChangeSet {
     }
 }
 
+pub(crate) fn create_snapshot_tables(
+    snap: &kvenginepb::Snapshot,
+    tables: &ChangeSet,
+) -> (Vec<L0Table>, [ShardCF; 3]) {
+    let mut l0_tbls = vec![];
+    for l0_create in snap.get_l0_creates() {
+        let l0_tbl = tables.l0_tables.get(&l0_create.id).unwrap().clone();
+        l0_tbls.push(l0_tbl);
+    }
+    l0_tbls.sort_by(|a, b| b.version().cmp(&a.version()));
+    let mut scf_builders = vec![];
+    for cf in 0..NUM_CFS {
+        let scf = ShardCFBuilder::new(cf);
+        scf_builders.push(scf);
+    }
+    for table_create in snap.get_table_creates() {
+        let tbl = tables.ln_tables.get(&table_create.id).unwrap().clone();
+        let scf = &mut scf_builders.as_mut_slice()[table_create.cf as usize];
+        scf.add_table(tbl, table_create.level as usize);
+    }
+    let mut scfs = [ShardCF::new(0), ShardCF::new(1), ShardCF::new(2)];
+    for cf in 0..NUM_CFS {
+        let scf = &mut scf_builders.as_mut_slice()[cf];
+        scfs[cf] = scf.build();
+    }
+    (l0_tbls, scfs)
+}
+
 impl EngineCore {
     pub fn apply_change_set(&self, cs: ChangeSet) -> Result<()> {
         let shard = self.get_shard(cs.shard_id);
@@ -155,7 +183,7 @@ impl EngineCore {
         let initial_flush = cs.get_initial_flush();
         let data = shard.get_data();
         let mut mem_tbls = data.mem_tbls.clone();
-        let (l0s, scfs) = self.create_snapshot_tables(initial_flush, cs);
+        let (l0s, scfs) = create_snapshot_tables(initial_flush, cs);
         mem_tbls.retain(|x| {
             let version = x.get_version();
             let flushed =
@@ -418,35 +446,6 @@ impl EngineCore {
         if let Err(err) = std::fs::remove_file(&local_file_path) {
             error!("failed to remove local file {:?}", err);
         }
-    }
-
-    pub(crate) fn create_snapshot_tables(
-        &self,
-        snap: &kvenginepb::Snapshot,
-        tables: &ChangeSet,
-    ) -> (Vec<L0Table>, [ShardCF; 3]) {
-        let mut l0_tbls = vec![];
-        for l0_create in snap.get_l0_creates() {
-            let l0_tbl = tables.l0_tables.get(&l0_create.id).unwrap().clone();
-            l0_tbls.push(l0_tbl);
-        }
-        l0_tbls.sort_by(|a, b| b.version().cmp(&a.version()));
-        let mut scf_builders = vec![];
-        for cf in 0..NUM_CFS {
-            let scf = ShardCFBuilder::new(cf);
-            scf_builders.push(scf);
-        }
-        for table_create in snap.get_table_creates() {
-            let tbl = tables.ln_tables.get(&table_create.id).unwrap().clone();
-            let scf = &mut scf_builders.as_mut_slice()[table_create.cf as usize];
-            scf.add_table(tbl, table_create.level as usize);
-        }
-        let mut scfs = [ShardCF::new(0), ShardCF::new(1), ShardCF::new(2)];
-        for cf in 0..NUM_CFS {
-            let scf = &mut scf_builders.as_mut_slice()[cf];
-            scfs[cf] = scf.build();
-        }
-        (l0_tbls, scfs)
     }
 
     fn apply_ingest_files(&self, shard: &Shard, cs: &ChangeSet) -> Result<()> {

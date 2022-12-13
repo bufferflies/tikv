@@ -7,6 +7,7 @@ use async_stream::try_stream;
 use concurrency_manager::ConcurrencyManager;
 use engine_traits::PerfLevel;
 use futures::{channel::mpsc, prelude::*};
+use futures_executor::block_on;
 use kvproto::{coprocessor as coppb, errorpb, kvrpcpb};
 use protobuf::{CodedInputStream, Message};
 use resource_metering::{FutureExt, ResourceTagFactory, StreamExt};
@@ -19,7 +20,10 @@ use tokio::sync::Semaphore;
 use txn_types::Lock;
 
 use crate::{
-    coprocessor::{cache::CachedRequestHandler, interceptors::*, metrics::*, tracker::Tracker, *},
+    coprocessor::{
+        cache::CachedRequestHandler, interceptors::*, metrics::*,
+        statistics::analyze::RemoteContext, tracker::Tracker, *,
+    },
     read_pool::ReadPoolHandle,
     server::Config,
     storage::{
@@ -35,6 +39,7 @@ use crate::{
 /// Requests that need time of less than `LIGHT_TASK_THRESHOLD` is considered as light ones,
 /// which means they don't need a permit from the semaphore before execution.
 const LIGHT_TASK_THRESHOLD: Duration = Duration::from_millis(5);
+const ANALYZE_CACHE_CAPACITY: u64 = 64;
 
 /// A pool to build and run Coprocessor request handlers.
 #[derive(Clone)]
@@ -67,6 +72,8 @@ pub struct Endpoint<E: Engine> {
     _phantom: PhantomData<E>,
 
     quota_limiter: Arc<QuotaLimiter>,
+
+    remote_ctx: Option<RemoteContext>,
 }
 
 impl<E: Engine> tikv_util::AssertSend for Endpoint<E> {}
@@ -88,6 +95,7 @@ impl<E: Engine> Endpoint<E> {
             }
             _ => None,
         };
+
         Self {
             read_pool,
             semaphore,
@@ -102,7 +110,36 @@ impl<E: Engine> Endpoint<E> {
             slow_log_threshold: cfg.end_point_slow_log_threshold.0,
             _phantom: Default::default(),
             quota_limiter,
+            remote_ctx: None,
         }
+    }
+
+    pub fn set_remote_url(&mut self, remote_url: String) {
+        if remote_url.is_empty() {
+            return;
+        }
+        let remote_ctx = if let Some(v) = self.remote_ctx.as_ref() {
+            let mut ctx = v.clone();
+            ctx.remote_url = remote_url;
+            ctx
+        } else {
+            let runtime = Arc::new(
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .enable_all()
+                    .thread_name("remote_coprocessor")
+                    .build()
+                    .unwrap(),
+            );
+            RemoteContext {
+                remote_req: RemoteAnalysisRequest::default(),
+                remote_url,
+                runtime,
+                analyze_cache: moka::future::Cache::new(ANALYZE_CACHE_CAPACITY),
+                client: hyper::Client::new(),
+            }
+        };
+        self.remote_ctx = Some(remote_ctx);
     }
 
     fn check_memory_locks(&self, req_ctx: &ReqContext) -> Result<()> {
@@ -164,7 +201,11 @@ impl<E: Engine> Endpoint<E> {
         fail_point!("coprocessor_parse_request", |_| Err(box_err!(
             "unsupported tp (failpoint)"
         )));
-
+        let req_bytes = if self.remote_ctx.is_some() && req.get_tp() == REQ_TYPE_ANALYZE {
+            req.write_to_bytes().unwrap()
+        } else {
+            Vec::default()
+        };
         let (context, data, ranges, mut start_ts) = (
             req.take_context(),
             req.take_data(),
@@ -262,11 +303,15 @@ impl<E: Engine> Endpoint<E> {
                     AnalyzeType::TypeFullSampling => ReqTag::analyze_full_sampling,
                     AnalyzeType::TypeSampleIndex => unimplemented!(),
                 };
+                let mut max_handle_duration = self.max_handle_duration;
+                if self.remote_ctx.is_some() {
+                    max_handle_duration *= 5;
+                }
                 req_ctx = ReqContext::new(
                     tag,
                     context,
                     ranges,
-                    self.max_handle_duration,
+                    max_handle_duration,
                     peer,
                     None,
                     start_ts.into(),
@@ -276,7 +321,18 @@ impl<E: Engine> Endpoint<E> {
 
                 self.check_memory_locks(&req_ctx)?;
                 let quota_limiter = self.quota_limiter.clone();
-
+                let remote_req = RemoteAnalysisRequest {
+                    key: String::default(),
+                    req_bytes,
+                    peer: req_ctx.peer.clone().unwrap_or_default(),
+                    max_handle_duration,
+                    snap_bytes: Vec::new(),
+                };
+                let remote_ctx = self.remote_ctx.as_ref().map(|v| {
+                    let mut ctx = v.clone();
+                    ctx.remote_req = remote_req;
+                    ctx
+                });
                 builder = Box::new(move |snap, req_ctx| {
                     statistics::analyze::AnalyzeContext::<_, F>::new(
                         analyze,
@@ -285,6 +341,7 @@ impl<E: Engine> Endpoint<E> {
                         snap,
                         req_ctx,
                         quota_limiter,
+                        remote_ctx,
                     )
                     .map(|h| h.into_boxed())
                 });
@@ -627,6 +684,91 @@ impl<E: Engine> Endpoint<E> {
             .try_flatten() // Stream<Resp, Error>
             .or_else(|e| futures::future::ok(make_error_response(e))) // Stream<Resp, ()>
             .map(|item: std::result::Result<_, ()>| item.unwrap())
+    }
+}
+
+pub fn parse_request_and_remote_analyze<S: 'static + Snapshot>(
+    remote_req: RemoteAnalysisRequest,
+    snap: S,
+) -> Result<Vec<u8>> {
+    let mut req = coppb::Request::default();
+    req.merge_from_bytes(&remote_req.req_bytes).unwrap();
+    let api_version = req.get_context().get_api_version();
+    dispatch_api_version!(api_version, {
+        parse_request_and_remote_analyze_impl::<S, API>(req, remote_req, snap)
+    })
+}
+
+fn parse_request_and_remote_analyze_impl<S: 'static + Snapshot, F: KvFormat>(
+    mut req: coppb::Request,
+    remote_req: RemoteAnalysisRequest,
+    snap: S,
+) -> Result<Vec<u8>> {
+    let peer: Option<String> = if !remote_req.peer.is_empty() {
+        Some(remote_req.peer)
+    } else {
+        None
+    };
+    let (context, data, ranges, mut start_ts) = (
+        req.take_context(),
+        req.take_data(),
+        req.take_ranges().to_vec(),
+        req.get_start_ts(),
+    );
+    let cache_match_version = if req.get_is_cache_enabled() {
+        Some(req.get_cache_if_match_version())
+    } else {
+        None
+    };
+
+    let mut input = CodedInputStream::from_bytes(&data);
+    input.set_recursion_limit(1000);
+
+    let req_ctx: ReqContext;
+    match req.get_tp() {
+        REQ_TYPE_ANALYZE => {
+            let mut analyze = AnalyzeReq::default();
+            match analyze.merge_from(&mut input) {
+                Ok(_) => (),
+                Err(e) => return Err(Error::Other(e.to_string())),
+            };
+            if start_ts == 0 {
+                start_ts = analyze.get_start_ts_fallback();
+            }
+
+            let tag = match analyze.get_tp() {
+                AnalyzeType::TypeIndex | AnalyzeType::TypeCommonHandle => ReqTag::analyze_index,
+                AnalyzeType::TypeColumn | AnalyzeType::TypeMixed => ReqTag::analyze_table,
+                AnalyzeType::TypeFullSampling => ReqTag::analyze_full_sampling,
+                AnalyzeType::TypeSampleIndex => unimplemented!(),
+            };
+
+            req_ctx = ReqContext::new(
+                tag,
+                context,
+                ranges,
+                remote_req.max_handle_duration,
+                peer,
+                None,
+                start_ts.into(),
+                cache_match_version,
+                PerfLevel::Uninitialized,
+            );
+
+            let quota_limiter = Arc::new(QuotaLimiter::default());
+            let mut handler = statistics::analyze::AnalyzeContext::<_, F>::new(
+                analyze,
+                req_ctx.ranges.clone(),
+                start_ts,
+                snap,
+                &req_ctx,
+                quota_limiter,
+                None,
+            )
+            .unwrap();
+            return block_on(handler.local_handle_request());
+        }
+        tp => return Err(Error::Other(format!("unsupported tp {}", tp))),
     }
 }
 

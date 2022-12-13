@@ -1,6 +1,7 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
+    collections::HashMap,
     fmt::{Debug, Formatter},
     marker::PhantomData,
     ops::Deref,
@@ -8,9 +9,15 @@ use std::{
 };
 
 use bytes::{Buf, Bytes, BytesMut};
+use kvenginepb as pb;
+use protobuf::Message;
 
 use crate::{
-    table::{memtable::Hint, table},
+    table::{
+        memtable::{CFTable, Hint},
+        sstable::{InMemFile, L0Table, SSTable},
+        table,
+    },
     *,
 };
 
@@ -55,6 +62,11 @@ impl SnapAccess {
         let core = Arc::new(SnapAccessCore::new(shard));
         Self { core }
     }
+
+    pub async fn from_change_set(dfs: Arc<dyn dfs::DFS>, change_set: pb::ChangeSet) -> Self {
+        let core = Arc::new(SnapAccessCore::from_change_set(dfs, change_set).await);
+        Self { core }
+    }
 }
 
 impl Deref for SnapAccess {
@@ -74,6 +86,8 @@ impl Debug for SnapAccess {
 pub struct SnapAccessCore {
     tag: ShardTag,
     managed_ts: u64,
+    base_version: u64,
+    meta_seq: u64,
     write_sequence: u64,
     data: ShardData,
     get_hint: Mutex<Hint>,
@@ -81,15 +95,81 @@ pub struct SnapAccessCore {
 
 impl SnapAccessCore {
     pub fn new(shard: &Shard) -> Self {
+        let base_version = shard.base_version;
+        let meta_seq = shard.get_meta_sequence();
         let write_sequence = shard.get_write_sequence();
         let data = shard.get_data();
         Self {
             tag: shard.tag(),
             write_sequence,
+            meta_seq,
+            base_version,
             managed_ts: 0,
             data,
             get_hint: Mutex::new(Hint::new()),
         }
+    }
+
+    pub async fn from_change_set(dfs: Arc<dyn dfs::DFS>, change_set: pb::ChangeSet) -> Self {
+        let mut cs = ChangeSet::new(change_set);
+        let mut ids = HashMap::new();
+        if cs.has_snapshot() {
+            let snap = cs.get_snapshot();
+            for l0 in snap.get_l0_creates() {
+                ids.insert(l0.id, 0);
+            }
+            for ln in snap.get_table_creates() {
+                ids.insert(ln.id, ln.level);
+            }
+        }
+        let (result_tx, mut result_rx) = tokio::sync::mpsc::channel(ids.len());
+        let runtime = dfs.get_runtime();
+        let opts = dfs::Options::new(cs.shard_id, cs.shard_ver);
+        let mut msg_count = 0;
+        for (&id, &level) in &ids {
+            let fs = dfs.clone();
+            let tx = result_tx.clone();
+            runtime.spawn(async move {
+                let res = fs.read_file(id, opts).await;
+                tx.send(res.map(|data| (id, level, data))).await.unwrap();
+            });
+            msg_count += 1;
+        }
+        let mut errors = vec![];
+        for _ in 0..msg_count {
+            match result_rx.recv().await.unwrap() {
+                Ok((id, level, data)) => {
+                    let file = InMemFile::new(id, data);
+                    if level == 0 {
+                        let l0_table = L0Table::new(Arc::new(file), None).unwrap();
+                        cs.l0_tables.insert(id, l0_table);
+                    } else {
+                        let ln_table = SSTable::new(Arc::new(file), None, level == 1).unwrap();
+                        cs.ln_tables.insert(id, ln_table);
+                    }
+                }
+                Err(err) => {
+                    error!("prefetch failed {:?}", &err);
+                    errors.push(err);
+                }
+            }
+        }
+        if !errors.is_empty() {
+            panic!("errors is not empty");
+        }
+        let mut shard = Shard::new_for_ingest(0, &cs, Arc::new(Options::default()));
+        let (l0s, scfs) = create_snapshot_tables(cs.get_snapshot(), &cs);
+        let data = ShardData::new(
+            shard.start.clone(),
+            shard.end.clone(),
+            shard.get_data().del_prefixes.clone(),
+            vec![CFTable::new()],
+            l0s,
+            scfs,
+        );
+        shard.id = cs.shard_id;
+        shard.set_data(data);
+        Self::new(&shard)
     }
 
     pub fn new_iterator(
@@ -281,6 +361,93 @@ impl SnapAccessCore {
             }
         }
         false
+    }
+
+    fn to_change_set(&self, ranges: &[(Bytes, Bytes)]) -> pb::ChangeSet {
+        let mut cs = new_change_set(self.get_tag().id_ver.id, self.get_tag().id_ver.ver);
+        let mut snap = pb::Snapshot::new();
+        let mut properties = pb::Properties::new();
+        properties.shard_id = self.get_tag().id_ver.id;
+        let data_sequence = if self.data.l0_tbls.len() > 0 {
+            self.data.l0_tbls[0].version() - self.base_version
+        } else {
+            self.meta_seq
+        };
+        snap.set_data_sequence(data_sequence);
+        snap.set_start(self.get_start_key().to_vec());
+        snap.set_end(self.get_end_key().to_vec());
+        snap.set_properties(properties);
+        let mut count = 0;
+        let mut overlapped_count = 0;
+        for v in &self.data.l0_tbls {
+            count += 1;
+            let mut overlap = false;
+            for (start, end) in ranges {
+                if v.has_data_in_range(start.as_ref(), end.as_ref()) {
+                    overlap = true;
+                    break;
+                }
+            }
+            if !overlap {
+                continue;
+            }
+            overlapped_count += 1;
+            let mut l0 = pb::L0Create::new();
+            l0.set_id(v.id());
+            l0.set_smallest(v.smallest().to_vec());
+            l0.set_biggest(v.biggest().to_vec());
+            snap.mut_l0_creates().push(l0);
+        }
+        self.data.for_each_level(|cf, lh| {
+            for v in lh.tables.iter() {
+                count += 1;
+                let mut overlap = false;
+                for (start, end) in ranges {
+                    if v.has_overlap(start.as_ref(), end.as_ref(), false) {
+                        overlap = true;
+                        break;
+                    }
+                }
+                if !overlap {
+                    continue;
+                }
+                overlapped_count += 1;
+                let mut tbl = pb::TableCreate::new();
+                tbl.set_id(v.id());
+                tbl.set_cf(cf as i32);
+                tbl.set_level(lh.level as u32);
+                tbl.set_smallest(v.smallest().to_vec());
+                tbl.set_biggest(v.biggest().to_vec());
+                snap.mut_table_creates().push(tbl);
+            }
+            false
+        });
+        info!(
+            "convert snap access to change set for {}, total files {}, overlapped files {}",
+            self.get_tag(),
+            count,
+            overlapped_count,
+        );
+        cs.set_snapshot(snap);
+        cs
+    }
+
+    pub fn marshal(&self, ranges: &[(Bytes, Bytes)]) -> (String, Vec<u8>) {
+        let cs = self.to_change_set(ranges);
+        let mut ranges_bytes = Vec::new();
+        for (start, end) in ranges {
+            ranges_bytes.append(start.to_vec().as_mut());
+            ranges_bytes.append(end.to_vec().as_mut());
+        }
+        let ranges_key = hex::encode(ranges_bytes);
+        let key = format!(
+            "{}:{}:{}:{}",
+            cs.shard_id,
+            cs.shard_ver,
+            cs.get_snapshot().data_sequence,
+            ranges_key,
+        );
+        (key, cs.write_to_bytes().unwrap())
     }
 
     pub fn get_all_files(&self) -> Vec<u64> {

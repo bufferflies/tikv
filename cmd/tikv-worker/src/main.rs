@@ -5,24 +5,32 @@ use std::{
     path::{Path, PathBuf},
     str::FromStr,
     sync::Arc,
-    time::Instant,
 };
 
 use clap::{App, Arg, ArgMatches};
 use grpcio::EnvBuilder;
 use http::Uri;
-use hyper::service::{make_service_fn, service_fn};
-use kvengine::dfs::{DFSConfig, DFS, S3FS};
+use hyper::{
+    body::Buf,
+    service::{make_service_fn, service_fn},
+};
+use kvengine::{
+    dfs,
+    dfs::{DFSConfig, DFS, S3FS},
+    SnapAccess,
+};
 use kvproto::metapb::Store;
 use pd_client::{PdClient, RpcClient};
+use protobuf::Message;
+use rfstore::store::RegionSnapshot;
 use security::{SecurityConfig, SecurityManager};
 use slog_global::{error, info};
-use tikv_util::config::ReadableDuration;
+use tikv_util::{config::ReadableDuration, time::Instant};
 
 fn main() {
     init_logger(io::stdout());
-    let matches = App::new("tikv-compactor")
-        .about("tikv remote compactor")
+    let matches = App::new("tikv-worker")
+        .about("tikv remote worker")
         .arg(
             Arg::with_name("config")
                 .short("C")
@@ -120,12 +128,11 @@ fn main() {
         config.dfs.s3_region,
         config.dfs.s3_bucket,
     ));
-    let dfsclone = dfs.clone();
-
+    let dfs_clone = dfs.clone();
     let thread_pool = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .worker_threads(16)
-        .thread_name("compaction-server")
+        .thread_name("worker-server")
         .build()
         .unwrap();
     let addr = config.addr.parse().expect("Unable to parse socket address");
@@ -148,7 +155,12 @@ fn main() {
                             .status(200)
                             .body(hyper::Body::from("ok"))
                             .unwrap()),
-                        _ => kvengine::handle_remote_compaction(dfs, req).await,
+                        "/compact" => kvengine::handle_remote_compaction(dfs, req).await,
+                        "/analyze" => handle_remote_analysis(dfs, req).await,
+                        _ => Ok(hyper::Response::builder()
+                            .status(404)
+                            .body(hyper::Body::from("Not Found"))
+                            .unwrap()),
                     }
                 }
             }))
@@ -165,11 +177,15 @@ fn main() {
             RpcClient::new(&config.pd, Some(env), security_mgr)
                 .unwrap_or_else(|e| panic!("failed to create rpc client: {:?}", e)),
         );
-        let remote_url = format!("http://{}", config.addr);
+        let remote_compact_url = format!("http://{}/compact", config.addr);
         let duration = config.update_interval.0;
         std::thread::spawn(move || {
             loop {
-                register_to_all_stores(pd_client.clone(), dfsclone.clone(), remote_url.clone());
+                register_compactor_to_all_stores(
+                    pd_client.clone(),
+                    dfs_clone.clone(),
+                    remote_compact_url.clone(),
+                );
                 std::thread::sleep(duration);
             }
         });
@@ -192,7 +208,61 @@ fn init_logger<W: 'static + io::Write + Send>(writer: W) {
     slog_global::set_global(logger);
 }
 
-fn register_to_all_stores(pd: Arc<RpcClient>, dfs: Arc<S3FS>, remote_url: String) {
+async fn handle_remote_analysis(
+    dfs: Arc<dyn dfs::DFS>,
+    req: hyper::Request<hyper::Body>,
+) -> hyper::Result<hyper::Response<hyper::Body>> {
+    let mut start_time = Instant::now();
+    let req_body = hyper::body::to_bytes(req.into_body()).await?;
+    let result = serde_json::from_slice(req_body.chunk());
+    if result.is_err() {
+        let err_str = result.unwrap_err().to_string();
+        return Ok(hyper::Response::builder()
+            .status(400)
+            .body(err_str.into())
+            .unwrap());
+    }
+    let remote_req: tikv::coprocessor::RemoteAnalysisRequest = result.unwrap();
+    let tag = format!("[:{}]", remote_req.key);
+    let mut change_set = kvenginepb::ChangeSet::default();
+    change_set.merge_from_bytes(&remote_req.snap_bytes).unwrap();
+    let snap_access = SnapAccess::from_change_set(dfs, change_set).await;
+    info!(
+        "start analyzing for {}, prepare snap time {:?}",
+        tag,
+        start_time.saturating_elapsed()
+    );
+    start_time = Instant::now();
+    let snap = RegionSnapshot::from_snapshot(snap_access);
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let result =
+            tikv::coprocessor::parse_request_and_remote_analyze::<RegionSnapshot>(remote_req, snap);
+        tx.send(result).unwrap();
+    });
+    match rx.await.unwrap() {
+        Ok(data) => {
+            info!(
+                "finish analyzing for {}, takes {:?}, data size {}",
+                tag,
+                start_time.saturating_elapsed(),
+                data.len(),
+            );
+            Ok(hyper::Response::builder()
+                .status(200)
+                .body(data.into())
+                .unwrap())
+        }
+        Err(err) => {
+            let err_str = format!("{:?}", err);
+            error!("failed to analyze for {}, error {}", tag, err_str);
+            let body = hyper::Body::from(err_str);
+            Ok(hyper::Response::builder().status(500).body(body).unwrap())
+        }
+    }
+}
+
+fn register_compactor_to_all_stores(pd: Arc<RpcClient>, dfs: Arc<S3FS>, remote_url: String) {
     let all_stores = pd
         .get_all_stores(true)
         .unwrap_or_else(|e| panic!("failed get all stores {:?}", e));
@@ -203,7 +273,7 @@ fn register_to_all_stores(pd: Arc<RpcClient>, dfs: Arc<S3FS>, remote_url: String
         let tx = tx.clone();
         let remote_url = remote_url.clone();
         dfs.get_runtime().spawn(async move {
-            tx.send(register_to_store(store, remote_url.clone()).await)
+            tx.send(register_compactor_to_store(store, remote_url.clone()).await)
                 .unwrap();
         });
     }
@@ -214,7 +284,7 @@ fn register_to_all_stores(pd: Arc<RpcClient>, dfs: Arc<S3FS>, remote_url: String
             finish_cnt += 1;
         }
     }
-    let elapsed = start_time.elapsed();
+    let elapsed = start_time.saturating_elapsed();
     let remain = stores_len - finish_cnt;
     info!(
         "register compactor to {} stores in {:?}, remain {} stores",
@@ -222,7 +292,7 @@ fn register_to_all_stores(pd: Arc<RpcClient>, dfs: Arc<S3FS>, remote_url: String
     );
 }
 
-async fn register_to_store(store: Store, remote_url: String) -> bool {
+async fn register_compactor_to_store(store: Store, remote_url: String) -> bool {
     let uri = Uri::from_str(&format!(
         "http://{}/kvengine/compactor",
         &store.status_address

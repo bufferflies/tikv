@@ -19,6 +19,8 @@ pub struct Config {
     pub s3_region: String,
 
     pub remote_compactor_addr: String,
+
+    pub remote_analyzer_addr: String,
 }
 
 impl Config {
@@ -42,5 +44,6 @@ impl Config {
         Self::env_or_default("DFS_S3_SECRET_KEY", &mut self.s3_secret_key);
         Self::env_or_default("DFS_S3_REGION", &mut self.s3_region);
         Self::env_or_default("DFS_REMOTE_COMPACTOR_ADDR", &mut self.remote_compactor_addr);
+        Self::env_or_default("DFS_REMOTE_ANALYZER_ADDR", &mut self.remote_analyzer_addr);
     }
 }

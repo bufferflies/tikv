@@ -12,7 +12,7 @@ use crate::{
     },
 };
 
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum Error {
     #[error("Region error (will back off and retry) {0:?}")]
     Region(kvproto::errorpb::Error),

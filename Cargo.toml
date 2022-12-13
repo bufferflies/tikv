@@ -115,6 +115,7 @@ log_wrappers = { path = "components/log_wrappers" }
 match_template = { path = "components/match_template" }
 memory_trace_macros = { path = "components/memory_trace_macros" }
 mime = "0.3.13"
+moka = { version = "0.8", features = ["future"] }
 more-asserts = "0.2"
 murmur3 = "0.5.1"
 nom = { version = "5.1.0", default-features = false, features = ["std"] }
@@ -218,7 +219,7 @@ kvproto = { git = "https://github.com/tidbcloud/kvproto.git", branch = "release-
 resolver = "2"
 members = [
   "cmd/cse-ctl",
-  "cmd/tikv-compactor",
+  "cmd/tikv-worker",
   "cmd/tikv-ctl",
   "cmd/tikv-server",
   "components/api_version",
@@ -288,7 +289,7 @@ members = [
   "fuzz/fuzzer-libfuzzer",
   "tests",
 ]
-default-members = ["cmd/tikv-server", "cmd/tikv-compactor", "cmd/cse-ctl"]
+default-members = ["cmd/tikv-server", "cmd/cse-ctl", "cmd/tikv-worker"]
 
 [profile.dev.package.grpcio-sys]
 debug = false

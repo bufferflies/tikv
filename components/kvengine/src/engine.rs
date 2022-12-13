@@ -235,7 +235,7 @@ impl EngineCore {
         let engine_id = self.engine_id.load(Ordering::Acquire);
         let shard = Shard::new_for_ingest(engine_id, &cs, self.opts.clone());
         shard.set_active(active);
-        let (l0s, scfs) = self.create_snapshot_tables(cs.get_snapshot(), &cs);
+        let (l0s, scfs) = create_snapshot_tables(cs.get_snapshot(), &cs);
         let data = ShardData::new(
             shard.start.clone(),
             shard.end.clone(),
