@@ -30,7 +30,7 @@ pub struct TruncateTsArgs {
     #[clap(long)]
     pub truncate_ts: u64,
     /// The timeout in seconds
-    #[clap(long, default_value_t)]
+    #[clap(long, default_value_t = DEFAULT_TRUNCATE_TS_TIMEOUT)]
     pub timeout: u64,
 }
 
@@ -40,11 +40,7 @@ pub(crate) fn execute_truncate_ts(args: TruncateTsArgs) {
         error!("failed to read config file {:?}", result.unwrap_err());
         return;
     }
-    let timeout = if args.timeout == 0 {
-        Duration::from_secs(DEFAULT_TRUNCATE_TS_TIMEOUT)
-    } else {
-        Duration::from_secs(args.timeout)
-    };
+    let timeout = Duration::from_secs(args.timeout);
     let config: TruncateTsConfig = toml::from_slice(&result.unwrap()).unwrap();
     let pd_client = create_pd_client(&config.security, &config.pd);
     let truncate_ts = args.truncate_ts;

@@ -33,7 +33,9 @@ pub(crate) async fn send_request_to_store(
     }
     let resp = resp.unwrap();
     if !resp.status().is_success() {
-        return Err(format!("{:?} {:?}", &store, resp.status()));
+        let status = resp.status();
+        let body = hyper::body::to_bytes(resp.into_body()).await.unwrap();
+        return Err(format!("{:?} {:?}: {:?}", &store, status, body));
     }
     match hyper::body::to_bytes(resp.into_body()).await {
         Ok(body) => Ok(body),

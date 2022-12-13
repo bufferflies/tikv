@@ -32,8 +32,8 @@ use crate::dfs::{Options, DFS};
 const MAX_RETRY_COUNT: u32 = 7;
 const RETRY_SLEEP_MS: u64 = 500;
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
-const DISPATCH_TIMEOUT: Duration = Duration::from_secs(20);
-const READ_BODY_TIMEOUT: Duration = Duration::from_secs(20);
+const DISPATCH_TIMEOUT: Duration = Duration::from_secs(60);
+const READ_BODY_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone)]
 pub struct S3FS {
@@ -176,7 +176,12 @@ impl S3FSCore {
         format!("{}/{:02x}/{:016x}.sst", self.prefix, idx, file_id)
     }
 
-    fn parse_suffix(&self, key: &str) -> String {
+    pub fn get_prefix(&self) -> String {
+        self.prefix.clone()
+    }
+
+    // parse the sst file's suffix with format {idx}/{file_id}.sst
+    pub fn parse_sst_file_suffix(&self, key: &str) -> String {
         let end_idx = key.len();
         let start_idx = end_idx - 4 - 16 - 1 - 2;
         let suffix = &key[start_idx..end_idx];
@@ -218,7 +223,7 @@ impl S3FSCore {
         }
     }
 
-    // list gets a list of file ids greater than start_after.
+    // list gets a list of file ids(full path) greater than start_after.
     // The result contains a vector of file ids and a boolean indicate if there is more.
     pub async fn list(&self, start_after: &str) -> crate::dfs::Result<(Vec<String>, bool)> {
         let prefix = format!("{}/", self.prefix.clone());
@@ -241,7 +246,7 @@ impl S3FSCore {
                     let list: ListObjects = quick_xml::de::from_str(body_str).unwrap();
                     let mut files = vec![];
                     for content in list.contents {
-                        files.push(self.parse_suffix(&content.key));
+                        files.push(content.key);
                     }
                     return Ok((files, list.is_truncated));
                 } else {
@@ -377,11 +382,9 @@ impl S3FSCore {
                 }
             }
             let err = result.unwrap_err();
-            if let RusotoError::Service(GetObjectError::NoSuchKey(err_msg)) = err {
-                panic!(
-                    "file {} not exist, S3 key {}, err_msg {}",
-                    &file_name, key, err_msg
-                );
+            if let RusotoError::Service(GetObjectError::NoSuchKey(err_msg)) = &err {
+                error!("file {} not exist, err msg {}", &file_name, err_msg);
+                return Err(err.into());
             }
             if self.is_err_retryable(&err) && self.sleep_for_retry(&mut retry_cnt, &file_name).await
             {
@@ -660,6 +663,7 @@ mod tests {
     use std::{fs, io::Write, str};
 
     use bytes::Buf;
+    use rand::random;
     use rusoto_mock::{
         MockCredentialsProvider, MockRequestDispatcher, MultipleMockRequestDispatcher,
     };
@@ -743,5 +747,26 @@ mod tests {
         s3fs.runtime.spawn(f);
         assert!(rx.recv().unwrap());
         let _ = fs::remove_file(local_file);
+    }
+
+    #[test]
+    fn test_parse_sst_file_suffix() {
+        let file_data = "abcdefgh".to_string().into_bytes();
+        let s3c = rusoto_core::Client::new_with(
+            MockCredentialsProvider,
+            MultipleMockRequestDispatcher::new(vec![
+                MockRequestDispatcher::with_status(200),
+                MockRequestDispatcher::with_status(200)
+                    .with_body(str::from_utf8(&file_data).unwrap()),
+                MockRequestDispatcher::with_status(200),
+                MockRequestDispatcher::with_status(200),
+            ]),
+        );
+        let s3fs = S3FS::new_for_test(s3c, "shard-db".into(), "prefix".into());
+        let file_key = s3fs.file_key(random());
+        assert_eq!(
+            format!("{}/{}", "prefix", s3fs.parse_sst_file_suffix(&file_key)),
+            file_key
+        );
     }
 }

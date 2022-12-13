@@ -158,6 +158,10 @@ impl GcWorker {
                 .get_runtime()
                 .block_on(s3fs.list(start_after.as_str()))
                 .unwrap();
+            let files: Vec<String> = files
+                .iter()
+                .map(|f| self.s3fs.parse_sst_file_suffix(f))
+                .collect();
             info!("listed {} files", files.len());
             for file_suffix in &files {
                 let file_id = self.s3fs.parse_file_id(file_suffix.as_str());

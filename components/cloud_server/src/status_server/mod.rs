@@ -465,18 +465,14 @@ impl StatusServer {
         engine: rfengine::RfEngine,
         dfs_conf: DFSConfig,
     ) -> hyper::Result<Response<Body>> {
-        let mut body = Vec::new();
-        req.into_body()
-            .try_for_each(|bytes| {
-                body.extend(bytes);
-                ok(())
-            })
-            .await?;
-        let args = decode_json(&body).unwrap_or_default();
-        let cluster_id = args
-            .get("cluster_id")
-            .map(|v| u64::from_str(v).unwrap_or_default())
-            .unwrap_or_default();
+        let body = hyper::body::to_bytes(req.into_body()).await?;
+        let backup_config: serde_json::Result<rfengine::BackupConfig> =
+            serde_json::from_slice(&body.to_vec());
+        if backup_config.is_err() {
+            return Ok(make_response(StatusCode::BAD_REQUEST, "Bad request body"));
+        }
+        let backup_config = backup_config.unwrap();
+        let cluster_id = backup_config.cluster_id;
         let mut store_ident = StoreIdent::default();
         let data = engine
             .get_state(0, rfstore::store::STORE_IDENT_KEY)
@@ -501,7 +497,7 @@ impl StatusServer {
             dfs_conf.s3_bucket,
         );
         let (callback, future) = paired_future_callback();
-        let task = rfengine::BackupTask::new(Box::new(s3fs), callback);
+        let task = rfengine::BackupTask::new(Box::new(s3fs), callback, backup_config);
         engine.backup(task);
         Ok(match future.await.unwrap() {
             Ok(meta) => {

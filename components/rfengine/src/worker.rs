@@ -4,7 +4,7 @@ use std::{
     cmp::min,
     fs,
     fs::File,
-    io::Read,
+    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU32, Ordering},
@@ -72,7 +72,11 @@ impl Worker {
                 Task::Truncates(truncates) => drop(truncates),
                 Task::Close => return,
                 Task::Backup(backup_task) => {
-                    self.backup(backup_task);
+                    if backup_task.config.incremental {
+                        self.incremental_backup(backup_task);
+                    } else {
+                        self.full_backup(backup_task);
+                    }
                 }
             }
         }
@@ -145,42 +149,19 @@ impl Worker {
         Ok(file)
     }
 
-    fn backup(&mut self, task: BackupTask) {
+    fn full_backup(&mut self, task: BackupTask) {
         let engine_id = self.manifest.get_engine_id();
         info!("{}: start backup task", engine_id);
         let wal_epoch = self.manifest.epoch_id + 1;
-        let wal_file_name = wal_file_name(&self.dir, wal_epoch);
-        let mut wal_file = File::open(&wal_file_name).unwrap();
-        let mut chunks = vec![];
-        let mut total_size = 0;
-        while total_size < task.file_off {
-            let chunk_size = min(MAX_WAL_CHUNK_SIZE, task.file_off - total_size);
-            let chunk = vec![0u8; chunk_size as usize];
-            chunks.push(chunk);
-            total_size += chunk_size;
-        }
         let mut objects = vec![];
-        let mut offset = 0;
         let mut backup_meta = StoreBackupMeta::default();
-        backup_meta.set_store_id(self.manifest.get_engine_id());
-        for mut chunk in chunks.drain(..) {
-            if let Err(err) = wal_file.read_exact(chunk.as_mut_slice()) {
-                (task.callback)(Err(format!("read wal failed {:?}", err)));
+        backup_meta.set_store_id(engine_id);
+        match self.backup_wal(&mut backup_meta, wal_epoch, 0, task.file_off) {
+            Ok(mut objs) => objects.append(&mut objs),
+            Err(e) => {
+                (task.callback)(Err(format!("backup wal failed {:?}", e)));
                 return;
             }
-            let mut wal_chunk = WalChunk::default();
-            wal_chunk.set_epoch(wal_epoch);
-            wal_chunk.set_start_off(offset as u64);
-            wal_chunk.set_end_off((offset + chunk.len()) as u64);
-            let wal_key = wal_file_key(
-                backup_meta.get_store_id(),
-                wal_chunk.get_epoch(),
-                wal_chunk.get_start_off(),
-                wal_chunk.get_end_off(),
-            );
-            backup_meta.mut_wal_chunks().push(wal_chunk);
-            offset += chunk.len();
-            objects.push((wal_key, Bytes::from(chunk)));
         }
         let manifest = self.manifest.to_change_set();
         for peer in manifest.get_peers() {
@@ -216,6 +197,100 @@ impl Worker {
             if let Err(err) = task.object_storage.put_objects(objects) {
                 (task.callback)(Err(err));
                 return;
+            }
+            (task.callback)(Ok(backup_meta));
+        });
+    }
+
+    fn backup_wal(
+        &mut self,
+        backup_meta: &mut StoreBackupMeta,
+        wal_epoch: u32,
+        start_off: u64,
+        end_off: u64,
+    ) -> Result<Vec<(String, Bytes)>> {
+        let wal_file_name = wal_file_name(&self.dir, wal_epoch);
+        let mut wal_file = File::open(&wal_file_name)?;
+        let mut chunks = vec![];
+        let mut total_size = 0;
+        let backup_size = end_off - start_off;
+        while total_size < backup_size {
+            let chunk_size = min(MAX_WAL_CHUNK_SIZE, backup_size - total_size);
+            let chunk = vec![0u8; chunk_size as usize];
+            chunks.push(chunk);
+            total_size += chunk_size;
+        }
+        let mut objects = vec![];
+        let mut offset = start_off;
+        if offset > 0 {
+            wal_file.seek(SeekFrom::Start(offset))?;
+        }
+        for mut chunk in chunks.drain(..) {
+            wal_file.read_exact(chunk.as_mut_slice())?;
+            let mut wal_chunk = WalChunk::default();
+            wal_chunk.set_epoch(wal_epoch);
+            wal_chunk.set_start_off(offset as u64);
+            wal_chunk.set_end_off(offset + chunk.len() as u64);
+            let wal_key = wal_file_key(
+                backup_meta.get_store_id(),
+                wal_chunk.get_epoch(),
+                wal_chunk.get_start_off(),
+                wal_chunk.get_end_off(),
+            );
+            backup_meta.mut_wal_chunks().push(wal_chunk);
+            offset += chunk.len() as u64;
+            objects.push((wal_key, Bytes::from(chunk)));
+        }
+        Ok(objects)
+    }
+
+    fn incremental_backup(&mut self, mut task: BackupTask) {
+        let engine_id = self.manifest.get_engine_id();
+        let wal_epoch = self.manifest.epoch_id + 1;
+        // If epoch is not matched, fallback to full backup.
+        if wal_epoch != task.config.wal_epoch {
+            warn!(
+                "Fallback to full backup as wal epoch changed, cur: {}, input:{}",
+                wal_epoch, task.config.wal_epoch
+            );
+            task.config.incremental = false;
+            task.config.start_offset = 0;
+            return self.full_backup(task);
+        }
+        if task.file_off < task.config.start_offset {
+            return (task.callback)(Err(format!(
+                "WAL offset invalid, current {}, given start {}",
+                task.file_off, task.config.start_offset
+            )));
+        }
+        info!(
+            "Engine {} start incremental backup task, epoch {}",
+            engine_id, wal_epoch
+        );
+        let mut backup_meta = StoreBackupMeta::default();
+        backup_meta.set_store_id(engine_id);
+        let mut objects = vec![];
+        match self.backup_wal(
+            &mut backup_meta,
+            wal_epoch,
+            task.config.start_offset,
+            task.file_off,
+        ) {
+            Ok(mut objs) => objects.append(&mut objs),
+            Err(e) => {
+                return (task.callback)(Err(format!("Backup WAL failed {:?}", e)));
+            }
+        }
+        let total_size: usize = objects.iter().map(|(_, data)| data.len()).sum();
+        info!(
+            "incremental backup read file count: {}, size: {}",
+            objects.len(),
+            total_size
+        );
+        // Starts a background task in case the object storage is slow and blocking WAL compaction.
+        thread::spawn(move || {
+            if let Err(err) = task.object_storage.put_objects(objects) {
+                return (task.callback)(Err(err));
             }
             (task.callback)(Ok(backup_meta));
         });
@@ -309,21 +384,35 @@ pub(crate) enum Task {
     Backup(BackupTask),
 }
 
+#[derive(Default, Debug, Serialize, Deserialize)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+// If incremental is true, backup the same `epoch` WAL from the `start_offset`
+pub struct BackupConfig {
+    pub cluster_id: u64,
+    pub store_id: u64,
+    pub incremental: bool,
+    pub wal_epoch: u32,
+    pub start_offset: u64,
+}
 pub struct BackupTask {
     pub object_storage: Box<dyn ObjectStorage>,
     pub callback: Box<dyn FnOnce(std::result::Result<StoreBackupMeta, String>) + Send>,
     pub(crate) file_off: u64,
+    pub(crate) config: BackupConfig,
 }
 
 impl BackupTask {
     pub fn new(
         object_storage: Box<dyn ObjectStorage>,
         callback: Box<dyn FnOnce(std::result::Result<StoreBackupMeta, String>) + Send>,
+        config: BackupConfig,
     ) -> Self {
         Self {
             file_off: 0,
             object_storage,
             callback,
+            config,
         }
     }
 }

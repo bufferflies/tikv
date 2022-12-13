@@ -1418,6 +1418,7 @@ version = "0.1.0"
 dependencies = [
  "byteorder",
  "bytes",
+ "chrono",
  "clap 3.2.22",
  "futures 0.3.15",
  "grpcio",
@@ -1438,6 +1439,7 @@ dependencies = [
  "slog",
  "slog-global",
  "slog-term",
+ "thiserror",
  "tikv_util",
  "tokio",
  "toml",
