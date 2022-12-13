@@ -483,28 +483,7 @@ impl PdRunner {
             .region_keys_read
             .observe(region_stat.read_keys as f64);
 
-        // If the api-version of region range is api v2,
-        // it will collect region store size by keyspace id label.
-        let startkey = region.start_key.clone();
-        let endkey = region.end_key.clone();
-
-        let start_key_mode = ApiV2::parse_key_mode(startkey.as_slice());
-        let end_key_mode = ApiV2::parse_key_mode(endkey.as_slice());
-
-        if (start_key_mode == KeyMode::Raw || start_key_mode == KeyMode::Txn)
-            && (end_key_mode == KeyMode::Raw || end_key_mode == KeyMode::Txn)
-        {
-            let keyspace_id_string = ApiV2::get_keyspace_id_str(startkey.as_slice());
-            let keyspace_id_str = keyspace_id_string.as_str();
-
-            let region_id = region.get_id();
-            let region_id_string = region_id.to_string();
-            let region_id_str = region_id_string.as_str();
-
-            STORE_SIZE_GAUGE_VEC
-                .with_label_values(&["used", region_id_str, keyspace_id_str])
-                .set(region_stat.approximate_kv_size as i64);
-        }
+        PdRunner::set_storage_size_metric(&region, Some(region_stat.approximate_kv_size));
 
         STORE_ENGINE_FLOW_VEC
             .with_label_values(&["kv", "bytes_read"])
@@ -539,6 +518,57 @@ impl PdRunner {
             }
         };
         self.remote.spawn(f);
+    }
+
+    pub fn get_region_keyspace_id(region: &metapb::Region) -> Option<String> {
+        // If the api-version of region range is api v2,
+        // it will collect region store size by keyspace id label.
+        let startkey = region.start_key.as_slice();
+        let endkey = region.end_key.as_slice();
+
+        let start_key_mode = ApiV2::parse_key_mode(startkey);
+        let end_key_mode = ApiV2::parse_key_mode(endkey);
+
+        if (start_key_mode == KeyMode::Raw || start_key_mode == KeyMode::Txn)
+            && (end_key_mode == KeyMode::Raw || end_key_mode == KeyMode::Txn)
+        {
+            let keyspace_id_str = ApiV2::get_keyspace_id_str(startkey);
+            return Some(keyspace_id_str);
+        }
+        return None;
+    }
+
+    pub fn set_storage_size_metric(region: &metapb::Region, kv_size: Option<u64>) {
+        let keyspace_id = PdRunner::get_region_keyspace_id(region);
+        let region_id = region.get_id();
+        let region_id_string = region_id.to_string();
+        let region_id_str = region_id_string.as_str();
+        match keyspace_id {
+            None => {}
+            Some(keyspace_id_string) => {
+                let keyspace_id_str = keyspace_id_string.as_str();
+                match kv_size {
+                    None => {
+                        let _ = STORE_SIZE_GAUGE_VEC.remove_label_values(&[
+                            "used",
+                            region_id_str,
+                            "test_not_found_metrics",
+                        ]);
+                    }
+                    Some(size) => {
+                        debug!(
+                            "update STORE_SIZE_GAUGE_VEC";
+                            "region_id_str" => region_id_str,
+                            "keyspace_id_str" => keyspace_id_str,
+                            "kv_size"=>size,
+                        );
+                        STORE_SIZE_GAUGE_VEC
+                            .with_label_values(&["used", region_id_str, keyspace_id_str])
+                            .set(size as i64);
+                    }
+                }
+            }
+        }
     }
 
     fn handle_store_heartbeat(
@@ -1376,4 +1406,50 @@ fn collect_report_read_peer_stats(
 
 fn get_read_query_num(stat: &pdpb::QueryStats) -> u64 {
     stat.get_get() + stat.get_coprocessor() + stat.get_scan()
+}
+
+#[cfg(test)]
+pub mod tests {
+    use api_version::api_v2::TXN_KEY_PREFIX;
+    use byteorder::{BigEndian, ByteOrder};
+    use kvproto::metapb::Region;
+
+    use crate::store::PdRunner;
+
+    #[test]
+    fn test_get_region_keyspace_id() {
+        let keyspace_id = 1 as u32;
+        let startkey = get_txn_startkey_prefix(keyspace_id);
+        let endkey = get_txn_endkey_prefix(keyspace_id);
+
+        let region = Region {
+            id: keyspace_id as u64,
+            start_key: startkey.to_vec(),
+            end_key: endkey.to_vec(),
+            ..Default::default()
+        };
+
+        let ks = PdRunner::get_region_keyspace_id(&region);
+        match ks {
+            None => {
+                unreachable!()
+            }
+            Some(keyspace_id_str) => {
+                assert_eq!(keyspace_id_str, keyspace_id.to_string())
+            }
+        }
+    }
+
+    fn get_txn_startkey_prefix(keyspace_id: u32) -> [u8; 4] {
+        let mut keyspace_id_buf = [0 as u8; 4];
+        BigEndian::write_u32(&mut keyspace_id_buf, keyspace_id);
+        keyspace_id_buf[0] = TXN_KEY_PREFIX;
+        return keyspace_id_buf;
+    }
+
+    fn get_txn_endkey_prefix(keyspace_id: u32) -> [u8; 4] {
+        let mut keyspace_id_buf = get_txn_startkey_prefix(keyspace_id);
+        keyspace_id_buf[3] = keyspace_id_buf[3] + 1;
+        return keyspace_id_buf;
+    }
 }

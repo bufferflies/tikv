@@ -653,6 +653,9 @@ impl Peer {
         for Proposal { cb, .. } in self.proposals.queue.drain(..) {
             notify_req_region_removed(self.region_id, cb);
         }
+
+        PdRunner::set_storage_size_metric(self.region(), None);
+
         info!(
             "peer destroy itself";
             "tag" => self.tag(),
@@ -1190,6 +1193,7 @@ impl Peer {
                 }
                 StateRole::Follower => {
                     self.leader_lease.expire();
+                    PdRunner::set_storage_size_metric(self.region(), None)
                 }
                 _ => {}
             }
