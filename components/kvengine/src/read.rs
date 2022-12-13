@@ -163,6 +163,7 @@ impl SnapAccessCore {
             shard.start.clone(),
             shard.end.clone(),
             shard.get_data().del_prefixes.clone(),
+            None,
             vec![CFTable::new()],
             l0s,
             scfs,
