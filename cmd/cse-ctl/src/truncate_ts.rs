@@ -15,7 +15,7 @@ use slog_global::{error, info};
 use tikv_util::time::Instant;
 use tokio::runtime::Runtime;
 
-use crate::common::{create_pd_client, send_request_to_store};
+use crate::common::{create_pd_client, get_all_stores_except_tiflash, send_request_to_store};
 
 const DEFAULT_TRUNCATE_TS_TIMEOUT: u64 = 5 * 60; // 5 min
 const MAX_WAIT_TRUNCATE_TS_CNT: usize = 10;
@@ -54,7 +54,7 @@ pub(crate) fn execute_truncate_ts(args: TruncateTsArgs) {
         .unwrap();
     let start = Instant::now();
     while Instant::now().duration_since(start) < timeout {
-        let stores = pd_client.get_all_stores(true).unwrap();
+        let stores = get_all_stores_except_tiflash(&pd_client).unwrap();
         let mut remain_stores = HashMap::new();
         for store in stores {
             remain_stores.insert(store.id, store);

@@ -6,7 +6,7 @@ use grpcio::EnvBuilder;
 use http::Request;
 use hyper::Body;
 use kvproto::metapb::Store;
-use pd_client::RpcClient;
+use pd_client::{PdClient, RpcClient};
 use security::{SecurityConfig, SecurityManager};
 
 pub(crate) fn create_pd_client(
@@ -20,6 +20,20 @@ pub(crate) fn create_pd_client(
     let env = Arc::new(EnvBuilder::new().cq_count(1).build());
     RpcClient::new(pd_conf, Some(env), security_mgr)
         .unwrap_or_else(|e| panic!("failed to create rpc client: {:?}", e))
+}
+
+pub(crate) fn get_all_stores_except_tiflash(
+    pd_client: &dyn PdClient,
+) -> Result<Vec<Store>, pd_client::Error> {
+    Ok(pd_client
+        .get_all_stores(true)?
+        .into_iter()
+        .filter(|s| {
+            !s.get_labels()
+                .iter()
+                .any(|l| l.key.to_lowercase() == "engine" && l.value.to_lowercase() == "tiflash")
+        })
+        .collect())
 }
 
 pub(crate) async fn send_request_to_store(

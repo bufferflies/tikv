@@ -17,12 +17,12 @@ use kvengine::{
     dfs::{DFSConfig, DFS, S3FS},
 };
 use kvproto::metapb::Store;
-use pd_client::{PdClient, RpcClient};
+use pd_client::RpcClient;
 use security::SecurityConfig;
 use slog_global::error;
 use tikv_util::info;
 
-use crate::common::create_pd_client;
+use crate::common::{create_pd_client, get_all_stores_except_tiflash};
 
 /// DFSGC arguments
 #[derive(Args)]
@@ -96,9 +96,7 @@ impl GcWorker {
     }
 
     fn collect_valid_files(&mut self) {
-        let all_stores = self
-            .pd
-            .get_all_stores(true)
+        let all_stores = get_all_stores_except_tiflash(&self.pd)
             .unwrap_or_else(|e| panic!("failed get all stores {:?}", e));
         let start_time = Instant::now();
         let stores_len = all_stores.len();

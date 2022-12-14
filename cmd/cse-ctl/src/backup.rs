@@ -15,7 +15,7 @@ use rfenginepb::{ClusterBackupMeta, StoreBackupMeta};
 use security::SecurityConfig;
 use slog_global::{error, info, warn};
 
-use crate::common::{create_pd_client, send_request_to_store};
+use crate::common::{create_pd_client, get_all_stores_except_tiflash, send_request_to_store};
 const INCREMENTAL_BACKUP_INTERVAL: u64 = 30; // seconds.
 const BACKUP_FOLDER_FORMAT: &str = "%Y%m%d";
 
@@ -33,11 +33,19 @@ pub enum Error {
     ServerError(String),
     #[error("Safe ts {0} is greater than backup ts {1}")]
     TsError(u64, u64),
+    #[error("PD error {0}")]
+    PDError(pd_client::Error),
 }
 
 impl From<dfs::Error> for Error {
     fn from(e: dfs::Error) -> Self {
         Error::DFSError(e)
+    }
+}
+
+impl From<pd_client::Error> for Error {
+    fn from(e: pd_client::Error) -> Self {
+        Error::PDError(e)
     }
 }
 
@@ -134,9 +142,9 @@ fn backup_cluster(
     last_backup_meta: Option<ClusterBackupMeta>,
 ) -> Result<ClusterBackupMeta> {
     let pd_client = create_pd_client(&config.security, &config.pd);
-    let stores = pd_client.get_all_stores(true).unwrap();
-    let backup_ts = block_on(pd_client.get_tso()).unwrap().into_inner();
-    let cluster_id = pd_client.get_cluster_id().unwrap();
+    let stores = get_all_stores_except_tiflash(&pd_client)?;
+    let backup_ts = block_on(pd_client.get_tso())?.into_inner();
+    let cluster_id = pd_client.get_cluster_id()?;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(8)
@@ -188,14 +196,14 @@ fn backup_cluster(
             return Err(Error::ServerError(format!("backup errors {:?}", errs)));
         }
     }
-    let alloc_id = pd_client.alloc_id().unwrap();
-    let safe_ts = runtime.block_on(pd_client.get_gc_safe_point()).unwrap();
+    let alloc_id = pd_client.alloc_id()?;
+    let safe_ts = runtime.block_on(pd_client.get_gc_safe_point())?;
     if safe_ts > backup_ts {
         return Err(Error::TsError(safe_ts, backup_ts));
     }
     cluster_backup_meta.set_alloc_id(alloc_id);
     cluster_backup_meta.set_safe_ts(safe_ts);
-    let stores = pd_client.get_all_stores(true).unwrap();
+    let stores = get_all_stores_except_tiflash(&pd_client)?;
     check_backup_meta_consistency(&cluster_backup_meta, &stores)?;
     info!(
         "cluster backup cluster_id:{}, backup_ts:{}, alloc_id:{}, safe_ts:{}, num_stores:{}",

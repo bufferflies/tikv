@@ -219,9 +219,9 @@ kvproto = { git = "https://github.com/tidbcloud/kvproto.git", branch = "release-
 resolver = "2"
 members = [
   "cmd/cse-ctl",
-  "cmd/tikv-worker",
   "cmd/tikv-ctl",
   "cmd/tikv-server",
+  "cmd/tikv-worker",
   "components/api_version",
   "components/backup",
   "components/backup-stream",

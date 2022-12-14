@@ -262,9 +262,22 @@ async fn handle_remote_analysis(
     }
 }
 
+pub(crate) fn get_all_stores_except_tiflash(
+    pd_client: &Arc<RpcClient>,
+) -> Result<Vec<Store>, pd_client::Error> {
+    Ok(pd_client
+        .get_all_stores(true)?
+        .into_iter()
+        .filter(|s| {
+            !s.get_labels()
+                .iter()
+                .any(|l| l.key.to_lowercase() == "engine" && l.value.to_lowercase() == "tiflash")
+        })
+        .collect())
+}
+
 fn register_compactor_to_all_stores(pd: Arc<RpcClient>, dfs: Arc<S3FS>, remote_url: String) {
-    let all_stores = pd
-        .get_all_stores(true)
+    let all_stores = get_all_stores_except_tiflash(&pd)
         .unwrap_or_else(|e| panic!("failed get all stores {:?}", e));
     let start_time = Instant::now();
     let stores_len = all_stores.len();
