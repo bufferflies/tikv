@@ -429,12 +429,17 @@ impl SnapAccessCore {
             count,
             overlapped_count,
         );
-        cs.set_snapshot(snap);
+        if overlapped_count > 0 {
+            cs.set_snapshot(snap);
+        }
         cs
     }
 
-    pub fn marshal(&self, ranges: &[(Bytes, Bytes)]) -> (String, Vec<u8>) {
+    pub fn marshal(&self, ranges: &[(Bytes, Bytes)]) -> Option<(String, Vec<u8>)> {
         let cs = self.to_change_set(ranges);
+        if !cs.has_snapshot() {
+            return None;
+        }
         let mut ranges_bytes = Vec::new();
         for (start, end) in ranges {
             ranges_bytes.append(start.to_vec().as_mut());
@@ -448,7 +453,7 @@ impl SnapAccessCore {
             cs.get_snapshot().data_sequence,
             ranges_key,
         );
-        (key, cs.write_to_bytes().unwrap())
+        Some((key, cs.write_to_bytes().unwrap()))
     }
 
     pub fn get_all_files(&self) -> Vec<u64> {

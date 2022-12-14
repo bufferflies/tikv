@@ -68,7 +68,7 @@ impl<S: Snapshot, F: KvFormat> AnalyzeContext<S, F> {
         quota_limiter: Arc<QuotaLimiter>,
         remote_ctx: Option<RemoteContext>,
     ) -> Result<Self> {
-        let remote_ctx = remote_ctx.map(|mut ctx| {
+        let remote_ctx = remote_ctx.and_then(|mut ctx| {
             let mut kv_ranges = Vec::new();
             for range in ranges.clone() {
                 let kv_range = (
@@ -77,13 +77,14 @@ impl<S: Snapshot, F: KvFormat> AnalyzeContext<S, F> {
                 );
                 kv_ranges.push(kv_range)
             }
-            let (key, snap_bytes) = snap
-                .get_kvengine_snap()
+            snap.get_kvengine_snap()
                 .unwrap()
-                .marshal(kv_ranges.as_slice());
-            ctx.remote_req.key = key;
-            ctx.remote_req.snap_bytes = snap_bytes;
-            ctx
+                .marshal(kv_ranges.as_slice())
+                .and_then(|(key, snap_bytes)| {
+                    ctx.remote_req.key = key;
+                    ctx.remote_req.snap_bytes = snap_bytes;
+                    Some(ctx)
+                })
         });
         let store = CloudStore::new(
             snap,
