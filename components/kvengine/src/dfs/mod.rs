@@ -2,6 +2,7 @@
 
 mod config;
 mod s3;
+mod metrics;
 
 use std::{
     fmt::Debug,
@@ -18,6 +19,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 pub use config::Config as DFSConfig;
 use file_system;
+use metrics::*;
 pub use s3::S3FS;
 use thiserror::Error;
 use tikv_util::time::Instant;
@@ -171,6 +173,9 @@ impl DFS for LocalFS {
         let mut reader = BufReader::new(fd);
         let mut buf = Vec::new();
         reader.read_to_end(&mut buf)?;
+        KVENGINE_DFS_THROUGHPUT_VEC
+            .with_label_values(&["read"])
+            .inc_by(buf.len() as u64);
         Ok(Bytes::from(buf))
     }
 
@@ -188,6 +193,9 @@ impl DFS for LocalFS {
         }
         std::fs::rename(&tmp_file_name, &local_file_name)?;
         file_system::sync_dir(&self.dir)?;
+        KVENGINE_DFS_THROUGHPUT_VEC
+            .with_label_values(&["write"])
+            .inc_by(data.len() as u64);
         Ok(())
     }
 

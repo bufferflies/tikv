@@ -115,7 +115,7 @@ log_wrappers = { path = "components/log_wrappers" }
 match_template = { path = "components/match_template" }
 memory_trace_macros = { path = "components/memory_trace_macros" }
 mime = "0.3.13"
-moka = { version = "0.8", features = ["future"] }
+moka = { version = "0.9.6", features = ["future"] }
 more-asserts = "0.2"
 murmur3 = "0.5.1"
 nom = { version = "5.1.0", default-features = false, features = ["std"] }

@@ -688,10 +688,20 @@ impl PdRunner {
                 .with_label_values(&["kv", store_info.kv_engine.cf_names()[cf]])
                 .set(kv_engine_stats.cf_total_sizes[cf] as i64);
         }
+        STORE_ENGINE_MEM_SIZE_GAUGE_VEC
+            .with_label_values(&["kv", "memtable"])
+            .set(kv_engine_stats.mem_tables_size as i64);
+        STORE_ENGINE_MEM_SIZE_GAUGE_VEC
+            .with_label_values(&["kv", "block_cache"])
+            .set(store_info.kv_engine.get_cache_size() as i64);
+
         let rf_engine_stats = store_info.rf_engine.get_engine_stats();
         STORE_ENGINE_SIZE_GAUGE_VEC
             .with_label_values(&["raft", "raft"])
             .set(rf_engine_stats.disk_size as i64);
+        STORE_ENGINE_MEM_SIZE_GAUGE_VEC
+            .with_label_values(&["raft", ""])
+            .set(rf_engine_stats.total_mem_size as i64);
 
         // TODO(x): set slow score
 

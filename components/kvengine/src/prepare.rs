@@ -5,7 +5,7 @@ use std::{collections::HashMap, io::Write, path::PathBuf};
 use bytes::{Buf, Bytes};
 use file_system::{IOOp, IOType};
 
-use crate::{apply::ChangeSet, table::sstable::LocalFile, EngineCore, *};
+use crate::{apply::ChangeSet, metrics::KVENGINE_LEVEL_WRITE_VEC, table::sstable::LocalFile, EngineCore, *};
 
 impl EngineCore {
     pub fn prepare_change_set(
@@ -96,12 +96,16 @@ impl EngineCore {
         for _ in 0..msg_count {
             match result_rx.recv().unwrap() {
                 Ok((id, level, data)) => {
+                    let data_len = data.len();
                     if let Err(err) = self.write_local_file(id, data, use_direct_io) {
                         error!("write local file failed {:?}", &err);
                         errors.push(err.into());
                     } else {
                         let file = self.open_sstable_file(id)?;
                         cs.add_file(id, file, level, self.cache.clone())?;
+                        KVENGINE_LEVEL_WRITE_VEC
+                            .with_label_values(&[&level.to_string()])
+                            .inc_by(data_len as u64);
                     }
                 }
                 Err(err) => {

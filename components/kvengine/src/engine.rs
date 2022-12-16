@@ -535,6 +535,10 @@ impl EngineCore {
                 .unwrap();
         }
     }
+
+    pub fn get_cache_size(&self) -> u64 {
+        self.cache.weighted_size()
+    }
 }
 
 #[derive(Copy, Clone, Debug, Default)]

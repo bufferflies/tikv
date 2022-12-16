@@ -27,7 +27,7 @@ use rusoto_s3::{
 use tikv_util::time::Instant;
 use tokio::runtime::Runtime;
 
-use crate::dfs::{Options, DFS};
+use crate::dfs::{Options, DFS, metrics::*};
 
 const MAX_RETRY_COUNT: u32 = 7;
 const RETRY_SLEEP_MS: u64 = 500;
@@ -364,6 +364,7 @@ impl S3FSCore {
         loop {
             let req = self.new_request("GET", &key);
             let mut result = self.dispatch(req, GetObjectError::from_response).await;
+
             if result.is_ok() {
                 let resp = result.unwrap();
                 let body = self.read_body(resp).await;
@@ -376,6 +377,12 @@ impl S3FSCore {
                             start_time.saturating_elapsed(),
                             retry_cnt
                         );
+                        KVENGINE_DFS_THROUGHPUT_VEC
+                            .with_label_values(&["read"])
+                            .inc_by(data.len() as u64);
+                        KVENGINE_DFS_LATENCY_VEC
+                            .with_label_values(&["read"])
+                            .observe(start_time.saturating_elapsed().as_millis() as f64);
                         return Ok(data);
                     }
                     Err(err) => result = Err(err.into()),
@@ -388,6 +395,9 @@ impl S3FSCore {
             }
             if self.is_err_retryable(&err) && self.sleep_for_retry(&mut retry_cnt, &file_name).await
             {
+                KVENGINE_DFS_RETRY_COUNTER_VEC
+                    .with_label_values(&["read"])
+                    .inc();
                 warn!("retry read file {}, error {:?}", &file_name, &err);
                 continue;
             }
@@ -419,11 +429,20 @@ impl S3FSCore {
                     start_time.saturating_elapsed(),
                     retry_cnt
                 );
+                KVENGINE_DFS_THROUGHPUT_VEC
+                    .with_label_values(&["write"])
+                    .inc_by(data_len as u64);
+                KVENGINE_DFS_LATENCY_VEC
+                    .with_label_values(&["write"])
+                    .observe(start_time.saturating_elapsed().as_millis() as f64);
                 return Ok(());
             }
             let err = result.unwrap_err();
             if self.is_err_retryable(&err) {
                 if retry_cnt < MAX_RETRY_COUNT {
+                    KVENGINE_DFS_RETRY_COUNTER_VEC
+                        .with_label_values(&["write"])
+                        .inc();
                     retry_cnt += 1;
                     let retry_sleep = 2u64.pow(retry_cnt) * RETRY_SLEEP_MS;
                     tokio::time::sleep(Duration::from_millis(retry_sleep)).await;
