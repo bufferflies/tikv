@@ -102,7 +102,7 @@ impl CompactionClient {
         };
     }
 
-    pub fn delete_remote_compactor(&mut self, remote_compactor: &RemoteCompactor) {
+    pub fn delete_remote_compactor(&self, remote_compactor: &RemoteCompactor) {
         let mut remote_compactors = self.remote_compactors.lock().unwrap();
         if !remote_compactor.permanent {
             remote_compactors
@@ -149,33 +149,41 @@ impl CompactionClient {
         if remote_compactor.remote_url.is_empty() {
             local_compact(self.dfs.clone(), &req)
         } else {
-            let mut client = self.clone();
             let (tx, rx) = tikv_util::mpsc::bounded(1);
-            self.dfs.get_runtime().spawn(async move {
-                let mut retry_cnt = 0;
-                let result = loop {
-                    match client.remote_compact(&req, remote_compactor.remote_url.clone()).await {
-                        result @ Ok(_) => break result,
-                        Err(e) => {
-                            retry_cnt += 1;
-                            if remote_compactor.permanent && retry_cnt >= 5 || !remote_compactor.permanent && retry_cnt >= 3 {
-                                retry_cnt = 0;
-                                client.delete_remote_compactor(&remote_compactor);
-                                remote_compactor = client.get_remote_compactor();
-                            }
-                            let tag = ShardTag::from_comp_req(&req);
-                            error!("shard {} cf: {} level: {} remote compaction failed {:?}, retrying {} remote compactor {}",
-                                   tag, req.cf, req.level, e, retry_cnt, remote_compactor.remote_url);
-                            if remote_compactor.remote_url.is_empty() {
-                                break local_compact(client.dfs.clone(), &req)
-                            }
-                            tokio::time::sleep(Duration::from_secs(1)).await;
+            let req = Arc::new(req);
+            let mut retry_cnt = 0;
+            loop {
+                let tx = tx.clone();
+                let req_clone = req.clone();
+                let client = self.clone();
+                let remote_url = remote_compactor.remote_url.clone();
+                self.dfs.get_runtime().spawn(async move {
+                    let result = client.remote_compact(&req_clone, remote_url).await;
+                    tx.send(result).unwrap();
+                });
+                match rx.recv().unwrap() {
+                    result @ Ok(_) => break result,
+                    Err(e) => {
+                        retry_cnt += 1;
+                        if remote_compactor.permanent && retry_cnt >= 5
+                            || !remote_compactor.permanent && retry_cnt >= 3
+                        {
+                            retry_cnt = 0;
+                            self.delete_remote_compactor(&remote_compactor);
+                            remote_compactor = self.get_remote_compactor();
                         }
+                        let tag = ShardTag::from_comp_req(&req);
+                        error!(
+                            "shard {} cf: {} level: {} remote compaction failed {:?}, retrying {} remote compactor {}",
+                            tag, req.cf, req.level, e, retry_cnt, remote_compactor.remote_url
+                        );
+                        if remote_compactor.remote_url.is_empty() {
+                            break local_compact(self.dfs.clone(), &req);
+                        }
+                        std::thread::sleep(Duration::from_secs(1));
                     }
-                };
-                tx.send(result).unwrap();
-            });
-            rx.recv().unwrap()
+                }
+            }
         }
     }
 
