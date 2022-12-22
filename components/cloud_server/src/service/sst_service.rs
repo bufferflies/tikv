@@ -479,17 +479,44 @@ where
         mut req: MultiIngestRequest,
         sink: UnarySink<IngestResponse>,
     ) {
+        info!("multi_ingest begin");
         let label = "multi-ingest";
         let timer = Instant::now_coarse();
 
         let mut resp = IngestResponse::default();
         let mut errorpb = errorpb::Error::default();
         let mut metas = vec![];
+        let mut first_uuid = vec![];
         for sst in req.get_ssts() {
             if Self::acquire_lock(&self.task_slots, sst).unwrap_or(false) {
                 metas.push(sst.clone());
+
+                // Add ingest logs.
+                let sst_clone = sst.clone();
+                let cf_name = sst_clone.cf_name.as_str().trim();
+
+                let range = sst_clone.range.unwrap();
+
+                let startkey = range.start.as_slice();
+                let endkey = range.end.as_slice();
+                let uuid = sst_clone.uuid.as_slice();
+                if first_uuid.len() == 0 {
+                    first_uuid = sst_clone.uuid.clone();
+                }
+                info!(
+                    "multi_ingest sst:cf_name {:?},sst.region_id:{:?};uuid:{:?};startkey:{:?};endkey:{:?};",
+                    cf_name,
+                    sst.region_id,
+                    &log_wrappers::Value::key(uuid),
+                    &log_wrappers::Value::key(startkey),
+                    &log_wrappers::Value::key(endkey),
+                );
             }
         }
+        info!(
+            "multi_ingest before exec first_uuid:{:?}",
+            &log_wrappers::Value::key(first_uuid.as_slice())
+        );
         if metas.len() < req.get_ssts().len() {
             for m in metas {
                 Self::release_lock(&self.task_slots, &m).unwrap();
@@ -512,6 +539,10 @@ where
             tikv::send_rpc_response!(res, sink, label, timer);
         };
         self.threads.spawn_ok(handle_task);
+        info!(
+            "multi_ingest end first_uuid:{:?}",
+            &log_wrappers::Value::key(first_uuid.as_slice())
+        );
     }
 
     fn compact(
