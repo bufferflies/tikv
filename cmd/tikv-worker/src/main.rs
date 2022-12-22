@@ -27,6 +27,8 @@ use security::{SecurityConfig, SecurityManager};
 use slog_global::{error, info};
 use tikv_util::{config::ReadableDuration, time::Instant};
 
+const ZSTD_COMPRESSION_LEVEL_FOR_REMOTE: &str = "5";
+
 fn main() {
     init_logger(io::stdout());
     let matches = App::new("tikv-worker")
@@ -119,6 +121,11 @@ fn main() {
     override_from_args(&mut config, &matches);
     config.dfs.override_from_env();
 
+    // If zstd_compression_level is not set, set it to default value
+    if config.dfs.zstd_compression_level.is_empty() {
+        config.dfs.zstd_compression_level = ZSTD_COMPRESSION_LEVEL_FOR_REMOTE.to_string();
+    }
+
     info!("config is {:?}", &config);
     let dfs = Arc::new(kvengine::dfs::S3FS::new(
         config.dfs.prefix,
@@ -136,6 +143,12 @@ fn main() {
         .build()
         .unwrap();
     let addr = config.addr.parse().expect("Unable to parse socket address");
+
+    let compression_lvl: i32 = config
+        .dfs
+        .zstd_compression_level
+        .parse()
+        .expect("Unable to parse zstd compression level");
 
     let incoming = {
         let _enter = thread_pool.enter();
@@ -155,7 +168,7 @@ fn main() {
                             .status(200)
                             .body(hyper::Body::from("ok"))
                             .unwrap()),
-                        "/compact" => kvengine::handle_remote_compaction(dfs, req).await,
+                        "/compact" => kvengine::handle_remote_compaction(dfs, req, compression_lvl).await,
                         "/analyze" => handle_remote_analysis(dfs, req).await,
                         _ => Ok(hyper::Response::builder()
                             .status(404)

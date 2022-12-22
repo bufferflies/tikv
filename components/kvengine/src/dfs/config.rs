@@ -2,7 +2,7 @@
 
 use std::{env, error::Error};
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Debug, Default)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
 pub struct Config {
@@ -20,7 +20,25 @@ pub struct Config {
 
     pub remote_compactor_addr: String,
 
+    pub zstd_compression_level: String,
+
     pub remote_analyzer_addr: String,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            prefix: "".to_string(),
+            s3_endpoint: "".to_string(),
+            s3_key_id: "".to_string(),
+            s3_secret_key: "".to_string(),
+            s3_bucket: "".to_string(),
+            s3_region: "".to_string(),
+            remote_compactor_addr: "".to_string(),
+            zstd_compression_level: "".to_string(),
+            remote_analyzer_addr: "".to_string(),
+        }
+    }
 }
 
 impl Config {
@@ -45,5 +63,6 @@ impl Config {
         Self::env_or_default("DFS_S3_REGION", &mut self.s3_region);
         Self::env_or_default("DFS_REMOTE_COMPACTOR_ADDR", &mut self.remote_compactor_addr);
         Self::env_or_default("DFS_REMOTE_ANALYZER_ADDR", &mut self.remote_analyzer_addr);
+        Self::env_or_default("DFS_ZSTD_COMPRESSION_LEVEL", &mut self.zstd_compression_level);
     }
 }

@@ -199,7 +199,7 @@ impl L0Builder {
     pub fn new(fid: u64, block_size: usize, version: u64) -> Self {
         let mut builders = Vec::with_capacity(4);
         for _ in 0..NUM_CFS {
-            let builder = Builder::new(fid, block_size, NO_COMPRESSION);
+            let builder = Builder::new(fid, block_size, NO_COMPRESSION, 0);
             builders.push(builder);
         }
         Self {

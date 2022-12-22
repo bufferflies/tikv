@@ -91,6 +91,8 @@ const RESERVED_OPEN_FDS: u64 = 1000;
 
 const DEFAULT_METRICS_FLUSH_INTERVAL: Duration = Duration::from_millis(10_000);
 
+const ZSTD_COMPRESSION_LEVEL_FOR_LOCAL: &str = "3";
+
 /// A complete TiKV server.
 pub struct TiKVServer {
     config: TiKvConfig,
@@ -178,6 +180,11 @@ impl TiKVServer {
 
         config.dfs.override_from_env();
 
+        // If zstd_compression_level is not set, set it to default value
+        if config.dfs.zstd_compression_level.is_empty() {
+            config.dfs.zstd_compression_level = ZSTD_COMPRESSION_LEVEL_FOR_LOCAL.to_string();
+        }
+        
         let dfs_conf = &config.dfs;
         let dfs: Arc<dyn DFS> = if dfs_conf.s3_bucket.is_empty() && dfs_conf.s3_endpoint.is_empty()
             || dfs_conf.s3_endpoint == "local"
@@ -904,6 +911,13 @@ impl TiKVServer {
         let cf_opt = &conf.rocksdb.writecf;
         kv_opts.table_builder_options.block_size = cf_opt.block_size.0 as usize;
         kv_opts.table_builder_options.max_table_size = cf_opt.target_file_size_base.0 as usize;
+        kv_opts.table_builder_options.compression_lvl =
+            conf.dfs.zstd_compression_level.parse().unwrap_or_else(|_| {
+                fatal!(
+                    "invalid zstd compression level: {}",
+                    conf.dfs.zstd_compression_level
+                )
+            });
         let opts = Arc::new(kv_opts);
         let recoverer = rfstore::store::RecoverHandler::new(rf_engine.clone());
         let meta_iter = recoverer.clone();

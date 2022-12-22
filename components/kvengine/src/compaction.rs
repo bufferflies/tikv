@@ -144,10 +144,10 @@ impl CompactionClient {
         }
     }
 
-    pub(crate) fn compact(&self, req: CompactionRequest) -> Result<pb::ChangeSet> {
+    pub(crate) fn compact(&self, req: CompactionRequest, compression_lvl: i32) -> Result<pb::ChangeSet> {
         let mut remote_compactor = self.get_remote_compactor();
         if remote_compactor.remote_url.is_empty() {
-            local_compact(self.dfs.clone(), &req)
+            local_compact(self.dfs.clone(), &req, compression_lvl)
         } else {
             let (tx, rx) = tikv_util::mpsc::bounded(1);
             let req = Arc::new(req);
@@ -178,7 +178,7 @@ impl CompactionClient {
                             tag, req.cf, req.level, e, retry_cnt, remote_compactor.remote_url
                         );
                         if remote_compactor.remote_url.is_empty() {
-                            break local_compact(self.dfs.clone(), &req);
+                            break local_compact(self.dfs.clone(), &req, compression_lvl);
                         }
                         std::thread::sleep(Duration::from_secs(1));
                     }
@@ -430,8 +430,8 @@ impl Engine {
         }
     }
 
-    pub(crate) fn run_compaction(&self, compact_rx: mpsc::Receiver<CompactMsg>) {
-        let mut runner = CompactRunner::new(self.clone(), compact_rx);
+    pub(crate) fn run_compaction(&self, compact_rx: mpsc::Receiver<CompactMsg>, compression_lvl: i32) {
+        let mut runner = CompactRunner::new(self.clone(), compact_rx, compression_lvl);
         runner.run();
     }
 
@@ -456,7 +456,7 @@ impl Engine {
         Some((self.build_compact_ln_request(shard, &cd), Some(cd)))
     }
 
-    pub(crate) fn compact(&self, id_ver: IDVer) -> Option<Result<pb::ChangeSet>> {
+    pub(crate) fn compact(&self, id_ver: IDVer, compression_lvl: i32) -> Option<Result<pb::ChangeSet>> {
         let shard = self.get_shard_with_ver(id_ver.id, id_ver.ver).ok()?;
         let tag = shard.tag();
         if !shard.ready_to_compact() {
@@ -465,10 +465,10 @@ impl Engine {
         }
         // Destroy range & truncate ts has higher priority than compaction.
         if shard.get_data().ready_to_destroy_range() {
-            return Some(self.destroy_range(&shard));
+            return Some(self.destroy_range(&shard, compression_lvl));
         }
         if shard.get_data().ready_to_truncate_ts() {
-            return self.truncate_ts(&shard).transpose();
+            return self.truncate_ts(&shard, compression_lvl).transpose();
         }
         let pri = shard.get_compaction_priority()?;
         let (req, cd) = self.build_compact_request(&shard, pri)?;
@@ -511,7 +511,7 @@ impl Engine {
                 return Some(Ok(cs));
             }
         }
-        Some(self.comp_client.compact(req))
+        Some(self.comp_client.compact(req, compression_lvl))
     }
 
     pub(crate) fn build_compact_l0_request(&self, shard: &Shard) -> Option<CompactionRequest> {
@@ -625,7 +625,7 @@ impl Engine {
         req
     }
 
-    fn destroy_range(&self, shard: &Shard) -> Result<pb::ChangeSet> {
+    fn destroy_range(&self, shard: &Shard, compression_lvl: i32) -> Result<pb::ChangeSet> {
         let data = shard.get_data();
         assert!(!data.del_prefixes.is_empty());
         // Tables that full covered by delete-prefixes.
@@ -684,7 +684,7 @@ impl Engine {
             req.in_place_compact_files = overlaps;
             req.del_prefixes = data.del_prefixes.marshal();
             req.file_ids = self.id_allocator.alloc_id(req.in_place_compact_files.len());
-            let mut cs = self.comp_client.compact(req)?;
+            let mut cs = self.comp_client.compact(req, compression_lvl)?;
             let dr = cs.mut_destroy_range();
             deletes.extend(dr.take_table_deletes().into_iter());
             dr.set_table_deletes(deletes.into());
@@ -697,7 +697,7 @@ impl Engine {
         Ok(cs)
     }
 
-    pub(crate) fn truncate_ts(&self, shard: &Shard) -> Result<Option<pb::ChangeSet>> {
+    pub(crate) fn truncate_ts(&self, shard: &Shard, compression_lvl: i32) -> Result<Option<pb::ChangeSet>> {
         let data = shard.get_data();
         let truncate_ts = data.truncate_ts.unwrap();
 
@@ -734,7 +734,7 @@ impl Engine {
             req.truncate_ts = Some(truncate_ts.inner());
             req.in_place_compact_files = overlaps;
             req.file_ids = self.id_allocator.alloc_id(req.in_place_compact_files.len());
-            self.comp_client.compact(req)?
+            self.comp_client.compact(req, compression_lvl)?
         };
         cs.set_shard_id(shard.id);
         cs.set_shard_ver(shard.ver);
@@ -812,6 +812,7 @@ pub(crate) fn get_tables_in_range(tables: &[SSTable], start: &[u8], end: &[u8]) 
 pub(crate) fn compact_l0(
     req: &CompactionRequest,
     fs: Arc<dyn dfs::DFS>,
+    compression_lvl: i32,
 ) -> Result<Vec<pb::TableCreate>> {
     let opts = dfs::Options::new(req.shard_id, req.shard_ver);
     let l0_files = load_table_files(&req.tops, fs.clone(), opts)?;
@@ -836,7 +837,7 @@ pub(crate) fn compact_l0(
             std::mem::take(&mut mult_cf_bot_tbls[cf]),
             &req.start,
         );
-        let mut helper = CompactL0Helper::new(cf, req);
+        let mut helper = CompactL0Helper::new(cf, req, compression_lvl);
         loop {
             if id_idx >= req.file_ids.len() {
                 panic!(
@@ -962,10 +963,10 @@ struct CompactL0Helper {
 }
 
 impl CompactL0Helper {
-    fn new(cf: usize, req: &CompactionRequest) -> Self {
+    fn new(cf: usize, req: &CompactionRequest, compression_lvl: i32) -> Self {
         Self {
             cf,
-            builder: sstable::Builder::new(0, req.block_size, req.compression_tp),
+            builder: sstable::Builder::new(0, req.block_size, req.compression_tp, compression_lvl),
             last_key: BytesMut::new(),
             skip_key: BytesMut::new(),
             safe_ts: req.safe_ts,
@@ -1051,6 +1052,7 @@ impl CompactL0Helper {
 pub(crate) fn compact_tables(
     req: &CompactionRequest,
     fs: Arc<dyn dfs::DFS>,
+    compression_lvl: i32,
 ) -> Result<Vec<pb::TableCreate>> {
     let tag = ShardTag::from_comp_req(req);
     info!(
@@ -1071,7 +1073,7 @@ pub(crate) fn compact_tables(
 
     let mut last_key = BytesMut::new();
     let mut skip_key = BytesMut::new();
-    let mut builder = sstable::Builder::new(0, req.block_size, req.compression_tp);
+    let mut builder = sstable::Builder::new(0, req.block_size, req.compression_tp, compression_lvl);
     let mut id_idx = 0;
     let (tx, rx) = tikv_util::mpsc::bounded(req.file_ids.len());
     let mut reach_end = false;
@@ -1222,6 +1224,7 @@ fn filter(safe_ts: u64, cf: usize, val: table::Value) -> Decision {
 pub async fn handle_remote_compaction(
     dfs: Arc<dyn dfs::DFS>,
     req: hyper::Request<hyper::Body>,
+    compression_lvl: i32,
 ) -> hyper::Result<hyper::Response<hyper::Body>> {
     let req_body = hyper::body::to_bytes(req.into_body()).await?;
     let result = serde_json::from_slice(req_body.chunk());
@@ -1235,7 +1238,7 @@ pub async fn handle_remote_compaction(
     let comp_req: CompactionRequest = result.unwrap();
     let (tx, rx) = tokio::sync::oneshot::channel();
     std::thread::spawn(move || {
-        let result = local_compact(dfs, &comp_req);
+        let result = local_compact(dfs, &comp_req, compression_lvl);
         tx.send(result).unwrap();
     });
     match rx.await.unwrap() {
@@ -1255,14 +1258,14 @@ pub async fn handle_remote_compaction(
     }
 }
 
-fn local_compact(dfs: Arc<dyn dfs::DFS>, req: &CompactionRequest) -> Result<pb::ChangeSet> {
+fn local_compact(dfs: Arc<dyn dfs::DFS>, req: &CompactionRequest, compression_lvl: i32) -> Result<pb::ChangeSet> {
     let mut cs = pb::ChangeSet::new();
     cs.set_shard_id(req.shard_id);
     cs.set_shard_ver(req.shard_ver);
     let tag = ShardTag::from_comp_req(req);
     if req.destroy_range {
         info!("start destroying range for {}", tag);
-        let tc = compact_destroy_range(req, dfs)?;
+        let tc = compact_destroy_range(req, dfs, compression_lvl)?;
         cs.set_destroy_range(tc);
         info!("finish destroying range for {}", tag);
         return Ok(cs);
@@ -1270,7 +1273,7 @@ fn local_compact(dfs: Arc<dyn dfs::DFS>, req: &CompactionRequest) -> Result<pb::
 
     if let Some(truncate_ts) = req.truncate_ts {
         info!("start truncate ts({}) for {}", truncate_ts, tag);
-        let tc = compact_truncate_ts(req, dfs)?;
+        let tc = compact_truncate_ts(req, dfs, compression_lvl)?;
         info!(
             "finish truncate ts({}) for {}, create:{}, delete:{}",
             truncate_ts,
@@ -1288,14 +1291,14 @@ fn local_compact(dfs: Arc<dyn dfs::DFS>, req: &CompactionRequest) -> Result<pb::
     comp.set_level(req.level as u32);
     if req.level == 0 {
         info!("start compact L0 for {}", tag);
-        let tbls = compact_l0(req, dfs.clone())?;
+        let tbls = compact_l0(req, dfs.clone(), compression_lvl)?;
         comp.set_table_creates(tbls.into());
         let bot_dels = req.multi_cf_bottoms.clone().into_iter().flatten().collect();
         comp.set_bottom_deletes(bot_dels);
         info!("finish compacting L0 for {}", tag);
     } else {
         info!("start compacting L{} CF{} for {}", req.level, req.cf, tag);
-        let tbls = compact_tables(req, dfs.clone())?;
+        let tbls = compact_tables(req, dfs.clone(), compression_lvl)?;
         comp.set_table_creates(tbls.into());
         comp.set_bottom_deletes(req.bottoms.clone());
         info!("finish compacting L{} CF{} for {}", req.level, req.cf, tag);
@@ -1308,6 +1311,7 @@ fn local_compact(dfs: Arc<dyn dfs::DFS>, req: &CompactionRequest) -> Result<pb::
 fn compact_destroy_range(
     req: &CompactionRequest,
     dfs: Arc<dyn dfs::DFS>,
+    compression_lvl: i32,
 ) -> Result<pb::TableChange> {
     assert!(
         req.destroy_range && !req.del_prefixes.is_empty() && !req.in_place_compact_files.is_empty()
@@ -1357,7 +1361,7 @@ fn compact_destroy_range(
             (data, smallest.to_vec(), biggest.to_vec())
         } else {
             let t = sstable::SSTable::new(Arc::new(file), None, false).unwrap();
-            let mut builder = sstable::Builder::new(new_id, req.block_size, t.compression_type());
+            let mut builder = sstable::Builder::new(new_id, req.block_size, t.compression_type(), compression_lvl);
             let mut iter = t.new_iterator(false, false);
             iter.rewind();
             while iter.valid() {
@@ -1408,7 +1412,7 @@ fn compact_destroy_range(
     Ok(destroy)
 }
 
-fn compact_truncate_ts(req: &CompactionRequest, dfs: Arc<dyn dfs::DFS>) -> Result<pb::TableChange> {
+fn compact_truncate_ts(req: &CompactionRequest, dfs: Arc<dyn dfs::DFS>, compression_lvl: i32) -> Result<pb::TableChange> {
     let truncate_ts = req.truncate_ts.unwrap();
     assert!(!req.in_place_compact_files.is_empty());
 
@@ -1464,7 +1468,7 @@ fn compact_truncate_ts(req: &CompactionRequest, dfs: Arc<dyn dfs::DFS>) -> Resul
             (data, smallest.to_vec(), biggest.to_vec())
         } else {
             let t = sstable::SSTable::new(Arc::new(file), None, false).unwrap();
-            let mut builder = sstable::Builder::new(new_id, req.block_size, t.compression_type());
+            let mut builder = sstable::Builder::new(new_id, req.block_size, t.compression_type(), compression_lvl);
             let mut iter = t.new_iterator(false, false);
             iter.rewind();
             while iter.valid() {
@@ -1553,10 +1557,12 @@ pub(crate) struct CompactRunner {
     notified: HashSet<IDVer>,
     /// `pending` contains shards that want to do compaction but the job queue is full now.
     pending: HashSet<IDVer>,
+    /// `compression_lvl` is the compression level used for compaction.
+    compression_lvl: i32,
 }
 
 impl CompactRunner {
-    pub(crate) fn new(engine: Engine, rx: mpsc::Receiver<CompactMsg>) -> Self {
+    pub(crate) fn new(engine: Engine, rx: mpsc::Receiver<CompactMsg>, compression_lvl: i32) -> Self {
         Self {
             engine,
             rx,
@@ -1564,6 +1570,7 @@ impl CompactRunner {
             running: Default::default(),
             notified: Default::default(),
             pending: Default::default(),
+            compression_lvl,
         }
     }
 
@@ -1598,8 +1605,9 @@ impl CompactRunner {
         let task_id = self.task_id;
         self.running.insert(id_ver, task_id);
         let engine = self.engine.clone();
+        let compression_lvl = self.compression_lvl;
         std::thread::spawn(move || {
-            let result = Box::new(engine.compact(id_ver));
+            let result = Box::new(engine.compact(id_ver, compression_lvl));
             engine
                 .compact_tx
                 .send(CompactMsg::Finish {

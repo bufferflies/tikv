@@ -33,6 +33,7 @@ pub struct TableBuilderOptions {
     pub block_size: usize,
     pub max_table_size: usize,
     pub compression_tps: [u8; 3],
+    pub compression_lvl: i32,
 }
 
 impl Default for TableBuilderOptions {
@@ -41,6 +42,7 @@ impl Default for TableBuilderOptions {
             block_size: 64 * 1024,
             max_table_size: 16 * 1024 * 1024,
             compression_tps: [LZ4_COMPRESSION, ZSTD_COMPRESSION, ZSTD_COMPRESSION],
+            compression_lvl: 3,
         }
     }
 }
@@ -121,13 +123,16 @@ pub struct Builder {
 }
 
 impl Builder {
-    pub fn new(fid: u64, block_size: usize, compression_tp: u8) -> Self {
+    // compression_lvl is the compression level for zstd compression only.
+    pub fn new(fid: u64, block_size: usize, compression_tp: u8, compression_lvl: i32) -> Self {
         let mut x = Self::default();
         x.fid = fid;
         x.checksum_tp = CRC32C;
         x.block_size = block_size;
         x.block_builder.compression_tp = compression_tp;
+        x.block_builder.compression_lvl = compression_lvl;
         x.old_builder.compression_tp = compression_tp;
+        x.old_builder.compression_lvl = compression_lvl;
         x
     }
 
@@ -392,6 +397,7 @@ struct BlockBuilder {
     block_keys: EntrySlice,
     block_addrs: Vec<BlockAddress>,
     compression_tp: u8,
+    compression_lvl: i32,
     compression_buf: Vec<u8>,
 }
 
@@ -554,7 +560,7 @@ impl BlockBuilder {
                 compress_bound,
                 src.as_ptr() as *const libc::c_void,
                 src.len(),
-                zstd_sys::ZSTD_defaultCLevel(),
+                self.compression_lvl as libc::c_int,
             );
             self.buf.set_len(buf_len + size);
         }

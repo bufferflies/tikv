@@ -566,7 +566,7 @@ pub(crate) fn build_test_table_with_kvs(key_vals: Vec<(String, String)>) -> Arc<
 
 #[cfg(test)]
 pub(crate) fn new_table_builder_for_test(id: u64) -> Builder {
-    Builder::new(id, 4096, NO_COMPRESSION)
+    Builder::new(id, 4096, NO_COMPRESSION, 0)
 }
 
 #[cfg(test)]

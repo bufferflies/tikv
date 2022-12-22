@@ -118,7 +118,7 @@ impl Engine {
         thread::Builder::new()
             .name("compaction".to_string())
             .spawn(move || {
-                compact_en.run_compaction(compact_rx);
+                compact_en.run_compaction(compact_rx, opts.table_builder_options.compression_lvl);
             })
             .unwrap();
         thread::Builder::new()
@@ -399,7 +399,9 @@ impl EngineCore {
         let mut tbl_cnt = 0;
         let block_size = self.opts.table_builder_options.block_size;
         let max_table_size = self.opts.table_builder_options.max_table_size;
-        let mut builder = table::sstable::Builder::new(0, block_size, ZSTD_COMPRESSION);
+        let zstd_compression_lvl = self.opts.table_builder_options.compression_lvl;
+        let mut builder =
+            table::sstable::Builder::new(0, block_size, ZSTD_COMPRESSION, zstd_compression_lvl);
         let mut fids = vec![];
         iter.rewind();
         while iter.valid() {
