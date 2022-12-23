@@ -169,10 +169,6 @@ impl Engine {
                 }
             } else if k == TRIM_OVER_BOUND {
                 shard.set_trim_over_bound(v.chunk());
-                let data = shard.get_data();
-                if data.has_mem_over_bound_data() {
-                    wb.set_switch_mem_table();
-                }
                 self.refresh_shard_states(&shard);
                 shard.properties.set(k.as_str(), v.chunk());
             } else {
