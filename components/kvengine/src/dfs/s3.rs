@@ -27,7 +27,7 @@ use rusoto_s3::{
 use tikv_util::time::Instant;
 use tokio::runtime::Runtime;
 
-use crate::dfs::{Options, DFS, metrics::*};
+use crate::dfs::{metrics::*, Options, DFS};
 
 const MAX_RETRY_COUNT: u32 = 7;
 const RETRY_SLEEP_MS: u64 = 500;

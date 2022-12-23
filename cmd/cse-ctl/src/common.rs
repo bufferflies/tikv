@@ -1,7 +1,8 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
-use std::{result::Result, sync::Arc};
+use std::{error::Error, result::Result, sync::Arc};
 
 use bytes::Bytes;
+use etcd_client::{ConnectOptions, OpenSslClientConfig};
 use grpcio::EnvBuilder;
 use http::Request;
 use hyper::Body;
@@ -55,4 +56,19 @@ pub(crate) async fn send_request_to_store(
         Ok(body) => Ok(body),
         Err(e) => Err(format!("{:?} {:?}", &store, e)),
     }
+}
+
+pub(crate) fn generate_etcd_connect_opt(
+    security: &SecurityConfig,
+) -> Result<ConnectOptions, Box<dyn Error>> {
+    let mut option = ConnectOptions::new();
+    if !security.ca_path.is_empty() {
+        let (ca, cert, key) = security.load_certs()?;
+        option = option.with_openssl_tls(
+            OpenSslClientConfig::default()
+                .ca_cert_pem(&ca)
+                .client_cert_pem_and_key(&cert, &key),
+        );
+    }
+    Ok(option)
 }

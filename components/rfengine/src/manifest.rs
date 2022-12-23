@@ -262,6 +262,9 @@ pub(crate) fn persist_change_set(
     cs: &rfenginepb::ChangeSet,
 ) -> io::Result<u64> {
     let buf = cs.write_to_bytes().unwrap();
+    if buf.is_empty() {
+        return Ok(0);
+    }
     let mut header_buf = Vec::with_capacity(8);
     header_buf.put_u32_le(crc32c::crc32c(&buf));
     header_buf.put_u32_le(buf.len() as u32);

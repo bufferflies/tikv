@@ -15,9 +15,15 @@ use rfenginepb::{ClusterBackupMeta, StoreBackupMeta};
 use security::SecurityConfig;
 use slog_global::{error, info, warn};
 
-use crate::common::{create_pd_client, get_all_stores_except_tiflash, send_request_to_store};
+use crate::common::{
+    create_pd_client, generate_etcd_connect_opt, get_all_stores_except_tiflash,
+    send_request_to_store,
+};
 const INCREMENTAL_BACKUP_INTERVAL: u64 = 30; // seconds.
 const BACKUP_FOLDER_FORMAT: &str = "%Y%m%d";
+const MAX_BATCH_GET_CNT: i64 = 1024;
+// keyspace meta in pd is "/pd/$cluster_id/PD_KEYSPACE_META_PATH"
+const PD_KEY_SPACE_META_PATH: [&str; 3] = ["keyspaces/", "region_label/keyspaces/", "rules/"];
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -35,6 +41,8 @@ pub enum Error {
     TsError(u64, u64),
     #[error("PD error {0}")]
     PDError(pd_client::Error),
+    #[error("Etcd error {0}")]
+    EtcdError(etcd_client::Error),
 }
 
 impl From<dfs::Error> for Error {
@@ -46,6 +54,12 @@ impl From<dfs::Error> for Error {
 impl From<pd_client::Error> for Error {
     fn from(e: pd_client::Error) -> Self {
         Error::PDError(e)
+    }
+}
+
+impl From<etcd_client::Error> for Error {
+    fn from(e: etcd_client::Error) -> Self {
+        Error::EtcdError(e)
     }
 }
 
@@ -173,6 +187,7 @@ fn backup_cluster(
     };
     cluster_backup_meta.set_backup_ts(backup_ts);
     cluster_backup_meta.set_cluster_id(cluster_id);
+    runtime.block_on(backup_pd_keyspace_meta(&config, &mut cluster_backup_meta))?;
     let num_stores = stores.len();
     let (tx, rx) = std::sync::mpsc::sync_channel(num_stores);
     for store in stores {
@@ -390,6 +405,64 @@ fn need_full_backup(err: &Error) -> bool {
         Error::TopoChanged(_) | Error::MetaNotFound(_) => return true,
         _ => return false,
     }
+}
+
+// Get keyspace meta from etcd and populate them to ClusterBackupMeta
+async fn backup_pd_keyspace_meta(
+    config: &BackupConfig,
+    cluster_backup_meta: &mut ClusterBackupMeta,
+) -> Result<()> {
+    let cluster_id = cluster_backup_meta.cluster_id;
+    let option = generate_etcd_connect_opt(&config.security).unwrap();
+    let mut etcd_client = etcd_client::Client::connect(&config.pd.endpoints, Some(option)).await?;
+    let old_revision = cluster_backup_meta.meta_revision;
+    // Keyspace meta will not be deleted even keyspace is deleted
+    // So incremental backup can be used.
+    let get_option = etcd_client::GetOptions::new()
+        .with_from_key()
+        .with_min_mod_revision(old_revision)
+        .with_limit(MAX_BATCH_GET_CNT);
+    let mut min_revision = i64::MAX;
+    let mut new_meta_cnt = 0;
+    // Only backup raw key-value pairs in etcd.
+    // Content is not parsed as it's hard to align to the format with PD repo.
+    // User cannot set placement rule in serverless cluster except the tiflash replica.
+    // So all placement rules are created inner, backup all of them.
+    for path in PD_KEY_SPACE_META_PATH {
+        let prefix = format!("/pd/{}/{}", cluster_id, path).as_bytes().to_owned();
+        let mut seek_key = prefix.clone();
+        loop {
+            let resp = etcd_client.get(seek_key, Some(get_option.clone())).await?;
+            let mut more = resp.more();
+            for kv in resp.kvs() {
+                if !kv.key().starts_with(&prefix) {
+                    more = false;
+                    break;
+                }
+                new_meta_cnt += 1;
+                cluster_backup_meta
+                    .mut_keyspace_meta()
+                    .insert(kv.key().to_vec(), kv.value().to_vec());
+            }
+            min_revision = std::cmp::min(min_revision, resp.header().map_or(0, |h| h.revision()));
+            if !more {
+                break;
+            }
+            seek_key = resp.kvs().last().unwrap().key().to_owned();
+            seek_key.push(0); // exclude the last key
+        }
+    }
+    if min_revision != i64::MAX {
+        cluster_backup_meta.set_meta_revision(min_revision);
+    }
+    info!(
+        "Backed up {} pd meta kvs, including {} new meta, revision: {} -> {}",
+        cluster_backup_meta.keyspace_meta.len(),
+        new_meta_cnt,
+        old_revision,
+        cluster_backup_meta.meta_revision
+    );
+    Ok(())
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug, Default)]

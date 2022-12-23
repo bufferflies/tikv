@@ -57,4 +57,7 @@ message ClusterBackupMeta {
     uint64 backup_ts = 3;
     uint64 alloc_id = 4;
     uint64 safe_ts = 5;
+    // use map for update convenience
+    map<bytes, bytes> keyspace_meta = 6;
+    int64 meta_revision = 7;
 }

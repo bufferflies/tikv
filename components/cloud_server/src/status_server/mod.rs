@@ -571,13 +571,15 @@ impl StatusServer {
             error!("Invalid cluster id or truncate ts, {:?}", e);
             return Ok(make_response(StatusCode::BAD_REQUEST, e.to_string()));
         }
-        info!(
-            "Begin truncate to ts {:?} for cluster {:?}",
-            truncate_ts, cluster_id
-        );
         let all_shards = engine.get_all_shard_id_vers();
         let mut region_futures = vec![];
         let mut shards_stat = vec![];
+        info!(
+            "Begin truncate to ts {:?} for cluster {:?}, shard cnt {}",
+            truncate_ts,
+            cluster_id,
+            all_shards.len()
+        );
         for id_ver in &all_shards {
             let shard = engine.get_shard(id_ver.id);
             // Skip invalid shard id here. Outside should be retry if engine's max_ts is still

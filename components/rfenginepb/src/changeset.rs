@@ -1595,6 +1595,8 @@ pub struct ClusterBackupMeta {
     pub backup_ts: u64,
     pub alloc_id: u64,
     pub safe_ts: u64,
+    pub keyspace_meta: ::std::collections::HashMap<::std::vec::Vec<u8>, ::std::vec::Vec<u8>>,
+    pub meta_revision: i64,
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
     pub cached_size: ::protobuf::CachedSize,
@@ -1695,6 +1697,46 @@ impl ClusterBackupMeta {
     pub fn set_safe_ts(&mut self, v: u64) {
         self.safe_ts = v;
     }
+
+    // repeated .rfpb.ClusterBackupMeta.keyspace_meta_MapEntry keyspace_meta = 6;
+
+
+    pub fn get_keyspace_meta(&self) -> &::std::collections::HashMap<::std::vec::Vec<u8>, ::std::vec::Vec<u8>> {
+        &self.keyspace_meta
+    }
+    pub fn clear_keyspace_meta(&mut self) {
+        self.keyspace_meta.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_keyspace_meta(&mut self, v: ::std::collections::HashMap<::std::vec::Vec<u8>, ::std::vec::Vec<u8>>) {
+        self.keyspace_meta = v;
+    }
+
+    // Mutable pointer to the field.
+    pub fn mut_keyspace_meta(&mut self) -> &mut ::std::collections::HashMap<::std::vec::Vec<u8>, ::std::vec::Vec<u8>> {
+        &mut self.keyspace_meta
+    }
+
+    // Take field
+    pub fn take_keyspace_meta(&mut self) -> ::std::collections::HashMap<::std::vec::Vec<u8>, ::std::vec::Vec<u8>> {
+        ::std::mem::replace(&mut self.keyspace_meta, ::std::collections::HashMap::new())
+    }
+
+    // int64 meta_revision = 7;
+
+
+    pub fn get_meta_revision(&self) -> i64 {
+        self.meta_revision
+    }
+    pub fn clear_meta_revision(&mut self) {
+        self.meta_revision = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_meta_revision(&mut self, v: i64) {
+        self.meta_revision = v;
+    }
 }
 
 impl ::protobuf::Message for ClusterBackupMeta {
@@ -1742,6 +1784,16 @@ impl ::protobuf::Message for ClusterBackupMeta {
                     let tmp = is.read_uint64()?;
                     self.safe_ts = tmp;
                 },
+                6 => {
+                    ::protobuf::rt::read_map_into::<::protobuf::types::ProtobufTypeBytes, ::protobuf::types::ProtobufTypeBytes>(wire_type, is, &mut self.keyspace_meta)?;
+                },
+                7 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_int64()?;
+                    self.meta_revision = tmp;
+                },
                 _ => {
                     ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
                 },
@@ -1770,6 +1822,10 @@ impl ::protobuf::Message for ClusterBackupMeta {
         if self.safe_ts != 0 {
             my_size += ::protobuf::rt::value_size(5, self.safe_ts, ::protobuf::wire_format::WireTypeVarint);
         }
+        my_size += ::protobuf::rt::compute_map_size::<::protobuf::types::ProtobufTypeBytes, ::protobuf::types::ProtobufTypeBytes>(6, &self.keyspace_meta);
+        if self.meta_revision != 0 {
+            my_size += ::protobuf::rt::value_size(7, self.meta_revision, ::protobuf::wire_format::WireTypeVarint);
+        }
         my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
         self.cached_size.set(my_size);
         my_size
@@ -1792,6 +1848,10 @@ impl ::protobuf::Message for ClusterBackupMeta {
         }
         if self.safe_ts != 0 {
             os.write_uint64(5, self.safe_ts)?;
+        }
+        ::protobuf::rt::write_map_with_cached_sizes::<::protobuf::types::ProtobufTypeBytes, ::protobuf::types::ProtobufTypeBytes>(6, &self.keyspace_meta, os)?;
+        if self.meta_revision != 0 {
+            os.write_int64(7, self.meta_revision)?;
         }
         os.write_unknown_fields(self.get_unknown_fields())?;
         ::std::result::Result::Ok(())
@@ -1860,6 +1920,16 @@ impl ::protobuf::Message for ClusterBackupMeta {
                     |m: &ClusterBackupMeta| { &m.safe_ts },
                     |m: &mut ClusterBackupMeta| { &mut m.safe_ts },
                 ));
+                fields.push(::protobuf::reflect::accessor::make_map_accessor::<_, ::protobuf::types::ProtobufTypeBytes, ::protobuf::types::ProtobufTypeBytes>(
+                    "keyspace_meta",
+                    |m: &ClusterBackupMeta| { &m.keyspace_meta },
+                    |m: &mut ClusterBackupMeta| { &mut m.keyspace_meta },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeInt64>(
+                    "meta_revision",
+                    |m: &ClusterBackupMeta| { &m.meta_revision },
+                    |m: &mut ClusterBackupMeta| { &mut m.meta_revision },
+                ));
                 ::protobuf::reflect::MessageDescriptor::new::<ClusterBackupMeta>(
                     "ClusterBackupMeta",
                     fields,
@@ -1887,6 +1957,8 @@ impl ::protobuf::Clear for ClusterBackupMeta {
         self.backup_ts = 0;
         self.alloc_id = 0;
         self.safe_ts = 0;
+        self.keyspace_meta.clear();
+        self.meta_revision = 0;
         self.unknown_fields.clear();
     }
 }
@@ -1901,6 +1973,8 @@ impl ::protobuf::PbPrint for ClusterBackupMeta {
         ::protobuf::PbPrint::fmt(&self.backup_ts, "backup_ts", buf);
         ::protobuf::PbPrint::fmt(&self.alloc_id, "alloc_id", buf);
         ::protobuf::PbPrint::fmt(&self.safe_ts, "safe_ts", buf);
+        ::protobuf::PbPrint::fmt(&self.keyspace_meta, "keyspace_meta", buf);
+        ::protobuf::PbPrint::fmt(&self.meta_revision, "meta_revision", buf);
         if old_len < buf.len() {
           buf.push(' ');
         }
@@ -1916,6 +1990,8 @@ impl ::std::fmt::Debug for ClusterBackupMeta {
         ::protobuf::PbPrint::fmt(&self.backup_ts, "backup_ts", &mut s);
         ::protobuf::PbPrint::fmt(&self.alloc_id, "alloc_id", &mut s);
         ::protobuf::PbPrint::fmt(&self.safe_ts, "safe_ts", &mut s);
+        ::protobuf::PbPrint::fmt(&self.keyspace_meta, "keyspace_meta", &mut s);
+        ::protobuf::PbPrint::fmt(&self.meta_revision, "meta_revision", &mut s);
         write!(f, "{}", s)
     }
 }
@@ -1941,11 +2017,14 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     fpb.ChangeSetB\0\x12$\n\nwal_chunks\x18\x03\x20\x03(\x0b2\x0e.rfpb.WalCh\
     unkB\0:\0\"E\n\x08WalChunk\x12\x0f\n\x05epoch\x18\x01\x20\x01(\rB\0\x12\
     \x13\n\tstart_off\x18\x02\x20\x01(\x04B\0\x12\x11\n\x07end_off\x18\x03\
-    \x20\x01(\x04B\0:\0\"\x90\x01\n\x11ClusterBackupMeta\x12'\n\x06stores\
+    \x20\x01(\x04B\0:\0\"\xa8\x02\n\x11ClusterBackupMeta\x12'\n\x06stores\
     \x18\x01\x20\x03(\x0b2\x15.rfpb.StoreBackupMetaB\0\x12\x14\n\ncluster_id\
     \x18\x02\x20\x01(\x04B\0\x12\x13\n\tbackup_ts\x18\x03\x20\x01(\x04B\0\
     \x12\x12\n\x08alloc_id\x18\x04\x20\x01(\x04B\0\x12\x11\n\x07safe_ts\x18\
-    \x05\x20\x01(\x04B\0:\0B\0b\x06proto3\
+    \x05\x20\x01(\x04B\0\x12G\n\rkeyspace_meta\x18\x06\x20\x03(\x0b2..rfpb.C\
+    lusterBackupMeta.keyspace_meta_MapEntryB\0\x12\x17\n\rmeta_revision\x18\
+    \x07\x20\x01(\x03B\0\x1a4\n\x16keyspace_meta_MapEntry\x12\t\n\x03key\x18\
+    \x01(\x0c\x12\x0b\n\x05value\x18\x02(\x0c:\x028\x01:\0B\0b\x06proto3\
 ";
 
 static mut file_descriptor_proto_lazy: ::protobuf::lazy::Lazy<::protobuf::descriptor::FileDescriptorProto> = ::protobuf::lazy::Lazy {

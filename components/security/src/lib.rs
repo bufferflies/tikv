@@ -85,7 +85,7 @@ impl SecurityConfig {
 
     /// Load certificates from the given file path.
     /// Return ca, cert, key after successful read.
-    fn load_certs(&self) -> CertResult {
+    pub fn load_certs(&self) -> CertResult {
         let ca = load_key("CA", &self.ca_path)?;
         let cert = load_key("certificate", &self.cert_path)?;
         let key = load_key("private key", &self.key_path)?;

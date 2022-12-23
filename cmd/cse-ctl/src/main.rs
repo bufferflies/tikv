@@ -17,7 +17,7 @@ use clap::{Parser, Subcommand};
 use crate::{
     backup::{execute_backup, BackupArgs},
     dfsgc::{execute_dfsgc, DFSGCArgs},
-    restore::{execute_restore, RestoreArgs},
+    restore::{execute_restore_command, RestoreCommand},
     truncate_ts::{execute_truncate_ts, TruncateTsArgs},
     unsafe_recover::{execute_unsafe_recover, UnsafeRecoverArgs},
     Commands::{Backup, Restore, TruncateTs, UnsafeRecover, DFSGC},
@@ -36,8 +36,8 @@ fn main() {
         Backup(backup_args) => {
             execute_backup(backup_args);
         }
-        Restore(restore_args) => {
-            execute_restore(restore_args);
+        Restore(restore_cmd) => {
+            execute_restore_command(restore_cmd);
         }
         TruncateTs(args) => {
             execute_truncate_ts(args);
@@ -70,7 +70,7 @@ pub enum Commands {
     /// Backup backups the cluster.
     Backup(BackupArgs),
     /// Restore a backup.
-    Restore(RestoreArgs),
+    Restore(RestoreCommand),
     /// Truncate newer data than given ts
     TruncateTs(TruncateTsArgs),
 }

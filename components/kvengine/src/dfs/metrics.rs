@@ -10,7 +10,6 @@ lazy_static! {
         &["type"]
     )
     .unwrap();
-
     pub static ref KVENGINE_DFS_LATENCY_VEC: HistogramVec = register_histogram_vec!(
         "kv_engine_dfs_latency_ms",
         "Latency of kvengine dfs in ms",
@@ -18,11 +17,10 @@ lazy_static! {
         exponential_buckets(1.0, 2.0, 21).unwrap()
     )
     .unwrap();
-
     pub static ref KVENGINE_DFS_RETRY_COUNTER_VEC: IntCounterVec = register_int_counter_vec!(
         "kv_engine_dfs_rw_retry_count",
         "Retries counter of kvengine dfs read/write",
         &["type"]
     )
-    .unwrap();  
+    .unwrap();
 }

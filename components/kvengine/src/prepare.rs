@@ -5,7 +5,9 @@ use std::{collections::HashMap, io::Write, path::PathBuf};
 use bytes::{Buf, Bytes};
 use file_system::{IOOp, IOType};
 
-use crate::{apply::ChangeSet, metrics::KVENGINE_LEVEL_WRITE_VEC, table::sstable::LocalFile, EngineCore, *};
+use crate::{
+    apply::ChangeSet, metrics::KVENGINE_LEVEL_WRITE_VEC, table::sstable::LocalFile, EngineCore, *,
+};
 
 impl EngineCore {
     pub fn prepare_change_set(

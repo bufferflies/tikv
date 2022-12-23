@@ -561,7 +561,9 @@ pub fn restore(
         .write(true)
         .open(&manifest_path(dir))
         .unwrap();
-    persist_change_set(&manifest_file, 0, store_meta.get_manifest()).unwrap();
+    if store_meta.has_manifest() {
+        persist_change_set(&manifest_file, 0, store_meta.get_manifest()).unwrap();
+    }
 }
 
 pub(crate) fn maybe_create_wal_files(dir: &Path) -> Result<()> {

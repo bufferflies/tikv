@@ -1,8 +1,8 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
 mod config;
-mod s3;
 mod metrics;
+mod s3;
 
 use std::{
     fmt::Debug,
