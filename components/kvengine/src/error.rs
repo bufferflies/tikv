@@ -32,6 +32,8 @@ pub enum Error {
     IngestFiles(String),
     #[error("check merge {0}")]
     CheckMerge(String),
+    #[error("incompatible remote compactor {}:{}", .url, .msg)]
+    IncompatibleRemoteCompactor { url: String, msg: String },
 }
 
 impl From<table::Error> for Error {

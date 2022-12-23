@@ -121,13 +121,19 @@ impl EngineCore {
         }
         if cs.has_flush() {
             self.apply_flush(&shard, &cs);
-        } else if cs.has_compaction() || cs.has_destroy_range() || cs.has_truncate_ts() {
+        } else if cs.has_compaction()
+            || cs.has_destroy_range()
+            || cs.has_truncate_ts()
+            || cs.has_trim_over_bound()
+        {
             if cs.has_compaction() {
                 self.apply_compaction(&shard, &cs);
             } else if cs.has_destroy_range() {
                 self.apply_destroy_range(&shard, &cs);
-            } else {
+            } else if cs.has_truncate_ts() {
                 self.apply_truncate_ts(&shard, &cs);
+            } else if cs.has_trim_over_bound() {
+                self.apply_trim_over_bound(&shard, &cs);
             }
             store_bool(&shard.compacting, false);
             self.compact_tx
@@ -170,6 +176,7 @@ impl EngineCore {
                 shard.end.clone(),
                 old_data.del_prefixes.clone(),
                 old_data.truncate_ts,
+                old_data.trim_over_bound,
                 new_mem_tbls,
                 new_l0_tbls,
                 old_data.cfs.clone(),
@@ -198,6 +205,7 @@ impl EngineCore {
             shard.end.clone(),
             data.del_prefixes.clone(),
             data.truncate_ts,
+            data.trim_over_bound,
             mem_tbls,
             l0s,
             scfs,
@@ -254,6 +262,7 @@ impl EngineCore {
             shard.end.clone(),
             data.del_prefixes.clone(),
             data.truncate_ts,
+            data.trim_over_bound,
             data.mem_tbls.clone(),
             new_l0s,
             new_cfs,
@@ -327,6 +336,7 @@ impl EngineCore {
             shard.end.clone(),
             data.del_prefixes.split(&done),
             data.truncate_ts,
+            data.trim_over_bound,
             data.mem_tbls.clone(),
             new_l0s,
             new_cfs,
@@ -361,6 +371,7 @@ impl EngineCore {
             shard.end.clone(),
             data.del_prefixes.clone(),
             new_truncate_ts,
+            data.trim_over_bound,
             data.mem_tbls.clone(),
             new_l0s,
             new_cfs,
@@ -369,6 +380,33 @@ impl EngineCore {
         if new_truncate_ts.is_none() {
             shard.set_property(TRUNCATE_TS_KEY, b"");
         }
+        let del_files = tc
+            .get_table_deletes()
+            .iter()
+            .map(|deleted| (deleted.get_id(), true))
+            .collect();
+        self.remove_dfs_files(shard, del_files);
+    }
+
+    fn apply_trim_over_bound(&self, shard: &Shard, cs: &ChangeSet) {
+        debug!("{} apply changeset.trim_over_bound in engine", shard.tag());
+        assert!(cs.has_trim_over_bound());
+        let data = shard.get_data();
+        let tc = cs.get_trim_over_bound();
+        let (new_l0s, new_cfs) = self.get_sstables_from_table_change(&data, cs, tc);
+
+        let new_data = ShardData::new(
+            shard.start.clone(),
+            shard.end.clone(),
+            data.del_prefixes.clone(),
+            data.truncate_ts,
+            false,
+            data.mem_tbls.clone(),
+            new_l0s,
+            new_cfs,
+        );
+        shard.set_data(new_data);
+        shard.set_property(TRIM_OVER_BOUND, TRIM_OVER_BOUND_DISABLE);
         let del_files = tc
             .get_table_deletes()
             .iter()
@@ -482,6 +520,7 @@ impl EngineCore {
             shard.end.clone(),
             old_data.del_prefixes.clone(),
             old_data.truncate_ts,
+            old_data.trim_over_bound,
             old_data.mem_tbls.clone(),
             new_l0s,
             new_cfs,

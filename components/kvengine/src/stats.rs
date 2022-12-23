@@ -138,7 +138,10 @@ pub struct ShardStats {
     pub compaction_cf: isize,
     pub compaction_level: usize,
     pub compaction_score: f64,
+    pub has_over_bound_data: bool,
     pub delete_prefixes: String,
+    pub truncate_ts: Option<u64>,
+    pub trim_over_bound: bool,
 }
 
 #[derive(Default, Serialize, Deserialize, Debug)]
@@ -296,7 +299,10 @@ impl super::Shard {
             compaction_cf,
             compaction_level,
             compaction_score,
+            has_over_bound_data: data.has_over_bound_data(),
             delete_prefixes: format!("{:?}", data.del_prefixes),
+            truncate_ts: data.truncate_ts.map(|x| x.inner()),
+            trim_over_bound: data.trim_over_bound,
         }
     }
 }

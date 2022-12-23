@@ -67,6 +67,10 @@ pub const INGEST_ID_KEY: &str = "_ingest_id";
 pub const DEL_PREFIXES_KEY: &str = "_del_prefixes";
 pub const TRUNCATE_TS_KEY: &str = "_truncate_ts";
 
+pub const TRIM_OVER_BOUND: &str = "_trim_over_bound";
+pub const TRIM_OVER_BOUND_ENABLE: &[u8] = &[1];
+pub const TRIM_OVER_BOUND_DISABLE: &[u8] = b"";
+
 impl Shard {
     pub fn new(
         engine_id: u64,
@@ -106,8 +110,13 @@ impl Shard {
         }
         if let Some(val) = get_shard_property(TRUNCATE_TS_KEY, props) {
             // when load shard from Meta, the value maybe empty.
-            if val.len() != 0 {
+            if !val.is_empty() {
                 shard.set_truncate_ts(&val);
+            }
+        }
+        if let Some(val) = get_shard_property(TRIM_OVER_BOUND, props) {
+            if !val.is_empty() {
+                shard.set_trim_over_bound(&val);
             }
         }
         shard
@@ -185,6 +194,7 @@ impl Shard {
             data.end.clone(),
             DeletePrefixes::unmarshal(val),
             data.truncate_ts,
+            data.trim_over_bound,
             data.mem_tbls.clone(),
             data.l0_tbls.clone(),
             data.cfs.clone(),
@@ -199,6 +209,7 @@ impl Shard {
             data.end.clone(),
             data.del_prefixes.merge(prefix),
             data.truncate_ts,
+            data.trim_over_bound,
             data.mem_tbls.clone(),
             data.l0_tbls.clone(),
             data.cfs.clone(),
@@ -227,6 +238,7 @@ impl Shard {
             data.end.clone(),
             data.del_prefixes.clone(),
             Some(truncate_ts),
+            data.trim_over_bound,
             data.mem_tbls.clone(),
             data.l0_tbls.clone(),
             data.cfs.clone(),
@@ -235,6 +247,27 @@ impl Shard {
 
         info!("ready to truncate ts"; "truncate_ts" => ?truncate_ts, "shard" => ?self.tag());
         true
+    }
+
+    pub(crate) fn set_trim_over_bound(&self, val: &[u8]) {
+        let trim_over_bound = !val.is_empty();
+
+        let data = self.get_data();
+        let new_data = ShardData::new(
+            data.start.clone(),
+            data.end.clone(),
+            data.del_prefixes.clone(),
+            data.truncate_ts,
+            trim_over_bound,
+            data.mem_tbls.clone(),
+            data.l0_tbls.clone(),
+            data.cfs.clone(),
+        );
+        self.set_data(new_data);
+
+        if trim_over_bound {
+            info!("{} ready to trim_over_bound", self.tag());
+        }
     }
 
     pub fn get_suggest_split_key(&self) -> Option<Bytes> {
@@ -331,6 +364,7 @@ impl Shard {
             self.end.clone(),
             old_data.del_prefixes.clone(),
             old_data.truncate_ts,
+            old_data.trim_over_bound,
             new_mem_tbls,
             old_data.l0_tbls.clone(),
             old_data.cfs.clone(),
@@ -394,15 +428,6 @@ impl Shard {
         for cf in 0..NUM_CFS {
             let scf = data.get_cf(cf);
             for lh in &scf.levels[..scf.levels.len() - 1] {
-                if lh.has_over_bound_data(&self.start, &self.end) {
-                    // set higher priority for over bound table.
-                    max_pri.score += 1.8;
-                    max_pri.cf = cf as isize;
-                    max_pri.level = lh.level;
-                    let mut lock = self.compaction_priority.write().unwrap();
-                    *lock = Some(max_pri);
-                    return;
-                }
                 let level_total_size = data.get_level_total_size(lh);
                 let score = level_total_size as f64
                     / ((self.opt.base_size as f64) * 10f64.powf((lh.level - 1) as f64));
@@ -443,6 +468,10 @@ impl Shard {
         self.get_data().has_over_bound_data()
     }
 
+    pub fn get_trim_over_bound(&self) -> bool {
+        self.get_data().trim_over_bound
+    }
+
     pub fn data_all_persisted(&self) -> bool {
         self.data.read().unwrap().all_presisted()
     }
@@ -456,7 +485,8 @@ impl Shard {
             && self.get_initial_flushed()
             && (self.get_compaction_priority().is_some()
                 || self.get_data().ready_to_destroy_range()
-                || self.get_data().ready_to_truncate_ts())
+                || self.get_data().ready_to_truncate_ts()
+                || self.get_data().ready_to_trim_over_bound())
     }
 
     pub(crate) fn add_parent_mem_tbls(&self, parent: Arc<Shard>) {
@@ -470,6 +500,7 @@ impl Shard {
             shard_data.end.clone(),
             shard_data.del_prefixes.clone(),
             shard_data.truncate_ts,
+            shard_data.trim_over_bound,
             mem_tbls,
             shard_data.l0_tbls.clone(),
             shard_data.cfs.clone(),
@@ -498,6 +529,7 @@ impl ShardData {
             end,
             DeletePrefixes::default(),
             None,
+            false,
             vec![CFTable::new()],
             vec![],
             [ShardCF::new(0), ShardCF::new(1), ShardCF::new(2)],
@@ -509,6 +541,7 @@ impl ShardData {
         end: Bytes,
         del_prefixes: DeletePrefixes,
         truncate_ts: Option<TruncateTs>,
+        trim_over_bound: bool,
         mem_tbls: Vec<memtable::CFTable>,
         l0_tbls: Vec<L0Table>,
         cfs: [ShardCF; 3],
@@ -520,6 +553,7 @@ impl ShardData {
                 end,
                 del_prefixes,
                 truncate_ts,
+                trim_over_bound,
                 mem_tbls,
                 l0_tbls,
                 cfs,
@@ -533,6 +567,7 @@ pub(crate) struct ShardDataCore {
     pub(crate) end: Bytes,
     pub(crate) del_prefixes: DeletePrefixes,
     pub(crate) truncate_ts: Option<TruncateTs>,
+    pub(crate) trim_over_bound: bool,
     pub(crate) mem_tbls: Vec<memtable::CFTable>,
     pub(crate) l0_tbls: Vec<L0Table>,
     pub(crate) cfs: [ShardCF; 3],
@@ -712,6 +747,10 @@ impl ShardDataCore {
         && !self.mem_tbls.iter().any(|mem_tbl| {
             mem_tbl.data_max_ts() > self.truncate_ts.unwrap().inner()
         })
+    }
+
+    pub fn ready_to_trim_over_bound(&self) -> bool {
+        self.trim_over_bound && !self.has_mem_over_bound_data()
     }
 }
 

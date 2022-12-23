@@ -35,6 +35,7 @@ message ChangeSet {
   bool property_merge = 17;
   TableChange destroy_range = 18;
   TableChange truncate_ts = 19;
+  TableChange trim_over_bound = 20;
 }
 
 message Compaction {

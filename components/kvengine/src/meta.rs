@@ -146,6 +146,10 @@ impl ShardMeta {
             self.apply_truncate_ts(cs);
             return;
         }
+        if cs.has_trim_over_bound() {
+            self.apply_trim_over_bound(cs);
+            return;
+        }
         if cs.has_ingest_files() {
             self.apply_ingest_files(cs.get_ingest_files());
             return;
@@ -268,6 +272,16 @@ impl ShardMeta {
                 .any(|deleted| !self.files.contains_key(&deleted.get_id()))
         {
             info!("{} skip duplicated truncate ts {:?}", self.tag(), cs);
+            return true;
+        }
+        if cs.has_trim_over_bound()
+            && cs
+                .get_trim_over_bound()
+                .get_table_deletes()
+                .iter()
+                .any(|deleted| !self.files.contains_key(&deleted.get_id()))
+        {
+            info!("{} skip duplicated trim_over_bound {:?}", self.tag(), cs);
             return true;
         }
         if cs.has_ingest_files() {
@@ -404,6 +418,13 @@ impl ShardMeta {
                 self.set_property(TRUNCATE_TS_KEY, b"");
             }
         }
+    }
+
+    fn apply_trim_over_bound(&mut self, cs: &pb::ChangeSet) {
+        debug!("apply changeset.trim_over_bound in meta {:?}", self.id);
+        assert!(cs.has_trim_over_bound());
+        self.apply_table_change(cs.get_trim_over_bound());
+        self.set_property(TRIM_OVER_BOUND, TRIM_OVER_BOUND_DISABLE);
     }
 
     fn apply_ingest_files(&mut self, ingest_files: &pb::IngestFiles) {

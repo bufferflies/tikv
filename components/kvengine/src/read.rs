@@ -159,11 +159,13 @@ impl SnapAccessCore {
         }
         let mut shard = Shard::new_for_ingest(0, &cs, Arc::new(Options::default()));
         let (l0s, scfs) = create_snapshot_tables(cs.get_snapshot(), &cs);
+        let old_data = shard.get_data();
         let data = ShardData::new(
             shard.start.clone(),
             shard.end.clone(),
-            shard.get_data().del_prefixes.clone(),
-            None,
+            old_data.del_prefixes.clone(),
+            old_data.truncate_ts,
+            old_data.trim_over_bound,
             vec![CFTable::new()],
             l0s,
             scfs,

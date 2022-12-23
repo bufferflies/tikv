@@ -184,7 +184,7 @@ impl TiKVServer {
         if config.dfs.zstd_compression_level.is_empty() {
             config.dfs.zstd_compression_level = ZSTD_COMPRESSION_LEVEL_FOR_LOCAL.to_string();
         }
-        
+
         let dfs_conf = &config.dfs;
         let dfs: Arc<dyn DFS> = if dfs_conf.s3_bucket.is_empty() && dfs_conf.s3_endpoint.is_empty()
             || dfs_conf.s3_endpoint == "local"

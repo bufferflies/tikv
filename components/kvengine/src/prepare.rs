@@ -41,6 +41,11 @@ impl EngineCore {
                 ids.insert(t.id, t.level);
             }
         }
+        if cs.has_trim_over_bound() {
+            for t in cs.get_trim_over_bound().get_table_creates() {
+                ids.insert(t.id, t.level);
+            }
+        }
         if cs.has_snapshot() {
             self.collect_snap_ids(cs.get_snapshot(), &mut ids);
         }

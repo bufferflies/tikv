@@ -168,7 +168,9 @@ fn main() {
                             .status(200)
                             .body(hyper::Body::from("ok"))
                             .unwrap()),
-                        "/compact" => kvengine::handle_remote_compaction(dfs, req, compression_lvl).await,
+                        "/compact" => {
+                            kvengine::handle_remote_compaction(dfs, req, compression_lvl).await
+                        }
                         "/analyze" => handle_remote_analysis(dfs, req).await,
                         _ => Ok(hyper::Response::builder()
                             .status(404)

@@ -15,7 +15,9 @@ use raftstore::store::util::KeysInfoFormatter;
 use tikv_util::time::Instant;
 
 use super::{Peer, RaftApplyState};
-use crate::store::{ApplyMetrics, ExecResult, Proposal, RegionIDVer, RegionSnapshot};
+use crate::store::{
+    ApplyMetrics, ExecResult, Proposal, RegionIDVer, RegionSnapshot, TrimOverBoundParameter,
+};
 
 #[derive(Debug)]
 pub enum PeerMsg {
@@ -33,6 +35,7 @@ pub enum PeerMsg {
     PrepareChangeSetResult(kvengine::Result<kvengine::ChangeSet>),
     PrepareCommitMergeResult(kvengine::Result<kvengine::ChangeSet>),
     Persisted(PersistReady),
+    TriggerTrimOverBound(TrimOverBoundParameter),
 }
 
 impl PeerMsg {

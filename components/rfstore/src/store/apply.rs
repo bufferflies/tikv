@@ -11,7 +11,7 @@ use std::{
 
 use bytes::Buf;
 use fail::fail_point;
-use kvengine::{ChangeSet, Engine, SnapAccess};
+use kvengine::{ChangeSet, Engine, SnapAccess, TRIM_OVER_BOUND, TRIM_OVER_BOUND_ENABLE};
 use kvproto::{
     metapb,
     metapb::{PeerRole, Region},
@@ -522,6 +522,7 @@ impl Applier {
                 if !cs.get_property_key().is_empty()
                     && !cs.has_destroy_range()
                     && !cs.has_truncate_ts()
+                    && !cs.has_trim_over_bound()
                 {
                     wb.set_property(cs.get_property_key(), cs.get_property_value());
                 }
@@ -536,6 +537,10 @@ impl Applier {
                 if self.mut_mem_table_state(engine).mem_table_size >= switch_mem_table_size {
                     wb.set_switch_mem_table();
                 }
+            }
+            TYPE_TRIGGER_TRIM_OVER_BOUND => {
+                let parameter = cl.get_trigger_trim_over_bound();
+                self.trigger_trim_over_bound(parameter, wb, engine, ctx.router.as_ref());
             }
             _ => panic!("unknown custom log type"),
         }
@@ -1308,6 +1313,44 @@ impl Applier {
             ApplyMsg::PrepareRollbackMerge => {
                 self.handle_prepare_rollback_merge(ctx);
             }
+        }
+    }
+
+    fn trigger_trim_over_bound(
+        &self,
+        parameter: TrimOverBoundParameter,
+        wb: &mut kvengine::WriteBatch,
+        engine: &Engine,
+        router: Option<&RaftRouter>,
+    ) {
+        info!(
+            "{} apply trigger_trim_over_bound: {:?}",
+            self.tag(),
+            parameter
+        );
+
+        let shard_id = self.region.get_id();
+        if parameter.is_for_shard(shard_id) {
+            let shard = engine.get_shard(shard_id).unwrap();
+            if !shard.get_trim_over_bound() && shard.has_over_bound_data() {
+                wb.set_property(TRIM_OVER_BOUND, TRIM_OVER_BOUND_ENABLE);
+            }
+        }
+
+        match (parameter.target_shard, router) {
+            (Some(target), Some(router)) if target.id != shard_id => {
+                if let Some(target_shard) = engine.get_shard(target.id) {
+                    if !target_shard.get_trim_over_bound() && target_shard.has_over_bound_data() {
+                        info!(
+                            "{} send trigger_trim_over_bound to {:?}",
+                            self.tag(),
+                            target
+                        );
+                        router.send(target.id, PeerMsg::TriggerTrimOverBound(parameter));
+                    }
+                };
+            }
+            _ => {}
         }
     }
 }

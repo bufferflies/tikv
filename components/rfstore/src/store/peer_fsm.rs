@@ -11,7 +11,7 @@ use std::{
 use bytes::Buf;
 use error_code::ErrorCodeExt;
 use fail::fail_point;
-use kvengine::{Shard, TruncateTs, DEL_PREFIXES_KEY, TRUNCATE_TS_KEY};
+use kvengine::{IDVer, Shard, TruncateTs, DEL_PREFIXES_KEY, TRUNCATE_TS_KEY};
 use kvproto::{
     import_sstpb::SwitchMode,
     metapb::{self, Region, RegionEpoch},
@@ -41,9 +41,9 @@ use crate::{
         util as _util, ApplyMetrics, ApplyMsg, CasualMessage, Config, CustomBuilder, Engines,
         MsgApplyResult, MsgRegistration, PdTask, PeerMsg, PersistReady, RaftApplyState,
         RaftCommand, RaftContext, ReadProgress, SignificantMsg, SnapState, StoreMeta, StoreMsg,
-        Ticker, PEER_TICK_CHECK_STALE_STATE, PEER_TICK_PD_HEARTBEAT, PEER_TICK_RAFT,
-        PEER_TICK_RAFT_LOG_GC, PEER_TICK_REPORT_REGION_BUCKETS, PEER_TICK_SPLIT_CHECK,
-        PEER_TICK_SWITCH_MEM_TABLE_CHECK,
+        Ticker, TrimOverBoundParameter, PEER_TICK_CHECK_STALE_STATE, PEER_TICK_PD_HEARTBEAT,
+        PEER_TICK_RAFT, PEER_TICK_RAFT_LOG_GC, PEER_TICK_REPORT_REGION_BUCKETS,
+        PEER_TICK_SPLIT_CHECK, PEER_TICK_SWITCH_MEM_TABLE_CHECK,
     },
     DiscardReason, Error, RaftStoreRouter, Result,
 };
@@ -216,6 +216,9 @@ impl<'a> PeerMsgHandler<'a> {
                 }
                 PeerMsg::PrepareCommitMergeResult(res) => {
                     self.on_prepared_commit_merge(res);
+                }
+                PeerMsg::TriggerTrimOverBound(parameter) => {
+                    self.trigger_trim_over_bound(parameter.target_shard.unwrap().ver, parameter);
                 }
             }
         }
@@ -684,7 +687,7 @@ impl<'a> PeerMsgHandler<'a> {
 
     /// Check if a request is valid if it has valid prepare_merge/commit_merge proposal.
     fn check_merge_proposal(
-        &self,
+        &mut self,
         msg: &RaftCmdRequest,
         store_meta: Option<&mut StoreMeta>,
     ) -> Result<()> {
@@ -742,7 +745,32 @@ impl<'a> PeerMsgHandler<'a> {
             let target_id = target_region.get_id();
             let target_version = target_region.get_region_epoch().get_version();
             let kv = &self.ctx.global.engines.kv;
-            kv.check_merge(id, version, target_id, target_version)?;
+            let (source_over_bound, target_over_bound) =
+                kv.check_merge(id, version, target_id, target_version)?;
+
+            info!(
+                "check_merge_proposal, source_over_bound:{}, target_over_bound:{}",
+                source_over_bound, target_over_bound
+            );
+            if source_over_bound || target_over_bound {
+                let parameter = TrimOverBoundParameter {
+                    source_shard: if source_over_bound {
+                        Some(IDVer::new(id, version))
+                    } else {
+                        None
+                    },
+                    target_shard: if target_over_bound {
+                        Some(IDVer::new(target_id, target_version))
+                    } else {
+                        None
+                    },
+                };
+                self.trigger_trim_over_bound(version, parameter);
+                return Err(kvengine::Error::CheckMerge(format!(
+                    "shards have over bound data, source:{source_over_bound}, target:{target_over_bound}"
+                ))
+                .into());
+            }
         } else if admin_req.has_commit_merge() {
             let source_region = msg.get_admin_request().get_commit_merge().get_source();
             if !util::is_sibling_regions(source_region, region) {
@@ -1217,6 +1245,35 @@ impl<'a> PeerMsgHandler<'a> {
         custom_builder.set_change_set(&cs);
         cmd.set_custom_request(custom_builder.build());
         self.propose_raft_command(cmd, callback, None);
+    }
+
+    fn trigger_trim_over_bound(&mut self, shard_ver: u64, parameter: TrimOverBoundParameter) {
+        if !self.peer.is_leader() {
+            return;
+        }
+        let tag = self.peer.tag();
+        let id_ver = tag.id_ver;
+        if shard_ver != id_ver.ver() {
+            warn!("{} trigger_trim_over_bound version not match", tag);
+            return;
+        }
+        let mut cmd = self.new_raft_cmd_request();
+        let mut custom_builder = CustomBuilder::new();
+        custom_builder.set_trigger_trim_over_bound(&parameter);
+        cmd.set_custom_request(custom_builder.build());
+
+        let cb = Callback::write(Box::new(move |resp| {
+            if resp.response.get_header().has_error() {
+                let err_msg = resp.response.get_header().get_error().get_message();
+                warn!("{} failed to trigger trim_over_bound: {:?}", tag, err_msg);
+            } else {
+                info!(
+                    "{} trigger trim_over_bound successfully: {:?}",
+                    tag, parameter
+                );
+            }
+        }));
+        self.propose_raft_command(cmd, cb, None);
     }
 
     fn on_pd_heartbeat_tick(&mut self) {

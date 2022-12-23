@@ -1529,7 +1529,10 @@ impl Peer {
         if let Some(cmd) = get_preprocess_cmd(entry) {
             no_kv = true;
             if cmd.has_custom_request() {
-                self.preprocess_change_set(ctx, entry, cmd.get_custom_request());
+                let custom_req = cmd.get_custom_request();
+                if is_engine_meta_log(custom_req.get_data()) {
+                    self.preprocess_change_set(ctx, entry, custom_req);
+                }
             } else {
                 if let Err(err) = check_region_epoch(&cmd, self.get_preprocessed_region(), false) {
                     warn!("preprocess pending admin failed {:?}", err);
@@ -2801,7 +2804,8 @@ impl Peer {
             .pre_propose(self.region(), req)?;
         let mut ctx = ProposalContext::empty();
         if req.has_custom_request() {
-            if rlog::is_engine_meta_log(req.get_custom_request().get_data()) {
+            let data = req.get_custom_request().get_data();
+            if rlog::is_engine_meta_log(data) || rlog::is_trigger_trim_over_bound(data) {
                 ctx.insert(ProposalContext::PRE_PROCESS);
             }
         } else if req.has_admin_request() {

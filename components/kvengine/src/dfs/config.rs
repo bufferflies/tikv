@@ -63,6 +63,9 @@ impl Config {
         Self::env_or_default("DFS_S3_REGION", &mut self.s3_region);
         Self::env_or_default("DFS_REMOTE_COMPACTOR_ADDR", &mut self.remote_compactor_addr);
         Self::env_or_default("DFS_REMOTE_ANALYZER_ADDR", &mut self.remote_analyzer_addr);
-        Self::env_or_default("DFS_ZSTD_COMPRESSION_LEVEL", &mut self.zstd_compression_level);
+        Self::env_or_default(
+            "DFS_ZSTD_COMPRESSION_LEVEL",
+            &mut self.zstd_compression_level,
+        );
     }
 }

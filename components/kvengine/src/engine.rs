@@ -236,11 +236,13 @@ impl EngineCore {
         let shard = Shard::new_for_ingest(engine_id, &cs, self.opts.clone());
         shard.set_active(active);
         let (l0s, scfs) = create_snapshot_tables(cs.get_snapshot(), &cs);
+        let old_data = shard.get_data();
         let data = ShardData::new(
             shard.start.clone(),
             shard.end.clone(),
-            shard.get_data().del_prefixes.clone(),
-            shard.get_data().truncate_ts,
+            old_data.del_prefixes.clone(),
+            old_data.truncate_ts,
+            old_data.trim_over_bound,
             vec![CFTable::new()],
             l0s,
             scfs,
@@ -500,7 +502,12 @@ impl EngineCore {
                 .send(FlushMsg::Committed((id_ver, table_version)))
                 .unwrap();
         }
-        if rejected && (cs.has_compaction() || cs.has_destroy_range() || cs.has_truncate_ts()) {
+        if rejected
+            && (cs.has_compaction()
+                || cs.has_destroy_range()
+                || cs.has_truncate_ts()
+                || cs.has_trim_over_bound())
+        {
             // Notify the compaction runner otherwise the shard can't be compacted any more.
             self.compact_tx
                 .send(CompactMsg::Applied(IDVer::new(cs.shard_id, cs.shard_ver)))
@@ -531,6 +538,8 @@ impl EngineCore {
 
     pub(crate) fn refresh_shard_states(&self, shard: &Shard) {
         shard.refresh_states();
+
+        fail::fail_point!("before_engine_trigger_compact", |_| ());
         if shard.ready_to_compact() {
             self.compact_tx
                 .send(CompactMsg::Compact(IDVer::new(shard.id, shard.ver)))

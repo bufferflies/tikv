@@ -4,8 +4,10 @@ use std::mem;
 
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, BufMut};
+use kvengine::IDVer;
 use kvproto::raft_cmdpb::{CustomRequest, RaftCmdRequest};
 use protobuf::Message;
+use tikv_util::codec::number::U64_SIZE;
 
 pub(crate) fn get_custom_log(req: &RaftCmdRequest) -> Option<CustomRaftLog<'_>> {
     if !req.has_custom_request() {
@@ -27,6 +29,7 @@ pub const TYPE_ONE_PC: CustomRaftlogType = 6;
 pub const TYPE_ENGINE_META: CustomRaftlogType = 7;
 pub const TYPE_RESOLVE_LOCK: CustomRaftlogType = 8;
 pub const TYPE_SWITCH_MEM_TABLE: CustomRaftlogType = 9;
+pub const TYPE_TRIGGER_TRIM_OVER_BOUND: CustomRaftlogType = 10;
 
 const HEADER_SIZE: usize = 2;
 
@@ -179,6 +182,11 @@ impl CustomRaftLog<'a> {
         let mut bin = &self.data[HEADER_SIZE..];
         bin.get_u64_le()
     }
+
+    pub(crate) fn get_trigger_trim_over_bound(&self) -> TrimOverBoundParameter {
+        let bin = &self.data[HEADER_SIZE..];
+        TrimOverBoundParameter::unmarshal(bin)
+    }
 }
 
 pub struct CustomBuilder {
@@ -263,6 +271,13 @@ impl CustomBuilder {
         self.set_type(TYPE_SWITCH_MEM_TABLE)
     }
 
+    pub fn set_trigger_trim_over_bound(&mut self, parameter: &TrimOverBoundParameter) {
+        assert_eq!(self.buf.len(), HEADER_SIZE);
+        let data = parameter.marshal();
+        self.buf.extend_from_slice(&data);
+        self.set_type(TYPE_TRIGGER_TRIM_OVER_BOUND);
+    }
+
     pub fn set_type(&mut self, tp: CustomRaftlogType) {
         self.buf[0] = tp as u8;
     }
@@ -297,12 +312,112 @@ pub fn is_engine_meta_log(data: &[u8]) -> bool {
     data[0] == TYPE_ENGINE_META
 }
 
-#[test]
-fn test_custom_log() {
-    let mut builder = CustomBuilder::new();
-    builder.set_switch_mem_table(2022);
-    let req = builder.build();
-    let cl = CustomRaftLog::new_from_data(req.get_data());
-    assert_eq!(cl.get_type(), TYPE_SWITCH_MEM_TABLE);
-    assert_eq!(cl.get_switch_mem_table(), 2022);
+pub fn is_trigger_trim_over_bound(data: &[u8]) -> bool {
+    data[0] == TYPE_TRIGGER_TRIM_OVER_BOUND
+}
+
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+pub struct TrimOverBoundParameter {
+    pub source_shard: Option<IDVer>, // `None` means no trim.
+    pub target_shard: Option<IDVer>,
+}
+
+impl TrimOverBoundParameter {
+    pub fn marshal(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(
+            2 + self.source_shard.is_some() as usize * 2 * U64_SIZE
+                + self.target_shard.is_some() as usize * 2 * U64_SIZE,
+        );
+
+        if let Some(source) = self.source_shard {
+            buf.put_u8(1);
+            buf.put_u64_le(source.id);
+            buf.put_u64_le(source.ver);
+        } else {
+            buf.put_u8(0);
+        }
+
+        if let Some(target) = self.target_shard {
+            buf.put_u8(1);
+            buf.put_u64_le(target.id);
+            buf.put_u64_le(target.ver);
+        } else {
+            buf.put_u8(0);
+        }
+
+        buf
+    }
+
+    pub fn unmarshal(mut data: &[u8]) -> Self {
+        if data.is_empty() {
+            return Self::default();
+        }
+        let source_shard = if data.get_u8() == 1 {
+            Some(IDVer::new(data.get_u64_le(), data.get_u64_le()))
+        } else {
+            None
+        };
+        let target_shard = if data.get_u8() == 1 {
+            Some(IDVer::new(data.get_u64_le(), data.get_u64_le()))
+        } else {
+            None
+        };
+        Self {
+            source_shard,
+            target_shard,
+        }
+    }
+
+    pub fn source_shard_id(&self) -> Option<u64> {
+        self.source_shard.map(|x| x.id)
+    }
+
+    pub fn target_shard_id(&self) -> Option<u64> {
+        self.target_shard.map(|x| x.id)
+    }
+
+    pub fn is_for_shard(&self, shard_id: u64) -> bool {
+        Some(shard_id) == self.source_shard_id() || Some(shard_id) == self.target_shard_id()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_custom_log() {
+        let mut builder = CustomBuilder::new();
+        builder.set_switch_mem_table(2022);
+        let req = builder.build();
+        let cl = CustomRaftLog::new_from_data(req.get_data());
+        assert_eq!(cl.get_type(), TYPE_SWITCH_MEM_TABLE);
+        assert_eq!(cl.get_switch_mem_table(), 2022);
+    }
+
+    #[test]
+    fn test_trim_over_bound_parameter() {
+        let cases = vec![
+            (None, None),
+            (Some(IDVer { id: 1, ver: 2 }), None),
+            (None, Some(IDVer { id: 2, ver: 3 })),
+            (Some(IDVer { id: 1, ver: 2 }), Some(IDVer { id: 2, ver: 3 })),
+        ];
+
+        for (source_shard, target_shard) in cases {
+            let trim_over_bound = TrimOverBoundParameter {
+                source_shard,
+                target_shard,
+            };
+            assert_eq!(
+                trim_over_bound,
+                TrimOverBoundParameter::unmarshal(trim_over_bound.marshal().as_slice())
+            );
+        }
+
+        assert_eq!(
+            TrimOverBoundParameter::default(),
+            TrimOverBoundParameter::unmarshal(vec![].as_slice())
+        );
+    }
 }

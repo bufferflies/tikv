@@ -11,6 +11,7 @@ use std::{
 
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, Bytes, BytesMut};
+use http::StatusCode;
 use kvenginepb as pb;
 use protobuf::Message;
 use slog_global::error;
@@ -22,7 +23,7 @@ use crate::{
         search,
         sstable::{self, InMemFile, L0Builder, SSTable},
     },
-    Error::RemoteCompaction,
+    Error::{IncompatibleRemoteCompactor, RemoteCompaction},
     Iterator, EXTRA_CF, LOCK_CF, WRITE_CF, *,
 };
 
@@ -144,7 +145,11 @@ impl CompactionClient {
         }
     }
 
-    pub(crate) fn compact(&self, req: CompactionRequest, compression_lvl: i32) -> Result<pb::ChangeSet> {
+    pub(crate) fn compact(
+        &self,
+        req: CompactionRequest,
+        compression_lvl: i32,
+    ) -> Result<pb::ChangeSet> {
         let mut remote_compactor = self.get_remote_compactor();
         if remote_compactor.remote_url.is_empty() {
             local_compact(self.dfs.clone(), &req, compression_lvl)
@@ -163,8 +168,18 @@ impl CompactionClient {
                 });
                 match rx.recv().unwrap() {
                     result @ Ok(_) => break result,
+                    Err(e @ IncompatibleRemoteCompactor { .. }) => {
+                        warn!("fall back to local compactor due to error: {:?}", e);
+                        break local_compact(self.dfs.clone(), &req, compression_lvl);
+                    }
                     Err(e) => {
                         retry_cnt += 1;
+                        let tag = ShardTag::from_comp_req(&req);
+                        error!(
+                            "shard {} cf: {} level: {} remote compaction failed {:?}, retrying {} remote compactor {}",
+                            tag, req.cf, req.level, e, retry_cnt, remote_compactor.remote_url
+                        );
+
                         if remote_compactor.permanent && retry_cnt >= 5
                             || !remote_compactor.permanent && retry_cnt >= 3
                         {
@@ -172,11 +187,6 @@ impl CompactionClient {
                             self.delete_remote_compactor(&remote_compactor);
                             remote_compactor = self.get_remote_compactor();
                         }
-                        let tag = ShardTag::from_comp_req(&req);
-                        error!(
-                            "shard {} cf: {} level: {} remote compaction failed {:?}, retrying {} remote compactor {}",
-                            tag, req.cf, req.level, e, retry_cnt, remote_compactor.remote_url
-                        );
                         if remote_compactor.remote_url.is_empty() {
                             break local_compact(self.dfs.clone(), &req, compression_lvl);
                         }
@@ -195,19 +205,25 @@ impl CompactionClient {
         let body_str = serde_json::to_string(&comp_req).unwrap();
         let req = hyper::Request::builder()
             .method(hyper::Method::POST)
-            .uri(remote_url)
+            .uri(remote_url.clone())
             .header("content-type", "application/json")
             .body(hyper::Body::from(body_str))?;
         let tag = ShardTag::from_comp_req(comp_req);
         info!("{} send request to remote compactor", tag);
         let response = self.client.as_ref().unwrap().request(req).await?;
         info!("{} got response from remote compactor", tag);
-        let success = response.status().is_success();
+        let status = response.status();
         let body = hyper::body::to_bytes(response.into_body()).await?;
-        if !success {
-            return Err(RemoteCompaction(
-                String::from_utf8_lossy(body.chunk()).to_string(),
-            ));
+        if !status.is_success() {
+            let err_msg = String::from_utf8_lossy(body.chunk()).to_string();
+            return if status == INCOMPATIBLE_COMPACTOR_ERROR_CODE {
+                Err(IncompatibleRemoteCompactor {
+                    url: remote_url,
+                    msg: err_msg,
+                })
+            } else {
+                Err(RemoteCompaction(err_msg))
+            };
         }
         let mut cs = pb::ChangeSet::new();
         if let Err(err) = cs.merge_from_bytes(&body) {
@@ -216,6 +232,12 @@ impl CompactionClient {
         Ok(cs)
     }
 }
+
+/// `CURRENT_COMPACTOR_VERSION` is used for version compatibility checking of remote compactor.
+/// NOTE: Increase `CURRENT_COMPACTOR_VERSION` by 1 when add new feature to remote compactor.
+const CURRENT_COMPACTOR_VERSION: u32 = 1;
+
+const INCOMPATIBLE_COMPACTOR_ERROR_CODE: StatusCode = StatusCode::NOT_IMPLEMENTED;
 
 #[derive(Default, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -242,6 +264,11 @@ pub struct CompactionRequest {
     /// to filter out data with version > `truncated_ts`.
     pub truncate_ts: Option<u64>,
 
+    /// Requires `compactor_version >= 1`.
+    /// If `trim_over_bound` is true, `in_place_compact_files` will be compacted in place
+    /// to filter out data out of shard bound.
+    pub trim_over_bound: bool,
+
     // Used for L1+ compaction.
     pub bottoms: Vec<u64>,
 
@@ -254,6 +281,10 @@ pub struct CompactionRequest {
     pub max_table_size: usize,
     pub compression_tp: u8,
     pub file_ids: Vec<u64>,
+
+    /// Required version of remote compactor.
+    /// Must be set to `CURRENT_COMPACTOR_VERSION`.
+    pub compactor_version: u32,
 }
 
 pub struct CompactDef {
@@ -430,7 +461,11 @@ impl Engine {
         }
     }
 
-    pub(crate) fn run_compaction(&self, compact_rx: mpsc::Receiver<CompactMsg>, compression_lvl: i32) {
+    pub(crate) fn run_compaction(
+        &self,
+        compact_rx: mpsc::Receiver<CompactMsg>,
+        compression_lvl: i32,
+    ) {
         let mut runner = CompactRunner::new(self.clone(), compact_rx, compression_lvl);
         runner.run();
     }
@@ -456,7 +491,11 @@ impl Engine {
         Some((self.build_compact_ln_request(shard, &cd), Some(cd)))
     }
 
-    pub(crate) fn compact(&self, id_ver: IDVer, compression_lvl: i32) -> Option<Result<pb::ChangeSet>> {
+    pub(crate) fn compact(
+        &self,
+        id_ver: IDVer,
+        compression_lvl: i32,
+    ) -> Option<Result<pb::ChangeSet>> {
         let shard = self.get_shard_with_ver(id_ver.id, id_ver.ver).ok()?;
         let tag = shard.tag();
         if !shard.ready_to_compact() {
@@ -469,6 +508,9 @@ impl Engine {
         }
         if shard.get_data().ready_to_truncate_ts() {
             return self.truncate_ts(&shard, compression_lvl).transpose();
+        }
+        if shard.get_data().ready_to_trim_over_bound() {
+            return Some(self.trim_over_bound(&shard, compression_lvl));
         }
         let pri = shard.get_compaction_priority()?;
         let (req, cd) = self.build_compact_request(&shard, pri)?;
@@ -594,6 +636,7 @@ impl Engine {
             del_prefixes: vec![],
             in_place_compact_files: vec![],
             truncate_ts: None,
+            trim_over_bound: false,
             cf,
             level,
             safe_ts: load_u64(&self.managed_safe_ts),
@@ -605,6 +648,7 @@ impl Engine {
             bottoms: vec![],
             multi_cf_bottoms: vec![],
             file_ids: vec![],
+            compactor_version: CURRENT_COMPACTOR_VERSION,
         }
     }
 
@@ -697,7 +741,11 @@ impl Engine {
         Ok(cs)
     }
 
-    pub(crate) fn truncate_ts(&self, shard: &Shard, compression_lvl: i32) -> Result<Option<pb::ChangeSet>> {
+    pub(crate) fn truncate_ts(
+        &self,
+        shard: &Shard,
+        compression_lvl: i32,
+    ) -> Result<Option<pb::ChangeSet>> {
         let data = shard.get_data();
         let truncate_ts = data.truncate_ts.unwrap();
 
@@ -741,6 +789,74 @@ impl Engine {
         cs.set_property_key(TRUNCATE_TS_KEY.to_string());
         cs.set_property_value(truncate_ts.marshal().to_vec());
         Ok(Some(cs))
+    }
+
+    fn trim_over_bound(&self, shard: &Shard, compression_lvl: i32) -> Result<pb::ChangeSet> {
+        let data = shard.get_data();
+        assert!(data.trim_over_bound);
+        // Tables that are entirely over bound.
+        let mut deletes = vec![];
+        // Tables that are partially over bound.
+        let mut overlaps = vec![];
+        for t in &data.l0_tbls {
+            if t.biggest() < data.start || t.smallest() >= data.end {
+                // -----smallest-----biggest-----[start----------end)
+                // [start----------end)-----smallest-----biggest-----
+                let mut delete = pb::TableDelete::default();
+                delete.set_id(t.id());
+                delete.set_level(0);
+                delete.set_cf(-1);
+                deletes.push(delete);
+            } else if t.smallest() < data.start || t.biggest() >= data.end {
+                // -----smallest-----[start----------end)-----biggest-----
+                overlaps.push((t.id(), 0, -1));
+            }
+        }
+        data.for_each_level(|cf, lh| {
+            for t in lh.tables.iter() {
+                if t.biggest() < data.start || t.smallest() >= data.end {
+                    // -----smallest-----biggest-----[start----------end)
+                    // [start----------end)-----smallest-----biggest-----
+                    let mut delete = pb::TableDelete::default();
+                    delete.set_id(t.id());
+                    delete.set_level(lh.level as u32);
+                    delete.set_cf(cf as i32);
+                    deletes.push(delete);
+                } else if t.smallest() < data.start || t.biggest() >= data.end {
+                    // -----smallest-----[start----------end)-----biggest-----
+                    overlaps.push((t.id(), lh.level as u32, cf as i32));
+                }
+            }
+            false
+        });
+
+        info!(
+            "start trim_over_bound for {}, destroyed: {}, overlapping: {}",
+            shard.tag(),
+            deletes.len(),
+            overlaps.len()
+        );
+
+        let mut cs = if overlaps.is_empty() {
+            let mut cs = pb::ChangeSet::default();
+            cs.mut_trim_over_bound().set_table_deletes(deletes.into());
+            cs
+        } else {
+            let mut req = self.new_compact_request(shard, 0, 0);
+            req.trim_over_bound = true;
+            req.in_place_compact_files = overlaps;
+            req.file_ids = self.id_allocator.alloc_id(req.in_place_compact_files.len());
+            let mut cs = self.comp_client.compact(req, compression_lvl)?;
+            let tc = cs.mut_trim_over_bound();
+            deletes.extend(tc.take_table_deletes().into_iter());
+            tc.set_table_deletes(deletes.into());
+            cs
+        };
+        cs.set_shard_id(shard.id);
+        cs.set_shard_ver(shard.ver);
+        cs.set_property_key(TRIM_OVER_BOUND.to_string());
+        cs.set_property_value(TRIM_OVER_BOUND_DISABLE.to_vec());
+        Ok(cs)
     }
 
     pub(crate) fn handle_compact_response(&self, cs: pb::ChangeSet) {
@@ -1236,6 +1352,19 @@ pub async fn handle_remote_compaction(
             .unwrap());
     }
     let comp_req: CompactionRequest = result.unwrap();
+
+    if comp_req.compactor_version > CURRENT_COMPACTOR_VERSION {
+        warn!(
+            "received incompatible compactor-version({}). Upgrade tikv-worker (version:{}). Request: {:?}",
+            comp_req.compactor_version, CURRENT_COMPACTOR_VERSION, comp_req,
+        );
+        let err_str = format!("incompatible compactor version ({CURRENT_COMPACTOR_VERSION})");
+        return Ok(hyper::Response::builder()
+            .status(INCOMPATIBLE_COMPACTOR_ERROR_CODE)
+            .body(err_str.into())
+            .unwrap());
+    }
+
     let (tx, rx) = tokio::sync::oneshot::channel();
     std::thread::spawn(move || {
         let result = local_compact(dfs, &comp_req, compression_lvl);
@@ -1258,7 +1387,11 @@ pub async fn handle_remote_compaction(
     }
 }
 
-fn local_compact(dfs: Arc<dyn dfs::DFS>, req: &CompactionRequest, compression_lvl: i32) -> Result<pb::ChangeSet> {
+fn local_compact(
+    dfs: Arc<dyn dfs::DFS>,
+    req: &CompactionRequest,
+    compression_lvl: i32,
+) -> Result<pb::ChangeSet> {
     let mut cs = pb::ChangeSet::new();
     cs.set_shard_id(req.shard_id);
     cs.set_shard_ver(req.shard_ver);
@@ -1285,6 +1418,14 @@ fn local_compact(dfs: Arc<dyn dfs::DFS>, req: &CompactionRequest, compression_lv
         return Ok(cs);
     }
 
+    if req.trim_over_bound {
+        info!("start trim_over_bound for {}", tag);
+        let tc = compact_trim_over_bound(req, dfs, compression_lvl)?;
+        cs.set_trim_over_bound(tc);
+        info!("finish trim_over_bound for {}", tag);
+        return Ok(cs);
+    }
+
     let mut comp = pb::Compaction::new();
     comp.set_top_deletes(req.tops.clone());
     comp.set_cf(req.cf as i32);
@@ -1307,7 +1448,7 @@ fn local_compact(dfs: Arc<dyn dfs::DFS>, req: &CompactionRequest, compression_lv
     Ok(cs)
 }
 
-/// Commpact files in place to remove data covered by delete prefixes.
+/// Compact files in place to remove data covered by delete prefixes.
 fn compact_destroy_range(
     req: &CompactionRequest,
     dfs: Arc<dyn dfs::DFS>,
@@ -1361,7 +1502,12 @@ fn compact_destroy_range(
             (data, smallest.to_vec(), biggest.to_vec())
         } else {
             let t = sstable::SSTable::new(Arc::new(file), None, false).unwrap();
-            let mut builder = sstable::Builder::new(new_id, req.block_size, t.compression_type(), compression_lvl);
+            let mut builder = sstable::Builder::new(
+                new_id,
+                req.block_size,
+                t.compression_type(),
+                compression_lvl,
+            );
             let mut iter = t.new_iterator(false, false);
             iter.rewind();
             while iter.valid() {
@@ -1412,7 +1558,11 @@ fn compact_destroy_range(
     Ok(destroy)
 }
 
-fn compact_truncate_ts(req: &CompactionRequest, dfs: Arc<dyn dfs::DFS>, compression_lvl: i32) -> Result<pb::TableChange> {
+fn compact_truncate_ts(
+    req: &CompactionRequest,
+    dfs: Arc<dyn dfs::DFS>,
+    compression_lvl: i32,
+) -> Result<pb::TableChange> {
     let truncate_ts = req.truncate_ts.unwrap();
     assert!(!req.in_place_compact_files.is_empty());
 
@@ -1468,7 +1618,12 @@ fn compact_truncate_ts(req: &CompactionRequest, dfs: Arc<dyn dfs::DFS>, compress
             (data, smallest.to_vec(), biggest.to_vec())
         } else {
             let t = sstable::SSTable::new(Arc::new(file), None, false).unwrap();
-            let mut builder = sstable::Builder::new(new_id, req.block_size, t.compression_type(), compression_lvl);
+            let mut builder = sstable::Builder::new(
+                new_id,
+                req.block_size,
+                t.compression_type(),
+                compression_lvl,
+            );
             let mut iter = t.new_iterator(false, false);
             iter.rewind();
             while iter.valid() {
@@ -1489,6 +1644,119 @@ fn compact_truncate_ts(req: &CompactionRequest, dfs: Arc<dyn dfs::DFS>, compress
             (buf.freeze(), res.smallest, res.biggest)
         };
 
+        let tx = tx.clone();
+        let dfs_clone = dfs.clone();
+        dfs.get_runtime().spawn(async move {
+            tx.send(dfs_clone.create(new_id, data, opts).await).unwrap();
+        });
+
+        let mut create = pb::TableCreate::new();
+        create.set_id(new_id);
+        create.set_level(level);
+        create.set_cf(cf);
+        create.set_smallest(smallest);
+        create.set_biggest(biggest);
+        creates.push(create);
+    }
+
+    let mut errors = creates
+        .iter()
+        .filter_map(|_| match rx.recv().unwrap() {
+            Ok(_) => None,
+            Err(e) => Some(e),
+        })
+        .collect::<Vec<_>>();
+    if !errors.is_empty() {
+        return Err(errors.pop().unwrap().into());
+    }
+    let mut table_change = pb::TableChange::new();
+    table_change.set_table_deletes(deletes.into());
+    table_change.set_table_creates(creates.into());
+    Ok(table_change)
+}
+
+/// Compact files in place to remove data out of shard bound.
+fn compact_trim_over_bound(
+    req: &CompactionRequest,
+    dfs: Arc<dyn dfs::DFS>,
+    compression_lvl: i32,
+) -> Result<pb::TableChange> {
+    assert!(req.trim_over_bound && !req.in_place_compact_files.is_empty());
+    assert_eq!(req.in_place_compact_files.len(), req.file_ids.len());
+
+    let opts = dfs::Options::new(req.shard_id, req.shard_ver);
+    let mut files: HashMap<u64, InMemFile> = load_table_files(
+        &req.in_place_compact_files
+            .iter()
+            .map(|(id, ..)| *id)
+            .collect::<Vec<_>>(),
+        dfs.clone(),
+        opts,
+    )?
+    .into_iter()
+    .map(|file| (file.id, file))
+    .collect();
+
+    let mut deletes = vec![];
+    let mut creates = vec![];
+    let (tx, rx) = tikv_util::mpsc::bounded(req.file_ids.len());
+    for (&(id, level, cf), &new_id) in req.in_place_compact_files.iter().zip(req.file_ids.iter()) {
+        let file = files.remove(&id).unwrap();
+
+        let mut delete = pb::TableDelete::new();
+        delete.set_id(id);
+        delete.set_level(level);
+        delete.set_cf(cf);
+        deletes.push(delete);
+
+        let (data, smallest, biggest) = if level == 0 {
+            let t = sstable::L0Table::new(Arc::new(file), None).unwrap();
+            let mut builder = L0Builder::new(new_id, req.block_size, t.version());
+            for cf in 0..NUM_CFS {
+                if let Some(cf_t) = t.get_cf(cf) {
+                    let mut iter = cf_t.new_iterator(false, false);
+                    iter.seek(&req.start);
+                    while iter.valid() {
+                        let key = iter.key();
+                        if key >= req.end.as_slice() {
+                            break;
+                        }
+                        builder.add(cf, key, iter.value());
+                        iter.next_all_version();
+                    }
+                }
+            }
+            if builder.is_empty() {
+                continue;
+            }
+            let data = builder.finish();
+            let (smallest, biggest) = builder.smallest_biggest();
+            (data, smallest.to_vec(), biggest.to_vec())
+        } else {
+            let t = sstable::SSTable::new(Arc::new(file), None, false).unwrap();
+            let mut builder = sstable::Builder::new(
+                new_id,
+                req.block_size,
+                t.compression_type(),
+                compression_lvl,
+            );
+            let mut iter = t.new_iterator(false, false);
+            iter.seek(&req.start);
+            while iter.valid() {
+                let key = iter.key();
+                if key >= req.end.as_slice() {
+                    break;
+                }
+                builder.add(key, iter.value());
+                iter.next_all_version();
+            }
+            if builder.is_empty() {
+                continue;
+            }
+            let mut buf = BytesMut::with_capacity(builder.estimated_size());
+            let res = builder.finish(0, &mut buf);
+            (buf.freeze(), res.smallest, res.biggest)
+        };
         let tx = tx.clone();
         let dfs_clone = dfs.clone();
         dfs.get_runtime().spawn(async move {
@@ -1562,7 +1830,11 @@ pub(crate) struct CompactRunner {
 }
 
 impl CompactRunner {
-    pub(crate) fn new(engine: Engine, rx: mpsc::Receiver<CompactMsg>, compression_lvl: i32) -> Self {
+    pub(crate) fn new(
+        engine: Engine,
+        rx: mpsc::Receiver<CompactMsg>,
+        compression_lvl: i32,
+    ) -> Self {
         Self {
             engine,
             rx,
@@ -1694,13 +1966,14 @@ impl CompactRunner {
         self.pending
             .retain(|id_ver| engine.get_shard_with_ver(id_ver.id, id_ver.ver).is_ok());
 
-        // Pick the shard that ready to destroy range or truncate ts.
+        // Pick the shard that ready to destroy range / truncate ts / trim over bound.
         if let Some(id_ver) = self.pending.iter().find(|id_ver| {
             self.engine
                 .get_shard_with_ver(id_ver.id, id_ver.ver)
                 .map(|shard| {
                     shard.get_data().ready_to_destroy_range()
                         || shard.get_data().ready_to_truncate_ts()
+                        || shard.get_data().ready_to_trim_over_bound()
                 })
                 .unwrap_or(false)
         }) {

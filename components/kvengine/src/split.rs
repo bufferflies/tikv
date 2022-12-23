@@ -89,6 +89,7 @@ impl Engine {
                 new_shard.end.clone(),
                 new_del_prefixes,
                 old_data.truncate_ts, // TODO: maybe not necessary to truncate ts on the new shard.
+                old_data.trim_over_bound,
                 new_mem_tbls,
                 new_l0s,
                 new_cfs,
@@ -142,22 +143,19 @@ impl Engine {
         source_ver: u64,
         target_id: u64,
         target_ver: u64,
-    ) -> Result<()> {
+    ) -> Result<(bool /*source*/, bool /*target*/)> {
         let source_shard = self.get_shard_with_ver(source_id, source_ver)?;
         if !source_shard.get_initial_flushed() {
             return Err(Error::CheckMerge("source not initial flushed".to_string()));
-        }
-        if source_shard.has_over_bound_data() {
-            return Err(Error::CheckMerge("source has over bound data".to_string()));
         }
         let target_shard = self.get_shard_with_ver(target_id, target_ver)?;
         if !target_shard.get_initial_flushed() {
             return Err(Error::CheckMerge("target not initial flushed".to_string()));
         }
-        if target_shard.has_over_bound_data() {
-            return Err(Error::CheckMerge("target has over bound data".to_string()));
-        }
-        Ok(())
+        Ok((
+            source_shard.has_over_bound_data(),
+            target_shard.has_over_bound_data(),
+        ))
     }
 
     pub fn prepare_merge(
@@ -246,7 +244,8 @@ impl Engine {
             new_shard.start.clone(),
             new_shard.end.clone(),
             old_data.del_prefixes.clone(),
-            old_data.truncate_ts.clone(),
+            old_data.truncate_ts,
+            old_data.trim_over_bound,
             mem_tbls,
             l0_tbls,
             new_cfs,
