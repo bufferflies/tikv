@@ -570,6 +570,7 @@ impl<'a> PeerMsgHandler<'a> {
         // TODO: for case f, if 2 is stale for a long time, 2 will communicate with pd and pd will
         // tell 2 is stale, so 2 can remove itself.
         if util::is_epoch_stale(from_epoch, self.fsm.peer.region().get_region_epoch())
+            && self.peer.is_initialized()
             && util::find_peer(self.fsm.peer.region(), from_store_id).is_none()
         {
             self.ctx
