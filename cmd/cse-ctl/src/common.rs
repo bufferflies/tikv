@@ -2,7 +2,7 @@
 use std::{error::Error, result::Result, sync::Arc};
 
 use bytes::Bytes;
-use etcd_client::{ConnectOptions, OpenSslClientConfig};
+use etcd_client::ConnectOptions;
 use grpcio::EnvBuilder;
 use http::Request;
 use hyper::Body;
@@ -61,14 +61,10 @@ pub(crate) async fn send_request_to_store(
 pub(crate) fn generate_etcd_connect_opt(
     security: &SecurityConfig,
 ) -> Result<ConnectOptions, Box<dyn Error>> {
-    let mut option = ConnectOptions::new();
+    let option = ConnectOptions::new();
     if !security.ca_path.is_empty() {
-        let (ca, cert, key) = security.load_certs()?;
-        option = option.with_openssl_tls(
-            OpenSslClientConfig::default()
-                .ca_cert_pem(&ca)
-                .client_cert_pem_and_key(&cert, &key),
-        );
+        // TODO: add tls support, the etcd-client tls has issue
+        // See: https://github.com/etcdv3/etcd-client/issues/49
     }
     Ok(option)
 }

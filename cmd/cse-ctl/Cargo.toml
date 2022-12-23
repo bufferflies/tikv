@@ -9,9 +9,7 @@ byteorder = "1.2"
 bytes = "1.0"
 chrono = "0.4"
 clap = { version = "3.2", features = ["derive"] }
-# We cannot update the etcd-client to latest version because of the cyclic requirement.
-# Also we need wait until https://github.com/etcdv3/etcd-client/pull/43/files to be merged.
-etcd-client = { git = "https://github.com/pingcap/etcd-client", rev = "14a6f8731f1890d5fd2f6e16a9f0d0a306b0599e", features = ["pub-response-field", "tls-openssl-vendored"] }
+etcd-client = { version = "0.7.2", features = ["pub-response-field"] }
 futures = "0.3"
 grpcio = { version = "0.10", default-features = false, features = ["openssl-vendored", "protobuf-codec"] }
 http = "0.2.8"
