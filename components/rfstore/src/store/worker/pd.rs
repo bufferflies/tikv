@@ -552,7 +552,7 @@ impl PdRunner {
                         let _ = STORE_SIZE_GAUGE_VEC.remove_label_values(&[
                             "used",
                             region_id_str,
-                            "test_not_found_metrics",
+                            keyspace_id_str,
                         ]);
                     }
                     Some(size) => {
