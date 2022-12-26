@@ -141,7 +141,7 @@ impl SnapAccessCore {
                 Ok((id, level, data)) => {
                     let file = InMemFile::new(id, data);
                     if level == 0 {
-                        let l0_table = L0Table::new(Arc::new(file), None).unwrap();
+                        let l0_table = L0Table::new(Arc::new(file), None, true).unwrap();
                         cs.l0_tables.insert(id, l0_table);
                     } else {
                         let ln_table = SSTable::new(Arc::new(file), None, level == 1).unwrap();
@@ -402,6 +402,9 @@ impl SnapAccessCore {
             snap.mut_l0_creates().push(l0);
         }
         self.data.for_each_level(|cf, lh| {
+            if cf == LOCK_CF {
+                return false;
+            }
             for v in lh.tables.iter() {
                 count += 1;
                 let mut overlap = false;

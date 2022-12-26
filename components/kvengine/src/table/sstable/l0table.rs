@@ -10,7 +10,7 @@ use super::*;
 use crate::{
     max_ts_by_cf,
     table::{table::Result, Value},
-    NUM_CFS, WRITE_CF,
+    LOCK_CF, NUM_CFS, WRITE_CF,
 };
 
 const L0_FOOTER_SIZE: usize = std::mem::size_of::<L0Footer>();
@@ -47,8 +47,9 @@ impl L0Table {
     pub fn new(
         file: Arc<dyn File>,
         cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
+        ignore_lock: bool,
     ) -> Result<Self> {
-        let core = L0TableCore::new(file, cache)?;
+        let core = L0TableCore::new(file, cache, ignore_lock)?;
         Ok(Self {
             core: Arc::new(core),
         })
@@ -70,6 +71,7 @@ impl L0TableCore {
     pub fn new(
         file: Arc<dyn File>,
         cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
+        ignore_lock: bool,
     ) -> Result<Self> {
         let footer_off = file.size() - L0_FOOTER_SIZE as u64;
         let mut footer = L0Footer::default();
@@ -90,7 +92,7 @@ impl L0TableCore {
             if i + 1 < NUM_CFS {
                 end_off = cf_offs[i + 1] as u64;
             }
-            if start_off == end_off {
+            if start_off == end_off || ignore_lock && i == LOCK_CF {
                 continue;
             }
             let tbl = sstable::SSTable::new_l0_cf(file.clone(), start_off, end_off, cache.clone())?;

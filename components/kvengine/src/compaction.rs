@@ -1034,7 +1034,7 @@ pub(crate) fn load_table_files(
 fn in_mem_files_to_l0_tables(files: Vec<InMemFile>) -> Vec<sstable::L0Table> {
     files
         .into_iter()
-        .map(|f| sstable::L0Table::new(Arc::new(f), None).unwrap())
+        .map(|f| sstable::L0Table::new(Arc::new(f), None, false).unwrap())
         .collect()
 }
 
@@ -1478,7 +1478,7 @@ fn compact_destroy_range(
     for (&(id, level, cf), &new_id) in req.in_place_compact_files.iter().zip(req.file_ids.iter()) {
         let file = files.remove(&id).unwrap();
         let (data, smallest, biggest) = if level == 0 {
-            let t = sstable::L0Table::new(Arc::new(file), None).unwrap();
+            let t = sstable::L0Table::new(Arc::new(file), None, false).unwrap();
             let mut builder = L0Builder::new(new_id, req.block_size, t.version());
             for cf in 0..NUM_CFS {
                 if let Some(cf_t) = t.get_cf(cf) {
@@ -1591,7 +1591,7 @@ fn compact_truncate_ts(
         deletes.push(delete);
 
         let (data, smallest, biggest) = if level == 0 {
-            let t = sstable::L0Table::new(Arc::new(file), None).unwrap();
+            let t = sstable::L0Table::new(Arc::new(file), None, false).unwrap();
             let mut builder = L0Builder::new(new_id, req.block_size, t.version());
             for cf in 0..NUM_CFS {
                 if let Some(cf_t) = t.get_cf(cf) {
@@ -1709,7 +1709,7 @@ fn compact_trim_over_bound(
         deletes.push(delete);
 
         let (data, smallest, biggest) = if level == 0 {
-            let t = sstable::L0Table::new(Arc::new(file), None).unwrap();
+            let t = sstable::L0Table::new(Arc::new(file), None, false).unwrap();
             let mut builder = L0Builder::new(new_id, req.block_size, t.version());
             for cf in 0..NUM_CFS {
                 if let Some(cf_t) = t.get_cf(cf) {

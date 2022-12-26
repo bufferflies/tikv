@@ -54,7 +54,7 @@ impl ChangeSet {
         cache: SegmentedCache<BlockCacheKey, Bytes>,
     ) -> Result<()> {
         if level == 0 {
-            let l0_table = L0Table::new(Arc::new(file), Some(cache))?;
+            let l0_table = L0Table::new(Arc::new(file), Some(cache), false)?;
             self.l0_tables.insert(id, l0_table);
         } else {
             let ln_table = SSTable::new(Arc::new(file), Some(cache), level == 1)?;
