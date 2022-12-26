@@ -5,8 +5,8 @@ mod backward;
 mod forward;
 
 use engine_traits::{CfName, CF_DEFAULT, CF_LOCK, CF_WRITE};
+use kvengine::WRITE_CF;
 use kvproto::kvrpcpb::{ExtraOp, IsolationLevel};
-use rfstore::WRITE_CF;
 use txn_types::{
     Key, Lock, LockType, OldValue, TimeStamp, TsSet, Value, Write, WriteRef, WriteType,
 };

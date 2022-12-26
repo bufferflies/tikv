@@ -5,13 +5,11 @@ use std::sync::Arc;
 use collections::HashMap;
 use engine_rocks::RocksSstReader;
 use engine_traits::{Iterable, Iterator as TraitIterator, SstReader, CF_DEFAULT, CF_WRITE};
-use kvengine::{table::Value, ShardMeta};
+use kvengine::{table::Value, ShardMeta, UserMeta};
 use kvproto::{import_sstpb::SstMeta, raft_cmdpb::RaftCmdRequest};
 use sst_importer::SstImporter;
 use tikv_util::{codec, error, info};
 use txn_types::{WriteRef, WriteType};
-
-use crate::UserMeta;
 
 pub(crate) fn convert_sst(
     kv: kvengine::Engine,

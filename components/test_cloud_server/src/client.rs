@@ -105,6 +105,35 @@ impl ClusterClient {
         block_on(self.pd_client.get_tso()).unwrap()
     }
 
+    pub fn del_kv<F>(&mut self, rng: Range<usize>, gen_key: F)
+    where
+        F: Fn(usize) -> Vec<u8>,
+    {
+        let start_key = gen_key(rng.start);
+        let start_ts = self.get_ts();
+
+        let mut mutations = vec![];
+        for i in rng {
+            let mut m = Mutation::default();
+            m.set_op(Op::Del);
+            m.set_key(gen_key(i));
+            mutations.push(m)
+        }
+        let keys = mutations.iter().map(|m| m.get_key().to_vec()).collect();
+        self.kv_prewrite(mutations.clone(), start_key, start_ts);
+        let commit_ts = self.get_ts();
+        self.kv_commit(keys, start_ts, commit_ts);
+        self.del_kv_in_ref_store(mutations);
+        self.set_max_ts(commit_ts.into_inner());
+    }
+
+    fn del_kv_in_ref_store(&mut self, mutations: Vec<Mutation>) {
+        let mut ref_store = self.ref_store.lock().unwrap();
+        for m in mutations {
+            ref_store.remove(m.get_key());
+        }
+    }
+
     pub fn put_kv<F, G>(&mut self, rng: Range<usize>, gen_key: F, gen_val: G)
     where
         F: Fn(usize) -> Vec<u8>,

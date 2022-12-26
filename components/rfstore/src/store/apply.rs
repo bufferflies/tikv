@@ -11,7 +11,9 @@ use std::{
 
 use bytes::Buf;
 use fail::fail_point;
-use kvengine::{ChangeSet, Engine, SnapAccess, TRIM_OVER_BOUND, TRIM_OVER_BOUND_ENABLE};
+use kvengine::{
+    mvcc, ChangeSet, Engine, SnapAccess, UserMeta, TRIM_OVER_BOUND, TRIM_OVER_BOUND_ENABLE,
+};
 use kvproto::{
     metapb,
     metapb::{PeerRole, Region},
@@ -42,9 +44,8 @@ use txn_types::LockType;
 use super::*;
 use crate::{
     errors::*,
-    mvcc,
     store::cmd_resp::{bind_term, err_resp},
-    RaftRouter, RaftStoreRouter, UserMeta,
+    RaftRouter, RaftStoreRouter,
 };
 
 pub(crate) struct PendingCmd {
@@ -323,7 +324,7 @@ impl Applier {
             );
         });
         let start_ts = lock.ts.into_inner();
-        let user_meta = &mvcc::UserMeta::new(start_ts, commit_ts).to_array()[..];
+        let user_meta = &UserMeta::new(start_ts, commit_ts).to_array()[..];
         match lock.lock_type {
             LockType::Lock | LockType::Pessimistic => {
                 let op_lock_key = mvcc::encode_extra_txn_status_key(key, start_ts);
@@ -498,7 +499,7 @@ impl Applier {
             }),
             TYPE_ONE_PC => cl.iterate_one_pc(|k, v, is_extra, del_lock, start_ts, commit_ts| {
                 self.record_write_stat(k, v);
-                let user_meta = UserMeta::new(start_ts, commit_ts).to_array();
+                let user_meta = mvcc::UserMeta::new(start_ts, commit_ts).to_array();
                 if is_extra {
                     let op_lock_key = mvcc::encode_extra_txn_status_key(k, start_ts);
                     wb.put(mvcc::EXTRA_CF, &op_lock_key, &[0], 0, &user_meta, commit_ts);

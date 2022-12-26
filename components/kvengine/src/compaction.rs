@@ -9,7 +9,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, Bytes, BytesMut};
 use http::StatusCode;
 use kvenginepb as pb;
@@ -1316,9 +1315,9 @@ enum Decision {
 fn filter(safe_ts: u64, cf: usize, val: table::Value) -> Decision {
     let user_meta = val.user_meta();
     if cf == WRITE_CF {
-        if user_meta.len() == 16 {
-            let version = LittleEndian::read_u64(&user_meta[8..]);
-            if version < safe_ts && val.get_value().is_empty() {
+        if user_meta.len() == USER_META_SIZE {
+            let um = UserMeta::from_slice(user_meta);
+            if um.commit_ts < safe_ts && val.get_value().is_empty() {
                 return Decision::MarkTombStone;
             }
         }
@@ -1326,9 +1325,9 @@ fn filter(safe_ts: u64, cf: usize, val: table::Value) -> Decision {
         return Decision::Keep;
     } else {
         assert_eq!(cf, EXTRA_CF);
-        if user_meta.len() == 16 {
-            let start_ts = LittleEndian::read_u64(user_meta);
-            if start_ts < safe_ts {
+        if user_meta.len() == USER_META_SIZE {
+            let um = UserMeta::from_slice(user_meta);
+            if um.start_ts < safe_ts {
                 return Decision::Drop;
             }
         }

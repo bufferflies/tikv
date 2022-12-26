@@ -1,7 +1,7 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
 use bytes::Bytes;
-use rfstore::{UserMeta, EXTRA_CF, LOCK_CF, WRITE_CF};
+use kvengine::{UserMeta, EXTRA_CF, LOCK_CF, WRITE_CF};
 use txn_types::{Key, Lock, OldValue, TimeStamp, Value, Write, WriteType};
 
 use crate::storage::mvcc::{Result, TxnCommitRecord};
@@ -83,7 +83,7 @@ impl CloudReader {
 
     pub fn get_extra(&mut self, key: &Key, start_ts: TimeStamp) -> Option<(TimeStamp, Write)> {
         let raw_key = key.to_raw().unwrap();
-        let extra_key = rfstore::mvcc::encode_extra_txn_status_key(&raw_key, start_ts.into_inner());
+        let extra_key = kvengine::encode_extra_txn_status_key(&raw_key, start_ts.into_inner());
         let item = self.snapshot.get(EXTRA_CF, &extra_key, 0);
         if item.user_meta_len() == 0 {
             return None;

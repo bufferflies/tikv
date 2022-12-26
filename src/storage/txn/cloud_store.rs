@@ -3,9 +3,8 @@
 use std::{borrow::Cow, marker::PhantomData};
 
 use bytes::{Buf, Bytes};
-use kvengine::Item;
+use kvengine::{Item, UserMeta};
 use kvproto::kvrpcpb::IsolationLevel;
-use rfstore::UserMeta;
 use tikv_kv::{Snapshot, Statistics};
 use txn_types::{is_short_value, Key, Lock, OldValue, TimeStamp, TsSet, Value, Write, WriteType};
 

@@ -6,11 +6,9 @@
 extern crate tikv_alloc;
 
 pub mod errors;
-pub mod mvcc;
 pub mod router;
 pub mod store;
 
-pub use mvcc::*;
 pub use router::*;
 
 pub use self::errors::*;

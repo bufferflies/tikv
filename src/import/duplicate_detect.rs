@@ -3,9 +3,8 @@
 use std::marker::PhantomData;
 
 use bytes::Bytes;
-use kvengine::read::Iterator as KvIterator;
+use kvengine::{read::Iterator as KvIterator, UserMeta, WRITE_CF};
 use kvproto::import_sstpb::{DuplicateDetectResponse, KvPair};
-use rfstore::{UserMeta, WRITE_CF};
 use sst_importer::{Error, Result};
 use tikv_kv::Snapshot;
 use txn_types::{TimeStamp, Write, WriteType};

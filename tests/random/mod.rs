@@ -220,7 +220,11 @@ fn spawn_write(idx: usize, mut client: ClusterClient) -> JoinHandle<()> {
         let mut rng = rand::thread_rng();
         while start_time.saturating_elapsed() < TIMEOUT {
             let i = rng.gen_range(begin..end);
-            client.put_kv(i..(i + 10), i_to_key, i_to_val);
+            if rng.gen_ratio(2, 3) {
+                client.put_kv(i..(i + 10), i_to_key, i_to_val);
+            } else {
+                client.del_kv(i..(i + 10), i_to_key);
+            }
             WRITE_COUNTER.fetch_add(10, Ordering::SeqCst);
         }
         info!("write thread {} exit", idx);
