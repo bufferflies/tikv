@@ -1,7 +1,7 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{btree_map::BTreeMap, HashMap, HashSet},
     ops::{
         Bound::{Excluded, Unbounded},
         Deref, DerefMut,
@@ -16,6 +16,7 @@ use fail::fail_point;
 use kvproto::{
     metapb::{self, Region, RegionEpoch},
     pdpb,
+    pdpb::SyncRegionResponse,
     raft_cmdpb::RaftCmdRequest,
     raft_serverpb::{ExtraMessageType, PeerState, RaftMessage, RegionLocalState},
 };
@@ -37,6 +38,7 @@ use rfengine::TRUNCATE_ALL_INDEX;
 use sst_importer::SstImporter;
 use tikv_util::{
     box_err,
+    codec::bytes::encode_bytes,
     config::VersionTrack,
     debug, error, info,
     mpsc::Receiver,
@@ -282,8 +284,7 @@ impl RaftBatchSystem {
                 info!("{} region is merging", peer.peer.tag());
                 peer.peer.pending_merge_state = Some(local_state.get_merge_state().to_owned());
             }
-            store_meta.update_region_ranges(region);
-            store_meta.regions.insert(region.get_id(), region.clone());
+            store_meta.region_map.put(region.clone());
             ctx.coprocessor_host.on_region_changed(
                 region,
                 RegionChangeEvent::Create,
@@ -318,11 +319,8 @@ pub struct StoreInfo {
 pub struct StoreMeta {
     /// store id
     pub store_id: Option<u64>,
-    /// region_end_key -> region_id
-    /// It may have less entries than regions because some entries are removed on overlap.
-    pub region_ranges: BTreeMap<Vec<u8>, u64>,
-    /// region_id -> region
-    pub regions: HashMap<u64, Region>,
+
+    pub region_map: RegionMap,
 
     pub cop_host: CoprocessorHost<kvengine::Engine>,
     /// region_id -> reader
@@ -337,8 +335,7 @@ impl StoreMeta {
     pub fn new(vote_capacity: usize, cop_host: CoprocessorHost<kvengine::Engine>) -> StoreMeta {
         StoreMeta {
             store_id: None,
-            region_ranges: BTreeMap::default(),
-            regions: HashMap::default(),
+            region_map: Default::default(),
             cop_host,
             readers: Arc::new(dashmap::DashMap::new()),
             pending_msgs: RingQueue::with_capacity(vote_capacity),
@@ -353,32 +350,45 @@ impl StoreMeta {
         reason: RegionChangeReason,
     ) {
         let region_id = region.get_id();
-        self.update_region_ranges(&region);
-        self.regions.insert(region_id, region.clone());
+        self.region_map.put(region.clone());
         peer.set_region(&self.cop_host, region, reason);
         self.readers
             .insert(region_id, ReadDelegate::from_peer(peer));
     }
 
     pub(crate) fn destroy_region(&mut self, region: &Region) {
-        if !self.regions.contains_key(&region.id) {
-            return;
-        }
-        if is_region_initialized(region) {
-            let end_key = raw_end_key(region);
-            if let Some(&id) = self.region_ranges.get(&end_key) {
-                if id == region.id {
-                    self.region_ranges.remove(&end_key);
+        self.region_map.remove(region.id);
+        self.readers.remove(&region.id);
+    }
+}
+
+#[derive(Default)]
+pub struct RegionMap {
+    /// region_end_key -> region_id
+    /// It may have less entries than regions because some entries are removed on overlap.
+    pub region_ranges: BTreeMap<Vec<u8>, u64>,
+    /// region_id -> region
+    pub regions: HashMap<u64, Region>,
+}
+
+impl RegionMap {
+    pub fn put(&mut self, region: Region) {
+        let region_id = region.get_id();
+        self.update_region_ranges(&region);
+        self.regions.insert(region_id, region);
+    }
+
+    fn update_region_ranges(&mut self, region: &Region) {
+        let region_id = region.get_id();
+        let prev = self.regions.get(&region_id);
+        if let Some(prev_region) = prev {
+            let prev_raw_end = raw_end_key(prev_region);
+            if let Some(&id) = self.region_ranges.get(&prev_raw_end) {
+                if id == region_id {
+                    self.region_ranges.remove(&prev_raw_end);
                 }
             }
         }
-        self.regions.remove(&region.id);
-        self.readers.remove(&region.id);
-    }
-
-    pub(crate) fn update_region_ranges(&mut self, region: &Region) {
-        let region_id = region.get_id();
-        let prev = self.regions.get(&region_id);
         let range_change = prev.map_or(true, |prev_region| {
             prev_region.get_region_epoch().get_version() != region.get_region_epoch().get_version()
         });
@@ -392,10 +402,7 @@ impl StoreMeta {
         }
     }
 
-    pub(crate) fn get_overlap_regions(
-        &mut self,
-        new_region: &Region,
-    ) -> Option<Vec<(u64, Vec<u8>)>> {
+    fn get_overlap_regions(&mut self, new_region: &Region) -> Option<Vec<(u64, Vec<u8>)>> {
         let start_key = raw_start_key(new_region);
         let end_key = raw_end_key(new_region);
         let new_version = new_region.get_region_epoch().get_version();
@@ -427,6 +434,44 @@ impl StoreMeta {
             self.region_ranges.remove(&outdated_key);
         }
         Some(regions)
+    }
+
+    pub fn remove(&mut self, region_id: u64) {
+        if let Some(region) = self.regions.remove(&region_id) {
+            if is_region_initialized(&region) {
+                let end_key = raw_end_key(&region);
+                if let Some(&id) = self.region_ranges.get(&end_key) {
+                    if id == region.id {
+                        self.region_ranges.remove(&end_key);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn get(&self, region_id: u64) -> Option<&Region> {
+        self.regions.get(&region_id)
+    }
+
+    pub fn len(&self) -> usize {
+        self.regions.len()
+    }
+
+    pub fn get_regions_in_range(&self, start: Vec<u8>, end: Vec<u8>) -> Vec<&Region> {
+        let mut regions = vec![];
+        let encoded_end = encode_bytes(&end);
+        for (_, region_id) in self.region_ranges.range((Excluded(start), Unbounded)) {
+            let region = self.regions.get(region_id);
+            if region.is_none() {
+                continue;
+            }
+            let region = region.unwrap();
+            if &region.start_key >= &encoded_end {
+                break;
+            }
+            regions.push(region);
+        }
+        regions
     }
 }
 
@@ -616,6 +661,12 @@ impl<'a> StoreMsgHandler<'a> {
             } => {
                 self.on_get_regions_in_range(start, end, callback);
             }
+            StoreMsg::SyncRegion {
+                keyspace_id,
+                callback,
+            } => {
+                self.on_sync_region(keyspace_id, callback);
+            }
             StoreMsg::ApplyResult { region_id, peer_id } => {
                 apply_region = self.on_apply_result(region_id, peer_id);
             }
@@ -656,7 +707,7 @@ impl<'a> StoreMsgHandler<'a> {
         let mut stats = pdpb::StoreStats::default();
 
         stats.set_store_id(self.store.id);
-        stats.set_region_count(self.ctx.store_meta.regions.len() as u32);
+        stats.set_region_count(self.ctx.store_meta.region_map.len() as u32);
 
         stats.set_start_time(self.store.start_time.unwrap().sec as u32);
 
@@ -735,7 +786,7 @@ impl<'a> StoreMsgHandler<'a> {
             "unreachable_store_id" => store_id,
         );
         self.store.last_unreachable_report.insert(store_id, now);
-        for (id, region) in &self.ctx.store_meta.regions {
+        for (id, region) in &self.ctx.store_meta.region_map.regions {
             if region.get_peers().iter().any(|p| p.store_id == store_id) {
                 self.ctx.global.router.report_unreachable(*id, store_id);
             }
@@ -934,7 +985,13 @@ impl<'a> StoreMsgHandler<'a> {
         };
         if is_first_request {
             // To void losing messages, either put it to pending_msg or force send.
-            if !self.ctx.store_meta.regions.contains_key(&region_id) {
+            if !self
+                .ctx
+                .store_meta
+                .region_map
+                .regions
+                .contains_key(&region_id)
+            {
                 // Save one pending message for a peer is enough, remove
                 // the previous pending message of this peer
                 self.ctx
@@ -1003,7 +1060,7 @@ impl<'a> StoreMsgHandler<'a> {
         msg: &RaftMessage,
         _is_local_first: bool,
     ) -> Result<bool> {
-        if self.ctx.store_meta.regions.contains_key(&region_id) {
+        if self.ctx.store_meta.region_map.get(region_id).is_some() {
             return Ok(true);
         }
         let target = msg.get_to_peer();
@@ -1027,8 +1084,8 @@ impl<'a> StoreMsgHandler<'a> {
         // snapshot is applied.
         self.ctx
             .store_meta
-            .regions
-            .insert(region_id, peer.get_peer().region().to_owned());
+            .region_map
+            .put(peer.get_peer().region().to_owned());
         self.register(peer);
         self.ctx.global.router.send(region_id, PeerMsg::Start);
         Ok(true)
@@ -1182,11 +1239,7 @@ impl<'a> StoreMsgHandler<'a> {
                 RegionChangeEvent::Create,
                 new_peer.peer.get_role(),
             );
-            self.ctx.store_meta.update_region_ranges(&new_region);
-            self.ctx
-                .store_meta
-                .regions
-                .insert(new_region_id, new_region.clone());
+            self.ctx.store_meta.region_map.put(new_region.clone());
             let read_delegate = ReadDelegate::from_peer(new_peer.get_peer());
             self.ctx
                 .store_meta
@@ -1449,25 +1502,30 @@ impl<'a> StoreMsgHandler<'a> {
         end: Vec<u8>,
         callback: Box<dyn FnOnce(Vec<RegionIDVer>) + Send>,
     ) {
-        let mut regions = vec![];
-        for (_, region_id) in self
+        let regions = self
             .ctx
             .store_meta
-            .region_ranges
-            .range((Excluded(start), Unbounded))
-        {
-            let region = self.ctx.store_meta.regions.get(region_id);
-            if region.is_none() {
-                continue;
-            }
-            let region = region.unwrap();
-            let region_start_key = raw_start_key(region);
-            if region_start_key >= end {
-                break;
-            }
-            regions.push(RegionIDVer::from_region(region));
-        }
+            .region_map
+            .get_regions_in_range(start, end)
+            .into_iter()
+            .map(|r| RegionIDVer::from_region(r))
+            .collect();
         callback(regions)
+    }
+
+    fn on_sync_region(
+        &mut self,
+        keyspace_id: Option<u32>,
+        callback: Box<dyn FnOnce(SyncRegionResponse) + Send>,
+    ) {
+        self.ctx
+            .global
+            .pd_scheduler
+            .schedule(PdTask::SyncRegion {
+                keyspace_id,
+                callback,
+            })
+            .unwrap();
     }
 
     fn on_apply_result(&mut self, region_id: u64, peer_id: u64) -> Option<u64> {
@@ -1621,15 +1679,6 @@ impl<'a> StoreMsgHandler<'a> {
             .engines
             .kv
             .set_shard_active(region.id, is_leader);
-        let old_region = self.ctx.store_meta.regions.get(&region.id).unwrap();
-        self.ctx
-            .store_meta
-            .region_ranges
-            .remove(&raw_end_key(&old_region));
-        self.ctx
-            .store_meta
-            .region_ranges
-            .insert(raw_end_key(&region), region.id);
         self.ctx
             .store_meta
             .set_region(region, &mut peer_fsm.peer, RegionChangeReason::CommitMerge);

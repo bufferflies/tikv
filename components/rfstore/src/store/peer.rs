@@ -2214,10 +2214,9 @@ impl Peer {
         );
 
         // TODO(x) update commit group
-        meta.update_region_ranges(&region);
-        meta.regions.insert(region.get_id(), region.clone());
+        meta.region_map.put(region);
         meta.readers
-            .insert(region.get_id(), ReadDelegate::from_peer(self));
+            .insert(self.region_id, ReadDelegate::from_peer(self));
         true
     }
 

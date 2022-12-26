@@ -42,7 +42,7 @@ use pin_project::pin_project;
 use prometheus::TEXT_FORMAT;
 use protobuf::Message;
 use rfstore::{
-    store::{Callback, CasualMessage},
+    store::{Callback, CasualMessage, StoreMsg},
     RaftRouter, RaftStoreRouter,
 };
 use security::{self, SecurityConfig};
@@ -658,6 +658,33 @@ impl StatusServer {
         Ok(hyper::Response::new(Body::empty()))
     }
 
+    pub async fn handle_sync_region(
+        req: Request<Body>,
+        router: RaftRouter,
+    ) -> hyper::Result<Response<Body>> {
+        let query = req.uri().query().unwrap_or("");
+        let query_pairs: HashMap<_, _> = url::form_urlencoded::parse(query.as_bytes()).collect();
+        let keyspace_id = if let Some(x) = query_pairs.get("keyspace_id") {
+            u32::from_str(x).map_or(None, |x| Some(x))
+        } else {
+            None
+        };
+        let debug = query_pairs.get("debug").map(|x| x.as_ref()) == Some("true");
+        let (callback, future) = paired_future_callback();
+        let store_msg = StoreMsg::SyncRegion {
+            keyspace_id,
+            callback,
+        };
+        router.send_store_msg(store_msg);
+        let resp = future.await.unwrap();
+        let body = if debug {
+            format!("{:?}", resp).into_bytes()
+        } else {
+            resp.write_to_bytes().unwrap()
+        };
+        Ok(hyper::Response::new(body.into()))
+    }
+
     fn handle_get_metrics(
         req: Request<Body>,
         mgr: &ConfigController,
@@ -776,6 +803,9 @@ impl StatusServer {
                             }
                             (Method::GET, path) if path.starts_with("/region") => {
                                 Self::dump_region_meta(req, router).await
+                            }
+                            (Method::GET, path) if path.starts_with("/sync_region") => {
+                                Self::handle_sync_region(req, router).await
                             }
                             (Method::PUT, path) if path.starts_with("/log-level") => {
                                 Self::change_log_level(req).await

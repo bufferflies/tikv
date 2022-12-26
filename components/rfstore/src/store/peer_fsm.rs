@@ -709,7 +709,7 @@ impl<'a> PeerMsgHandler<'a> {
             }
             let target_region = admin_req.get_prepare_merge().get_target();
             {
-                match store_meta.regions.get(&target_region.get_id()) {
+                match store_meta.region_map.get(target_region.get_id()) {
                     Some(r) => {
                         if r != target_region {
                             return Err(box_err!(
@@ -1714,7 +1714,7 @@ impl<'a> PeerMsgHandler<'a> {
         store_meta: &mut StoreMeta,
     ) -> Result<bool> {
         let target_region_id = target_region.get_id();
-        let exist_region = { store_meta.regions.get(&target_region_id).cloned() };
+        let exist_region = { store_meta.region_map.get(target_region_id).cloned() };
         if let Some(r) = exist_region {
             let exist_epoch = r.get_region_epoch();
             let expect_epoch = target_region.get_region_epoch();

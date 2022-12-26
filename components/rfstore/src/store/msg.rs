@@ -5,6 +5,7 @@ use std::{borrow::Cow, collections::VecDeque, fmt, fmt::Debug, sync::Arc};
 use kvproto::{
     kvrpcpb::ExtraOp as TxnExtraOp,
     metapb, pdpb,
+    pdpb::SyncRegionResponse,
     raft_cmdpb::{RaftCmdRequest, RaftCmdResponse},
     raft_serverpb as rspb,
     raft_serverpb::RaftMessage,
@@ -99,6 +100,10 @@ pub enum StoreMsg {
         start: Vec<u8>,
         end: Vec<u8>,
         callback: Box<dyn FnOnce(Vec<RegionIDVer>) + Send>,
+    },
+    SyncRegion {
+        keyspace_id: Option<u32>,
+        callback: Box<dyn FnOnce(SyncRegionResponse) + Send>,
     },
     ApplyResult {
         region_id: u64,

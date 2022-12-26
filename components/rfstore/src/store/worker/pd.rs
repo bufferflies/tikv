@@ -16,10 +16,12 @@ use engine_traits::{CFNamesExt, MiscExt};
 #[cfg(feature = "failpoints")]
 use fail::fail_point;
 use futures::{compat::Future01CompatExt, FutureExt};
+use kvengine::GLOBAL_SHARD_END_KEY;
 use kvproto::{
     metapb,
     metapb::Region,
     pdpb,
+    pdpb::SyncRegionResponse,
     raft_cmdpb::{
         AdminCmdType, AdminRequest, ChangePeerRequest, ChangePeerV2Request, RaftCmdRequest,
         SplitRequest,
@@ -29,8 +31,12 @@ use kvproto::{
 };
 use pd_client::{merge_bucket_stats, metrics::*, BucketStat, PdClient, RegionStat};
 use prometheus::local::LocalHistogram;
-use raft::eraftpb::ConfChangeType;
-use raftstore::store::{util, util::ConfChangeKind, QueryStats, ReadStats, TxnExt, WriteStats};
+use raft::{eraftpb::ConfChangeType, StateRole};
+use raftstore::store::{
+    util,
+    util::{find_peer, ConfChangeKind},
+    QueryStats, ReadStats, TxnExt, WriteStats,
+};
 use tikv_util::{
     debug, error, info,
     time::UnixSecs,
@@ -42,7 +48,9 @@ use tikv_util::{
 use yatp::Remote;
 
 use crate::{
-    store::{Callback, CasualMessage, PeerMsg, PeerTag, RegionIDVer, StoreInfo, StoreMsg},
+    store::{
+        Callback, CasualMessage, PeerMsg, PeerTag, RegionIDVer, RegionMap, StoreInfo, StoreMsg,
+    },
     RaftRouter, RaftStoreRouter,
 };
 
@@ -127,6 +135,14 @@ pub enum PdTask {
     },
     UpdateSafeTS,
     ReportBuckets(BucketStat),
+    SyncRegion {
+        keyspace_id: Option<u32>,
+        callback: Box<dyn FnOnce(SyncRegionResponse) + Send>,
+    },
+    RoleChanged {
+        region_id: u64,
+        role: StateRole,
+    },
 }
 
 #[derive(Default, Clone)]
@@ -216,6 +232,7 @@ pub struct PeerStat {
     pub approximate_keys: u64,
     pub approximate_size: u64,
     pub approximate_kv_size: u64,
+    pub role: StateRole,
 }
 
 #[derive(Default)]
@@ -317,15 +334,23 @@ impl Display for PdTask {
             PdTask::ReportBuckets(ref buckets) => {
                 write!(f, "report buckets: {:?}", buckets)
             }
+            PdTask::SyncRegion { .. } => {
+                write!(f, "sync region")
+            }
+            PdTask::RoleChanged { region_id, role } => {
+                write!(f, "region {} change role to {:?}", region_id, role)
+            }
         }
     }
 }
 
 pub struct PdRunner {
     store_id: u64,
+    cluster_id: u64,
     pd_client: Arc<dyn PdClient>,
     router: RaftRouter,
     region_peers: HashMap<u64, PeerStat>,
+    region_map: RegionMap,
     region_buckets: HashMap<u64, ReportBucket>,
     store_stat: StoreStat,
     is_hb_receiver_scheduled: bool,
@@ -336,9 +361,6 @@ pub struct PdRunner {
     // actually it is the sender connected to Runner's Worker which
     // calls Runner's run() on Task received.
     scheduler: Scheduler<PdTask>,
-
-    // region_id -> total_cpu_time_ms (since last region heartbeat)
-    region_cpu_records: HashMap<u64, u32>,
 
     concurrency_manager: ConcurrencyManager,
     remote: Remote<yatp::task::future::TaskCell>,
@@ -387,17 +409,19 @@ impl PdRunner {
         kv: kvengine::Engine,
     ) -> PdRunner {
         // TODO(x): support stats monitor.
+        let cluster_id = pd_client.get_cluster_id().unwrap();
         PdRunner {
             store_id,
+            cluster_id,
             pd_client,
             router,
             is_hb_receiver_scheduled: false,
             region_peers: HashMap::default(),
+            region_map: Default::default(),
             region_buckets: HashMap::default(),
             store_stat: StoreStat::default(),
             start_ts: UnixSecs::now(),
             scheduler,
-            region_cpu_records: HashMap::default(),
             concurrency_manager,
             remote,
             kv,
@@ -463,7 +487,7 @@ impl PdRunner {
     }
 
     fn handle_heartbeat(
-        &self,
+        &mut self,
         term: u64,
         region: metapb::Region,
         peer: metapb::Peer,
@@ -484,6 +508,15 @@ impl PdRunner {
             .observe(region_stat.read_keys as f64);
 
         PdRunner::set_storage_size_metric(&region, Some(region_stat.approximate_kv_size));
+
+        let changed = self
+            .region_map
+            .get(region.id)
+            .map(|old| old.get_region_epoch() != region.get_region_epoch())
+            .unwrap_or(true);
+        if changed {
+            self.region_map.put(region.clone())
+        }
 
         STORE_ENGINE_FLOW_VEC
             .with_label_values(&["kv", "bytes_read"])
@@ -953,6 +986,8 @@ impl PdRunner {
     }
 
     fn handle_destroy_peer(&mut self, region_id: u64) {
+        self.region_map.remove(region_id);
+        self.region_buckets.remove(&region_id);
         match self.region_peers.remove(&region_id) {
             None => {}
             Some(_) => {
@@ -1112,6 +1147,71 @@ impl PdRunner {
             &buckets.stats,
         );
     }
+
+    fn handle_sync_region(
+        &mut self,
+        keyspace_id: Option<u32>,
+        callback: Box<dyn FnOnce(SyncRegionResponse) + Send>,
+    ) {
+        let (start, end) = if let Some(keyspace_id) = keyspace_id {
+            let mut prefix: [u8; 4] = keyspace_id.to_be_bytes();
+            prefix[0] = api_version::api_v2::TXN_KEY_PREFIX;
+            let start = prefix.to_vec();
+            let mut end = start.clone();
+            end.extend_from_slice(GLOBAL_SHARD_END_KEY);
+            (start, end)
+        } else {
+            (vec![], GLOBAL_SHARD_END_KEY.to_vec())
+        };
+        let regions = self.region_map.get_regions_in_range(start, end);
+        let mut resp_regions = Vec::with_capacity(regions.len());
+        let mut resp_stats = Vec::with_capacity(regions.len());
+        let mut resp_leaders = Vec::with_capacity(regions.len());
+        let mut resp_buckets = Vec::with_capacity(regions.len());
+        for region in regions {
+            resp_regions.push(region.clone());
+            // The stats is used along with region, we need to push a default one if not found.
+            let mut region_stat = pdpb::RegionStat::new();
+            if let Some(stats) = self.region_peers.get(&region.id) {
+                region_stat.set_bytes_read(stats.read_bytes);
+                region_stat.set_keys_read(stats.read_keys);
+                region_stat.set_bytes_written(stats.last_region_report_written_bytes);
+                region_stat.set_keys_written(stats.last_region_report_written_keys);
+            }
+            resp_stats.push(region_stat);
+            let leader_peer = find_peer(region, self.store_id)
+                .cloned()
+                .unwrap_or_default();
+            resp_leaders.push(leader_peer);
+            if !self.region_buckets.is_empty() {
+                // If there is any bucket, then all regions must push a bucket even if it's not
+                // reported yet.
+                let mut bucket = metapb::Buckets::new();
+                if let Some(report_bucket) = self.region_buckets.get(&region.id) {
+                    bucket.set_region_id(region.id);
+                    bucket.set_version(report_bucket.current_stat.meta.version);
+                    bucket.set_keys(report_bucket.current_stat.meta.keys.clone().into());
+                    bucket.set_stats(report_bucket.current_stat.stats.clone());
+                }
+                resp_buckets.push(bucket);
+            }
+        }
+        let mut resp = SyncRegionResponse::new();
+        resp.mut_header().set_cluster_id(self.cluster_id);
+        resp.set_regions(resp_regions.into());
+        resp.set_region_leaders(resp_leaders.into());
+        resp.set_region_stats(resp_stats.into());
+        resp.set_buckets(resp_buckets.into());
+        callback(resp);
+    }
+
+    fn handle_role_changed(&mut self, region_id: u64, role: StateRole) {
+        let peer_stat = self
+            .region_peers
+            .entry(region_id)
+            .or_insert(PeerStat::default());
+        peer_stat.role = role;
+    }
 }
 
 impl Runnable for PdRunner {
@@ -1153,9 +1253,7 @@ impl Runnable for PdRunner {
                     written_keys_delta,
                     last_report_ts,
                     query_stats,
-                    _cpu_usage,
                 ) = {
-                    let region_id = hb_task.region.get_id();
                     let peer_stat = self
                         .region_peers
                         .entry(hb_task.region.get_id())
@@ -1187,24 +1285,6 @@ impl Runnable for PdRunner {
                     if last_report_ts.is_zero() {
                         last_report_ts = self.start_ts;
                     }
-                    // Calculate the CPU usage since the last region heartbeat.
-                    let cpu_usage = {
-                        // Take out the region CPU record.
-                        let cpu_time_duration = Duration::from_millis(
-                            self.region_cpu_records.remove(&region_id).unwrap_or(0) as u64,
-                        );
-                        let interval_second = unix_secs_now
-                            .into_inner()
-                            .saturating_sub(last_report_ts.into_inner());
-                        // Keep consistent with the calculation of cpu_usages in a store heartbeat.
-                        // See components/tikv_util/src/metrics/threads_linux.rs for more details.
-                        (interval_second > 0)
-                            .then(|| {
-                                ((cpu_time_duration.as_secs_f64() * 100.0) / interval_second as f64)
-                                    as u64
-                            })
-                            .unwrap_or(0)
-                    };
                     (
                         read_bytes_delta,
                         read_keys_delta,
@@ -1212,7 +1292,6 @@ impl Runnable for PdRunner {
                         written_keys_delta,
                         last_report_ts,
                         query_stats.0,
-                        cpu_usage,
                     )
                 };
                 self.handle_heartbeat(
@@ -1254,6 +1333,15 @@ impl Runnable for PdRunner {
             PdTask::UpdateSafeTS => self.handle_update_safe_ts(),
             PdTask::ReportBuckets(buckets) => {
                 self.handle_report_region_buckets(buckets);
+            }
+            PdTask::SyncRegion {
+                keyspace_id,
+                callback,
+            } => {
+                self.handle_sync_region(keyspace_id, callback);
+            }
+            PdTask::RoleChanged { region_id, role } => {
+                self.handle_role_changed(region_id, role);
             }
         };
     }
