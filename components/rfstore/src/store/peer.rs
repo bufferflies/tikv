@@ -464,6 +464,11 @@ pub(crate) struct Peer {
     /// `test_node_merge_write_data_to_source_region_after_merging`
     /// The peers who want to rollback merge.
     pub want_rollback_merge_peers: HashSet<u64>,
+
+    /// The known newest conf version and its corresponding peer list
+    /// Send to these peers to check whether itself is stale.
+    pub check_stale_conf_ver: u64,
+    pub check_stale_peers: Vec<metapb::Peer>,
 }
 
 impl Peer {
@@ -553,6 +558,8 @@ impl Peer {
             buckets: None,
             pending_merge_state: None,
             want_rollback_merge_peers: Default::default(),
+            check_stale_conf_ver: 0,
+            check_stale_peers: vec![],
         };
         // If this region has only one peer and I am the one, campaign directly.
         if region.get_peers().len() == 1 && region.get_peers()[0].get_store_id() == store_id {
@@ -3112,6 +3119,32 @@ impl Peer {
         if self.pending_merge_state.is_some() {
             self.pending_merge_state = None;
             self.want_rollback_merge_peers.clear();
+        }
+    }
+
+    pub fn bcast_check_stale_peer_message(&mut self, ctx: &mut RaftContext) {
+        if self.check_stale_conf_ver < self.region().get_region_epoch().get_conf_ver() {
+            self.check_stale_conf_ver = self.region().get_region_epoch().get_conf_ver();
+            self.check_stale_peers = self.region().get_peers().to_vec();
+        }
+        for peer in &self.check_stale_peers {
+            if peer.get_id() == self.peer_id() {
+                continue;
+            }
+            let mut extra_msg = ExtraMessage::default();
+            extra_msg.set_type(ExtraMessageType::MsgCheckStalePeer);
+            self.send_extra_message(extra_msg, &mut ctx.global.trans, peer);
+        }
+    }
+
+    pub fn on_check_stale_peer_response(
+        &mut self,
+        check_conf_ver: u64,
+        check_peers: Vec<metapb::Peer>,
+    ) {
+        if self.check_stale_conf_ver < check_conf_ver {
+            self.check_stale_conf_ver = check_conf_ver;
+            self.check_stale_peers = check_peers;
         }
     }
 }

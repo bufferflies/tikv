@@ -502,12 +502,18 @@ impl<'a> PeerMsgHandler<'a> {
         result
     }
 
-    fn on_extra_message(&mut self, msg: RaftMessage) {
+    fn on_extra_message(&mut self, mut msg: RaftMessage) {
         match msg.get_extra_msg().get_type() {
             ExtraMessageType::MsgWantRollbackMerge => {
                 self.fsm.peer.maybe_add_want_rollback_merge_peer(
                     msg.get_from_peer().get_id(),
                     msg.get_extra_msg(),
+                );
+            }
+            ExtraMessageType::MsgCheckStalePeerResponse => {
+                self.fsm.peer.on_check_stale_peer_response(
+                    msg.get_region_epoch().get_conf_ver(),
+                    msg.mut_extra_msg().take_check_peers().into(),
                 );
             }
             _ => {} // TODO
@@ -1583,6 +1589,8 @@ impl<'a> PeerMsgHandler<'a> {
                     "peer_id" => self.fsm.peer_id(),
                     "expect" => %self.ctx.cfg.max_leader_missing_duration,
                 );
+
+                self.fsm.peer.bcast_check_stale_peer_message(self.ctx);
 
                 let task = PdTask::ValidatePeer {
                     peer: self.fsm.peer.peer.clone(),

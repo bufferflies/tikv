@@ -2,8 +2,8 @@
 
 use std::cmp;
 
+use kvengine::WRITE_CF;
 use rand::Rng;
-use rfstore::WRITE_CF;
 use test_cloud_server::ServerCluster;
 use tikv_util::config::ReadableSize;
 
