@@ -30,9 +30,10 @@ pub(crate) fn get_all_stores_except_tiflash(
         .get_all_stores(true)?
         .into_iter()
         .filter(|s| {
-            !s.get_labels()
-                .iter()
-                .any(|l| l.key.to_lowercase() == "engine" && l.value.to_lowercase() == "tiflash")
+            !s.get_labels().iter().any(|l| {
+                // including "tiflash" & "tiflash_compute"
+                l.key.to_lowercase() == "engine" && l.value.to_lowercase().starts_with("tiflash")
+            })
         })
         .collect())
 }
