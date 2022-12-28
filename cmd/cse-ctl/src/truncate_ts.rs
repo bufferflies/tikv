@@ -12,6 +12,7 @@ use kvproto::metapb::Store;
 use pd_client::PdClient;
 use security::SecurityConfig;
 use slog_global::{error, info};
+use tikv_client::transaction::{Client as TiKVClient, ResolveLocksOptions};
 use tikv_util::time::Instant;
 use tokio::runtime::Runtime;
 
@@ -52,6 +53,12 @@ pub(crate) fn execute_truncate_ts(args: TruncateTsArgs) {
         .enable_all()
         .build()
         .unwrap();
+
+    if let Err(e) = runtime.block_on(resolve_async_commit_locks(&config)) {
+        error!("resolve_async_commit_locks error: {:?}", e);
+        return;
+    }
+
     let start = Instant::now();
     while Instant::now().duration_since(start) < timeout {
         let stores = get_all_stores_except_tiflash(&pd_client).unwrap();
@@ -222,6 +229,36 @@ async fn query_max_ts_store(store: Store, tx: SyncSender<Result<(u64, u64), Stri
             .send(Err(format!("Store {:?} failed, {:?}", store_id, e)))
             .unwrap(),
     }
+}
+
+async fn resolve_async_commit_locks(config: &TruncateTsConfig) -> tikv_client::Result<()> {
+    let tikv_client_config = if config.security.ca_path.is_empty() {
+        tikv_client::Config::default()
+    } else {
+        tikv_client::Config::default().with_security(
+            config.security.ca_path.clone(),
+            config.security.cert_path.clone(),
+            config.security.key_path.clone(),
+        )
+    };
+    let tikv_client = TiKVClient::new_with_config(
+        config.pd.endpoints.clone(),
+        tikv_client_config,
+        Some(slog_global::get_global().new(slog::o!())),
+    )
+    .await?;
+
+    let safepoint = tikv_client.current_timestamp().await?;
+    let options = ResolveLocksOptions {
+        async_commit_only: true,
+        ..Default::default()
+    };
+    let result = tikv_client.cleanup_locks(&safepoint, options).await?;
+    info!(
+        "resolve_async_commit_locks succeed, meet locks: {}",
+        result.meet_locks
+    );
+    Ok(())
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug, Default)]

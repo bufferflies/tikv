@@ -180,6 +180,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-recursion"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7d78656ba01f1b93024b7c3a0467f1608e4be67d725749fdcd7d2c7678fd7a2"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "async-speed-limit"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1426,6 +1437,7 @@ dependencies = [
  "slog-global",
  "slog-term",
  "thiserror",
+ "tikv-client",
  "tikv_util",
  "tokio",
  "toml",
@@ -1523,6 +1535,17 @@ name = "derivative"
 version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fcc3dd5e9e9c0b295d6e1e4d811fb6f157d5ffd784b8d202fc62eac8035a770b"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "derive-new"
+version = "0.5.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3418329ca0ad70234b9735dc4ceed10af4df60eff9c8e7b06cb5e520d92c3535"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -6714,6 +6737,93 @@ dependencies = [
  "walkdir",
  "yatp",
  "zipf",
+]
+
+[[package]]
+name = "tikv-client"
+version = "0.1.0"
+source = "git+http://github.com/tikv/client-rust.git?rev=a04e5510a726102d8e1a6b4b029c6e215fd46aa8#a04e5510a726102d8e1a6b4b029c6e215fd46aa8"
+dependencies = [
+ "async-recursion",
+ "async-trait",
+ "derive-new",
+ "either",
+ "fail 0.4.0",
+ "futures 0.3.15",
+ "futures-timer",
+ "grpcio",
+ "lazy_static",
+ "log",
+ "prometheus",
+ "rand 0.8.3",
+ "regex",
+ "semver 1.0.4",
+ "serde",
+ "serde_derive",
+ "slog",
+ "slog-term",
+ "thiserror",
+ "tikv-client-common",
+ "tikv-client-pd",
+ "tikv-client-proto",
+ "tikv-client-store",
+ "tokio",
+]
+
+[[package]]
+name = "tikv-client-common"
+version = "0.1.0"
+source = "git+http://github.com/tikv/client-rust.git?rev=a04e5510a726102d8e1a6b4b029c6e215fd46aa8#a04e5510a726102d8e1a6b4b029c6e215fd46aa8"
+dependencies = [
+ "futures 0.3.15",
+ "grpcio",
+ "lazy_static",
+ "log",
+ "regex",
+ "semver 1.0.4",
+ "thiserror",
+ "tikv-client-proto",
+ "tokio",
+]
+
+[[package]]
+name = "tikv-client-pd"
+version = "0.1.0"
+source = "git+http://github.com/tikv/client-rust.git?rev=a04e5510a726102d8e1a6b4b029c6e215fd46aa8#a04e5510a726102d8e1a6b4b029c6e215fd46aa8"
+dependencies = [
+ "async-trait",
+ "futures 0.3.15",
+ "grpcio",
+ "log",
+ "tikv-client-common",
+ "tikv-client-proto",
+]
+
+[[package]]
+name = "tikv-client-proto"
+version = "0.1.0"
+source = "git+http://github.com/tikv/client-rust.git?rev=a04e5510a726102d8e1a6b4b029c6e215fd46aa8#a04e5510a726102d8e1a6b4b029c6e215fd46aa8"
+dependencies = [
+ "futures 0.3.15",
+ "grpcio",
+ "lazy_static",
+ "protobuf",
+ "protobuf-build",
+ "raft-proto",
+]
+
+[[package]]
+name = "tikv-client-store"
+version = "0.1.0"
+source = "git+http://github.com/tikv/client-rust.git?rev=a04e5510a726102d8e1a6b4b029c6e215fd46aa8#a04e5510a726102d8e1a6b4b029c6e215fd46aa8"
+dependencies = [
+ "async-trait",
+ "derive-new",
+ "futures 0.3.15",
+ "grpcio",
+ "log",
+ "tikv-client-common",
+ "tikv-client-proto",
 ]
 
 [[package]]
