@@ -1,0 +1,51 @@
+name: Integrations
+
+on:
+  push:
+    branches:
+      - cloud-engine
+  workflow_dispatch:
+
+# Concurrency ensures that only a single job or workflow using the same concurrency group will run at a time.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.push.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dev:
+    name: Run integrations tests
+    runs-on: x64
+    strategy:
+      matrix:
+        case: [ cloud_engine, cloud_engine_failpoints ]
+    env:
+      RUSTFLAGS: -Dwarnings
+      FAIL_POINT: "1"
+      ROCKSDB_SYS_SSE: "1"
+      RUST_BACKTRACE: "1"
+      LOG_LEVEL: INFO
+      EXTRA_CARGO_ARGS: --no-run
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          ref: ${{ github.event.push.head.sha }}
+      - uses: lukka/get-cmake@latest
+      - name: Configure git for private modules
+        env:
+          TOKEN: ${{ secrets.GIT_ACTION_BOT }}
+        run: git config --global url."https://${TOKEN}@github.com/".insteadOf "https://github.com/"
+      - name: Install `rust` toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly-2022-02-14
+          default: true
+          profile: minimal
+          components: clippy
+      - uses: Swatinem/rust-cache@v1
+      - name: Run integrations tests
+        env:
+          CARGO_INCREMENTAL: "0"
+        working-directory: ./
+        # --test-threads=1 to run test case in serial for stability.
+        run: |
+          ./scripts/env cargo test -p tests --test ${{ matrix.case }} -- --test-threads=1 --nocapture

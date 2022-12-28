@@ -57,6 +57,7 @@ fn test_region_merge_isolated_peer() {
     let pd_client = cluster.get_pd_client();
     let mut client = cluster.new_client();
     cluster.wait_region_replicated(&[], 3);
+    pd_client.disable_default_operator();
 
     let split_key = i_to_key(5);
     client.split(&split_key);
