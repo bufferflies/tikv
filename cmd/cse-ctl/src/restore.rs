@@ -83,7 +83,7 @@ fn execute_restore_tikv(args: RestoreTiKVArgs) {
             Box::new(s3fs),
             &cluster_backup,
             args.store_id,
-            &PathBuf::from(&args.path).join("raft"), // rfengine files are in raft dir.
+            &PathBuf::from(&args.path),
         );
     }
 }
