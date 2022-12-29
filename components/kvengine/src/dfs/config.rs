@@ -23,6 +23,8 @@ pub struct Config {
     pub zstd_compression_level: String,
 
     pub remote_analyzer_addr: String,
+
+    pub allow_fallback_local: bool,
 }
 
 impl Default for Config {
@@ -37,6 +39,7 @@ impl Default for Config {
             remote_compactor_addr: "".to_string(),
             zstd_compression_level: "".to_string(),
             remote_analyzer_addr: "".to_string(),
+            allow_fallback_local: true,
         }
     }
 }
@@ -54,6 +57,12 @@ impl Config {
         }
     }
 
+    fn env_or_default_bool(name: &str, val: &mut bool) {
+        if let Ok(v) = env::var(name) {
+            *val = v == "true";
+        }
+    }
+
     pub fn override_from_env(&mut self) {
         Self::env_or_default("DFS_S3_BUCKET", &mut self.s3_bucket);
         Self::env_or_default("DFS_S3_ENDPOINT", &mut self.s3_endpoint);
@@ -67,5 +76,7 @@ impl Config {
             "DFS_ZSTD_COMPRESSION_LEVEL",
             &mut self.zstd_compression_level,
         );
+
+        Self::env_or_default_bool("DFS_ALLOW_FALLBACK_LOCAL", &mut self.allow_fallback_local);
     }
 }

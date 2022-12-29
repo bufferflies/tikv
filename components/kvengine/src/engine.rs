@@ -85,6 +85,8 @@ impl Engine {
         let (flush_tx, flush_rx) = mpsc::unbounded();
         let (compact_tx, compact_rx) = mpsc::unbounded();
         let (free_tx, free_rx) = mpsc::unbounded();
+        let compression_lvl = opts.table_builder_options.compression_lvl;
+        let allow_fallback_local = opts.allow_fallback_local;
         let core = EngineCore {
             engine_id: AtomicU64::new(meta_iter.engine_id()),
             shards: DashMap::new(),
@@ -93,7 +95,12 @@ impl Engine {
             compact_tx,
             fs: fs.clone(),
             cache,
-            comp_client: CompactionClient::new(fs.clone(), opts.remote_compactor_addr.clone()),
+            comp_client: CompactionClient::new(
+                fs.clone(),
+                opts.remote_compactor_addr.clone(),
+                compression_lvl,
+                allow_fallback_local,
+            ),
             id_allocator,
             managed_safe_ts: AtomicU64::new(0),
             tmp_file_id: AtomicU64::new(0),
@@ -118,7 +125,7 @@ impl Engine {
         thread::Builder::new()
             .name("compaction".to_string())
             .spawn(move || {
-                compact_en.run_compaction(compact_rx, opts.table_builder_options.compression_lvl);
+                compact_en.run_compaction(compact_rx);
             })
             .unwrap();
         thread::Builder::new()

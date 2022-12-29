@@ -34,6 +34,8 @@ pub enum Error {
     CheckMerge(String),
     #[error("incompatible remote compactor {}:{}", .url, .msg)]
     IncompatibleRemoteCompactor { url: String, msg: String },
+    #[error("fallback to local compactor disabled")]
+    FallbackLocalCompactorDisabled,
 }
 
 impl From<table::Error> for Error {

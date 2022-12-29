@@ -22,7 +22,7 @@ use crate::{
         search,
         sstable::{self, InMemFile, L0Builder, SSTable},
     },
-    Error::{IncompatibleRemoteCompactor, RemoteCompaction},
+    Error::{FallbackLocalCompactorDisabled, IncompatibleRemoteCompactor, RemoteCompaction},
     Iterator, EXTRA_CF, LOCK_CF, WRITE_CF, *,
 };
 
@@ -68,15 +68,24 @@ pub struct CompactionClient {
     dfs: Arc<dyn dfs::DFS>,
     remote_compactors: Arc<Mutex<RemoteCompactors>>,
     client: Option<hyper::Client<hyper::client::HttpConnector>>,
+    compression_lvl: i32,
+    allow_fallback_local: bool,
 }
 
 impl CompactionClient {
-    pub(crate) fn new(dfs: Arc<dyn dfs::DFS>, remote_url: String) -> Self {
+    pub(crate) fn new(
+        dfs: Arc<dyn dfs::DFS>,
+        remote_url: String,
+        compression_lvl: i32,
+        allow_fallback_local: bool,
+    ) -> Self {
         let remote_compactors = RemoteCompactors::new(remote_url);
         Self {
             dfs,
             remote_compactors: Arc::new(Mutex::new(remote_compactors)),
             client: Some(hyper::Client::new()),
+            compression_lvl,
+            allow_fallback_local,
         }
     }
 
@@ -144,14 +153,10 @@ impl CompactionClient {
         }
     }
 
-    pub(crate) fn compact(
-        &self,
-        req: CompactionRequest,
-        compression_lvl: i32,
-    ) -> Result<pb::ChangeSet> {
+    pub(crate) fn compact(&self, req: CompactionRequest) -> Result<pb::ChangeSet> {
         let mut remote_compactor = self.get_remote_compactor();
         if remote_compactor.remote_url.is_empty() {
-            local_compact(self.dfs.clone(), &req, compression_lvl)
+            local_compact(self.dfs.clone(), &req, self.compression_lvl)
         } else {
             let (tx, rx) = tikv_util::mpsc::bounded(1);
             let req = Arc::new(req);
@@ -168,8 +173,15 @@ impl CompactionClient {
                 match rx.recv().unwrap() {
                     result @ Ok(_) => break result,
                     Err(e @ IncompatibleRemoteCompactor { .. }) => {
-                        warn!("fall back to local compactor due to error: {:?}", e);
-                        break local_compact(self.dfs.clone(), &req, compression_lvl);
+                        if self.allow_fallback_local {
+                            warn!("fall back to local compactor due to error: {:?}", e);
+                            break local_compact(self.dfs.clone(), &req, self.compression_lvl);
+                        } else {
+                            warn!(
+                                "remote compactor is incompatible and local compaction is not allowed"
+                            );
+                            break Err(FallbackLocalCompactorDisabled);
+                        }
                     }
                     Err(e) => {
                         retry_cnt += 1;
@@ -187,7 +199,14 @@ impl CompactionClient {
                             remote_compactor = self.get_remote_compactor();
                         }
                         if remote_compactor.remote_url.is_empty() {
-                            break local_compact(self.dfs.clone(), &req, compression_lvl);
+                            if self.allow_fallback_local {
+                                break local_compact(self.dfs.clone(), &req, self.compression_lvl);
+                            } else {
+                                warn!(
+                                    "no remote compactor available and local compaction is not allowed"
+                                );
+                                break Err(FallbackLocalCompactorDisabled);
+                            }
                         }
                         std::thread::sleep(Duration::from_secs(1));
                     }
@@ -460,12 +479,8 @@ impl Engine {
         }
     }
 
-    pub(crate) fn run_compaction(
-        &self,
-        compact_rx: mpsc::Receiver<CompactMsg>,
-        compression_lvl: i32,
-    ) {
-        let mut runner = CompactRunner::new(self.clone(), compact_rx, compression_lvl);
+    pub(crate) fn run_compaction(&self, compact_rx: mpsc::Receiver<CompactMsg>) {
+        let mut runner = CompactRunner::new(self.clone(), compact_rx);
         runner.run();
     }
 
@@ -490,11 +505,7 @@ impl Engine {
         Some((self.build_compact_ln_request(shard, &cd), Some(cd)))
     }
 
-    pub(crate) fn compact(
-        &self,
-        id_ver: IDVer,
-        compression_lvl: i32,
-    ) -> Option<Result<pb::ChangeSet>> {
+    pub(crate) fn compact(&self, id_ver: IDVer) -> Option<Result<pb::ChangeSet>> {
         let shard = self.get_shard_with_ver(id_ver.id, id_ver.ver).ok()?;
         let tag = shard.tag();
         if !shard.ready_to_compact() {
@@ -503,13 +514,13 @@ impl Engine {
         }
         // Destroy range & truncate ts has higher priority than compaction.
         if shard.get_data().ready_to_destroy_range() {
-            return Some(self.destroy_range(&shard, compression_lvl));
+            return Some(self.destroy_range(&shard));
         }
         if shard.get_data().ready_to_truncate_ts() {
-            return self.truncate_ts(&shard, compression_lvl).transpose();
+            return self.truncate_ts(&shard).transpose();
         }
         if shard.get_data().ready_to_trim_over_bound() {
-            return Some(self.trim_over_bound(&shard, compression_lvl));
+            return Some(self.trim_over_bound(&shard));
         }
         let pri = shard.get_compaction_priority()?;
         let (req, cd) = self.build_compact_request(&shard, pri)?;
@@ -552,7 +563,7 @@ impl Engine {
                 return Some(Ok(cs));
             }
         }
-        Some(self.comp_client.compact(req, compression_lvl))
+        Some(self.comp_client.compact(req))
     }
 
     pub(crate) fn build_compact_l0_request(&self, shard: &Shard) -> Option<CompactionRequest> {
@@ -668,7 +679,7 @@ impl Engine {
         req
     }
 
-    fn destroy_range(&self, shard: &Shard, compression_lvl: i32) -> Result<pb::ChangeSet> {
+    fn destroy_range(&self, shard: &Shard) -> Result<pb::ChangeSet> {
         let data = shard.get_data();
         assert!(!data.del_prefixes.is_empty());
         // Tables that full covered by delete-prefixes.
@@ -727,7 +738,7 @@ impl Engine {
             req.in_place_compact_files = overlaps;
             req.del_prefixes = data.del_prefixes.marshal();
             req.file_ids = self.id_allocator.alloc_id(req.in_place_compact_files.len());
-            let mut cs = self.comp_client.compact(req, compression_lvl)?;
+            let mut cs = self.comp_client.compact(req)?;
             let dr = cs.mut_destroy_range();
             deletes.extend(dr.take_table_deletes().into_iter());
             dr.set_table_deletes(deletes.into());
@@ -740,11 +751,7 @@ impl Engine {
         Ok(cs)
     }
 
-    pub(crate) fn truncate_ts(
-        &self,
-        shard: &Shard,
-        compression_lvl: i32,
-    ) -> Result<Option<pb::ChangeSet>> {
+    pub(crate) fn truncate_ts(&self, shard: &Shard) -> Result<Option<pb::ChangeSet>> {
         let data = shard.get_data();
         let truncate_ts = data.truncate_ts.unwrap();
 
@@ -781,7 +788,7 @@ impl Engine {
             req.truncate_ts = Some(truncate_ts.inner());
             req.in_place_compact_files = overlaps;
             req.file_ids = self.id_allocator.alloc_id(req.in_place_compact_files.len());
-            self.comp_client.compact(req, compression_lvl)?
+            self.comp_client.compact(req)?
         };
         cs.set_shard_id(shard.id);
         cs.set_shard_ver(shard.ver);
@@ -790,7 +797,7 @@ impl Engine {
         Ok(Some(cs))
     }
 
-    fn trim_over_bound(&self, shard: &Shard, compression_lvl: i32) -> Result<pb::ChangeSet> {
+    fn trim_over_bound(&self, shard: &Shard) -> Result<pb::ChangeSet> {
         let data = shard.get_data();
         assert!(data.trim_over_bound);
         // Tables that are entirely over bound.
@@ -845,7 +852,7 @@ impl Engine {
             req.trim_over_bound = true;
             req.in_place_compact_files = overlaps;
             req.file_ids = self.id_allocator.alloc_id(req.in_place_compact_files.len());
-            let mut cs = self.comp_client.compact(req, compression_lvl)?;
+            let mut cs = self.comp_client.compact(req)?;
             let tc = cs.mut_trim_over_bound();
             deletes.extend(tc.take_table_deletes().into_iter());
             tc.set_table_deletes(deletes.into());
@@ -1824,16 +1831,10 @@ pub(crate) struct CompactRunner {
     notified: HashSet<IDVer>,
     /// `pending` contains shards that want to do compaction but the job queue is full now.
     pending: HashSet<IDVer>,
-    /// `compression_lvl` is the compression level used for compaction.
-    compression_lvl: i32,
 }
 
 impl CompactRunner {
-    pub(crate) fn new(
-        engine: Engine,
-        rx: mpsc::Receiver<CompactMsg>,
-        compression_lvl: i32,
-    ) -> Self {
+    pub(crate) fn new(engine: Engine, rx: mpsc::Receiver<CompactMsg>) -> Self {
         Self {
             engine,
             rx,
@@ -1841,7 +1842,6 @@ impl CompactRunner {
             running: Default::default(),
             notified: Default::default(),
             pending: Default::default(),
-            compression_lvl,
         }
     }
 
@@ -1876,9 +1876,8 @@ impl CompactRunner {
         let task_id = self.task_id;
         self.running.insert(id_ver, task_id);
         let engine = self.engine.clone();
-        let compression_lvl = self.compression_lvl;
         std::thread::spawn(move || {
-            let result = Box::new(engine.compact(id_ver, compression_lvl));
+            let result = Box::new(engine.compact(id_ver));
             engine
                 .compact_tx
                 .send(CompactMsg::Finish {
@@ -1915,6 +1914,9 @@ impl CompactRunner {
                 self.engine.handle_compact_response(resp);
                 self.notified.insert(id_ver);
                 self.schedule_pending_compaction();
+            }
+            Some(Err(FallbackLocalCompactorDisabled)) => {
+                error!("shard {} local compaction disabled, no need retry", tag);
             }
             Some(Err(e)) => {
                 error!("shard {} compaction failed {}, retrying", tag, e);

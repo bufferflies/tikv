@@ -31,6 +31,8 @@ pub struct Options {
     pub preparation_concurrency: usize,
 
     pub max_mem_table_size: u64,
+
+    pub allow_fallback_local: bool,
 }
 
 impl Default for Options {
@@ -45,6 +47,7 @@ impl Default for Options {
             recovery_concurrency: Default::default(),
             preparation_concurrency: Default::default(),
             max_mem_table_size: 96 << 20,
+            allow_fallback_local: true,
         }
     }
 }

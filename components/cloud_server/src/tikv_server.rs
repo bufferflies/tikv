@@ -918,6 +918,7 @@ impl TiKVServer {
                     conf.dfs.zstd_compression_level
                 )
             });
+        kv_opts.allow_fallback_local = conf.dfs.allow_fallback_local;
         let opts = Arc::new(kv_opts);
         let recoverer = rfstore::store::RecoverHandler::new(rf_engine.clone());
         let meta_iter = recoverer.clone();
