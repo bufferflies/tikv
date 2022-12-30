@@ -976,7 +976,8 @@ impl<'a> PeerMsgHandler<'a> {
             let estimated_size = shard.get_estimated_size();
             let estimated_entries = shard.get_estimated_entries();
             let estimated_kv_size = shard.get_estimated_kv_size();
-            self.peer.peer_stat.approximate_size = estimated_size;
+            // use 1 for empty size as 0 is for unknown size in PD.
+            self.peer.peer_stat.approximate_size = cmp::max(estimated_size, 1);
             self.peer.peer_stat.approximate_keys = estimated_entries;
             self.peer.peer_stat.approximate_kv_size = estimated_kv_size;
             if !self.fsm.peer.is_leader() {
