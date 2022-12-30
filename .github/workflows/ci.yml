@@ -40,7 +40,13 @@ jobs:
           toolchain: nightly-2022-02-14
           default: true
           profile: minimal
-          components: clippy
+          components: clippy, rustfmt
+      - name: Check format
+        working-directory: ./
+        run: |
+          cargo install -q cargo-sort
+          cargo fmt --check
+          cargo sort -w ./Cargo.toml ./*/Cargo.toml components/*/Cargo.toml cmd/*/Cargo.toml --check
       - uses: Swatinem/rust-cache@v1
       - name: Run tests
         env:
