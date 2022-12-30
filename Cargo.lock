@@ -5031,6 +5031,7 @@ dependencies = [
  "kvproto",
  "lazy_static",
  "libc 0.2.125",
+ "lz4",
  "prometheus",
  "prometheus-static-metric",
  "protobuf",
@@ -5047,6 +5048,7 @@ dependencies = [
  "thiserror",
  "tikv_alloc",
  "tikv_util",
+ "zstd-sys",
 ]
 
 [[package]]
@@ -6700,6 +6702,7 @@ dependencies = [
  "reqwest",
  "resource_metering",
  "rev_lines",
+ "rfengine",
  "rfstore",
  "seahash",
  "security",

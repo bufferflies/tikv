@@ -140,6 +140,7 @@ rand = "0.7.3"
 regex = "1.5"
 resource_metering = { path = "components/resource_metering" }
 rev_lines = "0.2.1"
+rfengine = { path = "components/rfengine" }
 rfstore = { path = "components/rfstore", default-features = false }
 seahash = "4.1.0"
 security = { path = "components/security", default-features = false }

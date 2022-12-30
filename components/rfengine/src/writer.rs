@@ -4,6 +4,7 @@ use std::{
     alloc::{self, Layout},
     cmp,
     fs::File,
+    io::Read,
     os::unix::prelude::FileExt,
     path::{Path, PathBuf},
     ptr::NonNull,
@@ -154,22 +155,33 @@ const WAL_MAGIC_NUMBER: u64 = 0xf126b8135c90588e;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u64)]
-enum Version {
+pub(crate) enum Version {
     V1 = 1,
+    V2 = 2,
+}
+
+impl Version {
+    fn from(version: u64) -> Result<Version> {
+        match version {
+            1 => Ok(Version::V1),
+            2 => Ok(Version::V2),
+            _ => Err(Error::Corruption(format!(
+                "WAL version {:x} mismatch",
+                version
+            ))),
+        }
+    }
 }
 
 #[derive(PartialEq, Eq, Debug)]
 pub(crate) struct WalHeader {
-    version: Version,
+    pub(crate) version: Version,
     pub(crate) epoch_id: u32,
 }
 
 impl WalHeader {
-    pub(crate) fn new(epoch_id: u32) -> Self {
-        Self {
-            version: Version::V1,
-            epoch_id,
-        }
+    pub(crate) fn new(version: Version, epoch_id: u32) -> Self {
+        Self { version, epoch_id }
     }
 }
 
@@ -193,31 +205,73 @@ impl WalHeader {
         if magic_number != WAL_MAGIC_NUMBER {
             return Err(Error::Corruption("WAL magic number mismatch".to_owned()));
         }
-        let version = buf.get_u64_le();
-        if version != Version::V1 as u64 {
-            return Err(Error::Corruption("WAL version mismatch".to_owned()));
-        }
+        let version = Version::from(buf.get_u64_le())?;
         let epoch_id = buf.get_u32_le();
-        Ok(Self {
-            version: Version::V1,
-            epoch_id,
-        })
+        Ok(Self { version, epoch_id })
     }
+}
+
+pub(crate) fn check_wal_header(dir: &Path, epoch_id: u32) -> Result<WalHeader> {
+    let filename = wal_file_name(dir, epoch_id);
+    if let Ok(mut file) = File::open(filename) {
+        let mut buf = vec![0u8; WalHeader::len()];
+        if file.read_exact(&mut buf).is_ok() {
+            return match WalHeader::decode(&buf) {
+                Ok(header) => {
+                    if header.epoch_id != epoch_id {
+                        return Err(Error::Corruption("WAL epoch id mismatch".to_owned()));
+                    }
+                    Ok(header)
+                }
+                Err(err) => {
+                    // Haven't written the header.
+                    if buf.iter().all(|v| *v == 0) {
+                        return Err(Error::EOF);
+                    }
+                    // Header is corrupt, but the first batch header is empty which means there
+                    // is no data in this WAL. Treat it like EOF and WAL writer will rewrite the
+                    // header.
+                    file.read_exact(&mut buf[..BATCH_HEADER_SIZE])?;
+                    if buf.iter().take(BATCH_HEADER_SIZE).all(|v| *v == 0) {
+                        return Err(Error::EOF);
+                    }
+                    // Header corruption.
+                    Err(err)
+                }
+            };
+        }
+    }
+    return Err(Error::EOF);
 }
 
 pub(crate) struct WalWriter {
     dir: PathBuf,
+    pub(crate) version: Version,
+    current_version: Version,
     pub(crate) epoch_id: u32,
     pub(crate) wal_size: usize,
     fd: Option<File>,
     buf: DmaBuffer,
+    // batch_buf is unformatted data.
+    batch_buf: DmaBuffer,
+    compression_threshold: usize,
     // file_off is always aligned.
     pub(crate) file_off: u64,
     pub(crate) compacted_epoch: Arc<AtomicU32>,
 }
 
 impl WalWriter {
-    pub(crate) fn new(dir: &Path, wal_size: usize, compacted_epoch: Arc<AtomicU32>) -> Self {
+    pub(crate) fn new(
+        dir: &Path,
+        wal_size: usize,
+        compression_threshold: usize,
+        compacted_epoch: Arc<AtomicU32>,
+    ) -> Self {
+        let version = if compression_threshold == 0 {
+            Version::V1
+        } else {
+            Version::V2
+        };
         let mut buf = DmaBuffer::new(INITIAL_BUF_SIZE);
         buf.ensure_space(BATCH_HEADER_SIZE);
         // Safety: ensured enough space and `flush` will init the header.
@@ -226,10 +280,14 @@ impl WalWriter {
         }
         Self {
             dir: dir.to_path_buf(),
+            version,
+            current_version: version,
             epoch_id: 0,
             wal_size: DmaBuffer::aligned_len(wal_size),
             fd: None,
             buf,
+            batch_buf: DmaBuffer::new(INITIAL_BUF_SIZE),
+            compression_threshold,
             file_off: 0,
             compacted_epoch,
         }
@@ -241,7 +299,20 @@ impl WalWriter {
         let file = open_direct_file(&wal_file_name(&self.dir, epoch_id), true)?;
         self.fd = Some(file);
         if file_off == 0 {
-            self.write_header()?
+            self.current_version = self.version;
+            self.write_header()?;
+        } else {
+            match check_wal_header(self.dir.as_path(), epoch_id) {
+                Ok(wal_header) => {
+                    self.current_version = wal_header.version;
+                }
+                Err(Error::EOF) => {
+                    self.file_off = 0;
+                    self.current_version = self.version;
+                    self.write_header()?;
+                }
+                Err(e) => return Err(e),
+            };
         }
         Ok(())
     }
@@ -252,12 +323,12 @@ impl WalWriter {
 
     pub(crate) fn append_region_data(&mut self, peer_batch: &PeerBatch) {
         let data_len = peer_batch.encoded_len();
-        self.buf.ensure_space(data_len);
+        self.batch_buf.ensure_space(data_len);
         // Safety: `data_len` is the length of data encoded by `encode_to` and
         // `ensure_space` ensures enough space.
         unsafe {
-            peer_batch.encode_to(&mut self.buf.chunk_mut());
-            self.buf.advance_mut(data_len);
+            peer_batch.encode_to(&mut self.batch_buf.chunk_mut());
+            self.batch_buf.advance_mut(data_len);
         }
     }
 
@@ -268,6 +339,14 @@ impl WalWriter {
             rotated = true;
         }
 
+        match self.current_version {
+            Version::V1 => {
+                self.format_v1();
+            }
+            Version::V2 => {
+                self.format_v2();
+            }
+        };
         let data_len = self.buf.len();
         let batch = self.buf.as_mut();
         let (mut batch_header, batch_payload) = batch.split_at_mut(BATCH_HEADER_SIZE);
@@ -287,6 +366,46 @@ impl WalWriter {
         self.buf.truncate(BATCH_HEADER_SIZE);
 
         Ok((data_len, rotated))
+    }
+
+    fn format_v1(&mut self) {
+        unsafe {
+            self.buf.ensure_space(self.batch_buf.len());
+            self.buf.chunk_mut().put_slice(self.batch_buf.as_ref());
+            self.buf.advance_mut(self.batch_buf.len());
+            self.batch_buf.truncate(0);
+        }
+    }
+
+    fn format_v2(&mut self) {
+        unsafe {
+            let compression = self.batch_buf.len() >= self.compression_threshold;
+            let compression_type = if compression { 1 } else { 0 };
+            self.buf.ensure_space(4);
+            self.buf.chunk_mut().put_u32_le(compression_type);
+            self.buf.advance_mut(4);
+            if compression {
+                self.buf.ensure_space(4);
+                self.buf.chunk_mut().put_u32_le(self.batch_buf.len() as u32);
+                self.buf.advance_mut(4);
+                let compress_bound = lz4::liblz4::LZ4_compressBound(self.batch_buf.len() as i32);
+                self.buf.ensure_space(compress_bound as usize);
+                let src = self.batch_buf.as_mut();
+                let dst = self.buf.chunk_mut();
+                let size = lz4::liblz4::LZ4_compress_default(
+                    src.as_ptr() as *const libc::c_char,
+                    dst.as_mut_ptr() as *mut libc::c_char,
+                    src.len() as i32,
+                    compress_bound as i32,
+                ) as usize;
+                self.buf.advance_mut(size);
+            } else {
+                self.buf.ensure_space(self.batch_buf.len());
+                self.buf.chunk_mut().put_slice(self.batch_buf.as_ref());
+                self.buf.advance_mut(self.batch_buf.len());
+            }
+            self.batch_buf.truncate(0);
+        }
     }
 
     fn should_rotate(&self) -> bool {
@@ -309,7 +428,7 @@ impl WalWriter {
     fn write_header(&mut self) -> Result<()> {
         let mut buf = DmaBuffer::new(WalHeader::len());
         unsafe {
-            let header = WalHeader::new(self.epoch_id);
+            let header = WalHeader::new(self.version, self.epoch_id);
             header.encode_to(buf.chunk_mut());
             buf.advance_mut(WalHeader::len());
             buf.pad_to_align();
@@ -340,7 +459,7 @@ pub(crate) fn epoch_to_idx(epoch_id: u32) -> usize {
 #[cfg(test)]
 mod tests {
     use super::DmaBuffer;
-    use crate::WalHeader;
+    use crate::{Version::V1, WalHeader};
 
     #[test]
     fn test_dma_buffer() {
@@ -366,7 +485,7 @@ mod tests {
 
     #[test]
     fn test_wal_header() {
-        let wal_header = WalHeader::new(1);
+        let wal_header = WalHeader::new(V1, 1);
         let mut buf = [0_u8; WalHeader::len()];
         wal_header.encode_to(buf.as_mut_slice());
         assert_eq!(WalHeader::decode(buf.as_slice()).unwrap(), wal_header);

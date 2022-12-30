@@ -1,10 +1,9 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{fs, io::Read, path::Path};
+use std::{fs, path::Path};
 
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::Buf;
-use file_system::File;
 use tikv_util::info;
 
 use crate::{log_batch::RaftLogOp, manifest::Manifest, *};
@@ -37,7 +36,29 @@ impl RfEngineCore {
             wal_offset = self.load_wal_file(epoch_id)?;
         }
         let mut writer = self.writer.lock().unwrap();
+        // Delete the following 7 lines and function get_wal_header at the next wal upgrade.
+        if !self.is_empty() {
+            match self.get_wal_header(epoch_id) {
+                Ok(wal_header) => writer.version = wal_header.version,
+                Err(Error::EOF) => {}
+                Err(e) => return Err(e),
+            };
+        }
         writer.open_file(epoch_id, wal_offset)
+    }
+
+    pub(crate) fn get_wal_header(&self, mut epoch_id: u32) -> Result<WalHeader> {
+        loop {
+            match check_wal_header(self.dir.as_path(), epoch_id) {
+                Ok(wal_header) => {
+                    return Ok(wal_header);
+                }
+                Err(Error::EOF) => {
+                    epoch_id -= 1;
+                }
+                Err(e) => return Err(e),
+            };
+        }
     }
 
     pub(crate) fn load_wal_file(&mut self, epoch_id: u32) -> Result<u64> {
@@ -91,16 +112,5 @@ impl RfEngineCore {
 }
 
 pub(crate) fn wal_exists(dir: &Path, epoch_id: u32) -> bool {
-    let filename = wal_file_name(dir, epoch_id);
-    if let Ok(mut file) = File::open(filename) {
-        let mut buf = vec![0u8; WalHeader::len()];
-        if file.read_exact(&mut buf).is_ok() {
-            if let Ok(header) = WalHeader::decode(&buf) {
-                if header.epoch_id == epoch_id {
-                    return true;
-                }
-            }
-        }
-    }
-    false
+    check_wal_header(dir, epoch_id).is_ok()
 }

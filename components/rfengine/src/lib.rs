@@ -11,6 +11,9 @@ extern crate tikv_alloc;
 #[macro_use]
 extern crate serde_derive;
 
+mod config;
+pub use config::Config as RfEngineConfig;
+
 pub mod engine;
 pub mod iterator;
 pub mod load;

@@ -6,13 +6,13 @@ use std::{
     path::PathBuf,
 };
 
-use bytes::{Buf, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 
 use crate::{
     worker::wal_file_name,
     write_batch::PeerBatch,
     writer::{DmaBuffer, WalHeader, BATCH_HEADER_SIZE},
-    Error, Result,
+    Error, Result, Version,
 };
 
 pub(crate) struct WALIterator {
@@ -38,6 +38,7 @@ impl WALIterator {
     where
         F: FnMut(PeerBatch),
     {
+        self.offset = 0;
         let filename = wal_file_name(self.dir.as_path(), self.epoch_id);
         let fd = fs::File::open(filename)?;
         let mut buf_reader = BufReader::new(fd);
@@ -98,8 +99,8 @@ impl WALIterator {
     pub(crate) fn read_batch(
         &mut self,
         reader: &mut BufReader<File>,
-        _header: &WalHeader,
-    ) -> Result<&[u8]> {
+        header: &WalHeader,
+    ) -> Result<Bytes> {
         let mut header_buf = [0u8; BATCH_HEADER_SIZE];
         reader.read_exact(header_buf.as_mut_slice())?;
         let mut header_buf = header_buf.as_slice();
@@ -124,6 +125,18 @@ impl WALIterator {
             return Err(Error::Corruption("checksum mismatch".to_owned()));
         }
         self.offset += aligned_length as u64;
-        Ok(batch)
+        match header.version {
+            Version::V1 => Ok(Bytes::from(batch.to_vec())),
+            Version::V2 => {
+                let (mut compression_type, batch_data) = batch.split_at(4);
+                let compression = compression_type.get_u32_le() > 0;
+                if compression {
+                    let dst = lz4::block::decompress(batch_data, None)?;
+                    Ok(Bytes::from(dst))
+                } else {
+                    Ok(Bytes::from(batch_data.to_vec()))
+                }
+            }
+        }
     }
 }

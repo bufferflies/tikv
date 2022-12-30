@@ -52,6 +52,7 @@ use raftstore::{
     store::{CompactionGuardGeneratorFactory, Config as RaftstoreConfig, SplitConfig},
 };
 use resource_metering::Config as ResourceMeteringConfig;
+use rfengine::RfEngineConfig;
 use security::SecurityConfig;
 use tikv_util::{
     config::{self, LogFormat, ReadableDuration, ReadableSize, TomlWriter, GIB, MIB},
@@ -2707,6 +2708,9 @@ pub struct TiKvConfig {
     pub raft_engine: RaftEngineConfig,
 
     #[online_config(skip)]
+    pub rfengine: RfEngineConfig,
+
+    #[online_config(skip)]
     pub security: SecurityConfig,
 
     #[online_config(skip)]
@@ -2774,6 +2778,7 @@ impl Default for TiKvConfig {
             rocksdb: DbConfig::default(),
             raftdb: RaftDbConfig::default(),
             raft_engine: RaftEngineConfig::default(),
+            rfengine: RfEngineConfig::default(),
             storage: StorageConfig::default(),
             security: SecurityConfig::default(),
             import: ImportConfig::default(),

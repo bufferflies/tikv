@@ -49,7 +49,7 @@ const REGION_META_KEY_BYTE: u8 = 2;
 const KV_ENGINE_META_KEY: &[u8] = &[5];
 
 pub(crate) fn execute_unsafe_recover(args: UnsafeRecoverArgs) {
-    let rf = rfengine::RfEngine::open(&args.path, 512 * 1024 * 1024).unwrap();
+    let rf = rfengine::RfEngine::open(&args.path, 512 * 1024 * 1024, 8 * 1024).unwrap();
     let target_regions = if let Some(region_id) = args.region {
         let region_to_peers = rf.get_region_peer_map();
         let &peer_id = region_to_peers.get(&region_id).unwrap();

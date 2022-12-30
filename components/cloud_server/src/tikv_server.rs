@@ -892,8 +892,9 @@ impl TiKVServer {
         // Create raft engine.
         let raft_db_path = Path::new(&conf.raft_store.raftdb_path);
         let kv_engine_path = PathBuf::from(&conf.storage.data_dir).join(Path::new("db"));
-        let wal_size = conf.raft_engine.config().target_file_size.0 as usize;
-        let rf_engine = RfEngine::open(raft_db_path, wal_size).unwrap();
+        let wal_size = conf.rfengine.target_file_size.0 as usize;
+        let compression_threshold = conf.rfengine.batch_compression_threshold.0 as usize;
+        let rf_engine = RfEngine::open(raft_db_path, wal_size, compression_threshold).unwrap();
         let mut kv_opts = kvengine::Options::default();
         let capacity = match conf.storage.block_cache.capacity {
             None => {

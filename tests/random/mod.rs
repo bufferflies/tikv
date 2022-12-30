@@ -51,6 +51,9 @@ fn test_random_workload() {
         conf.raft_store.peer_stale_state_check_interval = ReadableDuration::secs(1);
         conf.raft_store.abnormal_leader_missing_duration = ReadableDuration::secs(3);
         conf.raft_store.max_leader_missing_duration = ReadableDuration::secs(5);
+        conf.rfengine.target_file_size = ReadableSize::mb(1);
+        conf.rfengine.batch_compression_threshold =
+            ReadableSize::kb(rand::thread_rng().gen_range(0..2));
     };
     let mut cluster = ServerCluster::new(nodes.clone(), update_conf_fn);
     cluster.wait_region_replicated(&[], 3);
@@ -137,6 +140,9 @@ fn test_random_merge() {
         conf.raft_store.peer_stale_state_check_interval = ReadableDuration::secs(1);
         conf.raft_store.abnormal_leader_missing_duration = ReadableDuration::secs(3);
         conf.raft_store.max_leader_missing_duration = ReadableDuration::secs(5);
+        conf.rfengine.target_file_size = ReadableSize::mb(1);
+        conf.rfengine.batch_compression_threshold =
+            ReadableSize::kb(rand::thread_rng().gen_range(0..2));
     };
     let mut cluster = ServerCluster::new(nodes.clone(), update_conf_fn);
     cluster.wait_region_replicated(&[], 3);
