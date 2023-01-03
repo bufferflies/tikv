@@ -15,9 +15,6 @@ jobs:
   dev:
     name: Run integrations tests
     runs-on: x64
-    strategy:
-      matrix:
-        case: [ cloud_engine, cloud_engine_failpoints ]
     env:
       RUSTFLAGS: -Dwarnings
       FAIL_POINT: "1"
@@ -44,11 +41,9 @@ jobs:
           default: true
           profile: minimal
           components: clippy
-      - uses: Swatinem/rust-cache@v1
       - name: Run integrations tests
         env:
           CARGO_INCREMENTAL: "0"
         working-directory: ./
-        # --test-threads=1 to run test case in serial for stability.
         run: |
-          ./scripts/env cargo test -p tests --test ${{ matrix.case }} -- --test-threads=1 --nocapture
+          make test-cloud-engine-integration

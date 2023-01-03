@@ -455,3 +455,7 @@ x-build-dist-debug:
 
 test-cloud-engine:
 	cargo test -p kvengine -p rfstore -p rfengine --tests
+
+test-cloud-engine-integration:
+	# --test-threads=1 to run test case in serial for stability.
+	cargo test -p tests --test cloud_engine --test cloud_engine_failpoints -- --test-threads=1 --nocapture
