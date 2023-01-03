@@ -66,7 +66,7 @@ impl From<etcd_client::Error> for Error {
 #[derive(Args)]
 pub struct BackupArgs {
     /// The path of the config file.
-    #[clap(long)]
+    #[clap(long, default_value = "")]
     pub config: PathBuf,
     /// The name of the backup file, if empty, a system generated name will be used.
     #[clap(long, default_value_t = String::new())]
@@ -77,6 +77,18 @@ pub struct BackupArgs {
     /// Incremental backup interval, in seconds.
     #[clap(long, default_value_t = INCREMENTAL_BACKUP_INTERVAL)]
     pub interval: u64,
+    /// PD endpoints, use `,` to separate multiple PDs
+    #[clap(long, default_value_t = String::new())]
+    pub pd: String,
+    /// Path of file that contains list of trusted SSL CAs
+    #[clap(long, default_value = "")]
+    pub cacert: PathBuf,
+    /// Path of file that contains X509 certificate in PEM format
+    #[clap(long, default_value = "")]
+    pub cert: PathBuf,
+    /// Path of file that contains X509 key in PEM format
+    #[clap(long, default_value = "")]
+    pub key: PathBuf,
 }
 
 fn backup_file_name(prefix: String, name: String, backup_ts: u64) -> String {
@@ -92,13 +104,7 @@ fn backup_file_name(prefix: String, name: String, backup_ts: u64) -> String {
 }
 
 pub(crate) fn execute_backup(args: BackupArgs) {
-    let result = std::fs::read(args.config);
-    if result.is_err() {
-        error!("failed to read config file {:?}", result.unwrap_err());
-        return;
-    }
-    let data = result.unwrap();
-    let config: BackupConfig = toml::from_slice(&data).unwrap();
+    let config: BackupConfig = get_backup_config_from_args(&args);
     if args.incremental {
         execute_incremental_backup(config, args.name, Duration::from_secs(args.interval))
     } else {
@@ -473,6 +479,29 @@ pub struct BackupConfig {
     pub security: SecurityConfig,
     pub dfs: DFSConfig,
     pub tolerate_err: usize,
+}
+
+fn get_backup_config_from_args(args: &BackupArgs) -> BackupConfig {
+    let mut config = BackupConfig::default();
+    if args.config.exists() {
+        let data = std::fs::read(args.config.clone()).expect("failed to read config file");
+        config = toml::from_slice(&data).unwrap();
+    }
+    // override from args and ENV
+    if !args.pd.is_empty() {
+        config.pd.endpoints = args.pd.split(",").map(|x| x.to_owned()).collect();
+    }
+    if args.cacert.exists() {
+        config.security.ca_path = args.cacert.to_str().unwrap().to_owned();
+    }
+    if args.cert.exists() {
+        config.security.cert_path = args.cert.to_str().unwrap().to_owned();
+    }
+    if args.key.exists() {
+        config.security.key_path = args.key.to_str().unwrap().to_owned();
+    }
+    config.dfs.override_from_env();
+    config
 }
 
 #[cfg(test)]

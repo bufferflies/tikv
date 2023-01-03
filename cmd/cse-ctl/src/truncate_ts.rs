@@ -25,7 +25,7 @@ const TRUNCATE_TS_QUERY_INTERVAL: Duration = Duration::from_secs(10);
 #[derive(Args)]
 pub struct TruncateTsArgs {
     /// The path of the config file.
-    #[clap(long)]
+    #[clap(long, default_value = "")]
     pub config: PathBuf,
     /// The truncate ts
     #[clap(long)]
@@ -33,16 +33,23 @@ pub struct TruncateTsArgs {
     /// The timeout in seconds
     #[clap(long, default_value_t = DEFAULT_TRUNCATE_TS_TIMEOUT)]
     pub timeout: u64,
+    /// PD endpoints, use `,` to separate multiple PDs
+    #[clap(long, default_value_t = String::new())]
+    pub pd: String,
+    /// Path of file that contains list of trusted SSL CAs
+    #[clap(long, default_value = "")]
+    pub cacert: PathBuf,
+    /// Path of file that contains X509 certificate in PEM format
+    #[clap(long, default_value = "")]
+    pub cert: PathBuf,
+    /// Path of file that contains X509 key in PEM format
+    #[clap(long, default_value = "")]
+    pub key: PathBuf,
 }
 
 pub(crate) fn execute_truncate_ts(args: TruncateTsArgs) {
-    let result = std::fs::read(args.config);
-    if result.is_err() {
-        error!("failed to read config file {:?}", result.unwrap_err());
-        return;
-    }
     let timeout = Duration::from_secs(args.timeout);
-    let config: TruncateTsConfig = toml::from_slice(&result.unwrap()).unwrap();
+    let config = get_truncate_ts_config_from_args(&args);
     let pd_client = create_pd_client(&config.security, &config.pd);
     let truncate_ts = args.truncate_ts;
     let cluster_id = pd_client.get_cluster_id().unwrap();
@@ -267,4 +274,26 @@ async fn resolve_async_commit_locks(config: &TruncateTsConfig) -> tikv_client::R
 pub struct TruncateTsConfig {
     pub pd: pd_client::Config,
     pub security: SecurityConfig,
+}
+
+fn get_truncate_ts_config_from_args(args: &TruncateTsArgs) -> TruncateTsConfig {
+    let mut config = TruncateTsConfig::default();
+    if args.config.exists() {
+        let data = std::fs::read(args.config.clone()).expect("failed to read config file");
+        config = toml::from_slice(&data).unwrap();
+    }
+    // override from args
+    if !args.pd.is_empty() {
+        config.pd.endpoints = args.pd.split(",").map(|x| x.to_owned()).collect();
+    }
+    if args.cacert.exists() {
+        config.security.ca_path = args.cacert.to_str().unwrap().to_owned();
+    }
+    if args.cert.exists() {
+        config.security.cert_path = args.cert.to_str().unwrap().to_owned();
+    }
+    if args.key.exists() {
+        config.security.key_path = args.key.to_str().unwrap().to_owned();
+    }
+    config
 }

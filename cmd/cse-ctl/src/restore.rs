@@ -11,7 +11,7 @@ use kvengine::dfs::{DFSConfig, DFS, S3FS};
 use protobuf::Message;
 use rfenginepb::ClusterBackupMeta;
 use security::SecurityConfig;
-use slog_global::{error, info};
+use slog_global::info;
 
 use crate::{
     common::generate_etcd_connect_opt,
@@ -39,7 +39,7 @@ enum Commands {
 #[derive(Args)]
 struct RestoreTiKVArgs {
     /// The path of the config file.
-    #[clap(long)]
+    #[clap(long, default_value = "")]
     pub config: PathBuf,
     /// The name of the backup file.
     #[clap(long)]
@@ -55,11 +55,23 @@ struct RestoreTiKVArgs {
 #[derive(Args)]
 struct RestorePDArgs {
     /// The path of the config file.
-    #[clap(long)]
+    #[clap(long, default_value = "")]
     pub config: PathBuf,
     /// The name of the backup file.
     #[clap(long)]
     pub name: String,
+    /// PD endpoints, use `,` to separate multiple PDs
+    #[clap(long, default_value_t = String::new())]
+    pub pd: String,
+    /// Path of file that contains list of trusted SSL CAs
+    #[clap(long, default_value = "")]
+    pub cacert: PathBuf,
+    /// Path of file that contains X509 certificate in PEM format
+    #[clap(long, default_value = "")]
+    pub cert: PathBuf,
+    /// Path of file that contains X509 key in PEM format
+    #[clap(long, default_value = "")]
+    pub key: PathBuf,
 }
 
 pub(crate) fn execute_restore_command(cmd: RestoreCommand) {
@@ -70,13 +82,7 @@ pub(crate) fn execute_restore_command(cmd: RestoreCommand) {
 }
 
 fn execute_restore_tikv(args: RestoreTiKVArgs) {
-    let result = std::fs::read(args.config);
-    if result.is_err() {
-        error!("failed to read config file {:?}", result.unwrap_err());
-        return;
-    }
-    let data = result.unwrap();
-    let config: RestoreConfig = toml::from_slice(&data).unwrap();
+    let config = get_restore_tikv_config_from_args(&args);
     let (cluster_backup, s3fs) = get_cluster_backup_meta(&config, args.name);
     if args.store_id > 0 {
         rfengine::restore(
@@ -89,12 +95,7 @@ fn execute_restore_tikv(args: RestoreTiKVArgs) {
 }
 
 fn execute_restore_pd(args: RestorePDArgs) {
-    let result = std::fs::read(args.config);
-    if result.is_err() {
-        panic!("failed to read config file {:?}", result.unwrap_err());
-    }
-    let data = result.unwrap();
-    let config: RestoreConfig = toml::from_slice(&data).unwrap();
+    let config = get_restore_pd_config_from_args(&args);
     let (cluster_backup, _) = get_cluster_backup_meta(&config, args.name);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -233,4 +234,37 @@ pub struct RestoreConfig {
     pub pd: pd_client::Config,
     pub security: SecurityConfig,
     pub dfs: DFSConfig,
+}
+
+fn get_restore_pd_config_from_args(args: &RestorePDArgs) -> RestoreConfig {
+    let mut config = RestoreConfig::default();
+    if args.config.exists() {
+        let data = std::fs::read(args.config.clone()).expect("failed to read config file");
+        config = toml::from_slice(&data).unwrap();
+    }
+    // override from args and ENV
+    if !args.pd.is_empty() {
+        config.pd.endpoints = args.pd.split(",").map(|x| x.to_owned()).collect();
+    }
+    if args.cacert.exists() {
+        config.security.ca_path = args.cacert.to_str().unwrap().to_owned();
+    }
+    if args.cert.exists() {
+        config.security.cert_path = args.cert.to_str().unwrap().to_owned();
+    }
+    if args.key.exists() {
+        config.security.key_path = args.key.to_str().unwrap().to_owned();
+    }
+    config.dfs.override_from_env();
+    config
+}
+
+fn get_restore_tikv_config_from_args(args: &RestoreTiKVArgs) -> RestoreConfig {
+    let mut config = RestoreConfig::default();
+    if args.config.exists() {
+        let data = std::fs::read(args.config.clone()).expect("failed to read config file");
+        config = toml::from_slice(&data).unwrap();
+    }
+    config.dfs.override_from_env();
+    config
 }
