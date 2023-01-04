@@ -136,6 +136,7 @@ impl TiKVServer {
         Self::setup(config, security_mgr, env, pd, dfs)
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn prepare(
         config: &mut TiKvConfig,
     ) -> (

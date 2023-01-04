@@ -702,12 +702,12 @@ impl ShardDataCore {
                 let skl = mem_tbl.get_cf(cf);
                 let mut iter = skl.new_iterator(false);
                 iter.rewind();
-                if iter.valid() && iter.key() < &self.start {
+                if iter.valid() && iter.key() < self.start {
                     return true;
                 }
                 let mut rev_iter = skl.new_iterator(true);
                 rev_iter.rewind();
-                if iter.valid() && iter.key() >= &self.end {
+                if iter.valid() && iter.key() >= self.end {
                     return true;
                 }
             }
@@ -717,7 +717,7 @@ impl ShardDataCore {
 
     pub(crate) fn has_file_over_bound_data(&self) -> bool {
         for l0 in &self.l0_tbls {
-            if l0.smallest() < &self.start || l0.biggest() >= &self.end {
+            if l0.smallest() < self.start || l0.biggest() >= self.end {
                 return true;
             }
         }

@@ -593,7 +593,7 @@ impl ShardMeta {
         for (&id, source_file) in &source.files {
             self.files.insert(id, source_file.clone());
         }
-        if &self.end == &source.start {
+        if self.end == source.start {
             self.end = source.end.clone();
         } else {
             self.start = source.start.clone();

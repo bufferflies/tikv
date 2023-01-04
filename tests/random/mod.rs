@@ -103,13 +103,14 @@ fn test_random_workload() {
     for handle in handles {
         handle.join().unwrap();
     }
-    if !try_wait(
+    let ok = try_wait(
         || {
             let data_stats = cluster.get_data_stats();
             data_stats.check_data().is_ok()
         },
         10,
-    ) {
+    );
+    if !ok {
         cluster.get_data_stats().check_data().unwrap();
     }
     let mut client = cluster.new_client();
@@ -165,14 +166,12 @@ fn test_random_merge() {
     for _ in 0..20 {
         move_scheduler.move_random_region();
     }
-    let mut handles = vec![];
-    handles.push(spawn_write(0, cluster.new_client()));
-    handles.push(spawn_merge(cluster.new_scheduler()));
-    handles.push(spawn_transfer(cluster.new_scheduler()));
-    handles.push(spawn_move(
-        cluster.new_scheduler(),
-        Arc::new(RwLock::new(())),
-    ));
+    let handles = vec![
+        spawn_write(0, cluster.new_client()),
+        spawn_merge(cluster.new_scheduler()),
+        spawn_transfer(cluster.new_scheduler()),
+        spawn_move(cluster.new_scheduler(), Arc::new(RwLock::new(()))),
+    ];
     let start_time = Instant::now();
     let pd_client = cluster.get_pd_client();
     while start_time.saturating_elapsed() < TIMEOUT {
@@ -194,13 +193,14 @@ fn test_random_merge() {
     for handle in handles {
         handle.join().unwrap();
     }
-    if !try_wait(
+    let ok = try_wait(
         || {
             let data_stats = cluster.get_data_stats();
             data_stats.check_data().is_ok()
         },
         10,
-    ) {
+    );
+    if !ok {
         cluster.get_data_stats().check_data().unwrap();
     }
     let mut client = cluster.new_client();

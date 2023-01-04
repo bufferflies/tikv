@@ -211,7 +211,7 @@ fn backup_cluster(
             }
         }
     }
-    if errs.len() > 0 {
+    if !errs.is_empty() {
         error!("backup errors {:?}", errs);
         if errs.len() > config.tolerate_err {
             return Err(Error::ServerError(format!("backup errors {:?}", errs)));
@@ -256,11 +256,9 @@ async fn backup_store(
         Ok(resp) => {
             let mut store_backup_meta = StoreBackupMeta::default();
             store_backup_meta.merge_from_bytes(&resp).unwrap();
-            return tx.send(Ok(store_backup_meta)).unwrap();
+            tx.send(Ok(store_backup_meta)).unwrap()
         }
-        Err(e) => {
-            return tx.send(Err(Error::ServerError(e))).unwrap();
-        }
+        Err(e) => tx.send(Err(Error::ServerError(e))).unwrap(),
     }
 }
 
@@ -346,7 +344,7 @@ async fn get_all_backup_files(s3fs: &S3FS) -> dfs::Result<Vec<String>> {
             }
         }
     }
-    return Ok(files);
+    Ok(files)
 }
 
 // If backup exist, return the latest one, else create a new ClusterBackupMeta.
@@ -375,10 +373,7 @@ async fn get_latest_backup_meta(s3fs: &S3FS, cluster_id: u64) -> Result<ClusterB
     Ok(meta)
 }
 
-fn check_backup_meta_consistency(
-    backup_meta: &ClusterBackupMeta,
-    stores: &Vec<Store>,
-) -> Result<()> {
+fn check_backup_meta_consistency(backup_meta: &ClusterBackupMeta, stores: &[Store]) -> Result<()> {
     if stores.len() != backup_meta.stores.len() {
         return Err(Error::TopoChanged(format!(
             "Stores' count changed during backup, cur: {}, backed up: {}",
@@ -407,10 +402,7 @@ fn check_backup_meta_consistency(
 }
 
 fn need_full_backup(err: &Error) -> bool {
-    match err {
-        Error::TopoChanged(_) | Error::MetaNotFound(_) => return true,
-        _ => return false,
-    }
+    matches!(err, Error::TopoChanged(_) | Error::MetaNotFound(_))
 }
 
 // Get keyspace meta from etcd and populate them to ClusterBackupMeta
@@ -564,12 +556,10 @@ mod tests {
         assert_eq!(cluster_meta.stores.len(), 2);
         let last_meta = cluster_meta.stores.last().unwrap();
         assert_eq!(last_meta.wal_chunks.len(), 2 * wal_chunk_cnt as usize);
-        let mut i = 0;
-        for chunk in last_meta.wal_chunks.iter() {
+        for (i, chunk) in last_meta.wal_chunks.iter().enumerate() {
             assert_eq!(chunk.epoch, 2);
-            assert_eq!(chunk.start_off, i * 10);
-            assert_eq!(chunk.end_off, i * 20);
-            i += 1;
+            assert_eq!(chunk.start_off, i as u64 * 10);
+            assert_eq!(chunk.end_off, i as u64 * 20);
         }
     }
 

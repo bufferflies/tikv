@@ -35,6 +35,15 @@ CLIPPY_LINTS=(-A clippy::module_inception  \
         -W clippy::todo \
         -D rust-2018-idioms)
 
-cargo clippy --workspace \
-	--exclude fuzz-targets --exclude fuzzer-honggfuzz --exclude fuzzer-afl --exclude fuzzer-libfuzzer \
+cargo clippy \
+  -p cloud_server \
+  -p kvengine \
+  -p rfengine \
+  -p rfstore \
+  -p test_cloud_server \
+  -p tikv \
+  -p tikv-server \
+  -p tikv-worker \
+  -p cse-ctl \
+  -p tests \
 	--features "${TIKV_ENABLE_FEATURES}" "$@" -- "${CLIPPY_LINTS[@]}"

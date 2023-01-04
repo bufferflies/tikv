@@ -102,6 +102,7 @@ impl MockKvForRaft {
     }
 }
 
+#[allow(clippy::todo)]
 impl Tikv for MockKvForRaft {
     fn raft(
         &mut self,

@@ -350,7 +350,7 @@ impl ClusterClient {
         }
         self.region_ranges
             .insert(region.raw_end.clone(), region.id_ver());
-        self.regions.insert(region.id, region.clone());
+        self.regions.insert(region.id, region);
         self.get_region_from_cache(key).unwrap()
     }
 
@@ -472,13 +472,14 @@ impl ClusterClient {
 
     pub fn new_rpc_ctx(&mut self, region_id: u64) -> Option<Context> {
         if !self.regions.contains_key(&region_id) {
-            if !try_wait(
+            let ok = try_wait(
                 || {
                     self.update_cache_by_id(region_id, None);
                     self.regions.contains_key(&region_id)
                 },
                 3,
-            ) {
+            );
+            if !ok {
                 return None;
             }
         }

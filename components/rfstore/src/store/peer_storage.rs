@@ -542,7 +542,9 @@ impl PeerStorage {
     }
 
     pub(crate) fn get_preprocessed_region(&self) -> &metapb::Region {
-        self.preprocessed_region.as_ref().unwrap_or(self.region())
+        self.preprocessed_region
+            .as_ref()
+            .unwrap_or_else(|| self.region())
     }
 
     pub(crate) fn region_match_preprocessed(&self) -> bool {

@@ -241,7 +241,7 @@ pub(crate) fn check_wal_header(dir: &Path, epoch_id: u32) -> Result<WalHeader> {
             };
         }
     }
-    return Err(Error::EOF);
+    Err(Error::EOF)
 }
 
 pub(crate) struct WalWriter {

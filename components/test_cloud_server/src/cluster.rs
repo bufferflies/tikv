@@ -145,7 +145,7 @@ impl ServerCluster {
 
     pub fn send_raft_command(&self, cmd: RaftCmdRequest) {
         let store_id = cmd.get_header().get_peer().get_store_id();
-        for (_, server) in &self.servers {
+        for server in self.servers.values() {
             if server.get_store_id() == store_id {
                 server.get_raft_router().send_command(cmd, Callback::None);
                 return;
@@ -341,7 +341,7 @@ impl ClusterDataStats {
             let region_shard_stats = self
                 .regions
                 .entry(shard_stat.id)
-                .or_insert(RegionShardStats::new(shard_stat.id));
+                .or_insert_with(|| RegionShardStats::new(shard_stat.id));
             region_shard_stats.shard_stats.insert(store_id, shard_stat);
         }
     }

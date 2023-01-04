@@ -130,7 +130,7 @@ impl Engine {
         let version = shard.load_mem_table_version();
         // Switch the old shard mem-table, so the first mem-table is always empty.
         // ignore the read-only mem-table to be flushed. let the new shard handle it.
-        self.switch_mem_table(&shard, version);
+        self.switch_mem_table(shard, version);
         self.flush_tx.send(FlushMsg::Clear(shard.id)).unwrap();
         self.compact_tx
             .send(CompactMsg::Clear(IDVer::new(shard.id, shard.ver)))
@@ -211,7 +211,7 @@ impl Engine {
         let old_data = old_shard.get_data();
         let mem_tbls = old_data.mem_tbls.clone();
         let mut l0_tbls = old_data.l0_tbls.clone();
-        for (_, l0) in &source.l0_tables {
+        for l0 in source.l0_tables.values() {
             l0_tbls.push(l0.clone())
         }
         l0_tbls.sort_by(|a, b| b.version().cmp(&a.version()));

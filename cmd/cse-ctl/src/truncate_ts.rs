@@ -120,7 +120,7 @@ fn request_truncate_ts_on_all_stores(
     let mut shard_cnt = 0;
     let store_cnt = stores.len();
     let (tx, rx) = std::sync::mpsc::sync_channel(store_cnt);
-    for (_, store) in stores {
+    for store in stores.values() {
         runtime.spawn(request_truncate_ts_store(
             cluster_id,
             store.clone(),
@@ -143,7 +143,7 @@ fn request_truncate_ts_on_all_stores(
             }
         }
     }
-    if errs.len() > 0 {
+    if !errs.is_empty() {
         return Err(errs.join(";"));
     }
     Ok(shard_cnt)

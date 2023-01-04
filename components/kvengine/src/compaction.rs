@@ -356,7 +356,7 @@ impl CompactDef {
             return false;
         }
         let this = if this_level.has_over_bound_data(&shard.start, &shard.end) {
-            if this_level.tables.first().unwrap().smallest() < &shard.start {
+            if this_level.tables.first().unwrap().smallest() < shard.start {
                 Arc::new(vec![this_level.tables.first().unwrap().clone()])
             } else {
                 Arc::new(vec![this_level.tables.last().unwrap().clone()])

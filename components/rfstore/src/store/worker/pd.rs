@@ -568,7 +568,7 @@ impl PdRunner {
             let keyspace_id_str = ApiV2::get_keyspace_id_str(startkey);
             return Some(keyspace_id_str);
         }
-        return None;
+        None
     }
 
     pub fn set_storage_size_metric(region: &metapb::Region, kv_size: Option<u64>) {
@@ -1209,7 +1209,7 @@ impl PdRunner {
         let peer_stat = self
             .region_peers
             .entry(region_id)
-            .or_insert(PeerStat::default());
+            .or_insert_with(PeerStat::default);
         peer_stat.role = role;
     }
 }
@@ -1516,7 +1516,7 @@ pub mod tests {
 
     #[test]
     fn test_get_region_keyspace_id() {
-        let keyspace_id = 1 as u32;
+        let keyspace_id = 1;
         let startkey = get_txn_startkey_prefix(keyspace_id);
         let endkey = get_txn_endkey_prefix(keyspace_id);
 
@@ -1539,15 +1539,15 @@ pub mod tests {
     }
 
     fn get_txn_startkey_prefix(keyspace_id: u32) -> [u8; 4] {
-        let mut keyspace_id_buf = [0 as u8; 4];
+        let mut keyspace_id_buf = [0u8; 4];
         BigEndian::write_u32(&mut keyspace_id_buf, keyspace_id);
         keyspace_id_buf[0] = TXN_KEY_PREFIX;
-        return keyspace_id_buf;
+        keyspace_id_buf
     }
 
     fn get_txn_endkey_prefix(keyspace_id: u32) -> [u8; 4] {
         let mut keyspace_id_buf = get_txn_startkey_prefix(keyspace_id);
-        keyspace_id_buf[3] = keyspace_id_buf[3] + 1;
-        return keyspace_id_buf;
+        keyspace_id_buf[3] += 1;
+        keyspace_id_buf
     }
 }

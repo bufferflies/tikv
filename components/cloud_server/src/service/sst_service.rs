@@ -500,7 +500,7 @@ where
                 let startkey = range.start.as_slice();
                 let endkey = range.end.as_slice();
                 let uuid = sst_clone.uuid.as_slice();
-                if first_uuid.len() == 0 {
+                if first_uuid.is_empty() {
                     first_uuid = sst_clone.uuid.clone();
                 }
                 info!(

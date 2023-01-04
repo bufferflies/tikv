@@ -1,4 +1,4 @@
-name: CI
+name: Unit test
 
 on:
   pull_request:
@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   dev:
-    name: Run rustfmt and clippy
+    name: Run unit tests
     runs-on: x64
     env:
       RUSTFLAGS: -Dwarnings
@@ -40,14 +40,9 @@ jobs:
           toolchain: nightly-2022-02-14
           default: true
           profile: minimal
-          components: clippy, rustfmt
-      - name: Check format
+      - name: Run tests
+        env:
+          CARGO_INCREMENTAL: "0"
         working-directory: ./
         run: |
-          cargo install -q cargo-sort
-          cargo fmt --check
-          cargo sort -w ./Cargo.toml ./*/Cargo.toml components/*/Cargo.toml cmd/*/Cargo.toml --check
-      - name: Run clippy
-        working-directory: ./
-        run: |
-          make clippy
+          make test-cloud-engine

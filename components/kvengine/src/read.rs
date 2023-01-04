@@ -371,7 +371,7 @@ impl SnapAccessCore {
         let mut snap = pb::Snapshot::new();
         let mut properties = pb::Properties::new();
         properties.shard_id = self.get_tag().id_ver.id;
-        let data_sequence = if self.data.l0_tbls.len() > 0 {
+        let data_sequence = if !self.data.l0_tbls.is_empty() {
             self.data.l0_tbls[0].version() - self.base_version
         } else {
             self.meta_seq

@@ -887,7 +887,7 @@ impl<'a> PeerMsgHandler<'a> {
 
     pub(crate) fn propose_raft_command(
         &mut self,
-        mut msg: RaftCmdRequest,
+        msg: RaftCmdRequest,
         cb: Callback,
         store_meta: Option<&mut StoreMeta>,
     ) {
@@ -915,7 +915,7 @@ impl<'a> PeerMsgHandler<'a> {
             _ => (),
         }
 
-        if let Err(e) = self.check_merge_proposal(&mut msg, store_meta) {
+        if let Err(e) = self.check_merge_proposal(&msg, store_meta) {
             warn!(
                 "failed to propose merge";
                 "tag" => self.peer.tag(),

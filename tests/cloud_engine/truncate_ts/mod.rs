@@ -64,8 +64,8 @@ fn test_truncate_ts_impl(client: ClusterClient, max_key_idx: usize, timeout: Dur
         timeout,
     }));
     let context2 = context1.clone();
-    let handle1 = std::thread::spawn(move || random_update_kv(context1.clone()));
-    let handle2 = std::thread::spawn(move || truncate_ts_and_verification(context2.clone()));
+    let handle1 = std::thread::spawn(move || random_update_kv(context1));
+    let handle2 = std::thread::spawn(move || truncate_ts_and_verification(context2));
     handle1.join().unwrap();
     handle2.join().unwrap();
 }
@@ -189,7 +189,7 @@ fn request_truncate_ts_on_all_stores(
     let mut shard_cnt = 0;
     let store_cnt = stores.len();
     let (tx, rx) = std::sync::mpsc::sync_channel(store_cnt);
-    for (_, store) in stores {
+    for store in stores.values() {
         runtime.spawn(request_truncate_ts_store(
             cluster_id,
             store.clone(),
@@ -208,7 +208,7 @@ fn request_truncate_ts_on_all_stores(
             }
         }
     }
-    if errs.len() > 0 {
+    if !errs.is_empty() {
         return Err(errs.join(";"));
     }
     Ok(shard_cnt)

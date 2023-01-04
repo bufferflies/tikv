@@ -485,7 +485,7 @@ impl ObjectStorage for S3FS {
                 errs.push(err)
             }
         }
-        if errs.len() > 0 {
+        if !errs.is_empty() {
             return Err(format!("{:?}", errs));
         }
         Ok(())
@@ -520,7 +520,7 @@ impl ObjectStorage for S3FS {
                 }
             }
         }
-        if errs.len() > 0 {
+        if !errs.is_empty() {
             return Err(format!("{:?}", errs));
         }
         Ok(objects)

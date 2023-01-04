@@ -80,10 +80,10 @@ impl<S: Snapshot, F: KvFormat> AnalyzeContext<S, F> {
             snap.get_kvengine_snap()
                 .unwrap()
                 .marshal(kv_ranges.as_slice())
-                .and_then(|(key, snap_bytes)| {
+                .map(|(key, snap_bytes)| {
                     ctx.remote_req.key = key;
                     ctx.remote_req.snap_bytes = snap_bytes;
-                    Some(ctx)
+                    ctx
                 })
         });
         let store = CloudStore::new(
@@ -353,7 +353,7 @@ pub struct RemoteContext {
     pub client: hyper::Client<hyper::client::HttpConnector>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
 pub struct RemoteAnalysisRequest {
@@ -362,18 +362,6 @@ pub struct RemoteAnalysisRequest {
     pub snap_bytes: Vec<u8>,
     pub max_handle_duration: Duration,
     pub peer: String,
-}
-
-impl Default for RemoteAnalysisRequest {
-    fn default() -> Self {
-        Self {
-            key: String::default(),
-            req_bytes: Vec::default(),
-            snap_bytes: Vec::default(),
-            max_handle_duration: Duration::default(),
-            peer: String::default(),
-        }
-    }
 }
 
 #[async_trait]

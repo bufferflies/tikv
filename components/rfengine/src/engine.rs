@@ -530,11 +530,9 @@ pub fn restore(
         objects.sort_by(|(a, _), (b, _)| a.cmp(b));
         let wal_path = wal_file_name(dir, store_meta.get_manifest().epoch_id + 1);
         let file = OpenOptions::new().write(true).open(&wal_path).unwrap();
-        let mut i = 0;
-        for (_, data) in objects {
+        for (i, (_, data)) in objects.into_iter().enumerate() {
             file.write_at(&data, store_meta.get_wal_chunks()[i].start_off)
                 .unwrap();
-            i += 1;
         }
         let end_off = wal_chunks.last().unwrap().end_off;
         let eof = vec![0u8; 4096];

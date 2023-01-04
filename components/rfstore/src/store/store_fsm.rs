@@ -392,12 +392,12 @@ impl RegionMap {
         let range_change = prev.map_or(true, |prev_region| {
             prev_region.get_region_epoch().get_version() != region.get_region_epoch().get_version()
         });
-        if range_change && is_region_initialized(&region) {
-            if let Some(overlap_regions) = self.get_overlap_regions(&region) {
+        if range_change && is_region_initialized(region) {
+            if let Some(overlap_regions) = self.get_overlap_regions(region) {
                 for (_, end_key) in overlap_regions {
                     self.region_ranges.remove(&end_key);
                 }
-                self.region_ranges.insert(raw_end_key(&region), region_id);
+                self.region_ranges.insert(raw_end_key(region), region_id);
             }
         }
     }
@@ -457,6 +457,10 @@ impl RegionMap {
         self.regions.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.regions.is_empty()
+    }
+
     pub fn get_regions_in_range(&self, start: Vec<u8>, end: Vec<u8>) -> Vec<&Region> {
         let mut regions = vec![];
         let encoded_end = encode_bytes(&end);
@@ -466,7 +470,7 @@ impl RegionMap {
                 continue;
             }
             let region = region.unwrap();
-            if &region.start_key >= &encoded_end {
+            if region.start_key >= encoded_end {
                 break;
             }
             regions.push(region);
@@ -1109,7 +1113,7 @@ impl<'a> StoreMsgHandler<'a> {
     }
 
     fn on_split_region(&mut self, regions: Vec<metapb::Region>) {
-        fail_point!("on_split", self.ctx.store_id() == 3, |_| { None });
+        fail_point!("on_split", self.ctx.store_id() == 3, |_| {});
         let derived = regions.last().unwrap().clone();
         let derived_peer = self.get_peer(derived.get_id());
         let mut peer_fsm = derived_peer.peer_fsm.lock().unwrap();
@@ -1266,7 +1270,7 @@ impl<'a> StoreMsgHandler<'a> {
         for new_peer in new_peers {
             self.register(new_peer);
         }
-        fail_point!("after_split", self.ctx.store_id() == 3, |_| { None });
+        fail_point!("after_split", self.ctx.store_id() == 3, |_| {});
     }
 
     fn on_change_peer(&mut self, cp: ChangePeer) -> bool {
