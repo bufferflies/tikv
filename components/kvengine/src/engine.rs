@@ -75,13 +75,14 @@ impl Engine {
         let lock_path = opts.local_dir.join("LOCK");
         let mut x = fslock::LockFile::open(&lock_path)?;
         x.lock()?;
-        let mut max_capacity =
-            opts.max_block_cache_size as usize / opts.table_builder_options.block_size;
-        if max_capacity < 512 {
-            max_capacity = 512
+        let mut max_capacity = opts.max_block_cache_size as usize;
+        if max_capacity < 512 * opts.table_builder_options.block_size {
+            max_capacity = 512 * opts.table_builder_options.block_size;
         }
-        let cache: SegmentedCache<BlockCacheKey, Bytes> =
-            SegmentedCache::new(max_capacity as u64, 256);
+        let cache: SegmentedCache<BlockCacheKey, Bytes> = SegmentedCache::builder(256)
+            .weigher(|_k: &BlockCacheKey, v: &Bytes| (12 + v.len()) as u32)
+            .max_capacity(max_capacity as u64)
+            .build();
         let (flush_tx, flush_rx) = mpsc::unbounded();
         let (compact_tx, compact_rx) = mpsc::unbounded();
         let (free_tx, free_rx) = mpsc::unbounded();
