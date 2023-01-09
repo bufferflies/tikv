@@ -26,6 +26,7 @@ pub struct EngineStats {
     pub level_total_sizes: Vec<u64>,
     pub tbl_index_size: u64,
     pub tbl_filter_size: u64,
+    pub in_mem_tbl_filter_size: u64,
     pub max_ts: u64, // Use to check whether PiTR has completed.
     pub entries: usize,
     pub old_entries: usize,
@@ -80,6 +81,7 @@ impl super::Engine {
             engine_stats.partial_ln_count += shard.partial_tbls;
             engine_stats.tbl_index_size += shard.tbl_index_size;
             engine_stats.tbl_filter_size += shard.tbl_filter_size;
+            engine_stats.in_mem_tbl_filter_size += shard.in_mem_tbl_filter_size;
             engine_stats.max_ts = cmp::max(engine_stats.max_ts, shard.max_ts);
             engine_stats.entries += shard.entries;
             engine_stats.old_entries += shard.old_entries;
@@ -124,6 +126,7 @@ pub struct ShardStats {
     pub cfs: Vec<CFStats>,
     pub tbl_index_size: u64,
     pub tbl_filter_size: u64,
+    pub in_mem_tbl_filter_size: u64,
     pub max_ts: u64,
     pub entries: usize,
     pub old_entries: usize,
@@ -160,6 +163,7 @@ pub struct LevelStats {
     pub data_size: u64,
     pub index_size: u64,
     pub filter_size: u64,
+    pub in_mem_filter_size: u64,
     pub max_ts: u64,
     pub entries: usize,
     pub old_entries: usize,
@@ -182,6 +186,7 @@ impl super::Shard {
         let mut total_size = 0;
         let mut tbl_index_size = 0;
         let mut tbl_filter_size = 0;
+        let mut in_mem_tbl_filter_size = 0;
         let mut max_ts = 0;
         let mut entries = 0;
         let mut old_entries = 0;
@@ -209,6 +214,7 @@ impl super::Shard {
                 if let Some(cf_tbl) = l0_tbl.get_cf(cf) {
                     tbl_index_size += cf_tbl.index_size();
                     tbl_filter_size += cf_tbl.filter_size();
+                    in_mem_tbl_filter_size += cf_tbl.filter_size();
                     max_ts = max_ts_by_cf(max_ts, cf, cf_tbl.max_ts);
                     entries += cf_tbl.entries as usize;
                     old_entries += cf_tbl.old_entries as usize;
@@ -234,6 +240,9 @@ impl super::Shard {
                         level_stats.data_size += t.size();
                         level_stats.index_size += t.index_size();
                         level_stats.filter_size += t.filter_size();
+                        if l.level == 1 {
+                            level_stats.in_mem_filter_size += t.filter_size();
+                        }
                         level_stats.entries += t.entries as usize;
                         level_stats.old_entries += t.old_entries as usize;
                         level_stats.tombs += t.tombs as usize;
@@ -257,6 +266,7 @@ impl super::Shard {
                 total_size += level_stats.data_size;
                 tbl_index_size += level_stats.index_size;
                 tbl_filter_size += level_stats.filter_size;
+                in_mem_tbl_filter_size += level_stats.in_mem_filter_size;
                 max_ts = cmp::max(max_ts, level_stats.max_ts);
                 entries += level_stats.entries;
                 old_entries += level_stats.old_entries;
@@ -289,6 +299,7 @@ impl super::Shard {
             total_size,
             tbl_index_size,
             tbl_filter_size,
+            in_mem_tbl_filter_size,
             max_ts,
             entries,
             old_entries,
