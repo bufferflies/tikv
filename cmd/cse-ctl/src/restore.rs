@@ -244,7 +244,7 @@ fn get_restore_pd_config_from_args(args: &RestorePDArgs) -> RestoreConfig {
     }
     // override from args and ENV
     if !args.pd.is_empty() {
-        config.pd.endpoints = args.pd.split(",").map(|x| x.to_owned()).collect();
+        config.pd.endpoints = args.pd.split(',').map(|x| x.to_owned()).collect();
     }
     if args.cacert.exists() {
         config.security.ca_path = args.cacert.to_str().unwrap().to_owned();

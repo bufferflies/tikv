@@ -284,7 +284,7 @@ fn get_truncate_ts_config_from_args(args: &TruncateTsArgs) -> TruncateTsConfig {
     }
     // override from args
     if !args.pd.is_empty() {
-        config.pd.endpoints = args.pd.split(",").map(|x| x.to_owned()).collect();
+        config.pd.endpoints = args.pd.split(',').map(|x| x.to_owned()).collect();
     }
     if args.cacert.exists() {
         config.security.ca_path = args.cacert.to_str().unwrap().to_owned();

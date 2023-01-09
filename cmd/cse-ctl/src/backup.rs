@@ -481,7 +481,7 @@ fn get_backup_config_from_args(args: &BackupArgs) -> BackupConfig {
     }
     // override from args and ENV
     if !args.pd.is_empty() {
-        config.pd.endpoints = args.pd.split(",").map(|x| x.to_owned()).collect();
+        config.pd.endpoints = args.pd.split(',').map(|x| x.to_owned()).collect();
     }
     if args.cacert.exists() {
         config.security.ca_path = args.cacert.to_str().unwrap().to_owned();
