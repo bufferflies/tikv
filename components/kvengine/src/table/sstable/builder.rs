@@ -163,10 +163,10 @@ impl Builder {
             self.old_entries += 1;
         } else {
             // Only try to finish block when the key is different than last.
-            if self.block_builder.block.size > self.block_size {
+            if self.block_builder.need_finish_block(self.block_size) {
                 self.block_builder.finish_block(self.fid, self.checksum_tp);
             }
-            if self.old_builder.block.size > self.block_size {
+            if self.old_builder.need_finish_block(self.block_size) {
                 self.old_builder.finish_block(self.fid, self.checksum_tp);
             }
             self.block_builder.add_entry(key, val);
@@ -187,19 +187,19 @@ impl Builder {
     pub fn estimated_size(&self) -> usize {
         let mut size = self.block_builder.buf.len()
             + self.old_builder.buf.len()
-            + self.block_builder.block.size
-            + self.old_builder.block.size;
+            + self.block_builder.block.kv_size
+            + self.old_builder.block.kv_size;
         size += size / 32; // reserve extra capacity to avoid reallocate.
         size
     }
 
     pub fn finish(&mut self, base_off: u32, data_buf: &mut BytesMut) -> BuildResult {
-        if self.block_builder.block.size > 0 {
+        if self.block_builder.block.kv_size > 0 {
             let last_key = self.block_builder.block.tmp_keys.get_last();
             self.biggest.extend_from_slice(last_key);
             self.block_builder.finish_block(self.fid, self.checksum_tp);
         }
-        if self.old_builder.block.size > 0 {
+        if self.old_builder.block.kv_size > 0 {
             self.old_builder.finish_block(self.fid, self.checksum_tp);
         }
         assert_eq!(self.block_builder.block_keys.length() > 0, true);
@@ -352,7 +352,8 @@ struct BlockBuffer {
     tmp_vals: EntrySlice,
     old_vers: Vec<u64>,
     entry_sizes: Vec<u32>,
-    size: usize,
+    kv_size: usize,
+    common_prefix_len: usize,
 }
 
 impl BlockBuffer {
@@ -361,7 +362,8 @@ impl BlockBuffer {
         self.tmp_vals.reset();
         self.old_vers.truncate(0);
         self.entry_sizes.truncate(0);
-        self.size = 0;
+        self.kv_size = 0;
+        self.common_prefix_len = 0;
     }
 
     fn build_entry(&self, buf: &mut Vec<u8>, i: usize, common_prefix_len: usize) {
@@ -425,7 +427,17 @@ impl BlockBuilder {
         self.block.old_vers.push(0);
         let entry_size = 2 + key.len() + val.encoded_size();
         self.block.entry_sizes.push(entry_size as u32);
-        self.block.size += entry_size;
+        self.block.kv_size += entry_size;
+        if self.block.tmp_keys.length() % 64 == 0 {
+            // Do not need to recalculate common prefix for each entry.
+            self.block.common_prefix_len = self.get_block_common_prefix_len();
+        }
+    }
+
+    fn need_finish_block(&self, target_block_size: usize) -> bool {
+        let block_size =
+            self.block.kv_size - self.block.tmp_keys.length() * self.block.common_prefix_len;
+        block_size > target_block_size
     }
 
     fn finish_block(&mut self, fid: u64, checksum_tp: u8) {
