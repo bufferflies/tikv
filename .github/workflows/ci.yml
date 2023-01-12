@@ -41,6 +41,10 @@ jobs:
           default: true
           profile: minimal
           components: clippy, rustfmt
+      - name: Install Protoc
+        uses: arduino/setup-protoc@v1
+        with:
+          version: '3.14.0'
       - name: Check format
         working-directory: ./
         run: |

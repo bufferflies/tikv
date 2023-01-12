@@ -75,6 +75,16 @@ COPY cmd/ ./cmd/
 COPY components/ ./components/
 COPY src/ ./src/
 
+# Download proto zip
+RUN ARCH=$(arch | sed s/aarch64/aarch_64/) && \
+  curl -OL https://github.com/protocolbuffers/protobuf/releases/download/v3.14.0/protoc-3.14.0-linux-${ARCH}.zip && \
+  unzip -o protoc-3.14.0-linux-${ARCH}.zip -d ./proto 
+RUN chmod 755 -R ./proto/bin
+ENV BASE=/usr/local
+# Copy into path
+RUN cp ./proto/bin/protoc ${BASE}/bin
+RUN cp -R ./proto/include/* ${BASE}/include
+
 # Build binaries now
 RUN source /opt/rh/devtoolset-8/enable && make build_dist_release
 
