@@ -201,7 +201,7 @@ impl ArenaSegment {
             block_idx: Default::default(),
             total_size,
         };
-        let new_block = Box::into_raw(Box::new(ArenaBlock::new(block_cap(0))));
+        let new_block = Box::into_raw(Box::new(ArenaBlock::new(0)));
         s.blocks[0].store(new_block, Ordering::Release);
         s
     }
