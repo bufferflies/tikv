@@ -131,12 +131,15 @@ impl<E: Engine> Endpoint<E> {
                     .build()
                     .unwrap(),
             );
+            let client = hyper::Client::builder()
+                .pool_max_idle_per_host(0)
+                .build_http();
             RemoteContext {
                 remote_req: RemoteAnalysisRequest::default(),
                 remote_url,
                 runtime,
                 analyze_cache: moka::future::Cache::new(ANALYZE_CACHE_CAPACITY),
-                client: hyper::Client::new(),
+                client,
             }
         };
         self.remote_ctx = Some(remote_ctx);

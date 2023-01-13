@@ -80,10 +80,13 @@ impl CompactionClient {
         allow_fallback_local: bool,
     ) -> Self {
         let remote_compactors = RemoteCompactors::new(remote_url);
+        let client = hyper::Client::builder()
+            .pool_max_idle_per_host(0)
+            .build_http();
         Self {
             dfs,
             remote_compactors: Arc::new(Mutex::new(remote_compactors)),
-            client: Some(hyper::Client::new()),
+            client: Some(client),
             compression_lvl,
             allow_fallback_local,
         }
