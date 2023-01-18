@@ -167,6 +167,7 @@ impl Node {
     ) -> Result<()> {
         let store_id = self.id();
         store_meta.store_id = Some(store_id);
+        store_meta.cop_host = Some(coprocessor_host.clone());
         if let Some(first_region) = self.check_or_prepare_bootstrap_cluster(&engines, store_id)? {
             info!("trying to bootstrap cluster"; "store_id" => store_id, "region" => ?first_region);
             // cluster is not bootstrapped, and we choose first store to bootstrap

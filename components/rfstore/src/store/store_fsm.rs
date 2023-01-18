@@ -322,7 +322,7 @@ pub struct StoreMeta {
 
     pub region_map: RegionMap,
 
-    pub cop_host: CoprocessorHost<kvengine::Engine>,
+    pub cop_host: Option<CoprocessorHost<kvengine::Engine>>,
     /// region_id -> reader
     pub readers: Arc<dashmap::DashMap<u64, ReadDelegate>>,
     /// `MsgRequestPreVote`, `MsgRequestVote` or `MsgAppend` messages from newly split Regions shouldn't be
@@ -332,11 +332,11 @@ pub struct StoreMeta {
 }
 
 impl StoreMeta {
-    pub fn new(vote_capacity: usize, cop_host: CoprocessorHost<kvengine::Engine>) -> StoreMeta {
+    pub fn new(vote_capacity: usize) -> StoreMeta {
         StoreMeta {
             store_id: None,
             region_map: Default::default(),
-            cop_host,
+            cop_host: None,
             readers: Arc::new(dashmap::DashMap::new()),
             pending_msgs: RingQueue::with_capacity(vote_capacity),
         }
@@ -351,7 +351,7 @@ impl StoreMeta {
     ) {
         let region_id = region.get_id();
         self.region_map.put(region.clone());
-        peer.set_region(&self.cop_host, region, reason);
+        peer.set_region(&self.cop_host.as_ref().unwrap(), region, reason);
         self.readers
             .insert(region_id, ReadDelegate::from_peer(peer));
     }

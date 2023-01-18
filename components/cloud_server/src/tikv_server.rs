@@ -461,10 +461,7 @@ impl TiKVServer {
 
     fn init_engines(&mut self) {
         info!("init engines");
-        let store_meta = StoreMeta::new(
-            PENDING_MSG_CAP,
-            self.coprocessor_host.as_ref().unwrap().clone(),
-        );
+        let store_meta = StoreMeta::new(PENDING_MSG_CAP);
         let engine = RaftKv::new(
             ServerRaftStoreRouter::new(
                 self.router.clone(),
