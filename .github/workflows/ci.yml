@@ -45,6 +45,7 @@ jobs:
         uses: arduino/setup-protoc@v1
         with:
           version: '3.14.0'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Check format
         working-directory: ./
         run: |

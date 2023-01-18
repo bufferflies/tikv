@@ -351,7 +351,7 @@ impl StoreMeta {
     ) {
         let region_id = region.get_id();
         self.region_map.put(region.clone());
-        peer.set_region(&self.cop_host.as_ref().unwrap(), region, reason);
+        peer.set_region(self.cop_host.as_ref().unwrap(), region, reason);
         self.readers
             .insert(region_id, ReadDelegate::from_peer(peer));
     }
