@@ -103,7 +103,7 @@ fn backup_file_name(prefix: String, name: String, backup_ts: u64) -> String {
     }
 }
 
-pub(crate) fn execute_backup(args: BackupArgs) {
+pub fn execute_backup(args: BackupArgs) {
     let config: BackupConfig = get_backup_config_from_args(&args);
     if args.incremental {
         execute_incremental_backup(config, args.name, Duration::from_secs(args.interval))
@@ -117,12 +117,14 @@ fn execute_incremental_backup(config: BackupConfig, name: String, interval: Dura
         error!("Don't support non-empty name for incremental backup.");
         return;
     }
+    let pd_client = create_pd_client(&config.security, &config.pd);
     let mut cluster_backup_meta = None;
     loop {
         match backup_cluster(
             config.clone(),
             true,
             name.clone(),
+            &pd_client,
             cluster_backup_meta.clone(),
         ) {
             Ok(meta) => {
@@ -133,7 +135,7 @@ fn execute_incremental_backup(config: BackupConfig, name: String, interval: Dura
                 if need_full_backup(&e) {
                     warn!("Incremental backup fails {:?}, fallback to full backup", e);
                     // If incremental backup fails, restart full backup automatically.
-                    match backup_cluster(config.clone(), false, name.clone(), None) {
+                    match backup_cluster(config.clone(), false, name.clone(), &pd_client, None) {
                         Ok(meta) => cluster_backup_meta = Some(meta),
                         Err(e) => {
                             error!("Full backup still fail {:?}", e);
@@ -150,19 +152,20 @@ fn execute_incremental_backup(config: BackupConfig, name: String, interval: Dura
 }
 
 fn execute_full_backup(config: BackupConfig, name: String) {
-    if let Err(e) = backup_cluster(config, false, name, None) {
+    let pd_client = create_pd_client(&config.security, &config.pd);
+    if let Err(e) = backup_cluster(config, false, name, &pd_client, None) {
         error!("Full backup fail, {:?}", e)
     }
 }
 
-fn backup_cluster(
+pub fn backup_cluster(
     config: BackupConfig,
     incremental: bool,
     name: String,
+    pd_client: &dyn PdClient,
     last_backup_meta: Option<ClusterBackupMeta>,
 ) -> Result<ClusterBackupMeta> {
-    let pd_client = create_pd_client(&config.security, &config.pd);
-    let stores = get_all_stores_except_tiflash(&pd_client)?;
+    let stores = get_all_stores_except_tiflash(pd_client)?;
     let backup_ts = block_on(pd_client.get_tso())?.into_inner();
     let cluster_id = pd_client.get_cluster_id()?;
 
@@ -224,7 +227,7 @@ fn backup_cluster(
     }
     cluster_backup_meta.set_alloc_id(alloc_id);
     cluster_backup_meta.set_safe_ts(safe_ts);
-    let stores = get_all_stores_except_tiflash(&pd_client)?;
+    let stores = get_all_stores_except_tiflash(pd_client)?;
     check_backup_meta_consistency(&cluster_backup_meta, &stores)?;
     info!(
         "cluster backup cluster_id:{}, backup_ts:{}, alloc_id:{}, safe_ts:{}, num_stores:{}",

@@ -459,3 +459,14 @@ test-cloud-engine:
 test-cloud-engine-integration:
 	# --test-threads=1 to run test case in serial for stability.
 	cargo test -p tests --test cloud_engine --test cloud_engine_failpoints -- --test-threads=1 --nocapture
+
+test-cloud-engine-integration-with-minio:
+	# To run this test, setup a minio service, and set following environment variables:
+	#   export DFS_S3_BUCKET="cse"
+	#   export DFS_S3_ENDPOINT="http://127.0.0.1:9000"
+	#   export DFS_PREFIX="cse-integrations"
+	#   export DFS_S3_KEY_ID="minioadmin"
+	#   export DFS_S3_SECRET_KEY="minioadmin"
+	#   export DFS_S3_REGION="local"
+	#   export DFS_ZSTD_COMPRESSION_LEVEL="5"
+	cargo test -p tests test_native_full_backup -- --test-threads=1 --nocapture

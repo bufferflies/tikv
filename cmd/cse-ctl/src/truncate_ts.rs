@@ -5,6 +5,7 @@ use std::{
 };
 
 use clap::Args;
+use cse_ctl::common::{create_pd_client, get_all_stores_except_tiflash, send_request_to_store};
 use http::{Request, Uri};
 use hyper::Body;
 use kvengine::{EngineStats, ShardTruncateTsStats};
@@ -15,8 +16,6 @@ use slog_global::{error, info};
 use tikv_client::transaction::{Client as TiKVClient, ResolveLocksOptions};
 use tikv_util::time::Instant;
 use tokio::runtime::Runtime;
-
-use crate::common::{create_pd_client, get_all_stores_except_tiflash, send_request_to_store};
 
 const DEFAULT_TRUNCATE_TS_TIMEOUT: u64 = 5 * 60; // 5 min
 const MAX_WAIT_TRUNCATE_TS_CNT: usize = 10;

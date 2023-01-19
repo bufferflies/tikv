@@ -34,3 +34,11 @@ tikv-client = { version = "0.1.0", git = "http://github.com/tikv/client-rust.git
 tikv_util = { path = "../../components/tikv_util", default-features = false }
 tokio = { version = "1.12", features = ["full"] }
 toml = "0.5"
+
+[[bin]]
+name = "cse-ctl"
+path = "src/main.rs"
+
+[lib]
+name = "cse_ctl"
+path = "src/lib.rs"

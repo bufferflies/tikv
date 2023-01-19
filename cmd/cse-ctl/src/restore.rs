@@ -37,7 +37,7 @@ enum Commands {
 }
 
 #[derive(Args)]
-struct RestoreTiKVArgs {
+pub struct RestoreTiKVArgs {
     /// The path of the config file.
     #[clap(long, default_value = "")]
     pub config: PathBuf,
@@ -74,7 +74,7 @@ struct RestorePDArgs {
     pub key: PathBuf,
 }
 
-pub(crate) fn execute_restore_command(cmd: RestoreCommand) {
+pub fn execute_restore_command(cmd: RestoreCommand) {
     match cmd.command {
         Tikv(args) => execute_restore_tikv(args),
         PD(args) => execute_restore_pd(args),
@@ -83,13 +83,17 @@ pub(crate) fn execute_restore_command(cmd: RestoreCommand) {
 
 fn execute_restore_tikv(args: RestoreTiKVArgs) {
     let config = get_restore_tikv_config_from_args(&args);
-    let (cluster_backup, s3fs) = get_cluster_backup_meta(&config, args.name);
-    if args.store_id > 0 {
+    restore_tikv(&config, args.name, args.store_id, &args.path);
+}
+
+pub fn restore_tikv(config: &RestoreConfig, name: String, store_id: u64, path: &str) {
+    let (cluster_backup, s3fs) = get_cluster_backup_meta(config, name);
+    if store_id > 0 {
         rfengine::restore(
             Box::new(s3fs),
             &cluster_backup,
-            args.store_id,
-            &PathBuf::from(&args.path),
+            store_id,
+            &PathBuf::from(path),
         );
     }
 }

@@ -3,21 +3,20 @@
 #[macro_use]
 extern crate serde_derive;
 
-mod backup;
-mod common;
 mod dfsgc;
-mod restore;
 mod truncate_ts;
 mod unsafe_recover;
 
 use std::io;
 
 use clap::{Parser, Subcommand};
+use cse_ctl::{
+    backup::{execute_backup, BackupArgs},
+    restore::{execute_restore_command, RestoreCommand},
+};
 
 use crate::{
-    backup::{execute_backup, BackupArgs},
     dfsgc::{execute_dfsgc, DFSGCArgs},
-    restore::{execute_restore_command, RestoreCommand},
     truncate_ts::{execute_truncate_ts, TruncateTsArgs},
     unsafe_recover::{execute_unsafe_recover, UnsafeRecoverArgs},
     Commands::{Backup, Restore, TruncateTs, UnsafeRecover, DFSGC},

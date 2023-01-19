@@ -402,7 +402,10 @@ impl RegionCollector {
             // They are impossible to equal, or they cannot overlap.
             assert_ne!(
                 region.get_region_epoch().get_version(),
-                current_region.get_region_epoch().get_version()
+                current_region.get_region_epoch().get_version(),
+                "region:{:?}, current_region:{:?}",
+                region,
+                current_region,
             );
             // Remove it since it's a out-of-date region info.
             if clear_regions_in_range {

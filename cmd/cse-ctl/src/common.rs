@@ -10,10 +10,7 @@ use kvproto::metapb::Store;
 use pd_client::{PdClient, RpcClient};
 use security::{SecurityConfig, SecurityManager};
 
-pub(crate) fn create_pd_client(
-    security_conf: &SecurityConfig,
-    pd_conf: &pd_client::Config,
-) -> RpcClient {
+pub fn create_pd_client(security_conf: &SecurityConfig, pd_conf: &pd_client::Config) -> RpcClient {
     let security_mgr = Arc::new(
         SecurityManager::new(security_conf)
             .unwrap_or_else(|e| panic!("failed to create security manager: {:?}", e)),
@@ -23,7 +20,7 @@ pub(crate) fn create_pd_client(
         .unwrap_or_else(|e| panic!("failed to create rpc client: {:?}", e))
 }
 
-pub(crate) fn get_all_stores_except_tiflash(
+pub fn get_all_stores_except_tiflash(
     pd_client: &dyn PdClient,
 ) -> Result<Vec<Store>, pd_client::Error> {
     Ok(pd_client
@@ -38,10 +35,7 @@ pub(crate) fn get_all_stores_except_tiflash(
         .collect())
 }
 
-pub(crate) async fn send_request_to_store(
-    req: Request<Body>,
-    store: Store,
-) -> Result<Bytes, String> {
+pub async fn send_request_to_store(req: Request<Body>, store: Store) -> Result<Bytes, String> {
     let client = hyper::Client::new();
     let resp = client.request(req).await;
     if resp.is_err() {
@@ -59,7 +53,7 @@ pub(crate) async fn send_request_to_store(
     }
 }
 
-pub(crate) fn generate_etcd_connect_opt(
+pub fn generate_etcd_connect_opt(
     security: &SecurityConfig,
 ) -> Result<ConnectOptions, Box<dyn Error>> {
     let mut option = ConnectOptions::new();

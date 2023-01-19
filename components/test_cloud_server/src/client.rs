@@ -35,6 +35,8 @@ use tikv_util::{
 
 use crate::try_wait;
 
+pub type RefStore = HashMap<Vec<u8>, Vec<u8>>;
+
 pub struct ClusterClient {
     pub pd_client: Arc<TestPdClient>,
     pub channels: HashMap<u64, Channel>,
@@ -42,7 +44,7 @@ pub struct ClusterClient {
     pub(crate) region_ranges: BTreeMap<Vec<u8>, RegionIDVer>,
     /// region_id -> region
     pub(crate) regions: HashMap<u64, RawRegion>,
-    pub(crate) ref_store: Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>>,
+    pub(crate) ref_store: Arc<Mutex<RefStore>>,
     pub(crate) max_ts: AtomicU64,
 }
 
@@ -615,5 +617,13 @@ impl ClusterClient {
 
     pub fn ref_store_contains_key(&self, key: &[u8]) -> bool {
         self.ref_store.lock().unwrap().contains_key(key)
+    }
+
+    pub fn take_ref_store(&mut self) -> RefStore {
+        std::mem::take(&mut self.ref_store.lock().unwrap())
+    }
+
+    pub fn ingest_ref_store(&mut self, mut ref_store: RefStore) {
+        *self.ref_store.lock().unwrap() = std::mem::take(&mut ref_store);
     }
 }

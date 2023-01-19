@@ -2,7 +2,7 @@
 
 use std::{
     collections::HashMap,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     thread::sleep,
     time::Duration,
@@ -12,7 +12,7 @@ use cloud_server::TiKVServer;
 use dashmap::DashMap;
 use futures::executor::block_on;
 use grpcio::{Channel, ChannelBuilder, EnvBuilder, Environment};
-use kvengine::{dfs::InMemFS, ShardStats};
+use kvengine::{dfs::DFS, ShardStats};
 use kvproto::{
     kvrpcpb::{Mutation, Op},
     raft_cmdpb::RaftCmdRequest,
@@ -39,7 +39,6 @@ pub struct ServerCluster {
     env: Arc<Environment>,
     pd_client: Arc<TestPdClient>,
     security_mgr: Arc<SecurityManager>,
-    dfs: Arc<InMemFS>,
     channels: HashMap<u64, Channel>,
     ref_store: Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>>,
     schedule_lock: Arc<DashMap<u64, Arc<Mutex<()>>>>,
@@ -59,7 +58,6 @@ impl ServerCluster {
             env: Arc::new(EnvBuilder::new().cq_count(2).build()),
             pd_client: Arc::new(TestPdClient::new(1, false)),
             security_mgr: Arc::new(SecurityManager::new(&Default::default()).unwrap()),
-            dfs: Arc::new(InMemFS::new()),
             channels: HashMap::new(),
             ref_store: Arc::new(Mutex::new(HashMap::new())),
             schedule_lock: Arc::new(DashMap::new()),
@@ -71,18 +69,42 @@ impl ServerCluster {
         cluster
     }
 
+    fn prepare_dfs(config: &TiKvConfig) -> Arc<dyn DFS> {
+        let dfs_conf = &config.dfs;
+        if dfs_conf.s3_bucket.is_empty() && dfs_conf.s3_endpoint.is_empty()
+            || dfs_conf.s3_endpoint == "local"
+        {
+            let local_path = PathBuf::from(&config.storage.data_dir).join(Path::new("local"));
+            Arc::new(kvengine::dfs::LocalFS::new(&local_path))
+        } else if dfs_conf.s3_endpoint == "memory" {
+            Arc::new(kvengine::dfs::InMemFS::new())
+        } else {
+            Arc::new(kvengine::dfs::S3FS::new(
+                dfs_conf.prefix.clone(),
+                dfs_conf.s3_endpoint.clone(),
+                dfs_conf.s3_key_id.clone(),
+                dfs_conf.s3_secret_key.clone(),
+                dfs_conf.s3_region.clone(),
+                dfs_conf.s3_bucket.clone(),
+            ))
+        }
+    }
+
     pub fn start_node<F>(&mut self, node_id: u16, update_conf: F)
     where
         F: Fn(u16, &mut TiKvConfig),
     {
         let mut config = new_test_config(self.tmp_dir.path(), node_id);
         update_conf(node_id, &mut config);
+        std::fs::create_dir_all(&config.storage.data_dir).unwrap();
+
+        let dfs = Self::prepare_dfs(&config);
         let mut server = TiKVServer::setup(
             config,
             self.security_mgr.clone(),
             self.env.clone(),
             self.pd_client.clone(),
-            self.dfs.clone(),
+            dfs,
         );
         server.run();
         let store_id = server.get_store_id();
@@ -260,7 +282,6 @@ impl ServerCluster {
 pub fn new_test_config(base_dir: &Path, node_id: u16) -> TiKvConfig {
     let mut config = TiKvConfig::default();
     config.storage.data_dir = format!("{}/{}", base_dir.to_str().unwrap(), node_id);
-    std::fs::create_dir_all(&config.storage.data_dir).unwrap();
     config.server.cluster_id = 1;
     config.server.addr = node_addr(node_id);
     config.server.status_addr = node_status_addr(node_id);

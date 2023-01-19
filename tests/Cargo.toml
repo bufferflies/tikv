@@ -94,6 +94,7 @@ cdc = { path = "../components/cdc", default-features = false }
 collections = { path = "../components/collections" }
 crc64fast = "0.1"
 crossbeam = "0.8"
+cse-ctl = { path = "../cmd/cse-ctl" }
 encryption = { path = "../components/encryption", default-features = false }
 engine_rocks_helper = { path = "../components/engine_rocks_helper" }
 error_code = { path = "../components/error_code", default-features = false }
@@ -115,6 +116,7 @@ raft = { version = "0.7.0", default-features = false, features = ["protobuf-code
 raft_log_engine = { path = "../components/raft_log_engine", default-features = false }
 raftstore = { path = "../components/raftstore", default-features = false }
 rand = "0.8.3"
+rfenginepb = { path = "../components/rfenginepb" }
 rfstore = { path = "../components/rfstore", default-features = false }
 slog = { version = "2.3", features = ["max_level_trace", "release_max_level_debug"] }
 slog-global = { version = "0.1", git = "https://github.com/breeswish/slog-global.git", rev = "d592f88e4dbba5eb439998463054f1a44fbf17b9" }
