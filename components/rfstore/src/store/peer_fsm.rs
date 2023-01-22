@@ -999,7 +999,7 @@ impl<'a> PeerMsgHandler<'a> {
                 return self.split_by_iterate(shard);
             }
             let region_max_size = self.ctx.cfg.region_split_size.0 * 3 / 2;
-            let region_max_entries = region_max_size / 100;
+            let region_max_entries = self.ctx.cfg.region_split_keys * 3 / 2;
             raftstore::coprocessor::metrics::REGION_SIZE_HISTOGRAM.observe(estimated_size as f64);
             raftstore::coprocessor::metrics::REGION_KEYS_HISTOGRAM
                 .observe(estimated_entries as f64);
