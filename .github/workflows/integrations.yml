@@ -41,6 +41,11 @@ jobs:
           default: true
           profile: minimal
           components: clippy
+      - name: Install Protoc
+        uses: arduino/setup-protoc@v1
+        with:
+          version: '3.14.0'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Run integrations tests
         env:
           CARGO_INCREMENTAL: "0"
