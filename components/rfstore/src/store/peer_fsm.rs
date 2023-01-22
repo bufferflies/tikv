@@ -354,7 +354,9 @@ impl<'a> PeerMsgHandler<'a> {
                 for peer_id in peers {
                     if let Some(pr) = peer.raft_group.raft.mut_prs().get_mut(peer_id) {
                         // Increase these peers' next_idx manually to append entries.
-                        pr.next_idx = last_index;
+                        // pr.next_idx should never equal to pr.matched, otherwise the follower
+                        // will keep ignoring the snapshot, never be able to catch up.
+                        pr.next_idx = cmp::max(last_index, pr.matched + 1);
                     }
                 }
             }
