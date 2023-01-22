@@ -379,26 +379,14 @@ impl RegionMap {
     }
 
     fn update_region_ranges(&mut self, region: &Region) {
-        let region_id = region.get_id();
-        let prev = self.regions.get(&region_id);
-        if let Some(prev_region) = prev {
-            let prev_raw_end = raw_end_key(prev_region);
-            if let Some(&id) = self.region_ranges.get(&prev_raw_end) {
-                if id == region_id {
-                    self.region_ranges.remove(&prev_raw_end);
-                }
-            }
-        }
-        let range_change = prev.map_or(true, |prev_region| {
-            prev_region.get_region_epoch().get_version() != region.get_region_epoch().get_version()
-        });
-        if range_change && is_region_initialized(region) {
+        if is_region_initialized(region) {
             if let Some(overlap_regions) = self.get_overlap_regions(region) {
                 for (_, end_key) in overlap_regions {
                     self.region_ranges.remove(&end_key);
                 }
-                self.region_ranges.insert(raw_end_key(region), region_id);
             }
+            self.region_ranges
+                .insert(raw_end_key(region), region.get_id());
         }
     }
 
