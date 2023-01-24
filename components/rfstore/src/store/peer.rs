@@ -1807,6 +1807,7 @@ impl Peer {
             .push(ApplyMsg::PendingPrepareMerge(parent_snap));
         let mut new_meta = parent_meta;
         new_meta.prepare_merge(entry.index);
+        new_meta.set_property(TERM_KEY, &entry.term.to_le_bytes());
         self.update_meta_on_version_change(ctx, &new_meta, &region, Some(merge_state.clone()));
         self.pending_merge_state = Some(merge_state);
     }
@@ -1833,6 +1834,7 @@ impl Peer {
         region.mut_region_epoch().set_version(version + 1);
         let mut new_meta = self.get_store().shard_meta.as_ref().unwrap().clone();
         new_meta.rollback_merge(entry.index);
+        new_meta.set_property(TERM_KEY, &entry.term.to_le_bytes());
         self.update_meta_on_version_change(ctx, &new_meta, &region, None);
         ctx.apply_msgs.msgs.push(ApplyMsg::PrepareRollbackMerge);
     }
@@ -1853,6 +1855,7 @@ impl Peer {
             .unwrap();
         let source_meta = ShardMeta::new(self.peer.store_id, &source);
         new_meta.commit_merge(&source_meta, entry.index);
+        new_meta.set_property(TERM_KEY, &entry.term.to_le_bytes());
         let merged_region = new_merged_region(source_region, self.get_preprocessed_region());
         self.update_meta_on_version_change(ctx, &new_meta, &merged_region, None);
 
