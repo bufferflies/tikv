@@ -2,12 +2,19 @@
 
 use std::{collections::HashSet, path::PathBuf, str::FromStr};
 
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use clap::Args;
-use kvproto::raft_serverpb::{PeerState, RegionLocalState};
+use kvproto::{
+    metapb,
+    metapb::PeerRole,
+    raft_serverpb::{PeerState, RegionLocalState, StoreIdent},
+};
 use protobuf::Message;
 use rfengine::{RfEngine, WriteBatch};
-use tikv_util::{codec::number::NumberEncoder, info};
+use tikv_util::{
+    codec::{bytes::decode_bytes, number::NumberEncoder},
+    info,
+};
 
 #[derive(Args)]
 pub struct UnsafeRecoverArgs {
@@ -31,6 +38,10 @@ pub struct UnsafeRecoverArgs {
     #[clap(long)]
     pub destroy: bool,
 
+    /// create empty regions on the store.
+    #[clap(long)]
+    pub create_empty: Option<String>,
+
     /// Update the regions by removing the peers on the stores.
     /// Multiple stores are separated by ",".
     #[clap(long)]
@@ -45,11 +56,20 @@ pub struct UnsafeRecoverArgs {
     pub all: bool,
 }
 
+const RAFT_STATE_KEY_BYTE: u8 = 1;
 const REGION_META_KEY_BYTE: u8 = 2;
+const STORE_IDENT_KEY: &[u8] = &[3];
 const KV_ENGINE_META_KEY: &[u8] = &[5];
+const RAFT_INIT_LOG_TERM: u64 = 5;
+const RAFT_INIT_LOG_INDEX: u64 = 5;
+const TERM_KEY: &str = "term";
 
 pub(crate) fn execute_unsafe_recover(args: UnsafeRecoverArgs) {
     let rf = rfengine::RfEngine::open(&args.path, 512 * 1024 * 1024, 8 * 1024).unwrap();
+    if let Some(create_empty) = args.create_empty {
+        create_empty_regions(&rf, create_empty, args.commit);
+        return;
+    }
     let target_regions = if let Some(region_id) = args.region {
         let region_to_peers = rf.get_region_peer_map();
         let &peer_id = region_to_peers.get(&region_id).unwrap();
@@ -166,9 +186,131 @@ fn load_engine_meta(rf: &RfEngine, peer_id: u64) -> kvenginepb::ChangeSet {
     cs
 }
 
+fn raft_state_key(version: u64) -> Bytes {
+    let mut key = BytesMut::with_capacity(5);
+    key.put_u8(RAFT_STATE_KEY_BYTE);
+    key.put_u32(version as u32);
+    key.freeze()
+}
+
 fn region_state_key(version: u64) -> Bytes {
     let mut key = BytesMut::with_capacity(5);
     key.put_u8(REGION_META_KEY_BYTE);
     key.put_u32(version as u32);
     key.freeze()
+}
+
+fn create_empty_regions(rf: &RfEngine, empty_region_file: String, commit: bool) {
+    let mut store_ident = StoreIdent::new();
+    let data = rf.get_state(0, STORE_IDENT_KEY).unwrap_or_default();
+    store_ident.merge_from_bytes(data.chunk()).unwrap();
+    let region_map = rf.get_region_peer_map();
+    let mut wb = WriteBatch::new();
+    let data = std::fs::read(empty_region_file.as_str()).unwrap();
+    let empty_regions: Vec<EmptyRegion> = serde_json::from_slice(&data).unwrap();
+    for empty_region in &empty_regions {
+        let peer_id = empty_region.peer_id;
+        let region_id = empty_region.region_id;
+        if rf
+            .get_last_state_with_prefix(peer_id, &[REGION_META_KEY_BYTE])
+            .is_some()
+        {
+            panic!("peer conflict peer_id: {}", peer_id);
+        }
+        if let Some(&old_peer_id) = region_map.get(&region_id) {
+            panic!("region conflict {}, on peer {}", region_id, old_peer_id);
+        }
+        // reference rfstore::RaftState::marshal
+        let raft_state_key = raft_state_key(empty_region.epoch_ver);
+        let mut raft_state_val = BytesMut::with_capacity(40);
+        raft_state_val.put_u64_le(RAFT_INIT_LOG_TERM);
+        raft_state_val.put_u64_le(0);
+        raft_state_val.put_u64_le(RAFT_INIT_LOG_INDEX);
+        raft_state_val.put_u64_le(RAFT_INIT_LOG_INDEX);
+        raft_state_val.put_u64_le(RAFT_INIT_LOG_INDEX);
+        wb.set_state(
+            peer_id,
+            region_id,
+            raft_state_key.chunk(),
+            raft_state_val.chunk(),
+        );
+        let region_state_key = region_state_key(empty_region.epoch_ver);
+        let region = empty_region.to_region(store_ident.store_id);
+        info!("create region {:?}", &region);
+        let mut region_local_state = RegionLocalState::new();
+        region_local_state.set_region(region);
+        let region_state_val = region_local_state.write_to_bytes().unwrap();
+        wb.set_state(
+            peer_id,
+            region_id,
+            region_state_key.chunk(),
+            &region_state_val,
+        );
+        let engine_meta = empty_region.to_engine_meta();
+        info!("create engine meta {:?}", &engine_meta);
+        let engine_meta_data = engine_meta.write_to_bytes().unwrap();
+        wb.set_state(peer_id, region_id, KV_ENGINE_META_KEY, &engine_meta_data);
+    }
+    if commit {
+        rf.write(wb).unwrap();
+    }
+}
+
+#[derive(Default, Debug, Serialize, Deserialize)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+struct EmptyRegion {
+    pub region_id: u64,
+    pub store_id: u64,
+    pub peer_id: u64,
+    pub start_key: String,
+    pub end_key: String,
+    pub epoch_ver: u64,
+    pub epoch_conf_ver: u64,
+}
+
+impl EmptyRegion {
+    fn to_region(&self, store_id: u64) -> metapb::Region {
+        let mut region = metapb::Region::new();
+        region.set_id(self.region_id);
+        let epoch = region.mut_region_epoch();
+        epoch.set_version(self.epoch_ver);
+        epoch.set_conf_ver(self.epoch_conf_ver);
+        region.set_start_key(Self::encoded_key(self.start_key.as_bytes()));
+        region.set_end_key(Self::encoded_key(self.end_key.as_bytes()));
+        let mut peer = metapb::Peer::new();
+        peer.set_id(self.peer_id);
+        peer.set_store_id(store_id);
+        peer.set_role(PeerRole::Voter);
+        region.mut_peers().push(peer);
+        region
+    }
+
+    fn to_engine_meta(&self) -> kvenginepb::ChangeSet {
+        let mut cs = kvenginepb::ChangeSet::new();
+        cs.set_shard_id(self.region_id);
+        cs.set_shard_ver(self.epoch_ver);
+        cs.set_sequence(RAFT_INIT_LOG_INDEX);
+        let snap = cs.mut_snapshot();
+        snap.set_start(Self::raw_key(self.start_key.as_bytes()));
+        snap.set_end(Self::raw_key(self.end_key.as_bytes()));
+        snap.set_data_sequence(RAFT_INIT_LOG_INDEX);
+        let props = snap.mut_properties();
+        props.set_shard_id(self.region_id);
+        props.mut_keys().push(TERM_KEY.to_string());
+        props
+            .mut_values()
+            .push(RAFT_INIT_LOG_TERM.to_le_bytes().to_vec());
+        cs
+    }
+
+    fn encoded_key(str_key: &[u8]) -> Vec<u8> {
+        hex::decode(str_key).unwrap()
+    }
+
+    fn raw_key(str_key: &[u8]) -> Vec<u8> {
+        let encoded_key = Self::encoded_key(str_key);
+        let mut slice = encoded_key.as_slice();
+        decode_bytes(&mut slice, false).unwrap()
+    }
 }

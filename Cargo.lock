@@ -1464,6 +1464,7 @@ dependencies = [
  "etcd-client 0.10.2",
  "futures 0.3.15",
  "grpcio",
+ "hex 0.4.2",
  "http",
  "hyper",
  "kvengine",

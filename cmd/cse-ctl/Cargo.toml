@@ -12,6 +12,7 @@ clap = { version = "3.2", features = ["derive"] }
 etcd-client = { git = "https://github.com/pingcap/etcd-client", rev = "14a6f8731f1890d5fd2f6e16a9f0d0a306b0599e", features = ["pub-response-field", "tls-openssl-vendored"] }
 futures = "0.3"
 grpcio = { version = "0.10", default-features = false, features = ["openssl-vendored", "protobuf-codec"] }
+hex = "0.4"
 http = "0.2.8"
 hyper = "0.14"
 kvengine = { path = "../../components/kvengine" }
