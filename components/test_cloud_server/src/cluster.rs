@@ -39,6 +39,7 @@ pub struct ServerCluster {
     env: Arc<Environment>,
     pd_client: Arc<TestPdClient>,
     security_mgr: Arc<SecurityManager>,
+    dfs: Option<Arc<dyn DFS>>,
     channels: HashMap<u64, Channel>,
     ref_store: Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>>,
     schedule_lock: Arc<DashMap<u64, Arc<Mutex<()>>>>,
@@ -58,6 +59,7 @@ impl ServerCluster {
             env: Arc::new(EnvBuilder::new().cq_count(2).build()),
             pd_client: Arc::new(TestPdClient::new(1, false)),
             security_mgr: Arc::new(SecurityManager::new(&Default::default()).unwrap()),
+            dfs: None,
             channels: HashMap::new(),
             ref_store: Arc::new(Mutex::new(HashMap::new())),
             schedule_lock: Arc::new(DashMap::new()),
@@ -98,13 +100,13 @@ impl ServerCluster {
         update_conf(node_id, &mut config);
         std::fs::create_dir_all(&config.storage.data_dir).unwrap();
 
-        let dfs = Self::prepare_dfs(&config);
+        let dfs = self.dfs.get_or_insert_with(|| Self::prepare_dfs(&config));
         let mut server = TiKVServer::setup(
             config,
             self.security_mgr.clone(),
             self.env.clone(),
             self.pd_client.clone(),
-            dfs,
+            dfs.clone(),
         );
         server.run();
         let store_id = server.get_store_id();
