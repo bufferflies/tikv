@@ -62,6 +62,9 @@ impl CloudReader {
             if key != raw_key {
                 break;
             }
+            if kvengine::table::is_deleted(data_iter.item().meta) {
+                break;
+            }
             let user_meta = UserMeta::from_slice(data_iter.item().user_meta());
             if user_meta.commit_ts < start_ts.into_inner() {
                 // A transaction's commit_ts must be greater than start_ts, if current commit_ts
@@ -253,6 +256,10 @@ impl CloudReader {
         it.rewind();
         while it.valid() {
             let item = it.item();
+            if kvengine::table::is_deleted(item.meta) {
+                it.next();
+                continue;
+            }
             let user_meta = UserMeta::from_slice(item.user_meta());
             if user_meta.start_ts == ts.into_inner() {
                 return Ok(Some(Key::from_raw(it.key())));
