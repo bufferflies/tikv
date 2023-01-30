@@ -163,7 +163,7 @@ impl Worker {
                 return;
             }
         }
-        let manifest = self.manifest.to_change_set();
+        let manifest = self.manifest.to_change_set(true); // Exclude tombstone peers.
         for peer in manifest.get_peers() {
             for file in peer.get_files() {
                 let file_name =

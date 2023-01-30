@@ -18,7 +18,7 @@ use bytes::{Buf, BufMut};
 use protobuf::Message;
 use tikv_util::{error, info, warn};
 
-use crate::{raft_log_file_name, PeerMeta};
+use crate::{raft_log_file_name, PeerMeta, TRUNCATE_ALL_INDEX};
 
 const REWRITE_DIFF: u32 = 10;
 
@@ -186,7 +186,7 @@ impl Manifest {
         let dir = self.file_path.parent().unwrap();
         let tmp_path = self.file_path.with_extension("tmp");
         let tmp_file = File::create(&tmp_path)?;
-        let change_set = self.to_change_set();
+        let change_set = self.to_change_set(false);
         self.offset = persist_change_set(&tmp_file, 0, &change_set)?;
         fs::rename(&tmp_path, &self.file_path)?;
         file_system::sync_dir(dir)?;
@@ -197,10 +197,13 @@ impl Manifest {
         Ok(())
     }
 
-    pub(crate) fn to_change_set(&self) -> rfenginepb::ChangeSet {
+    pub(crate) fn to_change_set(&self, exclude_tombstone: bool) -> rfenginepb::ChangeSet {
         let mut cs = rfenginepb::ChangeSet::default();
         cs.epoch_id = self.epoch_id;
         for (&peer_id, peer_meta) in &self.peers {
+            if exclude_tombstone && peer_meta.truncated_idx == TRUNCATE_ALL_INDEX {
+                continue;
+            }
             let mut meta_pb = rfenginepb::PeerMeta::new();
             meta_pb.set_peer_id(peer_id);
             meta_pb.set_region_id(peer_meta.region_id);
