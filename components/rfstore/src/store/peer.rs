@@ -631,7 +631,7 @@ impl Peer {
     pub(crate) fn destroy(&mut self, raft_wb: &mut rfengine::WriteBatch) -> Result<()> {
         let t = Instant::now();
 
-        let mut region = self.region().clone();
+        let mut region = self.get_preprocessed_region().clone();
         info!(
             "begin to destroy";
             "tag" => self.tag(),
