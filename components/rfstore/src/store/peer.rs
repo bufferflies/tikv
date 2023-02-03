@@ -427,6 +427,8 @@ pub(crate) struct Peer {
 
     /// True if the peer is being destroyed, but waiting for dependents empty.
     pub(crate) delay_destroy: bool,
+    /// True if the delay_destroy is caused by successful commit merge.
+    pub(crate) delay_destroy_merged: bool,
 
     /// Record the instants of peers being added into the configuration.
     /// Remove them after they are not pending any more.
@@ -537,6 +539,7 @@ impl Peer {
             down_peer_ids: vec![],
             pending_remove: false,
             delay_destroy: false,
+            delay_destroy_merged: false,
             leader_missing_time: Some(Instant::now()),
             last_applying_idx: applied_index,
             last_urgent_proposal_idx: u64::MAX,
@@ -628,7 +631,11 @@ impl Peer {
         true
     }
 
-    pub(crate) fn destroy(&mut self, raft_wb: &mut rfengine::WriteBatch) -> Result<()> {
+    pub(crate) fn destroy(
+        &mut self,
+        raft_wb: &mut rfengine::WriteBatch,
+        merged_by_target: bool,
+    ) -> Result<()> {
         let t = Instant::now();
 
         let mut region = self.get_preprocessed_region().clone();
@@ -652,7 +659,11 @@ impl Peer {
             self.peer_id(),
             &region,
             PeerState::Tombstone,
-            self.pending_merge_state.clone(),
+            if merged_by_target {
+                self.pending_merge_state.clone()
+            } else {
+                None
+            },
         );
 
         self.pending_reads.clear_all(Some(self.region_id));
