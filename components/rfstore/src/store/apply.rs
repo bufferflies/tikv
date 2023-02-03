@@ -552,7 +552,6 @@ impl Applier {
             mem_states.set_switch_time(timer);
         }
         mem_states.mem_table_size = mem_table_size;
-        mem_states.last_write_time = Some(timer);
         self.maybe_propose_switch_mem_table(ctx, timer);
         ctx.apply_time.observe(timer.saturating_elapsed_secs());
         // self.metrics.written_bytes += wb.estimated_size() as u64;
@@ -1359,22 +1358,22 @@ impl Applier {
 struct MemTableState {
     mem_table_size: u64,
     init_time: Instant,
-    last_write_time: Option<Instant>,
     last_switch_time: Option<Instant>,
     proposed_time: Option<Instant>,
 }
 
 const BYTES_MB: u64 = 1024 * 1024;
-const MEM_TABLE_SIZE_LOWER_LIMIT: u64 = 4 * BYTES_MB;
 
 // 128MB mem-table flush at 10 seconds.
 // 32MB mem-table flush at 40 seconds.
 // 4MB mem-table flush at 320 seconds.
+// 1MB mem-table flush at 1280 seconds.
+// 256KB mem-table flush at 5120 seconds.
+// 64KB mem-table flush at 20480 seconds.
 const STANDARD_MEMORY_SIZE_DURATION: u64 = 128 * BYTES_MB * 10;
 
-// 1MB mem-table idle for 30 minutes get flushed.
-const STANDARD_IDLE_SECONDS: u64 = 30 * 60;
-const MAX_IDLE_SECONDS: u64 = 12 * 60 * 60;
+const MAX_SWITCH_SECONDS: u64 = 24 * 60 * 60;
+const MAX_JITTER_SECONDS: u64 = 4096;
 const PROPOSE_SWITCH_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl MemTableState {
@@ -1382,7 +1381,6 @@ impl MemTableState {
         Self {
             mem_table_size,
             init_time: Instant::now(),
-            last_write_time: None,
             last_switch_time: None,
             proposed_time: None,
         }
@@ -1399,28 +1397,14 @@ impl MemTableState {
             // The proposal maybe failed for some reason, propose again.
             warn!("propose switch mem-table expired, propose again");
         }
-        if self.mem_table_size < MEM_TABLE_SIZE_LOWER_LIMIT {
-            let idle_duration = self.get_idle_duration(now);
-            return idle_duration > self.max_idle_duration();
-        }
+        // Avoid too many mem-tables flush at the same time.
+        let jitter_seconds = self.mem_table_size % MAX_JITTER_SECONDS;
         // We don't need to propose on hard limit, it is handled by the engine.
-        let duration_secs_to_switch = STANDARD_MEMORY_SIZE_DURATION / self.mem_table_size;
+        let duration_secs_to_switch = min(
+            STANDARD_MEMORY_SIZE_DURATION / self.mem_table_size,
+            MAX_SWITCH_SECONDS + jitter_seconds,
+        );
         self.get_duration_since_last_switch(now).as_secs() > duration_secs_to_switch
-    }
-
-    fn get_idle_duration(&self, now: Instant) -> Duration {
-        self.last_write_time
-            .map(|time| now.saturating_duration_since(time))
-            .unwrap_or_else(|| now.saturating_duration_since(self.init_time))
-    }
-
-    // idle duration applies to small mem-table
-    // The large mem-table has less max idle time.
-    fn max_idle_duration(&self) -> Duration {
-        min(
-            Duration::from_secs(MAX_IDLE_SECONDS),
-            Duration::from_secs(STANDARD_IDLE_SECONDS * BYTES_MB / self.mem_table_size),
-        )
     }
 
     fn get_duration_since_last_switch(&self, now: Instant) -> Duration {
@@ -1804,19 +1788,17 @@ fn test_mem_table_state() {
     // Test that
     #[derive(Clone, Copy, Debug)]
     struct Case {
-        size_mb: u64,
+        size_kb: u64,
         propose_time: Option<u64>,
-        write_time: Option<u64>,
         switch_time: Option<u64>,
         check_time: u64,
         check_result: bool,
     }
     impl Case {
-        fn new(size_mb: u64) -> Self {
+        fn new(size_kb: u64) -> Self {
             Case {
-                size_mb,
+                size_kb,
                 propose_time: None,
-                write_time: None,
                 switch_time: None,
                 check_time: 0,
                 check_result: false,
@@ -1826,12 +1808,6 @@ fn test_mem_table_state() {
         fn propose_at(&self, secs: u64) -> Self {
             let mut c = *self;
             c.propose_time = Some(secs);
-            c
-        }
-
-        fn write_at(&self, secs: u64) -> Self {
-            let mut c = *self;
-            c.write_time = Some(secs);
             c
         }
 
@@ -1853,37 +1829,50 @@ fn test_mem_table_state() {
             c
         }
     }
+
     let cases = vec![
         // check mem size bound
         Case::new(0).result(false),
         // check propose
-        Case::new(129).propose_at(0).check_at(3).result(false),
-        Case::new(129).propose_at(0).check_at(11).result(true),
-        // check idle
-        Case::new(1).check_at(1700).result(false),
-        Case::new(1).check_at(1900).result(true),
-        Case::new(1).write_at(1000).check_at(1900).result(false),
-        Case::new(1).write_at(1000).check_at(2900).result(true),
-        Case::new(3).check_at(599).result(false),
-        Case::new(3).check_at(601).result(true),
+        Case::new(129 * 1024)
+            .propose_at(0)
+            .check_at(3)
+            .result(false),
+        Case::new(129 * 1024)
+            .propose_at(0)
+            .check_at(11)
+            .result(true),
         // check switched
-        Case::new(32).check_at(39).result(false),
-        Case::new(32).check_at(41).result(true),
-        Case::new(8).switch_at(100).check_at(259).result(false),
-        Case::new(8).switch_at(100).check_at(261).result(true),
-        Case::new(4).check_at(319).result(false),
-        Case::new(4).check_at(321).result(true),
+        Case::new(32 * 1024).check_at(39).result(false),
+        Case::new(32 * 1024).check_at(41).result(true),
+        Case::new(8 * 1024)
+            .switch_at(100)
+            .check_at(259)
+            .result(false),
+        Case::new(8 * 1024)
+            .switch_at(100)
+            .check_at(261)
+            .result(true),
+        Case::new(4 * 1024).check_at(319).result(false),
+        Case::new(4 * 1024).check_at(321).result(true),
+        Case::new(2 * 1024).check_at(639).result(false),
+        Case::new(2 * 1024).check_at(641).result(true),
+        Case::new(1024).check_at(1279).result(false),
+        Case::new(1024).check_at(1281).result(true),
+        Case::new(256).check_at(5119).result(false),
+        Case::new(256).check_at(5121).result(true),
+        Case::new(64).check_at(20479).result(false),
+        Case::new(64).check_at(20481).result(true),
+        Case::new(1).check_at(23 * 60 * 60).result(false),
+        Case::new(1).check_at(25 * 60 * 60).result(true),
     ];
     for case in cases {
-        let mut states = MemTableState::new(case.size_mb * BYTES_MB);
+        let mut states = MemTableState::new(case.size_kb * 1024);
         states.proposed_time = case
             .propose_time
             .map(|secs| Instant::now() + Duration::from_secs(secs));
         states.last_switch_time = case
             .switch_time
-            .map(|secs| Instant::now() + Duration::from_secs(secs));
-        states.last_write_time = case
-            .write_time
             .map(|secs| Instant::now() + Duration::from_secs(secs));
         let check_time = Instant::now() + Duration::from_secs(case.check_time);
         assert_eq!(
