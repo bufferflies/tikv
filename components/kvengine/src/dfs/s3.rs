@@ -466,25 +466,22 @@ impl ObjectStorage for S3FS {
     fn put_objects(&self, objects: Vec<(String, Bytes)>) -> Result<(), String> {
         let runtime = self.get_runtime();
         let len = objects.len();
-        let (tx, rx) = tikv_util::mpsc::bounded(len);
+        let mut handles = Vec::with_capacity(len);
         for (key, data) in objects {
             let full_key = format!("{}/{}", self.prefix, key);
             let fs = self.clone();
-            let tx = tx.clone();
-            runtime.spawn(async move {
-                let result = fs
-                    .put_object(full_key, data, key.clone())
+            handles.push(runtime.spawn(async move {
+                fs.put_object(full_key, data, key.clone())
                     .await
-                    .map_err(|err| format!("put {} failed {:?}", &key, err));
-                tx.send(result).unwrap();
-            });
+                    .map_err(|err| format!("put {} failed {:?}", &key, err))
+            }));
         }
-        let mut errs = vec![];
-        for _ in 0..len {
-            if let Err(err) = rx.recv().unwrap() {
-                errs.push(err)
-            }
-        }
+
+        let errs: Vec<_> = runtime
+            .block_on(futures::future::join_all(handles))
+            .into_iter()
+            .filter_map(|r| r.unwrap().err())
+            .collect();
         if !errs.is_empty() {
             return Err(format!("{:?}", errs));
         }
@@ -494,24 +491,22 @@ impl ObjectStorage for S3FS {
     fn get_objects(&self, keys: Vec<String>) -> Result<Vec<(String, Bytes)>, String> {
         let runtime = self.get_runtime();
         let len = keys.len();
-        let (tx, rx) = tikv_util::mpsc::bounded(len);
-        let mut objects = vec![];
+        let mut handles = Vec::with_capacity(len);
         for key in keys {
             let full_key = format!("{}/{}", self.prefix, key);
             let fs = self.clone();
-            let tx = tx.clone();
-            runtime.spawn(async move {
-                let result = fs
-                    .get_object(full_key, key.clone())
+            handles.push(runtime.spawn(async move {
+                fs.get_object(full_key, key.clone())
                     .await
                     .map_err(|err| format!("put {} failed {:?}", &key, err))
-                    .map(|data| (key.clone(), data));
-                tx.send(result).unwrap();
-            });
+                    .map(|data| (key.clone(), data))
+            }));
         }
+
+        let mut objects = vec![];
         let mut errs = vec![];
-        for _ in 0..len {
-            match rx.recv().unwrap() {
+        for res in runtime.block_on(futures::future::join_all(handles)) {
+            match res.unwrap() {
                 Ok((key, data)) => {
                     objects.push((key, data));
                 }
