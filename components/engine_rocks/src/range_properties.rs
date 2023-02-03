@@ -159,8 +159,8 @@ impl RangePropertiesExt for RocksEngine {
             return Err(box_err!("all CFs are empty"));
         }
 
-        let (cf, _) = cfs.iter().max_by_key(|(_, s)| s).unwrap();
-
+        let (cf, size) = cfs.iter().max_by_key(|(_, s)| s).unwrap();
+        println!("get range approximate split keys,cf:{},size:{},keys:{},key_count:{}",cf,size,box_try!(self.get_range_approximate_keys_cf(cf, range, 0)),key_count);
         self.get_range_approximate_split_keys_cf(cf, range, key_count)
     }
 
@@ -184,7 +184,10 @@ impl RangePropertiesExt for RocksEngine {
                     .map(|(k, _)| k),
             );
         }
-
+        println!("start_keys:{:?},end_keys:{:?},keys:{}", 
+            log_wrappers::Value::key(*start_key), 
+            log_wrappers::Value::key(*end_key),
+            keys.len());
         if keys.is_empty() {
             return Ok(vec![]);
         }

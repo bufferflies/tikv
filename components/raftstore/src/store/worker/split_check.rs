@@ -273,6 +273,11 @@ impl<EK: KvEngine, S: StoreHandle> Runner<EK, S> {
                 bucket_entry.size,
                 bucket_entry.keys.len()
             );
+            println!(
+                "bucket_entry size {} keys count {}",
+                bucket_entry.size,
+                bucket_entry.keys.len()
+            );
             buckets.push(bucket_entry);
         }
         self.on_buckets_created(&mut buckets, region, &ranges);
@@ -290,6 +295,7 @@ impl<EK: KvEngine, S: StoreHandle> Runner<EK, S> {
             let mut bucket_region = region.clone();
             bucket_region.set_start_key(bucket_range.0.clone());
             bucket_region.set_end_key(bucket_range.1.clone());
+            println!("bucket keys_size:{}",bucket.keys.len());
             let adjusted_keys = std::mem::take(&mut bucket.keys)
                 .into_iter()
                 .enumerate()
@@ -403,6 +409,7 @@ impl<EK: KvEngine, S: StoreHandle> Runner<EK, S> {
             );
             return;
         }
+        println!("check_split_and_bucket:{}, policy:{:?}, checker_size:{}",host.skip(), host.policy(), host.checkers.len());
         let split_keys = match host.policy() {
             CheckPolicy::Scan => {
                 match self.scan_split_keys(
@@ -432,6 +439,7 @@ impl<EK: KvEngine, S: StoreHandle> Runner<EK, S> {
                         if let Err(e) =
                             self.approximate_check_bucket(tablet, region, &mut host, bucket_ranges)
                         {
+                            println!("failed toapproximate_check_bucket,err:{:?}",e);
                             error!(%e;
                                 "approximate_check_bucket failed";
                                 "region_id" => region_id,
@@ -453,6 +461,7 @@ impl<EK: KvEngine, S: StoreHandle> Runner<EK, S> {
                         "start_key" => log_wrappers::Value::key(&start_key),
                         "end_key" => log_wrappers::Value::key(&end_key),
                     );
+                    println!("failed to get approximate split key,err:{:?}",e);
                     match self.scan_split_keys(
                         &mut host,
                         tablet,
@@ -607,6 +616,7 @@ impl<EK: KvEngine, S: StoreHandle> Runner<EK, S> {
                 "bucket_count" => buckets.len(),
                 "bucket_size" => bucket_size,
             );
+            println!("bucket_count,bucket_count:{},bucket_size:{}", buckets.len(),bucket_size);
             self.router.update_approximate_size(region.get_id(), size);
             self.router.update_approximate_keys(region.get_id(), keys);
         })?;

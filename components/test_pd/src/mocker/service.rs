@@ -235,6 +235,7 @@ impl PdMocker for Service {
     fn report_buckets(&self, req: &ReportBucketsRequest) -> Option<Result<ReportBucketsResponse>> {
         let buckets = req.get_buckets();
         let region_id = req.get_buckets().get_region_id();
+        println!("report buckets ,region_id:{},bucket_size:{}",region_id,buckets.keys.len());
         self.buckets
             .lock()
             .unwrap()
