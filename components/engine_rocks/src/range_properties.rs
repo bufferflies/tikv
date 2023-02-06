@@ -43,13 +43,12 @@ impl RangePropertiesExt for RocksEngine {
         let mut total_keys = 0;
         let (mem_keys, _) = box_try!(self.get_approximate_memtable_stats_cf(cfname, &range));
         total_keys += mem_keys;
-
         let collection = box_try!(self.get_range_properties_cf(cfname, start_key, end_key));
         for (_, v) in collection.iter() {
             let props = box_try!(RangeProperties::decode(v.user_collected_properties()));
             total_keys += props.get_approximate_keys_in_range(start_key, end_key);
         }
-
+        println!("mem_keys_size:{},total_keys:{}",mem_keys,total_keys);
         if large_threshold != 0 && total_keys > large_threshold {
             let ssts = collection
                 .iter()
@@ -159,8 +158,7 @@ impl RangePropertiesExt for RocksEngine {
             return Err(box_err!("all CFs are empty"));
         }
 
-        let (cf, size) = cfs.iter().max_by_key(|(_, s)| s).unwrap();
-        println!("get range approximate split keys,cf:{},size:{},keys:{},key_count:{}",cf,size,box_try!(self.get_range_approximate_keys_cf(cf, range, 0)),key_count);
+        let (cf, _) = cfs.iter().max_by_key(|(_, s)| s).unwrap();
         self.get_range_approximate_split_keys_cf(cf, range, key_count)
     }
 
@@ -173,7 +171,16 @@ impl RangePropertiesExt for RocksEngine {
         let start_key = &range.start_key;
         let end_key = &range.end_key;
         let collection = box_try!(self.get_range_properties_cf(cfname, start_key, end_key));
-
+        println!("get_range_approximate_split_keys_cf, cf_name:{}, size:{}, keys:{}, key_count:{}, collection size:{},
+                start_keys:{:?}, end_keys:{:?}",
+            cfname,
+            box_try!(self.get_range_approximate_size_cf(cfname, range, 0)),
+            box_try!(self.get_range_approximate_keys_cf(cfname, range, 0)),
+            key_count,
+            collection.len(),
+            log_wrappers::Value::key(*start_key), 
+            log_wrappers::Value::key(*end_key),
+        );
         let mut keys = vec![];
         for (_, v) in collection.iter() {
             let props = box_try!(RangeProperties::decode(v.user_collected_properties()));
@@ -184,10 +191,6 @@ impl RangePropertiesExt for RocksEngine {
                     .map(|(k, _)| k),
             );
         }
-        println!("start_keys:{:?},end_keys:{:?},keys:{}", 
-            log_wrappers::Value::key(*start_key), 
-            log_wrappers::Value::key(*end_key),
-            keys.len());
         if keys.is_empty() {
             return Ok(vec![]);
         }

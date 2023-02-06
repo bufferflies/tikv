@@ -273,11 +273,6 @@ impl<EK: KvEngine, S: StoreHandle> Runner<EK, S> {
                 bucket_entry.size,
                 bucket_entry.keys.len()
             );
-            println!(
-                "bucket_entry size {} keys count {}",
-                bucket_entry.size,
-                bucket_entry.keys.len()
-            );
             buckets.push(bucket_entry);
         }
         self.on_buckets_created(&mut buckets, region, &ranges);
@@ -295,7 +290,6 @@ impl<EK: KvEngine, S: StoreHandle> Runner<EK, S> {
             let mut bucket_region = region.clone();
             bucket_region.set_start_key(bucket_range.0.clone());
             bucket_region.set_end_key(bucket_range.1.clone());
-            println!("bucket keys_size:{}",bucket.keys.len());
             let adjusted_keys = std::mem::take(&mut bucket.keys)
                 .into_iter()
                 .enumerate()

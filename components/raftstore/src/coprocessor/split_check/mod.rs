@@ -97,7 +97,6 @@ impl<'a, E> Host<'a, E> {
                 region_size / self.cfg.region_bucket_size.0,
                 CheckPolicy::Approximate,
             );
-            println!("bucket checker,region_size:{},bucket_size:{},limit:{}",region_size,self.cfg.region_bucket_size.0,region_size / self.cfg.region_bucket_size.0);
             return bucket_checker
                 .approximate_split_keys(region, engine)
                 .map(|keys| Bucket {

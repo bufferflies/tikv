@@ -111,7 +111,7 @@ fn test_report_buckets() {
     router
         .send(region_id, PeerMsg::Tick(PeerTick::ReportBuckets))
         .unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(1000));
+    std::thread::sleep(std::time::Duration::from_millis(50));
     for _ in 0..5 {
         let resp = block_on(cluster.node(0).pd_client().get_buckets_by_id(region_id)).unwrap();
         if let Some(buckets) = resp {

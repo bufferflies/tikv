@@ -132,7 +132,7 @@ pub enum SimpleWrite<'a> {
 
 #[derive(Clone)]
 pub struct SimpleWriteEncoder {
-    buf: Vec<u8>,
+    pub buf: Vec<u8>,
 }
 
 impl SimpleWriteEncoder {
