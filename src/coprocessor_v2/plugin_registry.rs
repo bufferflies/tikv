@@ -128,7 +128,7 @@ impl PluginRegistry {
                 // Simple helper functions for loading/unloading plugins.
                 let maybe_load = |file: &PathBuf| {
                     let mut hot_reload_registry = hot_reload_registry.write().unwrap();
-                    if is_library_file(&file) {
+                    if is_library_file(file) {
                         // Ignore errors.
                         hot_reload_registry.load_plugin(file).ok();
                     }
@@ -234,7 +234,7 @@ impl PluginRegistry {
         let dir_name = dir_name.into();
         let mut loaded_plugins = Vec::new();
 
-        for entry in std::fs::read_dir(&dir_name)? {
+        for entry in std::fs::read_dir(dir_name)? {
             if let Ok(file) = entry.map(|f| f.path()) {
                 if is_library_file(&file) {
                     // Ignore errors.
@@ -477,7 +477,7 @@ mod tests {
     fn load_plugin() {
         let library_path = initialize_library();
 
-        let loaded_plugin = unsafe { LoadedPlugin::new(&library_path).unwrap() };
+        let loaded_plugin = unsafe { LoadedPlugin::new(library_path).unwrap() };
 
         assert_eq!(loaded_plugin.name(), "example_plugin");
         assert_eq!(loaded_plugin.version(), &Version::parse("0.1.0").unwrap());
@@ -531,7 +531,7 @@ mod tests {
 
         let registry = PluginRegistry::new();
 
-        let plugin_name = registry.load_plugin(&library_path).unwrap();
+        let plugin_name = registry.load_plugin(library_path).unwrap();
 
         assert!(registry.get_plugin(&plugin_name).is_some());
 
@@ -558,7 +558,7 @@ mod tests {
         registry.start_hot_reloading(&coprocessor_dir).unwrap();
 
         // trigger loading
-        std::fs::copy(&original_library_path, &library_path).unwrap();
+        std::fs::copy(original_library_path, &library_path).unwrap();
         // fs watcher detects changes in every 3 seconds, therefore, wait 4 seconds so as to make sure the watcher is triggered.
         std::thread::sleep(Duration::from_secs(4));
 

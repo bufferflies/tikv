@@ -439,7 +439,7 @@ impl Shard {
             }
         }
         let mut lock = self.compaction_priority.write().unwrap();
-        *lock = (max_pri.score > 1.0).then(|| max_pri);
+        *lock = (max_pri.score > 1.0).then_some(max_pri);
     }
 
     pub(crate) fn get_compaction_priority(&self) -> Option<CompactionPriority> {

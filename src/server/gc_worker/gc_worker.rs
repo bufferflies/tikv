@@ -84,6 +84,9 @@ impl<T: PdClient + 'static> GcSafePointProvider for Arc<T> {
     }
 }
 
+#[cfg(any(test, feature = "testexport"))]
+pub type ValidateFn = Box<dyn FnOnce(&GcConfig, &Limiter) + Send>;
+
 pub enum GcTask<E>
 where
     E: KvEngine,
@@ -132,7 +135,7 @@ where
     /// The tracking issue: <https://github.com/tikv/tikv/issues/9719>.
     OrphanVersions { wb: E::WriteBatch, id: usize },
     #[cfg(any(test, feature = "testexport"))]
-    Validate(Box<dyn FnOnce(&GcConfig, &Limiter) + Send>),
+    Validate(ValidateFn),
 }
 
 impl<E> GcTask<E>
@@ -443,7 +446,7 @@ where
                         "versions" => gc_info.found_versions,
                     );
                 }
-                if gc_info.deleted_versions as usize >= GC_LOG_DELETED_VERSION_THRESHOLD {
+                if gc_info.deleted_versions >= GC_LOG_DELETED_VERSION_THRESHOLD {
                     debug!(
                         "GC deleted plenty versions for a key";
                         "key" => %key,

@@ -102,8 +102,7 @@ impl Value {
     }
 
     pub fn encode_buf(meta: u8, user_meta: &[u8], version: u64, val: &[u8]) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(VALUE_PTR_OFF + user_meta.len() + val.len());
-        buf.resize(buf.capacity(), 0);
+        let mut buf = vec![0; VALUE_PTR_OFF + user_meta.len() + val.len()];
         let m_buf = buf.as_mut_slice();
         m_buf[0] = meta;
         m_buf[1] = user_meta.len() as u8;
@@ -290,7 +289,7 @@ impl LocalAddr {
     }
 
     pub fn len(self) -> usize {
-        (self.end - self.start) as usize
+        self.end - self.start
     }
 
     pub fn is_empty(self) -> bool {

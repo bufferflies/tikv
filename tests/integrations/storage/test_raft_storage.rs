@@ -349,8 +349,8 @@ fn test_auto_gc() {
     let split_keys: &[&[u8]] = &[b"k2", b"k4", b"k6", b"k8"];
 
     for k in split_keys {
-        let region = cluster.get_region(*k);
-        cluster.must_split(&region, *k);
+        let region = cluster.get_region(k);
+        cluster.must_split(&region, k);
     }
 
     check_data(&mut cluster, &storages, &test_data, 50, true);

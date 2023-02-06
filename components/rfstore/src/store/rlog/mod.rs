@@ -42,7 +42,7 @@ pub struct CustomRaftLog<'a> {
     pub(crate) data: &'a [u8],
 }
 
-impl CustomRaftLog<'a> {
+impl<'a> CustomRaftLog<'a> {
     pub fn new_from_data(data: &'a [u8]) -> Self {
         Self { data }
     }
@@ -279,7 +279,7 @@ impl CustomBuilder {
     }
 
     pub fn set_type(&mut self, tp: CustomRaftlogType) {
-        self.buf[0] = tp as u8;
+        self.buf[0] = tp;
     }
 
     pub fn get_type(&self) -> CustomRaftlogType {
@@ -289,7 +289,7 @@ impl CustomBuilder {
     // Some custom logs may contains multiple types of logs, e.g., resolve-lock can contain both
     // commit and rollback. We use type to distinguish them.
     pub fn append_type(&mut self, tp: CustomRaftlogType) {
-        self.buf.push(tp as u8);
+        self.buf.push(tp);
     }
 
     pub fn build(&mut self) -> CustomRequest {

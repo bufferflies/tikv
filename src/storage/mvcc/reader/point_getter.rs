@@ -1135,7 +1135,7 @@ mod tests {
         must_commit(&engine, b"k9", 25, 26);
         must_cleanup_with_gc_fence(&engine, b"k9", 20, 0, 27, true);
 
-        let expected_results = vec![
+        let expected_results: Vec<(&[u8], Option<&[u8]>)> = vec![
             (b"k1", Some(b"v1")),
             (b"k2", None),
             (b"k3", None),
@@ -1149,13 +1149,13 @@ mod tests {
 
         for (k, v) in &expected_results {
             let mut single_getter = new_point_getter(&engine, 40.into());
-            let value = single_getter.get(&Key::from_raw(*k)).unwrap();
+            let value = single_getter.get(&Key::from_raw(k)).unwrap();
             assert_eq!(value, v.map(|v| v.to_vec()));
         }
 
         let mut getter = new_point_getter(&engine, 40.into());
         for (k, v) in &expected_results {
-            let value = getter.get(&Key::from_raw(*k)).unwrap();
+            let value = getter.get(&Key::from_raw(k)).unwrap();
             assert_eq!(value, v.map(|v| v.to_vec()));
         }
     }

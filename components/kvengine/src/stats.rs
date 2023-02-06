@@ -196,7 +196,7 @@ impl super::Shard {
         let mem_table_count = data.mem_tbls.len();
         let mut mem_table_size = 0;
         for mem_tbl in data.mem_tbls.as_slice() {
-            mem_table_size += mem_tbl.size() as u64;
+            mem_table_size += mem_tbl.size();
             max_ts = cmp::max(max_ts, mem_tbl.data_max_ts());
         }
         total_size += mem_table_size;

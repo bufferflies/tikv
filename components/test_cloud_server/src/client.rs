@@ -305,7 +305,7 @@ impl ClusterClient {
         let mut groups: HashMap<RegionIDVer, Vec<Mutation>> = HashMap::new();
         for m in mutations.drain(..) {
             let region = self.get_region_by_key(m.get_key());
-            groups.entry(region.id_ver()).or_insert(vec![]).push(m);
+            groups.entry(region.id_ver()).or_default().push(m);
         }
         groups
     }
@@ -317,7 +317,7 @@ impl ClusterClient {
         let mut groups: HashMap<RegionIDVer, Vec<Vec<u8>>> = HashMap::new();
         for key in keys.drain(..) {
             let region = self.get_region_by_key(&key);
-            groups.entry(region.id_ver()).or_insert(vec![]).push(key);
+            groups.entry(region.id_ver()).or_default().push(key);
         }
         groups
     }

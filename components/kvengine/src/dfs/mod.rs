@@ -191,7 +191,7 @@ impl DFS for LocalFS {
             file.sync_data()?;
             start_off = end_off;
         }
-        std::fs::rename(&tmp_file_name, &local_file_name)?;
+        std::fs::rename(&tmp_file_name, local_file_name)?;
         file_system::sync_dir(&self.dir)?;
         KVENGINE_DFS_THROUGHPUT_VEC
             .with_label_values(&["write"])
@@ -201,7 +201,7 @@ impl DFS for LocalFS {
 
     async fn remove(&self, file_id: u64, _opts: Options) {
         let local_file_path = self.local_file_path(file_id);
-        if let Err(err) = std::fs::remove_file(&local_file_path) {
+        if let Err(err) = std::fs::remove_file(local_file_path) {
             error!("failed to remove local file {:?}", err);
         }
     }

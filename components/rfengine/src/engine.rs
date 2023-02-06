@@ -529,7 +529,7 @@ pub fn restore(
         let mut objects = object_storage.get_objects(keys).unwrap();
         objects.sort_by(|(a, _), (b, _)| a.cmp(b));
         let wal_path = wal_file_name(dir, store_meta.get_manifest().epoch_id + 1);
-        let file = OpenOptions::new().write(true).open(&wal_path).unwrap();
+        let file = OpenOptions::new().write(true).open(wal_path).unwrap();
         for (i, (_, data)) in objects.into_iter().enumerate() {
             file.write_at(&data, store_meta.get_wal_chunks()[i].start_off)
                 .unwrap();
@@ -562,7 +562,7 @@ pub fn restore(
         .create(true)
         .truncate(true)
         .write(true)
-        .open(&manifest_path(dir))
+        .open(manifest_path(dir))
         .unwrap();
     if store_meta.has_manifest() {
         persist_change_set(&manifest_file, 0, store_meta.get_manifest()).unwrap();

@@ -15,10 +15,13 @@ if [[ -n "$SHELL_DEBUG" ]] ; then
   set -x
 fi
 
-CLIPPY_LINTS=(-A clippy::module_inception  \
+# - Blocking issue for enabling `result_large_err` is the protobuf messages.
+CLIPPY_LINTS=( \
+	-A clippy::module_inception  \
+	-A clippy::result_large_err \
 	-A clippy::should_implement_trait \
 	-A clippy::too_many_arguments \
-	-A clippy::blacklisted_name \
+	-A clippy::disallowed_names \
 	-A clippy::redundant_closure \
 	-A clippy::upper_case_acronyms \
 	-A clippy::field_reassign_with_default \
@@ -35,7 +38,8 @@ CLIPPY_LINTS=(-A clippy::module_inception  \
         -W clippy::todo \
         -D rust-2018-idioms)
 
-cargo clippy \
+# TODO: remove "--no-deps"
+cargo clippy --no-deps \
   -p cloud_server \
   -p kvengine \
   -p rfengine \

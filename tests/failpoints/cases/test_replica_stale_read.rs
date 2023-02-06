@@ -11,9 +11,11 @@ fn prepare_for_stale_read(leader: Peer) -> (Cluster<ServerCluster>, Arc<TestPdCl
     prepare_for_stale_read_before_run(leader, None)
 }
 
+type BeforeRunFn = Box<dyn Fn(&mut Cluster<ServerCluster>)>;
+
 fn prepare_for_stale_read_before_run(
     leader: Peer,
-    before_run: Option<Box<dyn Fn(&mut Cluster<ServerCluster>)>>,
+    before_run: Option<BeforeRunFn>,
 ) -> (Cluster<ServerCluster>, Arc<TestPdClient>, PeerClient) {
     let mut cluster = new_server_cluster(0, 3);
     let pd_client = Arc::clone(&cluster.pd_client);

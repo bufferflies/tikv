@@ -319,8 +319,8 @@ impl ArenaBlock {
         if length > self.cap {
             return NULL_BLOCK_OFF;
         }
-        self.len.store(length as u32, Ordering::Release);
-        offset as u32
+        self.len.store(length, Ordering::Release);
+        offset
     }
 }
 

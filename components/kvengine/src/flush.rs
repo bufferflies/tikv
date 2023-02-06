@@ -240,7 +240,7 @@ impl Engine {
 
 pub(crate) enum FlushMsg {
     /// Task is send when trigger_flush is called.
-    Task(FlushTask),
+    Task(Box<FlushTask>),
 
     /// Result is sent from the background flush thread when a flush task is finished.
     Result(FlushResult),
@@ -270,7 +270,7 @@ impl FlushWorker {
                     let task_manager = self.get_shard_task_manager(task.id_ver.id);
                     if task_manager.enqueue_task(&task) {
                         let term = task_manager.term;
-                        self.spawn_flush_task(task, term);
+                        self.spawn_flush_task(*task, term);
                     }
                 }
                 FlushMsg::Result(res) => {

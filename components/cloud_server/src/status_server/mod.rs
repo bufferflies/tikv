@@ -467,7 +467,7 @@ impl StatusServer {
     ) -> hyper::Result<Response<Body>> {
         let body = hyper::body::to_bytes(req.into_body()).await?;
         let backup_config: serde_json::Result<rfengine::BackupConfig> =
-            serde_json::from_slice(&body.to_vec());
+            serde_json::from_slice(&body);
         if backup_config.is_err() {
             return Ok(make_response(StatusCode::BAD_REQUEST, "Bad request body"));
         }

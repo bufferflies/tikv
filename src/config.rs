@@ -104,11 +104,7 @@ fn memory_limit_for_cf(is_raft_db: bool, cf: &str, total_mem: u64) -> ReadableSi
         _ => unreachable!(),
     };
     let mut size = (total_mem as f64 * ratio) as usize;
-    if size < min {
-        size = min;
-    } else if size > max {
-        size = max;
-    }
+    size = size.clamp(min, max);
     ReadableSize::mb(size as u64 / MIB)
 }
 
@@ -172,13 +168,13 @@ impl Default for TitanCfConfig {
 impl TitanCfConfig {
     fn build_opts(&self) -> TitanDBOptions {
         let mut opts = TitanDBOptions::new();
-        opts.set_min_blob_size(self.min_blob_size.0 as u64);
+        opts.set_min_blob_size(self.min_blob_size.0);
         opts.set_blob_file_compression(self.blob_file_compression.into());
         opts.set_blob_cache(self.blob_cache_size.0 as usize, -1, false, 0.0);
-        opts.set_min_gc_batch_size(self.min_gc_batch_size.0 as u64);
-        opts.set_max_gc_batch_size(self.max_gc_batch_size.0 as u64);
+        opts.set_min_gc_batch_size(self.min_gc_batch_size.0);
+        opts.set_max_gc_batch_size(self.max_gc_batch_size.0);
         opts.set_discardable_ratio(self.discardable_ratio);
-        opts.set_merge_small_file_threshold(self.merge_small_file_threshold.0 as u64);
+        opts.set_merge_small_file_threshold(self.merge_small_file_threshold.0);
         opts.set_blob_run_mode(self.blob_run_mode.into());
         opts.set_level_merge(self.level_merge);
         opts.set_range_merge(self.range_merge);
@@ -245,7 +241,7 @@ fn get_background_job_limits_impl(
     let max_compactions = max_background_jobs - max_background_flushes;
     let max_sub_compactions: u32 = cmp::max(
         1,
-        cmp::min(defaults.max_sub_compactions, (max_compactions - 1) as u32),
+        cmp::min(defaults.max_sub_compactions, max_compactions - 1),
     );
     // Maximum background GC threads for Titan
     let max_titan_background_gc = cmp::min(defaults.max_titan_background_gc, cpu_num);
@@ -1053,7 +1049,7 @@ impl Default for DbConfig {
             rate_limiter_auto_tuned: true,
             bytes_per_sync: ReadableSize::mb(1),
             wal_bytes_per_sync: ReadableSize::kb(512),
-            max_sub_compactions: bg_job_limits.max_sub_compactions as u32,
+            max_sub_compactions: bg_job_limits.max_sub_compactions,
             writable_file_max_buffer_size: ReadableSize::mb(1),
             use_direct_io_for_flush_and_compaction: false,
             enable_pipelined_write: false,
@@ -1109,8 +1105,8 @@ impl DbConfig {
             }
         }
 
-        opts.set_bytes_per_sync(self.bytes_per_sync.0 as u64);
-        opts.set_wal_bytes_per_sync(self.wal_bytes_per_sync.0 as u64);
+        opts.set_bytes_per_sync(self.bytes_per_sync.0);
+        opts.set_wal_bytes_per_sync(self.wal_bytes_per_sync.0);
         opts.set_max_subcompactions(self.max_sub_compactions);
         opts.set_writable_file_max_buffer_size(self.writable_file_max_buffer_size.0 as i32);
         opts.set_use_direct_io_for_flush_and_compaction(
@@ -1361,7 +1357,7 @@ impl Default for RaftDbConfig {
             info_log_keep_log_file_num: 10,
             info_log_dir: "".to_owned(),
             info_log_level: LogLevel::Info,
-            max_sub_compactions: bg_job_limits.max_sub_compactions as u32,
+            max_sub_compactions: bg_job_limits.max_sub_compactions,
             writable_file_max_buffer_size: ReadableSize::mb(1),
             use_direct_io_for_flush_and_compaction: false,
             enable_pipelined_write: true,
@@ -1408,8 +1404,8 @@ impl RaftDbConfig {
         opts.enable_unordered_write(self.enable_unordered_write);
         opts.allow_concurrent_memtable_write(self.allow_concurrent_memtable_write);
         opts.add_event_listener(RocksEventListener::new("raft", None));
-        opts.set_bytes_per_sync(self.bytes_per_sync.0 as u64);
-        opts.set_wal_bytes_per_sync(self.wal_bytes_per_sync.0 as u64);
+        opts.set_bytes_per_sync(self.bytes_per_sync.0);
+        opts.set_wal_bytes_per_sync(self.wal_bytes_per_sync.0);
         // TODO maybe create a new env for raft engine
         if self.titan.enabled {
             opts.set_titandb_options(&self.titan.build_opts());
@@ -3379,7 +3375,7 @@ pub fn persist_config(config: &TiKvConfig) -> Result<(), String> {
     }
 
     // Create parent directory if missing.
-    if let Err(e) = fs::create_dir_all(&store_path) {
+    if let Err(e) = fs::create_dir_all(store_path) {
         return Err(format!(
             "create parent directory '{}' failed: {}",
             store_path.to_str().unwrap(),

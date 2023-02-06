@@ -138,7 +138,7 @@ impl Iterator for ConcatIterator {
             }
             idx = n as i32 - 1 - ridx;
         }
-        self.set_idx(idx as i32);
+        self.set_idx(idx);
         self.iter.as_mut().unwrap().seek(key);
     }
 

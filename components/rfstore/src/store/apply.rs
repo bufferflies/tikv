@@ -545,7 +545,7 @@ impl Applier {
             }
             _ => panic!("unknown custom log type"),
         }
-        let mem_table_size = ctx.engine.write(wb) as u64;
+        let mem_table_size = ctx.engine.write(wb);
         wb.reset();
         let mem_states = self.mut_mem_table_state(engine);
         if mem_states.mem_table_size > 0 && mem_table_size == 0 {

@@ -57,7 +57,7 @@ use txn_types::{
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("{}", .0.get_message())]
-    RequestFailed(errorpb::Error),
+    RequestFailed(Box<errorpb::Error>),
 
     #[error("{0}")]
     Io(#[from] IoError),
@@ -107,7 +107,7 @@ pub type Result<T> = result::Result<T, Error>;
 impl From<Error> for kv::Error {
     fn from(e: Error) -> kv::Error {
         match e {
-            Error::RequestFailed(e) => KvError::from(KvErrorInner::Request(e)),
+            Error::RequestFailed(e) => KvError::from(KvErrorInner::Request(*e)),
             Error::Server(e) => e.into(),
             e => box_err!(e),
         }
@@ -129,24 +129,22 @@ pub enum CmdRes {
 
 fn check_raft_cmd_response(resp: &mut RaftCmdResponse) -> Result<()> {
     if resp.get_header().has_error() {
-        return Err(Error::RequestFailed(resp.take_header().take_error()));
+        return Err(Error::RequestFailed(Box::new(
+            resp.take_header().take_error(),
+        )));
     }
 
     Ok(())
 }
 
 fn on_write_result(mut write_resp: WriteResponse) -> Result<CmdRes> {
-    if let Err(e) = check_raft_cmd_response(&mut write_resp.response) {
-        return Err(e);
-    }
+    check_raft_cmd_response(&mut write_resp.response)?;
     let resps = write_resp.response.take_responses();
     Ok(CmdRes::Resp(resps.into()))
 }
 
 fn on_read_result(mut read_resp: ReadResponse) -> Result<CmdRes> {
-    if let Err(e) = check_raft_cmd_response(&mut read_resp.response) {
-        return Err(e);
-    }
+    check_raft_cmd_response(&mut read_resp.response)?;
     let resps = read_resp.response.take_responses();
     if let Some(mut snapshot) = read_resp.snapshot {
         snapshot.term = NonZeroU64::new(read_resp.response.get_header().get_current_term());
@@ -190,7 +188,7 @@ impl RaftKv {
         req: Request,
         cb: Callback<CmdRes>,
     ) -> Result<()> {
-        let mut header = self.new_request_header(&*ctx.pb_ctx);
+        let mut header = self.new_request_header(ctx.pb_ctx);
         if ctx.pb_ctx.get_stale_read() && !ctx.start_ts.is_zero() {
             let mut data = [0u8; 8];
             (&mut data[..])

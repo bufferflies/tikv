@@ -201,7 +201,7 @@ pub fn must_kv_put(client: &mut ClusterClient, key_count: usize, versions: usize
     let mut batch = Vec::with_capacity(1024);
     let mut keys = Vec::with_capacity(1024);
     // Write 50 times to include more different ts.
-    let batch_size = cmp::min(cmp::max(key_count / 50, 1), 1024);
+    let batch_size = (key_count / 50).clamp(1, 1024);
     for _ in 0..versions {
         let mut j = 0;
         while j < key_count {

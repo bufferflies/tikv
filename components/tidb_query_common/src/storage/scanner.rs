@@ -3,7 +3,6 @@
 use std::{fmt::Debug, marker::PhantomData};
 
 use api_version::{api_v2::KeyspaceId, KvFormat};
-use log_wrappers::hex;
 
 use super::{range::*, ranges_iter::*, OwnedKvPair, Storage};
 use crate::error::StorageError;
@@ -92,8 +91,8 @@ impl PartialEq<OwnedKvPair> for IndexedKvPair {
 impl Debug for IndexedKvPair {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IndexedKvPair")
-            .field("key", &hex::hex_encode_upper(self.key()))
-            .field("value", &hex::hex_encode_upper(self.value()))
+            .field("key", &log_wrappers::hex_encode_upper(self.key()))
+            .field("value", &log_wrappers::hex_encode_upper(self.value()))
             .field("keyspace", &self.keyspace)
             .finish()
     }

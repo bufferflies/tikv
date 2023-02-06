@@ -210,7 +210,7 @@ impl Worker {
         end_off: u64,
     ) -> Result<Vec<(String, Bytes)>> {
         let wal_file_name = wal_file_name(&self.dir, wal_epoch);
-        let mut wal_file = File::open(&wal_file_name)?;
+        let mut wal_file = File::open(wal_file_name)?;
         let mut chunks = vec![];
         let mut total_size = 0;
         let backup_size = end_off - start_off;
@@ -229,7 +229,7 @@ impl Worker {
             wal_file.read_exact(chunk.as_mut_slice())?;
             let mut wal_chunk = WalChunk::default();
             wal_chunk.set_epoch(wal_epoch);
-            wal_chunk.set_start_off(offset as u64);
+            wal_chunk.set_start_off(offset);
             wal_chunk.set_end_off(offset + chunk.len() as u64);
             let wal_key = wal_file_key(
                 backup_meta.get_store_id(),

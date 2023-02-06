@@ -302,7 +302,7 @@ impl WaitTable {
 
     #[cfg(test)]
     fn count(&self) -> usize {
-        self.wait_table.iter().map(|(_, v)| v.len()).sum()
+        self.wait_table.values().map(|v| v.len()).sum()
     }
 
     fn is_empty(&self) -> bool {

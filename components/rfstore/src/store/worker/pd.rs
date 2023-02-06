@@ -520,19 +520,19 @@ impl PdRunner {
 
         STORE_ENGINE_FLOW_VEC
             .with_label_values(&["kv", "bytes_read"])
-            .inc_by(region_stat.read_bytes as u64);
+            .inc_by(region_stat.read_bytes);
         STORE_ENGINE_FLOW_VEC
             .with_label_values(&["kv", "keys_read"])
-            .inc_by(region_stat.read_keys as u64);
+            .inc_by(region_stat.read_keys);
         STORE_ENGINE_FLOW_VEC
             .with_label_values(&["kv", "bytes_written"])
-            .inc_by(region_stat.written_bytes as u64);
+            .inc_by(region_stat.written_bytes);
         STORE_ENGINE_FLOW_VEC
             .with_label_values(&["kv", "keys_written"])
-            .inc_by(region_stat.written_keys as u64);
+            .inc_by(region_stat.written_keys);
         STORE_ENGINE_FLOW_VEC
             .with_label_values(&["kv", "wal_file_bytes"])
-            .inc_by(region_stat.written_bytes as u64);
+            .inc_by(region_stat.written_bytes);
 
         let resp = self.pd_client.region_heartbeat(
             term,

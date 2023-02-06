@@ -344,7 +344,7 @@ impl<T: RaftStoreRouter + Unpin, S: StoreAddrResolver + 'static> Server<T, S> {
             server.shutdown();
         }
         if let Some(pool) = self.stats_pool.take() {
-            let _ = pool.shutdown_background();
+            pool.shutdown_background();
         }
         let _ = self.yatp_read_pool.take();
         self.health_service

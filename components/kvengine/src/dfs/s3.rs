@@ -547,7 +547,7 @@ impl DFS for S3FS {
                 if let Err(err) = self.dispatch(req, CopyObjectError::from_response).await {
                     if retry_cnt < MAX_RETRY_COUNT {
                         retry_cnt += 1;
-                        let retry_sleep = 2u64.pow(retry_cnt as u32) * RETRY_SLEEP_MS;
+                        let retry_sleep = 2u64.pow(retry_cnt) * RETRY_SLEEP_MS;
                         tokio::time::sleep(Duration::from_millis(retry_sleep)).await;
                         continue;
                     } else {
@@ -576,7 +576,7 @@ impl DFS for S3FS {
             {
                 if retry_cnt < MAX_RETRY_COUNT {
                     retry_cnt += 1;
-                    let retry_sleep = 2u64.pow(retry_cnt as u32) * RETRY_SLEEP_MS;
+                    let retry_sleep = 2u64.pow(retry_cnt) * RETRY_SLEEP_MS;
                     tokio::time::sleep(Duration::from_millis(retry_sleep)).await;
                     warn!("retry remove file {}, error {:?}", file_id, &err);
                     continue;

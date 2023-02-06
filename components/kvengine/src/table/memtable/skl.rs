@@ -401,7 +401,7 @@ impl SkipListCore {
 
     pub fn get_with_hint(&self, key: &[u8], version: u64, h: &mut Hint) -> Value {
         let list_height = self.get_height();
-        let recompute_height = self.calculate_recompute_height(key, h, list_height as usize);
+        let recompute_height = self.calculate_recompute_height(key, h, list_height);
         let mut n = ArenaAddr(NULL_ARENA_ADDR);
         if recompute_height > 0 {
             for i in (0..recompute_height).rev() {

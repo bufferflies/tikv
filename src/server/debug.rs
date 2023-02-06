@@ -874,7 +874,7 @@ impl<ER: RaftEngine> Debugger<ER> {
         res.push(("region.end_key".to_owned(), hex::encode(&region.end_key)));
         res.push((
             "region.middle_key_by_approximate_size".to_owned(),
-            hex::encode(&middle_key),
+            hex::encode(middle_key),
         ));
 
         Ok(res)
@@ -916,10 +916,10 @@ fn dump_default_cf_properties(
     let sst_files = collection
         .iter()
         .map(|(k, _)| {
-            Path::new(&*k)
+            Path::new(k)
                 .file_name()
                 .map(|f| f.to_str().unwrap())
-                .unwrap_or(&*k)
+                .unwrap_or(k)
                 .to_string()
         })
         .collect::<Vec<_>>()
@@ -953,10 +953,10 @@ fn dump_write_cf_properties(
     let sst_files = collection
         .iter()
         .map(|(k, _)| {
-            Path::new(&*k)
+            Path::new(k)
                 .file_name()
                 .map(|f| f.to_str().unwrap())
-                .unwrap_or(&*k)
+                .unwrap_or(k)
                 .to_string()
         })
         .collect::<Vec<_>>()

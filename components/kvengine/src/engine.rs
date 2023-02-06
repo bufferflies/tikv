@@ -346,7 +346,9 @@ impl EngineCore {
             // writable mem-table's version is 0.
             if mem_tbl.get_version() != 0 {
                 self.flush_tx
-                    .send(FlushMsg::Task(FlushTask::new_normal(shard, mem_tbl)))
+                    .send(FlushMsg::Task(Box::new(FlushTask::new_normal(
+                        shard, mem_tbl,
+                    ))))
                     .unwrap();
             }
         }
@@ -375,7 +377,7 @@ impl EngineCore {
             }
         }
         self.flush_tx
-            .send(FlushMsg::Task(FlushTask::new_initial(
+            .send(FlushMsg::Task(Box::new(FlushTask::new_initial(
                 shard,
                 InitialFlush {
                     parent_snap,
@@ -383,7 +385,7 @@ impl EngineCore {
                     base_version: shard.base_version,
                     data_sequence,
                 },
-            )))
+            ))))
             .unwrap();
     }
 

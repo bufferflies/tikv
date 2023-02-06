@@ -297,9 +297,9 @@ fn test_batch_id_in_lease<T: Simulator>(cluster: &mut Cluster<T>) {
     cluster.run();
 
     let (split_key1, split_key2) = (b"k22", b"k44");
-    let keys = vec![b"k11", b"k33", b"k55"];
+    let keys: Vec<&[u8]> = vec![b"k11", b"k33", b"k55"];
     let _ = keys.iter().map(|key| {
-        cluster.must_put(*key, b"v1");
+        cluster.must_put(key, b"v1");
     });
 
     let region = pd_client.get_region(keys[0]).unwrap();

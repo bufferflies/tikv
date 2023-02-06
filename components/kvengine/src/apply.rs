@@ -481,7 +481,7 @@ impl EngineCore {
 
     fn remove_local_file(&self, file_id: u64) {
         let local_file_path = self.local_file_path(file_id);
-        if let Err(err) = std::fs::remove_file(&local_file_path) {
+        if let Err(err) = std::fs::remove_file(local_file_path) {
             error!("failed to remove local file {:?}", err);
         }
     }

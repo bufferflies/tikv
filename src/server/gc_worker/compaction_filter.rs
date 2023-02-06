@@ -46,6 +46,9 @@ pub const DEFAULT_DELETE_BATCH_COUNT: usize = 128;
 // of GC are distributed to other replicas by Raft.
 const COMPACTION_FILTER_GC_FEATURE: Feature = Feature::require(5, 0, 0);
 
+#[cfg(any(test, feature = "failpoints"))]
+type CallbacksOnDrop = Vec<Arc<dyn Fn(&WriteCompactionFilter) + Send + Sync>>;
+
 // Global context to create a compaction filter for write CF. It's necessary as these fields are
 // not available when constructing `WriteCompactionFilterFactory`.
 pub struct GcContext {
@@ -57,7 +60,7 @@ pub struct GcContext {
     pub(crate) gc_scheduler: Scheduler<GcTask<RocksEngine>>,
     pub(crate) region_info_provider: Arc<dyn RegionInfoProvider + 'static>,
     #[cfg(any(test, feature = "failpoints"))]
-    callbacks_on_drop: Vec<Arc<dyn Fn(&WriteCompactionFilter) + Send + Sync>>,
+    callbacks_on_drop: CallbacksOnDrop,
 }
 
 // Give all orphan versions an ID to log them.
@@ -291,7 +294,7 @@ struct WriteCompactionFilter {
     filtered_hist: LocalHistogram,
 
     #[cfg(any(test, feature = "failpoints"))]
-    callbacks_on_drop: Vec<Arc<dyn Fn(&WriteCompactionFilter) + Send + Sync>>,
+    callbacks_on_drop: CallbacksOnDrop,
 }
 
 impl WriteCompactionFilter {
@@ -742,7 +745,7 @@ pub mod test_utils {
         pub target_level: Option<usize>,
         pub gc_scheduler: Scheduler<GcTask<RocksEngine>>,
         pub gc_receiver: ReceiverWrapper<GcTask<RocksEngine>>,
-        pub(super) callbacks_on_drop: Vec<Arc<dyn Fn(&WriteCompactionFilter) + Send + Sync>>,
+        pub(super) callbacks_on_drop: CallbacksOnDrop,
     }
 
     impl<'a> TestGCRunner<'a> {

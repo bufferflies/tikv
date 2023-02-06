@@ -953,7 +953,7 @@ pub(crate) fn compact_l0(
     }
 
     let channel_cap = req.file_ids.len();
-    let (tx, rx) = tikv_util::mpsc::bounded(channel_cap as usize);
+    let (tx, rx) = tikv_util::mpsc::bounded(channel_cap);
     let mut id_idx = 0;
     for cf in 0..NUM_CFS {
         let mut iter = build_compact_l0_iterator(

@@ -235,7 +235,7 @@ async fn request_truncate_ts_store(
         return;
     }
     let body = hyper::body::to_bytes(resp.into_body()).await.unwrap();
-    let resp: Vec<ShardTruncateTsStats> = serde_json::from_slice(&body.to_vec()).unwrap();
+    let resp: Vec<ShardTruncateTsStats> = serde_json::from_slice(&body).unwrap();
     tx.send(Ok((store_id, resp))).unwrap();
 }
 
@@ -286,7 +286,7 @@ async fn query_max_ts_store(store: Store, tx: SyncSender<Result<(u64, u64), Stri
     match client.get(uri).await {
         Ok(resp) => {
             let body = hyper::body::to_bytes(resp.into_body()).await.unwrap();
-            let engine_stats: EngineStats = serde_json::from_slice(&body.to_vec()).unwrap();
+            let engine_stats: EngineStats = serde_json::from_slice(&body).unwrap();
             tx.send(Ok((store_id, engine_stats.max_ts))).unwrap()
         }
         Err(e) => tx

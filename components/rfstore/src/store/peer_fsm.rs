@@ -194,7 +194,7 @@ impl<'a> PeerMsgHandler<'a> {
                         .raft_metrics
                         .propose
                         .request_wait_time
-                        .observe(duration_to_sec(cmd.send_time.saturating_elapsed()) as f64);
+                        .observe(duration_to_sec(cmd.send_time.saturating_elapsed()));
                     self.propose_raft_command(cmd.request, cmd.callback, None);
                 }
                 PeerMsg::Tick => self.on_tick(),
@@ -1494,7 +1494,7 @@ impl<'a> PeerMsgHandler<'a> {
                 .iter()
                 .filter_map(|(peer_id, pr)| {
                     // Don't keep raft logs for down peer. It may be too long(default 10mins).
-                    (!self.peer.down_peer_ids.contains(peer_id)).then(|| pr.matched)
+                    (!self.peer.down_peer_ids.contains(peer_id)).then_some(pr.matched)
                 })
                 .min()
                 .unwrap_or(last_idx)

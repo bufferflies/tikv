@@ -554,7 +554,7 @@ impl BlockBuilder {
                 src.as_ptr() as *const libc::c_char,
                 dst.as_mut_ptr() as *mut libc::c_char,
                 src.len() as i32,
-                compress_bound as i32,
+                compress_bound,
             ) as usize;
             self.buf.set_len(buf_len + size);
         }

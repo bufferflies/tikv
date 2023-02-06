@@ -61,11 +61,11 @@ pub fn run_test_with_hook(cases: &[&TestDescAndFn], hook: impl TestHook + Send +
             let f = match case.testfn {
                 TestFn::StaticTestFn(f) => TestFn::DynTestFn(Box::new(move || {
                     let _watcher = CaseLifeWatcher::new(name, h);
-                    f();
+                    f()
                 })),
                 TestFn::StaticBenchFn(f) => TestFn::DynTestFn(Box::new(move || {
                     let _watcher = CaseLifeWatcher::new(name, h);
-                    bench::run_once(move |b| f(b));
+                    bench::run_once(move |b| f(b))
                 })),
                 ref f => panic!("unexpected testfn {:?}", f),
             };

@@ -80,7 +80,7 @@ impl RfEngineCore {
         last: u64,
     ) -> Result<()> {
         let rlog_filename = raft_log_file_name(&self.dir, peer_id, first, last);
-        let bin = fs::read(&rlog_filename)?;
+        let bin = fs::read(rlog_filename)?;
         let header = RlogHeader::decode(bin.as_slice())?;
         let mut data = &bin[RlogHeader::len()..];
         let mut end_offs = vec![];

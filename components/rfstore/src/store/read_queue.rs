@@ -75,7 +75,7 @@ impl ReadIndexRequest {
     }
 
     pub fn cmds(&self) -> &[(RaftCmdRequest, Callback, Option<u64>)] {
-        &*self.cmds
+        &self.cmds
     }
 
     pub fn take_cmds(&mut self) -> MustConsumeVec<(RaftCmdRequest, Callback, Option<u64>)> {

@@ -380,7 +380,7 @@ impl WalWriter {
     fn format_v2(&mut self) {
         unsafe {
             let compression = self.batch_buf.len() >= self.compression_threshold;
-            let compression_type = if compression { 1 } else { 0 };
+            let compression_type = u32::from(compression);
             self.buf.ensure_space(4);
             self.buf.chunk_mut().put_u32_le(compression_type);
             self.buf.advance_mut(4);
@@ -396,7 +396,7 @@ impl WalWriter {
                     src.as_ptr() as *const libc::c_char,
                     dst.as_mut_ptr() as *mut libc::c_char,
                     src.len() as i32,
-                    compress_bound as i32,
+                    compress_bound,
                 ) as usize;
                 self.buf.advance_mut(size);
             } else {

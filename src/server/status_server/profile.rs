@@ -233,7 +233,7 @@ pub fn read_file(path: &str) -> Result<Vec<u8>, String> {
 pub fn jeprof_heap_profile(path: &str) -> Result<Vec<u8>, String> {
     info!("using jeprof to process {}", path);
     let output = Command::new("./jeprof")
-        .args(&["--show_bytes", "./bin/tikv-server", path, "--svg"])
+        .args(["--show_bytes", "./bin/tikv-server", path, "--svg"])
         .output()
         .map_err(|e| format!("jeprof: {}", e))?;
     if !output.status.success() {
@@ -249,7 +249,7 @@ pub fn list_heap_profiles() -> Result<Vec<(String, String)>, String> {
         None => return Ok(vec![]),
     };
 
-    let dir = std::fs::read_dir(&path).map_err(|e| format!("read dir fail: {}", e))?;
+    let dir = std::fs::read_dir(path).map_err(|e| format!("read dir fail: {}", e))?;
     let mut profiles = Vec::new();
     for item in dir {
         let item = match item {
@@ -277,7 +277,7 @@ where
 {
     let mut id = 0;
     while let Some(res) = period.next().await {
-        let _ = res?;
+        res?;
         id += 1;
         let path = format!("{}/{:0>6}{}", dir, id, HEAP_PROFILE_SUFFIX);
         dump_prof(&path).map_err(|e| format!("dump_prof: {}", e))?;

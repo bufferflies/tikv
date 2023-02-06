@@ -147,7 +147,7 @@ impl EngineCore {
                 start_off = end_off;
             }
         }
-        std::fs::rename(&tmp_file_name, &local_file_name)
+        std::fs::rename(&tmp_file_name, local_file_name)
     }
 
     fn open_sstable_file(&self, id: u64) -> std::io::Result<LocalFile> {
