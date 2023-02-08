@@ -89,6 +89,8 @@ pub struct BackupArgs {
     /// Path of file that contains X509 key in PEM format
     #[clap(long, default_value = "")]
     pub key: PathBuf,
+    #[clap(long, default_value_t = false)]
+    pub skip_keyspace_meta: bool,
 }
 
 fn backup_file_name(prefix: String, name: String, backup_ts: u64) -> String {
@@ -196,7 +198,11 @@ pub fn backup_cluster(
     };
     cluster_backup_meta.set_backup_ts(backup_ts);
     cluster_backup_meta.set_cluster_id(cluster_id);
-    runtime.block_on(backup_pd_keyspace_meta(&config, &mut cluster_backup_meta))?;
+
+    if !config.skip_keyspace_meta {
+        runtime.block_on(backup_pd_keyspace_meta(&config, &mut cluster_backup_meta))?;
+    }
+
     let num_stores = stores.len();
     let (tx, rx) = std::sync::mpsc::sync_channel(num_stores);
     for store in stores {
@@ -474,6 +480,7 @@ pub struct BackupConfig {
     pub security: SecurityConfig,
     pub dfs: DFSConfig,
     pub tolerate_err: usize,
+    pub skip_keyspace_meta: bool,
 }
 
 fn get_backup_config_from_args(args: &BackupArgs) -> BackupConfig {
@@ -495,6 +502,7 @@ fn get_backup_config_from_args(args: &BackupArgs) -> BackupConfig {
     if args.key.exists() {
         config.security.key_path = args.key.to_str().unwrap().to_owned();
     }
+    config.skip_keyspace_meta = args.skip_keyspace_meta;
     config.dfs.override_from_env();
     config
 }

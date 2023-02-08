@@ -8,9 +8,9 @@ use std::{
 use cse_ctl::{backup, restore};
 use kvengine::dfs::DFSConfig;
 use rand::Rng;
-use test_cloud_server::{client, ServerCluster};
+use test_cloud_server::{client, oss::ObjectStorageService, ServerCluster};
 use tikv::config::TiKvConfig;
-use tikv_util::{info, warn};
+use tikv_util::info;
 
 use crate::alloc_node_id;
 
@@ -41,8 +41,11 @@ fn start_cluster_and_full_backup(
     client.verify_data_with_ref_store();
 
     // execute backup
+    // `skip_keyspace_meta: true` as there is no ETCD in CI.
+    // TODO: support testing for keyspace meta backup.
     let backup_config = backup::BackupConfig {
         dfs: dfs_config,
+        skip_keyspace_meta: true,
         ..Default::default()
     };
     let backup_meta = backup::backup_cluster(
@@ -108,29 +111,41 @@ fn restore_cluster(
 fn test_native_full_backup() {
     test_util::init_log_for_test();
 
-    let mut dfs_config = DFSConfig::default();
-    dfs_config.override_from_env();
-    if dfs_config.s3_endpoint.is_empty() {
-        warn!("Environment variable DFS_S3_ENDPOINT is not set. Test case ignored.");
-        return;
-    }
+    let base_dir = tempfile::Builder::new()
+        .prefix("test_restore_cluster")
+        .tempdir()
+        .unwrap();
+
+    let oss_dir = base_dir.path().join("oss");
+    let mut oss = ObjectStorageService::new(oss_dir);
+    oss.start_server();
+
+    let dfs_config = DFSConfig {
+        prefix: "test_full_backup".to_string(),
+        s3_endpoint: format!("http://127.0.0.1:{}", oss.port()),
+        s3_key_id: "admin".to_string(),
+        s3_secret_key: "admin".to_string(),
+        s3_bucket: "test_full_backup".to_string(),
+        s3_region: "local".to_string(),
+        zstd_compression_level: "3".to_string(),
+        ..Default::default()
+    };
 
     let backup_name = format!("backup_{}", rand::thread_rng().gen::<u16>());
 
     let (backup_meta, ref_store) =
         start_cluster_and_full_backup(backup_name.clone(), dfs_config.clone());
 
-    let base_dir = tempfile::Builder::new()
-        .prefix("test_restore_cluster")
-        .tempdir()
-        .unwrap();
+    let backup_dir = base_dir.path().join("backup");
     restore_cluster(
         backup_name,
-        base_dir.path(),
+        backup_dir.as_path(),
         dfs_config,
         backup_meta,
         ref_store,
     );
+
+    oss.shutdown();
 }
 
 fn i_to_key(i: usize) -> Vec<u8> {

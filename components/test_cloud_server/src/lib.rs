@@ -2,6 +2,7 @@
 
 pub mod client;
 pub mod cluster;
+pub mod oss;
 pub mod scheduler;
 
 pub use cluster::*;
@@ -37,6 +38,7 @@ mod tests {
         for split_key in &split_keys {
             cluster.wait_region_replicated(split_key, 3);
         }
+        client.verify_data_with_ref_store();
         cluster.stop();
     }
 
@@ -45,6 +47,7 @@ mod tests {
     }
 
     fn gen_val(i: usize) -> Vec<u8> {
-        format!("val{:04}", i).repeat(i % 32).into_bytes()
+        // `repeat` must > 0. CSE treat empty value as not found.
+        format!("val{:04}", i).repeat(i % 32 + 1).into_bytes()
     }
 }
