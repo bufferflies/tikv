@@ -23,7 +23,7 @@ use kvproto::{
 };
 use pd_client::{new_bucket_write_stats, BucketMeta, BucketStat};
 use protobuf::Message;
-use raft::{self, eraftpb::MessageType, Storage};
+use raft::{self, eraftpb::MessageType, GetEntriesContext, Storage};
 use raft_proto::eraftpb;
 use raftstore::store::{util, util::is_learner};
 use rand::{thread_rng, Rng};
@@ -1797,6 +1797,18 @@ impl<'a> PeerMsgHandler<'a> {
                 .mut_commit_merge()
                 .set_source(self.fsm.peer.get_preprocessed_region().clone());
             admin.mut_commit_merge().set_commit(state.get_commit());
+            // Fetch the prepare_merge entry for learner.
+            let entries = self
+                .peer
+                .get_store()
+                .entries(
+                    state.commit,
+                    state.commit + 1,
+                    None,
+                    GetEntriesContext::empty(false),
+                )
+                .unwrap();
+            admin.mut_commit_merge().set_entries(entries.into());
             let source_meta = self
                 .fsm
                 .peer
