@@ -106,8 +106,22 @@ impl ShardMeta {
             .insert(id, FileMeta::new(cf, level, smallest, biggest));
     }
 
-    fn delete_file(&mut self, id: u64) {
-        self.files.remove(&id);
+    fn delete_file(&mut self, id: u64, level: u32) {
+        if self.has_file_at_level(id, level) {
+            self.files.remove(&id);
+        } else {
+            warn!(
+                "{} ShardMeta.delete_file: already deleted or level not match, request {}(L{}), current {:?}",
+                self.tag(),
+                id,
+                level,
+                self.file_level(id),
+            );
+        }
+    }
+
+    fn has_file_at_level(&self, id: u64, level: u32) -> bool {
+        self.file_level(id) == Some(level)
     }
 
     fn file_level(&self, id: u64) -> Option<u32> {
@@ -212,13 +226,13 @@ impl ShardMeta {
         }
         for i in 0..comp.get_top_deletes().len() {
             let id = comp.get_top_deletes()[i];
-            if self.is_compaction_file_deleted(id, comp) {
+            if self.is_compaction_file_deleted(id, comp.level, comp) {
                 return true;
             }
         }
         for i in 0..comp.get_bottom_deletes().len() {
             let id = comp.get_bottom_deletes()[i];
-            if self.is_compaction_file_deleted(id, comp) {
+            if self.is_compaction_file_deleted(id, comp.level + 1, comp) {
                 return true;
             }
         }
@@ -254,33 +268,15 @@ impl ShardMeta {
                 return true;
             }
         }
-        if cs.has_destroy_range()
-            && cs
-                .get_destroy_range()
-                .get_table_deletes()
-                .iter()
-                .any(|deleted| !self.files.contains_key(&deleted.get_id()))
-        {
+        if cs.has_destroy_range() && self.is_duplicated_table_change(cs.get_destroy_range()) {
             info!("{} skip duplicated destroy range {:?}", self.tag(), cs);
             return true;
         }
-        if cs.has_truncate_ts()
-            && cs
-                .get_truncate_ts()
-                .get_table_deletes()
-                .iter()
-                .any(|deleted| !self.files.contains_key(&deleted.get_id()))
-        {
+        if cs.has_truncate_ts() && self.is_duplicated_table_change(cs.get_truncate_ts()) {
             info!("{} skip duplicated truncate ts {:?}", self.tag(), cs);
             return true;
         }
-        if cs.has_trim_over_bound()
-            && cs
-                .get_trim_over_bound()
-                .get_table_deletes()
-                .iter()
-                .any(|deleted| !self.files.contains_key(&deleted.get_id()))
-        {
+        if cs.has_trim_over_bound() && self.is_duplicated_table_change(cs.get_trim_over_bound()) {
             info!("{} skip duplicated trim_over_bound {:?}", self.tag(), cs);
             return true;
         }
@@ -302,12 +298,13 @@ impl ShardMeta {
         false
     }
 
-    fn is_compaction_file_deleted(&self, id: u64, comp: &mut pb::Compaction) -> bool {
-        if !self.files.contains_key(&id) {
+    fn is_compaction_file_deleted(&self, id: u64, level: u32, comp: &mut pb::Compaction) -> bool {
+        if !self.has_file_at_level(id, level) {
             info!(
-                "{} skip duplicated compaction file {} already deleted.",
+                "{} skip duplicated compaction file {} at level {}, already deleted.",
                 self.tag(),
-                id
+                id,
+                level,
             );
             comp.conflicted = true;
             return true;
@@ -353,10 +350,10 @@ impl ShardMeta {
             return;
         }
         for id in comp.get_top_deletes() {
-            self.delete_file(*id);
+            self.delete_file(*id, comp.level);
         }
         for id in comp.get_bottom_deletes() {
-            self.delete_file(*id);
+            self.delete_file(*id, comp.level + 1);
         }
         for tbl in comp.get_table_creates() {
             self.add_file(
@@ -369,9 +366,15 @@ impl ShardMeta {
         }
     }
 
+    fn is_duplicated_table_change(&self, tc: &pb::TableChange) -> bool {
+        tc.get_table_deletes()
+            .iter()
+            .any(|deleted| !self.has_file_at_level(deleted.get_id(), deleted.get_level()))
+    }
+
     fn apply_table_change(&mut self, tc: &pb::TableChange) {
         for deleted in tc.get_table_deletes() {
-            self.delete_file(deleted.get_id());
+            self.delete_file(deleted.get_id(), deleted.get_level());
         }
         for created in tc.get_table_creates() {
             self.add_file(
@@ -646,47 +649,196 @@ trait MetaReader {
         F: Fn(&pb::ChangeSet) -> Result<()>;
 }
 
-#[test]
-fn test_ingest_level() {
-    let mut cs = new_change_set(1, 1);
-    let snap = cs.mut_snapshot();
-    snap.set_end(GLOBAL_SHARD_END_KEY.to_vec());
-    let mut id = 0;
-    let mut make_table = |level: u32, smallest: &str, biggest: &str| {
-        id += 1;
-        let mut tbl = pb::TableCreate::new();
-        tbl.id = id;
-        tbl.level = level;
-        tbl.smallest = smallest.as_bytes().to_vec();
-        tbl.biggest = biggest.as_bytes().to_vec();
-        tbl
-    };
-    let tables = snap.mut_table_creates();
-    tables.push(make_table(3, "1000", "2000"));
-    tables.push(make_table(2, "1500", "2500"));
-    tables.push(make_table(1, "2100", "3100"));
+#[cfg(test)]
+mod tests {
+    use std::iter::{FromIterator, Iterator};
 
-    let mut tbl4 = pb::L0Create::new();
-    tbl4.id = 4;
-    tbl4.smallest = "3000".as_bytes().to_vec();
-    tbl4.biggest = "4000".as_bytes().to_vec();
-    snap.mut_l0_creates().push(tbl4);
+    use super::*;
 
-    let meta = ShardMeta::new(1, &cs);
-    let assert_get_ingest_level = |smallest: &str, biggest: &str, level| {
-        assert_eq!(
-            meta.get_ingest_level(smallest.as_bytes(), biggest.as_bytes()),
-            level
-        );
-    };
-    //                       [3000, 4000]
-    //              [2100, 3100]
-    //      [1500, 2500]
-    // [1000, 2000]
-    assert_get_ingest_level("0000", "0999", 3);
-    assert_get_ingest_level("4001", "5000", 3);
-    assert_get_ingest_level("1000", "1499", 2);
-    assert_get_ingest_level("2000", "2099", 1);
-    assert_get_ingest_level("2500", "3500", 0);
-    assert_get_ingest_level("4000", "5000", 0);
+    #[test]
+    fn test_ingest_level() {
+        let mut cs = new_change_set(1, 1);
+        let snap = cs.mut_snapshot();
+        snap.set_end(GLOBAL_SHARD_END_KEY.to_vec());
+        let mut id = 0;
+        let mut make_table = |level: u32, smallest: &str, biggest: &str| {
+            id += 1;
+            let mut tbl = pb::TableCreate::new();
+            tbl.id = id;
+            tbl.level = level;
+            tbl.smallest = smallest.as_bytes().to_vec();
+            tbl.biggest = biggest.as_bytes().to_vec();
+            tbl
+        };
+        let tables = snap.mut_table_creates();
+        tables.push(make_table(3, "1000", "2000"));
+        tables.push(make_table(2, "1500", "2500"));
+        tables.push(make_table(1, "2100", "3100"));
+
+        let mut tbl4 = pb::L0Create::new();
+        tbl4.id = 4;
+        tbl4.smallest = "3000".as_bytes().to_vec();
+        tbl4.biggest = "4000".as_bytes().to_vec();
+        snap.mut_l0_creates().push(tbl4);
+
+        let meta = ShardMeta::new(1, &cs);
+        let assert_get_ingest_level = |smallest: &str, biggest: &str, level| {
+            assert_eq!(
+                meta.get_ingest_level(smallest.as_bytes(), biggest.as_bytes()),
+                level
+            );
+        };
+        //                       [3000, 4000]
+        //              [2100, 3100]
+        //      [1500, 2500]
+        // [1000, 2000]
+        assert_get_ingest_level("0000", "0999", 3);
+        assert_get_ingest_level("4001", "5000", 3);
+        assert_get_ingest_level("1000", "1499", 2);
+        assert_get_ingest_level("2000", "2099", 1);
+        assert_get_ingest_level("2500", "3500", 0);
+        assert_get_ingest_level("4000", "5000", 0);
+    }
+
+    // See issue #572
+    // https://github.com/tidbcloud/cloud-storage-engine/issues/572
+    #[test]
+    fn test_delete_file_with_level() {
+        let files = vec![
+            // L0:
+            (1, FileMeta::new(0, 0, b"", b"")),
+            // L1:
+            (101, FileMeta::new(0, 1, b"", b"")),
+            (102, FileMeta::new(0, 1, b"", b"")),
+            // L2:
+            (201, FileMeta::new(0, 2, b"", b"")),
+            (202, FileMeta::new(0, 2, b"", b"")),
+        ];
+
+        // comp_level, top_deletes, bottom_deletes, is_duplicated, result_files
+        struct Case(u32, &'static [u64], &'static [u64], bool, &'static [u64]);
+        let cases: Vec<Case> = vec![
+            // delete top
+            Case(0, &[1], &[], false, &[101, 102, 201, 202]),
+            Case(1, &[101], &[], false, &[1, 102, 201, 202]),
+            // delete bottom
+            Case(0, &[], &[102], false, &[1, 101, 201, 202]),
+            Case(1, &[], &[201, 202], false, &[1, 101, 102]),
+            // delete both top & bottom
+            Case(1, &[102], &[202], false, &[1, 101, 201]),
+            // top deleted
+            Case(0, &[888], &[], true, &[1, 101, 102, 201, 202]),
+            Case(1, &[888], &[], true, &[1, 101, 102, 201, 202]),
+            // bottom deleted
+            Case(1, &[], &[888], true, &[1, 101, 102, 201, 202]),
+            // bottom level not match
+            Case(1, &[], &[101], true, &[1, 101, 102, 201, 202]),
+            // top level not match
+            Case(1, &[201], &[202], true, &[1, 101, 102, 201]),
+        ];
+
+        for (idx, Case(comp_level, top_deletes, bottom_deletes, is_duplicated, result_files)) in
+            cases.into_iter().enumerate()
+        {
+            let meta = ShardMeta {
+                files: HashMap::from_iter(files.clone().into_iter()),
+                ..Default::default()
+            };
+
+            // Test compaction.
+            {
+                let mut meta = meta.clone();
+                let mut comp = pb::Compaction::default();
+                comp.set_level(comp_level);
+                comp.mut_top_deletes().extend_from_slice(top_deletes);
+                comp.mut_bottom_deletes().extend_from_slice(bottom_deletes);
+                comp.mut_table_creates().push(pb::TableCreate {
+                    id: 100000,
+                    level: comp_level + 1,
+                    ..Default::default()
+                });
+
+                assert_eq!(
+                    meta.is_duplicated_compaction(&mut comp),
+                    is_duplicated,
+                    "case {}",
+                    idx
+                );
+
+                meta.apply_compaction(&comp);
+                assert_eq!(result_files.len() + 1, meta.files.len());
+                for id in result_files {
+                    assert!(meta.files.contains_key(id), "case {} file id {}", idx, id);
+                }
+            }
+
+            // Test other table changes.
+            {
+                let mut table_change = pb::TableChange::default();
+                let table_deletes = table_change.mut_table_deletes();
+                for &id in top_deletes {
+                    let deleted = pb::TableDelete {
+                        id,
+                        level: comp_level,
+                        ..Default::default()
+                    };
+                    table_deletes.push(deleted);
+                }
+                for &id in bottom_deletes {
+                    let deleted = pb::TableDelete {
+                        id,
+                        level: comp_level + 1,
+                        ..Default::default()
+                    };
+                    table_deletes.push(deleted);
+                }
+
+                let changesets = vec![
+                    {
+                        // destroy_range
+                        let mut cs = pb::ChangeSet::default();
+                        cs.set_destroy_range(table_change.clone());
+                        cs.set_property_key(DEL_PREFIXES_KEY.to_string());
+                        cs
+                    },
+                    {
+                        // truncate_ts
+                        let mut cs = pb::ChangeSet::default();
+                        cs.set_truncate_ts(table_change.clone());
+                        cs.set_property_key(TRUNCATE_TS_KEY.to_string());
+                        cs
+                    },
+                    {
+                        // trim_over_bound
+                        let mut cs = pb::ChangeSet::default();
+                        cs.set_trim_over_bound(table_change.clone());
+                        cs
+                    },
+                ];
+
+                for mut cs in changesets {
+                    let mut meta = meta.clone();
+                    assert_eq!(
+                        meta.is_duplicated_change_set(&mut cs),
+                        is_duplicated,
+                        "case {} cs {:?}",
+                        idx,
+                        cs,
+                    );
+
+                    meta.apply_change_set(&cs);
+                    assert_eq!(result_files.len(), meta.files.len());
+                    for id in result_files {
+                        assert!(
+                            meta.files.contains_key(id),
+                            "case {} cs {:?} file id {}",
+                            idx,
+                            cs,
+                            id
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
