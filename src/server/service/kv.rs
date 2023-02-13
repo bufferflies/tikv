@@ -1296,6 +1296,8 @@ fn handle_batch_commands_request<E: Engine, L: LockManager, F: KvFormat>(
         ResolveLock, future_resolve_lock(storage), kv_resolve_lock;
         Gc, future_gc(), kv_gc;
         DeleteRange, future_delete_range(storage), kv_delete_range;
+        PrepareFlashbackToVersion, future_prepare_flashback_to_version(storage), kv_prepare_flashback_to_version;
+        FlashbackToVersion, future_flashback_to_version(storage), kv_flashback_to_version;
         RawBatchGet, future_raw_batch_get(storage), raw_batch_get;
         RawPut, future_raw_put(storage), raw_put;
         RawBatchPut, future_raw_batch_put(storage), raw_batch_put;
@@ -1512,6 +1514,37 @@ fn future_delete_range<E: Engine, L: LockManager, F: KvFormat>(
         } else if let Err(e) = v {
             resp.set_error(format!("{}", e));
         }
+        Ok(resp)
+    }
+}
+
+// Preparing the flashback for a region will "lock" the region so that
+// there is no any read, write or scheduling operation could be proposed before
+// the actual flashback operation.
+// NOTICE: the caller needs to make sure the version we want to flashback won't
+// be between any transactions that have not been fully committed.
+fn future_prepare_flashback_to_version<E: Engine, L: LockManager, F: KvFormat>(
+    // Keep this param to hint the type of E for the compiler.
+    _storage: &Storage<E, L, F>,
+    _req: PrepareFlashbackToVersionRequest,
+) -> impl Future<Output = ServerResult<PrepareFlashbackToVersionResponse>> {
+    async move {
+        let mut resp = PrepareFlashbackToVersionResponse::default();
+        resp.set_error("not implemented".to_string());
+        Ok(resp)
+    }
+}
+
+// Flashback the region to a specific point with the given `version`, please
+// make sure the region is "locked" by `PrepareFlashbackToVersion` first,
+// otherwise this request will fail.
+fn future_flashback_to_version<E: Engine, L: LockManager, F: KvFormat>(
+    _storage: &Storage<E, L, F>,
+    _req: FlashbackToVersionRequest,
+) -> impl Future<Output = ServerResult<FlashbackToVersionResponse>> {
+    async move {
+        let mut resp = FlashbackToVersionResponse::default();
+        resp.set_error("not implemented".to_string());
         Ok(resp)
     }
 }

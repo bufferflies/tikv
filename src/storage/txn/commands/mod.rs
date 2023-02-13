@@ -159,7 +159,10 @@ impl From<PrewriteRequest> for TypedCommand<PrewriteResult> {
                 req.take_context(),
             )
         } else {
-            let is_pessimistic_lock = req.take_is_pessimistic_lock();
+            let is_pessimistic_lock = req
+                .take_pessimistic_actions()
+                .into_iter()
+                .map(|action| action != PrewriteRequestPessimisticAction::SkipPessimisticCheck);
             let mutations = req
                 .take_mutations()
                 .into_iter()

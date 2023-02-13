@@ -585,7 +585,7 @@ impl Peer {
             return;
         }
         if let Some(ref state) = self.pending_merge_state {
-            if state.get_commit() == extra_msg.get_premerge_commit() {
+            if state.get_commit() == extra_msg.get_index() {
                 self.add_want_rollback_merge_peer(peer_id);
             }
         }
@@ -1137,7 +1137,7 @@ impl Peer {
         };
         let mut extra_msg = ExtraMessage::default();
         extra_msg.set_type(ExtraMessageType::MsgWantRollbackMerge);
-        extra_msg.set_premerge_commit(premerge_commit);
+        extra_msg.set_index(premerge_commit);
         self.send_extra_message(extra_msg, &mut ctx.global.trans, &to_peer);
     }
 

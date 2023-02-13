@@ -1417,6 +1417,7 @@ where
             AdminCmdType::CommitMerge => self.exec_commit_merge(ctx, request),
             AdminCmdType::RollbackMerge => self.exec_rollback_merge(ctx, request),
             AdminCmdType::InvalidAdmin => Err(box_err!("unsupported admin command type")),
+            _ => unimplemented!(),
         }?;
         response.set_cmd_type(cmd_type);
 
