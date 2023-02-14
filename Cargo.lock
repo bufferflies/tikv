@@ -2557,9 +2557,9 @@ dependencies = [
 
 [[package]]
 name = "grpcio"
-version = "0.10.4"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1f2506de56197d01821c2d1d21082d2dcfd6c82d7a1d6e04d33f37aab6130632"
+checksum = "86ef249d9cb1b1843767501ae7463b500542e7f9e72d9c2d61ed320fbefa6c79"
 dependencies = [
  "futures-executor",
  "futures-util",
@@ -2594,9 +2594,9 @@ dependencies = [
 
 [[package]]
 name = "grpcio-sys"
-version = "0.10.3+1.44.0-patched"
+version = "0.10.1+1.44.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f23adc509a3c4dea990e0ab8d2add4a65389ee69c288b7851d75dd1df7a6d6c6"
+checksum = "925586932dbbea927e913783da0be160ee74e0b0519d7b20cec35547a0a84631"
 dependencies = [
  "bindgen 0.59.2",
  "cc",
@@ -3058,7 +3058,7 @@ dependencies = [
 [[package]]
 name = "kvproto"
 version = "0.0.2"
-source = "git+https://github.com/tidbcloud/kvproto.git?branch=release-6.6-keyspace#65b26afea318be73cda3f251552ca7705a898536"
+source = "git+https://github.com/tidbcloud/kvproto.git?branch=release-6.2-dev-tier#abafd67fdf9bce498f44f9bbf4ec9b7c5bf6eb51"
 dependencies = [
  "futures 0.3.15",
  "grpcio",
