@@ -520,11 +520,7 @@ impl Applier {
             }
             TYPE_ENGINE_META => {
                 let cs = cl.get_change_set().unwrap();
-                if !cs.get_property_key().is_empty()
-                    && !cs.has_destroy_range()
-                    && !cs.has_truncate_ts()
-                    && !cs.has_trim_over_bound()
-                {
+                if is_property_change_set(&cs) {
                     wb.set_property(cs.get_property_key(), cs.get_property_value());
                 }
             }
@@ -1353,6 +1349,13 @@ impl Applier {
             _ => {}
         }
     }
+}
+
+pub(crate) fn is_property_change_set(cs: &kvenginepb::ChangeSet) -> bool {
+    !cs.get_property_key().is_empty()
+        && !cs.has_destroy_range()
+        && !cs.has_truncate_ts()
+        && !cs.has_trim_over_bound()
 }
 
 struct MemTableState {

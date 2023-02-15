@@ -12,8 +12,9 @@ use slog_global::info;
 use tikv_util::warn;
 
 use crate::store::{
-    load_raft_truncated_state, raft_state_key, region_state_key, rlog, Applier, ApplyContext,
-    PeerTag, RaftApplyState, RaftState, RegionIDVer, KV_ENGINE_META_KEY, STORE_IDENT_KEY, TERM_KEY,
+    is_property_change_set, load_raft_truncated_state, raft_state_key, region_state_key, rlog,
+    Applier, ApplyContext, CustomRaftLog, PeerTag, RaftApplyState, RaftState, RegionIDVer,
+    KV_ENGINE_META_KEY, STORE_IDENT_KEY, TERM_KEY,
 };
 
 #[derive(Clone)]
@@ -165,8 +166,7 @@ impl kvengine::RecoverHandler for RecoverHandler {
                 }
                 Self::execute_admin_request(&mut applier, &mut ctx, req)?;
             } else if let Some(custom) = rlog::get_custom_log(&req) {
-                if rlog::is_engine_meta_log(custom.data.chunk()) {
-                    let mut cs = custom.get_change_set().unwrap();
+                if let Some(mut cs) = get_async_change_set(&custom) {
                     cs.sequence = e.get_index();
                     if meta.ver == cs.get_shard_ver() && !meta.is_duplicated_change_set(&mut cs) {
                         // We don't have a background region worker now, should do it synchronously.
@@ -183,6 +183,21 @@ impl kvengine::RecoverHandler for RecoverHandler {
         }
         Ok(())
     }
+}
+
+// change set that only set property are applied synchronously by exec_custom_log, other change set
+// are applied asynchronously. During recover, we don't have background worker, so we need to
+// apply the async change sets directly.
+// And we must exclude property change set, because it has side effect of switch mem-table, if we
+// skip it, later apply flush mem-table would panic.
+fn get_async_change_set(custom: &CustomRaftLog<'_>) -> Option<ChangeSet> {
+    if rlog::is_engine_meta_log(custom.data.chunk()) {
+        let cs = custom.get_change_set().unwrap();
+        if !is_property_change_set(&cs) {
+            return Some(cs);
+        }
+    }
+    None
 }
 
 impl kvengine::MetaIterator for RecoverHandler {

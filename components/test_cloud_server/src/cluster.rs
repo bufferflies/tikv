@@ -279,6 +279,10 @@ impl ServerCluster {
         }
         stats
     }
+
+    pub fn set_dfs_delay(&self, delay: Duration) {
+        self.dfs.as_ref().unwrap().set_delay(delay);
+    }
 }
 
 pub fn new_test_config(base_dir: &Path, node_id: u16) -> TiKvConfig {
