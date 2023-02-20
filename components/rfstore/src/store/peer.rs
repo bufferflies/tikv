@@ -1831,6 +1831,11 @@ impl Peer {
         req: &RaftCmdRequest,
     ) {
         let commit = req.get_admin_request().get_rollback_merge().get_commit();
+        if self.pending_merge_state.is_none() {
+            error!("{} pending merge state is none", self.tag());
+            ctx.apply_msgs.msgs.push(ApplyMsg::SkipRollbackMerge);
+            return;
+        }
         let pending_commit = self.pending_merge_state.as_ref().unwrap().get_commit();
         if commit != 0 && pending_commit != commit {
             panic!(

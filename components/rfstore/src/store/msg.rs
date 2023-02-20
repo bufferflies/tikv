@@ -77,6 +77,7 @@ pub(crate) enum ApplyMsg {
         source: kvengine::ChangeSet,
     },
     PrepareRollbackMerge,
+    SkipRollbackMerge,
     UnsafeDestroy {
         region_id: u64,
     },
