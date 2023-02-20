@@ -2,6 +2,8 @@
 
 use std::{
     cmp::min,
+    collections::HashMap,
+    fmt::{Display, Formatter},
     fs,
     fs::File,
     io::{Read, Seek, SeekFrom},
@@ -13,17 +15,22 @@ use std::{
     thread,
 };
 
-use bytes::{Buf, BufMut, Bytes};
+use api_version::{api_v2, ApiV2};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use engine_traits::ObjectStorage;
 use file_system::{DirectWriter, IORateLimitMode, IOType};
-use rfenginepb::{StoreBackupMeta, WalChunk};
+use kvproto::raft_serverpb::RegionLocalState;
+use protobuf::Message;
+use rfenginepb::{
+    KeySpaceBackupMeta, RaftLogBackupFile, RaftLogFile, StoreBackupMeta, StoreRaftLogBackupMeta,
+    WalChunk,
+};
 use slog_global::*;
 use tikv_util::{mpsc::Receiver, time::Instant};
 
 use crate::{log_batch::RaftLogBlock, manifest::Manifest, write_batch::PeerBatch, *};
 
 const MAX_WAL_CHUNK_SIZE: u64 = 8 * 1024 * 1024;
-
 pub(crate) struct Worker {
     dir: PathBuf,
     manifest: Manifest,
@@ -123,6 +130,8 @@ impl Worker {
         Ok(())
     }
 
+    // rfenginepb::RaftLogFile format:
+    // RlogHeader + [endoffset] + [RaftLogOp + checksum]
     fn write_raft_log_file(&mut self, peer_batch: PeerBatch) -> Result<rfenginepb::RaftLogFile> {
         let first = peer_batch.raft_logs.front().unwrap().index;
         let last = peer_batch.raft_logs.back().unwrap().index;
@@ -164,33 +173,20 @@ impl Worker {
             }
         }
         let manifest = self.manifest.to_change_set(true); // Exclude tombstone peers.
-        for peer in manifest.get_peers() {
-            for file in peer.get_files() {
-                let file_name =
-                    raft_log_file_name(&self.dir, peer.peer_id, file.first_index, file.last_index);
-                match fs::read(&file_name) {
-                    Ok(rlog_data) => {
-                        let rlog_key = raft_log_file_key(
-                            backup_meta.get_store_id(),
-                            peer.get_peer_id(),
-                            file.first_index,
-                            file.last_index,
-                        );
-                        objects.push((rlog_key, Bytes::from(rlog_data)));
-                    }
-                    Err(err) => {
-                        (task.callback)(Err(format!("read {:?} failed {:?}", &file_name, err)));
-                        return;
-                    }
-                }
+        match self.backup_raft_log_files(&manifest, &mut backup_meta) {
+            Ok(obj) => objects.push(obj),
+            Err(e) => {
+                (task.callback)(Err(format!("backup raft log failed {:?}", e)));
+                return;
             }
         }
         backup_meta.set_manifest(manifest);
         let total_size: usize = objects.iter().map(|(_, data)| data.len()).sum();
         info!(
-            "backup read file count: {}, size: {}",
+            "backup write file count: {}, size: {}, raft meta offset {}",
             objects.len(),
-            total_size
+            total_size,
+            backup_meta.raft_meta_start_off,
         );
         // Starts a background task in case the object storage is slow and blocking WAL compaction.
         thread::spawn(move || {
@@ -200,6 +196,81 @@ impl Worker {
             }
             (task.callback)(Ok(backup_meta));
         });
+    }
+
+    fn get_keyspace_id_from_peer(peer_meta: &rfenginepb::PeerMeta) -> u32 {
+        let keyspace_id = match peer_meta
+            .get_states()
+            .iter()
+            .rev() // the states are got from BTreeMap iter, so the last one is latest.
+            .find(|s| s.get_key().starts_with(REGION_META_KEY_PREFIX))
+        {
+            Some(state) => {
+                let mut local_state = RegionLocalState::default();
+                local_state.merge_from_bytes(state.get_value()).unwrap();
+                utils::get_region_keyspace_id(local_state.get_region())
+            }
+            None => {
+                debug_assert!(peer_meta.peer_id == 0 && peer_meta.region_id == 0);
+                api_v2::UNKOWN_KEYSPACE_ID
+            }
+        };
+        ApiV2::get_u32_keyspace_id(keyspace_id)
+    }
+
+    // Aggregate all raft logs into one file by keyspace id.
+    fn backup_raft_log_files(
+        &mut self,
+        manifest: &rfenginepb::ChangeSet,
+        store_meta: &mut StoreBackupMeta,
+    ) -> Result<(String, Bytes)> {
+        let store_id = self.manifest.get_engine_id();
+        // keyspace_id -> Vec<(peer_id, RaftLogFile)>
+        let mut keyspace_map: HashMap<u32, Vec<(u64, &RaftLogFile)>> = HashMap::default();
+        let mut raft_log_size = 0;
+        for peer in manifest.get_peers() {
+            let peer_id = peer.get_peer_id();
+            let keyspace_id = Self::get_keyspace_id_from_peer(peer);
+            let peer_files = peer.get_files();
+            let mut files = Vec::with_capacity(peer_files.len());
+            for f in peer_files {
+                files.push((peer_id, f));
+                let file_name = raft_log_file_name(&self.dir, peer_id, f.first_index, f.last_index);
+                raft_log_size += fs::metadata(file_name)?.len();
+            }
+            keyspace_map
+                .entry(keyspace_id)
+                .and_modify(|k| k.append(&mut files))
+                .or_insert_with(|| files);
+        }
+        let object_key = store_raft_log_file_key(store_id, manifest.get_epoch_id());
+        // Reserve 10MB for `rlog_meta`, which should be enough in most scenarios.
+        let mut object = BytesMut::with_capacity(raft_log_size as usize + 10 * 1024 * 1024);
+        let mut rlog_meta = StoreRaftLogBackupMeta::default();
+        rlog_meta.mut_header().version = 1;
+        // Aggregate the raft log data with keyspace id.
+        for (keyspace_id, files) in keyspace_map {
+            let mut keyspace_meta = KeySpaceBackupMeta::default();
+            keyspace_meta.keyspace_id = keyspace_id;
+            for (peer_id, file) in files {
+                let file_name =
+                    raft_log_file_name(&self.dir, peer_id, file.first_index, file.last_index);
+                let data = fs::read(file_name)?;
+                let mut backup_file = RaftLogBackupFile::default();
+                backup_file.peer_id = peer_id;
+                backup_file.start_off = object.len() as u64;
+                object.put_slice(&data);
+                backup_file.end_off = object.len() as u64;
+                backup_file.first_index = file.first_index;
+                backup_file.last_index = file.last_index;
+                keyspace_meta.mut_files().push(backup_file);
+            }
+            rlog_meta.mut_raft_logs().insert(keyspace_id, keyspace_meta);
+        }
+        store_meta.raft_meta_start_off = object.len() as u64;
+        let meta = rlog_meta.write_to_bytes().unwrap();
+        object.put_slice(&meta);
+        Ok((object_key, object.freeze()))
     }
 
     fn backup_wal(
@@ -304,11 +375,8 @@ pub(crate) fn raft_log_file_name(dir: &Path, peer_id: u64, first: u64, last: u64
     ))
 }
 
-pub(crate) fn raft_log_file_key(store_id: u64, peer_id: u64, first: u64, last: u64) -> String {
-    format!(
-        "{:016x}/p{:016x}/{:016x}_{:016x}.rlog",
-        store_id, peer_id, first, last
-    )
+pub(crate) fn store_raft_log_file_key(store_id: u64, epoch: u32) -> String {
+    format!("{:016x}/r{:016x}.rlog", store_id, epoch)
 }
 
 pub(crate) fn wal_file_key(store_id: u64, epoch_id: u32, start_off: u64, end_off: u64) -> String {
@@ -395,6 +463,17 @@ pub struct BackupConfig {
     pub wal_epoch: u32,
     pub start_offset: u64,
 }
+
+impl Display for BackupConfig {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "cluster_id {}, store_id {}, incremental {}, wal_epoch {}, start_offset {} ",
+            self.cluster_id, self.store_id, self.incremental, self.wal_epoch, self.start_offset,
+        )
+    }
+}
+
 pub struct BackupTask {
     pub object_storage: Box<dyn ObjectStorage>,
     pub callback: Box<dyn FnOnce(std::result::Result<StoreBackupMeta, String>) + Send>,
@@ -414,5 +493,277 @@ impl BackupTask {
             callback,
             config,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        collections::HashMap,
+        fs, iter,
+        sync::atomic::{AtomicU32, AtomicU64},
+    };
+
+    use bytes::Buf;
+    use kvproto::raft_serverpb::RegionLocalState;
+    use protobuf::Message;
+    use rand::{distributions::Alphanumeric, Rng};
+    use rfenginepb::{ChangeSet, PeerState, StoreBackupMeta, StoreRaftLogBackupMeta};
+    use tikv_util::defer;
+
+    use crate::{
+        log_batch::{RaftLogOp, RaftLogs},
+        manifest::{persist_change_set, Manifest},
+        raft_log_file_name, region_state_key, store_raft_log_file_key,
+        tests::{get_txn_endkey_prefix, get_txn_startkey_prefix},
+        write_batch::PeerBatch,
+        RfEngine, WalWriter, Worker,
+    };
+
+    fn generate_random_str() -> Vec<u8> {
+        let mut rng = rand::thread_rng();
+        let len = rng.gen::<usize>() % 1024 + 1;
+        iter::repeat(())
+            .map(|()| rng.sample(Alphanumeric))
+            .take(len)
+            .collect()
+    }
+
+    fn write_keyspace_state(peer_meta: &mut rfenginepb::PeerMeta, keyspace: u32) {
+        let mut state = PeerState::default();
+        // mock a fake keyspace epoch version.
+        let region_epoch = 10;
+        state.key = region_state_key(region_epoch - 1).to_vec();
+        let mut local_stat = RegionLocalState::default();
+        local_stat.mut_region().start_key = get_txn_startkey_prefix(keyspace - 1).to_vec();
+        local_stat.mut_region().end_key = get_txn_endkey_prefix(keyspace - 1).to_vec();
+        state.value = local_stat.write_to_bytes().unwrap();
+        peer_meta.mut_states().push(state.clone());
+
+        state.key = region_state_key(region_epoch).to_vec();
+        local_stat.mut_region().start_key = get_txn_startkey_prefix(keyspace).to_vec();
+        local_stat.mut_region().end_key = get_txn_endkey_prefix(keyspace).to_vec();
+        state.value = local_stat.write_to_bytes().unwrap();
+        peer_meta.mut_states().push(state);
+    }
+
+    #[test]
+    fn test_backup_raft_log_files() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let tmp_path = tmp_dir.path();
+        defer!(fs::remove_dir_all(tmp_path).unwrap());
+        let (_, rx) = tikv_util::mpsc::unbounded();
+        let engine_id = 999;
+        let manifest = Manifest::open(tmp_path, AtomicU64::new(engine_id).into()).unwrap();
+        let mut worker = Worker::new(
+            tmp_path.to_path_buf(),
+            rx,
+            manifest,
+            AtomicU32::new(0).into(),
+        );
+        let epoch = 990;
+        let mut cs = ChangeSet::new();
+        cs.epoch_id = epoch;
+        let mut peer_rlog_files = HashMap::new();
+        let mut total_file_cnt = 0;
+        for i in 100..203 {
+            // peers
+            let peer_id = i;
+            let mut meta_pb = rfenginepb::PeerMeta::new();
+            meta_pb.set_peer_id(peer_id);
+            meta_pb.set_region_id(peer_id * 2);
+            meta_pb.set_truncated_index(i * 10);
+            let keyspace = (peer_id / 5) as u32;
+            write_keyspace_state(&mut meta_pb, keyspace);
+            let mut files = vec![];
+            for j in 0..10 {
+                // files
+                let mut raft_log_file = rfenginepb::RaftLogFile::default();
+                let first_index = j * 100 + 1;
+                let last_index = (j + 1) * 100;
+                raft_log_file.set_first_index(first_index);
+                raft_log_file.set_last_index(last_index);
+                meta_pb.mut_files().push(raft_log_file);
+                let file_name = raft_log_file_name(tmp_path, peer_id, first_index, last_index);
+                let content = generate_random_str();
+                fs::write(file_name, &content).unwrap();
+                files.push(content);
+                total_file_cnt += 1;
+            }
+            peer_rlog_files.insert(peer_id, files);
+            cs.mut_peers().push(meta_pb);
+        }
+        let mut store_meta = StoreBackupMeta::default();
+        let (key, object) = worker.backup_raft_log_files(&cs, &mut store_meta).unwrap();
+        let raft_file_key = store_raft_log_file_key(engine_id, epoch);
+        assert_eq!(raft_file_key, key);
+        let mut raft_meta = StoreRaftLogBackupMeta::default();
+        let size = object.len();
+        let meta_bytes = &object.chunk()[store_meta.raft_meta_start_off as usize..size];
+        raft_meta.merge_from_bytes(meta_bytes).unwrap();
+        assert_eq!(raft_meta.get_header().version, 1);
+        let mut ret_file_cnt = 0;
+        for (keyspace_id, keyspace_data) in raft_meta.take_raft_logs() {
+            assert_eq!(keyspace_id, keyspace_data.get_keyspace_id());
+            for file in keyspace_data.get_files() {
+                let peer_id = file.peer_id;
+                assert_eq!(keyspace_id as u64, peer_id / 5);
+                let data = &object.chunk()[file.start_off as usize..file.end_off as usize];
+                let rlog_files = peer_rlog_files[&peer_id].clone();
+                let idx = ((file.first_index - 1) / 100) as usize;
+                let file_data = rlog_files[idx].clone();
+                assert_eq!(
+                    file_data.len(),
+                    data.len(),
+                    "peer id {}, index {}-{}",
+                    peer_id,
+                    file.first_index,
+                    file.last_index
+                );
+                assert_eq!(
+                    &file_data, data,
+                    "peer id {}, index {}-{}",
+                    peer_id, file.first_index, file.last_index
+                );
+                ret_file_cnt += 1;
+            }
+        }
+        assert_eq!(ret_file_cnt, total_file_cnt);
+    }
+
+    fn generate_rlog_files(
+        worker: &mut Worker,
+        raft_logs: &mut RaftLogs,
+        peer_id: u64,
+        region_id: u64,
+        first_index: u64,
+        last_index: u64,
+    ) -> rfenginepb::RaftLogFile {
+        let mut peer_batch = PeerBatch::new(peer_id, region_id);
+        for index in first_index..=last_index {
+            let op = RaftLogOp {
+                index,
+                term: index as u32,
+                e_type: 1,
+                context: 2,
+                data: generate_random_str().into(),
+            };
+            peer_batch.append_raft_log(op.clone());
+            raft_logs.append(op);
+        }
+        worker.write_raft_log_file(peer_batch).unwrap()
+    }
+
+    #[test]
+    fn test_backup_and_load_raft_log_files() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let tmp_path = tmp_dir.path();
+        defer!(fs::remove_dir_all(tmp_path).unwrap());
+        let (_, rx) = tikv_util::mpsc::unbounded();
+        let engine_id = 1999;
+        let manifest = Manifest::open(tmp_path, AtomicU64::new(engine_id).into()).unwrap();
+        let mut worker = Worker::new(
+            tmp_path.to_path_buf(),
+            rx,
+            manifest,
+            AtomicU32::new(0).into(),
+        );
+        let mut cs = ChangeSet::new();
+        let mut peer_data_map = HashMap::new();
+        let peers_range = 100..150;
+        let mut total_file_cnt = 0;
+        for i in peers_range.clone() {
+            let peer_id = i;
+            let region_id = peer_id * 2;
+            let mut meta_pb = rfenginepb::PeerMeta::new();
+            meta_pb.set_peer_id(peer_id);
+            meta_pb.set_region_id(region_id);
+            meta_pb.set_truncated_index(0);
+            let keyspace_id = i as u32 / 10;
+            write_keyspace_state(&mut meta_pb, keyspace_id);
+            let mut peer_raft_log = RaftLogs::default();
+            for j in 0..10 {
+                let first_index = j * 100 + 1;
+                let last_index = (j + 1) * 100;
+                let raft_log_file = generate_rlog_files(
+                    &mut worker,
+                    &mut peer_raft_log,
+                    peer_id,
+                    region_id,
+                    first_index,
+                    last_index,
+                );
+                meta_pb.mut_files().push(raft_log_file);
+                total_file_cnt += 1;
+            }
+            cs.mut_peers().push(meta_pb);
+            cs.epoch_id += 1;
+            peer_data_map.insert(peer_id, peer_raft_log);
+        }
+        // 1. backup
+        let mut store_meta = StoreBackupMeta::default();
+        let (key, object) = worker.backup_raft_log_files(&cs, &mut store_meta).unwrap();
+        let raft_file_key = store_raft_log_file_key(engine_id, cs.epoch_id);
+        assert_eq!(raft_file_key, key);
+
+        let mut raft_meta = StoreRaftLogBackupMeta::default();
+        let size = object.len();
+        let meta_bytes = &object.chunk()[store_meta.raft_meta_start_off as usize..size];
+        raft_meta.merge_from_bytes(meta_bytes).unwrap();
+        assert_eq!(raft_meta.get_header().version, 1);
+
+        // 2. restore to new dir
+        let tmp_dir2 = tempfile::tempdir().unwrap();
+        let tmp_path2 = tmp_dir2.path();
+        defer!(fs::remove_dir_all(tmp_path2).unwrap());
+        // restore raft log files by keyspace
+        let mut restore_file_cnt = 0;
+        for (keyspace_id, keyspace_data) in raft_meta.take_raft_logs() {
+            assert_eq!(keyspace_id, keyspace_data.get_keyspace_id());
+            for file in keyspace_data.get_files() {
+                let peer_id = file.peer_id;
+                assert_eq!(peer_id / 10, keyspace_id as u64);
+                let data = &object.chunk()[file.start_off as usize..file.end_off as usize];
+                let file_name =
+                    raft_log_file_name(tmp_path2, peer_id, file.first_index, file.last_index);
+                fs::write(file_name, data).unwrap();
+                restore_file_cnt += 1;
+            }
+        }
+        assert_eq!(total_file_cnt, restore_file_cnt);
+        // restore manifest file
+        let manifest = Manifest::open(tmp_path2, AtomicU64::new(engine_id).into()).unwrap();
+        persist_change_set(&manifest.file, 0, &cs).unwrap();
+
+        // 3. open RfEngine with restored dir.
+        let wal_size = 4 * 1024 * 1024;
+        // Hack wal file to let RfEngine::open pass.
+        let mut wal_writer = WalWriter::new(
+            tmp_path2,
+            wal_size,
+            1024,
+            AtomicU32::new(cs.epoch_id + 1).into(),
+        );
+        wal_writer.open_file(cs.epoch_id + 1, 0).unwrap();
+        // checksum inner should succeeds.
+        let engine = RfEngine::open(tmp_path2, wal_size, 1024).unwrap();
+        // 4. Check peer data, restored data should be same with previous one.
+        for peer_id in peers_range {
+            let cache_peer_data = peer_data_map.get(&peer_id).unwrap();
+            for index in 1..=1000 {
+                let entry1 = cache_peer_data.get(index);
+                let entry2 = engine.get_raft_entry(peer_id, index);
+                assert_eq!(entry1, entry2);
+            }
+        }
+    }
+
+    #[test]
+    fn test_get_keyspace_id_from_peer() {
+        let mut peer_meta = rfenginepb::PeerMeta::default();
+        assert_eq!(Worker::get_keyspace_id_from_peer(&peer_meta), 16777215);
+        write_keyspace_state(&mut peer_meta, 100);
+        write_keyspace_state(&mut peer_meta, 200);
+        assert_eq!(Worker::get_keyspace_id_from_peer(&peer_meta), 200);
     }
 }

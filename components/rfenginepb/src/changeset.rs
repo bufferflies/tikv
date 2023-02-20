@@ -1055,6 +1055,7 @@ pub struct StoreBackupMeta {
     pub store_id: u64,
     pub manifest: ::protobuf::SingularPtrField<ChangeSet>,
     pub wal_chunks: ::protobuf::RepeatedField<WalChunk>,
+    pub raft_meta_start_off: u64,
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
     pub cached_size: ::protobuf::CachedSize,
@@ -1143,6 +1144,21 @@ impl StoreBackupMeta {
     pub fn take_wal_chunks(&mut self) -> ::protobuf::RepeatedField<WalChunk> {
         ::std::mem::replace(&mut self.wal_chunks, ::protobuf::RepeatedField::new())
     }
+
+    // uint64 raft_meta_start_off = 4;
+
+
+    pub fn get_raft_meta_start_off(&self) -> u64 {
+        self.raft_meta_start_off
+    }
+    pub fn clear_raft_meta_start_off(&mut self) {
+        self.raft_meta_start_off = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_raft_meta_start_off(&mut self, v: u64) {
+        self.raft_meta_start_off = v;
+    }
 }
 
 impl ::protobuf::Message for StoreBackupMeta {
@@ -1177,6 +1193,13 @@ impl ::protobuf::Message for StoreBackupMeta {
                 3 => {
                     ::protobuf::rt::read_repeated_message_into(wire_type, is, &mut self.wal_chunks)?;
                 },
+                4 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.raft_meta_start_off = tmp;
+                },
                 _ => {
                     ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
                 },
@@ -1200,6 +1223,9 @@ impl ::protobuf::Message for StoreBackupMeta {
             let len = value.compute_size();
             my_size += 1 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
         };
+        if self.raft_meta_start_off != 0 {
+            my_size += ::protobuf::rt::value_size(4, self.raft_meta_start_off, ::protobuf::wire_format::WireTypeVarint);
+        }
         my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
         self.cached_size.set(my_size);
         my_size
@@ -1219,6 +1245,9 @@ impl ::protobuf::Message for StoreBackupMeta {
             os.write_raw_varint32(v.get_cached_size())?;
             v.write_to_with_cached_sizes(os)?;
         };
+        if self.raft_meta_start_off != 0 {
+            os.write_uint64(4, self.raft_meta_start_off)?;
+        }
         os.write_unknown_fields(self.get_unknown_fields())?;
         ::std::result::Result::Ok(())
     }
@@ -1276,6 +1305,11 @@ impl ::protobuf::Message for StoreBackupMeta {
                     |m: &StoreBackupMeta| { &m.wal_chunks },
                     |m: &mut StoreBackupMeta| { &mut m.wal_chunks },
                 ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                    "raft_meta_start_off",
+                    |m: &StoreBackupMeta| { &m.raft_meta_start_off },
+                    |m: &mut StoreBackupMeta| { &mut m.raft_meta_start_off },
+                ));
                 ::protobuf::reflect::MessageDescriptor::new::<StoreBackupMeta>(
                     "StoreBackupMeta",
                     fields,
@@ -1301,6 +1335,7 @@ impl ::protobuf::Clear for StoreBackupMeta {
         self.store_id = 0;
         self.manifest.clear();
         self.wal_chunks.clear();
+        self.raft_meta_start_off = 0;
         self.unknown_fields.clear();
     }
 }
@@ -1313,6 +1348,7 @@ impl ::protobuf::PbPrint for StoreBackupMeta {
         ::protobuf::PbPrint::fmt(&self.store_id, "store_id", buf);
         ::protobuf::PbPrint::fmt(&self.manifest, "manifest", buf);
         ::protobuf::PbPrint::fmt(&self.wal_chunks, "wal_chunks", buf);
+        ::protobuf::PbPrint::fmt(&self.raft_meta_start_off, "raft_meta_start_off", buf);
         if old_len < buf.len() {
           buf.push(' ');
         }
@@ -1326,6 +1362,7 @@ impl ::std::fmt::Debug for StoreBackupMeta {
         ::protobuf::PbPrint::fmt(&self.store_id, "store_id", &mut s);
         ::protobuf::PbPrint::fmt(&self.manifest, "manifest", &mut s);
         ::protobuf::PbPrint::fmt(&self.wal_chunks, "wal_chunks", &mut s);
+        ::protobuf::PbPrint::fmt(&self.raft_meta_start_off, "raft_meta_start_off", &mut s);
         write!(f, "{}", s)
     }
 }
@@ -2002,6 +2039,974 @@ impl ::protobuf::reflect::ProtobufValue for ClusterBackupMeta {
     }
 }
 
+#[derive(PartialEq,Clone,Default)]
+pub struct RaftLogBackupFile {
+    // message fields
+    pub peer_id: u64,
+    pub first_index: u64,
+    pub last_index: u64,
+    pub start_off: u64,
+    pub end_off: u64,
+    // special fields
+    pub unknown_fields: ::protobuf::UnknownFields,
+    pub cached_size: ::protobuf::CachedSize,
+}
+
+impl<'a> ::std::default::Default for &'a RaftLogBackupFile {
+    fn default() -> &'a RaftLogBackupFile {
+        <RaftLogBackupFile as ::protobuf::Message>::default_instance()
+    }
+}
+
+impl RaftLogBackupFile {
+    pub fn new() -> RaftLogBackupFile {
+        ::std::default::Default::default()
+    }
+
+    // uint64 peer_id = 1;
+
+
+    pub fn get_peer_id(&self) -> u64 {
+        self.peer_id
+    }
+    pub fn clear_peer_id(&mut self) {
+        self.peer_id = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_peer_id(&mut self, v: u64) {
+        self.peer_id = v;
+    }
+
+    // uint64 first_index = 2;
+
+
+    pub fn get_first_index(&self) -> u64 {
+        self.first_index
+    }
+    pub fn clear_first_index(&mut self) {
+        self.first_index = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_first_index(&mut self, v: u64) {
+        self.first_index = v;
+    }
+
+    // uint64 last_index = 3;
+
+
+    pub fn get_last_index(&self) -> u64 {
+        self.last_index
+    }
+    pub fn clear_last_index(&mut self) {
+        self.last_index = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_last_index(&mut self, v: u64) {
+        self.last_index = v;
+    }
+
+    // uint64 start_off = 4;
+
+
+    pub fn get_start_off(&self) -> u64 {
+        self.start_off
+    }
+    pub fn clear_start_off(&mut self) {
+        self.start_off = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_start_off(&mut self, v: u64) {
+        self.start_off = v;
+    }
+
+    // uint64 end_off = 5;
+
+
+    pub fn get_end_off(&self) -> u64 {
+        self.end_off
+    }
+    pub fn clear_end_off(&mut self) {
+        self.end_off = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_end_off(&mut self, v: u64) {
+        self.end_off = v;
+    }
+}
+
+impl ::protobuf::Message for RaftLogBackupFile {
+    fn is_initialized(&self) -> bool {
+        true
+    }
+
+    fn merge_from(&mut self, is: &mut ::protobuf::CodedInputStream) -> ::protobuf::ProtobufResult<()> {
+        while !is.eof()? {
+            let (field_number, wire_type) = is.read_tag_unpack()?;
+            match field_number {
+                1 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.peer_id = tmp;
+                },
+                2 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.first_index = tmp;
+                },
+                3 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.last_index = tmp;
+                },
+                4 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.start_off = tmp;
+                },
+                5 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.end_off = tmp;
+                },
+                _ => {
+                    ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
+                },
+            };
+        }
+        ::std::result::Result::Ok(())
+    }
+
+    // Compute sizes of nested messages
+    #[allow(unused_variables)]
+    fn compute_size(&self) -> u32 {
+        let mut my_size = 0;
+        if self.peer_id != 0 {
+            my_size += ::protobuf::rt::value_size(1, self.peer_id, ::protobuf::wire_format::WireTypeVarint);
+        }
+        if self.first_index != 0 {
+            my_size += ::protobuf::rt::value_size(2, self.first_index, ::protobuf::wire_format::WireTypeVarint);
+        }
+        if self.last_index != 0 {
+            my_size += ::protobuf::rt::value_size(3, self.last_index, ::protobuf::wire_format::WireTypeVarint);
+        }
+        if self.start_off != 0 {
+            my_size += ::protobuf::rt::value_size(4, self.start_off, ::protobuf::wire_format::WireTypeVarint);
+        }
+        if self.end_off != 0 {
+            my_size += ::protobuf::rt::value_size(5, self.end_off, ::protobuf::wire_format::WireTypeVarint);
+        }
+        my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
+        self.cached_size.set(my_size);
+        my_size
+    }
+
+    fn write_to_with_cached_sizes(&self, os: &mut ::protobuf::CodedOutputStream) -> ::protobuf::ProtobufResult<()> {
+        if self.peer_id != 0 {
+            os.write_uint64(1, self.peer_id)?;
+        }
+        if self.first_index != 0 {
+            os.write_uint64(2, self.first_index)?;
+        }
+        if self.last_index != 0 {
+            os.write_uint64(3, self.last_index)?;
+        }
+        if self.start_off != 0 {
+            os.write_uint64(4, self.start_off)?;
+        }
+        if self.end_off != 0 {
+            os.write_uint64(5, self.end_off)?;
+        }
+        os.write_unknown_fields(self.get_unknown_fields())?;
+        ::std::result::Result::Ok(())
+    }
+
+    fn get_cached_size(&self) -> u32 {
+        self.cached_size.get()
+    }
+
+    fn get_unknown_fields(&self) -> &::protobuf::UnknownFields {
+        &self.unknown_fields
+    }
+
+    fn mut_unknown_fields(&mut self) -> &mut ::protobuf::UnknownFields {
+        &mut self.unknown_fields
+    }
+
+    fn as_any(&self) -> &dyn (::std::any::Any) {
+        self as &dyn (::std::any::Any)
+    }
+    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
+        self as &mut dyn (::std::any::Any)
+    }
+    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+        self
+    }
+
+    fn descriptor(&self) -> &'static ::protobuf::reflect::MessageDescriptor {
+        Self::descriptor_static()
+    }
+
+    fn new() -> RaftLogBackupFile {
+        RaftLogBackupFile::new()
+    }
+
+    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
+        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy {
+            lock: ::protobuf::lazy::ONCE_INIT,
+            ptr: 0 as *const ::protobuf::reflect::MessageDescriptor,
+        };
+        unsafe {
+            descriptor.get(|| {
+                let mut fields = ::std::vec::Vec::new();
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                    "peer_id",
+                    |m: &RaftLogBackupFile| { &m.peer_id },
+                    |m: &mut RaftLogBackupFile| { &mut m.peer_id },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                    "first_index",
+                    |m: &RaftLogBackupFile| { &m.first_index },
+                    |m: &mut RaftLogBackupFile| { &mut m.first_index },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                    "last_index",
+                    |m: &RaftLogBackupFile| { &m.last_index },
+                    |m: &mut RaftLogBackupFile| { &mut m.last_index },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                    "start_off",
+                    |m: &RaftLogBackupFile| { &m.start_off },
+                    |m: &mut RaftLogBackupFile| { &mut m.start_off },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                    "end_off",
+                    |m: &RaftLogBackupFile| { &m.end_off },
+                    |m: &mut RaftLogBackupFile| { &mut m.end_off },
+                ));
+                ::protobuf::reflect::MessageDescriptor::new::<RaftLogBackupFile>(
+                    "RaftLogBackupFile",
+                    fields,
+                    file_descriptor_proto()
+                )
+            })
+        }
+    }
+
+    fn default_instance() -> &'static RaftLogBackupFile {
+        static mut instance: ::protobuf::lazy::Lazy<RaftLogBackupFile> = ::protobuf::lazy::Lazy {
+            lock: ::protobuf::lazy::ONCE_INIT,
+            ptr: 0 as *const RaftLogBackupFile,
+        };
+        unsafe {
+            instance.get(RaftLogBackupFile::new)
+        }
+    }
+}
+
+impl ::protobuf::Clear for RaftLogBackupFile {
+    fn clear(&mut self) {
+        self.peer_id = 0;
+        self.first_index = 0;
+        self.last_index = 0;
+        self.start_off = 0;
+        self.end_off = 0;
+        self.unknown_fields.clear();
+    }
+}
+
+impl ::protobuf::PbPrint for RaftLogBackupFile {
+    #[allow(unused_variables)]
+    fn fmt(&self, name: &str, buf: &mut String) {
+        ::protobuf::push_message_start(name, buf);
+        let old_len = buf.len();
+        ::protobuf::PbPrint::fmt(&self.peer_id, "peer_id", buf);
+        ::protobuf::PbPrint::fmt(&self.first_index, "first_index", buf);
+        ::protobuf::PbPrint::fmt(&self.last_index, "last_index", buf);
+        ::protobuf::PbPrint::fmt(&self.start_off, "start_off", buf);
+        ::protobuf::PbPrint::fmt(&self.end_off, "end_off", buf);
+        if old_len < buf.len() {
+          buf.push(' ');
+        }
+        buf.push('}');
+    }
+}
+impl ::std::fmt::Debug for RaftLogBackupFile {
+    #[allow(unused_variables)]
+    fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
+        let mut s = String::new();
+        ::protobuf::PbPrint::fmt(&self.peer_id, "peer_id", &mut s);
+        ::protobuf::PbPrint::fmt(&self.first_index, "first_index", &mut s);
+        ::protobuf::PbPrint::fmt(&self.last_index, "last_index", &mut s);
+        ::protobuf::PbPrint::fmt(&self.start_off, "start_off", &mut s);
+        ::protobuf::PbPrint::fmt(&self.end_off, "end_off", &mut s);
+        write!(f, "{}", s)
+    }
+}
+
+impl ::protobuf::reflect::ProtobufValue for RaftLogBackupFile {
+    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef {
+        ::protobuf::reflect::ProtobufValueRef::Message(self)
+    }
+}
+
+#[derive(PartialEq,Clone,Default)]
+pub struct KeySpaceBackupMeta {
+    // message fields
+    pub keyspace_id: u32,
+    pub files: ::protobuf::RepeatedField<RaftLogBackupFile>,
+    // special fields
+    pub unknown_fields: ::protobuf::UnknownFields,
+    pub cached_size: ::protobuf::CachedSize,
+}
+
+impl<'a> ::std::default::Default for &'a KeySpaceBackupMeta {
+    fn default() -> &'a KeySpaceBackupMeta {
+        <KeySpaceBackupMeta as ::protobuf::Message>::default_instance()
+    }
+}
+
+impl KeySpaceBackupMeta {
+    pub fn new() -> KeySpaceBackupMeta {
+        ::std::default::Default::default()
+    }
+
+    // uint32 keyspace_id = 1;
+
+
+    pub fn get_keyspace_id(&self) -> u32 {
+        self.keyspace_id
+    }
+    pub fn clear_keyspace_id(&mut self) {
+        self.keyspace_id = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_keyspace_id(&mut self, v: u32) {
+        self.keyspace_id = v;
+    }
+
+    // repeated .rfpb.RaftLogBackupFile files = 2;
+
+
+    pub fn get_files(&self) -> &[RaftLogBackupFile] {
+        &self.files
+    }
+    pub fn clear_files(&mut self) {
+        self.files.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_files(&mut self, v: ::protobuf::RepeatedField<RaftLogBackupFile>) {
+        self.files = v;
+    }
+
+    // Mutable pointer to the field.
+    pub fn mut_files(&mut self) -> &mut ::protobuf::RepeatedField<RaftLogBackupFile> {
+        &mut self.files
+    }
+
+    // Take field
+    pub fn take_files(&mut self) -> ::protobuf::RepeatedField<RaftLogBackupFile> {
+        ::std::mem::replace(&mut self.files, ::protobuf::RepeatedField::new())
+    }
+}
+
+impl ::protobuf::Message for KeySpaceBackupMeta {
+    fn is_initialized(&self) -> bool {
+        for v in &self.files {
+            if !v.is_initialized() {
+                return false;
+            }
+        };
+        true
+    }
+
+    fn merge_from(&mut self, is: &mut ::protobuf::CodedInputStream) -> ::protobuf::ProtobufResult<()> {
+        while !is.eof()? {
+            let (field_number, wire_type) = is.read_tag_unpack()?;
+            match field_number {
+                1 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint32()?;
+                    self.keyspace_id = tmp;
+                },
+                2 => {
+                    ::protobuf::rt::read_repeated_message_into(wire_type, is, &mut self.files)?;
+                },
+                _ => {
+                    ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
+                },
+            };
+        }
+        ::std::result::Result::Ok(())
+    }
+
+    // Compute sizes of nested messages
+    #[allow(unused_variables)]
+    fn compute_size(&self) -> u32 {
+        let mut my_size = 0;
+        if self.keyspace_id != 0 {
+            my_size += ::protobuf::rt::value_size(1, self.keyspace_id, ::protobuf::wire_format::WireTypeVarint);
+        }
+        for value in &self.files {
+            let len = value.compute_size();
+            my_size += 1 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
+        };
+        my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
+        self.cached_size.set(my_size);
+        my_size
+    }
+
+    fn write_to_with_cached_sizes(&self, os: &mut ::protobuf::CodedOutputStream) -> ::protobuf::ProtobufResult<()> {
+        if self.keyspace_id != 0 {
+            os.write_uint32(1, self.keyspace_id)?;
+        }
+        for v in &self.files {
+            os.write_tag(2, ::protobuf::wire_format::WireTypeLengthDelimited)?;
+            os.write_raw_varint32(v.get_cached_size())?;
+            v.write_to_with_cached_sizes(os)?;
+        };
+        os.write_unknown_fields(self.get_unknown_fields())?;
+        ::std::result::Result::Ok(())
+    }
+
+    fn get_cached_size(&self) -> u32 {
+        self.cached_size.get()
+    }
+
+    fn get_unknown_fields(&self) -> &::protobuf::UnknownFields {
+        &self.unknown_fields
+    }
+
+    fn mut_unknown_fields(&mut self) -> &mut ::protobuf::UnknownFields {
+        &mut self.unknown_fields
+    }
+
+    fn as_any(&self) -> &dyn (::std::any::Any) {
+        self as &dyn (::std::any::Any)
+    }
+    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
+        self as &mut dyn (::std::any::Any)
+    }
+    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+        self
+    }
+
+    fn descriptor(&self) -> &'static ::protobuf::reflect::MessageDescriptor {
+        Self::descriptor_static()
+    }
+
+    fn new() -> KeySpaceBackupMeta {
+        KeySpaceBackupMeta::new()
+    }
+
+    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
+        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy {
+            lock: ::protobuf::lazy::ONCE_INIT,
+            ptr: 0 as *const ::protobuf::reflect::MessageDescriptor,
+        };
+        unsafe {
+            descriptor.get(|| {
+                let mut fields = ::std::vec::Vec::new();
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint32>(
+                    "keyspace_id",
+                    |m: &KeySpaceBackupMeta| { &m.keyspace_id },
+                    |m: &mut KeySpaceBackupMeta| { &mut m.keyspace_id },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_repeated_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<RaftLogBackupFile>>(
+                    "files",
+                    |m: &KeySpaceBackupMeta| { &m.files },
+                    |m: &mut KeySpaceBackupMeta| { &mut m.files },
+                ));
+                ::protobuf::reflect::MessageDescriptor::new::<KeySpaceBackupMeta>(
+                    "KeySpaceBackupMeta",
+                    fields,
+                    file_descriptor_proto()
+                )
+            })
+        }
+    }
+
+    fn default_instance() -> &'static KeySpaceBackupMeta {
+        static mut instance: ::protobuf::lazy::Lazy<KeySpaceBackupMeta> = ::protobuf::lazy::Lazy {
+            lock: ::protobuf::lazy::ONCE_INIT,
+            ptr: 0 as *const KeySpaceBackupMeta,
+        };
+        unsafe {
+            instance.get(KeySpaceBackupMeta::new)
+        }
+    }
+}
+
+impl ::protobuf::Clear for KeySpaceBackupMeta {
+    fn clear(&mut self) {
+        self.keyspace_id = 0;
+        self.files.clear();
+        self.unknown_fields.clear();
+    }
+}
+
+impl ::protobuf::PbPrint for KeySpaceBackupMeta {
+    #[allow(unused_variables)]
+    fn fmt(&self, name: &str, buf: &mut String) {
+        ::protobuf::push_message_start(name, buf);
+        let old_len = buf.len();
+        ::protobuf::PbPrint::fmt(&self.keyspace_id, "keyspace_id", buf);
+        ::protobuf::PbPrint::fmt(&self.files, "files", buf);
+        if old_len < buf.len() {
+          buf.push(' ');
+        }
+        buf.push('}');
+    }
+}
+impl ::std::fmt::Debug for KeySpaceBackupMeta {
+    #[allow(unused_variables)]
+    fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
+        let mut s = String::new();
+        ::protobuf::PbPrint::fmt(&self.keyspace_id, "keyspace_id", &mut s);
+        ::protobuf::PbPrint::fmt(&self.files, "files", &mut s);
+        write!(f, "{}", s)
+    }
+}
+
+impl ::protobuf::reflect::ProtobufValue for KeySpaceBackupMeta {
+    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef {
+        ::protobuf::reflect::ProtobufValueRef::Message(self)
+    }
+}
+
+#[derive(PartialEq,Clone,Default)]
+pub struct RaftLogMetaHeader {
+    // message fields
+    pub version: u64,
+    // special fields
+    pub unknown_fields: ::protobuf::UnknownFields,
+    pub cached_size: ::protobuf::CachedSize,
+}
+
+impl<'a> ::std::default::Default for &'a RaftLogMetaHeader {
+    fn default() -> &'a RaftLogMetaHeader {
+        <RaftLogMetaHeader as ::protobuf::Message>::default_instance()
+    }
+}
+
+impl RaftLogMetaHeader {
+    pub fn new() -> RaftLogMetaHeader {
+        ::std::default::Default::default()
+    }
+
+    // uint64 version = 1;
+
+
+    pub fn get_version(&self) -> u64 {
+        self.version
+    }
+    pub fn clear_version(&mut self) {
+        self.version = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_version(&mut self, v: u64) {
+        self.version = v;
+    }
+}
+
+impl ::protobuf::Message for RaftLogMetaHeader {
+    fn is_initialized(&self) -> bool {
+        true
+    }
+
+    fn merge_from(&mut self, is: &mut ::protobuf::CodedInputStream) -> ::protobuf::ProtobufResult<()> {
+        while !is.eof()? {
+            let (field_number, wire_type) = is.read_tag_unpack()?;
+            match field_number {
+                1 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.version = tmp;
+                },
+                _ => {
+                    ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
+                },
+            };
+        }
+        ::std::result::Result::Ok(())
+    }
+
+    // Compute sizes of nested messages
+    #[allow(unused_variables)]
+    fn compute_size(&self) -> u32 {
+        let mut my_size = 0;
+        if self.version != 0 {
+            my_size += ::protobuf::rt::value_size(1, self.version, ::protobuf::wire_format::WireTypeVarint);
+        }
+        my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
+        self.cached_size.set(my_size);
+        my_size
+    }
+
+    fn write_to_with_cached_sizes(&self, os: &mut ::protobuf::CodedOutputStream) -> ::protobuf::ProtobufResult<()> {
+        if self.version != 0 {
+            os.write_uint64(1, self.version)?;
+        }
+        os.write_unknown_fields(self.get_unknown_fields())?;
+        ::std::result::Result::Ok(())
+    }
+
+    fn get_cached_size(&self) -> u32 {
+        self.cached_size.get()
+    }
+
+    fn get_unknown_fields(&self) -> &::protobuf::UnknownFields {
+        &self.unknown_fields
+    }
+
+    fn mut_unknown_fields(&mut self) -> &mut ::protobuf::UnknownFields {
+        &mut self.unknown_fields
+    }
+
+    fn as_any(&self) -> &dyn (::std::any::Any) {
+        self as &dyn (::std::any::Any)
+    }
+    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
+        self as &mut dyn (::std::any::Any)
+    }
+    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+        self
+    }
+
+    fn descriptor(&self) -> &'static ::protobuf::reflect::MessageDescriptor {
+        Self::descriptor_static()
+    }
+
+    fn new() -> RaftLogMetaHeader {
+        RaftLogMetaHeader::new()
+    }
+
+    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
+        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy {
+            lock: ::protobuf::lazy::ONCE_INIT,
+            ptr: 0 as *const ::protobuf::reflect::MessageDescriptor,
+        };
+        unsafe {
+            descriptor.get(|| {
+                let mut fields = ::std::vec::Vec::new();
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                    "version",
+                    |m: &RaftLogMetaHeader| { &m.version },
+                    |m: &mut RaftLogMetaHeader| { &mut m.version },
+                ));
+                ::protobuf::reflect::MessageDescriptor::new::<RaftLogMetaHeader>(
+                    "RaftLogMetaHeader",
+                    fields,
+                    file_descriptor_proto()
+                )
+            })
+        }
+    }
+
+    fn default_instance() -> &'static RaftLogMetaHeader {
+        static mut instance: ::protobuf::lazy::Lazy<RaftLogMetaHeader> = ::protobuf::lazy::Lazy {
+            lock: ::protobuf::lazy::ONCE_INIT,
+            ptr: 0 as *const RaftLogMetaHeader,
+        };
+        unsafe {
+            instance.get(RaftLogMetaHeader::new)
+        }
+    }
+}
+
+impl ::protobuf::Clear for RaftLogMetaHeader {
+    fn clear(&mut self) {
+        self.version = 0;
+        self.unknown_fields.clear();
+    }
+}
+
+impl ::protobuf::PbPrint for RaftLogMetaHeader {
+    #[allow(unused_variables)]
+    fn fmt(&self, name: &str, buf: &mut String) {
+        ::protobuf::push_message_start(name, buf);
+        let old_len = buf.len();
+        ::protobuf::PbPrint::fmt(&self.version, "version", buf);
+        if old_len < buf.len() {
+          buf.push(' ');
+        }
+        buf.push('}');
+    }
+}
+impl ::std::fmt::Debug for RaftLogMetaHeader {
+    #[allow(unused_variables)]
+    fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
+        let mut s = String::new();
+        ::protobuf::PbPrint::fmt(&self.version, "version", &mut s);
+        write!(f, "{}", s)
+    }
+}
+
+impl ::protobuf::reflect::ProtobufValue for RaftLogMetaHeader {
+    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef {
+        ::protobuf::reflect::ProtobufValueRef::Message(self)
+    }
+}
+
+#[derive(PartialEq,Clone,Default)]
+pub struct StoreRaftLogBackupMeta {
+    // message fields
+    pub header: ::protobuf::SingularPtrField<RaftLogMetaHeader>,
+    pub raft_logs: ::std::collections::HashMap<u32, KeySpaceBackupMeta>,
+    // special fields
+    pub unknown_fields: ::protobuf::UnknownFields,
+    pub cached_size: ::protobuf::CachedSize,
+}
+
+impl<'a> ::std::default::Default for &'a StoreRaftLogBackupMeta {
+    fn default() -> &'a StoreRaftLogBackupMeta {
+        <StoreRaftLogBackupMeta as ::protobuf::Message>::default_instance()
+    }
+}
+
+impl StoreRaftLogBackupMeta {
+    pub fn new() -> StoreRaftLogBackupMeta {
+        ::std::default::Default::default()
+    }
+
+    // .rfpb.RaftLogMetaHeader header = 1;
+
+
+    pub fn get_header(&self) -> &RaftLogMetaHeader {
+        self.header.as_ref().unwrap_or_else(|| RaftLogMetaHeader::default_instance())
+    }
+    pub fn clear_header(&mut self) {
+        self.header.clear();
+    }
+
+    pub fn has_header(&self) -> bool {
+        self.header.is_some()
+    }
+
+    // Param is passed by value, moved
+    pub fn set_header(&mut self, v: RaftLogMetaHeader) {
+        self.header = ::protobuf::SingularPtrField::some(v);
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_header(&mut self) -> &mut RaftLogMetaHeader {
+        if self.header.is_none() {
+            self.header.set_default();
+        }
+        self.header.as_mut().unwrap()
+    }
+
+    // Take field
+    pub fn take_header(&mut self) -> RaftLogMetaHeader {
+        self.header.take().unwrap_or_else(|| RaftLogMetaHeader::new())
+    }
+
+    // repeated .rfpb.StoreRaftLogBackupMeta.raft_logs_MapEntry raft_logs = 2;
+
+
+    pub fn get_raft_logs(&self) -> &::std::collections::HashMap<u32, KeySpaceBackupMeta> {
+        &self.raft_logs
+    }
+    pub fn clear_raft_logs(&mut self) {
+        self.raft_logs.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_raft_logs(&mut self, v: ::std::collections::HashMap<u32, KeySpaceBackupMeta>) {
+        self.raft_logs = v;
+    }
+
+    // Mutable pointer to the field.
+    pub fn mut_raft_logs(&mut self) -> &mut ::std::collections::HashMap<u32, KeySpaceBackupMeta> {
+        &mut self.raft_logs
+    }
+
+    // Take field
+    pub fn take_raft_logs(&mut self) -> ::std::collections::HashMap<u32, KeySpaceBackupMeta> {
+        ::std::mem::replace(&mut self.raft_logs, ::std::collections::HashMap::new())
+    }
+}
+
+impl ::protobuf::Message for StoreRaftLogBackupMeta {
+    fn is_initialized(&self) -> bool {
+        for v in &self.header {
+            if !v.is_initialized() {
+                return false;
+            }
+        };
+        true
+    }
+
+    fn merge_from(&mut self, is: &mut ::protobuf::CodedInputStream) -> ::protobuf::ProtobufResult<()> {
+        while !is.eof()? {
+            let (field_number, wire_type) = is.read_tag_unpack()?;
+            match field_number {
+                1 => {
+                    ::protobuf::rt::read_singular_message_into(wire_type, is, &mut self.header)?;
+                },
+                2 => {
+                    ::protobuf::rt::read_map_into::<::protobuf::types::ProtobufTypeUint32, ::protobuf::types::ProtobufTypeMessage<KeySpaceBackupMeta>>(wire_type, is, &mut self.raft_logs)?;
+                },
+                _ => {
+                    ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
+                },
+            };
+        }
+        ::std::result::Result::Ok(())
+    }
+
+    // Compute sizes of nested messages
+    #[allow(unused_variables)]
+    fn compute_size(&self) -> u32 {
+        let mut my_size = 0;
+        if let Some(ref v) = self.header.as_ref() {
+            let len = v.compute_size();
+            my_size += 1 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
+        }
+        my_size += ::protobuf::rt::compute_map_size::<::protobuf::types::ProtobufTypeUint32, ::protobuf::types::ProtobufTypeMessage<KeySpaceBackupMeta>>(2, &self.raft_logs);
+        my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
+        self.cached_size.set(my_size);
+        my_size
+    }
+
+    fn write_to_with_cached_sizes(&self, os: &mut ::protobuf::CodedOutputStream) -> ::protobuf::ProtobufResult<()> {
+        if let Some(ref v) = self.header.as_ref() {
+            os.write_tag(1, ::protobuf::wire_format::WireTypeLengthDelimited)?;
+            os.write_raw_varint32(v.get_cached_size())?;
+            v.write_to_with_cached_sizes(os)?;
+        }
+        ::protobuf::rt::write_map_with_cached_sizes::<::protobuf::types::ProtobufTypeUint32, ::protobuf::types::ProtobufTypeMessage<KeySpaceBackupMeta>>(2, &self.raft_logs, os)?;
+        os.write_unknown_fields(self.get_unknown_fields())?;
+        ::std::result::Result::Ok(())
+    }
+
+    fn get_cached_size(&self) -> u32 {
+        self.cached_size.get()
+    }
+
+    fn get_unknown_fields(&self) -> &::protobuf::UnknownFields {
+        &self.unknown_fields
+    }
+
+    fn mut_unknown_fields(&mut self) -> &mut ::protobuf::UnknownFields {
+        &mut self.unknown_fields
+    }
+
+    fn as_any(&self) -> &dyn (::std::any::Any) {
+        self as &dyn (::std::any::Any)
+    }
+    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
+        self as &mut dyn (::std::any::Any)
+    }
+    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+        self
+    }
+
+    fn descriptor(&self) -> &'static ::protobuf::reflect::MessageDescriptor {
+        Self::descriptor_static()
+    }
+
+    fn new() -> StoreRaftLogBackupMeta {
+        StoreRaftLogBackupMeta::new()
+    }
+
+    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
+        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy {
+            lock: ::protobuf::lazy::ONCE_INIT,
+            ptr: 0 as *const ::protobuf::reflect::MessageDescriptor,
+        };
+        unsafe {
+            descriptor.get(|| {
+                let mut fields = ::std::vec::Vec::new();
+                fields.push(::protobuf::reflect::accessor::make_singular_ptr_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<RaftLogMetaHeader>>(
+                    "header",
+                    |m: &StoreRaftLogBackupMeta| { &m.header },
+                    |m: &mut StoreRaftLogBackupMeta| { &mut m.header },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_map_accessor::<_, ::protobuf::types::ProtobufTypeUint32, ::protobuf::types::ProtobufTypeMessage<KeySpaceBackupMeta>>(
+                    "raft_logs",
+                    |m: &StoreRaftLogBackupMeta| { &m.raft_logs },
+                    |m: &mut StoreRaftLogBackupMeta| { &mut m.raft_logs },
+                ));
+                ::protobuf::reflect::MessageDescriptor::new::<StoreRaftLogBackupMeta>(
+                    "StoreRaftLogBackupMeta",
+                    fields,
+                    file_descriptor_proto()
+                )
+            })
+        }
+    }
+
+    fn default_instance() -> &'static StoreRaftLogBackupMeta {
+        static mut instance: ::protobuf::lazy::Lazy<StoreRaftLogBackupMeta> = ::protobuf::lazy::Lazy {
+            lock: ::protobuf::lazy::ONCE_INIT,
+            ptr: 0 as *const StoreRaftLogBackupMeta,
+        };
+        unsafe {
+            instance.get(StoreRaftLogBackupMeta::new)
+        }
+    }
+}
+
+impl ::protobuf::Clear for StoreRaftLogBackupMeta {
+    fn clear(&mut self) {
+        self.header.clear();
+        self.raft_logs.clear();
+        self.unknown_fields.clear();
+    }
+}
+
+impl ::protobuf::PbPrint for StoreRaftLogBackupMeta {
+    #[allow(unused_variables)]
+    fn fmt(&self, name: &str, buf: &mut String) {
+        ::protobuf::push_message_start(name, buf);
+        let old_len = buf.len();
+        ::protobuf::PbPrint::fmt(&self.header, "header", buf);
+        ::protobuf::PbPrint::fmt(&self.raft_logs, "raft_logs", buf);
+        if old_len < buf.len() {
+          buf.push(' ');
+        }
+        buf.push('}');
+    }
+}
+impl ::std::fmt::Debug for StoreRaftLogBackupMeta {
+    #[allow(unused_variables)]
+    fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
+        let mut s = String::new();
+        ::protobuf::PbPrint::fmt(&self.header, "header", &mut s);
+        ::protobuf::PbPrint::fmt(&self.raft_logs, "raft_logs", &mut s);
+        write!(f, "{}", s)
+    }
+}
+
+impl ::protobuf::reflect::ProtobufValue for StoreRaftLogBackupMeta {
+    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef {
+        ::protobuf::reflect::ProtobufValueRef::Message(self)
+    }
+}
+
 static file_descriptor_proto_data: &'static [u8] = b"\
     \n\x0fchangeset.proto\x12\x04rfpb\"B\n\tChangeSet\x12\x12\n\x08epoch_id\
     \x18\x01\x20\x01(\rB\0\x12\x1f\n\x05peers\x18\x02\x20\x03(\x0b2\x0e.rfpb\
@@ -2012,19 +3017,32 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     fpb.RaftLogFileB\0:\0\"-\n\tPeerState\x12\r\n\x03key\x18\x01\x20\x01(\
     \x0cB\0\x12\x0f\n\x05value\x18\x02\x20\x01(\x0cB\0:\0\"<\n\x0bRaftLogFil\
     e\x12\x15\n\x0bfirst_index\x18\x01\x20\x01(\x04B\0\x12\x14\n\nlast_index\
-    \x18\x02\x20\x01(\x04B\0:\0\"r\n\x0fStoreBackupMeta\x12\x12\n\x08store_i\
-    d\x18\x01\x20\x01(\x04B\0\x12#\n\x08manifest\x18\x02\x20\x01(\x0b2\x0f.r\
-    fpb.ChangeSetB\0\x12$\n\nwal_chunks\x18\x03\x20\x03(\x0b2\x0e.rfpb.WalCh\
-    unkB\0:\0\"E\n\x08WalChunk\x12\x0f\n\x05epoch\x18\x01\x20\x01(\rB\0\x12\
-    \x13\n\tstart_off\x18\x02\x20\x01(\x04B\0\x12\x11\n\x07end_off\x18\x03\
-    \x20\x01(\x04B\0:\0\"\xa8\x02\n\x11ClusterBackupMeta\x12'\n\x06stores\
-    \x18\x01\x20\x03(\x0b2\x15.rfpb.StoreBackupMetaB\0\x12\x14\n\ncluster_id\
-    \x18\x02\x20\x01(\x04B\0\x12\x13\n\tbackup_ts\x18\x03\x20\x01(\x04B\0\
-    \x12\x12\n\x08alloc_id\x18\x04\x20\x01(\x04B\0\x12\x11\n\x07safe_ts\x18\
-    \x05\x20\x01(\x04B\0\x12G\n\rkeyspace_meta\x18\x06\x20\x03(\x0b2..rfpb.C\
-    lusterBackupMeta.keyspace_meta_MapEntryB\0\x12\x17\n\rmeta_revision\x18\
-    \x07\x20\x01(\x03B\0\x1a4\n\x16keyspace_meta_MapEntry\x12\t\n\x03key\x18\
-    \x01(\x0c\x12\x0b\n\x05value\x18\x02(\x0c:\x028\x01:\0B\0b\x06proto3\
+    \x18\x02\x20\x01(\x04B\0:\0\"\x91\x01\n\x0fStoreBackupMeta\x12\x12\n\x08\
+    store_id\x18\x01\x20\x01(\x04B\0\x12#\n\x08manifest\x18\x02\x20\x01(\x0b\
+    2\x0f.rfpb.ChangeSetB\0\x12$\n\nwal_chunks\x18\x03\x20\x03(\x0b2\x0e.rfp\
+    b.WalChunkB\0\x12\x1d\n\x13raft_meta_start_off\x18\x04\x20\x01(\x04B\0:\
+    \0\"E\n\x08WalChunk\x12\x0f\n\x05epoch\x18\x01\x20\x01(\rB\0\x12\x13\n\t\
+    start_off\x18\x02\x20\x01(\x04B\0\x12\x11\n\x07end_off\x18\x03\x20\x01(\
+    \x04B\0:\0\"\xa8\x02\n\x11ClusterBackupMeta\x12'\n\x06stores\x18\x01\x20\
+    \x03(\x0b2\x15.rfpb.StoreBackupMetaB\0\x12\x14\n\ncluster_id\x18\x02\x20\
+    \x01(\x04B\0\x12\x13\n\tbackup_ts\x18\x03\x20\x01(\x04B\0\x12\x12\n\x08a\
+    lloc_id\x18\x04\x20\x01(\x04B\0\x12\x11\n\x07safe_ts\x18\x05\x20\x01(\
+    \x04B\0\x12G\n\rkeyspace_meta\x18\x06\x20\x03(\x0b2..rfpb.ClusterBackupM\
+    eta.keyspace_meta_MapEntryB\0\x12\x17\n\rmeta_revision\x18\x07\x20\x01(\
+    \x03B\0\x1a4\n\x16keyspace_meta_MapEntry\x12\t\n\x03key\x18\x01(\x0c\x12\
+    \x0b\n\x05value\x18\x02(\x0c:\x028\x01:\0\"}\n\x11RaftLogBackupFile\x12\
+    \x11\n\x07peer_id\x18\x01\x20\x01(\x04B\0\x12\x15\n\x0bfirst_index\x18\
+    \x02\x20\x01(\x04B\0\x12\x14\n\nlast_index\x18\x03\x20\x01(\x04B\0\x12\
+    \x13\n\tstart_off\x18\x04\x20\x01(\x04B\0\x12\x11\n\x07end_off\x18\x05\
+    \x20\x01(\x04B\0:\0\"W\n\x12KeySpaceBackupMeta\x12\x15\n\x0bkeyspace_id\
+    \x18\x01\x20\x01(\rB\0\x12(\n\x05files\x18\x02\x20\x03(\x0b2\x17.rfpb.Ra\
+    ftLogBackupFileB\0:\0\"(\n\x11RaftLogMetaHeader\x12\x11\n\x07version\x18\
+    \x01\x20\x01(\x04B\0:\0\"\xd7\x01\n\x16StoreRaftLogBackupMeta\x12)\n\x06\
+    header\x18\x01\x20\x01(\x0b2\x17.rfpb.RaftLogMetaHeaderB\0\x12D\n\traft_\
+    logs\x18\x02\x20\x03(\x0b2/.rfpb.StoreRaftLogBackupMeta.raft_logs_MapEnt\
+    ryB\0\x1aJ\n\x12raft_logs_MapEntry\x12\t\n\x03key\x18\x01(\r\x12%\n\x05v\
+    alue\x18\x02(\x0b2\x18.rfpb.KeySpaceBackupMeta:\x028\x01:\0B\0b\x06proto\
+    3\
 ";
 
 static mut file_descriptor_proto_lazy: ::protobuf::lazy::Lazy<::protobuf::descriptor::FileDescriptorProto> = ::protobuf::lazy::Lazy {

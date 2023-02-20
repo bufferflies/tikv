@@ -8,13 +8,13 @@ use kvenginepb::ChangeSet;
 use kvproto::{metapb, raft_cmdpb::RaftCmdRequest, raft_serverpb};
 use protobuf::Message;
 use raft_proto::eraftpb;
+use rfengine::{raft_state_key, region_state_key, KV_ENGINE_META_KEY, STORE_IDENT_KEY};
 use slog_global::info;
 use tikv_util::warn;
 
 use crate::store::{
-    is_property_change_set, load_raft_truncated_state, raft_state_key, region_state_key, rlog,
-    Applier, ApplyContext, CustomRaftLog, PeerTag, RaftApplyState, RaftState, RegionIDVer,
-    KV_ENGINE_META_KEY, STORE_IDENT_KEY, TERM_KEY,
+    is_property_change_set, load_raft_truncated_state, rlog, Applier, ApplyContext, CustomRaftLog,
+    PeerTag, RaftApplyState, RaftState, RegionIDVer, TERM_KEY,
 };
 
 #[derive(Clone)]

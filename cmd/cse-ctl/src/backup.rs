@@ -258,7 +258,7 @@ async fn backup_store(
     tx: SyncSender<Result<StoreBackupMeta>>,
 ) {
     let uri = Uri::from_str(&format!("http://{}/rfengine/backup", &store.status_address)).unwrap();
-    info!("Start backup with config {:?}", config);
+    info!("Start backup with config {}", config);
     let json_string = serde_json::to_string(&config).unwrap();
     let req = Request::post(uri).body(Body::from(json_string)).unwrap();
     match send_request_to_store(req, store.clone()).await {
@@ -366,7 +366,11 @@ async fn get_latest_backup_meta(s3fs: &S3FS, cluster_id: u64) -> Result<ClusterB
     // The last should be the latest one in most cases.
     let last_file = files.last().unwrap();
     let object = s3fs
-        .get_object(last_file.clone(), last_file.clone())
+        .get_object(
+            last_file.clone(),
+            last_file.clone(),
+            engine_traits::GetObjectOptions::default(),
+        )
         .await?;
     let mut meta = ClusterBackupMeta::new();
     meta.merge_from_bytes(&object).unwrap();

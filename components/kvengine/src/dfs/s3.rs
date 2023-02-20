@@ -10,7 +10,7 @@ use std::{
 use async_trait::async_trait;
 use bstr::ByteSlice;
 use bytes::{Buf, Bytes};
-use engine_traits::ObjectStorage;
+use engine_traits::{GetObjectOptions, ObjectStorage};
 use farmhash::fingerprint64;
 use futures::StreamExt;
 use hyper_tls::HttpsConnector;
@@ -358,11 +358,19 @@ impl S3FSCore {
         Ok(Bytes::from(buf))
     }
 
-    pub async fn get_object(&self, key: String, file_name: String) -> crate::dfs::Result<Bytes> {
+    pub async fn get_object(
+        &self,
+        key: String,
+        file_name: String,
+        opts: GetObjectOptions,
+    ) -> crate::dfs::Result<Bytes> {
         let mut retry_cnt = 0;
         let start_time = Instant::now_coarse();
         loop {
-            let req = self.new_request("GET", &key);
+            let mut req = self.new_request("GET", &key);
+            if !opts.is_full_range() {
+                req.add_header("Range", &format!("bytes={}", opts.range_string()));
+            }
             let mut result = self.dispatch(req, GetObjectError::from_response).await;
 
             if result.is_ok() {
@@ -488,15 +496,18 @@ impl ObjectStorage for S3FS {
         Ok(())
     }
 
-    fn get_objects(&self, keys: Vec<String>) -> Result<Vec<(String, Bytes)>, String> {
+    fn get_objects(
+        &self,
+        keys: Vec<(String, GetObjectOptions)>,
+    ) -> Result<Vec<(String, Bytes)>, String> {
         let runtime = self.get_runtime();
         let len = keys.len();
         let mut handles = Vec::with_capacity(len);
-        for key in keys {
+        for (key, opts) in keys {
             let full_key = format!("{}/{}", self.prefix, key);
             let fs = self.clone();
             handles.push(runtime.spawn(async move {
-                fs.get_object(full_key, key.clone())
+                fs.get_object(full_key, key.clone(), opts)
                     .await
                     .map_err(|err| format!("put {} failed {:?}", &key, err))
                     .map(|data| (key.clone(), data))
@@ -525,8 +536,12 @@ impl ObjectStorage for S3FS {
 #[async_trait]
 impl DFS for S3FS {
     async fn read_file(&self, file_id: u64, _opts: Options) -> crate::dfs::Result<Bytes> {
-        self.get_object(self.file_key(file_id), file_id.to_string())
-            .await
+        self.get_object(
+            self.file_key(file_id),
+            file_id.to_string(),
+            GetObjectOptions::default(),
+        )
+        .await
     }
 
     async fn create(&self, file_id: u64, data: Bytes, _opts: Options) -> crate::dfs::Result<()> {

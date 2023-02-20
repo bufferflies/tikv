@@ -53,7 +53,30 @@ impl FileSystemInspector for EngineFileSystemInspector {
     }
 }
 
+#[derive(Debug, Default)]
+pub struct GetObjectOptions {
+    pub start_off: u64,
+    pub end_off: Option<u64>,
+}
+
+impl GetObjectOptions {
+    pub fn is_full_range(&self) -> bool {
+        self.start_off == 0 && self.end_off.is_none()
+    }
+
+    pub fn range_string(&self) -> String {
+        format!(
+            "{}-{}",
+            self.start_off,
+            self.end_off.map_or(String::new(), |e| format!("{}", e))
+        )
+    }
+}
+
 pub trait ObjectStorage: Sync + Send {
     fn put_objects(&self, objects: Vec<(String, Bytes)>) -> Result<(), String>;
-    fn get_objects(&self, keys: Vec<String>) -> Result<Vec<(String, Bytes)>, String>;
+    fn get_objects(
+        &self,
+        keys: Vec<(String, GetObjectOptions)>,
+    ) -> Result<Vec<(String, Bytes)>, String>;
 }

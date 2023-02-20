@@ -48,6 +48,7 @@ use raftstore::{
         QueryStats, TxnExt,
     },
 };
+use rfengine::KV_ENGINE_META_KEY;
 use tikv_util::{
     box_err, debug, error, info,
     time::{duration_to_sec, monotonic_raw_now, InstantExt},

@@ -18,16 +18,17 @@ use raft_proto::{
 };
 use raft_serverpb::RegionLocalState;
 use raftstore::store::{util, util::conf_state_from_region};
-use rfengine;
+use rfengine::{
+    self, raft_state_key, region_state_key, KV_ENGINE_META_KEY, RAFT_TRUNCATED_STATE_KEY,
+    REGION_META_KEY_PREFIX,
+};
 use tikv_util::{box_err, debug, info};
 
-use super::{util::raft_state_key, RAFT_TRUNCATED_STATE_KEY};
 use crate::{
     errors::*,
     store::{
-        region_state_key, Engines, PeerTag, RaftApplyState, RaftContext, RaftState,
-        RaftTruncatedState, RegionIDVer, StoreMsg, KV_ENGINE_META_KEY, REGION_META_KEY_PREFIX,
-        TERM_KEY,
+        Engines, PeerTag, RaftApplyState, RaftContext, RaftState, RaftTruncatedState, RegionIDVer,
+        StoreMsg, TERM_KEY,
     },
 };
 

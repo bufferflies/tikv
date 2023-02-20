@@ -2,6 +2,7 @@
 
 use std::{
     path::PathBuf,
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -90,10 +91,11 @@ pub fn restore_tikv(config: &RestoreConfig, name: String, store_id: u64, path: &
     let (cluster_backup, s3fs) = get_cluster_backup_meta(config, name);
     if store_id > 0 {
         rfengine::restore(
-            Box::new(s3fs),
+            Arc::new(s3fs),
             &cluster_backup,
             store_id,
             &PathBuf::from(path),
+            None,
         );
     }
 }
@@ -121,7 +123,9 @@ fn get_cluster_backup_meta(config: &RestoreConfig, name: String) -> (ClusterBack
         dfs_conf.s3_bucket,
     );
     let runtime = s3fs.get_runtime();
-    let data = runtime.block_on(s3fs.get_object(backup_key, name)).unwrap();
+    let data = runtime
+        .block_on(s3fs.get_object(backup_key, name, engine_traits::GetObjectOptions::default()))
+        .unwrap();
     let mut cluster_backup = ClusterBackupMeta::new();
     cluster_backup.merge_from_bytes(&data).unwrap();
     println!(

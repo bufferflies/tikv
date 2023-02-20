@@ -475,7 +475,7 @@ impl StatusServer {
         let cluster_id = backup_config.cluster_id;
         let mut store_ident = StoreIdent::default();
         let data = engine
-            .get_state(0, rfstore::store::STORE_IDENT_KEY)
+            .get_state(0, rfengine::STORE_IDENT_KEY)
             .unwrap_or_default();
         store_ident.merge_from_bytes(data.chunk()).unwrap();
         if store_ident.cluster_id != cluster_id {
@@ -544,7 +544,7 @@ impl StatusServer {
     ) -> Result<()> {
         let mut store_ident = StoreIdent::default();
         let data = rfengine
-            .get_state(0, rfstore::store::STORE_IDENT_KEY)
+            .get_state(0, rfengine::STORE_IDENT_KEY)
             .unwrap_or_default();
         store_ident.merge_from_bytes(data.chunk()).unwrap();
         if store_ident.cluster_id != cluster_id {

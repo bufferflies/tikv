@@ -1440,6 +1440,7 @@ dependencies = [
  "bytes",
  "chrono",
  "clap 3.2.22",
+ "engine_traits",
  "etcd-client 0.10.2",
  "futures 0.3.15",
  "grpcio",
@@ -5158,6 +5159,7 @@ checksum = "18eb52b6664d331053136fcac7e4883bdc6f5fc04a6aab3b0f75eafb80ab88b3"
 name = "rfengine"
 version = "0.0.1"
 dependencies = [
+ "api_version",
  "byteorder",
  "bytes",
  "crc32c",
@@ -5174,6 +5176,7 @@ dependencies = [
  "protobuf",
  "raft",
  "raft-proto",
+ "rand 0.8.3",
  "rfenginepb",
  "serde",
  "serde_derive",
@@ -5185,7 +5188,6 @@ dependencies = [
  "thiserror",
  "tikv_alloc",
  "tikv_util",
- "zstd-sys",
 ]
 
 [[package]]

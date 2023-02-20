@@ -34,7 +34,7 @@ use raftstore::{
         util::{is_initial_msg, is_region_initialized},
     },
 };
-use rfengine::TRUNCATE_ALL_INDEX;
+use rfengine::{REGION_META_KEY_BYTE, TRUNCATE_ALL_INDEX};
 use sst_importer::SstImporter;
 use tikv_util::{
     box_err,

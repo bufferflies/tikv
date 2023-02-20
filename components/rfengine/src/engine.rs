@@ -17,11 +17,11 @@ use std::{
 
 use bytes::{Buf, Bytes};
 use dashmap::mapref::one::Ref;
-use engine_traits::ObjectStorage;
+use engine_traits::{GetObjectOptions, ObjectStorage};
 use file_system::open_direct_file;
 use protobuf::Message;
 use raft_proto::{eraftpb, eraftpb::Entry};
-use rfenginepb::ClusterBackupMeta;
+use rfenginepb::{ClusterBackupMeta, StoreBackupMeta, StoreRaftLogBackupMeta};
 use tikv_util::{info, mpsc::Sender, time::Instant, warn};
 
 use crate::{
@@ -508,11 +508,94 @@ impl RfEngineCore {
     }
 }
 
+fn restore_all_raft_logs(
+    object_storage: &Arc<dyn ObjectStorage>,
+    store_meta: &StoreBackupMeta,
+    dir: &Path,
+) {
+    let store_id = store_meta.store_id;
+    let raft_file_key = store_raft_log_file_key(store_id, store_meta.get_manifest().epoch_id);
+    let raft_file = object_storage
+        .get_objects(vec![(raft_file_key, GetObjectOptions::default())])
+        .unwrap();
+    let (_, rlog_data) = raft_file.first().unwrap();
+    let mut raft_meta = StoreRaftLogBackupMeta::default();
+    let size = rlog_data.len();
+    debug_assert!(size as u64 > store_meta.raft_meta_start_off);
+    raft_meta
+        .merge_from_bytes(&rlog_data.chunk()[store_meta.raft_meta_start_off as usize..size])
+        .unwrap();
+    for (_, keyspace_meta) in raft_meta.raft_logs {
+        for file in keyspace_meta.get_files() {
+            let path = raft_log_file_name(dir, file.peer_id, file.first_index, file.last_index);
+            fs::write(
+                path,
+                &rlog_data.chunk()[file.start_off as usize..file.end_off as usize],
+            )
+            .unwrap();
+        }
+    }
+}
+
+fn restore_keyspace_raft_logs(
+    object_storage: &Arc<dyn ObjectStorage>,
+    store_meta: &StoreBackupMeta,
+    dir: &Path,
+    keyspace_id: u32,
+) {
+    let store_id = store_meta.store_id;
+    let raft_file_key = store_raft_log_file_key(store_id, store_meta.get_manifest().epoch_id);
+    let option = GetObjectOptions {
+        start_off: store_meta.raft_meta_start_off,
+        end_off: None,
+    };
+    let raft_meta_data = object_storage
+        .get_objects(vec![(raft_file_key.clone(), option)])
+        .unwrap();
+    let (_, rlog_meta_data) = raft_meta_data.first().unwrap();
+    let mut raft_meta = StoreRaftLogBackupMeta::default();
+    raft_meta.merge_from_bytes(rlog_meta_data.chunk()).unwrap();
+    let keyspace_meta = raft_meta
+        .raft_logs
+        .get(&keyspace_id)
+        .expect("keyspace is not found in backup files");
+    let raft_files = keyspace_meta.get_files();
+    info!(
+        "Restore {} raft files for keyspace {}",
+        raft_files.len(),
+        keyspace_id
+    );
+    if raft_files.is_empty() {
+        return;
+    }
+    let option = GetObjectOptions {
+        start_off: raft_files.first().unwrap().start_off,
+        end_off: Some(raft_files.last().unwrap().end_off),
+    };
+    let keyspace_raft_data = object_storage
+        .get_objects(vec![(raft_file_key, option)])
+        .unwrap();
+    let (_, keyspace_raft_data) = keyspace_raft_data.first().unwrap();
+    let mut cur_offset = 0;
+    for file in raft_files {
+        let path = raft_log_file_name(dir, file.peer_id, file.first_index, file.last_index);
+        let data_len = (file.end_off - file.start_off) as usize;
+        fs::write(
+            path,
+            &keyspace_raft_data.chunk()[cur_offset..cur_offset + data_len],
+        )
+        .unwrap();
+        cur_offset += data_len;
+    }
+}
+
+// If keyspace is none, restore all keyspaces, else, only restore given one.
 pub fn restore(
-    object_storage: Box<dyn ObjectStorage>,
+    object_storage: Arc<dyn ObjectStorage>,
     cluster_backup: &ClusterBackupMeta,
     store_id: u64,
     dir: &Path,
+    keyspace: Option<u32>,
 ) {
     let store_meta = cluster_backup
         .get_stores()
@@ -522,9 +605,14 @@ pub fn restore(
     maybe_create_wal_files(dir).unwrap();
     let wal_chunks = store_meta.get_wal_chunks();
     if !wal_chunks.is_empty() {
-        let keys: Vec<String> = wal_chunks
+        let keys: Vec<(String, GetObjectOptions)> = wal_chunks
             .iter()
-            .map(|chunk| wal_file_key(store_id, chunk.epoch, chunk.start_off, chunk.end_off))
+            .map(|chunk| {
+                (
+                    wal_file_key(store_id, chunk.epoch, chunk.start_off, chunk.end_off),
+                    GetObjectOptions::default(),
+                )
+            })
             .collect();
         let mut objects = object_storage.get_objects(keys).unwrap();
         objects.sort_by(|(a, _), (b, _)| a.cmp(b));
@@ -539,24 +627,11 @@ pub fn restore(
         file.write_at(&eof, end_off).unwrap();
         file.sync_data().unwrap();
     }
-    let mut key_path_map = HashMap::new();
-    for peer in store_meta.get_manifest().get_peers() {
-        for file in peer.get_files() {
-            let rlog_key = raft_log_file_key(
-                store_id,
-                peer.get_peer_id(),
-                file.get_first_index(),
-                file.get_last_index(),
-            );
-            let path = raft_log_file_name(dir, peer.peer_id, file.first_index, file.last_index);
-            key_path_map.insert(rlog_key, path);
+    match keyspace {
+        Some(keyspace_id) => {
+            restore_keyspace_raft_logs(&object_storage, store_meta, dir, keyspace_id)
         }
-    }
-    let keys: Vec<String> = key_path_map.keys().cloned().collect();
-    let objects = object_storage.get_objects(keys).unwrap();
-    for (key, data) in objects {
-        let path = key_path_map.get(&key).unwrap();
-        fs::write(path, &data).unwrap();
+        None => restore_all_raft_logs(&object_storage, store_meta, dir),
     }
     let manifest_file = OpenOptions::new()
         .create(true)

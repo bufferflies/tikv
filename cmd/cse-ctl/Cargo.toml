@@ -9,6 +9,7 @@ byteorder = "1.2"
 bytes = "1.0"
 chrono = "0.4"
 clap = { version = "3.2", features = ["derive"] }
+engine_traits = { path = "../../components/engine_traits", default-features = false }
 etcd-client = { git = "https://github.com/pingcap/etcd-client", rev = "14a6f8731f1890d5fd2f6e16a9f0d0a306b0599e", features = ["pub-response-field", "tls-openssl-vendored"] }
 futures = "0.3"
 grpcio = { version = "0.10", default-features = false, features = ["openssl-vendored", "protobuf-codec"] }

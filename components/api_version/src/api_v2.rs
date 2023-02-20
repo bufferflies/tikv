@@ -21,6 +21,7 @@ pub const DEFAULT_KEY_SPACE_ID: [u8; 3] = [0, 0, 0]; // reserve 3 bytes for key 
 pub const DEFAULT_KEY_SPACE_ID_END: [u8; 3] = [0, 0, 1];
 pub const KEYSPACE_ID_LEN: usize = DEFAULT_KEY_SPACE_ID.len();
 pub const KEYSPACE_PREFIX_LEN: usize = KEYSPACE_ID_LEN + 1;
+pub const UNKOWN_KEYSPACE_ID: [u8; 3] = [0xFF, 0xFF, 0xFF];
 
 pub const TIDB_RANGES: &[(&[u8], &[u8])] = &[
     (&[TIDB_META_KEY_PREFIX], &[TIDB_META_KEY_PREFIX + 1]),

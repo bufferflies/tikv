@@ -5,7 +5,6 @@ use std::{
     fmt::{Debug, Display, Formatter},
 };
 
-use bytes::{BufMut, Bytes, BytesMut};
 use kvproto::{metapb, raft_cmdpb::RaftCmdRequest};
 use protobuf::Message;
 use slog::{Key, Record, Serializer};
@@ -249,29 +248,8 @@ impl RegionIDVer {
     }
 }
 
-pub(crate) const RAFT_STATE_KEY_BYTE: u8 = 1;
-pub(crate) const REGION_META_KEY_BYTE: u8 = 2;
-pub(crate) const REGION_META_KEY_PREFIX: &[u8] = &[REGION_META_KEY_BYTE];
-pub const STORE_IDENT_KEY: &[u8] = &[3];
-pub(crate) const PREPARE_BOOTSTRAP_KEY: &[u8] = &[4];
-pub(crate) const KV_ENGINE_META_KEY: &[u8] = &[5];
-pub(crate) const RAFT_TRUNCATED_STATE_KEY: &[u8] = &[6];
 pub(crate) const EMPTY_KEY: &[u8] = &[];
 pub(crate) const RAW_INITIAL_END_KEY: &[u8] = &[255, 255, 255, 255, 255, 255, 255, 255];
-
-pub(crate) fn raft_state_key(version: u64) -> Bytes {
-    let mut key = BytesMut::with_capacity(5);
-    key.put_u8(RAFT_STATE_KEY_BYTE);
-    key.put_u32(version as u32);
-    key.freeze()
-}
-
-pub(crate) fn region_state_key(version: u64) -> Bytes {
-    let mut key = BytesMut::with_capacity(5);
-    key.put_u8(REGION_META_KEY_BYTE);
-    key.put_u32(version as u32);
-    key.freeze()
-}
 
 // Get the `start_key` of current region in raw form.
 pub(crate) fn raw_start_key(region: &metapb::Region) -> Vec<u8> {

@@ -43,6 +43,7 @@ message StoreBackupMeta {
     uint64 store_id = 1;
     ChangeSet manifest = 2;
     repeated WalChunk wal_chunks = 3;
+    uint64 raft_meta_start_off = 4;
 }
 
 message WalChunk {
@@ -60,4 +61,27 @@ message ClusterBackupMeta {
     // use map for update convenience
     map<bytes, bytes> keyspace_meta = 6;
     int64 meta_revision = 7;
+}
+
+message RaftLogBackupFile {
+    uint64 peer_id = 1;
+    uint64 first_index = 2;
+    uint64 last_index = 3;
+    uint64 start_off = 4;
+    uint64 end_off = 5;
+}
+
+message KeySpaceBackupMeta {
+    uint32 keyspace_id= 1;
+    repeated RaftLogBackupFile files = 2;
+}
+
+message RaftLogMetaHeader {
+    uint64 version = 1;
+}
+
+message StoreRaftLogBackupMeta {
+    RaftLogMetaHeader header = 1;
+    // keyspace_id -> KeySpaceBackupMeta
+    map<uint32, KeySpaceBackupMeta> raft_logs = 2;
 }

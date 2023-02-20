@@ -7,16 +7,15 @@ use kvproto::{
 };
 use protobuf::{Message, RepeatedField};
 use raftstore::store::util;
+use rfengine::{
+    raft_state_key, region_state_key, KV_ENGINE_META_KEY, PREPARE_BOOTSTRAP_KEY, STORE_IDENT_KEY,
+};
 use tikv_util::box_err;
 
-use super::{
-    peer_storage::{write_initial_raft_state, INIT_EPOCH_CONF_VER, INIT_EPOCH_VER},
-    PREPARE_BOOTSTRAP_KEY,
-};
+use super::peer_storage::{write_initial_raft_state, INIT_EPOCH_CONF_VER, INIT_EPOCH_VER};
 use crate::{
     store::{
-        raft_state_key, region_state_key, write_peer_state, Engines, EMPTY_KEY, KV_ENGINE_META_KEY,
-        RAFT_INIT_LOG_INDEX, RAFT_INIT_LOG_TERM, STORE_IDENT_KEY, TERM_KEY,
+        write_peer_state, Engines, EMPTY_KEY, RAFT_INIT_LOG_INDEX, RAFT_INIT_LOG_TERM, TERM_KEY,
     },
     Result,
 };
