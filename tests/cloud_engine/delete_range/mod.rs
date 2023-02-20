@@ -66,6 +66,7 @@ fn test_delete_range_recover() {
         cluster.start_node(stop_node_id, |_, _| {});
         thread::sleep(Duration::from_secs(1));
     }
+    cluster.stop();
 }
 
 fn new_destroy_range_req(prefix: &[u8]) -> UnsafeDestroyRangeRequest {
