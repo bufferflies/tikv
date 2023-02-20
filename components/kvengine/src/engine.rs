@@ -2,10 +2,12 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    env,
     fmt::{Debug, Display, Formatter},
     iter::{FromIterator, Iterator},
     ops::Deref,
     path::PathBuf,
+    str::FromStr,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -158,7 +160,9 @@ impl Engine {
                 }
             }
         }
-        let concurrency = num_cpus::get();
+        let concurrency = usize::from_str(&env::var("RECOVERY_CONCURRENCY").unwrap_or_default())
+            .unwrap_or_else(|_| std::cmp::min(num_cpus::get() * 8, 64));
+        info!("recovery concurrency {}", concurrency);
         let (token_tx, token_rx) = tikv_util::mpsc::bounded(concurrency);
         for _ in 0..concurrency {
             token_tx.send(true).unwrap();

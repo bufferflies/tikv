@@ -29,7 +29,7 @@ use tokio::runtime::Runtime;
 
 use crate::dfs::{metrics::*, Options, DFS};
 
-const MAX_RETRY_COUNT: u32 = 7;
+const MAX_RETRY_COUNT: u32 = 9;
 const RETRY_SLEEP_MS: u64 = 500;
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
 const DISPATCH_TIMEOUT: Duration = Duration::from_secs(60);
@@ -544,6 +544,8 @@ impl DFS for S3FS {
                 let mut req = self.new_request("PUT", &key);
                 req.add_header("x-amz-copy-source", &format!("{}/{}", self.bucket, key));
                 req.add_header("x-amz-metadata-directive", "REPLACE");
+                req.add_header("x-amz-tagging", "deleted=true");
+                req.add_header("x-amz-tagging-directive", "REPLACE");
                 if let Err(err) = self.dispatch(req, CopyObjectError::from_response).await {
                     if retry_cnt < MAX_RETRY_COUNT {
                         retry_cnt += 1;
@@ -560,7 +562,11 @@ impl DFS for S3FS {
                 }
                 copied = true;
             }
-            // put tagging
+            if !self.hostname.contains("ksyuncs.com") {
+                return;
+            }
+            // ks3 doesn't support copy object with tagging, workaround to send another request.
+            // TODO: remove it when KS3 fixed the compatibility issue.
             let mut req = self.new_request("PUT", &key);
             let mut params = Params::new();
             params.put_key("tagging");

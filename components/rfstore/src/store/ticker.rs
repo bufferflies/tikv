@@ -45,7 +45,7 @@ impl Ticker {
         let schedules = vec![
             TickSchedule::new(config.pd_store_heartbeat_tick_interval.as_millis() / base_interval),
             TickSchedule::new(config.update_safe_ts_interval.as_millis() / base_interval),
-            TickSchedule::new(config.local_file_gc_timeout.as_millis() / base_interval),
+            TickSchedule::new(config.local_file_gc_tick_interval.as_millis() / base_interval),
         ];
         Self { tick: 0, schedules }
     }
