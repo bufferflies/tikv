@@ -34,4 +34,4 @@ tempfile = "3.0"
 thiserror = "1.0"
 tikv_alloc = { path = "../tikv_alloc" }
 tikv_util = { path = "../tikv_util" }
-zstd-sys = "2.0.1"
+zstd-sys = "2.0.7"
