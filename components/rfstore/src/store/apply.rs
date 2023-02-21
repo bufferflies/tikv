@@ -231,8 +231,6 @@ pub(crate) struct Applier {
 
     pub(crate) paused_for_rollback_merge: bool,
 
-    pub(crate) skip_rollback_merge: bool,
-
     pub(crate) commit_merge_parent_snaps: VecDeque<kvenginepb::Snapshot>,
 
     pub(crate) commit_merge_source_tables: HashMap<u64, ChangeSet>,
@@ -889,13 +887,6 @@ impl Applier {
         ctx: &mut ApplyContext,
         request: &AdminRequest,
     ) -> Result<(AdminResponse, ApplyResult)> {
-        if self.skip_rollback_merge {
-            self.skip_rollback_merge = false;
-            return Ok((
-                AdminResponse::default(),
-                ApplyResult::None,
-            ))
-        }
         ctx.engine.rollback_merge(
             self.region_id(),
             self.region.get_region_epoch().version,
@@ -1317,9 +1308,6 @@ impl Applier {
             }
             ApplyMsg::PrepareRollbackMerge => {
                 self.handle_prepare_rollback_merge(ctx);
-            }
-            ApplyMsg::SkipRollbackMerge => {
-                self.skip_rollback_merge = true;
             }
         }
     }

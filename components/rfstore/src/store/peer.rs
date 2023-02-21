@@ -1832,9 +1832,7 @@ impl Peer {
     ) {
         let commit = req.get_admin_request().get_rollback_merge().get_commit();
         if self.pending_merge_state.is_none() {
-            error!("{} pending merge state is none", self.tag());
-            ctx.apply_msgs.msgs.push(ApplyMsg::SkipRollbackMerge);
-            return;
+            panic!("{} pending merge state is none", self.tag());
         }
         let pending_commit = self.pending_merge_state.as_ref().unwrap().get_commit();
         if commit != 0 && pending_commit != commit {
@@ -3018,6 +3016,9 @@ impl Peer {
         ctx: &mut RaftContext,
         req: &RaftCmdRequest,
     ) -> Result<Either<u64, u64>> {
+        if self.pending_merge_state.is_some() {
+            return Err(Error::ProposalInMergingMode(self.region_id));
+        }
         if self.raft_group.raft.pending_conf_index > self.get_store().applied_index() {
             info!(
                 "there is a pending conf change, try later";
