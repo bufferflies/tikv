@@ -204,6 +204,12 @@ where
             if header.has_error() {
                 pb_error_inc(label, header.get_error());
                 resp.set_error(header.take_error());
+            } else {
+                for sst in ssts.iter() {
+                    if let Err(e) = importer.delete(sst) {
+                        warn!("Fail to clean ingested sst file {:?}, err {:?}", sst, e);
+                    }
+                }
             }
             Ok(resp)
         }
