@@ -36,10 +36,11 @@ fn new_test_engine() -> (Engine, mpsc::Sender<ApplyTask>) {
         sender: listener_tx,
     });
     let rate_limiter = Arc::new(IORateLimiter::new_for_test());
+    let mut meta_iter = tester.clone();
     let engine = Engine::open(
         tester.fs.clone(),
         tester.opts.clone(),
-        tester.clone(),
+        &mut meta_iter,
         tester.clone(),
         tester.core.clone(),
         meta_change_listener,
@@ -371,7 +372,7 @@ struct EngineTesterCore {
 }
 
 impl MetaIterator for EngineTester {
-    fn iterate<F>(&self, mut f: F) -> Result<()>
+    fn iterate<F>(&mut self, mut f: F) -> Result<()>
     where
         F: FnMut(kvenginepb::ChangeSet),
     {

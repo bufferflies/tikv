@@ -80,7 +80,7 @@ pub trait RecoverHandler: Clone + Send {
 }
 
 pub trait MetaIterator {
-    fn iterate<F>(&self, f: F) -> Result<()>
+    fn iterate<F>(&mut self, f: F) -> Result<()>
     where
         F: FnMut(kvenginepb::ChangeSet);
 

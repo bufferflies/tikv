@@ -2664,6 +2664,9 @@ pub struct TiKvConfig {
     pub memory_usage_high_water: f64,
 
     #[online_config(skip)]
+    pub black_list_path: String,
+
+    #[online_config(skip)]
     pub log: LogConfig,
 
     #[online_config(submodule)]
@@ -2775,6 +2778,7 @@ impl Default for TiKvConfig {
             raftdb: RaftDbConfig::default(),
             raft_engine: RaftEngineConfig::default(),
             rfengine: RfEngineConfig::default(),
+            black_list_path: "".to_owned(),
             storage: StorageConfig::default(),
             security: SecurityConfig::default(),
             import: ImportConfig::default(),

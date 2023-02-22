@@ -248,7 +248,10 @@ impl RaftBatchSystem {
         let mut local_states = vec![];
         let mut last_peer_id: u64 = 0;
         let rfengine = &ctx.engines.raft;
-        let regions_to_peers = rfengine.get_region_peer_map();
+        let mut regions_to_peers = rfengine.get_region_peer_map();
+        if let Some(black_list) = store_meta.black_list.as_ref() {
+            regions_to_peers.retain(|&region_id, _| !black_list.is_region_blocked(region_id));
+        }
         let mut tomb_stone_peers = vec![];
         for (_, peer_id) in regions_to_peers {
             rfengine.iterate_peer_states(peer_id, true, |key, val| {
@@ -329,6 +332,8 @@ pub struct StoreMeta {
     /// dropped if there is no such Region in this store now. So the messages are recorded temporarily and
     /// will be handled later.
     pub pending_msgs: RingQueue<RaftMessage>,
+
+    pub black_list: Option<BlackList>,
 }
 
 impl StoreMeta {
@@ -339,6 +344,7 @@ impl StoreMeta {
             cop_host: None,
             readers: Arc::new(dashmap::DashMap::new()),
             pending_msgs: RingQueue::with_capacity(vote_capacity),
+            black_list: None,
         }
     }
 
@@ -923,6 +929,18 @@ impl<'a> StoreMsgHandler<'a> {
 
     fn on_raft_message(&mut self, msg: RaftMessage) {
         let region_id = msg.get_region_id();
+        if let Some(black_list) = self.ctx.store_meta.black_list.as_ref() {
+            if black_list.is_region_blocked(region_id) {
+                debug!("region {} blocked by black list", region_id);
+                return;
+            }
+            if let Some(keyspace_id) = get_keyspace_id(msg.get_start_key(), msg.get_end_key()) {
+                if black_list.is_keyspace_blocked(keyspace_id) {
+                    debug!("keyspace {} blocked by black list", keyspace_id);
+                    return;
+                }
+            }
+        }
         let region_epoch = msg.get_region_epoch();
         let tag = PeerTag::new(
             self.store.id,

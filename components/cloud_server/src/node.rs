@@ -176,6 +176,7 @@ impl Node {
             )));
             self.bootstrap_cluster(&engines, first_region)?;
         }
+        store_meta.black_list = engines.black_list.clone();
 
         // Put store only if the cluster is bootstrapped.
         info!("put store to PD"; "store" => ?&self.store);

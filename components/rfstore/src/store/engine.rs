@@ -11,7 +11,7 @@ use tikv_util::{
     mpsc::{Receiver, Sender},
 };
 
-use crate::store::StoreMsg;
+use crate::store::{BlackList, StoreMsg};
 
 #[derive(Clone)]
 pub struct Engines {
@@ -19,6 +19,7 @@ pub struct Engines {
     pub raft: rfengine::RfEngine,
     #[allow(clippy::type_complexity)]
     pub meta_change_channel: Arc<Mutex<Option<(Sender<StoreMsg>, Receiver<StoreMsg>)>>>,
+    pub black_list: Option<BlackList>,
 }
 
 impl Engines {
@@ -26,11 +27,13 @@ impl Engines {
         kv: kvengine::Engine,
         raft: rfengine::RfEngine,
         meta_change_channel: (Sender<StoreMsg>, Receiver<StoreMsg>),
+        black_list: Option<BlackList>,
     ) -> Self {
         Self {
             kv,
             raft,
             meta_change_channel: Arc::new(Mutex::new(Some(meta_change_channel))),
+            black_list,
         }
     }
 }

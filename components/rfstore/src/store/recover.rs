@@ -1,8 +1,10 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, iter::FromIterator, sync::Arc};
 
+use api_version::{ApiV2, KeyMode, KvFormat};
 use bytes::Buf;
+use collections::HashSet;
 use kvengine::{Engine, Shard, ShardMeta};
 use kvenginepb::ChangeSet;
 use kvproto::{metapb, raft_cmdpb::RaftCmdRequest, raft_serverpb};
@@ -22,6 +24,50 @@ pub struct RecoverHandler {
     rf_engine: rfengine::RfEngine,
     store_id: u64,
     region_peer_map: HashMap<u64, u64>,
+    black_list: Option<BlackList>,
+}
+
+pub const BLACK_LIST_FILE: &str = "black_list_file";
+
+#[derive(Clone)]
+pub struct BlackList {
+    keyspace_ids: HashSet<u32>,
+    region_ids: HashSet<u64>,
+}
+
+impl BlackList {
+    pub fn new(mut keyspace_ids: Vec<u32>, mut region_ids: Vec<u64>) -> Self {
+        Self {
+            keyspace_ids: HashSet::from_iter(keyspace_ids.drain(..)),
+            region_ids: HashSet::from_iter(region_ids.drain(..)),
+        }
+    }
+
+    pub(crate) fn check_blocked(&mut self, region_id: u64, start: &[u8], end: &[u8]) -> bool {
+        if let Some(keyspace_id) = get_keyspace_id(start, end) {
+            if self.keyspace_ids.contains(&keyspace_id) {
+                self.region_ids.insert(region_id);
+            }
+        }
+        self.region_ids.contains(&region_id)
+    }
+
+    pub(crate) fn is_region_blocked(&self, region_id: u64) -> bool {
+        self.region_ids.contains(&region_id)
+    }
+
+    pub(crate) fn is_keyspace_blocked(&self, keyspace_id: u32) -> bool {
+        self.keyspace_ids.contains(&keyspace_id)
+    }
+}
+
+pub(crate) fn get_keyspace_id(start: &[u8], end: &[u8]) -> Option<u32> {
+    let start_mode = ApiV2::parse_key_mode(start);
+    let end_mode = ApiV2::parse_key_mode(end);
+    if start_mode != KeyMode::Txn || end_mode != KeyMode::Txn {
+        return None;
+    }
+    Some(ApiV2::get_u32_keyspace_id(ApiV2::get_keyspace_id(start)))
 }
 
 impl RecoverHandler {
@@ -35,7 +81,16 @@ impl RecoverHandler {
             rf_engine,
             store_id,
             region_peer_map,
+            black_list: None,
         }
+    }
+
+    pub fn set_black_list(&mut self, black_list: BlackList) {
+        self.black_list = Some(black_list)
+    }
+
+    pub fn take_black_list(&mut self) -> Option<BlackList> {
+        self.black_list.take()
     }
 
     fn load_region_meta(&self, shard_id: u64, shard_ver: u64) -> (metapb::Region, u64) {
@@ -201,7 +256,7 @@ fn get_async_change_set(custom: &CustomRaftLog<'_>) -> Option<ChangeSet> {
 }
 
 impl kvengine::MetaIterator for RecoverHandler {
-    fn iterate<F>(&self, mut f: F) -> kvengine::Result<()>
+    fn iterate<F>(&mut self, mut f: F) -> kvengine::Result<()>
     where
         F: FnMut(ChangeSet),
     {
@@ -211,6 +266,13 @@ impl kvengine::MetaIterator for RecoverHandler {
                 let mut cs = kvenginepb::ChangeSet::new();
                 if let Err(e) = cs.merge_from_bytes(&val) {
                     return Err(kvengine::Error::ErrOpen(e.to_string()));
+                }
+                if let Some(black_list) = self.black_list.as_mut() {
+                    let snap = cs.get_snapshot();
+                    if black_list.check_blocked(cs.shard_id, snap.get_start(), snap.get_end()) {
+                        warn!("region {} blocked by black list", cs.shard_id);
+                        continue;
+                    }
                 }
                 f(cs);
             }

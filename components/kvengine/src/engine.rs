@@ -61,7 +61,7 @@ impl Engine {
     pub fn open(
         fs: Arc<dyn dfs::DFS>,
         opts: Arc<Options>,
-        meta_iter: impl MetaIterator,
+        meta_iter: &mut impl MetaIterator,
         recoverer: impl RecoverHandler + 'static,
         id_allocator: Arc<dyn IDAllocator>,
         meta_change_listener: Box<dyn MetaChangeListener>,
@@ -220,7 +220,7 @@ pub struct EngineCore {
 }
 
 impl EngineCore {
-    fn read_meta(&self, meta_iter: impl MetaIterator) -> Result<HashMap<u64, ShardMeta>> {
+    fn read_meta(&self, meta_iter: &mut impl MetaIterator) -> Result<HashMap<u64, ShardMeta>> {
         let mut metas = HashMap::new();
         let engine_id = meta_iter.engine_id();
         meta_iter.iterate(|cs| {

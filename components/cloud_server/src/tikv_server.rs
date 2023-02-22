@@ -46,7 +46,8 @@ use raftstore::{
 use rfengine::RfEngine;
 use rfstore::{
     store::{
-        Engines, LocalReader, MetaChangeListener, RaftBatchSystem, StoreMeta, PENDING_MSG_CAP,
+        BlackList, Engines, LocalReader, MetaChangeListener, RaftBatchSystem, StoreMeta,
+        PENDING_MSG_CAP,
     },
     RaftRouter, ServerRaftStoreRouter,
 };
@@ -920,7 +921,10 @@ impl TiKVServer {
         kv_opts.allow_fallback_local = conf.dfs.allow_fallback_local;
         let opts = Arc::new(kv_opts);
         let recoverer = rfstore::store::RecoverHandler::new(rf_engine.clone());
-        let meta_iter = recoverer.clone();
+        let mut meta_iter = recoverer.clone();
+        if let Some(black_list) = load_black_list(&conf.black_list_path) {
+            meta_iter.set_black_list(black_list);
+        }
         let id_allocator = Arc::new(PdIDAllocator { pd });
         let (sender, receiver) = tikv_util::mpsc::unbounded();
         let meta_change_listener = Box::new(MetaChangeListener {
@@ -929,7 +933,7 @@ impl TiKVServer {
         let kv_engine = kvengine::Engine::open(
             dfs,
             opts,
-            meta_iter,
+            &mut meta_iter,
             recoverer,
             id_allocator,
             meta_change_listener,
@@ -937,8 +941,35 @@ impl TiKVServer {
         )
         .unwrap();
         unset_panic_mark();
-        Engines::new(kv_engine, rf_engine, (sender, receiver))
+        Engines::new(
+            kv_engine,
+            rf_engine,
+            (sender, receiver),
+            meta_iter.take_black_list(),
+        )
     }
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug, Default)]
+#[serde(default)]
+struct BlackListConfig {
+    keyspace_ids: Vec<u32>,
+    region_ids: Vec<u64>,
+}
+
+fn load_black_list(black_list_path: &str) -> Option<BlackList> {
+    if black_list_path.is_empty() {
+        return None;
+    }
+    if let Ok(data) = fs::read(black_list_path) {
+        match serde_json::from_slice::<BlackListConfig>(&data) {
+            Ok(config) => return Some(BlackList::new(config.keyspace_ids, config.region_ids)),
+            Err(err) => {
+                error!("failed to load black list file {:?}", err);
+            }
+        }
+    }
+    None
 }
 
 struct PdIDAllocator {
