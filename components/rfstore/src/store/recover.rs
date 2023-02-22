@@ -23,7 +23,7 @@ use crate::store::{
 pub struct RecoverHandler {
     rf_engine: rfengine::RfEngine,
     store_id: u64,
-    region_peer_map: HashMap<u64, u64>,
+    region_peer_map: Arc<HashMap<u64, u64>>,
     black_list: Option<BlackList>,
 }
 
@@ -76,7 +76,7 @@ impl RecoverHandler {
             Some(ident) => ident.store_id,
             None => 0,
         };
-        let region_peer_map = rf_engine.get_region_peer_map();
+        let region_peer_map = Arc::new(rf_engine.get_region_peer_map());
         Self {
             rf_engine,
             store_id,
