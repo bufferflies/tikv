@@ -39,7 +39,7 @@ pub use read_queue::*;
 pub use recover::*;
 pub use rlog::*;
 pub use snapshot::*;
-pub(crate) use state::*;
+pub use state::*;
 pub use store_fsm::*;
 pub use ticker::*;
 pub use transport::*;

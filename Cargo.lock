@@ -1454,6 +1454,7 @@ dependencies = [
  "protobuf",
  "rfengine",
  "rfenginepb",
+ "rfstore",
  "security",
  "serde",
  "serde_derive",
