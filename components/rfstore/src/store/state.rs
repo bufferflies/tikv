@@ -38,19 +38,19 @@ impl RaftApplyState {
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
-pub struct RaftState {
-    pub term: u64,
-    pub vote: u64,
-    pub commit: u64,
-    pub last_index: u64,
+pub(crate) struct RaftState {
+    pub(crate) term: u64,
+    pub(crate) vote: u64,
+    pub(crate) commit: u64,
+    pub(crate) last_index: u64,
     /// `ShardMeta` is changed by preprocessed committed entries. When recovering, we can't replay
     /// entries from applied_index to committed_index directly, because some committed entries may
     /// not be preprocessed, so we record `last_preprocessed_index` to replay to it.
-    pub last_preprocessed_index: u64,
+    pub(crate) last_preprocessed_index: u64,
 }
 
 impl RaftState {
-    pub fn marshal(&self) -> Bytes {
+    pub(crate) fn marshal(&self) -> Bytes {
         let mut buf = BytesMut::with_capacity(32);
         buf.put_u64_le(self.term);
         buf.put_u64_le(self.vote);
@@ -60,7 +60,7 @@ impl RaftState {
         buf.freeze()
     }
 
-    pub fn unmarshal(&mut self, mut data: &[u8]) {
+    pub(crate) fn unmarshal(&mut self, mut data: &[u8]) {
         self.term = data.get_u64_le();
         self.vote = data.get_u64_le();
         self.commit = data.get_u64_le();

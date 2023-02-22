@@ -23,7 +23,6 @@ pd_client = { path = "../../components/pd_client", default-features = false }
 protobuf = "2.8"
 rfengine = { path = "../../components/rfengine" }
 rfenginepb = { path = "../../components/rfenginepb" }
-rfstore = { path = "../../components/rfstore" }
 security = { path = "../../components/security", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_derive = "1.0"

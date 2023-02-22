@@ -30,7 +30,7 @@ use tikv_util::{mpsc::Receiver, time::Instant};
 
 use crate::{log_batch::RaftLogBlock, manifest::Manifest, write_batch::PeerBatch, *};
 
-const MAX_WAL_CHUNK_SIZE: u64 = 64 * 1024 * 1024;
+const MAX_WAL_CHUNK_SIZE: u64 = 8 * 1024 * 1024;
 pub(crate) struct Worker {
     dir: PathBuf,
     manifest: Manifest,

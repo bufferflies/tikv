@@ -1,8 +1,6 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{
-    collections::HashMap, path::PathBuf, str::FromStr, sync::mpsc::SyncSender, time::Duration,
-};
+use std::{path::PathBuf, str::FromStr, sync::mpsc::SyncSender, time::Duration};
 
 use bytes::Bytes;
 use clap::Args;
@@ -13,8 +11,7 @@ use kvengine::dfs::{self, DFSConfig, S3FS};
 use kvproto::metapb::Store;
 use pd_client::PdClient;
 use protobuf::Message;
-use rfenginepb::{ClusterBackupMeta, PeerMeta, StoreBackupMeta};
-use rfstore::store::RaftState;
+use rfenginepb::{ClusterBackupMeta, StoreBackupMeta};
 use security::SecurityConfig;
 use slog_global::{error, info, warn};
 
@@ -238,7 +235,6 @@ pub fn backup_cluster(
     cluster_backup_meta.set_safe_ts(safe_ts);
     let stores = get_all_stores_except_tiflash(pd_client)?;
     check_backup_meta_consistency(&cluster_backup_meta, &stores)?;
-    dedup_peer_meta(&mut cluster_backup_meta);
     info!(
         "cluster backup cluster_id:{}, backup_ts:{}, alloc_id:{}, safe_ts:{}, num_stores:{}",
         cluster_backup_meta.cluster_id,
@@ -480,46 +476,6 @@ async fn backup_pd_keyspace_meta(
     Ok(())
 }
 
-fn get_raft_state(peer_meta: &PeerMeta) -> RaftState {
-    let mut raft_state = RaftState::default();
-    let key_prefix = vec![rfengine::RAFT_STATE_KEY_BYTE];
-    // state is got from BTree iter, the last one is latest.
-    let state = peer_meta
-        .get_states()
-        .iter()
-        .rev()
-        .find(|s| s.key.starts_with(&key_prefix))
-        .unwrap();
-    raft_state.unmarshal(state.get_value());
-    raft_state
-}
-
-fn dedup_peer_meta(cluster_meta: &mut ClusterBackupMeta) {
-    // region_id -> (store_id, latest commit index)
-    let mut peer_map: HashMap<u64, (u64, u64)> = HashMap::default();
-    let stores = cluster_meta.mut_stores();
-    for store in stores.iter() {
-        for peer in store.get_manifest().get_peers().iter() {
-            let commit_index = get_raft_state(peer).commit;
-            peer_map
-                .entry(peer.region_id)
-                .and_modify(|item| {
-                    if item.1 < commit_index {
-                        *item = (store.store_id, commit_index);
-                    }
-                })
-                .or_insert((store.store_id, commit_index));
-        }
-    }
-    for store in stores.iter_mut() {
-        if store.has_manifest() {
-            let mut new_peers = store.mut_manifest().take_peers().to_vec();
-            new_peers.retain(|p| peer_map.get(&p.region_id).unwrap().0 == store.store_id);
-            store.mut_manifest().set_peers(new_peers.into());
-        }
-    }
-}
-
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug, Default)]
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
@@ -557,14 +513,10 @@ fn get_backup_config_from_args(args: &BackupArgs) -> BackupConfig {
 
 #[cfg(test)]
 mod tests {
-    use bytes::Buf;
     use kvproto::metapb::Store;
-    use rfenginepb::{
-        ChangeSet, ClusterBackupMeta, PeerMeta, PeerState, StoreBackupMeta, WalChunk,
-    };
-    use rfstore::store::RaftState;
+    use rfenginepb::{ChangeSet, ClusterBackupMeta, StoreBackupMeta, WalChunk};
 
-    use super::{check_backup_meta_consistency, dedup_peer_meta, merge_store_backup_meta};
+    use super::{check_backup_meta_consistency, merge_store_backup_meta};
 
     #[test]
     fn test_merge_store_backup_meta() {
@@ -654,90 +606,5 @@ mod tests {
             });
         }
         assert!(check_backup_meta_consistency(&meta, &stores).is_ok());
-    }
-
-    #[test]
-    fn test_dedup_peer_meta() {
-        // (store_id, [(region_id, [(meta_ver, commit_index)])])
-        let peer_data = vec![
-            // store 0
-            (
-                0,
-                vec![
-                    (1000, vec![(10, 200), (15, 300), (20, 400)]),
-                    (2000, vec![(10, 200), (15, 300), (20, 400)]),
-                    (3000, vec![(10, 200), (15, 300), (20, 400)]),
-                ],
-            ),
-            // store 1
-            (
-                1,
-                vec![
-                    (1000, vec![(10, 200), (15, 300), (20, 400)]),
-                    (2000, vec![(10, 200), (15, 300), (20, 400), (30, 500)]),
-                    (3000, vec![(10, 200), (15, 300), (20, 400)]),
-                ],
-            ),
-            // store 2
-            (
-                2,
-                vec![
-                    (1000, vec![(10, 200), (15, 300), (20, 400)]),
-                    (2000, vec![(10, 100), (15, 300), (20, 400)]),
-                    (3000, vec![(10, 200), (15, 300), (20, 400), (30, 500)]),
-                ],
-            ),
-        ];
-        let generate_store_meta = |id: u64, meta: Vec<(u64, Vec<(u64, u64)>)>| {
-            let mut store_meta = StoreBackupMeta::default();
-            store_meta.store_id = id;
-            for (region_id, index) in meta {
-                let mut peer = PeerMeta::default();
-                peer.region_id = region_id;
-                for (meta_ver, commit_index) in index {
-                    let raft_state = RaftState {
-                        commit: commit_index,
-                        ..Default::default()
-                    };
-                    let mut state = PeerState::default();
-                    state.key = rfengine::raft_state_key(meta_ver).chunk().to_vec();
-                    state.value = raft_state.marshal().chunk().to_vec();
-                    peer.mut_states().push(state);
-                }
-                store_meta.mut_manifest().mut_peers().push(peer);
-            }
-            store_meta
-        };
-        let mut cluster_meta = ClusterBackupMeta::default();
-        for (_, (store_id, peer_meta)) in peer_data.into_iter().enumerate() {
-            let store_meta = generate_store_meta(store_id, peer_meta);
-            cluster_meta.mut_stores().push(store_meta);
-        }
-        dedup_peer_meta(&mut cluster_meta);
-        let expect_store_meta = vec![
-            // store 0
-            (0, vec![(1000, vec![(10, 200), (15, 300), (20, 400)])]),
-            // store 1
-            (
-                1,
-                vec![(2000, vec![(10, 200), (15, 300), (20, 400), (30, 500)])],
-            ),
-            // store 2
-            (
-                2,
-                vec![(3000, vec![(10, 200), (15, 300), (20, 400), (30, 500)])],
-            ),
-        ];
-        for (_, (store_id, peer_meta)) in expect_store_meta.into_iter().enumerate() {
-            let meta = generate_store_meta(store_id, peer_meta);
-            assert_eq!(
-                &meta,
-                cluster_meta
-                    .get_stores()
-                    .iter()
-                    .find(|s| s.store_id == store_id)
-                    .unwrap()
-            );
-        }
     }
 }
