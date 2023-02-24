@@ -7,13 +7,14 @@ mod dfsgc;
 mod truncate_ts;
 mod unsafe_recover;
 
-use std::io;
+use std::{env, fs::OpenOptions, io};
 
 use clap::{Parser, Subcommand};
 use cse_ctl::{
     backup::{execute_backup, BackupArgs},
     restore::{execute_restore_command, RestoreCommand},
 };
+use slog::Drain;
 
 use crate::{
     dfsgc::{execute_dfsgc, DFSGCArgs},
@@ -23,7 +24,7 @@ use crate::{
 };
 
 fn main() {
-    init_logger(io::stdout());
+    init_logger();
     let x: Cli = Cli::parse();
     match x.command {
         DFSGC(dfsgc_arg) => {
@@ -44,11 +45,33 @@ fn main() {
     }
 }
 
-fn init_logger<W: 'static + io::Write + Send>(writer: W) {
-    use slog::Drain;
+fn init_logger() {
+    let output = env::var("LOG_FILE").ok();
+    let level = tikv_util::logger::get_level_by_string(
+        &env::var("LOG_LEVEL").unwrap_or_else(|_| "info".to_owned()),
+    )
+    .unwrap();
+    let append_instead_truncate = env::var("LOG_APPEND").is_ok();
+
+    match output {
+        Some(log_file) => {
+            let f = OpenOptions::new()
+                .create(true)
+                .write(!append_instead_truncate)
+                .truncate(!append_instead_truncate)
+                .append(append_instead_truncate)
+                .open(log_file)
+                .unwrap();
+            init_logger_impl(f, level);
+        }
+        None => init_logger_impl(io::stdout(), level),
+    };
+}
+
+fn init_logger_impl<W: 'static + io::Write + Send>(writer: W, level: slog::Level) {
     let decorator = slog_term::PlainDecorator::new(writer);
     let drain = slog_term::CompactFormat::new(decorator).build();
-    let drain = std::sync::Mutex::new(drain).fuse();
+    let drain = std::sync::Mutex::new(drain).filter_level(level).fuse();
     let logger = slog::Logger::root(drain, slog::o!());
     slog_global::set_global(logger);
 }

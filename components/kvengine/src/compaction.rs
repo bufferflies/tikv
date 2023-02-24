@@ -576,7 +576,7 @@ impl Engine {
             info!("{} zero L0 tables", tag);
             return None;
         }
-        let mut req = self.new_compact_request(shard, -1, 0);
+        let mut req = self.new_compact_request_with_shard(shard, -1, 0);
         let mut total_size = 0;
         let mut smallest = data.l0_tbls[0].smallest();
         let mut biggest = data.l0_tbls[0].biggest();
@@ -633,18 +633,56 @@ impl Engine {
         req.file_ids = ids;
     }
 
-    pub(crate) fn new_compact_request(
+    pub(crate) fn new_compact_request_with_shard(
         &self,
         shard: &Shard,
         cf: isize,
         level: usize,
     ) -> CompactionRequest {
+        self.new_compact_request(
+            shard.engine_id,
+            shard.id,
+            shard.ver,
+            shard.start.to_vec(),
+            shard.end.to_vec(),
+            cf,
+            level,
+        )
+    }
+
+    pub(crate) fn new_compact_request_with_meta(
+        &self,
+        meta: &ShardMeta,
+        cf: isize,
+        level: usize,
+    ) -> CompactionRequest {
+        self.new_compact_request(
+            meta.engine_id,
+            meta.id,
+            meta.ver,
+            meta.start.clone(),
+            meta.end.clone(),
+            cf,
+            level,
+        )
+    }
+
+    fn new_compact_request(
+        &self,
+        engine_id: u64,
+        shard_id: u64,
+        shard_ver: u64,
+        start: Vec<u8>,
+        end: Vec<u8>,
+        cf: isize,
+        level: usize,
+    ) -> CompactionRequest {
         CompactionRequest {
-            engine_id: shard.engine_id,
-            shard_id: shard.id,
-            shard_ver: shard.ver,
-            start: shard.start.to_vec(),
-            end: shard.end.to_vec(),
+            engine_id,
+            shard_id,
+            shard_ver,
+            start,
+            end,
             destroy_range: false,
             del_prefixes: vec![],
             in_place_compact_files: vec![],
@@ -670,7 +708,7 @@ impl Engine {
         shard: &Shard,
         cd: &CompactDef,
     ) -> CompactionRequest {
-        let mut req = self.new_compact_request(shard, cd.cf as isize, cd.level);
+        let mut req = self.new_compact_request_with_shard(shard, cd.cf as isize, cd.level);
         req.overlap = cd.has_overlap;
         for top in &cd.top {
             req.tops.push(top.id());
@@ -736,7 +774,7 @@ impl Engine {
             cs.mut_destroy_range().set_table_deletes(deletes.into());
             cs
         } else {
-            let mut req = self.new_compact_request(shard, 0, 0);
+            let mut req = self.new_compact_request_with_shard(shard, 0, 0);
             req.destroy_range = true;
             req.in_place_compact_files = overlaps;
             req.del_prefixes = data.del_prefixes.marshal();
@@ -787,7 +825,7 @@ impl Engine {
             cs.set_truncate_ts(pb::TableChange::default());
             cs
         } else {
-            let mut req = self.new_compact_request(shard, 0, 0);
+            let mut req = self.new_compact_request_with_shard(shard, 0, 0);
             req.truncate_ts = Some(truncate_ts.inner());
             req.in_place_compact_files = overlaps;
             req.file_ids = self.id_allocator.alloc_id(req.in_place_compact_files.len());
@@ -851,7 +889,7 @@ impl Engine {
             cs.mut_trim_over_bound().set_table_deletes(deletes.into());
             cs
         } else {
-            let mut req = self.new_compact_request(shard, 0, 0);
+            let mut req = self.new_compact_request_with_shard(shard, 0, 0);
             req.trim_over_bound = true;
             req.in_place_compact_files = overlaps;
             req.file_ids = self.id_allocator.alloc_id(req.in_place_compact_files.len());
@@ -866,6 +904,55 @@ impl Engine {
         cs.set_property_key(TRIM_OVER_BOUND.to_string());
         cs.set_property_value(TRIM_OVER_BOUND_DISABLE.to_vec());
         Ok(cs)
+    }
+
+    pub fn trim_over_bound_by_meta(&self, meta: &ShardMeta) -> Result<pb::ChangeSet> {
+        // Tables that are entirely over bound.
+        let mut deletes = vec![];
+        // Tables that are partially over bound.
+        let mut overlaps = vec![];
+        for (&id, f) in &meta.files {
+            if meta.entirely_over_bound_table(&f.smallest, &f.biggest) {
+                let mut delete = pb::TableDelete::default();
+                delete.set_id(id);
+                delete.set_level(f.level as u32);
+                delete.set_cf(f.cf as i32);
+                deletes.push(delete);
+            } else if meta.partially_over_bound_table(&f.smallest, &f.biggest) {
+                overlaps.push((id, f.level as u32, f.cf as i32));
+            }
+        }
+
+        debug!(
+            "start trim_over_bound_by_meta for {}:{}, destroyed: {}, overlapping: {}",
+            meta.id,
+            meta.ver,
+            deletes.len(),
+            overlaps.len()
+        );
+
+        let mut res_cs = if overlaps.is_empty() {
+            let mut cs = pb::ChangeSet::default();
+            if !deletes.is_empty() {
+                cs.mut_trim_over_bound().set_table_deletes(deletes.into());
+            }
+            cs
+        } else {
+            let mut req = self.new_compact_request_with_meta(meta, 0, 0);
+            req.trim_over_bound = true;
+            req.in_place_compact_files = overlaps;
+            req.file_ids = self.id_allocator.alloc_id(req.in_place_compact_files.len());
+            let mut cs = self.comp_client.compact(req)?;
+            let tc = cs.mut_trim_over_bound();
+            deletes.extend(tc.take_table_deletes().into_iter());
+            tc.set_table_deletes(deletes.into());
+            cs
+        };
+        res_cs.set_shard_id(meta.id);
+        res_cs.set_shard_ver(meta.ver);
+        res_cs.set_property_key(TRIM_OVER_BOUND.to_string());
+        res_cs.set_property_value(TRIM_OVER_BOUND_DISABLE.to_vec());
+        Ok(res_cs)
     }
 
     pub(crate) fn handle_compact_response(&self, cs: pb::ChangeSet) {

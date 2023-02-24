@@ -1,6 +1,6 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::collections::HashMap;
+use std::{cmp, collections::HashMap};
 
 use bytes::{Buf, BytesMut};
 use slog_global::info;
@@ -140,7 +140,7 @@ impl Engine {
             panic!("{} unable to get shard", tag);
         });
         let snap = shard.new_snap_access();
-        let version = shard.base_version + wb.sequence;
+        let version = shard.get_base_version() + wb.sequence;
         self.update_write_batch_version(wb, version);
         let data = shard.get_data();
         let mem_tbl = data.get_writable_mem_table();
@@ -194,5 +194,23 @@ impl Engine {
                 });
             };
         }
+    }
+
+    pub fn flush_shard_for_restore(&self, shard: &Shard) {
+        let ver = shard.get_base_version()
+            + cmp::max(shard.get_write_sequence(), shard.get_meta_sequence())
+            + 1;
+        debug!(
+            "{} flush_shard_for_restore, ver: {}, base_ver: {}, write_seq: {}, meta_seq: {}",
+            shard.tag(),
+            ver,
+            shard.get_base_version(),
+            shard.get_write_sequence(),
+            shard.get_meta_sequence(),
+        );
+
+        self.switch_mem_table(shard, ver);
+        self.set_shard_active(shard.id, true);
+        self.trigger_flush(shard);
     }
 }

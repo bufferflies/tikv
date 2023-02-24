@@ -293,7 +293,7 @@ impl super::Shard {
             l0_table_count,
             l0_table_size,
             cfs,
-            base_version: self.base_version,
+            base_version: self.get_base_version(),
             meta_sequence: self.get_meta_sequence(),
             write_sequence: self.get_write_sequence(),
             total_size,

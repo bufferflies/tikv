@@ -46,6 +46,7 @@ pub struct ChangeSet {
     pub destroy_range: ::protobuf::SingularPtrField<TableChange>,
     pub truncate_ts: ::protobuf::SingularPtrField<TableChange>,
     pub trim_over_bound: ::protobuf::SingularPtrField<TableChange>,
+    pub restore_shard: ::protobuf::SingularPtrField<Snapshot>,
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
     pub cached_size: ::protobuf::CachedSize,
@@ -518,6 +519,39 @@ impl ChangeSet {
     pub fn take_trim_over_bound(&mut self) -> TableChange {
         self.trim_over_bound.take().unwrap_or_else(|| TableChange::new())
     }
+
+    // .enginepb.Snapshot restore_shard = 21;
+
+
+    pub fn get_restore_shard(&self) -> &Snapshot {
+        self.restore_shard.as_ref().unwrap_or_else(|| Snapshot::default_instance())
+    }
+    pub fn clear_restore_shard(&mut self) {
+        self.restore_shard.clear();
+    }
+
+    pub fn has_restore_shard(&self) -> bool {
+        self.restore_shard.is_some()
+    }
+
+    // Param is passed by value, moved
+    pub fn set_restore_shard(&mut self, v: Snapshot) {
+        self.restore_shard = ::protobuf::SingularPtrField::some(v);
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_restore_shard(&mut self) -> &mut Snapshot {
+        if self.restore_shard.is_none() {
+            self.restore_shard.set_default();
+        }
+        self.restore_shard.as_mut().unwrap()
+    }
+
+    // Take field
+    pub fn take_restore_shard(&mut self) -> Snapshot {
+        self.restore_shard.take().unwrap_or_else(|| Snapshot::new())
+    }
 }
 
 impl ::protobuf::Message for ChangeSet {
@@ -568,6 +602,11 @@ impl ::protobuf::Message for ChangeSet {
             }
         };
         for v in &self.trim_over_bound {
+            if !v.is_initialized() {
+                return false;
+            }
+        };
+        for v in &self.restore_shard {
             if !v.is_initialized() {
                 return false;
             }
@@ -650,6 +689,9 @@ impl ::protobuf::Message for ChangeSet {
                 20 => {
                     ::protobuf::rt::read_singular_message_into(wire_type, is, &mut self.trim_over_bound)?;
                 },
+                21 => {
+                    ::protobuf::rt::read_singular_message_into(wire_type, is, &mut self.restore_shard)?;
+                },
                 _ => {
                     ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
                 },
@@ -720,6 +762,10 @@ impl ::protobuf::Message for ChangeSet {
             my_size += 2 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
         }
         if let Some(ref v) = self.trim_over_bound.as_ref() {
+            let len = v.compute_size();
+            my_size += 2 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
+        }
+        if let Some(ref v) = self.restore_shard.as_ref() {
             let len = v.compute_size();
             my_size += 2 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
         }
@@ -797,6 +843,11 @@ impl ::protobuf::Message for ChangeSet {
         }
         if let Some(ref v) = self.trim_over_bound.as_ref() {
             os.write_tag(20, ::protobuf::wire_format::WireTypeLengthDelimited)?;
+            os.write_raw_varint32(v.get_cached_size())?;
+            v.write_to_with_cached_sizes(os)?;
+        }
+        if let Some(ref v) = self.restore_shard.as_ref() {
+            os.write_tag(21, ::protobuf::wire_format::WireTypeLengthDelimited)?;
             os.write_raw_varint32(v.get_cached_size())?;
             v.write_to_with_cached_sizes(os)?;
         }
@@ -927,6 +978,11 @@ impl ::protobuf::Message for ChangeSet {
                     |m: &ChangeSet| { &m.trim_over_bound },
                     |m: &mut ChangeSet| { &mut m.trim_over_bound },
                 ));
+                fields.push(::protobuf::reflect::accessor::make_singular_ptr_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<Snapshot>>(
+                    "restore_shard",
+                    |m: &ChangeSet| { &m.restore_shard },
+                    |m: &mut ChangeSet| { &mut m.restore_shard },
+                ));
                 ::protobuf::reflect::MessageDescriptor::new::<ChangeSet>(
                     "ChangeSet",
                     fields,
@@ -966,6 +1022,7 @@ impl ::protobuf::Clear for ChangeSet {
         self.destroy_range.clear();
         self.truncate_ts.clear();
         self.trim_over_bound.clear();
+        self.restore_shard.clear();
         self.unknown_fields.clear();
     }
 }
@@ -992,6 +1049,7 @@ impl ::protobuf::PbPrint for ChangeSet {
         ::protobuf::PbPrint::fmt(&self.destroy_range, "destroy_range", buf);
         ::protobuf::PbPrint::fmt(&self.truncate_ts, "truncate_ts", buf);
         ::protobuf::PbPrint::fmt(&self.trim_over_bound, "trim_over_bound", buf);
+        ::protobuf::PbPrint::fmt(&self.restore_shard, "restore_shard", buf);
         if old_len < buf.len() {
           buf.push(' ');
         }
@@ -1019,6 +1077,7 @@ impl ::std::fmt::Debug for ChangeSet {
         ::protobuf::PbPrint::fmt(&self.destroy_range, "destroy_range", &mut s);
         ::protobuf::PbPrint::fmt(&self.truncate_ts, "truncate_ts", &mut s);
         ::protobuf::PbPrint::fmt(&self.trim_over_bound, "trim_over_bound", &mut s);
+        ::protobuf::PbPrint::fmt(&self.restore_shard, "restore_shard", &mut s);
         write!(f, "{}", s)
     }
 }
@@ -4071,7 +4130,7 @@ impl ::protobuf::reflect::ProtobufValue for TableChange {
 }
 
 static file_descriptor_proto_data: &'static [u8] = b"\
-    \n\x0fchangeset.proto\x12\x08enginepb\"\xd6\x04\n\tChangeSet\x12\x11\n\
+    \n\x0fchangeset.proto\x12\x08enginepb\"\x83\x05\n\tChangeSet\x12\x11\n\
     \x07shardID\x18\x01\x20\x01(\x04B\0\x12\x12\n\x08shardVer\x18\x02\x20\
     \x01(\x04B\0\x12*\n\ncompaction\x18\x04\x20\x01(\x0b2\x14.enginepb.Compa\
     ctionB\0\x12\x20\n\x05flush\x18\x05\x20\x01(\x0b2\x0f.enginepb.FlushB\0\
@@ -4086,37 +4145,38 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     \x01(\x08B\0\x12.\n\rdestroy_range\x18\x12\x20\x01(\x0b2\x15.enginepb.Ta\
     bleChangeB\0\x12,\n\x0btruncate_ts\x18\x13\x20\x01(\x0b2\x15.enginepb.Ta\
     bleChangeB\0\x120\n\x0ftrim_over_bound\x18\x14\x20\x01(\x0b2\x15.enginep\
-    b.TableChangeB\0:\0\"\xa1\x01\n\nCompaction\x12\x0c\n\x02cf\x18\x01\x20\
-    \x01(\x05B\0\x12\x0f\n\x05level\x18\x02\x20\x01(\rB\0\x12-\n\x0ctableCre\
-    ates\x18\x03\x20\x03(\x0b2\x15.enginepb.TableCreateB\0\x12\x14\n\ntopDel\
-    etes\x18\x04\x20\x03(\x04B\0\x12\x17\n\rbottomDeletes\x18\x05\x20\x03(\
-    \x04B\0\x12\x14\n\nconflicted\x18\x06\x20\x01(\x08B\0:\0\"p\n\x05Flush\
-    \x12&\n\x08l0Create\x18\x01\x20\x01(\x0b2\x12.enginepb.L0CreateB\0\x12*\
-    \n\nproperties\x18\x02\x20\x01(\x0b2\x14.enginepb.PropertiesB\0\x12\x11\
-    \n\x07version\x18\x03\x20\x01(\x04B\0:\0\"\xe0\x01\n\x08Snapshot\x12\x0f\
-    \n\x05start\x18\x01\x20\x01(\x0cB\0\x12\r\n\x03end\x18\x02\x20\x01(\x0cB\
-    \0\x12*\n\nproperties\x18\x03\x20\x01(\x0b2\x14.enginepb.PropertiesB\0\
-    \x12'\n\tl0Creates\x18\x05\x20\x03(\x0b2\x12.enginepb.L0CreateB\0\x12-\n\
-    \x0ctableCreates\x18\x06\x20\x03(\x0b2\x15.enginepb.TableCreateB\0\x12\
-    \x15\n\x0bbaseVersion\x18\x07\x20\x01(\x04B\0\x12\x17\n\rdata_sequence\
-    \x18\x08\x20\x01(\x04B\0:\0\"A\n\x08L0Create\x12\x0c\n\x02ID\x18\x01\x20\
-    \x01(\x04B\0\x12\x12\n\x08smallest\x18\x02\x20\x01(\x0cB\0\x12\x11\n\x07\
-    biggest\x18\x03\x20\x01(\x0cB\0:\0\"c\n\x0bTableCreate\x12\x0c\n\x02ID\
-    \x18\x01\x20\x01(\x04B\0\x12\x0f\n\x05level\x18\x02\x20\x01(\rB\0\x12\
-    \x0c\n\x02CF\x18\x03\x20\x01(\x05B\0\x12\x12\n\x08smallest\x18\x04\x20\
-    \x01(\x0cB\0\x12\x11\n\x07biggest\x18\x05\x20\x01(\x0cB\0:\0\"<\n\x0bTab\
-    leDelete\x12\x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\x12\x0f\n\x05level\x18\
-    \x02\x20\x01(\rB\0\x12\x0c\n\x02CF\x18\x03\x20\x01(\x05B\0:\0\"D\n\x05Sp\
-    lit\x12)\n\tnewShards\x18\x01\x20\x03(\x0b2\x14.enginepb.PropertiesB\0\
-    \x12\x0e\n\x04Keys\x18\x03\x20\x03(\x0cB\0:\0\"\x93\x01\n\x0bIngestFiles\
-    \x12'\n\tl0Creates\x18\x01\x20\x03(\x0b2\x12.enginepb.L0CreateB\0\x12-\n\
-    \x0ctableCreates\x18\x02\x20\x03(\x0b2\x15.enginepb.TableCreateB\0\x12*\
-    \n\nproperties\x18\x03\x20\x01(\x0b2\x14.enginepb.PropertiesB\0:\0\"C\n\
-    \nProperties\x12\x11\n\x07shardID\x18\x01\x20\x01(\x04B\0\x12\x0e\n\x04k\
-    eys\x18\x02\x20\x03(\tB\0\x12\x10\n\x06values\x18\x03\x20\x03(\x0cB\0:\0\
-    \"m\n\x0bTableChange\x12-\n\x0ctableDeletes\x18\x01\x20\x03(\x0b2\x15.en\
-    ginepb.TableDeleteB\0\x12-\n\x0ctableCreates\x18\x02\x20\x03(\x0b2\x15.e\
-    nginepb.TableCreateB\0:\0B\0b\x06proto3\
+    b.TableChangeB\0\x12+\n\rrestore_shard\x18\x15\x20\x01(\x0b2\x12.enginep\
+    b.SnapshotB\0:\0\"\xa1\x01\n\nCompaction\x12\x0c\n\x02cf\x18\x01\x20\x01\
+    (\x05B\0\x12\x0f\n\x05level\x18\x02\x20\x01(\rB\0\x12-\n\x0ctableCreates\
+    \x18\x03\x20\x03(\x0b2\x15.enginepb.TableCreateB\0\x12\x14\n\ntopDeletes\
+    \x18\x04\x20\x03(\x04B\0\x12\x17\n\rbottomDeletes\x18\x05\x20\x03(\x04B\
+    \0\x12\x14\n\nconflicted\x18\x06\x20\x01(\x08B\0:\0\"p\n\x05Flush\x12&\n\
+    \x08l0Create\x18\x01\x20\x01(\x0b2\x12.enginepb.L0CreateB\0\x12*\n\nprop\
+    erties\x18\x02\x20\x01(\x0b2\x14.enginepb.PropertiesB\0\x12\x11\n\x07ver\
+    sion\x18\x03\x20\x01(\x04B\0:\0\"\xe0\x01\n\x08Snapshot\x12\x0f\n\x05sta\
+    rt\x18\x01\x20\x01(\x0cB\0\x12\r\n\x03end\x18\x02\x20\x01(\x0cB\0\x12*\n\
+    \nproperties\x18\x03\x20\x01(\x0b2\x14.enginepb.PropertiesB\0\x12'\n\tl0\
+    Creates\x18\x05\x20\x03(\x0b2\x12.enginepb.L0CreateB\0\x12-\n\x0ctableCr\
+    eates\x18\x06\x20\x03(\x0b2\x15.enginepb.TableCreateB\0\x12\x15\n\x0bbas\
+    eVersion\x18\x07\x20\x01(\x04B\0\x12\x17\n\rdata_sequence\x18\x08\x20\
+    \x01(\x04B\0:\0\"A\n\x08L0Create\x12\x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\
+    \x12\x12\n\x08smallest\x18\x02\x20\x01(\x0cB\0\x12\x11\n\x07biggest\x18\
+    \x03\x20\x01(\x0cB\0:\0\"c\n\x0bTableCreate\x12\x0c\n\x02ID\x18\x01\x20\
+    \x01(\x04B\0\x12\x0f\n\x05level\x18\x02\x20\x01(\rB\0\x12\x0c\n\x02CF\
+    \x18\x03\x20\x01(\x05B\0\x12\x12\n\x08smallest\x18\x04\x20\x01(\x0cB\0\
+    \x12\x11\n\x07biggest\x18\x05\x20\x01(\x0cB\0:\0\"<\n\x0bTableDelete\x12\
+    \x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\x12\x0f\n\x05level\x18\x02\x20\x01(\
+    \rB\0\x12\x0c\n\x02CF\x18\x03\x20\x01(\x05B\0:\0\"D\n\x05Split\x12)\n\tn\
+    ewShards\x18\x01\x20\x03(\x0b2\x14.enginepb.PropertiesB\0\x12\x0e\n\x04K\
+    eys\x18\x03\x20\x03(\x0cB\0:\0\"\x93\x01\n\x0bIngestFiles\x12'\n\tl0Crea\
+    tes\x18\x01\x20\x03(\x0b2\x12.enginepb.L0CreateB\0\x12-\n\x0ctableCreate\
+    s\x18\x02\x20\x03(\x0b2\x15.enginepb.TableCreateB\0\x12*\n\nproperties\
+    \x18\x03\x20\x01(\x0b2\x14.enginepb.PropertiesB\0:\0\"C\n\nProperties\
+    \x12\x11\n\x07shardID\x18\x01\x20\x01(\x04B\0\x12\x0e\n\x04keys\x18\x02\
+    \x20\x03(\tB\0\x12\x10\n\x06values\x18\x03\x20\x03(\x0cB\0:\0\"m\n\x0bTa\
+    bleChange\x12-\n\x0ctableDeletes\x18\x01\x20\x03(\x0b2\x15.enginepb.Tabl\
+    eDeleteB\0\x12-\n\x0ctableCreates\x18\x02\x20\x03(\x0b2\x15.enginepb.Tab\
+    leCreateB\0:\0B\0b\x06proto3\
 ";
 
 static mut file_descriptor_proto_lazy: ::protobuf::lazy::Lazy<::protobuf::descriptor::FileDescriptorProto> = ::protobuf::lazy::Lazy {

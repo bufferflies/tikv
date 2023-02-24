@@ -38,7 +38,7 @@ impl RaftApplyState {
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
-pub(crate) struct RaftState {
+pub struct RaftState {
     pub(crate) term: u64,
     pub(crate) vote: u64,
     pub(crate) commit: u64,
@@ -60,7 +60,7 @@ impl RaftState {
         buf.freeze()
     }
 
-    pub(crate) fn unmarshal(&mut self, mut data: &[u8]) {
+    pub fn unmarshal(&mut self, mut data: &[u8]) {
         self.term = data.get_u64_le();
         self.vote = data.get_u64_le();
         self.commit = data.get_u64_le();
@@ -68,7 +68,7 @@ impl RaftState {
         self.last_preprocessed_index = data.get_u64_le();
     }
 
-    pub(crate) fn get_hard_state(&self) -> eraftpb::HardState {
+    pub fn get_hard_state(&self) -> eraftpb::HardState {
         let mut hs = eraftpb::HardState::default();
         hs.set_term(self.term);
         hs.set_vote(self.vote);

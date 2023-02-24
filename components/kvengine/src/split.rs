@@ -48,11 +48,14 @@ impl Engine {
             }
             if new_shard.id == old_shard.id {
                 new_shard.set_active(old_shard.is_active());
-                new_shard.base_version = old_shard.base_version;
+                store_u64(&new_shard.base_version, old_shard.get_base_version());
                 store_u64(&new_shard.meta_seq, sequence);
                 store_u64(&new_shard.write_sequence, sequence);
             } else {
-                new_shard.base_version = old_shard.base_version + sequence;
+                store_u64(
+                    &new_shard.base_version,
+                    old_shard.get_base_version() + sequence,
+                );
                 store_u64(&new_shard.meta_seq, initial_seq);
                 store_u64(&new_shard.write_sequence, initial_seq);
             }
@@ -206,8 +209,11 @@ impl Engine {
         new_shard.ver = max(shard_ver, source.shard_ver) + 1;
         // make sure the new mem-table version is greater than source.
         let source_mem_tbl_version = source_snap.base_version + source.sequence;
-        let target_mem_tbl_version = old_shard.base_version + sequence;
-        new_shard.base_version = max(source_mem_tbl_version, target_mem_tbl_version) - sequence;
+        let target_mem_tbl_version = old_shard.get_base_version() + sequence;
+        store_u64(
+            &new_shard.base_version,
+            max(source_mem_tbl_version, target_mem_tbl_version) - sequence,
+        );
         let old_data = old_shard.get_data();
         let mem_tbls = old_data.mem_tbls.clone();
         let mut l0_tbls = old_data.l0_tbls.clone();
@@ -271,7 +277,7 @@ impl Engine {
 
     pub(crate) fn new_shard_version(&self, old_shard: &Shard, sequence: u64) -> Shard {
         let engine_id = self.get_engine_id();
-        let mut new_shard = Shard::new(
+        let new_shard = Shard::new(
             engine_id,
             &old_shard.properties.to_pb(old_shard.id),
             old_shard.ver + 1,
@@ -281,7 +287,7 @@ impl Engine {
         );
         new_shard.set_data(old_shard.get_data());
         new_shard.set_active(old_shard.is_active());
-        new_shard.base_version = old_shard.base_version;
+        store_u64(&new_shard.base_version, old_shard.get_base_version());
         store_u64(&new_shard.meta_seq, sequence);
         store_u64(&new_shard.write_sequence, sequence);
         new_shard

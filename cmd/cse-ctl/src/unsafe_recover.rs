@@ -2,15 +2,20 @@
 
 use std::{collections::HashSet, path::PathBuf, str::FromStr};
 
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, BytesMut};
 use clap::Args;
+use cse_ctl::common;
 use kvproto::{
     metapb,
     metapb::PeerRole,
     raft_serverpb::{PeerState, RegionLocalState, StoreIdent},
 };
 use protobuf::Message;
-use rfengine::{RfEngine, WriteBatch};
+use rfengine::{
+    raft_state_key, region_state_key, RfEngine, WriteBatch, KV_ENGINE_META_KEY,
+    REGION_META_KEY_BYTE, STORE_IDENT_KEY,
+};
+use rfstore::store::{RAFT_INIT_LOG_INDEX, RAFT_INIT_LOG_TERM, TERM_KEY};
 use tikv_util::{
     codec::{bytes::decode_bytes, number::NumberEncoder},
     info,
@@ -55,14 +60,6 @@ pub struct UnsafeRecoverArgs {
     #[clap(long)]
     pub all: bool,
 }
-
-const RAFT_STATE_KEY_BYTE: u8 = 1;
-const REGION_META_KEY_BYTE: u8 = 2;
-const STORE_IDENT_KEY: &[u8] = &[3];
-const KV_ENGINE_META_KEY: &[u8] = &[5];
-const RAFT_INIT_LOG_TERM: u64 = 5;
-const RAFT_INIT_LOG_INDEX: u64 = 5;
-const TERM_KEY: &str = "term";
 
 pub(crate) fn execute_unsafe_recover(args: UnsafeRecoverArgs) {
     let rf = rfengine::RfEngine::open(&args.path, 512 * 1024 * 1024, 8 * 1024).unwrap();
@@ -151,7 +148,7 @@ fn collect_prefix_regions(rf: &RfEngine, prefix: &[u8]) -> Vec<(u64, u64, u64)> 
         if region_id == 0 {
             continue;
         }
-        let engine_meta = load_engine_meta(rf, peer_id);
+        let engine_meta = common::load_rf_engine_meta(rf, peer_id).expect("engine meta not found");
         let snap = engine_meta.get_snapshot();
         let start = snap.get_start();
         if start.starts_with(prefix) {
@@ -175,29 +172,6 @@ fn load_region_state(rf: &RfEngine, peer_id: u64, key: &[u8]) -> RegionLocalStat
         .merge_from_bytes(&region_state_val)
         .unwrap();
     region_local_state
-}
-
-fn load_engine_meta(rf: &RfEngine, peer_id: u64) -> kvenginepb::ChangeSet {
-    let engine_meta_val = rf
-        .get_state(peer_id, KV_ENGINE_META_KEY)
-        .expect("engine meta not found");
-    let mut cs = kvenginepb::ChangeSet::new();
-    cs.merge_from_bytes(&engine_meta_val).unwrap();
-    cs
-}
-
-fn raft_state_key(version: u64) -> Bytes {
-    let mut key = BytesMut::with_capacity(5);
-    key.put_u8(RAFT_STATE_KEY_BYTE);
-    key.put_u32(version as u32);
-    key.freeze()
-}
-
-fn region_state_key(version: u64) -> Bytes {
-    let mut key = BytesMut::with_capacity(5);
-    key.put_u8(REGION_META_KEY_BYTE);
-    key.put_u32(version as u32);
-    key.freeze()
 }
 
 fn create_empty_regions(rf: &RfEngine, empty_region_file: String, commit: bool) {

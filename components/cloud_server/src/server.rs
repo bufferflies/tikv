@@ -111,6 +111,9 @@ pub enum Error {
 
     #[error("{0:?}")]
     OpenSSL(#[from] OpenSSLError),
+
+    #[error("{0:?}")]
+    JsonCodec(#[from] serde_json::Error),
 }
 
 impl From<RaftServerError> for Error {

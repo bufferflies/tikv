@@ -13,7 +13,10 @@ use moka::sync::SegmentedCache;
 
 use crate::{
     meta::is_move_down,
-    table::sstable::{BlockCacheKey, L0Table, LocalFile, SSTable},
+    table::{
+        memtable::CFTable,
+        sstable::{BlockCacheKey, L0Table, LocalFile, SSTable},
+    },
     *,
 };
 
@@ -143,6 +146,8 @@ impl EngineCore {
             self.apply_initial_flush(&shard, &cs);
         } else if cs.has_ingest_files() {
             self.apply_ingest_files(&shard, &cs)?;
+        } else if cs.has_restore_shard() {
+            self.apply_restore_shard(&shard, &cs)?;
         }
         self.refresh_shard_states(&shard);
         Ok(())
@@ -526,6 +531,57 @@ impl EngineCore {
             new_cfs,
         );
         shard.set_data(new_data);
+        Ok(())
+    }
+
+    fn apply_restore_shard(&self, shard: &Shard, cs: &ChangeSet) -> Result<()> {
+        assert!(cs.has_restore_shard());
+        // TODO: skip duplicated.
+
+        let snap = cs.get_restore_shard();
+        assert_eq!(shard.start, snap.start);
+        assert_eq!(shard.end, snap.end);
+
+        let snap_shard = Shard::new(
+            self.get_engine_id(),
+            snap.get_properties(),
+            cs.shard_ver,
+            snap.start.as_slice(),
+            snap.end.as_slice(),
+            shard.opt.clone(),
+        );
+        let snap_data = snap_shard.get_data();
+        let old_data = shard.get_data();
+
+        let (l0_tbls, cfs) = create_snapshot_tables(cs.get_restore_shard(), cs);
+        let new_data = ShardData::new(
+            shard.start.clone(),
+            shard.end.clone(),
+            snap_data.del_prefixes.clone(),
+            snap_data.truncate_ts,
+            snap_data.trim_over_bound,
+            vec![CFTable::new()],
+            l0_tbls,
+            cfs,
+        );
+        shard.set_data(new_data);
+
+        store_u64(&shard.base_version, snap.base_version);
+        assert!(!cs.has_parent());
+        store_bool(&shard.initial_flushed, true);
+
+        let mut old_mem_tbls = old_data.mem_tbls.clone();
+        for mem_tbl in old_mem_tbls.drain(..) {
+            self.free_tx.send(mem_tbl).unwrap();
+        }
+
+        info!(
+            "restore shard {} mem_table_version {}, change {:?}",
+            shard.tag(),
+            shard.load_mem_table_version(),
+            &cs,
+        );
+
         Ok(())
     }
 }

@@ -5,4 +5,6 @@ extern crate serde_derive;
 
 pub mod backup;
 pub mod common;
+pub mod pd_control;
 pub mod restore;
+pub mod restore_tenant;

@@ -1449,6 +1449,30 @@ impl PdClient for TestPdClient {
         ))
     }
 
+    fn get_region_async<'k>(&'k self, key: &'k [u8]) -> BoxFuture<'k, Result<metapb::Region>> {
+        let timer = self.timer.clone();
+        Box::pin(async move {
+            self.check_bootstrap()?;
+            for _ in 1..500 {
+                timer
+                    .delay(std::time::Instant::now() + Duration::from_millis(10))
+                    .compat()
+                    .await
+                    .unwrap();
+                if let Some(region) = self.cluster.rl().get_region(data_key(key)) {
+                    if check_key_in_region(key, &region).is_ok() {
+                        return Ok(region);
+                    }
+                }
+            }
+
+            Err(box_err!(
+                "no region contains key {}",
+                log_wrappers::hex_encode_upper(key)
+            ))
+        })
+    }
+
     fn get_region_info(&self, key: &[u8]) -> Result<RegionInfo> {
         let region = self.get_region(key)?;
         let leader = self.cluster.rl().leaders.get(&region.get_id()).cloned();

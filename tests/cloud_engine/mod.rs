@@ -24,3 +24,9 @@ pub(crate) fn alloc_node_id() -> u16 {
     info!("allocated node_id {}", node_id);
     node_id
 }
+
+pub(crate) fn alloc_node_id_vec(count: usize) -> Vec<u16> {
+    let mut nodes = vec![];
+    nodes.resize_with(count, || alloc_node_id());
+    nodes
+}

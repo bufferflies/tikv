@@ -16,7 +16,8 @@ use slog_global::info;
 
 use crate::{
     common::generate_etcd_connect_opt,
-    restore::Commands::{Tikv, PD},
+    restore::Commands::{Keyspace, Tikv, PD},
+    restore_tenant::execute_restore_keyspace,
 };
 
 const PD_ROOT_PATH: &str = "/pd";
@@ -35,6 +36,8 @@ enum Commands {
     Tikv(RestoreTiKVArgs),
     /// Restore PD meta data.
     PD(RestorePDArgs),
+    /// Restore Keyspace data.
+    Keyspace(RestoreKeyspaceArgs),
 }
 
 #[derive(Args)]
@@ -75,10 +78,27 @@ struct RestorePDArgs {
     pub key: PathBuf,
 }
 
+#[derive(Args)]
+pub struct RestoreKeyspaceArgs {
+    /// The path of the config file.
+    #[clap(long)]
+    pub config: PathBuf,
+    /// The name of the backup file.
+    #[clap(long)]
+    pub name: String,
+    /// The keyspace to restore.
+    #[clap(long)]
+    pub keyspace_name: String,
+    /// The local working path for temporary files during restore.
+    #[clap(long)]
+    pub working_path: Option<String>,
+}
+
 pub fn execute_restore_command(cmd: RestoreCommand) {
     match cmd.command {
         Tikv(args) => execute_restore_tikv(args),
         PD(args) => execute_restore_pd(args),
+        Keyspace(args) => execute_restore_keyspace(args),
     }
 }
 
@@ -111,7 +131,10 @@ fn execute_restore_pd(args: RestorePDArgs) {
     runtime.block_on(restore_pd_keyspace_meta(&config, &cluster_backup));
 }
 
-fn get_cluster_backup_meta(config: &RestoreConfig, name: String) -> (ClusterBackupMeta, S3FS) {
+pub(crate) fn get_cluster_backup_meta(
+    config: &RestoreConfig,
+    name: String,
+) -> (ClusterBackupMeta, S3FS) {
     let dfs_conf = config.dfs.clone();
     let backup_key = format!("{}/backup/{}", dfs_conf.prefix, name);
     let s3fs = S3FS::new(
@@ -128,7 +151,7 @@ fn get_cluster_backup_meta(config: &RestoreConfig, name: String) -> (ClusterBack
         .unwrap();
     let mut cluster_backup = ClusterBackupMeta::new();
     cluster_backup.merge_from_bytes(&data).unwrap();
-    println!(
+    info!(
         "Restore cluster_id {}, alloc_id {}, backup_ts {}, safe_ts {}, store cnt {}",
         cluster_backup.cluster_id,
         cluster_backup.alloc_id,

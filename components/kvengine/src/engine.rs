@@ -140,7 +140,8 @@ impl Engine {
         Ok(en)
     }
 
-    fn load_shards(
+    // This method is also used by cse-ctl for cluster restore.
+    pub fn load_shards(
         &self,
         metas: HashMap<u64, ShardMeta>,
         recoverer: impl RecoverHandler + 'static,
@@ -193,14 +194,6 @@ impl Engine {
         }
         Ok(())
     }
-
-    pub fn set_engine_id(&self, engine_id: u64) {
-        self.engine_id.store(engine_id, Ordering::Release);
-    }
-
-    pub fn get_engine_id(&self) -> u64 {
-        self.engine_id.load(Ordering::Acquire)
-    }
 }
 
 pub struct EngineCore {
@@ -220,7 +213,16 @@ pub struct EngineCore {
 }
 
 impl EngineCore {
-    fn read_meta(&self, meta_iter: &mut impl MetaIterator) -> Result<HashMap<u64, ShardMeta>> {
+    pub fn set_engine_id(&self, engine_id: u64) {
+        self.engine_id.store(engine_id, Ordering::Release);
+    }
+
+    pub fn get_engine_id(&self) -> u64 {
+        self.engine_id.load(Ordering::Acquire)
+    }
+
+    // This method is also used by cse-ctl for cluster restore.
+    pub fn read_meta(&self, meta_iter: &mut impl MetaIterator) -> Result<HashMap<u64, ShardMeta>> {
         let mut metas = HashMap::new();
         let engine_id = meta_iter.engine_id();
         meta_iter.iterate(|cs| {
@@ -374,7 +376,7 @@ impl EngineCore {
                 parent_snap.data_sequence,
             );
             if mem_tbl.get_version() > parent_snap.base_version + parent_snap.data_sequence
-                && mem_tbl.get_version() <= shard.base_version + data_sequence
+                && mem_tbl.get_version() <= shard.get_base_version() + data_sequence
                 && mem_tbl.has_data_in_range(&shard.start, &shard.end)
             {
                 mem_tbls.push(mem_tbl.clone());
@@ -386,7 +388,7 @@ impl EngineCore {
                 InitialFlush {
                     parent_snap,
                     mem_tbls,
-                    base_version: shard.base_version,
+                    base_version: shard.get_base_version(),
                     data_sequence,
                 },
             ))))

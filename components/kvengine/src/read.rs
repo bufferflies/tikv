@@ -95,7 +95,7 @@ pub struct SnapAccessCore {
 
 impl SnapAccessCore {
     pub fn new(shard: &Shard) -> Self {
-        let base_version = shard.base_version;
+        let base_version = shard.get_base_version();
         let meta_seq = shard.get_meta_sequence();
         let write_sequence = shard.get_write_sequence();
         let data = shard.get_data();

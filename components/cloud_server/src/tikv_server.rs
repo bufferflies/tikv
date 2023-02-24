@@ -46,7 +46,7 @@ use raftstore::{
 use rfengine::RfEngine;
 use rfstore::{
     store::{
-        BlackList, Engines, LocalReader, MetaChangeListener, RaftBatchSystem, StoreMeta,
+        BlackList, Engines, LocalReader, MetaChangeListener, RaftBatchSystem, StoreMeta, StoreMsg,
         PENDING_MSG_CAP,
     },
     RaftRouter, ServerRaftStoreRouter,
@@ -67,7 +67,7 @@ use tikv_kv::Engine;
 use tikv_util::{
     check_environment_variables,
     config::{ensure_dir_exist, VersionTrack},
-    panic_mark_file_exists,
+    mpsc, panic_mark_file_exists,
     quota_limiter::{QuotaLimitConfigManager, QuotaLimiter},
     set_panic_mark,
     sys::{register_memory_usage_high_water, SysQuota},
@@ -304,6 +304,7 @@ impl TiKVServer {
     /// Initialize and check the config
     ///
     /// Warnings are logged and fatal errors exist.
+    /// This method is also used by cse-ctl for cluster restore.
     ///
     /// #  Fatal errors
     ///
@@ -312,7 +313,7 @@ impl TiKVServer {
     /// - If the config can't pass `validate()`
     /// - If the max open file descriptor limit is not high enough to support
     ///   the main database and the raft database.
-    fn init_config(mut config: TiKvConfig) -> ConfigController {
+    pub fn init_config(mut config: TiKvConfig) -> ConfigController {
         validate_and_persist_config(&mut config, true);
 
         ensure_dir_exist(&config.storage.data_dir).unwrap();
@@ -875,25 +876,28 @@ impl TiKVServer {
 }
 
 impl TiKVServer {
-    fn init_raw_engines(
+    // This method is also used by cse-ctl for cluster restore.
+    pub fn init_raft_engine(conf: &TiKvConfig) -> rfengine::Result<RfEngine> {
+        let raft_db_path = Path::new(&conf.raft_store.raftdb_path);
+        let wal_size = conf.rfengine.target_file_size.0 as usize;
+        let compression_threshold = conf.rfengine.batch_compression_threshold.0 as usize;
+        RfEngine::open(raft_db_path, wal_size, compression_threshold)
+    }
+
+    // This method is also used by cse-ctl for cluster restore.
+    pub fn init_kv_engine(
         pd: Arc<dyn pd_client::PdClient>,
         conf: &TiKvConfig,
         dfs: Arc<dyn DFS>,
         rate_limiter: Arc<IORateLimiter>,
-    ) -> Engines {
-        if panic_mark_file_exists(&conf.storage.data_dir) {
-            error!("The panic mark file is exists. Pause the process");
-            loop {
-                std::thread::sleep(Duration::from_secs(600))
-            }
-        }
-        set_panic_mark();
-        // Create raft engine.
-        let raft_db_path = Path::new(&conf.raft_store.raftdb_path);
+        meta_iter: &mut impl kvengine::MetaIterator,
+        recoverer: impl kvengine::RecoverHandler + 'static,
+    ) -> kvengine::Result<(
+        kvengine::Engine,
+        mpsc::Sender<StoreMsg>,
+        mpsc::Receiver<StoreMsg>,
+    )> {
         let kv_engine_path = PathBuf::from(&conf.storage.data_dir).join(Path::new("db"));
-        let wal_size = conf.rfengine.target_file_size.0 as usize;
-        let compression_threshold = conf.rfengine.batch_compression_threshold.0 as usize;
-        let rf_engine = RfEngine::open(raft_db_path, wal_size, compression_threshold).unwrap();
         let mut kv_opts = kvengine::Options::default();
         let capacity = match conf.storage.block_cache.capacity {
             None => {
@@ -920,11 +924,6 @@ impl TiKVServer {
             });
         kv_opts.allow_fallback_local = conf.dfs.allow_fallback_local;
         let opts = Arc::new(kv_opts);
-        let recoverer = rfstore::store::RecoverHandler::new(rf_engine.clone());
-        let mut meta_iter = recoverer.clone();
-        if let Some(black_list) = load_black_list(&conf.black_list_path) {
-            meta_iter.set_black_list(black_list);
-        }
         let id_allocator = Arc::new(PdIDAllocator { pd });
         let (sender, receiver) = tikv_util::mpsc::unbounded();
         let meta_change_listener = Box::new(MetaChangeListener {
@@ -933,13 +932,38 @@ impl TiKVServer {
         let kv_engine = kvengine::Engine::open(
             dfs,
             opts,
-            &mut meta_iter,
+            meta_iter,
             recoverer,
             id_allocator,
             meta_change_listener,
             rate_limiter,
-        )
-        .unwrap();
+        )?;
+        Ok((kv_engine, sender, receiver))
+    }
+
+    fn init_raw_engines(
+        pd: Arc<dyn pd_client::PdClient>,
+        conf: &TiKvConfig,
+        dfs: Arc<dyn DFS>,
+        rate_limiter: Arc<IORateLimiter>,
+    ) -> Engines {
+        if panic_mark_file_exists(&conf.storage.data_dir) {
+            error!("The panic mark file is exists. Pause the process");
+            loop {
+                std::thread::sleep(Duration::from_secs(600))
+            }
+        }
+        set_panic_mark();
+
+        let rf_engine = Self::init_raft_engine(conf).unwrap();
+        let recoverer = rfstore::store::RecoverHandler::new(rf_engine.clone());
+        let mut meta_iter = recoverer.clone();
+        if let Some(black_list) = load_black_list(&conf.black_list_path) {
+            meta_iter.set_black_list(black_list);
+        }
+        let (kv_engine, sender, receiver) =
+            Self::init_kv_engine(pd, conf, dfs, rate_limiter, &mut meta_iter, recoverer).unwrap();
+
         unset_panic_mark();
         Engines::new(
             kv_engine,

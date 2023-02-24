@@ -32,7 +32,7 @@ use txn_types::{Key, WriteBatchFlags};
 
 use crate::{
     store::{
-        cmd_resp::{bind_term, new_error},
+        cmd_resp::{bind_term, message_error, new_error},
         ingest::convert_sst,
         load_last_peer_state,
         msg::Callback,
@@ -252,6 +252,7 @@ impl<'a> PeerMsgHandler<'a> {
                 shard_ver,
                 callback,
             } => self.on_truncate_ts(ts, shard_ver, callback),
+            CasualMessage::RestoreShard { cs, callback } => self.on_restore_shard(cs, callback),
         }
     }
 
@@ -1906,6 +1907,80 @@ impl<'a> PeerMsgHandler<'a> {
                 }
             }
         }
+    }
+
+    fn on_restore_shard(&mut self, mut cs: kvenginepb::ChangeSet, callback: Callback) {
+        let tag = self.peer.tag();
+        let region = self.peer.get_preprocessed_region();
+
+        // Check request.
+        if !cs.has_restore_shard() {
+            callback.invoke_with_response(message_error("invalid changeset"));
+            return;
+        }
+        let encoded_start_key = Key::from_raw(cs.get_restore_shard().get_start()).into_encoded();
+        let encoded_end_key = Key::from_raw(cs.get_restore_shard().get_end()).into_encoded();
+        if encoded_start_key != region.get_start_key() || encoded_end_key != region.get_end_key() {
+            let err_msg = format!(
+                "invalid snapshot range: [{:?},{:?}), expect: [{:?},{:?})",
+                encoded_start_key,
+                encoded_end_key,
+                region.get_start_key(),
+                region.get_end_key()
+            );
+            callback.invoke_with_response(message_error(err_msg));
+            return;
+        }
+
+        // Check peer.
+        if !self.peer.is_leader() {
+            callback.invoke_with_response(new_error(Error::NotLeader(
+                self.peer.region_id,
+                self.fsm.peer.get_peer_from_cache(self.fsm.peer.leader_id()),
+            )));
+            return;
+        }
+        if cs.shard_ver != region.get_region_epoch().get_version() {
+            callback.invoke_with_response(new_error(Error::EpochNotMatch(
+                "restore_shard".to_owned(),
+                vec![region.clone()],
+            )));
+            return;
+        }
+
+        let shard = match self.ctx.global.engines.kv.get_shard(self.region_id()) {
+            // initial flushed is necessary ?
+            Some(shard) if !shard.get_initial_flushed() => {
+                let err_msg = format!("{tag} not initial flushed, try again");
+                callback.invoke_with_response(message_error(err_msg));
+                return;
+            }
+            None => {
+                let err_msg = format!("{tag} shard not found");
+                error!("{}", err_msg);
+                callback.invoke_with_response(message_error(err_msg));
+                return;
+            }
+            Some(shard) => shard,
+        };
+
+        debug!("{} on_restore_shard, original changeset: {:?}", tag, cs);
+
+        // Adjust base version.
+        let snap = cs.mut_restore_shard();
+        let write_seq = shard.get_write_sequence();
+        let old_mem_tbl_version = shard.get_base_version() + write_seq;
+        let new_mem_tbl_version =
+            cmp::max(snap.base_version + snap.data_sequence, old_mem_tbl_version);
+        snap.set_base_version(new_mem_tbl_version - write_seq);
+        snap.set_data_sequence(write_seq); // not necessary but just keep fields consistency.
+        info!("{} on_restore_shard, adjusted changeset: {:?}", tag, cs);
+
+        let mut cmd = self.new_raft_cmd_request();
+        let mut custom_builder = CustomBuilder::new();
+        custom_builder.set_change_set(&cs);
+        cmd.set_custom_request(custom_builder.build());
+        self.propose_raft_command(cmd, callback, None);
     }
 }
 

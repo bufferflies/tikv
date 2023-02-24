@@ -207,6 +207,18 @@ impl ServerCluster {
         panic!("pd region count not match");
     }
 
+    pub fn wait_pd_region_min_count(&self, min_count: usize) {
+        let mut region_count = 0;
+        for _ in 0..10 {
+            region_count = self.pd_client.get_regions_number();
+            if region_count >= min_count {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        panic!("pd region count {} not match", region_count);
+    }
+
     pub fn remove_node_peers(&mut self, node_id: u16) {
         let server = self.servers.get(&node_id).unwrap();
         let store_id = server.get_store_id();
@@ -357,7 +369,7 @@ where
     false
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct ClusterDataStats {
     regions: HashMap<u64, RegionShardStats>,
 }
@@ -380,6 +392,16 @@ impl ClusterDataStats {
             stats.check_healthy().map_err(map_err_fn)?;
         }
         Ok(())
+    }
+
+    pub fn iter_shard_stats(&self, mut f: impl FnMut(u64, &ShardStats) -> bool) {
+        for region in self.regions.values() {
+            for (&store_id, shard) in &region.shard_stats {
+                if f(store_id, shard) {
+                    return;
+                }
+            }
+        }
     }
 }
 

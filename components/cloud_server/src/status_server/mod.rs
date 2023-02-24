@@ -624,6 +624,67 @@ impl StatusServer {
         })
     }
 
+    async fn get_restore_shard_request(
+        raw_req: Request<Body>,
+    ) -> hyper::Result<RestoreShardRequest> {
+        let mut body = Vec::new();
+        raw_req
+            .into_body()
+            .try_for_each(|bytes| {
+                body.extend(bytes);
+                ok(())
+            })
+            .await?;
+        let mut cs = kvenginepb::ChangeSet::default();
+        cs.merge_from_bytes(&body).unwrap();
+        Ok(RestoreShardRequest { cs })
+    }
+
+    async fn restore_shard(
+        req: Request<Body>,
+        router: RaftRouter,
+    ) -> hyper::Result<Response<Body>> {
+        let req = Self::get_restore_shard_request(req).await?;
+        let shard_id = req.cs.get_shard_id();
+        debug!("[{}] receive restore_shard request: {:?}", shard_id, req);
+
+        let (cb, fut) = paired_future_callback();
+        let callback = Callback::write(Box::new(move |res| {
+            cb(res);
+        }));
+        router.send_casual_msg(
+            req.cs.get_shard_id(),
+            CasualMessage::RestoreShard {
+                cs: req.cs,
+                callback,
+            },
+        );
+
+        let res = fut.await.unwrap();
+        if res.response.get_header().has_error() {
+            error!(
+                "{} restore_shard error: {:?}",
+                shard_id,
+                res.response.get_header().get_error()
+            );
+            Ok(make_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                res.response
+                    .get_header()
+                    .get_error()
+                    .get_message()
+                    .to_string(),
+            ))
+        } else {
+            let resp = RestoreShardResponse::default();
+            let json = serde_json::to_string_pretty(&resp).unwrap();
+            Ok(Response::builder()
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json))
+                .unwrap())
+        }
+    }
+
     pub fn stop(self) {
         let _ = self.tx.send(());
         self.thread_pool.shutdown_timeout(Duration::from_secs(3));
@@ -826,6 +887,9 @@ impl StatusServer {
                             }
                             (Method::POST, path) if path.starts_with("/truncate-ts") => {
                                 Self::truncate_ts(req, rfengine, engine, router).await
+                            }
+                            (Method::POST, path) if path.starts_with("/restore-shard") => {
+                                Self::restore_shard(req, router).await
                             }
                             (Method::POST, path) if path.starts_with("/kvengine/compactor") => {
                                 Self::add_remote_compactor(req, engine.comp_client.clone()).await
@@ -1108,3 +1172,13 @@ where
         .body(message.into())
         .unwrap()
 }
+
+#[derive(Debug)]
+struct RestoreShardRequest {
+    pub cs: kvenginepb::ChangeSet,
+}
+
+#[derive(Default, Serialize, Deserialize, Debug, PartialEq)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+struct RestoreShardResponse {}

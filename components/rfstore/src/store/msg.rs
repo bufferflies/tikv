@@ -346,6 +346,11 @@ pub enum CasualMessage {
         shard_ver: u64,
         callback: Callback,
     },
+    /// Restore from backup data.
+    RestoreShard {
+        cs: kvenginepb::ChangeSet,
+        callback: Callback,
+    },
 }
 
 impl fmt::Debug for CasualMessage {
@@ -369,6 +374,9 @@ impl fmt::Debug for CasualMessage {
             }
             CasualMessage::TruncateTs { ts, shard_ver, .. } => {
                 write!(fmt, "truncate ts {:?}, shard ver {:?}", ts, shard_ver)
+            }
+            CasualMessage::RestoreShard { cs, .. } => {
+                write!(fmt, "restore shard from {:?}", cs)
             }
         }
     }

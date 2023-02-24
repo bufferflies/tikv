@@ -1,6 +1,6 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{cmp::max, collections::HashMap};
+use std::{cmp::max, collections::HashMap, iter::Iterator};
 
 use bytes::{Buf, Bytes};
 use kvenginepb as pb;
@@ -29,11 +29,15 @@ pub struct ShardMeta {
 
 impl ShardMeta {
     pub fn new(engine_id: u64, cs: &pb::ChangeSet) -> Self {
-        assert!(cs.has_snapshot() || cs.has_initial_flush());
+        assert!(cs.has_snapshot() || cs.has_initial_flush() || cs.has_restore_shard());
         let snap = if cs.has_snapshot() {
             cs.get_snapshot()
-        } else {
+        } else if cs.has_initial_flush() {
             cs.get_initial_flush()
+        } else if cs.has_restore_shard() {
+            cs.get_restore_shard()
+        } else {
+            unreachable!();
         };
         let mut meta = Self {
             engine_id,
@@ -101,7 +105,7 @@ impl ShardMeta {
         fm.level = level as u8;
     }
 
-    fn add_file(&mut self, id: u64, cf: i32, level: u32, smallest: &[u8], biggest: &[u8]) {
+    pub fn add_file(&mut self, id: u64, cf: i32, level: u32, smallest: &[u8], biggest: &[u8]) {
         self.files
             .insert(id, FileMeta::new(cf, level, smallest, biggest));
     }
@@ -166,6 +170,10 @@ impl ShardMeta {
         }
         if cs.has_ingest_files() {
             self.apply_ingest_files(cs.get_ingest_files());
+            return;
+        }
+        if cs.has_restore_shard() {
+            self.apply_restore_shard(cs);
             return;
         }
         if !cs.get_property_key().is_empty() {
@@ -294,6 +302,9 @@ impl ShardMeta {
                     return true;
                 }
             }
+        }
+        if cs.has_restore_shard() {
+            // TODO: skip duplicated
         }
         false
     }
@@ -454,6 +465,32 @@ impl ShardMeta {
         }
     }
 
+    fn apply_restore_shard(&mut self, cs: &pb::ChangeSet) {
+        assert!(cs.has_restore_shard());
+        assert_eq!(self.start, cs.get_restore_shard().start);
+        assert_eq!(self.end, cs.get_restore_shard().end);
+        info!(
+            "{} apply_restore_shard in meta: current ver:{}, seq:{}, base_ver:{}, data_seq:{}",
+            self.tag(),
+            self.ver,
+            self.seq,
+            self.base_version,
+            self.data_sequence
+        );
+
+        let mut new_meta = Self::new(self.engine_id, cs);
+        new_meta.data_sequence = cs.sequence;
+        *self = new_meta;
+        info!(
+            "{} apply_restore_shard in meta: new ver:{}, seq:{}, base_ver:{}, data_seq:{}",
+            self.tag(),
+            self.ver,
+            self.seq,
+            self.base_version,
+            self.data_sequence
+        );
+    }
+
     pub fn apply_split(
         &self,
         split: &kvenginepb::Split,
@@ -543,7 +580,7 @@ impl ShardMeta {
         cs.write_to_bytes().unwrap()
     }
 
-    pub fn all_files(&self) -> Vec<u64> {
+    pub fn all_file_keys(&self) -> Vec<u64> {
         let mut ids = Vec::with_capacity(self.files.len());
         for k in self.files.keys() {
             ids.push(*k);
@@ -551,8 +588,30 @@ impl ShardMeta {
         ids
     }
 
+    pub fn all_files(&self) -> &HashMap<u64, FileMeta> {
+        &self.files
+    }
+
     pub fn overlap_table(&self, smallest: &[u8], biggest: &[u8]) -> bool {
+        // [start-----smallest-----biggest-----end)
+        // smallest-----[start-----biggest-----end)
+        // [start-----smallest-----end)-----biggest
+        // smallest-----[start-----end)-----biggest
         self.start.as_slice() <= biggest && smallest < self.end.as_slice()
+    }
+
+    pub fn entirely_over_bound_table(&self, smallest: &[u8], biggest: &[u8]) -> bool {
+        // smallest-----biggest-----[start----------end)
+        // [start----------end)-----smallest-----biggest
+        !self.overlap_table(smallest, biggest)
+    }
+
+    pub fn partially_over_bound_table(&self, smallest: &[u8], biggest: &[u8]) -> bool {
+        // smallest-----[start-----end)-----biggest
+        // smallest-----[start-----biggest-----end)
+        // [start-----smallest-----end)-----biggest
+        self.overlap_table(smallest, biggest)
+            && (smallest < self.start.as_slice() || self.end.as_slice() <= biggest)
     }
 
     pub(crate) fn get_ingest_level(&self, smallest: &[u8], biggest: &[u8]) -> u32 {
@@ -611,11 +670,11 @@ impl ShardMeta {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct FileMeta {
-    pub(crate) cf: i8,
-    pub(crate) level: u8,
-    pub(crate) smallest: Bytes,
-    pub(crate) biggest: Bytes,
+pub struct FileMeta {
+    pub cf: i8,
+    pub level: u8,
+    pub smallest: Bytes,
+    pub biggest: Bytes,
 }
 
 impl FileMeta {
@@ -839,6 +898,58 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn test_table_overlap() {
+        let meta = ShardMeta {
+            start: vec![10],
+            end: vec![20],
+            ..Default::default()
+        };
+
+        let cases: Vec<(u8, u8, bool, bool, bool)> = vec![
+            // smallest, biggest, overlap, entirely_over_bound, partially_over_bound
+            (3, 5, false, true, false),
+            (3, 10, true, false, true),
+            (3, 15, true, false, true),
+            (3, 20, true, false, true),
+            (3, 25, true, false, true),
+            (10, 15, true, false, false),
+            (10, 20, true, false, true),
+            (10, 25, true, false, true),
+            (13, 15, true, false, false),
+            (13, 20, true, false, true),
+            (13, 25, true, false, true),
+            (20, 25, false, true, false),
+            (23, 25, false, true, false),
+        ];
+
+        for (idx, (smallest, biggest, overlap, entirely_over_bound, partially_over_bound)) in
+            cases.into_iter().enumerate()
+        {
+            let smallest = [smallest];
+            let biggest = [biggest];
+
+            assert_eq!(
+                meta.overlap_table(&smallest, &biggest),
+                overlap,
+                "case {}",
+                idx
+            );
+            assert_eq!(
+                meta.entirely_over_bound_table(&smallest, &biggest),
+                entirely_over_bound,
+                "case {}",
+                idx
+            );
+            assert_eq!(
+                meta.partially_over_bound_table(&smallest, &biggest),
+                partially_over_bound,
+                "case {}",
+                idx
+            );
         }
     }
 }

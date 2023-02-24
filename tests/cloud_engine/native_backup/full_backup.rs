@@ -60,7 +60,7 @@ fn start_cluster_and_full_backup(
 
     cluster.stop();
 
-    let ref_store = client.take_ref_store();
+    let ref_store = client.dump_ref_store();
     assert_eq!(ref_store.len(), DATA_SIZE);
 
     (backup_meta, ref_store)

@@ -1734,7 +1734,7 @@ pub(crate) fn region_apply_conf_change(
 #[derive(Clone)]
 pub(crate) struct ApplyRouter {}
 
-pub(crate) const TERM_KEY: &str = "term";
+pub const TERM_KEY: &str = "term";
 
 pub(crate) struct ApplyContext {
     pub(crate) engine: kvengine::Engine,

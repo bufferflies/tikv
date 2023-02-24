@@ -263,7 +263,7 @@ pub(crate) fn raw_start_key(region: &metapb::Region) -> Vec<u8> {
 }
 
 // Get the `end_key` of current region in raw form.
-pub(crate) fn raw_end_key(region: &metapb::Region) -> Vec<u8> {
+pub fn raw_end_key(region: &metapb::Region) -> Vec<u8> {
     // only initialized region's end_key can be encoded, otherwise there must be bugs
     // somewhere.
     if region.end_key.is_empty() {

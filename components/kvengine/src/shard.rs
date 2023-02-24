@@ -43,7 +43,7 @@ pub struct Shard {
     pub(crate) compacting: AtomicBool,
     pub(crate) initial_flushed: AtomicBool,
 
-    pub(crate) base_version: u64,
+    pub(crate) base_version: AtomicU64,
 
     pub(crate) estimated_size: AtomicU64,
     pub(crate) estimated_entries: AtomicU64,
@@ -139,7 +139,7 @@ impl Shard {
             let mut guard = shard.parent_snap.write().unwrap();
             *guard = Some(cs.get_parent().get_snapshot().clone());
         }
-        shard.base_version = snap.base_version;
+        shard.base_version.store(snap.base_version, Release);
         shard.meta_seq.store(cs.sequence, Release);
         shard.write_sequence.store(snap.data_sequence, Release);
         info!(
@@ -336,7 +336,7 @@ impl Shard {
     }
 
     pub(crate) fn load_mem_table_version(&self) -> u64 {
-        self.base_version + self.write_sequence.load(Acquire)
+        self.get_base_version() + self.write_sequence.load(Acquire)
     }
 
     pub fn get_all_files(&self) -> Vec<u64> {
@@ -370,6 +370,10 @@ impl Shard {
             old_data.cfs.clone(),
         );
         self.set_data(new_data);
+    }
+
+    pub fn get_base_version(&self) -> u64 {
+        self.base_version.load(Ordering::Acquire)
     }
 
     pub fn get_write_sequence(&self) -> u64 {

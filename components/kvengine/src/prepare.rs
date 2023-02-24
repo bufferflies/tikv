@@ -52,6 +52,9 @@ impl EngineCore {
         if cs.has_initial_flush() {
             self.collect_snap_ids(cs.get_initial_flush(), &mut ids);
         }
+        if cs.has_restore_shard() {
+            self.collect_snap_ids(cs.get_restore_shard(), &mut ids);
+        }
         if cs.has_ingest_files() {
             let ingest_files = cs.get_ingest_files();
             for l0 in ingest_files.get_l0_creates() {

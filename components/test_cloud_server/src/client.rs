@@ -158,7 +158,8 @@ impl ClusterClient {
         let commit_ts = self.get_ts();
         self.kv_commit(keys, start_ts, commit_ts);
         let first = mutations.first().unwrap();
-        self.verify_key_value(first.get_key(), first.get_value(), put_time);
+        self.verify_key_value(first.get_key(), first.get_value(), put_time)
+            .unwrap();
         self.put_kv_in_ref_store(mutations);
         self.set_max_ts(commit_ts.into_inner());
     }
@@ -494,6 +495,10 @@ impl ClusterClient {
     }
 
     pub fn split(&mut self, key: &[u8]) {
+        self.try_split(key).expect("ClusterClient::split");
+    }
+
+    pub fn try_split(&mut self, key: &[u8]) -> std::result::Result<(), Box<dyn std::error::Error>> {
         for _ in 0..10 {
             let region_id = self.get_region_id(key);
             let ctx = self.new_rpc_ctx(region_id).unwrap();
@@ -512,11 +517,11 @@ impl ClusterClient {
                     sleep(Duration::from_millis(100));
                     continue;
                 }
-                panic!("failed to split key {:?} error {:?}", key, region_err);
+                return Err(format!("failed to split key {:?} error {:?}", key, region_err).into());
             }
-            return;
+            return Ok(());
         }
-        panic!("failed to split key {:?}", key);
+        Err(format!("failed to split key {:?}", key).into())
     }
 
     pub fn merge(&mut self, source_key: &[u8], target_key: &[u8]) {
@@ -525,6 +530,46 @@ impl ClusterClient {
         assert_ne!(source_region.id, target_region.id);
         self.pd_client
             .merge_region(source_region.id, target_region.id);
+    }
+
+    pub fn try_merge_adjacent_region(
+        &mut self,
+        source_key: &[u8],
+        boundary_prefix: Option<&[u8]>,
+        timeout: Duration,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let source_region = self.pd_client.get_region(source_key)?;
+        let raw_end_key = rfstore::store::raw_end_key(&source_region);
+        if let Some(prefix) = boundary_prefix {
+            if !raw_end_key.starts_with(prefix) {
+                return Err(format!(
+                    "adjacent region out of boundary prefix, raw_end_key: {:?}",
+                    raw_end_key,
+                )
+                .into());
+            }
+        }
+
+        let target_region = self.pd_client.get_region(source_region.get_end_key())?;
+        assert_ne!(source_region.id, target_region.id);
+        self.pd_client
+            .merge_region(source_region.id, target_region.id);
+
+        let start = Instant::now();
+        loop {
+            if block_on(self.pd_client.get_region_by_id(source_region.id))
+                .unwrap()
+                .is_none()
+            {
+                break;
+            }
+            if start.saturating_elapsed() >= timeout {
+                return Err(format!("region {:?} is still not merged.", source_region).into());
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+
+        Ok(())
     }
 
     pub fn must_get_key(&mut self, key: &[u8], put_time: Instant) -> (Vec<u8>, Context) {
@@ -592,35 +637,51 @@ impl ClusterClient {
     }
 
     pub fn verify_data_with_ref_store(&mut self) {
-        let put_time = Instant::now();
         let ref_store = self.ref_store.lock().unwrap().clone();
-        for (k, v) in ref_store {
-            self.verify_key_value(&k, &v, put_time);
-        }
+        self.verify_data_with_given_ref_store(&ref_store)
+            .expect("verify_data_with_ref_store");
     }
 
-    pub fn verify_key_value(&mut self, key: &[u8], expect_val: &[u8], put_time: Instant) {
+    pub fn verify_data_with_given_ref_store(
+        &mut self,
+        ref_store: &RefStore,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let put_time = Instant::now();
+        for (k, v) in ref_store {
+            self.verify_key_value(k, v, put_time)?;
+        }
+        Ok(())
+    }
+
+    pub fn verify_key_value(
+        &mut self,
+        key: &[u8],
+        expect_val: &[u8],
+        put_time: Instant,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let (val, ctx) = self.must_get_key(key, put_time);
         if val.as_slice() != expect_val {
             let region_id = ctx.region_id;
             let region_ver = ctx.get_region_epoch().get_version();
-            panic!(
+            return Err(format!(
                 "val not equal for key {:?} on region {}:{}, db_len:{}, ref_store_len:{}",
                 key,
                 region_id,
                 region_ver,
                 val.len(),
                 expect_val.len()
-            );
+            )
+            .into());
         }
+        Ok(())
     }
 
     pub fn ref_store_contains_key(&self, key: &[u8]) -> bool {
         self.ref_store.lock().unwrap().contains_key(key)
     }
 
-    pub fn take_ref_store(&mut self) -> RefStore {
-        std::mem::take(&mut self.ref_store.lock().unwrap())
+    pub fn dump_ref_store(&mut self) -> RefStore {
+        self.ref_store.lock().unwrap().clone()
     }
 
     pub fn ingest_ref_store(&mut self, mut ref_store: RefStore) {

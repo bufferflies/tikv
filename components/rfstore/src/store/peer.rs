@@ -1654,6 +1654,9 @@ impl Peer {
         if rejected {
             return;
         }
+        if cs.has_restore_shard() {
+            Self::preprocess_restore_shard(entry, &mut cs);
+        }
         shard_meta.apply_change_set(&cs);
         info!(
             "shard meta apply change set {:?}", &cs;
@@ -1665,7 +1668,7 @@ impl Peer {
             KV_ENGINE_META_KEY,
             &shard_meta.marshal(),
         );
-        if cs.has_initial_flush() || cs.has_snapshot() {
+        if cs.has_initial_flush() || cs.has_snapshot() || cs.has_restore_shard() {
             if let Some(parent_id) = opt_parent_id {
                 if ctx
                     .global
@@ -1682,6 +1685,16 @@ impl Peer {
             }
         }
         ctx.apply_msgs.msgs.push(ApplyMsg::PrepareChangeSet(cs));
+    }
+
+    fn preprocess_restore_shard(entry: &Entry, cs: &mut kvenginepb::ChangeSet) {
+        assert!(cs.has_restore_shard());
+
+        // NOTE: `cse-ctl` do NOT set TERM_KEY in changeset. Set it here.
+        let snap = cs.mut_restore_shard();
+        let props = snap.mut_properties();
+        props.mut_keys().push(TERM_KEY.to_string());
+        props.mut_values().push(entry.term.to_le_bytes().to_vec());
     }
 
     pub(crate) fn preprocess_pending_splits(

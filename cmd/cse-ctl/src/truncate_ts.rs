@@ -161,7 +161,7 @@ async fn request_truncate_ts_store(
     body_map.insert("truncate_ts".to_string(), truncate_ts.to_string());
     let json_string = serde_json::to_string(&body_map).unwrap();
     let req = Request::post(uri).body(Body::from(json_string)).unwrap();
-    match send_request_to_store(req, store).await {
+    match send_request_to_store(req, &store).await {
         Ok(resp) => {
             let resp: Vec<ShardTruncateTsStats> = serde_json::from_slice(&resp).unwrap();
             tx.send(Ok((store_id, resp))).unwrap()

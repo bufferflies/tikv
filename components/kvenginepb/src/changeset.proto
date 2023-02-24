@@ -36,6 +36,7 @@ message ChangeSet {
   TableChange destroy_range = 18;
   TableChange truncate_ts = 19;
   TableChange trim_over_bound = 20;
+  Snapshot restore_shard = 21;
 }
 
 message Compaction {
