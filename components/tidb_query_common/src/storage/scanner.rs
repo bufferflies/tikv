@@ -1,9 +1,5 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{fmt::Debug, marker::PhantomData};
-
-use api_version::{api_v2::KeyspaceId, KvFormat};
-
 use super::{range::*, ranges_iter::*, OwnedKvPair, Storage};
 use crate::error::StorageError;
 
@@ -11,7 +7,7 @@ const KEY_BUFFER_CAPACITY: usize = 64;
 
 /// A scanner that scans over multiple ranges. Each range can be a point range containing only
 /// one row, or an interval range containing multiple rows.
-pub struct RangesScanner<T, F> {
+pub struct RangesScanner<T> {
     storage: T,
     ranges_iter: RangesIterator,
 
@@ -27,7 +23,6 @@ pub struct RangesScanner<T, F> {
     current_range: IntervalRange,
     working_range_begin_key: Vec<u8>,
     working_range_end_key: Vec<u8>,
-    _phantom: PhantomData<F>,
 }
 
 pub struct RangesScannerOptions<T> {
@@ -38,67 +33,7 @@ pub struct RangesScannerOptions<T> {
     pub is_scanned_range_aware: bool, // TODO: This can be const generics
 }
 
-pub struct IndexedKvPair {
-    key: Vec<u8>,
-    value: Vec<u8>,
-    keyspace: Option<KeyspaceId>,
-    offset: usize,
-}
-
-impl IndexedKvPair {
-    pub fn from_kv_pair<F: KvFormat>((k, v): OwnedKvPair) -> Result<Self, StorageError> {
-        let (keyspace, user_key) =
-            F::strip_keyspace(&k).map_err(|e| StorageError(anyhow::Error::new(e)))?;
-        let offset = k.len() - user_key.len();
-
-        Ok(IndexedKvPair {
-            key: k,
-            value: v,
-            keyspace,
-            offset,
-        })
-    }
-
-    pub fn key(&self) -> &[u8] {
-        &self.key[self.offset..]
-    }
-
-    pub fn value(&self) -> &[u8] {
-        &self.value
-    }
-
-    pub fn kv(&self) -> (&[u8], &[u8]) {
-        (self.key(), self.value())
-    }
-
-    pub fn keyspace(&self) -> Option<KeyspaceId> {
-        self.keyspace
-    }
-}
-
-impl PartialEq for IndexedKvPair {
-    fn eq(&self, other: &IndexedKvPair) -> bool {
-        self.kv() == other.kv()
-    }
-}
-
-impl PartialEq<OwnedKvPair> for IndexedKvPair {
-    fn eq(&self, other: &OwnedKvPair) -> bool {
-        self.kv() == (&other.0, &other.1)
-    }
-}
-
-impl Debug for IndexedKvPair {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("IndexedKvPair")
-            .field("key", &log_wrappers::hex_encode_upper(self.key()))
-            .field("value", &log_wrappers::hex_encode_upper(self.value()))
-            .field("keyspace", &self.keyspace)
-            .finish()
-    }
-}
-
-impl<T: Storage, F: KvFormat> RangesScanner<T, F> {
+impl<T: Storage> RangesScanner<T> {
     pub fn new(
         RangesScannerOptions {
             storage,
@@ -107,7 +42,7 @@ impl<T: Storage, F: KvFormat> RangesScanner<T, F> {
             is_key_only,
             is_scanned_range_aware,
         }: RangesScannerOptions<T>,
-    ) -> Self {
+    ) -> RangesScanner<T> {
         let ranges_len = ranges.len();
         let ranges_iter = RangesIterator::new(ranges);
         RangesScanner {
@@ -123,14 +58,22 @@ impl<T: Storage, F: KvFormat> RangesScanner<T, F> {
             },
             working_range_begin_key: Vec::with_capacity(KEY_BUFFER_CAPACITY),
             working_range_end_key: Vec::with_capacity(KEY_BUFFER_CAPACITY),
-            _phantom: PhantomData,
         }
     }
 
     /// Fetches next row.
     // Note: This is not implemented over `Iterator` since it can fail.
     // TODO: Change to use reference to avoid allocation and copy.
-    pub fn next(&mut self) -> Result<Option<IndexedKvPair>, StorageError> {
+    pub fn next(&mut self) -> Result<Option<OwnedKvPair>, StorageError> {
+        self.next_opt(true)
+    }
+
+    /// Fetches next row.
+    /// Note: `update_scanned_range` can control whether update the scanned range when `is_scanned_range_aware` is true.
+    pub fn next_opt(
+        &mut self,
+        update_scanned_range: bool,
+    ) -> Result<Option<OwnedKvPair>, StorageError> {
         loop {
             let range = self.ranges_iter.next();
             let some_row = match range {
@@ -159,17 +102,16 @@ impl<T: Storage, F: KvFormat> RangesScanner<T, F> {
                     return Ok(None); // drained
                 }
             };
-            if self.is_scanned_range_aware {
+            if self.is_scanned_range_aware && update_scanned_range {
                 self.update_scanned_range_from_scanned_row(&some_row);
             }
-            if let Some(row) = some_row {
+            if some_row.is_some() {
                 // Retrieved one row from point range or interval range.
                 if let Some(r) = self.scanned_rows_per_range.last_mut() {
                     *r += 1;
                 }
 
-                let row = IndexedKvPair::from_kv_pair::<F>(row)?;
-                return Ok(Some(row));
+                return Ok(some_row);
             } else {
                 // No more row in the range.
                 self.ranges_iter.notify_drained();
@@ -226,31 +168,35 @@ impl<T: Storage, F: KvFormat> RangesScanner<T, F> {
     fn update_scanned_range_from_new_point(&mut self, point: &PointRange) {
         assert!(self.is_scanned_range_aware);
 
-        self.update_working_range_end_key();
-        self.current_range.lower_inclusive.clear();
-        self.current_range.upper_exclusive.clear();
-        self.current_range
-            .lower_inclusive
-            .extend_from_slice(&point.0);
-        self.current_range
-            .upper_exclusive
-            .extend_from_slice(&point.0);
-        self.current_range.upper_exclusive.push(0);
+        // Only update current_range for the first and the last range.
+        if self.current_range.lower_inclusive.is_empty() || self.ranges_iter.is_drained() {
+            self.current_range.lower_inclusive.clear();
+            self.current_range.upper_exclusive.clear();
+            self.current_range
+                .lower_inclusive
+                .extend_from_slice(&point.0);
+            self.current_range
+                .upper_exclusive
+                .extend_from_slice(&point.0);
+            self.current_range.upper_exclusive.push(0);
+        }
         self.update_working_range_begin_key();
     }
 
     fn update_scanned_range_from_new_range(&mut self, range: &IntervalRange) {
         assert!(self.is_scanned_range_aware);
 
-        self.update_working_range_end_key();
-        self.current_range.lower_inclusive.clear();
-        self.current_range.upper_exclusive.clear();
-        self.current_range
-            .lower_inclusive
-            .extend_from_slice(&range.lower_inclusive);
-        self.current_range
-            .upper_exclusive
-            .extend_from_slice(&range.upper_exclusive);
+        // Only update current_range for the first and the last range.
+        if self.current_range.lower_inclusive.is_empty() || self.ranges_iter.is_drained() {
+            self.current_range.lower_inclusive.clear();
+            self.current_range.upper_exclusive.clear();
+            self.current_range
+                .lower_inclusive
+                .extend_from_slice(&range.lower_inclusive);
+            self.current_range
+                .upper_exclusive
+                .extend_from_slice(&range.upper_exclusive);
+        }
         self.update_working_range_begin_key();
     }
 
@@ -296,8 +242,6 @@ impl<T: Storage, F: KvFormat> RangesScanner<T, F> {
 
 #[cfg(test)]
 mod tests {
-    use api_version::ApiV1;
-
     use super::*;
     use crate::storage::{test_fixture::FixtureStorage, IntervalRange, PointRange, Range};
 
@@ -323,7 +267,7 @@ mod tests {
             PointRange::from("foo_3").into(),
             IntervalRange::from(("a", "c")).into(),
         ];
-        let mut scanner = RangesScanner::<_, ApiV1>::new(RangesScannerOptions {
+        let mut scanner = RangesScanner::new(RangesScannerOptions {
             storage: storage.clone(),
             ranges,
             scan_backward_in_range: false,
@@ -331,24 +275,24 @@ mod tests {
             is_scanned_range_aware: false,
         });
         assert_eq!(
-            scanner.next().unwrap().unwrap(),
-            (b"foo".to_vec(), b"1".to_vec())
+            scanner.next().unwrap(),
+            Some((b"foo".to_vec(), b"1".to_vec()))
         );
         assert_eq!(
-            scanner.next().unwrap().unwrap(),
-            (b"foo_2".to_vec(), b"3".to_vec())
+            scanner.next().unwrap(),
+            Some((b"foo_2".to_vec(), b"3".to_vec()))
         );
         assert_eq!(
-            scanner.next().unwrap().unwrap(),
-            (b"foo_3".to_vec(), b"5".to_vec())
+            scanner.next().unwrap(),
+            Some((b"foo_3".to_vec(), b"5".to_vec()))
         );
         assert_eq!(
-            scanner.next().unwrap().unwrap(),
-            (b"bar".to_vec(), b"2".to_vec())
+            scanner.next().unwrap(),
+            Some((b"bar".to_vec(), b"2".to_vec()))
         );
         assert_eq!(
-            scanner.next().unwrap().unwrap(),
-            (b"bar_2".to_vec(), b"4".to_vec())
+            scanner.next().unwrap(),
+            Some((b"bar_2".to_vec(), b"4".to_vec()))
         );
         assert_eq!(scanner.next().unwrap(), None);
 
@@ -359,7 +303,7 @@ mod tests {
             PointRange::from("foo_3").into(),
             IntervalRange::from(("a", "bar_2")).into(),
         ];
-        let mut scanner = RangesScanner::<_, ApiV1>::new(RangesScannerOptions {
+        let mut scanner = RangesScanner::new(RangesScannerOptions {
             storage: storage.clone(),
             ranges,
             scan_backward_in_range: true,
@@ -367,20 +311,20 @@ mod tests {
             is_scanned_range_aware: false,
         });
         assert_eq!(
-            scanner.next().unwrap().unwrap(),
-            (b"foo_2".to_vec(), b"3".to_vec())
+            scanner.next().unwrap(),
+            Some((b"foo_2".to_vec(), b"3".to_vec()))
         );
         assert_eq!(
-            scanner.next().unwrap().unwrap(),
-            (b"foo".to_vec(), b"1".to_vec())
+            scanner.next().unwrap(),
+            Some((b"foo".to_vec(), b"1".to_vec()))
         );
         assert_eq!(
-            scanner.next().unwrap().unwrap(),
-            (b"foo_3".to_vec(), b"5".to_vec())
+            scanner.next().unwrap(),
+            Some((b"foo_3".to_vec(), b"5".to_vec()))
         );
         assert_eq!(
-            scanner.next().unwrap().unwrap(),
-            (b"bar".to_vec(), b"2".to_vec())
+            scanner.next().unwrap(),
+            Some((b"bar".to_vec(), b"2".to_vec()))
         );
         assert_eq!(scanner.next().unwrap(), None);
 
@@ -390,32 +334,26 @@ mod tests {
             PointRange::from("foo_3").into(),
             PointRange::from("bar_3").into(),
         ];
-        let mut scanner = RangesScanner::<_, ApiV1>::new(RangesScannerOptions {
+        let mut scanner = RangesScanner::new(RangesScannerOptions {
             storage,
             ranges,
             scan_backward_in_range: false,
             is_key_only: true,
             is_scanned_range_aware: false,
         });
+        assert_eq!(scanner.next().unwrap(), Some((b"bar".to_vec(), Vec::new())));
         assert_eq!(
-            scanner.next().unwrap().unwrap(),
-            (b"bar".to_vec(), Vec::new())
+            scanner.next().unwrap(),
+            Some((b"bar_2".to_vec(), Vec::new()))
+        );
+        assert_eq!(scanner.next().unwrap(), Some((b"foo".to_vec(), Vec::new())));
+        assert_eq!(
+            scanner.next().unwrap(),
+            Some((b"foo_2".to_vec(), Vec::new()))
         );
         assert_eq!(
-            scanner.next().unwrap().unwrap(),
-            (b"bar_2".to_vec(), Vec::new())
-        );
-        assert_eq!(
-            scanner.next().unwrap().unwrap(),
-            (b"foo".to_vec(), Vec::new())
-        );
-        assert_eq!(
-            scanner.next().unwrap().unwrap(),
-            (b"foo_2".to_vec(), Vec::new())
-        );
-        assert_eq!(
-            scanner.next().unwrap().unwrap(),
-            (b"foo_3".to_vec(), Vec::new())
+            scanner.next().unwrap(),
+            Some((b"foo_3".to_vec(), Vec::new()))
         );
         assert_eq!(scanner.next().unwrap(), None);
     }
@@ -430,7 +368,7 @@ mod tests {
             PointRange::from("foo_3").into(),
             IntervalRange::from(("a", "z")).into(),
         ];
-        let mut scanner = RangesScanner::<_, ApiV1>::new(RangesScannerOptions {
+        let mut scanner = RangesScanner::new(RangesScannerOptions {
             storage,
             ranges,
             scan_backward_in_range: false,
@@ -439,9 +377,9 @@ mod tests {
         });
         let mut scanned_rows_per_range = Vec::new();
 
-        assert_eq!(scanner.next().unwrap().unwrap().key(), b"foo");
-        assert_eq!(scanner.next().unwrap().unwrap().key(), b"foo_2");
-        assert_eq!(scanner.next().unwrap().unwrap().key(), b"foo_3");
+        assert_eq!(&scanner.next().unwrap().unwrap().0, b"foo");
+        assert_eq!(&scanner.next().unwrap().unwrap().0, b"foo_2");
+        assert_eq!(&scanner.next().unwrap().unwrap().0, b"foo_3");
 
         scanner.collect_scanned_rows_per_range(&mut scanned_rows_per_range);
         assert_eq!(scanned_rows_per_range, vec![2, 0, 1]);
@@ -451,21 +389,21 @@ mod tests {
         assert_eq!(scanned_rows_per_range, vec![0]);
         scanned_rows_per_range.clear();
 
-        assert_eq!(scanner.next().unwrap().unwrap().key(), b"bar");
-        assert_eq!(scanner.next().unwrap().unwrap().key(), b"bar_2");
+        assert_eq!(&scanner.next().unwrap().unwrap().0, b"bar");
+        assert_eq!(&scanner.next().unwrap().unwrap().0, b"bar_2");
 
         scanner.collect_scanned_rows_per_range(&mut scanned_rows_per_range);
         assert_eq!(scanned_rows_per_range, vec![0, 2]);
         scanned_rows_per_range.clear();
 
-        assert_eq!(scanner.next().unwrap().unwrap().key(), b"foo");
+        assert_eq!(&scanner.next().unwrap().unwrap().0, b"foo");
 
         scanner.collect_scanned_rows_per_range(&mut scanned_rows_per_range);
         assert_eq!(scanned_rows_per_range, vec![1]);
         scanned_rows_per_range.clear();
 
-        assert_eq!(scanner.next().unwrap().unwrap().key(), b"foo_2");
-        assert_eq!(scanner.next().unwrap().unwrap().key(), b"foo_3");
+        assert_eq!(&scanner.next().unwrap().unwrap().0, b"foo_2");
+        assert_eq!(&scanner.next().unwrap().unwrap().0, b"foo_3");
         assert_eq!(scanner.next().unwrap(), None);
 
         scanner.collect_scanned_rows_per_range(&mut scanned_rows_per_range);
@@ -485,7 +423,7 @@ mod tests {
 
         // No range
         let ranges = vec![];
-        let mut scanner = RangesScanner::<_, ApiV1>::new(RangesScannerOptions {
+        let mut scanner = RangesScanner::new(RangesScannerOptions {
             storage: storage.clone(),
             ranges,
             scan_backward_in_range: false,
@@ -505,7 +443,7 @@ mod tests {
 
         // Empty interval range
         let ranges = vec![IntervalRange::from(("x", "xb")).into()];
-        let mut scanner = RangesScanner::<_, ApiV1>::new(RangesScannerOptions {
+        let mut scanner = RangesScanner::new(RangesScannerOptions {
             storage: storage.clone(),
             ranges,
             scan_backward_in_range: false,
@@ -521,7 +459,7 @@ mod tests {
 
         // Empty point range
         let ranges = vec![PointRange::from("x").into()];
-        let mut scanner = RangesScanner::<_, ApiV1>::new(RangesScannerOptions {
+        let mut scanner = RangesScanner::new(RangesScannerOptions {
             storage: storage.clone(),
             ranges,
             scan_backward_in_range: false,
@@ -537,7 +475,7 @@ mod tests {
 
         // Filled interval range
         let ranges = vec![IntervalRange::from(("foo", "foo_8")).into()];
-        let mut scanner = RangesScanner::<_, ApiV1>::new(RangesScannerOptions {
+        let mut scanner = RangesScanner::new(RangesScannerOptions {
             storage: storage.clone(),
             ranges,
             scan_backward_in_range: false,
@@ -545,14 +483,14 @@ mod tests {
             is_scanned_range_aware: true,
         });
 
-        assert_eq!(scanner.next().unwrap().unwrap().key(), b"foo");
-        assert_eq!(scanner.next().unwrap().unwrap().key(), b"foo_2");
+        assert_eq!(&scanner.next().unwrap().unwrap().0, b"foo");
+        assert_eq!(&scanner.next().unwrap().unwrap().0, b"foo_2");
 
         let r = scanner.take_scanned_range();
         assert_eq!(&r.lower_inclusive, b"foo");
         assert_eq!(&r.upper_exclusive, b"foo_2\0");
 
-        assert_eq!(scanner.next().unwrap().unwrap().key(), b"foo_3");
+        assert_eq!(&scanner.next().unwrap().unwrap().0, b"foo_3");
 
         let r = scanner.take_scanned_range();
         assert_eq!(&r.lower_inclusive, b"foo_2\0");
@@ -575,7 +513,7 @@ mod tests {
             PointRange::from("bar_3").into(),
             IntervalRange::from(("bar_4", "box")).into(),
         ];
-        let mut scanner = RangesScanner::<_, ApiV1>::new(RangesScannerOptions {
+        let mut scanner = RangesScanner::new(RangesScannerOptions {
             storage,
             ranges,
             scan_backward_in_range: false,
@@ -583,25 +521,25 @@ mod tests {
             is_scanned_range_aware: true,
         });
 
-        assert_eq!(scanner.next().unwrap().unwrap().key(), b"foo");
+        assert_eq!(&scanner.next().unwrap().unwrap().0, b"foo");
 
         let r = scanner.take_scanned_range();
         assert_eq!(&r.lower_inclusive, b"foo");
         assert_eq!(&r.upper_exclusive, b"foo\0");
 
-        assert_eq!(scanner.next().unwrap().unwrap().key(), b"foo_2");
+        assert_eq!(&scanner.next().unwrap().unwrap().0, b"foo_2");
 
         let r = scanner.take_scanned_range();
         assert_eq!(&r.lower_inclusive, b"foo\0");
         assert_eq!(&r.upper_exclusive, b"foo_2\0");
 
-        assert_eq!(scanner.next().unwrap().unwrap().key(), b"bar");
+        assert_eq!(&scanner.next().unwrap().unwrap().0, b"bar");
 
         let r = scanner.take_scanned_range();
         assert_eq!(&r.lower_inclusive, b"foo_2\0");
         assert_eq!(&r.upper_exclusive, b"bar\0");
 
-        assert_eq!(scanner.next().unwrap().unwrap().key(), b"bar_2");
+        assert_eq!(&scanner.next().unwrap().unwrap().0, b"bar_2");
 
         let r = scanner.take_scanned_range();
         assert_eq!(&r.lower_inclusive, b"bar\0");
@@ -620,7 +558,7 @@ mod tests {
 
         // No range
         let ranges = vec![];
-        let mut scanner = RangesScanner::<_, ApiV1>::new(RangesScannerOptions {
+        let mut scanner = RangesScanner::new(RangesScannerOptions {
             storage: storage.clone(),
             ranges,
             scan_backward_in_range: true,
@@ -640,7 +578,7 @@ mod tests {
 
         // Empty interval range
         let ranges = vec![IntervalRange::from(("x", "xb")).into()];
-        let mut scanner = RangesScanner::<_, ApiV1>::new(RangesScannerOptions {
+        let mut scanner = RangesScanner::new(RangesScannerOptions {
             storage: storage.clone(),
             ranges,
             scan_backward_in_range: true,
@@ -656,7 +594,7 @@ mod tests {
 
         // Empty point range
         let ranges = vec![PointRange::from("x").into()];
-        let mut scanner = RangesScanner::<_, ApiV1>::new(RangesScannerOptions {
+        let mut scanner = RangesScanner::new(RangesScannerOptions {
             storage: storage.clone(),
             ranges,
             scan_backward_in_range: true,
@@ -672,7 +610,7 @@ mod tests {
 
         // Filled interval range
         let ranges = vec![IntervalRange::from(("foo", "foo_8")).into()];
-        let mut scanner = RangesScanner::<_, ApiV1>::new(RangesScannerOptions {
+        let mut scanner = RangesScanner::new(RangesScannerOptions {
             storage: storage.clone(),
             ranges,
             scan_backward_in_range: true,
@@ -680,14 +618,14 @@ mod tests {
             is_scanned_range_aware: true,
         });
 
-        assert_eq!(scanner.next().unwrap().unwrap().key(), b"foo_3");
-        assert_eq!(scanner.next().unwrap().unwrap().key(), b"foo_2");
+        assert_eq!(&scanner.next().unwrap().unwrap().0, b"foo_3");
+        assert_eq!(&scanner.next().unwrap().unwrap().0, b"foo_2");
 
         let r = scanner.take_scanned_range();
         assert_eq!(&r.lower_inclusive, b"foo_2");
         assert_eq!(&r.upper_exclusive, b"foo_8");
 
-        assert_eq!(scanner.next().unwrap().unwrap().key(), b"foo");
+        assert_eq!(&scanner.next().unwrap().unwrap().0, b"foo");
 
         let r = scanner.take_scanned_range();
         assert_eq!(&r.lower_inclusive, b"foo");
@@ -708,7 +646,7 @@ mod tests {
             IntervalRange::from(("foo_5", "foo_50")).into(),
             IntervalRange::from(("foo", "foo_3")).into(),
         ];
-        let mut scanner = RangesScanner::<_, ApiV1>::new(RangesScannerOptions {
+        let mut scanner = RangesScanner::new(RangesScannerOptions {
             storage,
             ranges,
             scan_backward_in_range: true,
@@ -716,20 +654,20 @@ mod tests {
             is_scanned_range_aware: true,
         });
 
-        assert_eq!(scanner.next().unwrap().unwrap().key(), b"bar_2");
+        assert_eq!(&scanner.next().unwrap().unwrap().0, b"bar_2");
 
         let r = scanner.take_scanned_range();
         assert_eq!(&r.lower_inclusive, b"bar_2");
         assert_eq!(&r.upper_exclusive, b"box");
 
-        assert_eq!(scanner.next().unwrap().unwrap().key(), b"bar");
+        assert_eq!(&scanner.next().unwrap().unwrap().0, b"bar");
 
         let r = scanner.take_scanned_range();
         assert_eq!(&r.lower_inclusive, b"bar");
         assert_eq!(&r.upper_exclusive, b"bar_2");
 
-        assert_eq!(scanner.next().unwrap().unwrap().key(), b"foo_2");
-        assert_eq!(scanner.next().unwrap().unwrap().key(), b"foo");
+        assert_eq!(&scanner.next().unwrap().unwrap().0, b"foo_2");
+        assert_eq!(&scanner.next().unwrap().unwrap().0, b"foo");
 
         let r = scanner.take_scanned_range();
         assert_eq!(&r.lower_inclusive, b"foo");
@@ -740,5 +678,175 @@ mod tests {
         let r = scanner.take_scanned_range();
         assert_eq!(&r.lower_inclusive, b"foo");
         assert_eq!(&r.upper_exclusive, b"foo");
+    }
+
+    #[test]
+    fn test_scanned_range_forward2() {
+        let storage = create_storage();
+        // Filled interval range
+        let ranges = vec![IntervalRange::from(("foo", "foo_8")).into()];
+        let mut scanner = RangesScanner::new(RangesScannerOptions {
+            storage: storage.clone(),
+            ranges,
+            scan_backward_in_range: false,
+            is_key_only: false,
+            is_scanned_range_aware: true,
+        });
+
+        // Only lower_inclusive is updated.
+        assert_eq!(&scanner.next_opt(false).unwrap().unwrap().0, b"foo");
+        assert_eq!(&scanner.working_range_begin_key, b"foo");
+        assert_eq!(&scanner.working_range_end_key, b"");
+
+        // Upper_exclusive is updated.
+        assert_eq!(&scanner.next_opt(true).unwrap().unwrap().0, b"foo_2");
+        assert_eq!(&scanner.working_range_begin_key, b"foo");
+        assert_eq!(&scanner.working_range_end_key, b"foo_2\0");
+
+        // Upper_exclusive is not updated.
+        assert_eq!(&scanner.next_opt(false).unwrap().unwrap().0, b"foo_3");
+        assert_eq!(&scanner.working_range_begin_key, b"foo");
+        assert_eq!(&scanner.working_range_end_key, b"foo_2\0");
+
+        // Drained.
+        assert_eq!(scanner.next_opt(false).unwrap(), None);
+        assert_eq!(&scanner.working_range_begin_key, b"foo");
+        assert_eq!(&scanner.working_range_end_key, b"foo_8");
+
+        let r = scanner.take_scanned_range();
+        assert_eq!(&r.lower_inclusive, b"foo");
+        assert_eq!(&r.upper_exclusive, b"foo_8");
+
+        // Multiple ranges
+        // TODO: caller should not pass in unordered ranges otherwise scanned ranges would be
+        // unsound.
+        let ranges = vec![
+            IntervalRange::from(("foo", "foo_3")).into(),
+            IntervalRange::from(("foo_5", "foo_50")).into(),
+            IntervalRange::from(("bar", "bar_")).into(),
+            PointRange::from("bar_2").into(),
+            PointRange::from("bar_3").into(),
+            IntervalRange::from(("bar_4", "box")).into(),
+        ];
+        let mut scanner = RangesScanner::new(RangesScannerOptions {
+            storage,
+            ranges,
+            scan_backward_in_range: false,
+            is_key_only: false,
+            is_scanned_range_aware: true,
+        });
+
+        // Only lower_inclusive is updated.
+        assert_eq!(&scanner.next_opt(false).unwrap().unwrap().0, b"foo");
+        assert_eq!(&scanner.working_range_begin_key, b"foo");
+        assert_eq!(&scanner.working_range_end_key, b"");
+
+        // Upper_exclusive is updated. Updated by scanned row.
+        assert_eq!(&scanner.next_opt(true).unwrap().unwrap().0, b"foo_2");
+        assert_eq!(&scanner.working_range_begin_key, b"foo");
+        assert_eq!(&scanner.working_range_end_key, b"foo_2\0");
+
+        // Upper_exclusive is not updated.
+        assert_eq!(&scanner.next_opt(false).unwrap().unwrap().0, b"bar");
+        assert_eq!(&scanner.working_range_begin_key, b"foo");
+        assert_eq!(&scanner.working_range_end_key, b"foo_2\0");
+
+        // Upper_exclusive is not updated.
+        assert_eq!(&scanner.next_opt(false).unwrap().unwrap().0, b"bar_2");
+        assert_eq!(&scanner.working_range_begin_key, b"foo");
+        assert_eq!(&scanner.working_range_end_key, b"foo_2\0");
+
+        // Drain.
+        assert_eq!(scanner.next_opt(false).unwrap(), None);
+        assert_eq!(&scanner.working_range_begin_key, b"foo");
+        assert_eq!(&scanner.working_range_end_key, b"box");
+
+        let r = scanner.take_scanned_range();
+        assert_eq!(&r.lower_inclusive, b"foo");
+        assert_eq!(&r.upper_exclusive, b"box");
+    }
+
+    #[test]
+    fn test_scanned_range_backward2() {
+        let storage = create_storage();
+        // Filled interval range
+        let ranges = vec![IntervalRange::from(("foo", "foo_8")).into()];
+        let mut scanner = RangesScanner::new(RangesScannerOptions {
+            storage: storage.clone(),
+            ranges,
+            scan_backward_in_range: true,
+            is_key_only: false,
+            is_scanned_range_aware: true,
+        });
+
+        // Only lower_inclusive is updated.
+        assert_eq!(&scanner.next_opt(false).unwrap().unwrap().0, b"foo_3");
+        assert_eq!(&scanner.working_range_begin_key, b"foo_8");
+        assert_eq!(&scanner.working_range_end_key, b"");
+
+        // Upper_exclusive is updated.
+        assert_eq!(&scanner.next_opt(true).unwrap().unwrap().0, b"foo_2");
+        assert_eq!(&scanner.working_range_begin_key, b"foo_8");
+        assert_eq!(&scanner.working_range_end_key, b"foo_2");
+
+        // Upper_exclusive is not updated.
+        assert_eq!(&scanner.next_opt(false).unwrap().unwrap().0, b"foo");
+        assert_eq!(&scanner.working_range_begin_key, b"foo_8");
+        assert_eq!(&scanner.working_range_end_key, b"foo_2");
+
+        // Drained.
+        assert_eq!(scanner.next_opt(false).unwrap(), None);
+        assert_eq!(&scanner.working_range_begin_key, b"foo_8");
+        assert_eq!(&scanner.working_range_end_key, b"foo");
+
+        let r = scanner.take_scanned_range();
+        assert_eq!(&r.lower_inclusive, b"foo");
+        assert_eq!(&r.upper_exclusive, b"foo_8");
+
+        // Multiple ranges
+        let ranges = vec![
+            IntervalRange::from(("bar_4", "box")).into(),
+            PointRange::from("bar_3").into(),
+            PointRange::from("bar_2").into(),
+            IntervalRange::from(("bar", "bar_")).into(),
+            IntervalRange::from(("foo_5", "foo_50")).into(),
+            IntervalRange::from(("foo", "foo_3")).into(),
+        ];
+        let mut scanner = RangesScanner::new(RangesScannerOptions {
+            storage,
+            ranges,
+            scan_backward_in_range: true,
+            is_key_only: false,
+            is_scanned_range_aware: true,
+        });
+
+        // Lower_inclusive is updated. Upper_exclusive is not update.
+        assert_eq!(&scanner.next_opt(false).unwrap().unwrap().0, b"bar_2");
+        assert_eq!(&scanner.working_range_begin_key, b"box");
+        assert_eq!(&scanner.working_range_end_key, b"");
+
+        // Upper_exclusive is updated. Updated by scanned row.
+        assert_eq!(&scanner.next_opt(true).unwrap().unwrap().0, b"bar");
+        assert_eq!(&scanner.working_range_begin_key, b"box");
+        assert_eq!(&scanner.working_range_end_key, b"bar");
+
+        // Upper_exclusive is not update.
+        assert_eq!(&scanner.next_opt(false).unwrap().unwrap().0, b"foo_2");
+        assert_eq!(&scanner.working_range_begin_key, b"box");
+        assert_eq!(&scanner.working_range_end_key, b"bar");
+
+        // Upper_exclusive is not update.
+        assert_eq!(&scanner.next_opt(false).unwrap().unwrap().0, b"foo");
+        assert_eq!(&scanner.working_range_begin_key, b"box");
+        assert_eq!(&scanner.working_range_end_key, b"bar");
+
+        // Drain.
+        assert_eq!(scanner.next_opt(false).unwrap(), None);
+        assert_eq!(&scanner.working_range_begin_key, b"box");
+        assert_eq!(&scanner.working_range_end_key, b"foo");
+
+        let r = scanner.take_scanned_range();
+        assert_eq!(&r.lower_inclusive, b"foo");
+        assert_eq!(&r.upper_exclusive, b"box");
     }
 }

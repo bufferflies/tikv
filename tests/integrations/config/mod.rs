@@ -9,7 +9,8 @@ use encryption::{EncryptionConfig, FileConfig, MasterKeyConfig};
 use engine_rocks::{
     config::{BlobRunMode, CompressionType, LogLevel},
     raw::{
-        CompactionPriority, DBCompactionStyle, DBCompressionType, DBRateLimiterMode, DBRecoveryMode,
+        ChecksumType, CompactionPriority, DBCompactionStyle, DBCompressionType, DBRateLimiterMode,
+        DBRecoveryMode, PrepopulateBlockCache,
     },
 };
 use engine_traits::PerfLevel;
@@ -63,7 +64,7 @@ fn read_file_in_project_dir(path: &str) -> String {
 fn test_serde_custom_tikv_config() {
     let mut value = TiKvConfig::default();
     value.log_rotation_timespan = ReadableDuration::days(1);
-    value.log.level = Level::Critical;
+    value.log.level = Level::Critical.into();
     value.log.file.filename = "foo".to_owned();
     value.log.format = LogFormat::Json;
     value.log.file.max_size = 1;
@@ -80,6 +81,8 @@ fn test_serde_custom_tikv_config() {
         labels: HashMap::from_iter([("a".to_owned(), "b".to_owned())]),
         advertise_addr: "example.com:443".to_owned(),
         status_addr: "example.com:443".to_owned(),
+        grpc_gzip_compression_level: 2,
+        grpc_min_message_size_to_compress: 4096,
         advertise_status_addr: "example.com:443".to_owned(),
         status_thread_pool_size: 1,
         max_grpc_send_msg_len: 6 * (1 << 20),
@@ -326,8 +329,8 @@ fn test_serde_custom_tikv_config() {
             max_bytes_for_level_base: ReadableSize::kb(12),
             target_file_size_base: ReadableSize::kb(123),
             level0_file_num_compaction_trigger: 123,
-            level0_slowdown_writes_trigger: 123,
-            level0_stop_writes_trigger: 123,
+            level0_slowdown_writes_trigger: Some(123),
+            level0_stop_writes_trigger: Some(123),
             max_compaction_bytes: ReadableSize::gb(1),
             compaction_pri: CompactionPriority::MinOverlappingRatio,
             dynamic_level_bytes: true,
@@ -336,8 +339,8 @@ fn test_serde_custom_tikv_config() {
             compaction_style: DBCompactionStyle::Universal,
             disable_auto_compactions: true,
             disable_write_stall: true,
-            soft_pending_compaction_bytes_limit: ReadableSize::gb(12),
-            hard_pending_compaction_bytes_limit: ReadableSize::gb(12),
+            soft_pending_compaction_bytes_limit: Some(ReadableSize::gb(12)),
+            hard_pending_compaction_bytes_limit: Some(ReadableSize::gb(12)),
             force_consistency_checks: true,
             titan: titan_cf_config.clone(),
             prop_size_index_distance: 4000000,
@@ -349,6 +352,9 @@ fn test_serde_custom_tikv_config() {
             bottommost_level_compression: DBCompressionType::Disable,
             bottommost_zstd_compression_dict_size: 1024,
             bottommost_zstd_compression_sample_size: 1024,
+            prepopulate_block_cache: PrepopulateBlockCache::FlushOnly,
+            format_version: 5,
+            checksum: ChecksumType::XXH3,
         },
         writecf: WriteCfConfig {
             block_size: ReadableSize::kb(12),
@@ -377,8 +383,8 @@ fn test_serde_custom_tikv_config() {
             max_bytes_for_level_base: ReadableSize::kb(12),
             target_file_size_base: ReadableSize::kb(123),
             level0_file_num_compaction_trigger: 123,
-            level0_slowdown_writes_trigger: 123,
-            level0_stop_writes_trigger: 123,
+            level0_slowdown_writes_trigger: Some(123),
+            level0_stop_writes_trigger: Some(123),
             max_compaction_bytes: ReadableSize::gb(1),
             compaction_pri: CompactionPriority::MinOverlappingRatio,
             dynamic_level_bytes: true,
@@ -387,8 +393,8 @@ fn test_serde_custom_tikv_config() {
             compaction_style: DBCompactionStyle::Universal,
             disable_auto_compactions: true,
             disable_write_stall: true,
-            soft_pending_compaction_bytes_limit: ReadableSize::gb(12),
-            hard_pending_compaction_bytes_limit: ReadableSize::gb(12),
+            soft_pending_compaction_bytes_limit: Some(ReadableSize::gb(12)),
+            hard_pending_compaction_bytes_limit: Some(ReadableSize::gb(12)),
             force_consistency_checks: true,
             titan: TitanCfConfig {
                 min_blob_size: ReadableSize(1024), // default value
@@ -414,6 +420,9 @@ fn test_serde_custom_tikv_config() {
             bottommost_level_compression: DBCompressionType::Zstd,
             bottommost_zstd_compression_dict_size: 0,
             bottommost_zstd_compression_sample_size: 0,
+            prepopulate_block_cache: PrepopulateBlockCache::FlushOnly,
+            format_version: 5,
+            checksum: ChecksumType::XXH3,
         },
         lockcf: LockCfConfig {
             block_size: ReadableSize::kb(12),
@@ -442,8 +451,8 @@ fn test_serde_custom_tikv_config() {
             max_bytes_for_level_base: ReadableSize::kb(12),
             target_file_size_base: ReadableSize::kb(123),
             level0_file_num_compaction_trigger: 123,
-            level0_slowdown_writes_trigger: 123,
-            level0_stop_writes_trigger: 123,
+            level0_slowdown_writes_trigger: Some(123),
+            level0_stop_writes_trigger: Some(123),
             max_compaction_bytes: ReadableSize::gb(1),
             compaction_pri: CompactionPriority::MinOverlappingRatio,
             dynamic_level_bytes: true,
@@ -452,8 +461,8 @@ fn test_serde_custom_tikv_config() {
             compaction_style: DBCompactionStyle::Universal,
             disable_auto_compactions: true,
             disable_write_stall: true,
-            soft_pending_compaction_bytes_limit: ReadableSize::gb(12),
-            hard_pending_compaction_bytes_limit: ReadableSize::gb(12),
+            soft_pending_compaction_bytes_limit: Some(ReadableSize::gb(12)),
+            hard_pending_compaction_bytes_limit: Some(ReadableSize::gb(12)),
             force_consistency_checks: true,
             titan: TitanCfConfig {
                 min_blob_size: ReadableSize(1024), // default value
@@ -479,6 +488,9 @@ fn test_serde_custom_tikv_config() {
             bottommost_level_compression: DBCompressionType::Disable,
             bottommost_zstd_compression_dict_size: 0,
             bottommost_zstd_compression_sample_size: 0,
+            prepopulate_block_cache: PrepopulateBlockCache::FlushOnly,
+            format_version: 5,
+            checksum: ChecksumType::XXH3,
         },
         raftcf: RaftCfConfig {
             block_size: ReadableSize::kb(12),
@@ -507,8 +519,8 @@ fn test_serde_custom_tikv_config() {
             max_bytes_for_level_base: ReadableSize::kb(12),
             target_file_size_base: ReadableSize::kb(123),
             level0_file_num_compaction_trigger: 123,
-            level0_slowdown_writes_trigger: 123,
-            level0_stop_writes_trigger: 123,
+            level0_slowdown_writes_trigger: Some(123),
+            level0_stop_writes_trigger: Some(123),
             max_compaction_bytes: ReadableSize::gb(1),
             compaction_pri: CompactionPriority::MinOverlappingRatio,
             dynamic_level_bytes: true,
@@ -517,8 +529,8 @@ fn test_serde_custom_tikv_config() {
             compaction_style: DBCompactionStyle::Universal,
             disable_auto_compactions: true,
             disable_write_stall: true,
-            soft_pending_compaction_bytes_limit: ReadableSize::gb(12),
-            hard_pending_compaction_bytes_limit: ReadableSize::gb(12),
+            soft_pending_compaction_bytes_limit: Some(ReadableSize::gb(12)),
+            hard_pending_compaction_bytes_limit: Some(ReadableSize::gb(12)),
             force_consistency_checks: true,
             titan: TitanCfConfig {
                 min_blob_size: ReadableSize(1024), // default value
@@ -544,6 +556,9 @@ fn test_serde_custom_tikv_config() {
             bottommost_level_compression: DBCompressionType::Disable,
             bottommost_zstd_compression_dict_size: 0,
             bottommost_zstd_compression_sample_size: 0,
+            prepopulate_block_cache: PrepopulateBlockCache::FlushOnly,
+            format_version: 5,
+            checksum: ChecksumType::XXH3,
         },
         titan: titan_db_config.clone(),
     };
@@ -601,8 +616,8 @@ fn test_serde_custom_tikv_config() {
             max_bytes_for_level_base: ReadableSize::kb(12),
             target_file_size_base: ReadableSize::kb(123),
             level0_file_num_compaction_trigger: 123,
-            level0_slowdown_writes_trigger: 123,
-            level0_stop_writes_trigger: 123,
+            level0_slowdown_writes_trigger: Some(123),
+            level0_stop_writes_trigger: Some(123),
             max_compaction_bytes: ReadableSize::gb(1),
             compaction_pri: CompactionPriority::MinOverlappingRatio,
             dynamic_level_bytes: true,
@@ -611,8 +626,8 @@ fn test_serde_custom_tikv_config() {
             compaction_style: DBCompactionStyle::Universal,
             disable_auto_compactions: true,
             disable_write_stall: true,
-            soft_pending_compaction_bytes_limit: ReadableSize::gb(12),
-            hard_pending_compaction_bytes_limit: ReadableSize::gb(12),
+            soft_pending_compaction_bytes_limit: Some(ReadableSize::gb(12)),
+            hard_pending_compaction_bytes_limit: Some(ReadableSize::gb(12)),
             force_consistency_checks: true,
             titan: titan_cf_config,
             prop_size_index_distance: 4000000,
@@ -624,6 +639,9 @@ fn test_serde_custom_tikv_config() {
             bottommost_level_compression: DBCompressionType::Disable,
             bottommost_zstd_compression_dict_size: 0,
             bottommost_zstd_compression_sample_size: 0,
+            prepopulate_block_cache: PrepopulateBlockCache::FlushOnly,
+            format_version: 5,
+            checksum: ChecksumType::XXH3,
         },
         titan: titan_db_config,
     };
@@ -732,7 +750,7 @@ fn test_serde_custom_tikv_config() {
         ..Default::default()
     };
     value.backup_stream = BackupStreamConfig {
-        num_threads: 8,
+        num_threads: 12,
         ..Default::default()
     };
     value.import = ImportConfig {
@@ -762,8 +780,10 @@ fn test_serde_custom_tikv_config() {
         incremental_scan_concurrency: 4,
         incremental_scan_speed_limit: ReadableSize(7),
         incremental_scan_ts_filter_ratio: 0.7,
+        tso_worker_threads: 2,
         old_value_cache_memory_quota: ReadableSize::mb(14),
         sink_memory_quota: ReadableSize::mb(7),
+        raw_min_ts_outlier_threshold: ReadableDuration::secs(60),
     };
     value.resolved_ts = ResolvedTsConfig {
         enable: true,
@@ -873,12 +893,12 @@ fn test_block_cache_backward_compatible() {
 fn test_log_backward_compatible() {
     let content = read_file_in_project_dir("integrations/config/test-log-compatible.toml");
     let mut cfg: TiKvConfig = toml::from_str(&content).unwrap();
-    assert_eq!(cfg.log.level, slog::Level::Info);
+    assert_eq!(cfg.log.level, slog::Level::Info.into());
     assert_eq!(cfg.log.file.filename, "");
     assert_eq!(cfg.log.format, LogFormat::Text);
     assert_eq!(cfg.log.file.max_size, 300);
     cfg.logger_compatible_adjust();
-    assert_eq!(cfg.log.level, slog::Level::Critical);
+    assert_eq!(cfg.log.level, slog::Level::Critical.into());
     assert_eq!(cfg.log.file.filename, "foo");
     assert_eq!(cfg.log.format, LogFormat::Json);
     assert_eq!(cfg.log.file.max_size, 1024);

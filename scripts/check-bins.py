@@ -15,6 +15,7 @@ WHITE_LIST = {
     "panic_hook", "fuzz", "fuzzer_afl", "fuzzer_honggfuzz", "fuzzer_libfuzzer",
     "coprocessor_plugin_api", "example_plugin", "memory_trace_macros", "case_macros",
     "kvenginepb",
+    "tracker"
 }
 
 JEMALLOC_SYMBOL = ["je_arena_boot", " malloc"]

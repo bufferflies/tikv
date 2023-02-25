@@ -429,6 +429,22 @@ pub struct PeerTickBatch {
     pub wait_duration: Duration,
 }
 
+impl PeerTickBatch {
+    #[inline]
+    pub fn schedule(&mut self, timer: &SteadyTimer) {
+        if self.ticks.is_empty() {
+            return;
+        }
+        let peer_ticks = mem::take(&mut self.ticks);
+        let f = timer.delay(self.wait_duration).compat().map(move |_| {
+            for tick in peer_ticks {
+                tick();
+            }
+        });
+        poll_future_notify(f);
+    }
+}
+
 impl Clone for PeerTickBatch {
     fn clone(&self) -> PeerTickBatch {
         PeerTickBatch {
@@ -486,7 +502,8 @@ where
     pub ready_count: usize,
     pub has_ready: bool,
     pub current_time: Option<Timespec>,
-    pub perf_context: EK::PerfContext,
+    pub raft_perf_context: ER::PerfContext,
+    pub kv_perf_context: EK::PerfContext,
     pub tick_batch: Vec<PeerTickBatch>,
     pub node_start_time: Option<TiInstant>,
     /// Disk usage for the store itself.
@@ -764,21 +781,7 @@ impl<EK: KvEngine, ER: RaftEngine, T: Transport> RaftPoller<EK, ER, T> {
     fn flush_ticks(&mut self) {
         for t in PeerTick::get_all_ticks() {
             let idx = *t as usize;
-            if self.poll_ctx.tick_batch[idx].ticks.is_empty() {
-                continue;
-            }
-            let peer_ticks = mem::take(&mut self.poll_ctx.tick_batch[idx].ticks);
-            let f = self
-                .poll_ctx
-                .timer
-                .delay(self.poll_ctx.tick_batch[idx].wait_duration)
-                .compat()
-                .map(move |_| {
-                    for tick in peer_ticks {
-                        tick();
-                    }
-                });
-            poll_future_notify(f);
+            self.poll_ctx.tick_batch[idx].schedule(&self.poll_ctx.timer);
         }
     }
 }
@@ -1286,7 +1289,11 @@ where
             ready_count: 0,
             has_ready: false,
             current_time: None,
-            perf_context: self
+            raft_perf_context: self
+                .engines
+                .raft
+                .get_perf_context(self.cfg.value().perf_level, PerfContextKind::RaftstoreStore),
+            kv_perf_context: self
                 .engines
                 .kv
                 .get_perf_context(self.cfg.value().perf_level, PerfContextKind::RaftstoreStore),
@@ -2043,11 +2050,20 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> StoreFsmDelegate<'a, EK, ER
 
         let mut is_overlapped = false;
         let mut regions_to_destroy = vec![];
-        for (_, id) in meta.region_ranges.range((
+        for (key, id) in meta.region_ranges.range((
             Excluded(data_key(msg.get_start_key())),
             Unbounded::<Vec<u8>>,
         )) {
-            let exist_region = &meta.regions[id];
+            let exist_region = match meta.regions.get(id) {
+                Some(r) => r,
+                None => panic!(
+                    "meta corrupted: no region for {} {} when creating {} {:?}",
+                    id,
+                    log_wrappers::Value::key(key),
+                    region_id,
+                    msg,
+                ),
+            };
             if enc_start_key(exist_region) >= data_end_key(msg.get_end_key()) {
                 break;
             }

@@ -56,6 +56,7 @@ pub struct AnalyzeContext<S: Snapshot, F: KvFormat> {
     quota_limiter: Arc<QuotaLimiter>,
     _phantom: PhantomData<F>,
     remote_ctx: Option<RemoteContext>,
+    is_auto_analyze: bool,
 }
 
 impl<S: Snapshot, F: KvFormat> AnalyzeContext<S, F> {
@@ -92,6 +93,8 @@ impl<S: Snapshot, F: KvFormat> AnalyzeContext<S, F> {
             req_ctx.bypass_locks.clone(),
             !req_ctx.context.get_not_fill_cache(),
         );
+        let is_auto_analyze = req.get_flags() & REQ_FLAG_TIDB_SYSSESSION > 0;
+
         Ok(Self {
             req,
             storage: Some(TiKvStorage::new(store, false)),
@@ -100,6 +103,7 @@ impl<S: Snapshot, F: KvFormat> AnalyzeContext<S, F> {
             quota_limiter,
             _phantom: PhantomData,
             remote_ctx,
+            is_auto_analyze,
         })
     }
 
@@ -299,7 +303,9 @@ impl<S: Snapshot, F: KvFormat> AnalyzeContext<S, F> {
                     storage,
                     ranges,
                     self.quota_limiter.clone(),
+                    self.is_auto_analyze,
                 )?;
+
                 let res = AnalyzeContext::handle_full_sampling(&mut builder).await;
                 builder.data.collect_storage_stats(&mut self.storage_stats);
                 res
@@ -439,6 +445,7 @@ struct RowSampleBuilder<S: Snapshot, F: KvFormat> {
     columns_info: Vec<tipb::ColumnInfo>,
     column_groups: Vec<tipb::AnalyzeColumnGroup>,
     quota_limiter: Arc<QuotaLimiter>,
+    is_auto_analyze: bool,
 }
 
 impl<S: Snapshot, F: KvFormat> RowSampleBuilder<S, F> {
@@ -447,6 +454,7 @@ impl<S: Snapshot, F: KvFormat> RowSampleBuilder<S, F> {
         storage: TiKvStorage<CloudStore<S>>,
         ranges: Vec<KeyRange>,
         quota_limiter: Arc<QuotaLimiter>,
+        is_auto_analyze: bool,
     ) -> Result<Self> {
         let columns_info: Vec<_> = req.take_columns_info().into();
         if columns_info.is_empty() {
@@ -471,6 +479,7 @@ impl<S: Snapshot, F: KvFormat> RowSampleBuilder<S, F> {
             columns_info,
             column_groups: req.take_column_groups().into(),
             quota_limiter,
+            is_auto_analyze,
         })
     }
 
@@ -502,7 +511,7 @@ impl<S: Snapshot, F: KvFormat> RowSampleBuilder<S, F> {
                 time_slice_start = Instant::now();
             }
 
-            let mut sample = self.quota_limiter.new_sample();
+            let mut sample = self.quota_limiter.new_sample(!self.is_auto_analyze);
             {
                 let _guard = sample.observe_cpu();
                 let result = self.data.next_batch(BATCH_MAX_SIZE);
@@ -556,7 +565,14 @@ impl<S: Snapshot, F: KvFormat> RowSampleBuilder<S, F> {
             }
 
             // Don't let analyze bandwidth limit the quota limiter, this is already limited in rate limiter.
-            let quota_delay = self.quota_limiter.async_consume(sample).await;
+            let quota_delay = {
+                if !self.is_auto_analyze {
+                    self.quota_limiter.consume_sample(sample, true).await
+                } else {
+                    self.quota_limiter.consume_sample(sample, false).await
+                }
+            };
+
             if !quota_delay.is_zero() {
                 NON_TXN_COMMAND_THROTTLE_TIME_COUNTER_VEC_STATIC
                     .get(ThrottleType::analyze_full_sampling)
@@ -852,6 +868,10 @@ impl RowSampleCollector for ReservoirRowSampleCollector {
     }
 
     fn sampling(&mut self, data: Vec<Vec<u8>>) {
+        // We should tolerate the abnormal case => `self.max_sample_size == 0`.
+        if self.max_sample_size == 0 {
+            return;
+        }
         let mut need_push = false;
         let cur_rng = self.base.rng.gen_range(0, i64::MAX);
         if self.samples.len() < self.max_sample_size {
@@ -1432,6 +1452,35 @@ mod tests {
                 "v: {}",
                 v
             );
+        }
+    }
+
+    #[test]
+    fn test_abnormal_sampling() {
+        let sample_num = 0; // abnormal.
+        let row_num = 100;
+        let mut nums: Vec<Vec<u8>> = Vec::with_capacity(row_num);
+        for i in 0..row_num {
+            nums.push(
+                datum::encode_value(&mut EvalContext::default(), &[Datum::I64(i as i64)]).unwrap(),
+            );
+        }
+        {
+            // Test for ReservoirRowSampleCollector
+            let mut collector = ReservoirRowSampleCollector::new(sample_num, 1000, 1);
+            for row in &nums {
+                collector.sampling([row.clone()].to_vec());
+            }
+            assert_eq!(collector.samples.len(), 0);
+        }
+        {
+            // Test for BernoulliRowSampleCollector
+            let mut collector =
+                BernoulliRowSampleCollector::new(sample_num as f64 / row_num as f64, 1000, 1);
+            for row in &nums {
+                collector.sampling([row.clone()].to_vec());
+            }
+            assert_eq!(collector.samples.len(), 0);
         }
     }
 }

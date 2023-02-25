@@ -379,7 +379,9 @@ impl<SS: 'static> BatchExecutorsRunner<SS> {
     ) -> Result<Self> {
         let executors_len = req.get_executors().len();
         let collect_exec_summary = req.get_collect_execution_summaries();
-        let config = Arc::new(EvalConfig::from_request(&req)?);
+        let mut config = EvalConfig::from_request(&req)?;
+        config.paging_size = paging_size;
+        let config = Arc::new(config);
 
         let out_most_executor = build_executors::<_, F>(
             req.take_executors().into(),
@@ -452,7 +454,7 @@ impl<SS: 'static> BatchExecutorsRunner<SS> {
 
             let mut chunk = Chunk::default();
 
-            let mut sample = self.quota_limiter.new_sample();
+            let mut sample = self.quota_limiter.new_sample(true);
             let (drained, record_len) = {
                 let _guard = sample.observe_cpu();
                 self.internal_handle_request(
@@ -464,7 +466,7 @@ impl<SS: 'static> BatchExecutorsRunner<SS> {
                 )?
             };
 
-            let quota_delay = self.quota_limiter.async_consume(sample).await;
+            let quota_delay = self.quota_limiter.consume_sample(sample, true).await;
             if !quota_delay.is_zero() {
                 NON_TXN_COMMAND_THROTTLE_TIME_COUNTER_VEC_STATIC
                     .get(ThrottleType::dag)

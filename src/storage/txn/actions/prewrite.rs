@@ -340,26 +340,7 @@ impl<'a> PrewriteMutation<'a> {
         &self,
         reader: &mut SnapshotReader<S>,
     ) -> Result<Option<(Write, TimeStamp)>> {
-        // check extra-cf
-        if let Some((commit_ts, write)) = reader
-            .cloud_reader
-            .as_mut()
-            .and_then(|reader| reader.get_extra(&self.key, self.txn_props.start_ts))
-        {
-            self.write_conflict_error(&write, commit_ts)?;
-        }
-        // The get_newer API returns None if there is no conflict,
-        // so it can not be used to check if key exists or get the value of the key.
-        let can_use_get_newer = self.assertion == Assertion::None
-            && !self.should_not_exist
-            && reader.cloud_reader.is_some();
-        let opt_write = if can_use_get_newer {
-            let cloud_reader = reader.cloud_reader.as_mut().unwrap();
-            cloud_reader.get_newer(&self.key, self.txn_props.start_ts)?
-        } else {
-            reader.seek_write(&self.key, TimeStamp::max())?
-        };
-        match opt_write {
+        match reader.seek_write(&self.key, TimeStamp::max())? {
             Some((commit_ts, write)) => {
                 // Abort on writes after our start/for_update timestamp ...
                 // If exists a commit version whose commit timestamp is larger than current start/for_update
@@ -375,9 +356,9 @@ impl<'a> PrewriteMutation<'a> {
                     // if it is a retrying prewrite request.
                     TransactionKind::Pessimistic(for_update_ts) => {
                         if commit_ts > for_update_ts {
-                            warn!("conflicting write was found, pessimistic lock must be lost for the corresponding row key";
-                                "key" => %self.key,
-                                "start_ts" => self.txn_props.start_ts,
+                            warn!("conflicting write was found, pessimistic lock must be lost for the corresponding row key"; 
+                                "key" => %self.key, 
+                                "start_ts" => self.txn_props.start_ts, 
                                 "for_update_ts" => for_update_ts,
                                 "conflicting start_ts" => write.start_ts,
                                 "conflicting commit_ts" => commit_ts);
@@ -693,27 +674,6 @@ fn amend_pessimistic_lock<S: Snapshot>(
             }
             .into());
         }
-    }
-    let start_ts = reader.start_ts;
-    if let Some((commit_ts, _)) = reader
-        .cloud_reader
-        .as_mut()
-        .and_then(|reader| reader.get_extra(&mutation.key, start_ts))
-    {
-        warn!(
-            "prewrite failed (pessimistic lock not found)";
-            "start_ts" => start_ts,
-            "commit_ts" => commit_ts,
-            "key" => %mutation.key
-        );
-        MVCC_CONFLICT_COUNTER
-            .pipelined_acquire_pessimistic_lock_amend_fail
-            .inc();
-        return Err(ErrorInner::PessimisticLockNotFound {
-            start_ts: reader.start_ts,
-            key: mutation.key.clone().into_raw()?,
-        }
-        .into());
     }
     // Used pipelined pessimistic lock acquiring in this txn but failed
     // Luckily no other txn modified this lock, amend it by treat it as optimistic txn.

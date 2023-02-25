@@ -6,8 +6,9 @@ use std::{path::Path, process};
 
 use clap::{crate_authors, App, Arg};
 use cloud_server::{signal_handler, TiKVServer};
+use serde_json::{Map, Value};
 use server::setup::{ensure_no_unrecognized_config, validate_and_persist_config};
-use tikv::config::TiKvConfig;
+use tikv::config::{to_flatten_config_info, TiKvConfig};
 
 fn main() {
     let build_timestamp = option_env!("TIKV_BUILD_TIME");
@@ -32,6 +33,15 @@ fn main() {
                 .long("config-check")
                 .takes_value(false)
                 .help("Check config file validity and exit"),
+        )
+        .arg(
+            Arg::with_name("config-info")
+                .required(false)
+                .long("config-info")
+                .takes_value(true)
+                .value_name("FORMAT")
+                .possible_values(&["json"])
+                .help("print configuration information with specified format")
         )
         .arg(
             Arg::with_name("log-level")
@@ -186,6 +196,18 @@ fn main() {
         println!("config check successful");
         process::exit(0)
     }
+
+    let is_config_info = matches.is_present("config-info");
+    if is_config_info {
+        let config_infos = to_flatten_config_info(&config);
+        let mut result = Map::new();
+        result.insert("Component".into(), "TiKV Server".into());
+        result.insert("Version".into(), tikv::tikv_build_version().into());
+        result.insert("Parameters".into(), Value::Array(config_infos));
+        println!("{}", serde_json::to_string_pretty(&result).unwrap());
+        process::exit(0);
+    }
+
     let mut tikv = TiKVServer::new(config);
     tikv.run();
     signal_handler::wait_for_signal();

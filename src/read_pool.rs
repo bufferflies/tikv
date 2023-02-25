@@ -2,7 +2,7 @@
 
 use std::{
     future::Future,
-    sync::{Arc, Mutex},
+    sync::{mpsc::SyncSender, Arc, Mutex},
 };
 
 use file_system::{set_io_type, IOType};
@@ -15,6 +15,7 @@ use tikv_util::{
     sys::SysQuota,
     yatp_pool::{self, FuturePool, PoolTicker, YatpPoolBuilder},
 };
+use tracker::TrackedFuture;
 use yatp::{pool::Remote, queue::Extras, task::future::TaskCell};
 
 use self::metrics::*;
@@ -121,10 +122,10 @@ impl ReadPoolHandle {
                 };
                 let extras = Extras::new_multilevel(task_id, fixed_level);
                 let task_cell = TaskCell::new(
-                    async move {
+                    TrackedFuture::new(async move {
                         f.await;
                         running_tasks.dec();
-                    },
+                    }),
                     extras,
                 );
                 remote.spawn(task_cell);
@@ -288,13 +289,14 @@ impl From<Vec<FuturePool>> for ReadPool {
     }
 }
 
-pub struct ReadPoolConfigManager(pub ReadPoolHandle);
+pub struct ReadPoolConfigManager(pub ReadPoolHandle, pub SyncSender<usize>);
 
 impl ConfigManager for ReadPoolConfigManager {
     fn dispatch(&mut self, change: ConfigChange) -> CfgResult<()> {
         if let Some(ConfigValue::Module(unified)) = change.get("unified") {
             if let Some(ConfigValue::Usize(max_thread_count)) = unified.get("max_thread_count") {
                 self.0.scale_pool_size(*max_thread_count);
+                self.1.send(*max_thread_count)?;
             }
         }
         info!(

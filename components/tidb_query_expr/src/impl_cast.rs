@@ -344,7 +344,7 @@ fn cast_string_as_int(
             } else {
                 // FIXME: if the err get_valid_int_prefix returned is overflow err,
                 //  it should be ERR_TRUNCATE_WRONG_VALUE but not others.
-                let valid_int_prefix = get_valid_int_prefix(ctx, val)?;
+                let valid_int_prefix = get_valid_int_prefix_helper(ctx, val, true)?;
                 let parse_res = if !is_str_neg {
                     valid_int_prefix.parse::<u64>().map(|x| x as i64)
                 } else {
@@ -1833,10 +1833,13 @@ mod tests {
 
         let cs = vec![
             // (input, expect)
-            (EnumRef::new("enum".as_bytes(), &0), Real::from(0.)),
-            (EnumRef::new("int".as_bytes(), &1), Real::from(1.)),
-            (EnumRef::new("real".as_bytes(), &2), Real::from(2.)),
-            (EnumRef::new("string".as_bytes(), &3), Real::from(3.)),
+            (EnumRef::new("enum".as_bytes(), &0), Real::new(0.).unwrap()),
+            (EnumRef::new("int".as_bytes(), &1), Real::new(1.).unwrap()),
+            (EnumRef::new("real".as_bytes(), &2), Real::new(2.).unwrap()),
+            (
+                EnumRef::new("string".as_bytes(), &3),
+                Real::new(3.).unwrap(),
+            ),
         ];
 
         for (input, expect) in cs {
@@ -2340,6 +2343,7 @@ mod tests {
                 vec![ERR_TRUNCATE_WRONG_VALUE],
                 Cond::Unsigned,
             ),
+            ("0.5", 0_i64, vec![ERR_TRUNCATE_WRONG_VALUE], Cond::None),
         ];
 
         for (input, expected, mut err_code, cond) in cs {

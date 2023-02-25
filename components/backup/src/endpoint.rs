@@ -9,8 +9,10 @@ use std::{
 };
 
 use async_channel::SendError;
+use causal_ts::CausalTsProvider;
 use concurrency_manager::ConcurrencyManager;
-use engine_traits::{name_to_cf, raw_ttl::ttl_current_ts, CfName, KvEngine, SstCompressionType};
+use engine_rocks::raw::DB;
+use engine_traits::{name_to_cf, raw_ttl::ttl_current_ts, CfName, SstCompressionType};
 use external_storage::{BackendConfig, HdfsConfig};
 use external_storage_export::{create_storage, ExternalStorage};
 use futures::channel::mpsc::*;
@@ -29,7 +31,7 @@ use tikv::{
         kv::{CursorBuilder, Engine, ScanMode, SnapContext},
         mvcc::Error as MvccError,
         raw::raw_mvcc::RawMvccSnapshot,
-        txn::{CloudStore, EntryBatch, Error as TxnError, TxnEntryScanner, TxnEntryStore},
+        txn::{EntryBatch, Error as TxnError, SnapshotStore, TxnEntryScanner, TxnEntryStore},
         Snapshot, Statistics,
     },
 };
@@ -155,12 +157,12 @@ pub struct BackupRange {
 
 /// The generic saveable writer. for generic `InMemBackupFiles`.
 /// Maybe what we really need is make Writer a trait...
-enum KvWriter<E: KvEngine> {
-    Txn(BackupWriter<E>),
-    Raw(BackupRawKvWriter<E>),
+enum KvWriter {
+    Txn(BackupWriter),
+    Raw(BackupRawKvWriter),
 }
 
-impl<E: KvEngine> std::fmt::Debug for KvWriter<E> {
+impl std::fmt::Debug for KvWriter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Txn(_) => f.debug_tuple("Txn").finish(),
@@ -169,7 +171,7 @@ impl<E: KvEngine> std::fmt::Debug for KvWriter<E> {
     }
 }
 
-impl<E: KvEngine> KvWriter<E> {
+impl KvWriter {
     async fn save(self, storage: &dyn ExternalStorage) -> Result<Vec<File>> {
         match self {
             Self::Txn(writer) => writer.save(storage).await,
@@ -186,8 +188,8 @@ impl<E: KvEngine> KvWriter<E> {
 }
 
 #[derive(Debug)]
-struct InMemBackupFiles<E: KvEngine> {
-    files: KvWriter<E>,
+struct InMemBackupFiles {
+    files: KvWriter,
     start_key: Vec<u8>,
     end_key: Vec<u8>,
     start_version: TimeStamp,
@@ -195,8 +197,8 @@ struct InMemBackupFiles<E: KvEngine> {
     region: Region,
 }
 
-async fn save_backup_file_worker<E: KvEngine>(
-    rx: async_channel::Receiver<InMemBackupFiles<E>>,
+async fn save_backup_file_worker(
+    rx: async_channel::Receiver<InMemBackupFiles>,
     tx: UnboundedSender<BackupResponse>,
     storage: Arc<dyn ExternalStorage>,
     codec: KeyValueCodec,
@@ -268,10 +270,10 @@ async fn save_backup_file_worker<E: KvEngine>(
 
 /// Send the save task to the save worker.
 /// Record the wait time at the same time.
-async fn send_to_worker_with_metrics<E: KvEngine>(
-    tx: &async_channel::Sender<InMemBackupFiles<E>>,
-    files: InMemBackupFiles<E>,
-) -> std::result::Result<(), SendError<InMemBackupFiles<E>>> {
+async fn send_to_worker_with_metrics(
+    tx: &async_channel::Sender<InMemBackupFiles>,
+    files: InMemBackupFiles,
+) -> std::result::Result<(), SendError<InMemBackupFiles>> {
     let files = match tx.try_send(files) {
         Ok(_) => return Ok(()),
         Err(e) => e.into_inner(),
@@ -284,14 +286,14 @@ async fn send_to_worker_with_metrics<E: KvEngine>(
 
 impl BackupRange {
     /// Get entries from the scanner and save them to storage
-    async fn backup<E: Engine, K: KvEngine>(
+    async fn backup<E: Engine>(
         &self,
-        writer_builder: BackupWriterBuilder<K>,
+        writer_builder: BackupWriterBuilder,
         engine: E,
         concurrency_manager: ConcurrencyManager,
         backup_ts: TimeStamp,
         begin_ts: TimeStamp,
-        saver: async_channel::Sender<InMemBackupFiles<K>>,
+        saver: async_channel::Sender<InMemBackupFiles>,
         storage_name: &str,
     ) -> Result<Statistics> {
         assert!(!self.codec.is_raw_kv);
@@ -339,13 +341,20 @@ impl BackupRange {
         BACKUP_RANGE_HISTOGRAM_VEC
             .with_label_values(&["snapshot"])
             .observe(start_snapshot.saturating_elapsed().as_secs_f64());
-        let cloud_store =
-            CloudStore::new(snapshot, backup_ts.into_inner(), Default::default(), false);
+        let snap_store = SnapshotStore::new(
+            snapshot,
+            backup_ts,
+            IsolationLevel::Si,
+            false, /* fill_cache */
+            Default::default(),
+            Default::default(),
+            false,
+        );
         let start_key = self.start_key.clone();
         let end_key = self.end_key.clone();
         // Incremental backup needs to output delete records.
         let incremental = !begin_ts.is_zero();
-        let mut scanner = cloud_store
+        let mut scanner = snap_store
             .entry_scanner(start_key, end_key, begin_ts, incremental)
             .unwrap();
 
@@ -402,7 +411,7 @@ impl BackupRange {
                 return Err(e);
             }
         }
-        drop(cloud_store);
+        drop(snap_store);
         let stat = scanner.take_statistics();
         let take = start_scan.saturating_elapsed_secs();
         if take > 30.0 {
@@ -434,9 +443,9 @@ impl BackupRange {
         Ok(stat)
     }
 
-    fn backup_raw<E: KvEngine, S: Snapshot>(
+    fn backup_raw<S: Snapshot>(
         &self,
-        writer: &mut BackupRawKvWriter<E>,
+        writer: &mut BackupRawKvWriter,
         snapshot: &S,
     ) -> Result<Statistics> {
         assert!(self.codec.is_raw_kv);
@@ -493,20 +502,20 @@ impl BackupRange {
         Ok(statistics)
     }
 
-    async fn backup_raw_kv_to_file<E: Engine, K: KvEngine>(
+    async fn backup_raw_kv_to_file<E: Engine>(
         &self,
         engine: E,
-        kv: K,
+        db: Arc<DB>,
         limiter: &Limiter,
         file_name: String,
         cf: CfNameWrap,
         compression_type: Option<SstCompressionType>,
         compression_level: i32,
         cipher: CipherInfo,
-        saver_tx: async_channel::Sender<InMemBackupFiles<K>>,
+        saver_tx: async_channel::Sender<InMemBackupFiles>,
     ) -> Result<Statistics> {
         let mut writer = match BackupRawKvWriter::new(
-            kv,
+            db,
             &file_name,
             cf,
             limiter.clone(),
@@ -559,7 +568,7 @@ impl BackupRange {
             end_version: TimeStamp::zero(),
             region: self.region.clone(),
         };
-        send_to_worker_with_metrics::<K>(&saver_tx, msg).await?;
+        send_to_worker_with_metrics(&saver_tx, msg).await?;
         Ok(stat)
     }
 }
@@ -569,8 +578,7 @@ pub struct ConfigManager(Arc<RwLock<BackupConfig>>);
 
 impl online_config::ConfigManager for ConfigManager {
     fn dispatch(&mut self, change: online_config::ConfigChange) -> online_config::Result<()> {
-        self.0.write().unwrap().update(change);
-        Ok(())
+        self.0.write().unwrap().update(change)
     }
 }
 
@@ -647,15 +655,16 @@ impl SoftLimitKeeper {
 /// The endpoint of backup.
 ///
 /// It coordinates backup tasks and dispatches them to different workers.
-pub struct Endpoint<E: Engine, K: KvEngine, R: RegionInfoProvider + Clone + 'static> {
+pub struct Endpoint<E: Engine, R: RegionInfoProvider + Clone + 'static> {
     store_id: u64,
     pool: RefCell<ControlThreadPool>,
     io_pool: Runtime,
-    kv: K,
+    db: Arc<DB>,
     config_manager: ConfigManager,
     concurrency_manager: ConcurrencyManager,
     softlimit: SoftLimitKeeper,
     api_version: ApiVersion,
+    causal_ts_provider: Option<Arc<dyn CausalTsProvider>>, // used in rawkv apiv2 only
 
     pub(crate) engine: E,
     pub(crate) region_info: R,
@@ -768,16 +777,17 @@ impl<R: RegionInfoProvider> Progress<R> {
     }
 }
 
-impl<E: Engine, K: KvEngine, R: RegionInfoProvider + Clone + 'static> Endpoint<E, K, R> {
+impl<E: Engine, R: RegionInfoProvider + Clone + 'static> Endpoint<E, R> {
     pub fn new(
         store_id: u64,
         engine: E,
         region_info: R,
-        kv: K,
+        db: Arc<DB>,
         config: BackupConfig,
         concurrency_manager: ConcurrencyManager,
         api_version: ApiVersion,
-    ) -> Endpoint<E, K, R> {
+        causal_ts_provider: Option<Arc<dyn CausalTsProvider>>,
+    ) -> Endpoint<E, R> {
         let pool = ControlThreadPool::new();
         let rt = utils::create_tokio_runtime(config.io_thread_size, "backup-io").unwrap();
         let config_manager = ConfigManager(Arc::new(RwLock::new(config)));
@@ -788,12 +798,13 @@ impl<E: Engine, K: KvEngine, R: RegionInfoProvider + Clone + 'static> Endpoint<E
             engine,
             region_info,
             pool: RefCell::new(pool),
-            kv,
+            db,
             io_pool: rt,
             softlimit,
             config_manager,
             concurrency_manager,
             api_version,
+            causal_ts_provider,
         }
     }
 
@@ -822,14 +833,14 @@ impl<E: Engine, K: KvEngine, R: RegionInfoProvider + Clone + 'static> Endpoint<E
         &self,
         prs: Arc<Mutex<Progress<R>>>,
         request: Request,
-        saver_tx: async_channel::Sender<InMemBackupFiles<K>>,
+        saver_tx: async_channel::Sender<InMemBackupFiles>,
         resp_tx: UnboundedSender<BackupResponse>,
         _backend: Arc<dyn ExternalStorage>,
     ) {
         let start_ts = request.start_ts;
         let backup_ts = request.end_ts;
         let engine = self.engine.clone();
-        let kv = self.kv.clone();
+        let db = self.db.clone();
         let store_id = self.store_id;
         let concurrency_manager = self.concurrency_manager.clone();
         let batch_size = self.config_manager.0.read().unwrap().batch_size;
@@ -838,8 +849,8 @@ impl<E: Engine, K: KvEngine, R: RegionInfoProvider + Clone + 'static> Endpoint<E
 
         self.pool.borrow_mut().spawn(async move {
             loop {
-                // when get the guard, release it until we finish scanning a batch,
-                // because if we were suspended during scanning,
+                // when get the guard, release it until we finish scanning a batch, 
+                // because if we were suspended during scanning, 
                 // the region info have higher possibility to change (then we must compensate that by the fine-grained backup).
                 let guard = limit.guard().await;
                 if let Err(e) = guard {
@@ -889,7 +900,7 @@ impl<E: Engine, K: KvEngine, R: RegionInfoProvider + Clone + 'static> Endpoint<E
                         brange
                             .backup_raw_kv_to_file(
                                 engine,
-                                kv.clone(),
+                                db.clone(),
                                 &request.limiter,
                                 name,
                                 cf.into(),
@@ -904,7 +915,7 @@ impl<E: Engine, K: KvEngine, R: RegionInfoProvider + Clone + 'static> Endpoint<E
                             store_id,
                             request.limiter.clone(),
                             brange.region.clone(),
-                            kv.clone(),
+                            db.clone(),
                             ct,
                             request.compression_level,
                             sst_max_size,
@@ -958,6 +969,26 @@ impl<E: Engine, K: KvEngine, R: RegionInfoProvider + Clone + 'static> Endpoint<E
             }
             return;
         }
+        // Flush causal timestamp to make sure that future writes will have larger timestamps.
+        // And help TiKV-BR acquire a backup-ts with intact data smaller than it.
+        // (Note that intactness is not fully ensured now, until the safe-ts of RawKV is implemented.
+        // TiKV-BR need a workaround by rewinding backup-ts to a small "safe interval").
+        if request.is_raw_kv {
+            if let Err(e) = self
+                .causal_ts_provider
+                .as_ref()
+                .map_or(Ok(()), |provider| provider.flush())
+            {
+                error!("backup flush causal timestamp failed"; "err" => ?e);
+                let mut response = BackupResponse::default();
+                let err_msg = format!("fail to flush causal ts, {:?}", e);
+                response.set_error(crate::Error::Other(box_err!(err_msg)).into());
+                if let Err(err) = resp.unbounded_send(response) {
+                    error_unknown!(?err; "backup failed to send response");
+                }
+                return;
+            }
+        }
         let start_key = codec.encode_backup_key(request.start_key.clone());
         let end_key = codec.encode_backup_key(request.end_key.clone());
 
@@ -1004,9 +1035,7 @@ impl<E: Engine, K: KvEngine, R: RegionInfoProvider + Clone + 'static> Endpoint<E
     }
 }
 
-impl<E: Engine, K: KvEngine, R: RegionInfoProvider + Clone + 'static> Runnable
-    for Endpoint<E, K, R>
-{
+impl<E: Engine, R: RegionInfoProvider + Clone + 'static> Runnable for Endpoint<E, R> {
     type Task = Task;
 
     fn run(&mut self, task: Task) {
@@ -1227,21 +1256,16 @@ pub mod tests {
         }
     }
 
-    pub fn new_endpoint() -> (
-        TempDir,
-        Endpoint<RocksEngine, engine_rocks::RocksEngine, MockRegionInfoProvider>,
-    ) {
-        new_endpoint_with_limiter(None, ApiVersion::V1, false)
+    pub fn new_endpoint() -> (TempDir, Endpoint<RocksEngine, MockRegionInfoProvider>) {
+        new_endpoint_with_limiter(None, ApiVersion::V1, false, None)
     }
 
     pub fn new_endpoint_with_limiter(
         limiter: Option<Arc<IORateLimiter>>,
         api_version: ApiVersion,
         is_raw_kv: bool,
-    ) -> (
-        TempDir,
-        Endpoint<RocksEngine, engine_rocks::RocksEngine, MockRegionInfoProvider>,
-    ) {
+        causal_ts_provider: Option<Arc<dyn CausalTsProvider>>,
+    ) -> (TempDir, Endpoint<RocksEngine, MockRegionInfoProvider>) {
         let temp = TempDir::new().unwrap();
         let rocks = TestEngineBuilder::new()
             .path(temp.path())
@@ -1256,13 +1280,14 @@ pub mod tests {
             .unwrap();
         let concurrency_manager = ConcurrencyManager::new(1.into());
         let need_encode_key = !is_raw_kv || api_version == ApiVersion::V2;
+        let db = rocks.get_rocksdb().get_sync_db();
         (
             temp,
             Endpoint::new(
                 1,
-                rocks.clone(),
+                rocks,
                 MockRegionInfoProvider::new(need_encode_key),
-                rocks.get_rocksdb(),
+                db,
                 BackupConfig {
                     num_threads: 4,
                     batch_size: 8,
@@ -1271,6 +1296,7 @@ pub mod tests {
                 },
                 concurrency_manager,
                 api_version,
+                causal_ts_provider,
             ),
         )
     }
@@ -1480,7 +1506,7 @@ pub mod tests {
     fn test_handle_backup_task() {
         let limiter = Arc::new(IORateLimiter::new_for_test());
         let stats = limiter.statistics().unwrap();
-        let (tmp, endpoint) = new_endpoint_with_limiter(Some(limiter), ApiVersion::V1, false);
+        let (tmp, endpoint) = new_endpoint_with_limiter(Some(limiter), ApiVersion::V1, false, None);
         let engine = endpoint.engine.clone();
 
         endpoint
@@ -1619,7 +1645,7 @@ pub mod tests {
     fn test_handle_backup_raw_task_impl(cur_api_ver: ApiVersion, dst_api_ver: ApiVersion) -> bool {
         let limiter = Arc::new(IORateLimiter::new_for_test());
         let stats = limiter.statistics().unwrap();
-        let (tmp, endpoint) = new_endpoint_with_limiter(Some(limiter), cur_api_ver, true);
+        let (tmp, endpoint) = new_endpoint_with_limiter(Some(limiter), cur_api_ver, true, None);
         let engine = endpoint.engine.clone();
 
         let start_key_idx: u64 = 100;
@@ -1754,6 +1780,32 @@ pub mod tests {
                 test_case.2
             );
         }
+    }
+
+    #[test]
+    fn test_backup_raw_apiv2_causal_ts() {
+        let limiter = Arc::new(IORateLimiter::new_for_test());
+        let ts_provider = Arc::new(causal_ts::tests::TestProvider::default());
+        let start_ts = ts_provider.get_ts().unwrap();
+        let (tmp, endpoint) = new_endpoint_with_limiter(
+            Some(limiter),
+            ApiVersion::V2,
+            true,
+            Some(ts_provider.clone()),
+        );
+
+        let mut req = BackupRequest::default();
+        let (tx, _) = unbounded();
+        let tmp1 = make_unique_dir(tmp.path());
+        req.set_storage_backend(make_local_backend(&tmp1));
+        req.set_start_key(b"r".to_vec());
+        req.set_end_key(b"s".to_vec());
+        req.set_is_raw_kv(true);
+        req.set_dst_api_version(ApiVersion::V2);
+        let (task, _) = Task::new(req, tx).unwrap();
+        endpoint.handle_backup_task(task);
+        let end_ts = ts_provider.get_ts().unwrap();
+        assert_eq!(end_ts.into_inner(), start_ts.next().into_inner() + 100);
     }
 
     #[test]
