@@ -700,7 +700,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
 
         let mut response_retriever = response_retriever.map(move |item| {
             for measure in item.measures {
-                let GrpcRequestDuration { label, begin } = measure;
+                let GrpcRequestDuration { label, begin, source } = measure;
                 GRPC_MSG_HISTOGRAM_STATIC
                     .get(label)
                     .observe(begin.saturating_elapsed_secs());
@@ -985,7 +985,7 @@ fn response_batch_commands_request<F, T>(
 {
     let task = async move {
         if let Ok(resp) = resp.await {
-            let measure = GrpcRequestDuration { begin, label };
+            let measure = GrpcRequestDuration { begin, label, source: String::default() };
             let task = MeasuredSingleResponse::new(id, resp, measure);
             if let Err(e) = tx.send_and_notify(task) {
                 error!("KvService response batch commands fail"; "err" => ?e);
@@ -1366,7 +1366,6 @@ fn future_get<L: LockManager, F: KvFormat>(
                     let exec_detail_v2 = resp.mut_exec_details_v2();
                     let scan_detail_v2 = exec_detail_v2.mut_scan_detail_v2();
                     stats.stats.write_scan_detail(scan_detail_v2);
-                    stats.perf_stats.write_scan_detail(scan_detail_v2);
                     let time_detail = exec_detail_v2.mut_time_detail();
                     time_detail.set_kv_read_wall_time_ms(duration_ms);
                     time_detail.set_wait_wall_time_ms(stats.latency_stats.wait_wall_time_ms);
@@ -1445,7 +1444,6 @@ fn future_batch_get<L: LockManager, F: KvFormat>(
                     let exec_detail_v2 = resp.mut_exec_details_v2();
                     let scan_detail_v2 = exec_detail_v2.mut_scan_detail_v2();
                     stats.stats.write_scan_detail(scan_detail_v2);
-                    stats.perf_stats.write_scan_detail(scan_detail_v2);
                     let time_detail = exec_detail_v2.mut_time_detail();
                     time_detail.set_kv_read_wall_time_ms(duration_ms);
                     time_detail.set_wait_wall_time_ms(stats.latency_stats.wait_wall_time_ms);

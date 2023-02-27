@@ -58,6 +58,7 @@ thiserror = "1.0"
 tidb_query_common = { path = "../tidb_query_common", default-features = false }
 tikv_alloc = { path = "../tikv_alloc" }
 tikv_util = { path = "../tikv_util", default-features = false }
+tracker = { path = "../tracker" }
 tokio = { version = "1.5", features = ["full"] }
 txn_types = { path = "../txn_types", default-features = false }
 # xorf = { version = "0.8", features = ["serde"] }
@@ -66,7 +67,6 @@ zstd-sys = "2.0.7"
 
 [dependencies.rocksdb]
 git = "https://github.com/tikv/rust-rocksdb.git"
-branch = "tikv-6.1"
 package = "rocksdb"
 features = ["encryption"]
 

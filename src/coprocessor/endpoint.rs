@@ -403,7 +403,7 @@ impl<E: Engine> Endpoint<E> {
                     .map(|h| h.into_boxed())
                 });
             }
-            tp => return Err(box_err!("unsupported tp {}", tp)),\
+            tp => return Err(box_err!("unsupported tp {}", tp)),
         };
 
         Ok((builder, req_ctx))

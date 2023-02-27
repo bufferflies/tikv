@@ -430,7 +430,7 @@ impl PerfContextExt for Engine {
     type PerfContext = EnginePerfContext;
 
     fn get_perf_context(&self, _level: PerfLevel, _kind: PerfContextKind) -> Self::PerfContext {
-        panic!()
+        EnginePerfContext
     }
 }
 
@@ -438,11 +438,11 @@ pub struct EnginePerfContext;
 
 impl PerfContext for EnginePerfContext {
     fn start_observe(&mut self) {
-        panic!()
+        // noop
     }
 
-    fn report_metrics(&mut self) {
-        panic!()
+    fn report_metrics(&mut self, _trackers: &[tracker::TrackerToken]) {
+        // noop
     }
 }
 

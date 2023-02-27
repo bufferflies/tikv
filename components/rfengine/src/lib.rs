@@ -10,6 +10,7 @@ extern crate test;
 extern crate tikv_alloc;
 #[macro_use]
 extern crate serde_derive;
+extern crate core;
 
 mod config;
 pub use config::Config as RfEngineConfig;

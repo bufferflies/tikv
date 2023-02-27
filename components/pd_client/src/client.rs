@@ -642,7 +642,7 @@ impl PdClient for RpcClient {
                 .expect("expect region heartbeat sender");
             let ret = sender
                 .unbounded_send(req)
-                .map_err(|e| Error::StreamDisconnect(e.into_send_error()));
+                .map_err(|e| Error::Other(Box::new(e)));
 
             Box::pin(future::ready(ret)) as PdFuture<_>
         };
@@ -1061,7 +1061,7 @@ impl PdClient for RpcClient {
                 .expect("expect region buckets sender");
             let ret = sender
                 .unbounded_send(req)
-                .map_err(|e| Error::StreamDisconnect(e.into_send_error()));
+                .map_err(|e| Error::Other(Box::new(e)));
             Box::pin(future::ready(ret)) as PdFuture<_>
         };
 

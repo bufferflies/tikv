@@ -48,7 +48,7 @@ use rfstore::{
 use security::{self, SecurityConfig};
 use serde_json::Value;
 use tikv::{
-    config::{log_level_serde, ConfigController},
+    config::ConfigController,
     server::status_server::profile::{
         activate_heap_profile, deactivate_heap_profile, jeprof_heap_profile, list_heap_profiles,
         read_file, start_one_cpu_profile, start_one_heap_profile,
@@ -66,6 +66,7 @@ use tokio::{
     sync::oneshot::{self, Receiver, Sender},
 };
 use tokio_openssl::SslStream;
+use tikv::config::LogLevel;
 
 use crate::server::Result;
 
@@ -81,8 +82,7 @@ static FAIL_POINTS_REQUEST_PATH: &str = "/fail";
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 struct LogLevelRequest {
-    #[serde(with = "log_level_serde")]
-    pub log_level: slog::Level,
+    pub log_level: LogLevel,
 }
 
 pub struct StatusServer {
@@ -365,7 +365,7 @@ impl StatusServer {
 
         match log_level_request {
             Ok(req) => {
-                set_log_level(req.log_level);
+                set_log_level(req.log_level.into());
                 Ok(Response::new(Body::empty()))
             }
             Err(err) => Ok(make_response(StatusCode::BAD_REQUEST, err.to_string())),

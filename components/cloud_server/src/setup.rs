@@ -153,7 +153,7 @@ pub fn initial_logger(config: &TiKvConfig) {
         let drainer = logger::LogDispatcher::new(normal, rocksdb, raftdb, slow);
         let level = config.log.level;
         let slow_threshold = config.slow_log_threshold.as_millis();
-        logger::init_log(drainer, level, true, true, vec![], slow_threshold).unwrap_or_else(|e| {
+        logger::init_log(drainer, level.into(), true, true, vec![], slow_threshold).unwrap_or_else(|e| {
             fatal!("failed to initialize log: {}", e);
         });
     }
@@ -254,8 +254,8 @@ fn write_empty_metrics_for_metrics_checker() {
 #[allow(dead_code)]
 pub fn overwrite_config_with_cmd_args(config: &mut TiKvConfig, matches: &ArgMatches<'_>) {
     if let Some(level) = matches.value_of("log-level") {
-        config.log.level = logger::get_level_by_string(level).unwrap();
-        config.log_level = slog::Level::Info;
+        config.log.level = logger::get_level_by_string(level).unwrap().into();
+        config.log_level = slog::Level::Info.into();
     }
 
     if let Some(file) = matches.value_of("log-file") {
