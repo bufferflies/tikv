@@ -1,7 +1,7 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
 use bytes::Bytes;
-use kvengine::{UserMeta, EXTRA_CF, LOCK_CF, WRITE_CF};
+use kvengine::{mvcc, UserMeta, EXTRA_CF, LOCK_CF, WRITE_CF};
 use txn_types::{Key, Lock, OldValue, TimeStamp, Value, Write, WriteType};
 
 use crate::storage::mvcc::{Result, TxnCommitRecord};
@@ -296,6 +296,13 @@ impl CloudReader {
 }
 
 pub fn parse_write(item: kvengine::Item<'_>) -> (TimeStamp, Write) {
+    if item.user_meta()[0] != mvcc::USER_META_FORMAT_V1 {
+        panic!(
+            "invalid user meta {:?}, path {:?}",
+            item.user_meta(),
+            item.path
+        );
+    }
     let user_meta = UserMeta::from_slice(item.user_meta());
     let commit_ts = user_meta.commit_ts;
     let write_type: WriteType;
