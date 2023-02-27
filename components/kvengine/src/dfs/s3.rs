@@ -171,7 +171,7 @@ impl S3FSCore {
         }
     }
 
-    fn file_key(&self, file_id: u64) -> String {
+    pub fn file_key(&self, file_id: u64) -> String {
         let idx = (fingerprint64(file_id.to_le_bytes().as_slice())) as u8;
         format!("{}/{:02x}/{:016x}.sst", self.prefix, idx, file_id)
     }

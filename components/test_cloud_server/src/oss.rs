@@ -3,6 +3,7 @@
 use std::{
     collections::HashMap,
     convert::Infallible,
+    io::SeekFrom,
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::{
@@ -15,12 +16,20 @@ use std::{
 use bytes::Buf;
 use futures::StreamExt;
 use hyper::{
+    header::HeaderValue,
     service::{make_service_fn, service_fn},
-    Body, Method, Request, Response, Server, StatusCode,
+    Body, HeaderMap, Method, Request, Response, Server, StatusCode,
 };
 use rand::Rng;
 use tikv_util::{debug, error, info, time::Instant, warn};
-use tokio::{fs, fs::File, io::AsyncWriteExt, runtime::Runtime, sync::oneshot, task::JoinHandle};
+use tokio::{
+    fs,
+    fs::File,
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
+    runtime::Runtime,
+    sync::oneshot,
+    task::JoinHandle,
+};
 use tokio_util::codec::{BytesCodec, FramedRead};
 use url::form_urlencoded;
 
@@ -114,16 +123,53 @@ impl ObjectStorageService {
         Ok(resp)
     }
 
+    // Return none means get all content in file.
+    // End is none means read to end.
+    fn parse_get_object_req_range(headers: &HeaderMap<HeaderValue>) -> Option<(u64, Option<u64>)> {
+        if let Some(v) = headers.get("Range") {
+            let regex = regex::Regex::new(r"bytes=(\d+)-(\d*)").unwrap();
+            let matches = regex.captures(v.to_str().unwrap()).unwrap();
+            let start_str = matches.get(1).unwrap().as_str();
+            let start = start_str.parse::<u64>().unwrap();
+            let end_str = matches.get(2).unwrap().as_str();
+            let end = if end_str.is_empty() {
+                None
+            } else {
+                Some(end_str.parse::<u64>().unwrap())
+            };
+            Some((start, end))
+        } else {
+            None
+        }
+    }
+
     async fn handle_get_object(
         ctx: Arc<ServiceContext>,
         req: Request<Body>,
     ) -> Result<Response<Body>> {
         let (parts, _) = req.into_parts();
         let file_path = Self::make_file_path(&ctx.store_path, parts.uri.path());
-
-        let res = if let Ok(file) = File::open(file_path).await {
-            let stream = FramedRead::new(file, BytesCodec::new());
-            let body = Body::wrap_stream(stream);
+        let range = Self::parse_get_object_req_range(&parts.headers);
+        let res = if let Ok(mut file) = File::open(file_path).await {
+            let body = match range {
+                None => {
+                    let stream = FramedRead::new(file, BytesCodec::new());
+                    Body::wrap_stream(stream)
+                }
+                Some(r) => {
+                    let end = if r.1.is_none() {
+                        file.metadata().await.unwrap().len()
+                    } else {
+                        r.1.unwrap()
+                    };
+                    assert!(end > r.0);
+                    // TODO: implement range read with FramedRead.
+                    file.seek(SeekFrom::Start(r.0)).await.unwrap();
+                    let mut buf = vec![0u8; (end - r.0) as usize];
+                    file.read_exact(&mut buf).await.unwrap();
+                    Body::from(buf)
+                }
+            };
             Response::new(body)
         } else {
             Self::not_found()
@@ -253,10 +299,18 @@ impl ObjectStorageService {
 mod tests {
     use bytes::Bytes;
     use kvengine::dfs::{Options, DFS, S3FS};
+    use rand::prelude::ThreadRng;
 
     use super::*;
 
     const TEST_COUNT: usize = 100;
+    const TEST_DATA_SIZE: usize = 1024;
+
+    fn random_range(rng: &mut ThreadRng) -> (usize, usize) {
+        let len = rng.gen_range(1..TEST_DATA_SIZE / 2);
+        let start = rng.gen_range(0..(TEST_DATA_SIZE - len));
+        (start, start + len)
+    }
 
     #[test]
     fn test_oss() {
@@ -286,11 +340,12 @@ mod tests {
             let options = Options::new(0, 0);
             let file_id = rng.gen::<u32>() as u64;
             let write_data = {
-                let mut buf = [0u8; 1024];
+                let mut buf = [0u8; TEST_DATA_SIZE];
                 rng.fill(&mut buf);
                 Bytes::from(buf.to_vec())
             };
             let fs = s3fs.clone();
+            let range = random_range(&mut rng);
 
             let handle = runtime.spawn(async move {
                 fs.create(file_id, write_data.clone(), options)
@@ -299,6 +354,23 @@ mod tests {
 
                 let read_data = fs.read_file(file_id, options).await.unwrap();
                 assert_eq!(write_data, read_data);
+
+                let key = fs.file_key(file_id);
+                let opts = engine_traits::GetObjectOptions {
+                    start_off: range.0 as u64,
+                    end_off: Some(range.1 as u64),
+                };
+                let read_data = fs
+                    .get_object(key.clone(), file_id.to_string(), opts)
+                    .await
+                    .unwrap();
+                assert_eq!(write_data.slice(range.0..range.1), read_data);
+                let opts = engine_traits::GetObjectOptions {
+                    start_off: range.0 as u64,
+                    end_off: None,
+                };
+                let read_data = fs.get_object(key, file_id.to_string(), opts).await.unwrap();
+                assert_eq!(write_data.slice(range.0..), read_data);
 
                 if idx % 7 == 0 {
                     fs.remove(file_id, options).await;
