@@ -186,6 +186,20 @@ impl<S: Snapshot> Iterator for DuplicateDetector<S> {
     }
 }
 
+fn from_kv_error(e: tikv_kv::Error) -> Error {
+    match e {
+        tikv_kv::Error(box tikv_kv::ErrorInner::Other(err)) => Error::Engine(err),
+        _ => Error::RocksDb("unkown error when request rocksdb".to_owned()),
+    }
+}
+
+fn from_txn_types_error(e: txn_types::Error) -> Error {
+    match e {
+        txn_types::Error(box txn_types::ErrorInner::Codec(err)) => Error::CodecError(err),
+        _ => Error::BadFormat("parse write type error".to_owned()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::mpsc::channel;
@@ -355,13 +369,15 @@ mod tests {
     }
 
     // There are 40 key-value pairs in db, there are
-    //  [100, 101, 102, 103, 104, 105, 106, 107, 108, 109] with commit timestamp 10
-    //  [104, 105, 106, 107, 108, 109, 110, 111, 112, 113] with commit timestamp 14, these 20 keys
-    //   have existed in db before importing. So we do not think (105,10) is repeated with (105,14).
-    //  [108, 109, 110, 111, 112, 113, 114, 115, 116, 117] with commit timestamp 18
-    //  [112, 113, 114, 115, 116, 117, 118, 119, 120, 121] with commit timestamp 22, these 20 keys
-    // are imported by lightning. So (108,18) is repeated with (108,14), but (108,18) is not repeated
-    // with (108,10).
+    // - [100, 101, 102, 103, 104, 105, 106, 107, 108, 109] with commit timestamp 10
+    // - [104, 105, 106, 107, 108, 109, 110, 111, 112, 113] with commit timestamp
+    //   14, these 20 keys have existed in db before importing. So we do not think
+    //   (105,10) is repeated with (105,14).
+    // - [108, 109, 110, 111, 112, 113, 114, 115, 116, 117] with commit timestamp 18
+    // - [112, 113, 114, 115, 116, 117, 118, 119, 120, 121] with commit timestamp
+    //   22, these 20 keys
+    // are imported by lightning. So (108,18) is repeated with (108,14), but
+    // (108,18) is not repeated with (108,10).
     #[test]
     fn test_duplicate_detect_incremental() {
         let storage = TestStorageBuilderApiV1::new(DummyLockManager)

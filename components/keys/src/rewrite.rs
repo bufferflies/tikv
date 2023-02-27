@@ -10,7 +10,7 @@ use tikv_util::codec::bytes::encode_bytes;
 
 /// An error indicating the key cannot be rewritten because it does not start
 /// with the given prefix.
-#[derive(PartialEq, Eq, Debug, Clone)]
+#[derive(PartialEq, Debug, Clone)]
 pub struct WrongPrefix;
 
 /// Rewrites the prefix of a byte array.

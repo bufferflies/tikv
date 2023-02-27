@@ -14,6 +14,7 @@ use std::{
     u64,
 };
 
+use engine_traits::KvEngine;
 use kvproto::{
     kvrpcpb::{self, KeyRange, LeaderInfo},
     metapb::{self, Peer, PeerRole, Region, RegionEpoch},
@@ -28,9 +29,12 @@ use raft::{
 use raft_proto::ConfChangeI;
 use tikv_util::{box_err, debug, info, time::monotonic_raw_now, Either};
 use time::{Duration, Timespec};
+use txn_types::TimeStamp;
 
 use super::peer_storage;
-use crate::{Error, Result};
+use crate::{coprocessor::CoprocessorHost, Error, Result};
+
+const INVALID_TIMESTAMP: u64 = u64::MAX;
 
 pub fn find_peer(region: &metapb::Region, store_id: u64) -> Option<&metapb::Peer> {
     region
@@ -105,10 +109,10 @@ pub fn check_key_in_region(key: &[u8], region: &metapb::Region) -> Result<()> {
     }
 }
 
-/// `is_first_vote_msg` checks `msg` is the first vote (or prevote) message or not. It's used for
-/// when the message is received but there is no such region in `Store::region_peers` and the
-/// region overlaps with others. In this case we should put `msg` into `pending_msg` instead of
-/// create the peer.
+/// `is_first_vote_msg` checks `msg` is the first vote (or prevote) message or
+/// not. It's used for when the message is received but there is no such region
+/// in `Store::region_peers` and the region overlaps with others. In this case
+/// we should put `msg` into `pending_msg` instead of create the peer.
 #[inline]
 fn is_first_vote_msg(msg: &eraftpb::Message) -> bool {
     match msg.get_msg_type() {
@@ -119,10 +123,11 @@ fn is_first_vote_msg(msg: &eraftpb::Message) -> bool {
     }
 }
 
-/// `is_first_append_entry` checks `msg` is the first append message or not. This meassge is the first
-/// message that the learner peers of the new split region will receive from the leader. It's used for
-/// when the message is received but there is no such region in `Store::region_peers`. In this case we
-/// should put `msg` into `pending_msg` instead of create the peer.
+/// `is_first_append_entry` checks `msg` is the first append message or not.
+/// This meassge is the first message that the learner peers of the new split
+/// region will receive from the leader. It's used for when the message is
+/// received but there is no such region in `Store::region_peers`. In this case
+/// we should put `msg` into `pending_msg` instead of create the peer.
 #[inline]
 fn is_first_append_entry(msg: &eraftpb::Message) -> bool {
     match msg.get_msg_type() {
@@ -146,7 +151,8 @@ pub fn is_vote_msg(msg: &eraftpb::Message) -> bool {
     msg_type == MessageType::MsgRequestVote || msg_type == MessageType::MsgRequestPreVote
 }
 
-/// `is_initial_msg` checks whether the `msg` can be used to initialize a new peer or not.
+/// `is_initial_msg` checks whether the `msg` can be used to initialize a new
+/// peer or not.
 // There could be two cases:
 // 1. Target peer already exists but has not established communication with leader yet
 // 2. Target peer is added newly due to member change or region split, but it's not
@@ -207,12 +213,13 @@ impl AdminCmdEpochState {
 }
 
 /// WARNING: the existing settings below **MUST NOT** be changed!!!
-/// Changing any admin cmd's `AdminCmdEpochState` or the epoch-change behavior during applying
-/// will break upgrade compatibility and correctness dependency of `CmdEpochChecker`.
-/// Please remember it is very difficult to fix the issues arising from not following this rule.
+/// Changing any admin cmd's `AdminCmdEpochState` or the epoch-change behavior
+/// during applying will break upgrade compatibility and correctness dependency
+/// of `CmdEpochChecker`. Please remember it is very difficult to fix the issues
+/// arising from not following this rule.
 ///
-/// If you really want to change an admin cmd behavior, please add a new admin cmd and **DO NOT**
-/// delete the old one.
+/// If you really want to change an admin cmd behavior, please add a new admin
+/// cmd and **DO NOT** delete the old one.
 pub fn admin_cmd_epoch_lookup(admin_cmp_type: AdminCmdType) -> AdminCmdEpochState {
     match admin_cmp_type {
         AdminCmdType::InvalidAdmin => AdminCmdEpochState::new(false, false, false, false),
@@ -234,8 +241,8 @@ pub fn admin_cmd_epoch_lookup(admin_cmp_type: AdminCmdType) -> AdminCmdEpochStat
     }
 }
 
-/// WARNING: `NORMAL_REQ_CHECK_VER` and `NORMAL_REQ_CHECK_CONF_VER` **MUST NOT** be changed.
-/// The reason is the same as `admin_cmd_epoch_lookup`.
+/// WARNING: `NORMAL_REQ_CHECK_VER` and `NORMAL_REQ_CHECK_CONF_VER` **MUST NOT**
+/// be changed. The reason is the same as `admin_cmd_epoch_lookup`.
 pub static NORMAL_REQ_CHECK_VER: bool = true;
 pub static NORMAL_REQ_CHECK_CONF_VER: bool = false;
 
@@ -396,14 +403,16 @@ pub fn is_region_initialized(r: &metapb::Region) -> bool {
     !r.get_peers().is_empty()
 }
 
-/// Lease records an expired time, for examining the current moment is in lease or not.
-/// It's dedicated to the Raft leader lease mechanism, contains either state of
-///   1. Suspect Timestamp
-///      A suspicious leader lease timestamp, which marks the leader may still hold or lose
-///      its lease until the clock time goes over this timestamp.
-///   2. Valid Timestamp
-///      A valid leader lease timestamp, which marks the leader holds the lease for now.
-///      The lease is valid until the clock time goes over this timestamp.
+/// Lease records an expired time, for examining the current moment is in lease
+/// or not. It's dedicated to the Raft leader lease mechanism, contains either
+/// state of
+/// - Suspect Timestamp
+///   - A suspicious leader lease timestamp, which marks the leader may still
+///     hold or lose its lease until the clock time goes over this timestamp.
+/// - Valid Timestamp
+///   - A valid leader lease timestamp, which marks the leader holds the lease
+///     for now. The lease is valid until the clock time goes over this
+///     timestamp.
 ///
 /// ```text
 /// Time
@@ -419,18 +428,19 @@ pub fn is_region_initialized(r: &metapb::Region) -> bool {
 /// ```
 ///
 /// Note:
-///   - Valid timestamp would increase when raft log entries are applied in current term.
-///   - Suspect timestamp would be set after the message `MsgTimeoutNow` is sent by current peer.
-///     The message `MsgTimeoutNow` starts a leader transfer procedure. During this procedure,
-///     current peer as an old leader may still hold its lease or lose it.
-///     It's possible there is a new leader elected and current peer as an old leader
-///     doesn't step down due to network partition from the new leader. In that case,
-///     current peer lose its leader lease.
-///     Within this suspect leader lease expire time, read requests could not be performed
-///     locally.
-///   - The valid leader lease should be `lease = max_lease - (commit_ts - send_ts)`
-///     And the expired timestamp for that leader lease is `commit_ts + lease`,
-///     which is `send_ts + max_lease` in short.
+///   - Valid timestamp would increase when raft log entries are applied in
+///     current term.
+///   - Suspect timestamp would be set after the message `MsgTimeoutNow` is sent
+///     by current peer. The message `MsgTimeoutNow` starts a leader transfer
+///     procedure. During this procedure, current peer as an old leader may
+///     still hold its lease or lose it. It's possible there is a new leader
+///     elected and current peer as an old leader doesn't step down due to
+///     network partition from the new leader. In that case, current peer lose
+///     its leader lease. Within this suspect leader lease expire time, read
+///     requests could not be performed locally.
+///   - The valid leader lease should be `lease = max_lease - (commit_ts -
+///     send_ts)` And the expired timestamp for that leader lease is `commit_ts
+///     + lease`, which is `send_ts + max_lease` in short.
 pub struct Lease {
     // A suspect timestamp is in the Either::Left(_),
     // a valid timestamp is in the Either::Right(_).
@@ -443,7 +453,7 @@ pub struct Lease {
     remote: Option<RemoteLease>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum LeaseState {
     /// The lease is suspicious, may be invalid.
     Suspect,
@@ -466,9 +476,9 @@ impl Lease {
         }
     }
 
-    /// The valid leader lease should be `lease = max_lease - (commit_ts - send_ts)`
-    /// And the expired timestamp for that leader lease is `commit_ts + lease`,
-    /// which is `send_ts + max_lease` in short.
+    /// The valid leader lease should be `lease = max_lease - (commit_ts -
+    /// send_ts)` And the expired timestamp for that leader lease is
+    /// `commit_ts + lease`, which is `send_ts + max_lease` in short.
     fn next_expired_time(&self, send_ts: Timespec) -> Timespec {
         send_ts + self.max_lease
     }
@@ -595,8 +605,8 @@ impl fmt::Debug for Lease {
 }
 
 /// A remote lease, it can only be derived by `Lease`. It will be sent
-/// to the local read thread, so name it remote. If Lease expires, the remote must
-/// expire too.
+/// to the local read thread, so name it remote. If Lease expires, the remote
+/// must expire too.
 #[derive(Clone)]
 pub struct RemoteLease {
     expired_time: Arc<AtomicU64>,
@@ -686,7 +696,7 @@ fn timespec_to_u64(ts: Timespec) -> u64 {
 ///
 /// # Panics
 ///
-/// If nsec is negative or GE than 1_000_000_000(nano seconds pre second).
+/// If nsec (nano seconds pre second) is not in [0, 1_000_000_000) range.
 #[inline]
 pub(crate) fn u64_to_timespec(u: u64) -> Timespec {
     let sec = u >> TIMESPEC_SEC_SHIFT;
@@ -788,7 +798,7 @@ impl<
     }
 }
 
-#[derive(PartialEq, Eq, Debug)]
+#[derive(PartialEq, Debug)]
 pub enum ConfChangeKind {
     // Only contains one configuration change
     Simple,
@@ -921,15 +931,50 @@ impl RegionReadProgressRegistry {
             .map(|rp| rp.safe_ts())
     }
 
-    // Update `safe_ts` with the provided `LeaderInfo` and return the regions that have the
-    // same `LeaderInfo`
-    pub fn handle_check_leaders(&self, leaders: Vec<LeaderInfo>) -> Vec<u64> {
+    pub fn get_tracked_index(&self, region_id: &u64) -> Option<u64> {
+        self.registry
+            .lock()
+            .unwrap()
+            .get(region_id)
+            .map(|rp| rp.core.lock().unwrap().applied_index)
+    }
+
+    // NOTICE: this function is an alias of `get_safe_ts` to distinguish the
+    // semantics.
+    pub fn get_resolved_ts(&self, region_id: &u64) -> Option<u64> {
+        self.registry
+            .lock()
+            .unwrap()
+            .get(region_id)
+            .map(|rp| rp.resolved_ts())
+    }
+
+    // Get the minimum `resolved_ts` which could ensure that there will be no more
+    // locks whose `start_ts` is greater than it.
+    pub fn get_min_resolved_ts(&self) -> u64 {
+        self.registry
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, rrp)| rrp.resolved_ts())
+            .filter(|ts| *ts != 0) // ts == 0 means the peer is uninitialized
+            .min()
+            .unwrap_or(0)
+    }
+
+    // Update `safe_ts` with the provided `LeaderInfo` and return the regions that
+    // have the same `LeaderInfo`
+    pub fn handle_check_leaders<E: KvEngine>(
+        &self,
+        leaders: Vec<LeaderInfo>,
+        coprocessor: &CoprocessorHost<E>,
+    ) -> Vec<u64> {
         let mut regions = Vec::with_capacity(leaders.len());
         let registry = self.registry.lock().unwrap();
         for leader_info in leaders {
             let region_id = leader_info.get_region_id();
             if let Some(rp) = registry.get(&region_id) {
-                if rp.consume_leader_info(leader_info) {
+                if rp.consume_leader_info(leader_info, coprocessor) {
                     regions.push(region_id);
                 }
             }
@@ -949,9 +994,9 @@ impl RegionReadProgressRegistry {
         info_map
     }
 
-    /// Invoke the provided callback with the registry, an internal lock will hold
-    /// while invoking the callback so it is important that *not* try to acquiring any
-    /// lock inside the callback to avoid dead lock
+    /// Invoke the provided callback with the registry, an internal lock will
+    /// hold while invoking the callback so it is important that *not* try
+    /// to acquiring any lock inside the callback to avoid dead lock
     pub fn with<F, T>(&self, f: F) -> T
     where
         F: FnOnce(&HashMap<u64, Arc<RegionReadProgress>>) -> T,
@@ -967,9 +1012,10 @@ impl Default for RegionReadProgressRegistry {
     }
 }
 
-/// `RegionReadProgress` is used to keep track of the replica's `safe_ts`, the replica can handle a read
-/// request directly without requiring leader lease or read index iff `safe_ts` >= `read_ts` (the `read_ts`
-/// is usually stale i.e seconds ago).
+/// `RegionReadProgress` is used to keep track of the replica's `safe_ts`, the
+/// replica can handle a read request directly without requiring leader lease or
+/// read index iff `safe_ts` >= `read_ts` (the `read_ts` is usually stale i.e
+/// seconds ago).
 ///
 /// `safe_ts` is updated by the `(apply index, safe ts)` item:
 /// ```ignore
@@ -978,13 +1024,15 @@ impl Default for RegionReadProgressRegistry {
 /// }
 /// ```
 ///
-/// For the leader, the `(apply index, safe ts)` item is publish by the `resolved-ts` worker periodically.
-/// For the followers, the item is sync periodically from the leader through the `CheckLeader` rpc.
+/// For the leader, the `(apply index, safe ts)` item is publish by the
+/// `resolved-ts` worker periodically. For the followers, the item is sync
+/// periodically from the leader through the `CheckLeader` rpc.
 ///
-/// The intend is to make the item's `safe ts` larger (more up to date) and `apply index` smaller (require less data)
+/// The intend is to make the item's `safe ts` larger (more up to date) and
+/// `apply index` smaller (require less data)
 //
-/// TODO: the name `RegionReadProgress` is conflict with the leader lease's `ReadProgress`, shoule change it to another
-/// more proper name
+/// TODO: the name `RegionReadProgress` is conflict with the leader lease's
+/// `ReadProgress`, should change it to another more proper name
 #[derive(Debug)]
 pub struct RegionReadProgress {
     // `core` used to keep track and update `safe_ts`, it should
@@ -1003,11 +1051,17 @@ impl RegionReadProgress {
         }
     }
 
-    pub fn update_applied(&self, applied: u64) {
+    pub fn update_applied<E: KvEngine>(&self, applied: u64, coprocessor: &CoprocessorHost<E>) {
         let mut core = self.core.lock().unwrap();
         if let Some(ts) = core.update_applied(applied) {
             if !core.pause {
                 self.safe_ts.store(ts, AtomicOrdering::Release);
+                // No need to update leader safe ts here.
+                coprocessor.on_update_safe_ts(
+                    core.region_id,
+                    TimeStamp::new(ts).physical(),
+                    INVALID_TIMESTAMP,
+                )
             }
         }
     }
@@ -1027,22 +1081,38 @@ impl RegionReadProgress {
         }
     }
 
-    pub fn merge_safe_ts(&self, source_safe_ts: u64, merge_index: u64) {
+    pub fn merge_safe_ts<E: KvEngine>(
+        &self,
+        source_safe_ts: u64,
+        merge_index: u64,
+        coprocessor: &CoprocessorHost<E>,
+    ) {
         let mut core = self.core.lock().unwrap();
         if let Some(ts) = core.merge_safe_ts(source_safe_ts, merge_index) {
             if !core.pause {
                 self.safe_ts.store(ts, AtomicOrdering::Release);
+                // After region merge, self safe ts may decrease, so leader safe ts should be
+                // reset.
+                coprocessor.on_update_safe_ts(
+                    core.region_id,
+                    TimeStamp::new(ts).physical(),
+                    TimeStamp::new(ts).physical(),
+                )
             }
         }
     }
 
-    // Consume the provided `LeaderInfo` to update `safe_ts` and return whether the provided
-    // `LeaderInfo` is same as ours
-    pub fn consume_leader_info(&self, mut leader_info: LeaderInfo) -> bool {
+    // Consume the provided `LeaderInfo` to update `safe_ts` and return whether the
+    // provided `LeaderInfo` is same as ours
+    pub fn consume_leader_info<E: KvEngine>(
+        &self,
+        mut leader_info: LeaderInfo,
+        coprocessor: &CoprocessorHost<E>,
+    ) -> bool {
         let mut core = self.core.lock().unwrap();
         if leader_info.has_read_state() {
-            // It is okay to update `safe_ts` without checking the `LeaderInfo`, the `read_state`
-            // is guaranteed to be valid when it is published by the leader
+            // It is okay to update `safe_ts` without checking the `LeaderInfo`, the
+            // `read_state` is guaranteed to be valid when it is published by the leader
             let rs = leader_info.take_read_state();
             let (apply_index, ts) = (rs.get_applied_index(), rs.get_safe_ts());
             if apply_index != 0 && ts != 0 && !core.discard {
@@ -1052,6 +1122,9 @@ impl RegionReadProgress {
                     }
                 }
             }
+            let self_phy_ts = TimeStamp::new(self.safe_ts()).physical();
+            let leader_phy_ts = TimeStamp::new(rs.get_safe_ts()).physical();
+            coprocessor.on_update_safe_ts(leader_info.region_id, self_phy_ts, leader_phy_ts)
         }
         // whether the provided `LeaderInfo` is same as ours
         core.leader_info.leader_term == leader_info.term
@@ -1116,6 +1189,13 @@ impl RegionReadProgress {
     pub fn safe_ts(&self) -> u64 {
         self.safe_ts.load(AtomicOrdering::Acquire)
     }
+
+    // `safe_ts` is calculated from the `resolved_ts`, they are the same thing
+    // internally. So we can use `resolved_ts` as the alias of `safe_ts` here.
+    #[inline(always)]
+    pub fn resolved_ts(&self) -> u64 {
+        self.safe_ts()
+    }
 }
 
 #[derive(Debug)]
@@ -1123,16 +1203,17 @@ struct RegionReadProgressCore {
     tag: String,
     region_id: u64,
     applied_index: u64,
-    // A wraper of `(apply_index, safe_ts)` item, where the `read_state.ts` is the peer's current `safe_ts`
-    // and the `read_state.idx` is the smallest `apply_index` required for that `safe_ts`
+    // A wrapper of `(apply_index, safe_ts)` item, where the `read_state.ts` is the peer's current
+    // `safe_ts` and the `read_state.idx` is the smallest `apply_index` required for that `safe_ts`
     read_state: ReadState,
     // The local peer's acknowledge about the leader
     leader_info: LocalLeaderInfo,
     // `pending_items` is a *sorted* list of `(apply_index, safe_ts)` item
     pending_items: VecDeque<ReadState>,
-    // After the region commit merged, the region's key range is extended and the region's `safe_ts`
-    // should reset to `min(source_safe_ts, target_safe_ts)`, and start reject stale `read_state` item
-    // with index smaller than `last_merge_index` to avoid `safe_ts` undo the decrease
+    // After the region commit merged, the region's key range is extended and the region's
+    // `safe_ts` should reset to `min(source_safe_ts, target_safe_ts)`, and start reject stale
+    // `read_state` item with index smaller than `last_merge_index` to avoid `safe_ts` undo the
+    // decrease
     last_merge_index: u64,
     // Stop update `safe_ts`
     pause: bool,
@@ -1140,7 +1221,7 @@ struct RegionReadProgressCore {
     discard: bool,
 }
 
-// A helpful wraper of `(apply_index, safe_ts)` item
+// A helpful wrapper of `(apply_index, safe_ts)` item
 #[derive(Clone, Debug, Default)]
 pub struct ReadState {
     pub idx: u64,
@@ -1210,7 +1291,8 @@ impl RegionReadProgressCore {
         // The apply index should not decrease
         assert!(applied >= self.applied_index);
         self.applied_index = applied;
-        // Consume pending items with `apply_index` less or equal to `self.applied_index`
+        // Consume pending items with `apply_index` less or equal to
+        // `self.applied_index`
         let mut to_update = self.read_state.clone();
         while let Some(item) = self.pending_items.pop_front() {
             if self.applied_index < item.idx {
@@ -1279,7 +1361,8 @@ impl RegionReadProgressCore {
     }
 }
 
-/// Represent the duration of all stages of raftstore recorded by one inspecting.
+/// Represent the duration of all stages of raftstore recorded by one
+/// inspecting.
 #[derive(Default, Debug)]
 pub struct RaftstoreDuration {
     pub store_wait_duration: Option<std::time::Duration>,
@@ -1345,6 +1428,7 @@ impl LatencyInspector {
 mod tests {
     use std::thread;
 
+    use engine_test::kv::KvTestEngine;
     use kvproto::{
         metapb::{self, RegionEpoch},
         raft_cmdpb::AdminRequest,
@@ -1432,7 +1516,8 @@ mod tests {
         let cases = vec![
             (Timespec::new(0, 0), 0x0000_0000_0000_0000u64),
             (Timespec::new(0, 1), 0x0000_0000_0000_0000u64), // 1ns is round down to 0ms.
-            (Timespec::new(0, 999_999), 0x0000_0000_0000_0000u64), // 999_999ns is round down to 0ms.
+            (Timespec::new(0, 999_999), 0x0000_0000_0000_0000u64), /* 999_999ns is round down to
+                                                              * 0ms. */
             (
                 // 1_048_575ns is round down to 0ms.
                 Timespec::new(0, 1_048_575 /* 0x0FFFFF */),
@@ -1520,7 +1605,7 @@ mod tests {
     ) -> metapb::Region {
         let mut region = metapb::Region::default();
         macro_rules! push_peer {
-            ($ids: ident, $role: expr) => {
+            ($ids:ident, $role:expr) => {
                 for id in $ids {
                     let mut peer = metapb::Peer::default();
                     peer.set_id(*id);
@@ -1965,7 +2050,8 @@ mod tests {
         assert_eq!(rrp.safe_ts(), 10);
         assert_eq!(pending_items_num(&rrp), 10);
 
-        rrp.update_applied(20);
+        let coprocessor_host = CoprocessorHost::<KvTestEngine>::default();
+        rrp.update_applied(20, &coprocessor_host);
         assert_eq!(rrp.safe_ts(), 20);
         assert_eq!(pending_items_num(&rrp), 0);
 
@@ -1977,7 +2063,7 @@ mod tests {
         assert!(pending_items_num(&rrp) <= cap);
 
         // `applied_index` large than all pending items will clear all pending items
-        rrp.update_applied(200);
+        rrp.update_applied(200, &coprocessor_host);
         assert_eq!(rrp.safe_ts(), 199);
         assert_eq!(pending_items_num(&rrp), 0);
 
@@ -1991,9 +2077,9 @@ mod tests {
         rrp.update_safe_ts(301, 600);
         assert_eq!(pending_items_num(&rrp), 2);
         // `safe_ts` will update to 500 instead of 300
-        rrp.update_applied(300);
+        rrp.update_applied(300, &coprocessor_host);
         assert_eq!(rrp.safe_ts(), 500);
-        rrp.update_applied(301);
+        rrp.update_applied(301, &coprocessor_host);
         assert_eq!(rrp.safe_ts(), 600);
         assert_eq!(pending_items_num(&rrp), 0);
 

@@ -4,12 +4,13 @@ use std::{marker::PhantomData, sync::Arc};
 
 use api_version::ApiV1;
 use criterion::black_box;
+use futures::executor::block_on;
 use kvproto::coprocessor::KeyRange;
 use test_coprocessor::*;
 use tidb_query_datatype::expr::EvalConfig;
 use tidb_query_executors::{interface::*, BatchTableScanExecutor};
 use tikv::{
-    coprocessor::{dag::TiKvStorage, RequestHandler},
+    coprocessor::{dag::TikvStorage, RequestHandler},
     storage::{RocksEngine, Statistics, Store as TxnStore},
 };
 use tipb::ColumnInfo;
@@ -49,17 +50,17 @@ impl<T: TxnStore + 'static> scan_bencher::ScanExecutorBuilder for BatchTableScan
         .unwrap();
         // There is a step of building scanner in the first `next()` which cost time,
         // so we next() before hand.
-        executor.next_batch(1);
+        block_on(executor.next_batch(1));
         Box::new(executor) as Box<dyn BatchExecutor<StorageStats = Statistics>>
     }
 }
 
-pub struct TableScanExecutorDAGBuilder<T: TxnStore + 'static> {
+pub struct TableScanExecutorDagBuilder<T: TxnStore + 'static> {
     _phantom: PhantomData<T>,
 }
 
-impl<T: TxnStore + 'static> scan_bencher::ScanExecutorDAGHandlerBuilder
-    for TableScanExecutorDAGBuilder<T>
+impl<T: TxnStore + 'static> scan_bencher::ScanExecutorDagHandlerBuilder
+    for TableScanExecutorDagBuilder<T>
 {
     type T = T;
     type P = TableScanParam;
@@ -78,4 +79,4 @@ impl<T: TxnStore + 'static> scan_bencher::ScanExecutorDAGHandlerBuilder
 
 pub type BatchTableScanNext1024Bencher<T> =
     scan_bencher::BatchScanNext1024Bencher<BatchTableScanExecutorBuilder<T>>;
-pub type TableScanDAGBencher<T> = scan_bencher::ScanDAGBencher<TableScanExecutorDAGBuilder<T>>;
+pub type TableScanDagBencher<T> = scan_bencher::ScanDagBencher<TableScanExecutorDagBuilder<T>>;

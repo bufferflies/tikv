@@ -8,12 +8,8 @@ use tidb_query_common::storage::{
     scanner::{RangesScanner, RangesScannerOptions},
     Range,
 };
-use tidb_query_executors::runner::MAX_TIME_SLICE;
-use tidb_query_expr::BATCH_MAX_SIZE;
 use tikv_alloc::trace::MemoryTraceGuard;
-use tikv_util::time::Instant;
 use tipb::{ChecksumAlgorithm, ChecksumRequest, ChecksumResponse};
-use yatp::task::future::reschedule;
 
 use crate::{
     coprocessor::{dag::TiKvStorage, *},
@@ -42,7 +38,7 @@ impl<S: Snapshot> ChecksumContext<S> {
         );
         info!("checksum ranges"; "ranges" => ?ranges);
         let scanner = RangesScanner::new(RangesScannerOptions {
-            storage: TiKvStorage::new(store, false),
+            storage: TikvStorage::new(store, false),
             ranges: ranges
                 .into_iter()
                 .map(|r| Range::from_pb_range(r, false))
@@ -76,19 +72,8 @@ impl<S: Snapshot> RequestHandler for ChecksumContext<S> {
         let mut prefix_digest = crc64fast::Digest::new();
         prefix_digest.write(&old_prefix);
 
-        let mut row_count = 0;
-        let mut time_slice_start = Instant::now();
-        while let Some(row) = self.scanner.next()? {
+        while let Some(row) = self.scanner.next().await? {
             let (k, v) = (row.key(), row.value());
-            row_count += 1;
-            if row_count >= BATCH_MAX_SIZE {
-                if time_slice_start.saturating_elapsed() > MAX_TIME_SLICE {
-                    reschedule().await;
-                    time_slice_start = Instant::now();
-                }
-                row_count = 0;
-            }
-
             if !k.starts_with(&new_prefix) {
                 return Err(box_err!("Wrong prefix expect: {:?}", new_prefix));
             }

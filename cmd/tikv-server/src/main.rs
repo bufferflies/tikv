@@ -8,7 +8,7 @@ use clap::{crate_authors, App, Arg};
 use cloud_server::{signal_handler, TiKVServer};
 use serde_json::{Map, Value};
 use server::setup::{ensure_no_unrecognized_config, validate_and_persist_config};
-use tikv::config::{to_flatten_config_info, TiKvConfig};
+use tikv::config::{to_flatten_config_info, TikvConfig};
 
 fn main() {
     let build_timestamp = option_env!("TIKV_BUILD_TIME");
@@ -158,7 +158,7 @@ fn main() {
         .get_matches();
 
     if matches.is_present("print-sample-config") {
-        let config = TiKvConfig::default();
+        let config = TikvConfig::default();
         println!("{}", toml::to_string_pretty(&config).unwrap());
         process::exit(0);
     }
@@ -168,9 +168,9 @@ fn main() {
 
     let mut config = matches
         .value_of_os("config")
-        .map_or_else(TiKvConfig::default, |path| {
+        .map_or_else(TikvConfig::default, |path| {
             let path = Path::new(path);
-            TiKvConfig::from_file(
+            TikvConfig::from_file(
                 path,
                 if is_config_check {
                     Some(&mut unrecognized_keys)

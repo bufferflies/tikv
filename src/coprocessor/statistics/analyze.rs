@@ -24,18 +24,14 @@ use tidb_query_datatype::{
     expr::{EvalConfig, EvalContext},
     FieldTypeAccessor,
 };
-use tidb_query_executors::{
-    interface::BatchExecutor, runner::MAX_TIME_SLICE, BatchTableScanExecutor,
-};
+use tidb_query_executors::{interface::BatchExecutor, BatchTableScanExecutor};
 use tidb_query_expr::BATCH_MAX_SIZE;
 use tikv_alloc::trace::{MemoryTraceGuard, TraceEvent};
 use tikv_util::{
     metrics::{ThrottleType, NON_TXN_COMMAND_THROTTLE_TIME_COUNTER_VEC_STATIC},
     quota_limiter::QuotaLimiter,
-    time::Instant,
 };
 use tipb::{self, AnalyzeColumnsReq, AnalyzeIndexReq, AnalyzeReq, AnalyzeType};
-use yatp::task::future::reschedule;
 
 use super::{cmsketch::CmSketch, fmsketch::FmSketch, histogram::Histogram};
 use crate::{
@@ -97,7 +93,7 @@ impl<S: Snapshot, F: KvFormat> AnalyzeContext<S, F> {
 
         Ok(Self {
             req,
-            storage: Some(TiKvStorage::new(store, false)),
+            storage: Some(TikvStorage::new(store, false)),
             ranges,
             storage_stats: Statistics::default(),
             quota_limiter,
@@ -158,12 +154,10 @@ impl<S: Snapshot, F: KvFormat> AnalyzeContext<S, F> {
             req.get_cmsketch_width() as usize,
         );
         let mut fms = FmSketch::new(req.get_sketch_size() as usize);
-        let mut row_count = 0;
-        let mut time_slice_start = Instant::now();
         let mut topn_heap = BinaryHeap::new();
-        // cur_val recording the current value's data and its counts when iterating index's rows.
-        // Once we met a new value, the old value will be pushed into the topn_heap to maintain the
-        // top-n information.
+        // cur_val recording the current value's data and its counts when iterating
+        // index's rows. Once we met a new value, the old value will be pushed
+        // into the topn_heap to maintain the top-n information.
         let mut cur_val: (u32, Vec<u8>) = (0, vec![]);
         let top_n_size = req.get_top_n_size() as usize;
         let stats_version = if req.has_version() {
@@ -171,17 +165,8 @@ impl<S: Snapshot, F: KvFormat> AnalyzeContext<S, F> {
         } else {
             ANALYZE_VERSION_V1
         };
-        while let Some(row) = scanner.next()? {
-            let key = row.key();
-            row_count += 1;
-            if row_count >= BATCH_MAX_SIZE {
-                if time_slice_start.saturating_elapsed() > MAX_TIME_SLICE {
-                    reschedule().await;
-                    time_slice_start = Instant::now();
-                }
-                row_count = 0;
-            }
-            let mut key = key;
+        while let Some(row) = scanner.next().await? {
+            let mut key = row.key();
             if is_common_handle {
                 table::check_record_key(key)?;
                 key = &key[table::PREFIX_LEN..];
@@ -502,19 +487,19 @@ impl<S: Snapshot, F: KvFormat> RowSampleBuilder<S, F> {
         use tidb_query_datatype::{codec::collation::Collator, match_template_collator};
 
         let mut is_drained = false;
-        let mut time_slice_start = Instant::now();
         let mut collector = self.new_collector();
         while !is_drained {
-            let time_slice_elapsed = time_slice_start.saturating_elapsed();
-            if time_slice_elapsed > MAX_TIME_SLICE {
-                reschedule().await;
-                time_slice_start = Instant::now();
-            }
-
             let mut sample = self.quota_limiter.new_sample(!self.is_auto_analyze);
+            let mut read_size: usize = 0;
             {
+                let result = {
+                    let (duration, res) = sample
+                        .observe_cpu_async(self.data.next_batch(BATCH_MAX_SIZE))
+                        .await;
+                    sample.add_cpu_time(duration);
+                    res
+                };
                 let _guard = sample.observe_cpu();
-                let result = self.data.next_batch(BATCH_MAX_SIZE);
                 is_drained = result.is_drained?;
 
                 let columns_slice = result.physical_columns.as_slice();
@@ -551,6 +536,7 @@ impl<S: Snapshot, F: KvFormat> RowSampleBuilder<S, F> {
                         } else {
                             collation_key_vals.push(Vec::new());
                         }
+                        read_size += val.len();
                         column_vals.push(val);
                     }
                     collector.mut_base().count += 1;
@@ -564,7 +550,9 @@ impl<S: Snapshot, F: KvFormat> RowSampleBuilder<S, F> {
                 }
             }
 
-            // Don't let analyze bandwidth limit the quota limiter, this is already limited in rate limiter.
+            sample.add_read_bytes(read_size);
+            // Don't let analyze bandwidth limit the quota limiter, this is already limited
+            // in rate limiter.
             let quota_delay = {
                 if !self.is_auto_analyze {
                     self.quota_limiter.consume_sample(sample, true).await
@@ -978,10 +966,10 @@ impl<S: Snapshot, F: KvFormat> SampleBuilder<S, F> {
         })
     }
 
-    // `collect_columns_stats` returns the sample collectors which contain total count,
-    // null count, distinct values count and count-min sketch. And it also returns the statistic
-    // builder for PK which contains the histogram. When PK is common handle, it returns index stats
-    // for PK.
+    // `collect_columns_stats` returns the sample collectors which contain total
+    // count, null count, distinct values count and count-min sketch. And it
+    // also returns the statistic builder for PK which contains the histogram.
+    // When PK is common handle, it returns index stats for PK.
     // See https://en.wikipedia.org/wiki/Reservoir_sampling
     async fn collect_columns_stats(
         &mut self,
@@ -991,8 +979,8 @@ impl<S: Snapshot, F: KvFormat> SampleBuilder<S, F> {
             self.columns_info.len() - self.columns_info[0].get_pk_handle() as usize;
 
         // The number of columns need to be sampled is `columns_without_handle_len`.
-        // It equals to `columns_info.len()` if the first column doesn't contain a handle.
-        // Otherwise, it equals to `columns_info.len() - 1`.
+        // It equals to `columns_info.len()` if the first column doesn't contain a
+        // handle. Otherwise, it equals to `columns_info.len() - 1`.
         let mut pk_builder = Histogram::new(self.max_bucket_size);
         let mut collectors = vec![
             SampleCollector::new(
@@ -1004,17 +992,11 @@ impl<S: Snapshot, F: KvFormat> SampleBuilder<S, F> {
             columns_without_handle_len
         ];
         let mut is_drained = false;
-        let mut time_slice_start = Instant::now();
         let mut common_handle_hist = Histogram::new(self.max_bucket_size);
         let mut common_handle_cms = CmSketch::new(self.cm_sketch_depth, self.cm_sketch_width);
         let mut common_handle_fms = FmSketch::new(self.max_fm_sketch_size);
         while !is_drained {
-            let time_slice_elapsed = time_slice_start.saturating_elapsed();
-            if time_slice_elapsed > MAX_TIME_SLICE {
-                reschedule().await;
-                time_slice_start = Instant::now();
-            }
-            let result = self.data.next_batch(BATCH_MAX_SIZE);
+            let result = self.data.next_batch(BATCH_MAX_SIZE).await;
             is_drained = result.is_drained?;
 
             let mut columns_slice = result.physical_columns.as_slice();
@@ -1035,9 +1017,9 @@ impl<S: Snapshot, F: KvFormat> SampleBuilder<S, F> {
             }
 
             if self.analyze_common_handle {
-                // cur_val recording the current value's data and its counts when iterating index's rows.
-                // Once we met a new value, the old value will be pushed into the topn_heap to maintain the
-                // top-n information.
+                // cur_val recording the current value's data and its counts when iterating
+                // index's rows. Once we met a new value, the old value will be pushed into the
+                // topn_heap to maintain the top-n information.
                 let mut cur_val: (u32, Vec<u8>) = (0, vec![]);
                 let mut topn_heap = BinaryHeap::new();
                 for logical_row in &result.logical_rows {
@@ -1099,16 +1081,21 @@ impl<S: Snapshot, F: KvFormat> SampleBuilder<S, F> {
                         &mut val,
                     )?;
 
-                    // This is a workaround for different encoding methods used by TiDB and TiKV for CM Sketch.
-                    // We need this because we must ensure we are using the same encoding method when we are querying values from
-                    //   CM Sketch (in TiDB) and inserting values into CM Sketch (here).
-                    // We are inserting raw bytes from TableScanExecutor into CM Sketch here and query CM Sketch using bytes
-                    //   encoded by tablecodec.EncodeValue() in TiDB. Their results are different after row format becomes ver 2.
+                    // This is a workaround for different encoding methods used by TiDB and TiKV for
+                    // CM Sketch. We need this because we must ensure we are using the same encoding
+                    // method when we are querying values from CM Sketch (in TiDB) and inserting
+                    // values into CM Sketch (here).
+                    // We are inserting raw bytes from TableScanExecutor into CM Sketch here and
+                    // query CM Sketch using bytes encoded by tablecodec.EncodeValue() in TiDB.
+                    // Their results are different after row format becomes ver 2.
                     //
-                    // Here we (1) convert INT bytes to VAR_INT bytes, (2) convert UINT bytes to VAR_UINT bytes,
-                    //   and (3) "flatten" the duration value from DURATION bytes into i64 value, then convert it to VAR_INT bytes.
-                    // These are the only 3 cases we need to care about according to TiDB's tablecodec.EncodeValue() and
-                    //   TiKV's V1CompatibleEncoder::write_v2_as_datum().
+                    // Here we:
+                    // - convert INT bytes to VAR_INT bytes
+                    // - convert UINT bytes to VAR_UINT bytes
+                    // - "flatten" the duration value from DURATION bytes into i64 value, then
+                    //   convert it to VAR_INT bytes.
+                    // These are the only 3 cases we need to care about according to TiDB's
+                    // tablecodec.EncodeValue() and TiKV's V1CompatibleEncoder::write_v2_as_datum().
                     val = match val[0] {
                         INT_FLAG | UINT_FLAG | DURATION_FLAG => {
                             let mut mut_val = &val[..];
@@ -1157,7 +1144,8 @@ impl<S: Snapshot, F: KvFormat> SampleBuilder<S, F> {
     }
 }
 
-/// `SampleCollector` will collect Samples and calculate the count, ndv and total size of an attribute.
+/// `SampleCollector` will collect Samples and calculate the count, ndv and
+/// total size of an attribute.
 #[derive(Clone)]
 struct SampleCollector {
     samples: Vec<Vec<u8>>,

@@ -32,11 +32,11 @@ fn test_retry_rpc_client() {
     server.stop();
     let child = thread::spawn(move || {
         let cfg = new_config(m_eps);
-        assert_eq!(RpcClient::new(&cfg, None, m_mgr).is_ok(), true);
+        RpcClient::new(&cfg, None, m_mgr).unwrap();
     });
     thread::sleep(Duration::from_millis(500));
     server.start(&mgr, eps);
-    assert_eq!(child.join().is_ok(), true);
+    child.join().unwrap();
 }
 
 #[test]
@@ -109,12 +109,9 @@ fn test_rpc_client() {
         .build()
         .unwrap();
     let (tx, rx) = mpsc::channel();
-    let f = client.handle_region_heartbeat_response(
-        1,
-        Box::new(move |resp| {
-            let _ = tx.send(resp);
-        }),
-    );
+    let f = client.handle_region_heartbeat_response(1, move |resp| {
+        let _ = tx.send(resp);
+    });
     poller.spawn(f);
     poller.spawn(client.region_heartbeat(
         store::RAFT_INIT_LOG_TERM,
@@ -131,7 +128,7 @@ fn test_rpc_client() {
 
     block_on(client.store_heartbeat(
         pdpb::StoreStats::default(),
-        /*store_report=*/ None,
+        None, // store_report
         None,
     ))
     .unwrap();
@@ -356,7 +353,8 @@ fn test_retry_sync() {
 
 fn test_not_retry<F: Fn(&RpcClient)>(func: F) {
     let eps_count = 1;
-    // NotRetry mocker returns Ok() with error header first, and next returns Ok() without any error header.
+    // NotRetry mocker returns Ok() with error header first, and next returns Ok()
+    // without any error header.
     let not_retry = Arc::new(NotRetry::new());
     let server = MockServer::with_case(eps_count, not_retry);
     let eps = server.bind_addrs();
@@ -458,9 +456,9 @@ fn test_change_leader_async() {
     let counter = Arc::new(AtomicUsize::new(0));
     let client = new_client(eps, None);
     let counter1 = Arc::clone(&counter);
-    client.handle_reconnect(Box::new(move || {
+    client.handle_reconnect(move || {
         counter1.fetch_add(1, Ordering::SeqCst);
-    }));
+    });
     let leader = client.get_leader();
 
     for _ in 0..5 {
@@ -506,10 +504,8 @@ fn test_pd_client_heartbeat_send_failed() {
         .build()
         .unwrap();
     let (tx, rx) = mpsc::channel();
-    let f = client.handle_region_heartbeat_response(
-        1,
-        Box::new(move |resp| tx.send(resp).unwrap_or_default()),
-    );
+    let f =
+        client.handle_region_heartbeat_response(1, move |resp| tx.send(resp).unwrap_or_default());
     poller.spawn(f);
 
     let heartbeat_send_fail = |ok| {
@@ -527,7 +523,7 @@ fn test_pd_client_heartbeat_send_failed() {
             assert!(rsp.is_ok());
             assert_eq!(rsp.unwrap().get_region_id(), 1);
         } else {
-            assert!(rsp.is_err());
+            rsp.unwrap_err();
         }
 
         let region = block_on(client.get_region_by_id(1));
@@ -537,7 +533,7 @@ fn test_pd_client_heartbeat_send_failed() {
             assert!(r.is_some());
             assert_eq!(1, r.unwrap().get_id());
         } else {
-            assert!(region.is_err());
+            region.unwrap_err();
         }
     };
     // send fail if network is block.
@@ -560,12 +556,9 @@ fn test_region_heartbeat_on_leader_change() {
         .build()
         .unwrap();
     let (tx, rx) = mpsc::channel();
-    let f = client.handle_region_heartbeat_response(
-        1,
-        Box::new(move |resp| {
-            tx.send(resp).unwrap();
-        }),
-    );
+    let f = client.handle_region_heartbeat_response(1, move |resp| {
+        tx.send(resp).unwrap();
+    });
     poller.spawn(f);
     let region = metapb::Region::default();
     let peer = metapb::Peer::default();
@@ -608,7 +601,8 @@ fn test_region_heartbeat_on_leader_change() {
     // Change PD leader once then heartbeat PD.
     heartbeat_on_leader_change(1);
 
-    // Change PD leader twice without update the heartbeat sender, then heartbeat PD.
+    // Change PD leader twice without update the heartbeat sender, then heartbeat
+    // PD.
     heartbeat_on_leader_change(2);
 }
 
@@ -621,9 +615,9 @@ fn test_periodical_update() {
     let counter = Arc::new(AtomicUsize::new(0));
     let client = new_client_with_update_interval(eps, None, ReadableDuration::secs(3));
     let counter1 = Arc::clone(&counter);
-    client.handle_reconnect(Box::new(move || {
+    client.handle_reconnect(move || {
         counter1.fetch_add(1, Ordering::SeqCst);
-    }));
+    });
     let leader = client.get_leader();
 
     for _ in 0..5 {
@@ -653,7 +647,7 @@ fn test_cluster_version() {
 
     let emit_heartbeat = || {
         let req = pdpb::StoreStats::default();
-        block_on(client.store_heartbeat(req, /*store_report=*/ None, None)).unwrap();
+        block_on(client.store_heartbeat(req, /* store_report= */ None, None)).unwrap();
     };
 
     let set_cluster_version = |version: &str| {

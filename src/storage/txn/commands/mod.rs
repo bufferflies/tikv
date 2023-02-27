@@ -11,6 +11,8 @@ pub(crate) mod check_txn_status;
 pub(crate) mod cleanup;
 pub(crate) mod commit;
 pub(crate) mod compare_and_swap;
+pub(crate) mod flashback_to_version;
+pub(crate) mod flashback_to_version_read_phase;
 pub(crate) mod mvcc_by_key;
 pub(crate) mod mvcc_by_start_ts;
 pub(crate) mod pause;
@@ -37,6 +39,8 @@ pub use cleanup::Cleanup;
 pub use commit::Commit;
 pub use compare_and_swap::RawCompareAndSwap;
 use concurrency_manager::{ConcurrencyManager, KeyHandleGuard};
+pub use flashback_to_version::FlashbackToVersion;
+pub use flashback_to_version_read_phase::FlashbackToVersionReadPhase;
 use kvproto::kvrpcpb::*;
 pub use mvcc_by_key::MvccByKey;
 pub use mvcc_by_start_ts::MvccByStartTs;
@@ -70,7 +74,8 @@ use crate::storage::{
 /// Learn more about our transaction system at
 /// [Deep Dive TiKV: Distributed Transactions](https://tikv.org/docs/deep-dive/distributed-transaction/introduction/)
 ///
-/// These are typically scheduled and used through the [`Storage`](crate::storage::Storage) with functions like
+/// These are typically scheduled and used through the
+/// [`Storage`](crate::storage::Storage) with functions like
 /// [`prewrite`](prewrite::Prewrite) trait and are executed asynchronously.
 pub enum Command {
     Prewrite(Prewrite),
@@ -91,26 +96,29 @@ pub enum Command {
     MvccByStartTs(MvccByStartTs),
     RawCompareAndSwap(RawCompareAndSwap),
     RawAtomicStore(RawAtomicStore),
+    FlashbackToVersionReadPhase(FlashbackToVersionReadPhase),
+    FlashbackToVersion(FlashbackToVersion),
 }
 
 /// A `Command` with its return type, reified as the generic parameter `T`.
 ///
-/// Incoming grpc requests (like `CommitRequest`, `PrewriteRequest`) are converted to
-/// this type via a series of transformations. That process is described below using
-/// `CommitRequest` as an example:
-/// 1. A `CommitRequest` is handled by the `future_commit` method in kv.rs, where it
-/// needs to be transformed to a `TypedCommand` before being passed to the
-/// `storage.sched_txn_command` method.
-/// 2. The `From<CommitRequest>` impl for `TypedCommand` gets chosen, and its generic
-/// parameter indicates that the result type for this instance of `TypedCommand` is
-/// going to be `TxnStatus` - one of the variants of the `StorageCallback` enum.
-/// 3. In the above `from` method, the details of the commit request are captured by
-/// creating an instance of the struct `storage::txn::commands::commit::Command`
-/// via its `new` method.
-/// 4. This struct is wrapped in a variant of the enum `storage::txn::commands::Command`.
-/// This enum exists to facilitate generic operations over different commands.
-/// 5. Finally, the `Command` enum variant for `Commit` is converted to the `TypedCommand`
-/// using the `From<Command>` impl for `TypedCommand`.
+/// Incoming grpc requests (like `CommitRequest`, `PrewriteRequest`) are
+/// converted to this type via a series of transformations. That process is
+/// described below using `CommitRequest` as an example:
+/// 1. A `CommitRequest` is handled by the `future_commit` method in kv.rs,
+/// where it needs to be transformed to a `TypedCommand` before being passed to
+/// the `storage.sched_txn_command` method.
+/// 2. The `From<CommitRequest>` impl for `TypedCommand` gets chosen, and its
+/// generic parameter indicates that the result type for this instance of
+/// `TypedCommand` is going to be `TxnStatus` - one of the variants of the
+/// `StorageCallback` enum. 3. In the above `from` method, the details of the
+/// commit request are captured by creating an instance of the struct
+/// `storage::txn::commands::commit::Command` via its `new` method.
+/// 4. This struct is wrapped in a variant of the enum
+/// `storage::txn::commands::Command`. This enum exists to facilitate generic
+/// operations over different commands. 5. Finally, the `Command` enum variant
+/// for `Commit` is converted to the `TypedCommand` using the `From<Command>`
+/// impl for `TypedCommand`.
 ///
 /// For other requests, see the corresponding `future_` method, the `From` trait
 /// implementation and so on.
@@ -160,12 +168,12 @@ impl From<PrewriteRequest> for TypedCommand<PrewriteResult> {
                 req.take_context(),
             )
         } else {
-            let is_pessimistic_lock = req.take_is_pessimistic_lock();
+            let pessimistic_actions = req.take_pessimistic_actions();
             let mutations = req
                 .take_mutations()
                 .into_iter()
                 .map(Into::into)
-                .zip(is_pessimistic_lock.into_iter())
+                .zip(pessimistic_actions)
                 .collect();
             PrewritePessimistic::new(
                 mutations,
@@ -211,6 +219,7 @@ impl From<PessimisticLockRequest> for TypedCommand<StorageResult<PessimisticLock
             req.get_min_commit_ts().into(),
             OldValues::default(),
             req.get_check_existence(),
+            req.get_lock_only_if_exists(),
             req.take_context(),
         )
     }
@@ -342,6 +351,20 @@ impl From<MvccGetByStartTsRequest> for TypedCommand<Option<(Key, MvccInfo)>> {
     }
 }
 
+impl From<FlashbackToVersionRequest> for TypedCommand<()> {
+    fn from(mut req: FlashbackToVersionRequest) -> Self {
+        FlashbackToVersionReadPhase::new(
+            req.get_start_ts().into(),
+            req.get_commit_ts().into(),
+            req.get_version().into(),
+            Some(Key::from_raw(req.get_end_key())),
+            Some(Key::from_raw(req.get_start_key())),
+            Some(Key::from_raw(req.get_start_key())),
+            req.take_context(),
+        )
+    }
+}
+
 #[derive(Default)]
 pub(super) struct ReleasedLocks {
     start_ts: TimeStamp,
@@ -350,16 +373,18 @@ pub(super) struct ReleasedLocks {
     pessimistic: bool,
 }
 
-/// Represents for a scheduler command, when should the response sent to the client.
-/// For most cases, the response should be sent after the result being successfully applied to
-/// the storage (if needed). But in some special cases, some optimizations allows the response to be
-/// returned at an earlier phase.
+/// Represents for a scheduler command, when should the response sent to the
+/// client. For most cases, the response should be sent after the result being
+/// successfully applied to the storage (if needed). But in some special cases,
+/// some optimizations allows the response to be returned at an earlier phase.
 ///
-/// Note that this doesn't affect latch releasing. The latch and the memory lock (if any) are always
-/// released after applying, regardless of when the response is sent.
+/// Note that this doesn't affect latch releasing. The latch and the memory lock
+/// (if any) are always released after applying, regardless of when the response
+/// is sent.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ResponsePolicy {
-    /// Return the response to the client when the command has finished applying.
+    /// Return the response to the client when the command has finished
+    /// applying.
     OnApplied,
     /// Return the response after finishing Raft committing.
     OnCommitted,
@@ -566,6 +591,8 @@ impl Command {
             Command::MvccByStartTs(t) => t,
             Command::RawCompareAndSwap(t) => t,
             Command::RawAtomicStore(t) => t,
+            Command::FlashbackToVersionReadPhase(t) => t,
+            Command::FlashbackToVersion(t) => t,
         }
     }
 
@@ -589,6 +616,8 @@ impl Command {
             Command::MvccByStartTs(t) => t,
             Command::RawCompareAndSwap(t) => t,
             Command::RawAtomicStore(t) => t,
+            Command::FlashbackToVersionReadPhase(t) => t,
+            Command::FlashbackToVersion(t) => t,
         }
     }
 
@@ -601,6 +630,7 @@ impl Command {
             Command::ResolveLockReadPhase(t) => t.process_read(snapshot, statistics),
             Command::MvccByKey(t) => t.process_read(snapshot, statistics),
             Command::MvccByStartTs(t) => t.process_read(snapshot, statistics),
+            Command::FlashbackToVersionReadPhase(t) => t.process_read(snapshot, statistics),
             _ => panic!("unsupported read command"),
         }
     }
@@ -626,6 +656,7 @@ impl Command {
             Command::Pause(t) => t.process_write(snapshot, context),
             Command::RawCompareAndSwap(t) => t.process_write(snapshot, context),
             Command::RawAtomicStore(t) => t.process_write(snapshot, context),
+            Command::FlashbackToVersion(t) => t.process_write(snapshot, context),
             _ => panic!("unsupported write command"),
         }
     }
@@ -698,12 +729,14 @@ impl Debug for Command {
     }
 }
 
-/// Commands that do not need to modify the database during execution will implement this trait.
+/// Commands that do not need to modify the database during execution will
+/// implement this trait.
 pub trait ReadCommand<S: Snapshot>: CommandExt {
     fn process_read(self, snapshot: S, statistics: &mut Statistics) -> Result<ProcessResult>;
 }
 
-/// Commands that need to modify the database during execution will implement this trait.
+/// Commands that need to modify the database during execution will implement
+/// this trait.
 pub trait WriteCommand<S: Snapshot, L: LockManager>: CommandExt {
     fn process_write(self, snapshot: S, context: WriteContext<'_, L>) -> Result<WriteResult>;
 }
@@ -800,7 +833,7 @@ pub mod test_util {
     pub fn pessimistic_prewrite<E: Engine>(
         engine: &E,
         statistics: &mut Statistics,
-        mutations: Vec<(Mutation, bool)>,
+        mutations: Vec<(Mutation, PrewriteRequestPessimisticAction)>,
         primary: Vec<u8>,
         start_ts: u64,
         for_update_ts: u64,
@@ -823,7 +856,7 @@ pub mod test_util {
         engine: &E,
         cm: ConcurrencyManager,
         statistics: &mut Statistics,
-        mutations: Vec<(Mutation, bool)>,
+        mutations: Vec<(Mutation, PrewriteRequestPessimisticAction)>,
         primary: Vec<u8>,
         start_ts: u64,
         for_update_ts: u64,

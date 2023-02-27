@@ -8,7 +8,7 @@ use kvproto::coprocessor::KeyRange;
 use test_coprocessor::*;
 use tidb_query_datatype::expr::EvalConfig;
 use tikv::{
-    coprocessor::dag::TiKvStorage,
+    coprocessor::dag::TikvStorage,
     storage::{RocksEngine, Store as TxnStore},
 };
 use tipb::Executor as PbExecutor;
@@ -74,7 +74,7 @@ where
         crate::util::bencher::BatchNextAllBencher::new(|| {
             tidb_query_executors::runner::build_executors::<_, ApiV1>(
                 black_box(executors.to_vec()),
-                black_box(TiKvStorage::new(ToTxnStore::<T>::to_store(store), false)),
+                black_box(TikvStorage::new(ToTxnStore::<T>::to_store(store), false)),
                 black_box(ranges.to_vec()),
                 black_box(Arc::new(EvalConfig::default())),
                 black_box(false),
@@ -89,12 +89,12 @@ where
     }
 }
 
-pub struct DAGBencher<T: TxnStore + 'static> {
+pub struct DagBencher<T: TxnStore + 'static> {
     pub batch: bool,
     _phantom: PhantomData<T>,
 }
 
-impl<T: TxnStore + 'static> DAGBencher<T> {
+impl<T: TxnStore + 'static> DagBencher<T> {
     pub fn new(batch: bool) -> Self {
         Self {
             batch,
@@ -103,7 +103,7 @@ impl<T: TxnStore + 'static> DAGBencher<T> {
     }
 }
 
-impl<T, M> IntegratedBencher<M> for DAGBencher<T>
+impl<T, M> IntegratedBencher<M> for DagBencher<T>
 where
     T: TxnStore + 'static,
     M: Measurement,
@@ -120,7 +120,7 @@ where
         ranges: &[KeyRange],
         store: &Store<RocksEngine>,
     ) {
-        crate::util::bencher::DAGHandleBencher::new(|| {
+        crate::util::bencher::DagHandleBencher::new(|| {
             crate::util::build_dag_handler::<T>(executors, ranges, store)
         })
         .bench(b);
