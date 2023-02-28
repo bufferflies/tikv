@@ -7,7 +7,7 @@ use std::{
 };
 
 use collections::HashSet;
-use file_system::{set_io_type, IOType};
+use file_system::{set_io_type, IoType};
 use futures::{
     executor::{ThreadPool, ThreadPoolBuilder},
     sink::SinkExt,
@@ -80,7 +80,7 @@ where
             .after_start(move |_| {
                 tikv_util::thread_group::set_properties(props.clone());
                 tikv_alloc::add_thread_memory_accessor();
-                set_io_type(IOType::Import);
+                set_io_type(IoType::Import);
             })
             .before_stop(move |_| tikv_alloc::remove_thread_memory_accessor())
             .create()

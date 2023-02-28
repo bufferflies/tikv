@@ -2660,6 +2660,7 @@ where
             ExtraMessageType::MsgRejectRaftLogCausedByMemoryUsage => {
                 unimplemented!()
             }
+            _ => todo!()
         }
     }
 

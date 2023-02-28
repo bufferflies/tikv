@@ -189,10 +189,10 @@ impl RaftKv {
         cb: Callback<CmdRes>,
     ) -> Result<()> {
         let mut header = self.new_request_header(ctx.pb_ctx);
-        if ctx.pb_ctx.get_stale_read() && !ctx.start_ts.is_zero() {
+        if ctx.pb_ctx.get_stale_read() && ctx.start_ts.map_or(true, |ts| !ts.is_zero()) {
             let mut data = [0u8; 8];
             (&mut data[..])
-                .encode_u64(ctx.start_ts.into_inner())
+                .encode_u64(ctx.start_ts.unwrap_or_default().into_inner())
                 .unwrap();
             header.set_flags(WriteBatchFlags::STALE_READ.bits());
             header.set_flag_data(data.into());
@@ -294,43 +294,12 @@ impl Engine for RaftKv {
     type Snap = RegionSnapshot;
     type Local = kvengine::Engine;
 
-    fn kv_engine(&self) -> kvengine::Engine {
-        self.engine.clone()
+    fn kv_engine(&self) -> Option<kvengine::Engine> {
+        Some(self.engine.clone())
     }
 
-    fn snapshot_on_kv_engine(&self, start_key: &[u8], end_key: &[u8]) -> kv::Result<Self::Snap> {
-        let mut region = metapb::Region::default();
-        region.set_start_key(start_key.to_owned());
-        region.set_end_key(end_key.to_owned());
-        // Use a fake peer to avoid panic.
-        region.mut_peers().push(Default::default());
-        Ok(RegionSnapshot::from_raw(&self.engine, &region))
-    }
-
-    fn modify_on_kv_engine(&self, mut modifies: Vec<Modify>) -> kv::Result<()> {
-        for modify in &mut modifies {
-            match modify {
-                Modify::Delete(_, ref mut key) => {
-                    let bytes = keys::data_key(key.as_encoded());
-                    *key = Key::from_encoded(bytes);
-                }
-                Modify::Put(_, ref mut key, _) => {
-                    let bytes = keys::data_key(key.as_encoded());
-                    *key = Key::from_encoded(bytes);
-                }
-                Modify::DeleteRange(_, ref mut key1, ref mut key2, _) => {
-                    let bytes = keys::data_key(key1.as_encoded());
-                    *key1 = Key::from_encoded(bytes);
-                    let bytes = keys::data_end_key(key2.as_encoded());
-                    *key2 = Key::from_encoded(bytes);
-                }
-                Modify::PessimisticLock(ref mut key, _) => {
-                    let bytes = keys::data_key(key.as_encoded());
-                    *key = Key::from_encoded(bytes);
-                }
-            }
-        }
-        write_modifies(&self.engine, modifies)
+    fn modify_on_kv_engine(&self, _modifies: HashMap<u64, Vec<Modify>>) -> kv::Result<()> {
+        panic!();
     }
 
     fn async_write(
@@ -396,8 +365,8 @@ impl Engine for RaftKv {
 
         let mut req = Request::default();
         req.set_cmd_type(CmdType::Snap);
-        if !ctx.key_ranges.is_empty() && !ctx.start_ts.is_zero() {
-            req.mut_read_index().set_start_ts(ctx.start_ts.into_inner());
+        if !ctx.key_ranges.is_empty() && ctx.start_ts.map_or(false, |ts| !ts.is_zero()) {
+            req.mut_read_index().set_start_ts(ctx.start_ts.as_ref().unwrap().into_inner());
             req.mut_read_index()
                 .set_key_ranges(mem::take(&mut ctx.key_ranges).into());
         }

@@ -32,10 +32,11 @@ use tikv_util::{
     quota_limiter::QuotaLimiter,
 };
 use tipb::{self, AnalyzeColumnsReq, AnalyzeIndexReq, AnalyzeReq, AnalyzeType};
+use tikv_util::time::Instant;
 
 use super::{cmsketch::CmSketch, fmsketch::FmSketch, histogram::Histogram};
 use crate::{
-    coprocessor::{dag::TiKvStorage, MEMTRACE_ANALYZE, *},
+    coprocessor::{dag::TikvStorage, MEMTRACE_ANALYZE, *},
     storage::{txn::CloudStore, Snapshot, Statistics},
 };
 
@@ -46,7 +47,7 @@ const REMOTE_ANALYZE_TIMEOUT: Duration = Duration::from_secs(300);
 // `AnalyzeContext` is used to handle `AnalyzeReq`
 pub struct AnalyzeContext<S: Snapshot, F: KvFormat> {
     req: AnalyzeReq,
-    storage: Option<TiKvStorage<CloudStore<S>>>,
+    storage: Option<TikvStorage<CloudStore<S>>>,
     ranges: Vec<KeyRange>,
     storage_stats: Statistics,
     quota_limiter: Arc<QuotaLimiter>,
@@ -145,7 +146,7 @@ impl<S: Snapshot, F: KvFormat> AnalyzeContext<S, F> {
     // it would build a histogram and count-min sketch of index values.
     async fn handle_index(
         req: AnalyzeIndexReq,
-        scanner: &mut RangesScanner<TiKvStorage<CloudStore<S>>, F>,
+        scanner: &mut RangesScanner<TikvStorage<CloudStore<S>>, F>,
         is_common_handle: bool,
     ) -> Result<Vec<u8>> {
         let mut hist = Histogram::new(req.get_bucket_size() as usize);
@@ -422,7 +423,7 @@ impl<S: Snapshot, F: KvFormat> RequestHandler for AnalyzeContext<S, F> {
 }
 
 struct RowSampleBuilder<S: Snapshot, F: KvFormat> {
-    data: BatchTableScanExecutor<TiKvStorage<CloudStore<S>>, F>,
+    data: BatchTableScanExecutor<TikvStorage<CloudStore<S>>, F>,
 
     max_sample_size: usize,
     max_fm_sketch_size: usize,
@@ -436,7 +437,7 @@ struct RowSampleBuilder<S: Snapshot, F: KvFormat> {
 impl<S: Snapshot, F: KvFormat> RowSampleBuilder<S, F> {
     fn new(
         mut req: AnalyzeColumnsReq,
-        storage: TiKvStorage<CloudStore<S>>,
+        storage: TikvStorage<CloudStore<S>>,
         ranges: Vec<KeyRange>,
         quota_limiter: Arc<QuotaLimiter>,
         is_auto_analyze: bool,
@@ -904,7 +905,7 @@ impl Drop for BaseRowSampleCollector {
 }
 
 struct SampleBuilder<S: Snapshot, F: KvFormat> {
-    data: BatchTableScanExecutor<TiKvStorage<CloudStore<S>>, F>,
+    data: BatchTableScanExecutor<TikvStorage<CloudStore<S>>, F>,
 
     max_bucket_size: usize,
     max_sample_size: usize,
@@ -925,7 +926,7 @@ impl<S: Snapshot, F: KvFormat> SampleBuilder<S, F> {
     fn new(
         mut req: AnalyzeColumnsReq,
         common_handle_req: Option<tipb::AnalyzeIndexReq>,
-        storage: TiKvStorage<CloudStore<S>>,
+        storage: TikvStorage<CloudStore<S>>,
         ranges: Vec<KeyRange>,
     ) -> Result<Self> {
         let columns_info: Vec<_> = req.take_columns_info().into();

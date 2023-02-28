@@ -18,7 +18,7 @@ use std::{
 use api_version::{api_v2, ApiV2};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use engine_traits::ObjectStorage;
-use file_system::{DirectWriter, IORateLimitMode, IOType};
+use file_system::{DirectWriter, IoRateLimitMode, IoType};
 use kvproto::raft_serverpb::RegionLocalState;
 use protobuf::Message;
 use rfenginepb::{
@@ -47,13 +47,13 @@ impl Worker {
         manifest: Manifest,
         compacted_epoch: Arc<AtomicU32>,
     ) -> Self {
-        let rate_limiter = Arc::new(file_system::IORateLimiter::new(
-            IORateLimitMode::WriteOnly,
+        let rate_limiter = Arc::new(file_system::IoRateLimiter::new(
+            IoRateLimitMode::WriteOnly,
             true,
             false,
         ));
         rate_limiter.set_io_rate_limit(128 * 1024 * 1024);
-        let writer = DirectWriter::new(rate_limiter, IOType::Compaction);
+        let writer = DirectWriter::new(rate_limiter, IoType::Compaction);
         Self {
             dir,
             manifest,

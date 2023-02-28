@@ -8,7 +8,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::{IOOp, IORateLimiter, IOType};
+use crate::{IoOp, IoRateLimiter, IoType};
 
 const WRITE_BATCH_SIZE: usize = 256 * 1024;
 const ALIGN_SIZE: usize = 4096;
@@ -16,12 +16,12 @@ const ALIGN_MASK: u64 = 0xffff_f000;
 
 pub struct DirectWriter {
     aligned_buf: Vec<u8>,
-    rate_limiter: Arc<IORateLimiter>,
-    io_type: IOType,
+    rate_limiter: Arc<IoRateLimiter>,
+    io_type: IoType,
 }
 
 impl DirectWriter {
-    pub fn new(rate_limiter: Arc<IORateLimiter>, io_type: IOType) -> Self {
+    pub fn new(rate_limiter: Arc<IoRateLimiter>, io_type: IoType) -> Self {
         Self {
             aligned_buf: alloc_aligned(WRITE_BATCH_SIZE),
             rate_limiter,
@@ -39,7 +39,7 @@ impl DirectWriter {
                 end = buf.len();
             }
             self.rate_limiter
-                .request(self.io_type, IOOp::Write, WRITE_BATCH_SIZE);
+                .request(self.io_type, IoOp::Write, WRITE_BATCH_SIZE);
             self.aligned_buf.truncate(0);
             self.aligned_buf.extend_from_slice(&buf[cursor..end]);
             let aligned_batch_len = aligned_len(self.aligned_buf.len());

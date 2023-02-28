@@ -37,6 +37,10 @@ impl RaftEngineReadOnly for RfEngine {
         panic!()
     }
 
+    fn get_recover_state(&self) -> Result<Option<kvproto::raft_serverpb::StoreRecoverState>> {
+        panic!()
+    }
+
     fn get_entry(&self, _raft_group_id: u64, _index: u64) -> Result<Option<Entry>> {
         panic!()
     }
@@ -128,10 +132,6 @@ impl RaftEngine for RfEngine {
         panic!()
     }
 
-    fn purge_expired_files(&self) -> Result<Vec<u64>> {
-        panic!()
-    }
-
     fn flush_metrics(&self, instance: &str) {
         flush_engine_properties(self, instance);
     }
@@ -153,6 +153,10 @@ impl RaftEngine for RfEngine {
         F: FnMut(u64) -> std::result::Result<(), E>,
         E: From<Error>,
     {
+        panic!()
+    }
+
+    fn put_recover_state(&self, _state: &kvproto::raft_serverpb::StoreRecoverState) -> Result<()> {
         panic!()
     }
 }

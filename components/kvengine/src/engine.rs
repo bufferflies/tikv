@@ -18,7 +18,7 @@ use std::{
 
 use bytes::{BufMut, Bytes, BytesMut};
 use dashmap::{mapref::entry::Entry, DashMap};
-use file_system::IORateLimiter;
+use file_system::IoRateLimiter;
 use fslock;
 use moka::sync::SegmentedCache;
 use slog_global::info;
@@ -65,7 +65,7 @@ impl Engine {
         recoverer: impl RecoverHandler + 'static,
         id_allocator: Arc<dyn IDAllocator>,
         meta_change_listener: Box<dyn MetaChangeListener>,
-        rate_limiter: Arc<IORateLimiter>,
+        rate_limiter: Arc<IoRateLimiter>,
     ) -> Result<Engine> {
         info!("open KVEngine");
         if !opts.local_dir.exists() {
@@ -208,7 +208,7 @@ pub struct EngineCore {
     pub(crate) id_allocator: Arc<dyn IDAllocator>,
     pub(crate) managed_safe_ts: AtomicU64,
     pub(crate) tmp_file_id: AtomicU64,
-    pub(crate) rate_limiter: Arc<IORateLimiter>,
+    pub(crate) rate_limiter: Arc<IoRateLimiter>,
     pub(crate) free_tx: mpsc::Sender<CFTable>,
 }
 

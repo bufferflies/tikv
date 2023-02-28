@@ -586,7 +586,7 @@ impl Peer {
             return;
         }
         if let Some(ref state) = self.pending_merge_state {
-            if state.get_commit() == extra_msg.get_premerge_commit() {
+            if state.get_commit() == extra_msg.get_index() {
                 self.add_want_rollback_merge_peer(peer_id);
             }
         }
@@ -789,20 +789,20 @@ impl Peer {
     }
 
     #[allow(unused)]
-    fn add_ready_metric(&self, ready: &Ready, metrics: &mut RaftReadyMetrics) {
-        metrics.message += ready.messages().len() as u64;
-        metrics.commit += ready.committed_entries().len() as u64;
-        metrics.append += ready.entries().len() as u64;
+    fn add_ready_metric(&self, ready: &Ready, metrics: &mut RaftMetrics) {
+        metrics.ready.message.inc_by(ready.messages().len() as u64);
+        metrics.ready.commit.inc_by(ready.committed_entries().len() as u64);
+        metrics.ready.append.inc_by(ready.entries().len() as u64);
 
         if !ready.snapshot().is_empty() {
-            metrics.snapshot += 1;
+            metrics.ready.snapshot.inc();
         }
     }
 
     #[allow(unused)]
-    fn add_light_ready_metric(&self, light_ready: &LightReady, metrics: &mut RaftReadyMetrics) {
-        metrics.message += light_ready.messages().len() as u64;
-        metrics.commit += light_ready.committed_entries().len() as u64;
+    fn add_light_ready_metric(&self, light_ready: &LightReady, metrics: &mut RaftMetrics) {
+        metrics.ready.message.inc_by(light_ready.messages().len() as u64);
+        metrics.ready.commit.inc_by(light_ready.committed_entries().len() as u64);
     }
 
     #[allow(unused)]
@@ -1138,7 +1138,7 @@ impl Peer {
         };
         let mut extra_msg = ExtraMessage::default();
         extra_msg.set_type(ExtraMessageType::MsgWantRollbackMerge);
-        extra_msg.set_premerge_commit(premerge_commit);
+        extra_msg.set_index(premerge_commit);
         self.send_extra_message(extra_msg, &mut ctx.global.trans, &to_peer);
     }
 
@@ -1367,10 +1367,7 @@ impl Peer {
             debug!("{} handle ready {}", self.tag(), ready_debug);
         }
         self.on_role_changed(ctx, &ready);
-        ctx.raft_metrics.ready.has_ready_region += 1;
-        ctx.raft_metrics.ready.commit += ready.committed_entries().len() as u64;
-        ctx.raft_metrics.ready.append += ready.entries().len() as u64;
-        ctx.raft_metrics.ready.message += ready.messages().len() as u64;
+        self.add_ready_metric(&ready, &mut ctx.raft_metrics);
 
         // TODO(x) on leader commit index change.
 
@@ -2285,7 +2282,7 @@ impl Peer {
             return false;
         }
 
-        ctx.raft_metrics.propose.all += 1;
+        ctx.raft_metrics.propose.all.inc();
 
         let req_admin_cmd_type = if !req.has_admin_request() {
             None
@@ -2649,7 +2646,7 @@ impl Peer {
                 "peer_id" => self.peer.get_id(),
                 "err" => ?e,
             );
-            ctx.raft_metrics.propose.unsafe_read_index += 1;
+            ctx.raft_metrics.propose.unsafe_read_index.inc();
             cmd_resp::bind_error(&mut err_resp, e);
             cb.invoke_with_response(err_resp);
             return false;
@@ -2699,7 +2696,7 @@ impl Peer {
         // cause a long time waiting for a read response. Then we should return an error directly
         // in this situation.
         if !self.is_leader() && self.leader_id() == INVALID_ID {
-            ctx.raft_metrics.invalid_proposal.read_index_no_leader += 1;
+            ctx.raft_metrics.invalid_proposal.read_index_no_leader.inc();
             cmd_resp::bind_error(&mut err_resp, Error::NotLeader(self.region_id, None));
             cb.invoke_with_response(err_resp);
             return false;
@@ -2709,7 +2706,7 @@ impl Peer {
         let last_pending_read_count = self.raft_group.raft.pending_read_count();
         let last_ready_read_count = self.raft_group.raft.ready_read_count();
 
-        ctx.raft_metrics.propose.read_index += 1;
+        ctx.raft_metrics.propose.read_index.inc();
 
         let id = Uuid::new_v4();
         let request = req
@@ -3002,7 +2999,7 @@ impl Peer {
         req: RaftCmdRequest,
         cb: Callback,
     ) -> bool {
-        ctx.raft_metrics.propose.transfer_leader += 1;
+        ctx.raft_metrics.propose.transfer_leader.inc();
 
         let transfer_leader = get_transfer_leader_cmd(&req).unwrap();
         let peer = transfer_leader.get_peer();
@@ -3089,7 +3086,7 @@ impl Peer {
 
         self.check_conf_change(ctx, changes.as_ref(), &cc)?;
 
-        ctx.raft_metrics.propose.conf_change += 1;
+        ctx.raft_metrics.propose.conf_change.inc();
         info!(
             "propose conf change peer";
             "tag" => self.tag(),

@@ -69,11 +69,7 @@ impl Snapshot for rfstore::store::RegionSnapshot {
         unreachable!()
     }
 
-    fn iter(&self, _iter_opt: IterOptions) -> kv::Result<Self::Iter> {
-        unreachable!()
-    }
-
-    fn iter_cf(&self, _cf: CfName, _iter_opt: IterOptions) -> kv::Result<Self::Iter> {
+    fn iter(&self, _cf: CfName, _iter_opt: IterOptions) -> kv::Result<Self::Iter> {
         unreachable!()
     }
 

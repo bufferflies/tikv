@@ -1,7 +1,7 @@
 // Copyright 2018 TiKV Project Authors. Licensed under Apache-2.0.
 
 /// Provides profilers for TiKV.
-mod profile;
+pub mod profile;
 use std::{
     error::Error as StdError,
     marker::PhantomData,

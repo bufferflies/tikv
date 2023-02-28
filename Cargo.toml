@@ -96,7 +96,7 @@ futures-executor = "0.3.1"
 futures-timer = "3.0"
 futures-util = { version = "0.3.1", default-features = false, features = ["io", "async-await"] }
 getset = "0.1"
-grpcio = { version = "0.10.3", default-features = false, features = ["openssl-vendored", "protobuf-codec", "nightly"] }
+grpcio = { version = "0.10", default-features = false, features = ["openssl-vendored", "protobuf-codec", "nightly"] }
 grpcio-health = { version = "0.10", default-features = false, features = ["protobuf-codec"] }
 hex = "0.4"
 http = "0"
@@ -112,7 +112,7 @@ libc = "0.2"
 libloading = "0.7"
 log = { version = "0.4", features = ["max_level_trace", "release_max_level_debug"] }
 log_wrappers = { path = "components/log_wrappers" }
-match_template = { path = "components/match_template" }
+match-template = "0.0.1"
 memory_trace_macros = { path = "components/memory_trace_macros" }
 mime = "0.3.13"
 moka = { version = "0.9.6", features = ["future"] }
@@ -212,7 +212,7 @@ procinfo = { git = "https://github.com/tikv/procinfo-rs", rev = "6599eb9dca74229
 # kvproto at the same time.
 # After the PR to kvproto is merged, remember to comment this out and run `cargo update -p kvproto`.
 [patch.'https://github.com/pingcap/kvproto']
-kvproto = { git = "https://github.com/tidbcloud/kvproto.git", branch = "release-6.2-dev-tier" }
+kvproto = { git = "https://github.com/tidbcloud/kvproto.git", branch = "release-6.6-keyspace" }
 
 [workspace]
 # See https://github.com/rust-lang/rfcs/blob/master/text/2957-cargo-features2.md
@@ -253,7 +253,6 @@ members = [
   "components/kvengine",
   "components/kvenginepb",
   "components/log_wrappers",
-  "components/match_template",
   "components/online_config",
   "components/panic_hook",
   "components/pd_client",

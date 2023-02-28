@@ -13,8 +13,8 @@ use std::{
     time::Duration,
 };
 
-use cloud_server::TiKVServer;
-use file_system::{IORateLimitMode, IORateLimiter};
+use cloud_server::TikvServer;
+use file_system::{IoRateLimitMode, IoRateLimiter};
 use http::{Request, Uri};
 use hyper::Body;
 use itertools::Itertools;
@@ -27,7 +27,7 @@ use rfenginepb::ClusterBackupMeta;
 use rfstore::store::StoreMsg;
 use slog_global::{debug, error, info, warn};
 use tempdir::TempDir;
-use tikv::{config::TiKvConfig, storage::mvcc::Key};
+use tikv::{config::TikvConfig, storage::mvcc::Key};
 use tikv_util::{box_err, mpsc, time::Instant, HandyRwLock};
 use tokio::runtime::Runtime;
 
@@ -319,7 +319,7 @@ impl BackupCluster {
         &mut self,
         store_id: u64,
         cluster_backup: &ClusterBackupMeta,
-        conf: &TiKvConfig,
+        conf: &TikvConfig,
     ) -> RestoreResult<()> {
         rfengine::restore(
             self.dfs.clone(),
@@ -329,7 +329,7 @@ impl BackupCluster {
             None, // TODO: pass `Some(keyspace_id)` in.
         );
 
-        let rf_engine = TiKVServer::init_raft_engine(conf)?;
+        let rf_engine = TikvServer::init_raft_engine(conf)?;
         self.raft_engines.insert(store_id, rf_engine);
         Ok(())
     }
@@ -344,7 +344,7 @@ impl BackupCluster {
         raw_metas
     }
 
-    fn setup_kv_engine(&mut self, store_id: u64, conf: &TiKvConfig) -> RestoreResult<()> {
+    fn setup_kv_engine(&mut self, store_id: u64, conf: &TikvConfig) -> RestoreResult<()> {
         let rf_engine = self.raft_engines.get(&store_id).unwrap();
         let recoverer = rfstore::store::RecoverHandler::new(rf_engine.clone());
 
@@ -362,12 +362,12 @@ impl BackupCluster {
         } else {
             // Even if `shards_need_flush.is_empty()`, `self.kv_engine` should be constructed for later use.
             let io_rate_limiter =
-                Arc::new(IORateLimiter::new(IORateLimitMode::WriteOnly, true, true));
+                Arc::new(IoRateLimiter::new(IoRateLimitMode::WriteOnly, true, true));
             io_rate_limiter
                 .set_io_rate_limit(conf.storage.io_rate_limit.max_bytes_per_sec.0 as usize);
 
             let mut meta_iter = MetaIterator::new(store_id, shards_need_flush, raw_metas);
-            let (kv_engine, _, receiver) = TiKVServer::init_kv_engine(
+            let (kv_engine, _, receiver) = TikvServer::init_kv_engine(
                 self.pd_client.clone(),
                 conf,
                 self.dfs.clone(),
@@ -400,18 +400,18 @@ impl BackupCluster {
         drop(kv_engine);
     }
 
-    fn generate_store_config(&self, store_id: u64) -> TiKvConfig {
+    fn generate_store_config(&self, store_id: u64) -> TikvConfig {
         let store_path = self.path.join(store_id.to_string());
         let rf_engine_path = store_path.join("raft");
 
-        let mut config = TiKvConfig::default();
+        let mut config = TikvConfig::default();
         config.storage.data_dir = store_path.to_str().unwrap().to_string();
         config.raft_store.raftdb_path = rf_engine_path.to_str().unwrap().to_string();
         config.dfs.zstd_compression_level = ZSTD_COMPRESSION_LEVEL.to_string();
         config.rocksdb.max_background_jobs = 2;
         config.rocksdb.max_sub_compactions = 1;
 
-        TiKVServer::init_config(config).get_current()
+        TikvServer::init_config(config).get_current()
     }
 
     fn collect_prefix_shards(store_id: u64, rf: &RfEngine, prefix: &[u8]) -> Vec<BackupShard> {

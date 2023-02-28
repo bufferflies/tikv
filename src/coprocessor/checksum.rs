@@ -12,14 +12,14 @@ use tikv_alloc::trace::MemoryTraceGuard;
 use tipb::{ChecksumAlgorithm, ChecksumRequest, ChecksumResponse};
 
 use crate::{
-    coprocessor::{dag::TiKvStorage, *},
+    coprocessor::{dag::TikvStorage, *},
     storage::{txn::CloudStore, Snapshot, Statistics},
 };
 
 // `ChecksumContext` is used to handle `ChecksumRequest`
 pub struct ChecksumContext<S: Snapshot> {
     req: ChecksumRequest,
-    scanner: RangesScanner<TiKvStorage<CloudStore<S>>, ApiV1>,
+    scanner: RangesScanner<TikvStorage<CloudStore<S>>, ApiV1>,
 }
 
 impl<S: Snapshot> ChecksumContext<S> {

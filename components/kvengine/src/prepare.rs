@@ -3,7 +3,7 @@
 use std::{collections::HashMap, io::Write, path::PathBuf};
 
 use bytes::{Buf, Bytes};
-use file_system::{IOOp, IOType};
+use file_system::{IoOp, IoType};
 
 use crate::{
     apply::ChangeSet, metrics::KVENGINE_LEVEL_WRITE_VEC, table::sstable::LocalFile, EngineCore, *,
@@ -135,7 +135,7 @@ impl EngineCore {
         let tmp_file_name = self.tmp_file_path(id);
         if use_direct_io {
             let mut writer =
-                file_system::DirectWriter::new(self.rate_limiter.clone(), IOType::Compaction);
+                file_system::DirectWriter::new(self.rate_limiter.clone(), IoType::Compaction);
             writer.write_to_file(data.chunk(), &tmp_file_name)?;
         } else {
             let mut file = std::fs::File::create(&tmp_file_name)?;
@@ -143,7 +143,7 @@ impl EngineCore {
             let write_batch_size = 256 * 1024;
             while start_off < data.len() {
                 self.rate_limiter
-                    .request(IOType::Compaction, IOOp::Write, write_batch_size);
+                    .request(IoType::Compaction, IoOp::Write, write_batch_size);
                 let end_off = std::cmp::min(start_off + write_batch_size, data.len());
                 file.write_all(&data[start_off..end_off])?;
                 file.sync_data()?;

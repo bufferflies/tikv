@@ -15,11 +15,7 @@ use kvproto::{
     raft_cmdpb::{CmdType, RaftCmdRequest, RaftCmdResponse, ReadIndexResponse, Request, Response},
 };
 use pd_client::BucketMeta;
-use raftstore::store::{
-    util::{LeaseState, RemoteLease},
-    worker_metrics::*,
-    TxnExt,
-};
+use raftstore::store::{util::{LeaseState, RemoteLease}, worker_metrics::*, TxnExt, worker_metrics};
 use tikv_util::{
     debug, error,
     lru::LruCache,
@@ -219,18 +215,18 @@ impl ReadDelegate {
         }
     }
 
-    fn is_in_leader_lease(&self, ts: Timespec, metrics: &mut ReadMetrics) -> bool {
+    fn is_in_leader_lease(&self, ts: Timespec) -> bool {
         if let Some(ref lease) = self.leader_lease {
             let term = lease.term();
             if term == self.term {
                 if lease.inspect(Some(ts)) == LeaseState::Valid {
                     return true;
                 } else {
-                    metrics.rejected_by_lease_expire += 1;
+                    TLS_LOCAL_READ_METRICS.with(|m| m.borrow_mut().reject_reason.lease_expire.inc());
                     debug!("rejected by lease expire"; "tag" => &self.tag);
                 }
             } else {
-                metrics.rejected_by_term_mismatch += 1;
+                TLS_LOCAL_READ_METRICS.with(|m| m.borrow_mut().reject_reason.term_mismatch.inc());
                 debug!("rejected by term mismatch"; "tag" => &self.tag);
             }
         }
@@ -241,7 +237,6 @@ impl ReadDelegate {
 pub struct LocalReader {
     store_readers: Arc<dashmap::DashMap<u64, ReadDelegate>>,
     kv_engine: kvengine::Engine,
-    metrics: ReadMetrics,
     // region id -> ReadDelegate
     // The use of `Arc` here is a workaround, see the comment at `get_delegate`
     delegates: LruCache<u64, Arc<ReadDelegate>>,
@@ -270,7 +265,6 @@ impl LocalReader {
             store_readers,
             kv_engine,
             router,
-            metrics: Default::default(),
             delegates: LruCache::with_capacity_and_sample(0, 7),
         }
     }
@@ -292,7 +286,7 @@ impl LocalReader {
             Some(d) if !d.track_ver.any_new() => Some(Arc::clone(d)),
             _ => {
                 debug!("update local read delegate"; "region_id" => region_id);
-                self.metrics.rejected_by_cache_miss += 1;
+                TLS_LOCAL_READ_METRICS.with(|m| m.borrow_mut().reject_reason.cache_miss.inc());
                 let meta_len = self.store_readers.len();
                 let meta_reader = self
                     .store_readers
@@ -321,14 +315,14 @@ impl LocalReader {
         let delegate = match self.get_delegate(region_id) {
             Some(d) => d,
             None => {
-                self.metrics.rejected_by_no_region += 1;
+                TLS_LOCAL_READ_METRICS.with(|m| m.borrow_mut().reject_reason.no_region.inc());
                 debug!("rejected by no region"; "region_id" => region_id);
                 return Ok(None);
             }
         };
 
         if let Err(e) = util::check_store_id(req, delegate.store_id) {
-            self.metrics.rejected_by_store_id_mismatch += 1;
+            TLS_LOCAL_READ_METRICS.with(|m| m.borrow_mut().reject_reason.store_id_mismatch.inc());
             debug!("rejected by store id not match"; "err" => %e);
             return Err(e);
         }
@@ -337,7 +331,7 @@ impl LocalReader {
 
         // Check peer id.
         if let Err(e) = util::check_peer_id(req, delegate.peer_id) {
-            self.metrics.rejected_by_peer_id_mismatch += 1;
+            TLS_LOCAL_READ_METRICS.with(|m| m.borrow_mut().reject_reason.peer_id_mismatch.inc());
             return Err(e);
         }
 
@@ -348,13 +342,13 @@ impl LocalReader {
                 "delegate_term" => delegate.term,
                 "header_term" => req.get_header().get_term(),
             );
-            self.metrics.rejected_by_term_mismatch += 1;
+            TLS_LOCAL_READ_METRICS.with(|m| m.borrow_mut().reject_reason.term_mismatch.inc());
             return Err(e);
         }
 
         // Check region epoch.
         if util::check_region_epoch(req, &delegate.region, false).is_err() {
-            self.metrics.rejected_by_epoch += 1;
+            TLS_LOCAL_READ_METRICS.with(|m| m.borrow_mut().reject_reason.epoch.inc());
             // Stale epoch, redirect it to raftstore to get the latest region.
             let delegate_ver = delegate.region.get_region_epoch().get_version();
             debug!("rejected by epoch not match req {:?}", req; "delegate_ver" => delegate_ver);
@@ -363,7 +357,6 @@ impl LocalReader {
 
         let mut inspector = Inspector {
             delegate: &delegate,
-            metrics: &mut self.metrics,
         };
         match inspector.inspect(req) {
             RequestPolicy::ReadLocal => Ok(Some((delegate, RequestPolicy::ReadLocal))),
@@ -394,7 +387,7 @@ impl LocalReader {
                             }
                             None => monotonic_raw_now(),
                         };
-                        if !delegate.is_in_leader_lease(snapshot_ts, &mut self.metrics) {
+                        if !delegate.is_in_leader_lease(snapshot_ts) {
                             // Forward to raftstore.
                             self.redirect(RaftCommand::new(req, cb));
                             return;
@@ -434,7 +427,7 @@ impl LocalReader {
     #[inline]
     pub fn read(&mut self, read_id: Option<ThreadReadId>, req: RaftCmdRequest, cb: Callback) {
         self.propose_raft_command(read_id, req, cb);
-        self.metrics.maybe_flush();
+        maybe_tls_local_read_metrics_flush();
     }
 }
 
@@ -444,18 +437,16 @@ impl Clone for LocalReader {
             store_readers: self.store_readers.clone(),
             kv_engine: self.kv_engine.clone(),
             router: self.router.clone(),
-            metrics: Default::default(),
             delegates: LruCache::with_capacity_and_sample(0, 7),
         }
     }
 }
 
-struct Inspector<'r, 'm> {
+struct Inspector<'r> {
     delegate: &'r ReadDelegate,
-    metrics: &'m mut ReadMetrics,
 }
 
-impl<'r, 'm> RequestInspector for Inspector<'r, 'm> {
+impl<'r> RequestInspector for Inspector<'r> {
     fn has_applied_to_current_term(&mut self) -> bool {
         if self.delegate.applied_index_term == self.delegate.term {
             true
@@ -468,7 +459,7 @@ impl<'r, 'm> RequestInspector for Inspector<'r, 'm> {
             );
 
             // only for metric.
-            self.metrics.rejected_by_appiled_term += 1;
+            TLS_LOCAL_READ_METRICS.with(|m| m.borrow_mut().reject_reason.applied_term.inc());
             false
         }
     }
@@ -480,7 +471,7 @@ impl<'r, 'm> RequestInspector for Inspector<'r, 'm> {
             LeaseState::Valid
         } else {
             debug!("rejected by leader lease"; "tag" => &self.delegate.tag);
-            self.metrics.rejected_by_no_lease += 1;
+            TLS_LOCAL_READ_METRICS.with(|m| m.borrow_mut().reject_reason.no_lease.inc());
             LeaseState::Expired
         }
     }
@@ -539,126 +530,5 @@ impl Drop for ReadDelegate {
     fn drop(&mut self) {
         // call `inc` to notify the source `ReadDelegate` is dropped
         self.track_ver.inc();
-    }
-}
-
-const METRICS_FLUSH_INTERVAL: u64 = 15_000; // 15s
-
-#[derive(Clone)]
-struct ReadMetrics {
-    local_executed_requests: u64,
-    local_executed_snapshot_cache_hit: u64,
-    // TODO: record rejected_by_read_quorum.
-    rejected_by_store_id_mismatch: u64,
-    rejected_by_peer_id_mismatch: u64,
-    rejected_by_term_mismatch: u64,
-    rejected_by_lease_expire: u64,
-    rejected_by_no_region: u64,
-    rejected_by_no_lease: u64,
-    rejected_by_epoch: u64,
-    rejected_by_appiled_term: u64,
-    rejected_by_channel_full: u64,
-    rejected_by_cache_miss: u64,
-    rejected_by_safe_timestamp: u64,
-
-    last_flush_time: Instant,
-}
-
-impl Default for ReadMetrics {
-    fn default() -> ReadMetrics {
-        ReadMetrics {
-            local_executed_requests: 0,
-            local_executed_snapshot_cache_hit: 0,
-            rejected_by_store_id_mismatch: 0,
-            rejected_by_peer_id_mismatch: 0,
-            rejected_by_term_mismatch: 0,
-            rejected_by_lease_expire: 0,
-            rejected_by_no_region: 0,
-            rejected_by_no_lease: 0,
-            rejected_by_epoch: 0,
-            rejected_by_appiled_term: 0,
-            rejected_by_channel_full: 0,
-            rejected_by_cache_miss: 0,
-            rejected_by_safe_timestamp: 0,
-            last_flush_time: Instant::now(),
-        }
-    }
-}
-
-impl ReadMetrics {
-    pub fn maybe_flush(&mut self) {
-        if self.last_flush_time.saturating_elapsed()
-            >= Duration::from_millis(METRICS_FLUSH_INTERVAL)
-        {
-            self.flush();
-            self.last_flush_time = Instant::now();
-        }
-    }
-
-    fn flush(&mut self) {
-        if self.rejected_by_store_id_mismatch > 0 {
-            LOCAL_READ_REJECT
-                .store_id_mismatch
-                .inc_by(self.rejected_by_store_id_mismatch);
-            self.rejected_by_store_id_mismatch = 0;
-        }
-        if self.rejected_by_peer_id_mismatch > 0 {
-            LOCAL_READ_REJECT
-                .peer_id_mismatch
-                .inc_by(self.rejected_by_peer_id_mismatch);
-            self.rejected_by_peer_id_mismatch = 0;
-        }
-        if self.rejected_by_term_mismatch > 0 {
-            LOCAL_READ_REJECT
-                .term_mismatch
-                .inc_by(self.rejected_by_term_mismatch);
-            self.rejected_by_term_mismatch = 0;
-        }
-        if self.rejected_by_lease_expire > 0 {
-            LOCAL_READ_REJECT
-                .lease_expire
-                .inc_by(self.rejected_by_lease_expire);
-            self.rejected_by_lease_expire = 0;
-        }
-        if self.rejected_by_no_region > 0 {
-            LOCAL_READ_REJECT
-                .no_region
-                .inc_by(self.rejected_by_no_region);
-            self.rejected_by_no_region = 0;
-        }
-        if self.rejected_by_no_lease > 0 {
-            LOCAL_READ_REJECT.no_lease.inc_by(self.rejected_by_no_lease);
-            self.rejected_by_no_lease = 0;
-        }
-        if self.rejected_by_epoch > 0 {
-            LOCAL_READ_REJECT.epoch.inc_by(self.rejected_by_epoch);
-            self.rejected_by_epoch = 0;
-        }
-        if self.rejected_by_appiled_term > 0 {
-            LOCAL_READ_REJECT
-                .applied_term
-                .inc_by(self.rejected_by_appiled_term);
-            self.rejected_by_appiled_term = 0;
-        }
-        if self.rejected_by_channel_full > 0 {
-            LOCAL_READ_REJECT
-                .channel_full
-                .inc_by(self.rejected_by_channel_full);
-            self.rejected_by_channel_full = 0;
-        }
-        if self.rejected_by_safe_timestamp > 0 {
-            LOCAL_READ_REJECT
-                .safe_ts
-                .inc_by(self.rejected_by_safe_timestamp);
-            self.rejected_by_safe_timestamp = 0;
-        }
-        if self.local_executed_snapshot_cache_hit > 0 {
-            LOCAL_READ_EXECUTED_CACHE_REQUESTS.inc_by(self.local_executed_snapshot_cache_hit);
-            self.local_executed_snapshot_cache_hit = 0;
-        }
-        if self.local_executed_requests > 0 {
-            LOCAL_READ_EXECUTED_REQUESTS.inc_by(self.local_executed_requests);
-            self.local_executed_requests = 0;
-        }
     }
 }

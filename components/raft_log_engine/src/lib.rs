@@ -16,6 +16,7 @@
 //! Please read the engine_trait crate docs before hacking.
 
 #![cfg_attr(test, feature(test))]
+#![feature(generic_associated_types)]
 
 #[macro_use]
 extern crate tikv_util;

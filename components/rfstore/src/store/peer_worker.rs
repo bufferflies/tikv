@@ -294,7 +294,7 @@ impl RaftWorker {
             .raft_metrics
             .store_time
             .observe(duration_to_sec(batch_duration));
-        self.ctx.raft_metrics.flush();
+        self.ctx.raft_metrics.maybe_flush();
         self.ctx.current_time = None;
         self.ctx.global.destroying.clear();
     }

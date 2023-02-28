@@ -15,7 +15,11 @@ use tikv::{
         ResponseBatchConsumer, Result, Storage,
     },
 };
-use tikv_util::{future::poll_future_notify, mpsc::batch::Sender, time::Instant};
+use tikv_util::{
+    future::poll_future_notify,
+    mpsc::future::{Sender, WakePolicy},
+    time::Instant,
+};
 use tracker::{with_tls_tracker, RequestInfo, RequestType, Tracker, TrackerToken, GLOBAL_TRACKERS};
 
 pub const MAX_BATCH_GET_REQUEST_COUNT: usize = 10;
@@ -186,7 +190,7 @@ impl ResponseBatchConsumer<(Option<Vec<u8>>, Statistics)>
         let mesure =
             GrpcRequestDuration::new(begin, GrpcTypeKind::kv_batch_get_command, request_source);
         let task = MeasuredSingleResponse::new(id, res, mesure);
-        if self.tx.send_and_notify(task).is_err() {
+        if self.tx.send_with(task, WakePolicy::Immediately).is_err() {
             error!("KvService response batch commands fail");
         }
     }
@@ -217,7 +221,7 @@ impl ResponseBatchConsumer<Option<Vec<u8>>> for GetCommandResponseConsumer {
         let mesure =
             GrpcRequestDuration::new(begin, GrpcTypeKind::raw_batch_get_command, request_source);
         let task = MeasuredSingleResponse::new(id, res, mesure);
-        if self.tx.send_and_notify(task).is_err() {
+        if self.tx.send_with(task, WakePolicy::Immediately).is_err() {
             error!("KvService response batch commands fail");
         }
     }
@@ -260,7 +264,7 @@ fn future_batch_get_command<E: Engine, L: LockManager, F: KvFormat>(
                 let measure =
                     GrpcRequestDuration::new(begin_instant, GrpcTypeKind::kv_batch_get_command, source);
                 let task = MeasuredSingleResponse::new(id, res, measure);
-                if tx.send_and_notify(task).is_err() {
+                if tx.send_with(task, WakePolicy::Immediately).is_err() {
                     error!("KvService response batch commands fail");
                 }
             }
@@ -306,7 +310,7 @@ fn future_batch_raw_get_command<E: Engine, L: LockManager, F: KvFormat>(
                     source,
                 );
                 let task = MeasuredSingleResponse::new(id, res, measure);
-                if tx.send_and_notify(task).is_err() {
+                if tx.send_with(task, WakePolicy::Immediately).is_err() {
                     error!("KvService response batch commands fail");
                 }
             }

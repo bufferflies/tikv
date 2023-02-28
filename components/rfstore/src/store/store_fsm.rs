@@ -568,7 +568,7 @@ impl RaftContext {
             "msg_type" => ?msg_type,
         );
 
-        self.raft_metrics.message_dropped.stale_msg += 1;
+        self.raft_metrics.message_dropped.stale_msg.inc();
 
         let mut gc_msg = RaftMessage::default();
         gc_msg.set_region_id(region_id);
@@ -913,7 +913,7 @@ impl<'a> StoreMsgHandler<'a> {
             util::find_peer(region, self.ctx.store_id()).map(|r| r.get_id())
         {
             if to_peer_id <= local_peer_id {
-                self.ctx.raft_metrics.message_dropped.region_tombstone_peer += 1;
+                self.ctx.raft_metrics.message_dropped.region_tombstone_peer.inc();
                 info!(
                     "tombstone peer receives a stale message, local_peer_id >= to_peer_id in msg";
                     "tag" => tag,
@@ -1051,7 +1051,7 @@ impl<'a> StoreMsgHandler<'a> {
                 "tag" => tag,
                 "msg" => %MsgDebug(msg),
             );
-            self.ctx.raft_metrics.message_dropped.stale_msg += 1;
+            self.ctx.raft_metrics.message_dropped.stale_msg.inc();
             return false;
         }
         match self.maybe_create_peer_internal(region_id, region_epoch, msg, is_local_first) {

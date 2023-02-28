@@ -45,7 +45,7 @@ use tikv::{
 };
 use tikv_util::{
     future::{paired_future_callback, poll_future_notify},
-    mpsc::batch::{unbounded, BatchCollector, BatchReceiver, Sender},
+    mpsc::future::{unbounded, BatchReceiver, Sender, WakePolicy},
     time::{duration_to_ms, duration_to_sec, Instant},
 };
 use txn_types::{self, Key};
@@ -297,7 +297,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
             callback,
         });
         let ch = self.ch.clone();
-        let kv = self.storage.get_engine().kv_engine();
+        let kv = self.storage.get_engine().kv_engine().unwrap();
         let task = async move {
             let mut resp = UnsafeDestroyRangeResponse::default();
             let regions = future.await?;
@@ -653,7 +653,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
         mut sink: DuplexSink<BatchCommandsResponse>,
     ) {
         forward_duplex!(self.proxy, batch_commands, ctx, stream, sink);
-        let (tx, rx) = unbounded(GRPC_MSG_NOTIFY_SIZE);
+        let (tx, rx) = unbounded(WakePolicy::TillReach(GRPC_MSG_NOTIFY_SIZE));
 
         let ctx = Arc::new(ctx);
         let peer = ctx.peer();
@@ -695,7 +695,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
             rx,
             GRPC_MSG_MAX_BATCH_SIZE,
             MeasuredBatchResponse::default,
-            BatchRespCollector,
+            collect_batch_resp,
         );
 
         let mut response_retriever = response_retriever.map(move |item| {
@@ -987,7 +987,7 @@ fn response_batch_commands_request<F, T>(
         if let Ok(resp) = resp.await {
             let measure = GrpcRequestDuration { begin, label, source: String::default() };
             let task = MeasuredSingleResponse::new(id, resp, measure);
-            if let Err(e) = tx.send_and_notify(task) {
+            if let Err(e) = tx.send_with(task, WakePolicy::Immediately) {
                 error!("KvService response batch commands fail"; "err" => ?e);
             }
         }
@@ -1706,18 +1706,10 @@ use tikv_util::timer::GLOBAL_TIMER_HANDLE;
 
 use crate::RaftKv;
 
-struct BatchRespCollector;
-impl BatchCollector<MeasuredBatchResponse, MeasuredSingleResponse> for BatchRespCollector {
-    fn collect(
-        &mut self,
-        v: &mut MeasuredBatchResponse,
-        mut e: MeasuredSingleResponse,
-    ) -> Option<MeasuredSingleResponse> {
-        v.batch_resp.mut_request_ids().push(e.id);
-        v.batch_resp.mut_responses().push(e.resp.consume());
-        v.measures.push(e.measure);
-        None
-    }
+fn collect_batch_resp(v: &mut MeasuredBatchResponse, mut e: MeasuredSingleResponse) {
+    v.batch_resp.mut_request_ids().push(e.id);
+    v.batch_resp.mut_responses().push(e.resp.consume());
+    v.measures.push(e.measure);
 }
 
 #[cfg(test)]

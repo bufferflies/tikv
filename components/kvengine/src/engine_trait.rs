@@ -3,34 +3,32 @@
 use std::{collections::BTreeMap, ops::Deref};
 
 use engine_traits::{
-    CFNamesExt, CFOptionsExt, CompactExt, CompactedEvent, DBOptions, DBOptionsExt, DBVector,
+    CfNamesExt, CfOptionsExt, CompactExt, CompactedEvent, DbOptions, DbOptionsExt, DbVector,
     DeleteStrategy, FlowControlFactorsExt, ImportExt, IngestExternalFileOptions, IterOptions,
     Iterable, KvEngine, MiscExt, Mutable, MvccProperties, MvccPropertiesExt, Peekable, PerfContext,
-    PerfContextExt, PerfContextKind, PerfLevel, Range, RangePropertiesExt, ReadOptions, SeekKey,
+    PerfContextExt, PerfContextKind, PerfLevel, Range, RangePropertiesExt, ReadOptions,
     Snapshot, SstCompressionType, SstExt, SstWriterBuilder, SyncMutable, TablePropertiesExt,
-    TitanDBOptions, TtlProperties, TtlPropertiesExt, WriteBatchExt, WriteOptions,
+    TitanCfOptions, TtlProperties, TtlPropertiesExt, WriteBatchExt, WriteOptions,
 };
 
 use crate::*;
 
 type TraitsResult<T> = std::result::Result<T, engine_traits::Error>;
 
-impl CFNamesExt for Engine {
+impl CfNamesExt for Engine {
     fn cf_names(&self) -> Vec<&str> {
         vec!["write", "lock", "extra"]
     }
 }
 
-impl CFOptionsExt for Engine {
-    type ColumnFamilyOptions = engine_rocks::RocksColumnFamilyOptions;
+impl CfOptionsExt for Engine {
+    type CfOptions = engine_panic::PanicCfOptions;
 
-    fn get_options_cf(&self, _cf: &str) -> TraitsResult<Self::ColumnFamilyOptions> {
-        Ok(engine_rocks::RocksColumnFamilyOptions::from_raw(
-            rocksdb::ColumnFamilyOptions::default(),
-        ))
+    fn get_options_cf(&self, _cf: &str) -> TraitsResult<Self::CfOptions> {
+        panic!()
     }
     fn set_options_cf(&self, _cf: &str, _options: &[(&str, &str)]) -> TraitsResult<()> {
-        Ok(())
+        panic!()
     }
 }
 
@@ -111,24 +109,24 @@ impl CompactedEvent for EngineCompactedEvent {
     }
 }
 
-impl DBOptionsExt for Engine {
-    type DBOptions = EngineDBOptions;
+impl DbOptionsExt for Engine {
+    type DbOptions = EngineDbOptions;
 
-    fn get_db_options(&self) -> Self::DBOptions {
-        EngineDBOptions::new()
+    fn get_db_options(&self) -> Self::DbOptions {
+        EngineDbOptions::new()
     }
     fn set_db_options(&self, _options: &[(&str, &str)]) -> TraitsResult<()> {
         Ok(())
     }
 }
 
-pub struct EngineDBOptions;
+pub struct EngineDbOptions;
 
-impl DBOptions for EngineDBOptions {
-    type TitanDBOptions = EngineTitanDBOptions;
+impl DbOptions for EngineDbOptions {
+    type TitanDbOptions = EngineTitanDbOptions;
 
     fn new() -> Self {
-        EngineDBOptions {}
+        EngineDbOptions {}
     }
 
     fn get_max_background_jobs(&self) -> i32 {
@@ -151,14 +149,14 @@ impl DBOptions for EngineDBOptions {
         Ok(())
     }
 
-    fn set_titandb_options(&mut self, _opts: &Self::TitanDBOptions) {
+    fn set_titandb_options(&mut self, _opts: &Self::TitanDbOptions) {
         panic!()
     }
 }
 
-pub struct EngineTitanDBOptions;
+pub struct EngineTitanDbOptions;
 
-impl TitanDBOptions for EngineTitanDBOptions {
+impl TitanCfOptions for EngineTitanDbOptions {
     fn new() -> Self {
         panic!()
     }
@@ -168,11 +166,11 @@ impl TitanDBOptions for EngineTitanDBOptions {
 }
 
 #[derive(Debug)]
-pub struct EngineDBVector;
+pub struct EngineDbVector;
 
-impl DBVector for EngineDBVector {}
+impl DbVector for EngineDbVector {}
 
-impl Deref for EngineDBVector {
+impl Deref for EngineDbVector {
     type Target = [u8];
 
     fn deref(&self) -> &[u8] {
@@ -180,7 +178,7 @@ impl Deref for EngineDBVector {
     }
 }
 
-impl<'a> PartialEq<&'a [u8]> for EngineDBVector {
+impl<'a> PartialEq<&'a [u8]> for EngineDbVector {
     fn eq(&self, rhs: &&[u8]) -> bool {
         **rhs == **self
     }
@@ -204,13 +202,13 @@ impl KvEngine for Engine {
 }
 
 impl Peekable for Engine {
-    type DBVector = EngineDBVector;
+    type DbVector = EngineDbVector;
 
     fn get_value_opt(
         &self,
         _opts: &ReadOptions,
         _key: &[u8],
-    ) -> TraitsResult<Option<Self::DBVector>> {
+    ) -> TraitsResult<Option<Self::DbVector>> {
         panic!()
     }
 
@@ -219,7 +217,7 @@ impl Peekable for Engine {
         _opts: &ReadOptions,
         _cf: &str,
         _key: &[u8],
-    ) -> TraitsResult<Option<Self::DBVector>> {
+    ) -> TraitsResult<Option<Self::DbVector>> {
         panic!()
     }
 }
@@ -249,10 +247,7 @@ impl SyncMutable for Engine {
 impl Iterable for Engine {
     type Iterator = EngineIterator;
 
-    fn iterator_opt(&self, _opts: IterOptions) -> TraitsResult<Self::Iterator> {
-        panic!()
-    }
-    fn iterator_cf_opt(&self, _cf: &str, _opts: IterOptions) -> TraitsResult<Self::Iterator> {
+    fn iterator_opt(&self, _cf: &str, _opts: IterOptions) -> engine_traits::Result<Self::Iterator> {
         panic!()
     }
 }
@@ -260,10 +255,18 @@ impl Iterable for Engine {
 pub struct EngineIterator;
 
 impl engine_traits::Iterator for EngineIterator {
-    fn seek(&mut self, _key: SeekKey<'_>) -> TraitsResult<bool> {
+    fn seek(&mut self, _key: &[u8]) -> TraitsResult<bool> {
         panic!()
     }
-    fn seek_for_prev(&mut self, _key: SeekKey<'_>) -> TraitsResult<bool> {
+    fn seek_for_prev(&mut self, _key: &[u8]) -> TraitsResult<bool> {
+        panic!()
+    }
+
+    fn seek_to_first(&mut self) -> engine_traits::Result<bool> {
+        panic!()
+    }
+
+    fn seek_to_last(&mut self) -> engine_traits::Result<bool> {
         panic!()
     }
 
@@ -335,7 +338,7 @@ impl FlowControlFactorsExt for Engine {
 }
 
 impl MiscExt for Engine {
-    fn flush(&self, _sync: bool) -> TraitsResult<()> {
+    fn flush_cfs(&self, _wait: bool) -> engine_traits::Result<()> {
         panic!()
     }
 
@@ -366,10 +369,6 @@ impl MiscExt for Engine {
 
     fn get_engine_used_size(&self) -> TraitsResult<u64> {
         Ok(self.size())
-    }
-
-    fn roughly_cleanup_ranges(&self, _ranges: &[(Vec<u8>, Vec<u8>)]) -> TraitsResult<()> {
-        panic!()
     }
 
     fn path(&self) -> &str {
@@ -503,19 +502,16 @@ impl RangePropertiesExt for Engine {
 pub struct EngineSnapshot {}
 
 impl Snapshot for EngineSnapshot {
-    fn cf_names(&self) -> Vec<&str> {
-        panic!()
-    }
 }
 
 impl Peekable for EngineSnapshot {
-    type DBVector = EngineDBVector;
+    type DbVector = EngineDbVector;
 
     fn get_value_opt(
         &self,
         _opts: &ReadOptions,
         _key: &[u8],
-    ) -> TraitsResult<Option<Self::DBVector>> {
+    ) -> TraitsResult<Option<Self::DbVector>> {
         panic!()
     }
     fn get_value_cf_opt(
@@ -523,7 +519,7 @@ impl Peekable for EngineSnapshot {
         _opts: &ReadOptions,
         _cf: &str,
         _key: &[u8],
-    ) -> TraitsResult<Option<Self::DBVector>> {
+    ) -> TraitsResult<Option<Self::DbVector>> {
         panic!()
     }
 }
@@ -531,10 +527,7 @@ impl Peekable for EngineSnapshot {
 impl Iterable for EngineSnapshot {
     type Iterator = PanicSnapshotIterator;
 
-    fn iterator_opt(&self, _opts: IterOptions) -> TraitsResult<Self::Iterator> {
-        panic!()
-    }
-    fn iterator_cf_opt(&self, _cf: &str, _opts: IterOptions) -> TraitsResult<Self::Iterator> {
+    fn iterator_opt(&self, _cf: &str, _opts: IterOptions) -> engine_traits::Result<Self::Iterator> {
         panic!()
     }
 }
@@ -542,10 +535,18 @@ impl Iterable for EngineSnapshot {
 pub struct PanicSnapshotIterator;
 
 impl engine_traits::Iterator for PanicSnapshotIterator {
-    fn seek(&mut self, _key: SeekKey<'_>) -> TraitsResult<bool> {
+    fn seek(&mut self, _key: &[u8]) -> TraitsResult<bool> {
         panic!()
     }
-    fn seek_for_prev(&mut self, _key: SeekKey<'_>) -> TraitsResult<bool> {
+    fn seek_for_prev(&mut self, _key: &[u8]) -> TraitsResult<bool> {
+        panic!()
+    }
+
+    fn seek_to_first(&mut self) -> engine_traits::Result<bool> {
+        panic!()
+    }
+
+    fn seek_to_last(&mut self) -> engine_traits::Result<bool> {
         panic!()
     }
 
@@ -569,44 +570,37 @@ impl engine_traits::Iterator for PanicSnapshotIterator {
 }
 
 impl SstExt for Engine {
-    type SstReader = engine_rocks::RocksSstReader;
-    type SstWriter = engine_rocks::RocksSstWriter;
+    type SstReader = engine_panic::PanicSstReader;
+    type SstWriter = engine_panic::PanicSstWriter;
     type SstWriterBuilder = EngineSstWriterBuilder;
 }
 
 pub struct EngineSstWriterBuilder {
-    builder: engine_rocks::RocksSstWriterBuilder,
+    builder: engine_panic::PanicSstWriterBuilder,
 }
 
 impl SstWriterBuilder<Engine> for EngineSstWriterBuilder {
     fn new() -> Self {
-        Self {
-            builder: engine_rocks::RocksSstWriterBuilder::new(),
-        }
+        panic!()
     }
     fn set_db(self, _db: &Engine) -> Self {
-        // TODO(x): need to find a way to pass RocksDB Env and CFOptions to the builder.
-        self
+        panic!()
     }
     fn set_cf(mut self, cf: &str) -> Self {
-        self.builder = self.builder.set_cf(cf);
-        self
+        panic!()
     }
     fn set_in_memory(mut self, in_memory: bool) -> Self {
-        self.builder = self.builder.set_in_memory(in_memory);
-        self
+        panic!()
     }
     fn set_compression_type(mut self, compression: Option<SstCompressionType>) -> Self {
-        self.builder = self.builder.set_compression_type(compression);
-        self
+        panic!()
     }
     fn set_compression_level(mut self, level: i32) -> Self {
-        self.builder = self.builder.set_compression_level(level);
-        self
+        panic!()
     }
 
-    fn build(self, path: &str) -> TraitsResult<engine_rocks::RocksSstWriter> {
-        self.builder.build(path)
+    fn build(self, path: &str) -> TraitsResult<engine_panic::PanicSstWriter> {
+        panic!()
     }
 }
 
@@ -669,7 +663,7 @@ impl WriteBatchExt for Engine {
 pub struct EngineWriteBatch;
 
 impl engine_traits::WriteBatch for EngineWriteBatch {
-    fn write_opt(&self, _: &WriteOptions) -> TraitsResult<()> {
+    fn write_opt(&mut self, _: &WriteOptions) -> TraitsResult<u64> {
         panic!()
     }
 

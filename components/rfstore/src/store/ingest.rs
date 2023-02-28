@@ -3,10 +3,11 @@
 use std::sync::Arc;
 
 use collections::HashMap;
-use engine_rocks::RocksSstReader;
-use engine_traits::{Iterable, Iterator as TraitIterator, SstReader, CF_DEFAULT, CF_WRITE};
+use engine_rocks::{RocksSstIterator, RocksSstReader};
+use engine_traits::{Iterable, Iterator as TraitIterator, SstReader, CF_DEFAULT, CF_WRITE, RefIterable, IterOptions};
 use kvengine::{table::Value, ShardMeta, UserMeta};
 use kvproto::{import_sstpb::SstMeta, raft_cmdpb::RaftCmdRequest};
+use kvengine::table::table;
 use sst_importer::SstImporter;
 use tikv_util::{codec, error, info};
 use txn_types::{WriteRef, WriteType};
@@ -20,16 +21,11 @@ pub(crate) fn convert_sst(
     info!("{} convert sst {:?}", shard_meta.tag(), req);
     let region_id = req.get_header().get_region_id();
     let region_ver = req.get_header().get_region_epoch().get_version();
-    let concat_iter = build_concat_iterator(&importer, req)?;
-    let ingest_id = concat_iter
-        .iterators
-        .first()
-        .map(|iter| iter.meta.get_uuid().to_vec())
-        .unwrap();
+    let (ingest_id, entries_iter) = build_entries_iterator(&importer, req)?;
     let cs = kv.build_ingest_files(
         region_id,
         region_ver,
-        Box::new(concat_iter),
+        Box::new(entries_iter),
         ingest_id,
         shard_meta,
     )?;
@@ -48,114 +44,82 @@ fn collect_default_values(
             continue;
         }
         let reader = importer.get_reader(sst_meta)?;
-        reader.scan(&[], &[], false, |rocks_key, v| {
-            let key = parse_rocksdb_key(rocks_key)?;
-            default_values.insert(key, v.to_vec());
-            Ok(true)
-        })?;
+        let mut iter = reader.iter(IterOptions::default())?;
+        if iter.seek_to_first()? {
+            while iter.valid()? {
+                let key = parse_rocksdb_key(iter.key())?;
+                default_values.insert(key, iter.value().to_vec());
+                iter.next()?;
+            }
+        }
     }
     Ok(default_values)
 }
 
-fn build_concat_iterator(
+fn build_entries_iterator(
     importer: &SstImporter,
     req: &RaftCmdRequest,
-) -> crate::Result<ConcatIterator> {
+) -> crate::Result<(Vec<u8>, EntriesIterator)> {
     let default_values = Arc::new(collect_default_values(importer, req)?);
-    let mut sst_iters = vec![];
+    let mut sst_metas = vec![];
+    let mut total_kvs = 0;
     for import_req in req.get_requests() {
         let sst_meta = import_req.get_ingest_sst().get_sst();
         if sst_meta.get_cf_name() != CF_WRITE {
             continue;
         }
-        let reader = importer.get_reader(sst_meta)?;
-        let sst_iter = SstIterator::new(sst_meta.clone(), reader, default_values.clone());
-        sst_iters.push(sst_iter);
+        total_kvs += sst_meta.total_kvs;
+        sst_metas.push(sst_meta);
     }
-    sst_iters.sort_by(|a, b| {
-        a.meta
-            .get_range()
-            .get_start()
-            .cmp(b.meta.get_range().get_start())
-    });
-    Ok(ConcatIterator::new(sst_iters))
+    sst_metas.sort_by(|a, b| a.get_range().get_start().cmp(b.get_range().get_start()));
+    let ingest_id = sst_metas.first().unwrap().get_uuid().to_vec();
+    let mut entries = Vec::with_capacity(total_kvs as usize);
+    for sst_meta in sst_metas {
+        let reader = importer.get_reader(sst_meta)?;
+        let mut iter = reader.iter(IterOptions::default())?;
+        iter.seek_to_first()?;
+        while iter.valid()? {
+            let (key, commit_ts) = parse_rocksdb_key(iter.key())?;
+            let write_ref = WriteRef::parse(iter.value())?;
+            let start_ts = write_ref.start_ts.into_inner();
+            let default_key = (key, start_ts);
+            let default_value = default_values.get(&default_key);
+            let key = default_key.0;
+            let user_meta = UserMeta::new(start_ts, commit_ts);
+            let val = match write_ref.write_type {
+                WriteType::Put => match write_ref.short_value {
+                    Some(short_val) => {
+                        encode_table_value(user_meta, short_val)
+                    }
+                    None => {
+                        encode_table_value(user_meta, default_value.unwrap())
+                    }
+                },
+                WriteType::Delete => {
+                    encode_table_value(user_meta, &[])
+                }
+                _ => panic!("unexpected write type"),
+            };
+            entries.push(Entry { key, val });
+            iter.next()?;
+        }
+    }
+    Ok((ingest_id, EntriesIterator::new(entries)))
+}
+
+struct Entry {
+    key: Vec<u8>,
+    val: Vec<u8>,
 }
 
 struct SstIterator {
     meta: SstMeta,
-    iter: engine_rocks::RocksSstIterator,
-    current_key: Vec<u8>,
-    current_value: Vec<u8>,
+    entries: Vec<Entry>,
+    idx: usize,
     start_ts: u64,
     commit_ts: u64,
     #[allow(clippy::type_complexity)]
     default_values: Arc<HashMap<(Vec<u8>, u64), Vec<u8>>>,
-}
-
-impl SstIterator {
-    #[allow(clippy::type_complexity)]
-    fn new(
-        meta: SstMeta,
-        reader: RocksSstReader,
-        default_values: Arc<HashMap<(Vec<u8>, u64), Vec<u8>>>,
-    ) -> Self {
-        let iter = reader.iter();
-        Self {
-            meta,
-            iter,
-            current_key: vec![],
-            current_value: vec![],
-            start_ts: 0,
-            commit_ts: 0,
-            default_values,
-        }
-    }
-
-    fn update_current(&mut self) -> crate::Result<bool> {
-        let (key, ts) = parse_rocksdb_key(self.iter.key())?;
-        self.commit_ts = ts;
-        let write_ref = WriteRef::parse(self.iter.value())?;
-        self.start_ts = write_ref.start_ts.into_inner();
-        let default_key = (key, self.start_ts);
-        let default_value = self.default_values.get(&default_key);
-        self.current_key = default_key.0;
-        let user_meta = UserMeta::new(self.start_ts, self.commit_ts);
-        match write_ref.write_type {
-            WriteType::Put => match write_ref.short_value {
-                Some(short_val) => {
-                    self.current_value = encode_table_value(user_meta, short_val);
-                }
-                None => {
-                    self.current_value = encode_table_value(user_meta, default_value.unwrap());
-                }
-            },
-            WriteType::Delete => {
-                self.current_value = encode_table_value(user_meta, &[]);
-            }
-            _ => panic!("unexpected write type"),
-        }
-        Ok(true)
-    }
-
-    fn rewind(&mut self) -> crate::Result<bool> {
-        let valid = self.iter.seek_to_first()?;
-        if !valid {
-            return Ok(false);
-        }
-        self.update_current()
-    }
-
-    fn next(&mut self) -> crate::Result<bool> {
-        let valid = self.iter.next()?;
-        if !valid {
-            return Ok(false);
-        }
-        self.update_current()
-    }
-
-    fn valid(&self) -> std::result::Result<bool, engine_traits::Error> {
-        self.iter.valid()
-    }
 }
 
 fn parse_rocksdb_key(data_key: &[u8]) -> codec::Result<(Vec<u8>, u64)> {
@@ -170,44 +134,20 @@ fn encode_table_value(user_meta: UserMeta, val: &[u8]) -> Vec<u8> {
     Value::encode_buf(0, &user_meta.to_array(), user_meta.commit_ts, val)
 }
 
-struct ConcatIterator {
-    iterators: Vec<SstIterator>,
+struct EntriesIterator {
+    entries: Vec<Entry>,
     idx: usize,
 }
 
-impl ConcatIterator {
-    fn new(iterators: Vec<SstIterator>) -> Self {
-        Self { iterators, idx: 0 }
+impl EntriesIterator {
+    fn new(entries: Vec<Entry>) -> Self {
+        Self { entries, idx: 0 }
     }
 }
 
-impl ConcatIterator {
-    fn get_current(&self) -> &SstIterator {
-        &self.iterators[self.idx]
-    }
-
-    fn mut_current(&mut self) -> &mut SstIterator {
-        &mut self.iterators[self.idx]
-    }
-}
-
-impl kvengine::table::Iterator for ConcatIterator {
+impl table::Iterator for EntriesIterator {
     fn next(&mut self) {
-        let iter_len = self.iterators.len();
-        let current = self.mut_current();
-        let valid = current.next().unwrap_or_else(|err| {
-            error!("next error {:?}", err);
-            false
-        });
-        if valid || self.idx + 1 == iter_len {
-            return;
-        }
         self.idx += 1;
-        let current = self.mut_current();
-        current.rewind().unwrap_or_else(|err| {
-            error!("rewind error {:?}", err);
-            false
-        });
     }
 
     fn next_version(&mut self) -> bool {
@@ -216,9 +156,6 @@ impl kvengine::table::Iterator for ConcatIterator {
 
     fn rewind(&mut self) {
         self.idx = 0;
-        if let Err(err) = self.iterators[0].rewind() {
-            error!("rewind error {:?}", err);
-        }
     }
 
     fn seek(&mut self, _key: &[u8]) {
@@ -226,20 +163,14 @@ impl kvengine::table::Iterator for ConcatIterator {
     }
 
     fn key(&self) -> &[u8] {
-        let current = self.get_current();
-        current.current_key.as_slice()
+        &self.entries[self.idx].key
     }
 
     fn value(&self) -> Value {
-        let current = self.get_current();
-        if current.current_value.is_empty() {
-            panic!("current value is empty");
-        }
-        Value::decode(&current.current_value)
+        Value::decode(&self.entries[self.idx].val)
     }
 
     fn valid(&self) -> bool {
-        let valid = self.get_current().valid().unwrap_or(false);
-        valid
+        self.idx < self.entries.len()
     }
 }

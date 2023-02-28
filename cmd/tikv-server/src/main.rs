@@ -5,7 +5,7 @@
 use std::{path::Path, process};
 
 use clap::{crate_authors, App, Arg};
-use cloud_server::{signal_handler, TiKVServer};
+use cloud_server::{signal_handler, TikvServer};
 use serde_json::{Map, Value};
 use server::setup::{ensure_no_unrecognized_config, validate_and_persist_config};
 use tikv::config::{to_flatten_config_info, TikvConfig};
@@ -208,7 +208,7 @@ fn main() {
         process::exit(0);
     }
 
-    let mut tikv = TiKVServer::new(config);
+    let mut tikv = TikvServer::new(config);
     tikv.run();
     signal_handler::wait_for_signal();
     tikv.stop();

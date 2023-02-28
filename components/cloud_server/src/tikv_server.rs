@@ -26,7 +26,7 @@ use engine_rocks::from_rocks_compression_type;
 use engine_traits::{KvEngine, RaftEngine, CF_DEFAULT, CF_WRITE};
 use error_code::ErrorCodeExt;
 use file_system::{
-    BytesFetcher, IORateLimitMode, IORateLimiter, MetricsManager as IOMetricsManager,
+    BytesFetcher, IoRateLimitMode, IoRateLimiter, MetricsManager as IoMetricsManager,
 };
 use fs2::FileExt;
 use futures::executor::block_on;
@@ -54,7 +54,7 @@ use rfstore::{
 use security::SecurityManager;
 use sst_importer::SstImporter;
 use tikv::{
-    config::{ConfigController, TiKvConfig},
+    config::{ConfigController, TikvConfig},
     coprocessor, coprocessor_v2,
     read_pool::{build_yatp_read_pool, ReadPool},
     server::{
@@ -96,8 +96,8 @@ const DEFAULT_METRICS_FLUSH_INTERVAL: Duration = Duration::from_millis(10_000);
 const ZSTD_COMPRESSION_LEVEL_FOR_LOCAL: &str = "3";
 
 /// A complete TiKV server.
-pub struct TiKVServer {
-    config: TiKvConfig,
+pub struct TikvServer {
+    config: TikvConfig,
     cfg_controller: Option<ConfigController>,
     security_mgr: Arc<SecurityManager>,
     pd_client: Arc<dyn PdClient>,
@@ -107,7 +107,7 @@ pub struct TiKVServer {
     store_path: PathBuf,
     encryption_key_manager: Option<Arc<DataKeyManager>>,
     raw_engines: Engines,
-    engines: Option<TiKVEngines>,
+    engines: Option<TikvEngines>,
     servers: Option<Servers>,
     region_info_accessor: RegionInfoAccessor,
     coprocessor_host: Option<CoprocessorHost<kvengine::Engine>>,
@@ -117,10 +117,10 @@ pub struct TiKVServer {
     env: Arc<Environment>,
     background_worker: Worker,
     quota_limiter: Arc<QuotaLimiter>,
-    io_rate_limiter: Arc<IORateLimiter>,
+    io_rate_limiter: Arc<IoRateLimiter>,
 }
 
-struct TiKVEngines {
+struct TikvEngines {
     store_meta: Option<StoreMeta>,
     engine: RaftKv,
 }
@@ -132,15 +132,15 @@ struct Servers {
     importer: Arc<SstImporter>,
 }
 
-impl TiKVServer {
-    pub fn new(mut config: TiKvConfig) -> TiKVServer {
+impl TikvServer {
+    pub fn new(mut config: TikvConfig) -> TikvServer {
         let (security_mgr, env, pd, dfs) = Self::prepare(&mut config);
         Self::setup(config, security_mgr, env, pd, dfs)
     }
 
     #[allow(clippy::type_complexity)]
     pub fn prepare(
-        config: &mut TiKvConfig,
+        config: &mut TikvConfig,
     ) -> (
         Arc<SecurityManager>,
         Arc<Environment>,
@@ -179,7 +179,7 @@ impl TiKVServer {
                 .build(),
         );
         let pd_client =
-            TiKVServer::connect_to_pd_cluster(config, env.clone(), Arc::clone(&security_mgr));
+            TikvServer::connect_to_pd_cluster(config, env.clone(), Arc::clone(&security_mgr));
 
         config.dfs.override_from_env();
 
@@ -211,16 +211,16 @@ impl TiKVServer {
     }
 
     pub fn setup(
-        config: TiKvConfig,
+        config: TikvConfig,
         security_mgr: Arc<SecurityManager>,
         env: Arc<Environment>,
         pd_client: Arc<dyn PdClient>,
         dfs: Arc<dyn DFS>,
-    ) -> TiKVServer {
+    ) -> TikvServer {
         // Initialize and check config
         let cfg_controller = Self::init_config(config);
         let config = cfg_controller.get_current();
-        let io_rate_limiter = Arc::new(IORateLimiter::new(IORateLimitMode::WriteOnly, true, true));
+        let io_rate_limiter = Arc::new(IoRateLimiter::new(IoRateLimitMode::WriteOnly, true, true));
         io_rate_limiter
             .set_io_rate_limit(config.storage.io_rate_limit.max_bytes_per_sec.0 as usize);
         let raw_engines =
@@ -260,7 +260,7 @@ impl TiKVServer {
             config.quota.enable_auto_tune,
         ));
         info!("created tikv server");
-        TiKVServer {
+        TikvServer {
             config,
             cfg_controller: Some(cfg_controller),
             security_mgr,
@@ -319,7 +319,7 @@ impl TiKVServer {
     /// - If the config can't pass `validate()`
     /// - If the max open file descriptor limit is not high enough to support
     ///   the main database and the raft database.
-    pub fn init_config(mut config: TiKvConfig) -> ConfigController {
+    pub fn init_config(mut config: TikvConfig) -> ConfigController {
         validate_and_persist_config(&mut config, true);
 
         ensure_dir_exist(&config.storage.data_dir).unwrap();
@@ -354,7 +354,7 @@ impl TiKVServer {
     }
 
     fn connect_to_pd_cluster(
-        config: &mut TiKvConfig,
+        config: &mut TikvConfig,
         env: Arc<Environment>,
         security_mgr: Arc<SecurityManager>,
     ) -> Arc<RpcClient> {
@@ -482,7 +482,7 @@ impl TiKVServer {
             self.raw_engines.kv.clone(),
         );
         let store_meta = Some(store_meta);
-        self.engines = Some(TiKVEngines { store_meta, engine });
+        self.engines = Some(TikvEngines { store_meta, engine });
     }
 
     fn init_servers<F: KvFormat>(&mut self) -> Arc<VersionTrack<ServerConfig>> {
@@ -719,7 +719,7 @@ impl TiKVServer {
             self.config.import.clone(),
             self.config.raft_store.raft_entry_max_size,
             self.router.clone(),
-            engines.engine.kv_engine(),
+            engines.engine.kv_engine().unwrap(),
             servers.importer.clone(),
         );
         if servers
@@ -757,14 +757,14 @@ impl TiKVServer {
             .is_ok();
 
         if stats_collector_enabled {
-            BytesFetcher::FromIOStatsCollector()
+            BytesFetcher::FromIoStatsCollector()
         } else {
             BytesFetcher::FromRateLimiter(self.io_rate_limiter.statistics().unwrap())
         }
     }
 
     fn init_metrics_flusher(&mut self, fetcher: BytesFetcher) {
-        let mut io_metrics = IOMetricsManager::new(fetcher);
+        let mut io_metrics = IoMetricsManager::new(fetcher);
         let kv = self.raw_engines.kv.clone();
         let raft = self.raw_engines.raft.clone();
         self.background_worker
@@ -854,9 +854,9 @@ impl TiKVServer {
     }
 }
 
-impl TiKVServer {
+impl TikvServer {
     // This method is also used by cse-ctl for cluster restore.
-    pub fn init_raft_engine(conf: &TiKvConfig) -> rfengine::Result<RfEngine> {
+    pub fn init_raft_engine(conf: &TikvConfig) -> rfengine::Result<RfEngine> {
         let raft_db_path = Path::new(&conf.raft_store.raftdb_path);
         let wal_size = conf.rfengine.target_file_size.0 as usize;
         let compression_threshold = conf.rfengine.batch_compression_threshold.0 as usize;
@@ -866,9 +866,9 @@ impl TiKVServer {
     // This method is also used by cse-ctl for cluster restore.
     pub fn init_kv_engine(
         pd: Arc<dyn pd_client::PdClient>,
-        conf: &TiKvConfig,
+        conf: &TikvConfig,
         dfs: Arc<dyn DFS>,
-        rate_limiter: Arc<IORateLimiter>,
+        rate_limiter: Arc<IoRateLimiter>,
         meta_iter: &mut impl kvengine::MetaIterator,
         recoverer: impl kvengine::RecoverHandler + 'static,
     ) -> kvengine::Result<(
@@ -922,9 +922,9 @@ impl TiKVServer {
 
     fn init_raw_engines(
         pd: Arc<dyn pd_client::PdClient>,
-        conf: &TiKvConfig,
+        conf: &TikvConfig,
         dfs: Arc<dyn DFS>,
-        rate_limiter: Arc<IORateLimiter>,
+        rate_limiter: Arc<IoRateLimiter>,
     ) -> Engines {
         if panic_mark_file_exists(&conf.storage.data_dir) {
             error!("The panic mark file is exists. Pause the process");
@@ -1032,7 +1032,7 @@ fn pre_start() {
     }
 }
 
-fn check_system_config(config: &TiKvConfig) {
+fn check_system_config(config: &TikvConfig) {
     info!("beginning system configuration check");
     let mut rocksdb_max_open_files = config.rocksdb.max_open_files;
     if config.rocksdb.titan.enabled {

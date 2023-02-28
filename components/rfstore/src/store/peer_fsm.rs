@@ -192,8 +192,7 @@ impl<'a> PeerMsgHandler<'a> {
                 PeerMsg::RaftCommand(cmd) => {
                     self.ctx
                         .raft_metrics
-                        .propose
-                        .request_wait_time
+                        .propose_wait_time
                         .observe(duration_to_sec(cmd.send_time.saturating_elapsed()));
                     self.propose_raft_command(cmd.request, cmd.callback, None);
                 }
@@ -536,7 +535,7 @@ impl<'a> PeerMsgHandler<'a> {
                 "to_store_id" => to.get_store_id(),
                 "my_store_id" => self.store_id(),
             );
-            self.ctx.raft_metrics.message_dropped.mismatch_store_id += 1;
+            self.ctx.raft_metrics.message_dropped.mismatch_store_id.inc();
             return false;
         }
 
@@ -546,7 +545,7 @@ impl<'a> PeerMsgHandler<'a> {
                 "tag" => self.peer.tag(),
                 "region_id" => region_id,
             );
-            self.ctx.raft_metrics.message_dropped.mismatch_region_epoch += 1;
+            self.ctx.raft_metrics.message_dropped.mismatch_region_epoch.inc();
             return false;
         }
 
@@ -607,7 +606,7 @@ impl<'a> PeerMsgHandler<'a> {
                     "peer_id" => self.fsm.peer_id(),
                     "target_peer" => ?target,
                 );
-                self.ctx.raft_metrics.message_dropped.stale_msg += 1;
+                self.ctx.raft_metrics.message_dropped.stale_msg.inc();
                 true
             }
             cmp::Ordering::Greater => {
@@ -616,7 +615,7 @@ impl<'a> PeerMsgHandler<'a> {
                         region_id: self.region_id(),
                     });
                 } else {
-                    self.ctx.raft_metrics.message_dropped.applying_snap += 1;
+                    self.ctx.raft_metrics.message_dropped.applying_snap.inc();
                 }
                 true
             }
@@ -651,7 +650,7 @@ impl<'a> PeerMsgHandler<'a> {
                 region_id: self.region_id(),
             });
         } else {
-            self.ctx.raft_metrics.message_dropped.applying_snap += 1;
+            self.ctx.raft_metrics.message_dropped.applying_snap.inc();
         }
     }
 
@@ -808,7 +807,7 @@ impl<'a> PeerMsgHandler<'a> {
     ) -> Result<Option<RaftCmdResponse>> {
         // Check store_id, make sure that the msg is dispatched to the right place.
         if let Err(e) = _util::check_store_id(msg, self.store_id()) {
-            self.ctx.raft_metrics.invalid_proposal.mismatch_store_id += 1;
+            self.ctx.raft_metrics.invalid_proposal.mismatch_store_id.inc();
             return Err(e);
         }
         if msg.has_status_request() {
@@ -840,13 +839,13 @@ impl<'a> PeerMsgHandler<'a> {
             && !allow_replica_read
             && !allow_stale_read
         {
-            self.ctx.raft_metrics.invalid_proposal.not_leader += 1;
+            self.ctx.raft_metrics.invalid_proposal.not_leader.inc();
             let leader = self.fsm.peer.get_peer_from_cache(leader_id);
             return Err(Error::NotLeader(region_id, leader));
         }
         // peer_id must be the same as peer's.
         if let Err(e) = _util::check_peer_id(msg, self.fsm.peer.peer_id()) {
-            self.ctx.raft_metrics.invalid_proposal.mismatch_peer_id += 1;
+            self.ctx.raft_metrics.invalid_proposal.mismatch_peer_id.inc();
             return Err(e);
         }
         // check whether the peer is initialized.
@@ -854,13 +853,13 @@ impl<'a> PeerMsgHandler<'a> {
             self.ctx
                 .raft_metrics
                 .invalid_proposal
-                .region_not_initialized += 1;
+                .region_not_initialized.inc();
             return Err(Error::RegionNotInitialized(region_id));
         }
         // If the peer is applying snapshot, it may drop some sending messages, that could
         // make clients wait for response until timeout.
         if self.fsm.peer.is_applying_snapshot() {
-            self.ctx.raft_metrics.invalid_proposal.is_applying_snapshot += 1;
+            self.ctx.raft_metrics.invalid_proposal.is_applying_snapshot.inc();
             // TODO: replace to a more suitable error.
             return Err(Error::Other(box_err!(
                 "{} peer is applying snapshot",
@@ -869,7 +868,7 @@ impl<'a> PeerMsgHandler<'a> {
         }
         // Check whether the term is stale.
         if let Err(e) = _util::check_term(msg, self.fsm.peer.term()) {
-            self.ctx.raft_metrics.invalid_proposal.stale_command += 1;
+            self.ctx.raft_metrics.invalid_proposal.stale_command.inc();
             return Err(e);
         }
 
@@ -880,7 +879,7 @@ impl<'a> PeerMsgHandler<'a> {
                 // received by the TiKV driver is newer than the meta cached in the driver, the meta is
                 // updated.
                 // TODO(x) add sibling region.
-                self.ctx.raft_metrics.invalid_proposal.epoch_not_match += 1;
+                self.ctx.raft_metrics.invalid_proposal.epoch_not_match.inc();
                 Err(Error::EpochNotMatch(m, new_regions))
             }
             Err(e) => Err(e),
