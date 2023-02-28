@@ -25,6 +25,12 @@ pub struct Item<'a> {
     val: table::Value,
     pub path: AccessPath,
     phantom: PhantomData<&'a i32>,
+
+    // Uses to hold the value's memory when necessary, so that the life time of val can be at least
+    // long as the life time of Item itself. This is necessary when the caller is not responsible
+    // (or impossible) to manage the life time. e.g. During point get, caller does not hold the
+    // memory as in scan (held by the iterator).
+    val_mem_holder: Option<Vec<u8>>,
 }
 
 impl std::ops::Deref for Item<'_> {
@@ -41,6 +47,7 @@ impl Item<'_> {
             val: table::Value::new(),
             path: AccessPath::default(),
             phantom: Default::default(),
+            val_mem_holder: None,
         }
     }
 }
@@ -212,7 +219,14 @@ impl SnapAccessCore {
             version = u64::MAX;
         }
         let mut item = Item::new();
-        item.val = self.get_value(cf, key, version, &mut item.path);
+        item.val_mem_holder = Some(vec![]);
+        item.val = self.get_value(
+            cf,
+            key,
+            version,
+            &mut item.path,
+            item.val_mem_holder.as_mut().unwrap(),
+        );
         item
     }
 
@@ -222,6 +236,7 @@ impl SnapAccessCore {
         key: &[u8],
         version: u64,
         path: &mut AccessPath,
+        val_mem_holder: &mut Vec<u8>,
     ) -> table::Value {
         for i in 0..self.data.mem_tbls.len() {
             let tbl = self.data.mem_tbls.as_slice()[i].get_cf(cf);
@@ -234,13 +249,15 @@ impl SnapAccessCore {
             };
             path.mem_table += 1;
             if v.is_valid() {
-                return v;
+                val_mem_holder.resize(v.encoded_size(), 0);
+                v.encode(val_mem_holder.as_mut_slice());
+                return table::Value::decode(val_mem_holder.as_slice());
             }
         }
         let key_hash = farmhash::fingerprint64(key);
         for l0 in &self.data.l0_tbls {
             if let Some(tbl) = &l0.get_cf(cf) {
-                let v = tbl.get(key, version, key_hash);
+                let v = tbl.get(key, version, key_hash, val_mem_holder);
                 path.l0 = path.l0.saturating_add(1);
                 if v.is_valid() {
                     return v;
@@ -249,7 +266,7 @@ impl SnapAccessCore {
         }
         let scf = self.data.get_cf(cf);
         for lh in &scf.levels {
-            let v = lh.get(key, version, key_hash);
+            let v = lh.get(key, version, key_hash, val_mem_holder);
             path.ln += 1;
             if v.is_valid() {
                 return v;
@@ -350,14 +367,16 @@ impl SnapAccessCore {
                 continue;
             }
             let l0_cf = l0_cf.as_ref().unwrap();
-            let val = l0_cf.get(key, u64::MAX, key_hash);
+            let mut val_mem_holder = vec![];
+            let val = l0_cf.get(key, u64::MAX, key_hash, &mut val_mem_holder);
             if val.is_valid() {
                 return !val.is_deleted();
             }
         }
         for l in self.data.get_cf(cf).levels.as_slice() {
             if let Some(tbl) = l.get_table(key) {
-                let val = tbl.get(key, u64::MAX, key_hash);
+                let mut val_mem_holder = vec![];
+                let val = tbl.get(key, u64::MAX, key_hash, &mut val_mem_holder);
                 if val.is_valid() {
                     return !val.is_deleted();
                 }
@@ -467,22 +486,31 @@ impl SnapAccessCore {
 
     pub fn get_newer(&self, cf: usize, key: &[u8], version: u64) -> Item<'_> {
         let mut item = Item::new();
-        item.val = self.get_newer_val(cf, key, version);
+        item.val_mem_holder = Some(vec![]);
+        item.val = self.get_newer_val(cf, key, version, item.val_mem_holder.as_mut().unwrap());
         item
     }
 
-    fn get_newer_val(&self, cf: usize, key: &[u8], version: u64) -> table::Value {
+    fn get_newer_val(
+        &self,
+        cf: usize,
+        key: &[u8],
+        version: u64,
+        val_mem_holder: &mut Vec<u8>,
+    ) -> table::Value {
         let key_hash = farmhash::fingerprint64(key);
         for i in 0..self.data.mem_tbls.len() {
             let tbl = self.data.mem_tbls.as_slice()[i].get_cf(cf);
             let v = tbl.get_newer(key, version);
             if v.is_valid() {
-                return v;
+                val_mem_holder.resize(v.encoded_size(), 0);
+                v.encode(val_mem_holder.as_mut_slice());
+                return table::Value::decode(val_mem_holder.as_slice());
             }
         }
         for l0 in &self.data.l0_tbls {
             if let Some(tbl) = &l0.get_cf(cf) {
-                let v = tbl.get_newer(key, version, key_hash);
+                let v = tbl.get_newer(key, version, key_hash, val_mem_holder);
                 if v.is_valid() {
                     return v;
                 }
@@ -490,7 +518,7 @@ impl SnapAccessCore {
         }
         let scf = self.data.get_cf(cf);
         for lh in &scf.levels {
-            let v = lh.get_newer(key, version, key_hash);
+            let v = lh.get_newer(key, version, key_hash, val_mem_holder);
             if v.is_valid() {
                 return v;
             }
@@ -538,6 +566,7 @@ impl Iterator {
             val: self.val,
             path: AccessPath::default(),
             phantom: Default::default(),
+            val_mem_holder: None,
         }
     }
 
