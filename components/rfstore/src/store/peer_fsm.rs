@@ -252,6 +252,7 @@ impl<'a> PeerMsgHandler<'a> {
                 shard_ver,
                 callback,
             } => self.on_truncate_ts(ts, shard_ver, callback),
+            CasualMessage::IngestFiles { cs, callback } => self.on_ingest_files(cs, callback),
             CasualMessage::RestoreShard { cs, callback } => self.on_restore_shard(cs, callback),
         }
     }
@@ -1252,6 +1253,60 @@ impl<'a> PeerMsgHandler<'a> {
         cs.set_property_key(TRUNCATE_TS_KEY.to_string());
         let property_value = TruncateTs::from(truncate_ts).marshal().to_vec();
         cs.set_property_value(property_value);
+        let mut custom_builder = CustomBuilder::new();
+        custom_builder.set_change_set(&cs);
+        cmd.set_custom_request(custom_builder.build());
+        self.propose_raft_command(cmd, callback, None);
+    }
+
+    fn on_ingest_files(&mut self, cs: kvenginepb::ChangeSet, callback: Callback) {
+        if !self.peer.is_leader() {
+            let mut resp = RaftCmdResponse::default();
+            let header = resp.mut_header();
+            let error = header.mut_error();
+            let not_leader = error.mut_not_leader();
+            not_leader.set_region_id(self.region_id());
+            let leader_id = self.peer.leader_id();
+            if leader_id != 0 {
+                let leader_peer = self
+                    .region()
+                    .get_peers()
+                    .iter()
+                    .find(|p| p.id == leader_id)
+                    .unwrap();
+                not_leader.set_leader(leader_peer.clone());
+            }
+            callback.invoke_with_response(resp);
+            return;
+        }
+        if cs.get_shard_ver() != self.region().get_region_epoch().get_version() {
+            let mut resp = RaftCmdResponse::default();
+            let regions = resp
+                .mut_header()
+                .mut_error()
+                .mut_epoch_not_match()
+                .mut_current_regions();
+            regions.push(self.region().clone());
+            callback.invoke_with_response(resp);
+            return;
+        }
+        // Check overlap.
+        if let Some(shard) = self.ctx.global.engines.kv.get_shard(cs.get_shard_id()) {
+            let snap = shard.new_snap_access();
+            let mut it = snap.new_iterator(0, false, false, None, false);
+            let table_creates = cs.get_ingest_files().get_table_creates();
+            let smallest = table_creates.first().unwrap().smallest.as_slice();
+            let biggest = table_creates.last().unwrap().biggest.as_slice();
+            it.seek(smallest);
+            if it.valid() && it.key() <= biggest {
+                let mut resp = RaftCmdResponse::default();
+                let err = resp.mut_header().mut_error();
+                err.set_message(format!("region {} has overlap data", cs.get_shard_id()));
+                callback.invoke_with_response(resp);
+                return;
+            }
+        }
+        let mut cmd = self.new_raft_cmd_request();
         let mut custom_builder = CustomBuilder::new();
         custom_builder.set_change_set(&cs);
         cmd.set_custom_request(custom_builder.build());

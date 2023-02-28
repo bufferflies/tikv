@@ -457,6 +457,55 @@ impl StatusServer {
         })
     }
 
+    async fn get_change_set_request(
+        raw_req: Request<Body>,
+    ) -> hyper::Result<kvenginepb::ChangeSet> {
+        let mut body = Vec::new();
+        raw_req
+            .into_body()
+            .try_for_each(|bytes| {
+                body.extend(bytes);
+                ok(())
+            })
+            .await?;
+        let mut cs = kvenginepb::ChangeSet::default();
+        cs.merge_from_bytes(&body).unwrap();
+        Ok(cs)
+    }
+
+    async fn ingest_files(req: Request<Body>, router: RaftRouter) -> hyper::Result<Response<Body>> {
+        let cs = Self::get_change_set_request(req).await?;
+        let shard_id = cs.get_shard_id();
+        info!("[{}] receive restore_shard request: {:?}", shard_id, cs);
+
+        let (cb, fut) = paired_future_callback();
+        let callback = Callback::write(Box::new(move |res| {
+            cb(res);
+        }));
+        router.send_casual_msg(
+            cs.get_shard_id(),
+            CasualMessage::IngestFiles { cs, callback },
+        );
+
+        let res = fut.await.unwrap();
+        if res.response.get_header().has_error() {
+            error!(
+                "{} ingest_files error: {:?}",
+                shard_id,
+                res.response.get_header().get_error()
+            );
+            let err_data = res
+                .response
+                .get_header()
+                .get_error()
+                .write_to_bytes()
+                .unwrap();
+            Ok(make_response(StatusCode::INTERNAL_SERVER_ERROR, err_data))
+        } else {
+            Ok(make_response(StatusCode::OK, ""))
+        }
+    }
+
     async fn dump_rfengine_stats(
         req: Request<Body>,
         engine: rfengine::RfEngine,
@@ -936,6 +985,9 @@ impl StatusServer {
                             }
                             (Method::POST, path) if path.starts_with("/kvengine/compactor") => {
                                 Self::add_remote_compactor(req, engine.comp_client.clone()).await
+                            }
+                            (Method::POST, path) if path.starts_with("/ingest_files") => {
+                                Self::ingest_files(req, router).await
                             }
                             _ => Ok(make_response(StatusCode::NOT_FOUND, "path not found")),
                         }

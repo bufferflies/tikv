@@ -346,6 +346,11 @@ pub enum CasualMessage {
         shard_ver: u64,
         callback: Callback,
     },
+    /// IngestFiles from load_data worker.
+    IngestFiles {
+        cs: kvenginepb::ChangeSet,
+        callback: Callback,
+    },
     /// Restore from backup data.
     RestoreShard {
         cs: kvenginepb::ChangeSet,
@@ -374,6 +379,9 @@ impl fmt::Debug for CasualMessage {
             }
             CasualMessage::TruncateTs { ts, shard_ver, .. } => {
                 write!(fmt, "truncate ts {:?}, shard ver {:?}", ts, shard_ver)
+            }
+            CasualMessage::IngestFiles { cs, .. } => {
+                write!(fmt, "ingest files {:?}", cs)
             }
             CasualMessage::RestoreShard { cs, .. } => {
                 write!(fmt, "restore shard from {:?}", cs)

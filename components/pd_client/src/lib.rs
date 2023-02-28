@@ -478,6 +478,24 @@ pub trait PdClient: Send + Sync {
     fn report_region_buckets(&self, _bucket_stat: &BucketStat, _period: Duration) -> PdFuture<()> {
         unimplemented!();
     }
+
+    /// tikv-worker uses this to load data.
+    fn split_regions(&self, _keys: Vec<Vec<u8>>) -> PdFuture<()> {
+        unimplemented!();
+    }
+
+    fn split_and_scatter_regions(&self, _keys: Vec<Vec<u8>>) -> PdFuture<()> {
+        unimplemented!();
+    }
+
+    fn scan_regions(
+        &self,
+        _key: Vec<u8>,
+        _end_key: Vec<u8>,
+        _limit: usize,
+    ) -> PdFuture<Vec<pdpb::Region>> {
+        unimplemented!();
+    }
 }
 
 const REQUEST_TIMEOUT: u64 = 2; // 2s
