@@ -15,10 +15,14 @@ use rfenginepb::{ClusterBackupMeta, StoreBackupMeta};
 use security::SecurityConfig;
 use slog_global::{error, info, warn};
 
-use crate::common::{
-    create_pd_client, generate_etcd_connect_opt, get_all_stores_except_tiflash,
-    send_request_to_store,
+use crate::{
+    common::{
+        create_pd_client, generate_etcd_connect_opt, get_all_stores_except_tiflash,
+        send_request_to_store,
+    },
+    error::Error,
 };
+
 const INCREMENTAL_BACKUP_INTERVAL: u64 = 30; // seconds.
 const BACKUP_FOLDER_FORMAT: &str = "%Y%m%d";
 const MAX_BATCH_GET_CNT: i64 = 1024;
@@ -26,42 +30,6 @@ const MAX_BATCH_GET_CNT: i64 = 1024;
 const PD_KEY_SPACE_META_PATH: [&str; 3] = ["keyspaces/", "region_label/keyspaces/", "rules/"];
 
 pub type Result<T> = std::result::Result<T, Error>;
-
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("Cluster topology error {0}")]
-    TopoChanged(String),
-    #[error("Backup meta of cluster {0} is not found")]
-    MetaNotFound(u64),
-    #[error("DFS error {0}")]
-    DFSError(dfs::Error),
-    #[error("Server error {0}")]
-    ServerError(String),
-    #[error("Safe ts {0} is greater than backup ts {1}")]
-    TsError(u64, u64),
-    #[error("PD error {0}")]
-    PDError(pd_client::Error),
-    #[error("Etcd error {0}")]
-    EtcdError(etcd_client::Error),
-}
-
-impl From<dfs::Error> for Error {
-    fn from(e: dfs::Error) -> Self {
-        Error::DFSError(e)
-    }
-}
-
-impl From<pd_client::Error> for Error {
-    fn from(e: pd_client::Error) -> Self {
-        Error::PDError(e)
-    }
-}
-
-impl From<etcd_client::Error> for Error {
-    fn from(e: etcd_client::Error) -> Self {
-        Error::EtcdError(e)
-    }
-}
 
 #[derive(Args)]
 pub struct BackupArgs {

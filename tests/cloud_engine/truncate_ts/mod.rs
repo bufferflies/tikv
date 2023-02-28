@@ -2,28 +2,28 @@
 
 use std::{
     collections::HashMap,
-    str::FromStr,
-    sync::{mpsc::SyncSender, Arc, Mutex},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
+use api_version::ApiV2;
+use cse_ctl::truncate_ts::{request_truncate_ts_on_all_stores, wait_truncate_ts_finish};
 use futures::executor::block_on;
-use hyper::{Body, Request, Uri};
-use kvengine::{EngineStats, ShardTruncateTsStats};
-use kvproto::metapb::Store;
 use pd_client::PdClient;
 use rand::Rng;
 use test_cloud_server::{client::ClusterClient, ServerCluster};
 use test_raftstore::TestPdClient;
 use tikv_util::{info, time::Instant};
-use tokio::runtime::Runtime;
 use txn_types::TimeStamp;
 
 use crate::alloc_node_id;
 
+const TEST_KEY_SPACE_CNT: usize = 10;
+
 struct TruncateTsContext {
     client: ClusterClient,
     max_key_idx: usize,
+    keyspace_id: Option<u32>,
     timeout: Duration,
 }
 
@@ -38,29 +38,48 @@ fn test_truncate_ts() {
     let max_key_idx = 2000;
     let mut cluster = ServerCluster::new(nodes.clone(), |_, _| {});
     let mut client = cluster.new_client();
+    // Split keyspaces.
+    for keyspace_id in 0..=TEST_KEY_SPACE_CNT {
+        client.split(&get_keyspace_prefix(keyspace_id as u32));
+    }
+    cluster.wait_pd_region_count(TEST_KEY_SPACE_CNT + 2);
     // preload some key-value pairs.
     client.put_kv(0..max_key_idx, i_to_key, i_to_random_value);
 
-    test_truncate_ts_impl(client, max_key_idx, Duration::from_secs(30));
+    let keyspaces_cases = vec![None, Some(random_keyspace(max_key_idx))];
+    for keyspace in keyspaces_cases {
+        let client = cluster.new_client();
+        test_truncate_ts_impl(client, max_key_idx, keyspace, Duration::from_secs(30));
+        // restart one node.
+        let node_id = nodes[rand::thread_rng().gen_range(0..node_cnt)];
+        cluster.stop_node(node_id);
+        cluster.start_node(node_id, |_, _| {});
+        info!("Cluster node {} is restarted.", node_id);
 
-    // restart one node.
-    let node_id = nodes[rand::thread_rng().gen_range(0..node_cnt)];
-    cluster.stop_node(node_id);
-    cluster.start_node(node_id, |_, _| {});
-    info!("Cluster node {} is restarted.", node_id);
-
-    // test truncate ts after restart
-    let client = cluster.new_client();
-    test_truncate_ts_impl(client, max_key_idx, Duration::from_secs(30));
+        // test truncate ts after restart
+        let client = cluster.new_client();
+        test_truncate_ts_impl(client, max_key_idx, keyspace, Duration::from_secs(30));
+    }
 
     info!("Truncate ts test stopped.");
     cluster.stop();
 }
 
-fn test_truncate_ts_impl(client: ClusterClient, max_key_idx: usize, timeout: Duration) {
+fn random_keyspace(max_idx: usize) -> u32 {
+    let mut rng = rand::thread_rng();
+    i_to_keyspace(rng.gen_range(0..max_idx))
+}
+
+fn test_truncate_ts_impl(
+    client: ClusterClient,
+    max_key_idx: usize,
+    keyspace_id: Option<u32>,
+    timeout: Duration,
+) {
     let context1 = Arc::new(Mutex::new(TruncateTsContext {
         client,
         max_key_idx,
+        keyspace_id,
         timeout,
     }));
     let context2 = context1.clone();
@@ -125,25 +144,40 @@ fn truncate_ts_and_verification(context: Arc<Mutex<TruncateTsContext>>) {
         // wait a while to let update thread to write some data.
         std::thread::sleep(Duration::from_secs(rng.gen_range(0..max_sleep_time)));
         {
+            let mut ctx = context.lock().unwrap();
+            let mut values_before = vec![];
+            if ctx.keyspace_id.is_some() {
+                values_before = Vec::with_capacity(ctx.max_key_idx);
+                let now = Instant::now();
+                for i in 0..ctx.max_key_idx {
+                    let key = i_to_key(i);
+                    let (value, _) = ctx.client.must_get_key(&key, now);
+                    values_before.push(value);
+                }
+            }
             info!("Begin truncate ts with {}", saved_tso);
             let truncate_ts = saved_tso.into_inner();
-            let mut ctx = context.lock().unwrap();
-            execute_truncate_ts(&ctx.client, truncate_ts);
+            execute_truncate_ts(&ctx.client, truncate_ts, ctx.keyspace_id);
 
             // do verification, compare the value with latest version with truncate_ts version.
             let now = Instant::now();
             for i in 0..ctx.max_key_idx {
                 let key = i_to_key(i);
-                let value = ctx.client.must_get_key_version(&key, truncate_ts, now);
-                let cur_value = ctx.client.must_get_key(&key, now);
-                assert_eq!(value, cur_value);
+                let (value, _) = ctx.client.must_get_key_version(&key, truncate_ts, now);
+                let (cur_value, _) = ctx.client.must_get_key(&key, now);
+                if ctx.keyspace_id.is_none() || ctx.keyspace_id == Some(i_to_keyspace(i)) {
+                    assert_eq!(cur_value, value);
+                } else {
+                    // Verify the data out of keyspace is not truncated.
+                    assert_eq!(&values_before[i], &cur_value);
+                }
             }
             truncate_number += 1;
         }
     }
 }
 
-fn execute_truncate_ts(client: &ClusterClient, ts: u64) {
+fn execute_truncate_ts(client: &ClusterClient, ts: u64, keyspace_id: Option<u32>) {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(3)
         .enable_all()
@@ -155,18 +189,18 @@ fn execute_truncate_ts(client: &ClusterClient, ts: u64) {
     for store in stores {
         remain_stores.insert(store.id, store);
     }
+    let range = keyspace_id.map(|id| ApiV2::get_txn_keyspace_range(id));
     let shard_cnt =
-        request_truncate_ts_on_all_stores(cluster_id, &remain_stores, ts, &runtime).unwrap();
+        request_truncate_ts_on_all_stores(cluster_id, &remain_stores, ts, range, &runtime).unwrap();
     info!("{} shards begin truncate ts to {}", shard_cnt, ts);
 
     let start = Instant::now();
-    // wait 200 * 50ms at maximum
     wait_truncate_ts_finish(
         &mut remain_stores,
         ts,
+        keyspace_id,
         &runtime,
         Duration::from_millis(50),
-        200,
     )
     .unwrap();
     info!(
@@ -179,124 +213,22 @@ fn execute_truncate_ts(client: &ClusterClient, ts: u64) {
     }
 }
 
-// send truncate ts request and return the count of shard which execute truncate ts.
-fn request_truncate_ts_on_all_stores(
-    cluster_id: u64,
-    stores: &HashMap<u64, Store>,
-    truncate_ts: u64,
-    runtime: &Runtime,
-) -> Result<usize, String> {
-    let mut shard_cnt = 0;
-    let store_cnt = stores.len();
-    let (tx, rx) = std::sync::mpsc::sync_channel(store_cnt);
-    for store in stores.values() {
-        runtime.spawn(request_truncate_ts_store(
-            cluster_id,
-            store.clone(),
-            truncate_ts,
-            tx.clone(),
-        ));
-    }
-    let mut errs = vec![];
-    for _ in 0..store_cnt {
-        match rx.recv().unwrap() {
-            Ok((_, resp)) => {
-                shard_cnt += resp.len();
-            }
-            Err(err) => {
-                errs.push(err);
-            }
-        }
-    }
-    if !errs.is_empty() {
-        return Err(errs.join(";"));
-    }
-    Ok(shard_cnt)
+fn get_keyspace_prefix(keyspace_id: u32) -> Vec<u8> {
+    let mut prefix = keyspace_id.to_be_bytes();
+    prefix[0] = b'x';
+    prefix.to_vec()
 }
 
-async fn request_truncate_ts_store(
-    cluster_id: u64,
-    store: Store,
-    truncate_ts: u64,
-    tx: SyncSender<Result<(u64, Vec<ShardTruncateTsStats>), String>>,
-) {
-    let uri = Uri::from_str(&format!("http://{}/truncate-ts", &store.status_address)).unwrap();
-    let store_id = store.get_id();
-    let mut body_map = HashMap::new();
-    body_map.insert("cluster_id".to_string(), cluster_id.to_string());
-    body_map.insert("truncate_ts".to_string(), truncate_ts.to_string());
-    let json_string = serde_json::to_string(&body_map).unwrap();
-    let req = Request::post(uri).body(Body::from(json_string)).unwrap();
-    let client = hyper::Client::new();
-    let resp = client.request(req).await.unwrap();
-    if !resp.status().is_success() {
-        tx.send(Err(format!("Request to store {:?} failed", store_id)))
-            .unwrap();
-        return;
-    }
-    let body = hyper::body::to_bytes(resp.into_body()).await.unwrap();
-    let resp: Vec<ShardTruncateTsStats> = serde_json::from_slice(&body).unwrap();
-    tx.send(Ok((store_id, resp))).unwrap();
-}
-
-// query max ts on all stores and remove the finished store in stores.
-fn wait_truncate_ts_finish(
-    stores: &mut HashMap<u64, Store>,
-    truncate_ts: u64,
-    runtime: &Runtime,
-    interval: Duration,
-    max_retry_cnt: u64,
-) -> Result<(), String> {
-    for _ in 0..max_retry_cnt {
-        // wait a while for truncate finish.
-        std::thread::sleep(interval);
-
-        let cnt = stores.len();
-        let (tx, rx) = std::sync::mpsc::sync_channel(cnt);
-        for (_, store) in stores.clone() {
-            runtime.spawn(query_max_ts_store(store, tx.clone()));
-        }
-        let mut errs = vec![];
-        for _ in 0..cnt {
-            match rx.recv().unwrap() {
-                Ok((store_id, max_ts)) => {
-                    if max_ts <= truncate_ts {
-                        stores.remove(&store_id);
-                    }
-                }
-                Err(err) => {
-                    errs.push(err);
-                }
-            }
-        }
-        if !errs.is_empty() {
-            return Err(errs.join(";"));
-        }
-        if stores.is_empty() {
-            return Ok(());
-        }
-    }
-    Ok(())
-}
-
-async fn query_max_ts_store(store: Store, tx: SyncSender<Result<(u64, u64), String>>) {
-    let uri = Uri::from_str(&format!("http://{}/kvengine", &store.status_address)).unwrap();
-    let store_id = store.get_id();
-    let client = hyper::Client::new();
-    match client.get(uri).await {
-        Ok(resp) => {
-            let body = hyper::body::to_bytes(resp.into_body()).await.unwrap();
-            let engine_stats: EngineStats = serde_json::from_slice(&body).unwrap();
-            tx.send(Ok((store_id, engine_stats.max_ts))).unwrap()
-        }
-        Err(e) => tx
-            .send(Err(format!("Store {:?} failed, {:?}", store_id, e)))
-            .unwrap(),
-    }
+fn i_to_keyspace(i: usize) -> u32 {
+    (i % TEST_KEY_SPACE_CNT) as u32
 }
 
 fn i_to_key(i: usize) -> Vec<u8> {
-    format!("key_{:03}", i).into_bytes()
+    let mut keyspace_id = i_to_keyspace(i).to_be_bytes();
+    keyspace_id[0] = api_version::api_v2::TXN_KEY_PREFIX;
+    let mut key = keyspace_id.to_vec();
+    key.append(&mut format!("key_{:03}", i).into_bytes());
+    key
 }
 
 fn i_to_random_value(_i: usize) -> Vec<u8> {

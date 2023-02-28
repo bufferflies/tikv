@@ -282,6 +282,16 @@ impl ApiV2 {
         String::new()
     }
 
+    pub fn get_txn_keyspace_range(keyspace_id: u32) -> (Vec<u8>, Vec<u8>) {
+        let mut start_key = keyspace_id.to_be_bytes();
+        start_key[0] = TXN_KEY_PREFIX;
+
+        let mut end_key = (keyspace_id + 1).to_be_bytes();
+        end_key[0] = TXN_KEY_PREFIX;
+
+        (start_key.to_vec(), end_key.to_vec())
+    }
+
     pub const ENCODED_LOGICAL_DELETE: [u8; 1] = [ValueMeta::DELETE_FLAG.bits];
 }
 
@@ -483,5 +493,28 @@ mod tests {
 
         let keyspace_id_str = ApiV2::get_keyspace_id_str(user_key_prefix);
         assert_eq!(keyspace_id_pd_alloc_str, keyspace_id_str);
+    }
+
+    #[test]
+    fn test_get_txn_keyspace_range() {
+        let test_cases = vec![
+            (10u32, vec![b'x', 0, 0, 0x0A], vec![b'x', 0, 0, 0x0B]),
+            (100, vec![b'x', 0, 0, 0x64], vec![b'x', 0, 0, 0x65]),
+            (1000, vec![b'x', 0, 0x03, 0xE8], vec![b'x', 0, 0x03, 0xE9]),
+            (
+                100000,
+                vec![b'x', 0x01, 0x86, 0xA0],
+                vec![b'x', 0x01, 0x86, 0xA1],
+            ),
+        ];
+
+        for (i, (id, start, end)) in test_cases.into_iter().enumerate() {
+            assert_eq!(
+                ApiV2::get_txn_keyspace_range(id),
+                (start, end),
+                "case {}",
+                i
+            );
+        }
     }
 }

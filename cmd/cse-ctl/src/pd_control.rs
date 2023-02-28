@@ -81,16 +81,6 @@ impl PdControl {
     }
 }
 
-pub fn get_keyspace_range(keyspace_id: u32) -> (Vec<u8>, Vec<u8>) {
-    let mut start_key = keyspace_id.to_be_bytes();
-    start_key[0] = b'x';
-
-    let mut end_key = (keyspace_id + 1).to_be_bytes();
-    end_key[0] = b'x';
-
-    (start_key.to_vec(), end_key.to_vec())
-}
-
 #[derive(Default, Serialize, Deserialize, Debug)]
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]

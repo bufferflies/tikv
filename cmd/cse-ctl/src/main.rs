@@ -4,7 +4,6 @@
 extern crate serde_derive;
 
 mod dfsgc;
-mod truncate_ts;
 mod unsafe_recover;
 
 use std::{env, fs::OpenOptions, io};
@@ -13,12 +12,12 @@ use clap::{Parser, Subcommand};
 use cse_ctl::{
     backup::{execute_backup, BackupArgs},
     restore::{execute_restore_command, RestoreCommand},
+    truncate_ts::{execute_truncate_ts, TruncateTsArgs},
 };
 use slog::Drain;
 
 use crate::{
     dfsgc::{execute_dfsgc, DFSGCArgs},
-    truncate_ts::{execute_truncate_ts, TruncateTsArgs},
     unsafe_recover::{execute_unsafe_recover, UnsafeRecoverArgs},
     Commands::{Backup, Restore, TruncateTs, UnsafeRecover, DFSGC},
 };

@@ -13,6 +13,7 @@ use std::{
     time::Duration,
 };
 
+use api_version::ApiV2;
 use cloud_server::TiKVServer;
 use file_system::{IORateLimitMode, IORateLimiter};
 use http::{Request, Uri};
@@ -36,9 +37,10 @@ use crate::{
         create_pd_client, load_peer_raft_state, load_rf_engine_meta, now, send_request_to_store,
         RawRegion,
     },
-    pd_control::{get_keyspace_range, PdControl},
+    pd_control::PdControl,
     restore::{get_cluster_backup_meta, RestoreConfig, RestoreKeyspaceArgs},
     step, step_error,
+    truncate_ts::{truncate_ts_with_cfg, TruncateTsConfig},
 };
 
 const WORKING_PATH_PREFIX: &str = "tenant-restore";
@@ -107,7 +109,7 @@ pub fn restore_keyspace(
     .unwrap();
     let working_path = working_dir.into_path();
 
-    let (keyspace_start, keyspace_end) = get_keyspace_range(keyspace_id);
+    let (keyspace_start, keyspace_end) = ApiV2::get_txn_keyspace_range(keyspace_id);
     step!(
         "Start restore tenant {} from backup <{}>, tenant id:{} range:[{:?},{:?})",
         keyspace_id,
@@ -163,6 +165,23 @@ pub fn restore_keyspace(
     step!("Restore {snapshots_count} regions");
 
     // truncate ts
+    let truncate_ts_cfg = TruncateTsConfig {
+        pd: config.pd.clone(),
+        security: config.security.clone(),
+    };
+    if let Err(e) = truncate_ts_with_cfg(
+        truncate_ts_cfg,
+        cluster_backup.backup_ts,
+        Duration::from_secs(30),
+        Some(keyspace_id),
+    ) {
+        return Err(box_err!(
+            "Fail to truncate ts {} for keyspace {}, err {:?}",
+            cluster_backup.backup_ts,
+            keyspace_id,
+            e
+        ));
+    }
 
     // untag deleted S3 files
 
@@ -276,7 +295,7 @@ impl BackupCluster {
         dfs: Arc<S3FS>,
         keyspace_id: u32,
     ) -> RestoreResult<BackupCluster> {
-        let (keyspace_prefix, _) = get_keyspace_range(keyspace_id);
+        let (keyspace_prefix, _) = ApiV2::get_txn_keyspace_range(keyspace_id);
         let mut cluster = Self {
             path,
             pd_client,
@@ -579,7 +598,7 @@ impl BackupCluster {
     }
 
     fn verify_shards(&self) -> RestoreResult<()> {
-        let (start, end) = get_keyspace_range(self.keyspace_id);
+        let (start, end) = ApiV2::get_txn_keyspace_range(self.keyspace_id);
         if self.sorted_shards.is_empty() {
             return Err(box_err!("no shard"));
         }
