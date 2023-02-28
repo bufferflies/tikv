@@ -710,10 +710,10 @@ impl PdRunner {
             .set(store_info.kv_engine.get_cache_size() as i64);
         STORE_ENGINE_MEM_SIZE_GAUGE_VEC
             .with_label_values(&["kv", "block_index"])
-            .set(kv_engine_stats.tbl_index_size as i64);
+            .set(kv_engine_stats.index_size as i64);
         STORE_ENGINE_MEM_SIZE_GAUGE_VEC
             .with_label_values(&["kv", "table_filter"])
-            .set(kv_engine_stats.in_mem_tbl_filter_size as i64);
+            .set(kv_engine_stats.in_mem_filter_size as i64);
 
         let rf_engine_stats = store_info.rf_engine.get_engine_stats();
         STORE_ENGINE_SIZE_GAUGE_VEC

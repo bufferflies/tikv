@@ -2,7 +2,7 @@
 
 use std::cmp;
 
-use bytes::Buf;
+use bytes::Bytes;
 
 use crate::{load_bool, EXTRA_CF, NUM_CFS, WRITE_CF};
 
@@ -24,9 +24,10 @@ pub struct EngineStats {
     pub cf_total_sizes: Vec<u64>,
     pub level_num_files: Vec<usize>,
     pub level_total_sizes: Vec<u64>,
-    pub tbl_index_size: u64,
-    pub tbl_filter_size: u64,
-    pub in_mem_tbl_filter_size: u64,
+    pub index_size: u64,
+    pub in_mem_index_size: u64,
+    pub filter_size: u64,
+    pub in_mem_filter_size: u64,
     pub max_ts: u64, // Use to check whether PiTR has completed.
     pub entries: usize,
     pub old_entries: usize,
@@ -79,9 +80,10 @@ impl super::Engine {
             engine_stats.l0_tables_size += shard.l0_table_size;
             engine_stats.partial_l0_count += shard.partial_l0s;
             engine_stats.partial_ln_count += shard.partial_tbls;
-            engine_stats.tbl_index_size += shard.tbl_index_size;
-            engine_stats.tbl_filter_size += shard.tbl_filter_size;
-            engine_stats.in_mem_tbl_filter_size += shard.in_mem_tbl_filter_size;
+            engine_stats.index_size += shard.index_size;
+            engine_stats.in_mem_index_size += shard.in_mem_index_size;
+            engine_stats.filter_size += shard.filter_size;
+            engine_stats.in_mem_filter_size += shard.in_mem_filter_size;
             engine_stats.max_ts = cmp::max(engine_stats.max_ts, shard.max_ts);
             engine_stats.entries += shard.entries;
             engine_stats.old_entries += shard.old_entries;
@@ -114,8 +116,8 @@ impl super::Engine {
 pub struct ShardStats {
     pub id: u64,
     pub ver: u64,
-    pub start: String,
-    pub end: String,
+    pub start: Bytes,
+    pub end: Bytes,
     pub active: bool,
     pub compacting: bool,
     pub flushed: bool,
@@ -124,9 +126,10 @@ pub struct ShardStats {
     pub l0_table_count: usize,
     pub l0_table_size: u64,
     pub cfs: Vec<CFStats>,
-    pub tbl_index_size: u64,
-    pub tbl_filter_size: u64,
-    pub in_mem_tbl_filter_size: u64,
+    pub index_size: u64,
+    pub in_mem_index_size: u64,
+    pub filter_size: u64,
+    pub in_mem_filter_size: u64,
     pub max_ts: u64,
     pub entries: usize,
     pub old_entries: usize,
@@ -142,7 +145,7 @@ pub struct ShardStats {
     pub compaction_level: usize,
     pub compaction_score: f64,
     pub has_over_bound_data: bool,
-    pub delete_prefixes: String,
+    pub delete_prefixes: Vec<Vec<u8>>,
     pub truncate_ts: Option<u64>,
     pub trim_over_bound: bool,
 }
@@ -162,6 +165,7 @@ pub struct LevelStats {
     pub num_tables: usize,
     pub data_size: u64,
     pub index_size: u64,
+    pub in_mem_index_size: u64,
     pub filter_size: u64,
     pub in_mem_filter_size: u64,
     pub max_ts: u64,
@@ -185,6 +189,7 @@ impl super::Shard {
     pub fn get_stats(&self) -> ShardStats {
         let mut total_size = 0;
         let mut tbl_index_size = 0;
+        let mut in_mem_tbl_index_size = 0;
         let mut tbl_filter_size = 0;
         let mut in_mem_tbl_filter_size = 0;
         let mut max_ts = 0;
@@ -212,6 +217,7 @@ impl super::Shard {
             }
             for cf in 0..NUM_CFS {
                 if let Some(cf_tbl) = l0_tbl.get_cf(cf) {
+                    cf_tbl.expire_index();
                     tbl_index_size += cf_tbl.index_size();
                     tbl_filter_size += cf_tbl.filter_size();
                     in_mem_tbl_filter_size += cf_tbl.filter_size();
@@ -236,9 +242,11 @@ impl super::Shard {
                 level_stats.level = l.level;
                 level_stats.num_tables = l.tables.len();
                 for t in l.tables.as_slice() {
+                    t.expire_index();
                     if data.cover_full_table(t.smallest(), t.biggest()) {
                         level_stats.data_size += t.size();
                         level_stats.index_size += t.index_size();
+                        level_stats.in_mem_index_size += t.in_mem_index_size();
                         level_stats.filter_size += t.filter_size();
                         if l.level == 1 {
                             level_stats.in_mem_filter_size += t.filter_size();
@@ -265,6 +273,7 @@ impl super::Shard {
                 }
                 total_size += level_stats.data_size;
                 tbl_index_size += level_stats.index_size;
+                in_mem_tbl_index_size += level_stats.in_mem_index_size;
                 tbl_filter_size += level_stats.filter_size;
                 in_mem_tbl_filter_size += level_stats.in_mem_filter_size;
                 max_ts = cmp::max(max_ts, level_stats.max_ts);
@@ -283,8 +292,8 @@ impl super::Shard {
         ShardStats {
             id: self.id,
             ver: self.ver,
-            start: format!("{:?}", self.start.chunk()),
-            end: format!("{:?}", self.end.chunk()),
+            start: self.start.clone(),
+            end: self.end.clone(),
             active: self.is_active(),
             compacting: load_bool(&self.compacting),
             flushed: self.get_initial_flushed(),
@@ -297,9 +306,10 @@ impl super::Shard {
             meta_sequence: self.get_meta_sequence(),
             write_sequence: self.get_write_sequence(),
             total_size,
-            tbl_index_size,
-            tbl_filter_size,
-            in_mem_tbl_filter_size,
+            index_size: tbl_index_size,
+            in_mem_index_size: in_mem_tbl_index_size,
+            filter_size: tbl_filter_size,
+            in_mem_filter_size: in_mem_tbl_filter_size,
             max_ts,
             entries,
             old_entries,
@@ -311,7 +321,7 @@ impl super::Shard {
             compaction_level,
             compaction_score,
             has_over_bound_data: data.has_over_bound_data(),
-            delete_prefixes: format!("{:?}", data.del_prefixes),
+            delete_prefixes: data.del_prefixes.prefixes.clone(),
             truncate_ts: data.truncate_ts.map(|x| x.inner()),
             trim_over_bound: data.trim_over_bound,
         }

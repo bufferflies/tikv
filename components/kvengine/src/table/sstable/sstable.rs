@@ -4,16 +4,23 @@ use std::{
     cmp::Ordering,
     ops::Deref,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering::Relaxed},
+        Arc, Mutex,
+    },
 };
 
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, Bytes, BytesMut};
 use moka::sync::SegmentedCache;
+use tikv_util::time::Instant;
 use xorf::{BinaryFuse8, Filter};
 
 use super::{builder::*, iterator::TableIterator};
 use crate::table::{sstable::File, table::Result, *};
+
+// 10 minutes idle idx would be cleared.
+const IDX_TTL: u64 = 60 * 10;
 
 #[derive(Clone)]
 pub struct SSTable {
@@ -132,8 +139,11 @@ pub struct SSTableCore {
     pub old_entries: u32,
     pub tombs: u32,
     pub kv_size: u64,
-    pub idx: Index,
-    pub old_idx: Index,
+    open_at: Instant,
+    idx: Mutex<Option<Arc<Index>>>,
+    last_idx_access: AtomicU64,
+    old_idx: Mutex<Option<Arc<Index>>>,
+    last_old_idx_access: AtomicU64,
 }
 
 impl SSTableCore {
@@ -154,13 +164,6 @@ impl SSTableCore {
         if footer.magic != MAGIC_NUMBER {
             return Err(table::Error::InvalidMagicNumber);
         }
-        let idx_data = file.read(start_off + footer.index_offset as u64, footer.index_len())?;
-        let idx = Index::new(idx_data, footer.checksum_type)?;
-        let old_idx_data = file.read(
-            start_off + footer.old_index_offset as u64,
-            footer.old_index_len(),
-        )?;
-        let old_idx = Index::new(old_idx_data, footer.checksum_type)?;
         let props_data = file.read(
             start_off + footer.properties_offset as u64,
             footer.properties_len(size as usize),
@@ -206,9 +209,12 @@ impl SSTableCore {
             entries,
             old_entries,
             tombs,
+            open_at: Instant::now_coarse(),
             kv_size: kv_size.unwrap_or(size),
-            idx,
-            old_idx,
+            idx: Mutex::new(None),
+            last_idx_access: AtomicU64::default(),
+            old_idx: Mutex::new(None),
+            last_old_idx_access: AtomicU64::default(),
         };
         if core.filter_size() > 0 && load_filter {
             let filter = core.load_filter().unwrap();
@@ -217,10 +223,68 @@ impl SSTableCore {
         Ok(core)
     }
 
-    pub fn load_block(&self, pos: usize, buf: &mut Vec<u8>, fill_cache: bool) -> Result<Bytes> {
-        let addr = self.idx.get_block_addr(pos);
-        let length = if pos + 1 < self.idx.num_blocks() {
-            let next_addr = self.idx.get_block_addr(pos + 1);
+    pub fn load_index(&self) -> Arc<Index> {
+        let access = Instant::now_coarse().saturating_duration_since(self.open_at);
+        self.last_idx_access.store(access.as_secs(), Relaxed);
+        let mut guard = self.idx.lock().unwrap();
+        if guard.is_none() {
+            let idx_data = self
+                .file
+                .read(
+                    self.start_off + self.footer.index_offset as u64,
+                    self.footer.index_len(),
+                )
+                .unwrap();
+            let idx = Index::new(idx_data, self.footer.checksum_type).unwrap();
+            *guard = Some(Arc::new(idx));
+        }
+        guard.as_ref().unwrap().clone()
+    }
+
+    pub fn load_old_index(&self) -> Arc<Index> {
+        let access = Instant::now_coarse().saturating_duration_since(self.open_at);
+        self.last_idx_access.store(access.as_secs(), Relaxed);
+        let mut guard = self.old_idx.lock().unwrap();
+        if guard.is_none() {
+            let old_idx_data = self
+                .file
+                .read(
+                    self.start_off + self.footer.old_index_offset as u64,
+                    self.footer.old_index_len(),
+                )
+                .unwrap();
+            let old_idx = Index::new(old_idx_data, self.footer.checksum_type).unwrap();
+            *guard = Some(Arc::new(old_idx));
+        }
+        guard.as_ref().unwrap().clone()
+    }
+
+    pub fn expire_index(&self) {
+        let now = Instant::now_coarse()
+            .saturating_duration_since(self.open_at)
+            .as_secs();
+        let last_idx_access = self.last_idx_access.load(Relaxed);
+        if last_idx_access > 0 && now.saturating_sub(last_idx_access) > IDX_TTL {
+            self.idx.lock().unwrap().take();
+            self.last_idx_access.store(0, Relaxed);
+        }
+        let last_old_idx_access = self.last_old_idx_access.load(Relaxed);
+        if last_old_idx_access > 0 && now.saturating_sub(last_old_idx_access) > IDX_TTL {
+            self.old_idx.lock().unwrap().take();
+            self.last_old_idx_access.store(0, Relaxed);
+        }
+    }
+
+    pub fn load_block(
+        &self,
+        idx: &Index,
+        pos: usize,
+        buf: &mut Vec<u8>,
+        fill_cache: bool,
+    ) -> Result<Bytes> {
+        let addr = idx.get_block_addr(pos);
+        let length = if pos + 1 < idx.num_blocks() {
+            let next_addr = idx.get_block_addr(pos + 1);
             (next_addr.curr_off - addr.curr_off) as usize
         } else {
             self.start_off as usize + self.footer.data_len() - addr.curr_off as usize
@@ -301,10 +365,16 @@ impl SSTableCore {
         }
     }
 
-    pub fn load_old_block(&self, pos: usize, buf: &mut Vec<u8>, fill_cache: bool) -> Result<Bytes> {
-        let addr = self.old_idx.get_block_addr(pos);
-        let length = if pos + 1 < self.old_idx.num_blocks() {
-            let next_addr = self.old_idx.get_block_addr(pos + 1);
+    pub fn load_old_block(
+        &self,
+        old_idx: &Index,
+        pos: usize,
+        buf: &mut Vec<u8>,
+        fill_cache: bool,
+    ) -> Result<Bytes> {
+        let addr = old_idx.get_block_addr(pos);
+        let length = if pos + 1 < old_idx.num_blocks() {
+            let next_addr = old_idx.get_block_addr(pos + 1);
             (next_addr.curr_off - addr.curr_off) as usize
         } else {
             self.footer.index_offset as usize - addr.curr_off as usize
@@ -353,7 +423,21 @@ impl SSTableCore {
     }
 
     pub fn index_size(&self) -> u64 {
-        self.idx.bin.len() as u64
+        (self.footer.index_len() + self.footer.old_index_len()) as u64
+    }
+
+    pub fn in_mem_index_size(&self) -> u64 {
+        let idx_in_mem = if self.last_idx_access.load(Relaxed) > 0 {
+            self.footer.index_len()
+        } else {
+            0
+        };
+        let old_idx_in_mem = if self.last_old_idx_access.load(Relaxed) > 0 {
+            self.footer.old_index_len()
+        } else {
+            0
+        };
+        (idx_in_mem + old_idx_in_mem) as u64
     }
 
     fn filter_offset(&self) -> u32 {
@@ -373,14 +457,15 @@ impl SSTableCore {
     }
 
     pub fn get_suggest_split_key(&self) -> Option<Bytes> {
-        let num_blocks = self.idx.num_blocks();
+        let idx = self.load_index();
+        let num_blocks = idx.num_blocks();
         if num_blocks <= 1 {
             return None;
         }
         let block_idx = num_blocks * 2 / 3;
-        let diff_key = self.idx.block_diff_key(block_idx);
+        let diff_key = idx.block_diff_key(block_idx);
         let mut split_key = BytesMut::new();
-        split_key.extend_from_slice(self.idx.common_prefix.chunk());
+        split_key.extend_from_slice(idx.common_prefix.chunk());
         split_key.extend_from_slice(diff_key);
         Some(split_key.freeze())
     }
@@ -392,7 +477,6 @@ impl SSTableCore {
 
 #[derive(Clone)]
 pub struct Index {
-    bin: Bytes,
     common_prefix: Bytes,
     block_key_offs: Bytes,
     block_addrs: Bytes,
@@ -400,8 +484,7 @@ pub struct Index {
 }
 
 impl Index {
-    fn new(bin: Bytes, checksum_type: u8) -> Result<Self> {
-        let mut data = bin.clone();
+    fn new(mut data: Bytes, checksum_type: u8) -> Result<Self> {
         validate_checksum(data.chunk(), checksum_type)?;
         let _checksum = data.get_u32_le();
         assert_eq!(data.get_u32_le(), INDEX_FORMAT_V1);
@@ -416,7 +499,6 @@ impl Index {
         let block_key_len = data.get_u32_le() as usize;
         let block_keys = data.slice(..block_key_len);
         Ok(Self {
-            bin,
             common_prefix,
             block_key_offs,
             block_addrs,
