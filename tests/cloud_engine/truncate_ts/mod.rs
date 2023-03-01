@@ -1,13 +1,11 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    collections::HashMap,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
-use api_version::ApiV2;
-use cse_ctl::truncate_ts::{request_truncate_ts_on_all_stores, wait_truncate_ts_finish};
+use cse_ctl::truncate_ts::{truncate_ts_with_cfg, TruncateTsConfig};
 use futures::executor::block_on;
 use pd_client::PdClient;
 use rand::Rng;
@@ -178,39 +176,23 @@ fn truncate_ts_and_verification(context: Arc<Mutex<TruncateTsContext>>) {
 }
 
 fn execute_truncate_ts(client: &ClusterClient, ts: u64, keyspace_id: Option<u32>) {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(3)
-        .enable_all()
-        .build()
-        .unwrap();
-    let cluster_id = client.pd_client.get_cluster_id().unwrap();
-    let stores = client.pd_client.get_all_stores(true).unwrap();
-    let mut remain_stores = HashMap::new();
-    for store in stores {
-        remain_stores.insert(store.id, store);
-    }
-    let range = keyspace_id.map(|id| ApiV2::get_txn_keyspace_range(id));
-    let shard_cnt =
-        request_truncate_ts_on_all_stores(cluster_id, &remain_stores, ts, range, &runtime).unwrap();
-    info!("{} shards begin truncate ts to {}", shard_cnt, ts);
-
     let start = Instant::now();
-    wait_truncate_ts_finish(
-        &mut remain_stores,
+    let truncate_ts_cfg = TruncateTsConfig {
+        skip_resolve_lock: true,
+        ..Default::default()
+    };
+    truncate_ts_with_cfg(
+        truncate_ts_cfg,
+        client.pd_client.clone(),
         ts,
+        Duration::from_secs(30),
         keyspace_id,
-        &runtime,
-        Duration::from_millis(50),
     )
     .unwrap();
     info!(
         "Truncate ts takes {:?} ",
         Instant::now().duration_since(start)
     );
-
-    if !remain_stores.is_empty() {
-        panic!("Some stores failed to truncate ts, {:?}", remain_stores);
-    }
 }
 
 fn get_keyspace_prefix(keyspace_id: u32) -> Vec<u8> {

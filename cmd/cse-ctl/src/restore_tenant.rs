@@ -40,7 +40,6 @@ use crate::{
     pd_control::PdControl,
     restore::{get_cluster_backup_meta, RestoreConfig, RestoreKeyspaceArgs},
     step, step_error,
-    truncate_ts::{truncate_ts_with_cfg, TruncateTsConfig},
 };
 
 const WORKING_PATH_PREFIX: &str = "tenant-restore";
@@ -62,13 +61,7 @@ pub(crate) fn execute_restore_keyspace(args: RestoreKeyspaceArgs) {
 }
 
 fn execute_restore_keyspace_impl(args: &RestoreKeyspaceArgs) -> RestoreResult<()> {
-    let config: RestoreConfig = match std::fs::read(&args.config) {
-        Ok(data) => toml::from_slice(&data).unwrap(),
-        Err(err) => {
-            return Err(box_err!("failed to read config file {:?}", err));
-        }
-    };
-
+    let config: RestoreConfig = get_restore_keyspace_config_from_args(args);
     let pd_client: Arc<dyn PdClient> = Arc::new(create_pd_client(&config.security, &config.pd));
     let pd_control = PdControl::new(config.pd.clone(), config.security.clone());
 
@@ -161,27 +154,34 @@ pub fn restore_keyspace(
     // TODO: retry on EpochNotMatch from `get_target_regions`.
     let snapshots = cluster.generate_snapshots(target_shards);
     let snapshots_count = snapshots.len();
-    restore_snapshots(runtime, pd_client, snapshots)?;
+    restore_snapshots(runtime, pd_client.clone(), snapshots)?;
     step!("Restore {snapshots_count} regions");
 
-    // truncate ts
-    let truncate_ts_cfg = TruncateTsConfig {
-        pd: config.pd.clone(),
-        security: config.security.clone(),
-    };
-    if let Err(e) = truncate_ts_with_cfg(
-        truncate_ts_cfg,
-        cluster_backup.backup_ts,
-        Duration::from_secs(30),
-        Some(keyspace_id),
-    ) {
-        return Err(box_err!(
-            "Fail to truncate ts {} for keyspace {}, err {:?}",
-            cluster_backup.backup_ts,
-            keyspace_id,
-            e
-        ));
-    }
+    // // truncate ts
+    // let truncate_ts_cfg = TruncateTsConfig {
+    //     pd: config.pd.clone(),
+    //     security: config.security.clone(),
+    //     skip_resolve_lock: config.skip_resolve_lock,
+    // };
+    // if let Err(e) = truncate_ts_with_cfg(
+    //     truncate_ts_cfg,
+    //     pd_client,
+    //     cluster_backup.backup_ts,
+    //     Duration::from_secs(30),
+    //     Some(keyspace_id),
+    // ) {
+    //     return Err(box_err!(
+    //         "Fail to truncate ts {} for keyspace {}, err {:?}",
+    //         cluster_backup.backup_ts,
+    //         keyspace_id,
+    //         e
+    //     ));
+    // }
+    // step!(
+    //     "Truncate ts {} on keyspace {}",
+    //     cluster_backup.backup_ts,
+    //     keyspace_id
+    // );
 
     // untag deleted S3 files
 
@@ -1310,4 +1310,28 @@ mod tests {
             assert_eq!(aligned_regions, expected, "case: {}", case_idx);
         }
     }
+}
+
+pub fn get_restore_keyspace_config_from_args(args: &RestoreKeyspaceArgs) -> RestoreConfig {
+    let mut config = RestoreConfig::default();
+    if args.config.exists() {
+        let data = std::fs::read(args.config.clone()).expect("failed to read config file");
+        config = toml::from_slice(&data).unwrap();
+    }
+    // override from args and ENV
+    if !args.pd.is_empty() {
+        config.pd.endpoints = args.pd.split(',').map(|x| x.to_owned()).collect();
+    }
+    if args.cacert.exists() {
+        config.security.ca_path = args.cacert.to_str().unwrap().to_owned();
+    }
+    if args.cert.exists() {
+        config.security.cert_path = args.cert.to_str().unwrap().to_owned();
+    }
+    if args.key.exists() {
+        config.security.key_path = args.key.to_str().unwrap().to_owned();
+    }
+    config.dfs.override_from_env();
+    config.skip_resolve_lock = false;
+    config
 }

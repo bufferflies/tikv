@@ -1,7 +1,11 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    collections::HashMap, path::PathBuf, str::FromStr, sync::mpsc::SyncSender, time::Duration,
+    collections::HashMap,
+    path::PathBuf,
+    str::FromStr,
+    sync::{mpsc::SyncSender, Arc},
+    time::Duration,
 };
 
 use api_version::ApiV2;
@@ -55,8 +59,10 @@ pub struct TruncateTsArgs {
 
 pub fn execute_truncate_ts(args: TruncateTsArgs) {
     let config = get_truncate_ts_config_from_args(&args);
+    let pd_client = create_pd_client(&config.security, &config.pd);
     truncate_ts_with_cfg(
         config,
+        Arc::new(pd_client),
         args.truncate_ts,
         Duration::from_secs(args.timeout),
         None,
@@ -66,11 +72,11 @@ pub fn execute_truncate_ts(args: TruncateTsArgs) {
 
 pub fn truncate_ts_with_cfg(
     config: TruncateTsConfig,
+    pd_client: Arc<dyn PdClient>,
     truncate_ts: u64,
     timeout: Duration,
     keyspace_id: Option<u32>,
 ) -> Result<()> {
-    let pd_client = create_pd_client(&config.security, &config.pd);
     let cluster_id = pd_client.get_cluster_id()?;
     info!("Cluster {} begin truncate ts {}.", cluster_id, truncate_ts);
 
@@ -81,14 +87,16 @@ pub fn truncate_ts_with_cfg(
         .unwrap();
 
     let range = keyspace_id.map(|id| ApiV2::get_txn_keyspace_range(id));
-    if let Err(e) = runtime.block_on(resolve_async_commit_locks(&config, range.clone())) {
-        error!("resolve_async_commit_locks error: {:?}", e);
-        return Err(e);
+    if !config.skip_resolve_lock {
+        if let Err(e) = runtime.block_on(resolve_async_commit_locks(&config, range.clone())) {
+            error!("resolve_async_commit_locks error: {:?}", e);
+            return Err(e);
+        }
     }
 
     let start = Instant::now();
     while Instant::now().duration_since(start) < timeout {
-        let stores = get_all_stores_except_tiflash(&pd_client)?;
+        let stores = get_all_stores_except_tiflash(pd_client.as_ref())?;
         let mut remain_stores = HashMap::new();
         for store in stores {
             remain_stores.insert(store.id, store);
@@ -138,7 +146,7 @@ pub fn truncate_ts_with_cfg(
 }
 
 // send truncate ts request and return the count of shard which execute truncate ts.
-pub fn request_truncate_ts_on_all_stores(
+fn request_truncate_ts_on_all_stores(
     cluster_id: u64,
     stores: &HashMap<u64, Store>,
     truncate_ts: u64,
@@ -210,7 +218,7 @@ async fn request_truncate_ts_store(
 }
 
 // query max ts on all stores and remove the finished store in stores.
-pub fn wait_truncate_ts_finish(
+fn wait_truncate_ts_finish(
     stores: &mut HashMap<u64, Store>,
     truncate_ts: u64,
     keyspace_id: Option<u32>,
@@ -339,6 +347,7 @@ async fn resolve_async_commit_locks(
 pub struct TruncateTsConfig {
     pub pd: pd_client::Config,
     pub security: SecurityConfig,
+    pub skip_resolve_lock: bool,
 }
 
 fn get_truncate_ts_config_from_args(args: &TruncateTsArgs) -> TruncateTsConfig {
@@ -360,5 +369,6 @@ fn get_truncate_ts_config_from_args(args: &TruncateTsArgs) -> TruncateTsConfig {
     if args.key.exists() {
         config.security.key_path = args.key.to_str().unwrap().to_owned();
     }
+    config.skip_resolve_lock = false;
     config
 }

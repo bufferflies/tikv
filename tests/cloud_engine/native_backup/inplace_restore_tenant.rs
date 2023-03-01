@@ -196,6 +196,7 @@ fn test_inplace_restore_tenant_impl(
     // Restore tenant.
     let config = restore::RestoreConfig {
         dfs: dfs_config.clone(),
+        skip_resolve_lock: true,
         ..Default::default()
     };
     restore_tenant::restore_keyspace(
