@@ -45,6 +45,7 @@ use tikv_util::{
     warn,
     worker::{LazyWorker, Scheduler},
     RingQueue,
+    store::{is_learner, find_peer},
 };
 use time::Timespec;
 
@@ -841,7 +842,7 @@ impl<'a> StoreMsgHandler<'a> {
                 "msg_type" => ?msg_type,
             );
 
-            let merge_target = if let Some(peer) = util::find_peer(region, from_store_id) {
+            let merge_target = if let Some(peer) = find_peer(region, from_store_id) {
                 // Maybe the target is promoted from learner to voter, but the follower
                 // doesn't know it. So we only compare peer id.
                 if peer.get_id() < msg.get_from_peer().get_id() {
@@ -873,7 +874,7 @@ impl<'a> StoreMsgHandler<'a> {
                 "current_region_epoch" => ?region_epoch,
                 "msg_type" => ?msg_type,
             );
-            if util::find_peer(region, from_store_id).is_none() {
+            if find_peer(region, from_store_id).is_none() {
                 self.ctx.handle_stale_msg(msg, region_epoch.clone(), None);
             } else {
                 let mut need_gc_msg = util::is_vote_msg(msg.get_message());
@@ -910,7 +911,7 @@ impl<'a> StoreMsgHandler<'a> {
         // In this case, the local epoch is stale and the local peer can be found from region.
         // We can compare the local peer id with to_peer_id to verify whether it is correct to create a new peer.
         if let Some(local_peer_id) =
-            util::find_peer(region, self.ctx.store_id()).map(|r| r.get_id())
+            find_peer(region, self.ctx.store_id()).map(|r| r.get_id())
         {
             if to_peer_id <= local_peer_id {
                 self.ctx.raft_metrics.message_dropped.region_tombstone_peer.inc();
@@ -1357,7 +1358,7 @@ impl<'a> StoreMsgHandler<'a> {
             // until new leader elected, but we can't revert this operation
             // because its result is already persisted in apply worker
             // TODO: should we transfer leader here?
-            let demote_self = util::is_learner(&peer_fsm.peer.peer);
+            let demote_self = is_learner(&peer_fsm.peer.peer);
             if remove_self || demote_self {
                 warn!(
                     "Removing or demoting leader";

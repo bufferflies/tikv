@@ -11,6 +11,7 @@ use rfengine::{
     raft_state_key, region_state_key, KV_ENGINE_META_KEY, PREPARE_BOOTSTRAP_KEY, STORE_IDENT_KEY,
 };
 use tikv_util::box_err;
+use tikv_util::store::new_peer;
 
 use super::peer_storage::{write_initial_raft_state, INIT_EPOCH_CONF_VER, INIT_EPOCH_VER};
 use crate::{
@@ -27,7 +28,7 @@ pub fn initial_region(store_id: u64, region_id: u64, peer_id: u64) -> metapb::Re
     region.set_end_key(EMPTY_KEY.to_vec());
     region.mut_region_epoch().set_version(INIT_EPOCH_VER);
     region.mut_region_epoch().set_conf_ver(INIT_EPOCH_CONF_VER);
-    region.mut_peers().push(util::new_peer(store_id, peer_id));
+    region.mut_peers().push(new_peer(store_id, peer_id));
     region
 }
 

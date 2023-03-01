@@ -33,8 +33,8 @@ use prometheus::local::LocalHistogram;
 use raft::{eraftpb::ConfChangeType, StateRole};
 use raftstore::store::{
     util,
-    util::{find_peer, ConfChangeKind},
-    QueryStats, ReadStats, TxnExt, WriteStats,
+    util::ConfChangeKind,
+    ReadStats, TxnExt, WriteStats,
 };
 use tikv_util::{
     debug, error, info,
@@ -43,6 +43,7 @@ use tikv_util::{
     topn::TopN,
     warn,
     worker::{Runnable, Scheduler},
+    store::{QueryStats, find_peer},
 };
 use yatp::Remote;
 
@@ -88,7 +89,6 @@ pub struct HeartbeatTask {
     pub pending_peers: Vec<metapb::Peer>,
     pub written_bytes: u64,
     pub written_keys: u64,
-    pub written_query_stats: QueryStats,
     pub approximate_size: u64,
     pub approximate_keys: u64,
     pub approximate_kv_size: u64,

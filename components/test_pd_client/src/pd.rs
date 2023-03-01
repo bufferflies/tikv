@@ -1521,7 +1521,7 @@ impl PdClient for TestPdClient {
                     .await
                     .unwrap();
                 if let Some(region) = self.cluster.rl().get_region(data_key(key)) {
-                    if check_key_in_region(key, &region).is_ok() {
+                    if check_key_in_region(key, &region) {
                         return Ok(region);
                     }
                 }

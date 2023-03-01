@@ -1,15 +1,9 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{collections::BTreeMap, ops::Deref};
+use std::path::Path;
 
-use engine_traits::{
-    CfNamesExt, CfOptionsExt, CompactExt, CompactedEvent, DbOptions, DbOptionsExt, DbVector,
-    DeleteStrategy, FlowControlFactorsExt, ImportExt, IngestExternalFileOptions, IterOptions,
-    Iterable, KvEngine, MiscExt, Mutable, MvccProperties, MvccPropertiesExt, Peekable, PerfContext,
-    PerfContextExt, PerfContextKind, PerfLevel, Range, RangePropertiesExt, ReadOptions,
-    Snapshot, SstCompressionType, SstExt, SstWriterBuilder, SyncMutable, TablePropertiesExt,
-    TitanCfOptions, TtlProperties, TtlPropertiesExt, WriteBatchExt, WriteOptions,
-};
+use engine_traits::{CfNamesExt, CfOptionsExt, CompactExt, CompactedEvent, DbOptions, DbOptionsExt, DbVector, DeleteStrategy, FlowControlFactorsExt, ImportExt, IngestExternalFileOptions, IterOptions, Iterable, KvEngine, MiscExt, Mutable, MvccProperties, MvccPropertiesExt, Peekable, PerfContext, PerfContextExt, PerfContextKind, PerfLevel, Range, RangePropertiesExt, ReadOptions, Snapshot, SstCompressionType, SstExt, SstWriterBuilder, SyncMutable, TablePropertiesExt, TitanCfOptions, TtlProperties, TtlPropertiesExt, WriteBatchExt, WriteOptions, Checkpointable, Checkpointer};
 
 use crate::*;
 
@@ -181,6 +175,27 @@ impl Deref for EngineDbVector {
 impl<'a> PartialEq<&'a [u8]> for EngineDbVector {
     fn eq(&self, rhs: &&[u8]) -> bool {
         **rhs == **self
+    }
+}
+
+impl Checkpointable for Engine {
+    type Checkpointer = EngineCheckpointer;
+
+    fn new_checkpointer(&self) -> engine_traits::Result<Self::Checkpointer> {
+        panic!()
+    }
+}
+
+pub struct EngineCheckpointer;
+
+impl Checkpointer for EngineCheckpointer {
+    fn create_at(
+        &mut self,
+        db_out_dir: &Path,
+        titan_out_dir: Option<&Path>,
+        log_size_for_flush: u64,
+    ) -> engine_traits::Result<()> {
+        panic!()
     }
 }
 

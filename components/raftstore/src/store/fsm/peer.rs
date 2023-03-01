@@ -2705,6 +2705,7 @@ where
             ExtraMessageType::MsgAvailabilityResponse => {
                 self.on_availability_response(msg.get_from_peer(), msg.get_extra_msg());
             }
+            _ => todo!()
         }
     }
 

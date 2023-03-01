@@ -240,7 +240,7 @@ pub fn initial_metric(cfg: &MetricConfig) {
 // Some metrics not applicable for cloud engine but will be checked by some test,
 // set initial values to make checker pass.
 fn write_empty_metrics_for_metrics_checker() {
-    raftstore::store::metrics::APPLY_PERF_CONTEXT_TIME_HISTOGRAM_STATIC
+    engine_rocks::APPLY_PERF_CONTEXT_TIME_HISTOGRAM_STATIC
         .db_mutex_lock_nanos
         .observe(0.0);
     engine_rocks::rocks_metrics::STORE_ENGINE_NUM_SNAPSHOTS_GAUGE_VEC

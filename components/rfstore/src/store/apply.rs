@@ -35,9 +35,9 @@ use raftstore::store::{
     metrics::*,
     util,
     util::{ChangePeerI, ConfChangeKind},
-    QueryStats,
 };
 use tikv_util::{box_err, error, info, time::Instant, warn};
+use tikv_util::store::{remove_peer, find_peer_mut, find_peer, new_peer};
 use time::Timespec;
 use txn_types::LockType;
 
@@ -1608,7 +1608,7 @@ pub(crate) fn region_apply_conf_change(
         let (change_type, peer) = (cp.get_change_type(), cp.get_peer());
         let store_id = peer.get_store_id();
 
-        if let Some(exist_peer) = util::find_peer(&region, store_id) {
+        if let Some(exist_peer) = find_peer(&region, store_id) {
             let r = exist_peer.get_role();
             if r == PeerRole::IncomingVoter || r == PeerRole::DemotingVoter {
                 panic!(
@@ -1617,7 +1617,7 @@ pub(crate) fn region_apply_conf_change(
                 );
             }
         }
-        match (util::find_peer_mut(&mut region, store_id), change_type) {
+        match (find_peer_mut(&mut region, store_id), change_type) {
             (None, ConfChangeType::AddNode) => {
                 let mut peer = peer.clone();
                 match kind {
@@ -1703,7 +1703,7 @@ pub(crate) fn region_apply_conf_change(
                         old_region
                     ));
                 }
-                match util::remove_peer(&mut region, store_id) {
+                match remove_peer(&mut region, store_id) {
                     Some(p) => {
                         if &p != peer {
                             error!(
@@ -1782,7 +1782,6 @@ pub struct ApplyMetrics {
     pub approximate_size: u64,
     pub written_bytes: u64,
     pub written_keys: u64,
-    pub written_query_stats: QueryStats,
     pub lock_cf_written_bytes: u64,
 }
 

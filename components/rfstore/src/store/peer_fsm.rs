@@ -25,7 +25,8 @@ use pd_client::{new_bucket_write_stats, BucketMeta, BucketStat};
 use protobuf::Message;
 use raft::{self, eraftpb::MessageType, GetEntriesContext, Storage};
 use raft_proto::eraftpb;
-use raftstore::store::{util, util::is_learner};
+use raftstore::store::util;
+use tikv_util::store::{is_learner, find_peer, region_on_same_stores};
 use rand::{thread_rng, Rng};
 use tikv_util::{box_err, debug, error, info, time::duration_to_sec, trace, warn};
 use txn_types::{Key, WriteBatchFlags};
@@ -74,7 +75,7 @@ impl PeerFsm {
         engines: Engines,
         region: &metapb::Region,
     ) -> Result<PeerFsm> {
-        let meta_peer = match util::find_peer(region, store_id) {
+        let meta_peer = match find_peer(region, store_id) {
             None => {
                 return Err(box_err!(
                     "find no peer for store {} in region {:?}",
@@ -301,7 +302,7 @@ impl<'a> PeerMsgHandler<'a> {
     fn on_significant_msg(&mut self, msg: SignificantMsg) {
         match msg {
             SignificantMsg::StoreUnreachable { store_id } => {
-                if let Some(peer_id) = util::find_peer(self.region(), store_id).map(|p| p.get_id())
+                if let Some(peer_id) = find_peer(self.region(), store_id).map(|p| p.get_id())
                 {
                     if self.fsm.peer.is_leader() {
                         self.fsm.peer.raft_group.report_unreachable(peer_id);
@@ -579,7 +580,7 @@ impl<'a> PeerMsgHandler<'a> {
         // tell 2 is stale, so 2 can remove itself.
         if util::is_epoch_stale(from_epoch, self.fsm.peer.region().get_region_epoch())
             && self.peer.is_initialized()
-            && util::find_peer(self.fsm.peer.region(), from_store_id).is_none()
+            && find_peer(self.fsm.peer.region(), from_store_id).is_none()
         {
             self.ctx
                 .handle_stale_msg(msg, self.fsm.peer.region().get_region_epoch().clone(), None);
@@ -742,7 +743,7 @@ impl<'a> PeerMsgHandler<'a> {
                     region
                 ));
             }
-            if !util::region_on_same_stores(target_region, region) {
+            if !region_on_same_stores(target_region, region) {
                 return Err(box_err!(
                     "peers doesn't match {:?} != {:?}, reject merge",
                     region.get_peers(),
@@ -789,7 +790,7 @@ impl<'a> PeerMsgHandler<'a> {
                     region
                 ));
             }
-            if !util::region_on_same_stores(source_region, region) {
+            if !region_on_same_stores(source_region, region) {
                 return Err(box_err!(
                     "peers not matched: {:?} {:?}",
                     source_region,
@@ -1645,7 +1646,7 @@ impl<'a> PeerMsgHandler<'a> {
     /// If everything is ok, the answer should always be true because PD should ensure all target peers exist.
     /// So if not, error log will be printed and return false.
     fn is_merge_target_region_stale(&self, target_region: &metapb::Region) -> Result<bool> {
-        let target_peer_id = util::find_peer(target_region, self.ctx.store_id())
+        let target_peer_id = find_peer(target_region, self.ctx.store_id())
             .unwrap()
             .get_id();
         if let Some(target_state) =
@@ -1659,7 +1660,7 @@ impl<'a> PeerMsgHandler<'a> {
             // In the case where the peer is destroyed by receiving gc msg rather than applying conf change,
             // the epoch may staler but it's legal, so check peer id to assure that.
             if let Some(local_target_peer_id) =
-                util::find_peer(target_state.get_region(), self.ctx.store_id()).map(|r| r.get_id())
+                find_peer(target_state.get_region(), self.ctx.store_id()).map(|r| r.get_id())
             {
                 match local_target_peer_id.cmp(&target_peer_id) {
                     cmp::Ordering::Equal => {
@@ -1786,7 +1787,7 @@ impl<'a> PeerMsgHandler<'a> {
             let target_id = expect_region.get_id();
             let sibling_region = expect_region;
 
-            let sibling_peer = util::find_peer(sibling_region, self.store_id()).unwrap();
+            let sibling_peer = find_peer(sibling_region, self.store_id()).unwrap();
             let mut request = new_admin_request(sibling_region.get_id(), sibling_peer.clone());
             request
                 .mut_header()

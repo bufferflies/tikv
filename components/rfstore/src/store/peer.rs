@@ -45,7 +45,7 @@ use raftstore::{
             admin_cmd_epoch_lookup, is_epoch_stale, is_initial_msg, AdminCmdEpochState,
             ChangePeerI, ConfChangeKind, Lease, LeaseState,
         },
-        QueryStats, TxnExt,
+        TxnExt,
     },
 };
 use rfengine::KV_ENGINE_META_KEY;
@@ -55,6 +55,7 @@ use tikv_util::{
     warn,
     worker::Scheduler,
     Either,
+    store::QueryStats,
 };
 use time::Timespec;
 use uuid::Uuid;
@@ -210,7 +211,6 @@ pub struct PeerStat {
     pub approximate_size: u64,
     pub approximate_keys: u64,
     pub approximate_kv_size: u64,
-    pub written_query_stats: QueryStats,
 }
 
 pub struct ProposedAdminCmd {
@@ -1274,7 +1274,6 @@ impl Peer {
             pending_peers: self.collect_pending_peers(),
             written_bytes: self.peer_stat.written_bytes,
             written_keys: self.peer_stat.written_keys,
-            written_query_stats: self.peer_stat.written_query_stats.clone(),
             approximate_size: self.peer_stat.approximate_size,
             approximate_keys: self.peer_stat.approximate_keys,
             approximate_kv_size: self.peer_stat.approximate_kv_size,

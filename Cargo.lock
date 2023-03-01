@@ -53,6 +53,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ahash"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57e6e951cfbb2db8de1828d49073a113a29fd7117b1596caa781a258c7e38d72"
+dependencies = [
+ "cfg-if 1.0.0",
+ "getrandom 0.2.3",
+ "once_cell",
+ "version_check 0.9.4",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "0.7.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -554,7 +566,7 @@ dependencies = [
  "concurrency_manager",
  "crossbeam",
  "crossbeam-channel",
- "dashmap 5.1.0",
+ "dashmap 5.2.0",
  "engine_panic",
  "engine_rocks",
  "engine_traits",
@@ -1184,8 +1196,7 @@ dependencies = [
 [[package]]
 name = "cmake"
 version = "0.1.49"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "db34956e100b30725f2eb215f90d4871051239535632f84fea3bc92722c66b7c"
+source = "git+https://github.com/rust-lang/cmake-rs#07cbf8fd36168b8a5dc9e107f6e659130dbcdd30"
 dependencies = [
  "cc",
 ]
@@ -1370,7 +1381,7 @@ dependencies = [
  "cfg-if 1.0.0",
  "crossbeam-channel",
  "crossbeam-deque",
- "crossbeam-epoch",
+ "crossbeam-epoch 0.9.13",
  "crossbeam-queue",
  "crossbeam-utils 0.8.8",
 ]
@@ -1397,6 +1408,19 @@ dependencies = [
 
 [[package]]
 name = "crossbeam-epoch"
+version = "0.9.10"
+source = "git+https://github.com/crossbeam-rs/crossbeam?rev=41ed3d948720f26149b2ebeaf58fe8a193134056#41ed3d948720f26149b2ebeaf58fe8a193134056"
+dependencies = [
+ "autocfg",
+ "cfg-if 1.0.0",
+ "crossbeam-utils 0.8.11",
+ "memoffset 0.6.4",
+ "once_cell",
+ "scopeguard",
+]
+
+[[package]]
+name = "crossbeam-epoch"
 version = "0.9.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "01a9af1f4c2ef74bb8aa1f7e19706bc72d03598c8a570bb5de72243c7a9d9d5a"
@@ -1405,19 +1429,6 @@ dependencies = [
  "cfg-if 1.0.0",
  "crossbeam-utils 0.8.8",
  "memoffset 0.7.1",
- "scopeguard",
-]
-
-[[package]]
-name = "crossbeam-epoch"
-version = "0.9.10"
-source = "git+https://github.com/crossbeam-rs/crossbeam?rev=41ed3d948720f26149b2ebeaf58fe8a193134056#41ed3d948720f26149b2ebeaf58fe8a193134056"
-dependencies = [
- "autocfg",
- "cfg-if 1.0.0",
- "crossbeam-utils 0.8.11",
- "memoffset",
- "once_cell",
  "scopeguard",
 ]
 
@@ -1438,7 +1449,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "883a5821d7d079fcf34ac55f27a833ee61678110f6b97637cc74513c0d0b42fc"
 dependencies = [
  "cfg-if 1.0.0",
- "crossbeam-epoch",
+ "crossbeam-epoch 0.9.13",
  "crossbeam-utils 0.8.8",
  "scopeguard",
 ]
@@ -1611,7 +1622,7 @@ version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bef552e6f588e446098f6ba40d89ac146c8c7b64aade83c051ee00bb5d2bc18d"
 dependencies = [
- "uuid 1.2.1",
+ "uuid 1.2.2",
 ]
 
 [[package]]
@@ -2701,7 +2712,7 @@ version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8c21d40587b92fa6a6c6e3c1bdbf87d75511db5672f9c93175574b3a00df1758"
 dependencies = [
- "ahash",
+ "ahash 0.7.4",
 ]
 
 [[package]]
@@ -2913,7 +2924,7 @@ version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "16d4bde3a7105e59c66a4104cfe9606453af1c7a0eac78cb7d5bc263eb762a70"
 dependencies = [
- "ahash",
+ "ahash 0.7.4",
  "atty",
  "indexmap",
  "itoa 1.0.1",
@@ -3595,7 +3606,7 @@ dependencies = [
  "async-io",
  "async-lock",
  "crossbeam-channel",
- "crossbeam-epoch",
+ "crossbeam-epoch 0.9.13",
  "crossbeam-utils 0.8.8",
  "futures-util",
  "num_cpus",
@@ -4811,13 +4822,46 @@ dependencies = [
 ]
 
 [[package]]
+name = "raft-engine"
+version = "0.3.0"
+source = "git+https://github.com/tikv/raft-engine.git#a0d29980f1448565a6d03f911ebb103c4266f1f4"
+dependencies = [
+ "byteorder",
+ "crc32fast",
+ "crossbeam",
+ "fail 0.5.0",
+ "fs2",
+ "hashbrown 0.12.0",
+ "hex 0.4.2",
+ "if_chain",
+ "lazy_static",
+ "libc 0.2.132",
+ "log",
+ "lz4-sys",
+ "nix 0.25.1",
+ "num-derive",
+ "num-traits",
+ "parking_lot 0.12.0",
+ "prometheus",
+ "prometheus-static-metric",
+ "protobuf",
+ "rayon",
+ "rhai",
+ "scopeguard",
+ "serde",
+ "serde_repr",
+ "strum 0.24.1",
+ "thiserror",
+]
+
+[[package]]
 name = "raft-engine-ctl"
 version = "0.3.0"
 source = "git+https://github.com/tikv/raft-engine.git#a0d29980f1448565a6d03f911ebb103c4266f1f4"
 dependencies = [
  "clap 3.2.22",
  "env_logger",
- "raft-engine 0.2.2",
+ "raft-engine 0.3.0 (git+https://github.com/tikv/raft-engine.git)",
 ]
 
 [[package]]
@@ -4843,7 +4887,7 @@ dependencies = [
  "online_config",
  "protobuf",
  "raft",
- "raft-engine 0.3.0",
+ "raft-engine 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde",
  "serde_derive",
  "slog",
@@ -4933,7 +4977,7 @@ dependencies = [
  "engine_test",
  "engine_traits",
  "error_code",
- "fail",
+ "fail 0.5.0",
  "file_system",
  "futures 0.3.15",
  "keys",
@@ -5400,11 +5444,12 @@ dependencies = [
 
 [[package]]
 name = "rhai"
-version = "1.4.1"
+version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "898b114d6cfa18af4593393fdc6c7437118e7e624d97f635fba8c75fd5c06f56"
+checksum = "6eec3a3db30f591ece18c66b3db4c9fa26f3bce20bc821c50550968361f84333"
 dependencies = [
- "ahash",
+ "ahash 0.8.0",
+ "bitflags",
  "instant",
  "num-traits",
  "rhai_codegen",
@@ -6135,11 +6180,13 @@ checksum = "2fd0db749597d91ff862fd1d55ea87f7855a744a8425a64695b6fca237d1dad1"
 
 [[package]]
 name = "smartstring"
-version = "0.2.10"
+version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e714dff2b33f2321fdcd475b71cec79781a692d846f37f415fb395a1d2bcd48e"
+checksum = "3fb72c633efbaa2dd666986505016c32c3044395ceaf881518399d2f4127ee29"
 dependencies = [
+ "autocfg",
  "static_assertions",
+ "version_check 0.9.4",
 ]
 
 [[package]]
@@ -6222,7 +6269,7 @@ version = "0.1.0"
 dependencies = [
  "api_version",
  "crc32fast",
- "dashmap 5.1.0",
+ "dashmap 5.2.0",
  "encryption",
  "engine_rocks",
  "engine_traits",
@@ -6377,7 +6424,7 @@ dependencies = [
  "debugid",
  "memmap2",
  "stable_deref_trait",
- "uuid 1.2.1",
+ "uuid 1.2.2",
 ]
 
 [[package]]
@@ -7047,7 +7094,7 @@ dependencies = [
  "crc32fast",
  "crc64fast",
  "crossbeam",
- "dashmap",
+ "dashmap 5.2.0",
  "encryption_export",
  "engine_panic",
  "engine_rocks",
@@ -7056,7 +7103,7 @@ dependencies = [
  "engine_traits_tests",
  "error_code",
  "example_coprocessor_plugin",
- "fail",
+ "fail 0.5.0",
  "file_system",
  "flate2",
  "futures 0.3.15",
@@ -8450,7 +8497,7 @@ version = "0.0.1"
 source = "git+https://github.com/tikv/yatp.git?branch=master#39cb495953d40a7e846363c06090755c2eac65fa"
 dependencies = [
  "crossbeam-deque",
- "dashmap 5.1.0",
+ "dashmap 5.2.0",
  "fail 0.5.0",
  "lazy_static",
  "num_cpus",
