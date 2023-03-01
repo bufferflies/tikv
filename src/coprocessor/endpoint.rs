@@ -808,7 +808,6 @@ impl<E: Engine> Endpoint<E> {
     }
 }
 
-<<<<<<< HEAD
 pub fn parse_request_and_remote_analyze<S: 'static + Snapshot>(
     remote_req: RemoteAnalysisRequest,
     snap: S,

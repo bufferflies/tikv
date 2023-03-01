@@ -21,6 +21,7 @@ pub mod metrics;
 mod mock_engine;
 mod raft_extension;
 mod raftstore_impls;
+mod rfstore_impls;
 mod rocksdb_engine;
 mod stats;
 
@@ -51,7 +52,7 @@ use raftstore::store::{PessimisticLockPair, TxnExt};
 use thiserror::Error;
 use tikv_util::{deadline::Deadline, escape, time::ThreadReadId, timer::GLOBAL_TIMER_HANDLE};
 use tracker::with_tls_tracker;
-use txn_types::{Key, PessimisticLock, TimeStamp, TxnExtra, Value};
+use txn_types::{Key, PessimisticLock, ReqType, TimeStamp, TxnExtra, Value};
 
 pub use self::{
     btree_engine::{BTreeEngine, BTreeEngineIterator, BTreeEngineSnapshot},
@@ -250,6 +251,10 @@ impl WriteData {
 
     pub fn set_disk_full_opt(&mut self, level: DiskFullOpt) {
         self.disk_full_opt = level
+    }
+
+    pub fn set_req_type(&mut self, tp: ReqType) {
+        self.extra.req_type = tp;
     }
 }
 
@@ -472,6 +477,11 @@ pub trait Snapshot: Sync + Send + Clone {
     }
 
     fn ext(&self) -> Self::Ext<'_>;
+
+    /// Specific for KVEngine.
+    fn get_kvengine_snap(&self) -> Option<&kvengine::SnapAccess> {
+        None
+    }
 }
 
 pub trait SnapshotExt {

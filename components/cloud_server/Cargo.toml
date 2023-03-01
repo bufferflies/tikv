@@ -29,6 +29,7 @@ nortcheck = ["engine_rocks/nortcheck"]
 api_version = { path = "../api_version" }
 async-stream = "0.2"
 backup = { path = "../backup", default-features = false }
+backtrace = "0.3"
 bytes = "1.0"
 cdc = { path = "../cdc", default-features = false }
 chrono = "0.4"

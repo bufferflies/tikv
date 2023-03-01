@@ -148,6 +148,10 @@ impl RaftEngine for RfEngine {
         panic!()
     }
 
+    fn get_engine_path(&self) -> &str {
+        panic!()
+    }
+
     fn for_each_raft_group<E, F>(&self, _f: &mut F) -> std::result::Result<(), E>
     where
         F: FnMut(u64) -> std::result::Result<(), E>,

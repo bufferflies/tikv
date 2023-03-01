@@ -59,6 +59,8 @@ use serde::{
     Deserialize, Deserializer, Serialize, Serializer,
 };
 use serde_json::{to_value, Map, Value};
+use kvengine::dfs::DFSConfig;
+use rfengine::RfEngineConfig;
 use tikv_util::{
     config::{
         self, LogFormat, RaftDataStateMachine, ReadableDuration, ReadableSize, TomlWriter, GIB, MIB,
@@ -2882,6 +2884,9 @@ pub struct TikvConfig {
     #[online_config(skip)]
     pub memory_usage_high_water: f64,
 
+    #[online_config(skip)]
+    pub black_list_path: String,
+
     #[online_config(submodule)]
     pub log: LogConfig,
 
@@ -2923,6 +2928,9 @@ pub struct TikvConfig {
     pub raft_engine: RaftEngineConfig,
 
     #[online_config(skip)]
+    pub rfengine: RfEngineConfig,
+
+    #[online_config(skip)]
     pub security: SecurityConfig,
 
     #[online_config(skip)]
@@ -2956,6 +2964,9 @@ pub struct TikvConfig {
     pub resource_metering: ResourceMeteringConfig,
 
     #[online_config(skip)]
+    pub dfs: DFSConfig,
+
+    #[online_config(skip)]
     pub causal_ts: CausalTsConfig,
 }
 
@@ -2975,6 +2986,7 @@ impl Default for TikvConfig {
             abort_on_panic: false,
             memory_usage_limit: None,
             memory_usage_high_water: 0.9,
+            black_list_path: "".to_owned(),
             log: LogConfig::default(),
             quota: QuotaConfig::default(),
             readpool: ReadPoolConfig::default(),
@@ -2987,6 +2999,7 @@ impl Default for TikvConfig {
             rocksdb: DbConfig::default(),
             raftdb: RaftDbConfig::default(),
             raft_engine: RaftEngineConfig::default(),
+            rfengine: RfEngineConfig::default(),
             storage: StorageConfig::default(),
             security: SecurityConfig::default(),
             import: ImportConfig::default(),
@@ -2998,6 +3011,7 @@ impl Default for TikvConfig {
             resolved_ts: ResolvedTsConfig::default(),
             resource_metering: ResourceMeteringConfig::default(),
             backup_stream: BackupStreamConfig::default(),
+            dfs: DFSConfig::default(),
             causal_ts: CausalTsConfig::default(),
         }
     }
@@ -3065,13 +3079,6 @@ impl TikvConfig {
         if kv_db_wal_path == raft_db_wal_path {
             return Err("raftdb.wal_dir can't be same as rocksdb.wal_dir".into());
         }
-
-        RaftDataStateMachine::new(
-            &self.storage.data_dir,
-            &self.raft_store.raftdb_path,
-            &self.raft_engine.config.dir,
-        )
-        .validate(RocksEngine::exists(&kv_db_path))?;
 
         // Check blob file dir is empty when titan is disabled
         if !self.rocksdb.titan.enabled {

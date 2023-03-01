@@ -7,7 +7,7 @@ use std::{
 
 // #[PerformanceCriticalPath]
 use kvproto::kvrpcpb::ExtraOp;
-use txn_types::{insert_old_value_if_resolved, Key, OldValues};
+use txn_types::{insert_old_value_if_resolved, Key, OldValues, ReqType};
 
 use crate::storage::{
     lock_manager::{
@@ -179,7 +179,7 @@ impl<S: Snapshot, L: LockManager> WriteCommand<S, L> for AcquirePessimisticLockR
         }
 
         let pr = ProcessResult::PessimisticLockRes { res: Ok(res) };
-        let to_be_write = make_write_data(modifies, old_values);
+        let to_be_write = make_write_data(modifies, old_values, ReqType::PessimisticLock);
 
         Ok(WriteResult {
             ctx: self.ctx,

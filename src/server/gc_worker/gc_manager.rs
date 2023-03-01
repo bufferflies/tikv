@@ -14,6 +14,7 @@ use engine_traits::KvEngine;
 use kvproto::metapb::Region;
 use pd_client::FeatureGate;
 use raftstore::coprocessor::RegionInfoProvider;
+use raftstore::store::metrics::AUTO_GC_SAFE_POINT_GAUGE;
 use tikv_util::{store::find_peer, time::Instant, worker::Scheduler};
 use txn_types::{Key, TimeStamp};
 

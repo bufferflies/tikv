@@ -842,6 +842,7 @@ impl SstImporter {
     #[cfg(test)]
     fn download<E: KvEngine>(
         &self,
+        request_type: DownloadRequestType,
         meta: &SstMeta,
         backend: &StorageBackend,
         name: &str,
@@ -851,6 +852,7 @@ impl SstImporter {
         engine: E,
     ) -> Result<Option<Range>> {
         self.download_rt.block_on(self.download_ext(
+            request_type,
             meta,
             backend,
             name,
@@ -2801,7 +2803,6 @@ mod tests {
         }
     }
 
-<<<<<<< HEAD
     fn test_download_sst_in_keyspace_mode_impl(
         data: &[(&[u8], &[u8])],
         old_prefix: &[u8],
