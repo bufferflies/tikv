@@ -10,7 +10,7 @@ use std::{
     time::Duration,
 };
 
-use api_version::KvFormat;
+use api_version::{ApiV1, ApiV2, KvFormat};
 use collections::HashMap;
 use engine_traits::DummyFactory;
 use errors::{extract_key_error, extract_region_error};
@@ -30,7 +30,7 @@ use tikv::{
         self,
         config_manager::StorageConfigManger,
         kv::{Error as KvError, ErrorInner as KvErrorInner, SnapContext, SnapshotExt},
-        lock_manager::DummyLockManager,
+        lock_manager::MockLockManager,
         mvcc::{Error as MvccError, ErrorInner as MvccErrorInner},
         test_util::*,
         txn::{
@@ -53,9 +53,10 @@ fn test_scheduler_leader_change_twice() {
     let peers = region0.get_peers();
     cluster.must_transfer_leader(region0.get_id(), peers[0].clone());
     let engine0 = cluster.sim.rl().storages[&peers[0].get_id()].clone();
-    let storage0 = TestStorageBuilderApiV1::from_engine_and_lock_mgr(engine0, DummyLockManager)
-        .build()
-        .unwrap();
+    let storage0 =
+        TestStorageBuilderApiV1::from_engine_and_lock_mgr(engine0, MockLockManager::new())
+            .build()
+            .unwrap();
 
     let mut ctx0 = Context::default();
     ctx0.set_region_id(region0.get_id());
@@ -247,7 +248,7 @@ fn test_scale_scheduler_pool() {
         .get(&1)
         .unwrap()
         .clone();
-    let storage = TestStorageBuilderApiV1::from_engine_and_lock_mgr(engine, DummyLockManager)
+    let storage = TestStorageBuilderApiV1::from_engine_and_lock_mgr(engine, MockLockManager::new())
         .config(cluster.cfg.tikv.storage.clone())
         .build()
         .unwrap();
@@ -344,7 +345,7 @@ fn test_pipelined_pessimistic_lock() {
     let before_pipelined_write_finish_fp = "before_pipelined_write_finish";
 
     {
-        let storage = TestStorageBuilderApiV1::new(DummyLockManager)
+        let storage = TestStorageBuilderApiV1::new(MockLockManager::new())
             .pipelined_pessimistic_lock(false)
             .build()
             .unwrap();
@@ -371,7 +372,7 @@ fn test_pipelined_pessimistic_lock() {
         fail::remove(rockskv_write_modifies_fp);
     }
 
-    let storage = TestStorageBuilderApiV1::new(DummyLockManager)
+    let storage = TestStorageBuilderApiV1::new(MockLockManager::new())
         .pipelined_pessimistic_lock(true)
         .build()
         .unwrap();
@@ -388,7 +389,7 @@ fn test_pipelined_pessimistic_lock() {
             new_acquire_pessimistic_lock_command(vec![(key.clone(), false)], 10, 10, true, false),
             expect_pessimistic_lock_res_callback(
                 tx.clone(),
-                PessimisticLockRes::Values(vec![None]),
+                PessimisticLockResults(vec![PessimisticLockKeyResult::Value(None)]),
             ),
         )
         .unwrap();
@@ -451,7 +452,9 @@ fn test_pipelined_pessimistic_lock() {
                 ),
                 expect_pessimistic_lock_res_callback(
                     tx.clone(),
-                    PessimisticLockRes::Values(vec![Some(val.clone())]),
+                    PessimisticLockResults(vec![PessimisticLockKeyResult::Value(Some(
+                        val.clone(),
+                    ))]),
                 ),
             )
             .unwrap();
@@ -474,7 +477,7 @@ fn test_pipelined_pessimistic_lock() {
             new_acquire_pessimistic_lock_command(vec![(key.clone(), false)], 50, 50, true, false),
             expect_pessimistic_lock_res_callback(
                 tx.clone(),
-                PessimisticLockRes::Values(vec![Some(val.clone())]),
+                PessimisticLockResults(vec![PessimisticLockKeyResult::Value(Some(val.clone()))]),
             ),
         )
         .unwrap();
@@ -497,7 +500,10 @@ fn test_pipelined_pessimistic_lock() {
             ),
             expect_pessimistic_lock_res_callback(
                 tx,
-                PessimisticLockRes::Values(vec![Some(val), None]),
+                PessimisticLockResults(vec![
+                    PessimisticLockKeyResult::Value(Some(val)),
+                    PessimisticLockKeyResult::Value(None),
+                ]),
             ),
         )
         .unwrap();
@@ -508,10 +514,15 @@ fn test_pipelined_pessimistic_lock() {
 
 #[test]
 fn test_async_commit_prewrite_with_stale_max_ts() {
-    let mut cluster = new_server_cluster(0, 2);
+    test_async_commit_prewrite_with_stale_max_ts_impl::<ApiV1>();
+    test_async_commit_prewrite_with_stale_max_ts_impl::<ApiV2>();
+}
+
+fn test_async_commit_prewrite_with_stale_max_ts_impl<F: KvFormat>() {
+    let mut cluster = new_server_cluster_with_api_ver(0, 2, F::TAG);
     cluster.run();
 
-    let engine = cluster
+    let mut engine = cluster
         .sim
         .read()
         .unwrap()
@@ -519,10 +530,12 @@ fn test_async_commit_prewrite_with_stale_max_ts() {
         .get(&1)
         .unwrap()
         .clone();
-    let storage =
-        TestStorageBuilderApiV1::from_engine_and_lock_mgr(engine.clone(), DummyLockManager)
-            .build()
-            .unwrap();
+    let storage = TestStorageBuilder::<_, _, F>::from_engine_and_lock_mgr(
+        engine.clone(),
+        MockLockManager::new(),
+    )
+    .build()
+    .unwrap();
 
     // Fail to get timestamp from PD at first
     fail::cfg("test_raftstore_get_tso", "pause").unwrap();
@@ -531,6 +544,7 @@ fn test_async_commit_prewrite_with_stale_max_ts() {
 
     let mut ctx = Context::default();
     ctx.set_region_id(1);
+    ctx.set_api_version(F::TAG);
     ctx.set_region_epoch(cluster.get_region_epoch(1));
     ctx.set_peer(cluster.leader_of_region(1).unwrap());
 
@@ -540,15 +554,15 @@ fn test_async_commit_prewrite_with_stale_max_ts() {
         storage
             .sched_txn_command(
                 commands::Prewrite::new(
-                    vec![Mutation::make_put(Key::from_raw(b"k1"), b"v".to_vec())],
-                    b"k1".to_vec(),
+                    vec![Mutation::make_put(Key::from_raw(b"xk1"), b"v".to_vec())],
+                    b"xk1".to_vec(),
                     10.into(),
                     100,
                     false,
                     2,
                     TimeStamp::default(),
                     TimeStamp::default(),
-                    Some(vec![b"k2".to_vec()]),
+                    Some(vec![b"xk2".to_vec()]),
                     false,
                     AssertionLevel::Off,
                     ctx.clone(),
@@ -573,17 +587,17 @@ fn test_async_commit_prewrite_with_stale_max_ts() {
             .sched_txn_command(
                 commands::PrewritePessimistic::new(
                     vec![(
-                        Mutation::make_put(Key::from_raw(b"k1"), b"v".to_vec()),
+                        Mutation::make_put(Key::from_raw(b"xk1"), b"v".to_vec()),
                         DoPessimisticCheck,
                     )],
-                    b"k1".to_vec(),
+                    b"xk1".to_vec(),
                     10.into(),
                     100,
                     20.into(),
                     2,
                     TimeStamp::default(),
                     TimeStamp::default(),
-                    Some(vec![b"k2".to_vec()]),
+                    Some(vec![b"xk2".to_vec()]),
                     false,
                     AssertionLevel::Off,
                     ctx.clone(),
@@ -635,7 +649,7 @@ fn expect_locked(err: tikv::storage::Error, key: &[u8], lock_ts: TimeStamp) {
 }
 
 fn test_async_apply_prewrite_impl<E: Engine, F: KvFormat>(
-    storage: &Storage<E, DummyLockManager, F>,
+    storage: &Storage<E, MockLockManager, F>,
     ctx: Context,
     key: &[u8],
     value: &[u8],
@@ -819,7 +833,7 @@ fn test_async_apply_prewrite() {
         .get(&1)
         .unwrap()
         .clone();
-    let storage = TestStorageBuilderApiV1::from_engine_and_lock_mgr(engine, DummyLockManager)
+    let storage = TestStorageBuilderApiV1::from_engine_and_lock_mgr(engine, MockLockManager::new())
         .async_apply_prewrite(true)
         .build()
         .unwrap();
@@ -917,7 +931,7 @@ fn test_async_apply_prewrite_fallback() {
         .get(&1)
         .unwrap()
         .clone();
-    let storage = TestStorageBuilderApiV1::from_engine_and_lock_mgr(engine, DummyLockManager)
+    let storage = TestStorageBuilderApiV1::from_engine_and_lock_mgr(engine, MockLockManager::new())
         .async_apply_prewrite(true)
         .build()
         .unwrap();
@@ -979,7 +993,7 @@ fn test_async_apply_prewrite_fallback() {
 }
 
 fn test_async_apply_prewrite_1pc_impl<E: Engine, F: KvFormat>(
-    storage: &Storage<E, DummyLockManager, F>,
+    storage: &Storage<E, MockLockManager, F>,
     ctx: Context,
     key: &[u8],
     value: &[u8],
@@ -1106,7 +1120,7 @@ fn test_async_apply_prewrite_1pc() {
         .get(&1)
         .unwrap()
         .clone();
-    let storage = TestStorageBuilderApiV1::from_engine_and_lock_mgr(engine, DummyLockManager)
+    let storage = TestStorageBuilderApiV1::from_engine_and_lock_mgr(engine, MockLockManager::new())
         .async_apply_prewrite(true)
         .build()
         .unwrap();
@@ -1133,7 +1147,7 @@ fn test_atomic_cas_lock_by_latch() {
         .get(&1)
         .unwrap()
         .clone();
-    let storage = TestStorageBuilderApiV1::from_engine_and_lock_mgr(engine, DummyLockManager)
+    let storage = TestStorageBuilderApiV1::from_engine_and_lock_mgr(engine, MockLockManager::new())
         .build()
         .unwrap();
 
@@ -1178,6 +1192,7 @@ fn test_atomic_cas_lock_by_latch() {
             cb,
         )
         .unwrap();
+    thread::sleep(Duration::from_secs(1));
     assert!(acquire_flag.load(Ordering::Acquire));
     assert!(!acquire_flag_fail.load(Ordering::Acquire));
     acquire_flag.store(false, Ordering::Release);
@@ -1193,6 +1208,7 @@ fn test_atomic_cas_lock_by_latch() {
             cb,
         )
         .unwrap();
+    thread::sleep(Duration::from_secs(1));
     assert!(acquire_flag_fail.load(Ordering::Acquire));
     assert!(!acquire_flag.load(Ordering::Acquire));
     fail::remove(pending_cas_fp);
@@ -1219,7 +1235,7 @@ fn test_before_async_write_deadline() {
         .get(&1)
         .unwrap()
         .clone();
-    let storage = TestStorageBuilderApiV1::from_engine_and_lock_mgr(engine, DummyLockManager)
+    let storage = TestStorageBuilderApiV1::from_engine_and_lock_mgr(engine, MockLockManager::new())
         .build()
         .unwrap();
 
@@ -1251,7 +1267,7 @@ fn test_before_propose_deadline() {
     cluster.run();
 
     let engine = cluster.sim.read().unwrap().storages[&1].clone();
-    let storage = TestStorageBuilderApiV1::from_engine_and_lock_mgr(engine, DummyLockManager)
+    let storage = TestStorageBuilderApiV1::from_engine_and_lock_mgr(engine, MockLockManager::new())
         .build()
         .unwrap();
 
@@ -1284,7 +1300,7 @@ fn test_resolve_lock_deadline() {
     cluster.run();
 
     let engine = cluster.sim.read().unwrap().storages[&1].clone();
-    let storage = TestStorageBuilderApiV1::from_engine_and_lock_mgr(engine, DummyLockManager)
+    let storage = TestStorageBuilderApiV1::from_engine_and_lock_mgr(engine, MockLockManager::new())
         .build()
         .unwrap();
 

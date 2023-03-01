@@ -38,7 +38,6 @@ use kvproto::{
 use pd_client::PdClient;
 use protobuf::RepeatedField;
 use raft::eraftpb::ConfChangeType;
-pub use raftstore::store::util::{find_peer, new_learner_peer, new_peer};
 use raftstore::{
     store::{fsm::RaftRouter, *},
     RaftRouterCompactedEventSender, Result,
@@ -48,6 +47,7 @@ use server::server::ConfiguredRaftEngine;
 use tempfile::TempDir;
 use test_pd_client::TestPdClient;
 use tikv::{config::*, server::KvEngineFactoryBuilder, storage::point_key_range};
+pub use tikv_util::store::{find_peer, new_learner_peer, new_peer};
 use tikv_util::{config::*, escape, time::ThreadReadId, worker::LazyWorker, HandyRwLock};
 use txn_types::Key;
 
@@ -818,6 +818,35 @@ pub fn must_kv_read_equal(client: &TikvClient, ctx: Context, key: Vec<u8>, val: 
     assert_eq!(get_resp.take_value(), val);
 }
 
+// TODO: replace the redundant code
+pub fn complete_data_commit(client: &TikvClient, ctx: &Context, ts: u64, k: Vec<u8>, v: Vec<u8>) {
+    // Prewrite
+    let prewrite_start_version = ts + 1;
+    let mut mutation = Mutation::default();
+    mutation.set_op(Op::Put);
+    mutation.set_key(k.clone());
+    mutation.set_value(v.clone());
+    must_kv_prewrite(
+        client,
+        ctx.clone(),
+        vec![mutation],
+        k.clone(),
+        prewrite_start_version,
+    );
+    // Commit
+    let commit_version = ts + 2;
+    must_kv_commit(
+        client,
+        ctx.clone(),
+        vec![k.clone()],
+        prewrite_start_version,
+        commit_version,
+        commit_version,
+    );
+    // Get
+    must_kv_read_equal(client, ctx.clone(), k, v, ts + 3);
+}
+
 pub fn kv_read(client: &TikvClient, ctx: Context, key: Vec<u8>, ts: u64) -> GetResponse {
     let mut get_req = GetRequest::default();
     get_req.set_context(ctx);
@@ -1216,6 +1245,30 @@ pub fn must_raw_get(client: &TikvClient, ctx: Context, key: Vec<u8>) -> Option<V
     } else {
         Some(get_resp.value)
     }
+}
+
+pub fn must_flashback_to_version(
+    client: &TikvClient,
+    ctx: Context,
+    version: u64,
+    start_ts: u64,
+    commit_ts: u64,
+) {
+    let mut prepare_req = PrepareFlashbackToVersionRequest::default();
+    prepare_req.set_context(ctx.clone());
+    client
+        .kv_prepare_flashback_to_version(&prepare_req)
+        .unwrap();
+    let mut req = FlashbackToVersionRequest::default();
+    req.set_context(ctx);
+    req.set_start_ts(start_ts);
+    req.set_commit_ts(commit_ts);
+    req.version = version;
+    req.start_key = b"a".to_vec();
+    req.end_key = b"z".to_vec();
+    let resp = client.kv_flashback_to_version(&req).unwrap();
+    assert!(!resp.has_region_error());
+    assert!(resp.get_error().is_empty());
 }
 
 // A helpful wrapper to make the test logic clear

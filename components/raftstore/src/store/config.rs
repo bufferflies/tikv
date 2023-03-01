@@ -218,6 +218,14 @@ pub struct Config {
     pub dev_assert: bool,
     #[online_config(hidden)]
     pub apply_yield_duration: ReadableDuration,
+    /// yield the fsm when apply flushed data size exceeds this threshold.
+    /// the yield is check after commit, so the actual handled messages can be
+    /// bigger than the configed value.
+    // NOTE: the default value is much smaller than the default max raft batch msg size(0.2
+    // * raft_entry_max_size), this is intentional because in the common case, a raft entry
+    // is unlikely to exceed this threshold, but in case when raftstore is the bottleneck,
+    // we still allow big raft batch for better throughput.
+    pub apply_yield_write_size: ReadableSize,
 
     #[serde(with = "perf_level_serde")]
     #[online_config(skip)]
@@ -303,10 +311,20 @@ pub struct Config {
     #[doc(hidden)]
     pub long_uncommitted_base_threshold: ReadableDuration,
 
+    /// Max duration for the entry cache to be warmed up.
+    /// Set it to 0 to disable warmup.
+    pub max_entry_cache_warmup_duration: ReadableDuration,
+
     #[doc(hidden)]
     pub max_snapshot_file_raw_size: ReadableSize,
 
     pub unreachable_backoff: ReadableDuration,
+
+    #[doc(hidden)]
+    #[serde(skip_serializing)]
+    #[online_config(hidden)]
+    // Interval to check peers availability info.
+    pub check_peers_availability_interval: ReadableDuration,
 }
 
 impl Default for Config {
@@ -380,6 +398,7 @@ impl Default for Config {
             hibernate_regions: true,
             dev_assert: false,
             apply_yield_duration: ReadableDuration::millis(500),
+            apply_yield_write_size: ReadableSize::kb(32),
             perf_level: PerfLevel::Uninitialized,
             evict_cache_on_memory_ratio: 0.0,
             cmd_batch: true,
@@ -399,6 +418,7 @@ impl Default for Config {
             /// the log commit duration is less than 1s. Feel free to adjust
             /// this config :)
             long_uncommitted_base_threshold: ReadableDuration::secs(20),
+            max_entry_cache_warmup_duration: ReadableDuration::secs(1),
 
             // cloud engine configs
             local_file_gc_tick_interval: ReadableDuration::minutes(10),
@@ -415,6 +435,8 @@ impl Default for Config {
             report_region_buckets_tick_interval: ReadableDuration::secs(10),
             max_snapshot_file_raw_size: ReadableSize::mb(100),
             unreachable_backoff: ReadableDuration::secs(10),
+            // TODO: make its value reasonable
+            check_peers_availability_interval: ReadableDuration::secs(30),
         }
     }
 }
@@ -450,6 +472,11 @@ impl Config {
 
     pub fn raft_log_gc_size_limit(&self) -> ReadableSize {
         self.raft_log_gc_size_limit.unwrap()
+    }
+
+    #[inline]
+    pub fn warmup_entry_cache_enabled(&self) -> bool {
+        self.max_entry_cache_warmup_duration.0 != Duration::from_secs(0)
     }
 
     pub fn region_split_check_diff(&self) -> ReadableSize {
@@ -900,6 +927,9 @@ impl Config {
         CONFIG_RAFTSTORE_GAUGE
             .with_label_values(&["local_read_batch_size"])
             .set(self.local_read_batch_size as f64);
+        CONFIG_RAFTSTORE_GAUGE
+            .with_label_values(&["apply_yield_write_size"])
+            .set(self.apply_yield_write_size.0 as f64);
         CONFIG_RAFTSTORE_GAUGE
             .with_label_values(&["apply_max_batch_size"])
             .set(self.apply_batch_system.max_batch_size() as f64);

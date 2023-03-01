@@ -21,10 +21,11 @@ use kvproto::{
 };
 use raftstore::store::{util, ExtraStates, WriteTask};
 use slog::{debug, error, info};
+use tikv_util::store::find_peer;
 
 use crate::{
     batch::StoreContext,
-    fsm::{PeerFsm, Store, StoreFsmDelegate},
+    fsm::{PeerFsm, Store},
     raft::{Peer, Storage},
     router::PeerMsg,
 };
@@ -159,7 +160,7 @@ impl Store {
                 ctx.raft_metrics.message_dropped.region_tombstone_peer.inc();
                 return;
             }
-            if let Some(local_peer) = util::find_peer(local_state.get_region(), self.store_id()) {
+            if let Some(local_peer) = find_peer(local_state.get_region(), self.store_id()) {
                 if to_peer.id <= local_peer.get_id() {
                     ctx.raft_metrics.message_dropped.region_tombstone_peer.inc();
                     return;
@@ -181,7 +182,7 @@ impl Store {
             self.store_id(),
             region,
             ctx.engine.clone(),
-            ctx.log_fetch_scheduler.clone(),
+            ctx.read_scheduler.clone(),
             &ctx.logger,
         )
         .and_then(|s| PeerFsm::new(&ctx.cfg, &*ctx.tablet_factory, s))

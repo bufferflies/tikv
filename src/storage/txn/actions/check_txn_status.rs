@@ -46,7 +46,7 @@ pub fn check_txn_status_lock_exists(
         // If the resolving and primary key lock are both pessimistic locks, just unlock
         // the primary pessimistic lock and do not write rollback records.
         return if resolving_pessimistic_lock && lock.lock_type == LockType::Pessimistic {
-            let released = txn.unlock_key(primary_key, is_pessimistic_txn);
+            let released = txn.unlock_key(primary_key, is_pessimistic_txn, TimeStamp::zero());
             MVCC_CHECK_TXN_STATUS_COUNTER_VEC.pessimistic_rollback.inc();
             Ok((TxnStatus::PessimisticRollBack, released))
         } else {
@@ -162,7 +162,7 @@ pub fn rollback_lock(
                 txn, key, write, lock, writes
             );
         }
-        _ => return Ok(txn.unlock_key(key, is_pessimistic_txn)),
+        _ => return Ok(txn.unlock_key(key, is_pessimistic_txn, TimeStamp::zero())),
     };
 
     // If prewrite type is DEL or LOCK or PESSIMISTIC, it is no need to delete
@@ -181,7 +181,7 @@ pub fn rollback_lock(
         collapse_prev_rollback(txn, reader, &key)?;
     }
 
-    Ok(txn.unlock_key(key, is_pessimistic_txn))
+    Ok(txn.unlock_key(key, is_pessimistic_txn, TimeStamp::zero()))
 }
 
 pub fn collapse_prev_rollback(

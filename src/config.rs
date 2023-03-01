@@ -31,12 +31,13 @@ use engine_rocks::{
         PrepopulateBlockCache,
     },
     util::{FixedPrefixSliceTransform, FixedSuffixSliceTransform, NoopSliceTransform},
-    RaftDbLogger, RangePropertiesCollectorFactory, RocksCfOptions, RocksDbOptions, RocksEngine,
-    RocksEventListener, RocksTitanDbOptions, RocksdbLogger, TtlPropertiesCollectorFactory,
-    DEFAULT_PROP_KEYS_INDEX_DISTANCE, DEFAULT_PROP_SIZE_INDEX_DISTANCE,
+    RaftDbLogger, RangePropertiesCollectorFactory, RawMvccPropertiesCollectorFactory,
+    RocksCfOptions, RocksDbOptions, RocksEngine, RocksEventListener, RocksTitanDbOptions,
+    RocksdbLogger, TtlPropertiesCollectorFactory, DEFAULT_PROP_KEYS_INDEX_DISTANCE,
+    DEFAULT_PROP_SIZE_INDEX_DISTANCE,
 };
 use engine_traits::{
-    CfOptions as _, CfOptionsExt, DbOptions as _, DbOptionsExt, TabletAccessor,
+    CfOptions as _, CfOptionsExt, DbOptions as _, DbOptionsExt, MiscExt, TabletAccessor,
     TabletErrorCollector, TitanCfOptions as _, CF_DEFAULT, CF_LOCK, CF_RAFT, CF_WRITE,
 };
 use file_system::IoRateLimiter;
@@ -101,7 +102,8 @@ const LOCKCF_MIN_MEM: usize = 256 * MIB as usize;
 const LOCKCF_MAX_MEM: usize = GIB as usize;
 const RAFT_MIN_MEM: usize = 256 * MIB as usize;
 const RAFT_MAX_MEM: usize = 2 * GIB as usize;
-const LAST_CONFIG_FILE: &str = "last_tikv.toml";
+/// Configs that actually took effect in the last run
+pub const LAST_CONFIG_FILE: &str = "last_tikv.toml";
 const TMP_CONFIG_FILE: &str = "tmp_tikv.toml";
 const MAX_BLOCK_SIZE: usize = 32 * MIB as usize;
 
@@ -677,6 +679,10 @@ impl DefaultCfConfig {
             prop_size_index_distance: self.prop_size_index_distance,
             prop_keys_index_distance: self.prop_keys_index_distance,
         };
+        cf_opts.add_table_properties_collector_factory(
+            "tikv.rawkv-mvcc-properties-collector",
+            RawMvccPropertiesCollectorFactory::default(),
+        );
         cf_opts.add_table_properties_collector_factory("tikv.range-properties-collector", f);
         match api_version {
             ApiVersion::V1 => {
@@ -2497,9 +2503,6 @@ pub struct BackupStreamConfig {
     pub initial_scan_pending_memory_quota: ReadableSize,
     #[online_config(skip)]
     pub initial_scan_rate_limit: ReadableSize,
-    #[serde(skip)]
-    #[online_config(skip)]
-    pub use_checkpoint_v3: bool,
 }
 
 impl BackupStreamConfig {
@@ -2532,7 +2535,6 @@ impl Default for BackupStreamConfig {
             file_size_limit: ReadableSize::mb(256),
             initial_scan_pending_memory_quota: ReadableSize(quota_size as _),
             initial_scan_rate_limit: ReadableSize::mb(60),
-            use_checkpoint_v3: true,
         }
     }
 }
@@ -2567,11 +2569,10 @@ pub struct CdcConfig {
     pub sink_memory_quota: ReadableSize,
     pub old_value_cache_memory_quota: ReadableSize,
 
-    /// Threshold of raw regions' resolved_ts outlier detection. 60s by default.
+    // Deprecated! preserved for compatibility check.
     #[online_config(skip)]
     #[doc(hidden)]
     pub raw_min_ts_outlier_threshold: ReadableDuration,
-    // Deprecated! preserved for compatibility check.
     #[online_config(skip)]
     #[doc(hidden)]
     #[serde(skip_serializing)]
@@ -4114,7 +4115,7 @@ mod tests {
         server::{config::ServerConfigManager, ttl::TtlCheckerTask},
         storage::{
             config_manager::StorageConfigManger,
-            lock_manager::DummyLockManager,
+            lock_manager::MockLockManager,
             txn::flow_controller::{EngineFlowController, FlowController},
             Storage, TestStorageBuilder,
         },
@@ -4504,7 +4505,7 @@ mod tests {
     fn new_engines<F: KvFormat>(
         cfg: TikvConfig,
     ) -> (
-        Storage<RocksDBEngine, DummyLockManager, F>,
+        Storage<RocksDBEngine, MockLockManager, F>,
         ConfigController,
         ReceiverWrapper<TtlCheckerTask>,
         Arc<FlowController>,
@@ -4523,7 +4524,7 @@ mod tests {
         )
         .unwrap();
         let storage =
-            TestStorageBuilder::<_, _, F>::from_engine_and_lock_mgr(engine, DummyLockManager)
+            TestStorageBuilder::<_, _, F>::from_engine_and_lock_mgr(engine, MockLockManager::new())
                 .config(cfg.storage.clone())
                 .build()
                 .unwrap();

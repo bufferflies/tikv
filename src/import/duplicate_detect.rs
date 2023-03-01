@@ -211,7 +211,7 @@ mod tests {
 
     use super::*;
     use crate::storage::{
-        lock_manager::{DummyLockManager, LockManager},
+        lock_manager::{LockManager, MockLockManager},
         txn::commands,
         Storage, TestStorageBuilderApiV1,
     };
@@ -322,7 +322,7 @@ mod tests {
 
     #[test]
     fn test_duplicate_detect() {
-        let storage = TestStorageBuilderApiV1::new(DummyLockManager)
+        let mut storage = TestStorageBuilderApiV1::new(MockLockManager::new())
             .build()
             .unwrap();
         let mut data = vec![];
@@ -380,7 +380,7 @@ mod tests {
     // (108,18) is not repeated with (108,10).
     #[test]
     fn test_duplicate_detect_incremental() {
-        let storage = TestStorageBuilderApiV1::new(DummyLockManager)
+        let mut storage = TestStorageBuilderApiV1::new(MockLockManager::new())
             .build()
             .unwrap();
         for &start in &[100, 104, 108, 112] {
@@ -441,7 +441,7 @@ mod tests {
 
     #[test]
     fn test_duplicate_detect_rollback_and_delete() {
-        let storage = TestStorageBuilderApiV1::new(DummyLockManager)
+        let mut storage = TestStorageBuilderApiV1::new(MockLockManager::new())
             .build()
             .unwrap();
         let data = vec![

@@ -33,7 +33,9 @@ make_auto_flush_static_metric! {
         commit_merge,
         rollback_merge,
         compact,
-        transfer_leader
+        transfer_leader,
+        prepare_flashback,
+        finish_flashback
     }
 
     pub label_enum AdminCmdStatus {
@@ -46,6 +48,7 @@ make_auto_flush_static_metric! {
         stale,
         decode,
         epoch,
+        cancel,
     }
 
     pub label_enum RegionHashType {
@@ -78,15 +81,10 @@ make_auto_flush_static_metric! {
         fetch_unused,
     }
 
-
-    pub label_enum RaftEventDurationType {
-        compact_check,
-        pd_store_heartbeat,
-        snap_gc,
-        compact_lock_cf,
-        consistency_check,
-        cleanup_import_sst,
-        raft_engine_purge,
+    pub label_enum WarmUpEntryCacheType {
+        started,
+        timeout,
+        finished,
     }
 
     pub label_enum CompactionGuardAction {
@@ -96,13 +94,14 @@ make_auto_flush_static_metric! {
         skip_partition,
     }
 
-    pub struct RaftEventDuration : LocalHistogram {
-        "type" => RaftEventDurationType
-    }
-
     pub struct RaftEntryFetches : LocalIntCounter {
         "type" => RaftEntryType
     }
+
+    pub struct WarmUpEntryCacheCounter : LocalIntCounter {
+        "type" => WarmUpEntryCacheType
+    }
+
     pub struct SnapCf : LocalHistogram {
         "type" => CfNames,
     }
@@ -202,7 +201,20 @@ make_static_metric! {
         region_not_initialized,
         is_applying_snapshot,
         force_leader,
-        flashback,
+        flashback_in_progress,
+        flashback_not_prepared
+    }
+
+    pub label_enum RaftEventDurationType {
+        compact_check,
+        pd_store_heartbeat,
+        snap_gc,
+        compact_lock_cf,
+        consistency_check,
+        cleanup_import_sst,
+        raft_engine_purge,
+        peer_msg,
+        store_msg,
     }
 
     pub label_enum RaftLogGcSkippedReason {
@@ -264,6 +276,10 @@ make_static_metric! {
 
     pub struct RaftInvalidProposalCounterVec : LocalIntCounter {
         "type" => RaftInvalidProposal
+    }
+
+    pub struct RaftEventDurationVec : LocalHistogram {
+        "type" => RaftEventDurationType
     }
 
     pub struct RaftLogGcSkippedCounterVec: LocalIntCounter {
@@ -613,6 +629,15 @@ lazy_static! {
             exponential_buckets(0.0005, 2.0, 21).unwrap()  // 500us ~ 8.7m
         ).unwrap();
 
+    pub static ref WARM_UP_ENTRY_CACHE_COUNTER_VEC: IntCounterVec =
+        register_int_counter_vec!(
+            "tikv_raftstore_prefill_entry_cache_total",
+            "Total number of prefill entry cache.",
+            &["type"]
+        ).unwrap();
+    pub static ref WARM_UP_ENTRY_CACHE_COUNTER: WarmUpEntryCacheCounter =
+        auto_flush_from!(WARM_UP_ENTRY_CACHE_COUNTER_VEC, WarmUpEntryCacheCounter);
+
     pub static ref LEADER_MISSING: IntGauge =
         register_int_gauge!(
             "tikv_raftstore_leader_missing",
@@ -640,8 +665,13 @@ lazy_static! {
             &["type"],
             exponential_buckets(0.001, 1.59, 20).unwrap() // max 10s
         ).unwrap();
-    pub static ref RAFT_EVENT_DURATION: RaftEventDuration =
-        auto_flush_from!(RAFT_EVENT_DURATION_VEC, RaftEventDuration);
+
+    pub static ref PEER_MSG_LEN: Histogram =
+        register_histogram!(
+            "tikv_raftstore_peer_msg_len",
+            "Length of peer msg.",
+            exponential_buckets(1.0, 2.0, 20).unwrap() // max 1000s
+        ).unwrap();
 
     pub static ref RAFT_READ_INDEX_PENDING_DURATION: Histogram =
         register_histogram!(
@@ -655,28 +685,6 @@ lazy_static! {
             "tikv_raftstore_read_index_pending",
             "Pending read index count."
         ).unwrap();
-
-    pub static ref APPLY_PERF_CONTEXT_TIME_HISTOGRAM: HistogramVec =
-        register_histogram_vec!(
-            "tikv_raftstore_apply_perf_context_time_duration_secs",
-            "Bucketed histogram of request wait time duration.",
-            &["type"],
-            exponential_buckets(0.00001, 2.0, 26).unwrap()
-        ).unwrap();
-
-    pub static ref STORE_PERF_CONTEXT_TIME_HISTOGRAM: HistogramVec =
-        register_histogram_vec!(
-            "tikv_raftstore_store_perf_context_time_duration_secs",
-            "Bucketed histogram of request wait time duration.",
-            &["type"],
-            exponential_buckets(0.00001, 2.0, 26).unwrap()
-        ).unwrap();
-
-    pub static ref APPLY_PERF_CONTEXT_TIME_HISTOGRAM_STATIC: PerfContextTimeDuration=
-        auto_flush_from!(APPLY_PERF_CONTEXT_TIME_HISTOGRAM, PerfContextTimeDuration);
-
-    pub static ref STORE_PERF_CONTEXT_TIME_HISTOGRAM_STATIC: PerfContextTimeDuration=
-        auto_flush_from!(STORE_PERF_CONTEXT_TIME_HISTOGRAM, PerfContextTimeDuration);
 
     pub static ref READ_QPS_TOPN: GaugeVec =
         register_gauge_vec!(
@@ -778,6 +786,12 @@ lazy_static! {
         "Sum of applying sst.",
         &["type"]
     ).unwrap();
+
+    pub static ref SNAPSHOT_LIMIT_GENERATE_BYTES: IntCounter = register_int_counter!(
+        "tikv_snapshot_limit_generate_bytes",
+        "Total snapshot generate limit used",
+    )
+    .unwrap();
 }
 
 lazy_static! {
