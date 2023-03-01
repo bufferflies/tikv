@@ -142,10 +142,22 @@ pub fn acquire_pessimistic_lock<S: Snapshot>(
                 None
             };
 
-        if need_load_value {
-            val = reader.get(&key, for_update_ts)?;
-        } else if need_check_existence {
-            val = reader.get_write(&key, for_update_ts)?.map(|_| vec![]);
+        if need_load_value || need_check_existence || should_not_exist {
+            let write = reader.get_write_with_commit_ts(&key, for_update_ts)?;
+            if let Some((write, commit_ts)) = write {
+                // Here `get_write_with_commit_ts` returns only the latest PUT if it exists and
+                // is not deleted. It's still ok to pass it into `check_data_constraint`.
+                // In case we are going to lock it with write conflict, we do not check it since
+                // the statement will then retry.
+                if locked_with_conflict_ts.is_none() {
+                    check_data_constraint(reader, should_not_exist, &write, commit_ts, &key)?;
+                }
+                if need_load_value {
+                    val = Some(reader.load_data(&key, write)?);
+                } else if need_check_existence {
+                    val = Some(vec![]);
+                }
+            }
         }
         // Pervious write is not loaded.
         let (prev_write_loaded, prev_write) = (false, None);
