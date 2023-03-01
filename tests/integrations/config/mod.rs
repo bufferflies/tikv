@@ -671,6 +671,7 @@ fn test_serde_custom_tikv_config() {
         scheduler_worker_pool_size: 1,
         scheduler_pending_write_threshold: ReadableSize::kb(123),
         reserve_space: ReadableSize::gb(10),
+        reserve_raft_space: ReadableSize::gb(2),
         enable_async_apply_prewrite: true,
         api_version: 1,
         enable_ttl: true,
@@ -764,6 +765,7 @@ fn test_serde_custom_tikv_config() {
         num_threads: 123,
         stream_channel_window: 123,
         import_mode_timeout: ReadableDuration::secs(1453),
+        memory_use_ratio: 0.3,
     };
     value.panic_when_unexpected_key_or_data = true;
     value.gc = GcConfig {
@@ -790,7 +792,6 @@ fn test_serde_custom_tikv_config() {
         tso_worker_threads: 2,
         old_value_cache_memory_quota: ReadableSize::mb(14),
         sink_memory_quota: ReadableSize::mb(7),
-        raw_min_ts_outlier_threshold: ReadableDuration::secs(60),
     };
     value.resolved_ts = ResolvedTsConfig {
         enable: true,

@@ -4,6 +4,8 @@
 mod backward;
 mod forward;
 
+use std::ops::Bound;
+
 use engine_traits::{CfName, CF_DEFAULT, CF_LOCK, CF_WRITE};
 use kvengine::WRITE_CF;
 use kvproto::kvrpcpb::{ExtraOp, IsolationLevel};
@@ -331,8 +333,8 @@ impl<S: Snapshot> ScannerConfig<S> {
             .range(lower, upper)
             .fill_cache(self.fill_cache)
             .scan_mode(scan_mode)
-            .hint_min_ts(hint_min_ts)
-            .hint_max_ts(hint_max_ts)
+            .hint_min_ts(hint_min_ts.map(|ts| Bound::Included(ts)))
+            .hint_max_ts(hint_max_ts.map(|ts| Bound::Included(ts)))
             .build()?;
         Ok(cursor)
     }

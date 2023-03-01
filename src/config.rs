@@ -42,7 +42,6 @@ use engine_traits::{
 };
 use file_system::IoRateLimiter;
 use keys::region_raft_prefix_len;
-use kvengine::dfs::DFSConfig;
 use kvproto::kvrpcpb::ApiVersion;
 use online_config::{ConfigChange, ConfigManager, ConfigValue, OnlineConfig, Result as CfgResult};
 use pd_client::Config as PdConfig;
@@ -54,7 +53,6 @@ use raftstore::{
     store::{CompactionGuardGeneratorFactory, Config as RaftstoreConfig, SplitConfig},
 };
 use resource_metering::Config as ResourceMeteringConfig;
-use rfengine::RfEngineConfig;
 use security::SecurityConfig;
 use serde::{
     de::{Error as DError, Unexpected},
@@ -115,8 +113,7 @@ fn memory_limit_for_cf(is_raft_db: bool, cf: &str, total_mem: u64) -> ReadableSi
         (false, CF_WRITE) => (0.15, 0, usize::MAX),
         _ => unreachable!(),
     };
-    let mut size = (total_mem as f64 * ratio) as usize;
-    size = size.clamp(min, max);
+    let size = ((total_mem as f64 * ratio) as usize).clamp(min, max);
     ReadableSize::mb(size as u64 / MIB)
 }
 
@@ -180,13 +177,13 @@ impl Default for TitanCfConfig {
 impl TitanCfConfig {
     fn build_opts(&self) -> RocksTitanDbOptions {
         let mut opts = RocksTitanDbOptions::new();
-        opts.set_min_blob_size(self.min_blob_size.0 as u64);
+        opts.set_min_blob_size(self.min_blob_size.0);
         opts.set_blob_file_compression(self.blob_file_compression.into());
         opts.set_blob_cache(self.blob_cache_size.0 as usize, -1, false, 0.0);
         opts.set_min_gc_batch_size(self.min_gc_batch_size.0);
         opts.set_max_gc_batch_size(self.max_gc_batch_size.0);
         opts.set_discardable_ratio(self.discardable_ratio);
-        opts.set_merge_small_file_threshold(self.merge_small_file_threshold.0 as u64);
+        opts.set_merge_small_file_threshold(self.merge_small_file_threshold.0);
         opts.set_blob_run_mode(self.blob_run_mode.into());
         opts.set_level_merge(self.level_merge);
         opts.set_range_merge(self.range_merge);
@@ -252,10 +249,7 @@ fn get_background_job_limits_impl(
     );
     // Cap max_sub_compactions to allow at least two compactions.
     let max_compactions = max_background_jobs - max_background_flushes;
-    let max_sub_compactions: u32 = cmp::max(
-        1,
-        cmp::min(defaults.max_sub_compactions, max_compactions - 1),
-    );
+    let max_sub_compactions: u32 = (max_compactions - 1).clamp(1, defaults.max_sub_compactions);
     // Maximum background GC threads for Titan
     let max_titan_background_gc = cmp::min(defaults.max_titan_background_gc, cpu_num);
 
@@ -1061,6 +1055,7 @@ pub struct DbConfig {
     pub rate_limiter_auto_tuned: bool,
     pub bytes_per_sync: ReadableSize,
     pub wal_bytes_per_sync: ReadableSize,
+    #[online_config(skip)]
     pub max_sub_compactions: u32,
     pub writable_file_max_buffer_size: ReadableSize,
     #[online_config(skip)]
@@ -1431,7 +1426,7 @@ impl Default for RaftDbConfig {
             info_log_keep_log_file_num: 10,
             info_log_dir: "".to_owned(),
             info_log_level: RocksLogLevel::Info,
-            max_sub_compactions: bg_job_limits.max_sub_compactions as u32,
+            max_sub_compactions: bg_job_limits.max_sub_compactions,
             writable_file_max_buffer_size: ReadableSize::mb(1),
             use_direct_io_for_flush_and_compaction: false,
             enable_pipelined_write: true,
@@ -1518,11 +1513,9 @@ pub struct RaftEngineConfig {
 
 impl Default for RaftEngineConfig {
     fn default() -> Self {
-        let mut config = RawRaftEngineConfig::default();
-        config.target_file_size = RaftEngineReadableSize::mb(512);
         Self {
             enable: true,
-            config,
+            config: RawRaftEngineConfig::default(),
         }
     }
 }
@@ -1772,14 +1765,6 @@ impl<T: TabletAccessor<RocksEngine> + Send + Sync> ConfigManager for DbConfigMan
         {
             let max_background_flushes = background_flushes_config.1.into();
             self.set_max_background_flushes(max_background_flushes)?;
-        }
-
-        if let Some(background_subcompactions_config) = change
-            .drain_filter(|(name, _)| name == "max_sub_compactions")
-            .next()
-        {
-            let max_subcompactions = background_subcompactions_config.1.into();
-            self.set_max_subcompactions(max_subcompactions)?;
         }
 
         if !change.is_empty() {
@@ -2468,12 +2453,13 @@ impl BackupConfig {
 
 impl Default for BackupConfig {
     fn default() -> Self {
+        let default_coprocessor = CopConfig::default();
         let cpu_num = SysQuota::cpu_cores_quota();
         Self {
             // use at most 50% of vCPU by default
             num_threads: (cpu_num * 0.5).clamp(1.0, 8.0) as usize,
             batch_size: 8,
-            sst_max_size: ReadableSize::mb(16),
+            sst_max_size: default_coprocessor.region_max_size(),
             enable_auto_tune: true,
             auto_tune_remain_threads: (cpu_num * 0.2).round() as usize,
             auto_tune_refresh_interval: ReadableDuration::secs(60),
@@ -2572,9 +2558,6 @@ pub struct CdcConfig {
     // Deprecated! preserved for compatibility check.
     #[online_config(skip)]
     #[doc(hidden)]
-    pub raw_min_ts_outlier_threshold: ReadableDuration,
-    #[online_config(skip)]
-    #[doc(hidden)]
     #[serde(skip_serializing)]
     pub old_value_cache_size: usize,
 }
@@ -2582,7 +2565,7 @@ pub struct CdcConfig {
 impl Default for CdcConfig {
     fn default() -> Self {
         Self {
-            min_ts_interval: ReadableDuration::secs(1),
+            min_ts_interval: ReadableDuration::millis(200),
             hibernate_regions_compatible: true,
             // 4 threads for incremental scan.
             incremental_scan_threads: 4,
@@ -2597,8 +2580,6 @@ impl Default for CdcConfig {
             sink_memory_quota: ReadableSize::mb(512),
             // 512MB memory for old value cache.
             old_value_cache_memory_quota: ReadableSize::mb(512),
-            // Trigger raw region outlier judgement if resolved_ts's lag is over 60s.
-            raw_min_ts_outlier_threshold: ReadableDuration::secs(60),
             // Deprecated! preserved for compatibility check.
             old_value_cache_size: 0,
         }
@@ -2639,14 +2620,6 @@ impl CdcConfig {
                 default_cfg.incremental_scan_ts_filter_ratio
             );
             self.incremental_scan_ts_filter_ratio = default_cfg.incremental_scan_ts_filter_ratio;
-        }
-        if self.raw_min_ts_outlier_threshold.is_zero() {
-            warn!(
-                "cdc.raw_min_ts_outlier_threshold should be larger than 0,
-                change it to {}",
-                default_cfg.raw_min_ts_outlier_threshold
-            );
-            self.raw_min_ts_outlier_threshold = default_cfg.raw_min_ts_outlier_threshold;
         }
         Ok(())
     }
@@ -2909,9 +2882,6 @@ pub struct TikvConfig {
     #[online_config(skip)]
     pub memory_usage_high_water: f64,
 
-    #[online_config(skip)]
-    pub black_list_path: String,
-
     #[online_config(submodule)]
     pub log: LogConfig,
 
@@ -2953,9 +2923,6 @@ pub struct TikvConfig {
     pub raft_engine: RaftEngineConfig,
 
     #[online_config(skip)]
-    pub rfengine: RfEngineConfig,
-
-    #[online_config(skip)]
     pub security: SecurityConfig,
 
     #[online_config(skip)]
@@ -2989,9 +2956,6 @@ pub struct TikvConfig {
     pub resource_metering: ResourceMeteringConfig,
 
     #[online_config(skip)]
-    pub dfs: DFSConfig,
-
-    #[online_config(skip)]
     pub causal_ts: CausalTsConfig,
 }
 
@@ -3023,8 +2987,6 @@ impl Default for TikvConfig {
             rocksdb: DbConfig::default(),
             raftdb: RaftDbConfig::default(),
             raft_engine: RaftEngineConfig::default(),
-            rfengine: RfEngineConfig::default(),
-            black_list_path: "".to_owned(),
             storage: StorageConfig::default(),
             security: SecurityConfig::default(),
             import: ImportConfig::default(),
@@ -3035,7 +2997,6 @@ impl Default for TikvConfig {
             cdc: CdcConfig::default(),
             resolved_ts: ResolvedTsConfig::default(),
             resource_metering: ResourceMeteringConfig::default(),
-            dfs: DFSConfig::default(),
             backup_stream: BackupStreamConfig::default(),
             causal_ts: CausalTsConfig::default(),
         }
@@ -3104,6 +3065,13 @@ impl TikvConfig {
         if kv_db_wal_path == raft_db_wal_path {
             return Err("raftdb.wal_dir can't be same as rocksdb.wal_dir".into());
         }
+
+        RaftDataStateMachine::new(
+            &self.storage.data_dir,
+            &self.raft_store.raftdb_path,
+            &self.raft_engine.config.dir,
+        )
+        .validate(RocksEngine::exists(&kv_db_path))?;
 
         // Check blob file dir is empty when titan is disabled
         if !self.rocksdb.titan.enabled {
@@ -3447,18 +3415,18 @@ impl TikvConfig {
                     + self.raftdb.defaultcf.block_cache_size.0,
             ));
         }
-        if self.backup.sst_max_size.0 < ReadableSize::kb(64).0 {
+        if self.backup.sst_max_size.0 < default_coprocessor.region_max_size().0 / 10 {
             warn!(
                 "override backup.sst-max-size with min sst-max-size, {:?}",
-                ReadableSize::kb(64)
+                default_coprocessor.region_max_size() / 10
             );
-            self.backup.sst_max_size = ReadableSize::kb(64);
-        } else if self.backup.sst_max_size.0 > ReadableSize::mb(64).0 {
+            self.backup.sst_max_size = default_coprocessor.region_max_size() / 10;
+        } else if self.backup.sst_max_size.0 > default_coprocessor.region_max_size().0 * 2 {
             warn!(
                 "override backup.sst-max-size with max sst-max-size, {:?}",
-                ReadableSize::mb(64)
+                default_coprocessor.region_max_size() * 2
             );
-            self.backup.sst_max_size = ReadableSize::mb(64);
+            self.backup.sst_max_size = default_coprocessor.region_max_size() * 2;
         }
 
         self.readpool.adjust_use_unified_pool();

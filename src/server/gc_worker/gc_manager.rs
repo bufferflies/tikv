@@ -197,7 +197,7 @@ fn set_status_metrics(state: GcManagerState) {
     ] {
         AUTO_GC_STATUS_GAUGE_VEC
             .with_label_values(&[s.tag()])
-            .set(i64::from(state == *s));
+            .set((state == *s) as i64);
     }
 }
 
@@ -384,8 +384,7 @@ impl<S: GcSafePointProvider, R: RegionInfoProvider + 'static, E: KvEngine> GcMan
             Ordering::Greater => {
                 debug!("gc_worker: update safe point"; "safe_point" => safe_point);
                 self.save_safe_point(safe_point);
-                raftstore::store::metrics::AUTO_GC_SAFE_POINT_GAUGE
-                    .set(safe_point.into_inner() as i64);
+                AUTO_GC_SAFE_POINT_GAUGE.set(safe_point.into_inner() as i64);
                 true
             }
         }
@@ -654,7 +653,6 @@ mod tests {
             } => callback,
             GcTask::GcKeys { .. } => unreachable!(),
             GcTask::RawGcKeys { .. } => unreachable!(),
-            GcTask::PhysicalScanLock { .. } => unreachable!(),
             GcTask::OrphanVersions { .. } => unreachable!(),
             GcTask::Validate(_) => unreachable!(),
         };

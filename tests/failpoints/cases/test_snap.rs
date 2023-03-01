@@ -354,8 +354,7 @@ fn test_shutdown_when_snap_gc() {
     pd_client.must_add_peer(r1, new_learner_peer(2, 2));
 
     // Snapshot directory on store 2 shouldn't be empty.
-    let snap_dir = cluster.get_snap_dir(2);
-    let snap_dir = &snap_dir;
+    let snap_dir = &cluster.get_snap_dir(2);
     for i in 0..=100 {
         if i == 100 {
             panic!("store 2 snap dir must not be empty");

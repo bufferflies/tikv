@@ -37,11 +37,12 @@ file_system = { workspace = true }
 futures = { version = "0.3", features = ["thread-pool", "compat"] }
 into_other = { workspace = true }
 kvengine = { workspace = true }
-kvproto = { git = "https://github.com/pingcap/kvproto.git" }
+kvproto = { workspace = true }
 log_wrappers = { workspace = true }
 pd_client = { workspace = true }
 prometheus = { version = "0.13", features = ["nightly"] }
 prometheus-static-metric = "0.5"
+raft = { version = "0.7.0", default-features = false, features = ["protobuf-codec"] }
 raftstore = { workspace = true }
 rfstore = { workspace = true }
 slog = { version = "2.3", features = ["max_level_trace", "release_max_level_debug"] }
