@@ -33,7 +33,7 @@ use futures::executor::block_on;
 use grpcio::{EnvBuilder, Environment};
 use kvengine::dfs::DFS;
 use kvproto::{
-    brpb_grpc::create_backup, deadlock::create_deadlock, import_sstpb_grpc::create_import_sst,
+    brpb::create_backup, deadlock::create_deadlock, import_sstpb_grpc::create_import_sst,
 };
 use pd_client::{PdClient, RpcClient};
 use raftstore::{
@@ -749,6 +749,34 @@ impl TikvServer {
                 &self.config.pessimistic_txn,
             )
             .unwrap_or_else(|e| fatal!("failed to start lock manager: {}", e));
+
+        // Backup service.
+        let mut backup_worker = Box::new(self.background_worker.lazy_build("backup-endpoint"));
+        let backup_scheduler = backup_worker.scheduler();
+        let backup_service = backup::Service::<kvengine::Engine>::new(backup_scheduler);
+        if servers
+            .server
+            .register_service(create_backup(backup_service))
+            .is_some()
+        {
+            fatal!("failed to register backup service");
+        }
+
+        let backup_endpoint = backup::Endpoint::new(
+            servers.node.id(),
+            engines.engine.clone(),
+            self.region_info_accessor.clone(),
+            engines.engine.kv_engine().unwrap(),
+            self.config.backup.clone(),
+            self.concurrency_manager.clone(),
+            self.config.storage.api_version(),
+            None,
+        );
+        self.cfg_controller.as_mut().unwrap().register(
+            tikv::config::Module::Backup,
+            Box::new(backup_endpoint.get_config_manager()),
+        );
+        backup_worker.start(backup_endpoint);
     }
 
     fn init_io_utility(&mut self) -> BytesFetcher {

@@ -14,7 +14,7 @@ use kvproto::pdpb::CheckPolicy;
 use pd_client::PdClient;
 use rand::{Rng, RngCore};
 use test_cloud_server::{client::ClusterClient, scheduler::Scheduler, try_wait, ServerCluster};
-use tikv::config::TiKvConfig;
+use tikv::config::TikvConfig;
 use tikv_util::{
     config::{ReadableDuration, ReadableSize},
     info,
@@ -46,7 +46,7 @@ fn test_random_workload() {
         alloc_node_id(),
         alloc_node_id(),
     ];
-    let update_conf_fn = |_, conf: &mut TiKvConfig| {
+    let update_conf_fn = |_, conf: &mut TikvConfig| {
         conf.coprocessor.region_split_size = ReadableSize::kb(128);
         conf.raft_store.peer_stale_state_check_interval = ReadableDuration::secs(1);
         conf.raft_store.abnormal_leader_missing_duration = ReadableDuration::secs(3);
@@ -136,7 +136,7 @@ fn test_random_merge() {
         alloc_node_id(),
         alloc_node_id(),
     ];
-    let update_conf_fn = |_, conf: &mut TiKvConfig| {
+    let update_conf_fn = |_, conf: &mut TikvConfig| {
         conf.coprocessor.region_split_size = ReadableSize::kb(128);
         conf.raft_store.peer_stale_state_check_interval = ReadableDuration::secs(1);
         conf.raft_store.abnormal_leader_missing_duration = ReadableDuration::secs(3);

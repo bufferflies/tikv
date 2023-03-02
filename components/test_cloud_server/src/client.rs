@@ -26,7 +26,7 @@ use kvproto::{
 };
 use pd_client::PdClient;
 use rfstore::store::RegionIDVer;
-use test_raftstore::TestPdClient;
+use test_pd_client::TestPdClient;
 use tikv::storage::mvcc::TimeStamp;
 use tikv_util::{
     codec::bytes::{decode_bytes, encode_bytes},

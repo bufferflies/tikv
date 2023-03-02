@@ -9,7 +9,7 @@ use cse_ctl::{backup, restore};
 use kvengine::dfs::DFSConfig;
 use rand::Rng;
 use test_cloud_server::{client, oss::ObjectStorageService, ServerCluster};
-use tikv::config::TiKvConfig;
+use tikv::config::TikvConfig;
 use tikv_util::info;
 
 use crate::alloc_node_id;
@@ -25,7 +25,7 @@ fn start_cluster_and_full_backup(
     dfs_config: DFSConfig,
 ) -> (rfenginepb::ClusterBackupMeta, client::RefStore) {
     let nodes = Vec::from_iter((0..NODES_SIZE).into_iter().map(|_| alloc_node_id()));
-    let mut cluster = ServerCluster::new(nodes, |_, conf: &mut TiKvConfig| {
+    let mut cluster = ServerCluster::new(nodes, |_, conf: &mut TikvConfig| {
         conf.dfs = dfs_config.clone();
     });
     cluster.wait_region_replicated(&[], 3);
@@ -94,7 +94,7 @@ fn restore_cluster(
         );
     }
 
-    let mut cluster = ServerCluster::new(nodes, |node_id, conf: &mut TiKvConfig| {
+    let mut cluster = ServerCluster::new(nodes, |node_id, conf: &mut TikvConfig| {
         conf.storage.data_dir = get_storage_path(node_id).to_str().unwrap().to_string();
         conf.dfs = dfs_config.clone();
     });

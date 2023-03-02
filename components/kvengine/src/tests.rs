@@ -10,7 +10,7 @@ use std::{
 };
 
 use bytes::Buf;
-use file_system::IORateLimiter;
+use file_system::IoRateLimiter;
 use kvenginepb as pb;
 use tempfile::TempDir;
 use tikv_util::{mpsc, time::Instant};
@@ -18,7 +18,7 @@ use tikv_util::{mpsc, time::Instant};
 use crate::{dfs::InMemFS, *};
 
 macro_rules! unwrap_or_return {
-    ( $e:expr, $m:expr ) => {
+    ($e:expr, $m:expr) => {
         match $e {
             Ok(x) => x,
             Err(y) => {
@@ -35,7 +35,7 @@ fn new_test_engine() -> (Engine, mpsc::Sender<ApplyTask>) {
     let meta_change_listener = Box::new(TestMetaChangeListener {
         sender: listener_tx,
     });
-    let rate_limiter = Arc::new(IORateLimiter::new_for_test());
+    let rate_limiter = Arc::new(IoRateLimiter::new_for_test());
     let mut meta_iter = tester.clone();
     let engine = Engine::open(
         tester.fs.clone(),

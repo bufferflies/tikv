@@ -11,6 +11,8 @@ pub use cluster::*;
 mod tests {
     use std::time::Duration;
 
+    use tikv_util::info;
+
     use crate::ServerCluster;
 
     #[test]
@@ -34,6 +36,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(100));
         cluster.start_node(1, |_, _| {});
         cluster.get_pd_client().enable_default_operator();
+        info!("enable replica operator");
         cluster.wait_region_replicated(&[], 3);
         for split_key in &split_keys {
             cluster.wait_region_replicated(split_key, 3);

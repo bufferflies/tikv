@@ -4,12 +4,9 @@ use std::{marker::PhantomData, sync::atomic::*};
 
 use engine_traits::KvEngine;
 use futures::{channel::mpsc, FutureExt, SinkExt, StreamExt, TryFutureExt};
+use futures::executor::block_on;
 use grpcio::{self, *};
 use kvproto::brpb::*;
-use raftstore::{
-    router::RaftStoreRouter,
-    store::msg::{PeerMsg, SignificantMsg},
-};
 use tikv_util::{error, info, worker::*};
 
 use super::Task;
@@ -17,31 +14,27 @@ use super::Task;
 /// Service handles the RPC messages for the `Backup` service.
 
 #[derive(Clone)]
-pub struct Service<E, RR> {
+pub struct Service<E> {
     scheduler: Scheduler<Task>,
-    router: RR,
     _phantom: PhantomData<E>,
 }
 
-impl<E, RR> Service<E, RR>
+impl<E> Service<E>
 where
     E: KvEngine,
-    RR: RaftStoreRouter<E>,
 {
     /// Create a new backup service.
-    pub fn new(scheduler: Scheduler<Task>, router: RR) -> Self {
+    pub fn new(scheduler: Scheduler<Task>) -> Self {
         Service {
             scheduler,
-            router,
             _phantom: PhantomData,
         }
     }
 }
 
-impl<E, RR> Backup for Service<E, RR>
+impl<E> Backup for Service<E>
 where
     E: KvEngine,
-    RR: RaftStoreRouter<E>,
 {
     fn check_pending_admin_op(
         &mut self,
@@ -49,10 +42,11 @@ where
         _req: CheckAdminRequest,
         mut sink: ServerStreamingSink<CheckAdminResponse>,
     ) {
-        let (tx, rx) = mpsc::unbounded();
-        self.router.broadcast_normal(|| {
-            PeerMsg::SignificantMsg(SignificantMsg::CheckPendingAdmin(tx.clone()))
-        });
+        let (mut tx, rx) = mpsc::unbounded();
+        // self.router.broadcast_normal(|| {
+        //     PeerMsg::SignificantMsg(SignificantMsg::CheckPendingAdmin(tx.clone()))
+        // });
+        block_on(tx.send(CheckAdminResponse::default())).unwrap();
 
         let send_task = async move {
             let mut s = rx.map(|resp| Ok((resp, WriteFlags::default())));

@@ -76,12 +76,11 @@ pub use self::{
     txn_ext::{LocksStatus, PeerPessimisticLocks, PessimisticLockPair, TxnExt},
     util::{RegionReadProgress, RegionReadProgressRegistry},
     worker::{
-        metrics as worker_metrics,
-        metrics::TLS_LOCAL_READ_METRICS, AutoSplitController, Bucket, BucketRange,
-        CachedReadDelegate, CheckLeaderRunner, CheckLeaderTask, FlowStatistics, FlowStatsReporter,
-        KeyEntry, LocalReadContext, LocalReader, LocalReaderCore, PdTask, ReadDelegate,
-        ReadExecutor, ReadExecutorProvider, ReadProgress, ReadStats, RefreshConfigTask, RegionTask,
-        SplitCheckRunner, SplitCheckTask, SplitConfig, SplitConfigManager, StoreMetaDelegate,
-        TrackVer, WriteStats,
+        metrics as worker_metrics, metrics::TLS_LOCAL_READ_METRICS, AutoSplitController, Bucket,
+        BucketRange, CachedReadDelegate, CheckLeaderRunner, CheckLeaderTask, FlowStatistics,
+        FlowStatsReporter, KeyEntry, LocalReadContext, LocalReader, LocalReaderCore, PdTask,
+        ReadDelegate, ReadExecutor, ReadExecutorProvider, ReadProgress, ReadStats,
+        RefreshConfigTask, RegionTask, SplitCheckRunner, SplitCheckTask, SplitConfig,
+        SplitConfigManager, StoreMetaDelegate, TrackVer, WriteStats,
     },
 };

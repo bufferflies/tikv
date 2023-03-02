@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use cloud_server::TiKVServer;
+use cloud_server::TikvServer;
 use dashmap::DashMap;
 use futures::executor::block_on;
 use grpcio::{Channel, ChannelBuilder, EnvBuilder, Environment};
@@ -21,8 +21,9 @@ use pd_client::PdClient;
 use rfstore::{store::Callback, RaftStoreRouter};
 use security::SecurityManager;
 use tempfile::TempDir;
-use test_raftstore::{find_peer, TestPdClient};
-use tikv::{config::TiKvConfig, import::SstImporter};
+use test_pd_client::TestPdClient;
+use test_raftstore::find_peer;
+use tikv::{config::TikvConfig, import::SstImporter};
 use tikv_util::{
     config::{ReadableDuration, ReadableSize},
     thread_group::GroupProperties,
@@ -34,7 +35,7 @@ use crate::{client::ClusterClient, scheduler::Scheduler};
 #[allow(dead_code)]
 pub struct ServerCluster {
     // node_id -> server.
-    servers: HashMap<u16, TiKVServer>,
+    servers: HashMap<u16, TikvServer>,
     tmp_dir: TempDir,
     env: Arc<Environment>,
     pd_client: Arc<TestPdClient>,
@@ -50,7 +51,7 @@ impl ServerCluster {
     // the node id.
     pub fn new<F>(nodes: Vec<u16>, update_conf: F) -> ServerCluster
     where
-        F: Fn(u16, &mut TiKvConfig),
+        F: Fn(u16, &mut TikvConfig),
     {
         tikv_util::thread_group::set_properties(Some(GroupProperties::default()));
         let mut cluster = Self {
@@ -71,7 +72,7 @@ impl ServerCluster {
         cluster
     }
 
-    fn prepare_dfs(config: &TiKvConfig) -> Arc<dyn DFS> {
+    fn prepare_dfs(config: &TikvConfig) -> Arc<dyn DFS> {
         let dfs_conf = &config.dfs;
         if dfs_conf.s3_bucket.is_empty() && dfs_conf.s3_endpoint.is_empty()
             || dfs_conf.s3_endpoint == "local"
@@ -94,14 +95,14 @@ impl ServerCluster {
 
     pub fn start_node<F>(&mut self, node_id: u16, update_conf: F)
     where
-        F: Fn(u16, &mut TiKvConfig),
+        F: Fn(u16, &mut TikvConfig),
     {
         let mut config = new_test_config(self.tmp_dir.path(), node_id);
         update_conf(node_id, &mut config);
         std::fs::create_dir_all(&config.storage.data_dir).unwrap();
 
         let dfs = self.dfs.get_or_insert_with(|| Self::prepare_dfs(&config));
-        let mut server = TiKVServer::setup(
+        let mut server = TikvServer::setup(
             config,
             self.security_mgr.clone(),
             self.env.clone(),
@@ -192,7 +193,7 @@ impl ServerCluster {
                     return;
                 }
             }
-            std::thread::sleep(Duration::from_millis(300));
+            std::thread::sleep(Duration::from_millis(1000));
         }
         panic!("region is not replicated");
     }
@@ -297,8 +298,8 @@ impl ServerCluster {
     }
 }
 
-pub fn new_test_config(base_dir: &Path, node_id: u16) -> TiKvConfig {
-    let mut config = TiKvConfig::default();
+pub fn new_test_config(base_dir: &Path, node_id: u16) -> TikvConfig {
+    let mut config = TikvConfig::default();
     config.storage.data_dir = format!("{}/{}", base_dir.to_str().unwrap(), node_id);
     config.server.cluster_id = 1;
     config.server.addr = node_addr(node_id);

@@ -1,7 +1,6 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    cmp,
     collections::VecDeque,
     ffi::CString,
     marker::Unpin,
@@ -340,18 +339,16 @@ fn grpc_error_is_unimplemented(e: &grpcio::Error) -> bool {
 }
 
 /// Struct tracks the lifetime of a `raft` or `batch_raft` RPC.
-struct AsyncRaftSender<R, M, B> {
+struct AsyncRaftSender<M, B> {
     sender: ClientCStreamSender<M>,
     queue: Arc<Queue>,
     buffer: B,
-    router: R,
     addr: String,
     flush_timeout: Option<Delay>,
 }
 
-impl<R, M, B> AsyncRaftSender<R, M, B>
+impl<M, B> AsyncRaftSender<M, B>
 where
-    R: RaftStoreRouter + 'static,
     B: Buffer<OutputMessage = M>,
 {
     fn fill_msg(&mut self, ctx: &Context<'_>) {
@@ -365,9 +362,8 @@ where
     }
 }
 
-impl<R, M, B> Future for AsyncRaftSender<R, M, B>
+impl<M, B> Future for AsyncRaftSender<M, B>
 where
-    R: RaftStoreRouter + Unpin + 'static,
     B: Buffer<OutputMessage = M> + Unpin,
 {
     type Output = grpcio::Result<()>;
@@ -428,17 +424,16 @@ enum RaftCallRes {
     Disconnected,
 }
 
-struct RaftCall<R, M, B> {
-    sender: AsyncRaftSender<R, M, B>,
+struct RaftCall<M, B> {
+    sender: AsyncRaftSender<M, B>,
     receiver: ClientCStreamReceiver<Done>,
     lifetime: Option<oneshot::Sender<RaftCallRes>>,
     store_id: u64,
 }
 
-impl<R, M, B> RaftCall<R, M, B>
-    where
-        R: RaftStoreRouter + Unpin + 'static,
-        B: Buffer<OutputMessage = M> + Unpin,
+impl<M, B> RaftCall<M, B>
+where
+    B: Buffer<OutputMessage = M> + Unpin,
 {
     async fn poll(&mut self) {
         let res = futures::join!(&mut self.sender, &mut self.receiver);
@@ -589,7 +584,6 @@ where
                 sender: batch_sink,
                 queue: self.queue.clone(),
                 buffer: BatchMessageBuffer::new(&self.builder.cfg, self.builder.loads.clone()),
-                router: self.builder.router.clone(),
                 addr,
                 flush_timeout: None,
             },
@@ -612,7 +606,6 @@ where
                 sender: sink,
                 queue: self.queue.clone(),
                 buffer: MessageBuffer::new(),
-                router: self.builder.router.clone(),
                 addr,
                 flush_timeout: None,
             },

@@ -20,7 +20,7 @@ use kvproto::{
 use rand::Rng;
 use tempfile::Builder;
 use test_cloud_server::{client::ClusterClient, ServerCluster};
-use tikv::config::TiKvConfig;
+use tikv::config::TikvConfig;
 use tikv_util::config::{ReadableDuration, ReadableSize};
 use txn_types::TimeStamp;
 
@@ -67,6 +67,12 @@ fn assert_same_files(mut files1: Vec<kvproto::brpb::File>, mut files2: Vec<kvpro
         assert_ne!(f1.cipher_iv, f2.cipher_iv);
         f1.cipher_iv = "".to_string().into_bytes();
         f2.cipher_iv = "".to_string().into_bytes();
+        // After RocksDB 6.12, each SST file writer writes its own session id to the
+        // generated file. The SHA will not never be the same.
+        // Detail: https://github.com/facebook/rocksdb/pull/6983
+        f1.sha256.clear();
+        f2.sha256.clear();
+        assert_eq!(f1, f2);
         assert_eq!(f1, f2);
     }
 }
@@ -75,7 +81,7 @@ fn assert_same_files(mut files1: Vec<kvproto::brpb::File>, mut files2: Vec<kvpro
 fn test_backup_and_import() {
     test_util::init_log_for_test();
     let node_id = alloc_node_id();
-    let update_conf = |_, conf: &mut TiKvConfig| {
+    let update_conf = |_, conf: &mut TikvConfig| {
         conf.backup.sst_max_size = ReadableSize::kb(32);
         conf.raft_store.local_file_gc_timeout = ReadableDuration::millis(500);
         conf.raft_store.local_file_gc_tick_interval = ReadableDuration::millis(200);

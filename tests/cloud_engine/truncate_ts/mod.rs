@@ -14,7 +14,7 @@ use kvproto::metapb::Store;
 use pd_client::PdClient;
 use rand::Rng;
 use test_cloud_server::{client::ClusterClient, ServerCluster};
-use test_raftstore::TestPdClient;
+use test_pd_client::TestPdClient;
 use tikv_util::{info, time::Instant};
 use tokio::runtime::Runtime;
 use txn_types::TimeStamp;

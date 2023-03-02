@@ -4,9 +4,9 @@ use std::{thread, time::Duration};
 
 use futures::executor::block_on;
 use pd_client::PdClient;
-use raftstore::store::util::{find_peer, new_learner_peer};
+use tikv_util::store::{find_peer, new_learner_peer};
 use test_cloud_server::{try_wait, ServerCluster};
-use tikv::config::TiKvConfig;
+use tikv::config::TikvConfig;
 use tikv_util::config::ReadableDuration;
 
 use crate::alloc_node_id;
@@ -48,7 +48,7 @@ fn test_region_merge_isolated_peer() {
         alloc_node_id(),
         alloc_node_id(),
     ];
-    let update_conf_fn = |_, conf: &mut TiKvConfig| {
+    let update_conf_fn = |_, conf: &mut TikvConfig| {
         conf.raft_store.peer_stale_state_check_interval = ReadableDuration::secs(1);
         conf.raft_store.abnormal_leader_missing_duration = ReadableDuration::secs(3);
         conf.raft_store.max_leader_missing_duration = ReadableDuration::secs(5);

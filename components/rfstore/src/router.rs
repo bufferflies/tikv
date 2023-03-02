@@ -18,7 +18,8 @@ pub trait RaftStoreRouter: StoreRouter + ProposalRouter + CasualRouter + Send + 
     /// Sends RaftMessage to local store.
     fn send_raft_msg(&self, msg: RaftMessage);
 
-    /// Sends a significant message. We should guarantee that the message can't be dropped.
+    /// Sends a significant message. We should guarantee that the message can't
+    /// be dropped.
     fn significant_send(&self, region_id: u64, msg: SignificantMsg);
 
     /// Send a casual message to the given region.
@@ -110,7 +111,8 @@ impl RaftStoreRouter for ServerRaftStoreRouter {
         RaftStoreRouter::send_raft_msg(&self.router, msg)
     }
 
-    /// Sends a significant message. We should guarantee that the message can't be dropped.
+    /// Sends a significant message. We should guarantee that the message can't
+    /// be dropped.
     fn significant_send(&self, region_id: u64, msg: SignificantMsg) {
         RaftStoreRouter::significant_send(&self.router, region_id, msg)
     }
@@ -148,7 +150,8 @@ impl RaftStoreRouter for RaftStoreBlackHole {
     /// Sends RaftMessage to local store.
     fn send_raft_msg(&self, _: RaftMessage) {}
 
-    /// Sends a significant message. We should guarantee that the message can't be dropped.
+    /// Sends a significant message. We should guarantee that the message can't
+    /// be dropped.
     fn significant_send(&self, _: u64, _: SignificantMsg) {}
 }
 

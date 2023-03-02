@@ -36,8 +36,12 @@ use raftstore::store::{
     util,
     util::{ChangePeerI, ConfChangeKind},
 };
-use tikv_util::{box_err, error, info, time::Instant, warn};
-use tikv_util::store::{remove_peer, find_peer_mut, find_peer, new_peer};
+use tikv_util::{
+    box_err, error, info,
+    store::{find_peer, find_peer_mut, remove_peer},
+    time::Instant,
+    warn,
+};
 use time::Timespec;
 use txn_types::LockType;
 
@@ -169,7 +173,8 @@ pub(crate) struct Proposal {
     pub(crate) term: u64,
     pub(crate) cb: Callback,
 
-    /// `propose_time` is set to the last time when a peer starts to renew lease.
+    /// `propose_time` is set to the last time when a peer starts to renew
+    /// lease.
     pub propose_time: Option<Timespec>,
     pub must_pass_epoch_check: bool,
 }
@@ -204,10 +209,12 @@ pub(crate) struct Applier {
     pub(crate) region: metapb::Region,
 
     /// If the applier should be stopped from polling.
-    /// A applier can be stopped in conf change, merge or requested by destroy message.
+    /// A applier can be stopped in conf change, merge or requested by destroy
+    /// message.
     pub(crate) stopped: bool,
-    /// Set to true when removing itself because of `ConfChangeType::RemoveNode`, and then
-    /// any following committed logs in same Ready should be applied failed.
+    /// Set to true when removing itself because of
+    /// `ConfChangeType::RemoveNode`, and then any following committed logs
+    /// in same Ready should be applied failed.
     pub(crate) pending_remove: bool,
 
     /// The commands waiting to be committed and applied
@@ -561,11 +568,12 @@ impl Applier {
     /// Applies raft command.
     ///
     /// An apply operation can fail in the following situations:
-    ///   1. it encounters an error that will occur on all stores, it can continue
-    /// applying next entry safely, like epoch not match for example;
-    ///   2. it encounters an error that may not occur on all stores, in this case
-    /// we should try to apply the entry again or panic. Considering that this
-    /// usually due to disk operation fail, which is rare, so just panic is ok.
+    ///   1. it encounters an error that will occur on all stores, it can
+    /// continue applying next entry safely, like epoch not match for
+    /// example;   2. it encounters an error that may not occur on all
+    /// stores, in this case we should try to apply the entry again or
+    /// panic. Considering that this usually due to disk operation fail,
+    /// which is rare, so just panic is ok.
     fn apply_raft_log(
         &mut self,
         ctx: &mut ApplyContext,
@@ -681,8 +689,8 @@ impl Applier {
     ) -> ApplyResult {
         // fail_point!(
         // "yield_apply_first_region",
-        // self.region.get_start_key().is_empty() && !self.region.get_end_key().is_empty(),
-        // |_| ApplyResult::Yield
+        // self.region.get_start_key().is_empty() &&
+        // !self.region.get_end_key().is_empty(), |_| ApplyResult::Yield
         // );
 
         let index = entry.get_index();
@@ -832,7 +840,8 @@ impl Applier {
         ctx: &mut ApplyContext,
         request: &AdminRequest,
     ) -> Result<(AdminResponse, ApplyResult)> {
-        // Write the engine before run finish split, or we will get shard not match error.
+        // Write the engine before run finish split, or we will get shard not match
+        // error.
         let cs = self.pending_split.remove(&ctx.exec_log_index);
         if cs.is_none() {
             return Err(box_err!("split conflict with conf change"));
@@ -840,8 +849,8 @@ impl Applier {
         let cs = cs.unwrap();
         let mut resp = AdminResponse::default();
         if let Err(err) = ctx.engine.split(cs, RAFT_INIT_LOG_INDEX) {
-            // This must be a follower that fall behind, we need to pause the apply and wait for split files to finish
-            // in the background worker.
+            // This must be a follower that fall behind, we need to pause the apply and wait
+            // for split files to finish in the background worker.
             panic!(
                 "region {} failed to execute split operation, error {:?}",
                 self.tag(),
@@ -849,7 +858,8 @@ impl Applier {
             );
         }
         self.snap.take(); // snapshot is outdated.
-        // clear the cache here or the locks doesn't belong to the new range would never have chance to delete.
+        // clear the cache here or the locks doesn't belong to the new range would never
+        // have chance to delete.
         self.lock_cache.clear();
         let mut splits = BatchSplitResponse::default();
         let regions =
@@ -954,7 +964,8 @@ impl Applier {
         APPLY_PROPOSAL.observe(propose_num as f64);
     }
 
-    /// Handles all the committed_entries, namely, applies the committed entries.
+    /// Handles all the committed_entries, namely, applies the committed
+    /// entries.
     fn handle_raft_committed_entries(
         &mut self,
         ctx: &mut ApplyContext,
@@ -964,9 +975,9 @@ impl Applier {
             return;
         }
 
-        // If we send multiple ConfChange commands, only first one will be proposed correctly,
-        // others will be saved as a normal entry with no data, so we must re-propose these
-        // commands again.
+        // If we send multiple ConfChange commands, only first one will be proposed
+        // correctly, others will be saved as a normal entry with no data, so we
+        // must re-propose these commands again.
         let mut results = VecDeque::<ExecResult>::new();
         for entry in committed_entries_drainer {
             if self.pending_remove {
@@ -1111,7 +1122,8 @@ impl Applier {
         }
     }
 
-    /// Handles peer registration. When a peer is created, it will register an apply delegate.
+    /// Handles peer registration. When a peer is created, it will register an
+    /// apply delegate.
     fn handle_registration(&mut self, reg: MsgRegistration) {
         info!(
             "re-register to applier";
@@ -1230,8 +1242,8 @@ impl Applier {
             if source_shard.get_meta_sequence() == source.sequence {
                 // TODO(optimize):
                 // All the files already in the local disk, prepare_change_set is non-blocking.
-                // But we still need to load block index for each file, later we can optimize to copy
-                // the opened tables from source shard.
+                // But we still need to load block index for each file, later we can optimize to
+                // copy the opened tables from source shard.
                 let source_tables = ctx.engine.prepare_change_set(source, !is_leader).unwrap();
                 self.commit_merge_source_tables
                     .insert(source_shard.id, source_tables);

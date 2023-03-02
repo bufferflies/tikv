@@ -6,7 +6,7 @@ use cse_ctl::{backup, common::now, restore, restore_tenant, step};
 use kvengine::dfs::DFSConfig;
 use rand::Rng;
 use test_cloud_server::{oss::ObjectStorageService, try_wait, ServerCluster};
-use tikv::config::TiKvConfig;
+use tikv::config::TikvConfig;
 use tikv_util::{config::ReadableSize, info, warn};
 use tokio::runtime::Runtime;
 
@@ -57,7 +57,7 @@ fn test_inplace_restore_tenant() {
 
     let mut cluster = ServerCluster::new(
         alloc_node_id_vec(NODES_COUNT),
-        |_, conf: &mut TiKvConfig| {
+        |_, conf: &mut TikvConfig| {
             conf.dfs = dfs_config.clone();
             // Set small mem-table size to make data reach L1 and generate over bound shards.
             conf.rocksdb.writecf.write_buffer_size = ReadableSize::kb(1);

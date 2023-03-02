@@ -1,9 +1,16 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{collections::BTreeMap, ops::Deref};
-use std::path::Path;
+use std::{collections::BTreeMap, ops::Deref, path::Path};
 
-use engine_traits::{CfNamesExt, CfOptionsExt, CompactExt, CompactedEvent, DbOptions, DbOptionsExt, DbVector, DeleteStrategy, FlowControlFactorsExt, ImportExt, IngestExternalFileOptions, IterOptions, Iterable, KvEngine, MiscExt, Mutable, MvccProperties, MvccPropertiesExt, Peekable, PerfContext, PerfContextExt, PerfContextKind, PerfLevel, Range, RangePropertiesExt, ReadOptions, Snapshot, SstCompressionType, SstExt, SstWriterBuilder, SyncMutable, TablePropertiesExt, TitanCfOptions, TtlProperties, TtlPropertiesExt, WriteBatchExt, WriteOptions, Checkpointable, Checkpointer};
+use engine_traits::{
+    CfNamesExt, CfOptionsExt, Checkpointable, Checkpointer, CompactExt, CompactedEvent, DbOptions,
+    DbOptionsExt, DbVector, DeleteStrategy, FlowControlFactorsExt, ImportExt,
+    IngestExternalFileOptions, IterOptions, Iterable, KvEngine, MiscExt, Mutable, MvccProperties,
+    MvccPropertiesExt, Peekable, PerfContext, PerfContextExt, PerfContextKind, PerfLevel, Range,
+    RangePropertiesExt, ReadOptions, Snapshot, SstCompressionType, SstExt, SstWriterBuilder,
+    SyncMutable, TablePropertiesExt, TitanCfOptions, TtlProperties, TtlPropertiesExt,
+    WriteBatchExt, WriteOptions,
+};
 
 use crate::*;
 
@@ -16,13 +23,15 @@ impl CfNamesExt for Engine {
 }
 
 impl CfOptionsExt for Engine {
-    type CfOptions = engine_panic::PanicCfOptions;
+    type CfOptions = engine_rocks::RocksCfOptions;
 
     fn get_options_cf(&self, _cf: &str) -> TraitsResult<Self::CfOptions> {
-        panic!()
+        Ok(engine_rocks::RocksCfOptions::from_raw(
+            rocksdb::ColumnFamilyOptions::default(),
+        ))
     }
     fn set_options_cf(&self, _cf: &str, _options: &[(&str, &str)]) -> TraitsResult<()> {
-        panic!()
+        Ok(())
     }
 }
 
@@ -191,9 +200,9 @@ pub struct EngineCheckpointer;
 impl Checkpointer for EngineCheckpointer {
     fn create_at(
         &mut self,
-        db_out_dir: &Path,
-        titan_out_dir: Option<&Path>,
-        log_size_for_flush: u64,
+        _db_out_dir: &Path,
+        _titan_out_dir: Option<&Path>,
+        _log_size_for_flush: u64,
     ) -> engine_traits::Result<()> {
         panic!()
     }
@@ -516,8 +525,7 @@ impl RangePropertiesExt for Engine {
 #[derive(Clone, Debug)]
 pub struct EngineSnapshot {}
 
-impl Snapshot for EngineSnapshot {
-}
+impl Snapshot for EngineSnapshot {}
 
 impl Peekable for EngineSnapshot {
     type DbVector = EngineDbVector;
@@ -585,37 +593,44 @@ impl engine_traits::Iterator for PanicSnapshotIterator {
 }
 
 impl SstExt for Engine {
-    type SstReader = engine_panic::PanicSstReader;
-    type SstWriter = engine_panic::PanicSstWriter;
+    type SstReader = engine_rocks::RocksSstReader;
+    type SstWriter = engine_rocks::RocksSstWriter;
     type SstWriterBuilder = EngineSstWriterBuilder;
 }
 
 pub struct EngineSstWriterBuilder {
-    builder: engine_panic::PanicSstWriterBuilder,
+    builder: engine_rocks::RocksSstWriterBuilder,
 }
 
 impl SstWriterBuilder<Engine> for EngineSstWriterBuilder {
     fn new() -> Self {
-        panic!()
+        Self {
+            builder: engine_rocks::RocksSstWriterBuilder::new(),
+        }
     }
     fn set_db(self, _db: &Engine) -> Self {
-        panic!()
+        // TODO(x): need to find a way to pass RocksDB Env and CFOptions to the builder.
+        self
     }
     fn set_cf(mut self, cf: &str) -> Self {
-        panic!()
+        self.builder = self.builder.set_cf(cf);
+        self
     }
     fn set_in_memory(mut self, in_memory: bool) -> Self {
-        panic!()
+        self.builder = self.builder.set_in_memory(in_memory);
+        self
     }
     fn set_compression_type(mut self, compression: Option<SstCompressionType>) -> Self {
-        panic!()
+        self.builder = self.builder.set_compression_type(compression);
+        self
     }
     fn set_compression_level(mut self, level: i32) -> Self {
-        panic!()
+        self.builder = self.builder.set_compression_level(level);
+        self
     }
 
-    fn build(self, path: &str) -> TraitsResult<engine_panic::PanicSstWriter> {
-        panic!()
+    fn build(self, path: &str) -> TraitsResult<engine_rocks::RocksSstWriter> {
+        self.builder.build(path)
     }
 }
 

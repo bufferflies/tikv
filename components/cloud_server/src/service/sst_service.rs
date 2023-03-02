@@ -10,7 +10,6 @@ use std::time::Duration;
 use collections::HashSet;
 use file_system::{set_io_type, IoType};
 use futures::{
-    executor::{ThreadPool, ThreadPoolBuilder},
     sink::SinkExt,
     stream::TryStreamExt,
     TryFutureExt,

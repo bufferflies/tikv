@@ -700,7 +700,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
 
         let mut response_retriever = response_retriever.map(move |item| {
             for measure in item.measures {
-                let GrpcRequestDuration { label, begin, source } = measure;
+                let GrpcRequestDuration { label, begin, source: _ } = measure;
                 GRPC_MSG_HISTOGRAM_STATIC
                     .get(label)
                     .observe(begin.saturating_elapsed_secs());

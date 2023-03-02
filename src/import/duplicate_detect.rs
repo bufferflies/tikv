@@ -186,20 +186,6 @@ impl<S: Snapshot> Iterator for DuplicateDetector<S> {
     }
 }
 
-fn from_kv_error(e: tikv_kv::Error) -> Error {
-    match e {
-        tikv_kv::Error(box tikv_kv::ErrorInner::Other(err)) => Error::Engine(err),
-        _ => Error::RocksDb("unkown error when request rocksdb".to_owned()),
-    }
-}
-
-fn from_txn_types_error(e: txn_types::Error) -> Error {
-    match e {
-        txn_types::Error(box txn_types::ErrorInner::Codec(err)) => Error::CodecError(err),
-        _ => Error::BadFormat("parse write type error".to_owned()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::mpsc::channel;

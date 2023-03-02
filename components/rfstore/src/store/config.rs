@@ -11,7 +11,8 @@ use time::Duration as TimeDuration;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, OnlineConfig)]
 #[serde(default)]
 pub struct Config {
-    // minimizes disruption when a partitioned node rejoins the cluster by using a two phase election.
+    // minimizes disruption when a partitioned node rejoins the cluster by using a two phase
+    // election.
     #[online_config(skip)]
     pub prevote: bool,
 
@@ -41,12 +42,13 @@ pub struct Config {
     /// the peer is considered to be down and is reported to PD.
     pub max_peer_down_duration: ReadableDuration,
 
-    /// If the leader of a peer is missing for longer than max_leader_missing_duration,
-    /// the peer would ask pd to confirm whether it is valid in any region.
-    /// If the peer is stale and is not valid in any region, it will destroy itself.
+    /// If the leader of a peer is missing for longer than
+    /// max_leader_missing_duration, the peer would ask pd to confirm
+    /// whether it is valid in any region. If the peer is stale and is not
+    /// valid in any region, it will destroy itself.
     pub max_leader_missing_duration: ReadableDuration,
-    /// Similar to the max_leader_missing_duration, instead it will log warnings and
-    /// try to alert monitoring systems, if there is any.
+    /// Similar to the max_leader_missing_duration, instead it will log warnings
+    /// and try to alert monitoring systems, if there is any.
     pub abnormal_leader_missing_duration: ReadableDuration,
     pub peer_stale_state_check_interval: ReadableDuration,
 

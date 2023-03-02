@@ -5,7 +5,6 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
-    time::Duration,
 };
 
 use fail::fail_point;
@@ -15,11 +14,11 @@ use kvproto::{
     raft_cmdpb::{CmdType, RaftCmdRequest, RaftCmdResponse, ReadIndexResponse, Request, Response},
 };
 use pd_client::BucketMeta;
-use raftstore::store::{util::{LeaseState, RemoteLease}, worker_metrics::*, TxnExt, worker_metrics};
+use raftstore::store::{util::{LeaseState, RemoteLease}, worker_metrics::*, TxnExt};
 use tikv_util::{
     debug, error,
     lru::LruCache,
-    time::{monotonic_raw_now, Instant, ThreadReadId},
+    time::{monotonic_raw_now, ThreadReadId},
 };
 use time::Timespec;
 

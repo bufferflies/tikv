@@ -3,13 +3,12 @@
 use std::sync::Arc;
 
 use collections::HashMap;
-use engine_rocks::{RocksSstIterator, RocksSstReader};
-use engine_traits::{Iterable, Iterator as TraitIterator, SstReader, CF_DEFAULT, CF_WRITE, RefIterable, IterOptions};
+use engine_traits::{Iterator as TraitIterator, CF_DEFAULT, CF_WRITE, RefIterable, IterOptions};
 use kvengine::{table::Value, ShardMeta, UserMeta};
-use kvproto::{import_sstpb::SstMeta, raft_cmdpb::RaftCmdRequest};
+use kvproto::raft_cmdpb::RaftCmdRequest;
 use kvengine::table::table;
 use sst_importer::SstImporter;
-use tikv_util::{codec, error, info};
+use tikv_util::{codec, info};
 use txn_types::{WriteRef, WriteType};
 
 pub(crate) fn convert_sst(
@@ -110,16 +109,6 @@ fn build_entries_iterator(
 struct Entry {
     key: Vec<u8>,
     val: Vec<u8>,
-}
-
-struct SstIterator {
-    meta: SstMeta,
-    entries: Vec<Entry>,
-    idx: usize,
-    start_ts: u64,
-    commit_ts: u64,
-    #[allow(clippy::type_complexity)]
-    default_values: Arc<HashMap<(Vec<u8>, u64), Vec<u8>>>,
 }
 
 fn parse_rocksdb_key(data_key: &[u8]) -> codec::Result<(Vec<u8>, u64)> {

@@ -1631,7 +1631,7 @@ where
             }
             AdminCmdType::BatchSwitchWitness => Err(box_err!("unsupported admin command type")),
             AdminCmdType::InvalidAdmin => Err(box_err!("unsupported admin command type")),
-            _ => todo!()
+            _ => todo!(),
         }?;
         response.set_cmd_type(cmd_type);
 

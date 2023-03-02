@@ -1,7 +1,7 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
 use pd_client::PdClient;
-use raftstore::store::util::find_peer;
+use tikv_util::store::find_peer;
 use test_cloud_server::{try_wait, ServerCluster};
 
 use super::{i_to_key, i_to_val};

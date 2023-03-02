@@ -37,11 +37,12 @@ use engine_rocks::{
     DEFAULT_PROP_SIZE_INDEX_DISTANCE,
 };
 use engine_traits::{
-    CfOptions as _, CfOptionsExt, DbOptions as _, DbOptionsExt, MiscExt, TabletAccessor,
+    CfOptions as _, CfOptionsExt, DbOptions as _, DbOptionsExt, TabletAccessor,
     TabletErrorCollector, TitanCfOptions as _, CF_DEFAULT, CF_LOCK, CF_RAFT, CF_WRITE,
 };
 use file_system::IoRateLimiter;
 use keys::region_raft_prefix_len;
+use kvengine::dfs::DFSConfig;
 use kvproto::kvrpcpb::ApiVersion;
 use online_config::{ConfigChange, ConfigManager, ConfigValue, OnlineConfig, Result as CfgResult};
 use pd_client::Config as PdConfig;
@@ -53,18 +54,15 @@ use raftstore::{
     store::{CompactionGuardGeneratorFactory, Config as RaftstoreConfig, SplitConfig},
 };
 use resource_metering::Config as ResourceMeteringConfig;
+use rfengine::RfEngineConfig;
 use security::SecurityConfig;
 use serde::{
     de::{Error as DError, Unexpected},
     Deserialize, Deserializer, Serialize, Serializer,
 };
 use serde_json::{to_value, Map, Value};
-use kvengine::dfs::DFSConfig;
-use rfengine::RfEngineConfig;
 use tikv_util::{
-    config::{
-        self, LogFormat, RaftDataStateMachine, ReadableDuration, ReadableSize, TomlWriter, GIB, MIB,
-    },
+    config::{self, LogFormat, ReadableDuration, ReadableSize, TomlWriter, GIB, MIB},
     logger::{get_level_by_string, get_string_by_level, set_log_level},
     sys::SysQuota,
     time::duration_to_sec,
@@ -2455,13 +2453,12 @@ impl BackupConfig {
 
 impl Default for BackupConfig {
     fn default() -> Self {
-        let default_coprocessor = CopConfig::default();
         let cpu_num = SysQuota::cpu_cores_quota();
         Self {
             // use at most 50% of vCPU by default
             num_threads: (cpu_num * 0.5).clamp(1.0, 8.0) as usize,
             batch_size: 8,
-            sst_max_size: default_coprocessor.region_max_size(),
+            sst_max_size: ReadableSize::mb(16),
             enable_auto_tune: true,
             auto_tune_remain_threads: (cpu_num * 0.2).round() as usize,
             auto_tune_refresh_interval: ReadableDuration::secs(60),

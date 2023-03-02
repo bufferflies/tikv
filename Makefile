@@ -44,7 +44,9 @@ ENABLE_FEATURES ?=
 # Note that enabling frame-pointer means that the Rust standard library will
 # be recompiled.
 ifndef TIKV_FRAME_POINTER
-export TIKV_FRAME_POINTER=1
+	ifneq ($(shell uname -s),Darwin)
+		export TIKV_FRAME_POINTER=1
+	endif
 endif
 
 ifeq ($(TIKV_FRAME_POINTER),1)

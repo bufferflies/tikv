@@ -55,7 +55,6 @@ use tikv_util::{
     warn,
     worker::Scheduler,
     Either,
-    store::QueryStats,
 };
 use time::Timespec;
 use uuid::Uuid;

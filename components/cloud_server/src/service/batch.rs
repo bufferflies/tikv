@@ -1,7 +1,6 @@
 // Copyright 20211 TiKV Project Authors. Licensed under Apache-2.0.
 
 use api_version::KvFormat;
-use engine_rocks::ReadPerfContext;
 use kvproto::kvrpcpb::*;
 use tikv::{
     server::{
@@ -20,7 +19,7 @@ use tikv_util::{
     mpsc::future::{Sender, WakePolicy},
     time::Instant,
 };
-use tracker::{with_tls_tracker, RequestInfo, RequestType, Tracker, TrackerToken, GLOBAL_TRACKERS};
+use tracker::{RequestInfo, RequestType, Tracker, TrackerToken, GLOBAL_TRACKERS};
 
 pub const MAX_BATCH_GET_REQUEST_COUNT: usize = 10;
 pub const MIN_BATCH_GET_REQUEST_COUNT: usize = 4;
@@ -156,9 +155,7 @@ pub struct GetCommandResponseConsumer {
     tx: Sender<MeasuredSingleResponse>,
 }
 
-impl ResponseBatchConsumer<(Option<Vec<u8>>, Statistics)>
-    for GetCommandResponseConsumer
-{
+impl ResponseBatchConsumer<(Option<Vec<u8>>, Statistics)> for GetCommandResponseConsumer {
     fn consume(
         &self,
         id: u64,
@@ -261,8 +258,11 @@ fn future_batch_get_command<E: Engine, L: LockManager, F: KvFormat>(
                     cmd: Some(batch_commands_response::response::Cmd::Get(resp.clone())),
                     ..Default::default()
                 };
-                let measure =
-                    GrpcRequestDuration::new(begin_instant, GrpcTypeKind::kv_batch_get_command, source);
+                let measure = GrpcRequestDuration::new(
+                    begin_instant,
+                    GrpcTypeKind::kv_batch_get_command,
+                    source,
+                );
                 let task = MeasuredSingleResponse::new(id, res, measure);
                 if tx.send_with(task, WakePolicy::Immediately).is_err() {
                     error!("KvService response batch commands fail");

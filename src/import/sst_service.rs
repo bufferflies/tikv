@@ -630,7 +630,7 @@ where
                 .filter(|c| c.cipher_type != EncryptionMethod::Plaintext);
 
             let res = importer.download_ext::<E>(
-                    req.get_request_type(),
+                req.get_request_type(),
                 req.get_sst(),
                 req.get_storage_backend(),
                 req.get_name(),

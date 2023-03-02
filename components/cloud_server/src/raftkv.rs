@@ -1,19 +1,29 @@
 // Copyright 2016 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{borrow::Cow, fmt::{self, Debug, Display, Formatter}, io::Error as IoError, mem, num::NonZeroU64, result, sync::Arc, time::Duration};
-use std::cell::UnsafeCell;
-use std::pin::Pin;
-use std::sync::atomic::{AtomicU8, Ordering};
-use std::task::Poll;
-use futures::{future::BoxFuture, task::AtomicWaker, Future, Stream, StreamExt};
+use std::{
+    borrow::Cow,
+    cell::UnsafeCell,
+    fmt::{self, Debug, Display, Formatter},
+    io::Error as IoError,
+    mem,
+    num::NonZeroU64,
+    pin::Pin,
+    result,
+    sync::{
+        atomic::{AtomicU8, Ordering},
+        Arc,
+    },
+    task::Poll,
+    time::Duration,
+};
 
 use collections::{HashMap, HashSet};
 use concurrency_manager::ConcurrencyManager;
 use engine_traits::{CfName, KvEngine, MvccProperties, CF_DEFAULT, CF_LOCK, CF_WRITE};
+use futures::{task::AtomicWaker, Future, Stream, StreamExt};
 use kvproto::{
     errorpb,
     kvrpcpb::{Context, IsolationLevel},
-    metapb,
     raft_cmdpb::{
         CmdType, CustomRequest, RaftCmdRequest, RaftCmdResponse, RaftRequestHeader, Request,
         Response,
@@ -26,25 +36,33 @@ use raft::{
 use raftstore::coprocessor::{
     dispatcher::BoxReadIndexObserver, Coprocessor, CoprocessorHost, ReadIndexObserver,
 };
-use rfstore::{store::{
-    rlog, Callback as StoreCallback, CustomBuilder, ReadIndexContext, ReadResponse,
-    RegionSnapshot, WriteResponse,
-}, Error as RaftServerError, LocalReadRouter, RaftStoreRouter, ServerRaftStoreRouter, store};
+use rfstore::{
+    store,
+    store::{
+        rlog, Callback as StoreCallback, CustomBuilder, ReadIndexContext, ReadResponse,
+        RegionSnapshot, WriteResponse,
+    },
+    Error as RaftServerError, LocalReadRouter, RaftStoreRouter, ServerRaftStoreRouter,
+};
 use thiserror::Error;
 use tikv::{
     server::metrics::*,
     storage::{
         self,
         kv::{
-            self, write_modifies, Callback, Engine, Error as KvError, ErrorInner as KvErrorInner,
-            ExtCallback, Modify, SnapContext, WriteData,
+            self, Engine, Error as KvError, ErrorInner as KvErrorInner, Modify, SnapContext,
+            WriteData,
         },
     },
 };
 use tikv_kv::{OnAppliedCb, WriteEvent};
-use tikv_util::{codec::number::NumberEncoder, time::Instant};
-use tikv_util::future::paired_must_called_future_callback;
-use txn_types::{Key, Lock, LockType, ReqType, TimeStamp, TxnExtra, TxnExtraScheduler, WriteBatchFlags, WriteRef, WriteType};
+use tikv_util::{
+    codec::number::NumberEncoder, future::paired_must_called_future_callback, time::Instant,
+};
+use txn_types::{
+    Key, Lock, LockType, ReqType, TimeStamp, TxnExtra, TxnExtraScheduler, WriteBatchFlags,
+    WriteRef, WriteType,
+};
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -65,19 +83,6 @@ pub enum Error {
 
     #[error("timeout after {0:?}")]
     Timeout(Duration),
-}
-
-fn get_status_kind_from_error(e: &Error) -> RequestStatusKind {
-    match *e {
-        Error::RequestFailed(ref header) => {
-            RequestStatusKind::from(storage::get_error_kind_from_header(header))
-        }
-        Error::Io(_) => RequestStatusKind::err_io,
-        Error::Server(_) => RequestStatusKind::err_server,
-        Error::InvalidResponse(_) => RequestStatusKind::err_invalid_resp,
-        Error::InvalidRequest(_) => RequestStatusKind::err_invalid_req,
-        Error::Timeout(_) => RequestStatusKind::err_timeout,
-    }
 }
 
 fn get_status_kind_from_engine_error(e: &kv::Error) -> RequestStatusKind {
@@ -414,9 +419,8 @@ impl Engine for RaftKv {
         });
 
         let cb = StoreCallback::write_ext(applied_cb, proposed_cb, committed_cb);
-        if let Some(deadline) = batch.deadline {
-            self.router.send_command_with_deadline(cmd, cb, deadline);
-        } else {
+        if res.is_ok() {
+            // TODO: do we need to support deadline?
             self.router.send_command(cmd, cb);
         }
         rx.inspect(move |ev| {

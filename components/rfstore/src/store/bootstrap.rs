@@ -6,7 +6,6 @@ use kvproto::{
     raft_serverpb::{PeerState, RegionLocalState, StoreIdent},
 };
 use protobuf::{Message, RepeatedField};
-use raftstore::store::util;
 use rfengine::{
     raft_state_key, region_state_key, KV_ENGINE_META_KEY, PREPARE_BOOTSTRAP_KEY, STORE_IDENT_KEY,
 };

@@ -10,7 +10,7 @@ use futures::executor::block_on;
 use kvproto::metapb::{Peer, PeerRole, Region};
 use pd_client::PdClient;
 use rand::Rng;
-use test_raftstore::TestPdClient;
+use test_pd_client::TestPdClient;
 
 use crate::{must_wait, try_wait};
 
