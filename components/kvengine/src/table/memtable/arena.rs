@@ -146,7 +146,7 @@ impl Arena {
         node.addr = node_addr;
         node.height = height;
         node.key_addr = key_addr;
-        node.value_addr.store(val_addr.0, Ordering::Relaxed);
+        node.value_addr.store(val_addr.0, Ordering::SeqCst);
         node
     }
 

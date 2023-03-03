@@ -555,11 +555,12 @@ fn restore_keyspace_raft_logs(
     let (_, rlog_meta_data) = raft_meta_data.first().unwrap();
     let mut raft_meta = StoreRaftLogBackupMeta::default();
     raft_meta.merge_from_bytes(rlog_meta_data.chunk()).unwrap();
-    let keyspace_meta = raft_meta
-        .raft_logs
-        .get(&keyspace_id)
-        .expect("keyspace is not found in backup files");
-    let raft_files = keyspace_meta.get_files();
+    let keyspace_meta = raft_meta.raft_logs.get(&keyspace_id);
+    if keyspace_meta.is_none() {
+        info!("There is no raft log files for keyspace {}", keyspace_id);
+        return;
+    }
+    let raft_files = keyspace_meta.unwrap().get_files();
     info!(
         "Restore {} raft files for keyspace {}",
         raft_files.len(),

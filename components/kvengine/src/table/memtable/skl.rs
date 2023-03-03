@@ -1279,4 +1279,45 @@ mod tests {
         assert!(l.size() > l.arena.size() as u64);
         assert!(l.size() * 9 / 10 < l.arena.size() as u64);
     }
+
+    #[test]
+    fn test_race() {
+        for _ in 0..100 {
+            let l = Arc::new(SkipList::new(None));
+            let new_key = Arc::new(AtomicU64::new(0));
+            for _ in 0..4 {
+                let new_key = new_key.clone();
+                let l = l.clone();
+                std::thread::spawn(move || {
+                    let mut hint = Hint::new();
+                    loop {
+                        let i = new_key.load(Ordering::Acquire);
+                        let bin = i.to_le_bytes();
+                        let val = l.get_with_hint(&bin, u64::MAX, &mut hint);
+                        if val.is_valid() {
+                            assert_eq!(val.user_meta(), &bin, "{}", i);
+                            assert_eq!(val.get_value(), &bin, "{}", i);
+                        }
+                        if i == 10000 - 1 {
+                            return;
+                        }
+                    }
+                });
+            }
+            let mut wb = WriteBatch::new();
+            let mut hint = Hint::new();
+            for i in 0u64..10000 {
+                let bin = i.to_le_bytes();
+                let key = &bin;
+                let um = &bin;
+                let val = &bin;
+                wb.put(key, 1, um, i, val);
+                let entry = wb.get(0);
+                let buf = wb.buf.chunk();
+                l.put_with_hint(buf, &entry, &mut hint);
+                new_key.store(i, Ordering::Release);
+                wb.reset();
+            }
+        }
+    }
 }

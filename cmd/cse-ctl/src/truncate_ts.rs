@@ -1,14 +1,18 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    collections::HashMap, path::PathBuf, str::FromStr, sync::mpsc::SyncSender, time::Duration,
+    collections::HashMap,
+    path::PathBuf,
+    str::FromStr,
+    sync::{mpsc::SyncSender, Arc},
+    time::Duration,
 };
 
+use api_version::ApiV2;
 use clap::Args;
-use cse_ctl::common::{create_pd_client, get_all_stores_except_tiflash, send_request_to_store};
 use http::{Request, Uri};
 use hyper::Body;
-use kvengine::{EngineStats, ShardTruncateTsStats};
+use kvengine::{EngineStats, ShardStats, ShardTruncateTsStats};
 use kvproto::metapb::Store;
 use pd_client::PdClient;
 use security::SecurityConfig;
@@ -17,9 +21,16 @@ use tikv_client::transaction::{Client as TiKVClient, ResolveLocksOptions};
 use tikv_util::time::Instant;
 use tokio::runtime::Runtime;
 
+use crate::{
+    common::{create_pd_client, get_all_stores_except_tiflash, send_request_to_store},
+    error::Error,
+};
+
 const DEFAULT_TRUNCATE_TS_TIMEOUT: u64 = 5 * 60; // 5 min
 const MAX_WAIT_TRUNCATE_TS_CNT: usize = 10;
 const TRUNCATE_TS_QUERY_INTERVAL: Duration = Duration::from_secs(10);
+
+pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Args)]
 pub struct TruncateTsArgs {
@@ -46,13 +57,28 @@ pub struct TruncateTsArgs {
     pub key: PathBuf,
 }
 
-pub(crate) fn execute_truncate_ts(args: TruncateTsArgs) {
-    let timeout = Duration::from_secs(args.timeout);
+pub fn execute_truncate_ts(args: TruncateTsArgs) {
     let config = get_truncate_ts_config_from_args(&args);
     let pd_client = create_pd_client(&config.security, &config.pd);
-    let truncate_ts = args.truncate_ts;
-    let cluster_id = pd_client.get_cluster_id().unwrap();
-    info!("Cluster {} truncate ts {}.", cluster_id, truncate_ts,);
+    truncate_ts_with_cfg(
+        config,
+        Arc::new(pd_client),
+        args.truncate_ts,
+        Duration::from_secs(args.timeout),
+        None,
+    )
+    .unwrap();
+}
+
+pub fn truncate_ts_with_cfg(
+    config: TruncateTsConfig,
+    pd_client: Arc<dyn PdClient>,
+    truncate_ts: u64,
+    timeout: Duration,
+    keyspace_id: Option<u32>,
+) -> Result<()> {
+    let cluster_id = pd_client.get_cluster_id()?;
+    info!("Cluster {} begin truncate ts {}.", cluster_id, truncate_ts);
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(8)
@@ -60,26 +86,35 @@ pub(crate) fn execute_truncate_ts(args: TruncateTsArgs) {
         .build()
         .unwrap();
 
-    if let Err(e) = runtime.block_on(resolve_async_commit_locks(&config)) {
-        error!("resolve_async_commit_locks error: {:?}", e);
-        return;
+    let range = keyspace_id.map(|id| ApiV2::get_txn_keyspace_range(id));
+    if !config.skip_resolve_lock {
+        if let Err(e) = runtime.block_on(resolve_async_commit_locks(&config, range.clone())) {
+            error!("resolve_async_commit_locks error: {:?}", e);
+            return Err(e);
+        }
     }
 
     let start = Instant::now();
     while Instant::now().duration_since(start) < timeout {
-        let stores = get_all_stores_except_tiflash(&pd_client).unwrap();
+        let stores = get_all_stores_except_tiflash(pd_client.as_ref())?;
         let mut remain_stores = HashMap::new();
         for store in stores {
             remain_stores.insert(store.id, store);
         }
-        match request_truncate_ts_on_all_stores(cluster_id, &remain_stores, truncate_ts, &runtime) {
+        match request_truncate_ts_on_all_stores(
+            cluster_id,
+            &remain_stores,
+            truncate_ts,
+            range.clone(),
+            &runtime,
+        ) {
             Ok(shard_cnt) => {
                 if shard_cnt == 0 {
                     info!(
                         "Current max ts is already smaller than truncate ts {:?}",
                         truncate_ts
                     );
-                    return;
+                    return Ok(());
                 }
                 info!(
                     "Send requests to all stores to truncate ts {:?} succeed, {:?} shards is executing truncate ts",
@@ -88,13 +123,14 @@ pub(crate) fn execute_truncate_ts(args: TruncateTsArgs) {
             }
             Err(e) => {
                 error!("Request to truncate ts failed {:?}", e);
-                return;
+                return Err(e);
             }
         }
 
         if let Err(e) = wait_truncate_ts_finish(
             &mut remain_stores,
             truncate_ts,
+            keyspace_id,
             &runtime,
             TRUNCATE_TS_QUERY_INTERVAL,
         ) {
@@ -103,10 +139,10 @@ pub(crate) fn execute_truncate_ts(args: TruncateTsArgs) {
 
         if remain_stores.is_empty() {
             info!("All stores truncate ts to {:?} succeed", truncate_ts);
-            return;
+            return Ok(());
         }
     }
-    error!("Check truncate ts timeout.");
+    Err(Error::Timeout(timeout.as_secs()))
 }
 
 // send truncate ts request and return the count of shard which execute truncate ts.
@@ -114,8 +150,9 @@ fn request_truncate_ts_on_all_stores(
     cluster_id: u64,
     stores: &HashMap<u64, Store>,
     truncate_ts: u64,
+    range: Option<(Vec<u8>, Vec<u8>)>,
     runtime: &Runtime,
-) -> Result<usize, String> {
+) -> Result<usize> {
     let mut shard_cnt = 0;
     let store_cnt = stores.len();
     let (tx, rx) = std::sync::mpsc::sync_channel(store_cnt);
@@ -124,10 +161,11 @@ fn request_truncate_ts_on_all_stores(
             cluster_id,
             store.clone(),
             truncate_ts,
+            range.clone(),
             tx.clone(),
         ));
     }
-    let mut errs = vec![];
+    let mut last_err = None;
     for _ in 0..store_cnt {
         match rx.recv().unwrap() {
             Ok((store_id, resp)) => {
@@ -138,12 +176,13 @@ fn request_truncate_ts_on_all_stores(
                 shard_cnt += resp.len();
             }
             Err(err) => {
-                errs.push(err);
+                error!("Truncate ts on store failed, {:?}", err);
+                last_err = Some(err);
             }
         }
     }
-    if !errs.is_empty() {
-        return Err(errs.join(";"));
+    if let Some(e) = last_err {
+        return Err(e);
     }
     Ok(shard_cnt)
 }
@@ -152,14 +191,17 @@ async fn request_truncate_ts_store(
     cluster_id: u64,
     store: Store,
     truncate_ts: u64,
-    tx: SyncSender<Result<(u64, Vec<ShardTruncateTsStats>), String>>,
+    range: Option<(Vec<u8>, Vec<u8>)>,
+    tx: SyncSender<Result<(u64, Vec<ShardTruncateTsStats>)>>,
 ) {
     let uri = Uri::from_str(&format!("http://{}/truncate-ts", &store.status_address)).unwrap();
     let store_id = store.get_id();
-    let mut body_map = HashMap::new();
-    body_map.insert("cluster_id".to_string(), cluster_id.to_string());
-    body_map.insert("truncate_ts".to_string(), truncate_ts.to_string());
-    let json_string = serde_json::to_string(&body_map).unwrap();
+    let config = cloud_server::TruncateTsConfig {
+        cluster_id,
+        ts: truncate_ts,
+        range,
+    };
+    let json_string = serde_json::to_string(&config).unwrap();
     let req = Request::post(uri).body(Body::from(json_string)).unwrap();
     match send_request_to_store(req, &store).await {
         Ok(resp) => {
@@ -167,7 +209,10 @@ async fn request_truncate_ts_store(
             tx.send(Ok((store_id, resp))).unwrap()
         }
         Err(e) => tx
-            .send(Err(format!("Store {:?} failed, {:?}", store_id, e)))
+            .send(Err(Error::ServerError(format!(
+                "Store {:?} failed, {:?}",
+                store_id, e
+            ))))
             .unwrap(),
     }
 }
@@ -176,9 +221,10 @@ async fn request_truncate_ts_store(
 fn wait_truncate_ts_finish(
     stores: &mut HashMap<u64, Store>,
     truncate_ts: u64,
+    keyspace_id: Option<u32>,
     runtime: &Runtime,
     interval: Duration,
-) -> Result<(), String> {
+) -> Result<()> {
     for _ in 0..MAX_WAIT_TRUNCATE_TS_CNT {
         // wait a while for truncate finish.
         std::thread::sleep(interval);
@@ -186,9 +232,9 @@ fn wait_truncate_ts_finish(
         let cnt = stores.len();
         let (tx, rx) = std::sync::mpsc::sync_channel(cnt);
         for (_, store) in stores.clone() {
-            runtime.spawn(query_max_ts_store(store, tx.clone()));
+            runtime.spawn(query_max_ts_store(store, keyspace_id, tx.clone()));
         }
-        let mut errs = vec![];
+        let mut last_err = None;
         for _ in 0..cnt {
             match rx.recv().unwrap() {
                 Ok((store_id, max_ts)) => {
@@ -207,12 +253,12 @@ fn wait_truncate_ts_finish(
                 }
                 Err(err) => {
                     error!("Query store max ts failed, {:?}", err);
-                    errs.push(err);
+                    last_err = Some(err);
                 }
             }
         }
-        if !errs.is_empty() {
-            return Err(errs.join(";"));
+        if let Some(e) = last_err {
+            return Err(e);
         }
         if stores.is_empty() {
             return Ok(());
@@ -221,23 +267,49 @@ fn wait_truncate_ts_finish(
     Ok(())
 }
 
-async fn query_max_ts_store(store: Store, tx: SyncSender<Result<(u64, u64), String>>) {
-    let uri = Uri::from_str(&format!("http://{}/kvengine", &store.status_address)).unwrap();
+async fn query_max_ts_store(
+    store: Store,
+    keyspace_id: Option<u32>,
+    tx: SyncSender<Result<(u64, u64)>>,
+) {
+    let uri = match keyspace_id {
+        Some(id) => Uri::from_str(&format!(
+            "http://{}/kvengine/keyspace/{}",
+            &store.status_address, id
+        ))
+        .unwrap(),
+        None => Uri::from_str(&format!("http://{}/kvengine", &store.status_address)).unwrap(),
+    };
     let store_id = store.get_id();
     let client = hyper::Client::new();
     match client.get(uri).await {
         Ok(resp) => {
             let body = hyper::body::to_bytes(resp.into_body()).await.unwrap();
-            let engine_stats: EngineStats = serde_json::from_slice(&body).unwrap();
-            tx.send(Ok((store_id, engine_stats.max_ts))).unwrap()
+            match keyspace_id {
+                Some(_) => {
+                    let shard_stats: Vec<ShardStats> = serde_json::from_slice(&body).unwrap();
+                    let max_ts = shard_stats.iter().map(|s| s.max_ts).max().unwrap_or(0);
+                    tx.send(Ok((store_id, max_ts))).unwrap();
+                }
+                None => {
+                    let engine_stats: EngineStats = serde_json::from_slice(&body).unwrap();
+                    tx.send(Ok((store_id, engine_stats.max_ts))).unwrap();
+                }
+            }
         }
         Err(e) => tx
-            .send(Err(format!("Store {:?} failed, {:?}", store_id, e)))
+            .send(Err(Error::ServerError(format!(
+                "Store {:?} failed, {:?}",
+                store_id, e
+            ))))
             .unwrap(),
     }
 }
 
-async fn resolve_async_commit_locks(config: &TruncateTsConfig) -> tikv_client::Result<()> {
+async fn resolve_async_commit_locks(
+    config: &TruncateTsConfig,
+    range: Option<(Vec<u8>, Vec<u8>)>,
+) -> Result<()> {
     let tikv_client_config = if config.security.ca_path.is_empty() {
         tikv_client::Config::default()
     } else {
@@ -259,10 +331,12 @@ async fn resolve_async_commit_locks(config: &TruncateTsConfig) -> tikv_client::R
         async_commit_only: true,
         ..Default::default()
     };
-    let result = tikv_client.cleanup_locks(&safepoint, options).await?;
+    let result = tikv_client
+        .cleanup_locks(range.unwrap_or_default(), &safepoint, options)
+        .await?;
     info!(
-        "resolve_async_commit_locks succeed, meet locks: {}",
-        result.meet_locks
+        "resolve_async_commit_locks succeed, resolved locks: {}",
+        result.resolved_locks
     );
     Ok(())
 }
@@ -273,6 +347,7 @@ async fn resolve_async_commit_locks(config: &TruncateTsConfig) -> tikv_client::R
 pub struct TruncateTsConfig {
     pub pd: pd_client::Config,
     pub security: SecurityConfig,
+    pub skip_resolve_lock: bool,
 }
 
 fn get_truncate_ts_config_from_args(args: &TruncateTsArgs) -> TruncateTsConfig {
@@ -294,5 +369,6 @@ fn get_truncate_ts_config_from_args(args: &TruncateTsArgs) -> TruncateTsConfig {
     if args.key.exists() {
         config.security.key_path = args.key.to_str().unwrap().to_owned();
     }
+    config.skip_resolve_lock = false;
     config
 }

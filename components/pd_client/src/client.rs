@@ -1072,4 +1072,101 @@ impl PdClient for RpcClient {
             .request(req, executor, LEADER_CHANGE_RETRY)
             .execute()
     }
+
+    fn split_regions(&self, keys: Vec<Vec<u8>>) -> PdFuture<()> {
+        let timer = Instant::now();
+        let mut req = pdpb::SplitRegionsRequest::default();
+        req.set_header(self.header());
+        req.set_split_keys(keys.into());
+        req.set_retry_limit(LEADER_CHANGE_RETRY as u64);
+        let executor = move |client: &Client, req: pdpb::SplitRegionsRequest| {
+            let handler = {
+                let inner = client.inner.rl();
+                inner
+                    .client_stub
+                    .split_regions_async_opt(&req, call_option_inner(&inner))
+                    .unwrap_or_else(|e| {
+                        panic!("fail to request PD {} err {:?}", "split regions", e)
+                    })
+            };
+            Box::pin(async move {
+                let resp = handler.await?;
+                PD_REQUEST_HISTOGRAM_VEC
+                    .with_label_values(&["split_regions"])
+                    .observe(duration_to_sec(timer.saturating_elapsed()));
+                check_resp_header(resp.get_header())?;
+                Ok(())
+            }) as PdFuture<_>
+        };
+        self.pd_client
+            .request(req, executor, LEADER_CHANGE_RETRY)
+            .execute()
+    }
+
+    fn split_and_scatter_regions(&self, keys: Vec<Vec<u8>>) -> PdFuture<()> {
+        let timer = Instant::now();
+        let mut req = pdpb::SplitAndScatterRegionsRequest::default();
+        req.set_header(self.header());
+        req.set_split_keys(keys.into());
+        req.set_retry_limit(LEADER_CHANGE_RETRY as u64);
+        let executor = move |client: &Client, req: pdpb::SplitAndScatterRegionsRequest| {
+            let handler = {
+                let inner = client.inner.rl();
+                inner
+                    .client_stub
+                    .split_and_scatter_regions_async_opt(&req, call_option_inner(&inner))
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "fail to request PD {} err {:?}",
+                            "split and scatter regions", e
+                        )
+                    })
+            };
+            Box::pin(async move {
+                let resp = handler.await?;
+                PD_REQUEST_HISTOGRAM_VEC
+                    .with_label_values(&["split_and_scatter_regions"])
+                    .observe(duration_to_sec(timer.saturating_elapsed()));
+                check_resp_header(resp.get_header())?;
+                Ok(())
+            }) as PdFuture<_>
+        };
+        self.pd_client
+            .request(req, executor, LEADER_CHANGE_RETRY)
+            .execute()
+    }
+
+    fn scan_regions(
+        &self,
+        key: Vec<u8>,
+        end_key: Vec<u8>,
+        limit: usize,
+    ) -> PdFuture<Vec<pdpb::Region>> {
+        let timer = Instant::now();
+        let mut req = pdpb::ScanRegionsRequest::default();
+        req.set_header(self.header());
+        req.set_start_key(key);
+        req.set_end_key(end_key);
+        req.set_limit(limit as i32);
+        let executor = move |client: &Client, req: pdpb::ScanRegionsRequest| {
+            let handler = {
+                let inner = client.inner.rl();
+                inner
+                    .client_stub
+                    .scan_regions_async_opt(&req, call_option_inner(&inner))
+                    .unwrap_or_else(|e| panic!("fail to request PD {} err {:?}", "scan regions", e))
+            };
+            Box::pin(async move {
+                let mut resp = handler.await?;
+                PD_REQUEST_HISTOGRAM_VEC
+                    .with_label_values(&["scan_regions"])
+                    .observe(duration_to_sec(timer.saturating_elapsed()));
+                check_resp_header(resp.get_header())?;
+                Ok(resp.take_regions().into())
+            }) as PdFuture<_>
+        };
+        self.pd_client
+            .request(req, executor, LEADER_CHANGE_RETRY)
+            .execute()
+    }
 }

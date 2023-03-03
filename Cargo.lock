@@ -1501,6 +1501,7 @@ dependencies = [
 name = "cse-ctl"
 version = "0.1.0"
 dependencies = [
+ "api_version",
  "bstr",
  "byteorder",
  "bytes",
@@ -6418,13 +6419,13 @@ dependencies = [
 
 [[package]]
 name = "tempfile"
-version = "3.2.0"
+version = "3.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dac1c663cfc93810f88aed9b8941d48cabf856a1b111c29a40439018d870eb22"
+checksum = "5cdb1ef4eaeeaddc8fbd371e5017057064af0911902ef36b39801f67cc6d79e4"
 dependencies = [
  "cfg-if 1.0.0",
+ "fastrand",
  "libc 0.2.132",
- "rand 0.8.5",
  "redox_syscall 0.2.11",
  "remove_dir_all",
  "winapi 0.3.9",
@@ -6484,6 +6485,7 @@ dependencies = [
  "bytes",
  "cloud_server",
  "dashmap 4.0.2",
+ "engine_traits",
  "futures 0.3.15",
  "grpcio",
  "hyper",
@@ -6491,6 +6493,7 @@ dependencies = [
  "kvproto",
  "pd_client",
  "rand 0.8.5",
+ "regex",
  "rfengine",
  "rfstore",
  "security",
@@ -7080,7 +7083,7 @@ dependencies = [
 [[package]]
 name = "tikv-client"
 version = "0.1.0"
-source = "git+http://github.com/tikv/client-rust.git?rev=a04e5510a726102d8e1a6b4b029c6e215fd46aa8#a04e5510a726102d8e1a6b4b029c6e215fd46aa8"
+source = "git+http://github.com/tikv/client-rust.git?rev=a675082f7569a305100ee5605ebee756d3c346b9#a675082f7569a305100ee5605ebee756d3c346b9"
 dependencies = [
  "async-recursion",
  "async-trait",
@@ -7111,7 +7114,7 @@ dependencies = [
 [[package]]
 name = "tikv-client-common"
 version = "0.1.0"
-source = "git+http://github.com/tikv/client-rust.git?rev=a04e5510a726102d8e1a6b4b029c6e215fd46aa8#a04e5510a726102d8e1a6b4b029c6e215fd46aa8"
+source = "git+http://github.com/tikv/client-rust.git?rev=a675082f7569a305100ee5605ebee756d3c346b9#a675082f7569a305100ee5605ebee756d3c346b9"
 dependencies = [
  "futures 0.3.15",
  "grpcio",
@@ -7127,7 +7130,7 @@ dependencies = [
 [[package]]
 name = "tikv-client-pd"
 version = "0.1.0"
-source = "git+http://github.com/tikv/client-rust.git?rev=a04e5510a726102d8e1a6b4b029c6e215fd46aa8#a04e5510a726102d8e1a6b4b029c6e215fd46aa8"
+source = "git+http://github.com/tikv/client-rust.git?rev=a675082f7569a305100ee5605ebee756d3c346b9#a675082f7569a305100ee5605ebee756d3c346b9"
 dependencies = [
  "async-trait",
  "futures 0.3.15",
@@ -7140,7 +7143,7 @@ dependencies = [
 [[package]]
 name = "tikv-client-proto"
 version = "0.1.0"
-source = "git+http://github.com/tikv/client-rust.git?rev=a04e5510a726102d8e1a6b4b029c6e215fd46aa8#a04e5510a726102d8e1a6b4b029c6e215fd46aa8"
+source = "git+http://github.com/tikv/client-rust.git?rev=a675082f7569a305100ee5605ebee756d3c346b9#a675082f7569a305100ee5605ebee756d3c346b9"
 dependencies = [
  "futures 0.3.15",
  "grpcio",
@@ -7153,7 +7156,7 @@ dependencies = [
 [[package]]
 name = "tikv-client-store"
 version = "0.1.0"
-source = "git+http://github.com/tikv/client-rust.git?rev=a04e5510a726102d8e1a6b4b029c6e215fd46aa8#a04e5510a726102d8e1a6b4b029c6e215fd46aa8"
+source = "git+http://github.com/tikv/client-rust.git?rev=a675082f7569a305100ee5605ebee756d3c346b9#a675082f7569a305100ee5605ebee756d3c346b9"
 dependencies = [
  "async-trait",
  "derive-new",
@@ -7266,10 +7269,15 @@ dependencies = [
 name = "tikv-worker"
 version = "0.1.0"
 dependencies = [
+ "api_version",
+ "bytes",
  "chrono",
  "clap 2.33.0",
+ "dashmap 4.0.2",
  "file_system",
+ "futures 0.3.15",
  "grpcio",
+ "hex 0.4.2",
  "http",
  "hyper",
  "kvengine",
@@ -7277,6 +7285,7 @@ dependencies = [
  "kvproto",
  "pd_client",
  "protobuf",
+ "rand 0.8.5",
  "rfstore",
  "security",
  "serde",
@@ -7286,10 +7295,15 @@ dependencies = [
  "slog",
  "slog-global",
  "slog-term",
+ "tempfile",
+ "test_raftstore",
+ "test_util",
+ "thiserror",
  "tikv",
  "tikv_util",
  "tokio",
  "toml",
+ "url",
 ]
 
 [[package]]

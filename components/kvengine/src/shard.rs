@@ -893,8 +893,14 @@ impl LevelHandler {
         )
     }
 
-    pub fn get(&self, key: &[u8], version: u64, key_hash: u64) -> table::Value {
-        self.get_in_table(key, version, key_hash, self.get_table(key))
+    pub fn get(
+        &self,
+        key: &[u8],
+        version: u64,
+        key_hash: u64,
+        val_mem_holder: &mut Vec<u8>,
+    ) -> table::Value {
+        self.get_in_table(key, version, key_hash, self.get_table(key), val_mem_holder)
     }
 
     fn get_in_table(
@@ -903,11 +909,12 @@ impl LevelHandler {
         version: u64,
         key_hash: u64,
         tbl: Option<&SSTable>,
+        val_mem_holder: &mut Vec<u8>,
     ) -> table::Value {
         if tbl.is_none() {
             return table::Value::new();
         }
-        tbl.unwrap().get(key, version, key_hash)
+        tbl.unwrap().get(key, version, key_hash, val_mem_holder)
     }
 
     pub(crate) fn get_table(&self, key: &[u8]) -> Option<&SSTable> {
@@ -955,12 +962,18 @@ impl LevelHandler {
         }
     }
 
-    pub(crate) fn get_newer(&self, key: &[u8], version: u64, key_hash: u64) -> table::Value {
+    pub(crate) fn get_newer(
+        &self,
+        key: &[u8],
+        version: u64,
+        key_hash: u64,
+        val_mem_holder: &mut Vec<u8>,
+    ) -> table::Value {
         if self.max_ts < version {
             return table::Value::new();
         }
         if let Some(tbl) = self.get_table(key) {
-            return tbl.get_newer(key, version, key_hash);
+            return tbl.get_newer(key, version, key_hash, val_mem_holder);
         }
         table::Value::new()
     }

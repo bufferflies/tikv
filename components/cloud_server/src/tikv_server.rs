@@ -1007,7 +1007,7 @@ struct PdIDAllocator {
     pd: Arc<dyn pd_client::PdClient>,
 }
 
-const ALLOCATE_ID_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const ALLOCATE_ID_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 impl kvengine::IDAllocator for PdIDAllocator {
     fn alloc_id(&self, count: usize) -> Vec<u64> {
@@ -1021,7 +1021,7 @@ impl kvengine::IDAllocator for PdIDAllocator {
                 }
                 Err(err) => {
                     error!("failed to allocate file id from PD {:?}", err);
-                    std::thread::sleep(Duration::from_secs(1));
+                    std::thread::sleep(Duration::from_secs(3));
                     if start.saturating_elapsed() > ALLOCATE_ID_TIMEOUT {
                         panic!("allocate file id timeout");
                     }

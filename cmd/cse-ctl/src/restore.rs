@@ -81,7 +81,7 @@ struct RestorePDArgs {
 #[derive(Args)]
 pub struct RestoreKeyspaceArgs {
     /// The path of the config file.
-    #[clap(long)]
+    #[clap(long, default_value = "")]
     pub config: PathBuf,
     /// The name of the backup file.
     #[clap(long)]
@@ -92,6 +92,18 @@ pub struct RestoreKeyspaceArgs {
     /// The local working path for temporary files during restore.
     #[clap(long)]
     pub working_path: Option<String>,
+    /// PD endpoints, use `,` to separate multiple PDs
+    #[clap(long, default_value_t = String::new())]
+    pub pd: String,
+    /// Path of file that contains list of trusted SSL CAs
+    #[clap(long, default_value = "")]
+    pub cacert: PathBuf,
+    /// Path of file that contains X509 certificate in PEM format
+    #[clap(long, default_value = "")]
+    pub cert: PathBuf,
+    /// Path of file that contains X509 key in PEM format
+    #[clap(long, default_value = "")]
+    pub key: PathBuf,
 }
 
 pub fn execute_restore_command(cmd: RestoreCommand) {
@@ -265,6 +277,7 @@ pub struct RestoreConfig {
     pub pd: pd_client::Config,
     pub security: SecurityConfig,
     pub dfs: DFSConfig,
+    pub skip_resolve_lock: bool,
 }
 
 fn get_restore_pd_config_from_args(args: &RestorePDArgs) -> RestoreConfig {
@@ -297,5 +310,6 @@ fn get_restore_tikv_config_from_args(args: &RestoreTiKVArgs) -> RestoreConfig {
         config = toml::from_slice(&data).unwrap();
     }
     config.dfs.override_from_env();
+    config.skip_resolve_lock = false;
     config
 }

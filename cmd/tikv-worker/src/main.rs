@@ -1,5 +1,7 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
+mod load_data;
+
 use std::{
     io,
     path::{Path, PathBuf},
@@ -26,6 +28,8 @@ use rfstore::store::RegionSnapshot;
 use security::{SecurityConfig, SecurityManager};
 use slog_global::{error, info};
 use tikv_util::{config::ReadableDuration, time::Instant};
+
+use crate::load_data::{handle_load_data, LoadDataManager, MAX_IN_MEM_SIZE};
 
 const ZSTD_COMPRESSION_LEVEL_FOR_REMOTE: &str = "5";
 
@@ -98,6 +102,20 @@ fn main() {
                 .value_name("INTERVAL")
                 .help("Sets registration update interval"),
         )
+        .arg(
+            Arg::with_name("register")
+                .long("register")
+                .takes_value(true)
+                .value_name("Bool")
+                .help("register compactor to stores"),
+        )
+        .arg(
+            Arg::with_name("data-dir")
+                .long("data-dir")
+                .takes_value(true)
+                .value_name("DIR")
+                .help("data dir for load_data"),
+        )
         .get_matches();
 
     let mut config: Config = match matches.value_of_os("config") {
@@ -135,13 +153,14 @@ fn main() {
         config.dfs.s3_region,
         config.dfs.s3_bucket,
     ));
-    let dfs_clone = dfs.clone();
-    let thread_pool = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .worker_threads(16)
-        .thread_name("worker-server")
-        .build()
-        .unwrap();
+    let thread_pool = Arc::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .worker_threads(16)
+            .thread_name("worker-server")
+            .build()
+            .unwrap(),
+    );
     let addr = config.addr.parse().expect("Unable to parse socket address");
 
     let compression_lvl: i32 = config
@@ -155,15 +174,35 @@ fn main() {
         hyper::server::conn::AddrIncoming::bind(&addr)
     }
     .unwrap();
+    let security_mgr = Arc::new(
+        SecurityManager::new(&config.security)
+            .unwrap_or_else(|e| panic!("failed to create security manager: {:?}", e)),
+    );
+    let env = Arc::new(EnvBuilder::new().cq_count(1).build());
+    let pd = Arc::new(
+        RpcClient::new(&config.pd, Some(env), security_mgr)
+            .unwrap_or_else(|e| panic!("failed to create rpc client: {:?}", e)),
+    );
+    let load_manager = Arc::new(LoadDataManager::new(
+        pd.clone(),
+        config.data_dir.into(),
+        dfs.clone(),
+        thread_pool.clone(),
+        MAX_IN_MEM_SIZE,
+    ));
     let server_builder = hyper::Server::builder(incoming);
+    let dfs_clone = dfs.clone();
     let server = server_builder.serve(make_service_fn(move |_| {
-        let dfs = dfs.clone();
+        let dfs = dfs_clone.clone();
+        let load_manager = load_manager.clone();
         async move {
             // Create a status service.
             Ok::<_, hyper::Error>(service_fn(move |req: hyper::Request<hyper::Body>| {
                 let dfs = dfs.clone();
+                let load_manager = load_manager.clone();
                 async move {
-                    match req.uri().path() {
+                    let path = req.uri().path().to_owned();
+                    match path.as_ref() {
                         "/healthz" => Ok(hyper::Response::builder()
                             .status(200)
                             .body(hyper::Body::from("ok"))
@@ -172,6 +211,7 @@ fn main() {
                             kvengine::handle_remote_compaction(dfs, req, compression_lvl).await
                         }
                         "/analyze" => handle_remote_analysis(dfs, req).await,
+                        "/load_data" => handle_load_data(load_manager, req).await,
                         _ => Ok(hyper::Response::builder()
                             .status(404)
                             .body(hyper::Body::from("Not Found"))
@@ -182,23 +222,14 @@ fn main() {
         }
     }));
 
-    if !config.pd.endpoints.is_empty() {
-        let security_mgr = Arc::new(
-            SecurityManager::new(&config.security)
-                .unwrap_or_else(|e| panic!("failed to create security manager: {:?}", e)),
-        );
-        let env = Arc::new(EnvBuilder::new().cq_count(1).build());
-        let pd_client = Arc::new(
-            RpcClient::new(&config.pd, Some(env), security_mgr)
-                .unwrap_or_else(|e| panic!("failed to create rpc client: {:?}", e)),
-        );
+    if config.register {
         let remote_compact_url = format!("http://{}/compact", config.addr);
         let duration = config.update_interval.0;
         std::thread::spawn(move || {
             loop {
                 register_compactor_to_all_stores(
-                    pd_client.clone(),
-                    dfs_clone.clone(),
+                    pd.clone(),
+                    dfs.clone(),
                     remote_compact_url.clone(),
                 );
                 std::thread::sleep(duration);
@@ -349,6 +380,8 @@ pub struct Config {
     pub update_interval: ReadableDuration,
     pub dfs: DFSConfig,
     pub log_file: String,
+    pub data_dir: String,
+    pub register: bool,
 }
 
 impl Default for Config {
@@ -362,6 +395,8 @@ impl Default for Config {
             update_interval: ReadableDuration::minutes(10),
             dfs: DFSConfig::default(),
             log_file: String::default(),
+            data_dir: String::default(),
+            register: false,
         }
     }
 }
@@ -406,5 +441,13 @@ fn override_from_args(config: &mut Config, matches: &ArgMatches<'_>) {
 
     if let Some(interval) = matches.value_of("interval") {
         config.update_interval = ReadableDuration::secs(interval.parse().unwrap());
+    }
+
+    if let Some(register) = matches.value_of("register") {
+        config.register = register == "true"
+    }
+
+    if let Some(dir) = matches.value_of("data-dir") {
+        config.data_dir = dir.to_string()
     }
 }

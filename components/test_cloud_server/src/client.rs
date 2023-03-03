@@ -664,12 +664,14 @@ impl ClusterClient {
             let region_id = ctx.region_id;
             let region_ver = ctx.get_region_epoch().get_version();
             return Err(format!(
-                "val not equal for key {:?} on region {}:{}, db_len:{}, ref_store_len:{}",
+                "val not equal for key {:?} on region {}:{}, db_len:{}, db: {:?} ref_store_len:{}, ref store {:?}",
                 key,
                 region_id,
                 region_ver,
                 val.len(),
-                expect_val.len()
+                val,
+                expect_val.len(),
+                expect_val,
             )
             .into());
         }

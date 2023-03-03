@@ -11,6 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use api_version::ApiV2;
 use async_stream::stream;
 use bytes::Buf;
 use collections::HashMap;
@@ -31,7 +32,7 @@ use hyper::{
     service::{make_service_fn, service_fn},
     Body, Method, Request, Response, Server, StatusCode,
 };
-use kvengine::dfs::DFSConfig;
+use kvengine::{dfs::DFSConfig, Shard, ShardStats};
 use kvproto::raft_serverpb::StoreIdent;
 use online_config::OnlineConfig;
 use openssl::{
@@ -379,9 +380,27 @@ impl StatusServer {
         let path = req.uri().path();
         let last = get_last_path_segment(path);
         let res;
-        if let Ok(region_id) = u64::from_str(last) {
-            let shard_stats = engine.get_shard_stat(region_id);
-            res = serde_json::to_string_pretty(&shard_stats);
+        if let Ok(id) = u64::from_str(last) {
+            // get all shard state in given keyspace id.
+            if path.starts_with("/kvengine/keyspace") {
+                let range = ApiV2::get_txn_keyspace_range(id as u32);
+                match Self::get_covered_shards_by_range(Some(range), &engine) {
+                    Ok(shards) => {
+                        let states: Vec<ShardStats> =
+                            shards.iter().map(|s| s.get_stats()).collect();
+                        res = serde_json::to_string_pretty(&states);
+                    }
+                    Err(e) => {
+                        return Ok(make_response(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            e.to_string(),
+                        ));
+                    }
+                }
+            } else {
+                let shard_stats = engine.get_shard_stat(id);
+                res = serde_json::to_string_pretty(&shard_stats);
+            }
         } else if path.starts_with("/kvengine/all") {
             let all_shard_stats = engine.get_all_shard_stats();
             res = serde_json::to_string_pretty(&all_shard_stats);
@@ -436,6 +455,55 @@ impl StatusServer {
                 format!("failed to decode, error: {:?}", e),
             ),
         })
+    }
+
+    async fn get_change_set_request(
+        raw_req: Request<Body>,
+    ) -> hyper::Result<kvenginepb::ChangeSet> {
+        let mut body = Vec::new();
+        raw_req
+            .into_body()
+            .try_for_each(|bytes| {
+                body.extend(bytes);
+                ok(())
+            })
+            .await?;
+        let mut cs = kvenginepb::ChangeSet::default();
+        cs.merge_from_bytes(&body).unwrap();
+        Ok(cs)
+    }
+
+    async fn ingest_files(req: Request<Body>, router: RaftRouter) -> hyper::Result<Response<Body>> {
+        let cs = Self::get_change_set_request(req).await?;
+        let shard_id = cs.get_shard_id();
+        info!("[{}] receive restore_shard request: {:?}", shard_id, cs);
+
+        let (cb, fut) = paired_future_callback();
+        let callback = Callback::write(Box::new(move |res| {
+            cb(res);
+        }));
+        router.send_casual_msg(
+            cs.get_shard_id(),
+            CasualMessage::IngestFiles { cs, callback },
+        );
+
+        let res = fut.await.unwrap();
+        if res.response.get_header().has_error() {
+            error!(
+                "{} ingest_files error: {:?}",
+                shard_id,
+                res.response.get_header().get_error()
+            );
+            let err_data = res
+                .response
+                .get_header()
+                .get_error()
+                .write_to_bytes()
+                .unwrap();
+            Ok(make_response(StatusCode::INTERNAL_SERVER_ERROR, err_data))
+        } else {
+            Ok(make_response(StatusCode::OK, ""))
+        }
     }
 
     async fn dump_rfengine_stats(
@@ -516,48 +584,65 @@ impl StatusServer {
         })
     }
 
-    async fn get_cluster_and_truncate_ts(req: Request<Body>) -> hyper::Result<(u64, u64)> {
-        let mut body = Vec::new();
-        req.into_body()
-            .try_for_each(|bytes| {
-                body.extend(bytes);
-                ok(())
-            })
-            .await?;
-        let args = decode_json(&body).unwrap_or_default();
-        let cluster_id = args
-            .get("cluster_id")
-            .map(|v| u64::from_str(v).unwrap_or_default())
-            .unwrap_or_default();
-        let truncate_ts = args
-            .get("truncate_ts")
-            .map(|v| u64::from_str(v).unwrap_or_default())
-            .unwrap_or_default();
-
-        Ok((cluster_id, truncate_ts))
-    }
-
     fn check_truncate_ts_req(
         rfengine: &rfengine::RfEngine,
-        cluster_id: u64,
-        truncate_ts: u64,
+        config: &TruncateTsConfig,
     ) -> Result<()> {
         let mut store_ident = StoreIdent::default();
         let data = rfengine
             .get_state(0, rfengine::STORE_IDENT_KEY)
             .unwrap_or_default();
         store_ident.merge_from_bytes(data.chunk()).unwrap();
-        if store_ident.cluster_id != cluster_id {
+        if store_ident.cluster_id != config.cluster_id {
             return Err(box_err!(
                 "Cluster id mismatch, got {:?}, expect {:?}",
-                cluster_id,
+                config.cluster_id,
                 store_ident.cluster_id
             ));
         }
-        if truncate_ts == 0 {
-            return Err(box_err!("Invalid truncate ts {:?}", truncate_ts));
+        if config.ts == 0 {
+            return Err(box_err!("Invalid truncate ts {:?}", config.ts));
+        }
+        if config.range.is_some() {
+            let range = config.range.as_ref().unwrap();
+            if range.0.is_empty() || range.1.is_empty() {
+                return Err(box_err!("Unsupported range {:?}", range));
+            }
         }
         Ok(())
+    }
+
+    fn get_covered_shards_by_range(
+        range: Option<(Vec<u8>, Vec<u8>)>,
+        engine: &kvengine::Engine,
+    ) -> Result<Vec<Arc<Shard>>> {
+        let shards = engine.get_all_shard_id_vers();
+        let mut partial_covered_shard = None;
+        let ret: Vec<Arc<Shard>> = shards
+            .into_iter()
+            .filter_map(|s| engine.get_shard(s.id))
+            .filter(|s| {
+                if range.is_none() {
+                    return true;
+                }
+                let range = range.as_ref().unwrap();
+                let full_cover = s.start >= range.0 && s.end <= range.1;
+                if !full_cover && s.start < range.1 && s.end > range.0 {
+                    partial_covered_shard = Some(s.clone());
+                }
+                full_cover
+            })
+            .collect();
+        if let Some(s) = partial_covered_shard {
+            return Err(box_err!(
+                "Shard {} [{:?}-{:?}) is partial covered by range {:?}",
+                s.tag(),
+                s.start,
+                s.end,
+                range
+            ));
+        }
+        Ok(ret)
     }
 
     async fn truncate_ts(
@@ -566,12 +651,25 @@ impl StatusServer {
         engine: kvengine::Engine,
         router: RaftRouter,
     ) -> hyper::Result<Response<Body>> {
-        let (cluster_id, truncate_ts) = Self::get_cluster_and_truncate_ts(req).await?;
-        if let Err(e) = Self::check_truncate_ts_req(&rfengine, cluster_id, truncate_ts) {
+        let body = hyper::body::to_bytes(req.into_body()).await?;
+        let config: serde_json::Result<TruncateTsConfig> = serde_json::from_slice(&body);
+        if config.is_err() {
+            return Ok(make_response(StatusCode::BAD_REQUEST, "Bad request body"));
+        }
+        let config = config.unwrap();
+        let cluster_id = config.cluster_id;
+        let truncate_ts = config.ts;
+        if let Err(e) = Self::check_truncate_ts_req(&rfengine, &config) {
             error!("Invalid cluster id or truncate ts, {:?}", e);
             return Ok(make_response(StatusCode::BAD_REQUEST, e.to_string()));
         }
-        let all_shards = engine.get_all_shard_id_vers();
+        let all_shards = Self::get_covered_shards_by_range(config.range, &engine);
+        if all_shards.is_err() {
+            let msg = all_shards.err().unwrap().to_string();
+            error!("Some shards are partial covered {}", msg);
+            return Ok(make_response(StatusCode::BAD_REQUEST, msg));
+        }
+        let all_shards = all_shards.unwrap();
         let mut region_futures = vec![];
         let mut shards_stat = vec![];
         info!(
@@ -580,14 +678,7 @@ impl StatusServer {
             cluster_id,
             all_shards.len()
         );
-        for id_ver in &all_shards {
-            let shard = engine.get_shard(id_ver.id);
-            // Skip invalid shard id here. Outside should be retry if engine's max_ts is still
-            // larger than truncate_ts after a certain duration.
-            if shard.is_none() {
-                continue;
-            }
-            let shard = shard.unwrap();
+        for shard in all_shards {
             let max_ts = shard.get_max_ts();
             // if shard max_ts is smaller than truncate_ts, no need to send request.
             if max_ts <= truncate_ts {
@@ -599,16 +690,16 @@ impl StatusServer {
             }));
             region_futures.push(fu);
             router.send_casual_msg(
-                id_ver.id,
+                shard.id,
                 CasualMessage::TruncateTs {
                     ts: truncate_ts,
-                    shard_ver: id_ver.ver,
+                    shard_ver: shard.ver,
                     callback,
                 },
             );
             shards_stat.push(kvengine::ShardTruncateTsStats {
-                id: id_ver.id,
-                ver: id_ver.ver,
+                id: shard.id,
+                ver: shard.ver,
                 cur_max_ts: max_ts,
                 truncate_ts,
             });
@@ -888,11 +979,15 @@ impl StatusServer {
                             (Method::POST, path) if path.starts_with("/truncate-ts") => {
                                 Self::truncate_ts(req, rfengine, engine, router).await
                             }
+
                             (Method::POST, path) if path.starts_with("/restore-shard") => {
                                 Self::restore_shard(req, router).await
                             }
                             (Method::POST, path) if path.starts_with("/kvengine/compactor") => {
                                 Self::add_remote_compactor(req, engine.comp_client.clone()).await
+                            }
+                            (Method::POST, path) if path.starts_with("/ingest_files") => {
+                                Self::ingest_files(req, router).await
                             }
                             _ => Ok(make_response(StatusCode::NOT_FOUND, "path not found")),
                         }
@@ -1182,3 +1277,12 @@ struct RestoreShardRequest {
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
 struct RestoreShardResponse {}
+
+#[derive(Default, Serialize, Deserialize, Debug)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+pub struct TruncateTsConfig {
+    pub cluster_id: u64,
+    pub ts: u64,
+    pub range: Option<(Vec<u8>, Vec<u8>)>, // None means apply to all keyspaces.
+}
