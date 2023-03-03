@@ -46,6 +46,7 @@ use kvproto::{
     replication_modepb::{ReplicationStatus, StoreDrAutoSyncStatus},
 };
 use security::SecurityManager;
+#[allow(unused_imports)]
 use tikv_util::{
     box_err,
     config::ReadableDuration,
