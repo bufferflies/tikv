@@ -15,7 +15,7 @@ use crate::{
     Error, Result, Version,
 };
 
-pub(crate) struct WALIterator {
+pub(crate) struct WalIterator {
     dir: PathBuf,
     epoch_id: u32,
     buf: BytesMut,
@@ -24,7 +24,7 @@ pub(crate) struct WALIterator {
 
 const MAX_BATCH_SIZE: usize = 256 * 1024 * 1024;
 
-impl WALIterator {
+impl WalIterator {
     pub(crate) fn new(dir: PathBuf, epoch_id: u32) -> Self {
         Self {
             dir,
@@ -44,7 +44,7 @@ impl WALIterator {
         let mut buf_reader = BufReader::new(fd);
         let header = match self.check_wal_header(&mut buf_reader) {
             Ok(header) => header,
-            Err(Error::EOF) => {
+            Err(Error::Eof) => {
                 return Ok(());
             }
             Err(e) => return Err(e),
@@ -52,7 +52,7 @@ impl WALIterator {
         loop {
             match self.read_batch(&mut buf_reader, &header) {
                 Err(err) => {
-                    if let Error::EOF = err {
+                    if let Error::Eof = err {
                         return Ok(());
                     }
                     return Err(err);
@@ -81,14 +81,14 @@ impl WALIterator {
             Err(err) => {
                 // Haven't written the header.
                 if buf.iter().all(|v| *v == 0) {
-                    return Err(Error::EOF);
+                    return Err(Error::Eof);
                 }
                 // Header is corrupt, but the first batch header is empty which means there
                 // is no data in this WAL. Treat it like EOF and WAL writer will rewrite the
                 // header.
                 reader.read_exact(&mut buf[..BATCH_HEADER_SIZE])?;
                 if buf.iter().take(BATCH_HEADER_SIZE).all(|v| *v == 0) {
-                    return Err(Error::EOF);
+                    return Err(Error::Eof);
                 }
                 // Header corruption.
                 Err(err)
@@ -108,7 +108,7 @@ impl WALIterator {
         let checksum = header_buf.get_u32_le();
         let length = header_buf.get_u32_le() as usize;
         if epoch_id == 0 && checksum == 0 && length == 0 {
-            return Err(Error::EOF);
+            return Err(Error::Eof);
         }
         if epoch_id != self.epoch_id {
             return Err(Error::Corruption("epoch mismatch".to_owned()));

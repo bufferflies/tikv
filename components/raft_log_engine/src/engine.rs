@@ -486,8 +486,8 @@ impl RaftEngineReadOnly for RaftLogEngine {
 
 impl RaftEngineDebug for RaftLogEngine {
     fn scan_entries<F>(&self, raft_group_id: u64, mut f: F) -> Result<()>
-        where
-            F: FnMut(&Entry) -> Result<bool>,
+    where
+        F: FnMut(&Entry) -> Result<bool>,
     {
         if let Some(first_index) = self.first_index(raft_group_id) {
             for idx in first_index..=self.last_index(raft_group_id).unwrap() {
@@ -624,9 +624,9 @@ impl RaftEngine for RaftLogEngine {
     }
 
     fn for_each_raft_group<E, F>(&self, f: &mut F) -> std::result::Result<(), E>
-        where
-            F: FnMut(u64) -> std::result::Result<(), E>,
-            E: From<engine_traits::Error>,
+    where
+        F: FnMut(u64) -> std::result::Result<(), E>,
+        E: From<engine_traits::Error>,
     {
         for id in self.0.raft_groups() {
             if id != STORE_STATE_ID {

@@ -68,7 +68,8 @@ impl CloudReader {
             let user_meta = UserMeta::from_slice(data_iter.item().user_meta());
             if user_meta.commit_ts < start_ts.into_inner() {
                 // A transaction's commit_ts must be greater than start_ts, if current commit_ts
-                // is already smaller than the start_ts, we don't need to look for older version.
+                // is already smaller than the start_ts, we don't need to look for older
+                // version.
                 break;
             }
             if let Some(record) = Self::get_commit_by_item(&data_iter.item(), start_ts) {
@@ -183,11 +184,12 @@ impl CloudReader {
         Ok(OldValue::None)
     }
 
-    /// Scan locks that satisfies `filter(lock)` returns true, from the given start key `start`.
-    /// At most `limit` locks will be returned. If `limit` is set to `0`, it means unlimited.
+    /// Scan locks that satisfies `filter(lock)` returns true, from the given
+    /// start key `start`. At most `limit` locks will be returned. If
+    /// `limit` is set to `0`, it means unlimited.
     ///
-    /// The return type is `(locks, is_remain)`. `is_remain` indicates whether there MAY be
-    /// remaining locks that can be scanned.
+    /// The return type is `(locks, is_remain)`. `is_remain` indicates whether
+    /// there MAY be remaining locks that can be scanned.
     pub fn scan_locks<F>(
         &mut self,
         start: Option<&Key>,

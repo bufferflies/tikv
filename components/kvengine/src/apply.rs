@@ -14,8 +14,8 @@ use moka::sync::SegmentedCache;
 use crate::{
     meta::is_move_down,
     table::{
-        memtable::CFTable,
-        sstable::{BlockCacheKey, L0Table, LocalFile, SSTable},
+        memtable::CfTable,
+        sstable::{BlockCacheKey, L0Table, LocalFile, SsTable},
     },
     *,
 };
@@ -23,7 +23,7 @@ use crate::{
 pub struct ChangeSet {
     pub change_set: kvenginepb::ChangeSet,
     pub l0_tables: HashMap<u64, L0Table>,
-    pub ln_tables: HashMap<u64, SSTable>,
+    pub ln_tables: HashMap<u64, SsTable>,
 }
 
 impl Deref for ChangeSet {
@@ -60,7 +60,7 @@ impl ChangeSet {
             let l0_table = L0Table::new(Arc::new(file), Some(cache), false)?;
             self.l0_tables.insert(id, l0_table);
         } else {
-            let ln_table = SSTable::new(Arc::new(file), Some(cache), level == 1)?;
+            let ln_table = SsTable::new(Arc::new(file), Some(cache), level == 1)?;
             self.ln_tables.insert(id, ln_table);
         }
         Ok(())
@@ -70,7 +70,7 @@ impl ChangeSet {
 pub(crate) fn create_snapshot_tables(
     snap: &kvenginepb::Snapshot,
     tables: &ChangeSet,
-) -> (Vec<L0Table>, [ShardCF; 3]) {
+) -> (Vec<L0Table>, [ShardCf; 3]) {
     let mut l0_tbls = vec![];
     for l0_create in snap.get_l0_creates() {
         let l0_tbl = tables.l0_tables.get(&l0_create.id).unwrap().clone();
@@ -79,7 +79,7 @@ pub(crate) fn create_snapshot_tables(
     l0_tbls.sort_by(|a, b| b.version().cmp(&a.version()));
     let mut scf_builders = vec![];
     for cf in 0..NUM_CFS {
-        let scf = ShardCFBuilder::new(cf);
+        let scf = ShardCfBuilder::new(cf);
         scf_builders.push(scf);
     }
     for table_create in snap.get_table_creates() {
@@ -87,7 +87,7 @@ pub(crate) fn create_snapshot_tables(
         let scf = &mut scf_builders.as_mut_slice()[table_create.cf as usize];
         scf.add_table(tbl, table_create.level as usize);
     }
-    let mut scfs = [ShardCF::new(0), ShardCF::new(1), ShardCF::new(2)];
+    let mut scfs = [ShardCf::new(0), ShardCf::new(1), ShardCf::new(2)];
     for cf in 0..NUM_CFS {
         let scf = &mut scf_builders.as_mut_slice()[cf];
         scfs[cf] = scf.build();
@@ -140,7 +140,7 @@ impl EngineCore {
             }
             store_bool(&shard.compacting, false);
             self.compact_tx
-                .send(CompactMsg::Applied(IDVer::new(shard.id, shard.ver)))
+                .send(CompactMsg::Applied(IdVer::new(shard.id, shard.ver)))
                 .unwrap();
         } else if cs.has_initial_flush() {
             self.apply_initial_flush(&shard, &cs);
@@ -217,8 +217,8 @@ impl EngineCore {
         );
         shard.set_data(new_data);
         store_bool(&shard.initial_flushed, true);
-        // Switched memtables can't be flushed until initial flush finished, so we trigger it
-        // actively.
+        // Switched memtables can't be flushed until initial flush finished, so we
+        // trigger it actively.
         self.trigger_flush(shard);
     }
 
@@ -257,7 +257,8 @@ impl EngineCore {
             new_cfs[cf].set_level(new_top_level);
             let new_bottom_level = self.new_level(shard, cs, &data, cf, &mut del_files, true);
             new_cfs[cf].set_level(new_bottom_level);
-            // For move down operation, the TableCreates may contains TopDeletes, we don't want to delete them.
+            // For move down operation, the TableCreates may contains TopDeletes, we don't
+            // want to delete them.
             for create in comp.get_table_creates() {
                 del_files.remove(&create.id);
             }
@@ -281,7 +282,7 @@ impl EngineCore {
         data: &ShardData,
         cs: &ChangeSet,
         tc: &pb::TableChange,
-    ) -> (Vec<L0Table>, [ShardCF; 3]) {
+    ) -> (Vec<L0Table>, [ShardCf; 3]) {
         let mut new_l0s = data.l0_tbls.clone();
         let mut new_cfs = data.cfs.clone();
         // Group files by cf and level.
@@ -507,7 +508,7 @@ impl EngineCore {
             new_l0s.push(l0_table);
         }
         new_l0s.sort_unstable_by(|a, b| b.version().cmp(&a.version()));
-        let mut scf_builder = ShardCFBuilder::new(0);
+        let mut scf_builder = ShardCfBuilder::new(0);
         for level in &old_data.cfs[0].levels {
             for old_tbl in level.tables.as_ref() {
                 scf_builder.add_table(old_tbl.clone(), level.level);
@@ -560,7 +561,7 @@ impl EngineCore {
             snap_data.del_prefixes.clone(),
             snap_data.truncate_ts,
             snap_data.trim_over_bound,
-            vec![CFTable::new()],
+            vec![CfTable::new()],
             l0_tbls,
             cfs,
         );

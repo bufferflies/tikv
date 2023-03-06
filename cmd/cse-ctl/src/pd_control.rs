@@ -13,8 +13,8 @@ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Sync + S
 
 const PD_KEYSPACE_PATH: &str = "/pd/api/v2/keyspaces";
 
-/// PdControl provides access to HTTP APIs of PD, which are not included in gRPC interface.
-/// It's also expected to act like the tool `pd-ctl`.
+/// PdControl provides access to HTTP APIs of PD, which are not included in gRPC
+/// interface. It's also expected to act like the tool `pd-ctl`.
 #[derive(Clone)]
 pub struct PdControl {
     config: pd_client::Config,

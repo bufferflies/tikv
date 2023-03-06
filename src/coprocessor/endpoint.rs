@@ -4,10 +4,10 @@ use std::{
     borrow::Cow, future::Future, iter::FromIterator, marker::PhantomData, sync::Arc, time::Duration,
 };
 
-use api_version::{dispatch_api_version, KvFormat};
 use ::tracker::{
     set_tls_tracker_token, with_tls_tracker, RequestInfo, RequestType, GLOBAL_TRACKERS,
 };
+use api_version::{dispatch_api_version, KvFormat};
 use async_stream::try_stream;
 use concurrency_manager::ConcurrencyManager;
 use engine_traits::PerfLevel;
@@ -888,7 +888,7 @@ fn parse_request_and_remote_analyze_impl<S: 'static + Snapshot, F: KvFormat>(
                 quota_limiter,
                 None,
             )
-                .unwrap();
+            .unwrap();
             return block_on(handler.local_handle_request());
         }
         tp => return Err(Error::Other(format!("unsupported tp {}", tp))),

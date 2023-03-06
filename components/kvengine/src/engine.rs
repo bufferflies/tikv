@@ -22,13 +22,13 @@ use file_system::IoRateLimiter;
 use fslock;
 use moka::sync::SegmentedCache;
 use slog_global::info;
-use tikv_util::mpsc;
+use tikv_util::{mpsc, sys::thread::StdThreadBuildWrapper};
 
 use crate::{
     apply::ChangeSet,
     meta::ShardMeta,
     table::{
-        memtable::CFTable,
+        memtable::CfTable,
         sstable::{BlockCacheKey, MAGIC_NUMBER, ZSTD_COMPRESSION},
     },
     *,
@@ -59,11 +59,11 @@ impl Debug for Engine {
 
 impl Engine {
     pub fn open(
-        fs: Arc<dyn dfs::DFS>,
+        fs: Arc<dyn dfs::Dfs>,
         opts: Arc<Options>,
         meta_iter: &mut impl MetaIterator,
         recoverer: impl RecoverHandler + 'static,
-        id_allocator: Arc<dyn IDAllocator>,
+        id_allocator: Arc<dyn IdAllocator>,
         meta_change_listener: Box<dyn MetaChangeListener>,
         rate_limiter: Arc<IoRateLimiter>,
     ) -> Result<Engine> {
@@ -120,20 +120,20 @@ impl Engine {
         let flush_en = en.clone();
         thread::Builder::new()
             .name("flush".to_string())
-            .spawn(move || {
+            .spawn_wrapper(move || {
                 flush_en.run_flush_worker(flush_rx);
             })
             .unwrap();
         let compact_en = en.clone();
         thread::Builder::new()
             .name("compaction".to_string())
-            .spawn(move || {
+            .spawn_wrapper(move || {
                 compact_en.run_compaction(compact_rx);
             })
             .unwrap();
         thread::Builder::new()
             .name("free_mem".to_string())
-            .spawn(move || {
+            .spawn_wrapper(move || {
                 free_mem(free_rx);
             })
             .unwrap();
@@ -149,12 +149,12 @@ impl Engine {
         let mut parents = HashMap::new();
         for meta in metas.values() {
             if let Some(parent) = &meta.parent {
-                let id_ver = IDVer::new(parent.id, parent.ver);
+                let id_ver = IdVer::new(parent.id, parent.ver);
                 if !parents.contains_key(&id_ver) {
                     info!("load parent of {}", meta.tag());
                     let parent_shard = self.load_shard(parent)?;
                     recoverer.recover(self, &parent_shard, parent)?;
-                    parents.insert(IDVer::new(parent.id, parent.ver), parent_shard);
+                    parents.insert(IdVer::new(parent.id, parent.ver), parent_shard);
                     // Do not keep the parent in the engine as we only use the parent's mem-table
                     // for children.
                     self.shards.remove(&parent.id);
@@ -176,7 +176,7 @@ impl Engine {
             token_rx.recv().unwrap();
             let parent_shard = meta.parent.as_ref().map(|parent_meta| {
                 parents
-                    .get(&IDVer::new(parent_meta.id, parent_meta.ver))
+                    .get(&IdVer::new(parent_meta.id, parent_meta.ver))
                     .cloned()
                     .unwrap()
             });
@@ -202,14 +202,14 @@ pub struct EngineCore {
     pub opts: Arc<Options>,
     pub(crate) flush_tx: mpsc::Sender<FlushMsg>,
     pub(crate) compact_tx: mpsc::Sender<CompactMsg>,
-    pub(crate) fs: Arc<dyn dfs::DFS>,
+    pub(crate) fs: Arc<dyn dfs::Dfs>,
     pub(crate) cache: SegmentedCache<BlockCacheKey, Bytes>,
     pub comp_client: CompactionClient,
-    pub(crate) id_allocator: Arc<dyn IDAllocator>,
+    pub(crate) id_allocator: Arc<dyn IdAllocator>,
     pub(crate) managed_safe_ts: AtomicU64,
     pub(crate) tmp_file_id: AtomicU64,
     pub(crate) rate_limiter: Arc<IoRateLimiter>,
-    pub(crate) free_tx: mpsc::Sender<CFTable>,
+    pub(crate) free_tx: mpsc::Sender<CfTable>,
 }
 
 impl EngineCore {
@@ -257,7 +257,7 @@ impl EngineCore {
             old_data.del_prefixes.clone(),
             old_data.truncate_ts,
             old_data.trim_over_bound,
-            vec![CFTable::new()],
+            vec![CfTable::new()],
             l0s,
             scfs,
         );
@@ -486,10 +486,10 @@ impl EngineCore {
     }
 
     // get_all_shard_id_vers collects all the id and vers of the engine.
-    // To prevent the shard change during the iteration, we iterate twice and make sure there is
-    // no change during the iteration.
+    // To prevent the shard change during the iteration, we iterate twice and make
+    // sure there is no change during the iteration.
     // Use this method first, then get each shard by id to reduce lock contention.
-    pub fn get_all_shard_id_vers(&self) -> Vec<IDVer> {
+    pub fn get_all_shard_id_vers(&self) -> Vec<IdVer> {
         loop {
             let id_vers = self.collect_shard_id_vers();
             let id_vers_set = HashSet::<_>::from_iter(id_vers.iter());
@@ -502,18 +502,19 @@ impl EngineCore {
         }
     }
 
-    fn collect_shard_id_vers(&self) -> Vec<IDVer> {
+    fn collect_shard_id_vers(&self) -> Vec<IdVer> {
         self.shards
             .iter()
-            .map(|x| IDVer::new(x.id, x.ver))
+            .map(|x| IdVer::new(x.id, x.ver))
             .collect()
     }
 
-    // meta_committed should be called when a change set is committed in the raft group.
+    // meta_committed should be called when a change set is committed in the raft
+    // group.
     pub fn meta_committed(&self, cs: &kvenginepb::ChangeSet, rejected: bool) {
         if cs.has_flush() || cs.has_initial_flush() {
             let table_version = change_set_table_version(cs);
-            let id_ver = IDVer::new(cs.shard_id, cs.shard_ver);
+            let id_ver = IdVer::new(cs.shard_id, cs.shard_ver);
             self.flush_tx
                 .send(FlushMsg::Committed((id_ver, table_version)))
                 .unwrap();
@@ -526,10 +527,10 @@ impl EngineCore {
         {
             // Notify the compaction runner otherwise the shard can't be compacted any more.
             self.compact_tx
-                .send(CompactMsg::Applied(IDVer::new(cs.shard_id, cs.shard_ver)))
+                .send(CompactMsg::Applied(IdVer::new(cs.shard_id, cs.shard_ver)))
                 .unwrap();
-            // This compaction may be conflicted with initial flush, so we have to trigger next
-            // compaction if needed.
+            // This compaction may be conflicted with initial flush, so we have to trigger
+            // next compaction if needed.
             let shard = self.get_shard(cs.shard_id).unwrap();
             self.refresh_shard_states(&shard);
         }
@@ -546,7 +547,7 @@ impl EngineCore {
                 store_bool(&shard.compacting, false);
                 self.flush_tx.send(FlushMsg::Clear(shard_id)).unwrap();
                 self.compact_tx
-                    .send(CompactMsg::Clear(IDVer::new(shard.id, shard.ver)))
+                    .send(CompactMsg::Clear(IdVer::new(shard.id, shard.ver)))
                     .unwrap();
             }
         }
@@ -558,7 +559,7 @@ impl EngineCore {
         fail::fail_point!("before_engine_trigger_compact", |_| ());
         if shard.ready_to_compact() {
             self.compact_tx
-                .send(CompactMsg::Compact(IDVer::new(shard.id, shard.ver)))
+                .send(CompactMsg::Compact(IdVer::new(shard.id, shard.ver)))
                 .unwrap();
         }
     }
@@ -571,18 +572,18 @@ impl EngineCore {
 #[derive(Copy, Clone, Debug, Default)]
 pub struct ShardTag {
     pub engine_id: u64,
-    pub id_ver: IDVer,
+    pub id_ver: IdVer,
 }
 
 impl ShardTag {
-    pub fn new(engine_id: u64, id_ver: IDVer) -> Self {
+    pub fn new(engine_id: u64, id_ver: IdVer) -> Self {
         Self { engine_id, id_ver }
     }
 
     pub fn from_comp_req(req: &CompactionRequest) -> Self {
         Self {
             engine_id: req.engine_id,
-            id_ver: IDVer::new(req.shard_id, req.shard_ver),
+            id_ver: IdVer::new(req.shard_id, req.shard_ver),
         }
     }
 }
@@ -598,12 +599,12 @@ impl Display for ShardTag {
 }
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
-pub struct IDVer {
+pub struct IdVer {
     pub id: u64,
     pub ver: u64,
 }
 
-impl IDVer {
+impl IdVer {
     pub fn new(id: u64, ver: u64) -> Self {
         Self { id, ver }
     }
@@ -621,7 +622,7 @@ pub fn new_tmp_filename(file_id: u64, tmp_id: u64) -> PathBuf {
     PathBuf::from(format!("{:016x}.{}.tmp", file_id, tmp_id))
 }
 
-fn free_mem(free_rx: mpsc::Receiver<CFTable>) {
+fn free_mem(free_rx: mpsc::Receiver<CfTable>) {
     loop {
         let mut tables = vec![];
         let tbl = free_rx.recv().unwrap();

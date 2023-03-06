@@ -352,28 +352,10 @@ impl Engine for RaftKv {
                         let rid: u64 = rid.parse().unwrap();
                         if rid == region_id { None } else { Some(()) }
                     })
-                    .ok_or_else(|| RaftServerError::RegionNotFound(region_id).into())
-                });
-                Ok(())
-            })();
-        }
-
-        #[cfg(feature = "failpoints")]
-        {
-            // If rid is some, only the specified region reports error.
-            // If rid is None, all regions report error.
-            let raftkv_early_error_report_fp = || -> Result<()> {
-                fail_point!("raftkv_early_error_report", |rid| {
-                    let region_id = ctx.get_region_id();
-                    rid.and_then(|rid| {
-                        let rid: u64 = rid.parse().unwrap();
-                        if rid == region_id { None } else { Some(()) }
-                    })
                     .ok_or_else(|| RaftServerError::RegionNotFound(region_id, None).into())
                 });
                 Ok(())
-            };
-            raftkv_early_error_report_fp()?;
+            })();
         }
 
         let req = modifies_to_requests(ctx, &mut batch);
@@ -402,7 +384,7 @@ impl Engine for RaftKv {
             let tx = tx.clone();
             Some(Box::new(move || tx.notify_committed()) as store::ExtCallback)
         };
-        let applied_tx = tx.clone();
+        let applied_tx = tx;
         let applied_cb = Box::new(move |resp: WriteResponse| {
             let mut res = match on_write_result(resp) {
                 Ok(CmdRes::Resp(_)) => {
@@ -568,7 +550,8 @@ impl Coprocessor for ReplicaReadLockChecker {}
 impl ReadIndexObserver for ReplicaReadLockChecker {
     fn on_step(&self, msg: &mut eraftpb::Message, role: StateRole) {
         // Only check and return result if the current peer is a leader.
-        // If it's not a leader, the read index request will be redirected to the leader later.
+        // If it's not a leader, the read index request will be redirected to the leader
+        // later.
         if msg.get_msg_type() != MessageType::MsgReadIndex || role != StateRole::Leader {
             return;
         }
@@ -618,50 +601,52 @@ impl ReadIndexObserver for ReplicaReadLockChecker {
     }
 }
 
-/**
-Reconstruct transaction operations from separated modifications.
-
-pessimistic_lock
-    modify::put lock(pessimistic)
-
-prewrite
-    optional modify::put cf_default
-    | modify::put cf_lock
-
-1pc
-    optional modify::put cf_default
-    optional modify::del cf_lock
-    | modify::put cf_write:put
-    | modify::put cf_write:del
-
-commit
-    modify:put cf_write + modify::del cf_lock
-
-rollback
-    modify:del cf_lock
-    | modify::put cf_write::put overlapped + modify:del cf_lock + optional modify::del cf_write(collapse rollback)
-    | modify::put cf_write::rollback + optional modify::del cf_write(collapse rollback)
-    | modify::put cf_write::rollback + modify:del cf_lock + optional modify::del cf_write(collapse rollback)
-    | modify::put cf_lock(has rollback_ts) + modify:put cf_write:rollback + optional modify::del cf_write(collapse rollback)
-
-pessimistic_rollback
-    modify::del cf_lock(pessimistic)
-
-check_txn_status
-    | pessimistic_lock(push min_commit_ts)
-    | prewrite(push min_commit_ts)
-    | pessimistic_rollback
-    | rollback
-
-CheckSecondaryLocks
-    rollback
-
-ResolveLock
-    commit and rollback
-
-Heartbeat
-    modify::put cf_lock(optimistc or pessimistic)
-*/
+/// Reconstruct transaction operations from separated modifications.
+///
+/// pessimistic_lock
+/// modify::put lock(pessimistic)
+///
+/// prewrite
+/// optional modify::put cf_default
+/// | modify::put cf_lock
+///
+/// 1pc
+/// optional modify::put cf_default
+/// optional modify::del cf_lock
+/// | modify::put cf_write:put
+/// | modify::put cf_write:del
+///
+/// commit
+/// modify:put cf_write + modify::del cf_lock
+///
+/// rollback
+/// modify:del cf_lock
+/// | modify::put cf_write::put overlapped + modify:del cf_lock +
+///   optional modify::del cf_write(collapse rollback)
+/// | modify::put cf_write::rollback +
+///   optional modify::del cf_write(collapse rollback)
+/// | modify::put cf_write::rollback + modify:del cf_lock +
+///   optional modify::del cf_write(collapse rollback)
+/// | modify::put cf_lock(has rollback_ts) + modify:put cf_write:rollback +
+///   optional modify::del cf_write(collapse rollback)
+///
+/// pessimistic_rollback
+/// modify::del cf_lock(pessimistic)
+///
+/// check_txn_status
+/// | pessimistic_lock(push min_commit_ts)
+/// | prewrite(push min_commit_ts)
+/// | pessimistic_rollback
+/// | rollback
+///
+/// CheckSecondaryLocks
+/// rollback
+///
+/// ResolveLock
+/// commit and rollback
+///
+/// Heartbeat
+/// modify::put cf_lock(optimistc or pessimistic)
 pub fn modifies_to_requests(_ctx: &Context, data: &mut WriteData) -> CustomRequest {
     let builder = &mut rlog::CustomBuilder::new();
     let modifies = std::mem::take(&mut data.modifies);
@@ -838,7 +823,8 @@ fn build_rollback(builder: &mut CustomBuilder, mut modifies: Vec<Modify>) {
                 // Lock deletion is carried on putting write.
             }
             Modify::Put(CF_LOCK, ..) => {
-                // The EXTRA_CF ensures no overlapped rollback and commit record, so we ignore them.
+                // The EXTRA_CF ensures no overlapped rollback and commit
+                // record, so we ignore them.
             }
             Modify::Delete(CF_WRITE, _) => {
                 // No need to collapse rollback write due to the EXTRA_CF.
@@ -846,8 +832,9 @@ fn build_rollback(builder: &mut CustomBuilder, mut modifies: Vec<Modify>) {
             _ => unreachable!("unexpected modify: {:?}", m),
         }
     }
-    // Non-pessimistic lock in a pessimistic transaction doesn't check write and rollback record
-    // during prewrite, so rollback record and lock may both exist. In this case, we delete the lock only.
+    // Non-pessimistic lock in a pessimistic transaction doesn't check write and
+    // rollback record during prewrite, so rollback record and lock may both
+    // exist. In this case, we delete the lock only.
     for delete_only in deleted_locks {
         let raw_key = delete_only.into_raw().unwrap();
         builder.append_rollback(&raw_key, 0, true);
@@ -926,13 +913,15 @@ mod tests {
         sync::{mpsc, Mutex},
     };
 
+    use kvproto::kvrpcpb::PrewriteRequestPessimisticAction::*;
     use tikv_kv::RocksEngine;
     use txn_types::SHORT_VALUE_MAX_LEN;
     use uuid::Uuid;
 
     use super::*;
 
-    // This test ensures `ReplicaReadLockChecker` won't change UUID context of read index.
+    // This test ensures `ReplicaReadLockChecker` won't change UUID context of read
+    // index.
     #[test]
     fn test_replica_read_lock_checker_for_single_uuid() {
         let cm = ConcurrencyManager::new(1.into());
@@ -977,46 +966,29 @@ mod tests {
         type Snap = <RocksEngine as Engine>::Snap;
         type Local = <RocksEngine as Engine>::Local;
 
-        fn kv_engine(&self) -> Self::Local {
+        fn kv_engine(&self) -> Option<Self::Local> {
             self.base.kv_engine()
         }
 
-        fn snapshot_on_kv_engine(
-            &self,
-            start_key: &[u8],
-            end_key: &[u8],
-        ) -> kv::Result<Self::Snap> {
-            self.base.snapshot_on_kv_engine(start_key, end_key)
-        }
-
-        fn modify_on_kv_engine(&self, modifies: Vec<Modify>) -> kv::Result<()> {
+        fn modify_on_kv_engine(&self, modifies: HashMap<u64, Vec<Modify>>) -> kv::Result<()> {
             self.base.modify_on_kv_engine(modifies)
         }
 
-        fn async_snapshot(&self, ctx: SnapContext<'_>, cb: Callback<Self::Snap>) -> kv::Result<()> {
-            self.base.async_snapshot(ctx, cb)
+        type SnapshotRes = <RocksEngine as Engine>::SnapshotRes;
+        fn async_snapshot(&mut self, ctx: SnapContext<'_>) -> Self::SnapshotRes {
+            self.base.async_snapshot(ctx)
         }
 
+        type WriteRes = <RocksEngine as Engine>::WriteRes;
         fn async_write(
             &self,
             ctx: &Context,
             batch: WriteData,
-            write_cb: Callback<()>,
-        ) -> kv::Result<()> {
-            self.async_write_ext(ctx, batch, write_cb, None, None)
-        }
-
-        fn async_write_ext(
-            &self,
-            ctx: &Context,
-            batch: WriteData,
-            write_cb: Callback<()>,
-            proposed_cb: Option<ExtCallback>,
-            committed_cb: Option<ExtCallback>,
-        ) -> kv::Result<()> {
+            subscribed: u8,
+            on_applied: Option<OnAppliedCb>,
+        ) -> Self::WriteRes {
             self.set_write_data(&batch);
-            self.base
-                .async_write_ext(ctx, batch, write_cb, proposed_cb, committed_cb)
+            self.base.async_write(ctx, batch, subscribed, on_applied)
         }
     }
 
@@ -1024,16 +996,18 @@ mod tests {
     fn test_custom_raft_log() {
         use kvproto::kvrpcpb::AssertionLevel;
         use tikv::storage::{
-            kv::TestEngineBuilder, lock_manager::DummyLockManager, test_util::expect_ok_callback,
+            kv::TestEngineBuilder, lock_manager::MockLockManager, test_util::expect_ok_callback,
             txn::commands, TestStorageBuilderApiV1,
         };
         use txn_types::Mutation;
 
         let engine = MockEngine::new(TestEngineBuilder::new().build().unwrap());
-        let storage =
-            TestStorageBuilderApiV1::from_engine_and_lock_mgr(engine.clone(), DummyLockManager {})
-                .build()
-                .unwrap();
+        let storage = TestStorageBuilderApiV1::from_engine_and_lock_mgr(
+            engine.clone(),
+            MockLockManager::new(),
+        )
+        .build()
+        .unwrap();
         let (tx, rx) = mpsc::channel();
         let get_modify_value = |modify: &_| match modify {
             Modify::Put(_, _, v) => v.clone(),
@@ -1105,6 +1079,7 @@ mod tests {
                         false,
                         (ts + 1).into(),
                         Default::default(),
+                        false,
                         false,
                         Context::default(),
                     ),
@@ -1223,9 +1198,12 @@ mod tests {
             vec![
                 (
                     Mutation::make_put(Key::from_raw(b"k1"), b"v1".to_vec()),
-                    true,
+                    DoPessimisticCheck,
                 ),
-                (Mutation::make_lock(Key::from_raw(b"k2")), false),
+                (
+                    Mutation::make_lock(Key::from_raw(b"k2")),
+                    SkipPessimisticCheck,
+                ),
             ],
             b"k1",
             40,
@@ -1423,7 +1401,10 @@ mod tests {
         });
         assert_eq!(cnt, 1);
         pessimistic_prewrite(
-            vec![(Mutation::make_delete(Key::from_raw(b"k1")), true)],
+            vec![(
+                Mutation::make_delete(Key::from_raw(b"k1")),
+                DoPessimisticCheck,
+            )],
             b"k1",
             90,
             false,
@@ -1506,7 +1487,8 @@ mod tests {
         });
         assert_eq!(cnt, 1);
 
-        // Rollback a missing lock and there is a lock of another async-commit transaction.
+        // Rollback a missing lock and there is a lock of another async-commit
+        // transaction.
         prewrite(
             vec![Mutation::make_put(Key::from_raw(b"k1"), b"v1".to_vec())],
             b"k1",

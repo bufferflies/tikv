@@ -17,16 +17,16 @@ use cse_ctl::{
 use slog::Drain;
 
 use crate::{
-    dfsgc::{execute_dfsgc, DFSGCArgs},
+    dfsgc::{execute_dfsgc, DfsGcArgs},
     unsafe_recover::{execute_unsafe_recover, UnsafeRecoverArgs},
-    Commands::{Backup, Restore, TruncateTs, UnsafeRecover, DFSGC},
+    Commands::{Backup, DfsGc, Restore, TruncateTs, UnsafeRecover},
 };
 
 fn main() {
     init_logger();
     let x: Cli = Cli::parse();
     match x.command {
-        DFSGC(dfsgc_arg) => {
+        DfsGc(dfsgc_arg) => {
             execute_dfsgc(dfsgc_arg);
         }
         UnsafeRecover(unsafe_recover) => {
@@ -85,8 +85,9 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Commands {
     /// Scan and mark the unused DFS files as deleted.
-    DFSGC(DFSGCArgs),
-    /// Unsafely recover the cluster by directly modifying the data on the raft engine.
+    DfsGc(DfsGcArgs),
+    /// Unsafely recover the cluster by directly modifying the data on the raft
+    /// engine.
     UnsafeRecover(UnsafeRecoverArgs),
     /// Backup backups the cluster.
     Backup(BackupArgs),

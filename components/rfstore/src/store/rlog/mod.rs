@@ -4,7 +4,7 @@ use std::mem;
 
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, BufMut};
-use kvengine::IDVer;
+use kvengine::IdVer;
 use kvproto::raft_cmdpb::{CustomRequest, RaftCmdRequest};
 use protobuf::Message;
 use tikv_util::codec::number::U64_SIZE;
@@ -33,9 +33,9 @@ pub const TYPE_TRIGGER_TRIM_OVER_BOUND: CustomRaftlogType = 10;
 
 const HEADER_SIZE: usize = 2;
 
-// CustomRaftLog is the raft log format for unistore to store Prewrite/Commit/PessimisticLock.
-//  | type(1) | version(1) | entries
-//
+// CustomRaftLog is the raft log format for unistore to store
+// Prewrite/Commit/PessimisticLock.
+// | type(1) | version(1) | entries
 // It reduces the cost of marshal/unmarshal and avoid DB lookup during apply.
 #[derive(Debug)]
 pub struct CustomRaftLog<'a> {
@@ -286,8 +286,8 @@ impl CustomBuilder {
         self.buf[0] as CustomRaftlogType
     }
 
-    // Some custom logs may contains multiple types of logs, e.g., resolve-lock can contain both
-    // commit and rollback. We use type to distinguish them.
+    // Some custom logs may contains multiple types of logs, e.g., resolve-lock can
+    // contain both commit and rollback. We use type to distinguish them.
     pub fn append_type(&mut self, tp: CustomRaftlogType) {
         self.buf.push(tp);
     }
@@ -318,8 +318,8 @@ pub fn is_trigger_trim_over_bound(data: &[u8]) -> bool {
 
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
 pub struct TrimOverBoundParameter {
-    pub source_shard: Option<IDVer>, // `None` means no trim.
-    pub target_shard: Option<IDVer>,
+    pub source_shard: Option<IdVer>, // `None` means no trim.
+    pub target_shard: Option<IdVer>,
 }
 
 impl TrimOverBoundParameter {
@@ -353,12 +353,12 @@ impl TrimOverBoundParameter {
             return Self::default();
         }
         let source_shard = if data.get_u8() == 1 {
-            Some(IDVer::new(data.get_u64_le(), data.get_u64_le()))
+            Some(IdVer::new(data.get_u64_le(), data.get_u64_le()))
         } else {
             None
         };
         let target_shard = if data.get_u8() == 1 {
-            Some(IDVer::new(data.get_u64_le(), data.get_u64_le()))
+            Some(IdVer::new(data.get_u64_le(), data.get_u64_le()))
         } else {
             None
         };
@@ -399,9 +399,9 @@ mod tests {
     fn test_trim_over_bound_parameter() {
         let cases = vec![
             (None, None),
-            (Some(IDVer { id: 1, ver: 2 }), None),
-            (None, Some(IDVer { id: 2, ver: 3 })),
-            (Some(IDVer { id: 1, ver: 2 }), Some(IDVer { id: 2, ver: 3 })),
+            (Some(IdVer { id: 1, ver: 2 }), None),
+            (None, Some(IdVer { id: 2, ver: 3 })),
+            (Some(IdVer { id: 1, ver: 2 }), Some(IdVer { id: 2, ver: 3 })),
         ];
 
         for (source_shard, target_shard) in cases {

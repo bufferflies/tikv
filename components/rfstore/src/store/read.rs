@@ -1,10 +1,8 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
 };
 
 use fail::fail_point;
@@ -14,7 +12,11 @@ use kvproto::{
     raft_cmdpb::{CmdType, RaftCmdRequest, RaftCmdResponse, ReadIndexResponse, Request, Response},
 };
 use pd_client::BucketMeta;
-use raftstore::store::{util::{LeaseState, RemoteLease}, worker_metrics::*, TxnExt};
+use raftstore::store::{
+    util::{LeaseState, RemoteLease},
+    worker_metrics::*,
+    TxnExt,
+};
 use tikv_util::{
     debug, error,
     lru::LruCache,
@@ -221,7 +223,8 @@ impl ReadDelegate {
                 if lease.inspect(Some(ts)) == LeaseState::Valid {
                     return true;
                 } else {
-                    TLS_LOCAL_READ_METRICS.with(|m| m.borrow_mut().reject_reason.lease_expire.inc());
+                    TLS_LOCAL_READ_METRICS
+                        .with(|m| m.borrow_mut().reject_reason.lease_expire.inc());
                     debug!("rejected by lease expire"; "tag" => &self.tag);
                 }
             } else {
@@ -274,11 +277,12 @@ impl LocalReader {
         self.router.send(region_id, PeerMsg::RaftCommand(cmd));
     }
 
-    // Ideally `get_delegate` should return `Option<&ReadDelegate>`, but if so the lifetime of
-    // the returned `&ReadDelegate` will bind to `self`, and make it impossible to use `&mut self`
-    // while the `&ReadDelegate` is alive, a better choice is use `Rc` but `LocalReader: Send` will be
-    // violated, which is required by `LocalReadRouter: Send`, use `Arc` will introduce extra cost but
-    // make the logic clear
+    // Ideally `get_delegate` should return `Option<&ReadDelegate>`, but if so the
+    // lifetime of the returned `&ReadDelegate` will bind to `self`, and make it
+    // impossible to use `&mut self` while the `&ReadDelegate` is alive, a
+    // better choice is use `Rc` but `LocalReader: Send` will be violated, which
+    // is required by `LocalReadRouter: Send`, use `Arc` will introduce extra cost
+    // but make the logic clear
     fn get_delegate(&mut self, region_id: u64) -> Option<Arc<ReadDelegate>> {
         match self.delegates.get(&region_id) {
             // The local `ReadDelegate` is up to date
@@ -418,11 +422,13 @@ impl LocalReader {
         }
     }
 
-    /// If read requests are received at the same RPC request, we can create one snapshot for all
-    /// of them and check whether the time when the snapshot was created is in lease. We use
-    /// ThreadReadId to figure out whether this RaftCommand comes from the same RPC request with
-    /// the last RaftCommand which left a snapshot cached in LocalReader. ThreadReadId is composed
-    /// by thread_id and a thread_local incremental sequence.
+    /// If read requests are received at the same RPC request, we can create one
+    /// snapshot for all of them and check whether the time when the
+    /// snapshot was created is in lease. We use ThreadReadId to figure out
+    /// whether this RaftCommand comes from the same RPC request with
+    /// the last RaftCommand which left a snapshot cached in LocalReader.
+    /// ThreadReadId is composed by thread_id and a thread_local incremental
+    /// sequence.
     #[inline]
     pub fn read(&mut self, read_id: Option<ThreadReadId>, req: RaftCmdRequest, cb: Callback) {
         self.propose_raft_command(read_id, req, cb);

@@ -1,8 +1,8 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
 use pd_client::PdClient;
-use tikv_util::store::find_peer;
 use test_cloud_server::{try_wait, ServerCluster};
+use tikv_util::store::find_peer;
 
 use super::{i_to_key, i_to_val};
 
@@ -14,7 +14,8 @@ fn test_remove_peer_after_split() {
     client.put_kv(0..100, i_to_key, i_to_val);
     let pd_client = cluster.get_pd_client();
 
-    // Splits the region and blocks flushing initial, so that the parent region always has dependents.
+    // Splits the region and blocks flushing initial, so that the parent region
+    // always has dependents.
     let fp = "kvengine_flush_initial";
     fail::cfg(fp, "pause").unwrap();
     let region = pd_client.get_region(&[]).unwrap();
@@ -27,7 +28,8 @@ fn test_remove_peer_after_split() {
     let mut new_peer = peer.clone();
     new_peer.set_id(pd_client.alloc_id().unwrap());
     pd_client.must_add_peer(region.get_id(), new_peer.clone());
-    // The new peer can't be created and is pending because the old peer is not destroyed yet.
+    // The new peer can't be created and is pending because the old peer is not
+    // destroyed yet.
     assert!(!try_wait(
         || {
             let pending_peers = pd_client.get_pending_peers();
@@ -47,8 +49,8 @@ fn test_remove_peer_after_split() {
         1
     ));
     fail::remove(fp);
-    // After all splitted regions finish flushing initial, the old peer is destroyed and new peer
-    // can be created.
+    // After all splitted regions finish flushing initial, the old peer is destroyed
+    // and new peer can be created.
     pd_client.must_none_pending_peer(new_peer);
 
     cluster.stop();

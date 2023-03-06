@@ -184,8 +184,8 @@ impl SkipList {
         }
     }
 
-    pub fn new_iterator(&self, reversed: bool) -> SKIterator {
-        SKIterator {
+    pub fn new_iterator(&self, reversed: bool) -> SkIterator {
+        SkIterator {
             list: self.clone(),
             n: ArenaAddr::null(),
             uk: BytesMut::new(),
@@ -298,8 +298,8 @@ impl SkipListCore {
     }
 
     fn put_with_hint(&self, buf: &[u8], entry: &WriteBatchEntry, h: &mut Hint) {
-        // Since we allow overwrite, we may not need to create a new node. We might not even need to
-        // increase the height. Let's defer these actions.
+        // Since we allow overwrite, we may not need to create a new node. We might not
+        // even need to increase the height. Let's defer these actions.
         let mut list_height = self.get_height();
         let height = self.random_height();
 
@@ -330,7 +330,8 @@ impl SkipListCore {
                 }
             }
         } else {
-            // Even the recomputeHeight is 0, we still need to check match and do in place update to insert the new version.
+            // Even the recomputeHeight is 0, we still need to check match and do in place
+            // update to insert the new version.
             if !h.next[0].is_null() {
                 let node = deref(self.arena.get_node(h.next[0]));
                 if self.arena.get_key(node).eq(key) {
@@ -343,8 +344,9 @@ impl SkipListCore {
         // We do need to create a new node.
         let x = self.arena.put_node(height, buf, entry);
 
-        // We always insert from the base level and up. After you add a node in base level, we cannot
-        // create a node in the level above because it would have discovered the node in the base level.
+        // We always insert from the base level and up. After you add a node in base
+        // level, we cannot create a node in the level above because it would
+        // have discovered the node in the base level.
         for i in 0..height {
             loop {
                 let next_off = h.next[i];
@@ -354,8 +356,9 @@ impl SkipListCore {
                     break;
                 }
                 // CAS failed. We need to recompute prev and next.
-                // It is unlikely to be helpful to try to use a different level as we redo the search,
-                // because it is unlikely that lots of nodes are inserted between prev[i] and next[i].
+                // It is unlikely to be helpful to try to use a different level as we redo the
+                // search, because it is unlikely that lots of nodes are
+                // inserted between prev[i] and next[i].
                 let (prev, next, _) = self.find_splice_for_level(key, h.prev[i], i);
                 h.prev[i] = prev;
                 h.next[i] = next;
@@ -601,8 +604,8 @@ impl SkipListCore {
         }
     }
 
-    // find_last returns the last element. If head (empty list), we return nil. All the find functions
-    // will NEVER return the head nodes.
+    // find_last returns the last element. If head (empty list), we return nil. All
+    // the find functions will NEVER return the head nodes.
     fn find_last(&self) -> ArenaAddr {
         let mut n = self.head;
         let mut level = self.height.load(SeqCst) - 1;
@@ -708,7 +711,8 @@ pub struct Hint {
 
     // hitHeight is used to reduce cost of calculate_recomput_height.
     // For random workload, comparing Hint keys from bottom up is wasted work.
-    // So we record the hit height of the last operation, only grow recompute height from near that height.
+    // So we record the hit height of the last operation, only grow recompute height from near that
+    // height.
     hit_height: usize,
     prev: [ArenaAddr; MAX_HEIGHT + 1],
     next: [ArenaAddr; MAX_HEIGHT + 1],
@@ -731,7 +735,7 @@ impl Default for Hint {
     }
 }
 
-pub struct SKIterator {
+pub struct SkIterator {
     list: SkipList,
     n: ArenaAddr,
 
@@ -742,10 +746,10 @@ pub struct SKIterator {
     reversed: bool,
 }
 
-unsafe impl Send for SKIterator {}
+unsafe impl Send for SkIterator {}
 
 #[allow(dead_code)]
-impl SKIterator {
+impl SkIterator {
     fn load_node(&mut self) {
         if self.n.is_null() {
             return;
@@ -814,7 +818,7 @@ impl SKIterator {
     }
 }
 
-impl Iterator for SKIterator {
+impl Iterator for SkIterator {
     fn next(&mut self) {
         if self.reversed {
             self.next_backward()

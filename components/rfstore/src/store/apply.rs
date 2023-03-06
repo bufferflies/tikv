@@ -278,7 +278,7 @@ impl Applier {
     }
 
     fn tag(&self) -> PeerTag {
-        let id_ver = RegionIDVer::new(self.region.id, self.region.get_region_epoch().version);
+        let id_ver = RegionIdVer::new(self.region.id, self.region.get_region_epoch().version);
         PeerTag::new(self.peer.store_id, id_ver)
     }
 
@@ -1482,7 +1482,7 @@ pub(crate) fn split_gen_new_region_metas(
         return Err(box_err!("missing split key"));
     }
     let new_region_cnt = requests.len();
-    let tag = PeerTag::new(store_id, RegionIDVer::from_region(old_region));
+    let tag = PeerTag::new(store_id, RegionIdVer::from_region(old_region));
 
     let mut keys = Vec::with_capacity(new_region_cnt + 1);
     keys.push(old_region.start_key.clone());
@@ -1753,7 +1753,7 @@ pub(crate) struct ApplyContext {
     pub(crate) router: Option<RaftRouter>, // None in recover mode.
     pub(crate) exec_log_index: u64,
     pub(crate) exec_log_term: u64,
-    pub(crate) wb: KVWriteBatch,
+    pub(crate) wb: KvWriteBatch,
     pub(crate) apply_wait: LocalHistogram,
     pub(crate) apply_time: LocalHistogram,
 }
@@ -1765,7 +1765,7 @@ impl ApplyContext {
             router,
             exec_log_index: Default::default(),
             exec_log_term: Default::default(),
-            wb: KVWriteBatch::new(),
+            wb: KvWriteBatch::new(),
             apply_wait: APPLY_TASK_WAIT_TIME_HISTOGRAM.local(),
             apply_time: APPLY_TIME_HISTOGRAM.local(),
         }

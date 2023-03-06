@@ -182,8 +182,9 @@ fn test_raft_log_gc() {
     let curr_shard_stats = flush_memtable(&cluster, &node_ids);
     let curr_truncated_idxes = wait_truncated(curr_truncated_idxes);
     std::thread::sleep(Duration::from_secs(1));
-    // Flushing memtable will propose a ChangeSet request which won't write data to memtable,
-    // so it can't trigger memtable flush. We shoud be able to truncate these logs.
+    // Flushing memtable will propose a ChangeSet request which won't write data to
+    // memtable, so it can't trigger memtable flush. We shoud be able to
+    // truncate these logs.
     assert!(
         curr_truncated_idxes
             .iter()

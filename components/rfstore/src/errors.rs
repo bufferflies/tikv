@@ -95,11 +95,11 @@ pub enum Error {
     #[error("Raft {0}")]
     Raft(#[from] raft::Error),
 
-    #[error("RFEngine {0}")]
-    RFEngineError(#[from] rfengine::Error),
+    #[error("RfEngine {0}")]
+    RfEngineError(#[from] rfengine::Error),
 
-    #[error("KVEngine {0}")]
-    KVEngineError(#[from] kvengine::Error),
+    #[error("KvEngine {0}")]
+    KvEngineError(#[from] kvengine::Error),
 
     #[error("Timeout {0}")]
     Timeout(String),
@@ -257,8 +257,8 @@ impl ErrorCodeExt for Error {
             Error::Codec(e) => e.error_code(),
             Error::AddrParse(_) => error_code::raftstore::ADDR_PARSE,
             Error::Pd(e) => e.error_code(),
-            Error::RFEngineError(_) => error_code::engine::ENGINE,
-            Error::KVEngineError(_) => error_code::engine::ENGINE,
+            Error::RfEngineError(_) => error_code::engine::ENGINE,
+            Error::KvEngineError(_) => error_code::engine::ENGINE,
             Error::Raft(e) => e.error_code(),
             Error::Timeout(_) => error_code::raftstore::TIMEOUT,
             Error::EpochNotMatch(..) => error_code::raftstore::EPOCH_NOT_MATCH,

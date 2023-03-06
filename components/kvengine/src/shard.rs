@@ -19,9 +19,9 @@ use tikv_util::codec::number::U64_SIZE;
 use crate::{
     table::{
         self,
-        memtable::{self, CFTable},
+        memtable::{self, CfTable},
         search,
-        sstable::{L0Table, SSTable},
+        sstable::{L0Table, SsTable},
     },
     Iterator as TableIterator, *,
 };
@@ -344,8 +344,8 @@ impl Shard {
         data.get_all_files()
     }
 
-    pub fn split_mem_tables(&self, parent_mem_tbls: &[CFTable]) -> Vec<CFTable> {
-        let mut new_mem_tbls = vec![CFTable::new()];
+    pub fn split_mem_tables(&self, parent_mem_tbls: &[CfTable]) -> Vec<CfTable> {
+        let mut new_mem_tbls = vec![CfTable::new()];
         for old_mem_tbl in parent_mem_tbls {
             if old_mem_tbl.has_data_in_range(self.start.chunk(), self.end.chunk()) {
                 new_mem_tbls.push(old_mem_tbl.new_split());
@@ -354,7 +354,7 @@ impl Shard {
         new_mem_tbls
     }
 
-    pub fn add_mem_table(&self, mem_tbl: CFTable) {
+    pub fn add_mem_table(&self, mem_tbl: CfTable) {
         let old_data = self.get_data();
         let mut new_mem_tbls = Vec::with_capacity(old_data.mem_tbls.len());
         new_mem_tbls.push(mem_tbl);
@@ -481,7 +481,7 @@ impl Shard {
     }
 
     pub fn tag(&self) -> ShardTag {
-        ShardTag::new(self.engine_id, IDVer::new(self.id, self.ver))
+        ShardTag::new(self.engine_id, IdVer::new(self.id, self.ver))
     }
 
     pub(crate) fn ready_to_compact(&self) -> bool {
@@ -534,9 +534,9 @@ impl ShardData {
             DeletePrefixes::default(),
             None,
             false,
-            vec![CFTable::new()],
+            vec![CfTable::new()],
             vec![],
-            [ShardCF::new(0), ShardCF::new(1), ShardCF::new(2)],
+            [ShardCf::new(0), ShardCf::new(1), ShardCf::new(2)],
         )
     }
 
@@ -546,9 +546,9 @@ impl ShardData {
         del_prefixes: DeletePrefixes,
         truncate_ts: Option<TruncateTs>,
         trim_over_bound: bool,
-        mem_tbls: Vec<memtable::CFTable>,
+        mem_tbls: Vec<memtable::CfTable>,
         l0_tbls: Vec<L0Table>,
-        cfs: [ShardCF; 3],
+        cfs: [ShardCf; 3],
     ) -> Self {
         assert!(!mem_tbls.is_empty());
         Self {
@@ -572,17 +572,17 @@ pub(crate) struct ShardDataCore {
     pub(crate) del_prefixes: DeletePrefixes,
     pub(crate) truncate_ts: Option<TruncateTs>,
     pub(crate) trim_over_bound: bool,
-    pub(crate) mem_tbls: Vec<memtable::CFTable>,
+    pub(crate) mem_tbls: Vec<memtable::CfTable>,
     pub(crate) l0_tbls: Vec<L0Table>,
-    pub(crate) cfs: [ShardCF; 3],
+    pub(crate) cfs: [ShardCf; 3],
 }
 
 impl ShardDataCore {
-    pub fn get_writable_mem_table(&self) -> &memtable::CFTable {
+    pub fn get_writable_mem_table(&self) -> &memtable::CfTable {
         self.mem_tbls.first().unwrap()
     }
 
-    pub(crate) fn get_cf(&self, cf: usize) -> &ShardCF {
+    pub(crate) fn get_cf(&self, cf: usize) -> &ShardCf {
         &self.cfs[cf]
     }
 
@@ -603,7 +603,7 @@ impl ShardDataCore {
 
     pub(crate) fn for_each_level<F>(&self, mut f: F)
     where
-        F: FnMut(usize /*cf*/, &LevelHandler) -> bool, /*stopped*/
+        F: FnMut(usize /* cf */, &LevelHandler) -> bool, // stopped
     {
         for cf in 0..NUM_CFS {
             let scf = self.get_cf(cf);
@@ -670,7 +670,7 @@ impl ShardDataCore {
         (total_size, total_entries, total_kv_size, max_ts)
     }
 
-    fn is_over_bound_table(&self, level: &LevelHandler, i: usize, tbl: &SSTable) -> bool {
+    fn is_over_bound_table(&self, level: &LevelHandler, i: usize, tbl: &SsTable) -> bool {
         let is_bound = i == 0 || i == level.tables.len() - 1;
         is_bound && !self.cover_full_table(tbl.smallest(), tbl.biggest())
     }
@@ -774,33 +774,33 @@ pub fn load_bool(ptr: &AtomicBool) -> bool {
     ptr.load(Acquire)
 }
 
-pub(crate) struct ShardCFBuilder {
+pub(crate) struct ShardCfBuilder {
     levels: Vec<LevelHandlerBuilder>,
 }
 
-impl ShardCFBuilder {
+impl ShardCfBuilder {
     pub(crate) fn new(cf: usize) -> Self {
         Self {
             levels: vec![LevelHandlerBuilder::new(); CF_LEVELS[cf]],
         }
     }
 
-    pub(crate) fn build(&mut self) -> ShardCF {
+    pub(crate) fn build(&mut self) -> ShardCf {
         let mut levels = Vec::with_capacity(self.levels.len());
         for i in 0..self.levels.len() {
             levels.push(self.levels[i].build(i + 1))
         }
-        ShardCF { levels }
+        ShardCf { levels }
     }
 
-    pub(crate) fn add_table(&mut self, tbl: SSTable, level: usize) {
+    pub(crate) fn add_table(&mut self, tbl: SsTable, level: usize) {
         self.levels[level - 1].add_table(tbl)
     }
 }
 
 #[derive(Clone)]
 struct LevelHandlerBuilder {
-    tables: Option<Vec<SSTable>>,
+    tables: Option<Vec<SsTable>>,
 }
 
 impl LevelHandlerBuilder {
@@ -816,7 +816,7 @@ impl LevelHandlerBuilder {
         LevelHandler::new(level, tables)
     }
 
-    fn add_table(&mut self, tbl: SSTable) {
+    fn add_table(&mut self, tbl: SsTable) {
         if self.tables.is_none() {
             self.tables = Some(vec![])
         }
@@ -825,11 +825,11 @@ impl LevelHandlerBuilder {
 }
 
 #[derive(Clone)]
-pub(crate) struct ShardCF {
+pub(crate) struct ShardCf {
     pub(crate) levels: Vec<LevelHandler>,
 }
 
-impl ShardCF {
+impl ShardCf {
     pub(crate) fn new(cf: usize) -> Self {
         let mut levels = vec![];
         for j in 1..=CF_LEVELS[cf] {
@@ -865,13 +865,13 @@ impl ShardCF {
 
 #[derive(Default, Clone)]
 pub struct LevelHandler {
-    pub(crate) tables: Arc<Vec<SSTable>>,
+    pub(crate) tables: Arc<Vec<SsTable>>,
     pub(crate) level: usize,
     pub(crate) max_ts: u64,
 }
 
 impl LevelHandler {
-    pub fn new(level: usize, tables: Vec<SSTable>) -> Self {
+    pub fn new(level: usize, tables: Vec<SsTable>) -> Self {
         let mut max_ts = 0;
         for tbl in &tables {
             if max_ts < tbl.max_ts {
@@ -908,7 +908,7 @@ impl LevelHandler {
         key: &[u8],
         version: u64,
         key_hash: u64,
-        tbl: Option<&SSTable>,
+        tbl: Option<&SsTable>,
         val_mem_holder: &mut Vec<u8>,
     ) -> table::Value {
         if tbl.is_none() {
@@ -917,7 +917,7 @@ impl LevelHandler {
         tbl.unwrap().get(key, version, key_hash, val_mem_holder)
     }
 
-    pub(crate) fn get_table(&self, key: &[u8]) -> Option<&SSTable> {
+    pub(crate) fn get_table(&self, key: &[u8]) -> Option<&SsTable> {
         let idx = search(self.tables.len(), |i| self.tables[i].biggest() >= key);
         if idx >= self.tables.len() {
             return None;
@@ -925,7 +925,7 @@ impl LevelHandler {
         Some(&self.tables[idx])
     }
 
-    pub(crate) fn get_table_by_id(&self, id: u64) -> Option<SSTable> {
+    pub(crate) fn get_table_by_id(&self, id: u64) -> Option<SsTable> {
         for tbl in self.tables.as_slice() {
             if tbl.id() == id {
                 return Some(tbl.clone());

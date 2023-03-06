@@ -35,7 +35,7 @@ impl<T: TxnStore + 'static> scan_bencher::ScanExecutorBuilder for BatchTableScan
         _: (),
     ) -> Self::E {
         let mut executor = BatchTableScanExecutor::<_, ApiV1>::new(
-            black_box(TiKvStorage::new(
+            black_box(TikvStorage::new(
                 ToTxnStore::<Self::T>::to_store(store),
                 false,
             )),

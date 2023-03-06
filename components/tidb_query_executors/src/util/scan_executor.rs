@@ -1,5 +1,6 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
+use api_version::KvFormat;
 use async_trait::async_trait;
 use kvproto::coprocessor::KeyRange;
 use tidb_query_common::{
@@ -11,7 +12,6 @@ use tidb_query_common::{
 };
 use tidb_query_datatype::{codec::batch::LazyBatchColumnVec, expr::EvalContext};
 use tipb::{ColumnInfo, FieldType};
-use api_version::KvFormat;
 
 use crate::interface::*;
 

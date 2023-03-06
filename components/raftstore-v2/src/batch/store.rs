@@ -400,12 +400,12 @@ impl<EK: KvEngine, ER: RaftEngine> StoreSystem<EK, ER> {
         C: PdClient + 'static,
     {
         let sync_router = Mutex::new(router.clone());
-        pd_client.handle_reconnect(move || {
+        pd_client.handle_reconnect(Box::new(move || {
             sync_router
                 .lock()
                 .unwrap()
                 .broadcast_normal(|| PeerMsg::Tick(PeerTick::PdHeartbeat));
-        });
+        }));
 
         let mut workers = Workers::default();
         workers

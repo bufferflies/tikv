@@ -21,7 +21,7 @@ use grpcio::{
 use grpcio_health::{create_health, HealthService, ServingStatus};
 use hyper::Error as HttpError;
 use kvproto::tikvpb::*;
-use openssl::error::ErrorStack as OpenSSLError;
+use openssl::error::ErrorStack as OpenSslError;
 use pd_client::Error as PdError;
 use protobuf::ProtobufError;
 use rfstore::{router::RaftStoreRouter, Error as RaftServerError};
@@ -110,7 +110,7 @@ pub enum Error {
     Http(#[from] HttpError),
 
     #[error("{0:?}")]
-    OpenSSL(#[from] OpenSSLError),
+    OpenSsl(#[from] OpenSslError),
 
     #[error("{0:?}")]
     JsonCodec(#[from] serde_json::Error),

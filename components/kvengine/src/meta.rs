@@ -71,7 +71,7 @@ impl ShardMeta {
     }
 
     pub fn tag(&self) -> ShardTag {
-        ShardTag::new(self.engine_id, IDVer::new(self.id, self.ver))
+        ShardTag::new(self.engine_id, IdVer::new(self.id, self.ver))
     }
 
     pub fn new_split(
@@ -401,8 +401,8 @@ impl ShardMeta {
     fn apply_destroy_range(&mut self, cs: &pb::ChangeSet) {
         assert!(cs.has_destroy_range());
         self.apply_table_change(cs.get_destroy_range());
-        // ChangeSet of DestroyRange contains the corresponding delete-prefixes which should be
-        // cleaned up.
+        // ChangeSet of DestroyRange contains the corresponding delete-prefixes which
+        // should be cleaned up.
         assert_eq!(cs.get_property_key(), DEL_PREFIXES_KEY);
         if let Some(data) = self.properties.get(DEL_PREFIXES_KEY) {
             let old = DeletePrefixes::unmarshal(data.chunk());
@@ -417,7 +417,8 @@ impl ShardMeta {
         assert!(cs.has_truncate_ts());
         self.apply_table_change(cs.get_truncate_ts());
 
-        // ChangeSet of TruncateTs contains the corresponding ts which should be cleaned up.
+        // ChangeSet of TruncateTs contains the corresponding ts which should be cleaned
+        // up.
         assert_eq!(cs.get_property_key(), TRUNCATE_TS_KEY);
         if self.get_property(TRUNCATE_TS_KEY).is_some() {
             let truncated_ts = TruncateTs::unmarshal(cs.get_property_value());

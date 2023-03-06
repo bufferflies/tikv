@@ -125,7 +125,7 @@ pub struct ShardStats {
     pub mem_table_size: u64,
     pub l0_table_count: usize,
     pub l0_table_size: u64,
-    pub cfs: Vec<CFStats>,
+    pub cfs: Vec<CfStats>,
     pub index_size: u64,
     pub in_mem_index_size: u64,
     pub filter_size: u64,
@@ -153,7 +153,7 @@ pub struct ShardStats {
 #[derive(Default, Serialize, Deserialize, Debug)]
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
-pub struct CFStats {
+pub struct CfStats {
     pub levels: Vec<LevelStats>,
 }
 
@@ -236,7 +236,7 @@ impl super::Shard {
         let mut cfs = vec![];
         for cf in 0..NUM_CFS {
             let scf = data.get_cf(cf);
-            let mut cf_stat = CFStats { levels: vec![] };
+            let mut cf_stat = CfStats { levels: vec![] };
             for l in scf.levels.as_slice() {
                 let mut level_stats = LevelStats::default();
                 level_stats.level = l.level;

@@ -185,7 +185,11 @@ impl<S: Snapshot, L: LockManager> WriteCommand<S, L> for AcquirePessimisticLock 
     }
 }
 
-pub(super) fn make_write_data(modifies: Vec<Modify>, old_values: OldValues, req_type: ReqType) -> WriteData {
+pub(super) fn make_write_data(
+    modifies: Vec<Modify>,
+    old_values: OldValues,
+    req_type: ReqType,
+) -> WriteData {
     if !modifies.is_empty() {
         let extra = TxnExtra {
             old_values,

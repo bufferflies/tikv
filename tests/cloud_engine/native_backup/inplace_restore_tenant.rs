@@ -59,7 +59,8 @@ fn test_inplace_restore_tenant() {
         alloc_node_id_vec(NODES_COUNT),
         |_, conf: &mut TikvConfig| {
             conf.dfs = dfs_config.clone();
-            // Set small mem-table size to make data reach L1 and generate over bound shards.
+            // Set small mem-table size to make data reach L1 and generate over bound
+            // shards.
             conf.rocksdb.writecf.write_buffer_size = ReadableSize::kb(1);
             conf.coprocessor.region_split_size = ReadableSize::kb(128); // kv_opts.base_size = 8kb
             conf.rfengine.target_file_size = ReadableSize::mb(1);
@@ -103,8 +104,8 @@ fn test_inplace_restore_tenant() {
     }
 
     cluster.stop();
-    // Don't graceful shutdown, as some S3FS threads are still alive and holding connections.
-    // oss.shutdown();
+    // Don't graceful shutdown, as some S3FS threads are still alive and holding
+    // connections. oss.shutdown();
 }
 
 fn test_inplace_restore_tenant_impl(

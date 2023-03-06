@@ -23,8 +23,8 @@ use crate::{write_batch::PeerBatch, *};
 pub const BATCH_HEADER_SIZE: usize = 4 /* epoch_id */ + 4 /* checksum */ + 4 /* batch_len */;
 pub(crate) const INITIAL_BUF_SIZE: usize = 8 * 1024 * 1024;
 
-/// `DmaBuffer` is a buffer used for direct I/O that follows the alignment restrictions
-/// on the length and address of user-space buffers.
+/// `DmaBuffer` is a buffer used for direct I/O that follows the alignment
+/// restrictions on the length and address of user-space buffers.
 ///
 /// The typical usage is:
 ///
@@ -106,7 +106,8 @@ impl DmaBuffer {
 
     /// Returns a mutable slice starting at the current position.
     ///
-    /// This function is unsafe because the returned byte slice may represent uninitialized memory.
+    /// This function is unsafe because the returned byte slice may represent
+    /// uninitialized memory.
     unsafe fn chunk_mut(&mut self) -> &mut [u8] {
         &mut std::slice::from_raw_parts_mut(self.data.as_ptr(), self.capacity())[self.len..]
     }
@@ -226,14 +227,14 @@ pub(crate) fn check_wal_header(dir: &Path, epoch_id: u32) -> Result<WalHeader> {
                 Err(err) => {
                     // Haven't written the header.
                     if buf.iter().all(|v| *v == 0) {
-                        return Err(Error::EOF);
+                        return Err(Error::Eof);
                     }
                     // Header is corrupt, but the first batch header is empty which means there
                     // is no data in this WAL. Treat it like EOF and WAL writer will rewrite the
                     // header.
                     file.read_exact(&mut buf[..BATCH_HEADER_SIZE])?;
                     if buf.iter().take(BATCH_HEADER_SIZE).all(|v| *v == 0) {
-                        return Err(Error::EOF);
+                        return Err(Error::Eof);
                     }
                     // Header corruption.
                     Err(err)
@@ -241,7 +242,7 @@ pub(crate) fn check_wal_header(dir: &Path, epoch_id: u32) -> Result<WalHeader> {
             };
         }
     }
-    Err(Error::EOF)
+    Err(Error::Eof)
 }
 
 pub(crate) struct WalWriter {
@@ -306,7 +307,7 @@ impl WalWriter {
                 Ok(wal_header) => {
                     self.current_version = wal_header.version;
                 }
-                Err(Error::EOF) => {
+                Err(Error::Eof) => {
                     self.file_off = 0;
                     self.current_version = self.version;
                     self.write_header()?;
@@ -356,7 +357,8 @@ impl WalWriter {
         batch_header.put_u32_le(batch_payload.len() as u32);
         self.buf.pad_to_align();
         let aligned_len = self.buf.len();
-        // An empty batch header is added after each new batch to differentiate the old record.
+        // An empty batch header is added after each new batch to differentiate the old
+        // record.
         write_eof(&mut self.buf);
 
         let timer = Instant::now_coarse();
@@ -413,8 +415,8 @@ impl WalWriter {
         let current_size =
             DmaBuffer::aligned_len(self.buf.len()) + eof_len + self.file_off as usize;
         let compacted_epoch = self.compacted_epoch.load(Ordering::SeqCst);
-        // If the current epoch id is 5, the rotated epoch id is 6, it would overwrite epoch 2 wal,
-        // so we need to make sure epoch 2 is compacted.
+        // If the current epoch id is 5, the rotated epoch id is 6, it would overwrite
+        // epoch 2 wal, so we need to make sure epoch 2 is compacted.
         current_size > self.wal_size && compacted_epoch + 4 > self.epoch_id
     }
 

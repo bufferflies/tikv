@@ -27,7 +27,7 @@ use tikv_util::{box_err, debug, info};
 use crate::{
     errors::*,
     store::{
-        Engines, PeerTag, RaftApplyState, RaftContext, RaftState, RaftTruncatedState, RegionIDVer,
+        Engines, PeerTag, RaftApplyState, RaftContext, RaftState, RaftTruncatedState, RegionIdVer,
         StoreMsg, TERM_KEY,
     },
 };
@@ -94,14 +94,15 @@ pub(crate) struct PeerStorage {
     pub(crate) shard_meta: Option<kvengine::ShardMeta>,
     pub(crate) restored_snapshot: Option<(kvenginepb::ChangeSet, u64)>,
     pub(crate) on_apply_snapshot_msgs: Vec<RaftMessage>,
-    /// !initial_flushed peer can't generate snapshot until initial_flush change set
-    /// is committed. If majority followers are created by raft msg which always request
-    /// snapshot from leader, the initial_flush change set can't be committed due to snapshot
-    /// not ready. It's a deadlock!
+    /// !initial_flushed peer can't generate snapshot until initial_flush change
+    /// set is committed. If majority followers are created by raft msg
+    /// which always request snapshot from leader, the initial_flush change
+    /// set can't be committed due to snapshot not ready. It's a deadlock!
     ///
-    /// Peer created by split doesn't request snapshot, so we can wait for those peer replacing
-    /// peer created by raft message. We record these requesting snapshot peers to set their
-    /// progress to probe manually due to raft-rs's implementation.
+    /// Peer created by split doesn't request snapshot, so we can wait for those
+    /// peer replacing peer created by raft message. We record these
+    /// requesting snapshot peers to set their progress to probe manually
+    /// due to raft-rs's implementation.
     pub(crate) snapshot_not_ready_peers: RefCell<HashSet<u64>>,
 }
 
@@ -193,9 +194,10 @@ impl raft::Storage for PeerStorage {
             ));
         }
         if !self.region_match_preprocessed() {
-            // If the region is staler than preprocessed region, the preprocessed region may not
-            // contain the to peer, cause the to peer panic. Or the region epoch version may not
-            // equal to the shard meta version, cause inconsistency.
+            // If the region is staler than preprocessed region, the preprocessed region may
+            // not contain the to peer, cause the to peer panic. Or the region
+            // epoch version may not equal to the shard meta version, cause
+            // inconsistency.
             return Err(raft::Error::Store(
                 StorageError::SnapshotTemporarilyUnavailable,
             ));
@@ -261,7 +263,7 @@ impl PeerStorage {
     }
 
     pub(crate) fn tag(&self) -> PeerTag {
-        PeerTag::new(self.store_id, RegionIDVer::from_region(&self.region))
+        PeerTag::new(self.store_id, RegionIdVer::from_region(&self.region))
     }
 
     pub(crate) fn truncate_raft_log(
@@ -442,9 +444,10 @@ impl PeerStorage {
     }
 
     pub fn write_raft_state(&mut self, ctx: &mut RaftContext) {
-        // The meta's version is the latest region version, use it to persist raft state.
+        // The meta's version is the latest region version, use it to persist raft
+        // state.
         let meta = self.shard_meta.as_ref().unwrap();
-        let id_ver = RegionIDVer::new(meta.id, meta.ver);
+        let id_ver = RegionIdVer::new(meta.id, meta.ver);
         let tag = PeerTag::new(ctx.store_id(), id_ver);
         debug!("{} write raft state {:?}", tag, self.raft_state);
         let key = raft_state_key(meta.ver);
@@ -467,9 +470,10 @@ impl PeerStorage {
                 self.get_region_id()
             ));
         }
-        // If the region is created by raft message, parent_id is always None, but it's possible
-        // a split request is applied lately and added it to the dependent, so we avoid adding dependent
-        // when splitting regions by checking peer existence to handle such a case.
+        // If the region is created by raft message, parent_id is always None, but it's
+        // possible a split request is applied lately and added it to the
+        // dependent, so we avoid adding dependent when splitting regions by
+        // checking peer existence to handle such a case.
         if let Some(parent_id) = self.parent_id() {
             if ctx
                 .global
@@ -537,7 +541,8 @@ impl PeerStorage {
             .map(|p| p.id)
     }
 
-    /// The last index of raft logs that have been applied and persisted to the state machine.
+    /// The last index of raft logs that have been applied and persisted to the
+    /// state machine.
     pub(crate) fn data_persisted_log_index(&self) -> Option<u64> {
         self.shard_meta.as_ref().map(|meta| meta.data_sequence)
     }
@@ -641,7 +646,8 @@ fn init_last_term(
     ));
 }
 
-// When we bootstrap the region we must call this to initialize region local state first.
+// When we bootstrap the region we must call this to initialize region local
+// state first.
 pub fn write_initial_raft_state(
     raft_wb: &mut rfengine::WriteBatch,
     peer_id: u64,
@@ -676,7 +682,7 @@ pub fn write_peer_state(
         .find(|p| p.id == peer_id)
         .map(|p| p.store_id)
         .unwrap_or(0);
-    let tag = PeerTag::new(store_id, RegionIDVer::from_region(region));
+    let tag = PeerTag::new(store_id, RegionIdVer::from_region(region));
     info!("{} write peer state", tag);
     let mut region_state = RegionLocalState::default();
     region_state.set_state(peer_state);

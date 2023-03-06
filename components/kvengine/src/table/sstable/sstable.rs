@@ -23,25 +23,25 @@ use crate::table::{sstable::File, table::Result, *};
 const IDX_TTL: u64 = 60 * 10;
 
 #[derive(Clone)]
-pub struct SSTable {
-    core: Arc<SSTableCore>,
+pub struct SsTable {
+    core: Arc<SsTableCore>,
 }
 
-impl Deref for SSTable {
-    type Target = SSTableCore;
+impl Deref for SsTable {
+    type Target = SsTableCore;
     fn deref(&self) -> &Self::Target {
         &self.core
     }
 }
 
-impl SSTable {
+impl SsTable {
     pub fn new(
         file: Arc<dyn File>,
         cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
         load_filter: bool,
     ) -> Result<Self> {
         let size = file.size();
-        let core = SSTableCore::new(file, 0, size, cache, load_filter)?;
+        let core = SsTableCore::new(file, 0, size, cache, load_filter)?;
         Ok(Self {
             core: Arc::new(core),
         })
@@ -53,7 +53,7 @@ impl SSTable {
         end: u64,
         cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
     ) -> Result<Self> {
-        let core = SSTableCore::new(file, start, end, cache, true)?;
+        let core = SsTableCore::new(file, start, end, cache, true)?;
         Ok(Self {
             core: Arc::new(core),
         })
@@ -66,7 +66,8 @@ impl SSTable {
 
     // Get the value with the given key and version.
     // It is caller's responsibility to maintain the lifetime of the returned value.
-    // Raw value is stored in val_mem_holder, while the returned value is a parsed slice of it.
+    // Raw value is stored in val_mem_holder, while the returned value is a parsed
+    // slice of it.
     pub fn get(
         &self,
         key: &[u8],
@@ -145,7 +146,7 @@ impl SSTable {
     }
 }
 
-pub struct SSTableCore {
+pub struct SsTableCore {
     file: Arc<dyn File>,
     cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
     filter: Option<BinaryFuse8>,
@@ -165,7 +166,7 @@ pub struct SSTableCore {
     last_old_idx_access: AtomicU64,
 }
 
-impl SSTableCore {
+impl SsTableCore {
     pub fn new(
         file: Arc<dyn File>,
         start_off: u64,
@@ -724,7 +725,7 @@ mod tests {
     fn test_table_iterator() {
         for n in 99..=101 {
             let file = build_test_table_with_prefix("key", n);
-            let t = SSTable::new(file, new_test_cache(), true).unwrap();
+            let t = SsTable::new(file, new_test_cache(), true).unwrap();
             let mut it = t.new_iterator(false, true);
             let mut count = 0;
             it.rewind();
@@ -743,7 +744,7 @@ mod tests {
     fn test_point_get() {
         let kvs = generate_key_values("key", 8000);
         let tf = build_test_table_with_kvs(kvs);
-        let t = SSTable::new(tf, new_test_cache(), true).unwrap();
+        let t = SsTable::new(tf, new_test_cache(), true).unwrap();
         for i in 0..8000 {
             let k = test_key("key", i);
             let k_h = farmhash::fingerprint64(k.as_bytes());
@@ -765,7 +766,7 @@ mod tests {
         let nums = &[99, 100, 101, 199, 200, 250, 9999, 10000];
         for n in nums {
             let tf = build_test_table_with_prefix("key", *n);
-            let t = SSTable::new(tf, new_test_cache(), true).unwrap();
+            let t = SsTable::new(tf, new_test_cache(), true).unwrap();
             let mut it = t.new_iterator(false, true);
             it.rewind();
             assert!(it.valid());
@@ -796,7 +797,7 @@ mod tests {
         let nums = vec![99, 100, 101, 199, 200, 250, 9999, 10000];
         for n in nums {
             let tf = build_test_table_with_prefix("key", n);
-            let t = SSTable::new(tf, new_test_cache(), true).unwrap();
+            let t = SsTable::new(tf, new_test_cache(), true).unwrap();
             let mut it = t.new_iterator(true, true);
             it.rewind();
             assert!(it.valid());
@@ -825,7 +826,7 @@ mod tests {
             TestData::new("z", false, ""),
         ];
         let tf = build_test_table_with_prefix("k", 10000);
-        let t = SSTable::new(tf, new_test_cache(), true).unwrap();
+        let t = SsTable::new(tf, new_test_cache(), true).unwrap();
         let mut it = t.new_iterator(false, true);
         for td in test_datas {
             it.seek(td.input.as_bytes());
@@ -850,7 +851,7 @@ mod tests {
             TestData::new("z", true, "k9999"),
         ];
         let tf = build_test_table_with_prefix("k", 10000);
-        let t = SSTable::new(tf, new_test_cache(), true).unwrap();
+        let t = SsTable::new(tf, new_test_cache(), true).unwrap();
         let mut it = t.new_iterator(true, true);
         for td in test_datas {
             it.seek(td.input.as_bytes());
@@ -868,7 +869,7 @@ mod tests {
         let nums = vec![99, 100, 101, 199, 200, 250, 9999, 10000];
         for n in nums {
             let file = build_test_table_with_prefix("key", n);
-            let t = SSTable::new(file, new_test_cache(), true).unwrap();
+            let t = SsTable::new(file, new_test_cache(), true).unwrap();
             let mut it = t.new_iterator(false, true);
             let mut count = 0;
             it.rewind();
@@ -890,7 +891,7 @@ mod tests {
         let nums = vec![99, 100, 101, 199, 200, 250, 9999, 10000];
         for n in nums {
             let file = build_test_table_with_prefix("key", n);
-            let t = SSTable::new(file, new_test_cache(), true).unwrap();
+            let t = SsTable::new(file, new_test_cache(), true).unwrap();
             let mut it = t.new_iterator(true, true);
             it.seek("zzzzzz".as_bytes()); // Seek to end, an invalid element.
             assert!(it.valid());
@@ -910,7 +911,7 @@ mod tests {
     #[test]
     fn test_table() {
         let tf = build_test_table_with_prefix("key", 10000);
-        let t = SSTable::new(tf, new_test_cache(), true).unwrap();
+        let t = SsTable::new(tf, new_test_cache(), true).unwrap();
         let mut it = t.new_iterator(false, true);
         let mut kid = 1010_usize;
         let seek = test_key("key", kid);
@@ -933,7 +934,7 @@ mod tests {
     #[test]
     fn test_iterate_back_and_forth() {
         let tf = build_test_table_with_prefix("key", 10000);
-        let t = SSTable::new(tf, new_test_cache(), true).unwrap();
+        let t = SsTable::new(tf, new_test_cache(), true).unwrap();
 
         let seek = test_key("key", 1010);
         let mut it = t.new_iterator(false, true);
@@ -971,7 +972,7 @@ mod tests {
     fn test_iterate_multi_version() {
         let num = 4000;
         let (tf, all_cnt) = build_multi_vesion_table(generate_key_values("key", num));
-        let t = SSTable::new(tf, new_test_cache(), true).unwrap();
+        let t = SsTable::new(tf, new_test_cache(), true).unwrap();
         let mut it = t.new_iterator(false, true);
         let mut it_cnt = 0;
         let mut last_key = BytesMut::new();
@@ -1026,7 +1027,7 @@ mod tests {
     #[test]
     fn test_uni_iterator() {
         let tf = build_test_table_with_prefix("key", 10000);
-        let t = SSTable::new(tf, new_test_cache(), true).unwrap();
+        let t = SsTable::new(tf, new_test_cache(), true).unwrap();
         {
             let mut it = t.new_iterator(false, true);
             let mut cnt = 0;
@@ -1058,7 +1059,7 @@ mod tests {
     fn test_build_and_load_filter() {
         let kvs = generate_key_values("key", 10000);
         let tf = build_test_table_with_kvs(kvs.clone());
-        let t = SSTable::new(tf, new_test_cache(), false).unwrap();
+        let t = SsTable::new(tf, new_test_cache(), false).unwrap();
         let cache_key = BlockCacheKey::new(t.id(), t.filter_offset());
         assert!(t.cache.as_ref().unwrap().get(&cache_key).is_none());
         let filter = t.load_filter().unwrap();
@@ -1072,7 +1073,7 @@ mod tests {
     #[bench]
     fn bench_load_filter(b: &mut test::Bencher) {
         let file = build_test_table_with_prefix("key", 10000);
-        let t = SSTable::new(file, new_test_cache(), true).unwrap();
+        let t = SsTable::new(file, new_test_cache(), true).unwrap();
         b.iter(|| {
             test::black_box(t.load_filter().unwrap());
         });
@@ -1081,7 +1082,7 @@ mod tests {
     #[bench]
     fn bench_cache_filter(b: &mut test::Bencher) {
         let file = build_test_table_with_prefix("key", 10000);
-        let t = SSTable::new(file, new_test_cache(), true).unwrap();
+        let t = SsTable::new(file, new_test_cache(), true).unwrap();
         t.load_filter().unwrap();
         let cache_key = BlockCacheKey::new(t.id(), t.filter_offset());
         b.iter(|| {
@@ -1092,7 +1093,7 @@ mod tests {
     #[bench]
     fn bench_decode_filter(b: &mut test::Bencher) {
         let file = build_test_table_with_prefix("key", 10000);
-        let t = SSTable::new(file, new_test_cache(), true).unwrap();
+        let t = SsTable::new(file, new_test_cache(), true).unwrap();
         let data = t.read_filter_data_from_file().unwrap();
         b.iter(|| {
             test::black_box(t.decode_filter(&data).unwrap());

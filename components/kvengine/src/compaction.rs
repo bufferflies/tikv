@@ -20,7 +20,7 @@ use crate::{
     dfs,
     table::{
         search,
-        sstable::{self, InMemFile, L0Builder, SSTable},
+        sstable::{self, InMemFile, L0Builder, SsTable},
     },
     Error::{FallbackLocalCompactorDisabled, IncompatibleRemoteCompactor, RemoteCompaction},
     Iterator, EXTRA_CF, LOCK_CF, WRITE_CF, *,
@@ -65,7 +65,7 @@ impl RemoteCompactors {
 
 #[derive(Clone)]
 pub struct CompactionClient {
-    dfs: Arc<dyn dfs::DFS>,
+    dfs: Arc<dyn dfs::Dfs>,
     remote_compactors: Arc<Mutex<RemoteCompactors>>,
     client: Option<hyper::Client<hyper::client::HttpConnector>>,
     compression_lvl: i32,
@@ -74,7 +74,7 @@ pub struct CompactionClient {
 
 impl CompactionClient {
     pub(crate) fn new(
-        dfs: Arc<dyn dfs::DFS>,
+        dfs: Arc<dyn dfs::Dfs>,
         remote_url: String,
         compression_lvl: i32,
         allow_fallback_local: bool,
@@ -254,8 +254,9 @@ impl CompactionClient {
     }
 }
 
-/// `CURRENT_COMPACTOR_VERSION` is used for version compatibility checking of remote compactor.
-/// NOTE: Increase `CURRENT_COMPACTOR_VERSION` by 1 when add new feature to remote compactor.
+/// `CURRENT_COMPACTOR_VERSION` is used for version compatibility checking of
+/// remote compactor. NOTE: Increase `CURRENT_COMPACTOR_VERSION` by 1 when add
+/// new feature to remote compactor.
 const CURRENT_COMPACTOR_VERSION: u32 = 1;
 
 const INCOMPATIBLE_COMPACTOR_ERROR_CODE: StatusCode = StatusCode::NOT_IMPLEMENTED;
@@ -274,20 +275,20 @@ pub struct CompactionRequest {
     pub start: Vec<u8>,
     pub end: Vec<u8>,
 
-    /// If `destroy_range` is true, `in_place_compact_files` will be compacted in place
-    /// to filter out data that covered by `del_prefixes`.
+    /// If `destroy_range` is true, `in_place_compact_files` will be compacted
+    /// in place to filter out data that covered by `del_prefixes`.
     pub destroy_range: bool,
     pub del_prefixes: Vec<u8>,
     // Vec<(id, level, cf)>
     pub in_place_compact_files: Vec<(u64, u32, i32)>,
 
-    /// If `truncate_ts` is some, `in_place_compact_files` will be compacted in place
-    /// to filter out data with version > `truncated_ts`.
+    /// If `truncate_ts` is some, `in_place_compact_files` will be compacted in
+    /// place to filter out data with version > `truncated_ts`.
     pub truncate_ts: Option<u64>,
 
     /// Requires `compactor_version >= 1`.
-    /// If `trim_over_bound` is true, `in_place_compact_files` will be compacted in place
-    /// to filter out data out of shard bound.
+    /// If `trim_over_bound` is true, `in_place_compact_files` will be compacted
+    /// in place to filter out data out of shard bound.
     pub trim_over_bound: bool,
 
     // Used for L1+ compaction.
@@ -312,8 +313,8 @@ pub struct CompactDef {
     pub(crate) cf: usize,
     pub(crate) level: usize,
 
-    pub(crate) top: Vec<sstable::SSTable>,
-    pub(crate) bot: Vec<sstable::SSTable>,
+    pub(crate) top: Vec<sstable::SsTable>,
+    pub(crate) bot: Vec<sstable::SsTable>,
 
     pub(crate) has_overlap: bool,
 
@@ -388,8 +389,8 @@ impl CompactDef {
         if self.top_left_idx == self.top_right_idx {
             return false;
         }
-        // Expand to left to include more tops as long as the ratio doesn't decrease and the total size
-        // do not exceed maxCompactionExpandSize.
+        // Expand to left to include more tops as long as the ratio doesn't decrease and
+        // the total size do not exceed maxCompactionExpandSize.
         for i in (0..self.top_left_idx).rev() {
             let t = &this[i];
             let (left, right) = get_tables_in_range(&next, t.smallest(), t.biggest());
@@ -409,8 +410,8 @@ impl CompactDef {
                 break;
             }
         }
-        // Expand to right to include more tops as long as the ratio doesn't decrease and the total size
-        // do not exceeds maxCompactionExpandSize.
+        // Expand to right to include more tops as long as the ratio doesn't decrease
+        // and the total size do not exceeds maxCompactionExpandSize.
         for i in self.top_right_idx..this.len() {
             let t = &this[i];
             let (left, right) = get_tables_in_range(&next, t.smallest(), t.biggest());
@@ -450,7 +451,7 @@ impl CompactDef {
         true
     }
 
-    fn sume_tbl_size(tbls: &[sstable::SSTable]) -> u64 {
+    fn sume_tbl_size(tbls: &[sstable::SsTable]) -> u64 {
         tbls.iter().map(|tbl| tbl.size()).sum()
     }
 
@@ -508,7 +509,7 @@ impl Engine {
         Some((self.build_compact_ln_request(shard, &cd), Some(cd)))
     }
 
-    pub(crate) fn compact(&self, id_ver: IDVer) -> Option<Result<pb::ChangeSet>> {
+    pub(crate) fn compact(&self, id_ver: IdVer) -> Option<Result<pb::ChangeSet>> {
         let shard = self.get_shard_with_ver(id_ver.id, id_ver.ver).ok()?;
         let tag = shard.tag();
         if !shard.ready_to_compact() {
@@ -617,8 +618,8 @@ impl Engine {
 
     pub(crate) fn set_alloc_ids_for_request(&self, req: &mut CompactionRequest, total_size: u64) {
         let tag = ShardTag::from_comp_req(req);
-        // We must ensure there are enough ids for remote compactor to use, so we need to allocate
-        // more ids than needed.
+        // We must ensure there are enough ids for remote compactor to use, so we need
+        // to allocate more ids than needed.
         let mut old_ids_num = 0usize;
         for bot_ids in req.multi_cf_bottoms.iter() {
             old_ids_num += bot_ids.len();
@@ -997,7 +998,7 @@ pub(crate) struct KeyRange {
     pub right: Bytes,
 }
 
-pub(crate) fn get_key_range(tables: &[SSTable]) -> KeyRange {
+pub(crate) fn get_key_range(tables: &[SsTable]) -> KeyRange {
     let mut smallest = tables[0].smallest();
     let mut biggest = tables[0].biggest();
     for i in 1..tables.len() {
@@ -1015,7 +1016,7 @@ pub(crate) fn get_key_range(tables: &[SSTable]) -> KeyRange {
     }
 }
 
-pub(crate) fn get_tables_in_range(tables: &[SSTable], start: &[u8], end: &[u8]) -> (usize, usize) {
+pub(crate) fn get_tables_in_range(tables: &[SsTable], start: &[u8], end: &[u8]) -> (usize, usize) {
     let left = search(tables.len(), |i| start <= tables[i].biggest());
     let right = search(tables.len(), |i| end < tables[i].smallest());
     (left, right)
@@ -1023,7 +1024,7 @@ pub(crate) fn get_tables_in_range(tables: &[SSTable], start: &[u8], end: &[u8]) 
 
 pub(crate) fn compact_l0(
     req: &CompactionRequest,
-    fs: Arc<dyn dfs::DFS>,
+    fs: Arc<dyn dfs::Dfs>,
     compression_lvl: i32,
 ) -> Result<Vec<pb::TableCreate>> {
     let opts = dfs::Options::new(req.shard_id, req.shard_ver);
@@ -1094,7 +1095,7 @@ pub(crate) fn compact_l0(
 
 pub(crate) fn load_table_files(
     tbl_ids: &[u64],
-    fs: Arc<dyn dfs::DFS>,
+    fs: Arc<dyn dfs::Dfs>,
     opts: dfs::Options,
 ) -> Result<Vec<InMemFile>> {
     let mut files = vec![];
@@ -1108,7 +1109,7 @@ pub(crate) fn load_table_files(
                 .read_file(aid, opts)
                 .await
                 .map(|data| (aid, data))
-                .map_err(|e| Error::DFSError(e));
+                .map_err(|e| Error::DfsError(e));
             atx.send(res).unwrap();
         });
     }
@@ -1135,17 +1136,17 @@ fn in_mem_files_to_l0_tables(files: Vec<InMemFile>) -> Vec<sstable::L0Table> {
         .collect()
 }
 
-fn in_mem_files_to_tables(files: Vec<InMemFile>) -> Vec<sstable::SSTable> {
+fn in_mem_files_to_tables(files: Vec<InMemFile>) -> Vec<sstable::SsTable> {
     files
         .into_iter()
-        .map(|f| sstable::SSTable::new(Arc::new(f), None, false).unwrap())
+        .map(|f| sstable::SsTable::new(Arc::new(f), None, false).unwrap())
         .collect()
 }
 
 fn build_compact_l0_iterator(
     cf: usize,
     top_tbls: Vec<sstable::L0Table>,
-    bot_tbls: Vec<sstable::SSTable>,
+    bot_tbls: Vec<sstable::SsTable>,
     start: &[u8],
 ) -> Box<dyn table::Iterator> {
     let mut iters: Vec<Box<dyn table::Iterator>> = vec![];
@@ -1219,11 +1220,13 @@ impl CompactL0Helper {
                 self.last_key.extend_from_slice(key);
             }
 
-            // Only consider the versions which are below the safeTS, otherwise, we might end up discarding the
-            // only valid version for a running transaction.
+            // Only consider the versions which are below the safeTS, otherwise, we might
+            // end up discarding the only valid version for a running
+            // transaction.
             let val = iter.value();
             if val.version <= self.safe_ts {
-                // key is the latest readable version of this key, so we simply discard all the rest of the versions.
+                // key is the latest readable version of this key, so we simply discard all the
+                // rest of the versions.
                 self.skip_key.clear();
                 self.skip_key.extend_from_slice(key);
                 if !val.is_deleted() {
@@ -1234,7 +1237,8 @@ impl CompactL0Helper {
                             continue;
                         }
                         Decision::MarkTombStone => {
-                            // There may have old versions for this key, so convert to delete tombstone.
+                            // There may have old versions for this key, so convert to delete
+                            // tombstone.
                             self.builder
                                 .add(key, table::Value::new_tombstone(val.version));
                             iter.next_all_version();
@@ -1263,7 +1267,7 @@ impl CompactL0Helper {
 
 pub(crate) fn compact_tables(
     req: &CompactionRequest,
-    fs: Arc<dyn dfs::DFS>,
+    fs: Arc<dyn dfs::Dfs>,
     compression_lvl: i32,
 ) -> Result<Vec<pb::TableCreate>> {
     let tag = ShardTag::from_comp_req(req);
@@ -1326,17 +1330,20 @@ pub(crate) fn compact_tables(
                 last_key.extend_from_slice(key);
             }
 
-            // Only consider the versions which are below the minReadTs, otherwise, we might end up discarding the
-            // only valid version for a running transaction.
+            // Only consider the versions which are below the minReadTs, otherwise, we might
+            // end up discarding the only valid version for a running
+            // transaction.
             if req.cf as usize == LOCK_CF || val.version <= req.safe_ts {
-                // key is the latest readable version of this key, so we simply discard all the rest of the versions.
+                // key is the latest readable version of this key, so we simply discard all the
+                // rest of the versions.
                 skip_key.clear();
                 skip_key.extend_from_slice(key);
 
                 if val.is_deleted() {
                     // If this key range has overlap with lower levels, then keep the deletion
                     // marker with the latest version, discarding the rest. We have set skipKey,
-                    // so the following key versions would be skipped. Otherwise discard the deletion marker.
+                    // so the following key versions would be skipped. Otherwise discard the
+                    // deletion marker.
                     if !req.overlap {
                         iter.next_all_version();
                         continue;
@@ -1350,7 +1357,8 @@ pub(crate) fn compact_tables(
                         }
                         Decision::MarkTombStone => {
                             if req.overlap {
-                                // There may have old versions for this key, so convert to delete tombstone.
+                                // There may have old versions for this key, so convert to delete
+                                // tombstone.
                                 builder.add(key, table::Value::new_tombstone(val.version));
                             }
                             iter.next_all_version();
@@ -1407,8 +1415,9 @@ enum Decision {
 }
 
 // filter implements the badger.CompactionFilter interface.
-// Since we use txn ts as badger version, we only need to filter Delete, Rollback and Op_Lock.
-// It is called for the first valid version before safe point, older versions are discarded automatically.
+// Since we use txn ts as badger version, we only need to filter Delete,
+// Rollback and Op_Lock. It is called for the first valid version before safe
+// point, older versions are discarded automatically.
 fn filter(safe_ts: u64, cf: usize, val: table::Value) -> Decision {
     let user_meta = val.user_meta();
     if cf == WRITE_CF {
@@ -1429,12 +1438,13 @@ fn filter(safe_ts: u64, cf: usize, val: table::Value) -> Decision {
             }
         }
     }
-    // Older version are discarded automatically, we need to keep the first valid version.
+    // Older version are discarded automatically, we need to keep the first valid
+    // version.
     Decision::Keep
 }
 
 pub async fn handle_remote_compaction(
-    dfs: Arc<dyn dfs::DFS>,
+    dfs: Arc<dyn dfs::Dfs>,
     req: hyper::Request<hyper::Body>,
     compression_lvl: i32,
 ) -> hyper::Result<hyper::Response<hyper::Body>> {
@@ -1484,7 +1494,7 @@ pub async fn handle_remote_compaction(
 }
 
 fn local_compact(
-    dfs: Arc<dyn dfs::DFS>,
+    dfs: Arc<dyn dfs::Dfs>,
     req: &CompactionRequest,
     compression_lvl: i32,
 ) -> Result<pb::ChangeSet> {
@@ -1547,7 +1557,7 @@ fn local_compact(
 /// Compact files in place to remove data covered by delete prefixes.
 fn compact_destroy_range(
     req: &CompactionRequest,
-    dfs: Arc<dyn dfs::DFS>,
+    dfs: Arc<dyn dfs::Dfs>,
     compression_lvl: i32,
 ) -> Result<pb::TableChange> {
     assert!(
@@ -1597,7 +1607,7 @@ fn compact_destroy_range(
             let (smallest, biggest) = builder.smallest_biggest();
             (data, smallest.to_vec(), biggest.to_vec())
         } else {
-            let t = sstable::SSTable::new(Arc::new(file), None, false).unwrap();
+            let t = sstable::SsTable::new(Arc::new(file), None, false).unwrap();
             let mut builder = sstable::Builder::new(
                 new_id,
                 req.block_size,
@@ -1656,7 +1666,7 @@ fn compact_destroy_range(
 
 fn compact_truncate_ts(
     req: &CompactionRequest,
-    dfs: Arc<dyn dfs::DFS>,
+    dfs: Arc<dyn dfs::Dfs>,
     compression_lvl: i32,
 ) -> Result<pb::TableChange> {
     let truncate_ts = req.truncate_ts.unwrap();
@@ -1713,7 +1723,7 @@ fn compact_truncate_ts(
             let (smallest, biggest) = builder.smallest_biggest();
             (data, smallest.to_vec(), biggest.to_vec())
         } else {
-            let t = sstable::SSTable::new(Arc::new(file), None, false).unwrap();
+            let t = sstable::SsTable::new(Arc::new(file), None, false).unwrap();
             let mut builder = sstable::Builder::new(
                 new_id,
                 req.block_size,
@@ -1774,7 +1784,7 @@ fn compact_truncate_ts(
 /// Compact files in place to remove data out of shard bound.
 fn compact_trim_over_bound(
     req: &CompactionRequest,
-    dfs: Arc<dyn dfs::DFS>,
+    dfs: Arc<dyn dfs::Dfs>,
     compression_lvl: i32,
 ) -> Result<pb::TableChange> {
     assert!(req.trim_over_bound && !req.in_place_compact_files.is_empty());
@@ -1829,7 +1839,7 @@ fn compact_trim_over_bound(
             let (smallest, biggest) = builder.smallest_biggest();
             (data, smallest.to_vec(), biggest.to_vec())
         } else {
-            let t = sstable::SSTable::new(Arc::new(file), None, false).unwrap();
+            let t = sstable::SsTable::new(Arc::new(file), None, false).unwrap();
             let mut builder = sstable::Builder::new(
                 new_id,
                 req.block_size,
@@ -1886,24 +1896,24 @@ fn compact_trim_over_bound(
 
 pub(crate) enum CompactMsg {
     /// The shard is ready to be compacted / destroyed range / truncated ts.
-    Compact(IDVer),
+    Compact(IdVer),
 
     /// Compaction finished.
     Finish {
         task_id: u64,
-        id_ver: IDVer,
+        id_ver: IdVer,
         // This variant is too large(256 bytes). Box it to reduce size.
         result: Box<Option<Result<pb::ChangeSet>>>,
     },
 
-    /// The compaction change set is applied to the engine, so the shard is ready
-    /// for next compaction.
-    Applied(IDVer),
+    /// The compaction change set is applied to the engine, so the shard is
+    /// ready for next compaction.
+    Applied(IdVer),
 
-    /// Clear message is sent when a shard changed its version or set to inactive.
-    /// Then all the previous tasks will be discarded.
+    /// Clear message is sent when a shard changed its version or set to
+    /// inactive. Then all the previous tasks will be discarded.
     /// This simplifies the logic, avoid race condition.
-    Clear(IDVer),
+    Clear(IdVer),
 }
 
 pub(crate) struct CompactRunner {
@@ -1911,16 +1921,19 @@ pub(crate) struct CompactRunner {
     rx: mpsc::Receiver<CompactMsg>,
     /// task_id is the identity of each compaction job.
     ///
-    /// When a shard is set to inactive, all the compaction jobs of this shard should be discarded, then when
-    /// it is set to active again, old result may arrive and conflict with the new tasks.
-    /// So we use task_id to detect and discard obsolete tasks.
+    /// When a shard is set to inactive, all the compaction jobs of this shard
+    /// should be discarded, then when it is set to active again, old result
+    /// may arrive and conflict with the new tasks. So we use task_id to
+    /// detect and discard obsolete tasks.
     task_id: u64,
     /// `running` contains shards' running compaction `task_id`s.
-    running: HashMap<IDVer, u64 /* task_id */>,
-    /// `notified` contains shards that have finished a compaction job and been notified to apply it.
-    notified: HashSet<IDVer>,
-    /// `pending` contains shards that want to do compaction but the job queue is full now.
-    pending: HashSet<IDVer>,
+    running: HashMap<IdVer, u64 /* task_id */>,
+    /// `notified` contains shards that have finished a compaction job and been
+    /// notified to apply it.
+    notified: HashSet<IdVer>,
+    /// `pending` contains shards that want to do compaction but the job queue
+    /// is full now.
+    pending: HashSet<IdVer>,
 }
 
 impl CompactRunner {
@@ -1953,8 +1966,9 @@ impl CompactRunner {
         }
     }
 
-    fn compact(&mut self, id_ver: IDVer) {
-        // The shard is compacting, and following compaction will be trigger after apply.
+    fn compact(&mut self, id_ver: IdVer) {
+        // The shard is compacting, and following compaction will be trigger after
+        // apply.
         if self.is_compacting(id_ver) {
             return;
         }
@@ -1981,7 +1995,7 @@ impl CompactRunner {
 
     fn compaction_finished(
         &mut self,
-        id_ver: IDVer,
+        id_ver: IdVer,
         task_id: u64,
         result: Option<Result<pb::ChangeSet>>,
     ) {
@@ -2014,8 +2028,8 @@ impl CompactRunner {
             }
             None => {
                 info!("shard {} got empty compaction result", tag);
-                // The compaction result can be none under complex situations. To avoid compaction
-                // not making progress, we trigger it actively.
+                // The compaction result can be none under complex situations. To avoid
+                // compaction not making progress, we trigger it actively.
                 if let Ok(shard) = self.engine.get_shard_with_ver(id_ver.id, id_ver.ver) {
                     self.engine.refresh_shard_states(&shard);
                 }
@@ -2024,18 +2038,19 @@ impl CompactRunner {
         }
     }
 
-    fn compaction_applied(&mut self, id_ver: IDVer) {
-        // It's possible the shard is not being pending applied, because it may apply a compaction
-        // from the former leader, so we use both `running` and `notified` to detect whether
-        // it's compacting. It can avoid spawning more compaction jobs, e.g., a new leader spawns
-        // one but not yet finished, and it applies the compaction from the former leader, then the
-        // new leader spawns another one. However, it's possible the new compaction is finished and
-        // not yet applied, it can result in duplicated compaction but no exceeding compaction
-        // jobs.
+    fn compaction_applied(&mut self, id_ver: IdVer) {
+        // It's possible the shard is not being pending applied, because it may apply a
+        // compaction from the former leader, so we use both `running` and
+        // `notified` to detect whether it's compacting. It can avoid spawning
+        // more compaction jobs, e.g., a new leader spawns one but not yet
+        // finished, and it applies the compaction from the former leader, then the
+        // new leader spawns another one. However, it's possible the new compaction is
+        // finished and not yet applied, it can result in duplicated compaction
+        // but no exceeding compaction jobs.
         self.notified.remove(&id_ver);
     }
 
-    fn clear(&mut self, id_ver: IDVer) {
+    fn clear(&mut self, id_ver: IdVer) {
         self.running.remove(&id_ver);
         self.notified.remove(&id_ver);
         self.pending.remove(&id_ver);
@@ -2052,7 +2067,7 @@ impl CompactRunner {
         }
     }
 
-    fn pick_highest_pri_pending_shard(&mut self) -> Option<IDVer> {
+    fn pick_highest_pri_pending_shard(&mut self) -> Option<IdVer> {
         let engine = self.engine.clone();
         self.pending
             .retain(|id_ver| engine.get_shard_with_ver(id_ver.id, id_ver.ver).is_ok());
@@ -2087,7 +2102,7 @@ impl CompactRunner {
         self.running.len() >= self.engine.opts.num_compactors
     }
 
-    fn is_compacting(&self, id_ver: IDVer) -> bool {
+    fn is_compacting(&self, id_ver: IdVer) -> bool {
         self.running.contains_key(&id_ver) || self.notified.contains(&id_ver)
     }
 }

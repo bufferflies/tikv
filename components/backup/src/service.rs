@@ -3,8 +3,7 @@
 use std::{marker::PhantomData, sync::atomic::*};
 
 use engine_traits::KvEngine;
-use futures::{channel::mpsc, FutureExt, SinkExt, StreamExt, TryFutureExt};
-use futures::executor::block_on;
+use futures::{channel::mpsc, executor::block_on, FutureExt, SinkExt, StreamExt, TryFutureExt};
 use grpcio::{self, *};
 use kvproto::brpb::*;
 use tikv_util::{error, info, worker::*};
@@ -125,7 +124,6 @@ mod tests {
 
     use engine_rocks::RocksEngine;
     use external_storage_export::make_local_backend;
-    use raftstore::router::RaftStoreBlackHole;
     use tikv::storage::txn::tests::{must_commit, must_prewrite_put};
     use tikv_util::worker::{dummy_scheduler, ReceiverWrapper};
     use txn_types::TimeStamp;
@@ -136,8 +134,7 @@ mod tests {
     fn new_rpc_suite() -> (Server, BackupClient, ReceiverWrapper<Task>) {
         let env = Arc::new(EnvBuilder::new().build());
         let (scheduler, rx) = dummy_scheduler();
-        let backup_service =
-            super::Service::<RocksEngine, RaftStoreBlackHole>::new(scheduler, RaftStoreBlackHole);
+        let backup_service = super::Service::<RocksEngine>::new(scheduler);
         let builder =
             ServerBuilder::new(env.clone()).register_service(create_backup(backup_service));
         let mut server = builder.bind("127.0.0.1", 0).build().unwrap();

@@ -109,7 +109,7 @@ impl Engine {
             return;
         }
         mem_table.set_version(version);
-        let new_tbl = memtable::CFTable::new();
+        let new_tbl = memtable::CfTable::new();
         let mut new_mem_tbls = Vec::with_capacity(data.mem_tbls.len() + 1);
         new_mem_tbls.push(new_tbl);
         new_mem_tbls.extend_from_slice(data.mem_tbls.as_slice());
@@ -136,7 +136,7 @@ impl Engine {
 
     pub fn write(&self, wb: &mut WriteBatch) -> u64 {
         let shard = self.get_shard(wb.shard_id).unwrap_or_else(|| {
-            let tag = ShardTag::new(self.get_engine_id(), IDVer::new(wb.shard_id, 0));
+            let tag = ShardTag::new(self.get_engine_id(), IdVer::new(wb.shard_id, 0));
             panic!("{} unable to get shard", tag);
         });
         let snap = shard.new_snap_access();

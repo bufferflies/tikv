@@ -298,7 +298,7 @@ impl ObjectStorageService {
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
-    use kvengine::dfs::{Options, DFS, S3FS};
+    use kvengine::dfs::{Dfs, Options, S3Fs};
     use rand::prelude::ThreadRng;
 
     use super::*;
@@ -324,7 +324,7 @@ mod tests {
         let mut oss = ObjectStorageService::new(base_dir.path());
         oss.start_server();
 
-        let s3fs = S3FS::new(
+        let s3fs = S3Fs::new(
             "oss_test".to_string(),
             format!("http://127.0.0.1:{}", oss.port()),
             "admin".to_string(),

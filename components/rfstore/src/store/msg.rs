@@ -17,7 +17,7 @@ use tikv_util::time::Instant;
 
 use super::{Peer, RaftApplyState};
 use crate::store::{
-    ApplyMetrics, ExecResult, Proposal, RegionIDVer, RegionSnapshot, TrimOverBoundParameter,
+    ApplyMetrics, ExecResult, Proposal, RegionIdVer, RegionSnapshot, TrimOverBoundParameter,
 };
 
 #[derive(Debug)]
@@ -28,8 +28,9 @@ pub enum PeerMsg {
     Start,
     ApplyResult(MsgApplyResult),
     CasualMessage(CasualMessage),
-    /// Message that can't be lost but rarely created. If they are lost, real bad
-    /// things happen like some peers will be considered dead in the group.
+    /// Message that can't be lost but rarely created. If they are lost, real
+    /// bad things happen like some peers will be considered dead in the
+    /// group.
     SignificantMsg(SignificantMsg),
     GenerateEngineChangeSet(kvenginepb::ChangeSet),
     ApplyChangeSetResult(kvengine::Result<kvenginepb::ChangeSet>),
@@ -99,7 +100,7 @@ pub enum StoreMsg {
     GetRegionsInRange {
         start: Vec<u8>,
         end: Vec<u8>,
-        callback: Box<dyn FnOnce(Vec<RegionIDVer>) + Send>,
+        callback: Box<dyn FnOnce(Vec<RegionIdVer>) + Send>,
     },
     SyncRegion {
         keyspace_id: Option<u32>,
@@ -109,7 +110,7 @@ pub enum StoreMsg {
         region_id: u64,
         peer_id: u64,
     },
-    DependentsEmpty(u64 /* region id*/),
+    DependentsEmpty(u64 /* region id */),
     PrepareMerge {
         region_id: u64,
         req: RaftCmdRequest,
@@ -128,7 +129,7 @@ pub struct PersistReady {
 }
 
 /// IOTask contains I/O tasks which need to be persisted to raft db.
-pub(crate) struct IOTask {
+pub(crate) struct IoTask {
     pub(crate) readies: Vec<PersistReady>,
     pub(crate) raft_wb: rfengine::WriteBatch,
 }
@@ -206,9 +207,9 @@ pub type ExtCallback = Box<dyn FnOnce() + Send>;
 
 /// Variants of callbacks for `Msg`.
 ///  - `Read`: a callback for read only requests including `StatusRequest`,
-///         `GetRequest` and `SnapRequest`
+///    `GetRequest` and `SnapRequest`
 ///  - `Write`: a callback for write only requests including `AdminRequest`
-///          `PutRequest`, `DeleteRequest` and `DeleteRangeRequest`.
+///    `PutRequest`, `DeleteRequest` and `DeleteRangeRequest`.
 pub enum Callback {
     /// No callback.
     None,
@@ -217,12 +218,14 @@ pub enum Callback {
     /// Write callback.
     Write {
         cb: WriteCallback,
-        /// `proposed_cb` is called after a request is proposed to the raft group successfully.
-        /// It's used to notify the caller to move on early because it's very likely the request
+        /// `proposed_cb` is called after a request is proposed to the raft
+        /// group successfully. It's used to notify the caller to move
+        /// on early because it's very likely the request
         /// will be applied to the raftstore.
         proposed_cb: Option<ExtCallback>,
-        /// `committed_cb` is called after a request is committed and before it's being applied, and
-        /// it's guaranteed that the request will be successfully applied soon.
+        /// `committed_cb` is called after a request is committed and before
+        /// it's being applied, and it's guaranteed that the request
+        /// will be successfully applied soon.
         committed_cb: Option<ExtCallback>,
     },
 }
@@ -308,8 +311,8 @@ impl fmt::Debug for Callback {
     }
 }
 
-/// Some significant messages sent to raftstore. Raftstore will dispatch these messages to Raft
-/// groups to update some important internal status.
+/// Some significant messages sent to raftstore. Raftstore will dispatch these
+/// messages to Raft groups to update some important internal status.
 #[derive(Debug)]
 pub enum SignificantMsg {
     StoreUnreachable { store_id: u64 },

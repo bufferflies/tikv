@@ -47,11 +47,11 @@ impl From<Engines> for engine_traits::Engines<kvengine::Engine, rfengine::RfEngi
     }
 }
 
-pub struct KVWriteBatch {
+pub struct KvWriteBatch {
     batches: HashMap<u64, kvengine::WriteBatch>,
 }
 
-impl KVWriteBatch {
+impl KvWriteBatch {
     pub(crate) fn new() -> Self {
         Self {
             batches: HashMap::new(),

@@ -5,7 +5,7 @@ use std::{mem, sync::Arc};
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, Bytes, BytesMut};
 
-use super::{builder::META_HAS_OLD, SSTable};
+use super::{builder::META_HAS_OLD, SsTable};
 use crate::table::{
     search,
     sstable::{Index, BLOCK_FORMAT_V1},
@@ -130,7 +130,7 @@ impl BlockIterator {
     fn set_idx(&mut self, i: i32) {
         self.idx = i;
         if i >= self.num_entries() as i32 || i < 0 {
-            self.err = Some(table::Error::EOF);
+            self.err = Some(table::Error::Eof);
             return;
         }
         self.err = None;
@@ -175,7 +175,7 @@ enum IterState {
 }
 
 pub struct TableIterator {
-    t: SSTable,
+    t: SsTable,
     idx: Arc<Index>,
     old_idx: Option<Arc<Index>>,
     b_pos: i32,
@@ -191,7 +191,7 @@ pub struct TableIterator {
 }
 
 impl TableIterator {
-    pub fn new(t: SSTable, reversed: bool, fill_cache: bool) -> Self {
+    pub fn new(t: SsTable, reversed: bool, fill_cache: bool) -> Self {
         let idx = t.load_index();
         Self {
             t,
@@ -258,7 +258,7 @@ impl TableIterator {
         self.reset();
         let num_blocks = self.idx.num_blocks();
         if num_blocks == 0 {
-            self.err = Some(table::Error::EOF);
+            self.err = Some(table::Error::Eof);
             return;
         }
         if !self.set_block(0) {
@@ -272,7 +272,7 @@ impl TableIterator {
         self.reset();
         let num_blocks = self.idx.num_blocks();
         if num_blocks == 0 {
-            self.err = Some(table::Error::EOF);
+            self.err = Some(table::Error::Eof);
             return;
         }
         if !self.set_block(num_blocks as i32 - 1) {
@@ -316,22 +316,25 @@ impl TableIterator {
         // block[idx].smallest is > key.
         // Since idx>0, we know block[idx-1].smallest is <= key.
         // There are two cases.
-        // 1) Everything in block[idx-1] is strictly < key. In this case, we should go to the first
-        //    element of block[idx].
+        // 1) Everything in block[idx-1] is strictly < key. In this case, we should go
+        // to the first    element of block[idx].
         // 2) Some element in block[idx-1] is >= key. We should go to that element.
         self.seek_in_block(idx - 1, key);
         if self.err.is_some() {
             // Case 1. Need to visit block[idx].
             if idx == self.idx.num_blocks() {
-                // If idx == len(itr.t.blockEndOffsets), then input key is greater than ANY element of table.
-                // There's nothing we can do. Valid() should return false as we seek to end of table.
+                // If idx == len(itr.t.blockEndOffsets), then input key is greater than ANY
+                // element of table. There's nothing we can do. Valid() should
+                // return false as we seek to end of table.
                 return;
             }
             self.err = None;
-            // Since block[idx].smallest is > key. This is essentially a block[idx].SeekToFirst.
+            // Since block[idx].smallest is > key. This is essentially a
+            // block[idx].SeekToFirst.
             self.seek_from_offset(idx, 0, key);
         }
-        // Case 2: No need to do anything. We already did the seek in block[idx-1].
+        // Case 2: No need to do anything. We already did the seek in
+        // block[idx-1].
     }
 
     fn seek_for_prev(&mut self, key: &[u8]) {
@@ -346,7 +349,7 @@ impl TableIterator {
         self.err = None;
         self.iter_state = IterState::NewVersion;
         if self.b_pos >= self.idx.num_blocks() as i32 {
-            self.err = Some(table::Error::EOF);
+            self.err = Some(table::Error::Eof);
             return;
         }
         if self.bi.b.is_empty() {
@@ -370,7 +373,7 @@ impl TableIterator {
         self.err = None;
         self.iter_state = IterState::NewVersion;
         if self.b_pos < 0 {
-            self.err = Some(table::Error::EOF);
+            self.err = Some(table::Error::Eof);
             return;
         }
         if self.bi.b.is_empty() {
@@ -462,10 +465,12 @@ impl table::Iterator for TableIterator {
         if self.same_old_key() {
             if self.iter_state == IterState::NewVersion {
                 // If it's the first time call, and the key is the same,
-                // the old version key must be iterated by a previous key, we should not call next.
+                // the old version key must be iterated by a previous key, we should not call
+                // next.
                 assert!(self.bi.old_ver == self.old_bi.ver);
             } else {
-                // It's the successive call of next_version, we need to move to the next version.
+                // It's the successive call of next_version, we need to move to the next
+                // version.
                 self.old_bi.next();
             }
             if self.old_bi.err.is_some() {

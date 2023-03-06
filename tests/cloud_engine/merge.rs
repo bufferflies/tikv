@@ -4,10 +4,12 @@ use std::{thread, time::Duration};
 
 use futures::executor::block_on;
 use pd_client::PdClient;
-use tikv_util::store::{find_peer, new_learner_peer};
 use test_cloud_server::{try_wait, ServerCluster};
 use tikv::config::TikvConfig;
-use tikv_util::config::ReadableDuration;
+use tikv_util::{
+    config::ReadableDuration,
+    store::{find_peer, new_learner_peer},
+};
 
 use crate::alloc_node_id;
 

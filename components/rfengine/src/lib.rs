@@ -10,7 +10,6 @@ extern crate test;
 extern crate tikv_alloc;
 #[macro_use]
 extern crate serde_derive;
-extern crate core;
 
 mod config;
 pub use config::Config as RfEngineConfig;
@@ -46,7 +45,7 @@ pub enum Error {
     #[error("IO error: {0:?}")]
     Io(std::io::Error),
     #[error("EOF")]
-    EOF,
+    Eof,
     #[error("parse error")]
     ParseError,
     #[error("Open error: {0}")]
@@ -58,7 +57,7 @@ pub enum Error {
 impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {
         if e.kind() == std::io::ErrorKind::UnexpectedEof {
-            return Error::EOF;
+            return Error::Eof;
         }
         Error::Io(e)
     }

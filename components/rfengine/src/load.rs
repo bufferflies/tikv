@@ -36,11 +36,12 @@ impl RfEngineCore {
             wal_offset = self.load_wal_file(epoch_id)?;
         }
         let mut writer = self.writer.lock().unwrap();
-        // Delete the following 7 lines and function get_wal_header at the next wal upgrade.
+        // Delete the following 7 lines and function get_wal_header at the next wal
+        // upgrade.
         if !self.is_empty() {
             match self.get_wal_header(epoch_id) {
                 Ok(wal_header) => writer.version = wal_header.version,
-                Err(Error::EOF) => {}
+                Err(Error::Eof) => {}
                 Err(e) => return Err(e),
             };
         }
@@ -53,7 +54,7 @@ impl RfEngineCore {
                 Ok(wal_header) => {
                     return Ok(wal_header);
                 }
-                Err(Error::EOF) => {
+                Err(Error::Eof) => {
                     epoch_id -= 1;
                 }
                 Err(e) => return Err(e),
@@ -63,7 +64,7 @@ impl RfEngineCore {
 
     pub(crate) fn load_wal_file(&mut self, epoch_id: u32) -> Result<u64> {
         info!("load wal {}", epoch_id);
-        let mut it = WALIterator::new(self.dir.clone(), epoch_id);
+        let mut it = WalIterator::new(self.dir.clone(), epoch_id);
         it.iterate(|new_data| {
             let peer_ref = self.get_or_init_peer_data(new_data.peer_id, new_data.meta.region_id);
             let mut peer_data = peer_ref.write().unwrap();

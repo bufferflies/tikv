@@ -18,7 +18,7 @@ use hyper::{
 };
 use kvengine::{
     dfs,
-    dfs::{DFSConfig, DFS, S3FS},
+    dfs::{DFSConfig, Dfs, S3Fs},
     SnapAccess,
 };
 use kvproto::metapb::Store;
@@ -145,7 +145,7 @@ fn main() {
     }
 
     info!("config is {:?}", &config);
-    let dfs = Arc::new(kvengine::dfs::S3FS::new(
+    let dfs = Arc::new(kvengine::dfs::S3Fs::new(
         config.dfs.prefix,
         config.dfs.s3_endpoint,
         config.dfs.s3_key_id,
@@ -255,7 +255,7 @@ fn init_logger<W: 'static + io::Write + Send>(writer: W) {
 }
 
 async fn handle_remote_analysis(
-    dfs: Arc<dyn dfs::DFS>,
+    dfs: Arc<dyn dfs::Dfs>,
     req: hyper::Request<hyper::Body>,
 ) -> hyper::Result<hyper::Response<hyper::Body>> {
     let mut start_time = Instant::now();
@@ -322,7 +322,7 @@ pub(crate) fn get_all_stores_except_tiflash(
         .collect())
 }
 
-fn register_compactor_to_all_stores(pd: Arc<RpcClient>, dfs: Arc<S3FS>, remote_url: String) {
+fn register_compactor_to_all_stores(pd: Arc<RpcClient>, dfs: Arc<S3Fs>, remote_url: String) {
     let all_stores = get_all_stores_except_tiflash(&pd)
         .unwrap_or_else(|e| panic!("failed get all stores {:?}", e));
     let start_time = Instant::now();

@@ -157,7 +157,8 @@ fn truncate_ts_and_verification(context: Arc<Mutex<TruncateTsContext>>) {
             let truncate_ts = saved_tso.into_inner();
             execute_truncate_ts(&ctx.client, truncate_ts, ctx.keyspace_id);
 
-            // do verification, compare the value with latest version with truncate_ts version.
+            // do verification, compare the value with latest version with truncate_ts
+            // version.
             let now = Instant::now();
             for i in 0..ctx.max_key_idx {
                 let key = i_to_key(i);

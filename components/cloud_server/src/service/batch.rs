@@ -243,7 +243,7 @@ fn future_batch_get_command<E: Engine, L: LockManager, F: KvFormat>(
     let res = storage.batch_get_command(
         gets,
         requests,
-        trackers.clone(),
+        trackers,
         GetCommandResponseConsumer { tx: tx.clone() },
         begin_instant,
     );

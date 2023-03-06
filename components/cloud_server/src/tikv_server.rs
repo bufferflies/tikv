@@ -2,13 +2,14 @@
 
 //! This module startups all the components of a TiKV server.
 //!
-//! It is responsible for reading from configs, starting up the various server components,
-//! and handling errors (mostly by aborting and reporting to the user).
+//! It is responsible for reading from configs, starting up the various server
+//! components, and handling errors (mostly by aborting and reporting to the
+//! user).
 //!
 //! The entry point is `run_tikv`.
 //!
-//! Components are often used to initialize other components, and/or must be explicitly stopped.
-//! We keep these components in the `TiKVServer` struct.
+//! Components are often used to initialize other components, and/or must be
+//! explicitly stopped. We keep these components in the `TiKVServer` struct.
 
 use std::{
     env, fmt,
@@ -31,7 +32,7 @@ use file_system::{
 use fs2::FileExt;
 use futures::executor::block_on;
 use grpcio::{EnvBuilder, Environment};
-use kvengine::dfs::DFS;
+use kvengine::dfs::Dfs;
 use kvproto::{
     brpb::create_backup, deadlock::create_deadlock, import_sstpb_grpc::create_import_sst,
 };
@@ -61,7 +62,11 @@ use tikv::{
         config::Config as ServerConfig, lock_manager::LockManager, raftkv::ReplicaReadLockChecker,
         CPU_CORES_QUOTA_GAUGE, DEFAULT_CLUSTER_ID, GRPC_THREAD_PREFIX,
     },
-    storage::{self, mvcc::MvccConsistencyCheckObserver, txn::flow_controller::FlowController},
+    storage::{
+        self,
+        mvcc::MvccConsistencyCheckObserver,
+        txn::flow_controller::{EngineFlowController, FlowController},
+    },
 };
 use tikv_kv::Engine;
 use tikv_util::{
@@ -70,14 +75,13 @@ use tikv_util::{
     mpsc, panic_mark_file_exists,
     quota_limiter::{QuotaLimitConfigManager, QuotaLimiter},
     set_panic_mark,
-    sys::{register_memory_usage_high_water, SysQuota},
+    sys::{register_memory_usage_high_water, thread::ThreadBuildWrapper, SysQuota},
     thread_group::GroupProperties,
     time::{Duration, Instant, Monitor},
     unset_panic_mark,
     worker::{Builder as WorkerBuilder, LazyWorker, Worker},
 };
 use tokio::runtime::Builder;
-use tikv::storage::txn::flow_controller::EngineFlowController;
 
 use crate::{
     node::*,
@@ -145,7 +149,7 @@ impl TikvServer {
         Arc<SecurityManager>,
         Arc<Environment>,
         Arc<dyn PdClient>,
-        Arc<dyn DFS>,
+        Arc<dyn Dfs>,
     ) {
         // Sets the global logger ASAP.
         // It is okay to use the config w/o `validate()`,
@@ -189,15 +193,15 @@ impl TikvServer {
         }
 
         let dfs_conf = &config.dfs;
-        let dfs: Arc<dyn DFS> = if dfs_conf.s3_bucket.is_empty() && dfs_conf.s3_endpoint.is_empty()
+        let dfs: Arc<dyn Dfs> = if dfs_conf.s3_bucket.is_empty() && dfs_conf.s3_endpoint.is_empty()
             || dfs_conf.s3_endpoint == "local"
         {
             let local_path = PathBuf::from(&config.storage.data_dir).join(Path::new("local"));
-            Arc::new(kvengine::dfs::LocalFS::new(&local_path))
+            Arc::new(kvengine::dfs::LocalFs::new(&local_path))
         } else if dfs_conf.s3_endpoint == "memory" {
-            Arc::new(kvengine::dfs::InMemFS::new())
+            Arc::new(kvengine::dfs::InMemFs::new())
         } else {
-            Arc::new(kvengine::dfs::S3FS::new(
+            Arc::new(kvengine::dfs::S3Fs::new(
                 dfs_conf.prefix.clone(),
                 dfs_conf.s3_endpoint.clone(),
                 dfs_conf.s3_key_id.clone(),
@@ -215,7 +219,7 @@ impl TikvServer {
         security_mgr: Arc<SecurityManager>,
         env: Arc<Environment>,
         pd_client: Arc<dyn PdClient>,
-        dfs: Arc<dyn DFS>,
+        dfs: Arc<dyn Dfs>,
     ) -> TikvServer {
         // Initialize and check config
         let cfg_controller = Self::init_config(config);
@@ -314,7 +318,8 @@ impl TikvServer {
     ///
     /// #  Fatal errors
     ///
-    /// - If `dynamic config` feature is enabled and failed to register config to PD
+    /// - If `dynamic config` feature is enabled and failed to register config
+    ///   to PD
     /// - If some critical configs (like data dir) are differrent from last run
     /// - If the config can't pass `validate()`
     /// - If the max open file descriptor limit is not high enough to support
@@ -522,11 +527,11 @@ impl TikvServer {
             Builder::new_multi_thread()
                 .thread_name(thd_name!("debugger"))
                 .worker_threads(1)
-                .on_thread_start(move || {
+                .after_start_wrapper(move || {
                     tikv_alloc::add_thread_memory_accessor();
                     tikv_util::thread_group::set_properties(props.clone());
                 })
-                .on_thread_stop(tikv_alloc::remove_thread_memory_accessor)
+                .before_stop_wrapper(tikv_alloc::remove_thread_memory_accessor)
                 .build()
                 .unwrap(),
         );
@@ -895,7 +900,7 @@ impl TikvServer {
     pub fn init_kv_engine(
         pd: Arc<dyn pd_client::PdClient>,
         conf: &TikvConfig,
-        dfs: Arc<dyn DFS>,
+        dfs: Arc<dyn Dfs>,
         rate_limiter: Arc<IoRateLimiter>,
         meta_iter: &mut impl kvengine::MetaIterator,
         recoverer: impl kvengine::RecoverHandler + 'static,
@@ -931,7 +936,7 @@ impl TikvServer {
             });
         kv_opts.allow_fallback_local = conf.dfs.allow_fallback_local;
         let opts = Arc::new(kv_opts);
-        let id_allocator = Arc::new(PdIDAllocator { pd });
+        let id_allocator = Arc::new(PdIdAllocator { pd });
         let (sender, receiver) = tikv_util::mpsc::unbounded();
         let meta_change_listener = Box::new(MetaChangeListener {
             sender: sender.clone(),
@@ -951,7 +956,7 @@ impl TikvServer {
     fn init_raw_engines(
         pd: Arc<dyn pd_client::PdClient>,
         conf: &TikvConfig,
-        dfs: Arc<dyn DFS>,
+        dfs: Arc<dyn Dfs>,
         rate_limiter: Arc<IoRateLimiter>,
     ) -> Engines {
         if panic_mark_file_exists(&conf.storage.data_dir) {
@@ -1003,13 +1008,13 @@ fn load_black_list(black_list_path: &str) -> Option<BlackList> {
     None
 }
 
-struct PdIDAllocator {
+struct PdIdAllocator {
     pd: Arc<dyn pd_client::PdClient>,
 }
 
 const ALLOCATE_ID_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
-impl kvengine::IDAllocator for PdIDAllocator {
+impl kvengine::IdAllocator for PdIdAllocator {
     fn alloc_id(&self, count: usize) -> Vec<u64> {
         let start = Instant::now();
         loop {

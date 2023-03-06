@@ -234,22 +234,20 @@ impl Node {
 
     fn load_all_stores(&mut self, _status: Option<ReplicationStatus>) {
         // TODO(x)
-        /*
-        info!("initializing replication mode"; "status" => ?status, "store_id" => self.store.id);
-        let stores = match self.pd_client.get_all_stores(false) {
-            Ok(stores) => stores,
-            Err(e) => panic!("failed to load all stores: {:?}", e),
-        };
-        let mut state = self.state.lock().unwrap();
-        if let Some(s) = status {
-            state.set_status(s);
-        }
-        for mut store in stores {
-            state
-                .group
-                .register_store(store.id, store.take_labels().into());
-        }
-         */
+        // info!("initializing replication mode"; "status" => ?status,
+        // "store_id" => self.store.id); let stores = match
+        // self.pd_client.get_all_stores(false) { Ok(stores) => stores,
+        // Err(e) => panic!("failed to load all stores: {:?}", e),
+        // };
+        // let mut state = self.state.lock().unwrap();
+        // if let Some(s) = status {
+        // state.set_status(s);
+        // }
+        // for mut store in stores {
+        // state
+        // .group
+        // .register_store(store.id, store.take_labels().into());
+        // }
     }
 
     // Exported for tests.

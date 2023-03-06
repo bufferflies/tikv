@@ -49,23 +49,28 @@ const CREATE_FILE_CONCURRENCY: usize = 32;
 
 const ALLOCATE_ID_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
-/*
-    Remote load data worker API:
-    1. init task:
-        POST /load_data?cluster_id=%d&start_ts=%d&commit_ts=%d
-    2. put chunk:
-        PUT /load_data?cluster_id=%d&start_ts=%d&chunk_id=%d
-        key_len(2) + key(key_len) + val_len(4) + value(val_len)
-        key_len(2) + key(key_len) + val_len(4) + value(val_len)
-        ...
-    3. build task:
-        POST /load_data?cluster_id=%d&start_ts=%d&build=true&compression=zstd&split_size=%d&split_keys=%d
-    4. get task states:
-        GET /load_data?cluster_id=%d&start_ts=%d
-        {"canceled": false, "finished": false, "error": "", "created-files": 10, "ingested-regions": 3}
-    5. clean up task:
-        DELETE /load_data?cluster_id=%d&start_ts=%d
-*/
+/// Remote load data worker API:
+///
+/// 1. init task:
+///   POST /load_data?cluster_id=%d&start_ts=%d&commit_ts=%d
+///
+/// 2. put chunk:
+///   PUT /load_data?cluster_id=%d&start_ts=%d&chunk_id=%d
+///   key_len(2) + key(key_len) + val_len(4) + value(val_len)
+///   key_len(2) + key(key_len) + val_len(4) + value(val_len)
+///   ...
+///
+/// 3. build task:
+///   POST /load_data?cluster_id=%d&start_ts=%d&build=true&compression=zstd&
+///        split_size=%d&split_keys=%d
+///
+/// 4. get task states:
+///   GET /load_data?cluster_id=%d&start_ts=%d
+///   {"canceled": false, "finished": false, "error": "", "created-files": 10,
+///   "ingested-regions": 3}
+///
+/// 5. clean up task:
+///   DELETE /load_data?cluster_id=%d&start_ts=%d
 pub(crate) async fn handle_load_data(
     manager: Arc<LoadDataManager>,
     req: hyper::Request<hyper::Body>,
@@ -338,7 +343,7 @@ impl LoadTaskScheduler {
 #[derive(Clone)]
 pub(crate) struct LoadDataContext {
     dir: PathBuf,
-    dfs: Arc<dyn dfs::DFS>,
+    dfs: Arc<dyn dfs::Dfs>,
     pd: Arc<dyn PdClient>,
     runtime: Arc<tokio::runtime::Runtime>,
     max_in_mem_size: usize,
@@ -874,11 +879,11 @@ enum Error {
     #[error("canceled")]
     Canceled,
     #[error("pd error {0}")]
-    PDError(pd_client::Error),
+    PdError(pd_client::Error),
     #[error("ingest files {0}")]
     IngestFiles(String),
     #[error("dfs error {0}")]
-    DFSError(dfs::Error),
+    DfsError(dfs::Error),
     #[error("hyper error {0}")]
     HyperError(hyper::Error),
     #[error("http error {0}")]
@@ -895,13 +900,13 @@ enum Error {
 
 impl From<dfs::Error> for Error {
     fn from(e: dfs::Error) -> Self {
-        Error::DFSError(e)
+        Error::DfsError(e)
     }
 }
 
 impl From<pd_client::Error> for Error {
     fn from(e: pd_client::Error) -> Self {
-        Error::PDError(e)
+        Error::PdError(e)
     }
 }
 
@@ -1059,7 +1064,7 @@ impl LoadDataManager {
     pub(crate) fn new(
         pd: Arc<dyn PdClient>,
         dir: PathBuf,
-        dfs: Arc<dyn dfs::DFS>,
+        dfs: Arc<dyn dfs::Dfs>,
         runtime: Arc<tokio::runtime::Runtime>,
         max_in_mem_size: usize,
     ) -> Self {

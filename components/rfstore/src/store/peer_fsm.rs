@@ -11,7 +11,7 @@ use std::{
 use bytes::Buf;
 use error_code::ErrorCodeExt;
 use fail::fail_point;
-use kvengine::{IDVer, Shard, TruncateTs, DEL_PREFIXES_KEY, TRUNCATE_TS_KEY};
+use kvengine::{IdVer, Shard, TruncateTs, DEL_PREFIXES_KEY, TRUNCATE_TS_KEY};
 use kvproto::{
     import_sstpb::SwitchMode,
     metapb::{self, Region, RegionEpoch},
@@ -26,9 +26,13 @@ use protobuf::Message;
 use raft::{self, eraftpb::MessageType, GetEntriesContext, Storage};
 use raft_proto::eraftpb;
 use raftstore::store::util;
-use tikv_util::store::{is_learner, find_peer, region_on_same_stores};
 use rand::{thread_rng, Rng};
-use tikv_util::{box_err, debug, error, info, time::duration_to_sec, trace, warn};
+use tikv_util::{
+    box_err, debug, error, info,
+    store::{find_peer, is_learner, region_on_same_stores},
+    time::duration_to_sec,
+    trace, warn,
+};
 use txn_types::{Key, WriteBatchFlags};
 
 use crate::{
@@ -51,7 +55,8 @@ use crate::{
 
 /// Limits the maximum number of regions returned by error.
 ///
-/// Another choice is using coprocessor batch limit, but 10 should be a good fit in most case.
+/// Another choice is using coprocessor batch limit, but 10 should be a good fit
+/// in most case.
 const _MAX_REGIONS_IN_ERROR: usize = 10;
 
 pub struct PeerFsm {
@@ -100,9 +105,9 @@ impl PeerFsm {
         })
     }
 
-    // The peer can be created from another node with raft membership changes, and we only
-    // know the region_id and peer_id when creating this replicated peer, the region info
-    // will be retrieved later after restored snapshot.
+    // The peer can be created from another node with raft membership changes, and
+    // we only know the region_id and peer_id when creating this replicated
+    // peer, the region info will be retrieved later after restored snapshot.
     pub fn replicate(
         store_id: u64,
         cfg: &Config,
@@ -115,8 +120,8 @@ impl PeerFsm {
 
         let mut region = metapb::Region::default();
         region.set_id(region_id);
-        // Peer state key contains version, so that we have to set it to prevent destroyed
-        // uninitialized peer from being created by raft msg again.
+        // Peer state key contains version, so that we have to set it to prevent
+        // destroyed uninitialized peer from being created by raft msg again.
         region.set_region_epoch(region_epoch);
         let peer = Peer::new(store_id, cfg, engines, &region, peer)?;
         info!(
@@ -303,8 +308,7 @@ impl<'a> PeerMsgHandler<'a> {
     fn on_significant_msg(&mut self, msg: SignificantMsg) {
         match msg {
             SignificantMsg::StoreUnreachable { store_id } => {
-                if let Some(peer_id) = find_peer(self.region(), store_id).map(|p| p.get_id())
-                {
+                if let Some(peer_id) = find_peer(self.region(), store_id).map(|p| p.get_id()) {
                     if self.fsm.peer.is_leader() {
                         self.fsm.peer.raft_group.report_unreachable(peer_id);
                     }
@@ -394,8 +398,8 @@ impl<'a> PeerMsgHandler<'a> {
         }
         if !res.results.is_empty() {
             self.fsm.peer.pending_apply_results.push(res);
-            // Some metadata change need to be handled by store FSM, so send the result to it
-            // and store FSM will handle all pending results of the peer.
+            // Some metadata change need to be handled by store FSM, so send the result to
+            // it and store FSM will handle all pending results of the peer.
             let region_id = self.region_id();
             let peer_id = self.peer_id();
             self.ctx
@@ -537,7 +541,11 @@ impl<'a> PeerMsgHandler<'a> {
                 "to_store_id" => to.get_store_id(),
                 "my_store_id" => self.store_id(),
             );
-            self.ctx.raft_metrics.message_dropped.mismatch_store_id.inc();
+            self.ctx
+                .raft_metrics
+                .message_dropped
+                .mismatch_store_id
+                .inc();
             return false;
         }
 
@@ -547,7 +555,11 @@ impl<'a> PeerMsgHandler<'a> {
                 "tag" => self.peer.tag(),
                 "region_id" => region_id,
             );
-            self.ctx.raft_metrics.message_dropped.mismatch_region_epoch.inc();
+            self.ctx
+                .raft_metrics
+                .message_dropped
+                .mismatch_region_epoch
+                .inc();
             return false;
         }
 
@@ -562,23 +574,26 @@ impl<'a> PeerMsgHandler<'a> {
         let from_store_id = msg.get_from_peer().get_store_id();
 
         // Let's consider following cases with three nodes [1, 2, 3] and 1 is leader:
-        // a. 1 removes 2, 2 may still send MsgAppendResponse to 1.
+        // - 1 removes 2, 2 may still send MsgAppendResponse to 1.
         //  We should ignore this stale message and let 2 remove itself after
         //  applying the ConfChange log.
-        // b. 2 is isolated, 1 removes 2. When 2 rejoins the cluster, 2 will
-        //  send stale MsgRequestVote to 1 and 3, at this time, we should tell 2 to gc itself.
-        // c. 2 is isolated but can communicate with 3. 1 removes 3.
+        // - 2 is isolated, 1 removes 2. When 2 rejoins the cluster, 2 will
+        //  send stale MsgRequestVote to 1 and 3, at this time, we should tell 2 to gc
+        // itself.
+        // - 2 is isolated but can communicate with 3. 1 removes 3.
         //  2 will send stale MsgRequestVote to 3, 3 should ignore this message.
-        // d. 2 is isolated but can communicate with 3. 1 removes 2, then adds 4, remove 3.
+        // - 2 is isolated but can communicate with 3. 1 removes 2, then adds 4, remove
+        //   3.
         //  2 will send stale MsgRequestVote to 3, 3 should tell 2 to gc itself.
-        // e. 2 is isolated. 1 adds 4, 5, 6, removes 3, 1. Now assume 4 is leader.
+        // - 2 is isolated. 1 adds 4, 5, 6, removes 3, 1. Now assume 4 is leader.
         //  After 2 rejoins the cluster, 2 may send stale MsgRequestVote to 1 and 3,
         //  1 and 3 will ignore this message. Later 4 will send messages to 2 and 2 will
         //  rejoin the raft group again.
-        // f. 2 is isolated. 1 adds 4, 5, 6, removes 3, 1. Now assume 4 is leader, and 4 removes 2.
+        // - 2 is isolated. 1 adds 4, 5, 6, removes 3, 1. Now assume 4 is leader, and 4
+        //   removes 2.
         //  unlike case e, 2 will be stale forever.
-        // TODO: for case f, if 2 is stale for a long time, 2 will communicate with pd and pd will
-        // tell 2 is stale, so 2 can remove itself.
+        // TODO: for case f, if 2 is stale for a long time, 2 will communicate with pd
+        // and pd will tell 2 is stale, so 2 can remove itself.
         if util::is_epoch_stale(from_epoch, self.fsm.peer.region().get_region_epoch())
             && self.peer.is_initialized()
             && find_peer(self.fsm.peer.region(), from_store_id).is_none()
@@ -668,9 +683,9 @@ impl<'a> PeerMsgHandler<'a> {
             "merge_state" => ?self.fsm.peer.pending_merge_state,
         );
         // Because of the checking before proposing `PrepareMerge`, which is
-        // no `CompactLog` proposal between the smallest commit index and the latest index.
-        // If the merge succeed, all source peers are impossible in apply snapshot state
-        // and must be initialized.
+        // no `CompactLog` proposal between the smallest commit index and the latest
+        // index. If the merge succeed, all source peers are impossible in apply
+        // snapshot state and must be initialized.
         // So `maybe_destroy` must succeed here.
         if self.fsm.peer.maybe_destroy() {
             // Destroy the apply fsm first, wait for the reply msg from apply fsm
@@ -680,9 +695,9 @@ impl<'a> PeerMsgHandler<'a> {
         }
     }
 
-    // Returns `Vec<(u64, bool)>` indicated (source_region_id, merge_to_this_peer) if the `msg`
-    // doesn't contain a snapshot or this snapshot doesn't conflict with any other snapshots or regions.
-    // Otherwise a `SnapKey` is returned.
+    // Returns `Vec<(u64, bool)>` indicated (source_region_id, merge_to_this_peer)
+    // if the `msg` doesn't contain a snapshot or this snapshot doesn't conflict
+    // with any other snapshots or regions. Otherwise a `SnapKey` is returned.
     fn check_snapshot(&mut self, msg: &RaftMessage) -> Result<Vec<(u64, bool)>> {
         if !msg.get_message().has_snapshot() {
             return Ok(vec![]);
@@ -696,7 +711,8 @@ impl<'a> PeerMsgHandler<'a> {
         // TODO(x)
     }
 
-    /// Check if a request is valid if it has valid prepare_merge/commit_merge proposal.
+    /// Check if a request is valid if it has valid prepare_merge/commit_merge
+    /// proposal.
     fn check_merge_proposal(
         &mut self,
         msg: &RaftCmdRequest,
@@ -766,12 +782,12 @@ impl<'a> PeerMsgHandler<'a> {
             if source_over_bound || target_over_bound {
                 let parameter = TrimOverBoundParameter {
                     source_shard: if source_over_bound {
-                        Some(IDVer::new(id, version))
+                        Some(IdVer::new(id, version))
                     } else {
                         None
                     },
                     target_shard: if target_over_bound {
-                        Some(IDVer::new(target_id, target_version))
+                        Some(IdVer::new(target_id, target_version))
                     } else {
                         None
                     },
@@ -809,7 +825,11 @@ impl<'a> PeerMsgHandler<'a> {
     ) -> Result<Option<RaftCmdResponse>> {
         // Check store_id, make sure that the msg is dispatched to the right place.
         if let Err(e) = _util::check_store_id(msg, self.store_id()) {
-            self.ctx.raft_metrics.invalid_proposal.mismatch_store_id.inc();
+            self.ctx
+                .raft_metrics
+                .invalid_proposal
+                .mismatch_store_id
+                .inc();
             return Err(e);
         }
         if msg.has_status_request() {
@@ -847,7 +867,11 @@ impl<'a> PeerMsgHandler<'a> {
         }
         // peer_id must be the same as peer's.
         if let Err(e) = _util::check_peer_id(msg, self.fsm.peer.peer_id()) {
-            self.ctx.raft_metrics.invalid_proposal.mismatch_peer_id.inc();
+            self.ctx
+                .raft_metrics
+                .invalid_proposal
+                .mismatch_peer_id
+                .inc();
             return Err(e);
         }
         // check whether the peer is initialized.
@@ -855,13 +879,18 @@ impl<'a> PeerMsgHandler<'a> {
             self.ctx
                 .raft_metrics
                 .invalid_proposal
-                .region_not_initialized.inc();
+                .region_not_initialized
+                .inc();
             return Err(Error::RegionNotInitialized(region_id));
         }
-        // If the peer is applying snapshot, it may drop some sending messages, that could
-        // make clients wait for response until timeout.
+        // If the peer is applying snapshot, it may drop some sending messages, that
+        // could make clients wait for response until timeout.
         if self.fsm.peer.is_applying_snapshot() {
-            self.ctx.raft_metrics.invalid_proposal.is_applying_snapshot.inc();
+            self.ctx
+                .raft_metrics
+                .invalid_proposal
+                .is_applying_snapshot
+                .inc();
             // TODO: replace to a more suitable error.
             return Err(Error::Other(box_err!(
                 "{} peer is applying snapshot",
@@ -876,9 +905,10 @@ impl<'a> PeerMsgHandler<'a> {
 
         match _util::check_region_epoch(msg, self.fsm.peer.region(), true) {
             Err(Error::EpochNotMatch(m, new_regions)) => {
-                // Attach the region which might be split from the current region. But it doesn't
-                // matter if the region is not split from the current region. If the region meta
-                // received by the TiKV driver is newer than the meta cached in the driver, the meta is
+                // Attach the region which might be split from the current region. But it
+                // doesn't matter if the region is not split from the current
+                // region. If the region meta received by the TiKV driver is
+                // newer than the meta cached in the driver, the meta is
                 // updated.
                 // TODO(x) add sibling region.
                 self.ctx.raft_metrics.invalid_proposal.epoch_not_match.inc();
@@ -936,9 +966,10 @@ impl<'a> PeerMsgHandler<'a> {
         }
 
         // Note:
-        // The peer that is being checked is a leader. It might step down to be a follower later. It
-        // doesn't matter whether the peer is a leader or not. If it's not a leader, the proposing
-        // command log entry can't be committed.
+        // The peer that is being checked is a leader. It might step down to be a
+        // follower later. It doesn't matter whether the peer is a leader or
+        // not. If it's not a leader, the proposing command log entry can't be
+        // committed.
 
         let mut resp = RaftCmdResponse::default();
         let term = self.fsm.peer.term();
@@ -950,8 +981,8 @@ impl<'a> PeerMsgHandler<'a> {
     }
 
     fn propose_ingest_sst(&mut self, msg: RaftCmdRequest, cb: Callback) {
-        // This is a ingest sst request, we need to redirect to worker thread and convert
-        // it to cloud engine format.
+        // This is a ingest sst request, we need to redirect to worker thread and
+        // convert it to cloud engine format.
         let importer = self.ctx.global.importer.clone();
         let router = self.ctx.global.router.clone();
         let kv = self.ctx.global.engines.kv.clone();
@@ -990,9 +1021,9 @@ impl<'a> PeerMsgHandler<'a> {
             if !shard.get_initial_flushed() {
                 return;
             }
-            // When Lightning or BR is importing data to TiKV, their ingest-request may fail because of
-            // region-epoch not matched. So we hope TiKV do not check region size and split region during
-            // importing.
+            // When Lightning or BR is importing data to TiKV, their ingest-request may fail
+            // because of region-epoch not matched. So we hope TiKV do not check
+            // region size and split region during importing.
             if self.ctx.global.importer.get_mode() == SwitchMode::Import {
                 return;
             }
@@ -1090,9 +1121,10 @@ impl<'a> PeerMsgHandler<'a> {
         self.schedule_ask_split(keys);
     }
 
-    // For idle regions, we need tick to trigger switch mem-table to reduce memory consumption.
-    // Only the applier knows how large the mem-table is and when the mem-table has been switched,
-    // so we don't need to check anything, just send a message.
+    // For idle regions, we need tick to trigger switch mem-table to reduce memory
+    // consumption. Only the applier knows how large the mem-table is and when
+    // the mem-table has been switched, so we don't need to check anything, just
+    // send a message.
     fn on_switch_mem_table_check_tick(&mut self) {
         self.ticker.schedule(PEER_TICK_SWITCH_MEM_TABLE_CHECK);
         if !self.peer.is_leader() {
@@ -1412,8 +1444,8 @@ impl<'a> PeerMsgHandler<'a> {
                 .get_version()
         {
             error!("change set version not match change {:?}", &change; "region" => tag);
-            // The peer can't change until applying snapshot finished, so applying snapshot should
-            // always succeed.
+            // The peer can't change until applying snapshot finished, so applying snapshot
+            // should always succeed.
             assert!(!change.has_snapshot(), "{:?}", change);
             return;
         }
@@ -1555,9 +1587,10 @@ impl<'a> PeerMsgHandler<'a> {
                 .min()
                 .unwrap_or(last_idx)
         } else {
-            // Followers can't know the progress of other replicas, so they truncate logs as many
-            // as possible, but it may result in snapshot transport when becomes leader.
-            // One solution is that leader propagates truncated index to followers.
+            // Followers can't know the progress of other replicas, so they truncate logs as
+            // many as possible, but it may result in snapshot transport when
+            // becomes leader. One solution is that leader propagates truncated
+            // index to followers.
             last_idx
         };
         let size_limit_index = engines.raft.index_to_truncate_to_size(
@@ -1565,7 +1598,8 @@ impl<'a> PeerMsgHandler<'a> {
             self.ctx.cfg.raft_log_gc_size_limit.unwrap().0 as usize,
         );
 
-        // If raft logs occupies too much memory, truncates them regardless of lagged replicas to avoid OOM.
+        // If raft logs occupies too much memory, truncates them regardless of lagged
+        // replicas to avoid OOM.
         let mut to_truncate_idx = cmp::max(size_limit_index, replicated_idx);
         // Shouldn't truncate unapplied logs.
         let applied_idx = self.peer.get_store().applied_index();
@@ -1619,8 +1653,9 @@ impl<'a> PeerMsgHandler<'a> {
         // from the cluster or probably destroyed.
         // Meantime, D, E, F would not reach B, since it's not in the cluster anymore.
         // In this case, peer B would notice that the leader is missing for a long time,
-        // and it would check with pd to confirm whether it's still a member of the cluster.
-        // If not, it destroys itself as a stale peer which is removed out already.
+        // and it would check with pd to confirm whether it's still a member of the
+        // cluster. If not, it destroys itself as a stale peer which is removed
+        // out already.
         let state = self.fsm.peer.check_stale_state(&self.ctx.cfg);
         fail_point!("peer_check_stale_state", state != StaleState::Valid, |_| {});
         match state {
@@ -1698,8 +1733,9 @@ impl<'a> PeerMsgHandler<'a> {
 
     /// Check if merge target region is staler than the local one in kv engine.
     /// It should be called when target region is not in region map in memory.
-    /// If everything is ok, the answer should always be true because PD should ensure all target peers exist.
-    /// So if not, error log will be printed and return false.
+    /// If everything is ok, the answer should always be true because PD should
+    /// ensure all target peers exist. So if not, error log will be printed
+    /// and return false.
     fn is_merge_target_region_stale(&self, target_region: &metapb::Region) -> Result<bool> {
         let target_peer_id = find_peer(target_region, self.ctx.store_id())
             .unwrap()
@@ -1712,8 +1748,9 @@ impl<'a> PeerMsgHandler<'a> {
                 return Ok(true);
             }
             // The local target region epoch is staler than target region's.
-            // In the case where the peer is destroyed by receiving gc msg rather than applying conf change,
-            // the epoch may staler but it's legal, so check peer id to assure that.
+            // In the case where the peer is destroyed by receiving gc msg rather than
+            // applying conf change, the epoch may staler but it's legal, so
+            // check peer id to assure that.
             if let Some(local_target_peer_id) =
                 find_peer(target_state.get_region(), self.ctx.store_id()).map(|r| r.get_id())
             {
@@ -1737,8 +1774,9 @@ impl<'a> PeerMsgHandler<'a> {
                             // There is a new peer and it's destroyed without being initialised.
                             return Ok(true);
                         }
-                        // The local target peer id is greater than the one in target region, but its epoch
-                        // is staler than target_region's. That is contradictory.
+                        // The local target peer id is greater than the one in target region, but
+                        // its epoch is staler than target_region's. That is
+                        // contradictory.
                         panic!("{} local target peer id {} is greater than the one in target region {}, but its epoch is staler, local target region {:?},
                                     target region {:?}", self.fsm.peer.tag(), local_target_peer_id, target_peer_id, target_state.get_region(), target_region);
                     }
@@ -1754,7 +1792,8 @@ impl<'a> PeerMsgHandler<'a> {
                     }
                 }
             } else {
-                // Can't get local target peer id probably because this target peer is removed by applying conf change
+                // Can't get local target peer id probably because this target peer is removed
+                // by applying conf change
                 error!(
                     "the local target peer does not exist in target region state";
                     "target_region" => ?target_region,
@@ -1879,9 +1918,10 @@ impl<'a> PeerMsgHandler<'a> {
             request.set_admin_request(admin);
             (request, target_id)
         };
-        // Please note that, here assumes that the unit of network isolation is store rather than
-        // peer. So a quorum stores of source region should also be the quorum stores of target
-        // region. Otherwise we need to enable proposal forwarding.
+        // Please note that, here assumes that the unit of network isolation is store
+        // rather than peer. So a quorum stores of source region should also be
+        // the quorum stores of target region. Otherwise we need to enable
+        // proposal forwarding.
         self.ctx.global.router.send(
             target_id,
             PeerMsg::RaftCommand(RaftCommand::new(request, Callback::None)),

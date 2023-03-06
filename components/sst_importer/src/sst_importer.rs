@@ -2820,7 +2820,8 @@ mod tests {
 
         let db = create_sst_test_engine().unwrap();
 
-        // Download and rewrite the SST file with a new keyspace id and a new table/index id.
+        // Download and rewrite the SST file with a new keyspace id and a new
+        // table/index id.
         let range = importer
             .download::<TestEngine>(
                 DownloadRequestType::Keyspace,
@@ -2857,8 +2858,8 @@ mod tests {
         // verifies the SST content is correct.
         let sst_reader = new_sst_reader(sst_file_path.to_str().unwrap(), None);
         sst_reader.verify_checksum().unwrap();
-        let mut iter = sst_reader.iter();
-        iter.seek(SeekKey::Start).unwrap();
+        let mut iter = sst_reader.iter(IterOptions::default()).unwrap();
+        iter.seek(&[]).unwrap();
         assert_eq!(
             collect(iter),
             data.iter()

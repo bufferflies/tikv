@@ -8,7 +8,7 @@ use std::{
 
 use clap::{Args, Subcommand};
 use etcd_client::{Compare, CompareOp, Txn, TxnOp};
-use kvengine::dfs::{DFSConfig, DFS, S3FS};
+use kvengine::dfs::{DFSConfig, Dfs, S3Fs};
 use protobuf::Message;
 use rfenginepb::ClusterBackupMeta;
 use security::SecurityConfig;
@@ -16,7 +16,7 @@ use slog_global::info;
 
 use crate::{
     common::generate_etcd_connect_opt,
-    restore::Commands::{Keyspace, Tikv, PD},
+    restore::Commands::{Keyspace, Pd, Tikv},
     restore_tenant::execute_restore_keyspace,
 };
 
@@ -33,15 +33,15 @@ pub struct RestoreCommand {
 #[derive(Subcommand)]
 enum Commands {
     /// Restore TiKV raft store data.
-    Tikv(RestoreTiKVArgs),
+    Tikv(RestoreTikvArgs),
     /// Restore PD meta data.
-    PD(RestorePDArgs),
+    Pd(RestorePdArgs),
     /// Restore Keyspace data.
     Keyspace(RestoreKeyspaceArgs),
 }
 
 #[derive(Args)]
-pub struct RestoreTiKVArgs {
+pub struct RestoreTikvArgs {
     /// The path of the config file.
     #[clap(long, default_value = "")]
     pub config: PathBuf,
@@ -57,7 +57,7 @@ pub struct RestoreTiKVArgs {
 }
 
 #[derive(Args)]
-struct RestorePDArgs {
+struct RestorePdArgs {
     /// The path of the config file.
     #[clap(long, default_value = "")]
     pub config: PathBuf,
@@ -109,12 +109,12 @@ pub struct RestoreKeyspaceArgs {
 pub fn execute_restore_command(cmd: RestoreCommand) {
     match cmd.command {
         Tikv(args) => execute_restore_tikv(args),
-        PD(args) => execute_restore_pd(args),
+        Pd(args) => execute_restore_pd(args),
         Keyspace(args) => execute_restore_keyspace(args),
     }
 }
 
-fn execute_restore_tikv(args: RestoreTiKVArgs) {
+fn execute_restore_tikv(args: RestoreTikvArgs) {
     let config = get_restore_tikv_config_from_args(&args);
     restore_tikv(&config, args.name, args.store_id, &args.path);
 }
@@ -132,7 +132,7 @@ pub fn restore_tikv(config: &RestoreConfig, name: String, store_id: u64, path: &
     }
 }
 
-fn execute_restore_pd(args: RestorePDArgs) {
+fn execute_restore_pd(args: RestorePdArgs) {
     let config = get_restore_pd_config_from_args(&args);
     let (cluster_backup, _) = get_cluster_backup_meta(&config, args.name);
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -146,10 +146,10 @@ fn execute_restore_pd(args: RestorePDArgs) {
 pub(crate) fn get_cluster_backup_meta(
     config: &RestoreConfig,
     name: String,
-) -> (ClusterBackupMeta, S3FS) {
+) -> (ClusterBackupMeta, S3Fs) {
     let dfs_conf = config.dfs.clone();
     let backup_key = format!("{}/backup/{}", dfs_conf.prefix, name);
-    let s3fs = S3FS::new(
+    let s3fs = S3Fs::new(
         dfs_conf.prefix,
         dfs_conf.s3_endpoint,
         dfs_conf.s3_key_id,
@@ -280,7 +280,7 @@ pub struct RestoreConfig {
     pub skip_resolve_lock: bool,
 }
 
-fn get_restore_pd_config_from_args(args: &RestorePDArgs) -> RestoreConfig {
+fn get_restore_pd_config_from_args(args: &RestorePdArgs) -> RestoreConfig {
     let mut config = RestoreConfig::default();
     if args.config.exists() {
         let data = std::fs::read(args.config.clone()).expect("failed to read config file");
@@ -303,7 +303,7 @@ fn get_restore_pd_config_from_args(args: &RestorePDArgs) -> RestoreConfig {
     config
 }
 
-fn get_restore_tikv_config_from_args(args: &RestoreTiKVArgs) -> RestoreConfig {
+fn get_restore_tikv_config_from_args(args: &RestoreTikvArgs) -> RestoreConfig {
     let mut config = RestoreConfig::default();
     if args.config.exists() {
         let data = std::fs::read(args.config.clone()).expect("failed to read config file");

@@ -83,22 +83,21 @@ where
             }
             Err(e) => return Err(box_err!(e)),
         };
-        /* TODO
-        let mut group_id = None;
-        let mut state = self.state.lock().unwrap();
-        if state.status().get_mode() == ReplicationMode::DrAutoSync {
-            let state_id = state.status().get_dr_auto_sync().state_id;
-            if state.group.group_id(state_id, store_id).is_none() {
-                group_id = state.group.register_store(store_id, s.take_labels().into());
-            }
-        } else {
-            state.group.backup_store_labels(&mut s);
-        }
-        drop(state);
-        if let Some(group_id) = group_id {
-            self.router.report_resolved(store_id, group_id);
-        }
-        */
+        // TODO
+        // let mut group_id = None;
+        // let mut state = self.state.lock().unwrap();
+        // if state.status().get_mode() == ReplicationMode::DrAutoSync {
+        // let state_id = state.status().get_dr_auto_sync().state_id;
+        // if state.group.group_id(state_id, store_id).is_none() {
+        // group_id = state.group.register_store(store_id, s.take_labels().into());
+        // }
+        // } else {
+        // state.group.backup_store_labels(&mut s);
+        // }
+        // drop(state);
+        // if let Some(group_id) = group_id {
+        // self.router.report_resolved(store_id, group_id);
+        // }
         let addr = take_peer_address(&mut s);
         // In some tests, we use empty address for store first,
         // so we should ignore here.
@@ -234,21 +233,21 @@ mod tests {
     fn test_resolve_store_state_up() {
         let store = new_store(STORE_ADDR, metapb::StoreState::Up);
         let runner = new_runner(store);
-        assert!(runner.get_address(0).is_ok());
+        runner.get_address(0).unwrap();
     }
 
     #[test]
     fn test_resolve_store_state_offline() {
         let store = new_store(STORE_ADDR, metapb::StoreState::Offline);
         let runner = new_runner(store);
-        assert!(runner.get_address(0).is_ok());
+        runner.get_address(0).unwrap();
     }
 
     #[test]
     fn test_resolve_store_state_tombstone() {
         let store = new_store(STORE_ADDR, metapb::StoreState::Tombstone);
         let runner = new_runner(store);
-        assert!(runner.get_address(0).is_err());
+        runner.get_address(0).unwrap_err();
     }
 
     #[test]

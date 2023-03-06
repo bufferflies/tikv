@@ -14,8 +14,8 @@ use protobuf::Message;
 
 use crate::{
     table::{
-        memtable::{CFTable, Hint},
-        sstable::{InMemFile, L0Table, SSTable},
+        memtable::{CfTable, Hint},
+        sstable::{InMemFile, L0Table, SsTable},
         table,
     },
     *,
@@ -70,7 +70,7 @@ impl SnapAccess {
         Self { core }
     }
 
-    pub async fn from_change_set(dfs: Arc<dyn dfs::DFS>, change_set: pb::ChangeSet) -> Self {
+    pub async fn from_change_set(dfs: Arc<dyn dfs::Dfs>, change_set: pb::ChangeSet) -> Self {
         let core = Arc::new(SnapAccessCore::from_change_set(dfs, change_set).await);
         Self { core }
     }
@@ -117,7 +117,7 @@ impl SnapAccessCore {
         }
     }
 
-    pub async fn from_change_set(dfs: Arc<dyn dfs::DFS>, change_set: pb::ChangeSet) -> Self {
+    pub async fn from_change_set(dfs: Arc<dyn dfs::Dfs>, change_set: pb::ChangeSet) -> Self {
         let mut cs = ChangeSet::new(change_set);
         let mut ids = HashMap::new();
         if cs.has_snapshot() {
@@ -151,7 +151,7 @@ impl SnapAccessCore {
                         let l0_table = L0Table::new(Arc::new(file), None, true).unwrap();
                         cs.l0_tables.insert(id, l0_table);
                     } else {
-                        let ln_table = SSTable::new(Arc::new(file), None, level == 1).unwrap();
+                        let ln_table = SsTable::new(Arc::new(file), None, level == 1).unwrap();
                         cs.ln_tables.insert(id, ln_table);
                     }
                 }
@@ -173,7 +173,7 @@ impl SnapAccessCore {
             old_data.del_prefixes.clone(),
             old_data.truncate_ts,
             old_data.trim_over_bound,
-            vec![CFTable::new()],
+            vec![CfTable::new()],
             l0s,
             scfs,
         );
@@ -212,7 +212,8 @@ impl SnapAccessCore {
     }
 
     /// get an Item by key. Caller need to call is_some() before get_value.
-    /// We don't return Option because we may need AccessPath even if the item is none.
+    /// We don't return Option because we may need AccessPath even if the item
+    /// is none.
     pub fn get(&self, cf: usize, key: &[u8], version: u64) -> Item<'_> {
         let mut version = version;
         if version == 0 {
@@ -609,9 +610,9 @@ impl Iterator {
         self.val = table::Value::new();
     }
 
-    // seek would seek to the provided key if present. If absent, it would seek to the next smallest key
-    // greater than provided if iterating in the forward direction. Behavior would be reversed is
-    // iterating backwards.
+    // seek would seek to the provided key if present. If absent, it would seek to
+    // the next smallest key greater than provided if iterating in the forward
+    // direction. Behavior would be reversed is iterating backwards.
     pub fn seek(&mut self, key: &[u8]) {
         if !self.reversed {
             self.inner.seek(key);
@@ -623,9 +624,10 @@ impl Iterator {
         self.parse_item();
     }
 
-    // rewind would rewind the iterator cursor all the way to zero-th position, which would be the
-    // smallest key if iterating forward, and largest if iterating backward. It does not keep track of
-    // whether the cursor started with a seek().
+    // rewind would rewind the iterator cursor all the way to zero-th position,
+    // which would be the smallest key if iterating forward, and largest if
+    // iterating backward. It does not keep track of whether the cursor started
+    // with a seek().
     pub fn rewind(&mut self) {
         self.inner.rewind();
         if self.inner.valid() {

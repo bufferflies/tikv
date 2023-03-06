@@ -24,7 +24,10 @@ use futures::{
     Future, Sink,
 };
 use futures_timer::Delay;
-use grpcio::{Channel, ChannelBuilder, ClientCStreamReceiver, ClientCStreamSender, Environment, RpcStatusCode, WriteFlags};
+use grpcio::{
+    Channel, ChannelBuilder, ClientCStreamReceiver, ClientCStreamSender, Environment,
+    RpcStatusCode, WriteFlags,
+};
 use kvproto::{
     raft_serverpb::{Done, RaftMessage},
     tikvpb::{BatchRaftMessage, TikvClient},
@@ -122,7 +125,8 @@ impl Queue {
         self.buf.pop()
     }
 
-    /// Same as `try_pop` but register interest on readiness when `None` is returned.
+    /// Same as `try_pop` but register interest on readiness when `None` is
+    /// returned.
     ///
     /// The method should be called in polling context. If the queue is empty,
     /// it will register current polling task for notifications.
@@ -229,8 +233,8 @@ impl Buffer for BatchMessageBuffer {
         if let Some(new_cfg) = self.cfg_tracker.any_new() {
             self.cfg = new_cfg.clone();
         }
-        // To avoid building too large batch, we limit each batch's size. Since `msg_size`
-        // is estimated, `GRPC_SEND_MSG_BUF` is reserved for errors.
+        // To avoid building too large batch, we limit each batch's size. Since
+        // `msg_size` is estimated, `GRPC_SEND_MSG_BUF` is reserved for errors.
         if self.size > 0
             && (self.size + msg_size + self.cfg.raft_client_grpc_send_msg_buffer
                 >= self.cfg.max_grpc_send_msg_len as usize
@@ -402,7 +406,8 @@ where
                     RAFT_MESSAGE_FLUSH_COUNTER.full.inc_by(1);
                 }
 
-                // So either enough messages are batched up or don't need to wait or wait timeouts.
+                // So either enough messages are batched up or don't need to wait or wait
+                // timeouts.
                 s.flush_timeout.take();
                 ready!(Poll::Ready(s.buffer.flush(&mut s.sender)))?;
                 continue;
@@ -883,9 +888,9 @@ where
 
     /// Sends a message.
     ///
-    /// If the message fails to be sent, false is returned. Returning true means the message is
-    /// enqueued to buffer. Caller is expected to call `flush` to ensure all buffered messages
-    /// are sent out.
+    /// If the message fails to be sent, false is returned. Returning true means
+    /// the message is enqueued to buffer. Caller is expected to call
+    /// `flush` to ensure all buffered messages are sent out.
     pub fn send(&mut self, msg: RaftMessage) -> result::Result<(), DiscardReason> {
         let store_id = msg.get_to_peer().store_id;
         let grpc_raft_conn_num = self.builder.cfg.value().grpc_raft_conn_num as u64;

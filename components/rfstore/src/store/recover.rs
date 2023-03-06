@@ -16,7 +16,7 @@ use tikv_util::warn;
 
 use crate::store::{
     is_property_change_set, load_raft_truncated_state, rlog, Applier, ApplyContext, CustomRaftLog,
-    PeerTag, RaftApplyState, RaftState, RegionIDVer, TERM_KEY,
+    PeerTag, RaftApplyState, RaftState, RegionIdVer, TERM_KEY,
 };
 
 #[derive(Clone)]
@@ -95,7 +95,7 @@ impl RecoverHandler {
 
     fn load_region_meta(&self, shard_id: u64, shard_ver: u64) -> (metapb::Region, u64) {
         let &peer_id = self.region_peer_map.get(&shard_id).unwrap();
-        let tag = PeerTag::new(self.store_id, RegionIDVer::new(shard_id, shard_ver));
+        let tag = PeerTag::new(self.store_id, RegionIdVer::new(shard_id, shard_ver));
         let region_state_key = region_state_key(shard_ver);
         let region_state_val = self
             .rf_engine
@@ -240,11 +240,11 @@ impl kvengine::RecoverHandler for RecoverHandler {
     }
 }
 
-// change set that only set property are applied synchronously by exec_custom_log, other change set
-// are applied asynchronously. During recover, we don't have background worker, so we need to
-// apply the async change sets directly.
-// And we must exclude property change set, because it has side effect of switch mem-table, if we
-// skip it, later apply flush mem-table would panic.
+// change set that only set property are applied synchronously by
+// exec_custom_log, other change set are applied asynchronously. During recover,
+// we don't have background worker, so we need to apply the async change sets
+// directly. And we must exclude property change set, because it has side effect
+// of switch mem-table, if we skip it, later apply flush mem-table would panic.
 fn get_async_change_set(custom: &CustomRaftLog<'_>) -> Option<ChangeSet> {
     if rlog::is_engine_meta_log(custom.data.chunk()) {
         let cs = custom.get_change_set().unwrap();

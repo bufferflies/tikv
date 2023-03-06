@@ -70,7 +70,7 @@ impl Engine {
                     new_l0s.push(l0.clone());
                 }
             }
-            let mut new_cfs = [ShardCF::new(0), ShardCF::new(1), ShardCF::new(2)];
+            let mut new_cfs = [ShardCf::new(0), ShardCf::new(1), ShardCf::new(2)];
             for cf in 0..NUM_CFS {
                 let old_scf = old_data.get_cf(cf);
                 for lh in &old_scf.levels {
@@ -136,7 +136,7 @@ impl Engine {
         self.switch_mem_table(shard, version);
         self.flush_tx.send(FlushMsg::Clear(shard.id)).unwrap();
         self.compact_tx
-            .send(CompactMsg::Clear(IDVer::new(shard.id, shard.ver)))
+            .send(CompactMsg::Clear(IdVer::new(shard.id, shard.ver)))
             .unwrap();
     }
 
@@ -146,7 +146,7 @@ impl Engine {
         source_ver: u64,
         target_id: u64,
         target_ver: u64,
-    ) -> Result<(bool /*source*/, bool /*target*/)> {
+    ) -> Result<(bool /* source */, bool /* target */)> {
         let source_shard = self.get_shard_with_ver(source_id, source_ver)?;
         if !source_shard.get_initial_flushed() {
             return Err(Error::CheckMerge("source not initial flushed".to_string()));
@@ -171,8 +171,9 @@ impl Engine {
         let old_shard = self.get_shard_with_ver(shard_id, shard_ver).unwrap();
         self.prepare_update_shard_version(&old_shard, sequence);
         let mut new_shard = self.new_shard_version(&old_shard, sequence);
-        // source shard may have non-empty mem-table, we need to flush them before commit merge.
-        // The initial_flushed of the new shard is false, set the parent for later initial flush.
+        // source shard may have non-empty mem-table, we need to flush them before
+        // commit merge. The initial_flushed of the new shard is false, set the
+        // parent for later initial flush.
         new_shard.parent_id = old_shard.id;
         {
             let mut guard = new_shard.parent_snap.write().unwrap();
@@ -186,7 +187,8 @@ impl Engine {
         let old_shard = self.get_shard_with_ver(shard_id, shard_ver).unwrap();
         self.prepare_update_shard_version(&old_shard, sequence);
         let new_shard = self.new_shard_version(&old_shard, sequence);
-        // There is no write during merging state, so we can directly set initial_flushed to true.
+        // There is no write during merging state, so we can directly set
+        // initial_flushed to true.
         new_shard.initial_flushed.store(true, Ordering::Release);
         info!("{} shard rollback merge", new_shard.tag());
         self.shards.insert(new_shard.id, Arc::new(new_shard));
@@ -222,9 +224,9 @@ impl Engine {
         }
         l0_tbls.sort_by(|a, b| b.version().cmp(&a.version()));
         let mut new_cf_builders = [
-            ShardCFBuilder::new(0),
-            ShardCFBuilder::new(1),
-            ShardCFBuilder::new(2),
+            ShardCfBuilder::new(0),
+            ShardCfBuilder::new(1),
+            ShardCfBuilder::new(2),
         ];
         for cf in 0..NUM_CFS {
             let old_scf = old_data.get_cf(cf);

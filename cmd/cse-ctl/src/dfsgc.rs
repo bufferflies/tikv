@@ -15,7 +15,7 @@ use cse_ctl::common::{create_pd_client, get_all_stores_except_tiflash};
 use http::Uri;
 use kvengine::{
     dfs,
-    dfs::{DFSConfig, DFS, S3FS},
+    dfs::{DFSConfig, Dfs, S3Fs},
 };
 use kvproto::metapb::Store;
 use pd_client::RpcClient;
@@ -25,7 +25,7 @@ use tikv_util::info;
 
 /// DFSGC arguments
 #[derive(Args)]
-pub struct DFSGCArgs {
+pub struct DfsGcArgs {
     /// The path of the config file.
     #[clap(long)]
     pub config: PathBuf,
@@ -35,7 +35,7 @@ pub struct DFSGCArgs {
     pub start: Option<String>,
 }
 
-pub(crate) fn execute_dfsgc(arg: DFSGCArgs) {
+pub(crate) fn execute_dfsgc(arg: DfsGcArgs) {
     let result = std::fs::read(arg.config);
     if result.is_err() {
         error!("failed to read config file {:?}", result.unwrap_err());
@@ -43,12 +43,12 @@ pub(crate) fn execute_dfsgc(arg: DFSGCArgs) {
     }
     let start_after = arg.start.unwrap_or_default();
     let data = result.unwrap();
-    let mut config: DFSGCConfig = toml::from_slice(&data).unwrap();
+    let mut config: DfsGcConfig = toml::from_slice(&data).unwrap();
     if config.data_dir.is_empty() {
         config.data_dir = ".".to_string();
     }
     let pd_client = create_pd_client(&config.security, &config.pd);
-    let s3fs = S3FS::new(
+    let s3fs = S3Fs::new(
         config.dfs.prefix,
         config.dfs.s3_endpoint,
         config.dfs.s3_key_id,
@@ -67,7 +67,7 @@ static REMOVED: AtomicUsize = AtomicUsize::new(0);
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug, Default)]
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
-pub struct DFSGCConfig {
+pub struct DfsGcConfig {
     pub pd: pd_client::Config,
     pub security: SecurityConfig,
     pub dfs: DFSConfig,
@@ -79,13 +79,13 @@ pub struct DFSGCConfig {
 
 struct GcWorker {
     pd: RpcClient,
-    s3fs: S3FS,
+    s3fs: S3Fs,
     progress_file_path: PathBuf,
     valid_files: HashSet<u64>,
 }
 
 impl GcWorker {
-    fn new(pd: RpcClient, s3fs: S3FS, progress_file_path: PathBuf) -> Self {
+    fn new(pd: RpcClient, s3fs: S3Fs, progress_file_path: PathBuf) -> Self {
         Self {
             pd,
             s3fs,
@@ -119,10 +119,11 @@ impl GcWorker {
             stores_len,
             elapsed
         );
-        // If all peers of a region are moved during the collection, it is possible that some files
-        // are not collected, cause data lost.
-        // As it takes time to move peer, we concurrently collect the store files to make the the
-        // collection faster and assume it takes at least 30s to move all peers.
+        // If all peers of a region are moved during the collection, it is possible that
+        // some files are not collected, cause data lost.
+        // As it takes time to move peer, we concurrently collect the store files to
+        // make the the collection faster and assume it takes at least 30s to
+        // move all peers.
         assert!(elapsed < Duration::from_secs(30));
     }
 

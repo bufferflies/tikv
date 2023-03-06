@@ -236,8 +236,9 @@ impl ProposedAdminCmd {
 
 #[derive(Default)]
 struct CmdEpochChecker {
-    // Although it's a deque, because of the characteristics of the settings from `admin_cmd_epoch_lookup`,
-    // the max size of admin cmd is 2, i.e. split/merge and change peer.
+    // Although it's a deque, because of the characteristics of the settings from
+    // `admin_cmd_epoch_lookup`, the max size of admin cmd is 2, i.e. split/merge and change
+    // peer.
     proposed_admin_cmd: VecDeque<ProposedAdminCmd>,
     term: u64,
 }
@@ -255,10 +256,11 @@ impl CmdEpochChecker {
         }
     }
 
-    /// Check if the proposal can be proposed on the basis of its epoch and previous proposed admin cmds.
+    /// Check if the proposal can be proposed on the basis of its epoch and
+    /// previous proposed admin cmds.
     ///
-    /// Returns None if passing the epoch check, otherwise returns a index which is the last
-    /// admin cmd index conflicted with this proposal.
+    /// Returns None if passing the epoch check, otherwise returns a index which
+    /// is the last admin cmd index conflicted with this proposal.
     pub fn propose_check_epoch(&mut self, req: &RaftCmdRequest, term: u64) -> Option<u64> {
         self.maybe_update_term(term);
         let (check_ver, check_conf_ver) = if !req.has_admin_request() {
@@ -453,8 +455,9 @@ pub(crate) struct Peer {
     /// lead_transferee if the peer is in a leadership transferring.
     pub lead_transferee: u64,
 
-    /// Record the region size at the time of last buckets splitting. If the diff between current
-    /// region size and this exceeds a threshold, buckets will be refreshed.
+    /// Record the region size at the time of last buckets splitting. If the
+    /// diff between current region size and this exceeds a threshold,
+    /// buckets will be refreshed.
     pub(crate) last_bucket_split_region_size: u64,
 
     pub buckets: Option<BucketStat>,
@@ -618,8 +621,9 @@ impl Peer {
             return false;
         }
         if !self.get_store().region_match_preprocessed() {
-            // If we don't wait for region applied to latest epoch, the split may failed to execute,
-            // So the dependent may failed to clean up, the destroy would delay forever.
+            // If we don't wait for region applied to latest epoch, the split may failed to
+            // execute, So the dependent may failed to clean up, the destroy
+            // would delay forever.
             info!(
                 "region has not applied to preprocessed epoch, wait for apply";
                 "tag" => self.tag(),
@@ -647,10 +651,11 @@ impl Peer {
         raft_wb.clear_peer(self.peer_id());
         self.mut_store().clear_meta(raft_wb, true);
 
-        // StoreMsgHandler::check_msg use both epoch and region peer list to check whether
-        // a message is targing a staled peer. But for an uninitialized peer, peer list is empty,
-        // so a removed peer will be created again. Saving current peer into the peer list of
-        // region will fix this problem.
+        // StoreMsgHandler::check_msg use both epoch and region peer list to check
+        // whether a message is targing a staled peer. But for an uninitialized
+        // peer, peer list is empty, so a removed peer will be created again.
+        // Saving current peer into the peer list of region will fix this
+        // problem.
         if !self.get_store().is_initialized() {
             region.mut_peers().push(self.peer.clone());
         }
@@ -761,16 +766,17 @@ impl Peer {
         self.get_store().is_applying_snapshot()
     }
 
-    /// Returns `true` if the raft group has replicated a snapshot but not committed it yet.
+    /// Returns `true` if the raft group has replicated a snapshot but not
+    /// committed it yet.
     #[inline]
     pub fn has_pending_snapshot(&self) -> bool {
         self.get_pending_snapshot().is_some()
     }
 
     pub fn ready_to_handle_pending_snapshot(&self, ctx: &RaftContext) -> bool {
-        // We can't apply snapshot until dependents are empty, because applying snapshot will clear
-        // meta and truncate raft logs which makes other peers fail to recover.
-        // If ourself is the last dependent, we can apply snapshot.
+        // We can't apply snapshot until dependents are empty, because applying snapshot
+        // will clear meta and truncate raft logs which makes other peers fail
+        // to recover. If ourself is the last dependent, we can apply snapshot.
         let mut ready = true;
         ctx.global
             .engines
@@ -790,7 +796,10 @@ impl Peer {
     #[allow(unused)]
     fn add_ready_metric(&self, ready: &Ready, metrics: &mut RaftMetrics) {
         metrics.ready.message.inc_by(ready.messages().len() as u64);
-        metrics.ready.commit.inc_by(ready.committed_entries().len() as u64);
+        metrics
+            .ready
+            .commit
+            .inc_by(ready.committed_entries().len() as u64);
         metrics.ready.append.inc_by(ready.entries().len() as u64);
 
         if !ready.snapshot().is_empty() {
@@ -800,8 +809,14 @@ impl Peer {
 
     #[allow(unused)]
     fn add_light_ready_metric(&self, light_ready: &LightReady, metrics: &mut RaftMetrics) {
-        metrics.ready.message.inc_by(light_ready.messages().len() as u64);
-        metrics.ready.commit.inc_by(light_ready.committed_entries().len() as u64);
+        metrics
+            .ready
+            .message
+            .inc_by(light_ready.messages().len() as u64);
+        metrics
+            .ready
+            .commit
+            .inc_by(light_ready.committed_entries().len() as u64);
     }
 
     #[allow(unused)]
@@ -901,13 +916,14 @@ impl Peer {
         send_msg.set_to_peer(to_peer);
 
         // There could be two cases:
-        // 1. Target peer already exists but has not established communication with leader yet
-        // 2. Target peer is added newly due to member change or region split, but it's not
-        //    created yet
-        // For both cases the region start key and end key are attached in RequestVote and
-        // Heartbeat message for the store of that peer to check whether to create a new peer
-        // when receiving these messages, or just to wait for a pending region split to perform
-        // later.
+        // - Target peer already exists but has not established communication with
+        //   leader yet
+        // - Target peer is added newly due to member change or region split, but it's
+        //   not created yet
+        // For both cases the region start key and end key are attached in RequestVote
+        // and Heartbeat message for the store of that peer to check whether to create a
+        // new peer when receiving these messages, or just to wait for a pending region
+        // split to perform later.
         if self.get_store().is_initialized() && is_initial_msg(&msg) {
             let region = self.region();
             send_msg.set_start_key(region.get_start_key().to_vec());
@@ -1047,11 +1063,13 @@ impl Peer {
             // 1. Current leader hasn't communicated with this peer.
             // 2. This peer does not exist yet(maybe it is created but not initialized)
             //
-            // The correctness of region merge depends on the fact that all target peers must exist during merging.
-            // (PD rely on `pending_peers` to check whether all target peers exist)
+            // The correctness of region merge depends on the fact that all target peers
+            // must exist during merging. (PD rely on `pending_peers` to check
+            // whether all target peers exist)
             //
             // So if the `matched` is 0, it must be a pending peer.
-            // It can be ensured because `truncated_index` must be greater than `RAFT_INIT_LOG_INDEX`(5).
+            // It can be ensured because `truncated_index` must be greater than
+            // `RAFT_INIT_LOG_INDEX`(5).
             if progress.matched < truncated_idx {
                 if let Some(p) = self.get_peer_from_cache(id) {
                     pending_peers.push(p);
@@ -1096,8 +1114,8 @@ impl Peer {
         // Updates the `leader_missing_time` according to the current state.
         //
         // If we are checking this it means we suspect the leader might be missing.
-        // Mark down the time when we are called, so we can check later if it's been longer than it
-        // should be.
+        // Mark down the time when we are called, so we can check later if it's been
+        // longer than it should be.
         match self.leader_missing_time {
             None => {
                 self.leader_missing_time = Instant::now().into();
@@ -1335,9 +1353,9 @@ impl Peer {
             return;
         }
         if self.get_store().is_applying_snapshot() {
-            // If we continue to handle all the messages, it may cause too many messages because
-            // leader will send all the remaining messages to this follower, which can lead
-            // to full message queue under high load.
+            // If we continue to handle all the messages, it may cause too many messages
+            // because leader will send all the remaining messages to this
+            // follower, which can lead to full message queue under high load.
             return;
         }
         if !self.raft_group.has_ready() {
@@ -1457,9 +1475,10 @@ impl Peer {
                     .find_propose_time(entry.get_term(), entry.get_index());
                 if let Some(propose_time) = propose_time {
                     // We must renew current_time because this value may be created a long time ago.
-                    // If we do not renew it, this time may be smaller than propose_time of a command,
-                    // which was proposed in another thread while this thread receives its AppendEntriesResponse
-                    // and is ready to calculate its commit-log-duration.
+                    // If we do not renew it, this time may be smaller than propose_time of a
+                    // command, which was proposed in another thread while this
+                    // thread receives its AppendEntriesResponse and is ready to
+                    // calculate its commit-log-duration.
                     ctx.current_time.replace(monotonic_raw_now());
                     ctx.raft_metrics.commit_log.observe(duration_to_sec(
                         (ctx.current_time.unwrap() - propose_time).to_std().unwrap(),
@@ -1782,10 +1801,11 @@ impl Peer {
             merge_state,
         );
         write_engine_meta(&mut ctx.raft_wb, self.peer_id(), new_meta);
-        // The raft state key changed when region version change, we need to set it here.
-        // We handle committed entries before update peer storage's raft state, so the peer
-        // storage's raft state may not be update to date, we set the hard state of raft.
-        // This is the final raft state of the old version.
+        // The raft state key changed when region version change, we need to set it
+        // here. We handle committed entries before update peer storage's raft
+        // state, so the peer storage's raft state may not be update to date, we
+        // set the hard state of raft. This is the final raft state of the old
+        // version.
         let hard_state = self.raft_group.raft.hard_state();
         let store = self.mut_store();
         store.raft_state.set_hard_state(&hard_state);
@@ -1882,8 +1902,8 @@ impl Peer {
         let merged_region = new_merged_region(source_region, self.get_preprocessed_region());
         self.update_meta_on_version_change(ctx, &new_meta, &merged_region, None);
 
-        // set target to tombstone in the same batch, so the commit merge and destroy source would
-        // be atomic.
+        // set target to tombstone in the same batch, so the commit merge and destroy
+        // source would be atomic.
         let rwb = &mut ctx.raft_wb;
         let mut merge_state = MergeState::new();
         merge_state.set_commit(commit_merge.commit);
@@ -1940,8 +1960,8 @@ impl Peer {
                     None,
                 );
             } else {
-                // It's a remove self conf change, it will be updated in destroy method with
-                // tombstone state.
+                // It's a remove self conf change, it will be updated in destroy
+                // method with tombstone state.
             }
             self.mut_store().preprocessed_region = Some(region);
         }
@@ -2059,7 +2079,8 @@ impl Peer {
         }
     }
 
-    /// Responses to the ready read index request on the replica, the replica is not a leader.
+    /// Responses to the ready read index request on the replica, the replica is
+    /// not a leader.
     fn post_pending_read_index_on_replica(&mut self, ctx: &mut RaftContext) {
         while let Some(mut read) = self.pending_reads.pop_front() {
             // The response of this read index request is lost, but we need it for
@@ -2114,9 +2135,9 @@ impl Peer {
         // update the `read_index` of read request that before this successful
         // `ready`.
         if !self.is_leader() {
-            // NOTE: there could still be some pending reads proposed by the peer when it was
-            // leader. They will be cleared in `clear_uncommitted_on_role_change` later in
-            // the function.
+            // NOTE: there could still be some pending reads proposed by the peer when it
+            // was leader. They will be cleared in
+            // `clear_uncommitted_on_role_change` later in the function.
             self.pending_reads.advance_replica_reads(states);
             self.post_pending_read_index_on_replica(ctx);
         } else {
@@ -2151,8 +2172,8 @@ impl Peer {
     fn ready_to_handle_read(&self) -> bool {
         // TODO: It may cause read index to wait a long time.
 
-        // There may be some values that are not applied by this leader yet but the old leader,
-        // if applied_index_term isn't equal to current term.
+        // There may be some values that are not applied by this leader yet but the old
+        // leader, if applied_index_term isn't equal to current term.
         self.get_store().applied_index_term() == self.term()
             // There may be stale read if the old leader splits really slow,
             // the new region may already elected a new leader while
@@ -2163,9 +2184,9 @@ impl Peer {
 
     fn ready_to_handle_unsafe_replica_read(&self, read_index: u64) -> bool {
         // Wait until the follower applies all values before the read. There is still a
-        // problem if the leader applies fewer values than the follower, the follower read
-        // could get a newer value, and after that, the leader may read a stale value,
-        // which violates linearizability.
+        // problem if the leader applies fewer values than the follower, the follower
+        // read could get a newer value, and after that, the leader may read a
+        // stale value, which violates linearizability.
         self.get_store().applied_index() >= read_index
             // If it is in pending merge state(i.e. applied PrepareMerge), the data may be stale.
             // TODO: Add a test to cover this case
@@ -2323,8 +2344,9 @@ impl Peer {
             Ok(Either::Left(idx)) => {
                 let has_applied_to_current_term = self.has_applied_to_current_term();
                 if has_applied_to_current_term {
-                    // After this peer has applied to current term and passed above checking including `cmd_epoch_checker`,
-                    // we can safely guarantee that this proposal will be committed if there is no abnormal leader transfer
+                    // After this peer has applied to current term and passed above checking
+                    // including `cmd_epoch_checker`, we can safely guarantee
+                    // that this proposal will be committed if there is no abnormal leader transfer
                     // in the near future. Thus proposed callback can be called.
                     cb.invoke_proposed();
                 }
@@ -2363,7 +2385,8 @@ impl Peer {
         self.proposals.push(p);
     }
 
-    // TODO: set higher election priority of voter/incoming voter than demoting voter
+    // TODO: set higher election priority of voter/incoming voter than demoting
+    // voter
     /// Validate the `ConfChange` requests and check whether it's safe to
     /// propose these conf change requests.
     /// It's safe iff at least the quorum of the Raft group is still healthy
@@ -2444,8 +2467,9 @@ impl Peer {
             }
         }
 
-        // Multiple changes that only effect learner will not product `IncommingVoter` or `DemotingVoter`
-        // after apply, but raftstore layer and PD rely on these roles to detect joint state
+        // Multiple changes that only effect learner will not product `IncommingVoter`
+        // or `DemotingVoter` after apply, but raftstore layer and PD rely on
+        // these roles to detect joint state
         if kind != ConfChangeKind::Simple && only_learner_change {
             return Err(box_err!(
                 "{} invalid conf change request, multiple changes that only effect learner",
@@ -2522,8 +2546,8 @@ impl Peer {
         msg.set_msg_type(eraftpb::MessageType::MsgTransferLeader);
         msg.set_from(self.peer_id());
         // log term here represents the term of last log. For leader, the term of last
-        // log is always its current term. Not just set term because raft library forbids
-        // setting it for MsgTransferLeader messages.
+        // log is always its current term. Not just set term because raft library
+        // forbids setting it for MsgTransferLeader messages.
         msg.set_log_term(self.term());
         self.raft_group.raft.msgs.push(msg);
         true
@@ -2603,8 +2627,9 @@ impl Peer {
         Ok(())
     }
 
-    /// `ReadIndex` requests could be lost in network, so on followers commands could queue in
-    /// `pending_reads` forever. Sending a new `ReadIndex` periodically can resolve this.
+    /// `ReadIndex` requests could be lost in network, so on followers commands
+    /// could queue in `pending_reads` forever. Sending a new `ReadIndex`
+    /// periodically can resolve this.
     pub fn retry_pending_reads(&mut self, raft_election_timeout_ticks: usize) {
         if self.is_leader()
             || !self
@@ -2653,10 +2678,11 @@ impl Peer {
         let now = monotonic_raw_now();
         if self.is_leader() {
             match self.inspect_lease() {
-                // Here combine the new read request with the previous one even if the lease expired is
-                // ok because in this case, the previous read index must be sent out with a valid
-                // lease instead of a suspect lease. So there must no pending transfer-leader proposals
-                // before or after the previous read index, and the lease can be renewed when get
+                // Here combine the new read request with the previous one even if the lease expired
+                // is ok because in this case, the previous read index must be sent
+                // out with a valid lease instead of a suspect lease. So there must
+                // no pending transfer-leader proposals before or after the previous
+                // read index, and the lease can be renewed when get
                 // heartbeat responses.
                 LeaseState::Valid | LeaseState::Expired => {
                     // Must use the commit index of `PeerStorage` instead of the commit index
@@ -2670,14 +2696,16 @@ impl Peer {
                             .get(0)
                             .map(|req| req.has_read_index())
                             .unwrap_or_default();
-                        // A read index request or a read with addition request always needs the response of
-                        // checking memory lock for async commit, so we cannot apply the optimization here
+                        // A read index request or a read with addition request always needs the
+                        // response of checking memory lock for async
+                        // commit, so we cannot apply the optimization here
                         if !is_read_index_request
                             && read.addition_request.is_none()
                             && read.propose_time + max_lease > now
                         {
-                            // A read request proposed in the current lease is found; combine the new
-                            // read request to that previous one, so that no proposing needed.
+                            // A read request proposed in the current lease is found; combine the
+                            // new read request to that previous one, so
+                            // that no proposing needed.
                             read.push_command(req, cb, commit_index);
                             return false;
                         }
@@ -2690,9 +2718,9 @@ impl Peer {
             }
         }
 
-        // When a replica cannot detect any leader, `MsgReadIndex` will be dropped, which would
-        // cause a long time waiting for a read response. Then we should return an error directly
-        // in this situation.
+        // When a replica cannot detect any leader, `MsgReadIndex` will be dropped,
+        // which would cause a long time waiting for a read response. Then we
+        // should return an error directly in this situation.
         if !self.is_leader() && self.leader_id() == INVALID_ID {
             ctx.raft_metrics.invalid_proposal.read_index_no_leader.inc();
             cmd_resp::bind_error(&mut err_resp, Error::NotLeader(self.region_id, None));
@@ -2800,8 +2828,9 @@ impl Peer {
                 "min_matched" => min_m,
                 "min_committed" => min_c,
             );
-            // Reset `min_matched` to `min_committed`, since the raft log at `min_committed` is
-            // known to be committed in all peers, all of the peers should also have replicated it
+            // Reset `min_matched` to `min_committed`, since the raft log at `min_committed`
+            // is known to be committed in all peers, all of the peers should
+            // also have replicated it
             min_m = min_c;
         }
         Ok((min_m, min_c))
@@ -2864,8 +2893,10 @@ impl Peer {
 
     /// Propose normal request to raft
     ///
-    /// Returns Ok(Either::Left(index)) means the proposal is proposed successfully and is located on `index` position.
-    /// Ok(Either::Right(index)) means the proposal is rejected by `CmdEpochChecker` and the `index` is the position of
+    /// Returns Ok(Either::Left(index)) means the proposal is proposed
+    /// successfully and is located on `index` position.
+    /// Ok(Either::Right(index)) means the proposal is rejected by
+    /// `CmdEpochChecker` and the `index` is the position of
     /// the last conflict admin cmd.
     fn propose_normal(
         &mut self,
@@ -2890,8 +2921,9 @@ impl Peer {
         }
 
         if self.has_applied_to_current_term() {
-            // Only when applied index's term is equal to current leader's term, the information
-            // in epoch checker is up to date and can be used to check epoch.
+            // Only when applied index's term is equal to current leader's term, the
+            // information in epoch checker is up to date and can be used to
+            // check epoch.
             if let Some(index) = self
                 .cmd_epoch_checker
                 .propose_check_epoch(&req, self.term())
@@ -2899,8 +2931,9 @@ impl Peer {
                 return Ok(Either::Right(index));
             }
         } else if req.has_admin_request() {
-            // The admin request is rejected because it may need to update epoch checker which
-            // introduces an uncertainty and may breaks the correctness of epoch checker.
+            // The admin request is rejected because it may need to update epoch checker
+            // which introduces an uncertainty and may breaks the correctness of
+            // epoch checker.
             return Err(box_err!(
                 "{} peer has not applied to current term, applied_term {}, current_term {}",
                 self.tag(),
@@ -3005,7 +3038,8 @@ impl Peer {
         let transferred = self.pre_transfer_leader(peer);
 
         // transfer leader command doesn't need to replicate log and apply, so we
-        // return immediately. Note that this command may fail, we can view it just as an advice
+        // return immediately. Note that this command may fail, we can view it just as
+        // an advice
         cb.invoke_with_response(make_transfer_leader_response());
 
         transferred
@@ -3016,8 +3050,10 @@ impl Peer {
     // 2. Removing the leader is not allowed in the configuration;
     // 3. The conf change makes the raft group not healthy;
     // 4. The conf change is dropped by raft group internally.
-    /// Returns Ok(Either::Left(index)) means the proposal is proposed successfully and is located on `index` position.
-    /// Ok(Either::Right(index)) means the proposal is rejected by `CmdEpochChecker` and the `index` is the position of
+    /// Returns Ok(Either::Left(index)) means the proposal is proposed
+    /// successfully and is located on `index` position.
+    /// Ok(Either::Right(index)) means the proposal is rejected by
+    /// `CmdEpochChecker` and the `index` is the position of
     /// the last conflict admin cmd.
     fn propose_conf_change(
         &mut self,
@@ -3038,9 +3074,10 @@ impl Peer {
                 self.tag()
             ));
         }
-        // Actually, according to the implementation of conf change in raft-rs, this check must be
-        // passed if the previous check that `pending_conf_index` should be less than or equal to
-        // `self.get_store().applied_index()` is passed.
+        // Actually, according to the implementation of conf change in raft-rs, this
+        // check must be passed if the previous check that `pending_conf_index`
+        // should be less than or equal to `self.get_store().applied_index()` is
+        // passed.
         if self.get_store().applied_index_term() != self.term() {
             return Err(box_err!(
                 "{} peer has not applied to current term, applied_term {}, current_term {}",

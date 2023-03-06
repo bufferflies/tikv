@@ -343,7 +343,8 @@ impl BackupRange {
         BACKUP_RANGE_HISTOGRAM_VEC
             .with_label_values(&["snapshot"])
             .observe(start_snapshot.saturating_elapsed().as_secs_f64());
-        let cloud_store = CloudStore::new(snapshot, backup_ts.into_inner(), Default::default(), false);
+        let cloud_store =
+            CloudStore::new(snapshot, backup_ts.into_inner(), Default::default(), false);
         let start_key = self.start_key.clone();
         let end_key = self.end_key.clone();
         // Incremental backup needs to output delete records.
@@ -1091,7 +1092,7 @@ impl<E: Engine, K: KvEngine, R: RegionInfoProvider + Clone + 'static> Endpoint<E
 }
 
 impl<E: Engine, K: KvEngine, R: RegionInfoProvider + Clone + 'static> Runnable
-for Endpoint<E, K, R>
+    for Endpoint<E, K, R>
 {
     type Task = Task;
 
@@ -1351,9 +1352,9 @@ pub mod tests {
             temp,
             Endpoint::new(
                 1,
-                rocks.clone(),
+                rocks,
                 MockRegionInfoProvider::new(need_encode_key),
-                rocks.get_rocksdb(),
+                db,
                 BackupConfig {
                     num_threads: 4,
                     batch_size: 8,

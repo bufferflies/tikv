@@ -13,27 +13,27 @@ use tikv_util::{
 };
 
 use crate::{
-    table::{memtable, memtable::CFTable, sstable, sstable::L0Builder},
+    table::{memtable, memtable::CfTable, sstable, sstable::L0Builder},
     *,
 };
 
 #[derive(Clone)]
 pub(crate) struct FlushTask {
-    pub(crate) id_ver: IDVer,
+    pub(crate) id_ver: IdVer,
     pub(crate) start: Vec<u8>,
     pub(crate) end: Vec<u8>,
-    pub(crate) normal: Option<memtable::CFTable>,
+    pub(crate) normal: Option<memtable::CfTable>,
     pub(crate) initial: Option<InitialFlush>,
 }
 
 impl FlushTask {
     fn new(
         shard: &Shard,
-        normal: Option<memtable::CFTable>,
+        normal: Option<memtable::CfTable>,
         initial: Option<InitialFlush>,
     ) -> Self {
         Self {
-            id_ver: IDVer::new(shard.id, shard.ver),
+            id_ver: IdVer::new(shard.id, shard.ver),
             start: shard.start.to_vec(),
             end: shard.end.to_vec(),
             normal,
@@ -41,7 +41,7 @@ impl FlushTask {
         }
     }
 
-    pub(crate) fn new_normal(shard: &Shard, mem_tbl: memtable::CFTable) -> Self {
+    pub(crate) fn new_normal(shard: &Shard, mem_tbl: memtable::CfTable) -> Self {
         Self::new(shard, Some(mem_tbl), None)
     }
 
@@ -65,7 +65,7 @@ impl FlushTask {
 #[derive(Clone)]
 pub(crate) struct InitialFlush {
     pub(crate) parent_snap: pb::Snapshot,
-    pub(crate) mem_tbls: Vec<memtable::CFTable>,
+    pub(crate) mem_tbls: Vec<memtable::CfTable>,
     pub(crate) base_version: u64,
     pub(crate) data_sequence: u64,
 }
@@ -172,7 +172,7 @@ impl Engine {
         Err(errs.pop().unwrap())
     }
 
-    pub(crate) fn build_l0_table(&self, m: &CFTable, start: &[u8], end: &[u8]) -> L0Builder {
+    pub(crate) fn build_l0_table(&self, m: &CfTable, start: &[u8], end: &[u8]) -> L0Builder {
         let fid = self.id_allocator.alloc_id(1).pop().unwrap();
         let mut l0_builder = sstable::L0Builder::new(
             fid,
@@ -194,7 +194,8 @@ impl Engine {
                     break;
                 }
                 if rc && prev_key == it.key() {
-                    // For read committed CF, we can discard all the old versions.
+                    // For read committed CF, we can discard all the old
+                    // versions.
                 } else {
                     l0_builder.add(cf, it.key(), it.value());
                     if rc {
@@ -212,7 +213,7 @@ impl Engine {
         &self,
         mut l0_builder: L0Builder,
         tx: tikv_util::mpsc::Sender<Result<pb::L0Create>>,
-        id_ver: IDVer,
+        id_ver: IdVer,
     ) {
         let l0_data = l0_builder.finish();
         let (smallest, biggest) = l0_builder.smallest_biggest();
@@ -242,20 +243,22 @@ pub(crate) enum FlushMsg {
     /// Task is send when trigger_flush is called.
     Task(Box<FlushTask>),
 
-    /// Result is sent from the background flush thread when a flush task is finished.
+    /// Result is sent from the background flush thread when a flush task is
+    /// finished.
     Result(FlushResult),
 
-    /// Committed message is sent when a flush is committed to the raft group, so we
-    /// can notify the next finished task.
-    Committed((IDVer, u64)),
+    /// Committed message is sent when a flush is committed to the raft group,
+    /// so we can notify the next finished task.
+    Committed((IdVer, u64)),
 
-    /// Clear message is sent when a shard changed its version or set to inactive.
-    /// Then all the previous tasks will be discarded.
+    /// Clear message is sent when a shard changed its version or set to
+    /// inactive. Then all the previous tasks will be discarded.
     /// This simplifies the logic, avoid race condition.
     Clear(u64),
 }
 
-// FlushManager manages the flush tasks, make them concurrent and ensure the order for each shard.
+// FlushManager manages the flush tasks, make them concurrent and ensure the
+// order for each shard.
 pub(crate) struct FlushWorker {
     shards: HashMap<u64, ShardTaskManager>,
     receiver: mpsc::Receiver<FlushMsg>,
@@ -333,19 +336,21 @@ impl FlushWorker {
 /// ShardTaskManager manage flush tasks for a shard.
 #[derive(Default)]
 pub(crate) struct ShardTaskManager {
-    /// When a Shard is set to inactive, all the running tasks should be discarded, then when
-    /// it is set to active again, old result may arrive and conflict with the new tasks.
-    /// So we use term to detect and discard obsolete tasks.
+    /// When a Shard is set to inactive, all the running tasks should be
+    /// discarded, then when it is set to active again, old result may
+    /// arrive and conflict with the new tasks. So we use term to detect and
+    /// discard obsolete tasks.
     term: u64,
     /// task_queue contains the running tasks.
     /// Incoming flush tasks are pushed back to the queue.
     task_queue: VecDeque<FlushTask>,
-    /// finished contains tasks that successfully flushed, but not yet notified to the meta listener.
+    /// finished contains tasks that successfully flushed, but not yet notified
+    /// to the meta listener.
     finished: HashMap<u64, kvenginepb::ChangeSet>,
     /// The flush notified the meta listener but not yet committed.
     notified: Option<kvenginepb::ChangeSet>,
-    /// committed_table_version is updated when the notified change set is committed
-    /// in the raft group.
+    /// committed_table_version is updated when the notified change set is
+    /// committed in the raft group.
     committed_table_version: u64,
 }
 
@@ -449,7 +454,7 @@ pub(crate) fn change_set_table_version(cs: &kvenginepb::ChangeSet) -> u64 {
 }
 
 pub(crate) struct FlushResult {
-    id_ver: IDVer,
+    id_ver: IdVer,
     table_version: u64,
     term: u64,
     res: Result<kvenginepb::ChangeSet>,

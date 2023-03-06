@@ -23,7 +23,8 @@ impl Display for GcTask {
     }
 }
 
-/// The GC worker periodically removes unused sst files to release storage resource.
+/// The GC worker periodically removes unused sst files to release storage
+/// resource.
 pub struct GcRunner {
     kv: kvengine::Engine,
     importer: Arc<SstImporter>,

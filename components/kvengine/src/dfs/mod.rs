@@ -20,20 +20,21 @@ use bytes::Bytes;
 pub use config::Config as DFSConfig;
 use file_system;
 use metrics::*;
-pub use s3::S3FS;
+pub use s3::S3Fs;
 use thiserror::Error;
 use tikv_util::time::Instant;
 use tokio::runtime::Runtime;
 
 // DFS represents a distributed file system.
 #[async_trait]
-pub trait DFS: Sync + Send {
+pub trait Dfs: Sync + Send {
     /// read_file reads the whole file to memory.
     /// It can be used by remote compaction server that doesn't have local disk.
     async fn read_file(&self, file_id: u64, opts: Options) -> Result<Bytes>;
 
     /// Create creates a new File.
-    /// The shard_id and shard_ver can be used determine where to write the file.
+    /// The shard_id and shard_ver can be used determine where to write the
+    /// file.
     async fn create(&self, file_id: u64, data: Bytes, opts: Options) -> Result<()>;
 
     /// remove removes the file from the DFS.
@@ -46,20 +47,20 @@ pub trait DFS: Sync + Send {
     fn set_delay(&self, _delay: Duration) {}
 }
 
-pub struct InMemFS {
+pub struct InMemFs {
     files: dashmap::DashMap<u64, Bytes>,
     pending_remove: dashmap::DashMap<u64, Instant>,
     runtime: tokio::runtime::Runtime,
     delay: Arc<Mutex<Duration>>,
 }
 
-impl Default for InMemFS {
+impl Default for InMemFs {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl InMemFS {
+impl InMemFs {
     pub fn new() -> Self {
         Self {
             files: Default::default(),
@@ -80,7 +81,7 @@ impl InMemFS {
 }
 
 #[async_trait]
-impl DFS for InMemFS {
+impl Dfs for InMemFs {
     async fn read_file(&self, file_id: u64, _opts: Options) -> Result<Bytes> {
         let delay = self.get_delay();
         tokio::time::sleep(delay).await;
@@ -124,13 +125,13 @@ impl DFS for InMemFS {
 }
 
 #[derive(Clone)]
-pub struct LocalFS {
-    core: Arc<LocalFSCore>,
+pub struct LocalFs {
+    core: Arc<LocalFsCore>,
 }
 
-impl LocalFS {
+impl LocalFs {
     pub fn new(dir: &Path) -> Self {
-        let core = Arc::new(LocalFSCore::new(dir));
+        let core = Arc::new(LocalFsCore::new(dir));
         Self { core }
     }
     pub fn local_file_path(&self, file_id: u64) -> PathBuf {
@@ -150,21 +151,21 @@ impl LocalFS {
     }
 }
 
-impl Deref for LocalFS {
-    type Target = LocalFSCore;
+impl Deref for LocalFs {
+    type Target = LocalFsCore;
 
     fn deref(&self) -> &Self::Target {
         &self.core
     }
 }
 
-pub struct LocalFSCore {
+pub struct LocalFsCore {
     dir: PathBuf,
     tmp_file_id: AtomicU64,
     runtime: tokio::runtime::Runtime,
 }
 
-impl LocalFSCore {
+impl LocalFsCore {
     pub fn new(dir: &Path) -> Self {
         if !dir.exists() {
             std::fs::create_dir_all(dir).unwrap();
@@ -185,7 +186,7 @@ impl LocalFSCore {
 }
 
 #[async_trait]
-impl DFS for LocalFS {
+impl Dfs for LocalFs {
     async fn read_file(&self, file_id: u64, _opts: Options) -> Result<Bytes> {
         let local_file_name = self.local_file_path(file_id);
         let fd = std::fs::File::open(local_file_name)?;
@@ -275,7 +276,7 @@ mod tests {
     use std::os::unix::fs::MetadataExt;
 
     use super::*;
-    use crate::dfs::LocalFS;
+    use crate::dfs::LocalFs;
 
     #[test]
     fn test_local_fs() {
@@ -283,7 +284,7 @@ mod tests {
 
         let local_dir = tempfile::tempdir().unwrap();
         let file_data = "abcdefgh".to_string().into_bytes();
-        let localfs = LocalFS::new(local_dir.path());
+        let localfs = LocalFs::new(local_dir.path());
         let (tx, rx) = tikv_util::mpsc::bounded(1);
         let file_id = 321u64;
         let fs = localfs.clone();
@@ -339,6 +340,6 @@ mod tests {
         };
         localfs.runtime.spawn(f);
         assert!(rx.recv().unwrap());
-        assert!(std::fs::File::open(&local_file).is_err())
+        std::fs::File::open(&local_file).unwrap_err();
     }
 }

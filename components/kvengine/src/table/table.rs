@@ -14,8 +14,8 @@ pub trait Iterator: Send {
 
     // next_version set the current entry to an older version.
     // The iterator must be valid to call this method.
-    // It returns true if there is an older version, returns false if there is no older version.
-    // The iterator is still valid and on the same key.
+    // It returns true if there is an older version, returns false if there is no
+    // older version. The iterator is still valid and on the same key.
     fn next_version(&mut self) -> bool;
 
     fn rewind(&mut self);
@@ -234,7 +234,7 @@ pub enum Error {
     #[error("IO error: {0}")]
     Io(String),
     #[error("EOF")]
-    EOF,
+    Eof,
     #[error("{0}")]
     Other(String),
 }

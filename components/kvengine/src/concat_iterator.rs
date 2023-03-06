@@ -3,14 +3,15 @@
 use crate::{
     table::{
         search,
-        sstable::{SSTable, TableIterator},
+        sstable::{SsTable, TableIterator},
         Iterator, Value,
     },
     LevelHandler,
 };
 
-// ConcatIterator concatenates the sequences defined by several iterators.  (It only works with
-// TableIterators, probably just because it's faster to not be so generic.)
+// ConcatIterator concatenates the sequences defined by several iterators.  (It
+// only works with TableIterators, probably just because it's faster to not be
+// so generic.)
 pub(crate) struct ConcatIterator {
     idx: i32,
     iter: Option<Box<TableIterator>>,
@@ -31,7 +32,7 @@ impl ConcatIterator {
         }
     }
 
-    pub(crate) fn new_with_tables(tables: Vec<SSTable>, reversed: bool, fill_cache: bool) -> Self {
+    pub(crate) fn new_with_tables(tables: Vec<SsTable>, reversed: bool, fill_cache: bool) -> Self {
         let level = LevelHandler::new(1, tables);
         ConcatIterator {
             idx: -1,
@@ -42,7 +43,7 @@ impl ConcatIterator {
         }
     }
 
-    fn get_table(&self, idx: usize) -> &SSTable {
+    fn get_table(&self, idx: usize) -> &SsTable {
         &self.level.tables[idx]
     }
 
@@ -164,7 +165,7 @@ mod tests {
         concat_iterator::ConcatIterator,
         table::{
             sstable::{
-                build_test_table_with_kvs, build_test_table_with_prefix, new_test_cache, SSTable,
+                build_test_table_with_kvs, build_test_table_with_prefix, new_test_cache, SsTable,
             },
             Iterator,
         },
@@ -176,7 +177,7 @@ mod tests {
             ("k1".to_string(), "a1".to_string()),
             ("k2".to_string(), "a2".to_string()),
         ]);
-        let t = SSTable::new(tf, new_test_cache(), true).unwrap();
+        let t = SsTable::new(tf, new_test_cache(), true).unwrap();
         let tables = vec![t];
         let mut it = ConcatIterator::new_with_tables(tables, false, true);
         it.rewind();
@@ -192,9 +193,9 @@ mod tests {
         let tf1 = build_test_table_with_prefix("keya", 10000);
         let tf2 = build_test_table_with_prefix("keyb", 10000);
         let tf3 = build_test_table_with_prefix("keyc", 10000);
-        let t1 = SSTable::new(tf1, new_test_cache(), true).unwrap();
-        let t2 = SSTable::new(tf2, new_test_cache(), true).unwrap();
-        let t3 = SSTable::new(tf3, new_test_cache(), true).unwrap();
+        let t1 = SsTable::new(tf1, new_test_cache(), true).unwrap();
+        let t2 = SsTable::new(tf2, new_test_cache(), true).unwrap();
+        let t3 = SsTable::new(tf3, new_test_cache(), true).unwrap();
         let tables = vec![t1, t2, t3];
         {
             let mut it = ConcatIterator::new_with_tables(tables.clone(), false, true);

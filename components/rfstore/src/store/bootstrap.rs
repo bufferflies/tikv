@@ -9,8 +9,7 @@ use protobuf::{Message, RepeatedField};
 use rfengine::{
     raft_state_key, region_state_key, KV_ENGINE_META_KEY, PREPARE_BOOTSTRAP_KEY, STORE_IDENT_KEY,
 };
-use tikv_util::box_err;
-use tikv_util::store::new_peer;
+use tikv_util::{box_err, store::new_peer};
 
 use super::peer_storage::{write_initial_raft_state, INIT_EPOCH_CONF_VER, INIT_EPOCH_VER};
 use crate::{
@@ -33,8 +32,8 @@ pub fn initial_region(store_id: u64, region_id: u64, peer_id: u64) -> metapb::Re
 
 // Bootstrap the store, the DB for this store must be empty and has no data.
 //
-// FIXME: ER typaram should just be impl KvEngine, but RaftEngine doesn't support
-// the `is_range_empty` query yet.
+// FIXME: ER typaram should just be impl KvEngine, but RaftEngine doesn't
+// support the `is_range_empty` query yet.
 pub fn bootstrap_store(engines: &Engines, cluster_id: u64, store_id: u64) -> Result<()> {
     if engines.kv.size() > 1 {
         return Err(box_err!("kv store is not empty and has already had data."));

@@ -251,6 +251,8 @@ fn test_serde_custom_tikv_config() {
         check_long_uncommitted_interval: ReadableDuration::secs(1),
         long_uncommitted_base_threshold: ReadableDuration::secs(1),
         max_entry_cache_warmup_duration: ReadableDuration::secs(2),
+        local_file_gc_tick_interval: ReadableDuration::minutes(10),
+        local_file_gc_timeout: ReadableDuration::minutes(30),
         max_snapshot_file_raw_size: ReadableSize::gb(10),
         unreachable_backoff: ReadableDuration::secs(111),
         check_peers_availability_interval: ReadableDuration::secs(30),

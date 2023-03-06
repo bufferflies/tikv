@@ -35,7 +35,8 @@ use crate::{
 pub const TRUNCATE_ALL_INDEX: u64 = u64::MAX;
 
 /// `RfEngine` is a persistent storage engine for multi-raft logs.
-/// It stores part of raft logs and states(key/value pair) in memory and persists them to disk.
+/// It stores part of raft logs and states(key/value pair) in memory and
+/// persists them to disk.
 ///
 /// A typical directory structure is:
 ///   .
@@ -51,33 +52,36 @@ pub const TRUNCATE_ALL_INDEX: u64 = u64::MAX;
 ///
 /// # Memory Layout
 ///
-/// `RfEngine` contains all raft group states and non-truncated logs in memory, so that it
-/// can get raft logs quickly.
+/// `RfEngine` contains all raft group states and non-truncated logs in memory,
+/// so that it can get raft logs quickly.
 ///
 /// # WAL
 ///
-/// `RfEngine` writes all raft groups' logs and states to a WAL file sequentially.
-/// When the WAL file size exceeds the threshold, it triggers rotation and switching to a new WAL file.
-/// The name of a WAL file is `{epoch}.wal`. Epoch increases when rotating.
+/// `RfEngine` writes all raft groups' logs and states to a WAL file
+/// sequentially. When the WAL file size exceeds the threshold, it triggers
+/// rotation and switching to a new WAL file. The name of a WAL file is
+/// `{epoch}.wal`. Epoch increases when rotating.
 ///
 /// ## Rotation
 ///
 /// Rotation splits the data of a WAL file to several files:
-///   - `{epoch}.states`: Contains **all** raft groups states, not just states in the corresponding WAL file.
+///   - `{epoch}.states`: Contains **all** raft groups states, not just states
+///     in the corresponding WAL file.
 ///   The old states file will be removed after rewriting.
 ///
-///   - `{epoch}_{region_id}_{first_log_index}_{last_log_index}.rlog`: Contains logs in
+///   - `{epoch}_{region_id}_{first_log_index}_{last_log_index}.rlog`: Contains
+///     logs in
 ///   [first_log_index, last_log_index) of a single raft group.
 ///
-/// After splitting, the WAL file is moved to the `recycle` directory for later use.
-/// `RfEngine` recycles old WAL files for better I/O performance. To distinguish between
-/// old data and new data, the data format of WAL contains epoch, i.e., valid data's epoch equals the
-/// epoch in the WAL file name.
+/// After splitting, the WAL file is moved to the `recycle` directory for later
+/// use. `RfEngine` recycles old WAL files for better I/O performance. To
+/// distinguish between old data and new data, the data format of WAL contains
+/// epoch, i.e., valid data's epoch equals the epoch in the WAL file name.
 ///
 /// # Garbage Collection
 ///
-/// Raft logs that has been applied and persisted to FSM can be truncated. All in-memory logs and `rlog` files before the
-/// truncated index will be removed.
+/// Raft logs that has been applied and persisted to FSM can be truncated. All
+/// in-memory logs and `rlog` files before the truncated index will be removed.
 #[derive(Clone)]
 pub struct RfEngine {
     core: Arc<RfEngineCore>,
@@ -195,8 +199,9 @@ impl RfEngineCore {
         ENGINE_APPLY_DURATION_HISTOGRAM.observe(timer.saturating_elapsed_secs());
     }
 
-    /// Persists the write batch to WAL. It can be used in another thread to implement async I/O,
-    /// i.e., call `apply` in the main thread and call `persist` in the I/O thread.
+    /// Persists the write batch to WAL. It can be used in another thread to
+    /// implement async I/O, i.e., call `apply` in the main thread and call
+    /// `persist` in the I/O thread.
     pub fn persist(&self, wb: WriteBatch) -> Result<usize> {
         let timer = Instant::now_coarse();
         let mut writer = self.writer.lock().unwrap();
@@ -242,7 +247,8 @@ impl RfEngineCore {
         })
     }
 
-    /// Get the value of the last state key with the `prefix`. `prefix` must be non-empty.
+    /// Get the value of the last state key with the `prefix`. `prefix` must be
+    /// non-empty.
     pub fn get_last_state_with_prefix(&self, peer_id: u64, prefix: &[u8]) -> Option<Bytes> {
         debug_assert!(!prefix.is_empty());
         let peer_data = self.peers.get(&peer_id)?;
@@ -260,8 +266,8 @@ impl RfEngineCore {
             .map(|(_, v)| v.clone())
     }
 
-    /// Iterates states of the region in order or in desc order if `desc` is true until `f` returns
-    /// error.
+    /// Iterates states of the region in order or in desc order if `desc` is
+    /// true until `f` returns error.
     pub fn iterate_peer_states<F>(&self, peer_id: u64, desc: bool, mut f: F)
     where
         F: FnMut(&[u8], &[u8]),
@@ -284,8 +290,8 @@ impl RfEngineCore {
         }
     }
 
-    /// Iterates stats of all regions in order or in desc order if `desc` is true and breaks one
-    /// regions iteration if `f` returns false.
+    /// Iterates stats of all regions in order or in desc order if `desc` is
+    /// true and breaks one regions iteration if `f` returns false.
     pub fn iterate_all_states<F>(&self, desc: bool, mut f: F)
     where
         F: FnMut(u64, u64, &[u8], &[u8]) -> bool,
@@ -320,11 +326,12 @@ impl RfEngineCore {
         }
     }
 
-    /// After split and before the new region is initially flushed, the old region's raft log
-    /// can not be truncated, otherwise, it would not be able to recover the new region.
-    /// So we can call `add_dependent` after split to protect the raft log.
-    /// After the new region is initially flushed or re-ingested or destroyed, call
-    /// `remove_dependent` to resume truncating the raft log.
+    /// After split and before the new region is initially flushed, the old
+    /// region's raft log can not be truncated, otherwise, it would not be
+    /// able to recover the new region. So we can call `add_dependent` after
+    /// split to protect the raft log. After the new region is initially
+    /// flushed or re-ingested or destroyed, call `remove_dependent` to
+    /// resume truncating the raft log.
     pub fn add_dependent(&self, region_id: u64, dependent_id: u64) {
         let hs_ref = self.dependants.entry(region_id).or_default();
         let mut hs = hs_ref.write().unwrap();
@@ -414,7 +421,8 @@ impl RfEngineCore {
             .unwrap_or_default()
     }
 
-    /// Returns the index that truncating to the given index can limit the memory usage to size.
+    /// Returns the index that truncating to the given index can limit the
+    /// memory usage to size.
     pub fn index_to_truncate_to_size(&self, peer_id: u64, size: usize) -> u64 {
         self.peers
             .get(&peer_id)
@@ -443,7 +451,8 @@ impl RfEngineCore {
             let is_truncated = peer_data.truncated_idx == TRUNCATE_ALL_INDEX;
             id_pairs.push((peer_data.peer_id, peer_data.region_id, is_truncated));
         }
-        // ensure the newer peer_id appear after the older peer_id, so it can replace older.
+        // ensure the newer peer_id appear after the older peer_id, so it can replace
+        // older.
         id_pairs.sort_by(|(peer_a, ..), (peer_b, ..)| peer_a.cmp(peer_b));
         for (peer_id, region_id, truncated) in id_pairs {
             if truncated {
@@ -649,7 +658,8 @@ pub(crate) fn maybe_create_wal_files(dir: &Path) -> Result<()> {
     if !dir.exists() {
         create_dir_all(dir)?;
     }
-    // create 4 wal files and always reuse them, so we never need to sync dir on writer thread.
+    // create 4 wal files and always reuse them, so we never need to sync dir on
+    // writer thread.
     for i in 0..4 {
         let file_path = dir.join(format!("{}.wal", i));
         let _ = open_direct_file(&file_path, true)?;
@@ -1081,7 +1091,7 @@ mod tests {
                 states.insert(state_key.to_vec(), state_val.to_vec());
             }
         }
-        assert!(engine.write(wb).is_ok());
+        engine.write(wb).unwrap();
 
         assert_eq!(engine.get_term(1, 1), Some(1));
         assert_eq!(engine.get_term(1, 11), None);
@@ -1269,7 +1279,7 @@ mod tests {
         };
         for ep in compacted_epoch + 1..=current_epoch {
             let filename = wal_file_name(dir_path, ep);
-            let mut it = WALIterator::new(dir_path.to_owned(), ep);
+            let mut it = WalIterator::new(dir_path.to_owned(), ep);
             let fd = fs::File::open(filename.clone()).unwrap();
             let mut buf_reader = BufReader::new(fd);
             let wal_header = it.check_wal_header(&mut buf_reader).unwrap();
@@ -1277,7 +1287,7 @@ mod tests {
             loop {
                 match it.read_batch(&mut buf_reader, &wal_header) {
                     Err(err) => {
-                        if let Error::EOF = err {
+                        if let Error::Eof = err {
                             break;
                         }
                         panic!("{:?}", err);

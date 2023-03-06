@@ -48,12 +48,11 @@ impl RaftLogOp {
         8 /* index */ + 4 /* term */ + 1 /* entry_type */ + 1 /* context */ + self.data.len()
     }
 
-    /// +-------------+-----------+-------------------+---------------+--------------+
-    /// |             |           |                   |               |              |
-    /// |  index(8B)  |  term(4B) |   entry_type(1B)  |  context(1B)  |   data(n)    |
-    /// |             |           |                   |               |              |
-    /// +-------------+-----------+-------------------+---------------+--------------+
-    // It's faster than protobuf, so as `decode`. See `bench_encode_and_decode_raft_log_op`.
+    /// +-----------+----------+----------------+-------------+---------+
+    /// | index(8B) | term(4B) | entry_type(1B) | context(1B) | data(n) |
+    /// +-----------+----------+----------------+-------------+---------+
+    // It's faster than protobuf, so as `decode`. See
+    // `bench_encode_and_decode_raft_log_op`.
     pub(crate) fn encode_to(&self, buf: &mut impl BufMut) {
         buf.put_u64_le(self.index);
         buf.put_u32_le(self.term);
@@ -82,7 +81,8 @@ impl RaftLogOp {
 const RAFT_LOG_BLOCK_CAP: usize = 255;
 
 /// `RaftLogBlock` contains fixed count raft logs.
-/// It's the building block of `RaftLogs`. Caller should make sure index is in the range.
+/// It's the building block of `RaftLogs`. Caller should make sure index is in
+/// the range.
 #[derive(Clone)]
 pub(crate) struct RaftLogBlock {
     logs: VecDeque<RaftLogOp>,
@@ -111,8 +111,8 @@ impl RaftLogBlock {
         self.logs.back().map_or(0, |back| back.index)
     }
 
-    /// Truncates and returns all logs whose index is less than or equal to the `truncated_idx`.
-    /// It's used to truncate persisted logs.
+    /// Truncates and returns all logs whose index is less than or equal to the
+    /// `truncated_idx`. It's used to truncate persisted logs.
     fn truncate_left(&mut self, truncated_idx: u64) -> RaftLogBlock {
         debug_assert!(self.first_index() <= truncated_idx && truncated_idx < self.last_index());
         let mut truncated_block = RaftLogBlock::new();
@@ -123,8 +123,8 @@ impl RaftLogBlock {
         truncated_block
     }
 
-    /// Truncates all logs whose index is greater than or equal to the `truncated_idx`.
-    /// It's used to truncate conflicted logs.
+    /// Truncates all logs whose index is greater than or equal to the
+    /// `truncated_idx`. It's used to truncate conflicted logs.
     fn truncate_right(&mut self, truncated_idx: u64) {
         debug_assert!(self.first_index() < truncated_idx && truncated_idx <= self.last_index());
         while let Some(back) = self.logs.pop_back() {
@@ -171,7 +171,8 @@ impl RaftLogs {
         self.blocks.back().map_or(0, |back| back.last_index())
     }
 
-    /// Appends the raft log. It handles log continuity internally and returns conflicted logs if any.
+    /// Appends the raft log. It handles log continuity internally and returns
+    /// conflicted logs if any.
     pub(crate) fn append(&mut self, op: RaftLogOp) -> Vec<RaftLogBlock> {
         let mut truncated_blocks = vec![];
         let next_idx = self.last_index() + 1;
@@ -217,7 +218,8 @@ impl RaftLogs {
         truncated_blocks
     }
 
-    /// Truncates and returns all logs whose index is less than or equal to the `index`.
+    /// Truncates and returns all logs whose index is less than or equal to the
+    /// `index`.
     pub(crate) fn truncate(&mut self, index: u64) -> Vec<RaftLogBlock> {
         let mut truncated = Vec::with_capacity(self.blocks.len());
         while let Some(mut front) = self.blocks.pop_front() {

@@ -15,8 +15,8 @@ use kvproto::kvrpcpb::{
 };
 use tikv_kv::SnapshotExt;
 use txn_types::{
-    insert_old_value_if_resolved, Key, Mutation, OldValue, OldValues, ReqType, TimeStamp, TxnExtra, Write,
-    WriteType,
+    insert_old_value_if_resolved, Key, Mutation, OldValue, OldValues, ReqType, TimeStamp, TxnExtra,
+    Write, WriteType,
 };
 
 use super::ReaderWithStats;

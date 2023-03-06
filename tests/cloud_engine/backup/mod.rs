@@ -48,9 +48,10 @@ fn assert_same_files(mut files1: Vec<kvproto::brpb::File>, mut files2: Vec<kvpro
         &files1,
         &files2
     );
-    // Sort here by start key in case of unordered response (by pipelined write + scan)
-    // `sort_by_key` couldn't be used here -- rustc would complain that `file.start_key.as_slice()`
-    //       may not live long enough. (Is that a bug of rustc?)
+    // Sort here by start key in case of unordered response (by pipelined write +
+    // scan) `sort_by_key` couldn't be used here -- rustc would complain that
+    // `file.start_key.as_slice()`       may not live long enough. (Is that a
+    // bug of rustc?)
     files1.sort_by(|f1, f2| f1.start_key.cmp(&f2.start_key));
     files2.sort_by(|f1, f2| f1.start_key.cmp(&f2.start_key));
 

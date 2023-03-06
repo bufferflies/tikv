@@ -7,7 +7,7 @@ use clap::Args;
 use futures::executor::block_on;
 use http::{Request, Uri};
 use hyper::Body;
-use kvengine::dfs::{self, DFSConfig, S3FS};
+use kvengine::dfs::{self, DFSConfig, S3Fs};
 use kvproto::metapb::Store;
 use pd_client::PdClient;
 use protobuf::Message;
@@ -36,7 +36,8 @@ pub struct BackupArgs {
     /// The path of the config file.
     #[clap(long, default_value = "")]
     pub config: PathBuf,
-    /// The name of the backup file, if empty, a system generated name will be used.
+    /// The name of the backup file, if empty, a system generated name will be
+    /// used.
     #[clap(long, default_value_t = String::new())]
     pub name: String,
     /// Incremental backup or full backup.
@@ -146,7 +147,7 @@ pub fn backup_cluster(
         .unwrap();
 
     let dfs_conf = config.dfs.clone();
-    let s3fs = S3FS::new(
+    let s3fs = S3Fs::new(
         dfs_conf.prefix,
         dfs_conf.s3_endpoint,
         dfs_conf.s3_key_id,
@@ -294,7 +295,7 @@ fn get_backup_config(
     config
 }
 
-async fn get_all_backup_files(s3fs: &S3FS) -> dfs::Result<Vec<String>> {
+async fn get_all_backup_files(s3fs: &S3Fs) -> dfs::Result<Vec<String>> {
     let mut files = vec![];
     let mut start_key = format!(
         "backup/{}",
@@ -325,7 +326,7 @@ async fn get_all_backup_files(s3fs: &S3FS) -> dfs::Result<Vec<String>> {
 }
 
 // If backup exist, return the latest one, else create a new ClusterBackupMeta.
-async fn get_latest_backup_meta(s3fs: &S3FS, cluster_id: u64) -> Result<ClusterBackupMeta> {
+async fn get_latest_backup_meta(s3fs: &S3Fs, cluster_id: u64) -> Result<ClusterBackupMeta> {
     let files = get_all_backup_files(s3fs).await?;
     if files.is_empty() {
         return Err(Error::MetaNotFound(cluster_id));
@@ -405,8 +406,8 @@ async fn backup_pd_keyspace_meta(
     let mut new_meta_cnt = 0;
     // Only backup raw key-value pairs in etcd.
     // Content is not parsed as it's hard to align to the format with PD repo.
-    // User cannot set placement rule in serverless cluster except the tiflash replica.
-    // So all placement rules are created inner, backup all of them.
+    // User cannot set placement rule in serverless cluster except the tiflash
+    // replica. So all placement rules are created inner, backup all of them.
     for path in PD_KEY_SPACE_META_PATH {
         let prefix = format!("/pd/{}/{}", cluster_id, path).as_bytes().to_owned();
         let mut seek_key = prefix.clone();
@@ -556,7 +557,7 @@ mod tests {
                 ..Default::default()
             });
         }
-        assert!(check_backup_meta_consistency(&meta, &stores).is_err());
+        check_backup_meta_consistency(&meta, &stores).unwrap_err();
 
         for i in 0..3 {
             meta.mut_stores().push(StoreBackupMeta {
@@ -564,7 +565,7 @@ mod tests {
                 ..Default::default()
             });
         }
-        assert!(check_backup_meta_consistency(&meta, &stores).is_err());
+        check_backup_meta_consistency(&meta, &stores).unwrap_err();
 
         meta.clear_stores();
         for i in 0..3 {
@@ -573,6 +574,6 @@ mod tests {
                 ..Default::default()
             });
         }
-        assert!(check_backup_meta_consistency(&meta, &stores).is_ok());
+        check_backup_meta_consistency(&meta, &stores).unwrap();
     }
 }

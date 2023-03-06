@@ -53,12 +53,12 @@ impl Default for Options {
 }
 
 #[derive(Default, Clone, Copy)]
-pub struct CFConfig {
+pub struct CfConfig {
     pub managed: bool,
     pub max_levels: usize,
 }
 
-impl CFConfig {
+impl CfConfig {
     pub fn new(managed: bool, max_levels: usize) -> Self {
         Self {
             managed,
@@ -67,14 +67,14 @@ impl CFConfig {
     }
 }
 
-pub trait IDAllocator: Sync + Send {
+pub trait IdAllocator: Sync + Send {
     // alloc_id returns the last id, and last_id - count is valid.
     fn alloc_id(&self, count: usize) -> Vec<u64>;
 }
 
 pub trait RecoverHandler: Clone + Send {
-    // Recovers from the shard's state to the state that is stored in the toState property.
-    // So the Engine has a chance to execute pre-split command.
+    // Recovers from the shard's state to the state that is stored in the toState
+    // property. So the Engine has a chance to execute pre-split command.
     // If toState is nil, the implementation should recovers to the latest state.
     fn recover(&self, engine: &Engine, shard: &Arc<Shard>, info: &ShardMeta) -> Result<()>;
 }

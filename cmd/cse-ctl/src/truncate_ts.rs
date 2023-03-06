@@ -145,7 +145,8 @@ pub fn truncate_ts_with_cfg(
     Err(Error::Timeout(timeout.as_secs()))
 }
 
-// send truncate ts request and return the count of shard which execute truncate ts.
+// send truncate ts request and return the count of shard which execute truncate
+// ts.
 fn request_truncate_ts_on_all_stores(
     cluster_id: u64,
     stores: &HashMap<u64, Store>,

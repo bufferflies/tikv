@@ -4,16 +4,12 @@ use std::{
     future::Future,
     path::PathBuf,
     sync::{Arc, Mutex},
+    time::Duration,
 };
-use std::time::Duration;
 
 use collections::HashSet;
 use file_system::{set_io_type, IoType};
-use futures::{
-    sink::SinkExt,
-    stream::TryStreamExt,
-    TryFutureExt,
-};
+use futures::{sink::SinkExt, stream::TryStreamExt, TryFutureExt};
 use grpcio::{
     ClientStreamingSink, RequestStream, RpcContext, RpcStatus, RpcStatusCode, ServerStreamingSink,
     UnarySink, WriteFlags,
@@ -25,14 +21,14 @@ use kvproto::{
     kvrpcpb::Context,
     raft_cmdpb::*,
 };
-use tokio::runtime::Runtime;
-use tokio::time::sleep;
 use rfstore::{
     router::RaftStoreRouter,
     store::{Callback, RegionSnapshot},
 };
-use sst_importer::{error_inc, metrics::*, sst_meta_to_path, Config, Error, Result, SstImporter};
-use sst_importer::sst_importer::DownloadExt;
+use sst_importer::{
+    error_inc, metrics::*, sst_importer::DownloadExt, sst_meta_to_path, Config, Error, Result,
+    SstImporter,
+};
 use tikv::{
     import::{duplicate_detect::DuplicateDetector, make_rpc_error},
     server::CONFIG_ROCKSDB_GAUGE,
@@ -40,9 +36,10 @@ use tikv::{
 use tikv_util::{
     config::ReadableSize,
     future::{create_stream_with_buffer, paired_future_callback},
+    sys::thread::ThreadBuildWrapper,
     time::{Instant, Limiter},
 };
-use tikv_util::sys::thread::ThreadBuildWrapper;
+use tokio::{runtime::Runtime, time::sleep};
 
 /// ImportSstService provides tikv-server with the ability to ingest SST files.
 ///
@@ -407,7 +404,8 @@ where
         self.threads.spawn(handle_task);
     }
 
-    // Downloads KV file and performs key-rewrite then apply kv into this tikv store.
+    // Downloads KV file and performs key-rewrite then apply kv into this tikv
+    // store.
     fn apply(&mut self, ctx: RpcContext<'_>, _req: ApplyRequest, sink: UnarySink<ApplyResponse>) {
         ctx.spawn(
             sink.fail(RpcStatus::new(RpcStatusCode::UNIMPLEMENTED))
@@ -492,7 +490,6 @@ where
     }
 
     /// Ingest multiple files by sending a raft command to raftstore.
-    ///
     fn multi_ingest(
         &mut self,
         ctx: RpcContext<'_>,

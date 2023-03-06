@@ -15,7 +15,7 @@ use kvenginepb as pb;
 use tempfile::TempDir;
 use tikv_util::{mpsc, time::Instant};
 
-use crate::{dfs::InMemFS, *};
+use crate::{dfs::InMemFs, *};
 
 macro_rules! unwrap_or_return {
     ($e:expr, $m:expr) => {
@@ -212,7 +212,7 @@ fn test_truncate_ts_request() {
     let truncated_ts = TruncateTs::from(version + 20);
     cs.set_property_value(truncated_ts.marshal().to_vec());
     let ret = engine.apply_change_set(apply::ChangeSet::new(cs.clone()));
-    assert!(ret.is_ok());
+    ret.unwrap();
     assert_eq!(
         Some(truncate_ts),
         engine.get_shard(1).unwrap().get_data().truncate_ts
@@ -223,7 +223,7 @@ fn test_truncate_ts_request() {
     cs.set_sequence(3);
     cs.set_property_value(truncated_ts.marshal().to_vec());
     let ret = engine.apply_change_set(apply::ChangeSet::new(cs));
-    assert!(ret.is_ok());
+    ret.unwrap();
     assert_eq!(None, engine.get_shard(1).unwrap().get_data().truncate_ts);
 }
 
@@ -355,7 +355,7 @@ impl EngineTester {
             core: Arc::new(EngineTesterCore {
                 _tmp_dir: tmp_dir,
                 metas,
-                fs: Arc::new(InMemFS::new()),
+                fs: Arc::new(InMemFs::new()),
                 opts: Arc::new(opts),
                 id: AtomicU64::new(0),
             }),
@@ -366,7 +366,7 @@ impl EngineTester {
 struct EngineTesterCore {
     _tmp_dir: TempDir,
     metas: dashmap::DashMap<u64, Arc<ShardMeta>>,
-    fs: Arc<dfs::InMemFS>,
+    fs: Arc<dfs::InMemFs>,
     opts: Arc<Options>,
     id: AtomicU64,
 }
@@ -393,7 +393,7 @@ impl RecoverHandler for EngineTester {
     }
 }
 
-impl IDAllocator for EngineTesterCore {
+impl IdAllocator for EngineTesterCore {
     fn alloc_id(&self, count: usize) -> Vec<u64> {
         let start_id = self
             .id

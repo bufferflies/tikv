@@ -109,9 +109,12 @@ fn test_rpc_client() {
         .build()
         .unwrap();
     let (tx, rx) = mpsc::channel();
-    let f = client.handle_region_heartbeat_response(1, move |resp| {
-        let _ = tx.send(resp);
-    });
+    let f = client.handle_region_heartbeat_response(
+        1,
+        Box::new(move |resp| {
+            let _ = tx.send(resp);
+        }),
+    );
     poller.spawn(f);
     poller.spawn(client.region_heartbeat(
         store::RAFT_INIT_LOG_TERM,
@@ -456,9 +459,9 @@ fn test_change_leader_async() {
     let counter = Arc::new(AtomicUsize::new(0));
     let client = new_client(eps, None);
     let counter1 = Arc::clone(&counter);
-    client.handle_reconnect(move || {
+    client.handle_reconnect(Box::new(move || {
         counter1.fetch_add(1, Ordering::SeqCst);
-    });
+    }));
     let leader = client.get_leader();
 
     for _ in 0..5 {
@@ -504,8 +507,10 @@ fn test_pd_client_heartbeat_send_failed() {
         .build()
         .unwrap();
     let (tx, rx) = mpsc::channel();
-    let f =
-        client.handle_region_heartbeat_response(1, move |resp| tx.send(resp).unwrap_or_default());
+    let f = client.handle_region_heartbeat_response(
+        1,
+        Box::new(move |resp| tx.send(resp).unwrap_or_default()),
+    );
     poller.spawn(f);
 
     let heartbeat_send_fail = |ok| {
@@ -556,9 +561,12 @@ fn test_region_heartbeat_on_leader_change() {
         .build()
         .unwrap();
     let (tx, rx) = mpsc::channel();
-    let f = client.handle_region_heartbeat_response(1, move |resp| {
-        tx.send(resp).unwrap();
-    });
+    let f = client.handle_region_heartbeat_response(
+        1,
+        Box::new(move |resp| {
+            tx.send(resp).unwrap();
+        }),
+    );
     poller.spawn(f);
     let region = metapb::Region::default();
     let peer = metapb::Peer::default();
@@ -615,9 +623,9 @@ fn test_periodical_update() {
     let counter = Arc::new(AtomicUsize::new(0));
     let client = new_client_with_update_interval(eps, None, ReadableDuration::secs(3));
     let counter1 = Arc::clone(&counter);
-    client.handle_reconnect(move || {
+    client.handle_reconnect(Box::new(move || {
         counter1.fetch_add(1, Ordering::SeqCst);
-    });
+    }));
     let leader = client.get_leader();
 
     for _ in 0..5 {

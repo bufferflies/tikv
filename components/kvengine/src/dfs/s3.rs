@@ -27,7 +27,7 @@ use rusoto_s3::{
 use tikv_util::time::Instant;
 use tokio::runtime::Runtime;
 
-use crate::dfs::{metrics::*, Options, DFS};
+use crate::dfs::{metrics::*, Dfs, Options};
 
 const MAX_RETRY_COUNT: u32 = 9;
 const RETRY_SLEEP_MS: u64 = 500;
@@ -36,11 +36,11 @@ const DISPATCH_TIMEOUT: Duration = Duration::from_secs(60);
 const READ_BODY_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone)]
-pub struct S3FS {
-    core: Arc<S3FSCore>,
+pub struct S3Fs {
+    core: Arc<S3FsCore>,
 }
 
-impl S3FS {
+impl S3Fs {
     pub fn new(
         prefix: String,
         endpoint: String,
@@ -49,7 +49,7 @@ impl S3FS {
         region: String,
         bucket: String,
     ) -> Self {
-        let core = Arc::new(S3FSCore::new(
+        let core = Arc::new(S3FsCore::new(
             endpoint, key_id, secret_key, region, bucket, prefix,
         ));
         Self { core }
@@ -58,7 +58,7 @@ impl S3FS {
     #[cfg(test)]
     pub fn new_for_test(s3c: rusoto_core::Client, bucket: String, prefix: String) -> Self {
         Self {
-            core: Arc::new(S3FSCore::new_with_s3_client(
+            core: Arc::new(S3FsCore::new_with_s3_client(
                 s3c,
                 "".to_string(),
                 "local".to_string(),
@@ -69,15 +69,15 @@ impl S3FS {
     }
 }
 
-impl Deref for S3FS {
-    type Target = S3FSCore;
+impl Deref for S3Fs {
+    type Target = S3FsCore;
 
     fn deref(&self) -> &Self::Target {
         &self.core
     }
 }
 
-pub struct S3FSCore {
+pub struct S3FsCore {
     s3c: rusoto_core::Client,
     hostname: String,
     region: Region,
@@ -87,7 +87,7 @@ pub struct S3FSCore {
     virtual_host: bool,
 }
 
-impl S3FSCore {
+impl S3FsCore {
     pub fn new(
         endpoint: String,
         key_id: String,
@@ -148,8 +148,8 @@ impl S3FSCore {
             .find("://")
             .map(|p| &endpoint[p + 3..])
             .unwrap_or(&endpoint);
-        // local deployed s3 service like minio does not support virtual host addressing, it always
-        // has a port defined at the end.
+        // local deployed s3 service like minio does not support virtual host
+        // addressing, it always has a port defined at the end.
         let virtual_host = !no_schema_endpoint.contains(':');
         let hostname = if virtual_host {
             format!("{}.{}", &bucket, no_schema_endpoint)
@@ -224,7 +224,8 @@ impl S3FSCore {
     }
 
     // list gets a list of file ids(full path) greater than start_after.
-    // The result contains a vector of file ids and a boolean indicate if there is more.
+    // The result contains a vector of file ids and a boolean indicate if there is
+    // more.
     pub async fn list(&self, start_after: &str) -> crate::dfs::Result<(Vec<String>, bool)> {
         let prefix = format!("{}/", self.prefix.clone());
         let start_after = format!("{}/{}", self.prefix.clone(), start_after);
@@ -470,7 +471,7 @@ impl S3FSCore {
     }
 }
 
-impl ObjectStorage for S3FS {
+impl ObjectStorage for S3Fs {
     fn put_objects(&self, objects: Vec<(String, Bytes)>) -> Result<(), String> {
         let runtime = self.get_runtime();
         let len = objects.len();
@@ -534,7 +535,7 @@ impl ObjectStorage for S3FS {
 }
 
 #[async_trait]
-impl DFS for S3FS {
+impl Dfs for S3Fs {
     async fn read_file(&self, file_id: u64, _opts: Options) -> crate::dfs::Result<Bytes> {
         self.get_object(
             self.file_key(file_id),
@@ -580,8 +581,8 @@ impl DFS for S3FS {
             if !self.hostname.contains("ksyuncs.com") {
                 return;
             }
-            // ks3 doesn't support copy object with tagging, workaround to send another request.
-            // TODO: remove it when KS3 fixed the compatibility issue.
+            // ks3 doesn't support copy object with tagging, workaround to send another
+            // request. TODO: remove it when KS3 fixed the compatibility issue.
             let mut req = self.new_request("PUT", &key);
             let mut params = Params::new();
             params.put_key("tagging");
@@ -723,7 +724,7 @@ mod tests {
                 MockRequestDispatcher::with_status(200),
             ]),
         );
-        let s3fs = S3FS::new_for_test(s3c, "shard-db".into(), "prefix".into());
+        let s3fs = S3Fs::new_for_test(s3c, "shard-db".into(), "prefix".into());
         let (tx, rx) = tikv_util::mpsc::bounded(1);
 
         let fs = s3fs.clone();
@@ -797,7 +798,7 @@ mod tests {
                 MockRequestDispatcher::with_status(200),
             ]),
         );
-        let s3fs = S3FS::new_for_test(s3c, "shard-db".into(), "prefix".into());
+        let s3fs = S3Fs::new_for_test(s3c, "shard-db".into(), "prefix".into());
         let file_key = s3fs.file_key(random());
         assert_eq!(
             format!("{}/{}", "prefix", s3fs.parse_sst_file_suffix(&file_key)),

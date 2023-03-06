@@ -19,7 +19,7 @@ use file_system::{IoRateLimitMode, IoRateLimiter};
 use http::{Request, Uri};
 use hyper::Body;
 use itertools::Itertools;
-use kvengine::{dfs::S3FS, IDVer, ShardMeta, ShardStats, ShardTag};
+use kvengine::{dfs::S3Fs, IdVer, ShardMeta, ShardStats, ShardTag};
 use kvenginepb as pb;
 use pd_client::PdClient;
 use protobuf::Message;
@@ -229,7 +229,7 @@ impl PartialEq for BackupShard {
 
 impl BackupShard {
     pub fn tag(&self) -> ShardTag {
-        ShardTag::new(self.store_id, IDVer::new(self.region_id, self.ver()))
+        ShardTag::new(self.store_id, IdVer::new(self.region_id, self.ver()))
     }
 
     pub fn ver(&self) -> u64 {
@@ -258,7 +258,7 @@ struct AlignedRegion {
 struct BackupCluster {
     path: PathBuf,
     pd_client: Arc<dyn PdClient>,
-    dfs: Arc<S3FS>,
+    dfs: Arc<S3Fs>,
     keyspace_id: u32,
     keyspace_prefix: Vec<u8>,
 
@@ -292,7 +292,7 @@ impl BackupCluster {
         cluster_meta: &ClusterBackupMeta,
         path: PathBuf,
         pd_client: Arc<dyn PdClient>,
-        dfs: Arc<S3FS>,
+        dfs: Arc<S3Fs>,
         keyspace_id: u32,
     ) -> RestoreResult<BackupCluster> {
         let (keyspace_prefix, _) = ApiV2::get_txn_keyspace_range(keyspace_id);
@@ -379,7 +379,8 @@ impl BackupCluster {
                 kv_engine.load_shards(metas, recoverer)?;
             }
         } else {
-            // Even if `shards_need_flush.is_empty()`, `self.kv_engine` should be constructed for later use.
+            // Even if `shards_need_flush.is_empty()`, `self.kv_engine` should be
+            // constructed for later use.
             let io_rate_limiter =
                 Arc::new(IoRateLimiter::new(IoRateLimitMode::WriteOnly, true, true));
             io_rate_limiter
@@ -501,7 +502,8 @@ impl BackupCluster {
                 .and_modify(|ids| ids.push(shard_id))
                 .or_insert_with(|| vec![shard_id]);
 
-            // Take `raw_meta`s out from `shards`, as `shards` will be moved into `MetaApplier` for flush shards.
+            // Take `raw_meta`s out from `shards`, as `shards` will be moved into
+            // `MetaApplier` for flush shards.
             self.raw_metas
                 .insert(shard_id, shard.raw_meta.take().unwrap());
         }
@@ -521,8 +523,8 @@ impl BackupCluster {
     fn get_leader_shards(
         all_shards: HashMap<u64, Vec<BackupShard>>,
     ) -> RestoreResult<(
-        HashMap<u64, BackupShard>, /* shard_id -> BackupShard */
-        Vec<u64>,                  /* Vec<shard_id> sorted by BackupShard.start() */
+        HashMap<u64, BackupShard>, // shard_id -> BackupShard
+        Vec<u64>,                  // Vec<shard_id> sorted by BackupShard.start()
     )> {
         // Assume 3 replicas here.
         let shards_cnt = all_shards.values().map(|x| x.len()).sum::<usize>() / 3;
@@ -547,7 +549,8 @@ impl BackupCluster {
             .collect();
 
         // Handle overlapping shards.
-        // Shards overlap will happen when some followers had not finished split or merge.
+        // Shards overlap will happen when some followers had not finished split or
+        // merge.
         if sorted_shards.len() > 1 {
             let mut shards_to_remove: HashSet<u64> = HashSet::default();
 
@@ -711,7 +714,8 @@ impl BackupCluster {
         Err(box_err!("wait_for_mem_table_flush timeout"))
     }
 
-    // NOTE: `sorted_backup_shards_id` & `sorted_target_regions` must be sorted by start_key.
+    // NOTE: `sorted_backup_shards_id` & `sorted_target_regions` must be sorted by
+    // start_key.
     fn align_target_regions_impl(
         sorted_backup_shards_id: &[u64],
         backup_shards: &HashMap<u64, BackupShard>,
@@ -754,7 +758,7 @@ impl BackupCluster {
         target_regions: Vec<RawRegion>,
     ) -> RestoreResult<(
         Vec<AlignedRegion>,
-        usize, /* number of trimmed shards */
+        usize, // number of trimmed shards
     )> {
         let aligned_regions =
             Self::align_target_regions_impl(&self.sorted_shards, &self.shards, target_regions);
@@ -893,7 +897,7 @@ impl MetaApplier {
             match msg {
                 StoreMsg::GenerateEngineChangeSet(mut cs) => {
                     let tag =
-                        ShardTag::new(self.engine.get_engine_id(), IDVer::from_change_set(&cs));
+                        ShardTag::new(self.engine.get_engine_id(), IdVer::from_change_set(&cs));
                     let engine_shard = self.engine.get_shard(cs.shard_id).unwrap();
                     let seq = cmp::max(
                         engine_shard.get_write_sequence(),
@@ -1082,7 +1086,7 @@ async fn request_restore_snapshot(
         }
 
         let store = pd_client.get_store_async(leader.get_store_id()).await?;
-        let tag = ShardTag::new(store.get_id(), IDVer::new(cs.shard_id, cs.shard_ver));
+        let tag = ShardTag::new(store.get_id(), IdVer::new(cs.shard_id, cs.shard_ver));
 
         let uri =
             Uri::from_str(&format!("http://{}/restore-shard", &store.status_address)).unwrap();
@@ -1115,10 +1119,10 @@ mod tests {
     #[test]
     fn test_get_leader_shards() {
         let make_backup_shard = |tuple: (
-            u64,  /* shard_id */
-            u64,  /* ver */
-            &str, /* start */
-            &str, /* end */
+            u64,  // shard_id
+            u64,  // ver
+            &str, // start
+            &str, // end
         )|
          -> BackupShard {
             let mut shard = BackupShard::default();
@@ -1126,7 +1130,8 @@ mod tests {
             shard.meta.ver = tuple.1;
             shard.meta.start = tuple.2.as_bytes().to_vec();
             shard.meta.end = tuple.3.as_bytes().to_vec();
-            // Use `ver` as raft log index, assume that the newer ver, the faster raft progress.
+            // Use `ver` as raft log index, assume that the newer ver, the faster raft
+            // progress.
             shard.raft_commit_index = shard.ver();
             shard
         };
@@ -1153,7 +1158,8 @@ mod tests {
                 vec![(1, 100, "00", "01")], // store0: Vec<(shard_id, ver, start, end)>
                 vec![(1, 100, "00", "01")], // store1
                 vec![(1, 100, "00", "01")], // store2
-                Some(vec![(1, 100, "00", "01")]), // expected Option<Vec<(shard_id, ver, start, end)>>
+                Some(vec![(1, 100, "00", "01")]), /* expected Option<Vec<(shard_id, ver, start,
+                                             * end)>> */
             ),
             (
                 vec![(1, 100, "00", "01"), (2, 200, "01", "02")],

@@ -275,8 +275,8 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
         let begin_instant = Instant::now_coarse();
         let start = req.take_start_key();
         let end = req.take_end_key();
-        // DestroyRange is a very dangerous operation. We don't allow passing MIN_KEY as start, or
-        // MAX_KEY as end here.
+        // DestroyRange is a very dangerous operation. We don't allow passing MIN_KEY as
+        // start, or MAX_KEY as end here.
         if start.is_empty()
             || end.is_empty()
             // All unsafe destroy range issued by TiDB are prefix range.
@@ -700,7 +700,11 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
 
         let mut response_retriever = response_retriever.map(move |item| {
             for measure in item.measures {
-                let GrpcRequestDuration { label, begin, source: _ } = measure;
+                let GrpcRequestDuration {
+                    label,
+                    begin,
+                    source: _,
+                } = measure;
                 GRPC_MSG_HISTOGRAM_STATIC
                     .get(label)
                     .observe(begin.saturating_elapsed_secs());
@@ -985,7 +989,11 @@ fn response_batch_commands_request<F, T>(
 {
     let task = async move {
         if let Ok(resp) = resp.await {
-            let measure = GrpcRequestDuration { begin, label, source: String::default() };
+            let measure = GrpcRequestDuration {
+                begin,
+                label,
+                source: String::default(),
+            };
             let task = MeasuredSingleResponse::new(id, resp, measure);
             if let Err(e) = tx.send_with(task, WakePolicy::Immediately) {
                 error!("KvService response batch commands fail"; "err" => ?e);
@@ -1330,8 +1338,9 @@ async fn future_handle_empty(
 ) -> ServerResult<BatchCommandsEmptyResponse> {
     let mut res = BatchCommandsEmptyResponse::default();
     res.set_test_id(req.get_test_id());
-    // `BatchCommandsWaker` processes futures in notify. If delay_time is too small, notify
-    // can be called immediately, so the future is polled recursively and lead to deadlock.
+    // `BatchCommandsWaker` processes futures in notify. If delay_time is too small,
+    // notify can be called immediately, so the future is polled recursively and
+    // lead to deadlock.
     if req.get_delay_time() >= 10 {
         let _ = tikv_util::timer::GLOBAL_TIMER_HANDLE
             .delay(
@@ -1717,6 +1726,7 @@ mod tests {
     use std::thread;
 
     use futures::{channel::oneshot, executor::block_on};
+    use tikv_util::sys::thread::StdThreadBuildWrapper;
 
     use super::*;
 
@@ -1727,7 +1737,7 @@ mod tests {
 
         thread::Builder::new()
             .name("source".to_owned())
-            .spawn(move || {
+            .spawn_wrapper(move || {
                 block_on(signal_rx).unwrap();
                 tx.send(100).unwrap();
             })
@@ -1750,7 +1760,7 @@ mod tests {
         let (signal_tx, signal_rx) = oneshot::channel();
         thread::Builder::new()
             .name("source".to_owned())
-            .spawn(move || {
+            .spawn_wrapper(move || {
                 tx.send(100).unwrap();
                 signal_tx.send(()).unwrap();
             })

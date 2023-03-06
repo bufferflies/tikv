@@ -3,10 +3,12 @@
 use std::sync::Arc;
 
 use collections::HashMap;
-use engine_traits::{Iterator as TraitIterator, CF_DEFAULT, CF_WRITE, RefIterable, IterOptions};
-use kvengine::{table::Value, ShardMeta, UserMeta};
+use engine_traits::{IterOptions, Iterator as TraitIterator, RefIterable, CF_DEFAULT, CF_WRITE};
+use kvengine::{
+    table::{table, Value},
+    ShardMeta, UserMeta,
+};
 use kvproto::raft_cmdpb::RaftCmdRequest;
-use kvengine::table::table;
 use sst_importer::SstImporter;
 use tikv_util::{codec, info};
 use txn_types::{WriteRef, WriteType};
@@ -87,16 +89,10 @@ fn build_entries_iterator(
             let user_meta = UserMeta::new(start_ts, commit_ts);
             let val = match write_ref.write_type {
                 WriteType::Put => match write_ref.short_value {
-                    Some(short_val) => {
-                        encode_table_value(user_meta, short_val)
-                    }
-                    None => {
-                        encode_table_value(user_meta, default_value.unwrap())
-                    }
+                    Some(short_val) => encode_table_value(user_meta, short_val),
+                    None => encode_table_value(user_meta, default_value.unwrap()),
                 },
-                WriteType::Delete => {
-                    encode_table_value(user_meta, &[])
-                }
+                WriteType::Delete => encode_table_value(user_meta, &[]),
                 _ => panic!("unexpected write type"),
             };
             entries.push(Entry { key, val });

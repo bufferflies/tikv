@@ -12,8 +12,8 @@ use tikv_util::{box_err, codec::bytes::decode_bytes, debug};
 
 use crate::{Error, Result};
 
-/// WARNING: `NORMAL_REQ_CHECK_VER` and `NORMAL_REQ_CHECK_CONF_VER` **MUST NOT** be changed.
-/// The reason is the same as `admin_cmd_epoch_lookup`.
+/// WARNING: `NORMAL_REQ_CHECK_VER` and `NORMAL_REQ_CHECK_CONF_VER` **MUST NOT**
+/// be changed. The reason is the same as `admin_cmd_epoch_lookup`.
 pub static NORMAL_REQ_CHECK_VER: bool = true;
 pub static NORMAL_REQ_CHECK_CONF_VER: bool = false;
 
@@ -194,11 +194,11 @@ pub fn parse_data_at<T: Message + Default>(data: &[u8], index: u64, tag: PeerTag
 #[derive(Clone, Copy, Debug)]
 pub struct PeerTag {
     pub store_id: u64,
-    pub id_ver: RegionIDVer,
+    pub id_ver: RegionIdVer,
 }
 
 impl PeerTag {
-    pub fn new(store_id: u64, id_ver: RegionIDVer) -> Self {
+    pub fn new(store_id: u64, id_ver: RegionIdVer) -> Self {
         Self { store_id, id_ver }
     }
 }
@@ -225,12 +225,12 @@ impl slog::Value for PeerTag {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
-pub struct RegionIDVer {
+pub struct RegionIdVer {
     id: u64,
     ver: u64,
 }
 
-impl RegionIDVer {
+impl RegionIdVer {
     pub fn new(id: u64, ver: u64) -> Self {
         Self { id, ver }
     }
@@ -253,8 +253,8 @@ pub(crate) const RAW_INITIAL_END_KEY: &[u8] = &[255, 255, 255, 255, 255, 255, 25
 
 // Get the `start_key` of current region in raw form.
 pub(crate) fn raw_start_key(region: &metapb::Region) -> Vec<u8> {
-    // only initialized region's start_key can be encoded, otherwise there must be bugs
-    // somewhere.
+    // only initialized region's start_key can be encoded, otherwise there must be
+    // bugs somewhere.
     if region.start_key.is_empty() {
         return EMPTY_KEY.to_vec();
     }
@@ -264,8 +264,8 @@ pub(crate) fn raw_start_key(region: &metapb::Region) -> Vec<u8> {
 
 // Get the `end_key` of current region in raw form.
 pub fn raw_end_key(region: &metapb::Region) -> Vec<u8> {
-    // only initialized region's end_key can be encoded, otherwise there must be bugs
-    // somewhere.
+    // only initialized region's end_key can be encoded, otherwise there must be
+    // bugs somewhere.
     if region.end_key.is_empty() {
         return RAW_INITIAL_END_KEY.to_vec();
     }

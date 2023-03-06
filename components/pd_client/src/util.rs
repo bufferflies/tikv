@@ -877,7 +877,7 @@ pub fn check_resp_header(header: &ResponseHeader) -> Result<()> {
         ErrorType::DuplicatedEntry | ErrorType::EntryNotFound => Err(box_err!(err.get_message())),
         ErrorType::Unknown => Err(box_err!(err.get_message())),
         ErrorType::InvalidValue => Err(box_err!(err.get_message())),
-        ErrorType::DataCompacted => todo!(),
+        ErrorType::DataCompacted => Err(box_err!(err.get_message())),
     }
 }
 

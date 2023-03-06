@@ -59,7 +59,7 @@ impl L0Table {
 pub struct L0TableCore {
     footer: L0Footer,
     file: Arc<dyn File>,
-    cfs: [Option<sstable::SSTable>; NUM_CFS],
+    cfs: [Option<sstable::SsTable>; NUM_CFS],
     max_ts: u64,
     entries: u64,
     kv_size: u64,
@@ -83,7 +83,7 @@ impl L0TableCore {
         for i in 0..NUM_CFS {
             cf_offs[i] = LittleEndian::read_u32(&cf_offs_buf[i * 4..]);
         }
-        let mut cfs: [Option<SSTable>; NUM_CFS] = [None, None, None];
+        let mut cfs: [Option<SsTable>; NUM_CFS] = [None, None, None];
         let mut entries = 0;
         let mut kv_size = 0;
         for i in 0..NUM_CFS {
@@ -95,7 +95,7 @@ impl L0TableCore {
             if start_off == end_off || ignore_lock && i == LOCK_CF {
                 continue;
             }
-            let tbl = sstable::SSTable::new_l0_cf(file.clone(), start_off, end_off, cache.clone())?;
+            let tbl = sstable::SsTable::new_l0_cf(file.clone(), start_off, end_off, cache.clone())?;
             entries += tbl.entries as u64;
             if i == WRITE_CF {
                 kv_size += tbl.kv_size;
@@ -117,7 +117,7 @@ impl L0TableCore {
     }
 
     // Return: smallest, biggest, max_ts
-    fn compute_smallest_biggest(cfs: &[Option<SSTable>; NUM_CFS]) -> (Bytes, Bytes, u64) {
+    fn compute_smallest_biggest(cfs: &[Option<SsTable>; NUM_CFS]) -> (Bytes, Bytes, u64) {
         let mut smallest_buf = BytesMut::new();
         let mut biggest_buf = BytesMut::new();
         let mut max_ts = 0;
@@ -147,7 +147,7 @@ impl L0TableCore {
         self.file.id()
     }
 
-    pub fn get_cf(&self, cf: usize) -> &Option<sstable::SSTable> {
+    pub fn get_cf(&self, cf: usize) -> &Option<sstable::SsTable> {
         &self.cfs[cf]
     }
 

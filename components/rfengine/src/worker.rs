@@ -92,7 +92,7 @@ impl Worker {
     fn compact(&mut self, epoch_id: u32) -> Result<()> {
         let timer = Instant::now_coarse();
         let mut batch = WriteBatch::default();
-        let mut it = WALIterator::new(self.dir.clone(), epoch_id);
+        let mut it = WalIterator::new(self.dir.clone(), epoch_id);
         it.iterate(|region_batch| {
             batch.merge_peer(region_batch);
         })?;
@@ -188,7 +188,8 @@ impl Worker {
             total_size,
             backup_meta.raft_meta_start_off,
         );
-        // Starts a background task in case the object storage is slow and blocking WAL compaction.
+        // Starts a background task in case the object storage is slow and blocking WAL
+        // compaction.
         thread::spawn(move || {
             if let Err(err) = task.object_storage.put_objects(objects) {
                 (task.callback)(Err(err));
@@ -358,7 +359,8 @@ impl Worker {
             objects.len(),
             total_size
         );
-        // Starts a background task in case the object storage is slow and blocking WAL compaction.
+        // Starts a background task in case the object storage is slow and blocking WAL
+        // compaction.
         thread::spawn(move || {
             if let Err(err) = task.object_storage.put_objects(objects) {
                 return (task.callback)(Err(err));

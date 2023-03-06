@@ -42,10 +42,11 @@ use tikv_util::{
     config::VersionTrack,
     debug, error, info,
     mpsc::Receiver,
+    store::{find_peer, is_learner},
+    sys::thread::StdThreadBuildWrapper,
     warn,
     worker::{LazyWorker, Scheduler},
     RingQueue,
-    store::{is_learner, find_peer},
 };
 use time::Timespec;
 
@@ -69,7 +70,7 @@ pub struct RaftBatchSystem {
 
     // Change to none after spawn.
     peer_receiver: Option<Receiver<(u64, PeerMsg)>>,
-    store_fsm: Option<StoreFSM>,
+    store_fsm: Option<StoreFsm>,
     join_handles: Vec<JoinHandle<()>>,
 }
 
@@ -83,7 +84,7 @@ impl RaftBatchSystem {
             router,
             workers: None,
             peer_receiver: Some(peer_receiver),
-            store_fsm: Some(StoreFSM::new(store_receiver, conf)),
+            store_fsm: Some(StoreFsm::new(store_receiver, conf)),
             join_handles: vec![],
         }
     }
@@ -171,7 +172,7 @@ impl RaftBatchSystem {
         assert!(workers.pd_worker.start(pd_runner));
         self.workers = Some(workers);
 
-        let (mut io_worker, io_sender) = IOWorker::new(
+        let (mut io_worker, io_sender) = IoWorker::new(
             ctx.engines.raft.clone(),
             self.router.clone(),
             ctx.trans.clone(),
@@ -179,7 +180,7 @@ impl RaftBatchSystem {
         let props = tikv_util::thread_group::current_properties();
         let handle = std::thread::Builder::new()
             .name("raft_io".to_string())
-            .spawn(move || {
+            .spawn_wrapper(move || {
                 tikv_util::thread_group::set_properties(props);
                 io_worker.run();
             })
@@ -196,7 +197,7 @@ impl RaftBatchSystem {
         let props = tikv_util::thread_group::current_properties();
         let handle = std::thread::Builder::new()
             .name("raftstore_0".to_string())
-            .spawn(move || {
+            .spawn_wrapper(move || {
                 tikv_util::thread_group::set_properties(props);
                 rw.run();
             })
@@ -209,7 +210,7 @@ impl RaftBatchSystem {
                 ApplyWorker::new(ctx.engines.kv.clone(), ctx.router.clone(), apply_receiver);
             let handle = std::thread::Builder::new()
                 .name(format!("apply_{}", i))
-                .spawn(move || {
+                .spawn_wrapper(move || {
                     tikv_util::thread_group::set_properties(props);
                     aw.run();
                 })
@@ -241,9 +242,9 @@ impl RaftBatchSystem {
         workers.coprocessor_host.shutdown();
     }
 
-    /// load_peers loads peers in this store. It scans the kv engine, loads all regions
-    /// and their peers from it, and schedules snapshot worker if necessary.
-    /// WARN: This store should not be used before initialized.
+    /// load_peers loads peers in this store. It scans the kv engine, loads all
+    /// regions and their peers from it, and schedules snapshot worker if
+    /// necessary. WARN: This store should not be used before initialized.
     fn load_peers(&self, ctx: &GlobalContext, store_meta: &mut StoreMeta) -> Result<Vec<PeerFsm>> {
         // Scan region meta to get saved regions.
         let mut local_states = vec![];
@@ -275,8 +276,8 @@ impl RaftBatchSystem {
                 }
             });
         }
-        // When a source peer is merged, the tombstone state is set, but it's not truncated at the
-        // same time, on restart we need to truncate the peers.
+        // When a source peer is merged, the tombstone state is set, but it's not
+        // truncated at the same time, on restart we need to truncate the peers.
         self.clear_tombstone_peers_on_restart(rfengine, tomb_stone_peers);
         let mut peers = vec![];
         let store_id = ctx.store.id;
@@ -329,9 +330,10 @@ pub struct StoreMeta {
     pub cop_host: Option<CoprocessorHost<kvengine::Engine>>,
     /// region_id -> reader
     pub readers: Arc<dashmap::DashMap<u64, ReadDelegate>>,
-    /// `MsgRequestPreVote`, `MsgRequestVote` or `MsgAppend` messages from newly split Regions shouldn't be
-    /// dropped if there is no such Region in this store now. So the messages are recorded temporarily and
-    /// will be handled later.
+    /// `MsgRequestPreVote`, `MsgRequestVote` or `MsgAppend` messages from newly
+    /// split Regions shouldn't be dropped if there is no such Region in
+    /// this store now. So the messages are recorded temporarily and will be
+    /// handled later.
     pub pending_msgs: RingQueue<RaftMessage>,
 
     pub black_list: Option<BlackList>,
@@ -372,7 +374,8 @@ impl StoreMeta {
 #[derive(Default)]
 pub struct RegionMap {
     /// region_end_key -> region_id
-    /// It may have less entries than regions because some entries are removed on overlap.
+    /// It may have less entries than regions because some entries are removed
+    /// on overlap.
     pub region_ranges: BTreeMap<Vec<u8>, u64>,
     /// region_id -> region
     pub regions: HashMap<u64, Region>,
@@ -486,9 +489,9 @@ pub(crate) struct GlobalContext {
     pub(crate) gc_scheduler: Scheduler<GcTask>,
     pub(crate) coprocessor_host: CoprocessorHost<kvengine::Engine>,
     pub(crate) importer: Arc<SstImporter>,
-    /// Saves destroying regions in one loop. It's used to solve the race between peer gc and split,
-    /// i.e., split won't create a destroying region if they are in the same loop with checking
-    /// it.
+    /// Saves destroying regions in one loop. It's used to solve the race
+    /// between peer gc and split, i.e., split won't create a destroying
+    /// region if they are in the same loop with checking it.
     pub(crate) destroying: HashSet<u64>,
 }
 
@@ -559,7 +562,7 @@ impl RaftContext {
         let msg_type = msg.get_message().get_msg_type();
         let tag = PeerTag::new(
             self.store_id(),
-            RegionIDVer::new(region_id, cur_epoch.get_version()),
+            RegionIdVer::new(region_id, cur_epoch.get_version()),
         );
 
         info!(
@@ -594,7 +597,7 @@ impl RaftContext {
     }
 }
 
-pub(crate) struct StoreFSM {
+pub(crate) struct StoreFsm {
     pub(crate) id: u64,
     pub(crate) start_time: Option<Timespec>,
     pub(crate) receiver: Receiver<StoreMsg>,
@@ -605,7 +608,7 @@ pub(crate) struct StoreFSM {
     pub(crate) stopped: bool,
 }
 
-impl StoreFSM {
+impl StoreFsm {
     pub fn new(receiver: Receiver<StoreMsg>, cfg: &Config) -> Self {
         Self {
             id: 0,
@@ -633,12 +636,12 @@ enum CheckMsgStatus {
 }
 
 pub(crate) struct StoreMsgHandler<'a> {
-    store: &'a mut StoreFSM,
+    store: &'a mut StoreFsm,
     pub(crate) ctx: &'a mut StoreContext,
 }
 
 impl<'a> StoreMsgHandler<'a> {
-    pub(crate) fn new(store: &'a mut StoreFSM, ctx: &'a mut StoreContext) -> StoreMsgHandler<'a> {
+    pub(crate) fn new(store: &'a mut StoreFsm, ctx: &'a mut StoreContext) -> StoreMsgHandler<'a> {
         Self { store, ctx }
     }
 
@@ -737,7 +740,7 @@ impl<'a> StoreMsgHandler<'a> {
     }
 
     fn on_update_safe_ts(&mut self) {
-        if let Err(e) = self.ctx.global.pd_scheduler.schedule(PdTask::UpdateSafeTS) {
+        if let Err(e) = self.ctx.global.pd_scheduler.schedule(PdTask::UpdateSafeTs) {
             error!("update safe ts failed";
                 "store_id" => self.store.id,
                 "err" => ?e
@@ -807,7 +810,7 @@ impl<'a> StoreMsgHandler<'a> {
         };
         let tag = PeerTag::new(
             self.store.id,
-            RegionIDVer::new(
+            RegionIdVer::new(
                 region_id,
                 local_state.get_region().get_region_epoch().get_version(),
             ),
@@ -879,8 +882,8 @@ impl<'a> StoreMsgHandler<'a> {
             } else {
                 let mut need_gc_msg = util::is_vote_msg(msg.get_message());
                 if msg.has_extra_msg() {
-                    // A learner can't vote so it sends the check-stale-peer msg to others to find out whether
-                    // it is removed due to conf change or merge.
+                    // A learner can't vote so it sends the check-stale-peer msg to others to find
+                    // out whether it is removed due to conf change or merge.
                     need_gc_msg |=
                         msg.get_extra_msg().get_type() == ExtraMessageType::MsgCheckStalePeer;
                     // For backward compatibility
@@ -908,13 +911,16 @@ impl<'a> StoreMsgHandler<'a> {
             return Ok(CheckMsgStatus::DropMsg);
         }
         // A tombstone peer may not apply the conf change log which removes itself.
-        // In this case, the local epoch is stale and the local peer can be found from region.
-        // We can compare the local peer id with to_peer_id to verify whether it is correct to create a new peer.
-        if let Some(local_peer_id) =
-            find_peer(region, self.ctx.store_id()).map(|r| r.get_id())
-        {
+        // In this case, the local epoch is stale and the local peer can be found from
+        // region. We can compare the local peer id with to_peer_id to verify
+        // whether it is correct to create a new peer.
+        if let Some(local_peer_id) = find_peer(region, self.ctx.store_id()).map(|r| r.get_id()) {
             if to_peer_id <= local_peer_id {
-                self.ctx.raft_metrics.message_dropped.region_tombstone_peer.inc();
+                self.ctx
+                    .raft_metrics
+                    .message_dropped
+                    .region_tombstone_peer
+                    .inc();
                 info!(
                     "tombstone peer receives a stale message, local_peer_id >= to_peer_id in msg";
                     "tag" => tag,
@@ -945,7 +951,7 @@ impl<'a> StoreMsgHandler<'a> {
         let region_epoch = msg.get_region_epoch();
         let tag = PeerTag::new(
             self.store.id,
-            RegionIDVer::new(region_id, region_epoch.version),
+            RegionIdVer::new(region_id, region_epoch.version),
         );
         info!("{} store handle raft message {}", tag, MsgDebug(&msg));
 
@@ -1021,12 +1027,12 @@ impl<'a> StoreMsgHandler<'a> {
     fn on_generate_engine_meta_change(&self, change_set: kvenginepb::ChangeSet) {
         debug!("store on generate engine meta change {:?}", &change_set);
         // GenerateEngineMetaChange message is first sent to store handler,
-        // Then send it to the router to create a raft log then propose this log, replicate to
-        // followers.
+        // Then send it to the router to create a raft log then propose this log,
+        // replicate to followers.
         let id = change_set.get_shard_id();
         let peer_msg = PeerMsg::GenerateEngineChangeSet(change_set);
-        // If the region is not found, there is no need to handle the engine meta change, so
-        // we can ignore not found error.
+        // If the region is not found, there is no need to handle the engine meta
+        // change, so we can ignore not found error.
         self.ctx.global.router.send(id, peer_msg);
     }
 
@@ -1043,7 +1049,7 @@ impl<'a> StoreMsgHandler<'a> {
     ) -> bool {
         let tag = PeerTag::new(
             self.store.id,
-            RegionIDVer::new(region_id, region_epoch.version),
+            RegionIdVer::new(region_id, region_epoch.version),
         );
         if !is_initial_msg(msg.get_message()) {
             info!(
@@ -1241,8 +1247,8 @@ impl<'a> StoreMsgHandler<'a> {
             new_peer.peer.need_campaign = is_leader;
 
             if is_leader {
-                // The new peer is likely to become leader, send a heartbeat immediately to reduce
-                // client query miss.
+                // The new peer is likely to become leader, send a heartbeat immediately to
+                // reduce client query miss.
                 new_peer.peer.heartbeat_pd(self.ctx);
             }
             self.ctx.global.coprocessor_host.on_region_changed(
@@ -1293,7 +1299,8 @@ impl<'a> StoreMsgHandler<'a> {
                 _ => unreachable!(),
             }
         } else {
-            // Please take a look at test case test_redundant_conf_change_by_snapshot.
+            // Please take a look at test case
+            // test_redundant_conf_change_by_snapshot.
         }
         self.update_region(&mut peer_fsm, cp.region, RegionChangeReason::ChangePeer);
 
@@ -1494,7 +1501,8 @@ impl<'a> StoreMsgHandler<'a> {
             panic!("{} destroy err {:?}", peer_fsm.peer.tag(), e);
         }
         // Some places use `force_send().unwrap()` if the StoreMeta lock is held.
-        // So in here, it's necessary to held the StoreMeta lock when closing the router.
+        // So in here, it's necessary to held the StoreMeta lock when closing the
+        // router.
 
         peer_fsm.stop();
         self.ctx.peers.remove(&region_id);
@@ -1515,7 +1523,7 @@ impl<'a> StoreMsgHandler<'a> {
         &mut self,
         start: Vec<u8>,
         end: Vec<u8>,
-        callback: Box<dyn FnOnce(Vec<RegionIDVer>) + Send>,
+        callback: Box<dyn FnOnce(Vec<RegionIdVer>) + Send>,
     ) {
         let regions = self
             .ctx
@@ -1523,7 +1531,7 @@ impl<'a> StoreMsgHandler<'a> {
             .region_map
             .get_regions_in_range(start, end)
             .into_iter()
-            .map(|r| RegionIDVer::from_region(r))
+            .map(|r| RegionIdVer::from_region(r))
             .collect();
         callback(regions)
     }
@@ -1546,7 +1554,7 @@ impl<'a> StoreMsgHandler<'a> {
     fn on_apply_result(&mut self, region_id: u64, peer_id: u64) -> Option<u64> {
         let peer = self.try_get_peer(region_id);
         if peer.is_none() {
-            let peer_tag = PeerTag::new(self.store.id, RegionIDVer::new(region_id, 0));
+            let peer_tag = PeerTag::new(self.store.id, RegionIdVer::new(region_id, 0));
             warn!("{} apply result peer doesn't exist", peer_tag);
             return None;
         }
@@ -1568,8 +1576,8 @@ impl<'a> StoreMsgHandler<'a> {
             )
         };
         if apply_results.is_empty() || is_applying_snapshot {
-            // The apply_results can be empty if a uninitialized peer received gc message and later
-            // replaced by split.
+            // The apply_results can be empty if a uninitialized peer received gc message
+            // and later replaced by split.
             //
             // The apply result is stale if the peer is applying snapshot.
             return None;

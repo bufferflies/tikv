@@ -43,9 +43,11 @@ pub struct RaftState {
     pub(crate) vote: u64,
     pub(crate) commit: u64,
     pub(crate) last_index: u64,
-    /// `ShardMeta` is changed by preprocessed committed entries. When recovering, we can't replay
-    /// entries from applied_index to committed_index directly, because some committed entries may
-    /// not be preprocessed, so we record `last_preprocessed_index` to replay to it.
+    /// `ShardMeta` is changed by preprocessed committed entries. When
+    /// recovering, we can't replay entries from applied_index to
+    /// committed_index directly, because some committed entries may
+    /// not be preprocessed, so we record `last_preprocessed_index` to replay to
+    /// it.
     pub(crate) last_preprocessed_index: u64,
 }
 

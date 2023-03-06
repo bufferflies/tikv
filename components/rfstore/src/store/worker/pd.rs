@@ -31,25 +31,21 @@ use kvproto::{
 use pd_client::{merge_bucket_stats, metrics::*, BucketStat, PdClient, RegionStat};
 use prometheus::local::LocalHistogram;
 use raft::{eraftpb::ConfChangeType, StateRole};
-use raftstore::store::{
-    util,
-    util::ConfChangeKind,
-    ReadStats, TxnExt, WriteStats,
-};
+use raftstore::store::{util, util::ConfChangeKind, ReadStats, TxnExt, WriteStats};
 use tikv_util::{
     debug, error, info,
+    store::{find_peer, QueryStats},
     time::UnixSecs,
     timer::GLOBAL_TIMER_HANDLE,
     topn::TopN,
     warn,
     worker::{Runnable, Scheduler},
-    store::{QueryStats, find_peer},
 };
 use yatp::Remote;
 
 use crate::{
     store::{
-        Callback, CasualMessage, PeerMsg, PeerTag, RegionIDVer, RegionMap, StoreInfo, StoreMsg,
+        Callback, CasualMessage, PeerMsg, PeerTag, RegionIdVer, RegionMap, StoreInfo, StoreMsg,
     },
     RaftRouter, RaftStoreRouter,
 };
@@ -132,7 +128,7 @@ pub enum PdTask {
         initial_status: u64,
         txn_ext: Arc<TxnExt>,
     },
-    UpdateSafeTS,
+    UpdateSafeTs,
     ReportBuckets(BucketStat),
     SyncRegion {
         keyspace_id: Option<u32>,
@@ -329,7 +325,7 @@ impl Display for PdTask {
                 "update the max timestamp for region {} in the concurrency manager",
                 region_id
             ),
-            PdTask::UpdateSafeTS => write!(f, "update safe ts"),
+            PdTask::UpdateSafeTs => write!(f, "update safe ts"),
             PdTask::ReportBuckets(ref buckets) => {
                 write!(f, "report buckets: {:?}", buckets)
             }
@@ -428,7 +424,7 @@ impl PdRunner {
     }
 
     fn peer_tag(&self, region: &Region) -> PeerTag {
-        let id_ver = RegionIDVer::from_region(region);
+        let id_ver = RegionIdVer::from_region(region);
         PeerTag::new(self.store_id, id_ver)
     }
 
@@ -643,7 +639,8 @@ impl PdRunner {
         stats.set_used_size(used_size);
 
         let mut available = capacity.checked_sub(used_size).unwrap_or_default();
-        // We only care about rocksdb SST file size, so we should check disk available here.
+        // We only care about rocksdb SST file size, so we should check disk available
+        // here.
         available = cmp::min(available, disk_stats.available_space());
 
         if available == 0 {
@@ -831,7 +828,7 @@ impl PdRunner {
                 let region_id = resp.get_region_id();
                 let epoch = resp.take_region_epoch();
                 let peer = resp.take_target_peer();
-                let tag = PeerTag::new(store_id, RegionIDVer::new(region_id, epoch.version));
+                let tag = PeerTag::new(store_id, RegionIdVer::new(region_id, epoch.version));
 
                 if resp.has_change_peer() {
                     PD_HEARTBEAT_COUNTER_VEC
@@ -949,13 +946,11 @@ impl PdRunner {
         }
         if !read_stats.region_infos.is_empty() {
             // TODO(x) send stats
-            /*
-            if let Some(sender) = self.stats_monitor.get_sender() {
-                if sender.send(read_stats).is_err() {
-                    warn!("send read_stats failed, are we shutting down?")
-                }
-            }
-             */
+            // if let Some(sender) = self.stats_monitor.get_sender() {
+            // if sender.send(read_stats).is_err() {
+            // warn!("send read_stats failed, are we shutting down?")
+            // }
+            // }
         }
     }
 
@@ -978,7 +973,7 @@ impl PdRunner {
         match self.region_peers.remove(&region_id) {
             None => {}
             Some(_) => {
-                let tag = PeerTag::new(self.store_id, RegionIDVer::new(region_id, 0));
+                let tag = PeerTag::new(self.store_id, RegionIdVer::new(region_id, 0));
                 info!("remove peer statistic record in pd"; "region" => tag)
             }
         }
@@ -1004,7 +999,7 @@ impl PdRunner {
     ) {
         let pd_client = self.pd_client.clone();
         let concurrency_manager = self.concurrency_manager.clone();
-        let tag = PeerTag::new(self.store_id, RegionIDVer::new(region_id, 0));
+        let tag = PeerTag::new(self.store_id, RegionIdVer::new(region_id, 0));
         let f = async move {
             let mut success = false;
             while txn_ext.max_ts_sync_status.load(Ordering::SeqCst) == initial_status {
@@ -1157,7 +1152,8 @@ impl PdRunner {
         let mut resp_buckets = Vec::with_capacity(regions.len());
         for region in regions {
             resp_regions.push(region.clone());
-            // The stats is used along with region, we need to push a default one if not found.
+            // The stats is used along with region, we need to push a default one if not
+            // found.
             let mut region_stat = pdpb::RegionStat::new();
             if let Some(stats) = self.region_peers.get(&region.id) {
                 region_stat.set_bytes_read(stats.read_bytes);
@@ -1317,7 +1313,7 @@ impl Runnable for PdRunner {
                 initial_status,
                 txn_ext,
             } => self.handle_update_max_timestamp(region_id, initial_status, txn_ext),
-            PdTask::UpdateSafeTS => self.handle_update_safe_ts(),
+            PdTask::UpdateSafeTs => self.handle_update_safe_ts(),
             PdTask::ReportBuckets(buckets) => {
                 self.handle_report_region_buckets(buckets);
             }

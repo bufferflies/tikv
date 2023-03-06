@@ -118,7 +118,8 @@ pub struct Builder {
     max_ts: u64,
     old_entries: u32,
     tombs: u32,
-    // Total size of key-value before compression of latest entries, excluding meta and version field.
+    // Total size of key-value before compression of latest entries, excluding meta and version
+    // field.
     kv_size: u64,
 }
 
@@ -459,7 +460,8 @@ impl BlockBuilder {
         let mut offset = 0u32;
         for i in 0..num_entries {
             buf.put_u32_le(offset);
-            // The entry size calculated in the first pass use full key size, we need to subtract common prefix size.
+            // The entry size calculated in the first pass use full key size, we need to
+            // subtract common prefix size.
             offset += self.block.entry_sizes[i] - common_prefix_len as u32;
         }
         buf.put_u16_le(common_prefix_len as u16);

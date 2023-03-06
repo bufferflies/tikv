@@ -62,10 +62,10 @@ pub(crate) struct RaftWorker {
     receiver: Receiver<(u64, PeerMsg)>,
     router: RaftRouter,
     apply_senders: Vec<Sender<Option<ApplyBatch>>>,
-    io_sender: Sender<Option<IOTask>>,
+    io_sender: Sender<Option<IoTask>>,
     last_tick: Instant,
     tick_millis: u64,
-    store_fsm: StoreFSM,
+    store_fsm: StoreFsm,
 }
 
 const MAX_BATCH_COUNT: usize = 1024;
@@ -76,8 +76,8 @@ impl RaftWorker {
         ctx: StoreContext,
         receiver: Receiver<(u64, PeerMsg)>,
         router: RaftRouter,
-        io_sender: Sender<Option<IOTask>>,
-        store_fsm: StoreFSM,
+        io_sender: Sender<Option<IoTask>>,
+        store_fsm: StoreFsm,
     ) -> (Self, Vec<Receiver<Option<ApplyBatch>>>) {
         let apply_pool_size = ctx.cfg.apply_pool_size;
         let mut apply_senders = Vec::with_capacity(apply_pool_size);
@@ -285,7 +285,7 @@ impl RaftWorker {
         let mut raft_wb = mem::take(&mut self.ctx.raft_wb);
         self.ctx.global.engines.raft.apply(&mut raft_wb);
         let readies = mem::take(&mut self.ctx.persist_readies);
-        let io_task = IOTask { raft_wb, readies };
+        let io_task = IoTask { raft_wb, readies };
         self.io_sender.send(Some(io_task)).unwrap();
     }
 
@@ -338,19 +338,19 @@ impl ApplyWorker {
     }
 }
 
-pub(crate) struct IOWorker {
+pub(crate) struct IoWorker {
     engine: rfengine::RfEngine,
-    receiver: Receiver<Option<IOTask>>,
+    receiver: Receiver<Option<IoTask>>,
     router: RaftRouter,
     trans: Box<dyn Transport>,
 }
 
-impl IOWorker {
+impl IoWorker {
     pub(crate) fn new(
         engine: rfengine::RfEngine,
         router: RaftRouter,
         trans: Box<dyn Transport>,
-    ) -> (Self, Sender<Option<IOTask>>) {
+    ) -> (Self, Sender<Option<IoTask>>) {
         let (sender, receiver) = tikv_util::mpsc::bounded(0);
         (
             Self {
@@ -369,7 +369,7 @@ impl IOWorker {
         }
     }
 
-    fn handle_task(&mut self, task: IOTask) {
+    fn handle_task(&mut self, task: IoTask) {
         if !task.raft_wb.is_empty() {
             let timer = tikv_util::time::Instant::now();
             let write_size = self.engine.persist(task.raft_wb).unwrap();

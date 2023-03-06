@@ -12,7 +12,7 @@ use cloud_server::TikvServer;
 use dashmap::DashMap;
 use futures::executor::block_on;
 use grpcio::{Channel, ChannelBuilder, EnvBuilder, Environment};
-use kvengine::{dfs::DFS, ShardStats};
+use kvengine::{dfs::Dfs, ShardStats};
 use kvproto::{
     kvrpcpb::{Mutation, Op},
     raft_cmdpb::RaftCmdRequest,
@@ -40,15 +40,15 @@ pub struct ServerCluster {
     env: Arc<Environment>,
     pd_client: Arc<TestPdClient>,
     security_mgr: Arc<SecurityManager>,
-    dfs: Option<Arc<dyn DFS>>,
+    dfs: Option<Arc<dyn Dfs>>,
     channels: HashMap<u64, Channel>,
     ref_store: Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>>,
     schedule_lock: Arc<DashMap<u64, Arc<Mutex<()>>>>,
 }
 
 impl ServerCluster {
-    // The node id is statically assigned, the temp dir and server address are calculated by
-    // the node id.
+    // The node id is statically assigned, the temp dir and server address are
+    // calculated by the node id.
     pub fn new<F>(nodes: Vec<u16>, update_conf: F) -> ServerCluster
     where
         F: Fn(u16, &mut TikvConfig),
@@ -72,17 +72,17 @@ impl ServerCluster {
         cluster
     }
 
-    fn prepare_dfs(config: &TikvConfig) -> Arc<dyn DFS> {
+    fn prepare_dfs(config: &TikvConfig) -> Arc<dyn Dfs> {
         let dfs_conf = &config.dfs;
         if dfs_conf.s3_bucket.is_empty() && dfs_conf.s3_endpoint.is_empty()
             || dfs_conf.s3_endpoint == "local"
         {
             let local_path = PathBuf::from(&config.storage.data_dir).join(Path::new("local"));
-            Arc::new(kvengine::dfs::LocalFS::new(&local_path))
+            Arc::new(kvengine::dfs::LocalFs::new(&local_path))
         } else if dfs_conf.s3_endpoint == "memory" {
-            Arc::new(kvengine::dfs::InMemFS::new())
+            Arc::new(kvengine::dfs::InMemFs::new())
         } else {
-            Arc::new(kvengine::dfs::S3FS::new(
+            Arc::new(kvengine::dfs::S3Fs::new(
                 dfs_conf.prefix.clone(),
                 dfs_conf.s3_endpoint.clone(),
                 dfs_conf.s3_key_id.clone(),
