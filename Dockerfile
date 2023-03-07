@@ -95,9 +95,6 @@ COPY --from=builder /tikv/target/release/tikv-ctl /tikv-ctl
 COPY --from=builder /tikv/target/release/cse-ctl /cse-ctl
 COPY --from=builder /tikv/target/release/tikv-worker /tikv-worker
 
-RUN apk add --no-cache \
-    curl
-
 EXPOSE 20160 20180
 
 ENTRYPOINT ["/tikv-server"]
