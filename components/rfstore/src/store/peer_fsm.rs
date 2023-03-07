@@ -495,6 +495,7 @@ impl<'a> PeerMsgHandler<'a> {
         let is_snapshot = msg.get_message().has_snapshot();
         let regions_to_destroy = self.check_snapshot(&msg)?;
 
+        let from_peer_id = msg.get_from_peer().get_id();
         self.fsm.peer.insert_peer_cache(msg.take_from_peer());
 
         let result = if msg.get_message().get_msg_type() == MessageType::MsgTransferLeader {
@@ -506,6 +507,9 @@ impl<'a> PeerMsgHandler<'a> {
 
         if is_snapshot && self.fsm.peer.has_pending_snapshot() {
             self.destroy_regions_for_snapshot(regions_to_destroy);
+        }
+        if self.fsm.peer.any_new_peer_catch_up(from_peer_id) {
+            self.fsm.peer.heartbeat_pd(self.ctx);
         }
         result
     }

@@ -1100,6 +1100,45 @@ impl Peer {
         pending_peers
     }
 
+    /// Returns `true` if any peer recover from connectivity problem.
+    ///
+    /// A peer can become pending or down if it has not responded for a
+    /// long time. If it becomes normal again, PD need to be notified.
+    pub fn any_new_peer_catch_up(&mut self, peer_id: u64) -> bool {
+        if self.peers_start_pending_time.is_empty() && self.down_peer_ids.is_empty() {
+            return false;
+        }
+        if !self.is_leader() {
+            self.down_peer_ids = vec![];
+            self.peers_start_pending_time = vec![];
+            return false;
+        }
+        for i in 0..self.peers_start_pending_time.len() {
+            if self.peers_start_pending_time[i].0 != peer_id {
+                continue;
+            }
+            let truncated_idx = self.raft_group.store().truncated_index();
+            if let Some(progress) = self.raft_group.raft.prs().get(peer_id) {
+                if progress.matched >= truncated_idx {
+                    let (_, pending_after) = self.peers_start_pending_time.swap_remove(i);
+                    let elapsed = duration_to_sec(pending_after.saturating_elapsed());
+                    RAFT_PEER_PENDING_DURATION.observe(elapsed);
+                    debug!(
+                        "peer has caught up logs";
+                        "region_id" => self.region_id,
+                        "peer_id" => self.peer.get_id(),
+                        "takes" => elapsed,
+                    );
+                    return true;
+                }
+            }
+        }
+        if self.down_peer_ids.contains(&peer_id) {
+            return true;
+        }
+        false
+    }
+
     pub fn check_stale_state(&mut self, cfg: &Config) -> StaleState {
         if self.is_leader() {
             // Leaders always have valid state.

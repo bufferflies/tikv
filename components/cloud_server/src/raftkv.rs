@@ -471,10 +471,10 @@ impl Engine for RaftKv {
                 .map_err(kv::Error::from);
         }
         async move {
-            // It's impossible to return cancel because the callback will be invoked if it's
-            // destroyed.
             let res = match res {
-                Ok(()) => f.await.unwrap(),
+                Ok(()) => f
+                    .await
+                    .map_err(|_| tikv_kv::ErrorInner::Other(box_err!("canceled")))?,
                 Err(e) => Err(e),
             };
             match res {
