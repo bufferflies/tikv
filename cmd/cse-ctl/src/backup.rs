@@ -60,6 +60,9 @@ pub struct BackupArgs {
     pub key: PathBuf,
     #[clap(long, default_value_t = false)]
     pub skip_keyspace_meta: bool,
+    /// The tolerate num of stores' backup failure.
+    #[clap(long, default_value_t = 0)]
+    pub tolerate_err: usize,
 }
 
 fn backup_file_name(prefix: String, name: String, backup_ts: u64) -> String {
@@ -190,7 +193,10 @@ pub fn backup_cluster(
         }
     }
     if !errs.is_empty() {
-        error!("backup errors {:?}", errs);
+        error!(
+            "backup errors {:?}, tolerance {}",
+            errs, config.tolerate_err
+        );
         if errs.len() > config.tolerate_err {
             return Err(Error::ServerError(format!("backup errors {:?}", errs)));
         }
@@ -476,6 +482,9 @@ fn get_backup_config_from_args(args: &BackupArgs) -> BackupConfig {
         config.security.key_path = args.key.to_str().unwrap().to_owned();
     }
     config.skip_keyspace_meta = args.skip_keyspace_meta;
+    if args.tolerate_err > 0 {
+        config.tolerate_err = args.tolerate_err;
+    }
     config.dfs.override_from_env();
     config
 }
