@@ -8,6 +8,7 @@ use farmhash;
 use xorf::BinaryFuse8;
 
 use super::super::table::Value;
+use crate::table::{ExternalLink, BIT_HAS_OLD_VERSION, VALUE_VERSION_LEN, VALUE_VERSION_OFF};
 
 pub const CRC32C: u8 = 1;
 pub const PROP_KEY_SMALLEST: &str = "smallest";
@@ -17,6 +18,7 @@ pub const PROP_KEY_ENTRIES: &str = "entries";
 pub const PROP_KEY_OLD_ENTRIES: &str = "old_entries";
 pub const PROP_KEY_TOMBS: &str = "tombs";
 pub const PROP_KEY_KV_SIZE: &str = "kv_size";
+pub const PROP_KEY_IN_USE_TOTAL_BLOB_SIZE: &str = "in_use_total_blob_size";
 pub const AUX_INDEX_BINARY_FUSE8: u32 = 1;
 pub const INDEX_FORMAT_V1: u32 = 1;
 pub const BLOCK_FORMAT_V1: u32 = 1;
@@ -25,7 +27,6 @@ pub const LZ4_COMPRESSION: u8 = 1;
 pub const ZSTD_COMPRESSION: u8 = 2;
 pub const TABLE_FORMAT_V1: u16 = 1;
 pub const MAGIC_NUMBER: u32 = 2940551257;
-pub const META_HAS_OLD: u8 = 1 << 1;
 pub const BLOCK_ADDR_SIZE: usize = mem::size_of::<BlockAddress>();
 
 #[derive(Clone, Copy)]
@@ -67,12 +68,21 @@ impl EntrySlice {
         self.end_offs.push(self.buf.len() as u32);
     }
 
-    fn append_value(&mut self, val: Value) {
+    fn append_value(&mut self, val: Value, external_link: Option<ExternalLink>) {
         let old_len = self.buf.len();
-        let new_len = old_len + val.encoded_size();
+        let new_len = if external_link.is_some() {
+            old_len + val.encoded_size_with_external_link()
+        } else {
+            old_len + val.encoded_size()
+        };
         self.buf.resize(new_len, 0);
         let slice = self.buf.as_mut_slice();
-        val.encode(&mut slice[old_len..]);
+        match external_link {
+            Some(external_link) => {
+                val.encode_with_external_link(&mut slice[old_len..], external_link)
+            }
+            None => val.encode(&mut slice[old_len..]),
+        }
         self.end_offs.push(new_len as u32);
     }
 
@@ -106,8 +116,7 @@ impl EntrySlice {
 
 #[derive(Default)]
 pub struct Builder {
-    fid: u64,
-
+    sst_fid: u64,
     block_builder: BlockBuilder,
     old_builder: BlockBuilder,
     block_size: usize,
@@ -121,13 +130,15 @@ pub struct Builder {
     // Total size of key-value before compression of latest entries, excluding meta and version
     // field.
     kv_size: u64,
+    /// Total size of the in use values stored in the blob table.
+    in_use_total_blob_size: u64,
 }
 
 impl Builder {
     // compression_lvl is the compression level for zstd compression only.
-    pub fn new(fid: u64, block_size: usize, compression_tp: u8, compression_lvl: i32) -> Self {
+    pub fn new(sst_fid: u64, block_size: usize, compression_tp: u8, compression_lvl: i32) -> Self {
         let mut x = Self::default();
-        x.fid = fid;
+        x.sst_fid = sst_fid;
         x.checksum_tp = CRC32C;
         x.block_size = block_size;
         x.block_builder.compression_tp = compression_tp;
@@ -137,8 +148,8 @@ impl Builder {
         x
     }
 
-    pub fn reset(&mut self, fid: u64) {
-        self.fid = fid;
+    pub fn reset(&mut self, sst_fid: u64) {
+        self.sst_fid = sst_fid;
         self.block_builder.reset_all();
         self.old_builder.reset_all();
         self.key_hashes.truncate(0);
@@ -156,21 +167,24 @@ impl Builder {
         buf.put_slice(val);
     }
 
-    pub fn add(&mut self, key: &[u8], val: Value) {
+    pub fn add(&mut self, key: &[u8], val: &Value, external_link: Option<ExternalLink>) {
         if self.block_builder.same_last_key(key) {
             self.block_builder
                 .set_last_entry_old_ver_if_zero(val.version);
-            self.old_builder.add_entry(key, val);
+            self.old_builder.add_entry(key, *val, external_link);
             self.old_entries += 1;
         } else {
             // Only try to finish block when the key is different than last.
             if self.block_builder.need_finish_block(self.block_size) {
-                self.block_builder.finish_block(self.fid, self.checksum_tp);
+                self.block_builder
+                    .finish_block(self.sst_fid, self.checksum_tp);
             }
             if self.old_builder.need_finish_block(self.block_size) {
-                self.old_builder.finish_block(self.fid, self.checksum_tp);
+                self.old_builder
+                    .finish_block(self.sst_fid, self.checksum_tp);
             }
-            self.block_builder.add_entry(key, val);
+            self.kv_size += (key.len() + val.user_meta_len() + val.value_len()) as u64;
+            self.block_builder.add_entry(key, *val, external_link);
             self.key_hashes.push(farmhash::fingerprint64(key));
             if self.smallest.is_empty() {
                 self.smallest.extend_from_slice(key);
@@ -178,7 +192,6 @@ impl Builder {
             if self.max_ts < val.version {
                 self.max_ts = val.version;
             }
-            self.kv_size += (key.len() + val.value_len()) as u64;
         }
         if val.value_len() == 0 {
             self.tombs += 1;
@@ -198,10 +211,12 @@ impl Builder {
         if self.block_builder.block.kv_size > 0 {
             let last_key = self.block_builder.block.tmp_keys.get_last();
             self.biggest.extend_from_slice(last_key);
-            self.block_builder.finish_block(self.fid, self.checksum_tp);
+            self.block_builder
+                .finish_block(self.sst_fid, self.checksum_tp);
         }
         if self.old_builder.block.kv_size > 0 {
-            self.old_builder.finish_block(self.fid, self.checksum_tp);
+            self.old_builder
+                .finish_block(self.sst_fid, self.checksum_tp);
         }
         assert_eq!(self.block_builder.block_keys.length() > 0, true);
         data_buf.extend_from_slice(self.block_builder.buf.as_slice());
@@ -238,8 +253,9 @@ impl Builder {
         footer.table_format_version = TABLE_FORMAT_V1;
         footer.magic = MAGIC_NUMBER;
         data_buf.extend_from_slice(footer.marshal());
+
         BuildResult {
-            id: self.fid,
+            id: self.sst_fid,
             smallest: self.smallest.clone(),
             biggest: self.biggest.clone(),
         }
@@ -276,6 +292,11 @@ impl Builder {
             PROP_KEY_KV_SIZE.as_bytes(),
             &self.kv_size.to_le_bytes(),
         );
+        Builder::add_property(
+            buf,
+            PROP_KEY_IN_USE_TOTAL_BLOB_SIZE.as_bytes(),
+            &self.in_use_total_blob_size.to_le_bytes(),
+        );
         if self.checksum_tp == CRC32C {
             let checksum = crc32c::crc32c(&buf[(origin_len + 4)..]);
             LittleEndian::write_u32(&mut buf[origin_len..], checksum);
@@ -292,6 +313,14 @@ impl Builder {
 
     pub fn get_biggest(&self) -> &[u8] {
         self.biggest.as_slice()
+    }
+
+    pub fn get_compression_type(&self) -> u8 {
+        self.block_builder.compression_tp
+    }
+
+    pub fn get_compression_level(&self) -> i32 {
+        self.block_builder.compression_lvl
     }
 }
 
@@ -377,10 +406,10 @@ impl BlockBuffer {
         let mut meta = v.meta;
         let old_ver = self.old_vers[i];
         if old_ver != 0 {
-            meta |= META_HAS_OLD;
+            meta |= BIT_HAS_OLD_VERSION;
         } else {
             // The val meta from the old table may have `metaHasOld` flag, need to unset it.
-            meta &= !META_HAS_OLD;
+            meta &= !BIT_HAS_OLD_VERSION;
         }
         buf.push(meta);
         buf.put_u64_le(v.version);
@@ -418,15 +447,20 @@ impl BlockBuilder {
         if self.block.old_vers[last_old_ver_idx] == 0 {
             self.block.old_vers[last_old_ver_idx] = ver;
             let last_entry_size_idx = self.block.entry_sizes.len() - 1;
-            self.block.entry_sizes[last_entry_size_idx] += 8;
+            self.block.entry_sizes[last_entry_size_idx] += VALUE_VERSION_LEN as u32;
         }
     }
 
-    fn add_entry(&mut self, key: &[u8], val: Value) {
+    fn add_entry(&mut self, key: &[u8], val: Value, external_link: Option<ExternalLink>) {
         self.block.tmp_keys.append(key);
-        self.block.tmp_vals.append_value(val);
+        self.block.tmp_vals.append_value(val, external_link);
         self.block.old_vers.push(0);
-        let entry_size = 2 + key.len() + val.encoded_size();
+        let encoded_size = if external_link.is_some() {
+            val.encoded_size_with_external_link()
+        } else {
+            val.encoded_size()
+        };
+        let entry_size = VALUE_VERSION_OFF + key.len() + encoded_size;
         self.block.entry_sizes.push(entry_size as u32);
         self.block.kv_size += entry_size;
         if self.block.tmp_keys.length() % 64 == 0 {
@@ -441,10 +475,10 @@ impl BlockBuilder {
         block_size > target_block_size
     }
 
-    fn finish_block(&mut self, fid: u64, checksum_tp: u8) {
+    fn finish_block(&mut self, sst_fid: u64, checksum_tp: u8) {
         self.block_keys.append(self.block.tmp_keys.get_entry(0));
         self.block_addrs
-            .push(BlockAddress::new(fid, self.buf.len() as u32));
+            .push(BlockAddress::new(sst_fid, self.buf.len() as u32));
         self.buf.put_u32_le(0); // checksum place holder.
         let begin_off = self.buf.len();
         let common_prefix_len = self.get_block_common_prefix_len();
@@ -589,9 +623,9 @@ pub struct BlockAddress {
 }
 
 impl BlockAddress {
-    fn new(fid: u64, offset: u32) -> Self {
+    fn new(sst_fid: u64, offset: u32) -> Self {
         Self {
-            origin_fid: fid,
+            origin_fid: sst_fid,
             origin_off: offset,
             curr_off: offset,
         }
@@ -635,7 +669,7 @@ mod tests {
         es.append("abc".as_bytes());
         let val_buf = Value::encode_buf(1, &[1], 1, "abc".as_bytes());
         let val = Value::decode(&val_buf);
-        es.append_value(val);
+        es.append_value(val, None);
         // dbg!(es.buf);
         // dbg!(es.end_offs);
     }

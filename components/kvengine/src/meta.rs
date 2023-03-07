@@ -54,6 +54,15 @@ impl ShardMeta {
         for l0 in snap.get_l0_creates() {
             meta.add_file(l0.id, -1, 0, l0.get_smallest(), l0.get_biggest());
         }
+        for blob in snap.get_blob_creates() {
+            meta.add_file(
+                blob.id,
+                -1,
+                BLOB_LEVEL,
+                blob.get_smallest(),
+                blob.get_biggest(),
+            );
+        }
         for tbl in snap.get_table_creates() {
             meta.add_file(
                 tbl.id,
@@ -96,9 +105,9 @@ impl ShardMeta {
     fn move_down_file(&mut self, id: u64, cf: i32, level: u32) {
         let mut fm = self.files.get_mut(&id).unwrap();
         assert!(
-            fm.level + 1 == level as u8,
+            fm.get_level() + 1 == level,
             "fm.level {} level {}",
-            fm.level,
+            fm.get_level(),
             level
         );
         assert!(fm.cf == cf as i8);
@@ -129,7 +138,7 @@ impl ShardMeta {
     }
 
     fn file_level(&self, id: u64) -> Option<u32> {
-        self.files.get(&id).map(|fm| fm.level as u32)
+        self.files.get(&id).map(|fm| fm.get_level())
     }
 
     pub fn get_property(&self, key: &str) -> Option<Bytes> {
@@ -328,7 +337,19 @@ impl ShardMeta {
         self.apply_properties(flush.get_properties());
         if flush.has_l0_create() {
             let l0 = flush.get_l0_create();
+            warn!("apply_flush: l0 {}", l0.id);
             self.add_file(l0.id, -1, 0, l0.get_smallest(), l0.get_biggest());
+        }
+        if flush.has_blob_create() {
+            let blob = flush.get_blob_create();
+            warn!("apply_flush: blob {}", blob.id);
+            self.add_file(
+                blob.id,
+                -1,
+                BLOB_LEVEL,
+                blob.get_smallest(),
+                blob.get_biggest(),
+            );
         }
         let new_data_seq = flush.get_version() - self.base_version;
         if self.data_sequence < new_data_seq {
@@ -456,6 +477,15 @@ impl ShardMeta {
                 l0_tbl.get_biggest(),
             );
         }
+        for blob_tbl in ingest_files.get_blob_creates() {
+            self.add_file(
+                blob_tbl.id,
+                -1,
+                BLOB_LEVEL,
+                blob_tbl.get_smallest(),
+                blob_tbl.get_biggest(),
+            );
+        }
     }
 
     fn apply_properties(&mut self, props: &pb::Properties) {
@@ -553,7 +583,13 @@ impl ShardMeta {
         snap.set_base_version(self.base_version);
         snap.set_data_sequence(self.data_sequence);
         for (k, v) in self.files.iter() {
-            if v.level == 0 {
+            if v.is_blob_file() {
+                let mut blob = pb::BlobCreate::new();
+                blob.set_id(*k);
+                blob.set_smallest(v.smallest.to_vec());
+                blob.set_biggest(v.biggest.to_vec());
+                snap.mut_blob_creates().push(blob);
+            } else if v.get_level() == 0 {
                 let mut l0 = pb::L0Create::new();
                 l0.set_id(*k);
                 l0.set_smallest(v.smallest.to_vec());
@@ -563,7 +599,7 @@ impl ShardMeta {
                 let mut tbl = pb::TableCreate::new();
                 tbl.set_id(*k);
                 tbl.set_cf(v.cf as i32);
-                tbl.set_level(v.level as u32);
+                tbl.set_level(v.get_level());
                 tbl.set_smallest(v.smallest.to_vec());
                 tbl.set_biggest(v.biggest.to_vec());
                 snap.mut_table_creates().push(tbl);
@@ -601,6 +637,17 @@ impl ShardMeta {
         self.start.as_slice() <= biggest && smallest < self.end.as_slice()
     }
 
+    pub(crate) fn get_blob_files(&self) -> Vec<(u64, Vec<u8>, Vec<u8>)> {
+        let mut blob_files = vec![];
+        for (id, file) in &self.files {
+            if !file.is_blob_file() {
+                continue;
+            }
+            blob_files.push((*id, file.smallest.to_vec(), file.biggest.to_vec()));
+        }
+        blob_files
+    }
+
     pub fn entirely_over_bound_table(&self, smallest: &[u8], biggest: &[u8]) -> bool {
         // smallest-----biggest-----[start----------end)
         // [start----------end)-----smallest-----biggest
@@ -618,14 +665,17 @@ impl ShardMeta {
     pub(crate) fn get_ingest_level(&self, smallest: &[u8], biggest: &[u8]) -> u32 {
         let mut lowest_overlap_level = 4;
         for file in self.files.values() {
-            if biggest < file.smallest.chunk() || file.biggest.chunk() < smallest {
+            if file.is_blob_file()
+                || biggest < file.smallest.chunk()
+                || file.biggest.chunk() < smallest
+            {
                 continue;
-            } else if lowest_overlap_level > file.level {
-                lowest_overlap_level = file.level;
+            } else if lowest_overlap_level > file.get_level() {
+                lowest_overlap_level = file.get_level();
             }
         }
         if lowest_overlap_level > 0 {
-            lowest_overlap_level as u32 - 1
+            lowest_overlap_level - 1
         } else {
             0
         }
@@ -680,11 +730,28 @@ pub struct FileMeta {
 
 impl FileMeta {
     fn new(cf: i32, level: u32, smallest: &[u8], biggest: &[u8]) -> Self {
+        let meta_level = if is_blob_file(level) {
+            1u8 << 7
+        } else {
+            level as u8
+        };
         Self {
             cf: cf as i8,
-            level: level as u8,
+            level: meta_level,
             smallest: Bytes::copy_from_slice(smallest),
             biggest: Bytes::copy_from_slice(biggest),
+        }
+    }
+
+    fn is_blob_file(&self) -> bool {
+        (self.level & (1u8 << 7)) > 0
+    }
+
+    pub(crate) fn get_level(&self) -> u32 {
+        if self.is_blob_file() {
+            BLOB_LEVEL
+        } else {
+            self.level as u32
         }
     }
 }

@@ -2,6 +2,7 @@
 
 use std::{
     cmp,
+    collections::HashMap,
     iter::Iterator,
     ops::Deref,
     sync::{
@@ -19,6 +20,7 @@ use tikv_util::codec::number::U64_SIZE;
 use crate::{
     table::{
         self,
+        blobtable::blobtable::BlobTable,
         memtable::{self, CfTable},
         search,
         sstable::{L0Table, SsTable},
@@ -197,6 +199,7 @@ impl Shard {
             data.trim_over_bound,
             data.mem_tbls.clone(),
             data.l0_tbls.clone(),
+            data.blob_tbl_map.clone(),
             data.cfs.clone(),
         );
         self.set_data(new_data);
@@ -212,6 +215,7 @@ impl Shard {
             data.trim_over_bound,
             data.mem_tbls.clone(),
             data.l0_tbls.clone(),
+            data.blob_tbl_map.clone(),
             data.cfs.clone(),
         );
         self.set_data(new_data);
@@ -241,6 +245,7 @@ impl Shard {
             data.trim_over_bound,
             data.mem_tbls.clone(),
             data.l0_tbls.clone(),
+            data.blob_tbl_map.clone(),
             data.cfs.clone(),
         );
         self.set_data(new_data);
@@ -261,6 +266,7 @@ impl Shard {
             trim_over_bound,
             data.mem_tbls.clone(),
             data.l0_tbls.clone(),
+            data.blob_tbl_map.clone(),
             data.cfs.clone(),
         );
         self.set_data(new_data);
@@ -367,6 +373,7 @@ impl Shard {
             old_data.trim_over_bound,
             new_mem_tbls,
             old_data.l0_tbls.clone(),
+            old_data.blob_tbl_map.clone(),
             old_data.cfs.clone(),
         );
         self.set_data(new_data);
@@ -420,6 +427,7 @@ impl Shard {
             let num_tbl_score = data.l0_tbls.len() as f64 / 4.0;
             max_pri.score = size_score * 0.6 + num_tbl_score * 0.4;
         }
+        // FIXME: Does this apply to blob tables too?
         for l0 in &data.l0_tbls {
             if !data.cover_full_table(l0.smallest(), l0.biggest()) {
                 // set highest priority for newly split L0.
@@ -507,6 +515,7 @@ impl Shard {
             shard_data.trim_over_bound,
             mem_tbls,
             shard_data.l0_tbls.clone(),
+            shard_data.blob_tbl_map.clone(),
             shard_data.cfs.clone(),
         );
         self.set_data(new_data);
@@ -536,6 +545,7 @@ impl ShardData {
             false,
             vec![CfTable::new()],
             vec![],
+            None,
             [ShardCf::new(0), ShardCf::new(1), ShardCf::new(2)],
         )
     }
@@ -548,6 +558,7 @@ impl ShardData {
         trim_over_bound: bool,
         mem_tbls: Vec<memtable::CfTable>,
         l0_tbls: Vec<L0Table>,
+        blob_tbl_map: Option<HashMap<u64, BlobTable>>,
         cfs: [ShardCf; 3],
     ) -> Self {
         assert!(!mem_tbls.is_empty());
@@ -560,6 +571,7 @@ impl ShardData {
                 trim_over_bound,
                 mem_tbls,
                 l0_tbls,
+                blob_tbl_map,
                 cfs,
             }),
         }
@@ -574,6 +586,7 @@ pub(crate) struct ShardDataCore {
     pub(crate) trim_over_bound: bool,
     pub(crate) mem_tbls: Vec<memtable::CfTable>,
     pub(crate) l0_tbls: Vec<L0Table>,
+    pub(crate) blob_tbl_map: Option<HashMap<u64, BlobTable>>,
     pub(crate) cfs: [ShardCf; 3],
 }
 
@@ -590,6 +603,11 @@ impl ShardDataCore {
         let mut files = Vec::new();
         for l0 in &self.l0_tbls {
             files.push(l0.id());
+        }
+        if let Some(blob_tbl_map) = &self.blob_tbl_map {
+            for v in blob_tbl_map.values() {
+                files.push(v.id());
+            }
         }
         self.for_each_level(|_cf, lh| {
             for tbl in lh.tables.iter() {

@@ -33,6 +33,8 @@ pub struct Options {
     pub max_mem_table_size: u64,
 
     pub allow_fallback_local: bool,
+
+    pub min_blob_size: u32,
 }
 
 impl Default for Options {
@@ -48,6 +50,7 @@ impl Default for Options {
             preparation_concurrency: Default::default(),
             max_mem_table_size: 96 << 20,
             allow_fallback_local: true,
+            min_blob_size: 0,
         }
     }
 }

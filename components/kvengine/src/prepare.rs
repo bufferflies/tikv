@@ -9,6 +9,12 @@ use crate::{
     apply::ChangeSet, metrics::KVENGINE_LEVEL_WRITE_VEC, table::sstable::LocalFile, EngineCore, *,
 };
 
+pub const BLOB_LEVEL: u32 = 1 << 31;
+
+pub fn is_blob_file(flags: u32) -> bool {
+    flags == BLOB_LEVEL
+}
+
 impl EngineCore {
     pub fn prepare_change_set(
         &self,
@@ -21,6 +27,9 @@ impl EngineCore {
             let flush = cs.get_flush();
             if flush.has_l0_create() {
                 ids.insert(flush.get_l0_create().id, 0);
+            }
+            if flush.has_blob_create() {
+                ids.insert(flush.get_blob_create().id, BLOB_LEVEL);
             }
         }
         if cs.has_compaction() {
@@ -63,12 +72,18 @@ impl EngineCore {
             for tbl in ingest_files.get_table_creates() {
                 ids.insert(tbl.id, tbl.level);
             }
+            for blob in ingest_files.get_blob_creates() {
+                ids.insert(blob.id, BLOB_LEVEL);
+            }
         }
         self.load_tables_by_ids(cs.shard_id, cs.shard_ver, ids, &mut cs, use_direct_io)?;
         Ok(cs)
     }
 
     fn collect_snap_ids(&self, snap: &kvenginepb::Snapshot, ids: &mut HashMap<u64, u32>) {
+        for blob in snap.get_blob_creates() {
+            ids.insert(blob.id, BLOB_LEVEL);
+        }
         for l0 in snap.get_l0_creates() {
             ids.insert(l0.id, 0);
         }
@@ -90,7 +105,12 @@ impl EngineCore {
         let opts = dfs::Options::new(shard_id, shard_ver);
         let mut msg_count = 0;
         for (&id, &level) in &ids {
-            if let Ok(file) = self.open_sstable_file(id) {
+            if is_blob_file(level) {
+                if let Ok(file) = self.open_blob_table_file(id) {
+                    cs.add_file(id, file, level, self.cache.clone())?;
+                    continue;
+                }
+            } else if let Ok(file) = self.open_sstable_file(id) {
                 cs.add_file(id, file, level, self.cache.clone())?;
                 continue;
             }
@@ -107,11 +127,17 @@ impl EngineCore {
             match result_rx.recv().unwrap() {
                 Ok((id, level, data)) => {
                     let data_len = data.len();
-                    if let Err(err) = self.write_local_file(id, data, use_direct_io) {
+                    if let Err(err) =
+                        self.write_local_file(id, data, use_direct_io, is_blob_file(level))
+                    {
                         error!("write local file failed {:?}", &err);
                         errors.push(err.into());
                     } else {
-                        let file = self.open_sstable_file(id)?;
+                        let file = if is_blob_file(level) {
+                            self.open_blob_table_file(id)?
+                        } else {
+                            self.open_sstable_file(id)?
+                        };
                         cs.add_file(id, file, level, self.cache.clone())?;
                         KVENGINE_LEVEL_WRITE_VEC
                             .with_label_values(&[&level.to_string()])
@@ -130,8 +156,19 @@ impl EngineCore {
         Ok(())
     }
 
-    fn write_local_file(&self, id: u64, data: Bytes, use_direct_io: bool) -> std::io::Result<()> {
-        let local_file_name = self.local_file_path(id);
+    fn write_local_file(
+        &self,
+        id: u64,
+        data: Bytes,
+        use_direct_io: bool,
+        blob_file: bool,
+    ) -> std::io::Result<()> {
+        let local_file_name = if blob_file {
+            self.local_blob_file_path(id)
+        } else {
+            self.local_sst_file_path(id)
+        };
+
         let tmp_file_name = self.tmp_file_path(id);
         if use_direct_io {
             let mut writer =
@@ -154,11 +191,19 @@ impl EngineCore {
     }
 
     fn open_sstable_file(&self, id: u64) -> std::io::Result<LocalFile> {
-        LocalFile::open(id, self.local_file_path(id).as_path())
+        LocalFile::open(id, self.local_sst_file_path(id).as_path())
     }
 
-    pub(crate) fn local_file_path(&self, file_id: u64) -> PathBuf {
-        self.opts.local_dir.join(new_filename(file_id))
+    fn open_blob_table_file(&self, id: u64) -> std::io::Result<LocalFile> {
+        LocalFile::open(id, self.local_blob_file_path(id).as_path())
+    }
+
+    pub(crate) fn local_sst_file_path(&self, file_id: u64) -> PathBuf {
+        self.opts.local_dir.join(new_sst_filename(file_id))
+    }
+
+    pub(crate) fn local_blob_file_path(&self, file_id: u64) -> PathBuf {
+        self.opts.local_dir.join(new_blob_filename(file_id))
     }
 
     fn tmp_file_path(&self, file_id: u64) -> PathBuf {

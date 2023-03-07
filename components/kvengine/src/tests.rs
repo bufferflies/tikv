@@ -1,6 +1,7 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
+    env,
     ops::Deref,
     path::Path,
     sync::{atomic::AtomicU64, Arc},
@@ -71,16 +72,25 @@ fn test_engine() {
     //
     // let mut keys = vec![];
     // for i in &[1000, 3000, 6000, 9000] {
-    // keys.push(i_to_key(*i));
+    // keys.push(i_to_key(*i, engine.opts.min_blob_size));
     // }
     // let mut splitter = Splitter::new(keys.clone(), applier_tx.clone());
     // let handle = thread::spawn(move || {
     // splitter.run();
     // });
     let (begin, end) = (0, 10000);
-    load_data(begin, end, 1, applier_tx);
+    load_data(begin, end, 1, applier_tx, engine.opts.min_blob_size);
     // handle.join().unwrap();
-    check_get(begin, end, 2, &[0, 1, 2], &engine, true, None);
+    check_get(
+        begin,
+        end,
+        2,
+        &[0, 1, 2],
+        &engine,
+        true,
+        None,
+        engine.opts.min_blob_size,
+    );
     check_iterater(begin, end, &engine);
 }
 
@@ -88,13 +98,13 @@ fn test_engine() {
 fn test_destroy_range() {
     init_logger();
     let (engine, applier_tx) = new_test_engine();
-    load_data(10, 50, 1, applier_tx.clone());
     let mem_table_count = engine.get_shard_stat(1).mem_table_count;
+    load_data(10, 50, 1, applier_tx.clone(), engine.opts.min_blob_size);
     // Unsafe destroy keys [10, 30).
     for prefix in [10, 20] {
         let mut wb = WriteBatch::new(1);
-        let key = i_to_key(prefix);
-        wb.set_property(DEL_PREFIXES_KEY, &key[..key.len() - 1]);
+        let key = i_to_key(prefix, engine.opts.min_blob_size);
+        wb.set_property(DEL_PREFIXES_KEY, key[..key.len() - 1].as_bytes());
         write_data(wb, &applier_tx);
     }
     assert!(
@@ -108,7 +118,7 @@ fn test_destroy_range() {
     // Memtable is switched because it contains data covered by the delete-prefixes.
     let stats = engine.get_shard_stat(1);
     assert_eq!(
-        stats.mem_table_count + stats.l0_table_count,
+        stats.mem_table_count + stats.l0_table_count + stats.blob_table_count,
         mem_table_count + 1
     );
     let wait_for_destroying_range = || {
@@ -134,13 +144,37 @@ fn test_destroy_range() {
     };
     wait_for_destroying_range();
     // After destroying range, key [10, 30) should be removed.
-    check_get(10, 30, 2, &[0, 1, 2], &engine, false, None);
-    check_get(30, 50, 2, &[0, 1, 2], &engine, true, None);
+    check_get(
+        10,
+        30,
+        2,
+        &[0, 1, 2],
+        &engine,
+        false,
+        None,
+        engine.opts.min_blob_size,
+    );
+    check_get(
+        30,
+        50,
+        2,
+        &[0, 1, 2],
+        &engine,
+        true,
+        None,
+        engine.opts.min_blob_size,
+    );
     check_iterater(30, 50, &engine);
 
     // Trigger L0 compaction.
     for i in 1..=10 {
-        load_data(50 + (i - 1) * 10, 50 + i * 10, 1, applier_tx.clone());
+        load_data(
+            50 + (i - 1) * 10,
+            50 + i * 10,
+            1,
+            applier_tx.clone(),
+            engine.opts.min_blob_size,
+        );
         let mut wb = WriteBatch::new(1);
         wb.set_switch_mem_table();
         write_data(wb, &applier_tx);
@@ -155,19 +189,46 @@ fn test_destroy_range() {
     assert!(engine.get_shard_stat(1).l0_table_count < 10);
     // Unsafe destroy keys [100, 150).
     let mut wb = WriteBatch::new(1);
-    let key = i_to_key(100);
-    wb.set_property(DEL_PREFIXES_KEY, &key[..key.len() - 2]);
+    let key = i_to_key(100, engine.opts.min_blob_size);
+    wb.set_property(DEL_PREFIXES_KEY, key[..key.len() - 2].as_bytes());
     write_data(wb, &applier_tx);
     wait_for_destroying_range();
-    check_get(100, 150, 2, &[0, 1, 2], &engine, false, None);
-    check_get(50, 100, 2, &[0, 1, 2], &engine, true, None);
+    check_get(
+        100,
+        150,
+        2,
+        &[0, 1, 2],
+        &engine,
+        false,
+        None,
+        engine.opts.min_blob_size,
+    );
+    check_get(
+        50,
+        100,
+        2,
+        &[0, 1, 2],
+        &engine,
+        true,
+        None,
+        engine.opts.min_blob_size,
+    );
 
     // Clean all data.
     let mut wb = WriteBatch::new(1);
     wb.set_property(DEL_PREFIXES_KEY, b"key");
     write_data(wb, &applier_tx);
     wait_for_destroying_range();
-    check_get(10, 150, 2, &[0, 1, 2], &engine, false, None);
+    check_get(
+        10,
+        150,
+        2,
+        &[0, 1, 2],
+        &engine,
+        false,
+        None,
+        engine.opts.min_blob_size,
+    );
 
     // No data exists and delete-prefixes can be cleaned too.
     let mut wb = WriteBatch::new(1);
@@ -182,7 +243,13 @@ fn test_truncate_ts_request() {
     // TODO: disable compaction, otherwise this case would be unstable.
     let (engine, applier_tx) = new_test_engine();
     let version = 1000;
-    load_data(10, 50, version, applier_tx.clone());
+    load_data(
+        10,
+        50,
+        version,
+        applier_tx.clone(),
+        engine.opts.min_blob_size,
+    );
     // truncate ts.
     let mut wb = WriteBatch::new(1);
     let truncate_ts = TruncateTs::from(version + 10);
@@ -276,9 +343,21 @@ fn test_truncate_ts() {
         assert_eq!(length, 0);
     };
 
-    load_data(0, 300, 1000, applier_tx.clone());
-    load_data(100, 400, 2000, applier_tx.clone());
-    load_data(200, 500, 3000, applier_tx.clone());
+    load_data(0, 300, 1000, applier_tx.clone(), engine.opts.min_blob_size);
+    load_data(
+        100,
+        400,
+        2000,
+        applier_tx.clone(),
+        engine.opts.min_blob_size,
+    );
+    load_data(
+        200,
+        500,
+        3000,
+        applier_tx.clone(),
+        engine.opts.min_blob_size,
+    );
 
     const ALL_CFS: &[usize] = &[0, 1, 2];
     const WRT_EXT_CFS: &[usize] = &[0, 2];
@@ -288,34 +367,142 @@ fn test_truncate_ts() {
         set_truncate_ts(3000);
         thread::sleep(Duration::from_secs(1));
         wait_for_truncate_ts();
-        check_get(0, 100, u64::MAX, ALL_CFS, &engine, true, Some(1000));
-        check_get(100, 300, 1000, ALL_CFS, &engine, true, Some(1000));
-        check_get(100, 200, u64::MAX, ALL_CFS, &engine, true, Some(2000));
-        check_get(200, 400, 2000, ALL_CFS, &engine, true, Some(2000));
-        check_get(200, 500, u64::MAX, ALL_CFS, &engine, true, Some(3000));
+        check_get(
+            0,
+            100,
+            u64::MAX,
+            ALL_CFS,
+            &engine,
+            true,
+            Some(1000),
+            engine.opts.min_blob_size,
+        );
+        check_get(
+            100,
+            300,
+            1000,
+            ALL_CFS,
+            &engine,
+            true,
+            Some(1000),
+            engine.opts.min_blob_size,
+        );
+        check_get(
+            100,
+            200,
+            u64::MAX,
+            ALL_CFS,
+            &engine,
+            true,
+            Some(2000),
+            engine.opts.min_blob_size,
+        );
+        check_get(
+            200,
+            400,
+            2000,
+            ALL_CFS,
+            &engine,
+            true,
+            Some(2000),
+            engine.opts.min_blob_size,
+        );
+        check_get(
+            200,
+            500,
+            u64::MAX,
+            ALL_CFS,
+            &engine,
+            true,
+            Some(3000),
+            engine.opts.min_blob_size,
+        );
     }
 
     for truncate_ts in [2999, 2000] {
         set_truncate_ts(truncate_ts);
         wait_for_truncate_ts();
-        check_get(0, 100, u64::MAX, ALL_CFS, &engine, true, Some(1000));
-        check_get(100, 300, 1000, ALL_CFS, &engine, true, Some(1000));
-        check_get(100, 400, u64::MAX, ALL_CFS, &engine, true, Some(2000));
-        check_get(400, 500, u64::MAX, WRT_EXT_CFS, &engine, false, None);
+        check_get(
+            0,
+            100,
+            u64::MAX,
+            ALL_CFS,
+            &engine,
+            true,
+            Some(1000),
+            engine.opts.min_blob_size,
+        );
+        check_get(
+            100,
+            300,
+            1000,
+            ALL_CFS,
+            &engine,
+            true,
+            Some(1000),
+            engine.opts.min_blob_size,
+        );
+        check_get(
+            100,
+            400,
+            u64::MAX,
+            ALL_CFS,
+            &engine,
+            true,
+            Some(2000),
+            engine.opts.min_blob_size,
+        );
+        check_get(
+            400,
+            500,
+            u64::MAX,
+            WRT_EXT_CFS,
+            &engine,
+            false,
+            None,
+            engine.opts.min_blob_size,
+        );
     }
 
     for truncate_ts in [1999, 1000] {
         set_truncate_ts(truncate_ts as u64);
         wait_for_truncate_ts();
-        check_get(0, 300, u64::MAX, ALL_CFS, &engine, true, Some(1000));
-        check_get(300, 500, u64::MAX, WRT_EXT_CFS, &engine, false, None);
+        check_get(
+            0,
+            300,
+            u64::MAX,
+            ALL_CFS,
+            &engine,
+            true,
+            Some(1000),
+            engine.opts.min_blob_size,
+        );
+        check_get(
+            300,
+            500,
+            u64::MAX,
+            WRT_EXT_CFS,
+            &engine,
+            false,
+            None,
+            engine.opts.min_blob_size,
+        );
     }
 
     {
         // Truncate all.
         set_truncate_ts(999);
         wait_for_truncate_ts();
-        check_get(0, 500, u64::MAX, WRT_EXT_CFS, &engine, false, None);
+        check_get(
+            0,
+            500,
+            u64::MAX,
+            WRT_EXT_CFS,
+            &engine,
+            false,
+            None,
+            engine.opts.min_blob_size,
+        );
     }
 }
 
@@ -581,6 +768,17 @@ fn new_initial_cs() -> pb::ChangeSet {
 }
 
 fn new_test_options(path: impl AsRef<Path>) -> Options {
+    let min_blob_size: u32 = match env::var("MIN_BLOB_SIZE") {
+        Ok(val) => match val.trim().parse() {
+            Ok(n) => n,
+            Err(e) => {
+                warn!("MIN_BLOB_SIZE=<number>, got {}", e);
+                1024
+            }
+        },
+        Err(_) => 1024,
+    };
+    info!("MIN_BLOB_SIZE={}", min_blob_size);
     let mut opts = Options::default();
     opts.local_dir = path.as_ref().to_path_buf();
     opts.base_size = 64 << 10;
@@ -588,17 +786,29 @@ fn new_test_options(path: impl AsRef<Path>) -> Options {
     opts.table_builder_options.max_table_size = 16 << 10;
     opts.max_mem_table_size = 16 << 10;
     opts.num_compactors = 2;
+    opts.min_blob_size = min_blob_size;
     opts
 }
 
-fn i_to_key(i: i32) -> Vec<u8> {
-    format!("key{:06}", i).into_bytes()
+fn i_to_key(i: i32, min_blob_size: u32) -> String {
+    if min_blob_size > 0 {
+        // 3 -> strlen("key")
+        format!("key{:0>1$}", i, min_blob_size as usize - 3)
+    } else {
+        format!("key{:0>1$}", i, 6)
+    }
 }
 
-fn load_data(begin: usize, end: usize, version: u64, tx: mpsc::Sender<ApplyTask>) {
+fn load_data(
+    begin: usize,
+    end: usize,
+    version: u64,
+    tx: mpsc::Sender<ApplyTask>,
+    min_blob_size: u32,
+) {
     let mut wb = WriteBatch::new(1);
     for i in begin..end {
-        let key = format!("key{:06}", i);
+        let key = i_to_key(i as i32, min_blob_size);
         for cf in 0..3 {
             let val = key.repeat(cf + 2);
             let version = if cf == 1 { 0 } else { version };
@@ -633,9 +843,10 @@ fn check_get(
     en: &Engine,
     exist: bool,
     check_version: Option<u64>,
+    min_blob_size: u32,
 ) {
     for i in begin..end {
-        let key = format!("key{:06}", i);
+        let key = i_to_key(i as i32, min_blob_size);
         let shard = get_shard_for_key(key.as_bytes(), en);
         let snap = SnapAccess::new(&shard);
         for &cf in cfs {
@@ -649,7 +860,12 @@ fn check_get(
                         key, shard.id, shard.ver, cf, shard_stats,
                     );
                 }
-                assert_eq!(item.get_value(), key.repeat(cf + 2).as_bytes());
+                if item.is_external_link() {
+                    let bytes = snap.fetch_from_blob_store(&item);
+                    assert_eq!(bytes, key.repeat(cf + 2).as_bytes());
+                } else {
+                    assert_eq!(item.get_value(), key.repeat(cf + 2).as_bytes());
+                }
                 if cf != 1 && check_version.is_some() {
                     assert_eq!(item.version, check_version.unwrap());
                 }
@@ -681,10 +897,15 @@ fn check_iterater(begin: usize, end: usize, en: &Engine) {
                 if iter.key.chunk() >= shard.end.chunk() {
                     break;
                 }
-                let key = format!("key{:06}", i);
+                let key = i_to_key(i as i32, en.opts.min_blob_size);
                 assert_eq!(iter.key(), key.as_bytes());
                 let item = iter.item();
-                assert_eq!(item.get_value(), key.repeat(cf + 2).as_bytes());
+                if item.is_external_link() {
+                    let bytes = snap.fetch_from_blob_store(&item);
+                    assert_eq!(bytes, key.repeat(cf + 2).as_bytes());
+                } else {
+                    assert_eq!(item.get_value(), key.repeat(cf + 2).as_bytes());
+                };
                 i += 1;
                 iter.next();
             }

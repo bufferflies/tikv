@@ -11,6 +11,7 @@ use crate::table::{
     Error, Result,
 };
 
+#[derive(Clone)]
 pub struct BlobTable {
     file: Arc<dyn File>,
     footer: BlobFooter,
@@ -60,12 +61,12 @@ impl BlobTable {
         data.advance(4);
         let val_len = LittleEndian::read_u32(&data);
         data.advance(4);
+        assert_eq!(val_len, size);
         assert!(val_len == size);
         let val = data.chunk();
         if self.footer.checksum_type == CRC32C && checksum != crc32c::crc32c(val) {
             return Err(Error::InvalidChecksum("blob checkusm mismatch".to_owned()));
         }
-
         Ok(Bytes::copy_from_slice(val))
     }
 
@@ -113,6 +114,25 @@ impl BlobTable {
         };
     }
 
+    pub fn id(&self) -> u64 {
+        self.file.id()
+    }
+
+    pub fn version(&self) -> u64 {
+        self.footer.version
+    }
+
+    pub fn smallest_key(&self) -> &[u8] {
+        &self.smallest_key
+    }
+
+    pub fn biggest_key(&self) -> &[u8] {
+        &self.biggest_key
+    }
+
+    pub fn size(&self) -> u64 {
+        self.file.size()
+    }
     pub fn smallest_biggest_key(&self) -> (&[u8], &[u8]) {
         (self.smallest_key.chunk(), self.biggest_key.chunk())
     }
@@ -185,39 +205,70 @@ impl BlobPrefetcher {
 mod tests {
     use std::sync::Arc;
 
-    use crate::table::{sstable, Value};
+    use rand::{distributions::Alphanumeric, rngs::ThreadRng, Rng};
+
+    use crate::table::{sstable, ExternalLink, Value};
+
+    fn get_blob_text(max_len: usize, rng: &mut ThreadRng) -> String {
+        let len = rng.gen_range(1..max_len);
+        rng.sample_iter(&Alphanumeric)
+            .take(len)
+            .map(char::from)
+            .collect()
+    }
+
+    struct TestData {
+        blob: String,
+        external_link: ExternalLink,
+    }
 
     #[test]
     fn test_basic() {
-        let mut builder = super::BlobTableBuilder::new(0, 0, 0);
-        let mut offsets = Vec::new();
-        for i in 0..100 {
-            let key_str = format!("key_{}", i);
-            let val_str = format!("val_{}", i);
-            let val_buf = Value::encode_buf(b'A', &[0], 0, val_str.as_bytes());
-            let (offset, _) = builder.add(key_str.as_bytes(), Value::decode(val_buf.as_slice()));
-            offsets.push(offset);
+        let mut rng = rand::thread_rng();
+        let mut builder = super::BlobTableBuilder::new(0, 0, sstable::builder::NO_COMPRESSION, 0);
+        let mut test_data = Vec::new();
+        let meta: u8 = 0;
+
+        for i in 0..128 {
+            let key = format!("key_{}", i);
+            let blob = get_blob_text(64, &mut rng);
+            let encoded = Value::encode_buf(meta, &[0], 0, blob.as_bytes());
+            let value = Value::decode(encoded.as_slice());
+            // In this test assume that all values are converted to external links.
+            let mut external_link = ExternalLink::new();
+            let (offset, len) = builder.add(key.as_bytes(), &value);
+            external_link.len = len;
+            external_link.offset = offset;
+
+            test_data.push(TestData {
+                blob,
+                external_link,
+            });
         }
+
         let file = sstable::InMemFile::new(1, builder.finish());
         let table = super::BlobTable::new(Arc::new(file)).unwrap();
-        for i in 0..100 {
-            let expected_val = format!("val_{}", i);
-            let val = table.get(offsets[i], expected_val.len() as u32).unwrap();
-            assert_eq!(val, expected_val.as_bytes());
+
+        for td in &mut test_data {
+            let blob = table
+                .get(td.external_link.offset, td.external_link.len)
+                .unwrap();
+            assert_eq!(td.blob.as_bytes(), blob);
         }
-        assert_eq!(table.smallest_key, format!("key_{}", 0).as_bytes());
-        assert_eq!(table.biggest_key, format!("key_{}", 99).as_bytes());
+
+        assert_eq!(table.smallest_key, format!("key_{}", 0));
+        assert_eq!(table.biggest_key, format!("key_{}", 127));
     }
 
     #[test]
     fn test_prefetcher() {
-        let mut builder = super::BlobTableBuilder::new(0, 0, 0);
+        let mut builder = super::BlobTableBuilder::new(0, 0, 0, 0);
         let mut offsets = Vec::new();
         for i in 0..100 {
             let key_str = format!("key_{}", i);
             let val_str = format!("val_{}", i);
             let val_buf = Value::encode_buf(b'A', &[0], 0, val_str.as_bytes());
-            let (offset, _) = builder.add(key_str.as_bytes(), Value::decode(val_buf.as_slice()));
+            let (offset, _) = builder.add(key_str.as_bytes(), &Value::decode(val_buf.as_slice()));
             offsets.push(offset);
         }
         let file = sstable::InMemFile::new(1, builder.finish());

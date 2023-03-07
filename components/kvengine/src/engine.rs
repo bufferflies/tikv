@@ -249,7 +249,7 @@ impl EngineCore {
         let engine_id = self.engine_id.load(Ordering::Acquire);
         let shard = Shard::new_for_ingest(engine_id, &cs, self.opts.clone());
         shard.set_active(active);
-        let (l0s, scfs) = create_snapshot_tables(cs.get_snapshot(), &cs);
+        let (l0s, blobs, scfs) = create_snapshot_tables(cs.get_snapshot(), &cs);
         let old_data = shard.get_data();
         let data = ShardData::new(
             shard.start.clone(),
@@ -259,6 +259,7 @@ impl EngineCore {
             old_data.trim_over_bound,
             vec![CfTable::new()],
             l0s,
+            blobs,
             scfs,
         );
         shard.set_data(data);
@@ -421,6 +422,16 @@ impl EngineCore {
         let mut builder =
             table::sstable::Builder::new(0, block_size, ZSTD_COMPRESSION, zstd_compression_lvl);
         let mut fids = vec![];
+
+        for (id, smallest, biggest) in meta.get_blob_files() {
+            let mut blob_create = kvenginepb::BlobCreate::new();
+            warn!("ingest blob file: {}, {:?}, {:?}", id, smallest, biggest);
+            blob_create.set_id(id);
+            blob_create.set_smallest(smallest);
+            blob_create.set_biggest(biggest);
+            ingest_files.mut_blob_creates().push(blob_create);
+        }
+
         iter.rewind();
         while iter.valid() {
             if fids.is_empty() {
@@ -429,13 +440,14 @@ impl EngineCore {
             let id = fids.pop().unwrap();
             builder.reset(id);
             while iter.valid() {
-                builder.add(iter.key(), iter.value());
+                builder.add(iter.key(), &iter.value(), None);
                 iter.next();
                 if builder.estimated_size() > max_table_size || !iter.valid() {
                     info!("builder estimated_size {}", builder.estimated_size());
                     let mut buf = BytesMut::with_capacity(builder.estimated_size());
                     let res = builder.finish(0, &mut buf);
                     let level = meta.get_ingest_level(&res.smallest, &res.biggest);
+                    assert!(!is_blob_file(level));
                     if level == 0 {
                         let mut offsets = vec![buf.len() as u32; NUM_CFS];
                         offsets[0] = 0;
@@ -614,12 +626,16 @@ impl IdVer {
     }
 }
 
-pub fn new_filename(file_id: u64) -> PathBuf {
+pub fn new_sst_filename(file_id: u64) -> PathBuf {
     PathBuf::from(format!("{:016x}.sst", file_id))
 }
 
 pub fn new_tmp_filename(file_id: u64, tmp_id: u64) -> PathBuf {
     PathBuf::from(format!("{:016x}.{}.tmp", file_id, tmp_id))
+}
+
+pub fn new_blob_filename(file_id: u64) -> PathBuf {
+    PathBuf::from(format!("{:016x}.sst", file_id))
 }
 
 fn free_mem(free_rx: mpsc::Receiver<CfTable>) {

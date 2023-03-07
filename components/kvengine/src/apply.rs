@@ -14,6 +14,7 @@ use moka::sync::SegmentedCache;
 use crate::{
     meta::is_move_down,
     table::{
+        blobtable::blobtable::BlobTable,
         memtable::CfTable,
         sstable::{BlockCacheKey, L0Table, LocalFile, SsTable},
     },
@@ -24,6 +25,7 @@ pub struct ChangeSet {
     pub change_set: kvenginepb::ChangeSet,
     pub l0_tables: HashMap<u64, L0Table>,
     pub ln_tables: HashMap<u64, SsTable>,
+    pub blob_tables: HashMap<u64, BlobTable>,
 }
 
 impl Deref for ChangeSet {
@@ -46,6 +48,7 @@ impl ChangeSet {
             change_set,
             l0_tables: HashMap::new(),
             ln_tables: HashMap::new(),
+            blob_tables: HashMap::new(),
         }
     }
 
@@ -56,7 +59,10 @@ impl ChangeSet {
         level: u32,
         cache: SegmentedCache<BlockCacheKey, Bytes>,
     ) -> Result<()> {
-        if level == 0 {
+        if is_blob_file(level) {
+            let blob_table = BlobTable::new(Arc::new(file))?;
+            self.blob_tables.insert(id, blob_table);
+        } else if level == 0 {
             let l0_table = L0Table::new(Arc::new(file), Some(cache), false)?;
             self.l0_tables.insert(id, l0_table);
         } else {
@@ -70,13 +76,25 @@ impl ChangeSet {
 pub(crate) fn create_snapshot_tables(
     snap: &kvenginepb::Snapshot,
     tables: &ChangeSet,
-) -> (Vec<L0Table>, [ShardCf; 3]) {
+) -> (Vec<L0Table>, Option<HashMap<u64, BlobTable>>, [ShardCf; 3]) {
+    let blob_creates = snap.get_blob_creates();
+    let blob_tbl_map = if !blob_creates.is_empty() {
+        let mut blob_tbl_map = HashMap::<u64, BlobTable>::new();
+        for blob_create in blob_creates {
+            let blob_tbl = tables.blob_tables.get(&blob_create.id).unwrap().clone();
+            blob_tbl_map.insert(blob_create.id, blob_tbl);
+        }
+        Some(blob_tbl_map)
+    } else {
+        None
+    };
     let mut l0_tbls = vec![];
     for l0_create in snap.get_l0_creates() {
         let l0_tbl = tables.l0_tables.get(&l0_create.id).unwrap().clone();
         l0_tbls.push(l0_tbl);
     }
     l0_tbls.sort_by(|a, b| b.version().cmp(&a.version()));
+
     let mut scf_builders = vec![];
     for cf in 0..NUM_CFS {
         let scf = ShardCfBuilder::new(cf);
@@ -92,7 +110,7 @@ pub(crate) fn create_snapshot_tables(
         let scf = &mut scf_builders.as_mut_slice()[cf];
         scfs[cf] = scf.build();
     }
-    (l0_tbls, scfs)
+    (l0_tbls, blob_tbl_map, scfs)
 }
 
 impl EngineCore {
@@ -156,8 +174,8 @@ impl EngineCore {
     fn apply_flush(&self, shard: &Shard, cs: &ChangeSet) {
         let flush = cs.get_flush();
         if flush.has_l0_create() {
-            let id = flush.get_l0_create().get_id();
-            let l0_tbl = cs.l0_tables.get(&id).unwrap().clone();
+            let l0_id = flush.get_l0_create().get_id();
+            let l0_tbl = cs.l0_tables.get(&l0_id).unwrap().clone();
             let old_data = shard.get_data();
             let mut new_mem_tbls = old_data.mem_tbls.clone();
             let last = new_mem_tbls.pop().unwrap();
@@ -173,9 +191,31 @@ impl EngineCore {
                     cs.sequence,
                 );
             }
+            let new_blob_tbl_map = if flush.has_blob_create() {
+                let mut new_blob_tbl_map = HashMap::<u64, BlobTable>::new();
+                let blob_id = flush.get_blob_create().get_id();
+                new_blob_tbl_map.insert(blob_id, cs.blob_tables.get(&blob_id).unwrap().clone());
+                Some(new_blob_tbl_map)
+            } else {
+                None
+            };
+            let new_blob_tbl_map = if let Some(blob_tbl_map) = &old_data.blob_tbl_map {
+                let mut new_blob_tbl_map = if let Some(new_blob_tbl_map) = new_blob_tbl_map {
+                    new_blob_tbl_map
+                } else {
+                    HashMap::<u64, BlobTable>::new()
+                };
+                for blob_tbl in blob_tbl_map.values() {
+                    new_blob_tbl_map.insert(blob_tbl.id(), blob_tbl.clone());
+                }
+                Some(new_blob_tbl_map)
+            } else {
+                new_blob_tbl_map
+            };
             let mut new_l0_tbls = Vec::with_capacity(old_data.l0_tbls.len() + 1);
             new_l0_tbls.push(l0_tbl);
             new_l0_tbls.extend_from_slice(old_data.l0_tbls.as_slice());
+
             let new_data = ShardData::new(
                 shard.start.clone(),
                 shard.end.clone(),
@@ -184,6 +224,7 @@ impl EngineCore {
                 old_data.trim_over_bound,
                 new_mem_tbls,
                 new_l0_tbls,
+                new_blob_tbl_map,
                 old_data.cfs.clone(),
             );
             shard.set_data(new_data);
@@ -195,7 +236,8 @@ impl EngineCore {
         let initial_flush = cs.get_initial_flush();
         let data = shard.get_data();
         let mut mem_tbls = data.mem_tbls.clone();
-        let (l0s, scfs) = create_snapshot_tables(initial_flush, cs);
+
+        let (l0s, blob_tbl_map, scfs) = create_snapshot_tables(initial_flush, cs);
         mem_tbls.retain(|x| {
             let version = x.get_version();
             let flushed =
@@ -213,6 +255,7 @@ impl EngineCore {
             data.trim_over_bound,
             mem_tbls,
             l0s,
+            blob_tbl_map,
             scfs,
         );
         shard.set_data(new_data);
@@ -237,8 +280,10 @@ impl EngineCore {
             return;
         }
         let data = shard.get_data();
-        let mut new_l0s = data.l0_tbls.clone();
         let mut new_cfs = data.cfs.clone();
+        let mut new_l0s = data.l0_tbls.clone();
+        let mut new_blob_tbl_map = data.blob_tbl_map.clone();
+        assert!(!is_blob_file(comp.level));
         if comp.level == 0 {
             new_l0s.retain(|x| {
                 let is_deleted = comp.get_top_deletes().contains(&x.id());
@@ -247,6 +292,18 @@ impl EngineCore {
                 }
                 !is_deleted
             });
+            if let Some(new_blob_tbl_map) = &mut new_blob_tbl_map {
+                new_blob_tbl_map.retain(|_, v| {
+                    let is_deleted = comp.get_top_deletes().contains(&v.id());
+                    if is_deleted {
+                        del_files.insert(
+                            v.id(),
+                            shard.cover_full_table(v.smallest_key(), v.biggest_key()),
+                        );
+                    }
+                    !is_deleted
+                });
+            }
             for cf in 0..NUM_CFS {
                 let new_l1 = self.new_level(shard, cs, &data, cf, &mut del_files, true);
                 new_cfs[cf].set_level(new_l1);
@@ -271,6 +328,7 @@ impl EngineCore {
             data.trim_over_bound,
             data.mem_tbls.clone(),
             new_l0s,
+            new_blob_tbl_map,
             new_cfs,
         );
         shard.set_data(new_data);
@@ -282,9 +340,10 @@ impl EngineCore {
         data: &ShardData,
         cs: &ChangeSet,
         tc: &pb::TableChange,
-    ) -> (Vec<L0Table>, [ShardCf; 3]) {
+    ) -> (Vec<L0Table>, Option<HashMap<u64, BlobTable>>, [ShardCf; 3]) {
         let mut new_l0s = data.l0_tbls.clone();
         let mut new_cfs = data.cfs.clone();
+        let mut new_blob_tbl_map = data.blob_tbl_map.clone();
         // Group files by cf and level.
         let mut grouped = HashMap::new();
         for deleted in tc.get_table_deletes() {
@@ -307,10 +366,21 @@ impl EngineCore {
                 new_l0s.retain(|l0| !deletes.contains(&l0.id()));
                 new_l0s.extend(
                     creates
+                        .clone()
                         .into_iter()
                         .map(|id| cs.l0_tables.get(&id).unwrap().clone()),
                 );
                 new_l0s.sort_by(|a, b| b.version().cmp(&a.version()));
+                if let Some(new_blob_tbl_map) = &mut new_blob_tbl_map {
+                    new_blob_tbl_map.retain(|_, v| !deletes.contains(&v.id()));
+                    let _ = creates
+                        .into_iter()
+                        .filter(|id: &u64| cs.blob_tables.get(id).is_some())
+                        .map(|id| {
+                            new_blob_tbl_map
+                                .insert(id, (*(cs.blob_tables.get(&id).unwrap())).clone())
+                        });
+                }
             } else {
                 let old_level = new_cfs[cf].get_level(level);
                 let mut new_level_tables = old_level.tables.as_ref().clone();
@@ -326,14 +396,14 @@ impl EngineCore {
             }
         }
 
-        (new_l0s, new_cfs)
+        (new_l0s, new_blob_tbl_map, new_cfs)
     }
 
     fn apply_destroy_range(&self, shard: &Shard, cs: &ChangeSet) {
         assert!(cs.has_destroy_range());
         let data = shard.get_data();
         let tc = cs.get_destroy_range();
-        let (new_l0s, new_cfs) = self.get_sstables_from_table_change(&data, cs, tc);
+        let (new_l0s, blob_tbl_map, new_cfs) = self.get_sstables_from_table_change(&data, cs, tc);
 
         assert_eq!(cs.get_property_key(), DEL_PREFIXES_KEY);
         let done = DeletePrefixes::unmarshal(cs.get_property_value());
@@ -345,6 +415,7 @@ impl EngineCore {
             data.trim_over_bound,
             data.mem_tbls.clone(),
             new_l0s,
+            blob_tbl_map,
             new_cfs,
         );
         let new_del_prefixes = new_data.del_prefixes.marshal();
@@ -363,8 +434,7 @@ impl EngineCore {
         assert!(cs.has_truncate_ts());
         let data = shard.get_data();
         let tc = cs.get_truncate_ts();
-        let (new_l0s, new_cfs) = self.get_sstables_from_table_change(&data, cs, tc);
-
+        let (new_l0s, blob_tbl_map, new_cfs) = self.get_sstables_from_table_change(&data, cs, tc);
         assert_eq!(cs.get_property_key(), TRUNCATE_TS_KEY);
         let mut new_truncate_ts = data.truncate_ts;
         let truncated_ts = TruncateTs::unmarshal(cs.get_property_value());
@@ -380,6 +450,7 @@ impl EngineCore {
             data.trim_over_bound,
             data.mem_tbls.clone(),
             new_l0s,
+            blob_tbl_map,
             new_cfs,
         );
         shard.set_data(new_data);
@@ -399,8 +470,7 @@ impl EngineCore {
         assert!(cs.has_trim_over_bound());
         let data = shard.get_data();
         let tc = cs.get_trim_over_bound();
-        let (new_l0s, new_cfs) = self.get_sstables_from_table_change(&data, cs, tc);
-
+        let (new_l0s, blob_tbl_map, new_cfs) = self.get_sstables_from_table_change(&data, cs, tc);
         let new_data = ShardData::new(
             shard.start.clone(),
             shard.end.clone(),
@@ -409,6 +479,7 @@ impl EngineCore {
             false,
             data.mem_tbls.clone(),
             new_l0s,
+            blob_tbl_map,
             new_cfs,
         );
         shard.set_data(new_data);
@@ -486,7 +557,7 @@ impl EngineCore {
     }
 
     fn remove_local_file(&self, file_id: u64) {
-        let local_file_path = self.local_file_path(file_id);
+        let local_file_path = self.local_sst_file_path(file_id);
         if let Err(err) = std::fs::remove_file(local_file_path) {
             error!("failed to remove local file {:?}", err);
         }
@@ -502,6 +573,17 @@ impl EngineCore {
             }
         }
         let old_data = shard.get_data();
+        let mut new_blob_tbl_map = old_data.blob_tbl_map.clone();
+        if let Some(new_blob_tbl_map) = &mut new_blob_tbl_map {
+            for blob_table_create in ingest_files.get_blob_creates() {
+                let blob_table = cs
+                    .blob_tables
+                    .get(&blob_table_create.get_id())
+                    .unwrap()
+                    .clone();
+                new_blob_tbl_map.insert(blob_table.id(), blob_table);
+            }
+        }
         let mut new_l0s = old_data.l0_tbls.clone();
         for l0_create in ingest_files.get_l0_creates() {
             let l0_table = cs.l0_tables.get(&l0_create.get_id()).unwrap().clone();
@@ -529,6 +611,7 @@ impl EngineCore {
             old_data.trim_over_bound,
             old_data.mem_tbls.clone(),
             new_l0s,
+            new_blob_tbl_map,
             new_cfs,
         );
         shard.set_data(new_data);
@@ -553,8 +636,7 @@ impl EngineCore {
         );
         let snap_data = snap_shard.get_data();
         let old_data = shard.get_data();
-
-        let (l0_tbls, cfs) = create_snapshot_tables(cs.get_restore_shard(), cs);
+        let (l0_tbls, blob_tbl_map, cfs) = create_snapshot_tables(cs.get_restore_shard(), cs);
         let new_data = ShardData::new(
             shard.start.clone(),
             shard.end.clone(),
@@ -563,6 +645,7 @@ impl EngineCore {
             snap_data.trim_over_bound,
             vec![CfTable::new()],
             l0_tbls,
+            blob_tbl_map,
             cfs,
         );
         shard.set_data(new_data);

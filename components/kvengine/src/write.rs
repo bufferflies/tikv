@@ -121,6 +121,7 @@ impl Engine {
             data.trim_over_bound,
             new_mem_tbls,
             data.l0_tbls.clone(),
+            data.blob_tbl_map.clone(),
             data.cfs.clone(),
         );
         shard.set_data(new_data);

@@ -52,6 +52,7 @@ message Flush {
   L0Create l0Create = 1;
   Properties properties = 2;
   uint64 version = 3;
+  BlobCreate BlobCreate = 4;
 }
 
 message Snapshot {
@@ -62,9 +63,16 @@ message Snapshot {
   repeated TableCreate tableCreates = 6;
   uint64 baseVersion = 7;
   uint64 data_sequence = 8;
+  repeated BlobCreate BlobCreates = 9;
 }
 
 message L0Create {
+  uint64 ID = 1;
+  bytes smallest = 2;
+  bytes biggest = 3;
+}
+
+message BlobCreate {
   uint64 ID = 1;
   bytes smallest = 2;
   bytes biggest = 3;
@@ -93,6 +101,7 @@ message IngestFiles {
   repeated L0Create l0Creates = 1;
   repeated TableCreate tableCreates = 2;
   Properties properties = 3;
+  repeated BlobCreate BlobCreates = 4;
 }
 
 message Properties {

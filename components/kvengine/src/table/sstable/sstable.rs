@@ -160,6 +160,7 @@ pub struct SsTableCore {
     pub tombs: u32,
     pub kv_size: u64,
     open_at: Instant,
+    pub in_use_total_blob_size: u64,
     idx: Mutex<Option<Arc<Index>>>,
     last_idx_access: AtomicU64,
     old_idx: Mutex<Option<Arc<Index>>>,
@@ -198,6 +199,7 @@ impl SsTableCore {
         let mut old_entries = 0;
         let mut tombs = 0;
         let mut kv_size = None;
+        let mut in_use_total_blob_size = 0u64;
         while !prop_slice.is_empty() {
             let (key, val, remain) = parse_prop_data(prop_slice);
             prop_slice = remain;
@@ -215,6 +217,8 @@ impl SsTableCore {
                 tombs = LittleEndian::read_u32(val);
             } else if key == PROP_KEY_KV_SIZE.as_bytes() {
                 kv_size = Some(LittleEndian::read_u64(val));
+            } else if key == PROP_KEY_IN_USE_TOTAL_BLOB_SIZE.as_bytes() {
+                in_use_total_blob_size = LittleEndian::read_u64(val);
             }
         }
         let mut core = Self {
@@ -231,6 +235,7 @@ impl SsTableCore {
             tombs,
             open_at: Instant::now_coarse(),
             kv_size: kv_size.unwrap_or(size),
+            in_use_total_blob_size,
             idx: Mutex::new(None),
             last_idx_access: AtomicU64::default(),
             old_idx: Mutex::new(None),
@@ -642,39 +647,54 @@ pub(crate) static TEST_ID_ALLOC: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(1);
 
 #[cfg(test)]
+pub(crate) fn get_test_value(n: usize) -> String {
+    format!("{}", n)
+}
+
+#[cfg(test)]
 pub(crate) fn generate_key_values(prefix: &str, n: usize) -> Vec<(String, String)> {
-    let mut results = Vec::with_capacity(n);
     assert!(n <= 10000);
+    let mut results = Vec::with_capacity(n);
     for i in 0..n {
-        let k = test_key(prefix, i);
-        let v = format!("{}", i);
+        let k = get_test_key(prefix, i);
+        let v = get_test_value(i);
         results.push((k, v));
     }
     results
 }
 
 #[cfg(test)]
-pub(crate) fn build_test_table_with_kvs(key_vals: Vec<(String, String)>) -> Arc<dyn File> {
-    let id = TEST_ID_ALLOC.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-    let mut builder = new_table_builder_for_test(id);
-    for (k, v) in key_vals {
-        let val_buf = Value::encode_buf(b'A', &[0], 0, v.as_bytes());
-        builder.add(k.as_bytes(), Value::decode(val_buf.as_slice()));
+pub(crate) fn build_test_table_with_kvs(kvs: &Vec<(String, String)>, load_filter: bool) -> SsTable {
+    let sst_fid = TEST_ID_ALLOC.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    let mut sst_builder = new_table_builder_for_test(sst_fid);
+    let meta = 0u8;
+
+    for (k, v) in kvs {
+        let value_buf = Value::encode_buf(meta, &[0], 0, v.as_bytes());
+        let value = &mut Value::decode(value_buf.as_slice());
+        sst_builder.add(k.as_bytes(), value, None);
     }
-    let mut buf = BytesMut::with_capacity(builder.estimated_size());
-    builder.finish(0, &mut buf);
-    Arc::new(sstable::InMemFile::new(id, buf.freeze()))
+
+    let mut buf = BytesMut::with_capacity(sst_builder.estimated_size());
+    sst_builder.finish(0, &mut buf);
+    let sst_file = sstable::InMemFile::new(sst_fid, buf.freeze());
+
+    SsTable::new(Arc::new(sst_file), new_test_cache(), load_filter).unwrap()
 }
 
 #[cfg(test)]
-pub(crate) fn new_table_builder_for_test(id: u64) -> Builder {
-    Builder::new(id, 4096, NO_COMPRESSION, 0)
+pub(crate) fn new_table_builder_for_test(sst_fid: u64) -> Builder {
+    Builder::new(sst_fid, 4096, NO_COMPRESSION, 0)
 }
 
 #[cfg(test)]
-pub(crate) fn build_test_table_with_prefix(prefix: &str, n: usize) -> Arc<dyn File> {
+pub(crate) fn build_test_table_with_prefix(
+    prefix: &str,
+    n: usize,
+    load_filter: bool,
+) -> (SsTable, Vec<(String, String)>) {
     let kvs = generate_key_values(prefix, n);
-    build_test_table_with_kvs(kvs)
+    (build_test_table_with_kvs(&kvs, load_filter), kvs)
 }
 
 #[cfg(test)]
@@ -683,8 +703,18 @@ pub(crate) fn new_test_cache() -> Option<SegmentedCache<BlockCacheKey, Bytes>> {
 }
 
 #[cfg(test)]
-pub(crate) fn test_key(prefix: &str, i: usize) -> String {
+pub(crate) fn get_test_key(prefix: &str, i: usize) -> String {
     format!("{}{:04}", prefix, i)
+}
+
+#[cfg(test)]
+pub(crate) fn create_sst_table(
+    prefix: &str,
+    n: usize,
+    load_filter: bool,
+) -> (SsTable, Vec<(String, String)>) {
+    let kvs = generate_key_values(prefix, n);
+    (build_test_table_with_kvs(&kvs, load_filter), kvs)
 }
 
 #[cfg(test)]
@@ -697,43 +727,47 @@ mod tests {
     use super::*;
     use crate::Iterator;
 
-    fn build_multi_vesion_table(mut key_vals: Vec<(String, String)>) -> (Arc<dyn File>, usize) {
-        let id = TEST_ID_ALLOC.fetch_add(1, Ordering::Relaxed) + 1;
-        let mut builder = new_table_builder_for_test(id);
-        key_vals.sort_by(|a, b| a.0.cmp(&b.0));
-        let mut all_cnt = key_vals.len();
-        for (k, v) in &key_vals {
+    fn create_multi_version_sst(mut kvs: Vec<(String, String)>) -> (SsTable, usize) {
+        let sst_fid = TEST_ID_ALLOC.fetch_add(1, Ordering::Relaxed) + 1;
+        let mut sst_builder = new_table_builder_for_test(sst_fid);
+        kvs.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut all_cnt = kvs.len();
+        let meta = 0u8;
+        for (k, v) in &kvs {
             let val_str = format!("{}_{}", v, 9);
-            let val_buf = Value::encode_buf(b'A', &[0], 9, val_str.as_bytes());
-            builder.add(k.as_bytes(), Value::decode(val_buf.as_slice()));
+            let val_buf = Value::encode_buf(meta, &[0], 9, val_str.as_bytes());
+            sst_builder.add(k.as_bytes(), &Value::decode(val_buf.as_slice()), None);
             let mut r = rand::thread_rng();
             for i in (1..=8).rev() {
                 if r.gen_range(0..4) == 0usize {
                     let val_str = format!("{}_{}", v, i);
-                    let val_buf = Value::encode_buf(b'A', &[0], i, val_str.as_bytes());
-                    builder.add(k.as_bytes(), Value::decode(val_buf.as_slice()));
+                    let val_buf = Value::encode_buf(meta, &[0], i, val_str.as_bytes());
+                    sst_builder.add(k.as_bytes(), &Value::decode(val_buf.as_slice()), None);
                     all_cnt += 1;
                 }
             }
         }
-        let mut buf = BytesMut::with_capacity(builder.estimated_size());
-        builder.finish(0, &mut buf);
-        (Arc::new(sstable::InMemFile::new(id, buf.freeze())), all_cnt)
+        let mut sst_buf = BytesMut::with_capacity(sst_builder.estimated_size());
+        sst_builder.finish(0, &mut sst_buf);
+        let sst_file = Arc::new(sstable::InMemFile::new(sst_fid, sst_buf.freeze()));
+        (
+            SsTable::new(sst_file, new_test_cache(), true).unwrap(),
+            all_cnt,
+        )
     }
 
     #[test]
     fn test_table_iterator() {
         for n in 99..=101 {
-            let file = build_test_table_with_prefix("key", n);
-            let t = SsTable::new(file, new_test_cache(), true).unwrap();
+            let (t, _) = create_sst_table("key", n, true);
             let mut it = t.new_iterator(false, true);
             let mut count = 0;
             it.rewind();
             while it.valid() {
                 let k = it.key();
-                assert_eq!(k, test_key("key", count).as_bytes());
+                assert_eq!(k, get_test_key("key", count).as_bytes());
                 let v = it.value();
-                assert_eq!(v.get_value(), format!("{}", count).as_bytes());
+                assert_eq!(v.get_value(), get_test_value(count).as_bytes());
                 count += 1;
                 it.next()
             }
@@ -742,18 +776,16 @@ mod tests {
 
     #[test]
     fn test_point_get() {
-        let kvs = generate_key_values("key", 8000);
-        let tf = build_test_table_with_kvs(kvs);
-        let t = SsTable::new(tf, new_test_cache(), true).unwrap();
+        let (t, _) = create_sst_table("key", 8000, true);
         for i in 0..8000 {
-            let k = test_key("key", i);
+            let k = get_test_key("key", i);
             let k_h = farmhash::fingerprint64(k.as_bytes());
             let mut v_mem_holder = vec![];
             let v = t.get(k.as_bytes(), u64::MAX, k_h, &mut v_mem_holder);
             assert!(!v.is_empty())
         }
         for i in 8000..10000 {
-            let k = test_key("key", i);
+            let k = get_test_key("key", i);
             let k_h = farmhash::fingerprint64(k.as_bytes());
             let mut v_mem_holder = vec![];
             let v = t.get(k.as_bytes(), u64::MAX, k_h, &mut v_mem_holder);
@@ -765,14 +797,12 @@ mod tests {
     fn test_seek_to_first() {
         let nums = &[99, 100, 101, 199, 200, 250, 9999, 10000];
         for n in nums {
-            let tf = build_test_table_with_prefix("key", *n);
-            let t = SsTable::new(tf, new_test_cache(), true).unwrap();
+            let (t, _) = create_sst_table("key", *n, true);
             let mut it = t.new_iterator(false, true);
             it.rewind();
             assert!(it.valid());
             let v = it.value();
-            assert_eq!(v.get_value(), "0".as_bytes());
-            assert_eq!(v.meta, b'A');
+            assert_eq!(v.get_value(), get_test_value(0).as_bytes());
             assert_eq!(v.user_meta(), &[0u8]);
         }
     }
@@ -796,20 +826,19 @@ mod tests {
     fn test_seek_to_last() {
         let nums = vec![99, 100, 101, 199, 200, 250, 9999, 10000];
         for n in nums {
-            let tf = build_test_table_with_prefix("key", n);
-            let t = SsTable::new(tf, new_test_cache(), true).unwrap();
+            let (t, _) = create_sst_table("key", n, true);
             let mut it = t.new_iterator(true, true);
             it.rewind();
             assert!(it.valid());
             let v = it.value();
-            assert_eq!(v.get_value(), format!("{}", n - 1).as_bytes());
-            assert_eq!(v.meta, b'A');
+            assert_eq!(v.get_value(), get_test_value(n - 1).as_bytes());
+            assert!(!v.is_external_link());
             assert_eq!(v.user_meta(), &[0u8]);
             it.next();
             assert!(it.valid());
             let v = it.value();
-            assert_eq!(v.get_value(), format!("{}", n - 2).as_bytes());
-            assert_eq!(v.meta, b'A');
+            assert_eq!(v.get_value(), get_test_value(n - 2).as_bytes());
+            assert!(!v.is_external_link());
             assert_eq!(v.user_meta(), &[0u8]);
         }
     }
@@ -825,8 +854,7 @@ mod tests {
             TestData::new("k9999", true, "k9999"),
             TestData::new("z", false, ""),
         ];
-        let tf = build_test_table_with_prefix("k", 10000);
-        let t = SsTable::new(tf, new_test_cache(), true).unwrap();
+        let (t, _) = create_sst_table("k", 10000, true);
         let mut it = t.new_iterator(false, true);
         for td in test_datas {
             it.seek(td.input.as_bytes());
@@ -850,8 +878,7 @@ mod tests {
             TestData::new("k9999", true, "k9999"),
             TestData::new("z", true, "k9999"),
         ];
-        let tf = build_test_table_with_prefix("k", 10000);
-        let t = SsTable::new(tf, new_test_cache(), true).unwrap();
+        let (t, _) = create_sst_table("k", 10000, true);
         let mut it = t.new_iterator(true, true);
         for td in test_datas {
             it.seek(td.input.as_bytes());
@@ -868,18 +895,17 @@ mod tests {
     fn test_iterate_from_start() {
         let nums = vec![99, 100, 101, 199, 200, 250, 9999, 10000];
         for n in nums {
-            let file = build_test_table_with_prefix("key", n);
-            let t = SsTable::new(file, new_test_cache(), true).unwrap();
+            let (t, _) = create_sst_table("key", n, true);
             let mut it = t.new_iterator(false, true);
             let mut count = 0;
             it.rewind();
             assert!(it.valid());
             while it.valid() {
                 let k = it.key();
-                assert_eq!(k, test_key("key", count).as_bytes());
+                assert_eq!(k, get_test_key("key", count).as_bytes());
                 let v = it.value();
-                assert_eq!(v.get_value(), format!("{}", count).as_bytes());
-                assert_eq!(v.meta, b'A');
+                assert_eq!(v.get_value(), get_test_value(count).as_bytes());
+                assert!(!v.is_external_link());
                 count += 1;
                 it.next()
             }
@@ -890,8 +916,7 @@ mod tests {
     fn test_iterate_from_end() {
         let nums = vec![99, 100, 101, 199, 200, 250, 9999, 10000];
         for n in nums {
-            let file = build_test_table_with_prefix("key", n);
-            let t = SsTable::new(file, new_test_cache(), true).unwrap();
+            let (t, _) = create_sst_table("key", n, true);
             let mut it = t.new_iterator(true, true);
             it.seek("zzzzzz".as_bytes()); // Seek to end, an invalid element.
             assert!(it.valid());
@@ -899,8 +924,8 @@ mod tests {
             for i in (0..n).rev() {
                 assert!(it.valid());
                 let v = it.value();
-                assert_eq!(v.get_value(), format!("{}", i).as_bytes());
-                assert_eq!(v.meta, b'A');
+                assert_eq!(v.get_value(), get_test_value(i).as_bytes());
+                assert!(!v.is_external_link());
                 it.next();
             }
             it.next();
@@ -910,33 +935,30 @@ mod tests {
 
     #[test]
     fn test_table() {
-        let tf = build_test_table_with_prefix("key", 10000);
-        let t = SsTable::new(tf, new_test_cache(), true).unwrap();
+        let (t, _) = create_sst_table("key", 10000, true);
         let mut it = t.new_iterator(false, true);
         let mut kid = 1010_usize;
-        let seek = test_key("key", kid);
+        let seek = get_test_key("key", kid);
         it.seek(seek.as_bytes());
         while it.valid() {
-            assert_eq!(it.key(), test_key("key", kid).as_bytes());
+            assert_eq!(it.key(), get_test_key("key", kid).as_bytes());
             kid += 1;
             it.next()
         }
         assert_eq!(kid, 10000);
 
-        it.seek(test_key("key", 99999).as_bytes());
+        it.seek(get_test_key("key", 99999).as_bytes());
         assert!(!it.valid());
 
-        it.seek(test_key("kex", 0).as_bytes());
+        it.seek(get_test_key("kex", 0).as_bytes());
         assert!(it.valid());
-        assert_eq!(it.key(), test_key("key", 0).as_bytes());
+        assert_eq!(it.key(), get_test_key("key", 0).as_bytes());
     }
 
     #[test]
     fn test_iterate_back_and_forth() {
-        let tf = build_test_table_with_prefix("key", 10000);
-        let t = SsTable::new(tf, new_test_cache(), true).unwrap();
-
-        let seek = test_key("key", 1010);
+        let (t, _) = create_sst_table("key", 10000, true);
+        let seek = get_test_key("key", 1010);
         let mut it = t.new_iterator(false, true);
         it.seek(seek.as_bytes());
         assert!(it.valid());
@@ -946,33 +968,33 @@ mod tests {
         it.next();
         it.next();
         assert!(it.valid());
-        assert_eq!(it.key(), test_key("key", 1008).as_bytes());
+        assert_eq!(it.key(), get_test_key("key", 1008).as_bytes());
 
         it.set_reversed(false);
         it.next();
         it.next();
         assert_eq!(it.valid(), true);
-        assert_eq!(it.key(), test_key("key", 1010).as_bytes());
+        assert_eq!(it.key(), get_test_key("key", 1010).as_bytes());
 
-        it.seek(test_key("key", 2000).as_bytes());
+        it.seek(get_test_key("key", 2000).as_bytes());
         assert_eq!(it.valid(), true);
-        assert_eq!(it.key(), test_key("key", 2000).as_bytes());
+        assert_eq!(it.key(), get_test_key("key", 2000).as_bytes());
 
         it.set_reversed(true);
         it.next();
         assert_eq!(it.valid(), true);
-        assert_eq!(it.key(), test_key("key", 1999).as_bytes());
+        assert_eq!(it.key(), get_test_key("key", 1999).as_bytes());
 
         it.set_reversed(false);
         it.rewind();
-        assert_eq!(it.key(), test_key("key", 0).as_bytes());
+        assert_eq!(it.key(), get_test_key("key", 0).as_bytes());
     }
 
     #[test]
     fn test_iterate_multi_version() {
         let num = 4000;
-        let (tf, all_cnt) = build_multi_vesion_table(generate_key_values("key", num));
-        let t = SsTable::new(tf, new_test_cache(), true).unwrap();
+        let kvs = generate_key_values("key", num);
+        let (t, all_cnt) = create_multi_version_sst(kvs);
         let mut it = t.new_iterator(false, true);
         let mut it_cnt = 0;
         let mut last_key = BytesMut::new();
@@ -992,7 +1014,7 @@ mod tests {
         assert_eq!(it_cnt, all_cnt);
         let mut r = rand::thread_rng();
         for _ in 0..1000 {
-            let k = test_key("key", r.gen_range(0..num));
+            let k = get_test_key("key", r.gen_range(0..num));
             let ver = 5 + r.gen_range(0..5) as u64;
             let k_h = farmhash::fingerprint64(k.as_bytes());
             let mut v_mem_holder = vec![];
@@ -1013,7 +1035,7 @@ mod tests {
             rev_it.next();
         }
         for _ in 0..1000 {
-            let k = test_key("key", r.gen_range(0..num));
+            let k = get_test_key("key", r.gen_range(0..num));
             // reverse iterator never seek to the same key with smaller version.
             rev_it.seek(k.as_bytes());
             if !rev_it.valid() {
@@ -1026,16 +1048,15 @@ mod tests {
 
     #[test]
     fn test_uni_iterator() {
-        let tf = build_test_table_with_prefix("key", 10000);
-        let t = SsTable::new(tf, new_test_cache(), true).unwrap();
+        let (t, _) = create_sst_table("key", 10000, true);
         {
             let mut it = t.new_iterator(false, true);
             let mut cnt = 0;
             it.rewind();
             while it.valid() {
                 let v = it.value();
-                assert_eq!(v.get_value(), format!("{}", cnt).as_bytes());
-                assert_eq!(v.meta, b'A');
+                assert_eq!(v.get_value(), get_test_value(cnt).as_bytes());
+                assert!(!v.is_external_link());
                 cnt += 1;
                 it.next();
             }
@@ -1047,8 +1068,8 @@ mod tests {
             it.rewind();
             while it.valid() {
                 let v = it.value();
-                assert_eq!(v.get_value(), format!("{}", 10000 - 1 - cnt).as_bytes());
-                assert_eq!(v.meta, b'A');
+                assert_eq!(v.get_value(), get_test_value(10000 - 1 - cnt).as_bytes());
+                assert!(!v.is_external_link());
                 cnt += 1;
                 it.next();
             }
@@ -1057,9 +1078,7 @@ mod tests {
 
     #[test]
     fn test_build_and_load_filter() {
-        let kvs = generate_key_values("key", 10000);
-        let tf = build_test_table_with_kvs(kvs.clone());
-        let t = SsTable::new(tf, new_test_cache(), false).unwrap();
+        let (t, kvs) = create_sst_table("key", 10000, false);
         let cache_key = BlockCacheKey::new(t.id(), t.filter_offset());
         assert!(t.cache.as_ref().unwrap().get(&cache_key).is_none());
         let filter = t.load_filter().unwrap();
@@ -1072,8 +1091,7 @@ mod tests {
 
     #[bench]
     fn bench_load_filter(b: &mut test::Bencher) {
-        let file = build_test_table_with_prefix("key", 10000);
-        let t = SsTable::new(file, new_test_cache(), true).unwrap();
+        let (t, _) = create_sst_table("key", 10000, true);
         b.iter(|| {
             test::black_box(t.load_filter().unwrap());
         });
@@ -1081,8 +1099,7 @@ mod tests {
 
     #[bench]
     fn bench_cache_filter(b: &mut test::Bencher) {
-        let file = build_test_table_with_prefix("key", 10000);
-        let t = SsTable::new(file, new_test_cache(), true).unwrap();
+        let (t, _) = create_sst_table("key", 10000, true);
         t.load_filter().unwrap();
         let cache_key = BlockCacheKey::new(t.id(), t.filter_offset());
         b.iter(|| {
@@ -1092,8 +1109,7 @@ mod tests {
 
     #[bench]
     fn bench_decode_filter(b: &mut test::Bencher) {
-        let file = build_test_table_with_prefix("key", 10000);
-        let t = SsTable::new(file, new_test_cache(), true).unwrap();
+        let (t, _) = create_sst_table("key", 10000, true);
         let data = t.read_filter_data_from_file().unwrap();
         b.iter(|| {
             test::black_box(t.decode_filter(&data).unwrap());

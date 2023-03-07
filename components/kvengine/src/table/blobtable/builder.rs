@@ -11,7 +11,7 @@ use crate::table::{
 };
 
 pub type ValueLength = u32; // Max value length is 4GB
-type BlobOffset = u32; // Max blob file size is 4GB
+pub type BlobOffset = u32; // Max blob file size is 4GB
 pub type Checksum = u32;
 
 pub const BLOB_FORMAT_V1: u16 = 1;
@@ -82,6 +82,7 @@ impl BlobFooter {
 
 #[derive(Default)]
 pub struct BlobTableBuilder {
+    fid: u64,
     buf: Vec<u8>,
     checksum_tp: u8,
     compression_tp: u8,
@@ -92,8 +93,9 @@ pub struct BlobTableBuilder {
 }
 
 impl BlobTableBuilder {
-    pub fn new(checksum_tp: u8, compression_tp: u8, compression_lvl: i32) -> Self {
+    pub fn new(fid: u64, checksum_tp: u8, compression_tp: u8, compression_lvl: i32) -> Self {
         Self {
+            fid,
             buf: vec![],
             checksum_tp,
             compression_tp,
@@ -104,7 +106,8 @@ impl BlobTableBuilder {
         }
     }
 
-    pub fn reset(&mut self) {
+    pub fn reset(&mut self, fid: u64) {
+        self.fid = fid;
         self.buf.clear();
         self.total_blob_size = 0;
         self.smallest_key.clear();
@@ -112,7 +115,7 @@ impl BlobTableBuilder {
         self.smallest_key.clear();
     }
 
-    pub fn add(&mut self, key: &[u8], value: Value) -> (BlobOffset, usize) {
+    pub fn add(&mut self, key: &[u8], value: &Value) -> (BlobOffset, ValueLength) {
         if value.value_len() > BlobOffset::max_value() as usize {
             panic!(
                 "value length {} exceeds max value length {}",
@@ -168,7 +171,7 @@ impl BlobTableBuilder {
             &mut slice[begin_off + mem::size_of::<Checksum>()..],
             compressed_len as ValueLength,
         ); // put compressed length at the reserved place.
-        (begin_off as u32, compressed_len)
+        (begin_off as BlobOffset, compressed_len as ValueLength)
     }
 
     fn compress_lz4(uncompressed: &[u8], compressed_buf: &mut Vec<u8>) -> usize {
@@ -240,5 +243,13 @@ impl BlobTableBuilder {
 
     pub fn is_empty(&self) -> bool {
         self.buf.is_empty()
+    }
+
+    pub fn get_fid(&self) -> u64 {
+        self.fid
+    }
+
+    pub fn smallest_biggest_key(&self) -> (&[u8], &[u8]) {
+        (&self.smallest_key, &self.last_key)
     }
 }

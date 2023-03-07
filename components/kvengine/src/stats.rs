@@ -18,7 +18,10 @@ pub struct EngineStats {
     pub mem_tables_size: u64,
     pub l0_tables_count: usize,
     pub l0_tables_size: u64,
+    pub blob_tables_count: usize,
+    pub blob_tables_size: u64,
     pub partial_l0_count: usize,
+    pub partial_blob_count: usize,
     pub partial_ln_count: usize,
     pub cfs_num_files: Vec<usize>,
     pub cf_total_sizes: Vec<u64>,
@@ -78,7 +81,10 @@ impl super::Engine {
             engine_stats.mem_tables_size += shard.mem_table_size;
             engine_stats.l0_tables_count += shard.l0_table_count;
             engine_stats.l0_tables_size += shard.l0_table_size;
+            engine_stats.blob_tables_count += shard.blob_table_count;
+            engine_stats.blob_tables_size += shard.blob_table_size;
             engine_stats.partial_l0_count += shard.partial_l0s;
+            engine_stats.partial_blob_count += shard.partial_blobs;
             engine_stats.partial_ln_count += shard.partial_tbls;
             engine_stats.index_size += shard.index_size;
             engine_stats.in_mem_index_size += shard.in_mem_index_size;
@@ -124,7 +130,9 @@ pub struct ShardStats {
     pub mem_table_count: usize,
     pub mem_table_size: u64,
     pub l0_table_count: usize,
+    pub blob_table_count: usize,
     pub l0_table_size: u64,
+    pub blob_table_size: u64,
     pub cfs: Vec<CfStats>,
     pub index_size: u64,
     pub in_mem_index_size: u64,
@@ -140,6 +148,7 @@ pub struct ShardStats {
     pub write_sequence: u64,
     pub total_size: u64,
     pub partial_l0s: usize,
+    pub partial_blobs: usize,
     pub partial_tbls: usize,
     pub compaction_cf: isize,
     pub compaction_level: usize,
@@ -206,8 +215,28 @@ impl super::Shard {
         }
         total_size += mem_table_size;
         let mut partial_l0s = 0;
+        let mut partial_blobs = 0;
         let l0_table_count = data.l0_tbls.len();
+        let blob_table_count;
         let mut l0_table_size = 0;
+        let mut blob_table_size = 0;
+        if let Some(blob_tbl_map) = &data.blob_tbl_map {
+            blob_table_count = blob_tbl_map.len();
+            // FIXME: Calculate the total size of blob files.
+            let mut blob_table_size = 0;
+            for v in blob_tbl_map.values() {
+                if self.cover_full_table(v.smallest_key(), v.biggest_key()) {
+                    blob_table_size += v.size();
+                } else {
+                    blob_table_size += v.size() / 2;
+                    partial_blobs += 1;
+                }
+            }
+            total_size += blob_table_size;
+        } else {
+            blob_table_size = 0;
+            blob_table_count = 0;
+        }
         for l0_tbl in data.l0_tbls.as_slice() {
             if self.cover_full_table(l0_tbl.smallest(), l0_tbl.biggest()) {
                 l0_table_size += l0_tbl.size();
@@ -300,7 +329,9 @@ impl super::Shard {
             mem_table_count,
             mem_table_size,
             l0_table_count,
+            blob_table_count,
             l0_table_size,
+            blob_table_size,
             cfs,
             base_version: self.get_base_version(),
             meta_sequence: self.get_meta_sequence(),
@@ -316,6 +347,7 @@ impl super::Shard {
             tombs,
             kv_size,
             partial_l0s,
+            partial_blobs,
             partial_tbls,
             compaction_cf,
             compaction_level,

@@ -16,7 +16,7 @@ use super::arena::*;
 use crate::{
     table::{
         is_deleted,
-        table::{Iterator, Value},
+        table::{Iterator, Value, VALUE_VERSION_LEN, VALUE_VERSION_OFF},
     },
     SnapAccess,
 };
@@ -118,11 +118,15 @@ impl WriteBatchEntry {
     }
 
     pub fn encoded_val_size(self) -> usize {
-        1 + 1 + 8 + self.user_meta_len as usize + self.val_len as usize
+        VALUE_VERSION_OFF + VALUE_VERSION_LEN + self.user_meta_len as usize + self.val_len as usize
     }
 
     pub fn encoded_full_size(self) -> usize {
-        2 + self.key_len as usize + 1 + 1 + 8 + self.user_meta_len as usize + self.val_len as usize
+        2 + self.key_len as usize
+            + VALUE_VERSION_OFF
+            + VALUE_VERSION_LEN
+            + self.user_meta_len as usize
+            + self.val_len as usize
     }
 }
 
@@ -917,9 +921,9 @@ mod tests {
 
         let mut wb = WriteBatch::new();
 
-        wb.put("key1".as_bytes(), 56, &[0], 0, val1.as_bytes());
-        wb.put("key2".as_bytes(), 57, &[0], 2, val2.as_bytes());
-        wb.put("key3".as_bytes(), 58, &[0], 0, val3.as_bytes());
+        wb.put("key1".as_bytes(), 0, &[0], 0, val1.as_bytes());
+        wb.put("key2".as_bytes(), 0, &[0], 2, val2.as_bytes());
+        wb.put("key3".as_bytes(), 0, &[0], 0, val3.as_bytes());
 
         l.put_batch_impl(&mut wb, None, 0);
 
@@ -929,7 +933,6 @@ mod tests {
         v = l.get("key1".as_bytes(), 0);
         assert_eq!(v.is_empty(), false);
         assert_eq!(v.get_value(), "00042".as_bytes());
-        assert_eq!(v.meta, 56);
 
         v = l.get("key2".as_bytes(), 0);
         assert_eq!(v.is_empty(), true);
@@ -937,15 +940,13 @@ mod tests {
         v = l.get("key3".as_bytes(), 0);
         assert_eq!(v.is_empty(), false);
         assert_eq!(v.get_value(), "00062".as_bytes());
-        assert_eq!(v.meta, 58);
 
         let mut wb = WriteBatch::new();
-        wb.put("key3".as_bytes(), 12, &[0], 1, val4.as_bytes());
+        wb.put("key3".as_bytes(), 0, &[0], 1, val4.as_bytes());
         l.put_batch_impl(&mut wb, None, 0);
         v = l.get("key3".as_bytes(), 1);
         assert_eq!(v.is_empty(), false);
         assert_eq!(v.get_value(), "00072".as_bytes());
-        assert_eq!(v.meta, 12);
     }
 
     #[test]

@@ -509,6 +509,27 @@ impl Engine {
         Some((self.build_compact_ln_request(shard, &cd), Some(cd)))
     }
 
+    // pub(crate) fn get_in_use_total_blob_size(&self, id_ver: IDVer) ->
+    // Option<HashMap<u64, u64>> { let shard =
+    // self.get_shard_with_ver(id_ver.id, id_ver.ver).ok()?; let pri = shard.
+    // get_compaction_priority()?; let (_, cd) =
+    // self.build_compact_request(&shard, pri)?; let mut in_use_total_blob_size
+    // = HashMap::<u64, u64>::default();
+    //
+    // if let None = cd {
+    // return None;
+    // }
+    //
+    // for sstable in cd.unwrap().top {
+    // let v = in_use_total_blob_size
+    // .entry(sstable.id())
+    // .or_insert_with(|| 0);
+    // v += sstable.in_use_total_blob_size;
+    // }
+    //
+    // Some(in_use_total_blob_size)
+    // }
+
     pub(crate) fn compact(&self, id_ver: IdVer) -> Option<Result<pb::ChangeSet>> {
         let shard = self.get_shard_with_ver(id_ver.id, id_ver.ver).ok()?;
         let tag = shard.tag();
@@ -1240,14 +1261,14 @@ impl CompactL0Helper {
                             // There may have old versions for this key, so convert to delete
                             // tombstone.
                             self.builder
-                                .add(key, table::Value::new_tombstone(val.version));
+                                .add(key, &table::Value::new_tombstone(val.version), None);
                             iter.next_all_version();
                             continue;
                         }
                     }
                 }
             }
-            self.builder.add(key, val);
+            self.builder.add(key, &val, None);
             iter.next_all_version();
         }
         if self.builder.is_empty() {
@@ -1357,9 +1378,9 @@ pub(crate) fn compact_tables(
                         }
                         Decision::MarkTombStone => {
                             if req.overlap {
-                                // There may have old versions for this key, so convert to delete
+                                // There may be old versions for this key, so convert to delete
                                 // tombstone.
-                                builder.add(key, table::Value::new_tombstone(val.version));
+                                builder.add(key, &table::Value::new_tombstone(val.version), None);
                             }
                             iter.next_all_version();
                             continue;
@@ -1367,7 +1388,7 @@ pub(crate) fn compact_tables(
                     }
                 }
             }
-            builder.add(key, val);
+            builder.add(key, &val, None);
             iter.next_all_version();
         }
         if builder.is_empty() {
@@ -1423,7 +1444,7 @@ fn filter(safe_ts: u64, cf: usize, val: table::Value) -> Decision {
     if cf == WRITE_CF {
         if user_meta.len() == USER_META_SIZE {
             let um = UserMeta::from_slice(user_meta);
-            if um.commit_ts < safe_ts && val.get_value().is_empty() {
+            if um.commit_ts < safe_ts && val.is_value_empty() {
                 return Decision::MarkTombStone;
             }
         }
@@ -1594,7 +1615,7 @@ fn compact_destroy_range(
                     while iter.valid() {
                         let key = iter.key();
                         if !del_prefixes.cover_prefix(key) {
-                            builder.add(cf, key, iter.value());
+                            builder.add(cf, key, &iter.value(), None);
                         }
                         iter.next_all_version();
                     }
@@ -1619,7 +1640,7 @@ fn compact_destroy_range(
             while iter.valid() {
                 let key = iter.key();
                 if !del_prefixes.cover_prefix(key) {
-                    builder.add(key, iter.value());
+                    builder.add(key, &iter.value(), None);
                 }
                 iter.next_all_version();
             }
@@ -1710,7 +1731,7 @@ fn compact_truncate_ts(
                         // Keep data in LOCK_CF. Locks would be resolved by TiDB.
                         // TODO: handle async commit
                         if cf == LOCK_CF || value.version <= truncate_ts {
-                            builder.add(cf, key, value);
+                            builder.add(cf, key, &value, None);
                         }
                         iter.next_all_version();
                     }
@@ -1738,7 +1759,7 @@ fn compact_truncate_ts(
                 // Keep data in LOCK_CF. Locks would be resolved by TiDB.
                 // TODO: handle async commit
                 if cf as usize == LOCK_CF || value.version <= truncate_ts {
-                    builder.add(key, value);
+                    builder.add(key, &value, None);
                 }
                 iter.next_all_version();
             }
@@ -1827,7 +1848,7 @@ fn compact_trim_over_bound(
                         if key >= req.end.as_slice() {
                             break;
                         }
-                        builder.add(cf, key, iter.value());
+                        builder.add(cf, key, &iter.value(), None);
                         iter.next_all_version();
                     }
                 }
@@ -1853,7 +1874,7 @@ fn compact_trim_over_bound(
                 if key >= req.end.as_slice() {
                     break;
                 }
-                builder.add(key, iter.value());
+                builder.add(key, &iter.value(), None);
                 iter.next_all_version();
             }
             if builder.is_empty() {

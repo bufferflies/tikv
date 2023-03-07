@@ -5,11 +5,12 @@ use std::{mem, sync::Arc};
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, Bytes, BytesMut};
 
-use super::{builder::META_HAS_OLD, SsTable};
+use super::SsTable;
 use crate::table::{
     search,
     sstable::{Index, BLOCK_FORMAT_V1},
-    table, LocalAddr,
+    table::{self, is_old_version, Value, VALUE_VERSION_LEN},
+    LocalAddr,
 };
 
 #[derive(Default)]
@@ -143,11 +144,15 @@ impl BlockIterator {
         let mut field_off = 2 + diff_key_len;
         self.meta = entry_data[field_off];
         field_off += 1;
-        self.ver = LittleEndian::read_u64(&entry_data[field_off..]);
-        field_off += 8;
-        if self.meta & META_HAS_OLD != 0 {
-            self.old_ver = LittleEndian::read_u64(&entry_data[field_off..]);
-            field_off += 8;
+        {
+            let version = Value::get_version(&entry_data[field_off..]);
+            self.ver = version;
+            field_off += VALUE_VERSION_LEN;
+        }
+        if is_old_version(self.meta) {
+            let version = Value::get_version(&entry_data[field_off..]);
+            self.old_ver = version;
+            field_off += VALUE_VERSION_LEN;
         } else {
             self.old_ver = 0;
         }
@@ -509,14 +514,14 @@ impl table::Iterator for TableIterator {
         self.key_buf.chunk()
     }
 
-    fn value(&self) -> table::Value {
+    fn value(&self) -> Value {
         let bi = if self.iter_state == IterState::NewVersion {
             &self.bi
         } else {
             &self.old_bi
         };
-        let bin = bi.val_addr.get(bi.b.chunk());
-        table::Value::new_with_meta_version(bi.meta, bi.ver, bi.user_meta_len, bin)
+        let buf = bi.val_addr.get(bi.b.chunk());
+        Value::new_with_meta_version(bi.meta, bi.ver, bi.user_meta_len, buf)
     }
 
     fn valid(&self) -> bool {

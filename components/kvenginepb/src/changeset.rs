@@ -1482,6 +1482,7 @@ pub struct Flush {
     pub l0_create: ::protobuf::SingularPtrField<L0Create>,
     pub properties: ::protobuf::SingularPtrField<Properties>,
     pub version: u64,
+    pub blob_create: ::protobuf::SingularPtrField<BlobCreate>,
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
     pub cached_size: ::protobuf::CachedSize,
@@ -1578,6 +1579,39 @@ impl Flush {
     pub fn set_version(&mut self, v: u64) {
         self.version = v;
     }
+
+    // .enginepb.BlobCreate BlobCreate = 4;
+
+
+    pub fn get_blob_create(&self) -> &BlobCreate {
+        self.blob_create.as_ref().unwrap_or_else(|| BlobCreate::default_instance())
+    }
+    pub fn clear_blob_create(&mut self) {
+        self.blob_create.clear();
+    }
+
+    pub fn has_blob_create(&self) -> bool {
+        self.blob_create.is_some()
+    }
+
+    // Param is passed by value, moved
+    pub fn set_blob_create(&mut self, v: BlobCreate) {
+        self.blob_create = ::protobuf::SingularPtrField::some(v);
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_blob_create(&mut self) -> &mut BlobCreate {
+        if self.blob_create.is_none() {
+            self.blob_create.set_default();
+        }
+        self.blob_create.as_mut().unwrap()
+    }
+
+    // Take field
+    pub fn take_blob_create(&mut self) -> BlobCreate {
+        self.blob_create.take().unwrap_or_else(|| BlobCreate::new())
+    }
 }
 
 impl ::protobuf::Message for Flush {
@@ -1588,6 +1622,11 @@ impl ::protobuf::Message for Flush {
             }
         };
         for v in &self.properties {
+            if !v.is_initialized() {
+                return false;
+            }
+        };
+        for v in &self.blob_create {
             if !v.is_initialized() {
                 return false;
             }
@@ -1612,6 +1651,9 @@ impl ::protobuf::Message for Flush {
                     let tmp = is.read_uint64()?;
                     self.version = tmp;
                 },
+                4 => {
+                    ::protobuf::rt::read_singular_message_into(wire_type, is, &mut self.blob_create)?;
+                },
                 _ => {
                     ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
                 },
@@ -1635,6 +1677,10 @@ impl ::protobuf::Message for Flush {
         if self.version != 0 {
             my_size += ::protobuf::rt::value_size(3, self.version, ::protobuf::wire_format::WireTypeVarint);
         }
+        if let Some(ref v) = self.blob_create.as_ref() {
+            let len = v.compute_size();
+            my_size += 1 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
+        }
         my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
         self.cached_size.set(my_size);
         my_size
@@ -1653,6 +1699,11 @@ impl ::protobuf::Message for Flush {
         }
         if self.version != 0 {
             os.write_uint64(3, self.version)?;
+        }
+        if let Some(ref v) = self.blob_create.as_ref() {
+            os.write_tag(4, ::protobuf::wire_format::WireTypeLengthDelimited)?;
+            os.write_raw_varint32(v.get_cached_size())?;
+            v.write_to_with_cached_sizes(os)?;
         }
         os.write_unknown_fields(self.get_unknown_fields())?;
         ::std::result::Result::Ok(())
@@ -1711,6 +1762,11 @@ impl ::protobuf::Message for Flush {
                     |m: &Flush| { &m.version },
                     |m: &mut Flush| { &mut m.version },
                 ));
+                fields.push(::protobuf::reflect::accessor::make_singular_ptr_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<BlobCreate>>(
+                    "BlobCreate",
+                    |m: &Flush| { &m.blob_create },
+                    |m: &mut Flush| { &mut m.blob_create },
+                ));
                 ::protobuf::reflect::MessageDescriptor::new::<Flush>(
                     "Flush",
                     fields,
@@ -1736,6 +1792,7 @@ impl ::protobuf::Clear for Flush {
         self.l0_create.clear();
         self.properties.clear();
         self.version = 0;
+        self.blob_create.clear();
         self.unknown_fields.clear();
     }
 }
@@ -1748,6 +1805,7 @@ impl ::protobuf::PbPrint for Flush {
         ::protobuf::PbPrint::fmt(&self.l0_create, "l0_create", buf);
         ::protobuf::PbPrint::fmt(&self.properties, "properties", buf);
         ::protobuf::PbPrint::fmt(&self.version, "version", buf);
+        ::protobuf::PbPrint::fmt(&self.blob_create, "blob_create", buf);
         if old_len < buf.len() {
           buf.push(' ');
         }
@@ -1761,6 +1819,7 @@ impl ::std::fmt::Debug for Flush {
         ::protobuf::PbPrint::fmt(&self.l0_create, "l0_create", &mut s);
         ::protobuf::PbPrint::fmt(&self.properties, "properties", &mut s);
         ::protobuf::PbPrint::fmt(&self.version, "version", &mut s);
+        ::protobuf::PbPrint::fmt(&self.blob_create, "blob_create", &mut s);
         write!(f, "{}", s)
     }
 }
@@ -1781,6 +1840,7 @@ pub struct Snapshot {
     pub table_creates: ::protobuf::RepeatedField<TableCreate>,
     pub base_version: u64,
     pub data_sequence: u64,
+    pub blob_creates: ::protobuf::RepeatedField<BlobCreate>,
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
     pub cached_size: ::protobuf::CachedSize,
@@ -1961,6 +2021,31 @@ impl Snapshot {
     pub fn set_data_sequence(&mut self, v: u64) {
         self.data_sequence = v;
     }
+
+    // repeated .enginepb.BlobCreate BlobCreates = 9;
+
+
+    pub fn get_blob_creates(&self) -> &[BlobCreate] {
+        &self.blob_creates
+    }
+    pub fn clear_blob_creates(&mut self) {
+        self.blob_creates.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_blob_creates(&mut self, v: ::protobuf::RepeatedField<BlobCreate>) {
+        self.blob_creates = v;
+    }
+
+    // Mutable pointer to the field.
+    pub fn mut_blob_creates(&mut self) -> &mut ::protobuf::RepeatedField<BlobCreate> {
+        &mut self.blob_creates
+    }
+
+    // Take field
+    pub fn take_blob_creates(&mut self) -> ::protobuf::RepeatedField<BlobCreate> {
+        ::std::mem::replace(&mut self.blob_creates, ::protobuf::RepeatedField::new())
+    }
 }
 
 impl ::protobuf::Message for Snapshot {
@@ -1976,6 +2061,11 @@ impl ::protobuf::Message for Snapshot {
             }
         };
         for v in &self.table_creates {
+            if !v.is_initialized() {
+                return false;
+            }
+        };
+        for v in &self.blob_creates {
             if !v.is_initialized() {
                 return false;
             }
@@ -2016,6 +2106,9 @@ impl ::protobuf::Message for Snapshot {
                     let tmp = is.read_uint64()?;
                     self.data_sequence = tmp;
                 },
+                9 => {
+                    ::protobuf::rt::read_repeated_message_into(wire_type, is, &mut self.blob_creates)?;
+                },
                 _ => {
                     ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
                 },
@@ -2052,6 +2145,10 @@ impl ::protobuf::Message for Snapshot {
         if self.data_sequence != 0 {
             my_size += ::protobuf::rt::value_size(8, self.data_sequence, ::protobuf::wire_format::WireTypeVarint);
         }
+        for value in &self.blob_creates {
+            let len = value.compute_size();
+            my_size += 1 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
+        };
         my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
         self.cached_size.set(my_size);
         my_size
@@ -2085,6 +2182,11 @@ impl ::protobuf::Message for Snapshot {
         if self.data_sequence != 0 {
             os.write_uint64(8, self.data_sequence)?;
         }
+        for v in &self.blob_creates {
+            os.write_tag(9, ::protobuf::wire_format::WireTypeLengthDelimited)?;
+            os.write_raw_varint32(v.get_cached_size())?;
+            v.write_to_with_cached_sizes(os)?;
+        };
         os.write_unknown_fields(self.get_unknown_fields())?;
         ::std::result::Result::Ok(())
     }
@@ -2162,6 +2264,11 @@ impl ::protobuf::Message for Snapshot {
                     |m: &Snapshot| { &m.data_sequence },
                     |m: &mut Snapshot| { &mut m.data_sequence },
                 ));
+                fields.push(::protobuf::reflect::accessor::make_repeated_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<BlobCreate>>(
+                    "BlobCreates",
+                    |m: &Snapshot| { &m.blob_creates },
+                    |m: &mut Snapshot| { &mut m.blob_creates },
+                ));
                 ::protobuf::reflect::MessageDescriptor::new::<Snapshot>(
                     "Snapshot",
                     fields,
@@ -2191,6 +2298,7 @@ impl ::protobuf::Clear for Snapshot {
         self.table_creates.clear();
         self.base_version = 0;
         self.data_sequence = 0;
+        self.blob_creates.clear();
         self.unknown_fields.clear();
     }
 }
@@ -2207,6 +2315,7 @@ impl ::protobuf::PbPrint for Snapshot {
         ::protobuf::PbPrint::fmt(&self.table_creates, "table_creates", buf);
         ::protobuf::PbPrint::fmt(&self.base_version, "base_version", buf);
         ::protobuf::PbPrint::fmt(&self.data_sequence, "data_sequence", buf);
+        ::protobuf::PbPrint::fmt(&self.blob_creates, "blob_creates", buf);
         if old_len < buf.len() {
           buf.push(' ');
         }
@@ -2224,6 +2333,7 @@ impl ::std::fmt::Debug for Snapshot {
         ::protobuf::PbPrint::fmt(&self.table_creates, "table_creates", &mut s);
         ::protobuf::PbPrint::fmt(&self.base_version, "base_version", &mut s);
         ::protobuf::PbPrint::fmt(&self.data_sequence, "data_sequence", &mut s);
+        ::protobuf::PbPrint::fmt(&self.blob_creates, "blob_creates", &mut s);
         write!(f, "{}", s)
     }
 }
@@ -2494,6 +2604,271 @@ impl ::std::fmt::Debug for L0Create {
 }
 
 impl ::protobuf::reflect::ProtobufValue for L0Create {
+    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef {
+        ::protobuf::reflect::ProtobufValueRef::Message(self)
+    }
+}
+
+#[derive(PartialEq,Clone,Default)]
+pub struct BlobCreate {
+    // message fields
+    pub id: u64,
+    pub smallest: ::std::vec::Vec<u8>,
+    pub biggest: ::std::vec::Vec<u8>,
+    // special fields
+    pub unknown_fields: ::protobuf::UnknownFields,
+    pub cached_size: ::protobuf::CachedSize,
+}
+
+impl<'a> ::std::default::Default for &'a BlobCreate {
+    fn default() -> &'a BlobCreate {
+        <BlobCreate as ::protobuf::Message>::default_instance()
+    }
+}
+
+impl BlobCreate {
+    pub fn new() -> BlobCreate {
+        ::std::default::Default::default()
+    }
+
+    // uint64 ID = 1;
+
+
+    pub fn get_id(&self) -> u64 {
+        self.id
+    }
+    pub fn clear_id(&mut self) {
+        self.id = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_id(&mut self, v: u64) {
+        self.id = v;
+    }
+
+    // bytes smallest = 2;
+
+
+    pub fn get_smallest(&self) -> &[u8] {
+        &self.smallest
+    }
+    pub fn clear_smallest(&mut self) {
+        self.smallest.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_smallest(&mut self, v: ::std::vec::Vec<u8>) {
+        self.smallest = v;
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_smallest(&mut self) -> &mut ::std::vec::Vec<u8> {
+        &mut self.smallest
+    }
+
+    // Take field
+    pub fn take_smallest(&mut self) -> ::std::vec::Vec<u8> {
+        ::std::mem::replace(&mut self.smallest, ::std::vec::Vec::new())
+    }
+
+    // bytes biggest = 3;
+
+
+    pub fn get_biggest(&self) -> &[u8] {
+        &self.biggest
+    }
+    pub fn clear_biggest(&mut self) {
+        self.biggest.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_biggest(&mut self, v: ::std::vec::Vec<u8>) {
+        self.biggest = v;
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_biggest(&mut self) -> &mut ::std::vec::Vec<u8> {
+        &mut self.biggest
+    }
+
+    // Take field
+    pub fn take_biggest(&mut self) -> ::std::vec::Vec<u8> {
+        ::std::mem::replace(&mut self.biggest, ::std::vec::Vec::new())
+    }
+}
+
+impl ::protobuf::Message for BlobCreate {
+    fn is_initialized(&self) -> bool {
+        true
+    }
+
+    fn merge_from(&mut self, is: &mut ::protobuf::CodedInputStream) -> ::protobuf::ProtobufResult<()> {
+        while !is.eof()? {
+            let (field_number, wire_type) = is.read_tag_unpack()?;
+            match field_number {
+                1 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.id = tmp;
+                },
+                2 => {
+                    ::protobuf::rt::read_singular_proto3_bytes_into(wire_type, is, &mut self.smallest)?;
+                },
+                3 => {
+                    ::protobuf::rt::read_singular_proto3_bytes_into(wire_type, is, &mut self.biggest)?;
+                },
+                _ => {
+                    ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
+                },
+            };
+        }
+        ::std::result::Result::Ok(())
+    }
+
+    // Compute sizes of nested messages
+    #[allow(unused_variables)]
+    fn compute_size(&self) -> u32 {
+        let mut my_size = 0;
+        if self.id != 0 {
+            my_size += ::protobuf::rt::value_size(1, self.id, ::protobuf::wire_format::WireTypeVarint);
+        }
+        if !self.smallest.is_empty() {
+            my_size += ::protobuf::rt::bytes_size(2, &self.smallest);
+        }
+        if !self.biggest.is_empty() {
+            my_size += ::protobuf::rt::bytes_size(3, &self.biggest);
+        }
+        my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
+        self.cached_size.set(my_size);
+        my_size
+    }
+
+    fn write_to_with_cached_sizes(&self, os: &mut ::protobuf::CodedOutputStream) -> ::protobuf::ProtobufResult<()> {
+        if self.id != 0 {
+            os.write_uint64(1, self.id)?;
+        }
+        if !self.smallest.is_empty() {
+            os.write_bytes(2, &self.smallest)?;
+        }
+        if !self.biggest.is_empty() {
+            os.write_bytes(3, &self.biggest)?;
+        }
+        os.write_unknown_fields(self.get_unknown_fields())?;
+        ::std::result::Result::Ok(())
+    }
+
+    fn get_cached_size(&self) -> u32 {
+        self.cached_size.get()
+    }
+
+    fn get_unknown_fields(&self) -> &::protobuf::UnknownFields {
+        &self.unknown_fields
+    }
+
+    fn mut_unknown_fields(&mut self) -> &mut ::protobuf::UnknownFields {
+        &mut self.unknown_fields
+    }
+
+    fn as_any(&self) -> &dyn (::std::any::Any) {
+        self as &dyn (::std::any::Any)
+    }
+    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
+        self as &mut dyn (::std::any::Any)
+    }
+    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+        self
+    }
+
+    fn descriptor(&self) -> &'static ::protobuf::reflect::MessageDescriptor {
+        Self::descriptor_static()
+    }
+
+    fn new() -> BlobCreate {
+        BlobCreate::new()
+    }
+
+    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
+        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy {
+            lock: ::protobuf::lazy::ONCE_INIT,
+            ptr: 0 as *const ::protobuf::reflect::MessageDescriptor,
+        };
+        unsafe {
+            descriptor.get(|| {
+                let mut fields = ::std::vec::Vec::new();
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                    "ID",
+                    |m: &BlobCreate| { &m.id },
+                    |m: &mut BlobCreate| { &mut m.id },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeBytes>(
+                    "smallest",
+                    |m: &BlobCreate| { &m.smallest },
+                    |m: &mut BlobCreate| { &mut m.smallest },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeBytes>(
+                    "biggest",
+                    |m: &BlobCreate| { &m.biggest },
+                    |m: &mut BlobCreate| { &mut m.biggest },
+                ));
+                ::protobuf::reflect::MessageDescriptor::new::<BlobCreate>(
+                    "BlobCreate",
+                    fields,
+                    file_descriptor_proto()
+                )
+            })
+        }
+    }
+
+    fn default_instance() -> &'static BlobCreate {
+        static mut instance: ::protobuf::lazy::Lazy<BlobCreate> = ::protobuf::lazy::Lazy {
+            lock: ::protobuf::lazy::ONCE_INIT,
+            ptr: 0 as *const BlobCreate,
+        };
+        unsafe {
+            instance.get(BlobCreate::new)
+        }
+    }
+}
+
+impl ::protobuf::Clear for BlobCreate {
+    fn clear(&mut self) {
+        self.id = 0;
+        self.smallest.clear();
+        self.biggest.clear();
+        self.unknown_fields.clear();
+    }
+}
+
+impl ::protobuf::PbPrint for BlobCreate {
+    #[allow(unused_variables)]
+    fn fmt(&self, name: &str, buf: &mut String) {
+        ::protobuf::push_message_start(name, buf);
+        let old_len = buf.len();
+        ::protobuf::PbPrint::fmt(&self.id, "id", buf);
+        ::protobuf::PbPrint::fmt(&self.smallest, "smallest", buf);
+        ::protobuf::PbPrint::fmt(&self.biggest, "biggest", buf);
+        if old_len < buf.len() {
+          buf.push(' ');
+        }
+        buf.push('}');
+    }
+}
+impl ::std::fmt::Debug for BlobCreate {
+    #[allow(unused_variables)]
+    fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
+        let mut s = String::new();
+        ::protobuf::PbPrint::fmt(&self.id, "id", &mut s);
+        ::protobuf::PbPrint::fmt(&self.smallest, "smallest", &mut s);
+        ::protobuf::PbPrint::fmt(&self.biggest, "biggest", &mut s);
+        write!(f, "{}", s)
+    }
+}
+
+impl ::protobuf::reflect::ProtobufValue for BlobCreate {
     fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef {
         ::protobuf::reflect::ProtobufValueRef::Message(self)
     }
@@ -3329,6 +3704,7 @@ pub struct IngestFiles {
     pub l0_creates: ::protobuf::RepeatedField<L0Create>,
     pub table_creates: ::protobuf::RepeatedField<TableCreate>,
     pub properties: ::protobuf::SingularPtrField<Properties>,
+    pub blob_creates: ::protobuf::RepeatedField<BlobCreate>,
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
     pub cached_size: ::protobuf::CachedSize,
@@ -3427,6 +3803,31 @@ impl IngestFiles {
     pub fn take_properties(&mut self) -> Properties {
         self.properties.take().unwrap_or_else(|| Properties::new())
     }
+
+    // repeated .enginepb.BlobCreate BlobCreates = 4;
+
+
+    pub fn get_blob_creates(&self) -> &[BlobCreate] {
+        &self.blob_creates
+    }
+    pub fn clear_blob_creates(&mut self) {
+        self.blob_creates.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_blob_creates(&mut self, v: ::protobuf::RepeatedField<BlobCreate>) {
+        self.blob_creates = v;
+    }
+
+    // Mutable pointer to the field.
+    pub fn mut_blob_creates(&mut self) -> &mut ::protobuf::RepeatedField<BlobCreate> {
+        &mut self.blob_creates
+    }
+
+    // Take field
+    pub fn take_blob_creates(&mut self) -> ::protobuf::RepeatedField<BlobCreate> {
+        ::std::mem::replace(&mut self.blob_creates, ::protobuf::RepeatedField::new())
+    }
 }
 
 impl ::protobuf::Message for IngestFiles {
@@ -3446,6 +3847,11 @@ impl ::protobuf::Message for IngestFiles {
                 return false;
             }
         };
+        for v in &self.blob_creates {
+            if !v.is_initialized() {
+                return false;
+            }
+        };
         true
     }
 
@@ -3461,6 +3867,9 @@ impl ::protobuf::Message for IngestFiles {
                 },
                 3 => {
                     ::protobuf::rt::read_singular_message_into(wire_type, is, &mut self.properties)?;
+                },
+                4 => {
+                    ::protobuf::rt::read_repeated_message_into(wire_type, is, &mut self.blob_creates)?;
                 },
                 _ => {
                     ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
@@ -3486,6 +3895,10 @@ impl ::protobuf::Message for IngestFiles {
             let len = v.compute_size();
             my_size += 1 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
         }
+        for value in &self.blob_creates {
+            let len = value.compute_size();
+            my_size += 1 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
+        };
         my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
         self.cached_size.set(my_size);
         my_size
@@ -3507,6 +3920,11 @@ impl ::protobuf::Message for IngestFiles {
             os.write_raw_varint32(v.get_cached_size())?;
             v.write_to_with_cached_sizes(os)?;
         }
+        for v in &self.blob_creates {
+            os.write_tag(4, ::protobuf::wire_format::WireTypeLengthDelimited)?;
+            os.write_raw_varint32(v.get_cached_size())?;
+            v.write_to_with_cached_sizes(os)?;
+        };
         os.write_unknown_fields(self.get_unknown_fields())?;
         ::std::result::Result::Ok(())
     }
@@ -3564,6 +3982,11 @@ impl ::protobuf::Message for IngestFiles {
                     |m: &IngestFiles| { &m.properties },
                     |m: &mut IngestFiles| { &mut m.properties },
                 ));
+                fields.push(::protobuf::reflect::accessor::make_repeated_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<BlobCreate>>(
+                    "BlobCreates",
+                    |m: &IngestFiles| { &m.blob_creates },
+                    |m: &mut IngestFiles| { &mut m.blob_creates },
+                ));
                 ::protobuf::reflect::MessageDescriptor::new::<IngestFiles>(
                     "IngestFiles",
                     fields,
@@ -3589,6 +4012,7 @@ impl ::protobuf::Clear for IngestFiles {
         self.l0_creates.clear();
         self.table_creates.clear();
         self.properties.clear();
+        self.blob_creates.clear();
         self.unknown_fields.clear();
     }
 }
@@ -3601,6 +4025,7 @@ impl ::protobuf::PbPrint for IngestFiles {
         ::protobuf::PbPrint::fmt(&self.l0_creates, "l0_creates", buf);
         ::protobuf::PbPrint::fmt(&self.table_creates, "table_creates", buf);
         ::protobuf::PbPrint::fmt(&self.properties, "properties", buf);
+        ::protobuf::PbPrint::fmt(&self.blob_creates, "blob_creates", buf);
         if old_len < buf.len() {
           buf.push(' ');
         }
@@ -3614,6 +4039,7 @@ impl ::std::fmt::Debug for IngestFiles {
         ::protobuf::PbPrint::fmt(&self.l0_creates, "l0_creates", &mut s);
         ::protobuf::PbPrint::fmt(&self.table_creates, "table_creates", &mut s);
         ::protobuf::PbPrint::fmt(&self.properties, "properties", &mut s);
+        ::protobuf::PbPrint::fmt(&self.blob_creates, "blob_creates", &mut s);
         write!(f, "{}", s)
     }
 }
@@ -4150,33 +4576,38 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     (\x05B\0\x12\x0f\n\x05level\x18\x02\x20\x01(\rB\0\x12-\n\x0ctableCreates\
     \x18\x03\x20\x03(\x0b2\x15.enginepb.TableCreateB\0\x12\x14\n\ntopDeletes\
     \x18\x04\x20\x03(\x04B\0\x12\x17\n\rbottomDeletes\x18\x05\x20\x03(\x04B\
-    \0\x12\x14\n\nconflicted\x18\x06\x20\x01(\x08B\0:\0\"p\n\x05Flush\x12&\n\
-    \x08l0Create\x18\x01\x20\x01(\x0b2\x12.enginepb.L0CreateB\0\x12*\n\nprop\
-    erties\x18\x02\x20\x01(\x0b2\x14.enginepb.PropertiesB\0\x12\x11\n\x07ver\
-    sion\x18\x03\x20\x01(\x04B\0:\0\"\xe0\x01\n\x08Snapshot\x12\x0f\n\x05sta\
-    rt\x18\x01\x20\x01(\x0cB\0\x12\r\n\x03end\x18\x02\x20\x01(\x0cB\0\x12*\n\
-    \nproperties\x18\x03\x20\x01(\x0b2\x14.enginepb.PropertiesB\0\x12'\n\tl0\
-    Creates\x18\x05\x20\x03(\x0b2\x12.enginepb.L0CreateB\0\x12-\n\x0ctableCr\
-    eates\x18\x06\x20\x03(\x0b2\x15.enginepb.TableCreateB\0\x12\x15\n\x0bbas\
-    eVersion\x18\x07\x20\x01(\x04B\0\x12\x17\n\rdata_sequence\x18\x08\x20\
-    \x01(\x04B\0:\0\"A\n\x08L0Create\x12\x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\
-    \x12\x12\n\x08smallest\x18\x02\x20\x01(\x0cB\0\x12\x11\n\x07biggest\x18\
-    \x03\x20\x01(\x0cB\0:\0\"c\n\x0bTableCreate\x12\x0c\n\x02ID\x18\x01\x20\
-    \x01(\x04B\0\x12\x0f\n\x05level\x18\x02\x20\x01(\rB\0\x12\x0c\n\x02CF\
-    \x18\x03\x20\x01(\x05B\0\x12\x12\n\x08smallest\x18\x04\x20\x01(\x0cB\0\
-    \x12\x11\n\x07biggest\x18\x05\x20\x01(\x0cB\0:\0\"<\n\x0bTableDelete\x12\
-    \x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\x12\x0f\n\x05level\x18\x02\x20\x01(\
-    \rB\0\x12\x0c\n\x02CF\x18\x03\x20\x01(\x05B\0:\0\"D\n\x05Split\x12)\n\tn\
-    ewShards\x18\x01\x20\x03(\x0b2\x14.enginepb.PropertiesB\0\x12\x0e\n\x04K\
-    eys\x18\x03\x20\x03(\x0cB\0:\0\"\x93\x01\n\x0bIngestFiles\x12'\n\tl0Crea\
-    tes\x18\x01\x20\x03(\x0b2\x12.enginepb.L0CreateB\0\x12-\n\x0ctableCreate\
-    s\x18\x02\x20\x03(\x0b2\x15.enginepb.TableCreateB\0\x12*\n\nproperties\
-    \x18\x03\x20\x01(\x0b2\x14.enginepb.PropertiesB\0:\0\"C\n\nProperties\
-    \x12\x11\n\x07shardID\x18\x01\x20\x01(\x04B\0\x12\x0e\n\x04keys\x18\x02\
-    \x20\x03(\tB\0\x12\x10\n\x06values\x18\x03\x20\x03(\x0cB\0:\0\"m\n\x0bTa\
-    bleChange\x12-\n\x0ctableDeletes\x18\x01\x20\x03(\x0b2\x15.enginepb.Tabl\
-    eDeleteB\0\x12-\n\x0ctableCreates\x18\x02\x20\x03(\x0b2\x15.enginepb.Tab\
-    leCreateB\0:\0B\0b\x06proto3\
+    \0\x12\x14\n\nconflicted\x18\x06\x20\x01(\x08B\0:\0\"\x9c\x01\n\x05Flush\
+    \x12&\n\x08l0Create\x18\x01\x20\x01(\x0b2\x12.enginepb.L0CreateB\0\x12*\
+    \n\nproperties\x18\x02\x20\x01(\x0b2\x14.enginepb.PropertiesB\0\x12\x11\
+    \n\x07version\x18\x03\x20\x01(\x04B\0\x12*\n\nBlobCreate\x18\x04\x20\x01\
+    (\x0b2\x14.enginepb.BlobCreateB\0:\0\"\x8d\x02\n\x08Snapshot\x12\x0f\n\
+    \x05start\x18\x01\x20\x01(\x0cB\0\x12\r\n\x03end\x18\x02\x20\x01(\x0cB\0\
+    \x12*\n\nproperties\x18\x03\x20\x01(\x0b2\x14.enginepb.PropertiesB\0\x12\
+    '\n\tl0Creates\x18\x05\x20\x03(\x0b2\x12.enginepb.L0CreateB\0\x12-\n\x0c\
+    tableCreates\x18\x06\x20\x03(\x0b2\x15.enginepb.TableCreateB\0\x12\x15\n\
+    \x0bbaseVersion\x18\x07\x20\x01(\x04B\0\x12\x17\n\rdata_sequence\x18\x08\
+    \x20\x01(\x04B\0\x12+\n\x0bBlobCreates\x18\t\x20\x03(\x0b2\x14.enginepb.\
+    BlobCreateB\0:\0\"A\n\x08L0Create\x12\x0c\n\x02ID\x18\x01\x20\x01(\x04B\
+    \0\x12\x12\n\x08smallest\x18\x02\x20\x01(\x0cB\0\x12\x11\n\x07biggest\
+    \x18\x03\x20\x01(\x0cB\0:\0\"C\n\nBlobCreate\x12\x0c\n\x02ID\x18\x01\x20\
+    \x01(\x04B\0\x12\x12\n\x08smallest\x18\x02\x20\x01(\x0cB\0\x12\x11\n\x07\
+    biggest\x18\x03\x20\x01(\x0cB\0:\0\"c\n\x0bTableCreate\x12\x0c\n\x02ID\
+    \x18\x01\x20\x01(\x04B\0\x12\x0f\n\x05level\x18\x02\x20\x01(\rB\0\x12\
+    \x0c\n\x02CF\x18\x03\x20\x01(\x05B\0\x12\x12\n\x08smallest\x18\x04\x20\
+    \x01(\x0cB\0\x12\x11\n\x07biggest\x18\x05\x20\x01(\x0cB\0:\0\"<\n\x0bTab\
+    leDelete\x12\x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\x12\x0f\n\x05level\x18\
+    \x02\x20\x01(\rB\0\x12\x0c\n\x02CF\x18\x03\x20\x01(\x05B\0:\0\"D\n\x05Sp\
+    lit\x12)\n\tnewShards\x18\x01\x20\x03(\x0b2\x14.enginepb.PropertiesB\0\
+    \x12\x0e\n\x04Keys\x18\x03\x20\x03(\x0cB\0:\0\"\xc0\x01\n\x0bIngestFiles\
+    \x12'\n\tl0Creates\x18\x01\x20\x03(\x0b2\x12.enginepb.L0CreateB\0\x12-\n\
+    \x0ctableCreates\x18\x02\x20\x03(\x0b2\x15.enginepb.TableCreateB\0\x12*\
+    \n\nproperties\x18\x03\x20\x01(\x0b2\x14.enginepb.PropertiesB\0\x12+\n\
+    \x0bBlobCreates\x18\x04\x20\x03(\x0b2\x14.enginepb.BlobCreateB\0:\0\"C\n\
+    \nProperties\x12\x11\n\x07shardID\x18\x01\x20\x01(\x04B\0\x12\x0e\n\x04k\
+    eys\x18\x02\x20\x03(\tB\0\x12\x10\n\x06values\x18\x03\x20\x03(\x0cB\0:\0\
+    \"m\n\x0bTableChange\x12-\n\x0ctableDeletes\x18\x01\x20\x03(\x0b2\x15.en\
+    ginepb.TableDeleteB\0\x12-\n\x0ctableCreates\x18\x02\x20\x03(\x0b2\x15.e\
+    nginepb.TableCreateB\0:\0B\0b\x06proto3\
 ";
 
 static mut file_descriptor_proto_lazy: ::protobuf::lazy::Lazy<::protobuf::descriptor::FileDescriptorProto> = ::protobuf::lazy::Lazy {

@@ -1,5 +1,6 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
+use core::panic;
 use std::{
     collections::HashMap,
     fmt::{Debug, Formatter},
@@ -14,6 +15,7 @@ use protobuf::Message;
 
 use crate::{
     table::{
+        blobtable::blobtable::BlobTable,
         memtable::{CfTable, Hint},
         sstable::{InMemFile, L0Table, SsTable},
         table,
@@ -128,6 +130,9 @@ impl SnapAccessCore {
             for ln in snap.get_table_creates() {
                 ids.insert(ln.id, ln.level);
             }
+            for blob in snap.get_blob_creates() {
+                ids.insert(blob.id, BLOB_LEVEL);
+            }
         }
         let (result_tx, mut result_rx) = tokio::sync::mpsc::channel(ids.len());
         let runtime = dfs.get_runtime();
@@ -147,7 +152,10 @@ impl SnapAccessCore {
             match result_rx.recv().await.unwrap() {
                 Ok((id, level, data)) => {
                     let file = InMemFile::new(id, data);
-                    if level == 0 {
+                    if is_blob_file(level) {
+                        let blob_table = BlobTable::new(Arc::new(file)).unwrap();
+                        cs.blob_tables.insert(id, blob_table);
+                    } else if level == 0 {
                         let l0_table = L0Table::new(Arc::new(file), None, true).unwrap();
                         cs.l0_tables.insert(id, l0_table);
                     } else {
@@ -165,7 +173,7 @@ impl SnapAccessCore {
             panic!("errors is not empty");
         }
         let mut shard = Shard::new_for_ingest(0, &cs, Arc::new(Options::default()));
-        let (l0s, scfs) = create_snapshot_tables(cs.get_snapshot(), &cs);
+        let (l0s, blob_tbls, scfs) = create_snapshot_tables(cs.get_snapshot(), &cs);
         let old_data = shard.get_data();
         let data = ShardData::new(
             shard.start.clone(),
@@ -175,6 +183,7 @@ impl SnapAccessCore {
             old_data.trim_over_bound,
             vec![CfTable::new()],
             l0s,
+            blob_tbls,
             scfs,
         );
         shard.id = cs.shard_id;
@@ -231,6 +240,19 @@ impl SnapAccessCore {
         item
     }
 
+    pub fn fetch_from_blob_store(&self, v: &Item<'_>) -> Bytes {
+        assert!(v.is_external_link());
+        if let Some(blob_table_map) = &self.data.blob_tbl_map {
+            let external_link = v.get_external_link();
+            let blob_table = blob_table_map.get(&external_link.fid).unwrap();
+            blob_table
+                .get(external_link.offset, external_link.len)
+                .unwrap()
+        } else {
+            panic!("Trying to fetch a blob but the file id map is missing");
+        }
+    }
+
     fn get_value(
         &self,
         cf: usize,
@@ -250,6 +272,7 @@ impl SnapAccessCore {
             };
             path.mem_table += 1;
             if v.is_valid() {
+                assert!(!v.is_external_link());
                 val_mem_holder.resize(v.encoded_size(), 0);
                 v.encode(val_mem_holder.as_mut_slice());
                 return table::Value::decode(val_mem_holder.as_slice());
@@ -420,6 +443,18 @@ impl SnapAccessCore {
             l0.set_smallest(v.smallest().to_vec());
             l0.set_biggest(v.biggest().to_vec());
             snap.mut_l0_creates().push(l0);
+        }
+        if let Some(blob_tbl_map) = &self.data.blob_tbl_map {
+            for (k, v) in blob_tbl_map {
+                assert_eq!(k, &v.id());
+                count += 1;
+                // FIXME: Overlap check
+                let mut blob = pb::BlobCreate::new();
+                blob.set_id(v.id());
+                blob.set_smallest(v.smallest_key().to_vec());
+                blob.set_biggest(v.biggest_key().to_vec());
+                snap.mut_blob_creates().push(blob);
+            }
         }
         self.data.for_each_level(|cf, lh| {
             if cf == LOCK_CF {

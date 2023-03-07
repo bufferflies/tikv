@@ -164,38 +164,33 @@ mod tests {
     use crate::{
         concat_iterator::ConcatIterator,
         table::{
-            sstable::{
-                build_test_table_with_kvs, build_test_table_with_prefix, new_test_cache, SsTable,
-            },
+            sstable::{build_test_table_with_kvs, build_test_table_with_prefix, get_test_value},
             Iterator,
         },
     };
 
     #[test]
     fn test_concat_iterator_one_table() {
-        let tf = build_test_table_with_kvs(vec![
-            ("k1".to_string(), "a1".to_string()),
-            ("k2".to_string(), "a2".to_string()),
-        ]);
-        let t = SsTable::new(tf, new_test_cache(), true).unwrap();
-        let tables = vec![t];
+        let tables = vec![build_test_table_with_kvs(
+            &vec![
+                ("k1".to_string(), "a1".to_string()),
+                ("k2".to_string(), "a2".to_string()),
+            ],
+            true,
+        )];
         let mut it = ConcatIterator::new_with_tables(tables, false, true);
         it.rewind();
         assert_eq!(it.valid(), true);
         assert_eq!(it.key(), "k1".as_bytes());
         let v = it.value();
         assert_eq!(v.get_value(), "a1".as_bytes());
-        assert_eq!(v.meta, b'A');
     }
 
     #[test]
     fn test_concat_iterator() {
-        let tf1 = build_test_table_with_prefix("keya", 10000);
-        let tf2 = build_test_table_with_prefix("keyb", 10000);
-        let tf3 = build_test_table_with_prefix("keyc", 10000);
-        let t1 = SsTable::new(tf1, new_test_cache(), true).unwrap();
-        let t2 = SsTable::new(tf2, new_test_cache(), true).unwrap();
-        let t3 = SsTable::new(tf3, new_test_cache(), true).unwrap();
+        let (t1, _) = build_test_table_with_prefix("keya", 10000, true);
+        let (t2, _) = build_test_table_with_prefix("keyb", 10000, true);
+        let (t3, _) = build_test_table_with_prefix("keyc", 10000, true);
         let tables = vec![t1, t2, t3];
         {
             let mut it = ConcatIterator::new_with_tables(tables.clone(), false, true);
@@ -204,23 +199,22 @@ mod tests {
             let mut cnt = 0;
             while it.valid() {
                 let v = it.value();
-                assert_eq!(v.get_value(), format!("{}", cnt % 10000).as_bytes());
-                assert_eq!(v.meta, b'A');
+                assert_eq!(v.get_value(), get_test_value(cnt % 10000).as_bytes());
                 cnt += 1;
                 it.next();
             }
             assert_eq!(cnt, 30000);
             it.seek("a".as_bytes());
             assert_eq!(it.key(), "keya0000".as_bytes());
-            assert_eq!(it.value().get_value(), "0".as_bytes());
+            assert_eq!(it.value().get_value(), get_test_value(0).as_bytes());
 
             it.seek("keyb".as_bytes());
             assert_eq!(it.key(), "keyb0000".as_bytes());
-            assert_eq!(it.value().get_value(), "0".as_bytes());
+            assert_eq!(it.value().get_value(), get_test_value(0).as_bytes());
 
             it.seek("keyb9999b".as_bytes());
             assert_eq!(it.key(), "keyc0000".as_bytes());
-            assert_eq!(it.value().get_value(), "0".as_bytes());
+            assert_eq!(it.value().get_value(), get_test_value(0).as_bytes());
 
             it.seek("keyd".as_bytes());
             assert_eq!(it.valid(), false);
@@ -234,9 +228,8 @@ mod tests {
                 let v = it.value();
                 assert_eq!(
                     v.get_value(),
-                    format!("{}", 10000 - (cnt % 10000) - 1).as_bytes()
+                    get_test_value(10000 - (cnt % 10000) - 1).as_bytes()
                 );
-                assert_eq!(v.meta, b'A');
                 cnt += 1;
                 it.next();
             }
@@ -247,15 +240,15 @@ mod tests {
 
             it.seek("keyb".as_bytes());
             assert_eq!(it.key(), "keya9999".as_bytes());
-            assert_eq!(it.value().get_value(), "9999".as_bytes());
+            assert_eq!(it.value().get_value(), get_test_value(9999).as_bytes());
 
             it.seek("keyb9999b".as_bytes());
             assert_eq!(it.key(), "keyb9999".as_bytes());
-            assert_eq!(it.value().get_value(), "9999".as_bytes());
+            assert_eq!(it.value().get_value(), get_test_value(9999).as_bytes());
 
             it.seek("keyd".as_bytes());
             assert_eq!(it.key(), "keyc9999".as_bytes());
-            assert_eq!(it.value().get_value(), "9999".as_bytes());
+            assert_eq!(it.value().get_value(), get_test_value(9999).as_bytes());
         }
     }
 }

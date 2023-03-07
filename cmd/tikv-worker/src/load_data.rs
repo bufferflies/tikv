@@ -637,7 +637,7 @@ impl LoadTaskWorker {
                 offset += 4;
                 let val = &batch[offset..offset + val_len];
                 offset += val_len;
-                builder.add(key, Value::decode(val));
+                builder.add(key, &Value::decode(val), None);
                 entries += 1;
             }
             batch.clear();

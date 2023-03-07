@@ -134,11 +134,17 @@ impl LocalFs {
         let core = Arc::new(LocalFsCore::new(dir));
         Self { core }
     }
-    pub fn local_file_path(&self, file_id: u64) -> PathBuf {
-        self.dir.join(self.filename(file_id))
+    pub fn local_sst_file_path(&self, file_id: u64) -> PathBuf {
+        self.dir.join(self.sst_filename(file_id))
     }
-    pub fn filename(&self, file_id: u64) -> PathBuf {
+    pub fn local_blob_file_path(&self, file_id: u64) -> PathBuf {
+        self.dir.join(self.blob_filename(file_id))
+    }
+    pub fn sst_filename(&self, file_id: u64) -> PathBuf {
         PathBuf::from(format!("{:016x}.sst", file_id))
+    }
+    pub fn blob_filename(&self, file_id: u64) -> PathBuf {
+        PathBuf::from(format!("{:016x}.blob", file_id))
     }
     pub fn tmp_file_path(&self, file_id: u64) -> PathBuf {
         let tmp_id = self
@@ -188,7 +194,7 @@ impl LocalFsCore {
 #[async_trait]
 impl Dfs for LocalFs {
     async fn read_file(&self, file_id: u64, _opts: Options) -> Result<Bytes> {
-        let local_file_name = self.local_file_path(file_id);
+        let local_file_name = self.local_sst_file_path(file_id);
         let fd = std::fs::File::open(local_file_name)?;
         let mut reader = BufReader::new(fd);
         let mut buf = Vec::new();
@@ -200,7 +206,7 @@ impl Dfs for LocalFs {
     }
 
     async fn create(&self, file_id: u64, data: Bytes, _opts: Options) -> Result<()> {
-        let local_file_name = self.local_file_path(file_id);
+        let local_file_name = self.local_sst_file_path(file_id);
         let tmp_file_name = self.tmp_file_path(file_id);
         let mut file = std::fs::File::create(&tmp_file_name)?;
         let mut start_off = 0;
@@ -220,7 +226,7 @@ impl Dfs for LocalFs {
     }
 
     async fn remove(&self, file_id: u64, _opts: Options) {
-        let local_file_path = self.local_file_path(file_id);
+        let local_file_path = self.local_sst_file_path(file_id);
         if let Err(err) = std::fs::remove_file(local_file_path) {
             error!("failed to remove local file {:?}", err);
         }
@@ -328,7 +334,7 @@ mod tests {
         };
         localfs.runtime.spawn(f);
         assert!(rx.recv().unwrap());
-        let local_file = localfs.local_file_path(file_id);
+        let local_file = localfs.local_sst_file_path(file_id);
         let fd = std::fs::File::open(&local_file).unwrap();
         let meta = fd.metadata().unwrap();
         assert_eq!(meta.size(), 8u64);

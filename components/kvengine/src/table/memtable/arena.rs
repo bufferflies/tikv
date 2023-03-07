@@ -14,7 +14,7 @@ use byteorder::{ByteOrder, LittleEndian};
 use rand::Rng;
 
 use super::{
-    super::table::Value,
+    super::table::{Value, VALUE_VERSION_LEN, VALUE_VERSION_OFF},
     skl::{deref, Node, MAX_HEIGHT},
     WriteBatchEntry,
 };
@@ -128,9 +128,11 @@ impl Arena {
         let m_buf = self.values.get_mut_bytes(addr);
         m_buf[0] = entry.meta;
         m_buf[1] = entry.user_meta_len;
-        LittleEndian::write_u64(&mut m_buf[2..], entry.version);
-        m_buf[10..10 + entry.user_meta_len as usize].copy_from_slice(entry.user_meta(buf));
-        let offset = 10 + entry.user_meta_len as usize;
+        let mut offset = VALUE_VERSION_OFF;
+        LittleEndian::write_u64(&mut m_buf[offset..], entry.version);
+        offset += VALUE_VERSION_LEN;
+        m_buf[offset..offset + entry.user_meta_len as usize].copy_from_slice(entry.user_meta(buf));
+        offset += entry.user_meta_len as usize;
         m_buf[offset..offset + entry.val_len as usize].copy_from_slice(entry.value(buf));
         addr
     }
