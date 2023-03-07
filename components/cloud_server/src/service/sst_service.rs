@@ -549,7 +549,14 @@ where
         let task_slots = self.task_slots.clone();
         let f = self.ingest_files(req.take_context(), label, req.take_ssts().into());
         let handle_task = async move {
-            let res = f.await;
+            let mut res = f.await;
+            if res.is_err() {
+                let mut resp = IngestResponse::default();
+                let mut err = errorpb::Error::default();
+                err.set_message(format!("{:?}", res.unwrap_err()));
+                resp.set_error(err);
+                res = Ok(resp);
+            }
             for m in metas {
                 Self::release_lock(&task_slots, &m).unwrap();
             }

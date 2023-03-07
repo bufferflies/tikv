@@ -1114,6 +1114,11 @@ impl Applier {
     }
 
     fn clear_all_commands_as_stale(&mut self) {
+        for mut apply in self.paused_apply_queue.drain(..) {
+            for proposal in apply.cbs.drain(..) {
+                notify_stale_req(self.term, proposal.cb, "reregistration");
+            }
+        }
         for cmd in self.pending_cmds.normals.drain(..) {
             notify_stale_req(self.term, cmd.cb, "reregistration");
         }
@@ -1148,6 +1153,11 @@ impl Applier {
             "peer_id" => peer_id,
         );
         self.stopped = true;
+        for mut apply in self.paused_apply_queue.drain(..) {
+            for proposal in apply.cbs.drain(..) {
+                notify_req_region_removed(self.region.get_id(), proposal.cb);
+            }
+        }
         for cmd in self.pending_cmds.normals.drain(..) {
             notify_req_region_removed(self.region.get_id(), cmd.cb);
         }
