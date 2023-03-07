@@ -24,6 +24,8 @@ pub struct ShardMeta {
     pub base_version: u64,
     // data_sequence is the raft log index of data included in the latest L0 file.
     pub data_sequence: u64,
+    // max_ts is the max ts in all sst files.
+    pub max_ts: u64,
     pub parent: Option<Box<ShardMeta>>,
 }
 
@@ -49,6 +51,7 @@ impl ShardMeta {
             properties: Properties::new().apply_pb(snap.get_properties()),
             base_version: snap.base_version,
             data_sequence: snap.data_sequence,
+            max_ts: snap.max_ts,
             ..Default::default()
         };
         for l0 in snap.get_l0_creates() {
@@ -363,6 +366,7 @@ impl ShardMeta {
             );
             self.data_sequence = new_data_seq;
         }
+        self.max_ts = std::cmp::max(self.max_ts, flush.max_ts);
     }
 
     pub fn apply_initial_flush(&mut self, cs: &pb::ChangeSet) {
@@ -430,6 +434,7 @@ impl ShardMeta {
             let done = DeletePrefixes::unmarshal(cs.get_property_value());
             self.properties
                 .set(DEL_PREFIXES_KEY, &old.split(&done).marshal());
+            info!("Destroy range in meta changed from {:?} to {:?}", old, done);
         }
     }
 
@@ -453,6 +458,10 @@ impl ShardMeta {
             if need_update_truncate_ts(cur_truncate_ts, truncated_ts) {
                 self.set_property(TRUNCATE_TS_KEY, b"");
             }
+            info!(
+                "Request change truncate ts in meta from {:?} to {:?}",
+                cur_truncate_ts, truncated_ts
+            );
         }
     }
 
@@ -582,6 +591,7 @@ impl ShardMeta {
         snap.set_properties(self.properties.to_pb(self.id));
         snap.set_base_version(self.base_version);
         snap.set_data_sequence(self.data_sequence);
+        snap.set_max_ts(self.max_ts);
         for (k, v) in self.files.iter() {
             if v.is_blob_file() {
                 let mut blob = pb::BlobCreate::new();
@@ -787,6 +797,7 @@ mod tests {
         let mut cs = new_change_set(1, 1);
         let snap = cs.mut_snapshot();
         snap.set_end(GLOBAL_SHARD_END_KEY.to_vec());
+        snap.set_max_ts(100);
         let mut id = 0;
         let mut make_table = |level: u32, smallest: &str, biggest: &str| {
             id += 1;
@@ -809,6 +820,7 @@ mod tests {
         snap.mut_l0_creates().push(tbl4);
 
         let meta = ShardMeta::new(1, &cs);
+        assert_eq!(meta.max_ts, 100);
         let assert_get_ingest_level = |smallest: &str, biggest: &str, level| {
             assert_eq!(
                 meta.get_ingest_level(smallest.as_bytes(), biggest.as_bytes()),

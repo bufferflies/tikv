@@ -815,9 +815,16 @@ impl Engine {
     }
 
     pub(crate) fn truncate_ts(&self, shard: &Shard) -> Result<Option<pb::ChangeSet>> {
-        let data = shard.get_data();
-        let truncate_ts = data.truncate_ts.unwrap();
+        self.truncate_with_ts(shard, shard.get_data().truncate_ts.unwrap())
+    }
 
+    // Also used by cse-ctl in tenant restore
+    pub fn truncate_with_ts(
+        &self,
+        shard: &Shard,
+        truncate_ts: TruncateTs,
+    ) -> Result<Option<pb::ChangeSet>> {
+        let data = shard.get_data();
         // TODO: record min_ts to directly delete a SSTable.
 
         let mut overlaps = vec![];

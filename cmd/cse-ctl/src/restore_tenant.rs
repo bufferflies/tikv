@@ -128,6 +128,13 @@ pub fn restore_keyspace(
     let flush_cnt = cluster.flush_shards()?;
     step!("Flush {} shards", flush_cnt);
 
+    let truncate_ts_cnt = cluster.truncate_backup_ts()?;
+    step!(
+        "Truncate {} shards to ts {}",
+        truncate_ts_cnt,
+        cluster.backup_ts
+    );
+
     // align target regions
     let target_regions = runtime.block_on(get_target_regions(
         &pd_client,
@@ -156,32 +163,6 @@ pub fn restore_keyspace(
     let snapshots_count = snapshots.len();
     restore_snapshots(runtime, pd_client.clone(), snapshots)?;
     step!("Restore {snapshots_count} regions");
-
-    // // truncate ts
-    // let truncate_ts_cfg = TruncateTsConfig {
-    //     pd: config.pd.clone(),
-    //     security: config.security.clone(),
-    //     skip_resolve_lock: config.skip_resolve_lock,
-    // };
-    // if let Err(e) = truncate_ts_with_cfg(
-    //     truncate_ts_cfg,
-    //     pd_client,
-    //     cluster_backup.backup_ts,
-    //     Duration::from_secs(30),
-    //     Some(keyspace_id),
-    // ) {
-    //     return Err(box_err!(
-    //         "Fail to truncate ts {} for keyspace {}, err {:?}",
-    //         cluster_backup.backup_ts,
-    //         keyspace_id,
-    //         e
-    //     ));
-    // }
-    // step!(
-    //     "Truncate ts {} on keyspace {}",
-    //     cluster_backup.backup_ts,
-    //     keyspace_id
-    // );
 
     // untag deleted S3 files
 
@@ -261,6 +242,7 @@ struct BackupCluster {
     dfs: Arc<S3Fs>,
     keyspace_id: u32,
     keyspace_prefix: Vec<u8>,
+    backup_ts: u64,
 
     // store_id -> rf_engine.
     raft_engines: HashMap<u64, RfEngine>,
@@ -277,6 +259,8 @@ struct BackupCluster {
     sorted_shards: Vec<u64>,
     // store_id -> Vec<shard_id>.
     shards_need_flush: HashMap<u64, Vec<u64>>,
+    // store_id -> Vec<shard_id>.
+    shards_need_truncate: HashMap<u64, Vec<u64>>,
 
     meta_applier: Option<Arc<MetaApplier>>,
 }
@@ -302,6 +286,7 @@ impl BackupCluster {
             dfs,
             keyspace_id,
             keyspace_prefix,
+            backup_ts: cluster_meta.backup_ts,
             shards: Default::default(),
             raw_metas: Default::default(),
             raft_engines: Default::default(),
@@ -309,6 +294,7 @@ impl BackupCluster {
             store_shards: Default::default(),
             sorted_shards: Default::default(),
             shards_need_flush: Default::default(),
+            shards_need_truncate: Default::default(),
             meta_applier: None,
         };
 
@@ -363,30 +349,38 @@ impl BackupCluster {
         raw_metas
     }
 
+    fn get_shards_need_flush_and_truncate(&self, store_id: u64) -> Vec<u64> {
+        let mut ret_shards = self.shards_need_flush.get(&store_id).unwrap().to_owned();
+        let mut shard_need_truncate = self.shards_need_truncate.get(&store_id).unwrap().to_owned();
+        ret_shards.append(&mut shard_need_truncate);
+        ret_shards.dedup();
+        ret_shards
+    }
+
     fn setup_kv_engine(&mut self, store_id: u64, conf: &TikvConfig) -> RestoreResult<()> {
         let rf_engine = self.raft_engines.get(&store_id).unwrap();
         let recoverer = rfstore::store::RecoverHandler::new(rf_engine.clone());
 
-        let shards_need_flush = self.shards_need_flush.get(&store_id).unwrap().to_owned();
+        let shards_need_load = self.get_shards_need_flush_and_truncate(store_id);
         let raw_metas = self.take_raw_metas(store_id);
 
         if let Some(kv_engine) = self.kv_engine.as_mut() {
-            if !shards_need_flush.is_empty() {
+            if !shards_need_load.is_empty() {
                 let mut meta_iter =
-                    MetaIterator::new(kv_engine.get_engine_id(), shards_need_flush, raw_metas);
+                    MetaIterator::new(kv_engine.get_engine_id(), shards_need_load, raw_metas);
                 let metas = kv_engine.read_meta(&mut meta_iter)?;
                 info!("kv_engine load {} shards in restore tenant", metas.len());
                 kv_engine.load_shards(metas, recoverer)?;
             }
         } else {
-            // Even if `shards_need_flush.is_empty()`, `self.kv_engine` should be
+            // Even if `shards_need_load.is_empty()`, `self.kv_engine` should be
             // constructed for later use.
             let io_rate_limiter =
                 Arc::new(IoRateLimiter::new(IoRateLimitMode::WriteOnly, true, true));
             io_rate_limiter
                 .set_io_rate_limit(conf.storage.io_rate_limit.max_bytes_per_sec.0 as usize);
 
-            let mut meta_iter = MetaIterator::new(store_id, shards_need_flush, raw_metas);
+            let mut meta_iter = MetaIterator::new(store_id, shards_need_load, raw_metas);
             let (kv_engine, _, receiver) = TikvServer::init_kv_engine(
                 self.pd_client.clone(),
                 conf,
@@ -515,6 +509,13 @@ impl BackupCluster {
                 .copied()
                 .collect();
             self.shards_need_flush.insert(store_id, shards_need_flush);
+            let shards_need_truncate = shards
+                .iter()
+                .filter(|&&id| self.get_shard(id).unwrap().meta.max_ts >= self.backup_ts)
+                .copied()
+                .collect();
+            self.shards_need_truncate
+                .insert(store_id, shards_need_truncate);
         }
 
         self.verify_shards()
@@ -714,6 +715,19 @@ impl BackupCluster {
         Err(box_err!("wait_for_mem_table_flush timeout"))
     }
 
+    fn truncate_backup_ts(&mut self) -> RestoreResult<usize> {
+        let mut truncate_cnt = 0_usize;
+        let stores_id: Vec<u64> = self.get_all_stores_id().collect();
+        for store_id in stores_id {
+            let shards_need_truncate = self.get_shards_need_flush_and_truncate(store_id);
+            truncate_cnt += shards_need_truncate.len();
+            for id in shards_need_truncate {
+                self.truncate_ts(id)?;
+            }
+        }
+        Ok(truncate_cnt)
+    }
+
     // NOTE: `sorted_backup_shards_id` & `sorted_target_regions` must be sorted by
     // start_key.
     fn align_target_regions_impl(
@@ -801,6 +815,30 @@ impl BackupCluster {
             target_shards.push(meta);
         }
         (target_shards, sstables_cnt)
+    }
+
+    fn truncate_ts(&mut self, shard_id: u64) -> RestoreResult<bool /* has_truncate_ts */> {
+        let shard_meta = &self.get_shard(shard_id).unwrap().meta;
+        let kvengine = self.kv_engine.as_ref().unwrap();
+        let shard = kvengine
+            .get_shard_with_ver(shard_meta.id, shard_meta.ver)
+            .expect("Could not find shard with meta");
+        let res_cs = kvengine
+            .truncate_with_ts(&shard, self.backup_ts.into())?
+            .unwrap();
+        if res_cs.has_truncate_ts() {
+            let shard = self.get_shard_mut(shard_id).unwrap();
+            info!(
+                "before truncate ts: {:?}, table change: {:?}",
+                shard,
+                res_cs.get_truncate_ts()
+            );
+            shard.meta.apply_change_set(&res_cs);
+            info!("after apply_truncate_ts: {:?}", shard);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     fn trim_over_bound(&mut self, shard_id: u64) -> RestoreResult<bool /* has_trim_over_bound */> {

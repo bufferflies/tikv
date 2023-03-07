@@ -132,15 +132,33 @@ fn execute_full_backup(config: BackupConfig, name: String) {
     }
 }
 
-pub fn backup_cluster(
+fn backup_cluster(
     config: BackupConfig,
     incremental: bool,
     name: String,
     pd_client: &dyn PdClient,
     last_backup_meta: Option<ClusterBackupMeta>,
 ) -> Result<ClusterBackupMeta> {
-    let stores = get_all_stores_except_tiflash(pd_client)?;
     let backup_ts = block_on(pd_client.get_tso())?.into_inner();
+    backup_cluster_with_ts(
+        config,
+        incremental,
+        name,
+        pd_client,
+        backup_ts,
+        last_backup_meta,
+    )
+}
+
+pub fn backup_cluster_with_ts(
+    config: BackupConfig,
+    incremental: bool,
+    name: String,
+    pd_client: &dyn PdClient,
+    backup_ts: u64,
+    last_backup_meta: Option<ClusterBackupMeta>,
+) -> Result<ClusterBackupMeta> {
+    let stores = get_all_stores_except_tiflash(pd_client)?;
     let cluster_id = pd_client.get_cluster_id()?;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()

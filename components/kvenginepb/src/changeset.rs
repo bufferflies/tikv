@@ -1483,6 +1483,7 @@ pub struct Flush {
     pub properties: ::protobuf::SingularPtrField<Properties>,
     pub version: u64,
     pub blob_create: ::protobuf::SingularPtrField<BlobCreate>,
+    pub max_ts: u64,
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
     pub cached_size: ::protobuf::CachedSize,
@@ -1612,6 +1613,21 @@ impl Flush {
     pub fn take_blob_create(&mut self) -> BlobCreate {
         self.blob_create.take().unwrap_or_else(|| BlobCreate::new())
     }
+
+    // uint64 max_ts = 5;
+
+
+    pub fn get_max_ts(&self) -> u64 {
+        self.max_ts
+    }
+    pub fn clear_max_ts(&mut self) {
+        self.max_ts = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_max_ts(&mut self, v: u64) {
+        self.max_ts = v;
+    }
 }
 
 impl ::protobuf::Message for Flush {
@@ -1654,6 +1670,13 @@ impl ::protobuf::Message for Flush {
                 4 => {
                     ::protobuf::rt::read_singular_message_into(wire_type, is, &mut self.blob_create)?;
                 },
+                5 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.max_ts = tmp;
+                },
                 _ => {
                     ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
                 },
@@ -1681,6 +1704,9 @@ impl ::protobuf::Message for Flush {
             let len = v.compute_size();
             my_size += 1 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
         }
+        if self.max_ts != 0 {
+            my_size += ::protobuf::rt::value_size(5, self.max_ts, ::protobuf::wire_format::WireTypeVarint);
+        }
         my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
         self.cached_size.set(my_size);
         my_size
@@ -1704,6 +1730,9 @@ impl ::protobuf::Message for Flush {
             os.write_tag(4, ::protobuf::wire_format::WireTypeLengthDelimited)?;
             os.write_raw_varint32(v.get_cached_size())?;
             v.write_to_with_cached_sizes(os)?;
+        }
+        if self.max_ts != 0 {
+            os.write_uint64(5, self.max_ts)?;
         }
         os.write_unknown_fields(self.get_unknown_fields())?;
         ::std::result::Result::Ok(())
@@ -1767,6 +1796,11 @@ impl ::protobuf::Message for Flush {
                     |m: &Flush| { &m.blob_create },
                     |m: &mut Flush| { &mut m.blob_create },
                 ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                    "max_ts",
+                    |m: &Flush| { &m.max_ts },
+                    |m: &mut Flush| { &mut m.max_ts },
+                ));
                 ::protobuf::reflect::MessageDescriptor::new::<Flush>(
                     "Flush",
                     fields,
@@ -1793,6 +1827,7 @@ impl ::protobuf::Clear for Flush {
         self.properties.clear();
         self.version = 0;
         self.blob_create.clear();
+        self.max_ts = 0;
         self.unknown_fields.clear();
     }
 }
@@ -1806,6 +1841,7 @@ impl ::protobuf::PbPrint for Flush {
         ::protobuf::PbPrint::fmt(&self.properties, "properties", buf);
         ::protobuf::PbPrint::fmt(&self.version, "version", buf);
         ::protobuf::PbPrint::fmt(&self.blob_create, "blob_create", buf);
+        ::protobuf::PbPrint::fmt(&self.max_ts, "max_ts", buf);
         if old_len < buf.len() {
           buf.push(' ');
         }
@@ -1820,6 +1856,7 @@ impl ::std::fmt::Debug for Flush {
         ::protobuf::PbPrint::fmt(&self.properties, "properties", &mut s);
         ::protobuf::PbPrint::fmt(&self.version, "version", &mut s);
         ::protobuf::PbPrint::fmt(&self.blob_create, "blob_create", &mut s);
+        ::protobuf::PbPrint::fmt(&self.max_ts, "max_ts", &mut s);
         write!(f, "{}", s)
     }
 }
@@ -1841,6 +1878,7 @@ pub struct Snapshot {
     pub base_version: u64,
     pub data_sequence: u64,
     pub blob_creates: ::protobuf::RepeatedField<BlobCreate>,
+    pub max_ts: u64,
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
     pub cached_size: ::protobuf::CachedSize,
@@ -2046,6 +2084,21 @@ impl Snapshot {
     pub fn take_blob_creates(&mut self) -> ::protobuf::RepeatedField<BlobCreate> {
         ::std::mem::replace(&mut self.blob_creates, ::protobuf::RepeatedField::new())
     }
+
+    // uint64 max_ts = 10;
+
+
+    pub fn get_max_ts(&self) -> u64 {
+        self.max_ts
+    }
+    pub fn clear_max_ts(&mut self) {
+        self.max_ts = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_max_ts(&mut self, v: u64) {
+        self.max_ts = v;
+    }
 }
 
 impl ::protobuf::Message for Snapshot {
@@ -2109,6 +2162,13 @@ impl ::protobuf::Message for Snapshot {
                 9 => {
                     ::protobuf::rt::read_repeated_message_into(wire_type, is, &mut self.blob_creates)?;
                 },
+                10 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.max_ts = tmp;
+                },
                 _ => {
                     ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
                 },
@@ -2149,6 +2209,9 @@ impl ::protobuf::Message for Snapshot {
             let len = value.compute_size();
             my_size += 1 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
         };
+        if self.max_ts != 0 {
+            my_size += ::protobuf::rt::value_size(10, self.max_ts, ::protobuf::wire_format::WireTypeVarint);
+        }
         my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
         self.cached_size.set(my_size);
         my_size
@@ -2187,6 +2250,9 @@ impl ::protobuf::Message for Snapshot {
             os.write_raw_varint32(v.get_cached_size())?;
             v.write_to_with_cached_sizes(os)?;
         };
+        if self.max_ts != 0 {
+            os.write_uint64(10, self.max_ts)?;
+        }
         os.write_unknown_fields(self.get_unknown_fields())?;
         ::std::result::Result::Ok(())
     }
@@ -2269,6 +2335,11 @@ impl ::protobuf::Message for Snapshot {
                     |m: &Snapshot| { &m.blob_creates },
                     |m: &mut Snapshot| { &mut m.blob_creates },
                 ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                    "max_ts",
+                    |m: &Snapshot| { &m.max_ts },
+                    |m: &mut Snapshot| { &mut m.max_ts },
+                ));
                 ::protobuf::reflect::MessageDescriptor::new::<Snapshot>(
                     "Snapshot",
                     fields,
@@ -2299,6 +2370,7 @@ impl ::protobuf::Clear for Snapshot {
         self.base_version = 0;
         self.data_sequence = 0;
         self.blob_creates.clear();
+        self.max_ts = 0;
         self.unknown_fields.clear();
     }
 }
@@ -2316,6 +2388,7 @@ impl ::protobuf::PbPrint for Snapshot {
         ::protobuf::PbPrint::fmt(&self.base_version, "base_version", buf);
         ::protobuf::PbPrint::fmt(&self.data_sequence, "data_sequence", buf);
         ::protobuf::PbPrint::fmt(&self.blob_creates, "blob_creates", buf);
+        ::protobuf::PbPrint::fmt(&self.max_ts, "max_ts", buf);
         if old_len < buf.len() {
           buf.push(' ');
         }
@@ -2334,6 +2407,7 @@ impl ::std::fmt::Debug for Snapshot {
         ::protobuf::PbPrint::fmt(&self.base_version, "base_version", &mut s);
         ::protobuf::PbPrint::fmt(&self.data_sequence, "data_sequence", &mut s);
         ::protobuf::PbPrint::fmt(&self.blob_creates, "blob_creates", &mut s);
+        ::protobuf::PbPrint::fmt(&self.max_ts, "max_ts", &mut s);
         write!(f, "{}", s)
     }
 }
@@ -4576,38 +4650,39 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     (\x05B\0\x12\x0f\n\x05level\x18\x02\x20\x01(\rB\0\x12-\n\x0ctableCreates\
     \x18\x03\x20\x03(\x0b2\x15.enginepb.TableCreateB\0\x12\x14\n\ntopDeletes\
     \x18\x04\x20\x03(\x04B\0\x12\x17\n\rbottomDeletes\x18\x05\x20\x03(\x04B\
-    \0\x12\x14\n\nconflicted\x18\x06\x20\x01(\x08B\0:\0\"\x9c\x01\n\x05Flush\
+    \0\x12\x14\n\nconflicted\x18\x06\x20\x01(\x08B\0:\0\"\xae\x01\n\x05Flush\
     \x12&\n\x08l0Create\x18\x01\x20\x01(\x0b2\x12.enginepb.L0CreateB\0\x12*\
     \n\nproperties\x18\x02\x20\x01(\x0b2\x14.enginepb.PropertiesB\0\x12\x11\
     \n\x07version\x18\x03\x20\x01(\x04B\0\x12*\n\nBlobCreate\x18\x04\x20\x01\
-    (\x0b2\x14.enginepb.BlobCreateB\0:\0\"\x8d\x02\n\x08Snapshot\x12\x0f\n\
-    \x05start\x18\x01\x20\x01(\x0cB\0\x12\r\n\x03end\x18\x02\x20\x01(\x0cB\0\
-    \x12*\n\nproperties\x18\x03\x20\x01(\x0b2\x14.enginepb.PropertiesB\0\x12\
-    '\n\tl0Creates\x18\x05\x20\x03(\x0b2\x12.enginepb.L0CreateB\0\x12-\n\x0c\
-    tableCreates\x18\x06\x20\x03(\x0b2\x15.enginepb.TableCreateB\0\x12\x15\n\
-    \x0bbaseVersion\x18\x07\x20\x01(\x04B\0\x12\x17\n\rdata_sequence\x18\x08\
-    \x20\x01(\x04B\0\x12+\n\x0bBlobCreates\x18\t\x20\x03(\x0b2\x14.enginepb.\
-    BlobCreateB\0:\0\"A\n\x08L0Create\x12\x0c\n\x02ID\x18\x01\x20\x01(\x04B\
-    \0\x12\x12\n\x08smallest\x18\x02\x20\x01(\x0cB\0\x12\x11\n\x07biggest\
-    \x18\x03\x20\x01(\x0cB\0:\0\"C\n\nBlobCreate\x12\x0c\n\x02ID\x18\x01\x20\
-    \x01(\x04B\0\x12\x12\n\x08smallest\x18\x02\x20\x01(\x0cB\0\x12\x11\n\x07\
-    biggest\x18\x03\x20\x01(\x0cB\0:\0\"c\n\x0bTableCreate\x12\x0c\n\x02ID\
-    \x18\x01\x20\x01(\x04B\0\x12\x0f\n\x05level\x18\x02\x20\x01(\rB\0\x12\
-    \x0c\n\x02CF\x18\x03\x20\x01(\x05B\0\x12\x12\n\x08smallest\x18\x04\x20\
-    \x01(\x0cB\0\x12\x11\n\x07biggest\x18\x05\x20\x01(\x0cB\0:\0\"<\n\x0bTab\
-    leDelete\x12\x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\x12\x0f\n\x05level\x18\
-    \x02\x20\x01(\rB\0\x12\x0c\n\x02CF\x18\x03\x20\x01(\x05B\0:\0\"D\n\x05Sp\
-    lit\x12)\n\tnewShards\x18\x01\x20\x03(\x0b2\x14.enginepb.PropertiesB\0\
-    \x12\x0e\n\x04Keys\x18\x03\x20\x03(\x0cB\0:\0\"\xc0\x01\n\x0bIngestFiles\
-    \x12'\n\tl0Creates\x18\x01\x20\x03(\x0b2\x12.enginepb.L0CreateB\0\x12-\n\
-    \x0ctableCreates\x18\x02\x20\x03(\x0b2\x15.enginepb.TableCreateB\0\x12*\
-    \n\nproperties\x18\x03\x20\x01(\x0b2\x14.enginepb.PropertiesB\0\x12+\n\
-    \x0bBlobCreates\x18\x04\x20\x03(\x0b2\x14.enginepb.BlobCreateB\0:\0\"C\n\
-    \nProperties\x12\x11\n\x07shardID\x18\x01\x20\x01(\x04B\0\x12\x0e\n\x04k\
-    eys\x18\x02\x20\x03(\tB\0\x12\x10\n\x06values\x18\x03\x20\x03(\x0cB\0:\0\
-    \"m\n\x0bTableChange\x12-\n\x0ctableDeletes\x18\x01\x20\x03(\x0b2\x15.en\
-    ginepb.TableDeleteB\0\x12-\n\x0ctableCreates\x18\x02\x20\x03(\x0b2\x15.e\
-    nginepb.TableCreateB\0:\0B\0b\x06proto3\
+    (\x0b2\x14.enginepb.BlobCreateB\0\x12\x10\n\x06max_ts\x18\x05\x20\x01(\
+    \x04B\0:\0\"\x9f\x02\n\x08Snapshot\x12\x0f\n\x05start\x18\x01\x20\x01(\
+    \x0cB\0\x12\r\n\x03end\x18\x02\x20\x01(\x0cB\0\x12*\n\nproperties\x18\
+    \x03\x20\x01(\x0b2\x14.enginepb.PropertiesB\0\x12'\n\tl0Creates\x18\x05\
+    \x20\x03(\x0b2\x12.enginepb.L0CreateB\0\x12-\n\x0ctableCreates\x18\x06\
+    \x20\x03(\x0b2\x15.enginepb.TableCreateB\0\x12\x15\n\x0bbaseVersion\x18\
+    \x07\x20\x01(\x04B\0\x12\x17\n\rdata_sequence\x18\x08\x20\x01(\x04B\0\
+    \x12+\n\x0bBlobCreates\x18\t\x20\x03(\x0b2\x14.enginepb.BlobCreateB\0\
+    \x12\x10\n\x06max_ts\x18\n\x20\x01(\x04B\0:\0\"A\n\x08L0Create\x12\x0c\n\
+    \x02ID\x18\x01\x20\x01(\x04B\0\x12\x12\n\x08smallest\x18\x02\x20\x01(\
+    \x0cB\0\x12\x11\n\x07biggest\x18\x03\x20\x01(\x0cB\0:\0\"C\n\nBlobCreate\
+    \x12\x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\x12\x12\n\x08smallest\x18\x02\
+    \x20\x01(\x0cB\0\x12\x11\n\x07biggest\x18\x03\x20\x01(\x0cB\0:\0\"c\n\
+    \x0bTableCreate\x12\x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\x12\x0f\n\x05lev\
+    el\x18\x02\x20\x01(\rB\0\x12\x0c\n\x02CF\x18\x03\x20\x01(\x05B\0\x12\x12\
+    \n\x08smallest\x18\x04\x20\x01(\x0cB\0\x12\x11\n\x07biggest\x18\x05\x20\
+    \x01(\x0cB\0:\0\"<\n\x0bTableDelete\x12\x0c\n\x02ID\x18\x01\x20\x01(\x04\
+    B\0\x12\x0f\n\x05level\x18\x02\x20\x01(\rB\0\x12\x0c\n\x02CF\x18\x03\x20\
+    \x01(\x05B\0:\0\"D\n\x05Split\x12)\n\tnewShards\x18\x01\x20\x03(\x0b2\
+    \x14.enginepb.PropertiesB\0\x12\x0e\n\x04Keys\x18\x03\x20\x03(\x0cB\0:\0\
+    \"\xc0\x01\n\x0bIngestFiles\x12'\n\tl0Creates\x18\x01\x20\x03(\x0b2\x12.\
+    enginepb.L0CreateB\0\x12-\n\x0ctableCreates\x18\x02\x20\x03(\x0b2\x15.en\
+    ginepb.TableCreateB\0\x12*\n\nproperties\x18\x03\x20\x01(\x0b2\x14.engin\
+    epb.PropertiesB\0\x12+\n\x0bBlobCreates\x18\x04\x20\x03(\x0b2\x14.engine\
+    pb.BlobCreateB\0:\0\"C\n\nProperties\x12\x11\n\x07shardID\x18\x01\x20\
+    \x01(\x04B\0\x12\x0e\n\x04keys\x18\x02\x20\x03(\tB\0\x12\x10\n\x06values\
+    \x18\x03\x20\x03(\x0cB\0:\0\"m\n\x0bTableChange\x12-\n\x0ctableDeletes\
+    \x18\x01\x20\x03(\x0b2\x15.enginepb.TableDeleteB\0\x12-\n\x0ctableCreate\
+    s\x18\x02\x20\x03(\x0b2\x15.enginepb.TableCreateB\0:\0B\0b\x06proto3\
 ";
 
 static mut file_descriptor_proto_lazy: ::protobuf::lazy::Lazy<::protobuf::descriptor::FileDescriptorProto> = ::protobuf::lazy::Lazy {

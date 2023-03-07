@@ -48,11 +48,13 @@ fn start_cluster_and_full_backup(
         skip_keyspace_meta: true,
         ..Default::default()
     };
-    let backup_meta = backup::backup_cluster(
+    let backup_ts = client.get_ts().into_inner();
+    let backup_meta = backup::backup_cluster_with_ts(
         backup_config,
         false,
         backup_name,
         cluster.get_pd_client().as_ref(),
+        backup_ts,
         None,
     )
     .expect("backup::backup_cluster");

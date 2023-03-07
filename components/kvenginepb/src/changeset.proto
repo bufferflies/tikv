@@ -53,6 +53,7 @@ message Flush {
   Properties properties = 2;
   uint64 version = 3;
   BlobCreate BlobCreate = 4;
+  uint64 max_ts = 5;
 }
 
 message Snapshot {
@@ -64,6 +65,7 @@ message Snapshot {
   uint64 baseVersion = 7;
   uint64 data_sequence = 8;
   repeated BlobCreate BlobCreates = 9;
+  uint64 max_ts = 10;
 }
 
 message L0Create {

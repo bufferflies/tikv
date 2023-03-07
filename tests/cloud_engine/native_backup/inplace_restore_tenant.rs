@@ -132,11 +132,25 @@ fn test_inplace_restore_tenant_impl(
         skip_keyspace_meta: true,
         ..Default::default()
     };
-    let backup_meta = backup::backup_cluster(
+    let backup_ts = client.get_ts().into_inner();
+    // Put more data before backup to verify truncate ts take affect.
+    client.put_kv(0..data_count, &i_to_key, i_to_val_142);
+    step!("another writes done");
+    client.verify_data_with_ref_store();
+    assert!(
+        client
+            .verify_data_with_given_ref_store(&origin_ref_store)
+            .is_err(),
+        "case: {}",
+        case_name,
+    );
+    step!("verify before backup ok");
+    let backup_meta = backup::backup_cluster_with_ts(
         backup_config,
         false,
         backup_name.clone(),
         cluster.get_pd_client().as_ref(),
+        backup_ts,
         None,
     )
     .expect("backup::backup_cluster");

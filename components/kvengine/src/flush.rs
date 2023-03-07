@@ -127,14 +127,17 @@ impl Engine {
         let m = task.normal.as_ref().unwrap();
         let flush_version = m.get_version();
         let tag = ShardTag::new(self.get_engine_id(), task.id_ver);
+        let max_ts = m.data_max_ts();
         info!(
-            "{} flush mem-table version {}, size {}",
+            "{} flush mem-table version {}, size {}, data max ts {}",
             tag,
             flush_version,
             m.size(),
+            max_ts,
         );
         let flush = cs.mut_flush();
         flush.set_version(flush_version);
+        flush.set_max_ts(max_ts);
         if let Some(props) = m.get_properties() {
             flush.set_properties(props);
         }
@@ -173,6 +176,7 @@ impl Engine {
         initial_flush.set_end(task.end.to_vec());
         initial_flush.set_base_version(flush.base_version);
         initial_flush.set_data_sequence(flush.data_sequence);
+        initial_flush.set_max_ts(flush.parent_snap.max_ts);
         for tbl_create in flush.parent_snap.get_table_creates() {
             if task.overlap_table(tbl_create.get_smallest(), tbl_create.get_biggest()) {
                 initial_flush.mut_table_creates().push(tbl_create.clone());
