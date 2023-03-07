@@ -21,13 +21,13 @@ use rusoto_core::{
     HttpClient, HttpDispatchError, Region, RusotoError,
 };
 use rusoto_s3::{
-    CopyObjectError, GetObjectError, GetObjectTaggingError, ListObjectsV2Error, PutObjectError,
-    PutObjectTaggingError,
+    CopyObjectError, DeleteObjectTaggingError, GetObjectError, GetObjectTaggingError,
+    ListObjectsV2Error, PutObjectError, PutObjectTaggingError,
 };
 use tikv_util::time::Instant;
 use tokio::runtime::Runtime;
 
-use crate::dfs::{metrics::*, Dfs, Options};
+use crate::dfs::{self, metrics::*, Dfs, Options};
 
 const MAX_RETRY_COUNT: u32 = 9;
 const RETRY_SLEEP_MS: u64 = 500;
@@ -269,14 +269,11 @@ impl S3FsCore {
         }
     }
 
-    pub async fn is_removed(&self, file_id: u64) -> bool {
+    pub async fn is_removed(&self, file_id: u64) -> Result<bool, dfs::Error> {
         let mut retry_cnt = 0;
         loop {
             let key = self.file_key(file_id);
-            let mut req = self.new_request("GET", &key);
-            let mut params = Params::new();
-            params.put_key("tagging");
-            req.set_params(params);
+            let req = self.new_tagging_request("GET", &key);
             let mut result = self
                 .dispatch(req, GetObjectTaggingError::from_response)
                 .await;
@@ -287,18 +284,17 @@ impl S3FsCore {
                     let body = body_res.unwrap();
                     let body_str = body.to_str().unwrap();
                     let tagging: Tagging = quick_xml::de::from_str(body_str).unwrap();
-                    return tagging
-                        .tag_set
-                        .tag
-                        .iter()
-                        .any(|tag| tag.key == "deleted" && tag.value == "true");
+                    return Ok(tagging.has_deleted_tag());
                 } else {
                     result = Err(body_res.unwrap_err().into());
                 }
             }
             let err = result.unwrap_err();
             if let RusotoError::Service(_) = err {
-                return true;
+                return Err(dfs::Error::S3(format!(
+                    "Get file {} tagging fail {:?}",
+                    file_id, err
+                )));
             }
             if self.is_err_retryable(&err) && retry_cnt < MAX_RETRY_COUNT {
                 retry_cnt += 1;
@@ -306,11 +302,10 @@ impl S3FsCore {
                 tokio::time::sleep(Duration::from_millis(retry_sleep)).await;
                 continue;
             }
-            error!(
-                "failed to get tagging for file {}, reach max retry count {}, err {:?}",
+            return Err(dfs::Error::S3(format!(
+                "Get file {} tagging, reach max retry count {}, err {:?}",
                 file_id, MAX_RETRY_COUNT, err,
-            );
-            return true;
+            )));
         }
     }
 
@@ -322,6 +317,14 @@ impl S3FsCore {
         };
         let mut req = SignedRequest::new(method, "s3", &self.region, &path);
         req.scheme = Some("http".to_string());
+        req
+    }
+
+    fn new_tagging_request(&self, method: &str, key: &str) -> SignedRequest {
+        let mut req = self.new_request(method, key);
+        let mut params = Params::new();
+        params.put_key("tagging");
+        req.set_params(params);
         req
     }
 
@@ -469,6 +472,42 @@ impl S3FsCore {
             return Err(err.into());
         }
     }
+
+    async fn remove_file_tagging(&self, file_id: u64) -> Result<(), dfs::Error> {
+        let mut retry_cnt = 0;
+        loop {
+            let key = self.file_key(file_id);
+            let req = self.new_tagging_request("DELETE", &key);
+            if let Err(err) = self
+                .dispatch(req, DeleteObjectTaggingError::from_response)
+                .await
+            {
+                if retry_cnt < MAX_RETRY_COUNT {
+                    retry_cnt += 1;
+                    warn!(
+                        "{}nd retry remove file {} tag error {:?}",
+                        retry_cnt, file_id, &err
+                    );
+                    let retry_sleep = 2u64.pow(retry_cnt) * RETRY_SLEEP_MS;
+                    tokio::time::sleep(Duration::from_millis(retry_sleep)).await;
+                    continue;
+                } else {
+                    return Err(dfs::Error::S3(format!(
+                        "Failed to remove file {} tag, reach max retry count {}, err {:?}",
+                        file_id, MAX_RETRY_COUNT, err,
+                    )));
+                }
+            }
+            return Ok(());
+        }
+    }
+
+    pub async fn retain_file(&self, file_id: u64) -> Result<(), dfs::Error> {
+        if self.is_removed(file_id).await? {
+            self.remove_file_tagging(file_id).await?
+        }
+        Ok(())
+    }
 }
 
 impl ObjectStorage for S3Fs {
@@ -555,7 +594,8 @@ impl Dfs for S3Fs {
         let mut copied = false;
         loop {
             let key = self.file_key(file_id);
-            // copy object
+            // Copy object to update the creation time, as the s3 clean policy
+            // depends on the creation time.
             if !copied {
                 let mut req = self.new_request("PUT", &key);
                 req.add_header("x-amz-copy-source", &format!("{}/{}", self.bucket, key));
@@ -583,14 +623,11 @@ impl Dfs for S3Fs {
             }
             // ks3 doesn't support copy object with tagging, workaround to send another
             // request. TODO: remove it when KS3 fixed the compatibility issue.
-            let mut req = self.new_request("PUT", &key);
-            let mut params = Params::new();
-            params.put_key("tagging");
-            req.set_params(params);
-            req.set_content_type("application/xml".to_string());
-            let tagging = Tagging::new_single("deleted", "true");
+            let mut req = self.new_tagging_request("PUT", &key);
+            let tagging = Tagging::new_single_deleted();
             let tagging_xml = quick_xml::se::to_string(&tagging).unwrap();
             let stream = futures::stream::once(async move { Ok(Bytes::from(tagging_xml)) });
+            req.set_content_type("application/xml".to_string());
             req.set_payload_stream(rusoto_core::ByteStream::new(stream));
             if let Err(err) = self
                 .dispatch(req, PutObjectTaggingError::from_response)
@@ -626,41 +663,46 @@ struct ListObjects {
     is_truncated: bool,
 }
 
-#[derive(Default, Debug, Serialize, Deserialize)]
+#[derive(Clone, Default, Debug, Serialize, Deserialize)]
 #[serde(default)]
 #[serde(rename_all = "PascalCase")]
 struct ListObjectContent {
     key: String,
 }
 
-#[derive(Default, Debug, Serialize, Deserialize)]
+#[derive(Clone, Default, Debug, Serialize, Deserialize)]
 #[serde(default)]
 #[serde(rename_all = "PascalCase")]
-struct Tagging {
+pub struct Tagging {
     tag_set: TagSet,
 }
 
 impl Tagging {
-    fn new_single(key: &str, value: &str) -> Tagging {
+    fn new_single_deleted() -> Tagging {
         Self {
             tag_set: TagSet {
-                tag: vec![Tag {
-                    key: key.to_string(),
-                    value: value.to_string(),
-                }],
+                tag: vec![Tag::new_deleted()],
             },
         }
     }
+
+    pub fn add_tag(&mut self, key: String, value: String) {
+        self.tag_set.tag.push(Tag { key, value });
+    }
+
+    fn has_deleted_tag(&self) -> bool {
+        self.tag_set.tag.iter().any(|tag| tag.is_deleted())
+    }
 }
 
-#[derive(Default, Debug, Serialize, Deserialize)]
+#[derive(Clone, Default, Debug, Serialize, Deserialize)]
 #[serde(default)]
 #[serde(rename_all = "PascalCase")]
 struct TagSet {
     tag: Vec<Tag>,
 }
 
-#[derive(Default, Debug, Serialize, Deserialize)]
+#[derive(Clone, Default, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 #[serde(rename_all = "PascalCase")]
 struct Tag {
@@ -668,6 +710,19 @@ struct Tag {
     key: String,
     #[serde(rename = "$unflatten=Value")]
     value: String,
+}
+
+impl Tag {
+    fn new_deleted() -> Self {
+        Self {
+            key: "deleted".to_string(),
+            value: "true".to_string(),
+        }
+    }
+
+    fn is_deleted(&self) -> bool {
+        self.key == "deleted" && self.value == "true"
+    }
 }
 
 struct Response {

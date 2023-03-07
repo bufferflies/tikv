@@ -194,10 +194,17 @@ impl GcWorker {
         let opts = dfs::Options::new(0, 0);
         let s3fs = self.s3fs.clone();
         self.s3fs.get_runtime().block_on(async move {
-            if !s3fs.is_removed(id).await {
-                s3fs.remove(id, opts).await;
-                REMOVED.fetch_add(1, Ordering::SeqCst);
-                info!("removed {}", id);
+            match s3fs.is_removed(id).await {
+                Ok(removed) => {
+                    if !removed {
+                        s3fs.remove(id, opts).await;
+                        REMOVED.fetch_add(1, Ordering::SeqCst);
+                        info!("removed {}", id);
+                    }
+                }
+                Err(e) => {
+                    error!("Fail to get file {} status, {:?}", id, e);
+                }
             }
         });
     }

@@ -8,20 +8,21 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU16, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     time::Duration,
 };
 
 use bytes::Buf;
-use futures::StreamExt;
+use futures::{future::ok, StreamExt, TryStreamExt};
 use hyper::{
     header::HeaderValue,
     service::{make_service_fn, service_fn},
     Body, HeaderMap, Method, Request, Response, Server, StatusCode,
 };
+use kvengine::dfs::Tagging;
 use rand::Rng;
-use tikv_util::{debug, error, info, time::Instant, warn};
+use tikv_util::{debug, error, info, time::Instant};
 use tokio::{
     fs,
     fs::File,
@@ -38,6 +39,32 @@ type HttpResult = std::result::Result<Response<Body>, hyper::Error>;
 
 struct ServiceContext {
     store_path: PathBuf,
+    tagging: HashMap<String, Tagging>, // file path -> Tagging
+}
+
+impl ServiceContext {
+    fn add_tag(&mut self, file_path: String, key: String, value: String) {
+        self.tagging
+            .entry(file_path)
+            .and_modify(|t| t.add_tag(key.clone(), value.clone()))
+            .or_insert({
+                let mut tagging = Tagging::default();
+                tagging.add_tag(key, value);
+                tagging
+            });
+    }
+
+    fn insert_tagging(&mut self, file_path: String, tagging: Tagging) {
+        self.tagging.insert(file_path, tagging);
+    }
+
+    fn get_tag(&self, file_path: &String) -> Option<Tagging> {
+        self.tagging.get(file_path).cloned()
+    }
+
+    fn remove_tags(&mut self, file_path: String) {
+        self.tagging.remove(&file_path);
+    }
 }
 
 pub struct ObjectStorageService {
@@ -74,11 +101,12 @@ impl ObjectStorageService {
     }
 
     async fn handle_put_object(
-        ctx: Arc<ServiceContext>,
+        ctx: Arc<Mutex<ServiceContext>>,
         req: Request<Body>,
     ) -> Result<Response<Body>> {
         let (parts, mut body) = req.into_parts();
-        let file_path = Self::make_file_path(&ctx.store_path, parts.uri.path());
+        let path = ctx.lock().unwrap().store_path.to_owned();
+        let file_path = Self::make_file_path(&path, parts.uri.path());
         let parent = file_path
             .parent()
             .ok_or(format!("fail to get parent for {:?}", file_path))?;
@@ -99,7 +127,7 @@ impl ObjectStorageService {
         let mut file = File::create(&tmp_file_path).await?;
         debug!(
             "handle_put_object: ready to save object, store_path: {}, file_path: {}, tmp_file_path: {}",
-            ctx.store_path.to_str().unwrap(),
+            path.to_str().unwrap(),
             file_path.to_str().unwrap(),
             tmp_file_path.to_str().unwrap()
         );
@@ -144,11 +172,12 @@ impl ObjectStorageService {
     }
 
     async fn handle_get_object(
-        ctx: Arc<ServiceContext>,
+        ctx: Arc<Mutex<ServiceContext>>,
         req: Request<Body>,
     ) -> Result<Response<Body>> {
         let (parts, _) = req.into_parts();
-        let file_path = Self::make_file_path(&ctx.store_path, parts.uri.path());
+        let path = ctx.lock().unwrap().store_path.to_owned();
+        let file_path = Self::make_file_path(&path, parts.uri.path());
         let range = Self::parse_get_object_req_range(&parts.headers);
         let res = if let Ok(mut file) = File::open(file_path).await {
             let body = match range {
@@ -177,16 +206,52 @@ impl ObjectStorageService {
         Ok(res)
     }
 
+    fn handle_get_object_tag(
+        ctx: Arc<Mutex<ServiceContext>>,
+        req: Request<Body>,
+    ) -> Result<Response<Body>> {
+        let (parts, _) = req.into_parts();
+        let path = ctx.lock().unwrap().store_path.to_owned();
+        let file_path = Self::make_file_path(&path, parts.uri.path());
+        let file = file_path.as_os_str().to_str().unwrap().to_owned();
+        let tagging = ctx.lock().unwrap().get_tag(&file).unwrap_or_default();
+        info!("Get object {} tag: {:?}", file, tagging);
+        let tagging_xml = quick_xml::se::to_string(&tagging).unwrap();
+        Ok(Response::new(Body::from(tagging_xml)))
+    }
+
+    fn handle_delete_object_tag(
+        ctx: Arc<Mutex<ServiceContext>>,
+        req: Request<Body>,
+    ) -> Result<Response<Body>> {
+        let (parts, _) = req.into_parts();
+        let path = ctx.lock().unwrap().store_path.to_owned();
+        let file_path = Self::make_file_path(&path, parts.uri.path());
+        let file = file_path.as_os_str().to_str().unwrap().to_owned();
+        info!("Delete object {} tag", file);
+        ctx.lock().unwrap().remove_tags(file);
+        Ok(Response::default())
+    }
+
     fn is_copy_object_request(req: &Request<Body>) -> bool {
         req.headers().contains_key("x-amz-copy-source")
     }
 
     async fn handle_copy_object(
-        _ctx: Arc<ServiceContext>,
-        _req: Request<Body>,
+        ctx: Arc<Mutex<ServiceContext>>,
+        req: Request<Body>,
     ) -> Result<Response<Body>> {
-        // TODO
-        warn!("handle_copy_object: request ignored");
+        if let Some(v) = req.headers().get("x-amz-tagging") {
+            let mut splits = v.to_str().unwrap().split('=');
+            let key = splits.next().unwrap().to_string();
+            let value = splits.next().unwrap().to_string();
+            let (parts, _) = req.into_parts();
+            let path = ctx.lock().unwrap().store_path.to_owned();
+            let file_path = Self::make_file_path(&path, parts.uri.path());
+            let file = file_path.as_os_str().to_str().unwrap().to_owned();
+            info!("Copy object {} with tag: {}={}", file, key, value);
+            ctx.lock().unwrap().add_tag(file, key, value);
+        }
         Ok(Response::default())
     }
 
@@ -201,15 +266,27 @@ impl ObjectStorageService {
     }
 
     async fn handle_tagging_object(
-        _ctx: Arc<ServiceContext>,
-        _req: Request<Body>,
+        ctx: Arc<Mutex<ServiceContext>>,
+        req: Request<Body>,
     ) -> Result<Response<Body>> {
-        // TODO
-        warn!("handle_tagging_object: request ignored");
+        let (parts, body) = req.into_parts();
+        let path = ctx.lock().unwrap().store_path.to_owned();
+        let file_path = Self::make_file_path(&path, parts.uri.path());
+        let file = file_path.as_os_str().to_str().unwrap().to_owned();
+        let mut body_content = Vec::new();
+        body.try_for_each(|bytes| {
+            body_content.extend(bytes);
+            ok(())
+        })
+        .await?;
+        let tagging: Tagging = quick_xml::de::from_slice(&body_content).unwrap();
+        info!("Put object {} tag {:?}", file, tagging);
+        // Only support replace tagging for now. TODO: Support append tags.
+        ctx.lock().unwrap().insert_tagging(file, tagging);
         Ok(Response::default())
     }
 
-    async fn service(ctx: Arc<ServiceContext>, req: Request<Body>) -> HttpResult {
+    async fn service(ctx: Arc<Mutex<ServiceContext>>, req: Request<Body>) -> HttpResult {
         let res: Result<Response<Body>> = match *req.method() {
             Method::PUT if Self::is_copy_object_request(&req) => {
                 Self::handle_copy_object(ctx, req).await
@@ -218,7 +295,13 @@ impl ObjectStorageService {
                 Self::handle_tagging_object(ctx, req).await
             }
             Method::PUT => Self::handle_put_object(ctx, req).await,
+            Method::GET if Self::is_tagging_object_request(&req) => {
+                Self::handle_get_object_tag(ctx, req)
+            }
             Method::GET => Self::handle_get_object(ctx, req).await,
+            Method::DELETE if Self::is_tagging_object_request(&req) => {
+                Self::handle_delete_object_tag(ctx, req)
+            }
             _ => Ok(Self::method_not_found()),
         };
         res.or_else(|e| {
@@ -247,9 +330,10 @@ impl ObjectStorageService {
         assert!(self.svc_handle.is_none(), "server has started");
 
         let addr = SocketAddr::from(([127, 0, 0, 1], 0));
-        let ctx = Arc::new(ServiceContext {
+        let ctx = Arc::new(Mutex::new(ServiceContext {
             store_path: self.store_path.clone(),
-        });
+            tagging: HashMap::default(),
+        }));
         let make_svc = make_service_fn(move |_conn| {
             let ctx = ctx.clone();
             async move {
@@ -375,6 +459,55 @@ mod tests {
                 if idx % 7 == 0 {
                     fs.remove(file_id, options).await;
                 }
+            });
+            handles.push(handle);
+        }
+
+        runtime.block_on(futures::future::join_all(handles));
+        oss.shutdown();
+    }
+
+    #[test]
+    fn test_oss_tagging() {
+        test_util::init_log_for_test();
+
+        let base_dir = tempfile::Builder::new()
+            .prefix("test_oss_tag_")
+            .tempdir()
+            .unwrap();
+
+        let mut oss = ObjectStorageService::new(base_dir.path());
+        oss.start_server();
+
+        let s3fs = S3Fs::new(
+            "oss_test".to_string(),
+            format!("http://127.0.0.1:{}", oss.port()),
+            "admin".to_string(),
+            "admin".to_string(),
+            "local".to_string(),
+            "cse_test".to_string(),
+        );
+
+        let runtime = s3fs.get_runtime();
+        let mut rng = rand::thread_rng();
+        let mut handles = Vec::with_capacity(TEST_COUNT);
+        for _ in 0..TEST_COUNT {
+            let options = Options::new(0, 0);
+            let file_id = rng.gen::<u32>() as u64;
+            let write_data = {
+                let mut buf = [0u8; TEST_DATA_SIZE];
+                rng.fill(&mut buf);
+                Bytes::from(buf.to_vec())
+            };
+            let fs = s3fs.clone();
+            let handle = runtime.spawn(async move {
+                fs.create(file_id, write_data.clone(), options)
+                    .await
+                    .unwrap();
+                fs.remove(file_id, options).await;
+                assert!(fs.is_removed(file_id).await.unwrap());
+                fs.retain_file(file_id).await.unwrap();
+                assert!(!fs.is_removed(file_id).await.unwrap());
             });
             handles.push(handle);
         }

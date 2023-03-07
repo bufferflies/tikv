@@ -34,9 +34,10 @@ use tokio::runtime::Runtime;
 
 use crate::{
     common::{
-        create_pd_client, load_peer_raft_state, load_rf_engine_meta, now, send_request_to_store,
-        RawRegion,
+        create_pd_client, load_peer_raft_state, load_rf_engine_meta, now, retain_sst_files,
+        send_request_to_store, RawRegion,
     },
+    error::{Error, Result},
     pd_control::PdControl,
     restore::{get_cluster_backup_meta, RestoreConfig, RestoreKeyspaceArgs},
     step, step_error,
@@ -46,8 +47,6 @@ const WORKING_PATH_PREFIX: &str = "tenant-restore";
 const ZSTD_COMPRESSION_LEVEL: &str = "5"; // The same as ZSTD_COMPRESSION_LEVEL_FOR_REMOTE.
 
 const REQUEST_RESTORE_SNAPSHOT_RETRY_LIMIT: usize = 10;
-
-type RestoreResult<T> = std::result::Result<T, Box<dyn std::error::Error + Sync + Send>>;
 
 pub(crate) fn execute_restore_keyspace(args: RestoreKeyspaceArgs) {
     match execute_restore_keyspace_impl(&args) {
@@ -60,7 +59,7 @@ pub(crate) fn execute_restore_keyspace(args: RestoreKeyspaceArgs) {
     }
 }
 
-fn execute_restore_keyspace_impl(args: &RestoreKeyspaceArgs) -> RestoreResult<()> {
+fn execute_restore_keyspace_impl(args: &RestoreKeyspaceArgs) -> Result<()> {
     let config: RestoreConfig = get_restore_keyspace_config_from_args(args);
     let pd_client: Arc<dyn PdClient> = Arc::new(create_pd_client(&config.security, &config.pd));
     let pd_control = PdControl::new(config.pd.clone(), config.security.clone());
@@ -94,7 +93,7 @@ pub fn restore_keyspace(
     config: &RestoreConfig,
     pd_client: Arc<dyn PdClient>,
     runtime: &Runtime,
-) -> RestoreResult<()> {
+) -> Result<()> {
     let working_dir = match working_path {
         Some(p) => TempDir::new_in(p, WORKING_PATH_PREFIX),
         None => TempDir::new(WORKING_PATH_PREFIX),
@@ -118,7 +117,7 @@ pub fn restore_keyspace(
         &cluster_backup,
         working_path,
         pd_client.clone(),
-        dfs,
+        dfs.clone(),
         keyspace_id,
     )?;
     step!("Restore {} shards from backup", cluster.shards_count());
@@ -164,7 +163,10 @@ pub fn restore_keyspace(
     restore_snapshots(runtime, pd_client.clone(), snapshots)?;
     step!("Restore {snapshots_count} regions");
 
-    // untag deleted S3 files
+    let files = cluster.get_all_shard_files();
+    if let Err(e) = retain_sst_files(files, &dfs) {
+        return Err(box_err!("Fail to retain restored sst files in s3. {:?}", e));
+    }
 
     Ok(())
 }
@@ -278,7 +280,7 @@ impl BackupCluster {
         pd_client: Arc<dyn PdClient>,
         dfs: Arc<S3Fs>,
         keyspace_id: u32,
-    ) -> RestoreResult<BackupCluster> {
+    ) -> Result<BackupCluster> {
         let (keyspace_prefix, _) = ApiV2::get_txn_keyspace_range(keyspace_id);
         let mut cluster = Self {
             path,
@@ -325,7 +327,7 @@ impl BackupCluster {
         store_id: u64,
         cluster_backup: &ClusterBackupMeta,
         conf: &TikvConfig,
-    ) -> RestoreResult<()> {
+    ) -> Result<()> {
         rfengine::restore(
             self.dfs.clone(),
             cluster_backup,
@@ -357,7 +359,7 @@ impl BackupCluster {
         ret_shards
     }
 
-    fn setup_kv_engine(&mut self, store_id: u64, conf: &TikvConfig) -> RestoreResult<()> {
+    fn setup_kv_engine(&mut self, store_id: u64, conf: &TikvConfig) -> Result<()> {
         let rf_engine = self.raft_engines.get(&store_id).unwrap();
         let recoverer = rfstore::store::RecoverHandler::new(rf_engine.clone());
 
@@ -475,7 +477,7 @@ impl BackupCluster {
         prefix_shards
     }
 
-    fn load_shards(&mut self) -> RestoreResult<()> {
+    fn load_shards(&mut self) -> Result<()> {
         let all_shards =
             HashMap::from_iter(self.raft_engines.iter().map(|(store_id, rf_engine)| {
                 (
@@ -521,9 +523,18 @@ impl BackupCluster {
         self.verify_shards()
     }
 
+    // Should be called after load_shard.
+    fn get_all_shard_files(&self) -> Vec<u64> {
+        let mut files = vec![];
+        for shard in self.shards.values() {
+            files.append(&mut shard.meta.all_file_keys());
+        }
+        files
+    }
+
     fn get_leader_shards(
         all_shards: HashMap<u64, Vec<BackupShard>>,
-    ) -> RestoreResult<(
+    ) -> Result<(
         HashMap<u64, BackupShard>, // shard_id -> BackupShard
         Vec<u64>,                  // Vec<shard_id> sorted by BackupShard.start()
     )> {
@@ -601,7 +612,7 @@ impl BackupCluster {
         Ok((leader_shards, sorted_shards))
     }
 
-    fn verify_shards(&self) -> RestoreResult<()> {
+    fn verify_shards(&self) -> Result<()> {
         let (start, end) = ApiV2::get_txn_keyspace_range(self.keyspace_id);
         if self.sorted_shards.is_empty() {
             return Err(box_err!("no shard"));
@@ -658,7 +669,7 @@ impl BackupCluster {
         self.store_shards.keys().copied()
     }
 
-    pub fn flush_shards(&mut self) -> RestoreResult<usize /* number of flushed shards */> {
+    pub fn flush_shards(&mut self) -> Result<usize /* number of flushed shards */> {
         let mut flush_cnt = 0_usize;
         for store_id in self.get_all_stores_id() {
             let shards_id = self.shards_need_flush.get(&store_id).unwrap();
@@ -678,7 +689,7 @@ impl BackupCluster {
     fn flush_shards_for_store(
         &self,
         shards_id: &[u64],
-    ) -> RestoreResult<usize /* number of flushed shards */> {
+    ) -> Result<usize /* number of flushed shards */> {
         let kv_engine = self.kv_engine.as_ref().unwrap();
         for shard_id in shards_id {
             let engine_shard = kv_engine.get_shard(*shard_id).unwrap();
@@ -688,7 +699,7 @@ impl BackupCluster {
         Ok(shards_id.len())
     }
 
-    fn check_flushed(&self, timeout: Duration) -> RestoreResult<()> {
+    fn check_flushed(&self, timeout: Duration) -> Result<()> {
         let is_flushed = |stats: &ShardStats| {
             stats.flushed && stats.mem_table_size == 0 && stats.mem_table_count == 1
         };
@@ -715,7 +726,7 @@ impl BackupCluster {
         Err(box_err!("wait_for_mem_table_flush timeout"))
     }
 
-    fn truncate_backup_ts(&mut self) -> RestoreResult<usize> {
+    fn truncate_backup_ts(&mut self) -> Result<usize> {
         let mut truncate_cnt = 0_usize;
         let stores_id: Vec<u64> = self.get_all_stores_id().collect();
         for store_id in stores_id {
@@ -770,7 +781,7 @@ impl BackupCluster {
     pub fn align_target_regions(
         &mut self,
         target_regions: Vec<RawRegion>,
-    ) -> RestoreResult<(
+    ) -> Result<(
         Vec<AlignedRegion>,
         usize, // number of trimmed shards
     )> {
@@ -817,7 +828,7 @@ impl BackupCluster {
         (target_shards, sstables_cnt)
     }
 
-    fn truncate_ts(&mut self, shard_id: u64) -> RestoreResult<bool /* has_truncate_ts */> {
+    fn truncate_ts(&mut self, shard_id: u64) -> Result<bool /* has_truncate_ts */> {
         let shard_meta = &self.get_shard(shard_id).unwrap().meta;
         let kvengine = self.kv_engine.as_ref().unwrap();
         let shard = kvengine
@@ -841,7 +852,7 @@ impl BackupCluster {
         }
     }
 
-    fn trim_over_bound(&mut self, shard_id: u64) -> RestoreResult<bool /* has_trim_over_bound */> {
+    fn trim_over_bound(&mut self, shard_id: u64) -> Result<bool /* has_trim_over_bound */> {
         let shard = self.get_shard(shard_id).unwrap();
         let kvengine = self.kv_engine.as_ref().unwrap();
 
@@ -864,7 +875,7 @@ impl BackupCluster {
     fn trim_over_bound_shards(
         &mut self,
         aligned_regions: &[AlignedRegion],
-    ) -> RestoreResult<usize /* number of trimmed shards */> {
+    ) -> Result<usize /* number of trimmed shards */> {
         let mut trim_shards_cnt = 0_usize;
         let mut unique_shards = HashSet::new();
         for region in aligned_regions
@@ -1018,7 +1029,7 @@ async fn get_target_regions(
     pd_client: &Arc<dyn PdClient>,
     start_key: &[u8],
     end_key: &[u8],
-) -> RestoreResult<Vec<RawRegion>> {
+) -> Result<Vec<RawRegion>> {
     let encoded_start_key = Key::from_raw(start_key).into_encoded();
     let encoded_end_key = Key::from_raw(end_key).into_encoded();
 
@@ -1035,11 +1046,7 @@ async fn get_target_regions(
     Ok(regions)
 }
 
-fn verify_regions_boundary(
-    start_key: &[u8],
-    end_key: &[u8],
-    regions: &[RawRegion],
-) -> RestoreResult<()> {
+fn verify_regions_boundary(start_key: &[u8], end_key: &[u8], regions: &[RawRegion]) -> Result<()> {
     if regions.is_empty() {
         return Err(box_err!("no region"));
     }
@@ -1075,7 +1082,7 @@ fn restore_snapshots(
     runtime: &Runtime,
     pd_client: Arc<dyn PdClient>,
     snapshots: Vec<pb::ChangeSet>,
-) -> RestoreResult<()> {
+) -> Result<()> {
     let mut handles = Vec::with_capacity(snapshots.len());
     for snap in snapshots {
         let pd_client = pd_client.clone();
@@ -1095,10 +1102,7 @@ fn restore_snapshots(
     }
 }
 
-async fn request_restore_snapshot(
-    pd_client: Arc<dyn PdClient>,
-    cs: &pb::ChangeSet,
-) -> RestoreResult<()> {
+async fn request_restore_snapshot(pd_client: Arc<dyn PdClient>, cs: &pb::ChangeSet) -> Result<()> {
     let post_data = Cow::from(cs.write_to_bytes().unwrap());
     let mut err = None;
     'retry: for i in 0..REQUEST_RESTORE_SNAPSHOT_RETRY_LIMIT {
@@ -1145,7 +1149,7 @@ async fn request_restore_snapshot(
             }
         }
     }
-    Err(err.expect("there must be error"))
+    Err(Error::Other(err.expect("there must be error")))
 }
 
 #[cfg(test)]

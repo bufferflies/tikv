@@ -2,8 +2,12 @@
 
 use kvengine::dfs;
 
+pub type Result<T> = std::result::Result<T, Error>;
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("Other error {0}")]
+    Other(#[from] Box<dyn std::error::Error + Send + Sync>),
     #[error("Cluster topology error {0}")]
     TopoChanged(String),
     #[error("Backup meta of cluster {0} is not found")]
@@ -22,6 +26,10 @@ pub enum Error {
     Timeout(u64),
     #[error("TiKV error {0}")]
     TikvError(tikv_client::Error),
+    #[error("KvEngine error {0}")]
+    KvEngine(kvengine::Error),
+    #[error("RfEngine error {0}")]
+    RfEngine(rfengine::Error),
 }
 
 impl From<dfs::Error> for Error {
@@ -45,5 +53,17 @@ impl From<etcd_client::Error> for Error {
 impl From<tikv_client::Error> for Error {
     fn from(e: tikv_client::Error) -> Self {
         Error::TikvError(e)
+    }
+}
+
+impl From<kvengine::Error> for Error {
+    fn from(e: kvengine::Error) -> Self {
+        Error::KvEngine(e)
+    }
+}
+
+impl From<rfengine::Error> for Error {
+    fn from(e: rfengine::Error) -> Self {
+        Error::RfEngine(e)
     }
 }

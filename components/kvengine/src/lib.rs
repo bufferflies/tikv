@@ -38,6 +38,8 @@ mod tests;
 pub use apply::*;
 pub use compaction::*;
 use concat_iterator::ConcatIterator;
+#[cfg(test)]
+pub use dfs::Tagging;
 pub use engine::*;
 pub use error::*;
 use flush::*;

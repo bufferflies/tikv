@@ -260,7 +260,7 @@ async fn backup_store(
             store_backup_meta.merge_from_bytes(&resp).unwrap();
             tx.send(Ok(store_backup_meta)).unwrap()
         }
-        Err(e) => tx.send(Err(Error::ServerError(e))).unwrap(),
+        Err(e) => tx.send(Err(e)).unwrap(),
     }
 }
 

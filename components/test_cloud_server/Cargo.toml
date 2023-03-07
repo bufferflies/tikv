@@ -15,6 +15,7 @@ hyper = { version = "0.14", features = ["full"] }
 kvengine = { path = "../kvengine" }
 kvproto = { git = "https://github.com/pingcap/kvproto.git" }
 pd_client = { path = "../pd_client", default-features = false }
+quick-xml = { version = "0.23.1", features = ["serialize"] }
 rand = "0.8"
 regex = "1.5"
 rfengine = { path = "../rfengine" }

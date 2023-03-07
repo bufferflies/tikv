@@ -6509,6 +6509,7 @@ dependencies = [
  "kvengine",
  "kvproto",
  "pd_client",
+ "quick-xml 0.23.1",
  "rand 0.8.5",
  "regex",
  "rfengine",

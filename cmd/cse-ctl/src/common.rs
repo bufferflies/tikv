@@ -1,17 +1,23 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
-use std::{error::Error, result::Result, sync::Arc};
+use std::{sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use etcd_client::{ConnectOptions, OpenSslClientConfig};
 use grpcio::EnvBuilder;
 use http::Request;
 use hyper::Body;
+use kvengine::dfs::{Dfs, S3Fs};
 use kvproto::{metapb, metapb::Store};
 use pd_client::{PdClient, RpcClient};
 use protobuf::Message;
 use rfstore::store::state::RaftState;
 use security::{SecurityConfig, SecurityManager};
-use tikv_util::codec::bytes::decode_bytes;
+use slog_global::{error, info};
+use tikv_util::{box_err, codec::bytes::decode_bytes};
+
+use crate::error::Result;
+
+const MAX_S3_REQ_BATCH_SIZE: usize = 1024;
 
 pub fn create_pd_client(security_conf: &SecurityConfig, pd_conf: &pd_client::Config) -> RpcClient {
     let security_mgr = Arc::new(
@@ -23,9 +29,7 @@ pub fn create_pd_client(security_conf: &SecurityConfig, pd_conf: &pd_client::Con
         .unwrap_or_else(|e| panic!("failed to create rpc client: {:?}", e))
 }
 
-pub fn get_all_stores_except_tiflash(
-    pd_client: &dyn PdClient,
-) -> Result<Vec<Store>, pd_client::Error> {
+pub fn get_all_stores_except_tiflash(pd_client: &dyn PdClient) -> Result<Vec<Store>> {
     Ok(pd_client
         .get_all_stores(true)?
         .into_iter()
@@ -38,37 +42,36 @@ pub fn get_all_stores_except_tiflash(
         .collect())
 }
 
-pub async fn send_request_to_store(req: Request<Body>, store: &Store) -> Result<Bytes, String> {
+pub async fn send_request_to_store(req: Request<Body>, store: &Store) -> Result<Bytes> {
     let client = hyper::Client::new();
     let resp = client.request(req).await;
     if resp.is_err() {
-        return Err(format!("{:?} {:?}", store, resp.unwrap_err()));
+        return Err(box_err!("{:?} {:?}", store, resp.unwrap_err()));
     }
     let resp = resp.unwrap();
     if !resp.status().is_success() {
         let status = resp.status();
         let body = hyper::body::to_bytes(resp.into_body()).await.unwrap();
-        return Err(format!("{:?} {:?}: {:?}", store, status, body));
+        return Err(box_err!("{:?} {:?}: {:?}", store, status, body));
     }
     match hyper::body::to_bytes(resp.into_body()).await {
         Ok(body) => Ok(body),
-        Err(e) => Err(format!("{:?} {:?}", store, e)),
+        Err(e) => Err(box_err!("{:?} {:?}", store, e)),
     }
 }
 
-pub fn generate_etcd_connect_opt(
-    security: &SecurityConfig,
-) -> Result<ConnectOptions, Box<dyn Error>> {
-    let mut option = ConnectOptions::new();
-    if !security.ca_path.is_empty() {
-        let (ca, cert, key) = security.load_certs()?;
-        option = option.with_openssl_tls(
+pub fn generate_etcd_connect_opt(security: &SecurityConfig) -> Result<ConnectOptions> {
+    if security.ca_path.is_empty() {
+        return Ok(ConnectOptions::new());
+    }
+    match security.load_certs() {
+        Ok((ca, cert, key)) => Ok(ConnectOptions::new().with_openssl_tls(
             OpenSslClientConfig::default()
                 .ca_cert_pem(&ca)
                 .client_cert_pem_and_key(&cert, &key),
-        );
+        )),
+        Err(e) => Err(box_err!("Load security fail {:?}", e)),
     }
-    Ok(option)
 }
 
 pub fn load_rf_engine_meta(rf: &rfengine::RfEngine, peer_id: u64) -> Option<kvenginepb::ChangeSet> {
@@ -161,3 +164,52 @@ macro_rules! step_error( ($($args:tt)+) => {
     error!("{}", msg);
     eprintln!("[{}] {}", now(), msg);
 };);
+
+pub fn retain_sst_files(file_ids: Vec<u64>, s3fs: &S3Fs) -> Result<()> {
+    let mut idx = 0;
+    let mut total_cnt = 0;
+    while idx < file_ids.len() {
+        let end_idx = std::cmp::min(file_ids.len(), idx + MAX_S3_REQ_BATCH_SIZE);
+        total_cnt += retain_sst_files_in_batch(&file_ids[idx..end_idx], s3fs, idx == 0)?;
+        idx = end_idx;
+    }
+    info!("Retain {} files successfully", total_cnt);
+    Ok(())
+}
+
+fn retain_sst_files_in_batch(file_ids: &[u64], s3fs: &S3Fs, first_batch: bool) -> Result<usize> {
+    let runtime = s3fs.get_runtime();
+    let file_cnt = file_ids.len();
+    let (tx, rx) = tikv_util::mpsc::unbounded();
+    for id in file_ids {
+        runtime.spawn(retain_s3_file(s3fs.clone(), id.to_owned(), tx.clone()));
+    }
+    // To avoid too much request to cause s3 SlowDown issue.
+    if !first_batch {
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    let mut succeed_cnt = 0;
+    for _ in 0..file_cnt {
+        match rx.recv().unwrap() {
+            Ok(_) => succeed_cnt += 1,
+            Err(e) => error!("{}", e),
+        }
+    }
+    if succeed_cnt != file_cnt {
+        return Err(box_err!(
+            "Error occurs, succeed {}, totally {}",
+            succeed_cnt,
+            file_cnt
+        ));
+    }
+    Ok(succeed_cnt)
+}
+
+async fn retain_s3_file(fs: S3Fs, file_id: u64, tx: tikv_util::mpsc::Sender<Result<u64>>) {
+    match fs.retain_file(file_id).await {
+        Ok(()) => tx.send(Ok(file_id)).unwrap(),
+        Err(e) => tx
+            .send(Err(box_err!("Retain file {:?} fail {}", file_id, e)))
+            .unwrap(),
+    }
+}
