@@ -411,19 +411,23 @@ pub(crate) struct Peer {
 
     pub(crate) pending_apply_results: Vec<MsgApplyResult>,
 
-    // Index of last scheduled committed raft log.
+    /// Index of last scheduled committed raft log.
     pub(crate) last_applying_idx: u64,
-    // The index of the latest urgent proposal index.
+    /// The index of the latest urgent proposal index.
     pub(crate) last_urgent_proposal_idx: u64,
-    // The index of the latest committed split command.
+    /// The index of the latest committed split command.
     pub(crate) last_committed_split_idx: u64,
     /// The index of last sent snapshot
     last_sent_snapshot_idx: u64,
     /// The range of no kv index, used to advance shard meta data sequence.
     first_no_kv_idx: u64,
     last_no_kv_idx: u64,
-    // preprocessed_index is used to avoid duplicated preprocess execution.
+    /// preprocessed_index is used to avoid duplicated preprocess execution.
     pub(crate) preprocessed_index: u64,
+    /// The index which is skipped replicating to learner.
+    /// By now it is used to trigger TiFlash acquiring latest snapshot after
+    /// "restore_shard".
+    pub learner_skip_idx: u64,
 
     pub(crate) pending_remove: bool,
 
@@ -551,6 +555,7 @@ impl Peer {
             first_no_kv_idx: truncated,
             last_no_kv_idx: truncated,
             preprocessed_index: 0,
+            learner_skip_idx: 0,
             leader_lease: Lease::new(
                 cfg.raft_store_max_leader_lease(),
                 cfg.renew_leader_lease_advance_duration(),
@@ -859,6 +864,25 @@ impl Peer {
             let to_peer_id = msg.get_to_peer().get_id();
             let to_store_id = msg.get_to_peer().get_store_id();
 
+            // Skip replicating to learner. See `learner_skip_idx`.
+            if self.learner_skip_idx > 0
+                && msg_type == MessageType::MsgAppend
+                && msg.get_message().get_index() <= self.learner_skip_idx
+                && msg.get_to_peer().get_role() == PeerRole::Learner
+            {
+                info!(
+                    "SKIP send raft msg to learner";
+                    "tag" => self.tag(),
+                    "peer_id" => self.peer.get_id(),
+                    "msg_type" => ?msg_type,
+                    "msg_size" => msg.get_message().compute_size(),
+                    "to" => to_peer_id,
+                    "learner_skip_idx" => self.learner_skip_idx,
+                    "msg_index" => msg.get_message().get_index(),
+                );
+                continue;
+            }
+
             debug!(
                 "send raft msg";
                 "tag" => self.tag(),
@@ -867,6 +891,7 @@ impl Peer {
                 "msg_size" => msg.get_message().compute_size(),
                 "to" => to_peer_id,
                 "disk_usage" => ?msg.get_disk_usage(),
+                "msg_index" => msg.get_message().get_index(),
             );
 
             if let Err(e) = ctx.global.trans.send(msg) {
@@ -1685,7 +1710,8 @@ impl Peer {
         let region_id = self.region_id;
         let tag = self.tag();
         let opt_parent_id = self.mut_store().parent_id();
-        let shard_meta = self.mut_store().mut_engine_meta();
+        let peer_storage = self.mut_store();
+        let shard_meta = peer_storage.shard_meta.as_ref().unwrap();
         let mut rejected = false;
         if shard_meta.ver != cs.get_shard_ver() {
             rejected = true;
@@ -1709,7 +1735,14 @@ impl Peer {
         }
         if cs.has_restore_shard() {
             Self::preprocess_restore_shard(entry, &mut cs);
+            // Truncate raft log to trigger TiFlash acquiring latest snapshot.
+            peer_storage.truncate_raft_log(&mut ctx.raft_wb, entry.index, entry.term);
+            info!(
+                "{} truncate raft log for restore_shard, term {} index {}",
+                tag, entry.term, entry.index
+            );
         }
+        let shard_meta = peer_storage.mut_engine_meta();
         shard_meta.apply_change_set(&cs);
         info!(
             "shard meta apply change set {:?}", &cs;
@@ -1745,6 +1778,7 @@ impl Peer {
 
         // NOTE: `cse-ctl` do NOT set TERM_KEY in changeset. Set it here.
         let snap = cs.mut_restore_shard();
+        snap.set_data_sequence(entry.index);
         let props = snap.mut_properties();
         props.mut_keys().push(TERM_KEY.to_string());
         props.mut_values().push(entry.term.to_le_bytes().to_vec());

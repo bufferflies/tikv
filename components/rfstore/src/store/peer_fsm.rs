@@ -3,6 +3,7 @@
 use std::{
     cmp,
     collections::VecDeque,
+    mem,
     ops::{Deref, DerefMut},
     sync::{atomic::AtomicU64, Arc},
     u64,
@@ -2074,6 +2075,15 @@ impl<'a> PeerMsgHandler<'a> {
         snap.set_base_version(new_mem_tbl_version - write_seq);
         snap.set_data_sequence(write_seq); // not necessary but just keep fields consistency.
         info!("{} on_restore_shard, adjusted changeset: {:?}", tag, cs);
+
+        // Set `learner_skip_idx` to skip "restore_shard" replicating to learner.
+        // NOTE: Next `MsgAppend` use the `last_index` other than `next_proposal_index`.
+        let new_idx = self.fsm.peer.raft_group.raft.raft_log.last_index();
+        let old_idx = mem::replace(&mut self.fsm.peer.learner_skip_idx, new_idx);
+        info!(
+            "{} on_restore_shard, set peer.learner_skip_idx {}, old idx {}",
+            tag, new_idx, old_idx
+        );
 
         let mut cmd = self.new_raft_cmd_request();
         let mut custom_builder = CustomBuilder::new();

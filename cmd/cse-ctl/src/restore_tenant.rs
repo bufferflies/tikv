@@ -156,7 +156,6 @@ pub fn restore_keyspace(
         target_shards.len(),
     );
 
-    // TODO: remove replicas on TiFlash
     // TODO: retry on EpochNotMatch from `get_target_regions`.
     let snapshots = cluster.generate_snapshots(target_shards);
     let snapshots_count = snapshots.len();

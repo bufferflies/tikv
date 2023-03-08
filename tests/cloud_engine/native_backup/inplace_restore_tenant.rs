@@ -4,17 +4,23 @@ use std::time::Duration;
 
 use cse_ctl::{backup, common::now, restore, restore_tenant, step};
 use kvengine::dfs::DFSConfig;
+use kvproto::metapb;
+use pd_client::PdClient;
 use rand::Rng;
-use test_cloud_server::{oss::ObjectStorageService, try_wait, ServerCluster};
+use test_cloud_server::{
+    client::{RequestOptions, RequestPeerRole},
+    oss::ObjectStorageService,
+    try_wait, ServerCluster,
+};
 use tikv::config::TikvConfig;
-use tikv_util::{config::ReadableSize, info, warn};
+use tikv_util::{config::ReadableSize, debug, info, store::new_learner_peer, warn};
 use tokio::runtime::Runtime;
 
 use crate::alloc_node_id_vec;
 
 const BASIC_DATA_COUNT: usize = 10;
 const RANDOM_VALUE_LEN: usize = 128;
-const NODES_COUNT: usize = 3;
+const NODES_COUNT: usize = 4;
 const KEYSPACE_COUNT: usize = 3;
 const DEFAULT_LOOP_COUNT: usize = 3;
 
@@ -28,11 +34,12 @@ fn test_inplace_restore_tenant() {
         .unwrap_or(DEFAULT_LOOP_COUNT);
 
     let cases = vec![
-        // keyspace_id, data_count, shuffle_regions, loop_count
-        (1, 1, None, 1),
-        (1, 100, None, 3),
-        (1, 200, Some(10), loop_count),
-        (2, 1, None, 1),
+        // keyspace_id, data_count, shuffle_regions, has_learner, loop_count
+        (1, 1, None, false, 1),
+        (1, 100, None, false, 3),
+        (1, 200, Some(10), false, loop_count),
+        (1, 200, None, true, loop_count), // Don't shuffle regions for stability.
+        (2, 1, None, false, 1),
     ];
 
     let base_dir = tempfile::Builder::new()
@@ -67,6 +74,7 @@ fn test_inplace_restore_tenant() {
         },
     );
     cluster.wait_region_replicated(&[], 3);
+    let pd_client = cluster.get_pd_client();
     let mut client = cluster.new_client();
 
     // Split keyspaces.
@@ -87,9 +95,24 @@ fn test_inplace_restore_tenant() {
     let runtime = Runtime::new().unwrap();
 
     // Run cases.
-    for (case_idx, &(keyspace_id, data_count, shuffle_regions, loop_count)) in
+    for (case_idx, &(keyspace_id, data_count, shuffle_regions, has_learner, loop_count)) in
         cases.iter().enumerate()
     {
+        step!("case group: {case_idx}");
+
+        if has_learner {
+            pd_client.disable_default_operator(); // To prevent PD removing learners due to exceed `max-replicas`.
+            let (start, end) = (
+                get_keyspace_prefix(keyspace_id),
+                get_keyspace_prefix(keyspace_id + 1),
+            );
+            add_learners(&mut cluster, &start, &end);
+            check_learners(&cluster, &start, &end, NODES_COUNT - 3, 10);
+            step!("add learner done");
+        } else {
+            pd_client.enable_default_operator(); // Remove learners by peer count check.
+        }
+
         for i in 0..loop_count {
             test_inplace_restore_tenant_impl(
                 &mut cluster,
@@ -98,14 +121,15 @@ fn test_inplace_restore_tenant() {
                 keyspace_id,
                 data_count,
                 shuffle_regions,
+                has_learner,
                 &runtime,
             );
         }
     }
 
     cluster.stop();
-    // Don't graceful shutdown, as some S3FS threads are still alive and holding
-    // connections. oss.shutdown();
+    // Don't graceful shutdown oss (`oss.shutdown()`), as some S3FS threads are
+    // still alive and holding connections.
 }
 
 fn test_inplace_restore_tenant_impl(
@@ -115,11 +139,16 @@ fn test_inplace_restore_tenant_impl(
     keyspace_id: u32,
     data_count: usize,
     shuffle_regions: Option<usize>,
+    has_learner: bool,
     runtime: &Runtime,
 ) {
     step!("case: {case_name}");
     let mut client = cluster.new_client();
     let i_to_key = gen_keyspace_key(keyspace_id);
+    let (keyspace_start, keyspace_end) = (
+        get_keyspace_prefix(keyspace_id),
+        get_keyspace_prefix(keyspace_id + 1),
+    );
 
     // Import data.
     client.put_kv(0..data_count, &i_to_key, i_to_val_140);
@@ -139,7 +168,7 @@ fn test_inplace_restore_tenant_impl(
     client.verify_data_with_ref_store();
     assert!(
         client
-            .verify_data_with_given_ref_store(&origin_ref_store)
+            .verify_data_with_given_ref_store(&origin_ref_store, None, &RequestOptions::default())
             .is_err(),
         "case: {}",
         case_name,
@@ -201,7 +230,7 @@ fn test_inplace_restore_tenant_impl(
     client.verify_data_with_ref_store();
     assert!(
         client
-            .verify_data_with_given_ref_store(&origin_ref_store)
+            .verify_data_with_given_ref_store(&origin_ref_store, None, &RequestOptions::default())
             .is_err(),
         "case: {}",
         case_name,
@@ -227,20 +256,37 @@ fn test_inplace_restore_tenant_impl(
 
     // Verify restored data.
     // Retry as shard restore is asynchronously applied.
-    let ok = try_wait(
-        || {
-            client
-                .verify_data_with_given_ref_store(&origin_ref_store)
-                .is_ok()
-        },
-        10,
-    );
-    if !ok {
-        client
-            .verify_data_with_given_ref_store(&origin_ref_store)
-            .unwrap();
+    let mut verify_options: Vec<(Option<(&[u8], &[u8])>, RequestOptions)> =
+        vec![(None, RequestOptions::default())];
+    if has_learner {
+        verify_options.push((
+            Some((&keyspace_start, &keyspace_end)),
+            RequestOptions {
+                peer_role: RequestPeerRole::Learner,
+            },
+        ));
     }
-    step!("verify restore data done");
+    let mut verify_res = Err("unknown".into());
+    for (range, opt) in verify_options {
+        let ok = try_wait(
+            || {
+                verify_res =
+                    client.verify_data_with_given_ref_store(&origin_ref_store, range, &opt);
+                verify_res.is_ok()
+            },
+            10,
+        );
+        if !ok {
+            client
+                .verify_data_with_given_ref_store(&origin_ref_store, range, &opt)
+                .unwrap();
+        }
+    }
+    step!(
+        "verify restore data done{}, kv count: {}",
+        if has_learner { " (with learner)" } else { "" },
+        verify_res.unwrap(),
+    );
 
     // Write more data to verify the sequences.
     for id in 0..KEYSPACE_COUNT {
@@ -296,4 +342,77 @@ fn gen_keyspace_key(keyspace_id: u32) -> impl Fn(usize) -> Vec<u8> {
         key.extend(i_to_key(i));
         key
     }
+}
+
+// Add learners to all stores with no peer of keyspace regions.
+// TODO: add to `test_cloud_server` for reuse.
+fn add_learners(cluster: &mut ServerCluster, start: &[u8], end: &[u8]) {
+    let pd_client = cluster.get_pd_client();
+    let mut client = cluster.new_client();
+    let stores = cluster.get_stores();
+
+    client.clear_region_cache();
+
+    let mut next_key = start.to_owned();
+    while next_key.as_slice() < end {
+        let region = client.get_region_by_key(&next_key);
+        next_key = region.raw_end().to_owned();
+
+        let learner_stores = stores
+            .iter()
+            .filter(|&&store_id| region.peers().iter().all(|peer| peer.store_id != store_id))
+            .collect::<Vec<_>>();
+        for &store_id in learner_stores {
+            let learner_peer = new_learner_peer(store_id, pd_client.alloc_id().unwrap());
+            pd_client.must_add_peer(region.id(), learner_peer);
+        }
+    }
+}
+
+fn check_learners_impl(
+    cluster: &ServerCluster,
+    start: &[u8],
+    end: &[u8],
+    min_count: usize,
+) -> Vec<test_cloud_server::client::RawRegion> {
+    let mut client = cluster.new_client();
+
+    let mut res = vec![];
+    let mut next_key = start.to_owned();
+    while next_key.as_slice() < end {
+        let region = client.get_region_by_key(&next_key);
+        next_key = region.raw_end().to_owned();
+
+        let learner_cnt = region
+            .peers()
+            .iter()
+            .filter(|peer| peer.get_role() == metapb::PeerRole::Learner)
+            .count();
+        debug!(
+            "check region for learner: {:?}, count: {}",
+            region, learner_cnt
+        );
+        if learner_cnt < min_count {
+            res.push(region);
+        }
+    }
+    res
+}
+
+fn check_learners(
+    cluster: &ServerCluster,
+    start: &[u8],
+    end: &[u8],
+    min_count: usize,
+    timeout_seconds: usize,
+) {
+    let ok = try_wait(
+        || check_learners_impl(cluster, start, end, min_count).is_empty(),
+        timeout_seconds,
+    );
+    assert!(
+        ok,
+        "{:?}",
+        check_learners_impl(cluster, start, end, min_count)
+    );
 }

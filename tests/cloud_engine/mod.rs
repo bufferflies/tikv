@@ -15,6 +15,7 @@ mod engine_basic;
 mod gc;
 mod merge;
 mod native_backup;
+mod replica_read;
 mod truncate_ts;
 
 static NODE_ALLOCATOR: AtomicU16 = AtomicU16::new(1);

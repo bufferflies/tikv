@@ -21,6 +21,7 @@ use kvproto::{
     kvrpcpb::{
         CommitRequest, Context, GetRequest, Mutation, Op, PrewriteRequest, SplitRegionRequest,
     },
+    metapb,
     metapb::{Peer, Region, RegionEpoch},
     tikvpb::TikvClient,
 };
@@ -31,6 +32,7 @@ use tikv::storage::mvcc::TimeStamp;
 use tikv_util::{
     codec::bytes::{decode_bytes, encode_bytes},
     time::Instant,
+    warn,
 };
 
 use crate::try_wait;
@@ -48,8 +50,32 @@ pub struct ClusterClient {
     pub(crate) max_ts: AtomicU64,
 }
 
-#[derive(Clone)]
-pub(crate) struct RawRegion {
+// Named as `RequestPeerRole` to avoid conflict with `metapb::PeerRole`.
+pub enum RequestPeerRole {
+    Leader,
+    Learner,
+}
+
+pub struct RequestOptions {
+    pub peer_role: RequestPeerRole,
+}
+
+impl Default for RequestOptions {
+    fn default() -> Self {
+        Self {
+            peer_role: RequestPeerRole::Leader,
+        }
+    }
+}
+
+impl RequestOptions {
+    pub fn replica_read(&self) -> bool {
+        !matches!(self.peer_role, RequestPeerRole::Leader)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct RawRegion {
     id: u64,
     raw_start: Vec<u8>,
     raw_end: Vec<u8>,
@@ -84,8 +110,8 @@ impl From<Region> for RawRegion {
 }
 
 impl RawRegion {
-    fn get_leader(&self) -> Peer {
-        self.peers[self.leader_idx].clone()
+    fn get_leader(&self) -> &Peer {
+        &self.peers[self.leader_idx]
     }
 
     fn id_ver(&self) -> RegionIdVer {
@@ -99,6 +125,18 @@ impl RawRegion {
         } else {
             false
         }
+    }
+
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    pub fn raw_end(&self) -> &[u8] {
+        &self.raw_end
+    }
+
+    pub fn peers(&self) -> &[Peer] {
+        &self.peers
     }
 }
 
@@ -158,8 +196,13 @@ impl ClusterClient {
         let commit_ts = self.get_ts();
         self.kv_commit(keys, start_ts, commit_ts);
         let first = mutations.first().unwrap();
-        self.verify_key_value(first.get_key(), first.get_value(), put_time)
-            .unwrap();
+        self.verify_key_value(
+            first.get_key(),
+            first.get_value(),
+            put_time,
+            &RequestOptions::default(),
+        )
+        .unwrap();
         self.put_kv_in_ref_store(mutations);
         self.set_max_ts(commit_ts.into_inner());
     }
@@ -338,7 +381,7 @@ impl ClusterClient {
             .id
     }
 
-    fn get_region_by_key(&mut self, key: &[u8]) -> RawRegion {
+    pub fn get_region_by_key(&mut self, key: &[u8]) -> RawRegion {
         if let Some(region) = self.get_region_from_cache(key) {
             return region;
         }
@@ -355,6 +398,11 @@ impl ClusterClient {
             .insert(region.raw_end.clone(), region.id_ver());
         self.regions.insert(region.id, region);
         self.get_region_from_cache(key).unwrap()
+    }
+
+    pub fn clear_region_cache(&mut self) {
+        self.region_ranges.clear();
+        self.regions.clear();
     }
 
     fn update_cache_by_id(&mut self, region_id: u64, opt_region: Option<RawRegion>) {
@@ -474,11 +522,37 @@ impl ClusterClient {
     }
 
     pub fn new_rpc_ctx(&mut self, region_id: u64) -> Option<Context> {
-        if !self.regions.contains_key(&region_id) {
+        self.new_rpc_ctx_opt(region_id, &RequestOptions::default())
+    }
+
+    fn get_peer_for_request(
+        &self,
+        region_id: u64,
+        options: &RequestOptions,
+    ) -> Option<(&RawRegion, &Peer)> {
+        self.regions
+            .get(&region_id)
+            .and_then(|region| match options.peer_role {
+                RequestPeerRole::Leader => Some((region, region.get_leader())),
+                RequestPeerRole::Learner => {
+                    let learner = region
+                        .peers
+                        .iter()
+                        .find(|peer| peer.role == metapb::PeerRole::Learner);
+                    if learner.is_none() {
+                        warn!("{} has no learner, region: {:?}", region_id, region);
+                    }
+                    learner.map(|learner| (region, learner))
+                }
+            })
+    }
+
+    pub fn new_rpc_ctx_opt(&mut self, region_id: u64, options: &RequestOptions) -> Option<Context> {
+        if self.get_peer_for_request(region_id, options).is_none() {
             let ok = try_wait(
                 || {
                     self.update_cache_by_id(region_id, None);
-                    self.regions.contains_key(&region_id)
+                    self.get_peer_for_request(region_id, options).is_some()
                 },
                 3,
             );
@@ -486,11 +560,12 @@ impl ClusterClient {
                 return None;
             }
         }
-        let region = self.regions.get(&region_id).unwrap();
+        let (region, peer) = self.get_peer_for_request(region_id, options).unwrap();
         let mut ctx = Context::new();
         ctx.set_region_id(region_id);
         ctx.set_region_epoch(region.epoch.clone());
-        ctx.set_peer(region.get_leader());
+        ctx.set_peer(peer.clone());
+        ctx.set_replica_read(options.replica_read());
         Some(ctx)
     }
 
@@ -582,13 +657,23 @@ impl ClusterClient {
         version: u64,
         put_time: Instant,
     ) -> (Vec<u8>, Context) {
+        self.must_get_key_version_opt(key, version, put_time, &RequestOptions::default())
+    }
+
+    pub fn must_get_key_version_opt(
+        &mut self,
+        key: &[u8],
+        version: u64,
+        put_time: Instant,
+        options: &RequestOptions,
+    ) -> (Vec<u8>, Context) {
         let start_time = Instant::now();
         let timeout = Duration::from_secs(15);
         let mut region_id = 0;
         let mut store_id_errors = vec![];
         while start_time.saturating_elapsed() < timeout {
             region_id = self.get_region_id(key);
-            let ctx = self.new_rpc_ctx(region_id);
+            let ctx = self.new_rpc_ctx_opt(region_id, options);
             if ctx.is_none() {
                 continue;
             }
@@ -638,19 +723,28 @@ impl ClusterClient {
 
     pub fn verify_data_with_ref_store(&mut self) {
         let ref_store = self.ref_store.lock().unwrap().clone();
-        self.verify_data_with_given_ref_store(&ref_store)
+        self.verify_data_with_given_ref_store(&ref_store, None, &RequestOptions::default())
             .expect("verify_data_with_ref_store");
     }
 
     pub fn verify_data_with_given_ref_store(
         &mut self,
         ref_store: &RefStore,
-    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        range: Option<(&[u8], &[u8])>,
+        options: &RequestOptions,
+    ) -> std::result::Result<usize, Box<dyn std::error::Error>> {
+        let mut cnt = 0;
         let put_time = Instant::now();
         for (k, v) in ref_store {
-            self.verify_key_value(k, v, put_time)?;
+            if let Some(range) = range {
+                if k.as_slice() < range.0 || k.as_slice() >= range.1 {
+                    continue;
+                }
+            }
+            self.verify_key_value(k, v, put_time, options)?;
+            cnt += 1;
         }
-        Ok(())
+        Ok(cnt)
     }
 
     pub fn verify_key_value(
@@ -658,8 +752,9 @@ impl ClusterClient {
         key: &[u8],
         expect_val: &[u8],
         put_time: Instant,
+        options: &RequestOptions,
     ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let (val, ctx) = self.must_get_key(key, put_time);
+        let (val, ctx) = self.must_get_key_version_opt(key, u64::MAX, put_time, options);
         if val.as_slice() != expect_val {
             let region_id = ctx.region_id;
             let region_ver = ctx.get_region_epoch().get_version();
