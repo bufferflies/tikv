@@ -676,6 +676,9 @@ impl Dfs for S3Fs {
                 req.add_header("x-amz-metadata-directive", "REPLACE");
                 req.add_header("x-amz-tagging", "deleted=true");
                 req.add_header("x-amz-tagging-directive", "REPLACE");
+                if self.hostname.contains("amazonaws") {
+                    req.add_header("x-amz-storage-class", "STANDARD_IA");
+                }
                 if let Err(err) = self.dispatch(req, CopyObjectError::from_response).await {
                     if retry_cnt < MAX_RETRY_COUNT {
                         retry_cnt += 1;
