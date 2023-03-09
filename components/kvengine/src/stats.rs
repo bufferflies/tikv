@@ -4,7 +4,7 @@ use std::cmp;
 
 use bytes::Bytes;
 
-use crate::{load_bool, EXTRA_CF, NUM_CFS, WRITE_CF};
+use crate::{load_bool, metrics::ENGINE_OPEN_FILES, EXTRA_CF, NUM_CFS, WRITE_CF};
 
 #[derive(Default, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -31,6 +31,7 @@ pub struct EngineStats {
     pub in_mem_index_size: u64,
     pub filter_size: u64,
     pub in_mem_filter_size: u64,
+    pub open_files: i64,
     pub max_ts: u64, // Use to check whether PiTR has completed.
     pub entries: usize,
     pub old_entries: usize,
@@ -95,6 +96,7 @@ impl super::Engine {
             engine_stats.old_entries += shard.old_entries;
             engine_stats.tombs += shard.tombs;
             engine_stats.kv_size += shard.kv_size;
+            engine_stats.open_files += shard.open_files;
             for cf in 0..NUM_CFS {
                 let shard_cf_stat = &shard.cfs[cf];
                 for (i, level_stat) in shard_cf_stat.levels.iter().enumerate() {
@@ -105,6 +107,7 @@ impl super::Engine {
                 }
             }
         }
+        ENGINE_OPEN_FILES.set(engine_stats.open_files);
         shard_stats.sort_by(|a, b| {
             let a_size = a.mem_table_size + a.l0_table_size;
             let b_size = b.mem_table_size + b.l0_table_size;
@@ -143,6 +146,7 @@ pub struct ShardStats {
     pub old_entries: usize,
     pub tombs: usize,
     pub kv_size: u64,
+    pub open_files: i64,
     pub base_version: u64,
     pub meta_sequence: u64,
     pub write_sequence: u64,
@@ -206,6 +210,7 @@ impl super::Shard {
         let mut old_entries = 0;
         let mut tombs = 0;
         let mut kv_size = 0;
+        let mut open_files = 0;
         let data = self.get_data();
         let mem_table_count = data.mem_tbls.len();
         let mut mem_table_size = 0;
@@ -246,16 +251,19 @@ impl super::Shard {
             }
             for cf in 0..NUM_CFS {
                 if let Some(cf_tbl) = l0_tbl.get_cf(cf) {
-                    cf_tbl.expire_index();
                     tbl_index_size += cf_tbl.index_size();
                     tbl_filter_size += cf_tbl.filter_size();
-                    in_mem_tbl_filter_size += cf_tbl.filter_size();
+                    in_mem_tbl_filter_size += cf_tbl.in_mem_filter_size();
                     max_ts = max_ts_by_cf(max_ts, cf, cf_tbl.max_ts);
                     entries += cf_tbl.entries as usize;
                     old_entries += cf_tbl.old_entries as usize;
                     tombs += cf_tbl.tombs as usize;
                     if cf == WRITE_CF {
                         kv_size += cf_tbl.kv_size;
+                        cf_tbl.expire_cache();
+                        if cf_tbl.has_open_file() {
+                            open_files += 1;
+                        }
                     }
                 }
             }
@@ -271,15 +279,16 @@ impl super::Shard {
                 level_stats.level = l.level;
                 level_stats.num_tables = l.tables.len();
                 for t in l.tables.as_slice() {
-                    t.expire_index();
+                    t.expire_cache();
+                    if t.has_open_file() {
+                        open_files += 1;
+                    }
                     if data.cover_full_table(t.smallest(), t.biggest()) {
                         level_stats.data_size += t.size();
                         level_stats.index_size += t.index_size();
                         level_stats.in_mem_index_size += t.in_mem_index_size();
                         level_stats.filter_size += t.filter_size();
-                        if l.level == 1 {
-                            level_stats.in_mem_filter_size += t.filter_size();
-                        }
+                        level_stats.in_mem_filter_size += t.in_mem_filter_size();
                         level_stats.entries += t.entries as usize;
                         level_stats.old_entries += t.old_entries as usize;
                         level_stats.tombs += t.tombs as usize;
@@ -346,6 +355,7 @@ impl super::Shard {
             old_entries,
             tombs,
             kv_size,
+            open_files,
             partial_l0s,
             partial_blobs,
             partial_tbls,

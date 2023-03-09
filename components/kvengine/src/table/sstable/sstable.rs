@@ -4,23 +4,24 @@ use std::{
     cmp::Ordering,
     ops::Deref,
     path::{Path, PathBuf},
-    sync::{
-        atomic::{AtomicU64, Ordering::Relaxed},
-        Arc, Mutex,
-    },
+    sync::Arc,
 };
 
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, Bytes, BytesMut};
 use moka::sync::SegmentedCache;
-use tikv_util::time::Instant;
 use xorf::{BinaryFuse8, Filter};
 
 use super::{builder::*, iterator::TableIterator};
-use crate::table::{sstable::File, table::Result, *};
+use crate::table::{
+    sstable::{File, TtlCache},
+    table::Result,
+    *,
+};
 
 // 10 minutes idle idx would be cleared.
 const IDX_TTL: u64 = 60 * 10;
+const FILTER_TTL: u64 = 60 * 3;
 
 #[derive(Clone)]
 pub struct SsTable {
@@ -38,10 +39,10 @@ impl SsTable {
     pub fn new(
         file: Arc<dyn File>,
         cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
-        load_filter: bool,
+        _load_filter: bool,
     ) -> Result<Self> {
         let size = file.size();
-        let core = SsTableCore::new(file, 0, size, cache, load_filter)?;
+        let core = SsTableCore::new(file, 0, size, cache)?;
         Ok(Self {
             core: Arc::new(core),
         })
@@ -53,7 +54,7 @@ impl SsTable {
         end: u64,
         cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
     ) -> Result<Self> {
-        let core = SsTableCore::new(file, start, end, cache, true)?;
+        let core = SsTableCore::new(file, start, end, cache)?;
         Ok(Self {
             core: Arc::new(core),
         })
@@ -76,13 +77,15 @@ impl SsTable {
         val_mem_holder: &mut Vec<u8>,
     ) -> table::Value {
         if self.filter_size() != 0 {
-            let contains = if let Some(filter) = &self.filter {
-                filter.contains(&key_hash)
-            } else {
-                let filter = self.load_filter().expect("load filter successfully");
-                filter.contains(&key_hash)
-            };
-            if !contains {
+            let filter = self
+                .filter
+                .get(|| {
+                    let filter_data = self.read_filter_data_from_file()?;
+                    let filter = self.decode_filter(&filter_data)?;
+                    Ok(filter)
+                })
+                .expect("load filter");
+            if !filter.contains(&key_hash) {
                 return table::Value::new();
             }
         }
@@ -149,7 +152,7 @@ impl SsTable {
 pub struct SsTableCore {
     file: Arc<dyn File>,
     cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
-    filter: Option<BinaryFuse8>,
+    filter: TtlCache<BinaryFuse8>,
     start_off: u64,
     footer: Footer,
     smallest_buf: Bytes,
@@ -159,12 +162,9 @@ pub struct SsTableCore {
     pub old_entries: u32,
     pub tombs: u32,
     pub kv_size: u64,
-    open_at: Instant,
     pub in_use_total_blob_size: u64,
-    idx: Mutex<Option<Arc<Index>>>,
-    last_idx_access: AtomicU64,
-    old_idx: Mutex<Option<Arc<Index>>>,
-    last_old_idx_access: AtomicU64,
+    idx: TtlCache<Index>,
+    old_idx: TtlCache<Index>,
 }
 
 impl SsTableCore {
@@ -173,7 +173,6 @@ impl SsTableCore {
         start_off: u64,
         end_off: u64,
         cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
-        load_filter: bool,
     ) -> Result<Self> {
         let size = end_off - start_off;
         let mut footer = Footer::default();
@@ -221,10 +220,10 @@ impl SsTableCore {
                 in_use_total_blob_size = LittleEndian::read_u64(val);
             }
         }
-        let mut core = Self {
+        let core = Self {
             file,
             cache,
-            filter: None,
+            filter: TtlCache::default(),
             start_off,
             footer,
             smallest_buf,
@@ -233,71 +232,43 @@ impl SsTableCore {
             entries,
             old_entries,
             tombs,
-            open_at: Instant::now_coarse(),
             kv_size: kv_size.unwrap_or(size),
             in_use_total_blob_size,
-            idx: Mutex::new(None),
-            last_idx_access: AtomicU64::default(),
-            old_idx: Mutex::new(None),
-            last_old_idx_access: AtomicU64::default(),
+            idx: TtlCache::default(),
+            old_idx: TtlCache::default(),
         };
-        if core.filter_size() > 0 && load_filter {
-            let filter = core.load_filter().unwrap();
-            core.filter = Some(filter);
-        }
         Ok(core)
     }
 
+    pub fn init_index(&self, offset: u32, length: usize) -> Result<Index> {
+        let idx_data = self
+            .file
+            .read(self.start_off + offset as u64, length)
+            .unwrap();
+        Index::new(idx_data, self.footer.checksum_type)
+    }
+
     pub fn load_index(&self) -> Arc<Index> {
-        let access = Instant::now_coarse().saturating_duration_since(self.open_at);
-        self.last_idx_access.store(access.as_secs(), Relaxed);
-        let mut guard = self.idx.lock().unwrap();
-        if guard.is_none() {
-            let idx_data = self
-                .file
-                .read(
-                    self.start_off + self.footer.index_offset as u64,
-                    self.footer.index_len(),
-                )
-                .unwrap();
-            let idx = Index::new(idx_data, self.footer.checksum_type).unwrap();
-            *guard = Some(Arc::new(idx));
-        }
-        guard.as_ref().unwrap().clone()
+        self.idx
+            .get(|| self.init_index(self.footer.index_offset, self.footer.index_len()))
+            .expect("load index")
     }
 
     pub fn load_old_index(&self) -> Arc<Index> {
-        let access = Instant::now_coarse().saturating_duration_since(self.open_at);
-        self.last_idx_access.store(access.as_secs(), Relaxed);
-        let mut guard = self.old_idx.lock().unwrap();
-        if guard.is_none() {
-            let old_idx_data = self
-                .file
-                .read(
-                    self.start_off + self.footer.old_index_offset as u64,
-                    self.footer.old_index_len(),
-                )
-                .unwrap();
-            let old_idx = Index::new(old_idx_data, self.footer.checksum_type).unwrap();
-            *guard = Some(Arc::new(old_idx));
-        }
-        guard.as_ref().unwrap().clone()
+        self.old_idx
+            .get(|| self.init_index(self.footer.old_index_offset, self.footer.old_index_len()))
+            .expect("load old index")
     }
 
-    pub fn expire_index(&self) {
-        let now = Instant::now_coarse()
-            .saturating_duration_since(self.open_at)
-            .as_secs();
-        let last_idx_access = self.last_idx_access.load(Relaxed);
-        if last_idx_access > 0 && now.saturating_sub(last_idx_access) > IDX_TTL {
-            self.idx.lock().unwrap().take();
-            self.last_idx_access.store(0, Relaxed);
-        }
-        let last_old_idx_access = self.last_old_idx_access.load(Relaxed);
-        if last_old_idx_access > 0 && now.saturating_sub(last_old_idx_access) > IDX_TTL {
-            self.old_idx.lock().unwrap().take();
-            self.last_old_idx_access.store(0, Relaxed);
-        }
+    pub fn expire_cache(&self) {
+        self.file.expire_open_file();
+        self.filter.expire(FILTER_TTL);
+        self.idx.expire(IDX_TTL);
+        self.old_idx.expire(IDX_TTL);
+    }
+
+    pub fn has_open_file(&self) -> bool {
+        self.file.is_open()
     }
 
     pub fn load_block(
@@ -407,22 +378,6 @@ impl SsTableCore {
         self.load_block_by_addr_len(addr, length, buf, fill_cache)
     }
 
-    fn load_filter(&self) -> Result<BinaryFuse8> {
-        let data = match &self.cache {
-            Some(cache) => {
-                let cache_key = BlockCacheKey::new(self.id(), self.filter_offset());
-                cache
-                    .try_get_with(cache_key, || {
-                        crate::metrics::ENGINE_CACHE_MISS.inc_by(1);
-                        self.read_filter_data_from_file()
-                    })
-                    .map_err(|e| e.as_ref().clone())?
-            }
-            None => self.read_filter_data_from_file()?,
-        };
-        self.decode_filter(&data)
-    }
-
     fn read_filter_data_from_file(&self) -> Result<Bytes> {
         let mut data = self
             .file
@@ -452,12 +407,12 @@ impl SsTableCore {
     }
 
     pub fn in_mem_index_size(&self) -> u64 {
-        let idx_in_mem = if self.last_idx_access.load(Relaxed) > 0 {
+        let idx_in_mem = if self.idx.is_loaded() {
             self.footer.index_len()
         } else {
             0
         };
-        let old_idx_in_mem = if self.last_old_idx_access.load(Relaxed) > 0 {
+        let old_idx_in_mem = if self.old_idx.is_loaded() {
             self.footer.old_index_len()
         } else {
             0
@@ -471,6 +426,14 @@ impl SsTableCore {
 
     pub fn filter_size(&self) -> u64 {
         self.footer.aux_index_len() as u64
+    }
+
+    pub fn in_mem_filter_size(&self) -> u64 {
+        if self.filter.is_loaded() {
+            self.footer.aux_index_len() as u64
+        } else {
+            0
+        }
     }
 
     pub fn smallest(&self) -> &[u8] {
@@ -1074,37 +1037,6 @@ mod tests {
                 it.next();
             }
         }
-    }
-
-    #[test]
-    fn test_build_and_load_filter() {
-        let (t, kvs) = create_sst_table("key", 10000, false);
-        let cache_key = BlockCacheKey::new(t.id(), t.filter_offset());
-        assert!(t.cache.as_ref().unwrap().get(&cache_key).is_none());
-        let filter = t.load_filter().unwrap();
-        assert!(t.cache.as_ref().unwrap().get(&cache_key).is_some());
-        for (k, _) in kvs {
-            let k_h = farmhash::fingerprint64(k.as_bytes());
-            assert!(filter.contains(&k_h));
-        }
-    }
-
-    #[bench]
-    fn bench_load_filter(b: &mut test::Bencher) {
-        let (t, _) = create_sst_table("key", 10000, true);
-        b.iter(|| {
-            test::black_box(t.load_filter().unwrap());
-        });
-    }
-
-    #[bench]
-    fn bench_cache_filter(b: &mut test::Bencher) {
-        let (t, _) = create_sst_table("key", 10000, true);
-        t.load_filter().unwrap();
-        let cache_key = BlockCacheKey::new(t.id(), t.filter_offset());
-        b.iter(|| {
-            test::black_box(t.cache.as_ref().unwrap().get(&cache_key).unwrap());
-        });
     }
 
     #[bench]

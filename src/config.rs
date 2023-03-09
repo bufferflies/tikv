@@ -745,7 +745,7 @@ impl Default for WriteCfConfig {
             max_write_buffer_number: 5,
             min_write_buffer_number_to_merge: 1,
             max_bytes_for_level_base: ReadableSize::mb(512),
-            target_file_size_base: ReadableSize::mb(8),
+            target_file_size_base: ReadableSize::mb(16),
             level0_file_num_compaction_trigger: 4,
             level0_slowdown_writes_trigger: None,
             level0_stop_writes_trigger: None,

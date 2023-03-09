@@ -60,6 +60,7 @@ thiserror = "1.0"
 tidb_query_common = { path = "../tidb_query_common", default-features = false }
 tikv_alloc = { path = "../tikv_alloc" }
 tikv_util = { path = "../tikv_util", default-features = false }
+time = "0.1"
 tokio = { version = "1.5", features = ["full"] }
 tracker = { path = "../tracker" }
 txn_types = { path = "../txn_types", default-features = false }

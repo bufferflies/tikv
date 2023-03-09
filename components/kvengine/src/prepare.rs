@@ -6,7 +6,7 @@ use bytes::{Buf, Bytes};
 use file_system::{IoOp, IoType};
 
 use crate::{
-    apply::ChangeSet, metrics::KVENGINE_LEVEL_WRITE_VEC, table::sstable::LocalFile, EngineCore, *,
+    apply::ChangeSet, metrics::ENGINE_LEVEL_WRITE_VEC, table::sstable::LocalFile, EngineCore, *,
 };
 
 pub const BLOB_LEVEL: u32 = 1 << 31;
@@ -139,7 +139,7 @@ impl EngineCore {
                             self.open_sstable_file(id)?
                         };
                         cs.add_file(id, file, level, self.cache.clone())?;
-                        KVENGINE_LEVEL_WRITE_VEC
+                        ENGINE_LEVEL_WRITE_VEC
                             .with_label_values(&[&level.to_string()])
                             .inc_by(data_len as u64);
                     }
@@ -190,12 +190,15 @@ impl EngineCore {
         std::fs::rename(&tmp_file_name, local_file_name)
     }
 
-    fn open_sstable_file(&self, id: u64) -> std::io::Result<LocalFile> {
-        LocalFile::open(id, self.local_sst_file_path(id).as_path())
+    fn open_sstable_file(&self, id: u64) -> Result<LocalFile> {
+        Ok(LocalFile::open(id, self.local_sst_file_path(id).as_path())?)
     }
 
-    fn open_blob_table_file(&self, id: u64) -> std::io::Result<LocalFile> {
-        LocalFile::open(id, self.local_blob_file_path(id).as_path())
+    fn open_blob_table_file(&self, id: u64) -> Result<LocalFile> {
+        Ok(LocalFile::open(
+            id,
+            self.local_blob_file_path(id).as_path(),
+        )?)
     }
 
     pub(crate) fn local_sst_file_path(&self, file_id: u64) -> PathBuf {

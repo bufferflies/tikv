@@ -3135,6 +3135,7 @@ dependencies = [
  "tidb_query_common",
  "tikv_alloc",
  "tikv_util",
+ "time",
  "tokio",
  "tracker",
  "txn_types",
