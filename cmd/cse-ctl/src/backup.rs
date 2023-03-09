@@ -328,13 +328,13 @@ async fn get_all_backup_files(s3fs: &S3Fs) -> dfs::Result<Vec<String>> {
     let prefix = format!("{}/{}", s3fs.get_prefix(), start_key);
     loop {
         match s3fs.list(&start_key).await {
-            Ok((backup_files, mut more)) => {
+            Ok((backup_files, mut more, _)) => {
                 for file in backup_files {
-                    if !file.starts_with(&prefix) {
+                    if !file.key.starts_with(&prefix) {
                         more = false;
                         break;
                     }
-                    files.push(file);
+                    files.push(file.key);
                 }
                 if !more {
                     break;

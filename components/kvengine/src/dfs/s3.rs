@@ -14,6 +14,7 @@ use engine_traits::{GetObjectOptions, ObjectStorage};
 use farmhash::fingerprint64;
 use futures::StreamExt;
 use hyper_tls::HttpsConnector;
+use regex::Regex;
 use rusoto_core::{
     param::{Params, ServiceParams},
     request::{BufferedHttpResponse, HttpResponse},
@@ -21,8 +22,8 @@ use rusoto_core::{
     HttpClient, HttpDispatchError, Region, RusotoError,
 };
 use rusoto_s3::{
-    CopyObjectError, DeleteObjectTaggingError, GetObjectError, GetObjectTaggingError,
-    ListObjectsV2Error, PutObjectError, PutObjectTaggingError,
+    CopyObjectError, DeleteObjectError, DeleteObjectTaggingError, GetObjectError,
+    GetObjectTaggingError, ListObjectsV2Error, PutObjectError, PutObjectTaggingError,
 };
 use tikv_util::time::Instant;
 use tokio::runtime::Runtime;
@@ -195,6 +196,17 @@ impl S3FsCore {
         u64::from_str_radix(file_part, 16).unwrap()
     }
 
+    // Try to parse the sst file id from file key.
+    // Expected file key format: "/{prefix}/{idx}/{file_id}.sst".
+    // Note: do NOT use in performance critical path as regex is used.
+    pub fn try_parse_file_id(&self, key: &str) -> Option<u64> {
+        lazy_static::lazy_static! {
+            static ref RE: Regex = Regex::new(r"/[0-9a-f]{2}/([0-9a-f]{16})\.sst$").unwrap();
+        }
+        let caps = RE.captures(key)?;
+        Some(u64::from_str_radix(&caps[1], 16).unwrap())
+    }
+
     fn is_err_retryable<T>(&self, rustoto_err: &RusotoError<T>) -> bool {
         match rustoto_err {
             RusotoError::Service(_) => true,
@@ -203,7 +215,7 @@ impl S3FsCore {
             RusotoError::Credentials(_) => false,
             RusotoError::Validation(_) => false,
             RusotoError::ParseError(_) => false,
-            RusotoError::Unknown(_) => true,
+            RusotoError::Unknown(resp) => resp.status.is_server_error(),
             RusotoError::Blocking => false,
         }
     }
@@ -224,9 +236,19 @@ impl S3FsCore {
     }
 
     // list gets a list of file ids(full path) greater than start_after.
-    // The result contains a vector of file ids and a boolean indicate if there is
-    // more.
-    pub async fn list(&self, start_after: &str) -> crate::dfs::Result<(Vec<String>, bool)> {
+    // The result contains:
+    // A vector of file content with `key` & `last_modified` timestamp.
+    // A boolean `has_more` indicate if there is more.
+    // An optional `next_start_after` for next loop if `has_more` is true.
+    // Ref: https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html
+    pub async fn list(
+        &self,
+        start_after: &str,
+    ) -> crate::dfs::Result<(
+        Vec<ListObjectContent>,
+        bool,           // has_more. Deprecated, use `next_start_after`
+        Option<String>, // next_start_after
+    )> {
         let prefix = format!("{}/", self.prefix.clone());
         let start_after = format!("{}/{}", self.prefix.clone(), start_after);
         let mut retry_cnt = 0;
@@ -245,11 +267,10 @@ impl S3FsCore {
                     let body = body_res.unwrap();
                     let body_str = body.to_str().unwrap();
                     let list: ListObjects = quick_xml::de::from_str(body_str).unwrap();
-                    let mut files = vec![];
-                    for content in list.contents {
-                        files.push(content.key);
-                    }
-                    return Ok((files, list.is_truncated));
+                    let next_start_after = list.is_truncated.then_some(
+                        list.contents.last().unwrap().key.as_str()[prefix.len()..].to_string(),
+                    );
+                    return Ok((list.contents, list.is_truncated, next_start_after));
                 } else {
                     result = Err(body_res.unwrap_err().into());
                 }
@@ -299,6 +320,10 @@ impl S3FsCore {
             if self.is_err_retryable(&err) && retry_cnt < MAX_RETRY_COUNT {
                 retry_cnt += 1;
                 let retry_sleep = 2u64.pow(retry_cnt) * RETRY_SLEEP_MS;
+                warn!(
+                    "Get file {} tagging fail {:?}, retry_cnt {}, retry after {}ms",
+                    file_id, err, retry_cnt, retry_sleep
+                );
                 tokio::time::sleep(Duration::from_millis(retry_sleep)).await;
                 continue;
             }
@@ -473,6 +498,52 @@ impl S3FsCore {
         }
     }
 
+    // Ref: https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteObject.html
+    pub async fn delete_object(&self, key: String, file_name: String) -> crate::dfs::Result<()> {
+        let mut retry_cnt = 0;
+        let start_time = Instant::now();
+        loop {
+            let req = self.new_request("DELETE", &key);
+            let result = self.dispatch(req, DeleteObjectError::from_response).await;
+            if result.is_ok() {
+                info!(
+                    "delete file {}, takes {:?}, retry {}",
+                    &file_name,
+                    start_time.saturating_elapsed(),
+                    retry_cnt
+                );
+                KVENGINE_DFS_LATENCY_VEC
+                    .with_label_values(&["delete"])
+                    .observe(start_time.saturating_elapsed().as_millis() as f64);
+                return Ok(());
+            }
+            let err = result.unwrap_err();
+            if self.is_err_retryable(&err) {
+                if retry_cnt < MAX_RETRY_COUNT {
+                    KVENGINE_DFS_RETRY_COUNTER_VEC
+                        .with_label_values(&["delete"])
+                        .inc();
+                    retry_cnt += 1;
+                    let retry_sleep = 2u64.pow(retry_cnt) * RETRY_SLEEP_MS;
+                    tokio::time::sleep(Duration::from_millis(retry_sleep)).await;
+                    warn!(
+                        "retry delete file {}, error {:?}, retry cnt {}, retry after {}ms",
+                        &file_name, &err, retry_cnt, retry_sleep
+                    );
+                    continue;
+                } else {
+                    error!(
+                        "delete file {}, takes {:?}, reach max retry count {}",
+                        &file_name,
+                        start_time.saturating_elapsed(),
+                        MAX_RETRY_COUNT
+                    );
+                }
+            }
+            return Err(err.into());
+        }
+    }
+
     async fn remove_file_tagging(&self, file_id: u64) -> Result<(), dfs::Error> {
         let mut retry_cnt = 0;
         loop {
@@ -589,6 +660,9 @@ impl Dfs for S3Fs {
             .await
     }
 
+    /// Logically remove the file on S3 by tagging with "deleted=true".
+    /// And the file would be permanently removed after `gc_lifetime`. See
+    /// `DfsGc`.
     async fn remove(&self, file_id: u64, _opts: Options) {
         let mut retry_cnt = 0;
         let mut copied = false;
@@ -650,6 +724,13 @@ impl Dfs for S3Fs {
         }
     }
 
+    /// Permanently remove the file on S3.
+    /// This method should be used by `DfsGc` ONLY to meet GC rules.
+    async fn permanently_remove(&self, file_id: u64, _opts: Options) -> crate::dfs::Result<()> {
+        self.delete_object(self.file_key(file_id), file_id.to_string())
+            .await
+    }
+
     fn get_runtime(&self) -> &Runtime {
         &self.runtime
     }
@@ -666,8 +747,9 @@ struct ListObjects {
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
 #[serde(default)]
 #[serde(rename_all = "PascalCase")]
-struct ListObjectContent {
-    key: String,
+pub struct ListObjectContent {
+    pub key: String,
+    pub last_modified: String,
 }
 
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
@@ -762,24 +844,27 @@ mod tests {
     use super::*;
     use crate::table::sstable::{new_filename, File, LocalFile};
 
+    fn new_s3fs(file_data: &[u8]) -> S3Fs {
+        let s3c = rusoto_core::Client::new_with(
+            MockCredentialsProvider,
+            MultipleMockRequestDispatcher::new(vec![
+                MockRequestDispatcher::with_status(200),
+                MockRequestDispatcher::with_status(200)
+                    .with_body(str::from_utf8(file_data).unwrap()),
+                MockRequestDispatcher::with_status(200),
+                MockRequestDispatcher::with_status(200),
+            ]),
+        );
+        S3Fs::new_for_test(s3c, "shard-db".into(), "prefix".into())
+    }
+
     #[test]
     fn test_s3() {
         crate::tests::init_logger();
 
         let local_dir = tempfile::tempdir().unwrap();
         let file_data = "abcdefgh".to_string().into_bytes();
-
-        let s3c = rusoto_core::Client::new_with(
-            MockCredentialsProvider,
-            MultipleMockRequestDispatcher::new(vec![
-                MockRequestDispatcher::with_status(200),
-                MockRequestDispatcher::with_status(200)
-                    .with_body(str::from_utf8(&file_data).unwrap()),
-                MockRequestDispatcher::with_status(200),
-                MockRequestDispatcher::with_status(200),
-            ]),
-        );
-        let s3fs = S3Fs::new_for_test(s3c, "shard-db".into(), "prefix".into());
+        let s3fs = new_s3fs(&file_data);
         let (tx, rx) = tikv_util::mpsc::bounded(1);
 
         let fs = s3fs.clone();
@@ -841,23 +926,25 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_sst_file_suffix() {
-        let file_data = "abcdefgh".to_string().into_bytes();
-        let s3c = rusoto_core::Client::new_with(
-            MockCredentialsProvider,
-            MultipleMockRequestDispatcher::new(vec![
-                MockRequestDispatcher::with_status(200),
-                MockRequestDispatcher::with_status(200)
-                    .with_body(str::from_utf8(&file_data).unwrap()),
-                MockRequestDispatcher::with_status(200),
-                MockRequestDispatcher::with_status(200),
-            ]),
-        );
-        let s3fs = S3Fs::new_for_test(s3c, "shard-db".into(), "prefix".into());
+    fn test_parse_sst_file() {
+        let s3fs = new_s3fs(b"abcdefgh");
+
         let file_key = s3fs.file_key(random());
         assert_eq!(
             format!("{}/{}", "prefix", s3fs.parse_sst_file_suffix(&file_key)),
             file_key
         );
+
+        for file_id in [0, 42, 0x1_0000_0000, 0xffff_ffff_ffff_ffff] {
+            let file_key = s3fs.file_key(file_id);
+            assert_eq!(s3fs.try_parse_file_id(&file_key), Some(file_id));
+        }
+
+        for file_key in [
+            "",
+            "cse/0000000000000001/e00000001/0000000000800000_00000000008e9000.wal",
+        ] {
+            assert_eq!(s3fs.try_parse_file_id(file_key), None);
+        }
     }
 }

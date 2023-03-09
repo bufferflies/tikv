@@ -2,16 +2,22 @@
 
 use std::{
     collections::HashSet,
+    fmt::Debug,
     fs,
     path::PathBuf,
     str::FromStr,
     sync::atomic::{AtomicUsize, Ordering},
+    thread,
     time::{Duration, Instant},
 };
 
 use bytes::Buf;
+use chrono::{DateTime, FixedOffset};
 use clap::Args;
-use cse_ctl::common::{create_pd_client, get_all_stores_except_tiflash};
+use cse_ctl::{
+    common::{create_pd_client, get_all_stores_except_tiflash},
+    error::{Error, Result},
+};
 use http::Uri;
 use kvengine::{
     dfs,
@@ -20,33 +26,56 @@ use kvengine::{
 use kvproto::metapb::Store;
 use pd_client::RpcClient;
 use security::SecurityConfig;
-use slog_global::error;
-use tikv_util::info;
+use tikv_util::{box_err, config::ReadableDuration, error, info, warn};
+
+/// DFS GC Rules:
+///
+/// 1. If the file is in used, do nothing. Otherwise,
+///
+/// 2. If the file is NOT tagged with "deleted=true", add the tag. Otherwise,
+///
+/// 3. The file will be permanently removed when:
+///   3a. The file IS tagged with "deleted=true", and,
+///   3b. `gc_lifetime` is configured, and,
+///   3c. the duration since file creation has been longer than `gc_lifetime`.
 
 /// DFSGC arguments
 #[derive(Args)]
 pub struct DfsGcArgs {
     /// The path of the config file.
-    #[clap(long)]
+    #[clap(long, default_value = "")]
     pub config: PathBuf,
 
     /// GC after the start file prefix string.
     #[clap(long)]
     pub start: Option<String>,
+
+    /// GC lifetime in duration string (see `ReadableDuration`).
+    #[clap(long)]
+    pub gc_lifetime: Option<ReadableDuration>,
+
+    /// Loop interval, in seconds. Don't loop if not set.
+    #[clap(long)]
+    pub interval: Option<u64>,
+
+    /// PD endpoints, use `,` to separate multiple PDs
+    #[clap(long, default_value_t = String::new())]
+    pub pd: String,
+    /// Path of file that contains list of trusted SSL CAs
+    #[clap(long, default_value = "")]
+    pub cacert: PathBuf,
+    /// Path of file that contains X509 certificate in PEM format
+    #[clap(long, default_value = "")]
+    pub cert: PathBuf,
+    /// Path of file that contains X509 key in PEM format
+    #[clap(long, default_value = "")]
+    pub key: PathBuf,
 }
 
 pub(crate) fn execute_dfsgc(arg: DfsGcArgs) {
-    let result = std::fs::read(arg.config);
-    if result.is_err() {
-        error!("failed to read config file {:?}", result.unwrap_err());
-        return;
-    }
+    let config = DfsGcConfig::from_args(&arg);
+
     let start_after = arg.start.unwrap_or_default();
-    let data = result.unwrap();
-    let mut config: DfsGcConfig = toml::from_slice(&data).unwrap();
-    if config.data_dir.is_empty() {
-        config.data_dir = ".".to_string();
-    }
     let pd_client = create_pd_client(&config.security, &config.pd);
     let s3fs = S3Fs::new(
         config.dfs.prefix,
@@ -57,12 +86,25 @@ pub(crate) fn execute_dfsgc(arg: DfsGcArgs) {
         config.dfs.s3_bucket,
     );
     let progress_file_path = PathBuf::from(format!("{}/{}", &config.data_dir, "dfsgc.progress"));
-    let mut gc_worker = GcWorker::new(pd_client, s3fs, progress_file_path);
-    gc_worker.collect_valid_files();
-    gc_worker.remove_garbage_files(start_after);
+    let mut gc_worker = GcWorker::new(pd_client, s3fs, progress_file_path, config.gc_lifetime);
+
+    loop {
+        if let Err(err) = gc_worker.collect_valid_files() {
+            error!("collect_valid_files error, try again: {:?}", err);
+        } else {
+            gc_worker.remove_garbage_files(start_after.clone());
+        }
+
+        if let Some(interval) = &arg.interval {
+            thread::sleep(Duration::from_secs(*interval));
+        } else {
+            break;
+        }
+    }
 }
 
 static REMOVED: AtomicUsize = AtomicUsize::new(0);
+static PERMANENTLY_REMOVED: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug, Default)]
 #[serde(default)]
@@ -75,6 +117,39 @@ pub struct DfsGcConfig {
     // If the task is not finished, a progress file is stored in the data dir, the next run
     // will load the progress and continue the task.
     pub data_dir: String,
+
+    pub gc_lifetime: Option<Duration>,
+}
+
+impl DfsGcConfig {
+    pub fn from_args(args: &DfsGcArgs) -> Self {
+        let mut config = Self::default();
+        if args.config.exists() {
+            let data = std::fs::read(args.config.as_path()).expect("failed to read config file");
+            config = toml::from_slice(&data).unwrap();
+        }
+        // override from args and ENV
+        if !args.pd.is_empty() {
+            config.pd.endpoints = args.pd.split(',').map(|x| x.to_owned()).collect();
+        }
+        if args.cacert.exists() {
+            config.security.ca_path = args.cacert.to_str().unwrap().to_owned();
+        }
+        if args.cert.exists() {
+            config.security.cert_path = args.cert.to_str().unwrap().to_owned();
+        }
+        if args.key.exists() {
+            config.security.key_path = args.key.to_str().unwrap().to_owned();
+        }
+        config.dfs.override_from_env();
+
+        if config.data_dir.is_empty() {
+            config.data_dir = ".".to_string();
+        }
+
+        config.gc_lifetime = args.gc_lifetime.map(Into::into);
+        config
+    }
 }
 
 struct GcWorker {
@@ -82,32 +157,42 @@ struct GcWorker {
     s3fs: S3Fs,
     progress_file_path: PathBuf,
     valid_files: HashSet<u64>,
+    gc_lifetime: Option<chrono::Duration>,
 }
 
 impl GcWorker {
-    fn new(pd: RpcClient, s3fs: S3Fs, progress_file_path: PathBuf) -> Self {
+    fn new(
+        pd: RpcClient,
+        s3fs: S3Fs,
+        progress_file_path: PathBuf,
+        gc_lifetime: Option<Duration>,
+    ) -> Self {
         Self {
             pd,
             s3fs,
             progress_file_path,
             valid_files: HashSet::default(),
+            gc_lifetime: gc_lifetime.map(|d| chrono::Duration::from_std(d).unwrap()),
         }
     }
 
-    fn collect_valid_files(&mut self) {
-        let all_stores = get_all_stores_except_tiflash(&self.pd)
-            .unwrap_or_else(|e| panic!("failed get all stores {:?}", e));
+    fn collect_valid_files(&mut self) -> Result<()> {
+        self.valid_files.clear();
+
+        let all_stores = get_all_stores_except_tiflash(&self.pd)?;
         let start_time = Instant::now();
         let stores_len = all_stores.len();
         let (tx, rx) = std::sync::mpsc::sync_channel(stores_len);
         for store in all_stores {
             let tx = tx.clone();
             self.s3fs.get_runtime().spawn(async move {
-                tx.send(Self::get_store_files(store).await).unwrap();
+                // Send failed when receive error from following `rx.recv()` and close the
+                // channel. So it can be ignored.
+                let _ = tx.send(Self::get_store_files(store).await);
             });
         }
         for _ in 0..stores_len {
-            let store_files_ids = rx.recv().unwrap();
+            let store_files_ids = rx.recv().unwrap()?;
             for (_, region_file_ids) in store_files_ids {
                 self.valid_files.extend(region_file_ids.into_iter());
             }
@@ -124,16 +209,26 @@ impl GcWorker {
         // As it takes time to move peer, we concurrently collect the store files to
         // make the the collection faster and assume it takes at least 30s to
         // move all peers.
-        assert!(elapsed < Duration::from_secs(30));
+        if elapsed >= Duration::from_secs(30) {
+            return Err(box_err!(
+                "duration of collect_valid_files exceed 30s: elapsed {:?}",
+                elapsed
+            ));
+        }
+
+        Ok(())
     }
 
-    async fn get_store_files(store: Store) -> Vec<(u64, Vec<u64>)> {
+    async fn get_store_files(store: Store) -> Result<Vec<(u64, Vec<u64>)>> {
         let uri =
             Uri::from_str(&format!("http://{}/kvengine/files", &store.status_address)).unwrap();
         let client = hyper::Client::new();
-        let resp = client.get(uri).await.unwrap();
+        let resp = client
+            .get(uri)
+            .await
+            .map_err(|e| Error::Other(box_err!("get_store_files error {:?}", e)))?;
         let body = hyper::body::to_bytes(resp.into_body()).await.unwrap();
-        serde_json::from_slice(body.chunk()).unwrap()
+        Ok(serde_json::from_slice(body.chunk()).unwrap())
     }
 
     fn remove_garbage_files(&self, mut start_after: String) {
@@ -147,33 +242,43 @@ impl GcWorker {
                 start_after = state_start_after;
             }
         }
-        info!("start remove garbage files after {}", start_after);
+        info!(
+            "start remove garbage files after {}, gc lifetime {:?}",
+            start_after, self.gc_lifetime
+        );
         let mut checked = 0;
         loop {
+            info!("loop start: {}", start_after);
             let s3fs = self.s3fs.clone();
-            let (files, has_more) = self
+            let (files, _, next_start_after) = self
                 .s3fs
                 .get_runtime()
                 .block_on(s3fs.list(start_after.as_str()))
                 .unwrap();
-            let files: Vec<String> = files
-                .iter()
-                .map(|f| self.s3fs.parse_sst_file_suffix(f))
-                .collect();
             info!("listed {} files", files.len());
-            for file_suffix in &files {
-                let file_id = self.s3fs.parse_file_id(file_suffix.as_str());
+            let file_ids = files
+                .into_iter()
+                .filter_map(|obj| {
+                    self.s3fs.try_parse_file_id(&obj.key).map(|file_id| {
+                        (
+                            file_id,
+                            DateTime::parse_from_rfc3339(&obj.last_modified)
+                                .expect("parse last_modified"),
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
+            for (file_id, last_modified) in file_ids {
                 if !self.valid_files.contains(&file_id) {
                     // Remove the files one by one to prevent reach API rate limit.
-                    self.remove_garbage_file(file_id);
+                    self.remove_garbage_file(file_id, last_modified);
                     checked += 1;
                 }
             }
-            if !files.is_empty() {
-                start_after = (*files.last().unwrap()).clone();
+            if let Some(next_start_after) = next_start_after {
+                start_after = next_start_after;
                 fs::write(self.progress_file_path.as_path(), start_after.as_bytes()).unwrap();
-            }
-            if !has_more || files.is_empty() {
+            } else {
                 break;
             }
         }
@@ -182,28 +287,47 @@ impl GcWorker {
         }
 
         info!(
-            "{} files valid, {} files checked, {} files removed",
+            "{} files valid, {} files checked, {} files removed, {} files permanently removed",
             self.valid_files.len(),
             checked,
-            REMOVED.load(Ordering::SeqCst)
+            REMOVED.load(Ordering::SeqCst),
+            PERMANENTLY_REMOVED.load(Ordering::SeqCst),
         );
         info!("finished");
     }
 
-    fn remove_garbage_file(&self, id: u64) {
+    fn remove_garbage_file(&self, file_id: u64, last_modified: DateTime<FixedOffset>) {
         let opts = dfs::Options::new(0, 0);
         let s3fs = self.s3fs.clone();
         self.s3fs.get_runtime().block_on(async move {
-            match s3fs.is_removed(id).await {
+            match s3fs.is_removed(file_id).await {
                 Ok(removed) => {
                     if !removed {
-                        s3fs.remove(id, opts).await;
+                        s3fs.remove(file_id, opts).await;
                         REMOVED.fetch_add(1, Ordering::SeqCst);
-                        info!("removed {}", id);
+                        info!("{} is removed", file_id);
+                    } else if let Some(gc_lifetime) = self.gc_lifetime {
+                        let now = chrono::Utc::now();
+                        let last_modified_utc: DateTime<chrono::Utc> = last_modified.into();
+                        let duration = now - last_modified_utc;
+
+                        if duration > gc_lifetime {
+                            if let Err(err) = s3fs.permanently_remove(file_id, opts).await {
+                                warn!("{} permanently_remove error: {:?}", file_id, err);
+                            } else {
+                                info!(
+                                    "{} is permanently removed, removed at {} ({:.2} min)",
+                                    file_id,
+                                    last_modified,
+                                    duration.num_seconds() as f64 / 60.0
+                                );
+                                PERMANENTLY_REMOVED.fetch_add(1, Ordering::SeqCst);
+                            }
+                        }
                     }
                 }
                 Err(e) => {
-                    error!("Fail to get file {} status, {:?}", id, e);
+                    error!("Fail to get file {} status, {:?}", file_id, e);
                 }
             }
         });

@@ -40,6 +40,9 @@ pub trait Dfs: Sync + Send {
     /// remove removes the file from the DFS.
     async fn remove(&self, file_id: u64, opts: Options);
 
+    /// Remove the file from DFS permanently.
+    async fn permanently_remove(&self, file_id: u64, opts: Options) -> Result<()>;
+
     /// get_runtime gets the tokio runtime for the DFS.
     fn get_runtime(&self) -> &tokio::runtime::Runtime;
 
@@ -112,6 +115,11 @@ impl Dfs for InMemFs {
                 true
             }
         });
+    }
+
+    async fn permanently_remove(&self, file_id: u64, _opts: Options) -> Result<()> {
+        self.files.remove(&file_id);
+        Ok(())
     }
 
     fn get_runtime(&self) -> &Runtime {
@@ -230,6 +238,11 @@ impl Dfs for LocalFs {
         if let Err(err) = std::fs::remove_file(local_file_path) {
             error!("failed to remove local file {:?}", err);
         }
+    }
+
+    async fn permanently_remove(&self, file_id: u64, opts: Options) -> Result<()> {
+        self.remove(file_id, opts).await;
+        Ok(())
     }
 
     fn get_runtime(&self) -> &Runtime {
