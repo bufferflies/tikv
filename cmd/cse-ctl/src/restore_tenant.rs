@@ -354,6 +354,7 @@ impl BackupCluster {
         let mut ret_shards = self.shards_need_flush.get(&store_id).unwrap().to_owned();
         let mut shard_need_truncate = self.shards_need_truncate.get(&store_id).unwrap().to_owned();
         ret_shards.append(&mut shard_need_truncate);
+        ret_shards.sort_unstable();
         ret_shards.dedup();
         ret_shards
     }

@@ -170,13 +170,22 @@ impl Engine {
             flush.base_version,
             flush.data_sequence
         );
+        let max_ts = std::cmp::max(
+            flush.parent_snap.max_ts,
+            flush
+                .mem_tbls
+                .iter()
+                .map(|m| m.data_max_ts())
+                .max()
+                .unwrap_or(0),
+        );
         let mut cs = new_change_set(task.id_ver.id, task.id_ver.ver);
         let initial_flush = cs.mut_initial_flush();
         initial_flush.set_start(task.start.to_vec());
         initial_flush.set_end(task.end.to_vec());
         initial_flush.set_base_version(flush.base_version);
         initial_flush.set_data_sequence(flush.data_sequence);
-        initial_flush.set_max_ts(flush.parent_snap.max_ts);
+        initial_flush.set_max_ts(max_ts);
         for tbl_create in flush.parent_snap.get_table_creates() {
             if task.overlap_table(tbl_create.get_smallest(), tbl_create.get_biggest()) {
                 initial_flush.mut_table_creates().push(tbl_create.clone());
