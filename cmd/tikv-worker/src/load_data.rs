@@ -86,6 +86,14 @@ pub(crate) async fn handle_load_data(
     }
     let start_ts = get_u64_param(&query_pairs, "start_ts").unwrap_or_default();
     if start_ts == 0 {
+        if *req.method() == Method::GET {
+            let tasks = manager.list_tasks();
+            let json = serde_json::to_string(&tasks).unwrap();
+            return Ok(Response::builder()
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(json.into())
+                .unwrap());
+        }
         return Ok(make_response(
             StatusCode::BAD_REQUEST,
             "start_ts is missing",
@@ -276,6 +284,7 @@ pub struct SstMeta {
 pub(crate) struct LoadTaskWorker {
     ctx: LoadDataContext,
     task_ctx: TaskContext,
+    task_dir: PathBuf,
     kv_pairs: Vec<KvPair>,
     in_mem_size: usize,
     file_idx: usize,
@@ -298,6 +307,7 @@ pub(crate) enum LoadTaskMsg {
         chunk_ids: Vec<u64>,
         compression_type: u8,
     },
+    Cleanup,
 }
 
 #[derive(Clone)]
@@ -359,6 +369,7 @@ pub(crate) struct TaskContext {
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
 pub struct LoadTaskStates {
+    pub start_ts: u64,
     pub canceled: bool,
     pub finished: bool,
     pub error: String,
@@ -369,14 +380,18 @@ pub struct LoadTaskStates {
 impl LoadTaskWorker {
     pub(crate) fn new(context: LoadDataContext, task_ctx: TaskContext) -> Self {
         let (sender, receiver) = tikv_util::mpsc::unbounded();
+        let mut states = LoadTaskStates::default();
+        states.start_ts = task_ctx.start_ts;
         let scheduler = LoadTaskScheduler {
             sender,
-            states: Arc::new(Mutex::new(LoadTaskStates::default())),
+            states: Arc::new(Mutex::new(states)),
         };
         let (file_tx, file_rx) = tikv_util::mpsc::unbounded();
+        let task_dir = context.dir.join(format!("{}", task_ctx.start_ts));
         Self {
             ctx: context,
             task_ctx,
+            task_dir,
             kv_pairs: vec![],
             in_mem_size: 0,
             file_idx: 0,
@@ -392,6 +407,7 @@ impl LoadTaskWorker {
     }
 
     pub(crate) fn run(&mut self) {
+        self.init_task_dir();
         while let Ok(msg) = self.receiver.recv() {
             match msg {
                 LoadTaskMsg::AddChunk {
@@ -414,16 +430,20 @@ impl LoadTaskWorker {
                 } => {
                     if self.scheduler.is_canceled() {
                         warn!("task {} is canceled, do not build", self.task_ctx.start_ts);
-                        return;
+                        continue;
                     }
                     if self.scheduler.is_finished() {
                         warn!("task {} is finished, skip build", self.task_ctx.start_ts);
-                        return;
+                        continue;
                     }
                     if let Err(err) = self.build(chunk_ids, compression_type) {
                         error!("build failed {:?}", err);
                         self.scheduler.cancel(err.to_string());
                     }
+                    continue;
+                }
+                LoadTaskMsg::Cleanup => {
+                    self.remove_local_files();
                     return;
                 }
             }
@@ -476,15 +496,14 @@ impl LoadTaskWorker {
                 "{} flush to local file on in_mem_size {}",
                 self.task_ctx.start_ts, self.in_mem_size
             );
-            let ctx = self.ctx.clone();
             let kv_pairs = mem::take(&mut self.kv_pairs);
             let tx = self.file_tx.clone();
             let task_ctx = self.task_ctx;
-            let file_idx = self.file_idx;
+            let file_path = self.file_path(self.file_idx);
             let in_mem_size = self.in_mem_size;
             self.file_idx += 1;
             std::thread::spawn(move || {
-                let res = flush_to_local_file(ctx, kv_pairs, task_ctx, file_idx, in_mem_size);
+                let res = flush_to_local_file(kv_pairs, task_ctx, file_path, in_mem_size);
                 tx.send(res).unwrap();
             });
             if self.file_idx + FLUSH_FILE_CONCURRENCY > self.readers.len() {
@@ -548,10 +567,9 @@ impl LoadTaskWorker {
         if !self.kv_pairs.is_empty() {
             let kv_pairs = mem::take(&mut self.kv_pairs);
             let reader = flush_to_local_file(
-                self.ctx.clone(),
                 kv_pairs,
                 self.task_ctx,
-                self.file_idx,
+                self.file_path(self.file_idx),
                 self.in_mem_size,
             )?;
             self.readers.push(reader);
@@ -606,6 +624,7 @@ impl LoadTaskWorker {
         if !errs.is_empty() {
             return Err(errs.pop().unwrap());
         }
+        info!("{} finish build", self.task_ctx.start_ts);
         self.ingest(sst_metas)
     }
 
@@ -687,7 +706,7 @@ impl LoadTaskWorker {
         if sst_metas.is_empty() {
             return Ok(());
         }
-        info!("start ingest");
+        info!("{} start ingest", self.task_ctx.start_ts);
         sst_metas.sort_by(|a, b| a.id.cmp(&b.id));
         let coarse_split_keys = gen_split_keys(&sst_metas, COARSE_SPLIT_SIZE);
         self.ctx.runtime.block_on(
@@ -695,7 +714,7 @@ impl LoadTaskWorker {
                 .pd
                 .split_and_scatter_regions(coarse_split_keys.clone()),
         )?;
-        for i in 0..=coarse_split_keys.len() {
+        for i in 0..coarse_split_keys.len() {
             let start_key = coarse_split_keys[i].clone();
             let end_key = if i + 1 == coarse_split_keys.len() {
                 let mut last = sst_metas.last().unwrap().encoded_biggest.clone();
@@ -708,6 +727,7 @@ impl LoadTaskWorker {
             self.ingest_group(group_ssts)?;
         }
         self.scheduler.set_finished();
+        info!("{} finished ingest", self.task_ctx.start_ts);
         Ok(())
     }
 
@@ -747,6 +767,27 @@ impl LoadTaskWorker {
             self.scheduler.add_ingested_regions();
         }
         Ok(())
+    }
+
+    fn file_path(&self, file_idx: usize) -> PathBuf {
+        self.task_dir.join(format!("kv_pairs_{}", file_idx))
+    }
+
+    fn init_task_dir(&self) {
+        if let Err(err) = fs::create_dir(&self.task_dir) {
+            self.scheduler.cancel(format!("{:?}", err))
+        }
+    }
+
+    fn remove_local_files(&self) {
+        if let Err(err) = fs::remove_dir_all(&self.task_dir) {
+            error!(
+                "failed to remove task {}, {:?}",
+                self.task_ctx.start_ts, err
+            );
+        } else {
+            info!("removed local files for task {}", self.task_ctx.start_ts);
+        }
     }
 }
 
@@ -929,16 +970,12 @@ impl From<std::io::Error> for Error {
 }
 
 fn flush_to_local_file(
-    ctx: LoadDataContext,
     mut kv_pairs: Vec<KvPair>,
     task_ctx: TaskContext,
-    file_idx: usize,
+    path: PathBuf,
     in_mem_size: usize,
 ) -> Result<KvPairsReader> {
     kv_pairs.sort_by(|a, b| a.key.cmp(&b.key));
-    let path = ctx
-        .dir
-        .join(format!("kv_pairs_{}_{}", task_ctx.start_ts, file_idx));
     let mut file = fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -1043,6 +1080,9 @@ impl MergeIterator {
         if !first.valid() {
             self.heap.swap(0, heap_len - 1);
             self.heap.pop();
+            if !self.valid() {
+                return Ok(());
+            }
         }
         self.down(0);
         let key = self.heap[0].key();
@@ -1085,6 +1125,13 @@ impl LoadDataManager {
         self.running_tasks
             .get(&start_ts)
             .map(|x| x.states.lock().unwrap().clone())
+    }
+
+    pub(crate) fn list_tasks(&self) -> Vec<LoadTaskStates> {
+        self.running_tasks
+            .iter()
+            .map(|x| x.states.lock().unwrap().clone())
+            .collect()
     }
 
     pub(crate) fn has_task(&self, start_ts: u64) -> bool {
@@ -1130,6 +1177,7 @@ impl LoadDataManager {
     pub(crate) fn delete(&self, start_ts: u64) {
         if let Some((_, scheduler)) = self.running_tasks.remove(&start_ts) {
             scheduler.cancel("deleted".to_string());
+            scheduler.sender.send(LoadTaskMsg::Cleanup).unwrap();
         }
     }
 }
