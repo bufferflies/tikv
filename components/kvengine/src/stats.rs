@@ -4,7 +4,7 @@ use std::cmp;
 
 use bytes::Bytes;
 
-use crate::{load_bool, metrics::ENGINE_OPEN_FILES, EXTRA_CF, NUM_CFS, WRITE_CF};
+use crate::{load_bool, metrics::ENGINE_OPEN_FILES, IdVer, EXTRA_CF, NUM_CFS, WRITE_CF};
 
 #[derive(Default, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -14,6 +14,8 @@ pub struct EngineStats {
     pub num_initial_flushed_shard: usize,
     pub num_active_shards: usize,
     pub num_compacting_shards: usize,
+    pub num_has_del_prefixes_shards: usize,
+    pub ready_destroy_range_shards: Vec<IdVer>,
     pub mem_tables_count: usize,
     pub mem_tables_size: u64,
     pub l0_tables_count: usize,
@@ -77,6 +79,14 @@ impl super::Engine {
             }
             if shard.flushed {
                 engine_stats.num_initial_flushed_shard += 1;
+            }
+            if shard.has_del_prefixes {
+                engine_stats.num_has_del_prefixes_shards += 1;
+            }
+            if shard.ready_to_destroy_range {
+                engine_stats
+                    .ready_destroy_range_shards
+                    .push(IdVer::new(shard.id, shard.ver));
             }
             engine_stats.mem_tables_count += shard.mem_table_count;
             engine_stats.mem_tables_size += shard.mem_table_size;
@@ -158,7 +168,8 @@ pub struct ShardStats {
     pub compaction_level: usize,
     pub compaction_score: f64,
     pub has_over_bound_data: bool,
-    pub delete_prefixes: Vec<Vec<u8>>,
+    pub has_del_prefixes: bool,
+    pub ready_to_destroy_range: bool,
     pub truncate_ts: Option<u64>,
     pub trim_over_bound: bool,
 }
@@ -363,7 +374,8 @@ impl super::Shard {
             compaction_level,
             compaction_score,
             has_over_bound_data: data.has_over_bound_data(),
-            delete_prefixes: data.del_prefixes.prefixes.clone(),
+            has_del_prefixes: !data.del_prefixes.is_empty(),
+            ready_to_destroy_range: data.ready_to_destroy_range(),
             truncate_ts: data.truncate_ts.map(|x| x.inner()),
             trim_over_bound: data.trim_over_bound,
         }

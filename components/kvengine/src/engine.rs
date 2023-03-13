@@ -570,10 +570,12 @@ impl EngineCore {
 
         fail::fail_point!("before_engine_trigger_compact", |_| ());
         if shard.ready_to_compact() {
-            self.compact_tx
-                .send(CompactMsg::Compact(IdVer::new(shard.id, shard.ver)))
-                .unwrap();
+            self.trigger_compact(shard.id_ver());
         }
+    }
+
+    pub fn trigger_compact(&self, id_ver: IdVer) {
+        self.compact_tx.send(CompactMsg::Compact(id_ver)).unwrap();
     }
 
     pub fn get_cache_size(&self) -> u64 {
@@ -610,7 +612,7 @@ impl Display for ShardTag {
     }
 }
 
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct IdVer {
     pub id: u64,
     pub ver: u64,

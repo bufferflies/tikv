@@ -1,6 +1,6 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use dyn_clone::DynClone;
 
@@ -35,6 +35,8 @@ pub struct Options {
     pub allow_fallback_local: bool,
 
     pub min_blob_size: u32,
+
+    pub max_del_range_delay: Duration,
 }
 
 impl Default for Options {
@@ -51,6 +53,7 @@ impl Default for Options {
             max_mem_table_size: 96 << 20,
             allow_fallback_local: true,
             min_blob_size: 0,
+            max_del_range_delay: Duration::from_secs(3600),
         }
     }
 }

@@ -123,14 +123,13 @@ fn test_destroy_range() {
     );
     let wait_for_destroying_range = || {
         for _ in 0..30 {
-            if engine
-                .get_shard(1)
-                .unwrap()
-                .get_data()
-                .del_prefixes
-                .is_empty()
-            {
+            let shard = engine.get_shard(1).unwrap();
+            let shard_data = shard.get_data();
+            if shard_data.del_prefixes.is_empty() {
                 break;
+            }
+            if shard_data.ready_to_destroy_range() {
+                engine.trigger_compact(shard.id_ver());
             }
             thread::sleep(Duration::from_millis(100));
         }
@@ -787,6 +786,7 @@ fn new_test_options(path: impl AsRef<Path>) -> Options {
     opts.max_mem_table_size = 16 << 10;
     opts.num_compactors = 2;
     opts.min_blob_size = min_blob_size;
+    opts.max_del_range_delay = Duration::from_secs(1);
     opts
 }
 

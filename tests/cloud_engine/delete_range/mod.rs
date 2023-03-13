@@ -6,6 +6,7 @@ use kvproto::kvrpcpb::UnsafeDestroyRangeRequest;
 use pd_client::PdClient;
 use test_cloud_server::{client::ClusterClient, ServerCluster};
 use tidb_query_common::util::convert_to_prefix_next;
+use tikv_util::config::ReadableDuration;
 
 use crate::alloc_node_id;
 
@@ -67,6 +68,49 @@ fn test_delete_range_recover() {
         thread::sleep(Duration::from_secs(1));
     }
     cluster.stop();
+}
+
+#[test]
+fn test_delete_range_delay() {
+    test_util::init_log_for_test();
+    let node_id = alloc_node_id();
+    let cluster = ServerCluster::new(vec![node_id], |_, conf| {
+        // 10 seconds max delay.
+        conf.raft_store.local_file_gc_timeout = ReadableDuration(Duration::from_secs(5));
+        conf.raft_store.local_file_gc_tick_interval = ReadableDuration(Duration::from_secs(1));
+    });
+    let mut client = cluster.new_client();
+    for i in 1..=30 {
+        client.split(&i_to_key(i * 100));
+        client.put_kv(i * 100..(i + 1) * 100, i_to_key, i_to_val);
+    }
+    let store_id = cluster.get_stores()[0];
+    // 30 regions randomly delay delete range.
+    destroy_range(&mut client, store_id, "key_".as_bytes());
+    let kvengine = cluster.get_kvengine(node_id);
+
+    // Most of the del_prefixes are not destroyed.
+    let has_del_prefix_count = get_del_prefix_shard_count(&kvengine);
+    assert!(has_del_prefix_count > 25);
+
+    // After half of the max delay duration, some of the del_prefixes are destroyed.
+    thread::sleep(Duration::from_secs(5));
+    let has_del_prefix_count = get_del_prefix_shard_count(&kvengine);
+    assert!(has_del_prefix_count > 5 && has_del_prefix_count < 25);
+
+    // After more than the max delay duration, all of the del_prefixes are
+    // destroyed.
+    thread::sleep(Duration::from_secs(7));
+    let has_del_prefix_count = get_del_prefix_shard_count(&kvengine);
+    assert_eq!(has_del_prefix_count, 0);
+}
+
+fn get_del_prefix_shard_count(kvengine: &kvengine::Engine) -> usize {
+    kvengine
+        .get_all_shard_stats()
+        .iter()
+        .filter(|stat| stat.has_del_prefixes)
+        .count()
 }
 
 fn new_destroy_range_req(prefix: &[u8]) -> UnsafeDestroyRangeRequest {

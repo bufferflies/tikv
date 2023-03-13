@@ -935,6 +935,9 @@ impl TikvServer {
                 )
             });
         kv_opts.allow_fallback_local = conf.dfs.allow_fallback_local;
+        // TODO: this is a temporary binding, add kvengine specific config in the
+        // future.
+        kv_opts.max_del_range_delay = conf.raft_store.local_file_gc_timeout.0 * 2;
         let opts = Arc::new(kv_opts);
         let id_allocator = Arc::new(PdIdAllocator { pd });
         let (sender, receiver) = tikv_util::mpsc::unbounded();

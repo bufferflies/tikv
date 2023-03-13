@@ -14,6 +14,7 @@ use std::{
 use bytes::{Buf, BufMut, Bytes};
 use dashmap::DashMap;
 use kvenginepb as pb;
+use rand::Rng;
 use slog_global::*;
 use tikv_util::codec::number::U64_SIZE;
 
@@ -153,6 +154,10 @@ impl Shard {
         shard
     }
 
+    pub(crate) fn id_ver(&self) -> IdVer {
+        IdVer::new(self.id, self.ver)
+    }
+
     pub(crate) fn set_active(&self, active: bool) {
         self.active.store(active, Release);
     }
@@ -189,12 +194,20 @@ impl Shard {
         store_u64(&self.estimated_kv_size, kv_size);
     }
 
+    pub(crate) fn gen_rand_schedule_del_range_time(&self) -> u64 {
+        let now = time::precise_time_ns();
+        let delay = rand::thread_rng().gen_range(0..self.opt.max_del_range_delay.as_nanos() as u64);
+        now + delay
+    }
+
     pub(crate) fn set_del_prefix(&self, val: &[u8]) {
+        let mut del_prefixes = DeletePrefixes::unmarshal(val);
+        del_prefixes.schedule_at = self.gen_rand_schedule_del_range_time();
         let data = self.get_data();
         let new_data = ShardData::new(
             data.start.clone(),
             data.end.clone(),
-            DeletePrefixes::unmarshal(val),
+            del_prefixes,
             data.truncate_ts,
             data.trim_over_bound,
             data.mem_tbls.clone(),
@@ -207,10 +220,12 @@ impl Shard {
 
     pub(crate) fn merge_del_prefix(&self, prefix: &[u8]) {
         let data = self.get_data();
+        let mut del_prefixes = data.del_prefixes.merge(prefix);
+        del_prefixes.schedule_at = self.gen_rand_schedule_del_range_time();
         let new_data = ShardData::new(
             data.start.clone(),
             data.end.clone(),
-            data.del_prefixes.merge(prefix),
+            del_prefixes,
             data.truncate_ts,
             data.trim_over_bound,
             data.mem_tbls.clone(),
@@ -493,12 +508,13 @@ impl Shard {
     }
 
     pub(crate) fn ready_to_compact(&self) -> bool {
+        let data = self.get_data();
         self.is_active()
             && self.get_initial_flushed()
             && (self.get_compaction_priority().is_some()
-                || self.get_data().ready_to_destroy_range()
-                || self.get_data().ready_to_truncate_ts()
-                || self.get_data().ready_to_trim_over_bound())
+                || data.ready_to_destroy_range()
+                || data.ready_to_truncate_ts()
+                || data.ready_to_trim_over_bound())
     }
 
     pub(crate) fn add_parent_mem_tbls(&self, parent: Arc<Shard>) {
@@ -709,7 +725,7 @@ impl ShardDataCore {
     }
 
     pub fn ready_to_destroy_range(&self) -> bool {
-        !self.del_prefixes.is_empty()
+        !self.del_prefixes.is_empty() && self.del_prefixes.after_scheduled_time()
             // No memtable contains data covered by deleted prefixes.
             && !self.mem_tbls.iter().any(|mem_tbl| {
                 self.del_prefixes
@@ -1084,6 +1100,7 @@ pub struct DeletePrefixes {
     // prefixes_nexts are prefix-next keys of prefixes, i.e., [prefixes[i], prefixes_nexts[i]) is
     // the range that should be destroyed.
     prefixes_nexts: Vec<Vec<u8>>,
+    pub(crate) schedule_at: u64,
 }
 
 impl std::fmt::Debug for DeletePrefixes {
@@ -1117,6 +1134,10 @@ impl DeletePrefixes {
         self.prefixes.is_empty()
     }
 
+    pub fn after_scheduled_time(&self) -> bool {
+        time::precise_time_ns() > self.schedule_at
+    }
+
     pub fn merge(&self, prefix: &[u8]) -> Self {
         let mut new_prefixes = vec![];
         for old_prefix in &self.prefixes {
@@ -1136,6 +1157,7 @@ impl DeletePrefixes {
         Self {
             prefixes: new_prefixes,
             prefixes_nexts: new_prefixes_nexts,
+            schedule_at: 0,
         }
     }
 
@@ -1167,6 +1189,7 @@ impl DeletePrefixes {
         Self {
             prefixes,
             prefixes_nexts,
+            schedule_at: 0,
         }
     }
 
@@ -1180,9 +1203,11 @@ impl DeletePrefixes {
             .cloned()
             .collect();
         let prefixes_nexts = DeletePrefixes::gen_prefixes_nexts(&prefixes);
+        let scheduled_at = self.schedule_at;
         Self {
             prefixes,
             prefixes_nexts,
+            schedule_at: scheduled_at,
         }
     }
 
