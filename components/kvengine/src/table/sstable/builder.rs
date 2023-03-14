@@ -201,8 +201,8 @@ impl Builder {
     pub fn estimated_size(&self) -> usize {
         let mut size = self.block_builder.buf.len()
             + self.old_builder.buf.len()
-            + self.block_builder.block.kv_size
-            + self.old_builder.block.kv_size;
+            + self.block_builder.block_size()
+            + self.old_builder.block_size();
         size += size / 32; // reserve extra capacity to avoid reallocate.
         size
     }
@@ -470,9 +470,11 @@ impl BlockBuilder {
     }
 
     fn need_finish_block(&self, target_block_size: usize) -> bool {
-        let block_size =
-            self.block.kv_size - self.block.tmp_keys.length() * self.block.common_prefix_len;
-        block_size > target_block_size
+        self.block_size() > target_block_size
+    }
+
+    fn block_size(&self) -> usize {
+        self.block.kv_size - self.block.tmp_keys.length() * self.block.common_prefix_len
     }
 
     fn finish_block(&mut self, sst_fid: u64, checksum_tp: u8) {
