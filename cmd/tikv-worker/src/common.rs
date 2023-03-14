@@ -1,0 +1,44 @@
+// Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
+
+use std::{borrow::Cow, collections::HashMap, str::FromStr};
+
+use futures::{future::ok, TryStreamExt};
+use http::{header, Response, StatusCode};
+use hyper::Body;
+
+pub(crate) fn get_u64_param(
+    query_pairs: &HashMap<Cow<'_, str>, Cow<'_, str>>,
+    name: &str,
+) -> Option<u64> {
+    if let Some(x) = query_pairs.get(name) {
+        u64::from_str(x).map_or(None, |x| Some(x))
+    } else {
+        None
+    }
+}
+
+pub(crate) async fn get_body(req: hyper::Request<hyper::Body>) -> hyper::Result<Vec<u8>> {
+    let length = req
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .map(|x| usize::from_str(x.to_str().unwrap_or_default()).unwrap_or_default())
+        .unwrap_or_default();
+    let mut body = Vec::with_capacity(length);
+    req.into_body()
+        .try_for_each(|bytes| {
+            body.extend(bytes);
+            ok(())
+        })
+        .await?;
+    Ok(body)
+}
+
+pub(crate) fn make_response<T>(status_code: StatusCode, message: T) -> Response<Body>
+where
+    T: Into<Body>,
+{
+    Response::builder()
+        .status(status_code)
+        .body(message.into())
+        .unwrap()
+}

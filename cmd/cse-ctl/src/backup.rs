@@ -67,10 +67,7 @@ pub struct BackupArgs {
 
 fn backup_file_name(prefix: String, name: String, backup_ts: u64) -> String {
     if name.is_empty() {
-        let folder = format!(
-            "backup/{}",
-            chrono::Local::now().format(BACKUP_FOLDER_FORMAT)
-        );
+        let folder = format!("backup/{}", chrono::Utc::now().format(BACKUP_FOLDER_FORMAT));
         format!("{}/{}/{}.meta", prefix, folder, backup_ts)
     } else {
         format!("{}/backup/{}", prefix, name)
@@ -236,7 +233,7 @@ pub fn backup_cluster_with_ts(
         cluster_backup_meta.safe_ts,
         cluster_backup_meta.get_stores().len(),
     );
-    let backup_key = backup_file_name(config.dfs.prefix, name, backup_ts);
+    let backup_key = backup_file_name(s3fs.get_prefix(), name, backup_ts);
     let backup_data = Bytes::from(cluster_backup_meta.write_to_bytes().unwrap());
     runtime
         .block_on(s3fs.put_object(backup_key.clone(), backup_data, backup_key.clone()))
@@ -319,16 +316,13 @@ fn get_backup_config(
     config
 }
 
-async fn get_all_backup_files(s3fs: &S3Fs) -> dfs::Result<Vec<String>> {
+pub async fn get_all_backup_files(s3fs: &S3Fs, date: String) -> dfs::Result<Vec<String>> {
     let mut files = vec![];
-    let mut start_key = format!(
-        "backup/{}",
-        chrono::Local::now().format(BACKUP_FOLDER_FORMAT)
-    );
+    let mut start_key = format!("backup/{}", date);
     let prefix = format!("{}/{}", s3fs.get_prefix(), start_key);
     loop {
         match s3fs.list(&start_key).await {
-            Ok((backup_files, mut more, _)) => {
+            Ok((backup_files, mut more, next_start_after)) => {
                 for file in backup_files {
                     if !file.key.starts_with(&prefix) {
                         more = false;
@@ -339,7 +333,7 @@ async fn get_all_backup_files(s3fs: &S3Fs) -> dfs::Result<Vec<String>> {
                 if !more {
                     break;
                 }
-                start_key = files.last().unwrap().clone();
+                start_key = next_start_after.unwrap();
             }
             Err(e) => {
                 return Err(e);
@@ -351,7 +345,8 @@ async fn get_all_backup_files(s3fs: &S3Fs) -> dfs::Result<Vec<String>> {
 
 // If backup exist, return the latest one, else create a new ClusterBackupMeta.
 async fn get_latest_backup_meta(s3fs: &S3Fs, cluster_id: u64) -> Result<ClusterBackupMeta> {
-    let files = get_all_backup_files(s3fs).await?;
+    let date = chrono::Utc::now().format(BACKUP_FOLDER_FORMAT).to_string();
+    let files = get_all_backup_files(s3fs, date).await?;
     if files.is_empty() {
         return Err(Error::MetaNotFound(cluster_id));
     }

@@ -120,7 +120,16 @@ fn execute_restore_tikv(args: RestoreTikvArgs) {
 }
 
 pub fn restore_tikv(config: &RestoreConfig, name: String, store_id: u64, path: &str) {
-    let (cluster_backup, s3fs) = get_cluster_backup_meta(config, name);
+    let dfs_conf = config.dfs.clone();
+    let s3fs = S3Fs::new(
+        dfs_conf.prefix,
+        dfs_conf.s3_endpoint,
+        dfs_conf.s3_key_id,
+        dfs_conf.s3_secret_key,
+        dfs_conf.s3_region,
+        dfs_conf.s3_bucket,
+    );
+    let cluster_backup = get_cluster_backup_meta(&s3fs, name);
     if store_id > 0 {
         rfengine::restore(
             Arc::new(s3fs),
@@ -134,21 +143,7 @@ pub fn restore_tikv(config: &RestoreConfig, name: String, store_id: u64, path: &
 
 fn execute_restore_pd(args: RestorePdArgs) {
     let config = get_restore_pd_config_from_args(&args);
-    let (cluster_backup, _) = get_cluster_backup_meta(&config, args.name);
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-        .unwrap();
-    runtime.block_on(restore_pd_keyspace_meta(&config, &cluster_backup));
-}
-
-pub(crate) fn get_cluster_backup_meta(
-    config: &RestoreConfig,
-    name: String,
-) -> (ClusterBackupMeta, S3Fs) {
     let dfs_conf = config.dfs.clone();
-    let backup_key = format!("{}/backup/{}", dfs_conf.prefix, name);
     let s3fs = S3Fs::new(
         dfs_conf.prefix,
         dfs_conf.s3_endpoint,
@@ -157,6 +152,17 @@ pub(crate) fn get_cluster_backup_meta(
         dfs_conf.s3_region,
         dfs_conf.s3_bucket,
     );
+    let cluster_backup = get_cluster_backup_meta(&s3fs, args.name);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(restore_pd_keyspace_meta(&config, &cluster_backup));
+}
+
+pub(crate) fn get_cluster_backup_meta(s3fs: &S3Fs, name: String) -> ClusterBackupMeta {
+    let backup_key = format!("{}/backup/{}", s3fs.get_prefix(), name);
     let runtime = s3fs.get_runtime();
     let data = runtime
         .block_on(s3fs.get_object(backup_key, name, engine_traits::GetObjectOptions::default()))
@@ -171,7 +177,7 @@ pub(crate) fn get_cluster_backup_meta(
         cluster_backup.safe_ts,
         cluster_backup.stores.len()
     );
-    (cluster_backup, s3fs)
+    cluster_backup
 }
 
 // Mainly ref `recoverFromNewPDCluster` in `pd-recover`.

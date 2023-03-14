@@ -1,6 +1,9 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
+mod common;
+mod error;
 mod load_data;
+mod native_br;
 
 use std::{
     io,
@@ -29,7 +32,10 @@ use security::{SecurityConfig, SecurityManager};
 use slog_global::{error, info};
 use tikv_util::{config::ReadableDuration, time::Instant};
 
-use crate::load_data::{handle_load_data, LoadDataManager, MAX_IN_MEM_SIZE};
+use crate::{
+    load_data::{handle_load_data, LoadDataManager, MAX_IN_MEM_SIZE},
+    native_br::{handle_backup, handle_restore_keyspace, NativeBrManger},
+};
 
 const ZSTD_COMPRESSION_LEVEL_FOR_REMOTE: &str = "5";
 
@@ -185,21 +191,31 @@ fn main() {
     );
     let load_manager = Arc::new(LoadDataManager::new(
         pd.clone(),
-        config.data_dir.into(),
+        config.data_dir.clone().into(),
         dfs.clone(),
         thread_pool.clone(),
         MAX_IN_MEM_SIZE,
+    ));
+    let br_manager = Arc::new(NativeBrManger::new(
+        thread_pool.clone(),
+        config.pd.clone(),
+        config.security.clone(),
+        pd.clone(),
+        dfs.clone(),
+        Some(config.data_dir),
     ));
     let server_builder = hyper::Server::builder(incoming);
     let dfs_clone = dfs.clone();
     let server = server_builder.serve(make_service_fn(move |_| {
         let dfs = dfs_clone.clone();
         let load_manager = load_manager.clone();
+        let br_manager = br_manager.clone();
         async move {
             // Create a status service.
             Ok::<_, hyper::Error>(service_fn(move |req: hyper::Request<hyper::Body>| {
                 let dfs = dfs.clone();
                 let load_manager = load_manager.clone();
+                let br_manager = br_manager.clone();
                 async move {
                     let path = req.uri().path().to_owned();
                     match path.as_ref() {
@@ -212,6 +228,8 @@ fn main() {
                         }
                         "/analyze" => handle_remote_analysis(dfs, req).await,
                         "/load_data" => handle_load_data(load_manager, req).await,
+                        "/backups" => handle_backup(br_manager, req).await,
+                        "/restore_keyspace" => handle_restore_keyspace(br_manager, req).await,
                         _ => Ok(hyper::Response::builder()
                             .status(404)
                             .body(hyper::Body::from("Not Found"))

@@ -1,9 +1,9 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
-use cse_ctl::{backup, common::now, restore, restore_tenant, step};
-use kvengine::dfs::DFSConfig;
+use cse_ctl::{backup, common::now, restore_tenant, step};
+use kvengine::dfs::{DFSConfig, S3Fs};
 use kvproto::metapb;
 use pd_client::PdClient;
 use rand::Rng;
@@ -238,16 +238,20 @@ fn test_inplace_restore_tenant_impl(
     step!("verify ok");
 
     // Restore tenant.
-    let config = restore::RestoreConfig {
-        dfs: dfs_config.clone(),
-        skip_resolve_lock: true,
-        ..Default::default()
-    };
+    let dfs_config = dfs_config.clone();
+    let s3fs = Arc::new(S3Fs::new(
+        dfs_config.prefix,
+        dfs_config.s3_endpoint,
+        dfs_config.s3_key_id,
+        dfs_config.s3_secret_key,
+        dfs_config.s3_region,
+        dfs_config.s3_bucket,
+    ));
     restore_tenant::restore_keyspace(
         keyspace_id,
         &backup_name,
         None,
-        &config,
+        s3fs,
         cluster.get_pd_client(),
         runtime,
     )

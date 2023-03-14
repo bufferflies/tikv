@@ -12,7 +12,7 @@ use pd_client::{PdClient, RpcClient};
 use protobuf::Message;
 use rfstore::store::state::RaftState;
 use security::{SecurityConfig, SecurityManager};
-use slog_global::{error, info};
+use slog_global::error;
 use tikv_util::{box_err, codec::bytes::decode_bytes};
 
 use crate::error::Result;
@@ -165,7 +165,7 @@ macro_rules! step_error( ($($args:tt)+) => {
     eprintln!("[{}] {}", now(), msg);
 };);
 
-pub fn retain_sst_files(file_ids: Vec<u64>, s3fs: &S3Fs) -> Result<()> {
+pub fn retain_sst_files(file_ids: Vec<u64>, s3fs: &S3Fs) -> Result<usize> {
     let mut idx = 0;
     let mut total_cnt = 0;
     while idx < file_ids.len() {
@@ -173,8 +173,7 @@ pub fn retain_sst_files(file_ids: Vec<u64>, s3fs: &S3Fs) -> Result<()> {
         total_cnt += retain_sst_files_in_batch(&file_ids[idx..end_idx], s3fs, idx == 0)?;
         idx = end_idx;
     }
-    info!("Retain {} files successfully", total_cnt);
-    Ok(())
+    Ok(total_cnt)
 }
 
 fn retain_sst_files_in_batch(file_ids: &[u64], s3fs: &S3Fs, first_batch: bool) -> Result<usize> {

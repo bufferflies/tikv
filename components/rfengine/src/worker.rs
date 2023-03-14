@@ -212,6 +212,7 @@ impl Worker {
                 utils::get_region_keyspace_id(local_state.get_region())
             }
             None => {
+                warn!("Get unknown keyspace id peer {:?}", peer_meta);
                 debug_assert!(peer_meta.peer_id == 0 && peer_meta.region_id == 0);
                 api_v2::UNKOWN_KEYSPACE_ID
             }

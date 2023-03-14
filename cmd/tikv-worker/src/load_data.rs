@@ -1,7 +1,6 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    borrow::Cow,
     collections::{HashMap, HashSet},
     fs,
     fs::File,
@@ -14,7 +13,6 @@ use std::{
 };
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use futures::{future::ok, TryStreamExt};
 use http::{header, Method, Request, Response, StatusCode, Uri};
 use hyper::Body;
 use kvengine::{
@@ -36,6 +34,13 @@ use tikv_util::{
     time::Instant,
     warn,
 };
+
+use crate::{
+    common::{get_body, get_u64_param, make_response},
+    error::Error,
+};
+
+type Result<T> = std::result::Result<T, Error>;
 
 pub(crate) const MAX_IN_MEM_SIZE: usize = 256 * 1024 * 1024;
 
@@ -167,40 +172,6 @@ pub(crate) async fn handle_load_data(
         }
         _ => Ok(make_response(StatusCode::BAD_REQUEST, "invalid method")),
     }
-}
-
-fn get_u64_param(query_pairs: &HashMap<Cow<'_, str>, Cow<'_, str>>, name: &str) -> Option<u64> {
-    if let Some(x) = query_pairs.get(name) {
-        u64::from_str(x).map_or(None, |x| Some(x))
-    } else {
-        None
-    }
-}
-
-async fn get_body(req: hyper::Request<hyper::Body>) -> hyper::Result<Vec<u8>> {
-    let length = req
-        .headers()
-        .get(header::CONTENT_LENGTH)
-        .map(|x| usize::from_str(x.to_str().unwrap_or_default()).unwrap_or_default())
-        .unwrap_or_default();
-    let mut body = Vec::with_capacity(length);
-    req.into_body()
-        .try_for_each(|bytes| {
-            body.extend(bytes);
-            ok(())
-        })
-        .await?;
-    Ok(body)
-}
-
-fn make_response<T>(status_code: StatusCode, message: T) -> Response<Body>
-where
-    T: Into<Body>,
-{
-    Response::builder()
-        .status(status_code)
-        .body(message.into())
-        .unwrap()
 }
 
 pub struct KvPair {
@@ -909,64 +880,6 @@ fn get_ssts_in_range(ssts: &[SstMeta], start: &[u8], end: &[u8]) -> Vec<SstMeta>
         matched.push(sst.clone())
     }
     matched
-}
-
-type Result<T> = std::result::Result<T, Error>;
-
-#[derive(Debug, thiserror::Error)]
-enum Error {
-    #[error("check {0}")]
-    CheckError(String),
-    #[error("canceled")]
-    Canceled,
-    #[error("pd error {0}")]
-    PdError(pd_client::Error),
-    #[error("ingest files {0}")]
-    IngestFiles(String),
-    #[error("dfs error {0}")]
-    DfsError(dfs::Error),
-    #[error("hyper error {0}")]
-    HyperError(hyper::Error),
-    #[error("http error {0}")]
-    HttpError(http::Error),
-    #[error("io error {0}")]
-    IoError(std::io::Error),
-    #[error("region {0} not found")]
-    RegionNotFound(u64),
-    #[error("leader of region {0} not found")]
-    LeaderNotFound(u64),
-    #[error("duplicated key {0}")]
-    DuplicatedKey(String),
-}
-
-impl From<dfs::Error> for Error {
-    fn from(e: dfs::Error) -> Self {
-        Error::DfsError(e)
-    }
-}
-
-impl From<pd_client::Error> for Error {
-    fn from(e: pd_client::Error) -> Self {
-        Error::PdError(e)
-    }
-}
-
-impl From<hyper::Error> for Error {
-    fn from(e: hyper::Error) -> Self {
-        Error::HyperError(e)
-    }
-}
-
-impl From<http::Error> for Error {
-    fn from(e: http::Error) -> Self {
-        Error::HttpError(e)
-    }
-}
-
-impl From<std::io::Error> for Error {
-    fn from(e: std::io::Error) -> Self {
-        Error::IoError(e)
-    }
 }
 
 fn flush_to_local_file(

@@ -62,27 +62,56 @@ pub(crate) fn execute_restore_keyspace(args: RestoreKeyspaceArgs) {
 fn execute_restore_keyspace_impl(args: &RestoreKeyspaceArgs) -> Result<()> {
     let config: RestoreConfig = get_restore_keyspace_config_from_args(args);
     let pd_client: Arc<dyn PdClient> = Arc::new(create_pd_client(&config.security, &config.pd));
-    let pd_control = PdControl::new(config.pd.clone(), config.security.clone());
-
+    let dfs_config = config.dfs.clone();
+    let s3fs = S3Fs::new(
+        dfs_config.prefix,
+        dfs_config.s3_endpoint,
+        dfs_config.s3_key_id,
+        dfs_config.s3_secret_key,
+        dfs_config.s3_region,
+        dfs_config.s3_bucket,
+    );
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(8)
         .enable_all()
         .build()
         .unwrap();
 
+    restore_keyspace_with_cfg(
+        config,
+        &args.keyspace_name,
+        &args.name,
+        args.working_path.as_deref(),
+        Arc::new(s3fs),
+        pd_client,
+        &runtime,
+    )
+}
+
+pub fn restore_keyspace_with_cfg(
+    config: RestoreConfig,
+    keyspace_name: &str,
+    backup_name: &str,
+    working_path: Option<&str>,
+    s3fs: Arc<S3Fs>,
+    pd_client: Arc<dyn PdClient>,
+    runtime: &Runtime,
+) -> Result<()> {
+    let pd_control = PdControl::new(config.pd.clone(), config.security);
     let keyspace_id = {
-        let keyspace = runtime.block_on(pd_control.get_keyspace_by_name(&args.keyspace_name))?;
-        assert_eq!(args.keyspace_name, keyspace.name);
+        let keyspace = runtime.block_on(pd_control.get_keyspace_by_name(keyspace_name))?;
+        assert_eq!(keyspace_name, keyspace.name);
         keyspace.id
     };
+    step!("Keyspace name {keyspace_name}'s id is {keyspace_id}");
 
     restore_keyspace(
         keyspace_id,
-        &args.name,
-        args.working_path.as_deref(),
-        &config,
+        backup_name,
+        working_path,
+        s3fs,
         pd_client,
-        &runtime,
+        runtime,
     )
 }
 
@@ -90,7 +119,7 @@ pub fn restore_keyspace(
     keyspace_id: u32,
     backup_name: &str,
     working_path: Option<&str>,
-    config: &RestoreConfig,
+    s3fs: Arc<S3Fs>,
     pd_client: Arc<dyn PdClient>,
     runtime: &Runtime,
 ) -> Result<()> {
@@ -99,37 +128,39 @@ pub fn restore_keyspace(
         None => TempDir::new(WORKING_PATH_PREFIX),
     }
     .unwrap();
-    let working_path = working_dir.into_path();
+    let working_path = working_dir.path().to_path_buf();
 
     let (keyspace_start, keyspace_end) = ApiV2::get_txn_keyspace_range(keyspace_id);
     step!(
-        "Start restore tenant {} from backup <{}>, tenant id:{} range:[{:?},{:?})",
+        "Start restore keyspace {} from backup <{}>, range:[{:?},{:?})",
         keyspace_id,
         backup_name,
-        keyspace_id,
         keyspace_start,
         keyspace_end
     );
-
-    let (cluster_backup, s3fs) = get_cluster_backup_meta(config, backup_name.to_owned());
-    let dfs = Arc::new(s3fs);
+    let cluster_backup = get_cluster_backup_meta(&s3fs, backup_name.to_owned());
     let mut cluster = BackupCluster::new(
         &cluster_backup,
         working_path,
         pd_client.clone(),
-        dfs.clone(),
+        s3fs.clone(),
         keyspace_id,
     )?;
-    step!("Restore {} shards from backup", cluster.shards_count());
+    step!(
+        "Keyspace {} restore {} shards from backup",
+        keyspace_id,
+        cluster.shards_count()
+    );
 
     // trigger initial flush & flush mem-table to S3
     // NOTE: `cluster.shards` is NOT available before `flush_shards` finished.
     let flush_cnt = cluster.flush_shards()?;
-    step!("Flush {} shards", flush_cnt);
+    step!("Keyspace {keyspace_id} flush {flush_cnt} shards");
 
     let truncate_ts_cnt = cluster.truncate_backup_ts()?;
     step!(
-        "Truncate {} shards to ts {}",
+        "Keyspace {} truncate {} shards to ts {}",
+        keyspace_id,
         truncate_ts_cnt,
         cluster.backup_ts
     );
@@ -142,7 +173,8 @@ pub fn restore_keyspace(
     ))?;
     let (aligned_regions, trimmed_shards_cnt) = cluster.align_target_regions(target_regions)?;
     step!(
-        "Align {} backup shards to {} target regions and trim {} over bound shards",
+        "Keyspace {} align {} backup shards to {} target regions and trim {} over bound shards",
+        keyspace_id,
         cluster.shards_count(),
         aligned_regions.len(),
         trimmed_shards_cnt
@@ -151,7 +183,8 @@ pub fn restore_keyspace(
     // gather SSTables for target regions
     let (target_shards, sstables_cnt) = cluster.gather_sstables(aligned_regions);
     step!(
-        "Gather {} SSTables for {} target regions",
+        "Keyspace {} gather {} SSTables for {} target regions",
+        keyspace_id,
         sstables_cnt,
         target_shards.len(),
     );
@@ -160,11 +193,20 @@ pub fn restore_keyspace(
     let snapshots = cluster.generate_snapshots(target_shards);
     let snapshots_count = snapshots.len();
     restore_snapshots(runtime, pd_client.clone(), snapshots)?;
-    step!("Restore {snapshots_count} regions");
+    step!("Keyspace {keyspace_id} restore {snapshots_count} regions");
 
     let files = cluster.get_all_shard_files();
-    if let Err(e) = retain_sst_files(files, &dfs) {
-        return Err(box_err!("Fail to retain restored sst files in s3. {:?}", e));
+    match retain_sst_files(files, &s3fs) {
+        Err(e) => {
+            return Err(box_err!(
+                "Keyspace {} fail to retain restored sst files in s3, {:?}",
+                keyspace_id,
+                e
+            ));
+        }
+        Ok(file_cnt) => {
+            step!("Keyspace {keyspace_id} retain {file_cnt} files successfully");
+        }
     }
 
     Ok(())
@@ -371,7 +413,11 @@ impl BackupCluster {
                 let mut meta_iter =
                     MetaIterator::new(kv_engine.get_engine_id(), shards_need_load, raw_metas);
                 let metas = kv_engine.read_meta(&mut meta_iter)?;
-                info!("kv_engine load {} shards in restore tenant", metas.len());
+                info!(
+                    "Keyspace {} kv_engine load {} shards in restore tenant",
+                    self.keyspace_id,
+                    metas.len()
+                );
                 kv_engine.load_shards(metas, recoverer)?;
             }
         } else {
@@ -395,7 +441,12 @@ impl BackupCluster {
             // Move shards to meta_applier to apply meta change in `flush_mem_table`.
             // Move back after flush finished.
             let shards = mem::take(&mut self.shards);
-            let meta_applier = Arc::new(MetaApplier::new(kv_engine.clone(), shards, receiver));
+            let meta_applier = Arc::new(MetaApplier::new(
+                self.keyspace_id,
+                kv_engine.clone(),
+                shards,
+                receiver,
+            ));
             self.meta_applier = Some(meta_applier.clone());
             thread::spawn(move || {
                 meta_applier.run();
@@ -489,8 +540,14 @@ impl BackupCluster {
         let (mut leader_shards, mut sorted_shards_id) = Self::get_leader_shards(all_shards)?;
         self.shards = mem::take(&mut leader_shards);
         self.sorted_shards = mem::take(&mut sorted_shards_id);
-        debug!("BackupCluster.load_shards: {:?}", self.shards);
-        debug!("BackupCluster.sorted_shards: {:?}", self.sorted_shards);
+        debug!(
+            "Keyspace {} BackupCluster.load_shards: {:?}",
+            self.keyspace_id, self.shards
+        );
+        debug!(
+            "Keyspace {} BackupCluster.sorted_shards: {:?}",
+            self.keyspace_id, self.sorted_shards
+        );
 
         for (&shard_id, shard) in self.shards.iter_mut() {
             self.store_shards
@@ -722,7 +779,10 @@ impl BackupCluster {
             .into_iter()
             .filter(|stats| !is_flushed(stats))
             .collect();
-        error!("wait_for_mem_table_flush timeout, stats: {:?}", stats);
+        error!(
+            "Keyspace {} wait_for_mem_table_flush timeout, stats: {:?}",
+            self.keyspace_id, stats
+        );
         Err(box_err!("wait_for_mem_table_flush timeout"))
     }
 
@@ -834,18 +894,23 @@ impl BackupCluster {
         let shard = kvengine
             .get_shard_with_ver(shard_meta.id, shard_meta.ver)
             .expect("Could not find shard with meta");
+        let keyspace_id = self.keyspace_id;
         let res_cs = kvengine
             .truncate_with_ts(&shard, self.backup_ts.into())?
             .unwrap();
         if res_cs.has_truncate_ts() {
             let shard = self.get_shard_mut(shard_id).unwrap();
             info!(
-                "before truncate ts: {:?}, table change: {:?}",
+                "Keyspace {} before truncate ts: {:?}, table change: {:?}",
+                keyspace_id,
                 shard,
                 res_cs.get_truncate_ts()
             );
             shard.meta.apply_change_set(&res_cs);
-            info!("after apply_truncate_ts: {:?}", shard);
+            info!(
+                "Keyspace {} after apply_truncate_ts: {:?}",
+                keyspace_id, shard
+            );
             Ok(true)
         } else {
             Ok(false)
@@ -857,15 +922,20 @@ impl BackupCluster {
         let kvengine = self.kv_engine.as_ref().unwrap();
 
         let res_cs = kvengine.trim_over_bound_by_meta(&shard.meta)?;
+        let keyspace_id = self.keyspace_id;
         if res_cs.has_trim_over_bound() {
             let shard = self.get_shard_mut(shard_id).unwrap();
             debug!(
-                "before trim_over_bound: {:?}, table change: {:?}",
+                "Keyspace {} before trim_over_bound: {:?}, table change: {:?}",
+                keyspace_id,
                 shard,
                 res_cs.get_trim_over_bound()
             );
             shard.meta.apply_change_set(&res_cs);
-            debug!("after apply_trim_over_bound: {:?}", shard);
+            debug!(
+                "Keyspace {} after apply_trim_over_bound: {:?}",
+                keyspace_id, shard
+            );
             Ok(true)
         } else {
             Ok(false)
@@ -912,6 +982,7 @@ impl BackupCluster {
 }
 
 struct MetaApplier {
+    keyspace_id: u32,
     engine: kvengine::Engine,
     shards: RwLock<Option<HashMap<u64, BackupShard>>>,
     store_rx: mpsc::Receiver<StoreMsg>,
@@ -919,11 +990,13 @@ struct MetaApplier {
 
 impl MetaApplier {
     fn new(
+        keyspace_id: u32,
         engine: kvengine::Engine,
         shards: HashMap<u64, BackupShard>,
         store_rx: mpsc::Receiver<StoreMsg>,
     ) -> Self {
         Self {
+            keyspace_id,
             engine,
             shards: RwLock::new(Some(shards)),
             store_rx,
@@ -939,7 +1012,10 @@ impl MetaApplier {
             let msg = match self.store_rx.recv() {
                 Ok(msg) => msg,
                 Err(err) => {
-                    error!("applier recv task error: {:?}", err);
+                    error!(
+                        "Keyspace {} applier recv task error: {:?}",
+                        self.keyspace_id, err
+                    );
                     return;
                 }
             };
@@ -953,7 +1029,10 @@ impl MetaApplier {
                         engine_shard.get_meta_sequence(),
                     ) + 1;
                     cs.set_sequence(seq);
-                    debug!("{} apply change set: {:?}", tag, cs);
+                    debug!(
+                        "Keyspace {} shard {} apply change set: {:?}",
+                        self.keyspace_id, tag, cs
+                    );
 
                     {
                         let mut shards = self.shards.wl();
@@ -962,7 +1041,10 @@ impl MetaApplier {
                             shard.meta.apply_change_set(&cs);
                         } else {
                             if cs.has_compaction() {
-                                debug!("MetaApplier: ignore changeset: {:?}", cs);
+                                debug!(
+                                    "Keyspace {} MetaApplier: ignore changeset: {:?}",
+                                    self.keyspace_id, cs
+                                );
                                 self.engine.meta_committed(&cs, true);
                                 continue 'outer;
                             }
@@ -979,9 +1061,15 @@ impl MetaApplier {
                         .prepare_change_set(cs, false)
                         .and_then(|cs| self.engine.apply_change_set(cs))
                     {
-                        Ok(()) => debug!("{} MetaApplier apply change set successfully", tag),
+                        Ok(()) => debug!(
+                            "Keyspace {} shard {} MetaApplier apply change set successfully",
+                            self.keyspace_id, tag
+                        ),
                         Err(err) => {
-                            error!("{} MetaApplier apply change set failed: {:?}", tag, err)
+                            error!(
+                                "Keyspace {} shard {} MetaApplier apply change set failed: {:?}",
+                                self.keyspace_id, tag, err
+                            )
                         }
                     }
                 }

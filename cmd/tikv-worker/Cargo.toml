@@ -9,6 +9,7 @@ api_version = { path = "../../components/api_version" }
 bytes = "1.1"
 chrono = "0.4"
 clap = "2.32"
+cse-ctl = { path = "../cse-ctl" }
 dashmap = "4.0"
 file_system = { path = "../../components/file_system" }
 futures = "0.3"
