@@ -233,14 +233,14 @@ impl Engine {
         start: &[u8],
         end: &[u8],
     ) -> (L0Builder, Option<BlobTableBuilder>) {
-        let sst_fid = self.id_allocator.alloc_id(1).pop().unwrap();
+        let sst_fid = self.id_allocator.alloc_id(1).unwrap().pop().unwrap();
         let mut l0_builder = sstable::L0Builder::new(
             sst_fid,
             self.opts.table_builder_options.block_size,
             m.get_version(),
         );
         let mut external_link = ExternalLink::new();
-        external_link.fid = self.id_allocator.alloc_id(1).pop().unwrap();
+        external_link.fid = self.id_allocator.alloc_id(1).unwrap().pop().unwrap();
         let mut blob_builder =
             BlobTableBuilder::new(external_link.fid, 0, sstable::NO_COMPRESSION, 0);
         for cf in 0..NUM_CFS {

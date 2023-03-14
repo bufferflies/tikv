@@ -435,7 +435,7 @@ impl EngineCore {
         iter.rewind();
         while iter.valid() {
             if fids.is_empty() {
-                fids = self.id_allocator.alloc_id(10);
+                fids = self.id_allocator.alloc_id(10).unwrap();
             }
             let id = fids.pop().unwrap();
             builder.reset(id);

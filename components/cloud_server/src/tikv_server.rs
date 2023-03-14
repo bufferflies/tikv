@@ -1018,20 +1018,22 @@ struct PdIdAllocator {
 const ALLOCATE_ID_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 impl kvengine::IdAllocator for PdIdAllocator {
-    fn alloc_id(&self, count: usize) -> Vec<u64> {
+    fn alloc_id(&self, count: usize) -> kvengine::Result<Vec<u64>> {
         let start = Instant::now();
         loop {
             match block_on(self.pd.batch_get_tso(count as u32)) {
                 Ok(ts) => {
                     let last = ts.into_inner();
                     let first = last - count as u64 + 1;
-                    return (first..=last).collect();
+                    return Ok((first..=last).collect());
                 }
                 Err(err) => {
                     error!("failed to allocate file id from PD {:?}", err);
                     std::thread::sleep(Duration::from_secs(3));
                     if start.saturating_elapsed() > ALLOCATE_ID_TIMEOUT {
-                        panic!("allocate file id timeout");
+                        return Err(kvengine::Error::ErrAllocId(
+                            "allocate file id timeout".to_string(),
+                        ));
                     }
                 }
             }

@@ -580,7 +580,7 @@ impl RecoverHandler for EngineTester {
 }
 
 impl IdAllocator for EngineTesterCore {
-    fn alloc_id(&self, count: usize) -> Vec<u64> {
+    fn alloc_id(&self, count: usize) -> Result<Vec<u64>> {
         let start_id = self
             .id
             .fetch_add(count as u64, std::sync::atomic::Ordering::Relaxed)
@@ -590,7 +590,7 @@ impl IdAllocator for EngineTesterCore {
         for id in start_id..end_id {
             ids.push(id);
         }
-        ids
+        Ok(ids)
     }
 }
 

@@ -651,7 +651,7 @@ impl Engine {
             "{} alloc id count {} for total size {}",
             tag, id_cnt, total_size
         );
-        let ids = self.id_allocator.alloc_id(id_cnt);
+        let ids = self.id_allocator.alloc_id(id_cnt).unwrap();
         req.file_ids = ids;
     }
 
@@ -800,7 +800,10 @@ impl Engine {
             req.destroy_range = true;
             req.in_place_compact_files = overlaps;
             req.del_prefixes = data.del_prefixes.marshal();
-            req.file_ids = self.id_allocator.alloc_id(req.in_place_compact_files.len());
+            req.file_ids = self
+                .id_allocator
+                .alloc_id(req.in_place_compact_files.len())
+                .unwrap();
             let mut cs = self.comp_client.compact(req)?;
             let dr = cs.mut_destroy_range();
             deletes.extend(dr.take_table_deletes().into_iter());
@@ -857,7 +860,10 @@ impl Engine {
             let mut req = self.new_compact_request_with_shard(shard, 0, 0);
             req.truncate_ts = Some(truncate_ts.inner());
             req.in_place_compact_files = overlaps;
-            req.file_ids = self.id_allocator.alloc_id(req.in_place_compact_files.len());
+            req.file_ids = self
+                .id_allocator
+                .alloc_id(req.in_place_compact_files.len())
+                .unwrap();
             self.comp_client.compact(req)?
         };
         cs.set_shard_id(shard.id);
@@ -921,7 +927,10 @@ impl Engine {
             let mut req = self.new_compact_request_with_shard(shard, 0, 0);
             req.trim_over_bound = true;
             req.in_place_compact_files = overlaps;
-            req.file_ids = self.id_allocator.alloc_id(req.in_place_compact_files.len());
+            req.file_ids = self
+                .id_allocator
+                .alloc_id(req.in_place_compact_files.len())
+                .unwrap();
             let mut cs = self.comp_client.compact(req)?;
             let tc = cs.mut_trim_over_bound();
             deletes.extend(tc.take_table_deletes().into_iter());
@@ -970,7 +979,10 @@ impl Engine {
             let mut req = self.new_compact_request_with_meta(meta, 0, 0);
             req.trim_over_bound = true;
             req.in_place_compact_files = overlaps;
-            req.file_ids = self.id_allocator.alloc_id(req.in_place_compact_files.len());
+            req.file_ids = self
+                .id_allocator
+                .alloc_id(req.in_place_compact_files.len())
+                .unwrap();
             let mut cs = self.comp_client.compact(req)?;
             let tc = cs.mut_trim_over_bound();
             deletes.extend(tc.take_table_deletes().into_iter());

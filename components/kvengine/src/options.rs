@@ -75,7 +75,7 @@ impl CfConfig {
 
 pub trait IdAllocator: Sync + Send {
     // alloc_id returns the last id, and last_id - count is valid.
-    fn alloc_id(&self, count: usize) -> Vec<u64>;
+    fn alloc_id(&self, count: usize) -> Result<Vec<u64>>;
 }
 
 pub trait RecoverHandler: Clone + Send {

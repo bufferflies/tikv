@@ -36,6 +36,9 @@ const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
 const DISPATCH_TIMEOUT: Duration = Duration::from_secs(60);
 const READ_BODY_TIMEOUT: Duration = Duration::from_secs(60);
 
+pub const STORAGE_CLASS_DEFAULT: &str = "STANDARD";
+pub const STORAGE_CLASS_STANDARD_IA: &str = "STANDARD_IA";
+
 #[derive(Clone)]
 pub struct S3Fs {
     core: Arc<S3FsCore>,
@@ -544,7 +547,105 @@ impl S3FsCore {
         }
     }
 
-    async fn remove_file_tagging(&self, file_id: u64) -> Result<(), dfs::Error> {
+    /// Copy object from `source_file_id` to `target_file_id`.
+    ///
+    /// `source_file_id` and `target_file_id` can be the same. And it's the only
+    /// way to update the object creation timestamp, which is used for
+    /// expiration rules of lifecycle.
+    ///
+    /// `target_tags`: replace tags if some, otherwise copy from source.
+    ///
+    /// `target_storage_class`: copy to another storage class if some. Note than
+    /// only AWS S3 support storage class.
+    pub async fn copy_object(
+        &self,
+        source_file_id: u64,
+        target_file_id: u64,
+        target_tagging: Option<&Tagging>,
+        target_storage_class: Option<&str>,
+    ) -> Result<(), dfs::Error> {
+        let mut retry_cnt = 0;
+        let mut copied = false;
+        let source_key = format!("{}/{}", self.bucket, self.file_key(source_file_id));
+        let target_key = self.file_key(target_file_id);
+
+        loop {
+            if !copied {
+                let mut req = self.new_request("PUT", &target_key);
+                req.add_header("x-amz-copy-source", &source_key);
+                req.add_header("x-amz-metadata-directive", "REPLACE");
+                if let Some(target_tagging) = target_tagging {
+                    req.add_header("x-amz-tagging", &target_tagging.to_url_encoded());
+                    req.add_header("x-amz-tagging-directive", "REPLACE");
+                }
+                if let Some(target_storage_class) = target_storage_class.as_ref() {
+                    if self.hostname.contains("amazonaws") {
+                        req.add_header("x-amz-storage-class", target_storage_class);
+                    } else {
+                        debug!(
+                            "{} ignore target_storage_class {} which is not supported by {}",
+                            target_file_id, target_storage_class, self.hostname
+                        );
+                    }
+                }
+                if let Err(err) = self.dispatch(req, CopyObjectError::from_response).await {
+                    if retry_cnt < MAX_RETRY_COUNT {
+                        retry_cnt += 1;
+                        let retry_sleep = 2u64.pow(retry_cnt) * RETRY_SLEEP_MS;
+                        warn!(
+                            "retry copy file {}, retry count {}, retry after {}ms, err {:?}",
+                            target_file_id, retry_cnt, retry_sleep, err,
+                        );
+                        tokio::time::sleep(Duration::from_millis(retry_sleep)).await;
+                        continue;
+                    } else {
+                        let err_msg = format!(
+                            "failed to copy file {} from {}, reach max retry count {}, err {:?}",
+                            target_file_id, source_file_id, MAX_RETRY_COUNT, err,
+                        );
+                        error!("{}", err_msg);
+                        return Err(dfs::Error::S3(err_msg));
+                    }
+                }
+                copied = true;
+            }
+
+            if target_tagging.is_none() || !self.hostname.contains("ksyuncs.com") {
+                return Ok(());
+            }
+
+            // ks3 doesn't support copy object with tagging, workaround to send another
+            // request. TODO: remove it when KS3 fixed the compatibility issue.
+            let target_tagging = target_tagging.unwrap();
+            let mut req = self.new_tagging_request("PUT", &target_key);
+            let tagging_xml = target_tagging.to_xml();
+            let stream = futures::stream::once(async move { Ok(Bytes::from(tagging_xml)) });
+            req.set_content_type("application/xml".to_string());
+            req.set_payload_stream(rusoto_core::ByteStream::new(stream));
+            if let Err(err) = self
+                .dispatch(req, PutObjectTaggingError::from_response)
+                .await
+            {
+                if retry_cnt < MAX_RETRY_COUNT {
+                    retry_cnt += 1;
+                    let retry_sleep = 2u64.pow(retry_cnt) * RETRY_SLEEP_MS;
+                    warn!("retry tagging file {}, error {:?}", target_file_id, &err);
+                    tokio::time::sleep(Duration::from_millis(retry_sleep)).await;
+                    continue;
+                } else {
+                    let err_msg = format!(
+                        "failed to tagging file {}, reach max retry count {}, err {:?}",
+                        target_file_id, MAX_RETRY_COUNT, err,
+                    );
+                    error!("{}", err_msg);
+                    return Err(dfs::Error::S3(err_msg));
+                }
+            }
+            return Ok(());
+        }
+    }
+
+    async fn _remove_file_tagging(&self, file_id: u64) -> Result<(), dfs::Error> {
         let mut retry_cnt = 0;
         loop {
             let key = self.file_key(file_id);
@@ -575,7 +676,14 @@ impl S3FsCore {
 
     pub async fn retain_file(&self, file_id: u64) -> Result<(), dfs::Error> {
         if self.is_removed(file_id).await? {
-            self.remove_file_tagging(file_id).await?
+            let empty_tagging = Tagging::default();
+            self.copy_object(
+                file_id,
+                file_id,
+                Some(&empty_tagging),
+                Some(STORAGE_CLASS_DEFAULT),
+            )
+            .await?;
         }
         Ok(())
     }
@@ -664,6 +772,7 @@ impl Dfs for S3Fs {
     /// And the file would be permanently removed after `gc_lifetime`. See
     /// `DfsGc`.
     async fn remove(&self, file_id: u64, _opts: Options) {
+        // TODO: Reuse `copy_object` method.
         let mut retry_cnt = 0;
         let mut copied = false;
         loop {
@@ -677,12 +786,16 @@ impl Dfs for S3Fs {
                 req.add_header("x-amz-tagging", "deleted=true");
                 req.add_header("x-amz-tagging-directive", "REPLACE");
                 if self.hostname.contains("amazonaws") {
-                    req.add_header("x-amz-storage-class", "STANDARD_IA");
+                    req.add_header("x-amz-storage-class", STORAGE_CLASS_STANDARD_IA);
                 }
                 if let Err(err) = self.dispatch(req, CopyObjectError::from_response).await {
                     if retry_cnt < MAX_RETRY_COUNT {
                         retry_cnt += 1;
                         let retry_sleep = 2u64.pow(retry_cnt) * RETRY_SLEEP_MS;
+                        warn!(
+                            "retry remove file {}, retry count {}, retry after {}ms, err {:?}",
+                            file_id, retry_cnt, retry_sleep, err,
+                        );
                         tokio::time::sleep(Duration::from_millis(retry_sleep)).await;
                         continue;
                     } else {
@@ -753,6 +866,7 @@ struct ListObjects {
 pub struct ListObjectContent {
     pub key: String,
     pub last_modified: String,
+    pub storage_class: String,
 }
 
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
@@ -777,6 +891,29 @@ impl Tagging {
 
     fn has_deleted_tag(&self) -> bool {
         self.tag_set.tag.iter().any(|tag| tag.is_deleted())
+    }
+
+    pub fn to_xml(&self) -> String {
+        quick_xml::se::to_string(&self).unwrap()
+    }
+
+    pub fn to_url_encoded(&self) -> String {
+        let mut se = url::form_urlencoded::Serializer::new(String::new());
+        for tag in &self.tag_set.tag {
+            se.append_pair(&tag.key, &tag.value);
+        }
+        se.finish()
+    }
+
+    pub fn from_url_encoded(query: &str) -> Tagging {
+        let mut tagging = Self::default();
+        for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+            tagging.tag_set.tag.push(Tag {
+                key: key.into_owned(),
+                value: value.into_owned(),
+            });
+        }
+        tagging
     }
 }
 
@@ -949,5 +1086,20 @@ mod tests {
         ] {
             assert_eq!(s3fs.try_parse_file_id(file_key), None);
         }
+    }
+
+    #[test]
+    fn test_tagging() {
+        let tagging_deleted = Tagging::new_single_deleted();
+
+        assert_eq!(
+            tagging_deleted.to_xml(),
+            "<Tagging><TagSet><Tag><Key>deleted</Key><Value>true</Value></Tag></TagSet></Tagging>"
+        );
+        assert_eq!(tagging_deleted.to_url_encoded(), "deleted=true");
+        assert_eq!(
+            tagging_deleted.tag_set.tag,
+            Tagging::from_url_encoded("deleted=true").tag_set.tag
+        );
     }
 }

@@ -43,7 +43,7 @@ struct ServiceContext {
 }
 
 impl ServiceContext {
-    fn add_tag(&mut self, file_path: String, key: String, value: String) {
+    fn _add_tag(&mut self, file_path: String, key: String, value: String) {
         self.tagging
             .entry(file_path)
             .and_modify(|t| t.add_tag(key.clone(), value.clone()))
@@ -241,17 +241,44 @@ impl ObjectStorageService {
         ctx: Arc<Mutex<ServiceContext>>,
         req: Request<Body>,
     ) -> Result<Response<Body>> {
-        if let Some(v) = req.headers().get("x-amz-tagging") {
-            let mut splits = v.to_str().unwrap().split('=');
-            let key = splits.next().unwrap().to_string();
-            let value = splits.next().unwrap().to_string();
-            let (parts, _) = req.into_parts();
-            let path = ctx.lock().unwrap().store_path.to_owned();
-            let file_path = Self::make_file_path(&path, parts.uri.path());
-            let file = file_path.as_os_str().to_str().unwrap().to_owned();
-            info!("Copy object {} with tag: {}={}", file, key, value);
-            ctx.lock().unwrap().add_tag(file, key, value);
+        let (parts, _) = req.into_parts();
+
+        let copy_source = parts
+            .headers
+            .get("x-amz-copy-source")
+            .ok_or("x-amz-copy-source is missing")?
+            .to_str()
+            .unwrap();
+        let target = parts.uri.path().strip_prefix('/').unwrap();
+        if copy_source != target {
+            return Err(format!(
+                "support copy from same source only, source {}, target {}",
+                copy_source, target
+            )
+            .into());
         }
+
+        let path = ctx.lock().unwrap().store_path.to_owned();
+        let file_path = Self::make_file_path(&path, parts.uri.path());
+        let file = file_path.as_os_str().to_str().unwrap().to_owned();
+
+        let tagging_directive = parts
+            .headers
+            .get("x-amz-tagging-directive")
+            .map(|x| x.to_str().unwrap())
+            .unwrap_or("COPY");
+        if tagging_directive == "REPLACE" {
+            let tagging_str = parts
+                .headers
+                .get("x-amz-tagging")
+                .ok_or("x-amz-tagging is missing")?;
+            let tagging = Tagging::from_url_encoded(tagging_str.to_str().unwrap());
+            info!("Copy object {} with replacing tagging: {:?}", file, tagging);
+            ctx.lock().unwrap().insert_tagging(file, tagging);
+        }
+
+        // TODO: support storage class
+
         Ok(Response::default())
     }
 
@@ -397,7 +424,7 @@ mod tests {
     }
 
     #[test]
-    fn test_oss() {
+    fn test_oss_basic() {
         test_util::init_log_for_test();
 
         let base_dir = tempfile::Builder::new()
@@ -468,7 +495,7 @@ mod tests {
     }
 
     #[test]
-    fn test_oss_tagging() {
+    fn test_oss_retain_file() {
         test_util::init_log_for_test();
 
         let base_dir = tempfile::Builder::new()
