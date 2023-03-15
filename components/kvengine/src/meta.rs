@@ -340,12 +340,10 @@ impl ShardMeta {
         self.apply_properties(flush.get_properties());
         if flush.has_l0_create() {
             let l0 = flush.get_l0_create();
-            warn!("apply_flush: l0 {}", l0.id);
             self.add_file(l0.id, -1, 0, l0.get_smallest(), l0.get_biggest());
         }
         if flush.has_blob_create() {
             let blob = flush.get_blob_create();
-            warn!("apply_flush: blob {}", blob.id);
             self.add_file(
                 blob.id,
                 -1,

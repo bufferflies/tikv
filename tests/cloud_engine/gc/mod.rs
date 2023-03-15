@@ -7,7 +7,10 @@ use kvengine::{new_tmp_filename, table::sstable::new_filename, ShardStats};
 use kvproto::raft_cmdpb::{RaftCmdRequest, RaftRequestHeader};
 use rfstore::store::rlog::*;
 use test_cloud_server::{must_wait, ServerCluster};
-use tikv_util::config::{ReadableDuration, ReadableSize};
+use tikv_util::{
+    config::{ReadableDuration, ReadableSize},
+    time::Instant,
+};
 
 use crate::alloc_node_id;
 
@@ -141,6 +144,29 @@ fn test_raft_log_gc() {
     };
     let curr_truncated_idxes = wait_truncated(before_truncated_idxes);
 
+    let wait_for_memtable_flush = |cluster: &ServerCluster, node_ids: &[u16], timeout: Duration| {
+        let mut curr_shard_stats;
+        let mut flushed;
+        let start = Instant::now_coarse();
+        loop {
+            curr_shard_stats = node_ids
+                .iter()
+                .map(|id| cluster.get_kvengine(*id).get_shard_stat(region_id))
+                .collect::<Vec<_>>();
+            flushed = curr_shard_stats
+                .iter()
+                .all(|curr| curr.mem_table_size == 0 && curr.mem_table_count == 1);
+            if flushed {
+                break;
+            }
+            if start.saturating_elapsed() >= timeout {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        (flushed, curr_shard_stats)
+    };
+
     // Trigger switching and flushing memtable.
     let flush_memtable = |cluster: &ServerCluster, node_ids: &[u16]| {
         let mut client = cluster.new_client();
@@ -158,32 +184,27 @@ fn test_raft_log_gc() {
         custom_builder.set_switch_mem_table(1);
         req.set_custom_request(custom_builder.build());
         cluster.send_raft_command(req);
-        // Wait for memtable flushing.
-        let mut curr_shard_stats = vec![];
-        for i in 0..30 {
-            curr_shard_stats = node_ids
-                .iter()
-                .map(|id| cluster.get_kvengine(*id).get_shard_stat(region_id))
-                .collect::<Vec<_>>();
-            if curr_shard_stats
-                .iter()
-                .all(|curr| curr.mem_table_size == 0 && curr.mem_table_count == 1)
-            {
-                break;
-            }
-            if i == 29 {
-                panic!("wait for memtable flush timeouts");
-            }
-            std::thread::sleep(Duration::from_millis(200));
-        }
+
+        let (flushed, curr_shard_stats) =
+            wait_for_memtable_flush(cluster, node_ids, Duration::from_secs(6));
+        assert!(flushed, "shard_stats: {:?}", curr_shard_stats);
         curr_shard_stats
     };
 
-    let curr_shard_stats = flush_memtable(&cluster, &node_ids);
+    let (flushed, mut curr_shard_stats) =
+        wait_for_memtable_flush(&cluster, &node_ids, Duration::from_secs(1));
+    if !flushed {
+        // Invoke `flush_memtable` only when memtable has not flushed.
+        // Otherwise, `switch_mem_table` on empty memtable will advance
+        // `Shard.sequence` only, but `ShardMeta.data_sequence` is unchanged.
+        // In this situation, raft log truncate index will be less than `Shard.sequence`
+        // (and `shard_stat.write_sequence`).
+        curr_shard_stats = flush_memtable(&cluster, &node_ids);
+    }
     let curr_truncated_idxes = wait_truncated(curr_truncated_idxes);
     std::thread::sleep(Duration::from_secs(1));
     // Flushing memtable will propose a ChangeSet request which won't write data to
-    // memtable, so it can't trigger memtable flush. We shoud be able to
+    // memtable, so it can't trigger memtable flush. We should be able to
     // truncate these logs.
     assert!(
         curr_truncated_idxes
