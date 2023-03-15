@@ -1,28 +1,20 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{
-    path::PathBuf,
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{path::PathBuf, sync::Arc};
 
 use clap::{Args, Subcommand};
-use etcd_client::{Compare, CompareOp, Txn, TxnOp};
-use kvengine::dfs::{DFSConfig, Dfs, S3Fs};
-use protobuf::Message;
-use rfenginepb::ClusterBackupMeta;
-use security::SecurityConfig;
-use slog_global::info;
-
-use crate::{
-    common::generate_etcd_connect_opt,
-    restore::Commands::{Keyspace, Pd, Tikv},
-    restore_tenant::execute_restore_keyspace,
+use kvengine::dfs::S3Fs;
+use native_br::{
+    common::{create_pd_client, now},
+    restore,
+    restore::{restore_pd, restore_tikv, RestoreConfig},
+    restore_keyspace::restore_keyspace_with_cfg,
+    step, step_error,
 };
+use pd_client::PdClient;
+use slog_global::{error, info};
 
-const PD_ROOT_PATH: &str = "/pd";
-const PD_CLUSTER_ID_PATH: &str = "/pd/cluster_id";
-const MAX_TXN_OPTS: usize = 128; // Default configuration in etcd server.
+use crate::restore::Commands::{Keyspace, Pd, Tikv};
 
 #[derive(Args)]
 pub struct RestoreCommand {
@@ -119,171 +111,49 @@ fn execute_restore_tikv(args: RestoreTikvArgs) {
     restore_tikv(&config, args.name, args.store_id, &args.path);
 }
 
-pub fn restore_tikv(config: &RestoreConfig, name: String, store_id: u64, path: &str) {
-    let dfs_conf = config.dfs.clone();
-    let s3fs = S3Fs::new(
-        dfs_conf.prefix,
-        dfs_conf.s3_endpoint,
-        dfs_conf.s3_key_id,
-        dfs_conf.s3_secret_key,
-        dfs_conf.s3_region,
-        dfs_conf.s3_bucket,
-    );
-    let cluster_backup = get_cluster_backup_meta(&s3fs, name);
-    if store_id > 0 {
-        rfengine::restore(
-            Arc::new(s3fs),
-            &cluster_backup,
-            store_id,
-            &PathBuf::from(path),
-            None,
-        );
+fn execute_restore_pd(args: RestorePdArgs) {
+    let config = get_restore_pd_config_from_args(&args);
+    restore_pd(config, args.name);
+}
+
+fn execute_restore_keyspace(args: RestoreKeyspaceArgs) {
+    match execute_restore_keyspace_impl(&args) {
+        Ok(()) => {
+            step!("Restore keyspace {} succeed", args.keyspace_name);
+        }
+        Err(err) => {
+            step_error!("Restore keyspace {} error: {:?}", args.keyspace_name, err);
+        }
     }
 }
 
-fn execute_restore_pd(args: RestorePdArgs) {
-    let config = get_restore_pd_config_from_args(&args);
-    let dfs_conf = config.dfs.clone();
+fn execute_restore_keyspace_impl(args: &RestoreKeyspaceArgs) -> native_br::Result<()> {
+    let config: restore::RestoreConfig = get_restore_keyspace_config_from_args(args);
+    let pd_client: Arc<dyn PdClient> = Arc::new(create_pd_client(&config.security, &config.pd));
+    let dfs_config = config.dfs.clone();
     let s3fs = S3Fs::new(
-        dfs_conf.prefix,
-        dfs_conf.s3_endpoint,
-        dfs_conf.s3_key_id,
-        dfs_conf.s3_secret_key,
-        dfs_conf.s3_region,
-        dfs_conf.s3_bucket,
+        dfs_config.prefix,
+        dfs_config.s3_endpoint,
+        dfs_config.s3_key_id,
+        dfs_config.s3_secret_key,
+        dfs_config.s3_region,
+        dfs_config.s3_bucket,
     );
-    let cluster_backup = get_cluster_backup_meta(&s3fs, args.name);
     let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
+        .worker_threads(8)
         .enable_all()
         .build()
         .unwrap();
-    runtime.block_on(restore_pd_keyspace_meta(&config, &cluster_backup));
-}
 
-pub(crate) fn get_cluster_backup_meta(s3fs: &S3Fs, name: String) -> ClusterBackupMeta {
-    let backup_key = format!("{}/backup/{}", s3fs.get_prefix(), name);
-    let runtime = s3fs.get_runtime();
-    let data = runtime
-        .block_on(s3fs.get_object(backup_key, name, engine_traits::GetObjectOptions::default()))
-        .unwrap();
-    let mut cluster_backup = ClusterBackupMeta::new();
-    cluster_backup.merge_from_bytes(&data).unwrap();
-    info!(
-        "Restore cluster_id {}, alloc_id {}, backup_ts {}, safe_ts {}, store cnt {}",
-        cluster_backup.cluster_id,
-        cluster_backup.alloc_id,
-        cluster_backup.backup_ts,
-        cluster_backup.safe_ts,
-        cluster_backup.stores.len()
-    );
-    cluster_backup
-}
-
-// Mainly ref `recoverFromNewPDCluster` in `pd-recover`.
-async fn restore_pd_keyspace_meta(config: &RestoreConfig, meta: &ClusterBackupMeta) {
-    let option = generate_etcd_connect_opt(&config.security).unwrap();
-    let mut etcd_client = etcd_client::Client::connect(&config.pd.endpoints, Some(option))
-        .await
-        .unwrap();
-    let mut txn_opts = Vec::with_capacity(4);
-    let root_path = format!("{}/{}", PD_ROOT_PATH, meta.cluster_id);
-    // recover cluster_id
-    txn_opts.push(TxnOp::put(
-        PD_CLUSTER_ID_PATH.as_bytes().to_vec(),
-        meta.cluster_id.to_be_bytes().to_vec(),
-        None,
-    ));
-    // recover alloc id
-    let alloc_id_path = format!("{}/{}", root_path, "alloc_id");
-    txn_opts.push(TxnOp::put(
-        alloc_id_path.as_bytes().to_vec(),
-        meta.alloc_id.to_be_bytes().to_vec(),
-        None,
-    ));
-    // recover meta of cluster
-    let cluster_raft_path = format!("{}/{}", root_path, "raft");
-    let cluster_meta = kvproto::metapb::Cluster {
-        id: meta.cluster_id,
-        ..Default::default()
-    };
-    txn_opts.push(TxnOp::put(
-        cluster_raft_path.as_bytes().to_vec(),
-        cluster_meta.write_to_bytes().unwrap(),
-        None,
-    ));
-    // set raft bootstrap time
-    let raft_bootstrap_time_path = format!(
-        "{}/{}/{}",
-        cluster_raft_path, "status", "raft_bootstrap_time"
-    );
-    let cur_nano = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos() as u64;
-    txn_opts.push(TxnOp::put(
-        raft_bootstrap_time_path.as_bytes().to_vec(),
-        cur_nano.to_be_bytes().to_vec(),
-        None,
-    ));
-    let resp = etcd_client
-        .txn(
-            Txn::new()
-                .when(
-                    &[Compare::create_revision(
-                        cluster_raft_path,
-                        CompareOp::Equal,
-                        0,
-                    )][..],
-                )
-                .and_then(txn_opts),
-        )
-        .await
-        .unwrap();
-    if !resp.succeeded() {
-        panic!(
-            "Failed to restore pd keyspace meta, please JUST start new pd-server(s) without tikv nodes."
-        );
-    }
-    // recover key space meta
-    let meta_cnt = meta.keyspace_meta.len();
-    let mut txn_opts = Vec::with_capacity(std::cmp::min(meta_cnt, MAX_TXN_OPTS));
-    let mut idx = 0;
-    for (key, value) in &meta.keyspace_meta {
-        txn_opts.push(TxnOp::put(key.to_owned(), value.to_owned(), None));
-        idx += 1;
-        if txn_opts.len() == MAX_TXN_OPTS || idx == meta_cnt {
-            // There is no batch put interface now, use txn to do batch.
-            let batch_cnt = txn_opts.len();
-            let resp = etcd_client
-                .txn(Txn::new().and_then(txn_opts))
-                .await
-                .unwrap();
-            if !resp.succeeded() {
-                panic!(
-                    "Fail to restore pd meta, cur idx {} batch {} total {}",
-                    idx - batch_cnt,
-                    batch_cnt,
-                    meta_cnt
-                );
-            }
-            txn_opts = Vec::with_capacity(std::cmp::min(meta_cnt - idx, MAX_TXN_OPTS));
-        }
-    }
-    info!(
-        "Restore PD {} meta data(revision: {}) of cluster {} successfully",
-        meta_cnt, meta.meta_revision, meta.cluster_id
-    );
-}
-
-#[derive(Clone, Serialize, Deserialize, PartialEq, Debug, Default)]
-#[serde(default)]
-#[serde(rename_all = "kebab-case")]
-pub struct RestoreConfig {
-    pub pd: pd_client::Config,
-    pub security: SecurityConfig,
-    pub dfs: DFSConfig,
-    pub skip_resolve_lock: bool,
+    restore_keyspace_with_cfg(
+        config,
+        &args.keyspace_name,
+        &args.name,
+        args.working_path.as_deref(),
+        Arc::new(s3fs),
+        pd_client,
+        &runtime,
+    )
 }
 
 fn get_restore_pd_config_from_args(args: &RestorePdArgs) -> RestoreConfig {
@@ -314,6 +184,30 @@ fn get_restore_tikv_config_from_args(args: &RestoreTikvArgs) -> RestoreConfig {
     if args.config.exists() {
         let data = std::fs::read(args.config.clone()).expect("failed to read config file");
         config = toml::from_slice(&data).unwrap();
+    }
+    config.dfs.override_from_env();
+    config.skip_resolve_lock = false;
+    config
+}
+
+pub fn get_restore_keyspace_config_from_args(args: &RestoreKeyspaceArgs) -> RestoreConfig {
+    let mut config = RestoreConfig::default();
+    if args.config.exists() {
+        let data = std::fs::read(args.config.clone()).expect("failed to read config file");
+        config = toml::from_slice(&data).unwrap();
+    }
+    // override from args and ENV
+    if !args.pd.is_empty() {
+        config.pd.endpoints = args.pd.split(',').map(|x| x.to_owned()).collect();
+    }
+    if args.cacert.exists() {
+        config.security.ca_path = args.cacert.to_str().unwrap().to_owned();
+    }
+    if args.cert.exists() {
+        config.security.cert_path = args.cert.to_str().unwrap().to_owned();
+    }
+    if args.key.exists() {
+        config.security.key_path = args.key.to_str().unwrap().to_owned();
     }
     config.dfs.override_from_env();
     config.skip_resolve_lock = false;

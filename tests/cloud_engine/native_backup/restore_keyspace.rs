@@ -2,9 +2,9 @@
 
 use std::{sync::Arc, time::Duration};
 
-use cse_ctl::{backup, common::now, restore_tenant, step};
 use kvengine::dfs::{DFSConfig, S3Fs};
 use kvproto::metapb;
+use native_br::{backup, common::now, restore_keyspace, step};
 use pd_client::PdClient;
 use rand::Rng;
 use test_cloud_server::{
@@ -25,7 +25,7 @@ const KEYSPACE_COUNT: usize = 3;
 const DEFAULT_LOOP_COUNT: usize = 3;
 
 #[test]
-fn test_inplace_restore_tenant() {
+fn test_restore_keyspace() {
     test_util::init_log_for_test();
 
     let loop_count = std::env::var("LOOP")
@@ -43,7 +43,7 @@ fn test_inplace_restore_tenant() {
     ];
 
     let base_dir = tempfile::Builder::new()
-        .prefix("test_inplace_restore_tenant_")
+        .prefix("test_restore_keyspace_")
         .tempdir()
         .unwrap();
 
@@ -52,11 +52,11 @@ fn test_inplace_restore_tenant() {
     oss.start_server();
 
     let dfs_config = DFSConfig {
-        prefix: "test_inplace_restore_tenant_".to_string(),
+        prefix: "test_restore_keyspace_".to_string(),
         s3_endpoint: format!("http://127.0.0.1:{}", oss.port()),
         s3_key_id: "admin".to_string(),
         s3_secret_key: "admin".to_string(),
-        s3_bucket: "test_inplace_restore_tenant_".to_string(),
+        s3_bucket: "test_restore_keyspace_".to_string(),
         s3_region: "local".to_string(),
         zstd_compression_level: "3".to_string(),
         ..Default::default()
@@ -114,7 +114,7 @@ fn test_inplace_restore_tenant() {
         }
 
         for i in 0..loop_count {
-            test_inplace_restore_tenant_impl(
+            test_restore_keyspace_impl(
                 &mut cluster,
                 &dfs_config,
                 &format!("{case_idx}:{i}"),
@@ -132,7 +132,7 @@ fn test_inplace_restore_tenant() {
     // still alive and holding connections.
 }
 
-fn test_inplace_restore_tenant_impl(
+fn test_restore_keyspace_impl(
     cluster: &mut ServerCluster,
     dfs_config: &DFSConfig,
     case_name: &str,
@@ -155,7 +155,7 @@ fn test_inplace_restore_tenant_impl(
     let origin_ref_store = client.dump_ref_store();
 
     // Execute backup.
-    let backup_name = format!("restore_tenant_test_{}", rand::thread_rng().gen::<u64>());
+    let backup_name = format!("restore_keyspace_test_{}", rand::thread_rng().gen::<u64>());
     let backup_config = backup::BackupConfig {
         dfs: dfs_config.clone(),
         skip_keyspace_meta: true,
@@ -237,7 +237,7 @@ fn test_inplace_restore_tenant_impl(
     );
     step!("verify ok");
 
-    // Restore tenant.
+    // Restore keyspace.
     let dfs_config = dfs_config.clone();
     let s3fs = Arc::new(S3Fs::new(
         dfs_config.prefix,
@@ -247,7 +247,7 @@ fn test_inplace_restore_tenant_impl(
         dfs_config.s3_region,
         dfs_config.s3_bucket,
     ));
-    restore_tenant::restore_keyspace(
+    restore_keyspace::restore_keyspace(
         keyspace_id,
         &backup_name,
         None,

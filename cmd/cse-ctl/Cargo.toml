@@ -4,35 +4,22 @@ version = "0.1.0"
 edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
-[features]
-pprof-fp = ["tikv/pprof-fp"]
-
 [dependencies]
-api_version = { path = "../../components/api_version", default-features = false }
-bstr = "0.2"
-byteorder = "1.2"
 bytes = "1.0"
 chrono = "0.4"
 clap = { version = "3.2", features = ["derive"] }
-cloud_server = { path = "../../components/cloud_server" }
-engine_traits = { path = "../../components/engine_traits", default-features = false }
-etcd-client = { git = "https://github.com/pingcap/etcd-client", rev = "14a6f8731f1890d5fd2f6e16a9f0d0a306b0599e", features = ["pub-response-field", "tls-openssl-vendored"] }
-file_system = { path = "../../components/file_system", default-features = false }
-futures = "0.3"
-grpcio = { version = "0.10", default-features = false, features = ["openssl-vendored", "protobuf-codec"] }
 hex = "0.4"
 http = "0.2.8"
 hyper = "0.14"
-itertools = "0.10"
-kvengine = { path = "../../components/kvengine" }
-kvenginepb = { path = "../../components/kvenginepb" }
+kvengine = { workspace = true }
+kvenginepb = { workspace = true }
 kvproto = { git = "https://github.com/pingcap/kvproto.git" }
-pd_client = { path = "../../components/pd_client", default-features = false }
+native_br = { workspace = true }
+pd_client = { workspace = true }
 protobuf = "2.8"
-rfengine = { path = "../../components/rfengine" }
-rfenginepb = { path = "../../components/rfenginepb" }
-rfstore = { path = "../../components/rfstore" }
-security = { path = "../../components/security", default-features = false }
+rfengine = { workspace = true }
+rfstore = { workspace = true }
+security = { workspace = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_derive = "1.0"
 serde_ignored = "0.1"
@@ -40,18 +27,6 @@ serde_json = "1.0"
 slog = { version = "2.3", features = ["max_level_trace", "release_max_level_debug"] }
 slog-global = { version = "0.1", git = "https://github.com/breeswish/slog-global.git", rev = "d592f88e4dbba5eb439998463054f1a44fbf17b9" }
 slog-term = "2.4"
-tempdir = "0.3"
-thiserror = "1.0"
-tikv = { path = "../..", default-features = false }
-tikv-client = { version = "0.1.0", git = "http://github.com/tikv/client-rust.git", rev = "a675082f7569a305100ee5605ebee756d3c346b9", default-features = false, features = ["protobuf-codec"] }
-tikv_util = { path = "../../components/tikv_util", default-features = false }
+tikv_util = { workspace = true }
 tokio = { version = "1.12", features = ["full"] }
 toml = "0.5"
-
-[[bin]]
-name = "cse-ctl"
-path = "src/main.rs"
-
-[lib]
-name = "cse_ctl"
-path = "src/lib.rs"

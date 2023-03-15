@@ -5,8 +5,8 @@ use std::{
     time::Duration,
 };
 
-use cse_ctl::truncate_ts::{truncate_ts_with_cfg, TruncateTsConfig};
 use futures::executor::block_on;
+use native_br::truncate_ts::{truncate_ts_with_cfg, TruncateTsConfig};
 use pd_client::PdClient;
 use rand::Rng;
 use test_cloud_server::{client::ClusterClient, ServerCluster};

@@ -4,12 +4,12 @@ use std::{collections::HashSet, path::PathBuf, str::FromStr};
 
 use bytes::{Buf, BufMut, BytesMut};
 use clap::Args;
-use cse_ctl::common;
 use kvproto::{
     metapb,
     metapb::PeerRole,
     raft_serverpb::{PeerState, RegionLocalState, StoreIdent},
 };
+use native_br::common::load_rf_engine_meta;
 use protobuf::Message;
 use rfengine::{
     raft_state_key, region_state_key, RfEngine, WriteBatch, KV_ENGINE_META_KEY,
@@ -148,7 +148,7 @@ fn collect_prefix_regions(rf: &RfEngine, prefix: &[u8]) -> Vec<(u64, u64, u64)> 
         if region_id == 0 {
             continue;
         }
-        let engine_meta = common::load_rf_engine_meta(rf, peer_id).expect("engine meta not found");
+        let engine_meta = load_rf_engine_meta(rf, peer_id).expect("engine meta not found");
         let snap = engine_meta.get_snapshot();
         let start = snap.get_start();
         if start.starts_with(prefix) {

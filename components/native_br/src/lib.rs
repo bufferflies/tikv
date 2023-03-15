@@ -8,5 +8,7 @@ pub mod common;
 pub mod error;
 pub mod pd_control;
 pub mod restore;
-pub mod restore_tenant;
+pub mod restore_keyspace;
 pub mod truncate_ts;
+
+pub use error::Result;

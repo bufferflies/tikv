@@ -821,7 +821,7 @@ impl Engine {
         self.truncate_with_ts(shard, shard.get_data().truncate_ts.unwrap())
     }
 
-    // Also used by cse-ctl in tenant restore
+    // Also used by keyspace restore
     pub fn truncate_with_ts(
         &self,
         shard: &Shard,

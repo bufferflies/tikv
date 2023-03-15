@@ -9,7 +9,6 @@ api_version = { path = "../../components/api_version" }
 bytes = "1.1"
 chrono = "0.4"
 clap = "2.32"
-cse-ctl = { path = "../cse-ctl" }
 dashmap = "4.0"
 file_system = { path = "../../components/file_system" }
 futures = "0.3"
@@ -20,6 +19,7 @@ hyper = { version = "0.14", features = ["full"] }
 kvengine = { path = "../../components/kvengine" }
 kvenginepb = { path = "../../components/kvenginepb" }
 kvproto = { git = "https://github.com/pingcap/kvproto.git" }
+native_br = { workspace = true }
 pd_client = { path = "../../components/pd_client", default-features = false }
 protobuf = "2.8"
 rfstore = { path = "../../components/rfstore" }

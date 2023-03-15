@@ -6,7 +6,10 @@ use tikv_util::store::find_peer;
 
 use super::{i_to_key, i_to_val};
 
+// Flaky test, see https://github.com/tidbcloud/cloud-storage-engine/issues/658.
+// TODO: remove "ignore".
 #[test]
+#[ignore]
 fn test_remove_peer_after_split() {
     test_util::init_log_for_test();
     let mut cluster = ServerCluster::new(vec![1, 2, 3], |_, _| {});

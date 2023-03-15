@@ -90,7 +90,6 @@ cdc = { workspace = true }
 collections = { workspace = true }
 crc64fast = "0.1"
 crossbeam = "0.8"
-cse-ctl = { path = "../cmd/cse-ctl" }
 encryption = { workspace = true }
 engine_rocks_helper = { workspace = true }
 error_code = { workspace = true }
@@ -104,6 +103,7 @@ kvproto = { workspace = true }
 libc = "0.2"
 log_wrappers = { workspace = true }
 more-asserts = "0.2"
+native_br = { workspace = true }
 online_config = { workspace = true }
 paste = "1.0"
 pd_client = { workspace = true }

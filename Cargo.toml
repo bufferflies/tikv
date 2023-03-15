@@ -266,6 +266,7 @@ members = [
   "components/kvengine",
   "components/kvenginepb",
   "components/log_wrappers",
+  "components/native_br",
   "components/online_config",
   "components/panic_hook",
   "components/pd_client",
@@ -321,7 +322,7 @@ case_macros = { path = "components/case_macros" }
 causal_ts = { path = "components/causal_ts" }
 cdc = { path = "components/cdc", default-features = false }
 cloud = { path = "components/cloud" }
-cloud-server = { path = "components/cloud_server" }
+cloud_server = { path = "components/cloud_server" }
 codec = { path = "components/codec" }
 collections = { path = "components/collections" }
 concurrency_manager = { path = "components/concurrency_manager" }
@@ -345,6 +346,7 @@ kvengine = { path = "components/kvengine" }
 kvenginepb = { path = "components/kvenginepb" }
 log_wrappers = { path = "components/log_wrappers" }
 memory_trace_macros = { path = "components/memory_trace_macros" }
+native_br = { path = "components/native_br" }
 online_config = { path = "components/online_config" }
 panic_hook = { path = "components/panic_hook" }
 pd_client = { path = "components/pd_client" }

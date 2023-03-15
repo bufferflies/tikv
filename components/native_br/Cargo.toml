@@ -1,0 +1,49 @@
+[package]
+name = "native_br"
+version = "0.0.1"
+authors = ["The TiKV Authors"]
+license = "Apache-2.0"
+edition = "2021"
+publish = false
+
+[features]
+pprof-fp = ["tikv/pprof-fp"]
+
+[dependencies]
+api_version = { workspace = true }
+bstr = "0.2"
+byteorder = "1.2"
+bytes = "1.0"
+chrono = "0.4"
+cloud_server = { workspace = true }
+engine_traits = { workspace = true }
+etcd-client = { git = "https://github.com/pingcap/etcd-client", rev = "14a6f8731f1890d5fd2f6e16a9f0d0a306b0599e", features = ["pub-response-field", "tls-openssl-vendored"] }
+file_system = { workspace = true }
+futures = "0.3"
+grpcio = { version = "0.10", default-features = false, features = ["openssl-vendored", "protobuf-codec"] }
+hex = "0.4"
+http = "0.2.8"
+hyper = "0.14"
+itertools = "0.10"
+kvengine = { workspace = true }
+kvenginepb = { workspace = true }
+kvproto = { git = "https://github.com/pingcap/kvproto.git" }
+pd_client = { workspace = true }
+protobuf = "2.8"
+rfengine = { workspace = true }
+rfenginepb = { workspace = true }
+rfstore = { workspace = true }
+security = { workspace = true }
+serde = { version = "1.0", features = ["derive"] }
+serde_derive = "1.0"
+serde_ignored = "0.1"
+serde_json = "1.0"
+slog = { version = "2.3", features = ["max_level_trace", "release_max_level_debug"] }
+slog-global = { version = "0.1", git = "https://github.com/breeswish/slog-global.git", rev = "d592f88e4dbba5eb439998463054f1a44fbf17b9" }
+slog-term = "2.4"
+tempdir = "0.3"
+thiserror = "1.0"
+tikv = { workspace = true }
+tikv-client = { version = "0.1.0", git = "http://github.com/tikv/client-rust.git", rev = "a675082f7569a305100ee5605ebee756d3c346b9", default-features = false, features = ["protobuf-codec"] }
+tikv_util = { workspace = true }
+tokio = { version = "1.12", features = ["full"] }

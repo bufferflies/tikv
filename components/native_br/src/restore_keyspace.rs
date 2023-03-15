@@ -34,59 +34,19 @@ use tokio::runtime::Runtime;
 
 use crate::{
     common::{
-        create_pd_client, load_peer_raft_state, load_rf_engine_meta, now, retain_sst_files,
-        send_request_to_store, RawRegion,
+        load_peer_raft_state, load_rf_engine_meta, now, retain_sst_files, send_request_to_store,
+        RawRegion,
     },
     error::{Error, Result},
     pd_control::PdControl,
-    restore::{get_cluster_backup_meta, RestoreConfig, RestoreKeyspaceArgs},
-    step, step_error,
+    restore::{get_cluster_backup_meta, RestoreConfig},
+    step,
 };
 
-const WORKING_PATH_PREFIX: &str = "tenant-restore";
+const WORKING_PATH_PREFIX: &str = "keyspace-restore";
 const ZSTD_COMPRESSION_LEVEL: &str = "5"; // The same as ZSTD_COMPRESSION_LEVEL_FOR_REMOTE.
 
 const REQUEST_RESTORE_SNAPSHOT_RETRY_LIMIT: usize = 10;
-
-pub(crate) fn execute_restore_keyspace(args: RestoreKeyspaceArgs) {
-    match execute_restore_keyspace_impl(&args) {
-        Ok(()) => {
-            step!("Restore tenant {} succeed", args.keyspace_name);
-        }
-        Err(err) => {
-            step_error!("Restore tenant {} error: {:?}", args.keyspace_name, err);
-        }
-    }
-}
-
-fn execute_restore_keyspace_impl(args: &RestoreKeyspaceArgs) -> Result<()> {
-    let config: RestoreConfig = get_restore_keyspace_config_from_args(args);
-    let pd_client: Arc<dyn PdClient> = Arc::new(create_pd_client(&config.security, &config.pd));
-    let dfs_config = config.dfs.clone();
-    let s3fs = S3Fs::new(
-        dfs_config.prefix,
-        dfs_config.s3_endpoint,
-        dfs_config.s3_key_id,
-        dfs_config.s3_secret_key,
-        dfs_config.s3_region,
-        dfs_config.s3_bucket,
-    );
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(8)
-        .enable_all()
-        .build()
-        .unwrap();
-
-    restore_keyspace_with_cfg(
-        config,
-        &args.keyspace_name,
-        &args.name,
-        args.working_path.as_deref(),
-        Arc::new(s3fs),
-        pd_client,
-        &runtime,
-    )
-}
 
 pub fn restore_keyspace_with_cfg(
     config: RestoreConfig,
@@ -414,7 +374,7 @@ impl BackupCluster {
                     MetaIterator::new(kv_engine.get_engine_id(), shards_need_load, raw_metas);
                 let metas = kv_engine.read_meta(&mut meta_iter)?;
                 info!(
-                    "Keyspace {} kv_engine load {} shards in restore tenant",
+                    "Keyspace {} kv_engine load {} shards in restore keyspace",
                     self.keyspace_id,
                     metas.len()
                 );
@@ -1446,28 +1406,4 @@ mod tests {
             assert_eq!(aligned_regions, expected, "case: {}", case_idx);
         }
     }
-}
-
-pub fn get_restore_keyspace_config_from_args(args: &RestoreKeyspaceArgs) -> RestoreConfig {
-    let mut config = RestoreConfig::default();
-    if args.config.exists() {
-        let data = std::fs::read(args.config.clone()).expect("failed to read config file");
-        config = toml::from_slice(&data).unwrap();
-    }
-    // override from args and ENV
-    if !args.pd.is_empty() {
-        config.pd.endpoints = args.pd.split(',').map(|x| x.to_owned()).collect();
-    }
-    if args.cacert.exists() {
-        config.security.ca_path = args.cacert.to_str().unwrap().to_owned();
-    }
-    if args.cert.exists() {
-        config.security.cert_path = args.cert.to_str().unwrap().to_owned();
-    }
-    if args.key.exists() {
-        config.security.key_path = args.key.to_str().unwrap().to_owned();
-    }
-    config.dfs.override_from_env();
-    config.skip_resolve_lock = false;
-    config
 }
