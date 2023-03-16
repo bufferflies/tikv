@@ -147,7 +147,8 @@ fn test_native_full_backup() {
         ref_store,
     );
 
-    oss.shutdown();
+    // Don't graceful shutdown oss (`oss.shutdown()`), as some S3FS threads are
+    // still alive and holding connections.
 }
 
 fn i_to_key(i: usize) -> Vec<u8> {

@@ -5,14 +5,14 @@ use test_cloud_server::{try_wait, ServerCluster};
 use tikv_util::store::find_peer;
 
 use super::{i_to_key, i_to_val};
+use crate::cases::alloc_node_id_vec;
 
-// Flaky test, see https://github.com/tidbcloud/cloud-storage-engine/issues/658.
-// TODO: remove "ignore".
 #[test]
-#[ignore]
 fn test_remove_peer_after_split() {
     test_util::init_log_for_test();
-    let mut cluster = ServerCluster::new(vec![1, 2, 3], |_, _| {});
+    let node_ids = alloc_node_id_vec(3);
+    let mut cluster = ServerCluster::new(node_ids.clone(), |_, _| {});
+    cluster.wait_region_replicated(&[], 3);
     let mut client = cluster.new_client();
     client.put_kv(0..100, i_to_key, i_to_val);
     let pd_client = cluster.get_pd_client();
@@ -24,7 +24,7 @@ fn test_remove_peer_after_split() {
     let region = pd_client.get_region(&[]).unwrap();
     client.split(&i_to_key(50));
     // Try to destroy the parent region.
-    let store_id = cluster.get_store_id(3);
+    let store_id = cluster.get_store_id(node_ids[2]);
     let peer = find_peer(&region, store_id).unwrap();
     pd_client.must_remove_peer(region.get_id(), peer.clone());
     // And then move the region back.
@@ -41,8 +41,8 @@ fn test_remove_peer_after_split() {
         1
     ));
     // Should be able to recover splitted regions.
-    cluster.stop_node(3);
-    cluster.start_node(3, |_, _| {});
+    cluster.stop_node(node_ids[2]);
+    cluster.start_node(node_ids[2], |_, _| {});
     // Should delay destroying the parent region even if the node is restarted.
     assert!(!try_wait(
         || {

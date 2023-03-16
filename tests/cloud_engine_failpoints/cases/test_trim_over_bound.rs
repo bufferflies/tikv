@@ -7,6 +7,8 @@ use slog_global::info;
 use test_cloud_server::ServerCluster;
 use tikv_util::config::ReadableSize;
 
+use crate::cases::alloc_node_id_vec;
+
 #[test]
 fn test_trim_over_bound() {
     let cases = vec![
@@ -24,7 +26,7 @@ fn test_trim_over_bound() {
 fn test_trim_over_bound_impl(split_key_idx: usize, do_leader_transfer: bool) {
     let fp = "before_engine_trigger_compact";
     test_util::init_log_for_test();
-    let node_ids = vec![1, 2, 3];
+    let node_ids = alloc_node_id_vec(3);
     let mut cluster = ServerCluster::new(node_ids.clone(), |_, conf| {
         // Set small memtable size to make data reach SSTables.
         conf.rocksdb.writecf.write_buffer_size = ReadableSize::kb(1);

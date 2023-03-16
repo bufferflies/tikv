@@ -324,12 +324,16 @@ pub fn new_test_config(base_dir: &Path, node_id: u16) -> TikvConfig {
     config
 }
 
+// Keep away from 20xxx ports to work around https://github.com/tidbcloud/cloud-storage-engine/issues/658.
+// TODO: Remove this work around.
 fn node_addr(node_id: u16) -> String {
-    format!("127.0.0.1:2{:04}", node_id)
+    format!("127.0.0.1:{}", node_id + 21000)
 }
 
+// Keep away from 3xxxx ports to work around https://github.com/tidbcloud/cloud-storage-engine/issues/658.
+// TODO: Remove this work around.
 fn node_status_addr(node_id: u16) -> String {
-    format!("127.0.0.1:3{:04}", node_id)
+    format!("127.0.0.1:{}", node_id + 25000)
 }
 
 pub fn put_mut(key: &str, val: &str) -> Mutation {

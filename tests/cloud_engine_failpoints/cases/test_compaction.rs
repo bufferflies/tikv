@@ -6,11 +6,13 @@ use test_cloud_server::{must_wait, ServerCluster};
 use tikv_util::config::ReadableSize;
 
 use super::{i_to_key, i_to_val};
+use crate::cases::alloc_node_id;
 
 #[test]
 fn test_retry_failed_flush() {
     test_util::init_log_for_test();
-    let mut cluster = ServerCluster::new(vec![1], |_, cfg| {
+    let node_id = alloc_node_id();
+    let mut cluster = ServerCluster::new(vec![node_id], |_, cfg| {
         cfg.rocksdb.writecf.write_buffer_size = ReadableSize::kb(16);
     });
 
@@ -23,7 +25,7 @@ fn test_retry_failed_flush() {
     thread::sleep(Duration::from_secs(1));
     assert_eq!(
         cluster
-            .get_kvengine(1)
+            .get_kvengine(node_id)
             .get_shard_stat(region_id)
             .l0_table_count,
         0
@@ -32,7 +34,7 @@ fn test_retry_failed_flush() {
     must_wait(
         || {
             cluster
-                .get_kvengine(1)
+                .get_kvengine(node_id)
                 .get_shard_stat(region_id)
                 .l0_table_count
                 > 0
