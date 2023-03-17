@@ -545,7 +545,7 @@ impl Engine {
             return self.truncate_ts(&shard).transpose();
         }
         if shard.get_data().ready_to_trim_over_bound() {
-            return Some(self.trim_over_bound(&shard));
+            return self.trim_over_bound(&shard).transpose();
         }
         let pri = shard.get_compaction_priority()?;
         let (req, cd) = self.build_compact_request(&shard, pri)?;
@@ -873,9 +873,18 @@ impl Engine {
         Ok(Some(cs))
     }
 
-    fn trim_over_bound(&self, shard: &Shard) -> Result<pb::ChangeSet> {
+    fn trim_over_bound(&self, shard: &Shard) -> Result<Option<pb::ChangeSet>> {
         let data = shard.get_data();
-        assert!(data.trim_over_bound);
+        if !data.trim_over_bound {
+            // `data.trim_over_bound is possible to be false.
+            // See https://github.com/tidbcloud/cloud-storage-engine/issues/663.
+            info!(
+                "{} shard.data.trim_over_bound is false, skip trim_over_bound",
+                shard.tag()
+            );
+            return Ok(None);
+        }
+
         // Tables that are entirely over bound.
         let mut deletes = vec![];
         // Tables that are partially over bound.
@@ -941,7 +950,7 @@ impl Engine {
         cs.set_shard_ver(shard.ver);
         cs.set_property_key(TRIM_OVER_BOUND.to_string());
         cs.set_property_value(TRIM_OVER_BOUND_DISABLE.to_vec());
-        Ok(cs)
+        Ok(Some(cs))
     }
 
     pub fn trim_over_bound_by_meta(&self, meta: &ShardMeta) -> Result<pb::ChangeSet> {
