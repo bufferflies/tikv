@@ -20,7 +20,7 @@ use bytes::Bytes;
 pub use config::Config as DFSConfig;
 use file_system;
 use metrics::*;
-pub use s3::{S3Fs, Tagging, STORAGE_CLASS_STANDARD_IA};
+pub use s3::{ListObjectContent, S3Fs, Tagging, STORAGE_CLASS_STANDARD_IA};
 use thiserror::Error;
 use tikv_util::time::Instant;
 use tokio::runtime::Runtime;
@@ -38,7 +38,10 @@ pub trait Dfs: Sync + Send {
     async fn create(&self, file_id: u64, data: Bytes, opts: Options) -> Result<()>;
 
     /// remove removes the file from the DFS.
-    async fn remove(&self, file_id: u64, opts: Options);
+    /// `file_len` is used to choose proper storage class for cost
+    /// efficiency, in bytes.
+    /// `None` if file_len is unknown when invoke this method.
+    async fn remove(&self, file_id: u64, file_len: Option<u64>, opts: Options);
 
     /// Remove the file from DFS permanently.
     async fn permanently_remove(&self, file_id: u64, opts: Options) -> Result<()>;
@@ -101,7 +104,7 @@ impl Dfs for InMemFs {
         Ok(())
     }
 
-    async fn remove(&self, file_id: u64, _opts: Options) {
+    async fn remove(&self, file_id: u64, _file_len: Option<u64>, _opts: Options) {
         if self.pending_remove.contains_key(&file_id) {
             return;
         }
@@ -233,7 +236,7 @@ impl Dfs for LocalFs {
         Ok(())
     }
 
-    async fn remove(&self, file_id: u64, _opts: Options) {
+    async fn remove(&self, file_id: u64, _file_len: Option<u64>, _opts: Options) {
         let local_file_path = self.local_sst_file_path(file_id);
         if let Err(err) = std::fs::remove_file(local_file_path) {
             error!("failed to remove local file {:?}", err);
@@ -241,7 +244,7 @@ impl Dfs for LocalFs {
     }
 
     async fn permanently_remove(&self, file_id: u64, opts: Options) -> Result<()> {
-        self.remove(file_id, opts).await;
+        self.remove(file_id, None, opts).await;
         Ok(())
     }
 
@@ -267,7 +270,7 @@ impl Options {
 
 pub type Result<T> = result::Result<T, Error>;
 
-#[derive(Debug, Error, Clone)]
+#[derive(Debug, Error)]
 pub enum Error {
     #[error("IO error: {0}")]
     Io(String),
@@ -275,6 +278,8 @@ pub enum Error {
     NotExists(u64),
     #[error("S3 error {0}")]
     S3(String),
+    #[error("Other error {0}")]
+    Other(#[from] Box<dyn std::error::Error + Sync + Send>),
 }
 
 impl From<io::Error> for Error {
@@ -354,7 +359,7 @@ mod tests {
         let fs = localfs.clone();
         let (tx, rx) = tikv_util::mpsc::bounded(1);
         let f = async move {
-            fs.remove(file_id, Options::new(1, 1)).await;
+            fs.remove(file_id, None, Options::new(1, 1)).await;
             tx.send(true).unwrap();
         };
         localfs.runtime.spawn(f);

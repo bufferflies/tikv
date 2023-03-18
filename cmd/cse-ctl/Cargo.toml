@@ -30,3 +30,4 @@ slog-term = "2.4"
 tikv_util = { workspace = true }
 tokio = { version = "1.12", features = ["full"] }
 toml = "0.5"
+url = "2"

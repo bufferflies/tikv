@@ -2,25 +2,23 @@
 
 use std::{
     collections::HashSet,
-    fmt::Debug,
+    fmt,
+    fmt::{Debug, Formatter},
     fs,
     path::PathBuf,
     str::FromStr,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
+    sync::Arc,
     thread,
     time::{Duration, Instant},
 };
 
 use bytes::Buf;
-use chrono::{DateTime, FixedOffset};
+use chrono::DateTime;
 use clap::Args;
 use http::Uri;
 use kvengine::{
     dfs,
-    dfs::{DFSConfig, Dfs, S3Fs},
+    dfs::{DFSConfig, Dfs, ListObjectContent, S3Fs},
 };
 use kvproto::metapb::Store;
 use native_br::{
@@ -33,14 +31,32 @@ use tikv_util::{box_err, config::ReadableDuration, error, info, warn};
 
 /// DFS GC Rules:
 ///
-/// 1. If the file is in used, do nothing. Otherwise,
+/// * For files with last modified time later than (now -
+///   `start_time_safe_interval`), do nothing.
 ///
-/// 2. If the file is NOT tagged with "deleted=true", add the tag. Otherwise,
+/// * For files IN USED: If it's removed, retain it. Also write a warning in
+///   logs.
 ///
-/// 3. The file will be permanently removed when:
-///   3a. The file IS tagged with "deleted=true", and,
-///   3b. `gc_lifetime` is configured, and,
-///   3c. the duration since file creation has been longer than `gc_lifetime`.
+/// * For files NOT in used:
+///
+///     1. The file will be removed if it's NOT removed.
+///
+///     2. The file will be permanently removed when:
+///
+///         2a. The file IS removed, and,
+///
+///         2b. `gc_lifetime` is configured, and,
+///
+///         2c. the duration since file last modified is longer than
+/// `gc_lifetime`.
+///
+/// NOTE:
+///
+/// * `gc_lifetime` MUST NOT be set for production environment, in which files
+///   are recycled by S3 lifecycle.
+///
+/// * A file is "removed" when it's in "STANDARD_IA" storage class or tagged
+///   with "delete=true".
 
 /// DFSGC arguments
 #[derive(Args)]
@@ -54,6 +70,9 @@ pub struct DfsGcArgs {
     pub start: Option<String>,
 
     /// GC lifetime in duration string (see `ReadableDuration`).
+    ///
+    /// WARNING: will permanently remove files if this argument is set. Should
+    /// be used for test environment ONLY.
     #[clap(long)]
     pub gc_lifetime: Option<ReadableDuration>,
 
@@ -83,6 +102,7 @@ pub struct DfsGcArgs {
 
 pub(crate) fn execute_dfsgc(arg: DfsGcArgs) {
     let config = DfsGcConfig::from_args(&arg);
+    validate_config(&config);
 
     let start_after = arg.start.unwrap_or_default();
     let pd_client = Arc::new(create_pd_client(&config.security, &config.pd));
@@ -99,6 +119,10 @@ pub(crate) fn execute_dfsgc(arg: DfsGcArgs) {
     let progress_file_path = PathBuf::from(format!("{}/{}", &config.data_dir, "dfsgc.progress"));
     let mut gc_worker = GcWorker::new(pd_client, s3fs, progress_file_path, config.gc_lifetime);
 
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     loop {
         let mut gc = || -> Result<()> {
             // `start_time` should be acquired before `collect_valid_files`, and skip GC on
@@ -108,7 +132,7 @@ pub(crate) fn execute_dfsgc(arg: DfsGcArgs) {
             let start_time = chrono::Utc::now() - start_time_safe_interval;
 
             gc_worker.collect_valid_files()?;
-            gc_worker.remove_garbage_files(start_after.clone(), start_time);
+            runtime.block_on(gc_worker.remove_garbage_files(start_after.clone(), start_time))?;
             Ok(())
         };
         if let Err(err) = gc() {
@@ -123,8 +147,19 @@ pub(crate) fn execute_dfsgc(arg: DfsGcArgs) {
     }
 }
 
-static REMOVED: AtomicUsize = AtomicUsize::new(0);
-static PERMANENTLY_REMOVED: AtomicUsize = AtomicUsize::new(0);
+fn validate_config(config: &DfsGcConfig) {
+    let s3_endpoint = url::Url::parse(&config.dfs.s3_endpoint).expect("parse dfs.s3_endpoint");
+
+    if config.gc_lifetime.is_some() {
+        // Assume that in test environment (e.g. minio) s3 endpoint must be configured
+        // with port.
+        assert!(
+            s3_endpoint.port().is_some(),
+            "gc_lifetime should be used on test environment only (dfs.s3_endpoint: {:?})",
+            config.dfs.s3_endpoint
+        );
+    }
+}
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug, Default)]
 #[serde(default)]
@@ -178,6 +213,52 @@ struct GcWorker {
     progress_file_path: PathBuf,
     valid_files: HashSet<u64>,
     gc_lifetime: Option<chrono::Duration>,
+}
+
+#[derive(Default)]
+struct GcStat {
+    checked: usize,
+    removed: usize,
+    permanently_removed: usize,
+    in_used_and_removed: usize,
+    retained: usize,
+}
+
+impl fmt::Display for GcStat {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} files checked, {} files removed, {} files permanently removed, {} files in-used but removed, {} files retained",
+            self.checked,
+            self.removed,
+            self.permanently_removed,
+            self.in_used_and_removed,
+            self.retained,
+        )
+    }
+}
+
+#[derive(Debug)]
+struct S3Object {
+    pub file_id: u64,
+    pub _key: String,
+    pub last_modified: DateTime<chrono::Utc>,
+    pub storage_class: String,
+    pub size: u64, // in bytes.
+}
+
+impl S3Object {
+    pub fn from_list_object_content(file_id: u64, obj: ListObjectContent) -> Self {
+        Self {
+            file_id,
+            _key: obj.key,
+            last_modified: DateTime::parse_from_rfc3339(&obj.last_modified)
+                .expect("parse last_modified")
+                .into(),
+            storage_class: obj.storage_class,
+            size: obj.size,
+        }
+    }
 }
 
 impl GcWorker {
@@ -251,7 +332,11 @@ impl GcWorker {
         Ok(serde_json::from_slice(body.chunk()).unwrap())
     }
 
-    fn remove_garbage_files(&self, mut start_after: String, start_time: DateTime<chrono::Utc>) {
+    async fn remove_garbage_files(
+        &self,
+        mut start_after: String,
+        start_time: DateTime<chrono::Utc>,
+    ) -> Result<()> {
         if let Ok(data) = fs::read_to_string(self.progress_file_path.as_path()) {
             let state_start_after = data;
             if start_after < state_start_after {
@@ -267,38 +352,31 @@ impl GcWorker {
             start_after, start_time, self.gc_lifetime
         );
 
-        let mut checked = 0;
-        REMOVED.store(0, Ordering::Relaxed);
-        PERMANENTLY_REMOVED.store(0, Ordering::Relaxed);
-
+        let mut stat = GcStat::default();
         loop {
             info!("loop start: {}", start_after);
             let s3fs = self.s3fs.clone();
-            let (files, _, next_start_after) = self
-                .s3fs
-                .get_runtime()
-                .block_on(s3fs.list(start_after.as_str()))
-                .unwrap();
+            let (files, _, next_start_after) = s3fs.list(start_after.as_str()).await?;
             info!("listed {} files", files.len());
             let file_objs = files.into_iter().filter_map(|obj| {
                 self.s3fs
                     .try_parse_file_id(&obj.key)
-                    .map(|file_id| {
-                        (
-                            file_id,
-                            DateTime::parse_from_rfc3339(&obj.last_modified)
-                                .expect("parse last_modified"),
-                            obj.storage_class,
-                        )
-                    })
-                    .filter(|obj| obj.1 < start_time)
+                    .map(|file_id| S3Object::from_list_object_content(file_id, obj))
+                    .filter(|obj| obj.last_modified < start_time)
             });
-            for (file_id, last_modified, storage_class) in file_objs {
-                if !self.valid_files.contains(&file_id) {
+            for s3_obj in file_objs {
+                if !self.valid_files.contains(&s3_obj.file_id) {
                     // Remove the files one by one to prevent reach API rate limit.
-                    self.remove_garbage_file(file_id, last_modified, &storage_class, &start_time);
-                    checked += 1;
+                    self.remove_garbage_file(&s3_obj, &start_time, &mut stat)
+                        .await;
+                } else if self.is_file_removed(&s3_obj).await? {
+                    warn!("{} in-used but removed: {:?}", s3_obj.file_id, s3_obj);
+                    stat.in_used_and_removed += 1;
+                    s3fs.retain_file(s3_obj.file_id).await?;
+                    info!("{} is retained", s3_obj.file_id);
+                    stat.retained += 1;
                 }
+                stat.checked += 1;
             }
             if let Some(next_start_after) = next_start_after {
                 start_after = next_start_after;
@@ -311,61 +389,56 @@ impl GcWorker {
             fs::remove_file(self.progress_file_path.as_path()).unwrap();
         }
 
-        info!(
-            "{} files valid, {} files checked, {} files removed, {} files permanently removed",
-            self.valid_files.len(),
-            checked,
-            REMOVED.load(Ordering::SeqCst),
-            PERMANENTLY_REMOVED.load(Ordering::SeqCst),
-        );
-        info!("finished");
+        info!("finished: {} files valid, {}", self.valid_files.len(), stat);
+        Ok(())
     }
 
     fn is_storage_class_for_remove(storage_class: &str) -> bool {
         storage_class == dfs::STORAGE_CLASS_STANDARD_IA
     }
 
-    fn remove_garbage_file(
+    async fn is_file_removed(&self, s3_obj: &S3Object) -> Result<bool> {
+        Ok(Self::is_storage_class_for_remove(&s3_obj.storage_class)
+            || self.s3fs.is_removed(s3_obj.file_id).await?)
+    }
+
+    async fn remove_garbage_file(
         &self,
-        file_id: u64,
-        last_modified: DateTime<FixedOffset>,
-        storage_class: &str,
+        s3_obj: &S3Object,
         start_time: &DateTime<chrono::Utc>,
+        stat: &mut GcStat,
     ) {
         let opts = dfs::Options::new(0, 0);
-        let s3fs = self.s3fs.clone();
-        self.s3fs.get_runtime().block_on(async move {
-            let removed = Self::is_storage_class_for_remove(storage_class)
-                || match s3fs.is_removed(file_id).await {
-                    Ok(removed) => removed,
-                    Err(e) => {
-                        error!("Fail to get file {} status, {:?}", file_id, e);
-                        return;
-                    }
-                };
+        let removed = match self.is_file_removed(s3_obj).await {
+            Ok(removed) => removed,
+            Err(e) => {
+                error!("{} check is_file_removed failed: {:?}", s3_obj.file_id, e);
+                return;
+            }
+        };
 
-            if !removed {
-                s3fs.remove(file_id, opts).await;
-                REMOVED.fetch_add(1, Ordering::SeqCst);
-                info!("{} is removed", file_id);
-            } else if let Some(gc_lifetime) = self.gc_lifetime {
-                let last_modified_utc: DateTime<chrono::Utc> = last_modified.into();
-                let duration = *start_time - last_modified_utc;
+        if !removed {
+            self.s3fs
+                .remove(s3_obj.file_id, Some(s3_obj.size), opts)
+                .await;
+            stat.removed += 1;
+            info!("{} is removed", s3_obj.file_id);
+        } else if let Some(gc_lifetime) = self.gc_lifetime {
+            let duration = *start_time - s3_obj.last_modified;
 
-                if duration > gc_lifetime {
-                    if let Err(err) = s3fs.permanently_remove(file_id, opts).await {
-                        warn!("{} permanently_remove error: {:?}", file_id, err);
-                    } else {
-                        info!(
-                            "{} is permanently removed, removed at {} ({:.2} min)",
-                            file_id,
-                            last_modified,
-                            duration.num_seconds() as f64 / 60.0
-                        );
-                        PERMANENTLY_REMOVED.fetch_add(1, Ordering::SeqCst);
-                    }
+            if duration > gc_lifetime {
+                if let Err(err) = self.s3fs.permanently_remove(s3_obj.file_id, opts).await {
+                    warn!("{} permanently_remove error: {:?}", s3_obj.file_id, err);
+                } else {
+                    info!(
+                        "{} is permanently removed, removed at {} ({:.2} min)",
+                        s3_obj.file_id,
+                        s3_obj.last_modified,
+                        duration.num_seconds() as f64 / 60.0
+                    );
+                    stat.permanently_removed += 1;
                 }
             }
-        });
+        }
     }
 }

@@ -549,9 +549,10 @@ impl EngineCore {
         let runtime = fs.get_runtime();
         for (id, cover) in del_files {
             if cover {
+                let file_len = self.local_file_len(id);
                 self.remove_local_file(id);
                 let fs_n = fs.clone();
-                runtime.spawn(async move { fs_n.remove(id, opts).await });
+                runtime.spawn(async move { fs_n.remove(id, file_len, opts).await });
             }
         }
     }
@@ -560,6 +561,17 @@ impl EngineCore {
         let local_file_path = self.local_sst_file_path(file_id);
         if let Err(err) = std::fs::remove_file(local_file_path) {
             error!("failed to remove local file {:?}", err);
+        }
+    }
+
+    fn local_file_len(&self, file_id: u64) -> Option<u64> {
+        let local_file_path = self.local_sst_file_path(file_id);
+        match std::fs::metadata(local_file_path) {
+            Ok(metadata) => Some(metadata.len()),
+            Err(err) => {
+                error!("failed to get local file len {:?}", err);
+                None
+            }
         }
     }
 

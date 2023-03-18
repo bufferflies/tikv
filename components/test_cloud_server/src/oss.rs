@@ -484,7 +484,7 @@ mod tests {
                 assert_eq!(write_data.slice(range.0..), read_data);
 
                 if idx % 7 == 0 {
-                    fs.remove(file_id, options).await;
+                    fs.remove(file_id, None, options).await;
                 }
             });
             handles.push(handle);
@@ -531,7 +531,7 @@ mod tests {
                 fs.create(file_id, write_data.clone(), options)
                     .await
                     .unwrap();
-                fs.remove(file_id, options).await;
+                fs.remove(file_id, None, options).await;
                 assert!(fs.is_removed(file_id).await.unwrap());
                 fs.retain_file(file_id).await.unwrap();
                 assert!(!fs.is_removed(file_id).await.unwrap());

@@ -25,7 +25,7 @@ use rusoto_s3::{
     CopyObjectError, DeleteObjectError, DeleteObjectTaggingError, GetObjectError,
     GetObjectTaggingError, ListObjectsV2Error, PutObjectError, PutObjectTaggingError,
 };
-use tikv_util::time::Instant;
+use tikv_util::{box_err, time::Instant};
 use tokio::runtime::Runtime;
 
 use crate::dfs::{self, metrics::*, Dfs, Options};
@@ -38,6 +38,10 @@ const READ_BODY_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub const STORAGE_CLASS_DEFAULT: &str = "STANDARD";
 pub const STORAGE_CLASS_STANDARD_IA: &str = "STANDARD_IA";
+
+const AWS_DOMAIN_STRING: &str = "amazonaws";
+
+const SMALL_FILE_THRESHOLD_BYTES: u64 = 1024 * 1024; // 1MB
 
 #[derive(Clone)]
 pub struct S3Fs {
@@ -182,6 +186,10 @@ impl S3FsCore {
 
     pub fn get_prefix(&self) -> String {
         self.prefix.clone()
+    }
+
+    pub fn is_on_aws(&self) -> bool {
+        self.hostname.contains(AWS_DOMAIN_STRING)
     }
 
     // parse the sst file's suffix with format {idx}/{file_id}.sst
@@ -579,7 +587,7 @@ impl S3FsCore {
                     req.add_header("x-amz-tagging-directive", "REPLACE");
                 }
                 if let Some(target_storage_class) = target_storage_class.as_ref() {
-                    if self.hostname.contains("amazonaws") {
+                    if self.is_on_aws() {
                         req.add_header("x-amz-storage-class", target_storage_class);
                     } else {
                         debug!(
@@ -687,6 +695,17 @@ impl S3FsCore {
         }
         Ok(())
     }
+
+    /// Choose proper storage class for removed files.
+    pub fn choose_storage_class_for_removed_files(&self, file_len: Option<u64>) -> &'static str {
+        // STORAGE_CLASS_STANDARD_IA is more cost efficient than STORAGE_CLASS_STANDARD
+        // for NOT small files.
+        if file_len.is_some() && file_len.unwrap() > SMALL_FILE_THRESHOLD_BYTES {
+            STORAGE_CLASS_STANDARD_IA
+        } else {
+            STORAGE_CLASS_DEFAULT
+        }
+    }
 }
 
 impl ObjectStorage for S3Fs {
@@ -771,8 +790,17 @@ impl Dfs for S3Fs {
     /// Logically remove the file on S3 by tagging with "deleted=true".
     /// And the file would be permanently removed after `gc_lifetime`. See
     /// `DfsGc`.
-    async fn remove(&self, file_id: u64, _opts: Options) {
+    async fn remove(&self, file_id: u64, file_len: Option<u64>, _opts: Options) {
         // TODO: Reuse `copy_object` method.
+
+        // Only AWS supports storage class.
+        let target_storage_class = if self.is_on_aws() {
+            let new_storage_class = self.choose_storage_class_for_removed_files(file_len);
+            (new_storage_class != STORAGE_CLASS_DEFAULT).then_some(new_storage_class)
+        } else {
+            None
+        };
+
         let mut retry_cnt = 0;
         let mut copied = false;
         loop {
@@ -785,8 +813,8 @@ impl Dfs for S3Fs {
                 req.add_header("x-amz-metadata-directive", "REPLACE");
                 req.add_header("x-amz-tagging", "deleted=true");
                 req.add_header("x-amz-tagging-directive", "REPLACE");
-                if self.hostname.contains("amazonaws") {
-                    req.add_header("x-amz-storage-class", STORAGE_CLASS_STANDARD_IA);
+                if let Some(target_storage_class) = target_storage_class {
+                    req.add_header("x-amz-storage-class", target_storage_class);
                 }
                 if let Err(err) = self.dispatch(req, CopyObjectError::from_response).await {
                     if retry_cnt < MAX_RETRY_COUNT {
@@ -843,6 +871,13 @@ impl Dfs for S3Fs {
     /// Permanently remove the file on S3.
     /// This method should be used by `DfsGc` ONLY to meet GC rules.
     async fn permanently_remove(&self, file_id: u64, _opts: Options) -> crate::dfs::Result<()> {
+        if self.is_on_aws() {
+            return Err(box_err!(
+                "{} permanently_remove is forbidden on AWS",
+                file_id
+            ));
+        }
+
         self.delete_object(self.file_key(file_id), file_id.to_string())
             .await
     }
@@ -867,6 +902,7 @@ pub struct ListObjectContent {
     pub key: String,
     pub last_modified: String,
     pub storage_class: String,
+    pub size: u64, // in bytes.
 }
 
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
@@ -1057,7 +1093,7 @@ mod tests {
         let fs = s3fs.clone();
         let (tx, rx) = tikv_util::mpsc::bounded(1);
         let f = async move {
-            fs.remove(321, Options::new(1, 1)).await;
+            fs.remove(321, None, Options::new(1, 1)).await;
             tx.send(true).unwrap();
         };
         s3fs.runtime.spawn(f);
