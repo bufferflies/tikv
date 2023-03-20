@@ -5,6 +5,11 @@ on:
     branches:
       - cloud-engine
   workflow_dispatch:
+    inputs:
+      overwrite_gcr:
+        description: "overwrite gcr daily-run image"
+        type: boolean
+        default: false
 
 jobs:
   build-arm64:
@@ -52,3 +57,20 @@ jobs:
       - name: push-manifest
         run: |
           docker manifest push xexplorersun/tikv:cse-${{ github.sha }}
+
+  sync-image:
+    name: Sync image to GCR
+    runs-on: arm64
+    needs: ["multi-arch"]
+    if: ${{ inputs.overwrite_gcr || github.ref == 'refs/heads/cloud-engine' }}
+    env:
+      GCR_IMAGE: xexplorersun/tikv-cse:v6.6.0
+    steps:
+      - name: create-manifest
+        run: |
+          docker manifest create ${{ env.GCR_IMAGE }} \
+          --amend xexplorersun/tikv:cse-${{ github.sha }}-amd64 \
+          --amend xexplorersun/tikv:cse-${{ github.sha }}-arm64
+      - name: push-manifest
+        run: |
+          docker manifest push ${{ env.GCR_IMAGE }}
