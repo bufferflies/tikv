@@ -22,6 +22,7 @@ use crate::table::{
 // higher level ttl is longer than lower level.
 const IDX_TTL_LEVELS: [u64; 4] = [60 * 8, 60 * 4, 60 * 2, 60];
 const FILTER_TTL_LEVELS: [u64; 4] = [60 * 2, 60, 30, 15];
+const SMALL_VALUE_SIZE: usize = 128;
 
 #[derive(Clone)]
 pub struct SsTable {
@@ -75,8 +76,13 @@ impl SsTable {
         version: u64,
         key_hash: u64,
         val_mem_holder: &mut Vec<u8>,
+        level: usize,
     ) -> table::Value {
-        if self.filter_size() != 0 {
+        // For small value on level 3, load the filter is not cost-effective.
+        // TODO: avoid build filter on level 3 small value table.
+        let small_value = self.footer.data_len() < self.entries as usize * SMALL_VALUE_SIZE;
+        let skip_filter = small_value && level == 3;
+        if self.filter_size() > 0 && !skip_filter {
             let filter = self
                 .filter
                 .get(|| {
@@ -137,11 +143,12 @@ impl SsTable {
         version: u64,
         key_hash: u64,
         val_mem_holder: &mut Vec<u8>,
+        level: usize,
     ) -> table::Value {
         if self.max_ts < version {
             return table::Value::new();
         }
-        let val = self.get(key, u64::MAX, key_hash, val_mem_holder);
+        let val = self.get(key, u64::MAX, key_hash, val_mem_holder, level);
         if val.version >= version {
             return val;
         }
@@ -744,14 +751,14 @@ mod tests {
             let k = get_test_key("key", i);
             let k_h = farmhash::fingerprint64(k.as_bytes());
             let mut v_mem_holder = vec![];
-            let v = t.get(k.as_bytes(), u64::MAX, k_h, &mut v_mem_holder);
+            let v = t.get(k.as_bytes(), u64::MAX, k_h, &mut v_mem_holder, 1);
             assert!(!v.is_empty())
         }
         for i in 8000..10000 {
             let k = get_test_key("key", i);
             let k_h = farmhash::fingerprint64(k.as_bytes());
             let mut v_mem_holder = vec![];
-            let v = t.get(k.as_bytes(), u64::MAX, k_h, &mut v_mem_holder);
+            let v = t.get(k.as_bytes(), u64::MAX, k_h, &mut v_mem_holder, 1);
             assert!(v.is_empty())
         }
     }
@@ -981,7 +988,7 @@ mod tests {
             let ver = 5 + r.gen_range(0..5) as u64;
             let k_h = farmhash::fingerprint64(k.as_bytes());
             let mut v_mem_holder = vec![];
-            let val = t.get(k.as_bytes(), ver, k_h, &mut v_mem_holder);
+            let val = t.get(k.as_bytes(), ver, k_h, &mut v_mem_holder, 1);
             if !val.is_empty() {
                 assert!(val.version <= ver);
             }

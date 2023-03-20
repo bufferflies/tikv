@@ -281,7 +281,7 @@ impl SnapAccessCore {
         let key_hash = farmhash::fingerprint64(key);
         for l0 in &self.data.l0_tbls {
             if let Some(tbl) = &l0.get_cf(cf) {
-                let v = tbl.get(key, version, key_hash, val_mem_holder);
+                let v = tbl.get(key, version, key_hash, val_mem_holder, 0);
                 path.l0 = path.l0.saturating_add(1);
                 if v.is_valid() {
                     return v;
@@ -392,7 +392,7 @@ impl SnapAccessCore {
             }
             let l0_cf = l0_cf.as_ref().unwrap();
             let mut val_mem_holder = vec![];
-            let val = l0_cf.get(key, u64::MAX, key_hash, &mut val_mem_holder);
+            let val = l0_cf.get(key, u64::MAX, key_hash, &mut val_mem_holder, 0);
             if val.is_valid() {
                 return !val.is_deleted();
             }
@@ -400,7 +400,7 @@ impl SnapAccessCore {
         for l in self.data.get_cf(cf).levels.as_slice() {
             if let Some(tbl) = l.get_table(key) {
                 let mut val_mem_holder = vec![];
-                let val = tbl.get(key, u64::MAX, key_hash, &mut val_mem_holder);
+                let val = tbl.get(key, u64::MAX, key_hash, &mut val_mem_holder, l.level);
                 if val.is_valid() {
                     return !val.is_deleted();
                 }
@@ -546,7 +546,7 @@ impl SnapAccessCore {
         }
         for l0 in &self.data.l0_tbls {
             if let Some(tbl) = &l0.get_cf(cf) {
-                let v = tbl.get_newer(key, version, key_hash, val_mem_holder);
+                let v = tbl.get_newer(key, version, key_hash, val_mem_holder, 0);
                 if v.is_valid() {
                     return v;
                 }

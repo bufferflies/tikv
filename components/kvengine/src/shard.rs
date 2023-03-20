@@ -948,7 +948,8 @@ impl LevelHandler {
         if tbl.is_none() {
             return table::Value::new();
         }
-        tbl.unwrap().get(key, version, key_hash, val_mem_holder)
+        tbl.unwrap()
+            .get(key, version, key_hash, val_mem_holder, self.level)
     }
 
     pub(crate) fn get_table(&self, key: &[u8]) -> Option<&SsTable> {
@@ -1007,7 +1008,7 @@ impl LevelHandler {
             return table::Value::new();
         }
         if let Some(tbl) = self.get_table(key) {
-            return tbl.get_newer(key, version, key_hash, val_mem_holder);
+            return tbl.get_newer(key, version, key_hash, val_mem_holder, self.level);
         }
         table::Value::new()
     }
