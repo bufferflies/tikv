@@ -19,9 +19,9 @@ use crate::table::{
     *,
 };
 
-// 10 minutes idle idx would be cleared.
-const IDX_TTL: u64 = 60 * 10;
-const FILTER_TTL: u64 = 60 * 3;
+// higher level ttl is longer than lower level.
+const IDX_TTL_LEVELS: [u64; 4] = [60 * 8, 60 * 4, 60 * 2, 60];
+const FILTER_TTL_LEVELS: [u64; 4] = [60 * 2, 60, 30, 15];
 
 #[derive(Clone)]
 pub struct SsTable {
@@ -260,11 +260,11 @@ impl SsTableCore {
             .expect("load old index")
     }
 
-    pub fn expire_cache(&self) {
+    pub fn expire_cache(&self, level: usize) {
         self.file.expire_open_file();
-        self.filter.expire(FILTER_TTL);
-        self.idx.expire(IDX_TTL);
-        self.old_idx.expire(IDX_TTL);
+        self.filter.expire(FILTER_TTL_LEVELS[level]);
+        self.idx.expire(IDX_TTL_LEVELS[level]);
+        self.old_idx.expire(IDX_TTL_LEVELS[level]);
     }
 
     pub fn has_open_file(&self) -> bool {
