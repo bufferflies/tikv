@@ -82,18 +82,22 @@ impl GcRunner {
         let entries = fs::read_dir(&self.kv.opts.local_dir)?;
         for e in entries {
             let entry = e?;
-            let meta = entry.metadata()?;
-            if !self.is_old_file(meta) {
-                continue;
-            }
             let path = entry.path();
             let path_str = path.to_str().unwrap();
             if path_str.ends_with(".tmp") {
+                let meta = entry.metadata()?;
+                if !self.is_old_file(meta) {
+                    continue;
+                }
                 Self::remove_file(store_id, &path)?;
             } else if path_str.ends_with(".sst") {
                 let id = sstable::parse_file_id(&path)?;
                 if !kv_file_ids.contains(&id) {
-                    Self::remove_file(store_id, &path)?;
+                    let _guard = self.kv.lock_file(id);
+                    let meta = fs::metadata(&path)?;
+                    if self.is_old_file(meta) {
+                        Self::remove_file(store_id, &path)?;
+                    }
                 }
             } else if !path_str.ends_with("LOCK") {
                 warn!("unexpected file {:?}", path);

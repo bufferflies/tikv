@@ -1085,7 +1085,7 @@ mod tests {
         assert!(rx.recv().unwrap());
         let data = std::fs::read(&local_file).unwrap();
         assert_eq!(&data, &file_data);
-        let file = LocalFile::open(321, &local_file).unwrap();
+        let file = LocalFile::open(321, &local_file, false).unwrap();
         assert_eq!(file.size(), 8u64);
         assert_eq!(file.id(), 321u64);
         let data = file.read(0, 8).unwrap();

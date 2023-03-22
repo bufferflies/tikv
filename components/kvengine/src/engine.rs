@@ -9,8 +9,8 @@ use std::{
     path::PathBuf,
     str::FromStr,
     sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Mutex, MutexGuard,
     },
     thread,
     time::Duration,
@@ -57,6 +57,8 @@ impl Debug for Engine {
     }
 }
 
+const FILE_LOCK_SLOTS: usize = 1024;
+
 impl Engine {
     pub fn open(
         fs: Arc<dyn dfs::Dfs>,
@@ -90,6 +92,7 @@ impl Engine {
         let (free_tx, free_rx) = mpsc::unbounded();
         let compression_lvl = opts.table_builder_options.compression_lvl;
         let allow_fallback_local = opts.allow_fallback_local;
+        let file_locks = (0..FILE_LOCK_SLOTS).map(|_| Mutex::new(())).collect();
         let core = EngineCore {
             engine_id: AtomicU64::new(meta_iter.engine_id()),
             shards: DashMap::new(),
@@ -109,6 +112,8 @@ impl Engine {
             tmp_file_id: AtomicU64::new(0),
             rate_limiter,
             free_tx,
+            loaded: AtomicBool::new(false),
+            file_locks,
         };
         let en = Engine {
             core: Arc::new(core),
@@ -117,6 +122,7 @@ impl Engine {
         let metas = en.read_meta(meta_iter)?;
         info!("engine load {} shards", metas.len());
         en.load_shards(metas, recoverer)?;
+        en.loaded.store(true, Ordering::Relaxed);
         let flush_en = en.clone();
         thread::Builder::new()
             .name("flush".to_string())
@@ -210,6 +216,8 @@ pub struct EngineCore {
     pub(crate) tmp_file_id: AtomicU64,
     pub(crate) rate_limiter: Arc<IoRateLimiter>,
     pub(crate) free_tx: mpsc::Sender<CfTable>,
+    pub(crate) loaded: AtomicBool,
+    pub(crate) file_locks: Vec<Mutex<()>>,
 }
 
 impl EngineCore {
@@ -580,6 +588,13 @@ impl EngineCore {
 
     pub fn get_cache_size(&self) -> u64 {
         self.cache.weighted_size()
+    }
+
+    // lock_file is used to prevent race between local file gc and
+    // prepare_change_set.
+    pub fn lock_file(&self, file_id: u64) -> MutexGuard<'_, ()> {
+        let idx = file_id as usize % FILE_LOCK_SLOTS;
+        self.file_locks[idx].lock().unwrap()
     }
 }
 

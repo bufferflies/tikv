@@ -46,7 +46,10 @@ pub struct LocalFile {
 }
 
 impl LocalFile {
-    pub fn open(id: u64, path: &Path) -> table::Result<LocalFile> {
+    pub fn open(id: u64, path: &Path, set_mtime: bool) -> table::Result<LocalFile> {
+        if set_mtime {
+            filetime::set_file_mtime(path, filetime::FileTime::now())?;
+        }
         let meta = std::fs::metadata(path)?;
         let local_file = LocalFile {
             id,

@@ -1,6 +1,6 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{collections::HashMap, io::Write, path::PathBuf};
+use std::{collections::HashMap, io::Write, path::PathBuf, sync::atomic::Ordering::Relaxed};
 
 use bytes::{Buf, Bytes};
 use file_system::{IoOp, IoType};
@@ -191,13 +191,20 @@ impl EngineCore {
     }
 
     fn open_sstable_file(&self, id: u64) -> Result<LocalFile> {
-        Ok(LocalFile::open(id, self.local_sst_file_path(id).as_path())?)
+        let _guard = self.lock_file(id);
+        Ok(LocalFile::open(
+            id,
+            self.local_sst_file_path(id).as_path(),
+            self.loaded.load(Relaxed),
+        )?)
     }
 
     fn open_blob_table_file(&self, id: u64) -> Result<LocalFile> {
+        let _guard = self.lock_file(id);
         Ok(LocalFile::open(
             id,
             self.local_blob_file_path(id).as_path(),
+            self.loaded.load(Relaxed),
         )?)
     }
 
