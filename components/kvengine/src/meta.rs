@@ -125,14 +125,6 @@ impl ShardMeta {
     fn delete_file(&mut self, id: u64, level: u32) {
         if self.has_file_at_level(id, level) {
             self.files.remove(&id);
-        } else {
-            warn!(
-                "{} ShardMeta.delete_file: already deleted or level not match, request {}(L{}), current {:?}",
-                self.tag(),
-                id,
-                level,
-                self.file_level(id),
-            );
         }
     }
 
@@ -186,6 +178,10 @@ impl ShardMeta {
         }
         if cs.has_restore_shard() {
             self.apply_restore_shard(cs);
+            return;
+        }
+        if cs.has_major_compaction() {
+            self.apply_major_compaction(cs.get_major_compaction());
             return;
         }
         if !cs.get_property_key().is_empty() {
@@ -259,6 +255,25 @@ impl ShardMeta {
         false
     }
 
+    pub fn is_duplicated_major_compaction(&self, comp: &mut pb::MajorCompaction) -> bool {
+        let ssts_already_deleted = comp
+            .get_sstable_change()
+            .get_table_deletes()
+            .iter()
+            .any(|sst_delete| !self.has_file_at_level(sst_delete.get_id(), sst_delete.get_level()));
+        let blobs_already_deleted = comp
+            .get_old_blob_tables()
+            .iter()
+            .any(|blob_tbl_delete| !self.has_file_at_level(*blob_tbl_delete, BLOB_LEVEL));
+        if ssts_already_deleted || blobs_already_deleted {
+            info!("{} skip duplicated major compaction {:?}", self.tag(), comp);
+            // set compaction to be conflicted, so that newly created files will be GCed.
+            comp.conflicted = true;
+            return true;
+        }
+        false
+    }
+
     pub fn is_duplicated_change_set(&self, cs: &mut pb::ChangeSet) -> bool {
         if cs.sequence > 0 && self.seq >= cs.sequence {
             info!("{} skip duplicated change {:?}", self.tag(), cs);
@@ -285,6 +300,12 @@ impl ShardMeta {
         if cs.has_compaction() {
             let comp = cs.mut_compaction();
             if self.is_duplicated_compaction(comp) {
+                return true;
+            }
+        }
+        if cs.has_major_compaction() {
+            let comp = cs.mut_major_compaction();
+            if self.is_duplicated_major_compaction(comp) {
                 return true;
             }
         }
@@ -397,6 +418,33 @@ impl ShardMeta {
                 tbl.get_smallest(),
                 tbl.get_biggest(),
             )
+        }
+    }
+
+    fn apply_major_compaction(&mut self, comp: &pb::MajorCompaction) {
+        for delete in comp.get_sstable_change().get_table_deletes() {
+            self.delete_file(delete.get_id(), delete.get_level());
+        }
+        for create in comp.get_sstable_change().get_table_creates() {
+            self.add_file(
+                create.id,
+                create.cf,
+                create.level,
+                create.get_smallest(),
+                create.get_biggest(),
+            );
+        }
+        for delete in comp.get_old_blob_tables() {
+            self.delete_file(*delete, BLOB_LEVEL);
+        }
+        for create in comp.get_new_blob_tables() {
+            self.add_file(
+                create.get_id(),
+                -1,
+                BLOB_LEVEL,
+                create.get_smallest(),
+                create.get_biggest(),
+            );
         }
     }
 

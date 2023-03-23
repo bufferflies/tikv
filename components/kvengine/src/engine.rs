@@ -257,7 +257,7 @@ impl EngineCore {
         let engine_id = self.engine_id.load(Ordering::Acquire);
         let shard = Shard::new_for_ingest(engine_id, &cs, self.opts.clone());
         shard.set_active(active);
-        let (l0s, blobs, scfs) = create_snapshot_tables(cs.get_snapshot(), &cs);
+        let (l0s, blob_tbls, scfs) = create_snapshot_tables(cs.get_snapshot(), &cs);
         let old_data = shard.get_data();
         let data = ShardData::new(
             shard.start.clone(),
@@ -267,7 +267,7 @@ impl EngineCore {
             old_data.trim_over_bound,
             vec![CfTable::new()],
             l0s,
-            blobs,
+            Arc::new(blob_tbls),
             scfs,
         );
         shard.set_data(data);

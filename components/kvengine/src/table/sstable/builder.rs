@@ -131,7 +131,7 @@ pub struct Builder {
     // field.
     kv_size: u64,
     /// Total size of the in use values stored in the blob table.
-    in_use_total_blob_size: u64,
+    total_blob_size: u64,
 }
 
 impl Builder {
@@ -172,6 +172,9 @@ impl Builder {
             self.block_builder
                 .set_last_entry_old_ver_if_zero(val.version);
             self.old_builder.add_entry(key, *val, external_link);
+            if let Some(external_link) = external_link {
+                self.total_blob_size += external_link.len as u64;
+            }
             self.old_entries += 1;
         } else {
             // Only try to finish block when the key is different than last.
@@ -184,6 +187,9 @@ impl Builder {
                     .finish_block(self.sst_fid, self.checksum_tp);
             }
             self.kv_size += (key.len() + val.user_meta_len() + val.value_len()) as u64;
+            if let Some(external_link) = external_link {
+                self.total_blob_size += external_link.len as u64;
+            }
             self.block_builder.add_entry(key, *val, external_link);
             self.key_hashes.push(farmhash::fingerprint64(key));
             if self.smallest.is_empty() {
@@ -295,7 +301,7 @@ impl Builder {
         Builder::add_property(
             buf,
             PROP_KEY_IN_USE_TOTAL_BLOB_SIZE.as_bytes(),
-            &self.in_use_total_blob_size.to_le_bytes(),
+            &self.total_blob_size.to_le_bytes(),
         );
         if self.checksum_tp == CRC32C {
             let checksum = crc32c::crc32c(&buf[(origin_len + 4)..]);
@@ -321,6 +327,10 @@ impl Builder {
 
     pub fn get_compression_level(&self) -> i32 {
         self.block_builder.compression_lvl
+    }
+
+    pub fn get_total_blob_size(&self) -> u64 {
+        self.total_blob_size
     }
 }
 

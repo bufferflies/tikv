@@ -21,7 +21,8 @@ pub struct EngineStats {
     pub l0_tables_count: usize,
     pub l0_tables_size: u64,
     pub blob_tables_count: usize,
-    pub blob_tables_size: u64,
+    pub in_use_blob_size: u64,
+    pub total_blob_size: u64,
     pub partial_l0_count: usize,
     pub partial_blob_count: usize,
     pub partial_ln_count: usize,
@@ -93,7 +94,8 @@ impl super::Engine {
             engine_stats.l0_tables_count += shard.l0_table_count;
             engine_stats.l0_tables_size += shard.l0_table_size;
             engine_stats.blob_tables_count += shard.blob_table_count;
-            engine_stats.blob_tables_size += shard.blob_table_size;
+            engine_stats.in_use_blob_size += shard.in_use_blob_size;
+            engine_stats.total_blob_size += shard.total_blob_size;
             engine_stats.partial_l0_count += shard.partial_l0s;
             engine_stats.partial_blob_count += shard.partial_blobs;
             engine_stats.partial_ln_count += shard.partial_tbls;
@@ -144,9 +146,12 @@ pub struct ShardStats {
     pub mem_table_size: u64,
     pub l0_table_count: usize,
     pub blob_table_count: usize,
+    pub in_use_blob_size: u64,
+    pub total_blob_size: u64,
+
     pub l0_table_size: u64,
-    pub blob_table_size: u64,
     pub cfs: Vec<CfStats>,
+
     pub index_size: u64,
     pub in_mem_index_size: u64,
     pub filter_size: u64,
@@ -165,7 +170,7 @@ pub struct ShardStats {
     pub partial_blobs: usize,
     pub partial_tbls: usize,
     pub compaction_cf: isize,
-    pub compaction_level: usize,
+    pub compaction_level: isize,
     pub compaction_score: f64,
     pub has_over_bound_data: bool,
     pub has_del_prefixes: bool,
@@ -197,6 +202,7 @@ pub struct LevelStats {
     pub old_entries: usize,
     pub tombs: usize,
     pub kv_size: u64,
+    pub in_use_blob_size: u64,
 }
 
 #[derive(Default, Serialize, Deserialize, Debug)]
@@ -233,26 +239,22 @@ impl super::Shard {
         let mut partial_l0s = 0;
         let mut partial_blobs = 0;
         let l0_table_count = data.l0_tbls.len();
-        let blob_table_count;
         let mut l0_table_size = 0;
+        let mut total_blob_size = 0;
+        let mut in_use_blob_size = 0;
+        let blob_table_count = data.blob_tbl_map.len();
+        // FIXME: Calculate the total size of blob files.
         let mut blob_table_size = 0;
-        if let Some(blob_tbl_map) = &data.blob_tbl_map {
-            blob_table_count = blob_tbl_map.len();
-            // FIXME: Calculate the total size of blob files.
-            let mut blob_table_size = 0;
-            for v in blob_tbl_map.values() {
-                if self.cover_full_table(v.smallest_key(), v.biggest_key()) {
-                    blob_table_size += v.size();
-                } else {
-                    blob_table_size += v.size() / 2;
-                    partial_blobs += 1;
-                }
+        for v in data.blob_tbl_map.values() {
+            if self.cover_full_table(v.smallest_key(), v.biggest_key()) {
+                blob_table_size += v.size();
+            } else {
+                blob_table_size += v.size() / 2;
+                partial_blobs += 1;
             }
-            total_size += blob_table_size;
-        } else {
-            blob_table_size = 0;
-            blob_table_count = 0;
         }
+        total_size += blob_table_size;
+        total_blob_size += blob_table_size;
         for l0_tbl in data.l0_tbls.as_slice() {
             if self.cover_full_table(l0_tbl.smallest(), l0_tbl.biggest()) {
                 l0_table_size += l0_tbl.size();
@@ -276,6 +278,7 @@ impl super::Shard {
                             open_files += 1;
                         }
                     }
+                    in_use_blob_size += cf_tbl.total_blob_size();
                 }
             }
         }
@@ -306,6 +309,7 @@ impl super::Shard {
                         if cf == WRITE_CF {
                             level_stats.kv_size += t.kv_size;
                         }
+                        level_stats.in_use_blob_size += t.total_blob_size();
                     } else {
                         level_stats.data_size += t.size() / 2;
                         level_stats.index_size += t.index_size() / 2;
@@ -317,6 +321,7 @@ impl super::Shard {
                             level_stats.kv_size += t.kv_size / 2;
                         }
                         partial_tbls += 1;
+                        level_stats.in_use_blob_size += t.total_blob_size() / 2;
                     }
                     level_stats.max_ts = max_ts_by_cf(level_stats.max_ts, cf, t.max_ts);
                 }
@@ -330,14 +335,15 @@ impl super::Shard {
                 old_entries += level_stats.old_entries;
                 tombs += level_stats.tombs;
                 kv_size += level_stats.kv_size;
+                in_use_blob_size += level_stats.in_use_blob_size;
                 cf_stat.levels.push(level_stats);
             }
             cfs.push(cf_stat);
         }
         let priority = self.compaction_priority.read().unwrap().clone();
-        let compaction_cf = priority.as_ref().map_or(0, |x| x.cf);
-        let compaction_level = priority.as_ref().map_or(0, |x| x.level);
-        let compaction_score = priority.as_ref().map_or(0f64, |x| x.score);
+        let compaction_cf = priority.as_ref().map_or(0, |x| x.cf());
+        let compaction_level = priority.as_ref().map_or(0, |x| x.level());
+        let compaction_score = priority.as_ref().map_or(0f64, |x| x.score());
         ShardStats {
             id: self.id,
             ver: self.ver,
@@ -351,7 +357,8 @@ impl super::Shard {
             l0_table_count,
             blob_table_count,
             l0_table_size,
-            blob_table_size,
+            total_blob_size,
+            in_use_blob_size,
             cfs,
             base_version: self.get_base_version(),
             meta_sequence: self.get_meta_sequence(),

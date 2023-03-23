@@ -74,8 +74,7 @@ impl<S: Snapshot> DuplicateDetector<S> {
 
     fn move_to_next_import_key(&mut self) -> Option<(Vec<u8>, TimeStamp)> {
         while self.iter.valid() {
-            let item = self.iter.item();
-            let user_meta = UserMeta::from_slice(item.user_meta());
+            let user_meta = UserMeta::from_slice(self.iter.user_meta());
             let (current_key, commit_ts) = (self.iter.key(), TimeStamp::from(user_meta.commit_ts));
             if commit_ts > self.min_commit_ts {
                 return Some((current_key.to_vec(), commit_ts));
@@ -91,7 +90,9 @@ impl<S: Snapshot> DuplicateDetector<S> {
         end_commit_ts: TimeStamp,
         duplicate_pairs: &mut Vec<KvPair>,
     ) -> Result<()> {
-        let (_, latest_write) = parse_write(self.iter.item());
+        let user_meta = UserMeta::from_slice(self.iter.user_meta());
+        let val = self.iter.val();
+        let (_, latest_write) = parse_write(&user_meta, val);
         if latest_write.write_type == WriteType::Delete {
             return Err(Error::Engine(box_err!(
                 "found a {:?} key with commits ts {} larger than min_commit_ts of importer {}",
@@ -109,7 +110,9 @@ impl<S: Snapshot> DuplicateDetector<S> {
 
         self.iter.next();
         while self.iter.valid() && self.iter.key() == start_key {
-            let (commit_ts, write) = parse_write(self.iter.item());
+            let user_meta = UserMeta::from_slice(self.iter.user_meta());
+            let val = self.iter.val();
+            let (commit_ts, write) = parse_write(&user_meta, val);
             if commit_ts <= self.min_commit_ts {
                 self.skip_all_version(&start_key);
                 return Ok(());

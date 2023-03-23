@@ -65,6 +65,7 @@ pub struct L0TableCore {
     kv_size: u64,
     smallest: Bytes,
     biggest: Bytes,
+    total_blob_size: u64,
 }
 
 impl L0TableCore {
@@ -104,6 +105,7 @@ impl L0TableCore {
             cfs[i] = Some(tbl)
         }
         let (smallest, biggest, max_ts) = Self::compute_smallest_biggest(&cfs);
+        let total_blob_size = Self::compute_total_blob_size(&cfs);
         Ok(Self {
             footer,
             file,
@@ -113,6 +115,7 @@ impl L0TableCore {
             kv_size,
             smallest,
             biggest,
+            total_blob_size,
         })
     }
 
@@ -141,6 +144,16 @@ impl L0TableCore {
         assert!(!smallest_buf.is_empty());
         assert!(!biggest_buf.is_empty());
         (smallest_buf.freeze(), biggest_buf.freeze(), max_ts)
+    }
+
+    fn compute_total_blob_size(cfs: &[Option<SsTable>; NUM_CFS]) -> u64 {
+        let mut total_blob_size = 0;
+        for i in 0..NUM_CFS {
+            if let Some(cf_tbl) = &cfs[i] {
+                total_blob_size += cf_tbl.total_blob_size();
+            }
+        }
+        total_blob_size
     }
 
     pub fn id(&self) -> u64 {
@@ -187,6 +200,10 @@ impl L0TableCore {
             .iter()
             .filter_map(|t| t.as_ref())
             .any(|t| t.has_overlap(start, end, false))
+    }
+
+    pub fn total_blob_size(&self) -> u64 {
+        self.total_blob_size
     }
 }
 
@@ -256,6 +273,14 @@ impl L0Builder {
             }
         }
         (smallest_buf.freeze(), biggest_buf.freeze())
+    }
+
+    pub fn total_blob_size(&self) -> u64 {
+        let mut total_blob_size = 0;
+        for builder in &self.builders {
+            total_blob_size += builder.get_total_blob_size();
+        }
+        total_blob_size
     }
 
     pub fn is_empty(&self) -> bool {

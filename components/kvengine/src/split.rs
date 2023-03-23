@@ -14,7 +14,7 @@ use dashmap::mapref::entry::Entry;
 use kvenginepb as pb;
 use slog_global::info;
 
-use crate::{table::blobtable::blobtable::BlobTable, *};
+use crate::*;
 
 impl Engine {
     pub fn split(&self, mut cs: pb::ChangeSet, initial_seq: u64) -> Result<()> {
@@ -71,22 +71,12 @@ impl Engine {
                     new_l0s.push(l0.clone());
                 }
             }
-            let new_blob_tbl_map = if let Some(blob_tbl_map) = &old_data.blob_tbl_map {
-                let mut new_blob_tbl_map = HashMap::<u64, BlobTable>::new();
-                for (k, v) in blob_tbl_map {
-                    assert_eq!(k, &v.id());
-                    if new_shard.overlap_table(v.smallest_key(), v.biggest_key()) {
-                        new_blob_tbl_map.insert(*k, v.clone());
-                    }
+            let mut new_blob_tbl_map = HashMap::new();
+            for blob_tbl in old_data.blob_tbl_map.values() {
+                if new_shard.overlap_table(blob_tbl.smallest_key(), blob_tbl.biggest_key()) {
+                    new_blob_tbl_map.insert(blob_tbl.id(), blob_tbl.clone());
                 }
-                if new_blob_tbl_map.is_empty() {
-                    None
-                } else {
-                    Some(new_blob_tbl_map)
-                }
-            } else {
-                None
-            };
+            }
             let mut new_cfs = [ShardCf::new(0), ShardCf::new(1), ShardCf::new(2)];
             for cf in 0..NUM_CFS {
                 let old_scf = old_data.get_cf(cf);
@@ -112,7 +102,7 @@ impl Engine {
                 old_data.trim_over_bound,
                 new_mem_tbls,
                 new_l0s,
-                new_blob_tbl_map,
+                Arc::new(new_blob_tbl_map),
                 new_cfs,
             );
             new_shard.set_data(new_data);
@@ -236,11 +226,9 @@ impl Engine {
         );
         let old_data = old_shard.get_data();
         let mem_tbls = old_data.mem_tbls.clone();
-        let mut blob_tbl_map = old_data.blob_tbl_map.clone();
-        if let Some(blob_tbl_map) = &mut blob_tbl_map {
-            for v in source.blob_tables.values() {
-                blob_tbl_map.insert(v.id(), v.clone());
-            }
+        let mut blob_tbl_map = old_data.blob_tbl_map.as_ref().clone();
+        for v in source.blob_tables.values() {
+            blob_tbl_map.insert(v.id(), v.clone());
         }
         let mut l0_tbls = old_data.l0_tbls.clone();
         for l0 in source.l0_tables.values() {
@@ -280,7 +268,7 @@ impl Engine {
             old_data.trim_over_bound,
             mem_tbls,
             l0_tbls,
-            blob_tbl_map,
+            Arc::new(blob_tbl_map),
             new_cfs,
         );
         new_shard.set_data(data);

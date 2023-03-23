@@ -174,13 +174,15 @@ impl<S: Snapshot> CloudStore<S> {
         }
         stats.lock.seek += 1;
         while lock_iter.valid() {
-            let key = Key::from_raw(lock_iter.key());
-            let item = lock_iter.item();
+            let raw_key = lock_iter.key();
+            let key = Key::from_raw(raw_key);
+            let raw_key_len = raw_key.len();
+            let val = lock_iter.val();
             stats.lock.next += 1;
             stats.lock.flow_stats.read_keys += 1;
-            stats.lock.flow_stats.read_bytes += lock_iter.key().len() + item.value_len();
+            stats.lock.flow_stats.read_bytes += raw_key_len + val.len();
             stats.lock.processed_keys += 1;
-            let lock = Lock::parse(item.get_value())?;
+            let lock = Lock::parse(val)?;
             Lock::check_ts_conflict(
                 Cow::Borrowed(&lock),
                 &key,
@@ -306,16 +308,16 @@ impl CloudStoreScanner {
                 return Ok(None);
             }
             let iter_key = self.iter.key();
-            let item = self.iter.item();
+            let key_len = iter_key.len();
+            let key = Key::from_raw(iter_key);
+            let user_meta = UserMeta::from_slice(self.iter.user_meta());
+            let val = self.iter.val();
             self.stats.write.next += 1;
             self.stats.write.flow_stats.read_keys += 1;
-            self.stats.write.flow_stats.read_bytes += iter_key.len() + item.value_len();
+            self.stats.write.flow_stats.read_bytes += key_len + val.len();
             self.stats.write.processed_keys += 1;
-            self.stats.processed_size += iter_key.len() + item.value_len();
-            let val = item.get_value();
+            self.stats.processed_size += key_len + val.len();
             if !val.is_empty() || self.output_delete {
-                let user_meta = UserMeta::from_slice(item.user_meta());
-                let key = Key::from_raw(iter_key);
                 return Ok(Some((key, user_meta, val.to_vec())));
             }
             self.stats.write.next_tombstone += 1;

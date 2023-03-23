@@ -76,6 +76,15 @@ impl EngineCore {
                 ids.insert(blob.id, BLOB_LEVEL);
             }
         }
+        if cs.has_major_compaction() {
+            let major_comp = cs.get_major_compaction();
+            for tbl in major_comp.get_sstable_change().get_table_creates() {
+                ids.insert(tbl.get_id(), tbl.get_level());
+            }
+            for blob in major_comp.get_new_blob_tables() {
+                ids.insert(blob.get_id(), BLOB_LEVEL);
+            }
+        }
         self.load_tables_by_ids(cs.shard_id, cs.shard_ver, ids, &mut cs, use_direct_io)?;
         Ok(cs)
     }
@@ -100,6 +109,11 @@ impl EngineCore {
         cs: &mut ChangeSet,
         use_direct_io: bool,
     ) -> Result<()> {
+        info!(
+            "load tables by ids";
+            "shard_id" => shard_id,
+            "ids" => ?cs,
+        );
         let (result_tx, result_rx) = tikv_util::mpsc::bounded(ids.len());
         let runtime = self.fs.get_runtime();
         let opts = dfs::Options::new(shard_id, shard_ver);

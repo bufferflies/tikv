@@ -36,6 +36,12 @@ pub struct Options {
 
     pub min_blob_size: u32,
 
+    pub max_blob_table_size: usize,
+
+    pub blob_table_gc_ratio: f64,
+
+    pub blob_prefetch_size: usize,
+
     pub max_del_range_delay: Duration,
 }
 
@@ -53,6 +59,9 @@ impl Default for Options {
             max_mem_table_size: 96 << 20,
             allow_fallback_local: true,
             min_blob_size: 0,
+            max_blob_table_size: 64 * 1024 * 1024,
+            blob_table_gc_ratio: 0.5,
+            blob_prefetch_size: 256 * 1024,
             max_del_range_delay: Duration::from_secs(3600),
         }
     }

@@ -432,23 +432,51 @@ impl Shard {
     }
 
     fn refresh_compaction_priority(&self) {
-        let mut max_pri = CompactionPriority::default();
-        max_pri.shard_id = self.id;
-        max_pri.shard_ver = self.ver;
-        max_pri.cf = -1;
         let data = self.get_data();
+        if !data.blob_tbl_map.is_empty() {
+            let blob_table_utilization = {
+                let mut in_use_blob_size = 0;
+                let mut total_blob_size = 0;
+                for l0 in &data.l0_tbls {
+                    in_use_blob_size += l0.total_blob_size();
+                }
+                for cf in &data.cfs {
+                    for lh in &cf.levels {
+                        for sst in &(*lh.tables) {
+                            in_use_blob_size += sst.total_blob_size();
+                        }
+                    }
+                }
+
+                for blob_table in data.blob_tbl_map.values() {
+                    total_blob_size += blob_table.total_blob_size();
+                }
+                if total_blob_size == 0 {
+                    1.0
+                } else {
+                    in_use_blob_size as f64 / total_blob_size as f64
+                }
+            };
+            if blob_table_utilization < self.opt.blob_table_gc_ratio {
+                let mut lock = self.compaction_priority.write().unwrap();
+                *lock = Some(CompactionPriority::Major);
+                return;
+            }
+        }
+        let mut score = 0.0;
+        let mut cf_with_highest_score = -1;
+        let mut level_with_highest_score = 0;
         if data.l0_tbls.len() > 2 {
             let size_score = data.get_l0_total_size() as f64 / self.opt.base_size as f64;
             let num_tbl_score = data.l0_tbls.len() as f64 / 4.0;
-            max_pri.score = size_score * 0.6 + num_tbl_score * 0.4;
+            score = size_score * 0.6 + num_tbl_score * 0.4;
         }
-        // FIXME: Does this apply to blob tables too?
         for l0 in &data.l0_tbls {
             if !data.cover_full_table(l0.smallest(), l0.biggest()) {
                 // set highest priority for newly split L0.
-                max_pri.score += 2.0;
+                score += 2.0;
                 let mut lock = self.compaction_priority.write().unwrap();
-                *lock = Some(max_pri);
+                *lock = Some(CompactionPriority::L0 { score });
                 return;
             }
         }
@@ -456,17 +484,31 @@ impl Shard {
             let scf = data.get_cf(cf);
             for lh in &scf.levels[..scf.levels.len() - 1] {
                 let level_total_size = data.get_level_total_size(lh);
-                let score = level_total_size as f64
+                let lvl_score = level_total_size as f64
                     / ((self.opt.base_size as f64) * 10f64.powf((lh.level - 1) as f64));
-                if max_pri.score < score {
-                    max_pri.score = score;
-                    max_pri.level = lh.level;
-                    max_pri.cf = cf as isize;
+                if score < lvl_score {
+                    score = lvl_score;
+                    level_with_highest_score = lh.level;
+                    cf_with_highest_score = cf as isize;
                 }
             }
         }
+        let priority = if score > 1.0 {
+            let max_pri = if level_with_highest_score == 0 {
+                CompactionPriority::L0 { score }
+            } else {
+                CompactionPriority::L1Plus {
+                    cf: cf_with_highest_score,
+                    level: level_with_highest_score,
+                    score,
+                }
+            };
+            Some(max_pri)
+        } else {
+            None
+        };
         let mut lock = self.compaction_priority.write().unwrap();
-        *lock = (max_pri.score > 1.0).then_some(max_pri);
+        *lock = priority;
     }
 
     pub(crate) fn get_compaction_priority(&self) -> Option<CompactionPriority> {
@@ -561,7 +603,7 @@ impl ShardData {
             false,
             vec![CfTable::new()],
             vec![],
-            None,
+            Arc::new(HashMap::new()),
             [ShardCf::new(0), ShardCf::new(1), ShardCf::new(2)],
         )
     }
@@ -574,10 +616,11 @@ impl ShardData {
         trim_over_bound: bool,
         mem_tbls: Vec<memtable::CfTable>,
         l0_tbls: Vec<L0Table>,
-        blob_tbl_map: Option<HashMap<u64, BlobTable>>,
+        blob_tbl_map: Arc<HashMap<u64, BlobTable>>,
         cfs: [ShardCf; 3],
     ) -> Self {
         assert!(!mem_tbls.is_empty());
+
         Self {
             core: Arc::new(ShardDataCore {
                 start,
@@ -602,7 +645,7 @@ pub(crate) struct ShardDataCore {
     pub(crate) trim_over_bound: bool,
     pub(crate) mem_tbls: Vec<memtable::CfTable>,
     pub(crate) l0_tbls: Vec<L0Table>,
-    pub(crate) blob_tbl_map: Option<HashMap<u64, BlobTable>>,
+    pub(crate) blob_tbl_map: Arc<HashMap<u64, BlobTable>>,
     pub(crate) cfs: [ShardCf; 3],
 }
 
@@ -620,10 +663,8 @@ impl ShardDataCore {
         for l0 in &self.l0_tbls {
             files.push(l0.id());
         }
-        if let Some(blob_tbl_map) = &self.blob_tbl_map {
-            for v in blob_tbl_map.values() {
-                files.push(v.id());
-            }
+        for blob_tbl_id in self.blob_tbl_map.keys() {
+            files.push(*blob_tbl_id);
         }
         self.for_each_level(|_cf, lh| {
             for tbl in lh.tables.iter() {
@@ -680,6 +721,20 @@ impl ShardDataCore {
         });
         (total_size, total_entries, total_kv_size, max_ts)
     }
+
+    // Return (total_size, total_blob_size).
+    // pub(crate) fn get_blob_total_size(&self) -> u64 {
+    // let mut total_size = 0u64;
+    //
+    // self.blob_tbls.iter().for_each(|blob_tbl| {
+    // if self.cover_full_table(blob_tbl.smallest_key(), blob_tbl.biggest_key()) {
+    // total_size += blob_tbl.size();
+    // } else {
+    // total_size += blob_tbl.size() / 2;
+    // };
+    // });
+    // total_size
+    // }
 
     pub(crate) fn get_level_total_size(&self, level: &LevelHandler) -> u64 {
         let (total_size, ..) = self.get_level_stats(level);
@@ -870,21 +925,6 @@ impl ShardCf {
             levels.push(LevelHandler::new(j, vec![]));
         }
         Self { levels }
-    }
-
-    pub(crate) fn set_has_overlapping(&self, cd: &mut CompactDef) {
-        if cd.move_down() {
-            return;
-        }
-        let kr = get_key_range(&cd.top);
-        for lvl_idx in (cd.level + 1)..self.levels.len() {
-            let lh = &self.levels[lvl_idx];
-            let (left, right) = lh.overlapping_tables(&kr);
-            if left < right {
-                cd.has_overlap = true;
-                return;
-            }
-        }
     }
 
     pub(crate) fn get_level(&self, level: usize) -> &LevelHandler {

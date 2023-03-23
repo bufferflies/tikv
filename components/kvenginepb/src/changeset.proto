@@ -37,6 +37,7 @@ message ChangeSet {
   TableChange truncate_ts = 19;
   TableChange trim_over_bound = 20;
   Snapshot restore_shard = 21;
+  MajorCompaction major_compaction = 22;
 }
 
 message Compaction {
@@ -48,12 +49,19 @@ message Compaction {
   bool conflicted = 6;
 }
 
+message MajorCompaction {
+  TableChange sstableChange = 1;
+  repeated BlobCreate newBlobTables = 2;
+  repeated uint64 oldBlobTables = 3;
+  bool conflicted = 4;
+}
+
 message Flush {
   L0Create l0Create = 1;
   Properties properties = 2;
   uint64 version = 3;
-  BlobCreate BlobCreate = 4;
   uint64 max_ts = 5;
+  BlobCreate BlobCreate = 4;
 }
 
 message Snapshot {

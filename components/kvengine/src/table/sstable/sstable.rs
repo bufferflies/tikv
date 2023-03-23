@@ -468,6 +468,10 @@ impl SsTableCore {
     pub fn compression_type(&self) -> u8 {
         self.footer.compression_type
     }
+
+    pub fn total_blob_size(&self) -> u64 {
+        self.in_use_total_blob_size
+    }
 }
 
 #[derive(Clone)]

@@ -51,14 +51,19 @@ pub const PROP_KEY_SMALLEST: &str = "smallest_key";
 pub struct BlobFooter {
     pub properties_offset: u32,
     pub version: u64,
-    pub total_blob_size: u32,
+    pub total_blob_size: u64,
     pub compression_type: u8,
     pub checksum_type: u8,
     pub blob_format_version: u16,
+    pub compression_lvl: i32,
+    pub min_blob_size: u32,
     pub magic: u32,
 }
 
-pub const BLOB_FOOTER_SIZE: usize = mem::size_of::<BlobFooter>();
+pub const BLOB_TABLE_FOOTER_SIZE: usize = mem::size_of::<BlobFooter>();
+pub const BLOB_ENTRY_META_SIZE: usize = mem::size_of::<Checksum>() + mem::size_of::<ValueLength>();
+pub const BLOB_ENTRY_LENGTH_OFFSET: usize = mem::size_of::<Checksum>();
+pub const BLOB_ENTRY_VALUE_OFFSET: usize = BLOB_ENTRY_META_SIZE;
 
 impl BlobFooter {
     pub fn data_len(&self) -> usize {
@@ -66,7 +71,7 @@ impl BlobFooter {
     }
 
     pub fn properties_len(&self, table_size: usize) -> usize {
-        table_size - BLOB_FOOTER_SIZE - self.properties_offset as usize
+        table_size - BLOB_TABLE_FOOTER_SIZE - self.properties_offset as usize
     }
 
     pub fn unmarshal(&mut self, data: &[u8]) {
@@ -76,7 +81,7 @@ impl BlobFooter {
 
     pub fn marshal(&self) -> &[u8] {
         let footer_ptr = self as *const BlobFooter as *const u8;
-        unsafe { slice::from_raw_parts(footer_ptr, BLOB_FOOTER_SIZE) }
+        unsafe { slice::from_raw_parts(footer_ptr, BLOB_TABLE_FOOTER_SIZE) }
     }
 }
 
@@ -87,22 +92,30 @@ pub struct BlobTableBuilder {
     checksum_tp: u8,
     compression_tp: u8,
     compression_lvl: i32,
-    total_blob_size: u32,
+    min_blob_size: u32,
+    total_blob_size: u64,
     smallest_key: Vec<u8>,
-    last_key: Vec<u8>,
+    biggest_key: Vec<u8>,
 }
 
 impl BlobTableBuilder {
-    pub fn new(fid: u64, checksum_tp: u8, compression_tp: u8, compression_lvl: i32) -> Self {
+    pub fn new(
+        fid: u64,
+        checksum_tp: u8,
+        compression_tp: u8,
+        compression_lvl: i32,
+        min_blob_size: u32,
+    ) -> Self {
         Self {
             fid,
             buf: vec![],
             checksum_tp,
             compression_tp,
             compression_lvl,
+            min_blob_size,
             total_blob_size: 0,
             smallest_key: vec![],
-            last_key: vec![],
+            biggest_key: vec![],
         }
     }
 
@@ -111,67 +124,60 @@ impl BlobTableBuilder {
         self.buf.clear();
         self.total_blob_size = 0;
         self.smallest_key.clear();
-        self.last_key.clear();
+        self.biggest_key.clear();
         self.smallest_key.clear();
     }
 
-    pub fn add(&mut self, key: &[u8], value: &Value) -> (BlobOffset, ValueLength) {
-        if value.value_len() > BlobOffset::max_value() as usize {
-            panic!(
-                "value length {} exceeds max value length {}",
-                value.value_len(),
-                BlobOffset::max_value()
-            );
-        }
-        if self.total_blob_size as usize + value.value_len() > BlobOffset::max_value() as usize {
-            panic!(
-                "total blob size {} exceeds max blob size {}",
-                self.total_blob_size as usize + value.value_len(),
-                BlobOffset::max_value()
-            );
-        }
+    pub fn add_blob(
+        &mut self,
+        key: &[u8],
+        blob: &[u8],
+        need_compress_blob: bool,
+    ) -> (BlobOffset, ValueLength) {
+        assert!(blob.len() >= self.min_blob_size as usize);
+        assert!(blob.len() <= ValueLength::max_value() as usize);
+        assert!(self.total_blob_size as usize + blob.len() <= BlobOffset::max_value() as usize);
         if self.smallest_key.is_empty() {
             self.smallest_key = key.to_vec();
         }
-        if !key.eq(&self.last_key) {
-            // TODO: move old versions to a different section.
-            self.last_key = key.to_vec();
+        if self.biggest_key.as_slice() < key {
+            self.biggest_key.clear();
+            self.biggest_key.extend_from_slice(key);
         }
-        self.total_blob_size += value.value_len() as BlobOffset;
+        self.total_blob_size += blob.len() as u64;
 
         let begin_off = self.buf.len();
-        self.buf.resize(
-            self.buf.len() + mem::size_of::<Checksum>() + mem::size_of::<ValueLength>(),
-            0,
-        );
-        let compressed_len = match self.compression_tp {
-            NO_COMPRESSION => {
-                self.buf.extend_from_slice(value.get_value());
-                value.value_len()
+        self.buf.resize(self.buf.len() + BLOB_ENTRY_META_SIZE, 0);
+        let compressed_len = if need_compress_blob {
+            match self.compression_tp {
+                NO_COMPRESSION => {
+                    self.buf.extend_from_slice(blob);
+                    blob.len()
+                }
+                LZ4_COMPRESSION => Self::compress_lz4(blob, &mut self.buf),
+                ZSTD_COMPRESSION => Self::compress_zstd(blob, self.compression_lvl, &mut self.buf),
+                _ => panic!("unexpected compression type {}", self.compression_tp),
             }
-            LZ4_COMPRESSION => Self::compress_lz4(value.get_value(), &mut self.buf),
-            ZSTD_COMPRESSION => {
-                Self::compress_zstd(value.get_value(), self.compression_lvl, &mut self.buf)
-            }
-            _ => panic!("unexpected compression type {}", self.compression_tp),
+        } else {
+            self.buf.extend_from_slice(blob);
+            blob.len()
         };
 
-        self.buf.put_u32_le(value.value_len() as ValueLength);
-        self.buf.extend_from_slice(value.get_value());
         let mut checksum = 0u32;
         if self.checksum_tp == CRC32C {
-            checksum = crc32c::crc32c(
-                &self.buf
-                    [(begin_off + mem::size_of::<Checksum>() + mem::size_of::<ValueLength>())..],
-            );
+            checksum = crc32c::crc32c(&self.buf[(begin_off + BLOB_ENTRY_VALUE_OFFSET)..]);
         }
         let slice = self.buf.as_mut_slice();
         LittleEndian::write_u32(&mut slice[begin_off..], checksum); // put checksum at the reserved place.
         LittleEndian::write_u32(
-            &mut slice[begin_off + mem::size_of::<Checksum>()..],
+            &mut slice[begin_off + BLOB_ENTRY_LENGTH_OFFSET..],
             compressed_len as ValueLength,
         ); // put compressed length at the reserved place.
         (begin_off as BlobOffset, compressed_len as ValueLength)
+    }
+
+    pub fn add(&mut self, key: &[u8], value: &Value) -> (BlobOffset, ValueLength) {
+        self.add_blob(key, value.get_value(), true)
     }
 
     fn compress_lz4(uncompressed: &[u8], compressed_buf: &mut Vec<u8>) -> usize {
@@ -228,7 +234,7 @@ impl BlobTableBuilder {
 
         let properties_offset = buf.len();
         BlobTableBuilder::add_property(&mut buf, PROP_KEY_SMALLEST.as_bytes(), &self.smallest_key);
-        BlobTableBuilder::add_property(&mut buf, PROP_KEY_BIGGEST.as_bytes(), &self.last_key);
+        BlobTableBuilder::add_property(&mut buf, PROP_KEY_BIGGEST.as_bytes(), &self.biggest_key);
 
         let mut footer = BlobFooter::default();
         footer.properties_offset = properties_offset as u32;
@@ -236,6 +242,8 @@ impl BlobTableBuilder {
         footer.compression_type = self.compression_tp;
         footer.checksum_type = self.checksum_tp;
         footer.blob_format_version = BLOB_FORMAT_V1;
+        footer.compression_lvl = self.compression_lvl;
+        footer.min_blob_size = self.min_blob_size;
         footer.magic = BLOB_MAGIC_NUMBER;
         buf.extend_from_slice(footer.marshal());
         buf.freeze()
@@ -250,6 +258,10 @@ impl BlobTableBuilder {
     }
 
     pub fn smallest_biggest_key(&self) -> (&[u8], &[u8]) {
-        (&self.smallest_key, &self.last_key)
+        (&self.smallest_key, &self.biggest_key)
+    }
+
+    pub fn total_blob_size(&self) -> u64 {
+        self.total_blob_size
     }
 }

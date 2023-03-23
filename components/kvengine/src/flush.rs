@@ -15,7 +15,7 @@ use tikv_util::{
 use crate::{
     table::{
         blobtable::builder::BlobTableBuilder, memtable, memtable::CfTable, sstable,
-        sstable::L0Builder, table::ExternalLink,
+        sstable::L0Builder, table::ExternalLink, Iterator,
     },
     *,
 };
@@ -197,10 +197,9 @@ impl Engine {
             }
         }
         for blob_create in flush.parent_snap.get_blob_creates() {
-            // if task.overlap_table(blob_create.get_smallest(), blob_create.get_biggest())
-            // {
-            initial_flush.mut_blob_creates().push(blob_create.clone());
-            //}
+            if task.overlap_table(blob_create.get_smallest(), blob_create.get_biggest()) {
+                initial_flush.mut_blob_creates().push(blob_create.clone());
+            }
         }
         let mut builders = vec![];
         for m in &flush.mem_tbls {
@@ -241,8 +240,13 @@ impl Engine {
         );
         let mut external_link = ExternalLink::new();
         external_link.fid = self.id_allocator.alloc_id(1).unwrap().pop().unwrap();
-        let mut blob_builder =
-            BlobTableBuilder::new(external_link.fid, 0, sstable::NO_COMPRESSION, 0);
+        let mut blob_builder = BlobTableBuilder::new(
+            external_link.fid,
+            0,
+            sstable::NO_COMPRESSION,
+            0,
+            self.opts.min_blob_size,
+        );
         for cf in 0..NUM_CFS {
             let skl = m.get_cf(cf);
             if skl.is_empty() {
@@ -269,6 +273,14 @@ impl Engine {
                         let (offset, len) = blob_builder.add(it.key(), &v);
                         external_link.len = len;
                         external_link.offset = offset;
+                        // info!(
+                        //     "blob table {} add key {:?} offset {} len {}, value {:?}",
+                        //     external_link.fid,
+                        //     it.key(),
+                        //     offset,
+                        //     len,
+                        //     v.get_value(),
+                        // );
                         l0_builder.add(cf, it.key(), &v, Some(external_link));
                     } else {
                         l0_builder.add(cf, it.key(), &v, None);

@@ -152,6 +152,8 @@ pub struct Value {
     len: u32,
     /// The row version
     pub version: u64,
+
+    blob_ptr: *const u8,
 }
 
 impl Value {
@@ -162,6 +164,7 @@ impl Value {
             user_meta_len: Default::default(),
             len: Default::default(),
             version: Default::default(),
+            blob_ptr: ptr::null(),
         }
     }
 
@@ -215,6 +218,7 @@ impl Value {
             user_meta_len,
             len: (buf.len() - offset - user_meta_len as usize) as u32,
             version,
+            blob_ptr: ptr::null(),
         }
     }
 
@@ -231,6 +235,7 @@ impl Value {
             user_meta_len,
             len: buf.len() as u32 - user_meta_len as u32,
             version,
+            blob_ptr: ptr::null(),
         }
     }
 
@@ -241,6 +246,7 @@ impl Value {
             user_meta_len: 0,
             len: 0,
             version,
+            blob_ptr: ptr::null(),
         }
     }
 
@@ -292,7 +298,13 @@ impl Value {
 
     #[inline(always)]
     pub fn get_value(&self) -> &[u8] {
-        unsafe { slice::from_raw_parts::<u8>(self.ptr.add(self.user_meta_len()), self.value_len()) }
+        unsafe {
+            if self.blob_ptr.is_null() {
+                slice::from_raw_parts::<u8>(self.ptr.add(self.user_meta_len()), self.value_len())
+            } else {
+                slice::from_raw_parts::<u8>(self.blob_ptr, self.value_len())
+            }
+        }
     }
 
     #[inline(always)]
@@ -320,6 +332,12 @@ impl Value {
     #[inline(always)]
     pub fn get_version(buf: &[u8]) -> u64 {
         Version::deserialize(buf)
+    }
+
+    pub fn fill_in_blob(&mut self, blob: &[u8]) {
+        assert!(self.is_external_link());
+        self.blob_ptr = blob.as_ptr();
+        self.len = blob.len() as u32;
     }
 }
 

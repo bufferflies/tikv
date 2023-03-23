@@ -15,7 +15,7 @@ use protobuf::Message;
 
 use crate::{
     table::{
-        blobtable::blobtable::BlobTable,
+        blobtable::blobtable::{BlobPrefetcher, BlobTable},
         memtable::{CfTable, Hint},
         sstable::{InMemFile, L0Table, SsTable},
         table,
@@ -33,6 +33,7 @@ pub struct Item<'a> {
     // (or impossible) to manage the life time. e.g. During point get, caller does not hold the
     // memory as in scan (held by the iterator).
     val_mem_holder: Option<Vec<u8>>,
+    blob_mem_hodler: Option<Vec<u8>>,
 }
 
 impl std::ops::Deref for Item<'_> {
@@ -50,6 +51,7 @@ impl Item<'_> {
             path: AccessPath::default(),
             phantom: Default::default(),
             val_mem_holder: None,
+            blob_mem_hodler: None,
         }
     }
 }
@@ -100,6 +102,7 @@ pub struct SnapAccessCore {
     write_sequence: u64,
     data: ShardData,
     get_hint: Mutex<Hint>,
+    blob_table_prefetch_size: usize,
 }
 
 impl SnapAccessCore {
@@ -116,6 +119,7 @@ impl SnapAccessCore {
             managed_ts: 0,
             data,
             get_hint: Mutex::new(Hint::new()),
+            blob_table_prefetch_size: shard.opt.blob_prefetch_size,
         }
     }
 
@@ -183,7 +187,7 @@ impl SnapAccessCore {
             old_data.trim_over_bound,
             vec![CfTable::new()],
             l0s,
-            blob_tbls,
+            Arc::new(blob_tbls),
             scfs,
         );
         shard.id = cs.shard_id;
@@ -191,7 +195,7 @@ impl SnapAccessCore {
         Self::new(&shard)
     }
 
-    pub fn new_iterator(
+    pub fn new_iterator_skip_blob(
         &self,
         cf: usize,
         reversed: bool,
@@ -217,7 +221,55 @@ impl SnapAccessCore {
             end: self.clone_end_key(),
             bound: None,
             bound_include: false,
+            blob_prefetcher: None,
         }
+    }
+
+    pub fn new_iterator(
+        &self,
+        cf: usize,
+        reversed: bool,
+        all_versions: bool,
+        read_ts: Option<u64>,
+        fill_cache: bool,
+    ) -> Iterator {
+        let read_ts = if let Some(ts) = read_ts {
+            ts
+        } else if CF_MANAGED[cf] && self.managed_ts != 0 {
+            self.managed_ts
+        } else {
+            u64::MAX
+        };
+        let blob_prefetcher = Some(BlobPrefetcher::new(
+            self.data.blob_tbl_map.clone(),
+            self.blob_table_prefetch_size,
+        ));
+        Iterator {
+            all_versions,
+            reversed,
+            read_ts,
+            key: BytesMut::new(),
+            val: table::Value::new(),
+            inner: self.new_table_iterator(cf, reversed, fill_cache),
+            start: self.clone_start_key(),
+            end: self.clone_end_key(),
+            bound: None,
+            bound_include: false,
+            blob_prefetcher,
+        }
+    }
+
+    fn fetch_blob(&self, key: &[u8], val: &table::Value) -> Vec<u8> {
+        assert!(val.is_external_link());
+        let blob_link = val.get_external_link();
+        let blob_table = self
+            .data
+            .blob_tbl_map
+            .get(&blob_link.fid)
+            .unwrap_or_else(|| panic!("[{}] blob table not found {:?}", self.tag, key));
+        blob_table
+            .get(blob_link.offset, blob_link.len)
+            .unwrap_or_else(|e| panic!("[{}] blob table get failed {:?} {:?}", self.tag, key, e))
     }
 
     /// get an Item by key. Caller need to call is_some() before get_value.
@@ -237,20 +289,12 @@ impl SnapAccessCore {
             &mut item.path,
             item.val_mem_holder.as_mut().unwrap(),
         );
-        item
-    }
-
-    pub fn fetch_from_blob_store(&self, v: &Item<'_>) -> Bytes {
-        assert!(v.is_external_link());
-        if let Some(blob_table_map) = &self.data.blob_tbl_map {
-            let external_link = v.get_external_link();
-            let blob_table = blob_table_map.get(&external_link.fid).unwrap();
-            blob_table
-                .get(external_link.offset, external_link.len)
-                .unwrap()
-        } else {
-            panic!("Trying to fetch a blob but the file id map is missing");
+        if item.val.is_external_link() {
+            item.blob_mem_hodler = Some(self.fetch_blob(key, &item.val));
+            item.val
+                .fill_in_blob(item.blob_mem_hodler.as_ref().unwrap());
         }
+        item
     }
 
     fn get_value(
@@ -272,7 +316,6 @@ impl SnapAccessCore {
             };
             path.mem_table += 1;
             if v.is_valid() {
-                assert!(!v.is_external_link());
                 val_mem_holder.resize(v.encoded_size(), 0);
                 v.encode(val_mem_holder.as_mut_slice());
                 return table::Value::decode(val_mem_holder.as_slice());
@@ -444,17 +487,15 @@ impl SnapAccessCore {
             l0.set_biggest(v.biggest().to_vec());
             snap.mut_l0_creates().push(l0);
         }
-        if let Some(blob_tbl_map) = &self.data.blob_tbl_map {
-            for (k, v) in blob_tbl_map {
-                assert_eq!(k, &v.id());
-                count += 1;
-                // FIXME: Overlap check
-                let mut blob = pb::BlobCreate::new();
-                blob.set_id(v.id());
-                blob.set_smallest(v.smallest_key().to_vec());
-                blob.set_biggest(v.biggest_key().to_vec());
-                snap.mut_blob_creates().push(blob);
-            }
+        for (k, v) in self.data.blob_tbl_map.iter() {
+            assert_eq!(k, &v.id());
+            count += 1;
+            // FIXME: Overlap check
+            let mut blob = pb::BlobCreate::new();
+            blob.set_id(v.id());
+            blob.set_smallest(v.smallest_key().to_vec());
+            blob.set_biggest(v.biggest_key().to_vec());
+            snap.mut_blob_creates().push(blob);
         }
         self.data.for_each_level(|cf, lh| {
             if cf == LOCK_CF {
@@ -524,6 +565,11 @@ impl SnapAccessCore {
         let mut item = Item::new();
         item.val_mem_holder = Some(vec![]);
         item.val = self.get_newer_val(cf, key, version, item.val_mem_holder.as_mut().unwrap());
+        if item.val.is_external_link() {
+            item.blob_mem_hodler = Some(self.fetch_blob(key, &item.val));
+            item.val
+                .fill_in_blob(item.blob_mem_hodler.as_ref().unwrap());
+        }
         item
     }
 
@@ -586,6 +632,7 @@ pub struct Iterator {
     end: Bytes,
     pub bound: Option<Bytes>,
     pub bound_include: bool,
+    blob_prefetcher: Option<BlobPrefetcher>,
 }
 
 impl Iterator {
@@ -597,13 +644,29 @@ impl Iterator {
         self.key.chunk()
     }
 
-    pub fn item(&self) -> Item<'_> {
-        Item {
-            val: self.val,
-            path: AccessPath::default(),
-            phantom: Default::default(),
-            val_mem_holder: None,
+    pub fn val(&mut self) -> &[u8] {
+        if self.val.is_external_link() {
+            if let Some(prefetcher) = &mut self.blob_prefetcher {
+                let blob_link = self.val.get_external_link();
+                return prefetcher
+                    .get(blob_link.fid, blob_link.offset, blob_link.len)
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "failed to get blob for fid {}, offset {}, len {}, err {:?}",
+                            blob_link.fid, blob_link.offset, blob_link.len, e
+                        )
+                    });
+            }
         }
+        self.val.get_value()
+    }
+
+    pub fn meta(&self) -> u8 {
+        self.val.meta
+    }
+
+    pub fn user_meta(&self) -> &[u8] {
+        self.val.user_meta()
     }
 
     pub fn valid_for_prefix(&self, prefix: &[u8]) -> bool {

@@ -1,7 +1,7 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
 use bytes::Bytes;
-use kvengine::{mvcc, UserMeta, EXTRA_CF, LOCK_CF, WRITE_CF};
+use kvengine::{UserMeta, EXTRA_CF, LOCK_CF, WRITE_CF};
 use txn_types::{Key, Lock, OldValue, TimeStamp, Value, Write, WriteType};
 
 use crate::storage::mvcc::{Result, TxnCommitRecord};
@@ -22,15 +22,15 @@ impl CloudReader {
     }
 
     fn get_commit_by_item(
-        item: &kvengine::Item<'_>,
+        user_meta: &UserMeta,
+        value: &[u8],
         start_ts: TimeStamp,
     ) -> Option<TxnCommitRecord> {
-        let user_meta = UserMeta::from_slice(item.user_meta());
         if user_meta.start_ts == start_ts.into_inner() {
-            let (write_type, short_value) = if item.value_len() > 0 {
-                (WriteType::Put, Some(item.get_value().to_vec()))
-            } else {
+            let (write_type, short_value) = if value.is_empty() {
                 (WriteType::Delete, None)
+            } else {
+                (WriteType::Put, Some(value.to_vec()))
             };
             let write = Write::new(write_type, TimeStamp::new(user_meta.start_ts), short_value);
             return Some(TxnCommitRecord::SingleRecord {
@@ -49,7 +49,8 @@ impl CloudReader {
         let raw_key = key.to_raw()?;
         let item = self.snapshot.get(WRITE_CF, &raw_key, 0);
         if item.user_meta_len() > 0 {
-            if let Some(record) = Self::get_commit_by_item(&item, start_ts) {
+            let user_meta = UserMeta::from_slice(item.user_meta());
+            if let Some(record) = Self::get_commit_by_item(&user_meta, item.get_value(), start_ts) {
                 return Ok(record);
             }
         }
@@ -58,21 +59,20 @@ impl CloudReader {
                 .new_iterator(WRITE_CF, false, true, None, self.fill_cache);
         data_iter.seek(&raw_key);
         while data_iter.valid() {
-            let key = data_iter.key();
-            if key != raw_key {
+            if data_iter.key() != raw_key {
                 break;
             }
-            if kvengine::table::is_deleted(data_iter.item().meta) {
+            if kvengine::table::is_deleted(data_iter.meta()) {
                 break;
             }
-            let user_meta = UserMeta::from_slice(data_iter.item().user_meta());
+            let user_meta = UserMeta::from_slice(data_iter.user_meta());
             if user_meta.commit_ts < start_ts.into_inner() {
                 // A transaction's commit_ts must be greater than start_ts, if current commit_ts
                 // is already smaller than the start_ts, we don't need to look for older
                 // version.
                 break;
             }
-            if let Some(record) = Self::get_commit_by_item(&data_iter.item(), start_ts) {
+            if let Some(record) = Self::get_commit_by_item(&user_meta, data_iter.val(), start_ts) {
                 return Ok(record);
             }
             data_iter.next();
@@ -155,7 +155,8 @@ impl CloudReader {
         self.statistics.write.processed_keys += 1;
         self.statistics.processed_size += raw_key.len() + item.value_len();
         if item.user_meta_len() > 0 {
-            let (commit_ts, write) = parse_write(item);
+            let user_meta = UserMeta::from_slice(item.user_meta());
+            let (commit_ts, write) = parse_write(&user_meta, item.get_value());
             return Ok(Some((commit_ts, write)));
         }
         Ok(None)
@@ -224,12 +225,12 @@ impl CloudReader {
                     return Ok((locks, false));
                 }
             }
-            let item = lock_iter.item();
+            let val = lock_iter.val();
             self.statistics.lock.next += 1;
             self.statistics.lock.flow_stats.read_keys += 1;
-            self.statistics.lock.flow_stats.read_bytes += item.value_len();
+            self.statistics.lock.flow_stats.read_bytes += val.len();
             self.statistics.lock.processed_keys += 1;
-            let lock = Lock::parse(item.get_value())?;
+            let lock = Lock::parse(val)?;
             if filter(&lock) {
                 locks.push((key, lock));
                 if limit > 0 && locks.len() == limit {
@@ -245,7 +246,8 @@ impl CloudReader {
         let raw_key = key.to_raw()?;
         let item = self.snapshot.get_newer(WRITE_CF, &raw_key, ts.into_inner());
         if item.user_meta_len() > 0 {
-            return Ok(Some(parse_write(item)));
+            let user_meta = UserMeta::from_slice(item.user_meta());
+            return Ok(Some(parse_write(&user_meta, item.get_value())));
         }
         Ok(None)
     }
@@ -257,12 +259,11 @@ impl CloudReader {
             .new_iterator(WRITE_CF, false, true, None, self.fill_cache);
         it.rewind();
         while it.valid() {
-            let item = it.item();
-            if kvengine::table::is_deleted(item.meta) {
+            if kvengine::table::is_deleted(it.meta()) {
                 it.next();
                 continue;
             }
-            let user_meta = UserMeta::from_slice(item.user_meta());
+            let user_meta = UserMeta::from_slice(it.user_meta());
             if user_meta.start_ts == ts.into_inner() {
                 return Ok(Some(Key::from_raw(it.key())));
             }
@@ -283,8 +284,7 @@ impl CloudReader {
                 break;
             }
             if extra_iter.key().len() == raw_key.len() + 8 {
-                let item = extra_iter.item();
-                let um = UserMeta::from_slice(item.user_meta());
+                let um = UserMeta::from_slice(extra_iter.user_meta());
                 let (ts, write_type) = if um.commit_ts == 0 {
                     (um.start_ts, WriteType::Rollback)
                 } else {
@@ -297,24 +297,16 @@ impl CloudReader {
     }
 }
 
-pub fn parse_write(item: kvengine::Item<'_>) -> (TimeStamp, Write) {
-    if item.user_meta()[0] != mvcc::USER_META_FORMAT_V1 {
-        panic!(
-            "invalid user meta {:?}, path {:?}",
-            item.user_meta(),
-            item.path
-        );
-    }
-    let user_meta = UserMeta::from_slice(item.user_meta());
+pub fn parse_write(user_meta: &UserMeta, value: &[u8]) -> (TimeStamp, Write) {
     let commit_ts = user_meta.commit_ts;
     let write_type: WriteType;
     let short_value: Option<Value>;
-    if item.get_value().is_empty() {
+    if value.is_empty() {
         write_type = WriteType::Delete;
         short_value = None;
     } else {
         write_type = WriteType::Put;
-        short_value = Some(item.get_value().to_vec())
+        short_value = Some(value.to_vec())
     }
     (
         TimeStamp::new(commit_ts),

@@ -860,12 +860,7 @@ fn check_get(
                         key, shard.id, shard.ver, cf, shard_stats,
                     );
                 }
-                if item.is_external_link() {
-                    let bytes = snap.fetch_from_blob_store(&item);
-                    assert_eq!(bytes, key.repeat(cf + 2).as_bytes());
-                } else {
-                    assert_eq!(item.get_value(), key.repeat(cf + 2).as_bytes());
-                }
+                assert_eq!(item.get_value(), key.repeat(cf + 2).as_bytes());
                 if cf != 1 && check_version.is_some() {
                     assert_eq!(item.version, check_version.unwrap());
                 }
@@ -899,13 +894,7 @@ fn check_iterater(begin: usize, end: usize, en: &Engine) {
                 }
                 let key = i_to_key(i as i32, en.opts.min_blob_size);
                 assert_eq!(iter.key(), key.as_bytes());
-                let item = iter.item();
-                if item.is_external_link() {
-                    let bytes = snap.fetch_from_blob_store(&item);
-                    assert_eq!(bytes, key.repeat(cf + 2).as_bytes());
-                } else {
-                    assert_eq!(item.get_value(), key.repeat(cf + 2).as_bytes());
-                };
+                assert_eq!(iter.val(), key.repeat(cf + 2).as_bytes());
                 i += 1;
                 iter.next();
             }
