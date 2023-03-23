@@ -61,16 +61,18 @@ jobs:
   sync-image:
     name: Sync image to GCR
     runs-on: arm64
-    needs: ["multi-arch"]
+    needs: [ "multi-arch" ]
     if: ${{ inputs.overwrite_gcr || github.ref == 'refs/heads/cloud-engine' }}
     env:
       GCR_IMAGE: xexplorersun/tikv-cse:v6.6.0
+      # Additional tag to label the image with the commit SHA.
+      ADDITIONAL_TAG: xexplorersun/tikv-cse:cse-${{ github.sha }}
     steps:
-      - name: create-manifest
+      - name: Install regctl
         run: |
-          docker manifest create ${{ env.GCR_IMAGE }} \
-          --amend xexplorersun/tikv:cse-${{ github.sha }}-amd64 \
-          --amend xexplorersun/tikv:cse-${{ github.sha }}-arm64
-      - name: push-manifest
+          curl -sLO https://github.com/regclient/regclient/releases/download/v0.4.0/regctl-linux-arm64
+          chmod +x regctl-linux-arm64
+      - name: Sync Image
         run: |
-          docker manifest push ${{ env.GCR_IMAGE }}
+          ./regctl-linux-arm64 image copy xexplorersun/tikv:cse-${{ github.sha }} ${{ env.GCR_IMAGE }} -v info
+          ./regctl-linux-arm64 image copy xexplorersun/tikv:cse-${{ github.sha }} ${{ env.ADDITIONAL_TAG }} -v info
