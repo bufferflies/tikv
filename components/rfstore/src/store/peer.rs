@@ -1917,7 +1917,7 @@ impl Peer {
         let parent_snap = parent_meta.to_change_set().take_snapshot();
         ctx.apply_msgs
             .msgs
-            .push(ApplyMsg::PendingPrepareMerge(parent_snap));
+            .push(ApplyMsg::PendingPrepareMerge(parent_snap, entry.index));
         let mut new_meta = parent_meta;
         new_meta.prepare_merge(entry.index);
         new_meta.set_property(TERM_KEY, &entry.term.to_le_bytes());

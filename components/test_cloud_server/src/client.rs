@@ -600,11 +600,37 @@ impl ClusterClient {
     }
 
     pub fn merge(&mut self, source_key: &[u8], target_key: &[u8]) {
-        let source_region = self.pd_client.get_region(source_key).unwrap();
-        let target_region = self.pd_client.get_region(target_key).unwrap();
+        let source_region = self
+            .pd_client
+            .get_region(&encode_bytes(source_key))
+            .unwrap();
+        let target_region = self
+            .pd_client
+            .get_region(&encode_bytes(target_key))
+            .unwrap();
         assert_ne!(source_region.id, target_region.id);
         self.pd_client
             .merge_region(source_region.id, target_region.id);
+    }
+
+    /// Try to merge.
+    /// Return true: merge request sent.
+    /// Return false: `source_key` & `target_key` had been merged.
+    pub fn try_merge(&mut self, source_key: &[u8], target_key: &[u8]) -> bool /* sent */ {
+        let source_region = self
+            .pd_client
+            .get_region(&encode_bytes(source_key))
+            .unwrap();
+        let target_region = self
+            .pd_client
+            .get_region(&encode_bytes(target_key))
+            .unwrap();
+        if source_region.id == target_region.id {
+            return false;
+        }
+        self.pd_client
+            .try_merge_region(source_region.id, target_region.id);
+        true
     }
 
     pub fn try_merge_adjacent_region(

@@ -232,7 +232,8 @@ pub(crate) struct Applier {
 
     pub(crate) paused_for_ingest: bool,
 
-    pub(crate) prepare_merge_parent_snap: Option<kvenginepb::Snapshot>,
+    pub(crate) prepare_merge_parent_snap:
+        VecDeque<(kvenginepb::Snapshot, u64 /* commit index */)>,
 
     pub(crate) paused_for_commit_merge: bool,
 
@@ -875,7 +876,21 @@ impl Applier {
         &mut self,
         ctx: &mut ApplyContext,
     ) -> Result<(AdminResponse, ApplyResult)> {
-        let parent_snap = self.prepare_merge_parent_snap.take().unwrap();
+        debug_assert!(
+            !self.prepare_merge_parent_snap.is_empty(),
+            "{} exec_prepare_merge: prepare_merge_parent_snap is empty, log_index {}",
+            self.tag(),
+            ctx.exec_log_index,
+        );
+
+        let (parent_snap, commit_index) = self.prepare_merge_parent_snap.pop_front().unwrap();
+        debug_assert_eq!(
+            commit_index,
+            ctx.exec_log_index,
+            "{} exec_prepare_merge: commit index not match, parent_snap {:?}",
+            self.tag(),
+            parent_snap
+        );
         ctx.engine.prepare_merge(
             self.region_id(),
             self.region.get_region_epoch().get_version(),
@@ -897,6 +912,9 @@ impl Applier {
         ctx: &mut ApplyContext,
         request: &AdminRequest,
     ) -> Result<(AdminResponse, ApplyResult)> {
+        fail_point!("on_follower_exec_rollback_merge", !self.is_leader(), |_| {
+            unimplemented!()
+        });
         ctx.engine.rollback_merge(
             self.region_id(),
             self.region.get_region_epoch().version,
@@ -1293,6 +1311,11 @@ impl Applier {
     }
 
     pub(crate) fn handle_msg(&mut self, ctx: &mut ApplyContext, msg: ApplyMsg) {
+        if self.stopped {
+            info!("{} skip apply msg {:?}", self.tag(), msg);
+            return;
+        }
+
         match msg {
             ApplyMsg::Apply(apply) => {
                 self.handle_apply(ctx, apply);
@@ -1316,8 +1339,9 @@ impl Applier {
             ApplyMsg::CheckSwitchMemTable { region_id } => {
                 self.handle_check_switch_mem_table(ctx, region_id);
             }
-            ApplyMsg::PendingPrepareMerge(parent_snap) => {
-                self.prepare_merge_parent_snap = Some(parent_snap);
+            ApplyMsg::PendingPrepareMerge(parent_snap, commit_index) => {
+                self.prepare_merge_parent_snap
+                    .push_back((parent_snap, commit_index));
             }
             ApplyMsg::PrepareCommitMerge {
                 parent_snap,

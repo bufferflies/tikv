@@ -42,7 +42,7 @@ encryption_export = { path = "../encryption/export", default-features = false }
 engine_rocks = { path = "../engine_rocks", default-features = false }
 engine_traits = { path = "../engine_traits", default-features = false }
 error_code = { path = "../error_code", default-features = false }
-fail = "0.4"
+fail = "0.5"
 file_system = { path = "../file_system", default-features = false }
 flate2 = { version = "1.0", default-features = false, features = ["zlib"] }
 fs2 = "0.4"

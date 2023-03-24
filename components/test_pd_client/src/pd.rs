@@ -234,7 +234,15 @@ impl Operator {
                 if target_region_id == region_id {
                     pdpb::RegionHeartbeatResponse::default()
                 } else {
-                    let region = cluster.get_region_by_id(target_region_id).unwrap().unwrap();
+                    let region = match cluster.get_region_by_id(target_region_id).unwrap() {
+                        Some(region) => region,
+                        None => {
+                            // Target region not found would happen when test cases keep retrying
+                            // even if the merge had succeeded. Ignore the stale merge request.
+                            warn!("target region not found, region id {}", target_region_id);
+                            return pdpb::RegionHeartbeatResponse::default();
+                        }
+                    };
                     if cluster.check_merge_target_integrity {
                         let mut all_exist = true;
                         for peer in region.get_peers() {
