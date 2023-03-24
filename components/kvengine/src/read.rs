@@ -32,8 +32,8 @@ pub struct Item<'a> {
     // long as the life time of Item itself. This is necessary when the caller is not responsible
     // (or impossible) to manage the life time. e.g. During point get, caller does not hold the
     // memory as in scan (held by the iterator).
-    val_mem_holder: Option<Vec<u8>>,
-    blob_mem_hodler: Option<Vec<u8>>,
+    owned_val: Option<Vec<u8>>,
+    owned_blob: Option<Vec<u8>>,
 }
 
 impl std::ops::Deref for Item<'_> {
@@ -50,8 +50,8 @@ impl Item<'_> {
             val: table::Value::new(),
             path: AccessPath::default(),
             phantom: Default::default(),
-            val_mem_holder: None,
-            blob_mem_hodler: None,
+            owned_val: None,
+            owned_blob: None,
         }
     }
 }
@@ -281,18 +281,17 @@ impl SnapAccessCore {
             version = u64::MAX;
         }
         let mut item = Item::new();
-        item.val_mem_holder = Some(vec![]);
+        item.owned_val = Some(vec![]);
         item.val = self.get_value(
             cf,
             key,
             version,
             &mut item.path,
-            item.val_mem_holder.as_mut().unwrap(),
+            item.owned_val.as_mut().unwrap(),
         );
         if item.val.is_external_link() {
-            item.blob_mem_hodler = Some(self.fetch_blob(key, &item.val));
-            item.val
-                .fill_in_blob(item.blob_mem_hodler.as_ref().unwrap());
+            item.owned_blob = Some(self.fetch_blob(key, &item.val));
+            item.val.fill_in_blob(item.owned_blob.as_ref().unwrap());
         }
         item
     }
@@ -303,7 +302,7 @@ impl SnapAccessCore {
         key: &[u8],
         version: u64,
         path: &mut AccessPath,
-        val_mem_holder: &mut Vec<u8>,
+        out_val_owner: &mut Vec<u8>,
     ) -> table::Value {
         for i in 0..self.data.mem_tbls.len() {
             let tbl = self.data.mem_tbls.as_slice()[i].get_cf(cf);
@@ -316,15 +315,15 @@ impl SnapAccessCore {
             };
             path.mem_table += 1;
             if v.is_valid() {
-                val_mem_holder.resize(v.encoded_size(), 0);
-                v.encode(val_mem_holder.as_mut_slice());
-                return table::Value::decode(val_mem_holder.as_slice());
+                out_val_owner.resize(v.encoded_size(), 0);
+                v.encode(out_val_owner.as_mut_slice());
+                return table::Value::decode(out_val_owner.as_slice());
             }
         }
         let key_hash = farmhash::fingerprint64(key);
         for l0 in &self.data.l0_tbls {
             if let Some(tbl) = &l0.get_cf(cf) {
-                let v = tbl.get(key, version, key_hash, val_mem_holder, 0);
+                let v = tbl.get(key, version, key_hash, out_val_owner, 0);
                 path.l0 = path.l0.saturating_add(1);
                 if v.is_valid() {
                     return v;
@@ -333,7 +332,7 @@ impl SnapAccessCore {
         }
         let scf = self.data.get_cf(cf);
         for lh in &scf.levels {
-            let v = lh.get(key, version, key_hash, val_mem_holder);
+            let v = lh.get(key, version, key_hash, out_val_owner);
             path.ln += 1;
             if v.is_valid() {
                 return v;
@@ -434,16 +433,16 @@ impl SnapAccessCore {
                 continue;
             }
             let l0_cf = l0_cf.as_ref().unwrap();
-            let mut val_mem_holder = vec![];
-            let val = l0_cf.get(key, u64::MAX, key_hash, &mut val_mem_holder, 0);
+            let mut owned_val = vec![];
+            let val = l0_cf.get(key, u64::MAX, key_hash, &mut owned_val, 0);
             if val.is_valid() {
                 return !val.is_deleted();
             }
         }
         for l in self.data.get_cf(cf).levels.as_slice() {
             if let Some(tbl) = l.get_table(key) {
-                let mut val_mem_holder = vec![];
-                let val = tbl.get(key, u64::MAX, key_hash, &mut val_mem_holder, l.level);
+                let mut owned_val = vec![];
+                let val = tbl.get(key, u64::MAX, key_hash, &mut owned_val, l.level);
                 if val.is_valid() {
                     return !val.is_deleted();
                 }
@@ -563,12 +562,11 @@ impl SnapAccessCore {
 
     pub fn get_newer(&self, cf: usize, key: &[u8], version: u64) -> Item<'_> {
         let mut item = Item::new();
-        item.val_mem_holder = Some(vec![]);
-        item.val = self.get_newer_val(cf, key, version, item.val_mem_holder.as_mut().unwrap());
+        item.owned_val = Some(vec![]);
+        item.val = self.get_newer_val(cf, key, version, item.owned_val.as_mut().unwrap());
         if item.val.is_external_link() {
-            item.blob_mem_hodler = Some(self.fetch_blob(key, &item.val));
-            item.val
-                .fill_in_blob(item.blob_mem_hodler.as_ref().unwrap());
+            item.owned_blob = Some(self.fetch_blob(key, &item.val));
+            item.val.fill_in_blob(item.owned_blob.as_ref().unwrap());
         }
         item
     }
@@ -578,21 +576,21 @@ impl SnapAccessCore {
         cf: usize,
         key: &[u8],
         version: u64,
-        val_mem_holder: &mut Vec<u8>,
+        out_val_owner: &mut Vec<u8>,
     ) -> table::Value {
         let key_hash = farmhash::fingerprint64(key);
         for i in 0..self.data.mem_tbls.len() {
             let tbl = self.data.mem_tbls.as_slice()[i].get_cf(cf);
             let v = tbl.get_newer(key, version);
             if v.is_valid() {
-                val_mem_holder.resize(v.encoded_size(), 0);
-                v.encode(val_mem_holder.as_mut_slice());
-                return table::Value::decode(val_mem_holder.as_slice());
+                out_val_owner.resize(v.encoded_size(), 0);
+                v.encode(out_val_owner.as_mut_slice());
+                return table::Value::decode(out_val_owner.as_slice());
             }
         }
         for l0 in &self.data.l0_tbls {
             if let Some(tbl) = &l0.get_cf(cf) {
-                let v = tbl.get_newer(key, version, key_hash, val_mem_holder, 0);
+                let v = tbl.get_newer(key, version, key_hash, out_val_owner, 0);
                 if v.is_valid() {
                     return v;
                 }
@@ -600,7 +598,7 @@ impl SnapAccessCore {
         }
         let scf = self.data.get_cf(cf);
         for lh in &scf.levels {
-            let v = lh.get_newer(key, version, key_hash, val_mem_holder);
+            let v = lh.get_newer(key, version, key_hash, out_val_owner);
             if v.is_valid() {
                 return v;
             }

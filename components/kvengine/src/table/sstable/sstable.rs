@@ -68,14 +68,14 @@ impl SsTable {
 
     // Get the value with the given key and version.
     // It is caller's responsibility to maintain the lifetime of the returned value.
-    // Raw value is stored in val_mem_holder, while the returned value is a parsed
+    // Value will be filled in out_val_owner , while the returned value is a parsed
     // slice of it.
     pub fn get(
         &self,
         key: &[u8],
         version: u64,
         key_hash: u64,
-        val_mem_holder: &mut Vec<u8>,
+        out_val_owner: &mut Vec<u8>,
         level: usize,
     ) -> table::Value {
         // For small value on level 3, load the filter is not cost-effective.
@@ -107,9 +107,9 @@ impl SsTable {
         }
         // Reconstruct the value to avoid the lifetime issue.
         let val = it.value();
-        val_mem_holder.resize(val.encoded_size(), 0);
-        val.encode(val_mem_holder.as_mut_slice());
-        Value::decode(val_mem_holder.as_slice())
+        out_val_owner.resize(val.encoded_size(), 0);
+        val.encode(out_val_owner.as_mut_slice());
+        Value::decode(out_val_owner.as_slice())
     }
 
     pub fn has_overlap(&self, start: &[u8], end: &[u8], include_end: bool) -> bool {
@@ -142,13 +142,13 @@ impl SsTable {
         key: &[u8],
         version: u64,
         key_hash: u64,
-        val_mem_holder: &mut Vec<u8>,
+        out_val_owner: &mut Vec<u8>,
         level: usize,
     ) -> table::Value {
         if self.max_ts < version {
             return table::Value::new();
         }
-        let val = self.get(key, u64::MAX, key_hash, val_mem_holder, level);
+        let val = self.get(key, u64::MAX, key_hash, out_val_owner, level);
         if val.version >= version {
             return val;
         }
@@ -754,15 +754,15 @@ mod tests {
         for i in 0..8000 {
             let k = get_test_key("key", i);
             let k_h = farmhash::fingerprint64(k.as_bytes());
-            let mut v_mem_holder = vec![];
-            let v = t.get(k.as_bytes(), u64::MAX, k_h, &mut v_mem_holder, 1);
+            let mut owned_v = vec![];
+            let v = t.get(k.as_bytes(), u64::MAX, k_h, &mut owned_v, 1);
             assert!(!v.is_empty())
         }
         for i in 8000..10000 {
             let k = get_test_key("key", i);
             let k_h = farmhash::fingerprint64(k.as_bytes());
-            let mut v_mem_holder = vec![];
-            let v = t.get(k.as_bytes(), u64::MAX, k_h, &mut v_mem_holder, 1);
+            let mut owned_v = vec![];
+            let v = t.get(k.as_bytes(), u64::MAX, k_h, &mut owned_v, 1);
             assert!(v.is_empty())
         }
     }
@@ -991,8 +991,8 @@ mod tests {
             let k = get_test_key("key", r.gen_range(0..num));
             let ver = 5 + r.gen_range(0..5) as u64;
             let k_h = farmhash::fingerprint64(k.as_bytes());
-            let mut v_mem_holder = vec![];
-            let val = t.get(k.as_bytes(), ver, k_h, &mut v_mem_holder, 1);
+            let mut owned_v = vec![];
+            let val = t.get(k.as_bytes(), ver, k_h, &mut owned_v, 1);
             if !val.is_empty() {
                 assert!(val.version <= ver);
             }
