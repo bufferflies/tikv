@@ -546,6 +546,11 @@ impl LoadTaskWorker {
             self.readers.push(reader);
             self.file_idx += 1;
         }
+        if self.readers.is_empty() {
+            info!("{} build empty data", self.task_ctx.start_ts);
+            self.scheduler.set_finished();
+            return Ok(());
+        }
 
         info!("{} start build", self.task_ctx.start_ts);
         let (tx, rx) = tikv_util::mpsc::unbounded();
