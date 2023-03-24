@@ -13,11 +13,16 @@ use std::{
 };
 
 use clap::{App, Arg, ArgMatches};
+use flate2::{write::GzEncoder, Compression};
 use grpcio::EnvBuilder;
-use http::Uri;
+use http::{
+    header::{ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_TYPE},
+    HeaderValue, Request, Response, Uri,
+};
 use hyper::{
     body::Buf,
     service::{make_service_fn, service_fn},
+    Body,
 };
 use kvengine::{
     dfs,
@@ -26,11 +31,16 @@ use kvengine::{
 };
 use kvproto::metapb::Store;
 use pd_client::{PdClient, RpcClient};
+use prometheus::TEXT_FORMAT;
 use protobuf::Message;
 use rfstore::store::RegionSnapshot;
 use security::{SecurityConfig, SecurityManager};
 use slog_global::{error, info};
-use tikv_util::{config::ReadableDuration, time::Instant};
+use tikv_util::{
+    config::ReadableDuration,
+    metrics::{dump, dump_to},
+    time::Instant,
+};
 
 use crate::{
     load_data::{handle_load_data, LoadDataManager, MAX_IN_MEM_SIZE},
@@ -41,6 +51,8 @@ const ZSTD_COMPRESSION_LEVEL_FOR_REMOTE: &str = "5";
 
 fn main() {
     init_logger(io::stdout());
+    tikv_util::metrics::monitor_process()
+        .unwrap_or_else(|e| panic!("failed to start process monitor: {}", e));
     let matches = App::new("tikv-worker")
         .about("tikv remote worker")
         .arg(
@@ -230,6 +242,7 @@ fn main() {
                         "/load_data" => handle_load_data(load_manager, req).await,
                         "/backups" => handle_backup(br_manager, req).await,
                         "/restore_keyspace" => handle_restore_keyspace(br_manager, req).await,
+                        "/metrics" => handle_get_metrics(req).await,
                         _ => Ok(hyper::Response::builder()
                             .status(404)
                             .body(hyper::Body::from("Not Found"))
@@ -270,6 +283,41 @@ fn init_logger<W: 'static + io::Write + Send>(writer: W) {
     let drain = std::sync::Mutex::new(drain).fuse();
     let logger = slog::Logger::root(drain, slog::o!());
     slog_global::set_global(logger);
+}
+
+async fn handle_get_metrics(req: Request<Body>) -> hyper::Result<Response<Body>> {
+    let gz_encoding = client_accept_gzip(&req);
+    let metrics = if gz_encoding {
+        // gzip can reduce the body size to less than 1/10.
+        let mut encoder = GzEncoder::new(vec![], Compression::default());
+        dump_to(&mut encoder, true);
+        encoder.finish().unwrap()
+    } else {
+        dump(true).into_bytes()
+    };
+    let mut resp = Response::new(metrics.into());
+    resp.headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static(TEXT_FORMAT));
+    if gz_encoding {
+        resp.headers_mut()
+            .insert(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+    }
+    Ok(resp)
+}
+
+// check if the client allow return response with gzip compression
+// the following logic is port from prometheus's golang:
+// https://github.com/prometheus/client_golang/blob/24172847e35ba46025c49d90b8846b59eb5d9ead/prometheus/promhttp/http.go#L155-L176
+fn client_accept_gzip(req: &Request<Body>) -> bool {
+    let encoding = req
+        .headers()
+        .get(ACCEPT_ENCODING)
+        .map(|enc| enc.to_str().unwrap_or_default())
+        .unwrap_or_default();
+    encoding
+        .split(',')
+        .map(|s| s.trim())
+        .any(|s| s == "gzip" || s.starts_with("gzip;"))
 }
 
 async fn handle_remote_analysis(
