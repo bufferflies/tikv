@@ -137,10 +137,11 @@ impl BlobTableBuilder {
         assert!(blob.len() >= self.min_blob_size as usize);
         assert!(blob.len() <= ValueLength::max_value() as usize);
         assert!(self.total_blob_size as usize + blob.len() <= BlobOffset::max_value() as usize);
-        if self.smallest_key.is_empty() {
-            self.smallest_key = key.to_vec();
+        if self.smallest_key.is_empty() || self.smallest_key.as_slice() > key {
+            self.smallest_key.clear();
+            self.smallest_key.extend_from_slice(key);
         }
-        if self.biggest_key.as_slice() < key {
+        if self.biggest_key.is_empty() || self.biggest_key.as_slice() < key {
             self.biggest_key.clear();
             self.biggest_key.extend_from_slice(key);
         }

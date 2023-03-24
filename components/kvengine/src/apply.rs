@@ -169,6 +169,7 @@ impl EngineCore {
             self.apply_restore_shard(&shard, &cs)?;
         }
         self.refresh_shard_states(&shard);
+        debug!("{} finished applying change set: {:?}", shard.tag(), cs);
         Ok(())
     }
 

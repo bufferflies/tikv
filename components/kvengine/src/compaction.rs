@@ -983,7 +983,8 @@ impl Engine {
         let mut req = self.new_compact_request_with_shard(shard, 0, 0);
         let mut ln_tables: HashMap<usize, Vec<(usize, Vec<u64>)>> = HashMap::new();
         let mut total_size = 0;
-        for (cf, shard_cf) in shard.get_data().cfs.iter().enumerate() {
+        let data = shard.get_data();
+        for (cf, shard_cf) in data.cfs.iter().enumerate() {
             let mut ssts_for_cf = vec![];
             for lh in &shard_cf.levels {
                 if lh.tables.is_empty() {
@@ -994,22 +995,24 @@ impl Engine {
             }
             ln_tables.insert(cf, ssts_for_cf);
         }
-        total_size += shard
-            .get_data()
-            .l0_tbls
-            .iter()
-            .map(|t| t.size())
-            .sum::<u64>();
+        total_size += data.l0_tbls.iter().map(|t| t.size()).sum::<u64>();
+        total_size += data.blob_tbl_map.values().map(|t| t.size()).sum::<u64>();
         req.major_compaction = Some(MajorCompaction {
-            l0_tables: shard.get_data().l0_tbls.iter().map(|t| t.id()).collect(),
+            l0_tables: data.l0_tbls.iter().map(|t| t.id()).collect(),
             ln_tables,
-            blob_tables: shard.get_data().blob_tbl_map.keys().copied().collect(),
+            blob_tables: data.blob_tbl_map.keys().copied().collect(),
             max_sst_size: self.opts.table_builder_options.max_table_size,
             max_blob_table_size: self.opts.max_blob_table_size,
             min_blob_size: self.opts.min_blob_size,
             blob_prefetch_size: self.opts.blob_prefetch_size,
         });
         self.set_alloc_ids_for_request(&mut req, total_size);
+        info!(
+            "start major compact for {}, num_ids: {}, input_size: {}",
+            shard.tag(),
+            req.file_ids.len(),
+            total_size,
+        );
         Some(self.comp_client.compact(req))
     }
 
@@ -2056,7 +2059,6 @@ fn major_compact_for_cf(
     id_idx: usize,
     ret: &mut pb::MajorCompaction,
 ) -> Result<usize> {
-    info!("major compaction for cf {} with req {:?}", cf, req);
     iter.seek(&req.start);
     let mut last_key = BytesMut::new();
     let mut skip_key = BytesMut::new();
@@ -2171,9 +2173,12 @@ fn major_compact_for_cf(
         let mut need_recompress_blob = false;
         if val.is_external_link() {
             let link = val.get_external_link();
-            let blob_table = blob_tables
-                .get(&link.fid)
-                .unwrap_or_else(|| panic!("[{}] blob table {} not found", req.shard_id, link.fid));
+            let blob_table = blob_tables.get(&link.fid).unwrap_or_else(|| {
+                panic!(
+                    "[{}] blob table {} not found for key {:?}",
+                    req.shard_id, link.fid, key,
+                )
+            });
             // TODO: we can avoid decompressing the blob in some cases even if the
             // min_blob_size that we use to build the blob table is different
             // from the min_blob_size that is requested by the major compaction.
@@ -2292,15 +2297,7 @@ fn major_compact(
     fs: Arc<dyn dfs::Dfs>,
     compression_lvl: i32,
 ) -> Result<pb::MajorCompaction> {
-    info!(
-        "major compaction";
-        "shard id" => req.shard_id,
-        "shard ver" => req.shard_ver,
-        "l0 tables" => ?major_compaction.l0_tables,
-        "ln tables" => ?major_compaction.ln_tables,
-        "blob tables" => ?major_compaction.blob_tables,
-        "min blob size" => major_compaction.min_blob_size,
-    );
+    debug!("[{}] major compaction starts req {:?}", req.shard_id, req);
     let opts = dfs::Options::new(req.shard_id, req.shard_ver);
     let mut ret = pb::MajorCompaction::new();
     ret.mut_old_blob_tables()
@@ -2326,20 +2323,7 @@ fn major_compact(
             }
         }
         if let Some(sstables) = major_compaction.ln_tables.get(&cf) {
-            info!(
-                "major compaction, ln iter";
-                "shard id" => req.shard_id,
-                "shard ver" => req.shard_ver,
-                "cf" => cf
-            );
             for (level, table_ids) in sstables.iter() {
-                info!(
-                    "major compaction, ln iter";
-                    "shard id" => req.shard_id,
-                    "shard ver" => req.shard_ver,
-                    "cf" => cf,
-                    "level" => *level, "table ids" => ?table_ids
-                );
                 table_ids.iter().for_each(|t| {
                     let mut tbl_delete = pb::TableDelete::new();
                     tbl_delete.set_cf(cf as i32);
@@ -2352,18 +2336,6 @@ fn major_compact(
                 let files = load_table_files(table_ids, fs.clone(), opts)?;
                 let mut tables = in_mem_files_to_tables(files);
                 tables.sort_by(|a, b| a.smallest().cmp(b.smallest()));
-                for tbl in &tables {
-                    info!(
-                        "major compaction, ln iter";
-                        "shard id" => req.shard_id,
-                        "shard ver" => req.shard_ver,
-                        "cf" => cf,
-                        "level" => *level,
-                        "table id" => tbl.id(),
-                        "smallest" => ?tbl.smallest(),
-                        "largest" => ?tbl.biggest(),
-                    );
-                }
                 let level_concat_iter =
                     Box::new(ConcatIterator::new_with_tables(tables, false, false));
                 iters.push(level_concat_iter);

@@ -85,6 +85,10 @@ impl EngineCore {
                 ids.insert(blob.get_id(), BLOB_LEVEL);
             }
         }
+        debug!(
+            "[{}:{}] is preparing change set, loading file by ids", cs.shard_id, cs.shard_ver;
+            "ids" => ?ids,
+        );
         self.load_tables_by_ids(cs.shard_id, cs.shard_ver, ids, &mut cs, use_direct_io)?;
         Ok(cs)
     }
@@ -109,11 +113,6 @@ impl EngineCore {
         cs: &mut ChangeSet,
         use_direct_io: bool,
     ) -> Result<()> {
-        info!(
-            "load tables by ids";
-            "shard_id" => shard_id,
-            "ids" => ?cs,
-        );
         let (result_tx, result_rx) = tikv_util::mpsc::bounded(ids.len());
         let runtime = self.fs.get_runtime();
         let opts = dfs::Options::new(shard_id, shard_ver);

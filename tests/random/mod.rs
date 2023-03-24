@@ -108,7 +108,7 @@ fn test_random_workload() {
             let data_stats = cluster.get_data_stats();
             data_stats.check_data().is_ok()
         },
-        10,
+        20,
     );
     if !ok {
         cluster.get_data_stats().check_data().unwrap();
@@ -198,7 +198,7 @@ fn test_random_merge() {
             let data_stats = cluster.get_data_stats();
             data_stats.check_data().is_ok()
         },
-        10,
+        20,
     );
     if !ok {
         cluster.get_data_stats().check_data().unwrap();
