@@ -26,8 +26,12 @@ pub(crate) enum Error {
     LeaderNotFound(u64),
     #[error("duplicated key {0}")]
     DuplicatedKey(String),
-    #[error("Restore failed {0}")]
-    RestoreError(String),
+    #[error("native backup/restore error {0}")]
+    NativeBackupRestoreError(#[from] native_br::error::Error),
+    #[error("restore keyspace task conflict with id {0}")]
+    RestoreKeyspaceTaskConflict(u64),
+    #[error("datetime parse error {0}")]
+    DateTimeParseError(#[from] chrono::ParseError),
 }
 
 impl From<dfs::Error> for Error {

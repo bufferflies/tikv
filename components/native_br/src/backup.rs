@@ -1,8 +1,9 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{str::FromStr, sync::mpsc::SyncSender, time::Duration};
+use std::{path::Path, str::FromStr, sync::mpsc::SyncSender, time::Duration};
 
 use bytes::Bytes;
+use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use futures::executor::block_on;
 use http::{Request, Uri};
 use hyper::Body;
@@ -10,6 +11,7 @@ use kvengine::dfs::{self, DFSConfig, S3Fs};
 use kvproto::metapb::Store;
 use pd_client::PdClient;
 use protobuf::Message;
+use regex::Regex;
 use rfenginepb::{ClusterBackupMeta, StoreBackupMeta};
 use security::SecurityConfig;
 use slog_global::{error, info, warn};
@@ -22,20 +24,26 @@ use crate::{
     error::Error,
 };
 
-const BACKUP_FOLDER_FORMAT: &str = "%Y%m%d";
 const MAX_BATCH_GET_CNT: i64 = 1024;
 // keyspace meta in pd is "/pd/$cluster_id/PD_KEYSPACE_META_PATH"
 const PD_KEY_SPACE_META_PATH: [&str; 3] = ["keyspaces/", "region_label/keyspaces/", "rules/"];
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-fn backup_file_name(prefix: String, name: String, backup_ts: u64) -> String {
-    if name.is_empty() {
-        let folder = format!("backup/{}", chrono::Utc::now().format(BACKUP_FOLDER_FORMAT));
-        format!("{}/{}/{}.meta", prefix, folder, backup_ts)
+/// Generate full path `/<prefix>/backup/<name>`.
+pub fn backup_file_full_path(prefix: String, name: String) -> String {
+    let name = if name.is_empty() {
+        IncrementalBackupFile::default().into_name()
     } else {
-        format!("{}/backup/{}", prefix, name)
-    }
+        name
+    };
+    // Use `Path` to handle path separators.
+    Path::new(&prefix)
+        .join("backup")
+        .join(name)
+        .to_str()
+        .unwrap()
+        .to_string()
 }
 
 pub fn execute_incremental_backup(config: BackupConfig, name: String, interval: Duration) {
@@ -188,7 +196,7 @@ pub fn backup_cluster_with_ts(
         cluster_backup_meta.safe_ts,
         cluster_backup_meta.get_stores().len(),
     );
-    let backup_key = backup_file_name(s3fs.get_prefix(), name, backup_ts);
+    let backup_key = backup_file_full_path(s3fs.get_prefix(), name);
     let backup_data = Bytes::from(cluster_backup_meta.write_to_bytes().unwrap());
     runtime
         .block_on(s3fs.put_object(backup_key.clone(), backup_data, backup_key.clone()))
@@ -271,18 +279,25 @@ fn get_backup_config(
     config
 }
 
-pub async fn get_all_backup_files(s3fs: &S3Fs, date: String) -> dfs::Result<Vec<String>> {
+/// Return full path of incremental backups in S3.
+pub async fn get_all_incremental_backups(
+    s3fs: &S3Fs,
+    start_date: &chrono::Date<Utc>,
+    start_time: Option<&NaiveTime>,
+) -> dfs::Result<Vec<String>> {
     let mut files = vec![];
-    let mut start_key = format!("backup/{}", date);
-    let prefix = format!("{}/{}", s3fs.get_prefix(), start_key);
+    let mut start_key = format!(
+        "{}/{}",
+        start_date.format(INCREMENTAL_BACKUP_FOLDER_FORMAT),
+        start_time
+            .map(|t| t.format(INCREMENTAL_BACKUP_FILE_NAME_FORMAT).to_string())
+            .unwrap_or_default()
+    );
+    let prefix = "backup/";
     loop {
-        match s3fs.list(&start_key).await {
-            Ok((backup_files, mut more, next_start_after)) => {
+        match s3fs.list(&start_key, Some(prefix)).await {
+            Ok((backup_files, more, next_start_after)) => {
                 for file in backup_files {
-                    if !file.key.starts_with(&prefix) {
-                        more = false;
-                        break;
-                    }
                     files.push(file.key);
                 }
                 if !more {
@@ -300,12 +315,12 @@ pub async fn get_all_backup_files(s3fs: &S3Fs, date: String) -> dfs::Result<Vec<
 
 // If backup exist, return the latest one, else create a new ClusterBackupMeta.
 async fn get_latest_backup_meta(s3fs: &S3Fs, cluster_id: u64) -> Result<ClusterBackupMeta> {
-    let date = chrono::Utc::now().format(BACKUP_FOLDER_FORMAT).to_string();
-    let files = get_all_backup_files(s3fs, date).await?;
+    let now = Utc::now();
+    let files = get_all_incremental_backups(s3fs, &now.date(), None).await?;
     if files.is_empty() {
         return Err(Error::MetaNotFound(cluster_id));
     }
-    // Incremental backup file name is generated with `backup_file_name`.
+    // Incremental backup file name is generated with `backup_file_full_path`.
     // The last should be the latest one in most cases.
     let last_file = files.last().unwrap();
     let object = s3fs
@@ -430,12 +445,106 @@ pub struct BackupConfig {
     pub skip_keyspace_meta: bool,
 }
 
+/// Incremental Backup ID, name, and S3 path
+///
+/// Backup ID (`backup_id`) is the UNIX timestamp when the backup is created.
+///
+/// Backup Name is in the format of "YYYYmmdd/HHMMSS.meta", in which "YYYYmmdd"
+/// & "HHMMSS" are the UTC data & time respectively, when the backup is created.
+///
+/// Backup S3 path is `/<s3_prefix>/backup/{{backup_name}}`.
+///
+/// Manual backups without name also follow this rule.
+
+const INCREMENTAL_BACKUP_FOLDER_FORMAT: &str = "%Y%m%d";
+const INCREMENTAL_BACKUP_FILE_NAME_FORMAT: &str = "%H%M%S";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IncrementalBackupFile {
+    name: String,
+    created_at: DateTime<Utc>,
+}
+
+impl IncrementalBackupFile {
+    pub fn new() -> Self {
+        let created_at = Utc::now();
+        Self::from_datetime(created_at)
+    }
+
+    pub fn from_datetime(utc: DateTime<Utc>) -> Self {
+        let name = Self::generate_name_from_utc(&utc);
+        Self {
+            name,
+            created_at: utc,
+        }
+    }
+
+    pub fn try_from_full_path(path: &str) -> Option<Self> {
+        lazy_static::lazy_static! {
+            static ref RE: Regex = Regex::new(r"/backup/([0-9]{8})/([0-9]{6})\.meta$").unwrap();
+        }
+        let caps = RE.captures(path)?;
+        let date = NaiveDate::parse_from_str(&caps[1], INCREMENTAL_BACKUP_FOLDER_FORMAT).ok()?;
+        let time = NaiveTime::parse_from_str(&caps[2], INCREMENTAL_BACKUP_FILE_NAME_FORMAT).ok()?;
+        let datetime = NaiveDateTime::new(date, time);
+        let utc = DateTime::<Utc>::from_utc(datetime, Utc);
+        Some(Self::from_datetime(utc))
+    }
+
+    pub fn from_id(backup_id: u64) -> Self {
+        let datetime = NaiveDateTime::from_timestamp(backup_id as i64, 0);
+        let utc = DateTime::<Utc>::from_utc(datetime, Utc);
+        Self::from_datetime(utc)
+    }
+
+    pub fn id(&self) -> u64 {
+        self.created_at.timestamp() as u64
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn into_name(self) -> String {
+        self.name
+    }
+
+    pub fn created_at(&self) -> &DateTime<Utc> {
+        &self.created_at
+    }
+
+    // `/<s3_prefix>/backup/{{backup_name}}`
+    pub fn full_path(&self, s3_prefix: &str) -> String {
+        Path::new(s3_prefix)
+            .join("backup")
+            .join(&self.name)
+            .to_str()
+            .unwrap()
+            .to_string()
+    }
+
+    fn generate_name_from_utc(utc: &DateTime<Utc>) -> String {
+        format!(
+            "{}/{}.meta",
+            utc.format(INCREMENTAL_BACKUP_FOLDER_FORMAT),
+            utc.format(INCREMENTAL_BACKUP_FILE_NAME_FORMAT)
+        )
+    }
+}
+
+impl Default for IncrementalBackupFile {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use chrono::{DateTime, NaiveDateTime, Utc};
     use kvproto::metapb::Store;
     use rfenginepb::{ChangeSet, ClusterBackupMeta, StoreBackupMeta, WalChunk};
 
-    use super::{check_backup_meta_consistency, merge_store_backup_meta};
+    use super::*;
 
     #[test]
     fn test_merge_store_backup_meta() {
@@ -525,5 +634,28 @@ mod tests {
             });
         }
         check_backup_meta_consistency(&meta, &stores).unwrap();
+    }
+
+    #[test]
+    fn test_incremental_backup_file() {
+        let datetime =
+            NaiveDateTime::parse_from_str("2023-03-21 11:22:33", "%Y-%m-%d %H:%M:%S").unwrap();
+        let utc = DateTime::<Utc>::from_utc(datetime, Utc);
+
+        let backup = IncrementalBackupFile::from_datetime(utc);
+        assert_eq!(backup.name(), "20230321/112233.meta");
+        assert_eq!(backup.id(), 1679397753);
+        let full_path = backup.full_path("cse-local");
+        assert_eq!(&full_path, "cse-local/backup/20230321/112233.meta");
+        assert_eq!(
+            full_path,
+            backup_file_full_path("cse-local".to_owned(), backup.name.to_owned())
+        );
+
+        let backup1 = IncrementalBackupFile::try_from_full_path(&full_path).unwrap();
+        assert_eq!(backup, backup1);
+
+        let backup2 = IncrementalBackupFile::from_id(backup.id());
+        assert_eq!(backup, backup2);
     }
 }

@@ -42,3 +42,15 @@ where
         .body(message.into())
         .unwrap()
 }
+
+pub(crate) fn make_json_response<T>(status_code: StatusCode, resp: &T) -> Response<Body>
+where
+    T: ?Sized + serde::Serialize,
+{
+    let json = serde_json::to_string(resp).unwrap();
+    Response::builder()
+        .status(status_code)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(json.into())
+        .unwrap()
+}

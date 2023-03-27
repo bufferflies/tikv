@@ -8,6 +8,7 @@ use http::{Request, Uri};
 use hyper::Body;
 use slog_global::debug;
 use tikv_util::box_err;
+use url::Url;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Sync + Send>>;
 
@@ -17,29 +18,39 @@ const PD_KEYSPACE_PATH: &str = "/pd/api/v2/keyspaces";
 /// interface. It's also expected to act like the tool `pd-ctl`.
 #[derive(Clone)]
 pub struct PdControl {
-    config: pd_client::Config,
+    _config: pd_client::Config,
     // TODO: support TLS
     _security_config: security::SecurityConfig,
+    endpoints: Vec<Url>,
 }
 
 impl PdControl {
-    pub fn new(config: pd_client::Config, security_config: security::SecurityConfig) -> Self {
-        Self {
-            config,
-            _security_config: security_config,
+    pub fn new(
+        config: pd_client::Config,
+        security_config: security::SecurityConfig,
+    ) -> Result<Self> {
+        let mut endpoints = Vec::with_capacity(config.endpoints.len());
+        for endpoint in &config.endpoints {
+            let url = if !endpoint.starts_with("http") {
+                Url::parse(&format!("http://{endpoint}"))?
+            } else {
+                Url::parse(endpoint)?
+            };
+            endpoints.push(url);
         }
+        Ok(Self {
+            _config: config,
+            _security_config: security_config,
+            endpoints,
+        })
     }
 
     async fn request_pd_restful(&self, query: String, post_data: Option<Vec<u8>>) -> Result<Bytes> {
         let client = hyper::Client::new();
         let mut err = None;
-        for endpoint in &self.config.endpoints {
-            let uri = if !endpoint.starts_with("http") {
-                format!("http://{endpoint}{query}")
-            } else {
-                format!("{endpoint}/{query}")
-            };
-            let uri = Uri::from_str(&uri).unwrap();
+        for endpoint in &self.endpoints {
+            let uri = endpoint.join(&query).unwrap();
+            let uri = Uri::from_str(uri.as_str()).unwrap();
             let resp = match post_data {
                 Some(ref post_data) => {
                     let req = Request::post(uri)

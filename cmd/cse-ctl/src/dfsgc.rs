@@ -355,7 +355,7 @@ impl GcWorker {
         loop {
             info!("loop start: {}", start_after);
             let s3fs = self.s3fs.clone();
-            let (files, _, next_start_after) = s3fs.list(start_after.as_str()).await?;
+            let (files, _, next_start_after) = s3fs.list(start_after.as_str(), None).await?;
             info!("listed {} files", files.len());
             let file_objs = files.into_iter().filter_map(|obj| {
                 self.s3fs

@@ -246,22 +246,31 @@ impl S3FsCore {
         }
     }
 
-    // list gets a list of file ids(full path) greater than start_after.
-    // The result contains:
-    // A vector of file content with `key` & `last_modified` timestamp.
-    // A boolean `has_more` indicate if there is more.
-    // An optional `next_start_after` for next loop if `has_more` is true.
-    // Ref: https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html
+    /// list gets a list of file ids(full path) greater than `start_after`, with
+    /// optional prefix `prefix`.
+    ///
+    /// The result contains:
+    ///     A vector of file content with `key` & `last_modified` timestamp.
+    ///     A boolean `has_more` indicate if there is more.
+    ///     An optional `next_start_after` for next loop if `has_more` is true.
+    ///
+    /// Note:
+    ///     `prefix` should NOT be contained in `start_after`.
+    ///     The file ids in result are in full path, including `S3Fs.prefix` and
+    /// `prefix`.
+    ///
+    /// Ref: https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html
     pub async fn list(
         &self,
         start_after: &str,
+        prefix: Option<&str>,
     ) -> crate::dfs::Result<(
         Vec<ListObjectContent>,
         bool,           // has_more. Deprecated, use `next_start_after`
         Option<String>, // next_start_after
     )> {
-        let prefix = format!("{}/", self.prefix.clone());
-        let start_after = format!("{}/{}", self.prefix.clone(), start_after);
+        let prefix = format!("{}/{}", self.prefix.clone(), prefix.unwrap_or_default());
+        let start_after = format!("{}{}", prefix, start_after);
         let mut retry_cnt = 0;
         loop {
             let mut req = self.new_request("GET", "");

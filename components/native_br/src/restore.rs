@@ -13,7 +13,7 @@ use rfenginepb::ClusterBackupMeta;
 use security::SecurityConfig;
 use slog_global::info;
 
-use crate::common::generate_etcd_connect_opt;
+use crate::{backup::backup_file_full_path, common::generate_etcd_connect_opt};
 
 const PD_ROOT_PATH: &str = "/pd";
 const PD_CLUSTER_ID_PATH: &str = "/pd/cluster_id";
@@ -61,7 +61,7 @@ pub fn restore_pd(config: RestoreConfig, name: String) {
 }
 
 pub(crate) fn get_cluster_backup_meta(s3fs: &S3Fs, name: String) -> ClusterBackupMeta {
-    let backup_key = format!("{}/backup/{}", s3fs.get_prefix(), name);
+    let backup_key = backup_file_full_path(s3fs.get_prefix(), name.clone());
     let runtime = s3fs.get_runtime();
     let data = runtime
         .block_on(s3fs.get_object(backup_key, name, engine_traits::GetObjectOptions::default()))

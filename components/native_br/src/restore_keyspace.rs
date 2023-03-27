@@ -57,7 +57,7 @@ pub fn restore_keyspace_with_cfg(
     pd_client: Arc<dyn PdClient>,
     runtime: &Runtime,
 ) -> Result<()> {
-    let pd_control = PdControl::new(config.pd.clone(), config.security);
+    let pd_control = PdControl::new(config.pd.clone(), config.security)?;
     let keyspace_id = {
         let keyspace = runtime.block_on(pd_control.get_keyspace_by_name(keyspace_name))?;
         assert_eq!(keyspace_name, keyspace.name);
@@ -751,9 +751,8 @@ impl BackupCluster {
         let stores_id: Vec<u64> = self.get_all_stores_id().collect();
         for store_id in stores_id {
             let shards_need_truncate = self.get_shards_need_flush_and_truncate(store_id);
-            truncate_cnt += shards_need_truncate.len();
             for id in shards_need_truncate {
-                self.truncate_ts(id)?;
+                truncate_cnt += self.truncate_ts(id)? as usize;
             }
         }
         Ok(truncate_cnt)
@@ -860,14 +859,14 @@ impl BackupCluster {
             .unwrap();
         if res_cs.has_truncate_ts() {
             let shard = self.get_shard_mut(shard_id).unwrap();
-            info!(
+            debug!(
                 "Keyspace {} before truncate ts: {:?}, table change: {:?}",
                 keyspace_id,
                 shard,
                 res_cs.get_truncate_ts()
             );
             shard.meta.apply_change_set(&res_cs);
-            info!(
+            debug!(
                 "Keyspace {} after apply_truncate_ts: {:?}",
                 keyspace_id, shard
             );

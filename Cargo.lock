@@ -3705,8 +3705,10 @@ dependencies = [
  "kvengine",
  "kvenginepb",
  "kvproto",
+ "lazy_static",
  "pd_client",
  "protobuf",
+ "regex",
  "rfengine",
  "rfenginepb",
  "rfstore",
@@ -3724,6 +3726,7 @@ dependencies = [
  "tikv-client",
  "tikv_util",
  "tokio",
+ "url",
 ]
 
 [[package]]

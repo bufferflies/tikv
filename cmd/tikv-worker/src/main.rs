@@ -35,6 +35,7 @@ use prometheus::TEXT_FORMAT;
 use protobuf::Message;
 use rfstore::store::RegionSnapshot;
 use security::{SecurityConfig, SecurityManager};
+use slog::Level;
 use slog_global::{error, info};
 use tikv_util::{
     config::ReadableDuration,
@@ -44,13 +45,14 @@ use tikv_util::{
 
 use crate::{
     load_data::{handle_load_data, LoadDataManager, MAX_IN_MEM_SIZE},
-    native_br::{handle_backup, handle_restore_keyspace, NativeBrManger},
+    native_br::NativeBrManger,
 };
 
 const ZSTD_COMPRESSION_LEVEL_FOR_REMOTE: &str = "5";
+const DEFAULT_LOG_LEVEL: Level = Level::Info;
 
 fn main() {
-    init_logger(io::stdout());
+    init_logger(io::stdout(), DEFAULT_LOG_LEVEL);
     tikv_util::metrics::monitor_process()
         .unwrap_or_else(|e| panic!("failed to start process monitor: {}", e));
     let matches = App::new("tikv-worker")
@@ -79,6 +81,14 @@ fn main() {
                 .value_name("LOGFILE")
                 .help("Sets log file")
                 .long_help("Set the log file path. If not set, logs will output to stderr"),
+        )
+        .arg(
+            Arg::with_name("log-level")
+                .short("L")
+                .long("log-level")
+                .value_name("LOGLEVEL")
+                .help("Sets log level")
+                .long_help("Set the log level [debug,info,warn,error]"),
         )
         .arg(
             Arg::with_name("pd-endpoints")
@@ -149,12 +159,16 @@ fn main() {
         None => Config::default(),
     };
 
+    override_from_args(&mut config, &matches);
+    let log_level =
+        tikv_util::logger::get_level_by_string(&config.log_level).unwrap_or(DEFAULT_LOG_LEVEL);
     if !config.log_file.is_empty() {
         let log = tikv_util::logger::file_writer(&config.log_file, 300, 0, 0, rename_by_timestamp)
             .unwrap();
-        init_logger(log);
+        init_logger(log, log_level);
+    } else if log_level != DEFAULT_LOG_LEVEL {
+        init_logger(io::stdout(), log_level);
     }
-    override_from_args(&mut config, &matches);
     config.dfs.override_from_env();
 
     // If zstd_compression_level is not set, set it to default value
@@ -240,9 +254,13 @@ fn main() {
                         }
                         "/analyze" => handle_remote_analysis(dfs, req).await,
                         "/load_data" => handle_load_data(load_manager, req).await,
-                        "/backups" => handle_backup(br_manager, req).await,
-                        "/restore_keyspace" => handle_restore_keyspace(br_manager, req).await,
                         "/metrics" => handle_get_metrics(req).await,
+                        native_br::BACKUPS_API_PATH => {
+                            native_br::handle_backup(br_manager, req).await
+                        }
+                        path if path.starts_with(native_br::RESTORE_KEYSPACE_API_PATH) => {
+                            native_br::handle_restore_keyspace(br_manager, req).await
+                        }
                         _ => Ok(hyper::Response::builder()
                             .status(404)
                             .body(hyper::Body::from("Not Found"))
@@ -276,11 +294,11 @@ fn main() {
     rx.recv().unwrap().unwrap();
 }
 
-fn init_logger<W: 'static + io::Write + Send>(writer: W) {
+fn init_logger<W: 'static + io::Write + Send>(writer: W, level: Level) {
     use slog::Drain;
     let decorator = slog_term::PlainDecorator::new(writer);
     let drain = slog_term::CompactFormat::new(decorator).build();
-    let drain = std::sync::Mutex::new(drain).fuse();
+    let drain = std::sync::Mutex::new(drain).filter_level(level).fuse();
     let logger = slog::Logger::root(drain, slog::o!());
     slog_global::set_global(logger);
 }
@@ -447,6 +465,7 @@ pub struct Config {
     pub update_interval: ReadableDuration,
     pub dfs: DFSConfig,
     pub log_file: String,
+    pub log_level: String,
     pub data_dir: String,
     pub register: bool,
 }
@@ -462,6 +481,7 @@ impl Default for Config {
             update_interval: ReadableDuration::minutes(10),
             dfs: DFSConfig::default(),
             log_file: String::default(),
+            log_level: String::default(),
             data_dir: String::default(),
             register: false,
         }
@@ -511,10 +531,18 @@ fn override_from_args(config: &mut Config, matches: &ArgMatches<'_>) {
     }
 
     if let Some(register) = matches.value_of("register") {
-        config.register = register == "true"
+        config.register = register == "true";
     }
 
     if let Some(dir) = matches.value_of("data-dir") {
-        config.data_dir = dir.to_string()
+        config.data_dir = dir.to_string();
+    }
+
+    if let Some(log_file) = matches.value_of("log-file") {
+        config.log_file = log_file.to_string();
+    }
+
+    if let Some(log_level) = matches.value_of("log-level") {
+        config.log_level = log_level.to_string();
     }
 }
