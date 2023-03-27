@@ -148,9 +148,8 @@ pub(crate) fn execute_dfsgc(arg: DfsGcArgs) {
 }
 
 fn validate_config(config: &DfsGcConfig) {
-    let s3_endpoint = url::Url::parse(&config.dfs.s3_endpoint).expect("parse dfs.s3_endpoint");
-
     if config.gc_lifetime.is_some() {
+        let s3_endpoint = url::Url::parse(&config.dfs.s3_endpoint).expect("parse dfs.s3_endpoint");
         // Assume that in test environment (e.g. minio) s3 endpoint must be configured
         // with port.
         assert!(
