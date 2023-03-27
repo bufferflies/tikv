@@ -278,9 +278,9 @@ impl S3FsCore {
                     let body = body_res.unwrap();
                     let body_str = body.to_str().unwrap();
                     let list: ListObjects = quick_xml::de::from_str(body_str).unwrap();
-                    let next_start_after = list.is_truncated.then_some(
-                        list.contents.last().unwrap().key.as_str()[prefix.len()..].to_string(),
-                    );
+                    let next_start_after = list.is_truncated.then(|| {
+                        list.contents.last().unwrap().key.as_str()[prefix.len()..].to_string()
+                    });
                     return Ok((list.contents, list.is_truncated, next_start_after));
                 } else {
                     result = Err(body_res.unwrap_err().into());
