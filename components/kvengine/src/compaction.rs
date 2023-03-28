@@ -348,27 +348,6 @@ impl Engine {
         runner.run();
     }
 
-    // pub(crate) fn get_in_use_total_blob_size(&self, id_ver: IDVer) ->
-    // Option<HashMap<u64, u64>> { let shard =
-    // self.get_shard_with_ver(id_ver.id, id_ver.ver).ok()?; let pri = shard.
-    // get_compaction_priority()?; let (_, cd) =
-    // self.build_compact_request(&shard, pri)?; let mut in_use_total_blob_size
-    // = HashMap::<u64, u64>::default();
-    //
-    // if let None = cd {
-    // return None;
-    // }
-    //
-    // for sstable in cd.unwrap().top {
-    // let v = in_use_total_blob_size
-    // .entry(sstable.id())
-    // .or_insert_with(|| 0);
-    // v += sstable.in_use_total_blob_size;
-    // }
-    //
-    // Some(in_use_total_blob_size)
-    // }
-
     pub(crate) fn compact(&self, id_ver: IdVer) -> Option<Result<pb::ChangeSet>> {
         let shard = self.get_shard_with_ver(id_ver.id, id_ver.ver).ok()?;
         let tag = shard.tag();
@@ -767,6 +746,7 @@ impl Engine {
         let data = shard.get_data();
         if data.l0_tbls.is_empty() {
             info!("{} zero L0 tables", tag);
+            store_bool(&shard.compacting, false);
             return None;
         }
         let mut req = self.new_compact_request_with_shard(shard, -1, 0);
@@ -826,6 +806,7 @@ impl Engine {
         let upper_level = &scf.levels[level - 1];
         let lower_level = &scf.levels[level];
         if upper_level.tables.len() == 0 {
+            store_bool(&shard.compacting, false);
             return None;
         }
         let upper_level_candidates = if upper_level.has_over_bound_data(&shard.start, &shard.end) {
@@ -870,6 +851,7 @@ impl Engine {
             }
         }
         if upper_left_idx == upper_right_idx {
+            store_bool(&shard.compacting, false);
             return None;
         }
         // Expand to left to include more tops as long as the ratio doesn't decrease and

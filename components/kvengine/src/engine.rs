@@ -543,15 +543,17 @@ impl EngineCore {
             && (cs.has_compaction()
                 || cs.has_destroy_range()
                 || cs.has_truncate_ts()
-                || cs.has_trim_over_bound())
+                || cs.has_trim_over_bound()
+                || cs.has_major_compaction())
         {
+            // This compaction may be conflicted with initial flush, so we have to trigger
+            // next compaction if needed.
+            let shard = self.get_shard(cs.shard_id).unwrap();
+            store_bool(&shard.compacting, false);
             // Notify the compaction runner otherwise the shard can't be compacted any more.
             self.compact_tx
                 .send(CompactMsg::Applied(IdVer::new(cs.shard_id, cs.shard_ver)))
                 .unwrap();
-            // This compaction may be conflicted with initial flush, so we have to trigger
-            // next compaction if needed.
-            let shard = self.get_shard(cs.shard_id).unwrap();
             self.refresh_shard_states(&shard);
         }
     }
