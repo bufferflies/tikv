@@ -44,9 +44,7 @@ const BACKUP_NAME_FORMAT: &str = "%Y%m%d%H%M%S";
 ///     backup_id=%d&backup_name=%s
 ///   * GET    /api/v1/restore_keyspace/<restore_id>?cluster_id=%d&keyspace=%s
 ///   * DELETE /api/v1/restore_keyspace/<restore_id>?cluster_id=%d&keyspace=%s
-///
-/// Note that "cluster_id" is optional as some components cannot get cluster id
-/// from PD.
+///   * GET    /api/v1/restore_keyspace/?cluster_id=%d
 
 pub(crate) async fn handle_backup(
     manager: Arc<NativeBrManger>,
@@ -116,6 +114,22 @@ pub(crate) async fn handle_restore_keyspace(
         }
     }
 
+    let sub_path = req
+        .uri()
+        .path()
+        .strip_prefix(RESTORE_KEYSPACE_API_PATH)
+        .unwrap();
+    if sub_path.is_empty() && *req.method() == Method::GET {
+        return handle_get_all_restore_task(&manager);
+    }
+
+    let restore_id = match sub_path.parse::<u64>() {
+        Ok(id) => id,
+        Err(_) => {
+            return Ok(make_response(StatusCode::BAD_REQUEST, "Invalid restore id"));
+        }
+    };
+
     let keyspace = query_pairs.get("keyspace");
     if keyspace.is_none() {
         return Ok(make_response(
@@ -124,18 +138,6 @@ pub(crate) async fn handle_restore_keyspace(
         ));
     }
     let keyspace = keyspace.unwrap().to_string();
-
-    let sub_path = req
-        .uri()
-        .path()
-        .strip_prefix(RESTORE_KEYSPACE_API_PATH)
-        .unwrap();
-    let restore_id = match sub_path.parse::<u64>() {
-        Ok(id) => id,
-        Err(_) => {
-            return Ok(make_response(StatusCode::BAD_REQUEST, "Invalid restore id"));
-        }
-    };
 
     match *req.method() {
         Method::GET => {
@@ -183,6 +185,7 @@ pub(crate) async fn handle_restore_keyspace(
                         error: String::new(),
                         duration: 0,
                         id: restore_id,
+                        keyspace,
                     };
                     Ok(make_json_response(StatusCode::CREATED, &resp))
                 }
@@ -261,6 +264,15 @@ pub(crate) async fn handle_restore_keyspace(
     }
 }
 
+fn handle_get_all_restore_task(manager: &Arc<NativeBrManger>) -> hyper::Result<Response<Body>> {
+    let resp_vec: Vec<RestoreProgressResponse> = manager
+        .get_all_restore_task()
+        .into_iter()
+        .map(|(id, task)| RestoreProgressResponse::from_restore_status(id, task))
+        .collect();
+    Ok(make_json_response(StatusCode::OK, &resp_vec))
+}
+
 fn handle_restore_status(
     manager: &Arc<NativeBrManger>,
     restore_id: u64,
@@ -327,6 +339,7 @@ struct RestoreProgressResponse {
     error: String,
     duration: i64, // in seconds
     id: u64,
+    keyspace: String,
 }
 
 impl RestoreProgressResponse {
@@ -340,6 +353,7 @@ impl RestoreProgressResponse {
             error: status.error,
             duration: duration.num_seconds().clamp(0, i64::MAX),
             id: restore_id,
+            keyspace: status.keyspace_name,
         }
     }
 }
@@ -578,6 +592,11 @@ impl NativeBrManger {
         } else {
             Ok(None)
         }
+    }
+
+    /// Return all restore tasks in memory.
+    fn get_all_restore_task(&self) -> HashMap<u64, RestoreTask> {
+        self.context.restore_tasks.rl().clone()
     }
 
     /// Return:
