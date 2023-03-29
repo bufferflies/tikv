@@ -13,6 +13,7 @@ use bytes::{Buf, Bytes};
 use engine_traits::{GetObjectOptions, ObjectStorage};
 use farmhash::fingerprint64;
 use futures::StreamExt;
+use http::StatusCode;
 use hyper_tls::HttpsConnector;
 use regex::Regex;
 use rusoto_core::{
@@ -231,6 +232,13 @@ impl S3FsCore {
         }
     }
 
+    fn is_err_not_found<T>(&self, rustoto_err: &RusotoError<T>) -> bool {
+        match rustoto_err {
+            RusotoError::Unknown(resp) => resp.status == StatusCode::NOT_FOUND,
+            _ => false,
+        }
+    }
+
     async fn sleep_for_retry(&self, retry_cnt: &mut u32, file_name: &str) -> bool {
         if *retry_cnt < MAX_RETRY_COUNT {
             *retry_cnt += 1;
@@ -296,7 +304,9 @@ impl S3FsCore {
                 }
             }
             let err = result.unwrap_err();
-            if self.is_err_retryable(&err) && retry_cnt < MAX_RETRY_COUNT {
+            if self.is_err_not_found(&err) {
+                return Ok((vec![], false, None));
+            } else if self.is_err_retryable(&err) && retry_cnt < MAX_RETRY_COUNT {
                 retry_cnt += 1;
                 let retry_sleep = 2u64.pow(retry_cnt) * RETRY_SLEEP_MS;
                 tokio::time::sleep(Duration::from_millis(retry_sleep)).await;

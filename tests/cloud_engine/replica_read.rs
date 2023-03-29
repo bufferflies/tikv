@@ -67,8 +67,9 @@ fn test_replica_read() {
         peer_role: RequestPeerRole::Learner,
     };
     for i in 0..DATA_COUNT {
-        let (val, ctx) =
-            client.must_get_key_version_opt(&i_to_key(i), u64::MAX, put_time, &options);
+        let (val, ctx) = client
+            .get_key_version_opt(&i_to_key(i), u64::MAX, put_time, &options)
+            .unwrap();
         assert_eq!(ctx.get_peer().get_role(), metapb::PeerRole::Learner);
         assert_eq!(ctx.get_peer().get_id(), learner_peer.id);
         assert_eq!(val, i_to_val(i));

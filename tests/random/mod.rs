@@ -1,5 +1,7 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
+mod test_native_br;
+
 use std::{
     sync::{
         atomic::{AtomicU16, AtomicUsize, Ordering},
@@ -10,29 +12,45 @@ use std::{
 };
 
 use futures::executor::block_on;
+use kvengine::dfs::DFSConfig;
 use kvproto::pdpb::CheckPolicy;
 use pd_client::PdClient;
 use rand::{Rng, RngCore};
-use test_cloud_server::{client::ClusterClient, scheduler::Scheduler, try_wait, ServerCluster};
+use tempfile::TempDir;
+use test_cloud_server::{
+    client::ClusterClient, oss::ObjectStorageService, scheduler::Scheduler, try_wait, ServerCluster,
+};
+use test_pd_client::TestPdClient;
 use tikv::config::TikvConfig;
 use tikv_util::{
     config::{ReadableDuration, ReadableSize},
-    info,
+    error, info,
     time::Instant,
 };
 use txn_types::Key;
 
+lazy_static::lazy_static! {
+    pub static ref WRITE_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    pub static ref MOVE_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    pub static ref MERGE_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    pub static ref TRANSFER_COUNTER: AtomicUsize = AtomicUsize::new(0);
+}
+
+pub const TIMEOUT: Duration = Duration::from_secs(60);
+pub const CONCURRENCY: usize = 4;
+
 static NODE_ALLOCATOR: AtomicU16 = AtomicU16::new(1);
-static WRITE_COUNTER: AtomicUsize = AtomicUsize::new(0);
-static MOVE_COUNTER: AtomicUsize = AtomicUsize::new(0);
-static MERGE_COUNTER: AtomicUsize = AtomicUsize::new(0);
-static TRANSFER_COUNTER: AtomicUsize = AtomicUsize::new(0);
-const TIMEOUT: Duration = Duration::from_secs(60);
 
 pub(crate) fn alloc_node_id() -> u16 {
     let node_id = NODE_ALLOCATOR.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     info!("allocated node_id {}", node_id);
     node_id
+}
+
+pub(crate) fn alloc_node_id_vec(count: usize) -> Vec<u16> {
+    let mut nodes = vec![];
+    nodes.resize_with(count, || alloc_node_id());
+    nodes
 }
 
 #[test]
@@ -133,7 +151,7 @@ fn test_random_merge() {
     );
 }
 
-fn spawn_write(idx: usize, mut client: ClusterClient) -> JoinHandle<()> {
+pub(crate) fn spawn_write(idx: usize, mut client: ClusterClient) -> JoinHandle<()> {
     std::thread::spawn(move || {
         // Make sure each write thread don't conflict with others.
         let begin = idx * 2000;
@@ -153,7 +171,7 @@ fn spawn_write(idx: usize, mut client: ClusterClient) -> JoinHandle<()> {
     })
 }
 
-fn spawn_move(scheduler: Scheduler, two_node_down: Arc<RwLock<()>>) -> JoinHandle<()> {
+pub(crate) fn spawn_move(scheduler: Scheduler, two_node_down: Arc<RwLock<()>>) -> JoinHandle<()> {
     std::thread::spawn(move || {
         let start_time = Instant::now();
         while start_time.saturating_elapsed() < TIMEOUT {
@@ -167,7 +185,7 @@ fn spawn_move(scheduler: Scheduler, two_node_down: Arc<RwLock<()>>) -> JoinHandl
     })
 }
 
-fn spawn_merge(scheduler: Scheduler) -> JoinHandle<()> {
+pub(crate) fn spawn_merge(scheduler: Scheduler) -> JoinHandle<()> {
     std::thread::spawn(move || {
         let start_time = Instant::now();
         while start_time.saturating_elapsed() < TIMEOUT {
@@ -179,7 +197,7 @@ fn spawn_merge(scheduler: Scheduler) -> JoinHandle<()> {
     })
 }
 
-fn spawn_transfer(scheduler: Scheduler) -> JoinHandle<()> {
+pub(crate) fn spawn_transfer(scheduler: Scheduler) -> JoinHandle<()> {
     std::thread::spawn(move || {
         let start_time = Instant::now();
         while start_time.saturating_elapsed() < TIMEOUT {
@@ -192,13 +210,93 @@ fn spawn_transfer(scheduler: Scheduler) -> JoinHandle<()> {
     })
 }
 
-fn i_to_key(i: usize) -> Vec<u8> {
+pub(crate) fn spawn_gc_worker(pd_client: Arc<TestPdClient>, timeout: Duration) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        let start_time = Instant::now();
+        while start_time.saturating_elapsed() < timeout {
+            let ts = block_on(pd_client.get_tso()).unwrap();
+            sleep(Duration::from_secs(10));
+            pd_client.set_gc_safe_point(ts.into_inner());
+        }
+        info!("gc worker thread exit");
+    })
+}
+
+pub(crate) fn spawn_keyspace_write(
+    idx: usize,
+    mut client: ClusterClient,
+    keyspace_count: usize,
+    timeout: Duration,
+) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        // Make sure each write thread don't conflict with others.
+        let begin = idx * 2000;
+        let end = begin + 2000 - 10;
+        let start_time = Instant::now();
+        let mut rng = rand::thread_rng();
+        while start_time.saturating_elapsed() < timeout {
+            let keyspace = rng.gen_range(0..keyspace_count);
+            let i_to_keyspace_key = generate_keyspace_key(keyspace as u32);
+
+            let i = rng.gen_range(begin..end);
+            let res = if rng.gen_ratio(2, 3) {
+                client.try_put_kv(i..(i + 10), &i_to_keyspace_key, i_to_val)
+            } else {
+                client.del_kv(i..(i + 10), &i_to_keyspace_key);
+                Ok(())
+            };
+            if res.is_err() {
+                // TODO: raise the error
+                error!("keyspace_write error: {:?}", res);
+            }
+            WRITE_COUNTER.fetch_add(10, Ordering::SeqCst);
+        }
+        info!("keyspace write thread {} exit", idx);
+    })
+}
+
+pub(crate) fn i_to_key(i: usize) -> Vec<u8> {
     format!("key{:08}", i).into_bytes()
 }
 
-fn i_to_val(i: usize) -> Vec<u8> {
+pub(crate) fn i_to_val(i: usize) -> Vec<u8> {
     let mut rng = rand::thread_rng();
     let mut buf = vec![0; i % 512 + 1];
     rng.fill_bytes(&mut buf);
     buf
+}
+
+pub(crate) fn get_keyspace_prefix(keyspace_id: u32) -> Vec<u8> {
+    let mut prefix = keyspace_id.to_be_bytes();
+    prefix[0] = b'x';
+    prefix.to_vec()
+}
+
+pub(crate) fn generate_keyspace_key(keyspace_id: u32) -> impl Fn(usize) -> Vec<u8> {
+    move |i: usize| -> Vec<u8> {
+        let mut key = get_keyspace_prefix(keyspace_id);
+        key.extend(i_to_key(i));
+        key
+    }
+}
+
+pub(crate) fn prepare_dfs(prefix: &str) -> (TempDir, ObjectStorageService, DFSConfig) {
+    let base_dir = tempfile::Builder::new().prefix(prefix).tempdir().unwrap();
+
+    let oss_dir = base_dir.path().join("oss");
+    let mut oss = ObjectStorageService::new(oss_dir);
+    oss.start_server();
+
+    let dfs_config = DFSConfig {
+        prefix: prefix.to_string(),
+        s3_endpoint: format!("http://127.0.0.1:{}", oss.port()),
+        s3_key_id: "admin".to_string(),
+        s3_secret_key: "admin".to_string(),
+        s3_bucket: prefix.to_string(),
+        s3_region: "local".to_string(),
+        zstd_compression_level: "3".to_string(),
+        ..Default::default()
+    };
+
+    (base_dir, oss, dfs_config)
 }

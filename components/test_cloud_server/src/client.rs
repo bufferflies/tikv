@@ -30,12 +30,15 @@ use rfstore::store::RegionIdVer;
 use test_pd_client::TestPdClient;
 use tikv::storage::mvcc::TimeStamp;
 use tikv_util::{
+    box_err,
     codec::bytes::{decode_bytes, encode_bytes},
     time::Instant,
     warn,
 };
 
 use crate::try_wait;
+
+pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Sync + Send>>;
 
 pub type RefStore = HashMap<Vec<u8>, Vec<u8>>;
 
@@ -179,6 +182,14 @@ impl ClusterClient {
         F: Fn(usize) -> Vec<u8>,
         G: Fn(usize) -> Vec<u8>,
     {
+        self.try_put_kv(rng, gen_key, gen_val).unwrap();
+    }
+
+    pub fn try_put_kv<F, G>(&mut self, rng: Range<usize>, gen_key: F, gen_val: G) -> Result<()>
+    where
+        F: Fn(usize) -> Vec<u8>,
+        G: Fn(usize) -> Vec<u8>,
+    {
         let start_key = gen_key(rng.start);
         let start_ts = self.get_ts();
 
@@ -201,10 +212,10 @@ impl ClusterClient {
             first.get_value(),
             put_time,
             &RequestOptions::default(),
-        )
-        .unwrap();
+        )?;
         self.put_kv_in_ref_store(mutations);
         self.set_max_ts(commit_ts.into_inner());
+        Ok(())
     }
 
     fn put_kv_in_ref_store(&mut self, mutations: Vec<Mutation>) {
@@ -573,7 +584,7 @@ impl ClusterClient {
         self.try_split(key).expect("ClusterClient::split");
     }
 
-    pub fn try_split(&mut self, key: &[u8]) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    pub fn try_split(&mut self, key: &[u8]) -> Result<()> {
         for _ in 0..10 {
             let region_id = self.get_region_id(key);
             let ctx = self.new_rpc_ctx(region_id).unwrap();
@@ -638,7 +649,7 @@ impl ClusterClient {
         source_key: &[u8],
         boundary_prefix: Option<&[u8]>,
         timeout: Duration,
-    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<()> {
         let source_region = self.pd_client.get_region(source_key)?;
         let raw_end_key = rfstore::store::raw_end_key(&source_region);
         if let Some(prefix) = boundary_prefix {
@@ -683,16 +694,17 @@ impl ClusterClient {
         version: u64,
         put_time: Instant,
     ) -> (Vec<u8>, Context) {
-        self.must_get_key_version_opt(key, version, put_time, &RequestOptions::default())
+        self.get_key_version_opt(key, version, put_time, &RequestOptions::default())
+            .unwrap()
     }
 
-    pub fn must_get_key_version_opt(
+    pub fn get_key_version_opt(
         &mut self,
         key: &[u8],
         version: u64,
         put_time: Instant,
         options: &RequestOptions,
-    ) -> (Vec<u8>, Context) {
+    ) -> Result<(Vec<u8>, Context)> {
         let start_time = Instant::now();
         let timeout = Duration::from_secs(15);
         let mut region_id = 0;
@@ -726,25 +738,25 @@ impl ClusterClient {
                 if self.handle_region_epoch_not_match_or_not_found(region_err) {
                     continue;
                 }
-                panic!("unexpected error {:?}", region_err);
+                return Err(box_err!("unexpected error {:?}", region_err));
             }
             if resp.get_not_found() {
-                panic!(
+                return Err(box_err!(
                     "key {:?} not found on region {}, put elapsed {:?}",
                     key,
                     region_id,
                     put_time.saturating_elapsed()
-                );
+                ));
             }
-            return (resp.take_value(), ctx);
+            return Ok((resp.take_value(), ctx));
         }
-        panic!(
+        Err(box_err!(
             "region {} failed to get key {:?}, errors {:?}, put elapsed {:?}",
             region_id,
             key,
             store_id_errors,
-            put_time.saturating_elapsed(),
-        );
+            put_time.saturating_elapsed()
+        ))
     }
 
     pub fn verify_data_with_ref_store(&mut self) {
@@ -758,7 +770,7 @@ impl ClusterClient {
         ref_store: &RefStore,
         range: Option<(&[u8], &[u8])>,
         options: &RequestOptions,
-    ) -> std::result::Result<usize, Box<dyn std::error::Error>> {
+    ) -> Result<usize> {
         let mut cnt = 0;
         let put_time = Instant::now();
         for (k, v) in ref_store {
@@ -779,8 +791,8 @@ impl ClusterClient {
         expect_val: &[u8],
         put_time: Instant,
         options: &RequestOptions,
-    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let (val, ctx) = self.must_get_key_version_opt(key, u64::MAX, put_time, options);
+    ) -> Result<()> {
+        let (val, ctx) = self.get_key_version_opt(key, u64::MAX, put_time, options)?;
         if val.as_slice() != expect_val {
             let region_id = ctx.region_id;
             let region_ver = ctx.get_region_epoch().get_version();

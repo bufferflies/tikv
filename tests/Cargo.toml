@@ -149,6 +149,7 @@ external_storage_export = { workspace = true }
 file_system = { workspace = true }
 hyper = { version = "0.14", default-features = false, features = ["runtime"] }
 keys = { workspace = true }
+lazy_static = "1.3"
 panic_hook = { workspace = true }
 profiler = { workspace = true }
 rand_xorshift = "0.3"

@@ -201,6 +201,7 @@ impl ObjectStorageService {
             };
             Response::new(body)
         } else {
+            info!("handle_get_object: path not found: {}", parts.uri.path());
             Self::not_found()
         };
         Ok(res)

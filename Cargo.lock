@@ -6751,6 +6751,7 @@ dependencies = [
  "keys",
  "kvengine",
  "kvproto",
+ "lazy_static",
  "libc 0.2.132",
  "log_wrappers",
  "more-asserts",
