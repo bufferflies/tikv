@@ -684,7 +684,7 @@ impl Peer {
             notify_req_region_removed(self.region_id, cb);
         }
 
-        PdRunner::set_storage_size_metric(self.region(), None);
+        PdRunner::set_storage_size_metric(self.region(), None, false);
 
         info!(
             "peer destroy itself";
@@ -1295,7 +1295,7 @@ impl Peer {
                 }
                 StateRole::Follower => {
                     self.leader_lease.expire();
-                    PdRunner::set_storage_size_metric(self.region(), None)
+                    PdRunner::set_storage_size_metric(self.region(), None, false)
                 }
                 _ => {}
             }

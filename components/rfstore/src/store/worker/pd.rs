@@ -345,6 +345,7 @@ pub struct PdRunner {
     region_map: RegionMap,
     region_buckets: HashMap<u64, ReportBucket>,
     store_stat: StoreStat,
+    store_map: HashMap<u64, bool>,
     is_hb_receiver_scheduled: bool,
     // Records the boot time.
     start_ts: UnixSecs,
@@ -412,6 +413,7 @@ impl PdRunner {
             region_map: Default::default(),
             region_buckets: HashMap::default(),
             store_stat: StoreStat::default(),
+            store_map: HashMap::default(),
             start_ts: UnixSecs::now(),
             scheduler,
             concurrency_manager,
@@ -499,7 +501,37 @@ impl PdRunner {
             .region_keys_read
             .observe(region_stat.read_keys as f64);
 
-        PdRunner::set_storage_size_metric(&region, Some(region_stat.approximate_kv_size));
+        for p in region.get_peers() {
+            let store_id = p.get_store_id();
+            if let std::collections::hash_map::Entry::Vacant(entry) = self.store_map.entry(store_id)
+            {
+                let resp = self.pd_client.get_store(store_id);
+                match resp {
+                    Ok(store) => {
+                        let is_tiflash = store.get_labels().iter().any(|label| {
+                            label.get_key() == "engine" && label.get_value() == "tiflash"
+                        });
+                        entry.insert(is_tiflash);
+                    }
+                    Err(e) => {
+                        error!("failed to get store from pd"; "store_id" => store_id, "err" => ?e);
+                    }
+                }
+            }
+        }
+
+        let has_tiflash_replicas = region.get_peers().iter().any(|p| {
+            let store_id = p.get_store_id();
+            self.store_map
+                .get(&store_id)
+                .map_or(false, |is_tiflash| *is_tiflash)
+        });
+
+        PdRunner::set_storage_size_metric(
+            &region,
+            Some(region_stat.approximate_kv_size),
+            has_tiflash_replicas,
+        );
 
         let changed = self
             .region_map
@@ -545,7 +577,11 @@ impl PdRunner {
         self.remote.spawn(f);
     }
 
-    pub fn set_storage_size_metric(region: &metapb::Region, kv_size: Option<u64>) {
+    pub fn set_storage_size_metric(
+        region: &metapb::Region,
+        kv_size: Option<u64>,
+        has_tiflash_replicas: bool,
+    ) {
         let keyspace_id = rfengine::get_region_keyspace_id_str(region);
         let region_id = region.get_id();
         let region_id_string = region_id.to_string();
@@ -561,6 +597,11 @@ impl PdRunner {
                             region_id_str,
                             keyspace_id_str,
                         ]);
+                        let _ = STORE_SIZE_GAUGE_VEC.remove_label_values(&[
+                            "tiflash_used",
+                            region_id_str,
+                            keyspace_id_str,
+                        ]);
                     }
                     Some(size) => {
                         debug!(
@@ -568,10 +609,15 @@ impl PdRunner {
                             "region_id_str" => region_id_str,
                             "keyspace_id_str" => keyspace_id_str,
                             "kv_size"=>size,
+                            "has_tiflash_replicas" => has_tiflash_replicas,
                         );
                         STORE_SIZE_GAUGE_VEC
                             .with_label_values(&["used", region_id_str, keyspace_id_str])
                             .set(size as i64);
+                        let tiflash_size = if has_tiflash_replicas { size } else { 0 };
+                        STORE_SIZE_GAUGE_VEC
+                            .with_label_values(&["tiflash_used", region_id_str, keyspace_id_str])
+                            .set(tiflash_size as i64);
                     }
                 }
             }
