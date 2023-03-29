@@ -408,6 +408,48 @@ impl ClusterDataStats {
             }
         }
     }
+
+    fn get_region_shard_stats(&self, region_id: u64) -> Option<&ShardStats> {
+        self.regions
+            .get(&region_id)
+            .map(|stats| stats.shard_stats.values().next().unwrap())
+    }
+
+    pub fn check_buckets(&self, pd_client: &TestPdClient, bucket_size: u64) -> Result<(), String> {
+        let regions = pd_client.get_all_regions();
+        for region in regions {
+            let region_id = region.get_id();
+            let region_shard_stats = self.get_region_shard_stats(region_id).unwrap();
+            let shard_size = region_shard_stats.total_size;
+            if shard_size == 0 {
+                continue;
+            }
+            if let Some(buckets) = pd_client.get_buckets(region_id) {
+                for i in 1..buckets.meta.keys.len() {
+                    let prev_key = &buckets.meta.keys[i - 1];
+                    let key = &buckets.meta.keys[i];
+                    if !key.is_empty() {
+                        assert!(prev_key < key);
+                    }
+                }
+                let expected_bucket_count = (shard_size + bucket_size - 1) / bucket_size;
+                let actual_bucket_count = buckets.meta.sizes.len() as u64;
+                let ratio = expected_bucket_count as f64 / actual_bucket_count as f64;
+                if !(0.3..=3.0).contains(&ratio) {
+                    return Err(format!(
+                        "region {} buckets {:?}, shard size {}, expected {}, actual {}",
+                        region_id, buckets, shard_size, expected_bucket_count, actual_bucket_count
+                    ));
+                };
+            } else {
+                return Err(format!(
+                    "region {} no buckets, shard size {}",
+                    region_id, shard_size
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Default, Debug)]

@@ -89,6 +89,7 @@ pub struct HeartbeatTask {
     pub approximate_keys: u64,
     pub approximate_kv_size: u64,
     pub replication_status: Option<RegionReplicationStatus>,
+    pub bucket_stat: Option<BucketStat>,
 }
 
 /// Uses an asynchronous thread to tell PD something.
@@ -129,7 +130,6 @@ pub enum PdTask {
         txn_ext: Arc<TxnExt>,
     },
     UpdateSafeTs,
-    ReportBuckets(BucketStat),
     SyncRegion {
         keyspace_id: Option<u32>,
         callback: Box<dyn FnOnce(SyncRegionResponse) + Send>,
@@ -326,9 +326,6 @@ impl Display for PdTask {
                 region_id
             ),
             PdTask::UpdateSafeTs => write!(f, "update safe ts"),
-            PdTask::ReportBuckets(ref buckets) => {
-                write!(f, "report buckets: {:?}", buckets)
-            }
             PdTask::SyncRegion { .. } => {
                 write!(f, "sync region")
             }
@@ -1299,7 +1296,10 @@ impl Runnable for PdRunner {
                         cpu_usage: 0,
                     },
                     hb_task.replication_status,
-                )
+                );
+                if let Some(bucket_stat) = hb_task.bucket_stat {
+                    self.handle_report_region_buckets(bucket_stat);
+                }
             }
             PdTask::StoreHeartbeat {
                 stats,
@@ -1317,9 +1317,6 @@ impl Runnable for PdRunner {
                 txn_ext,
             } => self.handle_update_max_timestamp(region_id, initial_status, txn_ext),
             PdTask::UpdateSafeTs => self.handle_update_safe_ts(),
-            PdTask::ReportBuckets(buckets) => {
-                self.handle_report_region_buckets(buckets);
-            }
             PdTask::SyncRegion {
                 keyspace_id,
                 callback,

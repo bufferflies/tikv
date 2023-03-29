@@ -9,6 +9,7 @@ use std::{
 };
 
 use bitflags::bitflags;
+use bytes::Buf;
 use collections::{HashMap, HashSet};
 use error_code::ErrorCodeExt;
 use fail::fail_point;
@@ -25,7 +26,7 @@ use kvproto::{
     raft_serverpb::{ExtraMessage, ExtraMessageType, MergeState, PeerState, RaftMessage},
     *,
 };
-use pd_client::{simple_merge_bucket_write_stats, BucketStat};
+use pd_client::{new_bucket_write_stats, simple_merge_bucket_write_stats, BucketMeta, BucketStat};
 use protobuf::Message;
 use raft::{
     self, Changer, LightReady, ProgressState, ProgressTracker, RawNode, Ready, SnapshotStatus,
@@ -57,6 +58,7 @@ use tikv_util::{
     Either,
 };
 use time::Timespec;
+use txn_types::Key;
 use uuid::Uuid;
 
 use super::*;
@@ -1346,7 +1348,57 @@ impl Peer {
         None
     }
 
+    fn update_buckets(&mut self, ctx: &RaftContext) {
+        if !ctx.cfg.enable_region_bucket {
+            return;
+        }
+        if let Some(shard) = ctx.global.engines.kv.get_shard(self.region_id) {
+            let estimated_size = shard.get_estimated_size();
+            let bucket_size = ctx.cfg.region_bucket_size.0;
+            let size_diff = estimated_size.abs_diff(self.last_bucket_split_region_size);
+            if size_diff < bucket_size && self.buckets.is_some() {
+                return;
+            }
+            let expected_bucket_count = (estimated_size + bucket_size - 1) / bucket_size;
+            let mut bucket_keys = vec![self.region().get_start_key().to_vec()];
+            if let Some(keys) = shard.get_evenly_split_keys(expected_bucket_count as usize) {
+                bucket_keys.extend(
+                    keys.into_iter()
+                        .map(|k| Key::from_raw(k.chunk()).into_encoded()),
+                );
+            }
+            bucket_keys.push(self.region().get_end_key().to_vec());
+            let prev_version = self
+                .buckets
+                .as_ref()
+                .map(|b| b.meta.version)
+                .unwrap_or_default();
+            let mut bucket_meta = BucketMeta::new(self.region(), bucket_keys, bucket_size);
+            bucket_meta.version = prev_version;
+            bucket_meta.incr_version(self.term());
+            let stats = new_bucket_write_stats(&bucket_meta);
+            let bucket_stat = BucketStat::new(Arc::new(bucket_meta), stats);
+            self.buckets = Some(bucket_stat);
+            self.last_bucket_split_region_size = estimated_size;
+            if let Some(mut reader) = ctx.global.readers.get_mut(&self.region_id) {
+                reader.update(ReadProgress::RegionBuckets(
+                    self.buckets.as_ref().unwrap().meta.clone(),
+                ));
+            }
+        }
+    }
+
     pub fn heartbeat_pd(&mut self, ctx: &RaftContext) {
+        self.update_buckets(ctx);
+        let bucket_stat = self.buckets.as_mut().map(|buckets| {
+            let stats =
+                std::mem::replace(&mut buckets.stats, new_bucket_write_stats(&buckets.meta));
+            BucketStat {
+                meta: buckets.meta.clone(),
+                stats,
+                create_time: buckets.create_time,
+            }
+        });
         let task = PdTask::Heartbeat(HeartbeatTask {
             term: self.term(),
             region: self.region().clone(),
@@ -1359,6 +1411,7 @@ impl Peer {
             approximate_keys: self.peer_stat.approximate_keys,
             approximate_kv_size: self.peer_stat.approximate_kv_size,
             replication_status: None,
+            bucket_stat,
         });
         if let Err(e) = ctx.global.pd_scheduler.schedule(task) {
             error!(

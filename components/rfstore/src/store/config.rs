@@ -96,9 +96,6 @@ pub struct Config {
 
     pub region_bucket_size: ReadableSize,
 
-    // Interval of scheduling a tick to report region buckets.
-    pub report_region_buckets_tick_interval: ReadableDuration,
-
     pub apply_pool_size: usize,
 }
 
@@ -131,7 +128,6 @@ impl Default for Config {
             region_split_keys: 2_560_000,
             enable_region_bucket: false,
             region_bucket_size: ReadableSize::mb(96),
-            report_region_buckets_tick_interval: ReadableDuration::secs(10),
             pd_heartbeat_tick_interval: ReadableDuration::minutes(1),
             pd_store_heartbeat_tick_interval: ReadableDuration::secs(10),
             local_file_gc_timeout: ReadableDuration::minutes(30),
@@ -198,7 +194,6 @@ impl Config {
         }
         cfg.enable_region_bucket = old_cop.enable_region_bucket;
         cfg.region_bucket_size = old_cop.region_bucket_size;
-        cfg.report_region_buckets_tick_interval = old.report_region_buckets_tick_interval;
 
         cfg.apply_pool_size = old.apply_batch_system.pool_size;
         cfg.local_file_gc_tick_interval = old.local_file_gc_tick_interval;

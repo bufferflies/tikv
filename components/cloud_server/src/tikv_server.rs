@@ -921,7 +921,9 @@ impl TikvServer {
         kv_opts.local_dir = kv_engine_path;
         kv_opts.num_compactors = conf.rocksdb.max_background_jobs as usize;
         kv_opts.max_mem_table_size = conf.rocksdb.writecf.write_buffer_size.0;
-        kv_opts.base_size = conf.coprocessor.region_split_size.0 / 16;
+        // base_size affects compaction priority a lot, we should cap it to a smaller
+        // size when we increase the region_split_size.
+        kv_opts.base_size = (conf.coprocessor.region_split_size.0 / 16).min(32 * 1024 * 1024);
         kv_opts.max_block_cache_size = capacity as i64;
         kv_opts.remote_compactor_addr = conf.dfs.remote_compactor_addr.clone();
         let cf_opt = &conf.rocksdb.writecf;

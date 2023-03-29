@@ -6,7 +6,10 @@ use std::{
         Bound::{Excluded, Unbounded},
         Deref, DerefMut,
     },
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering::SeqCst},
+        Arc,
+    },
     thread::JoinHandle,
     time::{Duration, Instant},
 };
@@ -142,6 +145,8 @@ impl RaftBatchSystem {
             coprocessor_host,
             importer,
             destroying: HashSet::default(),
+            engine_total_bytes_written: Arc::new(AtomicU64::new(0)),
+            engine_total_keys_written: Arc::new(AtomicU64::new(0)),
         };
         let mut region_peers = self.load_peers(&ctx, &mut store_meta)?;
         for peer_fsm in &region_peers {
@@ -493,6 +498,8 @@ pub(crate) struct GlobalContext {
     /// between peer gc and split, i.e., split won't create a destroying
     /// region if they are in the same loop with checking it.
     pub(crate) destroying: HashSet<u64>,
+    pub(crate) engine_total_bytes_written: Arc<AtomicU64>,
+    pub(crate) engine_total_keys_written: Arc<AtomicU64>,
 }
 
 pub(crate) struct RaftContext {
@@ -713,7 +720,8 @@ impl<'a> StoreMsgHandler<'a> {
 
         stats.set_start_time(self.store.start_time.unwrap().sec as u32);
 
-        // TODO(x): report store write flow to pd.
+        stats.set_bytes_written(self.ctx.global.engine_total_bytes_written.swap(0, SeqCst));
+        stats.set_keys_written(self.ctx.global.engine_total_keys_written.swap(0, SeqCst));
 
         let store_info = StoreInfo {
             kv_engine: self.ctx.global.engines.kv.clone(),

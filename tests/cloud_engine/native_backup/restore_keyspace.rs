@@ -70,6 +70,7 @@ fn test_restore_keyspace() {
             // shards.
             conf.rocksdb.writecf.write_buffer_size = ReadableSize::kb(1);
             conf.coprocessor.region_split_size = ReadableSize::kb(128); // kv_opts.base_size = 8kb
+            conf.coprocessor.region_bucket_size = ReadableSize::kb(64);
             conf.rfengine.target_file_size = ReadableSize::mb(1);
         },
     );

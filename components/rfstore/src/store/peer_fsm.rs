@@ -5,7 +5,10 @@ use std::{
     collections::VecDeque,
     mem,
     ops::{Deref, DerefMut},
-    sync::{atomic::AtomicU64, Arc},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     u64,
 };
 
@@ -22,7 +25,6 @@ use kvproto::{
     },
     raft_serverpb::{ExtraMessageType, PeerState, RaftMessage},
 };
-use pd_client::{new_bucket_write_stats, BucketMeta, BucketStat};
 use protobuf::Message;
 use raft::{self, eraftpb::MessageType, GetEntriesContext, Storage};
 use raft_proto::eraftpb;
@@ -46,10 +48,10 @@ use crate::{
         peer::{Peer, StaleState},
         util as _util, ApplyMetrics, ApplyMsg, CasualMessage, Config, CustomBuilder, Engines,
         MsgApplyResult, MsgRegistration, PdTask, PeerMsg, PersistReady, RaftApplyState,
-        RaftCommand, RaftContext, ReadProgress, SignificantMsg, SnapState, StoreMeta, StoreMsg,
-        Ticker, TrimOverBoundParameter, PEER_TICK_CHECK_STALE_STATE, PEER_TICK_PD_HEARTBEAT,
-        PEER_TICK_RAFT, PEER_TICK_RAFT_LOG_GC, PEER_TICK_REPORT_REGION_BUCKETS,
-        PEER_TICK_SPLIT_CHECK, PEER_TICK_SWITCH_MEM_TABLE_CHECK,
+        RaftCommand, RaftContext, SignificantMsg, SnapState, StoreMeta, StoreMsg, Ticker,
+        TrimOverBoundParameter, PEER_TICK_CHECK_STALE_STATE, PEER_TICK_PD_HEARTBEAT,
+        PEER_TICK_RAFT, PEER_TICK_RAFT_LOG_GC, PEER_TICK_SPLIT_CHECK,
+        PEER_TICK_SWITCH_MEM_TABLE_CHECK,
     },
     DiscardReason, Error, RaftStoreRouter, Result,
 };
@@ -291,9 +293,6 @@ impl<'a> PeerMsgHandler<'a> {
         if self.ticker.is_on_tick(PEER_TICK_CHECK_STALE_STATE) {
             self.on_check_peer_stale_state_tick();
         }
-        if self.ticker.is_on_tick(PEER_TICK_REPORT_REGION_BUCKETS) {
-            self.on_report_region_buckets_tick();
-        }
     }
 
     fn start(&mut self) {
@@ -303,7 +302,6 @@ impl<'a> PeerMsgHandler<'a> {
         self.ticker.schedule(PEER_TICK_SWITCH_MEM_TABLE_CHECK);
         self.ticker.schedule(PEER_TICK_RAFT_LOG_GC);
         self.ticker.schedule(PEER_TICK_CHECK_STALE_STATE);
-        self.ticker.schedule(PEER_TICK_REPORT_REGION_BUCKETS);
     }
 
     fn on_significant_msg(&mut self, msg: SignificantMsg) {
@@ -415,7 +413,14 @@ impl<'a> PeerMsgHandler<'a> {
             "peer_id" => self.fsm.peer_id(),
             "res" => ?res,
         );
-        // TODO(x) update metrics.
+        self.ctx
+            .global
+            .engine_total_bytes_written
+            .fetch_add(res.metrics.written_bytes, Ordering::Relaxed);
+        self.ctx
+            .global
+            .engine_total_keys_written
+            .fetch_add(res.metrics.written_keys, Ordering::Relaxed);
         self.fsm.peer.post_apply(self.ctx, &res);
         if self.fsm.stopped {}
     }
@@ -1054,41 +1059,6 @@ impl<'a> PeerMsgHandler<'a> {
                     );
                     self.schedule_ask_split(vec![Key::from_raw(k.chunk()).into_encoded()]);
                 }
-                return;
-            }
-            if self.ctx.cfg.enable_region_bucket {
-                let bucket_size = self.ctx.cfg.region_bucket_size.0;
-                let size_diff = estimated_size.abs_diff(self.peer.last_bucket_split_region_size);
-                if size_diff < bucket_size {
-                    return;
-                }
-                let expected_bucket_count = (estimated_size + bucket_size - 1) / bucket_size;
-                let mut bucket_keys = vec![self.region().get_start_key().to_vec()];
-                if let Some(keys) = shard.get_evenly_split_keys(expected_bucket_count as usize) {
-                    bucket_keys.extend(
-                        keys.into_iter()
-                            .map(|k| Key::from_raw(k.chunk()).into_encoded()),
-                    );
-                }
-                bucket_keys.push(self.region().get_end_key().to_vec());
-                let prev_version = self
-                    .peer
-                    .buckets
-                    .as_ref()
-                    .map(|b| b.meta.version)
-                    .unwrap_or_default();
-                let mut bucket_meta = BucketMeta::new(self.region(), bucket_keys, bucket_size);
-                bucket_meta.version = prev_version;
-                bucket_meta.incr_version(self.peer.term());
-                let stats = new_bucket_write_stats(&bucket_meta);
-                let bucket_stat = BucketStat::new(Arc::new(bucket_meta), stats);
-                self.peer.buckets = Some(bucket_stat);
-                self.peer.last_bucket_split_region_size = estimated_size;
-                if let Some(mut reader) = self.ctx.global.readers.get_mut(&self.region_id()) {
-                    reader.update(ReadProgress::RegionBuckets(
-                        self.peer.buckets.as_ref().unwrap().meta.clone(),
-                    ));
-                }
             }
         }
     }
@@ -1704,35 +1674,6 @@ impl<'a> PeerMsgHandler<'a> {
                     )
                 }
             }
-        }
-    }
-
-    fn on_report_region_buckets_tick(&mut self) {
-        self.ticker.schedule(PEER_TICK_REPORT_REGION_BUCKETS);
-        if !self.fsm.peer.is_leader() || self.fsm.peer.buckets.is_none() {
-            return;
-        }
-
-        let peer_id = self.fsm.peer_id();
-        let buckets = self.fsm.peer.buckets.as_mut().unwrap();
-        let stats = std::mem::replace(&mut buckets.stats, new_bucket_write_stats(&buckets.meta));
-        let for_report = BucketStat {
-            meta: buckets.meta.clone(),
-            stats,
-            create_time: buckets.create_time,
-        };
-        if let Err(e) = self
-            .ctx
-            .global
-            .pd_scheduler
-            .schedule(PdTask::ReportBuckets(for_report))
-        {
-            error!(
-                "failed to report region buckets";
-                "tag" => self.peer.tag(),
-                "peer_id" => peer_id,
-                "err" => ?e,
-            );
         }
     }
 

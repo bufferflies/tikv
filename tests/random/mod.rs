@@ -28,102 +28,11 @@ static MOVE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static MERGE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static TRANSFER_COUNTER: AtomicUsize = AtomicUsize::new(0);
 const TIMEOUT: Duration = Duration::from_secs(60);
-const CONCURRENCY: usize = 4;
 
 pub(crate) fn alloc_node_id() -> u16 {
     let node_id = NODE_ALLOCATOR.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     info!("allocated node_id {}", node_id);
     node_id
-}
-
-#[test]
-fn test_random_workload() {
-    test_util::init_log_for_test();
-    let nodes = vec![
-        alloc_node_id(),
-        alloc_node_id(),
-        alloc_node_id(),
-        alloc_node_id(),
-        alloc_node_id(),
-    ];
-    let update_conf_fn = |_, conf: &mut TikvConfig| {
-        conf.coprocessor.region_split_size = ReadableSize::kb(128);
-        conf.raft_store.peer_stale_state_check_interval = ReadableDuration::secs(1);
-        conf.raft_store.abnormal_leader_missing_duration = ReadableDuration::secs(3);
-        conf.raft_store.max_leader_missing_duration = ReadableDuration::secs(5);
-        conf.rfengine.target_file_size = ReadableSize::mb(1);
-        conf.rfengine.batch_compression_threshold =
-            ReadableSize::kb(rand::thread_rng().gen_range(0..2));
-    };
-    let mut cluster = ServerCluster::new(nodes.clone(), update_conf_fn);
-    cluster.wait_region_replicated(&[], 3);
-    cluster.get_pd_client().disable_default_operator();
-    let mut handles = vec![];
-    for i in 0..CONCURRENCY {
-        handles.push(spawn_write(i, cluster.new_client()));
-    }
-    let two_nodes_down = Arc::new(RwLock::new(()));
-    handles.push(spawn_move(cluster.new_scheduler(), two_nodes_down.clone()));
-    handles.push(spawn_transfer(cluster.new_scheduler()));
-    let start_time = Instant::now();
-    let pd_client = cluster.get_pd_client();
-    while start_time.saturating_elapsed() < TIMEOUT {
-        let ts = block_on(pd_client.get_tso()).unwrap();
-        let mut rng = rand::thread_rng();
-        let node_idx = rng.gen_range(0..nodes.len());
-        let node_id = nodes[node_idx];
-        let mut guard = None;
-        if node_idx == 0 {
-            guard = Some(two_nodes_down.write().unwrap());
-        }
-        info!("stop node {}", node_id);
-        cluster.stop_node(node_id);
-        info!("finish stop node {}", node_id);
-        let mut node2_id = 0;
-        if node_idx == 0 {
-            let node2_idx = rng.gen_range(1..nodes.len());
-            node2_id = nodes[node2_idx];
-            info!("stop node {}", node2_id);
-            cluster.stop_node(node2_id);
-            info!("finish stop node {}", node_id);
-        }
-        let sleep_sec = rng.gen_range(1..5);
-        sleep(Duration::from_secs(sleep_sec));
-        info!("start node {}", node_id);
-        cluster.start_node(node_id, update_conf_fn);
-        if node2_id > 0 {
-            info!("start node {}", node2_id);
-            cluster.start_node(node2_id, update_conf_fn);
-        }
-        guard.take();
-        sleep(Duration::from_secs(5));
-        pd_client.set_gc_safe_point(ts.into_inner());
-    }
-    info!("stop node thread exit");
-    for handle in handles {
-        handle.join().unwrap();
-    }
-    let ok = try_wait(
-        || {
-            let data_stats = cluster.get_data_stats();
-            data_stats.check_data().is_ok()
-        },
-        20,
-    );
-    if !ok {
-        cluster.get_data_stats().check_data().unwrap();
-    }
-    let mut client = cluster.new_client();
-    client.verify_data_with_ref_store();
-    cluster.stop();
-    let total_write_count = WRITE_COUNTER.load(Ordering::SeqCst);
-    let total_move_count = MOVE_COUNTER.load(Ordering::SeqCst);
-    let total_transfer_count = TRANSFER_COUNTER.load(Ordering::SeqCst);
-    let region_number = pd_client.get_regions_number();
-    info!(
-        "total_write_count {}, region number {}, move count {}, transfer count {}",
-        total_write_count, region_number, total_move_count, total_transfer_count,
-    );
 }
 
 #[test]
@@ -136,11 +45,14 @@ fn test_random_merge() {
         alloc_node_id(),
         alloc_node_id(),
     ];
+    let bucket_size_kb = 64;
     let update_conf_fn = |_, conf: &mut TikvConfig| {
-        conf.coprocessor.region_split_size = ReadableSize::kb(128);
+        conf.coprocessor.region_split_size = ReadableSize::kb(192);
+        conf.coprocessor.region_bucket_size = ReadableSize::kb(bucket_size_kb);
         conf.raft_store.peer_stale_state_check_interval = ReadableDuration::secs(1);
         conf.raft_store.abnormal_leader_missing_duration = ReadableDuration::secs(3);
         conf.raft_store.max_leader_missing_duration = ReadableDuration::secs(5);
+        conf.rocksdb.writecf.target_file_size_base = ReadableSize::kb(16);
         conf.rfengine.target_file_size = ReadableSize::mb(1);
         conf.rfengine.batch_compression_threshold =
             ReadableSize::kb(rand::thread_rng().gen_range(0..2));
@@ -198,11 +110,15 @@ fn test_random_merge() {
             let data_stats = cluster.get_data_stats();
             data_stats.check_data().is_ok()
         },
-        20,
+        10,
     );
+    let data_stats = cluster.get_data_stats();
     if !ok {
-        cluster.get_data_stats().check_data().unwrap();
+        data_stats.check_data().unwrap();
     }
+    data_stats
+        .check_buckets(&pd_client, bucket_size_kb * 1024)
+        .unwrap();
     let mut client = cluster.new_client();
     client.verify_data_with_ref_store();
     cluster.stop();
