@@ -305,6 +305,16 @@ impl Engine {
         store_u64(&new_shard.base_version, old_shard.get_base_version());
         store_u64(&new_shard.meta_seq, sequence);
         store_u64(&new_shard.write_sequence, sequence);
+        store_u64(&new_shard.estimated_size, old_shard.get_estimated_size());
+        store_u64(
+            &new_shard.estimated_entries,
+            old_shard.get_estimated_entries(),
+        );
+        store_u64(&new_shard.max_ts, old_shard.get_max_ts());
+        store_u64(
+            &new_shard.estimated_kv_size,
+            old_shard.get_estimated_kv_size(),
+        );
         new_shard
     }
 }

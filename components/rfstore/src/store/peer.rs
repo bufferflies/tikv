@@ -466,7 +466,8 @@ pub(crate) struct Peer {
     /// buckets will be refreshed.
     pub(crate) last_bucket_split_region_size: u64,
 
-    pub buckets: Option<BucketStat>,
+    pub(crate) buckets: Option<BucketStat>,
+    pub(crate) bucket_version: u64,
 
     pub(crate) pending_merge_state: Option<MergeState>,
     /// The rollback merge proposal can be proposed only when the number
@@ -569,6 +570,7 @@ impl Peer {
             lead_transferee: raft::INVALID_ID,
             last_bucket_split_region_size: 0,
             buckets: None,
+            bucket_version: 0,
             pending_merge_state: None,
             want_rollback_merge_peers: Default::default(),
             check_stale_conf_ver: 0,
@@ -1368,16 +1370,12 @@ impl Peer {
                 );
             }
             bucket_keys.push(self.region().get_end_key().to_vec());
-            let prev_version = self
-                .buckets
-                .as_ref()
-                .map(|b| b.meta.version)
-                .unwrap_or_default();
             let mut bucket_meta = BucketMeta::new(self.region(), bucket_keys, bucket_size);
-            bucket_meta.version = prev_version;
+            bucket_meta.version = self.bucket_version;
             bucket_meta.incr_version(self.term());
             let stats = new_bucket_write_stats(&bucket_meta);
             let bucket_stat = BucketStat::new(Arc::new(bucket_meta), stats);
+            self.bucket_version = bucket_stat.meta.version;
             self.buckets = Some(bucket_stat);
             self.last_bucket_split_region_size = estimated_size;
             if let Some(mut reader) = ctx.global.readers.get_mut(&self.region_id) {
