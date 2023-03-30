@@ -718,23 +718,31 @@ impl ShardMeta {
             && (smallest < self.start.as_slice() || self.end.as_slice() <= biggest)
     }
 
+    // the ingest level never skip to lower level if upper level file exists, this
+    // may not be optimal but prevent compaction generate conflicting files.
+    // It find the top most existing file's level as ingest level, if there is
+    // overlap with existing files, it will use the one level upper.
     pub(crate) fn get_ingest_level(&self, smallest: &[u8], biggest: &[u8]) -> u32 {
-        let mut lowest_overlap_level = 4;
-        for file in self.files.values() {
-            if file.is_blob_file()
-                || biggest < file.smallest.chunk()
-                || file.biggest.chunk() < smallest
-            {
-                continue;
-            } else if lowest_overlap_level > file.get_level() {
-                lowest_overlap_level = file.get_level();
-            }
+        // find the top most level as ingest level.
+        let mut ingest_level = self
+            .files
+            .values()
+            .filter(|f| !f.is_blob_file())
+            .map(|f| f.level)
+            .min()
+            .unwrap_or(3);
+        if ingest_level == 0 {
+            return 0;
         }
-        if lowest_overlap_level > 0 {
-            lowest_overlap_level - 1
-        } else {
-            0
+        let overlap = self
+            .files
+            .values()
+            .filter(|f| f.level == ingest_level && f.cf == 0)
+            .any(|file| file.smallest.chunk() <= biggest && smallest <= file.biggest.chunk());
+        if overlap {
+            ingest_level -= 1;
         }
+        ingest_level as u32
     }
 
     pub(crate) fn data_version(&self) -> u64 {
@@ -840,49 +848,40 @@ mod tests {
 
     #[test]
     fn test_ingest_level() {
-        let mut cs = new_change_set(1, 1);
-        let snap = cs.mut_snapshot();
-        snap.set_end(GLOBAL_SHARD_END_KEY.to_vec());
-        snap.set_max_ts(100);
-        let mut id = 0;
-        let mut make_table = |level: u32, smallest: &str, biggest: &str| {
-            id += 1;
-            let mut tbl = pb::TableCreate::new();
-            tbl.id = id;
-            tbl.level = level;
-            tbl.smallest = smallest.as_bytes().to_vec();
-            tbl.biggest = biggest.as_bytes().to_vec();
-            tbl
-        };
-        let tables = snap.mut_table_creates();
-        tables.push(make_table(3, "1000", "2000"));
-        tables.push(make_table(2, "1500", "2500"));
-        tables.push(make_table(1, "2100", "3100"));
-
-        let mut tbl4 = pb::L0Create::new();
-        tbl4.id = 4;
-        tbl4.smallest = "3000".as_bytes().to_vec();
-        tbl4.biggest = "4000".as_bytes().to_vec();
-        snap.mut_l0_creates().push(tbl4);
-
-        let meta = ShardMeta::new(1, &cs);
-        assert_eq!(meta.max_ts, 100);
-        let assert_get_ingest_level = |smallest: &str, biggest: &str, level| {
-            assert_eq!(
-                meta.get_ingest_level(smallest.as_bytes(), biggest.as_bytes()),
-                level
-            );
-        };
-        //                       [3000, 4000]
-        //              [2100, 3100]
-        //      [1500, 2500]
-        // [1000, 2000]
-        assert_get_ingest_level("0000", "0999", 3);
-        assert_get_ingest_level("4001", "5000", 3);
-        assert_get_ingest_level("1000", "1499", 2);
-        assert_get_ingest_level("2000", "2099", 1);
-        assert_get_ingest_level("2500", "3500", 0);
-        assert_get_ingest_level("4000", "5000", 0);
+        for level in 0..=3 {
+            let mut cs = new_change_set(1, 1);
+            let snap = cs.mut_snapshot();
+            snap.set_end(GLOBAL_SHARD_END_KEY.to_vec());
+            snap.set_max_ts(100);
+            let mut id = 0;
+            let mut make_table = |level: u32, smallest: &str, biggest: &str| {
+                id += 1;
+                let mut tbl = pb::TableCreate::new();
+                tbl.id = id;
+                tbl.level = level;
+                tbl.smallest = smallest.as_bytes().to_vec();
+                tbl.biggest = biggest.as_bytes().to_vec();
+                tbl
+            };
+            let tables = snap.mut_table_creates();
+            tables.push(make_table(level, "1000", "2000"));
+            let meta = ShardMeta::new(1, &cs);
+            assert_eq!(meta.max_ts, 100);
+            let assert_get_ingest_level = |smallest: &str, biggest: &str, level| {
+                assert_eq!(
+                    meta.get_ingest_level(smallest.as_bytes(), biggest.as_bytes()),
+                    level
+                );
+            };
+            let overlap_level = level.saturating_sub(1);
+            assert_get_ingest_level("0000", "0999", level);
+            assert_get_ingest_level("1000", "1500", overlap_level);
+            assert_get_ingest_level("1000", "2000", overlap_level);
+            assert_get_ingest_level("1500", "2000", overlap_level);
+            assert_get_ingest_level("1500", "2999", overlap_level);
+            assert_get_ingest_level("2000", "2999", overlap_level);
+            assert_get_ingest_level("2500", "2999", level);
+        }
     }
 
     // See issue #572
