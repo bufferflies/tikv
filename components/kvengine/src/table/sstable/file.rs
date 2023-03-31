@@ -61,8 +61,10 @@ impl LocalFile {
     }
 
     fn get_file(&self) -> table::Result<Arc<std::fs::File>> {
-        self.fd
-            .get(|| Ok(std::fs::File::open(self.path.as_path())?))
+        self.fd.get(|| {
+            std::fs::File::open(self.path.as_path())
+                .map_err(|e| table::Error::Io(format!("failed to open file {}: {:?}", self.id, e)))
+        })
     }
 }
 
