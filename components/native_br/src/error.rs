@@ -30,6 +30,8 @@ pub enum Error {
     KvEngine(kvengine::Error),
     #[error("RfEngine error {0}")]
     RfEngine(rfengine::Error),
+    #[error("Region version not match expected:{} actual:{}", .expected, .actual)]
+    RegionVerNotMatch { expected: u64, actual: u64 },
 }
 
 impl From<dfs::Error> for Error {

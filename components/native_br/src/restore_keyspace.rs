@@ -3,7 +3,7 @@
 use std::{
     borrow::Cow,
     cmp,
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     default::Default,
     fmt, mem,
     path::{Path, PathBuf},
@@ -125,35 +125,62 @@ pub fn restore_keyspace(
         cluster.backup_ts
     );
 
-    // align target regions
-    let target_regions = runtime.block_on(get_target_regions(
-        &pd_client,
-        &keyspace_start,
-        &keyspace_end,
-    ))?;
-    let (aligned_regions, trimmed_shards_cnt) = cluster.align_target_regions(target_regions)?;
-    step!(
-        "Keyspace {} align {} backup shards to {} target regions and trim {} over bound shards",
-        keyspace_id,
-        cluster.shards_count(),
-        aligned_regions.len(),
-        trimmed_shards_cnt
-    );
+    let mut success_ranges = MergeRanges::default();
+    let mut retry = 0;
+    loop {
+        // align target regions
+        let mut target_regions = runtime.block_on(get_target_regions(
+            &pd_client,
+            &keyspace_start,
+            &keyspace_end,
+        ))?;
+        let target_regions_total_cnt = target_regions.len();
+        if !success_ranges.is_empty() {
+            target_regions.retain(|r| !success_ranges.covered(&r.raw_start, &r.raw_end));
+        }
+        step!(
+            "Keyspace {} target regions: {} ({} in total)",
+            keyspace_id,
+            target_regions.len(),
+            target_regions_total_cnt
+        );
 
-    // gather SSTables for target regions
-    let (target_shards, sstables_cnt) = cluster.gather_sstables(aligned_regions);
-    step!(
-        "Keyspace {} gather {} SSTables for {} target regions",
-        keyspace_id,
-        sstables_cnt,
-        target_shards.len(),
-    );
+        let (aligned_regions, trimmed_shards_cnt) = cluster.align_target_regions(target_regions)?;
+        step!(
+            "Keyspace {} align {} backup shards to {} target regions and trim {} over bound shards",
+            keyspace_id,
+            cluster.shards_count(),
+            aligned_regions.len(),
+            trimmed_shards_cnt
+        );
 
-    // TODO: retry on EpochNotMatch from `get_target_regions`.
-    let snapshots = cluster.generate_snapshots(target_shards);
-    let snapshots_count = snapshots.len();
-    restore_snapshots(runtime, pd_client.clone(), snapshots)?;
-    step!("Keyspace {keyspace_id} restore {snapshots_count} regions");
+        // gather SSTables for target regions
+        let (target_shards, sstables_cnt) = cluster.gather_sstables(aligned_regions);
+        step!(
+            "Keyspace {} gather {} SSTables for {} target regions",
+            keyspace_id,
+            sstables_cnt,
+            target_shards.len(),
+        );
+
+        let snapshots = cluster.generate_snapshots(target_shards);
+        let snapshots_count = snapshots.len();
+        restore_snapshots(
+            keyspace_id,
+            runtime,
+            pd_client.clone(),
+            snapshots,
+            &mut success_ranges,
+        )?;
+        step!("Keyspace {keyspace_id} restore {snapshots_count} regions");
+
+        if success_ranges.covered(&keyspace_start, &keyspace_end) {
+            break;
+        } else {
+            retry += 1;
+            step!("Keyspace {keyspace_id} restore retry {retry}");
+        }
+    }
 
     let files = cluster.get_all_shard_files();
     match retain_sst_files(files, &s3fs) {
@@ -1126,27 +1153,40 @@ fn verify_regions_boundary(start_key: &[u8], end_key: &[u8], regions: &[RawRegio
 }
 
 fn restore_snapshots(
+    keyspace_id: u32,
     runtime: &Runtime,
     pd_client: Arc<dyn PdClient>,
     snapshots: Vec<pb::ChangeSet>,
+    success_ranges: &mut MergeRanges,
 ) -> Result<()> {
     let mut handles = Vec::with_capacity(snapshots.len());
     for snap in snapshots {
         let pd_client = pd_client.clone();
+        let start = snap.get_restore_shard().get_start().to_vec();
+        let end = snap.get_restore_shard().get_end().to_vec();
         let task = async move { request_restore_snapshot(pd_client, &snap).await };
-        handles.push(runtime.spawn(task));
+        handles.push((runtime.spawn(task), start, end));
     }
 
-    let errors: Vec<_> = runtime
-        .block_on(futures::future::join_all(handles))
-        .into_iter()
-        .filter_map(|x| x.unwrap().err())
-        .collect();
-    if !errors.is_empty() {
-        Err(box_err!("{:?}", errors))
-    } else {
-        Ok(())
+    for (h, start, end) in handles {
+        match runtime.block_on(h).unwrap() {
+            Ok(()) => success_ranges.insert(start, end),
+            Err(e @ Error::RegionVerNotMatch { .. }) => {
+                info!(
+                    "Keyspace {} request_restore_snapshot error: {:?}, retry in next loop",
+                    keyspace_id, e
+                );
+            }
+            Err(e) => {
+                error!(
+                    "Keyspace {} request_restore_snapshot error: {:?}",
+                    keyspace_id, e
+                );
+                return Err(e);
+            }
+        }
     }
+    Ok(())
 }
 
 async fn request_restore_snapshot(pd_client: Arc<dyn PdClient>, cs: &pb::ChangeSet) -> Result<()> {
@@ -1167,11 +1207,10 @@ async fn request_restore_snapshot(pd_client: Arc<dyn PdClient>, cs: &pb::ChangeS
         let region_ver = region.get_region_epoch().get_version();
         let shard_ver = cs.get_shard_ver();
         if region_ver != shard_ver {
-            return Err(box_err!(
-                "region version not match (region.ver {}, cs.ver {}), try again",
-                region_ver,
-                shard_ver
-            ));
+            return Err(Error::RegionVerNotMatch {
+                expected: shard_ver,
+                actual: region_ver,
+            });
         }
 
         let store = pd_client.get_store_async(leader.get_store_id()).await?;
@@ -1197,6 +1236,96 @@ async fn request_restore_snapshot(pd_client: Arc<dyn PdClient>, cs: &pb::ChangeS
         }
     }
     Err(Error::Other(err.expect("there must be error")))
+}
+
+/// MergeRanges is used to record the successful ranges to reduce unnecessary
+/// retry.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct MergeRanges {
+    ranges: VecDeque<Range>,
+}
+
+type Range = std::ops::Range<Vec<u8>>;
+
+impl MergeRanges {
+    #[cfg(test)]
+    pub fn new(start: Vec<u8>, end: Vec<u8>) -> Self {
+        let mut mr = Self::default();
+        mr.ranges.push_back(start..end);
+        mr
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ranges.is_empty()
+    }
+
+    /// Search range by `range.start`.
+    /// Return:
+    /// - OK(idx) when `ranges[idx].start == key`.
+    /// - Err(idx) when not found, and `idx` is the index to insert.
+    /// Simple iteration is used as length of ranges is expected to be small,
+    /// and binary search is not efficient.
+    fn search_by_start(&self, key: &Vec<u8>) -> std::result::Result<usize, usize> {
+        for i in 0..self.ranges.len() {
+            match self.ranges[i].start.cmp(key) {
+                cmp::Ordering::Equal => return Ok(i),
+                cmp::Ordering::Greater => return Err(i),
+                cmp::Ordering::Less => continue,
+            }
+        }
+        Err(self.ranges.len())
+    }
+
+    /// `search_overlapped` return the index of overlapped range for `key`.
+    /// range.start <= key <= range.end.
+    /// If not found, return the index where `key` should be inserted.
+    fn search_overlapped(&self, key: &Vec<u8>) -> std::result::Result<usize, usize> {
+        // Search range.start <= key.
+        match self.search_by_start(key) {
+            Ok(idx) => Ok(idx),
+            Err(idx) if idx == 0 => Err(idx),
+            Err(idx) => {
+                let left = idx - 1;
+                if key <= &self.ranges[left].end {
+                    Ok(left)
+                } else {
+                    Err(idx)
+                }
+            }
+        }
+    }
+
+    pub fn covered(&self, start: &Vec<u8>, end: &Vec<u8>) -> bool {
+        match self.search_overlapped(start) {
+            Ok(idx) => end <= &self.ranges[idx].end,
+            Err(_) => false,
+        }
+    }
+
+    pub fn insert(&mut self, mut start: Vec<u8>, mut end: Vec<u8>) {
+        let left = self.search_overlapped(&start);
+        if let Ok(idx) = left {
+            if end <= self.ranges[idx].end {
+                return;
+            }
+        }
+
+        let right = self.search_overlapped(&end);
+
+        if let Ok(ref left) = left {
+            start = mem::take(&mut self.ranges[*left].start);
+        }
+        if let Ok(ref right) = right {
+            end = mem::take(&mut self.ranges[*right].end.clone());
+        }
+
+        // Remove overlapped.
+        let remove_left = left.unwrap_or_else(|idx| idx);
+        let remove_right = right.map(|idx| idx + 1).unwrap_or_else(|idx| idx);
+        self.ranges.drain(remove_left..remove_right);
+
+        self.ranges.insert(remove_left, start..end);
+    }
 }
 
 #[cfg(test)]
@@ -1403,6 +1532,122 @@ mod tests {
                 target_regions,
             );
             assert_eq!(aligned_regions, expected, "case: {}", case_idx);
+        }
+    }
+
+    #[test]
+    fn test_merge_ranges() {
+        let i_to_key = |i: u64| format!("{:04}", i).into_bytes();
+        let new_range = |i: u64, j: u64| MergeRanges::new(i_to_key(i), i_to_key(j));
+        let new_ranges = |ranges: &[(u64, u64)]| {
+            let mut mr = MergeRanges::default();
+            for &(i, j) in ranges {
+                mr.insert(i_to_key(i), i_to_key(j));
+            }
+            mr
+        };
+        let insert = |mr: &mut MergeRanges, i: u64, j: u64| {
+            mr.insert(i_to_key(i), i_to_key(j));
+        };
+        let covered = |mr: &MergeRanges, i: u64, j: u64| mr.covered(&i_to_key(i), &i_to_key(j));
+
+        // test `search_overlapped`
+        {
+            let mut mr = MergeRanges::default();
+            assert_eq!(mr.search_overlapped(&i_to_key(0)), Err(0));
+
+            insert(&mut mr, 0, 1);
+            assert_eq!(mr.search_overlapped(&i_to_key(0)), Ok(0));
+            assert_eq!(mr.search_overlapped(&i_to_key(1)), Ok(0));
+            assert_eq!(mr.search_overlapped(&i_to_key(2)), Err(1));
+
+            insert(&mut mr, 3, 5);
+            assert_eq!(mr.search_overlapped(&i_to_key(0)), Ok(0));
+            assert_eq!(mr.search_overlapped(&i_to_key(1)), Ok(0));
+            assert_eq!(mr.search_overlapped(&i_to_key(2)), Err(1));
+            assert_eq!(mr.search_overlapped(&i_to_key(3)), Ok(1));
+            assert_eq!(mr.search_overlapped(&i_to_key(4)), Ok(1));
+            assert_eq!(mr.search_overlapped(&i_to_key(5)), Ok(1));
+            assert_eq!(mr.search_overlapped(&i_to_key(6)), Err(2));
+        }
+
+        // test `covered`
+        {
+            let mut mr = MergeRanges::default();
+            assert!(!covered(&mr, 0, 1));
+
+            insert(&mut mr, 0, 1);
+            assert!(covered(&mr, 0, 1));
+            assert!(!covered(&mr, 1, 2));
+
+            insert(&mut mr, 2, 4);
+            assert!(covered(&mr, 2, 3));
+            assert!(covered(&mr, 2, 4));
+            assert!(!covered(&mr, 1, 2));
+            assert!(!covered(&mr, 1, 3));
+            assert!(!covered(&mr, 1, 4));
+            assert!(!covered(&mr, 1, 5));
+            assert!(!covered(&mr, 2, 5));
+            assert!(!covered(&mr, 4, 5));
+            assert!(!covered(&mr, 0, 4));
+        }
+
+        // test `insert`
+        {
+            let mut mr = MergeRanges::default();
+            insert(&mut mr, 2, 3);
+            assert_eq!(mr, new_range(2, 3));
+            insert(&mut mr, 3, 4);
+            assert_eq!(mr, new_range(2, 4));
+
+            insert(&mut mr, 0, 1);
+            assert_eq!(mr, new_ranges(&[(0, 1), (2, 4)]));
+            insert(&mut mr, 1, 2);
+            assert_eq!(mr, new_range(0, 4));
+
+            insert(&mut mr, 5, 6);
+            assert_eq!(mr, new_ranges(&[(0, 4), (5, 6)]));
+            insert(&mut mr, 4, 5);
+            assert_eq!(mr, new_range(0, 6));
+
+            insert(&mut mr, 10, 11);
+            assert_eq!(mr, new_ranges(&[(0, 6), (10, 11)]));
+            insert(&mut mr, 3, 12);
+            assert_eq!(mr, new_range(0, 12));
+
+            assert!(covered(&mr, 0, 12));
+        }
+
+        // test merge overlapping ranges
+        {
+            let mut mr = new_range(2, 12);
+            insert(&mut mr, 2, 6);
+            assert_eq!(mr, new_range(2, 12));
+
+            insert(&mut mr, 3, 8);
+            assert_eq!(mr, new_range(2, 12));
+
+            insert(&mut mr, 6, 12);
+            assert_eq!(mr, new_range(2, 12));
+
+            insert(&mut mr, 1, 4);
+            assert_eq!(mr, new_range(1, 12));
+
+            insert(&mut mr, 4, 15);
+            assert_eq!(mr, new_range(1, 15));
+
+            insert(&mut mr, 20, 21);
+            insert(&mut mr, 22, 23);
+            insert(&mut mr, 24, 25);
+            insert(&mut mr, 14, 30);
+            assert_eq!(mr, new_range(1, 30));
+
+            insert(&mut mr, 40, 41);
+            insert(&mut mr, 42, 43);
+            insert(&mut mr, 50, 51);
+            insert(&mut mr, 53, 54);
+            insert(&mut mr, 0, 42);
+            assert_eq!(mr, new_ranges(&[(0, 43), (50, 51), (53, 54)]));
         }
     }
 }
