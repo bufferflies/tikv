@@ -79,10 +79,7 @@ impl File for LocalFile {
 
     fn read(&self, off: u64, length: usize) -> table::Result<Bytes> {
         let mut buf = vec![0; length];
-        let fd = self.fd.get(|| {
-            let file = std::fs::File::open(self.path.as_path())?;
-            Ok(file)
-        })?;
+        let fd = self.get_file()?;
         fd.read_at(&mut buf, off)?;
         Ok(Bytes::from(buf))
     }
