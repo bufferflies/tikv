@@ -124,6 +124,13 @@ impl EngineCore {
             cs.sequence
         );
         if shard.ver != cs.shard_ver {
+            warn!(
+                "{} kvengine::apply_change_set: shard not match, shard {}, cs {}, {:?}",
+                shard.tag(),
+                shard.ver,
+                cs.shard_ver,
+                cs
+            );
             return Err(Error::ShardNotMatch);
         }
         let seq = load_u64(&shard.meta_seq);
@@ -698,28 +705,35 @@ impl EngineCore {
         Ok(())
     }
 
-    fn apply_restore_shard(&self, shard: &Shard, cs: &ChangeSet) -> Result<()> {
-        assert!(cs.has_restore_shard());
+    fn apply_restore_shard(&self, old_shard: &Shard, cs: &ChangeSet) -> Result<()> {
+        debug_assert!(cs.has_restore_shard());
         // TODO: skip duplicated.
 
         let snap = cs.get_restore_shard();
-        assert_eq!(shard.start, snap.start);
-        assert_eq!(shard.end, snap.end);
+        assert_eq!(old_shard.start, snap.start);
+        assert_eq!(old_shard.end, snap.end);
 
-        let snap_shard = Shard::new(
+        self.flush_tx.send(FlushMsg::Clear(old_shard.id)).unwrap();
+        self.compact_tx
+            .send(CompactMsg::Clear(IdVer::new(old_shard.id, old_shard.ver)))
+            .unwrap();
+
+        // Increase shard version to make change sets generated before restore shard
+        // stale.
+        let new_shard = Shard::new(
             self.get_engine_id(),
             snap.get_properties(),
-            cs.shard_ver,
+            cs.shard_ver + 1,
             snap.start.as_slice(),
             snap.end.as_slice(),
-            shard.opt.clone(),
+            old_shard.opt.clone(),
         );
-        let snap_data = snap_shard.get_data();
-        let old_data = shard.get_data();
+        let snap_data = new_shard.get_data();
+        let old_data = old_shard.get_data();
         let (l0_tbls, blob_tbl_map, cfs) = create_snapshot_tables(cs.get_restore_shard(), cs);
         let new_data = ShardData::new(
-            shard.start.clone(),
-            shard.end.clone(),
+            snap_data.start.clone(),
+            snap_data.end.clone(),
             snap_data.del_prefixes.clone(),
             snap_data.truncate_ts,
             snap_data.trim_over_bound,
@@ -728,23 +742,28 @@ impl EngineCore {
             Arc::new(blob_tbl_map),
             cfs,
         );
-        shard.set_data(new_data);
+        new_shard.set_data(new_data);
+        new_shard.set_active(old_shard.is_active());
 
-        store_u64(&shard.base_version, snap.base_version);
-        assert!(!cs.has_parent());
-        store_bool(&shard.initial_flushed, true);
+        store_u64(&new_shard.base_version, snap.base_version);
+        store_u64(&new_shard.meta_seq, cs.sequence);
+        store_u64(&new_shard.write_sequence, cs.sequence);
+        debug_assert!(!cs.has_parent());
+        store_bool(&new_shard.initial_flushed, true);
 
         let mut old_mem_tbls = old_data.mem_tbls.clone();
         for mem_tbl in old_mem_tbls.drain(..) {
             self.free_tx.send(mem_tbl).unwrap();
         }
 
+        self.refresh_shard_states(&new_shard);
         info!(
             "restore shard {} mem_table_version {}, change {:?}",
-            shard.tag(),
-            shard.load_mem_table_version(),
+            new_shard.tag(),
+            new_shard.load_mem_table_version(),
             &cs,
         );
+        self.shards.insert(new_shard.id, Arc::new(new_shard));
 
         Ok(())
     }

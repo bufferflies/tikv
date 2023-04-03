@@ -230,7 +230,7 @@ pub(crate) struct Applier {
 
     pub(crate) pending_split: HashMap<u64, kvenginepb::ChangeSet>,
 
-    pub(crate) paused_for_ingest: bool,
+    pub(crate) paused_for_ingest_or_restore: bool,
 
     pub(crate) prepare_merge_parent_snap:
         VecDeque<(kvenginepb::Snapshot, u64 /* commit index */)>,
@@ -257,7 +257,7 @@ pub(crate) struct Applier {
 
     last_property_term: u64,
 
-    last_ingest_seq: u64,
+    last_ingest_or_restore_seq: u64,
 
     buckets: Option<BucketStat>,
 }
@@ -1040,7 +1040,9 @@ impl Applier {
     }
 
     fn is_paused(&self) -> bool {
-        self.paused_for_ingest || self.paused_for_commit_merge || self.paused_for_rollback_merge
+        self.paused_for_ingest_or_restore
+            || self.paused_for_commit_merge
+            || self.paused_for_rollback_merge
     }
 
     fn handle_apply(&mut self, ctx: &mut ApplyContext, mut apply: MsgApply) {
@@ -1097,18 +1099,35 @@ impl Applier {
         while let Some(cs) = self.take_prepared_change_set() {
             let seq = cs.sequence;
             let cs_pb = cs.change_set.clone();
-            let is_ingest_files = cs.has_ingest_files();
+            let is_ingest_or_restore = cs.has_ingest_files() || cs.has_restore_shard();
             let is_initial_flush = cs.has_initial_flush();
             let result = if cs.has_snapshot() {
                 self.apply_state = RaftApplyState::from_snapshot(cs.get_snapshot());
-                ctx.engine.ingest(cs, false).map(|()| cs_pb)
+                ctx.engine.ingest(cs, false)
             } else {
-                ctx.engine.apply_change_set(cs).map(|()| cs_pb)
+                ctx.engine.apply_change_set(cs)
             };
             let router = ctx.router.as_ref().unwrap();
-            router.send(self.region_id(), PeerMsg::ApplyChangeSetResult(result));
-            if is_ingest_files && self.last_ingest_seq == seq {
-                self.paused_for_ingest = false;
+            if result.is_ok() && cs_pb.has_restore_shard() {
+                debug_assert_eq!(
+                    self.region.get_region_epoch().get_version(),
+                    cs_pb.shard_ver
+                );
+                self.region
+                    .mut_region_epoch()
+                    .set_version(cs_pb.shard_ver + 1);
+                router.send_store(StoreMsg::ApplyRestoreResult {
+                    region_id: self.region_id(),
+                    ver: cs_pb.shard_ver,
+                });
+            }
+            router.send(
+                self.region_id(),
+                PeerMsg::ApplyChangeSetResult(result.map(|()| cs_pb)),
+            );
+
+            if is_ingest_or_restore && self.last_ingest_or_restore_seq == seq {
+                self.paused_for_ingest_or_restore = false;
             }
             if is_initial_flush && self.paused_for_rollback_merge {
                 self.paused_for_rollback_merge = false;
@@ -1195,11 +1214,17 @@ impl Applier {
     }
 
     fn handle_prepare_change_set(&mut self, ctx: &mut ApplyContext, cs: kvenginepb::ChangeSet) {
-        if cs.has_ingest_files() {
-            if cs.sequence > self.last_ingest_seq {
-                self.last_ingest_seq = cs.sequence;
+        if cs.has_ingest_files() || cs.has_restore_shard() {
+            if cs.sequence > self.last_ingest_or_restore_seq {
+                self.last_ingest_or_restore_seq = cs.sequence;
             }
-            self.paused_for_ingest = true;
+            self.paused_for_ingest_or_restore = true;
+        }
+        if cs.has_restore_shard() {
+            // Invalidate snapshot & lock_cache, otherwise they would be inconsistent with
+            // restored data.
+            self.snap.take();
+            self.lock_cache.clear();
         }
         self.scheduled_change_sets
             .push_back((cs.sequence, cs.has_snapshot()));

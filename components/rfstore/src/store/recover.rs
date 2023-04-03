@@ -102,8 +102,9 @@ impl RecoverHandler {
             .get_state(peer_id, &region_state_key)
             .unwrap_or_else(|| {
                 panic!(
-                    "{} failed to get region state, state keys {:?}",
+                    "{} failed to get region state, state key {:?}, state keys {:?}",
                     tag,
+                    region_state_key,
                     self.get_state_keys(peer_id)
                 );
             });

@@ -507,7 +507,7 @@ impl RegionShardStats {
         }
         if stats.compaction_score > 2.0 {
             return Err(format!(
-                "compaction score {} too large",
+                "compaction score too large: {}",
                 stats.compaction_score
             ));
         }

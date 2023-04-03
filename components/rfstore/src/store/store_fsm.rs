@@ -679,6 +679,9 @@ impl<'a> StoreMsgHandler<'a> {
             StoreMsg::ApplyResult { region_id, peer_id } => {
                 apply_region = self.on_apply_result(region_id, peer_id);
             }
+            StoreMsg::ApplyRestoreResult { region_id, ver } => {
+                self.on_restore_shard_result(region_id, ver);
+            }
             StoreMsg::DependentsEmpty(region_id) => {
                 self.on_dependents_empty(region_id);
             }
@@ -1773,6 +1776,42 @@ impl<'a> StoreMsgHandler<'a> {
                 "commit_index" => commit,
             );
             peer_fsm.peer.heartbeat_pd(self.ctx);
+        }
+    }
+
+    fn on_restore_shard_result(&mut self, region_id: u64, ver: u64) {
+        let mut region = match self.ctx.store_meta.region_map.get(region_id) {
+            Some(region) => region.clone(),
+            None => return,
+        };
+        region.mut_region_epoch().set_version(ver + 1);
+
+        let peer = match self.ctx.peers.get(&region.id) {
+            Some(peer) => peer,
+            None => return,
+        };
+        let mut peer_fsm = peer.peer_fsm.lock().unwrap();
+
+        let tag = peer_fsm.peer.tag();
+        info!(
+            "{} store_fsm::on_restore_shard_result: set region {:?}",
+            tag, region
+        );
+
+        let is_leader = peer_fsm.peer.is_leader();
+        self.ctx.store_meta.set_region(
+            region,
+            &mut peer_fsm.peer,
+            RegionChangeReason::RestoreShard,
+        );
+
+        if is_leader {
+            peer_fsm.peer.heartbeat_pd(self.ctx);
+            info!(
+                "{} store_fsm::on_restore_shard_result: notify pd, peer_id: {}",
+                tag,
+                peer_fsm.peer_id(),
+            );
         }
     }
 }

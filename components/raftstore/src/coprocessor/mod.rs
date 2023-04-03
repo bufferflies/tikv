@@ -297,6 +297,7 @@ pub enum RegionChangeReason {
     PrepareMerge,
     CommitMerge,
     RollbackMerge,
+    RestoreShard,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

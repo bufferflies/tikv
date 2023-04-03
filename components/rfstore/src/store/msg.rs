@@ -117,6 +117,10 @@ pub enum StoreMsg {
     },
     CheckMerge(u64),
     Stop,
+    ApplyRestoreResult {
+        region_id: u64,
+        ver: u64,
+    },
 }
 
 #[derive(Debug)]

@@ -1761,8 +1761,7 @@ impl Peer {
         let region_id = self.region_id;
         let tag = self.tag();
         let opt_parent_id = self.mut_store().parent_id();
-        let peer_storage = self.mut_store();
-        let shard_meta = peer_storage.shard_meta.as_ref().unwrap();
+        let shard_meta = self.mut_store().shard_meta.as_ref().unwrap();
         let mut rejected = false;
         if shard_meta.ver != cs.get_shard_ver() {
             rejected = true;
@@ -1785,15 +1784,9 @@ impl Peer {
             return;
         }
         if cs.has_restore_shard() {
-            Self::preprocess_restore_shard(entry, &mut cs);
-            // Truncate raft log to trigger TiFlash acquiring latest snapshot.
-            peer_storage.truncate_raft_log(&mut ctx.raft_wb, entry.index, entry.term);
-            info!(
-                "{} truncate raft log for restore_shard, term {} index {}",
-                tag, entry.term, entry.index
-            );
+            self.preprocess_restore_shard(ctx, entry, &mut cs);
         }
-        let shard_meta = peer_storage.mut_engine_meta();
+        let shard_meta = self.mut_store().mut_engine_meta();
         shard_meta.apply_change_set(&cs);
         info!(
             "shard meta apply change set {:?}", &cs;
@@ -1824,15 +1817,53 @@ impl Peer {
         ctx.apply_msgs.msgs.push(ApplyMsg::PrepareChangeSet(cs));
     }
 
-    fn preprocess_restore_shard(entry: &Entry, cs: &mut kvenginepb::ChangeSet) {
-        assert!(cs.has_restore_shard());
+    fn preprocess_restore_shard(
+        &mut self,
+        ctx: &mut RaftContext,
+        entry: &Entry,
+        cs: &mut kvenginepb::ChangeSet,
+    ) {
+        debug_assert!(cs.has_restore_shard());
 
-        // NOTE: `cse-ctl` do NOT set TERM_KEY in changeset. Set it here.
+        let tag = self.tag();
+        let peer_id = self.peer_id();
+        let peer_storage = self.mut_store();
+
+        // Increase region version to discard stale change sets.
+        // Otherwise, change sets generated before but apply after restore shard will
+        // result in undefined behavior.
+        let mut new_region = peer_storage.get_preprocessed_region().clone();
+        let region_version = new_region.get_region_epoch().get_version();
+        debug_assert_eq!(cs.shard_ver, region_version);
+        new_region
+            .mut_region_epoch()
+            .set_version(region_version + 1);
+        info!(
+            "{} preprocess_restore_shard: new_region: {:?}",
+            tag, new_region
+        );
+        write_peer_state(
+            &mut ctx.raft_wb,
+            peer_id,
+            &new_region,
+            PeerState::Normal,
+            None,
+        );
+        peer_storage.preprocessed_region = Some(new_region);
+
+        // Set raft term & index.
         let snap = cs.mut_restore_shard();
         snap.set_data_sequence(entry.index);
         let props = snap.mut_properties();
         props.mut_keys().push(TERM_KEY.to_string());
         props.mut_values().push(entry.term.to_le_bytes().to_vec());
+
+        // Truncate raft log to trigger TiFlash acquiring latest snapshot.
+        peer_storage.truncate_raft_log(&mut ctx.raft_wb, entry.index, entry.term);
+        info!(
+            "{} truncate raft log for restore_shard, term {} index {}",
+            tag, entry.term, entry.index
+        );
     }
 
     pub(crate) fn preprocess_pending_splits(

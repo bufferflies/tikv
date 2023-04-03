@@ -564,8 +564,11 @@ impl ShardMeta {
             self.data_sequence
         );
 
+        // Increase shard version to make change sets generated before restore shard
+        // stale.
         let mut new_meta = Self::new(self.engine_id, cs);
         new_meta.data_sequence = cs.sequence;
+        new_meta.ver = cs.shard_ver + 1;
         *self = new_meta;
         info!(
             "{} apply_restore_shard in meta: new ver:{}, seq:{}, base_ver:{}, data_seq:{}",
