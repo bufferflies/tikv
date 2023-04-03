@@ -1800,18 +1800,7 @@ impl Peer {
         );
         if cs.has_initial_flush() || cs.has_snapshot() || cs.has_restore_shard() {
             if let Some(parent_id) = opt_parent_id {
-                if ctx
-                    .global
-                    .engines
-                    .raft
-                    .remove_dependent(parent_id, self.region_id)
-                    == 0
-                    && parent_id != self.region_id
-                {
-                    ctx.global
-                        .router
-                        .send_store(StoreMsg::DependentsEmpty(parent_id));
-                }
+                ctx.remove_dependent(parent_id, self.region_id);
             }
         }
         ctx.apply_msgs.msgs.push(ApplyMsg::PrepareChangeSet(cs));

@@ -602,6 +602,20 @@ impl RaftContext {
     pub(crate) fn store_id(&self) -> u64 {
         self.global.store.get_id()
     }
+
+    // Region(dependent_id) depends on Region(parent_id).
+    pub fn remove_dependent(&self, parent_id: u64, dependent_id: u64) {
+        let dependent_len = self
+            .global
+            .engines
+            .raft
+            .remove_dependent(parent_id, dependent_id);
+        if dependent_len == 0 && parent_id != dependent_id {
+            self.global
+                .router
+                .send_store(StoreMsg::DependentsEmpty(parent_id));
+        }
+    }
 }
 
 pub(crate) struct StoreFsm {
@@ -1200,11 +1214,7 @@ impl<'a> StoreMsgHandler<'a> {
                         "{} peer avoid replace by split, has pending snap {}, initialized {}, pending remove {}, peer_id changed {}",
                         tag, pending_snap, initialized, pending_remove, peer_id_changed,
                     );
-                    self.ctx
-                        .global
-                        .engines
-                        .raft
-                        .remove_dependent(region_id, new_region_id);
+                    self.ctx.remove_dependent(region_id, new_region_id);
                     continue;
                 }
             } else if load_last_peer_state(&self.ctx.global.engines.raft, new_peer_id)
@@ -1214,11 +1224,7 @@ impl<'a> StoreMsgHandler<'a> {
             {
                 // The peer has been destroyed.
                 info!("{} region {} avoid created by split", tag, new_region_id);
-                self.ctx
-                    .global
-                    .engines
-                    .raft
-                    .remove_dependent(region_id, new_region_id);
+                self.ctx.remove_dependent(region_id, new_region_id);
                 self.ctx.global.engines.kv.remove_shard(new_region_id);
                 continue;
             }
@@ -1454,20 +1460,7 @@ impl<'a> StoreMsgHandler<'a> {
 
         let peer_store = peer_fsm.peer.get_store();
         if let Some(parent_id) = peer_store.parent_id() {
-            if self
-                .ctx
-                .global
-                .engines
-                .raft
-                .remove_dependent(parent_id, region_id)
-                == 0
-                && parent_id != region_id
-            {
-                self.ctx
-                    .global
-                    .router
-                    .send_store(StoreMsg::DependentsEmpty(parent_id));
-            }
+            self.ctx.remove_dependent(parent_id, region_id);
         }
 
         if peer_store.engines.raft.has_dependents(region_id) {

@@ -28,7 +28,7 @@ use crate::{
     errors::*,
     store::{
         Engines, PeerTag, RaftApplyState, RaftContext, RaftState, RaftTruncatedState, RegionIdVer,
-        StoreMsg, TERM_KEY,
+        TERM_KEY,
     },
 };
 
@@ -475,18 +475,7 @@ impl PeerStorage {
         // dependent, so we avoid adding dependent when splitting regions by
         // checking peer existence to handle such a case.
         if let Some(parent_id) = self.parent_id() {
-            if ctx
-                .global
-                .engines
-                .raft
-                .remove_dependent(parent_id, self.get_region_id())
-                == 0
-                && parent_id != self.get_region_id()
-            {
-                ctx.global
-                    .router
-                    .send_store(StoreMsg::DependentsEmpty(parent_id));
-            }
+            ctx.remove_dependent(parent_id, self.get_region_id());
         }
         if self.is_initialized() {
             // we can only delete the old data when the peer is initialized.
