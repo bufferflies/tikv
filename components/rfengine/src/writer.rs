@@ -324,6 +324,7 @@ impl WalWriter {
 
     pub(crate) fn append_region_data(&mut self, peer_batch: &PeerBatch) {
         let data_len = peer_batch.encoded_len();
+        ENGINE_REGION_WRITE_BATCH_SIZE_HISTOGRAM.observe(data_len as f64);
         self.batch_buf.ensure_space(data_len);
         // Safety: `data_len` is the length of data encoded by `encode_to` and
         // `ensure_space` ensures enough space.

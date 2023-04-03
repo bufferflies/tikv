@@ -70,4 +70,10 @@ lazy_static! {
         exponential_buckets(0.0005, 1.8, 26).unwrap()
     )
     .unwrap();
+    pub static ref ENGINE_REGION_WRITE_BATCH_SIZE_HISTOGRAM: Histogram = register_histogram!(
+        "raft_engine_region_write_batch_size",
+        "Bucketed histogram of Raft Engine region write batch size",
+        exponential_buckets(16.0, 2.0, 20).unwrap()
+    )
+    .unwrap();
 }
