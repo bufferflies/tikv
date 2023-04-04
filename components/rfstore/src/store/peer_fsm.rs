@@ -1411,7 +1411,13 @@ impl<'a> PeerMsgHandler<'a> {
             return;
         }
         let change = result.unwrap();
-        if change.shard_ver
+        let expected_shard_ver = if change.has_restore_shard() {
+            // Restore shard will increase shard version by 1.
+            change.shard_ver + 1
+        } else {
+            change.shard_ver
+        };
+        if expected_shard_ver
             != self
                 .peer
                 .get_preprocessed_region()
