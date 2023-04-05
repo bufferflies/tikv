@@ -45,7 +45,7 @@ use tikv_util::{
 
 use crate::{
     load_data::{handle_load_data, LoadDataManager, MAX_IN_MEM_SIZE},
-    native_br::NativeBrManger,
+    native_br::{NativeBrConfig, NativeBrManger},
 };
 
 const ZSTD_COMPRESSION_LEVEL_FOR_REMOTE: &str = "5";
@@ -229,6 +229,7 @@ fn main() {
         pd.clone(),
         dfs.clone(),
         Some(config.data_dir),
+        config.native_br.clone(),
     ));
     let server_builder = hyper::Server::builder(incoming);
     let dfs_clone = dfs.clone();
@@ -260,6 +261,9 @@ fn main() {
                         }
                         path if path.starts_with(native_br::RESTORE_KEYSPACE_API_PATH) => {
                             native_br::handle_restore_keyspace(br_manager, req).await
+                        }
+                        path if path.starts_with(native_br::WHITELIST_API_PATH) => {
+                            native_br::handle_native_br_whitelist(br_manager, req).await
                         }
                         _ => Ok(hyper::Response::builder()
                             .status(404)
@@ -468,6 +472,7 @@ pub struct Config {
     pub log_level: String,
     pub data_dir: String,
     pub register: bool,
+    pub native_br: NativeBrConfig,
 }
 
 impl Default for Config {
@@ -484,6 +489,7 @@ impl Default for Config {
             log_level: String::default(),
             data_dir: String::default(),
             register: false,
+            native_br: NativeBrConfig::default(),
         }
     }
 }

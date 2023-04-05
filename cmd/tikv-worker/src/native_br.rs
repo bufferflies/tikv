@@ -1,7 +1,7 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, RwLock},
     thread,
 };
@@ -31,6 +31,7 @@ const JSON_TIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S%.3f"; // e.g. 2006-01-02 15:04
 
 pub(crate) const BACKUPS_API_PATH: &str = "/api/v1/backups";
 pub(crate) const RESTORE_KEYSPACE_API_PATH: &str = "/api/v1/restore_keyspace/";
+pub(crate) const WHITELIST_API_PATH: &str = "/api/v1/native_br/whitelist/";
 
 const BACKUP_NAME_FORMAT: &str = "%Y%m%d%H%M%S";
 
@@ -45,6 +46,9 @@ const BACKUP_NAME_FORMAT: &str = "%Y%m%d%H%M%S";
 ///   * GET    /api/v1/restore_keyspace/<restore_id>?cluster_id=%d&keyspace=%s
 ///   * DELETE /api/v1/restore_keyspace/<restore_id>?cluster_id=%d&keyspace=%s
 ///   * GET    /api/v1/restore_keyspace/?cluster_id=%d
+/// 3. whitelist
+///   * GET    /api/v1/native_br/whitelist/?cluster_id=%d
+///   * GET    /api/v1/native_br/whitelist/<keyspace>?cluster_id=%d
 
 pub(crate) async fn handle_backup(
     manager: Arc<NativeBrManger>,
@@ -138,6 +142,12 @@ pub(crate) async fn handle_restore_keyspace(
         ));
     }
     let keyspace = keyspace.unwrap().to_string();
+    if !manager.is_keyspace_allowed(&keyspace) {
+        return Ok(make_response(
+            StatusCode::FORBIDDEN,
+            format!("Keyspace {} is not in whitelist", keyspace),
+        ));
+    }
 
     match *req.method() {
         Method::GET => {
@@ -307,6 +317,52 @@ fn handle_error(err: Error) -> hyper::Result<Response<Body>> {
     }
 }
 
+pub(crate) async fn handle_native_br_whitelist(
+    manager: Arc<NativeBrManger>,
+    req: hyper::Request<hyper::Body>,
+) -> hyper::Result<hyper::Response<hyper::Body>> {
+    let query = req.uri().query().unwrap_or("");
+    let query_pairs: HashMap<_, _> = url::form_urlencoded::parse(query.as_bytes()).collect();
+
+    match get_u64_param(&query_pairs, "cluster_id") {
+        Some(cluster_id) if cluster_id == manager.get_cluster_id().unwrap() => {}
+        _ => {
+            return Ok(make_response(
+                StatusCode::BAD_REQUEST,
+                "Cluster ID mismatch",
+            ));
+        }
+    }
+
+    let keyspace = req
+        .uri()
+        .path()
+        .strip_prefix(WHITELIST_API_PATH)
+        .unwrap()
+        .to_string();
+    match *req.method() {
+        Method::GET => {
+            if keyspace.is_empty() {
+                // Get all whitelist, for debug use only.
+                Ok(make_json_response(
+                    StatusCode::OK,
+                    &manager.config.whitelist,
+                ))
+            } else {
+                let resp = WhitelistResponse {
+                    is_allowed: manager.is_keyspace_allowed(&keyspace),
+                    keyspace,
+                };
+                Ok(make_json_response(StatusCode::OK, &resp))
+            }
+        }
+        _ => Ok(make_response(
+            StatusCode::BAD_REQUEST,
+            "Invalid whitelist method",
+        )),
+    }
+}
+
 #[derive(Default, Serialize, Deserialize, Debug)]
 #[serde(default)]
 struct BackupItem {
@@ -385,6 +441,13 @@ impl RestoreState {
     fn is_retry(&self, new_state: &Self) -> bool {
         *self == Self::Error && *new_state == Self::Init
     }
+}
+
+#[derive(Default, Serialize, Deserialize, Debug)]
+#[serde(default)]
+struct WhitelistResponse {
+    keyspace: String,
+    is_allowed: bool,
 }
 
 #[derive(Clone)]
@@ -507,8 +570,30 @@ impl BrContext {
     }
 }
 
+#[derive(Clone, Default, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+pub struct WhiteList {
+    enable: bool,
+    list: HashSet<String>,
+}
+
+impl WhiteList {
+    pub(crate) fn is_allowed(&self, keyspace: &String) -> bool {
+        !self.enable || self.list.contains(keyspace)
+    }
+}
+
+#[derive(Clone, Default, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+pub struct NativeBrConfig {
+    whitelist: WhiteList,
+}
+
 pub(crate) struct NativeBrManger {
     pub context: Arc<BrContext>,
+    pub config: NativeBrConfig,
 }
 
 impl NativeBrManger {
@@ -519,6 +604,7 @@ impl NativeBrManger {
         pd_client: Arc<dyn PdClient>,
         s3fs: Arc<S3Fs>,
         working_path: Option<String>,
+        config: NativeBrConfig,
     ) -> Self {
         Self {
             context: Arc::new(BrContext {
@@ -531,6 +617,7 @@ impl NativeBrManger {
                 restore_tasks: Default::default(),
                 keyspace_tasks: Default::default(),
             }),
+            config,
         }
     }
 
@@ -617,6 +704,10 @@ impl NativeBrManger {
         } else {
             Ok(None)
         }
+    }
+
+    fn is_keyspace_allowed(&self, keyspace: &String) -> bool {
+        self.config.whitelist.is_allowed(keyspace)
     }
 }
 
