@@ -426,10 +426,18 @@ pub(crate) struct Peer {
     last_no_kv_idx: u64,
     /// preprocessed_index is used to avoid duplicated preprocess execution.
     pub(crate) preprocessed_index: u64,
-    /// The index which is skipped replicating to learner.
-    /// By now it is used to trigger TiFlash acquiring latest snapshot after
+
+    /// Indexes and term to trigger TiFlash acquiring latest snapshot after
     /// "restore_shard".
+    /// learner_skip_idx: the raft log which is skipped replicating to learner.
+    /// It is set when proposing "restore_shard".
     pub learner_skip_idx: u64,
+    /// pending_truncate: the raft log pending to be truncated after
+    /// applied. It is set after "restore_shard" is committed.
+    /// Note that index of `pending_truncate` is not necessarily equal to
+    /// `learner_skip_idx`. E.g. when there is another "restore_shard"
+    /// request in a short time.
+    pub pending_truncate: Option<(u64 /* term */, u64 /* index */)>,
 
     pub(crate) pending_remove: bool,
 
@@ -559,6 +567,7 @@ impl Peer {
             last_no_kv_idx: truncated,
             preprocessed_index: 0,
             learner_skip_idx: 0,
+            pending_truncate: None,
             leader_lease: Lease::new(
                 cfg.raft_store_max_leader_lease(),
                 cfg.renew_leader_lease_advance_duration(),
@@ -1847,12 +1856,31 @@ impl Peer {
         props.mut_keys().push(TERM_KEY.to_string());
         props.mut_values().push(entry.term.to_le_bytes().to_vec());
 
-        // Truncate raft log to trigger TiFlash acquiring latest snapshot.
-        peer_storage.truncate_raft_log(&mut ctx.raft_wb, entry.index, entry.term);
+        // Set pending truncate raft log to trigger TiFlash acquiring latest snapshot.
+        let old = self.pending_truncate.replace((entry.term, entry.index));
         info!(
-            "{} truncate raft log for restore_shard, term {} index {}",
-            tag, entry.term, entry.index
+            "{} set pending truncate raft log for restore_shard, term {} index {} old {:?}",
+            tag, entry.term, entry.index, old
         );
+    }
+
+    fn truncate_pending_raft_log(&mut self, ctx: &mut RaftContext, applied_index: u64) {
+        if self.pending_truncate.is_none() {
+            return;
+        }
+
+        let (term, idx) = self.pending_truncate.unwrap();
+        if self.get_store().truncated_index() < idx && idx <= applied_index {
+            self.mut_store()
+                .truncate_raft_log(&mut ctx.raft_wb, idx, term);
+            self.pending_truncate = None;
+            info!(
+                "{} truncate pending raft log, term {} index {}",
+                self.tag(),
+                term,
+                idx
+            );
+        }
     }
 
     pub(crate) fn preprocess_pending_splits(
@@ -2127,6 +2155,8 @@ impl Peer {
         let applied_index = apply_state.applied_index;
         let applied_index_term = apply_state.applied_index_term;
         self.raft_group.advance_apply_to(applied_index);
+
+        self.truncate_pending_raft_log(ctx, applied_index);
 
         self.cmd_epoch_checker.advance_apply(
             applied_index,

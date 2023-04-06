@@ -1,7 +1,7 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    sync::{atomic::Ordering, Arc, Mutex},
+    sync::{atomic::Ordering, Arc, Mutex, RwLock},
     thread::{sleep, JoinHandle},
     time::Duration,
 };
@@ -21,7 +21,8 @@ use tokio::runtime::Runtime;
 
 use crate::{
     alloc_node_id_vec, get_keyspace_prefix, prepare_dfs, spawn_gc_worker, spawn_keyspace_write,
-    CONCURRENCY, MERGE_COUNTER, MOVE_COUNTER, TIMEOUT, TRANSFER_COUNTER, WRITE_COUNTER,
+    spawn_move, spawn_transfer, CONCURRENCY, MERGE_COUNTER, MOVE_COUNTER, TIMEOUT,
+    TRANSFER_COUNTER, WRITE_COUNTER,
 };
 
 const KEYSPACE_COUNT: usize = 10;
@@ -67,10 +68,10 @@ fn test_random_br() {
 
     // Start workloads & schedulers.
     // TODO: restart nodes
-    // TODO: add scheduler: transfer, move, merge inside keyspace
+    // TODO: add scheduler: merge inside keyspace
     let mut handles = vec![
-        // spawn_transfer(cluster.new_scheduler()),
-        // spawn_move(cluster.new_scheduler(), Arc::new(RwLock::new(()))),
+        spawn_transfer(cluster.new_scheduler()),
+        spawn_move(cluster.new_scheduler(), Arc::new(RwLock::new(()))),
         spawn_gc_worker(cluster.get_pd_client(), TIMEOUT),
         spawn_incremental_backup(
             backups.clone(),
