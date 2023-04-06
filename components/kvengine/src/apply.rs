@@ -629,19 +629,22 @@ impl EngineCore {
         let opts = dfs::Options::new(shard.id, shard.ver);
         let runtime = fs.get_runtime();
         for (id, cover) in del_files {
+            self.set_local_file_mtime(id);
             if cover {
                 let file_len = self.local_file_len(id);
-                self.remove_local_file(id);
                 let fs_n = fs.clone();
                 runtime.spawn(async move { fs_n.remove(id, file_len, opts).await });
             }
         }
     }
 
-    fn remove_local_file(&self, file_id: u64) {
-        let local_file_path = self.local_sst_file_path(file_id);
-        if let Err(err) = std::fs::remove_file(local_file_path) {
-            error!("failed to remove local file {:?}", err);
+    // On remove local file, we need to retain the file for a while as SnapAccess
+    // hold the file may reopen it, update the mtime so local file gc worker
+    // will delay the remove.
+    fn set_local_file_mtime(&self, file_id: u64) {
+        let path = self.local_sst_file_path(file_id);
+        if let Err(err) = filetime::set_file_mtime(path, filetime::FileTime::now()) {
+            error!("failed to set local file mtime {} {:?}", file_id, err);
         }
     }
 
