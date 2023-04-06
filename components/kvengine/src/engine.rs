@@ -146,7 +146,7 @@ impl Engine {
         Ok(en)
     }
 
-    // This method is also used by cse-ctl for cluster restore.
+    // This method is also used by native-br for cluster restore.
     pub fn load_shards(
         &self,
         metas: HashMap<u64, ShardMeta>,
@@ -158,12 +158,20 @@ impl Engine {
                 let id_ver = IdVer::new(parent.id, parent.ver);
                 if !parents.contains_key(&id_ver) {
                     info!("load parent of {}", meta.tag());
-                    let parent_shard = self.load_shard(parent)?;
+                    let parent_shard = Arc::new(self.load_parent_shard(parent)?);
+
+                    // Ingest the parent shard before recovery, as recoverer depends on the shard
+                    // existing in kvengine.
+                    let normal_shard = self.shards.insert(parent.id, parent_shard.clone());
                     recoverer.recover(self, &parent_shard, parent)?;
                     parents.insert(IdVer::new(parent.id, parent.ver), parent_shard);
                     // Do not keep the parent in the engine as we only use the parent's mem-table
                     // for children.
-                    self.shards.remove(&parent.id);
+                    if let Some(normal_shard) = normal_shard {
+                        self.shards.insert(parent.id, normal_shard);
+                    } else {
+                        self.shards.remove(&parent.id);
+                    }
                 }
             }
         }
@@ -187,7 +195,7 @@ impl Engine {
                     .unwrap()
             });
             std::thread::spawn(move || {
-                let shard = engine.load_shard(&meta).unwrap();
+                let shard = engine.load_and_ingest_shard(&meta).unwrap();
                 if let Some(parent) = parent_shard {
                     shard.add_parent_mem_tbls(parent)
                 }
@@ -229,7 +237,7 @@ impl EngineCore {
         self.engine_id.load(Ordering::Acquire)
     }
 
-    // This method is also used by cse-ctl for cluster restore.
+    // This method is also used by native-br for cluster restore.
     pub fn read_meta(&self, meta_iter: &mut impl MetaIterator) -> Result<HashMap<u64, ShardMeta>> {
         let mut metas = HashMap::new();
         let engine_id = meta_iter.engine_id();
@@ -240,23 +248,33 @@ impl EngineCore {
         Ok(metas)
     }
 
-    fn load_shard(&self, meta: &ShardMeta) -> Result<Arc<Shard>> {
+    /// Load shard from meta and ingest to the engine.
+    fn load_and_ingest_shard(&self, meta: &ShardMeta) -> Result<Arc<Shard>> {
         if let Some(shard) = self.get_shard(meta.id) {
             if shard.ver == meta.ver {
                 return Ok(shard);
             }
         }
-        info!("load shard {}", meta.tag());
+        info!("load and ingest shard {}", meta.tag());
         let change_set = self.prepare_change_set(meta.to_change_set(), false)?;
         self.ingest(change_set, false)?;
         let shard = self.get_shard(meta.id);
         Ok(shard.unwrap())
     }
 
-    pub fn ingest(&self, cs: ChangeSet, active: bool) -> Result<()> {
+    /// Load parent shard for recovery.
+    /// The shard is not ingested to the engine.
+    fn load_parent_shard(&self, meta: &ShardMeta) -> Result<Shard> {
+        info!("load parent shard {}", meta.tag());
+        let change_set = self.prepare_change_set(meta.to_change_set(), false)?;
+        let shard = self.new_shard_from_change_set(change_set);
+        shard.refresh_states();
+        Ok(shard)
+    }
+
+    fn new_shard_from_change_set(&self, cs: ChangeSet) -> Shard {
         let engine_id = self.engine_id.load(Ordering::Acquire);
         let shard = Shard::new_for_ingest(engine_id, &cs, self.opts.clone());
-        shard.set_active(active);
         let (l0s, blob_tbls, scfs) = create_snapshot_tables(cs.get_snapshot(), &cs);
         let old_data = shard.get_data();
         let data = ShardData::new(
@@ -271,6 +289,12 @@ impl EngineCore {
             scfs,
         );
         shard.set_data(data);
+        shard
+    }
+
+    pub fn ingest(&self, cs: ChangeSet, active: bool) -> Result<()> {
+        let shard = self.new_shard_from_change_set(cs);
+        shard.set_active(active);
         self.refresh_shard_states(&shard);
         match self.shards.entry(shard.id) {
             Entry::Occupied(entry) => {

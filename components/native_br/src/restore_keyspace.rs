@@ -736,7 +736,9 @@ impl BackupCluster {
     ) -> Result<usize /* number of flushed shards */> {
         let kv_engine = self.kv_engine.as_ref().unwrap();
         for shard_id in shards_id {
-            let engine_shard = kv_engine.get_shard(*shard_id).unwrap();
+            let engine_shard = kv_engine
+                .get_shard(*shard_id)
+                .unwrap_or_else(|| panic!("shard not found: {}", *shard_id));
             kv_engine.flush_shard_for_restore(&engine_shard);
         }
 
