@@ -20,7 +20,7 @@ use kvproto::{
     metapb,
     metapb::Region,
     pdpb,
-    pdpb::SyncRegionResponse,
+    pdpb::{Peers, SyncRegionResponse},
     raft_cmdpb::{
         AdminCmdType, AdminRequest, ChangePeerRequest, ChangePeerV2Request, RaftCmdRequest,
         SplitRequest,
@@ -131,7 +131,14 @@ pub enum PdTask {
     },
     UpdateSafeTs,
     SyncRegion {
-        keyspace_id: Option<u32>,
+        start: Vec<u8>,
+        end: Vec<u8>,
+        limit: usize,
+        reverse: bool,
+        callback: Box<dyn FnOnce(SyncRegionResponse) + Send>,
+    },
+    SyncRegionById {
+        region_id: u64,
         callback: Box<dyn FnOnce(SyncRegionResponse) + Send>,
     },
     RoleChanged {
@@ -228,6 +235,9 @@ pub struct PeerStat {
     pub approximate_size: u64,
     pub approximate_kv_size: u64,
     pub role: StateRole,
+
+    pub down_peers: Vec<pdpb::PeerStats>,
+    pub pending_peers: Vec<metapb::Peer>,
 }
 
 #[derive(Default)]
@@ -285,7 +295,7 @@ impl ReportBucket {
 
 impl Display for PdTask {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match *self {
+        match self {
             PdTask::AskBatchSplit {
                 ref region,
                 ref split_keys,
@@ -326,8 +336,16 @@ impl Display for PdTask {
                 region_id
             ),
             PdTask::UpdateSafeTs => write!(f, "update safe ts"),
-            PdTask::SyncRegion { .. } => {
-                write!(f, "sync region")
+            PdTask::SyncRegion { start, end, .. } => {
+                write!(
+                    f,
+                    "sync region, range: [{}, {})",
+                    log_wrappers::Value(start),
+                    log_wrappers::Value(end)
+                )
+            }
+            PdTask::SyncRegionById { region_id, .. } => {
+                write!(f, "sync region by id: {}", region_id)
             }
             PdTask::RoleChanged { region_id, role } => {
                 write!(f, "region {} change role to {:?}", region_id, role)
@@ -1177,37 +1195,56 @@ impl PdRunner {
     }
 
     fn handle_sync_region(
-        &mut self,
-        keyspace_id: Option<u32>,
+        &self,
+        start: Vec<u8>,
+        mut end: Vec<u8>,
+        limit: usize,
+        reverse: bool,
         callback: Box<dyn FnOnce(SyncRegionResponse) + Send>,
     ) {
-        let (start, end) = if let Some(keyspace_id) = keyspace_id {
-            let mut prefix: [u8; 4] = keyspace_id.to_be_bytes();
-            prefix[0] = api_version::api_v2::TXN_KEY_PREFIX;
-            let start = prefix.to_vec();
-            let mut end = start.clone();
+        if end.is_empty() {
             end.extend_from_slice(GLOBAL_SHARD_END_KEY);
-            (start, end)
-        } else {
-            (vec![], GLOBAL_SHARD_END_KEY.to_vec())
-        };
-        let regions = self.region_map.get_regions_in_range(start, end);
+        }
+        let regions = self.region_map.scan_regions(start, end, limit, reverse);
+        let resp = self.make_sync_region_resp(regions);
+        callback(resp);
+    }
+
+    fn handle_sync_region_by_id(
+        &self,
+        region_id: u64,
+        callback: Box<dyn FnOnce(SyncRegionResponse) + Send>,
+    ) {
+        let region = self.region_map.regions.get(&region_id);
+        let resp = self.make_sync_region_resp(region.into_iter().collect());
+        callback(resp);
+    }
+
+    fn make_sync_region_resp(&self, regions: Vec<&Region>) -> SyncRegionResponse {
         let mut resp_regions = Vec::with_capacity(regions.len());
         let mut resp_stats = Vec::with_capacity(regions.len());
         let mut resp_leaders = Vec::with_capacity(regions.len());
         let mut resp_buckets = Vec::with_capacity(regions.len());
+        let mut resp_down_peers: Vec<pdpb::PeersStats> = Vec::with_capacity(regions.len());
+        let mut resp_pending_peers: Vec<Peers> = Vec::with_capacity(regions.len());
         for region in regions {
             resp_regions.push(region.clone());
             // The stats is used along with region, we need to push a default one if not
             // found.
             let mut region_stat = pdpb::RegionStat::new();
+            let mut down_peers = pdpb::PeersStats::new();
+            let mut pending_peers = Peers::new();
             if let Some(stats) = self.region_peers.get(&region.id) {
                 region_stat.set_bytes_read(stats.read_bytes);
                 region_stat.set_keys_read(stats.read_keys);
                 region_stat.set_bytes_written(stats.last_region_report_written_bytes);
                 region_stat.set_keys_written(stats.last_region_report_written_keys);
+                down_peers.peers = stats.down_peers.clone().into();
+                pending_peers.peers = stats.pending_peers.clone().into();
             }
             resp_stats.push(region_stat);
+            resp_down_peers.push(down_peers);
+            resp_pending_peers.push(pending_peers);
             let leader_peer = find_peer(region, self.store_id)
                 .cloned()
                 .unwrap_or_default();
@@ -1231,7 +1268,9 @@ impl PdRunner {
         resp.set_region_leaders(resp_leaders.into());
         resp.set_region_stats(resp_stats.into());
         resp.set_buckets(resp_buckets.into());
-        callback(resp);
+        resp.set_down_peers(resp_down_peers.into());
+        resp.set_pending_peers(resp_pending_peers.into());
+        resp
     }
 
     fn handle_role_changed(&mut self, region_id: u64, role: StateRole) {
@@ -1240,6 +1279,10 @@ impl PdRunner {
             .entry(region_id)
             .or_insert_with(PeerStat::default);
         peer_stat.role = role;
+        if role != StateRole::Leader {
+            peer_stat.down_peers.clear();
+            peer_stat.pending_peers.clear();
+        }
     }
 }
 
@@ -1311,6 +1354,9 @@ impl Runnable for PdRunner {
                     let unix_secs_now = UnixSecs::now();
                     peer_stat.last_region_report_ts = unix_secs_now;
 
+                    peer_stat.down_peers = hb_task.down_peers.clone();
+                    peer_stat.pending_peers = hb_task.pending_peers.clone();
+
                     if last_report_ts.is_zero() {
                         last_report_ts = self.start_ts;
                     }
@@ -1364,10 +1410,19 @@ impl Runnable for PdRunner {
             } => self.handle_update_max_timestamp(region_id, initial_status, txn_ext),
             PdTask::UpdateSafeTs => self.handle_update_safe_ts(),
             PdTask::SyncRegion {
-                keyspace_id,
+                start,
+                end,
+                limit,
+                reverse,
                 callback,
             } => {
-                self.handle_sync_region(keyspace_id, callback);
+                self.handle_sync_region(start, end, limit, reverse, callback);
+            }
+            PdTask::SyncRegionById {
+                region_id,
+                callback,
+            } => {
+                self.handle_sync_region_by_id(region_id, callback);
             }
             PdTask::RoleChanged { region_id, role } => {
                 self.handle_role_changed(region_id, role);

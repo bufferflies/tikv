@@ -103,7 +103,14 @@ pub enum StoreMsg {
         callback: Box<dyn FnOnce(Vec<RegionIdVer>) + Send>,
     },
     SyncRegion {
-        keyspace_id: Option<u32>,
+        start: Vec<u8>,
+        end: Vec<u8>,
+        limit: usize,
+        reverse: bool,
+        callback: Box<dyn FnOnce(SyncRegionResponse) + Send>,
+    },
+    SyncRegionById {
+        region_id: u64,
         callback: Box<dyn FnOnce(SyncRegionResponse) + Send>,
     },
     ApplyResult {

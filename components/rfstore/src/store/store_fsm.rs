@@ -3,7 +3,7 @@
 use std::{
     collections::{btree_map::BTreeMap, HashMap, HashSet},
     ops::{
-        Bound::{Excluded, Unbounded},
+        Bound::{Excluded, Included, Unbounded},
         Deref, DerefMut,
     },
     sync::{
@@ -464,18 +464,43 @@ impl RegionMap {
         self.regions.is_empty()
     }
 
-    pub fn get_regions_in_range(&self, start: Vec<u8>, end: Vec<u8>) -> Vec<&Region> {
+    pub fn scan_regions(
+        &self,
+        start: Vec<u8>,
+        end: Vec<u8>,
+        limit: usize,
+        reverse: bool,
+    ) -> Vec<&Region> {
         let mut regions = vec![];
+        let mut right_bound = Unbounded;
         let encoded_end = encode_bytes(&end);
-        for (_, region_id) in self.region_ranges.range((Excluded(start), Unbounded)) {
+        if let Some((region_end, region_id)) = self
+            .region_ranges
+            .range((Included(end.clone()), Unbounded))
+            .next()
+        {
+            right_bound = Included(end);
+            let region = self.regions.get(region_id);
+            if let Some(region) = region {
+                if region.start_key < encoded_end {
+                    right_bound = Included(region_end.clone());
+                }
+            }
+        }
+        let mut iter: Box<dyn DoubleEndedIterator<Item = (&Vec<u8>, &u64)>> =
+            Box::new(self.region_ranges.range((Excluded(start), right_bound)));
+        if reverse {
+            iter = Box::new(iter.rev());
+        }
+        for (_, region_id) in iter {
+            if limit > 0 && regions.len() >= limit {
+                break;
+            }
             let region = self.regions.get(region_id);
             if region.is_none() {
                 continue;
             }
             let region = region.unwrap();
-            if region.start_key >= encoded_end {
-                break;
-            }
             regions.push(region);
         }
         regions
@@ -685,10 +710,19 @@ impl<'a> StoreMsgHandler<'a> {
                 self.on_get_regions_in_range(start, end, callback);
             }
             StoreMsg::SyncRegion {
-                keyspace_id,
+                start,
+                end,
+                limit,
+                reverse,
                 callback,
             } => {
-                self.on_sync_region(keyspace_id, callback);
+                self.on_sync_region(start, end, limit, reverse, callback);
+            }
+            StoreMsg::SyncRegionById {
+                region_id,
+                callback,
+            } => {
+                self.on_sync_region_by_id(region_id, callback);
             }
             StoreMsg::ApplyResult { region_id, peer_id } => {
                 apply_region = self.on_apply_result(region_id, peer_id);
@@ -1533,7 +1567,7 @@ impl<'a> StoreMsgHandler<'a> {
             .ctx
             .store_meta
             .region_map
-            .get_regions_in_range(start, end)
+            .scan_regions(start, end, 0, false)
             .into_iter()
             .map(|r| RegionIdVer::from_region(r))
             .collect();
@@ -1542,14 +1576,35 @@ impl<'a> StoreMsgHandler<'a> {
 
     fn on_sync_region(
         &mut self,
-        keyspace_id: Option<u32>,
+        start: Vec<u8>,
+        end: Vec<u8>,
+        limit: usize,
+        reverse: bool,
         callback: Box<dyn FnOnce(SyncRegionResponse) + Send>,
     ) {
         self.ctx
             .global
             .pd_scheduler
             .schedule(PdTask::SyncRegion {
-                keyspace_id,
+                start,
+                end,
+                limit,
+                reverse,
+                callback,
+            })
+            .unwrap();
+    }
+
+    fn on_sync_region_by_id(
+        &mut self,
+        region_id: u64,
+        callback: Box<dyn FnOnce(SyncRegionResponse) + Send>,
+    ) {
+        self.ctx
+            .global
+            .pd_scheduler
+            .schedule(PdTask::SyncRegionById {
+                region_id,
                 callback,
             })
             .unwrap();

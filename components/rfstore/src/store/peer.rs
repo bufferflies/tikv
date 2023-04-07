@@ -1261,6 +1261,18 @@ impl Peer {
         }
     }
 
+    pub fn notify_role_changed(&self, pd_scheduler: &Scheduler<PdTask>, role: StateRole) {
+        if let Err(e) = pd_scheduler.schedule(PdTask::RoleChanged {
+            region_id: self.region_id,
+            role,
+        }) {
+            error!(
+                "failed to notify pd runner that peer's role has changed";
+                "err" => ?e,
+            );
+        }
+    }
+
     pub(crate) fn reset_buckets(&mut self) {
         self.buckets = None;
         self.last_bucket_split_region_size = 0;
@@ -1310,6 +1322,8 @@ impl Peer {
                 }
                 _ => {}
             }
+
+            self.notify_role_changed(&ctx.global.pd_scheduler, ss.raft_state);
             // TODO: it may possible that only the `leader_id` change and the role
             // didn't change
             ctx.global.coprocessor_host.on_role_change(

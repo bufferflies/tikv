@@ -60,6 +60,7 @@ use tikv_util::{
     logger::set_log_level,
     metrics::{dump, dump_to},
     sys::thread::ThreadBuildWrapper,
+    time::InstantExt,
     timer::GLOBAL_TIMER_HANDLE,
 };
 use tokio::{
@@ -69,7 +70,9 @@ use tokio::{
 };
 use tokio_openssl::SslStream;
 
-use crate::server::Result;
+use crate::{server::Result, status_server::metrics::STATUS_REQ_HISTOGRAM_STATIC};
+
+mod metrics;
 
 static TIMER_CANCELED: &str = "tokio timer canceled";
 
@@ -84,6 +87,24 @@ static FAIL_POINTS_REQUEST_PATH: &str = "/fail";
 #[serde(rename_all = "kebab-case")]
 struct LogLevelRequest {
     pub log_level: LogLevel,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct SyncRegionRequest {
+    pub start: String,
+    pub end: String,
+    pub limit: usize,
+    pub reverse: bool,
+    pub debug: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct SyncRegionByIdRequest {
+    pub region_id: u64,
+    #[serde(default)]
+    pub debug: bool,
 }
 
 pub struct StatusServer {
@@ -815,17 +836,46 @@ impl StatusServer {
         req: Request<Body>,
         router: RaftRouter,
     ) -> hyper::Result<Response<Body>> {
-        let query = req.uri().query().unwrap_or("");
-        let query_pairs: HashMap<_, _> = url::form_urlencoded::parse(query.as_bytes()).collect();
-        let keyspace_id = if let Some(x) = query_pairs.get("keyspace_id") {
-            u32::from_str(x).map_or(None, |x| Some(x))
-        } else {
-            None
+        let mut body = Vec::new();
+        req.into_body()
+            .try_for_each(|bytes| {
+                body.extend(bytes);
+                ok(())
+            })
+            .await?;
+
+        let SyncRegionRequest {
+            start,
+            end,
+            limit,
+            reverse,
+            debug,
+        } = match serde_json::from_slice::<SyncRegionRequest>(&body) {
+            Ok(req) => req,
+            Err(e) => {
+                return Ok(make_response(
+                    StatusCode::BAD_REQUEST,
+                    format!("invalid request body: {:?}", e),
+                ));
+            }
         };
-        let debug = query_pairs.get("debug").map(|x| x.as_ref()) == Some("true");
+
+        let (start, end) = match (hex::decode(&start), hex::decode(&end)) {
+            (Ok(start), Ok(end)) if end.is_empty() || start <= end => (start, end),
+            _ => {
+                return Ok(make_response(
+                    StatusCode::BAD_REQUEST,
+                    format!("invalid range: [{}, {})", start, end),
+                ));
+            }
+        };
+
         let (callback, future) = paired_future_callback();
         let store_msg = StoreMsg::SyncRegion {
-            keyspace_id,
+            start,
+            end,
+            limit,
+            reverse,
             callback,
         };
         router.send_store_msg(store_msg);
@@ -835,7 +885,44 @@ impl StatusServer {
         } else {
             resp.write_to_bytes().unwrap()
         };
-        Ok(hyper::Response::new(body.into()))
+        Ok(Response::new(body.into()))
+    }
+
+    pub async fn handle_sync_region_by_id(
+        req: Request<Body>,
+        router: RaftRouter,
+    ) -> hyper::Result<Response<Body>> {
+        let mut body = Vec::new();
+        req.into_body()
+            .try_for_each(|bytes| {
+                body.extend(bytes);
+                ok(())
+            })
+            .await?;
+
+        let SyncRegionByIdRequest { region_id, debug } = match serde_json::from_slice(&body) {
+            Ok(req) => req,
+            Err(e) => {
+                return Ok(make_response(
+                    StatusCode::BAD_REQUEST,
+                    format!("invalid request body: {:?}", e),
+                ));
+            }
+        };
+
+        let (callback, future) = paired_future_callback();
+        let store_msg = StoreMsg::SyncRegionById {
+            region_id,
+            callback,
+        };
+        router.send_store_msg(store_msg);
+        let resp = future.await.unwrap();
+        let body = if debug {
+            format!("{:?}", resp).into_bytes()
+        } else {
+            resp.write_to_bytes().unwrap()
+        };
+        Ok(Response::new(body.into()))
     }
 
     fn handle_get_metrics(
@@ -888,6 +975,7 @@ impl StatusServer {
             async move {
                 // Create a status service.
                 Ok::<_, hyper::Error>(service_fn(move |req: Request<Body>| {
+                    let start = Instant::now();
                     let x509 = x509.clone();
                     let security_config = security_config.clone();
                     let cfg_controller = cfg_controller.clone();
@@ -958,8 +1046,19 @@ impl StatusServer {
                             (Method::GET, path) if path.starts_with("/region") => {
                                 Self::dump_region_meta(req, router).await
                             }
+                            (Method::GET, path) if path.starts_with("/sync_region_by_id") => {
+                                let resp = Self::handle_sync_region_by_id(req, router).await?;
+                                STATUS_REQ_HISTOGRAM_STATIC
+                                    .sync_region_by_id
+                                    .observe(start.saturating_elapsed().as_secs_f64());
+                                Ok(resp)
+                            }
                             (Method::GET, path) if path.starts_with("/sync_region") => {
-                                Self::handle_sync_region(req, router).await
+                                let resp = Self::handle_sync_region(req, router).await?;
+                                STATUS_REQ_HISTOGRAM_STATIC
+                                    .sync_region
+                                    .observe(start.saturating_elapsed().as_secs_f64());
+                                Ok(resp)
                             }
                             (Method::PUT, path) if path.starts_with("/log-level") => {
                                 Self::change_log_level(req).await
