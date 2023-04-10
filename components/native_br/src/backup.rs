@@ -284,8 +284,9 @@ pub async fn get_all_incremental_backups(
     s3fs: &S3Fs,
     start_date: &chrono::Date<Utc>,
     start_time: Option<&NaiveTime>,
-) -> dfs::Result<Vec<String>> {
-    let mut files = vec![];
+    max_count: usize,
+) -> dfs::Result<(Vec<String>, bool)> {
+    let mut files = Vec::with_capacity(max_count);
     let mut start_key = format!(
         "{}/{}",
         start_date.format(INCREMENTAL_BACKUP_FOLDER_FORMAT),
@@ -294,13 +295,18 @@ pub async fn get_all_incremental_backups(
             .unwrap_or_default()
     );
     let prefix = "backup/";
+
+    let mut reach_limit = false;
     loop {
         match s3fs.list(&start_key, Some(prefix)).await {
             Ok((backup_files, more, next_start_after)) => {
-                for file in backup_files {
-                    files.push(file.key);
+                let mut file_keys = backup_files.into_iter().map(|f| f.key).collect::<Vec<_>>();
+                files.append(&mut file_keys);
+                if files.len() > max_count {
+                    files.truncate(max_count);
+                    reach_limit = true;
                 }
-                if !more {
+                if reach_limit || !more {
                     break;
                 }
                 start_key = next_start_after.unwrap();
@@ -310,13 +316,13 @@ pub async fn get_all_incremental_backups(
             }
         }
     }
-    Ok(files)
+    Ok((files, reach_limit))
 }
 
 // If backup exist, return the latest one, else create a new ClusterBackupMeta.
 async fn get_latest_backup_meta(s3fs: &S3Fs, cluster_id: u64) -> Result<ClusterBackupMeta> {
     let now = Utc::now();
-    let files = get_all_incremental_backups(s3fs, &now.date(), None).await?;
+    let (files, _) = get_all_incremental_backups(s3fs, &now.date(), None, usize::MAX).await?;
     if files.is_empty() {
         return Err(Error::MetaNotFound(cluster_id));
     }

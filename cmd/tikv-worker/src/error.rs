@@ -32,6 +32,8 @@ pub(crate) enum Error {
     RestoreKeyspaceTaskConflict(u64),
     #[error("datetime parse error {0}")]
     DateTimeParseError(#[from] chrono::ParseError),
+    #[error("ReachLimit {0}")]
+    ReachConcurrencyLimit(usize),
 }
 
 impl From<dfs::Error> for Error {

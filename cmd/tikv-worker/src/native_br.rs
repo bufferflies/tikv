@@ -27,13 +27,14 @@ use crate::{
 
 type Result<T> = std::result::Result<T, Error>;
 
+const MAX_RESTORE_CONCURRENCY: usize = 20;
+const MAX_BACKUP_COUNT_PER_PAGE: usize = 1000; // Same with dfs list.
 const JSON_TIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S%.3f"; // e.g. 2006-01-02 15:04:05.000
+const BACKUP_NAME_FORMAT: &str = "%Y%m%d%H%M%S";
 
 pub(crate) const BACKUPS_API_PATH: &str = "/api/v1/backups";
 pub(crate) const RESTORE_KEYSPACE_API_PATH: &str = "/api/v1/restore_keyspace/";
 pub(crate) const WHITELIST_API_PATH: &str = "/api/v1/native_br/whitelist/";
-
-const BACKUP_NAME_FORMAT: &str = "%Y%m%d%H%M%S";
 
 /// Backup and restore keyspace API:
 ///
@@ -82,12 +83,25 @@ pub(crate) async fn handle_backup(
                 .unwrap()
                 .checked_add_signed(chrono::Duration::seconds(1))
                 .unwrap();
+            let max_count = if let Some(count) = query_pairs.get("max_count") {
+                match count.parse::<usize>() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        return Ok(make_response(
+                            StatusCode::BAD_REQUEST,
+                            format!("max count is invalid {:?}", e),
+                        ));
+                    }
+                }
+            } else {
+                MAX_BACKUP_COUNT_PER_PAGE
+            };
 
-            match manager.list_backups(&start_backup_time).await {
-                Ok(backups) => {
+            match manager.list_backups(&start_backup_time, max_count).await {
+                Ok((backups, has_more)) => {
                     let resp = ListBackupResponse {
                         items: backups.into_iter().map(Into::into).collect(),
-                        has_more: false, // TODO: paging
+                        has_more,
                     };
                     Ok(make_json_response(StatusCode::OK, &resp))
                 }
@@ -621,21 +635,23 @@ impl NativeBrManger {
         }
     }
 
-    // TODO: local cache
     async fn list_backups(
         &self,
         start_backup_time: &DateTime<Utc>,
-    ) -> Result<Vec<IncrementalBackupFile>> {
-        let backups = backup::get_all_incremental_backups(
+        max_count: usize,
+    ) -> Result<(Vec<IncrementalBackupFile>, bool)> {
+        let (backups, has_more) = backup::get_all_incremental_backups(
             &self.context.s3fs,
             &start_backup_time.date(),
             Some(&start_backup_time.time()),
+            max_count,
         )
-        .await?
-        .into_iter()
-        .filter_map(|file_path| IncrementalBackupFile::try_from_full_path(&file_path))
-        .collect::<Vec<_>>();
-        Ok(backups)
+        .await?;
+        let backups = backups
+            .into_iter()
+            .filter_map(|file_path| IncrementalBackupFile::try_from_full_path(&file_path))
+            .collect::<Vec<_>>();
+        Ok((backups, has_more))
     }
 
     fn get_cluster_id(&self) -> Result<u64> {
@@ -652,6 +668,10 @@ impl NativeBrManger {
         keyspace_name: String,
         backup_name: String,
     ) -> Result<bool> {
+        if self.get_all_restore_task().len() >= MAX_RESTORE_CONCURRENCY {
+            return Err(Error::ReachConcurrencyLimit(MAX_RESTORE_CONCURRENCY));
+        }
+
         if self.context.change_restore_state(
             restore_id,
             &keyspace_name,
@@ -659,7 +679,6 @@ impl NativeBrManger {
             None,
         )? {
             let context = self.context.clone();
-            // TODO: limit concurrency
             thread::spawn(move || context.restore_keyspace(restore_id, keyspace_name, backup_name));
             Ok(true)
         } else {
