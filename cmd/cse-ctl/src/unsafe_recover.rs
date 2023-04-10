@@ -62,7 +62,8 @@ pub struct UnsafeRecoverArgs {
 }
 
 pub(crate) fn execute_unsafe_recover(args: UnsafeRecoverArgs) {
-    let rf = rfengine::RfEngine::open(&args.path, 512 * 1024 * 1024, 8 * 1024).unwrap();
+    let cfg = rfengine::RfEngineConfig::default();
+    let rf = rfengine::RfEngine::open(&args.path, &cfg).unwrap();
     if let Some(create_empty) = args.create_empty {
         create_empty_regions(&rf, create_empty, args.commit);
         return;

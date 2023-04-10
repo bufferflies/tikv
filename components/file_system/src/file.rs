@@ -37,7 +37,6 @@ impl File {
         })
     }
 
-    #[cfg(test)]
     pub fn open_with_limiter<P: AsRef<Path>>(
         path: P,
         limiter: Option<Arc<IoRateLimiter>>,

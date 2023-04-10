@@ -15,6 +15,11 @@ pub struct Config {
     ///
     /// Default: "512MB"
     pub target_file_size: ReadableSize,
+
+    /// Limit the worker io
+    ///
+    /// Default: "125MB"
+    pub worker_rate_limit: ReadableSize,
 }
 
 impl Default for Config {
@@ -22,6 +27,15 @@ impl Default for Config {
         Self {
             batch_compression_threshold: ReadableSize::kb(8),
             target_file_size: ReadableSize::mb(512),
+            worker_rate_limit: ReadableSize::mb(125),
         }
+    }
+}
+
+impl Config {
+    pub fn new(target_file_size: usize) -> Self {
+        let mut cfg = Self::default();
+        cfg.target_file_size = ReadableSize(target_file_size as u64);
+        cfg
     }
 }

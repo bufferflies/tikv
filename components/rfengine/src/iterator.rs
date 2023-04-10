@@ -1,12 +1,13 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    fs::{self, File},
     io::{BufReader, Read},
     path::PathBuf,
+    sync::Arc,
 };
 
 use bytes::{Buf, Bytes, BytesMut};
+use file_system::IoRateLimiter;
 
 use crate::{
     worker::wal_file_name,
@@ -20,17 +21,23 @@ pub(crate) struct WalIterator {
     epoch_id: u32,
     buf: BytesMut,
     pub(crate) offset: u64,
+    rate_limiter: Option<Arc<IoRateLimiter>>,
 }
 
 const MAX_BATCH_SIZE: usize = 256 * 1024 * 1024;
 
 impl WalIterator {
-    pub(crate) fn new(dir: PathBuf, epoch_id: u32) -> Self {
+    pub(crate) fn new(
+        dir: PathBuf,
+        epoch_id: u32,
+        rate_limiter: Option<Arc<IoRateLimiter>>,
+    ) -> Self {
         Self {
             dir,
             epoch_id,
             buf: BytesMut::new(),
             offset: 0,
+            rate_limiter,
         }
     }
 
@@ -40,7 +47,7 @@ impl WalIterator {
     {
         self.offset = 0;
         let filename = wal_file_name(self.dir.as_path(), self.epoch_id);
-        let fd = fs::File::open(filename)?;
+        let fd = file_system::File::open_with_limiter(filename, self.rate_limiter.clone())?;
         let mut buf_reader = BufReader::new(fd);
         let header = match self.check_wal_header(&mut buf_reader) {
             Ok(header) => header,
@@ -72,7 +79,10 @@ impl WalIterator {
         }
     }
 
-    pub(crate) fn check_wal_header(&mut self, reader: &mut BufReader<File>) -> Result<WalHeader> {
+    pub(crate) fn check_wal_header(
+        &mut self,
+        reader: &mut BufReader<file_system::File>,
+    ) -> Result<WalHeader> {
         let mut buf = [0u8; WalHeader::len()];
         reader.read_exact(&mut buf)?;
         self.offset += WalHeader::len() as u64;
@@ -98,7 +108,7 @@ impl WalIterator {
 
     pub(crate) fn read_batch(
         &mut self,
-        reader: &mut BufReader<File>,
+        reader: &mut BufReader<file_system::File>,
         header: &WalHeader,
     ) -> Result<Bytes> {
         let mut header_buf = [0u8; BATCH_HEADER_SIZE];

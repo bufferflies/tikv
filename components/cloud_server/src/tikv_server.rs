@@ -891,9 +891,7 @@ impl TikvServer {
     // This method is also used by cse-ctl for cluster restore.
     pub fn init_raft_engine(conf: &TikvConfig) -> rfengine::Result<RfEngine> {
         let raft_db_path = Path::new(&conf.raft_store.raftdb_path);
-        let wal_size = conf.rfengine.target_file_size.0 as usize;
-        let compression_threshold = conf.rfengine.batch_compression_threshold.0 as usize;
-        RfEngine::open(raft_db_path, wal_size, compression_threshold)
+        RfEngine::open(raft_db_path, &conf.rfengine)
     }
 
     // This method is also used by cse-ctl for cluster restore.

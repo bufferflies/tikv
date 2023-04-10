@@ -25,6 +25,7 @@ use rfenginepb::{ClusterBackupMeta, StoreBackupMeta, StoreRaftLogBackupMeta};
 use tikv_util::{info, mpsc::Sender, time::Instant, warn};
 
 use crate::{
+    config::Config,
     log_batch::{RaftLogBlock, RaftLogs},
     manifest::{manifest_path, persist_change_set, Manifest},
     metrics::*,
@@ -96,8 +97,8 @@ impl Deref for RfEngine {
 }
 
 impl RfEngine {
-    pub fn open(dir: &Path, wal_size: usize, compression_threshold: usize) -> Result<Self> {
-        let core = RfEngineCore::open(dir, wal_size, compression_threshold)?;
+    pub fn open(dir: &Path, cfg: &Config) -> Result<Self> {
+        let core = RfEngineCore::open(dir, cfg)?;
         Ok(Self {
             core: Arc::new(core),
         })
@@ -126,7 +127,9 @@ pub(crate) struct WorkerHandle {
 }
 
 impl RfEngineCore {
-    fn open(dir: &Path, wal_size: usize, compression_threshold: usize) -> Result<Self> {
+    fn open(dir: &Path, cfg: &Config) -> Result<Self> {
+        let wal_size = cfg.target_file_size.0 as usize;
+        let compression_threshold = cfg.batch_compression_threshold.0 as usize;
         maybe_create_wal_files(dir)?;
         let engine_id = Arc::new(AtomicU64::new(0));
         let manifest = Manifest::open(dir, engine_id.clone())?;
@@ -152,7 +155,13 @@ impl RfEngineCore {
         };
         en.load(&manifest)?;
         {
-            let mut worker = Worker::new(dir.to_owned(), rx, manifest, compacted_epoch);
+            let mut worker = Worker::new(
+                dir.to_owned(),
+                rx,
+                manifest,
+                compacted_epoch,
+                cfg.worker_rate_limit.0 as usize,
+            );
             let join_handle = thread::spawn(move || worker.run());
             en.worker_handle.lock().unwrap().handle = Some(join_handle);
         }
@@ -841,9 +850,7 @@ impl Display for PeerTag {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::HashMap, fs, fs::OpenOptions, io::BufReader, os::unix::prelude::FileExt,
-    };
+    use std::{collections::HashMap, fs::OpenOptions, io::BufReader, os::unix::prelude::FileExt};
 
     use bytes::{BufMut, BytesMut};
     use engine_traits::Error as TraitError;
@@ -858,9 +865,8 @@ mod tests {
     fn test_rfengine() {
         init_logger();
         let tmp_dir = tempfile::tempdir().unwrap();
-        let wal_size = 128 * 1024_usize;
-        let compression_threshold = 8 * 1024_usize;
-        let engine = RfEngine::open(tmp_dir.path(), wal_size, compression_threshold).unwrap();
+        let cfg = Config::new(128 * 1024_usize);
+        let engine = RfEngine::open(tmp_dir.path(), &cfg).unwrap();
         let mut wb = WriteBatch::new();
         for peer_id in 1..=10_u64 {
             let (key, val) = make_state_kv(2, 1);
@@ -912,7 +918,7 @@ mod tests {
         engine.stop_worker();
 
         for _ in 0..2 {
-            let engine = RfEngine::open(tmp_dir.path(), wal_size, compression_threshold).unwrap();
+            let engine = RfEngine::open(tmp_dir.path(), &cfg).unwrap();
             let mut wb = WriteBatch::new();
             for &(peer_id, region_id, truncated_idx) in truncated_regions.iter() {
                 wb.truncate_raft_log(peer_id, region_id, truncated_idx);
@@ -1071,7 +1077,8 @@ mod tests {
         const STATE_PREFIX: u8 = b'p';
 
         let dir = tempfile::tempdir().unwrap();
-        let engine = RfEngine::open(dir.path(), 128 * 1024, 8 * 1024).unwrap();
+        let cfg = Config::new(128 * 1024);
+        let engine = RfEngine::open(dir.path(), &cfg).unwrap();
 
         // Write 10 logs and states to 2 region.
         let mut data_map = HashMap::new();
@@ -1243,9 +1250,9 @@ mod tests {
     fn test_rfengine_wal() {
         let tmp_dir = tempfile::tempdir().unwrap();
         let wal_size = 128 * 1024_usize;
-        let compression_threshold = 8 * 1024_usize;
         let dir_path = tmp_dir.path();
-        let engine = RfEngine::open(dir_path, wal_size, compression_threshold).unwrap();
+        let cfg = Config::new(wal_size);
+        let engine = RfEngine::open(dir_path, &cfg).unwrap();
         let mut wb = WriteBatch::new();
         for peer_id in 1..=10_u64 {
             let (key, val) = make_state_kv(2, 1);
@@ -1266,7 +1273,7 @@ mod tests {
         assert_eq!(engine.peers.len(), 10);
         engine.stop_worker();
         for _ in 0..2 {
-            let engine = RfEngine::open(dir_path, wal_size, compression_threshold).unwrap();
+            let engine = RfEngine::open(dir_path, &cfg).unwrap();
             assert_eq!(engine.peers.len(), 10);
             engine.stop_worker();
         }
@@ -1279,8 +1286,8 @@ mod tests {
         };
         for ep in compacted_epoch + 1..=current_epoch {
             let filename = wal_file_name(dir_path, ep);
-            let mut it = WalIterator::new(dir_path.to_owned(), ep);
-            let fd = fs::File::open(filename.clone()).unwrap();
+            let mut it = WalIterator::new(dir_path.to_owned(), ep, None);
+            let fd = file_system::File::open(filename.clone()).unwrap();
             let mut buf_reader = BufReader::new(fd);
             let wal_header = it.check_wal_header(&mut buf_reader).unwrap();
             let mut offsets = vec![it.offset];
@@ -1309,7 +1316,7 @@ mod tests {
                         buf[*pos] += 1;
                         fd.write_all_at(buf.as_ref(), *offset).unwrap();
                         fd.sync_data().unwrap();
-                        assert!(RfEngine::open(dir_path, wal_size, compression_threshold).is_err());
+                        assert!(RfEngine::open(dir_path, &cfg).is_err());
                         buf[*pos] -= 1;
                         fd.write_all_at(buf.as_ref(), *offset).unwrap();
                         fd.sync_data().unwrap();
@@ -1324,8 +1331,8 @@ mod tests {
         init_logger();
         let tmp_dir = tempfile::tempdir().unwrap();
         let wal_size = 4096 * 10;
-        let compression_threshold = 8 * 1024_usize;
-        let engine = RfEngine::open(tmp_dir.path(), wal_size, compression_threshold).unwrap();
+        let cfg = Config::new(wal_size);
+        let engine = RfEngine::open(tmp_dir.path(), &cfg).unwrap();
         for i in 1..=50 {
             let mut wb = WriteBatch::new();
             wb.append_raft_log(1, 2, &make_log_data(i, 128));

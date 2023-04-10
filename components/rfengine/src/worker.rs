@@ -5,7 +5,6 @@ use std::{
     collections::HashMap,
     fmt::{Display, Formatter},
     fs,
-    fs::File,
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     sync::{
@@ -18,7 +17,7 @@ use std::{
 use api_version::{api_v2, ApiV2};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use engine_traits::ObjectStorage;
-use file_system::{DirectWriter, IoRateLimitMode, IoType};
+use file_system::{DirectWriter, IoRateLimitMode, IoRateLimiter, IoType};
 use kvproto::raft_serverpb::RegionLocalState;
 use protobuf::Message;
 use rfenginepb::{
@@ -38,6 +37,7 @@ pub(crate) struct Worker {
     task_rx: Receiver<Task>,
     buf: Vec<u8>,
     compacted_epoch: Arc<AtomicU32>,
+    rate_limiter: Arc<IoRateLimiter>,
 }
 
 impl Worker {
@@ -46,14 +46,11 @@ impl Worker {
         task_rx: Receiver<Task>,
         manifest: Manifest,
         compacted_epoch: Arc<AtomicU32>,
+        rate_limit: usize,
     ) -> Self {
-        let rate_limiter = Arc::new(file_system::IoRateLimiter::new(
-            IoRateLimitMode::WriteOnly,
-            true,
-            false,
-        ));
-        rate_limiter.set_io_rate_limit(128 * 1024 * 1024);
-        let writer = DirectWriter::new(rate_limiter, IoType::Compaction);
+        let rate_limiter = Arc::new(IoRateLimiter::new(IoRateLimitMode::AllIo, true, false));
+        rate_limiter.set_io_rate_limit(rate_limit);
+        let writer = DirectWriter::new(rate_limiter.clone(), IoType::Compaction);
         Self {
             dir,
             manifest,
@@ -61,6 +58,7 @@ impl Worker {
             task_rx,
             buf: vec![],
             compacted_epoch,
+            rate_limiter,
         }
     }
 
@@ -92,7 +90,7 @@ impl Worker {
     fn compact(&mut self, epoch_id: u32) -> Result<()> {
         let timer = Instant::now_coarse();
         let mut batch = WriteBatch::default();
-        let mut it = WalIterator::new(self.dir.clone(), epoch_id);
+        let mut it = WalIterator::new(self.dir.clone(), epoch_id, Some(self.rate_limiter.clone()));
         it.iterate(|region_batch| {
             batch.merge_peer(region_batch);
         })?;
@@ -120,12 +118,13 @@ impl Worker {
         }
         let _ = file_system::sync_dir(self.dir.as_path());
         let engine_id = self.manifest.get_engine_id();
+        let duration = timer.saturating_elapsed();
         info!(
-            "{}: epoch {} compact wal file generated {} files",
-            engine_id, epoch_id, generated_files,
+            "{}: epoch {} compact wal file generated {} files takes {:?}",
+            engine_id, epoch_id, generated_files, duration,
         );
         self.manifest.handle_compaction(change_set)?;
-        ENGINE_COMPACT_WAL_DURATION_HISTOGRAM.observe(timer.saturating_elapsed_secs());
+        ENGINE_COMPACT_WAL_DURATION_HISTOGRAM.observe(duration.as_secs_f64());
         self.compacted_epoch.store(epoch_id, Ordering::SeqCst);
         Ok(())
     }
@@ -257,7 +256,12 @@ impl Worker {
             for (peer_id, file) in files {
                 let file_name =
                     raft_log_file_name(&self.dir, peer_id, file.first_index, file.last_index);
-                let data = fs::read(file_name)?;
+                let mut fd = file_system::File::open_with_limiter(
+                    file_name,
+                    Some(self.rate_limiter.clone()),
+                )?;
+                let mut data = vec![];
+                fd.read_to_end(&mut data)?;
                 let mut backup_file = RaftLogBackupFile::default();
                 backup_file.peer_id = peer_id;
                 backup_file.start_off = object.len() as u64;
@@ -283,7 +287,8 @@ impl Worker {
         end_off: u64,
     ) -> Result<Vec<(String, Bytes)>> {
         let wal_file_name = wal_file_name(&self.dir, wal_epoch);
-        let mut wal_file = File::open(wal_file_name)?;
+        let mut wal_file =
+            file_system::File::open_with_limiter(wal_file_name, Some(self.rate_limiter.clone()))?;
         let mut chunks = vec![];
         let mut total_size = 0;
         let backup_size = end_off - start_off;
@@ -520,7 +525,7 @@ mod tests {
         raft_log_file_name, region_state_key, store_raft_log_file_key,
         tests::{get_txn_endkey_prefix, get_txn_startkey_prefix},
         write_batch::PeerBatch,
-        RfEngine, WalWriter, Worker,
+        RfEngine, RfEngineConfig, WalWriter, Worker,
     };
 
     fn generate_random_str() -> Vec<u8> {
@@ -563,6 +568,7 @@ mod tests {
             rx,
             manifest,
             AtomicU32::new(0).into(),
+            125 * 1024 * 1024,
         );
         let epoch = 990;
         let mut cs = ChangeSet::new();
@@ -670,6 +676,7 @@ mod tests {
             rx,
             manifest,
             AtomicU32::new(0).into(),
+            125 * 1024 * 1024,
         );
         let mut cs = ChangeSet::new();
         let mut peer_data_map = HashMap::new();
@@ -740,6 +747,7 @@ mod tests {
 
         // 3. open RfEngine with restored dir.
         let wal_size = 4 * 1024 * 1024;
+        let cfg = RfEngineConfig::new(wal_size);
         // Hack wal file to let RfEngine::open pass.
         let mut wal_writer = WalWriter::new(
             tmp_path2,
@@ -749,7 +757,7 @@ mod tests {
         );
         wal_writer.open_file(cs.epoch_id + 1, 0).unwrap();
         // checksum inner should succeeds.
-        let engine = RfEngine::open(tmp_path2, wal_size, 1024).unwrap();
+        let engine = RfEngine::open(tmp_path2, &cfg).unwrap();
         // 4. Check peer data, restored data should be same with previous one.
         for peer_id in peers_range {
             let cache_peer_data = peer_data_map.get(&peer_id).unwrap();

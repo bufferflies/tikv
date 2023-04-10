@@ -64,7 +64,7 @@ impl RfEngineCore {
 
     pub(crate) fn load_wal_file(&mut self, epoch_id: u32) -> Result<u64> {
         info!("load wal {}", epoch_id);
-        let mut it = WalIterator::new(self.dir.clone(), epoch_id);
+        let mut it = WalIterator::new(self.dir.clone(), epoch_id, None);
         it.iterate(|new_data| {
             let peer_ref = self.get_or_init_peer_data(new_data.peer_id, new_data.meta.region_id);
             let mut peer_data = peer_ref.write().unwrap();
