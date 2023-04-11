@@ -286,7 +286,7 @@ pub async fn get_all_incremental_backups(
     start_time: Option<&NaiveTime>,
     max_count: usize,
 ) -> dfs::Result<(Vec<String>, bool)> {
-    let mut files = Vec::with_capacity(max_count);
+    let mut files = Vec::with_capacity(std::cmp::min(max_count, 1000));
     let mut start_key = format!(
         "{}/{}",
         start_date.format(INCREMENTAL_BACKUP_FOLDER_FORMAT),
