@@ -432,6 +432,7 @@ impl EngineCore {
         data: &ShardData,
         cs: &ChangeSet,
         tc: &pb::TableChange,
+        del_files: &mut HashMap<u64, bool>,
     ) -> (Vec<L0Table>, [ShardCf; 3]) {
         let mut new_l0s = data.l0_tbls.clone();
         let mut new_cfs = data.cfs.clone();
@@ -454,7 +455,14 @@ impl EngineCore {
 
         for ((cf, level), (deletes, creates)) in grouped {
             if level == 0 {
-                new_l0s.retain(|l0| !deletes.contains(&l0.id()));
+                new_l0s.retain(|l0| {
+                    let is_deleted = deletes.contains(&l0.id());
+                    if is_deleted {
+                        del_files
+                            .insert(l0.id(), data.cover_full_table(l0.smallest(), l0.biggest()));
+                    }
+                    !is_deleted
+                });
                 new_l0s.extend(
                     creates
                         .clone()
@@ -465,7 +473,13 @@ impl EngineCore {
             } else {
                 let old_level = new_cfs[cf].get_level(level);
                 let mut new_level_tables = old_level.tables.as_ref().clone();
-                new_level_tables.retain(|t| !deletes.contains(&t.id()));
+                new_level_tables.retain(|t| {
+                    let is_deleted = deletes.contains(&t.id());
+                    if is_deleted {
+                        del_files.insert(t.id(), data.cover_full_table(t.smallest(), t.biggest()));
+                    }
+                    !is_deleted
+                });
                 new_level_tables.extend(
                     creates
                         .into_iter()
@@ -484,7 +498,8 @@ impl EngineCore {
         assert!(cs.has_destroy_range());
         let data = shard.get_data();
         let tc = cs.get_destroy_range();
-        let (new_l0s, new_cfs) = self.get_sstables_from_table_change(&data, cs, tc);
+        let mut del_files = HashMap::new();
+        let (new_l0s, new_cfs) = self.get_sstables_from_table_change(&data, cs, tc, &mut del_files);
 
         assert_eq!(cs.get_property_key(), DEL_PREFIXES_KEY);
         let done = DeletePrefixes::unmarshal(cs.get_property_value());
@@ -502,11 +517,6 @@ impl EngineCore {
         let new_del_prefixes = new_data.del_prefixes.marshal();
         shard.set_data(new_data);
         shard.set_property(DEL_PREFIXES_KEY, &new_del_prefixes);
-        let del_files = tc
-            .get_table_deletes()
-            .iter()
-            .map(|deleted| (deleted.get_id(), true))
-            .collect();
         self.remove_dfs_files(shard, del_files);
     }
 
@@ -515,7 +525,8 @@ impl EngineCore {
         assert!(cs.has_truncate_ts());
         let data = shard.get_data();
         let tc = cs.get_truncate_ts();
-        let (new_l0s, new_cfs) = self.get_sstables_from_table_change(&data, cs, tc);
+        let mut del_files = HashMap::new();
+        let (new_l0s, new_cfs) = self.get_sstables_from_table_change(&data, cs, tc, &mut del_files);
         assert_eq!(cs.get_property_key(), TRUNCATE_TS_KEY);
         let mut new_truncate_ts = data.truncate_ts;
         let truncated_ts = TruncateTs::unmarshal(cs.get_property_value());
@@ -538,11 +549,6 @@ impl EngineCore {
         if new_truncate_ts.is_none() {
             shard.set_property(TRUNCATE_TS_KEY, b"");
         }
-        let del_files = tc
-            .get_table_deletes()
-            .iter()
-            .map(|deleted| (deleted.get_id(), true))
-            .collect();
         self.remove_dfs_files(shard, del_files);
     }
 
@@ -551,7 +557,8 @@ impl EngineCore {
         assert!(cs.has_trim_over_bound());
         let data = shard.get_data();
         let tc = cs.get_trim_over_bound();
-        let (new_l0s, new_cfs) = self.get_sstables_from_table_change(&data, cs, tc);
+        let mut del_files = HashMap::new();
+        let (new_l0s, new_cfs) = self.get_sstables_from_table_change(&data, cs, tc, &mut del_files);
         let new_data = ShardData::new(
             shard.start.clone(),
             shard.end.clone(),
@@ -565,11 +572,6 @@ impl EngineCore {
         );
         shard.set_data(new_data);
         shard.set_property(TRIM_OVER_BOUND, TRIM_OVER_BOUND_DISABLE);
-        let del_files = tc
-            .get_table_deletes()
-            .iter()
-            .map(|deleted| (deleted.get_id(), true))
-            .collect();
         self.remove_dfs_files(shard, del_files);
     }
 
