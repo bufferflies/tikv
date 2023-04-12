@@ -383,6 +383,9 @@ pub(crate) enum FlushMsg {
     /// inactive. Then all the previous tasks will be discarded.
     /// This simplifies the logic, avoid race condition.
     Clear(u64),
+
+    /// Stop background flush thread.
+    Stop,
 }
 
 // FlushManager manages the flush tasks, make them concurrent and ensure the
@@ -427,6 +430,13 @@ impl FlushWorker {
                 }
                 FlushMsg::Clear(shard_id) => {
                     self.shards.remove(&shard_id);
+                }
+                FlushMsg::Stop => {
+                    info!(
+                        "Engine {} flush worker receive stop msg and stop now",
+                        self.engine.get_engine_id()
+                    );
+                    break;
                 }
             }
         }

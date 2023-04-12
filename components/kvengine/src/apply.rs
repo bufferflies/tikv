@@ -222,7 +222,7 @@ impl EngineCore {
                 old_data.cfs.clone(),
             );
             shard.set_data(new_data);
-            self.free_tx.send(last).unwrap();
+            self.free_tx.send(FreeMemMsg::FreeMem(last)).unwrap();
         }
     }
 
@@ -237,7 +237,7 @@ impl EngineCore {
             let flushed =
                 version > 0 && version <= initial_flush.base_version + initial_flush.data_sequence;
             if flushed {
-                self.free_tx.send(x.clone()).unwrap();
+                self.free_tx.send(FreeMemMsg::FreeMem(x.clone())).unwrap();
             }
             !flushed
         });
@@ -756,7 +756,7 @@ impl EngineCore {
 
         let mut old_mem_tbls = old_data.mem_tbls.clone();
         for mem_tbl in old_mem_tbls.drain(..) {
-            self.free_tx.send(mem_tbl).unwrap();
+            self.free_tx.send(FreeMemMsg::FreeMem(mem_tbl)).unwrap();
         }
 
         self.refresh_shard_states(&new_shard);

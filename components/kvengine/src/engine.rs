@@ -208,6 +208,19 @@ impl Engine {
         }
         Ok(())
     }
+
+    /// Should close engine explicitly if engine is not useful anymore but
+    /// process is still running.
+    pub fn close(&self) {
+        info!(
+            "Close kvengine {} and stop the background worker, core ref count {}",
+            self.get_engine_id(),
+            Arc::strong_count(&self.core)
+        );
+        self.compact_tx.send(CompactMsg::Stop).unwrap();
+        self.flush_tx.send(FlushMsg::Stop).unwrap();
+        self.free_tx.send(FreeMemMsg::Stop).unwrap();
+    }
 }
 
 pub struct EngineCore {
@@ -223,9 +236,15 @@ pub struct EngineCore {
     pub(crate) managed_safe_ts: AtomicU64,
     pub(crate) tmp_file_id: AtomicU64,
     pub(crate) rate_limiter: Arc<IoRateLimiter>,
-    pub(crate) free_tx: mpsc::Sender<CfTable>,
+    pub(crate) free_tx: mpsc::Sender<FreeMemMsg>,
     pub(crate) loaded: AtomicBool,
     pub(crate) file_locks: Vec<Mutex<()>>,
+}
+
+impl Drop for EngineCore {
+    fn drop(&mut self) {
+        info!("Drop kvengine {:?} core ", self.get_engine_id());
+    }
 }
 
 impl EngineCore {
@@ -307,7 +326,7 @@ impl EngineCore {
                 if shard.ver > old.ver || new_total_seq > old_total_seq {
                     entry.replace_entry(Arc::new(shard));
                     for mem_tbl in old_mem_tbls.drain(..) {
-                        self.free_tx.send(mem_tbl).unwrap();
+                        self.free_tx.send(FreeMemMsg::FreeMem(mem_tbl)).unwrap();
                     }
                 } else {
                     info!(
@@ -681,16 +700,30 @@ pub fn new_blob_filename(file_id: u64) -> PathBuf {
     PathBuf::from(format!("{:016x}.sst", file_id))
 }
 
-fn free_mem(free_rx: mpsc::Receiver<CfTable>) {
+pub(crate) enum FreeMemMsg {
+    /// Free CfTable
+    FreeMem(CfTable),
+    /// Stop the free mem background worker
+    Stop,
+}
+
+fn free_mem(free_rx: mpsc::Receiver<FreeMemMsg>) {
     loop {
-        let mut tables = vec![];
-        let tbl = free_rx.recv().unwrap();
-        tables.push(tbl);
         let cnt = free_rx.len();
+        let mut tables = Vec::with_capacity(cnt);
         for _ in 0..cnt {
-            tables.push(free_rx.recv().unwrap());
+            match free_rx.recv().unwrap() {
+                FreeMemMsg::FreeMem(tbl) => {
+                    tables.push(tbl);
+                }
+                FreeMemMsg::Stop => {
+                    drop(tables);
+                    info!("Engine free mem worker receive stop msg and stop now");
+                    return;
+                }
+            }
         }
-        thread::sleep(Duration::from_secs(5));
         drop(tables);
+        thread::sleep(Duration::from_secs(5));
     }
 }

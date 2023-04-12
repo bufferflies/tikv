@@ -293,6 +293,8 @@ struct BackupCluster {
     shards_need_truncate: HashMap<u64, Vec<u64>>,
 
     meta_applier: Option<Arc<MetaApplier>>,
+
+    meta_sender: Option<mpsc::Sender<StoreMsg>>,
 }
 
 impl Drop for BackupCluster {
@@ -326,6 +328,7 @@ impl BackupCluster {
             shards_need_flush: Default::default(),
             shards_need_truncate: Default::default(),
             meta_applier: None,
+            meta_sender: None,
         };
 
         let mut store_configs = HashMap::with_capacity(cluster_meta.stores.len());
@@ -416,7 +419,7 @@ impl BackupCluster {
                 .set_io_rate_limit(conf.storage.io_rate_limit.max_bytes_per_sec.0 as usize);
 
             let mut meta_iter = MetaIterator::new(store_id, shards_need_load, raw_metas);
-            let (kv_engine, _, receiver) = TikvServer::init_kv_engine(
+            let (kv_engine, sender, receiver) = TikvServer::init_kv_engine(
                 self.pd_client.clone(),
                 conf,
                 self.dfs.clone(),
@@ -435,6 +438,7 @@ impl BackupCluster {
                 receiver,
             ));
             self.meta_applier = Some(meta_applier.clone());
+            self.meta_sender = Some(sender);
             thread::spawn(move || {
                 meta_applier.run();
             });
@@ -451,7 +455,12 @@ impl BackupCluster {
             drop(rf);
         }
         let kv_engine = self.kv_engine.take().unwrap();
+        kv_engine.close();
         drop(kv_engine);
+        // Receiver cannot get err msg even close_sender, send Stop msg instead.
+        if let Some(sender) = &self.meta_sender {
+            sender.send(StoreMsg::Stop).unwrap();
+        }
     }
 
     fn generate_store_config(&self, store_id: u64) -> TikvConfig {
@@ -976,6 +985,15 @@ struct MetaApplier {
     store_rx: mpsc::Receiver<StoreMsg>,
 }
 
+impl Drop for MetaApplier {
+    fn drop(&mut self) {
+        info!(
+            "Meta applier is dropped, engine {}",
+            self.engine.get_engine_id()
+        );
+    }
+}
+
 impl MetaApplier {
     fn new(
         keyspace_id: u32,
@@ -1060,6 +1078,14 @@ impl MetaApplier {
                             )
                         }
                     }
+                }
+                StoreMsg::Stop => {
+                    info!(
+                        "Engine {} restore keyspace {} meta applier receive stop msg and stop now",
+                        self.engine.get_engine_id(),
+                        self.keyspace_id
+                    );
+                    break 'outer;
                 }
                 _ => {
                     error!("unexpected msg");

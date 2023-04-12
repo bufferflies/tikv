@@ -2363,6 +2363,9 @@ pub(crate) enum CompactMsg {
     /// inactive. Then all the previous tasks will be discarded.
     /// This simplifies the logic, avoid race condition.
     Clear(IdVer),
+
+    /// Stop background compact thread.
+    Stop,
 }
 
 pub(crate) struct CompactRunner {
@@ -2411,6 +2414,14 @@ impl CompactRunner {
                 CompactMsg::Applied(id_ver) => self.compaction_applied(id_ver),
 
                 CompactMsg::Clear(id_ver) => self.clear(id_ver),
+
+                CompactMsg::Stop => {
+                    info!(
+                        "Engine {} compaction worker receive stop msg and stop now",
+                        self.engine.get_engine_id()
+                    );
+                    break;
+                }
             }
         }
     }
