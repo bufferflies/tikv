@@ -360,7 +360,7 @@ pub(crate) async fn handle_native_br_whitelist(
                 // Get all whitelist, for debug use only.
                 Ok(make_json_response(
                     StatusCode::OK,
-                    &manager.config.whitelist,
+                    &manager.config.read().unwrap().whitelist,
                 ))
             } else {
                 let resp = WhitelistResponse {
@@ -607,7 +607,7 @@ pub struct NativeBrConfig {
 
 pub(crate) struct NativeBrManger {
     pub context: Arc<BrContext>,
-    pub config: NativeBrConfig,
+    pub config: RwLock<NativeBrConfig>,
 }
 
 impl NativeBrManger {
@@ -631,7 +631,18 @@ impl NativeBrManger {
                 restore_tasks: Default::default(),
                 keyspace_tasks: Default::default(),
             }),
-            config,
+            config: RwLock::new(config),
+        }
+    }
+
+    pub(crate) fn update_config(&self, config: NativeBrConfig) {
+        let mut ori_config = self.config.write().unwrap();
+        if *ori_config != config {
+            info!(
+                "Update native br config from {:?} to {:?}",
+                *ori_config, config
+            );
+            *ori_config = config;
         }
     }
 
@@ -726,7 +737,7 @@ impl NativeBrManger {
     }
 
     fn is_keyspace_allowed(&self, keyspace: &String) -> bool {
-        self.config.whitelist.is_allowed(keyspace)
+        self.config.read().unwrap().whitelist.is_allowed(keyspace)
     }
 }
 

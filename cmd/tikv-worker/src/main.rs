@@ -10,6 +10,7 @@ use std::{
     path::{Path, PathBuf},
     str::FromStr,
     sync::Arc,
+    time::Duration,
 };
 
 use clap::{App, Arg, ArgMatches};
@@ -50,6 +51,7 @@ use crate::{
 
 const ZSTD_COMPRESSION_LEVEL_FOR_REMOTE: &str = "5";
 const DEFAULT_LOG_LEVEL: Level = Level::Info;
+const UPDATE_NATIVE_BR_CONFIG_INTERVAL: Duration = Duration::from_secs(60); //1min
 
 fn main() {
     init_logger(io::stdout(), DEFAULT_LOG_LEVEL);
@@ -146,9 +148,12 @@ fn main() {
         )
         .get_matches();
 
+    let mut config_file_path = None;
     let mut config: Config = match matches.value_of_os("config") {
         Some(config_path) => {
-            let result = std::fs::read(PathBuf::from(config_path));
+            let path = PathBuf::from(config_path);
+            config_file_path = Some(path.clone());
+            let result = std::fs::read(path);
             if result.is_err() {
                 error!("failed to read config file {:?}", result.unwrap_err());
                 return;
@@ -231,6 +236,7 @@ fn main() {
         Some(config.data_dir),
         config.native_br.clone(),
     ));
+    update_native_br_config_periodically(br_manager.clone(), config_file_path);
     let server_builder = hyper::Server::builder(incoming);
     let dfs_clone = dfs.clone();
     let server = server_builder.serve(make_service_fn(move |_| {
@@ -305,6 +311,25 @@ fn init_logger<W: 'static + io::Write + Send>(writer: W, level: Level) {
     let drain = std::sync::Mutex::new(drain).filter_level(level).fuse();
     let logger = slog::Logger::root(drain, slog::o!());
     slog_global::set_global(logger);
+}
+
+fn update_native_br_config_periodically(br_manager: Arc<NativeBrManger>, path: Option<PathBuf>) {
+    if path.is_none() {
+        return;
+    }
+    let path = path.unwrap();
+    std::thread::spawn(move || {
+        loop {
+            match std::fs::read(&path) {
+                Ok(data) => match toml::from_slice::<Config>(&data) {
+                    Ok(config) => br_manager.update_config(config.native_br),
+                    Err(e) => error!("failed to parse config file {:?}", e),
+                },
+                Err(e) => error!("failed to read config file {:?}", e),
+            }
+            std::thread::sleep(UPDATE_NATIVE_BR_CONFIG_INTERVAL);
+        }
+    });
 }
 
 async fn handle_get_metrics(req: Request<Body>) -> hyper::Result<Response<Body>> {
