@@ -70,7 +70,7 @@ pub enum ConsistencyCheckMethod {
 }
 
 /// Default region split size.
-pub const SPLIT_SIZE_MB: u64 = 256;
+pub const SPLIT_SIZE_MB: u64 = 1024;
 /// Default batch split limit.
 pub const BATCH_SPLIT_LIMIT: u64 = 10;
 
@@ -101,7 +101,7 @@ impl Default for Config {
 
 impl Config {
     pub fn region_max_keys(&self) -> u64 {
-        let default_split_keys = self.region_split_size.as_mb_f64() * 10000.0;
+        let default_split_keys = self.region_split_size.as_mb_f64() * 100000.0;
         self.region_max_keys
             .unwrap_or(default_split_keys as u64 / 2 * 3)
     }
@@ -114,12 +114,12 @@ impl Config {
     pub fn region_split_keys(&self) -> u64 {
         // Assume the average size of KVs is 100B.
         self.region_split_keys
-            .unwrap_or((self.region_split_size.as_mb_f64() * 10000.0) as u64)
+            .unwrap_or((self.region_split_size.as_mb_f64() * 100000.0) as u64)
     }
 
     pub fn validate(&mut self) -> Result<()> {
         if self.region_split_keys.is_none() {
-            self.region_split_keys = Some((self.region_split_size.as_mb_f64() * 10000.0) as u64);
+            self.region_split_keys = Some((self.region_split_size.as_mb_f64() * 100000.0) as u64);
         }
 
         match self.region_max_size {
