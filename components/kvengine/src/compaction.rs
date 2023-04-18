@@ -1539,6 +1539,7 @@ pub async fn handle_remote_compaction(
 
     let (tx, rx) = tokio::sync::oneshot::channel();
     std::thread::spawn(move || {
+        tikv_util::set_current_region(comp_req.shard_id);
         let result = local_compact(dfs, &comp_req, compression_lvl);
         tx.send(result).unwrap();
     });
@@ -2441,6 +2442,7 @@ impl CompactRunner {
         self.running.insert(id_ver, task_id);
         let engine = self.engine.clone();
         std::thread::spawn(move || {
+            tikv_util::set_current_region(id_ver.id);
             let result = Box::new(engine.compact(id_ver));
             engine
                 .compact_tx

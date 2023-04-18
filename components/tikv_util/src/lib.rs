@@ -15,7 +15,7 @@ use std::{
         vec_deque::{Iter, VecDeque},
     },
     convert::AsRef,
-    env,
+    env, fs,
     fs::File,
     ops::{Deref, DerefMut},
     path::{Path, PathBuf},
@@ -107,6 +107,37 @@ fn file_exists<P: AsRef<Path>>(file: P) -> bool {
 pub fn panic_mark_file_exists<P: AsRef<Path>>(data_dir: P) -> bool {
     let path = panic_mark_file_path(data_dir);
     file_exists(path)
+}
+
+thread_local! {
+    static CURRENT_REGION: std::cell::Cell<u64> = std::cell::Cell::new(0);
+}
+
+pub fn set_current_region(region_id: u64) {
+    CURRENT_REGION.with(|c| c.set(region_id))
+}
+
+pub fn get_current_region() -> u64 {
+    CURRENT_REGION.with(|c| c.get())
+}
+
+pub const PANIC_REGION_FILE_PREFIX: &str = "panic_region_";
+
+pub fn panic_region_file_path<P: AsRef<Path>>(data_dir: P, region_id: u64) -> PathBuf {
+    let file_name = format!("{}{}", PANIC_REGION_FILE_PREFIX, region_id);
+    data_dir.as_ref().join(file_name)
+}
+
+pub fn create_panic_region_file<P: AsRef<Path>>(data_dir: P, region_id: u64) {
+    let file = panic_region_file_path(data_dir, region_id);
+    let count = get_panic_region_count(&file) + 1;
+    fs::write(file, count.to_string()).unwrap();
+}
+
+pub fn get_panic_region_count<P: AsRef<Path>>(file_path: P) -> u64 {
+    let data = fs::read(file_path).unwrap_or_default();
+    let str = String::from_utf8_lossy(&data);
+    str.parse::<u64>().unwrap_or_default()
 }
 
 pub const NO_LIMIT: u64 = u64::MAX;
@@ -489,7 +520,7 @@ pub fn set_panic_hook(panic_abort: bool, data_dir: &str) {
                 None => "Box<Any>",
             },
         };
-
+        let current_region = get_current_region();
         let thread = thread::current();
         let name = thread.name().unwrap_or("<unnamed>");
         let loc = info
@@ -498,6 +529,7 @@ pub fn set_panic_hook(panic_abort: bool, data_dir: &str) {
         let bt = backtrace::Backtrace::new();
         crit!("{}", msg;
             "thread_name" => name,
+            "current_region" => current_region,
             "location" => loc.unwrap_or_else(|| "<unknown>".to_owned()),
             "backtrace" => format_args!("{:?}", bt),
         );
@@ -523,6 +555,9 @@ pub fn set_panic_hook(panic_abort: bool, data_dir: &str) {
         // If PANIC_MARK is true, create panic mark file.
         if panic_mark_is_on() {
             create_panic_mark_file(data_dir.clone());
+        }
+        if current_region > 0 {
+            create_panic_region_file(data_dir.as_str(), current_region);
         }
 
         if panic_abort {

@@ -256,6 +256,7 @@ impl RaftWorker {
         if peer_fsm.stopped {
             return;
         }
+        tikv_util::set_current_region(peer_fsm.region_id());
         PeerMsgHandler::new(&mut peer_fsm, &mut self.ctx).handle_msgs(&mut inbox.msgs);
         peer_fsm.peer.handle_raft_ready(&mut self.ctx, None);
         self.maybe_send_apply(&inbox.peer.applier, &peer_fsm);
@@ -323,6 +324,7 @@ impl ApplyWorker {
                 timer.saturating_duration_since(batch.send_time),
             ));
             let mut applier = batch.applier.lock().unwrap();
+            tikv_util::set_current_region(applier.region_id());
             for msg in batch.msgs.drain(..) {
                 applier.handle_msg(&mut self.ctx, msg);
             }

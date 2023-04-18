@@ -998,6 +998,7 @@ impl<'a> PeerMsgHandler<'a> {
         let kv = self.ctx.global.engines.kv.clone();
         let shard_meta = self.peer.get_store().shard_meta.as_ref().unwrap().clone();
         std::thread::spawn(move || {
+            tikv_util::set_current_region(shard_meta.id);
             match convert_sst(kv, importer, &msg, shard_meta) {
                 Ok(cs) => {
                     // Make ingest command.

@@ -158,6 +158,7 @@ impl Engine {
                 let id_ver = IdVer::new(parent.id, parent.ver);
                 if !parents.contains_key(&id_ver) {
                     info!("load parent of {}", meta.tag());
+                    tikv_util::set_current_region(id_ver.id);
                     let parent_shard = Arc::new(self.load_parent_shard(parent)?);
 
                     // Ingest the parent shard before recovery, as recoverer depends on the shard
@@ -183,6 +184,7 @@ impl Engine {
             token_tx.send(true).unwrap();
         }
         for meta in metas.values() {
+            tikv_util::set_current_region(meta.id);
             let meta = meta.clone();
             let engine = self.clone();
             let recoverer = recoverer.clone();
@@ -195,6 +197,7 @@ impl Engine {
                     .unwrap()
             });
             std::thread::spawn(move || {
+                tikv_util::set_current_region(meta.id);
                 let shard = engine.load_and_ingest_shard(&meta).unwrap();
                 if let Some(parent) = parent_shard {
                     shard.add_parent_mem_tbls(parent)

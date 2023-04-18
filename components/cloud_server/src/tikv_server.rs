@@ -72,14 +72,13 @@ use tikv_kv::Engine;
 use tikv_util::{
     check_environment_variables,
     config::{ensure_dir_exist, VersionTrack},
-    mpsc, panic_mark_file_exists,
+    get_panic_region_count, mpsc,
     quota_limiter::{QuotaLimitConfigManager, QuotaLimiter},
-    set_panic_mark,
     sys::{register_memory_usage_high_water, thread::ThreadBuildWrapper, SysQuota},
     thread_group::GroupProperties,
     time::{Duration, Instant, Monitor},
-    unset_panic_mark,
     worker::{Builder as WorkerBuilder, LazyWorker, Worker},
+    PANIC_REGION_FILE_PREFIX,
 };
 use tokio::runtime::Builder;
 
@@ -962,30 +961,45 @@ impl TikvServer {
         dfs: Arc<dyn Dfs>,
         rate_limiter: Arc<IoRateLimiter>,
     ) -> Engines {
-        if panic_mark_file_exists(&conf.storage.data_dir) {
-            error!("The panic mark file is exists. Pause the process");
-            loop {
-                std::thread::sleep(Duration::from_secs(600))
-            }
-        }
-        set_panic_mark();
-
+        let panic_regions = Self::load_panic_regions(&conf.storage.data_dir);
+        let black_list_regions = panic_regions
+            .into_iter()
+            .filter(|(_, count)| *count > 1)
+            .map(|(id, _)| id)
+            .collect();
         let rf_engine = Self::init_raft_engine(conf).unwrap();
         let recoverer = rfstore::store::RecoverHandler::new(rf_engine.clone());
         let mut meta_iter = recoverer.clone();
-        if let Some(black_list) = load_black_list(&conf.black_list_path) {
+        if let Some(mut black_list) = load_black_list(&conf.black_list_path) {
+            black_list.add_regions(black_list_regions);
+            meta_iter.set_black_list(black_list);
+        } else if !black_list_regions.is_empty() {
+            let black_list = BlackList::new(vec![], black_list_regions);
             meta_iter.set_black_list(black_list);
         }
         let (kv_engine, sender, receiver) =
             Self::init_kv_engine(pd, conf, dfs, rate_limiter, &mut meta_iter, recoverer).unwrap();
-
-        unset_panic_mark();
         Engines::new(
             kv_engine,
             rf_engine,
             (sender, receiver),
             meta_iter.take_black_list(),
         )
+    }
+
+    fn load_panic_regions<P: AsRef<Path>>(data_dir: P) -> Vec<(u64, usize)> {
+        let dir = fs::read_dir(data_dir).unwrap();
+        let mut panic_regions = vec![];
+        for entry in dir.into_iter().flatten() {
+            let file_name = entry.file_name().into_string().unwrap_or_default();
+            if let Some(region_id_str) = file_name.strip_prefix(PANIC_REGION_FILE_PREFIX) {
+                if let Ok(region_id) = region_id_str.parse::<u64>() {
+                    let count = get_panic_region_count(entry.path()) as usize;
+                    panic_regions.push((region_id, count));
+                }
+            }
+        }
+        panic_regions
     }
 }
 

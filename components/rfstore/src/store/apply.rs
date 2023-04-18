@@ -1230,6 +1230,7 @@ impl Applier {
         let is_leader = self.is_leader();
         std::thread::spawn(move || {
             let id = cs.shard_id;
+            tikv_util::set_current_region(id);
             let res = engine.prepare_change_set(cs, !is_leader);
             router.send(id, PeerMsg::PrepareChangeSetResult(res));
         });
@@ -1309,6 +1310,7 @@ impl Applier {
         let region_id = self.region_id();
         let router = ctx.router.as_ref().unwrap().clone();
         std::thread::spawn(move || {
+            tikv_util::set_current_region(source.shard_id);
             let res = engine.prepare_change_set(source, !is_leader);
             router.send(
                 region_id,

@@ -453,6 +453,7 @@ impl FlushWorker {
         std::thread::spawn(move || {
             let table_version = task.table_version();
             let id_ver = task.id_ver;
+            tikv_util::set_current_region(id_ver.id);
             let res = if task.normal.is_some() {
                 engine.flush_normal(task)
             } else {

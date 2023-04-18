@@ -59,6 +59,10 @@ impl BlackList {
     pub(crate) fn is_keyspace_blocked(&self, keyspace_id: u32) -> bool {
         self.keyspace_ids.contains(&keyspace_id)
     }
+
+    pub fn add_regions(&mut self, region_ids: Vec<u64>) {
+        self.region_ids.extend(region_ids.into_iter());
+    }
 }
 
 pub(crate) fn get_keyspace_id(start: &[u8], end: &[u8]) -> Option<u32> {

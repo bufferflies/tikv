@@ -1318,6 +1318,7 @@ impl Runnable for PdRunner {
             ),
 
             PdTask::Heartbeat(hb_task) => {
+                tikv_util::set_current_region(hb_task.region.id);
                 let (
                     read_bytes_delta,
                     read_keys_delta,
