@@ -222,8 +222,8 @@ impl<'a> PeerMsgHandler<'a> {
                 PeerMsg::PrepareChangeSetResult(res) => {
                     self.on_prepared_change_set(res);
                 }
-                PeerMsg::PrepareCommitMergeResult(res) => {
-                    self.on_prepared_commit_merge(res);
+                PeerMsg::PrepareCommitMergeResult(res, commit_index) => {
+                    self.on_prepared_commit_merge(res, commit_index);
                 }
                 PeerMsg::TriggerTrimOverBound(parameter) => {
                     self.trigger_trim_over_bound(parameter.target_shard.unwrap().ver, parameter);
@@ -1501,7 +1501,11 @@ impl<'a> PeerMsgHandler<'a> {
             .push(ApplyMsg::ApplyChangeSet(res.unwrap()));
     }
 
-    pub(crate) fn on_prepared_commit_merge(&mut self, res: kvengine::Result<kvengine::ChangeSet>) {
+    pub(crate) fn on_prepared_commit_merge(
+        &mut self,
+        res: kvengine::Result<kvengine::ChangeSet>,
+        commit_index: u64,
+    ) {
         if res.is_err() {
             // TODO(x): properly handle this error.
             panic!(
@@ -1512,6 +1516,7 @@ impl<'a> PeerMsgHandler<'a> {
         }
         self.ctx.apply_msgs.msgs.push(ApplyMsg::ResumeCommitMerge {
             source: res.unwrap(),
+            commit_index,
         });
     }
 

@@ -35,7 +35,10 @@ pub enum PeerMsg {
     GenerateEngineChangeSet(kvenginepb::ChangeSet),
     ApplyChangeSetResult(kvengine::Result<kvenginepb::ChangeSet>),
     PrepareChangeSetResult(kvengine::Result<kvengine::ChangeSet>),
-    PrepareCommitMergeResult(kvengine::Result<kvengine::ChangeSet>),
+    PrepareCommitMergeResult(
+        kvengine::Result<kvengine::ChangeSet>,
+        u64, // commit index
+    ),
     Persisted(PersistReady),
     TriggerTrimOverBound(TrimOverBoundParameter),
 }
@@ -73,11 +76,13 @@ pub(crate) enum ApplyMsg {
     PrepareCommitMerge {
         parent_snap: kvenginepb::Snapshot,
         source: kvenginepb::ChangeSet,
+        commit_index: u64,
     },
     ResumeCommitMerge {
         source: kvengine::ChangeSet,
+        commit_index: u64,
     },
-    PrepareRollbackMerge,
+    PrepareRollbackMerge(u64 /* initial flush sequence */),
     UnsafeDestroy {
         region_id: u64,
     },
@@ -170,6 +175,51 @@ pub struct MsgApply {
     pub(crate) new_role: Option<raft::StateRole>,
     pub(crate) cbs: Vec<Proposal>,
     pub(crate) bucket_meta: Option<Arc<BucketMeta>>,
+}
+
+impl MsgApply {
+    /// Split off [-, raft-index). The rest [raft-index, +) is left in `self`.
+    pub fn split_off(&mut self, raft_idx: u64) -> Option<MsgApply> {
+        let pos = self
+            .entries
+            .iter()
+            .position(|e| e.get_index() >= raft_idx)
+            .unwrap_or(self.entries.len());
+        if pos == 0 {
+            return None;
+        }
+        let mut split_entries = self.entries.split_off(pos);
+        std::mem::swap(&mut split_entries, &mut self.entries);
+
+        let cbs_pos = self
+            .cbs
+            .iter()
+            .position(|cb| cb.index >= raft_idx)
+            .unwrap_or(self.cbs.len());
+        let mut split_cbs = self.cbs.split_off(cbs_pos);
+        std::mem::swap(&mut split_cbs, &mut self.cbs);
+
+        Some(MsgApply {
+            _region_id: self._region_id,
+            term: self.term,
+            entries: split_entries,
+            new_role: self.new_role,
+            cbs: split_cbs,
+            bucket_meta: self.bucket_meta.clone(),
+        })
+    }
+
+    /// Return `None` when there is no entry.
+    #[inline]
+    pub fn first_raft_index(&self) -> Option<u64> {
+        self.entries.first().map(|e| e.get_index())
+    }
+
+    /// Return `None` when there is no entry.
+    #[inline]
+    pub fn last_raft_index(&self) -> Option<u64> {
+        self.entries.last().map(|e| e.get_index())
+    }
 }
 
 #[derive(Debug)]

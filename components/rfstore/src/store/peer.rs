@@ -2062,10 +2062,19 @@ impl Peer {
         // Update version to avoid duplicated rollback requests.
         region.mut_region_epoch().set_version(version + 1);
         let mut new_meta = self.get_store().shard_meta.as_ref().unwrap().clone();
+
+        // Get the applied sequence of last initial flush, which was applied to meta
+        // before check merge.
+        // The sequence is used to pause apply queue before the initial flush is applied
+        // to kvengine.
+        let initial_flush_seq = new_meta.seq;
+
         new_meta.rollback_merge(entry.index);
         new_meta.set_property(TERM_KEY, &entry.term.to_le_bytes());
         self.update_meta_on_version_change(ctx, &new_meta, &region, None);
-        ctx.apply_msgs.msgs.push(ApplyMsg::PrepareRollbackMerge);
+        ctx.apply_msgs
+            .msgs
+            .push(ApplyMsg::PrepareRollbackMerge(initial_flush_seq));
     }
 
     pub(crate) fn preprocess_commit_merge(
@@ -2110,6 +2119,7 @@ impl Peer {
         let apply_msg = ApplyMsg::PrepareCommitMerge {
             parent_snap,
             source,
+            commit_index: entry.index,
         };
         ctx.apply_msgs.msgs.push(apply_msg);
     }

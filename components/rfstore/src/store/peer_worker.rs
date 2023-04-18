@@ -243,7 +243,7 @@ impl RaftWorker {
             PeerMsg::ApplyChangeSetResult(_) => {}
             PeerMsg::PrepareChangeSetResult(_) => {}
             PeerMsg::Persisted(_) => {}
-            PeerMsg::PrepareCommitMergeResult(_) => {}
+            PeerMsg::PrepareCommitMergeResult(..) => {}
             PeerMsg::TriggerTrimOverBound(_) => {}
         }
     }

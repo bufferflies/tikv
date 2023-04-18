@@ -2,8 +2,9 @@
 
 use std::{
     cmp::min,
-    collections::{HashMap, VecDeque},
+    collections::{vec_deque, HashMap, VecDeque},
     fmt::{self, Debug, Formatter},
+    ops::RangeBounds,
     sync::{atomic::AtomicU64, Arc, Mutex},
     time::Duration,
     vec::Drain,
@@ -37,7 +38,7 @@ use raftstore::store::{
     util::{ChangePeerI, ConfChangeKind},
 };
 use tikv_util::{
-    box_err, error, info,
+    box_err, debug, error, info,
     store::{find_peer, find_peer_mut, remove_peer},
     time::Instant,
     warn,
@@ -230,20 +231,14 @@ pub(crate) struct Applier {
 
     pub(crate) pending_split: HashMap<u64, kvenginepb::ChangeSet>,
 
-    pub(crate) paused_for_ingest_or_restore: bool,
-
     pub(crate) prepare_merge_parent_snap:
         VecDeque<(kvenginepb::Snapshot, u64 /* commit index */)>,
-
-    pub(crate) paused_for_commit_merge: bool,
-
-    pub(crate) paused_for_rollback_merge: bool,
 
     pub(crate) commit_merge_parent_snaps: VecDeque<kvenginepb::Snapshot>,
 
     pub(crate) commit_merge_source_tables: HashMap<u64, ChangeSet>,
 
-    pub(crate) paused_apply_queue: Vec<MsgApply>,
+    pub(crate) paused_apply_queue: PausedApplyQueue,
 
     // The sequence of snapshot change set can be equal to other types, so we use
     // (sequence, is_snapshot) to track.
@@ -256,8 +251,6 @@ pub(crate) struct Applier {
     mem_table_state: Option<MemTableState>,
 
     last_property_term: u64,
-
-    last_ingest_or_restore_seq: u64,
 
     buckets: Option<BucketStat>,
 }
@@ -937,7 +930,10 @@ impl Applier {
     ) -> Result<(AdminResponse, ApplyResult)> {
         let parent_snap = self.commit_merge_parent_snaps.pop_front().unwrap();
         let source_id = request.get_commit_merge().get_source().get_id();
-        let source_tables = self.commit_merge_source_tables.remove(&source_id).unwrap();
+        let source_tables = self
+            .commit_merge_source_tables
+            .remove(&source_id)
+            .unwrap_or_else(|| panic!("{} source_id not exists {}", self.tag(), source_id));
         let region_ver = self.region.get_region_epoch().get_version();
         ctx.engine.commit_merge(
             self.region_id(),
@@ -1039,23 +1035,22 @@ impl Applier {
         self.role == StateRole::Leader
     }
 
-    fn is_paused(&self) -> bool {
-        self.paused_for_ingest_or_restore
-            || self.paused_for_commit_merge
-            || self.paused_for_rollback_merge
-    }
-
-    fn handle_apply(&mut self, ctx: &mut ApplyContext, mut apply: MsgApply) {
+    fn handle_apply(&mut self, ctx: &mut ApplyContext, apply: MsgApply) {
         if (apply.entries.is_empty() && apply.new_role.is_none())
             || self.pending_remove
             || self.stopped
         {
             return;
         }
-        if self.is_paused() {
-            self.paused_apply_queue.push(apply);
-            return;
+
+        if self.paused_apply_queue.must_not_paused() {
+            self.process_apply_msg(ctx, apply);
+        } else if let Some(split_apply) = self.paused_apply_queue.push(apply) {
+            self.process_apply_msg(ctx, split_apply);
         }
+    }
+
+    fn process_apply_msg(&mut self, ctx: &mut ApplyContext, mut apply: MsgApply) {
         self.metrics = ApplyMetrics::default();
         if let Some(meta) = apply.bucket_meta.clone() {
             let bucket_stats = new_bucket_write_stats(&meta);
@@ -1073,6 +1068,12 @@ impl Applier {
         }
     }
 
+    fn resume_handle_apply(&mut self, ctx: &mut ApplyContext) {
+        while let Some(apply) = self.paused_apply_queue.take_next() {
+            self.process_apply_msg(ctx, apply);
+        }
+    }
+
     fn handle_apply_change_set(&mut self, ctx: &mut ApplyContext, cs: ChangeSet) {
         if !self
             .scheduled_change_sets
@@ -1087,20 +1088,14 @@ impl Applier {
             return;
         }
         self.prepared_change_sets.insert(cs.sequence, cs);
-        if self.paused_for_commit_merge {
-            // If the apply is paused we my apply the change set earlier than commit merge.
-            // So we need to wait for resume commit merge to apply the change set.
-            return;
-        }
         self.apply_prepared_change_set(ctx);
     }
 
     fn apply_prepared_change_set(&mut self, ctx: &mut ApplyContext) {
         while let Some(cs) = self.take_prepared_change_set() {
             let seq = cs.sequence;
+            let label = change_set_label(&cs.change_set);
             let cs_pb = cs.change_set.clone();
-            let is_ingest_or_restore = cs.has_ingest_files() || cs.has_restore_shard();
-            let is_initial_flush = cs.has_initial_flush();
             let result = if cs.has_snapshot() {
                 self.apply_state = RaftApplyState::from_snapshot(cs.get_snapshot());
                 ctx.engine.ingest(cs, false)
@@ -1126,23 +1121,30 @@ impl Applier {
                 PeerMsg::ApplyChangeSetResult(result.map(|()| cs_pb)),
             );
 
-            if is_ingest_or_restore && self.last_ingest_or_restore_seq == seq {
-                self.paused_for_ingest_or_restore = false;
-            }
-            if is_initial_flush && self.paused_for_rollback_merge {
-                self.paused_for_rollback_merge = false;
-            }
-            if !self.is_paused() && !self.paused_apply_queue.is_empty() {
-                for apply in std::mem::take(&mut self.paused_apply_queue) {
-                    self.handle_apply(ctx, apply);
-                }
+            if self
+                .paused_apply_queue
+                .try_unpause(seq, &format!("{} {}", self.tag(), label))
+            {
+                self.resume_handle_apply(ctx);
             }
         }
     }
 
     fn take_prepared_change_set(&mut self) -> Option<ChangeSet> {
-        if let Some((sequence, _)) = self.scheduled_change_sets.front() {
-            if let Some(cs) = self.prepared_change_sets.remove(sequence) {
+        if let Some(&(sequence, _)) = self.scheduled_change_sets.front() {
+            if let Some(paused_seq) = self.paused_apply_queue.paused_sequence() {
+                if sequence > paused_seq {
+                    debug!(
+                        "{} prepared change set is hold by paused, sequence {}, paused_seq {}",
+                        self.tag(),
+                        sequence,
+                        paused_seq,
+                    );
+                    return None;
+                }
+            }
+
+            if let Some(cs) = self.prepared_change_sets.remove(&sequence) {
                 self.scheduled_change_sets.pop_front();
                 return Some(cs);
             }
@@ -1214,18 +1216,13 @@ impl Applier {
     }
 
     fn handle_prepare_change_set(&mut self, ctx: &mut ApplyContext, cs: kvenginepb::ChangeSet) {
-        if cs.has_ingest_files() || cs.has_restore_shard() {
-            if cs.sequence > self.last_ingest_or_restore_seq {
-                self.last_ingest_or_restore_seq = cs.sequence;
-            }
-            self.paused_for_ingest_or_restore = true;
+        if cs.has_ingest_files() {
+            self.paused_apply_queue
+                .pause(cs.sequence, &format!("{} ingest", self.tag()));
+        } else if cs.has_restore_shard() {
+            self.handle_prepare_restore_shard(&cs);
         }
-        if cs.has_restore_shard() {
-            // Invalidate snapshot & lock_cache, otherwise they would be inconsistent with
-            // restored data.
-            self.snap.take();
-            self.lock_cache.clear();
-        }
+
         self.scheduled_change_sets
             .push_back((cs.sequence, cs.has_snapshot()));
         let engine = ctx.engine.clone();
@@ -1285,6 +1282,7 @@ impl Applier {
         ctx: &mut ApplyContext,
         parent_snap: kvenginepb::Snapshot,
         source: kvenginepb::ChangeSet,
+        commit_index: u64,
     ) {
         self.commit_merge_parent_snaps.push_back(parent_snap);
         let is_leader = self.is_leader();
@@ -1304,34 +1302,50 @@ impl Applier {
             }
         }
         let engine = ctx.engine.clone();
-        self.paused_for_commit_merge = true;
+
+        self.paused_apply_queue
+            .pause(commit_index, &format!("{} commit merge", self.tag()));
+
         let region_id = self.region_id();
         let router = ctx.router.as_ref().unwrap().clone();
         std::thread::spawn(move || {
             let res = engine.prepare_change_set(source, !is_leader);
-            router.send(region_id, PeerMsg::PrepareCommitMergeResult(res));
+            router.send(
+                region_id,
+                PeerMsg::PrepareCommitMergeResult(res, commit_index),
+            );
         });
     }
 
-    fn handle_resume_commit_merge(&mut self, ctx: &mut ApplyContext, source: ChangeSet) {
+    fn handle_resume_commit_merge(
+        &mut self,
+        ctx: &mut ApplyContext,
+        source: ChangeSet,
+        commit_index: u64,
+    ) {
         self.commit_merge_source_tables
             .insert(source.shard_id, source);
-        if self.commit_merge_source_tables.len() == self.commit_merge_parent_snaps.len() {
-            self.paused_for_commit_merge = false;
+
+        if !self
+            .paused_apply_queue
+            .pick_unpause(commit_index, &format!("{} commit merge", self.tag()))
+        {
+            panic!(
+                "{} commit merge unpause seq {} not found",
+                self.tag(),
+                commit_index
+            )
         }
-        if !self.is_paused() {
-            for apply in std::mem::take(&mut self.paused_apply_queue) {
-                self.handle_apply(ctx, apply);
-            }
-            self.apply_prepared_change_set(ctx);
-        }
+        self.resume_handle_apply(ctx);
+        self.apply_prepared_change_set(ctx);
     }
 
-    fn handle_prepare_rollback_merge(&mut self, ctx: &mut ApplyContext) {
+    fn handle_prepare_rollback_merge(&mut self, ctx: &mut ApplyContext, initial_flush_seq: u64) {
         let shard = ctx.engine.get_shard(self.region_id()).unwrap();
         if !shard.get_initial_flushed() {
             // Wait for initial flush before apply rollback merge.
-            self.paused_for_rollback_merge = true;
+            self.paused_apply_queue
+                .pause(initial_flush_seq, &format!("{} rollback merge", self.tag()));
         }
     }
 
@@ -1371,14 +1385,18 @@ impl Applier {
             ApplyMsg::PrepareCommitMerge {
                 parent_snap,
                 source,
+                commit_index,
             } => {
-                self.handle_prepare_commit_merge(ctx, parent_snap, source);
+                self.handle_prepare_commit_merge(ctx, parent_snap, source, commit_index);
             }
-            ApplyMsg::ResumeCommitMerge { source } => {
-                self.handle_resume_commit_merge(ctx, source);
+            ApplyMsg::ResumeCommitMerge {
+                source,
+                commit_index,
+            } => {
+                self.handle_resume_commit_merge(ctx, source, commit_index);
             }
-            ApplyMsg::PrepareRollbackMerge => {
-                self.handle_prepare_rollback_merge(ctx);
+            ApplyMsg::PrepareRollbackMerge(initial_flush_seq) => {
+                self.handle_prepare_rollback_merge(ctx, initial_flush_seq);
             }
         }
     }
@@ -1419,6 +1437,28 @@ impl Applier {
             }
             _ => {}
         }
+    }
+
+    /// Sequence of applying:
+    ///
+    /// 1. Preprocess restore shard
+    /// 2. Prepare restore shard, pause applying of custom logs (until seq of
+    /// restore shard)
+    /// 3. Apply custom logs before seq of restore shard
+    /// 4. Apply restore shard, resume applying of custom logs
+    /// 5. Apply custom logs after seq of restore shard
+    ///
+    /// Without the pause, `apply_restore_shard` would clear the mem-table on
+    /// different apply index with other peer, and lead to data inconsistency.
+    fn handle_prepare_restore_shard(&mut self, cs: &kvenginepb::ChangeSet) {
+        // Invalidate snapshot & lock_cache, otherwise they would be inconsistent with
+        // restored data.
+        self.snap.take();
+        self.lock_cache.clear();
+
+        // Will resume after `apply_restore_shard`. See `apply_prepared_change_set`.
+        self.paused_apply_queue
+            .pause(cs.sequence, &format!("{} restore_shard", self.tag()));
     }
 }
 
@@ -1856,103 +1896,375 @@ pub struct ApplyMetrics {
     pub lock_cf_written_bytes: u64,
 }
 
-#[test]
-fn test_mem_table_state() {
-    // Test that
-    #[derive(Clone, Copy, Debug)]
-    struct Case {
-        size_kb: u64,
-        propose_time: Option<u64>,
-        switch_time: Option<u64>,
-        check_time: u64,
-        check_result: bool,
+#[derive(Default)]
+pub(crate) struct PausedApplyQueue {
+    queue: VecDeque<MsgApply>,
+    paused_sequences: VecDeque<u64>,
+}
+
+impl PausedApplyQueue {
+    /// Note that if `must_not_paused` is false, there would be part of entries
+    /// can be applied.
+    pub fn must_not_paused(&self) -> bool {
+        let not_paused = self.paused_sequences.is_empty();
+        if not_paused {
+            // If queue is not empty, the entries in it would have no chance to apply.
+            // It should be caused by missing to call `resume_handle_apply` after unpause.
+            debug_assert!(
+                self.queue.is_empty(),
+                "PausedApplyQueue must be empty when not paused: {:?}",
+                self.queue
+            );
+        }
+        not_paused
     }
-    impl Case {
-        fn new(size_kb: u64) -> Self {
-            Case {
-                size_kb,
-                propose_time: None,
-                switch_time: None,
-                check_time: 0,
-                check_result: false,
+
+    pub fn paused_sequence(&self) -> Option<u64> {
+        self.paused_sequences.front().cloned()
+    }
+
+    pub fn pause(&mut self, seq: u64, label: &str) {
+        info!("{} pause apply at {}", label, seq);
+        self.paused_sequences.push_back(seq);
+    }
+
+    pub fn unpause(&mut self, label: &str) -> Option<u64> {
+        let paused_seq = self.paused_sequences.pop_front();
+        info!("{} unpause apply at {:?}", label, paused_seq);
+        paused_seq
+    }
+
+    /// Unpause by picking the expected seq in queue, and return true if found.
+    /// Otherwise return false.
+    pub fn pick_unpause(&mut self, expected_seq: u64, label: &str) -> bool {
+        // `paused_sequences` must be small, so it's ok to use `contain` & `retain`.
+        let found = self.paused_sequences.contains(&expected_seq);
+        if found {
+            self.paused_sequences.retain(|&seq| seq != expected_seq);
+            info!("{} unpause apply at {}", label, expected_seq);
+        }
+        found
+    }
+
+    /// Return true when the seq is un-paused.
+    /// Otherwise false.
+    pub fn try_unpause(&mut self, seq: u64, label: &str) -> bool {
+        if self.paused_sequence() == Some(seq) {
+            self.unpause(label);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Push would return part of msg that is not paused.
+    #[inline]
+    pub fn push(&mut self, msg: MsgApply) -> Option<MsgApply> {
+        self.queue.push_back(msg);
+        self.take_next()
+    }
+
+    pub fn take_next(&mut self) -> Option<MsgApply> {
+        if self.queue.is_empty() {
+            return None;
+        }
+        if let Some(&seq) = self.paused_sequences.front() {
+            let front = self.queue.front_mut().unwrap();
+            // Treat message with empty entries as not paused.
+            // Otherwise, this message would block following available entries.
+            if front
+                .last_raft_index()
+                .map_or(true, |idx| !Self::index_should_pause(idx, seq))
+            {
+                self.queue.pop_front()
+            } else if Self::index_should_pause(front.first_raft_index().unwrap(), seq) {
+                None
+            } else {
+                front.split_off(seq)
+            }
+        } else {
+            self.queue.pop_front()
+        }
+    }
+
+    #[inline]
+    fn index_should_pause(raft_idx: u64, pause_seq: u64) -> bool {
+        raft_idx >= pause_seq
+    }
+
+    /// Drain all elements in the queue regardless of the pause state.
+    /// Used on destroy only.
+    pub fn drain<R>(&mut self, range: R) -> vec_deque::Drain<'_, MsgApply>
+    where
+        R: RangeBounds<usize>,
+    {
+        self.queue.drain(range)
+    }
+}
+
+// Only for ChangeSets will pause/unpause apply queue.
+fn change_set_label(cs: &kvenginepb::ChangeSet) -> &'static str {
+    if cs.has_initial_flush() {
+        "initial_flush"
+    } else if cs.has_ingest_files() {
+        "ingest_files"
+    } else if cs.has_restore_shard() {
+        "restore_shard"
+    } else {
+        "other"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use raft_proto::eraftpb::Entry;
+
+    use super::*;
+
+    #[test]
+    fn test_mem_table_state() {
+        // Test that
+        #[derive(Clone, Copy, Debug)]
+        struct Case {
+            size_kb: u64,
+            propose_time: Option<u64>,
+            switch_time: Option<u64>,
+            check_time: u64,
+            check_result: bool,
+        }
+        impl Case {
+            fn new(size_kb: u64) -> Self {
+                Case {
+                    size_kb,
+                    propose_time: None,
+                    switch_time: None,
+                    check_time: 0,
+                    check_result: false,
+                }
+            }
+
+            fn propose_at(&self, secs: u64) -> Self {
+                let mut c = *self;
+                c.propose_time = Some(secs);
+                c
+            }
+
+            fn switch_at(&self, secs: u64) -> Self {
+                let mut c = *self;
+                c.switch_time = Some(secs);
+                c
+            }
+
+            fn check_at(&self, secs: u64) -> Self {
+                let mut c = *self;
+                c.check_time = secs;
+                c
+            }
+
+            fn result(&self, b: bool) -> Self {
+                let mut c = *self;
+                c.check_result = b;
+                c
             }
         }
 
-        fn propose_at(&self, secs: u64) -> Self {
-            let mut c = *self;
-            c.propose_time = Some(secs);
-            c
-        }
-
-        fn switch_at(&self, secs: u64) -> Self {
-            let mut c = *self;
-            c.switch_time = Some(secs);
-            c
-        }
-
-        fn check_at(&self, secs: u64) -> Self {
-            let mut c = *self;
-            c.check_time = secs;
-            c
-        }
-
-        fn result(&self, b: bool) -> Self {
-            let mut c = *self;
-            c.check_result = b;
-            c
+        let cases = vec![
+            // check mem size bound
+            Case::new(0).result(false),
+            // check propose
+            Case::new(129 * 1024)
+                .propose_at(0)
+                .check_at(3)
+                .result(false),
+            Case::new(129 * 1024)
+                .propose_at(0)
+                .check_at(11)
+                .result(true),
+            // check switched
+            Case::new(32 * 1024).check_at(39).result(false),
+            Case::new(32 * 1024).check_at(41).result(true),
+            Case::new(8 * 1024)
+                .switch_at(100)
+                .check_at(259)
+                .result(false),
+            Case::new(8 * 1024)
+                .switch_at(100)
+                .check_at(261)
+                .result(true),
+            Case::new(4 * 1024).check_at(319).result(false),
+            Case::new(4 * 1024).check_at(321).result(true),
+            Case::new(2 * 1024).check_at(639).result(false),
+            Case::new(2 * 1024).check_at(641).result(true),
+            Case::new(1024).check_at(1279).result(false),
+            Case::new(1024).check_at(1281).result(true),
+            Case::new(256).check_at(5119).result(false),
+            Case::new(256).check_at(5121).result(true),
+            Case::new(64).check_at(20479).result(false),
+            Case::new(64).check_at(20481).result(true),
+            Case::new(1).check_at(23 * 60 * 60).result(false),
+            Case::new(1).check_at(25 * 60 * 60).result(true),
+        ];
+        for case in cases {
+            let mut states = MemTableState::new(case.size_kb * 1024);
+            states.proposed_time = case
+                .propose_time
+                .map(|secs| Instant::now() + Duration::from_secs(secs));
+            states.last_switch_time = case
+                .switch_time
+                .map(|secs| Instant::now() + Duration::from_secs(secs));
+            let check_time = Instant::now() + Duration::from_secs(case.check_time);
+            assert_eq!(
+                states.need_switch(check_time),
+                case.check_result,
+                "{:?}",
+                case
+            );
         }
     }
 
-    let cases = vec![
-        // check mem size bound
-        Case::new(0).result(false),
-        // check propose
-        Case::new(129 * 1024)
-            .propose_at(0)
-            .check_at(3)
-            .result(false),
-        Case::new(129 * 1024)
-            .propose_at(0)
-            .check_at(11)
-            .result(true),
-        // check switched
-        Case::new(32 * 1024).check_at(39).result(false),
-        Case::new(32 * 1024).check_at(41).result(true),
-        Case::new(8 * 1024)
-            .switch_at(100)
-            .check_at(259)
-            .result(false),
-        Case::new(8 * 1024)
-            .switch_at(100)
-            .check_at(261)
-            .result(true),
-        Case::new(4 * 1024).check_at(319).result(false),
-        Case::new(4 * 1024).check_at(321).result(true),
-        Case::new(2 * 1024).check_at(639).result(false),
-        Case::new(2 * 1024).check_at(641).result(true),
-        Case::new(1024).check_at(1279).result(false),
-        Case::new(1024).check_at(1281).result(true),
-        Case::new(256).check_at(5119).result(false),
-        Case::new(256).check_at(5121).result(true),
-        Case::new(64).check_at(20479).result(false),
-        Case::new(64).check_at(20481).result(true),
-        Case::new(1).check_at(23 * 60 * 60).result(false),
-        Case::new(1).check_at(25 * 60 * 60).result(true),
-    ];
-    for case in cases {
-        let mut states = MemTableState::new(case.size_kb * 1024);
-        states.proposed_time = case
-            .propose_time
-            .map(|secs| Instant::now() + Duration::from_secs(secs));
-        states.last_switch_time = case
-            .switch_time
-            .map(|secs| Instant::now() + Duration::from_secs(secs));
-        let check_time = Instant::now() + Duration::from_secs(case.check_time);
-        assert_eq!(
-            states.need_switch(check_time),
-            case.check_result,
-            "{:?}",
-            case
-        );
+    #[test]
+    fn test_paused_apply_queue() {
+        fn new_msg(entry_indexes: &[u64], cb_indexes: &[u64]) -> MsgApply {
+            let entries = entry_indexes
+                .iter()
+                .map(|&index| Entry {
+                    index,
+                    ..Default::default()
+                })
+                .collect();
+            let cbs = cb_indexes
+                .iter()
+                .map(|&index| Proposal {
+                    is_conf_change: false,
+                    index,
+                    term: 0,
+                    cb: Callback::None,
+                    propose_time: None,
+                    must_pass_epoch_check: false,
+                })
+                .collect();
+            MsgApply {
+                _region_id: 0,
+                term: 0,
+                entries,
+                new_role: None,
+                cbs,
+                bucket_meta: None,
+            }
+        }
+
+        fn clone_msg(msg: &MsgApply) -> MsgApply {
+            new_msg(
+                msg.entries
+                    .iter()
+                    .map(|e| e.index)
+                    .collect::<Vec<_>>()
+                    .as_slice(),
+                msg.cbs
+                    .iter()
+                    .map(|cb| cb.index)
+                    .collect::<Vec<_>>()
+                    .as_slice(),
+            )
+        }
+
+        #[must_use]
+        fn msg_is_equal(msg1: &MsgApply, msg2: &MsgApply) -> bool {
+            msg1.entries == msg2.entries
+                && msg1.cbs.len() == msg2.cbs.len()
+                && msg1
+                    .cbs
+                    .iter()
+                    .zip(msg2.cbs.iter())
+                    .all(|(cb1, cb2)| cb1.index == cb2.index)
+        }
+
+        let mut queue = PausedApplyQueue::default();
+        assert!(queue.must_not_paused());
+
+        let msg0 = new_msg(&[0], &[0]);
+        let msg1 = new_msg(&[1, 2, 3], &[1, 2, 3]);
+        let msg2 = new_msg(&[4, 5, 6], &[4, 5, 6]);
+        let msg3 = new_msg(&[7, 8, 9], &[7, 8, 9]);
+        let msg4 = new_msg(&[10, 11, 12], &[10, 11, 12]);
+        let msg5_empty = new_msg(&[], &[]);
+        let msg6 = new_msg(&[13, 14, 15], &[13, 14, 15]);
+        let msg7 = new_msg(&[16, 17, 18], &[16, 17, 18]);
+
+        // Test push
+        assert!(msg_is_equal(&queue.push(clone_msg(&msg0)).unwrap(), &msg0));
+        assert_eq!(queue.paused_sequence(), None);
+        queue.pause(1, "");
+        assert_eq!(queue.paused_sequence(), Some(1));
+
+        assert!(queue.push(clone_msg(&msg1)).is_none());
+        assert!(queue.pick_unpause(1, ""));
+        queue.pause(4, "");
+        assert!(msg_is_equal(&queue.push(clone_msg(&msg2)).unwrap(), &msg1));
+        assert!(queue.push(clone_msg(&msg3)).is_none());
+
+        // Test take_next
+        queue.pause(7, "");
+        assert!(!queue.try_unpause(3, ""));
+        assert!(queue.pick_unpause(4, ""));
+        assert!(msg_is_equal(&queue.take_next().unwrap(), &msg2));
+        assert!(queue.take_next().is_none());
+        assert!(queue.try_unpause(7, ""));
+        assert!(!queue.pick_unpause(7, ""));
+        assert!(msg_is_equal(&queue.take_next().unwrap(), &msg3));
+        assert!(queue.must_not_paused());
+
+        // Test split
+        queue.pause(11, "");
+        assert!(msg_is_equal(
+            &queue.push(clone_msg(&msg4)).unwrap(),
+            &new_msg(&[10], &[10])
+        ));
+        assert!(queue.take_next().is_none());
+        assert!(queue.push(clone_msg(&msg5_empty)).is_none());
+        assert!(queue.push(clone_msg(&msg6)).is_none());
+
+        assert!(queue.pick_unpause(11, ""));
+        queue.pause(13, "");
+        assert!(msg_is_equal(
+            &queue.push(clone_msg(&msg7)).unwrap(),
+            &new_msg(&[11, 12], &[11, 12])
+        ));
+
+        // Test empty entries
+        assert!(msg_is_equal(&queue.take_next().unwrap(), &msg5_empty));
+
+        // Test drain
+        let mut drained_entries = vec![];
+        for msg in queue.drain(..) {
+            drained_entries.extend(msg.entries.iter().map(|e| e.get_index()));
+        }
+        assert_eq!(drained_entries, (13..=18).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_paused_apply_queue_pick_unpause() {
+        let mut queue = PausedApplyQueue::default();
+        assert!(queue.must_not_paused());
+        assert!(!queue.pick_unpause(1, ""));
+
+        queue.pause(1, "");
+        assert!(queue.pick_unpause(1, ""));
+        assert!(!queue.pick_unpause(1, ""));
+        assert!(queue.must_not_paused());
+
+        queue.pause(2, "");
+        queue.pause(4, "");
+        queue.pause(6, "");
+        assert!(!queue.pick_unpause(1, ""));
+        assert!(!queue.pick_unpause(5, ""));
+        assert!(!queue.pick_unpause(7, ""));
+        assert!(queue.pick_unpause(4, ""));
+        assert!(!queue.pick_unpause(4, ""));
+        assert!(queue.pick_unpause(6, ""));
+        assert!(!queue.pick_unpause(6, ""));
+        assert!(queue.pick_unpause(2, ""));
+        assert!(!queue.pick_unpause(2, ""));
+        assert!(queue.must_not_paused());
     }
 }
