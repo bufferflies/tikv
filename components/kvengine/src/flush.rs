@@ -459,15 +459,12 @@ impl FlushWorker {
             } else {
                 engine.flush_initial(task)
             };
-            engine
-                .flush_tx
-                .send(FlushMsg::Result(FlushResult {
-                    id_ver,
-                    table_version,
-                    term,
-                    res,
-                }))
-                .unwrap();
+            engine.send_flush_msg(FlushMsg::Result(FlushResult {
+                id_ver,
+                table_version,
+                term,
+                res,
+            }));
         });
     }
 }

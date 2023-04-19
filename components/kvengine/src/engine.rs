@@ -114,6 +114,7 @@ impl Engine {
             free_tx,
             loaded: AtomicBool::new(false),
             file_locks,
+            shutting_down: AtomicBool::new(false),
         };
         let en = Engine {
             core: Arc::new(core),
@@ -220,6 +221,7 @@ impl Engine {
             self.get_engine_id(),
             Arc::strong_count(&self.core)
         );
+        self.shutting_down.store(true, Ordering::Release);
         self.compact_tx.send(CompactMsg::Stop).unwrap();
         self.flush_tx.send(FlushMsg::Stop).unwrap();
         self.free_tx.send(FreeMemMsg::Stop).unwrap();
@@ -242,6 +244,7 @@ pub struct EngineCore {
     pub(crate) free_tx: mpsc::Sender<FreeMemMsg>,
     pub(crate) loaded: AtomicBool,
     pub(crate) file_locks: Vec<Mutex<()>>,
+    pub(crate) shutting_down: AtomicBool,
 }
 
 impl Drop for EngineCore {
@@ -329,7 +332,7 @@ impl EngineCore {
                 if shard.ver > old.ver || new_total_seq > old_total_seq {
                     entry.replace_entry(Arc::new(shard));
                     for mem_tbl in old_mem_tbls.drain(..) {
-                        self.free_tx.send(FreeMemMsg::FreeMem(mem_tbl)).unwrap();
+                        self.send_free_mem_msg(FreeMemMsg::FreeMem(mem_tbl));
                     }
                 } else {
                     info!(
@@ -406,11 +409,9 @@ impl EngineCore {
         while let Some(mem_tbl) = mem_tbls.pop() {
             // writable mem-table's version is 0.
             if mem_tbl.get_version() != 0 {
-                self.flush_tx
-                    .send(FlushMsg::Task(Box::new(FlushTask::new_normal(
-                        shard, mem_tbl,
-                    ))))
-                    .unwrap();
+                self.send_flush_msg(FlushMsg::Task(Box::new(FlushTask::new_normal(
+                    shard, mem_tbl,
+                ))));
             }
         }
     }
@@ -437,17 +438,15 @@ impl EngineCore {
                 mem_tbls.push(mem_tbl.clone());
             }
         }
-        self.flush_tx
-            .send(FlushMsg::Task(Box::new(FlushTask::new_initial(
-                shard,
-                InitialFlush {
-                    parent_snap,
-                    mem_tbls,
-                    base_version: shard.get_base_version(),
-                    data_sequence,
-                },
-            ))))
-            .unwrap();
+        self.send_flush_msg(FlushMsg::Task(Box::new(FlushTask::new_initial(
+            shard,
+            InitialFlush {
+                parent_snap,
+                mem_tbls,
+                base_version: shard.get_base_version(),
+                data_sequence,
+            },
+        ))));
     }
 
     pub fn build_ingest_files(
@@ -581,9 +580,7 @@ impl EngineCore {
         if cs.has_flush() || cs.has_initial_flush() {
             let table_version = change_set_table_version(cs);
             let id_ver = IdVer::new(cs.shard_id, cs.shard_ver);
-            self.flush_tx
-                .send(FlushMsg::Committed((id_ver, table_version)))
-                .unwrap();
+            self.send_flush_msg(FlushMsg::Committed((id_ver, table_version)));
         }
         if rejected
             && (cs.has_compaction()
@@ -597,9 +594,7 @@ impl EngineCore {
             let shard = self.get_shard(cs.shard_id).unwrap();
             store_bool(&shard.compacting, false);
             // Notify the compaction runner otherwise the shard can't be compacted any more.
-            self.compact_tx
-                .send(CompactMsg::Applied(IdVer::new(cs.shard_id, cs.shard_ver)))
-                .unwrap();
+            self.send_compact_msg(CompactMsg::Applied(IdVer::new(cs.shard_id, cs.shard_ver)));
             self.refresh_shard_states(&shard);
         }
     }
@@ -613,10 +608,8 @@ impl EngineCore {
                 self.trigger_flush(&shard);
             } else {
                 store_bool(&shard.compacting, false);
-                self.flush_tx.send(FlushMsg::Clear(shard_id)).unwrap();
-                self.compact_tx
-                    .send(CompactMsg::Clear(IdVer::new(shard.id, shard.ver)))
-                    .unwrap();
+                self.send_flush_msg(FlushMsg::Clear(shard_id));
+                self.send_compact_msg(CompactMsg::Clear(IdVer::new(shard.id, shard.ver)));
             }
         }
     }
@@ -631,7 +624,7 @@ impl EngineCore {
     }
 
     pub fn trigger_compact(&self, id_ver: IdVer) {
-        self.compact_tx.send(CompactMsg::Compact(id_ver)).unwrap();
+        self.send_compact_msg(CompactMsg::Compact(id_ver));
     }
 
     pub fn get_cache_size(&self) -> u64 {
@@ -643,6 +636,39 @@ impl EngineCore {
     pub fn lock_file(&self, file_id: u64) -> MutexGuard<'_, ()> {
         let idx = file_id as usize % FILE_LOCK_SLOTS;
         self.file_locks[idx].lock().unwrap()
+    }
+
+    pub(crate) fn send_compact_msg(&self, msg: CompactMsg) {
+        if let Err(e) = self.compact_tx.send(msg) {
+            assert!(self.shutting_down.load(Ordering::Acquire));
+            info!(
+                "Engine {} is shutting down, cannot send compact msg {:?}",
+                self.get_engine_id(),
+                e
+            );
+        }
+    }
+
+    pub(crate) fn send_flush_msg(&self, msg: FlushMsg) {
+        if let Err(e) = self.flush_tx.send(msg) {
+            assert!(self.shutting_down.load(Ordering::Acquire));
+            info!(
+                "Engine {} is shutting down, cannot send flush msg {:?}",
+                self.get_engine_id(),
+                e
+            );
+        }
+    }
+
+    pub(crate) fn send_free_mem_msg(&self, msg: FreeMemMsg) {
+        if let Err(e) = self.free_tx.send(msg) {
+            assert!(self.shutting_down.load(Ordering::Acquire));
+            info!(
+                "Engine {} is shutting down, cannot send free mem msg {:?}",
+                self.get_engine_id(),
+                e
+            );
+        }
     }
 }
 

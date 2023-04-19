@@ -2444,14 +2444,11 @@ impl CompactRunner {
         std::thread::spawn(move || {
             tikv_util::set_current_region(id_ver.id);
             let result = Box::new(engine.compact(id_ver));
-            engine
-                .compact_tx
-                .send(CompactMsg::Finish {
-                    task_id,
-                    id_ver,
-                    result,
-                })
-                .unwrap();
+            engine.send_compact_msg(CompactMsg::Finish {
+                task_id,
+                id_ver,
+                result,
+            });
         });
     }
 

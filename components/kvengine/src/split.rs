@@ -142,10 +142,8 @@ impl Engine {
         // Switch the old shard mem-table, so the first mem-table is always empty.
         // ignore the read-only mem-table to be flushed. let the new shard handle it.
         self.switch_mem_table(shard, version);
-        self.flush_tx.send(FlushMsg::Clear(shard.id)).unwrap();
-        self.compact_tx
-            .send(CompactMsg::Clear(IdVer::new(shard.id, shard.ver)))
-            .unwrap();
+        self.send_flush_msg(FlushMsg::Clear(shard.id));
+        self.send_compact_msg(CompactMsg::Clear(IdVer::new(shard.id, shard.ver)));
     }
 
     pub fn check_merge(

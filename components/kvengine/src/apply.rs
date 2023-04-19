@@ -165,9 +165,7 @@ impl EngineCore {
                 self.apply_major_compaction(&shard, &cs);
             }
             store_bool(&shard.compacting, false);
-            self.compact_tx
-                .send(CompactMsg::Applied(IdVer::new(shard.id, shard.ver)))
-                .unwrap();
+            self.send_compact_msg(CompactMsg::Applied(IdVer::new(shard.id, shard.ver)));
         } else if cs.has_initial_flush() {
             self.apply_initial_flush(&shard, &cs);
         } else if cs.has_ingest_files() {
@@ -222,7 +220,7 @@ impl EngineCore {
                 old_data.cfs.clone(),
             );
             shard.set_data(new_data);
-            self.free_tx.send(FreeMemMsg::FreeMem(last)).unwrap();
+            self.send_free_mem_msg(FreeMemMsg::FreeMem(last));
         }
     }
 
@@ -237,7 +235,7 @@ impl EngineCore {
             let flushed =
                 version > 0 && version <= initial_flush.base_version + initial_flush.data_sequence;
             if flushed {
-                self.free_tx.send(FreeMemMsg::FreeMem(x.clone())).unwrap();
+                self.send_free_mem_msg(FreeMemMsg::FreeMem(x.clone()));
             }
             !flushed
         });
@@ -718,10 +716,8 @@ impl EngineCore {
         assert_eq!(old_shard.start, snap.start);
         assert_eq!(old_shard.end, snap.end);
 
-        self.flush_tx.send(FlushMsg::Clear(old_shard.id)).unwrap();
-        self.compact_tx
-            .send(CompactMsg::Clear(IdVer::new(old_shard.id, old_shard.ver)))
-            .unwrap();
+        self.send_flush_msg(FlushMsg::Clear(old_shard.id));
+        self.send_compact_msg(CompactMsg::Clear(IdVer::new(old_shard.id, old_shard.ver)));
 
         // Increase shard version to make change sets generated before restore shard
         // stale.
@@ -758,7 +754,7 @@ impl EngineCore {
 
         let mut old_mem_tbls = old_data.mem_tbls.clone();
         for mem_tbl in old_mem_tbls.drain(..) {
-            self.free_tx.send(FreeMemMsg::FreeMem(mem_tbl)).unwrap();
+            self.send_free_mem_msg(FreeMemMsg::FreeMem(mem_tbl));
         }
 
         self.refresh_shard_states(&new_shard);
