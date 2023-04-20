@@ -309,6 +309,7 @@ pub fn new_test_config(base_dir: &Path, node_id: u16) -> TikvConfig {
     config.dfs.s3_endpoint = "memory".to_string();
     config.dfs.zstd_compression_level = "3".to_string();
     config.raft_store.raft_base_tick_interval = ReadableDuration::millis(10);
+    config.raft_store.raft_election_timeout_ticks = 50;
     config.raft_store.raft_store_max_leader_lease = ReadableDuration::millis(20);
     config.raft_store.split_region_check_tick_interval = ReadableDuration::millis(100);
     config.raft_store.raft_log_gc_tick_interval = ReadableDuration::millis(100);
