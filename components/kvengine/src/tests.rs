@@ -1,6 +1,7 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
+    collections::HashMap,
     env,
     ops::Deref,
     path::Path,
@@ -10,13 +11,21 @@ use std::{
     vec,
 };
 
-use bytes::Buf;
+use bytes::{Buf, BytesMut};
 use file_system::IoRateLimiter;
 use kvenginepb as pb;
 use tempfile::TempDir;
 use tikv_util::{mpsc, time::Instant};
 
-use crate::{dfs::InMemFs, *};
+use crate::{
+    dfs::InMemFs,
+    table::{
+        memtable::CfTable,
+        sstable::{InMemFile, SsTable},
+        BIT_DELETE,
+    },
+    *,
+};
 
 macro_rules! unwrap_or_return {
     ($e:expr, $m:expr) => {
@@ -505,6 +514,73 @@ fn test_truncate_ts() {
     }
 }
 
+// This test case construct a LSM tree and trigger a particular compaction to
+// verify deleted entry will not reappear after the compaction.
+// In the LSM true, L3 contains data, L2 contains tombstone, L1 contains data.
+// The range for overlap check should use both L1 and L2 instead of only L1.
+// The tombstone entries will be discarded when the compaction is
+// non-overlapping. If only use L1's range for overlap check, some of the L2's
+// tombstone will be lost, cause deleted entries reappear.
+#[test]
+fn test_lost_tombstone_issue() {
+    init_logger();
+    let (engine, _) = new_test_engine();
+    let shard = engine.get_shard(1).unwrap();
+    let block_size = engine.opts.table_builder_options.block_size;
+    let comp_tp = engine.opts.table_builder_options.compression_tps[0];
+    let comp_lvl = engine.opts.table_builder_options.compression_lvl;
+    let fs = engine.fs.clone();
+    let new_table = |id: u64, begin: usize, end: usize, version: u64, del: bool| {
+        let mut builder = table::sstable::builder::Builder::new(id, block_size, comp_tp, comp_lvl);
+        for i in begin..end {
+            let key = i_to_key(i as i32, 0);
+            let val = if del {
+                table::Value::new_with_meta_version(BIT_DELETE, version, 0, &[])
+            } else {
+                let val_str = key.repeat(2);
+                table::Value::new_with_meta_version(0, version, 0, val_str.as_bytes())
+            };
+            builder.add(key.as_bytes(), &val, None);
+        }
+        let mut data_buf = BytesMut::new();
+        builder.finish(0, &mut data_buf);
+        let data = data_buf.freeze();
+        let opts = dfs::Options::new(1, 1);
+        let runtime = fs.get_runtime();
+        runtime.block_on(fs.create(id, data.clone(), opts)).unwrap();
+        let file = InMemFile::new(id, data);
+        SsTable::new(Arc::new(file), None, true).unwrap()
+    };
+    let mut cf_builder = ShardCfBuilder::new(0);
+    cf_builder.add_table(new_table(11, 0, 100, 101, false), 3);
+    cf_builder.add_table(new_table(12, 50, 150, 102, true), 2);
+    cf_builder.add_table(new_table(13, 120, 200, 103, false), 1);
+    let data = ShardData::new(
+        shard.start.clone(),
+        shard.end.clone(),
+        DeletePrefixes::default(),
+        None,
+        false,
+        vec![CfTable::new()],
+        vec![],
+        Arc::new(HashMap::default()),
+        [cf_builder.build(), ShardCf::new(1), ShardCf::new(2)],
+    );
+    shard.set_data(data);
+    let pri = CompactionPriority::L1Plus {
+        cf: 0,
+        score: 2.0,
+        level: 1,
+    };
+    let mut guard = shard.compaction_priority.write().unwrap();
+    *guard = Some(pri);
+    drop(guard);
+    engine.update_managed_safe_ts(104);
+    engine.trigger_compact(IdVer::new(1, 1));
+    thread::sleep(Duration::from_secs(1));
+    check_get(50, 100, 104, &[0], &engine, false, None, 0);
+}
+
 #[derive(Clone)]
 struct TestMetaChangeListener {
     sender: mpsc::Sender<pb::ChangeSet>,
@@ -854,6 +930,9 @@ fn check_get(
             let item = snap.get(cf, key.as_bytes(), version);
             if item.is_valid() {
                 if !exist {
+                    if item.is_deleted() {
+                        continue;
+                    }
                     let shard_stats = shard.get_stats();
                     panic!(
                         "got key {}, shard {}:{}, cf {}, stats {:?}",

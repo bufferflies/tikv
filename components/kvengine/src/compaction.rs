@@ -935,7 +935,11 @@ impl Engine {
             return Some(Ok(cs));
         }
         let mut has_overlap = false;
-        let kr = get_key_range(&upper_level_candidates[upper_left_idx..upper_right_idx]);
+        let mut kr = KeyRange::default();
+        // The range for overlapping check should include both upper level and lower
+        // level.
+        kr.update(&upper_level_candidates[upper_left_idx..upper_right_idx]);
+        kr.update(&lower_level.tables[lower_left_idx..lower_right_idx]);
         for lvl_idx in (level + 1)..scf.levels.len() {
             let lh = &scf.levels[lvl_idx];
             let (left, right) = lh.overlapping_tables(&kr);
@@ -1064,21 +1068,19 @@ pub(crate) struct KeyRange {
     pub right: Bytes,
 }
 
-pub(crate) fn get_key_range(tables: &[SsTable]) -> KeyRange {
-    let mut smallest = tables[0].smallest();
-    let mut biggest = tables[0].biggest();
-    for i in 1..tables.len() {
-        let tbl = &tables[i];
-        if tbl.smallest() < smallest {
-            smallest = tbl.smallest();
+impl KeyRange {
+    pub(crate) fn update(&mut self, tables: &[SsTable]) {
+        if tables.is_empty() {
+            return;
         }
-        if tbl.biggest() > tbl.biggest() {
-            biggest = tbl.biggest();
+        let lower_smallest = tables.first().unwrap().smallest();
+        if self.left.is_empty() || lower_smallest < self.left.chunk() {
+            self.left = Bytes::copy_from_slice(lower_smallest);
         }
-    }
-    KeyRange {
-        left: Bytes::copy_from_slice(smallest),
-        right: Bytes::copy_from_slice(biggest),
+        let lower_biggest = tables.last().unwrap().biggest();
+        if lower_biggest > self.right.chunk() {
+            self.right = Bytes::copy_from_slice(lower_biggest);
+        }
     }
 }
 
