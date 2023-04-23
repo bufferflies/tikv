@@ -158,6 +158,7 @@ pub enum ExecResult {
     PrepareMerge { region: Region },
     CommitMerge { region: Region, source: Region },
     RollbackMerge { region: Region, commit: u64 },
+    RestoreShard { cs: kvenginepb::ChangeSet },
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -632,6 +633,7 @@ impl Applier {
                 ExecResult::RollbackMerge { region, .. } => {
                     self.region = region.clone();
                 }
+                ExecResult::RestoreShard { .. } => unreachable!(),
             }
         }
         // TODO: if we have exec_result, maybe we should return this callback too. Outer
@@ -1092,6 +1094,7 @@ impl Applier {
     }
 
     fn apply_prepared_change_set(&mut self, ctx: &mut ApplyContext) {
+        let mut exec_results = VecDeque::<ExecResult>::new();
         while let Some(cs) = self.take_prepared_change_set() {
             let seq = cs.sequence;
             let label = change_set_label(&cs.change_set);
@@ -1102,24 +1105,16 @@ impl Applier {
             } else {
                 ctx.engine.apply_change_set(cs)
             };
-            let router = ctx.router.as_ref().unwrap();
-            if result.is_ok() && cs_pb.has_restore_shard() {
-                debug_assert_eq!(
-                    self.region.get_region_epoch().get_version(),
-                    cs_pb.shard_ver
-                );
-                self.region
-                    .mut_region_epoch()
-                    .set_version(cs_pb.shard_ver + 1);
-                router.send_store(StoreMsg::ApplyRestoreResult {
-                    region_id: self.region_id(),
-                    ver: cs_pb.shard_ver,
-                });
+
+            match result {
+                Ok(()) => self.handle_apply_change_set_result(ctx, cs_pb, &mut exec_results),
+                Err(err) => warn!(
+                    "{} failed to apply change set to kvengine, err {:?}, change set {:?}",
+                    self.tag(),
+                    err,
+                    cs_pb
+                ),
             }
-            router.send(
-                self.region_id(),
-                PeerMsg::ApplyChangeSetResult(result.map(|()| cs_pb)),
-            );
 
             if self
                 .paused_apply_queue
@@ -1127,6 +1122,29 @@ impl Applier {
             {
                 self.resume_handle_apply(ctx);
             }
+        }
+        if !exec_results.is_empty() {
+            ctx.finish_for(self, exec_results);
+        }
+    }
+
+    fn handle_apply_change_set_result(
+        &mut self,
+        ctx: &mut ApplyContext,
+        cs: kvenginepb::ChangeSet,
+        exec_results: &mut VecDeque<ExecResult>,
+    ) {
+        if cs.has_snapshot() {
+            if !exec_results.is_empty() {
+                ctx.finish_for(self, std::mem::take(exec_results));
+            }
+
+            let router = ctx.router.as_ref().unwrap();
+            router.send(self.region_id(), PeerMsg::ApplySnapshotResult(cs));
+        } else if cs.has_restore_shard() {
+            debug_assert_eq!(self.region.get_region_epoch().get_version(), cs.shard_ver);
+            self.region.mut_region_epoch().set_version(cs.shard_ver + 1);
+            exec_results.push_back(ExecResult::RestoreShard { cs });
         }
     }
 

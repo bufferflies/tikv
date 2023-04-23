@@ -213,8 +213,8 @@ impl<'a> PeerMsgHandler<'a> {
                 PeerMsg::CasualMessage(msg) => self.on_casual_msg(msg),
                 PeerMsg::Start => self.start(),
                 PeerMsg::GenerateEngineChangeSet(cs) => self.on_generate_engine_change_set(cs),
-                PeerMsg::ApplyChangeSetResult(res) => {
-                    self.on_apply_change_set_result(res);
+                PeerMsg::ApplySnapshotResult(cs) => {
+                    self.on_apply_snapshot_result(cs);
                 }
                 PeerMsg::Persisted(ready) => {
                     self.on_persisted(ready);
@@ -386,6 +386,11 @@ impl<'a> PeerMsgHandler<'a> {
             return;
         }
         if self.peer.is_applying_snapshot() {
+            debug!(
+                "{} applying snapshot, skip handle apply results {:?}",
+                self.peer.tag(),
+                res.results
+            );
             return;
         }
         fail_point!("on_apply_res", |_| {});
@@ -1401,37 +1406,23 @@ impl<'a> PeerMsgHandler<'a> {
         req
     }
 
-    fn on_apply_change_set_result(&mut self, result: kvengine::Result<kvenginepb::ChangeSet>) {
+    fn on_apply_snapshot_result(&mut self, change: kvenginepb::ChangeSet) {
         let tag = self.peer.tag();
-        if let Err(err) = result {
-            error!(
-                "region failed to apply change set";
-                "err" => ?err,
-                "region" => tag,
-            );
-            return;
-        }
-        let change = result.unwrap();
-        let expected_shard_ver = if change.has_restore_shard() {
-            // Restore shard will increase shard version by 1.
-            change.shard_ver + 1
-        } else {
-            change.shard_ver
-        };
-        if expected_shard_ver
-            != self
-                .peer
+        debug_assert!(change.has_snapshot(), "{}", tag);
+        assert_eq!(
+            change.shard_ver,
+            self.peer
                 .get_preprocessed_region()
                 .get_region_epoch()
-                .get_version()
-        {
-            error!("change set version not match change {:?}", &change; "region" => tag);
-            // The peer can't change until applying snapshot finished, so applying snapshot
-            // should always succeed.
-            assert!(!change.has_snapshot(), "{:?}", change);
-            return;
-        }
-        if change.has_snapshot() && self.peer.mut_store().is_applying_snapshot() {
+                .get_version(),
+            "{} snapshot change set version not match, region {:?}, is_applying_snapshot {}, cs {:?}",
+            tag,
+            self.peer.get_preprocessed_region(),
+            self.peer.get_store().is_applying_snapshot(),
+            change
+        );
+
+        if self.peer.mut_store().is_applying_snapshot() {
             self.peer.mut_store().snap_state = SnapState::Relax;
             // After applying a snapshot, merge is rollbacked implicitly.
             self.peer.clear_merge_in_mem_data();

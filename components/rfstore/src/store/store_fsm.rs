@@ -727,9 +727,6 @@ impl<'a> StoreMsgHandler<'a> {
             StoreMsg::ApplyResult { region_id, peer_id } => {
                 apply_region = self.on_apply_result(region_id, peer_id);
             }
-            StoreMsg::ApplyRestoreResult { region_id, ver } => {
-                self.on_restore_shard_result(region_id, ver);
-            }
             StoreMsg::DependentsEmpty(region_id) => {
                 self.on_dependents_empty(region_id);
             }
@@ -1671,6 +1668,9 @@ impl<'a> StoreMsgHandler<'a> {
                     ExecResult::RollbackMerge { region, commit } => {
                         self.on_rollback_merge(region, commit);
                     }
+                    ExecResult::RestoreShard { cs } => {
+                        self.on_restore_shard_result(cs);
+                    }
                 }
             }
             {
@@ -1827,7 +1827,10 @@ impl<'a> StoreMsgHandler<'a> {
         }
     }
 
-    fn on_restore_shard_result(&mut self, region_id: u64, ver: u64) {
+    fn on_restore_shard_result(&mut self, cs: kvenginepb::ChangeSet) {
+        let region_id = cs.shard_id;
+        let ver = cs.shard_ver;
+
         let mut region = match self.ctx.store_meta.region_map.get(region_id) {
             Some(region) => region.clone(),
             None => return,

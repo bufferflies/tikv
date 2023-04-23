@@ -33,7 +33,7 @@ pub enum PeerMsg {
     /// group.
     SignificantMsg(SignificantMsg),
     GenerateEngineChangeSet(kvenginepb::ChangeSet),
-    ApplyChangeSetResult(kvengine::Result<kvenginepb::ChangeSet>),
+    ApplySnapshotResult(kvenginepb::ChangeSet),
     PrepareChangeSetResult(kvengine::Result<kvengine::ChangeSet>),
     PrepareCommitMergeResult(
         kvengine::Result<kvengine::ChangeSet>,
@@ -129,10 +129,6 @@ pub enum StoreMsg {
     },
     CheckMerge(u64),
     Stop,
-    ApplyRestoreResult {
-        region_id: u64,
-        ver: u64,
-    },
 }
 
 #[derive(Debug)]
