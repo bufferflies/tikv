@@ -38,6 +38,15 @@ make_auto_flush_static_metric! {
         finish_flashback
     }
 
+    pub label_enum RfAdminCmdType {
+        change_peer,
+        change_peer_v2,
+        batch_split,
+        prepare_merge,
+        rollback_merge,
+        commit_merge,
+    }
+
     pub label_enum AdminCmdStatus {
         reject_unsafe,
         all,
@@ -117,6 +126,11 @@ make_auto_flush_static_metric! {
         "type" => AdminCmdType,
         "status" => AdminCmdStatus,
     }
+
+    pub struct RfAdminCmdVec : LocalHistogram {
+        "type" => RfAdminCmdType,
+    }
+
 
     pub struct WriteCmdVec : LocalIntCounter {
         "type" => WriteCmdType,
@@ -439,6 +453,16 @@ lazy_static! {
         ).unwrap();
     pub static ref PEER_ADMIN_CMD_COUNTER: AdminCmdVec =
         auto_flush_from!(PEER_ADMIN_CMD_COUNTER_VEC, AdminCmdVec);
+
+    pub static ref RF_PEER_ADMIN_CMD_HISTOGRAM_VEC: HistogramVec =
+        register_histogram_vec!(
+            "tikv_rfstore_admin_cmd",
+            "Total number of admin cmd processed.",
+            &["type"],
+            exponential_buckets(0.00001, 2.0, 26).unwrap(),
+        ).unwrap();
+    pub static ref RF_PEER_ADMIN_CMD_HISTOGRAM: RfAdminCmdVec =
+        auto_flush_from!(RF_PEER_ADMIN_CMD_HISTOGRAM_VEC, RfAdminCmdVec);
 
     pub static ref PEER_WRITE_CMD_COUNTER_VEC: IntCounterVec =
         register_int_counter_vec!(

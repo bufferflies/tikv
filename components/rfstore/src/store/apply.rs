@@ -40,7 +40,7 @@ use raftstore::store::{
 use tikv_util::{
     box_err, debug, error, info,
     store::{find_peer, find_peer_mut, remove_peer},
-    time::Instant,
+    time::{duration_to_sec, Instant},
     warn,
 };
 use time::Timespec;
@@ -719,6 +719,7 @@ impl Applier {
         ctx: &mut ApplyContext,
         request: &AdminRequest,
     ) -> Result<(AdminResponse, ApplyResult)> {
+        let star_time = Instant::now();
         assert!(request.has_change_peer());
         let request = request.get_change_peer();
         let change_type = request.get_change_type();
@@ -752,6 +753,9 @@ impl Applier {
         let mut resp = AdminResponse::default();
         resp.mut_change_peer().set_region(region.clone());
 
+        RF_PEER_ADMIN_CMD_HISTOGRAM
+            .change_peer
+            .observe(duration_to_sec(star_time.saturating_elapsed()));
         Ok((
             resp,
             ApplyResult::Res(ExecResult::ChangePeer(ChangePeer {
@@ -769,6 +773,7 @@ impl Applier {
         request: &AdminRequest,
     ) -> Result<(AdminResponse, ApplyResult)> {
         assert!(request.has_change_peer_v2());
+        let star_time = Instant::now();
         let changes = request.get_change_peer_v2().get_change_peers().to_vec();
 
         info!(
@@ -784,6 +789,9 @@ impl Applier {
 
         let mut resp = AdminResponse::default();
         resp.mut_change_peer().set_region(region.clone());
+        RF_PEER_ADMIN_CMD_HISTOGRAM
+            .change_peer_v2
+            .observe(duration_to_sec(star_time.saturating_elapsed()));
         Ok((
             resp,
             ApplyResult::Res(ExecResult::ChangePeer(ChangePeer {
@@ -836,6 +844,7 @@ impl Applier {
         ctx: &mut ApplyContext,
         request: &AdminRequest,
     ) -> Result<(AdminResponse, ApplyResult)> {
+        let star_time = Instant::now();
         // Write the engine before run finish split, or we will get shard not match
         // error.
         let cs = self.pending_split.remove(&ctx.exec_log_index);
@@ -864,6 +873,9 @@ impl Applier {
         splits.set_regions(RepeatedField::from(regions.clone()));
         resp.set_splits(splits);
         let result = ApplyResult::Res(ExecResult::SplitRegion { regions });
+        RF_PEER_ADMIN_CMD_HISTOGRAM
+            .batch_split
+            .observe(duration_to_sec(star_time.saturating_elapsed()));
         Ok((resp, result))
     }
 
@@ -877,7 +889,7 @@ impl Applier {
             self.tag(),
             ctx.exec_log_index,
         );
-
+        let star_time = Instant::now();
         let (parent_snap, commit_index) = self.prepare_merge_parent_snap.pop_front().unwrap();
         debug_assert_eq!(
             commit_index,
@@ -896,6 +908,9 @@ impl Applier {
         let epoch = region.mut_region_epoch();
         epoch.version += 1;
         epoch.conf_ver += 1;
+        RF_PEER_ADMIN_CMD_HISTOGRAM
+            .prepare_merge
+            .observe(duration_to_sec(star_time.saturating_elapsed()));
         Ok((
             AdminResponse::default(),
             ApplyResult::Res(ExecResult::PrepareMerge { region }),
@@ -910,6 +925,7 @@ impl Applier {
         fail_point!("on_follower_exec_rollback_merge", !self.is_leader(), |_| {
             unimplemented!()
         });
+        let star_time = Instant::now();
         ctx.engine.rollback_merge(
             self.region_id(),
             self.region.get_region_epoch().version,
@@ -919,6 +935,9 @@ impl Applier {
         let epoch = region.mut_region_epoch();
         epoch.version += 1;
         let commit = request.get_rollback_merge().commit;
+        RF_PEER_ADMIN_CMD_HISTOGRAM
+            .rollback_merge
+            .observe(duration_to_sec(star_time.saturating_elapsed()));
         Ok((
             AdminResponse::default(),
             ApplyResult::Res(ExecResult::RollbackMerge { region, commit }),
@@ -930,6 +949,7 @@ impl Applier {
         ctx: &mut ApplyContext,
         request: &AdminRequest,
     ) -> Result<(AdminResponse, ApplyResult)> {
+        let star_time = Instant::now();
         let parent_snap = self.commit_merge_parent_snaps.pop_front().unwrap();
         let source_id = request.get_commit_merge().get_source().get_id();
         let source_tables = self
@@ -946,6 +966,9 @@ impl Applier {
         )?;
         let source = request.get_commit_merge().get_source().clone();
         let region = new_merged_region(&source, &self.region);
+        RF_PEER_ADMIN_CMD_HISTOGRAM
+            .commit_merge
+            .observe(duration_to_sec(star_time.saturating_elapsed()));
         Ok((
             AdminResponse::default(),
             ApplyResult::Res(ExecResult::CommitMerge { region, source }),
