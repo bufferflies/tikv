@@ -18,7 +18,7 @@ use bytes::{Buf, BufMut};
 use protobuf::Message;
 use tikv_util::{error, info, warn};
 
-use crate::{raft_log_file_name, PeerMeta, TRUNCATE_ALL_INDEX};
+use crate::{metrics::RFENGINE_RLOG_GC_SIZE, raft_log_file_name, PeerMeta, TRUNCATE_ALL_INDEX};
 
 const REWRITE_DIFF: u32 = 10;
 
@@ -234,16 +234,23 @@ impl Manifest {
                 let filename = raft_log_file_name(dir, peer_id, file.first_index, file.last_index);
                 if filename.exists() {
                     let region_id = peer_meta.region_id;
+                    let file_size = fs::metadata(filename.as_path()).unwrap().len();
                     if let Err(err) = fs::remove_file(filename.as_path()) {
                         error!(
                             "{}:{} failed to remove rlog file {:?}, {:?}",
                             engine_id, region_id, filename, err
                         );
+                        RFENGINE_RLOG_GC_SIZE
+                            .with_label_values(&["error"])
+                            .observe(file_size as f64);
                     } else {
                         info!(
                             "{}:{} remove rlog file {:?}",
                             engine_id, region_id, filename
                         );
+                        RFENGINE_RLOG_GC_SIZE
+                            .with_label_values(&["success"])
+                            .observe(file_size as f64);
                     }
                 }
             }

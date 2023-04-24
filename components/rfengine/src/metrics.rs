@@ -76,4 +76,11 @@ lazy_static! {
         exponential_buckets(16.0, 2.0, 20).unwrap()
     )
     .unwrap();
+    pub static ref RFENGINE_RLOG_GC_SIZE: HistogramVec = register_histogram_vec!(
+        "raft_engine_log_file_gc_size",
+        "Bucketed histogram of raft log gc file size",
+        &["status"],
+        exponential_buckets(16.0, 2.0, 20).unwrap()
+    )
+    .unwrap();
 }
