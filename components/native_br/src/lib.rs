@@ -9,6 +9,7 @@ pub mod error;
 pub mod pd_control;
 pub mod restore;
 pub mod restore_keyspace;
+mod tiflash;
 pub mod truncate_ts;
 
 pub use error::Result;

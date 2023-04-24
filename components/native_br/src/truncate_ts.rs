@@ -101,7 +101,10 @@ pub fn truncate_ts_with_cfg(
             return Ok(());
         }
     }
-    Err(Error::Timeout(timeout.as_secs()))
+    Err(Error::Timeout(
+        "Wait truncate ts".to_string(),
+        timeout.as_secs(),
+    ))
 }
 
 // send truncate ts request and return the count of shard which execute truncate

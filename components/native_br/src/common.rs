@@ -42,6 +42,27 @@ pub fn get_all_stores_except_tiflash(pd_client: &dyn PdClient) -> Result<Vec<Sto
         .collect())
 }
 
+pub fn get_tiflash_storage_stores(pd_client: &dyn PdClient) -> Result<Vec<Store>> {
+    Ok(pd_client
+        .get_all_stores(true)?
+        .into_iter()
+        .filter(|s| {
+            let mut is_tiflash = false;
+            let mut is_write_role = false;
+            for l in s.get_labels().iter() {
+                if l.key.to_lowercase() == "engine" && l.value.to_lowercase() == "tiflash" {
+                    is_tiflash = true;
+                }
+                // exclude the tiflash write node
+                if l.key.to_lowercase() == "engine_role" && l.value.to_lowercase() == "write" {
+                    is_write_role = true;
+                }
+            }
+            is_tiflash && !is_write_role
+        })
+        .collect())
+}
+
 pub async fn send_request_to_store(req: Request<Body>, store: &Store) -> Result<Bytes> {
     let client = hyper::Client::new();
     let resp = client.request(req).await;

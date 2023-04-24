@@ -4,7 +4,7 @@ use std::str::FromStr;
 
 use bstr::ByteSlice;
 use bytes::Bytes;
-use http::{Request, Uri};
+use http::{Method, Request, Uri};
 use hyper::Body;
 use slog_global::debug;
 use tikv_util::box_err;
@@ -13,6 +13,33 @@ use url::Url;
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Sync + Send>>;
 
 const PD_KEYSPACE_PATH: &str = "/pd/api/v2/keyspaces";
+const PD_PLACEMENT_RULE_GROUP_PATH: &str = "pd/api/v1/config/placement-rule";
+const PD_PLACEMENT_RULE_PATH: &str = "pd/api/v1/config/rule";
+const TIFLASH_GROUP: &str = "tiflash";
+
+#[derive(Default, Serialize, Deserialize, Debug)]
+#[serde(default)]
+pub struct RuleGroup {
+    pub group_id: String,
+    pub group_index: i64,
+    pub group_override: bool,
+    pub rules: Option<Vec<Rule>>,
+}
+
+#[derive(Default, Serialize, Deserialize, Debug)]
+#[serde(default)]
+pub struct Rule {
+    pub group_id: String,
+    pub id: String,
+    pub index: i64,
+    #[serde(rename = "override")]
+    pub is_override: bool,
+    pub start_key: String,
+    pub end_key: String,
+    pub role: String,
+    pub is_witness: bool,
+    pub count: u32,
+}
 
 /// PdControl provides access to HTTP APIs of PD, which are not included in gRPC
 /// interface. It's also expected to act like the tool `pd-ctl`.
@@ -45,21 +72,26 @@ impl PdControl {
         })
     }
 
-    async fn request_pd_restful(&self, query: String, post_data: Option<Vec<u8>>) -> Result<Bytes> {
+    async fn request_pd_restful(
+        &self,
+        path: String,
+        method: Method,
+        body_data: Option<Vec<u8>>,
+    ) -> Result<Bytes> {
         let client = hyper::Client::new();
         let mut err = None;
         for endpoint in &self.endpoints {
-            let uri = endpoint.join(&query).unwrap();
+            let uri = endpoint.join(&path).unwrap();
             let uri = Uri::from_str(uri.as_str()).unwrap();
-            let resp = match post_data {
-                Some(ref post_data) => {
-                    let req = Request::post(uri)
-                        .body(Body::from(post_data.to_vec()))
-                        .unwrap();
-                    client.request(req).await
-                }
-                None => client.get(uri).await,
-            };
+            let req = Request::builder()
+                .method(method.clone())
+                .uri(uri)
+                .body(match body_data {
+                    Some(ref data) => Body::from(data.to_owned()),
+                    None => Body::empty(),
+                })
+                .unwrap();
+            let resp = client.request(req).await;
             match resp {
                 Err(e) => err = Some(box_err!(e)),
                 Ok(resp) => {
@@ -81,13 +113,36 @@ impl PdControl {
 
     pub async fn get_keyspace_by_name(&self, keyspace_name: &str) -> Result<KeyspaceMeta> {
         let query = format!("{PD_KEYSPACE_PATH}/{}", keyspace_name);
-        match self.request_pd_restful(query, None).await {
+        match self.request_pd_restful(query, Method::GET, None).await {
             Ok(resp) => {
                 let keyspace = serde_json::from_slice(&resp)?;
                 debug!("get_keyspace: {:?}", keyspace);
                 Ok(keyspace)
             }
             Err(err) => Err(box_err!("get_keyspace_by_name error: {:?}", err)),
+        }
+    }
+
+    pub async fn get_tiflash_placement_rule_group(&self) -> Result<Option<RuleGroup>> {
+        let path = format!("{PD_PLACEMENT_RULE_GROUP_PATH}/{TIFLASH_GROUP}");
+        match self.request_pd_restful(path, Method::GET, None).await {
+            Ok(resp) => {
+                let tiflash_rule_group = serde_json::from_slice(&resp)?;
+                debug!("get tiflash rule group: {:?}", tiflash_rule_group);
+                Ok(tiflash_rule_group)
+            }
+            Err(err) => Err(box_err!("get tiflash rule group error: {:?}", err)),
+        }
+    }
+
+    pub async fn remove_tiflash_placement_rule_by_id(&self, rule_id: &str) -> Result<()> {
+        let path = format!("{PD_PLACEMENT_RULE_PATH}/{TIFLASH_GROUP}/{rule_id}");
+        match self.request_pd_restful(path, Method::DELETE, None).await {
+            Ok(_) => {
+                debug!("delete tiflash rule {}-{}", TIFLASH_GROUP, rule_id);
+                Ok(())
+            }
+            Err(err) => Err(box_err!("delete tiflash rule error: {:?}", err)),
         }
     }
 }

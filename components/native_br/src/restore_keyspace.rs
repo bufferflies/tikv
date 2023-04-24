@@ -41,6 +41,7 @@ use crate::{
     pd_control::PdControl,
     restore::{get_cluster_backup_meta, RestoreConfig},
     step,
+    tiflash::remove_tiflash_replia_of_keyspace,
 };
 
 const WORKING_PATH_PREFIX: &str = "keyspace-restore";
@@ -64,6 +65,16 @@ pub fn restore_keyspace_with_cfg(
         keyspace.id
     };
     step!("Keyspace name {keyspace_name}'s id is {keyspace_id}");
+
+    if let Err(e) = runtime.block_on(remove_tiflash_replia_of_keyspace(
+        keyspace_id,
+        &pd_control,
+        &pd_client,
+    )) {
+        error!("Keyspace {keyspace_id} remove tiflash replica err {:?}", e);
+        return Err(e);
+    }
+    step!("Removed keyspace {keyspace_name} tiflash replica");
 
     restore_keyspace(
         keyspace_id,

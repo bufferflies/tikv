@@ -22,8 +22,8 @@ pub enum Error {
     PdError(pd_client::Error),
     #[error("Etcd error {0}")]
     EtcdError(etcd_client::Error),
-    #[error("Timeout {0}s")]
-    Timeout(u64),
+    #[error("{0} timeout {0}s")]
+    Timeout(String, u64),
     #[error("TiKV error {0}")]
     TikvError(tikv_client::Error),
     #[error("KvEngine error {0}")]
