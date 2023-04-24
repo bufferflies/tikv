@@ -1343,6 +1343,17 @@ impl Applier {
         source: ChangeSet,
         commit_index: u64,
     ) {
+        // Resume commit merge would be stale after restore snapshot.
+        if self.apply_state.applied_index >= commit_index {
+            info!(
+                "{} ignore stale resume commit merge, applied_index {}, commit_index {}",
+                self.tag(),
+                self.apply_state.applied_index,
+                commit_index
+            );
+            return;
+        }
+
         self.commit_merge_source_tables
             .insert(source.shard_id, source);
 
