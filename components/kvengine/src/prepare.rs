@@ -4,12 +4,14 @@ use std::{collections::HashMap, io::Write, path::PathBuf, sync::atomic::Ordering
 
 use bytes::{Buf, Bytes};
 use file_system::{IoOp, IoType};
+use tikv_util::{mpsc::Receiver, time::Instant};
 
 use crate::{
     apply::ChangeSet, metrics::ENGINE_LEVEL_WRITE_VEC, table::sstable::LocalFile, EngineCore, *,
 };
 
 pub const BLOB_LEVEL: u32 = 1 << 31;
+pub const LOAD_FILE_CONCURRENCY: usize = 8;
 
 pub fn is_blob_file(flags: u32) -> bool {
     flags == BLOB_LEVEL
@@ -131,41 +133,44 @@ impl EngineCore {
             let tx = result_tx.clone();
             runtime.spawn(async move {
                 let res = fs.read_file(id, opts).await;
-                tx.send(res.map(|data| (id, level, data))).unwrap();
+                let _ = tx.send(res.map(|data| (id, level, data)));
             });
-            msg_count += 1;
-        }
-        let mut errors = vec![];
-        for _ in 0..msg_count {
-            match result_rx.recv().unwrap() {
-                Ok((id, level, data)) => {
-                    let data_len = data.len();
-                    if let Err(err) =
-                        self.write_local_file(id, data, use_direct_io, is_blob_file(level))
-                    {
-                        error!("write local file failed {:?}", &err);
-                        errors.push(err.into());
-                    } else {
-                        let file = if is_blob_file(level) {
-                            self.open_blob_table_file(id)?
-                        } else {
-                            self.open_sstable_file(id)?
-                        };
-                        cs.add_file(id, file, level, self.cache.clone())?;
-                        ENGINE_LEVEL_WRITE_VEC
-                            .with_label_values(&[&level.to_string()])
-                            .inc_by(data_len as u64);
-                    }
-                }
-                Err(err) => {
-                    error!("prefetch failed {:?}", &err);
-                    errors.push(err);
-                }
+            if msg_count < LOAD_FILE_CONCURRENCY {
+                msg_count += 1;
+            } else {
+                self.recv_file_data(cs, use_direct_io, &result_rx)?;
             }
         }
-        if !errors.is_empty() {
-            return Err(errors.pop().unwrap().into());
+        for _ in 0..msg_count {
+            self.recv_file_data(cs, use_direct_io, &result_rx)?;
         }
+        Ok(())
+    }
+
+    fn recv_file_data(
+        &self,
+        cs: &mut ChangeSet,
+        use_direct_io: bool,
+        result_tx: &Receiver<dfs::Result<(u64, u32, Bytes)>>,
+    ) -> Result<()> {
+        let (id, level, data) = result_tx.recv().unwrap()?;
+        let data_len = data.len();
+        let start = Instant::now();
+        self.write_local_file(id, data, use_direct_io, is_blob_file(level))?;
+        info!(
+            "write local file {} takes {:?}",
+            id,
+            start.saturating_elapsed()
+        );
+        let file = if is_blob_file(level) {
+            self.open_blob_table_file(id)?
+        } else {
+            self.open_sstable_file(id)?
+        };
+        cs.add_file(id, file, level, self.cache.clone())?;
+        ENGINE_LEVEL_WRITE_VEC
+            .with_label_values(&[&level.to_string()])
+            .inc_by(data_len as u64);
         Ok(())
     }
 
@@ -196,9 +201,9 @@ impl EngineCore {
                     .request(IoType::Compaction, IoOp::Write, write_batch_size);
                 let end_off = std::cmp::min(start_off + write_batch_size, data.len());
                 file.write_all(&data[start_off..end_off])?;
-                file.sync_data()?;
                 start_off = end_off;
             }
+            file.sync_data()?;
         }
         std::fs::rename(&tmp_file_name, local_file_name)
     }

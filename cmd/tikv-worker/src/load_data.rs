@@ -45,12 +45,13 @@ type Result<T> = std::result::Result<T, Error>;
 pub(crate) const MAX_IN_MEM_SIZE: usize = 256 * 1024 * 1024;
 
 const SST_FILE_SIZE: usize = 16 * 1024 * 1024;
-const REGION_SIZE: usize = 256 * 1024 * 1024;
+const REGION_SIZE: usize = 1024 * 1024 * 1024;
 const COARSE_SPLIT_SIZE: usize = 32 * 1024 * 1024 * 1024; // 32GB
 const BLOCK_SIZE: usize = 64 * 1024;
 const ZSTD_COMPRESSION_LEVEL: i32 = 3;
 const FLUSH_FILE_CONCURRENCY: usize = 8;
 const CREATE_FILE_CONCURRENCY: usize = 32;
+const INGEST_CONCURRENCY: usize = 4;
 
 const ALLOCATE_ID_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
@@ -720,7 +721,8 @@ impl LoadTaskWorker {
                 .runtime
                 .block_on(self.ctx.pd.scan_regions(first_key, last_key, usize::MAX))?;
         info!("scanned regions {:?}", regions);
-        let mut handles = vec![];
+        let (tx, rx) = tikv_util::mpsc::unbounded();
+        let mut msg_cnt = 0;
         for mut pd_region in regions {
             let region = pd_region.get_region();
             let cs = build_ingest_files(region, &sst_metas, self.task_ctx.start_ts);
@@ -731,15 +733,23 @@ impl LoadTaskWorker {
                 return Err(Error::Canceled);
             }
             let pd_cli = self.ctx.pd.clone();
-            handles.push(self.ctx.runtime.spawn(async move {
+            let tx = tx.clone();
+            self.ctx.runtime.spawn(async move {
                 info!("ingest file {:?}", cs);
                 let region = pd_region.take_region();
                 let leader = pd_region.take_leader();
-                ingest_files_to_leader(pd_cli, cs, region, leader).await
-            }));
+                let res = ingest_files_to_leader(pd_cli, cs, region, leader).await;
+                let _ = tx.send(res);
+            });
+            if msg_cnt < INGEST_CONCURRENCY {
+                msg_cnt += 1;
+            } else {
+                rx.recv().unwrap()?;
+                self.scheduler.add_ingested_regions();
+            }
         }
-        for handle in handles {
-            self.ctx.runtime.block_on(handle).unwrap()?;
+        for _ in 0..msg_cnt {
+            rx.recv().unwrap()?;
             self.scheduler.add_ingested_regions();
         }
         Ok(())
