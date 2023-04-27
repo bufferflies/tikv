@@ -400,6 +400,14 @@ impl ClusterDataStats {
         Ok(())
     }
 
+    pub fn check_leader(&self) -> Result<(), String> {
+        for stats in self.regions.values() {
+            let map_err_fn = |e| format!("err {} stats: {:?}", e, stats);
+            stats.get_leader_stats().map_err(map_err_fn)?;
+        }
+        Ok(())
+    }
+
     pub fn iter_shard_stats(&self, mut f: impl FnMut(u64, &ShardStats) -> bool) {
         for region in self.regions.values() {
             for (&store_id, shard) in &region.shard_stats {
@@ -491,12 +499,16 @@ impl RegionShardStats {
         Ok(())
     }
 
-    fn check_healthy(&self) -> Result<(), String> {
+    fn get_leader_stats(&self) -> Result<&ShardStats, String> {
         let item = self.shard_stats.values().find(|stats| stats.active);
         if item.is_none() {
             return Err("no leader".into());
         }
-        let stats = item.unwrap();
+        Ok(item.unwrap())
+    }
+
+    fn check_healthy(&self) -> Result<(), String> {
+        let stats = self.get_leader_stats()?;
         if stats.mem_table_count > 1 {
             return Err(format!(
                 "mem table count {} too large",

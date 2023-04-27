@@ -5,6 +5,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use api_version::api_v2::KEYSPACE_PREFIX_LEN;
 use dashmap::DashMap;
 use futures::executor::block_on;
 use kvproto::metapb::{Peer, PeerRole, Region};
@@ -69,7 +70,11 @@ impl Scheduler {
                 region.get_peers().iter().any(|peer| peer.id == peer_id)
             },
             10,
-            "failed to add learner",
+            format!(
+                "failed to add learner, region id {}, store id {}, peer id {}",
+                region_id, store_id, peer_id
+            )
+            .as_str(),
         );
         let mut peer = Peer::new();
         peer.store_id = store_id;
@@ -87,7 +92,11 @@ impl Scheduler {
                     .any(|peer| peer.id == peer_id && peer.role == PeerRole::Voter)
             },
             10,
-            "failed to promote learner",
+            format!(
+                "failed to promote learner, region id {}, store id {}, peer id {}",
+                region_id, store_id, peer_id
+            )
+            .as_str(),
         );
         let mut old_leader = Peer::default();
         let mut to_remove = Peer::default();
@@ -108,7 +117,7 @@ impl Scheduler {
                     .unwrap_or(false)
             },
             10,
-            "failed to get target peer",
+            format!("failed to get target peer, region id {}", region_id).as_str(),
         );
         must_wait(
             || {
@@ -196,16 +205,40 @@ impl Scheduler {
             .clone()
     }
 
-    pub fn merge_random_region(&self) -> bool {
+    pub fn merge_random_region(&self, disallow_cross_keyspace: bool) -> bool {
+        let mut rng = rand::thread_rng();
         let mut regions = self.pd.get_all_regions();
         regions.sort_by(|a, b| a.start_key.cmp(&b.start_key));
-        let merge_idx = rand::thread_rng().gen_range(1..regions.len());
-        let left = &regions[merge_idx - 1];
-        let right = &regions[merge_idx];
-        if !left.end_key.eq(&right.start_key) {
-            return false;
-        }
-        let (source, target) = if merge_idx % 2 == 0 {
+
+        let in_same_keyspace = |left: &Region, right: &Region| -> bool {
+            left.start_key.len() >= KEYSPACE_PREFIX_LEN
+                && right.start_key.len() >= KEYSPACE_PREFIX_LEN
+                && left.start_key[..KEYSPACE_PREFIX_LEN] == right.start_key[..KEYSPACE_PREFIX_LEN]
+        };
+
+        let mut get_adjacent_regions = || -> Option<(&Region, &Region)> {
+            for _ in 0..3 {
+                let merge_idx = rng.gen_range(1..regions.len());
+                let left = &regions[merge_idx - 1];
+                let right = &regions[merge_idx];
+
+                if !left.end_key.eq(&right.start_key) {
+                    continue;
+                }
+                if disallow_cross_keyspace && !in_same_keyspace(left, right) {
+                    continue;
+                }
+
+                return Some((left, right));
+            }
+            None
+        };
+
+        let (left, right) = match get_adjacent_regions() {
+            Some((left, right)) => (left, right),
+            None => return false,
+        };
+        let (source, target) = if rng.gen_ratio(1, 2) {
             (left, right)
         } else {
             (right, left)

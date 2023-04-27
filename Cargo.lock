@@ -6536,6 +6536,7 @@ dependencies = [
 name = "test_cloud_server"
 version = "0.1.0"
 dependencies = [
+ "api_version",
  "bytes",
  "cloud_server",
  "dashmap 4.0.2",

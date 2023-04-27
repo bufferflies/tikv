@@ -176,7 +176,7 @@ pub fn backup_cluster_with_ts(
             errs, config.tolerate_err
         );
         if errs.len() > config.tolerate_err {
-            return Err(Error::ServerError(format!("backup errors {:?}", errs)));
+            return Err(errs.pop().unwrap());
         }
     }
     let alloc_id = pd_client.alloc_id()?;

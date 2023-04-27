@@ -32,6 +32,12 @@ pub enum Error {
     RfEngine(rfengine::Error),
     #[error("Region version not match expected:{} actual:{}", .expected, .actual)]
     RegionVerNotMatch { expected: u64, actual: u64 },
+    #[error("Region {0} not found or no leader")]
+    RegionNotFoundOrNoLeader(u64 /* region id */),
+    #[error("HTTP error {0}")]
+    HttpError(#[from] hyper::Error),
+    #[error("Retry limit exceeded, last error {0}")]
+    RetryLimitExceeded(Box<Error>),
 }
 
 impl From<dfs::Error> for Error {

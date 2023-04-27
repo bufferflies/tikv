@@ -773,7 +773,14 @@ impl StatusServer {
             },
         );
 
-        let res = fut.await.unwrap();
+        let res = match fut.await {
+            Ok(res) => res,
+            Err(e) => {
+                let err_msg = format!("{} restore_shard channel error: {:?}", shard_id, e);
+                error!("{}", err_msg);
+                return Ok(make_response(StatusCode::INTERNAL_SERVER_ERROR, err_msg));
+            }
+        };
         if res.response.get_header().has_error() {
             error!(
                 "{} restore_shard error: {:?}",

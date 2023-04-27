@@ -34,6 +34,9 @@ lazy_static::lazy_static! {
     pub static ref MOVE_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref MERGE_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref TRANSFER_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    pub static ref NODE_RESTART_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    pub static ref BACKUP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    pub static ref RESTORE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 }
 
 pub const TIMEOUT: Duration = Duration::from_secs(60);
@@ -98,7 +101,7 @@ fn test_random_merge() {
     }
     let handles = vec![
         spawn_write(0, cluster.new_client()),
-        spawn_merge(cluster.new_scheduler()),
+        spawn_merge(cluster.new_scheduler(), false),
         spawn_transfer(cluster.new_scheduler()),
         spawn_move(cluster.new_scheduler(), Arc::new(RwLock::new(()))),
     ];
@@ -185,11 +188,11 @@ pub(crate) fn spawn_move(scheduler: Scheduler, two_node_down: Arc<RwLock<()>>) -
     })
 }
 
-pub(crate) fn spawn_merge(scheduler: Scheduler) -> JoinHandle<()> {
+pub(crate) fn spawn_merge(scheduler: Scheduler, disallow_cross_keyspace: bool) -> JoinHandle<()> {
     std::thread::spawn(move || {
         let start_time = Instant::now();
         while start_time.saturating_elapsed() < TIMEOUT {
-            if scheduler.merge_random_region() {
+            if scheduler.merge_random_region(disallow_cross_keyspace) {
                 MERGE_COUNTER.fetch_add(1, Ordering::SeqCst);
             }
         }

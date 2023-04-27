@@ -66,8 +66,12 @@ pub fn get_tiflash_storage_stores(pd_client: &dyn PdClient) -> Result<Vec<Store>
 pub async fn send_request_to_store(req: Request<Body>, store: &Store) -> Result<Bytes> {
     let client = hyper::Client::new();
     let resp = client.request(req).await;
-    if resp.is_err() {
-        return Err(box_err!("{:?} {:?}", store, resp.unwrap_err()));
+    if let Err(err) = resp {
+        error!(
+            "send request to store failed, store {:?}, err {:?}",
+            store, err
+        );
+        return Err(err.into());
     }
     let resp = resp.unwrap();
     if !resp.status().is_success() {

@@ -131,7 +131,14 @@ pub fn panic_region_file_path<P: AsRef<Path>>(data_dir: P, region_id: u64) -> Pa
 pub fn create_panic_region_file<P: AsRef<Path>>(data_dir: P, region_id: u64) {
     let file = panic_region_file_path(data_dir, region_id);
     let count = get_panic_region_count(&file) + 1;
-    fs::write(file, count.to_string()).unwrap();
+    // Ignore write panic_region_file error for keyspace restore, as the data path
+    // of which is removed before panic is captured.
+    fs::write(file.as_path(), count.to_string()).unwrap_or_else(|e| {
+        warn!(
+            "write panic_region_file failed: {:?}, path {:?}, region {}, count {}",
+            e, file, region_id, count
+        )
+    });
 }
 
 pub fn get_panic_region_count<P: AsRef<Path>>(file_path: P) -> u64 {

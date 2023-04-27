@@ -37,7 +37,7 @@ use crate::{
         load_peer_raft_state, load_rf_engine_meta, now, retain_sst_files, send_request_to_store,
         RawRegion,
     },
-    error::{Error, Result},
+    error::{Error, Error::RetryLimitExceeded, Result},
     pd_control::PdControl,
     restore::{get_cluster_backup_meta, RestoreConfig},
     step,
@@ -48,6 +48,7 @@ const WORKING_PATH_PREFIX: &str = "keyspace-restore";
 const ZSTD_COMPRESSION_LEVEL: &str = "5"; // The same as ZSTD_COMPRESSION_LEVEL_FOR_REMOTE.
 
 const REQUEST_RESTORE_SNAPSHOT_RETRY_LIMIT: usize = 10;
+const RESTORE_KEYSPACE_MAX_RETRY: usize = 20;
 
 pub fn restore_keyspace_with_cfg(
     config: RestoreConfig,
@@ -110,6 +111,10 @@ pub fn restore_keyspace(
         keyspace_end
     );
     let cluster_backup = get_cluster_backup_meta(&s3fs, backup_name.to_owned());
+    debug!(
+        "Keyspace {} get cluster backup meta: {:?}",
+        keyspace_id, cluster_backup
+    );
     let mut cluster = BackupCluster::new(
         &cluster_backup,
         working_path,
@@ -138,13 +143,27 @@ pub fn restore_keyspace(
 
     let mut success_ranges = MergeRanges::default();
     let mut retry = 0;
+    let mut last_error = None;
     loop {
-        // align target regions
-        let mut target_regions = runtime.block_on(get_target_regions(
+        if retry > RESTORE_KEYSPACE_MAX_RETRY {
+            return Err(RetryLimitExceeded(Box::new(last_error.unwrap())));
+        }
+        retry += 1;
+
+        // get target regions
+        let mut target_regions = match runtime.block_on(get_target_regions(
             &pd_client,
             &keyspace_start,
             &keyspace_end,
-        ))?;
+        )) {
+            Ok(regions) => regions,
+            Err(err) => {
+                warn!("get target regions failed: {:?}, retry again", err);
+                last_error = Some(err);
+                thread::sleep(Duration::from_millis(200));
+                continue;
+            }
+        };
         let target_regions_total_cnt = target_regions.len();
         if !success_ranges.is_empty() {
             target_regions.retain(|r| !success_ranges.covered(&r.raw_start, &r.raw_end));
@@ -156,6 +175,7 @@ pub fn restore_keyspace(
             target_regions_total_cnt
         );
 
+        // align target regions
         let (aligned_regions, trimmed_shards_cnt) = cluster.align_target_regions(target_regions)?;
         step!(
             "Keyspace {} align {} backup shards to {} target regions and trim {} over bound shards",
@@ -465,9 +485,11 @@ impl BackupCluster {
             rf.stop_worker();
             drop(rf);
         }
-        let kv_engine = self.kv_engine.take().unwrap();
-        kv_engine.close();
-        drop(kv_engine);
+        if let Some(kv_engine) = self.kv_engine.take() {
+            // `self.kv_engine` will be None when `BackupCluster` fail to initialize.
+            kv_engine.close();
+            drop(kv_engine);
+        }
         // Receiver cannot get err msg even close_sender, send Stop msg instead.
         if let Some(sender) = &self.meta_sender {
             sender.send(StoreMsg::Stop).unwrap();
@@ -1210,10 +1232,17 @@ fn restore_snapshots(
         handles.push((runtime.spawn(task), start, end));
     }
 
+    let is_error_retryable = |err: &Error| {
+        matches!(
+            err,
+            Error::RegionVerNotMatch { .. } | Error::RegionNotFoundOrNoLeader(_)
+        )
+    };
+
     for (h, start, end) in handles {
         match runtime.block_on(h).unwrap() {
             Ok(()) => success_ranges.insert(start, end),
-            Err(e @ Error::RegionVerNotMatch { .. }) => {
+            Err(e) if is_error_retryable(&e) => {
                 info!(
                     "Keyspace {} request_restore_snapshot error: {:?}, retry in next loop",
                     keyspace_id, e
@@ -1233,15 +1262,15 @@ fn restore_snapshots(
 
 async fn request_restore_snapshot(pd_client: Arc<dyn PdClient>, cs: &pb::ChangeSet) -> Result<()> {
     let post_data = Cow::from(cs.write_to_bytes().unwrap());
-    let mut err = None;
+    let mut last_err = None;
     'retry: for i in 0..REQUEST_RESTORE_SNAPSHOT_RETRY_LIMIT {
         let (region, leader) = match pd_client.get_region_leader_by_id(cs.shard_id).await? {
             Some((region, leader)) => (region, leader),
             None => {
-                let err_msg = format!("no leader of region {}", cs.shard_id);
-                warn!("{}", err_msg);
-                err = box_err!(err_msg);
-                tokio::time::sleep(Duration::from_millis(1000)).await;
+                let e = Err(Error::RegionNotFoundOrNoLeader(cs.shard_id));
+                warn!("{}:{}: {:?}", cs.shard_id, cs.shard_ver, e);
+                last_err = Some(e);
+                tokio::time::sleep(Duration::from_millis(200)).await;
                 continue 'retry;
             }
         };
@@ -1269,15 +1298,18 @@ async fn request_restore_snapshot(pd_client: Arc<dyn PdClient>, cs: &pb::ChangeS
                 return Ok(());
             }
             Err(e) => {
-                let err_msg = format!("{} request_restore_snapshot #{i} error: {:?}", tag, e);
+                let err_msg = format!(
+                    "{} request_restore_snapshot #{i} error: {:?}, region: {:?}, leader: {:?}",
+                    tag, e, region, leader
+                );
                 warn!("{}", err_msg);
-                err = box_err!(err_msg);
-                tokio::time::sleep(Duration::from_millis(1000)).await;
+                last_err = Some(Err(box_err!(err_msg)));
+                tokio::time::sleep(Duration::from_millis(500)).await;
                 continue 'retry;
             }
         }
     }
-    Err(Error::Other(err.expect("there must be error")))
+    last_err.expect("there must be error")
 }
 
 /// MergeRanges is used to record the successful ranges to reduce unnecessary
