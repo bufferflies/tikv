@@ -83,6 +83,10 @@ impl RaftState {
         self.vote = hs.get_vote();
         self.commit = hs.get_commit();
     }
+
+    pub fn get_last_preprocessed_index(&self) -> u64 {
+        self.last_preprocessed_index
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]

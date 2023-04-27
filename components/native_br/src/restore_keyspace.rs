@@ -218,7 +218,7 @@ struct BackupShard {
     pub need_flush: bool,
     pub meta: ShardMeta,
     pub(crate) raw_meta: Option<pb::ChangeSet>, // used for kv engine recovery only.
-    raft_commit_index: u64,
+    raft_progress: (u64 /* commit_index */, u64 /* preprocess_index */),
 }
 
 impl fmt::Debug for BackupShard {
@@ -231,7 +231,7 @@ impl fmt::Debug for BackupShard {
             .field("need_flush", &self.need_flush)
             .field("meta", &self.meta.to_change_set())
             .field("raw_meta", &self.raw_meta)
-            .field("raft_commit_index", &self.raft_commit_index)
+            .field("raft_progress", &self.raft_progress)
             .finish()
     }
 }
@@ -245,7 +245,7 @@ impl PartialEq for BackupShard {
             && self.need_flush == other.need_flush
             && self.meta.to_change_set() == other.meta.to_change_set()
             && self.raw_meta == other.raw_meta
-            && self.raft_commit_index == other.raft_commit_index
+            && self.raft_progress == other.raft_progress
     }
 }
 
@@ -517,7 +517,10 @@ impl BackupCluster {
                 let need_initial_flush = meta.has_parent();
 
                 let raft_state = load_peer_raft_state(rf, peer_id, meta.shard_ver).unwrap();
-                let raft_commit_index = raft_state.get_hard_state().commit;
+                let raft_progress = (
+                    raft_state.get_hard_state().commit,
+                    raft_state.get_last_preprocessed_index(),
+                );
 
                 let shard = BackupShard {
                     region_id,
@@ -526,7 +529,7 @@ impl BackupCluster {
                     need_flush: need_flush_mem_table || need_initial_flush,
                     meta: ShardMeta::new(rf.get_engine_id(), &meta),
                     raw_meta: Some(meta),
-                    raft_commit_index,
+                    raft_progress,
                 };
                 debug!("collect_prefix_shard: {:?}", shard);
                 prefix_shards.push(shard);
@@ -611,7 +614,7 @@ impl BackupCluster {
             leader_shards
                 .entry(shard.region_id)
                 .and_modify(|old: &mut BackupShard| {
-                    if shard.raft_commit_index > old.raft_commit_index {
+                    if shard.raft_progress > old.raft_progress {
                         std::mem::swap(old, &mut shard);
                     }
                 })
@@ -1389,7 +1392,7 @@ mod tests {
             shard.meta.end = tuple.3.as_bytes().to_vec();
             // Use `ver` as raft log index, assume that the newer ver, the faster raft
             // progress.
-            shard.raft_commit_index = shard.ver();
+            shard.raft_progress = (shard.ver(), shard.ver());
             shard
         };
 
