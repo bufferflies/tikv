@@ -26,7 +26,12 @@ use crate::{
 
 const MAX_BATCH_GET_CNT: i64 = 1024;
 // keyspace meta in pd is "/pd/$cluster_id/PD_KEYSPACE_META_PATH"
-const PD_KEY_SPACE_META_PATH: [&str; 3] = ["keyspaces/", "region_label/keyspaces/", "rules/"];
+const PD_KEY_SPACE_META_PATH: [&str; 4] = [
+    "keyspaces/",
+    "region_label/keyspaces/",
+    "rules/",
+    "tso/keyspace_groups/membership/",
+];
 
 pub type Result<T> = std::result::Result<T, Error>;
 
