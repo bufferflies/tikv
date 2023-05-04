@@ -11,7 +11,10 @@ use tikv_util::{
     store::{find_peer, new_learner_peer},
 };
 
-use crate::alloc_node_id;
+use crate::{
+    alloc_node_id, generate_keyspace_key, get_keyspace_prefix, i_to_key, i_to_val,
+    is_region_belongs_to_keyspace,
+};
 
 #[test]
 fn test_region_merge() {
@@ -118,10 +121,105 @@ fn test_region_merge_isolated_peer() {
     cluster.stop();
 }
 
-fn i_to_key(i: usize) -> Vec<u8> {
-    format!("key_{:03}", i).into_bytes()
+#[test]
+fn test_region_split_merge_without_inner_key_offset() {
+    region_split_merge_inner_key_offset(false);
 }
 
-fn i_to_val(i: usize) -> Vec<u8> {
-    format!("val_{:03}", i).into_bytes().repeat(3)
+#[test]
+fn test_region_split_merge_with_inner_key_offset() {
+    region_split_merge_inner_key_offset(true);
+}
+
+fn region_split_merge_inner_key_offset(enabled: bool) {
+    test_util::init_log_for_test();
+
+    let expected_inner_key_off = if enabled { 4 } else { 0 };
+
+    let node_ids = vec![alloc_node_id(), alloc_node_id(), alloc_node_id()];
+    let mut cluster = ServerCluster::new(node_ids.clone(), |_, conf: &mut TikvConfig| {
+        conf.enable_inner_key_offset = enabled;
+    });
+    cluster.wait_region_replicated(&[], 3);
+
+    let mut client = cluster.new_client();
+    let pd_client = cluster.get_pd_client();
+    // 1. Generate 1 keyspace region.
+    // 2. Split it into 10 regions.
+    // 3. Check all regions inner_key_off.
+    // 4. Merge 10 inner regions into 1 region.
+    // 5. Check the keyspace region's inner_key_off.
+    let (ks100, ks101) = (get_keyspace_prefix(100), get_keyspace_prefix(101));
+    let generate_ks100_keys = generate_keyspace_key(100);
+    let split_keys = vec![ks100.clone(), ks101.clone()];
+    for sk in split_keys {
+        client.split(sk.as_slice());
+    }
+    cluster.wait_pd_region_count(3);
+
+    // split keyspace inner regions
+    for i in 0..10 {
+        let split_key = generate_ks100_keys(i);
+        client.split(split_key.as_slice());
+    }
+
+    cluster.wait_pd_region_count(13);
+
+    // check inner_key_off
+    let mut regions = pd_client.get_all_regions();
+    regions.sort_by(|a, b| a.get_start_key().cmp(b.get_start_key()));
+
+    for region in &regions {
+        if is_region_belongs_to_keyspace(region, 100) {
+            for node_id in &node_ids {
+                let kv_engine = cluster.get_kvengine(*node_id);
+                let region_id = region.get_id();
+                let shard = kv_engine.get_shard(region_id).unwrap();
+                assert_eq!(shard.range.inner_key_off, expected_inner_key_off);
+            }
+        }
+    }
+
+    // merge inner regions
+    for region in &regions {
+        if is_region_belongs_to_keyspace(region, 100) {
+            let start_key = region.get_start_key();
+            let end_key = region.get_end_key();
+            if end_key.starts_with(ks101.as_slice()) {
+                continue;
+            }
+
+            client
+                .try_merge_adjacent_region(
+                    start_key,
+                    Some(ks100.as_slice()),
+                    Duration::from_secs(3),
+                )
+                .unwrap();
+        }
+    }
+
+    cluster.wait_pd_region_count(3);
+
+    // check inner_key_off
+    let regions = pd_client.get_all_regions();
+    for region in &regions {
+        if is_region_belongs_to_keyspace(region, 100) {
+            for node_id in &node_ids {
+                let region_id = region.get_id();
+                let kv_engine = cluster.get_kvengine(*node_id);
+                let shard = kv_engine.get_shard(region_id).unwrap();
+                assert_eq!(shard.range.inner_key_off, expected_inner_key_off);
+            }
+        }
+    }
+
+    for &node_id in &node_ids {
+        cluster.stop_node(node_id);
+    }
+    for &node_id in &node_ids {
+        cluster.start_node(node_id, |_, _| {});
+    }
+    client.verify_data_with_ref_store();
+    cluster.stop();
 }

@@ -137,14 +137,6 @@ impl RawRegion {
     pub fn get_end_key(&self) -> &[u8] {
         self.raw_end.as_slice()
     }
-
-    pub fn take_start_key(&mut self) -> Vec<u8> {
-        std::mem::take(&mut self.raw_start)
-    }
-
-    pub fn take_end_key(&mut self) -> Vec<u8> {
-        std::mem::take(&mut self.raw_end)
-    }
 }
 
 impl From<metapb::Region> for RawRegion {

@@ -128,6 +128,11 @@ impl WriteBatchEntry {
             + self.user_meta_len as usize
             + self.val_len as usize
     }
+
+    pub fn trim_to_inner_key(&mut self, inner_key_off: usize) {
+        self.buf_off += inner_key_off as u32;
+        self.key_len -= inner_key_off as u16;
+    }
 }
 
 pub struct Node {

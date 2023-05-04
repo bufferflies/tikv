@@ -274,7 +274,11 @@ impl kvengine::MetaIterator for RecoverHandler {
                 }
                 if let Some(black_list) = self.black_list.as_mut() {
                     let snap = cs.get_snapshot();
-                    if black_list.check_blocked(cs.shard_id, snap.get_start(), snap.get_end()) {
+                    if black_list.check_blocked(
+                        cs.shard_id,
+                        snap.get_outer_start(),
+                        snap.get_outer_end(),
+                    ) {
                         warn!("region {} blocked by black list", cs.shard_id);
                         continue;
                     }

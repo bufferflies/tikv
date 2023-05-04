@@ -151,7 +151,7 @@ fn collect_prefix_regions(rf: &RfEngine, prefix: &[u8]) -> Vec<(u64, u64, u64)> 
         }
         let engine_meta = load_rf_engine_meta(rf, peer_id).expect("engine meta not found");
         let snap = engine_meta.get_snapshot();
-        let start = snap.get_start();
+        let start = snap.get_outer_start();
         if start.starts_with(prefix) {
             prefix_peers.push((peer_id, region_id, engine_meta.shard_ver));
         }
@@ -267,8 +267,8 @@ impl EmptyRegion {
         cs.set_shard_ver(self.epoch_ver);
         cs.set_sequence(RAFT_INIT_LOG_INDEX);
         let snap = cs.mut_snapshot();
-        snap.set_start(Self::raw_key(self.start_key.as_bytes()));
-        snap.set_end(Self::raw_key(self.end_key.as_bytes()));
+        snap.set_outer_start(Self::raw_key(self.start_key.as_bytes()));
+        snap.set_outer_end(Self::raw_key(self.end_key.as_bytes()));
         snap.set_data_sequence(RAFT_INIT_LOG_INDEX);
         let props = snap.mut_properties();
         props.set_shard_id(self.region_id);

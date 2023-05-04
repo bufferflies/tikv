@@ -65,8 +65,8 @@ message Flush {
 }
 
 message Snapshot {
-  bytes start = 1;
-  bytes end = 2;
+  bytes outer_start = 1;
+  bytes outer_end = 2;
   Properties properties = 3;
   repeated L0Create l0Creates = 5;
   repeated TableCreate tableCreates = 6;
@@ -74,6 +74,7 @@ message Snapshot {
   uint64 data_sequence = 8;
   repeated BlobCreate BlobCreates = 9;
   uint64 max_ts = 10;
+  uint32 inner_key_off = 11;
 }
 
 message L0Create {

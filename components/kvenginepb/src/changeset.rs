@@ -2259,8 +2259,8 @@ impl ::protobuf::reflect::ProtobufValue for Flush {
 #[derive(PartialEq,Clone,Default)]
 pub struct Snapshot {
     // message fields
-    pub start: ::std::vec::Vec<u8>,
-    pub end: ::std::vec::Vec<u8>,
+    pub outer_start: ::std::vec::Vec<u8>,
+    pub outer_end: ::std::vec::Vec<u8>,
     pub properties: ::protobuf::SingularPtrField<Properties>,
     pub l0_creates: ::protobuf::RepeatedField<L0Create>,
     pub table_creates: ::protobuf::RepeatedField<TableCreate>,
@@ -2268,6 +2268,7 @@ pub struct Snapshot {
     pub data_sequence: u64,
     pub blob_creates: ::protobuf::RepeatedField<BlobCreate>,
     pub max_ts: u64,
+    pub inner_key_off: u32,
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
     pub cached_size: ::protobuf::CachedSize,
@@ -2284,56 +2285,56 @@ impl Snapshot {
         ::std::default::Default::default()
     }
 
-    // bytes start = 1;
+    // bytes outer_start = 1;
 
 
-    pub fn get_start(&self) -> &[u8] {
-        &self.start
+    pub fn get_outer_start(&self) -> &[u8] {
+        &self.outer_start
     }
-    pub fn clear_start(&mut self) {
-        self.start.clear();
+    pub fn clear_outer_start(&mut self) {
+        self.outer_start.clear();
     }
 
     // Param is passed by value, moved
-    pub fn set_start(&mut self, v: ::std::vec::Vec<u8>) {
-        self.start = v;
+    pub fn set_outer_start(&mut self, v: ::std::vec::Vec<u8>) {
+        self.outer_start = v;
     }
 
     // Mutable pointer to the field.
     // If field is not initialized, it is initialized with default value first.
-    pub fn mut_start(&mut self) -> &mut ::std::vec::Vec<u8> {
-        &mut self.start
+    pub fn mut_outer_start(&mut self) -> &mut ::std::vec::Vec<u8> {
+        &mut self.outer_start
     }
 
     // Take field
-    pub fn take_start(&mut self) -> ::std::vec::Vec<u8> {
-        ::std::mem::replace(&mut self.start, ::std::vec::Vec::new())
+    pub fn take_outer_start(&mut self) -> ::std::vec::Vec<u8> {
+        ::std::mem::replace(&mut self.outer_start, ::std::vec::Vec::new())
     }
 
-    // bytes end = 2;
+    // bytes outer_end = 2;
 
 
-    pub fn get_end(&self) -> &[u8] {
-        &self.end
+    pub fn get_outer_end(&self) -> &[u8] {
+        &self.outer_end
     }
-    pub fn clear_end(&mut self) {
-        self.end.clear();
+    pub fn clear_outer_end(&mut self) {
+        self.outer_end.clear();
     }
 
     // Param is passed by value, moved
-    pub fn set_end(&mut self, v: ::std::vec::Vec<u8>) {
-        self.end = v;
+    pub fn set_outer_end(&mut self, v: ::std::vec::Vec<u8>) {
+        self.outer_end = v;
     }
 
     // Mutable pointer to the field.
     // If field is not initialized, it is initialized with default value first.
-    pub fn mut_end(&mut self) -> &mut ::std::vec::Vec<u8> {
-        &mut self.end
+    pub fn mut_outer_end(&mut self) -> &mut ::std::vec::Vec<u8> {
+        &mut self.outer_end
     }
 
     // Take field
-    pub fn take_end(&mut self) -> ::std::vec::Vec<u8> {
-        ::std::mem::replace(&mut self.end, ::std::vec::Vec::new())
+    pub fn take_outer_end(&mut self) -> ::std::vec::Vec<u8> {
+        ::std::mem::replace(&mut self.outer_end, ::std::vec::Vec::new())
     }
 
     // .enginepb.Properties properties = 3;
@@ -2488,6 +2489,21 @@ impl Snapshot {
     pub fn set_max_ts(&mut self, v: u64) {
         self.max_ts = v;
     }
+
+    // uint32 inner_key_off = 11;
+
+
+    pub fn get_inner_key_off(&self) -> u32 {
+        self.inner_key_off
+    }
+    pub fn clear_inner_key_off(&mut self) {
+        self.inner_key_off = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_inner_key_off(&mut self, v: u32) {
+        self.inner_key_off = v;
+    }
 }
 
 impl ::protobuf::Message for Snapshot {
@@ -2520,10 +2536,10 @@ impl ::protobuf::Message for Snapshot {
             let (field_number, wire_type) = is.read_tag_unpack()?;
             match field_number {
                 1 => {
-                    ::protobuf::rt::read_singular_proto3_bytes_into(wire_type, is, &mut self.start)?;
+                    ::protobuf::rt::read_singular_proto3_bytes_into(wire_type, is, &mut self.outer_start)?;
                 },
                 2 => {
-                    ::protobuf::rt::read_singular_proto3_bytes_into(wire_type, is, &mut self.end)?;
+                    ::protobuf::rt::read_singular_proto3_bytes_into(wire_type, is, &mut self.outer_end)?;
                 },
                 3 => {
                     ::protobuf::rt::read_singular_message_into(wire_type, is, &mut self.properties)?;
@@ -2558,6 +2574,13 @@ impl ::protobuf::Message for Snapshot {
                     let tmp = is.read_uint64()?;
                     self.max_ts = tmp;
                 },
+                11 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint32()?;
+                    self.inner_key_off = tmp;
+                },
                 _ => {
                     ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
                 },
@@ -2570,11 +2593,11 @@ impl ::protobuf::Message for Snapshot {
     #[allow(unused_variables)]
     fn compute_size(&self) -> u32 {
         let mut my_size = 0;
-        if !self.start.is_empty() {
-            my_size += ::protobuf::rt::bytes_size(1, &self.start);
+        if !self.outer_start.is_empty() {
+            my_size += ::protobuf::rt::bytes_size(1, &self.outer_start);
         }
-        if !self.end.is_empty() {
-            my_size += ::protobuf::rt::bytes_size(2, &self.end);
+        if !self.outer_end.is_empty() {
+            my_size += ::protobuf::rt::bytes_size(2, &self.outer_end);
         }
         if let Some(ref v) = self.properties.as_ref() {
             let len = v.compute_size();
@@ -2601,17 +2624,20 @@ impl ::protobuf::Message for Snapshot {
         if self.max_ts != 0 {
             my_size += ::protobuf::rt::value_size(10, self.max_ts, ::protobuf::wire_format::WireTypeVarint);
         }
+        if self.inner_key_off != 0 {
+            my_size += ::protobuf::rt::value_size(11, self.inner_key_off, ::protobuf::wire_format::WireTypeVarint);
+        }
         my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
         self.cached_size.set(my_size);
         my_size
     }
 
     fn write_to_with_cached_sizes(&self, os: &mut ::protobuf::CodedOutputStream) -> ::protobuf::ProtobufResult<()> {
-        if !self.start.is_empty() {
-            os.write_bytes(1, &self.start)?;
+        if !self.outer_start.is_empty() {
+            os.write_bytes(1, &self.outer_start)?;
         }
-        if !self.end.is_empty() {
-            os.write_bytes(2, &self.end)?;
+        if !self.outer_end.is_empty() {
+            os.write_bytes(2, &self.outer_end)?;
         }
         if let Some(ref v) = self.properties.as_ref() {
             os.write_tag(3, ::protobuf::wire_format::WireTypeLengthDelimited)?;
@@ -2641,6 +2667,9 @@ impl ::protobuf::Message for Snapshot {
         };
         if self.max_ts != 0 {
             os.write_uint64(10, self.max_ts)?;
+        }
+        if self.inner_key_off != 0 {
+            os.write_uint32(11, self.inner_key_off)?;
         }
         os.write_unknown_fields(self.get_unknown_fields())?;
         ::std::result::Result::Ok(())
@@ -2685,14 +2714,14 @@ impl ::protobuf::Message for Snapshot {
             descriptor.get(|| {
                 let mut fields = ::std::vec::Vec::new();
                 fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeBytes>(
-                    "start",
-                    |m: &Snapshot| { &m.start },
-                    |m: &mut Snapshot| { &mut m.start },
+                    "outer_start",
+                    |m: &Snapshot| { &m.outer_start },
+                    |m: &mut Snapshot| { &mut m.outer_start },
                 ));
                 fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeBytes>(
-                    "end",
-                    |m: &Snapshot| { &m.end },
-                    |m: &mut Snapshot| { &mut m.end },
+                    "outer_end",
+                    |m: &Snapshot| { &m.outer_end },
+                    |m: &mut Snapshot| { &mut m.outer_end },
                 ));
                 fields.push(::protobuf::reflect::accessor::make_singular_ptr_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<Properties>>(
                     "properties",
@@ -2729,6 +2758,11 @@ impl ::protobuf::Message for Snapshot {
                     |m: &Snapshot| { &m.max_ts },
                     |m: &mut Snapshot| { &mut m.max_ts },
                 ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint32>(
+                    "inner_key_off",
+                    |m: &Snapshot| { &m.inner_key_off },
+                    |m: &mut Snapshot| { &mut m.inner_key_off },
+                ));
                 ::protobuf::reflect::MessageDescriptor::new::<Snapshot>(
                     "Snapshot",
                     fields,
@@ -2751,8 +2785,8 @@ impl ::protobuf::Message for Snapshot {
 
 impl ::protobuf::Clear for Snapshot {
     fn clear(&mut self) {
-        self.start.clear();
-        self.end.clear();
+        self.outer_start.clear();
+        self.outer_end.clear();
         self.properties.clear();
         self.l0_creates.clear();
         self.table_creates.clear();
@@ -2760,6 +2794,7 @@ impl ::protobuf::Clear for Snapshot {
         self.data_sequence = 0;
         self.blob_creates.clear();
         self.max_ts = 0;
+        self.inner_key_off = 0;
         self.unknown_fields.clear();
     }
 }
@@ -2769,8 +2804,8 @@ impl ::protobuf::PbPrint for Snapshot {
     fn fmt(&self, name: &str, buf: &mut String) {
         ::protobuf::push_message_start(name, buf);
         let old_len = buf.len();
-        ::protobuf::PbPrint::fmt(&self.start, "start", buf);
-        ::protobuf::PbPrint::fmt(&self.end, "end", buf);
+        ::protobuf::PbPrint::fmt(&self.outer_start, "outer_start", buf);
+        ::protobuf::PbPrint::fmt(&self.outer_end, "outer_end", buf);
         ::protobuf::PbPrint::fmt(&self.properties, "properties", buf);
         ::protobuf::PbPrint::fmt(&self.l0_creates, "l0_creates", buf);
         ::protobuf::PbPrint::fmt(&self.table_creates, "table_creates", buf);
@@ -2778,6 +2813,7 @@ impl ::protobuf::PbPrint for Snapshot {
         ::protobuf::PbPrint::fmt(&self.data_sequence, "data_sequence", buf);
         ::protobuf::PbPrint::fmt(&self.blob_creates, "blob_creates", buf);
         ::protobuf::PbPrint::fmt(&self.max_ts, "max_ts", buf);
+        ::protobuf::PbPrint::fmt(&self.inner_key_off, "inner_key_off", buf);
         if old_len < buf.len() {
           buf.push(' ');
         }
@@ -2788,8 +2824,8 @@ impl ::std::fmt::Debug for Snapshot {
     #[allow(unused_variables)]
     fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
         let mut s = String::new();
-        ::protobuf::PbPrint::fmt(&self.start, "start", &mut s);
-        ::protobuf::PbPrint::fmt(&self.end, "end", &mut s);
+        ::protobuf::PbPrint::fmt(&self.outer_start, "outer_start", &mut s);
+        ::protobuf::PbPrint::fmt(&self.outer_end, "outer_end", &mut s);
         ::protobuf::PbPrint::fmt(&self.properties, "properties", &mut s);
         ::protobuf::PbPrint::fmt(&self.l0_creates, "l0_creates", &mut s);
         ::protobuf::PbPrint::fmt(&self.table_creates, "table_creates", &mut s);
@@ -2797,6 +2833,7 @@ impl ::std::fmt::Debug for Snapshot {
         ::protobuf::PbPrint::fmt(&self.data_sequence, "data_sequence", &mut s);
         ::protobuf::PbPrint::fmt(&self.blob_creates, "blob_creates", &mut s);
         ::protobuf::PbPrint::fmt(&self.max_ts, "max_ts", &mut s);
+        ::protobuf::PbPrint::fmt(&self.inner_key_off, "inner_key_off", &mut s);
         write!(f, "{}", s)
     }
 }
@@ -5049,34 +5086,35 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     \x12*\n\nproperties\x18\x02\x20\x01(\x0b2\x14.enginepb.PropertiesB\0\x12\
     \x11\n\x07version\x18\x03\x20\x01(\x04B\0\x12\x10\n\x06max_ts\x18\x05\
     \x20\x01(\x04B\0\x12*\n\nBlobCreate\x18\x04\x20\x01(\x0b2\x14.enginepb.B\
-    lobCreateB\0:\0\"\x9f\x02\n\x08Snapshot\x12\x0f\n\x05start\x18\x01\x20\
-    \x01(\x0cB\0\x12\r\n\x03end\x18\x02\x20\x01(\x0cB\0\x12*\n\nproperties\
-    \x18\x03\x20\x01(\x0b2\x14.enginepb.PropertiesB\0\x12'\n\tl0Creates\x18\
-    \x05\x20\x03(\x0b2\x12.enginepb.L0CreateB\0\x12-\n\x0ctableCreates\x18\
-    \x06\x20\x03(\x0b2\x15.enginepb.TableCreateB\0\x12\x15\n\x0bbaseVersion\
-    \x18\x07\x20\x01(\x04B\0\x12\x17\n\rdata_sequence\x18\x08\x20\x01(\x04B\
-    \0\x12+\n\x0bBlobCreates\x18\t\x20\x03(\x0b2\x14.enginepb.BlobCreateB\0\
-    \x12\x10\n\x06max_ts\x18\n\x20\x01(\x04B\0:\0\"A\n\x08L0Create\x12\x0c\n\
-    \x02ID\x18\x01\x20\x01(\x04B\0\x12\x12\n\x08smallest\x18\x02\x20\x01(\
-    \x0cB\0\x12\x11\n\x07biggest\x18\x03\x20\x01(\x0cB\0:\0\"C\n\nBlobCreate\
-    \x12\x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\x12\x12\n\x08smallest\x18\x02\
-    \x20\x01(\x0cB\0\x12\x11\n\x07biggest\x18\x03\x20\x01(\x0cB\0:\0\"c\n\
-    \x0bTableCreate\x12\x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\x12\x0f\n\x05lev\
-    el\x18\x02\x20\x01(\rB\0\x12\x0c\n\x02CF\x18\x03\x20\x01(\x05B\0\x12\x12\
-    \n\x08smallest\x18\x04\x20\x01(\x0cB\0\x12\x11\n\x07biggest\x18\x05\x20\
-    \x01(\x0cB\0:\0\"<\n\x0bTableDelete\x12\x0c\n\x02ID\x18\x01\x20\x01(\x04\
-    B\0\x12\x0f\n\x05level\x18\x02\x20\x01(\rB\0\x12\x0c\n\x02CF\x18\x03\x20\
-    \x01(\x05B\0:\0\"D\n\x05Split\x12)\n\tnewShards\x18\x01\x20\x03(\x0b2\
-    \x14.enginepb.PropertiesB\0\x12\x0e\n\x04Keys\x18\x03\x20\x03(\x0cB\0:\0\
-    \"\xc0\x01\n\x0bIngestFiles\x12'\n\tl0Creates\x18\x01\x20\x03(\x0b2\x12.\
-    enginepb.L0CreateB\0\x12-\n\x0ctableCreates\x18\x02\x20\x03(\x0b2\x15.en\
-    ginepb.TableCreateB\0\x12*\n\nproperties\x18\x03\x20\x01(\x0b2\x14.engin\
-    epb.PropertiesB\0\x12+\n\x0bBlobCreates\x18\x04\x20\x03(\x0b2\x14.engine\
-    pb.BlobCreateB\0:\0\"C\n\nProperties\x12\x11\n\x07shardID\x18\x01\x20\
-    \x01(\x04B\0\x12\x0e\n\x04keys\x18\x02\x20\x03(\tB\0\x12\x10\n\x06values\
-    \x18\x03\x20\x03(\x0cB\0:\0\"m\n\x0bTableChange\x12-\n\x0ctableDeletes\
-    \x18\x01\x20\x03(\x0b2\x15.enginepb.TableDeleteB\0\x12-\n\x0ctableCreate\
-    s\x18\x02\x20\x03(\x0b2\x15.enginepb.TableCreateB\0:\0B\0b\x06proto3\
+    lobCreateB\0:\0\"\xc4\x02\n\x08Snapshot\x12\x15\n\x0bouter_start\x18\x01\
+    \x20\x01(\x0cB\0\x12\x13\n\touter_end\x18\x02\x20\x01(\x0cB\0\x12*\n\npr\
+    operties\x18\x03\x20\x01(\x0b2\x14.enginepb.PropertiesB\0\x12'\n\tl0Crea\
+    tes\x18\x05\x20\x03(\x0b2\x12.enginepb.L0CreateB\0\x12-\n\x0ctableCreate\
+    s\x18\x06\x20\x03(\x0b2\x15.enginepb.TableCreateB\0\x12\x15\n\x0bbaseVer\
+    sion\x18\x07\x20\x01(\x04B\0\x12\x17\n\rdata_sequence\x18\x08\x20\x01(\
+    \x04B\0\x12+\n\x0bBlobCreates\x18\t\x20\x03(\x0b2\x14.enginepb.BlobCreat\
+    eB\0\x12\x10\n\x06max_ts\x18\n\x20\x01(\x04B\0\x12\x17\n\rinner_key_off\
+    \x18\x0b\x20\x01(\rB\0:\0\"A\n\x08L0Create\x12\x0c\n\x02ID\x18\x01\x20\
+    \x01(\x04B\0\x12\x12\n\x08smallest\x18\x02\x20\x01(\x0cB\0\x12\x11\n\x07\
+    biggest\x18\x03\x20\x01(\x0cB\0:\0\"C\n\nBlobCreate\x12\x0c\n\x02ID\x18\
+    \x01\x20\x01(\x04B\0\x12\x12\n\x08smallest\x18\x02\x20\x01(\x0cB\0\x12\
+    \x11\n\x07biggest\x18\x03\x20\x01(\x0cB\0:\0\"c\n\x0bTableCreate\x12\x0c\
+    \n\x02ID\x18\x01\x20\x01(\x04B\0\x12\x0f\n\x05level\x18\x02\x20\x01(\rB\
+    \0\x12\x0c\n\x02CF\x18\x03\x20\x01(\x05B\0\x12\x12\n\x08smallest\x18\x04\
+    \x20\x01(\x0cB\0\x12\x11\n\x07biggest\x18\x05\x20\x01(\x0cB\0:\0\"<\n\
+    \x0bTableDelete\x12\x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\x12\x0f\n\x05lev\
+    el\x18\x02\x20\x01(\rB\0\x12\x0c\n\x02CF\x18\x03\x20\x01(\x05B\0:\0\"D\n\
+    \x05Split\x12)\n\tnewShards\x18\x01\x20\x03(\x0b2\x14.enginepb.Propertie\
+    sB\0\x12\x0e\n\x04Keys\x18\x03\x20\x03(\x0cB\0:\0\"\xc0\x01\n\x0bIngestF\
+    iles\x12'\n\tl0Creates\x18\x01\x20\x03(\x0b2\x12.enginepb.L0CreateB\0\
+    \x12-\n\x0ctableCreates\x18\x02\x20\x03(\x0b2\x15.enginepb.TableCreateB\
+    \0\x12*\n\nproperties\x18\x03\x20\x01(\x0b2\x14.enginepb.PropertiesB\0\
+    \x12+\n\x0bBlobCreates\x18\x04\x20\x03(\x0b2\x14.enginepb.BlobCreateB\0:\
+    \0\"C\n\nProperties\x12\x11\n\x07shardID\x18\x01\x20\x01(\x04B\0\x12\x0e\
+    \n\x04keys\x18\x02\x20\x03(\tB\0\x12\x10\n\x06values\x18\x03\x20\x03(\
+    \x0cB\0:\0\"m\n\x0bTableChange\x12-\n\x0ctableDeletes\x18\x01\x20\x03(\
+    \x0b2\x15.enginepb.TableDeleteB\0\x12-\n\x0ctableCreates\x18\x02\x20\x03\
+    (\x0b2\x15.enginepb.TableCreateB\0:\0B\0b\x06proto3\
 ";
 
 static mut file_descriptor_proto_lazy: ::protobuf::lazy::Lazy<::protobuf::descriptor::FileDescriptorProto> = ::protobuf::lazy::Lazy {

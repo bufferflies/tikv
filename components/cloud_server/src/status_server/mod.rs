@@ -648,8 +648,8 @@ impl StatusServer {
                     return true;
                 }
                 let range = range.as_ref().unwrap();
-                let full_cover = s.start >= range.0 && s.end <= range.1;
-                if !full_cover && s.start < range.1 && s.end > range.0 {
+                let full_cover = s.outer_start >= range.0 && s.outer_end <= range.1;
+                if !full_cover && s.outer_start < range.1 && s.outer_end > range.0 {
                     partial_covered_shard = Some(s.clone());
                 }
                 full_cover
@@ -659,8 +659,8 @@ impl StatusServer {
             return Err(box_err!(
                 "Shard {} [{:?}-{:?}) is partial covered by range {:?}",
                 s.tag(),
-                s.start,
-                s.end,
+                s.outer_start,
+                s.outer_end,
                 range
             ));
         }

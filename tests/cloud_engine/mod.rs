@@ -31,3 +31,40 @@ pub(crate) fn alloc_node_id_vec(count: usize) -> Vec<u16> {
     nodes.resize_with(count, || alloc_node_id());
     nodes
 }
+
+pub(crate) fn get_keyspace_prefix(keyspace_id: u32) -> Vec<u8> {
+    let mut prefix = keyspace_id.to_be_bytes();
+    prefix[0] = b'x';
+    prefix.to_vec()
+}
+
+pub(crate) fn generate_keyspace_key(keyspace_id: u32) -> impl Fn(usize) -> Vec<u8> {
+    move |i: usize| -> Vec<u8> {
+        let mut key = get_keyspace_prefix(keyspace_id);
+        key.extend(i_to_key(i));
+        key
+    }
+}
+
+pub(crate) fn is_region_belongs_to_keyspace(
+    region: &kvproto::metapb::Region,
+    keyspace_id: u32,
+) -> bool {
+    let keyspace_prefix = get_keyspace_prefix(keyspace_id);
+    let keypsace_next_prefix = get_keyspace_prefix(keyspace_id + 1);
+    let start_key = region.get_start_key();
+    let end_key = region.get_end_key();
+    if start_key.is_empty() || end_key.is_empty() {
+        return false;
+    }
+    start_key.starts_with(&keyspace_prefix)
+        && (end_key.starts_with(&keyspace_prefix) || end_key == keypsace_next_prefix.as_slice())
+}
+
+pub(crate) fn i_to_key(i: usize) -> Vec<u8> {
+    format!("key_{:03}", i).into_bytes()
+}
+
+pub(crate) fn i_to_val(i: usize) -> Vec<u8> {
+    format!("val_{:03}", i).into_bytes().repeat(3)
+}

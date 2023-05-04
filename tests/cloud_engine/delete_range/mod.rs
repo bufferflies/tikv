@@ -6,49 +6,64 @@ use kvproto::kvrpcpb::UnsafeDestroyRangeRequest;
 use pd_client::PdClient;
 use test_cloud_server::{client::ClusterClient, ServerCluster};
 use tidb_query_common::util::convert_to_prefix_next;
+use tikv::config::TikvConfig;
 use tikv_util::config::ReadableDuration;
 
 use crate::alloc_node_id;
 
 #[test]
 fn test_delete_range() {
+    test_delete_range_helper(false);
+    test_delete_range_helper(true);
+}
+
+fn test_delete_range_helper(enable_inner_key_off: bool) {
     test_util::init_log_for_test();
     let node_id = alloc_node_id();
-    let mut cluster = ServerCluster::new(vec![node_id], |_, _| {});
+    let mut cluster = ServerCluster::new(vec![node_id], |_, conf: &mut TikvConfig| {
+        conf.enable_inner_key_offset = enable_inner_key_off;
+    });
     let mut client = cluster.new_client();
     // insert "key_100".."key_500"
-    client.put_kv(100..500, i_to_key, i_to_val);
+    client.put_kv(100..500, i_to_key_with_prefix, i_to_val);
     let store_id = cluster.get_stores()[0];
-    destroy_range(&mut client, store_id, "key_20".as_bytes());
-    let snap = cluster.get_snap(node_id, "key_".as_bytes());
-    assert!(!snap.has_data_in_prefix("key_200".as_bytes()));
-    assert!(!snap.has_data_in_prefix("key_209".as_bytes()));
+    destroy_range(&mut client, store_id, "x123key_20".as_bytes());
+    let snap = cluster.get_snap(node_id, "x123key_".as_bytes());
+    assert!(!snap.has_data_in_prefix("x123key_200".as_bytes()));
+    assert!(!snap.has_data_in_prefix("x123key_209".as_bytes()));
 
-    assert!(snap.has_data_in_prefix("key_24".as_bytes()));
+    assert!(snap.has_data_in_prefix("x123key_24".as_bytes()));
 
-    destroy_range(&mut client, store_id, "key_22".as_bytes());
-    let snap = cluster.get_snap(node_id, "key_".as_bytes());
-    assert!(!snap.has_data_in_prefix("key_20".as_bytes()));
-    assert!(!snap.has_data_in_prefix("key_22".as_bytes()));
+    destroy_range(&mut client, store_id, "x123key_22".as_bytes());
+    let snap = cluster.get_snap(node_id, "x123key_".as_bytes());
+    assert!(!snap.has_data_in_prefix("x123key_20".as_bytes()));
+    assert!(!snap.has_data_in_prefix("x123key_22".as_bytes()));
 
-    assert!(snap.has_data_in_prefix("key_21".as_bytes()));
+    assert!(snap.has_data_in_prefix("x123key_21".as_bytes()));
 
-    destroy_range(&mut client, store_id, "key_2".as_bytes());
-    let snap = cluster.get_snap(node_id, "key_".as_bytes());
-    assert!(!snap.has_data_in_prefix("key_20".as_bytes()));
-    assert!(!snap.has_data_in_prefix("key_21".as_bytes()));
-    assert!(!snap.has_data_in_prefix("key_22".as_bytes()));
-    assert!(!snap.has_data_in_prefix("key_23".as_bytes()));
+    destroy_range(&mut client, store_id, "x123key_2".as_bytes());
+    let snap = cluster.get_snap(node_id, "x123key_".as_bytes());
+    assert!(!snap.has_data_in_prefix("x123key_20".as_bytes()));
+    assert!(!snap.has_data_in_prefix("x123key_21".as_bytes()));
+    assert!(!snap.has_data_in_prefix("x123key_22".as_bytes()));
+    assert!(!snap.has_data_in_prefix("x123key_23".as_bytes()));
 
-    assert!(snap.has_data_in_prefix("key_3".as_bytes()));
+    assert!(snap.has_data_in_prefix("x123key_3".as_bytes()));
     cluster.stop();
 }
 
 #[test]
 fn test_delete_range_recover() {
+    test_delete_range_recover_helper(false);
+    test_delete_range_recover_helper(true);
+}
+
+fn test_delete_range_recover_helper(enable_inner_key_off: bool) {
     test_util::init_log_for_test();
     let node_ids = &[alloc_node_id(), alloc_node_id(), alloc_node_id()];
-    let mut cluster = ServerCluster::new(node_ids.to_vec(), |_, _| {});
+    let mut cluster = ServerCluster::new(node_ids.to_vec(), |_, conf: &mut TikvConfig| {
+        conf.enable_inner_key_offset = enable_inner_key_off;
+    });
     let region = cluster.get_pd_client().get_region_info(&[]).unwrap();
     let leader_store_id = region.leader.unwrap().store_id;
     let &stop_node_id = node_ids
@@ -59,9 +74,9 @@ fn test_delete_range_recover() {
     for _ in 0..3 {
         let mut client = cluster.new_client();
         for i in 0..10 {
-            client.put_kv(i * 100..i * 100 + 10, i_to_key, i_to_val);
+            client.put_kv(i * 100..i * 100 + 10, i_to_key_with_prefix, i_to_val);
         }
-        destroy_range(&mut client, leader_store_id, "key_".as_bytes());
+        destroy_range(&mut client, leader_store_id, "x123key_".as_bytes());
         client.put_kv(0..10, i_to_key, i_to_val);
         cluster.stop_node(stop_node_id);
         cluster.start_node(stop_node_id, |_, _| {});
@@ -72,21 +87,27 @@ fn test_delete_range_recover() {
 
 #[test]
 fn test_delete_range_delay() {
+    test_delete_range_delay_helper(false);
+    test_delete_range_delay_helper(true);
+}
+
+fn test_delete_range_delay_helper(enable_inner_key_off: bool) {
     test_util::init_log_for_test();
     let node_id = alloc_node_id();
     let cluster = ServerCluster::new(vec![node_id], |_, conf| {
         // 10 seconds max delay.
         conf.raft_store.local_file_gc_timeout = ReadableDuration(Duration::from_secs(5));
         conf.raft_store.local_file_gc_tick_interval = ReadableDuration(Duration::from_secs(1));
+        conf.enable_inner_key_offset = enable_inner_key_off;
     });
     let mut client = cluster.new_client();
     for i in 1..=30 {
-        client.split(&i_to_key(i * 100));
-        client.put_kv(i * 100..(i + 1) * 100, i_to_key, i_to_val);
+        client.split(&i_to_key_with_prefix(i * 100));
+        client.put_kv(i * 100..(i + 1) * 100, i_to_key_with_prefix, i_to_val);
     }
     let store_id = cluster.get_stores()[0];
     // 30 regions randomly delay delete range.
-    destroy_range(&mut client, store_id, "key_".as_bytes());
+    destroy_range(&mut client, store_id, "x123key_".as_bytes());
     let kvengine = cluster.get_kvengine(node_id);
 
     // Most of the del_prefixes are not destroyed.
@@ -136,4 +157,8 @@ fn i_to_key(i: usize) -> Vec<u8> {
 
 fn i_to_val(i: usize) -> Vec<u8> {
     format!("val_{:03}", i).into_bytes()
+}
+
+fn i_to_key_with_prefix(i: usize) -> Vec<u8> {
+    format!("x123key_{:03}", i).into_bytes()
 }

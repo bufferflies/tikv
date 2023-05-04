@@ -2884,6 +2884,10 @@ pub struct TikvConfig {
     #[online_config(skip)]
     pub black_list_path: String,
 
+    #[doc(hidden)]
+    #[online_config(skip)]
+    pub enable_inner_key_offset: bool,
+
     #[online_config(submodule)]
     pub log: LogConfig,
 
@@ -2984,6 +2988,7 @@ impl Default for TikvConfig {
             memory_usage_limit: None,
             memory_usage_high_water: 0.9,
             black_list_path: "".to_owned(),
+            enable_inner_key_offset: false,
             log: LogConfig::default(),
             quota: QuotaConfig::default(),
             readpool: ReadPoolConfig::default(),

@@ -9,6 +9,7 @@ use std::{
     },
 };
 
+use api_version::api_v2::{is_whole_keyspace_range, KEYSPACE_PREFIX_LEN};
 use bytes::Buf;
 use dashmap::mapref::entry::Entry;
 use kvenginepb as pb;
@@ -29,17 +30,30 @@ impl Engine {
         let new_ver = old_shard.ver + new_shard_props.len() as u64 - 1;
         for i in 0..=split.keys.len() {
             let (start_key, end_key) = get_splitting_start_end(
-                old_shard.start.chunk(),
-                old_shard.end.chunk(),
+                old_shard.outer_start.chunk(),
+                old_shard.outer_end.chunk(),
                 split.get_keys(),
                 i,
             );
+            let range = if self.core.opts.enable_inner_key_offset
+                && is_whole_keyspace_range(start_key, end_key)
+            {
+                ShardRange::new(start_key, end_key, KEYSPACE_PREFIX_LEN)
+            } else {
+                debug!(
+                    "engine split";
+                    "shard_id" => old_shard.id,
+                    "start_key" => format!("{:?}", start_key),
+                    "end_key" => format!("{:?}", end_key),
+                    "inner_key_off" => old_shard.inner_key_off
+                );
+                ShardRange::new(start_key, end_key, old_shard.inner_key_off)
+            };
             let mut new_shard = Shard::new(
                 self.get_engine_id(),
                 &new_shard_props[i],
                 new_ver,
-                start_key,
-                end_key,
+                range,
                 self.opts.clone(),
             );
             new_shard.parent_id = old_shard.id;
@@ -91,12 +105,13 @@ impl Engine {
                     new_cfs[cf].set_level(new_level);
                 }
             }
-            let new_del_prefixes = old_data
-                .del_prefixes
-                .build_split(&new_shard.start, &new_shard.end);
+            let new_del_prefixes = old_data.del_prefixes.build_split(
+                &new_shard.outer_start,
+                &new_shard.outer_end,
+                new_shard.inner_key_off,
+            );
             let new_data = ShardData::new(
-                new_shard.start.clone(),
-                new_shard.end.clone(),
+                new_shard.range.clone(),
                 new_del_prefixes,
                 old_data.truncate_ts, // TODO: maybe not necessary to truncate ts on the new shard.
                 old_data.trim_over_bound,
@@ -128,8 +143,8 @@ impl Engine {
             info!(
                 "split new shard {}, start {:x}, end {:x}, all files {:?}",
                 shard.tag(),
-                shard.start,
-                shard.end,
+                shard.outer_start,
+                shard.outer_end,
                 all_files
             );
         }
@@ -212,8 +227,14 @@ impl Engine {
         self.prepare_update_shard_version(&old_shard, sequence);
         let mut new_shard = self.new_shard_version(&old_shard, sequence);
         let source_snap = source.get_snapshot();
-        new_shard.start = min(old_shard.start.clone(), source_snap.start.clone().into());
-        new_shard.end = max(old_shard.end.clone(), source_snap.end.clone().into());
+        new_shard.range.outer_start = min(
+            old_shard.outer_start.clone(),
+            source_snap.outer_start.clone().into(),
+        );
+        new_shard.range.outer_end = max(
+            old_shard.outer_end.clone(),
+            source_snap.outer_end.clone().into(),
+        );
         new_shard.ver = max(shard_ver, source.shard_ver) + 1;
         // make sure the new mem-table version is greater than source.
         let source_mem_tbl_version = source_snap.base_version + source.sequence;
@@ -259,8 +280,7 @@ impl Engine {
             new_cf_builders[2].build(),
         ];
         let data = ShardData::new(
-            new_shard.start.clone(),
-            new_shard.end.clone(),
+            new_shard.range.clone(),
             old_data.del_prefixes.clone(),
             old_data.truncate_ts,
             old_data.trim_over_bound,
@@ -279,8 +299,8 @@ impl Engine {
         info!(
             "merged new shard {}, start {:x}, end {:x}, all files {:?}",
             new_shard.tag(),
-            new_shard.start,
-            new_shard.end,
+            new_shard.outer_start,
+            new_shard.outer_end,
             all_files
         );
         self.refresh_shard_states(&new_shard);
@@ -294,8 +314,7 @@ impl Engine {
             engine_id,
             &old_shard.properties.to_pb(old_shard.id),
             old_shard.ver + 1,
-            &old_shard.start,
-            &old_shard.end,
+            old_shard.range.clone(),
             old_shard.opt.clone(),
         );
         new_shard.set_data(old_shard.get_data());

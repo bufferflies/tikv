@@ -1916,7 +1916,12 @@ impl Peer {
         self.last_committed_split_idx = entry.index;
         let split = build_split_pb(self.region_id, &regions, entry.term);
         let shard_meta = self.mut_store().mut_engine_meta();
-        let new_metas = shard_meta.apply_split(&split, entry.index, RAFT_INIT_LOG_INDEX);
+        let new_metas = shard_meta.apply_split(
+            &split,
+            entry.index,
+            RAFT_INIT_LOG_INDEX,
+            ctx.cfg.enable_inner_key_offset,
+        );
         let mut cs = shard_meta.to_change_set();
         cs.set_split(split);
         cs.set_sequence(entry.index);

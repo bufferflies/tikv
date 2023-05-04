@@ -19,7 +19,7 @@ use file_system::{IoRateLimitMode, IoRateLimiter};
 use http::{Request, Uri};
 use hyper::Body;
 use itertools::Itertools;
-use kvengine::{dfs::S3Fs, IdVer, ShardMeta, ShardStats, ShardTag};
+use kvengine::{dfs::S3Fs, IdVer, ShardMeta, ShardRange, ShardStats, ShardTag};
 use kvenginepb as pb;
 use pd_client::PdClient;
 use protobuf::Message;
@@ -279,11 +279,11 @@ impl BackupShard {
     }
 
     pub fn start(&self) -> &[u8] {
-        &self.meta.start
+        &self.meta.range.outer_start
     }
 
     pub fn end(&self) -> &[u8] {
-        &self.meta.end
+        &self.meta.range.outer_end
     }
 
     pub fn table_version(&self) -> u64 {
@@ -513,6 +513,7 @@ impl BackupCluster {
     fn collect_prefix_shards(store_id: u64, rf: &RfEngine, prefix: &[u8]) -> Vec<BackupShard> {
         let region_peers = rf.get_region_peer_map();
         let mut prefix_shards = vec![];
+        let mut first_inner_key_off = None;
         for (region_id, peer_id) in region_peers {
             if region_id == 0 {
                 continue;
@@ -530,7 +531,13 @@ impl BackupCluster {
             assert_eq!(region_id, meta.shard_id);
 
             let snap = meta.get_snapshot();
-            if snap.get_start().starts_with(prefix) {
+            if snap.get_outer_start().starts_with(prefix) {
+                if let Some(x) = first_inner_key_off {
+                    assert_eq!(x, snap.inner_key_off)
+                } else {
+                    first_inner_key_off = Some(snap.inner_key_off);
+                }
+
                 let raft_last_index = rf.get_last_index(peer_id);
                 let need_flush_mem_table = raft_last_index.map_or(false, |last_idx| {
                     assert!(last_idx >= snap.get_data_sequence());
@@ -890,12 +897,21 @@ impl BackupCluster {
     ) -> (Vec<ShardMeta>, usize /* number of sstables */) {
         let mut sstables_cnt = 0;
         let mut target_shards = Vec::with_capacity(aligned_regions.len());
-        for mut region in aligned_regions {
+        let inner_key_off = self
+            .get_shard(*self.sorted_shards.first().unwrap())
+            .unwrap()
+            .meta
+            .range
+            .inner_key_off;
+        for region in aligned_regions {
             let mut meta = ShardMeta::default();
             meta.id = region.target_region.id;
             meta.ver = region.target_region.epoch.version;
-            meta.start = region.target_region.take_start_key();
-            meta.end = region.target_region.take_end_key();
+            meta.range = ShardRange::new(
+                region.target_region.get_start_key(),
+                region.target_region.get_end_key(),
+                inner_key_off,
+            );
 
             for shard_id in region.backup_shards_id {
                 let shard = self.get_shard(shard_id).unwrap();
@@ -1226,8 +1242,8 @@ fn restore_snapshots(
     let mut handles = Vec::with_capacity(snapshots.len());
     for snap in snapshots {
         let pd_client = pd_client.clone();
-        let start = snap.get_restore_shard().get_start().to_vec();
-        let end = snap.get_restore_shard().get_end().to_vec();
+        let start = snap.get_restore_shard().get_outer_start().to_vec();
+        let end = snap.get_restore_shard().get_outer_end().to_vec();
         let task = async move { request_restore_snapshot(pd_client, &snap).await };
         handles.push((runtime.spawn(task), start, end));
     }
@@ -1420,8 +1436,7 @@ mod tests {
             let mut shard = BackupShard::default();
             shard.region_id = tuple.0;
             shard.meta.ver = tuple.1;
-            shard.meta.start = tuple.2.as_bytes().to_vec();
-            shard.meta.end = tuple.3.as_bytes().to_vec();
+            shard.meta.range = ShardRange::new(tuple.2.as_bytes(), tuple.3.as_bytes(), 0);
             // Use `ver` as raft log index, assume that the newer ver, the faster raft
             // progress.
             shard.raft_progress = (shard.ver(), shard.ver());
@@ -1571,11 +1586,10 @@ mod tests {
         let make_backup_shards = |regions: Vec<RawRegion>| {
             let mut shards = HashMap::with_capacity(regions.len());
             let mut shards_id = Vec::with_capacity(regions.len());
-            for mut r in regions {
+            for r in regions {
                 let mut shard = BackupShard::default();
                 shard.region_id = r.id;
-                shard.meta.start = r.take_start_key();
-                shard.meta.end = r.take_end_key();
+                shard.meta.range = ShardRange::new(r.get_start_key(), r.get_end_key(), 0);
 
                 shards_id.push(shard.region_id);
                 shards.insert(shard.region_id, shard);

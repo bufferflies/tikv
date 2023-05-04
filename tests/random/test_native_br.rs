@@ -30,6 +30,11 @@ const KEYSPACE_COUNT: usize = 10;
 
 #[test]
 fn test_random_br() {
+    test_random_br_helper(false);
+    test_random_br_helper(true);
+}
+
+fn test_random_br_helper(enable_inner_key_offset: bool) {
     test_util::init_log_for_test();
 
     let (_temp_dir, _oss, dfs_config) = prepare_dfs("random_br_");
@@ -47,6 +52,7 @@ fn test_random_br() {
         conf.rfengine.target_file_size = ReadableSize::mb(1);
         conf.rfengine.batch_compression_threshold =
             ReadableSize::kb(rand::thread_rng().gen_range(0..2));
+        conf.enable_inner_key_offset = enable_inner_key_offset;
     };
     let mut cluster = ServerCluster::new(nodes.clone(), update_conf_fn);
     cluster.wait_region_replicated(&[], 3);

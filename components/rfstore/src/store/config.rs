@@ -97,6 +97,8 @@ pub struct Config {
     pub region_bucket_size: ReadableSize,
 
     pub apply_pool_size: usize,
+
+    pub enable_inner_key_offset: bool,
 }
 
 impl Default for Config {
@@ -138,6 +140,7 @@ impl Default for Config {
             consistency_check_interval: ReadableDuration::secs(0),
             channel_capacity: 40960,
             apply_pool_size: 3,
+            enable_inner_key_offset: false,
         }
     }
 }

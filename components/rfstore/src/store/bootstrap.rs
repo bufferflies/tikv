@@ -92,7 +92,7 @@ pub fn initial_change_set(region_id: u64, shard_ver: u64) -> kvengine::ChangeSet
     change_set.set_shard_ver(shard_ver);
     change_set.set_sequence(RAFT_INIT_LOG_INDEX);
     let mut snap = kvenginepb::Snapshot::default();
-    snap.set_end(kvengine::GLOBAL_SHARD_END_KEY.to_vec());
+    snap.set_outer_end(kvengine::GLOBAL_SHARD_END_KEY.to_vec());
     snap.set_data_sequence(RAFT_INIT_LOG_INDEX);
     let props = new_initial_properties(region_id);
     snap.set_properties(props);

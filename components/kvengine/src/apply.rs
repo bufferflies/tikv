@@ -209,8 +209,7 @@ impl EngineCore {
             new_l0_tbls.extend_from_slice(old_data.l0_tbls.as_slice());
 
             let new_data = ShardData::new(
-                shard.start.clone(),
-                shard.end.clone(),
+                old_data.range.clone(),
                 old_data.del_prefixes.clone(),
                 old_data.truncate_ts,
                 old_data.trim_over_bound,
@@ -240,8 +239,7 @@ impl EngineCore {
             !flushed
         });
         let new_data = ShardData::new(
-            shard.start.clone(),
-            shard.end.clone(),
+            data.range.clone(),
             data.del_prefixes.clone(),
             data.truncate_ts,
             data.trim_over_bound,
@@ -312,8 +310,7 @@ impl EngineCore {
             }
         }
         let new_data = ShardData::new(
-            shard.start.clone(),
-            shard.end.clone(),
+            data.range.clone(),
             data.del_prefixes.clone(),
             data.truncate_ts,
             data.trim_over_bound,
@@ -411,8 +408,7 @@ impl EngineCore {
         }
 
         let new_data = ShardData::new(
-            shard.start.clone(),
-            shard.end.clone(),
+            shard.range.clone(),
             data.del_prefixes.clone(),
             data.truncate_ts,
             data.trim_over_bound,
@@ -500,10 +496,9 @@ impl EngineCore {
         let (new_l0s, new_cfs) = self.get_sstables_from_table_change(&data, cs, tc, &mut del_files);
 
         assert_eq!(cs.get_property_key(), DEL_PREFIXES_KEY);
-        let done = DeletePrefixes::unmarshal(cs.get_property_value());
+        let done = DeletePrefixes::unmarshal(cs.get_property_value(), shard.inner_key_off);
         let new_data = ShardData::new(
-            shard.start.clone(),
-            shard.end.clone(),
+            data.range.clone(),
             data.del_prefixes.split(&done),
             data.truncate_ts,
             data.trim_over_bound,
@@ -533,8 +528,7 @@ impl EngineCore {
             new_truncate_ts = None;
         }
         let new_data = ShardData::new(
-            shard.start.clone(),
-            shard.end.clone(),
+            data.range.clone(),
             data.del_prefixes.clone(),
             new_truncate_ts,
             data.trim_over_bound,
@@ -558,8 +552,7 @@ impl EngineCore {
         let mut del_files = HashMap::new();
         let (new_l0s, new_cfs) = self.get_sstables_from_table_change(&data, cs, tc, &mut del_files);
         let new_data = ShardData::new(
-            shard.start.clone(),
-            shard.end.clone(),
+            data.range.clone(),
             data.del_prefixes.clone(),
             data.truncate_ts,
             false,
@@ -694,8 +687,7 @@ impl EngineCore {
         let mut new_cfs = old_data.cfs.clone();
         new_cfs[0] = new_cf;
         let new_data = ShardData::new(
-            shard.start.clone(),
-            shard.end.clone(),
+            old_data.range.clone(),
             old_data.del_prefixes.clone(),
             old_data.truncate_ts,
             old_data.trim_over_bound,
@@ -713,28 +705,27 @@ impl EngineCore {
         // TODO: skip duplicated.
 
         let snap = cs.get_restore_shard();
-        assert_eq!(old_shard.start, snap.start);
-        assert_eq!(old_shard.end, snap.end);
+        assert_eq!(old_shard.outer_start, snap.outer_start);
+        assert_eq!(old_shard.outer_end, snap.outer_end);
 
         self.send_flush_msg(FlushMsg::Clear(old_shard.id));
         self.send_compact_msg(CompactMsg::Clear(IdVer::new(old_shard.id, old_shard.ver)));
 
+        let range = ShardRange::from_snap(snap);
         // Increase shard version to make change sets generated before restore shard
         // stale.
         let new_shard = Shard::new(
             self.get_engine_id(),
             snap.get_properties(),
             cs.shard_ver + 1,
-            snap.start.as_slice(),
-            snap.end.as_slice(),
+            range,
             old_shard.opt.clone(),
         );
         let snap_data = new_shard.get_data();
         let old_data = old_shard.get_data();
         let (l0_tbls, blob_tbl_map, cfs) = create_snapshot_tables(cs.get_restore_shard(), cs);
         let new_data = ShardData::new(
-            snap_data.start.clone(),
-            snap_data.end.clone(),
+            snap_data.range.clone(),
             snap_data.del_prefixes.clone(),
             snap_data.truncate_ts,
             snap_data.trim_over_bound,

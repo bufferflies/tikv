@@ -180,8 +180,7 @@ impl SnapAccessCore {
         let (l0s, blob_tbls, scfs) = create_snapshot_tables(cs.get_snapshot(), &cs);
         let old_data = shard.get_data();
         let data = ShardData::new(
-            shard.start.clone(),
-            shard.end.clone(),
+            shard.range.clone(),
             old_data.del_prefixes.clone(),
             old_data.truncate_ts,
             old_data.trim_over_bound,
@@ -210,18 +209,20 @@ impl SnapAccessCore {
         } else {
             u64::MAX
         };
+        let data = self.data.clone();
+        let mut key = BytesMut::new();
+        key.extend_from_slice(data.prefix());
         Iterator {
             all_versions,
             reversed,
             read_ts,
-            key: BytesMut::new(),
+            key,
             val: table::Value::new(),
             inner: self.new_table_iterator(cf, reversed, fill_cache),
-            start: self.clone_start_key(),
-            end: self.clone_end_key(),
             bound: None,
             bound_include: false,
             blob_prefetcher: None,
+            data,
         }
     }
 
@@ -244,18 +245,20 @@ impl SnapAccessCore {
             self.data.blob_tbl_map.clone(),
             self.blob_table_prefetch_size,
         ));
+        let data = self.data.clone();
+        let mut key = BytesMut::new();
+        key.extend_from_slice(data.prefix());
         Iterator {
             all_versions,
             reversed,
             read_ts,
-            key: BytesMut::new(),
+            key,
             val: table::Value::new(),
             inner: self.new_table_iterator(cf, reversed, fill_cache),
-            start: self.clone_start_key(),
-            end: self.clone_end_key(),
             bound: None,
             bound_include: false,
             blob_prefetcher,
+            data,
         }
     }
 
@@ -280,17 +283,20 @@ impl SnapAccessCore {
         if version == 0 {
             version = u64::MAX;
         }
+
+        debug_assert_eq!(self.data.prefix(), &key[..self.data.inner_key_off]);
+        let inner_key = &key[self.data.inner_key_off..];
         let mut item = Item::new();
         item.owned_val = Some(vec![]);
         item.val = self.get_value(
             cf,
-            key,
+            inner_key,
             version,
             &mut item.path,
             item.owned_val.as_mut().unwrap(),
         );
         if item.val.is_external_link() {
-            item.owned_blob = Some(self.fetch_blob(key, &item.val));
+            item.owned_blob = Some(self.fetch_blob(inner_key, &item.val));
             item.val.fill_in_blob(item.owned_blob.as_ref().unwrap());
         }
         item
@@ -299,7 +305,7 @@ impl SnapAccessCore {
     fn get_value(
         &self,
         cf: usize,
-        key: &[u8],
+        inner_key: &[u8],
         version: u64,
         path: &mut AccessPath,
         out_val_owner: &mut Vec<u8>,
@@ -309,9 +315,9 @@ impl SnapAccessCore {
             let v = if i == 0 && cf == 0 {
                 // only use hint for the first mem-table and cf 0.
                 let mut hint = self.get_hint.lock().unwrap();
-                tbl.get_with_hint(key, version, &mut hint)
+                tbl.get_with_hint(inner_key, version, &mut hint)
             } else {
-                tbl.get(key, version)
+                tbl.get(inner_key, version)
             };
             path.mem_table += 1;
             if v.is_valid() {
@@ -320,10 +326,10 @@ impl SnapAccessCore {
                 return table::Value::decode(out_val_owner.as_slice());
             }
         }
-        let key_hash = farmhash::fingerprint64(key);
+        let key_hash = farmhash::fingerprint64(inner_key);
         for l0 in &self.data.l0_tbls {
             if let Some(tbl) = &l0.get_cf(cf) {
-                let v = tbl.get(key, version, key_hash, out_val_owner, 0);
+                let v = tbl.get(inner_key, version, key_hash, out_val_owner, 0);
                 path.l0 = path.l0.saturating_add(1);
                 if v.is_valid() {
                     return v;
@@ -332,7 +338,7 @@ impl SnapAccessCore {
         }
         let scf = self.data.get_cf(cf);
         for lh in &scf.levels {
-            let v = lh.get(key, version, key_hash, out_val_owner);
+            let v = lh.get(inner_key, version, key_hash, out_val_owner);
             path.ln += 1;
             if v.is_valid() {
                 return v;
@@ -392,19 +398,15 @@ impl SnapAccessCore {
     }
 
     pub fn get_start_key(&self) -> &[u8] {
-        self.data.start.chunk()
-    }
-
-    pub fn clone_start_key(&self) -> Bytes {
-        self.data.start.clone()
+        self.data.outer_start.chunk()
     }
 
     pub fn get_end_key(&self) -> &[u8] {
-        self.data.end.chunk()
+        self.data.outer_end.chunk()
     }
 
     pub fn clone_end_key(&self) -> Bytes {
-        self.data.end.clone()
+        self.data.outer_end.clone()
     }
 
     pub fn get_tag(&self) -> ShardTag {
@@ -462,8 +464,9 @@ impl SnapAccessCore {
             self.meta_seq
         };
         snap.set_data_sequence(data_sequence);
-        snap.set_start(self.get_start_key().to_vec());
-        snap.set_end(self.get_end_key().to_vec());
+        snap.set_outer_start(self.get_start_key().to_vec());
+        snap.set_outer_end(self.get_end_key().to_vec());
+        snap.set_inner_key_off(self.data.range.inner_key_off as u32);
         snap.set_properties(properties);
         let mut count = 0;
         let mut overlapped_count = 0;
@@ -561,11 +564,12 @@ impl SnapAccessCore {
     }
 
     pub fn get_newer(&self, cf: usize, key: &[u8], version: u64) -> Item<'_> {
+        let inner_key = &key[self.data.inner_key_off..];
         let mut item = Item::new();
         item.owned_val = Some(vec![]);
-        item.val = self.get_newer_val(cf, key, version, item.owned_val.as_mut().unwrap());
+        item.val = self.get_newer_val(cf, inner_key, version, item.owned_val.as_mut().unwrap());
         if item.val.is_external_link() {
-            item.owned_blob = Some(self.fetch_blob(key, &item.val));
+            item.owned_blob = Some(self.fetch_blob(inner_key, &item.val));
             item.val.fill_in_blob(item.owned_blob.as_ref().unwrap());
         }
         item
@@ -574,14 +578,14 @@ impl SnapAccessCore {
     fn get_newer_val(
         &self,
         cf: usize,
-        key: &[u8],
+        inner_key: &[u8],
         version: u64,
         out_val_owner: &mut Vec<u8>,
     ) -> table::Value {
-        let key_hash = farmhash::fingerprint64(key);
+        let key_hash = farmhash::fingerprint64(inner_key);
         for i in 0..self.data.mem_tbls.len() {
             let tbl = self.data.mem_tbls.as_slice()[i].get_cf(cf);
-            let v = tbl.get_newer(key, version);
+            let v = tbl.get_newer(inner_key, version);
             if v.is_valid() {
                 out_val_owner.resize(v.encoded_size(), 0);
                 v.encode(out_val_owner.as_mut_slice());
@@ -590,7 +594,7 @@ impl SnapAccessCore {
         }
         for l0 in &self.data.l0_tbls {
             if let Some(tbl) = &l0.get_cf(cf) {
-                let v = tbl.get_newer(key, version, key_hash, out_val_owner, 0);
+                let v = tbl.get_newer(inner_key, version, key_hash, out_val_owner, 0);
                 if v.is_valid() {
                     return v;
                 }
@@ -598,7 +602,7 @@ impl SnapAccessCore {
         }
         let scf = self.data.get_cf(cf);
         for lh in &scf.levels {
-            let v = lh.get_newer(key, version, key_hash, out_val_owner);
+            let v = lh.get_newer(inner_key, version, key_hash, out_val_owner);
             if v.is_valid() {
                 return v;
             }
@@ -606,16 +610,31 @@ impl SnapAccessCore {
         table::Value::new()
     }
 
-    pub fn has_data_in_prefix(&self, prefix: &[u8]) -> bool {
-        if self.data.del_prefixes.cover_prefix(prefix) {
+    pub fn has_data_in_prefix<'a>(&'a self, mut prefix: &'a [u8]) -> bool {
+        let shard_prefix = self.data.prefix();
+
+        let min_off = std::cmp::min(prefix.len(), self.data.inner_key_off);
+        if min_off > 0 {
+            if prefix[0..min_off] != shard_prefix[0..min_off] {
+                return false;
+            }
+            if prefix.len() < self.data.inner_key_off {
+                // If prefix is less than inner_key_off, the data in shard always have
+                // `shard_prefix`, just update prefix to shard_prefix.
+                prefix = shard_prefix;
+            }
+        }
+
+        let inner_prefix = &prefix[self.data.inner_key_off..];
+        if self.data.del_prefixes.cover_prefix(inner_prefix) {
             return false;
         }
         let mut it = self.new_iterator(0, false, false, Some(u64::MAX), true);
-        it.seek(prefix);
+        it.seek(inner_prefix);
         if !it.valid() {
             return false;
         }
-        it.key().starts_with(prefix)
+        it.key().starts_with(inner_prefix)
     }
 }
 
@@ -626,11 +645,10 @@ pub struct Iterator {
     pub key: BytesMut,
     val: table::Value,
     pub inner: Box<dyn table::Iterator>,
-    start: Bytes,
-    end: Bytes,
     pub bound: Option<Bytes>,
     pub bound_include: bool,
     blob_prefetcher: Option<BlobPrefetcher>,
+    data: ShardData,
 }
 
 impl Iterator {
@@ -681,7 +699,7 @@ impl Iterator {
     }
 
     fn update_item(&mut self) {
-        self.key.truncate(0);
+        self.key.truncate(self.data.inner_key_off);
         self.key.extend_from_slice(self.inner.key());
         self.val = self.inner.value();
     }
@@ -710,12 +728,10 @@ impl Iterator {
     // the next smallest key greater than provided if iterating in the forward
     // direction. Behavior would be reversed is iterating backwards.
     pub fn seek(&mut self, key: &[u8]) {
-        if !self.reversed {
-            self.inner.seek(key);
-        } else if key.is_empty() {
+        if key.len() <= self.data.inner_key_off {
             self.inner.rewind();
         } else {
-            self.inner.seek(key);
+            self.inner.seek(&key[self.data.inner_key_off..]);
         }
         self.parse_item();
     }
@@ -728,14 +744,14 @@ impl Iterator {
         self.inner.rewind();
         if self.inner.valid() {
             if self.reversed {
-                if self.inner.key() >= self.end.chunk() {
-                    self.inner.seek(self.end.chunk());
-                    if self.inner.key() == self.end.chunk() {
+                if self.inner.key() >= self.data.inner_end() {
+                    self.inner.seek(self.data.inner_end());
+                    if self.inner.key() == self.data.inner_end() {
                         self.inner.next();
                     }
                 }
-            } else if self.inner.key() < self.start.chunk() {
-                self.inner.seek(self.start.chunk())
+            } else if self.inner.key() < self.data.inner_start() {
+                self.inner.seek(self.data.inner_start())
             }
         }
         self.parse_item();
@@ -750,7 +766,7 @@ impl Iterator {
     }
 
     pub fn set_bound(&mut self, bound: Bytes, bound_include: bool) {
-        self.bound = Some(bound);
+        self.bound = Some(bound.slice(self.data.inner_key_off..));
         self.bound_include = bound_include;
     }
 
@@ -768,9 +784,9 @@ impl Iterator {
                 self.inner.key() >= bound.chunk()
             }
         } else if self.reversed {
-            self.inner.key() < self.start.chunk()
+            self.inner.key() < self.data.inner_start()
         } else {
-            self.inner.key() >= self.end.chunk()
+            self.inner.key() >= self.data.inner_end()
         }
     }
 }

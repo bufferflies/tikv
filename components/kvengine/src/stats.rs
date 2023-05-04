@@ -15,6 +15,7 @@ pub struct EngineStats {
     pub num_active_shards: usize,
     pub num_compacting_shards: usize,
     pub num_has_del_prefixes_shards: usize,
+    pub num_inner_key_shards: usize,
     pub ready_destroy_range_shards: Vec<IdVer>,
     pub mem_tables_count: usize,
     pub mem_tables_size: u64,
@@ -89,6 +90,9 @@ impl super::Engine {
                     .ready_destroy_range_shards
                     .push(IdVer::new(shard.id, shard.ver));
             }
+            if shard.inner_key_off > 0 {
+                engine_stats.num_inner_key_shards += 1;
+            }
             engine_stats.mem_tables_count += shard.mem_table_count;
             engine_stats.mem_tables_size += shard.mem_table_size;
             engine_stats.l0_tables_count += shard.l0_table_count;
@@ -139,6 +143,7 @@ pub struct ShardStats {
     pub ver: u64,
     pub start: Bytes,
     pub end: Bytes,
+    pub inner_key_off: usize,
     pub active: bool,
     pub compacting: bool,
     pub flushed: bool,
@@ -347,8 +352,9 @@ impl super::Shard {
         ShardStats {
             id: self.id,
             ver: self.ver,
-            start: self.start.clone(),
-            end: self.end.clone(),
+            start: self.outer_start.clone(),
+            end: self.outer_end.clone(),
+            inner_key_off: self.inner_key_off,
             active: self.is_active(),
             compacting: load_bool(&self.compacting),
             flushed: self.get_initial_flushed(),

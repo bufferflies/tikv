@@ -303,8 +303,7 @@ impl EngineCore {
         let (l0s, blob_tbls, scfs) = create_snapshot_tables(cs.get_snapshot(), &cs);
         let old_data = shard.get_data();
         let data = ShardData::new(
-            shard.start.clone(),
-            shard.end.clone(),
+            shard.range.clone(),
             old_data.del_prefixes.clone(),
             old_data.truncate_ts,
             old_data.trim_over_bound,
@@ -433,7 +432,7 @@ impl EngineCore {
             );
             if mem_tbl.get_version() > parent_snap.base_version + parent_snap.data_sequence
                 && mem_tbl.get_version() <= shard.get_base_version() + data_sequence
-                && mem_tbl.has_data_in_range(&shard.start, &shard.end)
+                && mem_tbl.has_data_in_range(shard.inner_start(), shard.inner_end())
             {
                 mem_tbls.push(mem_tbl.clone());
             }

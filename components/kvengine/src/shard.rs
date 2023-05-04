@@ -33,8 +33,7 @@ pub struct Shard {
     pub engine_id: u64,
     pub id: u64,
     pub ver: u64,
-    pub start: Bytes,
-    pub end: Bytes,
+    pub range: ShardRange,
     pub parent_id: u64,
     pub(crate) data: RwLock<ShardData>,
     pub(crate) opt: Arc<Options>,
@@ -74,25 +73,29 @@ pub const TRIM_OVER_BOUND: &str = "_trim_over_bound";
 pub const TRIM_OVER_BOUND_ENABLE: &[u8] = &[1];
 pub const TRIM_OVER_BOUND_DISABLE: &[u8] = b"";
 
+impl Deref for Shard {
+    type Target = ShardRange;
+
+    fn deref(&self) -> &Self::Target {
+        &self.range
+    }
+}
+
 impl Shard {
     pub fn new(
         engine_id: u64,
         props: &pb::Properties,
         ver: u64,
-        start: &[u8],
-        end: &[u8],
+        range: ShardRange,
         opt: Arc<Options>,
     ) -> Self {
-        let start = Bytes::copy_from_slice(start);
-        let end = Bytes::copy_from_slice(end);
         let shard = Self {
             engine_id,
             id: props.shard_id,
             ver,
-            start: start.clone(),
-            end: end.clone(),
+            range: range.clone(),
             parent_id: 0,
-            data: RwLock::new(ShardData::new_empty(start, end)),
+            data: RwLock::new(ShardData::new_empty(range)),
             opt,
             active: Default::default(),
             properties: Properties::new().apply_pb(props),
@@ -127,14 +130,8 @@ impl Shard {
 
     pub fn new_for_ingest(engine_id: u64, cs: &pb::ChangeSet, opt: Arc<Options>) -> Self {
         let snap = cs.get_snapshot();
-        let mut shard = Self::new(
-            engine_id,
-            snap.get_properties(),
-            cs.shard_ver,
-            snap.start.as_slice(),
-            snap.end.as_slice(),
-            opt,
-        );
+        let range = ShardRange::from_snap(snap);
+        let mut shard = Self::new(engine_id, snap.get_properties(), cs.shard_ver, range, opt);
         if !cs.has_parent() {
             store_bool(&shard.initial_flushed, true);
         } else {
@@ -201,12 +198,11 @@ impl Shard {
     }
 
     pub(crate) fn set_del_prefix(&self, val: &[u8]) {
-        let mut del_prefixes = DeletePrefixes::unmarshal(val);
+        let mut del_prefixes = DeletePrefixes::unmarshal(val, self.inner_key_off);
         del_prefixes.schedule_at = self.gen_rand_schedule_del_range_time();
         let data = self.get_data();
         let new_data = ShardData::new(
-            data.start.clone(),
-            data.end.clone(),
+            data.range.clone(),
             del_prefixes,
             data.truncate_ts,
             data.trim_over_bound,
@@ -223,8 +219,7 @@ impl Shard {
         let mut del_prefixes = data.del_prefixes.merge(prefix);
         del_prefixes.schedule_at = self.gen_rand_schedule_del_range_time();
         let new_data = ShardData::new(
-            data.start.clone(),
-            data.end.clone(),
+            data.range.clone(),
             del_prefixes,
             data.truncate_ts,
             data.trim_over_bound,
@@ -253,8 +248,7 @@ impl Shard {
         }
 
         let new_data = ShardData::new(
-            data.start.clone(),
-            data.end.clone(),
+            data.range.clone(),
             data.del_prefixes.clone(),
             Some(truncate_ts),
             data.trim_over_bound,
@@ -274,8 +268,7 @@ impl Shard {
 
         let data = self.get_data();
         let new_data = ShardData::new(
-            data.start.clone(),
-            data.end.clone(),
+            data.range.clone(),
             data.del_prefixes.clone(),
             data.truncate_ts,
             trim_over_bound,
@@ -302,10 +295,17 @@ impl Shard {
             return None;
         }
         if max_level.tables.len() == 1 {
-            return max_level.tables[0].get_suggest_split_key();
+            if let Some(key) = max_level.tables[0].get_suggest_split_key() {
+                return Some([self.key_prefix(), key.to_vec().as_slice()].concat().into());
+            }
+            return None;
         }
         let tbl_idx = max_level.tables.len() * 2 / 3;
-        Some(Bytes::copy_from_slice(max_level.tables[tbl_idx].smallest()))
+        Some(
+            [self.key_prefix(), max_level.tables[tbl_idx].smallest()]
+                .concat()
+                .into(),
+        )
     }
 
     pub fn get_evenly_split_keys(&self, count: usize) -> Option<Vec<Bytes>> {
@@ -330,22 +330,22 @@ impl Shard {
                 .skip(1)
                 .filter_map(|tbl| {
                     (self.overlap_key(tbl.smallest()))
-                        .then(|| Bytes::copy_from_slice(tbl.smallest()))
+                        .then(|| [self.key_prefix(), tbl.smallest()].concat().into())
                 })
                 .collect(),
         )
     }
 
-    pub fn overlap_table(&self, smallest: &[u8], biggest: &[u8]) -> bool {
-        self.start <= biggest && smallest < self.end
+    pub(crate) fn overlap_table(&self, smallest: &[u8], biggest: &[u8]) -> bool {
+        self.inner_start() <= biggest && smallest < self.inner_end()
     }
 
-    pub fn cover_full_table(&self, smallest: &[u8], biggest: &[u8]) -> bool {
-        self.start <= smallest && biggest < self.end
+    pub(crate) fn cover_full_table(&self, smallest: &[u8], biggest: &[u8]) -> bool {
+        self.inner_start() <= smallest && biggest < self.inner_end()
     }
 
-    pub fn overlap_key(&self, key: &[u8]) -> bool {
-        self.start <= key && key < self.end
+    pub(crate) fn overlap_key(&self, key: &[u8]) -> bool {
+        self.inner_start() <= key && key < self.inner_end()
     }
 
     pub fn get_property(&self, key: &str) -> Option<Bytes> {
@@ -365,33 +365,14 @@ impl Shard {
         data.get_all_files()
     }
 
-    pub fn split_mem_tables(&self, parent_mem_tbls: &[CfTable]) -> Vec<CfTable> {
+    pub(crate) fn split_mem_tables(&self, parent_mem_tbls: &[CfTable]) -> Vec<CfTable> {
         let mut new_mem_tbls = vec![CfTable::new()];
         for old_mem_tbl in parent_mem_tbls {
-            if old_mem_tbl.has_data_in_range(self.start.chunk(), self.end.chunk()) {
+            if old_mem_tbl.has_data_in_range(self.inner_start(), self.inner_end()) {
                 new_mem_tbls.push(old_mem_tbl.new_split());
             }
         }
         new_mem_tbls
-    }
-
-    pub fn add_mem_table(&self, mem_tbl: CfTable) {
-        let old_data = self.get_data();
-        let mut new_mem_tbls = Vec::with_capacity(old_data.mem_tbls.len());
-        new_mem_tbls.push(mem_tbl);
-        new_mem_tbls.extend_from_slice(old_data.mem_tbls.as_slice());
-        let new_data = ShardData::new(
-            self.start.clone(),
-            self.end.clone(),
-            old_data.del_prefixes.clone(),
-            old_data.truncate_ts,
-            old_data.trim_over_bound,
-            new_mem_tbls,
-            old_data.l0_tbls.clone(),
-            old_data.blob_tbl_map.clone(),
-            old_data.cfs.clone(),
-        );
-        self.set_data(new_data);
     }
 
     pub fn get_base_version(&self) -> u64 {
@@ -566,8 +547,7 @@ impl Shard {
         let mem_tbl_vers: Vec<u64> = mem_tbls.iter().map(|tbl| tbl.get_version()).collect();
         info!("{} add parent mem-tables {:?}", self.tag(), mem_tbl_vers);
         let new_data = ShardData::new(
-            shard_data.start.clone(),
-            shard_data.end.clone(),
+            shard_data.range.clone(),
             shard_data.del_prefixes.clone(),
             shard_data.truncate_ts,
             shard_data.trim_over_bound,
@@ -577,6 +557,24 @@ impl Shard {
             shard_data.cfs.clone(),
         );
         self.set_data(new_data);
+    }
+
+    pub(crate) fn inner_start(&self) -> &[u8] {
+        &self.outer_start[self.inner_key_off..]
+    }
+
+    pub(crate) fn inner_end(&self) -> &[u8] {
+        if self.inner_key_off == self.outer_end.len() {
+            return GLOBAL_SHARD_END_KEY;
+        }
+        &self.outer_end[self.inner_key_off..]
+    }
+
+    pub(crate) fn key_prefix(&self) -> &[u8] {
+        if self.inner_key_off > 0 {
+            return &self.outer_start[0..self.inner_key_off];
+        }
+        &[]
     }
 }
 
@@ -594,11 +592,11 @@ impl Deref for ShardData {
 }
 
 impl ShardData {
-    pub fn new_empty(start: Bytes, end: Bytes) -> Self {
+    pub(crate) fn new_empty(shard_range: ShardRange) -> Self {
+        let inner_key_off = shard_range.inner_key_off;
         Self::new(
-            start,
-            end,
-            DeletePrefixes::default(),
+            shard_range,
+            DeletePrefixes::new_with_inner_key_off(inner_key_off),
             None,
             false,
             vec![CfTable::new()],
@@ -608,9 +606,8 @@ impl ShardData {
         )
     }
 
-    pub fn new(
-        start: Bytes,
-        end: Bytes,
+    pub(crate) fn new(
+        range: ShardRange,
         del_prefixes: DeletePrefixes,
         truncate_ts: Option<TruncateTs>,
         trim_over_bound: bool,
@@ -623,8 +620,7 @@ impl ShardData {
 
         Self {
             core: Arc::new(ShardDataCore {
-                start,
-                end,
+                range,
                 del_prefixes,
                 truncate_ts,
                 trim_over_bound,
@@ -638,8 +634,7 @@ impl ShardData {
 }
 
 pub(crate) struct ShardDataCore {
-    pub(crate) start: Bytes,
-    pub(crate) end: Bytes,
+    pub(crate) range: ShardRange,
     pub(crate) del_prefixes: DeletePrefixes,
     pub(crate) truncate_ts: Option<TruncateTs>,
     pub(crate) trim_over_bound: bool,
@@ -647,6 +642,14 @@ pub(crate) struct ShardDataCore {
     pub(crate) l0_tbls: Vec<L0Table>,
     pub(crate) blob_tbl_map: Arc<HashMap<u64, BlobTable>>,
     pub(crate) cfs: [ShardCf; 3],
+}
+
+impl Deref for ShardDataCore {
+    type Target = ShardRange;
+
+    fn deref(&self) -> &Self::Target {
+        &self.range
+    }
 }
 
 impl ShardDataCore {
@@ -764,8 +767,8 @@ impl ShardDataCore {
         is_bound && !self.cover_full_table(tbl.smallest(), tbl.biggest())
     }
 
-    pub fn cover_full_table(&self, smallest: &[u8], biggest: &[u8]) -> bool {
-        self.start <= smallest && biggest < self.end
+    pub(crate) fn cover_full_table(&self, smallest: &[u8], biggest: &[u8]) -> bool {
+        self.inner_start() <= smallest && biggest < self.inner_end()
     }
 
     pub fn all_presisted(&self) -> bool {
@@ -775,7 +778,7 @@ impl ShardDataCore {
     pub fn writable_mem_table_has_data_in_deleted_prefix(&self) -> bool {
         let mem_tbl = self.get_writable_mem_table();
         self.del_prefixes
-            .delete_ranges()
+            .inner_delete_ranges()
             .any(|(start, end)| mem_tbl.has_data_in_range(start, end))
     }
 
@@ -784,7 +787,7 @@ impl ShardDataCore {
             // No memtable contains data covered by deleted prefixes.
             && !self.mem_tbls.iter().any(|mem_tbl| {
                 self.del_prefixes
-                    .delete_ranges()
+                    .inner_delete_ranges()
                     .any(|(start, end)| mem_tbl.has_data_in_range(start, end))
             })
     }
@@ -795,12 +798,12 @@ impl ShardDataCore {
                 let skl = mem_tbl.get_cf(cf);
                 let mut iter = skl.new_iterator(false);
                 iter.rewind();
-                if iter.valid() && iter.key() < self.start {
+                if iter.valid() && iter.key() < self.inner_start() {
                     return true;
                 }
                 let mut rev_iter = skl.new_iterator(true);
                 rev_iter.rewind();
-                if iter.valid() && iter.key() >= self.end {
+                if iter.valid() && iter.key() >= self.inner_end() {
                     return true;
                 }
             }
@@ -810,14 +813,14 @@ impl ShardDataCore {
 
     pub(crate) fn has_file_over_bound_data(&self) -> bool {
         for l0 in &self.l0_tbls {
-            if l0.smallest() < self.start || l0.biggest() >= self.end {
+            if l0.smallest() < self.inner_start() || l0.biggest() >= self.inner_end() {
                 return true;
             }
         }
         for cf in 0..NUM_CFS {
             let scf = &self.cfs[cf];
             for level in &scf.levels {
-                if level.has_over_bound_data(self.start.chunk(), self.end.chunk()) {
+                if level.has_over_bound_data(self.inner_start().chunk(), self.inner_end().chunk()) {
                     return true;
                 }
             }
@@ -1135,13 +1138,14 @@ pub fn get_splitting_start_end<'a: 'b, 'b>(
     (start_key, end_key)
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct DeletePrefixes {
     pub(crate) prefixes: Vec<Vec<u8>>,
     // prefixes_nexts are prefix-next keys of prefixes, i.e., [prefixes[i], prefixes_nexts[i]) is
     // the range that should be destroyed.
     prefixes_nexts: Vec<Vec<u8>>,
     pub(crate) schedule_at: u64,
+    pub(crate) inner_key_off: usize,
 }
 
 impl std::fmt::Debug for DeletePrefixes {
@@ -1160,6 +1164,14 @@ impl std::fmt::Debug for DeletePrefixes {
 }
 
 impl DeletePrefixes {
+    pub fn new_with_inner_key_off(inner_key_off: usize) -> Self {
+        Self {
+            prefixes: vec![],
+            prefixes_nexts: vec![],
+            schedule_at: 0,
+            inner_key_off,
+        }
+    }
     fn gen_prefixes_nexts(prefixes: &[Vec<u8>]) -> Vec<Vec<u8>> {
         prefixes
             .iter()
@@ -1180,6 +1192,8 @@ impl DeletePrefixes {
     }
 
     pub fn merge(&self, prefix: &[u8]) -> Self {
+        assert!(prefix.len() >= self.inner_key_off);
+
         let mut new_prefixes = vec![];
         for old_prefix in &self.prefixes {
             if prefix.starts_with(old_prefix) {
@@ -1199,6 +1213,7 @@ impl DeletePrefixes {
             prefixes: new_prefixes,
             prefixes_nexts: new_prefixes_nexts,
             schedule_at: 0,
+            inner_key_off: self.inner_key_off,
         }
     }
 
@@ -1219,7 +1234,7 @@ impl DeletePrefixes {
         buf
     }
 
-    pub fn unmarshal(mut data: &[u8]) -> Self {
+    pub fn unmarshal(mut data: &[u8], inner_key_off: usize) -> Self {
         let mut prefixes = vec![];
         while !data.is_empty() {
             let len = data.get_u16_le() as usize;
@@ -1231,10 +1246,11 @@ impl DeletePrefixes {
             prefixes,
             prefixes_nexts,
             schedule_at: 0,
+            inner_key_off,
         }
     }
 
-    pub fn build_split(&self, start: &[u8], end: &[u8]) -> Self {
+    pub fn build_split(&self, start: &[u8], end: &[u8], inner_key_off: usize) -> Self {
         let prefixes: Vec<_> = self
             .prefixes
             .iter()
@@ -1249,24 +1265,50 @@ impl DeletePrefixes {
             prefixes,
             prefixes_nexts,
             schedule_at: scheduled_at,
+            inner_key_off,
         }
     }
 
-    pub fn cover_prefix(&self, prefix: &[u8]) -> bool {
-        self.prefixes.iter().any(|old| prefix.starts_with(old))
+    pub(crate) fn cover_prefix(&self, inner_prefix: &[u8]) -> bool {
+        let inner_key_off = self.inner_key_off;
+        self.prefixes.iter().any(|p| {
+            if inner_key_off >= p.len() {
+                return true;
+            }
+            let inner_p = &p[inner_key_off..];
+            inner_prefix.starts_with(inner_p)
+        })
     }
 
-    pub fn cover_range(&self, start: &[u8], end: &[u8]) -> bool {
-        self.prefixes
-            .iter()
-            .any(|p| start.starts_with(p) && end.starts_with(p))
+    pub(crate) fn cover_range(&self, inner_start: &[u8], inner_end: &[u8]) -> bool {
+        let inner_key_off = self.inner_key_off;
+        self.prefixes.iter().any(|p| {
+            if inner_key_off >= p.len() {
+                return true;
+            }
+            let inner_p = &p[inner_key_off..];
+            inner_start.starts_with(inner_p) && inner_end.starts_with(inner_p)
+        })
     }
 
-    pub fn delete_ranges(&self) -> impl Iterator<Item = (&[u8], &[u8])> {
+    pub(crate) fn inner_delete_ranges(&self) -> impl Iterator<Item = (&[u8], &[u8])> {
+        let inner_key_off = self.inner_key_off;
         self.prefixes
             .iter()
-            .map(|p| p.as_slice())
-            .zip(self.prefixes_nexts.iter().map(|p| p.as_slice()))
+            .map(move |p| {
+                if inner_key_off >= p.len() {
+                    &[]
+                } else {
+                    &p[inner_key_off..]
+                }
+            })
+            .zip(self.prefixes_nexts.iter().map(move |p| {
+                if inner_key_off >= p.len() {
+                    GLOBAL_SHARD_END_KEY
+                } else {
+                    &p[inner_key_off..]
+                }
+            }))
     }
 }
 
@@ -1303,116 +1345,180 @@ pub(crate) fn need_update_truncate_ts(cur: Option<TruncateTs>, new: TruncateTs) 
     new <= cur.unwrap()
 }
 
+#[derive(Clone, Default)]
+pub struct ShardRange {
+    pub outer_start: Bytes,
+    pub outer_end: Bytes,
+    pub inner_key_off: usize,
+}
+
+impl ShardRange {
+    pub fn new(outer_start: &[u8], outer_end: &[u8], inner_key_off: usize) -> Self {
+        Self {
+            outer_start: Bytes::from(outer_start.to_vec()),
+            outer_end: Bytes::from(outer_end.to_vec()),
+            inner_key_off,
+        }
+    }
+
+    pub(crate) fn from_snap(snap: &kvenginepb::Snapshot) -> Self {
+        Self::new(
+            snap.get_outer_start(),
+            snap.get_outer_end(),
+            snap.inner_key_off as usize,
+        )
+    }
+
+    pub(crate) fn inner_start(&self) -> &[u8] {
+        &self.outer_start[self.inner_key_off..]
+    }
+
+    pub(crate) fn inner_end(&self) -> &[u8] {
+        if self.inner_key_off == self.outer_end.len() {
+            return GLOBAL_SHARD_END_KEY;
+        }
+        &self.outer_end[self.inner_key_off..]
+    }
+
+    pub(crate) fn prefix(&self) -> &[u8] {
+        &self.outer_start[..self.inner_key_off]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_delete_prefix() {
-        let assert_prefix_invariant = |del_prefix: &DeletePrefixes| {
-            assert_eq!(del_prefix.prefixes.len(), del_prefix.prefixes_nexts.len());
-            assert_eq!(
-                del_prefix.prefixes.len(),
-                del_prefix.delete_ranges().count()
+        for inner_key_off in [0, 4] {
+            let assert_prefix_invariant = |del_prefix: &DeletePrefixes| {
+                assert_eq!(del_prefix.prefixes.len(), del_prefix.prefixes_nexts.len());
+                assert_eq!(
+                    del_prefix.prefixes.len(),
+                    del_prefix.inner_delete_ranges().count()
+                );
+                assert!(del_prefix.inner_delete_ranges().all(|(p, p_n)| {
+                    let mut p_c = p.to_vec();
+                    tidb_query_common::util::convert_to_prefix_next(&mut p_c);
+                    p_c == p_n
+                }));
+            };
+
+            let mut del_prefix = DeletePrefixes::new_with_inner_key_off(inner_key_off);
+            assert_prefix_invariant(&del_prefix);
+            assert!(del_prefix.is_empty());
+            del_prefix = del_prefix.merge("0000101".as_bytes());
+            assert!(!del_prefix.is_empty());
+            assert_eq!(del_prefix.prefixes.len(), 1);
+            assert_prefix_invariant(&del_prefix);
+            for prefix in ["00001010", "0000101"] {
+                let inner_prefix = &prefix.as_bytes()[inner_key_off..];
+                assert!(del_prefix.cover_prefix(inner_prefix));
+            }
+            for prefix in ["000010", "0000103"] {
+                let inner_prefix = &prefix.as_bytes()[inner_key_off..];
+                assert!(!del_prefix.cover_prefix(inner_prefix));
+            }
+
+            del_prefix = del_prefix.merge("0000105".as_bytes());
+            assert_prefix_invariant(&del_prefix);
+            let bin = del_prefix.marshal();
+            del_prefix = DeletePrefixes::unmarshal(&bin, inner_key_off);
+            assert_prefix_invariant(&del_prefix);
+            assert_eq!(del_prefix.prefixes.len(), 2);
+            for prefix in ["00001010", "0000101", "00001050", "0000105"] {
+                let inner_prefix = &prefix.as_bytes()[inner_key_off..];
+                assert!(del_prefix.cover_prefix(inner_prefix));
+            }
+            for prefix in ["000010", "0000103"] {
+                let inner_prefix = &prefix.as_bytes()[inner_key_off..];
+                assert!(!del_prefix.cover_prefix(inner_prefix));
+            }
+
+            del_prefix = del_prefix.merge("000010".as_bytes());
+            assert_prefix_invariant(&del_prefix);
+            assert_eq!(del_prefix.prefixes.len(), 1);
+            for prefix in ["000010", "0000101", "0000103", "0000104"] {
+                let inner_prefix = &prefix.as_bytes()[inner_key_off..];
+                assert!(del_prefix.cover_prefix(inner_prefix));
+            }
+            for prefix in ["00001", "000011"] {
+                let inner_prefix = &prefix.as_bytes()[inner_key_off..];
+                assert!(!del_prefix.cover_prefix(inner_prefix));
+            }
+
+            del_prefix = DeletePrefixes::new_with_inner_key_off(inner_key_off);
+            del_prefix = del_prefix.merge("0000101".as_bytes());
+            del_prefix = del_prefix.merge("0000102".as_bytes());
+            assert_prefix_invariant(&del_prefix);
+            for (start, end) in [("0000101", "00001011"), ("0000102", "00001022")] {
+                let inner_start = &start.as_bytes()[inner_key_off..];
+                let inner_end = &end.as_bytes()[inner_key_off..];
+                assert!(del_prefix.cover_range(inner_start, inner_end));
+            }
+            for (start, end) in [
+                ("000099", "0000100"),
+                ("0000101", "0000102"),
+                ("0000102", "0000103"),
+            ] {
+                let inner_start = &start.as_bytes()[inner_key_off..];
+                let inner_end = &end.as_bytes()[inner_key_off..];
+                assert!(!del_prefix.cover_range(inner_start, inner_end));
+            }
+
+            del_prefix = DeletePrefixes::new_with_inner_key_off(inner_key_off);
+            del_prefix = del_prefix.merge("0000101".as_bytes());
+            del_prefix = del_prefix.merge("00001033".as_bytes());
+            del_prefix = del_prefix.merge("00001055".as_bytes());
+            del_prefix = del_prefix.merge("0000107".as_bytes());
+            assert_prefix_invariant(&del_prefix);
+
+            let split_del_range =
+                del_prefix.build_split("00001033".as_bytes(), "00001055".as_bytes(), inner_key_off);
+            assert_prefix_invariant(&split_del_range);
+            assert_eq!(split_del_range.prefixes.len(), 1);
+            assert_eq!(&split_del_range.prefixes[0], "00001033".as_bytes());
+
+            let split_del_range =
+                del_prefix.build_split("00001034".as_bytes(), "00001055".as_bytes(), inner_key_off);
+            assert_prefix_invariant(&split_del_range);
+            assert_eq!(split_del_range.prefixes.len(), 0);
+
+            let split_del_range = del_prefix.build_split(
+                "000010334".as_bytes(),
+                "000010555".as_bytes(),
+                inner_key_off,
             );
-            assert!(del_prefix.delete_ranges().all(|(p, p_n)| {
-                let mut p_c = p.to_vec();
-                tidb_query_common::util::convert_to_prefix_next(&mut p_c);
-                p_c == p_n
-            }));
-        };
+            assert_prefix_invariant(&split_del_range);
+            assert_eq!(split_del_range.prefixes.len(), 2);
+            assert_eq!(&split_del_range.prefixes[0], "00001033".as_bytes());
+            assert_eq!(&split_del_range.prefixes[1], "00001055".as_bytes());
 
-        let mut del_prefix = DeletePrefixes::default();
-        assert_prefix_invariant(&del_prefix);
-        assert!(del_prefix.is_empty());
-        del_prefix = del_prefix.merge("101".as_bytes());
-        assert!(!del_prefix.is_empty());
-        assert_eq!(del_prefix.prefixes.len(), 1);
-        assert_prefix_invariant(&del_prefix);
-        for prefix in ["1010", "101"] {
-            assert!(del_prefix.cover_prefix(prefix.as_bytes()));
+            del_prefix = DeletePrefixes::new_with_inner_key_off(inner_key_off)
+                .merge("0000100".as_bytes())
+                .merge("0000200".as_bytes())
+                .merge("0000300".as_bytes());
+            assert_prefix_invariant(&del_prefix);
+            del_prefix = del_prefix.split(
+                &DeletePrefixes::new_with_inner_key_off(inner_key_off).merge("0000100".as_bytes()),
+            );
+            assert_prefix_invariant(&del_prefix);
+            assert_eq!(del_prefix.prefixes.len(), 2);
+            assert!(!del_prefix.cover_prefix(&"0000100".as_bytes()[inner_key_off..]));
+            assert!(del_prefix.cover_prefix(&"0000200".as_bytes()[inner_key_off..]));
+            assert!(del_prefix.cover_prefix(&"0000300".as_bytes()[inner_key_off..]));
+            del_prefix = del_prefix.split(
+                &DeletePrefixes::new_with_inner_key_off(inner_key_off)
+                    .merge("0000200".as_bytes())
+                    .merge("0000300".as_bytes()),
+            );
+            assert_prefix_invariant(&del_prefix);
+            assert_eq!(del_prefix.prefixes.len(), 0);
+            assert!(!del_prefix.cover_prefix(&"0000100".as_bytes()[inner_key_off..]));
+            assert!(!del_prefix.cover_prefix(&"0000200".as_bytes()[inner_key_off..]));
+            assert!(!del_prefix.cover_prefix(&"0000300".as_bytes()[inner_key_off..]));
         }
-        for prefix in ["10", "103"] {
-            assert!(!del_prefix.cover_prefix(prefix.as_bytes()));
-        }
-
-        del_prefix = del_prefix.merge("105".as_bytes());
-        assert_prefix_invariant(&del_prefix);
-        let bin = del_prefix.marshal();
-        del_prefix = DeletePrefixes::unmarshal(&bin);
-        assert_prefix_invariant(&del_prefix);
-        assert_eq!(del_prefix.prefixes.len(), 2);
-        for prefix in ["1010", "101", "1050", "105"] {
-            assert!(del_prefix.cover_prefix(prefix.as_bytes()));
-        }
-        for prefix in ["10", "103"] {
-            assert!(!del_prefix.cover_prefix(prefix.as_bytes()));
-        }
-
-        del_prefix = del_prefix.merge("10".as_bytes());
-        assert_prefix_invariant(&del_prefix);
-        assert_eq!(del_prefix.prefixes.len(), 1);
-        for prefix in ["10", "101", "103", "104"] {
-            assert!(del_prefix.cover_prefix(prefix.as_bytes()));
-        }
-        for prefix in ["1", "11"] {
-            assert!(!del_prefix.cover_prefix(prefix.as_bytes()));
-        }
-
-        del_prefix = DeletePrefixes::default();
-        del_prefix = del_prefix.merge("101".as_bytes());
-        del_prefix = del_prefix.merge("102".as_bytes());
-        assert_prefix_invariant(&del_prefix);
-        for (start, end) in [("101", "1011"), ("102", "1022")] {
-            assert!(del_prefix.cover_range(start.as_bytes(), end.as_bytes()));
-        }
-        for (start, end) in [("99", "100"), ("101", "102"), ("102", "103")] {
-            assert!(!del_prefix.cover_range(start.as_bytes(), end.as_bytes()));
-        }
-
-        del_prefix = DeletePrefixes::default();
-        del_prefix = del_prefix.merge("101".as_bytes());
-        del_prefix = del_prefix.merge("1033".as_bytes());
-        del_prefix = del_prefix.merge("1055".as_bytes());
-        del_prefix = del_prefix.merge("107".as_bytes());
-        assert_prefix_invariant(&del_prefix);
-
-        let split_del_range = del_prefix.build_split("1033".as_bytes(), "1055".as_bytes());
-        assert_prefix_invariant(&split_del_range);
-        assert_eq!(split_del_range.prefixes.len(), 1);
-        assert_eq!(&split_del_range.prefixes[0], "1033".as_bytes());
-
-        let split_del_range = del_prefix.build_split("1034".as_bytes(), "1055".as_bytes());
-        assert_prefix_invariant(&split_del_range);
-        assert_eq!(split_del_range.prefixes.len(), 0);
-
-        let split_del_range = del_prefix.build_split("10334".as_bytes(), "10555".as_bytes());
-        assert_prefix_invariant(&split_del_range);
-        assert_eq!(split_del_range.prefixes.len(), 2);
-        assert_eq!(&split_del_range.prefixes[0], "1033".as_bytes());
-        assert_eq!(&split_del_range.prefixes[1], "1055".as_bytes());
-
-        del_prefix = DeletePrefixes::default()
-            .merge("100".as_bytes())
-            .merge("200".as_bytes())
-            .merge("300".as_bytes());
-        assert_prefix_invariant(&del_prefix);
-        del_prefix = del_prefix.split(&DeletePrefixes::default().merge("100".as_bytes()));
-        assert_prefix_invariant(&del_prefix);
-        assert_eq!(del_prefix.prefixes.len(), 2);
-        assert!(!del_prefix.cover_prefix("100".as_bytes()));
-        assert!(del_prefix.cover_prefix("200".as_bytes()));
-        assert!(del_prefix.cover_prefix("300".as_bytes()));
-        del_prefix = del_prefix.split(
-            &DeletePrefixes::default()
-                .merge("200".as_bytes())
-                .merge("300".as_bytes()),
-        );
-        assert_prefix_invariant(&del_prefix);
-        assert_eq!(del_prefix.prefixes.len(), 0);
-        assert!(!del_prefix.cover_prefix("100".as_bytes()));
-        assert!(!del_prefix.cover_prefix("200".as_bytes()));
-        assert!(!del_prefix.cover_prefix("300".as_bytes()));
     }
 
     #[test]

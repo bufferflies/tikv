@@ -114,8 +114,7 @@ impl Engine {
         new_mem_tbls.push(new_tbl);
         new_mem_tbls.extend_from_slice(data.mem_tbls.as_slice());
         let new_data = ShardData::new(
-            shard.start.clone(),
-            shard.end.clone(),
+            data.range.clone(),
             data.del_prefixes.clone(),
             data.truncate_ts,
             data.trim_over_bound,
@@ -140,10 +139,17 @@ impl Engine {
             let tag = ShardTag::new(self.get_engine_id(), IdVer::new(wb.shard_id, 0));
             panic!("{} unable to get shard", tag);
         });
-        let snap = shard.new_snap_access();
+        if shard.inner_key_off > 0 {
+            for cf in &mut wb.cf_batches {
+                for entry in &mut cf.entries {
+                    entry.trim_to_inner_key(shard.inner_key_off);
+                }
+            }
+        }
         let version = shard.get_base_version() + wb.sequence;
         self.update_write_batch_version(wb, version);
         let data = shard.get_data();
+        let snap = shard.new_snap_access();
         let mem_tbl = data.get_writable_mem_table();
         for cf in 0..NUM_CFS {
             mem_tbl.get_cf(cf).put_batch(wb.get_cf_mut(cf), &snap, cf);

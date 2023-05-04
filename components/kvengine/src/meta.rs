@@ -2,6 +2,7 @@
 
 use std::{cmp::max, collections::HashMap, iter::Iterator};
 
+use api_version::api_v2::{is_whole_keyspace_range, KEYSPACE_PREFIX_LEN};
 use bytes::{Buf, Bytes};
 use kvenginepb as pb;
 use protobuf::Message;
@@ -14,8 +15,7 @@ pub struct ShardMeta {
     pub engine_id: u64,
     pub id: u64,
     pub ver: u64,
-    pub start: Vec<u8>,
-    pub end: Vec<u8>,
+    pub range: ShardRange,
     // sequence is the raft log index of the applied change set.
     pub seq: u64,
     pub(crate) files: HashMap<u64, FileMeta>,
@@ -45,8 +45,7 @@ impl ShardMeta {
             engine_id,
             id: cs.shard_id,
             ver: cs.shard_ver,
-            start: snap.get_start().to_vec(),
-            end: snap.get_end().to_vec(),
+            range: ShardRange::from_snap(snap),
             seq: cs.sequence,
             properties: Properties::new().apply_pb(snap.get_properties()),
             base_version: snap.base_version,
@@ -93,12 +92,24 @@ impl ShardMeta {
         end: &[u8],
         props: &pb::Properties,
         parent: Box<ShardMeta>,
+        enable_inner_key_offset: bool,
     ) -> Self {
+        let range = if enable_inner_key_offset && is_whole_keyspace_range(start, end) {
+            ShardRange::new(start, end, KEYSPACE_PREFIX_LEN)
+        } else {
+            debug!(
+                "engine new_split";
+                "shard_id" => id,
+                "start_key" => format!("{:?}", start),
+                "end_key" => format!("{:?}", end),
+                "inner_key_off" => parent.range.inner_key_off
+            );
+            ShardRange::new(start, end, parent.range.inner_key_off)
+        };
         Self {
             id,
             ver,
-            start: Vec::from(start),
-            end: Vec::from(end),
+            range,
             parent: Some(parent),
             properties: Properties::new().apply_pb(props),
             ..Default::default()
@@ -189,13 +200,14 @@ impl ShardMeta {
                 // Now only DEL_PREFIXES_KEY is mergeable.
                 assert_eq!(cs.get_property_key(), DEL_PREFIXES_KEY);
                 let prefix = cs.get_property_value();
+                let inner_key_off = self.range.inner_key_off;
                 self.properties.set(
                     DEL_PREFIXES_KEY,
                     &self
                         .properties
                         .get(DEL_PREFIXES_KEY)
-                        .map(|b| DeletePrefixes::unmarshal(b.chunk()))
-                        .unwrap_or_default()
+                        .map(|b| DeletePrefixes::unmarshal(b.chunk(), inner_key_off))
+                        .unwrap()
                         .merge(prefix)
                         .marshal(),
                 );
@@ -391,6 +403,7 @@ impl ShardMeta {
     pub fn apply_initial_flush(&mut self, cs: &pb::ChangeSet) {
         let props = self.properties.clone();
         let mut new_meta = Self::new(self.engine_id, cs);
+        new_meta.range = self.range.clone();
         new_meta.properties = props;
         // self.data_sequence may be advanced on raft log gc tick.
         new_meta.data_sequence = std::cmp::max(new_meta.data_sequence, self.data_sequence);
@@ -476,8 +489,8 @@ impl ShardMeta {
         // should be cleaned up.
         assert_eq!(cs.get_property_key(), DEL_PREFIXES_KEY);
         if let Some(data) = self.properties.get(DEL_PREFIXES_KEY) {
-            let old = DeletePrefixes::unmarshal(data.chunk());
-            let done = DeletePrefixes::unmarshal(cs.get_property_value());
+            let old = DeletePrefixes::unmarshal(data.chunk(), self.range.inner_key_off);
+            let done = DeletePrefixes::unmarshal(cs.get_property_value(), self.range.inner_key_off);
             self.properties
                 .set(DEL_PREFIXES_KEY, &old.split(&done).marshal());
             info!("Destroy range in meta changed from {:?} to {:?}", old, done);
@@ -553,8 +566,8 @@ impl ShardMeta {
 
     fn apply_restore_shard(&mut self, cs: &pb::ChangeSet) {
         assert!(cs.has_restore_shard());
-        assert_eq!(self.start, cs.get_restore_shard().start);
-        assert_eq!(self.end, cs.get_restore_shard().end);
+        assert_eq!(self.range.outer_start, cs.get_restore_shard().outer_start);
+        assert_eq!(self.range.outer_end, cs.get_restore_shard().outer_end);
         info!(
             "{} apply_restore_shard in meta: current ver:{}, seq:{}, base_ver:{}, data_seq:{}",
             self.tag(),
@@ -585,14 +598,19 @@ impl ShardMeta {
         split: &kvenginepb::Split,
         sequence: u64,
         initial_seq: u64,
+        enable_inner_key_offset: bool,
     ) -> Vec<ShardMeta> {
         let old = self;
         let new_shards_len = split.get_new_shards().len();
         let mut new_shards = Vec::with_capacity(new_shards_len);
         let new_ver = old.ver + new_shards_len as u64 - 1;
         for i in 0..new_shards_len {
-            let (start_key, end_key) =
-                get_splitting_start_end(&old.start, &old.end, split.get_keys(), i);
+            let (start_key, end_key) = get_splitting_start_end(
+                &old.range.outer_start,
+                &old.range.outer_end,
+                split.get_keys(),
+                i,
+            );
             let new_shard = &split.get_new_shards()[i];
             let id = new_shard.get_shard_id();
             let mut meta = ShardMeta::new_split(
@@ -602,6 +620,7 @@ impl ShardMeta {
                 end_key,
                 new_shard,
                 Box::new(old.clone()),
+                enable_inner_key_offset,
             );
             meta.engine_id = self.engine_id;
             if id == old.id {
@@ -635,8 +654,9 @@ impl ShardMeta {
         let mut cs = new_change_set(self.id, self.ver);
         cs.set_sequence(self.seq);
         let mut snap = pb::Snapshot::new();
-        snap.set_start(self.start.clone());
-        snap.set_end(self.end.clone());
+        snap.set_outer_start(self.range.outer_start.to_vec());
+        snap.set_outer_end(self.range.outer_end.to_vec());
+        snap.set_inner_key_off(self.range.inner_key_off as u32);
         snap.set_properties(self.properties.to_pb(self.id));
         snap.set_base_version(self.base_version);
         snap.set_data_sequence(self.data_sequence);
@@ -693,7 +713,7 @@ impl ShardMeta {
         // smallest-----[start-----biggest-----end)
         // [start-----smallest-----end)-----biggest
         // smallest-----[start-----end)-----biggest
-        self.start.as_slice() <= biggest && smallest < self.end.as_slice()
+        self.range.inner_start() <= biggest && smallest < self.range.inner_end()
     }
 
     pub(crate) fn get_blob_files(&self) -> Vec<(u64, Vec<u8>, Vec<u8>)> {
@@ -707,18 +727,18 @@ impl ShardMeta {
         blob_files
     }
 
-    pub fn entirely_over_bound_table(&self, smallest: &[u8], biggest: &[u8]) -> bool {
+    pub(crate) fn entirely_over_bound_table(&self, smallest: &[u8], biggest: &[u8]) -> bool {
         // smallest-----biggest-----[start----------end)
         // [start----------end)-----smallest-----biggest
         !self.overlap_table(smallest, biggest)
     }
 
-    pub fn partially_over_bound_table(&self, smallest: &[u8], biggest: &[u8]) -> bool {
+    pub(crate) fn partially_over_bound_table(&self, smallest: &[u8], biggest: &[u8]) -> bool {
         // smallest-----[start-----end)-----biggest
         // smallest-----[start-----biggest-----end)
         // [start-----smallest-----end)-----biggest
         self.overlap_table(smallest, biggest)
-            && (smallest < self.start.as_slice() || self.end.as_slice() <= biggest)
+            && (smallest < self.range.inner_start() || self.range.inner_end() <= biggest)
     }
 
     // the ingest level never skip to lower level if upper level file exists, this
@@ -773,10 +793,12 @@ impl ShardMeta {
         for (&id, source_file) in &source.files {
             self.files.insert(id, source_file.clone());
         }
-        if self.end == source.start {
-            self.end = source.end.clone();
+
+        debug_assert_eq!(self.range.inner_key_off, source.range.inner_key_off);
+        if self.range.outer_end == source.range.outer_start {
+            self.range.outer_end = source.range.outer_end.clone();
         } else {
-            self.start = source.start.clone();
+            self.range.outer_start = source.range.outer_start.clone();
         }
         self.ver = max(self.ver, source.ver) + 1;
         let source_mem_tbl_version = source.base_version + source.seq;
@@ -854,7 +876,7 @@ mod tests {
         for level in 0..=3 {
             let mut cs = new_change_set(1, 1);
             let snap = cs.mut_snapshot();
-            snap.set_end(GLOBAL_SHARD_END_KEY.to_vec());
+            snap.set_outer_end(GLOBAL_SHARD_END_KEY.to_vec());
             snap.set_max_ts(100);
             let mut id = 0;
             let mut make_table = |level: u32, smallest: &str, biggest: &str| {
@@ -1031,9 +1053,18 @@ mod tests {
 
     #[test]
     fn test_table_overlap() {
+        test_table_overlap_helper(false);
+        test_table_overlap_helper(true);
+    }
+
+    fn test_table_overlap_helper(enable_inner_key_off: bool) {
+        let range = if enable_inner_key_off {
+            ShardRange::new(&[1, 2, 3, 4, 10], &[1, 2, 3, 4, 20], 4)
+        } else {
+            ShardRange::new(&[10], &[20], 0)
+        };
         let meta = ShardMeta {
-            start: vec![10],
-            end: vec![20],
+            range,
             ..Default::default()
         };
 

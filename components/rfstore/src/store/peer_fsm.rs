@@ -1965,8 +1965,9 @@ impl<'a> PeerMsgHandler<'a> {
             callback.invoke_with_response(message_error("invalid changeset"));
             return;
         }
-        let encoded_start_key = Key::from_raw(cs.get_restore_shard().get_start()).into_encoded();
-        let encoded_end_key = Key::from_raw(cs.get_restore_shard().get_end()).into_encoded();
+        let encoded_start_key =
+            Key::from_raw(cs.get_restore_shard().get_outer_start()).into_encoded();
+        let encoded_end_key = Key::from_raw(cs.get_restore_shard().get_outer_end()).into_encoded();
         if encoded_start_key != region.get_start_key() || encoded_end_key != region.get_end_key() {
             let err_msg = format!(
                 "invalid snapshot range: [{:?},{:?}), expect: [{:?},{:?})",

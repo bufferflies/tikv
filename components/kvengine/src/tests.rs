@@ -556,9 +556,8 @@ fn test_lost_tombstone_issue() {
     cf_builder.add_table(new_table(12, 50, 150, 102, true), 2);
     cf_builder.add_table(new_table(13, 120, 200, 103, false), 1);
     let data = ShardData::new(
-        shard.start.clone(),
-        shard.end.clone(),
-        DeletePrefixes::default(),
+        shard.range.clone(),
+        DeletePrefixes::new_with_inner_key_off(0),
         None,
         false,
         vec![CfTable::new()],
@@ -835,7 +834,7 @@ fn new_initial_cs() -> pb::ChangeSet {
     cs.set_sequence(1);
     let mut snap = pb::Snapshot::new();
     snap.set_base_version(1);
-    snap.set_end(GLOBAL_SHARD_END_KEY.to_vec());
+    snap.set_outer_end(GLOBAL_SHARD_END_KEY.to_vec());
     let props = snap.mut_properties();
     props.shard_id = 1;
     cs.set_snapshot(snap);
@@ -966,9 +965,9 @@ fn check_iterater(begin: usize, end: usize, en: &Engine) {
             let shard = en.get_shard(id).unwrap();
             let snap = SnapAccess::new(&shard);
             let mut iter = snap.new_iterator(cf, false, false, None, true);
-            iter.seek(shard.start.chunk());
+            iter.seek(shard.outer_start.chunk());
             while iter.valid() {
-                if iter.key.chunk() >= shard.end.chunk() {
+                if iter.key.chunk() >= shard.outer_end.chunk() {
                     break;
                 }
                 let key = i_to_key(i as i32, en.opts.min_blob_size);

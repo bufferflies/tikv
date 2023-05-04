@@ -29,8 +29,7 @@ pub enum Persisted {
 #[derive(Clone)]
 pub(crate) struct FlushTask {
     pub(crate) id_ver: IdVer,
-    pub(crate) start: Vec<u8>,
-    pub(crate) end: Vec<u8>,
+    pub(crate) range: ShardRange,
     pub(crate) normal: Option<memtable::CfTable>,
     pub(crate) initial: Option<InitialFlush>,
 }
@@ -43,11 +42,18 @@ impl FlushTask {
     ) -> Self {
         Self {
             id_ver: IdVer::new(shard.id, shard.ver),
-            start: shard.start.to_vec(),
-            end: shard.end.to_vec(),
+            range: shard.range.clone(),
             normal,
             initial,
         }
+    }
+
+    pub(crate) fn inner_start(&self) -> &[u8] {
+        self.range.inner_start()
+    }
+
+    pub(crate) fn inner_end(&self) -> &[u8] {
+        self.range.inner_end()
     }
 
     pub(crate) fn new_normal(shard: &Shard, mem_tbl: memtable::CfTable) -> Self {
@@ -59,7 +65,7 @@ impl FlushTask {
     }
 
     pub(crate) fn overlap_table(&self, start_key: &[u8], end_key: &[u8]) -> bool {
-        self.start.as_slice() <= end_key && start_key < self.end.as_slice()
+        self.inner_start() <= end_key && start_key < self.inner_end()
     }
 
     pub(crate) fn table_version(&self) -> u64 {
@@ -142,7 +148,7 @@ impl Engine {
             flush.set_properties(props);
         }
         let (l0_builder, blob_builder) =
-            self.build_l0_table(m, task.start.as_slice(), task.end.as_slice());
+            self.build_l0_table(m, task.inner_start(), task.inner_end());
         if l0_builder.is_empty() {
             return Ok(cs);
         }
@@ -181,8 +187,9 @@ impl Engine {
         );
         let mut cs = new_change_set(task.id_ver.id, task.id_ver.ver);
         let initial_flush = cs.mut_initial_flush();
-        initial_flush.set_start(task.start.to_vec());
-        initial_flush.set_end(task.end.to_vec());
+        initial_flush.set_outer_start(task.range.outer_start.to_vec());
+        initial_flush.set_outer_end(task.range.outer_end.to_vec());
+        initial_flush.set_inner_key_off(task.range.inner_key_off as u32);
         initial_flush.set_base_version(flush.base_version);
         initial_flush.set_data_sequence(flush.data_sequence);
         initial_flush.set_max_ts(max_ts);
@@ -203,7 +210,8 @@ impl Engine {
         }
         let mut builders = vec![];
         for m in &flush.mem_tbls {
-            let (l0_builder, blob_builder) = self.build_l0_table(m, &task.start, &task.end);
+            let (l0_builder, blob_builder) =
+                self.build_l0_table(m, task.inner_start(), task.inner_end());
             builders.push((l0_builder, blob_builder));
         }
         let num_mem_tables = builders.len();

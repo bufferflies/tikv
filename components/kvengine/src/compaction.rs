@@ -275,8 +275,12 @@ pub struct CompactionRequest {
     pub engine_id: u64,
     pub shard_id: u64,
     pub shard_ver: u64,
-    pub start: Vec<u8>,
-    pub end: Vec<u8>,
+
+    #[serde(rename = "start")]
+    pub outer_start: Vec<u8>,
+    #[serde(rename = "end")]
+    pub outer_end: Vec<u8>,
+    pub inner_key_off: usize,
 
     /// If `destroy_range` is true, `in_place_compact_files` will be compacted
     /// in place to filter out data that covered by `del_prefixes`.
@@ -311,6 +315,19 @@ pub struct CompactionRequest {
     /// Required version of remote compactor.
     /// Must be set to `CURRENT_COMPACTOR_VERSION`.
     pub compactor_version: u32,
+}
+
+impl CompactionRequest {
+    pub fn inner_start(&self) -> &[u8] {
+        &self.outer_start[self.inner_key_off..]
+    }
+
+    pub fn inner_end(&self) -> &[u8] {
+        if self.inner_key_off == self.outer_end.len() {
+            return GLOBAL_SHARD_END_KEY;
+        }
+        &self.outer_end[self.inner_key_off..]
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -417,8 +434,7 @@ impl Engine {
             shard.engine_id,
             shard.id,
             shard.ver,
-            shard.start.to_vec(),
-            shard.end.to_vec(),
+            shard.range.clone(),
             cf,
             level,
         )
@@ -434,8 +450,7 @@ impl Engine {
             meta.engine_id,
             meta.id,
             meta.ver,
-            meta.start.clone(),
-            meta.end.clone(),
+            meta.range.clone(),
             cf,
             level,
         )
@@ -446,8 +461,7 @@ impl Engine {
         engine_id: u64,
         shard_id: u64,
         shard_ver: u64,
-        start: Vec<u8>,
-        end: Vec<u8>,
+        range: ShardRange,
         cf: isize,
         level: usize,
     ) -> CompactionRequest {
@@ -455,8 +469,9 @@ impl Engine {
             engine_id,
             shard_id,
             shard_ver,
-            start,
-            end,
+            outer_start: range.outer_start.to_vec(),
+            outer_end: range.outer_end.to_vec(),
+            inner_key_off: range.inner_key_off,
             destroy_range: false,
             del_prefixes: vec![],
             in_place_compact_files: vec![],
@@ -494,7 +509,7 @@ impl Engine {
                 deletes.push(delete);
             } else if data
                 .del_prefixes
-                .delete_ranges()
+                .inner_delete_ranges()
                 .any(|(start, end)| t.has_data_in_range(start, end))
             {
                 overlaps.push((t.id(), 0, -1));
@@ -510,7 +525,7 @@ impl Engine {
                     deletes.push(delete);
                 } else if data
                     .del_prefixes
-                    .delete_ranges()
+                    .inner_delete_ranges()
                     .any(|(start, end)| t.has_overlap(start, end, false))
                 {
                     overlaps.push((t.id(), lh.level as u32, cf as i32));
@@ -626,7 +641,7 @@ impl Engine {
         // Tables that are partially over bound.
         let mut overlaps = vec![];
         for t in &data.l0_tbls {
-            if t.biggest() < data.start || t.smallest() >= data.end {
+            if t.biggest() < data.inner_start() || t.smallest() >= data.inner_end() {
                 // -----smallest-----biggest-----[start----------end)
                 // [start----------end)-----smallest-----biggest-----
                 let mut delete = pb::TableDelete::default();
@@ -634,14 +649,14 @@ impl Engine {
                 delete.set_level(0);
                 delete.set_cf(-1);
                 deletes.push(delete);
-            } else if t.smallest() < data.start || t.biggest() >= data.end {
+            } else if t.smallest() < data.inner_start() || t.biggest() >= data.inner_end() {
                 // -----smallest-----[start----------end)-----biggest-----
                 overlaps.push((t.id(), 0, -1));
             }
         }
         data.for_each_level(|cf, lh| {
             for t in lh.tables.iter() {
-                if t.biggest() < data.start || t.smallest() >= data.end {
+                if t.biggest() < data.inner_start() || t.smallest() >= data.inner_end() {
                     // -----smallest-----biggest-----[start----------end)
                     // [start----------end)-----smallest-----biggest-----
                     let mut delete = pb::TableDelete::default();
@@ -649,7 +664,7 @@ impl Engine {
                     delete.set_level(lh.level as u32);
                     delete.set_cf(cf as i32);
                     deletes.push(delete);
-                } else if t.smallest() < data.start || t.biggest() >= data.end {
+                } else if t.smallest() < data.inner_start() || t.biggest() >= data.inner_end() {
                     // -----smallest-----[start----------end)-----biggest-----
                     overlaps.push((t.id(), lh.level as u32, cf as i32));
                 }
@@ -809,15 +824,16 @@ impl Engine {
             store_bool(&shard.compacting, false);
             return None;
         }
-        let upper_level_candidates = if upper_level.has_over_bound_data(&shard.start, &shard.end) {
-            if upper_level.tables.first().unwrap().smallest() < shard.start {
-                Arc::new(vec![upper_level.tables.first().unwrap().clone()])
+        let upper_level_candidates =
+            if upper_level.has_over_bound_data(shard.inner_start(), shard.inner_end()) {
+                if upper_level.tables.first().unwrap().smallest() < shard.inner_start() {
+                    Arc::new(vec![upper_level.tables.first().unwrap().clone()])
+                } else {
+                    Arc::new(vec![upper_level.tables.last().unwrap().clone()])
+                }
             } else {
-                Arc::new(vec![upper_level.tables.last().unwrap().clone()])
-            }
-        } else {
-            upper_level.tables.clone()
-        };
+                upper_level.tables.clone()
+            };
 
         let sum_tbl_size = |tbls: &[sstable::SsTable]| tbls.iter().map(|tbl| tbl.size()).sum();
 
@@ -1116,7 +1132,7 @@ pub(crate) fn compact_l0(
             cf,
             l0_tbls.clone(),
             std::mem::take(&mut mult_cf_bot_tbls[cf]),
-            &req.start,
+            req.inner_start(),
         );
         let mut helper = CompactL0Helper::new(cf, req, compression_lvl);
         loop {
@@ -1252,7 +1268,7 @@ impl CompactL0Helper {
             skip_key: BytesMut::new(),
             safe_ts: req.safe_ts,
             max_table_size: req.max_table_size,
-            end: req.end.clone(),
+            end: req.inner_end().to_vec(),
         }
     }
 
@@ -1353,7 +1369,7 @@ pub(crate) fn compact_tables(
     let top_iter = Box::new(ConcatIterator::new_with_tables(top_tables, false, false));
     let bot_iter = Box::new(ConcatIterator::new_with_tables(bot_tables, false, false));
     let mut iter = table::new_merge_iterator(vec![top_iter, bot_iter], false);
-    iter.seek(&req.start);
+    iter.seek(req.inner_start());
 
     let mut last_key = BytesMut::new();
     let mut skip_key = BytesMut::new();
@@ -1390,7 +1406,7 @@ pub(crate) fn compact_tables(
                 if !last_key.is_empty() && builder.estimated_size() + kv_size > req.max_table_size {
                     break;
                 }
-                if key >= req.end.as_slice() {
+                if key >= req.inner_end() {
                     reach_end = true;
                     break;
                 }
@@ -1659,7 +1675,7 @@ fn compact_destroy_range(
 
     let mut deletes = vec![];
     let mut creates = vec![];
-    let del_prefixes = DeletePrefixes::unmarshal(&req.del_prefixes);
+    let del_prefixes = DeletePrefixes::unmarshal(&req.del_prefixes, req.inner_key_off);
     let (tx, rx) = tikv_util::mpsc::bounded(req.file_ids.len());
     for (&(id, level, cf), &new_id) in req.in_place_compact_files.iter().zip(req.file_ids.iter()) {
         let file = files.remove(&id).unwrap();
@@ -1900,10 +1916,10 @@ fn compact_trim_over_bound(
             for cf in 0..NUM_CFS {
                 if let Some(cf_t) = t.get_cf(cf) {
                     let mut iter = cf_t.new_iterator(false, false);
-                    iter.seek(&req.start);
+                    iter.seek(req.inner_start());
                     while iter.valid() {
                         let key = iter.key();
-                        if key >= req.end.as_slice() {
+                        if key >= req.inner_end() {
                             break;
                         }
                         builder.add(cf, key, &iter.value(), None);
@@ -1926,10 +1942,10 @@ fn compact_trim_over_bound(
                 compression_lvl,
             );
             let mut iter = t.new_iterator(false, false);
-            iter.seek(&req.start);
+            iter.seek(req.inner_start());
             while iter.valid() {
                 let key = iter.key();
-                if key >= req.end.as_slice() {
+                if key >= req.inner_end() {
                     break;
                 }
                 builder.add(key, &iter.value(), None);
@@ -2044,7 +2060,7 @@ fn major_compact_for_cf(
     id_idx: usize,
     ret: &mut pb::MajorCompaction,
 ) -> Result<usize> {
-    iter.seek(&req.start);
+    iter.seek(req.inner_start());
     let mut last_key = BytesMut::new();
     let mut skip_key = BytesMut::new();
     if id_idx + 2 >= req.file_ids.len() {
@@ -2077,7 +2093,7 @@ fn major_compact_for_cf(
     );
     let (tx, rx) = tikv_util::mpsc::bounded(req.file_ids.len());
     let mut cnt = 0;
-    while iter.valid() && iter.key() < req.end.as_slice() {
+    while iter.valid() && iter.key() < req.inner_end() {
         let mut val = iter.value();
         let key = iter.key();
         // See if we need to skip this key.
