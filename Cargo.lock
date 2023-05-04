@@ -7341,6 +7341,7 @@ dependencies = [
  "kvengine",
  "kvenginepb",
  "kvproto",
+ "lazy_static",
  "native_br",
  "pd_client",
  "prometheus",

@@ -83,4 +83,17 @@ lazy_static! {
         exponential_buckets(16.0, 2.0, 20).unwrap()
     )
     .unwrap();
+    pub static ref RFENGINE_BACKUP_DURATION_HISTOGRAM: HistogramVec = register_histogram_vec!(
+        "raft_engine_backup_duration_seconds",
+        "Bucketed histogram of rfengine backup duration",
+        &["type"], // full or incremental
+        exponential_buckets(0.1, 2.0, 20).unwrap() // start from 0.1s
+    )
+    .unwrap();
+    pub static ref RFENGINE_BACKUP_COUNTER: IntCounterVec = register_int_counter_vec!(
+        "raft_engine_backup_counter",
+        "Counter of rfengine backup",
+        &["status"], // success or fail
+    )
+    .unwrap();
 }

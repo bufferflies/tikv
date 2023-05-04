@@ -27,7 +27,13 @@ use rfenginepb::{
 use slog_global::*;
 use tikv_util::{mpsc::Receiver, time::Instant};
 
-use crate::{log_batch::RaftLogBlock, manifest::Manifest, write_batch::PeerBatch, *};
+use crate::{
+    log_batch::RaftLogBlock,
+    manifest::Manifest,
+    metrics::{RFENGINE_BACKUP_COUNTER, RFENGINE_BACKUP_DURATION_HISTOGRAM},
+    write_batch::PeerBatch,
+    *,
+};
 
 const MAX_WAL_CHUNK_SIZE: u64 = 128 * 1024 * 1024;
 pub(crate) struct Worker {
@@ -157,9 +163,25 @@ impl Worker {
         Ok(file)
     }
 
+    fn backup_callback(
+        task: BackupTask,
+        ret: std::result::Result<StoreBackupMeta, String>,
+        label: &str,
+        ob_start_time: Instant,
+    ) {
+        RFENGINE_BACKUP_COUNTER.with_label_values(&[label]).inc();
+        if ret.is_ok() {
+            RFENGINE_BACKUP_DURATION_HISTOGRAM
+                .with_label_values(&[label])
+                .observe(ob_start_time.saturating_elapsed_secs());
+        }
+        (task.callback)(ret);
+    }
+
     fn full_backup(&mut self, task: BackupTask) {
         let engine_id = self.manifest.get_engine_id();
         info!("{}: start backup task", engine_id);
+        let ob_start_time = Instant::now();
         let wal_epoch = self.manifest.epoch_id + 1;
         let mut objects = vec![];
         let mut backup_meta = StoreBackupMeta::default();
@@ -167,16 +189,24 @@ impl Worker {
         match self.backup_wal(&mut backup_meta, wal_epoch, 0, task.file_off) {
             Ok(mut objs) => objects.append(&mut objs),
             Err(e) => {
-                (task.callback)(Err(format!("backup wal failed {:?}", e)));
-                return;
+                return Self::backup_callback(
+                    task,
+                    Err(format!("backup wal failed {:?}", e)),
+                    "full_fail",
+                    ob_start_time,
+                );
             }
         }
         let manifest = self.manifest.to_change_set(true); // Exclude tombstone peers.
         match self.backup_raft_log_files(&manifest, &mut backup_meta) {
             Ok(obj) => objects.push(obj),
             Err(e) => {
-                (task.callback)(Err(format!("backup raft log failed {:?}", e)));
-                return;
+                return Self::backup_callback(
+                    task,
+                    Err(format!("backup raft log failed {:?}", e)),
+                    "full_fail",
+                    ob_start_time,
+                );
             }
         }
         backup_meta.set_manifest(manifest);
@@ -191,10 +221,9 @@ impl Worker {
         // compaction.
         thread::spawn(move || {
             if let Err(err) = task.object_storage.put_objects(objects) {
-                (task.callback)(Err(err));
-                return;
+                return Self::backup_callback(task, Err(err), "full_fail", ob_start_time);
             }
-            (task.callback)(Ok(backup_meta));
+            Self::backup_callback(task, Ok(backup_meta), "full_success", ob_start_time);
         });
     }
 
@@ -335,11 +364,13 @@ impl Worker {
             task.config.start_offset = 0;
             return self.full_backup(task);
         }
+        let ob_start_time = Instant::now();
         if task.file_off < task.config.start_offset {
-            return (task.callback)(Err(format!(
+            let msg = format!(
                 "WAL offset invalid, current {}, given start {}",
                 task.file_off, task.config.start_offset
-            )));
+            );
+            return Self::backup_callback(task, Err(msg), "incr_fail", ob_start_time);
         }
         info!(
             "Engine {} start incremental backup task, epoch {}",
@@ -356,7 +387,12 @@ impl Worker {
         ) {
             Ok(mut objs) => objects.append(&mut objs),
             Err(e) => {
-                return (task.callback)(Err(format!("Backup WAL failed {:?}", e)));
+                return Self::backup_callback(
+                    task,
+                    Err(format!("Backup WAL failed {:?}", e)),
+                    "incr_fail",
+                    ob_start_time,
+                );
             }
         }
         let total_size: usize = objects.iter().map(|(_, data)| data.len()).sum();
@@ -369,9 +405,9 @@ impl Worker {
         // compaction.
         thread::spawn(move || {
             if let Err(err) = task.object_storage.put_objects(objects) {
-                return (task.callback)(Err(err));
+                return Self::backup_callback(task, Err(err), "incr_fail", ob_start_time);
             }
-            (task.callback)(Ok(backup_meta));
+            Self::backup_callback(task, Ok(backup_meta), "incr_success", ob_start_time);
         });
     }
 }

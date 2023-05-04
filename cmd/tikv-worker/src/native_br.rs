@@ -17,12 +17,13 @@ use native_br::{
 use pd_client::PdClient;
 use security::SecurityConfig;
 use serde::Deserialize;
-use tikv_util::{debug, error, info, HandyRwLock};
+use tikv_util::{debug, error, info, time::Instant, HandyRwLock};
 use tokio::runtime::Runtime;
 
 use crate::{
     common::{get_u64_param, make_json_response, make_response},
     error::Error,
+    metrics::{NATIVE_BR_COUNTER_VEC, NATIVE_BR_HISTOGRAM_VEC},
 };
 
 type Result<T> = std::result::Result<T, Error>;
@@ -68,6 +69,7 @@ pub(crate) async fn handle_backup(
     }
     match *req.method() {
         Method::GET => {
+            let ob_start_time = Instant::now();
             let last_backup_time = query_pairs.get("last_backup_time").and_then(|s| {
                 NaiveDateTime::parse_from_str(s, JSON_TIME_FORMAT)
                     .ok()
@@ -103,12 +105,20 @@ pub(crate) async fn handle_backup(
                         items: backups.into_iter().map(Into::into).collect(),
                         has_more,
                     };
+                    NATIVE_BR_HISTOGRAM_VEC
+                        .with_label_values(&["list_backup"])
+                        .observe(ob_start_time.saturating_elapsed_secs());
                     Ok(make_json_response(StatusCode::OK, &resp))
                 }
-                Err(e) => Ok(make_response(
-                    StatusCode::NOT_FOUND,
-                    format!("Backups not found: {:?}", e),
-                )),
+                Err(e) => {
+                    NATIVE_BR_COUNTER_VEC
+                        .with_label_values(&["list_backup_fail"])
+                        .inc();
+                    Ok(make_response(
+                        StatusCode::NOT_FOUND,
+                        format!("Backups not found: {:?}", e),
+                    ))
+                }
             }
         }
         _ => Ok(make_response(StatusCode::BAD_REQUEST, "Invalid method")),
@@ -549,6 +559,7 @@ impl BrContext {
         keyspace_name: String,
         backup_name: String,
     ) -> Result<()> {
+        let ob_start_time = Instant::now();
         self.change_restore_state(restore_id, &keyspace_name, RestoreState::Running, None)?;
         let config = RestoreConfig {
             pd: self.pd.clone(),
@@ -565,6 +576,12 @@ impl BrContext {
             &self.runtime,
         ) {
             Ok(()) => {
+                NATIVE_BR_COUNTER_VEC
+                    .with_label_values(&["restore_keyspace_succeed"])
+                    .inc();
+                NATIVE_BR_HISTOGRAM_VEC
+                    .with_label_values(&["restore_keyspace"])
+                    .observe(ob_start_time.saturating_elapsed_secs());
                 self.change_restore_state(restore_id, &keyspace_name, RestoreState::Succeed, None)
             }
             Err(err) => {
@@ -572,6 +589,9 @@ impl BrContext {
                     "{} restore_keyspace error, restore_id {}, error {:?}",
                     keyspace_name, restore_id, err
                 );
+                NATIVE_BR_COUNTER_VEC
+                    .with_label_values(&["restore_keyspace_fail"])
+                    .inc();
                 self.change_restore_state(
                     restore_id,
                     &keyspace_name,

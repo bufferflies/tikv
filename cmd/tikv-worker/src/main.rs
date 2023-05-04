@@ -3,6 +3,7 @@
 mod common;
 mod error;
 mod load_data;
+mod metrics;
 mod native_br;
 
 use std::{
