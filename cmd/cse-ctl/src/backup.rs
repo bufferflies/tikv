@@ -4,6 +4,7 @@ use std::{path::PathBuf, time::Duration};
 
 use clap::Args;
 use native_br::backup::{execute_full_backup, execute_incremental_backup, BackupConfig};
+use tikv_util::info;
 
 const INCREMENTAL_BACKUP_INTERVAL: u64 = 30; // seconds.
 
@@ -34,7 +35,7 @@ pub struct BackupArgs {
     /// Path of file that contains X509 key in PEM format
     #[clap(long, default_value = "")]
     pub key: PathBuf,
-    #[clap(long, default_value_t = false)]
+    #[clap(long)]
     pub skip_keyspace_meta: bool,
     /// The tolerate num of stores' backup failure.
     #[clap(long, default_value_t = 0)]
@@ -43,6 +44,7 @@ pub struct BackupArgs {
 
 pub fn execute_backup(args: BackupArgs) {
     let config: BackupConfig = get_backup_config_from_args(&args);
+    info!("Begin backup with config {:?}", config);
     if args.incremental {
         execute_incremental_backup(config, args.name, Duration::from_secs(args.interval))
     } else {
