@@ -8,7 +8,7 @@ use farmhash;
 use xorf::BinaryFuse8;
 
 use super::super::table::Value;
-use crate::table::{ExternalLink, BIT_HAS_OLD_VERSION, VALUE_VERSION_LEN, VALUE_VERSION_OFF};
+use crate::table::{ExternalLink, BIT_HAS_OLD_VERSION, VALUE_VERSION_LEN};
 
 pub const CRC32C: u8 = 1;
 pub const PROP_KEY_SMALLEST: &str = "smallest";
@@ -409,6 +409,8 @@ impl BlockBuffer {
     fn build_entry(&self, buf: &mut Vec<u8>, i: usize, common_prefix_len: usize) {
         let key = self.tmp_keys.get_entry(i);
         let key_suffix = &key[common_prefix_len..];
+        // The key suffix length is encoded as a u16. Remember to update the entry size
+        // calculation (in fn add_entry()) if the key suffix length type changes.
         buf.put_u16_le(key_suffix.len() as u16);
         buf.extend_from_slice(key_suffix);
         let val_bin = self.tmp_vals.get_entry(i);
@@ -470,7 +472,7 @@ impl BlockBuilder {
         } else {
             val.encoded_size()
         };
-        let entry_size = VALUE_VERSION_OFF + key.len() + encoded_size;
+        let entry_size = /*key_suffix length in bytes*/ 2 + key.len() + encoded_size;
         self.block.entry_sizes.push(entry_size as u32);
         self.block.kv_size += entry_size;
         if self.block.tmp_keys.length() % 64 == 0 {
