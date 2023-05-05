@@ -207,7 +207,7 @@ impl ShardMeta {
                         .properties
                         .get(DEL_PREFIXES_KEY)
                         .map(|b| DeletePrefixes::unmarshal(b.chunk(), inner_key_off))
-                        .unwrap()
+                        .unwrap_or_else(|| DeletePrefixes::new_with_inner_key_off(inner_key_off))
                         .merge(prefix)
                         .marshal(),
                 );
