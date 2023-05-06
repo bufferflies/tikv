@@ -386,7 +386,7 @@ async fn handle_remote_analysis(
     let tag = format!("[:{}]", remote_req.key);
     let mut change_set = kvenginepb::ChangeSet::default();
     change_set.merge_from_bytes(&remote_req.snap_bytes).unwrap();
-    let snap_access = SnapAccess::from_change_set(dfs, change_set).await;
+    let snap_access = SnapAccess::from_change_set(dfs, change_set, true).await;
     info!(
         "start analyzing for {}, prepare snap time {:?}",
         tag,

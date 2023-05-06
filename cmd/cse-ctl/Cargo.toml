@@ -5,9 +5,13 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+api_version = { workspace = true }
+async-trait = "0.1"
 bytes = "1.0"
 chrono = "0.4"
 clap = { version = "3.2", features = ["derive"] }
+farmhash = "1.1.5"
+futures = "0.3"
 hex = "0.4"
 http = "0.2.8"
 hyper = "0.14"
@@ -19,6 +23,7 @@ pd_client = { workspace = true }
 protobuf = "2.8"
 rfengine = { workspace = true }
 rfstore = { workspace = true }
+schema = { workspace = true }
 security = { workspace = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_derive = "1.0"
@@ -27,7 +32,9 @@ serde_json = "1.0"
 slog = { version = "2.3", features = ["max_level_trace", "release_max_level_debug"] }
 slog-global = { version = "0.1", git = "https://github.com/breeswish/slog-global.git", rev = "d592f88e4dbba5eb439998463054f1a44fbf17b9" }
 slog-term = "2.4"
+tidb_query_datatype = { workspace = true }
 tikv_util = { workspace = true }
 tokio = { version = "1.12", features = ["full"] }
 toml = "0.5"
+txn_types = { workspace = true }
 url = "2"

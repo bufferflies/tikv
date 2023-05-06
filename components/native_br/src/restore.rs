@@ -60,7 +60,7 @@ pub fn restore_pd(config: RestoreConfig, name: String) {
     runtime.block_on(restore_pd_keyspace_meta(&config, &cluster_backup));
 }
 
-pub(crate) fn get_cluster_backup_meta(s3fs: &S3Fs, name: String) -> ClusterBackupMeta {
+pub fn get_cluster_backup_meta(s3fs: &S3Fs, name: String) -> ClusterBackupMeta {
     let backup_key = backup_file_full_path(s3fs.get_prefix(), name.clone());
     let runtime = s3fs.get_runtime();
     let data = runtime

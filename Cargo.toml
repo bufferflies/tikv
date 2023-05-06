@@ -278,6 +278,7 @@ members = [
   "components/rfengine",
   "components/rfenginepb",
   "components/rfstore",
+  "components/schema",
   "components/security",
   "components/server",
   "components/sst_importer",
@@ -359,6 +360,7 @@ resource_metering = { path = "components/resource_metering" }
 rfengine = { path = "components/rfengine" }
 rfenginepb = { path = "components/rfenginepb" }
 rfstore = { path = "components/rfstore" }
+schema = { path = "components/schema" }
 security = { path = "components/security" }
 server = { path = "components/server" }
 snap_recovery = { path = "components/snap_recovery" }

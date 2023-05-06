@@ -4,6 +4,7 @@
 extern crate serde_derive;
 
 mod backup;
+mod check_table;
 mod dfsgc;
 mod restore;
 mod truncate_ts;
@@ -16,11 +17,12 @@ use slog::Drain;
 
 use crate::{
     backup::{execute_backup, BackupArgs},
+    check_table::{execute_check_table, CheckTableArgs},
     dfsgc::{execute_dfsgc, DfsGcArgs},
     restore::{execute_restore_command, RestoreCommand},
     truncate_ts::{execute_truncate_ts, TruncateTsArgs},
     unsafe_recover::{execute_unsafe_recover, UnsafeRecoverArgs},
-    Commands::{Backup, DfsGc, Restore, TruncateTs, UnsafeRecover},
+    Commands::{Backup, CheckTable, DfsGc, Restore, TruncateTs, UnsafeRecover},
 };
 
 fn main() {
@@ -41,6 +43,9 @@ fn main() {
         }
         TruncateTs(args) => {
             execute_truncate_ts(args);
+        }
+        CheckTable(args) => {
+            execute_check_table(args);
         }
     }
 }
@@ -96,4 +101,6 @@ pub enum Commands {
     Restore(RestoreCommand),
     /// Truncate newer data than given ts
     TruncateTs(TruncateTsArgs),
+    /// CheckTable check data consistency on each table.
+    CheckTable(CheckTableArgs),
 }

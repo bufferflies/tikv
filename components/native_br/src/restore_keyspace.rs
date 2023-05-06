@@ -231,7 +231,7 @@ pub fn restore_keyspace(
 }
 
 #[derive(Default, Clone)]
-struct BackupShard {
+pub struct BackupShard {
     pub region_id: u64,
     pub store_id: u64,
     pub peer_id: u64,
@@ -297,7 +297,7 @@ struct AlignedRegion {
     backup_shards_id: Vec<u64>,
 }
 
-struct BackupCluster {
+pub struct BackupCluster {
     path: PathBuf,
     pd_client: Arc<dyn PdClient>,
     dfs: Arc<S3Fs>,
@@ -326,6 +326,7 @@ struct BackupCluster {
     meta_applier: Option<Arc<MetaApplier>>,
 
     meta_sender: Option<mpsc::Sender<StoreMsg>>,
+    // new members need to check if need to clear in reset_keyspace.
 }
 
 impl Drop for BackupCluster {
@@ -577,6 +578,11 @@ impl BackupCluster {
             }));
 
         let (mut leader_shards, mut sorted_shards_id) = Self::get_leader_shards(all_shards)?;
+        info!(
+            "leader shard cnt {}, sorted shards cnt {}",
+            leader_shards.len(),
+            sorted_shards_id.len()
+        );
         self.shards = mem::take(&mut leader_shards);
         self.sorted_shards = mem::take(&mut sorted_shards_id);
         debug!(
@@ -760,6 +766,21 @@ impl BackupCluster {
         self.sorted_shards.len()
     }
 
+    pub fn get_shard_metas_before_flush(&self) -> Vec<ShardMeta> {
+        let mut shards = Vec::with_capacity(self.sorted_shards.len());
+        let guard = self.meta_applier.as_ref().unwrap().shards.read().unwrap();
+        let backup_shards = guard.as_ref().unwrap();
+        for &id in &self.sorted_shards {
+            let backup_shard = backup_shards.get(&id).unwrap();
+            shards.push(backup_shard.meta.clone());
+        }
+        shards
+    }
+
+    pub fn get_kvengine(&self) -> kvengine::Engine {
+        self.kv_engine.as_ref().unwrap().clone()
+    }
+
     #[inline]
     fn get_all_stores_id(&self) -> impl ExactSizeIterator<Item = u64> + '_ {
         self.store_shards.keys().copied()
@@ -878,7 +899,7 @@ impl BackupCluster {
         aligned_regions
     }
 
-    pub fn align_target_regions(
+    fn align_target_regions(
         &mut self,
         target_regions: Vec<RawRegion>,
     ) -> Result<(
@@ -891,7 +912,7 @@ impl BackupCluster {
         Ok((aligned_regions, trimmed_shards_cnt))
     }
 
-    pub fn gather_sstables(
+    fn gather_sstables(
         &self,
         aligned_regions: Vec<AlignedRegion>,
     ) -> (Vec<ShardMeta>, usize /* number of sstables */) {
@@ -1027,6 +1048,43 @@ impl BackupCluster {
                 cs
             })
             .collect()
+    }
+
+    pub fn reset_keyspace(
+        &mut self,
+        cluster_meta: &ClusterBackupMeta,
+        keyspace_id: u32,
+    ) -> Result<()> {
+        let (keyspace_prefix, _) = ApiV2::get_txn_keyspace_range(keyspace_id);
+        self.keyspace_id = keyspace_id;
+        self.keyspace_prefix = keyspace_prefix;
+
+        let kv_engine = self.kv_engine.take().unwrap();
+        kv_engine.close();
+        drop(kv_engine);
+        if let Some(sender) = self.meta_sender.take() {
+            sender.send(StoreMsg::Stop).unwrap();
+        }
+        self.meta_applier.take();
+        self.sorted_shards.clear();
+        self.raw_metas.clear();
+        self.store_shards.clear();
+        self.shards.clear();
+        self.shards_need_flush.clear();
+        self.shards_need_truncate.clear();
+
+        let mut store_configs = HashMap::with_capacity(cluster_meta.stores.len());
+        for store in &cluster_meta.stores {
+            let store_id = store.get_store_id();
+            let store_config = self.generate_store_config(store_id);
+            store_configs.insert(store_id, store_config);
+        }
+        self.load_shards()?;
+        let stores_ids: Vec<_> = self.get_all_stores_id().collect();
+        for store_id in stores_ids {
+            self.setup_kv_engine(store_id, store_configs.get(&store_id).unwrap())?;
+        }
+        Ok(())
     }
 }
 

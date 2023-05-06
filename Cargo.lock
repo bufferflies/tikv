@@ -1507,9 +1507,13 @@ dependencies = [
 name = "cse-ctl"
 version = "0.1.0"
 dependencies = [
+ "api_version",
+ "async-trait",
  "bytes",
  "chrono",
  "clap 3.2.22",
+ "farmhash",
+ "futures 0.3.15",
  "hex 0.4.2",
  "http",
  "hyper",
@@ -1521,6 +1525,7 @@ dependencies = [
  "protobuf",
  "rfengine",
  "rfstore",
+ "schema",
  "security",
  "serde",
  "serde_derive",
@@ -1529,9 +1534,11 @@ dependencies = [
  "slog",
  "slog-global",
  "slog-term",
+ "tidb_query_datatype",
  "tikv_util",
  "tokio",
  "toml",
+ "txn_types",
  "url",
 ]
 
@@ -5677,6 +5684,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "977a7519bff143a44f842fd07e80ad1329295bd71686457f18e496736f4bf9bf"
 dependencies = [
  "parking_lot 0.12.0",
+]
+
+[[package]]
+name = "schema"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "kvengine",
+ "serde",
+ "serde_derive",
+ "serde_ignored",
+ "serde_json",
+ "slog",
+ "slog-global",
+ "slog-term",
+ "tikv_util",
 ]
 
 [[package]]

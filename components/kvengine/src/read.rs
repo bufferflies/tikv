@@ -74,8 +74,12 @@ impl SnapAccess {
         Self { core }
     }
 
-    pub async fn from_change_set(dfs: Arc<dyn dfs::Dfs>, change_set: pb::ChangeSet) -> Self {
-        let core = Arc::new(SnapAccessCore::from_change_set(dfs, change_set).await);
+    pub async fn from_change_set(
+        dfs: Arc<dyn dfs::Dfs>,
+        change_set: pb::ChangeSet,
+        ignore_lock: bool,
+    ) -> Self {
+        let core = Arc::new(SnapAccessCore::from_change_set(dfs, change_set, ignore_lock).await);
         Self { core }
     }
 }
@@ -123,7 +127,11 @@ impl SnapAccessCore {
         }
     }
 
-    pub async fn from_change_set(dfs: Arc<dyn dfs::Dfs>, change_set: pb::ChangeSet) -> Self {
+    pub async fn from_change_set(
+        dfs: Arc<dyn dfs::Dfs>,
+        change_set: pb::ChangeSet,
+        ignore_lock: bool,
+    ) -> Self {
         let mut cs = ChangeSet::new(change_set);
         let mut ids = HashMap::new();
         if cs.has_snapshot() {
@@ -138,7 +146,7 @@ impl SnapAccessCore {
                 ids.insert(blob.id, BLOB_LEVEL);
             }
         }
-        let (result_tx, mut result_rx) = tokio::sync::mpsc::channel(ids.len());
+        let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel();
         let runtime = dfs.get_runtime();
         let opts = dfs::Options::new(cs.shard_id, cs.shard_ver);
         let mut msg_count = 0;
@@ -147,7 +155,7 @@ impl SnapAccessCore {
             let tx = result_tx.clone();
             runtime.spawn(async move {
                 let res = fs.read_file(id, opts).await;
-                tx.send(res.map(|data| (id, level, data))).await.unwrap();
+                tx.send(res.map(|data| (id, level, data))).unwrap();
             });
             msg_count += 1;
         }
@@ -160,7 +168,7 @@ impl SnapAccessCore {
                         let blob_table = BlobTable::new(Arc::new(file)).unwrap();
                         cs.blob_tables.insert(id, blob_table);
                     } else if level == 0 {
-                        let l0_table = L0Table::new(Arc::new(file), None, true).unwrap();
+                        let l0_table = L0Table::new(Arc::new(file), None, ignore_lock).unwrap();
                         cs.l0_tables.insert(id, l0_table);
                     } else {
                         let ln_table = SsTable::new(Arc::new(file), None, level == 1).unwrap();
