@@ -303,10 +303,9 @@ fn run_task(
     let mut idx_writer = BufWriter::new(idx_file);
     for (idx_id, index_meta) in invalid_indices {
         let idx_str = format!(
-            "{}|{}|{}|{}|{}|{}\n",
+            "{}|{}|{}|{}|{}\n",
             idx_id,
             index_meta.handle,
-            hex::encode(&index_meta.idx_val_in_key),
             index_meta.unique,
             index_meta.user_meta.start_ts,
             index_meta.user_meta.commit_ts,
@@ -402,7 +401,6 @@ struct RowMeta {
 #[derive(Debug, Clone)]
 struct IndexMeta {
     handle: Handle,
-    idx_val_in_key: Vec<u8>,
     unique: bool,
     user_meta: UserMeta,
 }
@@ -469,7 +467,7 @@ impl BackupReader {
             } else {
                 (Handle::parse_from_index_val(val, common_handle), true)
             };
-            meta_writer.write_index(handle, user_meta, idx_cols_data, unique);
+            meta_writer.write_index(handle, user_meta, unique);
             true
         })?;
         Ok(meta_writer.finish())
@@ -621,10 +619,8 @@ impl SegmentWriter {
         self.maybe_flush();
     }
 
-    fn write_idx(&mut self, handle: Handle, um: UserMeta, idx_val_in_key: &[u8], unique: bool) {
+    fn write_idx(&mut self, handle: Handle, um: UserMeta, unique: bool) {
         self.write_handle_user_meta(handle, um);
-        self.buf.put_u16(idx_val_in_key.len() as u16);
-        self.buf.extend_from_slice(idx_val_in_key);
         self.buf.put_u8(unique as u8);
         self.cnt += 1;
         self.maybe_flush();
@@ -656,9 +652,9 @@ impl MetaWriter {
         self.segments[shard_id].write_row(handle, um);
     }
 
-    fn write_index(&mut self, handle: Handle, um: UserMeta, idx_val_in_key: &[u8], unique: bool) {
+    fn write_index(&mut self, handle: Handle, um: UserMeta, unique: bool) {
         let shard_id = handle.segment_id(self.segments.len());
-        self.segments[shard_id].write_idx(handle, um, idx_val_in_key, unique);
+        self.segments[shard_id].write_idx(handle, um, unique);
     }
 
     fn finish(&mut self) -> usize {
@@ -757,14 +753,10 @@ impl TableChecker {
         let mut buf = &data[..data.len() - 8];
         while !buf.is_empty() {
             let (handle, user_meta) = self.get_handle_user_meta(&mut buf);
-            let idx_val_len = buf.get_u16() as usize;
-            let idx_val_in_key = buf.get(..idx_val_len).unwrap().to_vec();
-            buf.advance(idx_val_len);
             let unique = buf.get_u8() > 0;
             let idx_meta = IndexMeta {
                 handle,
                 user_meta,
-                idx_val_in_key,
                 unique,
             };
             f(idx_meta);
