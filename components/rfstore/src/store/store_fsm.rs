@@ -1835,15 +1835,16 @@ impl<'a> StoreMsgHandler<'a> {
             Some(region) => region.clone(),
             None => return,
         };
-        region.mut_region_epoch().set_version(ver + 1);
 
         let peer = match self.ctx.peers.get(&region.id) {
             Some(peer) => peer,
             None => return,
         };
         let mut peer_fsm = peer.peer_fsm.lock().unwrap();
-
         let tag = peer_fsm.peer.tag();
+        debug_assert_eq!(region.get_region_epoch().get_version(), ver, "{}", tag);
+
+        region.mut_region_epoch().set_version(ver + 1);
         info!(
             "{} store_fsm::on_restore_shard_result: set region {:?}",
             tag, region

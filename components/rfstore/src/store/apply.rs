@@ -4,6 +4,7 @@ use std::{
     cmp::min,
     collections::{vec_deque, HashMap, VecDeque},
     fmt::{self, Debug, Formatter},
+    mem,
     ops::RangeBounds,
     sync::{atomic::AtomicU64, Arc, Mutex},
     time::Duration,
@@ -1143,6 +1144,9 @@ impl Applier {
                 .paused_apply_queue
                 .try_unpause(seq, &format!("{} {}", self.tag(), label))
             {
+                if !exec_results.is_empty() {
+                    ctx.finish_for(self, mem::take(&mut exec_results));
+                }
                 self.resume_handle_apply(ctx);
             }
         }
