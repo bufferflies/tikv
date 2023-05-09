@@ -1,7 +1,7 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fmt::{Display, Formatter},
     fs,
     fs::File,
@@ -69,6 +69,7 @@ pub struct CheckTableConfig {
     pub data_dir: String,
     pub backup_name: String,
     pub keyspace_ids: Vec<u32>,
+    pub skip_keyspace_ids: Vec<u32>,
     pub timestamp: u64,
     pub all: bool,
 }
@@ -116,12 +117,17 @@ pub(crate) fn execute_check_table(args: CheckTableArgs) {
     let cluster_backup = get_cluster_backup_meta(&s3fs, config.backup_name.clone());
     let keyspace_ids = if config.all {
         let mut all_keyspace_ids = vec![];
+        let skip_keyspace_ids: HashSet<u32> =
+            HashSet::from_iter(config.skip_keyspace_ids.iter().copied());
         for (k, v) in &cluster_backup.keyspace_meta {
             let key_str = String::from_utf8_lossy(k);
             if key_str.contains("/keyspaces/meta/") {
                 let mut keyspace_meta = KeyspaceMeta::default();
                 let res = keyspace_meta.merge_from_bytes(v);
-                if res.is_ok() && keyspace_meta.state == KeyspaceState::Enabled {
+                if res.is_ok()
+                    && keyspace_meta.state == KeyspaceState::Enabled
+                    && !skip_keyspace_ids.contains(&keyspace_meta.id)
+                {
                     all_keyspace_ids.push(keyspace_meta.id);
                 }
             }

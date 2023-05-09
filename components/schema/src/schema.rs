@@ -48,9 +48,9 @@ pub struct ColumnInfo {
     pub name: CiStr,
     pub offset: i64,
     pub origin_default: Option<String>,
-    pub origin_default_bit: Option<Vec<u8>>,
+    pub origin_default_bit: Option<String>, // base64 encoded string.
     pub default: Option<String>,
-    pub default_bit: Option<Vec<u8>>,
+    pub default_bit: Option<String>, // base64 encoded string.
     // DefaultIsExpr is indicates the default value string is expr.
     pub default_is_expr: bool,
     pub generated_expr_string: String,
@@ -121,7 +121,7 @@ pub struct PartitionInfo {
     #[serde(rename = "type")]
     pub type_: PartitionType,
     pub expr: String,
-    pub columns: Vec<CiStr>,
+    pub columns: Option<Vec<CiStr>>,
     // User may already create table with partition but table partition is not
     // yet supported back then. When Enable is true, write/read need use tid
     // rather than pid.
