@@ -54,6 +54,9 @@ const CREATE_FILE_CONCURRENCY: usize = 32;
 const INGEST_CONCURRENCY: usize = 4;
 
 const ALLOCATE_ID_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const RETRY_SLEEP_DURATION: Duration = Duration::from_millis(100);
+const MAX_RETRY_TIMES: usize = 10;
+const MAX_SLEEP_DURATION: Duration = Duration::from_secs(30);
 
 /// Remote load data worker API:
 ///
@@ -679,6 +682,54 @@ impl LoadTaskWorker {
         Ok(buf)
     }
 
+    fn split_and_scatter_regions(&mut self, split_keys: &[Vec<u8>]) -> Result<()> {
+        info!("{} start split and scatter", self.task_ctx.start_ts);
+        let mut retry = 0;
+        let mut split_keys = split_keys.to_owned();
+        loop {
+            let mut unprocessed_keys = Vec::with_capacity(split_keys.len());
+            for split_key in &split_keys {
+                let region = self.ctx.pd.get_region(split_key)?;
+                let start_key = region.get_start_key();
+                if start_key == split_key {
+                    continue;
+                }
+                unprocessed_keys.push(split_key.clone());
+            }
+            if unprocessed_keys.is_empty() {
+                break;
+            }
+
+            let result = self.ctx.runtime.block_on(
+                self.ctx
+                    .pd
+                    .split_and_scatter_regions(unprocessed_keys.clone()),
+            );
+            match result {
+                Err(e) => {
+                    error!(
+                        "{} split and scatter failed {:?}",
+                        self.task_ctx.start_ts, e
+                    );
+                    if retry >= MAX_RETRY_TIMES {
+                        return Err(Error::PdError(e));
+                    }
+                    std::thread::sleep(std::cmp::max(
+                        MAX_SLEEP_DURATION,
+                        2_u32.pow(retry as u32) * RETRY_SLEEP_DURATION,
+                    ));
+                }
+                Ok(_) => {
+                    break;
+                }
+            }
+            split_keys = unprocessed_keys.clone();
+            retry += 1;
+        }
+        info!("{} finish split and scatter", self.task_ctx.start_ts);
+        Ok(())
+    }
+
     fn ingest(&mut self, mut sst_metas: Vec<SstMeta>) -> Result<()> {
         if sst_metas.is_empty() {
             return Ok(());
@@ -686,11 +737,7 @@ impl LoadTaskWorker {
         info!("{} start ingest", self.task_ctx.start_ts);
         sst_metas.sort_by(|a, b| a.id.cmp(&b.id));
         let coarse_split_keys = gen_split_keys(&sst_metas, COARSE_SPLIT_SIZE);
-        self.ctx.runtime.block_on(
-            self.ctx
-                .pd
-                .split_and_scatter_regions(coarse_split_keys.clone()),
-        )?;
+        self.split_and_scatter_regions(&coarse_split_keys)?;
         for i in 0..coarse_split_keys.len() {
             let start_key = coarse_split_keys[i].clone();
             let end_key = if i + 1 == coarse_split_keys.len() {
