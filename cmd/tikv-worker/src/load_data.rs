@@ -45,7 +45,7 @@ type Result<T> = std::result::Result<T, Error>;
 pub(crate) const MAX_IN_MEM_SIZE: usize = 256 * 1024 * 1024;
 
 const SST_FILE_SIZE: usize = 16 * 1024 * 1024;
-const REGION_SIZE: usize = 1024 * 1024 * 1024;
+const REGION_SIZE: usize = 1024 * 1024 * 1024; // 1GB
 const COARSE_SPLIT_SIZE: usize = 32 * 1024 * 1024 * 1024; // 32GB
 const BLOCK_SIZE: usize = 64 * 1024;
 const ZSTD_COMPRESSION_LEVEL: i32 = 3;
@@ -682,16 +682,18 @@ impl LoadTaskWorker {
         Ok(buf)
     }
 
-    fn split_and_scatter_regions(&mut self, split_keys: &[Vec<u8>]) -> Result<()> {
-        info!("{} start split and scatter", self.task_ctx.start_ts);
+    fn split_regions(&self, split_keys: &[Vec<u8>]) -> Result<Vec<u64>> {
+        info!("{} start split", self.task_ctx.start_ts);
         let mut retry = 0;
         let mut split_keys = split_keys.to_owned();
+        let mut new_regions_id = Vec::with_capacity(split_keys.len());
         loop {
             let mut unprocessed_keys = Vec::with_capacity(split_keys.len());
             for split_key in &split_keys {
                 let region = self.ctx.pd.get_region(split_key)?;
                 let start_key = region.get_start_key();
                 if start_key == split_key {
+                    new_regions_id.push(region.get_id());
                     continue;
                 }
                 unprocessed_keys.push(split_key.clone());
@@ -700,17 +702,13 @@ impl LoadTaskWorker {
                 break;
             }
 
-            let result = self.ctx.runtime.block_on(
-                self.ctx
-                    .pd
-                    .split_and_scatter_regions(unprocessed_keys.clone()),
-            );
+            let result = self
+                .ctx
+                .runtime
+                .block_on(self.ctx.pd.split_regions(unprocessed_keys.clone()));
             match result {
                 Err(e) => {
-                    error!(
-                        "{} split and scatter failed {:?}",
-                        self.task_ctx.start_ts, e
-                    );
+                    error!("{} split failed {:?}", self.task_ctx.start_ts, e);
                     if retry >= MAX_RETRY_TIMES {
                         return Err(Error::PdError(e));
                     }
@@ -719,15 +717,21 @@ impl LoadTaskWorker {
                         2_u32.pow(retry as u32) * RETRY_SLEEP_DURATION,
                     ));
                 }
-                Ok(_) => {
+                Ok(regions_id) => {
+                    new_regions_id.extend_from_slice(&regions_id);
                     break;
                 }
             }
             split_keys = unprocessed_keys.clone();
             retry += 1;
         }
-        info!("{} finish split and scatter", self.task_ctx.start_ts);
-        Ok(())
+        new_regions_id.sort();
+        new_regions_id.dedup();
+        info!(
+            "{} finish split, new regions_id {:?}",
+            self.task_ctx.start_ts, new_regions_id
+        );
+        Ok(new_regions_id)
     }
 
     fn ingest(&mut self, mut sst_metas: Vec<SstMeta>) -> Result<()> {
@@ -737,7 +741,7 @@ impl LoadTaskWorker {
         info!("{} start ingest", self.task_ctx.start_ts);
         sst_metas.sort_by(|a, b| a.id.cmp(&b.id));
         let coarse_split_keys = gen_split_keys(&sst_metas, COARSE_SPLIT_SIZE);
-        self.split_and_scatter_regions(&coarse_split_keys)?;
+        let new_regions_id = self.split_regions(&coarse_split_keys)?;
         for i in 0..coarse_split_keys.len() {
             let start_key = coarse_split_keys[i].clone();
             let end_key = if i + 1 == coarse_split_keys.len() {
@@ -750,6 +754,13 @@ impl LoadTaskWorker {
             let group_ssts = get_ssts_in_range(&sst_metas, &start_key, &end_key);
             self.ingest_group(group_ssts)?;
         }
+        let result = self.ctx.pd.scatter_regions_by_id(new_regions_id);
+        if let Err(err) = result {
+            error!(
+                "{} scatter regions failed {:?}",
+                self.task_ctx.start_ts, err
+            );
+        }
         self.scheduler.set_finished();
         info!("{} finished ingest", self.task_ctx.start_ts);
         Ok(())
@@ -757,9 +768,7 @@ impl LoadTaskWorker {
 
     fn ingest_group(&self, sst_metas: Vec<SstMeta>) -> Result<()> {
         let split_keys = gen_split_keys(&sst_metas, REGION_SIZE);
-        self.ctx
-            .runtime
-            .block_on(self.ctx.pd.split_regions(split_keys))?;
+        self.split_regions(&split_keys)?;
         let first_key = sst_metas.first().unwrap().encoded_smallest.clone();
         let mut last_key = sst_metas.last().unwrap().encoded_biggest.clone();
         last_key.push(0);

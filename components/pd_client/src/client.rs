@@ -834,6 +834,21 @@ impl PdClient for RpcClient {
         check_resp_header(resp.get_header())
     }
 
+    fn scatter_regions_by_id(&self, regions_id: Vec<u64>) -> Result<()> {
+        let _timer = PD_REQUEST_HISTOGRAM_VEC
+            .with_label_values(&["scatter_regions_by_id"])
+            .start_coarse_timer();
+
+        let mut req = pdpb::ScatterRegionRequest::default();
+        req.set_header(self.header());
+        req.set_regions_id(regions_id);
+
+        let resp = sync_request(&self.pd_client, LEADER_CHANGE_RETRY, |client, option| {
+            client.scatter_region_opt(&req, option)
+        })?;
+        check_resp_header(resp.get_header())
+    }
+
     fn handle_reconnect(&self, f: Box<dyn Fn() + Sync + Send + 'static>) {
         self.pd_client.on_reconnect(Box::new(f))
     }
@@ -1073,7 +1088,7 @@ impl PdClient for RpcClient {
             .execute()
     }
 
-    fn split_regions(&self, keys: Vec<Vec<u8>>) -> PdFuture<()> {
+    fn split_regions(&self, keys: Vec<Vec<u8>>) -> PdFuture<Vec<u64>> {
         let timer = Instant::now();
         let mut req = pdpb::SplitRegionsRequest::default();
         req.set_header(self.header());
@@ -1090,12 +1105,12 @@ impl PdClient for RpcClient {
                     })
             };
             Box::pin(async move {
-                let resp = handler.await?;
+                let mut resp = handler.await?;
                 PD_REQUEST_HISTOGRAM_VEC
                     .with_label_values(&["split_regions"])
                     .observe(duration_to_sec(timer.saturating_elapsed()));
                 check_resp_header(resp.get_header())?;
-                Ok(())
+                Ok(resp.take_regions_id())
             }) as PdFuture<_>
         };
         self.pd_client

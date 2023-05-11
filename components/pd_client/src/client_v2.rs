@@ -611,6 +611,8 @@ pub trait PdClient {
 
     fn scatter_region(&mut self, region: RegionInfo) -> Result<()>;
 
+    fn scatter_regions_by_id(&mut self, regions_id: Vec<u64>) -> Result<()>;
+
     fn get_gc_safe_point(&mut self) -> PdFuture<u64>;
 
     fn get_operator(&mut self, region_id: u64) -> Result<pdpb::GetOperatorResponse>;
@@ -1279,6 +1281,24 @@ impl PdClient for RpcClient {
             req.set_leader(leader);
         }
         req.set_region(region.region);
+
+        block_on(self.raw_client.wait_for_ready())?;
+        req.set_header(self.raw_client.header());
+        let resp = self.raw_client.stub().scatter_region_opt(
+            &req,
+            self.raw_client.call_option().timeout(request_timeout()),
+        );
+        let resp = self.raw_client.check_resp(resp)?;
+        check_resp_header(resp.get_header())
+    }
+
+    fn scatter_regions_by_id(&mut self, regions_id: Vec<u64>) -> Result<()> {
+        let _timer = PD_REQUEST_HISTOGRAM_VEC
+            .with_label_values(&["scatter_regions_by_id"])
+            .start_coarse_timer();
+
+        let mut req = pdpb::ScatterRegionRequest::default();
+        req.set_regions_id(regions_id);
 
         block_on(self.raw_client.wait_for_ready())?;
         req.set_header(self.raw_client.header());

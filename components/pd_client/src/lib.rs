@@ -437,6 +437,11 @@ pub trait PdClient: Send + Sync {
         unimplemented!();
     }
 
+    /// Scatters the Regions across the cluster by Region id.
+    fn scatter_regions_by_id(&self, _: Vec<u64>) -> Result<()> {
+        unimplemented!();
+    }
+
     /// Registers a handler to the client, which will be invoked after
     /// reconnecting to PD.
     ///
@@ -500,7 +505,7 @@ pub trait PdClient: Send + Sync {
     }
 
     /// tikv-worker uses this to load data.
-    fn split_regions(&self, _keys: Vec<Vec<u8>>) -> PdFuture<()> {
+    fn split_regions(&self, _keys: Vec<Vec<u8>>) -> PdFuture<Vec<u64>> {
         unimplemented!();
     }
 
