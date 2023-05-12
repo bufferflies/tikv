@@ -1,10 +1,15 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{path::Path, str::FromStr, sync::mpsc::SyncSender, time::Duration};
+use std::{
+    path::Path,
+    str::FromStr,
+    sync::mpsc::SyncSender,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 
 use bytes::Bytes;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
-use futures::executor::block_on;
+use futures::{compat::Stream01CompatExt, executor::block_on, StreamExt};
 use http::{Request, Uri};
 use hyper::Body;
 use kvengine::dfs::{self, DFSConfig, S3Fs};
@@ -15,6 +20,7 @@ use regex::Regex;
 use rfenginepb::{ClusterBackupMeta, StoreBackupMeta};
 use security::SecurityConfig;
 use slog_global::{error, info, warn};
+use tikv_util::timer::GLOBAL_TIMER_HANDLE;
 
 use crate::{
     common::{
@@ -56,9 +62,15 @@ pub fn execute_incremental_backup(config: BackupConfig, name: String, interval: 
         error!("Don't support non-empty name for incremental backup.");
         return;
     }
+    let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    let gap = interval.as_secs() - duration.as_secs() % interval.as_secs();
+    let start_time = Instant::now()
+        .checked_add(Duration::from_secs(gap))
+        .unwrap();
+    let mut interval = GLOBAL_TIMER_HANDLE.interval(start_time, interval).compat();
     let pd_client = create_pd_client(&config.security, &config.pd);
     let mut cluster_backup_meta = None;
-    loop {
+    while let Some(Ok(_)) = block_on(interval.next()) {
         match backup_cluster(
             config.clone(),
             true,
@@ -86,7 +98,6 @@ pub fn execute_incremental_backup(config: BackupConfig, name: String, interval: 
                 }
             }
         }
-        std::thread::sleep(interval)
     }
 }
 
