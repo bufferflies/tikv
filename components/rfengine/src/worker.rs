@@ -44,6 +44,7 @@ pub(crate) struct Worker {
     buf: Vec<u8>,
     compacted_epoch: Arc<AtomicU32>,
     rate_limiter: Arc<IoRateLimiter>,
+    async_wal_writer: Option<WalWriter>,
 }
 
 impl Worker {
@@ -53,6 +54,7 @@ impl Worker {
         manifest: Manifest,
         compacted_epoch: Arc<AtomicU32>,
         rate_limit: usize,
+        async_wal_writer: Option<WalWriter>,
     ) -> Self {
         let rate_limiter = Arc::new(IoRateLimiter::new(IoRateLimitMode::AllIo, true, false));
         rate_limiter.set_io_rate_limit(rate_limit);
@@ -65,6 +67,7 @@ impl Worker {
             buf: vec![],
             compacted_epoch,
             rate_limiter,
+            async_wal_writer,
         }
     }
 
@@ -72,6 +75,10 @@ impl Worker {
         while let Ok(task) = self.task_rx.recv() {
             match task {
                 Task::Rotate { epoch_id } => {
+                    if let Some(async_writer) = self.async_wal_writer.as_mut() {
+                        assert_eq!(async_writer.epoch_id, epoch_id);
+                        async_writer.rotate().unwrap();
+                    }
                     if let Err(err) = self.compact(epoch_id) {
                         let engine_id = self.manifest.get_engine_id();
                         error!(
@@ -89,6 +96,11 @@ impl Worker {
                         self.full_backup(backup_task);
                     }
                 }
+                Task::Write(wb) => {
+                    if let Some(wal_writer) = &mut self.async_wal_writer {
+                        wal_writer.write_batch(&wb).unwrap();
+                    }
+                }
             }
         }
     }
@@ -97,8 +109,10 @@ impl Worker {
         let timer = Instant::now_coarse();
         let mut batch = WriteBatch::default();
         let mut it = WalIterator::new(self.dir.clone(), epoch_id, Some(self.rate_limiter.clone()));
-        it.iterate(|region_batch| {
-            batch.merge_peer(region_batch);
+        it.iterate_batch(|data| {
+            WalIterator::iterate_peer_batch(data, |region_batch| {
+                batch.merge_peer(region_batch);
+            });
         })?;
         let mut change_set = rfenginepb::ChangeSet::default();
         change_set.set_epoch_id(epoch_id);
@@ -494,6 +508,7 @@ pub(crate) enum Task {
     Truncates(Vec<Vec<RaftLogBlock>>),
     Close,
     Backup(BackupTask),
+    Write(WriteBatch),
 }
 
 #[derive(Default, Debug, Serialize, Deserialize)]
@@ -605,6 +620,7 @@ mod tests {
             manifest,
             AtomicU32::new(0).into(),
             125 * 1024 * 1024,
+            None,
         );
         let epoch = 990;
         let mut cs = ChangeSet::new();
@@ -713,6 +729,7 @@ mod tests {
             manifest,
             AtomicU32::new(0).into(),
             125 * 1024 * 1024,
+            None,
         );
         let mut cs = ChangeSet::new();
         let mut peer_data_map = HashMap::new();
@@ -790,6 +807,7 @@ mod tests {
             wal_size,
             1024,
             AtomicU32::new(cs.epoch_id + 1).into(),
+            false,
         );
         wal_writer.open_file(cs.epoch_id + 1, 0).unwrap();
         // checksum inner should succeeds.

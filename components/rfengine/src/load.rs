@@ -9,7 +9,7 @@ use tikv_util::info;
 use crate::{log_batch::RaftLogOp, manifest::Manifest, *};
 
 impl RfEngineCore {
-    pub(crate) fn load(&mut self, manifest: &Manifest) -> Result<()> {
+    pub(crate) fn load(&mut self, manifest: &Manifest) -> Result<u64> {
         for (&peer_id, peer_meta) in &manifest.peers {
             let peer_ref = self.get_or_init_peer_data(peer_id, peer_meta.region_id);
             let mut peer_data = peer_ref.write().unwrap();
@@ -27,13 +27,15 @@ impl RfEngineCore {
         }
         let mut epoch_id = manifest.epoch_id + 1;
         let mut wal_offset = 0;
-        if wal_exists(self.dir.as_path(), epoch_id) {
-            wal_offset = self.load_wal_file(epoch_id)?;
+        let mut async_offset = 0;
+        if wal_exists(self.wal_dir(), epoch_id) {
+            (wal_offset, async_offset) = self.load_wal_file(epoch_id)?;
         }
-        while wal_exists(self.dir.as_path(), epoch_id + 1) {
+        while wal_exists(self.wal_dir(), epoch_id + 1) {
             self.task_sender.send(Task::Rotate { epoch_id }).unwrap();
             epoch_id += 1;
-            wal_offset = self.load_wal_file(epoch_id)?;
+            let (offset, _) = self.load_wal_file(epoch_id)?;
+            wal_offset = offset;
         }
         let mut writer = self.writer.lock().unwrap();
         // Delete the following 7 lines and function get_wal_header at the next wal
@@ -45,12 +47,13 @@ impl RfEngineCore {
                 Err(e) => return Err(e),
             };
         }
-        writer.open_file(epoch_id, wal_offset)
+        writer.open_file(epoch_id, wal_offset)?;
+        Ok(async_offset)
     }
 
     pub(crate) fn get_wal_header(&self, mut epoch_id: u32) -> Result<WalHeader> {
         loop {
-            match check_wal_header(self.dir.as_path(), epoch_id) {
+            match check_wal_header(self.wal_dir(), epoch_id) {
                 Ok(wal_header) => {
                     return Ok(wal_header);
                 }
@@ -62,15 +65,40 @@ impl RfEngineCore {
         }
     }
 
-    pub(crate) fn load_wal_file(&mut self, epoch_id: u32) -> Result<u64> {
+    pub(crate) fn load_wal_file(&mut self, epoch_id: u32) -> Result<(u64, u64)> {
         info!("load wal {}", epoch_id);
-        let mut it = WalIterator::new(self.dir.clone(), epoch_id, None);
-        it.iterate(|new_data| {
-            let peer_ref = self.get_or_init_peer_data(new_data.peer_id, new_data.meta.region_id);
-            let mut peer_data = peer_ref.write().unwrap();
-            let _ = peer_data.apply(&new_data);
+        let mut async_batch_cnt = 0;
+        let mut async_offset = 0;
+        if self.is_async_wal_enabled() {
+            let mut async_it = WalIterator::new(self.dir.to_path_buf(), epoch_id, None);
+            async_it.iterate_batch(|_| {
+                async_batch_cnt += 1;
+            })?;
+            async_offset = async_it.offset;
+        }
+        let mut sync_batch_idx = 0;
+        let mut it = WalIterator::new(self.wal_dir().to_path_buf(), epoch_id, None);
+        it.iterate_batch(|data| {
+            sync_batch_idx += 1;
+            let mut wb = if self.is_async_wal_enabled() && sync_batch_idx >= async_batch_cnt {
+                Some(WriteBatch::new())
+            } else {
+                None
+            };
+            WalIterator::iterate_peer_batch(data, |peer_batch| {
+                let peer_ref =
+                    self.get_or_init_peer_data(peer_batch.peer_id, peer_batch.meta.region_id);
+                let mut peer_data = peer_ref.write().unwrap();
+                let _ = peer_data.apply(&peer_batch);
+                if let Some(wb) = &mut wb {
+                    wb.peers.insert(peer_batch.peer_id, peer_batch);
+                }
+            });
+            if let Some(wb) = wb {
+                self.task_sender.send(Task::Write(wb)).unwrap();
+            }
         })?;
-        Ok(it.offset)
+        Ok((it.offset, async_offset))
     }
 
     pub(crate) fn load_raft_log_file(

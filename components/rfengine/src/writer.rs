@@ -259,6 +259,7 @@ pub(crate) struct WalWriter {
     // file_off is always aligned.
     pub(crate) file_off: u64,
     pub(crate) compacted_epoch: Arc<AtomicU32>,
+    pub(crate) is_async: bool,
 }
 
 impl WalWriter {
@@ -267,6 +268,7 @@ impl WalWriter {
         wal_size: usize,
         compression_threshold: usize,
         compacted_epoch: Arc<AtomicU32>,
+        is_async: bool,
     ) -> Self {
         let version = if compression_threshold == 0 {
             Version::V1
@@ -291,6 +293,7 @@ impl WalWriter {
             compression_threshold,
             file_off: 0,
             compacted_epoch,
+            is_async,
         }
     }
 
@@ -371,6 +374,13 @@ impl WalWriter {
         Ok((data_len, rotated))
     }
 
+    pub(crate) fn write_batch(&mut self, wb: &WriteBatch) -> Result<(usize, bool)> {
+        for peer_batch in wb.peers.values() {
+            self.append_region_data(peer_batch);
+        }
+        self.flush()
+    }
+
     fn format_v1(&mut self) {
         unsafe {
             self.buf.ensure_space(self.batch_buf.len());
@@ -418,10 +428,10 @@ impl WalWriter {
         let compacted_epoch = self.compacted_epoch.load(Ordering::SeqCst);
         // If the current epoch id is 5, the rotated epoch id is 6, it would overwrite
         // epoch 2 wal, so we need to make sure epoch 2 is compacted.
-        current_size > self.wal_size && compacted_epoch + 4 > self.epoch_id
+        current_size > self.wal_size && compacted_epoch + 4 > self.epoch_id && !self.is_async
     }
 
-    fn rotate(&mut self) -> Result<()> {
+    pub(crate) fn rotate(&mut self) -> Result<()> {
         let timer = Instant::now_coarse();
         self.open_file(self.epoch_id + 1, 0)?;
         ENGINE_ROTATE_DURATION_HISTOGRAM.observe(timer.saturating_elapsed_secs());

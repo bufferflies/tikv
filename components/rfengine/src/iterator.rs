@@ -41,11 +41,19 @@ impl WalIterator {
         }
     }
 
-    pub(crate) fn iterate<F>(&mut self, mut f: F) -> Result<()>
+    pub(crate) fn iterate_peer_batch(data: Bytes, mut f: impl FnMut(PeerBatch)) {
+        let mut batch = data.chunk();
+        while !batch.is_empty() {
+            let peer_data = PeerBatch::decode(batch);
+            batch = &batch[peer_data.encoded_len()..];
+            f(peer_data);
+        }
+    }
+
+    pub(crate) fn iterate_batch<F>(&mut self, mut f: F) -> Result<()>
     where
-        F: FnMut(PeerBatch),
+        F: FnMut(Bytes),
     {
-        self.offset = 0;
         let filename = wal_file_name(self.dir.as_path(), self.epoch_id);
         let fd = file_system::File::open_with_limiter(filename, self.rate_limiter.clone())?;
         let mut buf_reader = BufReader::new(fd);
@@ -65,15 +73,10 @@ impl WalIterator {
                     return Err(err);
                 }
                 Ok(data) => {
-                    let mut batch = data.chunk();
-                    if batch.is_empty() {
+                    if data.is_empty() {
                         return Ok(());
                     }
-                    while !batch.is_empty() {
-                        let peer_data = PeerBatch::decode(batch);
-                        batch = &batch[peer_data.encoded_len()..];
-                        f(peer_data);
-                    }
+                    f(data);
                 }
             }
         }

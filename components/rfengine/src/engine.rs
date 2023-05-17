@@ -4,7 +4,7 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fmt::{Display, Formatter},
     fs,
-    fs::{create_dir_all, OpenOptions},
+    fs::{create_dir_all, File, OpenOptions},
     ops::{Deref, DerefMut},
     os::unix::fs::{FileExt, MetadataExt},
     path::{Path, PathBuf},
@@ -108,6 +108,8 @@ impl RfEngine {
 pub struct RfEngineCore {
     pub dir: PathBuf,
 
+    pub wal_sync_dir: Option<PathBuf>,
+
     pub(crate) writer: Mutex<WalWriter>,
 
     pub(crate) peers: dashmap::DashMap<u64, RwLock<PeerData>>,
@@ -130,19 +132,23 @@ impl RfEngineCore {
     fn open(dir: &Path, cfg: &Config) -> Result<Self> {
         let wal_size = cfg.target_file_size.0 as usize;
         let compression_threshold = cfg.batch_compression_threshold.0 as usize;
-        maybe_create_wal_files(dir)?;
+        let wal_sync_dir = cfg.wal_sync_dir.as_ref().map(|p| PathBuf::from(p));
+        init_wal_files(dir, wal_sync_dir.as_ref())?;
         let engine_id = Arc::new(AtomicU64::new(0));
         let manifest = Manifest::open(dir, engine_id.clone())?;
         let (tx, rx) = tikv_util::mpsc::unbounded();
         let compacted_epoch = Arc::new(AtomicU32::new(manifest.epoch_id));
+        let wal_dir = wal_sync_dir.as_deref().unwrap_or(dir);
         let writer = WalWriter::new(
-            dir,
+            wal_dir,
             wal_size,
             compression_threshold,
             compacted_epoch.clone(),
+            false,
         );
         let mut en = Self {
             dir: dir.to_owned(),
+            wal_sync_dir,
             peers: Default::default(),
             dependants: Default::default(),
             writer: Mutex::new(writer),
@@ -153,20 +159,38 @@ impl RfEngineCore {
             }),
             engine_id,
         };
-        en.load(&manifest)?;
+        let async_offset = en.load(&manifest)?;
         {
+            let async_wal_writer = if en.is_async_wal_enabled() {
+                let mut async_wal_writer = WalWriter::new(
+                    dir,
+                    wal_size,
+                    compression_threshold,
+                    compacted_epoch.clone(),
+                    true,
+                );
+                async_wal_writer.open_file(manifest.epoch_id + 1, async_offset)?;
+                Some(async_wal_writer)
+            } else {
+                None
+            };
             let mut worker = Worker::new(
                 dir.to_owned(),
                 rx,
                 manifest,
                 compacted_epoch,
                 cfg.worker_rate_limit.0 as usize,
+                async_wal_writer,
             );
             let join_handle = thread::spawn(move || worker.run());
             en.worker_handle.lock().unwrap().handle = Some(join_handle);
         }
 
         Ok(en)
+    }
+
+    pub(crate) fn wal_dir(&self) -> &Path {
+        self.wal_sync_dir.as_ref().unwrap_or(&self.dir)
     }
 
     pub(crate) fn get_or_init_peer_data(
@@ -215,12 +239,12 @@ impl RfEngineCore {
         let timer = Instant::now_coarse();
         let mut writer = self.writer.lock().unwrap();
         let epoch_id = writer.epoch_id;
-        for data in wb.peers.values() {
-            writer.append_region_data(data);
-        }
-        let (size, rotated) = writer.flush()?;
+        let (size, rotated) = writer.write_batch(&wb)?;
         if rotated {
             self.task_sender.send(Task::Rotate { epoch_id }).unwrap();
+        }
+        if self.is_async_wal_enabled() {
+            self.task_sender.send(Task::Write(wb)).unwrap();
         }
         ENGINE_PERSIST_DURATION_HISTOGRAM.observe(timer.saturating_elapsed_secs());
         Ok(size)
@@ -524,6 +548,10 @@ impl RfEngineCore {
         task.file_off = writer.file_off;
         self.task_sender.send(Task::Backup(task)).unwrap();
     }
+
+    pub(crate) fn is_async_wal_enabled(&self) -> bool {
+        self.wal_sync_dir.is_some()
+    }
 }
 
 fn restore_all_raft_logs(
@@ -621,7 +649,7 @@ pub fn restore(
         .iter()
         .find(|x| x.store_id == store_id)
         .expect("store not found");
-    maybe_create_wal_files(dir).unwrap();
+    init_wal_files(dir, None).unwrap();
     let wal_chunks = store_meta.get_wal_chunks();
     if !wal_chunks.is_empty() {
         let keys: Vec<(String, GetObjectOptions)> = wal_chunks
@@ -663,17 +691,68 @@ pub fn restore(
     }
 }
 
-pub(crate) fn maybe_create_wal_files(dir: &Path) -> Result<()> {
+pub(crate) fn init_wal_files(dir: &Path, wal_sync_dir: Option<&PathBuf>) -> Result<()> {
     if !dir.exists() {
         create_dir_all(dir)?;
     }
+    open_wal_files(dir)?;
+    if wal_sync_dir.is_none() {
+        return Ok(());
+    }
+    let wal_sync_dir = wal_sync_dir.unwrap();
+    if !wal_sync_dir.exists() {
+        create_dir_all(wal_sync_dir)?;
+    }
+    // upgrade_mark file is used to make the upgrade procedure idempotent.
+    // In case the upgrade process is interrupted, we can resume it later.
+    let upgrade_mark_file = upgrade_mark_file_path(dir);
+    if !upgrade_mark_file.exists() {
+        if all_wal_files_exists(wal_sync_dir.as_path()) {
+            return Ok(()); // already upgraded.
+        }
+        File::create(upgrade_mark_file.as_path())?;
+    }
+    copy_wal_files(dir, wal_sync_dir.as_path())?;
+    fs::remove_file(upgrade_mark_file.as_path())?;
+    file_system::sync_dir(dir)?;
+    Ok(())
+}
+
+fn upgrade_mark_file_path(dir: &Path) -> PathBuf {
+    dir.join("upgrade_mark")
+}
+
+fn open_wal_files(dir: &Path) -> Result<()> {
     // create 4 wal files and always reuse them, so we never need to sync dir on
     // writer thread.
     for i in 0..4 {
-        let file_path = dir.join(format!("{}.wal", i));
+        let file_path = wal_file_path(dir, i);
         let _ = open_direct_file(&file_path, true)?;
     }
     file_system::sync_dir(dir)?;
+    Ok(())
+}
+
+fn wal_file_path(dir: &Path, idx: usize) -> PathBuf {
+    dir.join(format!("{}.wal", idx))
+}
+
+fn all_wal_files_exists(dir: &Path) -> bool {
+    for i in 0..4 {
+        if !wal_file_path(dir, i).exists() {
+            return false;
+        }
+    }
+    true
+}
+
+fn copy_wal_files(dir: &Path, wal_sync_dir: &Path) -> Result<()> {
+    for i in 0..4 {
+        let src_file_path = wal_file_path(dir, i);
+        let dst_file_path = wal_file_path(wal_sync_dir, i);
+        fs::copy(src_file_path, dst_file_path)?;
+    }
+    file_system::sync_dir(wal_sync_dir)?;
     Ok(())
 }
 
@@ -696,6 +775,10 @@ impl PeerMeta {
         assert_eq!(self.region_id, other.region_id);
         if self.truncated_idx < other.truncated_idx {
             self.truncated_idx = other.truncated_idx;
+            info!(
+                "{} update truncate to {}",
+                other.region_id, other.truncated_idx
+            );
         }
         for (key, val) in &other.states {
             if keep_empty || !val.is_empty() {
@@ -1379,5 +1462,52 @@ mod tests {
                 .count(),
             0
         );
+    }
+
+    #[test]
+    fn test_init_wal_files() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        init_wal_files(tmp_dir.path(), None).unwrap();
+        let check_file_exists = |path: &Path| {
+            for idx in 0..4 {
+                assert!(wal_file_path(path, idx).exists());
+            }
+        };
+        check_file_exists(tmp_dir.path());
+
+        let file_contents: Vec<String> = (0..4).map(|i| format!("wal {}", i)).collect();
+        let write_files = |path: &Path| {
+            for idx in 0..4 {
+                let wal_file_path = wal_file_path(path, idx);
+                fs::write(wal_file_path.as_path(), file_contents[idx].as_bytes()).unwrap();
+            }
+        };
+        write_files(tmp_dir.path());
+        File::create(manifest_path(tmp_dir.path())).unwrap();
+
+        // upgrade to use wal_sync_dir
+        let wal_sync_dir = tmp_dir.path().join("wal_sync_dir");
+        init_wal_files(tmp_dir.path(), Some(&wal_sync_dir)).unwrap();
+        assert!(!upgrade_mark_file_path(tmp_dir.path()).exists());
+        let check_files = || {
+            for idx in 0..4 {
+                let async_wal_file_path = wal_file_path(tmp_dir.path(), idx);
+                assert!(async_wal_file_path.exists());
+                let sync_wal_file_path = wal_file_path(&wal_sync_dir, idx);
+                assert!(sync_wal_file_path.exists());
+                let data = fs::read_to_string(sync_wal_file_path.as_path()).unwrap();
+                assert_eq!(data, file_contents[idx]);
+            }
+        };
+        check_files();
+
+        // simulate upgrade interrupted.
+        write_files(tmp_dir.path());
+        fs::remove_file(wal_file_path(wal_sync_dir.as_path(), 3)).unwrap();
+        File::create(upgrade_mark_file_path(tmp_dir.path())).unwrap();
+
+        // init_wal_files again should recover from the interrupted upgrade.
+        init_wal_files(tmp_dir.path(), Some(&wal_sync_dir)).unwrap();
+        check_files();
     }
 }

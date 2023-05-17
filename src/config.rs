@@ -3518,6 +3518,15 @@ impl TikvConfig {
         {
             return Err("format_version larger than 5 is unsupported".into());
         }
+        if last_cfg.rfengine.wal_sync_dir.is_some()
+            && last_cfg.rfengine.wal_sync_dir != self.rfengine.wal_sync_dir
+        {
+            return Err(format!(
+                "rfengine wal_sync_dir have been changed, former is '{:?}', \
+                 current rfengine wal_sync_dir is '{:?}', please check if it is expected.",
+                last_cfg.rfengine.wal_sync_dir, self.rfengine.wal_sync_dir
+            ));
+        }
 
         Ok(())
     }
