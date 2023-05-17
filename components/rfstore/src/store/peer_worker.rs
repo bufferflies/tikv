@@ -16,6 +16,7 @@ use raftstore::store::{
     },
     util,
 };
+use rfengine::WriteBatch;
 use tikv_util::{
     debug, error,
     mpsc::{Receiver, Sender},
@@ -345,6 +346,7 @@ pub(crate) struct IoWorker {
     receiver: Receiver<Option<IoTask>>,
     router: RaftRouter,
     trans: Box<dyn Transport>,
+    wb: WriteBatch,
 }
 
 impl IoWorker {
@@ -353,13 +355,14 @@ impl IoWorker {
         router: RaftRouter,
         trans: Box<dyn Transport>,
     ) -> (Self, Sender<Option<IoTask>>) {
-        let (sender, receiver) = tikv_util::mpsc::bounded(0);
+        let (sender, receiver) = tikv_util::mpsc::bounded(256);
         (
             Self {
                 engine,
                 receiver,
                 router,
                 trans,
+                wb: Default::default(),
             },
             sender,
         )
@@ -367,35 +370,54 @@ impl IoWorker {
 
     pub(crate) fn run(&mut self) {
         while let Ok(Some(task)) = self.receiver.recv() {
-            self.handle_task(task);
+            let len = self.receiver.len();
+            let mut tasks = Vec::with_capacity(len + 1);
+            tasks.push(task);
+            for _ in 0..len {
+                let task = self.receiver.recv().unwrap();
+                if task.is_none() {
+                    return;
+                }
+                tasks.push(task.unwrap());
+            }
+            for task in &mut tasks {
+                if !task.raft_wb.is_empty() {
+                    let wb = mem::take(&mut task.raft_wb);
+                    self.wb.merge_write_batch(wb);
+                }
+            }
+            self.handle_tasks(tasks);
         }
     }
 
-    fn handle_task(&mut self, task: IoTask) {
-        if !task.raft_wb.is_empty() {
-            let timer = tikv_util::time::Instant::now();
-            let write_size = self.engine.persist(task.raft_wb).unwrap();
+    fn handle_tasks(&mut self, tasks: Vec<IoTask>) {
+        let timer = tikv_util::time::Instant::now();
+        if !self.wb.is_empty() {
+            let wb = mem::take(&mut self.wb);
+            let write_size = self.engine.persist(wb).unwrap();
             let write_raft_db_time = duration_to_sec(timer.saturating_elapsed());
             STORE_WRITE_RAFTDB_DURATION_HISTOGRAM.observe(write_raft_db_time);
             STORE_WRITE_TRIGGER_SIZE_HISTOGRAM.observe(write_size as f64);
         }
         let timer = tikv_util::time::Instant::now();
-        for mut ready in task.readies {
-            let raft_messages = mem::take(&mut ready.raft_messages);
-            for msg in raft_messages {
-                debug!(
-                    "follower send raft message";
-                    "region_id" => msg.region_id,
-                    "message_type" => %util::MsgType(&msg),
-                    "from_peer_id" => msg.get_from_peer().get_id(),
-                    "to_peer_id" => msg.get_to_peer().get_id(),
-                );
-                if let Err(err) = self.trans.send(msg) {
-                    error!("failed to send persist raft message {:?}", err);
+        for task in tasks {
+            for mut ready in task.readies {
+                let raft_messages = mem::take(&mut ready.raft_messages);
+                for msg in raft_messages {
+                    debug!(
+                        "follower send raft message";
+                        "region_id" => msg.region_id,
+                        "message_type" => %util::MsgType(&msg),
+                        "from_peer_id" => msg.get_from_peer().get_id(),
+                        "to_peer_id" => msg.get_to_peer().get_id(),
+                    );
+                    if let Err(err) = self.trans.send(msg) {
+                        error!("failed to send persist raft message {:?}", err);
+                    }
                 }
+                let region_id = ready.region_id;
+                self.router.send(region_id, PeerMsg::Persisted(ready));
             }
-            let region_id = ready.region_id;
-            self.router.send(region_id, PeerMsg::Persisted(ready));
         }
         if self.trans.need_flush() {
             self.trans.flush();

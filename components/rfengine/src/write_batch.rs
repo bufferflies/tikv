@@ -62,6 +62,12 @@ impl WriteBatch {
         self.get_peer(peer_batch.peer_id, peer_batch.meta.region_id)
             .merge(peer_batch);
     }
+
+    pub fn merge_write_batch(&mut self, other: WriteBatch) {
+        for (_, peer_batch) in other.peers {
+            self.merge_peer(peer_batch);
+        }
+    }
 }
 
 /// `RegionBatch` is a batch of modifications in one region.
