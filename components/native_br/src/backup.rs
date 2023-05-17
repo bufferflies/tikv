@@ -108,6 +108,14 @@ pub fn execute_full_backup(config: BackupConfig, name: String) {
     }
 }
 
+fn grpc_error_is_unimplemented(e: &pd_client::Error) -> bool {
+    if let pd_client::Error::Grpc(grpcio::Error::RpcFailure(ref status)) = e {
+        status.code() == grpcio::RpcStatusCode::UNIMPLEMENTED
+    } else {
+        false
+    }
+}
+
 fn backup_cluster(
     config: BackupConfig,
     incremental: bool,
@@ -115,7 +123,19 @@ fn backup_cluster(
     pd_client: &dyn PdClient,
     last_backup_meta: Option<ClusterBackupMeta>,
 ) -> Result<ClusterBackupMeta> {
-    let backup_ts = block_on(pd_client.get_tso())?.into_inner();
+    let res = pd_client.get_min_tso();
+    let backup_ts = match res {
+        Ok(ts) => Ok(ts.into_inner()),
+        Err(e) => {
+            if grpc_error_is_unimplemented(&e) {
+                info!("get_min_tso is unimplemented, fall back to get_tso");
+                Ok(block_on(pd_client.get_tso())?.into_inner())
+            } else {
+                Err(e)
+            }
+        }
+    }?;
+
     backup_cluster_with_ts(
         config,
         incremental,

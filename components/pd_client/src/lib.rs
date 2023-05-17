@@ -479,6 +479,10 @@ pub trait PdClient: Send + Sync {
         unimplemented!()
     }
 
+    fn get_min_tso(&self) -> Result<TimeStamp> {
+        unimplemented!()
+    }
+
     /// Set a service safe point.
     fn update_service_safe_point(
         &self,

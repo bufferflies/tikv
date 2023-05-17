@@ -2,6 +2,7 @@
 
 use std::{
     collections::HashMap,
+    convert::TryInto,
     fmt,
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -933,6 +934,26 @@ impl PdClient for RpcClient {
         self.pd_client
             .request((), executor, LEADER_CHANGE_RETRY)
             .execute()
+    }
+
+    fn get_min_tso(&self) -> Result<TimeStamp> {
+        let _timer = PD_REQUEST_HISTOGRAM_VEC
+            .with_label_values(&["get_min_tso"])
+            .start_coarse_timer();
+
+        let mut req: pdpb::GetMinTsRequest = pdpb::GetMinTsRequest::default();
+        req.set_header(self.header());
+
+        let resp: pdpb::GetMinTsResponse =
+            sync_request(&self.pd_client, LEADER_CHANGE_RETRY, |client, option| {
+                client.get_min_ts_opt(&req, option)
+            })?;
+        check_resp_header(resp.get_header())?;
+        let ts: TimeStamp = TimeStamp::compose(
+            resp.get_timestamp().get_physical().try_into().unwrap(),
+            resp.get_timestamp().get_logical().try_into().unwrap(),
+        );
+        Ok(ts)
     }
 
     fn update_service_safe_point(
