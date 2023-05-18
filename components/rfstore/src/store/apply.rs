@@ -378,6 +378,22 @@ impl Applier {
             return item.get_value().to_vec();
         }
         // TODO: investigate why there is duplicated commit.
+        if snap.has_unloaded_tables() {
+            // Currently only WRITE_CF data would be unloaded.
+            // TODO: save which data is unloaded for more general.
+            kv.load_unloaded_tables(snap.get_id(), snap.get_version(), false).unwrap_or_else(|err| {
+                panic!(
+                    "{} failed to load unloaded tables, snap_write_sequence: {}, snap_files: {:?}, log_index:{}, err:{:?}",
+                    snap.get_tag(),
+                    snap.get_write_sequence(),
+                    snap.get_all_files(),
+                    log_index,
+                    err,
+                );
+            });
+            snap = kv.get_snap_access(region_id).unwrap();
+            self.snap = Some(snap.clone());
+        }
         let item = snap.get(mvcc::WRITE_CF, key, u64::MAX);
         let old_commit_ts = if item.user_meta_len() == 0 {
             0
@@ -1276,7 +1292,7 @@ impl Applier {
         std::thread::spawn(move || {
             let id = cs.shard_id;
             tikv_util::set_current_region(id);
-            let res = engine.prepare_change_set(cs, !is_leader);
+            let res = engine.prepare_change_set(cs, !is_leader, None);
             router.send(id, PeerMsg::PrepareChangeSetResult(res));
         });
     }
@@ -1341,7 +1357,10 @@ impl Applier {
                 // All the files already in the local disk, prepare_change_set is non-blocking.
                 // But we still need to load block index for each file, later we can optimize to
                 // copy the opened tables from source shard.
-                let source_tables = ctx.engine.prepare_change_set(source, !is_leader).unwrap();
+                let source_tables = ctx
+                    .engine
+                    .prepare_change_set(source, !is_leader, None)
+                    .unwrap();
                 self.commit_merge_source_tables
                     .insert(source_shard.id, source_tables);
                 return;
@@ -1356,7 +1375,7 @@ impl Applier {
         let router = ctx.router.as_ref().unwrap().clone();
         std::thread::spawn(move || {
             tikv_util::set_current_region(source.shard_id);
-            let res = engine.prepare_change_set(source, !is_leader);
+            let res = engine.prepare_change_set(source, !is_leader, None);
             router.send(
                 region_id,
                 PeerMsg::PrepareCommitMergeResult(res, commit_index),

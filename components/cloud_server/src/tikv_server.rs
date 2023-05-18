@@ -902,6 +902,7 @@ impl TikvServer {
         rate_limiter: Arc<IoRateLimiter>,
         meta_iter: &mut impl kvengine::MetaIterator,
         recoverer: impl kvengine::RecoverHandler + 'static,
+        for_restore: bool,
     ) -> kvengine::Result<(
         kvengine::Engine,
         mpsc::Sender<StoreMsg>,
@@ -939,6 +940,7 @@ impl TikvServer {
         // TODO: this is a temporary binding, add kvengine specific config in the
         // future.
         kv_opts.max_del_range_delay = conf.raft_store.local_file_gc_timeout.0 * 2;
+        kv_opts.for_restore = for_restore;
         let opts = Arc::new(kv_opts);
         let id_allocator = Arc::new(PdIdAllocator { pd });
         let (sender, receiver) = tikv_util::mpsc::unbounded();
@@ -979,8 +981,16 @@ impl TikvServer {
             let black_list = BlackList::new(vec![], black_list_regions);
             meta_iter.set_black_list(black_list);
         }
-        let (kv_engine, sender, receiver) =
-            Self::init_kv_engine(pd, conf, dfs, rate_limiter, &mut meta_iter, recoverer).unwrap();
+        let (kv_engine, sender, receiver) = Self::init_kv_engine(
+            pd,
+            conf,
+            dfs,
+            rate_limiter,
+            &mut meta_iter,
+            recoverer,
+            false,
+        )
+        .unwrap();
         Engines::new(
             kv_engine,
             rf_engine,

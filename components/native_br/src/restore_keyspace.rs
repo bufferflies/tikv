@@ -427,37 +427,21 @@ impl BackupCluster {
         let rf_engine = self.raft_engines.get(&store_id).unwrap();
         let recoverer = rfstore::store::RecoverHandler::new(rf_engine.clone());
 
-        let shards_need_load = self.get_shards_need_flush_and_truncate(store_id);
-        let raw_metas = self.take_raw_metas(store_id);
-
-        if let Some(kv_engine) = self.kv_engine.as_mut() {
-            if !shards_need_load.is_empty() {
-                let mut meta_iter =
-                    MetaIterator::new(kv_engine.get_engine_id(), shards_need_load, raw_metas);
-                let metas = kv_engine.read_meta(&mut meta_iter)?;
-                info!(
-                    "Keyspace {} kv_engine load {} shards in restore keyspace",
-                    self.keyspace_id,
-                    metas.len()
-                );
-                kv_engine.load_shards(metas, recoverer)?;
-            }
-        } else {
-            // Even if `shards_need_load.is_empty()`, `self.kv_engine` should be
-            // constructed for later use.
+        if self.kv_engine.is_none() {
             let io_rate_limiter =
                 Arc::new(IoRateLimiter::new(IoRateLimitMode::WriteOnly, true, true));
             io_rate_limiter
                 .set_io_rate_limit(conf.storage.io_rate_limit.max_bytes_per_sec.0 as usize);
 
-            let mut meta_iter = MetaIterator::new(store_id, shards_need_load, raw_metas);
+            let mut meta_iter = MetaIterator::new(store_id, Vec::new(), HashMap::new());
             let (kv_engine, sender, receiver) = TikvServer::init_kv_engine(
                 self.pd_client.clone(),
                 conf,
                 self.dfs.clone(),
                 io_rate_limiter,
                 &mut meta_iter,
-                recoverer,
+                recoverer.clone(),
+                true,
             )?;
 
             // Move shards to meta_applier to apply meta change in `flush_mem_table`.
@@ -476,6 +460,36 @@ impl BackupCluster {
             });
 
             self.kv_engine = Some(kv_engine);
+        }
+
+        let shards_need_load = self.get_shards_need_flush_and_truncate(store_id);
+        let raw_metas = self.take_raw_metas(store_id);
+        let kv_engine = self.kv_engine.as_mut().unwrap();
+        if !shards_need_load.is_empty() {
+            let mut meta_iter =
+                MetaIterator::new(kv_engine.get_engine_id(), shards_need_load, raw_metas);
+            let metas = kv_engine.read_meta(&mut meta_iter)?;
+            info!(
+                "Keyspace {} kv_engine load {} shards in restore keyspace",
+                self.keyspace_id,
+                metas.len()
+            );
+
+            // Load the following tables from DFS:
+            // 1. Tables of shards need truncate, to get the `max_ts`.
+            // 2. Tables has locks (L0 & LOCK_CF) to replay commit requests.
+            let shard_need_truncate: HashSet<u64> = HashSet::from_iter(
+                self.shards_need_truncate
+                    .get(&store_id)
+                    .unwrap()
+                    .iter()
+                    .copied(),
+            );
+            let table_filter = move |shard_id: u64, tb: &kvengine::FileMeta| -> bool {
+                shard_need_truncate.contains(&shard_id) || tb.has_locks()
+            };
+
+            kv_engine.load_shards(metas, recoverer, Some(Arc::new(table_filter)))?;
         }
         Ok(())
     }
@@ -1174,7 +1188,7 @@ impl MetaApplier {
                     self.engine.meta_committed(&cs, false);
                     match self
                         .engine
-                        .prepare_change_set(cs, false)
+                        .prepare_change_set(cs, false, None)
                         .and_then(|cs| self.engine.apply_change_set(cs))
                     {
                         Ok(()) => debug!(

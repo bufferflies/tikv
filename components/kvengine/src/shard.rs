@@ -210,6 +210,7 @@ impl Shard {
             data.l0_tbls.clone(),
             data.blob_tbl_map.clone(),
             data.cfs.clone(),
+            data.unloaded_tbls.clone(),
         );
         self.set_data(new_data);
     }
@@ -227,6 +228,7 @@ impl Shard {
             data.l0_tbls.clone(),
             data.blob_tbl_map.clone(),
             data.cfs.clone(),
+            data.unloaded_tbls.clone(),
         );
         self.set_data(new_data);
     }
@@ -256,6 +258,7 @@ impl Shard {
             data.l0_tbls.clone(),
             data.blob_tbl_map.clone(),
             data.cfs.clone(),
+            data.unloaded_tbls.clone(),
         );
         self.set_data(new_data);
 
@@ -276,6 +279,7 @@ impl Shard {
             data.l0_tbls.clone(),
             data.blob_tbl_map.clone(),
             data.cfs.clone(),
+            data.unloaded_tbls.clone(),
         );
         self.set_data(new_data);
 
@@ -555,6 +559,7 @@ impl Shard {
             shard_data.l0_tbls.clone(),
             shard_data.blob_tbl_map.clone(),
             shard_data.cfs.clone(),
+            shard_data.unloaded_tbls.clone(),
         );
         self.set_data(new_data);
     }
@@ -603,6 +608,7 @@ impl ShardData {
             vec![],
             Arc::new(HashMap::new()),
             [ShardCf::new(0), ShardCf::new(1), ShardCf::new(2)],
+            HashMap::new(),
         )
     }
 
@@ -615,6 +621,7 @@ impl ShardData {
         l0_tbls: Vec<L0Table>,
         blob_tbl_map: Arc<HashMap<u64, BlobTable>>,
         cfs: [ShardCf; 3],
+        unloaded_tbls: HashMap<u64, FileMeta>,
     ) -> Self {
         assert!(!mem_tbls.is_empty());
 
@@ -628,6 +635,7 @@ impl ShardData {
                 l0_tbls,
                 blob_tbl_map,
                 cfs,
+                unloaded_tbls,
             }),
         }
     }
@@ -642,6 +650,8 @@ pub(crate) struct ShardDataCore {
     pub(crate) l0_tbls: Vec<L0Table>,
     pub(crate) blob_tbl_map: Arc<HashMap<u64, BlobTable>>,
     pub(crate) cfs: [ShardCf; 3],
+    /// Tables that are not loaded from DFS yet.
+    pub(crate) unloaded_tbls: HashMap<u64, FileMeta>,
 }
 
 impl Deref for ShardDataCore {

@@ -1,5 +1,6 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
+#![feature(hash_drain_filter)]
 #![cfg_attr(test, feature(test))]
 #[cfg(test)]
 extern crate test;

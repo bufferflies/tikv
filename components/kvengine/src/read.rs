@@ -185,7 +185,7 @@ impl SnapAccessCore {
             panic!("errors is not empty");
         }
         let mut shard = Shard::new_for_ingest(0, &cs, Arc::new(Options::default()));
-        let (l0s, blob_tbls, scfs) = create_snapshot_tables(cs.get_snapshot(), &cs);
+        let (l0s, blob_tbls, scfs) = create_snapshot_tables(cs.get_snapshot(), &cs, false);
         let old_data = shard.get_data();
         let data = ShardData::new(
             shard.range.clone(),
@@ -196,6 +196,7 @@ impl SnapAccessCore {
             l0s,
             Arc::new(blob_tbls),
             scfs,
+            HashMap::new(),
         );
         shard.id = cs.shard_id;
         shard.set_data(data);
@@ -643,6 +644,10 @@ impl SnapAccessCore {
             return false;
         }
         it.key().starts_with(inner_prefix)
+    }
+
+    pub fn has_unloaded_tables(&self) -> bool {
+        !self.data.unloaded_tbls.is_empty()
     }
 }
 

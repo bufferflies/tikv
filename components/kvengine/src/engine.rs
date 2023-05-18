@@ -59,6 +59,11 @@ impl Debug for Engine {
 
 const FILE_LOCK_SLOTS: usize = 1024;
 
+/// LoadTableFilterFn is used to filter tables which are not necessary to load
+/// from DFS to local disks during restoration.
+pub type LoadTableFilterFn =
+    Arc<dyn Fn(u64 /* shard_id */, &FileMeta) -> bool + Send + Sync + 'static>;
+
 impl Engine {
     pub fn open(
         fs: Arc<dyn dfs::Dfs>,
@@ -122,7 +127,7 @@ impl Engine {
         };
         let metas = en.read_meta(meta_iter)?;
         info!("engine load {} shards", metas.len());
-        en.load_shards(metas, recoverer)?;
+        en.load_shards(metas, recoverer, None)?;
         en.loaded.store(true, Ordering::Relaxed);
         let flush_en = en.clone();
         thread::Builder::new()
@@ -131,13 +136,18 @@ impl Engine {
                 flush_en.run_flush_worker(flush_rx);
             })
             .unwrap();
-        let compact_en = en.clone();
-        thread::Builder::new()
-            .name("compaction".to_string())
-            .spawn_wrapper(move || {
-                compact_en.run_compaction(compact_rx);
-            })
-            .unwrap();
+        if !opts.for_restore {
+            // Disable compaction for restore, as some tables are not loaded from DFS.
+            let compact_en = en.clone();
+            thread::Builder::new()
+                .name("compaction".to_string())
+                .spawn_wrapper(move || {
+                    compact_en.run_compaction(compact_rx);
+                })
+                .unwrap();
+        } else {
+            warn!("compaction is disabled");
+        }
         thread::Builder::new()
             .name("free_mem".to_string())
             .spawn_wrapper(move || {
@@ -152,6 +162,7 @@ impl Engine {
         &self,
         metas: HashMap<u64, ShardMeta>,
         recoverer: impl RecoverHandler + 'static,
+        load_table_filter: Option<LoadTableFilterFn>,
     ) -> Result<()> {
         let mut parents = HashMap::new();
         for meta in metas.values() {
@@ -160,7 +171,8 @@ impl Engine {
                 if !parents.contains_key(&id_ver) {
                     info!("load parent of {}", meta.tag());
                     tikv_util::set_current_region(id_ver.id);
-                    let parent_shard = Arc::new(self.load_parent_shard(parent)?);
+                    let parent_shard =
+                        Arc::new(self.load_parent_shard(parent, load_table_filter.clone())?);
 
                     // Ingest the parent shard before recovery, as recoverer depends on the shard
                     // existing in kvengine.
@@ -197,9 +209,12 @@ impl Engine {
                     .cloned()
                     .unwrap()
             });
+            let load_table_filter = load_table_filter.clone();
             std::thread::spawn(move || {
                 tikv_util::set_current_region(meta.id);
-                let shard = engine.load_and_ingest_shard(&meta).unwrap();
+                let shard = engine
+                    .load_and_ingest_shard(&meta, load_table_filter)
+                    .unwrap();
                 if let Some(parent) = parent_shard {
                     shard.add_parent_mem_tbls(parent)
                 }
@@ -222,7 +237,9 @@ impl Engine {
             Arc::strong_count(&self.core)
         );
         self.shutting_down.store(true, Ordering::Release);
-        self.compact_tx.send(CompactMsg::Stop).unwrap();
+        if !self.opts.for_restore {
+            self.compact_tx.send(CompactMsg::Stop).unwrap();
+        }
         self.flush_tx.send(FlushMsg::Stop).unwrap();
         self.free_tx.send(FreeMemMsg::Stop).unwrap();
     }
@@ -274,14 +291,18 @@ impl EngineCore {
     }
 
     /// Load shard from meta and ingest to the engine.
-    fn load_and_ingest_shard(&self, meta: &ShardMeta) -> Result<Arc<Shard>> {
+    fn load_and_ingest_shard(
+        &self,
+        meta: &ShardMeta,
+        table_filter: Option<LoadTableFilterFn>,
+    ) -> Result<Arc<Shard>> {
         if let Some(shard) = self.get_shard(meta.id) {
             if shard.ver == meta.ver {
                 return Ok(shard);
             }
         }
         info!("load and ingest shard {}", meta.tag());
-        let change_set = self.prepare_change_set(meta.to_change_set(), false)?;
+        let change_set = self.prepare_change_set(meta.to_change_set(), false, table_filter)?;
         self.ingest(change_set, false)?;
         let shard = self.get_shard(meta.id);
         Ok(shard.unwrap())
@@ -289,9 +310,13 @@ impl EngineCore {
 
     /// Load parent shard for recovery.
     /// The shard is not ingested to the engine.
-    fn load_parent_shard(&self, meta: &ShardMeta) -> Result<Shard> {
+    fn load_parent_shard(
+        &self,
+        meta: &ShardMeta,
+        table_filter: Option<LoadTableFilterFn>,
+    ) -> Result<Shard> {
         info!("load parent shard {}", meta.tag());
-        let change_set = self.prepare_change_set(meta.to_change_set(), false)?;
+        let change_set = self.prepare_change_set(meta.to_change_set(), false, table_filter)?;
         let shard = self.new_shard_from_change_set(change_set);
         shard.refresh_states();
         Ok(shard)
@@ -300,7 +325,8 @@ impl EngineCore {
     fn new_shard_from_change_set(&self, cs: ChangeSet) -> Shard {
         let engine_id = self.engine_id.load(Ordering::Acquire);
         let shard = Shard::new_for_ingest(engine_id, &cs, self.opts.clone());
-        let (l0s, blob_tbls, scfs) = create_snapshot_tables(cs.get_snapshot(), &cs);
+        let (l0s, blob_tbls, scfs) =
+            create_snapshot_tables(cs.get_snapshot(), &cs, self.opts.for_restore);
         let old_data = shard.get_data();
         let data = ShardData::new(
             shard.range.clone(),
@@ -311,6 +337,7 @@ impl EngineCore {
             l0s,
             Arc::new(blob_tbls),
             scfs,
+            cs.unloaded_tables,
         );
         shard.set_data(data);
         shard
@@ -638,6 +665,9 @@ impl EngineCore {
     }
 
     pub(crate) fn send_compact_msg(&self, msg: CompactMsg) {
+        if self.opts.for_restore {
+            return;
+        }
         if let Err(e) = self.compact_tx.send(msg) {
             assert!(self.shutting_down.load(Ordering::Acquire));
             info!(

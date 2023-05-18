@@ -45,6 +45,9 @@ pub struct Options {
     pub max_del_range_delay: Duration,
 
     pub enable_inner_key_offset: bool,
+
+    /// Indicate kvengine is used for restore or not.
+    pub for_restore: bool,
 }
 
 impl Default for Options {
@@ -66,6 +69,7 @@ impl Default for Options {
             blob_prefetch_size: 256 * 1024,
             max_del_range_delay: Duration::from_secs(3600),
             enable_inner_key_offset: false,
+            for_restore: false,
         }
     }
 }
