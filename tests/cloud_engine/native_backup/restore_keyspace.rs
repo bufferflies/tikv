@@ -27,7 +27,11 @@ const DEFAULT_LOOP_COUNT: usize = 3;
 #[test]
 fn test_restore_keyspace() {
     test_util::init_log_for_test();
+    test_restore_keyspace_opt(false); // TODO: remove when wal sync dir is enabled by default.
+    test_restore_keyspace_opt(true);
+}
 
+fn test_restore_keyspace_opt(enable_wal_sync_dir: bool) {
     let loop_count = std::env::var("LOOP")
         .unwrap_or_default()
         .parse::<usize>()
@@ -46,6 +50,7 @@ fn test_restore_keyspace() {
         .prefix("test_restore_keyspace_")
         .tempdir()
         .unwrap();
+    let base_dir_str = base_dir.path().to_str().unwrap();
 
     let oss_dir = base_dir.path().join("oss");
     let mut oss = ObjectStorageService::new(oss_dir);
@@ -64,7 +69,7 @@ fn test_restore_keyspace() {
 
     let mut cluster = ServerCluster::new(
         alloc_node_id_vec(NODES_COUNT),
-        |_, conf: &mut TikvConfig| {
+        |node_id: u16, conf: &mut TikvConfig| {
             conf.dfs = dfs_config.clone();
             // Set small mem-table size to make data reach L1 and generate over bound
             // shards.
@@ -72,6 +77,11 @@ fn test_restore_keyspace() {
             conf.coprocessor.region_split_size = ReadableSize::kb(128); // kv_opts.base_size = 8kb
             conf.coprocessor.region_bucket_size = ReadableSize::kb(64);
             conf.rfengine.target_file_size = ReadableSize::mb(1);
+            conf.rfengine.wal_sync_dir = enable_wal_sync_dir.then(|| {
+                let dir = format!("{}/wal_sync/{}", base_dir_str, node_id);
+                step!("enable wal sync dir: {}", dir);
+                dir
+            });
         },
     );
     cluster.wait_region_replicated(&[], 3);

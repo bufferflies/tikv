@@ -1,9 +1,7 @@
 name: Integrations
 
 on:
-  push:
-    branches:
-      - cloud-engine
+  pull_request:
   workflow_dispatch:
 
 # Concurrency ensures that only a single job or workflow using the same concurrency group will run at a time.
