@@ -544,8 +544,12 @@ impl RfEngineCore {
     }
 
     pub fn backup(&self, mut task: BackupTask) {
-        let writer = self.writer.lock().unwrap();
-        task.file_off = writer.file_off;
+        if !self.is_async_wal_enabled() {
+            // Note: when async wal is enabled, `file_off` is acquired from
+            // `async_wal_writer` in worker.
+            let writer = self.writer.lock().unwrap();
+            task.file_off = writer.file_off;
+        }
         self.task_sender.send(Task::Backup(task)).unwrap();
     }
 

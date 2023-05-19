@@ -89,7 +89,10 @@ impl Worker {
                 }
                 Task::Truncates(truncates) => drop(truncates),
                 Task::Close => return,
-                Task::Backup(backup_task) => {
+                Task::Backup(mut backup_task) => {
+                    if let Some(async_writer) = self.async_wal_writer.as_ref() {
+                        backup_task.file_off = async_writer.file_off;
+                    }
                     if backup_task.config.incremental {
                         self.incremental_backup(backup_task);
                     } else {
