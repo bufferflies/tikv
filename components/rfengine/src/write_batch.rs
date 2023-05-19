@@ -142,9 +142,11 @@ impl PeerBatch {
     pub fn merge(&mut self, other: PeerBatch) {
         debug_assert_eq!(self.peer_id, other.peer_id);
         self.meta.merge(&other.meta, true);
+        let truncated_idx = other.truncated_idx;
         for op in other.raft_logs {
             self.append_raft_log(op);
         }
+        self.truncate(truncated_idx);
     }
 
     pub(crate) fn encoded_len(&self) -> usize {
@@ -271,7 +273,7 @@ mod tests {
         }
         region_batch.set_state(b"k0", b"v0");
         region_batch.merge(decoded);
-        assert_eq!(region_batch.raft_logs, logs);
+        assert_eq!(region_batch.raft_logs, logs[5..].to_vec());
         assert_eq!(region_batch.states.len(), 3);
     }
 }
