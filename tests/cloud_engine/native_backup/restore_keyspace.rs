@@ -260,6 +260,7 @@ fn test_restore_keyspace_impl(
     ));
     restore_keyspace::restore_keyspace(
         keyspace_id,
+        keyspace_id,
         &backup_name,
         None,
         s3fs,

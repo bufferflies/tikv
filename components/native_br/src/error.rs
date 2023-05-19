@@ -38,6 +38,8 @@ pub enum Error {
     HttpError(#[from] hyper::Error),
     #[error("Retry limit exceeded, last error {0}")]
     RetryLimitExceeded(Box<Error>),
+    #[error("Keyspace {0} inner_key_off not enabled")]
+    KeyspaceInnerKeyOffNotEnabled(u32 /* region id */),
 }
 
 impl From<dfs::Error> for Error {

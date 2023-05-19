@@ -11,7 +11,6 @@ use native_br::{backup, error::Error, restore_keyspace};
 use pd_client::PdClient;
 use rand::{prelude::SliceRandom, Rng};
 use test_cloud_server::{client::ClusterClient, try_wait, ServerCluster};
-use tikv::config::TikvConfig;
 use tikv_util::{
     config::{ReadableDuration, ReadableSize},
     error, info,
@@ -22,19 +21,25 @@ use tokio::runtime::Runtime;
 
 use crate::{
     alloc_node_id_vec, get_keyspace_prefix, prepare_dfs, spawn_gc_worker, spawn_keyspace_write,
-    spawn_merge, spawn_move, spawn_transfer, BACKUP_COUNTER, CONCURRENCY, MERGE_COUNTER,
-    MOVE_COUNTER, NODE_RESTART_COUNTER, RESTORE_COUNTER, TIMEOUT, TRANSFER_COUNTER, WRITE_COUNTER,
+    spawn_merge, spawn_move, spawn_transfer, TikvConfig, BACKUP_COUNTER, CONCURRENCY,
+    MERGE_COUNTER, MOVE_COUNTER, NODE_RESTART_COUNTER, RESTORE_COUNTER, TIMEOUT, TRANSFER_COUNTER,
+    WRITE_COUNTER,
 };
 
 const KEYSPACE_COUNT: usize = 10;
 
 #[test]
 fn test_random_br() {
-    test_random_br_helper(false);
-    test_random_br_helper(true);
+    test_random_br_helper(false, false);
+    test_random_br_helper(true, false);
 }
 
-fn test_random_br_helper(enable_inner_key_offset: bool) {
+#[test]
+fn test_random_data_branching() {
+    test_random_br_helper(true, true);
+}
+
+fn test_random_br_helper(enable_inner_key_offset: bool, restore_to_new: bool) {
     test_util::init_log_for_test();
 
     let (_temp_dir, _oss, dfs_config) = prepare_dfs("random_br_");
@@ -64,7 +69,19 @@ fn test_random_br_helper(enable_inner_key_offset: bool) {
     for keyspace_id in 0..=KEYSPACE_COUNT {
         client.split(&get_keyspace_prefix(keyspace_id as u32));
     }
+
     cluster.wait_pd_region_min_count(KEYSPACE_COUNT + 2);
+
+    let mut rng = rand::thread_rng();
+    let delta = rng.gen_range(5000..100000);
+
+    // Split target keyspace region.
+    if restore_to_new {
+        for keyspace_id in delta..=delta + KEYSPACE_COUNT {
+            client.split(&get_keyspace_prefix(keyspace_id as u32));
+        }
+        cluster.wait_pd_region_min_count(2 * KEYSPACE_COUNT + 2);
+    }
 
     let move_scheduler = cluster.new_scheduler();
     for _ in 0..20 {
@@ -102,7 +119,6 @@ fn test_random_br_helper(enable_inner_key_offset: bool) {
         .thread_name("restore-keyspace")
         .build()
         .unwrap();
-    let mut rng = rand::thread_rng();
 
     let start_time = Instant::now();
     while start_time.saturating_elapsed() < TIMEOUT {
@@ -152,16 +168,22 @@ fn test_random_br_helper(enable_inner_key_offset: bool) {
         };
 
         let keyspace = rng.gen_range(0..KEYSPACE_COUNT) as u32;
+        let target_keyspace = if restore_to_new {
+            keyspace + delta as u32
+        } else {
+            keyspace
+        };
         do_restore_keyspace(
             &mut cluster,
             &runtime,
             dfs_config.clone(),
             keyspace,
+            target_keyspace,
             &backup_name,
         );
         info!(
-            "restore keyspace {} from backup {} success",
-            keyspace, backup_name
+            "restore keyspace {}->{} from backup {} success",
+            keyspace, target_keyspace, backup_name,
         );
         RESTORE_COUNTER.fetch_add(1, Ordering::SeqCst);
     }
@@ -220,6 +242,7 @@ fn do_restore_keyspace(
     runtime: &Runtime,
     dfs_config: DFSConfig,
     keyspace: u32,
+    target_keyspace: u32,
     backup_name: &str,
 ) {
     let s3fs = Arc::new(S3Fs::new(
@@ -232,6 +255,7 @@ fn do_restore_keyspace(
     ));
     restore_keyspace::restore_keyspace(
         keyspace,
+        target_keyspace,
         backup_name,
         None,
         s3fs,

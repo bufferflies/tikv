@@ -32,7 +32,6 @@ const MAX_RESTORE_CONCURRENCY: usize = 20;
 const MAX_BACKUP_COUNT_PER_PAGE: usize = 1000; // Same with dfs list.
 const JSON_TIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S%.3f"; // e.g. 2006-01-02 15:04:05.000
 const BACKUP_NAME_FORMAT: &str = "%Y%m%d%H%M%S";
-
 pub(crate) const BACKUPS_API_PATH: &str = "/api/v1/backups";
 pub(crate) const RESTORE_KEYSPACE_API_PATH: &str = "/api/v1/restore_keyspace/";
 pub(crate) const WHITELIST_API_PATH: &str = "/api/v1/native_br/whitelist/";
@@ -44,7 +43,7 @@ pub(crate) const WHITELIST_API_PATH: &str = "/api/v1/native_br/whitelist/";
 ///
 /// 2. restore keyspace:
 ///   * PUT    /api/v1/restore_keyspace/<restore_id>?cluster_id=%d&keyspace=%s&
-///     backup_id=%d&backup_name=%s
+///     backup_id=%d&backup_name=%s[&source_keyspace=%s]
 ///   * GET    /api/v1/restore_keyspace/<restore_id>?cluster_id=%d&keyspace=%s
 ///   * DELETE /api/v1/restore_keyspace/<restore_id>?cluster_id=%d&keyspace=%s
 ///   * GET    /api/v1/restore_keyspace/?cluster_id=%d
@@ -158,28 +157,43 @@ pub(crate) async fn handle_restore_keyspace(
         }
     };
 
-    let keyspace = query_pairs.get("keyspace");
-    if keyspace.is_none() {
+    let target_keyspace = query_pairs.get("keyspace");
+    if target_keyspace.is_none() {
         return Ok(make_response(
             StatusCode::BAD_REQUEST,
             "Keyspace name is none",
         ));
     }
-    let keyspace = keyspace.unwrap().to_string();
-    if !manager.is_keyspace_allowed(&keyspace) {
+    let mut source_keyspace = query_pairs.get("source_keyspace");
+    let inplace_restore = source_keyspace.is_none();
+    if inplace_restore {
+        // treat source as target
+        source_keyspace = target_keyspace;
+    }
+
+    let source_keyspace = source_keyspace.unwrap().to_string();
+    let target_keyspace = target_keyspace.unwrap().to_string();
+    if !manager.is_keyspace_allowed(&source_keyspace)
+        || !manager.is_keyspace_allowed(&target_keyspace)
+    {
         return Ok(make_response(
             StatusCode::FORBIDDEN,
-            format!("Keyspace {} is not in whitelist", keyspace),
+            format!(
+                "Keyspace source {} or target {} is not in whitelist",
+                source_keyspace, target_keyspace
+            ),
         ));
     }
+
+    let keyspace_tag = format!("{}->{}", source_keyspace, target_keyspace);
 
     match *req.method() {
         Method::GET => {
             debug!(
                 "{} request to GET restore_keyspace, restore_id {}",
-                keyspace, restore_id
+                keyspace_tag, restore_id
             );
-            handle_restore_status(&manager, restore_id, &keyspace)
+            handle_restore_status(&manager, restore_id, &target_keyspace)
         }
         Method::PUT => {
             let backup_id = match get_u64_param(&query_pairs, "backup_id") {
@@ -205,39 +219,44 @@ pub(crate) async fn handle_restore_keyspace(
 
             debug!(
                 "{} request to PUT restore_keyspace, restore_id {}, backup {:?}",
-                keyspace, restore_id, backup
+                keyspace_tag, restore_id, backup
             );
-            match manager.restore_keyspace(restore_id, keyspace.clone(), backup.name().to_string())
-            {
+
+            match manager.restore_keyspace(
+                restore_id,
+                source_keyspace,
+                target_keyspace.clone(),
+                backup.name().to_string(),
+            ) {
                 Ok(true) => {
                     info!(
                         "{} restore keyspace started, restore_id {}, backup {:?}",
-                        keyspace, restore_id, backup
+                        keyspace_tag, restore_id, backup
                     );
                     let resp = RestoreProgressResponse {
                         status: RestoreState::Pending,
                         error: String::new(),
                         duration: 0,
                         id: restore_id,
-                        keyspace,
+                        keyspace: target_keyspace,
                     };
                     Ok(make_json_response(StatusCode::CREATED, &resp))
                 }
                 Ok(false) => {
                     info!(
                         "{} restore keyspace ignored, restore_id {}, backup {:?}",
-                        keyspace, restore_id, backup
+                        keyspace_tag, restore_id, backup
                     );
                     // Return current status when `restore_keyspace` request is ignored.
-                    handle_restore_status(&manager, restore_id, &keyspace)
+                    handle_restore_status(&manager, restore_id, &target_keyspace)
                 }
                 Err(Error::RestoreKeyspaceTaskConflict(conflict_restore_id)) => {
                     info!(
                         "{} restore keyspace conflict, restore_id {}, backup {:?}, conflict restore_id {}",
-                        keyspace, restore_id, backup, conflict_restore_id,
+                        keyspace_tag, restore_id, backup, conflict_restore_id,
                     );
                     let resp = RestoreConflictResponse {
-                        keyspace,
+                        keyspace: target_keyspace,
                         id: restore_id,
                         conflict_restore_id,
                     };
@@ -246,7 +265,7 @@ pub(crate) async fn handle_restore_keyspace(
                 Err(e) => {
                     error!(
                         "{} restore keyspace error, restore_id {}, backup {:?}, error {:?}",
-                        keyspace, restore_id, backup, e
+                        keyspace_tag, restore_id, backup, e
                     );
                     handle_error(e)
                 }
@@ -255,20 +274,20 @@ pub(crate) async fn handle_restore_keyspace(
         Method::DELETE => {
             debug!(
                 "{} request to DELETE restore_keyspace, restore_id {}",
-                keyspace, restore_id
+                keyspace_tag, restore_id
             );
-            match manager.delete_restore(restore_id, &keyspace) {
+            match manager.delete_restore(restore_id, &target_keyspace) {
                 Ok(Some(true)) => {
                     info!(
                         "{} restore keyspace task deleted, restore_id {}",
-                        keyspace, restore_id
+                        keyspace_tag, restore_id
                     );
                     Ok(make_response(StatusCode::OK, "Restore task deleted"))
                 }
                 Ok(Some(false)) => {
                     info!(
                         "{} delete restore keyspace task ignored, restore_id {}",
-                        keyspace, restore_id
+                        keyspace_tag, restore_id
                     );
                     Ok(make_response(
                         StatusCode::CONFLICT,
@@ -278,7 +297,7 @@ pub(crate) async fn handle_restore_keyspace(
                 Ok(None) => {
                     info!(
                         "{} delete restore keyspace task not found, restore_id {}",
-                        keyspace, restore_id
+                        keyspace_tag, restore_id
                     );
                     Ok(make_response(
                         StatusCode::NOT_FOUND,
@@ -288,7 +307,7 @@ pub(crate) async fn handle_restore_keyspace(
                 Err(err) => {
                     error!(
                         "{} delete restore keyspace task error, restore_id {}, error {:?}",
-                        keyspace, restore_id, err
+                        keyspace_tag, restore_id, err
                     );
                     handle_error(err)
                 }
@@ -557,18 +576,27 @@ impl BrContext {
         &self,
         restore_id: u64,
         keyspace_name: String,
+        target_keyspace_name: String,
         backup_name: String,
     ) -> Result<()> {
         let ob_start_time = Instant::now();
-        self.change_restore_state(restore_id, &keyspace_name, RestoreState::Running, None)?;
+
+        self.change_restore_state(
+            restore_id,
+            &target_keyspace_name,
+            RestoreState::Running,
+            None,
+        )?;
         let config = RestoreConfig {
             pd: self.pd.clone(),
             security: self.security.clone(),
             ..Default::default()
         };
-        let _ = match restore_keyspace_with_cfg(
+
+        let res = match restore_keyspace_with_cfg(
             config,
             &keyspace_name,
+            &target_keyspace_name,
             &backup_name,
             self.working_path.as_deref(),
             self.s3fs.clone(),
@@ -582,24 +610,35 @@ impl BrContext {
                 NATIVE_BR_HISTOGRAM_VEC
                     .with_label_values(&["restore_keyspace"])
                     .observe(ob_start_time.saturating_elapsed_secs());
-                self.change_restore_state(restore_id, &keyspace_name, RestoreState::Succeed, None)
+                self.change_restore_state(
+                    restore_id,
+                    &target_keyspace_name,
+                    RestoreState::Succeed,
+                    None,
+                )
             }
             Err(err) => {
                 error!(
-                    "{} restore_keyspace error, restore_id {}, error {:?}",
-                    keyspace_name, restore_id, err
+                    "{}->{} restore_keyspace error, restore_id {}, error {:?}",
+                    keyspace_name, target_keyspace_name, restore_id, err
                 );
                 NATIVE_BR_COUNTER_VEC
                     .with_label_values(&["restore_keyspace_fail"])
                     .inc();
                 self.change_restore_state(
                     restore_id,
-                    &keyspace_name,
+                    &target_keyspace_name,
                     RestoreState::Error,
                     Some(err.into()),
                 )
             }
         };
+        if let Err(e) = res {
+            NATIVE_BR_COUNTER_VEC
+                .with_label_values(&["change_restore_state_fail"])
+                .inc();
+            return Err(e);
+        }
         Ok(())
     }
 }
@@ -697,6 +736,7 @@ impl NativeBrManger {
         &self,
         restore_id: u64,
         keyspace_name: String,
+        target_keyspace_name: String,
         backup_name: String,
     ) -> Result<bool> {
         if self.get_all_restore_task().len() >= MAX_RESTORE_CONCURRENCY {
@@ -705,12 +745,19 @@ impl NativeBrManger {
 
         if self.context.change_restore_state(
             restore_id,
-            &keyspace_name,
+            &target_keyspace_name,
             RestoreState::Init,
             None,
         )? {
             let context = self.context.clone();
-            thread::spawn(move || context.restore_keyspace(restore_id, keyspace_name, backup_name));
+            thread::spawn(move || {
+                context.restore_keyspace(
+                    restore_id,
+                    keyspace_name,
+                    target_keyspace_name,
+                    backup_name,
+                )
+            });
             Ok(true)
         } else {
             Ok(false)

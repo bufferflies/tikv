@@ -37,7 +37,11 @@ use crate::{
         load_peer_raft_state, load_rf_engine_meta, now, retain_sst_files, send_request_to_store,
         RawRegion,
     },
-    error::{Error, Error::RetryLimitExceeded, Result},
+    error::{
+        Error,
+        Error::{KeyspaceInnerKeyOffNotEnabled, RetryLimitExceeded},
+        Result,
+    },
     pd_control::PdControl,
     restore::{get_cluster_backup_meta, RestoreConfig},
     step,
@@ -53,6 +57,7 @@ const RESTORE_KEYSPACE_MAX_RETRY: usize = 20;
 pub fn restore_keyspace_with_cfg(
     config: RestoreConfig,
     keyspace_name: &str,
+    target_keyspace_name: &str,
     backup_name: &str,
     working_path: Option<&str>,
     s3fs: Arc<S3Fs>,
@@ -67,18 +72,31 @@ pub fn restore_keyspace_with_cfg(
     };
     step!("Keyspace name {keyspace_name}'s id is {keyspace_id}");
 
-    if let Err(e) = runtime.block_on(remove_tiflash_replia_of_keyspace(
-        keyspace_id,
-        &pd_control,
-        &pd_client,
-    )) {
-        error!("Keyspace {keyspace_id} remove tiflash replica err {:?}", e);
-        return Err(e);
-    }
-    step!("Removed keyspace {keyspace_name} tiflash replica");
+    let target_keyspace_id = if keyspace_name != target_keyspace_name {
+        let target_id = {
+            let target_keyspace =
+                runtime.block_on(pd_control.get_keyspace_by_name(target_keyspace_name))?;
+            assert_eq!(target_keyspace_name, target_keyspace.name);
+            target_keyspace.id
+        };
+        step!("Target keyspace name {target_keyspace_name}'s id is {target_id}");
+        target_id
+    } else {
+        if let Err(e) = runtime.block_on(remove_tiflash_replia_of_keyspace(
+            keyspace_id,
+            &pd_control,
+            &pd_client,
+        )) {
+            error!("Keyspace {keyspace_id} remove tiflash replica err {:?}", e);
+            return Err(e);
+        }
+        step!("Removed keyspace {keyspace_name} tiflash replica");
+        keyspace_id
+    };
 
     restore_keyspace(
         keyspace_id,
+        target_keyspace_id,
         backup_name,
         working_path,
         s3fs,
@@ -89,6 +107,7 @@ pub fn restore_keyspace_with_cfg(
 
 pub fn restore_keyspace(
     keyspace_id: u32,
+    target_keyspace_id: u32,
     backup_name: &str,
     working_path: Option<&str>,
     s3fs: Arc<S3Fs>,
@@ -102,18 +121,27 @@ pub fn restore_keyspace(
     .unwrap();
     let working_path = working_dir.path().to_path_buf();
 
+    let inplace_restore = target_keyspace_id == keyspace_id;
+
     let (keyspace_start, keyspace_end) = ApiV2::get_txn_keyspace_range(keyspace_id);
+    let (target_keyspace_start, target_keyspace_end) =
+        ApiV2::get_txn_keyspace_range(target_keyspace_id);
+
+    let keyspace_tag = format!("{}->{}", keyspace_id, target_keyspace_id);
+
     step!(
-        "Start restore keyspace {} from backup <{}>, range:[{:?},{:?})",
-        keyspace_id,
+        "Start restore keyspace {} from backup <{}>, range:[{:?},{:?}), target_range:[{:?},{:?})",
+        keyspace_tag,
         backup_name,
         keyspace_start,
-        keyspace_end
+        keyspace_end,
+        target_keyspace_start,
+        target_keyspace_end
     );
     let cluster_backup = get_cluster_backup_meta(&s3fs, backup_name.to_owned());
     debug!(
         "Keyspace {} get cluster backup meta: {:?}",
-        keyspace_id, cluster_backup
+        keyspace_tag, cluster_backup
     );
     let mut cluster = BackupCluster::new(
         &cluster_backup,
@@ -124,22 +152,30 @@ pub fn restore_keyspace(
     )?;
     step!(
         "Keyspace {} restore {} shards from backup",
-        keyspace_id,
+        keyspace_tag,
         cluster.shards_count()
     );
 
     // trigger initial flush & flush mem-table to S3
     // NOTE: `cluster.shards` is NOT available before `flush_shards` finished.
     let flush_cnt = cluster.flush_shards()?;
-    step!("Keyspace {keyspace_id} flush {flush_cnt} shards");
+    step!("Keyspace {keyspace_tag} flush {flush_cnt} shards");
 
     let truncate_ts_cnt = cluster.truncate_backup_ts()?;
     step!(
         "Keyspace {} truncate {} shards to ts {}",
-        keyspace_id,
+        keyspace_tag,
         truncate_ts_cnt,
         cluster.backup_ts
     );
+
+    // Check if the backup enable inner_key_offset.
+    if !inplace_restore && !cluster.is_inner_key_off_enabled() {
+        error!("Keyspace {} inner_key_offset not enabled", keyspace_tag);
+        return Err(KeyspaceInnerKeyOffNotEnabled(keyspace_id));
+    }
+
+    let inner_split_keys = cluster.get_region_split_keys(&target_keyspace_start);
 
     let mut success_ranges = MergeRanges::default();
     let mut retry = 0;
@@ -150,11 +186,10 @@ pub fn restore_keyspace(
         }
         retry += 1;
 
-        // get target regions
         let mut target_regions = match runtime.block_on(get_target_regions(
             &pd_client,
-            &keyspace_start,
-            &keyspace_end,
+            &target_keyspace_start,
+            &target_keyspace_end,
         )) {
             Ok(regions) => regions,
             Err(err) => {
@@ -164,32 +199,64 @@ pub fn restore_keyspace(
                 continue;
             }
         };
+
+        // TODO: split regions for inplace restore.
+        if !inplace_restore {
+            // Try split target keyspace regions according to backup keyspace regions if
+            // needed.
+            // No need check keyspace split in retry.
+            if retry == 1 {
+                split_target_keyspace(
+                    &inner_split_keys,
+                    &target_regions,
+                    &keyspace_tag,
+                    pd_client.clone(),
+                    runtime,
+                )?;
+
+                // Update target regions after split.
+                target_regions = match runtime.block_on(get_target_regions(
+                    &pd_client,
+                    &target_keyspace_start,
+                    &target_keyspace_end,
+                )) {
+                    Ok(regions) => regions,
+                    Err(err) => {
+                        warn!("get target regions failed: {:?}, retry again", err);
+                        last_error = Some(err);
+                        thread::sleep(Duration::from_millis(200));
+                        continue;
+                    }
+                };
+            }
+        }
+
         let target_regions_total_cnt = target_regions.len();
         if !success_ranges.is_empty() {
             target_regions.retain(|r| !success_ranges.covered(&r.raw_start, &r.raw_end));
         }
         step!(
             "Keyspace {} target regions: {} ({} in total)",
-            keyspace_id,
+            keyspace_tag,
             target_regions.len(),
             target_regions_total_cnt
         );
 
-        // align target regions
+        // Align target regions.
         let (aligned_regions, trimmed_shards_cnt) = cluster.align_target_regions(target_regions)?;
         step!(
             "Keyspace {} align {} backup shards to {} target regions and trim {} over bound shards",
-            keyspace_id,
+            keyspace_tag,
             cluster.shards_count(),
             aligned_regions.len(),
             trimmed_shards_cnt
         );
 
-        // gather SSTables for target regions
+        // Gather sstables for target regions.
         let (target_shards, sstables_cnt) = cluster.gather_sstables(aligned_regions);
         step!(
             "Keyspace {} gather {} SSTables for {} target regions",
-            keyspace_id,
+            keyspace_tag,
             sstables_cnt,
             target_shards.len(),
         );
@@ -197,19 +264,18 @@ pub fn restore_keyspace(
         let snapshots = cluster.generate_snapshots(target_shards);
         let snapshots_count = snapshots.len();
         restore_snapshots(
-            keyspace_id,
+            target_keyspace_id,
             runtime,
             pd_client.clone(),
             snapshots,
             &mut success_ranges,
         )?;
-        step!("Keyspace {keyspace_id} restore {snapshots_count} regions");
+        step!("Keyspace {keyspace_tag} restore {snapshots_count} regions");
 
-        if success_ranges.covered(&keyspace_start, &keyspace_end) {
+        if success_ranges.covered(&target_keyspace_start, &target_keyspace_end) {
             break;
         } else {
-            retry += 1;
-            step!("Keyspace {keyspace_id} restore retry {retry}");
+            step!("Keyspace {keyspace_tag} restore retry {retry}");
         }
     }
 
@@ -218,13 +284,47 @@ pub fn restore_keyspace(
         Err(e) => {
             return Err(box_err!(
                 "Keyspace {} fail to retain restored sst files in s3, {:?}",
-                keyspace_id,
+                keyspace_tag,
                 e
             ));
         }
         Ok(file_cnt) => {
-            step!("Keyspace {keyspace_id} retain {file_cnt} files successfully");
+            step!("Keyspace {keyspace_tag} retain {file_cnt} files successfully");
         }
+    }
+
+    Ok(())
+}
+
+fn split_target_keyspace(
+    split_keys: &[Vec<u8>],
+    target_regions: &[RawRegion],
+    keyspace_tag: &str,
+    pd_client: Arc<dyn PdClient>,
+    runtime: &Runtime,
+) -> Result<()> {
+    if split_keys.is_empty() {
+        return Ok(());
+    }
+
+    // Filter out the already splitted keys.
+    let mut split_keys = split_keys.to_vec();
+    split_keys.retain(|key| {
+        target_regions
+            .iter()
+            .all(|region| key.as_slice() != region.get_start_key())
+    });
+    step!(
+        "Keyspace {} split target regions, split keys count {}",
+        keyspace_tag,
+        split_keys.len(),
+    );
+    let enc_split_keys = split_keys
+        .iter()
+        .map(|key| Key::from_raw(key.as_slice()).into_encoded())
+        .collect::<Vec<_>>();
+    if !enc_split_keys.is_empty() {
+        runtime.block_on(pd_client.split_regions(enc_split_keys))?;
     }
 
     Ok(())
@@ -284,6 +384,18 @@ impl BackupShard {
 
     pub fn end(&self) -> &[u8] {
         &self.meta.range.outer_end
+    }
+
+    pub fn inner_start(&self) -> &[u8] {
+        self.meta.range.inner_start()
+    }
+
+    pub fn inner_end(&self) -> &[u8] {
+        self.meta.range.inner_end()
+    }
+
+    pub fn inner_key_off(&self) -> usize {
+        self.meta.range.inner_key_off
     }
 
     pub fn table_version(&self) -> u64 {
@@ -780,6 +892,10 @@ impl BackupCluster {
         self.sorted_shards.len()
     }
 
+    pub fn is_inner_key_off_enabled(&self) -> bool {
+        self.get_sorted_shard(0).meta.range.inner_key_off != 0
+    }
+
     pub fn get_shard_metas_before_flush(&self) -> Vec<ShardMeta> {
         let mut shards = Vec::with_capacity(self.sorted_shards.len());
         let guard = self.meta_applier.as_ref().unwrap().shards.read().unwrap();
@@ -880,12 +996,17 @@ impl BackupCluster {
         sorted_backup_shards_id: &[u64],
         backup_shards: &HashMap<u64, BackupShard>,
         sorted_target_regions: Vec<RawRegion>,
+        inner_key_off: usize,
     ) -> Vec<AlignedRegion> {
         let mut aligned_regions = Vec::with_capacity(sorted_target_regions.len());
         let mut idx = 0;
 
-        let key_in_shard =
-            |key: &[u8], shard: &BackupShard| key >= shard.start() && key < shard.end();
+        // NOTE: use inner_key to check overlapping, target_regions may belongs to
+        // a new keyspace.
+        let key_in_shard = |key: &[u8], shard: &BackupShard| {
+            let inner_key = &key[inner_key_off..];
+            inner_key >= shard.inner_start() && inner_key < shard.inner_end()
+        };
 
         let get_backup_shard =
             |idx: usize| backup_shards.get(&sorted_backup_shards_id[idx]).unwrap();
@@ -896,9 +1017,10 @@ impl BackupCluster {
                 idx -= 1;
             }
 
+            let target_end = target_region.get_end_key();
             let mut aligned_shards_id = vec![];
             while idx < sorted_backup_shards_id.len()
-                && get_backup_shard(idx).start() < target_region.get_end_key()
+                && get_backup_shard(idx).inner_start() < &target_end[inner_key_off..]
             {
                 aligned_shards_id.push(sorted_backup_shards_id[idx]);
                 idx += 1;
@@ -920,10 +1042,40 @@ impl BackupCluster {
         Vec<AlignedRegion>,
         usize, // number of trimmed shards
     )> {
-        let aligned_regions =
-            Self::align_target_regions_impl(&self.sorted_shards, &self.shards, target_regions);
+        let inner_key_off = self.inner_key_off();
+        let aligned_regions = Self::align_target_regions_impl(
+            &self.sorted_shards,
+            &self.shards,
+            target_regions,
+            inner_key_off,
+        );
         let trimmed_shards_cnt = self.trim_over_bound_shards(&aligned_regions)?;
         Ok((aligned_regions, trimmed_shards_cnt))
+    }
+
+    pub fn get_region_split_keys(&self, keyspace_prefix: &[u8]) -> Vec<Vec<u8>> {
+        let mut split_keys = Vec::with_capacity(self.sorted_shards.len() - 1);
+        for shard_id in &self.sorted_shards {
+            let shard = self.get_shard(*shard_id).unwrap();
+            debug!(
+                "get_region_split_keys, shard_id: {} start key {:?} end key {:?}",
+                shard_id,
+                shard.start().to_vec(),
+                shard.end().to_vec()
+            );
+            let mut split_key = keyspace_prefix.to_vec();
+            let inner_start = shard.meta.range.inner_start();
+
+            // Skip the keyspace boundary key.
+            if inner_start.is_empty() {
+                continue;
+            }
+            split_key.extend_from_slice(inner_start);
+
+            split_keys.push(split_key);
+        }
+
+        split_keys
     }
 
     fn gather_sstables(
@@ -932,12 +1084,7 @@ impl BackupCluster {
     ) -> (Vec<ShardMeta>, usize /* number of sstables */) {
         let mut sstables_cnt = 0;
         let mut target_shards = Vec::with_capacity(aligned_regions.len());
-        let inner_key_off = self
-            .get_shard(*self.sorted_shards.first().unwrap())
-            .unwrap()
-            .meta
-            .range
-            .inner_key_off;
+        let inner_key_off = self.inner_key_off();
         for region in aligned_regions {
             let mut meta = ShardMeta::default();
             meta.id = region.target_region.id;
@@ -1062,6 +1209,14 @@ impl BackupCluster {
                 cs
             })
             .collect()
+    }
+
+    fn inner_key_off(&self) -> usize {
+        self.get_shard(*self.sorted_shards.first().unwrap())
+            .unwrap()
+            .meta
+            .range
+            .inner_key_off
     }
 
     pub fn reset_keyspace(
@@ -1281,13 +1436,15 @@ fn verify_regions_boundary(start_key: &[u8], end_key: &[u8], regions: &[RawRegio
     let last_region = regions.last().unwrap();
     if first_region.get_start_key() != start_key {
         return Err(box_err!(
-            "unexpected start key of first region: {:?}",
-            first_region
+            "unexpected start key of first region: {:?}, start_key: {:?}",
+            first_region,
+            start_key
         ));
     } else if last_region.get_end_key() != end_key {
         return Err(box_err!(
-            "unexpected end key of last region: {:?}",
-            last_region
+            "unexpected end key of last region: {:?}, end_key: {:?}",
+            last_region,
+            end_key
         ));
     }
 
@@ -1494,6 +1651,8 @@ impl MergeRanges {
 mod tests {
     use std::collections::{hash_map::Entry, BTreeMap};
 
+    use api_version::api_v2::KEYSPACE_PREFIX_LEN;
+
     use super::*;
 
     #[test]
@@ -1619,6 +1778,16 @@ mod tests {
 
     #[test]
     fn test_align_target_regions() {
+        test_align_target_regions_helper(false);
+        test_align_target_regions_helper(true);
+    }
+
+    fn test_align_target_regions_helper(inner_key_off_enabled: bool) {
+        let inner_key_off = if inner_key_off_enabled {
+            KEYSPACE_PREFIX_LEN
+        } else {
+            0
+        };
         let cases = vec![
             // backup_regions, target_regions, align_regions_id
             (vec![0, 10], vec![0, 10], vec![vec![0]]),
@@ -1643,11 +1812,15 @@ mod tests {
 
         let make_regions = |keys: Vec<u64>| -> Vec<RawRegion> {
             let mut regions = Vec::with_capacity(keys.len() - 1);
+            let prefix = b"0000";
             for w in keys.as_slice().windows(2) {
+                let (mut raw_start, mut raw_end) = (prefix.to_vec(), prefix.to_vec());
+                raw_start.extend_from_slice(&w[0].to_be_bytes());
+                raw_end.extend_from_slice(&w[1].to_be_bytes());
                 regions.push(RawRegion {
                     id: w[0],
-                    raw_start: w[0].to_be_bytes().to_vec(),
-                    raw_end: w[1].to_be_bytes().to_vec(),
+                    raw_start,
+                    raw_end,
                     ..Default::default()
                 });
             }
@@ -1661,7 +1834,8 @@ mod tests {
             for r in regions {
                 let mut shard = BackupShard::default();
                 shard.region_id = r.id;
-                shard.meta.range = ShardRange::new(r.get_start_key(), r.get_end_key(), 0);
+                shard.meta.range =
+                    ShardRange::new(r.get_start_key(), r.get_end_key(), inner_key_off);
 
                 shards_id.push(shard.region_id);
                 shards.insert(shard.region_id, shard);
@@ -1690,6 +1864,7 @@ mod tests {
                 &backup_shards_id,
                 &backup_shards,
                 target_regions,
+                inner_key_off,
             );
             assert_eq!(aligned_regions, expected, "case: {}", case_idx);
         }

@@ -1720,6 +1720,37 @@ impl PdClient for TestPdClient {
         Box::pin(ok(resp))
     }
 
+    fn split_regions(&self, keys: Vec<Vec<u8>>) -> PdFuture<Vec<u64>> {
+        let mut region_map = HashMap::default();
+
+        // Group split keys by region.
+        for key in keys {
+            let region = self.get_region(&key).unwrap();
+            // if key is already the boundary of the region, skip.
+            if key.as_slice() == region.get_start_key() {
+                continue;
+            }
+            match region_map.entry(region.get_id()) {
+                HashMapEntry::Occupied(mut e) => {
+                    let v: &mut Vec<Vec<u8>> = e.get_mut();
+                    v.push(key);
+                }
+                HashMapEntry::Vacant(e) => {
+                    e.insert(vec![key]);
+                }
+            }
+        }
+
+        let mut region_ids = Vec::with_capacity(region_map.len());
+        for (region_id, keys) in region_map.into_iter() {
+            let region = self.get_region(&keys[0]).unwrap();
+            self.must_split_region(region, CheckPolicy::Usekey, keys);
+            region_ids.push(region_id);
+        }
+
+        Box::pin(ok(region_ids))
+    }
+
     fn store_heartbeat(
         &self,
         stats: pdpb::StoreStats,

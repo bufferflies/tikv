@@ -1379,11 +1379,11 @@ impl ShardRange {
         )
     }
 
-    pub(crate) fn inner_start(&self) -> &[u8] {
+    pub fn inner_start(&self) -> &[u8] {
         &self.outer_start[self.inner_key_off..]
     }
 
-    pub(crate) fn inner_end(&self) -> &[u8] {
+    pub fn inner_end(&self) -> &[u8] {
         if self.inner_key_off == self.outer_end.len() {
             return GLOBAL_SHARD_END_KEY;
         }

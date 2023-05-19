@@ -81,6 +81,9 @@ pub struct RestoreKeyspaceArgs {
     /// The keyspace to restore.
     #[clap(long)]
     pub keyspace_name: String,
+    /// The target keyspace.
+    #[clap(long)]
+    pub target_keyspace_name: Option<String>,
     /// The local working path for temporary files during restore.
     #[clap(long)]
     pub working_path: Option<String>,
@@ -117,12 +120,25 @@ fn execute_restore_pd(args: RestorePdArgs) {
 }
 
 fn execute_restore_keyspace(args: RestoreKeyspaceArgs) {
+    let target_keyspace = args
+        .target_keyspace_name
+        .as_deref()
+        .unwrap_or(&args.keyspace_name);
     match execute_restore_keyspace_impl(&args) {
         Ok(()) => {
-            step!("Restore keyspace {} succeed", args.keyspace_name);
+            step!(
+                "Restore keyspace {}->{} succeed",
+                args.keyspace_name,
+                target_keyspace
+            );
         }
         Err(err) => {
-            step_error!("Restore keyspace {} error: {:?}", args.keyspace_name, err);
+            step_error!(
+                "Restore keyspace {}->{} error: {:?}",
+                args.keyspace_name,
+                target_keyspace,
+                err
+            );
         }
     }
 }
@@ -145,9 +161,14 @@ fn execute_restore_keyspace_impl(args: &RestoreKeyspaceArgs) -> native_br::Resul
         .build()
         .unwrap();
 
+    let target_keyspace_name = args
+        .target_keyspace_name
+        .as_deref()
+        .unwrap_or(&args.keyspace_name);
     restore_keyspace_with_cfg(
         config,
         &args.keyspace_name,
+        target_keyspace_name,
         &args.name,
         args.working_path.as_deref(),
         Arc::new(s3fs),
