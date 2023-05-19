@@ -498,7 +498,7 @@ impl StatusServer {
     async fn ingest_files(req: Request<Body>, router: RaftRouter) -> hyper::Result<Response<Body>> {
         let cs = Self::get_change_set_request(req).await?;
         let shard_id = cs.get_shard_id();
-        info!("[{}] receive restore_shard request: {:?}", shard_id, cs);
+        info!("[{}] receive ingest_files request: {:?}", shard_id, cs);
 
         let (cb, fut) = paired_future_callback();
         let callback = Callback::write(Box::new(move |res| {

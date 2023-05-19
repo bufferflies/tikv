@@ -740,7 +740,12 @@ impl LoadTaskWorker {
         }
         info!("{} start ingest", self.task_ctx.start_ts);
         sst_metas.sort_by(|a, b| a.id.cmp(&b.id));
-        let coarse_split_keys = gen_split_keys(&sst_metas, COARSE_SPLIT_SIZE);
+        let mut coarse_split_keys = gen_split_keys(&sst_metas, COARSE_SPLIT_SIZE);
+        // split at last key so the last region will not be split by other concurrent
+        // load_data and get epoch not match error.
+        let mut last_key = sst_metas.last().unwrap().biggest.clone();
+        last_key.push(0);
+        coarse_split_keys.push(encode_bytes(&last_key));
         let new_regions_id = self.split_regions(&coarse_split_keys)?;
         for i in 0..coarse_split_keys.len() {
             let start_key = coarse_split_keys[i].clone();
@@ -860,7 +865,10 @@ async fn ingest_files_to_leader(
             let body = hyper::body::to_bytes(resp.into_body()).await?;
             let mut errpb = kvproto::errorpb::Error::new();
             errpb.merge_from_bytes(&body).unwrap();
-            if errpb.has_not_leader() {
+            if errpb.has_region_not_initialized() {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            } else if errpb.has_not_leader() {
                 leader = errpb.mut_not_leader().take_leader();
                 if leader.store_id == 0 {
                     tokio::time::sleep(Duration::from_secs(1)).await;

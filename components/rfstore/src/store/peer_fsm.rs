@@ -1292,6 +1292,13 @@ impl<'a> PeerMsgHandler<'a> {
             callback.invoke_with_response(resp);
             return;
         }
+        if !self.get_peer().get_store().initial_flushed() {
+            let mut resp = RaftCmdResponse::default();
+            let not_initialized = resp.mut_header().mut_error().mut_region_not_initialized();
+            not_initialized.set_region_id(self.region_id());
+            callback.invoke_with_response(resp);
+            return;
+        }
         if cs.get_shard_ver() != self.region().get_region_epoch().get_version() {
             let mut resp = RaftCmdResponse::default();
             let regions = resp
