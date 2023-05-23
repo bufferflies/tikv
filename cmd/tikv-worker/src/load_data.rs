@@ -481,7 +481,8 @@ impl LoadTaskWorker {
                 let res = flush_to_local_file(kv_pairs, task_ctx, file_path, in_mem_size);
                 tx.send(res).unwrap();
             });
-            if self.file_idx + FLUSH_FILE_CONCURRENCY > self.readers.len() {
+            if self.file_idx > self.readers.len() + self.reader_errs.len() + FLUSH_FILE_CONCURRENCY
+            {
                 self.recv_reader();
             }
             self.in_mem_size = 0;
@@ -747,15 +748,9 @@ impl LoadTaskWorker {
         last_key.push(0);
         coarse_split_keys.push(encode_bytes(&last_key));
         let new_regions_id = self.split_regions(&coarse_split_keys)?;
-        for i in 0..coarse_split_keys.len() {
+        for i in 0..coarse_split_keys.len() - 1 {
             let start_key = coarse_split_keys[i].clone();
-            let end_key = if i + 1 == coarse_split_keys.len() {
-                let mut last = sst_metas.last().unwrap().encoded_biggest.clone();
-                last.push(0);
-                last
-            } else {
-                coarse_split_keys[i + 1].clone()
-            };
+            let end_key = coarse_split_keys[i + 1].clone();
             let group_ssts = get_ssts_in_range(&sst_metas, &start_key, &end_key);
             self.ingest_group(group_ssts)?;
         }
