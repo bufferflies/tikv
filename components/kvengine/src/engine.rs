@@ -484,6 +484,7 @@ impl EngineCore {
         meta: ShardMeta,
     ) -> Result<kvenginepb::ChangeSet> {
         let shard = self.get_shard_with_ver(shard_id, shard_ver)?;
+        let inner_key_off = shard.inner_key_off;
         let l0_version = shard.load_mem_table_version();
         let mut cs = new_change_set(shard_id, shard_ver);
         let ingest_files = cs.mut_ingest_files();
@@ -519,7 +520,7 @@ impl EngineCore {
             let id = fids.pop().unwrap();
             builder.reset(id);
             while iter.valid() {
-                builder.add(iter.key(), &iter.value(), None);
+                builder.add(&iter.key()[inner_key_off..], &iter.value(), None);
                 iter.next();
                 if builder.estimated_size() > max_table_size || !iter.valid() {
                     info!("builder estimated_size {}", builder.estimated_size());
