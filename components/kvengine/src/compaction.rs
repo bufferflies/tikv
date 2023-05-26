@@ -69,6 +69,7 @@ impl RemoteCompactors {
 #[derive(Clone)]
 pub struct CompactionClient {
     dfs: Arc<dyn dfs::Dfs>,
+    id_allocator: Arc<dyn IdAllocator>,
     remote_compactors: Arc<Mutex<RemoteCompactors>>,
     client: Option<hyper::Client<hyper::client::HttpConnector>>,
     compression_lvl: i32,
@@ -81,6 +82,7 @@ impl CompactionClient {
         remote_url: String,
         compression_lvl: i32,
         allow_fallback_local: bool,
+        id_allocator: Arc<dyn IdAllocator>,
     ) -> Self {
         let remote_compactors = RemoteCompactors::new(remote_url);
         let client = hyper::Client::builder()
@@ -92,6 +94,7 @@ impl CompactionClient {
             client: Some(client),
             compression_lvl,
             allow_fallback_local,
+            id_allocator,
         }
     }
 
@@ -162,7 +165,12 @@ impl CompactionClient {
     pub(crate) fn compact(&self, req: CompactionRequest) -> Result<pb::ChangeSet> {
         let mut remote_compactor = self.get_remote_compactor();
         if remote_compactor.remote_url.is_empty() {
-            local_compact(self.dfs.clone(), &req, self.compression_lvl)
+            local_compact(
+                self.dfs.clone(),
+                &req,
+                self.compression_lvl,
+                self.id_allocator.clone(),
+            )
         } else {
             let (tx, rx) = tikv_util::mpsc::bounded(1);
             let req = Arc::new(req);
@@ -181,7 +189,12 @@ impl CompactionClient {
                     Err(e @ IncompatibleRemoteCompactor { .. }) => {
                         if self.allow_fallback_local {
                             warn!("fall back to local compactor due to error: {:?}", e);
-                            break local_compact(self.dfs.clone(), &req, self.compression_lvl);
+                            break local_compact(
+                                self.dfs.clone(),
+                                &req,
+                                self.compression_lvl,
+                                self.id_allocator.clone(),
+                            );
                         } else {
                             warn!(
                                 "remote compactor is incompatible and local compaction is not allowed"
@@ -206,7 +219,12 @@ impl CompactionClient {
                         }
                         if remote_compactor.remote_url.is_empty() {
                             if self.allow_fallback_local {
-                                break local_compact(self.dfs.clone(), &req, self.compression_lvl);
+                                break local_compact(
+                                    self.dfs.clone(),
+                                    &req,
+                                    self.compression_lvl,
+                                    self.id_allocator.clone(),
+                                );
                             } else {
                                 warn!(
                                     "no remote compactor available and local compaction is not allowed"
@@ -1353,6 +1371,7 @@ pub(crate) fn compact_tables(
     req: &CompactionRequest,
     fs: Arc<dyn dfs::Dfs>,
     compression_lvl: i32,
+    id_allocator: Arc<dyn IdAllocator>,
 ) -> Result<Vec<pb::TableCreate>> {
     let tag = ShardTag::from_comp_req(req);
     info!(
@@ -1375,18 +1394,23 @@ pub(crate) fn compact_tables(
     let mut skip_key = BytesMut::new();
     let mut builder = sstable::Builder::new(0, req.block_size, req.compression_tp, compression_lvl);
     let mut id_idx = 0;
-    let (tx, rx) = tikv_util::mpsc::bounded(req.file_ids.len());
+    let mut file_ids = req.file_ids.clone();
+    let (tx, rx) = tikv_util::mpsc::bounded(file_ids.len());
     let mut reach_end = false;
     while iter.valid() && !reach_end {
-        if id_idx >= req.file_ids.len() {
-            panic!(
-                "index out of bounds: the len is {} but the index is {}, req {:?}",
-                req.file_ids.len(),
-                id_idx,
-                req
-            );
+        if id_idx >= file_ids.len() {
+            if id_idx > 4096 {
+                panic!(
+                    "index out of bounds: the len is {} but the index is {}, req {:?}",
+                    file_ids.len(),
+                    id_idx,
+                    req
+                );
+            }
+            let new_ids = id_allocator.alloc_id(64)?;
+            file_ids.extend_from_slice(new_ids.as_slice());
         }
-        let id = req.file_ids[id_idx];
+        let id = file_ids[id_idx];
         builder.reset(id);
         last_key.clear();
         while iter.valid() {
@@ -1531,6 +1555,7 @@ pub async fn handle_remote_compaction(
     dfs: Arc<dyn dfs::Dfs>,
     req: hyper::Request<hyper::Body>,
     compression_lvl: i32,
+    id_allocator: Arc<dyn IdAllocator>,
 ) -> hyper::Result<hyper::Response<hyper::Body>> {
     let req_body = hyper::body::to_bytes(req.into_body()).await?;
     let result = serde_json::from_slice(req_body.chunk());
@@ -1558,7 +1583,7 @@ pub async fn handle_remote_compaction(
     let (tx, rx) = tokio::sync::oneshot::channel();
     std::thread::spawn(move || {
         tikv_util::set_current_region(comp_req.shard_id);
-        let result = local_compact(dfs, &comp_req, compression_lvl);
+        let result = local_compact(dfs, &comp_req, compression_lvl, id_allocator);
         tx.send(result).unwrap();
     });
     match rx.await.unwrap() {
@@ -1582,6 +1607,7 @@ fn local_compact(
     dfs: Arc<dyn dfs::Dfs>,
     req: &CompactionRequest,
     compression_lvl: i32,
+    id_allocator: Arc<dyn IdAllocator>,
 ) -> Result<pb::ChangeSet> {
     let mut cs = pb::ChangeSet::new();
     cs.set_shard_id(req.shard_id);
@@ -1640,7 +1666,7 @@ fn local_compact(
         info!("finish compacting L0 for {}", tag);
     } else {
         info!("start compacting L{} CF{} for {}", req.level, req.cf, tag);
-        let tbls = compact_tables(req, dfs.clone(), compression_lvl)?;
+        let tbls = compact_tables(req, dfs.clone(), compression_lvl, id_allocator)?;
         comp.set_table_creates(tbls.into());
         comp.set_bottom_deletes(req.bottoms.clone());
         info!("finish compacting L{} CF{} for {}", req.level, req.cf, tag);

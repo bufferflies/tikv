@@ -35,7 +35,7 @@ use kvproto::metapb::Store;
 use pd_client::{PdClient, RpcClient};
 use prometheus::TEXT_FORMAT;
 use protobuf::Message;
-use rfstore::store::RegionSnapshot;
+use rfstore::store::{PdIdAllocator, RegionSnapshot};
 use security::{SecurityConfig, SecurityManager};
 use slog::Level;
 use slog_global::{error, info};
@@ -240,16 +240,19 @@ fn main() {
     update_native_br_config_periodically(br_manager.clone(), config_file_path);
     let server_builder = hyper::Server::builder(incoming);
     let dfs_clone = dfs.clone();
+    let pd_clone = pd.clone();
     let server = server_builder.serve(make_service_fn(move |_| {
         let dfs = dfs_clone.clone();
         let load_manager = load_manager.clone();
         let br_manager = br_manager.clone();
+        let pd = pd_clone.clone();
         async move {
             // Create a status service.
             Ok::<_, hyper::Error>(service_fn(move |req: hyper::Request<hyper::Body>| {
                 let dfs = dfs.clone();
                 let load_manager = load_manager.clone();
                 let br_manager = br_manager.clone();
+                let pd = pd.clone();
                 async move {
                     let path = req.uri().path().to_owned();
                     match path.as_ref() {
@@ -258,7 +261,9 @@ fn main() {
                             .body(hyper::Body::from("ok"))
                             .unwrap()),
                         "/compact" => {
-                            kvengine::handle_remote_compaction(dfs, req, compression_lvl).await
+                            let allocator = Arc::new(PdIdAllocator::new(pd));
+                            kvengine::handle_remote_compaction(dfs, req, compression_lvl, allocator)
+                                .await
                         }
                         "/analyze" => handle_remote_analysis(dfs, req).await,
                         "/load_data" => handle_load_data(load_manager, req).await,

@@ -3,12 +3,15 @@
 use std::{
     fmt,
     fmt::{Debug, Display, Formatter},
+    sync::Arc,
+    time::Duration,
 };
 
+use futures::executor::block_on;
 use kvproto::{metapb, raft_cmdpb::RaftCmdRequest};
 use protobuf::Message;
 use slog::{Key, Record, Serializer};
-use tikv_util::{box_err, codec::bytes::decode_bytes, debug};
+use tikv_util::{box_err, codec::bytes::decode_bytes, debug, error, time::Instant};
 
 use crate::{Error, Result};
 
@@ -275,4 +278,40 @@ pub fn raw_end_key(region: &metapb::Region) -> Vec<u8> {
 
 pub fn region_has_peer(region: &metapb::Region, peer_id: u64) -> bool {
     region.get_peers().iter().any(|p| p.id == peer_id)
+}
+
+pub struct PdIdAllocator {
+    pd: Arc<dyn pd_client::PdClient>,
+}
+
+const ALLOCATE_ID_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
+impl PdIdAllocator {
+    pub fn new(pd: Arc<dyn pd_client::PdClient>) -> Self {
+        Self { pd }
+    }
+}
+
+impl kvengine::IdAllocator for PdIdAllocator {
+    fn alloc_id(&self, count: usize) -> kvengine::Result<Vec<u64>> {
+        let start = Instant::now();
+        loop {
+            match block_on(self.pd.batch_get_tso(count as u32)) {
+                Ok(ts) => {
+                    let last = ts.into_inner();
+                    let first = last - count as u64 + 1;
+                    return Ok((first..=last).collect());
+                }
+                Err(err) => {
+                    error!("failed to allocate file id from PD {:?}", err);
+                    std::thread::sleep(Duration::from_secs(3));
+                    if start.saturating_elapsed() > ALLOCATE_ID_TIMEOUT {
+                        return Err(kvengine::Error::ErrAllocId(
+                            "allocate file id timeout".to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
 }

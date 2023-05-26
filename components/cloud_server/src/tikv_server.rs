@@ -47,8 +47,8 @@ use raftstore::{
 use rfengine::RfEngine;
 use rfstore::{
     store::{
-        BlackList, Engines, LocalReader, MetaChangeListener, RaftBatchSystem, StoreMeta, StoreMsg,
-        PENDING_MSG_CAP,
+        BlackList, Engines, LocalReader, MetaChangeListener, PdIdAllocator, RaftBatchSystem,
+        StoreMeta, StoreMsg, PENDING_MSG_CAP,
     },
     RaftRouter, ServerRaftStoreRouter,
 };
@@ -942,7 +942,7 @@ impl TikvServer {
         kv_opts.max_del_range_delay = conf.raft_store.local_file_gc_timeout.0 * 2;
         kv_opts.for_restore = for_restore;
         let opts = Arc::new(kv_opts);
-        let id_allocator = Arc::new(PdIdAllocator { pd });
+        let id_allocator = Arc::new(PdIdAllocator::new(pd));
         let (sender, receiver) = tikv_util::mpsc::unbounded();
         let meta_change_listener = Box::new(MetaChangeListener {
             sender: sender.clone(),
@@ -1035,36 +1035,6 @@ fn load_black_list(black_list_path: &str) -> Option<BlackList> {
         }
     }
     None
-}
-
-struct PdIdAllocator {
-    pd: Arc<dyn pd_client::PdClient>,
-}
-
-const ALLOCATE_ID_TIMEOUT: Duration = Duration::from_secs(30 * 60);
-
-impl kvengine::IdAllocator for PdIdAllocator {
-    fn alloc_id(&self, count: usize) -> kvengine::Result<Vec<u64>> {
-        let start = Instant::now();
-        loop {
-            match block_on(self.pd.batch_get_tso(count as u32)) {
-                Ok(ts) => {
-                    let last = ts.into_inner();
-                    let first = last - count as u64 + 1;
-                    return Ok((first..=last).collect());
-                }
-                Err(err) => {
-                    error!("failed to allocate file id from PD {:?}", err);
-                    std::thread::sleep(Duration::from_secs(3));
-                    if start.saturating_elapsed() > ALLOCATE_ID_TIMEOUT {
-                        return Err(kvengine::Error::ErrAllocId(
-                            "allocate file id timeout".to_string(),
-                        ));
-                    }
-                }
-            }
-        }
-    }
 }
 
 /// Various sanity-checks and logging before running a server.

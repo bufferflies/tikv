@@ -111,6 +111,7 @@ impl Engine {
                 opts.remote_compactor_addr.clone(),
                 compression_lvl,
                 allow_fallback_local,
+                id_allocator.clone(),
             ),
             id_allocator,
             managed_safe_ts: AtomicU64::new(0),
