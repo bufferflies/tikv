@@ -18,6 +18,7 @@ use hyper::Body;
 use kvengine::{
     dfs,
     dfs::Options,
+    stats::ShardStats,
     table::{
         sstable::{Builder, LZ4_COMPRESSION, NO_COMPRESSION, ZSTD_COMPRESSION},
         Value,
@@ -147,6 +148,8 @@ pub(crate) async fn handle_load_data(
                 let task_ctx = TaskContext {
                     start_ts,
                     commit_ts,
+                    inner_key_off: None,
+                    key_prefix: vec![],
                 };
                 // step 1: on start, client call init task
                 manager.init_task(task_ctx);
@@ -334,10 +337,12 @@ pub(crate) struct LoadDataContext {
     max_in_mem_size: usize,
 }
 
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 pub(crate) struct TaskContext {
     start_ts: u64,
     commit_ts: u64,
+    inner_key_off: Option<usize>,
+    key_prefix: Vec<u8>,
 }
 
 #[derive(Default, Debug, Serialize, Deserialize, Clone)]
@@ -389,10 +394,14 @@ impl LoadTaskWorker {
                     chunk_id,
                     chunk_data,
                 } => {
-                    self.handle_add_chunk(chunk_id, chunk_data);
-                    if !self.reader_errs.is_empty() {
-                        self.scheduler
-                            .cancel(self.reader_errs.first().unwrap().to_string());
+                    let res = self.handle_add_chunk(chunk_id, chunk_data);
+                    if res.is_err() || !self.reader_errs.is_empty() {
+                        let err_msg = if let Err(e) = res {
+                            e.to_string()
+                        } else {
+                            self.reader_errs.first().unwrap().to_string()
+                        };
+                        self.scheduler.cancel(err_msg);
                         let remained = self.file_idx - self.reader_errs.len() - self.readers.len();
                         for _ in 0..remained {
                             self.recv_reader();
@@ -429,30 +438,45 @@ impl LoadTaskWorker {
         self.scheduler.clone()
     }
 
-    pub(crate) fn handle_add_chunk(&mut self, chunk_id: u64, chunk_data: Bytes) {
+    pub(crate) fn handle_add_chunk(&mut self, chunk_id: u64, chunk_data: Bytes) -> Result<()> {
         info!("handle add chunk {}, len {}", chunk_id, chunk_data.len());
         if self.handled_chunks.contains(&chunk_id) {
             warn!(
                 "{} skip duplicated chunk {}",
                 self.task_ctx.start_ts, chunk_id
             );
-            return;
+            return Ok(());
         }
         if self.scheduler.is_canceled() {
             warn!(
                 "task {} is canceled, skip add chunk {}",
                 self.task_ctx.start_ts, chunk_id
             );
-            return;
+            return Ok(());
         }
         if self.scheduler.is_finished() {
             warn!(
                 "task {} is finished, skip add chunk {}",
                 self.task_ctx.start_ts, chunk_id
             );
-            return;
+            return Ok(());
         }
         self.handled_chunks.insert(chunk_id);
+
+        if self.task_ctx.inner_key_off.is_none() {
+            let key_len = (&chunk_data[0..]).get_u16_le();
+            let first_key = chunk_data.slice(2..2 + key_len as usize);
+            let region = self.ctx.pd.get_region(first_key.chunk())?;
+            let region_id = region.get_id();
+            let shard_stats = self
+                .ctx
+                .runtime
+                .block_on(get_shard_stats(&self.ctx.pd, region_id))?;
+
+            self.task_ctx.inner_key_off = Some(shard_stats.inner_key_off);
+            self.task_ctx.key_prefix = first_key.slice(..shard_stats.inner_key_off).to_vec();
+        }
+        let inner_key_off = self.task_ctx.inner_key_off.unwrap();
         let mut offset = 0;
         while offset < chunk_data.len() {
             let key_len = (&chunk_data[offset..]).get_u16_le();
@@ -463,7 +487,21 @@ impl LoadTaskWorker {
             offset += 4;
             let val = chunk_data.slice(offset..offset + val_len as usize);
             offset += val_len as usize;
-            self.kv_pairs.push(KvPair::new(key, val));
+
+            let key_prefix = key.slice(..inner_key_off);
+            if key_prefix.chunk() != self.task_ctx.key_prefix.as_slice() {
+                let err_msg = format!(
+                    "{} chunk data key prefix inconsistent, first chunk: {:?}, chunk: {:?}",
+                    self.task_ctx.start_ts,
+                    self.task_ctx.key_prefix,
+                    key_prefix.chunk()
+                );
+                error!("{}", err_msg);
+                return Err(Error::CheckError(err_msg));
+            }
+
+            let inner_key = key.slice(inner_key_off..);
+            self.kv_pairs.push(KvPair::new(inner_key, val));
             self.in_mem_size += 2 + key_len as usize + 4 + val_len as usize;
         }
         if self.in_mem_size > self.ctx.max_in_mem_size {
@@ -473,7 +511,7 @@ impl LoadTaskWorker {
             );
             let kv_pairs = mem::take(&mut self.kv_pairs);
             let tx = self.file_tx.clone();
-            let task_ctx = self.task_ctx;
+            let task_ctx = self.task_ctx.clone();
             let file_path = self.file_path(self.file_idx);
             let in_mem_size = self.in_mem_size;
             self.file_idx += 1;
@@ -487,6 +525,7 @@ impl LoadTaskWorker {
             }
             self.in_mem_size = 0;
         }
+        Ok(())
     }
 
     fn recv_reader(&mut self) {
@@ -544,7 +583,7 @@ impl LoadTaskWorker {
             let kv_pairs = mem::take(&mut self.kv_pairs);
             let reader = flush_to_local_file(
                 kv_pairs,
-                self.task_ctx,
+                self.task_ctx.clone(),
                 self.file_path(self.file_idx),
                 self.in_mem_size,
             )?;
@@ -618,6 +657,7 @@ impl LoadTaskWorker {
     ) {
         let ctx = self.ctx.clone();
         let start_ts = self.task_ctx.start_ts;
+
         self.ctx.runtime.spawn(async move {
             info!("{} start build sst file {}", start_ts, file_id);
             let mut builder = Builder::new(
@@ -877,6 +917,63 @@ async fn ingest_files_to_leader(
     }
 }
 
+async fn get_shard_stats(pd: &Arc<dyn PdClient>, shard_id: u64) -> Result<ShardStats> {
+    let http_client = hyper::client::Client::new();
+    let mut retry = 0;
+    loop {
+        if retry > MAX_RETRY_TIMES {
+            return Err(Error::Other(format!(
+                "get_shard_stats failed, shard_id: {}",
+                shard_id
+            )));
+        }
+        if retry > 0 {
+            tokio::time::sleep(Duration::from_secs(6)).await;
+        }
+        retry += 1;
+
+        let store_id_res = get_leader_store(pd, shard_id).await;
+        if store_id_res.is_err() {
+            error!("get_shard_stats error: {:?}", store_id_res.unwrap_err());
+            continue;
+        }
+        let store_id = store_id_res.unwrap();
+        let store_res = pd.get_store_async(store_id).await;
+        if store_res.is_err() {
+            error!("get_shard_stats error: {:?}", store_res.unwrap_err());
+            continue;
+        }
+        let store = store_res.unwrap();
+        let uri = Uri::from_str(&format!(
+            "http://{}/kvengine/{}",
+            &store.status_address, shard_id
+        ))
+        .unwrap();
+        let req = Request::get(uri).body(Body::from(""))?;
+        match http_client.request(req).await {
+            Ok(resp) => {
+                if resp.status().is_success() {
+                    let body = hyper::body::to_bytes(resp.into_body()).await?;
+                    let shard_stats: ShardStats = serde_json::from_slice(&body).unwrap();
+                    if shard_stats.id == 0 {
+                        continue;
+                    }
+                    return Ok(shard_stats);
+                } else {
+                    continue;
+                }
+            }
+            Err(e) => {
+                error!(
+                    "get_shard_stats failed, shard_id: {}, error: {:?}",
+                    shard_id, e
+                );
+                continue;
+            }
+        }
+    }
+}
+
 async fn get_leader_store(pd: &Arc<dyn PdClient>, region_id: u64) -> Result<u64> {
     let start = Instant::now();
     let timeout = Duration::from_secs(60);
@@ -1126,7 +1223,7 @@ impl LoadDataManager {
     }
 
     pub(crate) fn init_task(&self, task_ctx: TaskContext) {
-        let mut worker = LoadTaskWorker::new(self.ctx.clone(), task_ctx);
+        let mut worker = LoadTaskWorker::new(self.ctx.clone(), task_ctx.clone());
         let scheduler = worker.get_scheduler();
         std::thread::spawn(move || {
             worker.run();

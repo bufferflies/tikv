@@ -34,6 +34,8 @@ pub(crate) enum Error {
     DateTimeParseError(#[from] chrono::ParseError),
     #[error("ReachLimit {0}")]
     ReachConcurrencyLimit(usize),
+    #[error("Other {0}")]
+    Other(String),
 }
 
 impl From<dfs::Error> for Error {
