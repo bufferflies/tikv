@@ -539,9 +539,9 @@ impl LoadTaskWorker {
         }
     }
 
-    fn alloc_file_id(&mut self) -> u64 {
+    fn alloc_file_id(&mut self) -> Result<u64> {
         if let Some(id) = self.cached_file_ids.pop() {
-            return id;
+            return Ok(id);
         }
         let start = Instant::now();
         let count = 64;
@@ -551,13 +551,13 @@ impl LoadTaskWorker {
                     let last = ts.into_inner();
                     let first = last - count as u64 + 1;
                     self.cached_file_ids = (first..=last).rev().collect();
-                    return self.cached_file_ids.pop().unwrap();
+                    return Ok(self.cached_file_ids.pop().unwrap());
                 }
                 Err(err) => {
                     error!("failed to allocate file id from PD {:?}", err);
                     std::thread::sleep(Duration::from_secs(1));
                     if start.saturating_elapsed() > ALLOCATE_ID_TIMEOUT {
-                        panic!("allocate file id timeout");
+                        return Err(Error::PdError(err));
                     }
                 }
             }
@@ -613,7 +613,11 @@ impl LoadTaskWorker {
                 break;
             }
             let file_id = self.alloc_file_id();
-            self.spawn_build_file(file_id, batch, tx.clone(), compression_type);
+            if let Err(err) = file_id {
+                errs.push(err);
+                break;
+            }
+            self.spawn_build_file(file_id.unwrap(), batch, tx.clone(), compression_type);
             sent_count += 1;
             if sent_count > CREATE_FILE_CONCURRENCY {
                 recv_count += 1;
