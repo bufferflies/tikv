@@ -36,17 +36,19 @@ For more info, check https://github.com/tikv/tikv/blob/master/CONTRIBUTING.md#fo
 
 ### Related changes
 
-- PR to update `pingcap/docs`/`pingcap/docs-cn`:
-- Need to cherry-pick to the release branch
+- PR to update [`pingcap/docs/tidb-cloud`](https://github.com/pingcap/docs/tree/master/tidb-cloud):
 
 ### Check List <!--REMOVE the items that are not applicable-->
 
-Tests <!-- At least one of them must be included. -->
+<!-- Also check the box next to each item, even if it's not necessary to do so -->
 
-- Unit test
-- Integration test
-- Manual test (add detailed scripts or steps below)
-- No code
+- [ ] Sync feature docs
+- [ ] Tests <!-- At least one of them must be included. -->
+  - Unit test
+  - Integration test
+  - Random test
+  - Manual test (add detailed scripts or steps below)
+  - No code
 
 Side effects
 
