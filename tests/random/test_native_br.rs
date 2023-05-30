@@ -13,7 +13,7 @@ use rand::{prelude::SliceRandom, Rng};
 use test_cloud_server::{client::ClusterClient, try_wait, ServerCluster};
 use tikv_util::{
     config::{ReadableDuration, ReadableSize},
-    error, info,
+    info,
     time::Instant,
     warn,
 };
@@ -200,14 +200,7 @@ fn test_random_br_helper(enable_inner_key_offset: bool, restore_to_new: bool) {
         20,
     );
     if !ok {
-        if let Err(str) = cluster.get_data_stats().check_data() {
-            if str.contains("compaction score too large") {
-                // TODO: investigate why compaction score too large
-                error!("{}", str);
-            } else {
-                panic!("{}", str);
-            }
-        }
+        cluster.get_data_stats().check_data().unwrap();
     }
 
     // TODO: verify data

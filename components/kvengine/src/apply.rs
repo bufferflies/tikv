@@ -189,8 +189,15 @@ impl EngineCore {
         } else if cs.has_restore_shard() {
             self.apply_restore_shard(&shard, &cs)?;
         }
-        self.refresh_shard_states(&shard);
         debug!("{} finished applying change set: {:?}", shard.tag(), cs);
+
+        // Get shard again as version may be changed after change set applied.
+        // Note that the shard may have been destroyed (e.g. by merge, in rfstore
+        // thread) at this point.
+        if let Some(shard) = self.get_shard(cs.shard_id) {
+            self.refresh_shard_states(&shard);
+        }
+
         Ok(())
     }
 
