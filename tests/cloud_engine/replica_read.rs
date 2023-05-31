@@ -72,7 +72,7 @@ fn test_replica_read() {
             .unwrap();
         assert_eq!(ctx.get_peer().get_role(), metapb::PeerRole::Learner);
         assert_eq!(ctx.get_peer().get_id(), learner_peer.id);
-        assert_eq!(val, i_to_val(i));
+        assert_eq!(val.unwrap(), i_to_val(i));
     }
     let ref_store = client.dump_ref_store();
     client

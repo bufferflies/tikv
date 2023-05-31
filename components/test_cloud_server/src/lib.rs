@@ -2,6 +2,7 @@
 
 pub mod client;
 pub mod cluster;
+pub mod keyspace;
 pub mod oss;
 pub mod scheduler;
 

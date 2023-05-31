@@ -40,7 +40,7 @@ use crate::try_wait;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Sync + Send>>;
 
-pub type RefStore = HashMap<Vec<u8>, Vec<u8>>;
+pub type RefStore = HashMap<Vec<u8>, Option<Vec<u8>>>; // `None` means the key has been deleted.
 
 pub struct ClusterClient {
     pub pd_client: Arc<TestPdClient>,
@@ -172,8 +172,8 @@ impl ClusterClient {
 
     fn del_kv_in_ref_store(&mut self, mutations: Vec<Mutation>) {
         let mut ref_store = self.ref_store.lock().unwrap();
-        for m in mutations {
-            ref_store.remove(m.get_key());
+        for mut m in mutations {
+            ref_store.insert(m.take_key(), None);
         }
     }
 
@@ -209,7 +209,7 @@ impl ClusterClient {
         let first = mutations.first().unwrap();
         self.verify_key_value(
             first.get_key(),
-            first.get_value(),
+            Some(first.get_value()),
             put_time,
             &RequestOptions::default(),
         )?;
@@ -221,7 +221,7 @@ impl ClusterClient {
     fn put_kv_in_ref_store(&mut self, mutations: Vec<Mutation>) {
         let mut ref_store = self.ref_store.lock().unwrap();
         for mut m in mutations {
-            ref_store.insert(m.take_key(), m.take_value());
+            ref_store.insert(m.take_key(), Some(m.take_value()));
         }
     }
 
@@ -231,6 +231,21 @@ impl ClusterClient {
 
     pub fn max_ts(&mut self) -> u64 {
         self.max_ts.load(Ordering::Relaxed)
+    }
+
+    pub fn kv_mutate(&mut self, muts: Vec<Mutation>) -> Result<()> {
+        assert!(!muts.is_empty());
+        let keys = muts
+            .iter()
+            .map(|m| m.get_key().to_vec())
+            .collect::<Vec<_>>();
+        let start_ts = self.get_ts();
+        self.kv_prewrite(muts, keys[0].clone(), start_ts);
+
+        let commit_ts = self.get_ts();
+        self.kv_commit(keys, start_ts, commit_ts);
+        self.set_max_ts(commit_ts.into_inner());
+        Ok(())
     }
 
     pub fn kv_prewrite(&mut self, muts: Vec<Mutation>, pk: Vec<u8>, ts: TimeStamp) {
@@ -288,6 +303,14 @@ impl ClusterClient {
                     return;
                 }
                 panic!("unexpected error {:?}", region_err);
+            }
+            let key_errors = resp.get_errors();
+            if !key_errors.is_empty() {
+                // TODO: resolve locks
+                panic!(
+                    "{} prewrite failed with key errors {:?}",
+                    region_id, key_errors
+                );
             }
             return;
         }
@@ -347,6 +370,10 @@ impl ClusterClient {
                     return;
                 }
                 panic!("unexpected error {:?}", region_err);
+            }
+            if commit_resp.has_error() {
+                let key_err = commit_resp.get_error();
+                panic!("{} commit failed with key error {:?}", region_id, key_err);
             }
             return;
         }
@@ -536,6 +563,13 @@ impl ClusterClient {
         self.new_rpc_ctx_opt(region_id, &RequestOptions::default())
     }
 
+    fn tag_from_ctx(ctx: &Context) -> kvengine::ShardTag {
+        kvengine::ShardTag {
+            engine_id: ctx.get_peer().get_store_id(),
+            id_ver: kvengine::IdVer::new(ctx.get_region_id(), ctx.get_region_epoch().get_version()),
+        }
+    }
+
     fn get_peer_for_request(
         &self,
         region_id: u64,
@@ -694,8 +728,17 @@ impl ClusterClient {
         version: u64,
         put_time: Instant,
     ) -> (Vec<u8>, Context) {
-        self.get_key_version_opt(key, version, put_time, &RequestOptions::default())
-            .unwrap()
+        let (value, ctx) = self
+            .get_key_version_opt(key, version, put_time, &RequestOptions::default())
+            .unwrap();
+        let value = value.unwrap_or_else(|| {
+            panic!(
+                "{} key {} not found",
+                Self::tag_from_ctx(&ctx),
+                log_wrappers::hex_encode_upper(key),
+            )
+        });
+        (value, ctx)
     }
 
     pub fn get_key_version_opt(
@@ -704,18 +747,19 @@ impl ClusterClient {
         version: u64,
         put_time: Instant,
         options: &RequestOptions,
-    ) -> Result<(Vec<u8>, Context)> {
+    ) -> Result<(Option<Vec<u8>>, Context)> {
         let start_time = Instant::now();
         let timeout = Duration::from_secs(15);
-        let mut region_id = 0;
+        let mut tag = kvengine::ShardTag::default();
         let mut store_id_errors = vec![];
         while start_time.saturating_elapsed() < timeout {
-            region_id = self.get_region_id(key);
+            let region_id = self.get_region_id(key);
             let ctx = self.new_rpc_ctx_opt(region_id, options);
             if ctx.is_none() {
                 continue;
             }
             let ctx = ctx.unwrap();
+            tag = Self::tag_from_ctx(&ctx);
             let store_id = ctx.get_peer().get_store_id();
             let client = self.get_kv_client(store_id);
             let mut get_req = GetRequest::default();
@@ -738,22 +782,25 @@ impl ClusterClient {
                 if self.handle_region_epoch_not_match_or_not_found(region_err) {
                     continue;
                 }
-                return Err(box_err!("unexpected error {:?}", region_err));
+                return Err(box_err!("{} unexpected error {:?}", tag, region_err));
             }
-            if resp.get_not_found() {
+            if resp.has_error() {
                 return Err(box_err!(
-                    "key {:?} not found on region {}, put elapsed {:?}",
-                    key,
-                    region_id,
-                    put_time.saturating_elapsed()
+                    "{} key {} get key_error: {:?}",
+                    tag,
+                    log_wrappers::hex_encode_upper(key),
+                    resp.get_error()
                 ));
             }
-            return Ok((resp.take_value(), ctx));
+            if resp.get_not_found() {
+                return Ok((None, ctx));
+            }
+            return Ok((Some(resp.take_value()), ctx));
         }
         Err(box_err!(
-            "region {} failed to get key {:?}, errors {:?}, put elapsed {:?}",
-            region_id,
-            key,
+            "{} failed to get key {}, errors {:?}, put elapsed {:?}",
+            tag,
+            log_wrappers::hex_encode_upper(key),
             store_id_errors,
             put_time.saturating_elapsed()
         ))
@@ -779,32 +826,29 @@ impl ClusterClient {
                     continue;
                 }
             }
-            self.verify_key_value(k, v, put_time, options)?;
+            self.verify_key_value(k, v.as_ref(), put_time, options)?;
             cnt += 1;
         }
         Ok(cnt)
     }
 
-    pub fn verify_key_value(
+    pub fn verify_key_value<T: AsRef<[u8]> + ?Sized>(
         &mut self,
         key: &[u8],
-        expect_val: &[u8],
+        expect_val: Option<&T>,
         put_time: Instant,
         options: &RequestOptions,
     ) -> Result<()> {
         let (val, ctx) = self.get_key_version_opt(key, u64::MAX, put_time, options)?;
-        if val.as_slice() != expect_val {
-            let region_id = ctx.region_id;
-            let region_ver = ctx.get_region_epoch().get_version();
+        let val = val.as_deref();
+        let expect_val = expect_val.map(|v| v.as_ref());
+        if val != expect_val {
             return Err(format!(
-                "val not equal for key {:?} on region {}:{}, db_len:{}, db: {:?} ref_store_len:{}, ref store {:?}",
-                key,
-                region_id,
-                region_ver,
-                val.len(),
-                val,
-                expect_val.len(),
-                expect_val,
+                "{} val not equal for key {}, db: {:?}, ref store {:?}",
+                Self::tag_from_ctx(&ctx),
+                log_wrappers::hex_encode_upper(key),
+                val.map(|v| (v.len(), log_wrappers::hex_encode_upper(v))),
+                expect_val.map(|v| (v.len(), log_wrappers::hex_encode_upper(v))),
             )
             .into());
         }

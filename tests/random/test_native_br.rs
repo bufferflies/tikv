@@ -1,16 +1,21 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    sync::{atomic::Ordering, Arc, Mutex, RwLock},
+    sync::{atomic::Ordering, Arc, RwLock},
     thread::{sleep, JoinHandle},
     time::Duration,
 };
 
+use api_version::ApiV2;
 use kvengine::dfs::{DFSConfig, S3Fs};
 use native_br::{backup, error::Error, restore_keyspace};
 use pd_client::PdClient;
 use rand::{prelude::SliceRandom, Rng};
-use test_cloud_server::{client::ClusterClient, try_wait, ServerCluster};
+use test_cloud_server::{
+    client::ClusterClient,
+    keyspace::{ClusterKeyspaceClient, KeyspaceManager},
+    try_wait, try_wait_result, ServerCluster,
+};
 use tikv_util::{
     config::{ReadableDuration, ReadableSize},
     info,
@@ -20,10 +25,9 @@ use tikv_util::{
 use tokio::runtime::Runtime;
 
 use crate::{
-    alloc_node_id_vec, get_keyspace_prefix, prepare_dfs, spawn_gc_worker, spawn_keyspace_write,
-    spawn_merge, spawn_move, spawn_transfer, TikvConfig, BACKUP_COUNTER, CONCURRENCY,
-    MERGE_COUNTER, MOVE_COUNTER, NODE_RESTART_COUNTER, RESTORE_COUNTER, TIMEOUT, TRANSFER_COUNTER,
-    WRITE_COUNTER,
+    alloc_node_id_vec, prepare_dfs, spawn_gc_worker, spawn_keyspace_write_deprecated, spawn_merge,
+    spawn_move, spawn_transfer, TikvConfig, BACKUP_COUNTER, CONCURRENCY, MERGE_COUNTER,
+    MOVE_COUNTER, NODE_RESTART_COUNTER, RESTORE_COUNTER, TIMEOUT, TRANSFER_COUNTER, WRITE_COUNTER,
 };
 
 const KEYSPACE_COUNT: usize = 10;
@@ -67,7 +71,7 @@ fn test_random_br_helper(enable_inner_key_offset: bool, restore_to_new: bool) {
 
     // Split keyspaces.
     for keyspace_id in 0..=KEYSPACE_COUNT {
-        client.split(&get_keyspace_prefix(keyspace_id as u32));
+        client.split(&ApiV2::get_txn_keyspace_prefix(keyspace_id as u32));
     }
 
     cluster.wait_pd_region_min_count(KEYSPACE_COUNT + 2);
@@ -78,7 +82,7 @@ fn test_random_br_helper(enable_inner_key_offset: bool, restore_to_new: bool) {
     // Split target keyspace region.
     if restore_to_new {
         for keyspace_id in delta..=delta + KEYSPACE_COUNT {
-            client.split(&get_keyspace_prefix(keyspace_id as u32));
+            client.split(&ApiV2::get_txn_keyspace_prefix(keyspace_id as u32));
         }
         cluster.wait_pd_region_min_count(2 * KEYSPACE_COUNT + 2);
     }
@@ -88,8 +92,6 @@ fn test_random_br_helper(enable_inner_key_offset: bool, restore_to_new: bool) {
         move_scheduler.move_random_region();
     }
 
-    let backups = Arc::new(Mutex::new(vec![]));
-
     // Start workloads & schedulers.
     let mut handles = vec![
         spawn_transfer(cluster.new_scheduler()),
@@ -97,15 +99,16 @@ fn test_random_br_helper(enable_inner_key_offset: bool, restore_to_new: bool) {
         spawn_merge(cluster.new_scheduler(), true),
         spawn_gc_worker(cluster.get_pd_client(), TIMEOUT),
         spawn_incremental_backup(
-            backups.clone(),
             cluster.new_client(),
             cluster.get_pd_client(),
             dfs_config.clone(),
+            cluster.keyspace_manager().clone(),
+            Duration::from_secs(3),
             TIMEOUT,
         ),
     ];
     for idx in 0..CONCURRENCY {
-        handles.push(spawn_keyspace_write(
+        handles.push(spawn_keyspace_write_deprecated(
             idx,
             cluster.new_client(),
             KEYSPACE_COUNT,
@@ -159,8 +162,12 @@ fn test_random_br_helper(enable_inner_key_offset: bool, restore_to_new: bool) {
             // }
         }
 
-        let backup_name = match backups.lock().unwrap().choose(&mut rng) {
-            Some(name) => name.clone(),
+        let backup_name = match cluster
+            .keyspace_manager()
+            .ref_stores()
+            .get_random_backup(&mut rng)
+        {
+            Some(name) => name,
             None => {
                 sleep(Duration::from_millis(100));
                 continue;
@@ -174,13 +181,14 @@ fn test_random_br_helper(enable_inner_key_offset: bool, restore_to_new: bool) {
             keyspace
         };
         do_restore_keyspace(
-            &mut cluster,
+            pd_client.clone(),
             &runtime,
             dfs_config.clone(),
             keyspace,
             target_keyspace,
             &backup_name,
-        );
+        )
+        .unwrap();
         info!(
             "restore keyspace {}->{} from backup {} success",
             keyspace, target_keyspace, backup_name,
@@ -230,14 +238,14 @@ fn test_random_br_helper(enable_inner_key_offset: bool, restore_to_new: bool) {
     );
 }
 
-fn do_restore_keyspace(
-    cluster: &mut ServerCluster,
+pub(crate) fn do_restore_keyspace(
+    pd_client: Arc<dyn PdClient>,
     runtime: &Runtime,
     dfs_config: DFSConfig,
     keyspace: u32,
     target_keyspace: u32,
     backup_name: &str,
-) {
+) -> native_br::Result<()> {
     let s3fs = Arc::new(S3Fs::new(
         dfs_config.prefix,
         dfs_config.s3_endpoint,
@@ -252,17 +260,17 @@ fn do_restore_keyspace(
         backup_name,
         None,
         s3fs,
-        cluster.get_pd_client(),
+        pd_client,
         runtime,
     )
-    .unwrap();
 }
 
-fn spawn_incremental_backup(
-    backups: Arc<Mutex<Vec<String>>>,
+pub(crate) fn spawn_incremental_backup(
     client: ClusterClient,
     pd_client: Arc<dyn PdClient>,
     dfs_config: DFSConfig,
+    keyspace_manager: KeyspaceManager,
+    interval: Duration,
     timeout: Duration,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
@@ -274,37 +282,46 @@ fn spawn_incremental_backup(
         };
 
         let start_time = Instant::now();
+        let mut last_backup_time = start_time;
         let mut last_backup_meta = None;
         let mut idx = 0;
         while start_time.saturating_elapsed() < timeout {
             idx += 1;
             let backup_name = format!("backup_{}", idx);
-            let backup_ts = client.get_ts().into_inner();
-            let backup_meta = match backup::backup_cluster_with_ts(
-                backup_config.clone(),
-                last_backup_meta.is_some(),
-                backup_name.clone(),
-                pd_client.as_ref(),
-                backup_ts,
-                last_backup_meta.take(),
-            ) {
-                Ok(meta) => meta,
-                Err(err) if is_backup_error_retryable(&err) => {
-                    warn!("backup failed, retry full backup: {}", err);
-                    last_backup_meta = None;
-                    continue;
-                }
-                Err(err) => {
-                    panic!("backup failed: {}", err);
-                }
+            let backup_meta = {
+                let _guard = keyspace_manager.lock_for_backup();
+
+                let backup_ts = client.get_ts().into_inner();
+                let backup_meta = match backup::backup_cluster_with_ts(
+                    backup_config.clone(),
+                    last_backup_meta.is_some(),
+                    backup_name.clone(),
+                    pd_client.as_ref(),
+                    backup_ts,
+                    last_backup_meta.take(),
+                ) {
+                    Ok(meta) => meta,
+                    Err(err) if is_backup_error_retryable(&err) => {
+                        warn!("backup failed, retry full backup: {}", err);
+                        last_backup_meta = None;
+                        continue;
+                    }
+                    Err(err) => {
+                        panic!("backup failed: {}", err);
+                    }
+                };
+
+                keyspace_manager.ref_stores().backup(backup_name.clone());
+                backup_meta
             };
             info!("backup done: {}: {:?}", backup_name, backup_meta);
-
-            backups.lock().unwrap().push(backup_name);
             BACKUP_COUNTER.fetch_add(1, Ordering::SeqCst);
 
             last_backup_meta = Some(backup_meta);
-            sleep(Duration::from_secs(3));
+
+            let backup_elapsed = last_backup_time.saturating_elapsed();
+            sleep(interval.saturating_sub(backup_elapsed));
+            last_backup_time = Instant::now();
         }
         info!("incremental backup thread exit");
     })
@@ -314,7 +331,7 @@ fn is_backup_error_retryable(err: &Error) -> bool {
     matches!(err, Error::TopoChanged(_) | Error::HttpError(_))
 }
 
-fn check_br() {
+pub(crate) fn check_br() {
     let total_backup_count = BACKUP_COUNTER.load(Ordering::SeqCst);
     let total_restore_count = RESTORE_COUNTER.load(Ordering::SeqCst);
 
@@ -328,4 +345,112 @@ fn check_br() {
         "restore count too small: {}",
         total_restore_count
     );
+}
+
+pub(crate) fn spawn_restore_keyspace(
+    pd_client: Arc<dyn PdClient>,
+    mut client: ClusterKeyspaceClient,
+    dfs_config: DFSConfig,
+    keyspace_manager: KeyspaceManager,
+    timeout: Duration,
+) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut rng = rand::thread_rng();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .thread_name("restore-keyspace")
+            .build()
+            .unwrap();
+
+        let start_time = Instant::now();
+        sleep(Duration::from_secs(3));
+        while start_time.saturating_elapsed() < timeout {
+            let backup_name = match keyspace_manager.ref_stores().get_random_backup(&mut rng) {
+                Some(name) => name,
+                None => {
+                    sleep(Duration::from_millis(500));
+                    continue;
+                }
+            };
+
+            // Restore pick a random keyspace uniformly, to generate the scenario that some
+            // big keyspaces are never restored.
+            let keyspace = keyspace_manager.get_uniform_random_keyspace(&mut rng);
+            // TODO: test data branching.
+            let target_keyspace = keyspace;
+
+            // TODO: test without blocking write workloads.
+            {
+                let lock = keyspace_manager.get_keyspace_lock(keyspace);
+                let _guard = lock.lock_for_restore_with_verify();
+
+                client
+                    .verify_keyspace_with_ref_store(target_keyspace)
+                    .unwrap_or_else(|err| {
+                        panic!(
+                            "{}->{} verify_keyspace_with_ref_store (before restore): {:?}",
+                            keyspace, target_keyspace, err
+                        )
+                    });
+
+                match do_restore_keyspace(
+                    pd_client.clone(),
+                    &runtime,
+                    dfs_config.clone(),
+                    keyspace,
+                    target_keyspace,
+                    &backup_name,
+                ) {
+                    Ok(()) => {}
+                    Err(Error::BackupEmptyForKeyspace(_)) => {
+                        // Empty backup will happen on newly created keyspace. Retry.
+                        warn!("{}->{} backup is empty, retry", keyspace, target_keyspace);
+                        continue;
+                    }
+                    Err(err) => panic!(
+                        "{}->{} restore failed: {:?}",
+                        keyspace, target_keyspace, err
+                    ),
+                }
+                keyspace_manager.ref_stores().restore_keyspace(
+                    keyspace,
+                    &backup_name,
+                    target_keyspace,
+                );
+
+                // To find data corruption early, and generate read workload as well.
+                // The retry should not be necessary.
+                // TODO: Remove the retry after verification issue is addressed.
+                let (verify_res, _) = try_wait_result(
+                    || {
+                        let verify_res = client.verify_keyspace_with_ref_store(target_keyspace);
+                        if verify_res.is_err() {
+                            warn!(
+                                "{}->{} verify_keyspace_with_ref_store failed (after restore): {:?}",
+                                keyspace, target_keyspace, verify_res
+                            );
+                        }
+                        (verify_res.map(|_| ()), ())
+                    },
+                    10,
+                );
+                assert!(
+                    verify_res.is_ok(),
+                    "{}->{} verify_keyspace_with_ref_store (after restore): {:?}",
+                    keyspace,
+                    target_keyspace,
+                    verify_res
+                );
+            }
+            info!(
+                "restore keyspace {}->{} from backup {} success",
+                keyspace, target_keyspace, backup_name,
+            );
+            RESTORE_COUNTER.fetch_add(1, Ordering::Relaxed);
+
+            sleep(Duration::from_secs(rng.gen_range(0..10)));
+        }
+        info!("restore keyspace thread exit");
+    })
 }

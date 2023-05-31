@@ -61,18 +61,26 @@ impl Scheduler {
         peer.store_id = store_id;
         peer.id = peer_id;
         peer.role = PeerRole::Learner;
-        self.pd.add_peer(region_id, peer);
         must_wait(
             || {
-                let region = block_on(self.pd.get_region_by_id(region_id))
-                    .unwrap()
-                    .unwrap();
-                region.get_peers().iter().any(|peer| peer.id == peer_id)
+                self.pd.add_peer(region_id, peer.clone());
+                try_wait(
+                    || {
+                        let region = block_on(self.pd.get_region_by_id(region_id))
+                            .unwrap()
+                            .unwrap();
+                        region.get_peers().iter().any(|peer| peer.id == peer_id)
+                    },
+                    1,
+                )
             },
             10,
             format!(
-                "failed to add learner, region id {}, store id {}, peer id {}",
-                region_id, store_id, peer_id
+                "failed to add learner, region id {}, store id {}, peer id {}, region {:?}",
+                region_id,
+                store_id,
+                peer_id,
+                block_on(self.pd.get_region_by_id(region_id)).unwrap()
             )
             .as_str(),
         );
@@ -80,21 +88,29 @@ impl Scheduler {
         peer.store_id = store_id;
         peer.id = peer_id;
         peer.role = PeerRole::Voter;
-        self.pd.add_peer(region_id, peer);
         must_wait(
             || {
-                let region = block_on(self.pd.get_region_by_id(region_id))
-                    .unwrap()
-                    .unwrap();
-                region
-                    .get_peers()
-                    .iter()
-                    .any(|peer| peer.id == peer_id && peer.role == PeerRole::Voter)
+                self.pd.add_peer(region_id, peer.clone());
+                try_wait(
+                    || {
+                        let region = block_on(self.pd.get_region_by_id(region_id))
+                            .unwrap()
+                            .unwrap();
+                        region
+                            .get_peers()
+                            .iter()
+                            .any(|peer| peer.id == peer_id && peer.role == PeerRole::Voter)
+                    },
+                    1,
+                )
             },
             10,
             format!(
-                "failed to promote learner, region id {}, store id {}, peer id {}",
-                region_id, store_id, peer_id
+                "failed to promote learner, region id {}, store id {}, peer id {}, region {:?}",
+                region_id,
+                store_id,
+                peer_id,
+                block_on(self.pd.get_region_by_id(region_id)).unwrap()
             )
             .as_str(),
         );

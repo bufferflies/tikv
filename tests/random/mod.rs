@@ -1,5 +1,6 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
+mod test_all;
 mod test_native_br;
 
 use std::{
@@ -11,14 +12,19 @@ use std::{
     time::Duration,
 };
 
+use api_version::ApiV2;
 use futures::executor::block_on;
 use kvengine::dfs::DFSConfig;
 use kvproto::pdpb::CheckPolicy;
 use pd_client::PdClient;
-use rand::{Rng, RngCore};
+use rand::{prelude::SliceRandom, Rng, RngCore};
 use tempfile::TempDir;
 use test_cloud_server::{
-    client::ClusterClient, oss::ObjectStorageService, scheduler::Scheduler, try_wait, ServerCluster,
+    client::ClusterClient,
+    keyspace::{ClusterKeyspaceClient, KeyspaceManager},
+    oss::ObjectStorageService,
+    scheduler::Scheduler,
+    try_wait, try_wait_result, ServerCluster,
 };
 use test_pd_client::TestPdClient;
 use tikv::config::TikvConfig;
@@ -37,10 +43,13 @@ lazy_static::lazy_static! {
     pub static ref NODE_RESTART_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref BACKUP_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref RESTORE_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    pub static ref KEYSPACE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 }
 
-pub const TIMEOUT: Duration = Duration::from_secs(60);
+pub const TIMEOUT: Duration = Duration::from_secs(90);
 pub const CONCURRENCY: usize = 4;
+
+const DEFAULT_INNER_KEY_OFFSET: usize = 4;
 
 static NODE_ALLOCATOR: AtomicU16 = AtomicU16::new(1);
 
@@ -225,7 +234,7 @@ pub(crate) fn spawn_gc_worker(pd_client: Arc<TestPdClient>, timeout: Duration) -
     })
 }
 
-pub(crate) fn spawn_keyspace_write(
+pub(crate) fn spawn_keyspace_write_deprecated(
     idx: usize,
     mut client: ClusterClient,
     keyspace_count: usize,
@@ -258,6 +267,133 @@ pub(crate) fn spawn_keyspace_write(
     })
 }
 
+pub(crate) fn spawn_keyspace_write(
+    idx: usize,
+    mut client: ClusterKeyspaceClient,
+    timeout: Duration,
+) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        // Make sure each write thread don't conflict with others.
+        let begin = idx * 2000;
+        let end = begin + 2000 - 10;
+        let start_time = Instant::now();
+        let mut rng = rand::thread_rng();
+        while start_time.saturating_elapsed() < timeout {
+            let keyspace = client.keyspace_manager().get_zipf_random_keyspace(&mut rng);
+            {
+                let lock = client.keyspace_manager().get_keyspace_lock(keyspace);
+                let guard = lock.try_lock_for_write();
+                if guard.is_none() {
+                    continue;
+                }
+                let _guard = guard.unwrap();
+                info!("[{}] thread write on keyspace {}", idx, keyspace);
+
+                let i = rng.gen_range(begin..end);
+                if rng.gen_ratio(2, 3) {
+                    client
+                        .keyspace_put_kv(keyspace, i..(i + 10), i_to_key, i_to_val)
+                        .unwrap();
+                } else {
+                    client
+                        .keyspace_del_kv(keyspace, i..(i + 10), i_to_key)
+                        .unwrap();
+                };
+            }
+            WRITE_COUNTER.fetch_add(10, Ordering::SeqCst);
+        }
+        info!("keyspace write thread {} exit", idx);
+    })
+}
+
+pub fn spawn_create_keyspace(
+    pd_client: Arc<TestPdClient>,
+    keyspace_manager: KeyspaceManager,
+    timeout: Duration,
+) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut rng = rand::thread_rng();
+        let start_time = Instant::now();
+        while start_time.saturating_elapsed() < timeout {
+            sleep(Duration::from_secs(rng.gen_range(0..5)));
+
+            let max_keyspace = keyspace_manager.max_keyspace_id().unwrap();
+            let new_keyspace = rng.gen_range(max_keyspace + 1..=max_keyspace + 3);
+
+            must_split_region_for_keyspace(&pd_client, new_keyspace);
+            // Don't shuffle keyspaces. Otherwise we will not have a few big keyspaces.
+            // Note that the new keyspace will has less chance to be written.
+            keyspace_manager.create_keyspaces(&[new_keyspace], DEFAULT_INNER_KEY_OFFSET, None);
+
+            KEYSPACE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        }
+        info!("create keyspace thread exit");
+    })
+}
+
+fn must_split_region_for_keyspace(pd_client: &TestPdClient, keyspace_id: u32) {
+    let keys = vec![
+        ApiV2::get_txn_keyspace_prefix(keyspace_id),
+        ApiV2::get_txn_keyspace_prefix(keyspace_id + 1),
+    ];
+    let mut split_keys = keys
+        .into_iter()
+        .map(|k| Key::from_raw(&k).into_encoded())
+        .collect::<Vec<_>>();
+    let region_key = split_keys[0].clone();
+
+    let ok = try_wait(
+        || {
+            let region = pd_client.get_region(&split_keys[0]).unwrap();
+            if region.get_start_key() == split_keys[0] {
+                split_keys.remove(0);
+            }
+            if split_keys
+                .last()
+                .map_or(false, |last| region.get_end_key() == last.as_slice())
+            {
+                split_keys.pop();
+            }
+            if split_keys.is_empty() {
+                return true;
+            }
+            pd_client.split_region(region, CheckPolicy::Usekey, split_keys.clone());
+            false
+        },
+        10,
+    );
+    let new_region = pd_client.get_region(&region_key).unwrap();
+    assert!(ok, "split region failed: {:?}", new_region);
+    info!(
+        "split region for keyspace {}: {:?}",
+        keyspace_id, new_region
+    );
+}
+
+pub(crate) fn random_node_restart(cluster: &mut ServerCluster) {
+    let mut rng = rand::thread_rng();
+    // Note: start of random range should not be too small.
+    // Otherwise `check_leader` would not be able to ensure that the leaders exist.
+    sleep(Duration::from_secs(rng.gen_range(3..10)));
+
+    // Wait for leader election before another restart.
+    try_wait_result(
+        || {
+            let stats = cluster.get_data_stats();
+            (stats.check_leader(), stats)
+        },
+        10,
+    )
+    .0
+    .expect("check leader failed");
+
+    let nodes = cluster.get_nodes();
+    let node_id = *nodes.choose(&mut rng).unwrap();
+    let sleep_sec = rng.gen_range(0..3);
+    cluster.restart_node(node_id, Duration::from_secs(sleep_sec));
+    NODE_RESTART_COUNTER.fetch_add(1, Ordering::Relaxed);
+}
+
 pub(crate) fn i_to_key(i: usize) -> Vec<u8> {
     format!("key{:08}", i).into_bytes()
 }
@@ -269,15 +405,9 @@ pub(crate) fn i_to_val(i: usize) -> Vec<u8> {
     buf
 }
 
-pub(crate) fn get_keyspace_prefix(keyspace_id: u32) -> Vec<u8> {
-    let mut prefix = keyspace_id.to_be_bytes();
-    prefix[0] = b'x';
-    prefix.to_vec()
-}
-
 pub(crate) fn generate_keyspace_key(keyspace_id: u32) -> impl Fn(usize) -> Vec<u8> {
     move |i: usize| -> Vec<u8> {
-        let mut key = get_keyspace_prefix(keyspace_id);
+        let mut key = ApiV2::get_txn_keyspace_prefix(keyspace_id);
         key.extend(i_to_key(i));
         key
     }

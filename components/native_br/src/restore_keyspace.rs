@@ -414,7 +414,8 @@ pub struct BackupCluster {
     pd_client: Arc<dyn PdClient>,
     dfs: Arc<S3Fs>,
     keyspace_id: u32,
-    keyspace_prefix: Vec<u8>,
+    keyspace_start: Vec<u8>,
+    keyspace_end: Vec<u8>,
     backup_ts: u64,
 
     // store_id -> rf_engine.
@@ -455,13 +456,14 @@ impl BackupCluster {
         dfs: Arc<S3Fs>,
         keyspace_id: u32,
     ) -> Result<BackupCluster> {
-        let (keyspace_prefix, _) = ApiV2::get_txn_keyspace_range(keyspace_id);
+        let (keyspace_start, keyspace_end) = ApiV2::get_txn_keyspace_range(keyspace_id);
         let mut cluster = Self {
             path,
             pd_client,
             dfs,
             keyspace_id,
-            keyspace_prefix,
+            keyspace_start,
+            keyspace_end,
             backup_ts: cluster_meta.backup_ts,
             shards: Default::default(),
             raw_metas: Default::default(),
@@ -637,7 +639,12 @@ impl BackupCluster {
         TikvServer::init_config(config).get_current()
     }
 
-    fn collect_prefix_shards(store_id: u64, rf: &RfEngine, prefix: &[u8]) -> Vec<BackupShard> {
+    fn collect_keyspace_shards(
+        store_id: u64,
+        rf: &RfEngine,
+        keyspace_start: &[u8],
+        keyspace_end: &[u8],
+    ) -> Vec<BackupShard> {
         let region_peers = rf.get_region_peer_map();
         let mut prefix_shards = vec![];
         let mut first_inner_key_off = None;
@@ -658,7 +665,7 @@ impl BackupCluster {
             assert_eq!(region_id, meta.shard_id);
 
             let snap = meta.get_snapshot();
-            if snap.get_outer_start().starts_with(prefix) {
+            if keyspace_start <= snap.get_outer_start() && snap.get_outer_end() <= keyspace_end {
                 if let Some(x) = first_inner_key_off {
                     assert_eq!(x, snap.inner_key_off)
                 } else {
@@ -699,9 +706,21 @@ impl BackupCluster {
             HashMap::from_iter(self.raft_engines.iter().map(|(store_id, rf_engine)| {
                 (
                     *store_id,
-                    Self::collect_prefix_shards(*store_id, rf_engine, &self.keyspace_prefix),
+                    Self::collect_keyspace_shards(
+                        *store_id,
+                        rf_engine,
+                        &self.keyspace_start,
+                        &self.keyspace_end,
+                    ),
                 )
             }));
+
+        // Check whether backup is empty (for this keyspace).
+        // Empty backup should be invalid or before the creation of this
+        // keyspace, so the restore is not allowed.
+        if all_shards.iter().all(|(_, shards)| shards.is_empty()) {
+            return Err(Error::BackupEmptyForKeyspace(self.keyspace_id));
+        }
 
         let (mut leader_shards, mut sorted_shards_id) = Self::get_leader_shards(all_shards)?;
         info!(
@@ -841,20 +860,17 @@ impl BackupCluster {
     }
 
     fn verify_shards(&self) -> Result<()> {
-        let (start, end) = ApiV2::get_txn_keyspace_range(self.keyspace_id);
-        if self.sorted_shards.is_empty() {
-            return Err(box_err!("no shard"));
-        }
+        debug_assert!(!self.sorted_shards.is_empty());
 
         let first_shard = self.get_sorted_shard(0);
         let last_shard = self.get_sorted_shard(self.sorted_shards.len() - 1);
-        if first_shard.start() != start {
+        if first_shard.start() != self.keyspace_start {
             return Err(box_err!(
                 "start key of first region not match: {:?}",
                 first_shard
             ));
         }
-        if last_shard.end() != end {
+        if last_shard.end() != self.keyspace_end {
             return Err(box_err!(
                 "end key of last region not match: {:?}",
                 last_shard
@@ -1224,9 +1240,10 @@ impl BackupCluster {
         cluster_meta: &ClusterBackupMeta,
         keyspace_id: u32,
     ) -> Result<()> {
-        let (keyspace_prefix, _) = ApiV2::get_txn_keyspace_range(keyspace_id);
+        let (keyspace_start, keyspace_end) = ApiV2::get_txn_keyspace_range(keyspace_id);
         self.keyspace_id = keyspace_id;
-        self.keyspace_prefix = keyspace_prefix;
+        self.keyspace_start = keyspace_start;
+        self.keyspace_end = keyspace_end;
 
         let kv_engine = self.kv_engine.take().unwrap();
         kv_engine.close();

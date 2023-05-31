@@ -12,9 +12,11 @@ dashmap = "4.0"
 engine_traits = { path = "../engine_traits", default-features = false }
 futures = "0.3"
 grpcio = { version = "0.10", default-features = false, features = ["openssl-vendored", "protobuf-codec"] }
+hex = "0.4"
 hyper = { version = "0.14", features = ["full"] }
 kvengine = { path = "../kvengine" }
 kvproto = { git = "https://github.com/pingcap/kvproto.git" }
+log_wrappers = { path = "../log_wrappers" }
 pd_client = { path = "../pd_client", default-features = false }
 quick-xml = { version = "0.23.1", features = ["serialize"] }
 rand = "0.8"
@@ -33,3 +35,4 @@ tikv_util = { path = "../tikv_util" }
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
 url = "2"
+zipf = "7.0"

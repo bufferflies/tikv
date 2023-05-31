@@ -40,6 +40,8 @@ pub enum Error {
     RetryLimitExceeded(Box<Error>),
     #[error("Keyspace {0} inner_key_off not enabled")]
     KeyspaceInnerKeyOffNotEnabled(u32 /* region id */),
+    #[error("Backup for keyspace {0} is empty")]
+    BackupEmptyForKeyspace(u32 /* keyspace id */),
 }
 
 impl From<dfs::Error> for Error {

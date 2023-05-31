@@ -26,24 +26,30 @@ use test_raftstore::find_peer;
 use tikv::{config::TikvConfig, import::SstImporter};
 use tikv_util::{
     config::{ReadableDuration, ReadableSize},
+    info,
     thread_group::GroupProperties,
     time::Instant,
 };
 
-use crate::{client::ClusterClient, scheduler::Scheduler};
+use crate::{
+    client::{ClusterClient, RefStore},
+    keyspace::{ClusterKeyspaceClient, KeyspaceManager},
+    scheduler::Scheduler,
+};
 
 #[allow(dead_code)]
 pub struct ServerCluster {
-    // node_id -> server.
-    servers: HashMap<u16, TikvServer>,
+    servers: HashMap<u16 /* node_id */, TikvServer>,
     tmp_dir: TempDir,
     env: Arc<Environment>,
     pd_client: Arc<TestPdClient>,
     security_mgr: Arc<SecurityManager>,
     dfs: Option<Arc<dyn Dfs>>,
     channels: HashMap<u64, Channel>,
-    ref_store: Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>>,
+    ref_store: Arc<Mutex<RefStore>>,
     schedule_lock: Arc<DashMap<u64, Arc<Mutex<()>>>>,
+    confs: HashMap<u16 /* node_id */, TikvConfig>,
+    keyspace_manager: KeyspaceManager,
 }
 
 impl ServerCluster {
@@ -64,6 +70,8 @@ impl ServerCluster {
             channels: HashMap::new(),
             ref_store: Arc::new(Mutex::new(HashMap::new())),
             schedule_lock: Arc::new(DashMap::new()),
+            confs: Default::default(),
+            keyspace_manager: Default::default(),
         };
         for node_id in nodes {
             cluster.start_node(node_id, &update_conf);
@@ -93,14 +101,20 @@ impl ServerCluster {
         }
     }
 
+    /// `update_conf` is based on the existed config.
     pub fn start_node<F>(&mut self, node_id: u16, update_conf: F)
     where
         F: Fn(u16, &mut TikvConfig),
     {
-        let mut config = new_test_config(self.tmp_dir.path(), node_id);
+        let mut config = if let Some(config) = self.confs.remove(&node_id) {
+            config
+        } else {
+            new_test_config(self.tmp_dir.path(), node_id)
+        };
         update_conf(node_id, &mut config);
-        std::fs::create_dir_all(&config.storage.data_dir).unwrap();
+        self.confs.insert(node_id, config.clone());
 
+        std::fs::create_dir_all(&config.storage.data_dir).unwrap();
         let dfs = self.dfs.get_or_insert_with(|| Self::prepare_dfs(&config));
         let mut server = TikvServer::setup(
             config,
@@ -145,6 +159,16 @@ impl ServerCluster {
         if let Some(node) = self.servers.remove(&node_id) {
             node.stop();
         }
+    }
+
+    pub fn restart_node(&mut self, node_id: u16, stop_dur: Duration) {
+        let store_id = self.get_store_id(node_id);
+        self.stop_node(node_id);
+        info!("node {} (store {}) stopped", node_id, store_id);
+
+        std::thread::sleep(stop_dur);
+        self.start_node(node_id, |_, _| {});
+        info!("node {} (store {}) restarted", node_id, store_id);
     }
 
     pub fn get_kvengine(&self, node_id: u16) -> kvengine::Engine {
@@ -275,6 +299,14 @@ impl ServerCluster {
         }
     }
 
+    pub fn new_keyspace_client(&self) -> ClusterKeyspaceClient {
+        ClusterKeyspaceClient::new(self.new_client(), self.keyspace_manager.clone())
+    }
+
+    pub fn keyspace_manager(&self) -> &KeyspaceManager {
+        &self.keyspace_manager
+    }
+
     pub fn new_scheduler(&self) -> Scheduler {
         Scheduler {
             pd: self.pd_client.clone(),
@@ -374,6 +406,29 @@ where
         sleep(Duration::from_millis(100))
     }
     false
+}
+
+/// A extended version of `try_wait` which can save and return an extra value
+/// from `f`.
+pub fn try_wait_result<F, T, E>(mut f: F, seconds: usize) -> (std::result::Result<(), E>, T)
+where
+    F: FnMut() -> (std::result::Result<(), E>, T),
+{
+    let begin = Instant::now_coarse();
+    let timeout = Duration::from_secs(seconds as u64);
+    let mut last_err = None;
+    let mut last_val = None;
+    while begin.saturating_elapsed() < timeout {
+        match f() {
+            (Ok(()), val) => return (Ok(()), val),
+            (Err(err), val) => {
+                last_err = Some(err);
+                last_val = Some(val);
+                sleep(Duration::from_millis(100));
+            }
+        }
+    }
+    (Err(last_err.unwrap()), last_val.unwrap())
 }
 
 #[derive(Default, Debug)]
