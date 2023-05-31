@@ -41,6 +41,7 @@ For more info, check https://github.com/tikv/tikv/blob/master/CONTRIBUTING.md#fo
 ### Check List <!--REMOVE the items that are not applicable-->
 
 <!-- Also check the box next to each item, even if it's not necessary to do so -->
+<!-- Sync feature docs: see https://github.com/tidbcloud/cloud-storage-engine/tree/cloud-engine/doc/features -->
 
 - [ ] Sync feature docs
 - [ ] Tests <!-- At least one of them must be included. -->

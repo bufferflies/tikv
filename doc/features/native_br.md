@@ -34,11 +34,13 @@ The client-side code required for restoring a keyspace resides in [`native_br::r
 
 #### On Apply
 
-1. The changeset is applied to `ShardMeta` through `ShardMeta::apply_restore_shard`. The apply of `custom_log` is then paused, and a thread is spawned to prepare the changeset.
+1. The changeset is applied to `ShardMeta` through `ShardMeta::apply_restore_shard`. Next, `Peer` sends an `ApplyMsg::PrepareChangeSet` message to `Applier`.
 
-2. Tables are loaded to prepare the changeset for apply in `EngineCore::prepare_change_set`.
+2. `Applier` clears relevant caches including the lock cache, and pauses the apply of `custom_log` in `Applier::handle_prepare_restore_shard` when it receives the `ApplyMsg::PrepareChangeSet`. Then, a thread is spawned to prepare the changeset.
 
-3. The changeset is then applied to `kvengine` through `EngineCore::apply_restore_shard`.
+3. Tables are loaded to prepare the changeset for apply in `EngineCore::prepare_change_set`.
+
+4. The changeset is then applied to `kvengine` through `EngineCore::apply_restore_shard`.
 
 #### Post-Apply
 
