@@ -494,7 +494,7 @@ impl ClusterDataStats {
                     let prev_key = &buckets.meta.keys[i - 1];
                     let key = &buckets.meta.keys[i];
                     if !key.is_empty() {
-                        assert!(prev_key < key);
+                        assert!(prev_key < key, "region {} buckets {:?}", region_id, buckets);
                     }
                 }
                 let expected_bucket_count = (shard_size + bucket_size - 1) / bucket_size;

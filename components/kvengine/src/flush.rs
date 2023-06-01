@@ -281,14 +281,6 @@ impl Engine {
                         let (offset, len) = blob_builder.add(it.key(), &v);
                         external_link.len = len;
                         external_link.offset = offset;
-                        // info!(
-                        //     "blob table {} add key {:?} offset {} len {}, value {:?}",
-                        //     external_link.fid,
-                        //     it.key(),
-                        //     offset,
-                        //     len,
-                        //     v.get_value(),
-                        // );
                         l0_builder.add(cf, it.key(), &v, Some(external_link));
                     } else {
                         l0_builder.add(cf, it.key(), &v, None);
