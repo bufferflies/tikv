@@ -28,8 +28,9 @@ use kvengine::{
 use kvproto::metapb;
 use pd_client::PdClient;
 use protobuf::Message;
+use rfstore::store::{raw_end_key, raw_start_key};
 use tikv_util::{
-    codec::bytes::encode_bytes,
+    codec::bytes::{decode_bytes, encode_bytes},
     error, info,
     mpsc::{Receiver, Sender},
     time::Instant,
@@ -255,8 +256,6 @@ pub struct SstMeta {
     pub biggest: Vec<u8>,
     pub size: usize,
     pub keys: usize,
-    pub encoded_smallest: Vec<u8>,
-    pub encoded_biggest: Vec<u8>,
 }
 
 pub(crate) struct LoadTaskWorker {
@@ -693,8 +692,6 @@ impl LoadTaskWorker {
                 biggest: builder.get_biggest().to_vec(),
                 size: data.len(),
                 keys: entries,
-                encoded_smallest: encode_bytes(builder.get_smallest()),
-                encoded_biggest: encode_bytes(builder.get_biggest()),
             };
             info!("{} finish build sst file {:?}", start_ts, sst_meta);
             let opts = Options::new(0, 0);
@@ -728,7 +725,10 @@ impl LoadTaskWorker {
     }
 
     fn split_regions(&self, split_keys: &[Vec<u8>]) -> Result<Vec<u64>> {
-        info!("{} start split", self.task_ctx.start_ts);
+        info!(
+            "{} start split, keys {:?}",
+            self.task_ctx.start_ts, split_keys
+        );
         let mut retry = 0;
         let mut split_keys = split_keys.to_owned();
         let mut new_regions_id = Vec::with_capacity(split_keys.len());
@@ -785,17 +785,27 @@ impl LoadTaskWorker {
         }
         info!("{} start ingest", self.task_ctx.start_ts);
         sst_metas.sort_by(|a, b| a.id.cmp(&b.id));
-        let mut coarse_split_keys = gen_split_keys(&sst_metas, COARSE_SPLIT_SIZE);
-        // split at last key so the last region will not be split by other concurrent
-        // load_data and get epoch not match error.
-        let mut last_key = sst_metas.last().unwrap().biggest.clone();
-        last_key.push(0);
-        coarse_split_keys.push(encode_bytes(&last_key));
+        let key_prefix = self.task_ctx.key_prefix.to_vec();
+        let inner_key_off = self.task_ctx.inner_key_off.unwrap();
+        let coarse_split_keys = gen_split_keys(&key_prefix, &sst_metas, COARSE_SPLIT_SIZE, true);
         let new_regions_id = self.split_regions(&coarse_split_keys)?;
         for i in 0..coarse_split_keys.len() - 1 {
-            let start_key = coarse_split_keys[i].clone();
-            let end_key = coarse_split_keys[i + 1].clone();
-            let group_ssts = get_ssts_in_range(&sst_metas, &start_key, &end_key);
+            let mut encoded_start_key = coarse_split_keys[i].as_slice();
+            let raw_start_key = decode_bytes(&mut encoded_start_key, false).unwrap();
+            let mut encoded_end_key = coarse_split_keys[i + 1].as_slice();
+            let raw_end_key = decode_bytes(&mut encoded_end_key, false).unwrap();
+            let inner_start_key = &raw_start_key[inner_key_off..];
+            let inner_end_key = &raw_end_key[inner_key_off..];
+            let group_ssts = get_ssts_in_range(&sst_metas, inner_start_key, inner_end_key);
+            assert!(
+                !group_ssts.is_empty(),
+                "raw start {:?}, raw end {:?}, inner start {:?}, inner end {:?}, ssts {:?}",
+                raw_start_key,
+                raw_end_key,
+                inner_start_key,
+                inner_end_key,
+                sst_metas
+            );
             self.ingest_group(group_ssts)?;
         }
         let result = self.ctx.pd.scatter_regions_by_id(new_regions_id);
@@ -811,21 +821,28 @@ impl LoadTaskWorker {
     }
 
     fn ingest_group(&self, sst_metas: Vec<SstMeta>) -> Result<()> {
-        let split_keys = gen_split_keys(&sst_metas, REGION_SIZE);
-        self.split_regions(&split_keys)?;
-        let first_key = sst_metas.first().unwrap().encoded_smallest.clone();
-        let mut last_key = sst_metas.last().unwrap().encoded_biggest.clone();
-        last_key.push(0);
-        let regions =
-            self.ctx
-                .runtime
-                .block_on(self.ctx.pd.scan_regions(first_key, last_key, usize::MAX))?;
+        let key_prefix = self.task_ctx.key_prefix.to_vec();
+        let split_keys = gen_split_keys(&key_prefix, &sst_metas, REGION_SIZE, false);
+        if !split_keys.is_empty() {
+            self.split_regions(&split_keys)?;
+        }
+        let outer_first_key =
+            new_region_key(&key_prefix, sst_metas.first().unwrap().smallest.as_slice());
+        let mut outer_last_key =
+            new_region_key(&key_prefix, sst_metas.last().unwrap().biggest.as_slice());
+        outer_last_key.push(0);
+        let regions = self.ctx.runtime.block_on(self.ctx.pd.scan_regions(
+            outer_first_key,
+            outer_last_key,
+            usize::MAX,
+        ))?;
         info!("scanned regions {:?}", regions);
         let (tx, rx) = tikv_util::mpsc::unbounded();
         let mut msg_cnt = 0;
         for mut pd_region in regions {
             let region = pd_region.get_region();
-            let cs = build_ingest_files(region, &sst_metas, self.task_ctx.start_ts);
+            let cs =
+                build_ingest_files(key_prefix.len(), region, &sst_metas, self.task_ctx.start_ts);
             if cs.get_ingest_files().get_table_creates().is_empty() {
                 continue;
             }
@@ -997,10 +1014,15 @@ async fn get_leader_store(pd: &Arc<dyn PdClient>, region_id: u64) -> Result<u64>
 }
 
 fn build_ingest_files(
+    inner_key_off: usize,
     region: &metapb::Region,
     sst_metas: &[SstMeta],
     start_ts: u64,
 ) -> kvenginepb::ChangeSet {
+    let raw_start_key = raw_start_key(region);
+    let inner_start_key = &raw_start_key[inner_key_off..];
+    let raw_end_key = raw_end_key(region);
+    let inner_end_key = &raw_end_key[inner_key_off..];
     let mut cs = kvenginepb::ChangeSet::default();
     cs.set_shard_id(region.get_id());
     cs.set_shard_ver(region.get_region_epoch().get_version());
@@ -1012,10 +1034,10 @@ fn build_ingest_files(
         .push(start_ts.to_le_bytes().to_vec());
     let table_creates = ingest_files.mut_table_creates();
     for sst_meta in sst_metas {
-        if sst_meta.encoded_biggest < region.start_key {
+        if sst_meta.biggest.as_slice() < inner_start_key {
             continue;
         }
-        if !region.end_key.is_empty() && sst_meta.encoded_smallest >= region.end_key {
+        if !inner_end_key.is_empty() && sst_meta.smallest.as_slice() >= inner_end_key {
             break;
         }
         let mut table_create = kvenginepb::TableCreate::new();
@@ -1029,27 +1051,51 @@ fn build_ingest_files(
     cs
 }
 
-fn gen_split_keys(ssts: &[SstMeta], split_size: usize) -> Vec<Vec<u8>> {
-    let mut keys = vec![ssts.first().unwrap().encoded_smallest.clone()];
+fn gen_split_keys(
+    key_prefix: &[u8],
+    ssts: &[SstMeta],
+    split_size: usize,
+    include_bound: bool,
+) -> Vec<Vec<u8>> {
+    let mut keys = vec![];
+    if include_bound {
+        keys.push(new_region_key(
+            key_prefix,
+            ssts.first().unwrap().smallest.as_slice(),
+        ));
+    }
     let mut size = 0;
     for sst in ssts {
         if size > split_size {
-            keys.push(sst.encoded_smallest.clone());
+            keys.push(new_region_key(key_prefix, sst.smallest.as_slice()));
             size = 0;
         }
         size += sst.size;
     }
+    if include_bound {
+        // split at last key so the last region will not be split by other concurrent
+        // load_data and get epoch not match error.
+        let mut last_key = ssts.last().unwrap().biggest.to_vec();
+        last_key.push(0);
+        keys.push(new_region_key(key_prefix, last_key.as_slice()));
+    }
     keys
+}
+
+fn new_region_key(key_prefix: &[u8], raw_key: &[u8]) -> Vec<u8> {
+    let mut key = key_prefix.to_vec();
+    key.extend_from_slice(raw_key);
+    encode_bytes(&key)
 }
 
 fn get_ssts_in_range(ssts: &[SstMeta], start: &[u8], end: &[u8]) -> Vec<SstMeta> {
     let position = ssts
-        .binary_search_by(|sst| sst.encoded_smallest.as_slice().cmp(start))
+        .binary_search_by(|sst| sst.smallest.as_slice().cmp(start))
         .unwrap();
     let mut matched = vec![];
     for i in position..ssts.len() {
         let sst = &ssts[i];
-        if sst.encoded_smallest.as_slice() >= end {
+        if !end.is_empty() && sst.smallest.as_slice() >= end {
             break;
         }
         matched.push(sst.clone())

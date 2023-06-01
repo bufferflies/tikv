@@ -1313,12 +1313,7 @@ impl<'a> PeerMsgHandler<'a> {
         // Check overlap.
         if let Some(shard) = self.ctx.global.engines.kv.get_shard(cs.get_shard_id()) {
             let snap = shard.new_snap_access();
-            let mut it = snap.new_iterator(0, false, false, None, false);
-            let table_creates = cs.get_ingest_files().get_table_creates();
-            let smallest = table_creates.first().unwrap().smallest.as_slice();
-            let biggest = table_creates.last().unwrap().biggest.as_slice();
-            it.seek(smallest);
-            if it.valid() && it.key() <= biggest {
+            if snap.overlap_ingest_files(cs.get_ingest_files()) {
                 let mut resp = RaftCmdResponse::default();
                 let err = resp.mut_header().mut_error();
                 err.set_message(format!("region {} has overlap data", cs.get_shard_id()));

@@ -255,7 +255,7 @@ pub(crate) const EMPTY_KEY: &[u8] = &[];
 pub(crate) const RAW_INITIAL_END_KEY: &[u8] = &[255, 255, 255, 255, 255, 255, 255, 255];
 
 // Get the `start_key` of current region in raw form.
-pub(crate) fn raw_start_key(region: &metapb::Region) -> Vec<u8> {
+pub fn raw_start_key(region: &metapb::Region) -> Vec<u8> {
     // only initialized region's start_key can be encoded, otherwise there must be
     // bugs somewhere.
     if region.start_key.is_empty() {

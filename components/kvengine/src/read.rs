@@ -11,6 +11,7 @@ use std::{
 
 use bytes::{Buf, Bytes, BytesMut};
 use kvenginepb as pb;
+use kvenginepb::IngestFiles;
 use protobuf::Message;
 
 use crate::{
@@ -648,6 +649,16 @@ impl SnapAccessCore {
 
     pub fn has_unloaded_tables(&self) -> bool {
         !self.data.unloaded_tbls.is_empty()
+    }
+
+    // check if the ingest files overlaps with the existing data in the shard.
+    pub fn overlap_ingest_files(&self, ingest_files: &IngestFiles) -> bool {
+        let table_creates = ingest_files.get_table_creates();
+        let inner_smallest = table_creates.first().unwrap().get_smallest();
+        let inner_biggest = table_creates.last().unwrap().get_biggest();
+        let mut tbl_it = self.new_table_iterator(0, false, false);
+        tbl_it.seek(inner_smallest);
+        tbl_it.valid() && tbl_it.key() <= inner_biggest
     }
 }
 
