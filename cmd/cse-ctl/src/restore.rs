@@ -8,7 +8,7 @@ use native_br::{
     common::{create_pd_client, now},
     restore,
     restore::{restore_pd, restore_tikv, RestoreConfig},
-    restore_keyspace::restore_keyspace_with_cfg,
+    restore_keyspace::{restore_keyspace_with_cfg, RestoredKeyspace},
     step, step_error,
 };
 use pd_client::PdClient;
@@ -125,7 +125,7 @@ fn execute_restore_keyspace(args: RestoreKeyspaceArgs) {
         .as_deref()
         .unwrap_or(&args.keyspace_name);
     match execute_restore_keyspace_impl(&args) {
-        Ok(()) => {
+        Ok(_) => {
             step!(
                 "Restore keyspace {}->{} succeed",
                 args.keyspace_name,
@@ -143,7 +143,9 @@ fn execute_restore_keyspace(args: RestoreKeyspaceArgs) {
     }
 }
 
-fn execute_restore_keyspace_impl(args: &RestoreKeyspaceArgs) -> native_br::Result<()> {
+fn execute_restore_keyspace_impl(
+    args: &RestoreKeyspaceArgs,
+) -> native_br::Result<RestoredKeyspace> {
     let config: restore::RestoreConfig = get_restore_keyspace_config_from_args(args);
     let pd_client: Arc<dyn PdClient> = Arc::new(create_pd_client(&config.security, &config.pd));
     let dfs_config = config.dfs.clone();
@@ -174,6 +176,7 @@ fn execute_restore_keyspace_impl(args: &RestoreKeyspaceArgs) -> native_br::Resul
         Arc::new(s3fs),
         pd_client,
         &runtime,
+        None,
     )
 }
 

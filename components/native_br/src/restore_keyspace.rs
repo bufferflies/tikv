@@ -14,7 +14,7 @@ use std::{
 };
 
 use api_version::ApiV2;
-use cloud_server::TikvServer;
+use cloud_server::{RestoreShardResponse, TikvServer};
 use file_system::{IoRateLimitMode, IoRateLimiter};
 use http::{Request, Uri};
 use hyper::Body;
@@ -54,6 +54,26 @@ const ZSTD_COMPRESSION_LEVEL: &str = "5"; // The same as ZSTD_COMPRESSION_LEVEL_
 const REQUEST_RESTORE_SNAPSHOT_RETRY_LIMIT: usize = 10;
 const RESTORE_KEYSPACE_MAX_RETRY: usize = 20;
 
+#[derive(Clone, Debug, Default)]
+pub struct RestoredKeyspace {
+    pub keyspace_id: u32,
+    pub target_keyspace_id: u32,
+    pub ts: u64,
+    pub restore_bytes: u64,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct RestoredSnapshots {
+    pub count: u64,
+    pub restore_bytes: u64,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct RestoredShard {
+    pub shard_id: u64,
+    pub restore_bytes: u64,
+}
+
 pub fn restore_keyspace_with_cfg(
     config: RestoreConfig,
     keyspace_name: &str,
@@ -63,7 +83,8 @@ pub fn restore_keyspace_with_cfg(
     s3fs: Arc<S3Fs>,
     pd_client: Arc<dyn PdClient>,
     runtime: &Runtime,
-) -> Result<()> {
+    truncate_ts: Option<u64>,
+) -> Result<RestoredKeyspace> {
     let pd_control = PdControl::new(config.pd.clone(), config.security)?;
     let keyspace_id = {
         let keyspace = runtime.block_on(pd_control.get_keyspace_by_name(keyspace_name))?;
@@ -102,6 +123,7 @@ pub fn restore_keyspace_with_cfg(
         s3fs,
         pd_client,
         runtime,
+        truncate_ts,
     )
 }
 
@@ -113,7 +135,8 @@ pub fn restore_keyspace(
     s3fs: Arc<S3Fs>,
     pd_client: Arc<dyn PdClient>,
     runtime: &Runtime,
-) -> Result<()> {
+    truncate_ts: Option<u64>,
+) -> Result<RestoredKeyspace> {
     let working_dir = match working_path {
         Some(p) => TempDir::new_in(p, WORKING_PATH_PREFIX),
         None => TempDir::new(WORKING_PATH_PREFIX),
@@ -128,27 +151,35 @@ pub fn restore_keyspace(
         ApiV2::get_txn_keyspace_range(target_keyspace_id);
 
     let keyspace_tag = format!("{}->{}", keyspace_id, target_keyspace_id);
-
+    let cluster_backup = get_cluster_backup_meta(&s3fs, backup_name.to_owned());
     step!(
-        "Start restore keyspace {} from backup <{}>, range:[{:?},{:?}), target_range:[{:?},{:?})",
+        "Start restore keyspace {} from backup <{}>, range:[{:?},{:?}), target_range:[{:?},{:?}),\n
+        backup ts: {}, safe ts: {} truncate ts {:?}",
         keyspace_tag,
         backup_name,
         keyspace_start,
         keyspace_end,
         target_keyspace_start,
-        target_keyspace_end
+        target_keyspace_end,
+        cluster_backup.backup_ts,
+        cluster_backup.safe_ts,
+        truncate_ts,
     );
-    let cluster_backup = get_cluster_backup_meta(&s3fs, backup_name.to_owned());
     debug!(
         "Keyspace {} get cluster backup meta: {:?}",
         keyspace_tag, cluster_backup
     );
+    if truncate_ts.is_some() {
+        check_backup_meta_ts(&cluster_backup, truncate_ts.unwrap())?;
+    }
+    let truncate_ts = truncate_ts.unwrap_or(cluster_backup.backup_ts);
     let mut cluster = BackupCluster::new(
         &cluster_backup,
         working_path,
         pd_client.clone(),
         s3fs.clone(),
         keyspace_id,
+        truncate_ts,
     )?;
     step!(
         "Keyspace {} restore {} shards from backup",
@@ -161,12 +192,12 @@ pub fn restore_keyspace(
     let flush_cnt = cluster.flush_shards()?;
     step!("Keyspace {keyspace_tag} flush {flush_cnt} shards");
 
-    let truncate_ts_cnt = cluster.truncate_backup_ts()?;
+    let truncate_ts_cnt = cluster.truncate_ts()?;
     step!(
         "Keyspace {} truncate {} shards to ts {}",
         keyspace_tag,
         truncate_ts_cnt,
-        cluster.backup_ts
+        cluster.truncate_ts
     );
 
     // Check if the backup enable inner_key_offset.
@@ -180,6 +211,7 @@ pub fn restore_keyspace(
     let mut success_ranges = MergeRanges::default();
     let mut retry = 0;
     let mut last_error = None;
+    let mut restore_bytes = 0;
     loop {
         if retry > RESTORE_KEYSPACE_MAX_RETRY {
             return Err(RetryLimitExceeded(Box::new(last_error.unwrap())));
@@ -263,14 +295,18 @@ pub fn restore_keyspace(
 
         let snapshots = cluster.generate_snapshots(target_shards);
         let snapshots_count = snapshots.len();
-        restore_snapshots(
+        let ret = restore_snapshots(
             target_keyspace_id,
             runtime,
             pd_client.clone(),
             snapshots,
             &mut success_ranges,
         )?;
-        step!("Keyspace {keyspace_tag} restore {snapshots_count} regions");
+        restore_bytes += ret.restore_bytes;
+        step!(
+            "Keyspace {keyspace_tag} restore {snapshots_count} regions, result: {:?}",
+            ret,
+        );
 
         if success_ranges.covered(&target_keyspace_start, &target_keyspace_end) {
             break;
@@ -293,6 +329,23 @@ pub fn restore_keyspace(
         }
     }
 
+    let restore_ret = RestoredKeyspace {
+        keyspace_id,
+        target_keyspace_id,
+        ts: truncate_ts,
+        restore_bytes,
+    };
+    Ok(restore_ret)
+}
+
+fn check_backup_meta_ts(meta: &ClusterBackupMeta, truncate_ts: u64) -> Result<()> {
+    if truncate_ts < meta.safe_ts || truncate_ts > meta.backup_ts {
+        return Err(Error::PitrTsError(
+            truncate_ts,
+            meta.safe_ts,
+            meta.backup_ts,
+        ));
+    }
     Ok(())
 }
 
@@ -416,7 +469,7 @@ pub struct BackupCluster {
     keyspace_id: u32,
     keyspace_start: Vec<u8>,
     keyspace_end: Vec<u8>,
-    backup_ts: u64,
+    truncate_ts: u64,
 
     // store_id -> rf_engine.
     raft_engines: HashMap<u64, RfEngine>,
@@ -455,6 +508,7 @@ impl BackupCluster {
         pd_client: Arc<dyn PdClient>,
         dfs: Arc<S3Fs>,
         keyspace_id: u32,
+        truncate_ts: u64,
     ) -> Result<BackupCluster> {
         let (keyspace_start, keyspace_end) = ApiV2::get_txn_keyspace_range(keyspace_id);
         let mut cluster = Self {
@@ -464,7 +518,7 @@ impl BackupCluster {
             keyspace_id,
             keyspace_start,
             keyspace_end,
-            backup_ts: cluster_meta.backup_ts,
+            truncate_ts,
             shards: Default::default(),
             raw_metas: Default::default(),
             raft_engines: Default::default(),
@@ -760,7 +814,7 @@ impl BackupCluster {
             self.shards_need_flush.insert(store_id, shards_need_flush);
             let shards_need_truncate = shards
                 .iter()
-                .filter(|&&id| self.get_shard(id).unwrap().meta.max_ts >= self.backup_ts)
+                .filter(|&&id| self.get_shard(id).unwrap().meta.max_ts >= self.truncate_ts)
                 .copied()
                 .collect();
             self.shards_need_truncate
@@ -994,13 +1048,13 @@ impl BackupCluster {
         Err(box_err!("wait_for_mem_table_flush timeout"))
     }
 
-    fn truncate_backup_ts(&mut self) -> Result<usize> {
+    fn truncate_ts(&mut self) -> Result<usize> {
         let mut truncate_cnt = 0_usize;
         let stores_id: Vec<u64> = self.get_all_stores_id().collect();
         for store_id in stores_id {
             let shards_need_truncate = self.get_shards_need_flush_and_truncate(store_id);
             for id in shards_need_truncate {
-                truncate_cnt += self.truncate_ts(id)? as usize;
+                truncate_cnt += self.truncate_shard_ts(id)? as usize;
             }
         }
         Ok(truncate_cnt)
@@ -1135,7 +1189,7 @@ impl BackupCluster {
         (target_shards, sstables_cnt)
     }
 
-    fn truncate_ts(&mut self, shard_id: u64) -> Result<bool /* has_truncate_ts */> {
+    fn truncate_shard_ts(&mut self, shard_id: u64) -> Result<bool /* has_truncate_ts */> {
         let shard_meta = &self.get_shard(shard_id).unwrap().meta;
         let kvengine = self.kv_engine.as_ref().unwrap();
         let shard = kvengine
@@ -1143,7 +1197,7 @@ impl BackupCluster {
             .expect("Could not find shard with meta");
         let keyspace_id = self.keyspace_id;
         let res_cs = kvengine
-            .truncate_with_ts(&shard, self.backup_ts.into())?
+            .truncate_with_ts(&shard, self.truncate_ts.into())?
             .unwrap();
         if res_cs.has_truncate_ts() {
             let shard = self.get_shard_mut(shard_id).unwrap();
@@ -1484,7 +1538,7 @@ fn restore_snapshots(
     pd_client: Arc<dyn PdClient>,
     snapshots: Vec<pb::ChangeSet>,
     success_ranges: &mut MergeRanges,
-) -> Result<()> {
+) -> Result<RestoredSnapshots> {
     let mut handles = Vec::with_capacity(snapshots.len());
     for snap in snapshots {
         let pd_client = pd_client.clone();
@@ -1501,9 +1555,14 @@ fn restore_snapshots(
         )
     };
 
+    let mut restored = RestoredSnapshots::default();
     for (h, start, end) in handles {
         match runtime.block_on(h).unwrap() {
-            Ok(()) => success_ranges.insert(start, end),
+            Ok(resp) => {
+                success_ranges.insert(start, end);
+                restored.count += 1;
+                restored.restore_bytes += resp.restore_bytes;
+            }
             Err(e) if is_error_retryable(&e) => {
                 info!(
                     "Keyspace {} request_restore_snapshot error: {:?}, retry in next loop",
@@ -1519,10 +1578,13 @@ fn restore_snapshots(
             }
         }
     }
-    Ok(())
+    Ok(restored)
 }
 
-async fn request_restore_snapshot(pd_client: Arc<dyn PdClient>, cs: &pb::ChangeSet) -> Result<()> {
+async fn request_restore_snapshot(
+    pd_client: Arc<dyn PdClient>,
+    cs: &pb::ChangeSet,
+) -> Result<RestoreShardResponse> {
     let post_data = Cow::from(cs.write_to_bytes().unwrap());
     let mut last_err = None;
     'retry: for i in 0..REQUEST_RESTORE_SNAPSHOT_RETRY_LIMIT {
@@ -1555,9 +1617,10 @@ async fn request_restore_snapshot(pd_client: Arc<dyn PdClient>, cs: &pb::ChangeS
             .body(Body::from(post_data.clone()))
             .unwrap();
         match send_request_to_store(req, &store).await {
-            Ok(_resp) => {
+            Ok(resp) => {
+                let resp: RestoreShardResponse = serde_json::from_slice(&resp).unwrap();
                 debug!("{} request_restore_snapshot succeed", tag);
-                return Ok(());
+                return Ok(resp);
             }
             Err(e) => {
                 let err_msg = format!(

@@ -14,6 +14,7 @@ use std::{
     time::Duration,
 };
 
+use ::native_br::{backup::BackupConfig, restore::RestoreConfig};
 use clap::{App, Arg, ArgMatches};
 use flate2::{write::GzEncoder, Compression};
 use grpcio::EnvBuilder;
@@ -183,13 +184,14 @@ fn main() {
     }
 
     info!("config is {:?}", &config);
+    let dfs_config = config.dfs.clone();
     let dfs = Arc::new(kvengine::dfs::S3Fs::new(
-        config.dfs.prefix,
-        config.dfs.s3_endpoint,
-        config.dfs.s3_key_id,
-        config.dfs.s3_secret_key,
-        config.dfs.s3_region,
-        config.dfs.s3_bucket,
+        dfs_config.prefix,
+        dfs_config.s3_endpoint,
+        dfs_config.s3_key_id,
+        dfs_config.s3_secret_key,
+        dfs_config.s3_region,
+        dfs_config.s3_bucket,
     ));
     let thread_pool = Arc::new(
         tokio::runtime::Builder::new_multi_thread()
@@ -230,12 +232,10 @@ fn main() {
     ));
     let br_manager = Arc::new(NativeBrManger::new(
         thread_pool.clone(),
-        config.pd.clone(),
-        config.security.clone(),
         pd.clone(),
         dfs.clone(),
-        Some(config.data_dir),
-        config.native_br.clone(),
+        Some(config.data_dir.clone()),
+        config.clone(),
     ));
     update_native_br_config_periodically(br_manager.clone(), config_file_path);
     let server_builder = hyper::Server::builder(incoming);
@@ -328,7 +328,7 @@ fn update_native_br_config_periodically(br_manager: Arc<NativeBrManger>, path: O
         loop {
             match std::fs::read(&path) {
                 Ok(data) => match toml::from_slice::<Config>(&data) {
-                    Ok(config) => br_manager.update_config(config.native_br),
+                    Ok(config) => br_manager.update_native_br_config(config.native_br),
                     Err(e) => error!("failed to parse config file {:?}", e),
                 },
                 Err(e) => error!("failed to read config file {:?}", e),
@@ -521,6 +521,29 @@ impl Default for Config {
             data_dir: String::default(),
             register: false,
             native_br: NativeBrConfig::default(),
+        }
+    }
+}
+
+impl Config {
+    pub fn to_backup_config(&self) -> BackupConfig {
+        BackupConfig {
+            pd: self.pd.clone(),
+            security: self.security.clone(),
+            dfs: self.dfs.clone(),
+            tolerate_err: 0,
+            skip_keyspace_meta: false,
+        }
+    }
+    pub fn to_restore_config(&self) -> RestoreConfig {
+        RestoreConfig {
+            pd: self.pd.clone(),
+            security: self.security.clone(),
+            dfs: self.dfs.clone(),
+            // resolve_lock is to solve the Async Commit locks. Async Commit is not supported
+            // for now. TODO: Change it to false when Async Commit is enabled, and impl resolve
+            // locks in restore_keyspace.
+            skip_resolve_lock: true,
         }
     }
 }

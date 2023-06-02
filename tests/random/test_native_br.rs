@@ -245,7 +245,7 @@ pub(crate) fn do_restore_keyspace(
     keyspace: u32,
     target_keyspace: u32,
     backup_name: &str,
-) -> native_br::Result<()> {
+) -> native_br::Result<restore_keyspace::RestoredKeyspace> {
     let s3fs = Arc::new(S3Fs::new(
         dfs_config.prefix,
         dfs_config.s3_endpoint,
@@ -262,6 +262,7 @@ pub(crate) fn do_restore_keyspace(
         s3fs,
         pd_client,
         runtime,
+        None,
     )
 }
 
@@ -292,7 +293,7 @@ pub(crate) fn spawn_incremental_backup(
                 let _guard = keyspace_manager.lock_for_backup();
 
                 let backup_ts = client.get_ts().into_inner();
-                let backup_meta = match backup::backup_cluster_with_ts(
+                let (_, backup_meta) = match backup::backup_cluster_with_ts(
                     backup_config.clone(),
                     last_backup_meta.is_some(),
                     backup_name.clone(),
@@ -402,7 +403,7 @@ pub(crate) fn spawn_restore_keyspace(
                     target_keyspace,
                     &backup_name,
                 ) {
-                    Ok(()) => {}
+                    Ok(_) => {}
                     Err(Error::BackupEmptyForKeyspace(_)) => {
                         // Empty backup will happen on newly created keyspace. Retry.
                         warn!("{}->{} backup is empty, retry", keyspace, target_keyspace);

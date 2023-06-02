@@ -27,11 +27,12 @@ const DEFAULT_LOOP_COUNT: usize = 3;
 #[test]
 fn test_restore_keyspace() {
     test_util::init_log_for_test();
-    test_restore_keyspace_opt(false); // TODO: remove when wal sync dir is enabled by default.
-    test_restore_keyspace_opt(true);
+    // wal sync dir does not matter with pitr, no need to do parameter matrix
+    test_restore_keyspace_opt(false, false); // TODO: remove when wal sync dir is enabled by default.
+    test_restore_keyspace_opt(true, true);
 }
 
-fn test_restore_keyspace_opt(enable_wal_sync_dir: bool) {
+fn test_restore_keyspace_opt(enable_wal_sync_dir: bool, pitr: bool) {
     let loop_count = std::env::var("LOOP")
         .unwrap_or_default()
         .parse::<usize>()
@@ -136,6 +137,7 @@ fn test_restore_keyspace_opt(enable_wal_sync_dir: bool) {
                 shuffle_regions,
                 has_learner,
                 &runtime,
+                pitr,
             );
         }
     }
@@ -154,6 +156,7 @@ fn test_restore_keyspace_impl(
     shuffle_regions: Option<usize>,
     has_learner: bool,
     runtime: &Runtime,
+    pitr: bool,
 ) {
     step!("case: {case_name}");
     let mut client = cluster.new_client();
@@ -174,6 +177,15 @@ fn test_restore_keyspace_impl(
         skip_keyspace_meta: true,
         ..Default::default()
     };
+    let truncate_ts = if pitr {
+        let ts = client.get_ts();
+        client.put_kv(0..data_count, &i_to_key, i_to_val_142);
+        step!("another writes for pitr done");
+        client.verify_data_with_ref_store();
+        Some(ts.into_inner())
+    } else {
+        None
+    };
     let backup_ts = client.get_ts().into_inner();
     // Put more data before backup to verify truncate ts take affect.
     client.put_kv(0..data_count, &i_to_key, i_to_val_142);
@@ -187,7 +199,7 @@ fn test_restore_keyspace_impl(
         case_name,
     );
     step!("verify before backup ok");
-    let backup_meta = backup::backup_cluster_with_ts(
+    let (_, backup_meta) = backup::backup_cluster_with_ts(
         backup_config,
         false,
         backup_name.clone(),
@@ -268,6 +280,7 @@ fn test_restore_keyspace_impl(
         s3fs,
         cluster.get_pd_client(),
         runtime,
+        truncate_ts,
     )
     .unwrap();
     step!("restore done");

@@ -143,6 +143,7 @@ pub(crate) fn execute_check_table(args: CheckTableArgs) {
         pd_client,
         s3fs.clone(),
         keyspace_id,
+        cluster_backup.backup_ts,
     )
     .unwrap();
     let check_table_ts = if config.timestamp > 0 {

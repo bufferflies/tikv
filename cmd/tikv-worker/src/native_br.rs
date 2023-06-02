@@ -1,6 +1,7 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
+    borrow::Cow,
     collections::{HashMap, HashSet},
     sync::{Arc, RwLock},
     thread,
@@ -11,12 +12,13 @@ use http::{Method, StatusCode};
 use hyper::{Body, Response};
 use kvengine::dfs::S3Fs;
 use native_br::{
-    backup, backup::IncrementalBackupFile, restore::RestoreConfig,
+    backup,
+    backup::{BackupConfig, IncrementalBackupFile},
     restore_keyspace::restore_keyspace_with_cfg,
 };
 use pd_client::PdClient;
-use security::SecurityConfig;
 use serde::Deserialize;
+use tikv::storage::mvcc::TimeStamp;
 use tikv_util::{debug, error, info, time::Instant, HandyRwLock};
 use tokio::runtime::Runtime;
 
@@ -24,10 +26,12 @@ use crate::{
     common::{get_u64_param, make_json_response, make_response},
     error::Error,
     metrics::{NATIVE_BR_COUNTER_VEC, NATIVE_BR_HISTOGRAM_VEC},
+    Config,
 };
 
 type Result<T> = std::result::Result<T, Error>;
 
+const MIN_PITR_INTERVAL_GAP_SECONDS: i64 = 1; // 1s
 const MAX_RESTORE_CONCURRENCY: usize = 20;
 const MAX_BACKUP_COUNT_PER_PAGE: usize = 1000; // Same with dfs list.
 const JSON_TIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S%.3f"; // e.g. 2006-01-02 15:04:05.000
@@ -42,8 +46,11 @@ pub(crate) const WHITELIST_API_PATH: &str = "/api/v1/native_br/whitelist/";
 ///   * GET    /api/v1/backups?cluster_id=%d&last_backup_time=<JSON_TIME_FORMAT>
 ///
 /// 2. restore keyspace:
+///    Specify backup_id&backup_name for normal restore or point_in_time for
+///    pitr
 ///   * PUT    /api/v1/restore_keyspace/<restore_id>?cluster_id=%d&keyspace=%s&
-///     backup_id=%d&backup_name=%s[&source_keyspace=%s]
+///     backup_id=%d&backup_name=%s[&source_keyspace=%s]&
+///     point_in_time=<JSON_TIME_FORMAT>
 ///   * GET    /api/v1/restore_keyspace/<restore_id>?cluster_id=%d&keyspace=%s
 ///   * DELETE /api/v1/restore_keyspace/<restore_id>?cluster_id=%d&keyspace=%s
 ///   * GET    /api/v1/restore_keyspace/?cluster_id=%d
@@ -97,7 +104,6 @@ pub(crate) async fn handle_backup(
             } else {
                 MAX_BACKUP_COUNT_PER_PAGE
             };
-
             match manager.list_backups(&start_backup_time, max_count).await {
                 Ok((backups, has_more)) => {
                     let resp = ListBackupResponse {
@@ -124,6 +130,73 @@ pub(crate) async fn handle_backup(
     }
 }
 
+fn parse_restore_type(query_pairs: &HashMap<Cow<'_, str>, Cow<'_, str>>) -> Result<RestoreType> {
+    let existed_backup =
+        query_pairs.get("backup_id").is_some() || query_pairs.get("backup_name").is_some();
+    let pitr = query_pairs.get("point_in_time").is_some();
+
+    if existed_backup && pitr {
+        return Err(Error::CheckError(
+            "Request for normal restore and PiTR at the same time".to_string(),
+        ));
+    }
+    if existed_backup {
+        Ok(RestoreType::Normal)
+    } else {
+        Ok(RestoreType::Pitr)
+    }
+}
+
+async fn get_backup_from_query(
+    manager: &Arc<NativeBrManger>,
+    query_pairs: &HashMap<Cow<'_, str>, Cow<'_, str>>,
+    restore_type: RestoreType,
+) -> Result<RestoreSource> {
+    match restore_type {
+        RestoreType::Normal => {
+            let backup_id = match get_u64_param(query_pairs, "backup_id") {
+                Some(id) => id,
+                None => {
+                    return Err(Error::CheckError("Backup ID is invalid".to_string()));
+                }
+            };
+            let backup_name = query_pairs
+                .get("backup_name")
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            let backup = IncrementalBackupFile::from_id(backup_id);
+            if backup_name != backup.created_at().format(BACKUP_NAME_FORMAT).to_string() {
+                return Err(Error::CheckError("Backup ID & name mismatch".to_string()));
+            }
+            Ok(RestoreSource::ExistFile((backup, None)))
+        }
+        RestoreType::Pitr => {
+            let ts = query_pairs
+                .get("point_in_time")
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            if ts.is_empty() {
+                return Err(Error::CheckError("Recover time is empty".to_string()));
+            }
+            let utc_time = NaiveDateTime::parse_from_str(&ts, JSON_TIME_FORMAT)
+                .map(|t| DateTime::<Utc>::from_utc(t, Utc))?;
+            // To avoid the system time gap between tikv-api and pd nodes.
+            if Utc::now().signed_duration_since(utc_time).num_seconds()
+                < MIN_PITR_INTERVAL_GAP_SECONDS
+            {
+                return Err(Error::CheckError(format!(
+                    "Future time {:?} is not supported",
+                    ts
+                )));
+            }
+            match manager.get_next_backup_after_ts(&utc_time).await? {
+                Some(f) => Ok(RestoreSource::ExistFile((f, Some(utc_time)))),
+                None => Ok(RestoreSource::InstantBackup(utc_time)),
+            }
+        }
+    }
+}
+
 pub(crate) async fn handle_restore_keyspace(
     manager: Arc<NativeBrManger>,
     req: hyper::Request<hyper::Body>,
@@ -140,7 +213,6 @@ pub(crate) async fn handle_restore_keyspace(
             ));
         }
     }
-
     let sub_path = req
         .uri()
         .path()
@@ -196,37 +268,30 @@ pub(crate) async fn handle_restore_keyspace(
             handle_restore_status(&manager, restore_id, &target_keyspace)
         }
         Method::PUT => {
-            let backup_id = match get_u64_param(&query_pairs, "backup_id") {
-                Some(id) => id,
-                None => {
-                    return Ok(make_response(
-                        StatusCode::BAD_REQUEST,
-                        "Backup ID is invalid",
-                    ));
+            let restore_type = match parse_restore_type(&query_pairs) {
+                Ok(t) => t,
+                Err(e) => {
+                    return Ok(make_response(StatusCode::BAD_REQUEST, e.to_string()));
                 }
             };
-            let backup_name = query_pairs
-                .get("backup_name")
-                .map(|s| s.to_string())
-                .unwrap_or_default();
-            let backup = IncrementalBackupFile::from_id(backup_id);
-            if backup_name != backup.created_at().format(BACKUP_NAME_FORMAT).to_string() {
+            let backup = get_backup_from_query(&manager, &query_pairs, restore_type).await;
+            if backup.is_err() {
                 return Ok(make_response(
                     StatusCode::BAD_REQUEST,
-                    "Backup ID & name mismatch",
+                    format!("Fail to get backup: {}", backup.unwrap_err()),
                 ));
             }
-
+            let backup = backup.unwrap();
             debug!(
                 "{} request to PUT restore_keyspace, restore_id {}, backup {:?}",
                 keyspace_tag, restore_id, backup
             );
-
             match manager.restore_keyspace(
                 restore_id,
                 source_keyspace,
                 target_keyspace.clone(),
-                backup.name().to_string(),
+                backup.clone(),
+                restore_type,
             ) {
                 Ok(true) => {
                     info!(
@@ -239,6 +304,8 @@ pub(crate) async fn handle_restore_keyspace(
                         duration: 0,
                         id: restore_id,
                         keyspace: target_keyspace,
+                        restore_type,
+                        restore_bytes: 0,
                     };
                     Ok(make_json_response(StatusCode::CREATED, &resp))
                 }
@@ -389,7 +456,7 @@ pub(crate) async fn handle_native_br_whitelist(
                 // Get all whitelist, for debug use only.
                 Ok(make_json_response(
                     StatusCode::OK,
-                    &manager.config.read().unwrap().whitelist,
+                    &manager.config.read().unwrap().native_br.whitelist,
                 ))
             } else {
                 let resp = WhitelistResponse {
@@ -404,6 +471,14 @@ pub(crate) async fn handle_native_br_whitelist(
             "Invalid whitelist method",
         )),
     }
+}
+
+#[derive(Clone, Debug)]
+enum RestoreSource {
+    ExistFile(
+        (IncrementalBackupFile, Option<DateTime<Utc>>), // truncate_ts
+    ),
+    InstantBackup(DateTime<Utc> /* truncate_ts */),
 }
 
 #[derive(Default, Serialize, Deserialize, Debug)]
@@ -439,6 +514,8 @@ struct RestoreProgressResponse {
     duration: i64, // in seconds
     id: u64,
     keyspace: String,
+    restore_type: RestoreType,
+    restore_bytes: u64,
 }
 
 impl RestoreProgressResponse {
@@ -453,6 +530,8 @@ impl RestoreProgressResponse {
             duration: duration.num_seconds().clamp(0, i64::MAX),
             id: restore_id,
             keyspace: status.keyspace_name,
+            restore_type: status.restore_type,
+            restore_bytes: status.restore_bytes,
         }
     }
 }
@@ -493,6 +572,13 @@ struct WhitelistResponse {
     is_allowed: bool,
 }
 
+#[derive(Clone, Copy, Default, Serialize, Deserialize, Debug, PartialEq)]
+enum RestoreType {
+    #[default]
+    Normal,
+    Pitr,
+}
+
 #[derive(Clone)]
 pub(crate) struct RestoreTask {
     state: RestoreState,
@@ -500,6 +586,8 @@ pub(crate) struct RestoreTask {
     error: String,
     start: DateTime<Utc>,
     end: Option<DateTime<Utc>>,
+    restore_type: RestoreType,
+    restore_bytes: u64,
 }
 
 type TasksMap = HashMap<u64 /* restore_id */, RestoreTask>;
@@ -507,8 +595,6 @@ type TasksMap = HashMap<u64 /* restore_id */, RestoreTask>;
 type KeyspacesMap = HashMap<String /* keyspace */, u64 /* restore_id */>;
 
 pub(crate) struct BrContext {
-    pub pd: pd_client::Config,
-    pub security: SecurityConfig,
     pub pd_client: Arc<dyn PdClient>,
     pub working_path: Option<String>,
     pub s3fs: Arc<S3Fs>,
@@ -523,8 +609,10 @@ impl BrContext {
         &self,
         restore_id: u64,
         keyspace_name: &str,
+        restore_type: RestoreType,
         new_state: RestoreState,
         err: Option<Error>,
+        restore_bytes: u64,
     ) -> Result<bool> {
         let new_task = |tasks: &mut TasksMap| -> Result<()> {
             let mut keyspaces = self.keyspace_tasks.write().unwrap();
@@ -540,6 +628,8 @@ impl BrContext {
                     error: String::new(),
                     start: Utc::now(),
                     end: None,
+                    restore_type,
+                    restore_bytes,
                 },
             );
             Ok(())
@@ -560,6 +650,7 @@ impl BrContext {
                 if task.state >= new_state {
                     return Ok(false);
                 }
+                task.restore_bytes = restore_bytes;
                 task.state = new_state;
                 task.error = err.map(|err| format!("{:?}", err)).unwrap_or_default();
 
@@ -574,36 +665,60 @@ impl BrContext {
 
     fn restore_keyspace(
         &self,
+        config: Config,
         restore_id: u64,
         keyspace_name: String,
         target_keyspace_name: String,
-        backup_name: String,
+        restore_source: RestoreSource,
+        restore_type: RestoreType,
     ) -> Result<()> {
         let ob_start_time = Instant::now();
 
         self.change_restore_state(
             restore_id,
             &target_keyspace_name,
+            restore_type,
             RestoreState::Running,
             None,
+            0,
         )?;
-        let config = RestoreConfig {
-            pd: self.pd.clone(),
-            security: self.security.clone(),
-            ..Default::default()
+
+        let get_truncate_ts =
+            |utc_time: Option<DateTime<Utc>>, restore_type: RestoreType| -> Option<u64> {
+                match utc_time {
+                    Some(t) => {
+                        debug_assert!(restore_type == RestoreType::Pitr);
+                        let tso = TimeStamp::compose(t.timestamp_millis() as u64, 0);
+                        Some(tso.into_inner())
+                    }
+                    None => {
+                        debug_assert!(restore_type == RestoreType::Normal);
+                        None
+                    }
+                }
+            };
+
+        let (backup_file, truncate_ts) = match restore_source {
+            RestoreSource::ExistFile((f, utc_time)) => (f, get_truncate_ts(utc_time, restore_type)),
+            RestoreSource::InstantBackup(utc_time) => {
+                let backup_config = config.to_backup_config();
+                let backup = self.trigger_backup(backup_config)?;
+                (backup, get_truncate_ts(Some(utc_time), restore_type))
+            }
         };
 
         let res = match restore_keyspace_with_cfg(
-            config,
+            config.to_restore_config(),
             &keyspace_name,
             &target_keyspace_name,
-            &backup_name,
+            backup_file.name(),
             self.working_path.as_deref(),
             self.s3fs.clone(),
             self.pd_client.clone(),
             &self.runtime,
+            truncate_ts,
         ) {
-            Ok(()) => {
+            Ok(ret) => {
                 NATIVE_BR_COUNTER_VEC
                     .with_label_values(&["restore_keyspace_succeed"])
                     .inc();
@@ -613,8 +728,10 @@ impl BrContext {
                 self.change_restore_state(
                     restore_id,
                     &target_keyspace_name,
+                    restore_type,
                     RestoreState::Succeed,
                     None,
+                    ret.restore_bytes,
                 )
             }
             Err(err) => {
@@ -628,8 +745,10 @@ impl BrContext {
                 self.change_restore_state(
                     restore_id,
                     &target_keyspace_name,
+                    restore_type,
                     RestoreState::Error,
                     Some(err.into()),
+                    0,
                 )
             }
         };
@@ -640,6 +759,37 @@ impl BrContext {
             return Err(e);
         }
         Ok(())
+    }
+
+    // TODO: Add frequency limit, like at most 1 backup per minute.
+    fn trigger_backup(&self, config: BackupConfig) -> Result<IncrementalBackupFile> {
+        let pd_client = self.pd_client.clone();
+        let exec_backup = |incremental: bool| -> native_br::error::Result<IncrementalBackupFile> {
+            backup::backup_cluster(
+                config.clone(),
+                incremental,
+                "".to_string(),
+                pd_client.as_ref(),
+                None,
+            )
+            .map_or_else(
+                |e| {
+                    error!("Backup failed with {:?}", e);
+                    Err(e)
+                },
+                |(backup, _)| Ok(IncrementalBackupFile::try_from_full_path(&backup).unwrap()),
+            )
+        };
+        match exec_backup(true) {
+            Ok(f) => Ok(f),
+            Err(e) => {
+                if backup::need_full_backup(&e) {
+                    exec_backup(false).map_err(|e| Error::NativeBackupRestoreError(e))
+                } else {
+                    Err(Error::NativeBackupRestoreError(e))
+                }
+            }
+        }
     }
 }
 
@@ -666,23 +816,19 @@ pub struct NativeBrConfig {
 
 pub(crate) struct NativeBrManger {
     pub context: Arc<BrContext>,
-    pub config: RwLock<NativeBrConfig>,
+    pub config: RwLock<Config>,
 }
 
 impl NativeBrManger {
     pub(crate) fn new(
         runtime: Arc<Runtime>,
-        pd: pd_client::Config,
-        security: SecurityConfig,
         pd_client: Arc<dyn PdClient>,
         s3fs: Arc<S3Fs>,
         working_path: Option<String>,
-        config: NativeBrConfig,
+        config: Config,
     ) -> Self {
         Self {
             context: Arc::new(BrContext {
-                pd,
-                security,
                 pd_client,
                 s3fs,
                 working_path,
@@ -694,14 +840,14 @@ impl NativeBrManger {
         }
     }
 
-    pub(crate) fn update_config(&self, config: NativeBrConfig) {
+    pub(crate) fn update_native_br_config(&self, config: NativeBrConfig) {
         let mut ori_config = self.config.write().unwrap();
-        if *ori_config != config {
+        if ori_config.native_br != config {
             info!(
                 "Update native br config from {:?} to {:?}",
-                *ori_config, config
+                ori_config.native_br, config
             );
-            *ori_config = config;
+            ori_config.native_br = config;
         }
     }
 
@@ -737,7 +883,8 @@ impl NativeBrManger {
         restore_id: u64,
         keyspace_name: String,
         target_keyspace_name: String,
-        backup_name: String,
+        restore_source: RestoreSource,
+        restore_type: RestoreType,
     ) -> Result<bool> {
         if self.get_all_restore_task().len() >= MAX_RESTORE_CONCURRENCY {
             return Err(Error::ReachConcurrencyLimit(MAX_RESTORE_CONCURRENCY));
@@ -746,16 +893,21 @@ impl NativeBrManger {
         if self.context.change_restore_state(
             restore_id,
             &target_keyspace_name,
+            restore_type,
             RestoreState::Init,
             None,
+            0,
         )? {
             let context = self.context.clone();
+            let config = self.config.read().unwrap().clone();
             thread::spawn(move || {
                 context.restore_keyspace(
+                    config,
                     restore_id,
                     keyspace_name,
                     target_keyspace_name,
-                    backup_name,
+                    restore_source,
+                    restore_type,
                 )
             });
             Ok(true)
@@ -804,7 +956,20 @@ impl NativeBrManger {
     }
 
     fn is_keyspace_allowed(&self, keyspace: &String) -> bool {
-        self.config.read().unwrap().whitelist.is_allowed(keyspace)
+        self.config
+            .read()
+            .unwrap()
+            .native_br
+            .whitelist
+            .is_allowed(keyspace)
+    }
+
+    async fn get_next_backup_after_ts(
+        &self,
+        ts: &DateTime<Utc>,
+    ) -> Result<Option<IncrementalBackupFile>> {
+        let (backup_files, _) = self.list_backups(ts, 1).await?;
+        Ok(backup_files.first().cloned())
     }
 }
 

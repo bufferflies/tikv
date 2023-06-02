@@ -756,6 +756,7 @@ impl StatusServer {
     async fn restore_shard(
         req: Request<Body>,
         router: RaftRouter,
+        engine: kvengine::Engine,
     ) -> hyper::Result<Response<Body>> {
         let req = Self::get_restore_shard_request(req).await?;
         let shard_id = req.cs.get_shard_id();
@@ -796,7 +797,11 @@ impl StatusServer {
                     .to_string(),
             ))
         } else {
-            let resp = RestoreShardResponse::default();
+            let stat = engine.get_shard_stat(shard_id);
+            let resp = RestoreShardResponse {
+                shard_id,
+                restore_bytes: stat.kv_size,
+            };
             let json = serde_json::to_string_pretty(&resp).unwrap();
             Ok(Response::builder()
                 .header(header::CONTENT_TYPE, "application/json")
@@ -1089,7 +1094,7 @@ impl StatusServer {
                             }
 
                             (Method::POST, path) if path.starts_with("/restore-shard") => {
-                                Self::restore_shard(req, router).await
+                                Self::restore_shard(req, router, engine).await
                             }
                             (Method::POST, path) if path.starts_with("/kvengine/compactor") => {
                                 Self::add_remote_compactor(req, engine.comp_client.clone()).await
@@ -1385,7 +1390,10 @@ struct RestoreShardRequest {
 #[derive(Default, Serialize, Deserialize, Debug, PartialEq)]
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
-struct RestoreShardResponse {}
+pub struct RestoreShardResponse {
+    pub shard_id: u64,
+    pub restore_bytes: u64,
+}
 
 #[derive(Default, Serialize, Deserialize, Debug)]
 #[serde(default)]

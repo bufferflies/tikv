@@ -20,6 +20,7 @@ use regex::Regex;
 use rfenginepb::{ClusterBackupMeta, StoreBackupMeta};
 use security::SecurityConfig;
 use slog_global::{error, info, warn};
+use tikv::storage::mvcc::TimeStamp;
 use tikv_util::timer::GLOBAL_TIMER_HANDLE;
 
 use crate::{
@@ -38,6 +39,10 @@ const PD_KEY_SPACE_META_PATH: [&str; 4] = [
     "rules/",
     "tso/keyspace_groups/membership/",
 ];
+const BACKUP_GC_SERVICE_NAME: &str = "native_br";
+// `BACKUP_SERVICE_SAFEPOINT_TTL` should not be too long, as failure of backup
+// will block GC.
+const BACKUP_SERVICE_SAFEPOINT_TTL: Duration = Duration::from_secs(12 * 60 * 60); // 12 hour.
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -78,7 +83,7 @@ pub fn execute_incremental_backup(config: BackupConfig, name: String, interval: 
             &pd_client,
             cluster_backup_meta.clone(),
         ) {
-            Ok(meta) => {
+            Ok((_, meta)) => {
                 cluster_backup_meta = Some(meta);
             }
             Err(e) => {
@@ -87,7 +92,7 @@ pub fn execute_incremental_backup(config: BackupConfig, name: String, interval: 
                     warn!("Incremental backup fails {:?}, fallback to full backup", e);
                     // If incremental backup fails, restart full backup automatically.
                     match backup_cluster(config.clone(), false, name.clone(), &pd_client, None) {
-                        Ok(meta) => cluster_backup_meta = Some(meta),
+                        Ok((_, meta)) => cluster_backup_meta = Some(meta),
                         Err(e) => {
                             error!("Full backup still fail {:?}", e);
                             return;
@@ -102,6 +107,7 @@ pub fn execute_incremental_backup(config: BackupConfig, name: String, interval: 
 }
 
 pub fn execute_full_backup(config: BackupConfig, name: String) {
+    // TODO: Set safepoint before backup and delete it after backup.
     let pd_client = create_pd_client(&config.security, &config.pd);
     if let Err(e) = backup_cluster(config, false, name, &pd_client, None) {
         error!("Full backup fail, {:?}", e)
@@ -116,13 +122,29 @@ fn grpc_error_is_unimplemented(e: &pd_client::Error) -> bool {
     }
 }
 
-fn backup_cluster(
+fn update_service_safe_point(pd_client: &dyn PdClient, safepoint: u64) -> Result<()> {
+    if let Err(e) = block_on(pd_client.update_service_safe_point(
+        BACKUP_GC_SERVICE_NAME.to_string(),
+        TimeStamp::from(safepoint),
+        BACKUP_SERVICE_SAFEPOINT_TTL,
+    )) {
+        error!(
+            "fail to update gc service safepoint {safepoint}, err {:?}",
+            e
+        );
+        return Err(Error::PdError(e));
+    }
+    Ok(())
+}
+
+// return backup file key(full path) and ClusterBackupMeta
+pub fn backup_cluster(
     config: BackupConfig,
     incremental: bool,
     name: String,
     pd_client: &dyn PdClient,
     last_backup_meta: Option<ClusterBackupMeta>,
-) -> Result<ClusterBackupMeta> {
+) -> Result<(String, ClusterBackupMeta)> {
     let res = pd_client.get_min_tso();
     let backup_ts = match res {
         Ok(ts) => Ok(ts.into_inner()),
@@ -136,14 +158,19 @@ fn backup_cluster(
         }
     }?;
 
-    backup_cluster_with_ts(
+    let ret = backup_cluster_with_ts(
         config,
         incremental,
         name,
         pd_client,
         backup_ts,
         last_backup_meta,
-    )
+    )?;
+    // Incremental backup keeps running in production env, so we only update service
+    // safepoint when backup succeed. Therefore the first backup cannot be used as
+    // we don't set safepoint before backup for logical simplicity.
+    update_service_safe_point(pd_client, backup_ts)?;
+    Ok(ret)
 }
 
 pub fn backup_cluster_with_ts(
@@ -153,7 +180,7 @@ pub fn backup_cluster_with_ts(
     pd_client: &dyn PdClient,
     backup_ts: u64,
     last_backup_meta: Option<ClusterBackupMeta>,
-) -> Result<ClusterBackupMeta> {
+) -> Result<(String, ClusterBackupMeta)> {
     let stores = get_all_stores_except_tiflash(pd_client)?;
     let cluster_id = pd_client.get_cluster_id()?;
 
@@ -238,7 +265,7 @@ pub fn backup_cluster_with_ts(
         .block_on(s3fs.put_object(backup_key.clone(), backup_data, backup_key.clone()))
         .unwrap();
     info!("finished build backup file {}", backup_key);
-    Ok(cluster_backup_meta)
+    Ok((backup_key, cluster_backup_meta))
 }
 
 async fn backup_store(
@@ -414,7 +441,7 @@ fn check_backup_meta_consistency(backup_meta: &ClusterBackupMeta, stores: &[Stor
     }
 }
 
-fn need_full_backup(err: &Error) -> bool {
+pub fn need_full_backup(err: &Error) -> bool {
     matches!(err, Error::TopoChanged(_) | Error::MetaNotFound(_))
 }
 

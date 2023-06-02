@@ -49,7 +49,7 @@ fn start_cluster_and_full_backup(
         ..Default::default()
     };
     let backup_ts = client.get_ts().into_inner();
-    let backup_meta = backup::backup_cluster_with_ts(
+    let (_, backup_meta) = backup::backup_cluster_with_ts(
         backup_config,
         false,
         backup_name,

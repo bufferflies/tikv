@@ -18,6 +18,8 @@ pub enum Error {
     ServerError(String),
     #[error("Safe ts {0} is greater than backup ts {1}")]
     TsError(u64, u64),
+    #[error("PiTR ts {0} is out of safe ts {1} and backup ts {2}")]
+    PitrTsError(u64, u64, u64),
     #[error("PD error {0}")]
     PdError(pd_client::Error),
     #[error("Etcd error {0}")]
