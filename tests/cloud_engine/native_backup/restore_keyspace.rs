@@ -77,11 +77,13 @@ fn test_restore_keyspace_opt(enable_wal_sync_dir: bool) {
             conf.coprocessor.region_split_size = ReadableSize::kb(128); // kv_opts.base_size = 8kb
             conf.coprocessor.region_bucket_size = ReadableSize::kb(64);
             conf.rfengine.target_file_size = ReadableSize::mb(1);
-            conf.rfengine.wal_sync_dir = enable_wal_sync_dir.then(|| {
-                let dir = format!("{}/wal_sync/{}", base_dir_str, node_id);
-                step!("enable wal sync dir: {}", dir);
-                dir
-            });
+            conf.rfengine.wal_sync_dir = enable_wal_sync_dir
+                .then(|| {
+                    let dir = format!("{}/wal_sync/{}", base_dir_str, node_id);
+                    step!("enable wal sync dir: {}", dir);
+                    dir
+                })
+                .unwrap_or_default();
         },
     );
     cluster.wait_region_replicated(&[], 3);

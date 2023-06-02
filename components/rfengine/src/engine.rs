@@ -132,7 +132,7 @@ impl RfEngineCore {
     fn open(dir: &Path, cfg: &Config) -> Result<Self> {
         let wal_size = cfg.target_file_size.0 as usize;
         let compression_threshold = cfg.batch_compression_threshold.0 as usize;
-        let wal_sync_dir = cfg.wal_sync_dir.as_ref().map(|p| PathBuf::from(p));
+        let wal_sync_dir = (!cfg.wal_sync_dir.is_empty()).then(|| PathBuf::from(&cfg.wal_sync_dir));
         init_wal_files(dir, wal_sync_dir.as_ref())?;
         let engine_id = Arc::new(AtomicU64::new(0));
         let manifest = Manifest::open(dir, engine_id.clone())?;

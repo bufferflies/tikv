@@ -354,7 +354,7 @@ pub fn new_test_config(base_dir: &Path, node_id: u16) -> TikvConfig {
     config.rocksdb.max_background_jobs = 2;
     config.rocksdb.max_sub_compactions = 1;
     config.rfengine.target_file_size = ReadableSize::kb(128);
-    config.rfengine.wal_sync_dir = Some(format!("{}/{}/wal", base_dir.to_str().unwrap(), node_id));
+    config.rfengine.wal_sync_dir = format!("{}/{}/wal", base_dir.to_str().unwrap(), node_id);
     config
 }
 

@@ -3518,7 +3518,7 @@ impl TikvConfig {
         {
             return Err("format_version larger than 5 is unsupported".into());
         }
-        if last_cfg.rfengine.wal_sync_dir.is_some()
+        if !last_cfg.rfengine.wal_sync_dir.is_empty()
             && last_cfg.rfengine.wal_sync_dir != self.rfengine.wal_sync_dir
         {
             return Err(format!(

@@ -23,7 +23,7 @@ pub struct Config {
 
     /// The directory to store the wal files for synchronous write.
     /// It's used to reduce the latency of writing wal.
-    pub wal_sync_dir: Option<String>,
+    pub wal_sync_dir: String,
 }
 
 impl Default for Config {
@@ -32,7 +32,7 @@ impl Default for Config {
             batch_compression_threshold: ReadableSize::kb(8),
             target_file_size: ReadableSize::mb(512),
             worker_rate_limit: ReadableSize::mb(125),
-            wal_sync_dir: None,
+            wal_sync_dir: "".to_owned(),
         }
     }
 }
