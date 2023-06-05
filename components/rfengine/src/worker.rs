@@ -440,7 +440,7 @@ pub(crate) fn store_raft_log_file_key(store_id: u64, epoch: u32) -> String {
     format!("{:016x}/r{:016x}.rlog", store_id, epoch)
 }
 
-pub(crate) fn wal_file_key(store_id: u64, epoch_id: u32, start_off: u64, end_off: u64) -> String {
+pub fn wal_file_key(store_id: u64, epoch_id: u32, start_off: u64, end_off: u64) -> String {
     format!(
         "{:016x}/e{:08x}/{:016x}_{:016x}.wal",
         store_id, epoch_id, start_off, end_off

@@ -12,17 +12,17 @@ mod unsafe_recover;
 
 use std::{env, fs::OpenOptions, io};
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use slog::Drain;
 
 use crate::{
-    backup::{execute_backup, BackupArgs},
+    backup::{execute_backup, execute_show_backup, BackupArgs, ShowBackupArgs},
     check_table::{execute_check_table, CheckTableArgs},
     dfsgc::{execute_dfsgc, DfsGcArgs},
     restore::{execute_restore_command, RestoreCommand},
     truncate_ts::{execute_truncate_ts, TruncateTsArgs},
     unsafe_recover::{execute_unsafe_recover, UnsafeRecoverArgs},
-    Commands::{Backup, CheckTable, DfsGc, Restore, TruncateTs, UnsafeRecover},
+    Commands::*,
 };
 
 fn main() {
@@ -46,6 +46,9 @@ fn main() {
         }
         CheckTable(args) => {
             execute_check_table(args);
+        }
+        Show(args) => {
+            execute_show(args);
         }
     }
 }
@@ -103,4 +106,26 @@ pub enum Commands {
     TruncateTs(TruncateTsArgs),
     /// CheckTable check data consistency on each table.
     CheckTable(CheckTableArgs),
+    /// Show some information.
+    Show(ShowArgs),
+}
+
+#[derive(Args)]
+pub struct ShowArgs {
+    #[clap(subcommand)]
+    command: ShowCommands,
+}
+
+#[derive(Subcommand)]
+enum ShowCommands {
+    /// Show the backup meta data.
+    Backup(ShowBackupArgs),
+}
+
+fn execute_show(args: ShowArgs) {
+    match args.command {
+        ShowCommands::Backup(args) => {
+            execute_show_backup(args);
+        }
+    }
 }

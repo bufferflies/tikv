@@ -3,6 +3,7 @@
 use std::{path::PathBuf, time::Duration};
 
 use clap::Args;
+use kvengine::dfs::{DFSConfig, S3Fs};
 use native_br::backup::{execute_full_backup, execute_incremental_backup, BackupConfig};
 use tikv_util::info;
 
@@ -77,4 +78,83 @@ fn get_backup_config_from_args(args: &BackupArgs) -> BackupConfig {
     }
     config.dfs.override_from_env();
     config
+}
+
+#[derive(Args)]
+pub struct ShowBackupArgs {
+    /// The path of the config file.
+    #[clap(long, default_value = "")]
+    pub config: PathBuf,
+    /// The name of the backup file.
+    #[clap(long)]
+    pub name: String,
+    /// Enable verbose mode.
+    #[clap(long)]
+    pub verbose: bool,
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug, Default)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+pub struct ShowBackupConfig {
+    pub dfs: DFSConfig,
+}
+
+pub fn execute_show_backup(args: ShowBackupArgs) {
+    let mut config = ShowBackupConfig::default();
+    if args.config.exists() {
+        let data = std::fs::read(args.config.clone()).expect("failed to read config file");
+        config = toml::from_slice(&data).unwrap();
+    }
+    config.dfs.override_from_env();
+
+    let s3fs = S3Fs::new(
+        config.dfs.prefix,
+        config.dfs.s3_endpoint,
+        config.dfs.s3_key_id,
+        config.dfs.s3_secret_key,
+        config.dfs.s3_region,
+        config.dfs.s3_bucket,
+    );
+
+    let cluster_backup = native_br::restore::get_cluster_backup_meta(&s3fs, args.name.clone());
+
+    let store_ids = cluster_backup
+        .get_stores()
+        .iter()
+        .map(|store| store.get_store_id())
+        .collect::<Vec<_>>();
+    let peers_count = cluster_backup
+        .get_stores()
+        .iter()
+        .map(|store| store.get_manifest().get_peers().len())
+        .sum::<usize>();
+    let keyspaces_count = cluster_backup.keyspace_meta.len();
+
+    println!("[Backup {}]", args.name);
+    println!("  cluster_id: {}", cluster_backup.cluster_id);
+    println!("  backup_ts: {}", cluster_backup.backup_ts);
+    println!("  safe_ts: {}", cluster_backup.safe_ts);
+    println!("  stores: {:?}", store_ids);
+    println!("  peers count: {}", peers_count);
+    println!("  alloc_id: {}", cluster_backup.alloc_id);
+    println!("  keyspaces count: {}", keyspaces_count);
+
+    if args.verbose {
+        for store in &cluster_backup.stores {
+            println!();
+            println!("[Store {}]", store.store_id);
+            println!("  WAL chunks:");
+            for file_key in store.get_wal_chunks().iter().map(|chunk| {
+                rfengine::wal_file_key(store.store_id, chunk.epoch, chunk.start_off, chunk.end_off)
+            }) {
+                println!(
+                    "    epoch: {}, file_key: {}",
+                    store.get_manifest().epoch_id,
+                    file_key
+                );
+            }
+            // TODO: output some readable information of `store.manifest`.
+        }
+    }
 }

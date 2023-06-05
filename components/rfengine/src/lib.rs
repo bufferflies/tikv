@@ -23,6 +23,7 @@ mod metrics;
 pub mod traits;
 pub mod utils;
 pub mod worker;
+pub use worker::wal_file_key;
 mod write_batch;
 pub mod writer;
 
