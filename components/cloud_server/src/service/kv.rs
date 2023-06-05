@@ -301,6 +301,10 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
         let task = async move {
             let mut resp = UnsafeDestroyRangeResponse::default();
             let regions = future.await?;
+            info!(
+                "unsafe destroy range prefix {:?} for regions {:?}",
+                prefix, regions
+            );
             let mut region_futures = vec![];
             for region in &regions {
                 if let Some(snap) = kv.get_snap_access(region.id()) {
@@ -321,6 +325,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
                         callback,
                     },
                 );
+                info!("delete prefix {:?} for region {:?}", prefix, region);
             }
             let _ = futures::future::join_all(region_futures).await;
             // Wait and check if all regions have applied delete prefix.
