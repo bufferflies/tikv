@@ -24,6 +24,12 @@ fn test_delete_range_helper(enable_inner_key_off: bool) {
         conf.enable_inner_key_offset = enable_inner_key_off;
     });
     let mut client = cluster.new_client();
+
+    // split keyspace region for inner key offset to take effect.
+    let keyspace_id_array = api_version::ApiV2::get_keyspace_id("x123".as_bytes());
+    let keyspace_id = api_version::ApiV2::get_u32_keyspace_id(keyspace_id_array);
+    client.split_keyspace(keyspace_id);
+
     // insert "key_100".."key_500"
     client.put_kv(100..500, i_to_key_with_prefix, i_to_val);
     let store_id = cluster.get_stores()[0];

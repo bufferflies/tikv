@@ -644,6 +644,16 @@ impl ClusterClient {
         Err(format!("failed to split key {:?}", key).into())
     }
 
+    pub fn split_keyspace(&mut self, keyspace_id: u32) {
+        let (start_key, end_key) = api_version::ApiV2::get_txn_keyspace_range(keyspace_id);
+        let encoded_start = encode_bytes(&start_key);
+        let encoded_end = encode_bytes(&end_key);
+        let region = self.pd_client.get_region(&encoded_start).unwrap();
+        let keys = vec![encoded_start, encoded_end];
+        self.pd_client
+            .must_split_region(region, kvproto::pdpb::CheckPolicy::Usekey, keys);
+    }
+
     pub fn merge(&mut self, source_key: &[u8], target_key: &[u8]) {
         let source_region = self
             .pd_client

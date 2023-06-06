@@ -640,11 +640,11 @@ impl SnapAccessCore {
             return false;
         }
         let mut it = self.new_iterator(0, false, false, Some(u64::MAX), true);
-        it.seek(inner_prefix);
+        it.seek(prefix);
         if !it.valid() {
             return false;
         }
-        it.key().starts_with(inner_prefix)
+        it.key().starts_with(prefix)
     }
 
     pub fn has_unloaded_tables(&self) -> bool {
