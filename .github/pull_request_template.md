@@ -1,70 +1,19 @@
-<!--
-Thank you for contributing to TiKV!
+### What problem does this PR solve?
+Issue Number: close #xxx
 
-If you haven't already, please read TiKV's [CONTRIBUTING](https://github.com/tikv/tikv/blob/master/CONTRIBUTING.md) document.
-
-If you're unsure about anything, just ask; somebody should be along to answer within a day or two.
-
-PR Title Format:
-1. module [, module2, module3]: what's changed
-2. *: what's changed
--->
+Problem Summary:
 
 ### What is changed and how it works?
-<!--
 
-Please create an issue first to describe the problem.
+### Check List 
+***all must be checked or comment on why it is not checked***
 
-There MUST be one line starting with "Issue Number:  " and 
-linking the relevant issues via the "close" or "ref".
-
-For more info, check https://github.com/tikv/tikv/blob/master/CONTRIBUTING.md#linking-issues.
-
--->
-Issue Number: Close #xxx
-
-What's Changed:
-
-<!--
-
-You could use "commit message" code block to add more description to the final commit message.
-For more info, check https://github.com/tikv/tikv/blob/master/CONTRIBUTING.md#format-of-the-commit-message.
-
--->
-```commit-message
-```
-
-### Related changes
-
-- PR to update [`pingcap/docs/tidb-cloud`](https://github.com/pingcap/docs/tree/master/tidb-cloud):
-
-### Check List <!--REMOVE the items that are not applicable-->
-
-<!-- Also check the box next to each item, even if it's not necessary to do so -->
-<!-- Sync feature docs: see https://github.com/tidbcloud/cloud-storage-engine/tree/cloud-engine/doc/features -->
-
-- [ ] Sync feature docs
-- [ ] Tests <!-- At least one of them must be included. -->
+- [ ] Sync [feature docs](https://github.com/tidbcloud/cloud-storage-engine/tree/cloud-engine/doc/features)
+- [ ] Tests (At least one of them must be included.)
   - Unit test
   - Integration test
   - Random test
   - Manual test (add detailed scripts or steps below)
   - No code
-
-Side effects
-
-- Performance regression
-    - Consumes more CPU
-    - Consumes more MEM
-- Breaking backward compatibility
-
-### Release note <!-- bugfixes or new feature need a release note -->
-
-```release-note
-Please add a release note.
-
-Please refer to [Release Notes Language Style Guide](https://pingcap.github.io/tidb-dev-guide/contribute-to-tidb/release-notes-style-guide.html) to write a quality release note.
-
-If you don't think this PR needs a release note then fill it with None.
-If this PR will be picked to release branch, then a release note is probably required.
-```
+- [ ] Do not break backward compatibility
+- [ ] Do not have performance regression
