@@ -53,6 +53,8 @@ pub trait Dfs: Sync + Send {
     fn set_delay(&self, _delay: Duration) {}
 }
 
+const REMOVE_DELAY: Duration = Duration::from_secs(90);
+
 pub struct InMemFs {
     files: dashmap::DashMap<u64, Bytes>,
     pending_remove: dashmap::DashMap<u64, Instant>,
@@ -111,7 +113,7 @@ impl Dfs for InMemFs {
         let now = Instant::now_coarse();
         self.pending_remove.insert(file_id, now);
         self.pending_remove.retain(|id, &mut remove_time| {
-            if now.saturating_duration_since(remove_time) > Duration::from_secs(60) {
+            if now.saturating_duration_since(remove_time) > REMOVE_DELAY {
                 self.files.remove(id);
                 false
             } else {
