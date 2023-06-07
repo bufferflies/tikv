@@ -851,7 +851,10 @@ impl PeerData {
             self.truncated_idx = truncated_index;
             truncated_blocks.extend(self.raft_logs.truncate(truncated_index));
         }
-        if self.truncated_idx == TRUNCATE_ALL_INDEX && truncated_index > 0 {
+        if self.truncated_idx == TRUNCATE_ALL_INDEX
+            && truncated_index > 0
+            && truncated_index != TRUNCATE_ALL_INDEX
+        {
             warn!(
                 "region: {} peer:{} restore truncate all index to index {}",
                 self.region_id, self.peer_id, truncated_index,
