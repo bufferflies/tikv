@@ -13,7 +13,7 @@ use std::{
 
 use api_version::ApiV2;
 use async_stream::stream;
-use bytes::Buf;
+use bytes::{Buf, BufMut, BytesMut};
 use collections::HashMap;
 use flate2::{write::GzEncoder, Compression};
 use futures::{
@@ -42,8 +42,15 @@ use openssl::{
 use pin_project::pin_project;
 use prometheus::TEXT_FORMAT;
 use protobuf::Message;
+use rfengine::{
+    raft_state_key, RfEngine, WriteBatch, KV_ENGINE_META_KEY, RAFT_TRUNCATED_STATE_KEY,
+};
 use rfstore::{
-    store::{Callback, CasualMessage, StoreMsg},
+    store::{
+        peer_storage::{collect_prefix_regions, load_raft_engine_meta, load_region_state},
+        state::RaftState,
+        Callback, CasualMessage, StoreMsg, RAFT_INIT_LOG_INDEX, RAFT_INIT_LOG_TERM, TERM_KEY,
+    },
     RaftRouter, RaftStoreRouter,
 };
 use security::{self, SecurityConfig};
@@ -56,6 +63,7 @@ use tikv::{
     },
 };
 use tikv_util::{
+    codec::bytes::decode_bytes,
     future::paired_future_callback,
     logger::set_log_level,
     metrics::{dump, dump_to},
@@ -70,7 +78,10 @@ use tokio::{
 };
 use tokio_openssl::SslStream;
 
-use crate::{server::Result, status_server::metrics::STATUS_REQ_HISTOGRAM_STATIC};
+use crate::{
+    server::Result, status_server::metrics::STATUS_REQ_HISTOGRAM_STATIC,
+    tikv_util::codec::number::NumberEncoder,
+};
 
 mod metrics;
 
@@ -215,6 +226,106 @@ impl StatusServer {
             "no heap profile is running"
         };
         Ok(make_response(StatusCode::OK, body))
+    }
+
+    fn load_raft_state(rf: &RfEngine, peer_id: u64, ver: u64) -> Option<RaftState> {
+        let key = raft_state_key(ver);
+        let raft_state_val = match rf.get_state(peer_id, key.chunk()) {
+            Some(val) => val,
+            None => {
+                error!("failed to load raft state");
+                return None;
+            }
+        };
+        let mut raft_state = RaftState::default();
+        raft_state.unmarshal(&raft_state_val);
+        Some(raft_state)
+    }
+
+    fn load_store_ident(rf: &RfEngine) -> StoreIdent {
+        let mut store_ident = StoreIdent::default();
+        let data = rf
+            .get_state(0, rfengine::STORE_IDENT_KEY)
+            .unwrap_or_default();
+        store_ident.merge_from_bytes(data.chunk()).unwrap();
+        store_ident
+    }
+
+    fn write_empty_engine_meta(
+        rf: &RfEngine,
+        wb: &mut WriteBatch,
+        peer_id: u64,
+        region_id: u64,
+        ver: u64,
+        index: u64,
+        term: u64,
+        inner_key_off: u32,
+    ) -> Result<kvenginepb::ChangeSet> {
+        let region_local_state = match load_region_state(rf, peer_id, ver) {
+            Some(val) => val,
+            None => {
+                return Err(crate::server::Error::Other(box_err!(
+                    "region state not found"
+                )));
+            }
+        };
+        let mut enc_start_key = region_local_state.get_region().get_start_key();
+        let mut enc_end_key = region_local_state.get_region().get_end_key();
+        let start_key = decode_bytes(&mut enc_start_key, false).unwrap();
+        let end_key = decode_bytes(&mut enc_end_key, false).unwrap();
+
+        let mut cs = kvenginepb::ChangeSet::new();
+        cs.set_shard_id(region_id);
+        cs.set_shard_ver(ver);
+        cs.set_sequence(index);
+        let snap = cs.mut_snapshot();
+        snap.set_outer_start(start_key.to_vec());
+        snap.set_outer_end(end_key.to_vec());
+        snap.set_inner_key_off(inner_key_off);
+        snap.set_data_sequence(index);
+        let props = snap.mut_properties();
+        props.set_shard_id(region_id);
+        props.mut_keys().push(TERM_KEY.to_string());
+        props.mut_values().push(term.to_le_bytes().to_vec());
+        let cs_val = cs.write_to_bytes().unwrap();
+        wb.set_state(peer_id, region_id, KV_ENGINE_META_KEY, &cs_val);
+        Ok(cs)
+    }
+
+    fn write_truncated_state(
+        wb: &mut WriteBatch,
+        peer_id: u64,
+        region_id: u64,
+        index: u64,
+        term: u64,
+    ) {
+        let mut ts_val = BytesMut::with_capacity(16);
+        ts_val.put_u64_le(term);
+        ts_val.put_u64_le(index);
+        let ts = ts_val.freeze();
+        wb.set_state(peer_id, region_id, RAFT_TRUNCATED_STATE_KEY, ts.chunk());
+    }
+
+    fn write_raft_state(
+        wb: &mut WriteBatch,
+        peer_id: u64,
+        region_id: u64,
+        ver: u64,
+        index: u64,
+        term: u64,
+    ) -> RaftState {
+        let mut rs_val = BytesMut::with_capacity(40);
+        rs_val.put_u64_le(term);
+        rs_val.put_u64_le(0);
+        rs_val.put_u64_le(index);
+        rs_val.put_u64_le(index);
+        rs_val.put_u64_le(index);
+        let rs = rs_val.freeze();
+        let key = raft_state_key(ver);
+        wb.set_state(peer_id, region_id, key.chunk(), rs.chunk());
+        let mut raft_state = RaftState::default();
+        raft_state.unmarshal(rs.chunk());
+        raft_state
     }
 
     #[allow(dead_code)]
@@ -548,6 +659,177 @@ impl StatusServer {
                 .unwrap(),
             Err(_) => make_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error"),
         })
+    }
+
+    // URI: /unsafe_recover/clear?cluster_id=xxx&[keyspace_id=xxx[&table_id=xxx]][&
+    // region_id=xxx]
+    async fn unsafe_recover(
+        req: Request<Body>,
+        rf: rfengine::RfEngine,
+        engine: kvengine::Engine,
+    ) -> hyper::Result<Response<Body>> {
+        let bad_request_resp = |msg: &str| make_response(StatusCode::BAD_REQUEST, msg.to_owned());
+        let path = req.uri().path();
+        if path != "/unsafe_recover/clear" {
+            return Ok(bad_request_resp("bad request URI"));
+        }
+        let query = req.uri().query().unwrap_or("");
+        let query_pairs: HashMap<_, _> = url::form_urlencoded::parse(query.as_bytes()).collect();
+        let cluster_id = query_pairs.get("cluster_id");
+        if cluster_id.is_none() {
+            return Ok(bad_request_resp("cluster_id not found"));
+        }
+        let cluster_id = match u64::from_str(cluster_id.unwrap()) {
+            Ok(cluster_id) => cluster_id,
+            Err(e) => return Ok(bad_request_resp(e.to_string().as_str())),
+        };
+        let store_ident = Self::load_store_ident(&rf);
+        if cluster_id != store_ident.cluster_id {
+            return Ok(bad_request_resp("cluster_id not match"));
+        }
+        let region_id = query_pairs.get("region_id");
+        let keyspace_id = query_pairs.get("keyspace_id");
+        let table_id = query_pairs.get("table_id");
+
+        let target_regions = if let Some(region_id) = region_id {
+            let region_id = match u64::from_str(region_id) {
+                Ok(region_id) => region_id,
+                Err(err) => return Ok(bad_request_resp(err.to_string().as_str())),
+            };
+            let region_to_peers = rf.get_region_peer_map();
+            let &peer_id = region_to_peers.get(&region_id).unwrap();
+            let cs = load_raft_engine_meta(&rf, peer_id);
+            if cs.is_none() {
+                return Ok(bad_request_resp(
+                    format!("region {} peer {} not exists", region_id, peer_id).as_str(),
+                ));
+            }
+            vec![(peer_id, region_id, cs.unwrap().shard_ver)]
+        } else if let Some(keyspace_id) = keyspace_id {
+            let keyspace_id = match u32::from_str(keyspace_id) {
+                Ok(keyspace_id) => keyspace_id,
+                Err(e) => return Ok(bad_request_resp(e.to_string().as_str())),
+            };
+            let mut prefix = ApiV2::get_txn_keyspace_prefix(keyspace_id);
+            if let Some(table_id) = table_id {
+                let table_id = match u64::from_str(table_id) {
+                    Ok(table_id) => table_id,
+                    Err(e) => return Ok(bad_request_resp(e.to_string().as_str())),
+                };
+                prefix.put_u8(b't');
+                prefix.encode_i64(table_id as i64).unwrap();
+            }
+            if let Some(regions) = collect_prefix_regions(&rf, &prefix) {
+                regions
+            } else {
+                return Ok(bad_request_resp("collect none region with prefix"));
+            }
+        } else {
+            return Ok(bad_request_resp("query parameters invalid"));
+        };
+
+        let target_regions_len = target_regions.len();
+        let mut wb = WriteBatch::new();
+        for (peer_id, region_id, region_version) in target_regions {
+            let shard_stats = engine.get_shard_stat(region_id);
+            info!(
+                "unsafe recover region {} peer {} shard_stats {:?}",
+                region_id, peer_id, shard_stats
+            );
+            if shard_stats.id != 0 {
+                return Ok(bad_request_resp(
+                    format!("region {} not in blacklist", region_id).as_str(),
+                ));
+            }
+
+            let old_raft_state = match Self::load_raft_state(&rf, peer_id, region_version) {
+                Some(state) => state,
+                None => {
+                    return Ok(bad_request_resp(
+                        format!(
+                            "region {} peer {} raft state not exists",
+                            region_id, peer_id
+                        )
+                        .as_str(),
+                    ));
+                }
+            };
+            let raft_state_last_index = old_raft_state.get_last_index();
+            let raft_log_last_index = rf.get_last_index(peer_id).unwrap_or(RAFT_INIT_LOG_INDEX);
+            let last_index = std::cmp::max(raft_state_last_index, raft_log_last_index);
+            info!(
+                "unsafe_recover region: {} peer: {} truncate raft log to {}",
+                region_id, peer_id, last_index
+            );
+            wb.truncate_raft_log(peer_id, region_id, last_index);
+
+            let raft_log_term = rf
+                .get_term(peer_id, last_index)
+                .unwrap_or(RAFT_INIT_LOG_TERM);
+            let old_kv_engine_meta = match rf.get_state(peer_id, KV_ENGINE_META_KEY) {
+                Some(meta) => meta,
+                None => {
+                    return Ok(bad_request_resp(
+                        format!("peer {} kv engine meta not exists", peer_id).as_str(),
+                    ));
+                }
+            };
+            let mut old_cs = kvenginepb::ChangeSet::new();
+            old_cs.merge_from_bytes(&old_kv_engine_meta).unwrap();
+            let snap = old_cs.get_snapshot();
+            let inner_key_off = snap.get_inner_key_off();
+            let mut properties = kvengine::Properties::new();
+            properties = properties.apply_pb(snap.get_properties());
+            let meta_term = properties.get(TERM_KEY).unwrap().get_u64_le();
+
+            // Add a delta to term 3 make sure it's greater than term in pd cache.
+            let term = std::cmp::max(raft_log_term, meta_term) + 3;
+
+            let _ = match Self::write_empty_engine_meta(
+                &rf,
+                &mut wb,
+                peer_id,
+                region_id,
+                region_version,
+                last_index,
+                term,
+                inner_key_off,
+            ) {
+                Ok(cs) => {
+                    info!(
+                        "unsafe_recover region: {} peer: {} reset kv engine meta {:?} -> {:?}",
+                        region_id, peer_id, old_cs, cs
+                    );
+                    cs
+                }
+                Err(e) => return Ok(bad_request_resp(e.to_string().as_str())),
+            };
+
+            Self::write_truncated_state(&mut wb, peer_id, region_id, last_index, term);
+            info!(
+                "unsafe_recover region: {} peer: {} reset truncated state to truncated_index: {} truncated_term: {}",
+                region_id, peer_id, last_index, term
+            );
+
+            let raft_state = Self::write_raft_state(
+                &mut wb,
+                peer_id,
+                region_id,
+                region_version,
+                last_index,
+                term,
+            );
+            info!(
+                "unsafe_recover region: {} peer: {} reset raft state {:?} -> {:?}",
+                region_id, peer_id, old_raft_state, raft_state
+            );
+        }
+
+        rf.write(wb).unwrap();
+        Ok(make_response(
+            StatusCode::OK,
+            format!("{} region(s) clear success", target_regions_len),
+        ))
     }
 
     async fn backup_rfengine(
@@ -1101,6 +1383,9 @@ impl StatusServer {
                             }
                             (Method::POST, path) if path.starts_with("/ingest_files") => {
                                 Self::ingest_files(req, router).await
+                            }
+                            (Method::POST, path) if path.starts_with("/unsafe_recover") => {
+                                Self::unsafe_recover(req, rfengine, engine).await
                             }
                             _ => Ok(make_response(StatusCode::NOT_FOUND, "path not found")),
                         }

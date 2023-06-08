@@ -9,13 +9,15 @@ use kvproto::{
     metapb::PeerRole,
     raft_serverpb::{PeerState, RegionLocalState, StoreIdent},
 };
-use native_br::common::load_rf_engine_meta;
 use protobuf::Message;
 use rfengine::{
     raft_state_key, region_state_key, RfEngine, WriteBatch, KV_ENGINE_META_KEY,
     REGION_META_KEY_BYTE, STORE_IDENT_KEY,
 };
-use rfstore::store::{RAFT_INIT_LOG_INDEX, RAFT_INIT_LOG_TERM, TERM_KEY};
+use rfstore::store::{
+    peer_storage::{collect_prefix_regions, load_region_state},
+    RAFT_INIT_LOG_INDEX, RAFT_INIT_LOG_TERM, TERM_KEY,
+};
 use tikv_util::{
     codec::{bytes::decode_bytes, number::NumberEncoder},
     info,
@@ -85,13 +87,13 @@ pub(crate) fn execute_unsafe_recover(args: UnsafeRecoverArgs) {
             prefix.put_u8(b't');
             prefix.encode_i64(table_id as i64).unwrap();
         }
-        collect_prefix_regions(&rf, &prefix)
+        collect_prefix_regions(&rf, &prefix).unwrap()
     } else if let Some(table_id) = args.table {
         let mut prefix = vec![b't'];
         prefix.encode_i64(table_id as i64).unwrap();
-        collect_prefix_regions(&rf, &prefix)
+        collect_prefix_regions(&rf, &prefix).unwrap()
     } else if args.all {
-        collect_prefix_regions(&rf, &[])
+        collect_prefix_regions(&rf, &[]).unwrap()
     } else {
         panic!("no filter specified");
     };
@@ -99,8 +101,7 @@ pub(crate) fn execute_unsafe_recover(args: UnsafeRecoverArgs) {
     if let Some(failed_stores_str) = args.remove_stores {
         let failed_stores: HashSet<u64> = parse_stores(&failed_stores_str);
         for (peer_id, region_id, region_version) in target_regions {
-            let region_state_key = region_state_key(region_version);
-            let mut region_local_state = load_region_state(&rf, peer_id, &region_state_key);
+            let mut region_local_state = load_region_state(&rf, peer_id, region_version).unwrap();
             let region = region_local_state.mut_region();
             let old_region = region.clone();
             region.mut_region_epoch().conf_ver += 1;
@@ -108,6 +109,7 @@ pub(crate) fn execute_unsafe_recover(args: UnsafeRecoverArgs) {
             new_peers.retain(|peer| !failed_stores.contains(&peer.store_id));
             region.set_peers(new_peers.into());
             let region_state_val = region_local_state.write_to_bytes().unwrap();
+            let region_state_key = region_state_key(region_version);
             wb.set_state(peer_id, region_id, &region_state_key, &region_state_val);
             info!(
                 "update region from {:?} to {:?}",
@@ -120,18 +122,17 @@ pub(crate) fn execute_unsafe_recover(args: UnsafeRecoverArgs) {
             rf.iterate_peer_states(peer_id, false, |k, _| {
                 wb.set_state(peer_id, region_id, k, &[]);
             });
-            let region_state_key = region_state_key(region_version);
-            let mut region_local_state = load_region_state(&rf, peer_id, &region_state_key);
+            let mut region_local_state = load_region_state(&rf, peer_id, region_version).unwrap();
             region_local_state.state = PeerState::Tombstone;
             let region_state_val = region_local_state.write_to_bytes().unwrap();
+            let region_state_key = region_state_key(region_version);
             wb.set_state(peer_id, region_id, &region_state_key, &region_state_val);
             wb.truncate_raft_log(peer_id, region_id, u64::MAX);
             info!("destroy region {:?}", region_local_state);
         }
     } else {
         for (peer_id, _, region_version) in target_regions {
-            let region_state_key = region_state_key(region_version);
-            let region_local_state = load_region_state(&rf, peer_id, &region_state_key);
+            let region_local_state = load_region_state(&rf, peer_id, region_version).unwrap();
             info!("region: {:?}", region_local_state.get_region());
         }
     }
@@ -142,37 +143,11 @@ pub(crate) fn execute_unsafe_recover(args: UnsafeRecoverArgs) {
     }
 }
 
-fn collect_prefix_regions(rf: &RfEngine, prefix: &[u8]) -> Vec<(u64, u64, u64)> {
-    let region_peers = rf.get_region_peer_map();
-    let mut prefix_peers = vec![];
-    for (region_id, peer_id) in region_peers {
-        if region_id == 0 {
-            continue;
-        }
-        let engine_meta = load_rf_engine_meta(rf, peer_id).expect("engine meta not found");
-        let snap = engine_meta.get_snapshot();
-        let start = snap.get_outer_start();
-        if start.starts_with(prefix) {
-            prefix_peers.push((peer_id, region_id, engine_meta.shard_ver));
-        }
-    }
-    prefix_peers
-}
-
 fn parse_stores(stores_str: &str) -> HashSet<u64> {
     stores_str
         .split(',')
         .map(|x| u64::from_str(x).unwrap())
         .collect()
-}
-
-fn load_region_state(rf: &RfEngine, peer_id: u64, key: &[u8]) -> RegionLocalState {
-    let region_state_val = rf.get_state(peer_id, key).expect("region state not found");
-    let mut region_local_state = RegionLocalState::new();
-    region_local_state
-        .merge_from_bytes(&region_state_val)
-        .unwrap();
-    region_local_state
 }
 
 fn create_empty_regions(rf: &RfEngine, empty_region_file: String, commit: bool) {

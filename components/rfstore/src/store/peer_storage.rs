@@ -745,3 +745,64 @@ pub(crate) fn load_raft_truncated_state(
         state
     })
 }
+
+pub fn load_raft_engine_meta(
+    raft: &rfengine::RfEngine,
+    peer_id: u64,
+) -> Option<kvenginepb::ChangeSet> {
+    raft.get_state(peer_id, rfengine::KV_ENGINE_META_KEY)
+        .map(|engine_meta_val| {
+            let mut cs = kvenginepb::ChangeSet::new();
+            cs.merge_from_bytes(&engine_meta_val).unwrap();
+            cs
+        })
+}
+
+pub fn load_peer_raft_state(
+    raft: &rfengine::RfEngine,
+    peer_id: u64,
+    region_version: u64,
+) -> Option<RaftState> {
+    let raft_state_key = rfengine::raft_state_key(region_version);
+    let raft_state_val = raft.get_state(peer_id, &raft_state_key)?;
+    let mut raft_state = RaftState::default();
+    raft_state.unmarshal(raft_state_val.as_ref());
+    Some(raft_state)
+}
+
+pub fn collect_prefix_regions(
+    raft: &rfengine::RfEngine,
+    prefix: &[u8],
+) -> Option<Vec<(u64, u64, u64)>> {
+    let region_peers = raft.get_region_peer_map();
+    let mut prefix_peers = vec![];
+    for (region_id, peer_id) in region_peers {
+        if region_id == 0 {
+            continue;
+        }
+        let engine_meta = match load_raft_engine_meta(raft, peer_id) {
+            Some(cs) => cs,
+            None => continue,
+        };
+        let snap = engine_meta.get_snapshot();
+        let start = snap.get_outer_start();
+        if start.starts_with(prefix) {
+            prefix_peers.push((peer_id, region_id, engine_meta.shard_ver));
+        }
+    }
+    Some(prefix_peers)
+}
+
+pub fn load_region_state(
+    rf: &rfengine::RfEngine,
+    peer_id: u64,
+    ver: u64,
+) -> Option<RegionLocalState> {
+    let region_state_key = region_state_key(ver);
+    let region_state_val = rf.get_state(peer_id, region_state_key.chunk())?;
+    let mut region_local_state = RegionLocalState::new();
+    region_local_state
+        .merge_from_bytes(&region_state_val)
+        .unwrap();
+    Some(region_local_state)
+}
