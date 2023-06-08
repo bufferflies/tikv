@@ -53,7 +53,7 @@ pub struct RaftState {
 
 impl RaftState {
     pub(crate) fn marshal(&self) -> Bytes {
-        let mut buf = BytesMut::with_capacity(32);
+        let mut buf = BytesMut::with_capacity(40);
         buf.put_u64_le(self.term);
         buf.put_u64_le(self.vote);
         buf.put_u64_le(self.commit);
