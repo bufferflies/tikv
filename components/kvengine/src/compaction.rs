@@ -1704,6 +1704,11 @@ fn compact_destroy_range(
     let del_prefixes = DeletePrefixes::unmarshal(&req.del_prefixes, req.inner_key_off);
     let (tx, rx) = tikv_util::mpsc::bounded(req.file_ids.len());
     for (&(id, level, cf), &new_id) in req.in_place_compact_files.iter().zip(req.file_ids.iter()) {
+        let mut delete = pb::TableDelete::new();
+        delete.set_id(id);
+        delete.set_level(level);
+        delete.set_cf(cf);
+        deletes.push(delete);
         let file = files.remove(&id).unwrap();
         let (data, smallest, biggest) = if level == 0 {
             let t = sstable::L0Table::new(Arc::new(file), None, false).unwrap();
@@ -1756,11 +1761,6 @@ fn compact_destroy_range(
         dfs.get_runtime().spawn(async move {
             tx.send(dfs_clone.create(new_id, data, opts).await).unwrap();
         });
-        let mut delete = pb::TableDelete::new();
-        delete.set_id(id);
-        delete.set_level(level);
-        delete.set_cf(cf);
-        deletes.push(delete);
         let mut create = pb::TableCreate::new();
         create.set_id(new_id);
         create.set_level(level);

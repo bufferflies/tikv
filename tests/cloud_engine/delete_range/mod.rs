@@ -4,7 +4,7 @@ use std::{thread, time::Duration};
 
 use kvproto::kvrpcpb::UnsafeDestroyRangeRequest;
 use pd_client::PdClient;
-use test_cloud_server::{client::ClusterClient, ServerCluster};
+use test_cloud_server::{client::ClusterClient, must_wait, ServerCluster};
 use tidb_query_common::util::convert_to_prefix_next;
 use tikv::config::TikvConfig;
 use tikv_util::config::ReadableDuration;
@@ -26,9 +26,7 @@ fn test_delete_range_helper(enable_inner_key_off: bool) {
     let mut client = cluster.new_client();
 
     // split keyspace region for inner key offset to take effect.
-    let keyspace_id_array = api_version::ApiV2::get_keyspace_id("x123".as_bytes());
-    let keyspace_id = api_version::ApiV2::get_u32_keyspace_id(keyspace_id_array);
-    client.split_keyspace(keyspace_id);
+    client.split_keyspace(get_keyspace_id("x123".as_bytes()));
 
     // insert "key_100".."key_500"
     client.put_kv(100..500, i_to_key_with_prefix, i_to_val);
@@ -89,6 +87,35 @@ fn test_delete_range_recover_helper(enable_inner_key_off: bool) {
         thread::sleep(Duration::from_secs(1));
     }
     cluster.stop();
+}
+
+#[test]
+fn test_delete_range_lost_table_delete() {
+    test_util::init_log_for_test();
+    let node_id = alloc_node_id();
+    let cluster = ServerCluster::new(vec![node_id], |_, conf| {
+        // 3 seconds max delay.
+        conf.raft_store.local_file_gc_timeout = ReadableDuration(Duration::from_secs(3));
+        conf.raft_store.local_file_gc_tick_interval = ReadableDuration(Duration::from_secs(1));
+    });
+    let mut client = cluster.new_client();
+    client.split_keyspace(get_keyspace_id("x123".as_bytes()));
+
+    client.put_kv(200..350, i_to_key_with_prefix, i_to_val);
+    client.put_kv(350..450, i_to_key_with_prefix, i_to_val);
+    client.put_kv(450..500, i_to_key_with_prefix, i_to_val);
+    let store_id = cluster.get_stores()[0];
+    destroy_range(&mut client, store_id, "x123key_2".as_bytes());
+    destroy_range(&mut client, store_id, "x123key_3".as_bytes());
+    destroy_range(&mut client, store_id, "x123key_4".as_bytes());
+    must_wait(
+        || {
+            let all_stats = cluster.get_kvengine(node_id).get_all_shard_stats();
+            all_stats.into_iter().map(|s| s.total_size).sum::<u64>() == 0
+        },
+        15,
+        "wait for total size to be 0",
+    );
 }
 
 #[test]
@@ -167,4 +194,9 @@ fn i_to_val(i: usize) -> Vec<u8> {
 
 fn i_to_key_with_prefix(i: usize) -> Vec<u8> {
     format!("x123key_{:03}", i).into_bytes()
+}
+
+fn get_keyspace_id(keyspace: &[u8]) -> u32 {
+    let keyspace_id_array = api_version::ApiV2::get_keyspace_id(keyspace);
+    api_version::ApiV2::get_u32_keyspace_id(keyspace_id_array)
 }
