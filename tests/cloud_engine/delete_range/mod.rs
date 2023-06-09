@@ -104,6 +104,9 @@ fn test_delete_range_lost_table_delete() {
     client.put_kv(200..350, i_to_key_with_prefix, i_to_val);
     client.put_kv(350..450, i_to_key_with_prefix, i_to_val);
     client.put_kv(450..500, i_to_key_with_prefix, i_to_val);
+    client.split("x123key_25".as_bytes());
+    client.split("x123key_35".as_bytes());
+    client.split("x123key_45".as_bytes());
     let store_id = cluster.get_stores()[0];
     destroy_range(&mut client, store_id, "x123key_2".as_bytes());
     destroy_range(&mut client, store_id, "x123key_3".as_bytes());

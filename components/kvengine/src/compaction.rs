@@ -1716,9 +1716,12 @@ fn compact_destroy_range(
             for cf in 0..NUM_CFS {
                 if let Some(cf_t) = t.get_cf(cf) {
                     let mut iter = cf_t.new_iterator(false, false);
-                    iter.rewind();
+                    iter.seek(req.inner_start());
                     while iter.valid() {
                         let key = iter.key();
+                        if key >= req.inner_end() {
+                            break;
+                        }
                         if !del_prefixes.cover_prefix(key) {
                             builder.add(cf, key, &iter.value(), None);
                         }
@@ -1741,9 +1744,12 @@ fn compact_destroy_range(
                 compression_lvl,
             );
             let mut iter = t.new_iterator(false, false);
-            iter.rewind();
+            iter.seek(req.inner_start());
             while iter.valid() {
                 let key = iter.key();
+                if key >= req.inner_end() {
+                    break;
+                }
                 if !del_prefixes.cover_prefix(key) {
                     builder.add(key, &iter.value(), None);
                 }
