@@ -29,12 +29,12 @@ impl RfEngineCore {
         let mut wal_offset = 0;
         let mut async_offset = 0;
         if wal_exists(self.wal_dir(), epoch_id) {
-            (wal_offset, async_offset) = self.load_wal_file(epoch_id)?;
+            (wal_offset, async_offset) = self.load_wal_file(epoch_id, true)?;
         }
         while wal_exists(self.wal_dir(), epoch_id + 1) {
             self.task_sender.send(Task::Rotate { epoch_id }).unwrap();
             epoch_id += 1;
-            let (offset, _) = self.load_wal_file(epoch_id)?;
+            let (offset, _) = self.load_wal_file(epoch_id, false)?;
             wal_offset = offset;
         }
         let mut writer = self.writer.lock().unwrap();
@@ -65,11 +65,11 @@ impl RfEngineCore {
         }
     }
 
-    pub(crate) fn load_wal_file(&mut self, epoch_id: u32) -> Result<(u64, u64)> {
+    pub(crate) fn load_wal_file(&mut self, epoch_id: u32, load_async: bool) -> Result<(u64, u64)> {
         info!("load wal {}", epoch_id);
         let mut async_batch_cnt = 0;
         let mut async_offset = 0;
-        if self.is_async_wal_enabled() {
+        if self.is_async_wal_enabled() && load_async {
             let mut async_it = WalIterator::new(self.dir.to_path_buf(), epoch_id, None);
             async_it.iterate_batch(|_| {
                 async_batch_cnt += 1;
