@@ -76,7 +76,7 @@ impl ServerCluster {
         for node_id in nodes {
             cluster.start_node(node_id, &update_conf);
         }
-        cluster.wait_pd_region_count(1);
+        cluster.wait_pd_region_min_count(1);
         cluster
     }
 
@@ -241,7 +241,10 @@ impl ServerCluster {
             }
             std::thread::sleep(Duration::from_millis(100));
         }
-        panic!("pd region count {} not match", region_count);
+        panic!(
+            "pd region count {} < min_count({})",
+            region_count, min_count
+        );
     }
 
     pub fn remove_node_peers(&mut self, node_id: u16) {
