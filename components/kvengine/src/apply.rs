@@ -221,12 +221,7 @@ impl EngineCore {
                     cs.sequence,
                 );
             }
-            let mut new_blob_tbl_map = old_data.blob_tbl_map.as_ref().clone();
 
-            if flush.has_blob_create() {
-                let blob_id = flush.get_blob_create().get_id();
-                new_blob_tbl_map.insert(blob_id, cs.blob_tables.get(&blob_id).unwrap().clone());
-            };
             let mut new_l0_tbls = Vec::with_capacity(old_data.l0_tbls.len() + 1);
             new_l0_tbls.push(l0_tbl);
             new_l0_tbls.extend_from_slice(old_data.l0_tbls.as_slice());
@@ -238,7 +233,7 @@ impl EngineCore {
                 old_data.trim_over_bound,
                 new_mem_tbls,
                 new_l0_tbls,
-                Arc::new(new_blob_tbl_map),
+                old_data.blob_tbl_map.clone(),
                 old_data.cfs.clone(),
                 old_data.unloaded_tbls.clone(),
             );
@@ -308,17 +303,7 @@ impl EngineCore {
                 }
                 !is_deleted
             });
-
-            new_blob_tbl_map.retain(|_, v| {
-                let is_deleted = comp.get_top_deletes().contains(&v.id());
-                if is_deleted {
-                    del_files.insert(
-                        v.id(),
-                        shard.cover_full_table(v.smallest_key(), v.biggest_key()),
-                    );
-                }
-                !is_deleted
-            });
+            new_blob_tbl_map.extend(cs.blob_tables.clone());
             for cf in 0..NUM_CFS {
                 let new_l1 = self.new_level(shard, cs, &data, cf, &mut del_files, true);
                 new_cfs[cf].set_level(new_l1);

@@ -99,17 +99,11 @@ pub struct BlobTableBuilder {
 }
 
 impl BlobTableBuilder {
-    pub fn new(
-        fid: u64,
-        checksum_tp: u8,
-        compression_tp: u8,
-        compression_lvl: i32,
-        min_blob_size: u32,
-    ) -> Self {
+    pub fn new(fid: u64, compression_tp: u8, compression_lvl: i32, min_blob_size: u32) -> Self {
         Self {
             fid,
             buf: vec![],
-            checksum_tp,
+            checksum_tp: 0,
             compression_tp,
             compression_lvl,
             min_blob_size,

@@ -279,7 +279,12 @@ impl SnapAccessCore {
             .data
             .blob_tbl_map
             .get(&blob_link.fid)
-            .unwrap_or_else(|| panic!("[{}] blob table not found {:?}", self.tag, key));
+            .unwrap_or_else(|| {
+                panic!(
+                    "[{}] blob table not found {:?}, blob table id: {}",
+                    self.tag, key, blob_link.fid
+                )
+            });
         blob_table
             .get(blob_link.offset, blob_link.len)
             .unwrap_or_else(|e| panic!("[{}] blob table get failed {:?} {:?}", self.tag, key, e))

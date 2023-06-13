@@ -460,7 +460,7 @@ mod tests {
         let sst_fid = TEST_ID_ALLOC.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         let blob_fid = TEST_ID_ALLOC.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         let mut sst_builder = new_table_builder_for_test(sst_fid);
-        let mut blob_builder = BlobTableBuilder::new(0, 0, NO_COMPRESSION, 0, 0);
+        let mut blob_builder = BlobTableBuilder::new(0, NO_COMPRESSION, 0, 0);
         let meta = 0u8;
 
         for (k, v) in kvs {

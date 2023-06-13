@@ -40,18 +40,15 @@ impl EngineCore {
                     FileMeta::from_l0_table(flush.get_l0_create()),
                 );
             }
-            if flush.has_blob_create() {
-                ids.insert(
-                    flush.get_blob_create().id,
-                    FileMeta::from_blob_table(flush.get_blob_create()),
-                );
-            }
         }
         if cs.has_compaction() {
             let comp = cs.get_compaction();
             if !is_move_down(comp) {
                 for tbl in &comp.table_creates {
                     ids.insert(tbl.id, FileMeta::from_table(tbl));
+                }
+                for bt in comp.get_blob_tables() {
+                    ids.insert(bt.get_id(), FileMeta::from_blob_table(bt));
                 }
             }
         }

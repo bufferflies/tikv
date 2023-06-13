@@ -375,16 +375,6 @@ impl ShardMeta {
             let l0 = flush.get_l0_create();
             self.add_file(l0.id, -1, 0, l0.get_smallest(), l0.get_biggest());
         }
-        if flush.has_blob_create() {
-            let blob = flush.get_blob_create();
-            self.add_file(
-                blob.id,
-                -1,
-                BLOB_LEVEL,
-                blob.get_smallest(),
-                blob.get_biggest(),
-            );
-        }
         let new_data_seq = flush.get_version() - self.base_version;
         if self.data_sequence < new_data_seq {
             debug!(
@@ -431,6 +421,15 @@ impl ShardMeta {
                 tbl.get_smallest(),
                 tbl.get_biggest(),
             )
+        }
+        for blob_table in comp.get_blob_tables() {
+            self.add_file(
+                blob_table.get_id(),
+                -1,
+                BLOB_LEVEL,
+                blob_table.get_smallest(),
+                blob_table.get_biggest(),
+            );
         }
     }
 

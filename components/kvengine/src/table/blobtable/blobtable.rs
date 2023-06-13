@@ -307,8 +307,7 @@ mod tests {
     #[test]
     fn test_basic() {
         let mut rng = rand::thread_rng();
-        let mut builder =
-            super::BlobTableBuilder::new(0, 0, sstable::builder::NO_COMPRESSION, 0, 0);
+        let mut builder = super::BlobTableBuilder::new(0, sstable::builder::NO_COMPRESSION, 0, 0);
         let mut test_data = Vec::new();
         let meta: u8 = 0;
 
@@ -345,8 +344,7 @@ mod tests {
 
     #[test]
     fn test_prefetcher() {
-        let mut builder =
-            super::BlobTableBuilder::new(0, 0, sstable::builder::NO_COMPRESSION, 0, 0);
+        let mut builder = super::BlobTableBuilder::new(0, sstable::builder::NO_COMPRESSION, 0, 0);
         let mut offsets = Vec::new();
         for i in 0..100 {
             let key_str = format!("key_{:03}", i);
