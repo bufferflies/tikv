@@ -86,6 +86,7 @@ portable = ["tikv/portable"]
 api_version = { workspace = true }
 async-trait = "0.1"
 batch-system = { workspace = true }
+bytes = "1.1"
 cdc = { workspace = true }
 collections = { workspace = true }
 crc64fast = "0.1"
@@ -101,6 +102,7 @@ grpcio-health = { version = "0.10", default-features = false }
 kvengine = { workspace = true }
 kvproto = { workspace = true }
 libc = "0.2"
+load_data = { path = "../components/load_data" }
 log_wrappers = { workspace = true }
 more-asserts = "0.2"
 native_br = { workspace = true }

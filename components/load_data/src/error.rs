@@ -3,11 +3,15 @@
 use kvengine::dfs;
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum Error {
+pub enum Error {
     #[error("check {0}")]
     CheckError(String),
+    #[error("canceled")]
+    Canceled,
     #[error("pd error {0}")]
     PdError(#[from] pd_client::Error),
+    #[error("ingest files {0}")]
+    IngestFiles(String),
     #[error("dfs error {0}")]
     DfsError(#[from] dfs::Error),
     #[error("hyper error {0}")]
@@ -16,12 +20,16 @@ pub(crate) enum Error {
     HttpError(#[from] http::Error),
     #[error("io error {0}")]
     IoError(#[from] std::io::Error),
-    #[error("native backup/restore error {0}")]
-    NativeBackupRestoreError(#[from] native_br::error::Error),
-    #[error("restore keyspace task conflict with id {0}")]
-    RestoreKeyspaceTaskConflict(u64),
-    #[error("datetime parse error {0}")]
-    DateTimeParseError(#[from] chrono::ParseError),
+    #[error("region {0} not found")]
+    RegionNotFound(u64),
+    #[error("leader of region {0} not found")]
+    LeaderNotFound(u64),
+    #[error("duplicated key {0}")]
+    DuplicatedKey(String),
     #[error("ReachLimit {0}")]
     ReachConcurrencyLimit(usize),
+    #[error("Other {0}")]
+    Other(String),
 }
+
+pub type Result<T> = std::result::Result<T, Error>;

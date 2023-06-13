@@ -68,7 +68,7 @@ impl ServerCluster {
             security_mgr: Arc::new(SecurityManager::new(&Default::default()).unwrap()),
             dfs: None,
             channels: HashMap::new(),
-            ref_store: Arc::new(Mutex::new(HashMap::new())),
+            ref_store: Arc::new(Mutex::new(RefStore::default())),
             schedule_lock: Arc::new(DashMap::new()),
             confs: Default::default(),
             keyspace_manager: Default::default(),

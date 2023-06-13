@@ -327,7 +327,7 @@ impl KeyspaceRefStores {
         match self.ref_stores.entry(keyspace_id) {
             Entry::Occupied(e) => e.get().clone(),
             Entry::Vacant(e) => {
-                let ref_store = Arc::new(Mutex::new(RefStore::new()));
+                let ref_store = Arc::new(Mutex::new(RefStore::default()));
                 e.insert(ref_store.clone());
                 ref_store
             }
@@ -370,7 +370,7 @@ impl KeyspaceRefStores {
         let ref_store = self.get_keyspace_ref_store(keyspace_id);
         let mut ref_store = ref_store.lock().unwrap();
         for mut m in mutations {
-            ref_store.insert(m.take_key(), Some(m.take_value()));
+            ref_store.put_kv(m.take_key(), m.take_value());
         }
     }
 
@@ -378,7 +378,7 @@ impl KeyspaceRefStores {
         let ref_store = self.get_keyspace_ref_store(keyspace_id);
         let mut ref_store = ref_store.lock().unwrap();
         for mut m in mutations {
-            ref_store.insert(m.take_key(), None);
+            ref_store.del_kv(m.take_key());
         }
     }
 

@@ -4,7 +4,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     ops::{
         Bound::{Excluded, Included, Unbounded},
-        Range,
+        Deref, DerefMut, Range,
     },
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -40,7 +40,32 @@ use crate::try_wait;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Sync + Send>>;
 
-pub type RefStore = HashMap<Vec<u8>, Option<Vec<u8>>>; // `None` means the key has been deleted.
+#[derive(Default, Clone)]
+pub struct RefStore(HashMap<Vec<u8>, Option<Vec<u8>>>); // `None` means the key has been deleted.
+
+impl RefStore {
+    pub fn put_kv(&mut self, key: Vec<u8>, value: Vec<u8>) {
+        self.0.insert(key, Some(value));
+    }
+
+    pub fn del_kv(&mut self, key: Vec<u8>) {
+        self.0.insert(key, None);
+    }
+}
+
+impl Deref for RefStore {
+    type Target = HashMap<Vec<u8>, Option<Vec<u8>>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for RefStore {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
 
 pub struct ClusterClient {
     pub pd_client: Arc<TestPdClient>,
@@ -173,7 +198,7 @@ impl ClusterClient {
     fn del_kv_in_ref_store(&mut self, mutations: Vec<Mutation>) {
         let mut ref_store = self.ref_store.lock().unwrap();
         for mut m in mutations {
-            ref_store.insert(m.take_key(), None);
+            ref_store.del_kv(m.take_key());
         }
     }
 
@@ -221,7 +246,7 @@ impl ClusterClient {
     fn put_kv_in_ref_store(&mut self, mutations: Vec<Mutation>) {
         let mut ref_store = self.ref_store.lock().unwrap();
         for mut m in mutations {
-            ref_store.insert(m.take_key(), Some(m.take_value()));
+            ref_store.put_kv(m.take_key(), m.take_value());
         }
     }
 
@@ -830,7 +855,7 @@ impl ClusterClient {
     ) -> Result<usize> {
         let mut cnt = 0;
         let put_time = Instant::now();
-        for (k, v) in ref_store {
+        for (k, v) in ref_store.iter() {
             if let Some(range) = range {
                 if k.as_slice() < range.0 || k.as_slice() >= range.1 {
                     continue;

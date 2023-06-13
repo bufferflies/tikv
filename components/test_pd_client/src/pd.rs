@@ -527,6 +527,30 @@ impl PdCluster {
             .map(|(_, region)| region.clone())
     }
 
+    fn scan_regions(&self, key: Vec<u8>, end_key: Vec<u8>, limit: usize) -> Vec<pdpb::Region> {
+        let search_key = data_key(&key);
+        let mut regions = vec![];
+        // The upper bound of `range` should not be `Included(end_key)`, as `end_key`
+        // of last expected regions can be bigger than `end_key`.
+        for (_, region) in self.regions.range((Excluded(search_key), Unbounded)) {
+            let mut pd_region = pdpb::Region::default();
+            pd_region.set_region(region.clone());
+            if let Some(p) = self.leaders.get(&region.id) {
+                pd_region.set_leader(p.clone());
+            }
+            // TODO: set down_peers, pending_peers.
+
+            regions.push(pd_region);
+            if regions.len() == limit {
+                break;
+            }
+            if !end_key.is_empty() && end_key.as_slice() <= region.get_end_key() {
+                break;
+            }
+        }
+        regions
+    }
+
     fn get_region_by_id(&self, region_id: u64) -> Result<Option<metapb::Region>> {
         Ok(self
             .region_id_keys
@@ -1542,6 +1566,19 @@ impl PdClient for TestPdClient {
         })
     }
 
+    fn scan_regions(
+        &self,
+        key: Vec<u8>,
+        end_key: Vec<u8>,
+        limit: usize,
+    ) -> PdFuture<Vec<pdpb::Region>> {
+        if let Err(e) = self.check_bootstrap() {
+            return Box::pin(err(e));
+        }
+        let regions = self.cluster.rl().scan_regions(key, end_key, limit);
+        Box::pin(ok(regions))
+    }
+
     fn get_region_info(&self, key: &[u8]) -> Result<RegionInfo> {
         let region = self.get_region(key)?;
         let leader = self.cluster.rl().leaders.get(&region.get_id()).cloned();
@@ -1938,5 +1975,80 @@ impl PdClient for TestPdClient {
             })
             .or_insert(buckets);
         ready(Ok(())).boxed()
+    }
+
+    fn scatter_regions_by_id(&self, _regions_id: Vec<u64>) -> Result<()> {
+        self.check_bootstrap()?;
+        // TODO: implement this method
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_scan_regions() {
+        let mut cluster = PdCluster::new(1);
+
+        let peer = metapb::Peer::default();
+
+        let region0 = metapb::Region {
+            id: 0,
+            end_key: b"10".to_vec(),
+            peers: vec![peer.clone()].into(),
+            ..Default::default()
+        };
+        let region10 = metapb::Region {
+            id: 10,
+            start_key: b"10".to_vec(),
+            end_key: b"20".to_vec(),
+            peers: vec![peer.clone()].into(),
+            ..Default::default()
+        };
+        let region20 = metapb::Region {
+            id: 20,
+            start_key: b"20".to_vec(),
+            end_key: b"30".to_vec(),
+            peers: vec![peer.clone()].into(),
+            ..Default::default()
+        };
+        let region30 = metapb::Region {
+            id: 30,
+            start_key: b"30".to_vec(),
+            peers: vec![peer].into(),
+            ..Default::default()
+        };
+
+        cluster.add_region(&region0);
+        cluster.add_region(&region10);
+        cluster.add_region(&region20);
+        cluster.add_region(&region30);
+
+        let cases: Vec<(&[u8], &[u8], usize, Vec<u64>)> = vec![
+            (b"", b"0", usize::MAX, vec![0]),
+            (b"", b"10", usize::MAX, vec![0]),
+            (b"", b"11", usize::MAX, vec![0, 10]),
+            (b"", b"20", usize::MAX, vec![0, 10]),
+            (b"", b"21", usize::MAX, vec![0, 10, 20]),
+            (b"05", b"21", usize::MAX, vec![0, 10, 20]),
+            (b"05", b"21", 2, vec![0, 10]),
+            (b"10", b"20", usize::MAX, vec![10]),
+            (b"15", b"25", usize::MAX, vec![10, 20]),
+            (b"30", b"31", usize::MAX, vec![30]),
+            (b"31", b"32", usize::MAX, vec![30]),
+            (b"", b"", usize::MAX, vec![0, 10, 20, 30]),
+            (b"", b"", 3, vec![0, 10, 20]),
+        ];
+
+        for (i, (start_key, end_key, limit, expected)) in cases.into_iter().enumerate() {
+            let regions = cluster.scan_regions(start_key.to_vec(), end_key.to_vec(), limit);
+            let region_ids = regions
+                .into_iter()
+                .map(|x| x.get_region().get_id())
+                .collect::<Vec<_>>();
+            assert_eq!(region_ids, expected, "case {}", i);
+        }
     }
 }

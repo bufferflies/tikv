@@ -13,6 +13,7 @@ mod backup;
 mod delete_range;
 mod engine_basic;
 mod gc;
+mod load_data;
 mod merge;
 mod native_backup;
 mod replica_read;

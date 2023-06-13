@@ -265,6 +265,7 @@ members = [
   "components/keys",
   "components/kvengine",
   "components/kvenginepb",
+  "components/load_data",
   "components/log_wrappers",
   "components/native_br",
   "components/online_config",
