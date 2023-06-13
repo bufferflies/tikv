@@ -1392,6 +1392,13 @@ impl Peer {
                         .map(|k| Key::from_raw(k.chunk()).into_encoded()),
                 );
             }
+            if shard.ver > self.region().get_region_epoch().version {
+                // The shard's version may be greater than the region's version, then the
+                // returned bucket_keys may exceed the region's range. So we need to exclude the
+                // out of range keys.
+                bucket_keys.retain(|k| check_key_in_region(k, self.region()).is_ok());
+                bucket_keys.dedup();
+            }
             bucket_keys.push(self.region().get_end_key().to_vec());
             let mut bucket_meta = BucketMeta::new(self.region(), bucket_keys, bucket_size);
             bucket_meta.version = self.bucket_version;
