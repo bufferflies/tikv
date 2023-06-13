@@ -1403,6 +1403,9 @@ mod tests {
                             .unwrap();
                         let mut buf = [0u8; 4096];
                         fd.read_exact_at(&mut buf, *offset).unwrap();
+                        if buf[*pos] == 255 {
+                            continue;
+                        }
                         buf[*pos] += 1;
                         fd.write_all_at(buf.as_ref(), *offset).unwrap();
                         fd.sync_data().unwrap();
