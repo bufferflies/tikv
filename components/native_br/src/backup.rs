@@ -32,13 +32,17 @@ use crate::{
 };
 
 const MAX_BATCH_GET_CNT: i64 = 1024;
-// keyspace meta in pd is "/pd/$cluster_id/PD_KEYSPACE_META_PATH"
-const PD_KEY_SPACE_META_PATH: [&str; 4] = [
+// keyspace meta in pd are:
+// 1. "/pd/$cluster_id/PD_KEYSPACE_META_PATH"
+// 2. "resource_group/"
+const PD_KEY_SPACE_META_PATH: [&str; 5] = [
     "keyspaces/",
     "region_label/keyspaces/",
     "rules/",
     "tso/keyspace_groups/membership/",
+    "resource_group/",
 ];
+
 const BACKUP_GC_SERVICE_NAME: &str = "native_br";
 // `BACKUP_SERVICE_SAFEPOINT_TTL` should not be too long, as failure of backup
 // will block GC.
@@ -467,7 +471,11 @@ async fn backup_pd_keyspace_meta(
     // User cannot set placement rule in serverless cluster except the tiflash
     // replica. So all placement rules are created inner, backup all of them.
     for path in PD_KEY_SPACE_META_PATH {
-        let prefix = format!("/pd/{}/{}", cluster_id, path).as_bytes().to_owned();
+        let prefix = if path.starts_with("resource_group") {
+            path.as_bytes().to_owned()
+        } else {
+            format!("/pd/{}/{}", cluster_id, path).as_bytes().to_owned()
+        };
         let mut seek_key = prefix.clone();
         loop {
             let resp = etcd_client.get(seek_key, Some(get_option.clone())).await?;
