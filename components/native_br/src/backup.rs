@@ -32,15 +32,25 @@ use crate::{
 };
 
 const MAX_BATCH_GET_CNT: i64 = 1024;
-// keyspace meta in pd are:
-// 1. "/pd/$cluster_id/PD_KEYSPACE_META_PATH"
-// 2. "resource_group/"
-const PD_KEY_SPACE_META_PATH: [&str; 5] = [
-    "keyspaces/",
-    "region_label/keyspaces/",
-    "rules/",
-    "tso/keyspace_groups/membership/",
-    "resource_group/",
+// `PD_KEY_SPACE_META_PATH` is an array of tuples each containing:
+// 1. A string representing a keyspace meta path.
+// 2. A boolean indicating whether the path is prefixed by 'pd/$cluster_id/'.
+//
+// Keyspace meta paths in PD are:
+// 1. keyspace meta: "/pd/$cluster_id/keyspaces/"
+// 2. keyspace region label: "/pd/$cluster_id/region_label/keyspaces/"
+// 3. keyspace placement rules: "/pd/$cluster_id/rules/"
+// 4. keyspace group membership:
+//      "/pd/$cluster_id/tso/keyspace_groups/membership/"
+// 5. resource group information: "resource_group/" (Note: no leading slash)
+// 6. tidb worker keys: "/tidb/remote/worker/"
+const PD_KEY_SPACE_META_PATH: [(&str, bool); 6] = [
+    ("keyspaces/", true),
+    ("region_label/keyspaces/", true),
+    ("rules/", true),
+    ("tso/keyspace_groups/membership/", true),
+    ("resource_group/", false),
+    ("/tidb/remote/worker/", false),
 ];
 
 const BACKUP_GC_SERVICE_NAME: &str = "native_br";
@@ -470,11 +480,11 @@ async fn backup_pd_keyspace_meta(
     // Content is not parsed as it's hard to align to the format with PD repo.
     // User cannot set placement rule in serverless cluster except the tiflash
     // replica. So all placement rules are created inner, backup all of them.
-    for path in PD_KEY_SPACE_META_PATH {
-        let prefix = if path.starts_with("resource_group") {
-            path.as_bytes().to_owned()
-        } else {
+    for (path, prefixed) in PD_KEY_SPACE_META_PATH {
+        let prefix = if prefixed {
             format!("/pd/{}/{}", cluster_id, path).as_bytes().to_owned()
+        } else {
+            path.as_bytes().to_owned()
         };
         let mut seek_key = prefix.clone();
         loop {
