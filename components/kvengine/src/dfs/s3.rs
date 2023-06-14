@@ -224,7 +224,7 @@ impl S3FsCore {
             RusotoError::Service(_) => true,
             RusotoError::HttpDispatch(_) => true,
             RusotoError::InvalidDnsName(_) => false,
-            RusotoError::Credentials(_) => false,
+            RusotoError::Credentials(cred) => cred.message.contains("Timeout"),
             RusotoError::Validation(_) => false,
             RusotoError::ParseError(_) => false,
             RusotoError::Unknown(resp) => resp.status.is_server_error(),
