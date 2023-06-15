@@ -108,6 +108,10 @@ impl<S: Snapshot> CloudStore<S> {
         }
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.snapshot.get_start_key().is_empty() && self.snapshot.get_end_key().is_empty()
+    }
+
     fn get_inner<'a>(
         user_key: &Key,
         snap: &'a kvengine::SnapAccess,
@@ -195,6 +199,25 @@ impl<S: Snapshot> CloudStore<S> {
         Ok(())
     }
 
+    pub fn check_locks_in_range(&self, lower_bound: &[u8], upper_bound: &[u8]) -> Result<()> {
+        let lower_bound = txn_types::Key::from_raw_maybe_unbounded(lower_bound);
+        let upper_bound = txn_types::Key::from_raw_maybe_unbounded(upper_bound);
+        let lower_bound = lower_bound.map(|k| Bytes::from(k.to_raw().unwrap()));
+        let upper_bound = upper_bound.map(|k| Bytes::from(k.to_raw().unwrap()));
+        self.verify_range(&lower_bound, &upper_bound)?;
+        let mut stats = Statistics::default();
+        let iter =
+            self.snapshot
+                .new_iterator(LOCK_CF, false, false, Some(self.start_ts), self.fill_cache);
+        self.check_locks(iter, lower_bound, upper_bound, &mut stats)?;
+        Ok(())
+    }
+
+    pub fn new_memtable_iterator(&self) -> kvengine::read::Iterator {
+        self.snapshot
+            .new_memtable_iterator(WRITE_CF, false, false, Some(self.start_ts))
+    }
+
     fn scanner_inner(
         &self,
         desc: bool,
@@ -202,8 +225,14 @@ impl<S: Snapshot> CloudStore<S> {
         upper_bound: Option<Key>,
         output_delete: bool,
     ) -> Result<CloudStoreScanner> {
-        let lower_bound = lower_bound.map(|k| Bytes::from(k.to_raw().unwrap()));
-        let upper_bound = upper_bound.map(|k| Bytes::from(k.to_raw().unwrap()));
+        let (lower_bound, upper_bound) = if !self.is_empty() {
+            (
+                lower_bound.map(|k| Bytes::from(k.to_raw().unwrap())),
+                upper_bound.map(|k| Bytes::from(k.to_raw().unwrap())),
+            )
+        } else {
+            (None, None)
+        };
         self.verify_range(&lower_bound, &upper_bound)?;
         let mut stats = Statistics::default();
         let lock_iter = self
@@ -325,6 +354,12 @@ impl CloudStoreScanner {
             self.iter.next();
             continue;
         }
+    }
+
+    pub fn next_with_user_meta(&mut self) -> Result<Option<(Key, UserMeta, Value)>> {
+        Ok(self
+            .next_inner()?
+            .map(|(key, user_meta, val)| (key, user_meta, val)))
     }
 }
 

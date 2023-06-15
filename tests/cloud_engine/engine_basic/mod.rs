@@ -1,5 +1,6 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
+mod test_remote_coprocessor;
 mod test_stats;
 
 use std::{thread, time::Duration};

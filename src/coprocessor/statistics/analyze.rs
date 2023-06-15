@@ -77,7 +77,7 @@ impl<S: Snapshot, F: KvFormat> AnalyzeContext<S, F> {
             }
             snap.get_kvengine_snap()
                 .unwrap()
-                .marshal(kv_ranges.as_slice())
+                .marshal(kv_ranges.as_slice(), false)
                 .map(|(key, snap_bytes)| {
                     ctx.remote_req.key = key;
                     ctx.remote_req.snap_bytes = snap_bytes;

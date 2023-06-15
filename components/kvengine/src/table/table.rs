@@ -10,6 +10,13 @@ use crate::{
     table::blobtable::builder::{BlobOffset, ValueLength},
 };
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct Row {
+    pub key: Vec<u8>,
+    pub user_meta: crate::UserMeta,
+    pub value: Vec<u8>,
+}
+
 pub trait Iterator: Send {
     // next returns the next entry with different key on the latest version.
     // If old version is needed, call next_version.

@@ -36,7 +36,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 pub use checksum::checksum_crc64_xor;
-pub use endpoint::parse_request_and_remote_analyze;
+pub use endpoint::{parse_request_and_handle_remote_cop, parse_request_and_remote_analyze};
 use engine_traits::PerfLevel;
 use kvproto::{coprocessor as coppb, kvrpcpb};
 use lazy_static::lazy_static;

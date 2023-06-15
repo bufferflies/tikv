@@ -138,6 +138,49 @@ impl Dfs for InMemFs {
 }
 
 #[derive(Clone)]
+pub struct CacheFs {
+    cache: moka::future::Cache<u64, Bytes>,
+    s3_fs: Arc<S3Fs>,
+}
+
+impl CacheFs {
+    pub fn new(cache_size: u64, s3_fs: Arc<S3Fs>) -> Self {
+        let builder = moka::future::CacheBuilder::new(cache_size);
+        let builder = builder.weigher(|_, v: &Bytes| v.len() as u32);
+        let cache = builder.build();
+        Self { cache, s3_fs }
+    }
+}
+
+#[async_trait]
+impl Dfs for CacheFs {
+    async fn read_file(&self, file_id: u64, opts: Options) -> Result<Bytes> {
+        let s3_fs = self.s3_fs.clone();
+        let file = self
+            .cache
+            .try_get_with(file_id, async move { s3_fs.read_file(file_id, opts).await })
+            .await
+            .map_err(|e| e.as_ref().clone())?;
+        Ok(file)
+    }
+    async fn create(&self, _file_id: u64, _data: Bytes, _opts: Options) -> Result<()> {
+        panic!("Do not call");
+    }
+
+    async fn remove(&self, _file_id: u64, _file_len: Option<u64>, _opts: Options) {
+        panic!("Do not call");
+    }
+
+    async fn permanently_remove(&self, _file_id: u64, _opts: Options) -> Result<()> {
+        panic!("Do not call");
+    }
+
+    fn get_runtime(&self) -> &Runtime {
+        self.s3_fs.get_runtime()
+    }
+}
+
+#[derive(Clone)]
 pub struct LocalFs {
     core: Arc<LocalFsCore>,
 }
@@ -272,7 +315,7 @@ impl Options {
 
 pub type Result<T> = result::Result<T, Error>;
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Clone)]
 pub enum Error {
     #[error("IO error: {0}")]
     Io(String),
@@ -281,7 +324,7 @@ pub enum Error {
     #[error("S3 error {0}")]
     S3(String),
     #[error("Other error {0}")]
-    Other(#[from] Box<dyn std::error::Error + Sync + Send>),
+    Other(String),
 }
 
 impl From<io::Error> for Error {

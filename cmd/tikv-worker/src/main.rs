@@ -5,6 +5,7 @@ mod error;
 mod load_data;
 mod metrics;
 mod native_br;
+mod remote_cop;
 
 use std::{
     io,
@@ -41,7 +42,7 @@ use security::{SecurityConfig, SecurityManager};
 use slog::Level;
 use slog_global::{error, info};
 use tikv_util::{
-    config::ReadableDuration,
+    config::{ReadableDuration, ReadableSize},
     metrics::{dump, dump_to},
     time::Instant,
 };
@@ -185,7 +186,7 @@ fn main() {
 
     info!("config is {:?}", &config);
     let dfs_config = config.dfs.clone();
-    let dfs = Arc::new(kvengine::dfs::S3Fs::new(
+    let s3fs = Arc::new(kvengine::dfs::S3Fs::new(
         dfs_config.prefix,
         dfs_config.s3_endpoint,
         dfs_config.s3_key_id,
@@ -193,6 +194,14 @@ fn main() {
         dfs_config.s3_region,
         dfs_config.s3_bucket,
     ));
+
+    let cache_fs = {
+        Arc::new(kvengine::dfs::CacheFs::new(
+            config.cop_cache_size.0,
+            s3fs.clone(),
+        ))
+    };
+
     let thread_pool = Arc::new(
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -226,30 +235,33 @@ fn main() {
     let load_manager = Arc::new(LoadDataManager::new(
         pd.clone(),
         config.data_dir.clone().into(),
-        dfs.clone(),
+        cache_fs.clone(),
         thread_pool.clone(),
         MAX_IN_MEM_SIZE,
     ));
     let br_manager = Arc::new(NativeBrManger::new(
         thread_pool.clone(),
         pd.clone(),
-        dfs.clone(),
+        s3fs.clone(),
         Some(config.data_dir.clone()),
         config.clone(),
     ));
     update_native_br_config_periodically(br_manager.clone(), config_file_path);
     let server_builder = hyper::Server::builder(incoming);
-    let dfs_clone = dfs.clone();
+    let s3fs_clone = s3fs.clone();
+    let cache_fs_clone = cache_fs.clone();
     let pd_clone = pd.clone();
     let server = server_builder.serve(make_service_fn(move |_| {
-        let dfs = dfs_clone.clone();
+        let s3fs = s3fs_clone.clone();
+        let cache_fs = cache_fs_clone.clone();
         let load_manager = load_manager.clone();
         let br_manager = br_manager.clone();
         let pd = pd_clone.clone();
         async move {
             // Create a status service.
             Ok::<_, hyper::Error>(service_fn(move |req: hyper::Request<hyper::Body>| {
-                let dfs = dfs.clone();
+                let s3fs = s3fs.clone();
+                let cache_fs = cache_fs.clone();
                 let load_manager = load_manager.clone();
                 let br_manager = br_manager.clone();
                 let pd = pd.clone();
@@ -262,10 +274,15 @@ fn main() {
                             .unwrap()),
                         "/compact" => {
                             let allocator = Arc::new(PdIdAllocator::new(pd));
-                            kvengine::handle_remote_compaction(dfs, req, compression_lvl, allocator)
-                                .await
+                            kvengine::handle_remote_compaction(
+                                s3fs,
+                                req,
+                                compression_lvl,
+                                allocator,
+                            )
+                            .await
                         }
-                        "/analyze" => handle_remote_analysis(dfs, req).await,
+                        "/analyze" => handle_remote_analysis(cache_fs, req).await,
                         "/load_data" => handle_load_data(load_manager, req).await,
                         "/metrics" => handle_get_metrics(req).await,
                         native_br::BACKUPS_API_PATH => {
@@ -290,18 +307,31 @@ fn main() {
     if config.register {
         let remote_compact_url = format!("http://{}/compact", config.addr);
         let duration = config.update_interval.0;
+        let pd_clone = pd.clone();
         std::thread::spawn(move || {
             loop {
                 register_compactor_to_all_stores(
-                    pd.clone(),
-                    dfs.clone(),
+                    pd_clone.clone(),
+                    s3fs.clone(),
                     remote_compact_url.clone(),
                 );
                 std::thread::sleep(duration);
             }
         });
     }
-
+    let mut cop_server_opt = None;
+    if !config.cop_addr.is_empty() {
+        let cop_config = remote_cop::Config {
+            addr: config.cop_addr.clone(),
+            max_handle_duration: Duration::from_secs(60),
+        };
+        let cop_server = remote_cop::RemoteCopServer::new(pd, cache_fs, cop_config);
+        cop_server_opt = Some(cop_server);
+    }
+    if let Some(server) = cop_server_opt.as_mut() {
+        server.start();
+        info!("remote cop server started");
+    }
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     thread_pool.spawn(async move {
         let res = server.await;
@@ -504,6 +534,8 @@ pub struct Config {
     pub data_dir: String,
     pub register: bool,
     pub native_br: NativeBrConfig,
+    pub cop_addr: String,
+    pub cop_cache_size: ReadableSize,
 }
 
 impl Default for Config {
@@ -521,6 +553,8 @@ impl Default for Config {
             data_dir: String::default(),
             register: false,
             native_br: NativeBrConfig::default(),
+            cop_addr: String::default(),
+            cop_cache_size: ReadableSize::gb(1),
         }
     }
 }

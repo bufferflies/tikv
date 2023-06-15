@@ -266,6 +266,34 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
         ctx.spawn(task);
     }
 
+    fn delegate_coprocessor(
+        &mut self,
+        ctx: RpcContext<'_>,
+        req: DelegateRequest,
+        sink: UnarySink<DelegateResponse>,
+    ) {
+        let begin_instant = Instant::now_coarse();
+        let future = self.copr.handle_delegate_request(req);
+        let task = async move {
+            let resp = future.await;
+            sink.success(resp).await?;
+            GRPC_MSG_HISTOGRAM_STATIC
+                .delegate_coprocessor
+                .observe(duration_to_sec(begin_instant.saturating_elapsed()));
+            ServerResult::Ok(())
+        }
+        .map_err(|e| {
+            debug!("kv rpc failed";
+                "request" => "delegate_coprocessor",
+                "err" => ?e
+            );
+            GRPC_MSG_FAIL_COUNTER.delegate_coprocessor.inc();
+        })
+        .map(|_| ());
+
+        ctx.spawn(task);
+    }
+
     fn unsafe_destroy_range(
         &mut self,
         ctx: RpcContext<'_>,

@@ -24,6 +24,8 @@ regex = "1.5"
 rfengine = { path = "../rfengine" }
 rfstore = { path = "../rfstore" }
 security = { path = "../security", default-features = false }
+serde = { version = "1.0", features = ["derive"] }
+serde_derive = "1.0"
 slog = { version = "2.3", features = ["max_level_trace", "release_max_level_debug"] }
 slog-global = { version = "0.1", git = "https://github.com/breeswish/slog-global.git", rev = "d592f88e4dbba5eb439998463054f1a44fbf17b9" }
 tempfile = "3.0"

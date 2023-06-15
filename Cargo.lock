@@ -3151,7 +3151,7 @@ dependencies = [
 [[package]]
 name = "kvproto"
 version = "0.0.2"
-source = "git+https://github.com/tidbcloud/kvproto.git?branch=release-6.6-keyspace#3965d68ea0bc2c9188d0aa660b91be23d72a0f99"
+source = "git+https://github.com/tidbcloud/kvproto.git?branch=release-6.6-keyspace#81b73c8078101fd448b897404461431db77cf7e7"
 dependencies = [
  "futures 0.3.15",
  "grpcio",
@@ -6604,6 +6604,8 @@ dependencies = [
  "rfengine",
  "rfstore",
  "security",
+ "serde",
+ "serde_derive",
  "slog",
  "slog-global",
  "tempfile",
@@ -6778,10 +6780,12 @@ dependencies = [
  "arrow",
  "async-trait",
  "batch-system",
+ "bincode",
  "byteorder",
  "bytes",
  "causal_ts",
  "cdc",
+ "codec",
  "collections",
  "concurrency_manager",
  "crc64fast",
@@ -6804,6 +6808,7 @@ dependencies = [
  "hyper",
  "keys",
  "kvengine",
+ "kvenginepb",
  "kvproto",
  "lazy_static",
  "libc 0.2.132",
@@ -6828,6 +6833,8 @@ dependencies = [
  "rfenginepb",
  "rfstore",
  "security",
+ "serde",
+ "serde_derive",
  "serde_json",
  "slog",
  "slog-global",
@@ -7069,6 +7076,7 @@ dependencies = [
  "async-trait",
  "backtrace",
  "batch-system",
+ "bincode",
  "byteorder",
  "bytes",
  "case_macros",
@@ -7381,6 +7389,7 @@ name = "tikv-worker"
 version = "0.1.0"
 dependencies = [
  "api_version",
+ "bincode",
  "bytes",
  "chrono",
  "clap 2.33.0",

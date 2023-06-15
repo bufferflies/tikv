@@ -80,6 +80,10 @@ impl ServerCluster {
         cluster
     }
 
+    pub fn get_dfs(&self) -> Option<Arc<dyn Dfs>> {
+        self.dfs.clone()
+    }
+
     fn prepare_dfs(config: &TikvConfig) -> Arc<dyn Dfs> {
         let dfs_conf = &config.dfs;
         if dfs_conf.s3_bucket.is_empty() && dfs_conf.s3_endpoint.is_empty()

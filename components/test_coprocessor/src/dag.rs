@@ -1,5 +1,7 @@
 // Copyright 2018 TiKV Project Authors. Licensed under Apache-2.0.
 
+use std::convert::TryInto;
+
 use kvproto::{
     coprocessor::{KeyRange, Request},
     kvrpcpb::Context,
@@ -214,10 +216,18 @@ impl DagSelect {
     }
 
     pub fn build(self) -> Request {
-        self.build_with(Context::default(), &[0])
+        self.build_impl(Context::default(), &[0], next_id().try_into().unwrap())
     }
 
-    pub fn build_with(mut self, ctx: Context, flags: &[u64]) -> Request {
+    pub fn build_with_start_ts(self, start_ts: txn_types::TimeStamp) -> Request {
+        self.build_impl(Context::default(), &[0], start_ts.into_inner())
+    }
+
+    pub fn build_with(self, ctx: Context, flags: &[u64]) -> Request {
+        self.build_impl(ctx, flags, next_id().try_into().unwrap())
+    }
+
+    fn build_impl(mut self, ctx: Context, flags: &[u64], start_ts: u64) -> Request {
         if !self.aggregate.is_empty() || !self.group_by.is_empty() {
             let mut exec = Executor::default();
             exec.set_tp(ExecType::TypeAggregation);
@@ -267,7 +277,7 @@ impl DagSelect {
         dag.set_output_offsets(output_offsets);
 
         let mut req = Request::default();
-        req.set_start_ts(next_id() as u64);
+        req.set_start_ts(start_ts);
         req.set_tp(REQ_TYPE_DAG);
         req.set_data(dag.write_to_bytes().unwrap());
         req.set_ranges(self.key_ranges.into());

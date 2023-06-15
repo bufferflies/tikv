@@ -17,9 +17,11 @@ use std::{
 use futures::executor::block_on;
 use grpcio::Channel;
 use kvproto::{
+    coprocessor as coppb,
     errorpb::Error,
     kvrpcpb::{
-        CommitRequest, Context, GetRequest, Mutation, Op, PrewriteRequest, SplitRegionRequest,
+        CommitRequest, Context, GetRequest, IsolationLevel, Mutation, Op, PrewriteRequest,
+        SplitRegionRequest,
     },
     metapb,
     metapb::{Peer, Region, RegionEpoch},
@@ -36,6 +38,7 @@ use tikv_util::{
     warn,
 };
 
+// use fail::fail_point;
 use crate::try_wait;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Sync + Send>>;
@@ -173,6 +176,14 @@ impl ClusterClient {
         block_on(self.pd_client.get_tso()).unwrap()
     }
 
+    pub fn del_table_rows_commit(&mut self, start_ts: TimeStamp, mutations: &[Mutation]) {
+        let commit_ts = self.get_ts();
+        let keys = mutations.iter().map(|m| m.get_key().to_vec()).collect();
+        self.kv_commit(keys, start_ts, commit_ts);
+        self.del_kv_in_ref_store(mutations.to_vec());
+        self.set_max_ts(commit_ts.into_inner());
+    }
+
     pub fn del_kv<F>(&mut self, rng: Range<usize>, gen_key: F)
     where
         F: Fn(usize) -> Vec<u8>,
@@ -200,6 +211,23 @@ impl ClusterClient {
         for mut m in mutations {
             ref_store.del_kv(m.take_key());
         }
+    }
+
+    pub fn put_commit(&mut self, start_ts: TimeStamp, mutations: &[Mutation]) -> Result<TimeStamp> {
+        let put_time = Instant::now();
+        let commit_ts = self.get_ts();
+        let first = mutations.first().unwrap().clone();
+        let keys = mutations.iter().map(|m| m.get_key().to_vec()).collect();
+        self.kv_commit(keys, start_ts, commit_ts);
+        self.verify_key_value(
+            first.get_key(),
+            Some(first.get_value()),
+            put_time,
+            &RequestOptions::default(),
+        )?;
+        self.put_kv_in_ref_store(mutations.to_vec());
+        self.set_max_ts(commit_ts.into_inner());
+        Ok(commit_ts)
     }
 
     pub fn put_kv<F, G>(&mut self, rng: Range<usize>, gen_key: F, gen_val: G)
@@ -343,6 +371,9 @@ impl ClusterClient {
     }
 
     pub fn kv_commit(&mut self, keys: Vec<Vec<u8>>, start_ts: TimeStamp, commit_ts: TimeStamp) {
+        // fail_point!("kv_commmit");
+        // println!("{:?}", fail::list());
+
         let groups = self.group_keys_by_region(keys);
         for (id_ver, group_keys) in groups {
             self.kv_commit_single_region(id_ver, group_keys, start_ts, commit_ts);
@@ -774,6 +805,92 @@ impl ClusterClient {
             )
         });
         (value, ctx)
+    }
+
+    pub fn get_memtable_snapshot(
+        &mut self,
+        req_ctx: Option<kvproto::kvrpcpb::Context>,
+        start_ts: u64,
+        ranges: Vec<coppb::KeyRange>,
+    ) -> Result<(Vec<u8>, Vec<u8>, Context)> {
+        assert!(ranges.len() == 1);
+        let start_time = Instant::now();
+        let timeout = Duration::from_secs(15);
+        let mut region_id = 0;
+        let mut store_id_errors = vec![];
+
+        let mut req = coppb::DelegateRequest::default();
+
+        // All ranges should be in the same region.
+        for range in ranges {
+            let id = self.get_region_id(range.get_start());
+            if region_id != 0 && id != region_id {
+                return Err(box_err!("Key ranges not in the same region".to_owned()));
+            }
+            region_id = id;
+            req.mut_ranges().push(range);
+        }
+
+        if let Some(req_ctx) = req_ctx {
+            req.set_context(req_ctx);
+        }
+        req.set_start_ts(start_ts);
+        req.mut_context().set_isolation_level(IsolationLevel::Si);
+
+        while start_time.saturating_elapsed() < timeout {
+            let ctx = self.new_rpc_ctx(region_id);
+
+            if ctx.is_none() {
+                continue;
+            }
+
+            let ctx = ctx.unwrap();
+            let store_id = ctx.get_peer().get_store_id();
+            let client = self.get_kv_client(store_id);
+
+            req.set_context(ctx.clone());
+
+            let result = client.delegate_coprocessor(&req);
+
+            if result.is_err() {
+                store_id_errors.push((store_id, format!("{:?}", result.unwrap_err())));
+                sleep(Duration::from_millis(100));
+                continue;
+            }
+
+            let mut resp = result.unwrap();
+
+            if resp.has_locked() {
+                sleep(Duration::from_millis(100));
+                continue;
+            }
+
+            let other_err = resp.get_other_error();
+
+            if !other_err.is_empty() {
+                panic!("unexpected error {:?}", other_err);
+            } else if resp.has_region_error() {
+                let region_err = resp.get_region_error();
+
+                store_id_errors.push((store_id, format!("{:?}", region_err)));
+
+                if self.handle_retryable_error(region_id, region_err) {
+                    continue;
+                }
+
+                if self.handle_region_epoch_not_match_or_not_found(region_err) {
+                    continue;
+                }
+                panic!("unexpected error {:?}", region_err);
+            }
+
+            return Ok((resp.take_mem_table_data(), resp.take_snapshot(), ctx));
+        }
+
+        panic!(
+            "region {} failed to get memtable snapshot: {:?}",
+            region_id, store_id_errors
+        );
     }
 
     pub fn get_key_version_opt(

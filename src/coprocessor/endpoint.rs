@@ -9,10 +9,12 @@ use ::tracker::{
 };
 use api_version::{dispatch_api_version, KvFormat};
 use async_stream::try_stream;
+use bytes::Buf;
 use concurrency_manager::ConcurrencyManager;
 use engine_traits::PerfLevel;
 use futures::{channel::mpsc, prelude::*};
 use futures_executor::block_on;
+use kvengine::UserMeta;
 use kvproto::{coprocessor as coppb, errorpb, kvrpcpb};
 use protobuf::{CodedInputStream, Message};
 use resource_metering::{FutureExt, ResourceTagFactory, StreamExt};
@@ -27,7 +29,7 @@ use txn_types::Lock;
 use crate::{
     coprocessor::{
         cache::CachedRequestHandler, interceptors::*, metrics::*,
-        statistics::analyze::RemoteContext, tracker::Tracker, *,
+        statistics::analyze::RemoteContext, tracker::Tracker, Error, *,
     },
     read_pool::ReadPoolHandle,
     server::Config,
@@ -46,6 +48,7 @@ use crate::{
 /// execution.
 const LIGHT_TASK_THRESHOLD: Duration = Duration::from_millis(5);
 const ANALYZE_CACHE_CAPACITY: u64 = 64;
+pub const REMOTE_COP_MEM_FORMAT: u32 = 1;
 
 /// A pool to build and run Coprocessor request handlers.
 #[derive(Clone)]
@@ -151,17 +154,20 @@ impl<E: Engine> Endpoint<E> {
         self.remote_ctx = Some(remote_ctx);
     }
 
-    fn check_memory_locks(&self, req_ctx: &ReqContext) -> Result<()> {
+    fn check_memory_locks(
+        concurrency_manager: &ConcurrencyManager,
+        req_ctx: &ReqContext,
+    ) -> Result<()> {
         let start_ts = req_ctx.txn_start_ts;
         if !req_ctx.context.get_stale_read() {
-            self.concurrency_manager.update_max_ts(start_ts);
+            concurrency_manager.update_max_ts(start_ts);
         }
         if need_check_locks(req_ctx.context.get_isolation_level()) {
             let begin_instant = Instant::now();
             for range in &req_ctx.ranges {
                 let start_key = txn_types::Key::from_raw_maybe_unbounded(range.get_start());
                 let end_key = txn_types::Key::from_raw_maybe_unbounded(range.get_end());
-                self.concurrency_manager
+                concurrency_manager
                     .read_range_check(start_key.as_ref(), end_key.as_ref(), |key, lock| {
                         Lock::check_ts_conflict(
                             Cow::Borrowed(lock),
@@ -272,7 +278,7 @@ impl<E: Engine> Endpoint<E> {
                     tracker.req_info.start_ts = start_ts;
                 });
 
-                self.check_memory_locks(&req_ctx)?;
+                Endpoint::<E>::check_memory_locks(&self.concurrency_manager, &req_ctx)?;
 
                 let batch_row_limit = self.get_batch_row_limit(is_streaming);
                 let quota_limiter = self.quota_limiter.clone();
@@ -336,7 +342,7 @@ impl<E: Engine> Endpoint<E> {
                     tracker.req_info.start_ts = start_ts;
                 });
 
-                self.check_memory_locks(&req_ctx)?;
+                Endpoint::<E>::check_memory_locks(&self.concurrency_manager, &req_ctx)?;
 
                 let quota_limiter = self.quota_limiter.clone();
                 let remote_req = RemoteAnalysisRequest {
@@ -393,7 +399,7 @@ impl<E: Engine> Endpoint<E> {
                     tracker.req_info.start_ts = start_ts;
                 });
 
-                self.check_memory_locks(&req_ctx)?;
+                Endpoint::<E>::check_memory_locks(&self.concurrency_manager, &req_ctx)?;
 
                 builder = Box::new(move |snap, req_ctx| {
                     checksum::ChecksumContext::new(
@@ -422,26 +428,30 @@ impl<E: Engine> Endpoint<E> {
         }
     }
 
+    fn add_ranges_to_snap_context(ctx: &ReqContext, snap_ctx: &mut SnapContext<'_>) {
+        // Need to pass start_ts and ranges to check memory locks for replica read
+        for r in &ctx.ranges {
+            let start_key = txn_types::Key::from_raw(r.get_start());
+            let end_key = txn_types::Key::from_raw(r.get_end());
+            let mut key_range = kvrpcpb::KeyRange::default();
+            key_range.set_start_key(start_key.into_encoded());
+            key_range.set_end_key(end_key.into_encoded());
+            snap_ctx.key_ranges.push(key_range);
+        }
+    }
+
     #[inline]
     fn async_snapshot(
         engine: &mut E,
-        ctx: &ReqContext,
+        req_ctx: &ReqContext,
     ) -> impl std::future::Future<Output = Result<E::Snap>> {
         let mut snap_ctx = SnapContext {
-            pb_ctx: &ctx.context,
-            start_ts: Some(ctx.txn_start_ts),
+            pb_ctx: &req_ctx.context,
+            start_ts: Some(req_ctx.txn_start_ts),
             ..Default::default()
         };
-        // need to pass start_ts and ranges to check memory locks for replica read
-        if need_check_locks_in_replica_read(&ctx.context) {
-            for r in &ctx.ranges {
-                let start_key = txn_types::Key::from_raw(r.get_start());
-                let end_key = txn_types::Key::from_raw(r.get_end());
-                let mut key_range = kvrpcpb::KeyRange::default();
-                key_range.set_start_key(start_key.into_encoded());
-                key_range.set_end_key(end_key.into_encoded());
-                snap_ctx.key_ranges.push(key_range);
-            }
+        if need_check_locks_in_replica_read(&req_ctx.context) {
+            Self::add_ranges_to_snap_context(req_ctx, &mut snap_ctx);
         }
         kv::snapshot(engine, snap_ctx).map_err(Error::from)
     }
@@ -599,7 +609,7 @@ impl<E: Engine> Endpoint<E> {
     // prepare all the requests and schedule them into the read pool, then
     // collect all the responses and convert them into the `StoreBatchResponse`
     // type.
-    pub fn process_batch_tasks(
+    fn process_batch_tasks(
         &self,
         req: &mut coppb::Request,
         peer: &Option<String>,
@@ -702,6 +712,7 @@ impl<E: Engine> Endpoint<E> {
                 with_tls_engine(|engine| Self::async_snapshot(engine, &tracker.req_ctx))
             }
             .await?;
+
             // When snapshot is retrieved, deadline may exceed.
             tracker.on_snapshot_finished();
             tracker.req_ctx.deadline.check()?;
@@ -808,6 +819,93 @@ impl<E: Engine> Endpoint<E> {
             .or_else(|e| futures::future::ok(make_error_response(e))) // Stream<Resp, ()>
             .map(|item: std::result::Result<_, ()>| item.unwrap())
     }
+
+    pub fn handle_delegate_request(
+        &self,
+        mut req: coppb::DelegateRequest,
+    ) -> impl Future<Output = coppb::DelegateResponse> {
+        let mut ranges = Vec::new();
+        let key_ranges = req.take_ranges().into_vec();
+        for key_range in key_ranges.clone() {
+            let kv_range = (
+                bytes::Bytes::from(key_range.start.clone()),
+                bytes::Bytes::from(key_range.end.clone()),
+            );
+            ranges.push(kv_range)
+        }
+        let req_ctx = ReqContext::new(
+            ReqTag::select,
+            req.take_context(),
+            key_ranges,
+            self.max_handle_duration,
+            None,
+            None,
+            req.start_ts.into(),
+            None,
+            self.perf_level,
+        );
+        let check_mem_res = Endpoint::<E>::check_memory_locks(&self.concurrency_manager, &req_ctx);
+        let priority = req_ctx.context.get_priority();
+        let task_id = req_ctx.build_task_id();
+        let res = self
+            .read_pool
+            .spawn_handle(
+                async move {
+                    check_mem_res?;
+                    let snapshot =
+                        unsafe { with_tls_engine(|engine| Self::async_snapshot(engine, &req_ctx)) }
+                            .await?;
+                    let snap_access = snapshot.get_kvengine_snap().unwrap().clone();
+                    let cloud_store = CloudStore::new(
+                        snapshot,
+                        req.start_ts,
+                        req_ctx.bypass_locks.clone(),
+                        !req_ctx.context.get_not_fill_cache(),
+                    );
+                    cloud_store.check_locks_in_range(&req_ctx.lower_bound, &req_ctx.upper_bound)?;
+                    let mut mem_iterator = cloud_store.new_memtable_iterator();
+                    let mut rows = vec![];
+                    let mut resp = coppb::DelegateResponse::default();
+                    for (range_start, range_end) in &ranges {
+                        mem_iterator.seek(range_start.chunk());
+                        while mem_iterator.valid() {
+                            let key = mem_iterator.key();
+                            if key >= range_end.chunk() {
+                                break;
+                            }
+                            rows.push(kvengine::table::Row {
+                                key: key.to_vec(),
+                                user_meta: UserMeta::from_slice(mem_iterator.user_meta()),
+                                value: mem_iterator.val().to_vec(),
+                            });
+                            mem_iterator.next();
+                        }
+                    }
+                    let mem_size =
+                        bincode::serialized_size(&rows).map_err(|e| Error::Other(e.to_string()))?;
+                    let mut mem_data = Vec::with_capacity(mem_size as usize + 4);
+                    mem_data.extend_from_slice(&REMOTE_COP_MEM_FORMAT.to_be_bytes());
+                    bincode::serialize_into(&mut mem_data, &rows)
+                        .map_err(|e| Error::Other(e.to_string()))?;
+                    resp.set_mem_table_data(mem_data);
+                    if let Some(change_set) = snap_access.marshal(ranges.as_slice(), true) {
+                        resp.set_snapshot(change_set.1);
+                    }
+
+                    Ok(resp)
+                },
+                priority,
+                task_id,
+            )
+            .map_err(|_| Error::MaxPendingTasksExceeded);
+        async move {
+            match res.await {
+                Ok(Ok(resp)) => resp,
+                Ok(Err(e)) => make_error_delegate_response(e),
+                Err(e) => make_error_delegate_response(e),
+            }
+        }
+    }
 }
 
 pub fn parse_request_and_remote_analyze<S: 'static + Snapshot>(
@@ -895,6 +993,205 @@ fn parse_request_and_remote_analyze_impl<S: 'static + Snapshot, F: KvFormat>(
     }
 }
 
+pub async fn parse_request_and_handle_remote_cop<S: 'static + Snapshot>(
+    req: coppb::Request,
+    peer: Option<String>,
+    max_handle_duration: Duration,
+    quota_limiter: Arc<QuotaLimiter>,
+    snap: S,
+) -> Result<MemoryTraceGuard<coppb::Response>> {
+    let api_version = req.get_context().get_api_version();
+    dispatch_api_version!(api_version, {
+        parse_request_and_handle_remote_cop_impl::<S, API>(
+            req,
+            peer,
+            max_handle_duration,
+            quota_limiter,
+            snap,
+        )
+        .await
+    })
+}
+
+pub async fn parse_request_and_handle_remote_cop_impl<S: 'static + Snapshot, F: KvFormat>(
+    mut req: coppb::Request,
+    peer: Option<String>,
+    max_handle_duration: Duration,
+    quota_limiter: Arc<QuotaLimiter>,
+    snap: S,
+) -> Result<MemoryTraceGuard<coppb::Response>> {
+    let (context, data, ranges, mut start_ts) = (
+        req.take_context(),
+        req.take_data(),
+        req.take_ranges().to_vec(),
+        req.get_start_ts(),
+    );
+    let cache_match_version = if req.get_is_cache_enabled() {
+        Some(req.get_cache_if_match_version())
+    } else {
+        None
+    };
+    let req_ctx: ReqContext;
+    match req.get_tp() {
+        REQ_TYPE_DAG => {
+            let mut dag = DagRequest::default();
+            box_try!(dag.merge_from_bytes(&data));
+            let mut table_scan = false;
+            let mut is_desc_scan = false;
+            if let Some(scan) = dag.get_executors().iter().next() {
+                table_scan = scan.get_tp() == ExecType::TypeTableScan;
+                if table_scan {
+                    is_desc_scan = scan.get_tbl_scan().get_desc();
+                } else {
+                    is_desc_scan = scan.get_idx_scan().get_desc();
+                }
+            }
+            if start_ts == 0 {
+                start_ts = dag.get_start_ts_fallback();
+            }
+            let tag = if table_scan {
+                ReqTag::select
+            } else {
+                ReqTag::index
+            };
+            req_ctx = ReqContext::new(
+                tag,
+                context,
+                ranges,
+                max_handle_duration,
+                peer,
+                Some(is_desc_scan),
+                start_ts.into(),
+                cache_match_version,
+                PerfLevel::Uninitialized,
+            );
+            let data_version = snap.ext().get_data_version();
+            let store = CloudStore::new(
+                snap,
+                start_ts,
+                req_ctx.bypass_locks.clone(),
+                !req_ctx.context.get_not_fill_cache(),
+            );
+            let paging_size = match req.get_paging_size() {
+                0 => None,
+                i => Some(i),
+            };
+            let mut handler = dag::DagHandlerBuilder::new(
+                dag,
+                req_ctx.ranges.clone(),
+                store,
+                req_ctx.deadline,
+                64,
+                false,
+                req.get_is_cache_enabled(),
+                paging_size,
+                quota_limiter,
+            )
+            .data_version(data_version)
+            .build::<F>()?;
+            return handler.handle_request().await;
+        }
+        REQ_TYPE_ANALYZE => {
+            let (context, data, ranges, mut start_ts) = (
+                req.take_context(),
+                req.take_data(),
+                req.take_ranges().to_vec(),
+                req.get_start_ts(),
+            );
+            let cache_match_version = if req.get_is_cache_enabled() {
+                Some(req.get_cache_if_match_version())
+            } else {
+                None
+            };
+            let analyze = {
+                let mut input = CodedInputStream::from_bytes(&data);
+                input.set_recursion_limit(1000);
+                let mut analyze = AnalyzeReq::default();
+                match analyze.merge_from(&mut input) {
+                    Ok(_) => (),
+                    Err(e) => return Err(Error::Other(e.to_string())),
+                };
+                analyze
+            };
+            if start_ts == 0 {
+                start_ts = analyze.get_start_ts_fallback();
+            }
+            let tag = match analyze.get_tp() {
+                AnalyzeType::TypeIndex | AnalyzeType::TypeCommonHandle => ReqTag::analyze_index,
+                AnalyzeType::TypeColumn | AnalyzeType::TypeMixed => ReqTag::analyze_table,
+                AnalyzeType::TypeFullSampling => ReqTag::analyze_full_sampling,
+                AnalyzeType::TypeSampleIndex => unimplemented!(),
+            };
+            req_ctx = ReqContext::new(
+                tag,
+                context,
+                ranges,
+                max_handle_duration,
+                peer,
+                None,
+                start_ts.into(),
+                cache_match_version,
+                PerfLevel::Uninitialized,
+            );
+            let mut handler = statistics::analyze::AnalyzeContext::<_, F>::new(
+                analyze,
+                req_ctx.ranges.clone(),
+                start_ts,
+                snap,
+                &req_ctx,
+                quota_limiter,
+                None,
+            )
+            .unwrap();
+            return handler.handle_request().await;
+        }
+        REQ_TYPE_CHECKSUM => {
+            let checksum = {
+                let mut input = CodedInputStream::from_bytes(&data);
+                input.set_recursion_limit(1000);
+                let mut checksum = ChecksumRequest::default();
+                box_try!(checksum.merge_from(&mut input));
+                checksum
+            };
+            let table_scan = checksum.get_scan_on() == ChecksumScanOn::Table;
+            if start_ts == 0 {
+                start_ts = checksum.get_start_ts_fallback();
+            }
+            let tag = if table_scan {
+                ReqTag::checksum_table
+            } else {
+                ReqTag::checksum_index
+            };
+            req_ctx = ReqContext::new(
+                tag,
+                context,
+                ranges,
+                max_handle_duration,
+                peer,
+                None,
+                start_ts.into(),
+                cache_match_version,
+                // FIXME: How do we set this?
+                PerfLevel::Uninitialized,
+            );
+            with_tls_tracker(|tracker| {
+                tracker.req_info.request_type = RequestType::CoprocessorChecksum;
+                tracker.req_info.start_ts = start_ts;
+            });
+            let mut handler = checksum::ChecksumContext::new(
+                checksum,
+                req_ctx.ranges.clone(),
+                start_ts,
+                snap,
+                &req_ctx,
+            )
+            .unwrap();
+            return handler.handle_request().await;
+        }
+        tp => return Err(Error::Other(format!("unsupported tp {}", tp))),
+    }
+}
+
 fn make_error_batch_response(batch_resp: &mut coppb::StoreBatchTaskResponse, e: Error) {
     warn!(
         "batch cop task error-response";
@@ -937,6 +1234,44 @@ fn make_error_response(e: Error) -> coppb::Response {
         "err" => %e
     );
     let mut resp = coppb::Response::default();
+    let tag;
+    match e {
+        Error::Region(e) => {
+            tag = storage::get_tag_from_header(&e);
+            resp.set_region_error(e);
+        }
+        Error::Locked(info) => {
+            tag = "meet_lock";
+            resp.set_locked(info);
+        }
+        Error::DeadlineExceeded => {
+            tag = "deadline_exceeded";
+            resp.set_other_error(e.to_string());
+        }
+        Error::MaxPendingTasksExceeded => {
+            tag = "max_pending_tasks_exceeded";
+            let mut server_is_busy_err = errorpb::ServerIsBusy::default();
+            server_is_busy_err.set_reason(e.to_string());
+            let mut errorpb = errorpb::Error::default();
+            errorpb.set_message(e.to_string());
+            errorpb.set_server_is_busy(server_is_busy_err);
+            resp.set_region_error(errorpb);
+        }
+        Error::Other(_) => {
+            tag = "other";
+            resp.set_other_error(e.to_string());
+        }
+    };
+    COPR_REQ_ERROR.with_label_values(&[tag]).inc();
+    resp
+}
+
+fn make_error_delegate_response(e: Error) -> coppb::DelegateResponse {
+    warn!(
+        "error-response";
+        "err" => %e
+    );
+    let mut resp = coppb::DelegateResponse::default();
     let tag;
     match e {
         Error::Region(e) => {

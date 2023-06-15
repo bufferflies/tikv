@@ -12,11 +12,11 @@ use super::*;
 #[derive(Clone)]
 pub struct Table {
     pub id: i64,
-    pub(crate) handle_id: i64,
-    pub(crate) columns: Vec<(String, Column)>,
+    pub handle_id: i64,
+    pub columns: Vec<(String, Column)>,
     pub(crate) column_index_by_id: BTreeMap<i64, usize>,
     pub(crate) column_index_by_name: BTreeMap<String, usize>,
-    pub(crate) idxs: BTreeMap<i64, Vec<i64>>,
+    pub idxs: BTreeMap<i64, Vec<i64>>,
 }
 
 fn normalize_column_name(name: impl std::borrow::Borrow<str>) -> String {
@@ -113,6 +113,19 @@ impl Table {
         range.set_start(table::encode_index_seek_key(self.id, idx, &buf));
         buf.clear();
         buf.encode_i64(i64::MAX).unwrap();
+        range.set_end(table::encode_index_seek_key(self.id, idx, &buf));
+        range
+    }
+
+    /// Create a `KeyRange` which selects index records in the range. The end is
+    /// included.
+    pub fn get_index_record_range(&self, idx: i64, start: i64, end: i64) -> KeyRange {
+        let mut range = KeyRange::default();
+        let mut buf = Vec::with_capacity(8);
+        buf.encode_i64(start).unwrap();
+        range.set_start(table::encode_index_seek_key(self.id, idx, &buf));
+        buf.clear();
+        buf.encode_i64(end).unwrap();
         range.set_end(table::encode_index_seek_key(self.id, idx, &buf));
         range
     }
