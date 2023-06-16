@@ -6,6 +6,8 @@ mod test_stats;
 use std::{thread, time::Duration};
 
 use test_cloud_server::{try_wait, ServerCluster};
+use tikv::storage::{txn::CloudStoreScanner, Scanner};
+use tikv_kv::Statistics;
 use tikv_util::config::ReadableSize;
 
 use crate::alloc_node_id;
@@ -102,6 +104,34 @@ fn test_increasing_put_and_split() {
         }
     }
     cluster.stop()
+}
+
+#[test]
+fn test_cloud_store_reverse_scan() {
+    test_util::init_log_for_test();
+    let node_id = alloc_node_id();
+    let cluster = ServerCluster::new(vec![node_id], |_, _| {});
+    let mut client = cluster.new_client();
+    client.put_kv(1..6, i_to_key, i_to_val);
+    let region_id = client.get_region_id(&[]);
+    let engine = cluster.get_kvengine(node_id);
+    let snapshot = engine.get_snap_access(region_id).unwrap();
+    for rev in [true, false] {
+        let iter = snapshot.new_iterator(0, rev, false, None, true);
+        let lower_bound = Some(i_to_key(2).into());
+        let upper_bound = Some(i_to_key(5).into());
+        let mut scanner =
+            CloudStoreScanner::new(iter, Statistics::default(), lower_bound, upper_bound, false);
+        let mut indices = vec![2, 3, 4];
+        if rev {
+            indices.reverse();
+        }
+        for i in indices {
+            let (key, _) = scanner.next().unwrap().unwrap();
+            assert_eq!(key.into_raw().unwrap(), i_to_key(i));
+        }
+        assert!(scanner.next().unwrap().is_none());
+    }
 }
 
 fn sleep() {

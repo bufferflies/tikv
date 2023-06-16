@@ -161,21 +161,7 @@ impl<S: Snapshot> CloudStore<S> {
         upper_bound: Option<Bytes>,
         stats: &mut Statistics,
     ) -> mvcc::Result<()> {
-        if lock_iter.is_reverse() {
-            if let Some(lower) = lower_bound {
-                lock_iter.set_bound(lower, false);
-            }
-            if let Some(upper) = upper_bound {
-                lock_iter.seek(upper.chunk());
-            }
-        } else {
-            if let Some(upper) = upper_bound {
-                lock_iter.set_bound(upper, false);
-            }
-            if let Some(lower) = lower_bound {
-                lock_iter.seek(lower.chunk());
-            }
-        }
+        CloudStoreScanner::init_iter(&mut lock_iter, &lower_bound, &upper_bound);
         stats.lock.seek += 1;
         while lock_iter.valid() {
             let raw_key = lock_iter.key();
@@ -247,15 +233,13 @@ impl<S: Snapshot> CloudStore<S> {
         let iter =
             self.snapshot
                 .new_iterator(WRITE_CF, desc, false, Some(self.start_ts), self.fill_cache);
-        Ok(CloudStoreScanner {
+        Ok(CloudStoreScanner::new(
             iter,
-            desc,
             stats,
-            is_started: false,
             lower_bound,
             upper_bound,
             output_delete,
-        })
+        ))
     }
 
     fn verify_range(&self, lower_bound: &Option<Bytes>, upper_bound: &Option<Bytes>) -> Result<()> {
@@ -297,32 +281,61 @@ pub struct CloudStoreScanner {
     is_started: bool,
     lower_bound: Option<Bytes>,
     upper_bound: Option<Bytes>,
-    desc: bool,
     output_delete: bool,
 }
 
 impl CloudStoreScanner {
-    fn init(&mut self) {
-        self.stats.write.seek += 1;
-        if self.desc {
-            if let Some(lower) = &self.lower_bound {
-                self.iter.set_bound(lower.clone(), false);
+    pub fn new(
+        iter: kvengine::read::Iterator,
+        stats: Statistics,
+        lower_bound: Option<Bytes>,
+        upper_bound: Option<Bytes>,
+        output_delete: bool,
+    ) -> Self {
+        Self {
+            iter,
+            stats,
+            is_started: false,
+            lower_bound,
+            upper_bound,
+            output_delete,
+        }
+    }
+
+    fn init_iter(
+        iter: &mut kvengine::read::Iterator,
+        lower_bound: &Option<Bytes>,
+        upper_bound: &Option<Bytes>,
+    ) {
+        if iter.is_reverse() {
+            if let Some(lower) = lower_bound {
+                // the lower bound is always inclusive even in reverse scan.
+                iter.set_bound(lower.clone(), true);
             }
-            if let Some(upper) = &self.upper_bound {
-                self.iter.seek(upper.chunk());
+            if let Some(upper) = upper_bound {
+                iter.seek(upper.chunk());
+                // the upper bound is exclusive, so we need to skip it
+                if iter.valid() && iter.key().chunk() == upper.chunk() {
+                    iter.next();
+                }
             } else {
-                self.iter.rewind();
+                iter.rewind();
             }
         } else {
-            if let Some(upper) = &self.upper_bound {
-                self.iter.set_bound(upper.clone(), false);
+            if let Some(upper) = upper_bound {
+                iter.set_bound(upper.clone(), false);
             }
-            if let Some(lower) = &self.lower_bound {
-                self.iter.seek(lower.chunk());
+            if let Some(lower) = lower_bound {
+                iter.seek(lower.chunk());
             } else {
-                self.iter.rewind();
+                iter.rewind();
             }
         }
+    }
+
+    fn init(&mut self) {
+        self.stats.write.seek += 1;
+        Self::init_iter(&mut self.iter, &self.lower_bound, &self.upper_bound);
     }
 
     fn next_inner(&mut self) -> Result<Option<(Key, UserMeta, Value)>> {
