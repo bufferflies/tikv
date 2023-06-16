@@ -209,7 +209,9 @@ impl SnapAccessCore {
                 let tx = result_tx.clone();
                 runtime.spawn(async move {
                     let res = fs.read_file(id, opts).await;
-                    tx.send(res.map(|data| (id, level, Some(data)))).unwrap();
+                    tx.send(res.map(|data| (id, level, Some(data))))
+                        .map_err(|_| "send file data failed")
+                        .unwrap();
                 });
             }
             msg_count += 1;

@@ -1355,7 +1355,7 @@ fn load_table_files(
                 .await
                 .map(|data| (aid, data))
                 .map_err(|e| Error::DfsError(e));
-            atx.send(res).unwrap();
+            atx.send(res).map_err(|_| "send file data failed").unwrap();
         });
     }
     let mut errors = vec![];
@@ -1711,7 +1711,7 @@ fn load_blob_tables(
                 .await
                 .map(|data| (aid, data))
                 .map_err(|e| Error::DfsError(e));
-            atx.send(res).unwrap();
+            atx.send(res).map_err(|_| "send file data failed").unwrap();
         });
     }
     let mut errors = vec![];
