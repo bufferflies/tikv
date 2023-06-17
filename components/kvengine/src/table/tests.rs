@@ -430,7 +430,11 @@ mod tests {
         assert!(v.is_external_link());
         let external_link = v.get_external_link();
         assert_eq!(bt.id(), external_link.fid);
-        bt.get(external_link.offset, external_link.len)
+        bt.get(
+            external_link.offset,
+            external_link.len,
+            external_link.original_len,
+        )
     }
 
     #[cfg(test)]
@@ -442,12 +446,8 @@ mod tests {
     ) -> ExternalLink {
         assert!(v.value_len() > size_of::<ExternalLink>() + v.user_meta_len());
         v.set_external_link();
-        let mut external_link = ExternalLink::new();
-        external_link.fid = blob_fid;
         let (offset, len) = blob_builder.add(k.as_bytes(), v);
-        external_link.len = len;
-        external_link.offset = offset;
-        external_link
+        ExternalLink::new(blob_fid, offset, len, v.value_len() as u32)
     }
 
     #[cfg(test)]

@@ -84,14 +84,14 @@ impl BlobTable {
         })
     }
 
-    pub fn get(&self, offset: u32, size: u32) -> Result<Vec<u8>> {
+    pub fn get(&self, offset: u32, size: u32, original_len: u32) -> Result<Vec<u8>> {
         let data = self
             .file
             .as_ref()
             .unwrap_or_else(|| panic!("file is not set"))
             .read(offset as u64, size as usize + BLOB_ENTRY_META_SIZE)?;
         let mut decompressed = Vec::with_capacity(size as usize);
-        if self.decompress(&data, size, &mut decompressed)? {
+        if self.decompress(&data, size, original_len as usize, &mut decompressed)? {
             Ok(decompressed)
         } else {
             Ok(data[BLOB_ENTRY_VALUE_OFFSET..].to_vec())
@@ -106,12 +106,13 @@ impl BlobTable {
         &'a self,
         offset: u32,
         size: u32,
+        original_len: u32,
         need_decompress: bool,
         buf: &'a mut Vec<u8>,
     ) -> Result<&[u8]> {
         let data = &self.preloaded_data.as_ref().unwrap()
             [offset as usize..offset as usize + BLOB_ENTRY_VALUE_OFFSET + size as usize];
-        if need_decompress && self.decompress(data, size, buf)? {
+        if need_decompress && self.decompress(data, size, original_len as usize, buf)? {
             Ok(buf.as_slice())
         } else {
             Ok(&data[BLOB_ENTRY_VALUE_OFFSET..])
@@ -122,6 +123,7 @@ impl BlobTable {
         &self,
         data: &[u8],
         size: u32,
+        original_len: usize,
         decompressed_buf: &mut Vec<u8>,
     ) -> Result<bool> {
         let total_data_size = size as usize + BLOB_ENTRY_META_SIZE;
@@ -137,30 +139,29 @@ impl BlobTable {
         return match self.footer.compression_type {
             NO_COMPRESSION => Ok(false), // in place decoding
             LZ4_COMPRESSION => unsafe {
-                let decompressed = lz4::block::decompress(compressed_data, None)?;
-                if decompressed_buf.capacity() < decompressed.len() {
-                    decompressed_buf.reserve(decompressed.len() - decompressed_buf.capacity());
+                if decompressed_buf.capacity() < original_len {
+                    decompressed_buf.reserve(original_len - decompressed_buf.capacity());
                 }
-                decompressed_buf.copy_from_slice(&decompressed);
-                decompressed_buf.set_len(decompressed.len());
+                lz4::block::decompress_to_buffer(
+                    compressed_data,
+                    Some(original_len as i32),
+                    decompressed_buf,
+                )?;
+                decompressed_buf.set_len(original_len);
                 Ok(true)
             },
             ZSTD_COMPRESSION => unsafe {
-                let capacity = zstd_sys::ZSTD_getFrameContentSize(
-                    compressed_data.as_ptr() as *const libc::c_void,
-                    compressed_data.len(),
-                ) as usize;
-                if decompressed_buf.capacity() < capacity {
-                    decompressed_buf.reserve(capacity - decompressed_buf.capacity());
+                if decompressed_buf.capacity() < original_len {
+                    decompressed_buf.reserve(original_len - decompressed_buf.capacity());
                 }
                 let result = zstd_sys::ZSTD_decompress(
                     decompressed_buf.as_mut_ptr() as *mut libc::c_void,
-                    capacity,
+                    original_len,
                     compressed_data.as_ptr() as *const libc::c_void,
                     compressed_data.len(),
                 );
                 assert_eq!(zstd_sys::ZSTD_isError(result), 0u32);
-                decompressed_buf.set_len(capacity);
+                decompressed_buf.set_len(original_len);
                 Ok(true)
             },
             _ => panic!("unknown compression type {}", self.footer.compression_type),
@@ -242,7 +243,7 @@ impl BlobPrefetcher {
         }
     }
 
-    pub fn get(&mut self, fid: u64, offset: u32, size: u32) -> Result<&[u8]> {
+    pub fn get(&mut self, fid: u64, offset: u32, size: u32, original_len: u32) -> Result<&[u8]> {
         let blob_table = self
             .tables
             .get(&fid)
@@ -272,7 +273,12 @@ impl BlobPrefetcher {
             *buffer_offset = offset;
         }
         let data = &buffer[(offset - *buffer_offset) as usize..];
-        if blob_table.decompress(data, size, &mut self.decompressed_buffer)? {
+        if blob_table.decompress(
+            data,
+            size,
+            original_len as usize,
+            &mut self.decompressed_buffer,
+        )? {
             return Ok(&self.decompressed_buffer);
         }
         Ok(
@@ -317,11 +323,8 @@ mod tests {
             let encoded = Value::encode_buf(meta, &[0], 0, blob.as_bytes());
             let value = Value::decode(encoded.as_slice());
             // In this test assume that all values are converted to external links.
-            let mut external_link = ExternalLink::new();
             let (offset, len) = builder.add(key.as_bytes(), &value);
-            external_link.len = len;
-            external_link.offset = offset;
-
+            let external_link = ExternalLink::new(0, offset, len, value.value_len() as u32);
             test_data.push(TestData {
                 blob,
                 external_link,
@@ -333,7 +336,11 @@ mod tests {
 
         for td in test_data {
             let blob = table
-                .get(td.external_link.offset, td.external_link.len)
+                .get(
+                    td.external_link.offset,
+                    td.external_link.len,
+                    td.external_link.original_len,
+                )
                 .unwrap();
             assert_eq!(td.blob.as_bytes(), blob);
         }
@@ -360,7 +367,12 @@ mod tests {
         for i in 0..100 {
             let expected_val = format!("val_{:03}", i);
             let val = prefetcher
-                .get(1, offsets[i], expected_val.len() as u32)
+                .get(
+                    1,
+                    offsets[i],
+                    expected_val.len() as u32,
+                    expected_val.len() as u32,
+                )
                 .unwrap();
             assert_eq!(val, expected_val.as_bytes());
         }

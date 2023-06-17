@@ -2500,6 +2500,7 @@ fn compact_for_cf(
                         .get_from_preloaded(
                             link.offset,
                             link.len,
+                            link.original_len,
                             need_recompress_blob,
                             &mut decompressed_blob_buf,
                         )
@@ -2515,10 +2516,8 @@ fn compact_for_cf(
                     {
                         let (offset, len) =
                             bt_builder.add_blob(key, blob_or_compressed_blob, need_recompress_blob);
-                        let mut external_link = ExternalLink::new();
-                        external_link.fid = bt_builder.get_fid();
-                        external_link.len = len;
-                        external_link.offset = offset;
+                        let external_link =
+                            ExternalLink::new(bt_builder.get_fid(), offset, len, link.original_len);
                         sst_builder.add(key, &val, Some(external_link));
                     } else {
                         val.fill_in_blob(blob_or_compressed_blob);
@@ -2527,10 +2526,8 @@ fn compact_for_cf(
                 }
             } else if val.value_len() >= bt_config.min_blob_size as usize {
                 let (offset, len) = bt_builder.add(key, &val);
-                let mut external_link = ExternalLink::new();
-                external_link.fid = bt_builder.get_fid();
-                external_link.len = len;
-                external_link.offset = offset;
+                let external_link =
+                    ExternalLink::new(bt_builder.get_fid(), offset, len, val.value_len() as u32);
                 val.set_external_link();
                 sst_builder.add(key, &val, Some(external_link));
             } else {

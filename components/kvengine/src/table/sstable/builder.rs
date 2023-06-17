@@ -186,9 +186,12 @@ impl Builder {
                 self.old_builder
                     .finish_block(self.sst_fid, self.checksum_tp);
             }
-            self.kv_size += (key.len() + val.user_meta_len() + val.value_len()) as u64;
+            self.kv_size += (key.len() + val.user_meta_len()) as u64;
             if let Some(external_link) = external_link {
                 self.total_blob_size += external_link.len as u64;
+                self.kv_size += external_link.original_len as u64;
+            } else {
+                self.kv_size += val.value_len() as u64;
             }
             self.block_builder.add_entry(key, *val, external_link);
             self.key_hashes.push(farmhash::fingerprint64(key));

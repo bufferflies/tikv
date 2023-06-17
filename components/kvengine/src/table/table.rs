@@ -1,6 +1,6 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{convert::TryInto, io, mem::size_of, ptr, result, slice};
+use std::{io, mem::size_of, ptr, result, slice};
 
 use byteorder::{ByteOrder, LittleEndian};
 use thiserror::Error;
@@ -88,14 +88,16 @@ pub const VALUE_VERSION_LEN: usize = std::mem::size_of::<u64>();
 /// else
 ///     [data as is]
 /// Link to data when the value is stored externally.
-#[derive(Default, Clone, Copy, Debug, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
 pub struct ExternalLink {
     /// ID of file where the data is stored.
     pub(crate) fid: u64,
     /// Absolute offset within the file. Apparently SST max size is <= 4GB.
     pub(crate) offset: BlobOffset,
-    /// Original value length.
+    /// Compressed value length.
     pub(crate) len: ValueLength,
+    /// Original value length.
+    pub(crate) original_len: ValueLength,
 }
 
 pub struct Version(pub u64);
@@ -112,28 +114,46 @@ impl Version {
 }
 
 impl ExternalLink {
-    pub(crate) fn new() -> Self {
-        Default::default()
+    pub(crate) fn new(
+        fid: u64,
+        offset: BlobOffset,
+        len: ValueLength,
+        original_len: ValueLength,
+    ) -> Self {
+        Self {
+            fid,
+            offset,
+            original_len,
+            len,
+        }
     }
 
-    fn deserialize(&mut self, buf: &[u8]) -> u8 {
+    fn deserialize(buf: &[u8]) -> Self {
         let mut offset: usize = 0;
-        self.fid = LittleEndian::read_u64(&buf[offset..]);
+        let fid = LittleEndian::read_u64(&buf[offset..]);
         offset += size_of::<u64>();
-        self.offset = LittleEndian::read_u32(&buf[offset..]);
-        offset += size_of::<u32>();
-        self.len = LittleEndian::read_u32(&buf[offset..]);
-        size_of::<Self>().try_into().unwrap()
+        let file_offset = LittleEndian::read_u32(&buf[offset..]);
+        offset += size_of::<BlobOffset>();
+        let len = LittleEndian::read_u32(&buf[offset..]);
+        offset += size_of::<ValueLength>();
+        let original_len = LittleEndian::read_u32(&buf[offset..]);
+        Self {
+            fid,
+            offset: file_offset,
+            len,
+            original_len,
+        }
     }
 
-    fn serialize(&self, buf: &mut [u8]) -> u8 {
+    fn serialize(&self, buf: &mut [u8]) {
         let mut offset: usize = 0;
         LittleEndian::write_u64(&mut buf[offset..], self.fid);
         offset += size_of::<u64>();
         LittleEndian::write_u32(&mut buf[offset..], self.offset);
-        offset += size_of::<u32>();
+        offset += size_of::<BlobOffset>();
         LittleEndian::write_u32(&mut buf[offset..], self.len);
-        size_of::<Self>().try_into().unwrap()
+        offset += size_of::<ValueLength>();
+        LittleEndian::write_u32(&mut buf[offset..], self.original_len);
     }
 
     fn size_of() -> usize {
@@ -331,9 +351,7 @@ impl Value {
 
     pub fn get_external_link(&self) -> ExternalLink {
         assert!(self.is_external_link());
-        let mut external_link: ExternalLink = Default::default();
-        external_link.deserialize(self.get_value());
-        external_link
+        ExternalLink::deserialize(self.get_value())
     }
 
     #[inline(always)]

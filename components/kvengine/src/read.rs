@@ -370,7 +370,7 @@ impl SnapAccessCore {
                 )
             });
         blob_table
-            .get(blob_link.offset, blob_link.len)
+            .get(blob_link.offset, blob_link.len, blob_link.original_len)
             .unwrap_or_else(|e| panic!("[{}] blob table get failed {:?} {:?}", self.tag, key, e))
     }
 
@@ -802,7 +802,12 @@ impl Iterator {
             if let Some(prefetcher) = &mut self.blob_prefetcher {
                 let blob_link = self.val.get_external_link();
                 return prefetcher
-                    .get(blob_link.fid, blob_link.offset, blob_link.len)
+                    .get(
+                        blob_link.fid,
+                        blob_link.offset,
+                        blob_link.len,
+                        blob_link.original_len,
+                    )
                     .unwrap_or_else(|e| {
                         panic!(
                             "failed to get blob for fid {}, offset {}, len {}, err {:?}",
