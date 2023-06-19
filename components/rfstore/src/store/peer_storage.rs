@@ -72,6 +72,8 @@ pub struct RestoreSnapResult {
     pub prev_region: metapb::Region,
     pub region: metapb::Region,
     pub destroyed_regions: Vec<metapb::Region>,
+    // `snap_last_index` is the last index of snapshot.
+    pub snap_last_index: u64,
 }
 
 pub(crate) struct PeerStorage {
@@ -423,19 +425,24 @@ impl PeerStorage {
                 prev_region,
                 region,
                 destroyed_regions: vec![],
+                snap_last_index: ready.snapshot().get_metadata().get_index(),
             })
         }
         if !ready.entries().is_empty() {
             self.append(ready.take_entries(), &mut ctx.raft_wb);
         }
 
-        // Last index is 0 means the peer is created from raft message
+        // Not initialized means the peer is created from raft message
         // and has not applied snapshot yet, so skip persistent hard state.
         if self.is_initialized() {
             if let Some(hs) = ready.hs() {
                 self.raft_state.set_hard_state(hs);
             }
-            self.raft_state.last_preprocessed_index = last_preprocessed_index;
+            // When there is snapshot, `self.restore_snapshot` will set
+            // `last_preprocessed_index` to the last index of snapshot.
+            if ready.snapshot().is_empty() {
+                self.raft_state.last_preprocessed_index = last_preprocessed_index;
+            }
         }
         if prev_raft_state != self.raft_state || !ready.snapshot().is_empty() {
             self.write_raft_state(ctx);

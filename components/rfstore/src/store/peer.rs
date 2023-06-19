@@ -1547,6 +1547,7 @@ impl Peer {
             self.mut_store()
                 .handle_raft_ready(ctx, &mut ready, last_preprocessed_index)
         {
+            self.last_applying_idx = snap_res.snap_last_index;
             self.mut_store().preprocessed_region = None;
             // The peer may change from learner to voter after snapshot persisted.
             let peer = self
