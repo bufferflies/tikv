@@ -68,11 +68,21 @@ jobs:
       # Additional tag to label the image with the commit SHA.
       ADDITIONAL_TAG: xexplorersun/tikv-cse:cse-${{ github.sha }}
     steps:
+      - name: Set runner architecture
+        run: |
+          arch=$(uname -m)
+          if [ "$arch" = "x86_64" ]; then
+            echo "ARCH=amd64" >> $GITHUB_ENV
+          elif [ "$arch" = "aarch64" ]; then
+            echo "ARCH=arm64" >> $GITHUB_ENV
+          else
+            echo "ARCH=$arch" >> $GITHUB_ENV
+          fi
       - name: Install regctl
         run: |
-          curl -sLO https://github.com/regclient/regclient/releases/download/v0.4.0/regctl-linux-arm64
-          chmod +x regctl-linux-arm64
+          curl -sLO https://github.com/regclient/regclient/releases/download/v0.4.0/regctl-linux-${{ env.ARCH }}
+          chmod +x regctl-linux-${{ env.ARCH }}
       - name: Sync Image
         run: |
-          ./regctl-linux-arm64 image copy xexplorersun/tikv:cse-${{ github.sha }} ${{ env.GCR_IMAGE }} -v info
-          ./regctl-linux-arm64 image copy xexplorersun/tikv:cse-${{ github.sha }} ${{ env.ADDITIONAL_TAG }} -v info
+          ./regctl-linux-${{ env.ARCH }} image copy xexplorersun/tikv:cse-${{ github.sha }} ${{ env.GCR_IMAGE }} -v info
+          ./regctl-linux-${{ env.ARCH }} image copy xexplorersun/tikv:cse-${{ github.sha }} ${{ env.ADDITIONAL_TAG }} -v info
