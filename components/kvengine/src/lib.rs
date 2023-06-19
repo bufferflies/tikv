@@ -8,6 +8,8 @@ extern crate test;
 pub mod apply;
 pub mod compaction;
 mod concat_iterator;
+mod config;
+pub use config::Config as KvEngineConfig;
 pub mod dfs;
 pub mod engine;
 pub mod engine_trait;

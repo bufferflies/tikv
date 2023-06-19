@@ -97,6 +97,7 @@ fn test_delete_range_lost_table_delete() {
         // 3 seconds max delay.
         conf.raft_store.local_file_gc_timeout = ReadableDuration(Duration::from_secs(3));
         conf.raft_store.local_file_gc_tick_interval = ReadableDuration(Duration::from_secs(1));
+        conf.kvengine.max_del_range_delay = ReadableDuration(Duration::from_secs(3));
     });
     let mut client = cluster.new_client();
     client.split_keyspace(get_keyspace_id("x123".as_bytes()));
@@ -135,6 +136,7 @@ fn test_delete_range_delay_helper(enable_inner_key_off: bool) {
         conf.raft_store.local_file_gc_timeout = ReadableDuration(Duration::from_secs(5));
         conf.raft_store.local_file_gc_tick_interval = ReadableDuration(Duration::from_secs(1));
         conf.enable_inner_key_offset = enable_inner_key_off;
+        conf.kvengine.max_del_range_delay = ReadableDuration(Duration::from_secs(10));
     });
     let mut client = cluster.new_client();
     for i in 1..=30 {

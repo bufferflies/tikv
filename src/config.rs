@@ -42,7 +42,7 @@ use engine_traits::{
 };
 use file_system::IoRateLimiter;
 use keys::region_raft_prefix_len;
-use kvengine::dfs::DFSConfig;
+use kvengine::{dfs::DFSConfig, KvEngineConfig};
 use kvproto::kvrpcpb::ApiVersion;
 use online_config::{ConfigChange, ConfigManager, ConfigValue, OnlineConfig, Result as CfgResult};
 use pd_client::Config as PdConfig;
@@ -2932,6 +2932,9 @@ pub struct TikvConfig {
     pub rfengine: RfEngineConfig,
 
     #[online_config(skip)]
+    pub kvengine: KvEngineConfig,
+
+    #[online_config(skip)]
     pub security: SecurityConfig,
 
     #[online_config(skip)]
@@ -3002,6 +3005,7 @@ impl Default for TikvConfig {
             raftdb: RaftDbConfig::default(),
             raft_engine: RaftEngineConfig::default(),
             rfengine: RfEngineConfig::default(),
+            kvengine: KvEngineConfig::default(),
             storage: StorageConfig::default(),
             security: SecurityConfig::default(),
             import: ImportConfig::default(),
