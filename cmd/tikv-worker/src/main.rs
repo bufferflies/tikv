@@ -195,6 +195,7 @@ fn main() {
         dfs_config.s3_bucket,
     ));
 
+    // CacheFs is only used for remote coprocessor.
     let cache_fs = {
         Arc::new(kvengine::dfs::CacheFs::new(
             config.cop_cache_size.0,
@@ -235,7 +236,7 @@ fn main() {
     let load_manager = Arc::new(LoadDataManager::new(
         pd.clone(),
         config.data_dir.clone().into(),
-        cache_fs.clone(),
+        s3fs.clone(),
         thread_pool.clone(),
         MAX_IN_MEM_SIZE,
     ));
