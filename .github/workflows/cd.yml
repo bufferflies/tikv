@@ -46,7 +46,7 @@ jobs:
             xexplorersun/tikv:cse-${{ github.sha }}-amd64
   multi-arch:
     name: Create Multi-Architecture Image
-    runs-on: arm64
+    runs-on: amd64
     needs: ["build-arm64", "build-amd64"]
     steps:
       - name: create-manifest
@@ -60,7 +60,7 @@ jobs:
 
   sync-image:
     name: Sync image to GCR
-    runs-on: arm64
+    runs-on: amd64
     needs: [ "multi-arch" ]
     if: ${{ inputs.overwrite_gcr || github.ref == 'refs/heads/cloud-engine' }}
     env:
