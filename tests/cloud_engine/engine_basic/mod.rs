@@ -5,10 +5,14 @@ mod test_stats;
 
 use std::{thread, time::Duration};
 
+use futures::executor::block_on;
+use kvengine::SnapAccess;
+use kvproto::kvrpcpb::{Mutation, Op};
+use pd_client::PdClient;
 use test_cloud_server::{try_wait, ServerCluster};
 use tikv::storage::{txn::CloudStoreScanner, Scanner};
-use tikv_kv::Statistics;
 use tikv_util::config::ReadableSize;
+use txn_types::{Key, TsSet};
 
 use crate::alloc_node_id;
 
@@ -31,11 +35,11 @@ fn test_engine_auto_switch() {
 }
 
 fn i_to_key(i: usize) -> Vec<u8> {
-    format!("key_{:03}", i).into_bytes()
+    format!("key_{:05}", i).into_bytes()
 }
 
 fn i_to_val(i: usize) -> Vec<u8> {
-    format!("val_{:03}", i).into_bytes().repeat(100)
+    format!("val_{:05}", i).into_bytes().repeat(100)
 }
 
 #[test]
@@ -117,11 +121,19 @@ fn test_cloud_store_reverse_scan() {
     let engine = cluster.get_kvengine(node_id);
     let snapshot = engine.get_snap_access(region_id).unwrap();
     for rev in [true, false] {
-        let iter = snapshot.new_iterator(0, rev, false, None, true);
-        let lower_bound = Some(i_to_key(2).into());
-        let upper_bound = Some(i_to_key(5).into());
-        let mut scanner =
-            CloudStoreScanner::new(iter, Statistics::default(), lower_bound, upper_bound, false);
+        let lower_bound = Some(Key::from_raw(&i_to_key(2)));
+        let upper_bound = Some(Key::from_raw(&i_to_key(5)));
+        let mut scanner = CloudStoreScanner::new(
+            snapshot.clone(),
+            rev,
+            true,
+            TsSet::Empty,
+            u64::MAX,
+            lower_bound,
+            upper_bound,
+            false,
+        )
+        .unwrap();
         let mut indices = vec![2, 3, 4];
         if rev {
             indices.reverse();
@@ -132,6 +144,168 @@ fn test_cloud_store_reverse_scan() {
         }
         assert!(scanner.next().unwrap().is_none());
     }
+}
+
+#[test]
+fn test_cloud_store_reset_range() {
+    test_util::init_log_for_test();
+    let node_id = alloc_node_id();
+    let cluster = ServerCluster::new(vec![node_id], |_, _| {});
+    let mut client = cluster.new_client();
+    client.put_kv(3..10, i_to_key, i_to_val);
+    client.put_kv(30..40, i_to_key, i_to_val);
+
+    let region_id = client.get_region_id(&[]);
+    let engine = cluster.get_kvengine(node_id);
+    let snap = engine.get_snap_access(region_id).unwrap();
+    let read_ts = block_on(cluster.get_pd_client().get_tso())
+        .unwrap()
+        .into_inner();
+    let mut scanner = new_scanner(&snap, false, read_ts);
+    let cases = vec![
+        ((9, 10), Some(9), true), // old range is not set should seek.
+        ((10, 19), None, true),   // inner is smaller, should seek.
+        ((19, 25), None, false),
+        ((23, 27), None, true), // none monotonic reset range do not skip seek.
+        ((28, 35), Some(30), false),
+        ((37, 39), Some(37), true),
+        ((40, 70), None, true),  // inner is smaller, should seek.
+        ((70, 80), None, false), // inner is invalid, should not seek.
+    ];
+    for ((start, end), key, seek) in cases {
+        check_scanner(&mut scanner, false, start, end, key, seek);
+    }
+    let mut desc_scanner = new_scanner(&snap, true, read_ts);
+    let desc_cases = vec![
+        ((40, 70), None, true),      // old range is not set should seek.
+        ((37, 40), Some(39), false), // inner is equal to upper, skip seek.
+        ((36, 38), Some(37), true),  // none monotonic reset range do not skip seek.
+        ((23, 27), None, true),      // inner is greater should seek.
+        ((15, 20), None, false),     // inner is at 9, skip seek.
+        ((5, 9), Some(8), false),
+        ((2, 3), None, true),  // inner is greater, should seek.
+        ((0, 2), None, false), // inner is invalid, should not seek.
+    ];
+    for ((start, end), key, seek) in desc_cases {
+        check_scanner(&mut desc_scanner, true, start, end, key, seek);
+    }
+
+    // test lock.
+    let keys_nums = vec![21, 31, 51];
+    let mutations: Vec<Mutation> = keys_nums
+        .iter()
+        .map(|&k_num| {
+            let mut m = Mutation::new();
+            m.key = i_to_key(k_num);
+            m.value = i_to_val(k_num);
+            m.op = Op::Put;
+            m
+        })
+        .collect();
+    let start_ts = block_on(cluster.get_pd_client().get_tso()).unwrap();
+    client.kv_prewrite(mutations, i_to_key(21), start_ts);
+
+    let snap = engine.get_snap_access(region_id).unwrap();
+    let (locked, seeked) = (true, true);
+    let read_ts = block_on(cluster.get_pd_client().get_tso())
+        .unwrap()
+        .into_inner();
+    let mut scanner = new_scanner(&snap, false, read_ts);
+    let lock_cases = vec![
+        ((0, 10), false, seeked),
+        ((10, 20), false, false),
+        ((20, 25), locked, false),
+        ((25, 30), false, seeked),
+        ((30, 40), locked, false),
+        ((55, 60), false, seeked),
+        ((60, 65), false, false),
+        ((70, 85), false, false),
+    ];
+    for ((lower, upper), is_err, seeked) in lock_cases {
+        reset_range(&mut scanner, false, lower, upper);
+        if is_err {
+            scanner.next().unwrap_err();
+        } else {
+            scanner.next().unwrap();
+        }
+        assert_eq!(scanner.take_statistics().lock.seek, seeked as usize);
+    }
+
+    let mut desc_scanner = new_scanner(&snap, true, read_ts);
+    let desc_lock_cases = vec![
+        ((70, 85), false, seeked),
+        ((60, 65), false, false),
+        ((55, 60), false, false),
+        ((30, 40), locked, seeked), // locked(31)
+        ((25, 30), false, seeked),
+        ((20, 25), locked, false), // locked(21)
+        ((10, 20), false, seeked),
+        ((0, 10), false, false),
+    ];
+    for ((lower, upper), is_err, seeked) in desc_lock_cases {
+        reset_range(&mut desc_scanner, true, lower, upper);
+        if is_err {
+            desc_scanner.next().unwrap_err();
+        } else {
+            desc_scanner.next().unwrap();
+        }
+        assert_eq!(desc_scanner.take_statistics().lock.seek, seeked as usize);
+    }
+}
+
+fn new_scanner(snap: &SnapAccess, desc: bool, read_ts: u64) -> CloudStoreScanner {
+    CloudStoreScanner::new(
+        snap.clone(),
+        desc,
+        true,
+        TsSet::Empty,
+        read_ts,
+        None,
+        None,
+        false,
+    )
+    .unwrap()
+}
+
+fn check_scanner(
+    scanner: &mut CloudStoreScanner,
+    desc: bool,
+    start: usize,
+    end: usize,
+    key: Option<usize>,
+    seek: bool,
+) {
+    reset_range(scanner, desc, start, end);
+    if let Some(key) = key {
+        assert_eq!(next_key(scanner), i_to_key(key));
+    } else {
+        assert!(scanner.next().unwrap().is_none());
+    }
+    let stats = scanner.take_statistics();
+    if seek {
+        assert_eq!(stats.write.seek, 1);
+    } else {
+        assert_eq!(stats.write.seek, 0);
+        assert_eq!(stats.lock.seek, 0);
+    }
+}
+
+fn reset_range(scanner: &mut CloudStoreScanner, desc: bool, lower: usize, upper: usize) {
+    scanner
+        .reset_range(
+            desc,
+            Some(Key::from_raw(&i_to_key(lower))),
+            Some(Key::from_raw(&i_to_key(upper))),
+        )
+        .unwrap();
+}
+
+fn next_key(scanner: &mut CloudStoreScanner) -> Vec<u8> {
+    scanner
+        .next()
+        .unwrap()
+        .map(|(k, _)| k.into_raw().unwrap())
+        .unwrap()
 }
 
 fn sleep() {

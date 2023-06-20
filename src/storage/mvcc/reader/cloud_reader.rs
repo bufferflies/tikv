@@ -205,19 +205,19 @@ impl CloudReader {
         let mut lock_iter =
             self.snapshot
                 .new_iterator(LOCK_CF, false, false, None, self.fill_cache);
-        let bound = if let Some(k) = end {
-            Bytes::from(k.to_raw().unwrap())
+        let lower_bound: Bytes = if let Some(start) = start {
+            Bytes::from(start.to_raw()?)
+        } else {
+            Bytes::copy_from_slice(self.snapshot.get_start_key())
+        };
+        let upper_bound = if let Some(k) = end {
+            Bytes::from(k.to_raw()?)
         } else {
             self.snapshot.clone_end_key()
         };
-        lock_iter.set_bound(bound, false);
-        if let Some(start) = start {
-            let raw_start = start.to_raw()?;
-            lock_iter.seek(&raw_start);
-        } else {
-            lock_iter.seek(self.snapshot.get_start_key());
+        if lock_iter.set_range(lower_bound, upper_bound) {
+            self.statistics.lock.seek += 1;
         }
-        self.statistics.lock.seek += 1;
         while lock_iter.valid() {
             let key = Key::from_raw(lock_iter.key());
             if let Some(end) = end {

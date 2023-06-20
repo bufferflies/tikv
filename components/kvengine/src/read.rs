@@ -289,10 +289,9 @@ impl SnapAccessCore {
             key,
             val: table::Value::new(),
             inner: self.new_table_iterator(cf, reversed, fill_cache),
-            bound: None,
-            bound_include: false,
             blob_prefetcher: None,
             data,
+            range: None,
         }
     }
 
@@ -318,10 +317,9 @@ impl SnapAccessCore {
             key,
             val: table::Value::new(),
             inner: self.new_table_iterator(cf, reversed, fill_cache),
-            bound: None,
-            bound_include: false,
             blob_prefetcher,
             data,
+            range: None,
         }
     }
 
@@ -339,10 +337,9 @@ impl SnapAccessCore {
             key: BytesMut::new(),
             val: table::Value::new(),
             inner: self.new_mem_table_iterator(cf, reversed),
-            bound: None,
-            bound_include: false,
             blob_prefetcher: None,
             data: self.data.clone(),
+            range: None,
         }
     }
 
@@ -779,13 +776,12 @@ pub struct Iterator {
     all_versions: bool,
     reversed: bool,
     read_ts: u64,
-    pub key: BytesMut,
+    pub(crate) key: BytesMut,
     val: table::Value,
-    pub inner: Box<dyn table::Iterator>,
-    pub bound: Option<Bytes>,
-    pub bound_include: bool,
+    pub(crate) inner: Box<dyn table::Iterator>,
     blob_prefetcher: Option<BlobPrefetcher>,
     data: ShardData,
+    range: Option<(Bytes, Bytes)>, // [lower_bound, upper_bound)
 }
 
 impl Iterator {
@@ -907,23 +903,81 @@ impl Iterator {
         self.reversed
     }
 
-    pub fn set_bound(&mut self, bound: Bytes, bound_include: bool) {
-        self.bound = Some(bound.slice(self.data.inner_key_off..));
-        self.bound_include = bound_include;
+    // set the new range of the iterator, it the range is monotonic, we can avoid
+    // seek. return true if seek is performed.
+    #[allow(clippy::collapsible_else_if)]
+    pub fn set_range(
+        &mut self,
+        outer_lower_bound_include: Bytes,
+        outer_upper_bound_exclude: Bytes,
+    ) -> bool {
+        let inner_lower_bound = outer_lower_bound_include.slice(self.data.inner_key_off..);
+        let inner_upper_bound = outer_upper_bound_exclude.slice(self.data.inner_key_off..);
+        let mut seeked = false;
+        // reset monotonic range can be optimized to avoid seek.
+        if self.is_reset_monotonic_range(&inner_lower_bound, &inner_upper_bound) {
+            // If inner is not valid, the iterator has reached the end, there is no more
+            // data to return, we can avoid the seek.
+            if self.inner.valid() {
+                if self.reversed {
+                    // If the new inner_upper_bound is greater than the current key, we can
+                    // continue to use the current key to iterate backward, avoid the seek.
+                    if self.inner.key() > inner_upper_bound.chunk() {
+                        self.inner.seek(inner_upper_bound.chunk());
+                        seeked = true;
+                    }
+                    // the upper bound is exclusive, so we need to skip the current key.
+                    if self.inner.key() == inner_upper_bound.chunk() {
+                        self.inner.next();
+                    }
+                } else {
+                    // If the new inner_lower_bound is greater than or equal to the current key,
+                    // we can continue to use the current key to iterate forward, avoid the seek.
+                    if self.inner.key() < inner_lower_bound.chunk() {
+                        self.inner.seek(inner_lower_bound.chunk());
+                        seeked = true;
+                    }
+                }
+            }
+        } else {
+            // always seek if not reset monotonic range.
+            if self.reversed {
+                self.inner.seek(inner_upper_bound.chunk());
+                if self.inner.key() == inner_upper_bound.chunk() {
+                    self.inner.next();
+                }
+            } else {
+                self.inner.seek(inner_lower_bound.chunk());
+            }
+            seeked = true;
+        }
+        self.range = Some((inner_lower_bound, outer_upper_bound_exclude));
+        self.parse_item();
+        seeked
     }
 
-    pub fn is_inner_key_over_bound(&self) -> bool {
-        if let Some(bound) = &self.bound {
+    fn is_reset_monotonic_range(&self, inner_lower_bound: &[u8], inner_upper_bound: &[u8]) -> bool {
+        if let Some((old_lower, old_upper)) = &self.range {
             if self.reversed {
-                if self.bound_include {
-                    self.inner.key() < bound.chunk()
-                } else {
-                    self.inner.key() <= bound.chunk()
-                }
-            } else if self.bound_include {
-                self.inner.key() > bound.chunk()
+                inner_upper_bound <= old_lower.chunk()
             } else {
-                self.inner.key() >= bound.chunk()
+                old_upper <= inner_lower_bound.chunk()
+            }
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn is_inner_key_over_bound(&self) -> bool {
+        if let Some((lower, upper)) = &self.range {
+            if self.inner.valid() {
+                if self.reversed {
+                    self.inner.key() < lower.chunk()
+                } else {
+                    self.inner.key() >= upper.chunk()
+                }
+            } else {
+                true
             }
         } else if self.reversed {
             self.inner.key() < self.data.inner_start()

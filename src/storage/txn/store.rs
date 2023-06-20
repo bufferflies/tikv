@@ -93,6 +93,17 @@ pub trait Scanner: Send {
 
     /// Take statistics.
     fn take_statistics(&mut self) -> Statistics;
+
+    // Reset the range for the scanner, the caller need create a new
+    // scanner if false is returned.
+    fn reset_range(
+        &mut self,
+        _desc: bool,
+        _lower_bound: Option<Key>,
+        _upper_bound: Option<Key>,
+    ) -> Result<bool> {
+        Ok(false)
+    }
 }
 
 pub trait TxnEntryStore: Send {

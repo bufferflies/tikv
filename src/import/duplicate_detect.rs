@@ -33,10 +33,14 @@ impl<S: Snapshot> DuplicateDetector<S> {
         min_commit_ts: u64,
         key_only: bool,
     ) -> Result<DuplicateDetector<S>> {
-        let snap = snapshot.get_kvengine_snap().unwrap();
+        let snap = snapshot.get_kvengine_snap().unwrap().clone();
         let mut iter = snap.new_iterator(WRITE_CF, false, true, None, true);
-        iter.seek(&start_key);
-
+        let lower_bound = Bytes::copy_from_slice(&start_key);
+        let upper_bound = end_key
+            .as_ref()
+            .map(|e| Bytes::copy_from_slice(e))
+            .unwrap_or_else(|| Bytes::copy_from_slice(snap.get_end_key()));
+        iter.set_range(lower_bound, upper_bound);
         debug!(
             "snapshot meta";
             "start_key" => log_wrappers::Value::key(snap.get_start_key()),
@@ -45,10 +49,6 @@ impl<S: Snapshot> DuplicateDetector<S> {
             "request_end" => end_key.as_ref().map(|k| log_wrappers::Value::key(k)),
             "valid" => iter.valid(),
         );
-
-        if let Some(end_key) = end_key {
-            iter.set_bound(Bytes::from(end_key), false);
-        }
         Ok(DuplicateDetector {
             iter,
             key_only,

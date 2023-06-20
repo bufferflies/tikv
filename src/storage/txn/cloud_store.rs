@@ -3,7 +3,7 @@
 use std::{borrow::Cow, marker::PhantomData};
 
 use bytes::{Buf, Bytes};
-use kvengine::{Item, UserMeta};
+use kvengine::{read, Item, SnapAccess, UserMeta};
 use kvproto::kvrpcpb::IsolationLevel;
 use tikv_kv::{Snapshot, Statistics};
 use txn_types::{is_short_value, Key, Lock, OldValue, TimeStamp, TsSet, Value, Write, WriteType};
@@ -108,10 +108,6 @@ impl<S: Snapshot> CloudStore<S> {
         }
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.snapshot.get_start_key().is_empty() && self.snapshot.get_end_key().is_empty()
-    }
-
     fn get_inner<'a>(
         user_key: &Key,
         snap: &'a kvengine::SnapAccess,
@@ -154,48 +150,18 @@ impl<S: Snapshot> CloudStore<S> {
         Ok(item)
     }
 
-    fn check_locks(
-        &self,
-        mut lock_iter: kvengine::read::Iterator,
-        lower_bound: Option<Bytes>,
-        upper_bound: Option<Bytes>,
-        stats: &mut Statistics,
-    ) -> mvcc::Result<()> {
-        CloudStoreScanner::init_iter(&mut lock_iter, &lower_bound, &upper_bound);
-        stats.lock.seek += 1;
-        while lock_iter.valid() {
-            let raw_key = lock_iter.key();
-            let key = Key::from_raw(raw_key);
-            let raw_key_len = raw_key.len();
-            let val = lock_iter.val();
-            stats.lock.next += 1;
-            stats.lock.flow_stats.read_keys += 1;
-            stats.lock.flow_stats.read_bytes += raw_key_len + val.len();
-            stats.lock.processed_keys += 1;
-            let lock = Lock::parse(val)?;
-            Lock::check_ts_conflict(
-                Cow::Borrowed(&lock),
-                &key,
-                self.start_ts.into(),
-                &self.bypass_locks,
-                IsolationLevel::Si,
-            )?;
-            lock_iter.next();
-        }
-        Ok(())
-    }
-
     pub fn check_locks_in_range(&self, lower_bound: &[u8], upper_bound: &[u8]) -> Result<()> {
-        let lower_bound = txn_types::Key::from_raw_maybe_unbounded(lower_bound);
-        let upper_bound = txn_types::Key::from_raw_maybe_unbounded(upper_bound);
-        let lower_bound = lower_bound.map(|k| Bytes::from(k.to_raw().unwrap()));
-        let upper_bound = upper_bound.map(|k| Bytes::from(k.to_raw().unwrap()));
-        self.verify_range(&lower_bound, &upper_bound)?;
+        let lower_bound = Some(Key::from_raw(lower_bound));
+        let upper_bound = Some(Key::from_raw(upper_bound));
+        let (lower_bound, upper_bound) = verify_range(&self.snapshot, lower_bound, upper_bound)?;
         let mut stats = Statistics::default();
-        let iter =
+        let mut iter =
             self.snapshot
                 .new_iterator(LOCK_CF, false, false, Some(self.start_ts), self.fill_cache);
-        self.check_locks(iter, lower_bound, upper_bound, &mut stats)?;
+        if iter.set_range(lower_bound, upper_bound) {
+            stats.lock.seek += 1;
+        }
+        check_locks(&mut iter, &self.bypass_locks, self.start_ts, &mut stats)?;
         Ok(())
     }
 
@@ -211,138 +177,164 @@ impl<S: Snapshot> CloudStore<S> {
         upper_bound: Option<Key>,
         output_delete: bool,
     ) -> Result<CloudStoreScanner> {
-        let (lower_bound, upper_bound) = if !self.is_empty() {
-            (
-                lower_bound.map(|k| Bytes::from(k.to_raw().unwrap())),
-                upper_bound.map(|k| Bytes::from(k.to_raw().unwrap())),
-            )
-        } else {
-            (None, None)
-        };
-        self.verify_range(&lower_bound, &upper_bound)?;
-        let mut stats = Statistics::default();
-        let lock_iter = self
-            .snapshot
-            .new_iterator(LOCK_CF, desc, false, None, self.fill_cache);
-        self.check_locks(
-            lock_iter,
-            lower_bound.clone(),
-            upper_bound.clone(),
-            &mut stats,
-        )?;
-        let iter =
-            self.snapshot
-                .new_iterator(WRITE_CF, desc, false, Some(self.start_ts), self.fill_cache);
-        Ok(CloudStoreScanner::new(
-            iter,
-            stats,
+        CloudStoreScanner::new(
+            self.snapshot.clone(),
+            desc,
+            self.fill_cache,
+            self.bypass_locks.clone(),
+            self.start_ts,
             lower_bound,
             upper_bound,
             output_delete,
-        ))
-    }
-
-    fn verify_range(&self, lower_bound: &Option<Bytes>, upper_bound: &Option<Bytes>) -> Result<()> {
-        if let Some(ref l) = lower_bound {
-            if l.chunk() < self.snapshot.get_start_key() {
-                return self.range_error(lower_bound, upper_bound);
-            }
-        }
-        if let Some(ref u) = upper_bound {
-            if u.chunk() > self.snapshot.get_end_key() {
-                return self.range_error(lower_bound, upper_bound);
-            }
-        }
-        Ok(())
-    }
-
-    fn range_error(&self, lower_bound: &Option<Bytes>, upper_bound: &Option<Bytes>) -> Result<()> {
-        REQUEST_EXCEED_BOUND.inc();
-        let start = lower_bound
-            .as_ref()
-            .map(|k| Key::from_raw(k.chunk()).into_encoded());
-        let end = upper_bound
-            .as_ref()
-            .map(|k| Key::from_raw(k.chunk()).into_encoded());
-        let snap_start = Key::from_raw(self.snapshot.get_start_key());
-        let snap_end = Key::from_raw(self.snapshot.get_end_key());
-        Err(Error::from(ErrorInner::InvalidReqRange {
-            start,
-            end,
-            lower_bound: Some(snap_start.into_encoded()),
-            upper_bound: Some(snap_end.into_encoded()),
-        }))
+        )
     }
 }
 
+fn check_locks(
+    lock_iter: &mut read::Iterator,
+    bypass_locks: &TsSet,
+    start_ts: u64,
+    stats: &mut Statistics,
+) -> mvcc::Result<()> {
+    while lock_iter.valid() {
+        let raw_key = lock_iter.key();
+        let key = Key::from_raw(raw_key);
+        let raw_key_len = raw_key.len();
+        let val = lock_iter.val();
+        stats.lock.next += 1;
+        stats.lock.flow_stats.read_keys += 1;
+        stats.lock.flow_stats.read_bytes += raw_key_len + val.len();
+        stats.lock.processed_keys += 1;
+        let lock = Lock::parse(val)?;
+        Lock::check_ts_conflict(
+            Cow::Borrowed(&lock),
+            &key,
+            start_ts.into(),
+            bypass_locks,
+            IsolationLevel::Si,
+        )?;
+        lock_iter.next();
+    }
+    Ok(())
+}
+
+fn verify_range(
+    snap: &SnapAccess,
+    lower_bound: Option<Key>,
+    upper_bound: Option<Key>,
+) -> Result<(Bytes, Bytes)> {
+    if snap.get_start_key().is_empty() && snap.get_end_key().is_empty() {
+        // remote coprocessor may create empty snapshot, return full range for
+        // simplicity.
+        return Ok((Bytes::new(), Bytes::from(kvengine::GLOBAL_SHARD_END_KEY)));
+    }
+    let lower = if let Some(lower_key) = &lower_bound {
+        let lower = Bytes::from(lower_key.to_raw()?);
+        if lower.chunk() < snap.get_start_key() {
+            range_error(snap, &lower_bound, &upper_bound)?;
+        }
+        lower
+    } else {
+        snap.get_start_key().to_vec().into()
+    };
+    let upper = if let Some(upper_key) = &upper_bound {
+        let upper = Bytes::from(upper_key.to_raw()?);
+        if upper.chunk() > snap.get_end_key() {
+            range_error(snap, &lower_bound, &upper_bound)?;
+        }
+        upper
+    } else {
+        snap.get_end_key().to_vec().into()
+    };
+    Ok((lower, upper))
+}
+
+fn range_error(
+    snap: &SnapAccess,
+    lower_bound: &Option<Key>,
+    upper_bound: &Option<Key>,
+) -> Result<()> {
+    REQUEST_EXCEED_BOUND.inc();
+    let start = lower_bound.as_ref().map(|k| k.as_encoded().clone());
+    let end = upper_bound.as_ref().map(|k| k.as_encoded().clone());
+    let snap_start = Key::from_raw(snap.get_start_key());
+    let snap_end = Key::from_raw(snap.get_end_key());
+    Err(Error::from(ErrorInner::InvalidReqRange {
+        start,
+        end,
+        lower_bound: Some(snap_start.into_encoded()),
+        upper_bound: Some(snap_end.into_encoded()),
+    }))
+}
+
 pub struct CloudStoreScanner {
+    snap: SnapAccess,
+    lock_iter: kvengine::read::Iterator,
+    bypass_locks: TsSet,
+    start_ts: u64,
     iter: kvengine::read::Iterator,
     stats: Statistics,
     is_started: bool,
-    lower_bound: Option<Bytes>,
-    upper_bound: Option<Bytes>,
+    lower_bound: Bytes,
+    upper_bound: Bytes,
     output_delete: bool,
 }
 
 impl CloudStoreScanner {
     pub fn new(
-        iter: kvengine::read::Iterator,
-        stats: Statistics,
-        lower_bound: Option<Bytes>,
-        upper_bound: Option<Bytes>,
+        snap: SnapAccess,
+        desc: bool,
+        fill_cache: bool,
+        bypass_locks: TsSet,
+        start_ts: u64,
+        lower_bound: Option<Key>,
+        upper_bound: Option<Key>,
         output_delete: bool,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        let stats = Statistics::default();
+        let lock_iter = snap.new_iterator(LOCK_CF, desc, false, None, fill_cache);
+        let iter = snap.new_iterator(WRITE_CF, desc, false, Some(start_ts), fill_cache);
+        let (lower_bound, upper_bound) = verify_range(&snap, lower_bound, upper_bound)?;
+        Ok(Self {
+            snap,
+            lock_iter,
+            bypass_locks,
+            start_ts,
             iter,
             stats,
             is_started: false,
             lower_bound,
             upper_bound,
             output_delete,
-        }
+        })
     }
-
-    fn init_iter(
-        iter: &mut kvengine::read::Iterator,
-        lower_bound: &Option<Bytes>,
-        upper_bound: &Option<Bytes>,
-    ) {
-        if iter.is_reverse() {
-            if let Some(lower) = lower_bound {
-                // the lower bound is always inclusive even in reverse scan.
-                iter.set_bound(lower.clone(), true);
-            }
-            if let Some(upper) = upper_bound {
-                iter.seek(upper.chunk());
-                // the upper bound is exclusive, so we need to skip it
-                if iter.valid() && iter.key().chunk() == upper.chunk() {
-                    iter.next();
-                }
-            } else {
-                iter.rewind();
-            }
-        } else {
-            if let Some(upper) = upper_bound {
-                iter.set_bound(upper.clone(), false);
-            }
-            if let Some(lower) = lower_bound {
-                iter.seek(lower.chunk());
-            } else {
-                iter.rewind();
-            }
+    fn init(&mut self) -> Result<()> {
+        if self
+            .lock_iter
+            .set_range(self.lower_bound.clone(), self.upper_bound.clone())
+        {
+            self.stats.lock.seek += 1;
+        };
+        check_locks(
+            &mut self.lock_iter,
+            &self.bypass_locks,
+            self.start_ts,
+            &mut self.stats,
+        )?;
+        if self
+            .iter
+            .set_range(self.lower_bound.clone(), self.upper_bound.clone())
+        {
+            self.stats.write.seek += 1;
         }
-    }
-
-    fn init(&mut self) {
-        self.stats.write.seek += 1;
-        Self::init_iter(&mut self.iter, &self.lower_bound, &self.upper_bound);
+        Ok(())
     }
 
     fn next_inner(&mut self) -> Result<Option<(Key, UserMeta, Value)>> {
         if self.is_started {
             self.iter.next();
         } else {
-            self.init();
+            self.init()?;
             self.is_started = true;
         }
         loop {
@@ -387,6 +379,22 @@ impl super::Scanner for CloudStoreScanner {
 
     fn take_statistics(&mut self) -> Statistics {
         std::mem::take(&mut self.stats)
+    }
+
+    fn reset_range(
+        &mut self,
+        desc: bool,
+        lower_bound: Option<Key>,
+        upper_bound: Option<Key>,
+    ) -> Result<bool> {
+        if self.iter.is_reverse() != desc {
+            return Ok(false);
+        }
+        let (lower_bound, upper_bound) = verify_range(&self.snap, lower_bound, upper_bound)?;
+        self.lower_bound = lower_bound;
+        self.upper_bound = upper_bound;
+        self.is_started = false;
+        Ok(true)
     }
 }
 

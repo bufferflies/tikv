@@ -42,15 +42,22 @@ impl<S: Store> Storage for TikvStorage<S> {
         is_key_only: bool,
         range: IntervalRange,
     ) -> QeResult<()> {
+        let lower = Some(Key::from_raw(&range.lower_inclusive));
+        let upper = Some(Key::from_raw(&range.upper_exclusive));
         if let Some(scanner) = &mut self.scanner {
             self.cf_stats_backlog.add(&scanner.take_statistics());
             if scanner.met_newer_ts_data() == NewerTsCheckState::Met {
                 // always override if we met newer ts data
                 self.met_newer_ts_data_backlog = NewerTsCheckState::Met;
             }
+            if scanner
+                .reset_range(is_backward_scan, lower.clone(), upper.clone())
+                .map_err(Error::from)?
+            {
+                return Ok(());
+            }
         }
-        let lower = Some(Key::from_raw(&range.lower_inclusive));
-        let upper = Some(Key::from_raw(&range.upper_exclusive));
+
         self.scanner = Some(
             self.store
                 .scanner(
