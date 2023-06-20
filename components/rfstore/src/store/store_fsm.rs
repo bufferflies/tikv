@@ -629,6 +629,7 @@ impl RaftContext {
     }
 
     // Region(dependent_id) depends on Region(parent_id).
+    // Note: duplicated with PreprocessContext::remove_dependent.
     pub fn remove_dependent(&self, parent_id: u64, dependent_id: u64) {
         let dependent_len = self
             .global

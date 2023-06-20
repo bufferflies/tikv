@@ -62,7 +62,7 @@ use txn_types::Key;
 use uuid::Uuid;
 
 use super::*;
-use crate::errors::*;
+use crate::{errors::*, RaftRouter};
 
 const SHRINK_CACHE_CAPACITY: usize = 64;
 const MAX_COMMITTED_SIZE_PER_READY: u64 = 16 * 1024 * 1024;
@@ -1701,7 +1701,21 @@ impl Peer {
         pos: usize,
         entry: &Entry,
     ) -> bool {
-        if self.preprocessed_index > 0 && entry.index <= self.preprocessed_index {
+        let mut preprocess_ctx = PreprocessContext::from_raft_context(ctx);
+        let mut preprocess_ref = PreprocessRef::from_peer(self);
+        preprocess_ref.preprocess_committed_entry(&mut preprocess_ctx, pos, entry)
+    }
+}
+
+// TODO: move to individual file.
+impl<'a> PreprocessRef<'a> {
+    pub fn preprocess_committed_entry(
+        &mut self,
+        ctx: &mut PreprocessContext<'_>,
+        pos: usize,
+        entry: &Entry,
+    ) -> bool {
+        if *self.preprocessed_index > 0 && entry.index <= *self.preprocessed_index {
             return false;
         }
         let mut no_kv = entry.data.is_empty();
@@ -1749,28 +1763,27 @@ impl Peer {
         if no_kv {
             self.try_advance_meta(ctx, entry);
         }
-        self.preprocessed_index = entry.index;
+        *self.preprocessed_index = entry.index;
         false
     }
 
-    pub(crate) fn try_advance_meta(&mut self, ctx: &mut RaftContext, entry: &Entry) {
-        if entry.index != self.last_no_kv_idx + 1 {
+    pub(crate) fn try_advance_meta(&mut self, ctx: &mut PreprocessContext<'_>, entry: &Entry) {
+        if entry.index != *self.last_no_kv_idx + 1 {
             // There is kv raft log, reset first.
-            self.first_no_kv_idx = entry.index;
+            *self.first_no_kv_idx = entry.index;
         }
-        self.last_no_kv_idx = entry.index;
-        let first_no_kv_idx = self.first_no_kv_idx;
-        let last_no_kv_idx = self.last_no_kv_idx;
+        *self.last_no_kv_idx = entry.index;
+        let first_no_kv_idx = *self.first_no_kv_idx;
+        let last_no_kv_idx = *self.last_no_kv_idx;
         let peer_id = self.peer_id();
-        let store = self.mut_store();
-        let shard_meta = store.mut_engine_meta();
+        let shard_meta = self.mut_shard_meta();
         if shard_meta.parent.is_none()
             && shard_meta.data_sequence + 1 >= first_no_kv_idx
             && shard_meta.data_sequence != last_no_kv_idx
         {
             shard_meta.data_sequence = last_no_kv_idx;
             shard_meta.set_property(TERM_KEY, &entry.term.to_le_bytes());
-            write_engine_meta(&mut ctx.raft_wb, peer_id, shard_meta);
+            write_engine_meta(ctx.raft_wb, peer_id, shard_meta);
             info!(
                 "{} shard meta advanced data sequence to {}",
                 self.tag(),
@@ -1781,7 +1794,7 @@ impl Peer {
 
     pub(crate) fn preprocess_change_set(
         &mut self,
-        ctx: &mut RaftContext,
+        ctx: &mut PreprocessContext<'_>,
         entry: &Entry,
         custom_req: &CustomRequest,
     ) {
@@ -1789,10 +1802,10 @@ impl Peer {
         let mut cs = custom_log.get_change_set().unwrap();
         cs.set_sequence(entry.get_index());
         let peer_id = self.peer_id();
-        let region_id = self.region_id;
+        let region_id = self.region_id();
         let tag = self.tag();
-        let opt_parent_id = self.mut_store().parent_id();
-        let shard_meta = self.mut_store().shard_meta.as_ref().unwrap();
+        let opt_parent_id = self.parent_id();
+        let shard_meta = self.shard_meta();
         let mut rejected = false;
         if shard_meta.ver != cs.get_shard_ver() {
             rejected = true;
@@ -1810,14 +1823,17 @@ impl Peer {
                 "seq" => cs.get_sequence(),
             );
         }
-        ctx.global.engines.kv.meta_committed(&cs, rejected);
+        if let Some(kv) = ctx.kv.as_ref() {
+            // `ctx.kv` is `None` only in restore. In which we don't need `meta_committed`.
+            kv.meta_committed(&cs, rejected);
+        }
         if rejected {
             return;
         }
         if cs.has_restore_shard() {
             self.preprocess_restore_shard(ctx, entry, &mut cs);
         }
-        let shard_meta = self.mut_store().mut_engine_meta();
+        let shard_meta = self.mut_shard_meta();
         shard_meta.apply_change_set(&cs);
         info!(
             "shard meta apply change set {:?}", &cs;
@@ -1831,7 +1847,7 @@ impl Peer {
         );
         if cs.has_initial_flush() || cs.has_snapshot() || cs.has_restore_shard() {
             if let Some(parent_id) = opt_parent_id {
-                ctx.remove_dependent(parent_id, self.region_id);
+                ctx.remove_dependent(parent_id, self.region_id());
             }
         }
         ctx.apply_msgs.msgs.push(ApplyMsg::PrepareChangeSet(cs));
@@ -1839,7 +1855,7 @@ impl Peer {
 
     fn preprocess_restore_shard(
         &mut self,
-        ctx: &mut RaftContext,
+        ctx: &mut PreprocessContext<'_>,
         entry: &Entry,
         cs: &mut kvenginepb::ChangeSet,
     ) {
@@ -1847,12 +1863,11 @@ impl Peer {
 
         let tag = self.tag();
         let peer_id = self.peer_id();
-        let peer_storage = self.mut_store();
 
         // Increase region version to discard stale change sets.
         // Otherwise, change sets generated before but apply after restore shard will
         // result in undefined behavior.
-        let mut new_region = peer_storage.get_preprocessed_region().clone();
+        let mut new_region = self.get_preprocessed_region().clone();
         let region_version = new_region.get_region_epoch().get_version();
         debug_assert_eq!(cs.shard_ver, region_version);
         new_region
@@ -1862,14 +1877,8 @@ impl Peer {
             "{} preprocess_restore_shard: new_region: {:?}",
             tag, new_region
         );
-        write_peer_state(
-            &mut ctx.raft_wb,
-            peer_id,
-            &new_region,
-            PeerState::Normal,
-            None,
-        );
-        peer_storage.preprocessed_region = Some(new_region);
+        write_peer_state(ctx.raft_wb, peer_id, &new_region, PeerState::Normal, None);
+        *self.preprocessed_region = Some(new_region);
 
         // Set raft term & index.
         let snap = cs.mut_restore_shard();
@@ -1886,28 +1895,9 @@ impl Peer {
         );
     }
 
-    fn truncate_pending_raft_log(&mut self, ctx: &mut RaftContext, applied_index: u64) {
-        if self.pending_truncate.is_none() {
-            return;
-        }
-
-        let (term, idx) = self.pending_truncate.unwrap();
-        if self.get_store().truncated_index() < idx && idx <= applied_index {
-            self.mut_store()
-                .truncate_raft_log(&mut ctx.raft_wb, idx, term);
-            self.pending_truncate = None;
-            info!(
-                "{} truncate pending raft log, term {} index {}",
-                self.tag(),
-                term,
-                idx
-            );
-        }
-    }
-
     pub(crate) fn preprocess_pending_splits(
         &mut self,
-        ctx: &mut RaftContext,
+        ctx: &mut PreprocessContext<'_>,
         entry: &Entry,
         req: &RaftCmdRequest,
     ) {
@@ -1916,14 +1906,14 @@ impl Peer {
             return;
         }
         let regions = split_gen_new_region_metas(
-            self.get_store().store_id,
+            self.store_id(),
             self.get_preprocessed_region(),
             req.get_admin_request().get_splits(),
         )
         .unwrap();
-        self.last_committed_split_idx = entry.index;
-        let split = build_split_pb(self.region_id, &regions, entry.term);
-        let shard_meta = self.mut_store().mut_engine_meta();
+        *self.last_committed_split_idx = entry.index;
+        let split = build_split_pb(self.region_id(), &regions, entry.term);
+        let shard_meta = self.mut_shard_meta();
         let new_metas = shard_meta.apply_split(
             &split,
             entry.index,
@@ -1936,13 +1926,12 @@ impl Peer {
         ctx.apply_msgs.msgs.push(ApplyMsg::PendingSplit(cs));
         for (new_meta, new_region) in new_metas.iter().zip(regions.iter()) {
             let new_peer_id = get_peer_id_by_store_id(new_region, self.peer.store_id).unwrap();
-            if new_meta.id == self.region_id {
+            if new_meta.id == self.region_id() {
                 self.update_meta_on_version_change(ctx, new_meta, new_region, None);
             } else {
-                let raft = &ctx.global.engines.raft;
                 // The peer has been created or destroyed.
-                if load_last_peer_state(raft, new_peer_id).is_some()
-                    || ctx.global.destroying.contains(&new_region.id)
+                if load_last_peer_state(ctx.raft, new_peer_id).is_some()
+                    || ctx.destroying.contains(&new_region.id)
                     // The new region may restore snapshot in the same batch, so we should check
                     // raft_wb too.
                     || ctx
@@ -1958,31 +1947,29 @@ impl Peer {
                     continue;
                 }
                 write_peer_state(
-                    &mut ctx.raft_wb,
+                    ctx.raft_wb,
                     new_peer_id,
                     new_region,
                     PeerState::Normal,
                     None,
                 );
-                write_engine_meta(&mut ctx.raft_wb, new_peer_id, new_meta);
+                write_engine_meta(ctx.raft_wb, new_peer_id, new_meta);
                 let region_version = new_region.get_region_epoch().get_version();
                 write_initial_raft_state(
-                    &mut ctx.raft_wb,
+                    ctx.raft_wb,
                     new_peer_id,
                     new_region.get_id(),
                     region_version,
                 );
             }
-            ctx.global
-                .engines
-                .raft
-                .add_dependent(self.region_id, new_region.get_id());
+            ctx.raft
+                .add_dependent(self.region_id(), new_region.get_id());
         }
     }
 
     pub(crate) fn update_meta_on_version_change(
         &mut self,
-        ctx: &mut RaftContext,
+        ctx: &mut PreprocessContext<'_>,
         new_meta: &ShardMeta,
         new_region: &Region,
         merge_state: Option<MergeState>,
@@ -1993,33 +1980,31 @@ impl Peer {
             PeerState::Normal
         };
         write_peer_state(
-            &mut ctx.raft_wb,
+            ctx.raft_wb,
             self.peer_id(),
             new_region,
             peer_state,
             merge_state,
         );
-        write_engine_meta(&mut ctx.raft_wb, self.peer_id(), new_meta);
+        write_engine_meta(ctx.raft_wb, self.peer_id(), new_meta);
         // The raft state key changed when region version change, we need to set it
         // here. We handle committed entries before update peer storage's raft
         // state, so the peer storage's raft state may not be update to date, we
         // set the hard state of raft. This is the final raft state of the old
         // version.
-        let hard_state = self.raft_group.raft.hard_state();
-        let store = self.mut_store();
-        store.raft_state.set_hard_state(&hard_state);
-        store.raft_state.last_preprocessed_index = new_meta.seq;
-        store.write_raft_state(ctx);
-        store.shard_meta = Some(new_meta.clone());
+        self.raft_state.set_hard_state(&self.raft_hard_state);
+        self.raft_state.last_preprocessed_index = new_meta.seq;
+        self.write_raft_state(ctx);
+        *self.shard_meta = Some(new_meta.clone());
         // PeerStore use the shard meta's version to persist raft state, since the
         // shard_meta has updated, we also need to set the new version's raft state.
-        store.write_raft_state(ctx);
-        store.preprocessed_region = Some(new_region.clone());
+        self.write_raft_state(ctx);
+        *self.preprocessed_region = Some(new_region.clone());
     }
 
     pub(crate) fn preprocess_prepare_merge(
         &mut self,
-        ctx: &mut RaftContext,
+        ctx: &mut PreprocessContext<'_>,
         entry: &Entry,
         req: &RaftCmdRequest,
     ) {
@@ -2039,7 +2024,7 @@ impl Peer {
         merge_state.set_target(prepare_merge.get_target().to_owned());
         merge_state.set_commit(entry.index);
         merge_state.set_min_index(prepare_merge.get_min_index());
-        let parent_meta = self.get_store().shard_meta.as_ref().unwrap().clone();
+        let parent_meta = self.shard_meta().clone();
         let parent_snap = parent_meta.to_change_set().take_snapshot();
         ctx.apply_msgs
             .msgs
@@ -2048,12 +2033,12 @@ impl Peer {
         new_meta.prepare_merge(entry.index);
         new_meta.set_property(TERM_KEY, &entry.term.to_le_bytes());
         self.update_meta_on_version_change(ctx, &new_meta, &region, Some(merge_state.clone()));
-        self.pending_merge_state = Some(merge_state);
+        *self.pending_merge_state = Some(merge_state);
     }
 
     pub(crate) fn preprocess_rollback_merge(
         &mut self,
-        ctx: &mut RaftContext,
+        ctx: &mut PreprocessContext<'_>,
         entry: &Entry,
         req: &RaftCmdRequest,
     ) {
@@ -2074,7 +2059,7 @@ impl Peer {
         let version = region.get_region_epoch().get_version();
         // Update version to avoid duplicated rollback requests.
         region.mut_region_epoch().set_version(version + 1);
-        let mut new_meta = self.get_store().shard_meta.as_ref().unwrap().clone();
+        let mut new_meta = self.shard_meta().clone();
 
         // Get the applied sequence of last initial flush, which was applied to meta
         // before check merge.
@@ -2092,14 +2077,14 @@ impl Peer {
 
     pub(crate) fn preprocess_commit_merge(
         &mut self,
-        ctx: &mut RaftContext,
+        ctx: &mut PreprocessContext<'_>,
         entry: &Entry,
         req: &RaftCmdRequest,
     ) {
         let commit_merge = req.get_admin_request().get_commit_merge();
         let source_region = commit_merge.get_source();
         let source_peer_id = get_peer_id_by_store_id(source_region, self.peer.store_id).unwrap();
-        let mut new_meta = self.get_store().shard_meta.as_ref().unwrap().clone();
+        let mut new_meta = self.shard_meta().clone();
         let mut source = kvenginepb::ChangeSet::new();
         source
             .merge_from_bytes(commit_merge.get_source_meta())
@@ -2112,12 +2097,11 @@ impl Peer {
 
         // set target to tombstone in the same batch, so the commit merge and destroy
         // source would be atomic.
-        let rwb = &mut ctx.raft_wb;
         let mut merge_state = MergeState::new();
         merge_state.set_commit(commit_merge.commit);
-        merge_state.set_target(self.region().clone());
+        merge_state.set_target(self.region.clone());
         write_peer_state(
-            rwb,
+            ctx.raft_wb,
             source_peer_id,
             source_region,
             PeerState::Tombstone,
@@ -2137,7 +2121,11 @@ impl Peer {
         ctx.apply_msgs.msgs.push(apply_msg);
     }
 
-    pub(crate) fn preprocess_conf_change(&mut self, ctx: &mut RaftContext, entry: &Entry) {
+    pub(crate) fn preprocess_conf_change(
+        &mut self,
+        ctx: &mut PreprocessContext<'_>,
+        entry: &Entry,
+    ) {
         let (cmd, _) = parse_conf_change_cmd(entry, self.tag());
         if let Err(err) = check_region_epoch(&cmd, self.get_preprocessed_region(), false) {
             warn!("preprocess pending conf change failed {:?}", err);
@@ -2162,7 +2150,7 @@ impl Peer {
         ) {
             if region_has_peer(&region, self.peer_id()) {
                 write_peer_state(
-                    &mut ctx.raft_wb,
+                    ctx.raft_wb,
                     self.peer_id(),
                     &region,
                     PeerState::Normal,
@@ -2172,7 +2160,28 @@ impl Peer {
                 // It's a remove self conf change, it will be updated in destroy
                 // method with tombstone state.
             }
-            self.mut_store().preprocessed_region = Some(region);
+            *self.preprocessed_region = Some(region);
+        }
+    }
+}
+
+impl Peer {
+    fn truncate_pending_raft_log(&mut self, ctx: &mut RaftContext, applied_index: u64) {
+        if self.pending_truncate.is_none() {
+            return;
+        }
+
+        let (term, idx) = self.pending_truncate.unwrap();
+        if self.get_store().truncated_index() < idx && idx <= applied_index {
+            self.mut_store()
+                .truncate_raft_log(&mut ctx.raft_wb, idx, term);
+            self.pending_truncate = None;
+            info!(
+                "{} truncate pending raft log, term {} index {}",
+                self.tag(),
+                term,
+                idx
+            );
         }
     }
 
@@ -3610,11 +3619,160 @@ pub(crate) fn new_merged_region(source: &Region, target: &Region) -> Region {
     merged
 }
 
-#[cfg(test)]
-mod tests {
+// TODO: move to individual file.
+/// `PreprocessRef` is a reference of `Peer`, including only necessary fields
+/// and methods for preprocess.
+///
+/// The main purpose of `PreprocessRef` is to separate the preprocess logic
+/// from the `Peer`, and reuse for remote recover procedures (e.g. restore
+/// keyspace).
+pub struct PreprocessRef<'a> {
+    pub region: &'a mut metapb::Region,
+    pub preprocessed_region: &'a mut Option<metapb::Region>,
+    pub peer: &'a mut metapb::Peer,
 
-    #[test]
-    fn test_run() {
-        println!("I'll run")
+    pub shard_meta: &'a mut Option<ShardMeta>,
+    pub raft_state: &'a mut RaftState,
+    // `raft_hard_state` is not reference as we don't have `raft::Raft` during restore.
+    // Note: `raft_hard_state` should be updated before handle every batch of Raft entries.
+    pub raft_hard_state: eraftpb::HardState,
+
+    pub preprocessed_index: &'a mut u64,
+    pub first_no_kv_idx: &'a mut u64,
+    pub last_no_kv_idx: &'a mut u64,
+
+    pub last_committed_split_idx: &'a mut u64,
+    pub pending_truncate: &'a mut Option<(u64 /* term */, u64 /* index */)>,
+    pub pending_merge_state: &'a mut Option<MergeState>,
+}
+
+impl<'a> PreprocessRef<'a> {
+    pub(crate) fn from_peer(peer: &'a mut Peer) -> PreprocessRef<'a> {
+        let raft_hard_state = peer.raft_group.raft.hard_state();
+
+        let (
+            pb_peer,
+            last_committed_split_idx,
+            pending_truncate,
+            pending_merge_state,
+            preprocessed_index,
+            first_no_kv_idx,
+            last_no_kv_idx,
+        ) = (
+            &mut peer.peer,
+            &mut peer.last_committed_split_idx,
+            &mut peer.pending_truncate,
+            &mut peer.pending_merge_state,
+            &mut peer.preprocessed_index,
+            &mut peer.first_no_kv_idx,
+            &mut peer.last_no_kv_idx,
+        );
+
+        let store = peer.raft_group.mut_store();
+        let (region, preprocessed_region, shard_meta, raft_state) = (
+            &mut store.region,
+            &mut store.preprocessed_region,
+            &mut store.shard_meta,
+            &mut store.raft_state,
+        );
+
+        Self {
+            region,
+            preprocessed_region,
+            peer: pb_peer,
+            shard_meta,
+            raft_state,
+            raft_hard_state,
+            preprocessed_index,
+            first_no_kv_idx,
+            last_no_kv_idx,
+            last_committed_split_idx,
+            pending_truncate,
+            pending_merge_state,
+        }
+    }
+
+    fn get_preprocessed_region(&self) -> &metapb::Region {
+        self.preprocessed_region.as_ref().unwrap_or(self.region)
+    }
+
+    fn store_id(&self) -> u64 {
+        self.peer.store_id
+    }
+
+    fn region_id(&self) -> u64 {
+        self.region.get_id()
+    }
+
+    fn peer_id(&self) -> u64 {
+        self.peer.get_id()
+    }
+
+    fn tag(&self) -> PeerTag {
+        PeerTag::new(self.store_id(), RegionIdVer::from_region(self.region))
+    }
+
+    fn parent_id(&self) -> Option<u64> {
+        self.shard_meta
+            .as_ref()
+            .and_then(|m| m.parent.as_ref())
+            .map(|p| p.id)
+    }
+
+    fn shard_meta(&self) -> &ShardMeta {
+        self.shard_meta.as_ref().unwrap()
+    }
+
+    fn mut_shard_meta(&mut self) -> &mut ShardMeta {
+        self.shard_meta.as_mut().unwrap()
+    }
+
+    pub fn write_raft_state(&mut self, ctx: &mut PreprocessContext<'_>) {
+        debug!("{} write raft state {:?}", self.tag(), self.raft_state);
+        write_raft_state(
+            ctx.raft_wb,
+            self.peer_id(),
+            self.shard_meta(),
+            self.raft_state,
+        );
+    }
+}
+
+pub struct PreprocessContext<'a> {
+    pub store_id: u64,
+    pub raft: &'a rfengine::RfEngine,
+    pub raft_wb: &'a mut rfengine::WriteBatch,
+    pub apply_msgs: &'a mut ApplyMsgs,
+    pub cfg: &'a Config,
+    pub destroying: &'a mut std::collections::HashSet<u64>,
+
+    // Following fields are `None` for restore scenario.
+    pub kv: Option<&'a kvengine::Engine>,
+    pub router: Option<&'a RaftRouter>,
+}
+
+impl<'a> PreprocessContext<'a> {
+    pub(crate) fn from_raft_context(raft_ctx: &'a mut RaftContext) -> PreprocessContext<'a> {
+        PreprocessContext {
+            store_id: raft_ctx.store_id(),
+            raft: &raft_ctx.global.engines.raft,
+            raft_wb: &mut raft_ctx.raft_wb,
+            apply_msgs: &mut raft_ctx.apply_msgs,
+            cfg: &raft_ctx.cfg,
+            destroying: &mut raft_ctx.global.destroying,
+            kv: Some(&raft_ctx.global.engines.kv),
+            router: Some(&raft_ctx.global.router),
+        }
+    }
+
+    // Region(dependent_id) depends on Region(parent_id).
+    // Note: duplicated with RaftContext::remove_dependent.
+    pub fn remove_dependent(&self, parent_id: u64, dependent_id: u64) {
+        let dependent_len = self.raft.remove_dependent(parent_id, dependent_id);
+        if dependent_len == 0 && parent_id != dependent_id {
+            if let Some(router) = self.router {
+                router.send_store(StoreMsg::DependentsEmpty(parent_id));
+            }
+        }
     }
 }

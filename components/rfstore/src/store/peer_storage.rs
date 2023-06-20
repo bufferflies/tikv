@@ -81,7 +81,7 @@ pub(crate) struct PeerStorage {
 
     pub(crate) peer_id: u64,
     pub(crate) store_id: u64,
-    region: metapb::Region,
+    pub(crate) region: metapb::Region,
     // The preprocessed_region applies all the committed conf change, we should use it instead of
     // the current region to do preprocessed_split and preprocessed_conf_change because the current
     // region may be outdated due to slow apply.
@@ -451,15 +451,13 @@ impl PeerStorage {
     }
 
     pub fn write_raft_state(&mut self, ctx: &mut RaftContext) {
-        // The meta's version is the latest region version, use it to persist raft
-        // state.
-        let meta = self.shard_meta.as_ref().unwrap();
-        let id_ver = RegionIdVer::new(meta.id, meta.ver);
-        let tag = PeerTag::new(ctx.store_id(), id_ver);
-        debug!("{} write raft state {:?}", tag, self.raft_state);
-        let key = raft_state_key(meta.ver);
-        ctx.raft_wb
-            .set_state(self.peer_id, meta.id, &key, &self.raft_state.marshal());
+        debug!("{} write raft state {:?}", self.tag(), self.raft_state);
+        write_raft_state(
+            &mut ctx.raft_wb,
+            self.peer_id,
+            self.shard_meta.as_ref().unwrap(),
+            &self.raft_state,
+        );
     }
 
     fn restore_snapshot(&mut self, ready: &Ready, ctx: &mut RaftContext) -> Result<()> {
@@ -524,10 +522,6 @@ impl PeerStorage {
         let last_entry = entries.last().unwrap();
         self.raft_state.last_index = last_entry.get_index();
         self.last_term = last_entry.get_term();
-    }
-
-    pub(crate) fn mut_engine_meta(&mut self) -> &mut ShardMeta {
-        self.shard_meta.as_mut().unwrap()
     }
 
     pub(crate) fn parent_id(&self) -> Option<u64> {
@@ -695,6 +689,18 @@ pub fn write_peer_state(
 pub fn write_engine_meta(raft_wb: &mut rfengine::WriteBatch, peer_id: u64, meta: &ShardMeta) {
     info!("{} write engine meta, sequence: {}", meta.tag(), meta.seq);
     raft_wb.set_state(peer_id, meta.id, KV_ENGINE_META_KEY, &meta.marshal());
+}
+
+pub(crate) fn write_raft_state(
+    raft_wb: &mut rfengine::WriteBatch,
+    peer_id: u64,
+    meta: &ShardMeta,
+    raft_state: &RaftState,
+) {
+    // The meta's version is the latest region version, use it to persist raft
+    // state.
+    let key = raft_state_key(meta.ver);
+    raft_wb.set_state(peer_id, meta.id, &key, &raft_state.marshal());
 }
 
 pub fn load_engine_meta(

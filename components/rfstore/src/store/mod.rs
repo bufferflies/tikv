@@ -13,6 +13,7 @@ pub mod peer;
 pub mod peer_fsm;
 pub mod peer_storage;
 pub mod peer_worker;
+pub mod preprocess;
 pub mod read;
 pub mod read_queue;
 pub mod recover;
