@@ -166,15 +166,37 @@ impl LoadDataManager {
     }
 
     pub(crate) fn get_task_states(&self, start_ts: u64) -> Option<LoadTaskStates> {
-        self.running_tasks
-            .get(&start_ts)
-            .map(|x| x.states.lock().unwrap().clone())
+        self.running_tasks.get(&start_ts).map(|x| {
+            let thread_finished = x
+                .thread_handle
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .is_finished();
+            if thread_finished {
+                x.cancel("task thread finished unexpectedly".to_string());
+            }
+            x.states.lock().unwrap().clone()
+        })
     }
 
     pub(crate) fn list_tasks(&self) -> Vec<LoadTaskStates> {
         self.running_tasks
             .iter()
-            .map(|x| x.states.lock().unwrap().clone())
+            .map(|x| {
+                let thread_finished = x
+                    .thread_handle
+                    .as_ref()
+                    .unwrap()
+                    .lock()
+                    .unwrap()
+                    .is_finished();
+                if thread_finished {
+                    x.cancel("task thread finished unexpectedly".to_string());
+                }
+                x.states.lock().unwrap().clone()
+            })
             .collect()
     }
 
@@ -184,10 +206,11 @@ impl LoadDataManager {
 
     pub(crate) fn init_task(&self, task_ctx: TaskContext) {
         let mut worker = LoadTaskWorker::new(self.ctx.clone(), task_ctx.clone());
-        let scheduler = worker.get_scheduler();
-        std::thread::spawn(move || {
+        let mut scheduler = worker.get_scheduler();
+        let thread_handle = std::thread::spawn(move || {
             worker.run();
         });
+        scheduler.set_thread_handle(thread_handle);
         self.running_tasks.insert(task_ctx.start_ts, scheduler);
     }
 

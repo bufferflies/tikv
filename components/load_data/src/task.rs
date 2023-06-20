@@ -118,6 +118,7 @@ pub struct TaskContext {
 pub struct LoadTaskScheduler {
     pub sender: Sender<LoadTaskMsg>,
     pub states: Arc<Mutex<LoadTaskStates>>,
+    pub thread_handle: Option<Arc<Mutex<std::thread::JoinHandle<()>>>>,
 }
 
 impl LoadTaskScheduler {
@@ -158,6 +159,10 @@ impl LoadTaskScheduler {
         states.finished
     }
 
+    pub fn set_thread_handle(&mut self, thread_handle: std::thread::JoinHandle<()>) {
+        self.thread_handle = Some(Arc::new(Mutex::new(thread_handle)))
+    }
+
     pub async fn query_unhandled_chunks(&self, chunk_ids: Vec<u64>) -> Vec<u64> {
         let (cb, fut) = tikv_util::future::paired_future_callback();
         self.sender
@@ -175,6 +180,7 @@ impl LoadTaskWorker {
         let scheduler = LoadTaskScheduler {
             sender,
             states: Arc::new(Mutex::new(states)),
+            thread_handle: None,
         };
         let (file_tx, file_rx) = tikv_util::mpsc::unbounded();
         let task_dir = context.dir.join(format!("{}", task_ctx.start_ts));
