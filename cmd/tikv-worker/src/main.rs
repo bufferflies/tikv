@@ -149,6 +149,13 @@ fn main() {
                 .value_name("DIR")
                 .help("data dir for load_data"),
         )
+        .arg(
+            Arg::with_name("cop-addr")
+                .long("cop-addr")
+                .takes_value(true)
+                .value_name("IP:PORT")
+                .help("Set the coprocessor listening address"),
+        )
         .get_matches();
 
     let mut config_file_path = None;
@@ -554,7 +561,7 @@ impl Default for Config {
             data_dir: String::default(),
             register: false,
             native_br: NativeBrConfig::default(),
-            cop_addr: String::default(),
+            cop_addr: String::from("0.0.0.0:9500"),
             cop_cache_size: ReadableSize::gb(1),
         }
     }
@@ -639,5 +646,9 @@ fn override_from_args(config: &mut Config, matches: &ArgMatches<'_>) {
 
     if let Some(log_level) = matches.value_of("log-level") {
         config.log_level = log_level.to_string();
+    }
+
+    if let Some(cop_addr) = matches.value_of("cop-addr") {
+        config.cop_addr = cop_addr.to_string();
     }
 }
