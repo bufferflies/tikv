@@ -25,7 +25,6 @@ use crate::{
         blobtable::{blobtable::BlobTable, builder::BlobTableBuilder},
         search,
         sstable::{self, InMemFile, L0Builder, SsTable, NO_COMPRESSION},
-        ExternalLink,
     },
     Error::{FallbackLocalCompactorDisabled, IncompatibleRemoteCompactor, RemoteCompaction},
     Iterator, EXTRA_CF, LOCK_CF, WRITE_CF, *,
@@ -2475,17 +2474,17 @@ fn compact_for_cf(
         }
         if let Some((bt_config, bt_builder)) = &mut blob_table_builder {
             let mut need_recompress_blob = false;
-            if val.is_external_link() {
+            if val.is_blob_ref() {
                 if blob_tables.is_empty() {
                     sst_builder.add(key, &val, None);
                 } else {
                     // If it is a blob link, we need to deref it and may need to decompress it as
                     // well.
-                    let link = val.get_external_link();
-                    let blob_table = blob_tables.get(&link.fid).unwrap_or_else(|| {
+                    let blob_ref = val.get_blob_ref();
+                    let blob_table = blob_tables.get(&blob_ref.fid).unwrap_or_else(|| {
                         panic!(
                             "[{}] blob table {} not found for key {:?}",
-                            shard_id, link.fid, key,
+                            shard_id, blob_ref.fid, key,
                         )
                     });
                     if blob_table.compression_tp() != bt_config.compression_type
@@ -2498,9 +2497,7 @@ fn compact_for_cf(
                     // depending on whether need_recompress_blob is true.
                     let blob_or_compressed_blob = blob_table
                         .get_from_preloaded(
-                            link.offset,
-                            link.len,
-                            link.original_len,
+                            &blob_ref,
                             need_recompress_blob,
                             &mut decompressed_blob_buf,
                         )
@@ -2514,22 +2511,21 @@ fn compact_for_cf(
                     if !need_recompress_blob
                         || blob_or_compressed_blob.len() >= bt_config.min_blob_size as usize
                     {
-                        let (offset, len) =
-                            bt_builder.add_blob(key, blob_or_compressed_blob, need_recompress_blob);
-                        let external_link =
-                            ExternalLink::new(bt_builder.get_fid(), offset, len, link.original_len);
-                        sst_builder.add(key, &val, Some(external_link));
+                        let new_blob_ref = bt_builder.add_blob(
+                            key,
+                            blob_or_compressed_blob,
+                            Some(blob_ref.original_len),
+                        );
+                        sst_builder.add(key, &val, Some(new_blob_ref));
                     } else {
                         val.fill_in_blob(blob_or_compressed_blob);
                         sst_builder.add(key, &val, None);
                     }
                 }
             } else if val.value_len() >= bt_config.min_blob_size as usize {
-                let (offset, len) = bt_builder.add(key, &val);
-                let external_link =
-                    ExternalLink::new(bt_builder.get_fid(), offset, len, val.value_len() as u32);
-                val.set_external_link();
-                sst_builder.add(key, &val, Some(external_link));
+                let blob_ref = bt_builder.add(key, &val);
+                val.set_blob_ref();
+                sst_builder.add(key, &val, Some(blob_ref));
             } else {
                 sst_builder.add(key, &val, None);
             }

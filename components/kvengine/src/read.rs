@@ -354,20 +354,20 @@ impl SnapAccessCore {
     }
 
     fn fetch_blob(&self, key: &[u8], val: &table::Value) -> Vec<u8> {
-        assert!(val.is_external_link());
-        let blob_link = val.get_external_link();
+        assert!(val.is_blob_ref());
+        let blob_ref = val.get_blob_ref();
         let blob_table = self
             .data
             .blob_tbl_map
-            .get(&blob_link.fid)
+            .get(&blob_ref.fid)
             .unwrap_or_else(|| {
                 panic!(
                     "[{}] blob table not found {:?}, blob table id: {}",
-                    self.tag, key, blob_link.fid
+                    self.tag, key, blob_ref.fid
                 )
             });
         blob_table
-            .get(blob_link.offset, blob_link.len, blob_link.original_len)
+            .get(&blob_ref)
             .unwrap_or_else(|e| panic!("[{}] blob table get failed {:?} {:?}", self.tag, key, e))
     }
 
@@ -391,7 +391,7 @@ impl SnapAccessCore {
             &mut item.path,
             item.owned_val.as_mut().unwrap(),
         );
-        if item.val.is_external_link() {
+        if item.val.is_blob_ref() {
             item.owned_blob = Some(self.fetch_blob(inner_key, &item.val));
             item.val.fill_in_blob(item.owned_blob.as_ref().unwrap());
         }
@@ -688,7 +688,7 @@ impl SnapAccessCore {
         let mut item = Item::new();
         item.owned_val = Some(vec![]);
         item.val = self.get_newer_val(cf, inner_key, version, item.owned_val.as_mut().unwrap());
-        if item.val.is_external_link() {
+        if item.val.is_blob_ref() {
             item.owned_blob = Some(self.fetch_blob(inner_key, &item.val));
             item.val.fill_in_blob(item.owned_blob.as_ref().unwrap());
         }
@@ -794,22 +794,12 @@ impl Iterator {
     }
 
     pub fn val(&mut self) -> &[u8] {
-        if self.val.is_external_link() {
+        if self.val.is_blob_ref() {
             if let Some(prefetcher) = &mut self.blob_prefetcher {
-                let blob_link = self.val.get_external_link();
-                return prefetcher
-                    .get(
-                        blob_link.fid,
-                        blob_link.offset,
-                        blob_link.len,
-                        blob_link.original_len,
-                    )
-                    .unwrap_or_else(|e| {
-                        panic!(
-                            "failed to get blob for fid {}, offset {}, len {}, err {:?}",
-                            blob_link.fid, blob_link.offset, blob_link.len, e
-                        )
-                    });
+                let blob_ref = self.val.get_blob_ref();
+                return prefetcher.get(&blob_ref).unwrap_or_else(|e| {
+                    panic!("failed to get blob, blob_ref: {:?}, err: {:?}", blob_ref, e)
+                });
             }
         }
         self.val.get_value()
