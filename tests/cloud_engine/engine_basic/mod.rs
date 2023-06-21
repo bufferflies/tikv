@@ -35,7 +35,7 @@ fn test_engine_auto_switch() {
 }
 
 fn i_to_key(i: usize) -> Vec<u8> {
-    format!("key_{:05}", i).into_bytes()
+    format!("x123key_{:05}", i).into_bytes()
 }
 
 fn i_to_val(i: usize) -> Vec<u8> {
@@ -148,14 +148,26 @@ fn test_cloud_store_reverse_scan() {
 
 #[test]
 fn test_cloud_store_reset_range() {
+    test_cloud_store_reset_range_with_opt(true);
+    test_cloud_store_reset_range_with_opt(false);
+}
+
+fn test_cloud_store_reset_range_with_opt(enable_inner_key: bool) {
     test_util::init_log_for_test();
     let node_id = alloc_node_id();
-    let cluster = ServerCluster::new(vec![node_id], |_, _| {});
+    let cluster = ServerCluster::new(vec![node_id], |_, conf| {
+        conf.enable_inner_key_offset = enable_inner_key;
+    });
     let mut client = cluster.new_client();
+
+    let keyspace_id_array = api_version::ApiV2::get_keyspace_id("x123".as_bytes());
+    let keyspace_id = api_version::ApiV2::get_u32_keyspace_id(keyspace_id_array);
+    client.split_keyspace(keyspace_id);
+
     client.put_kv(3..10, i_to_key, i_to_val);
     client.put_kv(30..40, i_to_key, i_to_val);
 
-    let region_id = client.get_region_id(&[]);
+    let region_id = client.get_region_id("x123".as_bytes());
     let engine = cluster.get_kvengine(node_id);
     let snap = engine.get_snap_access(region_id).unwrap();
     let read_ts = block_on(cluster.get_pd_client().get_tso())

@@ -941,7 +941,7 @@ impl Iterator {
             }
             seeked = true;
         }
-        self.range = Some((inner_lower_bound, outer_upper_bound_exclude));
+        self.range = Some((inner_lower_bound, inner_upper_bound));
         self.parse_item();
         seeked
     }
