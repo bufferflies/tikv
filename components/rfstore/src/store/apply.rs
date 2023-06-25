@@ -182,6 +182,7 @@ pub(crate) struct Proposal {
     pub must_pass_epoch_check: bool,
 }
 
+#[derive(Default)]
 pub struct ApplyMsgs {
     pub(crate) msgs: Vec<ApplyMsg>,
 }

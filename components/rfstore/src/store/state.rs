@@ -78,10 +78,14 @@ impl RaftState {
         hs
     }
 
-    pub(crate) fn set_hard_state(&mut self, hs: &eraftpb::HardState) {
+    pub fn set_hard_state(&mut self, hs: &eraftpb::HardState) {
         self.term = hs.get_term();
         self.vote = hs.get_vote();
         self.commit = hs.get_commit();
+    }
+
+    pub fn get_commit(&self) -> u64 {
+        self.commit
     }
 
     pub fn get_last_index(&self) -> u64 {
@@ -91,10 +95,14 @@ impl RaftState {
     pub fn get_last_preprocessed_index(&self) -> u64 {
         self.last_preprocessed_index
     }
+
+    pub fn set_last_preprocessed_index(&mut self, last_preprocessed_index: u64) {
+        self.last_preprocessed_index = last_preprocessed_index;
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct RaftTruncatedState {
+pub struct RaftTruncatedState {
     pub(crate) truncated_index: u64,
     pub(crate) truncated_index_term: u64,
 }

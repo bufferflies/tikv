@@ -748,7 +748,7 @@ pub fn load_last_peer_state(raft: &rfengine::RfEngine, peer_id: u64) -> Option<R
         })
 }
 
-pub(crate) fn load_raft_truncated_state(
+pub fn load_raft_truncated_state(
     raft: &rfengine::RfEngine,
     peer_id: u64,
 ) -> Option<RaftTruncatedState> {

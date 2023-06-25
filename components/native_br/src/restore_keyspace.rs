@@ -5,7 +5,7 @@ use std::{
     cmp,
     collections::{HashMap, HashSet, VecDeque},
     default::Default,
-    fmt, mem,
+    fmt, mem, ops,
     path::{Path, PathBuf},
     str::FromStr,
     sync::{Arc, RwLock},
@@ -21,11 +21,13 @@ use hyper::Body;
 use itertools::Itertools;
 use kvengine::{dfs::S3Fs, IdVer, ShardMeta, ShardRange, ShardStats, ShardTag};
 use kvenginepb as pb;
+use kvproto::{metapb, metapb::PeerRole, raft_serverpb::MergeState};
 use pd_client::PdClient;
 use protobuf::Message;
+use raft::eraftpb;
 use rfengine::RfEngine;
 use rfenginepb::ClusterBackupMeta;
-use rfstore::store::StoreMsg;
+use rfstore::store::{state::RaftState, ApplyMsgs, PreprocessContext, StoreMsg};
 use slog_global::{debug, error, info, warn};
 use tempdir::TempDir;
 use tikv::{config::TikvConfig, storage::mvcc::Key};
@@ -53,6 +55,9 @@ const ZSTD_COMPRESSION_LEVEL: &str = "5"; // The same as ZSTD_COMPRESSION_LEVEL_
 
 const REQUEST_RESTORE_SNAPSHOT_RETRY_LIMIT: usize = 10;
 const RESTORE_KEYSPACE_MAX_RETRY: usize = 20;
+
+const REPLICAS: usize = 3; // Number of replicas for each region.
+const QUORUM_REPLICAS: usize = REPLICAS / 2 + 1; // Number of replicas to form a quorum.
 
 #[derive(Clone, Debug, Default)]
 pub struct RestoredKeyspace {
@@ -150,17 +155,16 @@ pub fn restore_keyspace(
     let (target_keyspace_start, target_keyspace_end) =
         ApiV2::get_txn_keyspace_range(target_keyspace_id);
 
-    let keyspace_tag = format!("{}->{}", keyspace_id, target_keyspace_id);
+    let keyspace_tag = make_keyspace_tag(keyspace_id, target_keyspace_id);
     let cluster_backup = get_cluster_backup_meta(&s3fs, backup_name.to_owned());
     step!(
-        "Start restore keyspace {} from backup <{}>, range:[{:?},{:?}), target_range:[{:?},{:?}),\n
-        backup ts: {}, safe ts: {} truncate ts {:?}",
+        "Start restore keyspace {} from backup <{}>, range:[{},{}), target_range:[{},{}), backup ts:{}, safe ts:{} truncate ts{:?}",
         keyspace_tag,
         backup_name,
-        keyspace_start,
-        keyspace_end,
-        target_keyspace_start,
-        target_keyspace_end,
+        log_wrappers::hex_encode_upper(keyspace_start),
+        log_wrappers::hex_encode_upper(keyspace_end),
+        log_wrappers::hex_encode_upper(&target_keyspace_start),
+        log_wrappers::hex_encode_upper(&target_keyspace_end),
         cluster_backup.backup_ts,
         cluster_backup.safe_ts,
         truncate_ts,
@@ -179,6 +183,7 @@ pub fn restore_keyspace(
         pd_client.clone(),
         s3fs.clone(),
         keyspace_id,
+        target_keyspace_id,
         truncate_ts,
     )?;
     step!(
@@ -391,7 +396,7 @@ pub struct BackupShard {
     pub need_flush: bool,
     pub meta: ShardMeta,
     pub(crate) raw_meta: Option<pb::ChangeSet>, // used for kv engine recovery only.
-    raft_progress: (u64 /* commit_index */, u64 /* preprocess_index */),
+    raft_state: BackupRaftState,
 }
 
 impl fmt::Debug for BackupShard {
@@ -404,7 +409,7 @@ impl fmt::Debug for BackupShard {
             .field("need_flush", &self.need_flush)
             .field("meta", &self.meta.to_change_set())
             .field("raw_meta", &self.raw_meta)
-            .field("raft_progress", &self.raft_progress)
+            .field("raft_state", &self.raft_state)
             .finish()
     }
 }
@@ -418,7 +423,7 @@ impl PartialEq for BackupShard {
             && self.need_flush == other.need_flush
             && self.meta.to_change_set() == other.meta.to_change_set()
             && self.raw_meta == other.raw_meta
-            && self.raft_progress == other.raft_progress
+            && self.raft_state == other.raft_state
     }
 }
 
@@ -456,6 +461,37 @@ impl BackupShard {
     }
 }
 
+#[derive(Default, Clone, Debug, PartialEq)]
+struct BackupRaftState(pub RaftState);
+
+impl ops::Deref for BackupRaftState {
+    type Target = RaftState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl ops::DerefMut for BackupRaftState {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl BackupRaftState {
+    fn faster_than(&self, other: &Self) -> bool {
+        (
+            self.get_last_index(),
+            self.get_commit(),
+            self.get_last_preprocessed_index(),
+        ) > (
+            other.get_last_index(),
+            other.get_commit(),
+            other.get_last_preprocessed_index(),
+        )
+    }
+}
+
 #[derive(Debug, PartialEq)]
 struct AlignedRegion {
     target_region: RawRegion,
@@ -463,6 +499,7 @@ struct AlignedRegion {
 }
 
 pub struct BackupCluster {
+    tag: String,
     path: PathBuf,
     pd_client: Arc<dyn PdClient>,
     dfs: Arc<S3Fs>,
@@ -508,10 +545,12 @@ impl BackupCluster {
         pd_client: Arc<dyn PdClient>,
         dfs: Arc<S3Fs>,
         keyspace_id: u32,
+        target_keyspace_id: u32,
         truncate_ts: u64,
     ) -> Result<BackupCluster> {
         let (keyspace_start, keyspace_end) = ApiV2::get_txn_keyspace_range(keyspace_id);
         let mut cluster = Self {
+            tag: make_keyspace_tag(keyspace_id, target_keyspace_id),
             path,
             pd_client,
             dfs,
@@ -551,6 +590,10 @@ impl BackupCluster {
             cluster.setup_kv_engine(store_id, store_configs.get(&store_id).unwrap())?;
         }
         Ok(cluster)
+    }
+
+    fn tag(&self) -> &str {
+        &self.tag
     }
 
     fn setup_raft_engine(
@@ -726,57 +769,90 @@ impl BackupCluster {
                     first_inner_key_off = Some(snap.inner_key_off);
                 }
 
-                let raft_last_index = rf.get_last_index(peer_id);
-                let need_flush_mem_table = raft_last_index.map_or(false, |last_idx| {
-                    assert!(last_idx >= snap.get_data_sequence());
-                    last_idx > snap.get_data_sequence()
-                });
-                let need_initial_flush = meta.has_parent();
-
-                let raft_state = load_peer_raft_state(rf, peer_id, meta.shard_ver).unwrap();
-                let raft_progress = (
-                    raft_state.get_hard_state().commit,
-                    raft_state.get_last_preprocessed_index(),
-                );
-
-                let shard = BackupShard {
-                    region_id,
-                    store_id,
-                    peer_id,
-                    need_flush: need_flush_mem_table || need_initial_flush,
-                    meta: ShardMeta::new(rf.get_engine_id(), &meta),
-                    raw_meta: Some(meta),
-                    raft_progress,
-                };
-                debug!("collect_prefix_shard: {:?}", shard);
+                let shard = Self::create_backup_shard(rf, store_id, region_id, peer_id, meta);
                 prefix_shards.push(shard);
             }
         }
         prefix_shards
     }
 
-    fn load_shards(&mut self) -> Result<()> {
-        let all_shards =
-            HashMap::from_iter(self.raft_engines.iter().map(|(store_id, rf_engine)| {
-                (
-                    *store_id,
-                    Self::collect_keyspace_shards(
-                        *store_id,
-                        rf_engine,
-                        &self.keyspace_start,
-                        &self.keyspace_end,
-                    ),
-                )
-            }));
+    fn create_backup_shard(
+        rf: &RfEngine,
+        store_id: u64,
+        region_id: u64,
+        peer_id: u64,
+        meta: kvenginepb::ChangeSet,
+    ) -> BackupShard {
+        let snap = meta.get_snapshot();
+        let raft_last_index = rf.get_last_index(peer_id);
+        let need_flush_mem_table = raft_last_index.map_or(false, |last_idx| {
+            assert!(last_idx >= snap.get_data_sequence());
+            last_idx > snap.get_data_sequence()
+        });
+        let need_initial_flush = meta.has_parent();
 
-        // Check whether backup is empty (for this keyspace).
-        // Empty backup should be invalid or before the creation of this
-        // keyspace, so the restore is not allowed.
-        if all_shards.iter().all(|(_, shards)| shards.is_empty()) {
-            return Err(Error::BackupEmptyForKeyspace(self.keyspace_id));
+        let raft_state = load_peer_raft_state(rf, peer_id, meta.shard_ver).unwrap();
+        let shard = BackupShard {
+            region_id,
+            store_id,
+            peer_id,
+            need_flush: need_flush_mem_table || need_initial_flush,
+            meta: ShardMeta::new(rf.get_engine_id(), &meta),
+            raw_meta: Some(meta),
+            raft_state: BackupRaftState(raft_state),
+        };
+        debug!(
+            "create_backup_shard: raft_last_index {:?}, {:?}",
+            raft_last_index, shard
+        );
+        shard
+    }
+
+    fn load_shards(&mut self) -> Result<()> {
+        // Will need to retry when `get_leader_shards_and_preprocess` produce new shards
+        // after preprocess.
+        let mut leader_shards = HashMap::new();
+        let mut retry = 0_usize;
+        loop {
+            let all_shards =
+                HashMap::from_iter(self.raft_engines.iter().map(|(store_id, rf_engine)| {
+                    (
+                        *store_id,
+                        Self::collect_keyspace_shards(
+                            *store_id,
+                            rf_engine,
+                            &self.keyspace_start,
+                            &self.keyspace_end,
+                        ),
+                    )
+                }));
+
+            // Check whether backup is empty (for this keyspace).
+            // Empty backup should be invalid or before the creation of this
+            // keyspace, so the restore is not allowed.
+            if all_shards.iter().all(|(_, shards)| shards.is_empty()) {
+                return Err(Error::BackupEmptyForKeyspace(self.keyspace_id));
+            }
+
+            match self.get_leader_shards_and_preprocess(all_shards)? {
+                (_, true) => {
+                    if retry > 20 {
+                        // Should never happen. Just a safe guard to avoid infinite loop.
+                        return Err(box_err!(
+                            "get_leader_shards_and_preprocess retry too many times"
+                        ));
+                    }
+                    retry += 1;
+                    continue;
+                }
+                (shards, false) => {
+                    let _ = mem::replace(&mut leader_shards, shards);
+                    break;
+                }
+            }
         }
 
-        let (mut leader_shards, mut sorted_shards_id) = Self::get_leader_shards(all_shards)?;
+        let mut sorted_shards_id = Self::handle_overlapping_shards(&mut leader_shards)?;
         info!(
             "leader shard cnt {}, sorted shards cnt {}",
             leader_shards.len(),
@@ -786,11 +862,13 @@ impl BackupCluster {
         self.sorted_shards = mem::take(&mut sorted_shards_id);
         debug!(
             "Keyspace {} BackupCluster.load_shards: {:?}",
-            self.keyspace_id, self.shards
+            self.tag(),
+            self.shards
         );
         debug!(
             "Keyspace {} BackupCluster.sorted_shards: {:?}",
-            self.keyspace_id, self.sorted_shards
+            self.tag(),
+            self.sorted_shards
         );
 
         for (&shard_id, shard) in self.shards.iter_mut() {
@@ -833,37 +911,93 @@ impl BackupCluster {
         files
     }
 
-    fn get_leader_shards(
+    fn get_leader_shards_and_preprocess(
+        &self,
         all_shards: HashMap<u64, Vec<BackupShard>>,
     ) -> Result<(
-        HashMap<u64, BackupShard>, // shard_id -> BackupShard
-        Vec<u64>,                  // Vec<shard_id> sorted by BackupShard.start()
+        HashMap<u64, BackupShard>, // leader_shards, shard_id -> BackupShard
+        bool,                      // has_new_peer
     )> {
-        // Assume 3 replicas here.
-        let shards_cnt = all_shards.values().map(|x| x.len()).sum::<usize>() / 3;
+        let shards_cnt = all_shards.values().map(|x| x.len()).sum::<usize>() / REPLICAS;
         // leader_shards: shard_id -> BackupShard.
         let mut leader_shards = HashMap::with_capacity(shards_cnt);
+        // peers_last_index: shard_id -> Vec<last_index>
+        let mut peers_last_indexes: HashMap<u64, Vec<u64>> = HashMap::with_capacity(shards_cnt);
 
         for mut shard in all_shards.into_values().flatten() {
+            peers_last_indexes
+                .entry(shard.region_id)
+                .or_default()
+                .push(shard.raft_state.get_last_index());
             leader_shards
                 .entry(shard.region_id)
                 .and_modify(|old: &mut BackupShard| {
-                    if shard.raft_progress > old.raft_progress {
+                    if shard.raft_state.faster_than(&old.raft_state) {
                         std::mem::swap(old, &mut shard);
                     }
                 })
                 .or_insert(shard);
         }
 
+        let mut has_new_peer = false;
+        for shard in leader_shards.values_mut() {
+            let mut last_indexes = peers_last_indexes.remove(&shard.region_id).unwrap();
+
+            // There is chance that `raft_state.commit` is not up-to-date.
+            // We infer the real commit index by quorum of `last_index`.
+            let quorum_last_idx = get_quorum_last_index(last_indexes.as_mut_slice());
+            if quorum_last_idx > shard.raft_state.get_commit() {
+                // NOTE: we don't update the new `commit_index` to rf_engine here because:
+                // 1. If shard version is not changed after `preprocess_shard`, the new
+                // `commit_index` will be overwritten together with new
+                // `last_preprocessed_index`.
+                // 2. If shard version is changed after `preprocess_shard`, the new
+                // `commit_index` only affects recover of parent shard, and it's
+                // useless in this scenario.
+                info!(
+                    "Keyspace {} shard {} update commit_index by quorum: {} -> {}",
+                    self.tag(),
+                    shard.region_id,
+                    shard.raft_state.get_commit(),
+                    quorum_last_idx
+                );
+                let mut hs = shard.raft_state.get_hard_state();
+                hs.set_commit(quorum_last_idx);
+                shard.raft_state.set_hard_state(&hs);
+            }
+
+            // Preprocess if needed.
+            if shard.raft_state.get_commit() > shard.raft_state.get_last_preprocessed_index() {
+                info!(
+                    "Keyspace {} shard {} need preprocess, commit {}, last_preprocessed_index {}",
+                    self.tag(),
+                    shard.region_id,
+                    shard.raft_state.get_commit(),
+                    shard.raft_state.get_last_preprocessed_index()
+                );
+                let rf_engine = self.raft_engines.get(&shard.store_id).unwrap();
+                if self.preprocess_shard(rf_engine, shard)? {
+                    has_new_peer = true;
+                }
+            }
+        }
+        Ok((leader_shards, has_new_peer))
+    }
+
+    /// Handle overlapping shards.
+    /// Shards overlap will happen when some followers had not finished split or
+    /// merge.
+    fn handle_overlapping_shards(
+        leader_shards: &mut HashMap<u64, BackupShard>,
+    ) -> Result<
+        Vec<u64>, // Vec<shard_id> sorted by BackupShard.start()
+    > {
         let mut sorted_shards: Vec<u64> = leader_shards
             .values()
             .sorted_by(|a, b| a.start().cmp(b.start()))
             .map(|x| x.region_id)
             .collect();
 
-        // Handle overlapping shards.
-        // Shards overlap will happen when some followers had not finished split or
-        // merge.
         if sorted_shards.len() > 1 {
             let mut shards_to_remove: HashSet<u64> = HashSet::default();
 
@@ -910,7 +1044,124 @@ impl BackupCluster {
             }
         }
 
-        Ok((leader_shards, sorted_shards))
+        Ok(sorted_shards)
+    }
+
+    fn preprocess_shard(
+        &self,
+        rf_engine: &RfEngine,
+        old_shard: &mut BackupShard,
+    ) -> Result<bool /* has_new_peer */> {
+        let mut preprocessor = PeerPreprocessor::new(rf_engine, old_shard);
+        let mut preprocess_ref = preprocessor.as_ref();
+
+        // Get raft logs.
+        let low_idx = old_shard.raft_state.get_last_preprocessed_index() + 1;
+        let high_idx = old_shard.raft_state.get_commit() + 1;
+        info!(
+            "Keyspace {} shard {} preprocess Raft log [{}, {}), raft_state {:?}",
+            self.tag(),
+            old_shard.tag(),
+            low_idx,
+            high_idx,
+            preprocess_ref.raft_state,
+        );
+
+        let mut entries = Vec::with_capacity((high_idx.saturating_sub(low_idx)) as usize);
+        let peer_id = old_shard.peer_id;
+        rf_engine
+            .fetch_raft_entries_to(peer_id, low_idx, high_idx, None, &mut entries)
+            .map_err(|e| -> Error {
+                let stats = rf_engine.get_peer_stats(peer_id);
+                let truncated_state = rfstore::store::load_raft_truncated_state(rf_engine, peer_id);
+                box_err!(
+                    "{} entries unavailable err: {:?}, stats {:?}, truncated_state: {:?}, low: {}, high {}",
+                    old_shard.tag(),
+                    e,
+                    stats,
+                    truncated_state,
+                    low_idx,
+                    high_idx
+                )
+            })?;
+
+        // Prepare context.
+        let mut raft_wb = rfengine::WriteBatch::new();
+        let mut apply_msgs = ApplyMsgs::default();
+        let raft_cfg = rfstore::store::Config::default();
+        let mut destroying = HashSet::new();
+        let mut ctx = PreprocessContext {
+            store_id: old_shard.store_id,
+            kv: None,
+            raft: rf_engine,
+            raft_wb: &mut raft_wb,
+            apply_msgs: &mut apply_msgs,
+            cfg: &raft_cfg,
+            router: None,
+            destroying: &mut destroying,
+        };
+
+        // Preprocess
+        for (pos, entry) in entries.into_iter().enumerate() {
+            let _ = preprocess_ref.preprocess_committed_entry(&mut ctx, pos, &entry);
+        }
+        preprocess_ref
+            .raft_state
+            .set_last_preprocessed_index(*preprocess_ref.preprocessed_index);
+        preprocess_ref.write_raft_state(&mut ctx); // update `last_preprocessed_index` to rf_engine.
+        rf_engine.apply(ctx.raft_wb); // Do not need persist.
+
+        // Get new shard.
+        // TODO: In-place update `old_shard`, other than get a new one from rf_engine.
+        let meta = load_rf_engine_meta(rf_engine, peer_id).unwrap();
+        let new_shard = Self::create_backup_shard(
+            rf_engine,
+            old_shard.store_id,
+            old_shard.region_id,
+            peer_id,
+            meta,
+        );
+        info!(
+            "Keyspace {} preprocessed shard {}, old {:?}, new {:?}",
+            self.tag(),
+            old_shard.tag(),
+            old_shard,
+            new_shard
+        );
+
+        // Verify.
+        let old_commit = old_shard.raft_state.get_commit();
+        let new_commit = new_shard.raft_state.get_commit();
+        let new_last_preprocessed_index = new_shard.raft_state.get_last_preprocessed_index();
+        assert!(
+            old_commit == new_commit && new_commit == new_last_preprocessed_index,
+            "Keyspace {} shard {} preprocess: commit_index(old:{}, new:{})/last_preprocessed_index({}) not match",
+            self.tag(),
+            old_shard.tag(),
+            old_commit,
+            new_commit,
+            new_last_preprocessed_index,
+        );
+
+        // When new shard has smaller range, there must be new peer due to split.
+        // Raise error to retry from `load_shards` for simplicity, as it is a very rare
+        // case.
+        // Do not need to care about region merge, and `handle_overlapping_shards` will
+        // handle the overlapping caused by merge.
+        let has_new_peer =
+            old_shard.start() < new_shard.start() || new_shard.end() < old_shard.end();
+        if has_new_peer {
+            info!(
+                "{} split detected, retry load_shards, {} old_shard {:?}, new_shard {:?}",
+                self.tag,
+                old_shard.tag(),
+                old_shard,
+                new_shard
+            );
+        }
+
+        let _ = mem::replace(old_shard, new_shard);
+        Ok(has_new_peer)
     }
 
     fn verify_shards(&self) -> Result<()> {
@@ -1293,8 +1544,10 @@ impl BackupCluster {
         &mut self,
         cluster_meta: &ClusterBackupMeta,
         keyspace_id: u32,
+        target_keyspace_id: u32,
     ) -> Result<()> {
         let (keyspace_start, keyspace_end) = ApiV2::get_txn_keyspace_range(keyspace_id);
+        self.tag = make_keyspace_tag(keyspace_id, target_keyspace_id);
         self.keyspace_id = keyspace_id;
         self.keyspace_start = keyspace_start;
         self.keyspace_end = keyspace_end;
@@ -1727,6 +1980,82 @@ impl MergeRanges {
     }
 }
 
+fn make_keyspace_tag(source_keyspace_id: u32, target_keyspace_id: u32) -> String {
+    format!("{}->{}", source_keyspace_id, target_keyspace_id)
+}
+
+fn get_quorum_last_index(last_indexes: &mut [u64]) -> u64 {
+    last_indexes.sort_by(|a, b| b.cmp(a)); // Reverse compare.
+    let quorum_size = cmp::min(last_indexes.len(), QUORUM_REPLICAS);
+    last_indexes[quorum_size - 1]
+}
+
+struct PeerPreprocessor {
+    preprocessed_index: u64,
+    region: metapb::Region,
+    preprocessed_region: Option<metapb::Region>,
+    peer: metapb::Peer,
+    shard_meta: Option<ShardMeta>,
+    last_committed_split_idx: u64,
+    pending_truncate: Option<(u64 /* term */, u64 /* index */)>,
+    raft_hard_state: eraftpb::HardState,
+    raft_state: RaftState,
+    pending_merge_state: Option<MergeState>,
+    first_no_kv_idx: u64,
+    last_no_kv_idx: u64,
+}
+
+impl PeerPreprocessor {
+    fn new(rf_engine: &RfEngine, shard: &mut BackupShard) -> Self {
+        let peer = metapb::Peer {
+            id: shard.peer_id,
+            store_id: shard.store_id,
+            role: PeerRole::Voter,
+            ..Default::default()
+        };
+        let mut region_state = rf_engine
+            .load_region_state(shard.peer_id, shard.ver())
+            .unwrap_or_else(|| {
+                panic!("failed to load region state for peer {}", shard.peer_id);
+            });
+        let region = region_state.take_region();
+        let merge_state = region_state
+            .has_merge_state()
+            .then(|| region_state.take_merge_state());
+        Self {
+            preprocessed_index: shard.raft_state.get_last_preprocessed_index(),
+            region,
+            preprocessed_region: None,
+            peer,
+            shard_meta: Some(shard.meta.clone()), // TODO: mem::take()
+            last_committed_split_idx: 0,
+            pending_truncate: None,
+            raft_hard_state: shard.raft_state.get_hard_state(),
+            raft_state: shard.raft_state.0,
+            pending_merge_state: merge_state,
+            first_no_kv_idx: 0, // truncated ?
+            last_no_kv_idx: 0,  // truncated ?
+        }
+    }
+
+    fn as_ref(&mut self) -> rfstore::store::peer::PreprocessRef<'_> {
+        rfstore::store::peer::PreprocessRef {
+            preprocessed_index: &mut self.preprocessed_index,
+            region: &mut self.region,
+            preprocessed_region: &mut self.preprocessed_region,
+            peer: &mut self.peer,
+            shard_meta: &mut self.shard_meta,
+            last_committed_split_idx: &mut self.last_committed_split_idx,
+            pending_truncate: &mut self.pending_truncate,
+            raft_hard_state: self.raft_hard_state.clone(),
+            raft_state: &mut self.raft_state,
+            pending_merge_state: &mut self.pending_merge_state,
+            first_no_kv_idx: &mut self.first_no_kv_idx,
+            last_no_kv_idx: &mut self.last_no_kv_idx,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{hash_map::Entry, BTreeMap};
@@ -1736,7 +2065,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_get_leader_shards() {
+    fn test_handle_overlapping_shards() {
         let make_backup_shard = |tuple: (
             u64,  // shard_id
             u64,  // ver
@@ -1748,24 +2077,23 @@ mod tests {
             shard.region_id = tuple.0;
             shard.meta.ver = tuple.1;
             shard.meta.range = ShardRange::new(tuple.2.as_bytes(), tuple.3.as_bytes(), 0);
-            // Use `ver` as raft log index, assume that the newer ver, the faster raft
-            // progress.
-            shard.raft_progress = (shard.ver(), shard.ver());
             shard
         };
 
-        let make_store_shards =
-            |all_shards: &mut HashMap<u64, Vec<BackupShard>>,
-             store_id: u64,
+        let get_leader_shards_by_ver =
+            |leader_shards: &mut HashMap<u64, BackupShard>,
+             _store_id: u64,
              shards: Vec<(u64, u64, &str, &str)>| {
                 for shard_tuple in shards {
                     let shard = make_backup_shard(shard_tuple);
-                    match all_shards.entry(store_id) {
-                        Entry::Occupied(o) => {
-                            o.into_mut().push(shard);
+                    match leader_shards.entry(shard.region_id) {
+                        Entry::Occupied(mut o) => {
+                            if shard.ver() > o.get().ver() {
+                                o.insert(shard);
+                            }
                         }
                         Entry::Vacant(v) => {
-                            v.insert(vec![shard]);
+                            v.insert(shard);
                         }
                     }
                 }
@@ -1776,8 +2104,8 @@ mod tests {
                 vec![(1, 100, "00", "01")], // store0: Vec<(shard_id, ver, start, end)>
                 vec![(1, 100, "00", "01")], // store1
                 vec![(1, 100, "00", "01")], // store2
-                Some(vec![(1, 100, "00", "01")]), /* expected Option<Vec<(shard_id, ver, start,
-                                             * end)>> */
+                // expected: Option<Vec<(shard_id, ver, start,end)>>, None means error
+                Some(vec![(1, 100, "00", "01")]),
             ),
             (
                 vec![(1, 100, "00", "01"), (2, 200, "01", "02")],
@@ -1831,21 +2159,21 @@ mod tests {
         ];
 
         for (case_idx, (store0, store1, store2, expected)) in cases.into_iter().enumerate() {
-            let mut all_shards = HashMap::default();
-            make_store_shards(&mut all_shards, 0, store0);
-            make_store_shards(&mut all_shards, 1, store1);
-            make_store_shards(&mut all_shards, 2, store2);
+            let mut leader_shards = HashMap::default();
+            get_leader_shards_by_ver(&mut leader_shards, 0, store0);
+            get_leader_shards_by_ver(&mut leader_shards, 1, store1);
+            get_leader_shards_by_ver(&mut leader_shards, 2, store2);
 
-            let res = BackupCluster::get_leader_shards(all_shards);
+            let res = BackupCluster::handle_overlapping_shards(&mut leader_shards);
             if let Some(expected) = expected {
                 let expected_sorted_shards: Vec<u64> = expected.iter().map(|x| x.0).collect();
-                let expected_shards: HashMap<u64, BackupShard> =
+                let expected_leader_shards: HashMap<u64, BackupShard> =
                     HashMap::from_iter(expected.into_iter().map(|x| (x.0, make_backup_shard(x))));
 
-                let (shards, sorted_shards) = res.unwrap();
+                let sorted_shards = res.unwrap();
                 assert_eq!(
-                    BTreeMap::from_iter(shards.into_iter()),
-                    BTreeMap::from_iter(expected_shards.into_iter()),
+                    BTreeMap::from_iter(leader_shards.into_iter()),
+                    BTreeMap::from_iter(expected_leader_shards.into_iter()),
                     "case: {}",
                     case_idx
                 );
@@ -2063,6 +2391,31 @@ mod tests {
             insert(&mut mr, 53, 54);
             insert(&mut mr, 0, 42);
             assert_eq!(mr, new_ranges(&[(0, 43), (50, 51), (53, 54)]));
+        }
+    }
+
+    #[test]
+    fn test_get_quorum_last_index() {
+        let cases = vec![
+            (vec![1], 1),
+            (vec![2, 1], 1),
+            (vec![1, 2], 1),
+            (vec![2, 2], 2),
+            (vec![1, 2, 3], 2),
+            (vec![3, 2, 1], 2),
+            (vec![3, 1, 3], 3),
+            (vec![3, 3, 3], 3),
+            (vec![4, 3, 3], 3),
+            (vec![4, 3, 4, 3], 4), // replicas = 3, quorum = 2
+        ];
+
+        for (i, (mut last_indexes, quorum_idx)) in cases.into_iter().enumerate() {
+            assert_eq!(
+                get_quorum_last_index(last_indexes.as_mut_slice()),
+                quorum_idx,
+                "#{}",
+                i
+            );
         }
     }
 }

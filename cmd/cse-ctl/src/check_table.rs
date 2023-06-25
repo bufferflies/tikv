@@ -143,6 +143,7 @@ pub(crate) fn execute_check_table(args: CheckTableArgs) {
         pd_client,
         s3fs.clone(),
         keyspace_id,
+        keyspace_id,
         cluster_backup.backup_ts,
     )
     .unwrap();
@@ -153,7 +154,7 @@ pub(crate) fn execute_check_table(args: CheckTableArgs) {
     };
     for keyspace_id in keyspace_ids {
         cluster
-            .reset_keyspace(&cluster_backup, keyspace_id)
+            .reset_keyspace(&cluster_backup, keyspace_id, keyspace_id)
             .unwrap();
         let kv = cluster.get_kvengine();
         let shards = cluster.get_shard_metas_before_flush();

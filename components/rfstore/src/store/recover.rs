@@ -100,21 +100,20 @@ impl RecoverHandler {
     fn load_region_meta(&self, shard_id: u64, shard_ver: u64) -> (metapb::Region, u64) {
         let &peer_id = self.region_peer_map.get(&shard_id).unwrap();
         let tag = PeerTag::new(self.store_id, RegionIdVer::new(shard_id, shard_ver));
-        let region_state_key = region_state_key(shard_ver);
-        let region_state_val = self
+
+        let mut region_state = self
             .rf_engine
-            .get_state(peer_id, &region_state_key)
+            .load_region_state(peer_id, shard_ver)
             .unwrap_or_else(|| {
                 panic!(
                     "{} failed to get region state, state key {:?}, state keys {:?}",
                     tag,
-                    region_state_key,
+                    region_state_key(shard_ver),
                     self.get_state_keys(peer_id)
                 );
             });
-        let mut region_state = raft_serverpb::RegionLocalState::new();
-        region_state.merge_from_bytes(&region_state_val).unwrap();
         let region = region_state.take_region();
+
         let raft_state_key = raft_state_key(shard_ver);
         let raft_state_val = self
             .rf_engine

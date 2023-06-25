@@ -422,8 +422,8 @@ pub(crate) struct Peer {
     /// The index of last sent snapshot
     last_sent_snapshot_idx: u64,
     /// The range of no kv index, used to advance shard meta data sequence.
-    first_no_kv_idx: u64,
-    last_no_kv_idx: u64,
+    pub(crate) first_no_kv_idx: u64,
+    pub(crate) last_no_kv_idx: u64,
     /// preprocessed_index is used to avoid duplicated preprocess execution.
     pub(crate) preprocessed_index: u64,
 

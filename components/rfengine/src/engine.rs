@@ -19,6 +19,7 @@ use bytes::{Buf, Bytes};
 use dashmap::mapref::one::Ref;
 use engine_traits::{GetObjectOptions, ObjectStorage};
 use file_system::open_direct_file;
+use kvproto::raft_serverpb;
 use protobuf::Message;
 use raft_proto::{eraftpb, eraftpb::Entry};
 use rfenginepb::{ClusterBackupMeta, StoreBackupMeta, StoreRaftLogBackupMeta};
@@ -555,6 +556,18 @@ impl RfEngineCore {
 
     pub(crate) fn is_async_wal_enabled(&self) -> bool {
         self.wal_sync_dir.is_some()
+    }
+
+    pub fn load_region_state(
+        &self,
+        peer_id: u64,
+        version: u64,
+    ) -> Option<raft_serverpb::RegionLocalState> {
+        let region_state_key = region_state_key(version);
+        let region_state_val = self.get_state(peer_id, &region_state_key)?;
+        let mut region_state = raft_serverpb::RegionLocalState::new();
+        region_state.merge_from_bytes(&region_state_val).unwrap();
+        Some(region_state)
     }
 }
 
