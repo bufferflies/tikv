@@ -29,6 +29,11 @@ name = "cloud_engine_failpoints"
 path = "cloud_engine_failpoints/mod.rs"
 required-features = ["failpoints", "testexport"]
 
+[[test]]
+name = "rfstore"
+path = "rfstore/mod.rs"
+required-features = ["testexport"]
+
 [[bench]]
 name = "raftstore"
 harness = false

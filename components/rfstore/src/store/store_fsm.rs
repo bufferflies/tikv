@@ -540,17 +540,44 @@ pub(crate) struct RaftContext {
 // There is only one StoreContext owned by the main raft worker.
 pub(crate) struct StoreContext {
     pub(crate) raft_ctx: RaftContext,
-    pub(crate) peers: HashMap<u64, PeerStates>,
+    pub(crate) peers: Vec<HashMap<u64, PeerStates>>,
     pub(crate) store_meta: StoreMeta,
 }
+
+pub(crate) const PEER_SEGMENTS: usize = 128;
 
 impl StoreContext {
     pub(crate) fn new(raft_ctx: RaftContext, store_meta: StoreMeta) -> StoreContext {
         StoreContext {
             raft_ctx,
-            peers: HashMap::new(),
+            peers: vec![HashMap::new(); PEER_SEGMENTS],
             store_meta,
         }
+    }
+
+    pub(crate) fn try_get_peer(&self, region_id: u64) -> Option<PeerStates> {
+        self.peers[Self::region_idx(region_id)]
+            .get(&region_id)
+            .cloned()
+    }
+
+    pub(crate) fn get_peer(&self, region_id: u64) -> PeerStates {
+        self.peers[Self::region_idx(region_id)]
+            .get(&region_id)
+            .unwrap()
+            .clone()
+    }
+
+    pub(crate) fn insert_peer(&mut self, region_id: u64, peer_state: PeerStates) {
+        self.peers[Self::region_idx(region_id)].insert(region_id, peer_state);
+    }
+
+    pub(crate) fn remove_peer(&mut self, region_id: u64) {
+        self.peers[Self::region_idx(region_id)].remove(&region_id);
+    }
+
+    fn region_idx(region_id: u64) -> usize {
+        crc32c::crc32c(&region_id.to_le_bytes()) as usize % PEER_SEGMENTS
     }
 }
 
@@ -1171,15 +1198,15 @@ impl<'a> StoreMsgHandler<'a> {
         info!("register region {}, peer {}", tag, peer.peer.peer_id());
         let applier = Applier::new_from_peer(&peer);
         let new_peer = PeerStates::new(applier, peer);
-        self.ctx.peers.insert(id, new_peer);
+        self.ctx.insert_peer(id, new_peer);
     }
 
     fn get_peer(&mut self, region_id: u64) -> PeerStates {
-        self.ctx.peers.get(&region_id).unwrap().clone()
+        self.ctx.get_peer(region_id)
     }
 
     fn try_get_peer(&mut self, region_id: u64) -> Option<PeerStates> {
-        self.ctx.peers.get(&region_id).cloned()
+        self.ctx.try_get_peer(region_id)
     }
 
     fn on_split_region(&mut self, regions: Vec<metapb::Region>) {
@@ -1232,7 +1259,7 @@ impl<'a> StoreMsgHandler<'a> {
             if new_region_id == region_id {
                 continue;
             }
-            if let Some(existing) = self.ctx.peers.get(&new_region_id) {
+            if let Some(existing) = self.ctx.try_get_peer(new_region_id) {
                 let peer_fsm = existing.peer_fsm.lock().unwrap();
                 let tag = peer_fsm.peer.tag();
                 let pending_snap = peer_fsm.peer.has_pending_snapshot();
@@ -1541,7 +1568,7 @@ impl<'a> StoreMsgHandler<'a> {
         // router.
 
         peer_fsm.stop();
-        self.ctx.peers.remove(&region_id);
+        self.ctx.remove_peer(region_id);
         self.ctx.global.engines.kv.remove_shard(region_id);
         self.ctx.global.destroying.insert(region_id);
     }
@@ -1689,7 +1716,7 @@ impl<'a> StoreMsgHandler<'a> {
     }
 
     fn on_dependents_empty(&mut self, region_id: u64) {
-        let peer = match self.ctx.peers.get(&region_id) {
+        let peer = match self.ctx.try_get_peer(region_id) {
             Some(peer) => peer,
             None => return,
         };
@@ -1709,7 +1736,7 @@ impl<'a> StoreMsgHandler<'a> {
     }
 
     fn on_prepare_merge_request(&mut self, region_id: u64, req: RaftCmdRequest) {
-        let peer = match self.ctx.peers.get(&region_id) {
+        let peer = match self.ctx.try_get_peer(region_id) {
             Some(peer) => peer,
             None => return,
         };
@@ -1721,7 +1748,7 @@ impl<'a> StoreMsgHandler<'a> {
     }
 
     fn on_prepare_merge_result(&mut self, region: Region) {
-        let peer = match self.ctx.peers.get(&region.id) {
+        let peer = match self.ctx.try_get_peer(region.id) {
             Some(peer) => peer,
             None => return,
         };
@@ -1740,7 +1767,7 @@ impl<'a> StoreMsgHandler<'a> {
     }
 
     fn on_check_merge(&mut self, region_id: u64) {
-        let peer = match self.ctx.peers.get(&region_id) {
+        let peer = match self.ctx.try_get_peer(region_id) {
             Some(peer) => peer,
             None => return,
         };
@@ -1752,7 +1779,7 @@ impl<'a> StoreMsgHandler<'a> {
     }
 
     fn on_commit_merge_result(&mut self, region: Region, source: Region) {
-        let peer = match self.ctx.peers.get(&region.id) {
+        let peer = match self.ctx.try_get_peer(region.id) {
             Some(peer) => peer,
             None => return,
         };
@@ -1778,7 +1805,7 @@ impl<'a> StoreMsgHandler<'a> {
         }
         peer_fsm.peer.reset_buckets();
         drop(peer_fsm);
-        if let Some(source_peer) = self.ctx.peers.get(&source.get_id()) {
+        if let Some(source_peer) = self.ctx.try_get_peer(source.get_id()) {
             let mut applier = source_peer.applier.lock().unwrap();
             applier.destroy();
             drop(applier);
@@ -1787,7 +1814,7 @@ impl<'a> StoreMsgHandler<'a> {
     }
 
     fn on_rollback_merge(&mut self, region: Region, commit: u64) {
-        let peer = match self.ctx.peers.get(&region.id) {
+        let peer = match self.ctx.try_get_peer(region.id) {
             Some(peer) => peer,
             None => return,
         };
@@ -1837,7 +1864,7 @@ impl<'a> StoreMsgHandler<'a> {
             None => return,
         };
 
-        let peer = match self.ctx.peers.get(&region.id) {
+        let peer = match self.ctx.try_get_peer(region.id) {
             Some(peer) => peer,
             None => return,
         };

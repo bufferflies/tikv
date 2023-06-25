@@ -1,6 +1,7 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
+    cmp::min,
     collections::{hash_map::Entry, HashMap},
     mem,
     sync::{Arc, Mutex},
@@ -18,7 +19,7 @@ use raftstore::store::{
 };
 use rfengine::WriteBatch;
 use tikv_util::{
-    debug, error,
+    debug, error, info,
     mpsc::{Receiver, Sender},
     time::{duration_to_sec, InstantExt},
 };
@@ -65,6 +66,7 @@ pub(crate) struct RaftWorker {
     apply_senders: Vec<Sender<Option<ApplyBatch>>>,
     io_sender: Sender<Option<IoTask>>,
     last_tick: Instant,
+    tick_seg_idx: usize,
     tick_millis: u64,
     store_fsm: StoreFsm,
 }
@@ -97,6 +99,7 @@ impl RaftWorker {
                 apply_senders,
                 io_sender,
                 last_tick: Instant::now(),
+                tick_seg_idx: 0,
                 tick_millis,
                 store_fsm,
             },
@@ -132,9 +135,11 @@ impl RaftWorker {
             let _ = sender.send(None);
         });
         let _ = self.io_sender.send(None);
-        for peer in self.ctx.peers.values() {
-            let mut peer_fsm = peer.peer_fsm.lock().unwrap();
-            peer_fsm.peer.pending_reads.clear_all(None);
+        for peer_map in &self.ctx.peers {
+            for peer in peer_map.values() {
+                let mut peer_fsm = peer.peer_fsm.lock().unwrap();
+                peer_fsm.peer.pending_reads.clear_all(None);
+            }
         }
     }
 
@@ -142,7 +147,7 @@ impl RaftWorker {
         while let Ok(msg) = self.store_fsm.receiver.try_recv() {
             let mut store_handler = StoreMsgHandler::new(&mut self.store_fsm, &mut self.ctx);
             if let Some(apply_region) = store_handler.handle_msg(msg) {
-                let peer = self.ctx.peers.get(&apply_region).unwrap().clone();
+                let peer = self.ctx.get_peer(apply_region);
                 let peer_fsm = peer.peer_fsm.lock().unwrap();
                 let applier = peer.applier.clone();
                 self.maybe_send_apply(&applier, &peer_fsm);
@@ -189,10 +194,15 @@ impl RaftWorker {
             Err(RecvTimeoutError::Disconnected) => return Err(RecvTimeoutError::Disconnected),
             Err(RecvTimeoutError::Timeout) => {}
         }
-        if self.last_tick.saturating_elapsed().as_millis() as u64 > self.tick_millis {
-            self.last_tick = Instant::now();
-            for (region_id, peer) in self.ctx.peers.iter() {
-                match inboxes.inboxes.entry(*region_id) {
+        let tick_elapsed_millis = self.last_tick.saturating_elapsed().as_millis() as u64;
+        let next_tick_seg_idx = min(
+            (tick_elapsed_millis * PEER_SEGMENTS as u64 / self.tick_millis) as usize,
+            PEER_SEGMENTS,
+        );
+        for seg_idx in self.tick_seg_idx..next_tick_seg_idx {
+            let peer_map = &self.ctx.peers[seg_idx];
+            peer_map.iter().for_each(
+                |(&region_id, peer)| match inboxes.inboxes.entry(region_id) {
                     Entry::Occupied(mut entry) => {
                         entry.get_mut().msgs.push(PeerMsg::Tick);
                     }
@@ -202,8 +212,14 @@ impl RaftWorker {
                             msgs: vec![PeerMsg::Tick],
                         });
                     }
-                }
-            }
+                },
+            );
+        }
+        if next_tick_seg_idx == PEER_SEGMENTS {
+            self.last_tick = Instant::now();
+            self.tick_seg_idx = 0;
+        } else {
+            self.tick_seg_idx = next_tick_seg_idx;
         }
         Ok(receive_time)
     }
@@ -213,11 +229,11 @@ impl RaftWorker {
             inbox.msgs.push(msg);
             return;
         }
-        if let Some(peer) = self.ctx.peers.get(&region_id) {
+        if let Some(peer) = self.ctx.try_get_peer(region_id) {
             inboxes.inboxes.insert(
                 region_id,
                 PeerInbox {
-                    peer: peer.clone(),
+                    peer,
                     msgs: vec![msg],
                 },
             );
@@ -292,6 +308,9 @@ impl RaftWorker {
     }
 
     fn batch_end(&mut self, batch_duration: Duration) {
+        if batch_duration > Duration::from_millis(50) {
+            info!("raft worker batch loop takes {:?}", batch_duration);
+        }
         self.ctx
             .raft_metrics
             .store_time
@@ -395,8 +414,11 @@ impl IoWorker {
         if !self.wb.is_empty() {
             let wb = mem::take(&mut self.wb);
             let write_size = self.engine.persist(wb).unwrap();
-            let write_raft_db_time = duration_to_sec(timer.saturating_elapsed());
-            STORE_WRITE_RAFTDB_DURATION_HISTOGRAM.observe(write_raft_db_time);
+            let write_raft_db_dur = timer.saturating_elapsed();
+            if write_raft_db_dur > Duration::from_millis(50) {
+                info!("io worker write raft db takes {:?}", write_raft_db_dur);
+            }
+            STORE_WRITE_RAFTDB_DURATION_HISTOGRAM.observe(duration_to_sec(write_raft_db_dur));
             STORE_WRITE_TRIGGER_SIZE_HISTOGRAM.observe(write_size as f64);
         }
         let timer = tikv_util::time::Instant::now();

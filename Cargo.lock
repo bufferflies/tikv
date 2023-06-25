@@ -5370,6 +5370,7 @@ dependencies = [
  "bytes",
  "collections",
  "concurrency_manager",
+ "crc32c",
  "crossbeam",
  "dashmap 4.0.2",
  "dyn-clone",

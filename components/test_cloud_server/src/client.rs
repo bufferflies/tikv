@@ -39,7 +39,7 @@ use tikv_util::{
 };
 
 // use fail::fail_point;
-use crate::try_wait;
+use crate::{must_wait, try_wait};
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Sync + Send>>;
 
@@ -708,6 +708,25 @@ impl ClusterClient {
         let keys = vec![encoded_start, encoded_end];
         self.pd_client
             .must_split_region(region, kvproto::pdpb::CheckPolicy::Usekey, keys);
+    }
+
+    pub fn split_keyspaces(&mut self, keyspace_ids: Range<u32>) {
+        let mut keys = vec![];
+        for keyspace_id in keyspace_ids {
+            let prefix = api_version::ApiV2::get_txn_keyspace_prefix(keyspace_id);
+            keys.push(encode_bytes(&prefix));
+        }
+        let region = self.pd_client.get_region(keys.first().unwrap()).unwrap();
+        self.pd_client
+            .split_region(region, kvproto::pdpb::CheckPolicy::Usekey, keys.clone());
+        must_wait(
+            || {
+                let region = self.pd_client.get_region(keys.first().unwrap()).unwrap();
+                region.get_end_key() == keys.get(1).unwrap()
+            },
+            20,
+            "split_keyspace",
+        );
     }
 
     pub fn merge(&mut self, source_key: &[u8], target_key: &[u8]) {
