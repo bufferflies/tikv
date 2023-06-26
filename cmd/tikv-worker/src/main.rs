@@ -5,6 +5,7 @@ mod error;
 mod load_data;
 mod metrics;
 mod native_br;
+mod native_br_utils;
 mod remote_cop;
 
 use std::{

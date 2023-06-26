@@ -3,8 +3,10 @@
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
+    ops::Deref,
     sync::{Arc, Mutex, RwLock},
     thread,
+    time::Duration,
 };
 
 use chrono::{DateTime, NaiveDateTime, Utc};
@@ -13,8 +15,10 @@ use hyper::{Body, Response};
 use kvengine::dfs::S3Fs;
 use native_br::{
     backup,
-    backup::{BackupConfig, IncrementalBackupFile},
-    restore_keyspace::{restore_keyspace_with_cfg, ReportRestoreStepTrait, RestoreStep},
+    backup::IncrementalBackupFile,
+    restore_keyspace::{
+        restore_keyspace_with_cfg, ReportRestoreStepTrait, RestoreStep, RestoredKeyspace,
+    },
 };
 use pd_client::PdClient;
 use serde::Deserialize;
@@ -24,18 +28,21 @@ use tokio::runtime::Runtime;
 
 use crate::{
     common::{get_u64_param, make_json_response, make_response},
-    error::Error,
+    error::{Error, SharedError},
     metrics::{NATIVE_BR_COUNTER_VEC, NATIVE_BR_HISTOGRAM_VEC},
+    native_br_utils::BackupWorker,
     Config,
 };
 
-type Result<T> = std::result::Result<T, Error>;
+pub(crate) type Result<T> = std::result::Result<T, Error>;
+pub(crate) type SharedResult<T> = std::result::Result<T, SharedError>;
 
 const MIN_PITR_INTERVAL_GAP_SECONDS: i64 = 1; // 1s
-const MAX_RESTORE_CONCURRENCY: usize = 20;
+pub(crate) const MAX_RESTORE_CONCURRENCY: usize = 128;
 const MAX_BACKUP_COUNT_PER_PAGE: usize = 1000; // Same with dfs list.
 const JSON_TIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S%.3f"; // e.g. 2006-01-02 15:04:05.000
 const BACKUP_NAME_FORMAT: &str = "%Y%m%d%H%M%S";
+const INSTANT_BACKUP_INTERVAL: Duration = Duration::from_secs(60);
 pub(crate) const BACKUPS_API_PATH: &str = "/api/v1/backups";
 pub(crate) const RESTORE_KEYSPACE_API_PATH: &str = "/api/v1/restore_keyspace/";
 pub(crate) const WHITELIST_API_PATH: &str = "/api/v1/native_br/whitelist/";
@@ -626,13 +633,13 @@ impl RestoreProgressReporter {
             // Note: the message will be seen by customers.
             RestoreStep::Pending => (0, "pending"),
             RestoreStep::Init => (5, "init"),
-            RestoreStep::InstantBackup => (10, "instant backup"),
-            RestoreStep::RemoveTiFlashReplicas => (20, "remove tiflash replicas"),
-            RestoreStep::LoadBackupMeta => (25, "load backup meta"),
-            RestoreStep::ExtractBackupShards => (30, "extract backup shards"),
-            RestoreStep::FlushShards => (40, "flush shards"),
-            RestoreStep::TruncateTs => (45, "truncate ts"),
-            RestoreStep::SplitRegions => (50, "split regions"),
+            RestoreStep::InstantBackup => (10, "prepare backup"),
+            RestoreStep::RemoveTiFlashReplicas => (30, "remove tiflash replicas"),
+            RestoreStep::LoadBackupMeta => (35, "load backup meta"),
+            RestoreStep::ExtractBackupShards => (40, "extract backup shards"),
+            RestoreStep::FlushShards => (50, "flush shards"),
+            RestoreStep::TruncateTs => (52, "truncate ts"),
+            RestoreStep::SplitRegions => (55, "split regions"),
             RestoreStep::AlignRegions => (60, "align regions"),
             RestoreStep::RestoreSnapshotsToServers => (65, "restore snapshots to servers"),
             RestoreStep::RetainSstFiles => (85, "retain files"),
@@ -671,6 +678,7 @@ pub(crate) struct BrContext {
     pub runtime: Arc<Runtime>,
     pub restore_tasks: RwLock<TasksMap>,
     pub keyspace_tasks: RwLock<KeyspacesMap>,
+    pub backup_worker: BackupWorker,
 }
 
 impl BrContext {
@@ -744,6 +752,58 @@ impl BrContext {
             .map(|task| task.progress_reporter.clone())
     }
 
+    fn restore_keyspace_core(
+        &self,
+        config: Config,
+        keyspace_name: &str,
+        target_keyspace_name: &str,
+        restore_source: RestoreSource,
+        restore_type: RestoreType,
+        progress_reporter: Arc<RestoreProgressReporter>,
+    ) -> Result<RestoredKeyspace> {
+        // Instant backup must be performed before every restore.
+        // Otherwise the data from previous backup to now will be lost, and can not be
+        // restored by PiTR.
+        progress_reporter.report_step(RestoreStep::InstantBackup);
+        let instant_backup = self.runtime.block_on(self.backup_worker.instant_backup())?;
+
+        let get_truncate_ts =
+            |utc_time: Option<DateTime<Utc>>, restore_type: RestoreType| -> Option<u64> {
+                match utc_time {
+                    Some(t) => {
+                        debug_assert!(restore_type == RestoreType::Pitr);
+                        let tso = TimeStamp::compose(t.timestamp_millis() as u64, 0);
+                        Some(tso.into_inner())
+                    }
+                    None => {
+                        debug_assert!(restore_type == RestoreType::Normal);
+                        None
+                    }
+                }
+            };
+
+        let (backup_file, truncate_ts) = match restore_source {
+            RestoreSource::ExistFile((f, utc_time)) => (f, get_truncate_ts(utc_time, restore_type)),
+            RestoreSource::InstantBackup(utc_time) => (
+                instant_backup.deref().clone(),
+                get_truncate_ts(Some(utc_time), restore_type),
+            ),
+        };
+
+        Ok(restore_keyspace_with_cfg(
+            config.to_restore_config(),
+            keyspace_name,
+            target_keyspace_name,
+            backup_file.name(),
+            self.working_path.as_deref(),
+            self.s3fs.clone(),
+            self.pd_client.clone(),
+            &self.runtime,
+            truncate_ts,
+            progress_reporter,
+        )?)
+    }
+
     fn restore_keyspace(
         &self,
         config: Config,
@@ -765,41 +825,12 @@ impl BrContext {
         )?;
         let progress_reporter = self.get_progress_reporter(restore_id).unwrap();
 
-        let get_truncate_ts =
-            |utc_time: Option<DateTime<Utc>>, restore_type: RestoreType| -> Option<u64> {
-                match utc_time {
-                    Some(t) => {
-                        debug_assert!(restore_type == RestoreType::Pitr);
-                        let tso = TimeStamp::compose(t.timestamp_millis() as u64, 0);
-                        Some(tso.into_inner())
-                    }
-                    None => {
-                        debug_assert!(restore_type == RestoreType::Normal);
-                        None
-                    }
-                }
-            };
-
-        let (backup_file, truncate_ts) = match restore_source {
-            RestoreSource::ExistFile((f, utc_time)) => (f, get_truncate_ts(utc_time, restore_type)),
-            RestoreSource::InstantBackup(utc_time) => {
-                progress_reporter.report_step(RestoreStep::InstantBackup);
-                let backup_config = config.to_backup_config();
-                let backup = self.trigger_backup(backup_config)?;
-                (backup, get_truncate_ts(Some(utc_time), restore_type))
-            }
-        };
-
-        let res = match restore_keyspace_with_cfg(
-            config.to_restore_config(),
+        let res = match self.restore_keyspace_core(
+            config,
             &keyspace_name,
             &target_keyspace_name,
-            backup_file.name(),
-            self.working_path.as_deref(),
-            self.s3fs.clone(),
-            self.pd_client.clone(),
-            &self.runtime,
-            truncate_ts,
+            restore_source,
+            restore_type,
             progress_reporter.clone(),
         ) {
             Ok(ret) => {
@@ -832,7 +863,7 @@ impl BrContext {
                     &target_keyspace_name,
                     restore_type,
                     RestoreState::Error,
-                    Some(err.into()),
+                    Some(err),
                     0,
                 )
             }
@@ -845,36 +876,11 @@ impl BrContext {
         }
         Ok(())
     }
+}
 
-    // TODO: Add frequency limit, like at most 1 backup per minute.
-    fn trigger_backup(&self, config: BackupConfig) -> Result<IncrementalBackupFile> {
-        let pd_client = self.pd_client.clone();
-        let exec_backup = |incremental: bool| -> native_br::error::Result<IncrementalBackupFile> {
-            backup::backup_cluster(
-                config.clone(),
-                incremental,
-                "".to_string(),
-                pd_client.as_ref(),
-                None,
-            )
-            .map_or_else(
-                |e| {
-                    error!("Backup failed with {:?}", e);
-                    Err(e)
-                },
-                |(backup, _)| Ok(IncrementalBackupFile::try_from_full_path(&backup).unwrap()),
-            )
-        };
-        match exec_backup(true) {
-            Ok(f) => Ok(f),
-            Err(e) => {
-                if backup::need_full_backup(&e) {
-                    exec_backup(false).map_err(|e| Error::NativeBackupRestoreError(e))
-                } else {
-                    Err(Error::NativeBackupRestoreError(e))
-                }
-            }
-        }
+impl Drop for BrContext {
+    fn drop(&mut self) {
+        self.backup_worker.stop();
     }
 }
 
@@ -912,6 +918,9 @@ impl NativeBrManger {
         working_path: Option<String>,
         config: Config,
     ) -> Self {
+        let backup_config = config.to_backup_config();
+        let backup_worker =
+            BackupWorker::new(backup_config, pd_client.clone(), INSTANT_BACKUP_INTERVAL);
         Self {
             context: Arc::new(BrContext {
                 pd_client,
@@ -920,6 +929,7 @@ impl NativeBrManger {
                 runtime,
                 restore_tasks: Default::default(),
                 keyspace_tasks: Default::default(),
+                backup_worker,
             }),
             config: RwLock::new(config),
         }
