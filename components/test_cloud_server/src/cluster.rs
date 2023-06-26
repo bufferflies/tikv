@@ -340,6 +340,8 @@ impl ServerCluster {
 pub fn new_test_config(base_dir: &Path, node_id: u16) -> TikvConfig {
     let mut config = TikvConfig::default();
     config.storage.data_dir = format!("{}/{}", base_dir.to_str().unwrap(), node_id);
+    config.storage.api_version = 2;
+    config.storage.enable_ttl = true;
     config.server.cluster_id = 1;
     config.server.addr = node_addr(node_id);
     config.server.status_addr = node_status_addr(node_id);

@@ -16,6 +16,7 @@ use kvproto::{
         DownloadRequest, ImportSstClient, MultiIngestRequest, SstMeta, SwitchMode,
         SwitchModeRequest,
     },
+    kvrpcpb::ApiVersion,
 };
 use rand::Rng;
 use tempfile::Builder;
@@ -139,6 +140,7 @@ fn test_backup_and_import() {
     let mut metas = vec![];
     for resp in &resps1 {
         let mut sst_meta = SstMeta::default();
+        sst_meta.api_version = ApiVersion::V2;
         sst_meta.region_id = context.get_region_id();
         sst_meta.set_region_epoch(context.get_region_epoch().clone());
         sst_meta.set_uuid(uuid::Uuid::new_v4().as_bytes().to_vec());
@@ -217,7 +219,7 @@ pub fn must_kv_put(client: &mut ClusterClient, key_count: usize, versions: usize
             batch.clear();
             keys.clear();
             for i in j..limit {
-                let (k, v) = (format!("key_{}", i), format!("value_{}", i));
+                let (k, v) = (format!("xkey_{}", i), format!("value_{}", i));
                 keys.push(k.clone().into_bytes());
                 let mutation = test_cloud_server::put_mut(&k, &v.repeat(50));
                 batch.push(mutation);

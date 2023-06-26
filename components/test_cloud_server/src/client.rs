@@ -20,8 +20,8 @@ use kvproto::{
     coprocessor as coppb,
     errorpb::Error,
     kvrpcpb::{
-        CommitRequest, Context, GetRequest, IsolationLevel, Mutation, Op, PrewriteRequest,
-        SplitRegionRequest,
+        ApiVersion, CommitRequest, Context, GetRequest, IsolationLevel, Mutation, Op,
+        PrewriteRequest, SplitRegionRequest,
     },
     metapb,
     metapb::{Peer, Region, RegionEpoch},
@@ -663,6 +663,7 @@ impl ClusterClient {
         }
         let (region, peer) = self.get_peer_for_request(region_id, options).unwrap();
         let mut ctx = Context::new();
+        ctx.set_api_version(ApiVersion::V2);
         ctx.set_region_id(region_id);
         ctx.set_region_epoch(region.epoch.clone());
         ctx.set_peer(peer.clone());

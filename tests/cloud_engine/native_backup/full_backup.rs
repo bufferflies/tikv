@@ -152,7 +152,7 @@ fn test_native_full_backup() {
 }
 
 fn i_to_key(i: usize) -> Vec<u8> {
-    format!("key_{:08}", i).into_bytes()
+    format!("xkey_{:08}", i).into_bytes()
 }
 
 fn i_to_val(i: usize) -> Vec<u8> {

@@ -6,7 +6,7 @@ use codec::prelude::NumberEncoder;
 use kvengine::{table::table::Row, SnapAccess};
 use kvproto::{
     coprocessor::{self as coppb, Request},
-    kvrpcpb::{Context, Mutation},
+    kvrpcpb::{ApiVersion, Context, Mutation},
 };
 use protobuf::Message;
 use rfstore::store::RegionSnapshot;
@@ -1877,7 +1877,7 @@ impl<'a> Insert<'a> {
                 .cloned()
                 .unwrap_or_else(|| Datum::I64(next_id()));
 
-            let key = table::encode_row_key(table.id, handle.i64());
+            let key = add_txn_prefix(&table::encode_row_key(table.id, handle.i64()));
             let keys: Vec<_> = row.keys().cloned().collect();
             let values: Vec<_> = row.values().cloned().collect();
             let value = table::encode_row(&mut EvalContext::default(), values, &keys).unwrap();
@@ -1895,7 +1895,7 @@ impl<'a> Insert<'a> {
                 v.push(handle.clone());
 
                 let encoded = datum::encode_key(&mut EvalContext::default(), &v).unwrap();
-                let idx_key = table::encode_index_seek_key(table.id, id, &encoded);
+                let idx_key = add_txn_prefix(&table::encode_index_seek_key(table.id, id, &encoded));
                 let mut m = Mutation::default();
 
                 m.set_op(kvproto::kvrpcpb::Op::Put);
@@ -2170,19 +2170,27 @@ impl<'a> DagTest<'a> {
     }
 
     pub fn get_key_range_all(&self) -> coppb::KeyRange {
-        self.table.get_record_range_all()
+        let mut key_range = self.table.get_record_range_all();
+        encode_key_range(&mut key_range);
+        key_range
     }
 
     pub fn get_index_key_range_all(&self, index_id: i64) -> coppb::KeyRange {
-        self.table.get_index_range_all(index_id)
+        let mut key_range = self.table.get_index_range_all(index_id);
+        encode_key_range(&mut key_range);
+        key_range
     }
 
     pub fn get_key_range(&self, start: i64, end: i64) -> coppb::KeyRange {
-        self.table.get_record_range(start, end)
+        let mut key_range = self.table.get_record_range(start, end);
+        encode_key_range(&mut key_range);
+        key_range
     }
 
     pub fn _get_index_key_range(&self, index_id: i64, start: i64, end: i64) -> coppb::KeyRange {
-        self.table.get_index_record_range(index_id, start, end)
+        let mut key_range = self.table.get_index_record_range(index_id, start, end);
+        encode_key_range(&mut key_range);
+        key_range
     }
 
     #[allow(dead_code)]
@@ -2295,7 +2303,11 @@ impl<'a> DagTest<'a> {
         }
     }
 
-    fn select_all(&mut self, req: Request, index_id: Option<i64>) -> tipb::SelectResponse {
+    fn select_all(&mut self, mut req: Request, index_id: Option<i64>) -> tipb::SelectResponse {
+        let ranges = req.mut_ranges();
+        for key_range in ranges.iter_mut() {
+            encode_key_range(key_range);
+        }
         let cop_resp = self.execute_select_all_generic(req, index_id);
         let mut resp = tipb::SelectResponse::default();
         resp.merge_from_bytes(cop_resp.get_data()).unwrap();
@@ -2306,8 +2318,9 @@ impl<'a> DagTest<'a> {
         &self,
         snapshot: DagTestSnapshot,
         quota_limiter: Arc<QuotaLimiter>,
-        req: Request,
+        mut req: Request,
     ) -> Result<coppb::Response, tikv::coprocessor::Error> {
+        req.mut_context().set_api_version(ApiVersion::V2);
         let f = async {
             let snap_access = SnapAccess::construct_snapshot(
                 self.cluster.get_dfs().unwrap(),
@@ -2359,4 +2372,15 @@ fn init_with_data<'a>(tbl: &'a ProductTable, rows: &[(i64, Option<&str>, i64)]) 
     let mut dag_test = DagTest::new(tbl);
     dag_test.insert_and_commit(rows);
     dag_test
+}
+
+fn add_txn_prefix(key: &[u8]) -> Vec<u8> {
+    let mut v = api_version::ApiV2::get_txn_keyspace_prefix(1);
+    v.extend_from_slice(key);
+    v
+}
+
+fn encode_key_range(key_range: &mut coppb::KeyRange) {
+    key_range.set_start(add_txn_prefix(key_range.get_start()));
+    key_range.set_end(add_txn_prefix(key_range.get_end()));
 }

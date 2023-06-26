@@ -190,7 +190,7 @@ fn destroy_range(client: &mut ClusterClient, store_id: u64, prefix: &[u8]) {
 }
 
 fn i_to_key(i: usize) -> Vec<u8> {
-    format!("key_{:03}", i).into_bytes()
+    format!("xkey_{:03}", i).into_bytes()
 }
 
 fn i_to_val(i: usize) -> Vec<u8> {

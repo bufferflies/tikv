@@ -10,7 +10,7 @@ mod test_split;
 mod test_trim_over_bound;
 
 fn i_to_key(i: usize) -> Vec<u8> {
-    format!("key{:08}", i).into_bytes()
+    format!("xkey{:08}", i).into_bytes()
 }
 
 fn i_to_val(i: usize) -> Vec<u8> {

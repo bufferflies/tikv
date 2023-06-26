@@ -92,7 +92,7 @@ fn test_trim_over_bound_impl(split_key_idx: usize, do_leader_transfer: bool) {
 }
 
 fn i_to_key(i: usize) -> Vec<u8> {
-    format!("key_{:03}", i).into_bytes()
+    format!("xkey_{:03}", i).into_bytes()
 }
 
 const RANDOM_VALUE_SIZE: usize = 1024;

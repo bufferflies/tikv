@@ -395,7 +395,7 @@ pub(crate) fn random_node_restart(cluster: &mut ServerCluster) {
 }
 
 pub(crate) fn i_to_key(i: usize) -> Vec<u8> {
-    format!("key{:08}", i).into_bytes()
+    format!("xkey{:08}", i).into_bytes()
 }
 
 pub(crate) fn i_to_val(i: usize) -> Vec<u8> {

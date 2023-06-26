@@ -47,7 +47,7 @@ mod tests {
     }
 
     fn gen_key(i: usize) -> Vec<u8> {
-        format!("key{:04}", i).into_bytes()
+        format!("xkey{:04}", i).into_bytes()
     }
 
     fn gen_val(i: usize) -> Vec<u8> {

@@ -341,7 +341,7 @@ fn test_restore_keyspace_impl(
 }
 
 fn i_to_key(i: usize) -> Vec<u8> {
-    format!("key_{:08}", i).into_bytes()
+    format!("xkey_{:08}", i).into_bytes()
 }
 
 fn random_val() -> Vec<u8> {

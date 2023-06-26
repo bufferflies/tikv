@@ -62,7 +62,7 @@ fn test_local_file_gc() {
 }
 
 fn gen_key(i: usize) -> Vec<u8> {
-    format!("key_{:08}", i).into_bytes()
+    format!("xkey_{:08}", i).into_bytes()
 }
 
 fn gen_val(i: usize) -> Vec<u8> {
