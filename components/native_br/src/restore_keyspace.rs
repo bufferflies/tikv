@@ -79,6 +79,33 @@ pub struct RestoredShard {
     pub restore_bytes: u64,
 }
 
+/// RestoreStep is the steps of restore process.
+///
+/// Some steps are performed in retry loop, and will be reported multiple times.
+///
+/// Must keep the order of enums the same as they happen, then reporters can
+/// avoid the progress jumping back and forth.
+#[derive(Clone, Debug, PartialEq, PartialOrd)]
+pub enum RestoreStep {
+    Pending,
+    Init,
+    InstantBackup,
+    RemoveTiFlashReplicas,
+    LoadBackupMeta,
+    ExtractBackupShards,
+    FlushShards,
+    TruncateTs,
+    SplitRegions,
+    AlignRegions,
+    RestoreSnapshotsToServers,
+    RetainSstFiles,
+    Finalize,
+}
+
+pub trait ReportRestoreStepTrait {
+    fn report_step(&self, step: RestoreStep);
+}
+
 pub fn restore_keyspace_with_cfg(
     config: RestoreConfig,
     keyspace_name: &str,
@@ -89,6 +116,7 @@ pub fn restore_keyspace_with_cfg(
     pd_client: Arc<dyn PdClient>,
     runtime: &Runtime,
     truncate_ts: Option<u64>,
+    reporter: Arc<dyn ReportRestoreStepTrait>,
 ) -> Result<RestoredKeyspace> {
     let pd_control = PdControl::new(config.pd.clone(), config.security)?;
     let keyspace_id = {
@@ -108,6 +136,7 @@ pub fn restore_keyspace_with_cfg(
         step!("Target keyspace name {target_keyspace_name}'s id is {target_id}");
         target_id
     } else {
+        reporter.report_step(RestoreStep::RemoveTiFlashReplicas);
         if let Err(e) = runtime.block_on(remove_tiflash_replia_of_keyspace(
             keyspace_id,
             &pd_control,
@@ -129,6 +158,7 @@ pub fn restore_keyspace_with_cfg(
         pd_client,
         runtime,
         truncate_ts,
+        reporter,
     )
 }
 
@@ -141,6 +171,7 @@ pub fn restore_keyspace(
     pd_client: Arc<dyn PdClient>,
     runtime: &Runtime,
     truncate_ts: Option<u64>,
+    reporter: Arc<dyn ReportRestoreStepTrait>,
 ) -> Result<RestoredKeyspace> {
     let working_dir = match working_path {
         Some(p) => TempDir::new_in(p, WORKING_PATH_PREFIX),
@@ -156,6 +187,8 @@ pub fn restore_keyspace(
         ApiV2::get_txn_keyspace_range(target_keyspace_id);
 
     let keyspace_tag = make_keyspace_tag(keyspace_id, target_keyspace_id);
+
+    reporter.report_step(RestoreStep::LoadBackupMeta);
     let cluster_backup = get_cluster_backup_meta(&s3fs, backup_name.to_owned());
     step!(
         "Start restore keyspace {} from backup <{}>, range:[{},{}), target_range:[{},{}), backup ts:{}, safe ts:{} truncate ts{:?}",
@@ -173,6 +206,8 @@ pub fn restore_keyspace(
         "Keyspace {} get cluster backup meta: {:?}",
         keyspace_tag, cluster_backup
     );
+
+    reporter.report_step(RestoreStep::ExtractBackupShards);
     if truncate_ts.is_some() {
         check_backup_meta_ts(&cluster_backup, truncate_ts.unwrap())?;
     }
@@ -194,9 +229,11 @@ pub fn restore_keyspace(
 
     // trigger initial flush & flush mem-table to S3
     // NOTE: `cluster.shards` is NOT available before `flush_shards` finished.
+    reporter.report_step(RestoreStep::FlushShards);
     let flush_cnt = cluster.flush_shards()?;
     step!("Keyspace {keyspace_tag} flush {flush_cnt} shards");
 
+    reporter.report_step(RestoreStep::TruncateTs);
     let truncate_ts_cnt = cluster.truncate_ts()?;
     step!(
         "Keyspace {} truncate {} shards to ts {}",
@@ -215,6 +252,8 @@ pub fn restore_keyspace(
 
     let mut success_ranges = MergeRanges::default();
     let mut retry = 0;
+    // TODO: split regions for inplace restore.
+    let mut need_split_regions = !inplace_restore;
     let mut last_error = None;
     let mut restore_bytes = 0;
     loop {
@@ -237,35 +276,35 @@ pub fn restore_keyspace(
             }
         };
 
-        // TODO: split regions for inplace restore.
-        if !inplace_restore {
+        if need_split_regions {
+            reporter.report_step(RestoreStep::SplitRegions);
+
             // Try split target keyspace regions according to backup keyspace regions if
             // needed.
             // No need check keyspace split in retry.
-            if retry == 1 {
-                split_target_keyspace(
-                    &inner_split_keys,
-                    &target_regions,
-                    &keyspace_tag,
-                    pd_client.clone(),
-                    runtime,
-                )?;
+            split_target_keyspace(
+                &inner_split_keys,
+                &target_regions,
+                &keyspace_tag,
+                pd_client.clone(),
+                runtime,
+            )?;
+            need_split_regions = false;
 
-                // Update target regions after split.
-                target_regions = match runtime.block_on(get_target_regions(
-                    &pd_client,
-                    &target_keyspace_start,
-                    &target_keyspace_end,
-                )) {
-                    Ok(regions) => regions,
-                    Err(err) => {
-                        warn!("get target regions failed: {:?}, retry again", err);
-                        last_error = Some(err);
-                        thread::sleep(Duration::from_millis(200));
-                        continue;
-                    }
-                };
-            }
+            // Update target regions after split.
+            target_regions = match runtime.block_on(get_target_regions(
+                &pd_client,
+                &target_keyspace_start,
+                &target_keyspace_end,
+            )) {
+                Ok(regions) => regions,
+                Err(err) => {
+                    warn!("get target regions failed: {:?}, retry again", err);
+                    last_error = Some(err);
+                    thread::sleep(Duration::from_millis(200));
+                    continue;
+                }
+            };
         }
 
         let target_regions_total_cnt = target_regions.len();
@@ -280,6 +319,7 @@ pub fn restore_keyspace(
         );
 
         // Align target regions.
+        reporter.report_step(RestoreStep::AlignRegions);
         let (aligned_regions, trimmed_shards_cnt) = cluster.align_target_regions(target_regions)?;
         step!(
             "Keyspace {} align {} backup shards to {} target regions and trim {} over bound shards",
@@ -298,6 +338,7 @@ pub fn restore_keyspace(
             target_shards.len(),
         );
 
+        reporter.report_step(RestoreStep::RestoreSnapshotsToServers);
         let snapshots = cluster.generate_snapshots(target_shards);
         let snapshots_count = snapshots.len();
         let ret = restore_snapshots(
@@ -320,6 +361,7 @@ pub fn restore_keyspace(
         }
     }
 
+    reporter.report_step(RestoreStep::RetainSstFiles);
     let files = cluster.get_all_shard_files();
     match retain_sst_files(files, &s3fs) {
         Err(e) => {

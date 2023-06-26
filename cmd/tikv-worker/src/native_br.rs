@@ -3,7 +3,7 @@
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, RwLock},
     thread,
 };
 
@@ -14,7 +14,7 @@ use kvengine::dfs::S3Fs;
 use native_br::{
     backup,
     backup::{BackupConfig, IncrementalBackupFile},
-    restore_keyspace::restore_keyspace_with_cfg,
+    restore_keyspace::{restore_keyspace_with_cfg, ReportRestoreStepTrait, RestoreStep},
 };
 use pd_client::PdClient;
 use serde::Deserialize;
@@ -298,6 +298,8 @@ pub(crate) async fn handle_restore_keyspace(
                         "{} restore keyspace started, restore_id {}, backup {:?}",
                         keyspace_tag, restore_id, backup
                     );
+                    let (progress, step_name) =
+                        RestoreProgressReporter::step_to_progress(&RestoreStep::Pending);
                     let resp = RestoreProgressResponse {
                         status: RestoreState::Pending,
                         error: String::new(),
@@ -306,6 +308,10 @@ pub(crate) async fn handle_restore_keyspace(
                         keyspace: target_keyspace,
                         restore_type,
                         restore_bytes: 0,
+                        progress: RestoreProgress {
+                            step: step_name.to_string(),
+                            progress,
+                        },
                     };
                     Ok(make_json_response(StatusCode::CREATED, &resp))
                 }
@@ -508,6 +514,13 @@ struct ListBackupResponse {
 
 #[derive(Default, Serialize, Deserialize, Debug)]
 #[serde(default)]
+struct RestoreProgress {
+    step: String,
+    progress: i32,
+}
+
+#[derive(Default, Serialize, Deserialize, Debug)]
+#[serde(default)]
 struct RestoreProgressResponse {
     status: RestoreState,
     error: String,
@@ -516,6 +529,7 @@ struct RestoreProgressResponse {
     keyspace: String,
     restore_type: RestoreType,
     restore_bytes: u64,
+    progress: RestoreProgress,
 }
 
 impl RestoreProgressResponse {
@@ -532,6 +546,7 @@ impl RestoreProgressResponse {
             keyspace: status.keyspace_name,
             restore_type: status.restore_type,
             restore_bytes: status.restore_bytes,
+            progress: status.progress_reporter.get_progress(),
         }
     }
 }
@@ -588,6 +603,61 @@ pub(crate) struct RestoreTask {
     end: Option<DateTime<Utc>>,
     restore_type: RestoreType,
     restore_bytes: u64,
+    progress_reporter: Arc<RestoreProgressReporter>,
+}
+
+struct RestoreProgressReporter {
+    restore_id: u64,
+    step: Mutex<RestoreStep>,
+}
+
+impl RestoreProgressReporter {
+    fn new(restore_id: u64, step: RestoreStep) -> Self {
+        Self {
+            restore_id,
+            step: Mutex::new(step),
+        }
+    }
+
+    fn step_to_progress(step: &RestoreStep) -> (i32, &'static str) {
+        match step {
+            // The difference value between this and next step is the estimated time cost of current
+            // step.
+            // Note: the message will be seen by customers.
+            RestoreStep::Pending => (0, "pending"),
+            RestoreStep::Init => (5, "init"),
+            RestoreStep::InstantBackup => (10, "instant backup"),
+            RestoreStep::RemoveTiFlashReplicas => (20, "remove tiflash replicas"),
+            RestoreStep::LoadBackupMeta => (25, "load backup meta"),
+            RestoreStep::ExtractBackupShards => (30, "extract backup shards"),
+            RestoreStep::FlushShards => (40, "flush shards"),
+            RestoreStep::TruncateTs => (45, "truncate ts"),
+            RestoreStep::SplitRegions => (50, "split regions"),
+            RestoreStep::AlignRegions => (60, "align regions"),
+            RestoreStep::RestoreSnapshotsToServers => (65, "restore snapshots to servers"),
+            RestoreStep::RetainSstFiles => (85, "retain files"),
+            RestoreStep::Finalize => (90, "finalize"), // Wait for ClusterCR become normal.
+        }
+    }
+
+    fn get_progress(&self) -> RestoreProgress {
+        let step = self.step.lock().unwrap();
+        let (progress, step_name) = Self::step_to_progress(&step);
+        RestoreProgress {
+            step: step_name.to_string(),
+            progress,
+        }
+    }
+}
+
+impl ReportRestoreStepTrait for RestoreProgressReporter {
+    fn report_step(&self, step: RestoreStep) {
+        info!("restore {} report_step: {:?}", self.restore_id, step);
+        let mut current_step = self.step.lock().unwrap();
+        if *current_step < step {
+            *current_step = step;
+        }
+    }
 }
 
 type TasksMap = HashMap<u64 /* restore_id */, RestoreTask>;
@@ -630,6 +700,10 @@ impl BrContext {
                     end: None,
                     restore_type,
                     restore_bytes,
+                    progress_reporter: Arc::new(RestoreProgressReporter::new(
+                        restore_id,
+                        RestoreStep::Init,
+                    )),
                 },
             );
             Ok(())
@@ -663,6 +737,13 @@ impl BrContext {
         Ok(true)
     }
 
+    fn get_progress_reporter(&self, restore_id: u64) -> Option<Arc<RestoreProgressReporter>> {
+        let tasks = self.restore_tasks.read().unwrap();
+        tasks
+            .get(&restore_id)
+            .map(|task| task.progress_reporter.clone())
+    }
+
     fn restore_keyspace(
         &self,
         config: Config,
@@ -682,6 +763,7 @@ impl BrContext {
             None,
             0,
         )?;
+        let progress_reporter = self.get_progress_reporter(restore_id).unwrap();
 
         let get_truncate_ts =
             |utc_time: Option<DateTime<Utc>>, restore_type: RestoreType| -> Option<u64> {
@@ -701,6 +783,7 @@ impl BrContext {
         let (backup_file, truncate_ts) = match restore_source {
             RestoreSource::ExistFile((f, utc_time)) => (f, get_truncate_ts(utc_time, restore_type)),
             RestoreSource::InstantBackup(utc_time) => {
+                progress_reporter.report_step(RestoreStep::InstantBackup);
                 let backup_config = config.to_backup_config();
                 let backup = self.trigger_backup(backup_config)?;
                 (backup, get_truncate_ts(Some(utc_time), restore_type))
@@ -717,6 +800,7 @@ impl BrContext {
             self.pd_client.clone(),
             &self.runtime,
             truncate_ts,
+            progress_reporter.clone(),
         ) {
             Ok(ret) => {
                 NATIVE_BR_COUNTER_VEC
@@ -725,6 +809,7 @@ impl BrContext {
                 NATIVE_BR_HISTOGRAM_VEC
                     .with_label_values(&["restore_keyspace"])
                     .observe(ob_start_time.saturating_elapsed_secs());
+                progress_reporter.report_step(RestoreStep::Finalize);
                 self.change_restore_state(
                     restore_id,
                     &target_keyspace_name,

@@ -4,7 +4,13 @@ use std::{sync::Arc, time::Duration};
 
 use kvengine::dfs::{DFSConfig, S3Fs};
 use kvproto::metapb;
-use native_br::{backup, common::now, restore_keyspace, step};
+use native_br::{
+    backup,
+    common::now,
+    restore_keyspace,
+    restore_keyspace::{ReportRestoreStepTrait, RestoreStep},
+    step,
+};
 use pd_client::PdClient;
 use rand::Rng;
 use test_cloud_server::{
@@ -272,6 +278,7 @@ fn test_restore_keyspace_impl(
         dfs_config.s3_region,
         dfs_config.s3_bucket,
     ));
+    let reporter = Arc::new(DummyStepReporter::default());
     restore_keyspace::restore_keyspace(
         keyspace_id,
         keyspace_id,
@@ -281,6 +288,7 @@ fn test_restore_keyspace_impl(
         cluster.get_pd_client(),
         runtime,
         truncate_ts,
+        reporter,
     )
     .unwrap();
     step!("restore done");
@@ -446,4 +454,11 @@ fn check_learners(
         "{:?}",
         check_learners_impl(cluster, start, end, min_count)
     );
+}
+
+#[derive(Default)]
+struct DummyStepReporter {}
+
+impl ReportRestoreStepTrait for DummyStepReporter {
+    fn report_step(&self, _step: RestoreStep) {}
 }

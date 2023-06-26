@@ -8,7 +8,12 @@ use std::{
 
 use api_version::ApiV2;
 use kvengine::dfs::{DFSConfig, S3Fs};
-use native_br::{backup, error::Error, restore_keyspace};
+use native_br::{
+    backup,
+    error::Error,
+    restore_keyspace,
+    restore_keyspace::{ReportRestoreStepTrait, RestoreStep},
+};
 use pd_client::PdClient;
 use rand::{prelude::SliceRandom, Rng};
 use test_cloud_server::{
@@ -122,6 +127,7 @@ fn test_random_br_helper(enable_inner_key_offset: bool, restore_to_new: bool) {
         .thread_name("restore-keyspace")
         .build()
         .unwrap();
+    let reporter = Arc::new(DummyStepReporter::default());
 
     let start_time = Instant::now();
     while start_time.saturating_elapsed() < TIMEOUT {
@@ -187,6 +193,7 @@ fn test_random_br_helper(enable_inner_key_offset: bool, restore_to_new: bool) {
             keyspace,
             target_keyspace,
             &backup_name,
+            reporter.clone(),
         )
         .unwrap();
         info!(
@@ -245,6 +252,7 @@ pub(crate) fn do_restore_keyspace(
     keyspace: u32,
     target_keyspace: u32,
     backup_name: &str,
+    reporter: Arc<dyn ReportRestoreStepTrait>,
 ) -> native_br::Result<restore_keyspace::RestoredKeyspace> {
     let s3fs = Arc::new(S3Fs::new(
         dfs_config.prefix,
@@ -263,6 +271,7 @@ pub(crate) fn do_restore_keyspace(
         pd_client,
         runtime,
         None,
+        reporter,
     )
 }
 
@@ -363,6 +372,7 @@ pub(crate) fn spawn_restore_keyspace(
             .thread_name("restore-keyspace")
             .build()
             .unwrap();
+        let reporter = Arc::new(DummyStepReporter::default());
 
         let start_time = Instant::now();
         sleep(Duration::from_secs(3));
@@ -402,6 +412,7 @@ pub(crate) fn spawn_restore_keyspace(
                     keyspace,
                     target_keyspace,
                     &backup_name,
+                    reporter.clone(),
                 ) {
                     Ok(_) => {}
                     Err(Error::BackupEmptyForKeyspace(_)) => {
@@ -454,4 +465,11 @@ pub(crate) fn spawn_restore_keyspace(
         }
         info!("restore keyspace thread exit");
     })
+}
+
+#[derive(Default)]
+struct DummyStepReporter {}
+
+impl ReportRestoreStepTrait for DummyStepReporter {
+    fn report_step(&self, _step: RestoreStep) {}
 }

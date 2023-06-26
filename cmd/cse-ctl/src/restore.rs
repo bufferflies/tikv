@@ -8,7 +8,9 @@ use native_br::{
     common::{create_pd_client, now},
     restore,
     restore::{restore_pd, restore_tikv, RestoreConfig},
-    restore_keyspace::{restore_keyspace_with_cfg, RestoredKeyspace},
+    restore_keyspace::{
+        restore_keyspace_with_cfg, ReportRestoreStepTrait, RestoreStep, RestoredKeyspace,
+    },
     step, step_error,
 };
 use pd_client::PdClient;
@@ -162,6 +164,7 @@ fn execute_restore_keyspace_impl(
         .enable_all()
         .build()
         .unwrap();
+    let reporter = Arc::new(CliRestoreStepReporter::default());
 
     let target_keyspace_name = args
         .target_keyspace_name
@@ -177,6 +180,7 @@ fn execute_restore_keyspace_impl(
         pd_client,
         &runtime,
         None,
+        reporter,
     )
 }
 
@@ -236,4 +240,13 @@ pub fn get_restore_keyspace_config_from_args(args: &RestoreKeyspaceArgs) -> Rest
     config.dfs.override_from_env();
     config.skip_resolve_lock = false;
     config
+}
+
+#[derive(Default)]
+struct CliRestoreStepReporter {}
+
+impl ReportRestoreStepTrait for CliRestoreStepReporter {
+    fn report_step(&self, _step: RestoreStep) {
+        // TODO: friendly output for cli use.
+    }
 }
