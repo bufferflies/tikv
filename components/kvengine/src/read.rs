@@ -102,6 +102,9 @@ impl SnapAccess {
         mut mem_table_data: &[u8],
         snapshot: &[u8],
     ) -> Result<Self> {
+        let mut change_set = kvenginepb::ChangeSet::default();
+        change_set.merge_from_bytes(snapshot).unwrap();
+        let inner_key_off = change_set.get_snapshot().get_inner_key_off() as usize;
         let mut wb = crate::table::memtable::WriteBatch::new();
         if !mem_table_data.is_empty() {
             let format_version = mem_table_data.get_u32();
@@ -115,11 +118,10 @@ impl SnapAccess {
                 Error::RemoteRead(format!("failed to deserialize mem table data: {}", e))
             })?;
             for row in rows {
-                wb.put(&row.key, 0, &row.user_meta.to_array(), 0, &row.value);
+                let key = &row.key[inner_key_off..];
+                wb.put(key, 0, &row.user_meta.to_array(), 0, &row.value);
             }
         }
-        let mut change_set = kvenginepb::ChangeSet::default();
-        change_set.merge_from_bytes(snapshot).unwrap();
         Ok(Self::from_change_set_and_memtable_data(dfs, change_set, &mut wb).await)
     }
 }
@@ -330,15 +332,18 @@ impl SnapAccessCore {
         all_versions: bool,
         read_ts: Option<u64>,
     ) -> Iterator {
+        let data = self.data.clone();
+        let mut key = BytesMut::new();
+        key.extend_from_slice(data.prefix());
         Iterator {
             all_versions,
             reversed,
             read_ts: self.get_read_ts(cf, read_ts),
-            key: BytesMut::new(),
+            key,
             val: table::Value::new(),
             inner: self.new_mem_table_iterator(cf, reversed),
             blob_prefetcher: None,
-            data: self.data.clone(),
+            data,
             range: None,
         }
     }
@@ -559,7 +564,7 @@ impl SnapAccessCore {
 
     fn to_change_set(&self, ranges: &[(Bytes, Bytes)], ignore_locks: bool) -> pb::ChangeSet {
         let mut cs = new_change_set(self.get_tag().id_ver.id, self.get_tag().id_ver.ver);
-        let mut snap = pb::Snapshot::new();
+        let snap = cs.mut_snapshot();
         let mut properties = pb::Properties::new();
         properties.shard_id = self.get_tag().id_ver.id;
         let data_sequence = if !self.data.l0_tbls.is_empty() {
@@ -648,9 +653,6 @@ impl SnapAccessCore {
             count,
             overlapped_count,
         );
-        if overlapped_count > 0 {
-            cs.set_snapshot(snap);
-        }
         cs
     }
 
@@ -658,25 +660,27 @@ impl SnapAccessCore {
         &self,
         ranges: &[(Bytes, Bytes)],
         ignore_locks: bool,
-    ) -> Option<(String, Vec<u8>)> {
+        cache_key: bool,
+    ) -> (String, Vec<u8>) {
         let cs = self.to_change_set(ranges, ignore_locks);
-        if !cs.has_snapshot() {
-            return None;
-        }
-        let mut ranges_bytes = Vec::new();
-        for (start, end) in ranges {
-            ranges_bytes.append(start.to_vec().as_mut());
-            ranges_bytes.append(end.to_vec().as_mut());
-        }
-        let ranges_key = hex::encode(ranges_bytes);
-        let key = format!(
-            "{}:{}:{}:{}",
-            cs.shard_id,
-            cs.shard_ver,
-            cs.get_snapshot().data_sequence,
-            ranges_key,
-        );
-        Some((key, cs.write_to_bytes().unwrap()))
+        let key = if cache_key {
+            let mut ranges_bytes = Vec::new();
+            for (start, end) in ranges {
+                ranges_bytes.append(start.to_vec().as_mut());
+                ranges_bytes.append(end.to_vec().as_mut());
+            }
+            let ranges_key = hex::encode(ranges_bytes);
+            format!(
+                "{}:{}:{}:{}",
+                cs.shard_id,
+                cs.shard_ver,
+                cs.get_snapshot().data_sequence,
+                ranges_key,
+            )
+        } else {
+            "".to_string()
+        };
+        (key, cs.write_to_bytes().unwrap())
     }
 
     pub fn get_all_files(&self) -> Vec<u64> {

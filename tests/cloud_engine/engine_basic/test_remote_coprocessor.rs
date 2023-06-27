@@ -2141,9 +2141,11 @@ impl<'a> DagTest<'a> {
 
         let cluster = ServerCluster::new(vec![node_id], |_, conf| {
             conf.dfs = dfs_cfg.clone();
+            conf.enable_inner_key_offset = node_id % 2 == 0;
         });
 
-        let client = cluster.new_client();
+        let mut client = cluster.new_client();
+        client.split_keyspace(1);
 
         Self {
             table,

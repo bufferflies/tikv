@@ -223,11 +223,6 @@ fn verify_range(
     lower_bound: Option<Key>,
     upper_bound: Option<Key>,
 ) -> Result<(Bytes, Bytes)> {
-    if snap.get_start_key().is_empty() && snap.get_end_key().is_empty() {
-        // remote coprocessor may create empty snapshot, return full range for
-        // simplicity.
-        return Ok((Bytes::new(), Bytes::from(kvengine::GLOBAL_SHARD_END_KEY)));
-    }
     let lower = if let Some(lower_key) = &lower_bound {
         let lower = Bytes::from(lower_key.to_raw()?);
         if lower.chunk() < snap.get_start_key() {

@@ -888,10 +888,8 @@ impl<E: Engine> Endpoint<E> {
                     bincode::serialize_into(&mut mem_data, &rows)
                         .map_err(|e| Error::Other(e.to_string()))?;
                     resp.set_mem_table_data(mem_data);
-                    if let Some(change_set) = snap_access.marshal(ranges.as_slice(), true) {
-                        resp.set_snapshot(change_set.1);
-                    }
-
+                    let (_, snapshot) = snap_access.marshal(ranges.as_slice(), true, false);
+                    resp.set_snapshot(snapshot);
                     Ok(resp)
                 },
                 priority,
