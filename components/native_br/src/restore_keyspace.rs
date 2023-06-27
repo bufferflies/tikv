@@ -19,7 +19,7 @@ use file_system::{IoRateLimitMode, IoRateLimiter};
 use http::{Request, Uri};
 use hyper::Body;
 use itertools::Itertools;
-use kvengine::{dfs::S3Fs, IdVer, ShardMeta, ShardRange, ShardStats, ShardTag};
+use kvengine::{dfs::S3Fs, get_inner_end_key, IdVer, ShardMeta, ShardRange, ShardStats, ShardTag};
 use kvenginepb as pb;
 use kvproto::{metapb, metapb::PeerRole, raft_serverpb::MergeState};
 use pd_client::PdClient;
@@ -191,7 +191,7 @@ pub fn restore_keyspace(
     reporter.report_step(RestoreStep::LoadBackupMeta);
     let cluster_backup = get_cluster_backup_meta(&s3fs, backup_name.to_owned());
     step!(
-        "Start restore keyspace {} from backup <{}>, range:[{},{}), target_range:[{},{}), backup ts:{}, safe ts:{} truncate ts{:?}",
+        "Start restore keyspace {} from backup <{}>, range:[{},{}), target_range:[{},{}), backup ts:{}, safe ts:{} truncate ts:{:?}",
         keyspace_tag,
         backup_name,
         log_wrappers::hex_encode_upper(keyspace_start),
@@ -1380,10 +1380,10 @@ impl BackupCluster {
                 idx -= 1;
             }
 
-            let target_end = target_region.get_end_key();
+            let target_inner_end = get_inner_end_key(target_region.get_end_key(), inner_key_off);
             let mut aligned_shards_id = vec![];
             while idx < sorted_backup_shards_id.len()
-                && get_backup_shard(idx).inner_start() < &target_end[inner_key_off..]
+                && get_backup_shard(idx).inner_start() < target_inner_end
             {
                 aligned_shards_id.push(sorted_backup_shards_id[idx]);
                 idx += 1;
@@ -2238,37 +2238,44 @@ mod tests {
         } else {
             0
         };
-        let cases = vec![
-            // backup_regions, target_regions, align_regions_id
-            (vec![0, 10], vec![0, 10], vec![vec![0]]),
-            (vec![0, 5, 10], vec![0, 5, 10], vec![vec![0], vec![5]]),
+        let key_prefix = b"x00";
+        let cases: Vec<(Vec<&[u8]>, Vec<&[u8]>, Vec<Vec<u64>>)> = vec![
             (
-                vec![0, 3, 6, 10],
-                vec![0, 5, 10],
-                vec![vec![0, 3], vec![3, 6]],
+                vec![b"0", b"1"], // backup_regions_boundary_keys, the index is the region id.
+                vec![b"0", b"1"], // target_regions_boundary_keys
+                vec![vec![0]],    // align_regions_id
             ),
             (
-                vec![0, 5, 10],
-                vec![0, 3, 6, 10],
-                vec![vec![0], vec![0, 5], vec![5]],
+                vec![b"0", b"05", b"1"],
+                vec![b"0", b"05", b"1"],
+                vec![vec![0], vec![1]],
+            ),
+            (
+                vec![b"1", b"13", b"16", b"2"],
+                vec![b"1", b"15", b"2"],
+                vec![vec![0, 1], vec![1, 2]],
+            ),
+            (
+                vec![b"2", b"25", b"3"],
+                vec![b"2", b"23", b"26", b"3"],
+                vec![vec![0], vec![0, 1], vec![1]],
             ),
             #[cfg_attr(rustfmt, rustfmt_skip)]
             (
-            vec![   0,       2,                4,       6, 7, 8, 9, 10],
-            vec![   0,       2,       3,       4,       6,          10],
-            vec![vec![0], vec![2], vec![2], vec![4], vec![6,7,8,9]],
+            vec![ b"3",    b"32",            b"34",  b"36", b"37", b"38", b"39", b"4"],
+            vec![ b"3",    b"32",   b"33",   b"34",  b"36",                      b"4"],
+            vec![vec![0], vec![1], vec![1], vec![2],         vec![3,4,5,6]],
             ),
         ];
 
-        let make_regions = |keys: Vec<u64>| -> Vec<RawRegion> {
+        let make_regions = |keys: Vec<&[u8]>| -> Vec<RawRegion> {
             let mut regions = Vec::with_capacity(keys.len() - 1);
-            let prefix = b"0000";
-            for w in keys.as_slice().windows(2) {
-                let (mut raw_start, mut raw_end) = (prefix.to_vec(), prefix.to_vec());
-                raw_start.extend_from_slice(&w[0].to_be_bytes());
-                raw_end.extend_from_slice(&w[1].to_be_bytes());
+            for (idx, w) in keys.as_slice().windows(2).enumerate() {
+                let (mut raw_start, mut raw_end) = (key_prefix.to_vec(), key_prefix.to_vec());
+                raw_start.extend_from_slice(w[0]);
+                raw_end.extend_from_slice(w[1]);
                 regions.push(RawRegion {
-                    id: w[0],
+                    id: idx as u64,
                     raw_start,
                     raw_end,
                     ..Default::default()

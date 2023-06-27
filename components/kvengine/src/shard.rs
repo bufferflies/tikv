@@ -586,6 +586,14 @@ impl Shard {
     }
 }
 
+// TODO: replace duplicated codes for getting inner end key.
+pub fn get_inner_end_key(outer_end_key: &[u8], inner_key_off: usize) -> &[u8] {
+    if inner_key_off == outer_end_key.len() {
+        return GLOBAL_SHARD_END_KEY;
+    }
+    &outer_end_key[inner_key_off..]
+}
+
 #[derive(Clone)]
 pub(crate) struct ShardData {
     pub(crate) core: Arc<ShardDataCore>,

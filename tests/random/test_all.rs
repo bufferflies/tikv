@@ -140,7 +140,8 @@ fn prepare_cluster(
         conf.rfengine.target_file_size = ReadableSize::mb(1);
         conf.rfengine.batch_compression_threshold =
             ReadableSize::kb(rand::thread_rng().gen_range(0..2));
-        conf.enable_inner_key_offset = false; // create initial keyspace with inner_key_offset disabled
+        // TODO: test for both enable and disable inner_key_offset
+        conf.enable_inner_key_offset = true;
     };
     let cluster = ServerCluster::new(nodes, update_conf_fn);
     cluster.wait_region_replicated(&[], 3);
