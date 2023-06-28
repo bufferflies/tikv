@@ -562,7 +562,7 @@ impl SnapAccessCore {
         false
     }
 
-    fn to_change_set(&self, ranges: &[(Bytes, Bytes)], ignore_locks: bool) -> pb::ChangeSet {
+    fn to_change_set(&self, outer_ranges: &[(Bytes, Bytes)], ignore_locks: bool) -> pb::ChangeSet {
         let mut cs = new_change_set(self.get_tag().id_ver.id, self.get_tag().id_ver.ver);
         let snap = cs.mut_snapshot();
         let mut properties = pb::Properties::new();
@@ -591,8 +591,10 @@ impl SnapAccessCore {
                 }
             }
             let mut overlap = false;
-            for (start, end) in ranges {
-                if v.has_data_in_range(start.as_ref(), end.as_ref()) {
+            for (outer_start, outer_end) in outer_ranges {
+                let inner_start = &outer_start[self.data.range.inner_key_off..];
+                let inner_end = get_inner_end_key(outer_end, self.data.range.inner_key_off);
+                if v.has_data_in_range(inner_start, inner_end) {
                     overlap = true;
                     break;
                 }
@@ -627,8 +629,10 @@ impl SnapAccessCore {
                     continue;
                 }
                 let mut overlap = false;
-                for (start, end) in ranges {
-                    if v.has_overlap(start.as_ref(), end.as_ref(), false) {
+                for (outer_start, outer_end) in outer_ranges {
+                    let inner_start = &outer_start[self.data.range.inner_key_off..];
+                    let inner_end = get_inner_end_key(outer_end, self.data.range.inner_key_off);
+                    if v.has_overlap(inner_start, inner_end, false) {
                         overlap = true;
                         break;
                     }

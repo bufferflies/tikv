@@ -5,11 +5,15 @@ mod test_stats;
 
 use std::{thread, time::Duration};
 
+use bytes::Bytes;
 use futures::executor::block_on;
 use kvengine::SnapAccess;
+use kvenginepb::ChangeSet;
 use kvproto::kvrpcpb::{Mutation, Op};
 use pd_client::PdClient;
-use test_cloud_server::{try_wait, ServerCluster};
+use protobuf::Message;
+use test_cloud_server::{must_wait, try_wait, ServerCluster};
+use test_util::init_log_for_test;
 use tikv::storage::{txn::CloudStoreScanner, Scanner};
 use tikv_util::config::ReadableSize;
 use txn_types::{Key, TsSet};
@@ -144,6 +148,54 @@ fn test_cloud_store_reverse_scan() {
         }
         assert!(scanner.next().unwrap().is_none());
     }
+}
+
+#[test]
+fn test_snap_marshal() {
+    test_snap_marshal_with_opt(true);
+    test_snap_marshal_with_opt(false);
+}
+
+fn test_snap_marshal_with_opt(enable_inner_key_offset: bool) {
+    init_log_for_test();
+    let node_id = alloc_node_id();
+    let mut cluster = ServerCluster::new(vec![node_id], |_, conf| {
+        conf.enable_inner_key_offset = enable_inner_key_offset;
+    });
+    let mut client = cluster.new_client();
+    let keyspace_id_array = api_version::ApiV2::get_keyspace_id("x123".as_bytes());
+    let keyspace_id = api_version::ApiV2::get_u32_keyspace_id(keyspace_id_array);
+    client.split_keyspace(keyspace_id);
+    client.put_kv(0..100, i_to_key, i_to_val);
+    client.put_kv(100..200, i_to_key, i_to_val);
+    let region_id = client.get_region_id(&i_to_key(0));
+    let kvengine = cluster.get_kvengine(node_id);
+    let check_table_count = |start: Bytes, end: Bytes, check_l0: bool| -> bool {
+        let snap = kvengine.get_snap_access(region_id).unwrap();
+        let (_, cs_bin) = snap.marshal(&[(start, end)], false, false);
+        let mut cs = ChangeSet::default();
+        cs.merge_from_bytes(&cs_bin).unwrap();
+        let cs_snap = cs.get_snapshot();
+        if check_l0 {
+            !cs_snap.get_l0_creates().is_empty()
+        } else {
+            !cs_snap.get_table_creates().is_empty()
+        }
+    };
+    must_wait(
+        || check_table_count(Bytes::from(i_to_key(0)), Bytes::from(i_to_key(500)), true),
+        10,
+        "snapshot table count is zero",
+    );
+    client.put_kv(200..300, i_to_key, i_to_val);
+    client.put_kv(300..400, i_to_key, i_to_val);
+    client.put_kv(400..500, i_to_key, i_to_val);
+    must_wait(
+        || check_table_count(Bytes::from("x123"), Bytes::from("x124"), false),
+        10,
+        "snapshot table count is zero",
+    );
+    cluster.stop();
 }
 
 #[test]
