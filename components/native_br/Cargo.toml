@@ -52,3 +52,8 @@ tikv-client = { version = "0.1.0", git = "http://github.com/tikv/client-rust.git
 tikv_util = { workspace = true }
 tokio = { version = "1.12", features = ["full"] }
 url = "2"
+
+[dev-dependencies]
+tempfile = "3.0"
+test_cloud_server = { workspace = true }
+test_util = { workspace = true }

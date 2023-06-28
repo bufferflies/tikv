@@ -1,6 +1,7 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
+    cmp,
     collections::HashMap,
     convert::Infallible,
     io::SeekFrom,
@@ -14,13 +15,15 @@ use std::{
 };
 
 use bytes::Buf;
+use chrono::{DateTime, Utc};
 use futures::{future::ok, StreamExt, TryStreamExt};
+use glob::glob;
 use hyper::{
     header::HeaderValue,
     service::{make_service_fn, service_fn},
     Body, HeaderMap, Method, Request, Response, Server, StatusCode,
 };
-use kvengine::dfs::Tagging;
+use kvengine::dfs::{ListObjectContent, ListObjects, Tagging, STORAGE_CLASS_DEFAULT};
 use rand::Rng;
 use tikv_util::{debug, error, info, time::Instant};
 use tokio::{
@@ -314,6 +317,94 @@ impl ObjectStorageService {
         Ok(Response::default())
     }
 
+    fn is_list_objects_request(req: &Request<Body>) -> bool {
+        if let Some(query) = req.uri().query() {
+            form_urlencoded::parse(query.as_bytes()).any(|(k, _)| k == "list-type")
+        } else {
+            false
+        }
+    }
+
+    /// Ref: https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html
+    ///
+    /// list-type: must be 2.
+    ///
+    /// prefix: list keys begin with `prefix`, e.g. `backup/`.
+    ///
+    /// start-after: list keys after `start-after` key, e.g.
+    /// `backup/20230701/000000.meta`.
+    ///
+    /// Note: "bucket" should not be included in key.
+    async fn handle_list_objects(
+        ctx: Arc<Mutex<ServiceContext>>,
+        req: Request<Body>,
+    ) -> Result<Response<Body>> {
+        let query = req.uri().query().unwrap();
+        let params = form_urlencoded::parse(query.as_bytes())
+            .into_owned()
+            .collect::<HashMap<String, String>>();
+        info!("handle_list_objects: request: {:?}", params);
+
+        assert_eq!(params.get("list-type").unwrap(), "2"); // Support ListObjectsV2 only.
+        let prefix = params.get("prefix").cloned().unwrap_or_default();
+        let start_after = params.get("start-after");
+        let max_keys = params
+            .get("max-keys")
+            .map(|x| x.parse::<usize>().unwrap())
+            .unwrap_or(1000);
+
+        let path = ctx.lock().unwrap().store_path.to_owned();
+        let bucket_path = Self::make_file_path(&path, req.uri().path());
+        let list_path = bucket_path.join(prefix);
+        let list_pattern = list_path.to_str().unwrap().to_owned() + "*";
+
+        let mut files = vec![];
+        let mut add_file = |file: PathBuf| {
+            files.push(file);
+        };
+        glob(&list_pattern) // use `glob` to support prefix when it's not a directory.
+            .unwrap_or_else(|e| panic!("invalid pattern {}, {:?}", list_pattern, e))
+            .filter_map(|x| x.ok())
+            .for_each(|x| visit_path(x, &mut add_file));
+        files.sort_unstable();
+        let start = if let Some(start_after) = start_after {
+            let start_after = bucket_path.join(start_after);
+            files
+                .iter()
+                .position(|x| x > &start_after)
+                .unwrap_or(files.len())
+        } else {
+            0
+        };
+
+        let end = cmp::min(start + max_keys, files.len());
+        let contents = files[start..end]
+            .iter()
+            .map(|x| {
+                let metadata = x.metadata().unwrap();
+                let last_modified: DateTime<Utc> = metadata.modified().unwrap().into();
+                ListObjectContent {
+                    key: x
+                        .strip_prefix(&bucket_path)
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .to_owned(),
+                    last_modified: last_modified.to_rfc3339(),
+                    storage_class: STORAGE_CLASS_DEFAULT.to_owned(),
+                    size: metadata.len(),
+                }
+            })
+            .collect::<Vec<_>>();
+        let list_objects = ListObjects {
+            contents,
+            is_truncated: end < files.len(),
+        };
+        info!("handle_list_objects: result: {:?}", list_objects);
+        let list_objects_xml = quick_xml::se::to_string(&list_objects).unwrap();
+        Ok(Response::new(Body::from(list_objects_xml)))
+    }
+
     async fn service(ctx: Arc<Mutex<ServiceContext>>, req: Request<Body>) -> HttpResult {
         let res: Result<Response<Body>> = match *req.method() {
             Method::PUT if Self::is_copy_object_request(&req) => {
@@ -325,6 +416,9 @@ impl ObjectStorageService {
             Method::PUT => Self::handle_put_object(ctx, req).await,
             Method::GET if Self::is_tagging_object_request(&req) => {
                 Self::handle_get_object_tag(ctx, req)
+            }
+            Method::GET if Self::is_list_objects_request(&req) => {
+                Self::handle_list_objects(ctx, req).await
             }
             Method::GET => Self::handle_get_object(ctx, req).await,
             Method::DELETE if Self::is_tagging_object_request(&req) => {
@@ -404,6 +498,17 @@ impl ObjectStorageService {
             close_tx.send(()).unwrap();
             self.runtime.block_on(async { handle.await.unwrap() })
         }
+    }
+}
+
+// Ref: https://doc.rust-lang.org/std/fs/fn.read_dir.html
+fn visit_path(path: PathBuf, cb: &mut dyn FnMut(PathBuf)) {
+    if path.is_dir() {
+        for entry in std::fs::read_dir(&path).unwrap() {
+            visit_path(entry.unwrap().path(), cb);
+        }
+    } else {
+        cb(path);
     }
 }
 
@@ -541,6 +646,127 @@ mod tests {
         }
 
         runtime.block_on(futures::future::join_all(handles));
+        oss.shutdown();
+    }
+
+    #[test]
+    fn test_oss_list_objects() {
+        test_util::init_log_for_test();
+
+        let base_dir = tempfile::Builder::new()
+            .prefix("test_oss_list_objects_")
+            .tempdir()
+            .unwrap();
+
+        let mut oss = ObjectStorageService::new(base_dir.path());
+        oss.start_server();
+
+        let s3fs = S3Fs::new(
+            "pfx".to_string(),
+            format!("http://127.0.0.1:{}", oss.port()),
+            "admin".to_string(),
+            "admin".to_string(),
+            "local".to_string(),
+            "bkt".to_string(),
+        );
+
+        let prefix = s3fs.get_prefix();
+        s3fs.get_runtime().block_on(async {
+            {
+                let (objects, has_more, next_start_after) =
+                    s3fs.list("", None, None).await.unwrap();
+                assert!(objects.is_empty());
+                assert!(!has_more);
+                assert!(next_start_after.is_none());
+            }
+
+            let mut keys_a = Vec::new();
+            for i in 0..10 {
+                let key = format!("{}/A_{:04}.meta", prefix, i);
+                keys_a.push(key.clone());
+                s3fs.put_object(
+                    key.clone(),
+                    Bytes::from(b"x".repeat(i as usize).to_vec()),
+                    key,
+                )
+                .await
+                .unwrap();
+            }
+            let mut keys_b = Vec::new();
+            for i in 0..20 {
+                let key = format!("{}/B/{:04}.meta", prefix, i);
+                keys_b.push(key.clone());
+                s3fs.put_object(
+                    key.clone(),
+                    Bytes::from(b"xx".repeat(i as usize).to_vec()),
+                    key,
+                )
+                .await
+                .unwrap();
+            }
+
+            {
+                // list all
+                let (objects, has_more, next_start_after) =
+                    s3fs.list("", None, None).await.unwrap();
+                assert_eq!(objects.len(), 30);
+                assert!(!has_more);
+                assert!(next_start_after.is_none());
+                for i in 0..10 {
+                    assert_eq!(objects[i].key, keys_a[i]);
+                    assert_eq!(objects[i].size, i as u64);
+                    let _ = DateTime::parse_from_rfc3339(&objects[i].last_modified).unwrap();
+                }
+                for i in 0..20 {
+                    assert_eq!(objects[i + 10].key, keys_b[i]);
+                    assert_eq!(objects[i + 10].size, (i + i) as u64);
+                    let _ = DateTime::parse_from_rfc3339(&objects[i + 10].last_modified).unwrap();
+                }
+            }
+
+            {
+                // list with prefix
+                let (objects, has_more, ..) = s3fs.list("", Some("B/"), None).await.unwrap();
+                assert_eq!(objects.len(), 20);
+                assert!(!has_more);
+                for i in 0..20 {
+                    assert_eq!(objects[i].key, keys_b[i]);
+                }
+            }
+
+            {
+                // list with prefix & start_after
+                let (objects, has_more, ..) =
+                    s3fs.list("0009.meta", Some("B/"), None).await.unwrap();
+                assert_eq!(objects.len(), 10);
+                assert!(!has_more);
+                for i in 10..20 {
+                    assert_eq!(objects[i - 10].key, keys_b[i]);
+                }
+            }
+
+            {
+                // list with prefix & start_after & max_keys
+                let mut start_after = "0009.meta".to_string();
+                let mut objects = vec![];
+                loop {
+                    let (mut objs, _, next_start_after) =
+                        s3fs.list(&start_after, Some("B/"), Some(3)).await.unwrap();
+                    assert!(objs.len() <= 3);
+                    objects.append(&mut objs);
+                    if let Some(next) = next_start_after {
+                        start_after = next;
+                    } else {
+                        break;
+                    }
+                }
+                assert_eq!(objects.len(), 10);
+                for i in 10..20 {
+                    assert_eq!(objects[i - 10].key, keys_b[i]);
+                }
+            }
+        });
+
         oss.shutdown();
     }
 }

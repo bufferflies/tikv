@@ -958,10 +958,6 @@ impl NativeBrManger {
             max_count,
         )
         .await?;
-        let backups = backups
-            .into_iter()
-            .filter_map(|file_path| IncrementalBackupFile::try_from_full_path(&file_path))
-            .collect::<Vec<_>>();
         Ok((backups, has_more))
     }
 

@@ -214,6 +214,9 @@ pub fn backup_cluster_with_ts(
         dfs_conf.s3_bucket,
     );
     let mut cluster_backup_meta = if let Some(meta) = last_backup_meta {
+        // Cluster topology may be changed between two loop, so it's necessary to check
+        // consistency.
+        check_backup_meta_consistency(&meta, &stores)?;
         meta
     } else if !incremental {
         ClusterBackupMeta::new()
@@ -362,7 +365,7 @@ pub async fn get_all_incremental_backups(
     start_date: &chrono::Date<Utc>,
     start_time: Option<&NaiveTime>,
     max_count: usize,
-) -> dfs::Result<(Vec<String>, bool)> {
+) -> dfs::Result<(Vec<IncrementalBackupFile>, bool)> {
     let mut files = Vec::with_capacity(std::cmp::min(max_count, 1000));
     let mut start_key = format!(
         "{}/{}",
@@ -375,10 +378,14 @@ pub async fn get_all_incremental_backups(
 
     let mut reach_limit = false;
     loop {
-        match s3fs.list(&start_key, Some(prefix)).await {
+        // TODO: pass in `max_count` for limit.
+        match s3fs.list(&start_key, Some(prefix), None).await {
             Ok((backup_files, more, next_start_after)) => {
-                let mut file_keys = backup_files.into_iter().map(|f| f.key).collect::<Vec<_>>();
-                files.append(&mut file_keys);
+                let mut inc_files = backup_files
+                    .into_iter()
+                    .filter_map(|f| IncrementalBackupFile::try_from_full_path(&f.key))
+                    .collect::<Vec<_>>();
+                files.append(&mut inc_files);
                 if files.len() > max_count {
                     files.truncate(max_count);
                     reach_limit = true;
@@ -403,13 +410,14 @@ async fn get_latest_backup_meta(s3fs: &S3Fs, cluster_id: u64) -> Result<ClusterB
     if files.is_empty() {
         return Err(Error::MetaNotFound(cluster_id));
     }
-    // Incremental backup file name is generated with `backup_file_full_path`.
-    // The last should be the latest one in most cases.
+    // Incremental backup file name is generated with `backup_file_full_path` named
+    // by creation time. The last should be the latest one.
     let last_file = files.last().unwrap();
+    let full_path = last_file.full_path(&s3fs.get_prefix());
     let object = s3fs
         .get_object(
-            last_file.clone(),
-            last_file.clone(),
+            full_path.clone(),
+            full_path.clone(),
             engine_traits::GetObjectOptions::default(),
         )
         .await?;
@@ -421,7 +429,7 @@ async fn get_latest_backup_meta(s3fs: &S3Fs, cluster_id: u64) -> Result<ClusterB
     info!(
         "Get cluster {} latest backup meta {}, store cnt {}",
         meta.cluster_id,
-        last_file,
+        full_path,
         meta.stores.len()
     );
     Ok(meta)
@@ -628,8 +636,10 @@ impl Default for IncrementalBackupFile {
 #[cfg(test)]
 mod tests {
     use chrono::{DateTime, NaiveDateTime, Utc};
+    use kvengine::dfs::Dfs;
     use kvproto::metapb::Store;
     use rfenginepb::{ChangeSet, ClusterBackupMeta, StoreBackupMeta, WalChunk};
+    use test_cloud_server::oss::ObjectStorageService;
 
     use super::*;
 
@@ -744,5 +754,71 @@ mod tests {
 
         let backup2 = IncrementalBackupFile::from_id(backup.id());
         assert_eq!(backup, backup2);
+    }
+
+    #[test]
+    fn test_get_latest_backup_meta() {
+        test_util::init_log_for_test();
+
+        let base_dir = tempfile::Builder::new()
+            .prefix("test_get_latest_backup_meta_")
+            .tempdir()
+            .unwrap();
+
+        let mut oss = ObjectStorageService::new(base_dir.path());
+        oss.start_server();
+
+        let s3fs = S3Fs::new(
+            "pfx".to_string(),
+            format!("http://127.0.0.1:{}", oss.port()),
+            "admin".to_string(),
+            "admin".to_string(),
+            "local".to_string(),
+            "bkt".to_string(),
+        );
+
+        // Use cluster_id to distinguish with different backup meta.
+        const CLUSTER_ID_INCREMENTAL: u64 = 1;
+        const CLUSTER_ID_MANUAL: u64 = 2;
+
+        let prefix = s3fs.get_prefix();
+        s3fs.get_runtime().block_on(async {
+            {
+                let mut backup_meta = ClusterBackupMeta::new();
+                backup_meta.set_cluster_id(CLUSTER_ID_INCREMENTAL);
+                let backup_key = backup_file_full_path(prefix.clone(), "".to_string());
+                let backup_data = Bytes::from(backup_meta.write_to_bytes().unwrap());
+                s3fs.put_object(backup_key.clone(), backup_data, backup_key)
+                    .await
+                    .unwrap();
+            }
+
+            {
+                // Write manual backup file named as "check_table".
+                // See https://github.com/tidbcloud/cloud-storage-engine/issues/867.
+                let mut backup_meta = ClusterBackupMeta::new();
+                backup_meta.set_cluster_id(CLUSTER_ID_MANUAL);
+                let backup_key = backup_file_full_path(prefix.clone(), "check_table".to_string());
+                let backup_data = Bytes::from(backup_meta.write_to_bytes().unwrap());
+                s3fs.put_object(backup_key.clone(), backup_data, backup_key)
+                    .await
+                    .unwrap();
+            }
+
+            // `check_table` will be the latest one if we don't filter incremental backup
+            // metas.
+            let (objects, ..) = s3fs.list("", Some("backup/"), None).await.unwrap();
+            assert_eq!(objects.len(), 2);
+            assert_eq!(
+                objects.last().unwrap().key,
+                format!("{}/backup/check_table", prefix)
+            );
+
+            let _ = get_latest_backup_meta(&s3fs, CLUSTER_ID_INCREMENTAL)
+                .await
+                .unwrap();
+        });
+
+        oss.shutdown();
     }
 }

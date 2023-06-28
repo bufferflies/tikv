@@ -272,6 +272,7 @@ impl S3FsCore {
         &self,
         start_after: &str,
         prefix: Option<&str>,
+        max_keys: Option<u32>,
     ) -> crate::dfs::Result<(
         Vec<ListObjectContent>,
         bool,           // has_more. Deprecated, use `next_start_after`
@@ -286,6 +287,9 @@ impl S3FsCore {
             params.put("list-type", "2");
             params.put("start-after", &start_after);
             params.put("prefix", &prefix);
+            if let Some(max_keys) = max_keys {
+                params.put("max-keys", &max_keys.to_string());
+            }
             req.set_params(params);
             let mut result = self.dispatch(req, ListObjectsV2Error::from_response).await;
             if result.is_ok() {
@@ -909,9 +913,9 @@ impl Dfs for S3Fs {
 #[derive(Default, Debug, Serialize, Deserialize)]
 #[serde(default)]
 #[serde(rename_all = "PascalCase")]
-struct ListObjects {
-    contents: Vec<ListObjectContent>,
-    is_truncated: bool,
+pub struct ListObjects {
+    pub contents: Vec<ListObjectContent>,
+    pub is_truncated: bool,
 }
 
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
