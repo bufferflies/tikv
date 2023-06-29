@@ -16,6 +16,7 @@ fn test_remove_peer_after_split() {
     let mut client = cluster.new_client();
     client.put_kv(0..100, i_to_key, i_to_val);
     let pd_client = cluster.get_pd_client();
+    pd_client.disable_default_operator();
 
     // Splits the region and blocks flushing initial, so that the parent region
     // always has dependents.

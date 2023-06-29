@@ -3,6 +3,7 @@
 use std::{
     collections::HashMap,
     env,
+    iter::Iterator,
     ops::Deref,
     path::Path,
     sync::{atomic::AtomicU64, Arc},
@@ -307,23 +308,30 @@ fn test_truncate_ts() {
     init_logger();
     let (engine, applier_tx) = new_test_engine();
 
-    let set_truncate_ts = |ts: u64| {
+    // `tolerate_none`: set `true` when there is no data to be truncated.
+    // In this scene, truncate ts may have been done before we check
+    // `ShardData.truncate_ts`.
+    let set_truncate_ts = |ts: u64, tolerate_none: bool| {
         let mut wb = WriteBatch::new(1);
         let truncate_ts = TruncateTs::from(ts);
         wb.set_property(TRUNCATE_TS_KEY, truncate_ts.marshal().as_slice());
         write_data(wb, &applier_tx);
-        assert_eq!(
-            Some(truncate_ts),
-            engine.get_shard(1).unwrap().get_data().truncate_ts
-        );
-        assert_eq!(
-            truncate_ts.marshal().as_slice(),
-            engine
-                .get_shard(1)
-                .unwrap()
-                .get_property(TRUNCATE_TS_KEY)
-                .unwrap()
-        );
+
+        let res = engine.get_shard(1).unwrap().get_data().truncate_ts;
+        if res.is_none() && tolerate_none {
+            return;
+        }
+        assert_eq!(Some(truncate_ts), res);
+
+        let res_bin = engine
+            .get_shard(1)
+            .unwrap()
+            .get_property(TRUNCATE_TS_KEY)
+            .unwrap();
+        if res_bin.is_empty() && tolerate_none {
+            return;
+        }
+        assert_eq!(truncate_ts.marshal().as_slice(), res_bin);
     };
 
     let wait_for_truncate_ts = || {
@@ -372,7 +380,7 @@ fn test_truncate_ts() {
 
     {
         // No truncate.
-        set_truncate_ts(3000);
+        set_truncate_ts(3000, true);
         thread::sleep(Duration::from_secs(1));
         wait_for_truncate_ts();
         check_get(
@@ -427,8 +435,8 @@ fn test_truncate_ts() {
         );
     }
 
-    for truncate_ts in [2999, 2000] {
-        set_truncate_ts(truncate_ts);
+    for (i, truncate_ts) in [2999, 2000].iter().enumerate() {
+        set_truncate_ts(*truncate_ts as u64, i > 0);
         wait_for_truncate_ts();
         check_get(
             0,
@@ -472,8 +480,8 @@ fn test_truncate_ts() {
         );
     }
 
-    for truncate_ts in [1999, 1000] {
-        set_truncate_ts(truncate_ts as u64);
+    for (i, truncate_ts) in [1999, 1000].iter().enumerate() {
+        set_truncate_ts(*truncate_ts as u64, i > 0);
         wait_for_truncate_ts();
         check_get(
             0,
@@ -499,7 +507,7 @@ fn test_truncate_ts() {
 
     {
         // Truncate all.
-        set_truncate_ts(999);
+        set_truncate_ts(999, false);
         wait_for_truncate_ts();
         check_get(
             0,

@@ -1208,7 +1208,7 @@ impl TestPdClient {
 
     pub fn must_split_region(
         &self,
-        region: metapb::Region,
+        mut region: metapb::Region,
         policy: pdpb::CheckPolicy,
         keys: Vec<Vec<u8>>,
     ) {
@@ -1218,11 +1218,16 @@ impl TestPdClient {
             } else {
                 1
             };
-        self.split_region(region.clone(), policy, keys);
-        for _ in 1..500 {
+        self.split_region(region.clone(), policy, keys.clone());
+        for i in 1..500 {
             sleep_ms(10);
             if self.get_regions_number() == expect_region_count {
                 return;
+            }
+            if i % 50 == 0 {
+                // Region epoch may have been changed. Refresh every 500ms.
+                region = block_on(self.must_get_region_by_id(region.get_id())).unwrap();
+                self.split_region(region.clone(), policy, keys.clone());
             }
         }
         panic!("region {:?} is still not split.", region);
@@ -1466,6 +1471,21 @@ impl TestPdClient {
 
     pub fn get_all_regions(&self) -> Vec<metapb::Region> {
         self.cluster.rl().regions.values().cloned().collect()
+    }
+
+    fn must_get_region_by_id(&self, region_id: u64) -> PdFuture<metapb::Region> {
+        self.check_bootstrap().unwrap();
+        let region = self
+            .cluster
+            .rl()
+            .get_region_by_id(region_id)
+            .unwrap_or_else(|e| {
+                panic!("failed to get region {}: {:?}", region_id, e);
+            })
+            .unwrap_or_else(|| {
+                panic!("region {} not found", region_id);
+            });
+        Box::pin(ok(region))
     }
 }
 
