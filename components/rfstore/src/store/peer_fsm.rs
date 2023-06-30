@@ -1462,7 +1462,12 @@ impl<'a> PeerMsgHandler<'a> {
             );
             return;
         }
-        self.peer.raft_group.on_persist_ready(ready.ready_number);
+
+        // If peer is set `pending_remove`, no need to update persist index.
+        if !self.peer.pending_remove {
+            self.peer.raft_group.on_persist_ready(ready.ready_number);
+        }
+
         let store = self.peer.mut_store();
         let is_snapshot_ready = store
             .restored_snapshot
