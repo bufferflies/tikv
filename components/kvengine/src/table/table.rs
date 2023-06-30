@@ -1,12 +1,12 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{io, mem::size_of, ptr, result, slice};
+use std::{io, mem::size_of, ops::Deref, ptr, result, slice};
 
 use byteorder::{ByteOrder, LittleEndian};
 use thiserror::Error;
 
 use super::blobtable::BlobRef;
-use crate::dfs;
+use crate::{dfs, GLOBAL_SHARD_END_KEY};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Row {
@@ -28,9 +28,9 @@ pub trait Iterator: Send {
 
     fn rewind(&mut self);
 
-    fn seek(&mut self, key: &[u8]);
+    fn seek(&mut self, key: InnerKey<'_>);
 
-    fn key(&self) -> &[u8];
+    fn key(&self) -> InnerKey<'_>;
 
     fn value(&self) -> Value;
 
@@ -306,10 +306,10 @@ impl Iterator for EmptyIterator {
 
     fn rewind(&mut self) {}
 
-    fn seek(&mut self, _: &[u8]) {}
+    fn seek(&mut self, _: InnerKey<'_>) {}
 
-    fn key(&self) -> &[u8] {
-        &[]
+    fn key(&self) -> InnerKey<'_> {
+        InnerKey { key: &[] }
     }
 
     fn value(&self) -> Value {
@@ -426,5 +426,42 @@ pub fn new_merge_iterator<'a>(
             let second_it = new_merge_iterator(second, reverse);
             new_merge_iterator(vec![first_it, second_it], reverse)
         }
+    }
+}
+
+#[derive(Clone, Copy, PartialOrd, PartialEq, Ord, Eq, Debug)]
+pub struct InnerKey<'a> {
+    key: &'a [u8],
+}
+
+impl<'a> InnerKey<'a> {
+    pub fn from_inner_buf(key: &'a [u8]) -> Self {
+        Self { key }
+    }
+
+    pub fn from_outer_key<'b: 'a>(outer_key: &'b [u8], inner_offset: usize) -> Self {
+        debug_assert!(inner_offset <= outer_key.len());
+        let key = &outer_key[inner_offset..];
+        Self { key }
+    }
+
+    pub fn from_outer_end_key<'b: 'a>(outer_end_key: &'b [u8], inner_offset: usize) -> Self {
+        debug_assert!(inner_offset <= outer_end_key.len());
+        if outer_end_key.len() == inner_offset {
+            Self {
+                key: GLOBAL_SHARD_END_KEY,
+            }
+        } else {
+            let key = &outer_end_key[inner_offset..];
+            Self { key }
+        }
+    }
+}
+
+impl Deref for InnerKey<'_> {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        self.key
     }
 }

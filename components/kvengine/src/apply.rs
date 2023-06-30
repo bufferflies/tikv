@@ -17,6 +17,7 @@ use crate::{
         blobtable::blobtable::BlobTable,
         memtable::CfTable,
         sstable::{BlockCacheKey, L0Table, LocalFile, SsTable},
+        InnerKey,
     },
     *,
 };
@@ -284,7 +285,10 @@ impl EngineCore {
                 return;
             }
             for create in comp.get_table_creates() {
-                let cover = shard.cover_full_table(&create.smallest, &create.biggest);
+                let cover = shard.cover_full_table(
+                    InnerKey::from_inner_buf(&create.smallest),
+                    InnerKey::from_inner_buf(&create.biggest),
+                );
                 del_files.insert(create.id, cover);
             }
             self.remove_dfs_files(shard, del_files);
@@ -340,14 +344,16 @@ impl EngineCore {
         let mut del_file_is_subrange = HashMap::new();
         if comp.conflicted {
             for sst_create in comp.get_sstable_change().get_table_creates() {
-                let is_subrange =
-                    shard.cover_full_table(sst_create.get_smallest(), sst_create.get_biggest());
+                let is_subrange = shard.cover_full_table(
+                    InnerKey::from_inner_buf(sst_create.get_smallest()),
+                    InnerKey::from_inner_buf(sst_create.get_biggest()),
+                );
                 del_file_is_subrange.insert(sst_create.get_id(), is_subrange);
             }
             for blob_tbl_create in comp.get_new_blob_tables() {
                 let is_subrange = shard.cover_full_table(
-                    blob_tbl_create.get_smallest(),
-                    blob_tbl_create.get_biggest(),
+                    InnerKey::from_inner_buf(blob_tbl_create.get_smallest()),
+                    InnerKey::from_inner_buf(blob_tbl_create.get_biggest()),
                 );
                 del_file_is_subrange.insert(blob_tbl_create.get_id(), is_subrange);
             }
@@ -413,7 +419,7 @@ impl EngineCore {
                         }
                     }
                 }
-                tables.sort_by(|a, b| a.smallest().cmp(b.smallest()));
+                tables.sort_by(|a, b| a.smallest().cmp(&b.smallest()));
                 let lh = LevelHandler::new(level, tables);
                 new_cfs[cf].set_level(lh);
             }
@@ -492,7 +498,7 @@ impl EngineCore {
                         .into_iter()
                         .map(|id| cs.ln_tables.get(&id).unwrap().clone()),
                 );
-                new_level_tables.sort_by(|a, b| a.smallest().cmp(b.smallest()));
+                new_level_tables.sort_by(|a, b| a.smallest().cmp(&b.smallest()));
                 let new_level = LevelHandler::new(level, new_level_tables);
                 new_cfs[cf].set_level(new_level);
             }
@@ -623,7 +629,7 @@ impl EngineCore {
                     new_level_tables.push(new_tbl);
                 }
             }
-            new_level_tables.sort_by(|a, b| a.smallest().cmp(b.smallest()));
+            new_level_tables.sort_by(|a, b| a.smallest().cmp(&b.smallest()));
         }
         let new_level = LevelHandler::new(level, new_level_tables);
         new_level.check_order(cf, shard.tag());

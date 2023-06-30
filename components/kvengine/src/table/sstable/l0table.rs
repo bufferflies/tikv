@@ -9,7 +9,7 @@ use moka::sync::SegmentedCache;
 use super::*;
 use crate::{
     max_ts_by_cf,
-    table::{blobtable::BlobRef, table::Result, Value},
+    table::{blobtable::BlobRef, table::Result, InnerKey, Value},
     LOCK_CF, NUM_CFS, WRITE_CF,
 };
 
@@ -128,15 +128,15 @@ impl L0TableCore {
             if let Some(cf_tbl) = &cfs[i] {
                 let smallest = cf_tbl.smallest();
                 if !smallest.is_empty()
-                    && (smallest_buf.is_empty() || smallest_buf.chunk() > smallest)
+                    && (smallest_buf.is_empty() || smallest_buf.chunk() > smallest.deref())
                 {
                     smallest_buf.truncate(0);
-                    smallest_buf.extend_from_slice(smallest);
+                    smallest_buf.extend_from_slice(smallest.deref());
                 }
                 let biggest = cf_tbl.biggest();
-                if biggest > biggest_buf.chunk() {
+                if biggest.deref() > biggest_buf.chunk() {
                     biggest_buf.truncate(0);
-                    biggest_buf.extend_from_slice(biggest);
+                    biggest_buf.extend_from_slice(biggest.deref());
                 }
                 max_ts = max_ts_by_cf(max_ts, i, cf_tbl.max_ts);
             }
@@ -180,19 +180,19 @@ impl L0TableCore {
         self.kv_size
     }
 
-    pub fn smallest(&self) -> &[u8] {
-        self.smallest.chunk()
+    pub fn smallest(&self) -> InnerKey<'_> {
+        InnerKey::from_inner_buf(self.smallest.chunk())
     }
 
-    pub fn biggest(&self) -> &[u8] {
-        self.biggest.chunk()
+    pub fn biggest(&self) -> InnerKey<'_> {
+        InnerKey::from_inner_buf(self.biggest.chunk())
     }
 
     pub fn version(&self) -> u64 {
         self.footer.version
     }
 
-    pub fn has_data_in_range(&self, start: &[u8], end: &[u8]) -> bool {
+    pub fn has_data_in_range(&self, start: InnerKey<'_>, end: InnerKey<'_>) -> bool {
         if self.smallest() >= end || self.biggest() < start {
             return false;
         }
@@ -229,7 +229,13 @@ impl L0Builder {
         }
     }
 
-    pub fn add(&mut self, cf: usize, key: &[u8], val: &Value, external_link: Option<BlobRef>) {
+    pub fn add(
+        &mut self,
+        cf: usize,
+        key: InnerKey<'_>,
+        val: &Value,
+        external_link: Option<BlobRef>,
+    ) {
         self.builders[cf].add(key, val, external_link);
         self.count += 1;
     }

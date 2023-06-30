@@ -1,6 +1,6 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{convert::TryFrom, mem, slice};
+use std::{convert::TryFrom, mem, ops::Deref, slice};
 
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, BufMut, BytesMut};
@@ -8,7 +8,7 @@ use farmhash;
 use xorf::BinaryFuse8;
 
 use super::super::table::Value;
-use crate::table::{blobtable::BlobRef, BIT_HAS_OLD_VERSION, VALUE_VERSION_LEN};
+use crate::table::{blobtable::BlobRef, InnerKey, BIT_HAS_OLD_VERSION, VALUE_VERSION_LEN};
 
 pub const CRC32C: u8 = 1;
 pub const PROP_KEY_SMALLEST: &str = "smallest";
@@ -165,7 +165,8 @@ impl Builder {
         buf.put_slice(val);
     }
 
-    pub fn add(&mut self, key: &[u8], val: &Value, blob_ref: Option<BlobRef>) {
+    pub fn add(&mut self, inner_key: InnerKey<'_>, val: &Value, blob_ref: Option<BlobRef>) {
+        let key = inner_key.deref();
         if self.block_builder.same_last_key(key) {
             self.block_builder
                 .set_last_entry_old_ver_if_zero(val.version);

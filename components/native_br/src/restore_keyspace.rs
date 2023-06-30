@@ -6,6 +6,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     default::Default,
     fmt, mem, ops,
+    ops::Deref,
     path::{Path, PathBuf},
     str::FromStr,
     sync::{Arc, RwLock},
@@ -19,7 +20,7 @@ use file_system::{IoRateLimitMode, IoRateLimiter};
 use http::{Request, Uri};
 use hyper::Body;
 use itertools::Itertools;
-use kvengine::{dfs::S3Fs, get_inner_end_key, IdVer, ShardMeta, ShardRange, ShardStats, ShardTag};
+use kvengine::{dfs::S3Fs, table::InnerKey, IdVer, ShardMeta, ShardRange, ShardStats, ShardTag};
 use kvenginepb as pb;
 use kvproto::{metapb, metapb::PeerRole, raft_serverpb::MergeState};
 use pd_client::PdClient;
@@ -486,11 +487,11 @@ impl BackupShard {
         &self.meta.range.outer_end
     }
 
-    pub fn inner_start(&self) -> &[u8] {
+    pub fn inner_start(&self) -> InnerKey<'_> {
         self.meta.range.inner_start()
     }
 
-    pub fn inner_end(&self) -> &[u8] {
+    pub fn inner_end(&self) -> InnerKey<'_> {
         self.meta.range.inner_end()
     }
 
@@ -1367,7 +1368,7 @@ impl BackupCluster {
         // NOTE: use inner_key to check overlapping, target_regions may belongs to
         // a new keyspace.
         let key_in_shard = |key: &[u8], shard: &BackupShard| {
-            let inner_key = &key[inner_key_off..];
+            let inner_key = InnerKey::from_outer_key(key, inner_key_off);
             inner_key >= shard.inner_start() && inner_key < shard.inner_end()
         };
 
@@ -1379,8 +1380,8 @@ impl BackupCluster {
             if idx > 0 && key_in_shard(target_region.get_start_key(), get_backup_shard(idx - 1)) {
                 idx -= 1;
             }
-
-            let target_inner_end = get_inner_end_key(target_region.get_end_key(), inner_key_off);
+            let target_inner_end =
+                InnerKey::from_outer_end_key(target_region.get_end_key(), inner_key_off);
             let mut aligned_shards_id = vec![];
             while idx < sorted_backup_shards_id.len()
                 && get_backup_shard(idx).inner_start() < target_inner_end
@@ -1427,13 +1428,13 @@ impl BackupCluster {
                 shard.end().to_vec()
             );
             let mut split_key = keyspace_prefix.to_vec();
-            let inner_start = shard.meta.range.inner_start();
+            let inner_start = shard.inner_start();
 
             // Skip the keyspace boundary key.
             if inner_start.is_empty() {
                 continue;
             }
-            split_key.extend_from_slice(inner_start);
+            split_key.extend_from_slice(inner_start.deref());
 
             split_keys.push(split_key);
         }
@@ -1461,7 +1462,7 @@ impl BackupCluster {
             for shard_id in region.backup_shards_id {
                 let shard = self.get_shard(shard_id).unwrap();
                 for (&file_id, file_meta) in shard.meta.all_files() {
-                    if meta.overlap_table(file_meta.smallest.as_ref(), file_meta.biggest.as_ref()) {
+                    if meta.overlap_table(file_meta.smallest(), file_meta.biggest()) {
                         meta.add_file(
                             file_id,
                             file_meta.cf as i32,

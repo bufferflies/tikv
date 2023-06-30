@@ -23,7 +23,7 @@ use crate::{
     table::{
         memtable::CfTable,
         sstable::{InMemFile, SsTable},
-        BIT_DELETE,
+        InnerKey, BIT_DELETE,
     },
     *,
 };
@@ -112,7 +112,7 @@ fn test_destroy_range() {
     load_data(10, 50, 1, applier_tx.clone(), engine.opts.min_blob_size);
     // Unsafe destroy keys [10, 30).
     for prefix in [10, 20] {
-        let mut wb = WriteBatch::new(1);
+        let mut wb = WriteBatch::new(1, 0);
         let key = i_to_key(prefix, engine.opts.min_blob_size);
         wb.set_property(DEL_PREFIXES_KEY, key[..key.len() - 1].as_bytes());
         write_data(wb, &applier_tx);
@@ -184,7 +184,7 @@ fn test_destroy_range() {
             applier_tx.clone(),
             engine.opts.min_blob_size,
         );
-        let mut wb = WriteBatch::new(1);
+        let mut wb = WriteBatch::new(1, 0);
         wb.set_switch_mem_table();
         write_data(wb, &applier_tx);
     }
@@ -197,7 +197,7 @@ fn test_destroy_range() {
     }
     assert!(engine.get_shard_stat(1).l0_table_count < 10);
     // Unsafe destroy keys [100, 150).
-    let mut wb = WriteBatch::new(1);
+    let mut wb = WriteBatch::new(1, 0);
     let key = i_to_key(100, engine.opts.min_blob_size);
     wb.set_property(DEL_PREFIXES_KEY, key[..key.len() - 2].as_bytes());
     write_data(wb, &applier_tx);
@@ -224,7 +224,7 @@ fn test_destroy_range() {
     );
 
     // Clean all data.
-    let mut wb = WriteBatch::new(1);
+    let mut wb = WriteBatch::new(1, 0);
     wb.set_property(DEL_PREFIXES_KEY, b"key");
     write_data(wb, &applier_tx);
     wait_for_destroying_range();
@@ -240,7 +240,7 @@ fn test_destroy_range() {
     );
 
     // No data exists and delete-prefixes can be cleaned too.
-    let mut wb = WriteBatch::new(1);
+    let mut wb = WriteBatch::new(1, 0);
     wb.set_property(DEL_PREFIXES_KEY, b"key");
     write_data(wb, &applier_tx);
     wait_for_destroying_range();
@@ -260,7 +260,7 @@ fn test_truncate_ts_request() {
         engine.opts.min_blob_size,
     );
     // truncate ts.
-    let mut wb = WriteBatch::new(1);
+    let mut wb = WriteBatch::new(1, 0);
     let truncate_ts = TruncateTs::from(version + 10);
     wb.set_property(TRUNCATE_TS_KEY, truncate_ts.marshal().as_slice());
     write_data(wb, &applier_tx);
@@ -312,7 +312,7 @@ fn test_truncate_ts() {
     // In this scene, truncate ts may have been done before we check
     // `ShardData.truncate_ts`.
     let set_truncate_ts = |ts: u64, tolerate_none: bool| {
-        let mut wb = WriteBatch::new(1);
+        let mut wb = WriteBatch::new(1, 0);
         let truncate_ts = TruncateTs::from(ts);
         wb.set_property(TRUNCATE_TS_KEY, truncate_ts.marshal().as_slice());
         write_data(wb, &applier_tx);
@@ -548,7 +548,7 @@ fn test_lost_tombstone_issue() {
                 let val_str = key.repeat(2);
                 table::Value::new_with_meta_version(0, version, 0, val_str.as_bytes())
             };
-            builder.add(key.as_bytes(), &val, None);
+            builder.add(InnerKey::from_inner_buf(key.as_bytes()), &val, None);
         }
         let mut data_buf = BytesMut::new();
         builder.finish(0, &mut data_buf);
@@ -891,7 +891,7 @@ fn load_data(
     tx: mpsc::Sender<ApplyTask>,
     min_blob_size: u32,
 ) {
-    let mut wb = WriteBatch::new(1);
+    let mut wb = WriteBatch::new(1, 0);
     for i in begin..end {
         let key = i_to_key(i as i32, min_blob_size);
         for cf in 0..3 {
@@ -902,7 +902,7 @@ fn load_data(
         if i % 100 == 99 {
             info!("load data {}:{}", i - 99, i);
             write_data(wb, &tx);
-            wb = WriteBatch::new(1);
+            wb = WriteBatch::new(1, 0);
             thread::sleep(Duration::from_millis(10));
         }
     }
@@ -994,7 +994,7 @@ fn check_iterater(begin: usize, end: usize, en: &Engine) {
 fn get_shard_for_key(key: &[u8], en: &Engine) -> Arc<Shard> {
     for id in 1_u64..=5 {
         if let Some(shard) = en.get_shard(id) {
-            if shard.overlap_key(key) {
+            if shard.overlap_key(InnerKey::from_inner_buf(key)) {
                 return shard;
             }
         }

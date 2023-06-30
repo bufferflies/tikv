@@ -72,7 +72,7 @@ impl SsTable {
     // slice of it.
     pub fn get(
         &self,
-        key: &[u8],
+        key: InnerKey<'_>,
         version: u64,
         key_hash: u64,
         out_val_owner: &mut Vec<u8>,
@@ -112,11 +112,11 @@ impl SsTable {
         Value::decode(out_val_owner.as_slice())
     }
 
-    pub fn has_overlap(&self, start: &[u8], end: &[u8], include_end: bool) -> bool {
+    pub fn has_overlap(&self, start: InnerKey<'_>, end: InnerKey<'_>, include_end: bool) -> bool {
         if start > self.biggest() {
             return false;
         }
-        match end.cmp(self.smallest()) {
+        match end.cmp(&self.smallest()) {
             Ordering::Less => {
                 return false;
             }
@@ -130,7 +130,7 @@ impl SsTable {
         if !it.valid() {
             return it.error().is_some();
         }
-        match it.key().cmp(end) {
+        match it.key().cmp(&end) {
             Ordering::Greater => false,
             Ordering::Equal => include_end,
             _ => true,
@@ -139,7 +139,7 @@ impl SsTable {
 
     pub fn get_newer(
         &self,
-        key: &[u8],
+        key: InnerKey<'_>,
         version: u64,
         key_hash: u64,
         out_val_owner: &mut Vec<u8>,
@@ -443,12 +443,12 @@ impl SsTableCore {
         }
     }
 
-    pub fn smallest(&self) -> &[u8] {
-        self.smallest_buf.chunk()
+    pub fn smallest(&self) -> InnerKey<'_> {
+        InnerKey::from_inner_buf(self.smallest_buf.chunk())
     }
 
-    pub fn biggest(&self) -> &[u8] {
-        self.biggest_buf.chunk()
+    pub fn biggest(&self) -> InnerKey<'_> {
+        InnerKey::from_inner_buf(self.biggest_buf.chunk())
     }
 
     pub fn get_suggest_split_key(&self) -> Option<Bytes> {
@@ -646,7 +646,7 @@ pub(crate) fn build_test_table_with_kvs(kvs: &Vec<(String, String)>, load_filter
     for (k, v) in kvs {
         let value_buf = Value::encode_buf(meta, &[0], 0, v.as_bytes());
         let value = &mut Value::decode(value_buf.as_slice());
-        sst_builder.add(k.as_bytes(), value, None);
+        sst_builder.add(InnerKey::from_inner_buf(k.as_bytes()), value, None);
     }
 
     let mut buf = BytesMut::with_capacity(sst_builder.estimated_size());
@@ -710,13 +710,21 @@ mod tests {
         for (k, v) in &kvs {
             let val_str = format!("{}_{}", v, 9);
             let val_buf = Value::encode_buf(meta, &[0], 9, val_str.as_bytes());
-            sst_builder.add(k.as_bytes(), &Value::decode(val_buf.as_slice()), None);
+            sst_builder.add(
+                InnerKey::from_inner_buf(k.as_bytes()),
+                &Value::decode(val_buf.as_slice()),
+                None,
+            );
             let mut r = rand::thread_rng();
             for i in (1..=8).rev() {
                 if r.gen_range(0..4) == 0usize {
                     let val_str = format!("{}_{}", v, i);
                     let val_buf = Value::encode_buf(meta, &[0], i, val_str.as_bytes());
-                    sst_builder.add(k.as_bytes(), &Value::decode(val_buf.as_slice()), None);
+                    sst_builder.add(
+                        InnerKey::from_inner_buf(k.as_bytes()),
+                        &Value::decode(val_buf.as_slice()),
+                        None,
+                    );
                     all_cnt += 1;
                 }
             }
@@ -739,7 +747,7 @@ mod tests {
             it.rewind();
             while it.valid() {
                 let k = it.key();
-                assert_eq!(k, get_test_key("key", count).as_bytes());
+                assert_eq!(k.deref(), get_test_key("key", count).as_bytes());
                 let v = it.value();
                 assert_eq!(v.get_value(), get_test_value(count).as_bytes());
                 count += 1;
@@ -755,14 +763,26 @@ mod tests {
             let k = get_test_key("key", i);
             let k_h = farmhash::fingerprint64(k.as_bytes());
             let mut owned_v = vec![];
-            let v = t.get(k.as_bytes(), u64::MAX, k_h, &mut owned_v, 1);
+            let v = t.get(
+                InnerKey::from_inner_buf(k.as_bytes()),
+                u64::MAX,
+                k_h,
+                &mut owned_v,
+                1,
+            );
             assert!(!v.is_empty())
         }
         for i in 8000..10000 {
             let k = get_test_key("key", i);
             let k_h = farmhash::fingerprint64(k.as_bytes());
             let mut owned_v = vec![];
-            let v = t.get(k.as_bytes(), u64::MAX, k_h, &mut owned_v, 1);
+            let v = t.get(
+                InnerKey::from_inner_buf(k.as_bytes()),
+                u64::MAX,
+                k_h,
+                &mut owned_v,
+                1,
+            );
             assert!(v.is_empty())
         }
     }
@@ -831,13 +851,13 @@ mod tests {
         let (t, _) = create_sst_table("k", 10000, true);
         let mut it = t.new_iterator(false, true);
         for td in test_datas {
-            it.seek(td.input.as_bytes());
+            it.seek(InnerKey::from_inner_buf(td.input.as_bytes()));
             if !td.valid {
                 assert!(!it.valid());
                 continue;
             }
             assert!(it.valid());
-            assert_eq!(it.key(), td.output.as_bytes());
+            assert_eq!(it.key().deref(), td.output.as_bytes());
         }
     }
 
@@ -855,13 +875,13 @@ mod tests {
         let (t, _) = create_sst_table("k", 10000, true);
         let mut it = t.new_iterator(true, true);
         for td in test_datas {
-            it.seek(td.input.as_bytes());
+            it.seek(InnerKey::from_inner_buf(td.input.as_bytes()));
             if !td.valid {
                 assert!(!it.valid());
                 continue;
             }
             assert!(it.valid());
-            assert_eq!(it.key(), td.output.as_bytes());
+            assert_eq!(it.key().deref(), td.output.as_bytes());
         }
     }
 
@@ -876,7 +896,7 @@ mod tests {
             assert!(it.valid());
             while it.valid() {
                 let k = it.key();
-                assert_eq!(k, get_test_key("key", count).as_bytes());
+                assert_eq!(k.deref(), get_test_key("key", count).as_bytes());
                 let v = it.value();
                 assert_eq!(v.get_value(), get_test_value(count).as_bytes());
                 assert!(!v.is_blob_ref());
@@ -892,7 +912,7 @@ mod tests {
         for n in nums {
             let (t, _) = create_sst_table("key", n, true);
             let mut it = t.new_iterator(true, true);
-            it.seek("zzzzzz".as_bytes()); // Seek to end, an invalid element.
+            it.seek(InnerKey::from_inner_buf("zzzzzz".as_bytes())); // Seek to end, an invalid element.
             assert!(it.valid());
             it.rewind();
             for i in (0..n).rev() {
@@ -913,20 +933,22 @@ mod tests {
         let mut it = t.new_iterator(false, true);
         let mut kid = 1010_usize;
         let seek = get_test_key("key", kid);
-        it.seek(seek.as_bytes());
+        it.seek(InnerKey::from_inner_buf(seek.as_bytes()));
         while it.valid() {
-            assert_eq!(it.key(), get_test_key("key", kid).as_bytes());
+            assert_eq!(it.key().deref(), get_test_key("key", kid).as_bytes());
             kid += 1;
             it.next()
         }
         assert_eq!(kid, 10000);
 
-        it.seek(get_test_key("key", 99999).as_bytes());
+        it.seek(InnerKey::from_inner_buf(
+            get_test_key("key", 99999).as_bytes(),
+        ));
         assert!(!it.valid());
 
-        it.seek(get_test_key("kex", 0).as_bytes());
+        it.seek(InnerKey::from_inner_buf(get_test_key("kex", 0).as_bytes()));
         assert!(it.valid());
-        assert_eq!(it.key(), get_test_key("key", 0).as_bytes());
+        assert_eq!(it.key().deref(), get_test_key("key", 0).as_bytes());
     }
 
     #[test]
@@ -934,34 +956,36 @@ mod tests {
         let (t, _) = create_sst_table("key", 10000, true);
         let seek = get_test_key("key", 1010);
         let mut it = t.new_iterator(false, true);
-        it.seek(seek.as_bytes());
+        it.seek(InnerKey::from_inner_buf(seek.as_bytes()));
         assert!(it.valid());
-        assert_eq!(it.key(), seek.as_bytes());
+        assert_eq!(it.key().deref(), seek.as_bytes());
 
         it.set_reversed(true);
         it.next();
         it.next();
         assert!(it.valid());
-        assert_eq!(it.key(), get_test_key("key", 1008).as_bytes());
+        assert_eq!(it.key().deref(), get_test_key("key", 1008).as_bytes());
 
         it.set_reversed(false);
         it.next();
         it.next();
         assert_eq!(it.valid(), true);
-        assert_eq!(it.key(), get_test_key("key", 1010).as_bytes());
+        assert_eq!(it.key().deref(), get_test_key("key", 1010).as_bytes());
 
-        it.seek(get_test_key("key", 2000).as_bytes());
+        it.seek(InnerKey::from_inner_buf(
+            get_test_key("key", 2000).as_bytes(),
+        ));
         assert_eq!(it.valid(), true);
-        assert_eq!(it.key(), get_test_key("key", 2000).as_bytes());
+        assert_eq!(it.key().deref(), get_test_key("key", 2000).as_bytes());
 
         it.set_reversed(true);
         it.next();
         assert_eq!(it.valid(), true);
-        assert_eq!(it.key(), get_test_key("key", 1999).as_bytes());
+        assert_eq!(it.key().deref(), get_test_key("key", 1999).as_bytes());
 
         it.set_reversed(false);
         it.rewind();
-        assert_eq!(it.key(), get_test_key("key", 0).as_bytes());
+        assert_eq!(it.key().deref(), get_test_key("key", 0).as_bytes());
     }
 
     #[test]
@@ -975,10 +999,10 @@ mod tests {
         it.rewind();
         while it.valid() {
             if !last_key.is_empty() {
-                assert!(last_key < it.key());
+                assert!(last_key < it.key().deref());
             }
             last_key.truncate(0);
-            last_key.extend_from_slice(it.key());
+            last_key.extend_from_slice(it.key().deref());
             it_cnt += 1;
             while it.next_version() {
                 it_cnt += 1;
@@ -992,7 +1016,13 @@ mod tests {
             let ver = 5 + r.gen_range(0..5) as u64;
             let k_h = farmhash::fingerprint64(k.as_bytes());
             let mut owned_v = vec![];
-            let val = t.get(k.as_bytes(), ver, k_h, &mut owned_v, 1);
+            let val = t.get(
+                InnerKey::from_inner_buf(k.as_bytes()),
+                ver,
+                k_h,
+                &mut owned_v,
+                1,
+            );
             if !val.is_empty() {
                 assert!(val.version <= ver);
             }
@@ -1002,21 +1032,21 @@ mod tests {
         rev_it.rewind();
         while rev_it.valid() {
             if !last_key.is_empty() {
-                assert!(last_key > rev_it.key());
+                assert!(last_key > rev_it.key().deref());
             }
             last_key.truncate(0);
-            last_key.extend_from_slice(rev_it.key());
+            last_key.extend_from_slice(rev_it.key().deref());
             rev_it.next();
         }
         for _ in 0..1000 {
             let k = get_test_key("key", r.gen_range(0..num));
             // reverse iterator never seek to the same key with smaller version.
-            rev_it.seek(k.as_bytes());
+            rev_it.seek(InnerKey::from_inner_buf(k.as_bytes()));
             if !rev_it.valid() {
                 continue;
             }
             assert_eq!(rev_it.value().version, 9);
-            assert!(rev_it.key() <= k.as_bytes());
+            assert!(rev_it.key().deref() <= k.as_bytes());
         }
     }
 

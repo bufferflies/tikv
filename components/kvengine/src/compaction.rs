@@ -6,7 +6,7 @@ use std::{
     collections::{HashMap, HashSet},
     hash::Hash,
     iter::Iterator as StdIterator,
-    ops::Sub,
+    ops::{Deref, Sub},
     sync::{atomic::Ordering, Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -25,6 +25,7 @@ use crate::{
         blobtable::{blobtable::BlobTable, builder::BlobTableBuilder},
         search,
         sstable::{self, InMemFile, L0Builder, SsTable, NO_COMPRESSION},
+        InnerKey,
     },
     Error::{FallbackLocalCompactorDisabled, IncompatibleRemoteCompactor, RemoteCompaction},
     Iterator, EXTRA_CF, LOCK_CF, WRITE_CF, *,
@@ -362,15 +363,12 @@ pub struct CompactionRequest {
 }
 
 impl CompactionRequest {
-    pub fn inner_start(&self) -> &[u8] {
-        &self.outer_start[self.inner_key_off..]
+    pub fn inner_start(&self) -> InnerKey<'_> {
+        InnerKey::from_outer_key(&self.outer_start, self.inner_key_off)
     }
 
-    pub fn inner_end(&self) -> &[u8] {
-        if self.inner_key_off == self.outer_end.len() {
-            return GLOBAL_SHARD_END_KEY;
-        }
-        &self.outer_end[self.inner_key_off..]
+    pub fn inner_end(&self) -> InnerKey<'_> {
+        InnerKey::from_outer_end_key(&self.outer_end, self.inner_key_off)
     }
 }
 
@@ -586,7 +584,7 @@ impl Engine {
             }
         }
         data.for_each_level(|cf, lh| {
-            for t in lh.tables.iter() {
+            for t in lh.tables.as_slice() {
                 if data.del_prefixes.cover_range(t.smallest(), t.biggest()) {
                     let mut delete = pb::TableDelete::default();
                     delete.set_id(t.id());
@@ -789,13 +787,13 @@ impl Engine {
         // Tables that are partially over bound.
         let mut overlaps = vec![];
         for (&id, f) in &meta.files {
-            if meta.entirely_over_bound_table(&f.smallest, &f.biggest) {
+            if meta.entirely_over_bound_table(f.smallest(), f.biggest()) {
                 let mut delete = pb::TableDelete::default();
                 delete.set_id(id);
                 delete.set_level(f.level as u32);
                 delete.set_cf(f.cf as i32);
                 deletes.push(delete);
-            } else if meta.partially_over_bound_table(&f.smallest, &f.biggest) {
+            } else if meta.partially_over_bound_table(f.smallest(), f.biggest()) {
                 overlaps.push((id, f.level as u32, f.cf as i32));
             }
         }
@@ -1245,22 +1243,34 @@ pub(crate) struct KeyRange {
 }
 
 impl KeyRange {
+    pub(crate) fn left_key(&self) -> InnerKey<'_> {
+        InnerKey::from_inner_buf(&self.left)
+    }
+
+    pub(crate) fn right_key(&self) -> InnerKey<'_> {
+        InnerKey::from_inner_buf(&self.right)
+    }
+
     pub(crate) fn update(&mut self, tables: &[SsTable]) {
         if tables.is_empty() {
             return;
         }
         let lower_smallest = tables.first().unwrap().smallest();
-        if self.left.is_empty() || lower_smallest < self.left.chunk() {
-            self.left = Bytes::copy_from_slice(lower_smallest);
+        if self.left.is_empty() || lower_smallest < self.left_key() {
+            self.left = Bytes::copy_from_slice(lower_smallest.deref());
         }
         let lower_biggest = tables.last().unwrap().biggest();
-        if lower_biggest > self.right.chunk() {
-            self.right = Bytes::copy_from_slice(lower_biggest);
+        if lower_biggest > self.right_key() {
+            self.right = Bytes::copy_from_slice(lower_biggest.deref());
         }
     }
 }
 
-pub(crate) fn get_tables_in_range(tables: &[SsTable], start: &[u8], end: &[u8]) -> (usize, usize) {
+pub(crate) fn get_tables_in_range(
+    tables: &[SsTable],
+    start: InnerKey<'_>,
+    end: InnerKey<'_>,
+) -> (usize, usize) {
     let left = search(tables.len(), |i| start <= tables[i].biggest());
     let right = search(tables.len(), |i| end < tables[i].smallest());
     (left, right)
@@ -1280,7 +1290,7 @@ pub(crate) fn compact_l0(
         let bot_ids = &req.multi_cf_bottoms[cf];
         let bot_files = load_table_files(bot_ids, fs.clone(), opts)?;
         let mut bot_tbls = in_mem_files_to_tables(bot_files);
-        bot_tbls.sort_by(|a, b| a.smallest().cmp(b.smallest()));
+        bot_tbls.sort_by(|a, b| a.smallest().cmp(&b.smallest()));
         mult_cf_bot_tbls.push(bot_tbls);
     }
 
@@ -1391,7 +1401,7 @@ fn build_compact_l0_iterator(
     cf: usize,
     top_tbls: Vec<sstable::L0Table>,
     bot_tbls: Vec<sstable::SsTable>,
-    start: &[u8],
+    start: InnerKey<'_>,
 ) -> Box<dyn table::Iterator> {
     let mut iters: Vec<Box<dyn table::Iterator>> = vec![];
     for top_tbl in top_tbls {
@@ -1445,23 +1455,23 @@ impl CompactL0Helper {
             let key = iter.key();
             // See if we need to skip this key.
             if !self.skip_key.is_empty() {
-                if key == self.skip_key {
+                if key.deref() == self.skip_key {
                     iter.next_all_version();
                     continue;
                 } else {
                     self.skip_key.clear();
                 }
             }
-            if key != self.last_key {
+            if key.deref() != self.last_key {
                 // We only break on table size.
                 if self.builder.estimated_size() > self.max_table_size {
                     break;
                 }
-                if key >= self.end.as_slice() {
+                if key.deref() >= self.end.as_slice() {
                     break;
                 }
                 self.last_key.clear();
-                self.last_key.extend_from_slice(key);
+                self.last_key.extend_from_slice(key.deref());
             }
 
             // Only consider the versions which are below the safeTS, otherwise, we might
@@ -1472,7 +1482,7 @@ impl CompactL0Helper {
                 // key is the latest readable version of this key, so we simply discard all the
                 // rest of the versions.
                 self.skip_key.clear();
-                self.skip_key.extend_from_slice(key);
+                self.skip_key.extend_from_slice(key.deref());
                 if !val.is_deleted() {
                     match filter(self.safe_ts, self.cf, val) {
                         Decision::Keep => {}
@@ -1523,10 +1533,10 @@ pub(crate) fn compact_tables(
     let opts = dfs::Options::new(req.shard_id, req.shard_ver);
     let top_files = load_table_files(&req.tops, fs.clone(), opts)?;
     let mut top_tables = in_mem_files_to_tables(top_files);
-    top_tables.sort_by(|a, b| a.smallest().cmp(b.smallest()));
+    top_tables.sort_by(|a, b| a.smallest().cmp(&b.smallest()));
     let bot_files = load_table_files(&req.bottoms, fs.clone(), opts)?;
     let mut bot_tables = in_mem_files_to_tables(bot_files);
-    bot_tables.sort_by(|a, b| a.smallest().cmp(b.smallest()));
+    bot_tables.sort_by(|a, b| a.smallest().cmp(&b.smallest()));
     let top_iter = Box::new(ConcatIterator::new_with_tables(top_tables, false, false));
     let bot_iter = Box::new(ConcatIterator::new_with_tables(bot_tables, false, false));
     let mut iter = table::new_merge_iterator(vec![top_iter, bot_iter], false);
@@ -1561,14 +1571,14 @@ pub(crate) fn compact_tables(
             let kv_size = val.encoded_size() + key.len();
             // See if we need to skip this key.
             if !skip_key.is_empty() {
-                if key == skip_key {
+                if key.deref() == skip_key {
                     iter.next_all_version();
                     continue;
                 } else {
                     skip_key.clear();
                 }
             }
-            if key != last_key {
+            if key.deref() != last_key {
                 if !last_key.is_empty() && builder.estimated_size() + kv_size > req.max_table_size {
                     break;
                 }
@@ -1577,7 +1587,7 @@ pub(crate) fn compact_tables(
                     break;
                 }
                 last_key.clear();
-                last_key.extend_from_slice(key);
+                last_key.extend_from_slice(key.deref());
             }
 
             // Only consider the versions which are below the minReadTs, otherwise, we might
@@ -1587,7 +1597,7 @@ pub(crate) fn compact_tables(
                 // key is the latest readable version of this key, so we simply discard all the
                 // rest of the versions.
                 skip_key.clear();
-                skip_key.extend_from_slice(key);
+                skip_key.extend_from_slice(key.deref());
 
                 if val.is_deleted() {
                     // If this key range has overlap with lower levels, then keep the deletion
@@ -2336,8 +2346,8 @@ fn persist_blob_table(
 fn compact_for_cf(
     shard_id: u64,
     iter: &mut Box<dyn Iterator>,
-    start: &[u8],
-    end: &[u8],
+    start: InnerKey<'_>,
+    end: InnerKey<'_>,
     safe_ts: u64,
     fs: Arc<dyn dfs::Dfs>,
     opts: dfs::Options,
@@ -2394,7 +2404,7 @@ fn compact_for_cf(
         let mut val = iter.value();
         let key = iter.key();
         // See if we need to skip this key.
-        if key == last_key {
+        if key.deref() == last_key {
             if skip_same_key {
                 iter.next_all_version();
                 continue;
@@ -2437,7 +2447,7 @@ fn compact_for_cf(
                 }
             }
             last_key.clear();
-            last_key.extend_from_slice(key);
+            last_key.extend_from_slice(key.deref());
             skip_same_key = false;
         }
 
@@ -2601,7 +2611,7 @@ fn l0_compact_v3(
         let l1_ids = &l0_compaction.multi_cf_l1_tables[cf];
         let l1_files = load_table_files(l1_ids, fs.clone(), opts)?;
         let mut l1_tbls = in_mem_files_to_tables(l1_files);
-        l1_tbls.sort_by(|a, b| a.smallest().cmp(b.smallest()));
+        l1_tbls.sort_by(|a, b| a.smallest().cmp(&b.smallest()));
         let mut iters: Vec<Box<dyn table::Iterator>> = vec![];
         for l0_tbl in &l0_tbls {
             if let Some(tbl) = l0_tbl.get_cf(cf) {
@@ -2649,10 +2659,10 @@ fn l1_plus_compact_v3(
     let opts = dfs::Options::new(req.shard_id, req.shard_ver);
     let upper_files = load_table_files(&l1_plus_compaction.upper_level, fs.clone(), opts)?;
     let mut upper_tables = in_mem_files_to_tables(upper_files);
-    upper_tables.sort_by(|a, b| a.smallest().cmp(b.smallest()));
+    upper_tables.sort_by(|a, b| a.smallest().cmp(&b.smallest()));
     let lower_files = load_table_files(&l1_plus_compaction.lower_level, fs.clone(), opts)?;
     let mut lower_tables = in_mem_files_to_tables(lower_files);
-    lower_tables.sort_by(|a, b| a.smallest().cmp(b.smallest()));
+    lower_tables.sort_by(|a, b| a.smallest().cmp(&b.smallest()));
     let upper_iter = Box::new(ConcatIterator::new_with_tables(upper_tables, false, false));
     let lower_iter = Box::new(ConcatIterator::new_with_tables(lower_tables, false, false));
     let mut iter = table::new_merge_iterator(vec![upper_iter, lower_iter], false);
@@ -2727,7 +2737,7 @@ fn major_compact_v3(
                 });
                 let files = load_table_files(table_ids, fs.clone(), opts)?;
                 let mut tables = in_mem_files_to_tables(files);
-                tables.sort_by(|a, b| a.smallest().cmp(b.smallest()));
+                tables.sort_by(|a, b| a.smallest().cmp(&b.smallest()));
                 let level_concat_iter =
                     Box::new(ConcatIterator::new_with_tables(tables, false, false));
                 iters.push(level_concat_iter);

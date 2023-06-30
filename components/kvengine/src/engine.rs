@@ -30,6 +30,7 @@ use crate::{
     table::{
         memtable::CfTable,
         sstable::{BlockCacheKey, MAGIC_NUMBER, ZSTD_COMPRESSION},
+        InnerKey,
     },
     *,
 };
@@ -485,7 +486,6 @@ impl EngineCore {
         meta: ShardMeta,
     ) -> Result<kvenginepb::ChangeSet> {
         let shard = self.get_shard_with_ver(shard_id, shard_ver)?;
-        let inner_key_off = shard.inner_key_off;
         let l0_version = shard.load_mem_table_version();
         let mut cs = new_change_set(shard_id, shard_ver);
         let ingest_files = cs.mut_ingest_files();
@@ -521,13 +521,16 @@ impl EngineCore {
             let id = fids.pop().unwrap();
             builder.reset(id);
             while iter.valid() {
-                builder.add(&iter.key()[inner_key_off..], &iter.value(), None);
+                builder.add(iter.key(), &iter.value(), None);
                 iter.next();
                 if builder.estimated_size() > max_table_size || !iter.valid() {
                     info!("builder estimated_size {}", builder.estimated_size());
                     let mut buf = BytesMut::with_capacity(builder.estimated_size());
                     let res = builder.finish(0, &mut buf);
-                    let level = meta.get_ingest_level(&res.smallest, &res.biggest);
+                    let level = meta.get_ingest_level(
+                        InnerKey::from_inner_buf(&res.smallest),
+                        InnerKey::from_inner_buf(&res.biggest),
+                    );
                     assert!(!is_blob_file(level));
                     if level == 0 {
                         let mut offsets = vec![buf.len() as u32; NUM_CFS];

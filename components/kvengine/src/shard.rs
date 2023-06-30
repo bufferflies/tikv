@@ -25,6 +25,7 @@ use crate::{
         memtable::{self, CfTable},
         search,
         sstable::{L0Table, SsTable},
+        InnerKey,
     },
     Iterator as TableIterator, *,
 };
@@ -308,9 +309,12 @@ impl Shard {
         }
         let tbl_idx = max_level.tables.len() * 2 / 3;
         Some(
-            [self.key_prefix(), max_level.tables[tbl_idx].smallest()]
-                .concat()
-                .into(),
+            [
+                self.key_prefix(),
+                max_level.tables[tbl_idx].smallest().deref(),
+            ]
+            .concat()
+            .into(),
         )
     }
 
@@ -337,22 +341,22 @@ impl Shard {
                 .skip(1)
                 .filter_map(|tbl| {
                     (self.overlap_key(tbl.smallest()))
-                        .then(|| [self.key_prefix(), tbl.smallest()].concat().into())
+                        .then(|| [self.key_prefix(), tbl.smallest().deref()].concat().into())
                 })
                 .collect(),
         )
     }
 
-    pub(crate) fn overlap_table(&self, smallest: &[u8], biggest: &[u8]) -> bool {
+    pub(crate) fn overlap_table(&self, smallest: InnerKey<'_>, biggest: InnerKey<'_>) -> bool {
         self.inner_start() <= biggest && smallest < self.inner_end()
     }
 
-    pub(crate) fn cover_full_table(&self, smallest: &[u8], biggest: &[u8]) -> bool {
+    pub(crate) fn cover_full_table(&self, smallest: InnerKey<'_>, biggest: InnerKey<'_>) -> bool {
         self.inner_start() <= smallest && biggest < self.inner_end()
     }
 
-    pub(crate) fn overlap_key(&self, key: &[u8]) -> bool {
-        self.inner_start() <= key && key < self.inner_end()
+    pub(crate) fn overlap_key(&self, inner_key: InnerKey<'_>) -> bool {
+        self.inner_start() <= inner_key && inner_key < self.inner_end()
     }
 
     pub fn get_property(&self, key: &str) -> Option<Bytes> {
@@ -567,15 +571,12 @@ impl Shard {
         self.set_data(new_data);
     }
 
-    pub(crate) fn inner_start(&self) -> &[u8] {
-        &self.outer_start[self.inner_key_off..]
+    pub(crate) fn inner_start(&self) -> InnerKey<'_> {
+        InnerKey::from_outer_key(&self.outer_start, self.inner_key_off)
     }
 
-    pub(crate) fn inner_end(&self) -> &[u8] {
-        if self.inner_key_off == self.outer_end.len() {
-            return GLOBAL_SHARD_END_KEY;
-        }
-        &self.outer_end[self.inner_key_off..]
+    pub(crate) fn inner_end(&self) -> InnerKey<'_> {
+        InnerKey::from_outer_end_key(&self.outer_end, self.inner_key_off)
     }
 
     pub(crate) fn key_prefix(&self) -> &[u8] {
@@ -584,14 +585,6 @@ impl Shard {
         }
         &[]
     }
-}
-
-// TODO: replace duplicated codes for getting inner end key.
-pub fn get_inner_end_key(outer_end_key: &[u8], inner_key_off: usize) -> &[u8] {
-    if inner_key_off == outer_end_key.len() {
-        return GLOBAL_SHARD_END_KEY;
-    }
-    &outer_end_key[inner_key_off..]
 }
 
 #[derive(Clone)]
@@ -783,7 +776,7 @@ impl ShardDataCore {
         is_bound && !self.cover_full_table(tbl.smallest(), tbl.biggest())
     }
 
-    pub(crate) fn cover_full_table(&self, smallest: &[u8], biggest: &[u8]) -> bool {
+    pub(crate) fn cover_full_table(&self, smallest: InnerKey<'_>, biggest: InnerKey<'_>) -> bool {
         self.inner_start() <= smallest && biggest < self.inner_end()
     }
 
@@ -836,7 +829,7 @@ impl ShardDataCore {
         for cf in 0..NUM_CFS {
             let scf = &self.cfs[cf];
             for level in &scf.levels {
-                if level.has_over_bound_data(self.inner_start().chunk(), self.inner_end().chunk()) {
+                if level.has_over_bound_data(self.inner_start(), self.inner_end()) {
                     return true;
                 }
             }
@@ -920,7 +913,7 @@ impl LevelHandlerBuilder {
 
     fn build(&mut self, level: usize) -> LevelHandler {
         let mut tables = self.tables.take().unwrap();
-        tables.sort_by(|a, b| a.smallest().cmp(b.smallest()));
+        tables.sort_by(|a, b| a.smallest().cmp(&b.smallest()));
         LevelHandler::new(level, tables)
     }
 
@@ -979,16 +972,12 @@ impl LevelHandler {
     }
 
     pub(crate) fn overlapping_tables(&self, key_range: &KeyRange) -> (usize, usize) {
-        get_tables_in_range(
-            &self.tables,
-            key_range.left.chunk(),
-            key_range.right.chunk(),
-        )
+        get_tables_in_range(&self.tables, key_range.left_key(), key_range.right_key())
     }
 
     pub fn get(
         &self,
-        key: &[u8],
+        key: InnerKey<'_>,
         version: u64,
         key_hash: u64,
         out_val_owner: &mut Vec<u8>,
@@ -998,7 +987,7 @@ impl LevelHandler {
 
     fn get_in_table(
         &self,
-        key: &[u8],
+        key: InnerKey<'_>,
         version: u64,
         key_hash: u64,
         tbl: Option<&SsTable>,
@@ -1011,7 +1000,7 @@ impl LevelHandler {
             .get(key, version, key_hash, out_val_owner, self.level)
     }
 
-    pub(crate) fn get_table(&self, key: &[u8]) -> Option<&SsTable> {
+    pub(crate) fn get_table(&self, key: InnerKey<'_>) -> Option<&SsTable> {
         let idx = search(self.tables.len(), |i| self.tables[i].biggest() >= key);
         if idx >= self.tables.len() {
             return None;
@@ -1058,7 +1047,7 @@ impl LevelHandler {
 
     pub(crate) fn get_newer(
         &self,
-        key: &[u8],
+        key: InnerKey<'_>,
         version: u64,
         key_hash: u64,
         out_val_owner: &mut Vec<u8>,
@@ -1072,7 +1061,7 @@ impl LevelHandler {
         table::Value::new()
     }
 
-    pub(crate) fn has_over_bound_data(&self, start: &[u8], end: &[u8]) -> bool {
+    pub(crate) fn has_over_bound_data(&self, start: InnerKey<'_>, end: InnerKey<'_>) -> bool {
         if self.tables.is_empty() {
             return false;
         }
@@ -1285,44 +1274,44 @@ impl DeletePrefixes {
         }
     }
 
-    pub(crate) fn cover_prefix(&self, inner_prefix: &[u8]) -> bool {
+    pub(crate) fn cover_prefix(&self, inner_prefix: InnerKey<'_>) -> bool {
         let inner_key_off = self.inner_key_off;
         self.prefixes.iter().any(|p| {
             if inner_key_off >= p.len() {
                 return true;
             }
-            let inner_p = &p[inner_key_off..];
-            inner_prefix.starts_with(inner_p)
+            let inner_p = InnerKey::from_outer_key(p, inner_key_off);
+            inner_prefix.starts_with(inner_p.deref())
         })
     }
 
-    pub(crate) fn cover_range(&self, inner_start: &[u8], inner_end: &[u8]) -> bool {
+    pub(crate) fn cover_range(&self, inner_start: InnerKey<'_>, inner_end: InnerKey<'_>) -> bool {
         let inner_key_off = self.inner_key_off;
         self.prefixes.iter().any(|p| {
             if inner_key_off >= p.len() {
                 return true;
             }
-            let inner_p = &p[inner_key_off..];
-            inner_start.starts_with(inner_p) && inner_end.starts_with(inner_p)
+            let inner_p = InnerKey::from_outer_key(p, inner_key_off);
+            inner_start.starts_with(inner_p.deref()) && inner_end.starts_with(inner_p.deref())
         })
     }
 
-    pub(crate) fn inner_delete_ranges(&self) -> impl Iterator<Item = (&[u8], &[u8])> {
+    pub(crate) fn inner_delete_ranges(&self) -> impl Iterator<Item = (InnerKey<'_>, InnerKey<'_>)> {
         let inner_key_off = self.inner_key_off;
         self.prefixes
             .iter()
             .map(move |p| {
                 if inner_key_off >= p.len() {
-                    &[]
+                    InnerKey::from_inner_buf(&[])
                 } else {
-                    &p[inner_key_off..]
+                    InnerKey::from_outer_key(p, inner_key_off)
                 }
             })
             .zip(self.prefixes_nexts.iter().map(move |p| {
                 if inner_key_off >= p.len() {
-                    GLOBAL_SHARD_END_KEY
+                    InnerKey::from_inner_buf(GLOBAL_SHARD_END_KEY)
                 } else {
-                    &p[inner_key_off..]
+                    InnerKey::from_outer_end_key(p, inner_key_off)
                 }
             }))
     }
@@ -1385,15 +1374,12 @@ impl ShardRange {
         )
     }
 
-    pub fn inner_start(&self) -> &[u8] {
-        &self.outer_start[self.inner_key_off..]
+    pub fn inner_start(&self) -> InnerKey<'_> {
+        InnerKey::from_outer_key(&self.outer_start, self.inner_key_off)
     }
 
-    pub fn inner_end(&self) -> &[u8] {
-        if self.inner_key_off == self.outer_end.len() {
-            return GLOBAL_SHARD_END_KEY;
-        }
-        &self.outer_end[self.inner_key_off..]
+    pub fn inner_end(&self) -> InnerKey<'_> {
+        InnerKey::from_outer_end_key(&self.outer_end, self.inner_key_off)
     }
 
     pub(crate) fn prefix(&self) -> &[u8] {
@@ -1417,7 +1403,7 @@ mod tests {
                 assert!(del_prefix.inner_delete_ranges().all(|(p, p_n)| {
                     let mut p_c = p.to_vec();
                     tidb_query_common::util::convert_to_prefix_next(&mut p_c);
-                    p_c == p_n
+                    p_c == p_n.deref()
                 }));
             };
 
@@ -1429,11 +1415,11 @@ mod tests {
             assert_eq!(del_prefix.prefixes.len(), 1);
             assert_prefix_invariant(&del_prefix);
             for prefix in ["00001010", "0000101"] {
-                let inner_prefix = &prefix.as_bytes()[inner_key_off..];
+                let inner_prefix = InnerKey::from_outer_key(prefix.as_bytes(), inner_key_off);
                 assert!(del_prefix.cover_prefix(inner_prefix));
             }
             for prefix in ["000010", "0000103"] {
-                let inner_prefix = &prefix.as_bytes()[inner_key_off..];
+                let inner_prefix = InnerKey::from_outer_key(prefix.as_bytes(), inner_key_off);
                 assert!(!del_prefix.cover_prefix(inner_prefix));
             }
 
@@ -1444,11 +1430,11 @@ mod tests {
             assert_prefix_invariant(&del_prefix);
             assert_eq!(del_prefix.prefixes.len(), 2);
             for prefix in ["00001010", "0000101", "00001050", "0000105"] {
-                let inner_prefix = &prefix.as_bytes()[inner_key_off..];
+                let inner_prefix = InnerKey::from_outer_key(prefix.as_bytes(), inner_key_off);
                 assert!(del_prefix.cover_prefix(inner_prefix));
             }
             for prefix in ["000010", "0000103"] {
-                let inner_prefix = &prefix.as_bytes()[inner_key_off..];
+                let inner_prefix = InnerKey::from_outer_key(prefix.as_bytes(), inner_key_off);
                 assert!(!del_prefix.cover_prefix(inner_prefix));
             }
 
@@ -1456,11 +1442,11 @@ mod tests {
             assert_prefix_invariant(&del_prefix);
             assert_eq!(del_prefix.prefixes.len(), 1);
             for prefix in ["000010", "0000101", "0000103", "0000104"] {
-                let inner_prefix = &prefix.as_bytes()[inner_key_off..];
+                let inner_prefix = InnerKey::from_outer_key(prefix.as_bytes(), inner_key_off);
                 assert!(del_prefix.cover_prefix(inner_prefix));
             }
             for prefix in ["00001", "000011"] {
-                let inner_prefix = &prefix.as_bytes()[inner_key_off..];
+                let inner_prefix = InnerKey::from_outer_key(prefix.as_bytes(), inner_key_off);
                 assert!(!del_prefix.cover_prefix(inner_prefix));
             }
 
@@ -1469,8 +1455,8 @@ mod tests {
             del_prefix = del_prefix.merge("0000102".as_bytes());
             assert_prefix_invariant(&del_prefix);
             for (start, end) in [("0000101", "00001011"), ("0000102", "00001022")] {
-                let inner_start = &start.as_bytes()[inner_key_off..];
-                let inner_end = &end.as_bytes()[inner_key_off..];
+                let inner_start = InnerKey::from_outer_key(start.as_bytes(), inner_key_off);
+                let inner_end = InnerKey::from_outer_key(end.as_bytes(), inner_key_off);
                 assert!(del_prefix.cover_range(inner_start, inner_end));
             }
             for (start, end) in [
@@ -1478,8 +1464,8 @@ mod tests {
                 ("0000101", "0000102"),
                 ("0000102", "0000103"),
             ] {
-                let inner_start = &start.as_bytes()[inner_key_off..];
-                let inner_end = &end.as_bytes()[inner_key_off..];
+                let inner_start = InnerKey::from_outer_key(start.as_bytes(), inner_key_off);
+                let inner_end = InnerKey::from_outer_key(end.as_bytes(), inner_key_off);
                 assert!(!del_prefix.cover_range(inner_start, inner_end));
             }
 
@@ -1521,9 +1507,18 @@ mod tests {
             );
             assert_prefix_invariant(&del_prefix);
             assert_eq!(del_prefix.prefixes.len(), 2);
-            assert!(!del_prefix.cover_prefix(&"0000100".as_bytes()[inner_key_off..]));
-            assert!(del_prefix.cover_prefix(&"0000200".as_bytes()[inner_key_off..]));
-            assert!(del_prefix.cover_prefix(&"0000300".as_bytes()[inner_key_off..]));
+            assert!(!del_prefix.cover_prefix(InnerKey::from_outer_key(
+                "0000100".as_bytes(),
+                inner_key_off
+            )));
+            assert!(del_prefix.cover_prefix(InnerKey::from_outer_key(
+                "0000200".as_bytes(),
+                inner_key_off
+            )));
+            assert!(del_prefix.cover_prefix(InnerKey::from_outer_key(
+                "0000300".as_bytes(),
+                inner_key_off
+            )));
             del_prefix = del_prefix.split(
                 &DeletePrefixes::new_with_inner_key_off(inner_key_off)
                     .merge("0000200".as_bytes())
@@ -1531,9 +1526,18 @@ mod tests {
             );
             assert_prefix_invariant(&del_prefix);
             assert_eq!(del_prefix.prefixes.len(), 0);
-            assert!(!del_prefix.cover_prefix(&"0000100".as_bytes()[inner_key_off..]));
-            assert!(!del_prefix.cover_prefix(&"0000200".as_bytes()[inner_key_off..]));
-            assert!(!del_prefix.cover_prefix(&"0000300".as_bytes()[inner_key_off..]));
+            assert!(!del_prefix.cover_prefix(InnerKey::from_outer_key(
+                "0000100".as_bytes(),
+                inner_key_off
+            )));
+            assert!(!del_prefix.cover_prefix(InnerKey::from_outer_key(
+                "0000200".as_bytes(),
+                inner_key_off
+            )));
+            assert!(!del_prefix.cover_prefix(InnerKey::from_outer_key(
+                "0000300".as_bytes(),
+                inner_key_off
+            )));
         }
     }
 

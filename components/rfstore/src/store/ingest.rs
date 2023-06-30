@@ -5,7 +5,7 @@ use std::sync::Arc;
 use collections::HashMap;
 use engine_traits::{IterOptions, Iterator as TraitIterator, RefIterable, CF_DEFAULT, CF_WRITE};
 use kvengine::{
-    table::{table, Value},
+    table::{table, InnerKey, Value},
     ShardMeta, UserMeta,
 };
 use kvproto::raft_cmdpb::RaftCmdRequest;
@@ -22,7 +22,8 @@ pub(crate) fn convert_sst(
     info!("{} convert sst {:?}", shard_meta.tag(), req);
     let region_id = req.get_header().get_region_id();
     let region_ver = req.get_header().get_region_epoch().get_version();
-    let (ingest_id, entries_iter) = build_entries_iterator(&importer, req)?;
+    let (ingest_id, entries_iter) =
+        build_entries_iterator(&importer, req, shard_meta.range.inner_key_off)?;
     let cs = kv.build_ingest_files(
         region_id,
         region_ver,
@@ -60,6 +61,7 @@ fn collect_default_values(
 fn build_entries_iterator(
     importer: &SstImporter,
     req: &RaftCmdRequest,
+    inner_key_offset: usize,
 ) -> crate::Result<(Vec<u8>, EntriesIterator)> {
     let default_values = Arc::new(collect_default_values(importer, req)?);
     let mut sst_metas = vec![];
@@ -99,7 +101,7 @@ fn build_entries_iterator(
             iter.next()?;
         }
     }
-    Ok((ingest_id, EntriesIterator::new(entries)))
+    Ok((ingest_id, EntriesIterator::new(entries, inner_key_offset)))
 }
 
 struct Entry {
@@ -122,11 +124,16 @@ fn encode_table_value(user_meta: UserMeta, val: &[u8]) -> Vec<u8> {
 struct EntriesIterator {
     entries: Vec<Entry>,
     idx: usize,
+    inner_key_offset: usize,
 }
 
 impl EntriesIterator {
-    fn new(entries: Vec<Entry>) -> Self {
-        Self { entries, idx: 0 }
+    fn new(entries: Vec<Entry>, inner_key_offset: usize) -> Self {
+        Self {
+            entries,
+            idx: 0,
+            inner_key_offset,
+        }
     }
 }
 
@@ -143,12 +150,12 @@ impl table::Iterator for EntriesIterator {
         self.idx = 0;
     }
 
-    fn seek(&mut self, _key: &[u8]) {
+    fn seek(&mut self, _key: InnerKey<'_>) {
         unreachable!()
     }
 
-    fn key(&self) -> &[u8] {
-        &self.entries[self.idx].key
+    fn key(&self) -> InnerKey<'_> {
+        InnerKey::from_outer_key(&self.entries[self.idx].key, self.inner_key_offset)
     }
 
     fn value(&self) -> Value {

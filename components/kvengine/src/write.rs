@@ -6,7 +6,7 @@ use bytes::{Buf, BytesMut};
 use slog_global::info;
 
 use crate::{
-    table::{self, memtable},
+    table::{self, memtable, InnerKey},
     *,
 };
 
@@ -16,10 +16,11 @@ pub struct WriteBatch {
     properties: HashMap<String, BytesMut>,
     sequence: u64,
     switch_mem_table: bool,
+    inner_key_off: usize,
 }
 
 impl WriteBatch {
-    pub fn new(shard_id: u64) -> Self {
+    pub fn new(shard_id: u64, inner_key_off: usize) -> Self {
         let cf_batches = [
             memtable::WriteBatch::new(),
             memtable::WriteBatch::new(),
@@ -31,6 +32,7 @@ impl WriteBatch {
             properties: HashMap::new(),
             sequence: 1,
             switch_mem_table: false,
+            inner_key_off,
         }
     }
 
@@ -44,7 +46,9 @@ impl WriteBatch {
         version: u64,
     ) {
         self.validate_version(cf, version);
-        self.get_cf_mut(cf).put(key, meta, user_meta, version, val);
+        let inner_key = InnerKey::from_outer_key(key, self.inner_key_off);
+        self.get_cf_mut(cf)
+            .put(inner_key, meta, user_meta, version, val);
     }
 
     fn validate_version(&self, cf: usize, version: u64) {
@@ -59,8 +63,9 @@ impl WriteBatch {
 
     pub fn delete(&mut self, cf: usize, key: &[u8], version: u64) {
         self.validate_version(cf, version);
+        let inner_key = InnerKey::from_outer_key(key, self.inner_key_off);
         self.get_cf_mut(cf)
-            .put(key, table::BIT_DELETE, &[], version, &[]);
+            .put(inner_key, table::BIT_DELETE, &[], version, &[]);
     }
 
     pub fn set_property(&mut self, key: &str, val: &[u8]) {
@@ -140,13 +145,6 @@ impl Engine {
             let tag = ShardTag::new(self.get_engine_id(), IdVer::new(wb.shard_id, 0));
             panic!("{} unable to get shard", tag);
         });
-        if shard.inner_key_off > 0 {
-            for cf in &mut wb.cf_batches {
-                for entry in &mut cf.entries {
-                    entry.trim_to_inner_key(shard.inner_key_off);
-                }
-            }
-        }
         let version = shard.get_base_version() + wb.sequence;
         self.update_write_batch_version(wb, version);
         let data = shard.get_data();

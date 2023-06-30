@@ -58,10 +58,14 @@ impl KvWriteBatch {
         }
     }
 
-    pub(crate) fn get_engine_wb(&mut self, region_id: u64) -> &mut kvengine::WriteBatch {
+    pub(crate) fn get_engine_wb(
+        &mut self,
+        region_id: u64,
+        inner_key_off: usize,
+    ) -> &mut kvengine::WriteBatch {
         match self.batches.entry(region_id) {
             Entry::Occupied(o) => o.into_mut(),
-            Entry::Vacant(v) => v.insert(kvengine::WriteBatch::new(region_id)),
+            Entry::Vacant(v) => v.insert(kvengine::WriteBatch::new(region_id, inner_key_off)),
         }
     }
 }

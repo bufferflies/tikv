@@ -209,7 +209,7 @@ impl EngineCore {
         let load_tables = data
             .unloaded_tbls
             .iter()
-            .filter(|&(_, tbl)| shard.overlap_table(tbl.smallest.chunk(), tbl.biggest.chunk()))
+            .filter(|&(_, tbl)| shard.overlap_table(tbl.smallest(), tbl.biggest()))
             .map(|(id, tbl)| (*id, tbl.clone()))
             .collect();
         info!("{} load_unloaded_tables: {:?}", shard.tag(), load_tables);

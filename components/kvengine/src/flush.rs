@@ -1,6 +1,9 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::collections::{HashMap, VecDeque};
+use std::{
+    collections::{HashMap, VecDeque},
+    ops::Deref,
+};
 
 use bytes::BytesMut;
 use fail::fail_point;
@@ -13,7 +16,7 @@ use tikv_util::{
 };
 
 use crate::{
-    table::{memtable, memtable::CfTable, sstable, sstable::L0Builder, Iterator},
+    table::{memtable, memtable::CfTable, sstable, sstable::L0Builder, InnerKey, Iterator},
     *,
 };
 
@@ -45,11 +48,11 @@ impl FlushTask {
         }
     }
 
-    pub(crate) fn inner_start(&self) -> &[u8] {
+    pub(crate) fn inner_start(&self) -> InnerKey<'_> {
         self.range.inner_start()
     }
 
-    pub(crate) fn inner_end(&self) -> &[u8] {
+    pub(crate) fn inner_end(&self) -> InnerKey<'_> {
         self.range.inner_end()
     }
 
@@ -61,7 +64,7 @@ impl FlushTask {
         Self::new(shard, None, Some(initial))
     }
 
-    pub(crate) fn overlap_table(&self, start_key: &[u8], end_key: &[u8]) -> bool {
+    pub(crate) fn overlap_table(&self, start_key: InnerKey<'_>, end_key: InnerKey<'_>) -> bool {
         self.inner_start() <= end_key && start_key < self.inner_end()
     }
 
@@ -170,17 +173,26 @@ impl Engine {
         initial_flush.set_data_sequence(flush.data_sequence);
         initial_flush.set_max_ts(max_ts);
         for tbl_create in flush.parent_snap.get_table_creates() {
-            if task.overlap_table(tbl_create.get_smallest(), tbl_create.get_biggest()) {
+            if task.overlap_table(
+                InnerKey::from_inner_buf(tbl_create.get_smallest()),
+                InnerKey::from_inner_buf(tbl_create.get_biggest()),
+            ) {
                 initial_flush.mut_table_creates().push(tbl_create.clone());
             }
         }
         for l0_create in flush.parent_snap.get_l0_creates() {
-            if task.overlap_table(l0_create.get_smallest(), l0_create.get_biggest()) {
+            if task.overlap_table(
+                InnerKey::from_inner_buf(l0_create.get_smallest()),
+                InnerKey::from_inner_buf(l0_create.get_biggest()),
+            ) {
                 initial_flush.mut_l0_creates().push(l0_create.clone());
             }
         }
         for blob_create in flush.parent_snap.get_blob_creates() {
-            if task.overlap_table(blob_create.get_smallest(), blob_create.get_biggest()) {
+            if task.overlap_table(
+                InnerKey::from_inner_buf(blob_create.get_smallest()),
+                InnerKey::from_inner_buf(blob_create.get_biggest()),
+            ) {
                 initial_flush.mut_blob_creates().push(blob_create.clone());
             }
         }
@@ -212,7 +224,12 @@ impl Engine {
         Err(errs.pop().unwrap())
     }
 
-    pub(crate) fn build_l0_table(&self, m: &CfTable, start: &[u8], end: &[u8]) -> L0Builder {
+    pub(crate) fn build_l0_table(
+        &self,
+        m: &CfTable,
+        start: InnerKey<'_>,
+        end: InnerKey<'_>,
+    ) -> L0Builder {
         let sst_fid = self.id_allocator.alloc_id(1).unwrap().pop().unwrap();
         let mut l0_builder = sstable::L0Builder::new(
             sst_fid,
@@ -230,18 +247,19 @@ impl Engine {
             let mut prev_key = BytesMut::new();
             it.seek(start);
             while it.valid() {
-                if it.key() >= end {
+                let key = it.key();
+                if key >= end {
                     break;
                 }
-                if rc && prev_key == it.key() {
+                if rc && prev_key == key.deref() {
                     // For read committed CF, we can discard all the old
                     // versions.
                 } else {
                     let v = it.value();
-                    l0_builder.add(cf, it.key(), &v, None);
+                    l0_builder.add(cf, key, &v, None);
                     if rc {
                         prev_key.truncate(0);
-                        prev_key.extend_from_slice(it.key());
+                        prev_key.extend_from_slice(key.deref());
                     }
                 }
                 it.next_all_version();

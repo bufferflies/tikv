@@ -7,7 +7,7 @@ use bytes::{Buf, Bytes};
 use super::{builder::*, BlobRef};
 use crate::table::{
     sstable::{File, LZ4_COMPRESSION, NO_COMPRESSION, ZSTD_COMPRESSION},
-    Error, Result,
+    Error, InnerKey, Result,
 };
 
 #[derive(Clone)]
@@ -183,12 +183,12 @@ impl BlobTable {
         self.footer.version
     }
 
-    pub fn smallest_key(&self) -> &[u8] {
-        &self.smallest_key
+    pub fn smallest_key(&self) -> InnerKey<'_> {
+        InnerKey::from_inner_buf(self.smallest_key.chunk())
     }
 
-    pub fn biggest_key(&self) -> &[u8] {
-        &self.biggest_key
+    pub fn biggest_key(&self) -> InnerKey<'_> {
+        InnerKey::from_inner_buf(self.biggest_key.chunk())
     }
 
     pub fn size(&self) -> u64 {
@@ -197,8 +197,8 @@ impl BlobTable {
             .unwrap_or_else(|| panic!("file is not set"))
             .size()
     }
-    pub fn smallest_biggest_key(&self) -> (&[u8], &[u8]) {
-        (self.smallest_key.chunk(), self.biggest_key.chunk())
+    pub fn smallest_biggest_key(&self) -> (InnerKey<'_>, InnerKey<'_>) {
+        (self.smallest_key(), self.biggest_key())
     }
 
     pub fn total_blob_size(&self) -> u64 {
@@ -299,7 +299,7 @@ mod tests {
     use rand::{distributions::Alphanumeric, rngs::ThreadRng, Rng};
 
     use super::BlobTable;
-    use crate::table::{blobtable::BlobRef, sstable, Value};
+    use crate::table::{blobtable::BlobRef, sstable, InnerKey, Value};
 
     fn get_blob_text(max_len: usize, rng: &mut ThreadRng) -> String {
         let len = rng.gen_range(1..max_len);
@@ -327,7 +327,7 @@ mod tests {
             let encoded = Value::encode_buf(meta, &[0], 0, blob.as_bytes());
             let value = Value::decode(encoded.as_slice());
             // In this test assume that all values are converted to blob refs.
-            let blob_ref = builder.add(key.as_bytes(), &value);
+            let blob_ref = builder.add(InnerKey::from_inner_buf(key.as_bytes()), &value);
             test_data.push(TestData { blob, blob_ref });
         }
 
@@ -351,7 +351,10 @@ mod tests {
             let key_str = format!("key_{:03}", i);
             let val_str = format!("val_{:03}", i);
             let val_buf = Value::encode_buf(b'A', &[0], 0, val_str.as_bytes());
-            let blob_ref = builder.add(key_str.as_bytes(), &Value::decode(val_buf.as_slice()));
+            let blob_ref = builder.add(
+                InnerKey::from_inner_buf(key_str.as_bytes()),
+                &Value::decode(val_buf.as_slice()),
+            );
             offsets.push(blob_ref);
         }
         let file = sstable::InMemFile::new(1, builder.finish());

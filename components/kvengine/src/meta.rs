@@ -9,6 +9,7 @@ use protobuf::Message;
 use slog_global::*;
 
 use super::*;
+use crate::table::InnerKey;
 
 #[derive(Default, Clone)]
 pub struct ShardMeta {
@@ -641,7 +642,7 @@ impl ShardMeta {
         }
         for new_shard in &mut new_shards {
             for (fid, fm) in &old.files {
-                if new_shard.overlap_table(&fm.smallest, &fm.biggest) {
+                if new_shard.overlap_table(fm.smallest(), fm.biggest()) {
                     new_shard.files.insert(*fid, fm.clone());
                 }
             }
@@ -707,7 +708,7 @@ impl ShardMeta {
         &self.files
     }
 
-    pub fn overlap_table(&self, smallest: &[u8], biggest: &[u8]) -> bool {
+    pub fn overlap_table(&self, smallest: InnerKey<'_>, biggest: InnerKey<'_>) -> bool {
         // [start-----smallest-----biggest-----end)
         // smallest-----[start-----biggest-----end)
         // [start-----smallest-----end)-----biggest
@@ -726,13 +727,21 @@ impl ShardMeta {
         blob_files
     }
 
-    pub(crate) fn entirely_over_bound_table(&self, smallest: &[u8], biggest: &[u8]) -> bool {
+    pub(crate) fn entirely_over_bound_table(
+        &self,
+        smallest: InnerKey<'_>,
+        biggest: InnerKey<'_>,
+    ) -> bool {
         // smallest-----biggest-----[start----------end)
         // [start----------end)-----smallest-----biggest
         !self.overlap_table(smallest, biggest)
     }
 
-    pub(crate) fn partially_over_bound_table(&self, smallest: &[u8], biggest: &[u8]) -> bool {
+    pub(crate) fn partially_over_bound_table(
+        &self,
+        smallest: InnerKey<'_>,
+        biggest: InnerKey<'_>,
+    ) -> bool {
         // smallest-----[start-----end)-----biggest
         // smallest-----[start-----biggest-----end)
         // [start-----smallest-----end)-----biggest
@@ -744,7 +753,7 @@ impl ShardMeta {
     // may not be optimal but prevent compaction generate conflicting files.
     // It find the top most existing file's level as ingest level, if there is
     // overlap with existing files, it will use the one level upper.
-    pub(crate) fn get_ingest_level(&self, smallest: &[u8], biggest: &[u8]) -> u32 {
+    pub(crate) fn get_ingest_level(&self, smallest: InnerKey<'_>, biggest: InnerKey<'_>) -> u32 {
         // find the top most level as ingest level.
         let mut ingest_level = self
             .files
@@ -760,7 +769,7 @@ impl ShardMeta {
             .files
             .values()
             .filter(|f| f.level == ingest_level && f.cf == 0)
-            .any(|file| file.smallest.chunk() <= biggest && smallest <= file.biggest.chunk());
+            .any(|file| file.smallest() <= biggest && smallest <= file.biggest());
         if overlap {
             ingest_level -= 1;
         }
@@ -867,6 +876,14 @@ impl FileMeta {
     pub fn from_blob_table(table: &kvenginepb::BlobCreate) -> Self {
         Self::new(-1, BLOB_LEVEL, table.get_smallest(), table.get_biggest())
     }
+
+    pub fn smallest(&self) -> InnerKey<'_> {
+        InnerKey::from_inner_buf(&self.smallest)
+    }
+
+    pub fn biggest(&self) -> InnerKey<'_> {
+        InnerKey::from_inner_buf(&self.biggest)
+    }
 }
 
 pub fn is_move_down(comp: &pb::Compaction) -> bool {
@@ -918,7 +935,10 @@ mod tests {
             assert_eq!(meta.max_ts, 100);
             let assert_get_ingest_level = |smallest: &str, biggest: &str, level| {
                 assert_eq!(
-                    meta.get_ingest_level(smallest.as_bytes(), biggest.as_bytes()),
+                    meta.get_ingest_level(
+                        InnerKey::from_inner_buf(smallest.as_bytes()),
+                        InnerKey::from_inner_buf(biggest.as_bytes())
+                    ),
                     level
                 );
             };
@@ -1112,23 +1132,25 @@ mod tests {
         for (idx, (smallest, biggest, overlap, entirely_over_bound, partially_over_bound)) in
             cases.into_iter().enumerate()
         {
-            let smallest = [smallest];
-            let biggest = [biggest];
+            let smallest_buf = [smallest];
+            let smallest = InnerKey::from_inner_buf(&smallest_buf);
+            let biggest_buf = [biggest];
+            let biggest = InnerKey::from_inner_buf(&biggest_buf);
 
             assert_eq!(
-                meta.overlap_table(&smallest, &biggest),
+                meta.overlap_table(smallest, biggest),
                 overlap,
                 "case {}",
                 idx
             );
             assert_eq!(
-                meta.entirely_over_bound_table(&smallest, &biggest),
+                meta.entirely_over_bound_table(smallest, biggest),
                 entirely_over_bound,
                 "case {}",
                 idx
             );
             assert_eq!(
-                meta.partially_over_bound_table(&smallest, &biggest),
+                meta.partially_over_bound_table(smallest, biggest),
                 partially_over_bound,
                 "case {}",
                 idx

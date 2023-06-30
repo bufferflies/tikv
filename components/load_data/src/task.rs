@@ -5,6 +5,7 @@ use std::{
     fs,
     io::Write,
     mem,
+    ops::Deref,
     path::PathBuf,
     str::FromStr,
     sync::{Arc, Mutex},
@@ -18,7 +19,7 @@ use kvengine::{
     dfs,
     dfs::Options,
     stats::ShardStats,
-    table::{sstable::Builder, Value},
+    table::{sstable::Builder, InnerKey, Value},
 };
 use kvproto::metapb;
 use pd_client::PdClient;
@@ -501,7 +502,9 @@ impl LoadTaskWorker {
                 offset += 4;
                 let val = &batch[offset..offset + val_len];
                 offset += val_len;
-                builder.add(key, &Value::decode(val), None);
+                // The key is already trimmed prefix, so we can use `from_inner_buf` here.
+                let inner_key = InnerKey::from_inner_buf(key);
+                builder.add(inner_key, &Value::decode(val), None);
                 entries += 1;
             }
             batch.clear();
@@ -615,8 +618,8 @@ impl LoadTaskWorker {
             let raw_start_key = decode_bytes(&mut encoded_start_key, false).unwrap();
             let mut encoded_end_key = coarse_split_keys[i + 1].as_slice();
             let raw_end_key = decode_bytes(&mut encoded_end_key, false).unwrap();
-            let inner_start_key = &raw_start_key[inner_key_off..];
-            let inner_end_key = &raw_end_key[inner_key_off..];
+            let inner_start_key = InnerKey::from_outer_key(&raw_start_key, inner_key_off);
+            let inner_end_key = InnerKey::from_outer_end_key(&raw_end_key, inner_key_off);
             let group_ssts = get_ssts_in_range(&sst_metas, inner_start_key, inner_end_key);
             assert!(
                 !group_ssts.is_empty(),
@@ -913,14 +916,14 @@ fn new_region_key(key_prefix: &[u8], raw_key: &[u8]) -> Vec<u8> {
     encode_bytes(&key)
 }
 
-fn get_ssts_in_range(ssts: &[SstMeta], start: &[u8], end: &[u8]) -> Vec<SstMeta> {
+fn get_ssts_in_range(ssts: &[SstMeta], start: InnerKey<'_>, end: InnerKey<'_>) -> Vec<SstMeta> {
     let position = ssts
-        .binary_search_by(|sst| sst.smallest.as_slice().cmp(start))
+        .binary_search_by(|sst| sst.smallest.as_slice().cmp(start.deref()))
         .unwrap();
     let mut matched = vec![];
     for i in position..ssts.len() {
         let sst = &ssts[i];
-        if !end.is_empty() && sst.smallest.as_slice() >= end {
+        if !end.is_empty() && sst.smallest.as_slice() >= end.deref() {
             break;
         }
         matched.push(sst.clone())

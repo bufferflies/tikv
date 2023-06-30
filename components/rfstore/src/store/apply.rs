@@ -256,6 +256,8 @@ pub(crate) struct Applier {
     last_property_term: u64,
 
     buckets: Option<BucketStat>,
+
+    inner_key_offset: Option<usize>,
 }
 
 impl Applier {
@@ -496,7 +498,17 @@ impl Applier {
         ctx: &mut ApplyContext,
         cl: &CustomRaftLog<'_>,
     ) -> Result<(RaftCmdResponse, ApplyResult)> {
-        let wb = ctx.wb.get_engine_wb(self.region.get_id());
+        if self.inner_key_offset.is_none() {
+            self.inner_key_offset = Some(
+                ctx.engine
+                    .get_shard(self.region.get_id())
+                    .unwrap()
+                    .inner_key_off,
+            );
+        }
+        let wb = ctx
+            .wb
+            .get_engine_wb(self.region.get_id(), self.inner_key_offset.unwrap());
         let engine = &ctx.engine;
         let log_index = ctx.exec_log_index;
         wb.set_sequence(log_index);
