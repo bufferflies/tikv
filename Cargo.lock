@@ -3401,6 +3401,7 @@ dependencies = [
 name = "load_data"
 version = "0.0.1"
 dependencies = [
+ "api_version",
  "bytes",
  "futures 0.3.15",
  "http",
@@ -3417,6 +3418,7 @@ dependencies = [
  "slog",
  "slog-global",
  "thiserror",
+ "tidb_query_datatype",
  "tikv_util",
  "tokio",
 ]

@@ -12,6 +12,7 @@ use std::{
     time::Duration,
 };
 
+use api_version::api_v2::KEYSPACE_PREFIX_LEN;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use http::{Request, Uri};
 use hyper::Body;
@@ -26,6 +27,7 @@ use pd_client::PdClient;
 use protobuf::Message;
 use rfstore::store::{raw_end_key, raw_start_key};
 use serde_derive::{Deserialize, Serialize};
+use tidb_query_datatype::codec::table;
 use tikv_util::{
     codec::bytes::{decode_bytes, encode_bytes},
     error, info,
@@ -531,6 +533,7 @@ impl LoadTaskWorker {
 
     fn read_batch(&mut self, merge_iter: &mut MergeIterator) -> Result<BytesMut> {
         let mut buf = BytesMut::with_capacity(SST_FILE_SIZE);
+        let mut pre_table_id = 0;
         while merge_iter.valid() {
             let key = merge_iter.key();
             let key_len = key.len();
@@ -539,6 +542,15 @@ impl LoadTaskWorker {
             if buf.len() + 2 + key_len + 4 + val_len > buf.capacity() {
                 return Ok(buf);
             }
+            let table_id = if key.starts_with(table::TABLE_PREFIX) {
+                table::decode_table_id(key).unwrap()
+            } else {
+                table::decode_table_id(&key[KEYSPACE_PREFIX_LEN..]).unwrap()
+            };
+            if pre_table_id != 0 && pre_table_id != table_id {
+                return Ok(buf);
+            }
+            pre_table_id = table_id;
             buf.put_u16_le(key_len as u16);
             buf.extend_from_slice(key);
             buf.put_u32_le(val_len as u32);

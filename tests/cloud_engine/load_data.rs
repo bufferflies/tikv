@@ -1,20 +1,23 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{fs, mem, sync::Arc};
+use std::{collections::HashMap, fs, mem, sync::Arc};
 
-use api_version::ApiV2;
-use bytes::{BufMut, BytesMut};
+use api_version::{api_v2::KEYSPACE_PREFIX_LEN, ApiV2};
+use bytes::{BufMut, Bytes, BytesMut};
 use futures::executor::block_on;
 use kvengine::{dfs::DFSConfig, table::sstable::ZSTD_COMPRESSION};
+use kvenginepb::ChangeSet;
 use load_data::task::{
     LoadDataContext, LoadTaskMsg, LoadTaskScheduler, LoadTaskWorker, TaskContext,
 };
 use pd_client::PdClient;
+use protobuf::Message;
 use test_cloud_server::{
     client::{RefStore, RequestOptions},
     oss::ObjectStorageService,
     try_wait, ServerCluster,
 };
+use tidb_query_datatype::codec::table;
 use tikv::config::TikvConfig;
 
 use crate::alloc_node_id_vec;
@@ -103,6 +106,9 @@ fn impl_test_load_data(enable_inner_key_off: bool) {
         .verify_data_with_given_ref_store(&ref_store, None, &RequestOptions::default())
         .expect("verify_data_with_given_ref_store");
     assert_eq!(verified_count, DATA_COUNT);
+
+    // Verify that a `table create` contains only one table id
+    verify_table_creates(&cluster);
 
     cluster.stop();
 }
@@ -210,6 +216,56 @@ fn i_to_val(i: usize) -> Vec<u8> {
 
 fn i_to_key_with_prefix(prefix: &[u8], i: usize) -> Vec<u8> {
     let mut key = prefix.to_vec();
-    key.extend_from_slice(&format!("key_{:06}", i).into_bytes());
+    // load_data will parse table id from key
+    key.extend_from_slice(&format!("t{:08}_key_{:06}", i % 100, i).into_bytes());
     key
+}
+
+// verify_table_creats will verify that a `table create` contains only one table
+// id.
+fn verify_table_creates(cluster: &ServerCluster) {
+    let pd_client = cluster.get_pd_client();
+    let nodes = cluster.get_nodes();
+    let mut store_ids: HashMap<u64, u16> = HashMap::new();
+    for node in nodes {
+        let store_id = cluster.get_store_id(node);
+        store_ids.insert(store_id, node);
+    }
+
+    let keyspace_prefix = ApiV2::get_txn_keyspace_prefix(KEYSPACE_ID);
+    let start_key = i_to_key_with_prefix(&keyspace_prefix, 0);
+    let end_key = i_to_key_with_prefix(&keyspace_prefix, DATA_COUNT);
+
+    let regions = block_on(pd_client.scan_regions(start_key.clone(), end_key.clone(), 0)).unwrap();
+    for region in regions {
+        let node = store_ids.get(&region.get_leader().get_store_id()).unwrap();
+        let kvengine = cluster.get_kvengine(*node);
+        let snap = kvengine
+            .get_snap_access(region.get_region().get_id())
+            .unwrap();
+        let (_, cs_bin) = snap.marshal(
+            &[(Bytes::from(start_key.clone()), Bytes::from(end_key.clone()))],
+            false,
+            false,
+        );
+        let mut cs = ChangeSet::default();
+        cs.merge_from_bytes(&cs_bin).unwrap();
+        let cs_snap = cs.get_snapshot();
+        let table_creates = cs_snap.get_table_creates();
+        for table_create in table_creates {
+            let smallest = table_create.get_smallest();
+            let smalles_table_id = if smallest.starts_with(table::TABLE_PREFIX) {
+                table::decode_table_id(smallest).unwrap()
+            } else {
+                table::decode_table_id(&smallest[KEYSPACE_PREFIX_LEN..]).unwrap()
+            };
+            let biggest = table_create.get_biggest();
+            let biggest_table_id = if biggest.starts_with(table::TABLE_PREFIX) {
+                table::decode_table_id(biggest).unwrap()
+            } else {
+                table::decode_table_id(&biggest[KEYSPACE_PREFIX_LEN..]).unwrap()
+            };
+            assert_eq!(smalles_table_id, biggest_table_id);
+        }
+    }
 }

@@ -774,11 +774,16 @@ impl SnapAccessCore {
     // check if the ingest files overlaps with the existing data in the shard.
     pub fn overlap_ingest_files(&self, ingest_files: &IngestFiles) -> bool {
         let table_creates = ingest_files.get_table_creates();
-        let inner_smallest = table_creates.first().unwrap().get_smallest();
-        let inner_biggest = table_creates.last().unwrap().get_biggest();
         let mut tbl_it = self.new_table_iterator(0, false, false);
-        tbl_it.seek(InnerKey::from_inner_buf(inner_smallest));
-        tbl_it.valid() && tbl_it.key().deref() <= inner_biggest
+        for table_create in table_creates {
+            let inner_smallest = table_create.get_smallest();
+            let inner_biggest = table_create.get_biggest();
+            tbl_it.seek(InnerKey::from_inner_buf(inner_smallest));
+            if tbl_it.valid() && tbl_it.key().deref() <= inner_biggest {
+                return true;
+            }
+        }
+        false
     }
 }
 
