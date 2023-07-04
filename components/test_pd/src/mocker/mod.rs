@@ -52,6 +52,10 @@ pub trait PdMocker {
         panic!("could not mock this function due to it should return a stream")
     }
 
+    fn watch_gc_safepoint_v2(&self) -> Option<Result<WatchGcSafePointV2Response>> {
+        panic!("could not mock this function due to it should return a stream")
+    }
+
     fn get_members(&self, _: &GetMembersRequest) -> Option<Result<GetMembersResponse>> {
         None
     }

@@ -309,6 +309,16 @@ impl TikvServer {
         self.init_metrics_flusher(fetcher);
         self.run_server(server_config);
         self.run_status_server();
+        if self.config.gc.enable_safe_point_v2 {
+            self.run_watch_ks_gc_safepoint();
+        }
+    }
+
+    fn run_watch_ks_gc_safepoint(&mut self) {
+        let pd_clone = self.pd_client.clone();
+        self.background_worker.remote().spawn(async move {
+            pd_clone.watch_gc_safepoint_v2().await;
+        });
     }
 
     /// Initialize and check the config
@@ -925,6 +935,7 @@ impl TikvServer {
         kv_opts.base_size = (conf.coprocessor.region_split_size.0 / 16).min(32 * 1024 * 1024);
         kv_opts.max_block_cache_size = capacity as i64;
         kv_opts.remote_compactor_addr = conf.dfs.remote_compactor_addr.clone();
+        kv_opts.enable_safe_point_v2 = conf.gc.enable_safe_point_v2;
         let cf_opt = &conf.rocksdb.writecf;
         kv_opts.table_builder_options.block_size = cf_opt.block_size.0 as usize;
         kv_opts.table_builder_options.max_table_size = cf_opt.target_file_size_base.0 as usize;
@@ -940,11 +951,17 @@ impl TikvServer {
         kv_opts.max_del_range_delay = conf.kvengine.max_del_range_delay.into();
         kv_opts.for_restore = for_restore;
         let opts = Arc::new(kv_opts);
-        let id_allocator = Arc::new(PdIdAllocator::new(pd));
+        let id_allocator = Arc::new(PdIdAllocator::new(pd.clone()));
+
         let (sender, receiver) = tikv_util::mpsc::unbounded();
         let meta_change_listener = Box::new(MetaChangeListener {
             sender: sender.clone(),
         });
+
+        let mut opt_ks_gc_sp_cache = None;
+        if conf.gc.enable_safe_point_v2 {
+            opt_ks_gc_sp_cache = Some(pd.get_keyspace_gc_safepoint_v2_cache());
+        }
         let kv_engine = kvengine::Engine::open(
             dfs,
             opts,
@@ -953,6 +970,7 @@ impl TikvServer {
             id_allocator,
             meta_change_listener,
             rate_limiter,
+            opt_ks_gc_sp_cache,
         )?;
         Ok((kv_engine, sender, receiver))
     }

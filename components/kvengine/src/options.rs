@@ -52,6 +52,8 @@ pub struct Options {
 
     /// Indicate kvengine is used for restore or not.
     pub for_restore: bool,
+
+    pub enable_safe_point_v2: bool,
 }
 
 impl Default for Options {
@@ -75,6 +77,7 @@ impl Default for Options {
             max_del_range_delay: Duration::from_secs(3600),
             enable_inner_key_offset: false,
             for_restore: false,
+            enable_safe_point_v2: false,
         }
     }
 }

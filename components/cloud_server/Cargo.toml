@@ -46,7 +46,7 @@ fail = "0.5"
 file_system = { path = "../file_system", default-features = false }
 flate2 = { version = "1.0", default-features = false, features = ["zlib"] }
 fs2 = "0.4"
-futures = "0.3"
+futures = { version = "0.3.15", features = ["async-await", "compat"] }
 futures-timer = "3.0"
 grpcio = { version = "0.10", default-features = false, features = ["openssl-vendored", "protobuf-codec"] }
 grpcio-health = { version = "0.10", default-features = false, features = ["protobuf-codec"] }
@@ -99,7 +99,9 @@ tikv_util = { path = "../tikv_util", default-features = false }
 tokio = { version = "1.12", features = ["full"] }
 tokio-openssl = "0.6"
 tokio-timer = { git = "https://github.com/tikv/tokio", branch = "tokio-timer-hotfix" }
+tokio-util = "0.7"
 toml = "0.5"
+tonic = "0.9.2"
 tracker = { path = "../tracker" }
 txn_types = { path = "../txn_types", default-features = false }
 url = "2"

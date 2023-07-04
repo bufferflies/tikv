@@ -5,7 +5,7 @@
 #[allow(unused_extern_crates)]
 extern crate tikv_alloc;
 
-mod client;
+pub mod client;
 mod client_v2;
 mod feature_gate;
 pub mod metrics;
@@ -16,6 +16,8 @@ mod config;
 pub mod errors;
 use std::{cmp::Ordering, collections::HashMap, ops::Deref, sync::Arc, time::Duration};
 
+use async_trait::async_trait;
+use dashmap::DashMap;
 use futures::future::BoxFuture;
 use grpcio::ClientSStreamReceiver;
 use kvproto::{
@@ -246,6 +248,7 @@ pub const INVALID_ID: u64 = 0;
 /// cluster id in trait interface every time, so passing the cluster id when
 /// creating the PdClient is enough and the PdClient will use this cluster id
 /// all the time.
+#[async_trait]
 pub trait PdClient: Send + Sync {
     /// Load a list of GlobalConfig
     fn load_global_config(&self, _list: Vec<String>) -> PdFuture<HashMap<String, String>> {
@@ -260,6 +263,14 @@ pub trait PdClient: Send + Sync {
     /// Watching change of GlobalConfig
     fn watch_global_config(&self) -> Result<ClientSStreamReceiver<WatchGlobalConfigResponse>> {
         unimplemented!();
+    }
+
+    async fn watch_gc_safepoint_v2(&self) {
+        unimplemented!();
+    }
+
+    fn get_keyspace_gc_safepoint_v2_cache(&self) -> Arc<DashMap<u32, u64>> {
+        Arc::new(DashMap::default())
     }
 
     /// Returns the cluster ID.

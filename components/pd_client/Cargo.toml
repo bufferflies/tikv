@@ -9,7 +9,9 @@ failpoints = ["fail/failpoints"]
 testexport = []
 
 [dependencies]
+async-trait = "0.1"
 collections = { workspace = true }
+dashmap = "4.0"
 error_code = { workspace = true }
 fail = "0.5"
 futures = "0.3"

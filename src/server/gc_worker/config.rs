@@ -22,6 +22,7 @@ pub struct GcConfig {
     /// greater than 5.0.0. Change `compaction_filter_skip_version_check`
     /// can enable it by force.
     pub compaction_filter_skip_version_check: bool,
+    pub enable_safe_point_v2: bool,
 }
 
 impl Default for GcConfig {
@@ -32,6 +33,7 @@ impl Default for GcConfig {
             max_write_bytes_per_sec: ReadableSize(DEFAULT_GC_MAX_WRITE_BYTES_PER_SEC),
             enable_compaction_filter: true,
             compaction_filter_skip_version_check: false,
+            enable_safe_point_v2: false,
         }
     }
 }

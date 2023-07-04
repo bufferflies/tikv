@@ -11,6 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use api_version::{api_v2::KEYSPACE_PREFIX_LEN, ApiV2};
 use bytes::{Buf, Bytes, BytesMut};
 use http::StatusCode;
 use kvenginepb as pb;
@@ -445,6 +446,52 @@ impl Engine {
         }
     }
 
+    pub fn get_keyspace_gc_safepoint_v2(&self, key: &[u8]) -> u64 {
+        match &self.ks_safepoint_v2 {
+            Some(sp_map) => {
+                if key[0] == b'x' && key.len() >= KEYSPACE_PREFIX_LEN {
+                    // Api v2 key.
+                    let keyspace_id = ApiV2::get_keyspace_id(key);
+                    let keyspace_id_u32 = ApiV2::get_u32_keyspace_id(keyspace_id);
+
+                    let keyspace_sp_ts = sp_map.get(&keyspace_id_u32);
+                    match keyspace_sp_ts {
+                        None => 0,
+                        Some(ks2sp) => {
+                            let ks_gc_sp = *ks2sp.value();
+                            debug!(
+                                "Get gc safe point v2, key:{:?}, keyspace_id:{}, gc safepoint:{}",
+                                log_wrappers::Value::key(key),
+                                keyspace_id_u32,
+                                ks_gc_sp
+                            );
+                            ks_gc_sp
+                        }
+                    }
+                } else {
+                    // Api v1 key.
+                    let gc_safe_point_ts = load_u64(&self.managed_safe_ts);
+                    debug!(
+                        "Get gc safe point v1, key:{:?}, gc safepoint:{}",
+                        log_wrappers::Value::key(key),
+                        gc_safe_point_ts,
+                    );
+                    gc_safe_point_ts
+                }
+            }
+            None => {
+                // Api v1 key.
+                let gc_safe_point_ts = load_u64(&self.managed_safe_ts);
+                debug!(
+                    "Get gc safe point v1, key:{:?}, gc safepoint:{}",
+                    log_wrappers::Value::key(key),
+                    gc_safe_point_ts,
+                );
+                gc_safe_point_ts
+            }
+        }
+    }
+
     pub(crate) fn run_compaction(&self, compact_rx: mpsc::Receiver<CompactMsg>) {
         let mut runner = CompactRunner::new(self.clone(), compact_rx);
         runner.run();
@@ -547,7 +594,7 @@ impl Engine {
             trim_over_bound: false,
             cf,
             level,
-            safe_ts: load_u64(&self.managed_safe_ts),
+            safe_ts: self.get_keyspace_gc_safepoint_v2(range.outer_start.chunk()),
             block_size: self.opts.table_builder_options.block_size,
             max_table_size: self.opts.table_builder_options.max_table_size,
             compression_tp: self.opts.table_builder_options.compression_tps[level],
@@ -913,7 +960,7 @@ impl Engine {
             estimated_num_files,
         );
         let l0_compaction = L0Compaction {
-            safe_ts: load_u64(&self.managed_safe_ts),
+            safe_ts: self.get_keyspace_gc_safepoint_v2(&req.outer_start),
             l0_tables: l0_tbls,
             multi_cf_l1_tables: multi_cfs_l1_tbls,
             sst_config,
@@ -1099,7 +1146,7 @@ impl Engine {
         let l1_plus: L1PlusCompaction = L1PlusCompaction {
             cf,
             level,
-            safe_ts: load_u64(&self.managed_safe_ts),
+            safe_ts: self.get_keyspace_gc_safepoint_v2(&req.outer_start),
             keep_latest_obsolete_tombstone: has_overlap,
             upper_level: upper_level_table_ids,
             lower_level: lower_level_table_ids,
@@ -1155,7 +1202,7 @@ impl Engine {
             estimated_num_files,
         );
         let major_compaction = MajorCompaction {
-            safe_ts: load_u64(&self.managed_safe_ts),
+            safe_ts: self.get_keyspace_gc_safepoint_v2(&req.outer_start),
             l0_tables: data.l0_tbls.iter().map(|t| t.id()).collect(),
             ln_tables,
             blob_tables: data.blob_tbl_map.keys().copied().collect(),

@@ -5,25 +5,28 @@ use std::{
     convert::TryInto,
     fmt,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicI64, AtomicU64, Ordering},
         Arc,
     },
     time::Duration,
     u64,
 };
 
+use async_trait::async_trait;
+use dashmap::DashMap;
 use futures::{
     channel::mpsc,
     compat::{Compat, Future01CompatExt},
     executor::block_on,
     future::{self, BoxFuture, FutureExt, TryFutureExt},
+    select,
     sink::SinkExt,
     stream::StreamExt,
 };
-use grpcio::{EnvBuilder, Environment, WriteFlags};
+use grpcio::{ClientSStreamReceiver, EnvBuilder, Environment, WriteFlags};
 use kvproto::{
     metapb,
-    pdpb::{self, Member},
+    pdpb::{self, EventType, Member, WatchGcSafePointV2Response},
     replication_modepb::{RegionReplicationStatus, ReplicationStatus, StoreDrAutoSyncStatus},
 };
 use security::SecurityManager;
@@ -45,11 +48,15 @@ use super::{
 
 pub const CQ_COUNT: usize = 1;
 pub const CLIENT_PREFIX: &str = "pd";
+const RETRY_INTERVAL: Duration = Duration::from_secs(1); // to consistent with pd_client
 
 pub struct RpcClient {
     cluster_id: u64,
     pd_client: Arc<Client>,
     monitor: Arc<ThreadPool<TaskCell>>,
+    // KS_SAFEPOINT_V2 is to cache keyspace id and gc safepoint v2.
+    ks_safepoint_v2: Arc<DashMap<u32, u64>>,
+    ks_gc_sp_revision: AtomicI64,
 }
 
 impl RpcClient {
@@ -102,6 +109,8 @@ impl RpcClient {
                             cfg.enable_forwarding,
                         )),
                         monitor: monitor.clone(),
+                        ks_safepoint_v2: Arc::new(DashMap::default()),
+                        ks_gc_sp_revision: AtomicI64::new(0),
                     };
 
                     // spawn a background future to update PD information periodically
@@ -273,6 +282,111 @@ impl RpcClient {
             .request(req, executor, LEADER_CHANGE_RETRY)
             .execute()
     }
+
+    // watch_gc_safepoint_v2 is used to request pd.
+    fn watch_gc_safepoint_v2_from_pd(
+        &self,
+        revision: i64,
+    ) -> Result<grpcio::ClientSStreamReceiver<WatchGcSafePointV2Response>> {
+        use kvproto::pdpb::WatchGcSafePointV2Request;
+        let mut req = WatchGcSafePointV2Request::default();
+        info!("[gc safepoint watch] start watch gc safepoin't v2"; "revision" => revision);
+        req.set_revision(revision);
+        sync_request(&self.pd_client, LEADER_CHANGE_RETRY, |client, _| {
+            client.watch_gc_safe_point_v2(&req)
+        })
+    }
+
+    // handle_watch_gc_safepoint_v2_stream is used to handle
+    // ClientSStreamReceiver<WatchGcSafePointV2Response>.
+    async fn handle_watch_gc_safepoint_v2_stream(
+        &self,
+        mut stream: ClientSStreamReceiver<WatchGcSafePointV2Response>,
+    ) -> bool {
+        loop {
+            select! {
+                result = stream.next().fuse() => {
+                    if let Some(result) = result {
+                        match result {
+                            Ok(r) => {
+                                self.ks_gc_sp_revision.store(r.get_revision(), Ordering::SeqCst);
+                                self.handle_watch_gc_safepoint_v2_response(r);
+                            },
+                            Err(err) => {
+                                error!("watch safe point v2 response error:{:?}", err);
+                                let _ = GLOBAL_TIMER_HANDLE
+                                    .delay(std::time::Instant::now() + RETRY_INTERVAL)
+                                    .compat()
+                                    .await;
+                            }
+                        }
+                    }
+                },
+                _ = future::ready(tikv_util::thread_group::is_shutdown(!cfg!(test))).fuse() => {
+                    if  tikv_util::thread_group::is_shutdown(!cfg!(test)) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    // handle_watch_gc_safepoint_v2_response is used to handle
+    // WatchGcSafePointV2Response.
+    fn handle_watch_gc_safepoint_v2_response(&self, result: WatchGcSafePointV2Response) {
+        result
+            .get_events()
+            .iter()
+            .for_each(|item| match item.get_type() {
+                EventType::Put => {
+                    let keyspace_id = item.get_keyspace_id();
+                    let gc_safe_point = item.get_safe_point();
+                    self.ks_safepoint_v2.insert(keyspace_id, gc_safe_point);
+                    debug!(
+                        "updated keyspace gc safe point, keyspace id:{}, gc safe point:{}",
+                        keyspace_id, gc_safe_point
+                    );
+                }
+                EventType::Delete => {
+                    let keyspace_id = item.get_keyspace_id();
+                    self.ks_safepoint_v2.remove(&keyspace_id);
+                    debug!(
+                        "Removed keyspace gc safe point, keyspace id:{};",
+                        keyspace_id
+                    );
+                }
+            });
+    }
+
+    async fn load_all_gc_safe_point_v2(&self) {
+        let mut req = pdpb::GetAllGcSafePointV2Request::default();
+        req.set_header(self.header());
+
+        let sync_resp = sync_request(&self.pd_client, LEADER_CHANGE_RETRY, |client, option| {
+            client.get_all_gc_safe_point_v2_opt(&req, option)
+        });
+        match sync_resp {
+            Ok(mut resp) => {
+                for gc_safe_point in resp.take_gc_safe_points().iter() {
+                    self.ks_safepoint_v2
+                        .insert(gc_safe_point.keyspace_id, gc_safe_point.gc_safe_point);
+                    debug!(
+                        "load keyspace gc safe point v2, update cache keyspace id:{}, gc safe point:{}",
+                        gc_safe_point.keyspace_id, gc_safe_point.gc_safe_point
+                    );
+                }
+                self.ks_gc_sp_revision
+                    .store(resp.get_revision(), Ordering::SeqCst);
+                debug!(
+                    "load all keyspace gc safe point v2, revision:{}",
+                    resp.get_revision()
+                );
+            }
+            Err(err) => {
+                error!("failed to load all gc safe point v2 {:?}", err);
+            }
+        }
+    }
 }
 
 impl fmt::Debug for RpcClient {
@@ -285,7 +399,7 @@ impl fmt::Debug for RpcClient {
 }
 
 const LEADER_CHANGE_RETRY: usize = 10;
-
+#[async_trait]
 impl PdClient for RpcClient {
     fn load_global_config(&self, list: Vec<String>) -> PdFuture<HashMap<String, String>> {
         use kvproto::pdpb::LoadGlobalConfigRequest;
@@ -329,6 +443,42 @@ impl PdClient for RpcClient {
         sync_request(&self.pd_client, LEADER_CHANGE_RETRY, |client, _| {
             client.watch_global_config(&req)
         })
+    }
+
+    // watch_gc_safepoint_v2 is used to start watch gc safepoint v2.
+    async fn watch_gc_safepoint_v2(&self) {
+        'outer: loop {
+            self.load_all_gc_safe_point_v2().await;
+            let mut is_shutdown = false;
+            match self.watch_gc_safepoint_v2_from_pd(self.ks_gc_sp_revision.load(Ordering::SeqCst))
+            {
+                Ok(stream) => {
+                    is_shutdown = self.handle_watch_gc_safepoint_v2_stream(stream).await;
+                    debug!("watch gc safe point v2 stream done.");
+                }
+                Err(Error::DataCompacted(msg)) => {
+                    error!("watch gc safe point v2 required revision has been compacted"; "err" => ?msg);
+                    continue 'outer;
+                }
+                Err(err) => {
+                    error!("watch safe point v2 error:{:?}", err);
+                    let _ = GLOBAL_TIMER_HANDLE
+                        .delay(std::time::Instant::now() + RETRY_INTERVAL)
+                        .compat()
+                        .await;
+                }
+            }
+            if is_shutdown {
+                debug!("watch gc safe point v2, loop break by server is shutdown.");
+                break;
+            }
+            debug!("watch gc safe point v2,done.");
+        }
+        debug!("watch gc safe point v2, exit.");
+    }
+
+    fn get_keyspace_gc_safepoint_v2_cache(&self) -> Arc<DashMap<u32, u64>> {
+        self.ks_safepoint_v2.clone()
     }
 
     fn get_cluster_id(&self) -> Result<u64> {

@@ -56,6 +56,7 @@ fn new_test_engine() -> (Engine, mpsc::Sender<ApplyTask>) {
         tester.core.clone(),
         meta_change_listener,
         rate_limiter,
+        None,
     )
     .unwrap();
     {

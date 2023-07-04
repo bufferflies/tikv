@@ -74,6 +74,7 @@ impl Engine {
         id_allocator: Arc<dyn IdAllocator>,
         meta_change_listener: Box<dyn MetaChangeListener>,
         rate_limiter: Arc<IoRateLimiter>,
+        ks_gc_sp_map: Option<Arc<DashMap<u32, u64>>>,
     ) -> Result<Engine> {
         info!("open KVEngine");
         if !opts.local_dir.exists() {
@@ -122,6 +123,7 @@ impl Engine {
             loaded: AtomicBool::new(false),
             file_locks,
             shutting_down: AtomicBool::new(false),
+            ks_safepoint_v2: ks_gc_sp_map,
         };
         let en = Engine {
             core: Arc::new(core),
@@ -264,6 +266,7 @@ pub struct EngineCore {
     pub(crate) loaded: AtomicBool,
     pub(crate) file_locks: Vec<Mutex<()>>,
     pub(crate) shutting_down: AtomicBool,
+    pub(crate) ks_safepoint_v2: Option<Arc<DashMap<u32, u64>>>,
 }
 
 impl Drop for EngineCore {
