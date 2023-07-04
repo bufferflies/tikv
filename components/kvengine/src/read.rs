@@ -149,6 +149,7 @@ pub struct SnapAccessCore {
     data: ShardData,
     get_hint: Mutex<Hint>,
     blob_table_prefetch_size: usize,
+    deleting_prefixes: Arc<DeletePrefixes>,
 }
 
 impl SnapAccessCore {
@@ -166,6 +167,7 @@ impl SnapAccessCore {
             data,
             get_hint: Mutex::new(Hint::new()),
             blob_table_prefetch_size: shard.opt.blob_prefetch_size,
+            deleting_prefixes: shard.get_del_prefixes(),
         }
     }
 
@@ -249,12 +251,8 @@ impl SnapAccessCore {
         }
         let mut shard = Shard::new_for_ingest(0, &cs, Arc::new(Options::default()));
         let (l0s, blob_tbls, scfs) = create_snapshot_tables(cs.get_snapshot(), &cs, false);
-        let old_data = shard.get_data();
         let data = ShardData::new(
             shard.range.clone(),
-            old_data.del_prefixes.clone(),
-            old_data.truncate_ts,
-            old_data.trim_over_bound,
             mem_tbls,
             l0s,
             Arc::new(blob_tbls),
@@ -758,7 +756,7 @@ impl SnapAccessCore {
         }
 
         let inner_prefix = InnerKey::from_outer_key(prefix, self.data.inner_key_off);
-        if self.data.del_prefixes.cover_prefix(inner_prefix) {
+        if self.deleting_prefixes.cover_prefix(inner_prefix) {
             return false;
         }
         let mut it = self.new_iterator(0, false, false, Some(u64::MAX), true);

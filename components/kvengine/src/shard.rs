@@ -30,6 +30,23 @@ use crate::{
     Iterator as TableIterator, *,
 };
 
+#[derive(Clone)]
+pub(crate) struct ShardPendingOperations {
+    pub(crate) del_prefixes: Arc<DeletePrefixes>,
+    pub(crate) truncate_ts: Option<TruncateTs>,
+    pub(crate) trim_over_bound: bool,
+}
+
+impl ShardPendingOperations {
+    fn new(inner_key_off: usize) -> Self {
+        Self {
+            del_prefixes: Arc::new(DeletePrefixes::new_with_inner_key_off(inner_key_off)),
+            truncate_ts: None,
+            trim_over_bound: false,
+        }
+    }
+}
+
 pub struct Shard {
     pub engine_id: u64,
     pub id: u64,
@@ -43,7 +60,8 @@ pub struct Shard {
     pub(crate) active: AtomicBool,
 
     pub(crate) properties: Properties,
-    pub(crate) compacting: AtomicBool,
+    pub(crate) pending_ops: RwLock<ShardPendingOperations>,
+    pub(crate) compacting: AtomicBool, // for statistics only
     pub(crate) initial_flushed: AtomicBool,
 
     pub(crate) base_version: AtomicU64,
@@ -96,6 +114,7 @@ impl Shard {
             ver,
             range: range.clone(),
             parent_id: 0,
+            pending_ops: RwLock::new(ShardPendingOperations::new(range.inner_key_off)),
             data: RwLock::new(ShardData::new_empty(range)),
             opt,
             active: Default::default(),
@@ -112,18 +131,23 @@ impl Shard {
             compaction_priority: RwLock::new(None),
             parent_snap: RwLock::new(None),
         };
-        if let Some(val) = get_shard_property(DEL_PREFIXES_KEY, props) {
-            shard.set_del_prefix(&val);
-        }
-        if let Some(val) = get_shard_property(TRUNCATE_TS_KEY, props) {
-            // when load shard from Meta, the value maybe empty.
-            if !val.is_empty() {
-                shard.set_truncate_ts(&val);
+        {
+            let mut pending_ops = shard.pending_ops.write().unwrap();
+            if let Some(val) = get_shard_property(DEL_PREFIXES_KEY, props) {
+                let mut del_prefixes = DeletePrefixes::unmarshal(&val, shard.inner_key_off);
+                del_prefixes.schedule_at = shard.gen_rand_schedule_del_range_time();
+                pending_ops.del_prefixes = Arc::new(del_prefixes);
             }
-        }
-        if let Some(val) = get_shard_property(TRIM_OVER_BOUND, props) {
-            if !val.is_empty() {
-                shard.set_trim_over_bound(&val);
+            if let Some(val) = get_shard_property(TRUNCATE_TS_KEY, props) {
+                // when load shard from Meta, the value maybe empty.
+                if !val.is_empty() {
+                    pending_ops.truncate_ts = Some(TruncateTs::unmarshal(&val));
+                }
+            }
+            if let Some(val) = get_shard_property(TRIM_OVER_BOUND, props) {
+                if !val.is_empty() {
+                    pending_ops.trim_over_bound = true;
+                }
             }
         }
         shard
@@ -200,95 +224,38 @@ impl Shard {
         now + delay
     }
 
-    pub(crate) fn set_del_prefix(&self, val: &[u8]) {
-        let mut del_prefixes = DeletePrefixes::unmarshal(val, self.inner_key_off);
+    pub(crate) fn merge_del_prefix(&self, val: &[u8]) {
+        let mut pending_ops = self.pending_ops.write().unwrap();
+        let mut del_prefixes = (*pending_ops.del_prefixes).clone();
+        del_prefixes = del_prefixes.merge(val);
         del_prefixes.schedule_at = self.gen_rand_schedule_del_range_time();
-        let data = self.get_data();
-        let new_data = ShardData::new(
-            data.range.clone(),
-            del_prefixes,
-            data.truncate_ts,
-            data.trim_over_bound,
-            data.mem_tbls.clone(),
-            data.l0_tbls.clone(),
-            data.blob_tbl_map.clone(),
-            data.cfs.clone(),
-            data.unloaded_tbls.clone(),
-        );
-        self.set_data(new_data);
-    }
-
-    pub(crate) fn merge_del_prefix(&self, prefix: &[u8]) {
-        let data = self.get_data();
-        let mut del_prefixes = data.del_prefixes.merge(prefix);
-        del_prefixes.schedule_at = self.gen_rand_schedule_del_range_time();
-        let new_data = ShardData::new(
-            data.range.clone(),
-            del_prefixes,
-            data.truncate_ts,
-            data.trim_over_bound,
-            data.mem_tbls.clone(),
-            data.l0_tbls.clone(),
-            data.blob_tbl_map.clone(),
-            data.cfs.clone(),
-            data.unloaded_tbls.clone(),
-        );
-        self.set_data(new_data);
+        pending_ops.del_prefixes = Arc::new(del_prefixes);
     }
 
     pub(crate) fn set_truncate_ts(&self, val: &[u8]) -> bool {
+        let mut pending_ops = self.pending_ops.write().unwrap();
         let truncate_ts = TruncateTs::unmarshal(val);
-        let data = self.get_data();
-        if let Some(curr_truncate_ts) = data.truncate_ts {
+        if let Some(curr_truncate_ts) = pending_ops.truncate_ts {
             if curr_truncate_ts <= truncate_ts {
-                warn!("ignore another PiTR before the current one has completed";
-                    "current truncated_ts" => ?curr_truncate_ts, "incoming truncated_ts" => ?truncate_ts,
-                    "shard" => ?self.tag());
+                warn!("ignore another PiTR before the current one has completed"; "current truncated_ts" => ?curr_truncate_ts, "incoming truncated_ts" => ?truncate_ts, "shard" => ?self.tag());
                 return false;
             } else {
-                warn!("overwrite truncate_ts";
-                    "current truncated_ts" => ?curr_truncate_ts, "incoming truncated_ts" => ?truncate_ts,
-                    "shard" => ?self.tag());
+                warn!("overwrite truncate_ts";"current truncated_ts" => ?curr_truncate_ts, "incoming truncated_ts" => ?truncate_ts, "shard" => ?self.tag());
+                pending_ops.truncate_ts = Some(truncate_ts);
             }
+        } else {
+            pending_ops.truncate_ts = Some(truncate_ts);
         }
-
-        let new_data = ShardData::new(
-            data.range.clone(),
-            data.del_prefixes.clone(),
-            Some(truncate_ts),
-            data.trim_over_bound,
-            data.mem_tbls.clone(),
-            data.l0_tbls.clone(),
-            data.blob_tbl_map.clone(),
-            data.cfs.clone(),
-            data.unloaded_tbls.clone(),
-        );
-        self.set_data(new_data);
-
-        info!("ready to truncate ts"; "truncate_ts" => ?truncate_ts, "shard" => ?self.tag());
         true
     }
 
-    pub(crate) fn set_trim_over_bound(&self, val: &[u8]) {
-        let trim_over_bound = !val.is_empty();
-
-        let data = self.get_data();
-        let new_data = ShardData::new(
-            data.range.clone(),
-            data.del_prefixes.clone(),
-            data.truncate_ts,
-            trim_over_bound,
-            data.mem_tbls.clone(),
-            data.l0_tbls.clone(),
-            data.blob_tbl_map.clone(),
-            data.cfs.clone(),
-            data.unloaded_tbls.clone(),
-        );
-        self.set_data(new_data);
-
-        if trim_over_bound {
-            info!("{} ready to trim_over_bound", self.tag());
+    pub(crate) fn set_trim_over_bound(&self, val: &[u8]) -> bool {
+        let mut pending_ops = self.pending_ops.write().unwrap();
+        if !val.is_empty() {
+            pending_ops.trim_over_bound = true;
+            return true;
         }
+        false
     }
 
     pub fn get_suggest_split_key(&self) -> Option<Bytes> {
@@ -423,8 +390,45 @@ impl Shard {
         self.initial_flushed.load(Acquire)
     }
 
+    pub(crate) fn ready_to_destroy_range(
+        del_prefixes: &DeletePrefixes,
+        shard_data: &ShardData,
+    ) -> bool {
+        !del_prefixes.is_empty() && del_prefixes.after_scheduled_time()
+        // No memtable contains data covered by deleted prefixes.
+        && !shard_data.mem_tbls.iter().any(|mem_tbl| {
+            del_prefixes
+                .inner_delete_ranges()
+                .any(|(start, end)| mem_tbl.has_data_in_range(start, end))
+        })
+    }
+
+    fn ready_to_truncate_ts(truncate_ts: &Option<TruncateTs>, shard_data: &ShardData) -> bool {
+        truncate_ts.is_some()
+        // No memtable contains data with version > truncate_ts.
+        && !shard_data.mem_tbls.iter().any(|mem_tbl| {
+            mem_tbl.data_max_ts() > truncate_ts.unwrap().inner()
+        })
+    }
+
+    fn ready_to_trim_over_bound(trim_over_bound: bool, shard_data: &ShardData) -> bool {
+        trim_over_bound && !shard_data.has_mem_over_bound_data()
+    }
+
     fn refresh_compaction_priority(&self) {
         let data = self.get_data();
+        let pending_ops = self.pending_ops.read().unwrap();
+
+        if Self::ready_to_destroy_range(&pending_ops.del_prefixes, &data) {
+            *self.compaction_priority.write().unwrap() = Some(CompactionPriority::DestroyRange);
+            return;
+        } else if Self::ready_to_truncate_ts(&pending_ops.truncate_ts, &data) {
+            *self.compaction_priority.write().unwrap() = Some(CompactionPriority::TruncateTs);
+            return;
+        } else if Self::ready_to_trim_over_bound(pending_ops.trim_over_bound, &data) {
+            *self.compaction_priority.write().unwrap() = Some(CompactionPriority::TrimOverBound);
+            return;
+        }
         if !data.blob_tbl_map.is_empty() {
             let blob_table_utilization = {
                 let mut in_use_blob_size = 0;
@@ -530,7 +534,15 @@ impl Shard {
     }
 
     pub fn get_trim_over_bound(&self) -> bool {
-        self.get_data().trim_over_bound
+        self.pending_ops.read().unwrap().trim_over_bound
+    }
+
+    pub fn get_del_prefixes(&self) -> Arc<DeletePrefixes> {
+        self.pending_ops.read().unwrap().del_prefixes.clone()
+    }
+
+    pub fn get_truncate_ts(&self) -> Option<TruncateTs> {
+        self.pending_ops.read().unwrap().truncate_ts
     }
 
     pub fn data_all_persisted(&self) -> bool {
@@ -542,13 +554,7 @@ impl Shard {
     }
 
     pub(crate) fn ready_to_compact(&self) -> bool {
-        let data = self.get_data();
-        self.is_active()
-            && self.get_initial_flushed()
-            && (self.get_compaction_priority().is_some()
-                || data.ready_to_destroy_range()
-                || data.ready_to_truncate_ts()
-                || data.ready_to_trim_over_bound())
+        self.is_active() && self.get_initial_flushed()
     }
 
     pub(crate) fn add_parent_mem_tbls(&self, parent: Arc<Shard>) {
@@ -559,9 +565,6 @@ impl Shard {
         info!("{} add parent mem-tables {:?}", self.tag(), mem_tbl_vers);
         let new_data = ShardData::new(
             shard_data.range.clone(),
-            shard_data.del_prefixes.clone(),
-            shard_data.truncate_ts,
-            shard_data.trim_over_bound,
             mem_tbls,
             shard_data.l0_tbls.clone(),
             shard_data.blob_tbl_map.clone(),
@@ -602,12 +605,8 @@ impl Deref for ShardData {
 
 impl ShardData {
     pub(crate) fn new_empty(shard_range: ShardRange) -> Self {
-        let inner_key_off = shard_range.inner_key_off;
         Self::new(
             shard_range,
-            DeletePrefixes::new_with_inner_key_off(inner_key_off),
-            None,
-            false,
             vec![CfTable::new()],
             vec![],
             Arc::new(HashMap::new()),
@@ -618,9 +617,6 @@ impl ShardData {
 
     pub(crate) fn new(
         range: ShardRange,
-        del_prefixes: DeletePrefixes,
-        truncate_ts: Option<TruncateTs>,
-        trim_over_bound: bool,
         mem_tbls: Vec<memtable::CfTable>,
         l0_tbls: Vec<L0Table>,
         blob_tbl_map: Arc<HashMap<u64, BlobTable>>,
@@ -632,9 +628,6 @@ impl ShardData {
         Self {
             core: Arc::new(ShardDataCore {
                 range,
-                del_prefixes,
-                truncate_ts,
-                trim_over_bound,
                 mem_tbls,
                 l0_tbls,
                 blob_tbl_map,
@@ -647,9 +640,6 @@ impl ShardData {
 
 pub(crate) struct ShardDataCore {
     pub(crate) range: ShardRange,
-    pub(crate) del_prefixes: DeletePrefixes,
-    pub(crate) truncate_ts: Option<TruncateTs>,
-    pub(crate) trim_over_bound: bool,
     pub(crate) mem_tbls: Vec<memtable::CfTable>,
     pub(crate) l0_tbls: Vec<L0Table>,
     pub(crate) blob_tbl_map: Arc<HashMap<u64, BlobTable>>,
@@ -784,23 +774,6 @@ impl ShardDataCore {
         self.mem_tbls.len() == 1 && self.mem_tbls[0].size() == 0
     }
 
-    pub fn writable_mem_table_has_data_in_deleted_prefix(&self) -> bool {
-        let mem_tbl = self.get_writable_mem_table();
-        self.del_prefixes
-            .inner_delete_ranges()
-            .any(|(start, end)| mem_tbl.has_data_in_range(start, end))
-    }
-
-    pub fn ready_to_destroy_range(&self) -> bool {
-        !self.del_prefixes.is_empty() && self.del_prefixes.after_scheduled_time()
-            // No memtable contains data covered by deleted prefixes.
-            && !self.mem_tbls.iter().any(|mem_tbl| {
-                self.del_prefixes
-                    .inner_delete_ranges()
-                    .any(|(start, end)| mem_tbl.has_data_in_range(start, end))
-            })
-    }
-
     pub(crate) fn has_mem_over_bound_data(&self) -> bool {
         for mem_tbl in &self.mem_tbls {
             for cf in 0..NUM_CFS {
@@ -839,23 +812,6 @@ impl ShardDataCore {
 
     pub fn has_over_bound_data(&self) -> bool {
         self.has_mem_over_bound_data() || self.has_file_over_bound_data()
-    }
-
-    pub fn writable_mem_table_need_truncate_ts(&self) -> bool {
-        let mem_tbl = self.get_writable_mem_table();
-        mem_tbl.data_max_ts() > self.truncate_ts.unwrap().inner()
-    }
-
-    pub fn ready_to_truncate_ts(&self) -> bool {
-        self.truncate_ts.is_some()
-        // No memtable contains data with version > truncate_ts.
-        && !self.mem_tbls.iter().any(|mem_tbl| {
-            mem_tbl.data_max_ts() > self.truncate_ts.unwrap().inner()
-        })
-    }
-
-    pub fn ready_to_trim_over_bound(&self) -> bool {
-        self.trim_over_bound && !self.has_mem_over_bound_data()
     }
 }
 

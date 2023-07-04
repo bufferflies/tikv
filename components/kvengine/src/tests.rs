@@ -117,14 +117,7 @@ fn test_destroy_range() {
         wb.set_property(DEL_PREFIXES_KEY, key[..key.len() - 1].as_bytes());
         write_data(wb, &applier_tx);
     }
-    assert!(
-        !engine
-            .get_shard(1)
-            .unwrap()
-            .get_data()
-            .del_prefixes
-            .is_empty()
-    );
+    assert!(!engine.get_shard(1).unwrap().get_del_prefixes().is_empty());
     // Memtable is switched because it contains data covered by the delete-prefixes.
     let stats = engine.get_shard_stat(1);
     assert_eq!(
@@ -134,11 +127,12 @@ fn test_destroy_range() {
     let wait_for_destroying_range = || {
         for _ in 0..30 {
             let shard = engine.get_shard(1).unwrap();
-            let shard_data = shard.get_data();
-            if shard_data.del_prefixes.is_empty() {
+            let data = shard.get_data();
+            let del_prefixes = shard.get_del_prefixes();
+            if del_prefixes.is_empty() {
                 break;
             }
-            if shard_data.ready_to_destroy_range() {
+            if Shard::ready_to_destroy_range(&del_prefixes, &data) {
                 engine.trigger_compact(shard.id_ver());
             }
             thread::sleep(Duration::from_millis(100));
@@ -266,7 +260,7 @@ fn test_truncate_ts_request() {
     write_data(wb, &applier_tx);
     assert_eq!(
         Some(truncate_ts),
-        engine.get_shard(1).unwrap().get_data().truncate_ts
+        engine.get_shard(1).unwrap().get_truncate_ts()
     );
     assert_eq!(
         truncate_ts.marshal().as_slice(),
@@ -291,7 +285,7 @@ fn test_truncate_ts_request() {
     ret.unwrap();
     assert_eq!(
         Some(truncate_ts),
-        engine.get_shard(1).unwrap().get_data().truncate_ts
+        engine.get_shard(1).unwrap().get_truncate_ts()
     );
 
     // truncated_ts is equal than current truncate ts, remove truncate ts in shard.
@@ -300,7 +294,7 @@ fn test_truncate_ts_request() {
     cs.set_property_value(truncated_ts.marshal().to_vec());
     let ret = engine.apply_change_set(apply::ChangeSet::new(cs));
     ret.unwrap();
-    assert_eq!(None, engine.get_shard(1).unwrap().get_data().truncate_ts);
+    assert_eq!(None, engine.get_shard(1).unwrap().get_truncate_ts());
 }
 
 #[test]
@@ -317,7 +311,7 @@ fn test_truncate_ts() {
         wb.set_property(TRUNCATE_TS_KEY, truncate_ts.marshal().as_slice());
         write_data(wb, &applier_tx);
 
-        let res = engine.get_shard(1).unwrap().get_data().truncate_ts;
+        let res = engine.get_shard(1).unwrap().get_truncate_ts();
         if res.is_none() && tolerate_none {
             return;
         }
@@ -336,14 +330,7 @@ fn test_truncate_ts() {
 
     let wait_for_truncate_ts = || {
         let ok = try_wait(
-            || {
-                engine
-                    .get_shard(1)
-                    .unwrap()
-                    .get_data()
-                    .truncate_ts
-                    .is_none()
-            },
+            || engine.get_shard(1).unwrap().get_truncate_ts().is_none(),
             10,
         );
         assert!(
@@ -565,9 +552,6 @@ fn test_lost_tombstone_issue() {
     cf_builder.add_table(new_table(13, 120, 200, 103, false), 1);
     let data = ShardData::new(
         shard.range.clone(),
-        DeletePrefixes::new_with_inner_key_off(0),
-        None,
-        false,
         vec![CfTable::new()],
         vec![],
         Arc::new(HashMap::default()),

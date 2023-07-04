@@ -454,27 +454,24 @@ impl Engine {
         let shard = self.get_shard_with_ver(id_ver.id, id_ver.ver).ok()?;
         let tag = shard.tag();
         if !shard.ready_to_compact() {
-            info!("avoid shard {} compaction", tag);
+            info!("Shard {} is not ready for compaction", tag);
             return None;
         }
-        // Destroy range & truncate ts has higher priority than compaction.
-        if shard.get_data().ready_to_destroy_range() {
-            return Some(self.destroy_range(&shard));
-        }
-        if shard.get_data().ready_to_truncate_ts() {
-            return self.truncate_ts(&shard).transpose();
-        }
-        if shard.get_data().ready_to_trim_over_bound() {
-            return self.trim_over_bound(&shard).transpose();
-        }
         store_bool(&shard.compacting, true);
-        let pri = shard.get_compaction_priority()?;
-        match pri {
-            CompactionPriority::L0 { .. } => self.trigger_l0_compaction(&shard),
-            CompactionPriority::L1Plus { cf, level, .. } => {
+        match shard.get_compaction_priority() {
+            Some(CompactionPriority::L0 { .. }) => self.trigger_l0_compaction(&shard),
+            Some(CompactionPriority::L1Plus { cf, level, .. }) => {
                 self.trigger_l1_plus_compaction(&shard, cf, level, id_ver)
             }
-            CompactionPriority::Major => self.trigger_major_compacton(&shard),
+            Some(CompactionPriority::Major) => self.trigger_major_compacton(&shard),
+            Some(CompactionPriority::DestroyRange) => Some(self.destroy_range(&shard)),
+            Some(CompactionPriority::TruncateTs) => self.truncate_ts(&shard).transpose(),
+            Some(CompactionPriority::TrimOverBound) => self.trim_over_bound(&shard).transpose(),
+            None => {
+                info!("Shard {} is not urgent for compaction", tag);
+                store_bool(&shard.compacting, false);
+                None
+            }
         }
     }
 
@@ -562,21 +559,21 @@ impl Engine {
     }
 
     fn destroy_range(&self, shard: &Shard) -> Result<pb::ChangeSet> {
+        let del_prefixes = shard.get_del_prefixes();
         let data = shard.get_data();
-        assert!(!data.del_prefixes.is_empty());
+        assert!(!del_prefixes.is_empty());
         // Tables that full covered by delete-prefixes.
         let mut deletes = vec![];
         // Tables that partially covered by delete-prefixes.
         let mut overlaps = vec![];
         for t in &data.l0_tbls {
-            if data.del_prefixes.cover_range(t.smallest(), t.biggest()) {
+            if del_prefixes.cover_range(t.smallest(), t.biggest()) {
                 let mut delete = pb::TableDelete::default();
                 delete.set_id(t.id());
                 delete.set_level(0);
                 delete.set_cf(-1);
                 deletes.push(delete);
-            } else if data
-                .del_prefixes
+            } else if del_prefixes
                 .inner_delete_ranges()
                 .any(|(start, end)| t.has_data_in_range(start, end))
             {
@@ -585,14 +582,13 @@ impl Engine {
         }
         data.for_each_level(|cf, lh| {
             for t in lh.tables.as_slice() {
-                if data.del_prefixes.cover_range(t.smallest(), t.biggest()) {
+                if del_prefixes.cover_range(t.smallest(), t.biggest()) {
                     let mut delete = pb::TableDelete::default();
                     delete.set_id(t.id());
                     delete.set_level(lh.level as u32);
                     delete.set_cf(cf as i32);
                     deletes.push(delete);
-                } else if data
-                    .del_prefixes
+                } else if del_prefixes
                     .inner_delete_ranges()
                     .any(|(start, end)| t.has_overlap(start, end, false))
                 {
@@ -605,7 +601,7 @@ impl Engine {
         info!(
             "start destroying range for {}, {:?}, destroyed: {}, overlapping: {}",
             shard.tag(),
-            data.del_prefixes,
+            del_prefixes,
             deletes.len(),
             overlaps.len()
         );
@@ -618,9 +614,9 @@ impl Engine {
             let mut req = self.new_compact_request_with_shard(shard, 0, 0);
             req.destroy_range = true;
             req.in_place_compact_files = overlaps.clone();
-            req.del_prefixes = data.del_prefixes.marshal();
+            req.del_prefixes = del_prefixes.marshal();
             req.file_ids = self.id_allocator.alloc_id(overlaps.len()).unwrap();
-            let in_place_compaction = InPlaceCompaction::DestroyRange(data.del_prefixes.marshal());
+            let in_place_compaction = InPlaceCompaction::DestroyRange(del_prefixes.marshal());
             req.compaction_tp = CompactionType::InPlace {
                 file_ids: overlaps,
                 block_size: self.opts.table_builder_options.block_size,
@@ -636,12 +632,12 @@ impl Engine {
         cs.set_shard_id(shard.id);
         cs.set_shard_ver(shard.ver);
         cs.set_property_key(DEL_PREFIXES_KEY.to_string());
-        cs.set_property_value(data.del_prefixes.marshal());
+        cs.set_property_value(del_prefixes.marshal());
         Ok(cs)
     }
 
     pub(crate) fn truncate_ts(&self, shard: &Shard) -> Result<Option<pb::ChangeSet>> {
-        self.truncate_with_ts(shard, shard.get_data().truncate_ts.unwrap())
+        self.truncate_with_ts(shard, shard.get_truncate_ts().unwrap())
     }
 
     // Also used by keyspace restore
@@ -701,7 +697,7 @@ impl Engine {
 
     fn trim_over_bound(&self, shard: &Shard) -> Result<Option<pb::ChangeSet>> {
         let data = shard.get_data();
-        if !data.trim_over_bound {
+        if !shard.get_trim_over_bound() {
             // `data.trim_over_bound is possible to be false.
             // See https://github.com/tidbcloud/cloud-storage-engine/issues/663.
             info!(
@@ -1186,6 +1182,9 @@ pub(crate) enum CompactionPriority {
     L0 { score: f64 },
     L1Plus { cf: isize, score: f64, level: usize },
     Major,
+    DestroyRange,
+    TruncateTs,
+    TrimOverBound,
 }
 
 impl CompactionPriority {
@@ -1193,7 +1192,10 @@ impl CompactionPriority {
         match self {
             CompactionPriority::L0 { score } => *score,
             CompactionPriority::L1Plus { score, .. } => *score,
-            CompactionPriority::Major => f64::MAX,
+            CompactionPriority::Major => f64::MAX - 1.0,
+            CompactionPriority::DestroyRange => f64::MAX,
+            CompactionPriority::TruncateTs => f64::MAX,
+            CompactionPriority::TrimOverBound => f64::MAX,
         }
     }
 
@@ -1202,6 +1204,9 @@ impl CompactionPriority {
             CompactionPriority::L0 { .. } => 0,
             CompactionPriority::L1Plus { level, .. } => *level as isize,
             CompactionPriority::Major => -1,
+            CompactionPriority::DestroyRange => -1,
+            CompactionPriority::TruncateTs => -1,
+            CompactionPriority::TrimOverBound => -1,
         }
     }
 
@@ -1210,6 +1215,9 @@ impl CompactionPriority {
             CompactionPriority::L0 { .. } => -1,
             CompactionPriority::L1Plus { cf, .. } => *cf,
             CompactionPriority::Major => -1,
+            CompactionPriority::DestroyRange => -1,
+            CompactionPriority::TruncateTs => -1,
+            CompactionPriority::TrimOverBound => -1,
         }
     }
 }
@@ -2963,20 +2971,6 @@ impl CompactRunner {
         let engine = self.engine.clone();
         self.pending
             .retain(|id_ver| engine.get_shard_with_ver(id_ver.id, id_ver.ver).is_ok());
-
-        // Pick the shard that ready to destroy range / truncate ts / trim over bound.
-        if let Some(id_ver) = self.pending.iter().find(|id_ver| {
-            self.engine
-                .get_shard_with_ver(id_ver.id, id_ver.ver)
-                .map(|shard| {
-                    shard.get_data().ready_to_destroy_range()
-                        || shard.get_data().ready_to_truncate_ts()
-                        || shard.get_data().ready_to_trim_over_bound()
-                })
-                .unwrap_or(false)
-        }) {
-            return Some(*id_ver);
-        }
 
         // Find the shard with highest compaction priority.
         self.pending

@@ -350,6 +350,7 @@ impl super::Shard {
         let compaction_cf = priority.as_ref().map_or(0, |x| x.cf());
         let compaction_level = priority.as_ref().map_or(0, |x| x.level());
         let compaction_score = priority.as_ref().map_or(0f64, |x| x.score());
+        let pending_ops = self.pending_ops.read().unwrap();
         ShardStats {
             id: self.id,
             ver: self.ver,
@@ -388,10 +389,10 @@ impl super::Shard {
             compaction_level,
             compaction_score,
             has_over_bound_data: data.has_over_bound_data(),
-            has_del_prefixes: !data.del_prefixes.is_empty(),
-            ready_to_destroy_range: data.ready_to_destroy_range(),
-            truncate_ts: data.truncate_ts.map(|x| x.inner()),
-            trim_over_bound: data.trim_over_bound,
+            has_del_prefixes: !pending_ops.del_prefixes.is_empty(),
+            ready_to_destroy_range: Self::ready_to_destroy_range(&pending_ops.del_prefixes, &data),
+            truncate_ts: pending_ops.truncate_ts.map(|x| x.inner()),
+            trim_over_bound: pending_ops.trim_over_bound,
         }
     }
 }

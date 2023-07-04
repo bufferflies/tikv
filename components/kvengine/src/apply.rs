@@ -229,9 +229,6 @@ impl EngineCore {
 
             let new_data = ShardData::new(
                 old_data.range.clone(),
-                old_data.del_prefixes.clone(),
-                old_data.truncate_ts,
-                old_data.trim_over_bound,
                 new_mem_tbls,
                 new_l0_tbls,
                 old_data.blob_tbl_map.clone(),
@@ -261,9 +258,6 @@ impl EngineCore {
         });
         let new_data = ShardData::new(
             data.range.clone(),
-            data.del_prefixes.clone(),
-            data.truncate_ts,
-            data.trim_over_bound,
             mem_tbls,
             l0s,
             Arc::new(blob_tbl_map),
@@ -326,9 +320,6 @@ impl EngineCore {
         }
         let new_data = ShardData::new(
             data.range.clone(),
-            data.del_prefixes.clone(),
-            data.truncate_ts,
-            data.trim_over_bound,
             data.mem_tbls.clone(),
             new_l0s,
             Arc::new(new_blob_tbl_map),
@@ -427,9 +418,6 @@ impl EngineCore {
 
         let new_data = ShardData::new(
             shard.range.clone(),
-            data.del_prefixes.clone(),
-            data.truncate_ts,
-            data.trim_over_bound,
             data.mem_tbls.clone(),
             new_l0s,
             Arc::new(new_blob_tbl_map),
@@ -514,20 +502,19 @@ impl EngineCore {
         let mut del_files = HashMap::new();
         let (new_l0s, new_cfs) = self.get_sstables_from_table_change(&data, cs, tc, &mut del_files);
 
-        assert_eq!(cs.get_property_key(), DEL_PREFIXES_KEY);
-        let done = DeletePrefixes::unmarshal(cs.get_property_value(), shard.inner_key_off);
         let new_data = ShardData::new(
             data.range.clone(),
-            data.del_prefixes.split(&done),
-            data.truncate_ts,
-            data.trim_over_bound,
             data.mem_tbls.clone(),
             new_l0s,
             data.blob_tbl_map.clone(),
             new_cfs,
             data.unloaded_tbls.clone(),
         );
-        let new_del_prefixes = new_data.del_prefixes.marshal();
+        assert_eq!(cs.get_property_key(), DEL_PREFIXES_KEY);
+        let done = DeletePrefixes::unmarshal(cs.get_property_value(), shard.inner_key_off);
+        let mut lock = shard.pending_ops.write().unwrap();
+        lock.del_prefixes = Arc::new(lock.del_prefixes.split(&done));
+        let new_del_prefixes = lock.del_prefixes.marshal();
         shard.set_data(new_data);
         shard.set_property(DEL_PREFIXES_KEY, &new_del_prefixes);
         self.remove_dfs_files(shard, del_files);
@@ -541,17 +528,8 @@ impl EngineCore {
         let mut del_files = HashMap::new();
         let (new_l0s, new_cfs) = self.get_sstables_from_table_change(&data, cs, tc, &mut del_files);
         assert_eq!(cs.get_property_key(), TRUNCATE_TS_KEY);
-        let mut new_truncate_ts = data.truncate_ts;
-        let truncated_ts = TruncateTs::unmarshal(cs.get_property_value());
-        // if applied truncate_ts is smaller than truncate ts in shard, remove it.
-        if need_update_truncate_ts(data.truncate_ts, truncated_ts) {
-            new_truncate_ts = None;
-        }
         let new_data = ShardData::new(
             data.range.clone(),
-            data.del_prefixes.clone(),
-            new_truncate_ts,
-            data.trim_over_bound,
             data.mem_tbls.clone(),
             new_l0s,
             data.blob_tbl_map.clone(),
@@ -559,7 +537,11 @@ impl EngineCore {
             data.unloaded_tbls.clone(),
         );
         shard.set_data(new_data);
-        if new_truncate_ts.is_none() {
+        let truncated_ts = TruncateTs::unmarshal(cs.get_property_value());
+        // if applied truncate_ts is smaller than truncate ts in shard, remove it.
+        let mut lock = shard.pending_ops.write().unwrap();
+        if need_update_truncate_ts(lock.truncate_ts, truncated_ts) {
+            lock.truncate_ts = None;
             shard.set_property(TRUNCATE_TS_KEY, b"");
         }
         self.remove_dfs_files(shard, del_files);
@@ -574,9 +556,6 @@ impl EngineCore {
         let (new_l0s, new_cfs) = self.get_sstables_from_table_change(&data, cs, tc, &mut del_files);
         let new_data = ShardData::new(
             data.range.clone(),
-            data.del_prefixes.clone(),
-            data.truncate_ts,
-            false,
             data.mem_tbls.clone(),
             new_l0s,
             data.blob_tbl_map.clone(),
@@ -584,6 +563,8 @@ impl EngineCore {
             data.unloaded_tbls.clone(),
         );
         shard.set_data(new_data);
+        let mut lock = shard.pending_ops.write().unwrap();
+        lock.trim_over_bound = false;
         shard.set_property(TRIM_OVER_BOUND, TRIM_OVER_BOUND_DISABLE);
         self.remove_dfs_files(shard, del_files);
     }
@@ -710,9 +691,6 @@ impl EngineCore {
         new_cfs[0] = new_cf;
         let new_data = ShardData::new(
             old_data.range.clone(),
-            old_data.del_prefixes.clone(),
-            old_data.truncate_ts,
-            old_data.trim_over_bound,
             old_data.mem_tbls.clone(),
             new_l0s,
             Arc::new(new_blob_tbl_map),
@@ -750,9 +728,6 @@ impl EngineCore {
             create_snapshot_tables(cs.get_restore_shard(), cs, self.opts.for_restore);
         let new_data = ShardData::new(
             snap_data.range.clone(),
-            snap_data.del_prefixes.clone(),
-            snap_data.truncate_ts,
-            snap_data.trim_over_bound,
             vec![CfTable::new()],
             l0_tbls,
             Arc::new(blob_tbl_map),

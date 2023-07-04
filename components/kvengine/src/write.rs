@@ -120,9 +120,6 @@ impl Engine {
         new_mem_tbls.extend_from_slice(data.mem_tbls.as_slice());
         let new_data = ShardData::new(
             data.range.clone(),
-            data.del_prefixes.clone(),
-            data.truncate_ts,
-            data.trim_over_bound,
             new_mem_tbls,
             data.l0_tbls.clone(),
             data.blob_tbl_map.clone(),
@@ -155,33 +152,47 @@ impl Engine {
                 .get_cf(cf)
                 .put_batch(wb.get_cf_mut(cf), Some(&snap), cf);
         }
+        let mut need_refresh_shard_states = false;
         for (k, v) in std::mem::take(&mut wb.properties) {
-            if k == DEL_PREFIXES_KEY {
-                shard.merge_del_prefix(v.chunk());
-                let data = shard.get_data();
-                if data.writable_mem_table_has_data_in_deleted_prefix() {
-                    wb.set_switch_mem_table();
-                }
-                self.refresh_shard_states(&shard);
-                shard
-                    .properties
-                    .set(k.as_str(), &data.del_prefixes.marshal());
-            } else if k == TRUNCATE_TS_KEY {
-                if shard.set_truncate_ts(v.chunk()) {
+            match k.as_str() {
+                DEL_PREFIXES_KEY => {
+                    shard.merge_del_prefix(v.chunk());
+                    let del_prefixes = shard.get_del_prefixes();
                     let data = shard.get_data();
-                    if data.writable_mem_table_need_truncate_ts() {
+                    let mem_tbl = data.get_writable_mem_table();
+                    if del_prefixes
+                        .inner_delete_ranges()
+                        .any(|(start, end)| mem_tbl.has_data_in_range(start, end))
+                    {
                         wb.set_switch_mem_table();
                     }
-                    self.refresh_shard_states(&shard);
+                    need_refresh_shard_states = true;
+                    shard.properties.set(k.as_str(), &del_prefixes.marshal());
+                }
+                TRUNCATE_TS_KEY => {
+                    if shard.set_truncate_ts(v.chunk()) {
+                        wb.set_switch_mem_table();
+                        let data = shard.get_data();
+                        let mem_tbl = data.get_writable_mem_table();
+                        if mem_tbl.data_max_ts() > shard.get_truncate_ts().unwrap().inner() {
+                            wb.set_switch_mem_table();
+                        }
+                        need_refresh_shard_states = true;
+                        shard.properties.set(k.as_str(), v.chunk());
+                    }
+                }
+                TRIM_OVER_BOUND => {
+                    shard.set_trim_over_bound(v.chunk());
+                    need_refresh_shard_states = true;
                     shard.properties.set(k.as_str(), v.chunk());
                 }
-            } else if k == TRIM_OVER_BOUND {
-                shard.set_trim_over_bound(v.chunk());
-                self.refresh_shard_states(&shard);
-                shard.properties.set(k.as_str(), v.chunk());
-            } else {
-                shard.properties.set(k.as_str(), v.chunk());
+                _ => {
+                    shard.properties.set(k.as_str(), v.chunk());
+                }
             }
+        }
+        if need_refresh_shard_states {
+            self.refresh_shard_states(&shard);
         }
         store_u64(&shard.write_sequence, wb.sequence);
         let size = mem_tbl.size();

@@ -329,12 +329,8 @@ impl EngineCore {
         let shard = Shard::new_for_ingest(engine_id, &cs, self.opts.clone());
         let (l0s, blob_tbls, scfs) =
             create_snapshot_tables(cs.get_snapshot(), &cs, self.opts.for_restore);
-        let old_data = shard.get_data();
         let data = ShardData::new(
             shard.range.clone(),
-            old_data.del_prefixes.clone(),
-            old_data.truncate_ts,
-            old_data.trim_over_bound,
             vec![CfTable::new()],
             l0s,
             Arc::new(blob_tbls),
@@ -649,7 +645,7 @@ impl EngineCore {
         shard.refresh_states();
 
         fail::fail_point!("before_engine_trigger_compact", |_| ());
-        if shard.ready_to_compact() {
+        if shard.ready_to_compact() && shard.get_compaction_priority().is_some() {
             self.trigger_compact(shard.id_ver());
         }
     }

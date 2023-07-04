@@ -259,9 +259,6 @@ impl EngineCore {
 
         let new_data = ShardData::new(
             data.range.clone(),
-            data.del_prefixes.clone(),
-            data.truncate_ts,
-            data.trim_over_bound,
             data.mem_tbls.clone(),
             new_l0s,
             Arc::new(new_blob_tbl_map),
