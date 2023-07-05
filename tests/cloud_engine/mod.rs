@@ -17,6 +17,7 @@ mod load_data;
 mod merge;
 mod native_backup;
 mod replica_read;
+mod transaction;
 mod truncate_ts;
 
 static NODE_ALLOCATOR: AtomicU16 = AtomicU16::new(1);

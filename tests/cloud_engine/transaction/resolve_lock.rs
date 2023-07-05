@@ -1,0 +1,79 @@
+// Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
+
+use std::{thread, time::Duration};
+
+use kvproto::kvrpcpb;
+use test_cloud_server::ServerCluster;
+use tikv_util::time::Instant;
+
+use crate::{alloc_node_id_vec, i_to_key, i_to_val};
+
+#[test]
+fn test_resolve_lock() {
+    test_util::init_log_for_test();
+    let mut cluster = ServerCluster::new(alloc_node_id_vec(3), |_, _| {});
+    cluster.wait_region_replicated(&[], 3);
+    let mut client = cluster.new_client();
+
+    // Split to test for resolve locks on multiple regions.
+    let split_keys = [5, 15, 33, 35];
+    for i in split_keys {
+        client.split(&i_to_key(i));
+    }
+    cluster.wait_pd_region_min_count(split_keys.len() + 1);
+
+    // Test for kv_prewrite.
+    {
+        let mut mutations = vec![];
+        for i in 0..10 {
+            mutations.push(kvrpcpb::Mutation {
+                key: i_to_key(i),
+                value: i_to_val(i),
+                op: kvrpcpb::Op::Put,
+                ..Default::default()
+            });
+        }
+        let pk = mutations[0].key.clone();
+        let start_ts = client.get_ts();
+        // prewrite but no commit.
+        client.kv_prewrite(mutations, pk, start_ts);
+
+        // prewrite should meet locks of previous prewrite.
+        client.put_kv(0..20, i_to_key, i_to_val);
+        client.verify_data_with_ref_store();
+    }
+
+    // Test for kv_get.
+    {
+        let mut mutations = vec![];
+        for i in 30..40 {
+            mutations.push(kvrpcpb::Mutation {
+                key: i_to_key(i),
+                value: i_to_val(i),
+                op: kvrpcpb::Op::Put,
+                ..Default::default()
+            });
+        }
+        let keys: Vec<Vec<u8>> = mutations.iter().map(|m| m.get_key().to_vec()).collect();
+        let start_ts = client.get_ts();
+        let put_time = Instant::now();
+        client.kv_prewrite(mutations, keys[0].clone(), start_ts);
+
+        let mut client1 = cluster.new_client();
+        let key0 = keys[5].clone();
+        let handle = thread::spawn(move || {
+            // `get_key` should wait until committed, and get the committed value.
+            let (val, _) = client1.must_get_key(&key0, put_time);
+            assert_eq!(val, i_to_val(35));
+        });
+
+        thread::sleep(Duration::from_secs(1));
+        let commit_ts = client.get_ts();
+        client.kv_commit(keys, start_ts, commit_ts);
+
+        handle.join().unwrap();
+        client.verify_data_with_ref_store();
+    }
+
+    cluster.stop();
+}

@@ -35,6 +35,7 @@ use crate::{
     client::{ClusterClient, RefStore},
     keyspace::{ClusterKeyspaceClient, KeyspaceManager},
     scheduler::Scheduler,
+    txnlock::lock_resolver::LockResolver,
 };
 
 #[allow(dead_code)]
@@ -296,6 +297,11 @@ impl ServerCluster {
     }
 
     pub fn new_client(&self) -> ClusterClient {
+        self.new_client_opt(true)
+    }
+
+    fn new_client_opt(&self, with_lock_resolver: bool) -> ClusterClient {
+        let lock_resolver = with_lock_resolver.then(|| Box::new(self.new_lock_resolver()));
         ClusterClient {
             pd_client: self.pd_client.clone(),
             channels: self.channels.clone(),
@@ -303,6 +309,7 @@ impl ServerCluster {
             regions: Default::default(),
             ref_store: self.ref_store.clone(),
             max_ts: Default::default(),
+            lock_resolver,
         }
     }
 
@@ -320,6 +327,11 @@ impl ServerCluster {
             store_ids: self.get_stores(),
             lock: self.schedule_lock.clone(),
         }
+    }
+
+    pub fn new_lock_resolver(&self) -> LockResolver {
+        // `with_lock_resolver` must be false, otherwise it will cause dead loop.
+        LockResolver::new(self.new_client_opt(false))
     }
 
     pub fn get_data_stats(&self) -> ClusterDataStats {

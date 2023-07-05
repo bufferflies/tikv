@@ -10,7 +10,7 @@ use std::{
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc, RwLock,
     },
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use collections::{HashMap, HashMapEntry, HashSet};
@@ -1914,12 +1914,22 @@ impl PdClient for TestPdClient {
         assert!(count > 0);
         assert!(count < (1 << TSO_PHYSICAL_SHIFT_BITS));
 
+        let current_physical = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
         let mut old_tso = self.tso.load(Ordering::SeqCst);
         loop {
-            let ts: TimeStamp = old_tso.into();
+            let old_ts: TimeStamp = old_tso.into();
 
-            // Add to logical part first.
-            let (mut physical, mut logical) = (ts.physical(), ts.logical() + count as u64);
+            let (mut physical, mut logical) = if current_physical > old_ts.physical() {
+                // Assign to physical part.
+                (current_physical, (count - 1) as u64)
+            } else {
+                // Add to logical part if in the same physical millisecond.
+                // Also tolerate system clock fall back.
+                (old_ts.physical(), old_ts.logical() + count as u64)
+            };
 
             // When logical part is overflow, add to physical part.
             // Moreover, logical part must not less than `count-1`, as the

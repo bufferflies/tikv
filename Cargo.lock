@@ -6695,6 +6695,7 @@ dependencies = [
  "test_pd_client",
  "test_raftstore",
  "test_util",
+ "thiserror",
  "tikv",
  "tikv_util",
  "tokio",

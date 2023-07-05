@@ -1,7 +1,7 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     ops::{
         Bound::{Excluded, Included, Unbounded},
         Deref, DerefMut, Range,
@@ -16,9 +16,9 @@ use std::{
 
 use futures::executor::block_on;
 use grpcio::Channel;
+use kvengine::ShardTag;
 use kvproto::{
-    coprocessor as coppb,
-    errorpb::Error,
+    coprocessor as coppb, errorpb, kvrpcpb,
     kvrpcpb::{
         ApiVersion, CommitRequest, Context, GetRequest, IsolationLevel, Mutation, Op,
         PrewriteRequest, SplitRegionRequest,
@@ -34,14 +34,29 @@ use tikv::storage::mvcc::TimeStamp;
 use tikv_util::{
     box_err,
     codec::bytes::{decode_bytes, encode_bytes},
+    debug, info,
     time::Instant,
     warn,
 };
 
-// use fail::fail_point;
-use crate::{must_wait, try_wait};
+use crate::{
+    must_wait, try_wait,
+    txnlock::lock_resolver::{LockResolver, ResolveLocksOptions},
+};
 
-pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Sync + Send>>;
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("Other error {0}")]
+    Other(#[from] Box<dyn std::error::Error + Send + Sync>),
+    #[error("Pd error {0}")]
+    Pd(#[from] pd_client::Error),
+    #[error("Write conflict {0:?}")]
+    WriteConflict(kvrpcpb::WriteConflict),
+    #[error("Transaction not found {0:?}")]
+    TxnNotFound(kvrpcpb::TxnNotFound),
+}
+
+pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Default, Clone)]
 pub struct RefStore(HashMap<Vec<u8>, Option<Vec<u8>>>); // `None` means the key has been deleted.
@@ -79,6 +94,11 @@ pub struct ClusterClient {
     pub(crate) regions: HashMap<u64, RawRegion>,
     pub(crate) ref_store: Arc<Mutex<RefStore>>,
     pub(crate) max_ts: AtomicU64,
+
+    // `lock_resolver` embed a `ClusterClient` to reuse methods to communicate with tikv-server.
+    // So we need the `Option<Box>` to resolve circular dependency.
+    // TODO: separate methods of RPCs (kv_xxx) from ClusterClient.
+    pub(crate) lock_resolver: Option<Box<LockResolver>>,
 }
 
 // Named as `RequestPeerRole` to avoid conflict with `metapb::PeerRole`.
@@ -328,6 +348,7 @@ impl ClusterClient {
                 return;
             }
             let ctx = ctx.unwrap();
+            let tag = Self::tag_from_ctx(&ctx);
             let store_id = ctx.get_peer().get_store_id();
             let kv_client = self.get_kv_client(store_id);
             let mut prewrite_req = PrewriteRequest::default();
@@ -337,6 +358,7 @@ impl ClusterClient {
             prewrite_req.start_version = ts.into_inner();
             prewrite_req.lock_ttl = 3000;
             prewrite_req.min_commit_ts = prewrite_req.start_version + 1;
+            debug!("{} prewrite {:?}", tag, prewrite_req);
             let result = kv_client.kv_prewrite(&prewrite_req);
             if result.is_err() {
                 store_id_errors.push((store_id, format!("{:?}", result.unwrap_err())));
@@ -344,7 +366,7 @@ impl ClusterClient {
                 self.update_cache_by_id(region_id, None);
                 continue;
             }
-            let resp = result.unwrap();
+            let mut resp = result.unwrap();
             if resp.has_region_error() {
                 let region_err = resp.get_region_error();
                 if self.handle_retryable_error(region_id, region_err) {
@@ -357,13 +379,17 @@ impl ClusterClient {
                 }
                 panic!("unexpected error {:?}", region_err);
             }
-            let key_errors = resp.get_errors();
+            let key_errors = resp.take_errors();
             if !key_errors.is_empty() {
-                // TODO: resolve locks
-                panic!(
-                    "{} prewrite failed with key errors {:?}",
-                    region_id, key_errors
-                );
+                info!("{} prewrite: encounters key_errors: {:?}", tag, key_errors);
+                self.handle_key_errors(
+                    &tag,
+                    prewrite_req.start_version,
+                    false,
+                    key_errors.into_vec(),
+                )
+                .expect("handle_key_errors");
+                continue;
             }
             return;
         }
@@ -434,6 +460,146 @@ impl ClusterClient {
             return;
         }
         panic!("{} commit failed {:?}", region_id, store_id_errors,);
+    }
+
+    // TODO: eliminate duplicated codes for handling network & region errors.
+    pub fn kv_check_txn_status(
+        &mut self,
+        primary_key: &[u8],
+        lock_ts: u64,
+        caller_start_ts: u64,
+        current_ts: u64,
+        rollback_if_not_exist: bool,
+        force_sync_commit: bool,
+        resolving_pessimistic_lock: bool,
+    ) -> Result<kvrpcpb::CheckTxnStatusResponse> {
+        let stat_time = Instant::now();
+        let timeout = Duration::from_secs(5);
+        let mut last_err: Option<Error> = None;
+        let mut tag = ShardTag::default();
+        while stat_time.saturating_elapsed() < timeout {
+            let region_id = self.get_region_id(primary_key);
+            let ctx = self.new_rpc_ctx(region_id).unwrap();
+            tag = Self::tag_from_ctx(&ctx);
+            let client = self.get_kv_client(ctx.get_peer().get_store_id());
+            let mut req = kvrpcpb::CheckTxnStatusRequest::default();
+            req.set_context(ctx);
+            req.set_primary_key(primary_key.to_vec());
+            req.set_lock_ts(lock_ts);
+            req.set_caller_start_ts(caller_start_ts);
+            req.set_current_ts(current_ts);
+            req.set_rollback_if_not_exist(rollback_if_not_exist);
+            req.set_force_sync_commit(force_sync_commit);
+            req.set_resolving_pessimistic_lock(resolving_pessimistic_lock);
+            // TODO: req.set_verify_is_primary
+            let result = client.kv_check_txn_status(&req);
+            if result.is_err() {
+                last_err = Some(box_err!(
+                    "{} kv_check_txn_status error: {:?}",
+                    tag,
+                    result.unwrap_err()
+                ));
+                warn!("{:?}", last_err);
+                sleep(Duration::from_millis(100));
+                self.update_cache_by_id(region_id, None);
+                continue;
+            }
+
+            let resp = result.unwrap();
+            if resp.has_region_error() {
+                let region_err = resp.get_region_error();
+                last_err = Some(box_err!(
+                    "{} kv_check_txn_status: region_err {:?}",
+                    tag,
+                    region_err
+                ));
+                warn!("{:?}", last_err);
+                if self.handle_retryable_error(region_id, region_err) {
+                    continue;
+                }
+                if self.handle_region_epoch_not_match_or_not_found(region_err) {
+                    continue;
+                }
+                panic!("{:?}", last_err);
+            }
+
+            return Ok(resp);
+        }
+        panic!("{} kv_check_txn_status failed {:?}", tag, last_err.unwrap());
+    }
+
+    // TODO: eliminate duplicated codes for handling network & region errors.
+    // TODO: support lite: resolve single lock when number of keys is small.
+    pub fn kv_resolve_lock(
+        &mut self,
+        start_version: u64,
+        commit_version: Option<u64>,
+        key: Vec<u8>,
+        clean_regions: &mut HashSet<RegionIdVer>,
+    ) -> Result<()> {
+        let stat_time = Instant::now();
+        let timeout = Duration::from_secs(15);
+        let mut last_err: Option<Error> = None;
+        let mut tag = ShardTag::default();
+        while stat_time.saturating_elapsed() < timeout {
+            let region = self.get_region_by_key(&key);
+            if clean_regions.contains(&region.id_ver()) {
+                return Ok(());
+            }
+
+            let ctx = self.new_rpc_ctx(region.id()).unwrap();
+            tag = Self::tag_from_ctx(&ctx);
+            let client = self.get_kv_client(ctx.get_peer().get_store_id());
+            let mut req = kvrpcpb::ResolveLockRequest::default();
+            req.set_context(ctx);
+            req.set_start_version(start_version);
+            if let Some(commit_version) = commit_version {
+                req.set_commit_version(commit_version);
+            }
+            let result = client.kv_resolve_lock(&req);
+            if result.is_err() {
+                last_err = Some(box_err!(
+                    "{} kv_resolve_lock error: {:?}",
+                    tag,
+                    result.unwrap_err()
+                ));
+                warn!("{:?}", last_err);
+                sleep(Duration::from_millis(100));
+                self.update_cache_by_id(region.id(), None);
+                continue;
+            }
+
+            let resp = result.unwrap();
+            if resp.has_region_error() {
+                let region_err = resp.get_region_error();
+                last_err = Some(box_err!(
+                    "{} kv_resolve_lock: region_err {:?}",
+                    tag,
+                    region_err
+                ));
+                warn!("{:?}", last_err);
+                if self.handle_retryable_error(region.id(), region_err) {
+                    continue;
+                }
+                if self.handle_region_epoch_not_match_or_not_found(region_err) {
+                    continue;
+                }
+                panic!("{:?}", last_err);
+            }
+
+            if resp.has_error() {
+                panic!(
+                    "{} kv_resolve_lock failed, start_version {}, error {:?}",
+                    tag,
+                    start_version,
+                    resp.get_error()
+                );
+            }
+
+            clean_regions.insert(region.id_ver());
+            return Ok(());
+        }
+        panic!("{} kv_resolve_lock failed {:?}", tag, last_err.unwrap());
     }
 
     fn group_mutations_by_region(
@@ -542,7 +708,7 @@ impl ClusterClient {
             .collect()
     }
 
-    fn handle_retryable_error(&mut self, region_id: u64, region_err: &Error) -> bool {
+    fn handle_retryable_error(&mut self, region_id: u64, region_err: &errorpb::Error) -> bool {
         if region_err.has_not_leader() {
             let region = self.regions.get_mut(&region_id).unwrap();
             if region_err.get_not_leader().has_leader() {
@@ -585,7 +751,7 @@ impl ClusterClient {
         false
     }
 
-    fn handle_region_epoch_not_match_or_not_found(&mut self, region_err: &Error) -> bool {
+    fn handle_region_epoch_not_match_or_not_found(&mut self, region_err: &errorpb::Error) -> bool {
         if region_err.has_epoch_not_match() {
             let not_match = region_err.get_epoch_not_match();
             for region in not_match.get_current_regions() {
@@ -601,6 +767,88 @@ impl ClusterClient {
             return true;
         }
         false
+    }
+
+    fn lock_resolver(&mut self) -> &mut LockResolver {
+        self.lock_resolver.as_mut().unwrap()
+    }
+
+    // Note: only support optimistic transactions by now.
+    // TODO: support pessimistic transactions.
+    fn handle_key_errors(
+        &mut self,
+        tag: &ShardTag,
+        start_ts: u64,
+        is_pessimistic: bool,
+        key_errors: Vec<kvrpcpb::KeyError>,
+    ) -> Result<()> {
+        debug_assert!(!is_pessimistic);
+
+        let mut locks: Vec<kvrpcpb::LockInfo> = Vec::with_capacity(key_errors.len());
+        for key_err in key_errors {
+            let lock = self.handle_single_key_error(tag, start_ts, is_pessimistic, key_err)?;
+            locks.push(lock);
+        }
+        let opts = ResolveLocksOptions {
+            caller_start_ts: start_ts,
+            locks,
+        };
+        let res = self.lock_resolver().resolve_locks(opts)?;
+        if res.until_expire_ms() > 0 {
+            info!(
+                "{} txn {} resolve_locks: sleep {}ms for locks",
+                tag,
+                start_ts,
+                res.until_expire_ms()
+            );
+            sleep(Duration::from_millis(res.until_expire_ms()));
+        } else {
+            info!(
+                "{} txn {} resolve_locks: all locks are resolved",
+                tag, start_ts
+            );
+        }
+        Ok(())
+    }
+
+    fn handle_single_key_error(
+        &self,
+        tag: &ShardTag,
+        start_ts: u64,
+        is_pessimistic: bool,
+        mut key_err: kvrpcpb::KeyError,
+    ) -> Result<kvrpcpb::LockInfo> {
+        if key_err.has_locked() {
+            let lock = key_err.take_locked();
+            debug!(
+                "{} encounters lock, start_ts {}, lock {:?}",
+                tag, start_ts, lock
+            );
+
+            // If an optimistic transaction encounters a lock with larger ts, this
+            // transaction will certainly fail due to a WriteConflict error.
+            // So we can construct and return an error here early.
+            // Pessimistic transactions don't need such an optimization. If this key needs a
+            // pessimistic lock, TiKV will return a PessimisticLockNotFound
+            // error directly if it encounters a different lock. Otherwise,
+            // TiKV returns lock.lock_ttl = 0, and we still need to resolve the lock.
+            if lock.lock_version > start_ts && !is_pessimistic {
+                let write_conflict = kvrpcpb::WriteConflict {
+                    start_ts,
+                    conflict_ts: lock.lock_version,
+                    key: lock.key,
+                    conflict_commit_ts: 0,
+                    reason: kvrpcpb::WriteConflictReason::Optimistic,
+                    ..Default::default()
+                };
+                return Err(Error::WriteConflict(write_conflict));
+            }
+
+            return Ok(lock);
+        }
+
+        // TODO: handle already_exist error
+        Err(box_err!("{} unexpected key error {:?}", tag, key_err))
     }
 
     pub fn get_kv_client(&self, store_id: u64) -> TikvClient {
@@ -694,11 +942,15 @@ impl ClusterClient {
                     sleep(Duration::from_millis(100));
                     continue;
                 }
-                return Err(format!("failed to split key {:?} error {:?}", key, region_err).into());
+                return Err(box_err!(
+                    "failed to split key {:?} error {:?}",
+                    key,
+                    region_err
+                ));
             }
             return Ok(());
         }
-        Err(format!("failed to split key {:?}", key).into())
+        Err(box_err!("failed to split key {:?}", key))
     }
 
     pub fn split_keyspace(&mut self, keyspace_id: u32) {
@@ -774,11 +1026,10 @@ impl ClusterClient {
         let raw_end_key = rfstore::store::raw_end_key(&source_region);
         if let Some(prefix) = boundary_prefix {
             if !raw_end_key.starts_with(prefix) {
-                return Err(format!(
+                return Err(box_err!(
                     "adjacent region out of boundary prefix, raw_end_key: {:?}",
-                    raw_end_key,
-                )
-                .into());
+                    raw_end_key
+                ));
             }
         }
 
@@ -796,7 +1047,7 @@ impl ClusterClient {
                 break;
             }
             if start.saturating_elapsed() >= timeout {
-                return Err(format!("region {:?} is still not merged.", source_region).into());
+                return Err(box_err!("region {:?} is still not merged.", source_region));
             }
             std::thread::sleep(Duration::from_millis(100));
         }
@@ -922,7 +1173,7 @@ impl ClusterClient {
     ) -> Result<(Option<Vec<u8>>, Context)> {
         let start_time = Instant::now();
         let timeout = Duration::from_secs(15);
-        let mut tag = kvengine::ShardTag::default();
+        let mut tag = ShardTag::default();
         let mut store_id_errors = vec![];
         while start_time.saturating_elapsed() < timeout {
             let region_id = self.get_region_id(key);
@@ -957,12 +1208,14 @@ impl ClusterClient {
                 return Err(box_err!("{} unexpected error {:?}", tag, region_err));
             }
             if resp.has_error() {
-                return Err(box_err!(
-                    "{} key {} get key_error: {:?}",
-                    tag,
-                    log_wrappers::hex_encode_upper(key),
-                    resp.get_error()
-                ));
+                let key_err = resp.take_error();
+                info!(
+                    "{} get_key_version_opt: encounters key_error: {:?}",
+                    tag, key_err
+                );
+                self.handle_key_errors(&tag, version, false, vec![key_err])
+                    .expect("handle_key_errors");
+                continue;
             }
             if resp.get_not_found() {
                 return Ok((None, ctx));
@@ -1015,14 +1268,13 @@ impl ClusterClient {
         let val = val.as_deref();
         let expect_val = expect_val.map(|v| v.as_ref());
         if val != expect_val {
-            return Err(format!(
+            return Err(box_err!(
                 "{} val not equal for key {}, db: {:?}, ref store {:?}",
                 Self::tag_from_ctx(&ctx),
                 log_wrappers::hex_encode_upper(key),
                 val.map(|v| (v.len(), log_wrappers::hex_encode_upper(v))),
-                expect_val.map(|v| (v.len(), log_wrappers::hex_encode_upper(v))),
-            )
-            .into());
+                expect_val.map(|v| (v.len(), log_wrappers::hex_encode_upper(v)))
+            ));
         }
         Ok(())
     }

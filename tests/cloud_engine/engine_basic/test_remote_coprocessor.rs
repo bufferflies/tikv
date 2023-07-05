@@ -1919,8 +1919,7 @@ impl<'a> Insert<'a> {
     fn execute(mut self, row_cache: RowCache<'_>) -> txn_types::TimeStamp {
         let start_ts = self.client.get_ts();
         let mutations = self.prewrite(start_ts, row_cache);
-        let commit_ts = self.client.put_commit(start_ts, &mutations).unwrap();
-        commit_ts
+        self.client.put_commit(start_ts, &mutations).unwrap()
     }
 
     pub fn commit(
@@ -1928,8 +1927,7 @@ impl<'a> Insert<'a> {
         start_ts: txn_types::TimeStamp,
         mutations: &[Mutation],
     ) -> txn_types::TimeStamp {
-        let commit_ts = self.client.put_commit(start_ts, mutations).unwrap();
-        commit_ts
+        self.client.put_commit(start_ts, mutations).unwrap()
     }
 }
 

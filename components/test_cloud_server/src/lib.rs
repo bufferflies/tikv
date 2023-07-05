@@ -5,6 +5,7 @@ pub mod cluster;
 pub mod keyspace;
 pub mod oss;
 pub mod scheduler;
+mod txnlock;
 
 pub use cluster::*;
 
