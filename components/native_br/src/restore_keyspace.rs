@@ -1145,8 +1145,8 @@ impl BackupCluster {
         };
 
         // Preprocess
-        for (pos, entry) in entries.into_iter().enumerate() {
-            let _ = preprocess_ref.preprocess_committed_entry(&mut ctx, pos, &entry);
+        for entry in &entries {
+            preprocess_ref.preprocess_committed_entry(&mut ctx, entry);
         }
         preprocess_ref
             .raft_state

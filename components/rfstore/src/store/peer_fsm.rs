@@ -225,9 +225,6 @@ impl<'a> PeerMsgHandler<'a> {
                 PeerMsg::PrepareCommitMergeResult(res, commit_index) => {
                     self.on_prepared_commit_merge(res, commit_index);
                 }
-                PeerMsg::TriggerTrimOverBound(parameter) => {
-                    self.trigger_trim_over_bound(parameter.target_shard.unwrap().ver, parameter);
-                }
             }
         }
     }
@@ -262,6 +259,9 @@ impl<'a> PeerMsgHandler<'a> {
             } => self.on_truncate_ts(ts, shard_ver, callback),
             CasualMessage::IngestFiles { cs, callback } => self.on_ingest_files(cs, callback),
             CasualMessage::RestoreShard { cs, callback } => self.on_restore_shard(cs, callback),
+            CasualMessage::TriggerTrimOverBound(parameter) => {
+                self.trigger_trim_over_bound(parameter.target_shard.unwrap().ver, parameter)
+            }
         }
     }
 

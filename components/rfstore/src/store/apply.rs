@@ -1521,7 +1521,10 @@ impl Applier {
                             self.tag(),
                             target
                         );
-                        router.send(target.id, PeerMsg::TriggerTrimOverBound(parameter));
+                        router.send(
+                            target.id,
+                            PeerMsg::CasualMessage(CasualMessage::TriggerTrimOverBound(parameter)),
+                        );
                     }
                 };
             }

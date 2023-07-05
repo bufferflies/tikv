@@ -1634,14 +1634,10 @@ impl Peer {
                 }
             }
         }
-        for (pos, entry) in committed_entries.iter().enumerate() {
-            let split_entries = self.preprocess_committed_entry(ctx, pos, entry);
-            if split_entries {
-                let (first, second) = committed_entries.split_at(pos);
-                self.build_apply_msg(ctx, first.to_vec(), None);
-                self.handle_raft_committed_entries(ctx, second.to_vec(), new_role);
-                return;
-            }
+        let mut preprocess_ctx = PreprocessContext::from_raft_context(ctx);
+        let mut preprocess_ref = PreprocessRef::from_peer(self);
+        for entry in &committed_entries {
+            preprocess_ref.preprocess_committed_entry(&mut preprocess_ctx, entry);
         }
         self.build_apply_msg(ctx, committed_entries, new_role);
     }
@@ -1694,29 +1690,13 @@ impl Peer {
         ctx.apply_msgs.msgs.push(apply_msg);
         fail_point!("after_send_to_apply_1003", self.peer_id() == 1003, |_| {});
     }
-
-    pub(crate) fn preprocess_committed_entry(
-        &mut self,
-        ctx: &mut RaftContext,
-        pos: usize,
-        entry: &Entry,
-    ) -> bool {
-        let mut preprocess_ctx = PreprocessContext::from_raft_context(ctx);
-        let mut preprocess_ref = PreprocessRef::from_peer(self);
-        preprocess_ref.preprocess_committed_entry(&mut preprocess_ctx, pos, entry)
-    }
 }
 
 // TODO: move to individual file.
 impl<'a> PreprocessRef<'a> {
-    pub fn preprocess_committed_entry(
-        &mut self,
-        ctx: &mut PreprocessContext<'_>,
-        pos: usize,
-        entry: &Entry,
-    ) -> bool {
+    pub fn preprocess_committed_entry(&mut self, ctx: &mut PreprocessContext<'_>, entry: &Entry) {
         if *self.preprocessed_index > 0 && entry.index <= *self.preprocessed_index {
-            return false;
+            return;
         }
         let mut no_kv = entry.data.is_empty();
         if let Some(cmd) = get_preprocess_cmd(entry) {
@@ -1729,7 +1709,7 @@ impl<'a> PreprocessRef<'a> {
             } else {
                 if let Err(err) = check_region_epoch(&cmd, self.get_preprocessed_region(), false) {
                     warn!("preprocess pending admin failed {:?}", err);
-                    return false;
+                    return;
                 }
                 let admin = cmd.get_admin_request();
                 if admin.has_splits() {
@@ -1737,22 +1717,8 @@ impl<'a> PreprocessRef<'a> {
                 } else if admin.has_prepare_merge() {
                     self.preprocess_prepare_merge(ctx, entry, &cmd);
                 } else if admin.has_rollback_merge() {
-                    if pos != 0 {
-                        // rollback merge need to insert an ApplyMsg::PrepareRollbackMerge to pause
-                        // the applier. Split the committed entries to ensure all the previous
-                        // entries are applied before the pause.
-                        return true;
-                    }
                     self.preprocess_rollback_merge(ctx, entry, &cmd);
                 } else if admin.has_commit_merge() {
-                    if pos != 0 {
-                        // commit merge need to insert an ApplyMsg::PrepareCommitMerge which pause
-                        // the applier, if it's not the first entry it will also pause the
-                        // previously applied entries.
-                        // So split the committed entries to ensure all the previous entries are
-                        // applied before the pause.
-                        return true;
-                    }
                     self.preprocess_commit_merge(ctx, entry, &cmd);
                 }
             }
@@ -1764,7 +1730,6 @@ impl<'a> PreprocessRef<'a> {
             self.try_advance_meta(ctx, entry);
         }
         *self.preprocessed_index = entry.index;
-        false
     }
 
     pub(crate) fn try_advance_meta(&mut self, ctx: &mut PreprocessContext<'_>, entry: &Entry) {

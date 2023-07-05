@@ -261,7 +261,6 @@ impl RaftWorker {
             PeerMsg::PrepareChangeSetResult(_) => {}
             PeerMsg::Persisted(_) => {}
             PeerMsg::PrepareCommitMergeResult(..) => {}
-            PeerMsg::TriggerTrimOverBound(_) => {}
         }
     }
 

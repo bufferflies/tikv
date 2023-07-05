@@ -40,7 +40,6 @@ pub enum PeerMsg {
         u64, // commit index
     ),
     Persisted(PersistReady),
-    TriggerTrimOverBound(TrimOverBoundParameter),
 }
 
 impl PeerMsg {
@@ -416,6 +415,7 @@ pub enum CasualMessage {
         cs: kvenginepb::ChangeSet,
         callback: Callback,
     },
+    TriggerTrimOverBound(TrimOverBoundParameter),
 }
 
 impl fmt::Debug for CasualMessage {
@@ -445,6 +445,9 @@ impl fmt::Debug for CasualMessage {
             }
             CasualMessage::RestoreShard { cs, .. } => {
                 write!(fmt, "restore shard from {:?}", cs)
+            }
+            CasualMessage::TriggerTrimOverBound(param) => {
+                write!(fmt, "trigger trim over bound {:?}", param)
             }
         }
     }
