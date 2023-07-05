@@ -14,6 +14,7 @@ if [ -z "$EXECUTABLE" ]; then
 fi
 
 # "rm" + "cp" to avoid target text file busy.
-rm "$TARGET_BIN"
+# "|| true" to avoid error if file does not exist.
+rm "$TARGET_BIN" || true
 cp "$EXECUTABLE" "$TARGET_BIN"
 ls -l "$TARGET_BIN"
