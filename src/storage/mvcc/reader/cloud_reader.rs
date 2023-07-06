@@ -62,9 +62,13 @@ impl CloudReader {
             if data_iter.key() != raw_key {
                 break;
             }
+
+            debug_assert!(!kvengine::table::is_deleted(data_iter.meta()));
+            // TODO: remove this check, iterator should not return deleted records.
             if kvengine::table::is_deleted(data_iter.meta()) {
                 break;
             }
+
             let user_meta = UserMeta::from_slice(data_iter.user_meta());
             if user_meta.commit_ts < start_ts.into_inner() {
                 // A transaction's commit_ts must be greater than start_ts, if current commit_ts
@@ -259,6 +263,8 @@ impl CloudReader {
             .new_iterator(WRITE_CF, false, true, None, self.fill_cache);
         it.rewind();
         while it.valid() {
+            debug_assert!(!kvengine::table::is_deleted(it.meta()));
+            // TODO: remove this check, iterator should not return deleted records.
             if kvengine::table::is_deleted(it.meta()) {
                 it.next();
                 continue;

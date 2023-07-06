@@ -6,6 +6,7 @@ use std::{
     iter::Iterator,
     ops::Deref,
     path::Path,
+    rc::Rc,
     sync::{atomic::AtomicU64, Arc},
     thread,
     time::Duration,
@@ -522,35 +523,13 @@ fn test_lost_tombstone_issue() {
     init_logger();
     let (engine, _) = new_test_engine();
     let shard = engine.get_shard(1).unwrap();
-    let block_size = engine.opts.table_builder_options.block_size;
-    let comp_tp = engine.opts.table_builder_options.compression_tps[0];
-    let comp_lvl = engine.opts.table_builder_options.compression_lvl;
-    let fs = engine.fs.clone();
-    let new_table = |id: u64, begin: usize, end: usize, version: u64, del: bool| {
-        let mut builder = table::sstable::builder::Builder::new(id, block_size, comp_tp, comp_lvl);
-        for i in begin..end {
-            let key = i_to_key(i as i32, 0);
-            let val = if del {
-                table::Value::new_with_meta_version(BIT_DELETE, version, 0, &[])
-            } else {
-                let val_str = key.repeat(2);
-                table::Value::new_with_meta_version(0, version, 0, val_str.as_bytes())
-            };
-            builder.add(InnerKey::from_inner_buf(key.as_bytes()), &val, None);
-        }
-        let mut data_buf = BytesMut::new();
-        builder.finish(0, &mut data_buf);
-        let data = data_buf.freeze();
-        let opts = dfs::Options::new(1, 1);
-        let runtime = fs.get_runtime();
-        runtime.block_on(fs.create(id, data.clone(), opts)).unwrap();
-        let file = InMemFile::new(id, data);
-        SsTable::new(Arc::new(file), None, true).unwrap()
-    };
+
     let mut cf_builder = ShardCfBuilder::new(0);
-    cf_builder.add_table(new_table(11, 0, 100, 101, false), 3);
-    cf_builder.add_table(new_table(12, 50, 150, 102, true), 2);
-    cf_builder.add_table(new_table(13, 120, 200, 103, false), 1);
+    let mut saved_vals: Vec<Rc<String>> = Vec::new();
+
+    cf_builder.add_table(new_table(11, 0, 100, 101, false, &mut saved_vals), 3);
+    cf_builder.add_table(new_table(12, 50, 150, 102, true, &mut saved_vals), 2);
+    cf_builder.add_table(new_table(13, 120, 200, 103, false, &mut saved_vals), 1);
     let data = ShardData::new(
         shard.range.clone(),
         vec![CfTable::new()],
@@ -572,6 +551,70 @@ fn test_lost_tombstone_issue() {
     engine.trigger_compact(IdVer::new(1, 1));
     thread::sleep(Duration::from_secs(1));
     check_get(50, 100, 104, &[0], &engine, false, None, 0);
+}
+
+// This test case consturct a three level LSM tree and with different version
+// and add tombstone with latest version. Iterator should return all versions of
+// the key, excluding the tombstoned key.
+#[test]
+fn test_read_iterator_all_versions() {
+    init_logger();
+    let (engine, _) = new_test_engine();
+    let shard = engine.get_shard(1).unwrap();
+    let cf = 0;
+
+    let mut cf_builder = ShardCfBuilder::new(cf);
+    let mut saved_vals: Vec<Rc<String>> = Vec::new();
+
+    // 0..50 has only version 101
+    // 50..70 has version 101 and 102
+    // 70..90 has version 103 marked deleted, and older version 101 and 102
+    // 90..100 has version 101 and 102
+    // 100..150 has version 102
+    cf_builder.add_table(new_table(11, 0, 100, 101, false, &mut saved_vals), 3);
+    cf_builder.add_table(new_table(12, 50, 150, 102, false, &mut saved_vals), 2);
+    cf_builder.add_table(new_table(13, 70, 90, 103, true, &mut saved_vals), 1);
+
+    let data = ShardData::new(
+        shard.range.clone(),
+        vec![CfTable::new()],
+        vec![],
+        Arc::new(HashMap::default()),
+        [cf_builder.build(), ShardCf::new(1), ShardCf::new(2)],
+        HashMap::new(),
+    );
+    shard.set_data(data);
+
+    let snap = SnapAccess::new(&shard);
+    let mut iter = snap.new_iterator(cf, false, true, None, false);
+    iter.seek(shard.outer_start.chunk());
+
+    let mut expected_keys = Vec::with_capacity(160);
+    for i in 0..50 {
+        expected_keys.push(i);
+    }
+    for i in 50..70 {
+        expected_keys.push(i);
+        expected_keys.push(i);
+    }
+
+    // 70..90 should not returned
+
+    for i in 90..100 {
+        expected_keys.push(i);
+        expected_keys.push(i);
+    }
+    for i in 100..150 {
+        expected_keys.push(i);
+    }
+    let mut expected_keys_iter = expected_keys.iter();
+
+    while iter.valid() {
+        let key = i_to_key(expected_keys_iter.next().unwrap().to_owned(), 0);
+        assert_eq!(iter.key(), key.as_bytes());
+        assert_eq!(iter.val(), key.repeat(2).as_bytes());
+        iter.next();
+    }
 }
 
 #[derive(Clone)]
@@ -867,6 +910,44 @@ fn i_to_key(i: i32, min_blob_size: u32) -> String {
     } else {
         format!("key{:0>1$}", i, 6)
     }
+}
+
+fn new_table(
+    id: u64,
+    begin: usize,
+    end: usize,
+    version: u64,
+    del: bool,
+    saved_vals: &mut Vec<Rc<String>>,
+) -> SsTable {
+    let (engine, _) = new_test_engine();
+    let block_size = engine.opts.table_builder_options.block_size;
+    let comp_tp = engine.opts.table_builder_options.compression_tps[0];
+    let comp_lvl = engine.opts.table_builder_options.compression_lvl;
+    let fs = engine.fs.clone();
+
+    let mut builder = table::sstable::builder::Builder::new(id, block_size, comp_tp, comp_lvl);
+    for i in begin..end {
+        let key = i_to_key(i as i32, 0);
+        let val = if del {
+            table::Value::new_with_meta_version(BIT_DELETE, version, 0, &[])
+        } else {
+            let val = Rc::new(key.repeat(2));
+            // Save the val with Rc, make sure the val_rc stay valid during the iterator
+            // liftcycle.
+            saved_vals.push(val.clone());
+            table::Value::new_with_meta_version(0, version, 0, val.as_bytes())
+        };
+        builder.add(InnerKey::from_inner_buf(key.as_bytes()), &val, None);
+    }
+    let mut data_buf = BytesMut::new();
+    builder.finish(0, &mut data_buf);
+    let data = data_buf.freeze();
+    let opts = dfs::Options::new(1, 1);
+    let runtime = fs.get_runtime();
+    runtime.block_on(fs.create(id, data.clone(), opts)).unwrap();
+    let file = InMemFile::new(id, data);
+    SsTable::new(Arc::new(file), None, true).unwrap()
 }
 
 fn load_data(
