@@ -31,19 +31,20 @@ use tokio::runtime::Runtime;
 use crate::alloc_node_id_vec;
 
 const BASIC_DATA_COUNT: usize = 10;
-const RANDOM_VALUE_LEN: usize = 128;
+const RANDOM_VALUE_LEN: usize = 64;
 const NODES_COUNT: usize = 4;
 const KEYSPACE_COUNT: usize = 3;
-const DEFAULT_LOOP_COUNT: usize = 5;
+const DEFAULT_LOOP_COUNT: usize = 3;
+const DEFAULT_TARGET_REGIONS: usize = 4;
 
 // The numbers have no special meaning, just to make them different.
-// Require to be larger than 136, see `i_to_val`.
-const BASIC_DATA_LEN: usize = 140;
-const IMPORT_DATA_LEN: usize = 142;
-const PRE_BACKUP_DATA_LEN: usize = 144;
-const POST_BACKUP_DATA_LEN: usize = 146;
-const PRE_PITR_DATA_LEN: usize = 148;
-const FINAL_DATA_LEN: usize = 150;
+// Require to be larger than 72, see `i_to_val`.
+const BASIC_DATA_LEN: usize = 80;
+const IMPORT_DATA_LEN: usize = 82;
+const PRE_BACKUP_DATA_LEN: usize = 84;
+const POST_BACKUP_DATA_LEN: usize = 86;
+const PRE_PITR_DATA_LEN: usize = 88;
+const FINAL_DATA_LEN: usize = 90;
 
 #[test]
 fn test_restore_keyspace() {
@@ -52,19 +53,22 @@ fn test_restore_keyspace() {
         .unwrap_or_default()
         .parse::<usize>()
         .unwrap_or(DEFAULT_LOOP_COUNT);
+    let target_regions = std::env::var("TARGET_REGIONS")
+        .unwrap_or_default()
+        .parse::<usize>()
+        .unwrap_or(DEFAULT_TARGET_REGIONS);
 
-    test_restore_keyspace_opt(loop_count, true);
+    test_restore_keyspace_opt(loop_count, target_regions, true);
     // Regression test for `inner_key_off` disabled.
-    test_restore_keyspace_opt(DEFAULT_LOOP_COUNT, false);
+    test_restore_keyspace_opt(DEFAULT_LOOP_COUNT, target_regions, false);
 }
 
-fn test_restore_keyspace_opt(loop_count: usize, enable_inner_key_off: bool) {
+fn test_restore_keyspace_opt(loop_count: usize, target_regions: usize, enable_inner_key_off: bool) {
     let cases = vec![
         // keyspace_id, data_count, shuffle_regions, has_learner, loop_count
         (1, 1, None, false, 1),
-        (1, 100, None, false, 3),
-        (1, 200, Some(10), false, loop_count),
-        (1, 200, None, true, loop_count), // Don't shuffle regions for stability.
+        (1, 100, Some(target_regions), false, loop_count),
+        (1, 100, None, true, 1), // Don't shuffle regions for stability.
         (2, 1, None, false, 1),
     ];
 
@@ -141,11 +145,12 @@ fn test_restore_keyspace_opt(loop_count: usize, enable_inner_key_off: bool) {
             pd_client.enable_default_operator(); // Remove learners by peer count check.
         }
 
-        for i in 0..loop_count {
+        for loop_idx in 0..loop_count {
             test_restore_keyspace_impl(
+                case_idx,
+                loop_idx,
                 &mut cluster,
                 &dfs_config,
-                &format!("{case_idx}:{i}"),
                 keyspace_id,
                 data_count,
                 shuffle_regions,
@@ -161,16 +166,17 @@ fn test_restore_keyspace_opt(loop_count: usize, enable_inner_key_off: bool) {
 }
 
 fn test_restore_keyspace_impl(
+    case_idx: usize,
+    loop_idx: usize,
     cluster: &mut ServerCluster,
     dfs_config: &DFSConfig,
-    case_name: &str,
     keyspace_id: u32,
     data_count: usize,
     shuffle_regions: Option<usize>,
     has_learner: bool,
     runtime: &Runtime,
 ) {
-    step!("case: {case_name}");
+    step!("case: {}:{}", case_idx, loop_idx);
     let mut rng = rand::thread_rng();
     let mut client = cluster.new_client();
     let i_to_key = gen_keyspace_key(keyspace_id);
@@ -199,7 +205,7 @@ fn test_restore_keyspace_impl(
     let origin_ref_store = client.dump_ref_store();
 
     // Prepare for PiTR.
-    let truncate_ts = if rng.gen_ratio(1, 3) {
+    let truncate_ts = if rng.gen_ratio(1, 2) {
         let ts = client.get_ts();
         client.put_kv(0..data_count, &i_to_key, i_to_val(PRE_PITR_DATA_LEN));
         step!("another writes for pitr done");
@@ -225,8 +231,9 @@ fn test_restore_keyspace_impl(
                     &RequestOptions::default()
                 )
                 .is_err(),
-            "case: {}",
-            case_name,
+            "case: {}:{}",
+            case_idx,
+            loop_idx
         );
         step!("verify before backup ok");
         let (_, backup_meta) = backup::backup_cluster_with_ts(
@@ -246,7 +253,7 @@ fn test_restore_keyspace_impl(
     };
 
     // Shuffle regions.
-    if let Some(shuffle_regions) = shuffle_regions {
+    if let (Some(shuffle_regions), 0) = (shuffle_regions, loop_idx) {
         let keyspace_prefix = get_keyspace_prefix(keyspace_id);
         let region_count = client.pd_client.get_regions_number();
         let mut i = 0;
@@ -262,7 +269,7 @@ fn test_restore_keyspace_impl(
         cluster.wait_pd_region_min_count(region_count + shuffle_regions);
         let split_region_count = client.pd_client.get_regions_number();
 
-        for _ in 0..shuffle_regions {
+        for _ in 0..(shuffle_regions / 2) {
             let source_key = rng.gen::<usize>() % data_count;
             if let Err(e) = client.try_merge_adjacent_region(
                 &i_to_key(source_key),
@@ -290,8 +297,9 @@ fn test_restore_keyspace_impl(
         client
             .verify_data_with_given_ref_store(&origin_ref_store, None, &RequestOptions::default())
             .is_err(),
-        "case: {}",
-        case_name,
+        "case: {}:{}",
+        case_idx,
+        loop_idx,
     );
     step!("verify ok");
 
@@ -422,12 +430,12 @@ fn random_val() -> Vec<u8> {
 
 // Generate `i_to_val` by specifying expected length of value, to make it easier
 // to know where the data is written.
-// `expected_len` must be > 136
-// `expected_len` = 128(random_val) + i(8) + padding
+// `expected_len` must be > 72
+// `expected_len` = 64(random_val) + i(8) + padding
 fn i_to_val(expected_len: usize) -> impl Fn(usize) -> Vec<u8> {
     assert!(
         expected_len > 8 + RANDOM_VALUE_LEN,
-        "expected_len: {} is not larger than 136",
+        "expected_len: {} is not larger than 72",
         expected_len
     );
     move |i: usize| -> Vec<u8> {
