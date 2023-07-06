@@ -229,6 +229,8 @@ impl Manifest {
         let dir = self.file_path.parent().unwrap();
         let engine_id = self.engine_id.load(Ordering::SeqCst);
         for (&peer_id, peer_meta) in &mut self.peers {
+            let mut removed_count = 0;
+            let mut last_index = 0;
             while peer_meta.need_truncate() {
                 let file = peer_meta.files.pop_front().unwrap();
                 let filename = raft_log_file_name(dir, peer_id, file.first_index, file.last_index);
@@ -244,15 +246,19 @@ impl Manifest {
                             .with_label_values(&["error"])
                             .observe(file_size as f64);
                     } else {
-                        info!(
-                            "{}:{} remove rlog file {:?}",
-                            engine_id, region_id, filename
-                        );
+                        removed_count += 1;
+                        last_index = file.last_index;
                         RFENGINE_RLOG_GC_SIZE
                             .with_label_values(&["success"])
                             .observe(file_size as f64);
                     }
                 }
+            }
+            if removed_count > 0 {
+                info!(
+                    "{}:{} removed {} rlog files before index {}",
+                    engine_id, peer_meta.region_id, removed_count, last_index
+                );
             }
         }
     }

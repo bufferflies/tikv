@@ -101,7 +101,7 @@ impl EngineCore {
         if let Some(table_filter) = table_filter {
             info!(
                 "[{}:{}] is preparing change set (before table filter)", cs.shard_id, cs.shard_ver;
-                "ids" => ?ids,
+                "ids" => ?ids.keys(),
             );
             cs.unloaded_tables = ids
                 .drain_filter(|_, tb| !table_filter(cs.shard_id, tb)) // !table_filter: table will not load
@@ -110,7 +110,7 @@ impl EngineCore {
 
         info!(
             "[{}:{}] is preparing change set, loading file by ids", cs.shard_id, cs.shard_ver;
-            "ids" => ?ids,
+            "ids" => ?ids.keys(),
         );
         self.load_tables_by_ids(cs.shard_id, cs.shard_ver, &ids, &mut cs, use_direct_io)?;
         Ok(cs)
