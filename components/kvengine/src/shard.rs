@@ -785,7 +785,7 @@ impl ShardDataCore {
                 }
                 let mut rev_iter = skl.new_iterator(true);
                 rev_iter.rewind();
-                if iter.valid() && iter.key() >= self.inner_end() {
+                if rev_iter.valid() && rev_iter.key() >= self.inner_end() {
                     return true;
                 }
             }
