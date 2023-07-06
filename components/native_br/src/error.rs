@@ -1,8 +1,26 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
+use std::sync::Arc;
+
 use kvengine::dfs;
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[derive(Debug, Clone, thiserror::Error)]
+#[error(transparent)]
+pub struct SharedError(pub Arc<Error>);
+
+impl From<Error> for SharedError {
+    fn from(e: Error) -> Self {
+        Self(Arc::new(e))
+    }
+}
+
+impl SharedError {
+    pub fn inner(&self) -> &Error {
+        &self.0
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -44,6 +62,10 @@ pub enum Error {
     KeyspaceInnerKeyOffNotEnabled(u32 /* region id */),
     #[error("Backup for keyspace {0} is empty")]
     BackupEmptyForKeyspace(u32 /* keyspace id */),
+    #[error("Reach concurrency limit {0}")]
+    ReachConcurrencyLimit(usize),
+    #[error(transparent)]
+    SharedError(#[from] SharedError),
 }
 
 impl From<dfs::Error> for Error {

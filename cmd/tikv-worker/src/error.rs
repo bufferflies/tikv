@@ -1,18 +1,6 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::sync::Arc;
-
 use kvengine::dfs;
-
-#[derive(Debug, Clone, thiserror::Error)]
-#[error(transparent)]
-pub(crate) struct SharedError(pub(crate) Arc<Error>);
-
-impl From<Error> for SharedError {
-    fn from(e: Error) -> Self {
-        Self(Arc::new(e))
-    }
-}
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Error {
@@ -36,6 +24,4 @@ pub(crate) enum Error {
     DateTimeParseError(#[from] chrono::ParseError),
     #[error("ReachLimit {0}")]
     ReachConcurrencyLimit(usize),
-    #[error(transparent)]
-    SharedError(#[from] SharedError),
 }

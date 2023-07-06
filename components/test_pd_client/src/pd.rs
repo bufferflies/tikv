@@ -1954,6 +1954,10 @@ impl PdClient for TestPdClient {
         }
     }
 
+    fn get_min_tso(&self) -> Result<TimeStamp> {
+        block_on(self.get_tso())
+    }
+
     fn update_service_safe_point(
         &self,
         name: String,

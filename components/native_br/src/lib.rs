@@ -4,6 +4,7 @@
 extern crate serde_derive;
 
 pub mod backup;
+pub mod backup_worker;
 pub mod common;
 pub mod error;
 pub mod pd_control;

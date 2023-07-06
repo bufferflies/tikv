@@ -316,10 +316,15 @@ impl ClusterKeyspaceClient {
     }
 }
 
+pub struct KeyspaceBackup {
+    pub backup_ts: u64,
+    pub ref_stores: HashMap<u32 /* keyspace_id */, RefStore>,
+}
+
 #[derive(Default)]
 pub struct KeyspaceRefStores {
     ref_stores: DashMap<u32 /* keyspace_id */, Arc<Mutex<RefStore>>>,
-    backups: DashMap<String /* backup_name */, HashMap<u32 /* keyspace_id */, RefStore>>,
+    backups: DashMap<String /* backup_name */, KeyspaceBackup>,
 }
 
 impl KeyspaceRefStores {
@@ -334,17 +339,42 @@ impl KeyspaceRefStores {
         }
     }
 
-    pub fn backup(&self, backup_name: String) {
-        let backup = HashMap::from_iter(self.ref_stores.iter().map(|r| {
+    pub fn dump(&self) -> HashMap<u32, RefStore> {
+        HashMap::from_iter(self.ref_stores.iter().map(|r| {
             let (&keyspace_id, ref_store) = r.pair();
             let ref_store = ref_store.lock().unwrap();
             (keyspace_id, ref_store.clone())
-        }));
-        self.backups.insert(backup_name, backup);
+        }))
     }
 
-    pub fn get_random_backup(&self, rng: &mut ThreadRng) -> Option<String> {
-        self.backups.iter().map(|r| r.key().clone()).choose(rng)
+    pub fn add_backup(
+        &self,
+        backup_name: String,
+        backup_ts: u64,
+        ref_stores: HashMap<u32, RefStore>,
+    ) {
+        self.backups.insert(
+            backup_name,
+            KeyspaceBackup {
+                backup_ts,
+                ref_stores,
+            },
+        );
+    }
+
+    pub fn backup(&self, backup_name: String, backup_ts: u64) {
+        let ref_stores = self.dump();
+        self.add_backup(backup_name, backup_ts, ref_stores);
+    }
+
+    pub fn get_random_backup(
+        &self,
+        rng: &mut ThreadRng,
+    ) -> Option<(String /* backup_name */, u64 /* backup_ts */)> {
+        self.backups
+            .iter()
+            .choose(rng)
+            .map(|r| (r.key().clone(), r.backup_ts))
     }
 
     pub fn restore_keyspace(
@@ -354,16 +384,12 @@ impl KeyspaceRefStores {
         target_keyspace_id: u32,
     ) {
         let backup = self.backups.get(backup_name).unwrap();
-        let keyspace_backup = backup.get(&source_keyspace_id);
+        // `source_keyspace_id` must exist in backup, otherwise restore procedure will
+        // fail with `Error::BackupEmptyForKeyspace`.
+        let keyspace_backup = backup.ref_stores.get(&source_keyspace_id).unwrap().clone();
         let target_ref_store = self.get_keyspace_ref_store(target_keyspace_id);
         let mut target_ref_store = target_ref_store.lock().unwrap();
-        if let Some(keyspace_backup) = keyspace_backup {
-            *target_ref_store = keyspace_backup.clone();
-        } else {
-            // TODO: test for key not found. Clear ref store will not do the verification
-            // actually.
-            target_ref_store.clear();
-        }
+        *target_ref_store = keyspace_backup
     }
 
     pub fn keyspace_put_kv(&self, keyspace_id: u32, mutations: Vec<Mutation>) {

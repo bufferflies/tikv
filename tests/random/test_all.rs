@@ -8,6 +8,7 @@ use std::{
 use api_version::ApiV2;
 use kvengine::dfs::DFSConfig;
 use kvproto::pdpb::CheckPolicy;
+use native_br::{backup, backup_worker};
 use rand::Rng;
 use test_cloud_server::{try_wait_result, ServerCluster};
 use tikv_util::{
@@ -28,6 +29,9 @@ use crate::{
 const INITIAL_KEYSPACE_COUNT: usize = 10;
 const NODES_COUNT: usize = 4;
 const RESTORE_CONCURRENCY: usize = 2;
+// `INSTANT_BACKUP_INTERVAL` is more than 1 second as the incremental backup
+// file name has a precision of 1 second.
+const INSTANT_BACKUP_INTERVAL: Duration = Duration::from_millis(1050);
 
 const REGION_BUCKET_SIZE: ReadableSize = ReadableSize::kb(64);
 
@@ -40,6 +44,20 @@ fn test_random_all() {
     let mut cluster = prepare_cluster(&dfs_config, NODES_COUNT, INITIAL_KEYSPACE_COUNT);
     let pd_client = cluster.get_pd_client();
     let keyspace_manager = cluster.keyspace_manager().clone();
+    let backup_worker = {
+        let backup_config = backup::BackupConfig {
+            dfs: dfs_config.clone(),
+            tolerate_err: 0, // TODO: enable tolerate_err = 1.
+            skip_keyspace_meta: true,
+            ..Default::default()
+        };
+        Arc::new(backup_worker::BackupWorker::new(
+            backup_config,
+            pd_client.clone(),
+            INSTANT_BACKUP_INTERVAL,
+            100,
+        ))
+    };
 
     // Start workloads & schedulers.
     let mut handles = vec![
@@ -51,9 +69,8 @@ fn test_random_all() {
         spawn_create_keyspace(cluster.get_pd_client(), keyspace_manager.clone(), TIMEOUT),
         spawn_incremental_backup(
             cluster.new_client(),
-            cluster.get_pd_client(),
-            dfs_config.clone(),
             keyspace_manager.clone(),
+            backup_worker,
             Duration::from_secs(10),
             TIMEOUT,
         ),

@@ -16,6 +16,7 @@ use kvengine::dfs::S3Fs;
 use native_br::{
     backup,
     backup::IncrementalBackupFile,
+    backup_worker::BackupWorker,
     restore_keyspace::{
         restore_keyspace_with_cfg, ReportRestoreStepTrait, RestoreStep, RestoredKeyspace,
     },
@@ -28,14 +29,12 @@ use tokio::runtime::Runtime;
 
 use crate::{
     common::{get_u64_param, make_json_response, make_response},
-    error::{Error, SharedError},
+    error::Error,
     metrics::{NATIVE_BR_COUNTER_VEC, NATIVE_BR_HISTOGRAM_VEC},
-    native_br_utils::BackupWorker,
     Config,
 };
 
 pub(crate) type Result<T> = std::result::Result<T, Error>;
-pub(crate) type SharedResult<T> = std::result::Result<T, SharedError>;
 
 const MIN_PITR_INTERVAL_GAP_SECONDS: i64 = 1; // 1s
 pub(crate) const MAX_RESTORE_CONCURRENCY: usize = 128;
@@ -919,8 +918,12 @@ impl NativeBrManger {
         config: Config,
     ) -> Self {
         let backup_config = config.to_backup_config();
-        let backup_worker =
-            BackupWorker::new(backup_config, pd_client.clone(), INSTANT_BACKUP_INTERVAL);
+        let backup_worker = BackupWorker::new(
+            backup_config,
+            pd_client.clone(),
+            INSTANT_BACKUP_INTERVAL,
+            MAX_RESTORE_CONCURRENCY,
+        );
         Self {
             context: Arc::new(BrContext {
                 pd_client,

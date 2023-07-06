@@ -2,10 +2,6 @@
 
 use std::{fmt, mem, sync::Arc, time::Duration};
 
-use native_br::{
-    backup,
-    backup::{BackupConfig, IncrementalBackupFile},
-};
 use pd_client::PdClient;
 use rfenginepb::ClusterBackupMeta;
 use tikv_util::{
@@ -14,8 +10,9 @@ use tikv_util::{
 };
 
 use crate::{
+    backup,
+    backup::{BackupConfig, IncrementalBackupFile, Result, SharedResult},
     error::{Error, SharedError},
-    native_br::{Result, SharedResult, MAX_RESTORE_CONCURRENCY},
 };
 
 type InstantBackupCallback = Box<dyn FnOnce(SharedResult<Arc<IncrementalBackupFile>>) + Send>;
@@ -32,7 +29,7 @@ impl fmt::Display for BackupTask {
     }
 }
 
-pub(crate) struct BackupWorker {
+pub struct BackupWorker {
     worker: Worker,
     scheduler: Scheduler<BackupTask>,
 }
@@ -42,11 +39,12 @@ impl BackupWorker {
         config: BackupConfig,
         pd_client: Arc<dyn PdClient>,
         backup_interval: Duration,
+        max_concurrency: usize,
     ) -> Self {
         let worker = WorkerBuilder::new("backup-worker").create();
         let scheduler = worker.start_with_timer(
             "backup-worker",
-            BackupRunner::new(config, pd_client, backup_interval),
+            BackupRunner::new(config, pd_client, backup_interval, max_concurrency),
         );
         Self { worker, scheduler }
     }
@@ -56,12 +54,12 @@ impl BackupWorker {
         self.worker.stop();
     }
 
-    pub async fn instant_backup(&self) -> SharedResult<Arc<IncrementalBackupFile>> {
+    pub async fn instant_backup(&self) -> Result<Arc<IncrementalBackupFile>> {
         let (cb, fut) = tikv_util::future::paired_future_callback();
         self.scheduler
             .schedule(BackupTask::InstantBackup { cb })
             .unwrap();
-        fut.await.unwrap()
+        fut.await.unwrap().map_err(|e| e.into())
     }
 }
 
@@ -69,16 +67,23 @@ struct BackupRunner {
     config: BackupConfig,
     pd_client: Arc<dyn PdClient>,
     backup_interval: Duration,
+    max_concurrency: usize,
     backup_request_queue: Vec<InstantBackupCallback>,
     last_backup_meta: Option<ClusterBackupMeta>,
 }
 
 impl BackupRunner {
-    fn new(config: BackupConfig, pd_client: Arc<dyn PdClient>, backup_interval: Duration) -> Self {
+    fn new(
+        config: BackupConfig,
+        pd_client: Arc<dyn PdClient>,
+        backup_interval: Duration,
+        max_concurrency: usize,
+    ) -> Self {
         Self {
             config,
             pd_client,
             backup_interval,
+            max_concurrency,
             backup_request_queue: Vec::new(),
             last_backup_meta: None,
         }
@@ -111,7 +116,7 @@ impl BackupRunner {
 
         let exec_backup = |incremental: bool,
                            last_backup_meta: Option<ClusterBackupMeta>|
-         -> native_br::error::Result<(String, ClusterBackupMeta)> {
+         -> Result<(String, ClusterBackupMeta)> {
             backup::backup_cluster(
                 self.config.clone(),
                 incremental,
@@ -123,14 +128,11 @@ impl BackupRunner {
 
         let (backup_path, backup_meta) = match exec_backup(true, last_backup_meta) {
             Ok(res) => Ok(res),
-            Err(e) => {
-                if backup::need_full_backup(&e) {
-                    info!("Backup failed with {:?}, try full backup", e);
-                    exec_backup(false, None).map_err(|e| Error::NativeBackupRestoreError(e))
-                } else {
-                    Err(Error::NativeBackupRestoreError(e))
-                }
+            Err(e) if backup::need_full_backup(&e) => {
+                info!("Backup failed with {:?}, try full backup", e);
+                exec_backup(false, None)
             }
+            Err(e) => Err(e),
         }?;
         debug!(
             "Backup succeeded: {:?}, meta: {:?}",
@@ -147,10 +149,10 @@ impl Runnable for BackupRunner {
     fn run(&mut self, task: BackupTask) {
         match task {
             BackupTask::InstantBackup { cb } => {
-                if self.backup_request_queue.len() >= MAX_RESTORE_CONCURRENCY {
+                if self.backup_request_queue.len() >= self.max_concurrency {
                     error!("Too many backup requests, drop this one");
                     cb(Err(SharedError::from(Error::ReachConcurrencyLimit(
-                        MAX_RESTORE_CONCURRENCY,
+                        self.max_concurrency,
                     ))));
                     return;
                 }

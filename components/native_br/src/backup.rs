@@ -28,7 +28,7 @@ use crate::{
         create_pd_client, generate_etcd_connect_opt, get_all_stores_except_tiflash,
         send_request_to_store,
     },
-    error::Error,
+    error::{Error, SharedError},
 };
 
 const MAX_BATCH_GET_CNT: i64 = 1024;
@@ -59,6 +59,7 @@ const BACKUP_GC_SERVICE_NAME: &str = "native_br";
 const BACKUP_SERVICE_SAFEPOINT_TTL: Duration = Duration::from_secs(12 * 60 * 60); // 12 hour.
 
 pub type Result<T> = std::result::Result<T, Error>;
+pub type SharedResult<T> = std::result::Result<T, SharedError>;
 
 /// Generate full path `/<prefix>/backup/<name>`.
 pub fn backup_file_full_path(prefix: String, name: String) -> String {

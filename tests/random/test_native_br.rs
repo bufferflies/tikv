@@ -7,9 +7,10 @@ use std::{
 };
 
 use api_version::ApiV2;
+use futures::executor::block_on;
 use kvengine::dfs::{DFSConfig, S3Fs};
 use native_br::{
-    backup,
+    backup, backup_worker,
     error::Error,
     restore_keyspace,
     restore_keyspace::{ReportRestoreStepTrait, RestoreStep},
@@ -36,7 +37,12 @@ use crate::{
 };
 
 const KEYSPACE_COUNT: usize = 10;
+// `INSTANT_BACKUP_INTERVAL` is more than 1 second as the incremental backup
+// file name has a precision of 1 second.
+const INSTANT_BACKUP_INTERVAL: Duration = Duration::from_millis(1050);
 
+// TODO: remove `test_random_br` after `test_random_all` implements "data
+// branching".
 #[test]
 fn test_random_br() {
     test_random_br_helper(false, false);
@@ -73,6 +79,20 @@ fn test_random_br_helper(enable_inner_key_offset: bool, restore_to_new: bool) {
     let pd_client = cluster.get_pd_client();
     pd_client.disable_default_operator();
     let mut client = cluster.new_client();
+    let backup_worker = {
+        let backup_config = backup::BackupConfig {
+            dfs: dfs_config.clone(),
+            tolerate_err: 0, // TODO: enable tolerate_err = 1.
+            skip_keyspace_meta: true,
+            ..Default::default()
+        };
+        Arc::new(backup_worker::BackupWorker::new(
+            backup_config,
+            pd_client.clone(),
+            INSTANT_BACKUP_INTERVAL,
+            100,
+        ))
+    };
 
     // Split keyspaces.
     for keyspace_id in 0..=KEYSPACE_COUNT {
@@ -105,9 +125,8 @@ fn test_random_br_helper(enable_inner_key_offset: bool, restore_to_new: bool) {
         spawn_gc_worker(cluster.get_pd_client(), TIMEOUT),
         spawn_incremental_backup(
             cluster.new_client(),
-            cluster.get_pd_client(),
-            dfs_config.clone(),
             cluster.keyspace_manager().clone(),
+            backup_worker,
             Duration::from_secs(3),
             TIMEOUT,
         ),
@@ -168,12 +187,12 @@ fn test_random_br_helper(enable_inner_key_offset: bool, restore_to_new: bool) {
             // }
         }
 
-        let backup_name = match cluster
+        let (backup_name, backup_ts) = match cluster
             .keyspace_manager()
             .ref_stores()
             .get_random_backup(&mut rng)
         {
-            Some(name) => name,
+            Some(backup) => backup,
             None => {
                 sleep(Duration::from_millis(100));
                 continue;
@@ -193,6 +212,7 @@ fn test_random_br_helper(enable_inner_key_offset: bool, restore_to_new: bool) {
             keyspace,
             target_keyspace,
             &backup_name,
+            Some(backup_ts),
             reporter.clone(),
         )
         .unwrap();
@@ -252,6 +272,7 @@ pub(crate) fn do_restore_keyspace(
     keyspace: u32,
     target_keyspace: u32,
     backup_name: &str,
+    truncate_ts: Option<u64>,
     reporter: Arc<dyn ReportRestoreStepTrait>,
 ) -> native_br::Result<restore_keyspace::RestoredKeyspace> {
     let s3fs = Arc::new(S3Fs::new(
@@ -270,64 +291,45 @@ pub(crate) fn do_restore_keyspace(
         s3fs,
         pd_client,
         runtime,
-        None,
+        truncate_ts,
         reporter,
     )
 }
 
 pub(crate) fn spawn_incremental_backup(
     client: ClusterClient,
-    pd_client: Arc<dyn PdClient>,
-    dfs_config: DFSConfig,
     keyspace_manager: KeyspaceManager,
+    backup_worker: Arc<backup_worker::BackupWorker>,
     interval: Duration,
     timeout: Duration,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
-        let backup_config = backup::BackupConfig {
-            dfs: dfs_config,
-            tolerate_err: 1,
-            skip_keyspace_meta: true,
-            ..Default::default()
-        };
-
         let start_time = Instant::now();
         let mut last_backup_time = start_time;
-        let mut last_backup_meta = None;
-        let mut idx = 0;
         while start_time.saturating_elapsed() < timeout {
-            idx += 1;
-            let backup_name = format!("backup_{}", idx);
-            let backup_meta = {
-                let _guard = keyspace_manager.lock_for_backup();
+            let guard = keyspace_manager.lock_for_backup();
+            let backup_ts = client.get_ts().into_inner();
+            let ref_stores = keyspace_manager.ref_stores().dump();
+            drop(guard);
 
-                let backup_ts = client.get_ts().into_inner();
-                let (_, backup_meta) = match backup::backup_cluster_with_ts(
-                    backup_config.clone(),
-                    last_backup_meta.is_some(),
-                    backup_name.clone(),
-                    pd_client.as_ref(),
-                    backup_ts,
-                    last_backup_meta.take(),
-                ) {
-                    Ok(meta) => meta,
-                    Err(err) if is_backup_error_retryable(&err) => {
-                        warn!("backup failed, retry full backup: {}", err);
-                        last_backup_meta = None;
-                        continue;
-                    }
-                    Err(err) => {
-                        panic!("backup failed: {}", err);
-                    }
-                };
-
-                keyspace_manager.ref_stores().backup(backup_name.clone());
-                backup_meta
+            let backup_file = match block_on(backup_worker.instant_backup()) {
+                Ok(backup_file) => backup_file,
+                Err(err) if is_backup_error_retryable(&err) => {
+                    warn!("backup failed, retry: {:?}", err);
+                    continue;
+                }
+                Err(err) => {
+                    panic!("backup failed: {:?}", err);
+                }
             };
-            info!("backup done: {}: {:?}", backup_name, backup_meta);
-            BACKUP_COUNTER.fetch_add(1, Ordering::SeqCst);
+            keyspace_manager.ref_stores().add_backup(
+                backup_file.name().to_string(),
+                backup_ts,
+                ref_stores,
+            );
 
-            last_backup_meta = Some(backup_meta);
+            info!("backup done: {:?}", backup_file);
+            BACKUP_COUNTER.fetch_add(1, Ordering::SeqCst);
 
             let backup_elapsed = last_backup_time.saturating_elapsed();
             sleep(interval.saturating_sub(backup_elapsed));
@@ -338,7 +340,11 @@ pub(crate) fn spawn_incremental_backup(
 }
 
 fn is_backup_error_retryable(err: &Error) -> bool {
-    matches!(err, Error::TopoChanged(_) | Error::HttpError(_))
+    match err {
+        Error::TopoChanged(_) | Error::MetaNotFound(_) | Error::HttpError(_) => true,
+        Error::SharedError(err) => is_backup_error_retryable(err.inner()),
+        _ => false,
+    }
 }
 
 pub(crate) fn check_br() {
@@ -346,7 +352,8 @@ pub(crate) fn check_br() {
     let total_restore_count = RESTORE_COUNTER.load(Ordering::SeqCst);
 
     assert!(
-        total_backup_count > 5,
+        // It's possible that backup thread is difficult to acquire the write lock.
+        total_backup_count > 3,
         "backup count too small: {}",
         total_backup_count
     );
@@ -377,13 +384,14 @@ pub(crate) fn spawn_restore_keyspace(
         let start_time = Instant::now();
         sleep(Duration::from_secs(3));
         while start_time.saturating_elapsed() < timeout {
-            let backup_name = match keyspace_manager.ref_stores().get_random_backup(&mut rng) {
-                Some(name) => name,
-                None => {
-                    sleep(Duration::from_millis(500));
-                    continue;
-                }
-            };
+            let (backup_name, backup_ts) =
+                match keyspace_manager.ref_stores().get_random_backup(&mut rng) {
+                    Some(backup) => backup,
+                    None => {
+                        sleep(Duration::from_millis(500));
+                        continue;
+                    }
+                };
 
             // Restore pick a random keyspace uniformly, to generate the scenario that some
             // big keyspaces are never restored.
@@ -405,6 +413,10 @@ pub(crate) fn spawn_restore_keyspace(
                         )
                     });
 
+                // We always perform PiTR here. Snapshot restore will block write workload
+                // during the whole backup process, which is not efficient.
+                // And actually there are only trivial differences between PiTR and snapshot
+                // restore.
                 match do_restore_keyspace(
                     pd_client.clone(),
                     &runtime,
@@ -412,6 +424,7 @@ pub(crate) fn spawn_restore_keyspace(
                     keyspace,
                     target_keyspace,
                     &backup_name,
+                    Some(backup_ts),
                     reporter.clone(),
                 ) {
                     Ok(_) => {}
