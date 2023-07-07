@@ -13,7 +13,7 @@ use rand::{
     distributions::Distribution,
     prelude::{IteratorRandom, SliceRandom, ThreadRng},
 };
-use tikv_util::HandyRwLock;
+use tikv_util::{info, HandyRwLock};
 
 use crate::client::{ClusterClient, RefStore, RequestOptions, Result};
 
@@ -384,12 +384,22 @@ impl KeyspaceRefStores {
         target_keyspace_id: u32,
     ) {
         let backup = self.backups.get(backup_name).unwrap();
-        // `source_keyspace_id` must exist in backup, otherwise restore procedure will
-        // fail with `Error::BackupEmptyForKeyspace`.
-        let keyspace_backup = backup.ref_stores.get(&source_keyspace_id).unwrap().clone();
+        let keyspace_backup = backup.ref_stores.get(&source_keyspace_id);
         let target_ref_store = self.get_keyspace_ref_store(target_keyspace_id);
         let mut target_ref_store = target_ref_store.lock().unwrap();
-        *target_ref_store = keyspace_backup
+        if let Some(keyspace_backup) = keyspace_backup {
+            *target_ref_store = keyspace_backup.clone();
+        } else {
+            // Keyspace will not be found in backup if it has never been written after
+            // created.
+            info!(
+                "keyspace {} not found in backup {}, set target_ref_store to all none",
+                source_keyspace_id, backup_name
+            );
+            for v in target_ref_store.values_mut() {
+                *v = None;
+            }
+        }
     }
 
     pub fn keyspace_put_kv(&self, keyspace_id: u32, mutations: Vec<Mutation>) {
