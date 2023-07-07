@@ -146,6 +146,21 @@ fn test_random_merge() {
     if !ok {
         data_stats.check_data().unwrap();
     }
+
+    // Wait all regions heartbeats to pd. Check shard version match in pd and
+    // kvengine.
+    let version_match_ok = try_wait(
+        || {
+            let data_stats = cluster.get_data_stats();
+            data_stats.check_region_version_match(&pd_client).is_ok()
+        },
+        10,
+    );
+    let data_stats = cluster.get_data_stats();
+    if !version_match_ok {
+        data_stats.check_region_version_match(&pd_client).unwrap();
+    }
+
     data_stats
         .check_buckets(&pd_client, bucket_size_kb * 1024)
         .unwrap();

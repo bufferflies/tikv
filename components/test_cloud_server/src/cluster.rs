@@ -506,6 +506,27 @@ impl ClusterDataStats {
             .map(|stats| stats.shard_stats.values().next().unwrap())
     }
 
+    pub fn check_region_version_match(&self, pd_client: &TestPdClient) -> Result<(), String> {
+        let regions = pd_client.get_all_regions();
+        for region in regions {
+            let region_id = region.get_id();
+            let region_shard_stats = self.get_region_shard_stats(region_id).unwrap();
+            if region_shard_stats.total_size == 0 {
+                continue;
+            }
+
+            let region_pd_version = region.get_region_epoch().get_version();
+            let region_shard_version = region_shard_stats.ver;
+            if region_pd_version != region_shard_version {
+                return Err(format!(
+                    "region {} version not match, pd: {}, shard: {}",
+                    region_id, region_pd_version, region_shard_version
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub fn check_buckets(&self, pd_client: &TestPdClient, bucket_size: u64) -> Result<(), String> {
         let regions = pd_client.get_all_regions();
         for region in regions {
