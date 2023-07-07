@@ -19,6 +19,7 @@ use test_cloud_server::{
 };
 use tidb_query_datatype::codec::table;
 use tikv::config::TikvConfig;
+use tikv_util::codec::bytes::encode_bytes;
 
 use crate::alloc_node_id_vec;
 
@@ -108,7 +109,7 @@ fn impl_test_load_data(enable_inner_key_off: bool) {
     assert_eq!(verified_count, DATA_COUNT);
 
     // Verify that a `table create` contains only one table id
-    verify_table_creates(&cluster);
+    verify_table_creates(&cluster, enable_inner_key_off);
 
     cluster.stop();
 }
@@ -217,13 +218,13 @@ fn i_to_val(i: usize) -> Vec<u8> {
 fn i_to_key_with_prefix(prefix: &[u8], i: usize) -> Vec<u8> {
     let mut key = prefix.to_vec();
     // load_data will parse table id from key
-    key.extend_from_slice(&format!("t{:08}_key_{:06}", i % 100, i).into_bytes());
+    key.extend(table::encode_row_key((i / 100 + 1) as i64, i as i64));
     key
 }
 
 // verify_table_creats will verify that a `table create` contains only one table
 // id.
-fn verify_table_creates(cluster: &ServerCluster) {
+fn verify_table_creates(cluster: &ServerCluster, enable_inner_key_off: bool) {
     let pd_client = cluster.get_pd_client();
     let nodes = cluster.get_nodes();
     let mut store_ids: HashMap<u64, u16> = HashMap::new();
@@ -235,8 +236,9 @@ fn verify_table_creates(cluster: &ServerCluster) {
     let keyspace_prefix = ApiV2::get_txn_keyspace_prefix(KEYSPACE_ID);
     let start_key = i_to_key_with_prefix(&keyspace_prefix, 0);
     let end_key = i_to_key_with_prefix(&keyspace_prefix, DATA_COUNT);
-
-    let regions = block_on(pd_client.scan_regions(start_key.clone(), end_key.clone(), 0)).unwrap();
+    let encoded_start_key = encode_bytes(&start_key);
+    let encoded_end_key = encode_bytes(&end_key);
+    let regions = block_on(pd_client.scan_regions(encoded_start_key, encoded_end_key, 0)).unwrap();
     for region in regions {
         let node = store_ids.get(&region.get_leader().get_store_id()).unwrap();
         let kvengine = cluster.get_kvengine(*node);
@@ -254,18 +256,19 @@ fn verify_table_creates(cluster: &ServerCluster) {
         let table_creates = cs_snap.get_table_creates();
         for table_create in table_creates {
             let smallest = table_create.get_smallest();
-            let smalles_table_id = if smallest.starts_with(table::TABLE_PREFIX) {
-                table::decode_table_id(smallest).unwrap()
-            } else {
-                table::decode_table_id(&smallest[KEYSPACE_PREFIX_LEN..]).unwrap()
-            };
             let biggest = table_create.get_biggest();
-            let biggest_table_id = if biggest.starts_with(table::TABLE_PREFIX) {
-                table::decode_table_id(biggest).unwrap()
+            let (smallest_table_id, biggest_table_id) = if enable_inner_key_off {
+                (
+                    table::decode_table_id(smallest).unwrap(),
+                    table::decode_table_id(biggest).unwrap(),
+                )
             } else {
-                table::decode_table_id(&biggest[KEYSPACE_PREFIX_LEN..]).unwrap()
+                (
+                    table::decode_table_id(&smallest[KEYSPACE_PREFIX_LEN..]).unwrap(),
+                    table::decode_table_id(&biggest[KEYSPACE_PREFIX_LEN..]).unwrap(),
+                )
             };
-            assert_eq!(smalles_table_id, biggest_table_id);
+            assert_eq!(smallest_table_id, biggest_table_id);
         }
     }
 }
