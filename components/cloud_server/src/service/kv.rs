@@ -24,6 +24,7 @@ use kvproto::{
     raft_serverpb::*,
     tikvpb::*,
 };
+use log_wrappers::hex_encode;
 use rfstore::{
     router::RaftStoreRouter,
     store::{Callback, CasualMessage},
@@ -1429,7 +1430,11 @@ fn future_scan<L: LockManager, F: KvFormat>(
     mut req: ScanRequest,
 ) -> impl Future<Output = ServerResult<ScanResponse>> {
     let end_key = Key::from_raw_maybe_unbounded(req.get_end_key());
-
+    let rev_range = if req.reverse && req.version == u64::MAX {
+        Some((req.start_key.clone(), req.end_key.clone()))
+    } else {
+        None
+    };
     let v = storage.scan(
         req.take_context(),
         Key::from_raw(req.get_start_key()),
@@ -1449,9 +1454,23 @@ fn future_scan<L: LockManager, F: KvFormat>(
         } else {
             match v {
                 Ok(kv_res) => {
+                    if let Some((start_key, end_key)) = rev_range {
+                        info!("reverse scan";
+                            "start_key" => hex_encode(start_key),
+                            "end_key" => hex_encode(end_key),
+                            "count" => kv_res.len(),
+                        );
+                    }
                     resp.set_pairs(map_kv_pairs(kv_res).into());
                 }
                 Err(e) => {
+                    if let Some((start_key, end_key)) = rev_range {
+                        warn!("reverse scan error";
+                            "start_key" => hex_encode(start_key),
+                            "end_key" => hex_encode(end_key),
+                            "error" => ?e,
+                        );
+                    }
                     let key_error = extract_key_error(&e);
                     resp.set_error(key_error.clone());
                     // Set key_error in the first kv_pair for backward compatibility.
