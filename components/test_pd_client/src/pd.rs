@@ -6,6 +6,7 @@ use std::{
         BTreeMap,
         Bound::{Excluded, Unbounded},
     },
+    iter::FromIterator,
     sync::{
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc, RwLock,
@@ -1777,35 +1778,45 @@ impl PdClient for TestPdClient {
         Box::pin(ok(resp))
     }
 
+    // The number of returned region_ids would be less then number of keys.
+    // Since split_regions is not an atomic operation, a latter splitted region
+    // would has the same region id with a former one.
     fn split_regions(&self, keys: Vec<Vec<u8>>) -> PdFuture<Vec<u64>> {
-        let mut region_map = HashMap::default();
+        let mut keys_set: HashSet<Vec<u8>> = HashSet::from_iter(keys.into_iter());
+        let mut region_ids: HashSet<u64> = HashSet::default();
 
-        // Group split keys by region.
-        for key in keys {
-            let region = self.get_region(&key).unwrap();
-            // if key is already the boundary of the region, skip.
-            if key.as_slice() == region.get_start_key() {
-                continue;
-            }
-            match region_map.entry(region.get_id()) {
-                HashMapEntry::Occupied(mut e) => {
-                    let v: &mut Vec<Vec<u8>> = e.get_mut();
-                    v.push(key);
+        let start = Instant::now();
+        while !keys_set.is_empty() && start.saturating_elapsed() < Duration::from_secs(10) {
+            let mut region_map: HashMap<
+                u64, // region_id
+                (metapb::Region, Vec<Vec<u8>> /* keys */),
+            > = HashMap::default();
+            for key in keys_set.clone() {
+                let region = self.get_region(&key).unwrap();
+                if key.as_slice() == region.get_start_key() {
+                    keys_set.remove(&key);
+                    region_ids.insert(region.get_id());
+                    continue;
                 }
-                HashMapEntry::Vacant(e) => {
-                    e.insert(vec![key]);
-                }
+                // Group split keys by region.
+                region_map
+                    .entry(region.get_id())
+                    .or_insert((region, vec![]))
+                    .1
+                    .push(key);
             }
+
+            for (region, keys) in region_map.into_values() {
+                self.split_region(region, CheckPolicy::Usekey, keys);
+            }
+            std::thread::sleep(Duration::from_millis(100));
         }
 
-        let mut region_ids = Vec::with_capacity(region_map.len());
-        for (region_id, keys) in region_map.into_iter() {
-            let region = self.get_region(&keys[0]).unwrap();
-            self.must_split_region(region, CheckPolicy::Usekey, keys);
-            region_ids.push(region_id);
+        if !keys_set.is_empty() {
+            panic!("split_regions timeout, rest of keys: {:?}", keys_set);
         }
 
-        Box::pin(ok(region_ids))
+        Box::pin(ok(region_ids.into_iter().collect()))
     }
 
     fn store_heartbeat(
