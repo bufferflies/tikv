@@ -48,7 +48,7 @@ slog-term = "2.4"
 tempdir = "0.3"
 thiserror = "1.0"
 tikv = { workspace = true }
-tikv-client = { version = "0.1.0", git = "http://github.com/tikv/client-rust.git", rev = "a675082f7569a305100ee5605ebee756d3c346b9", default-features = false, features = ["protobuf-codec"] }
+tikv-client = { version = "0.2.0", git = "http://github.com/tikv/client-rust.git", rev = "0a1de19450b178378132b865a13adbee860e774f", default-features = false }
 tikv_util = { workspace = true }
 tokio = { version = "1.12", features = ["full"] }
 url = "2"

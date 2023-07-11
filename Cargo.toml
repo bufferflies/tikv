@@ -119,7 +119,7 @@ log_wrappers = { workspace = true }
 match-template = "0.0.1"
 memory_trace_macros = { workspace = true }
 mime = "0.3.13"
-moka = { version = "0.9.6", features = ["future"] }
+moka = { workspace = true }
 more-asserts = "0.2"
 murmur3 = "0.5.1"
 nom = { version = "5.1.0", default-features = false, features = ["std"] }
@@ -396,6 +396,7 @@ grpcio-health = { version = "0.10.4", default-features = false, features = ["pro
 tipb = { git = "https://github.com/pingcap/tipb.git" }
 kvproto = { git = "https://github.com/pingcap/kvproto.git" }
 yatp = { git = "https://github.com/tikv/yatp.git", branch = "master" }
+moka = { version = "0.9.6", features = ["future"] }
 tokio-timer = { git = "https://github.com/tikv/tokio", branch = "tokio-timer-hotfix" }
 
 [profile.dev.package.grpcio-sys]
