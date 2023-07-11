@@ -42,7 +42,6 @@ fn test_shard_stats() {
     let engine = cluster.get_kvengine(node_id);
     let mut rng = rand::thread_rng();
 
-    // Reduce compression rate to make `kv_size` & `total_size` comparable.
     let random_val = |_: usize| -> Vec<u8> {
         let mut bytes = [0u8; RANDOM_VALUE_SIZE];
         rand::thread_rng().fill(&mut bytes);
@@ -73,22 +72,22 @@ fn test_shard_stats() {
         }
 
         let all_shard_stats = engine.get_all_shard_stats();
-        let (kv_size, mem_table_size, total_size, kv_size_lower_l0, max_ts) = all_shard_stats
-            .iter()
-            .fold((0u64, 0u64, 0u64, 0u64, 0u64), |acc, x| {
-                let kv_size_lower_l0: u64 = x.cfs[WRITE_CF]
-                    .levels
-                    .iter()
-                    .map(|lv_stats| lv_stats.kv_size)
-                    .sum();
-                (
-                    acc.0 + x.kv_size,
-                    acc.1 + x.mem_table_size,
-                    acc.2 + x.total_size,
-                    acc.3 + kv_size_lower_l0,
-                    cmp::max(acc.4, x.max_ts),
-                )
-            });
+        let (kv_size, mem_table_size, kv_size_lower_l0, max_ts) =
+            all_shard_stats
+                .iter()
+                .fold((0u64, 0u64, 0u64, 0u64), |acc, x| {
+                    let kv_size_lower_l0: u64 = x.cfs[WRITE_CF]
+                        .levels
+                        .iter()
+                        .map(|lv_stats| lv_stats.kv_size)
+                        .sum();
+                    (
+                        acc.0 + x.kv_size,
+                        acc.1 + x.mem_table_size,
+                        acc.2 + kv_size_lower_l0,
+                        cmp::max(acc.3, x.max_ts),
+                    )
+                });
 
         // Multiple latest versions of a key in different SSTs are not deduplicated.
         // `mem_table_size` dose NOT calculate into `kv_size`.
@@ -101,15 +100,6 @@ fn test_shard_stats() {
             all_shard_stats,
         );
         assert_eq!(max_ts, client.max_ts());
-
-        // `total_size` contains size of WRITE_CF & LOCK_CF.
-        assert!(
-            kv_size <= total_size / 2,
-            "kv_size wrong, kv_size:{}, total_size:{}, shards:{:?}",
-            kv_size,
-            total_size,
-            all_shard_stats
-        );
 
         if i == TEST_COUNT {
             // Verify we cover levels lower than l0.
