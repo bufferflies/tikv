@@ -1193,6 +1193,7 @@ impl ClusterClient {
             if result.is_err() {
                 store_id_errors.push((store_id, format!("{:?}", result.unwrap_err())));
                 sleep(Duration::from_millis(100));
+                self.update_cache_by_id(region_id, None);
                 continue;
             }
             let mut resp = result.unwrap();
