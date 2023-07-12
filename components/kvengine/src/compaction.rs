@@ -166,20 +166,21 @@ impl CompactionClient {
     }
 
     pub(crate) fn compact(&self, req: CompactionRequest) -> Result<pb::ChangeSet> {
+        let ctx = CompactionCtx {
+            req: Arc::new(req),
+            dfs: self.dfs.clone(),
+            compression_lvl: self.compression_lvl,
+            id_allocator: self.id_allocator.clone(),
+        };
+        let req = &ctx.req;
         let mut remote_compactor = self.get_remote_compactor();
         if remote_compactor.remote_url.is_empty() {
             if req.compactor_version >= 3 {
-                return local_compact_v3(self.dfs.clone(), &req, self.compression_lvl);
+                return local_compact_v3(&ctx);
             }
-            local_compact(
-                self.dfs.clone(),
-                &req,
-                self.compression_lvl,
-                self.id_allocator.clone(),
-            )
+            local_compact(&ctx)
         } else {
             let (tx, rx) = tikv_util::mpsc::bounded(1);
-            let req = Arc::new(req);
             let mut retry_cnt = 0;
             loop {
                 let tx = tx.clone();
@@ -196,18 +197,9 @@ impl CompactionClient {
                         if self.allow_fallback_local {
                             warn!("fall back to local compactor due to error: {:?}", e);
                             if req.compactor_version >= 3 {
-                                break local_compact_v3(
-                                    self.dfs.clone(),
-                                    &req,
-                                    self.compression_lvl,
-                                );
+                                break local_compact_v3(&ctx);
                             }
-                            break local_compact(
-                                self.dfs.clone(),
-                                &req,
-                                self.compression_lvl,
-                                self.id_allocator.clone(),
-                            );
+                            break local_compact(&ctx);
                         } else {
                             warn!(
                                 "remote compactor is incompatible and local compaction is not allowed"
@@ -217,7 +209,7 @@ impl CompactionClient {
                     }
                     Err(e) => {
                         retry_cnt += 1;
-                        let tag = ShardTag::from_comp_req(&req);
+                        let tag = ShardTag::from_comp_req(req);
                         error!(
                             "shard {}, req {:?}, remote compaction failed {:?}, retrying {} remote compactor {}",
                             tag, req, e, retry_cnt, remote_compactor.remote_url
@@ -232,12 +224,7 @@ impl CompactionClient {
                         }
                         if remote_compactor.remote_url.is_empty() {
                             if self.allow_fallback_local {
-                                break local_compact(
-                                    self.dfs.clone(),
-                                    &req,
-                                    self.compression_lvl,
-                                    self.id_allocator.clone(),
-                                );
+                                break local_compact(&ctx);
                             } else {
                                 warn!(
                                     "no remote compactor available and local compaction is not allowed"
@@ -1331,11 +1318,10 @@ pub(crate) fn get_tables_in_range(
     (left, right)
 }
 
-pub(crate) fn compact_l0(
-    req: &CompactionRequest,
-    fs: Arc<dyn dfs::Dfs>,
-    compression_lvl: i32,
-) -> Result<Vec<pb::TableCreate>> {
+pub(crate) fn compact_l0(ctx: &CompactionCtx) -> Result<Vec<pb::TableCreate>> {
+    let req = &ctx.req;
+    let fs = &ctx.dfs;
+    let compression_lvl = ctx.compression_lvl;
     let opts = dfs::Options::new(req.shard_id, req.shard_ver);
     let l0_files = load_table_files(&req.tops, fs.clone(), opts)?;
     let mut l0_tbls = in_mem_files_to_l0_tables(l0_files);
@@ -1574,12 +1560,11 @@ impl CompactL0Helper {
     }
 }
 
-pub(crate) fn compact_tables(
-    req: &CompactionRequest,
-    fs: Arc<dyn dfs::Dfs>,
-    compression_lvl: i32,
-    id_allocator: Arc<dyn IdAllocator>,
-) -> Result<Vec<pb::TableCreate>> {
+pub(crate) fn compact_tables(ctx: &CompactionCtx) -> Result<Vec<pb::TableCreate>> {
+    let req = &ctx.req;
+    let fs = &ctx.dfs;
+    let compression_lvl = ctx.compression_lvl;
+    let id_allocator = &ctx.id_allocator;
     let tag = ShardTag::from_comp_req(req);
     info!(
         "{} compact req tops {:?}, bots {:?}",
@@ -1821,16 +1806,21 @@ pub async fn handle_remote_compaction(
             .body(err_str.into())
             .unwrap());
     }
-
+    let ctx = CompactionCtx {
+        req: Arc::new(comp_req),
+        dfs,
+        compression_lvl,
+        id_allocator,
+    };
     let (tx, rx) = tokio::sync::oneshot::channel();
     std::thread::spawn(move || {
-        tikv_util::set_current_region(comp_req.shard_id);
-        if comp_req.compactor_version >= 3 {
-            let result = local_compact_v3(dfs, &comp_req, compression_lvl);
+        tikv_util::set_current_region(ctx.req.shard_id);
+        if ctx.req.compactor_version >= 3 {
+            let result = local_compact_v3(&ctx);
             tx.send(result).unwrap();
             return;
         }
-        let result = local_compact(dfs, &comp_req, compression_lvl, id_allocator);
+        let result = local_compact(&ctx);
         tx.send(result).unwrap();
     });
     match rx.await.unwrap() {
@@ -1850,12 +1840,15 @@ pub async fn handle_remote_compaction(
     }
 }
 
-fn local_compact(
-    dfs: Arc<dyn dfs::Dfs>,
-    req: &CompactionRequest,
-    compression_lvl: i32,
-    id_allocator: Arc<dyn IdAllocator>,
-) -> Result<pb::ChangeSet> {
+pub(crate) struct CompactionCtx {
+    pub(crate) req: Arc<CompactionRequest>,
+    pub(crate) dfs: Arc<dyn dfs::Dfs>,
+    pub(crate) compression_lvl: i32,
+    pub(crate) id_allocator: Arc<dyn IdAllocator>,
+}
+
+fn local_compact(ctx: &CompactionCtx) -> Result<pb::ChangeSet> {
+    let req = &ctx.req;
     let mut cs = pb::ChangeSet::new();
     cs.set_shard_id(req.shard_id);
     cs.set_shard_ver(req.shard_ver);
@@ -1863,10 +1856,8 @@ fn local_compact(
     if req.destroy_range {
         info!("start destroying range for {}", tag);
         let tc = compact_destroy_range(
-            req,
-            dfs,
+            ctx,
             req.block_size,
-            compression_lvl,
             &req.in_place_compact_files,
             &req.del_prefixes,
         )?;
@@ -1878,10 +1869,8 @@ fn local_compact(
     if let Some(truncate_ts) = req.truncate_ts {
         info!("start truncate ts({}) for {}", truncate_ts, tag);
         let tc = compact_truncate_ts(
-            req,
-            dfs,
+            ctx,
             req.block_size,
-            compression_lvl,
             &req.in_place_compact_files,
             truncate_ts,
         )?;
@@ -1898,13 +1887,7 @@ fn local_compact(
 
     if req.trim_over_bound {
         info!("start trim_over_bound for {}", tag);
-        let tc = compact_trim_over_bound(
-            req,
-            dfs,
-            req.block_size,
-            compression_lvl,
-            &req.in_place_compact_files,
-        )?;
+        let tc = compact_trim_over_bound(ctx, req.block_size, &req.in_place_compact_files)?;
         cs.set_trim_over_bound(tc);
         info!("finish trim_over_bound for {}", tag);
         return Ok(cs);
@@ -1916,14 +1899,14 @@ fn local_compact(
     comp.set_level(req.level as u32);
     if req.level == 0 {
         info!("start compact L0 for {}", tag);
-        let tbls = compact_l0(req, dfs.clone(), compression_lvl)?;
+        let tbls = compact_l0(ctx)?;
         comp.set_table_creates(tbls.into());
         let bot_dels = req.multi_cf_bottoms.clone().into_iter().flatten().collect();
         comp.set_bottom_deletes(bot_dels);
         info!("finish compacting L0 for {}", tag);
     } else {
         info!("start compacting L{} CF{} for {}", req.level, req.cf, tag);
-        let tbls = compact_tables(req, dfs.clone(), compression_lvl, id_allocator)?;
+        let tbls = compact_tables(ctx)?;
         comp.set_table_creates(tbls.into());
         comp.set_bottom_deletes(req.bottoms.clone());
         info!("finish compacting L{} CF{} for {}", req.level, req.cf, tag);
@@ -1932,11 +1915,8 @@ fn local_compact(
     Ok(cs)
 }
 
-fn local_compact_v3(
-    dfs: Arc<dyn dfs::Dfs>,
-    req: &CompactionRequest,
-    compression_lvl: i32,
-) -> Result<pb::ChangeSet> {
+fn local_compact_v3(ctx: &CompactionCtx) -> Result<pb::ChangeSet> {
+    let req = &ctx.req;
     let mut cs = pb::ChangeSet::new();
     cs.set_shard_id(req.shard_id);
     cs.set_shard_ver(req.shard_ver);
@@ -1950,29 +1930,19 @@ fn local_compact_v3(
         } => match spec {
             InPlaceCompaction::DestroyRange(del_prefix) => {
                 cs.set_destroy_range(compact_destroy_range(
-                    req,
-                    dfs,
+                    ctx,
                     *block_size,
-                    compression_lvl,
                     file_ids,
                     del_prefix,
                 )?);
             }
             InPlaceCompaction::TrimOverBound => {
-                cs.set_trim_over_bound(compact_trim_over_bound(
-                    req,
-                    dfs,
-                    *block_size,
-                    compression_lvl,
-                    file_ids,
-                )?);
+                cs.set_trim_over_bound(compact_trim_over_bound(ctx, *block_size, file_ids)?);
             }
             InPlaceCompaction::TruncateTs(truncate_ts) => {
                 cs.set_truncate_ts(compact_truncate_ts(
-                    req,
-                    dfs,
+                    ctx,
                     *block_size,
-                    compression_lvl,
                     file_ids,
                     *truncate_ts,
                 )?);
@@ -1980,28 +1950,13 @@ fn local_compact_v3(
             InPlaceCompaction::Unknown => unreachable!(),
         },
         CompactionType::L0(l0_compaction) => {
-            cs.set_compaction(l0_compact_v3(
-                req,
-                dfs.clone(),
-                compression_lvl,
-                l0_compaction,
-            )?);
+            cs.set_compaction(l0_compact_v3(ctx, l0_compaction)?);
         }
         CompactionType::L1Plus(l1_plus_compaction) => {
-            cs.set_compaction(l1_plus_compact_v3(
-                req,
-                dfs.clone(),
-                compression_lvl,
-                l1_plus_compaction,
-            )?);
+            cs.set_compaction(l1_plus_compact_v3(ctx, l1_plus_compaction)?);
         }
         CompactionType::Major(major_compaction) => {
-            cs.set_major_compaction(major_compact_v3(
-                req,
-                dfs.clone(),
-                compression_lvl,
-                major_compaction,
-            )?);
+            cs.set_major_compaction(major_compact_v3(ctx, major_compaction)?);
         }
         CompactionType::Unknown => unreachable!(),
     }
@@ -2010,13 +1965,14 @@ fn local_compact_v3(
 
 /// Compact files in place to remove data covered by delete prefixes.
 fn compact_destroy_range(
-    req: &CompactionRequest,
-    dfs: Arc<dyn dfs::Dfs>,
+    ctx: &CompactionCtx,
     block_size: usize,
-    compression_lvl: i32,
     files: &Vec<(u64, u32, i32)>,
     del_prefix: &Vec<u8>,
 ) -> Result<pb::TableChange> {
+    let req = &ctx.req;
+    let dfs = &ctx.dfs;
+    let compression_lvl = ctx.compression_lvl;
     assert!(!del_prefix.is_empty() && !files.is_empty());
     assert_eq!(files.len(), req.file_ids.len());
 
@@ -2119,13 +2075,14 @@ fn compact_destroy_range(
 }
 
 fn compact_truncate_ts(
-    req: &CompactionRequest,
-    dfs: Arc<dyn dfs::Dfs>,
+    ctx: &CompactionCtx,
     block_size: usize,
-    compression_lvl: i32,
     files: &Vec<(u64, u32, i32)>,
     truncate_ts: u64,
 ) -> Result<pb::TableChange> {
+    let req = &ctx.req;
+    let dfs = &ctx.dfs;
+    let compression_lvl = ctx.compression_lvl;
     assert!(!files.is_empty());
 
     let opts = dfs::Options::new(req.shard_id, req.shard_ver);
@@ -2232,12 +2189,13 @@ fn compact_truncate_ts(
 
 /// Compact files in place to remove data out of shard bound.
 fn compact_trim_over_bound(
-    req: &CompactionRequest,
-    dfs: Arc<dyn dfs::Dfs>,
+    ctx: &CompactionCtx,
     block_size: usize,
-    compression_lvl: i32,
     files: &Vec<(u64, u32, i32)>,
 ) -> Result<pb::TableChange> {
+    let req = &ctx.req;
+    let dfs = &ctx.dfs;
+    let compression_lvl = ctx.compression_lvl;
     assert!(!files.is_empty());
     assert_eq!(files.len(), req.file_ids.len());
 
@@ -2399,14 +2357,10 @@ fn persist_blob_table(
 }
 
 fn compact_for_cf(
-    shard_id: u64,
+    ctx: &CompactionCtx,
     iter: &mut Box<dyn Iterator>,
-    start: InnerKey<'_>,
-    end: InnerKey<'_>,
     safe_ts: u64,
-    fs: Arc<dyn dfs::Dfs>,
     opts: dfs::Options,
-    compression_lvl: i32,
     cf: usize,
     target_lvl: u32,
     assigned_ids: &mut Vec<u64>,
@@ -2415,6 +2369,11 @@ fn compact_for_cf(
     keep_latest_obsolete_tombstone: bool,
     blob_tables: &HashMap<u64, BlobTable>,
 ) -> Result<(Vec<TableCreate>, Vec<BlobCreate>)> {
+    let shard_id = ctx.req.shard_id;
+    let start = ctx.req.inner_start();
+    let end = ctx.req.inner_end();
+    let fs = &ctx.dfs;
+    let compression_lvl = ctx.compression_lvl;
     let (tx, rx) = tikv_util::mpsc::bounded(assigned_ids.len());
     let mut cur_sst_id = assigned_ids
         .pop()
@@ -2638,12 +2597,9 @@ fn compact_for_cf(
     Ok((sst_creates, blob_table_creates))
 }
 
-fn l0_compact_v3(
-    req: &CompactionRequest,
-    fs: Arc<dyn dfs::Dfs>,
-    compression_lvl: i32,
-    l0_compaction: &L0Compaction,
-) -> Result<pb::Compaction> {
+fn l0_compact_v3(ctx: &CompactionCtx, l0_compaction: &L0Compaction) -> Result<pb::Compaction> {
+    let req = &ctx.req;
+    let fs = &ctx.dfs;
     let opts = dfs::Options::new(req.shard_id, req.shard_ver);
     let l0_files = load_table_files(&l0_compaction.l0_tables, fs.clone(), opts)?;
     let mut l0_tbls = in_mem_files_to_l0_tables(l0_files);
@@ -2680,14 +2636,10 @@ fn l0_compact_v3(
         }
         let mut iter = table::new_merge_iterator(iters, false);
         let (sst_creates, bt_creates) = compact_for_cf(
-            req.shard_id,
+            ctx,
             &mut iter,
-            req.inner_start(),
-            req.inner_end(),
             l0_compaction.safe_ts,
-            fs.clone(),
             opts,
-            compression_lvl,
             cf,
             1,
             &mut assigned_ids,
@@ -2706,11 +2658,11 @@ fn l0_compact_v3(
 }
 
 fn l1_plus_compact_v3(
-    req: &CompactionRequest,
-    fs: Arc<dyn dfs::Dfs>,
-    compression_lvl: i32,
+    ctx: &CompactionCtx,
     l1_plus_compaction: &L1PlusCompaction,
 ) -> Result<pb::Compaction> {
+    let req = &ctx.req;
+    let fs = &ctx.dfs;
     let opts = dfs::Options::new(req.shard_id, req.shard_ver);
     let upper_files = load_table_files(&l1_plus_compaction.upper_level, fs.clone(), opts)?;
     let mut upper_tables = in_mem_files_to_tables(upper_files);
@@ -2724,14 +2676,10 @@ fn l1_plus_compact_v3(
 
     let mut assigned_ids = req.file_ids.clone();
     let (sst_creates, _) = compact_for_cf(
-        req.shard_id,
+        ctx,
         &mut iter,
-        req.inner_start(),
-        req.inner_end(),
         l1_plus_compaction.safe_ts,
-        fs,
         opts,
-        compression_lvl,
         l1_plus_compaction.cf as usize,
         l1_plus_compaction.level as u32 + 1,
         &mut assigned_ids,
@@ -2750,11 +2698,11 @@ fn l1_plus_compact_v3(
 }
 
 fn major_compact_v3(
-    req: &CompactionRequest,
-    fs: Arc<dyn dfs::Dfs>,
-    compression_lvl: i32,
+    ctx: &CompactionCtx,
     major_compaction: &MajorCompaction,
 ) -> Result<pb::MajorCompaction> {
+    let req = &ctx.req;
+    let fs = &ctx.dfs;
     let opts = dfs::Options::new(req.shard_id, req.shard_ver);
     let mut ret = pb::MajorCompaction::new();
     ret.mut_old_blob_tables()
@@ -2804,14 +2752,10 @@ fn major_compact_v3(
         let mut iter = table::new_merge_iterator(iters, false);
         let bt_config = Some(major_compaction.bt_config);
         let (sst_creates, blob_table_creates) = compact_for_cf(
-            req.shard_id,
+            ctx,
             &mut iter,
-            req.inner_start(),
-            req.inner_end(),
             major_compaction.safe_ts,
-            fs.clone(),
             opts,
-            compression_lvl,
             cf,
             CF_LEVELS[cf] as u32,
             &mut assigned_ids,
