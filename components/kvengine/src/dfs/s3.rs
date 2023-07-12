@@ -64,7 +64,7 @@ impl S3Fs {
         Self { core }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testexport"))]
     pub fn new_for_test(s3c: rusoto_core::Client, bucket: String, prefix: String) -> Self {
         Self {
             core: Arc::new(S3FsCore::new_with_s3_client(
@@ -1030,20 +1030,17 @@ impl Debug for Response {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::{fs, io::Write, str};
+#[cfg(any(test, feature = "testexport"))]
+pub mod test_util {
+    use std::str;
 
-    use bytes::Buf;
-    use rand::random;
     use rusoto_mock::{
         MockCredentialsProvider, MockRequestDispatcher, MultipleMockRequestDispatcher,
     };
 
-    use super::*;
-    use crate::table::sstable::{new_filename, File, LocalFile};
+    use crate::dfs::S3Fs;
 
-    fn new_s3fs(file_data: &[u8]) -> S3Fs {
+    pub fn new_test_s3fs(file_data: &[u8]) -> S3Fs {
         let s3c = rusoto_core::Client::new_with(
             MockCredentialsProvider,
             MultipleMockRequestDispatcher::new(vec![
@@ -1056,6 +1053,20 @@ mod tests {
         );
         S3Fs::new_for_test(s3c, "shard-db".into(), "prefix".into())
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, io::Write};
+
+    use bytes::Buf;
+    use rand::random;
+
+    use super::*;
+    use crate::{
+        dfs::test_util::new_test_s3fs,
+        table::sstable::{new_filename, File, LocalFile},
+    };
 
     #[test]
     fn test_s3() {
@@ -1063,7 +1074,7 @@ mod tests {
 
         let local_dir = tempfile::tempdir().unwrap();
         let file_data = "abcdefgh".to_string().into_bytes();
-        let s3fs = new_s3fs(&file_data);
+        let s3fs = new_test_s3fs(&file_data);
         let (tx, rx) = tikv_util::mpsc::bounded(1);
 
         let fs = s3fs.clone();
@@ -1126,7 +1137,7 @@ mod tests {
 
     #[test]
     fn test_parse_sst_file() {
-        let s3fs = new_s3fs(b"abcdefgh");
+        let s3fs = new_test_s3fs(b"abcdefgh");
 
         let file_key = s3fs.file_key(random());
         assert_eq!(

@@ -65,7 +65,7 @@ pub(crate) const WHITELIST_API_PATH: &str = "/api/v1/native_br/whitelist/";
 ///   * GET    /api/v1/native_br/whitelist/<keyspace>?cluster_id=%d
 
 pub(crate) async fn handle_backup(
-    manager: Arc<NativeBrManger>,
+    manager: Arc<NativeBrManager>,
     req: hyper::Request<hyper::Body>,
 ) -> hyper::Result<hyper::Response<hyper::Body>> {
     let query = req.uri().query().unwrap_or("");
@@ -154,7 +154,7 @@ fn parse_restore_type(query_pairs: &HashMap<Cow<'_, str>, Cow<'_, str>>) -> Resu
 }
 
 async fn get_backup_from_query(
-    manager: &Arc<NativeBrManger>,
+    manager: &Arc<NativeBrManager>,
     query_pairs: &HashMap<Cow<'_, str>, Cow<'_, str>>,
     restore_type: RestoreType,
 ) -> Result<RestoreSource> {
@@ -204,7 +204,7 @@ async fn get_backup_from_query(
 }
 
 pub(crate) async fn handle_restore_keyspace(
-    manager: Arc<NativeBrManger>,
+    manager: Arc<NativeBrManager>,
     req: hyper::Request<hyper::Body>,
 ) -> hyper::Result<hyper::Response<hyper::Body>> {
     let query = req.uri().query().unwrap_or("");
@@ -396,7 +396,7 @@ pub(crate) async fn handle_restore_keyspace(
     }
 }
 
-fn handle_get_all_restore_task(manager: &Arc<NativeBrManger>) -> hyper::Result<Response<Body>> {
+fn handle_get_all_restore_task(manager: &Arc<NativeBrManager>) -> hyper::Result<Response<Body>> {
     let resp_vec: Vec<RestoreProgressResponse> = manager
         .get_all_restore_task()
         .into_iter()
@@ -406,7 +406,7 @@ fn handle_get_all_restore_task(manager: &Arc<NativeBrManger>) -> hyper::Result<R
 }
 
 fn handle_restore_status(
-    manager: &Arc<NativeBrManger>,
+    manager: &Arc<NativeBrManager>,
     restore_id: u64,
     keyspace: &str,
 ) -> hyper::Result<Response<Body>> {
@@ -440,7 +440,7 @@ fn handle_error(err: Error) -> hyper::Result<Response<Body>> {
 }
 
 pub(crate) async fn handle_native_br_whitelist(
-    manager: Arc<NativeBrManger>,
+    manager: Arc<NativeBrManager>,
     req: hyper::Request<hyper::Body>,
 ) -> hyper::Result<hyper::Response<hyper::Body>> {
     let query = req.uri().query().unwrap_or("");
@@ -610,6 +610,16 @@ pub(crate) struct RestoreTask {
     restore_type: RestoreType,
     restore_bytes: u64,
     progress_reporter: Arc<RestoreProgressReporter>,
+}
+
+impl RestoreTask {
+    fn ttl_expired(&self, ttl: Duration) -> bool {
+        self.state.is_final()
+            && Utc::now()
+                .signed_duration_since(self.end.unwrap())
+                .num_seconds()
+                >= ttl.as_secs() as i64
+    }
 }
 
 struct RestoreProgressReporter {
@@ -904,12 +914,12 @@ pub struct NativeBrConfig {
     whitelist: WhiteList,
 }
 
-pub(crate) struct NativeBrManger {
+pub(crate) struct NativeBrManager {
     pub context: Arc<BrContext>,
     pub config: RwLock<Config>,
 }
 
-impl NativeBrManger {
+impl NativeBrManager {
     pub(crate) fn new(
         runtime: Arc<Runtime>,
         pd_client: Arc<dyn PdClient>,
@@ -980,7 +990,7 @@ impl NativeBrManger {
         restore_source: RestoreSource,
         restore_type: RestoreType,
     ) -> Result<bool> {
-        if self.get_all_restore_task().len() >= MAX_RESTORE_CONCURRENCY {
+        if self.get_not_final_task_count() >= MAX_RESTORE_CONCURRENCY {
             return Err(Error::ReachConcurrencyLimit(MAX_RESTORE_CONCURRENCY));
         }
 
@@ -1029,6 +1039,16 @@ impl NativeBrManger {
         self.context.restore_tasks.rl().clone()
     }
 
+    /// Return number of tasks which are in not final state.
+    fn get_not_final_task_count(&self) -> usize {
+        self.context
+            .restore_tasks
+            .rl()
+            .values()
+            .filter(|task| !task.state.is_final())
+            .count()
+    }
+
     /// Return:
     ///   Ok(Some(true)): deleted.
     ///   Ok(Some(false)): ignored due state is not final.
@@ -1046,6 +1066,25 @@ impl NativeBrManger {
             }
         } else {
             Ok(None)
+        }
+    }
+
+    pub fn cleanup_expired_restores(&self) {
+        let ttl = self.config.rl().restore_task_ttl.0;
+        let restores = {
+            let tasks = self.context.restore_tasks.rl();
+            tasks
+                .iter()
+                .filter_map(|(&restore_id, task)| {
+                    task.ttl_expired(ttl)
+                        .then_some((restore_id, task.keyspace_name.clone()))
+                })
+                .collect::<Vec<_>>()
+        };
+        for (restore_id, keyspace_name) in restores {
+            if let Ok(Some(true)) = self.delete_restore(restore_id, &keyspace_name) {
+                info!("{}({}) expired and removed", keyspace_name, restore_id);
+            }
         }
     }
 
@@ -1075,4 +1114,94 @@ fn check_task(task: &RestoreTask, keyspace_name: &str) -> Result<()> {
     } else {
         Ok(())
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+
+    use kvengine::dfs::test_util::new_test_s3fs;
+    use tikv_util::config::ReadableDuration;
+
+    use super::*;
+    use crate::native_br::RestoreState::{Init, Running, Succeed};
+
+    #[test]
+    fn test_restore_task_state() {
+        let br_manager = new_test_br_manager("2s");
+
+        // TODO: test for illegal state transition.
+        let states_cases = vec![
+            vec![Init],
+            vec![Init, Running],
+            vec![Init, Running, Succeed],
+            vec![Init, Running, RestoreState::Error],
+            vec![Init, Running, RestoreState::Error, Init],
+        ];
+
+        for (restore_id, states) in states_cases.into_iter().enumerate() {
+            for state in states {
+                assert!(
+                    br_manager
+                        .context
+                        .change_restore_state(
+                            restore_id as u64,
+                            &format!("ks{}", restore_id),
+                            RestoreType::Normal,
+                            state,
+                            None,
+                            0
+                        )
+                        .unwrap()
+                );
+            }
+        }
+
+        assert_eq!(br_manager.get_not_final_task_count(), 3);
+        assert_eq!(br_manager.get_all_restore_task().len(), 5);
+
+        thread::sleep(Duration::from_secs(2));
+        br_manager.cleanup_expired_restores();
+        assert_eq!(br_manager.get_not_final_task_count(), 3);
+        assert_eq!(br_manager.get_all_restore_task().len(), 3);
+
+        assert!(
+            br_manager
+                .context
+                .change_restore_state(1, "ks1", RestoreType::Normal, Succeed, None, 0)
+                .unwrap()
+        );
+        br_manager.cleanup_expired_restores();
+        assert_eq!(br_manager.get_not_final_task_count(), 2);
+        assert_eq!(br_manager.get_all_restore_task().len(), 3);
+    }
+
+    fn new_test_br_manager(restore_task_ttl: &str) -> NativeBrManager {
+        let thread_pool = Arc::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .worker_threads(1)
+                .thread_name("br_manager_test")
+                .build()
+                .unwrap(),
+        );
+
+        let file_data = "abcdefgh".to_string().into_bytes();
+        let s3fs = Arc::new(new_test_s3fs(&file_data));
+
+        NativeBrManager::new(
+            thread_pool,
+            Arc::new(MockPdClient {}),
+            s3fs,
+            None,
+            Config {
+                restore_task_ttl: ReadableDuration::from_str(restore_task_ttl).unwrap(),
+                ..Default::default()
+            },
+        )
+    }
+
+    struct MockPdClient {}
+
+    impl PdClient for MockPdClient {}
 }

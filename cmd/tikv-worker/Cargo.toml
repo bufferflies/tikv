@@ -45,6 +45,7 @@ toml = "0.5"
 url = "2"
 
 [dev-dependencies]
+kvengine = { path = "../../components/kvengine", features = ["testexport"] }
 rand = "0.8.3"
 tempfile = "3.0"
 test_raftstore = { path = "../../components/test_raftstore" }

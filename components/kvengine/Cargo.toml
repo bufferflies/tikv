@@ -10,6 +10,7 @@ publish = false
 protobuf-codec = [
     "protobuf/bytes",
 ]
+testexport = []
 
 [dependencies]
 api_version = { path = "../api_version" }

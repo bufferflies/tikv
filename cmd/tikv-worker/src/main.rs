@@ -49,12 +49,12 @@ use tikv_util::{
 
 use crate::{
     load_data::{handle_load_data, LoadDataManager, MAX_IN_MEM_SIZE},
-    native_br::{NativeBrConfig, NativeBrManger},
+    native_br::{NativeBrConfig, NativeBrManager},
 };
 
 const ZSTD_COMPRESSION_LEVEL_FOR_REMOTE: &str = "5";
 const DEFAULT_LOG_LEVEL: Level = Level::Info;
-const UPDATE_NATIVE_BR_CONFIG_INTERVAL: Duration = Duration::from_secs(60); //1min
+const BACKGROUND_WORKER_INTERVAL: Duration = Duration::from_secs(60); //1min
 
 fn main() {
     init_logger(io::stdout(), DEFAULT_LOG_LEVEL);
@@ -247,14 +247,15 @@ fn main() {
         thread_pool.clone(),
         MAX_IN_MEM_SIZE,
     ));
-    let br_manager = Arc::new(NativeBrManger::new(
+    let br_manager = Arc::new(NativeBrManager::new(
         thread_pool.clone(),
         pd.clone(),
         s3fs.clone(),
         Some(config.data_dir.clone()),
         config.clone(),
     ));
-    update_native_br_config_periodically(br_manager.clone(), config_file_path);
+    spawn_br_background_worker(br_manager.clone(), config_file_path);
+
     let server_builder = hyper::Server::builder(incoming);
     let s3fs_clone = s3fs.clone();
     let cache_fs_clone = cache_fs.clone();
@@ -357,23 +358,29 @@ fn init_logger<W: 'static + io::Write + Send>(writer: W, level: Level) {
     slog_global::set_global(logger);
 }
 
-fn update_native_br_config_periodically(br_manager: Arc<NativeBrManger>, path: Option<PathBuf>) {
-    if path.is_none() {
-        return;
-    }
-    let path = path.unwrap();
+fn spawn_br_background_worker(br_manager: Arc<NativeBrManager>, path: Option<PathBuf>) {
     std::thread::spawn(move || {
+        info!("start br background worker");
         loop {
-            match std::fs::read(&path) {
-                Ok(data) => match toml::from_slice::<Config>(&data) {
-                    Ok(config) => br_manager.update_native_br_config(config.native_br),
-                    Err(e) => error!("failed to parse config file {:?}", e),
-                },
-                Err(e) => error!("failed to read config file {:?}", e),
+            if let Some(path) = path.as_ref() {
+                update_native_br_config(br_manager.clone(), path.as_path());
             }
-            std::thread::sleep(UPDATE_NATIVE_BR_CONFIG_INTERVAL);
+
+            br_manager.cleanup_expired_restores();
+
+            std::thread::sleep(BACKGROUND_WORKER_INTERVAL);
         }
     });
+}
+
+fn update_native_br_config(br_manager: Arc<NativeBrManager>, path: &Path) {
+    match std::fs::read(path) {
+        Ok(data) => match toml::from_slice::<Config>(&data) {
+            Ok(config) => br_manager.update_native_br_config(config.native_br),
+            Err(e) => error!("failed to parse config file {:?}", e),
+        },
+        Err(e) => error!("failed to read config file {:?}", e),
+    }
 }
 
 async fn handle_get_metrics(req: Request<Body>) -> hyper::Result<Response<Body>> {
@@ -544,6 +551,8 @@ pub struct Config {
     pub native_br: NativeBrConfig,
     pub cop_addr: String,
     pub cop_cache_size: ReadableSize,
+    // The time-to-live when restore task has been in final state.
+    pub restore_task_ttl: ReadableDuration,
 }
 
 impl Default for Config {
@@ -563,6 +572,7 @@ impl Default for Config {
             native_br: NativeBrConfig::default(),
             cop_addr: String::from("0.0.0.0:9500"),
             cop_cache_size: ReadableSize::gb(1),
+            restore_task_ttl: ReadableDuration::minutes(10),
         }
     }
 }
