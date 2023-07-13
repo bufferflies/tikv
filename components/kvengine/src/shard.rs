@@ -35,6 +35,7 @@ pub(crate) struct ShardPendingOperations {
     pub(crate) del_prefixes: Arc<DeletePrefixes>,
     pub(crate) truncate_ts: Option<TruncateTs>,
     pub(crate) trim_over_bound: bool,
+    pub(crate) manual_major_compaction: bool,
 }
 
 impl ShardPendingOperations {
@@ -43,6 +44,7 @@ impl ShardPendingOperations {
             del_prefixes: Arc::new(DeletePrefixes::new_with_inner_key_off(inner_key_off)),
             truncate_ts: None,
             trim_over_bound: false,
+            manual_major_compaction: false,
         }
     }
 }
@@ -91,6 +93,10 @@ pub const TRUNCATE_TS_KEY: &str = "_truncate_ts";
 pub const TRIM_OVER_BOUND: &str = "_trim_over_bound";
 pub const TRIM_OVER_BOUND_ENABLE: &[u8] = &[1];
 pub const TRIM_OVER_BOUND_DISABLE: &[u8] = b"";
+
+pub const MANUAL_MAJOR_COMPACTION: &str = "_manual_major_compaction";
+pub const MANUAL_MAJOR_COMPACTION_ENABLE: &[u8] = &[1];
+pub const MANUAL_MAJOR_COMPACTION_DISABLE: &[u8] = b"";
 
 impl Deref for Shard {
     type Target = ShardRange;
@@ -226,8 +232,7 @@ impl Shard {
 
     pub(crate) fn merge_del_prefix(&self, val: &[u8]) {
         let mut pending_ops = self.pending_ops.write().unwrap();
-        let mut del_prefixes = (*pending_ops.del_prefixes).clone();
-        del_prefixes = del_prefixes.merge(val);
+        let mut del_prefixes = (*pending_ops.del_prefixes).merge(val);
         del_prefixes.schedule_at = self.gen_rand_schedule_del_range_time();
         pending_ops.del_prefixes = Arc::new(del_prefixes);
     }
@@ -255,6 +260,16 @@ impl Shard {
             pending_ops.trim_over_bound = true;
             return true;
         }
+        false
+    }
+
+    pub(crate) fn set_manual_major_compaction(&self, val: &[u8]) -> bool {
+        let mut pending_ops = self.pending_ops.write().unwrap();
+        if !val.is_empty() {
+            pending_ops.manual_major_compaction = true;
+            return true;
+        }
+        pending_ops.manual_major_compaction = false;
         false
     }
 
@@ -428,6 +443,12 @@ impl Shard {
         } else if Self::ready_to_trim_over_bound(pending_ops.trim_over_bound, &data) {
             *self.compaction_priority.write().unwrap() = Some(CompactionPriority::TrimOverBound);
             return;
+        } else if pending_ops.manual_major_compaction {
+            // Set major compaction priority to 2.0 to make it less likely to be picked up
+            // when there are other shards waiting to be compacted.
+            *self.compaction_priority.write().unwrap() =
+                Some(CompactionPriority::Major { score: 2.0 });
+            return;
         }
         if !data.blob_tbl_map.is_empty() {
             let blob_table_utilization = {
@@ -455,7 +476,7 @@ impl Shard {
             };
             if blob_table_utilization < self.opt.blob_table_gc_ratio {
                 let mut lock = self.compaction_priority.write().unwrap();
-                *lock = Some(CompactionPriority::Major);
+                *lock = Some(CompactionPriority::Major { score: f64::MAX });
                 return;
             }
         }
@@ -543,6 +564,10 @@ impl Shard {
 
     pub fn get_truncate_ts(&self) -> Option<TruncateTs> {
         self.pending_ops.read().unwrap().truncate_ts
+    }
+
+    pub fn get_manual_major_compaction(&self) -> bool {
+        self.pending_ops.read().unwrap().manual_major_compaction
     }
 
     pub fn data_all_persisted(&self) -> bool {

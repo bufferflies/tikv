@@ -292,6 +292,7 @@ impl Value {
         assert!(self.is_blob_ref());
         self.blob_ptr = blob.as_ptr();
         self.len = blob.len() as u32;
+        self.meta &= !BIT_BLOB_REF;
     }
 }
 

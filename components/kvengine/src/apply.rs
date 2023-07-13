@@ -426,6 +426,9 @@ impl EngineCore {
         );
         shard.set_data(new_data);
         self.remove_dfs_files(shard, del_file_is_subrange);
+        let mut lock = shard.pending_ops.write().unwrap();
+        lock.manual_major_compaction = false;
+        shard.set_property(MANUAL_MAJOR_COMPACTION, MANUAL_MAJOR_COMPACTION_DISABLE);
     }
 
     fn get_sstables_from_table_change(

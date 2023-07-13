@@ -497,7 +497,7 @@ impl Engine {
             Some(CompactionPriority::L1Plus { cf, level, .. }) => {
                 self.trigger_l1_plus_compaction(&shard, cf, level, id_ver)
             }
-            Some(CompactionPriority::Major) => self.trigger_major_compacton(&shard),
+            Some(CompactionPriority::Major { .. }) => self.trigger_major_compacton(&shard),
             Some(CompactionPriority::DestroyRange) => Some(self.destroy_range(&shard)),
             Some(CompactionPriority::TruncateTs) => self.truncate_ts(&shard).transpose(),
             Some(CompactionPriority::TrimOverBound) => self.trim_over_bound(&shard).transpose(),
@@ -572,7 +572,7 @@ impl Engine {
             inner_key_off: range.inner_key_off,
             file_ids: vec![],
             compaction_tp: CompactionType::Unknown,
-            compactor_version: 2,
+            compactor_version: self.opts.compaction_request_version,
             // all fields below will be deprecated in v3.
             destroy_range: false,
             del_prefixes: vec![],
@@ -921,7 +921,8 @@ impl Engine {
             req.multi_cf_bottoms.push(l1_tbls.clone());
             multi_cfs_l1_tbls.push(l1_tbls);
         }
-        let build_blob = estimated_blob_size > self.opts.blob_table_target_size as u64;
+        let build_blob = self.opts.min_blob_size != 0
+            && estimated_blob_size > self.opts.blob_table_target_size as u64;
         info!(
             "{} build blob {} in L0 compaction, estimated blob size {}, target blob size {}",
             tag, build_blob, estimated_blob_size, self.opts.blob_table_target_size
@@ -1215,7 +1216,7 @@ impl Engine {
 pub(crate) enum CompactionPriority {
     L0 { score: f64 },
     L1Plus { cf: isize, score: f64, level: usize },
-    Major,
+    Major { score: f64 },
     DestroyRange,
     TruncateTs,
     TrimOverBound,
@@ -1226,7 +1227,7 @@ impl CompactionPriority {
         match self {
             CompactionPriority::L0 { score } => *score,
             CompactionPriority::L1Plus { score, .. } => *score,
-            CompactionPriority::Major => f64::MAX - 1.0,
+            CompactionPriority::Major { score } => *score,
             CompactionPriority::DestroyRange => f64::MAX,
             CompactionPriority::TruncateTs => f64::MAX,
             CompactionPriority::TrimOverBound => f64::MAX,
@@ -1237,7 +1238,7 @@ impl CompactionPriority {
         match self {
             CompactionPriority::L0 { .. } => 0,
             CompactionPriority::L1Plus { level, .. } => *level as isize,
-            CompactionPriority::Major => -1,
+            CompactionPriority::Major { .. } => -1,
             CompactionPriority::DestroyRange => -1,
             CompactionPriority::TruncateTs => -1,
             CompactionPriority::TrimOverBound => -1,
@@ -1248,7 +1249,7 @@ impl CompactionPriority {
         match self {
             CompactionPriority::L0 { .. } => -1,
             CompactionPriority::L1Plus { cf, .. } => *cf,
-            CompactionPriority::Major => -1,
+            CompactionPriority::Major { .. } => -1,
             CompactionPriority::DestroyRange => -1,
             CompactionPriority::TruncateTs => -1,
             CompactionPriority::TrimOverBound => -1,

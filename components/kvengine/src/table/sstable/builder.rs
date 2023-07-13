@@ -173,6 +173,8 @@ impl Builder {
             self.old_builder.add_entry(key, *val, blob_ref);
             if let Some(blob_ref) = blob_ref {
                 self.total_blob_size += blob_ref.len as u64;
+            } else if val.is_blob_ref() {
+                self.total_blob_size += val.get_blob_ref().len as u64;
             }
             self.old_entries += 1;
         } else {
@@ -189,6 +191,9 @@ impl Builder {
             if let Some(blob_ref) = blob_ref {
                 self.total_blob_size += blob_ref.len as u64;
                 self.kv_size += blob_ref.original_len as u64;
+            } else if val.is_blob_ref() {
+                self.total_blob_size += val.get_blob_ref().len as u64;
+                self.kv_size += val.get_blob_ref().original_len as u64;
             } else {
                 self.kv_size += val.value_len() as u64;
             }

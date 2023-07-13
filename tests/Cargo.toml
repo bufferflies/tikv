@@ -105,6 +105,7 @@ file_system = { workspace = true }
 futures = "0.3"
 grpcio = { workspace = true }
 grpcio-health = { version = "0.10", default-features = false }
+http = "0.2.8"
 kvengine = { workspace = true }
 kvenginepb = { workspace = true }
 kvproto = { workspace = true }

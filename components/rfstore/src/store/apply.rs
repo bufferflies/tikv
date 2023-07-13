@@ -14,7 +14,8 @@ use std::{
 use bytes::Buf;
 use fail::fail_point;
 use kvengine::{
-    mvcc, ChangeSet, Engine, SnapAccess, UserMeta, TRIM_OVER_BOUND, TRIM_OVER_BOUND_ENABLE,
+    mvcc, ChangeSet, Engine, SnapAccess, UserMeta, MANUAL_MAJOR_COMPACTION,
+    MANUAL_MAJOR_COMPACTION_ENABLE, TRIM_OVER_BOUND, TRIM_OVER_BOUND_ENABLE,
 };
 use kvproto::{
     metapb,
@@ -570,6 +571,12 @@ impl Applier {
             TYPE_TRIGGER_TRIM_OVER_BOUND => {
                 let parameter = cl.get_trigger_trim_over_bound();
                 self.trigger_trim_over_bound(parameter, wb, engine, ctx.router.as_ref());
+            }
+            TYPE_TRIGGER_MAJOR_COMPACTION => {
+                let shard = engine.get_shard(self.region_id()).unwrap();
+                if !shard.get_manual_major_compaction() {
+                    wb.set_property(MANUAL_MAJOR_COMPACTION, MANUAL_MAJOR_COMPACTION_ENABLE);
+                }
             }
             _ => panic!("unknown custom log type"),
         }

@@ -54,6 +54,8 @@ pub struct Options {
     pub for_restore: bool,
 
     pub enable_safe_point_v2: bool,
+
+    pub compaction_request_version: u32,
 }
 
 impl Default for Options {
@@ -78,6 +80,7 @@ impl Default for Options {
             enable_inner_key_offset: false,
             for_restore: false,
             enable_safe_point_v2: false,
+            compaction_request_version: 2,
         }
     }
 }

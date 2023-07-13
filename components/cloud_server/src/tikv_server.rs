@@ -949,6 +949,7 @@ impl TikvServer {
         kv_opts.allow_fallback_local = conf.dfs.allow_fallback_local;
         kv_opts.enable_inner_key_offset = conf.enable_inner_key_offset;
         kv_opts.max_del_range_delay = conf.kvengine.max_del_range_delay.into();
+        kv_opts.compaction_request_version = conf.kvengine.compaction_request_version;
         kv_opts.for_restore = for_restore;
         let opts = Arc::new(kv_opts);
         let id_allocator = Arc::new(PdIdAllocator::new(pd.clone()));

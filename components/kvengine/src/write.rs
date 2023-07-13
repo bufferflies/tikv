@@ -186,6 +186,11 @@ impl Engine {
                     need_refresh_shard_states = true;
                     shard.properties.set(k.as_str(), v.chunk());
                 }
+                MANUAL_MAJOR_COMPACTION => {
+                    shard.set_manual_major_compaction(v.chunk());
+                    need_refresh_shard_states = true;
+                    shard.properties.set(k.as_str(), v.chunk());
+                }
                 _ => {
                     shard.properties.set(k.as_str(), v.chunk());
                 }

@@ -8,12 +8,14 @@ use tikv_util::config::ReadableDuration;
 pub struct Config {
     /// The maximum delay duration for delete range.
     pub max_del_range_delay: ReadableDuration,
+    pub compaction_request_version: u32,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             max_del_range_delay: ReadableDuration::secs(3600),
+            compaction_request_version: 2,
         }
     }
 }

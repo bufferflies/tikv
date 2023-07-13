@@ -15,7 +15,10 @@ use std::{
 use bytes::Buf;
 use error_code::ErrorCodeExt;
 use fail::fail_point;
-use kvengine::{IdVer, Shard, TruncateTs, DEL_PREFIXES_KEY, TRUNCATE_TS_KEY};
+use kvengine::{
+    IdVer, Shard, TruncateTs, DEL_PREFIXES_KEY, MANUAL_MAJOR_COMPACTION,
+    MANUAL_MAJOR_COMPACTION_DISABLE, MANUAL_MAJOR_COMPACTION_ENABLE, TRUNCATE_TS_KEY,
+};
 use kvproto::{
     import_sstpb::SwitchMode,
     metapb::{self, Region, RegionEpoch},
@@ -262,6 +265,10 @@ impl<'a> PeerMsgHandler<'a> {
             CasualMessage::TriggerTrimOverBound(parameter) => {
                 self.trigger_trim_over_bound(parameter.target_shard.unwrap().ver, parameter)
             }
+            CasualMessage::MajorCompact {
+                major_compact,
+                callback,
+            } => self.on_manual_major_compact(major_compact, callback),
         }
     }
 
@@ -1266,6 +1273,26 @@ impl<'a> PeerMsgHandler<'a> {
         cs.set_property_key(TRUNCATE_TS_KEY.to_string());
         let property_value = TruncateTs::from(truncate_ts).marshal().to_vec();
         cs.set_property_value(property_value);
+        let mut custom_builder = CustomBuilder::new();
+        custom_builder.set_change_set(&cs);
+        cmd.set_custom_request(custom_builder.build());
+        self.propose_raft_command(cmd, callback, None);
+    }
+
+    fn on_manual_major_compact(&mut self, major_compact: bool, callback: Callback) {
+        if !self.peer.is_leader() {
+            callback.invoke_with_response(RaftCmdResponse::default());
+            return;
+        }
+        let id_ver = self.peer.tag().id_ver;
+        let mut cmd = self.new_raft_cmd_request();
+        let mut cs = kvengine::new_change_set(id_ver.id(), id_ver.ver());
+        cs.set_property_key(MANUAL_MAJOR_COMPACTION.to_string());
+        if major_compact {
+            cs.set_property_value(MANUAL_MAJOR_COMPACTION_ENABLE.to_vec());
+        } else {
+            cs.set_property_value(MANUAL_MAJOR_COMPACTION_DISABLE.to_vec());
+        }
         let mut custom_builder = CustomBuilder::new();
         custom_builder.set_change_set(&cs);
         cmd.set_custom_request(custom_builder.build());

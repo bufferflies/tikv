@@ -14,6 +14,7 @@ mod delete_range;
 mod engine_basic;
 mod gc;
 mod load_data;
+mod major_compaction;
 mod merge;
 mod native_backup;
 mod replica_read;

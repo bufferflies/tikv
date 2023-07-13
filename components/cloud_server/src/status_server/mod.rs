@@ -832,6 +832,102 @@ impl StatusServer {
         ))
     }
 
+    // URI: /major_compact?major_compact=xxx[&keyspace_id=xxx[&table_id=xxx]][&
+    // region_id=xxx]
+    async fn major_compact(
+        req: Request<Body>,
+        rf: RfEngine,
+        router: RaftRouter,
+    ) -> hyper::Result<Response<Body>> {
+        info!("major compact request: {:?}", req);
+        let bad_request_resp = |msg: &str| make_response(StatusCode::BAD_REQUEST, msg.to_owned());
+        let path = req.uri().path();
+        if path != "/major-compact" {
+            return Ok(bad_request_resp("bad request URI"));
+        }
+        let query = req.uri().query().unwrap_or("");
+        let query_pairs: HashMap<_, _> = url::form_urlencoded::parse(query.as_bytes()).collect();
+        let major_compact = query_pairs.get("major_compact");
+        if major_compact.is_none() {
+            return Ok(bad_request_resp("major_compact not found"));
+        }
+        let major_compact = match bool::from_str(major_compact.unwrap()) {
+            Ok(major_compact) => major_compact,
+            Err(e) => return Ok(bad_request_resp(e.to_string().as_str())),
+        };
+        let region_id = query_pairs.get("region_id");
+        let keyspace_id = query_pairs.get("keyspace_id");
+        let table_id = query_pairs.get("table_id");
+
+        let target_regions = if let Some(region_id) = region_id {
+            let region_id = match u64::from_str(region_id) {
+                Ok(region_id) => region_id,
+                Err(err) => return Ok(bad_request_resp(err.to_string().as_str())),
+            };
+            let region_to_peers = rf.get_region_peer_map();
+            let &peer_id = region_to_peers.get(&region_id).unwrap();
+            let cs = load_raft_engine_meta(&rf, peer_id);
+            if cs.is_none() {
+                return Ok(bad_request_resp(
+                    format!("region {} peer {} not exists", region_id, peer_id).as_str(),
+                ));
+            }
+            vec![region_id]
+        } else if let Some(keyspace_id) = keyspace_id {
+            let keyspace_id = match u32::from_str(keyspace_id) {
+                Ok(keyspace_id) => keyspace_id,
+                Err(e) => return Ok(bad_request_resp(e.to_string().as_str())),
+            };
+            let mut prefix = ApiV2::get_txn_keyspace_prefix(keyspace_id);
+            if let Some(table_id) = table_id {
+                let table_id = match u64::from_str(table_id) {
+                    Ok(table_id) => table_id,
+                    Err(e) => return Ok(bad_request_resp(e.to_string().as_str())),
+                };
+                prefix.put_u8(b't');
+                prefix.encode_i64(table_id as i64).unwrap();
+            }
+            if let Some(regions) = collect_prefix_regions(&rf, &prefix) {
+                regions
+                    .into_iter()
+                    .map(|(_, region_id, _)| region_id)
+                    .collect::<Vec<_>>()
+            } else {
+                return Ok(bad_request_resp("collect none region with prefix"));
+            }
+        } else {
+            return Ok(bad_request_resp("query parameters invalid"));
+        };
+        if target_regions.is_empty() {
+            return Ok(bad_request_resp("target regions is empty"));
+        } else {
+            info!("manual major compact regions {:?}", target_regions);
+        }
+        let mut region_futures = Vec::with_capacity(target_regions.len());
+        for region_id in target_regions.iter() {
+            let (cb, fu) = paired_future_callback();
+            let callback = Callback::write(Box::new(move |_| {
+                cb(());
+            }));
+            region_futures.push(fu);
+            router.send_casual_msg(
+                *region_id,
+                CasualMessage::MajorCompact {
+                    major_compact,
+                    callback,
+                },
+            );
+        }
+        let _ = futures::future::join_all(region_futures).await;
+        Ok(make_response(
+            StatusCode::OK,
+            format!(
+                "trigger manual major compaction on region(s) {:?} success",
+                target_regions
+            ),
+        ))
+    }
+
     async fn backup_rfengine(
         req: Request<Body>,
         engine: rfengine::RfEngine,
@@ -1386,6 +1482,9 @@ impl StatusServer {
                             }
                             (Method::POST, path) if path.starts_with("/unsafe_recover") => {
                                 Self::unsafe_recover(req, rfengine, engine).await
+                            }
+                            (Method::POST, path) if path.starts_with("/major-compact") => {
+                                Self::major_compact(req, rfengine, router).await
                             }
                             _ => Ok(make_response(StatusCode::NOT_FOUND, "path not found")),
                         }

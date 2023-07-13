@@ -255,6 +255,8 @@ fn test_truncate_ts_request() {
         applier_tx.clone(),
         engine.opts.min_blob_size,
     );
+    // In case auto truncate_ts compaction finishes too fast.
+    engine.get_shard(1).unwrap().set_active(false);
     // truncate ts.
     let mut wb = WriteBatch::new(1, 0);
     let truncate_ts = TruncateTs::from(version + 10);
