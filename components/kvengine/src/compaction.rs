@@ -1922,6 +1922,27 @@ fn local_compact_v3(ctx: &CompactionCtx) -> Result<pb::ChangeSet> {
     cs.set_shard_ver(req.shard_ver);
     let tag = ShardTag::from_comp_req(req);
     info!("start compaction for {}, req {:?}", tag, req);
+    let mut file_ids = req.file_ids.clone();
+    let mut num_files_quota = if 4096 > file_ids.len() {
+        4096 - req.file_ids.len()
+    } else {
+        0
+    };
+    let id_allocator = ctx.id_allocator.clone();
+    let mut allocate_id = move || {
+        if file_ids.is_empty() && num_files_quota > 0 {
+            let allocated = id_allocator
+                .alloc_id(std::cmp::min(64, num_files_quota))
+                .unwrap_or_else(|e| {
+                    panic!("failed to allocate id: {:?}", e);
+                });
+            file_ids.extend_from_slice(&allocated);
+            num_files_quota -= allocated.len();
+        }
+        file_ids.pop().unwrap_or_else(|| {
+            panic!("compaction runs out of file ids");
+        })
+    };
     match &req.compaction_tp {
         CompactionType::InPlace {
             file_ids,
@@ -1950,13 +1971,17 @@ fn local_compact_v3(ctx: &CompactionCtx) -> Result<pb::ChangeSet> {
             InPlaceCompaction::Unknown => unreachable!(),
         },
         CompactionType::L0(l0_compaction) => {
-            cs.set_compaction(l0_compact_v3(ctx, l0_compaction)?);
+            cs.set_compaction(l0_compact_v3(ctx, l0_compaction, &mut allocate_id)?);
         }
         CompactionType::L1Plus(l1_plus_compaction) => {
-            cs.set_compaction(l1_plus_compact_v3(ctx, l1_plus_compaction)?);
+            cs.set_compaction(l1_plus_compact_v3(
+                ctx,
+                l1_plus_compaction,
+                &mut allocate_id,
+            )?);
         }
         CompactionType::Major(major_compaction) => {
-            cs.set_major_compaction(major_compact_v3(ctx, major_compaction)?);
+            cs.set_major_compaction(major_compact_v3(ctx, major_compaction, &mut allocate_id)?);
         }
         CompactionType::Unknown => unreachable!(),
     }
@@ -2363,21 +2388,19 @@ fn compact_for_cf(
     opts: dfs::Options,
     cf: usize,
     target_lvl: u32,
-    assigned_ids: &mut Vec<u64>,
     sst_config: &SstConfig,
     bt_config: &Option<BlobTableConfig>,
     keep_latest_obsolete_tombstone: bool,
     blob_tables: &HashMap<u64, BlobTable>,
+    allocate_id: &mut dyn FnMut() -> u64,
 ) -> Result<(Vec<TableCreate>, Vec<BlobCreate>)> {
     let shard_id = ctx.req.shard_id;
     let start = ctx.req.inner_start();
     let end = ctx.req.inner_end();
     let fs = &ctx.dfs;
     let compression_lvl = ctx.compression_lvl;
-    let (tx, rx) = tikv_util::mpsc::bounded(assigned_ids.len());
-    let mut cur_sst_id = assigned_ids
-        .pop()
-        .unwrap_or_else(|| panic!("Assigned IDs have been exhausted"));
+    let (tx, rx) = tikv_util::mpsc::bounded(ctx.req.file_ids.len());
+    let mut cur_sst_id = allocate_id();
 
     let mut sst_builder = sstable::Builder::new(
         cur_sst_id,
@@ -2390,9 +2413,7 @@ fn compact_for_cf(
     // table, to reduce the memory re-allocation.
     let mut decompressed_blob_buf = vec![];
     let mut blob_table_builder = if let Some(config) = bt_config {
-        cur_blob_table_id = assigned_ids
-            .pop()
-            .unwrap_or_else(|| panic!("Assigned IDs have been exhausted"));
+        cur_blob_table_id = allocate_id();
         Some((
             config,
             BlobTableBuilder::new(
@@ -2438,9 +2459,7 @@ fn compact_for_cf(
                         fs.clone(),
                         opts,
                     );
-                    cur_sst_id = assigned_ids
-                        .pop()
-                        .unwrap_or_else(|| panic!("Assigned IDs have been exhausted"));
+                    cur_sst_id = allocate_id();
                     sst_builder.reset(cur_sst_id);
                 }
                 if let Some((bt_config, bt_builder)) = &mut blob_table_builder {
@@ -2453,9 +2472,7 @@ fn compact_for_cf(
                             fs.clone(),
                             opts,
                         );
-                        cur_blob_table_id = assigned_ids
-                            .pop()
-                            .unwrap_or_else(|| panic!("Assigned IDs have been exhausted"));
+                        cur_blob_table_id = allocate_id();
                         bt_builder.reset(cur_blob_table_id);
                     }
                 }
@@ -2597,14 +2614,17 @@ fn compact_for_cf(
     Ok((sst_creates, blob_table_creates))
 }
 
-fn l0_compact_v3(ctx: &CompactionCtx, l0_compaction: &L0Compaction) -> Result<pb::Compaction> {
+fn l0_compact_v3(
+    ctx: &CompactionCtx,
+    l0_compaction: &L0Compaction,
+    allocate_id: &mut dyn FnMut() -> u64,
+) -> Result<pb::Compaction> {
     let req = &ctx.req;
     let fs = &ctx.dfs;
     let opts = dfs::Options::new(req.shard_id, req.shard_ver);
     let l0_files = load_table_files(&l0_compaction.l0_tables, fs.clone(), opts)?;
     let mut l0_tbls = in_mem_files_to_l0_tables(l0_files);
     l0_tbls.sort_by(|a, b| b.version().cmp(&a.version()));
-    let mut assigned_ids = req.file_ids.clone();
     let mut comp = pb::Compaction::new();
     comp.set_top_deletes(l0_compaction.l0_tables.clone());
     comp.set_level(0_u32);
@@ -2642,12 +2662,12 @@ fn l0_compact_v3(ctx: &CompactionCtx, l0_compaction: &L0Compaction) -> Result<pb
             opts,
             cf,
             1,
-            &mut assigned_ids,
             &l0_compaction.sst_config,
             &l0_compaction.bt_config,
             //&None,
             true,
             &HashMap::new(),
+            allocate_id,
         )?;
         all_sst_creates.extend(sst_creates);
         all_bt_creates.extend(bt_creates);
@@ -2660,6 +2680,7 @@ fn l0_compact_v3(ctx: &CompactionCtx, l0_compaction: &L0Compaction) -> Result<pb
 fn l1_plus_compact_v3(
     ctx: &CompactionCtx,
     l1_plus_compaction: &L1PlusCompaction,
+    allocate_id: &mut dyn FnMut() -> u64,
 ) -> Result<pb::Compaction> {
     let req = &ctx.req;
     let fs = &ctx.dfs;
@@ -2674,7 +2695,6 @@ fn l1_plus_compact_v3(
     let lower_iter = Box::new(ConcatIterator::new_with_tables(lower_tables, false, false));
     let mut iter = table::new_merge_iterator(vec![upper_iter, lower_iter], false);
 
-    let mut assigned_ids = req.file_ids.clone();
     let (sst_creates, _) = compact_for_cf(
         ctx,
         &mut iter,
@@ -2682,11 +2702,11 @@ fn l1_plus_compact_v3(
         opts,
         l1_plus_compaction.cf as usize,
         l1_plus_compaction.level as u32 + 1,
-        &mut assigned_ids,
         &l1_plus_compaction.sst_config,
         &None,
         l1_plus_compaction.keep_latest_obsolete_tombstone,
         &HashMap::new(),
+        allocate_id,
     )?;
     let mut comp = pb::Compaction::new();
     comp.set_top_deletes(l1_plus_compaction.upper_level.clone());
@@ -2700,6 +2720,7 @@ fn l1_plus_compact_v3(
 fn major_compact_v3(
     ctx: &CompactionCtx,
     major_compaction: &MajorCompaction,
+    allocate_id: &mut dyn FnMut() -> u64,
 ) -> Result<pb::MajorCompaction> {
     let req = &ctx.req;
     let fs = &ctx.dfs;
@@ -2718,7 +2739,6 @@ fn major_compact_v3(
             .mut_table_deletes()
             .push(tbl_delete);
     });
-    let mut assigned_ids = req.file_ids.clone();
     for cf in 0..NUM_CFS {
         let mut iters: Vec<Box<dyn table::Iterator>> = vec![];
         for l0_tbl in &l0_tbls {
@@ -2758,11 +2778,11 @@ fn major_compact_v3(
             opts,
             cf,
             CF_LEVELS[cf] as u32,
-            &mut assigned_ids,
             &major_compaction.sst_config,
             &bt_config,
             false,
             &blob_tables,
+            allocate_id,
         )?;
         for sst_create in sst_creates {
             ret.mut_sstable_change()
