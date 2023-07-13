@@ -342,7 +342,7 @@ impl RpcClient {
                     let keyspace_id = item.get_keyspace_id();
                     let gc_safe_point = item.get_safe_point();
                     self.ks_safepoint_v2.insert(keyspace_id, gc_safe_point);
-                    debug!(
+                    info!(
                         "updated keyspace gc safe point, keyspace id:{}, gc safe point:{}",
                         keyspace_id, gc_safe_point
                     );
@@ -350,7 +350,7 @@ impl RpcClient {
                 EventType::Delete => {
                     let keyspace_id = item.get_keyspace_id();
                     self.ks_safepoint_v2.remove(&keyspace_id);
-                    debug!(
+                    info!(
                         "Removed keyspace gc safe point, keyspace id:{};",
                         keyspace_id
                     );
