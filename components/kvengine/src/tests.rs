@@ -529,9 +529,18 @@ fn test_lost_tombstone_issue() {
     let mut cf_builder = ShardCfBuilder::new(0);
     let mut saved_vals: Vec<Rc<String>> = Vec::new();
 
-    cf_builder.add_table(new_table(11, 0, 100, 101, false, &mut saved_vals), 3);
-    cf_builder.add_table(new_table(12, 50, 150, 102, true, &mut saved_vals), 2);
-    cf_builder.add_table(new_table(13, 120, 200, 103, false, &mut saved_vals), 1);
+    cf_builder.add_table(
+        new_table(&engine, 11, 0, 100, 101, false, &mut saved_vals),
+        3,
+    );
+    cf_builder.add_table(
+        new_table(&engine, 12, 50, 150, 102, true, &mut saved_vals),
+        2,
+    );
+    cf_builder.add_table(
+        new_table(&engine, 13, 120, 200, 103, false, &mut saved_vals),
+        1,
+    );
     let data = ShardData::new(
         shard.range.clone(),
         vec![CfTable::new()],
@@ -573,9 +582,18 @@ fn test_read_iterator_all_versions() {
     // 70..90 has version 103 marked deleted, and older version 101 and 102
     // 90..100 has version 101 and 102
     // 100..150 has version 102
-    cf_builder.add_table(new_table(11, 0, 100, 101, false, &mut saved_vals), 3);
-    cf_builder.add_table(new_table(12, 50, 150, 102, false, &mut saved_vals), 2);
-    cf_builder.add_table(new_table(13, 70, 90, 103, true, &mut saved_vals), 1);
+    cf_builder.add_table(
+        new_table(&engine, 11, 0, 100, 101, false, &mut saved_vals),
+        3,
+    );
+    cf_builder.add_table(
+        new_table(&engine, 12, 50, 150, 102, false, &mut saved_vals),
+        2,
+    );
+    cf_builder.add_table(
+        new_table(&engine, 13, 70, 90, 103, true, &mut saved_vals),
+        1,
+    );
 
     let data = ShardData::new(
         shard.range.clone(),
@@ -915,6 +933,7 @@ fn i_to_key(i: i32, min_blob_size: u32) -> String {
 }
 
 fn new_table(
+    engine: &Engine,
     id: u64,
     begin: usize,
     end: usize,
@@ -922,7 +941,6 @@ fn new_table(
     del: bool,
     saved_vals: &mut Vec<Rc<String>>,
 ) -> SsTable {
-    let (engine, _) = new_test_engine();
     let block_size = engine.opts.table_builder_options.block_size;
     let comp_tp = engine.opts.table_builder_options.compression_tps[0];
     let comp_lvl = engine.opts.table_builder_options.compression_lvl;
