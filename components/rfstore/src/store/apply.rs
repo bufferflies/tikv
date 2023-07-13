@@ -1439,7 +1439,7 @@ impl Applier {
 
     fn handle_prepare_rollback_merge(&mut self, ctx: &mut ApplyContext, initial_flush_seq: u64) {
         let shard = ctx.engine.get_shard(self.region_id()).unwrap();
-        if !shard.get_initial_flushed() {
+        if shard.get_meta_sequence() < initial_flush_seq {
             // Wait for initial flush before apply rollback merge.
             self.paused_apply_queue
                 .pause(initial_flush_seq, &format!("{} rollback merge", self.tag()));
