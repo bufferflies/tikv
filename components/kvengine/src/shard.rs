@@ -27,6 +27,7 @@ use crate::{
         sstable::{L0Table, SsTable},
         InnerKey,
     },
+    util::evenly_distribute,
     Iterator as TableIterator, *,
 };
 
@@ -273,60 +274,81 @@ impl Shard {
         false
     }
 
+    /// Get suggest key for region split.
     pub fn get_suggest_split_key(&self) -> Option<Bytes> {
         let data = self.get_data();
-        let max_level = data
-            .get_cf(0)
-            .levels
-            .iter()
-            .max_by_key(|level| level.tables.len())?;
-        if max_level.tables.len() == 0 {
+        let (max_level, left, right) = data.get_max_level_by_overlapping_tables_count()?;
+        let tables = &max_level.tables.as_slice()[left..right];
+        if tables.is_empty() {
             return None;
         }
-        if max_level.tables.len() == 1 {
-            if let Some(key) = max_level.tables[0].get_suggest_split_key() {
-                return Some([self.key_prefix(), key.to_vec().as_slice()].concat().into());
+        // Split on block boundaries only when there is one table.
+        // As split on table boundaries would have lower cost for trim over bound data.
+        if tables.len() == 1 {
+            if let Some(inner_key) =
+                tables[0].get_suggest_split_key(Some(data.inner_start()), Some(data.inner_end()))
+            {
+                return Some(
+                    [self.key_prefix(), inner_key.to_vec().as_slice()]
+                        .concat()
+                        .into(),
+                );
             }
             return None;
         }
-        let tbl_idx = max_level.tables.len() * 2 / 3;
+        let tbl_idx = tables.len() * 2 / 3;
         Some(
-            [
-                self.key_prefix(),
-                max_level.tables[tbl_idx].smallest().deref(),
-            ]
-            .concat()
-            .into(),
+            [self.key_prefix(), tables[tbl_idx].smallest().deref()]
+                .concat()
+                .into(),
         )
     }
 
+    /// Get evenly split keys, mainly for acquiring bucket keys.
     pub fn get_evenly_split_keys(&self, count: usize) -> Option<Vec<Bytes>> {
         if count <= 1 {
             return None;
         }
+
+        // Get tables in shard range.
         let data = self.get_data();
-        let max_level = data
-            .get_cf(0)
-            .levels
-            .iter()
-            .max_by_key(|level| level.tables.len())?;
-        if max_level.tables.len() <= 1 {
+        let (max_level, left, right) = data.get_max_level_by_overlapping_tables_count()?;
+        let tables = &max_level.tables.as_slice()[left..right];
+        if tables.is_empty() {
             return None;
         }
 
-        let step = (max_level.tables.len() / count).max(1);
-        Some(
-            max_level
-                .tables
-                .iter()
-                .step_by(step)
-                .skip(1)
-                .filter_map(|tbl| {
-                    (self.overlap_key(tbl.smallest()))
-                        .then(|| [self.key_prefix(), tbl.smallest().deref()].concat().into())
-                })
-                .collect(),
-        )
+        // Split at block boundaries when there are not enough tables.
+        if tables.len() < count {
+            let mut inner_keys = Vec::with_capacity(count);
+            let counts_in_table = evenly_distribute(count, tables.len());
+            debug_assert_eq!(counts_in_table.len(), tables.len());
+            for (i, (tbl, count_in_table)) in tables.iter().zip(counts_in_table).enumerate() {
+                let start = (i == 0).then_some(data.inner_start());
+                let end = (i == tables.len() - 1).then_some(data.inner_end());
+                inner_keys.extend(tbl.get_evenly_split_keys(start, end, count_in_table));
+            }
+            return Some(
+                inner_keys
+                    .into_iter()
+                    .skip(1)
+                    .map(|inner_key| [self.key_prefix(), inner_key.deref()].concat().into())
+                    .collect(),
+            );
+        }
+
+        // Split at table boundaries.
+        let steps = evenly_distribute(tables.len(), count);
+        let mut split_keys = Vec::with_capacity(count - 1);
+        let mut tbl_idx = steps[0];
+        for step in steps.into_iter().skip(1) {
+            let tbl = &tables[tbl_idx];
+            let split_key = [self.key_prefix(), tbl.smallest().deref()].concat().into();
+            split_keys.push(split_key);
+
+            tbl_idx += step;
+        }
+        Some(split_keys)
     }
 
     pub(crate) fn overlap_table(&self, smallest: InnerKey<'_>, biggest: InnerKey<'_>) -> bool {
@@ -337,6 +359,7 @@ impl Shard {
         self.inner_start() <= smallest && biggest < self.inner_end()
     }
 
+    #[cfg(test)]
     pub(crate) fn overlap_key(&self, inner_key: InnerKey<'_>) -> bool {
         self.inner_start() <= inner_key && inner_key < self.inner_end()
     }
@@ -838,6 +861,26 @@ impl ShardDataCore {
     pub fn has_over_bound_data(&self) -> bool {
         self.has_mem_over_bound_data() || self.has_file_over_bound_data()
     }
+
+    /// Get max level by count of overlapping tables.
+    /// Return level and range of the overlapping tables.
+    pub fn get_max_level_by_overlapping_tables_count(
+        &self,
+    ) -> Option<(
+        &LevelHandler,
+        usize, // left table index in shard range
+        usize, // exclusive right table index in shard range
+    )> {
+        self.get_cf(0)
+            .levels
+            .iter()
+            .map(|level| {
+                let (left, right) =
+                    level.overlapping_tables_exclusive_end(self.inner_start(), self.inner_end());
+                (level, left, right)
+            })
+            .max_by_key(|(_, left, right)| right - left)
+    }
 }
 
 pub fn store_u64(ptr: &AtomicU64, val: u64) {
@@ -954,6 +997,18 @@ impl LevelHandler {
 
     pub(crate) fn overlapping_tables(&self, key_range: &KeyRange) -> (usize, usize) {
         get_tables_in_range(&self.tables, key_range.left_key(), key_range.right_key())
+    }
+
+    pub(crate) fn overlapping_tables_exclusive_end(
+        &self,
+        start: InnerKey<'_>,
+        exclusive_end: InnerKey<'_>,
+    ) -> (usize, usize) {
+        let left = search(self.tables.len(), |i| start <= self.tables[i].biggest());
+        let right = search(self.tables.len(), |i| {
+            exclusive_end <= self.tables[i].smallest()
+        });
+        (left, right)
     }
 
     pub fn get(

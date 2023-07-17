@@ -358,7 +358,8 @@ impl From<dfs::Error> for Error {
 
 pub type Result<T> = result::Result<T, Error>;
 
-/// simple rewrite of golang sort.Search
+/// Simple rewrite of golang sort.Search
+/// Return i, f(x) == false when x in [0, i), f(x) == true when x in [i, n)
 pub fn search<F>(n: usize, mut f: F) -> usize
 where
     F: FnMut(usize) -> bool,

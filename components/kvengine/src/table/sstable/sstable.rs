@@ -2,6 +2,7 @@
 
 use std::{
     cmp::Ordering,
+    iter::Iterator as StdIterator,
     ops::Deref,
     path::{Path, PathBuf},
     sync::Arc,
@@ -13,10 +14,13 @@ use moka::sync::SegmentedCache;
 use xorf::{BinaryFuse8, Filter};
 
 use super::{builder::*, iterator::TableIterator};
-use crate::table::{
-    sstable::{File, TtlCache},
-    table::Result,
-    *,
+use crate::{
+    table::{
+        sstable::{File, TtlCache},
+        table::{Iterator, Result},
+        *,
+    },
+    util::evenly_distribute,
 };
 
 // higher level ttl is longer than lower level.
@@ -451,18 +455,44 @@ impl SsTableCore {
         InnerKey::from_inner_buf(self.biggest_buf.chunk())
     }
 
-    pub fn get_suggest_split_key(&self) -> Option<Bytes> {
+    pub fn get_suggest_split_key(
+        &self,
+        start: Option<InnerKey<'_>>,
+        end: Option<InnerKey<'_>>,
+    ) -> Option<Bytes> {
+        // Get the key at 1/2 as split key.
+        // Use `test_get_split_keys` to see the result when adjust the split point.
+        let split_keys = self.get_evenly_split_keys(start, end, 2);
+        split_keys.into_iter().nth(1)
+    }
+
+    /// Get evenly split keys by blocks.
+    ///
+    /// Length of return vector would be less than `count` when number of blocks
+    /// less than count.
+    ///
+    /// The first value of return is the first key of the first block in range.
+    pub fn get_evenly_split_keys(
+        &self,
+        start: Option<InnerKey<'_>>,
+        end: Option<InnerKey<'_>>,
+        count: usize,
+    ) -> Vec<Bytes> {
+        debug_assert!(count > 0);
         let idx = self.load_index();
-        let num_blocks = idx.num_blocks();
-        if num_blocks <= 1 {
-            return None;
+        let left = start.map_or(0, |start| idx.seek_block_bigger_or_equal(start.deref()));
+        let right = end.map_or(idx.num_blocks(), |end| {
+            idx.seek_block_bigger_or_equal(end.deref())
+        });
+        let num_blocks = right - left;
+        let steps = evenly_distribute(num_blocks, count);
+        let mut block_idx = left;
+        let mut split_keys = Vec::with_capacity(steps.len());
+        for step in steps {
+            split_keys.push(idx.block_key(block_idx));
+            block_idx += step;
         }
-        let block_idx = num_blocks * 2 / 3;
-        let diff_key = idx.block_diff_key(block_idx);
-        let mut split_key = BytesMut::new();
-        split_key.extend_from_slice(idx.common_prefix.chunk());
-        split_key.extend_from_slice(diff_key);
-        Some(split_key.freeze())
+        split_keys
     }
 
     pub fn compression_type(&self) -> u8 {
@@ -514,6 +544,7 @@ impl Index {
         self.block_key_offs.len() / 4
     }
 
+    /// Returns the block index of the first block whose key > `key`.
     pub fn seek_block(&self, key: &[u8]) -> usize {
         if key.len() <= self.common_prefix.len() {
             if key <= self.common_prefix.chunk() {
@@ -532,6 +563,25 @@ impl Index {
         }
     }
 
+    /// Returns the block index of the first block whose key >= `key`.
+    pub fn seek_block_bigger_or_equal(&self, key: &[u8]) -> usize {
+        if key.len() <= self.common_prefix.len() {
+            if key <= self.common_prefix.chunk() {
+                return 0;
+            }
+            return self.num_blocks();
+        }
+        let cmp = key[..self.common_prefix.len()].cmp(self.common_prefix.chunk());
+        match cmp {
+            Ordering::Less => 0,
+            Ordering::Equal => {
+                let diff_key = &key[self.common_prefix.len()..];
+                search(self.num_blocks(), |i| self.block_diff_key(i) >= diff_key)
+            }
+            Ordering::Greater => self.num_blocks(),
+        }
+    }
+
     fn block_diff_key(&self, i: usize) -> &[u8] {
         let off = self.get_block_key_off(i);
         let end_off = if i + 1 < self.num_blocks() {
@@ -544,6 +594,14 @@ impl Index {
 
     fn get_block_key_off(&self, i: usize) -> usize {
         (&self.block_key_offs[i * 4..]).get_u32_le() as usize
+    }
+
+    fn block_key(&self, i: usize) -> Bytes {
+        let diff_key = self.block_diff_key(i);
+        let mut buf = BytesMut::new();
+        buf.extend_from_slice(self.common_prefix.chunk());
+        buf.extend_from_slice(diff_key);
+        buf.freeze()
     }
 }
 
@@ -1077,6 +1135,113 @@ mod tests {
                 cnt += 1;
                 it.next();
             }
+        }
+    }
+
+    #[test]
+    fn test_get_split_keys() {
+        let cases = vec![
+            (
+                10000,               // number of kvs
+                49,                  // expected number of blocks, about 200 kvs per block
+                None,                // range start,
+                None,                // range end,
+                3,                   // split count
+                vec![0, 3514, 6767], // expected evenly split keys
+                Some(5136),          // expected suggest split key
+            ),
+            (
+                10000,
+                49,
+                None,
+                None,
+                10,
+                vec![0, 1072, 2088, 3104, 4120, 5136, 6152, 7168, 8184, 9209],
+                Some(5136),
+            ),
+            (
+                10000,
+                49,
+                Some(2000),
+                Some(8000),
+                10,
+                vec![2088, 2703, 3309, 3924, 4530, 5136, 5751, 6357, 6972, 7578],
+                Some(5136),
+            ),
+            (1, 1, None, None, 1, vec![0], None), // 1 block
+            (1, 1, None, None, 2, vec![0], None),
+            (1, 1, None, None, 3, vec![0], None),
+            (300, 2, None, None, 1, vec![0], Some(222)), // 2 blocks
+            (300, 2, None, None, 2, vec![0, 222], Some(222)),
+            (300, 2, None, None, 3, vec![0, 222], Some(222)),
+            (500, 3, None, None, 1, vec![0], Some(438)), // 3 blocks
+            (500, 3, None, None, 2, vec![0, 438], Some(438)),
+            (500, 3, None, None, 3, vec![0, 222, 438], Some(438)),
+            (500, 3, None, None, 4, vec![0, 222, 438], Some(438)),
+            (2000, 10, None, None, 3, vec![0, 870, 1482], Some(1072)), // 10 blocks
+            (
+                2000,
+                10,
+                None,
+                None,
+                4,
+                vec![0, 654, 1277, 1687],
+                Some(1072),
+            ),
+            (
+                2000,
+                10,
+                None,
+                None,
+                8,
+                vec![0, 438, 870, 1072, 1277, 1482, 1687, 1892],
+                Some(1072),
+            ),
+            (2000, 10, Some(2000), Some(3000), 4, vec![], None), // with range
+            (
+                2000,
+                10,
+                Some(1000),
+                Some(3000),
+                4,
+                vec![1072, 1482, 1687, 1892],
+                Some(1687),
+            ),
+        ];
+
+        let prefix = "key";
+        for (i, (n, blocks, start, end, count, evenly_split_keys, suggest_split_key)) in
+            cases.into_iter().enumerate()
+        {
+            let (sst, _) = create_sst_table(prefix, n, true);
+            assert_eq!(sst.load_index().num_blocks(), blocks);
+
+            let start = start.map(|x| get_test_key(prefix, x));
+            let start = start
+                .as_ref()
+                .map(|x| InnerKey::from_inner_buf(x.as_bytes()));
+            let end = end.map(|x| get_test_key(prefix, x));
+            let end = end.as_ref().map(|x| InnerKey::from_inner_buf(x.as_bytes()));
+
+            let evenly_split_keys = evenly_split_keys
+                .into_iter()
+                .map(|x| get_test_key(prefix, x).as_bytes().to_vec())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                sst.get_evenly_split_keys(start, end, count),
+                evenly_split_keys,
+                "case {}",
+                i
+            );
+
+            let suggest_split_key = suggest_split_key
+                .map(|x| Bytes::copy_from_slice(get_test_key(prefix, x).as_bytes()));
+            assert_eq!(
+                sst.get_suggest_split_key(start, end),
+                suggest_split_key,
+                "{}",
+                i
+            );
         }
     }
 

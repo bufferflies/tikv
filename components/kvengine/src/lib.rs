@@ -37,6 +37,7 @@ extern crate tikv_alloc;
 mod metrics;
 #[cfg(test)]
 mod tests;
+mod util;
 
 pub use apply::*;
 pub use compaction::*;

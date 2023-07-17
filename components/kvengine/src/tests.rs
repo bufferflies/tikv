@@ -41,9 +41,18 @@ macro_rules! unwrap_or_return {
     };
 }
 
+const DEF_BLOCK_SIZE: usize = 4 << 10;
+
 fn new_test_engine() -> (Engine, mpsc::Sender<ApplyTask>) {
+    new_test_engine_opt(false, DEF_BLOCK_SIZE)
+}
+
+fn new_test_engine_opt(
+    enable_inner_key_off: bool,
+    block_size: usize,
+) -> (Engine, mpsc::Sender<ApplyTask>) {
     let (listener_tx, listener_rx) = mpsc::unbounded();
-    let tester = EngineTester::new();
+    let tester = EngineTester::new(enable_inner_key_off, block_size);
     let meta_change_listener = Box::new(TestMetaChangeListener {
         sender: listener_tx,
     });
@@ -637,6 +646,372 @@ fn test_read_iterator_all_versions() {
     }
 }
 
+#[test]
+fn test_level_overlapping_tables() {
+    init_logger();
+    test_level_overlapping_tables_impl(false);
+    test_level_overlapping_tables_impl(true);
+}
+
+fn test_level_overlapping_tables_impl(enable_inner_key_off: bool) {
+    let (engine, _) = new_test_engine_opt(enable_inner_key_off, DEF_BLOCK_SIZE);
+    let shard = engine.get_shard(1).unwrap();
+
+    let mut cf_builder = ShardCfBuilder::new(0);
+    let mut saved_vals: Vec<Rc<String>> = Vec::new();
+
+    let table_ranges: Vec<(usize, usize)> = vec![(10, 20), (50, 100), (120, 200)];
+    for (i, (start, end)) in table_ranges.into_iter().enumerate() {
+        cf_builder.add_table(
+            new_table(
+                &engine,
+                i as u64,
+                start,
+                end,
+                i as u64 + 100,
+                false,
+                &mut saved_vals,
+            ),
+            1, // level
+        );
+    }
+    let data = ShardData::new(
+        shard.range.clone(),
+        vec![CfTable::new()],
+        vec![],
+        Arc::new(HashMap::default()),
+        [cf_builder.build(), ShardCf::new(1), ShardCf::new(2)],
+        HashMap::new(),
+    );
+
+    let cf0 = data.get_cf(0);
+    let level1 = cf0.get_level(1);
+    let get_overlapping_tables = |start: i32, end: i32| -> (usize, usize) {
+        level1.overlapping_tables_exclusive_end(
+            InnerKey::from_inner_buf(&i_to_key(start, 0).into_bytes()),
+            InnerKey::from_inner_buf(&i_to_key(end, 0).into_bytes()),
+        )
+    };
+
+    assert_eq!(get_overlapping_tables(0, 10), (0, 0));
+    assert_eq!(get_overlapping_tables(0, 20), (0, 1));
+    assert_eq!(get_overlapping_tables(0, 50), (0, 1));
+    assert_eq!(get_overlapping_tables(0, 100), (0, 2));
+    assert_eq!(get_overlapping_tables(0, 120), (0, 2));
+    assert_eq!(get_overlapping_tables(0, 200), (0, 3));
+    assert_eq!(get_overlapping_tables(0, 300), (0, 3));
+
+    assert_eq!(get_overlapping_tables(10, 20), (0, 1));
+    assert_eq!(get_overlapping_tables(10, 50), (0, 1));
+    assert_eq!(get_overlapping_tables(10, 100), (0, 2));
+    assert_eq!(get_overlapping_tables(10, 120), (0, 2));
+    assert_eq!(get_overlapping_tables(10, 200), (0, 3));
+    assert_eq!(get_overlapping_tables(10, 300), (0, 3));
+
+    assert_eq!(get_overlapping_tables(20, 50), (1, 1));
+    assert_eq!(get_overlapping_tables(20, 100), (1, 2));
+    assert_eq!(get_overlapping_tables(20, 120), (1, 2));
+    assert_eq!(get_overlapping_tables(20, 200), (1, 3));
+    assert_eq!(get_overlapping_tables(20, 300), (1, 3));
+
+    assert_eq!(get_overlapping_tables(50, 100), (1, 2));
+    assert_eq!(get_overlapping_tables(50, 120), (1, 2));
+    assert_eq!(get_overlapping_tables(50, 200), (1, 3));
+    assert_eq!(get_overlapping_tables(50, 300), (1, 3));
+
+    assert_eq!(get_overlapping_tables(100, 120), (2, 2));
+    assert_eq!(get_overlapping_tables(100, 200), (2, 3));
+    assert_eq!(get_overlapping_tables(100, 300), (2, 3));
+
+    assert_eq!(get_overlapping_tables(120, 200), (2, 3));
+    assert_eq!(get_overlapping_tables(120, 300), (2, 3));
+
+    assert_eq!(get_overlapping_tables(200, 300), (3, 3));
+}
+
+#[test]
+fn test_get_suggest_split_key() {
+    init_logger();
+    test_get_suggest_split_key_impl(false);
+    test_get_suggest_split_key_impl(true);
+}
+
+fn test_get_suggest_split_key_impl(enable_inner_key_off: bool) {
+    let (engine, _) = new_test_engine_opt(enable_inner_key_off, 10);
+    let shard = engine.get_shard(1).unwrap();
+
+    let range = ShardRange::new(
+        &i_to_key(100, 0).into_bytes(),
+        &i_to_key(200, 0).into_bytes(),
+        shard.inner_key_off,
+    );
+    let shard = Shard::new(
+        shard.engine_id,
+        &shard.properties.to_pb(shard.id),
+        shard.ver,
+        range.clone(),
+        engine.opts.clone(),
+    );
+
+    let cases: Vec<(
+        Vec<(i32, i32)>, // table ranges
+        Option<i32>,     // expected suggest split key,
+    )> = vec![
+        (vec![(0, 20), (20, 50), (50, 100)], None),
+        (vec![(0, 20), (20, 50), (100, 150), (150, 180)], Some(150)),
+        (
+            vec![
+                (20, 50),
+                (100, 150), // in range
+                (150, 180), // in range
+                (180, 300), // in range
+                (300, 400),
+                (400, 500),
+                (500, 600),
+                (700, 800),
+            ],
+            Some(180),
+        ),
+        (
+            vec![
+                (20, 50),
+                (100, 150), // in range, key in block
+                (300, 400),
+                (400, 500),
+                (500, 600),
+                (700, 800),
+            ],
+            Some(125),
+        ),
+        (
+            vec![
+                (20, 50),
+                (100, 200), // in range, key in block
+                (300, 400),
+                (400, 500),
+                (500, 600),
+                (700, 800),
+            ],
+            Some(150),
+        ),
+        (
+            vec![
+                (20, 50),
+                (100, 500), // would be 366 if shard range is not considered
+                (500, 600),
+                (700, 800),
+            ],
+            Some(150),
+        ),
+        (
+            vec![
+                (20, 50),
+                (150, 151), // only one block
+                (500, 600),
+                (700, 800),
+            ],
+            None,
+        ),
+        (
+            vec![(20, 50), (197, 200), (500, 600), (700, 800)],
+            Some(199),
+        ),
+        (
+            vec![
+                (20, 50),
+                (198, 201), // will be 200 if shard range is not considered
+                (500, 600),
+                (700, 800),
+            ],
+            Some(199),
+        ),
+    ];
+
+    for (idx, (table_ranges, expect_split_key)) in cases.into_iter().enumerate() {
+        let mut cf_builder = ShardCfBuilder::new(0);
+        let mut saved_vals: Vec<Rc<String>> = Vec::new();
+
+        for (i, (start, end)) in table_ranges.into_iter().enumerate() {
+            cf_builder.add_table(
+                new_table(
+                    &engine,
+                    i as u64 + 1,
+                    start as usize,
+                    end as usize,
+                    100 + i as u64,
+                    false,
+                    &mut saved_vals,
+                ),
+                1,
+            );
+        }
+
+        let data = ShardData::new(
+            range.clone(),
+            vec![CfTable::new()],
+            vec![],
+            Arc::new(HashMap::default()),
+            [cf_builder.build(), ShardCf::new(1), ShardCf::new(2)],
+            HashMap::new(),
+        );
+        shard.set_data(data);
+
+        let key = shard.get_suggest_split_key();
+        assert_eq!(
+            key.map(|k| k.to_vec()),
+            expect_split_key.map(|i| i_to_key(i, 0).into_bytes()),
+            "case {}",
+            idx
+        );
+    }
+}
+
+#[test]
+fn test_get_evenly_split_keys() {
+    init_logger();
+    test_get_evenly_split_keys_impl(false);
+    test_get_evenly_split_keys_impl(true);
+}
+
+fn test_get_evenly_split_keys_impl(enable_inner_key_off: bool) {
+    let (engine, _) = new_test_engine_opt(enable_inner_key_off, 10);
+    let shard = engine.get_shard(1).unwrap();
+
+    let range = ShardRange::new(
+        &i_to_key(100, 0).into_bytes(),
+        &i_to_key(200, 0).into_bytes(),
+        shard.inner_key_off,
+    );
+    let shard = Shard::new(
+        shard.engine_id,
+        &shard.properties.to_pb(shard.id),
+        shard.ver,
+        range.clone(),
+        engine.opts.clone(),
+    );
+
+    let cases: Vec<(
+        Vec<(i32, i32)>,  // table ranges
+        usize,            // split count
+        Option<Vec<i32>>, // expected evenly split keys,
+    )> = vec![
+        (vec![(0, 20), (20, 50), (50, 100)], 1, None),
+        (vec![(0, 20), (20, 50), (50, 100)], 2, None),
+        (
+            vec![(0, 20), (20, 50), (100, 150), (150, 180)],
+            2,
+            Some(vec![150]),
+        ),
+        (
+            vec![
+                (20, 50),
+                (100, 150), // in range
+                (150, 180), // in range
+                (180, 300), // in range
+                (300, 400),
+            ],
+            1,
+            None,
+        ),
+        (
+            vec![
+                (20, 50),
+                (100, 150), // in range
+                (150, 180), // in range
+                (180, 300), // in range
+                (300, 400),
+            ],
+            2,
+            Some(vec![180]),
+        ),
+        (
+            vec![
+                (20, 50),
+                (100, 150), // in range
+                (150, 180), // in range
+                (180, 300), // in range
+                (300, 400),
+            ],
+            3,
+            Some(vec![150, 180]),
+        ),
+        (
+            vec![
+                (20, 50),
+                (100, 150), // in range
+                (150, 180), // in range
+                (180, 300), // in range
+                (300, 400),
+            ],
+            4,
+            Some(vec![125, 150, 180]),
+        ),
+        (
+            vec![
+                (20, 50),
+                (100, 150), // in range
+                (150, 180), // in range
+                (180, 300), // in range
+                (300, 400),
+            ],
+            5,
+            Some(vec![125, 150, 165, 180]),
+        ),
+        (
+            vec![
+                (20, 50),
+                (100, 150), // in range
+                (150, 180), // in range
+                (180, 300), // in range
+                (300, 400),
+            ],
+            6,
+            Some(vec![125, 150, 165, 180, 190]),
+        ),
+    ];
+
+    for (idx, (table_ranges, split_count, expect_split_keys)) in cases.into_iter().enumerate() {
+        let mut cf_builder = ShardCfBuilder::new(0);
+        let mut saved_vals: Vec<Rc<String>> = Vec::new();
+
+        for (i, (start, end)) in table_ranges.into_iter().enumerate() {
+            cf_builder.add_table(
+                new_table(
+                    &engine,
+                    i as u64 + 1,
+                    start as usize,
+                    end as usize,
+                    100 + i as u64,
+                    false,
+                    &mut saved_vals,
+                ),
+                1, // level
+            );
+        }
+
+        let data = ShardData::new(
+            range.clone(),
+            vec![CfTable::new()],
+            vec![],
+            Arc::new(HashMap::default()),
+            [cf_builder.build(), ShardCf::new(1), ShardCf::new(2)],
+            HashMap::new(),
+        );
+        shard.set_data(data);
+
+        let split_keys = shard.get_evenly_split_keys(split_count);
+        assert_eq!(
+            split_keys.map(|keys| keys.into_iter().map(|k| k.to_vec()).collect::<Vec<_>>()),
+            expect_split_keys.map(|keys| keys
+                .into_iter()
+                .map(|i| i_to_key(i, 0).into_bytes())
+                .collect::<Vec<_>>()),
+            "case {}",
+            idx
+        );
+    }
+}
+
 #[derive(Clone)]
 struct TestMetaChangeListener {
     sender: mpsc::Sender<pb::ChangeSet>,
@@ -662,13 +1037,13 @@ impl Deref for EngineTester {
 }
 
 impl EngineTester {
-    fn new() -> Self {
+    fn new(enable_inner_key_off: bool, block_size: usize) -> Self {
         let initial_cs = new_initial_cs();
         let initial_meta = ShardMeta::new(1, &initial_cs);
         let metas = dashmap::DashMap::new();
         metas.insert(1, Arc::new(initial_meta));
         let tmp_dir = TempDir::new().unwrap();
-        let opts = new_test_options(tmp_dir.path());
+        let opts = new_test_options(tmp_dir.path(), enable_inner_key_off, block_size);
         Self {
             core: Arc::new(EngineTesterCore {
                 _tmp_dir: tmp_dir,
@@ -899,7 +1274,11 @@ fn new_initial_cs() -> pb::ChangeSet {
     cs
 }
 
-fn new_test_options(path: impl AsRef<Path>) -> Options {
+fn new_test_options(
+    path: impl AsRef<Path>,
+    enable_inner_key_off: bool,
+    block_size: usize,
+) -> Options {
     let min_blob_size: u32 = match env::var("MIN_BLOB_SIZE") {
         Ok(val) => match val.trim().parse() {
             Ok(n) => n,
@@ -914,12 +1293,13 @@ fn new_test_options(path: impl AsRef<Path>) -> Options {
     let mut opts = Options::default();
     opts.local_dir = path.as_ref().to_path_buf();
     opts.base_size = 64 << 10;
-    opts.table_builder_options.block_size = 4 << 10;
+    opts.table_builder_options.block_size = block_size;
     opts.table_builder_options.max_table_size = 16 << 10;
     opts.max_mem_table_size = 16 << 10;
     opts.num_compactors = 2;
     opts.min_blob_size = min_blob_size;
     opts.max_del_range_delay = Duration::from_secs(1);
+    opts.enable_inner_key_offset = enable_inner_key_off;
     opts
 }
 
