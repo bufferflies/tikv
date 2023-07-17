@@ -384,7 +384,7 @@ impl SsTableCore {
             let next_addr = old_idx.get_block_addr(pos + 1);
             (next_addr.curr_off - addr.curr_off) as usize
         } else {
-            self.footer.index_offset as usize - addr.curr_off as usize
+            self.start_off as usize + self.footer.index_offset as usize - addr.curr_off as usize
         };
         self.load_block_by_addr_len(addr, length, buf, fill_cache)
     }
