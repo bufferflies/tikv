@@ -967,20 +967,26 @@ impl StatusServer {
         let (callback, future) = paired_future_callback();
         let task = rfengine::BackupTask::new(Box::new(s3fs), callback, backup_config);
         engine.backup(task);
-        Ok(match future.await.unwrap() {
-            Ok(meta) => {
-                info!("{}: backup finished", meta.store_id);
-                Response::builder()
-                    .body(Body::from(meta.write_to_bytes().unwrap()))
-                    .unwrap()
-            }
-            Err(err) => {
-                error!("{}: backup failed {:?}", store_ident.store_id, &err);
-                make_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Internal Server Error {}", err),
-                )
-            }
+        Ok(match future.await {
+            Ok(resp) => match resp {
+                Ok(meta) => {
+                    info!("{}: backup finished", meta.store_id);
+                    Response::builder()
+                        .body(Body::from(meta.write_to_bytes().unwrap()))
+                        .unwrap()
+                }
+                Err(err) => {
+                    error!("{}: backup failed {:?}", store_ident.store_id, &err);
+                    make_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Internal Server Error {}", err),
+                    )
+                }
+            },
+            Err(e) => make_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Internal Server Error {}", e),
+            ),
         })
     }
 
@@ -1269,13 +1275,20 @@ impl StatusServer {
             callback,
         };
         router.send_store_msg(store_msg);
-        let resp = future.await.unwrap();
-        let body = if debug {
-            format!("{:?}", resp).into_bytes()
-        } else {
-            resp.write_to_bytes().unwrap()
-        };
-        Ok(Response::new(body.into()))
+        match future.await {
+            Ok(resp) => {
+                let body = if debug {
+                    format!("{:?}", resp).into_bytes()
+                } else {
+                    resp.write_to_bytes().unwrap()
+                };
+                Ok(Response::new(body.into()))
+            }
+            Err(e) => Ok(make_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Internal Server Error {}", e),
+            )),
+        }
     }
 
     pub async fn handle_sync_region_by_id(
@@ -1306,13 +1319,20 @@ impl StatusServer {
             callback,
         };
         router.send_store_msg(store_msg);
-        let resp = future.await.unwrap();
-        let body = if debug {
-            format!("{:?}", resp).into_bytes()
-        } else {
-            resp.write_to_bytes().unwrap()
-        };
-        Ok(Response::new(body.into()))
+        match future.await {
+            Ok(resp) => {
+                let body = if debug {
+                    format!("{:?}", resp).into_bytes()
+                } else {
+                    resp.write_to_bytes().unwrap()
+                };
+                Ok(Response::new(body.into()))
+            }
+            Err(e) => Ok(make_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Internal Server Error {}", e),
+            )),
+        }
     }
 
     fn handle_get_metrics(
