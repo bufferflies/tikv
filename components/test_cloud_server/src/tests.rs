@@ -115,6 +115,34 @@ fn test_split_regions() {
     cluster.stop();
 }
 
+// Test for update region cache after split.
+// https://github.com/tidbcloud/cloud-storage-engine/pull/933.
+#[test]
+fn test_client_split_region() {
+    test_util::init_log_for_test();
+    let mut cluster = ServerCluster::new(alloc_node_id_vec(3), |_, _| {});
+    cluster.wait_region_replicated(&[], 3);
+    let mut client = cluster.new_client();
+
+    let split_key = b"xkey";
+    client.split(split_key);
+    cluster.wait_pd_region_count(2);
+
+    assert_ne!(client.get_region_id(b""), client.get_region_id(split_key));
+    {
+        let region = client.get_region_by_key(b"");
+        assert_eq!(region.raw_start(), b"");
+        assert_eq!(region.raw_end(), split_key);
+    }
+    {
+        let region = client.get_region_by_key(split_key);
+        assert_eq!(region.raw_start(), split_key);
+        assert_eq!(region.raw_end(), kvengine::GLOBAL_SHARD_END_KEY);
+    }
+
+    cluster.stop();
+}
+
 static NODE_ALLOCATOR: AtomicU16 = AtomicU16::new(1);
 
 pub(crate) fn alloc_node_id() -> u16 {

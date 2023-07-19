@@ -182,6 +182,10 @@ impl RawRegion {
         self.id
     }
 
+    pub fn raw_start(&self) -> &[u8] {
+        &self.raw_start
+    }
+
     pub fn raw_end(&self) -> &[u8] {
         &self.raw_end
     }
@@ -931,7 +935,7 @@ impl ClusterClient {
             let mut split_req = SplitRegionRequest::default();
             split_req.set_context(ctx);
             split_req.set_split_key(key.to_vec());
-            let resp = client.split_region(&split_req).unwrap();
+            let mut resp = client.split_region(&split_req).unwrap();
             if resp.has_region_error() {
                 let region_err = resp.get_region_error();
                 if self.handle_retryable_error(region_id, region_err) {
@@ -947,6 +951,9 @@ impl ClusterClient {
                     key,
                     region_err
                 ));
+            }
+            for region in resp.take_regions().into_iter() {
+                self.update_cache_by_id(region.get_id(), Some(region.into()));
             }
             return Ok(());
         }
