@@ -195,7 +195,7 @@ impl Shard {
         self.active.load(Acquire)
     }
 
-    pub fn refresh_states(&self) {
+    pub(crate) fn refresh_states(&self) {
         self.refresh_estimated_size_and_entries();
         self.refresh_compaction_priority();
     }
@@ -545,16 +545,7 @@ impl Shard {
             };
             Some(max_pri)
         } else {
-            let handle_priority_none = || -> Option<CompactionPriority> {
-                if !data.l0_tbls.is_empty() {
-                    // Trigger L0 compaction for test purpose.
-                    fail::fail_point!("refresh_compaction_priority_for_l0", |_| {
-                        Some(CompactionPriority::L0 { score: 2.0 })
-                    });
-                }
-                None
-            };
-            handle_priority_none()
+            None
         };
         let mut lock = self.compaction_priority.write().unwrap();
         *lock = priority;
@@ -776,7 +767,7 @@ impl ShardDataCore {
                 total_size += l0.size();
                 total_entries += l0.entries();
                 total_kv_size += l0.kv_size();
-            } else if self.overlap_table(l0.smallest(), l0.biggest()) {
+            } else {
                 total_size += l0.size() / 2;
                 total_entries += l0.entries() / 2;
                 total_kv_size += l0.kv_size() / 2;
@@ -795,17 +786,17 @@ impl ShardDataCore {
     pub(crate) fn get_level_stats(&self, level: &LevelHandler) -> (u64, u64, u64, u64, u64) {
         let (mut total_size, mut total_entries, mut total_kv_size, mut max_ts, mut total_blob_size) =
             (0, 0, 0, 0, 0);
-        level.tables.iter().enumerate().for_each(|(_, tbl)| {
-            if self.cover_full_table(tbl.smallest(), tbl.biggest()) {
+        level.tables.iter().enumerate().for_each(|(i, tbl)| {
+            if self.is_over_bound_table(level, i, tbl) {
+                total_size += tbl.size() / 2;
+                total_blob_size += tbl.in_use_total_blob_size / 2;
+                total_entries += tbl.entries as u64 / 2;
+                total_kv_size += tbl.kv_size / 2;
+            } else {
                 total_size += tbl.size();
                 total_blob_size += tbl.in_use_total_blob_size;
                 total_entries += tbl.entries as u64;
                 total_kv_size += tbl.kv_size;
-            } else if self.overlap_table(tbl.smallest(), tbl.biggest()) {
-                total_size += tbl.estimated_size_in_range(self.inner_start(), self.inner_end());
-                total_blob_size += tbl.in_use_total_blob_size / 2;
-                total_entries += tbl.entries as u64 / 2;
-                total_kv_size += tbl.kv_size / 2;
             }
             max_ts = cmp::max(max_ts, tbl.max_ts);
         });
@@ -818,13 +809,13 @@ impl ShardDataCore {
         )
     }
 
-    pub(crate) fn cover_full_table(&self, smallest: InnerKey<'_>, biggest: InnerKey<'_>) -> bool {
-        self.inner_start() <= smallest && biggest < self.inner_end()
+    fn is_over_bound_table(&self, level: &LevelHandler, i: usize, tbl: &SsTable) -> bool {
+        let is_bound = i == 0 || i == level.tables.len() - 1;
+        is_bound && !self.cover_full_table(tbl.smallest(), tbl.biggest())
     }
 
-    // TODO: eliminate duplicated codes with `Shard::overlap_table`.
-    pub(crate) fn overlap_table(&self, smallest: InnerKey<'_>, biggest: InnerKey<'_>) -> bool {
-        self.inner_start() <= biggest && smallest < self.inner_end()
+    pub(crate) fn cover_full_table(&self, smallest: InnerKey<'_>, biggest: InnerKey<'_>) -> bool {
+        self.inner_start() <= smallest && biggest < self.inner_end()
     }
 
     pub fn all_presisted(&self) -> bool {

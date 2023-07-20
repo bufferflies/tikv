@@ -2,11 +2,12 @@
 
 use futures::executor::block_on;
 use pd_client::PdClient;
+use rand::Rng;
 use slog_global::info;
 use test_cloud_server::ServerCluster;
 use tikv_util::config::ReadableSize;
 
-use crate::cases::{alloc_node_id_vec, i_to_key, random_value_1kb};
+use crate::cases::alloc_node_id_vec;
 
 #[test]
 fn test_trim_over_bound() {
@@ -33,7 +34,7 @@ fn test_trim_over_bound_impl(split_key_idx: usize, do_leader_transfer: bool) {
     cluster.wait_region_replicated(&[], 3);
     let mut client = cluster.new_client();
 
-    client.put_kv(100..200, i_to_key, random_value_1kb);
+    client.put_kv(100..200, i_to_key, random_val);
 
     // Disable compaction to make shards over bound after split.
     fail::cfg(fp, "return").unwrap();
@@ -88,4 +89,16 @@ fn test_trim_over_bound_impl(split_key_idx: usize, do_leader_transfer: bool) {
 
     fail::remove(fp);
     cluster.stop();
+}
+
+fn i_to_key(i: usize) -> Vec<u8> {
+    format!("xkey_{:03}", i).into_bytes()
+}
+
+const RANDOM_VALUE_SIZE: usize = 1024;
+
+fn random_val(_: usize) -> Vec<u8> {
+    let mut bytes = [0u8; RANDOM_VALUE_SIZE];
+    rand::thread_rng().fill(&mut bytes);
+    bytes.to_vec()
 }
