@@ -263,7 +263,8 @@ impl super::Shard {
         for l0_tbl in data.l0_tbls.as_slice() {
             if self.cover_full_table(l0_tbl.smallest(), l0_tbl.biggest()) {
                 l0_table_size += l0_tbl.size();
-            } else {
+            } else if self.overlap_table(l0_tbl.smallest(), l0_tbl.biggest()) {
+                // TODO: estimate size by number of blocks in table.
                 l0_table_size += l0_tbl.size() / 2;
                 partial_l0s += 1;
             }
@@ -302,7 +303,7 @@ impl super::Shard {
                     if t.has_open_file() {
                         open_files += 1;
                     }
-                    if data.cover_full_table(t.smallest(), t.biggest()) {
+                    if self.cover_full_table(t.smallest(), t.biggest()) {
                         level_stats.data_size += t.size();
                         level_stats.index_size += t.index_size();
                         level_stats.in_mem_index_size += t.in_mem_index_size();
@@ -315,8 +316,9 @@ impl super::Shard {
                             level_stats.kv_size += t.kv_size;
                         }
                         level_stats.in_use_blob_size += t.total_blob_size();
-                    } else {
-                        level_stats.data_size += t.size() / 2;
+                    } else if self.overlap_table(t.smallest(), t.biggest()) {
+                        level_stats.data_size +=
+                            t.estimated_size_in_range(self.inner_start(), self.inner_end());
                         level_stats.index_size += t.index_size() / 2;
                         level_stats.filter_size += t.filter_size() / 2;
                         level_stats.entries += t.entries as usize / 2;
