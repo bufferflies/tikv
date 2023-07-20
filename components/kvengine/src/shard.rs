@@ -545,7 +545,16 @@ impl Shard {
             };
             Some(max_pri)
         } else {
-            None
+            let handle_priority_none = || -> Option<CompactionPriority> {
+                if !data.l0_tbls.is_empty() {
+                    // Trigger L0 compaction for test purpose.
+                    fail::fail_point!("refresh_compaction_priority_for_l0", |_| {
+                        Some(CompactionPriority::L0 { score: 2.0 })
+                    });
+                }
+                None
+            };
+            handle_priority_none()
         };
         let mut lock = self.compaction_priority.write().unwrap();
         *lock = priority;
@@ -788,7 +797,7 @@ impl ShardDataCore {
             (0, 0, 0, 0, 0);
         level.tables.iter().enumerate().for_each(|(i, tbl)| {
             if self.is_over_bound_table(level, i, tbl) {
-                total_size += tbl.size() / 2;
+                total_size += tbl.estimated_size_in_range(self.inner_start(), self.inner_end());
                 total_blob_size += tbl.in_use_total_blob_size / 2;
                 total_entries += tbl.entries as u64 / 2;
                 total_kv_size += tbl.kv_size / 2;
