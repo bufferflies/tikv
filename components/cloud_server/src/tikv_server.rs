@@ -966,6 +966,7 @@ impl TikvServer {
         let kv_engine = kvengine::Engine::open(
             dfs,
             opts,
+            conf.kvengine.clone(),
             meta_iter,
             recoverer,
             id_allocator,

@@ -29,7 +29,7 @@ pub const TABLE_FORMAT_V1: u16 = 1;
 pub const MAGIC_NUMBER: u32 = 2940551257;
 pub const BLOCK_ADDR_SIZE: usize = mem::size_of::<BlockAddress>();
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct TableBuilderOptions {
     pub block_size: usize,
     pub max_table_size: usize,

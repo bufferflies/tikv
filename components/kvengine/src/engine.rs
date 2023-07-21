@@ -26,6 +26,7 @@ use tikv_util::{mpsc, sys::thread::StdThreadBuildWrapper};
 
 use crate::{
     apply::ChangeSet,
+    config::PerKeyspaceConfig,
     meta::ShardMeta,
     table::{
         memtable::CfTable,
@@ -69,6 +70,7 @@ impl Engine {
     pub fn open(
         fs: Arc<dyn dfs::Dfs>,
         opts: Arc<Options>,
+        config: KvEngineConfig,
         meta_iter: &mut impl MetaIterator,
         recoverer: impl RecoverHandler + 'static,
         id_allocator: Arc<dyn IdAllocator>,
@@ -100,10 +102,12 @@ impl Engine {
         let compression_lvl = opts.table_builder_options.compression_lvl;
         let allow_fallback_local = opts.allow_fallback_local;
         let file_locks = (0..FILE_LOCK_SLOTS).map(|_| Mutex::new(())).collect();
+        let per_keyspace_configs = Arc::new(config.get_per_keyspace_configs());
         let core = EngineCore {
             engine_id: AtomicU64::new(meta_iter.engine_id()),
             shards: DashMap::new(),
             opts: opts.clone(),
+            per_keyspace_configs,
             flush_tx,
             compact_tx,
             fs: fs.clone(),
@@ -253,6 +257,7 @@ pub struct EngineCore {
     pub(crate) engine_id: AtomicU64,
     pub(crate) shards: DashMap<u64, Arc<Shard>>,
     pub opts: Arc<Options>,
+    pub per_keyspace_configs: Arc<HashMap<u32, PerKeyspaceConfig>>,
     pub(crate) flush_tx: mpsc::Sender<FlushMsg>,
     pub(crate) compact_tx: mpsc::Sender<CompactMsg>,
     pub(crate) fs: Arc<dyn dfs::Dfs>,

@@ -61,6 +61,7 @@ fn new_test_engine_opt(
     let engine = Engine::open(
         tester.fs.clone(),
         tester.opts.clone(),
+        tester.config.clone(),
         &mut meta_iter,
         tester.clone(),
         tester.core.clone(),
@@ -93,14 +94,20 @@ fn test_engine() {
     //
     // let mut keys = vec![];
     // for i in &[1000, 3000, 6000, 9000] {
-    // keys.push(i_to_key(*i, engine.opts.min_blob_size));
-    // }
+    // keys.push(i_to_key(*i,
+    // engine.opts.blob_table_build_options.min_blob_size)); }
     // let mut splitter = Splitter::new(keys.clone(), applier_tx.clone());
     // let handle = thread::spawn(move || {
     // splitter.run();
     // });
     let (begin, end) = (0, 10000);
-    load_data(begin, end, 1, applier_tx, engine.opts.min_blob_size);
+    load_data(
+        begin,
+        end,
+        1,
+        applier_tx,
+        engine.opts.blob_table_build_options.min_blob_size,
+    );
     // handle.join().unwrap();
     check_get(
         begin,
@@ -110,7 +117,7 @@ fn test_engine() {
         &engine,
         true,
         None,
-        engine.opts.min_blob_size,
+        engine.opts.blob_table_build_options.min_blob_size,
     );
     check_iterater(begin, end, &engine);
 }
@@ -120,11 +127,17 @@ fn test_destroy_range() {
     init_logger();
     let (engine, applier_tx) = new_test_engine();
     let mem_table_count = engine.get_shard_stat(1).mem_table_count;
-    load_data(10, 50, 1, applier_tx.clone(), engine.opts.min_blob_size);
+    load_data(
+        10,
+        50,
+        1,
+        applier_tx.clone(),
+        engine.opts.blob_table_build_options.min_blob_size,
+    );
     // Unsafe destroy keys [10, 30).
     for prefix in [10, 20] {
         let mut wb = WriteBatch::new(1, 0);
-        let key = i_to_key(prefix, engine.opts.min_blob_size);
+        let key = i_to_key(prefix, engine.opts.blob_table_build_options.min_blob_size);
         wb.set_property(DEL_PREFIXES_KEY, key[..key.len() - 1].as_bytes());
         write_data(wb, &applier_tx);
     }
@@ -166,7 +179,7 @@ fn test_destroy_range() {
         &engine,
         false,
         None,
-        engine.opts.min_blob_size,
+        engine.opts.blob_table_build_options.min_blob_size,
     );
     check_get(
         30,
@@ -176,7 +189,7 @@ fn test_destroy_range() {
         &engine,
         true,
         None,
-        engine.opts.min_blob_size,
+        engine.opts.blob_table_build_options.min_blob_size,
     );
     check_iterater(30, 50, &engine);
 
@@ -187,7 +200,7 @@ fn test_destroy_range() {
             50 + i * 10,
             1,
             applier_tx.clone(),
-            engine.opts.min_blob_size,
+            engine.opts.blob_table_build_options.min_blob_size,
         );
         let mut wb = WriteBatch::new(1, 0);
         wb.set_switch_mem_table();
@@ -203,7 +216,7 @@ fn test_destroy_range() {
     assert!(engine.get_shard_stat(1).l0_table_count < 10);
     // Unsafe destroy keys [100, 150).
     let mut wb = WriteBatch::new(1, 0);
-    let key = i_to_key(100, engine.opts.min_blob_size);
+    let key = i_to_key(100, engine.opts.blob_table_build_options.min_blob_size);
     wb.set_property(DEL_PREFIXES_KEY, key[..key.len() - 2].as_bytes());
     write_data(wb, &applier_tx);
     wait_for_destroying_range();
@@ -215,7 +228,7 @@ fn test_destroy_range() {
         &engine,
         false,
         None,
-        engine.opts.min_blob_size,
+        engine.opts.blob_table_build_options.min_blob_size,
     );
     check_get(
         50,
@@ -225,7 +238,7 @@ fn test_destroy_range() {
         &engine,
         true,
         None,
-        engine.opts.min_blob_size,
+        engine.opts.blob_table_build_options.min_blob_size,
     );
 
     // Clean all data.
@@ -241,7 +254,7 @@ fn test_destroy_range() {
         &engine,
         false,
         None,
-        engine.opts.min_blob_size,
+        engine.opts.blob_table_build_options.min_blob_size,
     );
 
     // No data exists and delete-prefixes can be cleaned too.
@@ -262,7 +275,7 @@ fn test_truncate_ts_request() {
         50,
         version,
         applier_tx.clone(),
-        engine.opts.min_blob_size,
+        engine.opts.blob_table_build_options.min_blob_size,
     );
     // In case auto truncate_ts compaction finishes too fast.
     engine.get_shard(1).unwrap().set_active(false);
@@ -359,20 +372,26 @@ fn test_truncate_ts() {
         assert_eq!(length, 0);
     };
 
-    load_data(0, 300, 1000, applier_tx.clone(), engine.opts.min_blob_size);
+    load_data(
+        0,
+        300,
+        1000,
+        applier_tx.clone(),
+        engine.opts.blob_table_build_options.min_blob_size,
+    );
     load_data(
         100,
         400,
         2000,
         applier_tx.clone(),
-        engine.opts.min_blob_size,
+        engine.opts.blob_table_build_options.min_blob_size,
     );
     load_data(
         200,
         500,
         3000,
         applier_tx.clone(),
-        engine.opts.min_blob_size,
+        engine.opts.blob_table_build_options.min_blob_size,
     );
 
     const ALL_CFS: &[usize] = &[0, 1, 2];
@@ -391,7 +410,7 @@ fn test_truncate_ts() {
             &engine,
             true,
             Some(1000),
-            engine.opts.min_blob_size,
+            engine.opts.blob_table_build_options.min_blob_size,
         );
         check_get(
             100,
@@ -401,7 +420,7 @@ fn test_truncate_ts() {
             &engine,
             true,
             Some(1000),
-            engine.opts.min_blob_size,
+            engine.opts.blob_table_build_options.min_blob_size,
         );
         check_get(
             100,
@@ -411,7 +430,7 @@ fn test_truncate_ts() {
             &engine,
             true,
             Some(2000),
-            engine.opts.min_blob_size,
+            engine.opts.blob_table_build_options.min_blob_size,
         );
         check_get(
             200,
@@ -421,7 +440,7 @@ fn test_truncate_ts() {
             &engine,
             true,
             Some(2000),
-            engine.opts.min_blob_size,
+            engine.opts.blob_table_build_options.min_blob_size,
         );
         check_get(
             200,
@@ -431,7 +450,7 @@ fn test_truncate_ts() {
             &engine,
             true,
             Some(3000),
-            engine.opts.min_blob_size,
+            engine.opts.blob_table_build_options.min_blob_size,
         );
     }
 
@@ -446,7 +465,7 @@ fn test_truncate_ts() {
             &engine,
             true,
             Some(1000),
-            engine.opts.min_blob_size,
+            engine.opts.blob_table_build_options.min_blob_size,
         );
         check_get(
             100,
@@ -456,7 +475,7 @@ fn test_truncate_ts() {
             &engine,
             true,
             Some(1000),
-            engine.opts.min_blob_size,
+            engine.opts.blob_table_build_options.min_blob_size,
         );
         check_get(
             100,
@@ -466,7 +485,7 @@ fn test_truncate_ts() {
             &engine,
             true,
             Some(2000),
-            engine.opts.min_blob_size,
+            engine.opts.blob_table_build_options.min_blob_size,
         );
         check_get(
             400,
@@ -476,7 +495,7 @@ fn test_truncate_ts() {
             &engine,
             false,
             None,
-            engine.opts.min_blob_size,
+            engine.opts.blob_table_build_options.min_blob_size,
         );
     }
 
@@ -491,7 +510,7 @@ fn test_truncate_ts() {
             &engine,
             true,
             Some(1000),
-            engine.opts.min_blob_size,
+            engine.opts.blob_table_build_options.min_blob_size,
         );
         check_get(
             300,
@@ -501,7 +520,7 @@ fn test_truncate_ts() {
             &engine,
             false,
             None,
-            engine.opts.min_blob_size,
+            engine.opts.blob_table_build_options.min_blob_size,
         );
     }
 
@@ -517,7 +536,7 @@ fn test_truncate_ts() {
             &engine,
             false,
             None,
-            engine.opts.min_blob_size,
+            engine.opts.blob_table_build_options.min_blob_size,
         );
     }
 }
@@ -1044,12 +1063,15 @@ impl EngineTester {
         metas.insert(1, Arc::new(initial_meta));
         let tmp_dir = TempDir::new().unwrap();
         let opts = new_test_options(tmp_dir.path(), enable_inner_key_off, block_size);
+        let config = KvEngineConfig::default();
+
         Self {
             core: Arc::new(EngineTesterCore {
                 _tmp_dir: tmp_dir,
                 metas,
                 fs: Arc::new(InMemFs::new()),
                 opts: Arc::new(opts),
+                config,
                 id: AtomicU64::new(0),
             }),
         }
@@ -1061,6 +1083,7 @@ struct EngineTesterCore {
     metas: dashmap::DashMap<u64, Arc<ShardMeta>>,
     fs: Arc<dfs::InMemFs>,
     opts: Arc<Options>,
+    config: KvEngineConfig,
     id: AtomicU64,
 }
 
@@ -1297,7 +1320,7 @@ fn new_test_options(
     opts.table_builder_options.max_table_size = 16 << 10;
     opts.max_mem_table_size = 16 << 10;
     opts.num_compactors = 2;
-    opts.min_blob_size = min_blob_size;
+    opts.blob_table_build_options.min_blob_size = min_blob_size;
     opts.max_del_range_delay = Duration::from_secs(1);
     opts.enable_inner_key_offset = enable_inner_key_off;
     opts
@@ -1446,7 +1469,7 @@ fn check_iterater(begin: usize, end: usize, en: &Engine) {
                 if iter.key.chunk() >= shard.outer_end.chunk() {
                     break;
                 }
-                let key = i_to_key(i as i32, en.opts.min_blob_size);
+                let key = i_to_key(i as i32, en.opts.blob_table_build_options.min_blob_size);
                 assert_eq!(iter.key(), key.as_bytes());
                 assert_eq!(iter.val(), key.repeat(cf + 2).as_bytes());
                 i += 1;

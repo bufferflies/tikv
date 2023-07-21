@@ -3,7 +3,10 @@
 use std::time::Duration;
 
 use api_version::ApiV2;
-use kvengine::{CF_LEVELS, WRITE_CF};
+use kvengine::{
+    table::blobtable::builder::BlobTableBuildOptions, KvEnginePerKeyspaceConfig, CF_LEVELS,
+    WRITE_CF,
+};
 use kvproto::{
     metapb::Store,
     pdpb::CheckPolicy,
@@ -14,18 +17,41 @@ use rfstore::store::CustomBuilder;
 use test_cloud_server::ServerCluster;
 use tikv_util::time::Instant;
 
-use crate::{alloc_node_id, i_to_key_with_keyspace, i_to_val, request_major_compact_on_store};
+use crate::{
+    alloc_node_id, i_to_key_with_keyspace, i_to_val_with_size, request_major_compact_on_store,
+};
 
 #[test]
-fn test_major_compaction() {
+fn test_per_keyspace_config() {
     test_util::init_log_for_test();
     let mut nodes = vec![];
     let node_cnt = 3;
     for _ in 0..node_cnt {
         nodes.push(alloc_node_id());
     }
+    let mut k1_bt_config = BlobTableBuildOptions::default();
+    let mut k2_bt_config = BlobTableBuildOptions::default();
+    let mut k3_bt_config = BlobTableBuildOptions::default();
+    k1_bt_config.min_blob_size = 1000;
+    k1_bt_config.target_blob_table_size = 1;
+    k2_bt_config.min_blob_size = 0;
+    k3_bt_config.min_blob_size = 5000;
     let mut cluster = ServerCluster::new(nodes.clone(), |_, conf| {
         conf.kvengine.compaction_request_version = 3;
+        conf.kvengine.per_keyspace_configs = vec![
+            KvEnginePerKeyspaceConfig {
+                keyspace: 1,
+                blob_table_build_options: k1_bt_config,
+            },
+            KvEnginePerKeyspaceConfig {
+                keyspace: 2,
+                blob_table_build_options: k2_bt_config,
+            },
+            KvEnginePerKeyspaceConfig {
+                keyspace: 3,
+                blob_table_build_options: k3_bt_config,
+            },
+        ];
     });
     cluster.wait_region_replicated(&[], 3);
     let mut client = cluster.new_client();
@@ -36,10 +62,10 @@ fn test_major_compaction() {
     let region0 = pd_client.get_all_regions().first().unwrap().clone();
     let keys = vec![
         ApiV2::get_txn_keyspace_prefix(1),
-        i_to_key_with_keyspace(1)(500),
         ApiV2::get_txn_keyspace_prefix(2),
-        i_to_key_with_keyspace(2)(500),
         ApiV2::get_txn_keyspace_prefix(3),
+        ApiV2::get_txn_keyspace_prefix(4),
+        ApiV2::get_txn_keyspace_prefix(5),
     ];
     let split_keys = keys
         .into_iter()
@@ -47,12 +73,14 @@ fn test_major_compaction() {
         .collect::<Vec<_>>();
     pd_client.must_split_region(region0, CheckPolicy::Usekey, split_keys.clone());
     cluster.wait_pd_region_min_count(split_keys.len() + 1);
-    client.put_kv(0..1000, i_to_key_with_keyspace(1), i_to_val);
-    client.put_kv(0..1000, i_to_key_with_keyspace(2), i_to_val);
-    let ks1_r1 = pd_client.get_region(&split_keys[0]).unwrap();
-    let ks1_r2 = pd_client.get_region(&split_keys[1]).unwrap();
-    let ks2_r1 = pd_client.get_region(&split_keys[2]).unwrap();
-    let ks2_r2 = pd_client.get_region(&split_keys[3]).unwrap();
+    client.put_kv(0..1000, i_to_key_with_keyspace(1), i_to_val_with_size(3000));
+    client.put_kv(0..1000, i_to_key_with_keyspace(2), i_to_val_with_size(3000));
+    client.put_kv(0..1000, i_to_key_with_keyspace(3), i_to_val_with_size(3000));
+    client.put_kv(0..1000, i_to_key_with_keyspace(4), i_to_val_with_size(3000));
+    let ks1 = pd_client.get_region(&split_keys[0]).unwrap();
+    let ks2 = pd_client.get_region(&split_keys[1]).unwrap();
+    let ks3 = pd_client.get_region(&split_keys[2]).unwrap();
+    let ks4 = pd_client.get_region(&split_keys[3]).unwrap();
 
     let wait_for_memtable_flush =
         |cluster: &ServerCluster, node_ids: &[u16], region_id: u64, timeout: Duration| {
@@ -98,10 +126,10 @@ fn test_major_compaction() {
         assert!(flushed);
     };
 
-    flush_memtable(&cluster, &nodes, ks1_r1.get_id());
-    flush_memtable(&cluster, &nodes, ks1_r2.get_id());
-    flush_memtable(&cluster, &nodes, ks2_r1.get_id());
-    flush_memtable(&cluster, &nodes, ks2_r2.get_id());
+    flush_memtable(&cluster, &nodes, ks1.get_id());
+    flush_memtable(&cluster, &nodes, ks2.get_id());
+    flush_memtable(&cluster, &nodes, ks3.get_id());
+    flush_memtable(&cluster, &nodes, ks4.get_id());
 
     let stores: Vec<Store> = pd_client
         .get_all_stores(true)
@@ -119,13 +147,15 @@ fn test_major_compaction() {
         .build()
         .unwrap();
 
-    // Trigger major compaction on one region.
     for store in &stores {
-        let query = format!(
-            "major_compact=true&keyspace_id=1&region_id={}",
-            ks1_r1.get_id()
-        );
-        runtime.block_on(request_major_compact_on_store(store, &query));
+        let query = "major_compact=true&keyspace_id=1";
+        runtime.block_on(request_major_compact_on_store(store, query));
+        let query = "major_compact=true&keyspace_id=2";
+        runtime.block_on(request_major_compact_on_store(store, query));
+        let query = "major_compact=true&keyspace_id=3";
+        runtime.block_on(request_major_compact_on_store(store, query));
+        let query = "major_compact=true&keyspace_id=4";
+        runtime.block_on(request_major_compact_on_store(store, query));
     }
 
     let wait_for_major_compaction =
@@ -156,48 +186,43 @@ fn test_major_compaction() {
             }
             major_compacted
         };
-    let major_compacted = |cluster: &ServerCluster, node_ids: &[u16], region_id: u64| {
-        let curr_shard_stats = node_ids
+    assert!(wait_for_major_compaction(
+        &cluster,
+        &nodes,
+        ks1.get_id(),
+        Duration::from_secs(6)
+    ));
+    assert!(wait_for_major_compaction(
+        &cluster,
+        &nodes,
+        ks2.get_id(),
+        Duration::from_secs(6)
+    ));
+    assert!(wait_for_major_compaction(
+        &cluster,
+        &nodes,
+        ks3.get_id(),
+        Duration::from_secs(6)
+    ));
+    assert!(wait_for_major_compaction(
+        &cluster,
+        &nodes,
+        ks4.get_id(),
+        Duration::from_secs(6)
+    ));
+    let num_blob_tables_in_shard = |cluster: &ServerCluster, node_ids: &[u16], region_id: u64| {
+        node_ids
             .iter()
-            .map(|id| cluster.get_kvengine(*id).get_shard_stat(region_id))
-            .collect::<Vec<_>>();
-        curr_shard_stats.iter().any(|curr| {
-            let bottom_most_level = curr.cfs[WRITE_CF].levels.last().unwrap();
-            curr.mem_table_size == 0
-                && curr.mem_table_count == 1
-                && curr.l0_table_count == 0
-                && bottom_most_level.level == CF_LEVELS[WRITE_CF]
-                && bottom_most_level.num_tables != 0
-        })
+            .map(|id| {
+                let shard_stat = cluster.get_kvengine(*id).get_shard_stat(region_id);
+                shard_stat.blob_table_count
+            })
+            .sum::<usize>()
     };
-    assert!(wait_for_major_compaction(
-        &cluster,
-        &nodes,
-        ks1_r1.get_id(),
-        Duration::from_secs(6)
-    ));
-    assert!(!major_compacted(&cluster, &nodes, ks1_r2.get_id()));
-    assert!(!major_compacted(&cluster, &nodes, ks2_r1.get_id()));
-    assert!(!major_compacted(&cluster, &nodes, ks2_r2.get_id()));
-
-    // Trigger major compaction on one keyspace.
-    for store in &stores {
-        let query = "major_compact=true&keyspace_id=2";
-        runtime.block_on(request_major_compact_on_store(store, query));
-    }
-    assert!(wait_for_major_compaction(
-        &cluster,
-        &nodes,
-        ks2_r1.get_id(),
-        Duration::from_secs(6)
-    ));
-    assert!(wait_for_major_compaction(
-        &cluster,
-        &nodes,
-        ks2_r2.get_id(),
-        Duration::from_secs(6)
-    ));
-    assert!(!major_compacted(&cluster, &nodes, ks1_r2.get_id()));
+    assert_ne!(num_blob_tables_in_shard(&cluster, &nodes, ks1.get_id()), 0);
+    assert_eq!(num_blob_tables_in_shard(&cluster, &nodes, ks2.get_id()), 0);
+    assert_eq!(num_blob_tables_in_shard(&cluster, &nodes, ks3.get_id()), 0);
+    assert_eq!(num_blob_tables_in_shard(&cluster, &nodes, ks4.get_id()), 0);
 
     cluster.stop();
 }

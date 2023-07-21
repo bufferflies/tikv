@@ -9,7 +9,7 @@ pub mod apply;
 pub mod compaction;
 mod concat_iterator;
 mod config;
-pub use config::Config as KvEngineConfig;
+pub use config::{Config as KvEngineConfig, PerKeyspaceConfig as KvEnginePerKeyspaceConfig};
 pub mod dfs;
 pub mod engine;
 pub mod engine_trait;

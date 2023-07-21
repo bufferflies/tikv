@@ -142,22 +142,17 @@ impl BlobTable {
         }
         return match self.footer.compression_type {
             NO_COMPRESSION => Ok(false), // in place decoding
-            LZ4_COMPRESSION => unsafe {
-                if decompressed_buf.capacity() < original_len as usize {
-                    decompressed_buf.reserve(original_len as usize - decompressed_buf.len());
-                }
+            LZ4_COMPRESSION => {
+                decompressed_buf.resize(original_len as usize, 0);
                 lz4::block::decompress_to_buffer(
                     compressed_data,
                     Some(original_len as i32),
                     decompressed_buf,
                 )?;
-                decompressed_buf.set_len(original_len as usize);
                 Ok(true)
-            },
+            }
             ZSTD_COMPRESSION => unsafe {
-                if decompressed_buf.capacity() < original_len as usize {
-                    decompressed_buf.reserve(original_len as usize - decompressed_buf.len());
-                }
+                decompressed_buf.resize(original_len as usize, 0);
                 let result = zstd_sys::ZSTD_decompress(
                     decompressed_buf.as_mut_ptr() as *mut libc::c_void,
                     original_len as usize,
@@ -165,7 +160,6 @@ impl BlobTable {
                     compressed_data.len(),
                 );
                 assert_eq!(zstd_sys::ZSTD_isError(result), 0u32);
-                decompressed_buf.set_len(original_len as usize);
                 Ok(true)
             },
             _ => panic!("unknown compression type {}", self.footer.compression_type),

@@ -5,8 +5,12 @@
 #![feature(custom_test_frameworks)]
 #![test_runner(test_util::run_tests)]
 
-use std::sync::atomic::AtomicU16;
+use std::{str::FromStr, sync::atomic::AtomicU16};
 
+use api_version::ApiV2;
+use http::Uri;
+use hyper::{Body, Request};
+use kvproto::metapb::Store;
 use tikv_util::info;
 
 mod backup;
@@ -70,4 +74,33 @@ pub(crate) fn i_to_key(i: usize) -> Vec<u8> {
 
 pub(crate) fn i_to_val(i: usize) -> Vec<u8> {
     format!("val_{:03}", i).into_bytes().repeat(3)
+}
+
+async fn request_major_compact_on_store(store: &Store, query: &str) {
+    let uri = Uri::from_str(&format!(
+        "http://{}/major-compact?{}",
+        &store.status_address, query
+    ))
+    .unwrap();
+    let req = Request::post(uri).body(Body::empty()).unwrap();
+    let client = hyper::Client::new();
+    let resp: http::Response<Body> = client.request(req).await.unwrap();
+    assert!(
+        resp.status().is_success(),
+        "{:?}",
+        hyper::body::to_bytes(resp.into_body()).await.unwrap()
+    );
+    hyper::body::to_bytes(resp.into_body()).await.unwrap();
+}
+
+pub(crate) fn i_to_key_with_keyspace(keyspace_id: u32) -> impl Fn(usize) -> Vec<u8> {
+    move |i: usize| -> Vec<u8> {
+        let mut key = ApiV2::get_txn_keyspace_prefix(keyspace_id);
+        key.extend(format!("xkey{:08}", i).into_bytes());
+        key
+    }
+}
+
+pub(crate) fn i_to_val_with_size(size: usize) -> impl Fn(usize) -> Vec<u8> {
+    move |i: usize| -> Vec<u8> { format!("{:0size$}", i, size = size).into_bytes() }
 }

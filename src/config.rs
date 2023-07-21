@@ -4087,6 +4087,7 @@ mod tests {
     use futures::executor::block_on;
     use grpcio::ResourceQuota;
     use itertools::Itertools;
+    use kvengine::table::blobtable::builder::BlobTableBuildOptions;
     use kvproto::kvrpcpb::CommandPri;
     use raftstore::coprocessor::region_info_accessor::MockRegionInfoProvider;
     use slog::Level;
@@ -5803,6 +5804,38 @@ mod tests {
         assert_eq!(
             cfg.rocksdb.defaultcf.soft_pending_compaction_bytes_limit,
             Some(ReadableSize::gb(1))
+        );
+    }
+
+    #[test]
+    fn test_kv_engine() {
+        let content = r#"
+            [kvengine]
+            per-keyspace-configs = [
+                {keyspace = 1},
+                {keyspace = 2, blob-table-build-options = {min-blob-size = 20}},
+            ]
+        "#;
+        let mut cfg: TikvConfig = toml::from_str(content).unwrap();
+        cfg.validate().unwrap();
+        let per_keyspace_configs = cfg.kvengine.get_per_keyspace_configs();
+        assert_eq!(per_keyspace_configs.len(), 2);
+        let default_bt_build_options = BlobTableBuildOptions::default();
+        assert_eq!(
+            per_keyspace_configs[&1].blob_table_build_options,
+            default_bt_build_options
+        );
+        assert_eq!(
+            per_keyspace_configs[&2]
+                .blob_table_build_options
+                .min_blob_size,
+            20
+        );
+        assert_eq!(
+            per_keyspace_configs[&2]
+                .blob_table_build_options
+                .max_blob_table_size,
+            default_bt_build_options.max_blob_table_size
         );
     }
 }

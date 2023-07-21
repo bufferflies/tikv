@@ -11,7 +11,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use api_version::{api_v2::KEYSPACE_PREFIX_LEN, ApiV2};
+use api_version::{
+    api_v2::{self, KEYSPACE_PREFIX_LEN},
+    ApiV2, KeyMode, KvFormat,
+};
 use bytes::{Buf, Bytes, BytesMut};
 use http::StatusCode;
 use kvenginepb as pb;
@@ -23,9 +26,12 @@ use tikv_util::mpsc;
 use crate::{
     dfs,
     table::{
-        blobtable::{blobtable::BlobTable, builder::BlobTableBuilder},
+        blobtable::{
+            blobtable::BlobTable,
+            builder::{BlobTableBuildOptions, BlobTableBuilder},
+        },
         search,
-        sstable::{self, InMemFile, L0Builder, SsTable, NO_COMPRESSION},
+        sstable::{self, builder::TableBuilderOptions, InMemFile, L0Builder, SsTable},
         InnerKey,
     },
     Error::{FallbackLocalCompactorDisabled, IncompatibleRemoteCompactor, RemoteCompaction},
@@ -282,20 +288,6 @@ const CURRENT_COMPACTOR_VERSION: u32 = 3;
 
 const INCOMPATIBLE_COMPACTOR_ERROR_CODE: StatusCode = StatusCode::NOT_IMPLEMENTED;
 
-#[derive(Debug, Serialize, Deserialize, Default)]
-struct SstConfig {
-    compression_types: [u8; 3],
-    block_size: usize,
-    max_sst_size: usize,
-}
-
-#[derive(Debug, Serialize, Deserialize, Default, Clone, Copy)]
-struct BlobTableConfig {
-    compression_type: u8,
-    min_blob_size: u32,
-    max_blob_table_size: usize,
-}
-
 #[derive(Default, Debug, Serialize, Deserialize)]
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
@@ -367,8 +359,8 @@ pub struct MajorCompaction {
     // L1 plus sstables of all cfs, map from cf id to sstables that are organized by level.
     ln_tables: HashMap<usize, Vec<(usize, Vec<u64>)>>,
     blob_tables: Vec<u64>,
-    sst_config: SstConfig,
-    bt_config: BlobTableConfig,
+    sst_config: TableBuilderOptions,
+    bt_config: Option<BlobTableBuildOptions>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -376,8 +368,8 @@ pub struct L0Compaction {
     safe_ts: u64,
     l0_tables: Vec<u64>,
     multi_cf_l1_tables: Vec<Vec<u64>>,
-    sst_config: SstConfig,
-    bt_config: Option<BlobTableConfig>,
+    sst_config: TableBuilderOptions,
+    bt_config: Option<BlobTableBuildOptions>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -389,7 +381,7 @@ pub struct L1PlusCompaction {
     keep_latest_obsolete_tombstone: bool,
     upper_level: Vec<u64>,
     lower_level: Vec<u64>,
-    sst_config: SstConfig,
+    sst_config: TableBuilderOptions,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -865,6 +857,34 @@ impl Engine {
         Ok(res_cs)
     }
 
+    fn get_blob_table_build_options_or_none(&self, shard: &Shard) -> Option<BlobTableBuildOptions> {
+        if shard.outer_start.len() >= api_v2::KEYSPACE_PREFIX_LEN {
+            let start_key_mode = ApiV2::parse_key_mode(&shard.outer_start);
+            let end_key_mode = ApiV2::parse_key_mode(&shard.outer_end);
+            if (start_key_mode == KeyMode::Raw || start_key_mode == KeyMode::Txn)
+                && (end_key_mode == KeyMode::Raw || end_key_mode == KeyMode::Txn)
+            {
+                let keyspace_id =
+                    ApiV2::get_u32_keyspace_id(ApiV2::get_keyspace_id(&shard.outer_start));
+                match self
+                    .per_keyspace_configs
+                    .get(&keyspace_id)
+                    .map(|c| c.blob_table_build_options)
+                {
+                    Some(bt_build_options) => {
+                        if bt_build_options.min_blob_size != 0 {
+                            return Some(bt_build_options);
+                        } else {
+                            return None;
+                        }
+                    }
+                    _ => return None,
+                };
+            }
+        }
+        None
+    }
+
     pub(crate) fn trigger_l0_compaction(&self, shard: &Shard) -> Option<Result<pb::ChangeSet>> {
         let tag = shard.tag();
         let data = shard.get_data();
@@ -888,8 +908,9 @@ impl Engine {
                 biggest = l0.biggest();
             }
             l0_tbls.push(l0.id());
-            if l0.size() > l0.entries() * self.opts.min_blob_size as u64 {
-                estimated_blob_size += l0.size() - l0.entries() * self.opts.min_blob_size as u64;
+            if l0.size() > l0.entries() * self.opts.blob_table_build_options.min_blob_size as u64 {
+                estimated_blob_size += l0.size()
+                    - l0.entries() * self.opts.blob_table_build_options.min_blob_size as u64;
             }
             total_size += l0.size();
         }
@@ -913,34 +934,33 @@ impl Engine {
                 }
                 l1_tbls.push(tbl.id());
                 total_size += tbl.size();
-                if tbl.size() > tbl.entries as u64 * self.opts.min_blob_size as u64 {
-                    estimated_blob_size +=
-                        tbl.size() - tbl.entries as u64 * self.opts.min_blob_size as u64;
+                if tbl.size()
+                    > tbl.entries as u64 * self.opts.blob_table_build_options.min_blob_size as u64
+                {
+                    estimated_blob_size += tbl.size()
+                        - tbl.entries as u64
+                            * self.opts.blob_table_build_options.min_blob_size as u64;
                 }
             }
             req.multi_cf_bottoms.push(l1_tbls.clone());
             multi_cfs_l1_tbls.push(l1_tbls);
         }
-        let build_blob = self.opts.min_blob_size != 0
-            && estimated_blob_size > self.opts.blob_table_target_size as u64;
-        info!(
-            "{} build blob {} in L0 compaction, estimated blob size {}, target blob size {}",
-            tag, build_blob, estimated_blob_size, self.opts.blob_table_target_size
-        );
-        let bt_config = build_blob.then_some(BlobTableConfig {
-            max_blob_table_size: self.opts.max_blob_table_size,
-            min_blob_size: self.opts.min_blob_size,
-            compression_type: NO_COMPRESSION,
-        });
+        let sst_config = self.opts.table_builder_options;
 
-        let sst_config = SstConfig {
-            max_sst_size: self.opts.table_builder_options.max_table_size,
-            compression_types: self.opts.table_builder_options.compression_tps,
-            block_size: self.opts.table_builder_options.block_size,
-        };
+        // Only opt-in users will use blob store.
+        let mut bt_config = self.get_blob_table_build_options_or_none(shard);
+        if let Some(build_opts) = &bt_config {
+            if estimated_blob_size < build_opts.target_blob_table_size as u64 {
+                bt_config = None;
+            }
+        }
+        info!(
+            "{} build blob in L0 compaction, estimated blob size {}, blob table build options {:?}",
+            tag, estimated_blob_size, bt_config
+        );
         let estimated_num_files = total_size as usize
-            / bt_config.map_or(sst_config.max_sst_size, |c| {
-                std::cmp::min(c.max_blob_table_size, sst_config.max_sst_size)
+            / bt_config.map_or(sst_config.max_table_size, |c| {
+                std::cmp::min(c.max_blob_table_size, sst_config.max_table_size)
             });
         self.set_alloc_ids_for_request(
             &mut req,
@@ -1120,12 +1140,8 @@ impl Engine {
         req.bottoms = lower_level_table_ids.clone();
         req.cf = cf;
         req.level = level;
-        let sst_config = SstConfig {
-            max_sst_size: self.opts.table_builder_options.max_table_size,
-            compression_types: self.opts.table_builder_options.compression_tps,
-            block_size: self.opts.table_builder_options.block_size,
-        };
-        let estimated_num_files = (upper_size + lower_size) as usize / sst_config.max_sst_size;
+        let sst_config = self.opts.table_builder_options;
+        let estimated_num_files = (upper_size + lower_size) as usize / sst_config.max_table_size;
         self.set_alloc_ids_for_request(
             &mut req,
             upper_level_table_ids.len() + lower_level_table_ids.len(),
@@ -1172,18 +1188,13 @@ impl Engine {
         }
         total_size += data.l0_tbls.iter().map(|t| t.size()).sum::<u64>();
         total_size += data.blob_tbl_map.values().map(|t| t.size()).sum::<u64>();
-        let sst_config = SstConfig {
-            compression_types: self.opts.table_builder_options.compression_tps,
-            block_size: self.opts.table_builder_options.block_size,
-            max_sst_size: self.opts.table_builder_options.max_table_size,
-        };
-        let bt_config = BlobTableConfig {
-            compression_type: NO_COMPRESSION,
-            min_blob_size: self.opts.min_blob_size,
-            max_blob_table_size: self.opts.max_blob_table_size,
-        };
+        let sst_config = self.opts.table_builder_options;
+        let bt_config = self.get_blob_table_build_options_or_none(shard);
         let estimated_num_files = total_size as usize
-            / std::cmp::min(bt_config.max_blob_table_size, sst_config.max_sst_size);
+            / std::cmp::min(
+                bt_config.map_or(usize::MAX, |bt_config| bt_config.max_blob_table_size),
+                sst_config.max_table_size,
+            );
         self.set_alloc_ids_for_request(
             &mut req,
             data.l0_tbls.len() + num_ln_files + data.blob_tbl_map.len(),
@@ -2389,8 +2400,8 @@ fn compact_for_cf(
     opts: dfs::Options,
     cf: usize,
     target_lvl: u32,
-    sst_config: &SstConfig,
-    bt_config: &Option<BlobTableConfig>,
+    sst_config: &TableBuilderOptions,
+    bt_config: &Option<BlobTableBuildOptions>,
     keep_latest_obsolete_tombstone: bool,
     blob_tables: &HashMap<u64, BlobTable>,
     allocate_id: &mut dyn FnMut() -> u64,
@@ -2406,7 +2417,7 @@ fn compact_for_cf(
     let mut sst_builder = sstable::Builder::new(
         cur_sst_id,
         sst_config.block_size,
-        sst_config.compression_types[target_lvl as usize - 1],
+        sst_config.compression_tps[target_lvl as usize - 1],
         compression_lvl,
     );
     let mut cur_blob_table_id = 0;
@@ -2449,7 +2460,7 @@ fn compact_for_cf(
             // A new key is met.
             if !last_key.is_empty() {
                 // Check if we need to rotate to a new SST or blob table.
-                if sst_builder.estimated_size() > sst_config.max_sst_size {
+                if sst_builder.estimated_size() > sst_config.max_table_size {
                     cnt += 1;
                     persist_sst(
                         cur_sst_id,
@@ -2771,7 +2782,6 @@ fn major_compact_v3(
             continue;
         }
         let mut iter = table::new_merge_iterator(iters, false);
-        let bt_config = Some(major_compaction.bt_config);
         let (sst_creates, blob_table_creates) = compact_for_cf(
             ctx,
             &mut iter,
@@ -2780,7 +2790,7 @@ fn major_compact_v3(
             cf,
             CF_LEVELS[cf] as u32,
             &major_compaction.sst_config,
-            &bt_config,
+            &major_compaction.bt_config,
             false,
             &blob_tables,
             allocate_id,
