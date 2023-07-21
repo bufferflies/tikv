@@ -293,7 +293,7 @@ impl RpcClient {
     ) -> Result<grpcio::ClientSStreamReceiver<WatchGcSafePointV2Response>> {
         use kvproto::pdpb::WatchGcSafePointV2Request;
         let mut req = WatchGcSafePointV2Request::default();
-        info!("[gc safepoint watch] start watch gc safepoin't v2"; "revision" => revision);
+        info!("[gc safepoint watch] start watch gc safepoint v2"; "revision" => revision);
         req.set_revision(revision);
         sync_request(&self.pd_client, LEADER_CHANGE_RETRY, |client, _| {
             client.watch_gc_safe_point_v2(&req)
