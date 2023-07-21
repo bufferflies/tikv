@@ -209,8 +209,7 @@ impl kvengine::RecoverHandler for RecoverHandler {
             }
             ctx.exec_log_index = e.get_index();
             ctx.exec_log_term = e.get_term();
-            let mut req = RaftCmdRequest::new();
-            req.merge_from_bytes(e.data.chunk()).unwrap();
+            let req = applier.parse_cmd(e);
             if req.get_header().get_region_epoch().version != shard.ver {
                 continue;
             }

@@ -17,6 +17,7 @@ use std::{
 
 use ::native_br::{backup::BackupConfig, restore::RestoreConfig};
 use clap::{App, Arg, ArgMatches};
+use cloud_encryption::MasterKey;
 use flate2::{write::GzEncoder, Compression};
 use grpcio::EnvBuilder;
 use http::{
@@ -235,6 +236,9 @@ fn main() {
         SecurityManager::new(&config.security)
             .unwrap_or_else(|e| panic!("failed to create security manager: {:?}", e)),
     );
+    let master_key = s3fs
+        .get_runtime()
+        .block_on(config.security.new_master_key());
     let env = Arc::new(EnvBuilder::new().cq_count(1).build());
     let pd = Arc::new(
         RpcClient::new(&config.pd, Some(env), security_mgr)
@@ -246,6 +250,7 @@ fn main() {
         s3fs.clone(),
         thread_pool.clone(),
         MAX_IN_MEM_SIZE,
+        master_key.clone(),
     ));
     let br_manager = Arc::new(NativeBrManager::new(
         thread_pool.clone(),
@@ -260,12 +265,14 @@ fn main() {
     let s3fs_clone = s3fs.clone();
     let cache_fs_clone = cache_fs.clone();
     let pd_clone = pd.clone();
+    let master_key_clone = master_key.clone();
     let server = server_builder.serve(make_service_fn(move |_| {
         let s3fs = s3fs_clone.clone();
         let cache_fs = cache_fs_clone.clone();
         let load_manager = load_manager.clone();
         let br_manager = br_manager.clone();
         let pd = pd_clone.clone();
+        let master_key = master_key_clone.clone();
         async move {
             // Create a status service.
             Ok::<_, hyper::Error>(service_fn(move |req: hyper::Request<hyper::Body>| {
@@ -274,6 +281,7 @@ fn main() {
                 let load_manager = load_manager.clone();
                 let br_manager = br_manager.clone();
                 let pd = pd.clone();
+                let master_key = master_key.clone();
                 async move {
                     let path = req.uri().path().to_owned();
                     match path.as_ref() {
@@ -288,10 +296,11 @@ fn main() {
                                 req,
                                 compression_lvl,
                                 allocator,
+                                master_key,
                             )
                             .await
                         }
-                        "/analyze" => handle_remote_analysis(cache_fs, req).await,
+                        "/analyze" => handle_remote_analysis(cache_fs, req, master_key).await,
                         "/load_data" => handle_load_data(load_manager, req).await,
                         "/metrics" => handle_get_metrics(req).await,
                         native_br::BACKUPS_API_PATH => {
@@ -334,7 +343,7 @@ fn main() {
             addr: config.cop_addr.clone(),
             max_handle_duration: Duration::from_secs(60),
         };
-        let cop_server = remote_cop::RemoteCopServer::new(pd, cache_fs, cop_config);
+        let cop_server = remote_cop::RemoteCopServer::new(pd, cache_fs, cop_config, master_key);
         cop_server_opt = Some(cop_server);
     }
     if let Some(server) = cop_server_opt.as_mut() {
@@ -421,6 +430,7 @@ fn client_accept_gzip(req: &Request<Body>) -> bool {
 async fn handle_remote_analysis(
     dfs: Arc<dyn dfs::Dfs>,
     req: hyper::Request<hyper::Body>,
+    master_key: MasterKey,
 ) -> hyper::Result<hyper::Response<hyper::Body>> {
     let mut start_time = Instant::now();
     let req_body = hyper::body::to_bytes(req.into_body()).await?;
@@ -436,7 +446,7 @@ async fn handle_remote_analysis(
     let tag = format!("[:{}]", remote_req.key);
     let mut change_set = kvenginepb::ChangeSet::default();
     change_set.merge_from_bytes(&remote_req.snap_bytes).unwrap();
-    let snap_access = SnapAccess::from_change_set(dfs, change_set, true).await;
+    let snap_access = SnapAccess::from_change_set(dfs, change_set, true, &master_key).await;
     info!(
         "start analyzing for {}, prepare snap time {:?}",
         tag,

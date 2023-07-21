@@ -17,6 +17,7 @@ use native_br::{
 };
 use pd_client::PdClient;
 use rand::{prelude::SliceRandom, Rng};
+use security::SecurityConfig;
 use test_cloud_server::{
     client::ClusterClient,
     keyspace::{ClusterKeyspaceClient, KeyspaceManager},
@@ -31,9 +32,10 @@ use tikv_util::{
 use tokio::runtime::Runtime;
 
 use crate::{
-    alloc_node_id_vec, prepare_dfs, spawn_gc_worker, spawn_keyspace_write_deprecated, spawn_merge,
-    spawn_move, spawn_transfer, TikvConfig, BACKUP_COUNTER, CONCURRENCY, MERGE_COUNTER,
-    MOVE_COUNTER, NODE_RESTART_COUNTER, RESTORE_COUNTER, TIMEOUT, TRANSFER_COUNTER, WRITE_COUNTER,
+    alloc_node_id_vec, new_security_config, prepare_dfs, spawn_gc_worker,
+    spawn_keyspace_write_deprecated, spawn_merge, spawn_move, spawn_transfer, TikvConfig,
+    BACKUP_COUNTER, CONCURRENCY, MERGE_COUNTER, MOVE_COUNTER, NODE_RESTART_COUNTER,
+    RESTORE_COUNTER, TIMEOUT, TRANSFER_COUNTER, WRITE_COUNTER,
 };
 
 const KEYSPACE_COUNT: usize = 10;
@@ -58,6 +60,7 @@ fn test_random_br_helper(enable_inner_key_offset: bool, restore_to_new: bool) {
     test_util::init_log_for_test();
 
     let (_temp_dir, _oss, dfs_config) = prepare_dfs("random_br_");
+    let security_conf = new_security_config();
 
     // Prepare cluster.
     let nodes = alloc_node_id_vec(5);
@@ -73,6 +76,7 @@ fn test_random_br_helper(enable_inner_key_offset: bool, restore_to_new: bool) {
         conf.rfengine.batch_compression_threshold =
             ReadableSize::kb(rand::thread_rng().gen_range(0..2));
         conf.enable_inner_key_offset = enable_inner_key_offset;
+        conf.security = security_conf.clone();
     };
     let mut cluster = ServerCluster::new(nodes.clone(), update_conf_fn);
     cluster.wait_region_replicated(&[], 3);
@@ -209,6 +213,7 @@ fn test_random_br_helper(enable_inner_key_offset: bool, restore_to_new: bool) {
             pd_client.clone(),
             &runtime,
             dfs_config.clone(),
+            security_conf.clone(),
             keyspace,
             target_keyspace,
             &backup_name,
@@ -269,6 +274,7 @@ pub(crate) fn do_restore_keyspace(
     pd_client: Arc<dyn PdClient>,
     runtime: &Runtime,
     dfs_config: DFSConfig,
+    security_config: SecurityConfig,
     keyspace: u32,
     target_keyspace: u32,
     backup_name: &str,
@@ -289,6 +295,7 @@ pub(crate) fn do_restore_keyspace(
         backup_name,
         None,
         s3fs,
+        security_config,
         pd_client,
         runtime,
         truncate_ts,
@@ -368,6 +375,7 @@ pub(crate) fn spawn_restore_keyspace(
     pd_client: Arc<dyn PdClient>,
     mut client: ClusterKeyspaceClient,
     dfs_config: DFSConfig,
+    security_config: SecurityConfig,
     keyspace_manager: KeyspaceManager,
     timeout: Duration,
 ) -> JoinHandle<()> {
@@ -421,6 +429,7 @@ pub(crate) fn spawn_restore_keyspace(
                     pd_client.clone(),
                     &runtime,
                     dfs_config.clone(),
+                    security_config.clone(),
                     keyspace,
                     target_keyspace,
                     &backup_name,

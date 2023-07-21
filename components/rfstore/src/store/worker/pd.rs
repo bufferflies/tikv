@@ -10,6 +10,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use api_version::{api_v2::is_whole_keyspace_range, ApiV2};
+use cloud_encryption::MasterKey;
 use concurrency_manager::ConcurrencyManager;
 use engine_traits::{CfNamesExt, MiscExt};
 #[cfg(feature = "failpoints")]
@@ -41,11 +43,13 @@ use tikv_util::{
     warn,
     worker::{Runnable, Scheduler},
 };
+use txn_types::Key;
 use yatp::Remote;
 
 use crate::{
     store::{
-        Callback, CasualMessage, PeerMsg, PeerTag, RegionIdVer, RegionMap, StoreInfo, StoreMsg,
+        encode_split_flag_encryption_keys, raw_end_key, raw_start_key, Callback, CasualMessage,
+        PeerMsg, PeerTag, RegionIdVer, RegionMap, StoreInfo, StoreMsg,
     },
     RaftRouter, RaftStoreRouter,
 };
@@ -459,11 +463,53 @@ impl PdRunner {
         callback: Callback,
         task: String,
         remote: Remote<yatp::task::future::TaskCell>,
+        master_key: MasterKey,
     ) {
         if split_keys.is_empty() {
             info!("empty split key, skip ask batch split";
                 "region" => tag);
             return;
+        }
+        let mut encryption_keys = vec![];
+        for i in 0..=split_keys.len() {
+            let raw_start = if i == 0 {
+                raw_start_key(&region)
+            } else {
+                Key::from_encoded_slice(&split_keys[i - 1])
+                    .into_raw()
+                    .unwrap_or_default()
+            };
+            let raw_end = if i == split_keys.len() {
+                raw_end_key(&region)
+            } else {
+                Key::from_encoded_slice(&split_keys[i])
+                    .into_raw()
+                    .unwrap_or_default()
+            };
+            if is_whole_keyspace_range(&raw_start, &raw_end) {
+                let keyspace_id = ApiV2::get_u32_keyspace_id(ApiV2::get_keyspace_id(&raw_start));
+                match pd_client.get_keyspace_encryption(keyspace_id) {
+                    Err(e) => {
+                        warn!(
+                            "get keyspace encryption config failed";
+                            "region" => tag,
+                            "err" => ?e,
+                        );
+                        return;
+                    }
+                    Ok(cfg) => {
+                        if cfg.enabled {
+                            let encryption_key = master_key.generate_encryption_key().export();
+                            info!(
+                                "keyspace generate encryption key";
+                                "keyspace_id" => keyspace_id,
+                                "encryption_key" => ?encryption_key,
+                            );
+                            encryption_keys.push((keyspace_id, encryption_key));
+                        }
+                    }
+                }
+            }
         }
         let resp = pd_client.ask_batch_split(region.clone(), split_keys.len());
         let f = async move {
@@ -477,14 +523,19 @@ impl PdRunner {
                         "task" => task,
                     );
 
-                    let req = new_batch_split_region_request(
+                    let admin_req = new_batch_split_region_request(
                         split_keys,
                         resp.take_ids().into(),
                         right_derive,
                     );
                     let region_id = region.get_id();
                     let epoch = region.take_region_epoch();
-                    send_admin_request(&router, region_id, epoch, peer, req, callback)
+                    let mut req = new_admin_command(region_id, epoch, peer, admin_req);
+                    if !encryption_keys.is_empty() {
+                        let header = req.mut_header();
+                        header.set_flag_data(encode_split_flag_encryption_keys(encryption_keys));
+                    }
+                    router.send_command(req, callback);
                 }
                 Err(e) => {
                     warn!(
@@ -1315,6 +1366,7 @@ impl Runnable for PdRunner {
                 callback,
                 String::from("batch_split"),
                 self.remote.clone(),
+                self.kv.get_master_key(),
             ),
 
             PdTask::Heartbeat(hb_task) => {

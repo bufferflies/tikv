@@ -18,6 +18,7 @@ use kvengine::dfs::DFSConfig;
 use kvproto::pdpb::CheckPolicy;
 use pd_client::PdClient;
 use rand::{prelude::SliceRandom, Rng, RngCore};
+use security::SecurityConfig;
 use tempfile::TempDir;
 use test_cloud_server::{
     client::ClusterClient,
@@ -447,4 +448,11 @@ pub(crate) fn prepare_dfs(prefix: &str) -> (TempDir, ObjectStorageService, DFSCo
     };
 
     (base_dir, oss, dfs_config)
+}
+
+pub(crate) fn new_security_config() -> SecurityConfig {
+    let mut conf = SecurityConfig::default();
+    conf.master_key.vendor = "test".to_string();
+    conf.master_key.key_id = "random".to_string();
+    conf
 }

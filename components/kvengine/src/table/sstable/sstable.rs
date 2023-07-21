@@ -10,6 +10,7 @@ use std::{
 
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, Bytes, BytesMut};
+use cloud_encryption::EncryptionKey;
 use moka::sync::SegmentedCache;
 use xorf::{BinaryFuse8, Filter};
 
@@ -45,9 +46,10 @@ impl SsTable {
         file: Arc<dyn File>,
         cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
         _load_filter: bool,
+        encryption_key: Option<EncryptionKey>,
     ) -> Result<Self> {
         let size = file.size();
-        let core = SsTableCore::new(file, 0, size, cache)?;
+        let core = SsTableCore::new(file, 0, size, cache, encryption_key)?;
         Ok(Self {
             core: Arc::new(core),
         })
@@ -58,8 +60,9 @@ impl SsTable {
         start: u64,
         end: u64,
         cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
+        encryption_key: Option<EncryptionKey>,
     ) -> Result<Self> {
-        let core = SsTableCore::new(file, start, end, cache)?;
+        let core = SsTableCore::new(file, start, end, cache, encryption_key)?;
         Ok(Self {
             core: Arc::new(core),
         })
@@ -176,6 +179,8 @@ pub struct SsTableCore {
     pub in_use_total_blob_size: u64,
     idx: TtlCache<Index>,
     old_idx: TtlCache<Index>,
+    encryption_key: Option<EncryptionKey>,
+    encryption_ver: u32,
 }
 
 impl SsTableCore {
@@ -184,6 +189,7 @@ impl SsTableCore {
         start_off: u64,
         end_off: u64,
         cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
+        encryption_key: Option<EncryptionKey>,
     ) -> Result<Self> {
         let size = end_off - start_off;
         let mut footer = Footer::default();
@@ -210,6 +216,7 @@ impl SsTableCore {
         let mut tombs = 0;
         let mut kv_size = None;
         let mut in_use_total_blob_size = 0u64;
+        let mut encryption_ver = 0;
         while !prop_slice.is_empty() {
             let (key, val, remain) = parse_prop_data(prop_slice);
             prop_slice = remain;
@@ -229,6 +236,8 @@ impl SsTableCore {
                 kv_size = Some(LittleEndian::read_u64(val));
             } else if key == PROP_KEY_IN_USE_TOTAL_BLOB_SIZE.as_bytes() {
                 in_use_total_blob_size = LittleEndian::read_u64(val);
+            } else if key == PROP_KEY_ENCRYPTION_VER.as_bytes() {
+                encryption_ver = LittleEndian::read_u32(val);
             }
         }
         let core = Self {
@@ -247,6 +256,8 @@ impl SsTableCore {
             in_use_total_blob_size,
             idx: TtlCache::default(),
             old_idx: TtlCache::default(),
+            encryption_ver,
+            encryption_key,
         };
         Ok(core)
     }
@@ -287,6 +298,7 @@ impl SsTableCore {
         idx: &Index,
         pos: usize,
         buf: &mut Vec<u8>,
+        decryption_buf: &mut Vec<u8>,
         fill_cache: bool,
     ) -> Result<Bytes> {
         let addr = idx.get_block_addr(pos);
@@ -296,7 +308,7 @@ impl SsTableCore {
         } else {
             self.start_off as usize + self.footer.data_len() - addr.curr_off as usize
         };
-        self.load_block_by_addr_len(addr, length, buf, fill_cache)
+        self.load_block_by_addr_len(addr, length, buf, decryption_buf, fill_cache)
     }
 
     fn load_block_by_addr_len(
@@ -304,6 +316,7 @@ impl SsTableCore {
         addr: BlockAddress,
         length: usize,
         buf: &mut Vec<u8>,
+        decryption_buf: &mut Vec<u8>,
         fill_cache: bool,
     ) -> Result<Bytes> {
         match &self.cache {
@@ -313,7 +326,7 @@ impl SsTableCore {
                     return cache
                         .try_get_with(cache_key, || {
                             crate::metrics::ENGINE_CACHE_MISS.inc_by(1);
-                            self.read_block_from_file(addr, length, buf)
+                            self.read_block_from_file(addr, length, buf, decryption_buf)
                         })
                         .map_err(|err| err.as_ref().clone());
                 }
@@ -321,9 +334,9 @@ impl SsTableCore {
                     return Ok(block);
                 }
                 crate::metrics::ENGINE_CACHE_MISS.inc_by(1);
-                self.read_block_from_file(addr, length, buf)
+                self.read_block_from_file(addr, length, buf, decryption_buf)
             }
-            None => self.read_block_from_file(addr, length, buf),
+            None => self.read_block_from_file(addr, length, buf, decryption_buf),
         }
     }
 
@@ -332,15 +345,40 @@ impl SsTableCore {
         addr: BlockAddress,
         length: usize,
         buf: &mut Vec<u8>,
+        decryption_buf: &mut Vec<u8>,
     ) -> Result<Bytes> {
         let compression_type = self.footer.compression_type;
         if compression_type == NO_COMPRESSION {
-            let raw_block = self.file.read(addr.curr_off as u64, length)?;
+            let mut raw_block = self.file.read(addr.curr_off as u64, length)?;
+            if let Some(encryption_key) = &self.encryption_key {
+                let mut block = Vec::with_capacity(length + encryption_key.encryption_block_size());
+                encryption_key.decrypt(
+                    raw_block.chunk(),
+                    addr.origin_fid,
+                    addr.curr_off,
+                    self.encryption_ver,
+                    &mut block,
+                );
+                raw_block = Bytes::from(block)
+            }
             validate_checksum(raw_block.chunk(), self.footer.checksum_type)?;
             return Ok(raw_block.slice(4..));
         }
         buf.resize(length, 0);
-        self.file.read_at(buf, addr.curr_off as u64)?;
+        if let Some(encryption_key) = &self.encryption_key {
+            decryption_buf.resize(length, 0);
+            self.file.read_at(decryption_buf, addr.curr_off as u64)?;
+            buf.truncate(0);
+            encryption_key.decrypt(
+                decryption_buf,
+                addr.origin_fid,
+                addr.curr_off,
+                self.encryption_ver,
+                buf,
+            );
+        } else {
+            self.file.read_at(buf, addr.curr_off as u64)?;
+        }
         validate_checksum(buf, self.footer.checksum_type)?;
         let content = &buf[4..];
         match compression_type {
@@ -377,6 +415,7 @@ impl SsTableCore {
         old_idx: &Index,
         pos: usize,
         buf: &mut Vec<u8>,
+        decryption_buf: &mut Vec<u8>,
         fill_cache: bool,
     ) -> Result<Bytes> {
         let addr = old_idx.get_block_addr(pos);
@@ -386,7 +425,7 @@ impl SsTableCore {
         } else {
             self.start_off as usize + self.footer.index_offset as usize - addr.curr_off as usize
         };
-        self.load_block_by_addr_len(addr, length, buf, fill_cache)
+        self.load_block_by_addr_len(addr, length, buf, decryption_buf, fill_cache)
     }
 
     fn read_filter_data_from_file(&self) -> Result<Bytes> {
@@ -715,16 +754,16 @@ pub(crate) fn build_test_table_with_kvs(kvs: &Vec<(String, String)>, load_filter
         sst_builder.add(InnerKey::from_inner_buf(k.as_bytes()), value, None);
     }
 
-    let mut buf = BytesMut::with_capacity(sst_builder.estimated_size());
+    let mut buf = Vec::with_capacity(sst_builder.estimated_size());
     sst_builder.finish(0, &mut buf);
-    let sst_file = sstable::InMemFile::new(sst_fid, buf.freeze());
+    let sst_file = sstable::InMemFile::new(sst_fid, buf.into());
 
-    SsTable::new(Arc::new(sst_file), new_test_cache(), load_filter).unwrap()
+    SsTable::new(Arc::new(sst_file), new_test_cache(), load_filter, None).unwrap()
 }
 
 #[cfg(test)]
 pub(crate) fn new_table_builder_for_test(sst_fid: u64) -> Builder {
-    Builder::new(sst_fid, 4096, NO_COMPRESSION, 0)
+    Builder::new(sst_fid, 4096, NO_COMPRESSION, 0, None)
 }
 
 #[cfg(test)]
@@ -795,11 +834,11 @@ mod tests {
                 }
             }
         }
-        let mut sst_buf = BytesMut::with_capacity(sst_builder.estimated_size());
+        let mut sst_buf = Vec::with_capacity(sst_builder.estimated_size());
         sst_builder.finish(0, &mut sst_buf);
-        let sst_file = Arc::new(sstable::InMemFile::new(sst_fid, sst_buf.freeze()));
+        let sst_file = Arc::new(sstable::InMemFile::new(sst_fid, sst_buf.into()));
         (
-            SsTable::new(sst_file, new_test_cache(), true).unwrap(),
+            SsTable::new(sst_file, new_test_cache(), true, None).unwrap(),
             all_cnt,
         )
     }

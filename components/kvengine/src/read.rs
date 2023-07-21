@@ -10,6 +10,7 @@ use std::{
 };
 
 use bytes::{Buf, Bytes, BytesMut};
+use cloud_encryption::{EncryptionKey, MasterKey};
 use kvenginepb as pb;
 use kvenginepb::IngestFiles;
 use protobuf::Message;
@@ -81,9 +82,11 @@ impl SnapAccess {
         dfs: Arc<dyn dfs::Dfs>,
         change_set: pb::ChangeSet,
         ignore_lock: bool,
+        master_key: &MasterKey,
     ) -> Self {
-        let core =
-            Arc::new(SnapAccessCore::from_change_set(dfs, change_set, None, ignore_lock).await);
+        let core = Arc::new(
+            SnapAccessCore::from_change_set(dfs, change_set, None, ignore_lock, master_key).await,
+        );
         Self { core }
     }
 
@@ -91,9 +94,11 @@ impl SnapAccess {
         dfs: Arc<dyn dfs::Dfs>,
         change_set: pb::ChangeSet,
         wb: &mut WriteBatch,
+        master_key: &MasterKey,
     ) -> Self {
         let wb = if wb.is_empty() { None } else { Some(wb) };
-        let core = Arc::new(SnapAccessCore::from_change_set(dfs, change_set, wb, true).await);
+        let core =
+            Arc::new(SnapAccessCore::from_change_set(dfs, change_set, wb, true, master_key).await);
         Self { core }
     }
 
@@ -101,6 +106,7 @@ impl SnapAccess {
         dfs: Arc<dyn dfs::Dfs>,
         mut mem_table_data: &[u8],
         snapshot: &[u8],
+        master_key: &MasterKey,
     ) -> Result<Self> {
         let mut change_set = kvenginepb::ChangeSet::default();
         change_set.merge_from_bytes(snapshot).unwrap();
@@ -122,7 +128,7 @@ impl SnapAccess {
                 wb.put(key, 0, &row.user_meta.to_array(), 0, &row.value);
             }
         }
-        Ok(Self::from_change_set_and_memtable_data(dfs, change_set, &mut wb).await)
+        Ok(Self::from_change_set_and_memtable_data(dfs, change_set, &mut wb, master_key).await)
     }
 }
 
@@ -150,6 +156,7 @@ pub struct SnapAccessCore {
     get_hint: Mutex<Hint>,
     blob_table_prefetch_size: usize,
     deleting_prefixes: Arc<DeletePrefixes>,
+    encryption_key: Option<EncryptionKey>,
 }
 
 impl SnapAccessCore {
@@ -168,6 +175,7 @@ impl SnapAccessCore {
             get_hint: Mutex::new(Hint::new()),
             blob_table_prefetch_size: shard.opt.blob_prefetch_size,
             deleting_prefixes: shard.get_del_prefixes(),
+            encryption_key: shard.encryption_key.clone(),
         }
     }
 
@@ -176,6 +184,7 @@ impl SnapAccessCore {
         change_set: pb::ChangeSet,
         wb: Option<&mut WriteBatch>,
         ignore_lock: bool,
+        master_key: &MasterKey,
     ) -> Self {
         let mut cs = ChangeSet::new(change_set);
         let mut ids = HashMap::new();
@@ -188,7 +197,7 @@ impl SnapAccessCore {
             // don't have to fiddle too much with the code below.
             ids.insert(0, 0);
         }
-        if cs.has_snapshot() {
+        let encryption_key = if cs.has_snapshot() {
             let snap = cs.get_snapshot();
             for l0 in snap.get_l0_creates() {
                 ids.insert(l0.id, 0);
@@ -199,7 +208,11 @@ impl SnapAccessCore {
             for blob in snap.get_blob_creates() {
                 ids.insert(blob.id, BLOB_LEVEL);
             }
-        }
+            get_shard_property(ENCRYPTION_KEY, snap.get_properties())
+                .map(|v| master_key.decrypt_encryption_key(&v).unwrap())
+        } else {
+            None
+        };
         let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel();
         let runtime = dfs.get_runtime();
         let opts = dfs::Options::new(cs.shard_id, cs.shard_ver);
@@ -233,10 +246,14 @@ impl SnapAccessCore {
                         let blob_table = BlobTable::new(Arc::new(file)).unwrap();
                         cs.blob_tables.insert(id, blob_table);
                     } else if level == 0 {
-                        let l0_table = L0Table::new(Arc::new(file), None, ignore_lock).unwrap();
+                        let l0_table =
+                            L0Table::new(Arc::new(file), None, ignore_lock, encryption_key.clone())
+                                .unwrap();
                         cs.l0_tables.insert(id, l0_table);
                     } else {
-                        let ln_table = SsTable::new(Arc::new(file), None, level == 1).unwrap();
+                        let ln_table =
+                            SsTable::new(Arc::new(file), None, level == 1, encryption_key.clone())
+                                .unwrap();
                         cs.ln_tables.insert(id, ln_table);
                     }
                 }
@@ -249,7 +266,7 @@ impl SnapAccessCore {
         if !errors.is_empty() {
             panic!("errors is not empty: {:?}", errors);
         }
-        let mut shard = Shard::new_for_ingest(0, &cs, Arc::new(Options::default()));
+        let mut shard = Shard::new_for_ingest(0, &cs, Arc::new(Options::default()), master_key);
         let (l0s, blob_tbls, scfs) = create_snapshot_tables(cs.get_snapshot(), &cs, false);
         let data = ShardData::new(
             shard.range.clone(),
@@ -565,6 +582,10 @@ impl SnapAccessCore {
         let snap = cs.mut_snapshot();
         let mut properties = pb::Properties::new();
         properties.shard_id = self.get_tag().id_ver.id;
+        if let Some(encryption_key) = &self.encryption_key {
+            properties.mut_keys().push(ENCRYPTION_KEY.to_string());
+            properties.mut_values().push(encryption_key.export());
+        }
         let data_sequence = if !self.data.l0_tbls.is_empty() {
             self.data.l0_tbls[0].version() - self.base_version
         } else {
@@ -784,6 +805,10 @@ impl SnapAccessCore {
             }
         }
         false
+    }
+
+    pub fn get_encryption_key(&self) -> Option<EncryptionKey> {
+        self.encryption_key.clone()
     }
 }
 

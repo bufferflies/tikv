@@ -20,6 +20,8 @@ pub enum Error {
     HttpError(#[from] http::Error),
     #[error("io error {0}")]
     IoError(#[from] std::io::Error),
+    #[error("protobuf error {0}")]
+    ProtobufError(#[from] protobuf::ProtobufError),
     #[error("region {0} not found")]
     RegionNotFound(u64),
     #[error("leader of region {0} not found")]

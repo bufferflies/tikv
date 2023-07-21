@@ -20,7 +20,9 @@ use file_system::{IoRateLimitMode, IoRateLimiter};
 use http::{Request, Uri};
 use hyper::Body;
 use itertools::Itertools;
-use kvengine::{dfs::S3Fs, table::InnerKey, IdVer, ShardMeta, ShardRange, ShardStats, ShardTag};
+use kvengine::{
+    dfs::S3Fs, table::InnerKey, IdVer, ShardMeta, ShardRange, ShardStats, ShardTag, ENCRYPTION_KEY,
+};
 use kvenginepb as pb;
 use kvproto::{metapb, metapb::PeerRole, raft_serverpb::MergeState};
 use pd_client::PdClient;
@@ -29,6 +31,7 @@ use raft::eraftpb;
 use rfengine::RfEngine;
 use rfenginepb::ClusterBackupMeta;
 use rfstore::store::{state::RaftState, ApplyMsgs, PreprocessContext, StoreMsg};
+use security::SecurityConfig;
 use slog_global::{debug, error, info, warn};
 use tempdir::TempDir;
 use tikv::{config::TikvConfig, storage::mvcc::Key};
@@ -119,7 +122,7 @@ pub fn restore_keyspace_with_cfg(
     truncate_ts: Option<u64>,
     reporter: Arc<dyn ReportRestoreStepTrait>,
 ) -> Result<RestoredKeyspace> {
-    let pd_control = PdControl::new(config.pd.clone(), config.security)?;
+    let pd_control = PdControl::new(config.pd.clone(), config.security.clone())?;
     let keyspace_id = {
         let keyspace = runtime.block_on(pd_control.get_keyspace_by_name(keyspace_name))?;
         assert_eq!(keyspace_name, keyspace.name);
@@ -156,6 +159,7 @@ pub fn restore_keyspace_with_cfg(
         backup_name,
         working_path,
         s3fs,
+        config.security,
         pd_client,
         runtime,
         truncate_ts,
@@ -169,6 +173,7 @@ pub fn restore_keyspace(
     backup_name: &str,
     working_path: Option<&str>,
     s3fs: Arc<S3Fs>,
+    security_conf: SecurityConfig,
     pd_client: Arc<dyn PdClient>,
     runtime: &Runtime,
     truncate_ts: Option<u64>,
@@ -218,6 +223,7 @@ pub fn restore_keyspace(
         working_path,
         pd_client.clone(),
         s3fs.clone(),
+        security_conf,
         keyspace_id,
         target_keyspace_id,
         truncate_ts,
@@ -546,6 +552,7 @@ pub struct BackupCluster {
     path: PathBuf,
     pd_client: Arc<dyn PdClient>,
     dfs: Arc<S3Fs>,
+    security_conf: SecurityConfig,
     keyspace_id: u32,
     keyspace_start: Vec<u8>,
     keyspace_end: Vec<u8>,
@@ -587,6 +594,7 @@ impl BackupCluster {
         path: PathBuf,
         pd_client: Arc<dyn PdClient>,
         dfs: Arc<S3Fs>,
+        security_conf: SecurityConfig,
         keyspace_id: u32,
         target_keyspace_id: u32,
         truncate_ts: u64,
@@ -597,6 +605,7 @@ impl BackupCluster {
             path,
             pd_client,
             dfs,
+            security_conf,
             keyspace_id,
             keyspace_start,
             keyspace_end,
@@ -775,6 +784,7 @@ impl BackupCluster {
         config.dfs.zstd_compression_level = ZSTD_COMPRESSION_LEVEL.to_string();
         config.rocksdb.max_background_jobs = 2;
         config.rocksdb.max_sub_compactions = 1;
+        config.security = self.security_conf.clone();
 
         TikvServer::init_config(config).get_current()
     }
@@ -1458,7 +1468,9 @@ impl BackupCluster {
                 region.target_region.get_end_key(),
                 inner_key_off,
             );
-
+            if let Some(encryption_key) = self.get_keyspace_encryption_key() {
+                meta.set_property(ENCRYPTION_KEY, encryption_key.as_slice());
+            }
             for shard_id in region.backup_shards_id {
                 let shard = self.get_shard(shard_id).unwrap();
                 for (&file_id, file_meta) in shard.meta.all_files() {
@@ -1621,6 +1633,13 @@ impl BackupCluster {
             self.setup_kv_engine(store_id, store_configs.get(&store_id).unwrap())?;
         }
         Ok(())
+    }
+
+    fn get_keyspace_encryption_key(&self) -> Option<Vec<u8>> {
+        self.get_sorted_shard(0)
+            .meta
+            .get_property(ENCRYPTION_KEY)
+            .map(|x| x.to_vec())
     }
 }
 

@@ -4,6 +4,7 @@ use std::{collections::HashMap, fs, mem, sync::Arc};
 
 use api_version::{api_v2::KEYSPACE_PREFIX_LEN, ApiV2};
 use bytes::{BufMut, Bytes, BytesMut};
+use cloud_encryption::KeyspaceEncryptionConfig;
 use futures::executor::block_on;
 use kvengine::{dfs::DFSConfig, table::sstable::ZSTD_COMPRESSION};
 use kvenginepb::ChangeSet;
@@ -64,13 +65,18 @@ fn impl_test_load_data(enable_inner_key_off: bool) {
             .build()
             .unwrap(),
     );
-
-    let mut cluster = ServerCluster::new(alloc_node_id_vec(3), |_, conf: &mut TikvConfig| {
+    let node_ids = alloc_node_id_vec(3);
+    let mut cluster = ServerCluster::new(node_ids.clone(), |_, conf: &mut TikvConfig| {
         conf.dfs = dfs_conf.clone();
         conf.enable_inner_key_offset = enable_inner_key_off;
     });
     cluster.wait_region_replicated(&[], 3);
     let pd_client = cluster.get_pd_client();
+    if enable_inner_key_off {
+        pd_client
+            .set_keyspace_encryption(KEYSPACE_ID, KeyspaceEncryptionConfig { enabled: true })
+            .unwrap();
+    }
     let mut client = cluster.new_client();
     client.split_keyspace(KEYSPACE_ID);
 
@@ -83,6 +89,7 @@ fn impl_test_load_data(enable_inner_key_off: bool) {
         dfs_conf.s3_region,
         dfs_conf.s3_bucket,
     ));
+    let master_key = cluster.get_kvengine(node_ids[0]).get_master_key();
     let load_data_dir = base_dir.path().join("load_data");
     fs::create_dir_all(&load_data_dir).unwrap();
     let start_ts = block_on(pd_client.get_tso()).unwrap().into_inner();
@@ -93,6 +100,7 @@ fn impl_test_load_data(enable_inner_key_off: bool) {
         pd: pd_client,
         runtime,
         max_in_mem_size: 1024, // 1KB
+        master_key,
     };
     let scheduler = init_task(load_data_ctx, start_ts, commit_ts);
 
@@ -120,6 +128,7 @@ fn init_task(ctx: LoadDataContext, start_ts: u64, commit_ts: u64) -> LoadTaskSch
         commit_ts,
         inner_key_off: None,
         key_prefix: vec![],
+        encryption_key: None,
     };
 
     let mut worker = LoadTaskWorker::new(ctx, task_ctx);

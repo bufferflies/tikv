@@ -9,11 +9,12 @@ use std::{
 };
 
 use bitflags::bitflags;
-use bytes::Buf;
+use bytes::{Buf, BufMut};
+use cloud_encryption::EncryptionKey;
 use collections::{HashMap, HashSet};
 use error_code::ErrorCodeExt;
 use fail::fail_point;
-use kvengine::ShardMeta;
+use kvengine::{ShardMeta, ENCRYPTION_KEY};
 use kvproto::{
     disk_usage::DiskUsage,
     kvrpcpb::ExtraOp as TxnExtraOp,
@@ -66,6 +67,7 @@ use crate::{errors::*, RaftRouter};
 
 const SHRINK_CACHE_CAPACITY: usize = 64;
 const MAX_COMMITTED_SIZE_PER_READY: u64 = 16 * 1024 * 1024;
+pub(crate) const SPLIT_FLAG_ENCRYPTION_KEYS: u64 = 0x01;
 pub(crate) const PENDING_CONF_CHANGE_ERR_MSG: &str = "pending conf change";
 
 /// The returned states of the peer after checking whether it is stale
@@ -170,6 +172,7 @@ bitflags! {
         const SPLIT          = 0b0000_0010;
         const PREPARE_MERGE  = 0b0000_0100;
         const PRE_PROCESS    = 0b0000_1000;
+        const ENCRYPTED      = 0b0001_0000;
     }
 }
 
@@ -489,6 +492,8 @@ pub(crate) struct Peer {
     /// Send to these peers to check whether itself is stale.
     pub check_stale_conf_ver: u64,
     pub check_stale_peers: Vec<metapb::Peer>,
+    pub(crate) encryption_key: Option<EncryptionKey>,
+    pub(crate) encryption_buf: Vec<u8>,
 }
 
 impl Peer {
@@ -542,8 +547,8 @@ impl Peer {
 
         let region_tag = format!("[{}:{}:]", store_id, region.clone().get_id());
         let logger = slog_global::get_global().new(slog::o!("region" => region_tag));
+        let encryption_key = ps.get_encryption_key();
         let raft_group = RawNode::new(&raft_cfg, ps, &logger)?;
-
         let mut peer = Peer {
             peer,
             region_id: region.get_id(),
@@ -584,6 +589,8 @@ impl Peer {
             want_rollback_merge_peers: Default::default(),
             check_stale_conf_ver: 0,
             check_stale_peers: vec![],
+            encryption_key,
+            encryption_buf: vec![],
         };
         // If this region has only one peer and I am the one, campaign directly.
         if region.get_peers().len() == 1 && region.get_peers()[0].get_store_id() == store_id {
@@ -1549,6 +1556,7 @@ impl Peer {
         {
             self.last_applying_idx = snap_res.snap_last_index;
             self.mut_store().preprocessed_region = None;
+            self.encryption_key = self.get_store().get_encryption_key();
             // The peer may change from learner to voter after snapshot persisted.
             let peer = self
                 .region()
@@ -1877,8 +1885,15 @@ impl<'a> PreprocessRef<'a> {
         )
         .unwrap();
         *self.last_committed_split_idx = entry.index;
-        let split = build_split_pb(self.region_id(), &regions, entry.term);
+        let region_id = self.region_id();
         let shard_meta = self.mut_shard_meta();
+        let split = build_split_pb(
+            region_id,
+            &regions,
+            entry.term,
+            req.get_header(),
+            shard_meta.get_property(ENCRYPTION_KEY),
+        );
         let new_metas = shard_meta.apply_split(
             &split,
             entry.index,
@@ -3061,6 +3076,9 @@ impl Peer {
             let data = req.get_custom_request().get_data();
             if rlog::is_engine_meta_log(data) || rlog::is_trigger_trim_over_bound(data) {
                 ctx.insert(ProposalContext::PRE_PROCESS);
+            } else if self.encryption_key.is_some() {
+                // only encrypt entry with user data.
+                ctx.insert(ProposalContext::ENCRYPTED);
             }
         } else if req.has_admin_request() {
             match req.get_admin_request().get_cmd_type() {
@@ -3149,8 +3167,20 @@ impl Peer {
                 return Err(e);
             }
         };
-
-        let data = req.write_to_bytes()?;
+        let propose_index = self.next_proposal_index();
+        let data = if ctx.contains(ProposalContext::ENCRYPTED) {
+            let encryption_key = self.encryption_key.as_ref().unwrap();
+            let buf = &mut self.encryption_buf;
+            buf.truncate(0);
+            req.write_to_vec(buf)?;
+            let mut data =
+                Vec::with_capacity(4 + buf.len() + encryption_key.encryption_block_size());
+            data.put_u32(encryption_key.current_ver);
+            encryption_key.encrypt(buf, self.region_id, propose_index as u32, &mut data);
+            data
+        } else {
+            req.write_to_bytes()?
+        };
 
         if data.len() as u64 > raft_ctx.cfg.raft_entry_max_size.0 {
             error!(
@@ -3164,7 +3194,6 @@ impl Peer {
                 entry_size: data.len() as u64,
             });
         }
-        let propose_index = self.next_proposal_index();
         self.raft_group.propose(ctx.to_vec(), data)?;
         if self.next_proposal_index() == propose_index {
             // The message is dropped silently, this usually due to leader absence

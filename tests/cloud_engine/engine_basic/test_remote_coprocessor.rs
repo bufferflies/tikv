@@ -2,6 +2,7 @@
 
 use std::{collections::BTreeMap, sync::Arc};
 
+use cloud_encryption::MasterKey;
 use codec::prelude::NumberEncoder;
 use kvengine::{table::table::Row, SnapAccess};
 use kvproto::{
@@ -2126,6 +2127,7 @@ struct DagTest<'a> {
     table: &'a ProductTable,
     cluster: ServerCluster,
     pub client: ClusterClient,
+    master_key: MasterKey,
 }
 
 #[cfg(test)]
@@ -2144,11 +2146,13 @@ impl<'a> DagTest<'a> {
 
         let mut client = cluster.new_client();
         client.split_keyspace(1);
+        let master_key = cluster.get_kvengine(node_id).get_master_key();
 
         Self {
             table,
             cluster,
             client,
+            master_key,
         }
     }
 
@@ -2326,6 +2330,7 @@ impl<'a> DagTest<'a> {
                 self.cluster.get_dfs().unwrap(),
                 &snapshot.memtable_rows,
                 &snapshot.cs,
+                &self.master_key,
             )
             .await
             .unwrap();

@@ -22,10 +22,8 @@ use std::{
 
 use api_version::{dispatch_api_version, KvFormat};
 use concurrency_manager::ConcurrencyManager;
-use encryption_export::{data_key_manager_from_config, DataKeyManager};
 use engine_rocks::from_rocks_compression_type;
 use engine_traits::{KvEngine, RaftEngine, CF_DEFAULT, CF_WRITE};
-use error_code::ErrorCodeExt;
 use file_system::{
     BytesFetcher, IoRateLimitMode, IoRateLimiter, MetricsManager as IoMetricsManager,
 };
@@ -108,7 +106,6 @@ pub struct TikvServer {
     router: RaftRouter,
     resolver: resolve::PdStoreAddrResolver,
     store_path: PathBuf,
-    encryption_key_manager: Option<Arc<DataKeyManager>>,
     raw_engines: Engines,
     engines: Option<TikvEngines>,
     servers: Option<Servers>,
@@ -273,7 +270,6 @@ impl TikvServer {
             system: Some(system),
             resolver,
             store_path,
-            encryption_key_manager: None,
             raw_engines,
             engines: None,
             servers: None,
@@ -297,7 +293,6 @@ impl TikvServer {
         self.check_conflict_addr();
         self.init_fs();
         self.init_yatp();
-        self.init_encryption();
         self.init_engines();
 
         let server_config = dispatch_api_version!(self.config.storage.api_version(), {
@@ -464,22 +459,6 @@ impl TikvServer {
             prometheus::register(Box::new(yatp::metrics::MULTILEVEL_LEVEL_ELAPSED.clone()))
                 .unwrap();
         })
-    }
-
-    fn init_encryption(&mut self) {
-        self.encryption_key_manager = data_key_manager_from_config(
-            &self.config.security.encryption,
-            &self.config.storage.data_dir,
-        )
-        .map_err(|e| {
-            panic!(
-                "Encryption failed to initialize: {}. code: {}",
-                e,
-                e.error_code()
-            )
-        })
-        .unwrap()
-        .map(Arc::new);
     }
 
     fn init_engines(&mut self) {
@@ -668,7 +647,7 @@ impl TikvServer {
         let mut importer = SstImporter::new(
             &self.config.import,
             import_path,
-            self.encryption_key_manager.clone(),
+            None,
             self.config.storage.api_version(),
         )
         .unwrap();
@@ -963,6 +942,7 @@ impl TikvServer {
         if conf.gc.enable_safe_point_v2 {
             opt_ks_gc_sp_cache = Some(pd.get_keyspace_gc_safepoint_v2_cache());
         }
+        let master_key = dfs.get_runtime().block_on(conf.security.new_master_key());
         let kv_engine = kvengine::Engine::open(
             dfs,
             opts,
@@ -973,6 +953,7 @@ impl TikvServer {
             meta_change_listener,
             rate_limiter,
             opt_ks_gc_sp_cache,
+            master_key,
         )?;
         Ok((kv_engine, sender, receiver))
     }

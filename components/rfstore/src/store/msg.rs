@@ -2,6 +2,7 @@
 
 use std::{borrow::Cow, collections::VecDeque, fmt, fmt::Debug, sync::Arc};
 
+use cloud_encryption::EncryptionKey;
 use kvproto::{
     kvrpcpb::ExtraOp as TxnExtraOp,
     metapb, pdpb,
@@ -226,12 +227,15 @@ pub struct MsgApplyResult {
     pub(crate) bucket_stat: Option<Box<BucketStat>>,
 }
 
-#[derive(Debug)]
+#[derive(Derivative)]
+#[derivative(Debug)]
 pub struct MsgRegistration {
     pub(crate) peer: metapb::Peer,
     pub(crate) term: u64,
     pub(crate) apply_state: RaftApplyState,
     pub(crate) region: metapb::Region,
+    #[derivative(Debug = "ignore")]
+    pub(crate) encryption_key: Option<EncryptionKey>,
 }
 
 impl MsgRegistration {
@@ -241,6 +245,7 @@ impl MsgRegistration {
             term: peer.term(),
             apply_state: peer.get_store().apply_state(),
             region: peer.get_store().region().clone(),
+            encryption_key: peer.encryption_key.clone(),
         }
     }
 }

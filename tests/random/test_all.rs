@@ -6,21 +6,27 @@ use std::{
 };
 
 use api_version::ApiV2;
+use cloud_encryption::KeyspaceEncryptionConfig;
+use futures::executor::block_on;
 use kvengine::dfs::DFSConfig;
 use kvproto::pdpb::CheckPolicy;
 use native_br::{backup, backup_worker};
+use pd_client::PdClient;
 use rand::Rng;
+use security::SecurityConfig;
 use test_cloud_server::{try_wait_result, ServerCluster};
 use tikv_util::{
     config::{ReadableDuration, ReadableSize},
     info,
     time::Instant,
+    warn,
 };
 use txn_types::Key;
 
 use crate::{
-    alloc_node_id_vec, generate_keyspace_key, prepare_dfs, random_node_restart,
-    spawn_create_keyspace, spawn_keyspace_write, spawn_merge, spawn_move, spawn_transfer,
+    alloc_node_id_vec, generate_keyspace_key, new_security_config, prepare_dfs,
+    random_node_restart, spawn_create_keyspace, spawn_keyspace_write, spawn_merge, spawn_move,
+    spawn_transfer,
     test_native_br::{check_br, spawn_incremental_backup, spawn_restore_keyspace},
     TikvConfig, BACKUP_COUNTER, CONCURRENCY, KEYSPACE_COUNTER, MERGE_COUNTER, MOVE_COUNTER,
     NODE_RESTART_COUNTER, RESTORE_COUNTER, TIMEOUT, TRANSFER_COUNTER, WRITE_COUNTER,
@@ -41,7 +47,13 @@ fn test_random_all() {
 
     // Prepare.
     let (_temp_dir, _oss, dfs_config) = prepare_dfs("random_br_");
-    let mut cluster = prepare_cluster(&dfs_config, NODES_COUNT, INITIAL_KEYSPACE_COUNT);
+    let security_conf = new_security_config();
+    let mut cluster = prepare_cluster(
+        &dfs_config,
+        &security_conf,
+        NODES_COUNT,
+        INITIAL_KEYSPACE_COUNT,
+    );
     let pd_client = cluster.get_pd_client();
     let keyspace_manager = cluster.keyspace_manager().clone();
     let backup_worker = {
@@ -80,6 +92,7 @@ fn test_random_all() {
             cluster.get_pd_client(),
             cluster.new_keyspace_client(),
             dfs_config.clone(),
+            security_conf.clone(),
             keyspace_manager.clone(),
             TIMEOUT,
         ));
@@ -140,6 +153,7 @@ fn test_random_all() {
 
 fn prepare_cluster(
     dfs_config: &DFSConfig,
+    security_conf: &SecurityConfig,
     nodes_count: usize,
     initial_keyspace_count: usize,
 ) -> ServerCluster {
@@ -159,6 +173,7 @@ fn prepare_cluster(
             ReadableSize::kb(rand::thread_rng().gen_range(0..2));
         // TODO: test for both enable and disable inner_key_offset
         conf.enable_inner_key_offset = true;
+        conf.security = security_conf.clone();
     };
     let cluster = ServerCluster::new(nodes, update_conf_fn);
     cluster.wait_region_replicated(&[], 3);
@@ -169,14 +184,17 @@ fn prepare_cluster(
     // Split keyspaces.
     let mut keys = vec![];
     let mut keyspaces: Vec<u32> = vec![];
+    let mut data_keys = vec![];
     for keyspace_id in 0..initial_keyspace_count {
         let keyspace_id = keyspace_id as u32;
         keyspaces.push(keyspace_id);
         keys.push(ApiV2::get_txn_keyspace_prefix(keyspace_id));
         let i_to_key = generate_keyspace_key(keyspace_id);
         for i in 0..rng.gen_range(0..10) {
-            keys.push(i_to_key(i * 100));
+            data_keys.push(Key::from_raw(&i_to_key(i * 100)).into_encoded());
         }
+        let cfg = KeyspaceEncryptionConfig { enabled: true };
+        pd_client.set_keyspace_encryption(keyspace_id, cfg).unwrap();
     }
     keys.push(ApiV2::get_txn_keyspace_prefix(
         initial_keyspace_count as u32,
@@ -191,6 +209,10 @@ fn prepare_cluster(
         .keyspace_manager()
         .create_keyspaces(&keyspaces, 0, Some(&mut rng));
     KEYSPACE_COUNTER.store(initial_keyspace_count, Ordering::Relaxed);
+    let res = block_on(pd_client.split_regions(data_keys));
+    if let Err(err) = res {
+        warn!("split regions failed: {:?}", err);
+    }
 
     // Scatter regions.
     let move_scheduler = cluster.new_scheduler();

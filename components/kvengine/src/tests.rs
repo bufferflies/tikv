@@ -13,7 +13,8 @@ use std::{
     vec,
 };
 
-use bytes::{Buf, BytesMut};
+use bytes::{Buf, Bytes};
+use cloud_encryption::MasterKey;
 use file_system::IoRateLimiter;
 use kvenginepb as pb;
 use tempfile::TempDir;
@@ -68,6 +69,7 @@ fn new_test_engine_opt(
         meta_change_listener,
         rate_limiter,
         None,
+        MasterKey::new(&[1u8; 32]),
     )
     .unwrap();
     {
@@ -770,6 +772,7 @@ fn test_get_suggest_split_key_impl(enable_inner_key_off: bool) {
         shard.ver,
         range.clone(),
         engine.opts.clone(),
+        &engine.master_key,
     );
 
     let cases: Vec<(
@@ -907,6 +910,7 @@ fn test_get_evenly_split_keys_impl(enable_inner_key_off: bool) {
         shard.ver,
         range.clone(),
         engine.opts.clone(),
+        &engine.master_key,
     );
 
     let cases: Vec<(
@@ -1349,7 +1353,8 @@ fn new_table(
     let comp_lvl = engine.opts.table_builder_options.compression_lvl;
     let fs = engine.fs.clone();
 
-    let mut builder = table::sstable::builder::Builder::new(id, block_size, comp_tp, comp_lvl);
+    let mut builder =
+        table::sstable::builder::Builder::new(id, block_size, comp_tp, comp_lvl, None);
     for i in begin..end {
         let key = i_to_key(i as i32, 0);
         let val = if del {
@@ -1363,14 +1368,14 @@ fn new_table(
         };
         builder.add(InnerKey::from_inner_buf(key.as_bytes()), &val, None);
     }
-    let mut data_buf = BytesMut::new();
+    let mut data_buf = Vec::new();
     builder.finish(0, &mut data_buf);
-    let data = data_buf.freeze();
+    let data = Bytes::from(data_buf);
     let opts = dfs::Options::new(1, 1);
     let runtime = fs.get_runtime();
     runtime.block_on(fs.create(id, data.clone(), opts)).unwrap();
     let file = InMemFile::new(id, data);
-    SsTable::new(Arc::new(file), None, true).unwrap()
+    SsTable::new(Arc::new(file), None, true, None).unwrap()
 }
 
 fn load_data(

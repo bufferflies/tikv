@@ -6,6 +6,7 @@ use std::{
 };
 
 use bytes::BytesMut;
+use cloud_encryption::EncryptionKey;
 use fail::fail_point;
 use kvenginepb as pb;
 use slog_global::info;
@@ -32,6 +33,7 @@ pub(crate) struct FlushTask {
     pub(crate) range: ShardRange,
     pub(crate) normal: Option<memtable::CfTable>,
     pub(crate) initial: Option<InitialFlush>,
+    pub(crate) encryption_key: Option<EncryptionKey>,
 }
 
 impl FlushTask {
@@ -39,12 +41,14 @@ impl FlushTask {
         shard: &Shard,
         normal: Option<memtable::CfTable>,
         initial: Option<InitialFlush>,
+        encryption_key: Option<EncryptionKey>,
     ) -> Self {
         Self {
             id_ver: IdVer::new(shard.id, shard.ver),
             range: shard.range.clone(),
             normal,
             initial,
+            encryption_key,
         }
     }
 
@@ -57,11 +61,11 @@ impl FlushTask {
     }
 
     pub(crate) fn new_normal(shard: &Shard, mem_tbl: memtable::CfTable) -> Self {
-        Self::new(shard, Some(mem_tbl), None)
+        Self::new(shard, Some(mem_tbl), None, shard.encryption_key.clone())
     }
 
     pub(crate) fn new_initial(shard: &Shard, initial: InitialFlush) -> Self {
-        Self::new(shard, None, Some(initial))
+        Self::new(shard, None, Some(initial), shard.encryption_key.clone())
     }
 
     pub(crate) fn overlap_table(&self, start_key: InnerKey<'_>, end_key: InnerKey<'_>) -> bool {
@@ -125,7 +129,12 @@ impl Engine {
         if let Some(props) = m.get_properties() {
             flush.set_properties(props);
         }
-        let l0_builder = self.build_l0_table(m, task.inner_start(), task.inner_end());
+        let l0_builder = self.build_l0_table(
+            m,
+            task.inner_start(),
+            task.inner_end(),
+            task.encryption_key.clone(),
+        );
         if l0_builder.is_empty() {
             return Ok(cs);
         }
@@ -198,7 +207,12 @@ impl Engine {
         }
         let mut builders = vec![];
         for m in &flush.mem_tbls {
-            let l0_builder = self.build_l0_table(m, task.inner_start(), task.inner_end());
+            let l0_builder = self.build_l0_table(
+                m,
+                task.inner_start(),
+                task.inner_end(),
+                task.encryption_key.clone(),
+            );
             builders.push(l0_builder);
         }
         let num_mem_tables = builders.len();
@@ -229,12 +243,14 @@ impl Engine {
         m: &CfTable,
         start: InnerKey<'_>,
         end: InnerKey<'_>,
+        encryption_key: Option<EncryptionKey>,
     ) -> L0Builder {
         let sst_fid = self.id_allocator.alloc_id(1).unwrap().pop().unwrap();
         let mut l0_builder = sstable::L0Builder::new(
             sst_fid,
             self.opts.table_builder_options.block_size,
             m.get_version(),
+            encryption_key,
         );
         for cf in 0..NUM_CFS {
             let skl = m.get_cf(cf);

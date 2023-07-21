@@ -17,6 +17,7 @@ pub fn new_security_cfg(cn: Option<HashSet<String>>) -> SecurityConfig {
         cert_allowed_cn: cn.unwrap_or_default(),
         encryption: EncryptionConfig::default(),
         redact_info_log: Some(true),
+        master_key: Default::default(),
     }
 }
 

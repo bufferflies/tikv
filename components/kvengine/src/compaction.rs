@@ -16,6 +16,7 @@ use api_version::{
     ApiV2, KeyMode, KvFormat,
 };
 use bytes::{Buf, Bytes, BytesMut};
+use cloud_encryption::{EncryptionKey, MasterKey};
 use http::StatusCode;
 use kvenginepb as pb;
 use pb::{BlobCreate, TableCreate};
@@ -83,6 +84,7 @@ pub struct CompactionClient {
     client: Option<hyper::Client<hyper::client::HttpConnector>>,
     compression_lvl: i32,
     allow_fallback_local: bool,
+    master_key: MasterKey,
 }
 
 impl CompactionClient {
@@ -92,6 +94,7 @@ impl CompactionClient {
         compression_lvl: i32,
         allow_fallback_local: bool,
         id_allocator: Arc<dyn IdAllocator>,
+        master_key: MasterKey,
     ) -> Self {
         let remote_compactors = RemoteCompactors::new(remote_url);
         let client = hyper::Client::builder()
@@ -104,6 +107,7 @@ impl CompactionClient {
             compression_lvl,
             allow_fallback_local,
             id_allocator,
+            master_key,
         }
     }
 
@@ -172,11 +176,21 @@ impl CompactionClient {
     }
 
     pub(crate) fn compact(&self, req: CompactionRequest) -> Result<pb::ChangeSet> {
+        let encryption_key = if req.exported_encryption_key.is_empty() {
+            None
+        } else {
+            Some(
+                self.master_key
+                    .decrypt_encryption_key(&req.exported_encryption_key)
+                    .unwrap(),
+            )
+        };
         let ctx = CompactionCtx {
             req: Arc::new(req),
             dfs: self.dfs.clone(),
             compression_lvl: self.compression_lvl,
             id_allocator: self.id_allocator.clone(),
+            encryption_key,
         };
         let req = &ctx.req;
         let mut remote_compactor = self.get_remote_compactor();
@@ -340,6 +354,7 @@ pub struct CompactionRequest {
     pub block_size: usize,
     pub max_table_size: usize,
     pub compression_tp: u8,
+    pub exported_encryption_key: Vec<u8>,
 }
 
 impl CompactionRequest {
@@ -520,6 +535,11 @@ impl Engine {
         cf: isize,
         level: usize,
     ) -> CompactionRequest {
+        let exported_encryption_key = shard
+            .properties
+            .get(ENCRYPTION_KEY)
+            .unwrap_or_default()
+            .to_vec();
         self.new_compact_request(
             shard.engine_id,
             shard.id,
@@ -527,6 +547,7 @@ impl Engine {
             shard.range.clone(),
             cf,
             level,
+            exported_encryption_key,
         )
     }
 
@@ -536,6 +557,11 @@ impl Engine {
         cf: isize,
         level: usize,
     ) -> CompactionRequest {
+        let exported_encryption_key = meta
+            .properties
+            .get(ENCRYPTION_KEY)
+            .unwrap_or_default()
+            .to_vec();
         self.new_compact_request(
             meta.engine_id,
             meta.id,
@@ -543,6 +569,7 @@ impl Engine {
             meta.range.clone(),
             cf,
             level,
+            exported_encryption_key,
         )
     }
 
@@ -554,6 +581,7 @@ impl Engine {
         range: ShardRange,
         cf: isize,
         level: usize,
+        exported_encryption_key: Vec<u8>,
     ) -> CompactionRequest {
         CompactionRequest {
             engine_id,
@@ -581,6 +609,7 @@ impl Engine {
             tops: vec![],
             bottoms: vec![],
             multi_cf_bottoms: vec![],
+            exported_encryption_key,
         }
     }
 
@@ -1336,13 +1365,13 @@ pub(crate) fn compact_l0(ctx: &CompactionCtx) -> Result<Vec<pb::TableCreate>> {
     let compression_lvl = ctx.compression_lvl;
     let opts = dfs::Options::new(req.shard_id, req.shard_ver);
     let l0_files = load_table_files(&req.tops, fs.clone(), opts)?;
-    let mut l0_tbls = in_mem_files_to_l0_tables(l0_files);
+    let mut l0_tbls = in_mem_files_to_l0_tables(l0_files, ctx.encryption_key.clone());
     l0_tbls.sort_by(|a, b| b.version().cmp(&a.version()));
     let mut mult_cf_bot_tbls = vec![];
     for cf in 0..NUM_CFS {
         let bot_ids = &req.multi_cf_bottoms[cf];
         let bot_files = load_table_files(bot_ids, fs.clone(), opts)?;
-        let mut bot_tbls = in_mem_files_to_tables(bot_files);
+        let mut bot_tbls = in_mem_files_to_tables(bot_files, ctx.encryption_key.clone());
         bot_tbls.sort_by(|a, b| a.smallest().cmp(&b.smallest()));
         mult_cf_bot_tbls.push(bot_tbls);
     }
@@ -1357,7 +1386,7 @@ pub(crate) fn compact_l0(ctx: &CompactionCtx) -> Result<Vec<pb::TableCreate>> {
             std::mem::take(&mut mult_cf_bot_tbls[cf]),
             req.inner_start(),
         );
-        let mut helper = CompactL0Helper::new(cf, req, compression_lvl);
+        let mut helper = CompactL0Helper::new(cf, req, compression_lvl, ctx.encryption_key.clone());
         loop {
             if id_idx >= req.file_ids.len() {
                 panic!(
@@ -1436,17 +1465,23 @@ fn load_table_files(
     Ok(files)
 }
 
-fn in_mem_files_to_l0_tables(files: Vec<InMemFile>) -> Vec<sstable::L0Table> {
+fn in_mem_files_to_l0_tables(
+    files: Vec<InMemFile>,
+    encryption_key: Option<EncryptionKey>,
+) -> Vec<sstable::L0Table> {
     files
         .into_iter()
-        .map(|f| sstable::L0Table::new(Arc::new(f), None, false).unwrap())
+        .map(|f| sstable::L0Table::new(Arc::new(f), None, false, encryption_key.clone()).unwrap())
         .collect()
 }
 
-fn in_mem_files_to_tables(files: Vec<InMemFile>) -> Vec<sstable::SsTable> {
+fn in_mem_files_to_tables(
+    files: Vec<InMemFile>,
+    encryption_key: Option<EncryptionKey>,
+) -> Vec<sstable::SsTable> {
     files
         .into_iter()
-        .map(|f| sstable::SsTable::new(Arc::new(f), None, false).unwrap())
+        .map(|f| sstable::SsTable::new(Arc::new(f), None, false, encryption_key.clone()).unwrap())
         .collect()
 }
 
@@ -1483,10 +1518,21 @@ struct CompactL0Helper {
 }
 
 impl CompactL0Helper {
-    fn new(cf: usize, req: &CompactionRequest, compression_lvl: i32) -> Self {
+    fn new(
+        cf: usize,
+        req: &CompactionRequest,
+        compression_lvl: i32,
+        encryption_key: Option<EncryptionKey>,
+    ) -> Self {
         Self {
             cf,
-            builder: sstable::Builder::new(0, req.block_size, req.compression_tp, compression_lvl),
+            builder: sstable::Builder::new(
+                0,
+                req.block_size,
+                req.compression_tp,
+                compression_lvl,
+                encryption_key,
+            ),
             last_key: BytesMut::new(),
             skip_key: BytesMut::new(),
             safe_ts: req.safe_ts,
@@ -1560,7 +1606,7 @@ impl CompactL0Helper {
         if self.builder.is_empty() {
             return Ok((pb::TableCreate::new(), Bytes::new()));
         }
-        let mut buf = BytesMut::with_capacity(self.builder.estimated_size());
+        let mut buf = Vec::with_capacity(self.builder.estimated_size());
         let res = self.builder.finish(0, &mut buf);
         let mut table_create = pb::TableCreate::new();
         table_create.set_id(id);
@@ -1568,7 +1614,7 @@ impl CompactL0Helper {
         table_create.set_cf(self.cf as i32);
         table_create.set_smallest(res.smallest);
         table_create.set_biggest(res.biggest);
-        Ok((table_create, buf.freeze()))
+        Ok((table_create, buf.into()))
     }
 }
 
@@ -1584,10 +1630,10 @@ pub(crate) fn compact_tables(ctx: &CompactionCtx) -> Result<Vec<pb::TableCreate>
     );
     let opts = dfs::Options::new(req.shard_id, req.shard_ver);
     let top_files = load_table_files(&req.tops, fs.clone(), opts)?;
-    let mut top_tables = in_mem_files_to_tables(top_files);
+    let mut top_tables = in_mem_files_to_tables(top_files, ctx.encryption_key.clone());
     top_tables.sort_by(|a, b| a.smallest().cmp(&b.smallest()));
     let bot_files = load_table_files(&req.bottoms, fs.clone(), opts)?;
-    let mut bot_tables = in_mem_files_to_tables(bot_files);
+    let mut bot_tables = in_mem_files_to_tables(bot_files, ctx.encryption_key.clone());
     bot_tables.sort_by(|a, b| a.smallest().cmp(&b.smallest()));
     let top_iter = Box::new(ConcatIterator::new_with_tables(top_tables, false, false));
     let bot_iter = Box::new(ConcatIterator::new_with_tables(bot_tables, false, false));
@@ -1596,7 +1642,13 @@ pub(crate) fn compact_tables(ctx: &CompactionCtx) -> Result<Vec<pb::TableCreate>
 
     let mut last_key = BytesMut::new();
     let mut skip_key = BytesMut::new();
-    let mut builder = sstable::Builder::new(0, req.block_size, req.compression_tp, compression_lvl);
+    let mut builder = sstable::Builder::new(
+        0,
+        req.block_size,
+        req.compression_tp,
+        compression_lvl,
+        ctx.encryption_key.clone(),
+    );
     let mut id_idx = 0;
     let mut file_ids = req.file_ids.clone();
     let (tx, rx) = tikv_util::mpsc::bounded(file_ids.len());
@@ -1685,7 +1737,7 @@ pub(crate) fn compact_tables(ctx: &CompactionCtx) -> Result<Vec<pb::TableCreate>
         if builder.is_empty() {
             continue;
         }
-        let mut buf = BytesMut::with_capacity(builder.estimated_size());
+        let mut buf = Vec::with_capacity(builder.estimated_size());
         let res = builder.finish(0, &mut buf);
         let mut tbl_create = pb::TableCreate::new();
         tbl_create.set_id(id);
@@ -1697,7 +1749,7 @@ pub(crate) fn compact_tables(ctx: &CompactionCtx) -> Result<Vec<pb::TableCreate>
         let atx = tx.clone();
         fs.get_runtime().spawn(async move {
             atx.send(
-                afs.create(tbl_create.id, buf.freeze(), opts)
+                afs.create(tbl_create.id, buf.into(), opts)
                     .await
                     .map(|_| tbl_create),
             )
@@ -1795,6 +1847,7 @@ pub async fn handle_remote_compaction(
     req: hyper::Request<hyper::Body>,
     compression_lvl: i32,
     id_allocator: Arc<dyn IdAllocator>,
+    master_key: MasterKey,
 ) -> hyper::Result<hyper::Response<hyper::Body>> {
     let req_body = hyper::body::to_bytes(req.into_body()).await?;
     let result = serde_json::from_slice(req_body.chunk());
@@ -1818,11 +1871,21 @@ pub async fn handle_remote_compaction(
             .body(err_str.into())
             .unwrap());
     }
+    let encryption_key = if comp_req.exported_encryption_key.is_empty() {
+        None
+    } else {
+        Some(
+            master_key
+                .decrypt_encryption_key(&comp_req.exported_encryption_key)
+                .unwrap(),
+        )
+    };
     let ctx = CompactionCtx {
         req: Arc::new(comp_req),
         dfs,
         compression_lvl,
         id_allocator,
+        encryption_key,
     };
     let (tx, rx) = tokio::sync::oneshot::channel();
     std::thread::spawn(move || {
@@ -1857,6 +1920,7 @@ pub(crate) struct CompactionCtx {
     pub(crate) dfs: Arc<dyn dfs::Dfs>,
     pub(crate) compression_lvl: i32,
     pub(crate) id_allocator: Arc<dyn IdAllocator>,
+    pub(crate) encryption_key: Option<EncryptionKey>,
 }
 
 fn local_compact(ctx: &CompactionCtx) -> Result<pb::ChangeSet> {
@@ -2035,8 +2099,10 @@ fn compact_destroy_range(
         deletes.push(delete);
         let file = in_mem_files.remove(&id).unwrap();
         let (data, smallest, biggest) = if level == 0 {
-            let t = sstable::L0Table::new(Arc::new(file), None, false).unwrap();
-            let mut builder = L0Builder::new(new_id, block_size, t.version());
+            let t = sstable::L0Table::new(Arc::new(file), None, false, ctx.encryption_key.clone())
+                .unwrap();
+            let mut builder =
+                L0Builder::new(new_id, block_size, t.version(), ctx.encryption_key.clone());
             for cf in 0..NUM_CFS {
                 if let Some(cf_t) = t.get_cf(cf) {
                     let mut iter = cf_t.new_iterator(false, false);
@@ -2060,9 +2126,15 @@ fn compact_destroy_range(
             let (smallest, biggest) = builder.smallest_biggest();
             (data, smallest.to_vec(), biggest.to_vec())
         } else {
-            let t = sstable::SsTable::new(Arc::new(file), None, false).unwrap();
-            let mut builder =
-                sstable::Builder::new(new_id, block_size, t.compression_type(), compression_lvl);
+            let t = sstable::SsTable::new(Arc::new(file), None, false, ctx.encryption_key.clone())
+                .unwrap();
+            let mut builder = sstable::Builder::new(
+                new_id,
+                block_size,
+                t.compression_type(),
+                compression_lvl,
+                ctx.encryption_key.clone(),
+            );
             let mut iter = t.new_iterator(false, false);
             iter.seek(req.inner_start());
             while iter.valid() {
@@ -2078,9 +2150,9 @@ fn compact_destroy_range(
             if builder.is_empty() {
                 continue;
             }
-            let mut buf = BytesMut::with_capacity(builder.estimated_size());
+            let mut buf = Vec::with_capacity(builder.estimated_size());
             let res = builder.finish(0, &mut buf);
-            (buf.freeze(), res.smallest, res.biggest)
+            (buf.into(), res.smallest, res.biggest)
         };
         let tx = tx.clone();
         let dfs_clone = dfs.clone();
@@ -2145,8 +2217,10 @@ fn compact_truncate_ts(
         deletes.push(delete);
 
         let (data, smallest, biggest) = if level == 0 {
-            let t = sstable::L0Table::new(Arc::new(file), None, false).unwrap();
-            let mut builder = L0Builder::new(new_id, block_size, t.version());
+            let t = sstable::L0Table::new(Arc::new(file), None, false, ctx.encryption_key.clone())
+                .unwrap();
+            let mut builder =
+                L0Builder::new(new_id, block_size, t.version(), ctx.encryption_key.clone());
             for cf in 0..NUM_CFS {
                 if let Some(cf_t) = t.get_cf(cf) {
                     let mut iter = cf_t.new_iterator(false, false);
@@ -2170,9 +2244,15 @@ fn compact_truncate_ts(
             let (smallest, biggest) = builder.smallest_biggest();
             (data, smallest.to_vec(), biggest.to_vec())
         } else {
-            let t = sstable::SsTable::new(Arc::new(file), None, false).unwrap();
-            let mut builder =
-                sstable::Builder::new(new_id, block_size, t.compression_type(), compression_lvl);
+            let t = sstable::SsTable::new(Arc::new(file), None, false, ctx.encryption_key.clone())
+                .unwrap();
+            let mut builder = sstable::Builder::new(
+                new_id,
+                block_size,
+                t.compression_type(),
+                compression_lvl,
+                ctx.encryption_key.clone(),
+            );
             let mut iter = t.new_iterator(false, false);
             iter.rewind();
             while iter.valid() {
@@ -2188,9 +2268,9 @@ fn compact_truncate_ts(
             if builder.is_empty() {
                 continue;
             }
-            let mut buf = BytesMut::with_capacity(builder.estimated_size());
+            let mut buf = Vec::with_capacity(builder.estimated_size());
             let res = builder.finish(0, &mut buf);
-            (buf.freeze(), res.smallest, res.biggest)
+            (buf.into(), res.smallest, res.biggest)
         };
 
         let tx = tx.clone();
@@ -2259,8 +2339,10 @@ fn compact_trim_over_bound(
         deletes.push(delete);
 
         let (data, smallest, biggest) = if level == 0 {
-            let t = sstable::L0Table::new(Arc::new(file), None, false).unwrap();
-            let mut builder = L0Builder::new(new_id, block_size, t.version());
+            let t = sstable::L0Table::new(Arc::new(file), None, false, ctx.encryption_key.clone())
+                .unwrap();
+            let mut builder =
+                L0Builder::new(new_id, block_size, t.version(), ctx.encryption_key.clone());
             for cf in 0..NUM_CFS {
                 if let Some(cf_t) = t.get_cf(cf) {
                     let mut iter = cf_t.new_iterator(false, false);
@@ -2282,9 +2364,15 @@ fn compact_trim_over_bound(
             let (smallest, biggest) = builder.smallest_biggest();
             (data, smallest.to_vec(), biggest.to_vec())
         } else {
-            let t = sstable::SsTable::new(Arc::new(file), None, false).unwrap();
-            let mut builder =
-                sstable::Builder::new(new_id, block_size, t.compression_type(), compression_lvl);
+            let t = sstable::SsTable::new(Arc::new(file), None, false, ctx.encryption_key.clone())
+                .unwrap();
+            let mut builder = sstable::Builder::new(
+                new_id,
+                block_size,
+                t.compression_type(),
+                compression_lvl,
+                ctx.encryption_key.clone(),
+            );
             let mut iter = t.new_iterator(false, false);
             iter.seek(req.inner_start());
             while iter.valid() {
@@ -2298,9 +2386,9 @@ fn compact_trim_over_bound(
             if builder.is_empty() {
                 continue;
             }
-            let mut buf = BytesMut::with_capacity(builder.estimated_size());
+            let mut buf = Vec::with_capacity(builder.estimated_size());
             let res = builder.finish(0, &mut buf);
-            (buf.freeze(), res.smallest, res.biggest)
+            (buf.into(), res.smallest, res.biggest)
         };
         let tx = tx.clone();
         let dfs_clone = dfs.clone();
@@ -2347,7 +2435,7 @@ fn persist_sst(
     fs: Arc<dyn dfs::Dfs>,
     opts: dfs::Options,
 ) {
-    let mut buf = BytesMut::with_capacity(builder.estimated_size());
+    let mut buf = Vec::with_capacity(builder.estimated_size());
     let res = builder.finish(0, &mut buf);
     let mut tbl_create = pb::TableCreate::new();
     tbl_create.set_id(id);
@@ -2360,7 +2448,7 @@ fn persist_sst(
     fs.get_runtime().spawn(async move {
         tx.send(
             fs_clone
-                .create(id, buf.freeze(), opts)
+                .create(id, buf.into(), opts)
                 .await
                 .map(|_| FilePersistResult::SsTableCreate(tbl_create)),
         )
@@ -2419,6 +2507,7 @@ fn compact_for_cf(
         sst_config.block_size,
         sst_config.compression_tps[target_lvl as usize - 1],
         compression_lvl,
+        ctx.encryption_key.clone(),
     );
     let mut cur_blob_table_id = 0;
     // Owns the decompressed blob value while reading from the orginal blob
@@ -2635,7 +2724,7 @@ fn l0_compact_v3(
     let fs = &ctx.dfs;
     let opts = dfs::Options::new(req.shard_id, req.shard_ver);
     let l0_files = load_table_files(&l0_compaction.l0_tables, fs.clone(), opts)?;
-    let mut l0_tbls = in_mem_files_to_l0_tables(l0_files);
+    let mut l0_tbls = in_mem_files_to_l0_tables(l0_files, ctx.encryption_key.clone());
     l0_tbls.sort_by(|a, b| b.version().cmp(&a.version()));
     let mut comp = pb::Compaction::new();
     comp.set_top_deletes(l0_compaction.l0_tables.clone());
@@ -2653,7 +2742,7 @@ fn l0_compact_v3(
     for cf in 0..NUM_CFS {
         let l1_ids = &l0_compaction.multi_cf_l1_tables[cf];
         let l1_files = load_table_files(l1_ids, fs.clone(), opts)?;
-        let mut l1_tbls = in_mem_files_to_tables(l1_files);
+        let mut l1_tbls = in_mem_files_to_tables(l1_files, ctx.encryption_key.clone());
         l1_tbls.sort_by(|a, b| a.smallest().cmp(&b.smallest()));
         let mut iters: Vec<Box<dyn table::Iterator>> = vec![];
         for l0_tbl in &l0_tbls {
@@ -2698,10 +2787,10 @@ fn l1_plus_compact_v3(
     let fs = &ctx.dfs;
     let opts = dfs::Options::new(req.shard_id, req.shard_ver);
     let upper_files = load_table_files(&l1_plus_compaction.upper_level, fs.clone(), opts)?;
-    let mut upper_tables = in_mem_files_to_tables(upper_files);
+    let mut upper_tables = in_mem_files_to_tables(upper_files, ctx.encryption_key.clone());
     upper_tables.sort_by(|a, b| a.smallest().cmp(&b.smallest()));
     let lower_files = load_table_files(&l1_plus_compaction.lower_level, fs.clone(), opts)?;
-    let mut lower_tables = in_mem_files_to_tables(lower_files);
+    let mut lower_tables = in_mem_files_to_tables(lower_files, ctx.encryption_key.clone());
     lower_tables.sort_by(|a, b| a.smallest().cmp(&b.smallest()));
     let upper_iter = Box::new(ConcatIterator::new_with_tables(upper_tables, false, false));
     let lower_iter = Box::new(ConcatIterator::new_with_tables(lower_tables, false, false));
@@ -2742,7 +2831,7 @@ fn major_compact_v3(
         .extend_from_slice(&major_compaction.blob_tables);
     let blob_tables = load_blob_tables(fs.clone(), &major_compaction.blob_tables, opts)?;
     let l0_files = load_table_files(&major_compaction.l0_tables, fs.clone(), opts)?;
-    let mut l0_tbls = in_mem_files_to_l0_tables(l0_files);
+    let mut l0_tbls = in_mem_files_to_l0_tables(l0_files, ctx.encryption_key.clone());
     l0_tbls.sort_by(|a, b| b.version().cmp(&a.version()));
     l0_tbls.iter().for_each(|tbl| {
         let mut tbl_delete = pb::TableDelete::new();
@@ -2771,7 +2860,7 @@ fn major_compact_v3(
                         .push(tbl_delete);
                 });
                 let files = load_table_files(table_ids, fs.clone(), opts)?;
-                let mut tables = in_mem_files_to_tables(files);
+                let mut tables = in_mem_files_to_tables(files, ctx.encryption_key.clone());
                 tables.sort_by(|a, b| a.smallest().cmp(&b.smallest()));
                 let level_concat_iter =
                     Box::new(ConcatIterator::new_with_tables(tables, false, false));

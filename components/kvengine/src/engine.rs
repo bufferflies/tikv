@@ -16,7 +16,8 @@ use std::{
     time::Duration,
 };
 
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{BufMut, Bytes};
+use cloud_encryption::MasterKey;
 use dashmap::{mapref::entry::Entry, DashMap};
 use file_system::IoRateLimiter;
 use fslock;
@@ -77,6 +78,7 @@ impl Engine {
         meta_change_listener: Box<dyn MetaChangeListener>,
         rate_limiter: Arc<IoRateLimiter>,
         ks_gc_sp_map: Option<Arc<DashMap<u32, u64>>>,
+        master_key: MasterKey,
     ) -> Result<Engine> {
         info!("open KVEngine");
         if !opts.local_dir.exists() {
@@ -118,6 +120,7 @@ impl Engine {
                 compression_lvl,
                 allow_fallback_local,
                 id_allocator.clone(),
+                master_key.clone(),
             ),
             id_allocator,
             managed_safe_ts: AtomicU64::new(0),
@@ -128,6 +131,7 @@ impl Engine {
             file_locks,
             shutting_down: AtomicBool::new(false),
             ks_safepoint_v2: ks_gc_sp_map,
+            master_key,
         };
         let en = Engine {
             core: Arc::new(core),
@@ -272,6 +276,7 @@ pub struct EngineCore {
     pub(crate) file_locks: Vec<Mutex<()>>,
     pub(crate) shutting_down: AtomicBool,
     pub(crate) ks_safepoint_v2: Option<Arc<DashMap<u32, u64>>>,
+    pub(crate) master_key: MasterKey,
 }
 
 impl Drop for EngineCore {
@@ -334,7 +339,7 @@ impl EngineCore {
 
     fn new_shard_from_change_set(&self, cs: ChangeSet) -> Shard {
         let engine_id = self.engine_id.load(Ordering::Acquire);
-        let shard = Shard::new_for_ingest(engine_id, &cs, self.opts.clone());
+        let shard = Shard::new_for_ingest(engine_id, &cs, self.opts.clone(), &self.master_key);
         let (l0s, blob_tbls, scfs) =
             create_snapshot_tables(cs.get_snapshot(), &cs, self.opts.for_restore);
         let data = ShardData::new(
@@ -504,8 +509,13 @@ impl EngineCore {
         let block_size = self.opts.table_builder_options.block_size;
         let max_table_size = self.opts.table_builder_options.max_table_size;
         let zstd_compression_lvl = self.opts.table_builder_options.compression_lvl;
-        let mut builder =
-            table::sstable::Builder::new(0, block_size, ZSTD_COMPRESSION, zstd_compression_lvl);
+        let mut builder = table::sstable::Builder::new(
+            0,
+            block_size,
+            ZSTD_COMPRESSION,
+            zstd_compression_lvl,
+            shard.encryption_key.clone(),
+        );
         let mut fids = vec![];
 
         for (id, smallest, biggest) in meta.get_blob_files() {
@@ -529,7 +539,7 @@ impl EngineCore {
                 iter.next();
                 if builder.estimated_size() > max_table_size || !iter.valid() {
                     info!("builder estimated_size {}", builder.estimated_size());
-                    let mut buf = BytesMut::with_capacity(builder.estimated_size());
+                    let mut buf = Vec::with_capacity(builder.estimated_size());
                     let res = builder.finish(0, &mut buf);
                     let level = meta.get_ingest_level(
                         InnerKey::from_inner_buf(&res.smallest),
@@ -563,7 +573,7 @@ impl EngineCore {
                     let fs = self.fs.clone();
                     let atx = tx.clone();
                     self.fs.get_runtime().spawn(async move {
-                        if let Err(err) = fs.create(id, buf.freeze(), opts).await {
+                        if let Err(err) = fs.create(id, buf.into(), opts).await {
                             atx.send(Err(err)).unwrap();
                         } else {
                             atx.send(Ok(())).unwrap();
@@ -707,6 +717,10 @@ impl EngineCore {
                 e
             );
         }
+    }
+
+    pub fn get_master_key(&self) -> MasterKey {
+        self.master_key.clone()
     }
 }
 

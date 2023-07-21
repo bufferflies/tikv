@@ -14,6 +14,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+use cloud_encryption::KeyspaceEncryptionConfig;
 use collections::{HashMap, HashMapEntry, HashSet};
 use fail::fail_point;
 use futures::{
@@ -902,6 +903,7 @@ pub struct TestPdClient {
     trigger_leader_info_loss: AtomicBool,
 
     pub gc_safepoints: RwLock<Vec<GcSafePoint>>,
+    keyspace_encryption: RwLock<HashMap<u32, KeyspaceEncryptionConfig>>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -926,6 +928,7 @@ impl TestPdClient {
             trigger_leader_info_loss: AtomicBool::new(false),
             feature_gate,
             gc_safepoints: Default::default(),
+            keyspace_encryption: Default::default(),
         }
     }
 
@@ -2026,6 +2029,21 @@ impl PdClient for TestPdClient {
         self.check_bootstrap()?;
         // TODO: implement this method
         Ok(())
+    }
+
+    fn set_keyspace_encryption(
+        &self,
+        keyspace_id: u32,
+        cfg: KeyspaceEncryptionConfig,
+    ) -> Result<()> {
+        let mut guard = self.keyspace_encryption.write().unwrap();
+        guard.insert(keyspace_id, cfg);
+        Ok(())
+    }
+
+    fn get_keyspace_encryption(&self, keyspace_id: u32) -> Result<KeyspaceEncryptionConfig> {
+        let guard = self.keyspace_encryption.read().unwrap();
+        Ok(guard.get(&keyspace_id).cloned().unwrap_or_default())
     }
 }
 

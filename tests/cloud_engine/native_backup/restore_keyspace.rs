@@ -19,6 +19,7 @@ use native_br::{
 };
 use pd_client::PdClient;
 use rand::Rng;
+use security::SecurityConfig;
 use test_cloud_server::{
     client::{RequestOptions, RequestPeerRole},
     oss::ObjectStorageService,
@@ -337,6 +338,7 @@ fn test_restore_keyspace_impl(
         &snapshot_backup_name,
         None,
         s3fs.clone(),
+        SecurityConfig::default(),
         cluster.get_pd_client(),
         runtime,
         truncate_ts,
@@ -380,6 +382,7 @@ fn test_restore_keyspace_impl(
             &instant_backup_name,
             None,
             s3fs,
+            SecurityConfig::default(),
             cluster.get_pd_client(),
             runtime,
             Some(truncate_ts_pitr),

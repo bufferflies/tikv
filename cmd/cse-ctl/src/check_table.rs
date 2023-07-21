@@ -13,6 +13,7 @@ use std::{
 use async_trait::async_trait;
 use bytes::{Buf, BufMut};
 use clap::Args;
+use cloud_encryption::MasterKey;
 use futures::executor::block_on;
 use kvengine::{
     dfs::{DFSConfig, Dfs, S3Fs},
@@ -114,6 +115,9 @@ pub(crate) fn execute_check_table(args: CheckTableArgs) {
         dfs_cfg.s3_region,
         dfs_cfg.s3_bucket,
     ));
+    let master_key = s3fs
+        .get_runtime()
+        .block_on(config.security.new_master_key());
     let cluster_backup = get_cluster_backup_meta(&s3fs, config.backup_name.clone());
     let keyspace_ids = if config.all {
         let mut all_keyspace_ids = vec![];
@@ -142,6 +146,7 @@ pub(crate) fn execute_check_table(args: CheckTableArgs) {
         PathBuf::from(&config.data_dir),
         pd_client,
         s3fs.clone(),
+        config.security.clone(),
         keyspace_id,
         keyspace_id,
         cluster_backup.backup_ts,
@@ -158,7 +163,13 @@ pub(crate) fn execute_check_table(args: CheckTableArgs) {
             .unwrap();
         let kv = cluster.get_kvengine();
         let shards = cluster.get_shard_metas_before_flush();
-        let backup_reader = Arc::new(BackupReader::new(check_table_ts, kv, shards, s3fs.clone()));
+        let backup_reader = Arc::new(BackupReader::new(
+            check_table_ts,
+            kv,
+            shards,
+            s3fs.clone(),
+            master_key.clone(),
+        ));
         let keyspace_prefix = api_version::ApiV2::get_txn_keyspace_prefix(keyspace_id);
         let dbs = block_on(schema::load_schema(backup_reader.clone(), &keyspace_prefix)).unwrap();
         let tasks = create_check_table_tasks(&dbs);
@@ -420,16 +431,24 @@ pub(crate) struct BackupReader {
     metas: Arc<Vec<ShardMeta>>,
     s3fs: Arc<S3Fs>,
     snap_cache: Arc<Mutex<Option<SnapAccess>>>,
+    master_key: MasterKey,
 }
 
 impl BackupReader {
-    pub(crate) fn new(ts: u64, kv: Engine, metas: Vec<ShardMeta>, s3fs: Arc<S3Fs>) -> Self {
+    pub(crate) fn new(
+        ts: u64,
+        kv: Engine,
+        metas: Vec<ShardMeta>,
+        s3fs: Arc<S3Fs>,
+        master_key: MasterKey,
+    ) -> Self {
         Self {
             ts,
             kv,
             metas: Arc::new(metas),
             s3fs,
             snap_cache: Arc::new(Mutex::new(None)),
+            master_key,
         }
     }
 
@@ -496,6 +515,7 @@ impl BackupReader {
             self.s3fs.clone(),
             meta.to_change_set(),
             false,
+            &self.master_key,
         ));
         let mut guard = self.snap_cache.lock().unwrap();
         *guard = Some(snap.clone());

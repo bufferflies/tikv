@@ -11,10 +11,12 @@ use std::{
     vec::Drain,
 };
 
-use bytes::Buf;
+use api_version::{api_v2::is_whole_keyspace_range, ApiV2};
+use bytes::{Buf, Bytes};
+use cloud_encryption::EncryptionKey;
 use fail::fail_point;
 use kvengine::{
-    mvcc, ChangeSet, Engine, SnapAccess, UserMeta, MANUAL_MAJOR_COMPACTION,
+    mvcc, ChangeSet, Engine, SnapAccess, UserMeta, ENCRYPTION_KEY, MANUAL_MAJOR_COMPACTION,
     MANUAL_MAJOR_COMPACTION_ENABLE, TRIM_OVER_BOUND, TRIM_OVER_BOUND_ENABLE,
 };
 use kvproto::{
@@ -259,6 +261,9 @@ pub(crate) struct Applier {
     buckets: Option<BucketStat>,
 
     inner_key_offset: Option<usize>,
+
+    encryption_key: Option<EncryptionKey>,
+    decryption_buf: Vec<u8>,
 }
 
 impl Applier {
@@ -273,6 +278,7 @@ impl Applier {
             term: reg.term,
             region: reg.region,
             apply_state: reg.apply_state,
+            encryption_key: reg.encryption_key,
             ..Default::default()
         }
     }
@@ -290,12 +296,14 @@ impl Applier {
     ) -> Self {
         let peer_idx = get_peer_idx_by_store_id(&region, store_id);
         let peer = region.peers[peer_idx].clone();
+        let encryption_key = snap.get_encryption_key();
         Self {
             peer,
             term: RAFT_INIT_LOG_TERM,
             region,
             apply_state,
             snap: Some(snap),
+            encryption_key,
             ..Default::default()
         }
     }
@@ -715,6 +723,28 @@ impl Applier {
         None
     }
 
+    pub(crate) fn parse_cmd(&mut self, entry: &eraftpb::Entry) -> RaftCmdRequest {
+        let mut data = entry.get_data();
+        let proposal_ctx = ProposalContext::from_bytes(entry.get_context());
+        let index = entry.index;
+        let tag = self.tag();
+        if proposal_ctx.contains(ProposalContext::ENCRYPTED) {
+            let encryption_key = self.encryption_key.as_ref().unwrap();
+            let key_ver = data.get_u32();
+            self.decryption_buf.truncate(0);
+            encryption_key.decrypt(
+                data,
+                tag.id_ver.id(),
+                entry.index as u32,
+                key_ver,
+                &mut self.decryption_buf,
+            );
+            parse_data_at(&self.decryption_buf, index, tag)
+        } else {
+            parse_data_at(data, index, tag)
+        }
+    }
+
     fn handle_raft_entry_normal(
         &mut self,
         ctx: &mut ApplyContext,
@@ -728,10 +758,9 @@ impl Applier {
 
         let index = entry.get_index();
         let term = entry.get_term();
-        let data = entry.get_data();
 
-        if !data.is_empty() {
-            let cmd = parse_data_at(data, index, self.tag());
+        if !entry.get_data().is_empty() {
+            let cmd = self.parse_cmd(entry);
             assert!(index > 0);
             // if pending remove, apply should be aborted already.
             assert!(!self.pending_remove);
@@ -1748,8 +1777,15 @@ pub(crate) fn build_split_pb(
     region_id: u64,
     new_regions: &Vec<metapb::Region>,
     term: u64,
+    header: &RaftRequestHeader,
+    parent_encryption_key: Option<Bytes>,
 ) -> kvenginepb::Split {
     let mut split = kvenginepb::Split::new();
+    let mut keyspace_encryption_keys = HashMap::new();
+    let flag_data = header.get_flag_data();
+    if !flag_data.is_empty() {
+        keyspace_encryption_keys = decode_split_flag_encryption_keys(flag_data);
+    }
     for new_region in new_regions {
         let mut props = kvenginepb::Properties::new();
         props.set_shard_id(new_region.get_id());
@@ -1760,6 +1796,21 @@ pub(crate) fn build_split_pb(
             props
                 .mut_values()
                 .push(RAFT_INIT_LOG_TERM.to_le_bytes().to_vec());
+        }
+        if let Some(encryption_key) = parent_encryption_key.as_ref() {
+            props.mut_keys().push(ENCRYPTION_KEY.to_string());
+            props.mut_values().push(encryption_key.to_vec());
+        } else {
+            let raw_start = raw_start_key(new_region);
+            let raw_end = raw_end_key(new_region);
+            if is_whole_keyspace_range(&raw_start, &raw_end) && !keyspace_encryption_keys.is_empty()
+            {
+                let keyspace_id = ApiV2::get_u32_keyspace_id(ApiV2::get_keyspace_id(&raw_start));
+                if let Some(encryption_key) = keyspace_encryption_keys.remove(&keyspace_id) {
+                    props.mut_keys().push(ENCRYPTION_KEY.to_string());
+                    props.mut_values().push(encryption_key);
+                }
+            }
         }
         split.mut_new_shards().push(props);
     }

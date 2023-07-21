@@ -13,6 +13,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use cloud_encryption::KeyspaceEncryptionConfig;
 use dashmap::DashMap;
 use futures::{
     channel::mpsc,
@@ -25,6 +26,8 @@ use futures::{
 };
 use grpcio::{ClientSStreamReceiver, EnvBuilder, Environment, WriteFlags};
 use kvproto::{
+    keyspacepb,
+    keyspacepb_grpc::KeyspaceClient,
     metapb,
     pdpb::{self, EventType, Member, WatchGcSafePointV2Response},
     replication_modepb::{RegionReplicationStatus, ReplicationStatus, StoreDrAutoSyncStatus},
@@ -1354,5 +1357,29 @@ impl PdClient for RpcClient {
         self.pd_client
             .request(req, executor, LEADER_CHANGE_RETRY)
             .execute()
+    }
+
+    fn get_keyspace_encryption(&self, keyspace_id: u32) -> Result<KeyspaceEncryptionConfig> {
+        let _timer = PD_REQUEST_HISTOGRAM_VEC
+            .with_label_values(&["get_all_keyspace"])
+            .start_coarse_timer();
+        let mut req = keyspacepb::GetAllKeyspacesRequest::default();
+        req.set_header(self.header());
+        req.set_start_id(keyspace_id);
+        req.set_limit(1);
+        let resp = sync_request(&self.pd_client, LEADER_CHANGE_RETRY, |client, option| {
+            let keyspace_client = KeyspaceClient::new(client.client.channel().clone());
+            keyspace_client.get_all_keyspaces_opt(&req, option)
+        })?;
+        check_resp_header(resp.get_header())?;
+        if let Some(keyspace_meta) = resp.get_keyspaces().first() {
+            if let Some(encryption_cfg) = keyspace_meta.get_config().get("encryption") {
+                let cfg: KeyspaceEncryptionConfig =
+                    serde_json::from_str(encryption_cfg).unwrap_or_default();
+                info!("got keyspace {} encryption config {:?}", keyspace_id, cfg);
+                return Ok(cfg);
+            }
+        }
+        Ok(KeyspaceEncryptionConfig::default())
     }
 }

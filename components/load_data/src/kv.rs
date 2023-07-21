@@ -2,10 +2,11 @@
 
 use std::{
     fs::File,
-    io::{BufReader, Read, Seek, SeekFrom},
+    io::{BufReader, Read},
 };
 
 use bytes::Bytes;
+use encryption::DecrypterReader;
 use kvengine::{table::Value, UserMeta};
 use serde_derive::{Deserialize, Serialize};
 
@@ -28,13 +29,12 @@ pub struct KvPairsReader {
     val_base_len: usize,
     count: usize,
     idx: usize,
-    buf_reader: BufReader<File>,
+    buf_reader: BufReader<DecrypterReader<File>>,
 }
 
 impl KvPairsReader {
-    pub fn new(start_ts: u64, commit_ts: u64, count: usize, mut file: File) -> Self {
-        file.seek(SeekFrom::Start(0)).unwrap();
-        let buf_reader = BufReader::with_capacity(64 * 1024, file);
+    pub fn new(start_ts: u64, commit_ts: u64, count: usize, reader: DecrypterReader<File>) -> Self {
+        let buf_reader = BufReader::with_capacity(64 * 1024, reader);
         let um = UserMeta::new(start_ts, commit_ts);
         let val_buf = Value::encode_buf(0, &um.to_array(), commit_ts, &[]);
         let val_base_len = val_buf.len();

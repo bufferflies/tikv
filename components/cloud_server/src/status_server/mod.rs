@@ -506,6 +506,30 @@ impl StatusServer {
         }
     }
 
+    async fn dump_kvengine_meta(
+        req: Request<Body>,
+        engine: kvengine::Engine,
+    ) -> hyper::Result<Response<Body>> {
+        let path = req.uri().path();
+        let last = get_last_path_segment(path);
+        let meta_bin = u64::from_str(last)
+            .map(|id| {
+                engine
+                    .get_shard(id)
+                    .map(|shard| {
+                        let (_, meta_bin) = shard.new_snap_access().marshal(
+                            &[(shard.outer_start.clone(), shard.outer_end.clone())],
+                            false,
+                            false,
+                        );
+                        meta_bin
+                    })
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
+        Ok(Response::builder().body(Body::from(meta_bin)).unwrap())
+    }
+
     async fn dump_kvengine_stats(
         req: Request<Body>,
         engine: kvengine::Engine,
@@ -1474,7 +1498,11 @@ impl StatusServer {
                                 Self::change_log_level(req).await
                             }
                             (Method::GET, path) if path.starts_with("/kvengine") => {
-                                Self::dump_kvengine_stats(req, engine).await
+                                if path.starts_with("/kvengine/meta/") {
+                                    Self::dump_kvengine_meta(req, engine).await
+                                } else {
+                                    Self::dump_kvengine_stats(req, engine).await
+                                }
                             }
                             (Method::GET, path) if path.starts_with("/rfengine") => {
                                 Self::dump_rfengine_stats(req, rfengine).await

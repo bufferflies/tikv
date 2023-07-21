@@ -17,6 +17,7 @@ pub mod errors;
 use std::{cmp::Ordering, collections::HashMap, ops::Deref, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use cloud_encryption::KeyspaceEncryptionConfig;
 use dashmap::DashMap;
 use futures::future::BoxFuture;
 use grpcio::ClientSStreamReceiver;
@@ -534,6 +535,18 @@ pub trait PdClient: Send + Sync {
         _end_key: Vec<u8>,
         _limit: usize,
     ) -> PdFuture<Vec<pdpb::Region>> {
+        unimplemented!();
+    }
+
+    fn set_keyspace_encryption(
+        &self,
+        _keyspace_id: u32,
+        _cfg: KeyspaceEncryptionConfig,
+    ) -> Result<()> {
+        unimplemented!();
+    }
+
+    fn get_keyspace_encryption(&self, _keyspace_id: u32) -> Result<KeyspaceEncryptionConfig> {
         unimplemented!();
     }
 }

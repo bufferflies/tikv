@@ -193,6 +193,7 @@ pub struct TableIterator {
     key_buf: BytesMut,
     iter_state: IterState,
     block_buf: Vec<u8>,
+    decryption_buf: Vec<u8>,
 }
 
 impl TableIterator {
@@ -212,6 +213,7 @@ impl TableIterator {
             key_buf: BytesMut::new(),
             iter_state: IterState::NewVersion,
             block_buf: vec![],
+            decryption_buf: vec![],
         }
     }
 
@@ -233,6 +235,7 @@ impl TableIterator {
                 &self.idx,
                 self.b_pos as usize,
                 &mut self.block_buf,
+                &mut self.decryption_buf,
                 self.fill_cache,
             )
             .unwrap();
@@ -247,6 +250,7 @@ impl TableIterator {
             &old_block,
             self.old_b_pos as usize,
             &mut self.block_buf,
+            &mut self.decryption_buf,
             self.fill_cache,
         ) {
             Ok(b) => b,

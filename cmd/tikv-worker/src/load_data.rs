@@ -3,6 +3,7 @@
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use bytes::Bytes;
+use cloud_encryption::MasterKey;
 use http::{header, Method, Response, StatusCode};
 use kvengine::{
     dfs,
@@ -108,6 +109,7 @@ pub(crate) async fn handle_load_data(
                     commit_ts,
                     inner_key_off: None,
                     key_prefix: vec![],
+                    encryption_key: None,
                 };
                 // step 1: on start, client call init task
                 manager.init_task(task_ctx);
@@ -151,6 +153,7 @@ impl LoadDataManager {
         dfs: Arc<dyn dfs::Dfs>,
         runtime: Arc<tokio::runtime::Runtime>,
         max_in_mem_size: usize,
+        master_key: MasterKey,
     ) -> Self {
         let context = LoadDataContext {
             pd,
@@ -158,6 +161,7 @@ impl LoadDataManager {
             dfs,
             runtime,
             max_in_mem_size,
+            master_key,
         };
         Self {
             running_tasks: Arc::new(dashmap::DashMap::default()),

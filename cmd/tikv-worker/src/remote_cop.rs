@@ -8,6 +8,7 @@ use std::{
     time::Duration,
 };
 
+use cloud_encryption::MasterKey;
 use futures::{FutureExt, TryFutureExt};
 use grpcio::{ChannelBuilder, EnvBuilder, Environment, RpcStatus, RpcStatusCode, ServerBuilder};
 use kvengine::dfs::Dfs;
@@ -32,7 +33,12 @@ pub struct RemoteCopServer {
 }
 
 impl RemoteCopServer {
-    pub fn new(pd: Arc<pd_client::RpcClient>, dfs: Arc<dyn Dfs>, cfg: Config) -> RemoteCopServer {
+    pub fn new(
+        pd: Arc<pd_client::RpcClient>,
+        dfs: Arc<dyn Dfs>,
+        cfg: Config,
+        master_key: MasterKey,
+    ) -> RemoteCopServer {
         let env = Arc::new(
             EnvBuilder::new()
                 .cq_count(16)
@@ -50,7 +56,7 @@ impl RemoteCopServer {
             .build_args();
         let addr = SocketAddr::from_str(&cfg.addr).unwrap();
         let ip = format!("{}", addr.ip());
-        let cop_service = CopService::new(pd, dfs, env.clone(), cfg);
+        let cop_service = CopService::new(pd, dfs, env.clone(), cfg, master_key);
         let sb = ServerBuilder::new(env)
             .channel_args(channel_args)
             .register_service(create_tikv(cop_service))
@@ -73,6 +79,7 @@ pub struct CopService {
     channels: Arc<Mutex<HashMap<String, TikvClient>>>,
     cfg: Config,
     quota_limiter: Arc<QuotaLimiter>,
+    master_key: MasterKey,
 }
 
 impl CopService {
@@ -81,6 +88,7 @@ impl CopService {
         dfs: Arc<dyn Dfs>,
         env: Arc<Environment>,
         cfg: Config,
+        master_key: MasterKey,
     ) -> Self {
         Self {
             pd,
@@ -90,6 +98,7 @@ impl CopService {
             channels: Arc::new(Mutex::new(HashMap::new())),
             cfg,
             quota_limiter: Arc::new(QuotaLimiter::default()),
+            master_key,
         }
     }
 }
@@ -126,6 +135,7 @@ impl Tikv for CopService {
         let quota_limit = self.quota_limiter.clone();
         let peer = Some(ctx.peer());
         let dfs = self.dfs.clone();
+        let master_key = self.master_key.clone();
         let future = async move {
             let mut resp = client
                 .delegate_coprocessor_async(&delegate_req)
@@ -136,6 +146,7 @@ impl Tikv for CopService {
                 dfs,
                 &resp.take_mem_table_data(),
                 &resp.take_snapshot(),
+                &master_key,
             )
             .await
             .map_err(|e| tikv::coprocessor::Error::Other(format!("{:?}", e)))?;

@@ -1,19 +1,21 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
+    collections::HashMap,
     fmt,
     fmt::{Debug, Display, Formatter},
     sync::Arc,
     time::Duration,
 };
 
+use bytes::{Buf, BufMut};
 use futures::executor::block_on;
 use kvproto::{metapb, raft_cmdpb::RaftCmdRequest};
 use protobuf::Message;
 use slog::{Key, Record, Serializer};
 use tikv_util::{box_err, codec::bytes::decode_bytes, debug, error, time::Instant};
 
-use crate::{Error, Result};
+use crate::{store::SPLIT_FLAG_ENCRYPTION_KEYS, Error, Result};
 
 /// WARNING: `NORMAL_REQ_CHECK_VER` and `NORMAL_REQ_CHECK_CONF_VER` **MUST NOT**
 /// be changed. The reason is the same as `admin_cmd_epoch_lookup`.
@@ -278,6 +280,34 @@ pub fn raw_end_key(region: &metapb::Region) -> Vec<u8> {
 
 pub fn region_has_peer(region: &metapb::Region, peer_id: u64) -> bool {
     region.get_peers().iter().any(|p| p.id == peer_id)
+}
+
+pub(crate) fn encode_split_flag_encryption_keys(encryption_keys: Vec<(u32, Vec<u8>)>) -> Vec<u8> {
+    let mut buf = vec![];
+    buf.put_u64(SPLIT_FLAG_ENCRYPTION_KEYS);
+    buf.put_u32(encryption_keys.len() as u32);
+    for (keyspace_id, key) in encryption_keys {
+        buf.put_u32(keyspace_id);
+        buf.put_u32(key.len() as u32);
+        buf.extend_from_slice(&key);
+    }
+    buf
+}
+
+pub(crate) fn decode_split_flag_encryption_keys(mut flag_data: &[u8]) -> HashMap<u32, Vec<u8>> {
+    let mut keyspace_encryption_keys = HashMap::new();
+    let flag = flag_data.get_u64();
+    assert_eq!(flag, SPLIT_FLAG_ENCRYPTION_KEYS);
+    let mut num_keys = flag_data.get_u32();
+    while num_keys > 0 {
+        let keyspace_id = flag_data.get_u32();
+        let key_len = flag_data.get_u32();
+        let key = &flag_data[..key_len as usize];
+        keyspace_encryption_keys.insert(keyspace_id, key.to_vec());
+        flag_data = &flag_data[key_len as usize..];
+        num_keys -= 1;
+    }
+    keyspace_encryption_keys
 }
 
 pub struct PdIdAllocator {

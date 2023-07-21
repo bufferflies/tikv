@@ -747,6 +747,7 @@ fn test_serde_custom_tikv_config() {
             },
             previous_master_key: MasterKeyConfig::Plaintext,
         },
+        master_key: Default::default(),
     };
     value.backup = BackupConfig {
         num_threads: 456,

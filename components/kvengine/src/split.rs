@@ -56,6 +56,7 @@ impl Engine {
                 new_ver,
                 range,
                 self.opts.clone(),
+                &self.master_key,
             );
             let new_del_prefixes = old_pending_ops.del_prefixes.build_split(
                 &new_shard.outer_start,
@@ -320,6 +321,7 @@ impl Engine {
             old_shard.ver + 1,
             old_shard.range.clone(),
             old_shard.opt.clone(),
+            &self.master_key,
         );
         new_shard.set_data(old_shard.get_data());
         new_shard.set_active(old_shard.is_active());

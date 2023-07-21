@@ -8,6 +8,7 @@ use std::{
 };
 
 use bytes::{Buf, Bytes};
+use cloud_encryption::EncryptionKey;
 use kvenginepb as pb;
 use moka::sync::SegmentedCache;
 
@@ -62,15 +63,16 @@ impl ChangeSet {
         file: LocalFile,
         level: u32,
         cache: SegmentedCache<BlockCacheKey, Bytes>,
+        encryption_key: Option<EncryptionKey>,
     ) -> Result<()> {
         if is_blob_file(level) {
             let blob_table = BlobTable::new(Arc::new(file))?;
             self.blob_tables.insert(id, blob_table);
         } else if level == 0 {
-            let l0_table = L0Table::new(Arc::new(file), Some(cache), false)?;
+            let l0_table = L0Table::new(Arc::new(file), Some(cache), false, encryption_key)?;
             self.l0_tables.insert(id, l0_table);
         } else {
-            let ln_table = SsTable::new(Arc::new(file), Some(cache), level == 1)?;
+            let ln_table = SsTable::new(Arc::new(file), Some(cache), level == 1, encryption_key)?;
             self.ln_tables.insert(id, ln_table);
         }
         Ok(())
@@ -724,6 +726,7 @@ impl EngineCore {
             cs.shard_ver + 1,
             range,
             old_shard.opt.clone(),
+            &self.master_key,
         );
         let snap_data = new_shard.get_data();
         let old_data = old_shard.get_data();

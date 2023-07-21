@@ -394,8 +394,6 @@ mod tests {
 
     use std::{mem::size_of, sync::Arc};
 
-    use bytes::BytesMut;
-
     use super::*;
     use crate::table::{
         blobtable::{blobtable::BlobTable, builder::BlobTableBuilder, BlobRef},
@@ -464,17 +462,17 @@ mod tests {
             sst_builder.add(InnerKey::from_inner_buf(k.as_bytes()), &v, Some(blob_ref));
         }
 
-        let mut buf = BytesMut::with_capacity(sst_builder.estimated_size());
+        let mut buf = Vec::with_capacity(sst_builder.estimated_size());
 
         sst_builder.finish(0, &mut buf);
 
         let bytes = blob_builder.finish();
 
-        let sst_file = InMemFile::new(sst_fid, buf.freeze());
+        let sst_file = InMemFile::new(sst_fid, buf.into());
         let blob_file = InMemFile::new(blob_fid, bytes);
 
         (
-            SsTable::new(Arc::new(sst_file), new_test_cache(), load_filter).unwrap(),
+            SsTable::new(Arc::new(sst_file), new_test_cache(), load_filter, None).unwrap(),
             BlobTable::new(Arc::new(blob_file)).unwrap(),
         )
     }

@@ -12,6 +12,7 @@ use std::{
 };
 
 use bytes::{Buf, BufMut, Bytes};
+use cloud_encryption::{EncryptionKey, MasterKey};
 use dashmap::DashMap;
 use kvenginepb as pb;
 use rand::Rng;
@@ -85,11 +86,14 @@ pub struct Shard {
     pub(crate) compaction_priority: RwLock<Option<CompactionPriority>>,
 
     pub(crate) parent_snap: RwLock<Option<pb::Snapshot>>,
+
+    pub(crate) encryption_key: Option<EncryptionKey>,
 }
 
 pub const INGEST_ID_KEY: &str = "_ingest_id";
 pub const DEL_PREFIXES_KEY: &str = "_del_prefixes";
 pub const TRUNCATE_TS_KEY: &str = "_truncate_ts";
+pub const ENCRYPTION_KEY: &str = "_encryption";
 
 pub const TRIM_OVER_BOUND: &str = "_trim_over_bound";
 pub const TRIM_OVER_BOUND_ENABLE: &[u8] = &[1];
@@ -114,7 +118,10 @@ impl Shard {
         ver: u64,
         range: ShardRange,
         opt: Arc<Options>,
+        master_key: &MasterKey,
     ) -> Self {
+        let encryption_key = get_shard_property(ENCRYPTION_KEY, props)
+            .map(|v| master_key.decrypt_encryption_key(&v).unwrap());
         let shard = Self {
             engine_id,
             id: props.shard_id,
@@ -137,6 +144,7 @@ impl Shard {
             write_sequence: Default::default(),
             compaction_priority: RwLock::new(None),
             parent_snap: RwLock::new(None),
+            encryption_key,
         };
         {
             let mut pending_ops = shard.pending_ops.write().unwrap();
@@ -160,10 +168,22 @@ impl Shard {
         shard
     }
 
-    pub fn new_for_ingest(engine_id: u64, cs: &pb::ChangeSet, opt: Arc<Options>) -> Self {
+    pub fn new_for_ingest(
+        engine_id: u64,
+        cs: &pb::ChangeSet,
+        opt: Arc<Options>,
+        master_key: &MasterKey,
+    ) -> Self {
         let snap = cs.get_snapshot();
         let range = ShardRange::from_snap(snap);
-        let mut shard = Self::new(engine_id, snap.get_properties(), cs.shard_ver, range, opt);
+        let mut shard = Self::new(
+            engine_id,
+            snap.get_properties(),
+            cs.shard_ver,
+            range,
+            opt,
+            master_key,
+        );
         if !cs.has_parent() {
             store_bool(&shard.initial_flushed, true);
         } else {

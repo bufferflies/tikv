@@ -34,6 +34,7 @@ bytes = "1.0"
 cdc = { path = "../cdc", default-features = false }
 chrono = "0.4"
 clap = "2.32"
+cloud_encryption = { workspace = true }
 collections = { path = "../collections" }
 concurrency_manager = { path = "../concurrency_manager", default-features = false }
 crossbeam = "0.8"

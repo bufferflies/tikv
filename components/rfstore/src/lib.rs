@@ -2,6 +2,8 @@
 
 #[allow(unused_extern_crates)]
 extern crate tikv_alloc;
+#[macro_use]
+extern crate derivative;
 
 pub mod errors;
 pub mod router;

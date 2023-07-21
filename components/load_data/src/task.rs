@@ -13,16 +13,19 @@ use std::{
 };
 
 use api_version::api_v2::KEYSPACE_PREFIX_LEN;
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes};
+use cloud_encryption::{EncryptionKey, MasterKey};
+use encryption::{DecrypterReader, EncrypterWriter, Iv};
 use http::{Request, Uri};
 use hyper::Body;
 use kvengine::{
     dfs,
     dfs::Options,
-    stats::ShardStats,
+    get_shard_property,
     table::{sstable::Builder, InnerKey, Value},
+    ENCRYPTION_KEY,
 };
-use kvproto::metapb;
+use kvproto::{encryptionpb::EncryptionMethod, metapb};
 use pd_client::PdClient;
 use protobuf::Message;
 use rfstore::store::{raw_end_key, raw_start_key};
@@ -107,6 +110,7 @@ pub struct LoadDataContext {
     pub pd: Arc<dyn PdClient>,
     pub runtime: Arc<tokio::runtime::Runtime>,
     pub max_in_mem_size: usize,
+    pub master_key: MasterKey,
 }
 
 #[derive(Clone)]
@@ -115,6 +119,7 @@ pub struct TaskContext {
     pub commit_ts: u64,
     pub inner_key_off: Option<usize>,
     pub key_prefix: Vec<u8>,
+    pub encryption_key: Option<EncryptionKey>,
 }
 
 #[derive(Clone)]
@@ -291,13 +296,20 @@ impl LoadTaskWorker {
             let first_key = chunk_data.slice(2..2 + key_len as usize);
             let region = self.ctx.pd.get_region(first_key.chunk())?;
             let region_id = region.get_id();
-            let shard_stats = self
+            let shard_meta = self
                 .ctx
                 .runtime
-                .block_on(get_shard_stats(&self.ctx.pd, region_id))?;
-
-            self.task_ctx.inner_key_off = Some(shard_stats.inner_key_off);
-            self.task_ctx.key_prefix = first_key.slice(..shard_stats.inner_key_off).to_vec();
+                .block_on(get_shard_meta(&self.ctx.pd, region_id))?;
+            let snapshot = shard_meta.get_snapshot();
+            self.task_ctx.inner_key_off = Some(snapshot.inner_key_off as usize);
+            self.task_ctx.key_prefix = first_key.slice(..snapshot.inner_key_off as usize).to_vec();
+            self.task_ctx.encryption_key =
+                get_shard_property(ENCRYPTION_KEY, snapshot.get_properties()).map(|exported_key| {
+                    self.ctx
+                        .master_key
+                        .decrypt_encryption_key(&exported_key)
+                        .unwrap()
+                });
         }
         let inner_key_off = self.task_ctx.inner_key_off.unwrap();
         let mut offset = 0;
@@ -478,12 +490,13 @@ impl LoadTaskWorker {
     fn spawn_build_file(
         &self,
         file_id: u64,
-        mut batch: BytesMut,
+        mut batch: Vec<u8>,
         sender: Sender<Result<SstMeta>>,
         compression_type: u8,
     ) {
         let ctx = self.ctx.clone();
         let start_ts = self.task_ctx.start_ts;
+        let encryption_key = self.task_ctx.encryption_key.clone();
 
         self.ctx.runtime.spawn(async move {
             info!("{} start build sst file {}", start_ts, file_id);
@@ -492,6 +505,7 @@ impl LoadTaskWorker {
                 BLOCK_SIZE,
                 compression_type,
                 ZSTD_COMPRESSION_LEVEL,
+                encryption_key,
             );
             let mut entries = 0;
             let mut offset = 0;
@@ -511,7 +525,7 @@ impl LoadTaskWorker {
             }
             batch.clear();
             builder.finish(0, &mut batch);
-            let data = batch.freeze();
+            let data: Bytes = batch.into();
             let sst_meta = SstMeta {
                 id: file_id,
                 smallest: builder.get_smallest().to_vec(),
@@ -531,8 +545,8 @@ impl LoadTaskWorker {
         });
     }
 
-    fn read_batch(&mut self, merge_iter: &mut MergeIterator) -> Result<BytesMut> {
-        let mut buf = BytesMut::with_capacity(SST_FILE_SIZE);
+    fn read_batch(&mut self, merge_iter: &mut MergeIterator) -> Result<Vec<u8>> {
+        let mut buf = Vec::with_capacity(SST_FILE_SIZE);
         let mut pre_table_id = 0;
         while merge_iter.valid() {
             let key = merge_iter.key();
@@ -778,7 +792,7 @@ async fn ingest_files_to_leader(
     }
 }
 
-async fn get_shard_stats(pd: &Arc<dyn PdClient>, shard_id: u64) -> Result<ShardStats> {
+async fn get_shard_meta(pd: &Arc<dyn PdClient>, shard_id: u64) -> Result<kvenginepb::ChangeSet> {
     let http_client = hyper::client::Client::new();
     let mut retry = 0;
     loop {
@@ -806,7 +820,7 @@ async fn get_shard_stats(pd: &Arc<dyn PdClient>, shard_id: u64) -> Result<ShardS
         }
         let store = store_res.unwrap();
         let uri = Uri::from_str(&format!(
-            "http://{}/kvengine/{}",
+            "http://{}/kvengine/meta/{}",
             &store.status_address, shard_id
         ))
         .unwrap();
@@ -815,11 +829,12 @@ async fn get_shard_stats(pd: &Arc<dyn PdClient>, shard_id: u64) -> Result<ShardS
             Ok(resp) => {
                 if resp.status().is_success() {
                     let body = hyper::body::to_bytes(resp.into_body()).await?;
-                    let shard_stats: ShardStats = serde_json::from_slice(&body).unwrap();
-                    if shard_stats.id == 0 {
+                    let mut cs = kvenginepb::ChangeSet::default();
+                    cs.merge_from_bytes(&body)?;
+                    if cs.shard_id == 0 {
                         continue;
                     }
-                    return Ok(shard_stats);
+                    return Ok(cs);
                 } else {
                     continue;
                 }
@@ -950,29 +965,46 @@ fn flush_to_local_file(
     in_mem_size: usize,
 ) -> Result<KvPairsReader> {
     kv_pairs.sort_by(|a, b| a.key.cmp(&b.key));
-    let mut file = fs::OpenOptions::new()
+    let file = fs::OpenOptions::new()
         .create(true)
         .write(true)
         .read(true)
-        .open(path)?;
+        .open(path.as_path())?;
     let mut buf: Vec<u8> = Vec::with_capacity(in_mem_size);
+    let iv = if task_ctx.encryption_key.is_some() {
+        let mut iv_buf = Vec::with_capacity(16);
+        iv_buf.put_u64(task_ctx.start_ts);
+        iv_buf.put_u64(task_ctx.commit_ts);
+        Iv::from_slice(&iv_buf).unwrap()
+    } else {
+        Iv::Empty
+    };
+    let (method, key) = if let Some(key) = &task_ctx.encryption_key {
+        (EncryptionMethod::Aes256Ctr, key.current_key.as_slice())
+    } else {
+        (EncryptionMethod::Plaintext, "".as_bytes())
+    };
+    let mut writer = EncrypterWriter::new(file, method, key, iv).unwrap();
     for pair in &kv_pairs {
         buf.put_u16_le(pair.key.len() as u16);
         buf.extend_from_slice(pair.key.chunk());
         buf.put_u32_le(pair.val.len() as u32);
         buf.extend_from_slice(pair.val.chunk());
         if buf.len() >= 128 * 1024 {
-            let _ = file.write(&buf)?;
+            writer.write_all(&buf)?;
             buf.clear();
         }
     }
     if !buf.is_empty() {
-        let _ = file.write(&buf)?;
+        writer.write_all(&buf)?;
     }
+    writer.flush()?;
+    let file = fs::File::open(path)?;
+    let reader = DecrypterReader::new(file, method, key, iv).unwrap();
     Ok(KvPairsReader::new(
         task_ctx.start_ts,
         task_ctx.commit_ts,
         kv_pairs.len(),
-        file,
+        reader,
     ))
 }

@@ -3,7 +3,8 @@
 use std::{convert::TryFrom, mem, ops::Deref, slice};
 
 use byteorder::{ByteOrder, LittleEndian};
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{Buf, BufMut};
+use cloud_encryption::EncryptionKey;
 use farmhash;
 use xorf::BinaryFuse8;
 
@@ -19,6 +20,7 @@ pub const PROP_KEY_OLD_ENTRIES: &str = "old_entries";
 pub const PROP_KEY_TOMBS: &str = "tombs";
 pub const PROP_KEY_KV_SIZE: &str = "kv_size";
 pub const PROP_KEY_IN_USE_TOTAL_BLOB_SIZE: &str = "in_use_total_blob_size";
+pub const PROP_KEY_ENCRYPTION_VER: &str = "encryption_ver";
 pub const AUX_INDEX_BINARY_FUSE8: u32 = 1;
 pub const INDEX_FORMAT_V1: u32 = 1;
 pub const BLOCK_FORMAT_V1: u32 = 1;
@@ -130,11 +132,18 @@ pub struct Builder {
     kv_size: u64,
     /// Total size of the in use values stored in the blob table.
     total_blob_size: u64,
+    encryption_key: Option<EncryptionKey>,
 }
 
 impl Builder {
     // compression_lvl is the compression level for zstd compression only.
-    pub fn new(sst_fid: u64, block_size: usize, compression_tp: u8, compression_lvl: i32) -> Self {
+    pub fn new(
+        sst_fid: u64,
+        block_size: usize,
+        compression_tp: u8,
+        compression_lvl: i32,
+        encryption_key: Option<EncryptionKey>,
+    ) -> Self {
         let mut x = Self::default();
         x.sst_fid = sst_fid;
         x.checksum_tp = CRC32C;
@@ -143,6 +152,7 @@ impl Builder {
         x.block_builder.compression_lvl = compression_lvl;
         x.old_builder.compression_tp = compression_tp;
         x.old_builder.compression_lvl = compression_lvl;
+        x.encryption_key = encryption_key;
         x
     }
 
@@ -158,7 +168,7 @@ impl Builder {
         self.kv_size = 0;
     }
 
-    fn add_property(buf: &mut BytesMut, key: &[u8], val: &[u8]) {
+    fn add_property(buf: &mut Vec<u8>, key: &[u8], val: &[u8]) {
         buf.put_u16_le(key.len() as u16);
         buf.put_slice(key);
         buf.put_u32_le(val.len() as u32);
@@ -220,7 +230,25 @@ impl Builder {
         size
     }
 
-    pub fn finish(&mut self, base_off: u32, data_buf: &mut BytesMut) -> BuildResult {
+    fn encrypt_blocks(
+        base_off: u32,
+        encryption_key: &EncryptionKey,
+        block_builder: &BlockBuilder,
+        data_buf: &mut Vec<u8>,
+    ) {
+        for (i, addr) in block_builder.block_addrs.iter().enumerate() {
+            let start = addr.curr_off as usize;
+            let end = if i + 1 < block_builder.block_addrs.len() {
+                block_builder.block_addrs[i + 1].curr_off as usize
+            } else {
+                block_builder.buf.len()
+            };
+            let data = &block_builder.buf[start..end];
+            encryption_key.encrypt(data, addr.origin_fid, addr.curr_off + base_off, data_buf);
+        }
+    }
+
+    pub fn finish(&mut self, base_off: u32, data_buf: &mut Vec<u8>) -> BuildResult {
         if self.block_builder.block.kv_size > 0 {
             let last_key = self.block_builder.block.tmp_keys.get_last();
             self.biggest.extend_from_slice(last_key);
@@ -232,9 +260,22 @@ impl Builder {
                 .finish_block(self.sst_fid, self.checksum_tp);
         }
         assert_eq!(self.block_builder.block_keys.length() > 0, true);
-        data_buf.extend_from_slice(self.block_builder.buf.as_slice());
+        if let Some(encryption_key) = &self.encryption_key {
+            Self::encrypt_blocks(base_off, encryption_key, &self.block_builder, data_buf);
+        } else {
+            data_buf.extend_from_slice(self.block_builder.buf.as_slice());
+        }
         let data_section_size = self.block_builder.buf.len() as u32;
-        data_buf.extend_from_slice(self.old_builder.buf.as_slice());
+        if let Some(encryption_key) = &self.encryption_key {
+            Self::encrypt_blocks(
+                base_off + data_section_size,
+                encryption_key,
+                &self.old_builder,
+                data_buf,
+            );
+        } else {
+            data_buf.extend_from_slice(self.old_builder.buf.as_slice());
+        }
         let old_data_section_size = self.old_builder.buf.len() as u32;
 
         self.block_builder.build_index(base_off, self.checksum_tp);
@@ -274,7 +315,7 @@ impl Builder {
         }
     }
 
-    fn build_aux_index(&self, buf: &mut BytesMut, fuse8: &[u8]) {
+    fn build_aux_index(&self, buf: &mut Vec<u8>, fuse8: &[u8]) {
         let origin_len = buf.len();
         buf.put_u32_le(0);
         buf.put_u32_le(AUX_INDEX_BINARY_FUSE8);
@@ -286,7 +327,7 @@ impl Builder {
         }
     }
 
-    fn build_properties(&self, buf: &mut BytesMut) {
+    fn build_properties(&self, buf: &mut Vec<u8>) {
         let origin_len = buf.len();
         buf.put_u32_le(0);
         Builder::add_property(buf, PROP_KEY_SMALLEST.as_bytes(), self.smallest.as_slice());
@@ -310,6 +351,13 @@ impl Builder {
             PROP_KEY_IN_USE_TOTAL_BLOB_SIZE.as_bytes(),
             &self.total_blob_size.to_le_bytes(),
         );
+        if let Some(encryption_key) = &self.encryption_key {
+            Builder::add_property(
+                buf,
+                PROP_KEY_ENCRYPTION_VER.as_bytes(),
+                &encryption_key.current_ver.to_le_bytes(),
+            );
+        }
         if self.checksum_tp == CRC32C {
             let checksum = crc32c::crc32c(&buf[(origin_len + 4)..]);
             LittleEndian::write_u32(&mut buf[origin_len..], checksum);
