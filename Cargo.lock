@@ -3837,6 +3837,7 @@ dependencies = [
  "tempdir",
  "tempfile",
  "test_cloud_server",
+ "test_pd_client",
  "test_util",
  "thiserror",
  "tikv",

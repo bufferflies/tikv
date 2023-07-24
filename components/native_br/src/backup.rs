@@ -62,9 +62,10 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub type SharedResult<T> = std::result::Result<T, SharedError>;
 
 /// Generate full path `/<prefix>/backup/<name>`.
-pub fn backup_file_full_path(prefix: String, name: String) -> String {
+/// When `name` is empty, `backup_ts` must be some.
+pub fn backup_file_full_path(prefix: String, name: String, backup_ts: Option<u64>) -> String {
     let name = if name.is_empty() {
-        IncrementalBackupFile::default().into_name()
+        IncrementalBackupFile::from_backup_ts(backup_ts.unwrap()).into_name()
     } else {
         name
     };
@@ -269,20 +270,21 @@ pub fn backup_cluster_with_ts(
     cluster_backup_meta.set_safe_ts(safe_ts);
     let stores = get_all_stores_except_tiflash(pd_client)?;
     check_backup_meta_consistency(&cluster_backup_meta, &stores)?;
+
+    let backup_key = backup_file_full_path(s3fs.get_prefix(), name, Some(backup_ts));
+    let backup_data = Bytes::from(cluster_backup_meta.write_to_bytes().unwrap());
+    runtime
+        .block_on(s3fs.put_object(backup_key.clone(), backup_data, backup_key.clone()))
+        .unwrap();
     info!(
-        "cluster backup cluster_id:{}, backup_ts:{}, alloc_id:{}, safe_ts:{}, num_stores:{}",
+        "cluster backup cluster_id:{}, backup_ts:{}, alloc_id:{}, safe_ts:{}, num_stores:{}, path:{}",
         cluster_backup_meta.cluster_id,
         cluster_backup_meta.backup_ts,
         cluster_backup_meta.alloc_id,
         cluster_backup_meta.safe_ts,
         cluster_backup_meta.get_stores().len(),
+        backup_key,
     );
-    let backup_key = backup_file_full_path(s3fs.get_prefix(), name);
-    let backup_data = Bytes::from(cluster_backup_meta.write_to_bytes().unwrap());
-    runtime
-        .block_on(s3fs.put_object(backup_key.clone(), backup_data, backup_key.clone()))
-        .unwrap();
-    info!("finished build backup file {}", backup_key);
     Ok((backup_key, cluster_backup_meta))
 }
 
@@ -562,17 +564,19 @@ pub struct IncrementalBackupFile {
 }
 
 impl IncrementalBackupFile {
-    pub fn new() -> Self {
-        let created_at = Utc::now();
-        Self::from_datetime(created_at)
-    }
-
     pub fn from_datetime(utc: DateTime<Utc>) -> Self {
         let name = Self::generate_name_from_utc(&utc);
         Self {
             name,
             created_at: utc,
         }
+    }
+
+    pub fn from_backup_ts(backup_ts: u64) -> Self {
+        let physical_seconds = TimeStamp::from(backup_ts).physical() / 1000; // Unit of physical is millisecond.
+        let datetime = NaiveDateTime::from_timestamp(physical_seconds as i64, 0);
+        let utc = DateTime::<Utc>::from_utc(datetime, Utc);
+        Self::from_datetime(utc)
     }
 
     pub fn try_from_full_path(path: &str) -> Option<Self> {
@@ -628,12 +632,6 @@ impl IncrementalBackupFile {
     }
 }
 
-impl Default for IncrementalBackupFile {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use chrono::{DateTime, NaiveDateTime, Utc};
@@ -641,6 +639,7 @@ mod tests {
     use kvproto::metapb::Store;
     use rfenginepb::{ChangeSet, ClusterBackupMeta, StoreBackupMeta, WalChunk};
     use test_cloud_server::oss::ObjectStorageService;
+    use test_pd_client::TestPdClient;
 
     use super::*;
 
@@ -747,7 +746,7 @@ mod tests {
         assert_eq!(&full_path, "cse-local/backup/20230321/112233.meta");
         assert_eq!(
             full_path,
-            backup_file_full_path("cse-local".to_owned(), backup.name.to_owned())
+            backup_file_full_path("cse-local".to_owned(), backup.name.to_owned(), None)
         );
 
         let backup1 = IncrementalBackupFile::try_from_full_path(&full_path).unwrap();
@@ -755,6 +754,10 @@ mod tests {
 
         let backup2 = IncrementalBackupFile::from_id(backup.id());
         assert_eq!(backup, backup2);
+
+        let backup_ts = TimeStamp::compose(datetime.timestamp_millis() as u64, 0);
+        let backup3 = IncrementalBackupFile::from_backup_ts(backup_ts.into_inner());
+        assert_eq!(backup, backup3);
     }
 
     #[test]
@@ -777,6 +780,7 @@ mod tests {
             "local".to_string(),
             "bkt".to_string(),
         );
+        let pd_client = TestPdClient::new(1, false);
 
         // Use cluster_id to distinguish with different backup meta.
         const CLUSTER_ID_INCREMENTAL: u64 = 1;
@@ -785,9 +789,11 @@ mod tests {
         let prefix = s3fs.get_prefix();
         s3fs.get_runtime().block_on(async {
             {
+                let backup_ts = pd_client.get_tso().await.unwrap().into_inner();
                 let mut backup_meta = ClusterBackupMeta::new();
                 backup_meta.set_cluster_id(CLUSTER_ID_INCREMENTAL);
-                let backup_key = backup_file_full_path(prefix.clone(), "".to_string());
+                let backup_key =
+                    backup_file_full_path(prefix.clone(), "".to_string(), Some(backup_ts));
                 let backup_data = Bytes::from(backup_meta.write_to_bytes().unwrap());
                 s3fs.put_object(backup_key.clone(), backup_data, backup_key)
                     .await
@@ -799,7 +805,8 @@ mod tests {
                 // See https://github.com/tidbcloud/cloud-storage-engine/issues/867.
                 let mut backup_meta = ClusterBackupMeta::new();
                 backup_meta.set_cluster_id(CLUSTER_ID_MANUAL);
-                let backup_key = backup_file_full_path(prefix.clone(), "check_table".to_string());
+                let backup_key =
+                    backup_file_full_path(prefix.clone(), "check_table".to_string(), None);
                 let backup_data = Bytes::from(backup_meta.write_to_bytes().unwrap());
                 s3fs.put_object(backup_key.clone(), backup_data, backup_key)
                     .await

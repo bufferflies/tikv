@@ -56,4 +56,5 @@ url = "2"
 [dev-dependencies]
 tempfile = "3.0"
 test_cloud_server = { workspace = true }
+test_pd_client = { workspace = true }
 test_util = { workspace = true }
