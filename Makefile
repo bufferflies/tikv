@@ -457,7 +457,12 @@ x-build-dist-debug:
 	bash scripts/run-cargo.sh
 
 test-cloud-engine:
-	cargo test -p kvengine -p rfstore -p rfengine -p native_br -p cse-ctl -p test_cloud_server --tests
+	cargo test \
+		-p kvengine -p rfstore -p rfengine \
+		-p cse-ctl -p tikv-worker \
+		-p test_cloud_server -p test_pd_client \
+		-p native_br -p load_data -p cloud_encryption \
+		--tests
 
 test-cloud-engine-integration:
 	# --test-threads=1 to run test case in serial for stability.
