@@ -117,7 +117,14 @@ impl EngineCore {
             get_shard_property(ENCRYPTION_KEY, cs.get_snapshot().get_properties())
                 .map(|v| self.master_key.decrypt_encryption_key(&v).unwrap())
         } else {
-            self.get_shard(cs.shard_id).unwrap().encryption_key.clone()
+            match self.get_shard(cs.shard_id) {
+                Some(shard) => shard.encryption_key.clone(),
+                None => {
+                    // If shard not exists it means the peer has been destroyed, return the empty
+                    // changeset.
+                    return Ok(cs);
+                }
+            }
         };
         self.load_tables_by_ids(
             cs.shard_id,

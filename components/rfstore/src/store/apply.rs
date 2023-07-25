@@ -1338,11 +1338,12 @@ impl Applier {
         let engine = ctx.engine.clone();
         let router = ctx.router.clone().unwrap();
         let is_leader = self.is_leader();
+        let peer_id = self.id();
         std::thread::spawn(move || {
             let id = cs.shard_id;
             tikv_util::set_current_region(id);
             let res = engine.prepare_change_set(cs, !is_leader, None);
-            router.send(id, PeerMsg::PrepareChangeSetResult(res));
+            router.send(id, PeerMsg::PrepareChangeSetResult(res, peer_id));
         });
     }
 

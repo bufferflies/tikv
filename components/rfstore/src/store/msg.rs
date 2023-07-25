@@ -35,7 +35,10 @@ pub enum PeerMsg {
     SignificantMsg(SignificantMsg),
     GenerateEngineChangeSet(kvenginepb::ChangeSet),
     ApplySnapshotResult(kvenginepb::ChangeSet),
-    PrepareChangeSetResult(kvengine::Result<kvengine::ChangeSet>),
+    PrepareChangeSetResult(
+        kvengine::Result<kvengine::ChangeSet>,
+        u64, // peer_id
+    ),
     PrepareCommitMergeResult(
         kvengine::Result<kvengine::ChangeSet>,
         u64, // commit index

@@ -222,8 +222,8 @@ impl<'a> PeerMsgHandler<'a> {
                 PeerMsg::Persisted(ready) => {
                     self.on_persisted(ready);
                 }
-                PeerMsg::PrepareChangeSetResult(res) => {
-                    self.on_prepared_change_set(res);
+                PeerMsg::PrepareChangeSetResult(res, peer_id) => {
+                    self.on_prepared_change_set(res, peer_id);
                 }
                 PeerMsg::PrepareCommitMergeResult(res, commit_index) => {
                     self.on_prepared_commit_merge(res, commit_index);
@@ -1512,7 +1512,11 @@ impl<'a> PeerMsgHandler<'a> {
         }
     }
 
-    pub(crate) fn on_prepared_change_set(&mut self, res: kvengine::Result<kvengine::ChangeSet>) {
+    pub(crate) fn on_prepared_change_set(
+        &mut self,
+        res: kvengine::Result<kvengine::ChangeSet>,
+        peer_id: u64,
+    ) {
         if res.is_err() {
             // TODO(x): properly handle this error.
             panic!(
@@ -1520,6 +1524,17 @@ impl<'a> PeerMsgHandler<'a> {
                 self.peer.tag(),
                 res.unwrap_err()
             );
+        }
+        // If peer_msg is from a stale peer, ignore it. prepare_change_set in kvengine
+        // will be return empty change set if old peer has be destroyed.
+        if peer_id != self.peer_id() {
+            warn!(
+                "{} peer id not match {} != {}, skip on_prepared_change_set",
+                self.peer.tag(),
+                peer_id,
+                self.peer_id()
+            );
+            return;
         }
         self.ctx
             .apply_msgs

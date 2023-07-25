@@ -258,7 +258,7 @@ impl RaftWorker {
             PeerMsg::SignificantMsg(_) => {}
             PeerMsg::GenerateEngineChangeSet(_) => {}
             PeerMsg::ApplySnapshotResult(_) => {}
-            PeerMsg::PrepareChangeSetResult(_) => {}
+            PeerMsg::PrepareChangeSetResult(..) => {}
             PeerMsg::Persisted(_) => {}
             PeerMsg::PrepareCommitMergeResult(..) => {}
         }
