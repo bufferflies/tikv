@@ -364,6 +364,14 @@ impl<'a> PrewriteMutation<'a> {
         &mut self,
         reader: &mut SnapshotReader<S>,
     ) -> Result<Option<(Write, TimeStamp)>> {
+        // Check if this txn rolled back for cloud_reader.
+        if let Some(cloud_reader) = reader.cloud_reader.as_mut() {
+            if let Some((ts, write)) = cloud_reader.get_extra(&self.key, self.txn_props.start_ts) {
+                MVCC_CONFLICT_COUNTER.rolled_back.inc();
+                self.write_conflict_error(&write, ts, WriteConflictReason::SelfRolledBack)?;
+            }
+        }
+
         let mut seek_ts = TimeStamp::max();
         while let Some((commit_ts, write)) = reader.seek_write(&self.key, seek_ts)? {
             // If there's a write record whose commit_ts equals to our start ts, the current
@@ -724,6 +732,27 @@ fn amend_pessimistic_lock<S: Snapshot>(
     mutation: &mut PrewriteMutation<'_>,
     reader: &mut SnapshotReader<S>,
 ) -> Result<()> {
+    // Check if this txn rolled back for cloud_reader.
+    if let Some(cloud_reader) = reader.cloud_reader.as_mut() {
+        if let Some((ts, _write)) =
+            cloud_reader.get_extra(&mutation.key, mutation.txn_props.start_ts)
+        {
+            warn!(
+                "prewrite failed (pessimistic lock not found)";
+                "start_ts" => ts,
+                "key" => %mutation.key
+            );
+            MVCC_CONFLICT_COUNTER
+                .pipelined_acquire_pessimistic_lock_amend_fail
+                .inc();
+            return Err(ErrorInner::PessimisticLockNotFound {
+                start_ts: ts,
+                key: mutation.key.clone().into_raw()?,
+            }
+            .into());
+        }
+    }
+
     let write = reader.seek_write(&mutation.key, TimeStamp::max())?;
     if let Some((commit_ts, write)) = write.as_ref() {
         // The invariants of pessimistic locks are:

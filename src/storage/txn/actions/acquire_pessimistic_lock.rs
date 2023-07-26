@@ -205,6 +205,30 @@ pub fn acquire_pessimistic_lock<S: Snapshot>(
     // Following seek_write read the previous write.
     let (prev_write_loaded, mut prev_write) = (true, None);
     let (mut last_change_ts, mut versions_to_last_change);
+
+    // Check EXTRA_CF for cloud_reader.
+    if let Some(cloud_reader) = reader.cloud_reader.as_mut() {
+        if let Some((ts, write)) = cloud_reader.get_extra(&key, reader.start_ts) {
+            return if write.write_type == WriteType::Rollback {
+                Err(ErrorInner::PessimisticLockRolledBack {
+                    start_ts: ts,
+                    key: key.into_raw()?,
+                }
+                .into())
+            } else {
+                Err(ErrorInner::WriteConflict {
+                    start_ts: reader.start_ts,
+                    conflict_start_ts: write.start_ts,
+                    conflict_commit_ts: ts,
+                    key: key.into_raw()?,
+                    primary: primary.to_vec(),
+                    reason: WriteConflictReason::PessimisticRetry,
+                }
+                .into())
+            };
+        }
+    }
+
     if let Some((commit_ts, write)) = reader.seek_write(&key, TimeStamp::max())? {
         // Find a previous write.
         if need_old_value {
@@ -236,7 +260,7 @@ pub fn acquire_pessimistic_lock<S: Snapshot>(
                 .into());
             }
         }
-
+        /*
         // Handle rollback.
         // The rollback information may come from either a Rollback record or a record
         // with `has_overlapped_rollback` flag.
@@ -268,6 +292,7 @@ pub fn acquire_pessimistic_lock<S: Snapshot>(
                 }
             }
         }
+        */
 
         // Check data constraint when acquiring pessimistic lock. But in case we are
         // going to lock it with write conflict, we do not check it since the
