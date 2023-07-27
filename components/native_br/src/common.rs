@@ -196,19 +196,20 @@ pub fn retain_sst_files(file_ids: Vec<u64>, s3fs: &S3Fs) -> Result<usize> {
 fn retain_sst_files_in_batch(file_ids: &[u64], s3fs: &S3Fs, first_batch: bool) -> Result<usize> {
     let runtime = s3fs.get_runtime();
     let file_cnt = file_ids.len();
-    let (tx, rx) = tikv_util::mpsc::unbounded();
-    for id in file_ids {
-        runtime.spawn(retain_s3_file(s3fs.clone(), id.to_owned(), tx.clone()));
+    let mut handles = Vec::with_capacity(file_cnt);
+    for &id in file_ids {
+        let s3fs = s3fs.clone();
+        handles.push(runtime.spawn(async move { s3fs.retain_file(id).await }));
     }
     // To avoid too much request to cause s3 SlowDown issue.
     if !first_batch {
         std::thread::sleep(Duration::from_secs(1));
     }
     let mut succeed_cnt = 0;
-    for _ in 0..file_cnt {
-        match rx.recv().unwrap() {
+    for (handle, &file_id) in handles.into_iter().zip(file_ids) {
+        match runtime.block_on(handle).unwrap() {
             Ok(_) => succeed_cnt += 1,
-            Err(e) => error!("{}", e),
+            Err(e) => error!("Retain file {} fail {:?}", file_id, e),
         }
     }
     if succeed_cnt != file_cnt {
@@ -219,13 +220,4 @@ fn retain_sst_files_in_batch(file_ids: &[u64], s3fs: &S3Fs, first_batch: bool) -
         ));
     }
     Ok(succeed_cnt)
-}
-
-async fn retain_s3_file(fs: S3Fs, file_id: u64, tx: tikv_util::mpsc::Sender<Result<u64>>) {
-    match fs.retain_file(file_id).await {
-        Ok(()) => tx.send(Ok(file_id)).unwrap(),
-        Err(e) => tx
-            .send(Err(box_err!("Retain file {:?} fail {}", file_id, e)))
-            .unwrap(),
-    }
 }
