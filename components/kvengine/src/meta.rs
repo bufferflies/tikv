@@ -793,8 +793,9 @@ impl ShardMeta {
     }
 
     pub fn commit_merge(&mut self, source: &ShardMeta, sequence: u64) {
+        // Include the max_ts and source files in the parent for future initial flush.
+        self.max_ts = std::cmp::max(self.max_ts, source.max_ts);
         let mut parent = self.clone();
-        // Include the source files in the parent for future initial flush.
         for (&id, source_file) in &source.files {
             parent.files.insert(id, source_file.clone());
         }

@@ -1811,6 +1811,7 @@ impl<'a> PreprocessRef<'a> {
         info!(
             "shard meta apply change set {:?}", &cs;
             "region" => tag,
+            "max_ts" => shard_meta.max_ts,
         );
         ctx.raft_wb.set_state(
             peer_id,
