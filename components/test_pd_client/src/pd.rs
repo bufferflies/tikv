@@ -411,6 +411,10 @@ struct PdCluster {
 
     unsafe_recovery_store_reports: HashMap<u64, pdpb::StoreReport>,
     unsafe_recovery_plan: HashMap<u64, pdpb::RecoveryPlan>,
+
+    // To verify compatibility with PD without `get_all_keyspaces` feature.
+    // TODO: remove this after `get_all_keyspaces` is online.
+    enable_get_all_keyspaces: bool,
 }
 
 impl PdCluster {
@@ -447,6 +451,8 @@ impl PdCluster {
             unsafe_recovery_store_reports: HashMap::default(),
             unsafe_recovery_plan: HashMap::default(),
             buckets: HashMap::default(),
+
+            enable_get_all_keyspaces: false,
         }
     }
 
@@ -1491,6 +1497,22 @@ impl TestPdClient {
             });
         Box::pin(ok(region))
     }
+
+    #[allow(dead_code)]
+    fn enable_get_all_keyspaces(&self, enable: bool) {
+        self.cluster.wl().enable_get_all_keyspaces = enable;
+    }
+
+    fn check_get_all_keyspaces_enabled(&self) -> Result<()> {
+        if !self.cluster.rl().enable_get_all_keyspaces {
+            let err = grpcio::Error::RpcFailure(grpcio::RpcStatus::new(
+                grpcio::RpcStatusCode::UNIMPLEMENTED,
+            ));
+            Err(Error::from(err))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 impl PdClient for TestPdClient {
@@ -2036,12 +2058,18 @@ impl PdClient for TestPdClient {
         keyspace_id: u32,
         cfg: KeyspaceEncryptionConfig,
     ) -> Result<()> {
+        // `get_keyspace_encryption` depends on `get_all_keyspaces` feature of PD.
+        self.check_get_all_keyspaces_enabled()?;
+
         let mut guard = self.keyspace_encryption.write().unwrap();
         guard.insert(keyspace_id, cfg);
         Ok(())
     }
 
     fn get_keyspace_encryption(&self, keyspace_id: u32) -> Result<KeyspaceEncryptionConfig> {
+        // `get_keyspace_encryption` depends on `get_all_keyspaces` feature of PD.
+        self.check_get_all_keyspaces_enabled()?;
+
         let guard = self.keyspace_encryption.read().unwrap();
         Ok(guard.get(&keyspace_id).cloned().unwrap_or_default())
     }

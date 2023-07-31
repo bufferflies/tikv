@@ -20,7 +20,7 @@ use test_cloud_server::{
 };
 use tidb_query_datatype::codec::table;
 use tikv::config::TikvConfig;
-use tikv_util::codec::bytes::encode_bytes;
+use tikv_util::{codec::bytes::encode_bytes, info};
 
 use crate::alloc_node_id_vec;
 
@@ -73,9 +73,17 @@ fn impl_test_load_data(enable_inner_key_off: bool) {
     cluster.wait_region_replicated(&[], 3);
     let pd_client = cluster.get_pd_client();
     if enable_inner_key_off {
-        pd_client
+        match pd_client
             .set_keyspace_encryption(KEYSPACE_ID, KeyspaceEncryptionConfig { enabled: true })
-            .unwrap();
+        {
+            Ok(_) => {}
+            Err(err) if pd_client::grpc_error_is_unimplemented(&err) => {
+                info!("set_keyspace_encryption is not supported, skip");
+            }
+            Err(err) => {
+                panic!("set_keyspace_encryption failed: {:?}", err)
+            }
+        }
     }
     let mut client = cluster.new_client();
     client.split_keyspace(KEYSPACE_ID);

@@ -194,7 +194,15 @@ fn prepare_cluster(
             data_keys.push(Key::from_raw(&i_to_key(i * 100)).into_encoded());
         }
         let cfg = KeyspaceEncryptionConfig { enabled: true };
-        pd_client.set_keyspace_encryption(keyspace_id, cfg).unwrap();
+        match pd_client.set_keyspace_encryption(keyspace_id, cfg) {
+            Ok(_) => {}
+            Err(err) if pd_client::grpc_error_is_unimplemented(&err) => {
+                info!("set_keyspace_encryption is not supported, skip");
+            }
+            Err(err) => {
+                panic!("set_keyspace_encryption failed: {:?}", err)
+            }
+        }
     }
     keys.push(ApiV2::get_txn_keyspace_prefix(
         initial_keyspace_count as u32,

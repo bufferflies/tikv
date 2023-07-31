@@ -1024,6 +1024,14 @@ pub fn simple_merge_bucket_write_stats(cur: &mut BucketStat, incoming: &BucketSt
     }
 }
 
+pub fn grpc_error_is_unimplemented(e: &Error) -> bool {
+    if let Error::Grpc(grpcio::Error::RpcFailure(ref status)) = e {
+        status.code() == grpcio::RpcStatusCode::UNIMPLEMENTED
+    } else {
+        false
+    }
+}
+
 #[cfg(test)]
 mod test {
     use kvproto::metapb::BucketStats;

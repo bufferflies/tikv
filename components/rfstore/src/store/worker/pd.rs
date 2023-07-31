@@ -489,6 +489,13 @@ impl PdRunner {
             if is_whole_keyspace_range(&raw_start, &raw_end) {
                 let keyspace_id = ApiV2::get_u32_keyspace_id(ApiV2::get_keyspace_id(&raw_start));
                 match pd_client.get_keyspace_encryption(keyspace_id) {
+                    Err(e) if pd_client::grpc_error_is_unimplemented(&e) => {
+                        warn!(
+                            "get_keyspace_encryption is unimplemented, skip encryption";
+                            "region" => tag,
+                            "err" => ?e,
+                        );
+                    }
                     Err(e) => {
                         warn!(
                             "get keyspace encryption config failed";

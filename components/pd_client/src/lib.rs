@@ -11,6 +11,7 @@ mod feature_gate;
 pub mod metrics;
 mod tso;
 mod util;
+pub use util::grpc_error_is_unimplemented;
 
 mod config;
 pub mod errors;
