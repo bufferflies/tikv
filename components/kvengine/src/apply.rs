@@ -662,8 +662,10 @@ impl EngineCore {
 
     fn apply_ingest_files(&self, shard: &Shard, cs: &ChangeSet) -> Result<()> {
         let ingest_files = cs.get_ingest_files();
-        let ingest_id = get_shard_property(INGEST_ID_KEY, ingest_files.get_properties()).unwrap();
-        if let Some(old_ingest_id) = shard.get_property(INGEST_ID_KEY) {
+        if let (Some(ingest_id), Some(old_ingest_id)) = (
+            get_shard_property(INGEST_ID_KEY, ingest_files.get_properties()),
+            shard.get_property(INGEST_ID_KEY),
+        ) {
             if old_ingest_id.chunk() == ingest_id.as_slice() {
                 // skip duplicated ingest files.
                 return Ok(());

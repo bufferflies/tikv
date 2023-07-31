@@ -1,6 +1,7 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
 mod test_all;
+mod test_load_data;
 mod test_native_br;
 
 use std::{
@@ -44,7 +45,9 @@ lazy_static::lazy_static! {
     pub static ref NODE_RESTART_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref BACKUP_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref RESTORE_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    pub static ref LOAD_DATA_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref KEYSPACE_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    pub static ref TABLE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 }
 
 pub const TIMEOUT: Duration = Duration::from_secs(90);
@@ -148,20 +151,7 @@ fn test_random_merge() {
         data_stats.check_data().unwrap();
     }
 
-    // Wait all regions heartbeats to pd. Check shard version match in pd and
-    // kvengine.
-    let version_match_ok = try_wait(
-        || {
-            let data_stats = cluster.get_data_stats();
-            data_stats.check_region_version_match(&pd_client).is_ok()
-        },
-        10,
-    );
-    let data_stats = cluster.get_data_stats();
-    if !version_match_ok {
-        data_stats.check_region_version_match(&pd_client).unwrap();
-    }
-
+    cluster.wait_region_version_match();
     data_stats
         .check_buckets(&pd_client, bucket_size_kb * 1024)
         .unwrap();
@@ -295,24 +285,32 @@ pub(crate) fn spawn_keyspace_write(
         let start_time = Instant::now();
         let mut rng = rand::thread_rng();
         while start_time.saturating_elapsed() < timeout {
-            let keyspace = client.keyspace_manager().get_zipf_random_keyspace(&mut rng);
+            let keyspace_id = client.keyspace_manager().get_zipf_random_keyspace(&mut rng);
+            let table_id = match client
+                .keyspace_manager()
+                .get_random_available_table(keyspace_id, &mut rng)
             {
-                let lock = client.keyspace_manager().get_keyspace_lock(keyspace);
+                Some(table_id) => table_id,
+                None => continue,
+            };
+
+            {
+                let lock = client.keyspace_manager().get_keyspace_lock(keyspace_id);
                 let guard = lock.try_lock_for_write();
                 if guard.is_none() {
                     continue;
                 }
                 let _guard = guard.unwrap();
-                info!("[{}] thread write on keyspace {}", idx, keyspace);
+                info!("[{}] thread write on keyspace {}", idx, keyspace_id);
 
                 let i = rng.gen_range(begin..end);
                 if rng.gen_ratio(2, 3) {
                     client
-                        .keyspace_put_kv(keyspace, i..(i + 10), i_to_key, i_to_val)
+                        .keyspace_put_kv(keyspace_id, table_id, i..(i + 10), i_to_key, i_to_val)
                         .unwrap();
                 } else {
                     client
-                        .keyspace_del_kv(keyspace, i..(i + 10), i_to_key)
+                        .keyspace_del_kv(keyspace_id, table_id, i..(i + 10), i_to_key)
                         .unwrap();
                 };
             }
@@ -325,6 +323,7 @@ pub(crate) fn spawn_keyspace_write(
 pub fn spawn_create_keyspace(
     pd_client: Arc<TestPdClient>,
     keyspace_manager: KeyspaceManager,
+    initial_table_count: usize,
     timeout: Duration,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
@@ -339,9 +338,15 @@ pub fn spawn_create_keyspace(
             must_split_region_for_keyspace(&pd_client, new_keyspace);
             // Don't shuffle keyspaces. Otherwise we will not have a few big keyspaces.
             // Note that the new keyspace will has less chance to be written.
-            keyspace_manager.create_keyspaces(&[new_keyspace], DEFAULT_INNER_KEY_OFFSET, None);
+            keyspace_manager.create_keyspaces(
+                &[new_keyspace],
+                DEFAULT_INNER_KEY_OFFSET,
+                initial_table_count,
+                None,
+            );
 
             KEYSPACE_COUNTER.fetch_add(1, Ordering::Relaxed);
+            TABLE_COUNTER.fetch_add(initial_table_count, Ordering::Relaxed);
         }
         info!("create keyspace thread exit");
     })

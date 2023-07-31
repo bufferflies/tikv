@@ -2,12 +2,17 @@
 
 use std::{
     collections::HashMap,
+    mem,
     ops::{Deref, DerefMut, Range},
     sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 
 use api_version::ApiV2;
-use dashmap::{mapref::entry::Entry, DashMap};
+use bytes::{BufMut, BytesMut};
+use dashmap::{
+    mapref::{entry::Entry, one::Ref},
+    DashMap,
+};
 use kvproto::kvrpcpb::{Mutation, Op};
 use rand::{
     distributions::Distribution,
@@ -15,10 +20,13 @@ use rand::{
 };
 use tikv_util::{info, HandyRwLock};
 
-use crate::client::{ClusterClient, RefStore, RequestOptions, Result};
+use crate::{
+    client::{ClusterClient, RefStore, RequestOptions, Result},
+    table::TableMeta,
+};
 
 #[derive(Default)]
-pub(crate) struct KeyspaceInnerLock {
+pub struct KeyspaceInnerLock {
     /// `write` is used to synchronize write and restore with verification
     /// operations.
     /// RwLock is used as writes are multi-threaded.
@@ -30,7 +38,7 @@ pub(crate) struct KeyspaceInnerLock {
 
 #[derive(Clone, Default)]
 pub struct KeyspaceManager {
-    keyspaces: Arc<DashMap<u32 /* keyspace_id */, Meta>>,
+    keyspaces: Arc<DashMap<u32 /* keyspace_id */, KeyspaceMeta>>,
 
     /// `backup_lock` is used to block all writes & restores for backup.
     ///
@@ -50,13 +58,14 @@ impl KeyspaceManager {
         &self,
         keyspace_ids: &[u32],
         inner_key_off: usize,
+        table_count: usize,
         need_shuffle: Option<&mut ThreadRng>,
     ) {
         for &keyspace_id in keyspace_ids {
             match self.keyspaces.entry(keyspace_id) {
                 Entry::Occupied(_) => panic!("duplicated keyspace {}", keyspace_id),
                 Entry::Vacant(entry) => {
-                    entry.insert(Meta::new(inner_key_off));
+                    entry.insert(KeyspaceMeta::new(inner_key_off, table_count));
                 }
             }
         }
@@ -89,24 +98,63 @@ impl KeyspaceManager {
     pub fn ref_stores(&self) -> &KeyspaceRefStores {
         &self.ref_stores
     }
+
+    pub fn get_keyspace_meta(&self, keyspace_id: u32) -> Option<Ref<'_, u32, KeyspaceMeta>> {
+        self.keyspaces.get(&keyspace_id)
+    }
+
+    pub fn get_random_available_table(
+        &self,
+        keyspace_id: u32,
+        rng: &mut ThreadRng,
+    ) -> Option<i64 /* table_id */> {
+        self.get_keyspace_meta(keyspace_id)
+            .unwrap()
+            .get_random_available_table(rng)
+    }
 }
 
 #[derive(Default)]
-pub(crate) struct Meta {
+pub struct KeyspaceMeta {
     _inner_key_off: usize,
     inner_lock: Arc<KeyspaceInnerLock>,
+    tables: DashMap<i64 /* table_id */, TableMeta>,
 }
 
-impl Meta {
-    pub fn new(inner_key_off: usize) -> Self {
+impl KeyspaceMeta {
+    pub fn new(inner_key_off: usize, table_count: usize) -> Self {
+        let tables = DashMap::default();
+        for _ in 0..table_count {
+            let table = TableMeta::new(true);
+            tables.insert(table.id(), table);
+        }
         Self {
             _inner_key_off: inner_key_off,
             inner_lock: Default::default(),
+            tables,
         }
     }
 
     pub fn inner_lock(&self) -> Arc<KeyspaceInnerLock> {
         self.inner_lock.clone()
+    }
+
+    pub fn get_random_available_table(&self, rng: &mut ThreadRng) -> Option<i64> {
+        self.tables
+            .iter()
+            .filter_map(|x| x.is_available().then_some(*x.key()))
+            .choose(rng)
+    }
+
+    pub fn new_table(&self, is_available: bool) -> i64 {
+        let table = TableMeta::new(is_available);
+        let table_id = table.id();
+        self.tables.insert(table.id(), table);
+        table_id
+    }
+
+    pub fn get_table(&self, table_id: i64) -> Option<Ref<'_, i64, TableMeta>> {
+        self.tables.get(&table_id)
     }
 }
 
@@ -150,6 +198,38 @@ impl KeyspaceLockHelper {
         let backup_guard = self.backup_lock.rl();
         let restore_guard = self.keyspace_inner.restore.lock().unwrap();
         (backup_guard, restore_guard)
+    }
+
+    /// Get locks for `load_data` operation.
+    /// Block backup, restore_with_verify, and restore_without_verify.
+    pub fn lock_for_load_data(
+        &self,
+    ) -> (
+        RwLockReadGuard<'_, ()>,
+        RwLockReadGuard<'_, ()>,
+        MutexGuard<'_, ()>,
+    ) {
+        let backup_guard = self.backup_lock.rl();
+        let write_guard = self.keyspace_inner.write.rl();
+        let restore_guard = self.keyspace_inner.restore.lock().unwrap();
+        (backup_guard, write_guard, restore_guard)
+    }
+
+    /// Get locks for `destroy_table` operation.
+    /// Block backup, writes, restore_with_verify, and restore_without_verify.
+    /// Downgrade `write_guard` on keyspace to read lock after set table to
+    /// unavailable.
+    pub fn _lock_for_destroy_table(
+        &self,
+    ) -> (
+        RwLockReadGuard<'_, ()>,
+        RwLockWriteGuard<'_, ()>,
+        MutexGuard<'_, ()>,
+    ) {
+        let backup_guard = self.backup_lock.rl();
+        let write_guard = self.keyspace_inner.write.wl();
+        let restore_guard = self.keyspace_inner.restore.lock().unwrap();
+        (backup_guard, write_guard, restore_guard)
     }
 }
 
@@ -243,6 +323,7 @@ impl ClusterKeyspaceClient {
     pub fn keyspace_put_kv<F, G>(
         &mut self,
         keyspace_id: u32,
+        table_id: i64,
         rng: Range<usize>,
         gen_user_key: F,
         gen_val: G,
@@ -255,7 +336,7 @@ impl ClusterKeyspaceClient {
         for i in rng {
             let mut m = Mutation::default();
             m.set_op(Op::Put);
-            m.set_key(Self::make_key(keyspace_id, &gen_user_key(i)));
+            m.set_key(make_key(keyspace_id, table_id, &gen_user_key(i)));
             m.set_value(gen_val(i));
             mutations.push(m)
         }
@@ -270,6 +351,7 @@ impl ClusterKeyspaceClient {
     pub fn keyspace_del_kv<F>(
         &mut self,
         keyspace_id: u32,
+        table_id: i64,
         rng: Range<usize>,
         gen_user_key: F,
     ) -> Result<()>
@@ -280,7 +362,7 @@ impl ClusterKeyspaceClient {
         for i in rng {
             let mut m = Mutation::default();
             m.set_op(Op::Del);
-            m.set_key(Self::make_key(keyspace_id, &gen_user_key(i)));
+            m.set_key(make_key(keyspace_id, table_id, &gen_user_key(i)));
             mutations.push(m)
         }
         self.kv_mutate(mutations.clone())?;
@@ -307,13 +389,25 @@ impl ClusterKeyspaceClient {
         }
         Ok(cnt)
     }
+}
 
-    #[inline]
-    fn make_key(keyspace_id: u32, user_key: &[u8]) -> Vec<u8> {
-        let mut prefix = ApiV2::get_txn_keyspace_prefix(keyspace_id);
-        prefix.extend_from_slice(user_key);
-        prefix
-    }
+const TABLE_PREFIX: &[u8] = b"t";
+const RECORD_PREFIX_SEP: &[u8] = b"_r";
+
+// Ref: tidb_query_datatype::codec::table::append_table_record_prefix
+pub fn make_key(keyspace_id: u32, table_id: i64, user_key: &[u8]) -> Vec<u8> {
+    let mut buf = BytesMut::with_capacity(
+        4 + TABLE_PREFIX.len()
+            + mem::size_of_val(&table_id)
+            + RECORD_PREFIX_SEP.len()
+            + user_key.len(),
+    );
+    buf.extend_from_slice(&ApiV2::get_txn_keyspace_prefix(keyspace_id));
+    buf.put_slice(TABLE_PREFIX);
+    buf.put_i64(table_id);
+    buf.put_slice(RECORD_PREFIX_SEP);
+    buf.put_slice(user_key);
+    buf.freeze().to_vec()
 }
 
 pub struct KeyspaceBackup {
@@ -420,5 +514,11 @@ impl KeyspaceRefStores {
 
     pub fn all_keyspace_ids(&self) -> Vec<u32> {
         self.ref_stores.iter().map(|r| *r.key()).collect()
+    }
+
+    pub fn ingest(&self, keyspace_id: u32, ref_store: RefStore) {
+        let target_ref_store = self.get_keyspace_ref_store(keyspace_id);
+        let mut target_ref_store = target_ref_store.lock().unwrap();
+        target_ref_store.ingest(ref_store);
     }
 }

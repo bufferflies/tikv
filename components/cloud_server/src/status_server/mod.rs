@@ -644,7 +644,21 @@ impl StatusServer {
             CasualMessage::IngestFiles { cs, callback },
         );
 
-        let res = fut.await.unwrap();
+        let res = match fut.await {
+            Ok(res) => res,
+            Err(e) => {
+                let err_msg = format!("{} ingest_files channel error: {:?}", shard_id, e);
+                error!("{}", err_msg);
+                // Return "not leader" to let callers retry.
+                let mut errpb = kvproto::errorpb::Error::default();
+                errpb.set_not_leader(Default::default());
+                errpb.set_message(err_msg);
+                return Ok(make_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    errpb.write_to_bytes().unwrap(),
+                ));
+            }
+        };
         if res.response.get_header().has_error() {
             error!(
                 "{} ingest_files error: {:?}",

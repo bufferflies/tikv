@@ -10,6 +10,7 @@ use cloud_encryption::KeyspaceEncryptionConfig;
 use futures::executor::block_on;
 use kvengine::dfs::DFSConfig;
 use kvproto::pdpb::CheckPolicy;
+use load_data::task::LoadDataConfig;
 use native_br::{backup, backup_worker};
 use pd_client::PdClient;
 use rand::Rng;
@@ -27,12 +28,15 @@ use crate::{
     alloc_node_id_vec, generate_keyspace_key, new_security_config, prepare_dfs,
     random_node_restart, spawn_create_keyspace, spawn_keyspace_write, spawn_merge, spawn_move,
     spawn_transfer,
+    test_load_data::{check_load_data, spawn_load_data},
     test_native_br::{check_br, spawn_incremental_backup, spawn_restore_keyspace},
-    TikvConfig, BACKUP_COUNTER, CONCURRENCY, KEYSPACE_COUNTER, MERGE_COUNTER, MOVE_COUNTER,
-    NODE_RESTART_COUNTER, RESTORE_COUNTER, TIMEOUT, TRANSFER_COUNTER, WRITE_COUNTER,
+    TikvConfig, BACKUP_COUNTER, CONCURRENCY, KEYSPACE_COUNTER, LOAD_DATA_COUNTER, MERGE_COUNTER,
+    MOVE_COUNTER, NODE_RESTART_COUNTER, RESTORE_COUNTER, TABLE_COUNTER, TIMEOUT, TRANSFER_COUNTER,
+    WRITE_COUNTER,
 };
 
 const INITIAL_KEYSPACE_COUNT: usize = 10;
+const INITIAL_TABLE_COUNT: usize = 3;
 const NODES_COUNT: usize = 4;
 const RESTORE_CONCURRENCY: usize = 2;
 // `INSTANT_BACKUP_INTERVAL` is more than 1 second as the incremental backup
@@ -70,6 +74,16 @@ fn test_random_all() {
             100,
         ))
     };
+    let load_data_config = {
+        let tikv_config = cluster.get_node_config(cluster.get_nodes()[0]);
+        let region_size = tikv_config.coprocessor.region_split_size.0 as usize;
+        LoadDataConfig {
+            block_size: tikv_config.rocksdb.writecf.block_size.0 as usize,
+            sst_file_size: tikv_config.rocksdb.writecf.target_file_size_base.0 as usize,
+            region_size,
+            coarse_split_size: region_size * 4,
+        }
+    };
 
     // Start workloads & schedulers.
     let mut handles = vec![
@@ -78,12 +92,27 @@ fn test_random_all() {
         spawn_move(cluster.new_scheduler(), Arc::new(RwLock::new(()))),
         // TODO: enable GC worker after verification error of restore is addressed.
         // spawn_gc_worker(cluster.get_pd_client(), TIMEOUT),
-        spawn_create_keyspace(cluster.get_pd_client(), keyspace_manager.clone(), TIMEOUT),
+        spawn_create_keyspace(
+            cluster.get_pd_client(),
+            keyspace_manager.clone(),
+            INITIAL_TABLE_COUNT,
+            TIMEOUT,
+        ),
         spawn_incremental_backup(
             cluster.new_client(),
             keyspace_manager.clone(),
             backup_worker,
             Duration::from_secs(10),
+            TIMEOUT,
+        ),
+        spawn_load_data(
+            cluster.get_pd_client(),
+            cluster.new_keyspace_client(),
+            dfs_config.clone(),
+            security_conf.clone(),
+            load_data_config,
+            keyspace_manager.clone(),
+            Duration::from_secs(15),
             TIMEOUT,
         ),
     ];
@@ -129,17 +158,20 @@ fn test_random_all() {
     // Statistics.
     let total_write_count = WRITE_COUNTER.load(Ordering::SeqCst);
     let total_keyspace_count = KEYSPACE_COUNTER.load(Ordering::SeqCst);
+    let total_table_count = TABLE_COUNTER.load(Ordering::SeqCst);
     let total_merge_count = MERGE_COUNTER.load(Ordering::SeqCst);
     let total_move_count = MOVE_COUNTER.load(Ordering::SeqCst);
     let total_transfer_count = TRANSFER_COUNTER.load(Ordering::SeqCst);
     let total_node_restart = NODE_RESTART_COUNTER.load(Ordering::SeqCst);
     let total_backup_count = BACKUP_COUNTER.load(Ordering::SeqCst);
     let total_restore_count = RESTORE_COUNTER.load(Ordering::SeqCst);
+    let total_load_data_count = LOAD_DATA_COUNTER.load(Ordering::SeqCst);
     let region_number = pd_client.get_regions_number();
     info!(
-        "TEST SUCCEED: write {}, keyspace {}, region {}, merge {}, move {}, transfer {}, node restart {}, backup {}, restore {}, verified_records {}",
+        "TEST SUCCEED: write {}, keyspace {}, table {}, region {}, merge {}, move {}, transfer {}, node restart {}, backup {}, restore {}, load_data {}, verified_records {}",
         total_write_count,
         total_keyspace_count,
+        total_table_count,
         region_number,
         total_merge_count,
         total_move_count,
@@ -147,6 +179,7 @@ fn test_random_all() {
         total_node_restart,
         total_backup_count,
         total_restore_count,
+        total_load_data_count,
         verified_records_count,
     );
 }
@@ -167,6 +200,7 @@ fn prepare_cluster(
         conf.raft_store.peer_stale_state_check_interval = ReadableDuration::secs(1);
         conf.raft_store.abnormal_leader_missing_duration = ReadableDuration::secs(3);
         conf.raft_store.max_leader_missing_duration = ReadableDuration::secs(5);
+        conf.rocksdb.writecf.block_size = ReadableSize::kb(4);
         conf.rocksdb.writecf.target_file_size_base = ReadableSize::kb(16);
         conf.rfengine.target_file_size = ReadableSize::mb(1);
         conf.rfengine.batch_compression_threshold =
@@ -215,8 +249,12 @@ fn prepare_cluster(
     cluster.wait_pd_region_min_count(keys.len() + 1);
     cluster
         .keyspace_manager()
-        .create_keyspaces(&keyspaces, 0, Some(&mut rng));
+        .create_keyspaces(&keyspaces, 0, INITIAL_TABLE_COUNT, Some(&mut rng));
     KEYSPACE_COUNTER.store(initial_keyspace_count, Ordering::Relaxed);
+    TABLE_COUNTER.store(
+        initial_keyspace_count * INITIAL_TABLE_COUNT,
+        Ordering::Relaxed,
+    );
     let res = block_on(pd_client.split_regions(data_keys));
     if let Err(err) = res {
         warn!("split regions failed: {:?}", err);
@@ -248,6 +286,7 @@ fn verify_cluster(cluster: &mut ServerCluster) -> usize /* records count in ref 
         res,
         data_stats
     );
+    cluster.wait_region_version_match();
     data_stats
         .check_buckets(&cluster.get_pd_client(), REGION_BUCKET_SIZE.0)
         .unwrap();
@@ -275,8 +314,8 @@ fn verify_cluster(cluster: &mut ServerCluster) -> usize /* records count in ref 
     }
     assert!(records_cnt > 1000, "too few records in ref store");
 
-    // Check BR.
     check_br();
+    check_load_data();
 
     records_cnt
 }

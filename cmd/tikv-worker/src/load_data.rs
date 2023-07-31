@@ -10,7 +10,8 @@ use kvengine::{
     table::sstable::{LZ4_COMPRESSION, NO_COMPRESSION, ZSTD_COMPRESSION},
 };
 use load_data::task::{
-    LoadDataContext, LoadTaskMsg, LoadTaskScheduler, LoadTaskStates, LoadTaskWorker, TaskContext,
+    LoadDataConfig, LoadDataContext, LoadTaskMsg, LoadTaskScheduler, LoadTaskStates,
+    LoadTaskWorker, TaskContext,
 };
 use pd_client::PdClient;
 
@@ -143,6 +144,7 @@ pub(crate) async fn handle_load_data(
 
 pub(crate) struct LoadDataManager {
     running_tasks: Arc<dashmap::DashMap<u64, LoadTaskScheduler>>,
+    config: LoadDataConfig,
     ctx: LoadDataContext,
 }
 
@@ -155,6 +157,7 @@ impl LoadDataManager {
         max_in_mem_size: usize,
         master_key: MasterKey,
     ) -> Self {
+        let config = LoadDataConfig::default();
         let context = LoadDataContext {
             pd,
             dir,
@@ -165,6 +168,7 @@ impl LoadDataManager {
         };
         Self {
             running_tasks: Arc::new(dashmap::DashMap::default()),
+            config,
             ctx: context,
         }
     }
@@ -209,7 +213,8 @@ impl LoadDataManager {
     }
 
     pub(crate) fn init_task(&self, task_ctx: TaskContext) {
-        let mut worker = LoadTaskWorker::new(self.ctx.clone(), task_ctx.clone());
+        let mut worker =
+            LoadTaskWorker::new(self.config.clone(), self.ctx.clone(), task_ctx.clone());
         let mut scheduler = worker.get_scheduler();
         let thread_handle = std::thread::spawn(move || {
             worker.run();

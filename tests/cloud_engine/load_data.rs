@@ -1,22 +1,21 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{collections::HashMap, fs, mem, sync::Arc};
+use std::{collections::HashMap, fs, sync::Arc, time::Duration};
 
 use api_version::{api_v2::KEYSPACE_PREFIX_LEN, ApiV2};
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::Bytes;
 use cloud_encryption::KeyspaceEncryptionConfig;
 use futures::executor::block_on;
 use kvengine::{dfs::DFSConfig, table::sstable::ZSTD_COMPRESSION};
 use kvenginepb::ChangeSet;
-use load_data::task::{
-    LoadDataContext, LoadTaskMsg, LoadTaskScheduler, LoadTaskWorker, TaskContext,
-};
+use load_data::task::{LoadDataConfig, LoadDataContext};
 use pd_client::PdClient;
 use protobuf::Message;
 use test_cloud_server::{
-    client::{RefStore, RequestOptions},
+    client::RequestOptions,
+    load_data::{build, cleanup, init_task, put_chunks},
     oss::ObjectStorageService,
-    try_wait, ServerCluster,
+    ServerCluster,
 };
 use tidb_query_datatype::codec::table;
 use tikv::config::TikvConfig;
@@ -89,6 +88,14 @@ fn impl_test_load_data(enable_inner_key_off: bool) {
     client.split_keyspace(KEYSPACE_ID);
 
     // Init task.
+    // Total data size is about 1.3MB = 10000 * (23 + 120)
+    let load_data_config = LoadDataConfig {
+        block_size: 1024,
+        sst_file_size: 4 * 1024,
+        region_size: 16 * 1024,
+        coarse_split_size: 128 * 1024,
+    };
+
     let dfs = Arc::new(kvengine::dfs::S3Fs::new(
         dfs_conf.prefix,
         dfs_conf.s3_endpoint,
@@ -110,13 +117,30 @@ fn impl_test_load_data(enable_inner_key_off: bool) {
         max_in_mem_size: 1024, // 1KB
         master_key,
     };
-    let scheduler = init_task(load_data_ctx, start_ts, commit_ts);
+    let scheduler = init_task(load_data_config, load_data_ctx, start_ts, commit_ts);
 
     // Put chunks.
-    let (chunk_ids, ref_store) = put_chunks(&scheduler);
+    let keyspace_prefix = ApiV2::get_txn_keyspace_prefix(KEYSPACE_ID);
+    let i_to_key = move |i: usize| -> Vec<u8> { i_to_key_with_prefix(&keyspace_prefix, i) };
+    let (chunk_ids, ref_store) = put_chunks(
+        &scheduler,
+        DATA_COUNT,
+        DATA_BATCH_SIZE,
+        i_to_key,
+        i_to_val,
+        Duration::from_secs(10),
+    );
 
     // Build.
-    build(&scheduler, chunk_ids);
+    build(
+        &scheduler,
+        chunk_ids,
+        COMPRESSION_TYPE,
+        Duration::from_secs(10),
+    );
+
+    // Cleanup.
+    cleanup(&scheduler);
 
     // Verify data consistency.
     let verified_count = client
@@ -130,106 +154,9 @@ fn impl_test_load_data(enable_inner_key_off: bool) {
     cluster.stop();
 }
 
-fn init_task(ctx: LoadDataContext, start_ts: u64, commit_ts: u64) -> LoadTaskScheduler {
-    let task_ctx = TaskContext {
-        start_ts,
-        commit_ts,
-        inner_key_off: None,
-        key_prefix: vec![],
-        encryption_key: None,
-    };
-
-    let mut worker = LoadTaskWorker::new(ctx, task_ctx);
-    let scheduler = worker.get_scheduler();
-    std::thread::spawn(move || {
-        worker.run();
-    });
-
-    assert!(
-        !scheduler.is_canceled(),
-        "task canceled: {}",
-        scheduler.error_msg()
-    );
-    scheduler
-}
-
-fn put_chunks(scheduler: &LoadTaskScheduler) -> (Vec<u64>, RefStore) {
-    let mut chunk_ids =
-        Vec::with_capacity((DATA_COUNT as f64 / DATA_BATCH_SIZE as f64).ceil() as usize);
-    let mut ref_store = RefStore::default();
-    let keyspace_prefix = ApiV2::get_txn_keyspace_prefix(KEYSPACE_ID);
-
-    let capacity = (2 + i_to_key_with_prefix(&keyspace_prefix, 0).len() + 4 + i_to_val(0).len())
-        * DATA_BATCH_SIZE;
-    for i in (0..DATA_COUNT).step_by(DATA_BATCH_SIZE) {
-        let mut buf = BytesMut::with_capacity(capacity);
-
-        for j in 0..DATA_BATCH_SIZE {
-            let key = i_to_key_with_prefix(&keyspace_prefix, i + j);
-            let val = i_to_val(i + j);
-
-            buf.put_u16_le(key.len() as u16);
-            buf.put_slice(&key);
-            buf.put_u32_le(val.len() as u32);
-            buf.put_slice(&val);
-
-            ref_store.put_kv(key, val);
-        }
-
-        let chunk_id = i as u64;
-        scheduler
-            .sender
-            .send(LoadTaskMsg::AddChunk {
-                chunk_id,
-                chunk_data: buf.freeze(),
-            })
-            .unwrap();
-
-        chunk_ids.push(chunk_id)
-    }
-
-    let mut unhandled_chunk_ids = chunk_ids.clone();
-    try_wait(
-        || {
-            assert!(
-                !scheduler.is_canceled(),
-                "task canceled: {}",
-                scheduler.error_msg()
-            );
-            let mut res = block_on(scheduler.query_unhandled_chunks(unhandled_chunk_ids.clone()));
-            unhandled_chunk_ids = mem::take(&mut res);
-            unhandled_chunk_ids.is_empty()
-        },
-        10,
-    );
-
-    (chunk_ids, ref_store)
-}
-
-fn build(scheduler: &LoadTaskScheduler, chunk_ids: Vec<u64>) {
-    scheduler
-        .sender
-        .send(LoadTaskMsg::Build {
-            chunk_ids,
-            compression_type: COMPRESSION_TYPE,
-        })
-        .unwrap();
-
-    try_wait(
-        || {
-            assert!(
-                !scheduler.is_canceled(),
-                "task canceled: {}",
-                scheduler.error_msg()
-            );
-            scheduler.is_finished()
-        },
-        10,
-    );
-}
-
+// 120 bytes
 fn i_to_val(i: usize) -> Vec<u8> {
-    format!("val_{:08}", i).into_bytes()
+    format!("val_{:08}", i).repeat(10).into_bytes()
 }
 
 fn i_to_key_with_prefix(prefix: &[u8], i: usize) -> Vec<u8> {

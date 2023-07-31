@@ -154,6 +154,10 @@ impl ServerCluster {
         self.servers.keys().copied().collect()
     }
 
+    pub fn get_node_config(&self, node_id: u16) -> &TikvConfig {
+        self.confs.get(&node_id).unwrap()
+    }
+
     pub fn stop(&mut self) {
         let nodes = self.get_nodes();
         for node_id in nodes {
@@ -346,6 +350,22 @@ impl ServerCluster {
 
     pub fn set_dfs_delay(&self, delay: Duration) {
         self.dfs.as_ref().unwrap().set_delay(delay);
+    }
+
+    // Wait shard version match between PD & kvengine.
+    pub fn wait_region_version_match(&self) {
+        let pd_client = self.get_pd_client();
+        let ok = try_wait(
+            || {
+                let data_stats = self.get_data_stats();
+                data_stats.check_region_version_match(&pd_client).is_ok()
+            },
+            10,
+        );
+        let data_stats = self.get_data_stats();
+        if !ok {
+            data_stats.check_region_version_match(&pd_client).unwrap();
+        }
     }
 }
 

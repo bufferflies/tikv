@@ -1,0 +1,188 @@
+// Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
+
+use std::{
+    sync::{atomic::Ordering, Arc},
+    thread::{sleep, JoinHandle},
+    time::Duration,
+};
+
+use cloud_encryption::MasterKey;
+use futures::executor::block_on;
+use kvengine::{dfs, dfs::DFSConfig, table::sstable::ZSTD_COMPRESSION};
+use load_data::task::{LoadDataConfig, LoadDataContext};
+use pd_client::PdClient;
+use rand::{rngs::ThreadRng, Rng};
+use security::SecurityConfig;
+use test_cloud_server::{
+    client::RequestOptions,
+    keyspace::{make_key, ClusterKeyspaceClient, KeyspaceManager},
+    load_data::{build, cleanup, init_task, put_chunks},
+};
+use tikv_util::{info, time::Instant};
+use tokio::runtime::Runtime;
+
+use crate::{i_to_key, i_to_val, LOAD_DATA_COUNTER, TABLE_COUNTER};
+
+const MAX_IN_MEM_SIZE: usize = 10 * 1024; // 10KiB
+const COMPRESSION_TYPE: u8 = ZSTD_COMPRESSION;
+
+pub(crate) fn spawn_load_data(
+    pd_client: Arc<dyn PdClient>,
+    mut client: ClusterKeyspaceClient,
+    dfs_conf: DFSConfig,
+    security_config: SecurityConfig,
+    load_data_config: LoadDataConfig,
+    keyspace_manager: KeyspaceManager,
+    interval: Duration,
+    timeout: Duration,
+) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut rng = rand::thread_rng();
+        let runtime = Arc::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(4)
+                .enable_all()
+                .thread_name("load-data")
+                .build()
+                .unwrap(),
+        );
+        let dfs = Arc::new(kvengine::dfs::S3Fs::new(
+            dfs_conf.prefix,
+            dfs_conf.s3_endpoint,
+            dfs_conf.s3_key_id,
+            dfs_conf.s3_secret_key,
+            dfs_conf.s3_region,
+            dfs_conf.s3_bucket,
+        ));
+        let master_key = runtime.block_on(security_config.new_master_key());
+
+        let start_time = Instant::now();
+        let mut last_time = start_time;
+        while start_time.saturating_elapsed() < timeout {
+            let keyspace_id = keyspace_manager.get_uniform_random_keyspace(&mut rng);
+            let table_id = keyspace_manager
+                .get_keyspace_meta(keyspace_id)
+                .unwrap()
+                .new_table(false);
+            TABLE_COUNTER.fetch_add(1, Ordering::Relaxed);
+
+            do_load_data(
+                keyspace_id,
+                table_id,
+                pd_client.clone(),
+                &mut client,
+                runtime.clone(),
+                dfs.clone(),
+                &keyspace_manager,
+                &mut rng,
+                master_key.clone(),
+                load_data_config.clone(),
+            );
+
+            LOAD_DATA_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let elapsed = last_time.saturating_elapsed();
+            sleep(interval.saturating_sub(elapsed));
+            last_time = Instant::now();
+        }
+        info!("load data thread exit");
+    })
+}
+
+fn do_load_data(
+    keyspace_id: u32,
+    table_id: i64,
+    pd_client: Arc<dyn PdClient>,
+    client: &mut ClusterKeyspaceClient,
+    runtime: Arc<Runtime>,
+    dfs: Arc<dyn dfs::Dfs>,
+    keyspace_manager: &KeyspaceManager,
+    rng: &mut ThreadRng,
+    master_key: MasterKey,
+    config: LoadDataConfig,
+) {
+    let temp_dir = tempfile::Builder::new()
+        .prefix("load_data")
+        .tempdir()
+        .unwrap();
+
+    // Init task.
+    let start_ts = block_on(pd_client.get_tso()).unwrap().into_inner();
+    let commit_ts = block_on(pd_client.get_tso()).unwrap().into_inner();
+    let load_data_ctx = LoadDataContext {
+        dir: temp_dir.path().to_path_buf(),
+        dfs,
+        pd: pd_client.clone(),
+        runtime,
+        max_in_mem_size: MAX_IN_MEM_SIZE,
+        master_key,
+    };
+    let scheduler = init_task(config, load_data_ctx, start_ts, commit_ts);
+    info!(
+        "load_data.init_task: keyspace {}, table {}, start_ts {}, commit_ts {}",
+        keyspace_id, table_id, start_ts, commit_ts
+    );
+
+    // Put chunks.
+    let data_count = rng.gen_range(1..=20) * 1000_usize;
+    let data_batch_size = rng.gen_range(1..=10) * 10_usize;
+    let generate_key = move |i: usize| -> Vec<u8> { make_key(keyspace_id, table_id, &i_to_key(i)) };
+    let (chunk_ids, ref_store) = put_chunks(
+        &scheduler,
+        data_count,
+        data_batch_size,
+        generate_key,
+        i_to_val,
+        Duration::from_secs(20),
+    );
+    info!(
+        "load_data.put_chunks: keyspace {}, table {}, data_count {}",
+        keyspace_id, table_id, data_count
+    );
+
+    {
+        let lock = keyspace_manager.get_keyspace_lock(keyspace_id);
+        let _guard = lock.lock_for_load_data();
+
+        // Build.
+        build(
+            &scheduler,
+            chunk_ids,
+            COMPRESSION_TYPE,
+            Duration::from_secs(20),
+        );
+        info!(
+            "load_data: build finished, keyspace {}, table {}",
+            keyspace_id, table_id
+        );
+
+        // Cleanup.
+        cleanup(&scheduler);
+
+        // Verify the data consistency.
+        let verified_count = client
+            .verify_data_with_given_ref_store(&ref_store, None, &RequestOptions::default())
+            .expect("verify data of load_data failed");
+        assert_eq!(verified_count, data_count);
+        info!(
+            "load_data: verified ok, keyspace {}, table {}, verified_count {}",
+            keyspace_id, table_id, verified_count
+        );
+
+        keyspace_manager.ref_stores().ingest(keyspace_id, ref_store);
+        keyspace_manager
+            .get_keyspace_meta(keyspace_id)
+            .unwrap()
+            .get_table(table_id)
+            .unwrap()
+            .set_available(true);
+    }
+}
+
+pub(crate) fn check_load_data() {
+    let load_data_counter = LOAD_DATA_COUNTER.load(Ordering::Relaxed);
+    assert!(
+        load_data_counter > 0,
+        "load_data_counter too small: {}",
+        load_data_counter
+    );
+}

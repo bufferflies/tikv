@@ -50,6 +50,7 @@ pub mod logger;
 pub mod lru;
 pub mod math;
 pub mod memory;
+pub mod merge_range;
 pub mod metrics;
 pub mod mpsc;
 pub mod quota_limiter;

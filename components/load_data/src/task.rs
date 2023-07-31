@@ -23,17 +23,19 @@ use kvengine::{
     dfs::Options,
     get_shard_property,
     table::{sstable::Builder, InnerKey, Value},
-    ENCRYPTION_KEY,
+    IdVer, ShardTag, ENCRYPTION_KEY,
 };
-use kvproto::{encryptionpb::EncryptionMethod, metapb};
+use kvproto::{encryptionpb::EncryptionMethod, metapb, pdpb};
 use pd_client::PdClient;
 use protobuf::Message;
 use rfstore::store::{raw_end_key, raw_start_key};
 use serde_derive::{Deserialize, Serialize};
 use tidb_query_datatype::codec::table;
 use tikv_util::{
+    box_err,
     codec::bytes::{decode_bytes, encode_bytes},
-    error, info,
+    debug, error, info,
+    merge_range::MergeRanges,
     mpsc::{Receiver, Sender},
     time::Instant,
     warn,
@@ -44,10 +46,11 @@ use crate::{
     kv::{KvPair, KvPairsReader, MergeIterator, SstMeta},
 };
 
-const SST_FILE_SIZE: usize = 16 * 1024 * 1024;
-const REGION_SIZE: usize = 1024 * 1024 * 1024; // 1GB
-const COARSE_SPLIT_SIZE: usize = 32 * 1024 * 1024 * 1024; // 32GB
-const BLOCK_SIZE: usize = 64 * 1024;
+const DEFAULT_BLOCK_SIZE: usize = 64 * 1024; // 64KB
+const DEFAULT_SST_FILE_SIZE: usize = 16 * 1024 * 1024; // 16MB
+const DEFAULT_REGION_SIZE: usize = 1024 * 1024 * 1024; // 1GB
+const DEFAULT_COARSE_SPLIT_SIZE: usize = 32 * 1024 * 1024 * 1024; // 32GB
+
 const ZSTD_COMPRESSION_LEVEL: i32 = 3;
 const FLUSH_FILE_CONCURRENCY: usize = 8;
 const CREATE_FILE_CONCURRENCY: usize = 32;
@@ -59,6 +62,7 @@ const MAX_RETRY_TIMES: usize = 10;
 const MAX_SLEEP_DURATION: Duration = Duration::from_secs(30);
 
 pub struct LoadTaskWorker {
+    config: LoadDataConfig,
     ctx: LoadDataContext,
     task_ctx: TaskContext,
     task_dir: PathBuf,
@@ -101,6 +105,25 @@ pub struct LoadTaskStates {
     pub error: String,
     pub created_files: usize,
     pub ingested_regions: usize,
+}
+
+#[derive(Clone)]
+pub struct LoadDataConfig {
+    pub block_size: usize,
+    pub sst_file_size: usize,
+    pub region_size: usize,
+    pub coarse_split_size: usize,
+}
+
+impl Default for LoadDataConfig {
+    fn default() -> Self {
+        Self {
+            block_size: DEFAULT_BLOCK_SIZE,
+            sst_file_size: DEFAULT_SST_FILE_SIZE,
+            region_size: DEFAULT_REGION_SIZE,
+            coarse_split_size: DEFAULT_COARSE_SPLIT_SIZE,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -147,6 +170,11 @@ impl LoadTaskScheduler {
         states.error.clone()
     }
 
+    pub fn states(&self) -> LoadTaskStates {
+        let states = self.states.lock().unwrap();
+        states.clone()
+    }
+
     pub(crate) fn add_created_files_count(&self) {
         let mut states = self.states.lock().unwrap();
         states.created_files += 1;
@@ -181,7 +209,7 @@ impl LoadTaskScheduler {
 }
 
 impl LoadTaskWorker {
-    pub fn new(context: LoadDataContext, task_ctx: TaskContext) -> Self {
+    pub fn new(config: LoadDataConfig, context: LoadDataContext, task_ctx: TaskContext) -> Self {
         let (sender, receiver) = tikv_util::mpsc::unbounded();
         let mut states = LoadTaskStates::default();
         states.start_ts = task_ctx.start_ts;
@@ -193,6 +221,7 @@ impl LoadTaskWorker {
         let (file_tx, file_rx) = tikv_util::mpsc::unbounded();
         let task_dir = context.dir.join(format!("{}", task_ctx.start_ts));
         Self {
+            config,
             ctx: context,
             task_ctx,
             task_dir,
@@ -495,6 +524,7 @@ impl LoadTaskWorker {
         compression_type: u8,
     ) {
         let ctx = self.ctx.clone();
+        let block_size = self.config.block_size;
         let start_ts = self.task_ctx.start_ts;
         let encryption_key = self.task_ctx.encryption_key.clone();
 
@@ -502,7 +532,7 @@ impl LoadTaskWorker {
             info!("{} start build sst file {}", start_ts, file_id);
             let mut builder = Builder::new(
                 file_id,
-                BLOCK_SIZE,
+                block_size,
                 compression_type,
                 ZSTD_COMPRESSION_LEVEL,
                 encryption_key,
@@ -546,7 +576,7 @@ impl LoadTaskWorker {
     }
 
     fn read_batch(&mut self, merge_iter: &mut MergeIterator) -> Result<Vec<u8>> {
-        let mut buf = Vec::with_capacity(SST_FILE_SIZE);
+        let mut buf = Vec::with_capacity(self.config.sst_file_size);
         let mut pre_table_id = 0;
         while merge_iter.valid() {
             let key = merge_iter.key();
@@ -607,7 +637,7 @@ impl LoadTaskWorker {
                     if retry >= MAX_RETRY_TIMES {
                         return Err(Error::PdError(e));
                     }
-                    std::thread::sleep(std::cmp::max(
+                    std::thread::sleep(std::cmp::min(
                         MAX_SLEEP_DURATION,
                         2_u32.pow(retry as u32) * RETRY_SLEEP_DURATION,
                     ));
@@ -637,7 +667,8 @@ impl LoadTaskWorker {
         sst_metas.sort_by(|a, b| a.id.cmp(&b.id));
         let key_prefix = self.task_ctx.key_prefix.to_vec();
         let inner_key_off = self.task_ctx.inner_key_off.unwrap();
-        let coarse_split_keys = gen_split_keys(&key_prefix, &sst_metas, COARSE_SPLIT_SIZE, true);
+        let coarse_split_keys =
+            gen_split_keys(&key_prefix, &sst_metas, self.config.coarse_split_size, true);
         let new_regions_id = self.split_regions(&coarse_split_keys)?;
         for i in 0..coarse_split_keys.len() - 1 {
             let mut encoded_start_key = coarse_split_keys[i].as_slice();
@@ -672,7 +703,7 @@ impl LoadTaskWorker {
 
     fn ingest_group(&self, sst_metas: Vec<SstMeta>) -> Result<()> {
         let key_prefix = self.task_ctx.key_prefix.to_vec();
-        let split_keys = gen_split_keys(&key_prefix, &sst_metas, REGION_SIZE, false);
+        let split_keys = gen_split_keys(&key_prefix, &sst_metas, self.config.region_size, false);
         if !split_keys.is_empty() {
             self.split_regions(&split_keys)?;
         }
@@ -683,20 +714,82 @@ impl LoadTaskWorker {
             last_key.push(0);
             new_region_key(&key_prefix, &last_key)
         };
-        let regions = self.ctx.runtime.block_on(self.ctx.pd.scan_regions(
-            outer_first_key,
-            outer_last_key,
+
+        let mut success_ranges = MergeRanges::default(); // keys of `success_ranges` are encoded. 
+        let mut last_error: Option<Error> = None;
+        let is_error_retryable = |err: &Error| {
+            matches!(
+                err,
+                Error::RegionNotFound(_)
+                    | Error::LeaderNotFound(_)
+                    | Error::RegionError(..)
+                    | Error::PdError(_)
+                    | Error::HyperError(_)
+            )
+        };
+        for retry in 0..MAX_RETRY_TIMES {
+            match self.ingest_group_to_range(
+                &key_prefix,
+                &sst_metas,
+                outer_first_key.clone(),
+                outer_last_key.clone(),
+                &mut success_ranges,
+            ) {
+                Ok(_) => {
+                    debug_assert!(success_ranges.covered(&outer_first_key, &outer_last_key));
+                    return Ok(());
+                }
+                Err(err) if is_error_retryable(&err) => {
+                    warn!(
+                        "{} ingest_group_to_range failed {:?}, retry {}",
+                        self.task_ctx.start_ts, err, retry
+                    );
+                    last_error = Some(err);
+                    std::thread::sleep(std::cmp::min(
+                        MAX_SLEEP_DURATION,
+                        2_u32.pow(retry as u32) * RETRY_SLEEP_DURATION,
+                    ));
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Err(last_error.unwrap())
+    }
+
+    fn ingest_group_to_range(
+        &self,
+        key_prefix: &[u8],
+        sst_metas: &[SstMeta],
+        outer_first_key: Vec<u8>,
+        outer_last_key: Vec<u8>,
+        success_ranges: &mut MergeRanges,
+    ) -> Result<()> {
+        let mut regions = self.ctx.runtime.block_on(self.ctx.pd.scan_regions(
+            outer_first_key.clone(),
+            outer_last_key.clone(),
             usize::MAX,
         ))?;
-        info!("scanned regions {:?}", regions);
-        // TODO: verify regions. In case the regions is not intact, we will silently
-        // miss to ingest some chunks.
+        verify_regions_boundary(&outer_first_key, &outer_last_key, &regions)?;
+        debug!("scanned regions {:?}", regions);
+        if !success_ranges.is_empty() {
+            regions.drain_filter(|region| {
+                success_ranges.covered(&region.get_region().start_key, &region.get_region().end_key)
+            });
+        }
+        info!("scanned and filtered regions {:?}", regions);
+
+        let mut handle_ingest_res = |res: Result<metapb::Region>| -> Result<()> {
+            res.map(|mut region| {
+                success_ranges.insert(region.take_start_key(), region.take_end_key());
+                self.scheduler.add_ingested_regions();
+            })
+        };
+
         let (tx, rx) = tikv_util::mpsc::unbounded();
         let mut msg_cnt = 0;
         for mut pd_region in regions {
             let region = pd_region.get_region();
-            let cs =
-                build_ingest_files(key_prefix.len(), region, &sst_metas, self.task_ctx.start_ts);
+            let cs = build_ingest_files(key_prefix.len(), region, sst_metas);
             if cs.get_ingest_files().get_table_creates().is_empty() {
                 continue;
             }
@@ -706,22 +799,23 @@ impl LoadTaskWorker {
             let pd_cli = self.ctx.pd.clone();
             let tx = tx.clone();
             self.ctx.runtime.spawn(async move {
-                info!("ingest file {:?}", cs);
                 let region = pd_region.take_region();
                 let leader = pd_region.take_leader();
-                let res = ingest_files_to_leader(pd_cli, cs, region, leader).await;
-                let _ = tx.send(res);
+                info!(
+                    "ingest_group_to_range: region: {:?}, leader: {:?}, cs: {:?}",
+                    region, leader, cs
+                );
+                let res = ingest_files_to_leader(pd_cli, cs, &region, leader).await;
+                let _ = tx.send(res.map(|_| region));
             });
             if msg_cnt < INGEST_CONCURRENCY {
                 msg_cnt += 1;
             } else {
-                rx.recv().unwrap()?;
-                self.scheduler.add_ingested_regions();
+                handle_ingest_res(rx.recv().unwrap())?;
             }
         }
         for _ in 0..msg_cnt {
-            rx.recv().unwrap()?;
-            self.scheduler.add_ingested_regions();
+            handle_ingest_res(rx.recv().unwrap())?;
         }
         Ok(())
     }
@@ -751,17 +845,13 @@ impl LoadTaskWorker {
 async fn ingest_files_to_leader(
     pd: Arc<dyn PdClient>,
     cs: kvenginepb::ChangeSet,
-    region: metapb::Region,
+    region: &metapb::Region,
     mut leader: metapb::Peer,
 ) -> Result<()> {
     let http_client = hyper::client::Client::new();
+    // Loop for retry on "not leader".
     loop {
-        let store_id = if leader.store_id > 0 {
-            leader.store_id
-        } else {
-            get_leader_store(&pd, region.get_id()).await?
-        };
-        let store = pd.get_store_async(store_id).await?;
+        let store = get_leader_store(&pd, region.get_id(), Some(&leader)).await?;
         let uri = Uri::from_str(&format!(
             "http://{}/ingest_files?cluster_id={}",
             &store.status_address,
@@ -775,17 +865,19 @@ async fn ingest_files_to_leader(
             let body = hyper::body::to_bytes(resp.into_body()).await?;
             let mut errpb = kvproto::errorpb::Error::new();
             errpb.merge_from_bytes(&body).unwrap();
-            if errpb.has_region_not_initialized() {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                continue;
-            } else if errpb.has_not_leader() {
+            let tag = ShardTag::new(
+                store.get_id(),
+                IdVer::new(region.get_id(), region.get_region_epoch().get_version()),
+            );
+            warn!("{} ingest_files_to_leader failed {:?}", tag, errpb);
+            if errpb.has_not_leader() {
                 leader = errpb.mut_not_leader().take_leader();
                 if leader.store_id == 0 {
-                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    return Err(Error::LeaderNotFound(region.get_id()));
                 }
                 continue;
             } else {
-                return Err(Error::IngestFiles(format!("{:?}", errpb)));
+                return Err(Error::RegionError(region.get_id(), errpb));
             }
         }
         return Ok(());
@@ -797,8 +889,8 @@ async fn get_shard_meta(pd: &Arc<dyn PdClient>, shard_id: u64) -> Result<kvengin
     let mut retry = 0;
     loop {
         if retry > MAX_RETRY_TIMES {
-            return Err(Error::Other(format!(
-                "get_shard_stats failed, shard_id: {}",
+            return Err(Error::Other(box_err!(
+                "get_shard_meta failed, shard_id: {}",
                 shard_id
             )));
         }
@@ -807,15 +899,13 @@ async fn get_shard_meta(pd: &Arc<dyn PdClient>, shard_id: u64) -> Result<kvengin
         }
         retry += 1;
 
-        let store_id_res = get_leader_store(pd, shard_id).await;
-        if store_id_res.is_err() {
-            error!("get_shard_stats error: {:?}", store_id_res.unwrap_err());
-            continue;
-        }
-        let store_id = store_id_res.unwrap();
-        let store_res = pd.get_store_async(store_id).await;
+        let store_res = get_leader_store(pd, shard_id, None).await;
         if store_res.is_err() {
-            error!("get_shard_stats error: {:?}", store_res.unwrap_err());
+            error!(
+                "get_shard_meta: get leader error: {:?}",
+                store_res.unwrap_err()
+            );
+            tokio::time::sleep(Duration::from_secs(1)).await;
             continue;
         }
         let store = store_res.unwrap();
@@ -841,7 +931,7 @@ async fn get_shard_meta(pd: &Arc<dyn PdClient>, shard_id: u64) -> Result<kvengin
             }
             Err(e) => {
                 error!(
-                    "get_shard_stats failed, shard_id: {}, error: {:?}",
+                    "get_shard_meta failed, shard_id: {}, error: {:?}",
                     shard_id, e
                 );
                 continue;
@@ -850,29 +940,31 @@ async fn get_shard_meta(pd: &Arc<dyn PdClient>, shard_id: u64) -> Result<kvengin
     }
 }
 
-async fn get_leader_store(pd: &Arc<dyn PdClient>, region_id: u64) -> Result<u64> {
-    let start = Instant::now();
-    let timeout = Duration::from_secs(60);
-    while start.saturating_elapsed() < timeout {
+async fn get_leader_store(
+    pd: &Arc<dyn PdClient>,
+    region_id: u64,
+    leader: Option<&metapb::Peer>,
+) -> Result<metapb::Store> {
+    let store_id = if leader.is_none() || leader.unwrap().store_id == 0 {
         let res = pd.get_region_leader_by_id(region_id).await?;
         if res.is_none() {
             return Err(Error::RegionNotFound(region_id));
         }
         let (_, leader) = res.unwrap();
-        if leader.store_id > 0 {
-            return Ok(leader.store_id);
+        if leader.store_id == 0 {
+            return Err(Error::LeaderNotFound(region_id));
         }
-        warn!("leader not found, retry get region leader by id");
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
-    Err(Error::LeaderNotFound(region_id))
+        leader.store_id
+    } else {
+        leader.unwrap().store_id
+    };
+    Ok(pd.get_store_async(store_id).await?)
 }
 
 fn build_ingest_files(
     inner_key_off: usize,
     region: &metapb::Region,
     sst_metas: &[SstMeta],
-    start_ts: u64,
 ) -> kvenginepb::ChangeSet {
     let raw_start_key = raw_start_key(region);
     let inner_start_key = &raw_start_key[inner_key_off..];
@@ -882,11 +974,7 @@ fn build_ingest_files(
     cs.set_shard_id(region.get_id());
     cs.set_shard_ver(region.get_region_epoch().get_version());
     let ingest_files = cs.mut_ingest_files();
-    let properties = ingest_files.mut_properties();
-    properties.mut_keys().push(kvengine::INGEST_ID_KEY.into());
-    properties
-        .mut_values()
-        .push(start_ts.to_le_bytes().to_vec());
+    // Don't set INGEST_ID_KEY property to indicate that it's from load data.
     let table_creates = ingest_files.mut_table_creates();
     for sst_meta in sst_metas {
         if sst_meta.biggest.as_slice() < inner_start_key {
@@ -1007,4 +1095,82 @@ fn flush_to_local_file(
         kv_pairs.len(),
         reader,
     ))
+}
+
+fn verify_regions_boundary(
+    start_key: &[u8],
+    end_key: &[u8],
+    regions: &[pdpb::Region],
+) -> Result<()> {
+    if regions.is_empty() {
+        return Err(box_err!("no region"));
+    }
+
+    let first_region = regions.first().unwrap();
+    let last_region = regions.last().unwrap();
+    if first_region.get_region().get_start_key() > start_key {
+        return Err(box_err!(
+            "unexpected start key of first region: {:?}, start_key: {:?}",
+            first_region,
+            start_key
+        ));
+    } else if last_region.get_region().get_end_key() < end_key {
+        return Err(box_err!(
+            "unexpected end key of last region: {:?}, end_key: {:?}",
+            last_region,
+            end_key
+        ));
+    }
+
+    for region in regions.windows(2) {
+        if region[0].get_region().get_end_key() != region[1].get_region().get_start_key() {
+            return Err(box_err!(
+                "region boundary not match: {:?}, {:?}",
+                region[0],
+                region[1]
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_verify_regions_boundary() {
+        let make_key = |key: u64| -> Vec<u8> { format!("k{:02}", key).into_bytes() };
+        let make_region = |start: u64, end: u64| -> pdpb::Region {
+            let mut region = metapb::Region::default();
+            region.set_start_key(make_key(start));
+            region.set_end_key(make_key(end));
+
+            let mut pd_region = pdpb::Region::default();
+            pd_region.set_region(region);
+            pd_region
+        };
+
+        let regions1 = vec![
+            make_region(1, 2),
+            make_region(2, 4),
+            make_region(4, 6),
+            make_region(6, 10),
+            make_region(10, 14),
+        ];
+        let regions2 = vec![make_region(1, 2), make_region(4, 6)];
+
+        let cases = vec![
+            (&regions1, 1, 14, true), // start, end, expect_is_ok
+            (&regions1, 1, 2, true),
+            (&regions1, 0, 2, false),
+            (&regions1, 2, 15, false),
+            (&regions2, 1, 6, false),
+        ];
+        for (idx, (regions, start, end, expect_is_ok)) in cases.into_iter().enumerate() {
+            let res = verify_regions_boundary(&make_key(start), &make_key(end), regions);
+            assert_eq!(res.is_ok(), expect_is_ok, "case {}: {:?}", idx, res);
+        }
+    }
 }

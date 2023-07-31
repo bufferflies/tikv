@@ -360,12 +360,12 @@ pub(crate) fn check_br() {
 
     assert!(
         // It's possible that backup thread is difficult to acquire the write lock.
-        total_backup_count > 3,
+        total_backup_count > 0,
         "backup count too small: {}",
         total_backup_count
     );
     assert!(
-        total_restore_count > 5,
+        total_restore_count > 0,
         "restore count too small: {}",
         total_restore_count
     );

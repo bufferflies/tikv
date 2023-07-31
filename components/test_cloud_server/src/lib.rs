@@ -5,8 +5,10 @@
 pub mod client;
 pub mod cluster;
 pub mod keyspace;
+pub mod load_data;
 pub mod oss;
 pub mod scheduler;
+mod table;
 mod txnlock;
 
 pub use cluster::*;

@@ -6748,6 +6748,7 @@ dependencies = [
  "hyper",
  "kvengine",
  "kvproto",
+ "load_data",
  "log_wrappers",
  "pd_client",
  "quick-xml 0.23.1",

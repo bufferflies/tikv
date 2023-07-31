@@ -69,6 +69,12 @@ impl RefStore {
     pub fn del_kv(&mut self, key: Vec<u8>) {
         self.0.insert(key, None);
     }
+
+    pub fn ingest(&mut self, other: RefStore) {
+        for (k, v) in other.0 {
+            self.0.insert(k, v);
+        }
+    }
 }
 
 impl Deref for RefStore {

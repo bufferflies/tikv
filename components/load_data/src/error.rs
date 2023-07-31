@@ -26,12 +26,14 @@ pub enum Error {
     RegionNotFound(u64),
     #[error("leader of region {0} not found")]
     LeaderNotFound(u64),
+    #[error("region {0} error {1:?}")]
+    RegionError(u64, kvproto::errorpb::Error),
     #[error("duplicated key {0}")]
     DuplicatedKey(String),
-    #[error("ReachLimit {0}")]
+    #[error("reach limit {0}")]
     ReachConcurrencyLimit(usize),
-    #[error("Other {0}")]
-    Other(String),
+    #[error("other {0}")]
+    Other(#[from] Box<dyn std::error::Error + Send + Sync>),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
