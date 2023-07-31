@@ -149,7 +149,7 @@ impl Debug for SnapAccess {
 pub struct SnapAccessCore {
     tag: ShardTag,
     managed_ts: u64,
-    base_version: u64,
+    _base_version: u64,
     meta_seq: u64,
     write_sequence: u64,
     data: ShardData,
@@ -169,7 +169,7 @@ impl SnapAccessCore {
             tag: shard.tag(),
             write_sequence,
             meta_seq,
-            base_version,
+            _base_version: base_version,
             managed_ts: 0,
             data,
             get_hint: Mutex::new(Hint::new()),
@@ -577,8 +577,12 @@ impl SnapAccessCore {
         false
     }
 
+    /// NOTE: `ChangeSet.snapshot.data_sequence` is not set, as it's not able to
+    /// get the accurate data sequence of ShardMeta from Shard.
     fn to_change_set(&self, outer_ranges: &[(Bytes, Bytes)], ignore_locks: bool) -> pb::ChangeSet {
         let mut cs = new_change_set(self.get_tag().id_ver.id, self.get_tag().id_ver.ver);
+        cs.set_sequence(self.meta_seq);
+
         let snap = cs.mut_snapshot();
         let mut properties = pb::Properties::new();
         properties.shard_id = self.get_tag().id_ver.id;
@@ -586,12 +590,7 @@ impl SnapAccessCore {
             properties.mut_keys().push(ENCRYPTION_KEY.to_string());
             properties.mut_values().push(encryption_key.export());
         }
-        let data_sequence = if !self.data.l0_tbls.is_empty() {
-            self.data.l0_tbls[0].version() - self.base_version
-        } else {
-            self.meta_seq
-        };
-        snap.set_data_sequence(data_sequence);
+
         snap.set_outer_start(self.get_start_key().to_vec());
         snap.set_outer_end(self.get_end_key().to_vec());
         snap.set_inner_key_off(self.data.range.inner_key_off as u32);
@@ -699,10 +698,7 @@ impl SnapAccessCore {
             let ranges_key = hex::encode(ranges_bytes);
             format!(
                 "{}:{}:{}:{}",
-                cs.shard_id,
-                cs.shard_ver,
-                cs.get_snapshot().data_sequence,
-                ranges_key,
+                cs.shard_id, cs.shard_ver, cs.sequence, ranges_key,
             )
         } else {
             "".to_string()
