@@ -1223,6 +1223,7 @@ dependencies = [
  "nix 0.11.1",
  "online_config",
  "openssl",
+ "overload_protector",
  "paste",
  "pd_client",
  "pin-project",
@@ -4254,6 +4255,19 @@ name = "os_str_bytes"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8e22443d1643a904602595ba1cd8f7d896afe56d26712531c5ff73a15b2fbf64"
+
+[[package]]
+name = "overload_protector"
+version = "0.1.0"
+dependencies = [
+ "online_config",
+ "serde",
+ "serde_derive",
+ "slog",
+ "slog-global",
+ "tikv_util",
+ "txn_types",
+]
 
 [[package]]
 name = "page_size"
@@ -7295,6 +7309,7 @@ dependencies = [
  "num_cpus",
  "online_config",
  "openssl",
+ "overload_protector",
  "panic_hook",
  "parking_lot 0.12.0",
  "paste",

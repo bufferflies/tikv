@@ -128,6 +128,7 @@ num-traits = "0.2.14"
 num_cpus = "1"
 online_config = { workspace = true }
 openssl = "0.10"
+overload_protector = { workspace = true }
 parking_lot = "0.12"
 paste = "1.0"
 pd_client = { workspace = true }
@@ -271,6 +272,7 @@ members = [
   "components/log_wrappers",
   "components/native_br",
   "components/online_config",
+  "components/overload_protector",
   "components/panic_hook",
   "components/pd_client",
   "components/profiler",
@@ -353,6 +355,7 @@ log_wrappers = { path = "components/log_wrappers" }
 memory_trace_macros = { path = "components/memory_trace_macros" }
 native_br = { path = "components/native_br" }
 online_config = { path = "components/online_config" }
+overload_protector = { path = "components/overload_protector" }
 panic_hook = { path = "components/panic_hook" }
 pd_client = { path = "components/pd_client" }
 profiler = { path = "components/profiler" }

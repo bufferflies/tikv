@@ -34,6 +34,7 @@ use kvengine::dfs::Dfs;
 use kvproto::{
     brpb::create_backup, deadlock::create_deadlock, import_sstpb_grpc::create_import_sst,
 };
+use overload_protector::{OverloadProtector, OverloadProtectorWorker};
 use pd_client::{PdClient, RpcClient};
 use raftstore::{
     coprocessor::{
@@ -118,6 +119,7 @@ pub struct TikvServer {
     background_worker: Worker,
     quota_limiter: Arc<QuotaLimiter>,
     io_rate_limiter: Arc<IoRateLimiter>,
+    overload_protector: OverloadProtector,
 }
 
 struct TikvEngines {
@@ -260,6 +262,11 @@ impl TikvServer {
             config.quota.max_delay_duration,
             config.quota.enable_auto_tune,
         ));
+        let mut overload_protector_worker = OverloadProtectorWorker::new(config.overload.clone());
+        let overload_protector = overload_protector_worker.get_protector();
+        std::thread::spawn(move || {
+            overload_protector_worker.run();
+        });
         info!("created tikv server");
         TikvServer {
             config,
@@ -282,6 +289,7 @@ impl TikvServer {
             background_worker,
             quota_limiter,
             io_rate_limiter,
+            overload_protector,
         }
     }
 
@@ -552,6 +560,15 @@ impl TikvServer {
             Box::new(cfg_manager),
         );
 
+        let overload_cfg_manager = overload_protector::OverloadConfigManager::new(
+            self.overload_protector.clone(),
+            self.config.overload.clone(),
+        );
+        cfg_controller.register(
+            tikv::config::Module::Overload,
+            Box::new(overload_cfg_manager),
+        );
+
         let storage_read_pool_handle = if self.config.readpool.storage.use_unified_pool() {
             unified_read_pool.as_ref().unwrap().handle()
         } else {
@@ -625,6 +642,7 @@ impl TikvServer {
             self.concurrency_manager.clone(),
             resource_tag_factory,
             Arc::new(QuotaLimiter::default()),
+            Some(self.overload_protector.clone()),
         );
         copr.set_remote_url(self.config.dfs.remote_analyzer_addr.clone());
         // Create server
@@ -853,6 +871,7 @@ impl TikvServer {
 
         self.to_stop.into_iter().for_each(|s| s.stop());
         self.raw_engines.raft.stop_worker();
+        self.overload_protector.stop();
     }
 
     pub fn get_kv_engine(&self) -> kvengine::Engine {

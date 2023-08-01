@@ -16,6 +16,7 @@ use futures::{channel::mpsc, prelude::*};
 use futures_executor::block_on;
 use kvengine::UserMeta;
 use kvproto::{coprocessor as coppb, errorpb, kvrpcpb};
+use overload_protector::{CopTaskStats, OverloadProtector};
 use protobuf::{CodedInputStream, Message};
 use resource_metering::{FutureExt, ResourceTagFactory, StreamExt};
 use tidb_query_common::execute_stats::ExecSummary;
@@ -83,6 +84,8 @@ pub struct Endpoint<E: Engine> {
     quota_limiter: Arc<QuotaLimiter>,
 
     remote_ctx: Option<RemoteContext>,
+
+    pub overload_protector: Option<OverloadProtector>,
 }
 
 impl<E: Engine> tikv_util::AssertSend for Endpoint<E> {}
@@ -94,6 +97,7 @@ impl<E: Engine> Endpoint<E> {
         concurrency_manager: ConcurrencyManager,
         resource_tag_factory: ResourceTagFactory,
         quota_limiter: Arc<QuotaLimiter>,
+        overload_protector: Option<OverloadProtector>,
     ) -> Self {
         // FIXME: When yatp is used, we need to limit coprocessor requests in progress
         // to avoid using too much memory. However, if there are a number of large
@@ -120,6 +124,7 @@ impl<E: Engine> Endpoint<E> {
             _phantom: Default::default(),
             quota_limiter,
             remote_ctx: None,
+            overload_protector,
         }
     }
 
@@ -572,6 +577,21 @@ impl<E: Engine> Endpoint<E> {
         mut req: coppb::Request,
         peer: Option<String>,
     ) -> impl Future<Output = MemoryTraceGuard<coppb::Response>> {
+        let overload_protector = self.overload_protector.clone();
+        let start_ts = req.start_ts;
+        if let Some(protector) = &overload_protector {
+            if let Some(stats) = protector.is_overloaded(req.start_ts) {
+                let store_id = req.get_context().get_peer().get_store_id();
+                return async move {
+                    make_error_response(Error::OverloadProtection(format!(
+                        "{:?} on store {}",
+                        stats, store_id
+                    )))
+                    .into()
+                }
+                .boxed();
+            }
+        }
         let tracker = GLOBAL_TRACKERS.insert(::tracker::Tracker::new(RequestInfo::new(
             req.get_context(),
             RequestType::Unknown,
@@ -597,12 +617,17 @@ impl<E: Engine> Endpoint<E> {
                     GLOBAL_TRACKERS.with_tracker(tracker, |tracker| {
                         tracker.write_scan_detail(res.mut_exec_details_v2().mut_scan_detail_v2());
                     });
+                    if let Some(protector) = overload_protector {
+                        let stats = make_cop_task_stats(start_ts, &res);
+                        protector.report_cop_task_stats(stats);
+                    }
                     res
                 }
             };
             GLOBAL_TRACKERS.remove(tracker);
             res
         }
+        .boxed()
     }
 
     // process_batch_tasks process the input batched coprocessor tasks if any,
@@ -1218,6 +1243,10 @@ fn make_error_batch_response(batch_resp: &mut coppb::StoreBatchTaskResponse, e: 
             errorpb.set_server_is_busy(server_is_busy_err);
             batch_resp.set_region_error(errorpb);
         }
+        Error::OverloadProtection(_) => {
+            tag = "overload_protection";
+            batch_resp.set_other_error(e.to_string());
+        }
         Error::Other(_) => {
             tag = "other";
             batch_resp.set_other_error(e.to_string());
@@ -1254,6 +1283,10 @@ fn make_error_response(e: Error) -> coppb::Response {
             errorpb.set_message(e.to_string());
             errorpb.set_server_is_busy(server_is_busy_err);
             resp.set_region_error(errorpb);
+        }
+        Error::OverloadProtection(_) => {
+            tag = "overload_protector";
+            resp.set_other_error(e.to_string());
         }
         Error::Other(_) => {
             tag = "other";
@@ -1293,6 +1326,10 @@ fn make_error_delegate_response(e: Error) -> coppb::DelegateResponse {
             errorpb.set_server_is_busy(server_is_busy_err);
             resp.set_region_error(errorpb);
         }
+        Error::OverloadProtection(_) => {
+            tag = "overload_protection";
+            resp.set_other_error(e.to_string());
+        }
         Error::Other(_) => {
             tag = "other";
             resp.set_other_error(e.to_string());
@@ -1300,6 +1337,28 @@ fn make_error_delegate_response(e: Error) -> coppb::DelegateResponse {
     };
     COPR_REQ_ERROR.with_label_values(&[tag]).inc();
     resp
+}
+
+fn make_cop_task_stats(start_ts: u64, resp: &coppb::Response) -> CopTaskStats {
+    let mut stats = CopTaskStats::default();
+    stats.task_id = start_ts;
+    stats.num_reqs = 1;
+    let exec_details = resp.get_exec_details_v2();
+    stats.num_keys = exec_details.get_scan_detail_v2().get_processed_versions();
+    stats.data_size = exec_details
+        .get_scan_detail_v2()
+        .get_processed_versions_size();
+    stats.duration_ms = exec_details.get_time_detail().get_process_wall_time_ms() as u32;
+    for batch_resp in resp.get_batch_responses() {
+        stats.num_reqs += 1;
+        let exec_details = batch_resp.get_exec_details_v2();
+        stats.num_keys += exec_details.get_scan_detail_v2().get_processed_versions();
+        stats.data_size += exec_details
+            .get_scan_detail_v2()
+            .get_processed_versions_size();
+        stats.duration_ms += exec_details.get_time_detail().get_process_wall_time_ms() as u32;
+    }
+    stats
 }
 
 #[cfg(test)]
@@ -1482,6 +1541,7 @@ mod tests {
             cm,
             ResourceTagFactory::new_for_test(),
             Arc::new(QuotaLimiter::default()),
+            None,
         );
 
         // a normal request
@@ -1523,6 +1583,7 @@ mod tests {
             cm,
             ResourceTagFactory::new_for_test(),
             Arc::new(QuotaLimiter::default()),
+            None,
         );
         copr.recursion_limit = 100;
 
@@ -1561,6 +1622,7 @@ mod tests {
             cm,
             ResourceTagFactory::new_for_test(),
             Arc::new(QuotaLimiter::default()),
+            None,
         );
 
         let mut req = coppb::Request::default();
@@ -1584,6 +1646,7 @@ mod tests {
             cm,
             ResourceTagFactory::new_for_test(),
             Arc::new(QuotaLimiter::default()),
+            None,
         );
 
         let mut req = coppb::Request::default();
@@ -1632,6 +1695,7 @@ mod tests {
             cm,
             ResourceTagFactory::new_for_test(),
             Arc::new(QuotaLimiter::default()),
+            None,
         );
 
         let (tx, rx) = mpsc::channel();
@@ -1680,6 +1744,7 @@ mod tests {
             cm,
             ResourceTagFactory::new_for_test(),
             Arc::new(QuotaLimiter::default()),
+            None,
         );
 
         let handler_builder =
@@ -1705,6 +1770,7 @@ mod tests {
             cm,
             ResourceTagFactory::new_for_test(),
             Arc::new(QuotaLimiter::default()),
+            None,
         );
 
         // Fail immediately
@@ -1758,6 +1824,7 @@ mod tests {
             cm,
             ResourceTagFactory::new_for_test(),
             Arc::new(QuotaLimiter::default()),
+            None,
         );
 
         let handler_builder = Box::new(|_, _: &_| Ok(StreamFixture::new(vec![]).into_boxed()));
@@ -1786,6 +1853,7 @@ mod tests {
             cm,
             ResourceTagFactory::new_for_test(),
             Arc::new(QuotaLimiter::default()),
+            None,
         );
 
         // handler returns `finished == true` should not be called again.
@@ -1885,6 +1953,7 @@ mod tests {
             cm,
             ResourceTagFactory::new_for_test(),
             Arc::new(QuotaLimiter::default()),
+            None,
         );
 
         let counter = Arc::new(atomic::AtomicIsize::new(0));
@@ -1954,6 +2023,7 @@ mod tests {
             cm,
             ResourceTagFactory::new_for_test(),
             Arc::new(QuotaLimiter::default()),
+            None,
         );
 
         let (tx, rx) = std::sync::mpsc::channel();
@@ -2277,6 +2347,7 @@ mod tests {
             cm,
             ResourceTagFactory::new_for_test(),
             Arc::new(QuotaLimiter::default()),
+            None,
         );
 
         {
@@ -2340,6 +2411,7 @@ mod tests {
             cm,
             ResourceTagFactory::new_for_test(),
             Arc::new(QuotaLimiter::default()),
+            None,
         );
         let mut req = coppb::Request::default();
         req.mut_context().set_isolation_level(IsolationLevel::Si);

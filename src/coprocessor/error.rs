@@ -26,6 +26,9 @@ pub enum Error {
     #[error("Coprocessor task canceled due to exceeding max pending tasks")]
     MaxPendingTasksExceeded,
 
+    #[error("Overload protection due to {0}")]
+    OverloadProtection(String),
+
     #[error("{0}")]
     Other(String),
 }
@@ -126,6 +129,7 @@ impl ErrorCodeExt for Error {
             Error::Locked(_) => error_code::coprocessor::LOCKED,
             Error::DeadlineExceeded => error_code::coprocessor::DEADLINE_EXCEEDED,
             Error::MaxPendingTasksExceeded => error_code::coprocessor::MAX_PENDING_TASKS_EXCEEDED,
+            Error::OverloadProtection(_) => error_code::coprocessor::OVERLOAD_PROTECTION,
             Error::Other(_) => error_code::UNKNOWN,
         }
     }

@@ -45,6 +45,7 @@ use keys::region_raft_prefix_len;
 use kvengine::{dfs::DFSConfig, KvEngineConfig};
 use kvproto::kvrpcpb::ApiVersion;
 use online_config::{ConfigChange, ConfigManager, ConfigValue, OnlineConfig, Result as CfgResult};
+use overload_protector::OverloadConfig;
 use pd_client::Config as PdConfig;
 use raft_log_engine::{
     RaftEngineConfig as RawRaftEngineConfig, ReadableSize as RaftEngineReadableSize,
@@ -2970,6 +2971,9 @@ pub struct TikvConfig {
     #[online_config(skip)]
     pub dfs: DFSConfig,
 
+    #[online_config(submodule)]
+    pub overload: OverloadConfig,
+
     #[online_config(skip)]
     pub causal_ts: CausalTsConfig,
 }
@@ -3018,6 +3022,7 @@ impl Default for TikvConfig {
             resource_metering: ResourceMeteringConfig::default(),
             backup_stream: BackupStreamConfig::default(),
             dfs: DFSConfig::default(),
+            overload: OverloadConfig::default(),
             causal_ts: CausalTsConfig::default(),
         }
     }
@@ -3927,6 +3932,7 @@ pub enum Module {
     Cdc,
     ResolvedTs,
     ResourceMetering,
+    Overload,
     BackupStream,
     Quota,
     Log,
@@ -3956,6 +3962,7 @@ impl From<&str> for Module {
             "cdc" => Module::Cdc,
             "resolved_ts" => Module::ResolvedTs,
             "resource_metering" => Module::ResourceMetering,
+            "overload" => Module::Overload,
             "quota" => Module::Quota,
             "log" => Module::Log,
             n => Module::Unknown(n.to_owned()),

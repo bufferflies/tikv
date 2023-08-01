@@ -6,6 +6,7 @@ define_error_codes!(
     LOCKED => ("Locked", "", ""),
     DEADLINE_EXCEEDED => ("DeadlineExceeded", "", ""),
     MAX_PENDING_TASKS_EXCEEDED => ("MaxPendingTasksExceeded", "", ""),
+    OVERLOAD_PROTECTION => ("OverloadProtection", "", ""),
 
     INVALID_DATA_TYPE => ("InvalidDataType", "", ""),
     ENCODING => ("Encoding", "", ""),
