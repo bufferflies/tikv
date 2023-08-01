@@ -21,10 +21,10 @@ use tidb_query_datatype::codec::table;
 use tikv::config::TikvConfig;
 use tikv_util::{codec::bytes::encode_bytes, info};
 
-use crate::alloc_node_id_vec;
+use crate::{alloc_node_id_vec, request_major_compact_on_store};
 
 const KEYSPACE_ID: u32 = 123;
-const DATA_COUNT: usize = 10000;
+const DATA_COUNT: usize = 2000;
 const DATA_BATCH_SIZE: usize = 10;
 const COMPRESSION_TYPE: u8 = ZSTD_COMPRESSION;
 
@@ -68,6 +68,7 @@ fn impl_test_load_data(enable_inner_key_off: bool) {
     let mut cluster = ServerCluster::new(node_ids.clone(), |_, conf: &mut TikvConfig| {
         conf.dfs = dfs_conf.clone();
         conf.enable_inner_key_offset = enable_inner_key_off;
+        conf.kvengine.compaction_request_version = 3;
     });
     cluster.wait_region_replicated(&[], 3);
     let pd_client = cluster.get_pd_client();
@@ -117,10 +118,34 @@ fn impl_test_load_data(enable_inner_key_off: bool) {
         max_in_mem_size: 1024, // 1KB
         master_key,
     };
+
+    // write table 1 and table 11, then trigger major compaction to build L3 file.
+    for i in (0..100).step_by(10) {
+        let key_prefix_1 = table_key_prefix(1);
+        let key_prefix_11 = table_key_prefix(11);
+        client.put_kv(
+            i..i + 10,
+            |i| i_to_key_with_prefix(&key_prefix_1, i),
+            i_to_val,
+        );
+        client.put_kv(
+            i..i + 10,
+            |i| i_to_key_with_prefix(&key_prefix_11, i),
+            i_to_val,
+        );
+    }
+    let stores = client.pd_client.get_all_stores(true).unwrap();
+    for store in &stores {
+        let query = format!("major_compact=true&keyspace_id={}", KEYSPACE_ID);
+        load_data_ctx
+            .runtime
+            .block_on(request_major_compact_on_store(store, query.as_str()))
+    }
+
     let scheduler = init_task(load_data_config, load_data_ctx, start_ts, commit_ts);
 
     // Put chunks.
-    let keyspace_prefix = ApiV2::get_txn_keyspace_prefix(KEYSPACE_ID);
+    let keyspace_prefix = table_key_prefix(5);
     let i_to_key = move |i: usize| -> Vec<u8> { i_to_key_with_prefix(&keyspace_prefix, i) };
     let (chunk_ids, ref_store) = put_chunks(
         &scheduler,
@@ -163,6 +188,15 @@ fn i_to_key_with_prefix(prefix: &[u8], i: usize) -> Vec<u8> {
     let mut key = prefix.to_vec();
     // load_data will parse table id from key
     key.extend(table::encode_row_key((i / 100 + 1) as i64, i as i64));
+    key
+}
+
+fn table_key_prefix(table_id: u64) -> Vec<u8> {
+    let mut key = vec![];
+    key.extend(ApiV2::get_txn_keyspace_prefix(KEYSPACE_ID));
+    key.extend(table::TABLE_PREFIX);
+    key.extend_from_slice(&table_id.to_be_bytes());
+    key.extend(table::RECORD_PREFIX_SEP);
     key
 }
 

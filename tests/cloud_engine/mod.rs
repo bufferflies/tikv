@@ -76,7 +76,7 @@ pub(crate) fn i_to_val(i: usize) -> Vec<u8> {
     format!("val_{:03}", i).into_bytes().repeat(3)
 }
 
-async fn request_major_compact_on_store(store: &Store, query: &str) {
+pub(crate) async fn request_major_compact_on_store(store: &Store, query: &str) {
     let uri = Uri::from_str(&format!(
         "http://{}/major-compact?{}",
         &store.status_address, query

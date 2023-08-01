@@ -1,7 +1,7 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     ops::Deref,
 };
 
@@ -17,7 +17,13 @@ use tikv_util::{
 };
 
 use crate::{
-    table::{memtable, memtable::CfTable, sstable, sstable::L0Builder, InnerKey, Iterator},
+    table::{
+        memtable,
+        memtable::CfTable,
+        sstable,
+        sstable::{L0Builder, L0Table, SsTable},
+        InnerKey, Iterator,
+    },
     *,
 };
 
@@ -87,6 +93,8 @@ pub(crate) struct InitialFlush {
     pub(crate) mem_tbls: Vec<memtable::CfTable>,
     pub(crate) base_version: u64,
     pub(crate) data_sequence: u64,
+    pub(crate) double_over_bound_l0s: Vec<L0Table>,
+    pub(crate) double_over_bound_tbls: Vec<SsTable>,
 }
 
 impl InitialFlush {
@@ -173,6 +181,17 @@ impl Engine {
                 .max()
                 .unwrap_or(0),
         );
+        let mut discard_overbound_tables: HashSet<u64> = HashSet::new();
+        for l0 in &flush.double_over_bound_l0s {
+            if !l0.has_data_in_range(task.inner_start(), task.inner_end()) {
+                discard_overbound_tables.insert(l0.id());
+            }
+        }
+        for tbl in &flush.double_over_bound_tbls {
+            if !tbl.has_overlap(task.inner_start(), task.inner_end(), false) {
+                discard_overbound_tables.insert(tbl.id());
+            }
+        }
         let mut cs = new_change_set(task.id_ver.id, task.id_ver.ver);
         let initial_flush = cs.mut_initial_flush();
         initial_flush.set_outer_start(task.range.outer_start.to_vec());
@@ -185,7 +204,8 @@ impl Engine {
             if task.overlap_table(
                 InnerKey::from_inner_buf(tbl_create.get_smallest()),
                 InnerKey::from_inner_buf(tbl_create.get_biggest()),
-            ) {
+            ) && !discard_overbound_tables.contains(&tbl_create.get_id())
+            {
                 initial_flush.mut_table_creates().push(tbl_create.clone());
             }
         }
@@ -193,7 +213,8 @@ impl Engine {
             if task.overlap_table(
                 InnerKey::from_inner_buf(l0_create.get_smallest()),
                 InnerKey::from_inner_buf(l0_create.get_biggest()),
-            ) {
+            ) && !discard_overbound_tables.contains(&l0_create.get_id())
+            {
                 initial_flush.mut_l0_creates().push(l0_create.clone());
             }
         }

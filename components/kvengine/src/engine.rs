@@ -475,6 +475,21 @@ impl EngineCore {
                 mem_tbls.push(mem_tbl.clone());
             }
         }
+        let mut double_over_bound_l0s = vec![];
+        for l0 in &data.l0_tbls {
+            if l0.smallest() < shard.inner_start() && l0.biggest() >= shard.inner_end() {
+                double_over_bound_l0s.push(l0.clone());
+            }
+        }
+        let mut double_over_bound_tbls = vec![];
+        data.for_each_level(|_cf, lvl| {
+            if let Some(tbl) = lvl.tables.first() {
+                if tbl.smallest() < shard.inner_start() && tbl.biggest() >= shard.inner_end() {
+                    double_over_bound_tbls.push(tbl.clone());
+                }
+            }
+            false
+        });
         self.send_flush_msg(FlushMsg::Task(Box::new(FlushTask::new_initial(
             shard,
             InitialFlush {
@@ -482,6 +497,8 @@ impl EngineCore {
                 mem_tbls,
                 base_version: shard.get_base_version(),
                 data_sequence,
+                double_over_bound_l0s,
+                double_over_bound_tbls,
             },
         ))));
     }
