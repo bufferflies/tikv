@@ -54,6 +54,8 @@ pub enum Error {
     WriteConflict(kvrpcpb::WriteConflict),
     #[error("Transaction not found {0:?}")]
     TxnNotFound(kvrpcpb::TxnNotFound),
+    #[error(transparent)]
+    Grpc(#[from] grpcio::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -941,7 +943,7 @@ impl ClusterClient {
             let mut split_req = SplitRegionRequest::default();
             split_req.set_context(ctx);
             split_req.set_split_key(key.to_vec());
-            let mut resp = client.split_region(&split_req).unwrap();
+            let mut resp = client.split_region(&split_req)?;
             if resp.has_region_error() {
                 let region_err = resp.get_region_error();
                 if self.handle_retryable_error(region_id, region_err) {

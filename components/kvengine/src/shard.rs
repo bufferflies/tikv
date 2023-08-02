@@ -1065,6 +1065,7 @@ impl LevelHandler {
             .get(key, version, key_hash, out_val_owner, self.level)
     }
 
+    // Note: the `key` may be on the left outside the returned sstable.
     pub(crate) fn get_table(&self, key: InnerKey<'_>) -> Option<&SsTable> {
         let idx = search(self.tables.len(), |i| self.tables[i].biggest() >= key);
         if idx >= self.tables.len() {

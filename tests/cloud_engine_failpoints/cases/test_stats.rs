@@ -39,10 +39,10 @@ fn test_estimated_size() {
     let fp_compact_l0 = "refresh_compaction_priority_for_l0";
     fail::cfg(fp_compact_l0, "return").unwrap();
     let ok = try_wait(
-        // Wait for L0 compaction finished.
+        // Wait for mem-table flush & L0 compaction finished.
         || {
             let stats = cluster.get_kvengine(node_ids[0]).get_all_shard_stats();
-            stats[0].l0_table_count == 0
+            stats[0].mem_table_size == 0 && stats[0].l0_table_count == 0
         },
         10,
     );
