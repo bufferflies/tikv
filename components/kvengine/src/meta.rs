@@ -575,6 +575,7 @@ impl ShardMeta {
     }
 
     fn apply_ingest_files(&mut self, ingest_files: &pb::IngestFiles) {
+        self.max_ts = std::cmp::max(self.max_ts, ingest_files.max_ts);
         self.apply_properties(ingest_files.get_properties());
         for tbl in ingest_files.get_table_creates() {
             self.add_file(tbl.id, 0, tbl.level, tbl.get_smallest(), tbl.get_biggest());

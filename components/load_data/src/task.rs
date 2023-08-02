@@ -789,7 +789,8 @@ impl LoadTaskWorker {
         let mut msg_cnt = 0;
         for mut pd_region in regions {
             let region = pd_region.get_region();
-            let cs = build_ingest_files(key_prefix.len(), region, sst_metas);
+            let cs =
+                build_ingest_files(key_prefix.len(), region, sst_metas, self.task_ctx.commit_ts);
             if cs.get_ingest_files().get_table_creates().is_empty() {
                 continue;
             }
@@ -965,6 +966,7 @@ fn build_ingest_files(
     inner_key_off: usize,
     region: &metapb::Region,
     sst_metas: &[SstMeta],
+    commit_ts: u64,
 ) -> kvenginepb::ChangeSet {
     let raw_start_key = raw_start_key(region);
     let inner_start_key = &raw_start_key[inner_key_off..];
@@ -974,6 +976,7 @@ fn build_ingest_files(
     cs.set_shard_id(region.get_id());
     cs.set_shard_ver(region.get_region_epoch().get_version());
     let ingest_files = cs.mut_ingest_files();
+    ingest_files.set_max_ts(commit_ts);
     // Don't set INGEST_ID_KEY property to indicate that it's from load data.
     let table_creates = ingest_files.mut_table_creates();
     for sst_meta in sst_metas {
