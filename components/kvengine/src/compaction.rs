@@ -443,7 +443,7 @@ impl Engine {
     pub fn get_keyspace_gc_safepoint_v2(&self, key: &[u8]) -> u64 {
         match &self.ks_safepoint_v2 {
             Some(sp_map) => {
-                if key[0] == b'x' && key.len() >= KEYSPACE_PREFIX_LEN {
+                if key.len() >= KEYSPACE_PREFIX_LEN && ApiV2::parse_key_mode(key) == KeyMode::Txn {
                     // Api v2 key.
                     let keyspace_id = ApiV2::get_keyspace_id(key);
                     let keyspace_id_u32 = ApiV2::get_u32_keyspace_id(keyspace_id);
