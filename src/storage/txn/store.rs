@@ -80,7 +80,13 @@ pub trait Scanner: Send {
                         ..
                     }))),
                 ) => {
-                    results.push(Err(e));
+                    // If we return key level error, TiDB will assume the key is in order, cause
+                    // DDL skip a table range to build the table index.
+                    // In cloud storage engine, the lock CF is checked first, then a large lock
+                    // cf key maybe returned before write CF.
+                    // So here we return a response level error, TiDB will resolve the lock and
+                    // retry the scan request.
+                    return Err(e);
                 }
                 Err(e) => return Err(e),
             }
