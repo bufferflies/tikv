@@ -39,6 +39,7 @@ const INITIAL_KEYSPACE_COUNT: usize = 10;
 const INITIAL_TABLE_COUNT: usize = 3;
 const NODES_COUNT: usize = 4;
 const RESTORE_CONCURRENCY: usize = 2;
+const LOAD_DATA_CONCURRENCY: usize = 2;
 // `INSTANT_BACKUP_INTERVAL` is more than 1 second as the incremental backup
 // file name has a precision of 1 second.
 const INSTANT_BACKUP_INTERVAL: Duration = Duration::from_millis(1050);
@@ -102,17 +103,7 @@ fn test_random_all() {
             cluster.new_client(),
             keyspace_manager.clone(),
             backup_worker,
-            Duration::from_secs(10),
-            TIMEOUT,
-        ),
-        spawn_load_data(
-            cluster.get_pd_client(),
-            cluster.new_keyspace_client(),
-            dfs_config.clone(),
-            security_conf.clone(),
-            load_data_config,
-            keyspace_manager.clone(),
-            Duration::from_secs(15),
+            Duration::from_secs(5),
             TIMEOUT,
         ),
     ];
@@ -123,6 +114,18 @@ fn test_random_all() {
             dfs_config.clone(),
             security_conf.clone(),
             keyspace_manager.clone(),
+            TIMEOUT,
+        ));
+    }
+    for _ in 0..LOAD_DATA_CONCURRENCY {
+        handles.push(spawn_load_data(
+            cluster.get_pd_client(),
+            cluster.new_keyspace_client(),
+            dfs_config.clone(),
+            security_conf.clone(),
+            load_data_config.clone(),
+            keyspace_manager.clone(),
+            Duration::from_secs(15),
             TIMEOUT,
         ));
     }

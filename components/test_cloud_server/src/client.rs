@@ -1260,16 +1260,21 @@ impl ClusterClient {
         options: &RequestOptions,
     ) -> Result<usize> {
         let mut cnt = 0;
-        let put_time = Instant::now();
+        let start_time = Instant::now();
         for (k, v) in ref_store.iter() {
             if let Some(range) = range {
                 if k.as_slice() < range.0 || k.as_slice() >= range.1 {
                     continue;
                 }
             }
-            self.verify_key_value(k, v.as_ref(), put_time, options)?;
+            self.verify_key_value(k, v.as_ref(), start_time, options)?;
             cnt += 1;
         }
+        info!(
+            "verify_data_with_given_ref_store: verified keys {}, takes {:?}",
+            cnt,
+            start_time.saturating_elapsed()
+        );
         Ok(cnt)
     }
 

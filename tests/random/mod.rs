@@ -32,7 +32,7 @@ use test_pd_client::TestPdClient;
 use tikv::config::TikvConfig;
 use tikv_util::{
     config::{ReadableDuration, ReadableSize},
-    error, info,
+    info,
     time::Instant,
 };
 use txn_types::Key;
@@ -228,7 +228,7 @@ pub(crate) fn spawn_transfer(scheduler: Scheduler) -> JoinHandle<()> {
     })
 }
 
-pub(crate) fn spawn_gc_worker(pd_client: Arc<TestPdClient>, timeout: Duration) -> JoinHandle<()> {
+pub(crate) fn _spawn_gc_worker(pd_client: Arc<TestPdClient>, timeout: Duration) -> JoinHandle<()> {
     std::thread::spawn(move || {
         let start_time = Instant::now();
         while start_time.saturating_elapsed() < timeout {
@@ -237,39 +237,6 @@ pub(crate) fn spawn_gc_worker(pd_client: Arc<TestPdClient>, timeout: Duration) -
             pd_client.set_gc_safe_point(ts.into_inner());
         }
         info!("gc worker thread exit");
-    })
-}
-
-pub(crate) fn spawn_keyspace_write_deprecated(
-    idx: usize,
-    mut client: ClusterClient,
-    keyspace_count: usize,
-    timeout: Duration,
-) -> JoinHandle<()> {
-    std::thread::spawn(move || {
-        // Make sure each write thread don't conflict with others.
-        let begin = idx * 2000;
-        let end = begin + 2000 - 10;
-        let start_time = Instant::now();
-        let mut rng = rand::thread_rng();
-        while start_time.saturating_elapsed() < timeout {
-            let keyspace = rng.gen_range(0..keyspace_count);
-            let i_to_keyspace_key = generate_keyspace_key(keyspace as u32);
-
-            let i = rng.gen_range(begin..end);
-            let res = if rng.gen_ratio(2, 3) {
-                client.try_put_kv(i..(i + 10), &i_to_keyspace_key, i_to_val)
-            } else {
-                client.del_kv(i..(i + 10), &i_to_keyspace_key);
-                Ok(())
-            };
-            if res.is_err() {
-                // TODO: raise the error
-                error!("keyspace_write error: {:?}", res);
-            }
-            WRITE_COUNTER.fetch_add(10, Ordering::SeqCst);
-        }
-        info!("keyspace write thread {} exit", idx);
     })
 }
 
@@ -296,7 +263,7 @@ pub(crate) fn spawn_keyspace_write(
 
             {
                 let lock = client.keyspace_manager().get_keyspace_lock(keyspace_id);
-                let guard = lock.try_lock_for_write();
+                let guard = lock.try_shared_lock();
                 if guard.is_none() {
                     continue;
                 }

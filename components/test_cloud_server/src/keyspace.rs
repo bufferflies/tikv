@@ -1,10 +1,9 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    collections::HashMap,
     mem,
     ops::{Deref, DerefMut, Range},
-    sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard},
+    sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 
 use api_version::ApiV2;
@@ -25,35 +24,28 @@ use crate::{
     table::TableMeta,
 };
 
-#[derive(Default)]
-pub struct KeyspaceInnerLock {
-    /// `write` is used to synchronize write and restore with verification
-    /// operations.
-    /// RwLock is used as writes are multi-threaded.
-    pub(crate) write: RwLock<()>,
-    /// `restore` is used to synchronize restore operations to the same keyspace
-    /// (especially for restores with and without verification).
-    pub(crate) restore: Mutex<()>,
-}
-
 #[derive(Clone, Default)]
 pub struct KeyspaceManager {
-    keyspaces: Arc<DashMap<u32 /* keyspace_id */, KeyspaceMeta>>,
-
-    /// `backup_lock` is used to block all writes & restores for backup.
-    ///
-    /// Should always acquire this lock before acquiring any keyspace lock, to
-    /// avoid deadlock.
-    ///
-    /// TODO: use MVCC ref store to eliminate this lock.
-    backup_lock: Arc<RwLock<()>>,
-
-    ref_stores: Arc<KeyspaceRefStores>,
-
-    random: Arc<Mutex<RandomHelper>>,
+    core: Arc<KeyspaceManagerCore>,
 }
 
-impl KeyspaceManager {
+impl Deref for KeyspaceManager {
+    type Target = KeyspaceManagerCore;
+
+    fn deref(&self) -> &Self::Target {
+        &self.core
+    }
+}
+
+#[derive(Default)]
+pub struct KeyspaceManagerCore {
+    keyspaces: DashMap<u32 /* keyspace_id */, KeyspaceMeta>,
+    ref_stores: KeyspaceRefStores,
+    backups: Mutex<Vec<KeyspaceBackup>>,
+    random: Mutex<RandomHelper>,
+}
+
+impl KeyspaceManagerCore {
     pub fn create_keyspaces(
         &self,
         keyspace_ids: &[u32],
@@ -112,12 +104,21 @@ impl KeyspaceManager {
             .unwrap()
             .get_random_available_table(rng)
     }
+
+    pub fn add_backup(&self, backup: KeyspaceBackup) {
+        self.backups.lock().unwrap().push(backup);
+    }
+
+    pub fn get_random_backup(&self, rng: &mut ThreadRng) -> Option<KeyspaceBackup> {
+        let backups = self.backups.lock().unwrap();
+        backups.iter().choose(rng).cloned()
+    }
 }
 
 #[derive(Default)]
 pub struct KeyspaceMeta {
     _inner_key_off: usize,
-    inner_lock: Arc<KeyspaceInnerLock>,
+    inner_lock: Arc<RwLock<()>>,
     tables: DashMap<i64 /* table_id */, TableMeta>,
 }
 
@@ -135,7 +136,7 @@ impl KeyspaceMeta {
         }
     }
 
-    pub fn inner_lock(&self) -> Arc<KeyspaceInnerLock> {
+    pub fn inner_lock(&self) -> Arc<RwLock<()>> {
         self.inner_lock.clone()
     }
 
@@ -158,90 +159,41 @@ impl KeyspaceMeta {
     }
 }
 
-/// Helper to get locks for different workload.
-/// Note: must keep order of locks acquiring to avoid deadlock.
+/// Helper to get locks for different workloads.
+///
+/// Shared (read) lock for: reads/writes, restore (without verification),
+/// load_data.
+///
+/// Mutual-exclusive (write) lock for: backup, restore (with verification),
+/// destroy_table.
+///
+/// For load_data: data is ingested to new table, and the new table is not
+/// available until the ingest finished. So load_data doesn't need to be
+/// mutual-exclusive with reads/writes.
+///
+/// For destroy_table: downgrade to shared lock after set table to unavailable.
 pub struct KeyspaceLockHelper {
-    backup_lock: Arc<RwLock<()>>,
-    keyspace_inner: Arc<KeyspaceInnerLock>,
+    inner: Arc<RwLock<()>>,
 }
 
 impl KeyspaceLockHelper {
-    /// Get locks for write workload.
-    /// Returns `None` if failed to acquire keyspace write lock. The caller can
-    /// retry another keyspace.
-    pub fn try_lock_for_write(&self) -> Option<(RwLockReadGuard<'_, ()>, RwLockReadGuard<'_, ()>)> {
-        let backup_guard = self.backup_lock.rl();
-        let write_guard = self.keyspace_inner.write.try_read();
-        if let Ok(write_guard) = write_guard {
-            return Some((backup_guard, write_guard));
-        }
-        None
+    pub fn try_shared_lock(&self) -> Option<RwLockReadGuard<'_, ()>> {
+        self.inner.try_read().ok()
     }
 
-    /// Get locks for restore with verification workload.
-    pub fn lock_for_restore_with_verify(
-        &self,
-    ) -> (
-        RwLockReadGuard<'_, ()>,
-        RwLockWriteGuard<'_, ()>,
-        MutexGuard<'_, ()>,
-    ) {
-        let backup_guard = self.backup_lock.rl();
-        let write_guard = self.keyspace_inner.write.wl();
-        let restore_guard = self.keyspace_inner.restore.lock().unwrap();
-        (backup_guard, write_guard, restore_guard)
+    pub fn shared_lock(&self) -> RwLockReadGuard<'_, ()> {
+        self.inner.rl()
     }
 
-    /// Get locks for restore without verification workload.
-    /// Do not acquire write lock so that write workloads are not blocked.
-    pub fn lock_for_restore_without_verify(&self) -> (RwLockReadGuard<'_, ()>, MutexGuard<'_, ()>) {
-        let backup_guard = self.backup_lock.rl();
-        let restore_guard = self.keyspace_inner.restore.lock().unwrap();
-        (backup_guard, restore_guard)
-    }
-
-    /// Get locks for `load_data` operation.
-    /// Block backup, restore_with_verify, and restore_without_verify.
-    pub fn lock_for_load_data(
-        &self,
-    ) -> (
-        RwLockReadGuard<'_, ()>,
-        RwLockReadGuard<'_, ()>,
-        MutexGuard<'_, ()>,
-    ) {
-        let backup_guard = self.backup_lock.rl();
-        let write_guard = self.keyspace_inner.write.rl();
-        let restore_guard = self.keyspace_inner.restore.lock().unwrap();
-        (backup_guard, write_guard, restore_guard)
-    }
-
-    /// Get locks for `destroy_table` operation.
-    /// Block backup, writes, restore_with_verify, and restore_without_verify.
-    /// Downgrade `write_guard` on keyspace to read lock after set table to
-    /// unavailable.
-    pub fn _lock_for_destroy_table(
-        &self,
-    ) -> (
-        RwLockReadGuard<'_, ()>,
-        RwLockWriteGuard<'_, ()>,
-        MutexGuard<'_, ()>,
-    ) {
-        let backup_guard = self.backup_lock.rl();
-        let write_guard = self.keyspace_inner.write.wl();
-        let restore_guard = self.keyspace_inner.restore.lock().unwrap();
-        (backup_guard, write_guard, restore_guard)
+    pub fn mutex_lock(&self) -> RwLockWriteGuard<'_, ()> {
+        self.inner.wl()
     }
 }
 
 impl KeyspaceManager {
-    pub fn lock_for_backup(&self) -> RwLockWriteGuard<'_, ()> {
-        self.backup_lock.wl()
-    }
-
     pub fn get_keyspace_lock(&self, keyspace_id: u32) -> KeyspaceLockHelper {
         KeyspaceLockHelper {
-            backup_lock: self.backup_lock.clone(),
-            keyspace_inner: self.keyspaces.get(&keyspace_id).unwrap().inner_lock(),
+            inner: self.keyspaces.get(&keyspace_id).unwrap().inner_lock(),
         }
     }
 }
@@ -410,15 +362,17 @@ pub fn make_key(keyspace_id: u32, table_id: i64, user_key: &[u8]) -> Vec<u8> {
     buf.freeze().to_vec()
 }
 
+#[derive(Clone)]
 pub struct KeyspaceBackup {
+    pub backup_name: String,
     pub backup_ts: u64,
-    pub ref_stores: HashMap<u32 /* keyspace_id */, RefStore>,
+    pub keyspace_id: u32,
+    pub ref_store: RefStore,
 }
 
 #[derive(Default)]
 pub struct KeyspaceRefStores {
     ref_stores: DashMap<u32 /* keyspace_id */, Arc<Mutex<RefStore>>>,
-    backups: DashMap<String /* backup_name */, KeyspaceBackup>,
 }
 
 impl KeyspaceRefStores {
@@ -433,62 +387,24 @@ impl KeyspaceRefStores {
         }
     }
 
-    pub fn dump(&self) -> HashMap<u32, RefStore> {
-        HashMap::from_iter(self.ref_stores.iter().map(|r| {
-            let (&keyspace_id, ref_store) = r.pair();
-            let ref_store = ref_store.lock().unwrap();
-            (keyspace_id, ref_store.clone())
-        }))
+    pub fn dump(&self, keyspace_id: u32) -> RefStore {
+        self.get_keyspace_ref_store(keyspace_id)
+            .lock()
+            .unwrap()
+            .clone()
     }
 
-    pub fn add_backup(
-        &self,
-        backup_name: String,
-        backup_ts: u64,
-        ref_stores: HashMap<u32, RefStore>,
-    ) {
-        self.backups.insert(
-            backup_name,
-            KeyspaceBackup {
-                backup_ts,
-                ref_stores,
-            },
-        );
-    }
-
-    pub fn backup(&self, backup_name: String, backup_ts: u64) {
-        let ref_stores = self.dump();
-        self.add_backup(backup_name, backup_ts, ref_stores);
-    }
-
-    pub fn get_random_backup(
-        &self,
-        rng: &mut ThreadRng,
-    ) -> Option<(String /* backup_name */, u64 /* backup_ts */)> {
-        self.backups
-            .iter()
-            .choose(rng)
-            .map(|r| (r.key().clone(), r.backup_ts))
-    }
-
-    pub fn restore_keyspace(
-        &self,
-        source_keyspace_id: u32,
-        backup_name: &str,
-        target_keyspace_id: u32,
-    ) {
-        let backup = self.backups.get(backup_name).unwrap();
-        let keyspace_backup = backup.ref_stores.get(&source_keyspace_id);
+    pub fn restore_keyspace(&self, tag: &str, backup: KeyspaceBackup, target_keyspace_id: u32) {
         let target_ref_store = self.get_keyspace_ref_store(target_keyspace_id);
         let mut target_ref_store = target_ref_store.lock().unwrap();
-        if let Some(keyspace_backup) = keyspace_backup {
-            *target_ref_store = keyspace_backup.clone();
+        if !backup.ref_store.is_empty() {
+            *target_ref_store = backup.ref_store;
         } else {
-            // Keyspace will not be found in backup if it has never been written after
-            // created.
+            // Empty ref store actually verify nothing. So set None to all entries.
+            // TODO: use kv_scan for data verification.
             info!(
-                "keyspace {} not found in backup {}, set target_ref_store to all none",
-                source_keyspace_id, backup_name
+                "{} ref store is empty in backup {}, set target_ref_store to all none",
+                tag, backup.backup_name
             );
             for v in target_ref_store.values_mut() {
                 *v = None;

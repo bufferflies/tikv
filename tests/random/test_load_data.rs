@@ -141,7 +141,7 @@ fn do_load_data(
 
     {
         let lock = keyspace_manager.get_keyspace_lock(keyspace_id);
-        let _guard = lock.lock_for_load_data();
+        let _guard = lock.shared_lock();
 
         // Build.
         build(
@@ -154,9 +154,6 @@ fn do_load_data(
             "load_data: build finished, keyspace {}, table {}",
             keyspace_id, table_id
         );
-
-        // Cleanup.
-        cleanup(&scheduler);
 
         // Verify the data consistency.
         let verified_count = client
@@ -176,12 +173,15 @@ fn do_load_data(
             .unwrap()
             .set_available(true);
     }
+
+    // Cleanup.
+    cleanup(&scheduler);
 }
 
 pub(crate) fn check_load_data() {
     let load_data_counter = LOAD_DATA_COUNTER.load(Ordering::Relaxed);
     assert!(
-        load_data_counter > 0,
+        load_data_counter > 0, // increase after optimize ref store verification.
         "load_data_counter too small: {}",
         load_data_counter
     );
