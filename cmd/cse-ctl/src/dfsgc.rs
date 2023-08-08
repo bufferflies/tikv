@@ -196,6 +196,7 @@ impl DfsGcConfig {
             config.security.key_path = args.key.to_str().unwrap().to_owned();
         }
         config.dfs.override_from_env();
+        config.security.master_key.override_from_env();
 
         if config.data_dir.is_empty() {
             config.data_dir = ".".to_string();

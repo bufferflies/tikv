@@ -149,6 +149,23 @@ pub struct MasterKeyConfig {
     pub endpoint: String,
 }
 
+impl MasterKeyConfig {
+    pub fn override_from_env(&mut self) {
+        Self::env_or_default("CSE_MASTER_KEY_ID", &mut self.key_id);
+        Self::env_or_default("CSE_MASTER_KEY_CIPHER_TEXT", &mut self.cipher_text);
+        if std::env::var("AWS_REGION").is_ok() {
+            self.vendor = "aws".to_string();
+        }
+        Self::env_or_default("AWS_REGION", &mut self.region);
+    }
+
+    fn env_or_default(name: &str, val: &mut String) {
+        if let Ok(v) = std::env::var(name) {
+            *val = v;
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct MasterKey {
     core: Arc<MasterKeyCore>,

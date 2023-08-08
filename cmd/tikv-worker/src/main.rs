@@ -186,6 +186,7 @@ fn main() {
         init_logger(io::stdout(), log_level);
     }
     config.dfs.override_from_env();
+    config.security.master_key.override_from_env();
 
     // If zstd_compression_level is not set, set it to default value
     if config.dfs.zstd_compression_level.is_empty() {
