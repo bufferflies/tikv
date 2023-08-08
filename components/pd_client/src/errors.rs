@@ -28,6 +28,8 @@ pub enum Error {
     GlobalConfigNotFound(String),
     #[error("required watch revision is smaller than current compact/min revision. {0:?}")]
     DataCompacted(String),
+    #[error("channel is dropped")]
+    ChannelDrop,
 }
 
 pub type Result<T> = result::Result<T, Error>;
@@ -38,6 +40,7 @@ impl Error {
             Error::Grpc(_)
             | Error::ClusterNotBootstrapped(_)
             | Error::StreamDisconnect(_)
+            | Error::ChannelDrop
             | Error::DataCompacted(_) => true,
             Error::Other(_)
             | Error::RegionNotFound(_)
@@ -61,6 +64,7 @@ impl ErrorCodeExt for Error {
             Error::StoreTombstone(_) => error_code::pd::STORE_TOMBSTONE,
             Error::GlobalConfigNotFound(_) => error_code::pd::GLOBAL_CONFIG_NOT_FOUND,
             Error::DataCompacted(_) => error_code::pd::GLOBAL_CONFIG_NOT_FOUND,
+            Error::ChannelDrop => error_code::pd::CHANNEL_DROP,
             Error::Other(_) => error_code::pd::UNKNOWN,
         }
     }

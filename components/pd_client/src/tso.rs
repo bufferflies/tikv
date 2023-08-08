@@ -95,9 +95,7 @@ impl TimestampOracle {
                 })
                 .await
                 .map_err(|_| -> Error { box_err!("TimestampRequest channel is closed") })?;
-            response
-                .await
-                .map_err(|_| box_err!("Timestamp channel is dropped"))
+            response.await.map_err(|_| Error::ChannelDrop {})
         }
     }
 
