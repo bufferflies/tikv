@@ -153,9 +153,7 @@ impl MasterKeyConfig {
     pub fn override_from_env(&mut self) {
         Self::env_or_default("CSE_MASTER_KEY_ID", &mut self.key_id);
         Self::env_or_default("CSE_MASTER_KEY_CIPHER_TEXT", &mut self.cipher_text);
-        if std::env::var("AWS_REGION").is_ok() {
-            self.vendor = "aws".to_string();
-        }
+        Self::env_or_default("CSE_MASTER_KEY_VENDOR", &mut self.vendor);
         Self::env_or_default("AWS_REGION", &mut self.region);
     }
 
