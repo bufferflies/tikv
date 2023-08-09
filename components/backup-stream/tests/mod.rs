@@ -803,7 +803,7 @@ mod test {
     };
     use futures::{Stream, StreamExt};
     use pd_client::PdClient;
-    use tikv_util::{box_err, defer, info, HandyRwLock};
+    use tikv_util::{box_err, defer, info};
     use tokio::time::timeout;
     use txn_types::{Key, TimeStamp};
 
@@ -1024,14 +1024,12 @@ mod test {
         let paused =
             run_async_test(suite.get_meta_cli().check_task_paused("test_fatal_error")).unwrap();
         assert!(paused);
-        let safepoints = suite.cluster.pd_client.gc_safepoints.rl();
+        let safepoints = suite.cluster.pd_client.get_gc_service_safe_points();
         let checkpoint = suite.global_checkpoint();
 
         assert!(
             safepoints.iter().any(|sp| {
-                sp.serivce.contains(&format!("{}", victim))
-                    && sp.ttl >= Duration::from_secs(60 * 60 * 24)
-                    && sp.safepoint.into_inner() == checkpoint - 1
+                sp.service.contains(&format!("{}", victim)) && sp.safe_point == checkpoint - 1
             }),
             "{:?}",
             safepoints

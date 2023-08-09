@@ -130,7 +130,7 @@ pub fn execute_full_backup(config: BackupConfig, name: String) {
     }
 }
 
-fn update_service_safe_point(pd_client: &dyn PdClient, safepoint: u64) -> Result<()> {
+pub fn update_service_safe_point(pd_client: &dyn PdClient, safepoint: u64) -> Result<()> {
     if let Err(e) = block_on(pd_client.update_service_safe_point(
         BACKUP_GC_SERVICE_NAME.to_string(),
         TimeStamp::from(safepoint),

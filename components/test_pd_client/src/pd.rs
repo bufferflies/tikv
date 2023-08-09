@@ -3,7 +3,7 @@
 use std::{
     cmp,
     collections::{
-        BTreeMap,
+        hash_map, BTreeMap,
         Bound::{Excluded, Unbounded},
     },
     iter::FromIterator,
@@ -401,6 +401,7 @@ struct PdCluster {
     is_bootstraped: bool,
 
     gc_safe_point: u64,
+    gc_service_safe_points: HashMap<String, GcServiceSafePoint>,
     min_resolved_ts: u64,
 
     replication_status: Option<ReplicationStatus>,
@@ -423,7 +424,7 @@ impl PdCluster {
         meta.set_id(cluster_id);
         meta.set_max_peer_count(3);
 
-        PdCluster {
+        let mut cluster = PdCluster {
             meta,
             stores: HashMap::default(),
             regions: BTreeMap::new(),
@@ -444,6 +445,7 @@ impl PdCluster {
             is_bootstraped: false,
 
             gc_safe_point: 0,
+            gc_service_safe_points: HashMap::default(),
             min_resolved_ts: 0,
             replication_status: None,
             region_replication_status: HashMap::default(),
@@ -453,7 +455,13 @@ impl PdCluster {
             buckets: HashMap::default(),
 
             enable_get_all_keyspaces: false,
-        }
+        };
+
+        // Initialize the gc safe point as 0.
+        // Otherwise the first `set_gc_safe_point` would fail if it's later than another
+        // `update_service_safe_point`.
+        cluster.set_gc_safe_point(0).unwrap();
+        cluster
     }
 
     fn bootstrap(&mut self, store: metapb::Store, region: metapb::Region) {
@@ -827,12 +835,62 @@ impl PdCluster {
         self.handle_heartbeat(region, leader)
     }
 
-    fn set_gc_safe_point(&mut self, safe_point: u64) {
-        self.gc_safe_point = safe_point;
+    // Used by gc_worker to advance gc safe point.
+    fn set_gc_safe_point(&mut self, safe_point: u64) -> Result<()> {
+        let svc_safe_point = GcServiceSafePoint {
+            service: "gc_worker".to_owned(),
+            safe_point,
+        };
+        self.update_gc_service_safe_point(svc_safe_point)
     }
 
     fn get_gc_safe_point(&self) -> u64 {
         self.gc_safe_point
+    }
+
+    fn update_gc_service_safe_point(&mut self, svc_safe_point: GcServiceSafePoint) -> Result<()> {
+        info!("update_gc_service_safe_point: {:?}", svc_safe_point);
+        match self
+            .gc_service_safe_points
+            .entry(svc_safe_point.service.clone())
+        {
+            hash_map::Entry::Occupied(mut e) => {
+                if e.get().safe_point > svc_safe_point.safe_point {
+                    return Err(box_err!(
+                        "service safe point rollback, current {:?}, new {:?}",
+                        e.get(),
+                        svc_safe_point
+                    ));
+                }
+                e.insert(svc_safe_point);
+            }
+            hash_map::Entry::Vacant(e) => {
+                if self.gc_safe_point > svc_safe_point.safe_point {
+                    return Err(box_err!(
+                        "service safe point smaller than gc safe point {}, new {:?}",
+                        self.gc_safe_point,
+                        svc_safe_point
+                    ));
+                }
+                e.insert(svc_safe_point);
+            }
+        }
+
+        self.gc_safe_point = self
+            .gc_service_safe_points
+            .values()
+            .map(|x| x.safe_point)
+            .min()
+            .unwrap_or(0);
+        info!(
+            "update_gc_service_safe_point: new gc_safe_point {}",
+            self.get_gc_safe_point()
+        );
+        Ok(())
+    }
+
+    pub fn get_gc_service_safe_points(&self) -> Vec<GcServiceSafePoint> {
+        self.gc_service_safe_points.values().cloned().collect()
     }
 
     fn set_min_resolved_ts(&mut self, min_resolved_ts: u64) {
@@ -907,16 +965,15 @@ pub struct TestPdClient {
     trigger_tso_failure: AtomicBool,
     feature_gate: FeatureGate,
     trigger_leader_info_loss: AtomicBool,
-
-    pub gc_safepoints: RwLock<Vec<GcSafePoint>>,
     keyspace_encryption: RwLock<HashMap<u32, KeyspaceEncryptionConfig>>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct GcSafePoint {
-    pub serivce: String,
-    pub ttl: Duration,
-    pub safepoint: TimeStamp,
+pub struct GcServiceSafePoint {
+    pub service: String,
+    pub safe_point: u64,
+    // `expire_time` is not supported for simplicity.
+    // pub expire_time: Option<Instant>,
 }
 
 impl TestPdClient {
@@ -933,7 +990,6 @@ impl TestPdClient {
             trigger_tso_failure: AtomicBool::new(false),
             trigger_leader_info_loss: AtomicBool::new(false),
             feature_gate,
-            gc_safepoints: Default::default(),
             keyspace_encryption: Default::default(),
         }
     }
@@ -1421,7 +1477,11 @@ impl TestPdClient {
     }
 
     pub fn set_gc_safe_point(&self, safe_point: u64) {
-        self.cluster.wl().set_gc_safe_point(safe_point);
+        self.cluster.wl().set_gc_safe_point(safe_point).unwrap();
+    }
+
+    pub fn get_gc_service_safe_points(&self) -> Vec<GcServiceSafePoint> {
+        self.cluster.rl().get_gc_service_safe_points()
     }
 
     pub fn get_min_resolved_ts(&self) -> u64 {
@@ -1997,17 +2057,19 @@ impl PdClient for TestPdClient {
     fn update_service_safe_point(
         &self,
         name: String,
-        safepoint: TimeStamp,
-        ttl: Duration,
+        safe_point: TimeStamp,
+        _ttl: Duration, // `ttl` is not supported yet.
     ) -> PdFuture<()> {
-        if ttl.as_secs() > 0 {
-            self.gc_safepoints.wl().push(GcSafePoint {
-                serivce: name,
-                ttl,
-                safepoint,
-            });
+        match self
+            .cluster
+            .wl()
+            .update_gc_service_safe_point(GcServiceSafePoint {
+                service: name,
+                safe_point: safe_point.into_inner(),
+            }) {
+            Ok(_) => Box::pin(ok(())),
+            Err(e) => Box::pin(err(e)),
         }
-        Box::pin(ok(()))
     }
 
     fn feature_gate(&self) -> &FeatureGate {
@@ -2140,6 +2202,57 @@ mod tests {
                 .map(|x| x.get_region().get_id())
                 .collect::<Vec<_>>();
             assert_eq!(region_ids, expected, "case {}", i);
+        }
+    }
+
+    #[test]
+    fn test_gc_safe_points() {
+        let pd_client = TestPdClient::new(1, false);
+        pd_client.set_bootstrap(true);
+
+        let update_svc_safe_point = |service: &str, safe_point: u64| -> Result<()> {
+            block_on(pd_client.update_service_safe_point(
+                service.to_string(),
+                safe_point.into(),
+                Duration::from_secs(3600),
+            ))
+        };
+        let get_gc_safe_point = || -> u64 { block_on(pd_client.get_gc_safe_point()).unwrap() };
+
+        assert_eq!(get_gc_safe_point(), 0);
+        pd_client.set_gc_safe_point(10);
+        assert_eq!(get_gc_safe_point(), 10);
+
+        {
+            // Test invalid update (rollback of itself).
+            update_svc_safe_point("svc", 5).unwrap_err();
+            update_svc_safe_point("svc", 15).unwrap();
+            assert_eq!(get_gc_safe_point(), 10);
+        }
+
+        pd_client.set_gc_safe_point(20);
+        assert_eq!(get_gc_safe_point(), 15);
+
+        {
+            // Test invalid update (smaller than gc safe point).
+            update_svc_safe_point("svc", 100).unwrap();
+            update_svc_safe_point("svc1", 10).unwrap_err();
+            assert_eq!(get_gc_safe_point(), 20);
+        }
+
+        {
+            // Test multiple services.
+            pd_client.set_gc_safe_point(30);
+            assert_eq!(get_gc_safe_point(), 30);
+
+            update_svc_safe_point("svc1", 31).unwrap();
+            update_svc_safe_point("svc2", 32).unwrap();
+            assert_eq!(get_gc_safe_point(), 30);
+
+            pd_client.set_gc_safe_point(40);
+            assert_eq!(get_gc_safe_point(), 31);
+            update_svc_safe_point("svc1", 41).unwrap();
+            assert_eq!(get_gc_safe_point(), 32);
         }
     }
 }

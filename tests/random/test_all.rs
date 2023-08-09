@@ -26,13 +26,13 @@ use txn_types::Key;
 
 use crate::{
     alloc_node_id_vec, generate_keyspace_key, new_security_config, prepare_dfs,
-    random_node_restart, spawn_create_keyspace, spawn_keyspace_write, spawn_merge, spawn_move,
-    spawn_transfer,
+    random_node_restart, spawn_create_keyspace, spawn_gc_worker, spawn_keyspace_write,
+    spawn_major_compact, spawn_merge, spawn_move, spawn_transfer,
     test_load_data::{check_load_data, spawn_load_data},
     test_native_br::{check_br, spawn_incremental_backup, spawn_restore_keyspace},
-    TikvConfig, BACKUP_COUNTER, CONCURRENCY, KEYSPACE_COUNTER, LOAD_DATA_COUNTER, MERGE_COUNTER,
-    MOVE_COUNTER, NODE_RESTART_COUNTER, RESTORE_COUNTER, TABLE_COUNTER, TIMEOUT, TRANSFER_COUNTER,
-    WRITE_COUNTER,
+    TikvConfig, BACKUP_COUNTER, CONCURRENCY, KEYSPACE_COUNTER, LOAD_DATA_COUNTER,
+    MANUAL_MAJOR_COMPACT_COUNTER, MERGE_COUNTER, MOVE_COUNTER, NODE_RESTART_COUNTER,
+    RESTORE_COUNTER, TABLE_COUNTER, TIMEOUT, TRANSFER_COUNTER, WRITE_COUNTER,
 };
 
 const INITIAL_KEYSPACE_COUNT: usize = 10;
@@ -86,13 +86,16 @@ fn test_random_all() {
         }
     };
 
+    // Set the first service safe point for backup before starting workloads.
+    let ts = block_on(pd_client.get_tso()).unwrap();
+    backup::update_service_safe_point(pd_client.as_ref(), ts.into_inner()).unwrap();
+
     // Start workloads & schedulers.
     let mut handles = vec![
         spawn_merge(cluster.new_scheduler(), true),
         spawn_transfer(cluster.new_scheduler()),
         spawn_move(cluster.new_scheduler(), Arc::new(RwLock::new(()))),
-        // TODO: enable GC worker after verification error of restore is addressed.
-        // spawn_gc_worker(cluster.get_pd_client(), TIMEOUT),
+        spawn_gc_worker(cluster.get_pd_client(), TIMEOUT),
         spawn_create_keyspace(
             cluster.get_pd_client(),
             keyspace_manager.clone(),
@@ -106,6 +109,7 @@ fn test_random_all() {
             Duration::from_secs(5),
             TIMEOUT,
         ),
+        spawn_major_compact(cluster.get_pd_client(), keyspace_manager.clone(), TIMEOUT),
     ];
     for _ in 0..RESTORE_CONCURRENCY {
         handles.push(spawn_restore_keyspace(
@@ -169,9 +173,10 @@ fn test_random_all() {
     let total_backup_count = BACKUP_COUNTER.load(Ordering::SeqCst);
     let total_restore_count = RESTORE_COUNTER.load(Ordering::SeqCst);
     let total_load_data_count = LOAD_DATA_COUNTER.load(Ordering::SeqCst);
+    let total_manual_major_compact = MANUAL_MAJOR_COMPACT_COUNTER.load(Ordering::SeqCst);
     let region_number = pd_client.get_regions_number();
     info!(
-        "TEST SUCCEED: write {}, keyspace {}, table {}, region {}, merge {}, move {}, transfer {}, node restart {}, backup {}, restore {}, load_data {}, verified_records {}",
+        "TEST SUCCEED: write {}, keyspace {}, table {}, region {}, merge {}, move {}, transfer {}, node restart {}, backup {}, restore {}, load_data {}, manual_major_compact {}, verified_records {}",
         total_write_count,
         total_keyspace_count,
         total_table_count,
@@ -183,6 +188,7 @@ fn test_random_all() {
         total_backup_count,
         total_restore_count,
         total_load_data_count,
+        total_manual_major_compact,
         verified_records_count,
     );
 }
@@ -211,6 +217,7 @@ fn prepare_cluster(
         // TODO: test for both enable and disable inner_key_offset
         conf.enable_inner_key_offset = true;
         conf.security = security_conf.clone();
+        conf.kvengine.compaction_request_version = 3;
     };
     let cluster = ServerCluster::new(nodes, update_conf_fn);
     cluster.wait_region_replicated(&[], 3);

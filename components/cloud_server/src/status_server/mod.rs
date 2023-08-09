@@ -872,6 +872,7 @@ impl StatusServer {
 
     // URI: /major_compact?major_compact=xxx[&keyspace_id=xxx[&table_id=xxx]][&
     // region_id=xxx]
+    // Note: return 404 when no match region is found.
     async fn major_compact(
         req: Request<Body>,
         rf: RfEngine,
@@ -879,6 +880,8 @@ impl StatusServer {
     ) -> hyper::Result<Response<Body>> {
         info!("major compact request: {:?}", req);
         let bad_request_resp = |msg: &str| make_response(StatusCode::BAD_REQUEST, msg.to_owned());
+        let not_found_resp = |msg: &str| make_response(StatusCode::NOT_FOUND, msg.to_owned());
+
         let path = req.uri().path();
         if path != "/major-compact" {
             return Ok(bad_request_resp("bad request URI"));
@@ -906,7 +909,7 @@ impl StatusServer {
             let &peer_id = region_to_peers.get(&region_id).unwrap();
             let cs = load_raft_engine_meta(&rf, peer_id);
             if cs.is_none() {
-                return Ok(bad_request_resp(
+                return Ok(not_found_resp(
                     format!("region {} peer {} not exists", region_id, peer_id).as_str(),
                 ));
             }
@@ -931,13 +934,13 @@ impl StatusServer {
                     .map(|(_, region_id, _)| region_id)
                     .collect::<Vec<_>>()
             } else {
-                return Ok(bad_request_resp("collect none region with prefix"));
+                return Ok(not_found_resp("collect none region with prefix"));
             }
         } else {
             return Ok(bad_request_resp("query parameters invalid"));
         };
         if target_regions.is_empty() {
-            return Ok(bad_request_resp("target regions is empty"));
+            return Ok(not_found_resp("target regions is empty"));
         } else {
             info!("manual major compact regions {:?}", target_regions);
         }

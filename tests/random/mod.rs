@@ -5,6 +5,7 @@ mod test_load_data;
 mod test_native_br;
 
 use std::{
+    str::FromStr,
     sync::{
         atomic::{AtomicU16, AtomicUsize, Ordering},
         Arc, RwLock,
@@ -15,8 +16,10 @@ use std::{
 
 use api_version::ApiV2;
 use futures::executor::block_on;
+use http::{Request, StatusCode, Uri};
+use hyper::Body;
 use kvengine::dfs::DFSConfig;
-use kvproto::pdpb::CheckPolicy;
+use kvproto::{metapb::Store, pdpb::CheckPolicy};
 use pd_client::PdClient;
 use rand::{prelude::SliceRandom, Rng, RngCore};
 use security::SecurityConfig;
@@ -31,11 +34,16 @@ use test_cloud_server::{
 use test_pd_client::TestPdClient;
 use tikv::config::TikvConfig;
 use tikv_util::{
+    box_err,
     config::{ReadableDuration, ReadableSize},
     info,
     time::Instant,
+    warn,
 };
 use txn_types::Key;
+
+pub(crate) type Error = Box<dyn std::error::Error + Send + Sync + 'static>;
+pub(crate) type Result<T> = std::result::Result<T, Error>;
 
 lazy_static::lazy_static! {
     pub static ref WRITE_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -48,6 +56,7 @@ lazy_static::lazy_static! {
     pub static ref LOAD_DATA_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref KEYSPACE_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref TABLE_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    pub static ref MANUAL_MAJOR_COMPACT_COUNTER: AtomicUsize = AtomicUsize::new(0);
 }
 
 pub const TIMEOUT: Duration = Duration::from_secs(90);
@@ -90,6 +99,7 @@ fn test_random_merge() {
         conf.rfengine.target_file_size = ReadableSize::mb(1);
         conf.rfengine.batch_compression_threshold =
             ReadableSize::kb(rand::thread_rng().gen_range(0..2));
+        conf.kvengine.compaction_request_version = 3;
     };
     let mut cluster = ServerCluster::new(nodes.clone(), update_conf_fn);
     cluster.wait_region_replicated(&[], 3);
@@ -228,7 +238,7 @@ pub(crate) fn spawn_transfer(scheduler: Scheduler) -> JoinHandle<()> {
     })
 }
 
-pub(crate) fn _spawn_gc_worker(pd_client: Arc<TestPdClient>, timeout: Duration) -> JoinHandle<()> {
+pub(crate) fn spawn_gc_worker(pd_client: Arc<TestPdClient>, timeout: Duration) -> JoinHandle<()> {
     std::thread::spawn(move || {
         let start_time = Instant::now();
         while start_time.saturating_elapsed() < timeout {
@@ -238,6 +248,90 @@ pub(crate) fn _spawn_gc_worker(pd_client: Arc<TestPdClient>, timeout: Duration) 
         }
         info!("gc worker thread exit");
     })
+}
+
+pub(crate) fn spawn_major_compact(
+    pd_client: Arc<TestPdClient>,
+    keyspace_manager: KeyspaceManager,
+    timeout: Duration,
+) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut rng = rand::thread_rng();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .thread_name("major-compact")
+            .build()
+            .unwrap();
+
+        let start_time = Instant::now();
+        while start_time.saturating_elapsed() < timeout {
+            // Manual major compact should not conform the zipf distribution.
+            let keyspace_id = keyspace_manager.get_uniform_random_keyspace(&mut rng);
+
+            let stores = pd_client.get_all_stores(true).unwrap();
+            let mut handles = Vec::with_capacity(stores.len());
+            for store in stores {
+                handles.push(
+                    runtime.spawn(request_major_compact_on_store(store.clone(), keyspace_id)),
+                );
+            }
+            for handle in handles {
+                runtime.block_on(handle).unwrap().unwrap();
+            }
+
+            MANUAL_MAJOR_COMPACT_COUNTER.fetch_add(1, Ordering::SeqCst);
+            sleep(Duration::from_secs(10));
+        }
+        info!("major compact worker thread exit");
+    })
+}
+
+pub(crate) async fn request_major_compact_on_store(store: Store, keyspace_id: u32) -> Result<()> {
+    let uri = Uri::from_str(&format!(
+        "http://{}/major-compact?major_compact=true&keyspace_id={}",
+        &store.status_address, keyspace_id
+    ))
+    .unwrap();
+    let client = hyper::Client::new();
+    let mut last_err: Option<Error> = None;
+    for retry in 0..20 {
+        let req = Request::post(&uri).body(Body::empty()).unwrap();
+        match client.request(req).await {
+            // Treat 404 as success.
+            Ok(resp) if (resp.status().is_success() || resp.status() == StatusCode::NOT_FOUND) => {
+                let body = hyper::body::to_bytes(resp.into_body()).await.unwrap();
+                let msg = String::from_utf8_lossy(&body);
+                info!(
+                    "request_major_compact_on_store success, keyspace {}: {}",
+                    keyspace_id,
+                    msg.as_ref()
+                );
+                return Ok(());
+            }
+            Ok(resp) => {
+                let body = hyper::body::to_bytes(resp.into_body()).await.unwrap();
+                let msg = String::from_utf8_lossy(&body);
+                // Return error only when there is bad request argument.
+                panic!(
+                    "request_major_compact_on_store failed: {}, retry {}",
+                    msg.as_ref(),
+                    retry
+                );
+            }
+            Err(err) => {
+                last_err = Some(box_err!(
+                    "request_major_compact_on_store failed: {:?}, retry {}",
+                    err,
+                    retry
+                ));
+                warn!("{:?}", last_err.as_ref().unwrap());
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                continue;
+            }
+        }
+    }
+    Err(last_err.unwrap())
 }
 
 pub(crate) fn spawn_keyspace_write(
