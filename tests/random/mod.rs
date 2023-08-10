@@ -100,6 +100,7 @@ fn test_random_merge() {
         conf.rfengine.batch_compression_threshold =
             ReadableSize::kb(rand::thread_rng().gen_range(0..2));
         conf.kvengine.compaction_request_version = 3;
+        conf.kvengine.compaction_tombs_count = 100;
     };
     let mut cluster = ServerCluster::new(nodes.clone(), update_conf_fn);
     cluster.wait_region_replicated(&[], 3);
@@ -174,7 +175,7 @@ fn test_random_merge() {
     let total_transfer_count = TRANSFER_COUNTER.load(Ordering::SeqCst);
     let region_number = pd_client.get_regions_number();
     info!(
-        "total_write_count {}, region number {}, merge count {}, move count {}, transfer count {}",
+        "TEST SUCCEED: total_write_count {}, region number {}, merge count {}, move count {}, transfer count {}",
         total_write_count, region_number, total_merge_count, total_move_count, total_transfer_count,
     );
 }

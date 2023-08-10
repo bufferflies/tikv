@@ -75,6 +75,10 @@ pub struct Shard {
     pub(crate) max_ts: AtomicU64,
     pub(crate) estimated_kv_size: AtomicU64,
 
+    pub(crate) sst_max_ts: AtomicU64, // the max_ts of sst files (mem-tables excluded)
+    pub(crate) tombs: AtomicU64,      // number of tombstone entries
+    pub(crate) entries_write_cf: AtomicU64, // number of entries in WRITE_CF
+
     // meta_seq is the raft log index of the applied change set.
     // Because change set are applied in the worker thread, the value is usually smaller
     // than write_sequence.
@@ -140,6 +144,9 @@ impl Shard {
             estimated_entries: Default::default(),
             max_ts: Default::default(),
             estimated_kv_size: Default::default(),
+            sst_max_ts: Default::default(),
+            tombs: Default::default(),
+            entries_write_cf: Default::default(),
             meta_seq: Default::default(),
             write_sequence: Default::default(),
             compaction_priority: RwLock::new(None),
@@ -203,7 +210,7 @@ impl Shard {
         shard
     }
 
-    pub(crate) fn id_ver(&self) -> IdVer {
+    pub fn id_ver(&self) -> IdVer {
         IdVer::new(self.id, self.ver)
     }
 
@@ -222,27 +229,26 @@ impl Shard {
 
     fn refresh_estimated_size_and_entries(&self) {
         let data = self.get_data();
-        let mut max_ts = data.get_mem_table_max_ts();
 
-        let (mut size, mut entries, mut kv_size, l0_max_ts) = data.get_l0_stats();
-        max_ts = cmp::max(max_ts, l0_max_ts);
-
+        let mut lv_stats = data.get_l0_stats();
         data.for_each_level(|cf, l| {
-            let (lv_size, lv_entries, lv_kv_size, lv_max_ts, lv_blob_size) =
-                data.get_level_stats(l);
-            size += lv_size + lv_blob_size;
-            max_ts = max_ts_by_cf(max_ts, cf, lv_max_ts);
-            entries += lv_entries;
-            if cf == WRITE_CF {
-                kv_size += lv_kv_size;
-            }
+            lv_stats.add(&data.get_level_stats(cf, l), cf);
             false
         });
 
-        store_u64(&self.estimated_size, size);
-        store_u64(&self.estimated_entries, entries);
-        store_u64(&self.max_ts, max_ts);
-        store_u64(&self.estimated_kv_size, kv_size);
+        store_u64(
+            &self.estimated_size,
+            lv_stats.data_size + lv_stats.blob_size,
+        );
+        store_u64(&self.estimated_entries, lv_stats.entries);
+        store_u64(&self.sst_max_ts, lv_stats.max_ts);
+        store_u64(
+            &self.max_ts,
+            std::cmp::max(lv_stats.max_ts, data.get_mem_table_max_ts()),
+        );
+        store_u64(&self.estimated_kv_size, lv_stats.kv_size);
+        store_u64(&self.tombs, lv_stats.tombs);
+        store_u64(&self.entries_write_cf, lv_stats.entries_write_cf);
     }
 
     pub(crate) fn gen_rand_schedule_del_range_time(&self) -> u64 {
@@ -543,8 +549,8 @@ impl Shard {
         for cf in 0..NUM_CFS {
             let scf = data.get_cf(cf);
             for lh in &scf.levels[..scf.levels.len() - 1] {
-                let level_total_size = data.get_level_total_size(lh);
-                let lvl_score = level_total_size as f64
+                let lvl_stats = data.get_level_stats(cf, lh);
+                let lvl_score = lvl_stats.data_size as f64
                     / ((self.opt.base_size as f64) * 10f64.powf((lh.level - 1) as f64));
                 if score < lvl_score {
                     score = lvl_score;
@@ -582,6 +588,46 @@ impl Shard {
 
     pub(crate) fn get_compaction_priority(&self) -> Option<CompactionPriority> {
         self.compaction_priority.read().unwrap().clone()
+    }
+
+    pub(crate) fn is_compacting(&self) -> bool {
+        load_bool(&self.compacting)
+    }
+
+    /// Check whether to trigger compaction for tombstones.
+    ///
+    /// Due to high costs of major compaction, the current strategies are
+    /// relatively conservative.
+    pub fn check_need_gc_tombstones(&self, safe_ts: u64) -> bool {
+        if self.is_compacting()
+            || self.get_compaction_priority().is_some()
+            || self.pending_ops.read().unwrap().manual_major_compaction
+        {
+            return false;
+        }
+
+        let sst_max_ts = self.sst_max_ts.load(Ordering::Relaxed);
+        if sst_max_ts > safe_ts {
+            return false;
+        }
+
+        let tombs = self.tombs.load(Ordering::Relaxed);
+        if tombs < self.opt.compaction_tombs_count {
+            return false;
+        }
+
+        let write_entries = self.entries_write_cf.load(Ordering::Relaxed);
+        let tombs_ratio = tombs as f64 / write_entries as f64;
+        if tombs_ratio >= self.opt.compaction_tombs_ratio {
+            let mut priority = self.compaction_priority.write().unwrap();
+            if priority.is_some() {
+                return false;
+            }
+            *priority = Some(CompactionPriority::Major { score: tombs_ratio });
+            return true;
+        }
+
+        false
     }
 
     pub(crate) fn get_data(&self) -> ShardData {
@@ -784,58 +830,56 @@ impl ShardDataCore {
     }
 
     pub(crate) fn get_l0_total_size(&self) -> u64 {
-        let (total_size, ..) = self.get_l0_stats();
-        total_size
+        self.get_l0_stats().data_size
     }
 
-    // Return (total_size, total_entries, total_kv_size, max_ts).
-    pub(crate) fn get_l0_stats(&self) -> (u64, u64, u64, u64) {
-        let (mut total_size, mut total_entries, mut total_kv_size, mut max_ts) = (0, 0, 0, 0);
+    pub(crate) fn get_l0_stats(&self) -> LevelStatsLite {
+        let mut stats = LevelStatsLite::default();
         self.l0_tbls.iter().for_each(|l0| {
             if self.cover_full_table(l0.smallest(), l0.biggest()) {
-                total_size += l0.size();
-                total_entries += l0.entries();
-                total_kv_size += l0.kv_size();
+                stats.data_size += l0.size();
+                stats.entries += l0.entries();
+                stats.kv_size += l0.kv_size();
+                stats.tombs += l0.tombs();
+                stats.entries_write_cf += l0.entries_write_cf();
             } else {
-                total_size += l0.size() / 2;
-                total_entries += l0.entries() / 2;
-                total_kv_size += l0.kv_size() / 2;
+                stats.data_size += l0.size() / 2;
+                stats.entries += l0.entries() / 2;
+                stats.kv_size += l0.kv_size() / 2;
+                stats.tombs += l0.tombs() / 2;
+                stats.entries_write_cf += l0.entries_write_cf() / 2;
             }
-            max_ts = cmp::max(max_ts, l0.max_ts());
+            stats.max_ts = cmp::max(stats.max_ts, l0.max_ts());
         });
-        (total_size, total_entries, total_kv_size, max_ts)
+        stats
     }
 
-    pub(crate) fn get_level_total_size(&self, level: &LevelHandler) -> u64 {
-        let (total_size, ..) = self.get_level_stats(level);
-        total_size
-    }
-
-    // Return (total_size, total_entries, total_kv_size, max_ts).
-    pub(crate) fn get_level_stats(&self, level: &LevelHandler) -> (u64, u64, u64, u64, u64) {
-        let (mut total_size, mut total_entries, mut total_kv_size, mut max_ts, mut total_blob_size) =
-            (0, 0, 0, 0, 0);
+    pub(crate) fn get_level_stats(&self, cf: usize, level: &LevelHandler) -> LevelStatsLite {
+        let mut stats = LevelStatsLite::default();
         level.tables.iter().enumerate().for_each(|(i, tbl)| {
             if self.is_over_bound_table(level, i, tbl) {
-                total_size += tbl.estimated_size_in_range(self.inner_start(), self.inner_end());
-                total_blob_size += tbl.in_use_total_blob_size / 2;
-                total_entries += tbl.entries as u64 / 2;
-                total_kv_size += tbl.kv_size / 2;
+                stats.data_size +=
+                    tbl.estimated_size_in_range(self.inner_start(), self.inner_end());
+                stats.blob_size += tbl.in_use_total_blob_size / 2;
+                stats.entries += tbl.entries as u64 / 2;
+                if cf == WRITE_CF {
+                    stats.kv_size += tbl.kv_size / 2;
+                    stats.tombs += tbl.tombs as u64 / 2;
+                    stats.entries_write_cf += tbl.entries as u64 / 2;
+                }
             } else {
-                total_size += tbl.size();
-                total_blob_size += tbl.in_use_total_blob_size;
-                total_entries += tbl.entries as u64;
-                total_kv_size += tbl.kv_size;
+                stats.data_size += tbl.size();
+                stats.blob_size += tbl.in_use_total_blob_size;
+                stats.entries += tbl.entries as u64;
+                if cf == WRITE_CF {
+                    stats.kv_size += tbl.kv_size;
+                    stats.tombs += tbl.tombs as u64;
+                    stats.entries_write_cf += tbl.entries as u64;
+                }
             }
-            max_ts = cmp::max(max_ts, tbl.max_ts);
+            stats.max_ts = cmp::max(stats.max_ts, tbl.max_ts);
         });
-        (
-            total_size,
-            total_entries,
-            total_kv_size,
-            max_ts,
-            total_blob_size,
-        )
+        stats
     }
 
     fn is_over_bound_table(&self, level: &LevelHandler, i: usize, tbl: &SsTable) -> bool {

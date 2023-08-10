@@ -2,13 +2,14 @@
 
 set -eu
 
-NAME="all"
+DOCKER_ID=$1
+TESTNAME=$2
 
 mkdir -p /random/logs /random/error-logs
-for i in $(seq 1 100000)
+for i in $(seq -w 1 100000)
 do
-    LOG=/random/logs/random_"$NAME"_$1_$i.log
-    /random/random-bin test_random_"$NAME" > "$LOG" 2>&1 || true
+    LOG=/random/logs/random_"$TESTNAME"_"$i"_"$DOCKER_ID".log
+    /random/random-bin test_random_"$TESTNAME" > "$LOG" 2>&1 || true
     if grep -q 'TEST SUCCEED' "$LOG"; then
         grep 'TEST SUCCEED' "$LOG"
         rm "$LOG"

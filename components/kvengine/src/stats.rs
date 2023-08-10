@@ -4,7 +4,7 @@ use std::cmp;
 
 use bytes::Bytes;
 
-use crate::{load_bool, metrics::ENGINE_OPEN_FILES, IdVer, EXTRA_CF, NUM_CFS, WRITE_CF};
+use crate::{metrics::ENGINE_OPEN_FILES, IdVer, EXTRA_CF, NUM_CFS, WRITE_CF};
 
 #[derive(Default, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -192,6 +192,33 @@ pub struct CfStats {
     pub levels: Vec<LevelStats>,
 }
 
+#[derive(Default, Clone, Debug, PartialEq)]
+pub struct LevelStatsLite {
+    pub data_size: u64,
+    pub blob_size: u64,
+    pub entries: u64,
+    // The followings are for WRITE_CF only.
+    pub kv_size: u64,
+    pub tombs: u64,
+    pub entries_write_cf: u64,
+    // The following is for WRITE_CF & EXTRA_CF
+    pub max_ts: u64,
+}
+
+impl LevelStatsLite {
+    pub fn add(&mut self, other: &LevelStatsLite, cf: usize) {
+        self.data_size += other.data_size;
+        self.blob_size += other.blob_size;
+        self.entries += other.entries;
+        if cf == WRITE_CF {
+            self.kv_size += other.kv_size;
+            self.tombs += other.tombs;
+            self.entries_write_cf += other.entries_write_cf;
+        }
+        self.max_ts = max_ts_by_cf(self.max_ts, cf, other.max_ts);
+    }
+}
+
 #[derive(Default, Serialize, Deserialize, Debug)]
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
@@ -231,8 +258,8 @@ impl super::Shard {
         let mut max_ts = 0;
         let mut entries = 0;
         let mut old_entries = 0;
-        let mut tombs = 0;
-        let mut kv_size = 0;
+        let mut tombs = 0; // for WRITE_CF only
+        let mut kv_size = 0; // for WRITE_CF only
         let mut open_files = 0;
         let data = self.get_data();
         let mem_table_count = data.mem_tbls.len();
@@ -276,8 +303,8 @@ impl super::Shard {
                     max_ts = max_ts_by_cf(max_ts, cf, cf_tbl.max_ts);
                     entries += cf_tbl.entries as usize;
                     old_entries += cf_tbl.old_entries as usize;
-                    tombs += cf_tbl.tombs as usize;
                     if cf == WRITE_CF {
+                        tombs += cf_tbl.tombs as usize;
                         kv_size += cf_tbl.kv_size;
                         cf_tbl.expire_cache(0);
                         if cf_tbl.has_open_file() {
@@ -311,8 +338,8 @@ impl super::Shard {
                         level_stats.in_mem_filter_size += t.in_mem_filter_size();
                         level_stats.entries += t.entries as usize;
                         level_stats.old_entries += t.old_entries as usize;
-                        level_stats.tombs += t.tombs as usize;
                         if cf == WRITE_CF {
+                            level_stats.tombs += t.tombs as usize;
                             level_stats.kv_size += t.kv_size;
                         }
                         level_stats.in_use_blob_size += t.total_blob_size();
@@ -323,8 +350,8 @@ impl super::Shard {
                         level_stats.filter_size += t.filter_size() / 2;
                         level_stats.entries += t.entries as usize / 2;
                         level_stats.old_entries += t.old_entries as usize / 2;
-                        level_stats.tombs += t.tombs as usize / 2;
                         if cf == WRITE_CF {
+                            level_stats.tombs += t.tombs as usize / 2;
                             level_stats.kv_size += t.kv_size / 2;
                         }
                         partial_tbls += 1;
@@ -360,7 +387,7 @@ impl super::Shard {
             end: self.outer_end.clone(),
             inner_key_off: self.inner_key_off,
             active: self.is_active(),
-            compacting: load_bool(&self.compacting),
+            compacting: self.is_compacting(),
             flushed: self.get_initial_flushed(),
             mem_table_count,
             mem_table_size,
@@ -427,5 +454,64 @@ mod tests {
         for (max_ts, cf, cf_max_ts, expected) in cases {
             assert_eq!(max_ts_by_cf(max_ts, cf, cf_max_ts), expected,);
         }
+    }
+
+    #[test]
+    fn test_level_stats_lite() {
+        let mut stats1 = LevelStatsLite {
+            data_size: 10000,
+            blob_size: 20000,
+            kv_size: 8000,
+            entries: 2000,
+            tombs: 1000,
+            entries_write_cf: 1500,
+            max_ts: 100,
+        };
+        let mut stats2 = stats1.clone();
+
+        stats2.max_ts = 110;
+        stats1.add(&stats2, WRITE_CF);
+        assert_eq!(
+            stats1,
+            LevelStatsLite {
+                data_size: 20000,
+                blob_size: 40000,
+                kv_size: 16000,
+                entries: 4000,
+                tombs: 2000,
+                entries_write_cf: 3000,
+                max_ts: 110,
+            }
+        );
+
+        stats2.max_ts = 120;
+        stats1.add(&stats2, LOCK_CF);
+        assert_eq!(
+            stats1,
+            LevelStatsLite {
+                data_size: 30000,
+                blob_size: 60000,
+                kv_size: 16000, // unchanged
+                entries: 6000,
+                tombs: 2000,            // unchanged
+                entries_write_cf: 3000, // unchanged
+                max_ts: 110,            // unchanged
+            }
+        );
+
+        stats2.max_ts = 130;
+        stats1.add(&stats2, EXTRA_CF);
+        assert_eq!(
+            stats1,
+            LevelStatsLite {
+                data_size: 40000,
+                blob_size: 80000,
+                kv_size: 16000, // unchanged
+                entries: 8000,
+                tombs: 2000,            // unchanged
+                entries_write_cf: 3000, // unchanged
+                max_ts: 130,
+            }
+        );
     }
 }

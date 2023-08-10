@@ -218,6 +218,7 @@ fn prepare_cluster(
         conf.enable_inner_key_offset = true;
         conf.security = security_conf.clone();
         conf.kvengine.compaction_request_version = 3;
+        conf.kvengine.compaction_tombs_count = 100;
     };
     let cluster = ServerCluster::new(nodes, update_conf_fn);
     cluster.wait_region_replicated(&[], 3);

@@ -5,6 +5,7 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use dyn_clone::DynClone;
 
 use crate::{
+    config::{DEFAULT_COMPACTION_TOMBS_COUNT, DEFAULT_COMPACTION_TOMBS_RATIO},
     table::{blobtable, sstable},
     *,
 };
@@ -53,6 +54,10 @@ pub struct Options {
     pub enable_safe_point_v2: bool,
 
     pub compaction_request_version: u32,
+    /// The ratio threshold of tombstone entries to trigger compaction.
+    pub compaction_tombs_ratio: f64,
+    /// The number threshold of tombstone entries to trigger compaction.
+    pub compaction_tombs_count: u64,
 }
 
 impl Default for Options {
@@ -76,6 +81,8 @@ impl Default for Options {
             for_restore: false,
             enable_safe_point_v2: false,
             compaction_request_version: 2,
+            compaction_tombs_ratio: DEFAULT_COMPACTION_TOMBS_RATIO,
+            compaction_tombs_count: DEFAULT_COMPACTION_TOMBS_COUNT,
         }
     }
 }

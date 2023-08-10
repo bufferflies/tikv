@@ -185,6 +185,14 @@ impl L0TableCore {
         self.entries
     }
 
+    pub fn tombs(&self) -> u64 {
+        self.cfs[WRITE_CF].as_ref().map_or(0, |t| t.tombs as u64)
+    }
+
+    pub fn entries_write_cf(&self) -> u64 {
+        self.cfs[WRITE_CF].as_ref().map_or(0, |t| t.entries as u64)
+    }
+
     pub fn kv_size(&self) -> u64 {
         self.kv_size
     }

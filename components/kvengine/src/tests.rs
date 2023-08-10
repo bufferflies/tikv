@@ -1128,6 +1128,64 @@ fn test_overlap_ingest_files() {
     }
 }
 
+#[test]
+fn test_refresh_stats() {
+    init_logger();
+    let (engine, _) = new_test_engine();
+    let shard = engine.get_shard(1).unwrap();
+
+    let mut saved_vals: Vec<Rc<String>> = Vec::new();
+
+    let mut write_cf_builder = ShardCfBuilder::new(WRITE_CF);
+    write_cf_builder.add_table(
+        new_table(&engine, 12, 50, 150, 102, false, &mut saved_vals),
+        2,
+    );
+    write_cf_builder.add_table(
+        new_table(&engine, 13, 70, 90, 103, true, &mut saved_vals),
+        1,
+    );
+
+    let mut lock_cf_builder = ShardCfBuilder::new(LOCK_CF);
+    lock_cf_builder.add_table(
+        new_table(&engine, 21, 50, 150, 1001, false, &mut saved_vals),
+        2,
+    );
+    lock_cf_builder.add_table(
+        new_table(&engine, 22, 70, 90, 1002, true, &mut saved_vals),
+        1,
+    );
+
+    let mut extra_cf_builder = ShardCfBuilder::new(EXTRA_CF);
+    extra_cf_builder.add_table(
+        new_table(&engine, 31, 50, 150, 150, false, &mut saved_vals),
+        1,
+    );
+
+    let data = ShardData::new(
+        shard.range.clone(),
+        vec![CfTable::new()],
+        vec![],
+        Arc::new(HashMap::default()),
+        [
+            write_cf_builder.build(),
+            lock_cf_builder.build(),
+            extra_cf_builder.build(),
+        ],
+        HashMap::new(),
+    );
+    shard.set_data(data);
+    shard.refresh_states();
+
+    // size per entry: key 9, value 18
+    assert_eq!(shard.get_estimated_entries(), 340); // 100 + 20 + 100 + 20 + 100
+    assert_eq!(load_u64(&shard.sst_max_ts), 150); // max(WRITE_CF, EXTRA_CF). TODO: test with mem tables.
+    assert_eq!(shard.get_max_ts(), 150); // max(WRITE_CF, EXTRA_CF)
+    assert_eq!(shard.get_estimated_kv_size(), 2880); // 100*27 + 20*9
+    assert_eq!(load_u64(&shard.tombs), 20); // WRITE_CF only
+    assert_eq!(load_u64(&shard.entries_write_cf), 120); // WRITE_CF only
+}
+
 #[derive(Clone)]
 struct TestMetaChangeListener {
     sender: mpsc::Sender<pb::ChangeSet>,

@@ -289,7 +289,10 @@ impl<'a> PeerMsgHandler<'a> {
             self.on_pd_heartbeat_tick();
         }
         if self.ticker.is_on_tick(PEER_TICK_SPLIT_CHECK) {
-            self.on_split_region_check_tick();
+            let should_split = self.on_split_region_check_tick();
+            if !should_split {
+                self.check_gc_tombstones();
+            }
         }
         if self.ticker.is_on_tick(PEER_TICK_SWITCH_MEM_TABLE_CHECK) {
             self.on_switch_mem_table_check_tick();
@@ -1028,7 +1031,7 @@ impl<'a> PeerMsgHandler<'a> {
         });
     }
 
-    fn on_split_region_check_tick(&mut self) {
+    fn on_split_region_check_tick(&mut self) -> bool /* should_split */ {
         self.ticker.schedule(PEER_TICK_SPLIT_CHECK);
         if let Some(shard) = self.ctx.global.engines.kv.get_shard(self.region_id()) {
             let estimated_size = shard.get_estimated_size();
@@ -1039,22 +1042,23 @@ impl<'a> PeerMsgHandler<'a> {
             self.peer.peer_stat.approximate_keys = estimated_entries;
             self.peer.peer_stat.approximate_kv_size = estimated_kv_size;
             if !self.fsm.peer.is_leader() {
-                return;
+                return false;
             }
             if !shard.get_initial_flushed() {
-                return;
+                return false;
             }
             // When Lightning or BR is importing data to TiKV, their ingest-request may fail
             // because of region-epoch not matched. So we hope TiKV do not check
             // region size and split region during importing.
             if self.ctx.global.importer.get_mode() == SwitchMode::Import {
-                return;
+                return false;
             }
             if self.ctx.cfg.region_split_keys < 10 {
                 // For some tests to be effective, we need to split tiny regions.
                 // But tiny region only has mem-table, get_suggest_split_key will return None.
                 // So we handle it specially.
-                return self.split_by_iterate(shard);
+                self.split_by_iterate(shard);
+                return true;
             }
             let region_max_size = self.ctx.cfg.region_split_size.0 * 3 / 2;
             let region_max_entries = self.ctx.cfg.region_split_keys * 3 / 2;
@@ -1071,9 +1075,11 @@ impl<'a> PeerMsgHandler<'a> {
                         region_max_size,
                     );
                     self.schedule_ask_split(vec![Key::from_raw(k.chunk()).into_encoded()]);
+                    return true;
                 }
             }
         }
+        false
     }
 
     fn schedule_ask_split(&mut self, split_keys: Vec<Vec<u8>>) {
@@ -2087,6 +2093,16 @@ impl<'a> PeerMsgHandler<'a> {
         custom_builder.set_change_set(&cs);
         cmd.set_custom_request(custom_builder.build());
         self.propose_raft_command(cmd, callback, None);
+    }
+
+    fn check_gc_tombstones(&self) {
+        let kv = &self.ctx.global.engines.kv;
+        if let Some(shard) = kv.get_shard(self.region_id()) {
+            let safe_ts = kv.get_keyspace_gc_safepoint_v2(self.region().get_start_key());
+            if shard.check_need_gc_tombstones(safe_ts) {
+                kv.trigger_compact(shard.id_ver());
+            }
+        }
     }
 }
 

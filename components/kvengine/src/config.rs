@@ -9,6 +9,9 @@ use tikv_util::config::ReadableDuration;
 
 use crate::table::blobtable::builder::BlobTableBuildOptions;
 
+pub(crate) const DEFAULT_COMPACTION_TOMBS_RATIO: f64 = 0.2;
+pub(crate) const DEFAULT_COMPACTION_TOMBS_COUNT: u64 = 10000;
+
 #[derive(Default, Clone, Serialize, Deserialize, PartialEq, Debug)]
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
@@ -24,7 +27,15 @@ pub struct Config {
     /// The maximum delay duration for delete range.
     pub max_del_range_delay: ReadableDuration,
     pub compaction_request_version: u32,
+    /// The ratio threshold of tombstone entries to trigger compaction.
+    pub compaction_tombs_ratio: f64,
+    /// The number threshold of tombstone entries to trigger compaction.
+    pub compaction_tombs_count: u64,
+
     pub per_keyspace_configs: Vec<PerKeyspaceConfig>,
+    // Note: `per_keyspace_configs` must be the last field. Otherwise serializing the config
+    // will meet a "ValueAfterTable" error.
+    // See https://docs.rs/toml/0.5.11/toml/ser/enum.Error.html#variant.ValueAfterTable.
 }
 
 impl Default for Config {
@@ -32,6 +43,8 @@ impl Default for Config {
         Self {
             max_del_range_delay: ReadableDuration::secs(3600),
             compaction_request_version: 2,
+            compaction_tombs_ratio: DEFAULT_COMPACTION_TOMBS_RATIO,
+            compaction_tombs_count: DEFAULT_COMPACTION_TOMBS_COUNT,
             per_keyspace_configs: vec![],
         }
     }
