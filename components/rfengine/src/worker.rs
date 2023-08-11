@@ -5,7 +5,7 @@ use std::{
     collections::HashMap,
     fmt::{Display, Formatter},
     fs,
-    io::{Read, Seek, SeekFrom},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU32, Ordering},
@@ -17,7 +17,6 @@ use std::{
 use api_version::{api_v2, ApiV2};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use engine_traits::ObjectStorage;
-use file_system::{DirectWriter, IoRateLimitMode, IoRateLimiter, IoType};
 use kvproto::raft_serverpb::RegionLocalState;
 use protobuf::Message;
 use rfenginepb::{
@@ -39,11 +38,9 @@ const MAX_WAL_CHUNK_SIZE: u64 = 128 * 1024 * 1024;
 pub(crate) struct Worker {
     dir: PathBuf,
     manifest: Manifest,
-    writer: DirectWriter,
     task_rx: Receiver<Task>,
     buf: Vec<u8>,
     compacted_epoch: Arc<AtomicU32>,
-    rate_limiter: Arc<IoRateLimiter>,
     async_wal_writer: Option<WalWriter>,
 }
 
@@ -53,20 +50,14 @@ impl Worker {
         task_rx: Receiver<Task>,
         manifest: Manifest,
         compacted_epoch: Arc<AtomicU32>,
-        rate_limit: usize,
         async_wal_writer: Option<WalWriter>,
     ) -> Self {
-        let rate_limiter = Arc::new(IoRateLimiter::new(IoRateLimitMode::AllIo, true, false));
-        rate_limiter.set_io_rate_limit(rate_limit);
-        let writer = DirectWriter::new(rate_limiter.clone(), IoType::Compaction);
         Self {
             dir,
             manifest,
-            writer,
             task_rx,
             buf: vec![],
             compacted_epoch,
-            rate_limiter,
             async_wal_writer,
         }
     }
@@ -111,7 +102,7 @@ impl Worker {
     fn compact(&mut self, epoch_id: u32) -> Result<()> {
         let timer = Instant::now_coarse();
         let mut batch = WriteBatch::default();
-        let mut it = WalIterator::new(self.dir.clone(), epoch_id, Some(self.rate_limiter.clone()));
+        let mut it = WalIterator::new(self.dir.clone(), epoch_id);
         it.iterate_batch(|data| {
             WalIterator::iterate_peer_batch(data, |region_batch| {
                 batch.merge_peer(region_batch);
@@ -173,7 +164,9 @@ impl Worker {
             let checksum = crc32c::crc32c(&self.buf[origin_len..]);
             self.buf.put_u32_le(checksum);
         }
-        self.writer.write_to_file(&self.buf, &filename)?;
+        let mut file = fs::File::create(filename)?;
+        file.write_all(&self.buf)?;
+        file.sync_data()?;
         let mut file = rfenginepb::RaftLogFile::default();
         file.first_index = first;
         file.last_index = last;
@@ -302,12 +295,7 @@ impl Worker {
             for (peer_id, file) in files {
                 let file_name =
                     raft_log_file_name(&self.dir, peer_id, file.first_index, file.last_index);
-                let mut fd = file_system::File::open_with_limiter(
-                    file_name,
-                    Some(self.rate_limiter.clone()),
-                )?;
-                let mut data = vec![];
-                fd.read_to_end(&mut data)?;
+                let data = fs::read(file_name)?;
                 let mut backup_file = RaftLogBackupFile::default();
                 backup_file.peer_id = peer_id;
                 backup_file.start_off = object.len() as u64;
@@ -333,8 +321,7 @@ impl Worker {
         end_off: u64,
     ) -> Result<Vec<(String, Bytes)>> {
         let wal_file_name = wal_file_name(&self.dir, wal_epoch);
-        let mut wal_file =
-            file_system::File::open_with_limiter(wal_file_name, Some(self.rate_limiter.clone()))?;
+        let mut wal_file = fs::File::open(wal_file_name)?;
         let mut chunks = vec![];
         let mut total_size = 0;
         let backup_size = end_off - start_off;
@@ -622,7 +609,6 @@ mod tests {
             rx,
             manifest,
             AtomicU32::new(0).into(),
-            125 * 1024 * 1024,
             None,
         );
         let epoch = 990;
@@ -731,7 +717,6 @@ mod tests {
             rx,
             manifest,
             AtomicU32::new(0).into(),
-            125 * 1024 * 1024,
             None,
         );
         let mut cs = ChangeSet::new();

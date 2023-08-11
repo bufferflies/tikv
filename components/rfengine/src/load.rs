@@ -70,14 +70,14 @@ impl RfEngineCore {
         let mut async_batch_cnt = 0;
         let mut async_offset = 0;
         if self.is_async_wal_enabled() && load_async {
-            let mut async_it = WalIterator::new(self.dir.to_path_buf(), epoch_id, None);
+            let mut async_it = WalIterator::new(self.dir.to_path_buf(), epoch_id);
             async_it.iterate_batch(|_| {
                 async_batch_cnt += 1;
             })?;
             async_offset = async_it.offset;
         }
         let mut sync_batch_idx = 0;
-        let mut it = WalIterator::new(self.wal_dir().to_path_buf(), epoch_id, None);
+        let mut it = WalIterator::new(self.wal_dir().to_path_buf(), epoch_id);
         it.iterate_batch(|data| {
             sync_batch_idx += 1;
             let mut wb = if self.is_async_wal_enabled() && sync_batch_idx >= async_batch_cnt {

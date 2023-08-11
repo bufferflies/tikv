@@ -180,7 +180,6 @@ impl RfEngineCore {
                 rx,
                 manifest,
                 compacted_epoch,
-                cfg.worker_rate_limit.0 as usize,
                 async_wal_writer,
             );
             let join_handle = thread::spawn(move || worker.run());
@@ -1389,8 +1388,8 @@ mod tests {
         };
         for ep in compacted_epoch + 1..=current_epoch {
             let filename = wal_file_name(dir_path, ep);
-            let mut it = WalIterator::new(dir_path.to_owned(), ep, None);
-            let fd = file_system::File::open(filename.clone()).unwrap();
+            let mut it = WalIterator::new(dir_path.to_owned(), ep);
+            let fd = File::open(filename.clone()).unwrap();
             let mut buf_reader = BufReader::new(fd);
             let wal_header = it.check_wal_header(&mut buf_reader).unwrap();
             let mut offsets = vec![it.offset];
