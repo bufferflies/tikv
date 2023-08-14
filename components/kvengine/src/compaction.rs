@@ -35,9 +35,14 @@ use crate::{
         sstable::{self, builder::TableBuilderOptions, InMemFile, L0Builder, SsTable},
         InnerKey,
     },
-    Error::{FallbackLocalCompactorDisabled, IncompatibleRemoteCompactor, RemoteCompaction},
+    Error::{
+        CompactionNotRetryable, FallbackLocalCompactorDisabled, IncompatibleRemoteCompactor,
+        RemoteCompaction,
+    },
     Iterator, EXTRA_CF, LOCK_CF, WRITE_CF, *,
 };
+
+const MAJOR_COMPACTION_MIN_REQUEST_VERSION: u32 = 3;
 
 static RETRY_INTERVAL: Duration = Duration::from_secs(600);
 
@@ -504,7 +509,7 @@ impl Engine {
             Some(CompactionPriority::L1Plus { cf, level, .. }) => {
                 self.trigger_l1_plus_compaction(&shard, cf, level, id_ver)
             }
-            Some(CompactionPriority::Major { .. }) => self.trigger_major_compacton(&shard),
+            Some(CompactionPriority::Major { .. }) => self.trigger_major_compaction(&shard),
             Some(CompactionPriority::DestroyRange) => Some(self.destroy_range(&shard)),
             Some(CompactionPriority::TruncateTs) => self.truncate_ts(&shard).transpose(),
             Some(CompactionPriority::TrimOverBound) => self.trim_over_bound(&shard).transpose(),
@@ -1197,7 +1202,13 @@ impl Engine {
         Some(self.comp_client.compact(req))
     }
 
-    pub(crate) fn trigger_major_compacton(&self, shard: &Shard) -> Option<Result<pb::ChangeSet>> {
+    pub(crate) fn trigger_major_compaction(&self, shard: &Shard) -> Option<Result<pb::ChangeSet>> {
+        if self.opts.compaction_request_version < MAJOR_COMPACTION_MIN_REQUEST_VERSION {
+            return Some(Err(CompactionNotRetryable(format!(
+                "trigger_major_compaction: compaction_request_version must >= {}",
+                MAJOR_COMPACTION_MIN_REQUEST_VERSION
+            ))));
+        }
         let mut req = self.new_compact_request_with_shard(shard, 0, 0);
         let mut ln_tables: HashMap<usize, Vec<(usize, Vec<u64>)>> = HashMap::new();
         let mut total_size = 0;
@@ -3032,6 +3043,9 @@ impl CompactRunner {
             }
             Some(Err(FallbackLocalCompactorDisabled)) => {
                 error!("shard {} local compaction disabled, no need retry", tag);
+            }
+            Some(Err(CompactionNotRetryable(e))) => {
+                error!("shard {} compaction failed {}, not retryable", tag, e);
             }
             Some(Err(e)) => {
                 error!("shard {} compaction failed {}, retrying", tag, e);

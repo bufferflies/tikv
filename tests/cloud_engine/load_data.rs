@@ -68,7 +68,6 @@ fn impl_test_load_data(enable_inner_key_off: bool) {
     let mut cluster = ServerCluster::new(node_ids.clone(), |_, conf: &mut TikvConfig| {
         conf.dfs = dfs_conf.clone();
         conf.enable_inner_key_offset = enable_inner_key_off;
-        conf.kvengine.compaction_request_version = 3;
     });
     cluster.wait_region_replicated(&[], 3);
     let pd_client = cluster.get_pd_client();

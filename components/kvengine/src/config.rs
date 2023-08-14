@@ -9,6 +9,7 @@ use tikv_util::config::ReadableDuration;
 
 use crate::table::blobtable::builder::BlobTableBuildOptions;
 
+pub(crate) const DEFAULT_COMPACTION_REQUEST_VERSION: u32 = 3;
 pub(crate) const DEFAULT_COMPACTION_TOMBS_RATIO: f64 = 0.2;
 pub(crate) const DEFAULT_COMPACTION_TOMBS_COUNT: u64 = 10000;
 
@@ -42,7 +43,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             max_del_range_delay: ReadableDuration::secs(3600),
-            compaction_request_version: 2,
+            compaction_request_version: DEFAULT_COMPACTION_REQUEST_VERSION,
             compaction_tombs_ratio: DEFAULT_COMPACTION_TOMBS_RATIO,
             compaction_tombs_count: DEFAULT_COMPACTION_TOMBS_COUNT,
             per_keyspace_configs: vec![],

@@ -24,9 +24,7 @@ fn test_major_compaction() {
     for _ in 0..node_cnt {
         nodes.push(alloc_node_id());
     }
-    let mut cluster = ServerCluster::new(nodes.clone(), |_, conf| {
-        conf.kvengine.compaction_request_version = 3;
-    });
+    let mut cluster = ServerCluster::new(nodes.clone(), |_, _| {});
     cluster.wait_region_replicated(&[], 3);
     let mut client = cluster.new_client();
     let pd_client = cluster.get_pd_client();

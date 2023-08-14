@@ -36,6 +36,8 @@ pub enum Error {
     IncompatibleRemoteCompactor { url: String, msg: String },
     #[error("fallback to local compactor disabled")]
     FallbackLocalCompactorDisabled,
+    #[error("not retryable compaction error {0}")]
+    CompactionNotRetryable(String),
     #[error("remote read error {0}")]
     RemoteRead(String),
 }

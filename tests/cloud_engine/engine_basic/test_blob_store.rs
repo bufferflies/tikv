@@ -37,7 +37,6 @@ fn test_per_keyspace_config() {
     k2_bt_config.min_blob_size = 0;
     k3_bt_config.min_blob_size = 5000;
     let mut cluster = ServerCluster::new(nodes.clone(), |_, conf| {
-        conf.kvengine.compaction_request_version = 3;
         conf.kvengine.per_keyspace_configs = vec![
             KvEnginePerKeyspaceConfig {
                 keyspace: 1,

@@ -99,7 +99,6 @@ fn test_random_merge() {
         conf.rfengine.target_file_size = ReadableSize::mb(1);
         conf.rfengine.batch_compression_threshold =
             ReadableSize::kb(rand::thread_rng().gen_range(0..2));
-        conf.kvengine.compaction_request_version = 3;
         conf.kvengine.compaction_tombs_count = 100;
     };
     let mut cluster = ServerCluster::new(nodes.clone(), update_conf_fn);

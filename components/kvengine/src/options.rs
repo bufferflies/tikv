@@ -5,7 +5,10 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use dyn_clone::DynClone;
 
 use crate::{
-    config::{DEFAULT_COMPACTION_TOMBS_COUNT, DEFAULT_COMPACTION_TOMBS_RATIO},
+    config::{
+        DEFAULT_COMPACTION_REQUEST_VERSION, DEFAULT_COMPACTION_TOMBS_COUNT,
+        DEFAULT_COMPACTION_TOMBS_RATIO,
+    },
     table::{blobtable, sstable},
     *,
 };
@@ -80,7 +83,7 @@ impl Default for Options {
             enable_inner_key_offset: false,
             for_restore: false,
             enable_safe_point_v2: false,
-            compaction_request_version: 2,
+            compaction_request_version: DEFAULT_COMPACTION_REQUEST_VERSION,
             compaction_tombs_ratio: DEFAULT_COMPACTION_TOMBS_RATIO,
             compaction_tombs_count: DEFAULT_COMPACTION_TOMBS_COUNT,
         }
