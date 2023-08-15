@@ -32,6 +32,8 @@ fn test_trim_over_bound_impl(split_key_idx: usize, do_leader_transfer: bool) {
     });
     cluster.wait_region_replicated(&[], 3);
     let mut client = cluster.new_client();
+    let prev_keyspace = i_to_key(0);
+    client.split(&prev_keyspace);
 
     client.put_kv(100..200, i_to_key, random_value_1kb);
 
@@ -39,17 +41,22 @@ fn test_trim_over_bound_impl(split_key_idx: usize, do_leader_transfer: bool) {
     fail::cfg(fp, "return").unwrap();
     let split_key = i_to_key(split_key_idx);
     client.split(&split_key);
-    cluster.wait_pd_region_count(2);
+    cluster.wait_pd_region_count(3);
 
     // Verify shard bound.
     {
         let stats = cluster.get_kvengine(node_ids[0]).get_all_shard_stats();
         info!("engine0 stats: {:?}", stats);
 
-        assert_eq!(stats.len(), 2);
+        assert_eq!(stats.len(), 3);
         if split_key_idx > 100 && split_key_idx < 200 {
-            assert!(stats[0].has_over_bound_data);
-            assert!(stats[1].has_over_bound_data);
+            for i in 0..3 {
+                if stats[i].start.is_empty() {
+                    // skip the first shard.
+                    continue;
+                }
+                assert!(stats[i].has_over_bound_data);
+            }
         }
     }
 
@@ -83,7 +90,7 @@ fn test_trim_over_bound_impl(split_key_idx: usize, do_leader_transfer: bool) {
     // Enable compaction for trim_over_bound.
     fail::cfg(fp, "off").unwrap();
     client.merge(&i_to_key(0), &i_to_key(300));
-    cluster.wait_pd_region_count(1);
+    cluster.wait_pd_region_count(2);
     client.verify_data_with_ref_store();
 
     fail::remove(fp);

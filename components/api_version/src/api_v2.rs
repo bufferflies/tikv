@@ -295,6 +295,30 @@ impl ApiV2 {
         start_key.to_vec()
     }
 
+    pub fn get_keyspace_prefix(key: &[u8]) -> Option<Vec<u8>> {
+        let key_mode = ApiV2::parse_key_mode(key);
+        if key_mode == KeyMode::Unknown || key_mode == KeyMode::Tidb {
+            return None;
+        }
+
+        let mut keyspace_prefix = Vec::with_capacity(KEYSPACE_PREFIX_LEN);
+        keyspace_prefix.extend_from_slice(&key[0..KEYSPACE_PREFIX_LEN]);
+        Some(keyspace_prefix)
+    }
+
+    pub fn is_belongs_to_same_keyspace(first_key: &[u8], second_key: &[u8]) -> bool {
+        if (ApiV2::parse_key_mode(first_key) == KeyMode::Txn
+            && ApiV2::parse_key_mode(second_key) == KeyMode::Txn)
+            || (ApiV2::parse_key_mode(first_key) == KeyMode::Raw
+                && ApiV2::parse_key_mode(second_key) == KeyMode::Raw)
+        {
+            ApiV2::get_keyspace_id(first_key) == ApiV2::get_keyspace_id(second_key)
+        } else {
+            // If both keys are not in ApiV2 mode, consider them as in the same keyspace.
+            ApiV2::parse_key_mode(first_key) == ApiV2::parse_key_mode(second_key)
+        }
+    }
+
     pub const ENCODED_LOGICAL_DELETE: [u8; 1] = [ValueMeta::DELETE_FLAG.bits];
 }
 
@@ -550,6 +574,33 @@ mod tests {
             assert_eq!(
                 is_whole_keyspace_range(&start, &end),
                 is_whole,
+                "case {}",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn test_is_belongs_to_same_keyspace() {
+        let test_cases = vec![
+            (b"x001111".to_vec(), b"x001112".to_vec(), true),
+            (b"x001".to_vec(), b"x0011".to_vec(), true),
+            (b"x0011".to_vec(), b"x002".to_vec(), false),
+            (b"r0011".to_vec(), b"r0012".to_vec(), true),
+            (b"r001".to_vec(), b"r0011".to_vec(), true),
+            (b"r0011".to_vec(), b"r0021".to_vec(), false),
+            (b"x0011".to_vec(), b"r0011".to_vec(), false),
+            (b"x0011".to_vec(), b"00121".to_vec(), false),
+            (b"r0011".to_vec(), b"00121".to_vec(), false),
+            (b"01234".to_vec(), b"02345".to_vec(), true),
+            (b"m1234".to_vec(), b"m2345".to_vec(), true),
+            (b"m1234".to_vec(), b"t2345".to_vec(), true),
+        ];
+
+        for (i, (start, end, is_same)) in test_cases.into_iter().enumerate() {
+            assert_eq!(
+                ApiV2::is_belongs_to_same_keyspace(&start, &end),
+                is_same,
                 "case {}",
                 i
             );

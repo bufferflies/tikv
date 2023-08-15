@@ -428,8 +428,6 @@ impl EngineCore {
         );
         shard.set_data(new_data);
         self.remove_dfs_files(shard, del_file_is_subrange);
-        let mut lock = shard.pending_ops.write().unwrap();
-        lock.manual_major_compaction = false;
         shard.set_property(MANUAL_MAJOR_COMPACTION, MANUAL_MAJOR_COMPACTION_DISABLE);
     }
 
@@ -517,11 +515,10 @@ impl EngineCore {
         );
         assert_eq!(cs.get_property_key(), DEL_PREFIXES_KEY);
         let done = DeletePrefixes::unmarshal(cs.get_property_value(), shard.inner_key_off);
-        let mut lock = shard.pending_ops.write().unwrap();
-        lock.del_prefixes = Arc::new(lock.del_prefixes.split(&done));
-        let new_del_prefixes = lock.del_prefixes.marshal();
         shard.set_data(new_data);
-        shard.set_property(DEL_PREFIXES_KEY, &new_del_prefixes);
+        let del_prefixes = shard.get_del_prefixes();
+        let new_del_prefixes = del_prefixes.split(&done);
+        shard.set_property(DEL_PREFIXES_KEY, &new_del_prefixes.marshal());
         self.remove_dfs_files(shard, del_files);
     }
 
@@ -544,9 +541,8 @@ impl EngineCore {
         shard.set_data(new_data);
         let truncated_ts = TruncateTs::unmarshal(cs.get_property_value());
         // if applied truncate_ts is smaller than truncate ts in shard, remove it.
-        let mut lock = shard.pending_ops.write().unwrap();
-        if need_update_truncate_ts(lock.truncate_ts, truncated_ts) {
-            lock.truncate_ts = None;
+        let old_truncated_ts = shard.get_truncate_ts();
+        if need_update_truncate_ts(old_truncated_ts, truncated_ts) {
             shard.set_property(TRUNCATE_TS_KEY, b"");
         }
         self.remove_dfs_files(shard, del_files);
@@ -568,8 +564,6 @@ impl EngineCore {
             data.unloaded_tbls.clone(),
         );
         shard.set_data(new_data);
-        let mut lock = shard.pending_ops.write().unwrap();
-        lock.trim_over_bound = false;
         shard.set_property(TRIM_OVER_BOUND, TRIM_OVER_BOUND_DISABLE);
         self.remove_dfs_files(shard, del_files);
     }

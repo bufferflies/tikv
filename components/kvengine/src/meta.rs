@@ -2,7 +2,10 @@
 
 use std::{cmp::max, collections::HashMap, iter::Iterator};
 
-use api_version::api_v2::{is_whole_keyspace_range, KEYSPACE_PREFIX_LEN};
+use api_version::{
+    api_v2::{is_whole_keyspace_range, KEYSPACE_PREFIX_LEN},
+    ApiV2,
+};
 use bytes::{Buf, Bytes};
 use kvenginepb as pb;
 use protobuf::Message;
@@ -154,6 +157,10 @@ impl ShardMeta {
 
     pub fn set_property(&mut self, key: &str, value: &[u8]) {
         self.properties.set(key, value);
+    }
+
+    pub fn del_property(&mut self, key: &str) {
+        self.properties.remove(key);
     }
 
     pub fn apply_change_set(&mut self, cs: &pb::ChangeSet) {
@@ -837,17 +844,39 @@ impl ShardMeta {
     }
 
     pub fn commit_merge(&mut self, source: &ShardMeta, sequence: u64) {
+        let is_same_keyspace_merge =
+            ApiV2::is_belongs_to_same_keyspace(&self.range.outer_start, &source.range.outer_start);
         // Include the max_ts and source files in the parent for future initial flush.
         self.max_ts = std::cmp::max(self.max_ts, source.max_ts);
         let mut parent = self.clone();
-        for (&id, source_file) in &source.files {
-            parent.files.insert(id, source_file.clone());
-        }
-        for (&id, source_file) in &source.files {
-            self.files.insert(id, source_file.clone());
+
+        if is_same_keyspace_merge {
+            for (&id, source_file) in &source.files {
+                parent.files.insert(id, source_file.clone());
+            }
+            for (&id, source_file) in &source.files {
+                self.files.insert(id, source_file.clone());
+            }
+
+            // merge DEL_PREFIXES_KEY from source if needed
+            let source_del_prefixes = source.get_property(DEL_PREFIXES_KEY);
+            let parent_del_prefixes = self.get_property(DEL_PREFIXES_KEY);
+            if let Some(new_del_prefixes) = merge_del_prefixes_if_needed(
+                source_del_prefixes,
+                parent_del_prefixes,
+                self.range.inner_key_off,
+            ) {
+                self.set_property(DEL_PREFIXES_KEY, &new_del_prefixes);
+            }
+        } else {
+            // clear all files if exists
+            parent.files.clear();
+            self.files.clear();
+
+            // remove DEL_PREFIXES_KEY property if exists
+            self.del_property(DEL_PREFIXES_KEY);
         }
 
-        debug_assert_eq!(self.range.inner_key_off, source.range.inner_key_off);
         if self.range.outer_end == source.range.outer_start {
             self.range.outer_end = source.range.outer_end.clone();
         } else {

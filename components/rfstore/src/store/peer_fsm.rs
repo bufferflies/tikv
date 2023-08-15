@@ -16,7 +16,7 @@ use bytes::Buf;
 use error_code::ErrorCodeExt;
 use fail::fail_point;
 use kvengine::{
-    IdVer, Shard, TruncateTs, DEL_PREFIXES_KEY, MANUAL_MAJOR_COMPACTION,
+    CheckMergeResult, IdVer, Shard, TruncateTs, DEL_PREFIXES_KEY, MANUAL_MAJOR_COMPACTION,
     MANUAL_MAJOR_COMPACTION_DISABLE, MANUAL_MAJOR_COMPACTION_ENABLE, TRUNCATE_TS_KEY,
 };
 use kvproto::{
@@ -797,21 +797,25 @@ impl<'a> PeerMsgHandler<'a> {
             let target_id = target_region.get_id();
             let target_version = target_region.get_region_epoch().get_version();
             let kv = &self.ctx.global.engines.kv;
-            let (source_over_bound, target_over_bound) =
-                kv.check_merge(id, version, target_id, target_version)?;
+            let check_result = kv.check_merge(id, version, target_id, target_version)?;
 
-            info!(
-                "check_merge_proposal, source_over_bound:{}, target_over_bound:{}",
-                source_over_bound, target_over_bound
-            );
-            if source_over_bound || target_over_bound {
+            info!("check_merge_proposal, {:?}", check_result);
+            let CheckMergeResult {
+                source_overbound,
+                target_overbound,
+                is_same_keyspace,
+                source_is_empty,
+                target_is_empty,
+            } = check_result;
+
+            if source_overbound || target_overbound {
                 let parameter = TrimOverBoundParameter {
-                    source_shard: if source_over_bound {
+                    source_shard: if source_overbound {
                         Some(IdVer::new(id, version))
                     } else {
                         None
                     },
-                    target_shard: if target_over_bound {
+                    target_shard: if target_overbound {
                         Some(IdVer::new(target_id, target_version))
                     } else {
                         None
@@ -819,9 +823,28 @@ impl<'a> PeerMsgHandler<'a> {
                 };
                 self.trigger_trim_over_bound(version, parameter);
                 return Err(kvengine::Error::CheckMerge(format!(
-                    "shards have over bound data, source:{source_over_bound}, target:{target_over_bound}"
+                    "shards have over bound data, source:{source_overbound}, target:{target_overbound}"
                 ))
                 .into());
+            }
+
+            if !is_same_keyspace {
+                // If shards have data that not covered by del_prefixes, reject merge.
+                // Otherwise, the data covered by del_prefixes will be automatically deleted in
+                // commit_merge phase.
+                if !source_is_empty || !target_is_empty {
+                    return Err(kvengine::Error::CheckMerge(format!(
+                        "shards have remaing data with different keyspace, source:{:?}, target:{:?}",
+                        IdVer::new(id, version),
+                        IdVer::new(target_id, target_version)
+                    ))
+                    .into());
+                }
+                info!(
+                    "shards data will be cleared, source:{:?}, target:{:?}",
+                    IdVer::new(id, version),
+                    IdVer::new(target_id, target_version)
+                );
             }
         } else if admin_req.has_commit_merge() {
             let source_region = msg.get_admin_request().get_commit_merge().get_source();

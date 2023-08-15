@@ -10,9 +10,10 @@ use std::{str::FromStr, sync::atomic::AtomicU16};
 use api_version::ApiV2;
 use http::Uri;
 use hyper::{Body, Request};
-use kvproto::metapb::Store;
+use kvproto::{kvrpcpb::UnsafeDestroyRangeRequest, metapb::Store};
+use test_cloud_server::client::ClusterClient;
+use tidb_query_common::util::convert_to_prefix_next;
 use tikv_util::info;
-
 mod backup;
 mod delete_range;
 mod engine_basic;
@@ -103,4 +104,21 @@ pub(crate) fn i_to_key_with_keyspace(keyspace_id: u32) -> impl Fn(usize) -> Vec<
 
 pub(crate) fn i_to_val_with_size(size: usize) -> impl Fn(usize) -> Vec<u8> {
     move |i: usize| -> Vec<u8> { format!("{:0size$}", i, size = size).into_bytes() }
+}
+
+pub(crate) fn new_destroy_range_req(prefix: &[u8]) -> UnsafeDestroyRangeRequest {
+    let mut req = UnsafeDestroyRangeRequest::default();
+    let mut end_key = prefix.to_vec();
+    convert_to_prefix_next(&mut end_key);
+    req.set_start_key(prefix.to_vec());
+    req.set_end_key(end_key);
+    req
+}
+
+pub(crate) fn destroy_range(client: &mut ClusterClient, store_id: u64, prefix: &[u8]) {
+    let req = new_destroy_range_req(prefix);
+    let kv_client = client.get_kv_client(store_id);
+    let resp = kv_client.unsafe_destroy_range(&req).unwrap();
+    assert!(resp.get_error().is_empty(), "{:?}", resp.get_error());
+    assert!(!resp.has_region_error());
 }

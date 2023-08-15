@@ -28,9 +28,12 @@ fn test_merge_pending_state_conflict() {
     cluster.get_pd_client().disable_default_operator();
 
     let mut client = cluster.new_client();
+    let prev_keyspace = i_to_key(0);
+    client.split(&prev_keyspace);
+
     let split_key = i_to_key(5);
     client.split(&split_key);
-    cluster.wait_pd_region_count(2);
+    cluster.wait_pd_region_count(3);
 
     client.put_kv(0..10, i_to_key, i_to_val);
 
@@ -56,7 +59,7 @@ fn test_merge_pending_state_conflict() {
     fail::remove(on_follower_exec_rollback_merge_fp);
 
     client.try_merge(&i_to_key(0), &i_to_key(10));
-    cluster.wait_pd_region_count(1);
+    cluster.wait_pd_region_count(2);
     client.verify_data_with_ref_store();
     cluster.stop();
 }

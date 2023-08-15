@@ -2,14 +2,12 @@
 
 use std::{thread, time::Duration};
 
-use kvproto::kvrpcpb::UnsafeDestroyRangeRequest;
 use pd_client::PdClient;
-use test_cloud_server::{client::ClusterClient, must_wait, ServerCluster};
-use tidb_query_common::util::convert_to_prefix_next;
+use test_cloud_server::{must_wait, ServerCluster};
 use tikv::config::TikvConfig;
 use tikv_util::config::ReadableDuration;
 
-use crate::alloc_node_id;
+use crate::{alloc_node_id, destroy_range};
 
 #[test]
 fn test_delete_range() {
@@ -170,23 +168,6 @@ fn get_del_prefix_shard_count(kvengine: &kvengine::Engine) -> usize {
         .iter()
         .filter(|stat| stat.has_del_prefixes)
         .count()
-}
-
-fn new_destroy_range_req(prefix: &[u8]) -> UnsafeDestroyRangeRequest {
-    let mut req = UnsafeDestroyRangeRequest::default();
-    let mut end_key = prefix.to_vec();
-    convert_to_prefix_next(&mut end_key);
-    req.set_start_key(prefix.to_vec());
-    req.set_end_key(end_key);
-    req
-}
-
-fn destroy_range(client: &mut ClusterClient, store_id: u64, prefix: &[u8]) {
-    let req = new_destroy_range_req(prefix);
-    let kv_client = client.get_kv_client(store_id);
-    let resp = kv_client.unsafe_destroy_range(&req).unwrap();
-    assert!(resp.get_error().is_empty(), "{:?}", resp.get_error());
-    assert!(!resp.has_region_error());
 }
 
 fn i_to_key(i: usize) -> Vec<u8> {

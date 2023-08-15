@@ -12,7 +12,7 @@ use tikv_util::{
 };
 
 use crate::{
-    alloc_node_id, generate_keyspace_key, get_keyspace_prefix, i_to_key, i_to_val,
+    alloc_node_id, destroy_range, generate_keyspace_key, get_keyspace_prefix, i_to_key, i_to_val,
     is_region_belongs_to_keyspace,
 };
 
@@ -23,12 +23,16 @@ fn test_region_merge() {
     let mut cluster = ServerCluster::new(node_ids.clone(), |_, _| {});
     cluster.wait_region_replicated(&[], 3);
     let mut client = cluster.new_client();
+    // Split a keyspace region, because the first region start key is empty
+    // and it can't be merged with keyspace region within data.
+    let prev_keyspace = i_to_key(0);
+    client.split(&prev_keyspace);
     let split_key = i_to_key(5);
     client.split(&split_key);
-    cluster.wait_pd_region_count(2);
+    cluster.wait_pd_region_count(3);
     client.put_kv(0..10, i_to_key, i_to_val);
     client.merge(&i_to_key(0), &i_to_key(10));
-    cluster.wait_pd_region_count(1);
+    cluster.wait_pd_region_count(2);
     client.verify_data_with_ref_store();
     for &node_id in &node_ids {
         cluster.stop_node(node_id);
@@ -64,9 +68,12 @@ fn test_region_merge_isolated_peer() {
     cluster.wait_region_replicated(&[], 3);
     pd_client.disable_default_operator();
 
+    let prev_keyspace = i_to_key(0);
+    client.split(&prev_keyspace);
+
     let split_key = i_to_key(5);
     client.split(&split_key);
-    cluster.wait_pd_region_count(2);
+    cluster.wait_pd_region_count(3);
     client.put_kv(0..10, i_to_key, i_to_val);
 
     let left_id = client.get_region_id(&i_to_key(0));
@@ -102,7 +109,7 @@ fn test_region_merge_isolated_peer() {
     thread::sleep(Duration::from_millis(500)); // Wait for node to stop completely.
 
     client.merge(&i_to_key(0), &i_to_key(10));
-    cluster.wait_pd_region_count(1);
+    cluster.wait_pd_region_count(2);
     client.verify_data_with_ref_store();
 
     cluster.start_node(isolated_node_id, update_conf_fn);
@@ -221,5 +228,174 @@ fn region_split_merge_inner_key_offset(enabled: bool) {
         cluster.start_node(node_id, |_, _| {});
     }
     client.verify_data_with_ref_store();
+    cluster.stop();
+}
+
+#[test]
+fn test_region_merge_with_del_prefixes() {
+    region_merge_with_del_prefixes(true);
+    region_merge_with_del_prefixes(false);
+}
+
+fn region_merge_with_del_prefixes(enable_inner_key_offset: bool) {
+    test_util::init_log_for_test();
+
+    let node_id = alloc_node_id();
+    let mut cluster = ServerCluster::new(vec![node_id], |_, conf: &mut TikvConfig| {
+        conf.enable_inner_key_offset = enable_inner_key_offset;
+    });
+
+    let mut client = cluster.new_client();
+    let pd_client = cluster.get_pd_client();
+    // 1. Generate 1 keyspace region.
+    // 2. Split it into 2 regions.
+    // 3. Put some keys to the 2 regions.
+    // 4. Destroy range in each region.
+    // 5. Merge the 2 regions and check the result.
+    let (ks100, ks101) = (get_keyspace_prefix(100), get_keyspace_prefix(101));
+    let generate_ks100_keys = generate_keyspace_key(100);
+    let split_keys = vec![ks100.clone(), ks101.clone()];
+    for sk in split_keys {
+        client.split(sk.as_slice());
+    }
+    cluster.wait_pd_region_count(3);
+
+    // split keyspace 2 inner regions
+    let split_key = generate_ks100_keys(1);
+    client.split(split_key.as_slice());
+    cluster.wait_pd_region_count(4);
+
+    let generate_region_0_key = |i: usize| {
+        let mut key = generate_ks100_keys(0);
+        key.extend_from_slice(i.to_string().as_bytes());
+        key
+    };
+    let generate_region_1_key = |i: usize| {
+        let mut key = generate_ks100_keys(1);
+        key.extend_from_slice(i.to_string().as_bytes());
+        key
+    };
+    // put some keys into 2 inner regions
+    client.put_kv(0..100, generate_region_0_key, i_to_val);
+    client.put_kv(0..100, generate_region_1_key, i_to_val);
+
+    // destroy range in both regions
+    let store_id = cluster.get_stores()[0];
+    destroy_range(&mut client, store_id, &generate_ks100_keys(0));
+    destroy_range(&mut client, store_id, &generate_ks100_keys(1));
+
+    let snap = cluster.get_snap(node_id, &generate_ks100_keys(0));
+    assert!(!snap.has_data_in_prefix(&generate_ks100_keys(0)));
+    let snap = cluster.get_snap(node_id, &generate_ks100_keys(1));
+    assert!(!snap.has_data_in_prefix(&generate_ks100_keys(1)));
+
+    let mut regions = pd_client.get_all_regions();
+    regions.sort_by(|a, b| a.get_start_key().cmp(b.get_start_key()));
+
+    // merge inner regions
+    for region in &regions {
+        if is_region_belongs_to_keyspace(region, 100) {
+            let start_key = region.get_start_key();
+            let end_key = region.get_end_key();
+            if end_key.starts_with(ks101.as_slice()) {
+                continue;
+            }
+
+            client
+                .try_merge_adjacent_region(
+                    start_key,
+                    Some(ks100.as_slice()),
+                    Duration::from_secs(3),
+                )
+                .unwrap();
+        }
+    }
+    cluster.wait_pd_region_count(3);
+
+    let snap = cluster.get_snap(node_id, &generate_ks100_keys(0));
+    assert!(!snap.has_data_in_prefix(&generate_ks100_keys(0)));
+    assert!(!snap.has_data_in_prefix(&generate_ks100_keys(1)));
+
+    cluster.stop_node(node_id);
+    cluster.stop();
+}
+
+#[test]
+fn test_region_merge_keyspace_with_del_prefixes() {
+    region_merge_keyspace_with_del_prefixes(true);
+    region_merge_keyspace_with_del_prefixes(false);
+}
+
+fn region_merge_keyspace_with_del_prefixes(enable_inner_key_offset: bool) {
+    test_util::init_log_for_test();
+
+    let node_id = alloc_node_id();
+    let mut cluster = ServerCluster::new(vec![node_id], |_, conf: &mut TikvConfig| {
+        conf.enable_inner_key_offset = enable_inner_key_offset;
+    });
+
+    let mut client = cluster.new_client();
+    let pd_client = cluster.get_pd_client();
+    // 1. Generate 2 keyspace region.
+    // 3. Put some keys to the 2 keyspace regions.
+    // 4. 2 keyspaces can not merge with data.
+    // 4. Destroy range in each keyspace region.
+    // 5. Merge the 2 keyspaces and check the result.
+    let (ks100, ks101, ks102) = (
+        get_keyspace_prefix(100),
+        get_keyspace_prefix(101),
+        get_keyspace_prefix(102),
+    );
+    let generate_ks100_keys = generate_keyspace_key(100);
+    let generate_ks101_keys = generate_keyspace_key(101);
+    let split_keys = vec![ks100.clone(), ks101.clone(), ks102];
+    for sk in split_keys {
+        client.split(sk.as_slice());
+    }
+    cluster.wait_pd_region_count(4);
+
+    let generate_ks100_ext_key = |i: usize| {
+        let mut key = generate_ks100_keys(0);
+        key.extend_from_slice(i.to_string().as_bytes());
+        key
+    };
+    let generate_ks101_ext_key = |i: usize| {
+        let mut key = generate_ks101_keys(0);
+        key.extend_from_slice(i.to_string().as_bytes());
+        key
+    };
+    // put some keys into 2 keyspace regions
+    client.put_kv(0..100, generate_ks100_ext_key, i_to_val);
+    client.put_kv(0..100, generate_ks101_ext_key, i_to_val);
+
+    let mut regions = pd_client.get_all_regions();
+    regions.sort_by(|a, b| a.get_start_key().cmp(b.get_start_key()));
+
+    client.try_merge(&ks100, &ks101);
+
+    // the 2 keyspaces can not merge with data
+    cluster.wait_pd_region_count(4);
+    // std::thread::sleep(Duration::from_secs(10));
+
+    // destroy range in both keyspace
+    let store_id = cluster.get_stores()[0];
+    destroy_range(&mut client, store_id, &ks100);
+    destroy_range(&mut client, store_id, &ks101);
+
+    let snap = cluster.get_snap(node_id, &ks100);
+    assert!(!snap.has_data_in_prefix(&ks100));
+    let snap = cluster.get_snap(node_id, &ks101);
+    assert!(!snap.has_data_in_prefix(&ks101));
+
+    client.try_merge(&ks100, &ks101);
+    // wait for region merge
+    cluster.wait_pd_region_count(3);
+
+    let snap = cluster.get_snap(node_id, &ks100);
+    assert!(!snap.has_data_in_prefix(&ks100));
+    let snap = cluster.get_snap(node_id, &ks101);
+    assert!(!snap.has_data_in_prefix(&ks101));
+
+    cluster.stop_node(node_id);
     cluster.stop();
 }

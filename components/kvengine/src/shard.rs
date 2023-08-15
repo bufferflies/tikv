@@ -171,6 +171,11 @@ impl Shard {
                     pending_ops.trim_over_bound = true;
                 }
             }
+            if let Some(val) = get_shard_property(MANUAL_MAJOR_COMPACTION, props) {
+                if !val.is_empty() {
+                    pending_ops.manual_major_compaction = true;
+                }
+            }
         }
         shard
     }
@@ -260,6 +265,18 @@ impl Shard {
     pub(crate) fn merge_del_prefix(&self, val: &[u8]) {
         let mut pending_ops = self.pending_ops.write().unwrap();
         let mut del_prefixes = (*pending_ops.del_prefixes).merge(val);
+        del_prefixes.schedule_at = self.gen_rand_schedule_del_range_time();
+        pending_ops.del_prefixes = Arc::new(del_prefixes);
+    }
+
+    pub(crate) fn set_del_prefixes(&self, val: &[u8]) {
+        let mut pending_ops = self.pending_ops.write().unwrap();
+        if val.is_empty() {
+            pending_ops.del_prefixes =
+                Arc::new(DeletePrefixes::new_with_inner_key_off(self.inner_key_off));
+            return;
+        }
+        let mut del_prefixes = DeletePrefixes::unmarshal(val, self.inner_key_off);
         del_prefixes.schedule_at = self.gen_rand_schedule_del_range_time();
         pending_ops.del_prefixes = Arc::new(del_prefixes);
     }
@@ -396,6 +413,37 @@ impl Shard {
 
     pub fn set_property(&self, key: &str, val: &[u8]) {
         self.properties.set(key, val);
+        // sync shard pending ops when set shard property.
+        match key {
+            DEL_PREFIXES_KEY => {
+                self.set_del_prefixes(val);
+            }
+            TRUNCATE_TS_KEY => {
+                let mut pending_ops = self.pending_ops.write().unwrap();
+                if !val.is_empty() {
+                    pending_ops.truncate_ts = Some(TruncateTs::unmarshal(val));
+                } else {
+                    pending_ops.truncate_ts = None;
+                }
+            }
+            TRIM_OVER_BOUND => {
+                let mut pending_ops = self.pending_ops.write().unwrap();
+                if !val.is_empty() {
+                    pending_ops.trim_over_bound = true;
+                } else {
+                    pending_ops.trim_over_bound = false;
+                }
+            }
+            MANUAL_MAJOR_COMPACTION => {
+                let mut pending_ops = self.pending_ops.write().unwrap();
+                if !val.is_empty() {
+                    pending_ops.manual_major_compaction = true;
+                } else {
+                    pending_ops.manual_major_compaction = false;
+                }
+            }
+            _ => {}
+        }
     }
 
     pub(crate) fn load_mem_table_version(&self) -> u64 {
@@ -710,6 +758,14 @@ impl Shard {
             return &self.outer_start[0..self.inner_key_off];
         }
         &[]
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        let data = self.get_data();
+        if data.mem_tbls.iter().any(|mem_tbl| !mem_tbl.is_empty()) {
+            return false;
+        }
+        self.get_estimated_size() == 0
     }
 }
 
@@ -1202,6 +1258,10 @@ impl Properties {
         Some(bin.value().clone())
     }
 
+    pub fn remove(&self, key: &str) {
+        self.m.remove(key);
+    }
+
     pub fn to_pb(&self, shard_id: u64) -> kvenginepb::Properties {
         let mut props = kvenginepb::Properties::new();
         props.shard_id = shard_id;
@@ -1384,6 +1444,16 @@ impl DeletePrefixes {
         }
     }
 
+    pub(crate) fn cover_full_keyspace(&self, keyspace_prefix: &[u8]) -> bool {
+        let inner_key_off = self.inner_key_off;
+        self.prefixes.iter().any(|p| {
+            if inner_key_off >= p.len() {
+                return true;
+            }
+            keyspace_prefix.starts_with(p.as_slice())
+        })
+    }
+
     pub(crate) fn cover_prefix(&self, inner_prefix: InnerKey<'_>) -> bool {
         let inner_key_off = self.inner_key_off;
         self.prefixes.iter().any(|p| {
@@ -1425,6 +1495,27 @@ impl DeletePrefixes {
                 }
             }))
     }
+}
+
+pub fn merge_del_prefixes_if_needed(
+    first: Option<Bytes>,
+    second: Option<Bytes>,
+    inner_key_off: usize,
+) -> Option<Vec<u8>> {
+    if first.is_none() && second.is_none() {
+        return None;
+    }
+
+    let mut first_prefixes = first
+        .map(|b| DeletePrefixes::unmarshal(b.chunk(), inner_key_off))
+        .unwrap_or_else(|| DeletePrefixes::new_with_inner_key_off(inner_key_off));
+    let second_prefixes = second
+        .map(|b| DeletePrefixes::unmarshal(b.chunk(), inner_key_off))
+        .unwrap_or_else(|| DeletePrefixes::new_with_inner_key_off(inner_key_off));
+    for prefix in &second_prefixes.prefixes {
+        first_prefixes = first_prefixes.merge(prefix);
+    }
+    Some(first_prefixes.marshal())
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -1648,6 +1739,56 @@ mod tests {
                 "0000300".as_bytes(),
                 inner_key_off
             )));
+        }
+    }
+
+    #[test]
+    fn test_merge_del_prefixes() {
+        for inner_key_off in [0, 4] {
+            let mut first = DeletePrefixes::new_with_inner_key_off(inner_key_off);
+            first = first.merge("0000101".as_bytes());
+            first = first.merge("00001033".as_bytes());
+            first = first.merge("00001055".as_bytes());
+            first = first.merge("0000107".as_bytes());
+
+            let mut second = DeletePrefixes::new_with_inner_key_off(inner_key_off);
+            second = second.merge("0000101".as_bytes());
+            second = second.merge("00001022".as_bytes());
+            second = second.merge("00001044".as_bytes());
+            second = second.merge("00001066".as_bytes());
+            second = second.merge("0000107".as_bytes());
+
+            let merged = merge_del_prefixes_if_needed(
+                Some(Bytes::from(first.marshal())),
+                Some(Bytes::from(second.marshal())),
+                inner_key_off,
+            )
+            .unwrap();
+            let merged_del_prefixes = DeletePrefixes::unmarshal(&merged, inner_key_off);
+            assert_eq!(
+                merged_del_prefixes.prefixes,
+                vec![
+                    "0000101".as_bytes(),
+                    "00001022".as_bytes(),
+                    "00001033".as_bytes(),
+                    "00001044".as_bytes(),
+                    "00001055".as_bytes(),
+                    "00001066".as_bytes(),
+                    "0000107".as_bytes()
+                ]
+            );
+
+            let rev_merged = merge_del_prefixes_if_needed(
+                Some(Bytes::from(second.marshal())),
+                Some(Bytes::from(first.marshal())),
+                inner_key_off,
+            );
+            let rev_merged_del_prefixes =
+                DeletePrefixes::unmarshal(&rev_merged.unwrap(), inner_key_off);
+            assert_eq!(
+                merged_del_prefixes.prefixes,
+                rev_merged_del_prefixes.prefixes,
+            );
         }
     }
 

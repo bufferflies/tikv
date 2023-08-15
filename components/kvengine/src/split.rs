@@ -9,13 +9,25 @@ use std::{
     },
 };
 
-use api_version::api_v2::{is_whole_keyspace_range, KEYSPACE_PREFIX_LEN};
-use bytes::Buf;
+use api_version::{
+    api_v2::{is_whole_keyspace_range, KEYSPACE_PREFIX_LEN},
+    ApiV2,
+};
+use bytes::{Buf, Bytes};
 use dashmap::mapref::entry::Entry;
 use kvenginepb as pb;
 use slog_global::info;
 
 use crate::*;
+
+#[derive(Debug)]
+pub struct CheckMergeResult {
+    pub source_overbound: bool,
+    pub target_overbound: bool,
+    pub is_same_keyspace: bool,
+    pub source_is_empty: bool,
+    pub target_is_empty: bool,
+}
 
 impl Engine {
     pub fn split(&self, mut cs: pb::ChangeSet, initial_seq: u64) -> Result<()> {
@@ -25,7 +37,6 @@ impl Engine {
         let old_shard = self.get_shard_with_ver(cs.shard_id, cs.shard_ver)?;
         self.prepare_update_shard_version(&old_shard, sequence);
 
-        let old_pending_ops = old_shard.pending_ops.read().unwrap();
         let mut new_shards = vec![];
         let new_shard_props = split.get_new_shards();
         let new_ver = old_shard.ver + new_shard_props.len() as u64 - 1;
@@ -58,13 +69,16 @@ impl Engine {
                 self.opts.clone(),
                 &self.master_key,
             );
-            let new_del_prefixes = old_pending_ops.del_prefixes.build_split(
+            let old_del_prefixes = old_shard.get_del_prefixes();
+            let new_del_prefixes = old_del_prefixes.build_split(
                 &new_shard.outer_start,
                 &new_shard.outer_end,
                 new_shard.inner_key_off,
             );
             // TODO: May not need to truncate ts on the new shard.
-            new_shard.pending_ops.write().unwrap().del_prefixes = Arc::new(new_del_prefixes);
+            if !new_del_prefixes.is_empty() {
+                new_shard.set_property(DEL_PREFIXES_KEY, &new_del_prefixes.marshal());
+            }
             new_shard.parent_id = old_shard.id;
             {
                 let mut guard = new_shard.parent_snap.write().unwrap();
@@ -169,7 +183,7 @@ impl Engine {
         source_ver: u64,
         target_id: u64,
         target_ver: u64,
-    ) -> Result<(bool /* source */, bool /* target */)> {
+    ) -> Result<CheckMergeResult> {
         let source_shard = self.get_shard_with_ver(source_id, source_ver)?;
         if !source_shard.get_initial_flushed() {
             return Err(Error::CheckMerge("source not initial flushed".to_string()));
@@ -178,10 +192,27 @@ impl Engine {
         if !target_shard.get_initial_flushed() {
             return Err(Error::CheckMerge("target not initial flushed".to_string()));
         }
-        Ok((
-            source_shard.has_over_bound_data(),
-            target_shard.has_over_bound_data(),
-        ))
+
+        let is_same_keyspace = ApiV2::is_belongs_to_same_keyspace(
+            &source_shard.outer_start,
+            &target_shard.outer_start,
+        );
+
+        Ok(CheckMergeResult {
+            source_overbound: source_shard.has_over_bound_data(),
+            target_overbound: target_shard.has_over_bound_data(),
+            is_same_keyspace,
+            // source shard is empty or del_prefixes covering the full keyspace.
+            source_is_empty: source_shard.is_empty()
+                || source_shard.get_del_prefixes().cover_full_keyspace(
+                    &ApiV2::get_keyspace_prefix(&source_shard.outer_start).unwrap_or_default(),
+                ),
+            // target shard is empty or del_prefixes covering the full keyspace.
+            target_is_empty: target_shard.is_empty()
+                || target_shard.get_del_prefixes().cover_full_keyspace(
+                    &ApiV2::get_keyspace_prefix(&target_shard.outer_start).unwrap_or_default(),
+                ),
+        })
     }
 
     pub fn prepare_merge(
@@ -229,6 +260,31 @@ impl Engine {
         self.prepare_update_shard_version(&old_shard, sequence);
         let mut new_shard = self.new_shard_version(&old_shard, sequence);
         let source_snap = source.get_snapshot();
+
+        // If the shards are belongs to different keyspaces, all data in the shards will
+        // be cleared. In check_merge we check del_prefixes covering all data, so it's
+        // safe to do this.
+        let is_same_keyspace_merge =
+            ApiV2::is_belongs_to_same_keyspace(&source_snap.outer_start, &old_shard.outer_start);
+
+        if is_same_keyspace_merge {
+            // merge source DEL_PREFIXES_KEY to new shard
+            let source_del_prefixes =
+                get_shard_property(DEL_PREFIXES_KEY, source_snap.get_properties())
+                    .map(|v| Bytes::from(v));
+            let old_del_prefixes = old_shard.get_property(DEL_PREFIXES_KEY);
+            if let Some(new_del_prefixes) = merge_del_prefixes_if_needed(
+                source_del_prefixes,
+                old_del_prefixes,
+                old_shard.range.inner_key_off,
+            ) {
+                new_shard.set_property(DEL_PREFIXES_KEY, &new_del_prefixes);
+            }
+        } else {
+            // reset del_prefixes property to empty
+            new_shard.set_property(DEL_PREFIXES_KEY, &[]);
+        }
+
         // TODO: Do we need to merge pending operations here?
         new_shard.range.outer_start = min(
             old_shard.outer_start.clone(),
@@ -246,54 +302,60 @@ impl Engine {
             &new_shard.base_version,
             max(source_mem_tbl_version, target_mem_tbl_version) - sequence,
         );
-        let old_data = old_shard.get_data();
-        let mem_tbls = old_data.mem_tbls.clone();
-        let mut blob_tbl_map = old_data.blob_tbl_map.as_ref().clone();
-        for v in source.blob_tables.values() {
-            blob_tbl_map.insert(v.id(), v.clone());
-        }
-        let mut l0_tbls = old_data.l0_tbls.clone();
-        for l0 in source.l0_tables.values() {
-            l0_tbls.push(l0.clone())
-        }
-        l0_tbls.sort_by(|a, b| b.version().cmp(&a.version()));
-        let mut new_cf_builders = [
-            ShardCfBuilder::new(0),
-            ShardCfBuilder::new(1),
-            ShardCfBuilder::new(2),
-        ];
-        for cf in 0..NUM_CFS {
-            let old_scf = old_data.get_cf(cf);
-            for level in 1..=CF_LEVELS[cf] {
-                let old_level = old_scf.get_level(level);
-                let cf_builder = &mut new_cf_builders[cf];
-                for tbl in old_level.tables.as_slice() {
-                    cf_builder.add_table(tbl.clone(), level);
+
+        let data = if is_same_keyspace_merge {
+            let old_data = old_shard.get_data();
+            let mem_tbls = old_data.mem_tbls.clone();
+            let mut blob_tbl_map = old_data.blob_tbl_map.as_ref().clone();
+            for v in source.blob_tables.values() {
+                blob_tbl_map.insert(v.id(), v.clone());
+            }
+            let mut l0_tbls = old_data.l0_tbls.clone();
+            for l0 in source.l0_tables.values() {
+                l0_tbls.push(l0.clone())
+            }
+            l0_tbls.sort_by(|a, b| b.version().cmp(&a.version()));
+            let mut new_cf_builders = [
+                ShardCfBuilder::new(0),
+                ShardCfBuilder::new(1),
+                ShardCfBuilder::new(2),
+            ];
+            for cf in 0..NUM_CFS {
+                let old_scf = old_data.get_cf(cf);
+                for level in 1..=CF_LEVELS[cf] {
+                    let old_level = old_scf.get_level(level);
+                    let cf_builder = &mut new_cf_builders[cf];
+                    for tbl in old_level.tables.as_slice() {
+                        cf_builder.add_table(tbl.clone(), level);
+                    }
                 }
             }
-        }
-        for tbl_create in source_snap.get_table_creates() {
-            let tbl = source.ln_tables.get(&tbl_create.id).unwrap().clone();
-            let cf_builder = &mut new_cf_builders[tbl_create.cf as usize];
-            cf_builder.add_table(tbl, tbl_create.level as usize);
-        }
-        let new_cfs = [
-            new_cf_builders[0].build(),
-            new_cf_builders[1].build(),
-            new_cf_builders[2].build(),
-        ];
-        let mut unloaded_tbls = source.unloaded_tables.clone();
-        for (&id, tbl) in old_data.unloaded_tbls.iter() {
-            unloaded_tbls.insert(id, tbl.clone());
-        }
-        let data = ShardData::new(
-            new_shard.range.clone(),
-            mem_tbls,
-            l0_tbls,
-            Arc::new(blob_tbl_map),
-            new_cfs,
-            unloaded_tbls,
-        );
+            for tbl_create in source_snap.get_table_creates() {
+                let tbl = source.ln_tables.get(&tbl_create.id).unwrap().clone();
+                let cf_builder = &mut new_cf_builders[tbl_create.cf as usize];
+                cf_builder.add_table(tbl, tbl_create.level as usize);
+            }
+            let new_cfs = [
+                new_cf_builders[0].build(),
+                new_cf_builders[1].build(),
+                new_cf_builders[2].build(),
+            ];
+            let mut unloaded_tbls = source.unloaded_tables.clone();
+            for (&id, tbl) in old_data.unloaded_tbls.iter() {
+                unloaded_tbls.insert(id, tbl.clone());
+            }
+            ShardData::new(
+                new_shard.range.clone(),
+                mem_tbls,
+                l0_tbls,
+                Arc::new(blob_tbl_map),
+                new_cfs,
+                unloaded_tbls,
+            )
+        } else {
+            ShardData::new_empty(new_shard.range.clone())
+        };
+
         new_shard.set_data(data);
         new_shard.parent_id = shard_id;
         {
