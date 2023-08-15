@@ -20,7 +20,6 @@ use futures::{
     compat::{Compat, Future01CompatExt},
     executor::block_on,
     future::{self, BoxFuture, FutureExt, TryFutureExt},
-    select,
     sink::SinkExt,
     stream::StreamExt,
 };
@@ -305,30 +304,20 @@ impl RpcClient {
     async fn handle_watch_gc_safepoint_v2_stream(
         &self,
         mut stream: ClientSStreamReceiver<WatchGcSafePointV2Response>,
-    ) -> bool {
-        loop {
-            select! {
-                result = stream.next().fuse() => {
-                    if let Some(result) = result {
-                        match result {
-                            Ok(r) => {
-                                self.ks_gc_sp_revision.store(r.get_revision(), Ordering::SeqCst);
-                                self.handle_watch_gc_safepoint_v2_response(r);
-                            },
-                            Err(err) => {
-                                error!("watch safe point v2 response error:{:?}", err);
-                                let _ = GLOBAL_TIMER_HANDLE
-                                    .delay(std::time::Instant::now() + RETRY_INTERVAL)
-                                    .compat()
-                                    .await;
-                            }
-                        }
-                    }
-                },
-                _ = future::ready(tikv_util::thread_group::is_shutdown(!cfg!(test))).fuse() => {
-                    if  tikv_util::thread_group::is_shutdown(!cfg!(test)) {
-                        return true;
-                    }
+    ) {
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(r) => {
+                    self.ks_gc_sp_revision
+                        .store(r.get_revision(), Ordering::SeqCst);
+                    self.handle_watch_gc_safepoint_v2_response(r);
+                }
+                Err(err) => {
+                    error!("watch safe point v2 response error:{:?}", err);
+                    let _ = GLOBAL_TIMER_HANDLE
+                        .delay(std::time::Instant::now() + RETRY_INTERVAL)
+                        .compat()
+                        .await;
                 }
             }
         }
@@ -450,18 +439,16 @@ impl PdClient for RpcClient {
 
     // watch_gc_safepoint_v2 is used to start watch gc safepoint v2.
     async fn watch_gc_safepoint_v2(&self) {
-        'outer: loop {
+        loop {
             self.load_all_gc_safe_point_v2().await;
-            let mut is_shutdown = false;
             match self.watch_gc_safepoint_v2_from_pd(self.ks_gc_sp_revision.load(Ordering::SeqCst))
             {
                 Ok(stream) => {
-                    is_shutdown = self.handle_watch_gc_safepoint_v2_stream(stream).await;
+                    self.handle_watch_gc_safepoint_v2_stream(stream).await;
                     debug!("watch gc safe point v2 stream done.");
                 }
                 Err(Error::DataCompacted(msg)) => {
                     error!("watch gc safe point v2 required revision has been compacted"; "err" => ?msg);
-                    continue 'outer;
                 }
                 Err(err) => {
                     error!("watch safe point v2 error:{:?}", err);
@@ -471,13 +458,7 @@ impl PdClient for RpcClient {
                         .await;
                 }
             }
-            if is_shutdown {
-                debug!("watch gc safe point v2, loop break by server is shutdown.");
-                break;
-            }
-            debug!("watch gc safe point v2,done.");
         }
-        debug!("watch gc safe point v2, exit.");
     }
 
     fn get_keyspace_gc_safepoint_v2_cache(&self) -> Arc<DashMap<u32, u64>> {

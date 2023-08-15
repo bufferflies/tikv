@@ -873,6 +873,7 @@ impl TikvServer {
         self.to_stop.into_iter().for_each(|s| s.stop());
         self.raw_engines.raft.stop_worker();
         self.overload_protector.stop();
+        self.background_worker.stop();
     }
 
     pub fn get_kv_engine(&self) -> kvengine::Engine {
