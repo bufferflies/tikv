@@ -200,9 +200,6 @@ impl CompactionClient {
         let req = &ctx.req;
         let mut remote_compactor = self.get_remote_compactor();
         if remote_compactor.remote_url.is_empty() {
-            if req.compactor_version >= 3 {
-                return local_compact_v3(&ctx);
-            }
             local_compact(&ctx)
         } else {
             let (tx, rx) = tikv_util::mpsc::bounded(1);
@@ -221,9 +218,6 @@ impl CompactionClient {
                     Err(e @ IncompatibleRemoteCompactor { .. }) => {
                         if self.allow_fallback_local {
                             warn!("fall back to local compactor due to error: {:?}", e);
-                            if req.compactor_version >= 3 {
-                                break local_compact_v3(&ctx);
-                            }
                             break local_compact(&ctx);
                         } else {
                             warn!(
@@ -1901,11 +1895,6 @@ pub async fn handle_remote_compaction(
     let (tx, rx) = tokio::sync::oneshot::channel();
     std::thread::spawn(move || {
         tikv_util::set_current_region(ctx.req.shard_id);
-        if ctx.req.compactor_version >= 3 {
-            let result = local_compact_v3(&ctx);
-            tx.send(result).unwrap();
-            return;
-        }
         let result = local_compact(&ctx);
         tx.send(result).unwrap();
     });
@@ -1935,6 +1924,10 @@ pub(crate) struct CompactionCtx {
 }
 
 fn local_compact(ctx: &CompactionCtx) -> Result<pb::ChangeSet> {
+    if ctx.req.compactor_version >= 3 {
+        return local_compact_v3(ctx);
+    }
+
     let req = &ctx.req;
     let mut cs = pb::ChangeSet::new();
     cs.set_shard_id(req.shard_id);
