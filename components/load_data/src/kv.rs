@@ -12,6 +12,8 @@ use serde_derive::{Deserialize, Serialize};
 
 use crate::error::Error;
 
+const MAX_DUP_SIZE: usize = 64 * 1024 * 1024;
+
 pub struct KvPair {
     pub key: Bytes,
     pub val: Bytes,
@@ -91,6 +93,18 @@ pub struct MergeIterator {
     #[allow(clippy::vec_box)]
     heap: Vec<Box<KvPairsReader>>,
     prev_key: Vec<u8>,
+    prev_val: Vec<u8>,
+    pub(crate) duplicated_entries: Vec<DuplicateEntry>,
+    pub(crate) duplicated_entries_size: usize,
+    last_dup_entry_key: Vec<u8>,
+}
+
+#[derive(Default, Debug, Serialize, Deserialize, Clone)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+pub struct DuplicateEntry {
+    pub key: String,
+    pub values: Vec<String>,
 }
 
 impl MergeIterator {
@@ -103,9 +117,14 @@ impl MergeIterator {
         let mut it = Self {
             heap,
             prev_key: vec![],
+            prev_val: vec![],
+            duplicated_entries: vec![],
+            duplicated_entries_size: 0,
+            last_dup_entry_key: vec![],
         };
         it.init_heap();
         it.prev_key = it.key().to_vec();
+        it.prev_val = it.value().to_vec();
         it
     }
 
@@ -155,9 +174,18 @@ impl MergeIterator {
     }
 
     pub fn next(&mut self) -> crate::Result<()> {
+        loop {
+            let dup = self.next_maybe_dup()?;
+            if !dup {
+                return Ok(());
+            }
+        }
+    }
+
+    pub fn next_maybe_dup(&mut self) -> crate::Result<bool> {
         let heap_len = self.heap.len();
         if heap_len == 0 {
-            return Ok(());
+            return Ok(false);
         }
         let first = &mut self.heap[0];
         first.next();
@@ -165,16 +193,40 @@ impl MergeIterator {
             self.heap.swap(0, heap_len - 1);
             self.heap.pop();
             if !self.valid() {
-                return Ok(());
+                return Ok(false);
             }
         }
         self.down(0);
         let key = self.heap[0].key();
+        let val = self.heap[0].val_buf.as_slice();
+        let val_base_len = self.heap[0].val_base_len;
         if key == self.prev_key.as_slice() {
-            return Err(Error::DuplicatedKey(format!("{:?}", key)));
+            if self.duplicated_entries_size > MAX_DUP_SIZE {
+                return Err(Error::TooManyDuplicatedKeys(
+                    self.duplicated_entries.len().to_string(),
+                ));
+            }
+            let val_str = hex::encode(&val[val_base_len..]);
+            if let Some(entry) = self.duplicated_entries.last_mut() {
+                if self.last_dup_entry_key.as_slice() == key {
+                    self.duplicated_entries_size += val.len();
+                    entry.values.push(val_str);
+                    return Ok(true);
+                }
+            }
+            self.duplicated_entries_size += key.len() + self.prev_val.len() + val.len();
+            let dup_entry = DuplicateEntry {
+                key: hex::encode(key),
+                values: vec![hex::encode(&self.prev_val[val_base_len..]), val_str],
+            };
+            self.duplicated_entries.push(dup_entry);
+            self.last_dup_entry_key = key.to_vec();
+            return Ok(true);
         }
         self.prev_key.truncate(0);
         self.prev_key.extend_from_slice(key);
-        Ok(())
+        self.prev_val.truncate(0);
+        self.prev_val.extend_from_slice(val);
+        Ok(false)
     }
 }

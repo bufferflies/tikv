@@ -43,7 +43,7 @@ use tikv_util::{
 
 use crate::{
     error::{Error, Result},
-    kv::{KvPair, KvPairsReader, MergeIterator, SstMeta},
+    kv::{DuplicateEntry, KvPair, KvPairsReader, MergeIterator, SstMeta},
 };
 
 const DEFAULT_BLOCK_SIZE: usize = 64 * 1024; // 64KB
@@ -105,6 +105,7 @@ pub struct LoadTaskStates {
     pub error: String,
     pub created_files: usize,
     pub ingested_regions: usize,
+    pub duplicated_entries: Vec<DuplicateEntry>,
 }
 
 #[derive(Clone)]
@@ -185,9 +186,10 @@ impl LoadTaskScheduler {
         states.ingested_regions += 1;
     }
 
-    pub(crate) fn set_finished(&self) {
+    pub(crate) fn set_finished(&self, dup_entries: Vec<DuplicateEntry>) {
         let mut states = self.states.lock().unwrap();
         states.finished = true;
+        states.duplicated_entries = dup_entries;
     }
 
     pub fn is_finished(&self) -> bool {
@@ -456,7 +458,7 @@ impl LoadTaskWorker {
         }
         if self.readers.is_empty() {
             info!("{} build empty data", self.task_ctx.start_ts);
-            self.scheduler.set_finished();
+            self.scheduler.set_finished(vec![]);
             return Ok(());
         }
 
@@ -512,8 +514,15 @@ impl LoadTaskWorker {
         if !errs.is_empty() {
             return Err(errs.pop().unwrap());
         }
+        if !merge_iter.duplicated_entries.is_empty() {
+            info!(
+                "got {} duplicated entries, size {}",
+                merge_iter.duplicated_entries.len(),
+                merge_iter.duplicated_entries_size
+            );
+        }
         info!("{} finish build", self.task_ctx.start_ts);
-        self.ingest(sst_metas)
+        self.ingest(sst_metas, mem::take(&mut merge_iter.duplicated_entries))
     }
 
     fn spawn_build_file(
@@ -659,7 +668,11 @@ impl LoadTaskWorker {
         Ok(new_regions_id)
     }
 
-    fn ingest(&mut self, mut sst_metas: Vec<SstMeta>) -> Result<()> {
+    fn ingest(
+        &mut self,
+        mut sst_metas: Vec<SstMeta>,
+        dup_entries: Vec<DuplicateEntry>,
+    ) -> Result<()> {
         if sst_metas.is_empty() {
             return Ok(());
         }
@@ -696,7 +709,7 @@ impl LoadTaskWorker {
                 self.task_ctx.start_ts, err
             );
         }
-        self.scheduler.set_finished();
+        self.scheduler.set_finished(dup_entries);
         info!("{} finished ingest", self.task_ctx.start_ts);
         Ok(())
     }

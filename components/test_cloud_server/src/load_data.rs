@@ -38,17 +38,19 @@ pub fn init_task(
     scheduler
 }
 
-pub fn put_chunks<FnKey, FnVal>(
+pub fn put_chunks<FnKey, FnVal, FnDup>(
     scheduler: &LoadTaskScheduler,
     data_count: usize,
     batch_size: usize,
     i_to_key: FnKey,
     i_to_val: FnVal,
     timeout: Duration,
+    dup_count: FnDup,
 ) -> (Vec<u64>, RefStore)
 where
     FnKey: Fn(usize) -> Vec<u8>,
     FnVal: Fn(usize) -> Vec<u8>,
+    FnDup: Fn(usize) -> usize,
 {
     let mut chunk_ids = Vec::with_capacity((data_count as f64 / batch_size as f64).ceil() as usize);
     let mut ref_store = RefStore::default();
@@ -71,6 +73,15 @@ where
             buf.put_slice(&val);
 
             ref_store.put_kv(key, val);
+            for k in 1..=dup_count(idx) {
+                let dup_key = i_to_key(idx);
+                let dup_val = i_to_val(idx + k);
+                buf.put_u16_le(dup_key.len() as u16);
+                buf.put_slice(&dup_key);
+                buf.put_u32_le(dup_val.len() as u32);
+                buf.put_slice(&dup_val);
+                // do not put dup_key into ref_store
+            }
         }
 
         let chunk_id = i as u64;

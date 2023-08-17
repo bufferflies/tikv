@@ -9,6 +9,7 @@ use futures::executor::block_on;
 use kvengine::{dfs::DFSConfig, table::sstable::ZSTD_COMPRESSION};
 use kvenginepb::ChangeSet;
 use load_data::task::{LoadDataConfig, LoadDataContext};
+use log_wrappers::hex;
 use pd_client::PdClient;
 use protobuf::Message;
 use test_cloud_server::{
@@ -146,6 +147,13 @@ fn impl_test_load_data(enable_inner_key_off: bool) {
     // Put chunks.
     let keyspace_prefix = table_key_prefix(5);
     let i_to_key = move |i: usize| -> Vec<u8> { i_to_key_with_prefix(&keyspace_prefix, i) };
+    let dup_count_fn = |i| {
+        if i % DATA_BATCH_SIZE == 0 {
+            i % 3 + 1
+        } else {
+            0
+        }
+    };
     let (chunk_ids, ref_store) = put_chunks(
         &scheduler,
         DATA_COUNT,
@@ -153,6 +161,7 @@ fn impl_test_load_data(enable_inner_key_off: bool) {
         i_to_key,
         i_to_val,
         Duration::from_secs(10),
+        dup_count_fn,
     );
 
     // Build.
@@ -162,6 +171,24 @@ fn impl_test_load_data(enable_inner_key_off: bool) {
         COMPRESSION_TYPE,
         Duration::from_secs(10),
     );
+    let states = scheduler.states();
+    assert_eq!(
+        states.duplicated_entries.len(),
+        DATA_COUNT / DATA_BATCH_SIZE
+    );
+    for (i, dup_entry) in states.duplicated_entries.iter().enumerate() {
+        let idx = DATA_BATCH_SIZE * i;
+        let dup_count = dup_count_fn(idx);
+        for j in 0..=dup_count {
+            assert_eq!(
+                dup_entry.values[j],
+                hex::hex_encode(i_to_val(idx + j)),
+                "i={} j={}",
+                i,
+                j
+            );
+        }
+    }
 
     // Cleanup.
     cleanup(&scheduler);

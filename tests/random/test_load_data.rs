@@ -133,6 +133,7 @@ fn do_load_data(
         generate_key,
         i_to_val,
         Duration::from_secs(20),
+        |_| 0,
     );
     info!(
         "load_data.put_chunks: keyspace {}, table {}, data_count {}",

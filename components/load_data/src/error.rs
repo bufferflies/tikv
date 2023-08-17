@@ -28,8 +28,8 @@ pub enum Error {
     LeaderNotFound(u64),
     #[error("region {0} error {1:?}")]
     RegionError(u64, kvproto::errorpb::Error),
-    #[error("duplicated key {0}")]
-    DuplicatedKey(String),
+    #[error("too many duplicated keys {0}")]
+    TooManyDuplicatedKeys(String),
     #[error("reach limit {0}")]
     ReachConcurrencyLimit(usize),
     #[error("other {0}")]
