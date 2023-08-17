@@ -193,11 +193,15 @@ impl<'a> PeerMsgHandler<'a> {
         for m in msgs.drain(..) {
             match m {
                 PeerMsg::RaftMessage(msg) => {
+                    let msg_type = msg.get_message().get_msg_type();
+                    let from_store = msg.get_from_peer().get_store_id();
                     if let Err(e) = self.on_raft_message(msg) {
                         error!(%e;
                             "handle raft message err";
                             "tag" => self.peer.tag(),
                             "peer_id" => self.fsm.peer_id(),
+                            "type" => ?msg_type,
+                            "from_store" => from_store,
                         );
                     }
                 }
