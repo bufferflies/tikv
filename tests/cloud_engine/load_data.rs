@@ -176,7 +176,10 @@ fn impl_test_load_data(enable_inner_key_off: bool) {
         states.duplicated_entries.len(),
         DATA_COUNT / DATA_BATCH_SIZE
     );
+    let dup_key_prefix = hex::hex_encode(ApiV2::get_txn_keyspace_prefix(KEYSPACE_ID));
     for (i, dup_entry) in states.duplicated_entries.iter().enumerate() {
+        assert!(dup_entry.key.starts_with(dup_key_prefix.as_str()));
+
         let idx = DATA_BATCH_SIZE * i;
         let dup_count = dup_count_fn(idx);
         for j in 0..=dup_count {

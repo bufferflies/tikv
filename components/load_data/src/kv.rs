@@ -94,6 +94,7 @@ pub struct MergeIterator {
     heap: Vec<Box<KvPairsReader>>,
     prev_key: Vec<u8>,
     prev_val: Vec<u8>,
+    key_prefix: Vec<u8>,
     pub(crate) duplicated_entries: Vec<DuplicateEntry>,
     pub(crate) duplicated_entries_size: usize,
     last_dup_entry_key: Vec<u8>,
@@ -108,7 +109,7 @@ pub struct DuplicateEntry {
 }
 
 impl MergeIterator {
-    pub fn new(readers: Vec<KvPairsReader>) -> Self {
+    pub fn new(readers: Vec<KvPairsReader>, key_prefix: &[u8]) -> Self {
         let mut heap = Vec::with_capacity(readers.len());
         for mut reader in readers {
             reader.next();
@@ -118,6 +119,7 @@ impl MergeIterator {
             heap,
             prev_key: vec![],
             prev_val: vec![],
+            key_prefix: key_prefix.to_vec(),
             duplicated_entries: vec![],
             duplicated_entries_size: 0,
             last_dup_entry_key: vec![],
@@ -215,8 +217,10 @@ impl MergeIterator {
                 }
             }
             self.duplicated_entries_size += key.len() + self.prev_val.len() + val.len();
+            let mut dup_key = self.key_prefix.clone();
+            dup_key.extend_from_slice(key);
             let dup_entry = DuplicateEntry {
-                key: hex::encode(key),
+                key: hex::encode(dup_key),
                 values: vec![hex::encode(&self.prev_val[val_base_len..]), val_str],
             };
             self.duplicated_entries.push(dup_entry);

@@ -467,7 +467,7 @@ impl LoadTaskWorker {
         let mut sent_count = 0;
         let mut recv_count = 0;
         let readers = mem::take(&mut self.readers);
-        let mut merge_iter = MergeIterator::new(readers);
+        let mut merge_iter = MergeIterator::new(readers, &self.task_ctx.key_prefix);
         let mut sst_metas = vec![];
         let mut errs = vec![];
         while merge_iter.valid() {
