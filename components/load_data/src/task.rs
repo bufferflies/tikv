@@ -738,6 +738,7 @@ impl LoadTaskWorker {
                     | Error::RegionError(..)
                     | Error::PdError(_)
                     | Error::HyperError(_)
+                    | Error::RegionsIntegrityError(_)
             )
         };
         for retry in 0..MAX_RETRY_TIMES {
@@ -1125,26 +1126,23 @@ fn verify_regions_boundary(
     let first_region = regions.first().unwrap();
     let last_region = regions.last().unwrap();
     if first_region.get_region().get_start_key() > start_key {
-        return Err(box_err!(
+        return Err(Error::RegionsIntegrityError(format!(
             "unexpected start key of first region: {:?}, start_key: {:?}",
-            first_region,
-            start_key
-        ));
+            first_region, start_key
+        )));
     } else if last_region.get_region().get_end_key() < end_key {
-        return Err(box_err!(
+        return Err(Error::RegionsIntegrityError(format!(
             "unexpected end key of last region: {:?}, end_key: {:?}",
-            last_region,
-            end_key
-        ));
+            last_region, end_key
+        )));
     }
 
     for region in regions.windows(2) {
         if region[0].get_region().get_end_key() != region[1].get_region().get_start_key() {
-            return Err(box_err!(
+            return Err(Error::RegionsIntegrityError(format!(
                 "region boundary not match: {:?}, {:?}",
-                region[0],
-                region[1]
-            ));
+                region[0], region[1]
+            )));
         }
     }
 

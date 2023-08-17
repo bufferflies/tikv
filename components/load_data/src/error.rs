@@ -32,6 +32,8 @@ pub enum Error {
     TooManyDuplicatedKeys(String),
     #[error("reach limit {0}")]
     ReachConcurrencyLimit(usize),
+    #[error("regions are not intact in range: {0}")]
+    RegionsIntegrityError(String),
     #[error("other {0}")]
     Other(#[from] Box<dyn std::error::Error + Send + Sync>),
 }
