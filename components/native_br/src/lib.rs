@@ -7,7 +7,6 @@ pub mod backup;
 pub mod backup_worker;
 pub mod common;
 pub mod error;
-pub mod pd_control;
 pub mod restore;
 pub mod restore_keyspace;
 mod tiflash;

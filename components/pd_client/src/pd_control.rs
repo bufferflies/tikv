@@ -10,8 +10,12 @@ use slog_global::debug;
 use tikv_util::box_err;
 use url::Url;
 
+use crate::Config;
+
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Sync + Send>>;
 
+const PD_CONFIG_PATH: &str = "/pd/api/v1/config";
+const PD_REGIONS_STORE_PATH: &str = "/pd/api/v1/regions/store";
 const PD_KEYSPACE_PATH: &str = "/pd/api/v2/keyspaces";
 const PD_PLACEMENT_RULE_GROUP_PATH: &str = "pd/api/v1/config/placement-rule";
 const PD_PLACEMENT_RULE_PATH: &str = "pd/api/v1/config/rule";
@@ -45,17 +49,14 @@ pub struct Rule {
 /// interface. It's also expected to act like the tool `pd-ctl`.
 #[derive(Clone)]
 pub struct PdControl {
-    _config: pd_client::Config,
+    _config: Config,
     // TODO: support TLS
     _security_config: security::SecurityConfig,
     endpoints: Vec<Url>,
 }
 
 impl PdControl {
-    pub fn new(
-        config: pd_client::Config,
-        security_config: security::SecurityConfig,
-    ) -> Result<Self> {
+    pub fn new(config: Config, security_config: security::SecurityConfig) -> Result<Self> {
         let mut endpoints = Vec::with_capacity(config.endpoints.len());
         for endpoint in &config.endpoints {
             let url = if !endpoint.starts_with("http") {
@@ -111,6 +112,30 @@ impl PdControl {
         Err(err.expect("there must be error"))
     }
 
+    pub async fn get_config(&self) -> Result<PdConfigFromApi> {
+        let query = PD_CONFIG_PATH.to_string();
+        match self.request_pd_restful(query, Method::GET, None).await {
+            Ok(resp) => {
+                let pd_config = serde_json::from_slice(&resp)?;
+                debug!("pd_config: {:?}", pd_config);
+                Ok(pd_config)
+            }
+            Err(err) => Err(box_err!("get_config error: {:?}", err)),
+        }
+    }
+
+    pub async fn get_store_regions(&self, store_id: u64) -> Result<RegionsInfo> {
+        let query = format!("{}/{}", PD_REGIONS_STORE_PATH, store_id);
+        match self.request_pd_restful(query, Method::GET, None).await {
+            Ok(resp) => {
+                let regions_info = serde_json::from_slice(&resp)?;
+                debug!("regions_info: {:?}", regions_info);
+                Ok(regions_info)
+            }
+            Err(err) => Err(box_err!("get_store_regions error: {:?}", err)),
+        }
+    }
+
     pub async fn get_keyspace_by_name(&self, keyspace_name: &str) -> Result<KeyspaceMeta> {
         let query = format!("{PD_KEYSPACE_PATH}/{}", keyspace_name);
         match self.request_pd_restful(query, Method::GET, None).await {
@@ -156,4 +181,35 @@ pub struct KeyspaceMeta {
     pub state: String,
     pub created_at: u64,
     pub state_changed_at: u64,
+}
+
+#[derive(Default, Serialize, Deserialize, Debug)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+pub struct RegionInfo {
+    pub id: u64,
+    pub start_key: String,
+    pub end_key: String,
+}
+
+#[derive(Default, Serialize, Deserialize, Debug)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+pub struct RegionsInfo {
+    pub count: u64,
+    pub regions: Vec<RegionInfo>,
+}
+
+#[derive(Default, Serialize, Deserialize, Debug)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+pub struct PdScheduleConfig {
+    pub max_store_down_time: String,
+}
+
+#[derive(Default, Serialize, Deserialize, Debug)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+pub struct PdConfigFromApi {
+    pub schedule: PdScheduleConfig,
 }

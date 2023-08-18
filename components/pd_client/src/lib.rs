@@ -5,6 +5,9 @@
 #[allow(unused_extern_crates)]
 extern crate tikv_alloc;
 
+#[macro_use]
+extern crate serde_derive;
+
 pub mod client;
 mod client_v2;
 mod feature_gate;
@@ -15,6 +18,8 @@ pub use util::grpc_error_is_unimplemented;
 
 mod config;
 pub mod errors;
+pub mod pd_control;
+
 use std::{cmp::Ordering, collections::HashMap, ops::Deref, sync::Arc, time::Duration};
 
 use async_trait::async_trait;

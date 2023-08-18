@@ -16,6 +16,7 @@ use std::{
     fs::{self, File},
     net::SocketAddr,
     path::{Path, PathBuf},
+    str::FromStr,
     sync::{atomic::AtomicU64, Arc, Once},
     u64,
 };
@@ -33,9 +34,11 @@ use grpcio::{EnvBuilder, Environment};
 use kvengine::dfs::Dfs;
 use kvproto::{
     brpb::create_backup, deadlock::create_deadlock, import_sstpb_grpc::create_import_sst,
+    raft_serverpb::StoreIdent,
 };
 use overload_protector::{OverloadProtector, OverloadProtectorWorker};
-use pd_client::{PdClient, RpcClient};
+use pd_client::{pd_control::PdControl, PdClient, RpcClient, INVALID_ID};
+use protobuf::Message;
 use raftstore::{
     coprocessor::{
         BoxConsistencyCheckObserver, ConsistencyCheckMethod, CoprocessorHost,
@@ -43,7 +46,7 @@ use raftstore::{
     },
     RegionInfoAccessor,
 };
-use rfengine::RfEngine;
+use rfengine::{RfEngine, STORE_IDENT_KEY};
 use rfstore::{
     store::{
         BlackList, Engines, LocalReader, MetaChangeListener, PdIdAllocator, RaftBatchSystem,
@@ -70,7 +73,7 @@ use tikv::{
 use tikv_kv::Engine;
 use tikv_util::{
     check_environment_variables,
-    config::{ensure_dir_exist, VersionTrack},
+    config::{ensure_dir_exist, ReadableDuration, VersionTrack},
     get_panic_region_count, mpsc,
     quota_limiter::{QuotaLimitConfigManager, QuotaLimiter},
     sys::{register_memory_usage_high_water, thread::ThreadBuildWrapper, SysQuota},
@@ -1003,6 +1006,9 @@ impl TikvServer {
             let black_list = BlackList::new(vec![], black_list_regions);
             meta_iter.set_black_list(black_list);
         }
+        if let Some(region_ids) = get_store_regions(pd.clone(), conf, rf_engine.clone()) {
+            meta_iter.set_contained_region_ids(region_ids);
+        }
         let (kv_engine, sender, receiver) = Self::init_kv_engine(
             pd,
             conf,
@@ -1055,6 +1061,81 @@ fn load_black_list(black_list_path: &str) -> Option<BlackList> {
                 error!("failed to load black list file {:?}", err);
             }
         }
+    }
+    None
+}
+
+fn get_store_regions(
+    pd: Arc<dyn pd_client::PdClient>,
+    conf: &TikvConfig,
+    rf_engine: RfEngine,
+) -> Option<Vec<u64>> {
+    if !pd.is_cluster_bootstrapped().unwrap() {
+        return None;
+    };
+    let store_id = match rf_engine.get_state(0, STORE_IDENT_KEY) {
+        None => 0,
+        Some(bin) => {
+            let mut ident = StoreIdent::default();
+            ident.merge_from_bytes(&bin).unwrap();
+            ident.get_store_id()
+        }
+    };
+    if store_id == INVALID_ID {
+        return None;
+    }
+    info!("store_id: {}", store_id);
+    let elapsed_secs = match pd.get_store(store_id) {
+        Ok(store) => {
+            let last_heartbeat = store.get_last_heartbeat();
+            if last_heartbeat > 0 {
+                let last_heartbeat_dur = Duration::from_nanos(last_heartbeat as u64);
+                chrono::Local::now().timestamp() as u64 - last_heartbeat_dur.as_secs()
+            } else {
+                return None;
+            }
+        }
+        Err(e) => {
+            warn!("failed to get store: {}", e);
+            return None;
+        }
+    };
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let pd_control = PdControl::new(conf.pd.clone(), conf.security.clone()).unwrap();
+    let max_store_down_time_secs = match rt.block_on(pd_control.get_config()) {
+        Ok(pd_config) => {
+            if !pd_config.schedule.max_store_down_time.is_empty() {
+                ReadableDuration::from_str(pd_config.schedule.max_store_down_time.as_str())
+                    .unwrap()
+                    .as_secs()
+            } else {
+                return None;
+            }
+        }
+        Err(e) => {
+            warn!("failed to get config: {}", e);
+            return None;
+        }
+    };
+    info!(
+        "elapsed secs: {}, max store down time secs: {}",
+        elapsed_secs, max_store_down_time_secs
+    );
+    if max_store_down_time_secs > 0 && elapsed_secs > max_store_down_time_secs {
+        match rt.block_on(pd_control.get_store_regions(store_id)) {
+            Ok(regions_info) => {
+                info!("get store regions: {}", regions_info.regions.len());
+                let region_ids = regions_info
+                    .regions
+                    .into_iter()
+                    .map(|region| region.id)
+                    .collect();
+                return Some(region_ids);
+            }
+            Err(e) => {
+                warn!("failed to get store regions: {}", e);
+            }
+        };
     }
     None
 }

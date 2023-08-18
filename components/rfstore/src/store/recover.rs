@@ -10,13 +10,13 @@ use kvenginepb::ChangeSet;
 use kvproto::{metapb, raft_cmdpb::RaftCmdRequest, raft_serverpb};
 use protobuf::Message;
 use raft_proto::eraftpb;
-use rfengine::{raft_state_key, region_state_key, KV_ENGINE_META_KEY, STORE_IDENT_KEY};
+use rfengine::{raft_state_key, region_state_key, WriteBatch, KV_ENGINE_META_KEY, STORE_IDENT_KEY};
 use slog_global::info;
 use tikv_util::warn;
 
 use crate::store::{
-    is_property_change_set, load_raft_truncated_state, rlog, Applier, ApplyContext, CustomRaftLog,
-    PeerTag, RaftApplyState, RaftState, RegionIdVer, TERM_KEY,
+    is_property_change_set, load_raft_truncated_state, load_region_state, rlog, Applier,
+    ApplyContext, CustomRaftLog, PeerTag, RaftApplyState, RaftState, RegionIdVer, TERM_KEY,
 };
 
 #[derive(Clone)]
@@ -25,6 +25,7 @@ pub struct RecoverHandler {
     store_id: u64,
     region_peer_map: Arc<HashMap<u64, u64>>,
     black_list: Option<BlackList>,
+    contained_region_ids: Option<HashSet<u64>>,
 }
 
 pub const BLACK_LIST_FILE: &str = "black_list_file";
@@ -86,7 +87,12 @@ impl RecoverHandler {
             store_id,
             region_peer_map,
             black_list: None,
+            contained_region_ids: None,
         }
+    }
+
+    pub fn set_contained_region_ids(&mut self, mut region_ids: Vec<u64>) {
+        self.contained_region_ids = Some(HashSet::from_iter(region_ids.drain(..)))
     }
 
     pub fn set_black_list(&mut self, black_list: BlackList) {
@@ -263,12 +269,31 @@ impl kvengine::MetaIterator for RecoverHandler {
     where
         F: FnMut(ChangeSet),
     {
+        let mut wb = WriteBatch::new();
         let region_to_peers = self.rf_engine.get_region_peer_map();
         for (_, peer_id) in region_to_peers {
             if let Some(val) = self.rf_engine.get_state(peer_id, KV_ENGINE_META_KEY) {
                 let mut cs = kvenginepb::ChangeSet::new();
                 if let Err(e) = cs.merge_from_bytes(&val) {
                     return Err(kvengine::Error::ErrOpen(e.to_string()));
+                }
+                if let Some(contained_region_ids) = self.contained_region_ids.as_mut() {
+                    if !contained_region_ids.contains(&cs.shard_id) {
+                        warn!("region {} removed by pd", cs.shard_id);
+                        let region_id = cs.shard_id;
+                        self.rf_engine.iterate_peer_states(peer_id, false, |k, _| {
+                            wb.set_state(peer_id, region_id, k, &[]);
+                        });
+                        let mut region_local_state =
+                            load_region_state(&self.rf_engine, peer_id, cs.shard_ver).unwrap();
+                        region_local_state.state = raft_serverpb::PeerState::Tombstone;
+                        let region_state_val = region_local_state.write_to_bytes().unwrap();
+                        let region_state_key = region_state_key(cs.shard_ver);
+                        wb.set_state(peer_id, region_id, &region_state_key, &region_state_val);
+                        wb.truncate_raft_log(peer_id, region_id, u64::MAX);
+                        info!("destroy removed region {:?}", region_local_state);
+                        continue;
+                    }
                 }
                 if let Some(black_list) = self.black_list.as_mut() {
                     let snap = cs.get_snapshot();
@@ -283,6 +308,9 @@ impl kvengine::MetaIterator for RecoverHandler {
                 }
                 f(cs);
             }
+        }
+        if !wb.is_empty() {
+            self.rf_engine.write(wb).unwrap();
         }
         Ok(())
     }

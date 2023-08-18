@@ -6,14 +6,13 @@ use api_version::ApiV2;
 use http::{Request, Uri};
 use hyper::Body;
 use kvproto::metapb::Store;
-use pd_client::PdClient;
+use pd_client::{pd_control::PdControl, PdClient};
 use slog_global::{error, info};
 use tikv_util::{box_err, time::Instant};
 
 use crate::{
     common::{get_tiflash_storage_stores, send_request_to_store},
     error::{Error, Result},
-    pd_control::PdControl,
 };
 
 const WAIT_TIFLASH_REMOVE_REPLICA_INTERVAL: Duration = Duration::from_secs(1);

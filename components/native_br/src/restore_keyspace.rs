@@ -25,7 +25,7 @@ use kvengine::{
 };
 use kvenginepb as pb;
 use kvproto::{metapb, metapb::PeerRole, raft_serverpb::MergeState};
-use pd_client::PdClient;
+use pd_client::{pd_control::PdControl, PdClient};
 use protobuf::Message;
 use raft::eraftpb;
 use rfengine::RfEngine;
@@ -48,7 +48,6 @@ use crate::{
         Error::{KeyspaceInnerKeyOffNotEnabled, RetryLimitExceeded},
         Result,
     },
-    pd_control::PdControl,
     restore::{get_cluster_backup_meta, RestoreConfig},
     step,
     tiflash::remove_tiflash_replia_of_keyspace,

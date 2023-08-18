@@ -4358,6 +4358,8 @@ name = "pd_client"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bstr",
+ "bytes",
  "cloud_encryption",
  "collections",
  "dashmap 4.0.2",
@@ -4365,6 +4367,8 @@ dependencies = [
  "fail 0.5.0",
  "futures 0.3.15",
  "grpcio",
+ "http",
+ "hyper",
  "kvproto",
  "lazy_static",
  "log",
@@ -4383,6 +4387,7 @@ dependencies = [
  "tokio",
  "tokio-timer",
  "txn_types",
+ "url",
  "yatp",
 ]
 
