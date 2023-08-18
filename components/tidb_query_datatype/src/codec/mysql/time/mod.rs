@@ -998,6 +998,7 @@ impl TimeArgs {
 }
 
 // Utility
+#[allow(deprecated)]
 impl Time {
     fn from_slice(
         ctx: &mut EvalContext,

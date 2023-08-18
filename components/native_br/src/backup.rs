@@ -357,7 +357,7 @@ fn get_backup_config(
 /// Return full path of incremental backups in S3.
 pub async fn get_all_incremental_backups(
     s3fs: &S3Fs,
-    start_date: &chrono::Date<Utc>,
+    start_date: &chrono::NaiveDate,
     start_time: Option<&NaiveTime>,
     max_count: usize,
 ) -> dfs::Result<(Vec<IncrementalBackupFile>, bool)> {
@@ -401,7 +401,7 @@ pub async fn get_all_incremental_backups(
 // If backup exist, return the latest one, else create a new ClusterBackupMeta.
 async fn get_latest_backup_meta(s3fs: &S3Fs, cluster_id: u64) -> Result<ClusterBackupMeta> {
     let now = Utc::now();
-    let (files, _) = get_all_incremental_backups(s3fs, &now.date(), None, usize::MAX).await?;
+    let (files, _) = get_all_incremental_backups(s3fs, &now.date_naive(), None, usize::MAX).await?;
     if files.is_empty() {
         return Err(Error::MetaNotFound(cluster_id));
     }
@@ -566,7 +566,7 @@ impl IncrementalBackupFile {
 
     pub fn from_backup_ts(backup_ts: u64) -> Self {
         let physical_seconds = TimeStamp::from(backup_ts).physical() / 1000; // Unit of physical is millisecond.
-        let datetime = NaiveDateTime::from_timestamp(physical_seconds as i64, 0);
+        let datetime = NaiveDateTime::from_timestamp_opt(physical_seconds as i64, 0).unwrap();
         let utc = DateTime::<Utc>::from_utc(datetime, Utc);
         Self::from_datetime(utc)
     }
@@ -584,7 +584,7 @@ impl IncrementalBackupFile {
     }
 
     pub fn from_id(backup_id: u64) -> Self {
-        let datetime = NaiveDateTime::from_timestamp(backup_id as i64, 0);
+        let datetime = NaiveDateTime::from_timestamp_opt(backup_id as i64, 0).unwrap();
         let utc = DateTime::<Utc>::from_utc(datetime, Utc);
         Self::from_datetime(utc)
     }

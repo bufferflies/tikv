@@ -966,7 +966,7 @@ impl NativeBrManager {
     ) -> Result<(Vec<IncrementalBackupFile>, bool)> {
         let (backups, has_more) = backup::get_all_incremental_backups(
             &self.context.s3fs,
-            &start_backup_time.date(),
+            &start_backup_time.date_naive(),
             Some(&start_backup_time.time()),
             max_count,
         )

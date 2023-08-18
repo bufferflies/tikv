@@ -6,6 +6,7 @@ mod load_data;
 mod metrics;
 mod native_br;
 mod remote_cop;
+mod worker_scaler;
 
 use std::{
     io,
@@ -45,12 +46,15 @@ use slog_global::{error, info};
 use tikv_util::{
     config::{ReadableDuration, ReadableSize},
     metrics::{dump, dump_to},
+    sys::SysQuota,
     time::Instant,
 };
 
 use crate::{
     load_data::{handle_load_data, LoadDataManager, MAX_IN_MEM_SIZE},
+    metrics::CPU_CORES_QUOTA_GAUGE,
     native_br::{NativeBrConfig, NativeBrManager},
+    worker_scaler::{new_worker_scaler, WorkerScalerConfig},
 };
 
 const ZSTD_COMPRESSION_LEVEL_FOR_REMOTE: &str = "5";
@@ -61,6 +65,7 @@ fn main() {
     init_logger(io::stdout(), DEFAULT_LOG_LEVEL);
     tikv_util::metrics::monitor_process()
         .unwrap_or_else(|e| panic!("failed to start process monitor: {}", e));
+    CPU_CORES_QUOTA_GAUGE.set(SysQuota::cpu_cores_quota());
     let matches = App::new("tikv-worker")
         .about("tikv remote worker")
         .arg(
@@ -156,6 +161,13 @@ fn main() {
                 .takes_value(true)
                 .value_name("IP:PORT")
                 .help("Set the coprocessor listening address"),
+        )
+        .arg(
+            Arg::with_name("run-worker-scaler")
+                .long("run-worker-scaler")
+                .takes_value(true)
+                .value_name("Bool")
+                .help("run worker-scaler"),
         )
         .get_matches();
 
@@ -336,6 +348,13 @@ fn main() {
                 );
                 std::thread::sleep(duration);
             }
+        });
+    }
+    if config.worker_scaler.run {
+        let scaler_cfg = config.worker_scaler.clone();
+        thread_pool.spawn(async move {
+            let mut worker_scaler = new_worker_scaler(&scaler_cfg).await.unwrap();
+            worker_scaler.run().await;
         });
     }
     let mut cop_server_opt = None;
@@ -564,6 +583,7 @@ pub struct Config {
     pub cop_cache_size: ReadableSize,
     // The time-to-live when restore task has been in final state.
     pub restore_task_ttl: ReadableDuration,
+    pub worker_scaler: WorkerScalerConfig,
 }
 
 impl Default for Config {
@@ -584,6 +604,7 @@ impl Default for Config {
             cop_addr: String::from("0.0.0.0:9500"),
             cop_cache_size: ReadableSize::gb(1),
             restore_task_ttl: ReadableDuration::minutes(10),
+            worker_scaler: WorkerScalerConfig::default(),
         }
     }
 }
@@ -671,5 +692,9 @@ fn override_from_args(config: &mut Config, matches: &ArgMatches<'_>) {
 
     if let Some(cop_addr) = matches.value_of("cop-addr") {
         config.cop_addr = cop_addr.to_string();
+    }
+
+    if let Some(run_worker_scaler) = matches.value_of("run-worker-scaler") {
+        config.worker_scaler.run = run_worker_scaler == "true";
     }
 }
