@@ -791,10 +791,6 @@ impl PeerMeta {
         assert_eq!(self.region_id, other.region_id);
         if self.truncated_idx < other.truncated_idx {
             self.truncated_idx = other.truncated_idx;
-            info!(
-                "{} update truncate to {}",
-                other.region_id, other.truncated_idx
-            );
         }
         for (key, val) in &other.states {
             if keep_empty || !val.is_empty() {
