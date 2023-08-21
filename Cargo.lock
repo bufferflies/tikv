@@ -4073,10 +4073,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "murmur3"
-version = "0.5.1"
+name = "mur3"
+version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ead5388e485d38e622630c6b05afd3761a6701ff15c55b279ea5b31dcb62cff"
+checksum = "97af489e1e21b68de4c390ecca6703318bc1aa16e9733bcb62c089b73c6fbb1b"
 
 [[package]]
 name = "native-tls"
@@ -7680,7 +7680,7 @@ dependencies = [
  "mime",
  "moka",
  "more-asserts",
- "murmur3",
+ "mur3",
  "nom 5.1.0",
  "notify",
  "num-traits",
@@ -8130,7 +8130,7 @@ dependencies = [
 [[package]]
 name = "tipb"
 version = "0.0.1"
-source = "git+https://github.com/pingcap/tipb.git#f3286471a05a4454a1071dd5f66ac7dbf6c79ba3"
+source = "git+https://github.com/pingcap/tipb.git#955fbdc879517f16b7a2f5967f143b92a6ab03dd"
 dependencies = [
  "futures 0.3.28",
  "grpcio",
