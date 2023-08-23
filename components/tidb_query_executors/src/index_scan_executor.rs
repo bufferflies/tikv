@@ -994,7 +994,7 @@ mod tests {
             .unwrap();
 
             let mut result = block_on(executor.next_batch(10));
-            assert!(result.is_drained.as_ref().unwrap());
+            assert!(result.is_drained.as_ref().unwrap().stop());
             assert_eq!(result.physical_columns.columns_len(), 2);
             assert_eq!(result.physical_columns.rows_len(), 3);
             assert!(result.physical_columns[0].is_raw());
@@ -1051,7 +1051,7 @@ mod tests {
             .unwrap();
 
             let mut result = block_on(executor.next_batch(10));
-            assert!(result.is_drained.as_ref().unwrap());
+            assert!(result.is_drained.as_ref().unwrap().stop());
             assert_eq!(result.physical_columns.columns_len(), 3);
             assert_eq!(result.physical_columns.rows_len(), 3);
             assert!(result.physical_columns[0].is_raw());
@@ -1111,7 +1111,7 @@ mod tests {
             .unwrap();
 
             let mut result = block_on(executor.next_batch(10));
-            assert!(result.is_drained.as_ref().unwrap());
+            assert!(result.is_drained.as_ref().unwrap().stop());
             assert_eq!(result.physical_columns.columns_len(), 2);
             assert_eq!(result.physical_columns.rows_len(), 3);
             assert!(result.physical_columns[0].is_raw());
@@ -1156,7 +1156,7 @@ mod tests {
             .unwrap();
 
             let mut result = block_on(executor.next_batch(10));
-            assert!(result.is_drained.as_ref().unwrap());
+            assert!(result.is_drained.as_ref().unwrap().stop());
             assert_eq!(result.physical_columns.columns_len(), 3);
             assert_eq!(result.physical_columns.rows_len(), 3);
             assert!(result.physical_columns[0].is_raw());
@@ -1208,7 +1208,7 @@ mod tests {
             .unwrap();
 
             let mut result = block_on(executor.next_batch(10));
-            assert!(result.is_drained.as_ref().unwrap());
+            assert!(result.is_drained.as_ref().unwrap().stop());
             assert_eq!(result.physical_columns.columns_len(), 3);
             assert_eq!(result.physical_columns.rows_len(), 2);
             assert!(result.physical_columns[0].is_raw());
@@ -1285,7 +1285,7 @@ mod tests {
             .unwrap();
 
             let mut result = block_on(executor.next_batch(10));
-            assert!(result.is_drained.as_ref().unwrap());
+            assert!(result.is_drained.as_ref().unwrap().stop());
             assert_eq!(result.physical_columns.columns_len(), 3);
             assert_eq!(result.physical_columns.rows_len(), 2);
             assert!(result.physical_columns[0].is_raw());
@@ -1342,7 +1342,7 @@ mod tests {
             .unwrap();
 
             let mut result = block_on(executor.next_batch(10));
-            assert!(result.is_drained.as_ref().unwrap());
+            assert!(result.is_drained.as_ref().unwrap().stop());
             assert_eq!(result.physical_columns.columns_len(), 3);
             assert_eq!(result.physical_columns.rows_len(), 1);
             assert!(result.physical_columns[0].is_raw());
@@ -1452,7 +1452,7 @@ mod tests {
         .unwrap();
 
         let mut result = block_on(executor.next_batch(10));
-        assert!(result.is_drained.as_ref().unwrap());
+        assert!(result.is_drained.as_ref().unwrap().stop());
         assert_eq!(result.physical_columns.columns_len(), 3);
         assert_eq!(result.physical_columns.rows_len(), 1);
         assert!(result.physical_columns[0].is_raw());
@@ -1495,7 +1495,7 @@ mod tests {
         .unwrap();
 
         let mut result = block_on(executor.next_batch(10));
-        assert!(result.is_drained.as_ref().unwrap());
+        assert!(result.is_drained.as_ref().unwrap().stop());
         assert_eq!(result.physical_columns.columns_len(), 3);
         assert_eq!(result.physical_columns.rows_len(), 1);
         assert!(result.physical_columns[0].is_raw());
@@ -1591,7 +1591,7 @@ mod tests {
         .unwrap();
 
         let mut result = block_on(executor.next_batch(10));
-        assert!(result.is_drained.as_ref().unwrap());
+        assert!(result.is_drained.as_ref().unwrap().stop());
         assert_eq!(result.physical_columns.columns_len(), 3);
         assert_eq!(result.physical_columns.rows_len(), 1);
         assert!(result.physical_columns[0].is_raw());
@@ -1691,7 +1691,7 @@ mod tests {
         .unwrap();
 
         let mut result = block_on(executor.next_batch(10));
-        assert!(result.is_drained.as_ref().unwrap());
+        assert!(result.is_drained.as_ref().unwrap().stop());
         assert_eq!(result.physical_columns.columns_len(), 3);
         assert_eq!(result.physical_columns.rows_len(), 1);
         assert!(result.physical_columns[0].is_raw());
@@ -1785,7 +1785,7 @@ mod tests {
         .unwrap();
 
         let mut result = block_on(executor.next_batch(10));
-        assert!(result.is_drained.as_ref().unwrap());
+        assert!(result.is_drained.as_ref().unwrap().stop());
         assert_eq!(result.physical_columns.columns_len(), 3);
         assert_eq!(result.physical_columns.rows_len(), 1);
         assert!(result.physical_columns[0].is_raw());
@@ -1878,7 +1878,7 @@ mod tests {
         .unwrap();
 
         let mut result = block_on(executor.next_batch(10));
-        assert!(result.is_drained.as_ref().unwrap());
+        assert!(result.is_drained.as_ref().unwrap().stop());
         assert_eq!(result.physical_columns.columns_len(), 3);
         assert_eq!(result.physical_columns.rows_len(), 1);
         assert!(result.physical_columns[0].is_raw());
@@ -2004,7 +2004,7 @@ mod tests {
         .unwrap();
 
         let mut result = block_on(executor.next_batch(10));
-        assert!(result.is_drained.as_ref().unwrap());
+        assert!(result.is_drained.as_ref().unwrap().stop());
         assert_eq!(result.physical_columns.columns_len(), 4);
         assert_eq!(result.physical_columns.rows_len(), 1);
         assert!(result.physical_columns[0].is_raw());

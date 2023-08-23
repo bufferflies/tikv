@@ -505,7 +505,7 @@ impl<S: Snapshot, F: KvFormat> RowSampleBuilder<S, F> {
                     res
                 };
                 let _guard = sample.observe_cpu();
-                is_drained = result.is_drained?;
+                is_drained = result.is_drained?.stop();
 
                 let columns_slice = result.physical_columns.as_slice();
                 let mut column_vals: Vec<Vec<u8>> = vec![vec![]; self.columns_info.len()];
@@ -1005,7 +1005,7 @@ impl<S: Snapshot, F: KvFormat> SampleBuilder<S, F> {
         let mut ctx = EvalContext::default();
         while !is_drained {
             let result = self.data.next_batch(BATCH_MAX_SIZE).await;
-            is_drained = result.is_drained?;
+            is_drained = result.is_drained?.stop();
 
             let mut columns_slice = result.physical_columns.as_slice();
             let mut columns_info = &self.columns_info[..];
