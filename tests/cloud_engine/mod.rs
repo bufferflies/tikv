@@ -77,6 +77,11 @@ pub(crate) fn i_to_val(i: usize) -> Vec<u8> {
     format!("val_{:03}", i).into_bytes().repeat(3)
 }
 
+/// Generate keys of API v1 (TiDB metas)
+pub(crate) fn i_to_key_v1(i: usize) -> Vec<u8> {
+    format!("m_{:03}", i).into_bytes()
+}
+
 pub(crate) async fn request_major_compact_on_store(store: &Store, query: &str) {
     let uri = Uri::from_str(&format!(
         "http://{}/major-compact?{}",

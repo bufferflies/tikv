@@ -807,9 +807,8 @@ impl<'a> PeerMsgHandler<'a> {
             let CheckMergeResult {
                 source_overbound,
                 target_overbound,
-                is_same_keyspace,
-                source_is_empty,
-                target_is_empty,
+                source_require_empty,
+                target_require_empty,
             } = check_result;
 
             if source_overbound || target_overbound {
@@ -832,23 +831,21 @@ impl<'a> PeerMsgHandler<'a> {
                 .into());
             }
 
-            if !is_same_keyspace {
-                // If shards have data that not covered by del_prefixes, reject merge.
-                // Otherwise, the data covered by del_prefixes will be automatically deleted in
-                // commit_merge phase.
-                if !source_is_empty || !target_is_empty {
-                    return Err(kvengine::Error::CheckMerge(format!(
-                        "shards have remaing data with different keyspace, source:{:?}, target:{:?}",
-                        IdVer::new(id, version),
-                        IdVer::new(target_id, target_version)
-                    ))
-                    .into());
-                }
-                info!(
-                    "shards data will be cleared, source:{:?}, target:{:?}",
+            // Shards are required to be empty when they are from different keyspaces.
+            // As SSTs have no prefix, merge SSTs from different keyspaces will violate
+            // correctness.
+            // Also note that the empty status of shard is not reliable, so on commit merge,
+            // the data will be cleared in this scene.
+            // The checking here is just for more safety.
+            if source_require_empty || target_require_empty {
+                return Err(kvengine::Error::CheckMerge(format!(
+                    "shards from different keyspaces require to be empty, source:{:?}: {:?}, target:{:?}: {:?}",
                     IdVer::new(id, version),
-                    IdVer::new(target_id, target_version)
-                );
+                    region,
+                    IdVer::new(target_id, target_version),
+                    target_region,
+                ))
+                .into());
             }
         } else if admin_req.has_commit_merge() {
             let source_region = msg.get_admin_request().get_commit_merge().get_source();

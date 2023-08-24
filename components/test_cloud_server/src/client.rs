@@ -20,8 +20,8 @@ use kvengine::ShardTag;
 use kvproto::{
     coprocessor as coppb, errorpb, kvrpcpb,
     kvrpcpb::{
-        ApiVersion, CommitRequest, Context, GetRequest, IsolationLevel, Mutation, Op,
-        PrewriteRequest, SplitRegionRequest,
+        CommitRequest, Context, GetRequest, IsolationLevel, Mutation, Op, PrewriteRequest,
+        SplitRegionRequest,
     },
     metapb,
     metapb::{Peer, Region, RegionEpoch},
@@ -107,6 +107,8 @@ pub struct ClusterClient {
     // So we need the `Option<Box>` to resolve circular dependency.
     // TODO: separate methods of RPCs (kv_xxx) from ClusterClient.
     pub(crate) lock_resolver: Option<Box<LockResolver>>,
+
+    pub(crate) api_version: kvrpcpb::ApiVersion,
 }
 
 // Named as `RequestPeerRole` to avoid conflict with `metapb::PeerRole`.
@@ -923,7 +925,7 @@ impl ClusterClient {
         }
         let (region, peer) = self.get_peer_for_request(region_id, options).unwrap();
         let mut ctx = Context::new();
-        ctx.set_api_version(ApiVersion::V2);
+        ctx.set_api_version(self.api_version);
         ctx.set_region_id(region_id);
         ctx.set_region_epoch(region.epoch.clone());
         ctx.set_peer(peer.clone());

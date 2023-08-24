@@ -124,7 +124,7 @@ fn test_random_merge() {
     }
     let handles = vec![
         spawn_write(0, cluster.new_client()),
-        spawn_merge(cluster.new_scheduler(), false),
+        spawn_merge(cluster.new_scheduler(), true),
         spawn_transfer(cluster.new_scheduler()),
         spawn_move(cluster.new_scheduler(), Arc::new(RwLock::new(()))),
     ];

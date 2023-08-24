@@ -2,10 +2,7 @@
 
 use std::{cmp::max, collections::HashMap, iter::Iterator};
 
-use api_version::{
-    api_v2::{is_whole_keyspace_range, KEYSPACE_PREFIX_LEN},
-    ApiV2,
-};
+use api_version::api_v2::{is_whole_keyspace_range, KEYSPACE_PREFIX_LEN};
 use bytes::{Buf, Bytes};
 use kvenginepb as pb;
 use protobuf::Message;
@@ -844,18 +841,38 @@ impl ShardMeta {
     }
 
     pub fn commit_merge(&mut self, source: &ShardMeta, sequence: u64) {
-        let is_same_keyspace_merge =
-            ApiV2::is_belongs_to_same_keyspace(&self.range.outer_start, &source.range.outer_start);
+        let (clear_source, clear_target) =
+            need_clear_region_data_on_merge(&source.range.outer_start, &self.range.outer_start);
+
         // Include the max_ts and source files in the parent for future initial flush.
         self.max_ts = std::cmp::max(self.max_ts, source.max_ts);
         let mut parent = self.clone();
 
-        if is_same_keyspace_merge {
+        if clear_target {
+            info!(
+                "{} clear data of target region on merge, target: {:?}",
+                self.tag(),
+                self.range,
+            );
+
+            // clear all files if exists
+            parent.files.clear();
+            self.files.clear();
+            // remove DEL_PREFIXES_KEY property if exists
+            self.del_property(DEL_PREFIXES_KEY);
+        }
+        if !clear_source {
             for (&id, source_file) in &source.files {
                 parent.files.insert(id, source_file.clone());
             }
             for (&id, source_file) in &source.files {
                 self.files.insert(id, source_file.clone());
+            }
+
+            // `inner_key_off` will be different when merge regions of different keyspaces.
+            if clear_target {
+                parent.range.inner_key_off = source.range.inner_key_off;
+                self.range.inner_key_off = source.range.inner_key_off;
             }
 
             // merge DEL_PREFIXES_KEY from source if needed
@@ -869,12 +886,11 @@ impl ShardMeta {
                 self.set_property(DEL_PREFIXES_KEY, &new_del_prefixes);
             }
         } else {
-            // clear all files if exists
-            parent.files.clear();
-            self.files.clear();
-
-            // remove DEL_PREFIXES_KEY property if exists
-            self.del_property(DEL_PREFIXES_KEY);
+            info!(
+                "{} clear data of source region on merge, source: {:?}",
+                self.tag(),
+                source.range,
+            );
         }
 
         if self.range.outer_end == source.range.outer_start {

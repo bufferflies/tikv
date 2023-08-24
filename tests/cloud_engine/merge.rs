@@ -3,8 +3,9 @@
 use std::{thread, time::Duration};
 
 use futures::executor::block_on;
+use kvproto::kvrpcpb;
 use pd_client::PdClient;
-use test_cloud_server::{try_wait, ServerCluster};
+use test_cloud_server::{client::RequestOptions, try_wait, ServerCluster};
 use tikv::config::TikvConfig;
 use tikv_util::{
     config::ReadableDuration,
@@ -12,8 +13,8 @@ use tikv_util::{
 };
 
 use crate::{
-    alloc_node_id, destroy_range, generate_keyspace_key, get_keyspace_prefix, i_to_key, i_to_val,
-    is_region_belongs_to_keyspace,
+    alloc_node_id, destroy_range, generate_keyspace_key, get_keyspace_prefix, i_to_key,
+    i_to_key_v1, i_to_val, is_region_belongs_to_keyspace,
 };
 
 #[test]
@@ -321,26 +322,26 @@ fn region_merge_with_del_prefixes(enable_inner_key_offset: bool) {
 }
 
 #[test]
-fn test_region_merge_keyspace_with_del_prefixes() {
-    region_merge_keyspace_with_del_prefixes(true);
-    region_merge_keyspace_with_del_prefixes(false);
+fn test_region_merge_keyspaces() {
+    test_util::init_log_for_test();
+    region_merge_keyspaces(true);
+    region_merge_keyspaces(false);
 }
 
-fn region_merge_keyspace_with_del_prefixes(enable_inner_key_offset: bool) {
-    test_util::init_log_for_test();
-
+fn region_merge_keyspaces(enable_inner_key_offset: bool) {
     let node_id = alloc_node_id();
     let mut cluster = ServerCluster::new(vec![node_id], |_, conf: &mut TikvConfig| {
         conf.enable_inner_key_offset = enable_inner_key_offset;
     });
 
+    let mut client_v1 = cluster.new_client_opt(true, kvrpcpb::ApiVersion::V1);
     let mut client = cluster.new_client();
-    let pd_client = cluster.get_pd_client();
-    // 1. Generate 2 keyspace region.
-    // 3. Put some keys to the 2 keyspace regions.
-    // 4. 2 keyspaces can not merge with data.
+    // 1. Generate 1 APIv1 region and 2 keyspace regions.
+    // 2. Put some keys to the regions.
+    // 3. 2 keyspaces can not merge with data.
     // 4. Destroy range in each keyspace region.
     // 5. Merge the 2 keyspaces and check the result.
+    // 6. Merge the APIv1 region and keyspace region, and check the result.
     let (ks100, ks101, ks102) = (
         get_keyspace_prefix(100),
         get_keyspace_prefix(101),
@@ -364,24 +365,22 @@ fn region_merge_keyspace_with_del_prefixes(enable_inner_key_offset: bool) {
         key.extend_from_slice(i.to_string().as_bytes());
         key
     };
+
+    // put some APIv1 keys
+    client_v1.put_kv(0..10, i_to_key_v1, i_to_val);
+    let ref_store = client_v1.dump_ref_store();
     // put some keys into 2 keyspace regions
     client.put_kv(0..100, generate_ks100_ext_key, i_to_val);
     client.put_kv(0..100, generate_ks101_ext_key, i_to_val);
 
-    let mut regions = pd_client.get_all_regions();
-    regions.sort_by(|a, b| a.get_start_key().cmp(b.get_start_key()));
-
     client.try_merge(&ks100, &ks101);
-
     // the 2 keyspaces can not merge with data
     cluster.wait_pd_region_count(4);
-    // std::thread::sleep(Duration::from_secs(10));
 
     // destroy range in both keyspace
     let store_id = cluster.get_stores()[0];
     destroy_range(&mut client, store_id, &ks100);
     destroy_range(&mut client, store_id, &ks101);
-
     let snap = cluster.get_snap(node_id, &ks100);
     assert!(!snap.has_data_in_prefix(&ks100));
     let snap = cluster.get_snap(node_id, &ks101);
@@ -390,11 +389,17 @@ fn region_merge_keyspace_with_del_prefixes(enable_inner_key_offset: bool) {
     client.try_merge(&ks100, &ks101);
     // wait for region merge
     cluster.wait_pd_region_count(3);
-
     let snap = cluster.get_snap(node_id, &ks100);
     assert!(!snap.has_data_in_prefix(&ks100));
     let snap = cluster.get_snap(node_id, &ks101);
     assert!(!snap.has_data_in_prefix(&ks101));
+
+    // merge APIv1 & keyspace region.
+    client.try_merge(&[], &ks100);
+    cluster.wait_pd_region_count(2);
+    client_v1
+        .verify_data_with_given_ref_store(&ref_store, None, &RequestOptions::default())
+        .unwrap();
 
     cluster.stop_node(node_id);
     cluster.stop();

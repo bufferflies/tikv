@@ -14,6 +14,7 @@ use futures::executor::block_on;
 use grpcio::{Channel, ChannelBuilder, EnvBuilder, Environment};
 use kvengine::{dfs::Dfs, ShardStats};
 use kvproto::{
+    kvrpcpb,
     kvrpcpb::{Mutation, Op},
     raft_cmdpb::RaftCmdRequest,
 };
@@ -301,10 +302,14 @@ impl ServerCluster {
     }
 
     pub fn new_client(&self) -> ClusterClient {
-        self.new_client_opt(true)
+        self.new_client_opt(true, kvrpcpb::ApiVersion::V2)
     }
 
-    fn new_client_opt(&self, with_lock_resolver: bool) -> ClusterClient {
+    pub fn new_client_opt(
+        &self,
+        with_lock_resolver: bool,
+        api_version: kvrpcpb::ApiVersion,
+    ) -> ClusterClient {
         let lock_resolver = with_lock_resolver.then(|| Box::new(self.new_lock_resolver()));
         ClusterClient {
             pd_client: self.pd_client.clone(),
@@ -314,6 +319,7 @@ impl ServerCluster {
             ref_store: self.ref_store.clone(),
             max_ts: Default::default(),
             lock_resolver,
+            api_version,
         }
     }
 
@@ -335,7 +341,7 @@ impl ServerCluster {
 
     pub fn new_lock_resolver(&self) -> LockResolver {
         // `with_lock_resolver` must be false, otherwise it will cause dead loop.
-        LockResolver::new(self.new_client_opt(false))
+        LockResolver::new(self.new_client_opt(false, kvrpcpb::ApiVersion::V2))
     }
 
     pub fn get_data_stats(&self) -> ClusterDataStats {

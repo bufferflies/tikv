@@ -11,7 +11,7 @@ use std::{
 
 use api_version::{
     api_v2::{is_whole_keyspace_range, KEYSPACE_PREFIX_LEN},
-    ApiV2,
+    ApiV2, KeyMode, KvFormat,
 };
 use bytes::{Buf, Bytes};
 use dashmap::mapref::entry::Entry;
@@ -24,9 +24,10 @@ use crate::*;
 pub struct CheckMergeResult {
     pub source_overbound: bool,
     pub target_overbound: bool,
-    pub is_same_keyspace: bool,
-    pub source_is_empty: bool,
-    pub target_is_empty: bool,
+
+    /// source/target region is required to be empty, but it's not.
+    pub source_require_empty: bool,
+    pub target_require_empty: bool,
 }
 
 impl Engine {
@@ -193,25 +194,22 @@ impl Engine {
             return Err(Error::CheckMerge("target not initial flushed".to_string()));
         }
 
-        let is_same_keyspace = ApiV2::is_belongs_to_same_keyspace(
-            &source_shard.outer_start,
-            &target_shard.outer_start,
-        );
+        let (clear_source, clear_target) =
+            need_clear_region_data_on_merge(&source_shard.outer_start, &target_shard.outer_start);
+        let shard_is_empty = |shard: &Shard| -> bool {
+            shard.is_empty()
+                || shard.get_del_prefixes().cover_full_keyspace(
+                    ApiV2::get_keyspace_prefix(&shard.outer_start).unwrap_or_default(),
+                )
+        };
+        let source_require_empty = clear_source && !shard_is_empty(source_shard.as_ref());
+        let target_require_empty = clear_target && !shard_is_empty(target_shard.as_ref());
 
         Ok(CheckMergeResult {
             source_overbound: source_shard.has_over_bound_data(),
             target_overbound: target_shard.has_over_bound_data(),
-            is_same_keyspace,
-            // source shard is empty or del_prefixes covering the full keyspace.
-            source_is_empty: source_shard.is_empty()
-                || source_shard.get_del_prefixes().cover_full_keyspace(
-                    &ApiV2::get_keyspace_prefix(&source_shard.outer_start).unwrap_or_default(),
-                ),
-            // target shard is empty or del_prefixes covering the full keyspace.
-            target_is_empty: target_shard.is_empty()
-                || target_shard.get_del_prefixes().cover_full_keyspace(
-                    &ApiV2::get_keyspace_prefix(&target_shard.outer_start).unwrap_or_default(),
-                ),
+            source_require_empty,
+            target_require_empty,
         })
     }
 
@@ -258,32 +256,21 @@ impl Engine {
     ) -> Result<()> {
         let old_shard = self.get_shard_with_ver(shard_id, shard_ver)?;
         self.prepare_update_shard_version(&old_shard, sequence);
-        let mut new_shard = self.new_shard_version(&old_shard, sequence);
         let source_snap = source.get_snapshot();
 
-        // If the shards are belongs to different keyspaces, all data in the shards will
-        // be cleared. In check_merge we check del_prefixes covering all data, so it's
-        // safe to do this.
-        let is_same_keyspace_merge =
-            ApiV2::is_belongs_to_same_keyspace(&source_snap.outer_start, &old_shard.outer_start);
+        let (clear_source, clear_target) =
+            need_clear_region_data_on_merge(&source_snap.outer_start, &old_shard.outer_start);
 
-        if is_same_keyspace_merge {
-            // merge source DEL_PREFIXES_KEY to new shard
-            let source_del_prefixes =
-                get_shard_property(DEL_PREFIXES_KEY, source_snap.get_properties())
-                    .map(|v| Bytes::from(v));
-            let old_del_prefixes = old_shard.get_property(DEL_PREFIXES_KEY);
-            if let Some(new_del_prefixes) = merge_del_prefixes_if_needed(
-                source_del_prefixes,
-                old_del_prefixes,
-                old_shard.range.inner_key_off,
-            ) {
-                new_shard.set_property(DEL_PREFIXES_KEY, &new_del_prefixes);
-            }
-        } else {
-            // reset del_prefixes property to empty
-            new_shard.set_property(DEL_PREFIXES_KEY, &[]);
+        if clear_target {
+            info!(
+                "{} clear data of target shard on merge, target: {:?}",
+                old_shard.tag(),
+                old_shard.range,
+            );
+            old_shard.set_property(DEL_PREFIXES_KEY, &[]);
+            old_shard.set_data(ShardData::new_empty(old_shard.range.clone()));
         }
+        let mut new_shard = self.new_shard_version(&old_shard, sequence);
 
         // TODO: Do we need to merge pending operations here?
         new_shard.range.outer_start = min(
@@ -303,7 +290,26 @@ impl Engine {
             max(source_mem_tbl_version, target_mem_tbl_version) - sequence,
         );
 
-        let data = if is_same_keyspace_merge {
+        if !clear_source {
+            if clear_target {
+                // `inner_key_off` will be different when merge regions of different keyspaces.
+                new_shard.range.inner_key_off = source_snap.inner_key_off as usize;
+            }
+
+            // merge source DEL_PREFIXES_KEY to new shard
+            let source_del_prefixes =
+                get_shard_property(DEL_PREFIXES_KEY, source_snap.get_properties())
+                    .map(|v| Bytes::from(v));
+            let old_del_prefixes = old_shard.get_property(DEL_PREFIXES_KEY);
+            if let Some(new_del_prefixes) = merge_del_prefixes_if_needed(
+                source_del_prefixes,
+                old_del_prefixes,
+                source_snap.inner_key_off as usize,
+            ) {
+                new_shard.set_property(DEL_PREFIXES_KEY, &new_del_prefixes);
+            }
+
+            // merge shard data
             let old_data = old_shard.get_data();
             let mem_tbls = old_data.mem_tbls.clone();
             let mut blob_tbl_map = old_data.blob_tbl_map.as_ref().clone();
@@ -344,19 +350,25 @@ impl Engine {
             for (&id, tbl) in old_data.unloaded_tbls.iter() {
                 unloaded_tbls.insert(id, tbl.clone());
             }
-            ShardData::new(
+            let data = ShardData::new(
                 new_shard.range.clone(),
                 mem_tbls,
                 l0_tbls,
                 Arc::new(blob_tbl_map),
                 new_cfs,
                 unloaded_tbls,
-            )
+            );
+
+            new_shard.set_data(data);
         } else {
-            ShardData::new_empty(new_shard.range.clone())
+            info!(
+                "{} clear data of source shard on merge, source start: {:x?}, end: {:x?}",
+                old_shard.tag(),
+                source_snap.outer_start,
+                source_snap.outer_end,
+            );
         };
 
-        new_shard.set_data(data);
         new_shard.parent_id = shard_id;
         {
             let mut guard = new_shard.parent_snap.write().unwrap();
@@ -411,4 +423,73 @@ pub fn get_split_shard_index(split_keys: &[Vec<u8>], key: &[u8]) -> usize {
         }
     }
     split_keys.len()
+}
+
+/// Whether to clear the data of source and/or target regions on merge.
+///
+/// Merging regions of different keyspaces only happens when the keyspace(s)
+/// has been deleted. The validity of which was ensured by PD.
+///
+/// In this condition, we must clear the data of region in keyspace.
+///
+/// Otherwise, as SSTs in keyspace do not have prefix (when enable key
+/// offset), the merged SSTs will violate data correctness.
+pub fn need_clear_region_data_on_merge(
+    source_outer_start: &[u8],
+    target_outer_start: &[u8],
+) -> (bool /* clear_source */, bool /* clear_target */) {
+    let is_same_keyspace_merge =
+        ApiV2::is_belongs_to_same_keyspace(source_outer_start, target_outer_start);
+    let clear_region = |key: &[u8]| -> bool {
+        let key_mode = ApiV2::parse_key_mode(key);
+        let in_keyspace = key_mode == KeyMode::Txn || key_mode == KeyMode::Raw;
+        !is_same_keyspace_merge && in_keyspace
+    };
+    (
+        clear_region(source_outer_start),
+        clear_region(target_outer_start),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::iter::Iterator;
+
+    use super::*;
+
+    #[test]
+    fn test_need_clear_region_data_on_merge() {
+        let cases: Vec<(&[u8], &[u8], (bool, bool))> = vec![
+            // Txn
+            (
+                b"x0000",       // source_outer_start
+                b"x0001",       // target_outer_start
+                (false, false), // (clear_source, clear_target)
+            ),
+            (b"x0000", b"x0010", (true, true)),
+            // Raw
+            (b"r0000", b"r0001", (false, false)),
+            (b"r0000", b"r0010", (true, true)),
+            // Txn & Raw
+            (b"x0000", b"r0000", (true, true)),
+            // Txn & TiDB/Unknown
+            (b"x0000", b"t", (true, false)),
+            (b"t", b"x0000", (false, true)),
+            (b"x0000", b"m", (true, false)),
+            (b"m", b"x0000", (false, true)),
+            (b"x0000", b"", (true, false)),
+            (b"", b"x0000", (false, true)),
+            // TiDB/Unknown
+            (b"t", b"m", (false, false)),
+            (b"m", b"", (false, false)),
+            (b"", b"t", (false, false)),
+        ];
+
+        for (idx, (source_outer_start, target_outer_start, expected)) in
+            cases.into_iter().enumerate()
+        {
+            let res = need_clear_region_data_on_merge(source_outer_start, target_outer_start);
+            assert_eq!(res, expected, "case {}", idx);
+        }
+    }
 }

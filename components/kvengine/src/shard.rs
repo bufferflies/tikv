@@ -3,6 +3,7 @@
 use std::{
     cmp,
     collections::HashMap,
+    fmt,
     iter::Iterator,
     ops::Deref,
     sync::{
@@ -760,6 +761,11 @@ impl Shard {
         &[]
     }
 
+    /// Whether the shard is empty.
+    ///
+    /// NOTE: use with caution.
+    /// The empty status of shard is not reliable, as the applying to kvengine
+    /// would be late.
     pub(crate) fn is_empty(&self) -> bool {
         let data = self.get_data();
         if data.mem_tbls.iter().any(|mem_tbl| !mem_tbl.is_empty()) {
@@ -1585,6 +1591,22 @@ impl ShardRange {
 
     pub(crate) fn prefix(&self) -> &[u8] {
         &self.outer_start[..self.inner_key_off]
+    }
+}
+
+impl fmt::Debug for ShardRange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShardRange")
+            .field(
+                "outer_start",
+                &log_wrappers::hex_encode_upper(&self.outer_start),
+            )
+            .field(
+                "outer_end",
+                &log_wrappers::hex_encode_upper(&self.outer_end),
+            )
+            .field("inner_key_off", &self.inner_key_off)
+            .finish()
     }
 }
 

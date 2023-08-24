@@ -295,27 +295,31 @@ impl ApiV2 {
         start_key.to_vec()
     }
 
-    pub fn get_keyspace_prefix(key: &[u8]) -> Option<Vec<u8>> {
+    pub fn get_keyspace_prefix(key: &[u8]) -> Option<&[u8]> {
         let key_mode = ApiV2::parse_key_mode(key);
         if key_mode == KeyMode::Unknown || key_mode == KeyMode::Tidb {
             return None;
         }
-
-        let mut keyspace_prefix = Vec::with_capacity(KEYSPACE_PREFIX_LEN);
-        keyspace_prefix.extend_from_slice(&key[0..KEYSPACE_PREFIX_LEN]);
-        Some(keyspace_prefix)
+        Some(&key[0..KEYSPACE_PREFIX_LEN])
     }
 
+    /// Check whether two keys are in the same keyspace.
+    ///
+    /// For keys of ApiV2 (including Raw and Txn), they are in the same keyspace
+    /// only when the keyspace_id are equal.
+    ///
+    /// For keys of ApiV1 (including Unknown and TiDB), consider they are in the
+    /// same keyspace.
     pub fn is_belongs_to_same_keyspace(first_key: &[u8], second_key: &[u8]) -> bool {
-        if (ApiV2::parse_key_mode(first_key) == KeyMode::Txn
-            && ApiV2::parse_key_mode(second_key) == KeyMode::Txn)
-            || (ApiV2::parse_key_mode(first_key) == KeyMode::Raw
-                && ApiV2::parse_key_mode(second_key) == KeyMode::Raw)
-        {
-            ApiV2::get_keyspace_id(first_key) == ApiV2::get_keyspace_id(second_key)
-        } else {
-            // If both keys are not in ApiV2 mode, consider them as in the same keyspace.
-            ApiV2::parse_key_mode(first_key) == ApiV2::parse_key_mode(second_key)
+        match (
+            Self::get_keyspace_prefix(first_key),
+            Self::get_keyspace_prefix(second_key),
+        ) {
+            (Some(first_keyspace_prefix), Some(second_keyspace_prefix)) => {
+                first_keyspace_prefix == second_keyspace_prefix
+            }
+            (Some(_), None) | (None, Some(_)) => false,
+            (None, None) => true,
         }
     }
 
@@ -583,18 +587,20 @@ mod tests {
     #[test]
     fn test_is_belongs_to_same_keyspace() {
         let test_cases = vec![
-            (b"x001111".to_vec(), b"x001112".to_vec(), true),
+            (b"x001111".to_vec(), b"x001112".to_vec(), true), // Txn
             (b"x001".to_vec(), b"x0011".to_vec(), true),
             (b"x0011".to_vec(), b"x002".to_vec(), false),
-            (b"r0011".to_vec(), b"r0012".to_vec(), true),
+            (b"r0011".to_vec(), b"r0012".to_vec(), true), // Raw
             (b"r001".to_vec(), b"r0011".to_vec(), true),
             (b"r0011".to_vec(), b"r0021".to_vec(), false),
-            (b"x0011".to_vec(), b"r0011".to_vec(), false),
-            (b"x0011".to_vec(), b"00121".to_vec(), false),
+            (b"x0011".to_vec(), b"r0011".to_vec(), false), // Txn vs. Raw
+            (b"x0011".to_vec(), b"00121".to_vec(), false), // Txn/Raw vs. Unknown/TiDB
             (b"r0011".to_vec(), b"00121".to_vec(), false),
-            (b"01234".to_vec(), b"02345".to_vec(), true),
+            (b"01234".to_vec(), b"02345".to_vec(), true), // Unknown/TiDB
             (b"m1234".to_vec(), b"m2345".to_vec(), true),
             (b"m1234".to_vec(), b"t2345".to_vec(), true),
+            (b"01234".to_vec(), b"t1234".to_vec(), true),
+            (b"".to_vec(), b"t1234".to_vec(), true),
         ];
 
         for (i, (start, end, is_same)) in test_cases.into_iter().enumerate() {
