@@ -726,8 +726,12 @@ impl<'a> StoreMsgHandler<'a> {
             StoreMsg::Start { store } => self.start(store),
             StoreMsg::StoreUnreachable { store_id } => self.on_store_unreachable(store_id),
             StoreMsg::GenerateEngineChangeSet(cs) => self.on_generate_engine_meta_change(cs),
-            StoreMsg::RaftMessage(msg) => self.on_raft_message(msg),
+            StoreMsg::RaftMessage(msg) => {
+                tikv_util::set_current_region(msg.region_id);
+                self.on_raft_message(msg)
+            }
             StoreMsg::SnapshotReady(region_id) => {
+                tikv_util::set_current_region(region_id);
                 apply_region = self.on_snapshot_ready(region_id);
             }
             StoreMsg::GetRegionsInRange {
@@ -753,15 +757,19 @@ impl<'a> StoreMsgHandler<'a> {
                 self.on_sync_region_by_id(region_id, callback);
             }
             StoreMsg::ApplyResult { region_id, peer_id } => {
+                tikv_util::set_current_region(region_id);
                 apply_region = self.on_apply_result(region_id, peer_id);
             }
             StoreMsg::DependentsEmpty(region_id) => {
+                tikv_util::set_current_region(region_id);
                 self.on_dependents_empty(region_id);
             }
             StoreMsg::PrepareMerge { region_id, req } => {
+                tikv_util::set_current_region(region_id);
                 self.on_prepare_merge_request(region_id, req);
             }
             StoreMsg::CheckMerge(region_id) => {
+                tikv_util::set_current_region(region_id);
                 self.on_check_merge(region_id);
             }
             StoreMsg::Stop => {
