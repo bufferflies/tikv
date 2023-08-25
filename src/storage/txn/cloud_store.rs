@@ -115,6 +115,8 @@ impl<S: Snapshot> CloudStore<S> {
         bypass_locks: &TsSet,
         statistics: &mut Statistics,
     ) -> mvcc::Result<Item<'a>> {
+        tikv_util::set_current_region(snap.get_id());
+
         let raw_key = user_key.to_raw()?;
         let item = snap.get(LOCK_CF, &raw_key, 0);
         statistics.lock.get += 1;
@@ -132,7 +134,7 @@ impl<S: Snapshot> CloudStore<S> {
             )?;
         }
         if snap.get_start_key() > raw_key.as_slice() || snap.get_end_key() <= raw_key.as_slice() {
-            panic!(
+            error!(
                 "get key {:?} out of snap range {:?}, {:?}, {}:{}",
                 raw_key.as_slice(),
                 snap.get_start_key(),
@@ -140,6 +142,7 @@ impl<S: Snapshot> CloudStore<S> {
                 snap.get_id(),
                 snap.get_version()
             );
+            return Ok(Item::default());
         }
         let item = snap.get(WRITE_CF, &raw_key, start_ts);
         statistics.write.get += 1;
@@ -177,6 +180,7 @@ impl<S: Snapshot> CloudStore<S> {
         upper_bound: Option<Key>,
         output_delete: bool,
     ) -> Result<CloudStoreScanner> {
+        tikv_util::set_current_region(self.snapshot.get_id());
         CloudStoreScanner::new(
             self.snapshot.clone(),
             desc,

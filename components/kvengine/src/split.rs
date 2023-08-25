@@ -290,7 +290,7 @@ impl Engine {
             max(source_mem_tbl_version, target_mem_tbl_version) - sequence,
         );
 
-        if !clear_source {
+        let data = if !clear_source {
             if clear_target {
                 // `inner_key_off` will be different when merge regions of different keyspaces.
                 new_shard.range.inner_key_off = source_snap.inner_key_off as usize;
@@ -350,24 +350,34 @@ impl Engine {
             for (&id, tbl) in old_data.unloaded_tbls.iter() {
                 unloaded_tbls.insert(id, tbl.clone());
             }
-            let data = ShardData::new(
+            ShardData::new(
                 new_shard.range.clone(),
                 mem_tbls,
                 l0_tbls,
                 Arc::new(blob_tbl_map),
                 new_cfs,
                 unloaded_tbls,
-            );
-
-            new_shard.set_data(data);
+            )
         } else {
             info!(
-                "{} clear data of source shard on merge, source start: {:x?}, end: {:x?}",
+                "{} clear data of source shard on merge, source start: {}, end: {}",
                 old_shard.tag(),
-                source_snap.outer_start,
-                source_snap.outer_end,
+                log_wrappers::hex_encode_upper(&source_snap.outer_start),
+                &log_wrappers::hex_encode_upper(&source_snap.outer_end),
             );
+
+            let old_data = old_shard.get_data();
+            ShardData::new(
+                new_shard.range.clone(),
+                old_data.mem_tbls.clone(),
+                old_data.l0_tbls.clone(),
+                old_data.blob_tbl_map.clone(),
+                old_data.cfs.clone(),
+                old_data.unloaded_tbls.clone(),
+            )
         };
+        new_shard.set_data(data);
+        debug_assert_eq!(new_shard.range, new_shard.get_data().range);
 
         new_shard.parent_id = shard_id;
         {

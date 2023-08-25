@@ -1557,7 +1557,7 @@ pub(crate) fn need_update_truncate_ts(cur: Option<TruncateTs>, new: TruncateTs) 
     new <= cur.unwrap()
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq)]
 pub struct ShardRange {
     pub outer_start: Bytes,
     pub outer_end: Bytes,

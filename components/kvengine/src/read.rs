@@ -60,6 +60,12 @@ impl Item<'_> {
     }
 }
 
+impl Default for Item<'_> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Default, Debug, Clone, Copy)]
 pub struct AccessPath {
     pub mem_table: u8,
