@@ -970,6 +970,7 @@ where
                     ).await;
                     match res {
                         Ok(stat) => {
+                            fail_point!("snapshot_delete_after_send");
                             snap_mgr.delete_snapshot(&stat.key);
                             info!(
                                 "sent snapshot";

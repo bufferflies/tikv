@@ -814,6 +814,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         ctx: &mut StoreContext<EK, ER, T>,
         write_task: &mut WriteTask<EK, ER>,
     ) {
+        fail::fail_point!("destroy_peer_after_pending_move", |_| {});
         if self.postponed_destroy() {
             return;
         }

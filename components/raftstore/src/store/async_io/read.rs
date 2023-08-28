@@ -121,6 +121,7 @@ impl<EK: KvEngine, ER: RaftEngine, N: AsyncReadNotifier> ReadRunner<EK, ER, N> {
     }
 
     fn generate_snap(&self, snap_key: &TabletSnapKey, tablet: EK) -> crate::Result<()> {
+        fail_point!("snapshot_enter_do_build");
         let checkpointer_path = self.snap_mgr().tablet_gen_path(snap_key);
         if checkpointer_path.exists() {
             // TODO: make `delete_snapshot` return error so we can use it here.

@@ -221,6 +221,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
     }
 
     pub fn on_snapshot_generated(&mut self, snapshot: GenSnapRes) {
+        fail_point!("region_gen_snap", self.region_id() == 1, |_| {});
         let commit_index = self.raft_group().raft.raft_log.committed;
         if self
             .storage_mut()
@@ -256,6 +257,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
     }
 
     pub fn on_applied_snapshot<T: Transport>(&mut self, ctx: &mut StoreContext<EK, ER, T>) {
+        fail_point!("apply_pending_snapshot", |_| {});
         ctx.coprocessor_host.on_region_changed(
             self.region(),
             RegionChangeEvent::Create,
@@ -744,6 +746,7 @@ impl<EK: KvEngine, ER: RaftEngine> Storage<EK, ER> {
         let key_manager = snap_mgr.key_manager().clone();
         let hook = move || {
             fail::fail_point!("region_apply_snap");
+            fail_point!("skip_schedule_applying_snapshot", |_| {});
             if !install_tablet(&reg, key_manager.as_deref(), &path, region_id, last_index) {
                 slog_panic!(
                     logger,

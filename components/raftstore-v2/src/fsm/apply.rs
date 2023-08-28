@@ -143,6 +143,14 @@ impl<EK: KvEngine, R: ApplyResReporter> ApplyFsm<EK, R> {
             };
             loop {
                 fail_point!("before_handle_tasks");
+                let fp=(||{
+                    fail_point!("before_handle_normal_3", self.apply.region_id() == 3, |_| {true});
+                    fail_point!("before_handle_normal_1003", self.apply.region_id() == 1003, |_| {true});
+                    false
+                })();
+                if fp{
+                    break;
+                }
                 match task {
                     // TODO: flush by buffer size.
                     ApplyTask::CommittedEntries(ce) => self.apply.apply_committed_entries(ce).await,

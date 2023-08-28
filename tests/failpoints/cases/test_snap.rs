@@ -18,7 +18,8 @@ use test_raftstore::*;
 use test_raftstore_macro::test_case;
 use tikv_util::{config::*, time::Instant, HandyRwLock};
 
-#[test]
+#[test_case(test_raftstore::new_node_cluster)]
+#[test_case(test_raftstore_v2::new_node_cluster)]
 fn test_overlap_cleanup() {
     let mut cluster = new_node_cluster(0, 3);
     // Disable raft log gc in this test case.
@@ -60,7 +61,9 @@ fn test_overlap_cleanup() {
 // progress if it's in Snapshot state. So trying to send a snapshot
 // when the address is being resolved will leave follower's progress
 // stay in Snapshot forever.
-#[test]
+// #[test]
+#[test_case(test_raftstore::new_server_cluster)]
+#[test_case(test_raftstore_v2::new_server_cluster)]
 fn test_server_snapshot_on_resolve_failure() {
     let mut cluster = new_server_cluster(1, 2);
     configure_for_snapshot(&mut cluster.cfg);
@@ -100,7 +103,8 @@ fn test_server_snapshot_on_resolve_failure() {
     notify_rx.recv_timeout(Duration::from_secs(3)).unwrap();
 }
 
-#[test]
+#[test_case(test_raftstore::new_server_cluster)]
+#[test_case(test_raftstore_v2::new_server_cluster)]
 fn test_generate_snapshot() {
     let mut cluster = new_server_cluster(1, 5);
     cluster.cfg.raft_store.raft_log_gc_tick_interval = ReadableDuration::millis(20);
@@ -193,7 +197,8 @@ fn assert_snapshot(snap_dir: &str, region_id: u64, exist: bool) {
 // destroyed because of a bigger peer id in msg. In previous implementation,
 // peer fsm can be destroyed synchronously because snapshot state is pending and
 // can be canceled, but panic may happen if the applyfsm runs very slow.
-#[test]
+#[test_case(test_raftstore::new_server_cluster)]
+#[test_case(test_raftstore_v2::new_server_cluster)]
 fn test_destroy_peer_on_pending_snapshot() {
     let mut cluster = new_server_cluster(0, 3);
     configure_for_snapshot(&mut cluster.cfg);
@@ -259,7 +264,8 @@ fn test_destroy_peer_on_pending_snapshot() {
 // either), the machine restarted. After the restart, the snapshot should be
 // applied successfully.println! And new data should be written to store 3
 // successfully.
-#[test]
+#[test_case(test_raftstore::new_server_cluster)]
+#[test_case(test_raftstore_v2::new_server_cluster)]
 fn test_destroy_peer_on_pending_snapshot_and_restart() {
     let mut cluster = new_server_cluster(0, 3);
     configure_for_snapshot(&mut cluster.cfg);
@@ -340,7 +346,8 @@ fn test_destroy_peer_on_pending_snapshot_and_restart() {
     must_get_equal(&cluster.get_engine(3), b"k120", b"v1");
 }
 
-#[test]
+#[test_case(test_raftstore::new_server_cluster)]
+#[test_case(test_raftstore_v2::new_server_cluster)]
 fn test_shutdown_when_snap_gc() {
     let mut cluster = new_node_cluster(0, 2);
     // So that batch system can handle a snap_gc event before shutting down.
