@@ -45,16 +45,17 @@ impl Deref for L0Table {
 }
 
 impl L0Table {
+    /// Would return `None` only when `ignore_lock` is `true`.
     pub fn new(
         file: Arc<dyn File>,
         cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
         ignore_lock: bool,
         encryption_key: Option<EncryptionKey>,
-    ) -> Result<Self> {
+    ) -> Result<Option<Self>> {
         let core = L0TableCore::new(file, cache, ignore_lock, encryption_key)?;
-        Ok(Self {
+        Ok(core.map(|core| Self {
             core: Arc::new(core),
-        })
+        }))
     }
 }
 
@@ -76,7 +77,7 @@ impl L0TableCore {
         cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
         ignore_lock: bool,
         encryption_key: Option<EncryptionKey>,
-    ) -> Result<Self> {
+    ) -> Result<Option<Self>> {
         let footer_off = file.size() - L0_FOOTER_SIZE as u64;
         let mut footer = L0Footer::default();
         let footer_buf = file.read(footer_off, L0_FOOTER_SIZE)?;
@@ -113,9 +114,17 @@ impl L0TableCore {
 
             cfs[i] = Some(tbl)
         }
+
+        if cfs.iter().all(|t| t.is_none()) {
+            // All CFs are empty only when `ignore_lock` is `true` and only `LOCK_CF` has
+            // data.
+            debug_assert!(ignore_lock);
+            return Ok(None);
+        }
+
         let (smallest, biggest, max_ts) = Self::compute_smallest_biggest(&cfs);
         let total_blob_size = Self::compute_total_blob_size(&cfs);
-        Ok(Self {
+        Ok(Some(Self {
             footer,
             file,
             cfs,
@@ -125,7 +134,7 @@ impl L0TableCore {
             smallest,
             biggest,
             total_blob_size,
-        })
+        }))
     }
 
     // Return: smallest, biggest, max_ts

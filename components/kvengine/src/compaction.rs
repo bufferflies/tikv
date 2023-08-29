@@ -1476,7 +1476,11 @@ fn in_mem_files_to_l0_tables(
 ) -> Vec<sstable::L0Table> {
     files
         .into_iter()
-        .map(|f| sstable::L0Table::new(Arc::new(f), None, false, encryption_key.clone()).unwrap())
+        .map(|f| {
+            sstable::L0Table::new(Arc::new(f), None, false, encryption_key.clone())
+                .unwrap()
+                .unwrap()
+        })
         .collect()
 }
 
@@ -2104,6 +2108,7 @@ fn compact_destroy_range(
         let file = in_mem_files.remove(&id).unwrap();
         let (data, smallest, biggest) = if level == 0 {
             let t = sstable::L0Table::new(Arc::new(file), None, false, ctx.encryption_key.clone())
+                .unwrap()
                 .unwrap();
             let mut builder =
                 L0Builder::new(new_id, block_size, t.version(), ctx.encryption_key.clone());
@@ -2222,6 +2227,7 @@ fn compact_truncate_ts(
 
         let (data, smallest, biggest) = if level == 0 {
             let t = sstable::L0Table::new(Arc::new(file), None, false, ctx.encryption_key.clone())
+                .unwrap()
                 .unwrap();
             let mut builder =
                 L0Builder::new(new_id, block_size, t.version(), ctx.encryption_key.clone());
@@ -2344,6 +2350,7 @@ fn compact_trim_over_bound(
 
         let (data, smallest, biggest) = if level == 0 {
             let t = sstable::L0Table::new(Arc::new(file), None, false, ctx.encryption_key.clone())
+                .unwrap()
                 .unwrap();
             let mut builder =
                 L0Builder::new(new_id, block_size, t.version(), ctx.encryption_key.clone());

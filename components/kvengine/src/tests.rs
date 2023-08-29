@@ -24,7 +24,7 @@ use crate::{
     dfs::InMemFs,
     table::{
         memtable::CfTable,
-        sstable::{InMemFile, SsTable},
+        sstable::{File, InMemFile, L0Builder, L0Table, SsTable},
         InnerKey, BIT_DELETE,
     },
     *,
@@ -1186,6 +1186,28 @@ fn test_refresh_stats() {
     assert_eq!(load_u64(&shard.entries_write_cf), 120); // WRITE_CF only
 }
 
+#[test]
+fn test_l0table_ignore_lock() {
+    init_logger();
+    let (engine, _) = new_test_engine();
+    let file = new_l0table_file(
+        &engine,
+        1,
+        [0, 0, 0],
+        [0, 100, 0],
+        100,
+        [false, false, false],
+    );
+
+    let l0table = L0Table::new(file.clone(), None, false, None).unwrap();
+    assert!(l0table.is_some());
+
+    // l0table would be none when `ignore_lock` is true and only LOCK_CF has data.
+    // See https://github.com/tidbcloud/cloud-storage-engine/issues/1026.
+    let l0table_ignore_lock = L0Table::new(file, None, true, None).unwrap();
+    assert!(l0table_ignore_lock.is_none());
+}
+
 #[derive(Clone)]
 struct TestMetaChangeListener {
     sender: mpsc::Sender<pb::ChangeSet>,
@@ -1527,6 +1549,36 @@ fn new_table(
     runtime.block_on(fs.create(id, data.clone(), opts)).unwrap();
     let file = InMemFile::new(id, data);
     SsTable::new(Arc::new(file), None, true, None).unwrap()
+}
+
+fn new_l0table_file(
+    engine: &Engine,
+    id: u64,
+    begin: [usize; NUM_CFS],
+    end: [usize; NUM_CFS],
+    version: u64,
+    del: [bool; NUM_CFS],
+) -> Arc<dyn File> {
+    let block_size = engine.opts.table_builder_options.block_size;
+    let fs = engine.fs.clone();
+
+    let mut builder = L0Builder::new(id, block_size, version, None);
+    for cf in 0..NUM_CFS {
+        for i in begin[cf]..end[cf] {
+            let key = i_to_key(i as i32, 0);
+            let val = if del[cf] {
+                table::Value::new_with_meta_version(BIT_DELETE, version, 0, &[])
+            } else {
+                table::Value::new_with_meta_version(0, version, 0, key.repeat(2).as_bytes())
+            };
+            builder.add(cf, InnerKey::from_inner_buf(key.as_bytes()), &val, None);
+        }
+    }
+    let data = builder.finish();
+    let opts = dfs::Options::new(1, 1);
+    let runtime = fs.get_runtime();
+    runtime.block_on(fs.create(id, data.clone(), opts)).unwrap();
+    Arc::new(InMemFile::new(id, data))
 }
 
 fn load_data(

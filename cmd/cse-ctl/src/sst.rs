@@ -56,7 +56,7 @@ pub fn execute_show_sst(args: ShowSstArgs) {
         .unwrap();
     let file = Arc::new(InMemFile::new(args.id, data));
     if args.level == 0 {
-        let l0 = L0Table::new(file, None, false, None).unwrap();
+        let l0 = L0Table::new(file, None, false, None).unwrap().unwrap();
         println!("[SST {}, level {}]", l0.id(), 0);
         println!("  size: {}", l0.size());
         println!("  max_ts: {}", l0.max_ts());

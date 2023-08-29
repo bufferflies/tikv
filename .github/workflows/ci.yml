@@ -45,7 +45,7 @@ jobs:
       - name: Check format
         working-directory: ./
         run: |
-          cargo install -q cargo-sort
+          cargo install -q cargo-sort --locked
           cargo fmt --check
           cargo sort -w ./Cargo.toml ./*/Cargo.toml components/*/Cargo.toml cmd/*/Cargo.toml --check
       - name: Run clippy

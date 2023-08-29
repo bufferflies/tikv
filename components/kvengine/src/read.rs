@@ -255,7 +255,9 @@ impl SnapAccessCore {
                         let l0_table =
                             L0Table::new(Arc::new(file), None, ignore_lock, encryption_key.clone())
                                 .unwrap();
-                        cs.l0_tables.insert(id, l0_table);
+                        if let Some(l0_table) = l0_table {
+                            cs.l0_tables.insert(id, l0_table);
+                        }
                     } else {
                         let ln_table =
                             SsTable::new(Arc::new(file), None, level == 1, encryption_key.clone())

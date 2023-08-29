@@ -70,7 +70,7 @@ impl ChangeSet {
             self.blob_tables.insert(id, blob_table);
         } else if level == 0 {
             let l0_table = L0Table::new(Arc::new(file), Some(cache), false, encryption_key)?;
-            self.l0_tables.insert(id, l0_table);
+            self.l0_tables.insert(id, l0_table.unwrap());
         } else {
             let ln_table = SsTable::new(Arc::new(file), Some(cache), level == 1, encryption_key)?;
             self.ln_tables.insert(id, ln_table);
