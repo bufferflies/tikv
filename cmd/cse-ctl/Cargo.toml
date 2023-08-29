@@ -19,6 +19,7 @@ hyper = "0.14"
 kvengine = { workspace = true }
 kvenginepb = { workspace = true }
 kvproto = { git = "https://github.com/pingcap/kvproto.git" }
+log_wrappers = { workspace = true }
 native_br = { workspace = true }
 pd_client = { workspace = true }
 protobuf = "2.8"

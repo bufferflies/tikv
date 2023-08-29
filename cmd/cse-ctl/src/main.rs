@@ -7,6 +7,7 @@ mod backup;
 mod check_table;
 mod dfsgc;
 mod restore;
+mod sst;
 mod truncate_ts;
 mod unsafe_recover;
 
@@ -20,6 +21,7 @@ use crate::{
     check_table::{execute_check_table, CheckTableArgs},
     dfsgc::{execute_dfsgc, DfsGcArgs},
     restore::{execute_restore_command, RestoreCommand},
+    sst::{execute_show_sst, ShowSstArgs},
     truncate_ts::{execute_truncate_ts, TruncateTsArgs},
     unsafe_recover::{execute_unsafe_recover, UnsafeRecoverArgs},
     Commands::*,
@@ -120,12 +122,16 @@ pub struct ShowArgs {
 enum ShowCommands {
     /// Show the backup meta data.
     Backup(ShowBackupArgs),
+    Sst(ShowSstArgs),
 }
 
 fn execute_show(args: ShowArgs) {
     match args.command {
         ShowCommands::Backup(args) => {
             execute_show_backup(args);
+        }
+        ShowCommands::Sst(args) => {
+            execute_show_sst(args);
         }
     }
 }

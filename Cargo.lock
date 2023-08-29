@@ -1655,6 +1655,7 @@ dependencies = [
  "kvengine",
  "kvenginepb",
  "kvproto",
+ "log_wrappers",
  "native_br",
  "pd_client",
  "protobuf",

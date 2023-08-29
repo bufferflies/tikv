@@ -549,6 +549,10 @@ impl SsTableCore {
     pub fn total_blob_size(&self) -> u64 {
         self.in_use_total_blob_size
     }
+
+    pub fn encryption_ver(&self) -> u32 {
+        self.encryption_ver
+    }
 }
 
 #[derive(Clone)]
