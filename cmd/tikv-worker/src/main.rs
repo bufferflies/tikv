@@ -581,8 +581,6 @@ pub struct Config {
     pub native_br: NativeBrConfig,
     pub cop_addr: String,
     pub cop_cache_size: ReadableSize,
-    // The time-to-live when restore task has been in final state.
-    pub restore_task_ttl: ReadableDuration,
     pub worker_scaler: WorkerScalerConfig,
 }
 
@@ -603,7 +601,6 @@ impl Default for Config {
             native_br: NativeBrConfig::default(),
             cop_addr: String::from("0.0.0.0:9500"),
             cop_cache_size: ReadableSize::gb(1),
-            restore_task_ttl: ReadableDuration::minutes(10),
             worker_scaler: WorkerScalerConfig::default(),
         }
     }

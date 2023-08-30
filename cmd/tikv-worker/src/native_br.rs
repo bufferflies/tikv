@@ -24,7 +24,7 @@ use native_br::{
 use pd_client::PdClient;
 use serde::Deserialize;
 use tikv::storage::mvcc::TimeStamp;
-use tikv_util::{debug, error, info, time::Instant, HandyRwLock};
+use tikv_util::{config::ReadableDuration, debug, error, info, time::Instant, HandyRwLock};
 use tokio::runtime::Runtime;
 
 use crate::{
@@ -907,11 +907,22 @@ impl WhiteList {
     }
 }
 
-#[derive(Clone, Default, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
 pub struct NativeBrConfig {
     whitelist: WhiteList,
+    // The time-to-live when restore task has been in final state.
+    restore_task_ttl: ReadableDuration,
+}
+
+impl Default for NativeBrConfig {
+    fn default() -> Self {
+        Self {
+            whitelist: WhiteList::default(),
+            restore_task_ttl: ReadableDuration::minutes(60),
+        }
+    }
 }
 
 pub(crate) struct NativeBrManager {
@@ -1070,7 +1081,7 @@ impl NativeBrManager {
     }
 
     pub fn cleanup_expired_restores(&self) {
-        let ttl = self.config.rl().restore_task_ttl.0;
+        let ttl = self.config.rl().native_br.restore_task_ttl.0;
         let restores = {
             let tasks = self.context.restore_tasks.rl();
             tasks
@@ -1195,7 +1206,10 @@ mod tests {
             s3fs,
             None,
             Config {
-                restore_task_ttl: ReadableDuration::from_str(restore_task_ttl).unwrap(),
+                native_br: NativeBrConfig {
+                    restore_task_ttl: ReadableDuration::from_str(restore_task_ttl).unwrap(),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
         )
