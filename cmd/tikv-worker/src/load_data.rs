@@ -5,6 +5,7 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use bytes::Bytes;
 use cloud_encryption::MasterKey;
 use http::{header, Method, Response, StatusCode};
+use hyper::Body;
 use kvengine::{
     dfs,
     table::sstable::{LZ4_COMPRESSION, NO_COMPRESSION, ZSTD_COMPRESSION},
@@ -15,7 +16,10 @@ use load_data::task::{
 };
 use pd_client::PdClient;
 
-use crate::common::{get_body, get_u64_param, make_response};
+use crate::{
+    common::{get_body, get_u64_param, make_response},
+    worker_scaler::{WorkerScaler, WorkerScalerConfig},
+};
 
 pub(crate) const MAX_IN_MEM_SIZE: usize = 256 * 1024 * 1024;
 
@@ -48,10 +52,14 @@ pub(crate) async fn handle_load_data(
     let query = req.uri().query().unwrap_or("");
     let query_pairs: HashMap<_, _> = url::form_urlencoded::parse(query.as_bytes()).collect();
     let cluster_id = get_u64_param(&query_pairs, "cluster_id").unwrap_or_default();
-    if cluster_id != manager.ctx.pd.get_cluster_id().unwrap() {
+    let pd_cluster_id = manager.ctx.pd.get_cluster_id().unwrap();
+    if cluster_id != pd_cluster_id {
         return Ok(make_response(
             StatusCode::BAD_REQUEST,
-            "cluster id mismatch",
+            format!(
+                "cluster id mismatch, got {}, expected {}",
+                cluster_id, pd_cluster_id
+            ),
         ));
     }
     let start_ts = get_u64_param(&query_pairs, "start_ts").unwrap_or_default();
@@ -105,6 +113,44 @@ pub(crate) async fn handle_load_data(
                 Ok(make_response(StatusCode::BAD_REQUEST, "task exists"))
             } else {
                 let commit_ts = get_u64_param(&query_pairs, "commit_ts").unwrap_or_default();
+                let data_size = get_u64_param(&query_pairs, "data_size").unwrap_or_default();
+                if data_size > manager.worker_scaler_conf.max_size.0 {
+                    return Ok(make_response(
+                        StatusCode::BAD_REQUEST,
+                        format!(
+                            "data size {} exceeds max data size {}",
+                            data_size, manager.worker_scaler_conf.max_size.0
+                        ),
+                    ));
+                }
+                let spawn_load_data_worker = manager.worker_scaler.is_some()
+                    && (data_size > manager.worker_scaler_conf.spawn_data_size.0
+                        || manager.running_tasks.len()
+                            > manager.worker_scaler_conf.spawn_running_tasks);
+                if spawn_load_data_worker {
+                    let worker_scaler = manager.worker_scaler.as_ref().unwrap();
+                    let data_size_gb = data_size / 1024 / 1024 / 1024;
+                    let worker_pod_res = worker_scaler
+                        .create_worker(start_ts, data_size_gb as usize)
+                        .await;
+                    match worker_pod_res {
+                        Ok(worker_pod) => {
+                            let worker_addr = worker_scaler.get_worker_addr(&worker_pod).unwrap();
+                            let resp = Response::builder()
+                                .header("Location", worker_addr)
+                                .status(StatusCode::FOUND)
+                                .body(Body::empty())
+                                .unwrap();
+                            return Ok(resp);
+                        }
+                        Err(err) => {
+                            return Ok(make_response(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                format!("{:?}", err),
+                            ));
+                        }
+                    }
+                }
                 let task_ctx = TaskContext {
                     start_ts,
                     commit_ts,
@@ -146,6 +192,8 @@ pub(crate) struct LoadDataManager {
     running_tasks: Arc<dashmap::DashMap<u64, LoadTaskScheduler>>,
     config: LoadDataConfig,
     ctx: LoadDataContext,
+    worker_scaler: Option<WorkerScaler>,
+    worker_scaler_conf: WorkerScalerConfig,
 }
 
 impl LoadDataManager {
@@ -156,6 +204,8 @@ impl LoadDataManager {
         runtime: Arc<tokio::runtime::Runtime>,
         max_in_mem_size: usize,
         master_key: MasterKey,
+        worker_scaler: Option<WorkerScaler>,
+        worker_scaler_conf: WorkerScalerConfig,
     ) -> Self {
         let config = LoadDataConfig::default();
         let context = LoadDataContext {
@@ -170,6 +220,8 @@ impl LoadDataManager {
             running_tasks: Arc::new(dashmap::DashMap::default()),
             config,
             ctx: context,
+            worker_scaler,
+            worker_scaler_conf,
         }
     }
 

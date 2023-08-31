@@ -1,29 +1,52 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    collections::{HashMap, VecDeque},
+    cmp::{max, min},
+    collections::{hash_map::Entry, HashMap},
     default::Default,
     fs,
+    ops::Deref,
     str::FromStr,
+    sync::Arc,
     time::Duration,
 };
 
-use async_trait::async_trait;
 use futures::StreamExt;
 use http::Uri;
 use hyper::client::HttpConnector;
 use k8s_openapi::{
-    api::{apps::v1::Deployment, core::v1::Pod},
+    api::{
+        apps::v1::StatefulSet,
+        core::v1::{EnvVar, PersistentVolumeClaim, Pod},
+    },
     serde_json,
 };
 use kube::{
-    api::{Api, AttachParams, AttachedProcess, ListParams, Patch, PatchParams, ResourceExt},
-    Client as KubeClient, Resource,
+    api::{Api, AttachParams, AttachedProcess, ListParams, PostParams, ResourceExt},
+    Client as KubeClient,
 };
-use tikv_util::{error, info};
+use load_data::task::LoadTaskStates;
+use serde_json::json;
+use tikv_util::{box_err, config::ReadableSize, error, info, time::Instant, warn};
+use tokio::sync::Mutex;
 
-const WORKER_SCALE_OUT_SAMPLES: usize = 3;
-const WORKER_SCALE_IN_SAMPLES: usize = 30;
+const CLEAN_UP_WORKER_TICK_INTERVAL: u64 = 30;
+const WORKER_MIN_STORAGE_GB: usize = 64;
+const DEFAULT_LOAD_DATA_WORKER_NAME: &str = "load-data-worker";
+const DEFAULT_LOAD_DATA_WORKER_PORT: u16 = 19500;
+const DEFAULT_MAX_SIZE: ReadableSize = ReadableSize::gb(1024);
+const DEFAULT_SPAWN_DATA_SIZE: ReadableSize = ReadableSize::gb(2);
+const DEFAULT_SPAWN_RUNNING_TASKS: usize = 2;
+const DEFAULT_WORKER_MAX_CORES: usize = 8;
+const DEFAULT_EXPIRE_SECONDS: i64 = 60 * 10;
+const DEFAULT_NAMESPACE: &str = "tidb-serverless";
+const DEFAULT_TEMPLATE_STS_NAME: &str = "tikv-api";
+const DEFAULT_WORKER_COUNT_LIMIT: usize = 1024;
+
+const K8S_LABEL_NAME: &str = "app.kubernetes.io/name";
+const K8S_NAMESPACE_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/namespace";
+
+pub const LOAD_DATA_WORKER_ENV: &str = "TIKV_LOAD_DATA_WORKER";
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 #[serde(default)]
@@ -31,353 +54,522 @@ const WORKER_SCALE_IN_SAMPLES: usize = 30;
 pub struct WorkerScalerConfig {
     pub run: bool,
     pub namespace: String,
-    pub label: String,
+    pub template_sts_name: String,
+    pub name: String,
     pub worker_port: u16,
-    pub cpu_max_ratio: f64,
-    pub cpu_min_ratio: f64,
-    pub sample_interval: f64,
-    pub max_replicas: usize,
-    pub min_replicas: usize,
+    pub max_size: ReadableSize,
+    pub spawn_data_size: ReadableSize,
+    pub spawn_running_tasks: usize,
+    pub worker_max_cores: usize,
+    pub expire_seconds: i64,
+    pub worker_count_limit: usize,
 }
 
 impl Default for WorkerScalerConfig {
     fn default() -> Self {
         Self {
             run: false,
-            namespace: "tidb-serverless".to_string(),
-            label: "app.kubernetes.io/name=tikv-worker".to_string(),
-            worker_port: 19000,
-            cpu_max_ratio: 0.6,
-            cpu_min_ratio: 0.4,
-            sample_interval: 10.0,
-            max_replicas: 64,
-            min_replicas: 1,
+            namespace: DEFAULT_NAMESPACE.to_string(),
+            template_sts_name: DEFAULT_TEMPLATE_STS_NAME.to_string(),
+            name: DEFAULT_LOAD_DATA_WORKER_NAME.to_string(),
+            worker_port: DEFAULT_LOAD_DATA_WORKER_PORT,
+            max_size: DEFAULT_MAX_SIZE,
+            spawn_data_size: DEFAULT_SPAWN_DATA_SIZE,
+            spawn_running_tasks: DEFAULT_SPAWN_RUNNING_TASKS,
+            worker_max_cores: DEFAULT_WORKER_MAX_CORES,
+            expire_seconds: DEFAULT_EXPIRE_SECONDS,
+            worker_count_limit: DEFAULT_WORKER_COUNT_LIMIT,
         }
     }
 }
 
-pub(crate) async fn new_worker_scaler(cfg: &WorkerScalerConfig) -> kube::Result<WorkerScaler> {
-    let kube_client = KubeClient::try_default().await?;
-    let pods: Api<Pod> = Api::namespaced(kube_client.clone(), &cfg.namespace);
-    let worker_pods = WorkerPods::new(pods, cfg);
-    let deploy: Api<Deployment> = Api::namespaced(kube_client.clone(), &cfg.namespace);
-    let worker_deploy = WorkerDeploy::new(deploy);
-    let worker_scaler =
-        WorkerScaler::new(cfg, Box::new(worker_pods), Box::new(worker_deploy)).await?;
-    Ok(worker_scaler)
+impl WorkerScalerConfig {
+    fn label_selector(&self) -> String {
+        format!("{}={}", K8S_LABEL_NAME, self.name)
+    }
 }
 
-pub struct WorkerScaler {
-    pods: Box<dyn WorkerPodsApi>,
-    deploy: Box<dyn WorkerDeployApi>,
+#[derive(Clone)]
+pub(crate) struct WorkerScaler {
+    core: Arc<WorkerScalerCore>,
+}
+
+impl Deref for WorkerScaler {
+    type Target = WorkerScalerCore;
+
+    fn deref(&self) -> &Self::Target {
+        &self.core
+    }
+}
+
+pub(crate) struct WorkerScalerCore {
+    sts_template: StatefulSet,
+    sts_api: Api<StatefulSet>,
+    pvc_api: Api<PersistentVolumeClaim>,
+    pod_api: Api<Pod>,
     config: WorkerScalerConfig,
-    cpu_usages: HashMap<String, f64>, // (pod_name, cpu_seconds_accumulated)
-    cpu_delta_samples: VecDeque<(f64, usize)>, // (cpu_seconds_delta, replicas)
-    current_replicas: usize,
+    pvc_template_name: String,
+    cluster_id: u64,
+    in_k8s: bool,
+    http_client: hyper::Client<HttpConnector>,
+    pods_map: Mutex<HashMap<u64, WorkerPod>>, // task_id -> WorkerPod
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct WorkerPod {
+    name: String,
+    started_at: i64,
+    updated_at: i64,
+    ip: Option<String>,
+    canceled: bool,
+    finished_at: i64,
+    flushed_files: usize,
+    created_files: usize,
+    ingested_regions: usize,
+}
+
+impl WorkerPod {
+    fn new(pod: &Pod) -> Self {
+        let mut worker_pod = Self::default();
+        worker_pod.name = pod.name_any();
+        if let Some(status) = &pod.status {
+            if let Some(start) = &status.start_time {
+                worker_pod.started_at = start.0.timestamp();
+                worker_pod.updated_at = start.0.timestamp();
+            }
+            worker_pod.ip = status.pod_ip.clone();
+        }
+        worker_pod
+    }
+
+    fn update_task_states(
+        &mut self,
+        tasks: Option<Vec<LoadTaskStates>>,
+        now_timestamp: i64,
+        expire_seconds: i64,
+    ) {
+        if self.started_at > 0 {
+            let start_duration_secs = now_timestamp - self.started_at;
+            if start_duration_secs < expire_seconds {
+                return;
+            }
+        }
+        if let Some(tasks) = tasks {
+            if tasks.is_empty() {
+                // the task is cleaned up by client and GCed by the load data worker.
+                self.canceled = true;
+            } else {
+                let task = &tasks[0];
+                if task.canceled {
+                    // the task is cleaned up by client.
+                    self.canceled = true;
+                }
+                if task.finished && self.finished_at == 0 {
+                    self.finished_at = now_timestamp;
+                }
+                if self.flushed_files != task.flushed_files
+                    || self.created_files != task.created_files
+                    || self.ingested_regions != task.ingested_regions
+                {
+                    self.flushed_files = task.flushed_files;
+                    self.created_files = task.created_files;
+                    self.ingested_regions = task.ingested_regions;
+                    self.updated_at = now_timestamp;
+                }
+            }
+        } else {
+            warn!("failed get pod {} task states", self.name);
+            self.canceled = true;
+        }
+        if self.finished_at > 0 {
+            let finished_duration = now_timestamp - self.finished_at;
+            if finished_duration > expire_seconds {
+                // The client finished the task but failed to explicit clean up.
+                self.canceled = true;
+            }
+        } else {
+            let updated_duration = now_timestamp - self.updated_at;
+            if updated_duration > expire_seconds {
+                // The client didn't finish the task and no progress for a long time.
+                self.canceled = true;
+            }
+        }
+    }
 }
 
 impl WorkerScaler {
-    pub(crate) async fn new(
-        cfg: &WorkerScalerConfig,
-        pods: Box<dyn WorkerPodsApi>,
-        deploy: Box<dyn WorkerDeployApi>,
-    ) -> kube::Result<Self> {
-        let current_replicas = deploy.get_replica().await?;
-        Ok(Self {
-            pods,
-            deploy,
-            config: cfg.clone(),
-            cpu_usages: HashMap::default(),
-            cpu_delta_samples: VecDeque::default(),
-            current_replicas,
-        })
+    pub(crate) async fn new(cfg: &WorkerScalerConfig, cluster_id: u64) -> kube::Result<Self> {
+        let kube_client = KubeClient::try_default().await?;
+        let pvc_api: Api<PersistentVolumeClaim> =
+            Api::namespaced(kube_client.clone(), &cfg.namespace);
+        let sts_api: Api<StatefulSet> = Api::namespaced(kube_client.clone(), &cfg.namespace);
+        let pod_api: Api<Pod> = Api::namespaced(kube_client.clone(), &cfg.namespace);
+        let sts_template = sts_api.get(&cfg.template_sts_name).await?;
+        let pvc_template_name = sts_template
+            .spec
+            .as_ref()
+            .unwrap()
+            .volume_claim_templates
+            .as_ref()
+            .unwrap()
+            .first()
+            .unwrap()
+            .metadata
+            .name
+            .as_ref()
+            .unwrap()
+            .clone();
+        let in_k8s = fs::read(K8S_NAMESPACE_PATH).is_ok();
+        let worker_scaler = Self {
+            core: Arc::new(WorkerScalerCore {
+                sts_template,
+                sts_api,
+                pvc_api,
+                pod_api,
+                pods_map: Mutex::new(HashMap::new()),
+                config: cfg.clone(),
+                pvc_template_name,
+                cluster_id,
+                in_k8s,
+                http_client: hyper::Client::new(),
+            }),
+        };
+        worker_scaler.init().await?;
+        Ok(worker_scaler)
     }
 
-    pub(crate) async fn run(&mut self) {
+    pub(crate) async fn run(&self) {
         info!("worker scaler started");
-        let interval = Duration::from_secs_f64(self.config.sample_interval);
+        let interval = Duration::from_secs(CLEAN_UP_WORKER_TICK_INTERVAL);
         let mut timer = tokio::time::interval(interval);
+        let pvc_ticks = self.config.expire_seconds as u64 / CLEAN_UP_WORKER_TICK_INTERVAL;
+        let mut tick_cnt = 0;
         loop {
             timer.tick().await;
-            if let Err(err) = self.update_cpu_usage().await {
-                error!("update cpu usage error: {}", err);
-                continue;
-            }
-            if let Err(err) = self.update_replica().await {
-                error!("update replica error: {}", err);
+            self.clean_up_finished_workers().await;
+            tick_cnt += 1;
+            if tick_cnt % pvc_ticks == 0 {
+                self.clean_up_orphan_pvcs().await;
             }
         }
     }
 
-    async fn update_cpu_usage(&mut self) -> kube::Result<()> {
-        let mut total_cpu_delta = 0.0;
-        let mut replicas = 0;
-        let mut max_pod_ratio = 0.0;
-        let pods = self.pods.get_running_pods().await?;
-        for pod in &pods {
-            let pod_cpu_usage = self.pods.get_pod_cpu_usage(pod).await;
-            if pod_cpu_usage.is_none() {
+    async fn init(&self) -> kube::Result<()> {
+        let list_params = ListParams::default()
+            .labels(&self.config.label_selector())
+            .timeout(15);
+        let mut pods = self.pod_api.list(&list_params).await?;
+        let mut pods_map = self.pods_map.lock().await;
+        for pod in pods.items.drain(..) {
+            let name = pod.name_any();
+            let task_id = parse_task_id_by_pod_name(name.as_str());
+            info!("load pod {} task {}", name, task_id);
+            pods_map.insert(task_id, WorkerPod::new(&pod));
+        }
+        Ok(())
+    }
+
+    async fn clean_up_finished_workers(&self) {
+        let task_ids: Vec<u64> = self.pods_map.lock().await.keys().cloned().collect();
+        for task_id in task_ids {
+            self.maybe_clean_up(task_id).await;
+        }
+    }
+
+    async fn clean_up_orphan_pvcs(&self) {
+        let list_params = ListParams::default()
+            .labels(&self.config.label_selector())
+            .timeout(15);
+        let res = self.pvc_api.list(&list_params).await;
+        if let Err(err) = res {
+            error!("list pvc err {:?}", err);
+            return;
+        }
+        let mut pvcs = res.unwrap();
+        let mut orphan_pvc_tasks = vec![];
+        let pods_map = self.pods_map.lock().await;
+        for pvc in pvcs.items.iter_mut() {
+            let name = pvc.name_any();
+            let task_id = parse_task_id_by_pvc_name(&name, &self.pvc_template_name);
+            if task_id == 0 {
+                error!("failed to parse task id from pvc name {}", name);
                 continue;
             }
-            let cpu_usage = pod_cpu_usage.unwrap();
-            let pod_name = pod.name_any();
-            if let Some(&last) = self.cpu_usages.get(&pod_name) {
-                if last < cpu_usage {
-                    let pod_cpu_delta = cpu_usage - last;
-                    let pod_cpu_ratio = pod_cpu_delta / self.config.sample_interval;
-                    total_cpu_delta += pod_cpu_delta;
-                    if max_pod_ratio < pod_cpu_ratio {
-                        max_pod_ratio = pod_cpu_ratio;
+            if !pods_map.contains_key(&task_id) {
+                orphan_pvc_tasks.push(task_id);
+            }
+        }
+        drop(pods_map);
+        for task_id in orphan_pvc_tasks {
+            info!("delete orphan pvc {}", task_id);
+            self.delete_pvc(task_id).await;
+        }
+    }
+
+    pub(crate) async fn create_worker(
+        &self,
+        task_id: u64,
+        data_size_gb: usize,
+    ) -> kube::Result<WorkerPod> {
+        {
+            let mut pods_map = self.pods_map.lock().await;
+            if pods_map.len() >= self.config.worker_count_limit {
+                return Err(kube::Error::Service(box_err!(
+                    "worker count limit {} reached",
+                    self.config.worker_count_limit
+                )));
+            }
+            match pods_map.entry(task_id) {
+                Entry::Occupied(e) => {
+                    if e.get().ip.is_some() {
+                        return Ok(e.get().clone());
                     }
                 }
+                Entry::Vacant(e) => {
+                    let num_cores = calculate_num_cores(data_size_gb, self.config.worker_max_cores);
+                    let storage_size_gb = max(data_size_gb * 2, WORKER_MIN_STORAGE_GB);
+                    let sts_name = new_worker_sts_name(task_id);
+                    self.create_sts(sts_name.clone(), num_cores, storage_size_gb)
+                        .await?;
+                    info!("created sts {:?}", sts_name);
+                    let mut worker_pod = WorkerPod::default();
+                    worker_pod.name = new_worker_pod_name(task_id);
+                    e.insert(worker_pod);
+                }
             }
-            self.cpu_usages.insert(pod_name, cpu_usage);
-            replicas += 1;
         }
-        let cpu_util_ratio = total_cpu_delta / self.config.sample_interval;
-        info!(
-            "total cpu util ratio: {}, max cpu util ratio: {}, replicas: {}",
-            cpu_util_ratio, max_pod_ratio, replicas
+        let worker_pod = self
+            .wait_worker_pod_ready(task_id, Duration::from_secs(60 * 5))
+            .await?;
+        let mut pods_map = self.pods_map.lock().await;
+        pods_map.insert(task_id, worker_pod.clone());
+        Ok(worker_pod)
+    }
+
+    async fn create_sts(
+        &self,
+        sts_name: String,
+        num_cores: usize,
+        storage_size_gb: usize,
+    ) -> kube::Result<()> {
+        let mut sts = self.sts_template.clone();
+        sts.metadata = serde_json::from_value(json!({
+            "name": sts_name.clone(),
+            "namespace": self.config.namespace.clone(),
+            "labels": {
+                K8S_LABEL_NAME: self.config.name.clone()
+            },
+        }))
+        .unwrap();
+        let spec = sts.spec.as_mut().unwrap();
+        spec.selector = serde_json::from_value(json!({
+            "matchLabels": {
+                K8S_LABEL_NAME: self.config.name.clone()
+            }
+        }))
+        .unwrap();
+        spec.replicas = Some(1);
+        let pod_template = &mut spec.template;
+        let pod_metadata = pod_template.metadata.as_mut().unwrap();
+        pod_metadata.labels = Some(
+            serde_json::from_value(json!({
+                K8S_LABEL_NAME: self.config.name.clone()
+            }))
+            .unwrap(),
         );
-        self.cpu_delta_samples
-            .push_back((total_cpu_delta, replicas));
-        if self.cpu_delta_samples.len() > WORKER_SCALE_IN_SAMPLES {
-            self.cpu_delta_samples.pop_front();
-        }
-        self.current_replicas = self.deploy.get_replica().await?;
-        Ok(())
-    }
-
-    async fn update_replica(&mut self) -> kube::Result<()> {
-        if !self.last_sample_replica_match_current() {
-            return Ok(());
-        }
-        let new_replicas = if let Some(new_replicas) = self.need_scale_out() {
-            new_replicas
-        } else if self.need_scale_in() {
-            // scale in one replica at a time to avoid high failure rate.
-            self.current_replicas - 1
-        } else {
-            self.current_replicas
-        };
-        if new_replicas != self.current_replicas {
-            info!(
-                "scale tikv-worker to {} replicas, samples: {:?}",
-                new_replicas, self.cpu_delta_samples
-            );
-            self.deploy.update_replica(new_replicas).await?;
-        }
-        Ok(())
-    }
-
-    fn last_sample_replica_match_current(&self) -> bool {
-        if let Some(&(_, last_replicas)) = self.cpu_delta_samples.back() {
-            last_replicas == self.current_replicas
-        } else {
-            false
-        }
-    }
-
-    fn need_scale_out(&self) -> Option<usize> {
-        let num_samples = self.cpu_delta_samples.len();
-        if num_samples < WORKER_SCALE_OUT_SAMPLES {
-            // didn't get enough data.
-            return None;
-        }
-        if self.current_replicas >= self.config.max_replicas {
-            // already reached max replicas.
-            return None;
-        }
-        let mut samples_total_cpu_delta = 0.0;
-        for &(cpu_delta, _) in self
-            .cpu_delta_samples
-            .iter()
-            .skip(num_samples - WORKER_SCALE_OUT_SAMPLES)
-        {
-            let ratio = cpu_delta / self.config.sample_interval / self.current_replicas as f64;
-            if ratio < self.config.cpu_max_ratio {
-                // any sample ratio didn't reach max cpu usage, we will not scale out.
-                return None;
-            }
-            samples_total_cpu_delta += cpu_delta;
-        }
-        let sample_avg_cpu_delta = samples_total_cpu_delta / WORKER_SCALE_OUT_SAMPLES as f64;
-        let target_cpu_ratio = self.config.cpu_max_ratio;
-        let target_replicas = sample_avg_cpu_delta / self.config.sample_interval / target_cpu_ratio;
-        if target_replicas <= self.current_replicas as f64 {
-            // no need to scale out.
-            return None;
-        }
-        Some(std::cmp::min(
-            target_replicas.ceil() as usize,
-            self.config.max_replicas,
-        ))
-    }
-
-    fn need_scale_in(&self) -> bool {
-        if self.current_replicas <= self.config.min_replicas {
-            // no need to scale in.
-            return false;
-        }
-        let mut samples_total_cpu_delta = 0.0;
-        for &(cpu_delta, _) in self.cpu_delta_samples.iter() {
-            let ratio = cpu_delta / self.config.sample_interval / self.current_replicas as f64;
-            if ratio > self.config.cpu_min_ratio {
-                // any sample ratio reached min cpu usage, we will not scale in.
-                return false;
-            }
-            samples_total_cpu_delta += cpu_delta;
-        }
-        let sample_avg_cpu_usage = samples_total_cpu_delta / WORKER_SCALE_IN_SAMPLES as f64;
-        let target_cpu_ratio = self.config.cpu_min_ratio;
-        let target_replicas = sample_avg_cpu_usage / self.config.sample_interval / target_cpu_ratio;
-        if target_replicas >= self.current_replicas as f64 {
-            // no need to scale in.
-            return false;
-        }
-        true
-    }
-}
-
-#[async_trait]
-pub(crate) trait WorkerPodsApi: Send + Sync {
-    async fn get_running_pods(&self) -> kube::Result<Vec<Pod>>;
-    async fn get_pod_cpu_usage(&self, pod: &Pod) -> Option<f64>;
-}
-
-struct WorkerPods {
-    pods: Api<Pod>,
-    in_cluster: bool,
-    http_client: hyper::Client<HttpConnector>,
-    port: u16,
-    label: String,
-}
-
-impl WorkerPods {
-    fn new(pods: Api<Pod>, cfg: &WorkerScalerConfig) -> Self {
-        let in_cluster =
-            fs::read("/var/run/secrets/kubernetes.io/serviceaccount/namespace").is_ok();
-        Self {
-            pods,
-            in_cluster,
-            http_client: hyper::Client::new(),
-            port: cfg.worker_port,
-            label: cfg.label.clone(),
-        }
-    }
-}
-
-#[async_trait]
-impl WorkerPodsApi for WorkerPods {
-    async fn get_running_pods(&self) -> kube::Result<Vec<Pod>> {
-        let list_params = ListParams::default()
-            .labels(self.label.as_str())
-            .timeout(15);
-        let mut pods = self.pods.list(&list_params).await?;
-        pods.items.retain(|p| {
-            p.status.as_ref().map_or(false, |s| {
-                s.phase.as_ref().map_or(false, |p| p == "Running")
-            })
+        let pod_template_spec = pod_template.spec.as_mut().unwrap();
+        let pod_container = pod_template_spec.containers.first_mut().unwrap();
+        let cpu = format!("{}", num_cores);
+        let memory = format!("{}Gi", num_cores * 2);
+        pod_container.resources = Some(
+            serde_json::from_value(json!({
+                "requests": {
+                    "cpu": cpu,
+                    "memory": memory
+                },
+                "limits": {
+                    "cpu": cpu,
+                    "memory": memory
+                },
+            }))
+            .unwrap(),
+        );
+        // add environment variable to prevent the load-data-worker to run
+        // worker-scaler.
+        let env = pod_container.env.as_mut().unwrap();
+        env.push(EnvVar {
+            name: LOAD_DATA_WORKER_ENV.to_string(),
+            value: Some("true".to_string()),
+            value_from: None,
         });
-        Ok(pods.items)
+        let pvc_template = spec
+            .volume_claim_templates
+            .as_mut()
+            .unwrap()
+            .first_mut()
+            .unwrap();
+        pvc_template.metadata.labels = Some(
+            serde_json::from_value(json!({
+                K8S_LABEL_NAME: self.config.name.clone()
+            }))
+            .unwrap(),
+        );
+        let pvc_template_spec = pvc_template.spec.as_mut().unwrap();
+        pvc_template_spec.resources = Some(
+            serde_json::from_value(json!({
+                "requests": {
+                    "storage": format!("{}Gi", storage_size_gb)
+                }
+            }))
+            .unwrap(),
+        );
+        info!("create sts {:?}", sts_name);
+        self.sts_api.create(&PostParams::default(), &sts).await?;
+        Ok(())
     }
 
-    async fn get_pod_cpu_usage(&self, pod: &Pod) -> Option<f64> {
-        let metrics_url = metrics_url(pod, self.port)?;
-        let metrics_string = if self.in_cluster {
-            let uri = Uri::from_str(metrics_url.as_str()).unwrap();
+    async fn wait_worker_pod_ready(
+        &self,
+        task_id: u64,
+        timeout: Duration,
+    ) -> kube::Result<WorkerPod> {
+        let start = Instant::now();
+        let pod_name = new_worker_pod_name(task_id);
+        loop {
+            if start.saturating_elapsed() > timeout {
+                return Err(kube::Error::Service(box_err!(format!(
+                    "wait worker {} ready timeout",
+                    pod_name
+                ))));
+            }
+            tokio::time::sleep(Duration::from_secs(3)).await;
+
+            let pod = self.pod_api.get(&pod_name).await?;
+            if pod.status.is_none() {
+                continue;
+            }
+            let status = pod.status.as_ref().unwrap();
+            if status.phase == Some("Running".into()) {
+                return Ok(WorkerPod::new(&pod));
+            }
+        }
+    }
+
+    async fn delete_sts(&self, task_id: u64) {
+        let sts_name = new_worker_sts_name(task_id);
+        if let Err(err) = self.sts_api.delete(&sts_name, &Default::default()).await {
+            warn!("delete sts {} err {:?}", sts_name, err);
+        }
+    }
+
+    async fn delete_pvc(&self, task_id: u64) {
+        let pvc_name = new_worker_pvc_name(&self.pvc_template_name, task_id);
+        if let Err(err) = self.pvc_api.delete(&pvc_name, &Default::default()).await {
+            warn!("delete pvc {} err {:?}", pvc_name, err);
+        }
+    }
+
+    async fn get_pod_task_states(&self, worker_pod: &WorkerPod) -> Option<Vec<LoadTaskStates>> {
+        let worker_addr = self.get_worker_addr(worker_pod)?;
+        let load_data_url = self.get_worker_tasks_url(worker_addr);
+        let resp_body = if self.in_k8s {
+            let uri = Uri::from_str(load_data_url.as_str()).unwrap();
             let resp_fut = self.http_client.get(uri);
-            let timeout_dur = Duration::from_secs(1);
+            let timeout_dur = Duration::from_secs(5);
             let result = tokio::time::timeout(timeout_dur, resp_fut).await.ok()?;
             let resp = result.ok()?;
+            if !resp.status().is_success() {
+                error!("pod task status error: {}", resp.status());
+                return None;
+            }
             let body = hyper::body::to_bytes(resp.into_body()).await.ok()?;
             String::from_utf8(body.to_vec()).ok()?
         } else {
             let ap = AttachParams::default();
             let proc = self
-                .pods
-                .exec(&pod.name_any(), vec!["curl", metrics_url.as_str()], &ap)
+                .pod_api
+                .exec(&worker_pod.name, vec!["curl", load_data_url.as_str()], &ap)
                 .await
                 .ok()?;
             get_proc_output(proc).await
         };
-        let proc_metrics = metrics_string.split('\n').collect::<Vec<_>>();
-        let mut cpu_cores = get_cpu_limit(pod).unwrap_or(2.0);
-        let mut cpu_seconds = 0.0;
-        for proc_metric in proc_metrics {
-            if proc_metric.starts_with("process_cpu_seconds_total") {
-                cpu_seconds = parse_second_field_f64(proc_metric);
-            } else if proc_metric.starts_with("tikv_worker_cpu_cores_quota") {
-                cpu_cores = parse_second_field_f64(proc_metric);
+        let tasks: Vec<LoadTaskStates> = serde_json::from_str(&resp_body).ok()?;
+        Some(tasks)
+    }
+
+    async fn get_pod_task_states_with_retry(
+        &self,
+        worker_pod: &WorkerPod,
+    ) -> Option<Vec<LoadTaskStates>> {
+        for _ in 0..6 {
+            let tasks = self.get_pod_task_states(worker_pod).await;
+            if tasks.is_some() {
+                return tasks;
             }
+            tokio::time::sleep(Duration::from_secs(10)).await;
         }
-        Some(cpu_seconds / cpu_cores)
+        None
+    }
+
+    async fn maybe_clean_up(&self, task_id: u64) {
+        let mut pods_map = self.pods_map.lock().await;
+        let worker_pod_opt = pods_map.get_mut(&task_id);
+        if worker_pod_opt.is_none() || worker_pod_opt.as_ref().unwrap().ip.is_none() {
+            return;
+        }
+        let worker_pod = worker_pod_opt.unwrap();
+        let tasks = self.get_pod_task_states_with_retry(worker_pod).await;
+        let now_timestamp = chrono::Utc::now().timestamp();
+        worker_pod.update_task_states(tasks, now_timestamp, self.config.expire_seconds);
+        if worker_pod.canceled {
+            info!("clean up task {}", task_id);
+            self.delete_sts(task_id).await;
+            self.delete_pvc(task_id).await;
+            pods_map.remove(&task_id);
+        }
+    }
+
+    pub(crate) fn get_worker_addr(&self, worker_pod: &WorkerPod) -> Option<String> {
+        let ip = worker_pod.ip.as_ref()?;
+        Some(format!(
+            "http://{}.{}.pod.cluster.local:{}/load_data",
+            ip.replace('.', "-"),
+            &self.config.namespace,
+            self.config.worker_port,
+        ))
+    }
+
+    pub(crate) fn get_worker_tasks_url(&self, worker_addr: String) -> String {
+        format!("{}?cluster_id={}", worker_addr, self.cluster_id)
     }
 }
 
-#[async_trait]
-pub(crate) trait WorkerDeployApi: Send + Sync {
-    async fn get_replica(&self) -> kube::Result<usize>;
-    async fn update_replica(&self, replicas: usize) -> kube::Result<()>;
-}
-
-struct WorkerDeploy {
-    deploy: Api<Deployment>,
-}
-
-impl WorkerDeploy {
-    fn new(deploy: Api<Deployment>) -> Self {
-        Self { deploy }
+fn parse_task_id_by_pod_name(pod_name: &str) -> u64 {
+    let fields: Vec<&str> = pod_name.split('-').collect();
+    if fields.len() == 5 {
+        return fields[3].parse::<u64>().unwrap_or(0);
     }
+    0
 }
 
-#[async_trait]
-impl WorkerDeployApi for WorkerDeploy {
-    async fn get_replica(&self) -> kube::Result<usize> {
-        let worker = self.deploy.get("tikv-worker").await?;
-        Ok(worker.spec.as_ref().unwrap().replicas.unwrap() as usize)
+fn parse_task_id_by_pvc_name(pvc_name: &str, pvc_template_name: &str) -> u64 {
+    let fields: Vec<&str> = pvc_name[pvc_template_name.len()..].split('-').collect();
+    if fields.len() == 6 {
+        return fields[4].parse::<u64>().unwrap_or(0);
     }
-
-    async fn update_replica(&self, replicas: usize) -> kube::Result<()> {
-        let patch = Patch::Merge(serde_json::json!({
-            "spec": {
-                "replicas": replicas
-            }
-        }));
-        self.deploy
-            .patch("tikv-worker", &PatchParams::default(), &patch)
-            .await?;
-        Ok(())
-    }
+    0
 }
 
-fn parse_second_field_f64(line: &str) -> f64 {
-    let fields: Vec<&str> = line.split_whitespace().collect();
-    if fields.len() == 2 {
-        return fields[1].parse::<f64>().unwrap_or(0.0);
-    }
-    0.0
+fn new_worker_sts_name(task_id: u64) -> String {
+    format!("load-data-worker-{}", task_id)
 }
 
-fn metrics_url(pod: &Pod, port: u16) -> Option<String> {
-    let status = pod.status.as_ref()?;
-    let ip = status.pod_ip.as_ref()?;
-    let namespace = pod.meta().namespace.as_ref()?;
-    Some(format!(
-        "http://{}.{}.pod.cluster.local:{}/metrics",
-        ip.replace('.', "-"),
-        namespace,
-        port
-    ))
+fn new_worker_pod_name(task_id: u64) -> String {
+    format!("load-data-worker-{}-0", task_id)
 }
 
-fn get_cpu_limit(pod: &Pod) -> Option<f64> {
-    let spec = pod.spec.as_ref()?;
-    let container = spec.containers.first()?;
-    let resources = container.resources.as_ref()?;
-    let limits = resources.limits.as_ref()?;
-    let cpu_limit = limits.get("cpu")?;
-    cpu_limit.0.parse::<f64>().ok()
+fn new_worker_pvc_name(pvc_template_name: &str, task_id: u64) -> String {
+    format!("{}-load-data-worker-{}-0", pvc_template_name, task_id)
 }
 
 async fn get_proc_output(mut attached: AttachedProcess) -> String {
@@ -391,193 +583,107 @@ async fn get_proc_output(mut attached: AttachedProcess) -> String {
     out
 }
 
+fn calculate_num_cores(data_size_gb: usize, max_cores: usize) -> usize {
+    let cores = if data_size_gb > 1024 {
+        32
+    } else if data_size_gb > 256 {
+        16
+    } else if data_size_gb > 64 {
+        8
+    } else if data_size_gb > 16 {
+        4
+    } else {
+        2
+    };
+    min(cores, max_cores)
+}
+
 #[cfg(test)]
 mod tests {
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering::SeqCst},
-        Arc, Mutex,
+    use k8s_openapi::{api::core::v1::Pod, apimachinery::pkg::apis::meta::v1::Time};
+    use load_data::task::LoadTaskStates;
+
+    use crate::worker_scaler::{
+        new_worker_pod_name, new_worker_pvc_name, parse_task_id_by_pod_name,
+        parse_task_id_by_pvc_name, WorkerPod,
     };
 
-    use test_util::init_log_for_test;
-    use tokio::time::Interval;
+    #[test]
+    fn test_worker_pod_update() {
+        let mut pod = Pod::default();
+        pod.metadata.name = Some("load-data-worker-1-0".to_string());
+        pod.status = Some(Default::default());
+        let status = pod.status.as_mut().unwrap();
+        status.pod_ip = Some("127.0.0.1".to_string());
+        let now = chrono::Utc::now();
+        status.start_time = Some(Time(now));
+        let now_ts = now.timestamp();
 
-    use super::*;
+        let mut worker_pod = WorkerPod::new(&pod);
+        assert_eq!(worker_pod.started_at, now_ts);
+        assert_eq!(worker_pod.updated_at, now_ts);
 
-    #[derive(Clone)]
-    struct MockWorkerPods {
-        core: Arc<Mutex<MockWorkerPodsCore>>,
-    }
+        // worker pod is not canceled if no task states and not expired.
+        worker_pod.update_task_states(None, now_ts + 40, 60);
+        assert!(!worker_pod.canceled);
 
-    struct MockWorkerPodsCore {
-        pods: Vec<Pod>,
-        usages: HashMap<String, f64>,
-        replicas: Arc<AtomicUsize>,
-    }
+        // worker pod is canceled if no task states and expired.
+        worker_pod.update_task_states(None, now_ts + 100, 60);
+        assert!(worker_pod.canceled);
 
-    impl MockWorkerPods {
-        fn new() -> Self {
-            let core = MockWorkerPodsCore {
-                pods: vec![],
-                usages: HashMap::new(),
-                replicas: Arc::new(AtomicUsize::new(1)),
-            };
-            let pods = Self {
-                core: Arc::new(Mutex::new(core)),
-            };
-            pods.scale();
-            pods
-        }
+        // worker pod is canceled if task is empty and expired.
+        worker_pod = WorkerPod::new(&pod);
+        worker_pod.update_task_states(Some(vec![]), now_ts + 100, 60);
+        assert!(worker_pod.canceled);
 
-        fn update_workloads(&self, workload: f64, interval: f64) {
-            let mut core = self.core.lock().unwrap();
-            let names = core
-                .pods
-                .iter()
-                .map(|pod| pod.name_any())
-                .collect::<Vec<_>>();
-            let avg_workload = workload / names.len() as f64;
-            for name in names {
-                let old = core.usages.get(&name).cloned().unwrap_or_default();
-                core.usages.insert(name, old + avg_workload * interval);
-            }
-        }
+        // worker pod is canceled if task is canceled.
+        let mut task_states = LoadTaskStates::default();
+        task_states.canceled = true;
+        worker_pod = WorkerPod::new(&pod);
+        worker_pod.update_task_states(Some(vec![task_states]), now_ts + 100, 60);
+        assert!(worker_pod.canceled);
 
-        async fn tick_update_workloads(
-            &self,
-            ticks: usize,
-            interval: &mut Interval,
-            workload: f64,
-        ) {
-            for _ in 0..ticks {
-                interval.tick().await;
-                self.update_workloads(workload, interval.period().as_secs_f64());
-                self.scale();
-            }
-        }
+        // worker pod is canceled if task is finished and not canceled, expired after
+        // finish time.
+        let mut task_states = LoadTaskStates::default();
+        task_states.finished = true;
+        worker_pod = WorkerPod::new(&pod);
+        worker_pod.update_task_states(Some(vec![task_states.clone()]), now_ts + 100, 60);
+        // worker pod is not canceled if task finished duration not exceed expire time.
+        assert!(!worker_pod.canceled);
+        worker_pod.update_task_states(Some(vec![task_states.clone()]), now_ts + 180, 60);
+        // worker pod is canceled if task finished duration exceed expire time.
+        assert!(worker_pod.canceled);
 
-        fn scale(&self) {
-            let mut core = self.core.lock().unwrap();
-            let new_replicas = core.replicas.load(SeqCst);
-            if new_replicas == core.pods.len() {
-                return;
-            }
-            if new_replicas < core.pods.len() {
-                for _ in 0..core.pods.len() - new_replicas {
-                    let pod = core.pods.pop().unwrap();
-                    let name = pod.name_any();
-                    core.usages.remove(&name);
-                }
-            } else {
-                for i in core.pods.len()..new_replicas {
-                    let mut pod = Pod::default();
-                    pod.metadata.name = Some(format!("worker-{}", i));
-                    core.usages.insert(pod.name_any(), 0.0);
-                    core.pods.push(pod);
-                }
-            }
-        }
-
-        fn get_replicas(&self) -> Arc<AtomicUsize> {
-            self.core.lock().unwrap().replicas.clone()
-        }
-    }
-
-    #[async_trait]
-    impl WorkerPodsApi for MockWorkerPods {
-        async fn get_running_pods(&self) -> kube::Result<Vec<Pod>> {
-            let core = self.core.lock().unwrap();
-            Ok(core.pods.clone())
-        }
-
-        async fn get_pod_cpu_usage(&self, pod: &Pod) -> Option<f64> {
-            let name = pod.name_any();
-            let core = self.core.lock().unwrap();
-            core.usages.get(&name).cloned()
-        }
-    }
-
-    #[derive(Clone)]
-    struct MockWorkerDeploy {
-        replicas: Arc<AtomicUsize>,
-    }
-
-    #[async_trait]
-    impl WorkerDeployApi for MockWorkerDeploy {
-        async fn get_replica(&self) -> kube::Result<usize> {
-            Ok(self.replicas.load(SeqCst))
-        }
-
-        async fn update_replica(&self, replicas: usize) -> kube::Result<()> {
-            self.replicas.store(replicas, SeqCst);
-            Ok(())
-        }
+        // worker pod is canceled if not finished and no progress for a long time.
+        worker_pod = WorkerPod::new(&pod);
+        task_states = LoadTaskStates::default();
+        task_states.created_files = 1;
+        worker_pod.update_task_states(Some(vec![task_states.clone()]), now_ts + 100, 60);
+        assert_eq!(worker_pod.created_files, 1);
+        assert_eq!(worker_pod.updated_at, now_ts + 100);
+        assert!(!worker_pod.canceled);
+        task_states.created_files = 2;
+        worker_pod.update_task_states(Some(vec![task_states.clone()]), now_ts + 180, 60);
+        assert_eq!(worker_pod.created_files, 2);
+        assert_eq!(worker_pod.updated_at, now_ts + 180);
+        assert!(!worker_pod.canceled);
+        worker_pod.update_task_states(Some(vec![task_states]), now_ts + 250, 60);
+        assert_eq!(worker_pod.created_files, 2);
+        assert_eq!(worker_pod.updated_at, now_ts + 180);
+        assert!(worker_pod.canceled);
     }
 
     #[test]
-    fn test_worker_scaler() {
-        init_log_for_test();
-        let pods = Box::new(MockWorkerPods::new());
-        let replicas = pods.get_replicas();
-        let deploy = Box::new(MockWorkerDeploy { replicas });
-        let mut cfg = WorkerScalerConfig::default();
-        cfg.sample_interval = 0.1;
-        cfg.max_replicas = 32;
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let mut scaler = rt
-            .block_on(WorkerScaler::new(&cfg, pods.clone(), deploy.clone()))
-            .unwrap();
-        rt.spawn(async move {
-            scaler.run().await;
-        });
-        rt.block_on(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs_f64(0.05));
-            // test scale out.
-            let mut replicas = deploy.replicas.load(SeqCst);
-            assert_eq!(replicas, 1);
-            pods.tick_update_workloads(WORKER_SCALE_OUT_SAMPLES * 3, &mut interval, 0.9)
-                .await;
-            replicas = deploy.replicas.load(SeqCst);
-            assert_eq!(replicas, 2);
-            pods.tick_update_workloads(WORKER_SCALE_OUT_SAMPLES * 3, &mut interval, 1.9)
-                .await;
-            replicas = deploy.replicas.load(SeqCst);
-            assert!(replicas > 2 && replicas <= 4, "{}", replicas);
-            pods.tick_update_workloads(WORKER_SCALE_OUT_SAMPLES * 3, &mut interval, 3.1)
-                .await;
-            replicas = deploy.replicas.load(SeqCst);
-            assert!(replicas > 4 && replicas <= 6, "{}", replicas);
-            pods.tick_update_workloads(WORKER_SCALE_OUT_SAMPLES * 3, &mut interval, 5.1)
-                .await;
-            replicas = deploy.replicas.load(SeqCst);
-            assert!(replicas > 6 && replicas <= 9, "{}", replicas);
-            pods.tick_update_workloads(WORKER_SCALE_OUT_SAMPLES * 3, &mut interval, 8.9)
-                .await;
-            replicas = deploy.replicas.load(SeqCst);
-            assert!(replicas > 9 && replicas <= 15, "{}", replicas);
-            pods.tick_update_workloads(WORKER_SCALE_OUT_SAMPLES * 3, &mut interval, 14.9)
-                .await;
-            replicas = deploy.replicas.load(SeqCst);
-            assert!(replicas > 15 && replicas <= 25, "{}", replicas);
-            pods.tick_update_workloads(WORKER_SCALE_OUT_SAMPLES * 3, &mut interval, 24.9)
-                .await;
-            replicas = deploy.replicas.load(SeqCst);
-            assert_eq!(replicas, 32);
-
-            // test scale in.
-            pods.tick_update_workloads(WORKER_SCALE_IN_SAMPLES * 2 + 5, &mut interval, 1.9)
-                .await;
-            replicas = deploy.replicas.load(SeqCst);
-            assert!(replicas > 20 && replicas < 32, "{}", replicas);
-
-            pods.tick_update_workloads(WORKER_SCALE_IN_SAMPLES, &mut interval, 0.1)
-                .await;
-            replicas = deploy.replicas.load(SeqCst);
-            assert!(replicas > 10 && replicas < 20, "{}", replicas);
-
-            pods.tick_update_workloads(WORKER_SCALE_IN_SAMPLES * 2, &mut interval, 0.0)
-                .await;
-            replicas = deploy.replicas.load(SeqCst);
-            assert_eq!(replicas, 1);
-        });
+    fn test_parse_task_id() {
+        let task_id = 101;
+        let pvc_template_name = "data0";
+        let pod_name = new_worker_pod_name(task_id);
+        let pvc_name = new_worker_pvc_name(pvc_template_name, task_id);
+        assert_eq!(task_id, parse_task_id_by_pod_name(pod_name.as_str()));
+        assert_eq!(
+            task_id,
+            parse_task_id_by_pvc_name(pvc_name.as_str(), pvc_template_name)
+        );
     }
 }

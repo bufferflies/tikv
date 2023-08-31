@@ -1,7 +1,7 @@
 # Worker Scaler
 
-The Worker Scaler feature optimizes the performance of the tikv-worker deployment within a Kubernetes (K8s) cluster by dynamically adjusting the number of replicas based on the current workload conditions. 
-This intelligent scaling ensures efficient resource utilization and responsive handling of varying loads.
+The Worker Scaler feature dynamically spawn load_data_worker pods on receive load_data task, and clean up the 
+load_data_worker pods when the load_data task is finished.
 
 ## Configuration
 
@@ -11,35 +11,40 @@ Default configuration values are set as follows:
 [worker-scaler]
 run = false
 namespace = "tidb-serverless"
-label = "app.kubernetes.io/name=tikv-worker"
-worker-port = 19000
-cpu-max-ratio = 0.6
-cpu-min-ratio = 0.4
-sample-interval = 10.0
-max-replicas = 64
-min-replicas = 1
+template-sts-name = "tikv-api"
+name = "load-data-worker"
+worker-port = 19500
+max-size = "1TB"
+spawn-data-size = "2GB"
+spawn-running-tasks = 4
+worker-min-storage-gb = 128
+worker-max-cores = 8
+expire-seconds = 600
+worker-count-limit = 1024
 ```
 
-- The `run` option enables the Worker Scaler within a `tikv-worker` process.
-- The Worker Scaler should be enabled on a single instance, typically on the `tikv-api` component.
-- The `label` option helps identify and select the relevant `tikv-worker` pods in the K8s cluster.
-- The `cpu-max-ratio` and `cpu-min-ratio` parameters influence the scaling algorithm, specifying the allowable CPU utilization range (0.0 to 1.0).
-Scaling out occurs when the CPU utilization ratio surpasses `cpu-max-ratio`, while scaling in occurs when it falls below `cpu-min-ratio`.
-- The `sample-interval` option, measured in seconds, determines the frequency at which metrics from `tikv-worker` pods are collected.
-- The `max-replicas` parameter sets the upper limit for the number of replicas.
-- The `min-replicas` parameter sets the lower limit for the number of replicas.
+- The `run` option runs the Worker-Scaler within a `tikv-worker` process.
+- The `template-sts-name` option specifies the name of the stateful-set used as a template for spawning `load-data-worker` pods.
+- The `name` option is used to name the spawned worker stateful-set.
+- The `max-size` option limits the maximum data size to load, if the data size is larger than this value, we return error to the client.
+- The `spawn-data-size` and `spawn-running-tasks` is used to control whether a load-data task execute locally on `tikv-api` pod or spawn a new `load-data-worker` to handle the task.
+  if the task data-size is larger than `spawn-data-size-mb` or locally running tasks is greater than `spawn-running-tasks`, we spawn a new `load-data-worker`, otherwise the task is executed locally on the `tikv-api` pod.
+- The `worker-max-cores` specifies the maximum cores for the `load-data-worker` pod.
+- The `expire-seconds` specifies the expiration time for the `load-data-worker` pod, if the pod is not used for `expire-seconds`, we will delete the pod.
+- The `worker-count-limit` limits the max running `load-data-worker` pods.
 
 ## Implementation
 
-To initiate the Worker Scaler, use the `new_worker_scaler` function to create an instance, which can then be set to run in the background.
+When the `tikv-api` process received a `load_data` initial request, we check if the task should be run locally or spawn a new `load-data-worker` 
+pod to handle the task.
+This determination is based on two factors: the `data_size` parameter provided in the request and the current count of tasks being run locally.
 
-During each sample interval, the worker scaler performs the following steps:
+To spawn a new `load-data-worker` pod, we create a new stateful-set based on the `template-sts-name` option, and change the
+new stateful-set name based on the unique task id, so each task creates a unique stateful-set.
+The pod's cpu, memory and storage is set based on the `data_size` of the task.
 
-- Retrieves a list of tikv-worker pods within the K8s cluster.
-- Collects CPU usage metrics from each of these pods.
-- Do scale-out or scale-in if needed.
+When the load-data-worker pod is running, we return the pod's address to the client and the client will send the load_data
+request to the new pod.
 
-Scaling actions are only triggered when an adequate number of CPU usage samples is available. 
-Scaling out requires fewer samples due to the need to address sudden workload spikes. The scaling increment is proportionate to ensure quick adjustment to the desired replica count.
-Scaling in, in contrast, demands more samples to prevent rapid fluctuations in scaling. Scaling in occurs gradually, reducing one replica at a time for stability.
-By intelligently adjusting replica counts based on real-time workload conditions, the Worker Scaler enhances the efficiency and responsiveness of the tikv-worker deployment, contributing to a seamless and optimized system performance.
+The worker-scaler periodically checks the `load-data-worker` pods, if the pod is not used for `expire-seconds`, we will
+delete the stateful-set and the pvc.

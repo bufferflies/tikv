@@ -103,6 +103,7 @@ pub struct LoadTaskStates {
     pub canceled: bool,
     pub finished: bool,
     pub error: String,
+    pub flushed_files: usize,
     pub created_files: usize,
     pub ingested_regions: usize,
     pub duplicated_entries: Vec<DuplicateEntry>,
@@ -195,6 +196,11 @@ impl LoadTaskScheduler {
     pub fn is_finished(&self) -> bool {
         let states = self.states.lock().unwrap();
         states.finished
+    }
+
+    pub(crate) fn set_flushed_files(&self, flushed_files: usize) {
+        let mut states = self.states.lock().unwrap();
+        states.flushed_files = flushed_files;
     }
 
     pub fn set_thread_handle(&mut self, thread_handle: std::thread::JoinHandle<()>) {
@@ -381,6 +387,7 @@ impl LoadTaskWorker {
             let file_path = self.file_path(self.file_idx);
             let in_mem_size = self.in_mem_size;
             self.file_idx += 1;
+            self.scheduler.set_flushed_files(self.file_idx);
             std::thread::spawn(move || {
                 let res = flush_to_local_file(kv_pairs, task_ctx, file_path, in_mem_size);
                 tx.send(res).unwrap();

@@ -54,7 +54,7 @@ use crate::{
     load_data::{handle_load_data, LoadDataManager, MAX_IN_MEM_SIZE},
     metrics::CPU_CORES_QUOTA_GAUGE,
     native_br::{NativeBrConfig, NativeBrManager},
-    worker_scaler::{new_worker_scaler, WorkerScalerConfig},
+    worker_scaler::{WorkerScaler, WorkerScalerConfig, LOAD_DATA_WORKER_ENV},
 };
 
 const ZSTD_COMPRESSION_LEVEL_FOR_REMOTE: &str = "5";
@@ -227,7 +227,7 @@ fn main() {
     let thread_pool = Arc::new(
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
-            .worker_threads(16)
+            .worker_threads(SysQuota::cpu_cores_quota() as usize)
             .thread_name("worker-server")
             .build()
             .unwrap(),
@@ -257,6 +257,19 @@ fn main() {
         RpcClient::new(&config.pd, Some(env), security_mgr)
             .unwrap_or_else(|e| panic!("failed to create rpc client: {:?}", e)),
     );
+    let is_load_data_worker = std::env::var(LOAD_DATA_WORKER_ENV).is_ok();
+    let mut worker_scaler_opt: Option<WorkerScaler> = None;
+    if config.worker_scaler.run && !is_load_data_worker {
+        let scaler_cfg = config.worker_scaler.clone();
+        let cluster_id = pd.get_cluster_id().unwrap();
+        let worker_scaler = thread_pool
+            .block_on(WorkerScaler::new(&scaler_cfg, cluster_id))
+            .unwrap();
+        worker_scaler_opt = Some(worker_scaler.clone());
+        thread_pool.spawn(async move {
+            worker_scaler.run().await;
+        });
+    }
     let load_manager = Arc::new(LoadDataManager::new(
         pd.clone(),
         config.data_dir.clone().into(),
@@ -264,6 +277,8 @@ fn main() {
         thread_pool.clone(),
         MAX_IN_MEM_SIZE,
         master_key.clone(),
+        worker_scaler_opt,
+        config.worker_scaler.clone(),
     ));
     let br_manager = Arc::new(NativeBrManager::new(
         thread_pool.clone(),
@@ -350,13 +365,7 @@ fn main() {
             }
         });
     }
-    if config.worker_scaler.run {
-        let scaler_cfg = config.worker_scaler.clone();
-        thread_pool.spawn(async move {
-            let mut worker_scaler = new_worker_scaler(&scaler_cfg).await.unwrap();
-            worker_scaler.run().await;
-        });
-    }
+
     let mut cop_server_opt = None;
     if !config.cop_addr.is_empty() {
         let cop_config = remote_cop::Config {
