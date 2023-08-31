@@ -33,7 +33,7 @@ use tikv_util::{
 };
 
 use crate::{
-    client::{ClusterClient, RefStore},
+    client::{ClusterClient, ClusterTxnClient, RefStore},
     keyspace::{ClusterKeyspaceClient, KeyspaceManager},
     scheduler::Scheduler,
     txnlock::lock_resolver::LockResolver,
@@ -45,6 +45,7 @@ pub struct ServerCluster {
     tmp_dir: TempDir,
     env: Arc<Environment>,
     pd_client: Arc<TestPdClient>,
+    pd_server: Option<test_pd::Server<test_pd_client::Service>>,
     security_mgr: Arc<SecurityManager>,
     dfs: Option<Arc<dyn Dfs>>,
     channels: HashMap<u64, Channel>,
@@ -67,6 +68,7 @@ impl ServerCluster {
             tmp_dir: TempDir::new().unwrap(),
             env: Arc::new(EnvBuilder::new().cq_count(2).build()),
             pd_client: Arc::new(TestPdClient::new(1, false)),
+            pd_server: None,
             security_mgr: Arc::new(SecurityManager::new(&Default::default()).unwrap()),
             dfs: None,
             channels: HashMap::new(),
@@ -372,6 +374,32 @@ impl ServerCluster {
         if !ok {
             data_stats.check_region_version_match(&pd_client).unwrap();
         }
+    }
+
+    pub fn start_pd_server(&mut self, pd_count: usize) {
+        let pd_service = test_pd_client::Service::new(self.pd_client.clone());
+        let pd_server = test_pd::Server::with_case(pd_count, Arc::new(pd_service));
+        self.pd_server = Some(pd_server);
+    }
+
+    pub fn pd_addrs(&self) -> Vec<(String, u16)> {
+        self.pd_server.as_ref().unwrap().bind_addrs()
+    }
+
+    pub async fn new_txn_client(&self) -> ClusterTxnClient {
+        let pd_endpoints = self
+            .pd_addrs()
+            .into_iter()
+            .map(|(host, port)| format!("{}:{}", host, port))
+            .collect::<Vec<_>>();
+        let client = tikv_client::TransactionClient::new_with_config_v2(
+            "",
+            pd_endpoints,
+            tikv_client::Config::default(),
+        )
+        .await
+        .unwrap();
+        ClusterTxnClient::new(client)
     }
 }
 

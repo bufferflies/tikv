@@ -282,12 +282,8 @@ async fn resolve_async_commit_locks(
             config.security.key_path.clone(),
         )
     };
-    let tikv_client = TiKVClient::new_with_config(
-        config.pd.endpoints.clone(),
-        tikv_client_config,
-        Some(slog_global::get_global().new(slog::o!())),
-    )
-    .await?;
+    let tikv_client =
+        TiKVClient::new_with_config(config.pd.endpoints.clone(), tikv_client_config).await?;
 
     let safepoint = tikv_client.current_timestamp().await?;
     let options = ResolveLocksOptions {

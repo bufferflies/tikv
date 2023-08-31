@@ -25,6 +25,10 @@ pub const DEFAULT_CLUSTER_ID: u64 = 42;
 pub type Result<T> = result::Result<T, String>;
 
 pub trait PdMocker {
+    fn get_cluster_id(&self) -> u64 {
+        DEFAULT_CLUSTER_ID
+    }
+
     fn load_global_config(
         &self,
         req: &LoadGlobalConfigRequest,
@@ -157,6 +161,10 @@ pub trait PdMocker {
     }
 
     fn get_operator(&self, _: &GetOperatorRequest) -> Option<Result<GetOperatorResponse>> {
+        None
+    }
+
+    fn report_buckets(&self, _: &ReportBucketsRequest) -> Option<Result<ReportBucketsResponse>> {
         None
     }
 }

@@ -89,6 +89,12 @@ impl UnixSecs {
     }
 }
 
+impl From<u64> for UnixSecs {
+    fn from(secs: u64) -> UnixSecs {
+        UnixSecs(secs)
+    }
+}
+
 pub struct SlowTimer {
     slow_time: Duration,
     t: Instant,

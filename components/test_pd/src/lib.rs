@@ -9,4 +9,7 @@ pub mod mocker;
 mod server;
 pub mod util;
 
-pub use self::{mocker::PdMocker, server::Server};
+pub use self::{
+    mocker::{PdMocker, Result},
+    server::Server,
+};

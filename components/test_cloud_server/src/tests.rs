@@ -6,7 +6,9 @@ use std::{sync::atomic::AtomicU16, time::Duration};
 
 use futures::executor::block_on;
 use pd_client::PdClient;
+use tikv_client::TimestampExt;
 use tikv_util::{codec::bytes::encode_bytes, info};
+use tokio::runtime::Runtime;
 
 use crate::ServerCluster;
 
@@ -139,6 +141,56 @@ fn test_client_split_region() {
         assert_eq!(region.raw_start(), split_key);
         assert_eq!(region.raw_end(), kvengine::GLOBAL_SHARD_END_KEY);
     }
+
+    cluster.stop();
+}
+
+#[test]
+fn test_txn_client() {
+    test_util::init_log_for_test();
+    let node_ids = alloc_node_id_vec(3);
+    let mut cluster = ServerCluster::new(node_ids, |_, _| {});
+
+    Runtime::new().unwrap().block_on(async {
+        cluster.start_pd_server(1);
+        let txn_client = cluster.new_txn_client().await;
+
+        // Check TSO.
+        {
+            let pd_client = cluster.get_pd_client();
+            let mut last_tso = 0;
+            for i in 0..=10 {
+                let tso = if i % 2 == 0 {
+                    pd_client.get_tso().await.unwrap().into_inner()
+                } else {
+                    txn_client.current_timestamp().await.unwrap().version()
+                };
+                assert!(tso > last_tso);
+                last_tso = tso;
+            }
+        }
+
+        // Prepare data.
+        let mut client = cluster.new_client();
+        {
+            client.put_kv(0..100, i_to_key, i_to_val);
+            client.put_kv(100..200, i_to_key, i_to_val);
+            client.put_kv(200..300, i_to_key, i_to_val);
+            let split_keys = vec![i_to_key(50), i_to_key(150), i_to_key(200)];
+            for split_key in &split_keys {
+                client.split(split_key);
+            }
+            cluster.wait_pd_region_count(4);
+            client.verify_data_with_ref_store();
+        }
+        let ref_store = client.dump_ref_store();
+
+        // Verify by scan.
+        txn_client
+            .verify_data_by_scan(&ref_store, None)
+            .await
+            .unwrap();
+    });
 
     cluster.stop();
 }

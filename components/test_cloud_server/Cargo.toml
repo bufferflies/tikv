@@ -32,11 +32,13 @@ serde_derive = "1.0"
 slog = { version = "2.3", features = ["max_level_trace", "release_max_level_debug"] }
 slog-global = { version = "0.1", git = "https://github.com/breeswish/slog-global.git", rev = "d592f88e4dbba5eb439998463054f1a44fbf17b9" }
 tempfile = "3.0"
+test_pd = { path = "../test_pd" }
 test_pd_client = { path = "../test_pd_client" }
 test_raftstore = { path = "../test_raftstore" }
 test_util = { path = "../test_util" }
 thiserror = "1.0"
 tikv = { path = "../.." }
+tikv-client = { workspace = true }
 tikv_util = { path = "../tikv_util" }
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"

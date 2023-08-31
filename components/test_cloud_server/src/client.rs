@@ -14,6 +14,7 @@ use std::{
     time::Duration,
 };
 
+use api_version::api_v2::TXN_KEY_PREFIX;
 use futures::executor::block_on;
 use grpcio::Channel;
 use kvengine::ShardTag;
@@ -31,6 +32,7 @@ use pd_client::PdClient;
 use rfstore::store::RegionIdVer;
 use test_pd_client::TestPdClient;
 use tikv::storage::mvcc::TimeStamp;
+use tikv_client::{request::codec::ApiV2Codec, BoundRange, IntoOwnedRange, TransactionOptions};
 use tikv_util::{
     box_err,
     codec::bytes::{decode_bytes, encode_bytes},
@@ -1312,5 +1314,99 @@ impl ClusterClient {
 
     pub fn ingest_ref_store(&mut self, mut ref_store: RefStore) {
         *self.ref_store.lock().unwrap() = std::mem::take(&mut ref_store);
+    }
+}
+
+const MIN_TXN_KEY: &[u8] = &[TXN_KEY_PREFIX];
+const MAX_TXN_KEY: &[u8] = &[TXN_KEY_PREFIX, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
+
+type TxnClient = tikv_client::TransactionClient<ApiV2Codec>;
+
+/// ClusterTxnClient provides transaction operations.
+pub struct ClusterTxnClient {
+    inner: TxnClient,
+}
+
+impl Deref for ClusterTxnClient {
+    type Target = TxnClient;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl ClusterTxnClient {
+    pub fn new(inner: TxnClient) -> Self {
+        Self { inner }
+    }
+
+    /// Verify data by scanning the given range.
+    pub async fn verify_data_by_scan(
+        &self,
+        ref_store: &RefStore,
+        range: Option<(&[u8], &[u8])>,
+    ) -> Result<usize> {
+        let start_time = Instant::now();
+        let mut ref_cnt = 0;
+        for (k, v) in ref_store.iter() {
+            if let Some(range) = range {
+                if k.as_slice() < range.0 || k.as_slice() >= range.1 {
+                    continue;
+                }
+            }
+            if v.is_some() {
+                ref_cnt += 1;
+            }
+        }
+
+        let start_ts = self.inner.current_timestamp().await.unwrap();
+        let mut snapshot = self
+            .inner
+            .snapshot(start_ts, TransactionOptions::new_pessimistic());
+        let scan_range: BoundRange = if let Some(range) = range {
+            range.into_owned()
+        } else {
+            (MIN_TXN_KEY..MAX_TXN_KEY).into_owned()
+        };
+        let limit = ref_cnt + 1; // +1 to check if there are more keys
+        let kv_pairs = snapshot.scan(scan_range, limit).await.unwrap();
+
+        let mut db_cnt = 0;
+        for kv in kv_pairs {
+            db_cnt += 1;
+            let ref_val = ref_store.get::<[u8]>(kv.key().into());
+            if ref_val.is_none() || ref_val.as_ref().unwrap().is_none() {
+                return Err(box_err!(
+                    "verify_data_by_scan: not found in ref store, db: {} -> {}",
+                    log_wrappers::hex_encode_upper::<&[u8]>(kv.key().into()),
+                    log_wrappers::hex_encode_upper(kv.value())
+                ));
+            }
+            let ref_val = ref_val.as_ref().unwrap().as_ref().unwrap();
+            if ref_val != kv.value() {
+                return Err(box_err!(
+                    "verify_data_by_scan: value not match for key {}, db: {}(len:{}), ref store: {}(len:{})",
+                    log_wrappers::hex_encode_upper::<&[u8]>(kv.key().into()),
+                    log_wrappers::hex_encode_upper(kv.value()),
+                    kv.value().len(),
+                    log_wrappers::hex_encode_upper(ref_val),
+                    ref_val.len()
+                ));
+            }
+        }
+        if ref_cnt != db_cnt {
+            return Err(box_err!(
+                "verify_data_by_scan: entries count not match, db: {}, ref store: {}",
+                db_cnt,
+                ref_cnt
+            ));
+        }
+
+        info!(
+            "verify_data_by_scan: verified entries {}, takes {:?}",
+            ref_cnt,
+            start_time.saturating_elapsed()
+        );
+        Ok(ref_cnt as usize)
     }
 }

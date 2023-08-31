@@ -6,5 +6,6 @@
 extern crate tikv_util;
 
 mod pd;
+mod service;
 
-pub use crate::pd::*;
+pub use crate::{pd::*, service::*};

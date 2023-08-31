@@ -52,7 +52,7 @@ pub(crate) fn get_region_keyspace_id(region: &metapb::Region) -> [u8; KEYSPACE_I
     if is_api_v2_region(region) {
         ApiV2::get_keyspace_id(region.start_key.as_slice())
     } else {
-        api_v2::UNKOWN_KEYSPACE_ID
+        api_v2::UNKNOWN_KEYSPACE_ID
     }
 }
 
@@ -90,7 +90,7 @@ pub mod tests {
         );
         region.start_key = vec![];
         assert!(get_region_keyspace_id_str(&region).is_none());
-        assert_eq!(get_region_keyspace_id(&region), api_v2::UNKOWN_KEYSPACE_ID);
+        assert_eq!(get_region_keyspace_id(&region), api_v2::UNKNOWN_KEYSPACE_ID);
     }
 
     pub fn get_txn_startkey_prefix(keyspace_id: u32) -> [u8; 4] {
