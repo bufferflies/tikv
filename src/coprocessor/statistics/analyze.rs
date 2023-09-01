@@ -363,7 +363,12 @@ pub struct RemoteAnalysisRequest {
 impl<S: Snapshot, F: KvFormat> RequestHandler for AnalyzeContext<S, F> {
     async fn handle_request(&mut self) -> Result<MemoryTraceGuard<Response>> {
         let start_time = Instant::now();
-        let mut is_remote = self.remote_ctx.is_some();
+        let is_remote = self.remote_ctx.is_some();
+        let remote_url = self
+            .remote_ctx
+            .as_ref()
+            .map(|ctx| ctx.remote_url.clone())
+            .unwrap_or_default();
         info!("handle analyze request, is remote {}", is_remote);
         let ret = if is_remote {
             let remote_ctx = self.remote_ctx.as_ref().unwrap();
@@ -379,17 +384,9 @@ impl<S: Snapshot, F: KvFormat> RequestHandler for AnalyzeContext<S, F> {
                     .await;
                 tx.send(result).unwrap();
             });
-            match rx.await.unwrap() {
-                result @ Ok(_) => result,
-                Err(err) => {
-                    warn!(
-                        "remote analyze [{}] error {:?}, fall back to local analysis",
-                        remote_ctx.remote_url, err
-                    );
-                    is_remote = false;
-                    self.local_handle_request().await
-                }
-            }
+            rx.await.unwrap()
+            // Do not fallback to local if remote analyze failed. Or else it may
+            // cause server overloaded.
         } else {
             self.local_handle_request().await
         };
@@ -407,13 +404,19 @@ impl<S: Snapshot, F: KvFormat> RequestHandler for AnalyzeContext<S, F> {
                 Ok(MEMTRACE_ANALYZE.trace_guard(resp, memory_size))
             }
             Err(Error::Other(e)) => {
-                error!("analyze other error {}", e,);
+                error!(
+                    "analyze other failed, is_remote {} [{}] error {}",
+                    is_remote, remote_url, e,
+                );
                 let mut resp = Response::default();
                 resp.set_other_error(e);
                 Ok(resp.into())
             }
             Err(e) => {
-                error!("analyze error {:?}", e,);
+                error!(
+                    "analyze failed, is_remote {} [{}] error {:?}",
+                    is_remote, remote_url, e,
+                );
                 Err(e)
             }
         }
