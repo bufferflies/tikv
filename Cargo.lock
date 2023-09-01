@@ -7144,6 +7144,7 @@ dependencies = [
  "load_data",
  "log_wrappers",
  "pd_client",
+ "protobuf",
  "quick-xml 0.23.1",
  "rand 0.8.5",
  "regex",
@@ -7757,7 +7758,7 @@ dependencies = [
 [[package]]
 name = "tikv-client"
 version = "0.2.0"
-source = "git+https://github.com/pingyu/client-rust.git?branch=api-v2-part1#42f819a4bd0a516da8b8a9efeac38f04216853fa"
+source = "git+https://github.com/tikv/client-rust.git?rev=dd34500282353d910bdc57c0282fe6ca602c1b90#dd34500282353d910bdc57c0282fe6ca602c1b90"
 dependencies = [
  "async-recursion",
  "async-trait",

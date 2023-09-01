@@ -49,6 +49,8 @@ const REGION_BUCKET_SIZE: ReadableSize = ReadableSize::kb(64);
 #[test]
 fn test_random_all() {
     test_util::init_log_for_test();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let _guard = runtime.enter();
 
     // Prepare.
     let (_temp_dir, _oss, dfs_config) = prepare_dfs("random_br_");
@@ -102,19 +104,12 @@ fn test_random_all() {
             INITIAL_TABLE_COUNT,
             TIMEOUT,
         ),
-        spawn_incremental_backup(
-            cluster.new_client(),
-            keyspace_manager.clone(),
-            backup_worker,
-            Duration::from_secs(5),
-            TIMEOUT,
-        ),
         spawn_major_compact(cluster.get_pd_client(), keyspace_manager.clone(), TIMEOUT),
     ];
     for _ in 0..RESTORE_CONCURRENCY {
         handles.push(spawn_restore_keyspace(
             cluster.get_pd_client(),
-            cluster.new_keyspace_client(),
+            runtime.block_on(cluster.new_keyspace_client()),
             dfs_config.clone(),
             security_conf.clone(),
             keyspace_manager.clone(),
@@ -124,7 +119,7 @@ fn test_random_all() {
     for _ in 0..LOAD_DATA_CONCURRENCY {
         handles.push(spawn_load_data(
             cluster.get_pd_client(),
-            cluster.new_keyspace_client(),
+            runtime.block_on(cluster.new_keyspace_client()),
             dfs_config.clone(),
             security_conf.clone(),
             load_data_config.clone(),
@@ -133,10 +128,18 @@ fn test_random_all() {
             TIMEOUT,
         ));
     }
+
+    let mut async_handles = vec![spawn_incremental_backup(
+        cluster.new_client(),
+        keyspace_manager,
+        backup_worker,
+        Duration::from_secs(5),
+        TIMEOUT,
+    )];
     for idx in 0..CONCURRENCY {
-        handles.push(spawn_keyspace_write(
+        async_handles.push(spawn_keyspace_write(
             idx,
-            cluster.new_keyspace_client(),
+            runtime.block_on(cluster.new_keyspace_client()),
             TIMEOUT,
         ));
     }
@@ -153,10 +156,15 @@ fn test_random_all() {
     for handle in handles {
         handle.join().unwrap();
     }
+    runtime.block_on(async move {
+        for handle in async_handles {
+            handle.await.unwrap();
+        }
+    });
 
     // Verify.
     info!("verify cluster");
-    let verified_records_count = verify_cluster(&mut cluster);
+    let verified_records_count = runtime.block_on(verify_cluster(&mut cluster));
 
     // Stop cluster.
     info!("stopping cluster");
@@ -219,7 +227,8 @@ fn prepare_cluster(
         conf.security = security_conf.clone();
         conf.kvengine.compaction_tombs_count = 100;
     };
-    let cluster = ServerCluster::new(nodes, update_conf_fn);
+    let mut cluster = ServerCluster::new(nodes, update_conf_fn);
+    cluster.start_pd_server(1);
     cluster.wait_region_replicated(&[], 3);
     let pd_client = cluster.get_pd_client();
     pd_client.disable_default_operator();
@@ -281,7 +290,7 @@ fn prepare_cluster(
     cluster
 }
 
-fn verify_cluster(cluster: &mut ServerCluster) -> usize /* records count in ref store */ {
+async fn verify_cluster(cluster: &mut ServerCluster) -> usize /* records count in ref store */ {
     // Check statistics.
     let (res, data_stats) = try_wait_result(
         || {
@@ -304,17 +313,17 @@ fn verify_cluster(cluster: &mut ServerCluster) -> usize /* records count in ref 
     // Verify data.
     let mut handles = vec![];
     for keyspace_id in cluster.keyspace_manager().ref_stores().all_keyspace_ids() {
-        let mut client = cluster.new_keyspace_client();
-        handles.push(std::thread::spawn(move || {
+        let mut client = cluster.new_keyspace_client().await;
+        handles.push(tokio::spawn(async move {
             (
                 keyspace_id,
-                client.verify_keyspace_with_ref_store(keyspace_id),
+                client.verify_keyspace_with_ref_store(keyspace_id).await,
             )
         }));
     }
     let mut records_cnt = 0;
     for handle in handles {
-        let (keyspace_id, res) = handle.join().unwrap();
+        let (keyspace_id, res) = handle.await.unwrap();
         records_cnt += res.unwrap_or_else(|err| {
             panic!(
                 "{} verify_keyspace_with_ref_store failed: {:?}",

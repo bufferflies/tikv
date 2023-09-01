@@ -338,19 +338,25 @@ pub(crate) fn spawn_keyspace_write(
     idx: usize,
     mut client: ClusterKeyspaceClient,
     timeout: Duration,
-) -> JoinHandle<()> {
-    std::thread::spawn(move || {
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
         // Make sure each write thread don't conflict with others.
         let begin = idx * 2000;
         let end = begin + 2000 - 10;
         let start_time = Instant::now();
-        let mut rng = rand::thread_rng();
         while start_time.saturating_elapsed() < timeout {
-            let keyspace_id = client.keyspace_manager().get_zipf_random_keyspace(&mut rng);
-            let table_id = match client
-                .keyspace_manager()
-                .get_random_available_table(keyspace_id, &mut rng)
-            {
+            let random = || {
+                let mut rng = rand::thread_rng();
+                let keyspace_id = client.keyspace_manager().get_zipf_random_keyspace(&mut rng);
+                let table_id = client
+                    .keyspace_manager()
+                    .get_random_available_table(keyspace_id, &mut rng);
+                let i = rng.gen_range(begin..end);
+                let put_kv = rng.gen_ratio(2, 3);
+                (keyspace_id, table_id, i, put_kv)
+            };
+            let (keyspace_id, table_id, i, put_kv) = random();
+            let table_id = match table_id {
                 Some(table_id) => table_id,
                 None => continue,
             };
@@ -364,14 +370,15 @@ pub(crate) fn spawn_keyspace_write(
                 let _guard = guard.unwrap();
                 info!("[{}] thread write on keyspace {}", idx, keyspace_id);
 
-                let i = rng.gen_range(begin..end);
-                if rng.gen_ratio(2, 3) {
+                if put_kv {
                     client
                         .keyspace_put_kv(keyspace_id, table_id, i..(i + 10), i_to_key, i_to_val)
+                        .await
                         .unwrap();
                 } else {
                     client
                         .keyspace_del_kv(keyspace_id, table_id, i..(i + 10), i_to_key)
+                        .await
                         .unwrap();
                 };
             }

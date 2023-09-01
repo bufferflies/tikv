@@ -29,14 +29,17 @@ use kvproto::{
     tikvpb::TikvClient,
 };
 use pd_client::PdClient;
+use protobuf::ProtobufEnum;
 use rfstore::store::RegionIdVer;
 use test_pd_client::TestPdClient;
 use tikv::storage::mvcc::TimeStamp;
-use tikv_client::{request::codec::ApiV2Codec, BoundRange, IntoOwnedRange, TransactionOptions};
+use tikv_client::{
+    proto::kvrpcpb::Mutation as KvMutation, BoundRange, IntoOwnedRange, TransactionOptions,
+};
 use tikv_util::{
     box_err,
     codec::bytes::{decode_bytes, encode_bytes},
-    debug, info,
+    debug, error, info,
     time::Instant,
     warn,
 };
@@ -58,6 +61,8 @@ pub enum Error {
     TxnNotFound(kvrpcpb::TxnNotFound),
     #[error(transparent)]
     Grpc(#[from] grpcio::Error),
+    #[error("TiKV Client error {0}")]
+    TikvClient(#[from] tikv_client::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -1320,11 +1325,21 @@ impl ClusterClient {
 const MIN_TXN_KEY: &[u8] = &[TXN_KEY_PREFIX];
 const MAX_TXN_KEY: &[u8] = &[TXN_KEY_PREFIX, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
 
-type TxnClient = tikv_client::TransactionClient<ApiV2Codec>;
+#[derive(Clone, Default)]
+pub struct ApiV2NoPrefixCodec {}
+
+impl tikv_client::codec::Codec for ApiV2NoPrefixCodec {
+    fn encode_request<R: tikv_client::request::KvRequest>(&self, req: &mut R) {
+        req.set_api_version(tikv_client::proto::kvrpcpb::ApiVersion::V2);
+    }
+}
+
+type TxnClient = tikv_client::TransactionClient<ApiV2NoPrefixCodec>;
 
 /// ClusterTxnClient provides transaction operations.
 pub struct ClusterTxnClient {
     inner: TxnClient,
+    pd_client: Arc<TestPdClient>, // Used to get region info for debug.
 }
 
 impl Deref for ClusterTxnClient {
@@ -1336,8 +1351,8 @@ impl Deref for ClusterTxnClient {
 }
 
 impl ClusterTxnClient {
-    pub fn new(inner: TxnClient) -> Self {
-        Self { inner }
+    pub fn new(inner: TxnClient, pd_client: Arc<TestPdClient>) -> Self {
+        Self { inner, pd_client }
     }
 
     /// Verify data by scanning the given range.
@@ -1358,18 +1373,11 @@ impl ClusterTxnClient {
                 ref_cnt += 1;
             }
         }
-
-        let start_ts = self.inner.current_timestamp().await.unwrap();
-        let mut snapshot = self
-            .inner
-            .snapshot(start_ts, TransactionOptions::new_pessimistic());
-        let scan_range: BoundRange = if let Some(range) = range {
-            range.into_owned()
-        } else {
-            (MIN_TXN_KEY..MAX_TXN_KEY).into_owned()
-        };
         let limit = ref_cnt + 1; // +1 to check if there are more keys
-        let kv_pairs = snapshot.scan(scan_range, limit).await.unwrap();
+        let kv_pairs = self
+            .kv_scan(range, limit, Duration::from_secs(60))
+            .await
+            .unwrap();
 
         let mut db_cnt = 0;
         for kv in kv_pairs {
@@ -1407,6 +1415,146 @@ impl ClusterTxnClient {
             ref_cnt,
             start_time.saturating_elapsed()
         );
-        Ok(ref_cnt as usize)
+        Ok(ref_cnt)
+    }
+
+    pub async fn kv_scan(
+        &self,
+        range: Option<(&[u8], &[u8])>,
+        limit: usize,
+        timeout: Duration,
+    ) -> tikv_client::Result<impl Iterator<Item = tikv_client::KvPair>> {
+        let start_ts = self.inner.current_timestamp().await?;
+        let scan_range: BoundRange = if let Some(range) = range {
+            range.into_owned()
+        } else {
+            (MIN_TXN_KEY..MAX_TXN_KEY).into_owned()
+        };
+        let mut snapshot = self
+            .inner
+            .snapshot(start_ts, TransactionOptions::new_pessimistic());
+
+        let start_time = Instant::now();
+        let mut last_error: Option<tikv_client::Error> = None;
+        while start_time.saturating_elapsed() < timeout {
+            match snapshot.scan(scan_range.clone(), limit as u32).await {
+                Ok(kvs) => return Ok(kvs),
+                Err(err) if Self::is_kv_error_retryable(&err) => {
+                    self.log_kv_error(&err);
+                    last_error = Some(err);
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    continue;
+                }
+                Err(err) => {
+                    self.log_kv_error(&err);
+                    return Err(err);
+                }
+            }
+        }
+        Err(last_error.unwrap())
+    }
+
+    async fn kv_mutate_inner(
+        &self,
+        muts: Vec<KvMutation>,
+    ) -> std::result::Result<(), tikv_client::Error> {
+        let option = TransactionOptions::new_pessimistic();
+        let mut txn = self.begin_with_options(option).await?;
+        match txn.batch_mutate(muts).await {
+            Ok(()) => {
+                let _ = txn.commit().await?;
+                Ok(())
+            }
+            Err(err) => {
+                txn.rollback().await?;
+                Err(err)
+            }
+        }
+    }
+
+    pub async fn kv_mutate(&self, muts: Vec<Mutation>, timeout: Duration) -> Result<()> {
+        assert!(!muts.is_empty());
+        let muts: Vec<KvMutation> = muts
+            .into_iter()
+            .map(|m| KvMutation {
+                op: m.op.value(),
+                key: m.key,
+                value: m.value,
+                ..Default::default()
+            })
+            .collect();
+
+        let start_time = Instant::now();
+        let mut last_error: Option<tikv_client::Error> = None;
+        while start_time.saturating_elapsed() < timeout {
+            match self.kv_mutate_inner(muts.clone()).await {
+                Ok(_) => return Ok(()),
+                Err(err) if Self::is_kv_error_retryable(&err) => {
+                    self.log_kv_error(&err);
+                    last_error = Some(err);
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    continue;
+                }
+                Err(err) => {
+                    self.log_kv_error(&err);
+                    return Err(err.into());
+                }
+            }
+        }
+        Err(last_error.unwrap().into())
+    }
+
+    pub(crate) fn is_kv_error_retryable(err: &tikv_client::Error) -> bool {
+        match err {
+            tikv_client::Error::Grpc(_)
+            | tikv_client::Error::GrpcAPI(_)
+            | tikv_client::Error::Channel(_) => true,
+            tikv_client::Error::RegionError(_) => true,
+            tikv_client::Error::PessimisticLockError { inner, .. } => {
+                Self::is_kv_error_retryable(inner)
+            }
+            tikv_client::Error::ResolveLockError(_) => true,
+            _ => false,
+        }
+    }
+
+    pub(crate) fn log_kv_error(&self, err: &tikv_client::Error) {
+        match err {
+            tikv_client::Error::PessimisticLockError {
+                inner,
+                success_keys,
+            } => {
+                error!(
+                    "tikv_client::PessimisticLockError: inner: {:?}, success_keys: {:?}",
+                    inner, success_keys
+                );
+                self.log_kv_error(inner);
+            }
+            tikv_client::Error::ResolveLockError(lock_info) => {
+                if let Some(first) = lock_info.first() {
+                    match self.pd_client.get_region(&first.key) {
+                        Ok(region) => {
+                            error!(
+                                "{}:{} tikv_client::ResolveLockError (first), lock_info: {:?}",
+                                region.get_id(),
+                                region.get_region_epoch().get_version(),
+                                lock_info
+                            );
+                        }
+                        Err(err) => {
+                            error!(
+                                "tikv_client::ResolveLockError: get_region failed for key {}, lock_info {:?}, err: {:?}",
+                                log_wrappers::hex_encode_upper(&first.key),
+                                lock_info,
+                                err
+                            )
+                        }
+                    }
+                }
+            }
+            _ => {
+                error!("tikv_client::Error: {:?}", err);
+            }
+        }
     }
 }

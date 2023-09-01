@@ -6,7 +6,6 @@ use std::{
     time::Duration,
 };
 
-use futures::executor::block_on;
 use kvengine::dfs::{DFSConfig, S3Fs};
 use native_br::{
     backup_worker,
@@ -66,9 +65,8 @@ pub(crate) fn spawn_incremental_backup(
     backup_worker: Arc<backup_worker::BackupWorker>,
     interval: Duration,
     timeout: Duration,
-) -> JoinHandle<()> {
-    std::thread::spawn(move || {
-        let mut rng = rand::thread_rng();
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
         let start_time = Instant::now();
         let mut last_backup_time = start_time;
         while start_time.saturating_elapsed() < timeout {
@@ -78,15 +76,18 @@ pub(crate) fn spawn_incremental_backup(
             // 3. As the keyspace of backup determines the keyspace to restore, we pick the
             //    random keyspace uniformly, to generate the scenario that some big
             //    keyspaces are never restored.
-            let keyspace_id = keyspace_manager.get_uniform_random_keyspace(&mut rng);
+            let keyspace_id = {
+                let mut rng = rand::thread_rng();
+                keyspace_manager.get_uniform_random_keyspace(&mut rng)
+            };
 
             let lock = keyspace_manager.get_keyspace_lock(keyspace_id);
-            let guard = lock.mutex_lock();
+            let guard = lock.mutex_lock().await;
             let backup_ts = client.get_ts().into_inner();
             let ref_store = keyspace_manager.ref_stores().dump(keyspace_id);
             drop(guard);
 
-            let backup_file = match block_on(backup_worker.instant_backup()) {
+            let backup_file = match backup_worker.instant_backup().await {
                 Ok(backup_file) => backup_file,
                 Err(err) if is_backup_error_retryable(&err) => {
                     warn!("backup failed, retry: {:?}", err);
@@ -110,7 +111,7 @@ pub(crate) fn spawn_incremental_backup(
             BACKUP_COUNTER.fetch_add(1, Ordering::SeqCst);
 
             let backup_elapsed = last_backup_time.saturating_elapsed();
-            sleep(interval.saturating_sub(backup_elapsed));
+            tokio::time::sleep(interval.saturating_sub(backup_elapsed)).await;
             last_backup_time = Instant::now();
         }
         info!("incremental backup thread exit");
@@ -183,10 +184,10 @@ pub(crate) fn spawn_restore_keyspace(
             // TODO: test without blocking write workloads.
             {
                 let lock = keyspace_manager.get_keyspace_lock(target_keyspace);
-                let _guard = lock.mutex_lock();
+                let _guard = runtime.block_on(lock.mutex_lock());
 
-                client
-                    .verify_keyspace_with_ref_store(target_keyspace)
+                runtime
+                    .block_on(client.verify_keyspace_with_ref_store(target_keyspace))
                     .unwrap_or_else(|err| {
                         panic!(
                             "{} verify_keyspace_with_ref_store (before restore): {:?}",
@@ -226,7 +227,8 @@ pub(crate) fn spawn_restore_keyspace(
                 // TODO: Remove the retry after verification issue is addressed.
                 let (verify_res, _) = try_wait_result(
                     || {
-                        let verify_res = client.verify_keyspace_with_ref_store(target_keyspace);
+                        let verify_res = runtime
+                            .block_on(client.verify_keyspace_with_ref_store(target_keyspace));
                         if verify_res.is_err() {
                             warn!(
                                 "{} verify_keyspace_with_ref_store failed (after restore): {:?}",

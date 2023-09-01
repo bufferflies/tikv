@@ -14,7 +14,6 @@ use pd_client::PdClient;
 use rand::{rngs::ThreadRng, Rng};
 use security::SecurityConfig;
 use test_cloud_server::{
-    client::RequestOptions,
     keyspace::{make_key, ClusterKeyspaceClient, KeyspaceManager},
     load_data::{build, cleanup, init_task, put_chunks},
 };
@@ -112,7 +111,7 @@ fn do_load_data(
         dir: temp_dir.path().to_path_buf(),
         dfs,
         pd: pd_client.clone(),
-        runtime,
+        runtime: runtime.clone(),
         max_in_mem_size: MAX_IN_MEM_SIZE,
         master_key,
     };
@@ -142,7 +141,7 @@ fn do_load_data(
 
     {
         let lock = keyspace_manager.get_keyspace_lock(keyspace_id);
-        let _guard = lock.shared_lock();
+        let _guard = runtime.block_on(lock.shared_lock());
 
         // Build.
         build(
@@ -157,8 +156,10 @@ fn do_load_data(
         );
 
         // Verify the data consistency.
-        let verified_count = client
-            .verify_data_with_given_ref_store(&ref_store, None, &RequestOptions::default())
+        let start_key = make_key(keyspace_id, table_id, &[]);
+        let end_key = make_key(keyspace_id, table_id + 1, &[]);
+        let verified_count = runtime
+            .block_on(client.verify_data_by_scan(&ref_store, Some((&start_key, &end_key))))
             .expect("verify data of load_data failed");
         assert_eq!(verified_count, data_count);
         info!(

@@ -3,7 +3,8 @@
 use std::{
     mem,
     ops::{Deref, DerefMut, Range},
-    sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard},
+    sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use api_version::ApiV2;
@@ -17,10 +18,11 @@ use rand::{
     distributions::Distribution,
     prelude::{IteratorRandom, SliceRandom, ThreadRng},
 };
-use tikv_util::{info, HandyRwLock};
+use tikv_util::info;
+use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::{
-    client::{ClusterClient, RefStore, RequestOptions, Result},
+    client::{ClusterTxnClient, RefStore, Result},
     table::TableMeta,
 };
 
@@ -181,12 +183,12 @@ impl KeyspaceLockHelper {
         self.inner.try_read().ok()
     }
 
-    pub fn shared_lock(&self) -> RwLockReadGuard<'_, ()> {
-        self.inner.rl()
+    pub async fn shared_lock(&self) -> RwLockReadGuard<'_, ()> {
+        self.inner.read().await
     }
 
-    pub fn mutex_lock(&self) -> RwLockWriteGuard<'_, ()> {
-        self.inner.wl()
+    pub async fn mutex_lock(&self) -> RwLockWriteGuard<'_, ()> {
+        self.inner.write().await
     }
 }
 
@@ -242,12 +244,12 @@ impl RandomHelper {
 }
 
 pub struct ClusterKeyspaceClient {
-    pub inner: ClusterClient,
+    pub inner: ClusterTxnClient,
     keyspace_manager: KeyspaceManager,
 }
 
 impl Deref for ClusterKeyspaceClient {
-    type Target = ClusterClient;
+    type Target = ClusterTxnClient;
 
     fn deref(&self) -> &Self::Target {
         &self.inner
@@ -261,7 +263,7 @@ impl DerefMut for ClusterKeyspaceClient {
 }
 
 impl ClusterKeyspaceClient {
-    pub fn new(inner: ClusterClient, keyspace_manager: KeyspaceManager) -> Self {
+    pub fn new(inner: ClusterTxnClient, keyspace_manager: KeyspaceManager) -> Self {
         Self {
             inner,
             keyspace_manager,
@@ -272,7 +274,7 @@ impl ClusterKeyspaceClient {
         &self.keyspace_manager
     }
 
-    pub fn keyspace_put_kv<F, G>(
+    pub async fn keyspace_put_kv<F, G>(
         &mut self,
         keyspace_id: u32,
         table_id: i64,
@@ -292,7 +294,8 @@ impl ClusterKeyspaceClient {
             m.set_value(gen_val(i));
             mutations.push(m)
         }
-        self.kv_mutate(mutations.clone())?;
+        self.kv_mutate(mutations.clone(), Duration::from_secs(30))
+            .await?;
 
         self.keyspace_manager
             .ref_stores()
@@ -300,7 +303,7 @@ impl ClusterKeyspaceClient {
         Ok(())
     }
 
-    pub fn keyspace_del_kv<F>(
+    pub async fn keyspace_del_kv<F>(
         &mut self,
         keyspace_id: u32,
         table_id: i64,
@@ -317,7 +320,8 @@ impl ClusterKeyspaceClient {
             m.set_key(make_key(keyspace_id, table_id, &gen_user_key(i)));
             mutations.push(m)
         }
-        self.kv_mutate(mutations.clone())?;
+        self.kv_mutate(mutations.clone(), Duration::from_secs(30))
+            .await?;
 
         self.keyspace_manager
             .ref_stores()
@@ -325,19 +329,21 @@ impl ClusterKeyspaceClient {
         Ok(())
     }
 
-    pub fn verify_keyspace_with_ref_store(&mut self, keyspace_id: u32) -> Result<usize> {
+    pub async fn verify_keyspace_with_ref_store(&mut self, keyspace_id: u32) -> Result<usize> {
         let ref_store = self
             .keyspace_manager
             .ref_stores()
             .get_keyspace_ref_store(keyspace_id);
         let ref_store = ref_store.lock().unwrap().clone();
-        self.verify_data_with_given_ref_store(&ref_store, None, &RequestOptions::default())
+        let (start_key, end_key) = ApiV2::get_txn_keyspace_range(keyspace_id);
+        self.verify_data_by_scan(&ref_store, Some((&start_key, &end_key)))
+            .await
     }
 
-    pub fn verify_all_keyspaces(&mut self) -> Result<usize> {
+    pub async fn verify_all_keyspaces(&mut self) -> Result<usize> {
         let mut cnt = 0;
         for keyspace_id in self.keyspace_manager.ref_stores().all_keyspace_ids() {
-            cnt += self.verify_keyspace_with_ref_store(keyspace_id)?;
+            cnt += self.verify_keyspace_with_ref_store(keyspace_id).await?;
         }
         Ok(cnt)
     }

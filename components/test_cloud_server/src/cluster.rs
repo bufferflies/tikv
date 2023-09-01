@@ -33,7 +33,7 @@ use tikv_util::{
 };
 
 use crate::{
-    client::{ClusterClient, ClusterTxnClient, RefStore},
+    client::{ApiV2NoPrefixCodec, ClusterClient, ClusterTxnClient, RefStore},
     keyspace::{ClusterKeyspaceClient, KeyspaceManager},
     scheduler::Scheduler,
     txnlock::lock_resolver::LockResolver,
@@ -325,8 +325,8 @@ impl ServerCluster {
         }
     }
 
-    pub fn new_keyspace_client(&self) -> ClusterKeyspaceClient {
-        ClusterKeyspaceClient::new(self.new_client(), self.keyspace_manager.clone())
+    pub async fn new_keyspace_client(&self) -> ClusterKeyspaceClient {
+        ClusterKeyspaceClient::new(self.new_txn_client().await, self.keyspace_manager.clone())
     }
 
     pub fn keyspace_manager(&self) -> &KeyspaceManager {
@@ -392,14 +392,14 @@ impl ServerCluster {
             .into_iter()
             .map(|(host, port)| format!("{}:{}", host, port))
             .collect::<Vec<_>>();
-        let client = tikv_client::TransactionClient::new_with_config_v2(
-            "",
+        let client = tikv_client::TransactionClient::new_with_codec(
             pd_endpoints,
             tikv_client::Config::default(),
+            ApiV2NoPrefixCodec::default(),
         )
         .await
         .unwrap();
-        ClusterTxnClient::new(client)
+        ClusterTxnClient::new(client, self.get_pd_client())
     }
 }
 
