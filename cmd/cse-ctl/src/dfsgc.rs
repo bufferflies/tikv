@@ -28,6 +28,7 @@ use native_br::{
 use pd_client::RpcClient;
 use security::SecurityConfig;
 use tikv_util::{box_err, config::ReadableDuration, error, info, warn};
+use tokio::sync::{mpsc::Sender, Mutex, Semaphore};
 
 /// DFS GC Rules:
 ///
@@ -80,9 +81,13 @@ pub struct DfsGcArgs {
     #[clap(long)]
     pub interval: Option<u64>,
 
+    /// Concurrently do s3 requests.
+    #[clap(long, default_value = "50")]
+    pub concurrency: usize,
+
     /// Start time safe interval, in duration string (see `ReadableDuration`).
     /// GC `start_time` = now() - `start-time-safe-interval`.
-    /// It's recommended to be at less 1 hour.
+    /// It's recommended to be at least 1 hour.
     #[clap(long, default_value = "1h")]
     pub start_time_safe_interval: ReadableDuration,
 
@@ -117,7 +122,13 @@ pub(crate) fn execute_dfsgc(arg: DfsGcArgs) {
     let start_time_safe_interval =
         chrono::Duration::from_std(Duration::from(arg.start_time_safe_interval)).unwrap();
     let progress_file_path = PathBuf::from(format!("{}/{}", &config.data_dir, "dfsgc.progress"));
-    let mut gc_worker = GcWorker::new(pd_client, s3fs, progress_file_path, config.gc_lifetime);
+    let mut gc_worker = GcWorker::new(
+        pd_client,
+        s3fs,
+        progress_file_path,
+        config.gc_lifetime,
+        arg.concurrency,
+    );
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -207,12 +218,14 @@ impl DfsGcConfig {
     }
 }
 
+#[derive(Clone)]
 struct GcWorker {
     pd: Arc<RpcClient>,
     s3fs: S3Fs,
     progress_file_path: PathBuf,
-    valid_files: HashSet<u64>,
+    valid_files: Arc<HashSet<u64>>,
     gc_lifetime: Option<chrono::Duration>,
+    concurrency: usize,
 }
 
 #[derive(Default)]
@@ -267,19 +280,19 @@ impl GcWorker {
         s3fs: S3Fs,
         progress_file_path: PathBuf,
         gc_lifetime: Option<Duration>,
+        concurrency: usize,
     ) -> Self {
         Self {
             pd,
             s3fs,
             progress_file_path,
-            valid_files: HashSet::default(),
+            valid_files: Arc::new(HashSet::default()),
             gc_lifetime: gc_lifetime.map(|d| chrono::Duration::from_std(d).unwrap()),
+            concurrency,
         }
     }
 
     fn collect_valid_files(&mut self) -> Result<()> {
-        self.valid_files.clear();
-
         let all_stores = get_all_stores_except_tiflash(self.pd.as_ref())?;
         let start_time = Instant::now();
         let stores_len = all_stores.len();
@@ -292,16 +305,17 @@ impl GcWorker {
                 let _ = tx.send(Self::get_store_files(store).await);
             });
         }
+        let mut valid_files = HashSet::default();
         for _ in 0..stores_len {
             let store_files_ids = rx.recv().unwrap()?;
             for (_, region_file_ids) in store_files_ids {
-                self.valid_files.extend(region_file_ids.into_iter());
+                valid_files.extend(region_file_ids.into_iter());
             }
         }
         let elapsed = start_time.elapsed();
         info!(
             "collect {} valid files from {} stores in {:?}",
-            self.valid_files.len(),
+            valid_files.len(),
             stores_len,
             elapsed
         );
@@ -317,6 +331,7 @@ impl GcWorker {
             ));
         }
 
+        self.valid_files = Arc::new(valid_files);
         Ok(())
     }
 
@@ -352,32 +367,45 @@ impl GcWorker {
             start_after, start_time, self.gc_lifetime
         );
 
-        let mut stat = GcStat::default();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<(u64, Result<()>)>(self.concurrency);
+        let sema = Arc::new(Semaphore::new(self.concurrency));
+
+        let stat = Arc::new(Mutex::new(GcStat::default()));
         loop {
             info!("loop start: {}", start_after);
-            let s3fs = self.s3fs.clone();
-            let (files, _, next_start_after) = s3fs.list(start_after.as_str(), None, None).await?;
+            let (files, _, next_start_after) =
+                self.s3fs.list(start_after.as_str(), None, None).await?;
             info!("listed {} files", files.len());
-            let file_objs = files.into_iter().filter_map(|obj| {
-                self.s3fs
-                    .try_parse_file_id(&obj.key)
-                    .map(|file_id| S3Object::from_list_object_content(file_id, obj))
-                    .filter(|obj| obj.last_modified < start_time)
-            });
+            let file_objs = files
+                .into_iter()
+                .filter_map(|obj| {
+                    self.s3fs
+                        .try_parse_file_id(&obj.key)
+                        .map(|file_id| S3Object::from_list_object_content(file_id, obj))
+                        .filter(|obj| obj.last_modified < start_time)
+                })
+                .collect::<Vec<_>>();
+            let objs_len = file_objs.len();
+
             for s3_obj in file_objs {
-                if !self.valid_files.contains(&s3_obj.file_id) {
-                    // Remove the files one by one to prevent reach API rate limit.
-                    self.remove_garbage_file(&s3_obj, &start_time, &mut stat)
-                        .await;
-                } else if self.is_file_removed(&s3_obj).await? {
-                    warn!("{} in-used but removed: {:?}", s3_obj.file_id, s3_obj);
-                    stat.in_used_and_removed += 1;
-                    s3fs.retain_file(s3_obj.file_id).await?;
-                    info!("{} is retained", s3_obj.file_id);
-                    stat.retained += 1;
-                }
-                stat.checked += 1;
+                self.spawn_remove_file_task(
+                    tx.clone(),
+                    stat.clone(),
+                    sema.clone(),
+                    s3_obj,
+                    start_time,
+                );
             }
+
+            for _ in 0..objs_len {
+                let (file_id, exec_result) = rx.recv().await.unwrap();
+                if let Err(e) = exec_result {
+                    error!("{} exec_result error: {:?}", file_id, e);
+                    return Err(e);
+                }
+                stat.lock().await.checked += 1;
+            }
+
             if let Some(next_start_after) = next_start_after {
                 start_after = next_start_after;
                 fs::write(self.progress_file_path.as_path(), start_after.as_bytes()).unwrap();
@@ -389,8 +417,50 @@ impl GcWorker {
             fs::remove_file(self.progress_file_path.as_path()).unwrap();
         }
 
-        info!("finished: {} files valid, {}", self.valid_files.len(), stat);
+        info!(
+            "finished: {} files valid, {}",
+            self.valid_files.len(),
+            stat.lock().await
+        );
         Ok(())
+    }
+
+    fn spawn_remove_file_task(
+        &self,
+        tx: Sender<(u64, Result<()>)>,
+        mut stat: Arc<Mutex<GcStat>>,
+        sema: Arc<Semaphore>,
+        s3_obj: S3Object,
+        start_time: DateTime<chrono::Utc>,
+    ) {
+        let gc_worker = self.clone();
+        self.s3fs.get_runtime().spawn(async move {
+            let permit = sema.acquire().await.unwrap();
+            let exec_result = if !gc_worker.valid_files.contains(&s3_obj.file_id) {
+                gc_worker
+                    .remove_garbage_file(&s3_obj, &start_time, &mut stat)
+                    .await
+            } else {
+                match gc_worker.is_file_removed(&s3_obj).await {
+                    Ok(true) => {
+                        warn!("{} in-used but removed: {:?}", s3_obj.file_id, s3_obj);
+                        stat.lock().await.in_used_and_removed += 1;
+                        if let Err(e) = gc_worker.s3fs.retain_file(s3_obj.file_id).await {
+                            return Err(Error::DfsError(e));
+                        }
+                        info!("{} is retained", s3_obj.file_id);
+                        stat.lock().await.retained += 1;
+                    }
+                    Ok(_) => {}
+                    Err(e) => return Err(e),
+                }
+                Ok(())
+            };
+
+            drop(permit);
+            let _ = tx.send((s3_obj.file_id, exec_result)).await;
+            Ok(())
+        });
     }
 
     fn is_storage_class_for_remove(storage_class: &str) -> bool {
@@ -406,14 +476,14 @@ impl GcWorker {
         &self,
         s3_obj: &S3Object,
         start_time: &DateTime<chrono::Utc>,
-        stat: &mut GcStat,
-    ) {
+        stat: &mut Arc<Mutex<GcStat>>,
+    ) -> Result<()> {
         let opts = dfs::Options::new(0, 0);
         let removed = match self.is_file_removed(s3_obj).await {
             Ok(removed) => removed,
             Err(e) => {
                 error!("{} check is_file_removed failed: {:?}", s3_obj.file_id, e);
-                return;
+                return Err(e);
             }
         };
 
@@ -421,7 +491,7 @@ impl GcWorker {
             self.s3fs
                 .remove(s3_obj.file_id, Some(s3_obj.size), opts)
                 .await;
-            stat.removed += 1;
+            stat.lock().await.removed += 1;
             info!("{} is removed", s3_obj.file_id);
         } else if let Some(gc_lifetime) = self.gc_lifetime {
             let duration = *start_time - s3_obj.last_modified;
@@ -429,6 +499,7 @@ impl GcWorker {
             if duration > gc_lifetime {
                 if let Err(err) = self.s3fs.permanently_remove(s3_obj.file_id, opts).await {
                     warn!("{} permanently_remove error: {:?}", s3_obj.file_id, err);
+                    return Err(Error::DfsError(err));
                 } else {
                     info!(
                         "{} is permanently removed, removed at {} ({:.2} min)",
@@ -436,9 +507,10 @@ impl GcWorker {
                         s3_obj.last_modified,
                         duration.num_seconds() as f64 / 60.0
                     );
-                    stat.permanently_removed += 1;
+                    stat.lock().await.permanently_removed += 1;
                 }
             }
         }
+        Ok(())
     }
 }
