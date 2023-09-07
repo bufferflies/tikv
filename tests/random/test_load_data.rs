@@ -104,6 +104,11 @@ fn do_load_data(
         .tempdir()
         .unwrap();
 
+    // Should lock from acquire `start_ts` to ingest ref store, to block backup.
+    // See https://github.com/tidbcloud/cloud-storage-engine/issues/1036.
+    let lock = keyspace_manager.get_keyspace_lock(keyspace_id);
+    let guard = runtime.block_on(lock.shared_lock());
+
     // Init task.
     let start_ts = block_on(pd_client.get_tso()).unwrap().into_inner();
     let commit_ts = block_on(pd_client.get_tso()).unwrap().into_inner();
@@ -139,42 +144,41 @@ fn do_load_data(
         keyspace_id, table_id, data_count
     );
 
-    {
-        let lock = keyspace_manager.get_keyspace_lock(keyspace_id);
-        let _guard = runtime.block_on(lock.shared_lock());
+    // Build.
+    build(
+        &scheduler,
+        chunk_ids,
+        COMPRESSION_TYPE,
+        Duration::from_secs(20),
+    );
+    info!(
+        "load_data: build finished, keyspace {}, table {}",
+        keyspace_id, table_id
+    );
 
-        // Build.
-        build(
-            &scheduler,
-            chunk_ids,
-            COMPRESSION_TYPE,
-            Duration::from_secs(20),
-        );
-        info!(
-            "load_data: build finished, keyspace {}, table {}",
-            keyspace_id, table_id
-        );
+    // Verify the data consistency, to find problems earlier.
+    // Must be in lock context to block restore.
+    // TODO: remove when it's stable.
+    let start_key = make_key(keyspace_id, table_id, &[]);
+    let end_key = make_key(keyspace_id, table_id + 1, &[]);
+    let verified_count = runtime
+        .block_on(client.verify_data_by_scan(&ref_store, Some((&start_key, &end_key))))
+        .expect("verify data of load_data failed");
+    assert_eq!(verified_count, data_count);
+    info!(
+        "load_data: verified ok, keyspace {}, table {}, verified_count {}",
+        keyspace_id, table_id, verified_count
+    );
 
-        // Verify the data consistency.
-        let start_key = make_key(keyspace_id, table_id, &[]);
-        let end_key = make_key(keyspace_id, table_id + 1, &[]);
-        let verified_count = runtime
-            .block_on(client.verify_data_by_scan(&ref_store, Some((&start_key, &end_key))))
-            .expect("verify data of load_data failed");
-        assert_eq!(verified_count, data_count);
-        info!(
-            "load_data: verified ok, keyspace {}, table {}, verified_count {}",
-            keyspace_id, table_id, verified_count
-        );
+    keyspace_manager.ref_stores().ingest(keyspace_id, ref_store);
+    keyspace_manager
+        .get_keyspace_meta(keyspace_id)
+        .unwrap()
+        .get_table(table_id)
+        .unwrap()
+        .set_available(true);
 
-        keyspace_manager.ref_stores().ingest(keyspace_id, ref_store);
-        keyspace_manager
-            .get_keyspace_meta(keyspace_id)
-            .unwrap()
-            .get_table(table_id)
-            .unwrap()
-            .set_available(true);
-    }
+    drop(guard);
 
     // Cleanup.
     cleanup(&scheduler);
