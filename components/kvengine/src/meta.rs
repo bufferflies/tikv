@@ -445,6 +445,7 @@ impl ShardMeta {
         new_meta.properties = props;
         // self.data_sequence may be advanced on raft log gc tick.
         new_meta.data_sequence = std::cmp::max(new_meta.data_sequence, self.data_sequence);
+        new_meta.max_ts = std::cmp::max(new_meta.max_ts, self.max_ts);
         *self = new_meta;
     }
 
@@ -686,6 +687,9 @@ impl ShardMeta {
                 meta.data_sequence = initial_seq;
                 meta.seq = initial_seq;
             }
+            // Although `max_ts` will be updated in initial flush again, still set here to
+            // avoid issue in unexpected corner case.
+            meta.max_ts = self.max_ts;
             new_shards.push(meta);
         }
         for new_shard in &mut new_shards {
