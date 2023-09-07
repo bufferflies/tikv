@@ -80,7 +80,7 @@ impl RfEngineCore {
         let mut it = WalIterator::new(self.wal_dir().to_path_buf(), epoch_id);
         it.iterate_batch(|data| {
             sync_batch_idx += 1;
-            let mut wb = if self.is_async_wal_enabled() && sync_batch_idx >= async_batch_cnt {
+            let mut wb = if self.is_async_wal_enabled() && sync_batch_idx > async_batch_cnt {
                 Some(WriteBatch::new())
             } else {
                 None
