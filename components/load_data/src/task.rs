@@ -47,8 +47,8 @@ use crate::{
 };
 
 const DEFAULT_BLOCK_SIZE: usize = 64 * 1024; // 64KB
-const DEFAULT_SST_FILE_SIZE: usize = 16 * 1024 * 1024; // 16MB
-const DEFAULT_REGION_SIZE: usize = 1024 * 1024 * 1024; // 1GB
+const DEFAULT_SST_FILE_SIZE: usize = 48 * 1024 * 1024; // 48MB
+const DEFAULT_REGION_SIZE: usize = 750 * 1024 * 1024; // 750MB
 const DEFAULT_COARSE_SPLIT_SIZE: usize = 32 * 1024 * 1024 * 1024; // 32GB
 
 const ZSTD_COMPRESSION_LEVEL: i32 = 3;
@@ -690,6 +690,13 @@ impl LoadTaskWorker {
         let coarse_split_keys =
             gen_split_keys(&key_prefix, &sst_metas, self.config.coarse_split_size, true);
         let new_regions_id = self.split_regions(&coarse_split_keys)?;
+        let result = self.ctx.pd.scatter_regions_by_id(new_regions_id);
+        if let Err(err) = result {
+            error!(
+                "{} scatter regions failed {:?}",
+                self.task_ctx.start_ts, err
+            );
+        }
         for i in 0..coarse_split_keys.len() - 1 {
             let mut encoded_start_key = coarse_split_keys[i].as_slice();
             let raw_start_key = decode_bytes(&mut encoded_start_key, false).unwrap();
@@ -708,13 +715,6 @@ impl LoadTaskWorker {
                 sst_metas
             );
             self.ingest_group(group_ssts)?;
-        }
-        let result = self.ctx.pd.scatter_regions_by_id(new_regions_id);
-        if let Err(err) = result {
-            error!(
-                "{} scatter regions failed {:?}",
-                self.task_ctx.start_ts, err
-            );
         }
         self.scheduler.set_finished(dup_entries);
         info!("{} finished ingest", self.task_ctx.start_ts);

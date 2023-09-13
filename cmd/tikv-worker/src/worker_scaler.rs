@@ -157,14 +157,17 @@ impl WorkerPod {
         if let Some(tasks) = tasks {
             if tasks.is_empty() {
                 // the task is cleaned up by client and GCed by the load data worker.
+                info!("task {} is GCed by the load data worker", self.name);
                 self.canceled = true;
             } else {
                 let task = &tasks[0];
                 if task.canceled {
                     // the task is cleaned up by client.
+                    info!("task {} is cleaned up by the client", self.name);
                     self.canceled = true;
                 }
                 if task.finished && self.finished_at == 0 {
+                    info!("task {} is finished", self.name);
                     self.finished_at = now_timestamp;
                 }
                 if self.flushed_files != task.flushed_files
@@ -175,6 +178,12 @@ impl WorkerPod {
                     self.created_files = task.created_files;
                     self.ingested_regions = task.ingested_regions;
                     self.updated_at = now_timestamp;
+                    info!("task {} progress updated", self.name;
+                        "flushed_files" => self.flushed_files,
+                        "created_files" => self.created_files,
+                        "ingested_regions" => self.ingested_regions,
+                        "updated_at" => self.updated_at,
+                    );
                 }
             }
         } else {
@@ -185,13 +194,27 @@ impl WorkerPod {
             let finished_duration = now_timestamp - self.finished_at;
             if finished_duration > expire_seconds {
                 // The client finished the task but failed to explicit clean up.
+                warn!(
+                    "task {} is finished but the client failed to explicit clean up",
+                    self.name
+                );
                 self.canceled = true;
             }
         } else {
             let updated_duration = now_timestamp - self.updated_at;
             if updated_duration > expire_seconds {
                 // The client didn't finish the task and no progress for a long time.
-                self.canceled = true;
+                warn!(
+                    "pod {} no progress for {} seconds",
+                    &self.name, updated_duration
+                );
+                if updated_duration > expire_seconds * 10 {
+                    warn!(
+                        "pod {} canceled for no progress for {} seconds",
+                        &self.name, updated_duration
+                    );
+                    self.canceled = true;
+                }
             }
         }
     }
@@ -394,6 +417,8 @@ impl WorkerScaler {
             }))
             .unwrap(),
         );
+        // disable liveness probe because we don't want the pod to be restarted by k8s.
+        pod_container.liveness_probe = None;
         // add environment variable to prevent the load-data-worker to run
         // worker-scaler.
         let env = pod_container.env.as_mut().unwrap();
@@ -668,7 +693,7 @@ mod tests {
         assert_eq!(worker_pod.created_files, 2);
         assert_eq!(worker_pod.updated_at, now_ts + 180);
         assert!(!worker_pod.canceled);
-        worker_pod.update_task_states(Some(vec![task_states]), now_ts + 250, 60);
+        worker_pod.update_task_states(Some(vec![task_states]), now_ts + 800, 60);
         assert_eq!(worker_pod.created_files, 2);
         assert_eq!(worker_pod.updated_at, now_ts + 180);
         assert!(worker_pod.canceled);
