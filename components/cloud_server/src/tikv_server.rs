@@ -939,6 +939,7 @@ impl TikvServer {
         kv_opts.max_block_cache_size = capacity as i64;
         kv_opts.remote_compactor_addr = conf.dfs.remote_compactor_addr.clone();
         kv_opts.enable_safe_point_v2 = conf.gc.enable_safe_point_v2;
+        kv_opts.disable_safe_point_fallback_v1 = conf.gc.disable_safe_point_fallback_v1;
         let cf_opt = &conf.rocksdb.writecf;
         kv_opts.table_builder_options.block_size = cf_opt.block_size.0 as usize;
         kv_opts.table_builder_options.max_table_size = cf_opt.target_file_size_base.0 as usize;

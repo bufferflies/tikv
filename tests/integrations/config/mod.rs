@@ -778,6 +778,7 @@ fn test_serde_custom_tikv_config() {
         enable_compaction_filter: false,
         compaction_filter_skip_version_check: true,
         enable_safe_point_v2: false,
+        disable_safe_point_fallback_v1: false,
     };
     value.pessimistic_txn = PessimisticTxnConfig {
         wait_for_lock_timeout: ReadableDuration::millis(10),

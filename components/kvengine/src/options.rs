@@ -54,7 +54,11 @@ pub struct Options {
     /// Indicate kvengine is used for restore or not.
     pub for_restore: bool,
 
+    // Start try to get gc safe point from gc v2 cache.
     pub enable_safe_point_v2: bool,
+
+    // Block keyspace gc safe point back to gc v1.
+    pub disable_safe_point_fallback_v1: bool,
 
     pub compaction_request_version: u32,
     /// The ratio threshold of tombstone entries to trigger compaction.
@@ -83,6 +87,7 @@ impl Default for Options {
             enable_inner_key_offset: false,
             for_restore: false,
             enable_safe_point_v2: false,
+            disable_safe_point_fallback_v1: false,
             compaction_request_version: DEFAULT_COMPACTION_REQUEST_VERSION,
             compaction_tombs_ratio: DEFAULT_COMPACTION_TOMBS_RATIO,
             compaction_tombs_count: DEFAULT_COMPACTION_TOMBS_COUNT,

@@ -23,6 +23,7 @@ pub struct GcConfig {
     /// can enable it by force.
     pub compaction_filter_skip_version_check: bool,
     pub enable_safe_point_v2: bool,
+    pub disable_safe_point_fallback_v1: bool,
 }
 
 impl Default for GcConfig {
@@ -34,6 +35,7 @@ impl Default for GcConfig {
             enable_compaction_filter: true,
             compaction_filter_skip_version_check: false,
             enable_safe_point_v2: false,
+            disable_safe_point_fallback_v1: false,
         }
     }
 }

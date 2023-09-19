@@ -439,6 +439,16 @@ impl Engine {
         }
     }
 
+    pub fn get_managed_safe_ts(&self, key: &[u8]) -> u64 {
+        let gc_safe_point_ts = load_u64(&self.managed_safe_ts);
+        debug!(
+            "Get gc safe point v1, key:{:?}, gc safepoint:{}",
+            log_wrappers::Value::key(key),
+            gc_safe_point_ts,
+        );
+        gc_safe_point_ts
+    }
+
     pub fn get_keyspace_gc_safepoint_v2(&self, key: &[u8]) -> u64 {
         match &self.ks_safepoint_v2 {
             Some(sp_map) => {
@@ -449,7 +459,23 @@ impl Engine {
 
                     let keyspace_sp_ts = sp_map.get(&keyspace_id_u32);
                     match keyspace_sp_ts {
-                        None => 0,
+                        None => {
+                            if self.opts.disable_safe_point_fallback_v1 {
+                                debug!(
+                                    "Can not get gc safe point v2, and refuse to get gc safe point v1, key:{:?}, keyspace_id:{}",
+                                    log_wrappers::Value::key(key),
+                                    keyspace_id_u32
+                                );
+                                return 0;
+                            }
+                            debug!(
+                                "Can not get gc safe point v2, get gc safe point v1, key:{:?}, keyspace_id:{}",
+                                log_wrappers::Value::key(key),
+                                keyspace_id_u32
+                            );
+                            // Api v1 key.
+                            self.get_managed_safe_ts(key)
+                        }
                         Some(ks2sp) => {
                             let ks_gc_sp = *ks2sp.value();
                             debug!(
@@ -463,24 +489,12 @@ impl Engine {
                     }
                 } else {
                     // Api v1 key.
-                    let gc_safe_point_ts = load_u64(&self.managed_safe_ts);
-                    debug!(
-                        "Get gc safe point v1, key:{:?}, gc safepoint:{}",
-                        log_wrappers::Value::key(key),
-                        gc_safe_point_ts,
-                    );
-                    gc_safe_point_ts
+                    self.get_managed_safe_ts(key)
                 }
             }
             None => {
                 // Api v1 key.
-                let gc_safe_point_ts = load_u64(&self.managed_safe_ts);
-                debug!(
-                    "Get gc safe point v1, key:{:?}, gc safepoint:{}",
-                    log_wrappers::Value::key(key),
-                    gc_safe_point_ts,
-                );
-                gc_safe_point_ts
+                self.get_managed_safe_ts(key)
             }
         }
     }
