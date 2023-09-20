@@ -57,12 +57,11 @@ impl CloudReader {
         let mut data_iter =
             self.snapshot
                 .new_iterator(WRITE_CF, false, true, None, self.fill_cache);
-        data_iter.seek(&raw_key);
+        let mut next_key = Vec::with_capacity(raw_key.len() + 1);
+        next_key.extend_from_slice(&raw_key);
+        next_key.push(0);
+        data_iter.set_range(Bytes::from(raw_key), Bytes::from(next_key));
         while data_iter.valid() {
-            if data_iter.key() != raw_key {
-                break;
-            }
-
             debug_assert!(!kvengine::table::is_deleted(data_iter.meta()));
             // TODO: remove this check, iterator should not return deleted records.
             if kvengine::table::is_deleted(data_iter.meta()) {
