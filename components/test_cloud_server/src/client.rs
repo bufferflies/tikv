@@ -34,7 +34,7 @@ use rfstore::store::RegionIdVer;
 use test_pd_client::TestPdClient;
 use tikv::storage::mvcc::TimeStamp;
 use tikv_client::{
-    proto::kvrpcpb::Mutation as KvMutation, BoundRange, IntoOwnedRange, TransactionOptions,
+    proto::kvrpcpb::Mutation as KvMutation, CheckLevel, IntoOwnedRange, TransactionOptions,
 };
 use tikv_util::{
     box_err,
@@ -1339,7 +1339,10 @@ type TxnClient = tikv_client::TransactionClient<ApiV2NoPrefixCodec>;
 /// ClusterTxnClient provides transaction operations.
 pub struct ClusterTxnClient {
     inner: TxnClient,
-    pd_client: Arc<TestPdClient>, // Used to get region info for debug.
+
+    // Used to get extra info for debug.
+    pd_client: Arc<TestPdClient>,
+    cluster_client: ClusterClient,
 }
 
 impl Deref for ClusterTxnClient {
@@ -1351,13 +1354,21 @@ impl Deref for ClusterTxnClient {
 }
 
 impl ClusterTxnClient {
-    pub fn new(inner: TxnClient, pd_client: Arc<TestPdClient>) -> Self {
-        Self { inner, pd_client }
+    pub fn new(
+        inner: TxnClient,
+        pd_client: Arc<TestPdClient>,
+        cluster_client: ClusterClient,
+    ) -> Self {
+        Self {
+            inner,
+            pd_client,
+            cluster_client,
+        }
     }
 
     /// Verify data by scanning the given range.
     pub async fn verify_data_by_scan(
-        &self,
+        &mut self,
         ref_store: &RefStore,
         range: Option<(&[u8], &[u8])>,
     ) -> Result<usize> {
@@ -1382,24 +1393,29 @@ impl ClusterTxnClient {
         let mut db_cnt = 0;
         for kv in kv_pairs {
             db_cnt += 1;
-            let ref_val = ref_store.get::<[u8]>(kv.key().into());
+            let key: &[u8] = kv.key().into();
+            let ref_val = ref_store.get(key);
             if ref_val.is_none() || ref_val.as_ref().unwrap().is_none() {
-                return Err(box_err!(
+                let err: Error = box_err!(
                     "verify_data_by_scan: not found in ref store, db: {} -> {}",
-                    log_wrappers::hex_encode_upper::<&[u8]>(kv.key().into()),
+                    log_wrappers::hex_encode_upper(key),
                     log_wrappers::hex_encode_upper(kv.value())
-                ));
+                );
+                self.log_verify_error(key, None, &err);
+                return Err(err);
             }
             let ref_val = ref_val.as_ref().unwrap().as_ref().unwrap();
             if ref_val != kv.value() {
-                return Err(box_err!(
+                let err: Error = box_err!(
                     "verify_data_by_scan: value not match for key {}, db: {}(len:{}), ref store: {}(len:{})",
-                    log_wrappers::hex_encode_upper::<&[u8]>(kv.key().into()),
+                    log_wrappers::hex_encode_upper(key),
                     log_wrappers::hex_encode_upper(kv.value()),
                     kv.value().len(),
                     log_wrappers::hex_encode_upper(ref_val),
                     ref_val.len()
-                ));
+                );
+                self.log_verify_error(key, Some(kv.value()), &err);
+                return Err(err);
             }
         }
         if ref_cnt != db_cnt {
@@ -1425,11 +1441,13 @@ impl ClusterTxnClient {
         timeout: Duration,
     ) -> tikv_client::Result<impl Iterator<Item = tikv_client::KvPair>> {
         let start_ts = self.inner.current_timestamp().await?;
-        let scan_range: BoundRange = if let Some(range) = range {
-            range.into_owned()
+        let scan_range = if let Some(range) = range {
+            (range.0, range.1)
         } else {
-            (MIN_TXN_KEY..MAX_TXN_KEY).into_owned()
+            (MIN_TXN_KEY, MAX_TXN_KEY)
         };
+        let tag = self.tag_from_key(scan_range.0);
+
         let mut snapshot = self
             .inner
             .snapshot(start_ts, TransactionOptions::new_pessimistic());
@@ -1437,17 +1455,27 @@ impl ClusterTxnClient {
         let start_time = Instant::now();
         let mut last_error: Option<tikv_client::Error> = None;
         while start_time.saturating_elapsed() < timeout {
-            match snapshot.scan(scan_range.clone(), limit as u32).await {
-                Ok(kvs) => return Ok(kvs),
-                Err(err) if Self::is_kv_error_retryable(&err) => {
-                    self.log_kv_error(&err);
+            match tokio::time::timeout(
+                timeout,
+                snapshot.scan(scan_range.into_owned(), limit as u32),
+            )
+            .await
+            {
+                Ok(Ok(kvs)) => return Ok(kvs),
+                Ok(Err(err)) if Self::is_kv_error_retryable(&err) => {
+                    self.log_kv_error(&tag, &err);
                     last_error = Some(err);
                     tokio::time::sleep(Duration::from_millis(200)).await;
                     continue;
                 }
-                Err(err) => {
-                    self.log_kv_error(&err);
+                Ok(Err(err)) => {
+                    self.log_kv_error(&tag, &err);
                     return Err(err);
+                }
+                Err(elapsed) => {
+                    let err_msg = format!("{} kv_scan timeout: {:?}", tag, elapsed);
+                    error!("{}", err_msg);
+                    return Err(tikv_client::Error::StringError(err_msg));
                 }
             }
         }
@@ -1456,24 +1484,22 @@ impl ClusterTxnClient {
 
     async fn kv_mutate_inner(
         &self,
+        txn: &mut tikv_client::Transaction<ApiV2NoPrefixCodec>,
         muts: Vec<KvMutation>,
+        started_commit: &mut bool,
     ) -> std::result::Result<(), tikv_client::Error> {
-        let option = TransactionOptions::new_pessimistic();
-        let mut txn = self.begin_with_options(option).await?;
-        match txn.batch_mutate(muts).await {
-            Ok(()) => {
-                let _ = txn.commit().await?;
-                Ok(())
-            }
-            Err(err) => {
-                txn.rollback().await?;
-                Err(err)
-            }
+        if !*started_commit {
+            txn.batch_mutate(muts).await?;
         }
+
+        *started_commit = true;
+        let _ = txn.commit().await?;
+        Ok(())
     }
 
     pub async fn kv_mutate(&self, muts: Vec<Mutation>, timeout: Duration) -> Result<()> {
         assert!(!muts.is_empty());
+        let tag = self.tag_from_key(muts[0].get_key());
         let muts: Vec<KvMutation> = muts
             .into_iter()
             .map(|m| KvMutation {
@@ -1484,19 +1510,29 @@ impl ClusterTxnClient {
             })
             .collect();
 
+        // Must use the same transaction during retries.
+        // Otherwise the later transaction in retries would be blocked by the locks of a
+        // previous one.
+        let option = TransactionOptions::new_pessimistic().drop_check(CheckLevel::Warn);
+        let mut txn = self.begin_with_options(option).await?;
+        let mut started_commit = false;
+
         let start_time = Instant::now();
         let mut last_error: Option<tikv_client::Error> = None;
         while start_time.saturating_elapsed() < timeout {
-            match self.kv_mutate_inner(muts.clone()).await {
+            match self
+                .kv_mutate_inner(&mut txn, muts.clone(), &mut started_commit)
+                .await
+            {
                 Ok(_) => return Ok(()),
                 Err(err) if Self::is_kv_error_retryable(&err) => {
-                    self.log_kv_error(&err);
+                    self.log_kv_error(&tag, &err);
                     last_error = Some(err);
                     tokio::time::sleep(Duration::from_millis(200)).await;
                     continue;
                 }
                 Err(err) => {
-                    self.log_kv_error(&err);
+                    self.log_kv_error(&tag, &err);
                     return Err(err.into());
                 }
             }
@@ -1518,43 +1554,57 @@ impl ClusterTxnClient {
         }
     }
 
-    pub(crate) fn log_kv_error(&self, err: &tikv_client::Error) {
+    fn log_kv_error(&self, tag: &str, err: &tikv_client::Error) {
         match err {
             tikv_client::Error::PessimisticLockError {
                 inner,
                 success_keys,
             } => {
                 error!(
-                    "tikv_client::PessimisticLockError: inner: {:?}, success_keys: {:?}",
-                    inner, success_keys
+                    "{} tikv_client::PessimisticLockError: inner: {:?}, success_keys: {:?}",
+                    tag, inner, success_keys
                 );
-                self.log_kv_error(inner);
+                self.log_kv_error(tag, inner);
             }
             tikv_client::Error::ResolveLockError(lock_info) => {
                 if let Some(first) = lock_info.first() {
-                    match self.pd_client.get_region(&first.key) {
-                        Ok(region) => {
-                            error!(
-                                "{}:{} tikv_client::ResolveLockError (first), lock_info: {:?}",
-                                region.get_id(),
-                                region.get_region_epoch().get_version(),
-                                lock_info
-                            );
-                        }
-                        Err(err) => {
-                            error!(
-                                "tikv_client::ResolveLockError: get_region failed for key {}, lock_info {:?}, err: {:?}",
-                                log_wrappers::hex_encode_upper(&first.key),
-                                lock_info,
-                                err
-                            )
-                        }
-                    }
+                    let region = self.pd_client.get_region(&first.key).unwrap();
+                    error!(
+                        "{} tikv_client::ResolveLockError (first), lock region: {}:{}, lock_info: {:?}",
+                        tag,
+                        region.get_id(),
+                        region.get_region_epoch().get_version(),
+                        lock_info
+                    );
                 }
             }
             _ => {
-                error!("tikv_client::Error: {:?}", err);
+                error!("{} tikv_client::Error: {:?}", tag, err);
             }
         }
+    }
+
+    fn log_verify_error(&mut self, key: &[u8], expect_val: Option<&[u8]>, err: &Error) {
+        let res = self.cluster_client.verify_key_value(
+            key,
+            expect_val,
+            Instant::now(),
+            &RequestOptions::default(),
+        );
+        assert!(
+            res.is_err(),
+            "verify_key_value should fail, verify error: {:?}",
+            err
+        );
+        error!("verify_key_value error: {:?}", res.unwrap_err());
+    }
+
+    fn tag_from_key(&self, key: &[u8]) -> String {
+        let region = self.pd_client.get_region(key.as_ref()).unwrap();
+        format!(
+            "{}:{}",
+            region.get_id(),
+            region.get_region_epoch().get_version()
+        )
     }
 }

@@ -153,7 +153,7 @@ fn test_txn_client() {
 
     Runtime::new().unwrap().block_on(async {
         cluster.start_pd_server(1);
-        let txn_client = cluster.new_txn_client().await;
+        let mut txn_client = cluster.new_txn_client().await;
 
         // Check TSO.
         {
@@ -186,10 +186,20 @@ fn test_txn_client() {
         let ref_store = client.dump_ref_store();
 
         // Verify by scan.
-        txn_client
-            .verify_data_by_scan(&ref_store, None)
-            .await
-            .unwrap();
+        assert_eq!(
+            txn_client
+                .verify_data_by_scan(&ref_store, None)
+                .await
+                .unwrap(),
+            300
+        );
+        assert_eq!(
+            txn_client
+                .verify_data_by_scan(&ref_store, Some((&i_to_key(100), &i_to_key(250))))
+                .await
+                .unwrap(),
+            150
+        );
     });
 
     cluster.stop();

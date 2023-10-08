@@ -336,7 +336,7 @@ pub(crate) async fn request_major_compact_on_store(store: Store, keyspace_id: u3
 
 pub(crate) fn spawn_keyspace_write(
     idx: usize,
-    mut client: ClusterKeyspaceClient,
+    client: ClusterKeyspaceClient,
     timeout: Duration,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {

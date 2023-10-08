@@ -399,7 +399,7 @@ impl ServerCluster {
         )
         .await
         .unwrap();
-        ClusterTxnClient::new(client, self.get_pd_client())
+        ClusterTxnClient::new(client, self.get_pd_client(), self.new_client())
     }
 }
 

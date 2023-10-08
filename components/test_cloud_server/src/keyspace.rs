@@ -275,7 +275,7 @@ impl ClusterKeyspaceClient {
     }
 
     pub async fn keyspace_put_kv<F, G>(
-        &mut self,
+        &self,
         keyspace_id: u32,
         table_id: i64,
         rng: Range<usize>,
@@ -304,7 +304,7 @@ impl ClusterKeyspaceClient {
     }
 
     pub async fn keyspace_del_kv<F>(
-        &mut self,
+        &self,
         keyspace_id: u32,
         table_id: i64,
         rng: Range<usize>,
