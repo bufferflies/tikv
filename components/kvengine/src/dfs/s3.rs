@@ -23,8 +23,8 @@ use rusoto_core::{
     HttpClient, HttpDispatchError, Region, RusotoError,
 };
 use rusoto_s3::{
-    CopyObjectError, DeleteObjectError, DeleteObjectTaggingError, GetObjectError,
-    GetObjectTaggingError, ListObjectsV2Error, PutObjectError, PutObjectTaggingError,
+    CopyObjectError, DeleteObjectError, GetObjectError, GetObjectTaggingError, ListObjectsV2Error,
+    PutObjectError, PutObjectTaggingError,
 };
 use tikv_util::time::Instant;
 use tokio::runtime::Runtime;
@@ -596,109 +596,44 @@ impl S3FsCore {
         target_storage_class: Option<&str>,
     ) -> Result<(), dfs::Error> {
         let mut retry_cnt = 0;
-        let mut copied = false;
         let source_key = format!("{}/{}", self.bucket, self.file_key(source_file_id));
         let target_key = self.file_key(target_file_id);
 
         loop {
-            if !copied {
-                let mut req = self.new_request("PUT", &target_key);
-                req.add_header("x-amz-copy-source", &source_key);
-                req.add_header("x-amz-metadata-directive", "REPLACE");
-                if let Some(target_tagging) = target_tagging {
-                    req.add_header("x-amz-tagging", &target_tagging.to_url_encoded());
-                    req.add_header("x-amz-tagging-directive", "REPLACE");
-                }
-                if let Some(target_storage_class) = target_storage_class.as_ref() {
-                    if self.is_on_aws() {
-                        req.add_header("x-amz-storage-class", target_storage_class);
-                    } else {
-                        debug!(
-                            "{} ignore target_storage_class {} which is not supported by {}",
-                            target_file_id, target_storage_class, self.hostname
-                        );
-                    }
-                }
-                if let Err(err) = self.dispatch(req, CopyObjectError::from_response).await {
-                    if retry_cnt < MAX_RETRY_COUNT {
-                        retry_cnt += 1;
-                        let retry_sleep = 2u64.pow(retry_cnt) * RETRY_SLEEP_MS;
-                        warn!(
-                            "retry copy file {}, retry count {}, retry after {}ms, err {:?}",
-                            target_file_id, retry_cnt, retry_sleep, err,
-                        );
-                        tokio::time::sleep(Duration::from_millis(retry_sleep)).await;
-                        continue;
-                    } else {
-                        let err_msg = format!(
-                            "failed to copy file {} from {}, reach max retry count {}, err {:?}",
-                            target_file_id, source_file_id, MAX_RETRY_COUNT, err,
-                        );
-                        error!("{}", err_msg);
-                        return Err(dfs::Error::S3(err_msg));
-                    }
-                }
-                copied = true;
+            let mut req = self.new_request("PUT", &target_key);
+            req.add_header("x-amz-copy-source", &source_key);
+            req.add_header("x-amz-metadata-directive", "REPLACE");
+            if let Some(target_tagging) = target_tagging {
+                req.add_header("x-amz-tagging", &target_tagging.to_url_encoded());
+                req.add_header("x-amz-tagging-directive", "REPLACE");
             }
-
-            if target_tagging.is_none() || !self.hostname.contains("ksyuncs.com") {
-                return Ok(());
+            if let Some(target_storage_class) = target_storage_class.as_ref() {
+                if self.is_on_aws() {
+                    req.add_header("x-amz-storage-class", target_storage_class);
+                } else {
+                    debug!(
+                        "{} ignore target_storage_class {} which is not supported by {}",
+                        target_file_id, target_storage_class, self.hostname
+                    );
+                }
             }
-
-            // ks3 doesn't support copy object with tagging, workaround to send another
-            // request. TODO: remove it when KS3 fixed the compatibility issue.
-            let target_tagging = target_tagging.unwrap();
-            let mut req = self.new_tagging_request("PUT", &target_key);
-            let tagging_xml = target_tagging.to_xml();
-            let stream = futures::stream::once(async move { Ok(Bytes::from(tagging_xml)) });
-            req.set_content_type("application/xml".to_string());
-            req.set_payload_stream(rusoto_core::ByteStream::new(stream));
-            if let Err(err) = self
-                .dispatch(req, PutObjectTaggingError::from_response)
-                .await
-            {
+            if let Err(err) = self.dispatch(req, CopyObjectError::from_response).await {
                 if retry_cnt < MAX_RETRY_COUNT {
                     retry_cnt += 1;
                     let retry_sleep = 2u64.pow(retry_cnt) * RETRY_SLEEP_MS;
-                    warn!("retry tagging file {}, error {:?}", target_file_id, &err);
+                    warn!(
+                        "retry copy file {}, retry count {}, retry after {}ms, err {:?}",
+                        target_file_id, retry_cnt, retry_sleep, err,
+                    );
                     tokio::time::sleep(Duration::from_millis(retry_sleep)).await;
                     continue;
                 } else {
                     let err_msg = format!(
-                        "failed to tagging file {}, reach max retry count {}, err {:?}",
-                        target_file_id, MAX_RETRY_COUNT, err,
+                        "failed to copy file {} from {}, reach max retry count {}, err {:?}",
+                        target_file_id, source_file_id, MAX_RETRY_COUNT, err,
                     );
                     error!("{}", err_msg);
                     return Err(dfs::Error::S3(err_msg));
-                }
-            }
-            return Ok(());
-        }
-    }
-
-    async fn _remove_file_tagging(&self, file_id: u64) -> Result<(), dfs::Error> {
-        let mut retry_cnt = 0;
-        loop {
-            let key = self.file_key(file_id);
-            let req = self.new_tagging_request("DELETE", &key);
-            if let Err(err) = self
-                .dispatch(req, DeleteObjectTaggingError::from_response)
-                .await
-            {
-                if retry_cnt < MAX_RETRY_COUNT {
-                    retry_cnt += 1;
-                    warn!(
-                        "{}nd retry remove file {} tag error {:?}",
-                        retry_cnt, file_id, &err
-                    );
-                    let retry_sleep = 2u64.pow(retry_cnt) * RETRY_SLEEP_MS;
-                    tokio::time::sleep(Duration::from_millis(retry_sleep)).await;
-                    continue;
-                } else {
-                    return Err(dfs::Error::S3(format!(
-                        "Failed to remove file {} tag, reach max retry count {}, err {:?}",
-                        file_id, MAX_RETRY_COUNT, err,
-                    )));
                 }
             }
             return Ok(());
