@@ -1,7 +1,7 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    cmp::{max, min},
+    cmp::max,
     collections::{hash_map::Entry, HashMap},
     default::Default,
     fs,
@@ -37,7 +37,7 @@ const DEFAULT_LOAD_DATA_WORKER_PORT: u16 = 19500;
 const DEFAULT_MAX_SIZE: ReadableSize = ReadableSize::gb(1024);
 const DEFAULT_SPAWN_DATA_SIZE: ReadableSize = ReadableSize::gb(2);
 const DEFAULT_SPAWN_RUNNING_TASKS: usize = 2;
-const DEFAULT_WORKER_MAX_CORES: usize = 8;
+const DEFAULT_WORKER_MAX_CORES: f64 = 4.0;
 const DEFAULT_EXPIRE_SECONDS: i64 = 60 * 10;
 const DEFAULT_NAMESPACE: &str = "tidb-serverless";
 const DEFAULT_TEMPLATE_STS_NAME: &str = "tikv-api";
@@ -60,7 +60,7 @@ pub struct WorkerScalerConfig {
     pub max_size: ReadableSize,
     pub spawn_data_size: ReadableSize,
     pub spawn_running_tasks: usize,
-    pub worker_max_cores: usize,
+    pub worker_max_cores: f64,
     pub expire_seconds: i64,
     pub worker_count_limit: usize,
 }
@@ -372,7 +372,7 @@ impl WorkerScaler {
     async fn create_sts(
         &self,
         sts_name: String,
-        num_cores: usize,
+        num_cores: f64,
         storage_size_gb: usize,
     ) -> kube::Result<()> {
         let mut sts = self.sts_template.clone();
@@ -402,17 +402,19 @@ impl WorkerScaler {
         );
         let pod_template_spec = pod_template.spec.as_mut().unwrap();
         let pod_container = pod_template_spec.containers.first_mut().unwrap();
-        let cpu = format!("{}", num_cores);
-        let memory = format!("{}Gi", num_cores * 2);
+        let request_cpu = format!("{}", num_cores);
+        let request_memory = format!("{}Gi", num_cores * 2.0);
+        let limit_cpu = format!("{}", num_cores * 2.0);
+        let limit_memory = format!("{}Gi", num_cores * 4.0);
         pod_container.resources = Some(
             serde_json::from_value(json!({
                 "requests": {
-                    "cpu": cpu,
-                    "memory": memory
+                    "cpu": request_cpu,
+                    "memory": request_memory
                 },
                 "limits": {
-                    "cpu": cpu,
-                    "memory": memory
+                    "cpu": limit_cpu,
+                    "memory": limit_memory
                 },
             }))
             .unwrap(),
@@ -608,19 +610,17 @@ async fn get_proc_output(mut attached: AttachedProcess) -> String {
     out
 }
 
-fn calculate_num_cores(data_size_gb: usize, max_cores: usize) -> usize {
-    let cores = if data_size_gb > 1024 {
-        32
-    } else if data_size_gb > 256 {
-        16
-    } else if data_size_gb > 64 {
-        8
-    } else if data_size_gb > 16 {
-        4
+fn calculate_num_cores(data_size_gb: usize, max_cores: f64) -> f64 {
+    let cores: f64 = if data_size_gb > 100 {
+        4.0
+    } else if data_size_gb > 10 {
+        2.0
+    } else if data_size_gb > 1 {
+        1.0
     } else {
-        2
+        0.5
     };
-    min(cores, max_cores)
+    cores.min(max_cores)
 }
 
 #[cfg(test)]
