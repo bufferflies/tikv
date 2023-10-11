@@ -16,6 +16,7 @@ use std::{
 
 use bytes::Buf;
 use chrono::{DateTime, Utc};
+use engine_traits::ListObjectContent;
 use futures::{future::ok, StreamExt, TryStreamExt};
 use glob::glob;
 use hyper::{
@@ -23,7 +24,7 @@ use hyper::{
     service::{make_service_fn, service_fn},
     Body, HeaderMap, Method, Request, Response, Server, StatusCode,
 };
-use kvengine::dfs::{ListObjectContent, ListObjects, Tagging, STORAGE_CLASS_DEFAULT};
+use kvengine::dfs::{ListObjects, Tagging, STORAGE_CLASS_DEFAULT};
 use rand::Rng;
 use tikv_util::{debug, error, info, time::Instant};
 use tokio::{
@@ -120,7 +121,7 @@ impl ObjectStorageService {
                 .to_str()
                 .unwrap();
             parent.to_path_buf().join(format!(
-                "{}.tmp.{}",
+                "{}.{}.tmp",
                 file_name,
                 rand::thread_rng().gen::<u16>()
             ))
@@ -182,6 +183,10 @@ impl ObjectStorageService {
         let path = ctx.lock().unwrap().store_path.to_owned();
         let file_path = Self::make_file_path(&path, parts.uri.path());
         let range = Self::parse_get_object_req_range(&parts.headers);
+        info!(
+            "handle_get_object: file_path {}",
+            file_path.to_str().unwrap()
+        );
         let res = if let Ok(mut file) = File::open(file_path).await {
             let body = match range {
                 None => {
@@ -380,19 +385,24 @@ impl ObjectStorageService {
         let end = cmp::min(start + max_keys, files.len());
         let contents = files[start..end]
             .iter()
-            .map(|x| {
-                let metadata = x.metadata().unwrap();
-                let last_modified: DateTime<Utc> = metadata.modified().unwrap().into();
-                ListObjectContent {
-                    key: x
-                        .strip_prefix(&bucket_path)
-                        .unwrap()
-                        .to_str()
-                        .unwrap()
-                        .to_owned(),
-                    last_modified: last_modified.to_rfc3339(),
-                    storage_class: STORAGE_CLASS_DEFAULT.to_owned(),
-                    size: metadata.len(),
+            .filter_map(|x| {
+                // Filter out tmp files.
+                if x.to_str().unwrap().ends_with(".tmp") {
+                    None
+                } else {
+                    let metadata = x.metadata().unwrap();
+                    let last_modified: DateTime<Utc> = metadata.modified().unwrap().into();
+                    Some(ListObjectContent {
+                        key: x
+                            .strip_prefix(&bucket_path)
+                            .unwrap()
+                            .to_str()
+                            .unwrap()
+                            .to_owned(),
+                        last_modified: last_modified.to_rfc3339(),
+                        storage_class: STORAGE_CLASS_DEFAULT.to_owned(),
+                        size: metadata.len(),
+                    })
                 }
             })
             .collect::<Vec<_>>();

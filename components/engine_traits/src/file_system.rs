@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use file_system::{get_io_rate_limiter, get_io_type, IoOp, IoRateLimiter};
+use serde::{Deserialize, Serialize};
 
 use crate::Result;
 
@@ -75,10 +76,26 @@ impl GetObjectOptions {
     }
 }
 
+#[derive(Clone, Default, Debug, Serialize, Deserialize)]
+#[serde(default)]
+#[serde(rename_all = "PascalCase")]
+pub struct ListObjectContent {
+    pub key: String,
+    pub last_modified: String,
+    pub storage_class: String,
+    pub size: u64, // in bytes.
+}
+
 pub trait ObjectStorage: Sync + Send {
     fn put_objects(&self, objects: Vec<(String, Bytes)>) -> std::result::Result<(), String>;
     fn get_objects(
         &self,
         keys: Vec<(String, GetObjectOptions)>,
     ) -> std::result::Result<Vec<(String, Bytes)>, String>;
+    fn list_objects(
+        &self,
+        start_after: &str,
+        prefix: Option<&str>,
+        max_keys: Option<u32>,
+    ) -> std::result::Result<(Vec<ListObjectContent>, Option<String>), String>;
 }

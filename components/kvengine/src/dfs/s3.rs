@@ -10,7 +10,7 @@ use std::{
 use async_trait::async_trait;
 use bstr::ByteSlice;
 use bytes::{Buf, Bytes};
-use engine_traits::{GetObjectOptions, ObjectStorage};
+use engine_traits::{GetObjectOptions, ListObjectContent, ObjectStorage};
 use farmhash::fingerprint64;
 use futures::StreamExt;
 use http::StatusCode;
@@ -727,6 +727,19 @@ impl ObjectStorage for S3Fs {
         }
         Ok(objects)
     }
+
+    fn list_objects(
+        &self,
+        start_after: &str,
+        prefix: Option<&str>,
+        max_keys: Option<u32>,
+    ) -> Result<(Vec<ListObjectContent>, Option<String>), String> {
+        let runtime = self.get_runtime();
+        runtime
+            .block_on(self.list(start_after, prefix, max_keys))
+            .map(|v| (v.0, v.2))
+            .map_err(|err| format!("list failed {:?}", err))
+    }
 }
 
 #[async_trait]
@@ -851,16 +864,6 @@ impl Dfs for S3Fs {
 pub struct ListObjects {
     pub contents: Vec<ListObjectContent>,
     pub is_truncated: bool,
-}
-
-#[derive(Clone, Default, Debug, Serialize, Deserialize)]
-#[serde(default)]
-#[serde(rename_all = "PascalCase")]
-pub struct ListObjectContent {
-    pub key: String,
-    pub last_modified: String,
-    pub storage_class: String,
-    pub size: u64, // in bytes.
 }
 
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]

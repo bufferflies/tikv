@@ -44,6 +44,9 @@ message StoreBackupMeta {
     ChangeSet manifest = 2;
     repeated WalChunk wal_chunks = 3;
     uint64 raft_meta_start_off = 4;
+    // for lightweight backup, wal_chunks filed will be deleted in future
+    uint32 epoch = 5;
+    uint64 offset = 6;
 }
 
 message WalChunk {
@@ -61,6 +64,7 @@ message ClusterBackupMeta {
     // use map for update convenience
     map<bytes, bytes> keyspace_meta = 6;
     int64 meta_revision = 7;
+    bool is_lightweight = 8;
 }
 
 message RaftLogBackupFile {

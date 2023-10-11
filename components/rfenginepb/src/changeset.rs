@@ -1056,6 +1056,8 @@ pub struct StoreBackupMeta {
     pub manifest: ::protobuf::SingularPtrField<ChangeSet>,
     pub wal_chunks: ::protobuf::RepeatedField<WalChunk>,
     pub raft_meta_start_off: u64,
+    pub epoch: u32,
+    pub offset: u64,
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
     pub cached_size: ::protobuf::CachedSize,
@@ -1159,6 +1161,36 @@ impl StoreBackupMeta {
     pub fn set_raft_meta_start_off(&mut self, v: u64) {
         self.raft_meta_start_off = v;
     }
+
+    // uint32 epoch = 5;
+
+
+    pub fn get_epoch(&self) -> u32 {
+        self.epoch
+    }
+    pub fn clear_epoch(&mut self) {
+        self.epoch = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_epoch(&mut self, v: u32) {
+        self.epoch = v;
+    }
+
+    // uint64 offset = 6;
+
+
+    pub fn get_offset(&self) -> u64 {
+        self.offset
+    }
+    pub fn clear_offset(&mut self) {
+        self.offset = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_offset(&mut self, v: u64) {
+        self.offset = v;
+    }
 }
 
 impl ::protobuf::Message for StoreBackupMeta {
@@ -1200,6 +1232,20 @@ impl ::protobuf::Message for StoreBackupMeta {
                     let tmp = is.read_uint64()?;
                     self.raft_meta_start_off = tmp;
                 },
+                5 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint32()?;
+                    self.epoch = tmp;
+                },
+                6 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.offset = tmp;
+                },
                 _ => {
                     ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
                 },
@@ -1226,6 +1272,12 @@ impl ::protobuf::Message for StoreBackupMeta {
         if self.raft_meta_start_off != 0 {
             my_size += ::protobuf::rt::value_size(4, self.raft_meta_start_off, ::protobuf::wire_format::WireTypeVarint);
         }
+        if self.epoch != 0 {
+            my_size += ::protobuf::rt::value_size(5, self.epoch, ::protobuf::wire_format::WireTypeVarint);
+        }
+        if self.offset != 0 {
+            my_size += ::protobuf::rt::value_size(6, self.offset, ::protobuf::wire_format::WireTypeVarint);
+        }
         my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
         self.cached_size.set(my_size);
         my_size
@@ -1247,6 +1299,12 @@ impl ::protobuf::Message for StoreBackupMeta {
         };
         if self.raft_meta_start_off != 0 {
             os.write_uint64(4, self.raft_meta_start_off)?;
+        }
+        if self.epoch != 0 {
+            os.write_uint32(5, self.epoch)?;
+        }
+        if self.offset != 0 {
+            os.write_uint64(6, self.offset)?;
         }
         os.write_unknown_fields(self.get_unknown_fields())?;
         ::std::result::Result::Ok(())
@@ -1310,6 +1368,16 @@ impl ::protobuf::Message for StoreBackupMeta {
                     |m: &StoreBackupMeta| { &m.raft_meta_start_off },
                     |m: &mut StoreBackupMeta| { &mut m.raft_meta_start_off },
                 ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint32>(
+                    "epoch",
+                    |m: &StoreBackupMeta| { &m.epoch },
+                    |m: &mut StoreBackupMeta| { &mut m.epoch },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                    "offset",
+                    |m: &StoreBackupMeta| { &m.offset },
+                    |m: &mut StoreBackupMeta| { &mut m.offset },
+                ));
                 ::protobuf::reflect::MessageDescriptor::new::<StoreBackupMeta>(
                     "StoreBackupMeta",
                     fields,
@@ -1336,6 +1404,8 @@ impl ::protobuf::Clear for StoreBackupMeta {
         self.manifest.clear();
         self.wal_chunks.clear();
         self.raft_meta_start_off = 0;
+        self.epoch = 0;
+        self.offset = 0;
         self.unknown_fields.clear();
     }
 }
@@ -1349,6 +1419,8 @@ impl ::protobuf::PbPrint for StoreBackupMeta {
         ::protobuf::PbPrint::fmt(&self.manifest, "manifest", buf);
         ::protobuf::PbPrint::fmt(&self.wal_chunks, "wal_chunks", buf);
         ::protobuf::PbPrint::fmt(&self.raft_meta_start_off, "raft_meta_start_off", buf);
+        ::protobuf::PbPrint::fmt(&self.epoch, "epoch", buf);
+        ::protobuf::PbPrint::fmt(&self.offset, "offset", buf);
         if old_len < buf.len() {
           buf.push(' ');
         }
@@ -1363,6 +1435,8 @@ impl ::std::fmt::Debug for StoreBackupMeta {
         ::protobuf::PbPrint::fmt(&self.manifest, "manifest", &mut s);
         ::protobuf::PbPrint::fmt(&self.wal_chunks, "wal_chunks", &mut s);
         ::protobuf::PbPrint::fmt(&self.raft_meta_start_off, "raft_meta_start_off", &mut s);
+        ::protobuf::PbPrint::fmt(&self.epoch, "epoch", &mut s);
+        ::protobuf::PbPrint::fmt(&self.offset, "offset", &mut s);
         write!(f, "{}", s)
     }
 }
@@ -1634,6 +1708,7 @@ pub struct ClusterBackupMeta {
     pub safe_ts: u64,
     pub keyspace_meta: ::std::collections::HashMap<::std::vec::Vec<u8>, ::std::vec::Vec<u8>>,
     pub meta_revision: i64,
+    pub is_lightweight: bool,
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
     pub cached_size: ::protobuf::CachedSize,
@@ -1774,6 +1849,21 @@ impl ClusterBackupMeta {
     pub fn set_meta_revision(&mut self, v: i64) {
         self.meta_revision = v;
     }
+
+    // bool is_lightweight = 8;
+
+
+    pub fn get_is_lightweight(&self) -> bool {
+        self.is_lightweight
+    }
+    pub fn clear_is_lightweight(&mut self) {
+        self.is_lightweight = false;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_is_lightweight(&mut self, v: bool) {
+        self.is_lightweight = v;
+    }
 }
 
 impl ::protobuf::Message for ClusterBackupMeta {
@@ -1831,6 +1921,13 @@ impl ::protobuf::Message for ClusterBackupMeta {
                     let tmp = is.read_int64()?;
                     self.meta_revision = tmp;
                 },
+                8 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_bool()?;
+                    self.is_lightweight = tmp;
+                },
                 _ => {
                     ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
                 },
@@ -1863,6 +1960,9 @@ impl ::protobuf::Message for ClusterBackupMeta {
         if self.meta_revision != 0 {
             my_size += ::protobuf::rt::value_size(7, self.meta_revision, ::protobuf::wire_format::WireTypeVarint);
         }
+        if self.is_lightweight != false {
+            my_size += 2;
+        }
         my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
         self.cached_size.set(my_size);
         my_size
@@ -1889,6 +1989,9 @@ impl ::protobuf::Message for ClusterBackupMeta {
         ::protobuf::rt::write_map_with_cached_sizes::<::protobuf::types::ProtobufTypeBytes, ::protobuf::types::ProtobufTypeBytes>(6, &self.keyspace_meta, os)?;
         if self.meta_revision != 0 {
             os.write_int64(7, self.meta_revision)?;
+        }
+        if self.is_lightweight != false {
+            os.write_bool(8, self.is_lightweight)?;
         }
         os.write_unknown_fields(self.get_unknown_fields())?;
         ::std::result::Result::Ok(())
@@ -1967,6 +2070,11 @@ impl ::protobuf::Message for ClusterBackupMeta {
                     |m: &ClusterBackupMeta| { &m.meta_revision },
                     |m: &mut ClusterBackupMeta| { &mut m.meta_revision },
                 ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeBool>(
+                    "is_lightweight",
+                    |m: &ClusterBackupMeta| { &m.is_lightweight },
+                    |m: &mut ClusterBackupMeta| { &mut m.is_lightweight },
+                ));
                 ::protobuf::reflect::MessageDescriptor::new::<ClusterBackupMeta>(
                     "ClusterBackupMeta",
                     fields,
@@ -1996,6 +2104,7 @@ impl ::protobuf::Clear for ClusterBackupMeta {
         self.safe_ts = 0;
         self.keyspace_meta.clear();
         self.meta_revision = 0;
+        self.is_lightweight = false;
         self.unknown_fields.clear();
     }
 }
@@ -2012,6 +2121,7 @@ impl ::protobuf::PbPrint for ClusterBackupMeta {
         ::protobuf::PbPrint::fmt(&self.safe_ts, "safe_ts", buf);
         ::protobuf::PbPrint::fmt(&self.keyspace_meta, "keyspace_meta", buf);
         ::protobuf::PbPrint::fmt(&self.meta_revision, "meta_revision", buf);
+        ::protobuf::PbPrint::fmt(&self.is_lightweight, "is_lightweight", buf);
         if old_len < buf.len() {
           buf.push(' ');
         }
@@ -2029,6 +2139,7 @@ impl ::std::fmt::Debug for ClusterBackupMeta {
         ::protobuf::PbPrint::fmt(&self.safe_ts, "safe_ts", &mut s);
         ::protobuf::PbPrint::fmt(&self.keyspace_meta, "keyspace_meta", &mut s);
         ::protobuf::PbPrint::fmt(&self.meta_revision, "meta_revision", &mut s);
+        ::protobuf::PbPrint::fmt(&self.is_lightweight, "is_lightweight", &mut s);
         write!(f, "{}", s)
     }
 }
@@ -3017,19 +3128,21 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     fpb.RaftLogFileB\0:\0\"-\n\tPeerState\x12\r\n\x03key\x18\x01\x20\x01(\
     \x0cB\0\x12\x0f\n\x05value\x18\x02\x20\x01(\x0cB\0:\0\"<\n\x0bRaftLogFil\
     e\x12\x15\n\x0bfirst_index\x18\x01\x20\x01(\x04B\0\x12\x14\n\nlast_index\
-    \x18\x02\x20\x01(\x04B\0:\0\"\x91\x01\n\x0fStoreBackupMeta\x12\x12\n\x08\
+    \x18\x02\x20\x01(\x04B\0:\0\"\xb4\x01\n\x0fStoreBackupMeta\x12\x12\n\x08\
     store_id\x18\x01\x20\x01(\x04B\0\x12#\n\x08manifest\x18\x02\x20\x01(\x0b\
     2\x0f.rfpb.ChangeSetB\0\x12$\n\nwal_chunks\x18\x03\x20\x03(\x0b2\x0e.rfp\
-    b.WalChunkB\0\x12\x1d\n\x13raft_meta_start_off\x18\x04\x20\x01(\x04B\0:\
-    \0\"E\n\x08WalChunk\x12\x0f\n\x05epoch\x18\x01\x20\x01(\rB\0\x12\x13\n\t\
-    start_off\x18\x02\x20\x01(\x04B\0\x12\x11\n\x07end_off\x18\x03\x20\x01(\
-    \x04B\0:\0\"\xa8\x02\n\x11ClusterBackupMeta\x12'\n\x06stores\x18\x01\x20\
-    \x03(\x0b2\x15.rfpb.StoreBackupMetaB\0\x12\x14\n\ncluster_id\x18\x02\x20\
-    \x01(\x04B\0\x12\x13\n\tbackup_ts\x18\x03\x20\x01(\x04B\0\x12\x12\n\x08a\
-    lloc_id\x18\x04\x20\x01(\x04B\0\x12\x11\n\x07safe_ts\x18\x05\x20\x01(\
-    \x04B\0\x12G\n\rkeyspace_meta\x18\x06\x20\x03(\x0b2..rfpb.ClusterBackupM\
-    eta.keyspace_meta_MapEntryB\0\x12\x17\n\rmeta_revision\x18\x07\x20\x01(\
-    \x03B\0\x1a4\n\x16keyspace_meta_MapEntry\x12\t\n\x03key\x18\x01(\x0c\x12\
+    b.WalChunkB\0\x12\x1d\n\x13raft_meta_start_off\x18\x04\x20\x01(\x04B\0\
+    \x12\x0f\n\x05epoch\x18\x05\x20\x01(\rB\0\x12\x10\n\x06offset\x18\x06\
+    \x20\x01(\x04B\0:\0\"E\n\x08WalChunk\x12\x0f\n\x05epoch\x18\x01\x20\x01(\
+    \rB\0\x12\x13\n\tstart_off\x18\x02\x20\x01(\x04B\0\x12\x11\n\x07end_off\
+    \x18\x03\x20\x01(\x04B\0:\0\"\xc2\x02\n\x11ClusterBackupMeta\x12'\n\x06s\
+    tores\x18\x01\x20\x03(\x0b2\x15.rfpb.StoreBackupMetaB\0\x12\x14\n\nclust\
+    er_id\x18\x02\x20\x01(\x04B\0\x12\x13\n\tbackup_ts\x18\x03\x20\x01(\x04B\
+    \0\x12\x12\n\x08alloc_id\x18\x04\x20\x01(\x04B\0\x12\x11\n\x07safe_ts\
+    \x18\x05\x20\x01(\x04B\0\x12G\n\rkeyspace_meta\x18\x06\x20\x03(\x0b2..rf\
+    pb.ClusterBackupMeta.keyspace_meta_MapEntryB\0\x12\x17\n\rmeta_revision\
+    \x18\x07\x20\x01(\x03B\0\x12\x18\n\x0eis_lightweight\x18\x08\x20\x01(\
+    \x08B\0\x1a4\n\x16keyspace_meta_MapEntry\x12\t\n\x03key\x18\x01(\x0c\x12\
     \x0b\n\x05value\x18\x02(\x0c:\x028\x01:\0\"}\n\x11RaftLogBackupFile\x12\
     \x11\n\x07peer_id\x18\x01\x20\x01(\x04B\0\x12\x15\n\x0bfirst_index\x18\
     \x02\x20\x01(\x04B\0\x12\x14\n\nlast_index\x18\x03\x20\x01(\x04B\0\x12\

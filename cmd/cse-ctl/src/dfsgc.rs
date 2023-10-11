@@ -15,10 +15,11 @@ use std::{
 use bytes::Buf;
 use chrono::DateTime;
 use clap::Args;
+use engine_traits::ListObjectContent;
 use http::Uri;
 use kvengine::{
     dfs,
-    dfs::{DFSConfig, Dfs, ListObjectContent, S3Fs},
+    dfs::{DFSConfig, Dfs, S3Fs},
 };
 use kvproto::metapb::Store;
 use native_br::{

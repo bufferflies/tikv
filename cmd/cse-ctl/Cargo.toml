@@ -11,6 +11,7 @@ bytes = "1.0"
 chrono = "0.4"
 clap = { version = "3.2", features = ["derive"] }
 cloud_encryption = { workspace = true }
+engine_traits = { workspace = true }
 farmhash = "1.1.5"
 futures = "0.3"
 hex = "0.4"

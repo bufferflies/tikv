@@ -416,24 +416,6 @@ impl Worker {
     }
 }
 
-pub(crate) fn raft_log_file_name(dir: &Path, peer_id: u64, first: u64, last: u64) -> PathBuf {
-    dir.join(format!(
-        "{:016x}_{:016x}_{:016x}.rlog",
-        peer_id, first, last,
-    ))
-}
-
-pub(crate) fn store_raft_log_file_key(store_id: u64, epoch: u32) -> String {
-    format!("{:016x}/r{:016x}.rlog", store_id, epoch)
-}
-
-pub fn wal_file_key(store_id: u64, epoch_id: u32, start_off: u64, end_off: u64) -> String {
-    format!(
-        "{:016x}/e{:08x}/{:016x}_{:016x}.wal",
-        store_id, epoch_id, start_off, end_off
-    )
-}
-
 /// Magic Number of rlog files. It's picked by running
 ///    echo rfengine.rlog | sha1sum
 /// and taking the leading 64 bits.

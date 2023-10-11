@@ -1,11 +1,14 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
+use std::path::{Path, PathBuf};
+
 use api_version::{
     api_v2::{self, KEYSPACE_ID_LEN},
     ApiV2, KeyMode, KvFormat,
 };
 use bytes::{BufMut, Bytes, BytesMut};
 use kvproto::metapb;
+use regex::Regex;
 
 pub(crate) const RAFT_STATE_KEY_BYTE: u8 = 1;
 pub const REGION_META_KEY_BYTE: u8 = 2;
@@ -40,6 +43,18 @@ fn is_api_v2_region(region: &metapb::Region) -> bool {
         && (end_key_mode == KeyMode::Raw || end_key_mode == KeyMode::Txn)
 }
 
+pub fn compress_lz4(uncompressed: &[u8], compressed_buf: &mut Vec<u8>) -> std::io::Result<usize> {
+    let compress_bound: i32 = unsafe { lz4::liblz4::LZ4_compressBound(uncompressed.len() as i32) };
+    compressed_buf.resize(4 + compress_bound as usize, 0);
+    let size = lz4::block::compress_to_buffer(uncompressed, None, true, compressed_buf)?;
+    compressed_buf.truncate(size);
+    Ok(size)
+}
+
+pub fn decompress_lz4(content: &[u8]) -> std::io::Result<Vec<u8>> {
+    lz4::block::decompress(content, None)
+}
+
 pub fn get_region_keyspace_id_str(region: &metapb::Region) -> Option<String> {
     if is_api_v2_region(region) {
         let keyspace_id_str = ApiV2::get_keyspace_id_str(region.start_key.as_slice());
@@ -56,6 +71,133 @@ pub(crate) fn get_region_keyspace_id(region: &metapb::Region) -> [u8; KEYSPACE_I
     }
 }
 
+pub(crate) fn raft_log_file_name(dir: &Path, peer_id: u64, first: u64, last: u64) -> PathBuf {
+    dir.join(format!(
+        "{:016x}_{:016x}_{:016x}.rlog",
+        peer_id, first, last,
+    ))
+}
+
+pub(crate) fn store_raft_log_file_key(store_id: u64, epoch: u32) -> String {
+    format!("{:016x}/r{:016x}.rlog", store_id, epoch)
+}
+
+pub fn wal_file_key(store_id: u64, epoch_id: u32, start_off: u64, end_off: u64) -> String {
+    format!(
+        "{:016x}/e{:08x}/{:016x}_{:016x}.wal",
+        store_id, epoch_id, start_off, end_off
+    )
+}
+
+#[allow(dead_code)]
+pub(crate) fn snapshot_store_meta_key(store_id: u64, epoch: u32) -> String {
+    format!(
+        "store_backup/{:016x}/snapshots/m{:08x}.meta",
+        store_id, epoch
+    )
+}
+
+#[allow(dead_code)]
+pub(crate) fn snapshot_rlog_key(store_id: u64, epoch: u32) -> String {
+    format!(
+        "store_backup/{:016x}/snapshots/r{:08x}.rlog",
+        store_id, epoch
+    )
+}
+
+#[allow(dead_code)]
+pub(crate) fn snapshot_rlog_key_suffix(epoch: u32) -> String {
+    format!("{:08x}.rlog", epoch)
+}
+
+#[allow(dead_code)]
+pub(crate) fn snapshot_rlog_key_prefix(store_id: u64) -> String {
+    format!("store_backup/{:016x}/snapshots/r", store_id)
+}
+
+pub fn parse_epoch_from_snapshot_key(key: Option<&str>) -> Option<u32> {
+    key.and_then(|key| {
+        let re = Regex::new(r"r([0-9a-fA-F]+)\.rlog").unwrap();
+        if let Some(captures) = re.captures(key) {
+            if let Some(epoch_hex) = captures.get(1) {
+                let epoch = epoch_hex.as_str();
+                return Some(u32::from_str_radix(epoch, 16).unwrap());
+            }
+        }
+        None
+    })
+}
+
+pub fn parse_wal_chunk_key(key: Option<&str>) -> Option<(u32, u64, u64)> {
+    key.and_then(|key| {
+        let re = Regex::new(r"e([0-9a-fA-F]+)_([0-9a-fA-F]+)_([0-9a-fA-F]+)\.wal").unwrap();
+        if let Some(captures) = re.captures(key) {
+            let epoch_hex = captures.get(1).unwrap().as_str();
+            let start_off_hex = captures.get(2).unwrap().as_str();
+            let end_off_hex = captures.get(3).unwrap().as_str();
+            let epoch = u32::from_str_radix(epoch_hex, 16).unwrap();
+            let start_off = u64::from_str_radix(start_off_hex, 16).unwrap();
+            let end_off = u64::from_str_radix(end_off_hex, 16).unwrap();
+            return Some((epoch, start_off, end_off));
+        }
+        None
+    })
+}
+
+pub fn verify_wal_chunks_integrity(chunks: &[String]) -> bool {
+    if chunks.is_empty() {
+        return false;
+    }
+
+    let wal_epoch;
+    let mut last_end_off;
+
+    let first_chunk = chunks.first().unwrap();
+    if let Some((epoch, start_off, end_off)) = parse_wal_chunk_key(Some(first_chunk)) {
+        if start_off != 0 {
+            return false;
+        }
+        wal_epoch = epoch;
+        last_end_off = end_off;
+    } else {
+        return false;
+    }
+
+    for chunk in &chunks[1..] {
+        if let Some((epoch, start_off, end_off)) = parse_wal_chunk_key(Some(chunk)) {
+            if epoch != wal_epoch {
+                return false;
+            }
+            if start_off != last_end_off {
+                return false;
+            }
+            last_end_off = end_off;
+        } else {
+            return false;
+        }
+    }
+
+    true
+}
+
+pub fn wal_chunk_file_key(store_id: u64, epoch_id: u32, start_off: u64, end_off: u64) -> String {
+    format!(
+        "store_backup/{:016x}/wal_chunks/e{:08x}_{:016x}_{:016x}.wal",
+        store_id, epoch_id, start_off, end_off,
+    )
+}
+
+pub fn wal_chunk_file_prefix(store_id: u64, epoch_id: u32) -> String {
+    format!(
+        "store_backup/{:016x}/wal_chunks/e{:08x}_",
+        store_id, epoch_id
+    )
+}
+
+pub fn wal_chunk_file_suffix(start_off: u64, end_off: u64) -> String {
+    format!("{:016x}_{:016x}.wal", start_off, end_off)
+}
+
 #[cfg(test)]
 pub mod tests {
     use api_version::{
@@ -65,7 +207,10 @@ pub mod tests {
     use byteorder::{BigEndian, ByteOrder};
     use kvproto::metapb::Region;
 
-    use crate::{get_region_keyspace_id, get_region_keyspace_id_str};
+    use crate::{
+        get_region_keyspace_id, get_region_keyspace_id_str, parse_epoch_from_snapshot_key,
+        parse_wal_chunk_key, snapshot_rlog_key, verify_wal_chunks_integrity, wal_chunk_file_key,
+    };
 
     #[test]
     fn test_get_region_keyspace_id() {
@@ -104,5 +249,91 @@ pub mod tests {
         let mut keyspace_id_buf = get_txn_startkey_prefix(keyspace_id);
         keyspace_id_buf[3] += 1;
         keyspace_id_buf
+    }
+
+    #[test]
+    fn test_parse_snapshot_key() {
+        let cases = vec![
+            (snapshot_rlog_key(1, 2), Some(2)),
+            (snapshot_rlog_key(1, 1000), Some(1000)),
+            ("xxxxx".to_string(), None),
+            ("".to_string(), None),
+        ];
+        for case in cases {
+            assert_eq!(parse_epoch_from_snapshot_key(Some(case.0.as_str())), case.1);
+        }
+        assert_eq!(parse_epoch_from_snapshot_key(None), None);
+    }
+
+    #[test]
+    fn test_parse_wal_chunk_key() {
+        let cases = vec![
+            (wal_chunk_file_key(1, 1, 10, 20), Some((1, 10, 20))),
+            (wal_chunk_file_key(1, 1000, 10, 20), Some((1000, 10, 20))),
+            (
+                wal_chunk_file_key(1, 1000, 1000, 2000),
+                Some((1000, 1000, 2000)),
+            ),
+            ("xxxxx".to_string(), None),
+            ("".to_string(), None),
+        ];
+        for case in cases {
+            assert_eq!(parse_wal_chunk_key(Some(case.0.as_str())), case.1);
+        }
+        assert_eq!(parse_wal_chunk_key(None), None);
+    }
+
+    #[test]
+    fn test_lz4_compress() {
+        let data = b"hello world".repeat(100);
+        let mut compressed = Vec::new();
+        let size = super::compress_lz4(&data, &mut compressed).unwrap();
+        assert!(size < data.len());
+        let decompressed = super::decompress_lz4(&compressed).unwrap();
+        assert_eq!(data, decompressed);
+    }
+
+    #[test]
+    fn test_verify_wal_chunks_integrity() {
+        let cases = vec![
+            (vec![], false),                                 // empty
+            (vec![wal_chunk_file_key(1, 1, 0, 100)], true),  // only has one chunk
+            (vec![wal_chunk_file_key(1, 1, 1, 100)], false), // start_off is not 0
+            (
+                vec![
+                    wal_chunk_file_key(1, 1, 1, 100),
+                    wal_chunk_file_key(1, 1, 100, 200),
+                ],
+                false,
+            ), // start_off is not 0
+            (
+                vec![
+                    wal_chunk_file_key(1, 1, 0, 100),
+                    wal_chunk_file_key(1, 1, 150, 200),
+                    wal_chunk_file_key(1, 1, 200, 300),
+                ],
+                false,
+            ), // offset is not continuous
+            (
+                vec![
+                    wal_chunk_file_key(1, 1, 0, 100),
+                    wal_chunk_file_key(1, 1, 100, 200),
+                    wal_chunk_file_key(1, 2, 200, 300),
+                ],
+                false,
+            ), // epoch is not consistent
+            (
+                vec![
+                    wal_chunk_file_key(1, 1, 0, 100),
+                    wal_chunk_file_key(1, 1, 100, 200),
+                    wal_chunk_file_key(1, 1, 200, 300),
+                ],
+                true,
+            ),
+        ];
+
+        for case in cases {
+            assert_eq!(verify_wal_chunks_integrity(&case.0), case.1);
+        }
     }
 }
