@@ -125,8 +125,9 @@ pub(crate) async fn handle_load_data(
                 }
                 let spawn_load_data_worker = manager.worker_scaler.is_some()
                     && (data_size > manager.worker_scaler_conf.spawn_data_size.0
-                        || manager.running_tasks.len()
-                            > manager.worker_scaler_conf.spawn_running_tasks);
+                        || (manager.running_tasks.len()
+                            > manager.worker_scaler_conf.spawn_running_tasks
+                            && data_size != 0));
                 if spawn_load_data_worker {
                     let worker_scaler = manager.worker_scaler.as_ref().unwrap();
                     let data_size_gb = data_size / 1024 / 1024 / 1024;
