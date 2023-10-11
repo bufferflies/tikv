@@ -2,7 +2,7 @@
 
 use std::{
     cmp::Reverse, collections::BinaryHeap, hash::Hasher, marker::PhantomData, mem, ops::Add,
-    sync::Arc,
+    string::ToString, sync::Arc,
 };
 
 use api_version::KvFormat;
@@ -46,7 +46,8 @@ use crate::{
 
 const ANALYZE_VERSION_V1: i32 = 1;
 const ANALYZE_VERSION_V2: i32 = 2;
-const REMOTE_ANALYZE_TIMEOUT: Duration = Duration::from_secs(300);
+pub const REMOTE_ANALYZE_TIMEOUT: Duration = Duration::from_secs(300);
+const INCOMPLETE_MESSAGE: &str = "connection closed before message completed";
 
 // `AnalyzeContext` is used to handle `AnalyzeReq`
 pub struct AnalyzeContext<S: Snapshot, F: KvFormat> {
@@ -319,10 +320,13 @@ async fn remote_analyze(remote_ctx: RemoteContext, deadline: Instant) -> Result<
     tokio::time::timeout(
         deadline.saturating_duration_since(Instant::now()),
         async move {
-            let response = client
-                .request(req)
-                .await
-                .map_err(|e| Error::Other(e.to_string()))?;
+            let response = client.request(req).await.map_err(|e| {
+                if e.is_incomplete_message() {
+                    Error::Other(INCOMPLETE_MESSAGE.to_string())
+                } else {
+                    Error::Other(e.to_string())
+                }
+            })?;
             let success = response.status().is_success();
             let body = hyper::body::to_bytes(response.into_body())
                 .await
@@ -364,12 +368,19 @@ impl<S: Snapshot, F: KvFormat> RequestHandler for AnalyzeContext<S, F> {
     async fn handle_request(&mut self) -> Result<MemoryTraceGuard<Response>> {
         let start_time = Instant::now();
         let is_remote = self.remote_ctx.is_some();
-        let remote_url = self
+        let remote_tag = self
             .remote_ctx
             .as_ref()
-            .map(|ctx| ctx.remote_url.clone())
+            .map(|ctx| {
+                format!(
+                    " url [{}] [:{}]",
+                    ctx.remote_url.clone(),
+                    ctx.remote_req.key.clone(),
+                )
+            })
             .unwrap_or_default();
-        info!("handle analyze request, is remote {}", is_remote);
+        let tag = format!("is remote {}{}", is_remote, remote_tag);
+        info!("handle analyze request, {}", tag);
         let ret = if is_remote {
             let remote_ctx = self.remote_ctx.as_ref().unwrap();
             let ctx = remote_ctx.clone();
@@ -384,7 +395,21 @@ impl<S: Snapshot, F: KvFormat> RequestHandler for AnalyzeContext<S, F> {
                     .await;
                 tx.send(result).unwrap();
             });
-            rx.await.unwrap()
+            match rx.await.unwrap() {
+                result @ Ok(_) => result,
+                Err(Error::Other(e)) => {
+                    if e.eq(INCOMPLETE_MESSAGE) {
+                        let key = remote_ctx.remote_req.key.clone();
+                        warn!(
+                            "analyze other failed, incomplete message error, invalidate cached value for the key [:{}]",
+                            key,
+                        );
+                        remote_ctx.analyze_cache.clone().invalidate(&key).await;
+                    }
+                    Err(Error::Other(e))
+                }
+                Err(e) => Err(e),
+            }
             // Do not fallback to local if remote analyze failed. Or else it may
             // cause server overloaded.
         } else {
@@ -393,10 +418,10 @@ impl<S: Snapshot, F: KvFormat> RequestHandler for AnalyzeContext<S, F> {
         match ret {
             Ok(data) => {
                 info!(
-                    "analyze response data size {}, takes {:?}, is remote {}",
+                    "analyze response data size {}, takes {:?}, {}",
                     data.len(),
                     start_time.saturating_elapsed(),
-                    is_remote,
+                    tag,
                 );
                 let memory_size = data.capacity();
                 let mut resp = Response::default();
@@ -404,19 +429,13 @@ impl<S: Snapshot, F: KvFormat> RequestHandler for AnalyzeContext<S, F> {
                 Ok(MEMTRACE_ANALYZE.trace_guard(resp, memory_size))
             }
             Err(Error::Other(e)) => {
-                error!(
-                    "analyze other failed, is_remote {} [{}] error {}",
-                    is_remote, remote_url, e,
-                );
+                error!("analyze other failed, {} error {}", tag, e,);
                 let mut resp = Response::default();
                 resp.set_other_error(e);
                 Ok(resp.into())
             }
             Err(e) => {
-                error!(
-                    "analyze failed, is_remote {} [{}] error {:?}",
-                    is_remote, remote_url, e,
-                );
+                error!("analyze failed, {} error {:?}", tag, e,);
                 Err(e)
             }
         }

@@ -29,8 +29,12 @@ use txn_types::Lock;
 
 use crate::{
     coprocessor::{
-        cache::CachedRequestHandler, interceptors::*, metrics::*,
-        statistics::analyze::RemoteContext, tracker::Tracker, Error, *,
+        cache::CachedRequestHandler,
+        interceptors::*,
+        metrics::*,
+        statistics::analyze::{RemoteContext, REMOTE_ANALYZE_TIMEOUT},
+        tracker::Tracker,
+        Error, *,
     },
     read_pool::ReadPoolHandle,
     server::Config,
@@ -148,11 +152,15 @@ impl<E: Engine> Endpoint<E> {
             let client = hyper::Client::builder()
                 .pool_max_idle_per_host(0)
                 .build_http();
+            let analyze_cache = moka::future::Cache::builder()
+                .max_capacity(ANALYZE_CACHE_CAPACITY)
+                .time_to_live(REMOTE_ANALYZE_TIMEOUT * 2)
+                .build();
             RemoteContext {
                 remote_req: RemoteAnalysisRequest::default(),
                 remote_url,
                 runtime,
-                analyze_cache: moka::future::Cache::new(ANALYZE_CACHE_CAPACITY),
+                analyze_cache,
                 client,
             }
         };
