@@ -275,7 +275,7 @@ impl SnapAccessCore {
             panic!("errors is not empty: {:?}", errors);
         }
         let mut shard = Shard::new_for_ingest(0, &cs, Arc::new(Options::default()), master_key);
-        let (l0s, blob_tbls, scfs) = create_snapshot_tables(cs.get_snapshot(), &cs, false);
+        let (l0s, blob_tbls, scfs) = create_snapshot_tables(cs.get_snapshot(), &cs, ignore_lock);
         let data = ShardData::new(
             shard.range.clone(),
             mem_tbls,

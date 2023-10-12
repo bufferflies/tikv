@@ -79,10 +79,12 @@ impl ChangeSet {
     }
 }
 
+// `not_all_tables_loaded` means that some tables in `snap` are not loaded to
+// `tables`. Should only happen in "ignore lock" or restoration (`for_restore`).
 pub(crate) fn create_snapshot_tables(
     snap: &kvenginepb::Snapshot,
     tables: &ChangeSet,
-    for_restore: bool,
+    not_all_tables_loaded: bool,
 ) -> (Vec<L0Table>, HashMap<u64, BlobTable>, [ShardCf; 3]) {
     // Note: Some tables in `snap` will not exist in `tables` if it's not necessary
     // to load from DFS.
@@ -95,7 +97,11 @@ pub(crate) fn create_snapshot_tables(
             if let Some(blob_tbl) = tables.blob_tables.get(&blob_create.id) {
                 blob_tbl_map.insert(blob_create.id, blob_tbl.clone());
             } else {
-                assert!(for_restore, "{:?}", blob_create);
+                assert!(
+                    not_all_tables_loaded,
+                    "blob_create: {:?}, tables: {:?}",
+                    blob_create, tables,
+                );
             }
         }
     };
@@ -104,7 +110,11 @@ pub(crate) fn create_snapshot_tables(
         if let Some(l0_tbl) = tables.l0_tables.get(&l0_create.id) {
             l0_tbls.push(l0_tbl.clone());
         } else {
-            assert!(for_restore, "{:?}", l0_create);
+            assert!(
+                not_all_tables_loaded,
+                "l0_create: {:?}, tables: {:?}",
+                l0_create, tables,
+            );
         }
     }
     l0_tbls.sort_by(|a, b| b.version().cmp(&a.version()));
@@ -119,7 +129,11 @@ pub(crate) fn create_snapshot_tables(
             let scf = &mut scf_builders.as_mut_slice()[table_create.cf as usize];
             scf.add_table(tbl.clone(), table_create.level as usize);
         } else {
-            assert!(for_restore, "{:?}", table_create);
+            assert!(
+                not_all_tables_loaded,
+                "table_create: {:?}, tables: {:?}",
+                table_create, tables,
+            );
         }
     }
     let mut scfs = [ShardCf::new(0), ShardCf::new(1), ShardCf::new(2)];
