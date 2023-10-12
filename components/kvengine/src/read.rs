@@ -818,6 +818,17 @@ impl SnapAccessCore {
     pub fn get_encryption_key(&self) -> Option<EncryptionKey> {
         self.encryption_key.clone()
     }
+
+    pub fn estimated_range_blocks(&self, ranges: &[(Bytes, Bytes)]) -> usize {
+        // ignore L0 tables, only estimate L1+ for simplicity and performance.
+        let inner_key_off = self.data.inner_key_off;
+        let mut num_blocks = 0;
+        let write_cf = &self.data.cfs[0];
+        for lvl in &write_cf.levels {
+            num_blocks += lvl.range_blocks(ranges, inner_key_off);
+        }
+        num_blocks
+    }
 }
 
 pub struct Iterator {
@@ -1037,5 +1048,115 @@ impl Iterator {
         } else {
             self.inner.key() >= self.data.inner_end()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::iter::Iterator;
+
+    use kvenginepb::TableCreate;
+
+    use super::*;
+    use crate::table::sstable::build_test_table_with_kvs;
+
+    #[test]
+    fn test_estimated_range_blocks() {
+        let mut cs_pb = kvenginepb::ChangeSet::default();
+        let mut cs = ChangeSet::new(cs_pb.clone());
+        let snap = cs_pb.mut_snapshot();
+        let mut build_table_fn =
+            |start: i32, end: i32, level: u32, tbl_entries: usize, step: usize| {
+                let mut kvs = vec![];
+                for i in (start..end).step_by(step) {
+                    let key = format!("key{:05x}", i);
+                    let val = key.repeat(10);
+                    kvs.push((key, val));
+                    if kvs.len() == tbl_entries {
+                        let tbl = build_test_table_with_kvs(&kvs, false);
+                        let mut tbl_create = TableCreate::default();
+                        tbl_create.id = tbl.id();
+                        tbl_create.level = level;
+                        tbl_create.smallest = tbl.smallest().to_vec();
+                        tbl_create.biggest = tbl.biggest().to_vec();
+                        kvs.truncate(0);
+                        cs.ln_tables.insert(tbl.id(), tbl.clone());
+                        snap.mut_table_creates().push(tbl_create);
+                    }
+                }
+            };
+        build_table_fn(0, 10000, 3, 1000, 1);
+        build_table_fn(0, 10000, 2, 500, 5);
+        build_table_fn(0, 10000, 1, 200, 20);
+        cs.change_set = cs_pb;
+        let range = ShardRange::new(&[], GLOBAL_SHARD_END_KEY, 0);
+        let opt = Arc::new(crate::options::Options::default());
+        let master_key = MasterKey::new(&[1u8; 32]);
+        let shard = Shard::new(
+            1,
+            &kvenginepb::Properties::new(),
+            1,
+            range,
+            opt,
+            &master_key,
+        );
+
+        let (l0s, blob_tbls, scfs) = create_snapshot_tables(cs.get_snapshot(), &cs, false);
+        let data = ShardData::new(
+            shard.range.clone(),
+            vec![CfTable::new()],
+            l0s,
+            Arc::new(blob_tbls),
+            scfs,
+            HashMap::new(),
+        );
+        shard.set_data(data);
+        let snap = shard.new_snap_access();
+
+        let build_range_fn = |start: i32, end: i32| {
+            (
+                Bytes::from(format!("key{:05x}", start)),
+                Bytes::from(format!("key{:05x}", end)),
+            )
+        };
+        let total_num_blocks = snap.estimated_range_blocks(&[build_range_fn(0, 10000)]);
+        assert_eq!(total_num_blocks, 312);
+
+        // verify that many small ranges are properly deduplicated, num blocks never
+        // exceed total.
+        let mut many_small_ranges = vec![];
+        for i in (0..10000).step_by(10) {
+            let small_range = build_range_fn(i, i + 5);
+            many_small_ranges.push(small_range);
+        }
+        let many_small_ranges_num_blocks = snap.estimated_range_blocks(&many_small_ranges);
+        assert_eq!(many_small_ranges_num_blocks, total_num_blocks);
+
+        let half_num_blocks = snap.estimated_range_blocks(&[build_range_fn(5000, 10000)]);
+        assert_eq!(half_num_blocks, 155);
+
+        for i in (100..10000).step_by(100) {
+            let num_blocks = snap.estimated_range_blocks(&[build_range_fn(i, i + 1)]);
+            // some range on level 1 doesn't overlap any table, so blocks nay be 2
+            assert!(num_blocks == 3 || num_blocks == 2);
+        }
+
+        let num_blocks = snap.estimated_range_blocks(&[
+            build_range_fn(1, 2),
+            build_range_fn(2, 3),
+            build_range_fn(3, 4),
+            build_range_fn(4, 5),
+        ]);
+        // each level only access one block.
+        assert_eq!(num_blocks, 3);
+
+        let num_blocks = snap.estimated_range_blocks(&[
+            build_range_fn(1, 2),
+            build_range_fn(2000, 2001),
+            build_range_fn(3000, 3001),
+            build_range_fn(4000, 4001),
+        ]);
+        // each range on each level access one block.
+        assert_eq!(num_blocks, 12);
     }
 }

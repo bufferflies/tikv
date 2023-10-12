@@ -1261,6 +1261,52 @@ impl LevelHandler {
         let last = self.tables.last().unwrap();
         first.smallest() < start || last.biggest() >= end
     }
+
+    pub(crate) fn range_blocks(&self, ranges: &[(Bytes, Bytes)], inner_key_off: usize) -> usize {
+        let mut num_blocks = 0;
+        let mut prev_table_id = 0;
+        let mut prev_block_right = 0;
+        for ran in ranges {
+            let start_key = InnerKey::from_outer_key(&ran.0, inner_key_off);
+            let end_key = InnerKey::from_outer_end_key(&ran.1, inner_key_off);
+            let (left, right) = self.overlapping_tables_exclusive_end(start_key, end_key);
+            if left == right {
+                continue;
+            }
+            let overlap_tables = &self.tables[left..right];
+            let first_table = overlap_tables.first().unwrap();
+            let first_idx = first_table.load_index();
+            let first_block_left = first_idx.seek_block(start_key.as_ref()).saturating_sub(1);
+            let first_block_right = if overlap_tables.len() == 1 {
+                first_idx.seek_block_bigger_or_equal(end_key.as_ref())
+            } else {
+                first_idx.num_blocks()
+            };
+            num_blocks += first_block_right - first_block_left;
+            if first_table.id() == prev_table_id && first_block_left < prev_block_right {
+                // do not count duplicated block.
+                num_blocks -= 1;
+            }
+            if overlap_tables.len() == 1 {
+                prev_table_id = first_table.id();
+                prev_block_right = first_block_right;
+                continue;
+            }
+            if overlap_tables.len() > 2 {
+                let middle_tables = &overlap_tables[1..overlap_tables.len() - 1];
+                for middle_table in middle_tables {
+                    num_blocks += middle_table.load_index().num_blocks();
+                }
+            }
+            let last_table = overlap_tables.last().unwrap();
+            let last_idx = last_table.load_index();
+            let last_block_right = last_idx.seek_block_bigger_or_equal(end_key.as_ref());
+            num_blocks += last_block_right;
+            prev_table_id = last_table.id();
+            prev_block_right = last_block_right;
+        }
+        num_blocks
+    }
 }
 
 #[derive(Default, Clone)]
