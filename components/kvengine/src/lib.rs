@@ -24,6 +24,7 @@ pub mod shard;
 pub mod split;
 pub mod stats;
 pub mod table;
+pub mod util;
 pub mod write;
 
 #[macro_use]
@@ -37,7 +38,6 @@ extern crate tikv_alloc;
 mod metrics;
 #[cfg(test)]
 mod tests;
-mod util;
 
 pub use apply::*;
 pub use compaction::*;

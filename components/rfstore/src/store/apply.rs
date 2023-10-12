@@ -16,8 +16,9 @@ use bytes::{Buf, Bytes};
 use cloud_encryption::EncryptionKey;
 use fail::fail_point;
 use kvengine::{
-    mvcc, ChangeSet, Engine, SnapAccess, UserMeta, ENCRYPTION_KEY, MANUAL_MAJOR_COMPACTION,
-    MANUAL_MAJOR_COMPACTION_ENABLE, TRIM_OVER_BOUND, TRIM_OVER_BOUND_ENABLE,
+    mvcc, util::PropertiesHelper, ChangeSet, Engine, SnapAccess, UserMeta, ENCRYPTION_KEY,
+    MANUAL_MAJOR_COMPACTION, MANUAL_MAJOR_COMPACTION_ENABLE, TRIM_OVER_BOUND,
+    TRIM_OVER_BOUND_ENABLE,
 };
 use kvproto::{
     metapb,
@@ -1780,6 +1781,7 @@ pub(crate) fn build_split_pb(
     term: u64,
     header: &RaftRequestHeader,
     parent_encryption_key: Option<Bytes>,
+    properties_helper: &PropertiesHelper,
 ) -> kvenginepb::Split {
     let mut split = kvenginepb::Split::new();
     let mut keyspace_encryption_keys = HashMap::new();
@@ -1788,6 +1790,9 @@ pub(crate) fn build_split_pb(
         keyspace_encryption_keys = decode_split_flag_encryption_keys(flag_data);
     }
     for new_region in new_regions {
+        let raw_start = raw_start_key(new_region);
+        let raw_end = raw_end_key(new_region);
+
         let mut props = kvenginepb::Properties::new();
         props.set_shard_id(new_region.get_id());
         props.mut_keys().push(TERM_KEY.to_string());
@@ -1801,18 +1806,17 @@ pub(crate) fn build_split_pb(
         if let Some(encryption_key) = parent_encryption_key.as_ref() {
             props.mut_keys().push(ENCRYPTION_KEY.to_string());
             props.mut_values().push(encryption_key.to_vec());
-        } else {
-            let raw_start = raw_start_key(new_region);
-            let raw_end = raw_end_key(new_region);
-            if is_whole_keyspace_range(&raw_start, &raw_end) && !keyspace_encryption_keys.is_empty()
-            {
-                let keyspace_id = ApiV2::get_u32_keyspace_id(ApiV2::get_keyspace_id(&raw_start));
-                if let Some(encryption_key) = keyspace_encryption_keys.remove(&keyspace_id) {
-                    props.mut_keys().push(ENCRYPTION_KEY.to_string());
-                    props.mut_values().push(encryption_key);
-                }
+        } else if is_whole_keyspace_range(&raw_start, &raw_end)
+            && !keyspace_encryption_keys.is_empty()
+        {
+            let keyspace_id = ApiV2::get_u32_keyspace_id(ApiV2::get_keyspace_id(&raw_start));
+            if let Some(encryption_key) = keyspace_encryption_keys.remove(&keyspace_id) {
+                props.mut_keys().push(ENCRYPTION_KEY.to_string());
+                props.mut_values().push(encryption_key);
             }
         }
+        properties_helper.split_to_properties(&raw_start, &raw_end, &mut props);
+
         split.mut_new_shards().push(props);
     }
     for new_region in &new_regions[1..] {

@@ -14,7 +14,7 @@ use cloud_encryption::EncryptionKey;
 use collections::{HashMap, HashSet};
 use error_code::ErrorCodeExt;
 use fail::fail_point;
-use kvengine::{ShardMeta, ENCRYPTION_KEY};
+use kvengine::{util::PropertiesHelper, ShardMeta, ENCRYPTION_KEY};
 use kvproto::{
     disk_usage::DiskUsage,
     kvrpcpb::ExtraOp as TxnExtraOp,
@@ -1875,8 +1875,9 @@ impl<'a> PreprocessRef<'a> {
         entry: &Entry,
         req: &RaftCmdRequest,
     ) {
+        let tag = self.tag();
         if let Err(err) = check_region_epoch(req, self.get_preprocessed_region(), false) {
-            warn!("{} preprocess pending split failed {:?}", self.tag(), err);
+            warn!("{} preprocess pending split failed {:?}", tag, err);
             return;
         }
         let regions = split_gen_new_region_metas(
@@ -1888,13 +1889,16 @@ impl<'a> PreprocessRef<'a> {
         *self.last_committed_split_idx = entry.index;
         let region_id = self.region_id();
         let shard_meta = self.mut_shard_meta();
+        let properties_helper = PropertiesHelper::new_from_shard_meta(shard_meta);
         let split = build_split_pb(
             region_id,
             &regions,
             entry.term,
             req.get_header(),
             shard_meta.get_property(ENCRYPTION_KEY),
+            &properties_helper,
         );
+        info!("{} preprocess_pending_splits, split: {:?}", tag, split);
         let new_metas = shard_meta.apply_split(
             &split,
             entry.index,

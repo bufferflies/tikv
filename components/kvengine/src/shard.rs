@@ -95,6 +95,10 @@ pub struct Shard {
     pub(crate) encryption_key: Option<EncryptionKey>,
 }
 
+// Note: when add new property, consider whether to add it to following process:
+// * `PropertiesHelper`
+// * `is_property_need_flush`
+// * `is_property_change_set`
 pub const INGEST_ID_KEY: &str = "_ingest_id";
 pub const DEL_PREFIXES_KEY: &str = "_del_prefixes";
 pub const TRUNCATE_TS_KEY: &str = "_truncate_ts";
@@ -107,6 +111,20 @@ pub const TRIM_OVER_BOUND_DISABLE: &[u8] = b"";
 pub const MANUAL_MAJOR_COMPACTION: &str = "_manual_major_compaction";
 pub const MANUAL_MAJOR_COMPACTION_ENABLE: &[u8] = &[1];
 pub const MANUAL_MAJOR_COMPACTION_DISABLE: &[u8] = b"";
+
+/// To indicate whether the property should be flush in mem-table flush process.
+///
+/// Most properties are applied to `Shard.properties` first. Then flush to
+/// `ShardMeta` and persist.
+///
+/// But some other properties are set in `ShardMeta` first, then set or recover
+/// to `Shard`. If `flush` operation get properties from mem-table and set to
+/// `ShardMeta` on `apply_flush`, it will cause inconsistency, as properties in
+/// mem-table would be applied lately than in `ShardMeta`.
+#[inline]
+pub fn is_property_need_flush(key: &str) -> bool {
+    !(key == DEL_PREFIXES_KEY || key == TRUNCATE_TS_KEY)
+}
 
 impl Deref for Shard {
     type Target = ShardRange;
@@ -264,6 +282,7 @@ impl Shard {
     }
 
     pub(crate) fn merge_del_prefix(&self, val: &[u8]) {
+        info!("{} Shard::merge_del_prefix: {:?}", self.tag(), val);
         let mut pending_ops = self.pending_ops.write().unwrap();
         let mut del_prefixes = (*pending_ops.del_prefixes).merge(val);
         del_prefixes.schedule_at = self.gen_rand_schedule_del_range_time();
@@ -271,6 +290,7 @@ impl Shard {
     }
 
     pub(crate) fn set_del_prefixes(&self, val: &[u8]) {
+        info!("{} Shard::set_del_prefixes: {:?}", self.tag(), val);
         let mut pending_ops = self.pending_ops.write().unwrap();
         if val.is_empty() {
             pending_ops.del_prefixes =
@@ -1340,6 +1360,16 @@ impl std::fmt::Debug for DeletePrefixes {
                     .map(|p| log_wrappers::Value::key(p))
                     .collect::<Vec<_>>(),
             )
+            .field(
+                "prefixes_nexts",
+                &self
+                    .prefixes_nexts
+                    .iter()
+                    .map(|p| log_wrappers::Value::key(p))
+                    .collect::<Vec<_>>(),
+            )
+            .field("schedule_at", &self.schedule_at)
+            .field("inner_key_off", &self.inner_key_off)
             .finish()
     }
 }
@@ -1372,6 +1402,7 @@ impl DeletePrefixes {
         time::precise_time_ns() > self.schedule_at
     }
 
+    #[must_use]
     pub fn merge(&self, prefix: &[u8]) -> Self {
         assert!(prefix.len() >= self.inner_key_off);
 
@@ -1396,6 +1427,11 @@ impl DeletePrefixes {
             schedule_at: 0,
             inner_key_off: self.inner_key_off,
         }
+    }
+
+    pub fn merge_in_place(&mut self, prefix: &[u8]) {
+        let merged = self.merge(prefix);
+        *self = merged;
     }
 
     /// Removes all prefixes in the `other` one.

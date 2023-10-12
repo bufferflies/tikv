@@ -153,23 +153,54 @@ impl Engine {
                 .put_batch(wb.get_cf_mut(cf), Some(&snap), cf);
         }
         let mut need_refresh_shard_states = false;
+
+        // Property may be duplicated when `Shard.properties` is restored from
+        // `ShardMeta.properties`, in scene of recover shard or restore snapshot. But
+        // we must still apply the side effect of setting property (i.e. switch
+        // mem-table), which has not been persisted. Otherwise peers of a region would
+        // be inconsistent.
+        let is_property_duplicated = wb.sequence <= shard.get_meta_sequence();
+
         for (k, v) in std::mem::take(&mut wb.properties) {
             match k.as_str() {
                 DEL_PREFIXES_KEY => {
-                    shard.merge_del_prefix(v.chunk());
-                    let del_prefixes = shard.get_del_prefixes();
+                    // Use property value, other than merged del_prefixes, to make switch mem-table
+                    // determined. As shard.get_del_prefixes() among peers may not be the same.
+                    let prefix = v.chunk();
+                    let mut del_prefixes =
+                        DeletePrefixes::new_with_inner_key_off(shard.inner_key_off);
+                    del_prefixes.merge_in_place(prefix);
                     let data = shard.get_data();
                     let mem_tbl = data.get_writable_mem_table();
                     if del_prefixes
                         .inner_delete_ranges()
                         .any(|(start, end)| mem_tbl.has_data_in_range(start, end))
                     {
+                        info!(
+                            "{} kvengine::write set_switch_mem_table for del_prefixes, prefix {:?}",
+                            shard.tag(),
+                            prefix
+                        );
                         wb.set_switch_mem_table();
                     }
                     need_refresh_shard_states = true;
-                    shard.properties.set(k.as_str(), &del_prefixes.marshal());
+
+                    if !is_property_duplicated {
+                        shard.merge_del_prefix(prefix);
+                        shard
+                            .properties
+                            .set(k.as_str(), &shard.get_del_prefixes().marshal());
+                    } else {
+                        info!(
+                            "{} kvengine::write: del_prefixes is duplicated, skip merge prefix {:?}, current del_prefixes {:?}",
+                            shard.tag(),
+                            prefix,
+                            shard.get_del_prefixes()
+                        );
+                    }
                 }
                 TRUNCATE_TS_KEY => {
+                    // TODO: handle duplicated property.
                     if shard.set_truncate_ts(v.chunk()) {
                         wb.set_switch_mem_table();
                         let data = shard.get_data();
@@ -182,6 +213,7 @@ impl Engine {
                     }
                 }
                 TRIM_OVER_BOUND => {
+                    // TODO: handle duplicated property.
                     shard.set_trim_over_bound(v.chunk());
                     need_refresh_shard_states = true;
                     shard.properties.set(k.as_str(), v.chunk());

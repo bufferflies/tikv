@@ -1,5 +1,9 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
+use bytes::{Buf, Bytes};
+
+use crate::{DeletePrefixes, ShardMeta, DEL_PREFIXES_KEY};
+
 /// A helper function to evenly distribute `total` into `count` parts.
 /// Note: when `total` <= `count`, return `[1; total]`.
 pub fn evenly_distribute(total: usize, count: usize) -> Vec<usize> {
@@ -14,6 +18,58 @@ pub fn evenly_distribute(total: usize, count: usize) -> Vec<usize> {
         ret[i] += 1;
     }
     ret
+}
+
+/// Helper for merging or splitting properties.
+///
+/// Currently only delete prefixes are handled.
+///
+/// Splitting properties is necessary for the following scenarios:
+/// 1. `preprocess_pending_splits` (`build_split_pb`).
+///
+/// Merging properties is necessary for the following scenarios:
+/// 1. `ShardMeta.commit_merge` (merge `ShardMeta` on region merge).
+/// 2. `kvengine::Engine::commit_merge` (merge `Shard` on region merge).
+/// 3. `restore_keyspace::BackupCluster::gather_sstables` (merge `ShardMeta` on
+/// merging backup regions).
+pub struct PropertiesHelper {
+    del_prefixes: DeletePrefixes,
+}
+
+impl PropertiesHelper {
+    pub fn new_from_shard_meta(meta: &ShardMeta) -> Self {
+        Self::new(
+            meta.get_property(DEL_PREFIXES_KEY),
+            meta.range.inner_key_off,
+        )
+    }
+
+    fn new(del_prefixes_bytes: Option<Bytes>, inner_key_off: usize) -> Self {
+        let del_prefixes = if let Some(prop) = del_prefixes_bytes {
+            DeletePrefixes::unmarshal(prop.chunk(), inner_key_off)
+        } else {
+            DeletePrefixes::new_with_inner_key_off(inner_key_off)
+        };
+        Self { del_prefixes }
+    }
+
+    fn split(&self, start_key: &[u8], end_key: &[u8]) -> DeletePrefixes {
+        self.del_prefixes
+            .build_split(start_key, end_key, self.del_prefixes.inner_key_off)
+    }
+
+    pub fn split_to_properties(
+        &self,
+        start_key: &[u8],
+        end_key: &[u8],
+        props: &mut kvenginepb::Properties,
+    ) {
+        let split_del_prefixes = self.split(start_key, end_key);
+        if !split_del_prefixes.is_empty() {
+            props.mut_keys().push(DEL_PREFIXES_KEY.to_owned());
+            props.mut_values().push(split_del_prefixes.marshal());
+        }
+    }
 }
 
 #[cfg(test)]

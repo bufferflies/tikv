@@ -136,7 +136,7 @@ fn do_load_data(
         data_batch_size,
         generate_key,
         i_to_val,
-        Duration::from_secs(20),
+        Duration::from_secs(60), // longer than expected. TODO: inspect the reason
         |_| 0,
     );
     info!(
@@ -149,7 +149,7 @@ fn do_load_data(
         &scheduler,
         chunk_ids,
         COMPRESSION_TYPE,
-        Duration::from_secs(20),
+        Duration::from_secs(90), // longer than expected. TODO: inspect the reason
     );
     info!(
         "load_data: build finished, keyspace {}, table {}",

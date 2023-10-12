@@ -293,7 +293,12 @@ impl ShardMeta {
 
     pub fn is_duplicated_change_set(&self, cs: &mut pb::ChangeSet) -> bool {
         if cs.sequence > 0 && self.seq >= cs.sequence {
-            info!("{} skip duplicated change {:?}", self.tag(), cs);
+            info!(
+                "{} skip duplicated change {:?}, meta_seq {}",
+                self.tag(),
+                cs,
+                self.seq
+            );
             return true;
         }
         if cs.has_initial_flush() && self.parent.is_none() {
@@ -539,9 +544,12 @@ impl ShardMeta {
         if let Some(data) = self.properties.get(DEL_PREFIXES_KEY) {
             let old = DeletePrefixes::unmarshal(data.chunk(), self.range.inner_key_off);
             let done = DeletePrefixes::unmarshal(cs.get_property_value(), self.range.inner_key_off);
-            self.properties
-                .set(DEL_PREFIXES_KEY, &old.split(&done).marshal());
-            info!("Destroy range in meta changed from {:?} to {:?}", old, done);
+            let new = old.split(&done);
+            self.properties.set(DEL_PREFIXES_KEY, &new.marshal());
+            info!(
+                "Destroy range in meta changed from {:?} to {:?} (split done: {:?})",
+                old, new, done
+            );
         }
     }
 
@@ -633,12 +641,13 @@ impl ShardMeta {
         new_meta.ver = cs.shard_ver + 1;
         *self = new_meta;
         info!(
-            "{} apply_restore_shard in meta: new ver:{}, seq:{}, base_ver:{}, data_seq:{}",
+            "{} apply_restore_shard in meta: new ver:{}, seq:{}, base_ver:{}, data_seq:{}, properties:{:?}",
             self.tag(),
             self.ver,
             self.seq,
             self.base_version,
-            self.data_sequence
+            self.data_sequence,
+            self.properties.to_pb(self.id),
         );
     }
 

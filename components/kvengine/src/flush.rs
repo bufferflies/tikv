@@ -2,6 +2,7 @@
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    iter::Iterator as StdIterator,
     ops::Deref,
 };
 
@@ -135,7 +136,15 @@ impl Engine {
         flush.set_version(flush_version);
         flush.set_max_ts(max_ts);
         if let Some(props) = m.get_properties() {
-            flush.set_properties(props);
+            let mut filtered_props = kvenginepb::Properties::default();
+            debug_assert_eq!(props.get_keys().len(), props.get_values().len());
+            for (key, val) in props.keys.into_iter().zip(props.values.into_iter()) {
+                if is_property_need_flush(&key) {
+                    filtered_props.mut_keys().push(key);
+                    filtered_props.mut_values().push(val);
+                }
+            }
+            flush.set_properties(filtered_props);
         }
         let l0_builder = self.build_l0_table(
             m,

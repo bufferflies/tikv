@@ -62,6 +62,7 @@ impl Engine {
                 );
                 ShardRange::new(start_key, end_key, old_shard.inner_key_off)
             };
+            // Note: properties of new shards are processed in `build_split_pb`.
             let mut new_shard = Shard::new(
                 self.get_engine_id(),
                 &new_shard_props[i],
@@ -70,16 +71,6 @@ impl Engine {
                 self.opts.clone(),
                 &self.master_key,
             );
-            let old_del_prefixes = old_shard.get_del_prefixes();
-            let new_del_prefixes = old_del_prefixes.build_split(
-                &new_shard.outer_start,
-                &new_shard.outer_end,
-                new_shard.inner_key_off,
-            );
-            // TODO: May not need to truncate ts on the new shard.
-            if !new_del_prefixes.is_empty() {
-                new_shard.set_property(DEL_PREFIXES_KEY, &new_del_prefixes.marshal());
-            }
             new_shard.parent_id = old_shard.id;
             {
                 let mut guard = new_shard.parent_snap.write().unwrap();
