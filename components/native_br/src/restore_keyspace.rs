@@ -56,7 +56,7 @@ use crate::{
 const WORKING_PATH_PREFIX: &str = "keyspace-restore";
 const ZSTD_COMPRESSION_LEVEL: &str = "5"; // The same as ZSTD_COMPRESSION_LEVEL_FOR_REMOTE.
 
-const REQUEST_RESTORE_SNAPSHOT_RETRY_LIMIT: usize = 10;
+const REQUEST_RESTORE_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(30);
 const RESTORE_KEYSPACE_MAX_RETRY: usize = 20;
 
 const REPLICAS: usize = 3; // Number of replicas for each region.
@@ -353,6 +353,7 @@ pub fn restore_keyspace(
             pd_client.clone(),
             snapshots,
             &mut success_ranges,
+            REQUEST_RESTORE_SNAPSHOT_TIMEOUT,
         )?;
         restore_bytes += ret.restore_bytes;
         step!(
@@ -1852,13 +1853,14 @@ fn restore_snapshots(
     pd_client: Arc<dyn PdClient>,
     snapshots: Vec<pb::ChangeSet>,
     success_ranges: &mut MergeRanges,
+    timeout: Duration,
 ) -> Result<RestoredSnapshots> {
     let mut handles = Vec::with_capacity(snapshots.len());
     for snap in snapshots {
         let pd_client = pd_client.clone();
         let start = snap.get_restore_shard().get_outer_start().to_vec();
         let end = snap.get_restore_shard().get_outer_end().to_vec();
-        let task = async move { request_restore_snapshot(pd_client, &snap).await };
+        let task = async move { request_restore_snapshot(pd_client, &snap, timeout).await };
         handles.push((runtime.spawn(task), start, end));
     }
 
@@ -1898,10 +1900,14 @@ fn restore_snapshots(
 async fn request_restore_snapshot(
     pd_client: Arc<dyn PdClient>,
     cs: &pb::ChangeSet,
+    timeout: Duration,
 ) -> Result<RestoreShardResponse> {
     let post_data = Cow::from(cs.write_to_bytes().unwrap());
     let mut last_err = None;
-    'retry: for i in 0..REQUEST_RESTORE_SNAPSHOT_RETRY_LIMIT {
+    let mut retry_cnt = 0;
+    let start_time = Instant::now();
+    'retry: while start_time.saturating_elapsed() < timeout {
+        retry_cnt += 1;
         let (region, leader) = match pd_client.get_region_leader_by_id(cs.shard_id).await? {
             Some((region, leader)) => (region, leader),
             None => {
@@ -1938,7 +1944,7 @@ async fn request_restore_snapshot(
             }
             Err(e) => {
                 let err_msg = format!(
-                    "{} request_restore_snapshot #{i} error: {:?}, region: {:?}, leader: {:?}",
+                    "{} request_restore_snapshot #{retry_cnt} error: {:?}, region: {:?}, leader: {:?}",
                     tag, e, region, leader
                 );
                 warn!("{}", err_msg);

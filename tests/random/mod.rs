@@ -63,6 +63,7 @@ pub const TIMEOUT: Duration = Duration::from_secs(90);
 pub const CONCURRENCY: usize = 4;
 
 const DEFAULT_INNER_KEY_OFFSET: usize = 4;
+const REQUEST_MAJOR_COMPACT_ON_STORE_TIMEOUT: Duration = Duration::from_secs(20);
 
 static NODE_ALLOCATOR: AtomicU16 = AtomicU16::new(1);
 
@@ -295,7 +296,10 @@ pub(crate) async fn request_major_compact_on_store(store: Store, keyspace_id: u3
     .unwrap();
     let client = hyper::Client::new();
     let mut last_err: Option<Error> = None;
-    for retry in 0..20 {
+    let mut retry = 0;
+    let start_time = Instant::now();
+    while start_time.saturating_elapsed() < REQUEST_MAJOR_COMPACT_ON_STORE_TIMEOUT {
+        retry += 1;
         let req = Request::post(&uri).body(Body::empty()).unwrap();
         match client.request(req).await {
             // Treat 404 as success.
