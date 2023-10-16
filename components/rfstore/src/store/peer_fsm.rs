@@ -22,6 +22,7 @@ use kvengine::{
 use kvproto::{
     import_sstpb::SwitchMode,
     metapb::{self, Region, RegionEpoch},
+    pdpb::CheckPolicy,
     raft_cmdpb::{
         AdminCmdType, AdminRequest, CmdType, RaftCmdRequest, RaftCmdResponse, RaftRequestHeader,
         Request, StatusCmdType, StatusResponse,
@@ -247,12 +248,11 @@ impl<'a> PeerMsgHandler<'a> {
                 self.on_prepare_split_region(region_epoch, split_keys, callback, &source);
             }
             CasualMessage::HalfSplitRegion {
-                region_epoch: _,
-                policy: _,
-                source: _,
+                region_epoch,
+                policy,
+                source,
             } => {
-                // TODO(x) handle half split region;
-                warn!("ignore half split region");
+                self.on_schedule_half_split_region(region_epoch, policy, source);
             }
             CasualMessage::DeletePrefix {
                 region_version,
@@ -1053,6 +1053,70 @@ impl<'a> PeerMsgHandler<'a> {
                 }
             }
         });
+    }
+
+    fn on_schedule_half_split_region(
+        &mut self,
+        region_epoch: RegionEpoch,
+        policy: CheckPolicy,
+        source: &str,
+    ) {
+        info!(
+            "on half split";
+            "tag" => self.peer.tag(),
+            "peer_id" => self.fsm.peer_id(),
+            "policy" => ?policy,
+            "source" => source,
+        );
+        if !self.fsm.peer.is_leader() {
+            // region on this store is no longer leader, skipped.
+            warn!(
+                "not leader, skip";
+                "tag" => self.peer.tag(),
+                "peer_id" => self.fsm.peer_id(),
+            );
+            return;
+        }
+
+        let region = self.fsm.peer.region();
+        if util::is_epoch_stale(&region_epoch, region.get_region_epoch()) {
+            warn!(
+                "receive a stale halfsplit message";
+                "tag" => self.peer.tag(),
+                "peer_id" => self.fsm.peer_id(),
+            );
+            return;
+        }
+        let split_key = self
+            .fsm
+            .peer
+            .buckets
+            .as_mut()
+            .map(|buckets| {
+                let length = buckets.meta.keys.len();
+                if length > 2 {
+                    buckets.meta.keys[length / 2].clone()
+                } else {
+                    Vec::new()
+                }
+            })
+            .unwrap_or_default();
+        if !split_key.is_empty() {
+            info!(
+                "schedule ask split";
+                "tag" => self.peer.tag(),
+                "peer_id" => self.fsm.peer_id(),
+                "split_key" => log_wrappers::hex_encode(split_key.clone()),
+            );
+            // The split key comes from the bucket key, which is the encoded key.
+            self.schedule_ask_split(vec![split_key]);
+        } else {
+            warn!(
+                "no need to schedule, split key not found";
+                "tag" => self.peer.tag(),
+                "peer_id" => self.fsm.peer_id(),
+            );
+        }
     }
 
     fn on_split_region_check_tick(&mut self) -> bool /* should_split */ {
