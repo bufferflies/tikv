@@ -29,7 +29,7 @@ use test_cloud_server::{
     keyspace::{ClusterKeyspaceClient, KeyspaceManager},
     oss::ObjectStorageService,
     scheduler::Scheduler,
-    try_wait, try_wait_result, ServerCluster,
+    try_wait, ServerCluster,
 };
 use test_pd_client::TestPdClient;
 use tikv::config::TikvConfig;
@@ -461,20 +461,10 @@ fn must_split_region_for_keyspace(pd_client: &TestPdClient, keyspace_id: u32) {
 
 pub(crate) fn random_node_restart(cluster: &mut ServerCluster) {
     let mut rng = rand::thread_rng();
-    // Note: start of random range should not be too small.
-    // Otherwise `check_leader` would not be able to ensure that the leaders exist.
-    sleep(Duration::from_secs(rng.gen_range(3..10)));
 
-    // Wait for leader election before another restart.
-    try_wait_result(
-        || {
-            let stats = cluster.get_data_stats();
-            (stats.check_leader(), stats)
-        },
-        10,
-    )
-    .0
-    .expect("check leader failed");
+    // Some regions would loss majority for a wile when the sleep duration is small.
+    // Data corruption should not happen, and workloads should tolerate this.
+    sleep(Duration::from_secs(rng.gen_range(3..17)));
 
     let nodes = cluster.get_nodes();
     let node_id = *nodes.choose(&mut rng).unwrap();
