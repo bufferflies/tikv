@@ -8,10 +8,11 @@ use std::{
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
         Arc,
     },
     thread,
+    thread::JoinHandle,
 };
 
 use api_version::{api_v2, ApiV2};
@@ -24,7 +25,10 @@ use rfenginepb::{
     WalChunk,
 };
 use slog_global::*;
-use tikv_util::{mpsc::Receiver, time::Instant};
+use tikv_util::{
+    mpsc::{Receiver, Sender},
+    time::Instant,
+};
 
 use crate::{
     log_batch::RaftLogBlock,
@@ -39,6 +43,7 @@ pub(crate) struct Worker {
     dir: PathBuf,
     manifest: Manifest,
     task_rx: Receiver<Task>,
+    dfs_worker_handle: Option<ObjectStorageWorkerHandle>,
     buf: Vec<u8>,
     compacted_epoch: Arc<AtomicU32>,
     async_wal_writer: Option<WalWriter>,
@@ -48,54 +53,230 @@ impl Worker {
     pub(crate) fn new(
         dir: PathBuf,
         task_rx: Receiver<Task>,
+        callback: Sender<Task>,
         manifest: Manifest,
         compacted_epoch: Arc<AtomicU32>,
         async_wal_writer: Option<WalWriter>,
+        object_storage_config: Option<ObjectStorageConfig>,
+        dfs_worker_healthy: Arc<AtomicBool>,
     ) -> Self {
+        // Create new thread for object storage worker if lightweight backup enabled.
+        let dfs_worker_handle = if let Some(config) = object_storage_config {
+            assert!(
+                async_wal_writer.is_some(),
+                "async wal writer must be enabled"
+            );
+
+            let (tx, rx) = tikv_util::mpsc::unbounded();
+            let epoch_id = manifest.epoch_id + 1;
+            let mut object_storage_worker = ObjectStorageWorker::new(
+                config,
+                epoch_id,
+                manifest.engine_id.clone(),
+                dfs_worker_healthy,
+                rx,
+                callback,
+            );
+            let handle = thread::spawn(move || object_storage_worker.run());
+            Some(ObjectStorageWorkerHandle {
+                task_sender: tx,
+                handle,
+            })
+        } else {
+            None
+        };
         Self {
             dir,
             manifest,
             task_rx,
+            dfs_worker_handle,
             buf: vec![],
             compacted_epoch,
             async_wal_writer,
         }
     }
 
+    pub(crate) fn is_lightweight_enabled(&self) -> bool {
+        self.dfs_worker_handle.is_some()
+    }
+
     pub(crate) fn run(&mut self) {
         while let Ok(task) = self.task_rx.recv() {
             match task {
-                Task::Rotate { epoch_id } => {
-                    if let Some(async_writer) = self.async_wal_writer.as_mut() {
-                        assert_eq!(async_writer.epoch_id, epoch_id);
-                        async_writer.rotate().unwrap();
-                    }
-                    if let Err(err) = self.compact(epoch_id) {
-                        let engine_id = self.manifest.get_engine_id();
-                        error!(
-                            "{}: failed to compact epoch {} {:?}",
-                            engine_id, epoch_id, err
-                        );
-                    }
-                }
+                Task::Rotate { epoch_id } => self.handle_rotate(epoch_id),
                 Task::Truncates(truncates) => drop(truncates),
-                Task::Close => return,
-                Task::Backup(mut backup_task) => {
-                    if let Some(async_writer) = self.async_wal_writer.as_ref() {
-                        backup_task.file_off = async_writer.file_off;
-                    }
-                    if backup_task.config.incremental {
-                        self.incremental_backup(backup_task);
-                    } else {
-                        self.full_backup(backup_task);
-                    }
+                Task::Close => {
+                    self.handle_close();
+                    return;
                 }
-                Task::Write(wb) => {
-                    if let Some(wal_writer) = &mut self.async_wal_writer {
-                        wal_writer.write_batch(&wb).unwrap();
-                    }
+                Task::Backup(task) => self.handle_backup(task),
+                Task::Dump {
+                    epoch_id,
+                    start_off,
+                    end_off,
+                    callback,
+                } => self.handle_dump(epoch_id, start_off, end_off, callback),
+                Task::Write { wb } => self.handle_write(&wb),
+                Task::Flush => self.handle_flush(),
+                Task::Snapshot => {
+                    info!("{}: init trigger snapshot", self.manifest.get_engine_id());
+                    self.handle_snapshot()
                 }
             }
+        }
+    }
+
+    fn handle_close(&mut self) {
+        // Close and join object storage thread.
+        if let Some(ObjectStorageWorkerHandle {
+            task_sender,
+            handle,
+        }) = self.dfs_worker_handle.take()
+        {
+            task_sender.send(ObjectStorageTask::Close).unwrap();
+            handle.join().unwrap();
+        }
+    }
+
+    fn handle_backup(&mut self, mut task: BackupTask) {
+        if let Some(async_writer) = self.async_wal_writer.as_ref() {
+            task.file_off = async_writer.file_off;
+        }
+        if task.config.incremental {
+            self.incremental_backup(task);
+        } else {
+            self.full_backup(task);
+        }
+    }
+
+    fn handle_dump(
+        &mut self,
+        epoch_id: u32,
+        start_off: u64,
+        end_off: u64,
+        callback: Box<dyn FnOnce(std::result::Result<Bytes, String>) + Send>,
+    ) {
+        if let Some(writer) = self.async_wal_writer.as_ref() {
+            // Check the WAL chunk meta is valid.
+            if writer.epoch_id != epoch_id || start_off >= end_off || writer.file_off < end_off {
+                let msg = format!(
+                    "{}: invalid dump wal chunk epoch {} start_off {} end_off {} file_off {}",
+                    self.manifest.get_engine_id(),
+                    epoch_id,
+                    start_off,
+                    end_off,
+                    writer.file_off
+                );
+                error!("{}", msg);
+                callback(Err(msg));
+                return;
+            }
+            // Dump the WAL chunk from offset start_off to end_off.
+            info!(
+                "{}: dump latest wal epoch {} start_off {} end_off {}",
+                self.manifest.get_engine_id(),
+                epoch_id,
+                start_off,
+                end_off,
+            );
+            match writer.dump_wal_chunk(epoch_id, start_off, end_off) {
+                Ok(chunk) => callback(Ok(chunk)),
+                Err(err) => {
+                    let msg = format!(
+                        "{}: dump wal chunk epoch {} start_off {} end_off {} failed {:?}",
+                        self.manifest.get_engine_id(),
+                        epoch_id,
+                        start_off,
+                        end_off,
+                        err
+                    );
+                    error!("{}", msg);
+                    callback(Err(msg));
+                }
+            }
+        }
+    }
+
+    fn handle_rotate(&mut self, epoch_id: u32) {
+        if let Some(async_writer) = self.async_wal_writer.as_mut() {
+            assert_eq!(async_writer.epoch_id, epoch_id);
+            async_writer.rotate().unwrap();
+
+            if self.is_lightweight_enabled() {
+                // Send rotate task to object storage worker.
+                self.dfs_worker_handle
+                    .as_ref()
+                    .unwrap()
+                    .task_sender
+                    .send(ObjectStorageTask::Rotate { epoch_id })
+                    .unwrap();
+            }
+        }
+
+        if let Err(err) = self.compact(epoch_id) {
+            let engine_id = self.manifest.get_engine_id();
+            error!(
+                "{}: failed to compact epoch {} {:?}",
+                engine_id, epoch_id, err
+            );
+        }
+
+        // NOTE: Snapshot frequency is same as the compaction frequency. It is not
+        // configurable.
+        let should_snapshot = self.manifest.should_snapshot();
+        if should_snapshot && self.is_lightweight_enabled() {
+            self.handle_snapshot();
+        }
+    }
+
+    fn handle_snapshot(&mut self) {
+        info!("{}: handle snapshot", self.manifest.get_engine_id());
+        match self.snapshot_backup() {
+            Ok(snapshot_objects) => {
+                self.dfs_worker_handle
+                    .as_ref()
+                    .unwrap()
+                    .task_sender
+                    .send(ObjectStorageTask::Snapshot { snapshot_objects })
+                    .unwrap();
+            }
+            Err(err) => {
+                let engine_id = self.manifest.get_engine_id();
+                let epoch_id = self.manifest.epoch_id;
+                error!(
+                    "{}: failed to snapshot epoch {} {:?}",
+                    engine_id, epoch_id, err
+                );
+            }
+        }
+    }
+
+    fn handle_write(&mut self, wb: &WriteBatch) {
+        if let Some(wal_writer) = &mut self.async_wal_writer {
+            wal_writer.write_batch(wb).unwrap();
+            let file_off = wal_writer.file_off;
+            let epoch_id = wal_writer.epoch_id;
+            if self.is_lightweight_enabled() {
+                // Send write task to object storage worker.
+                let task = ObjectStorageTask::Sync { epoch_id, file_off };
+                self.dfs_worker_handle
+                    .as_ref()
+                    .unwrap()
+                    .task_sender
+                    .send(task)
+                    .unwrap();
+            }
+        }
+    }
+
+    fn handle_flush(&mut self) {
+        if self.is_lightweight_enabled() {
+            self.dfs_worker_handle
+                .as_ref()
+                .unwrap()
+                .task_sender
+                .send(ObjectStorageTask::Flush)
+                .unwrap();
         }
     }
 
@@ -103,7 +284,7 @@ impl Worker {
         let timer = Instant::now_coarse();
         let mut batch = WriteBatch::default();
         let mut it = WalIterator::new(self.dir.clone(), epoch_id);
-        it.iterate_batch(|data| {
+        it.iterate_batch(|data, _| {
             WalIterator::iterate_peer_batch(data, |region_batch| {
                 batch.merge_peer(region_batch);
             });
@@ -188,6 +369,39 @@ impl Worker {
         (task.callback)(ret);
     }
 
+    fn snapshot_backup(&mut self) -> Result<Vec<(String, Bytes)>> {
+        let engine_id = self.manifest.get_engine_id();
+        info!("{}: start snapshot task", engine_id);
+        let mut objects = vec![];
+        let mut backup_meta = StoreBackupMeta::default();
+        backup_meta.set_store_id(engine_id);
+
+        let manifest = self.manifest.to_change_set(true); // Exclude tombstone peers.
+        match self.backup_raft_log_files(&manifest, &mut backup_meta, true) {
+            Ok(obj) => objects.push(obj),
+            Err(e) => {
+                return Err(Error::Other(format!("backup raft log failed {:?}", e)));
+            }
+        }
+        // manifest epoch id already increased by 1.
+        let epoch_id = manifest.get_epoch_id();
+        backup_meta.set_manifest(manifest);
+        let total_size: usize = objects.iter().map(|(_, data)| data.len()).sum();
+        info!(
+            "snapshot backup write file count: {}, size: {}, raft meta offset {}",
+            objects.len(),
+            total_size,
+            backup_meta.raft_meta_start_off,
+        );
+
+        // Also need snapshot backup_meta.
+        let meta_key = snapshot_store_meta_key(engine_id, epoch_id);
+        let meta_data = backup_meta.write_to_bytes().unwrap();
+        objects.push((meta_key, Bytes::from(meta_data)));
+
+        Ok(objects)
+    }
+
     fn full_backup(&mut self, task: BackupTask) {
         let engine_id = self.manifest.get_engine_id();
         info!("{}: start backup task", engine_id);
@@ -208,7 +422,7 @@ impl Worker {
             }
         }
         let manifest = self.manifest.to_change_set(true); // Exclude tombstone peers.
-        match self.backup_raft_log_files(&manifest, &mut backup_meta) {
+        match self.backup_raft_log_files(&manifest, &mut backup_meta, false) {
             Ok(obj) => objects.push(obj),
             Err(e) => {
                 return Self::backup_callback(
@@ -263,6 +477,7 @@ impl Worker {
         &mut self,
         manifest: &rfenginepb::ChangeSet,
         store_meta: &mut StoreBackupMeta,
+        is_snapshot: bool,
     ) -> Result<(String, Bytes)> {
         let store_id = self.manifest.get_engine_id();
         // keyspace_id -> Vec<(peer_id, RaftLogFile)>
@@ -283,7 +498,11 @@ impl Worker {
                 .and_modify(|k| k.append(&mut files))
                 .or_insert_with(|| files);
         }
-        let object_key = store_raft_log_file_key(store_id, manifest.get_epoch_id());
+        let object_key = if is_snapshot {
+            snapshot_rlog_key(store_id, manifest.get_epoch_id())
+        } else {
+            store_raft_log_file_key(store_id, manifest.get_epoch_id())
+        };
         // Reserve 10MB for `rlog_meta`, which should be enough in most scenarios.
         let mut object = BytesMut::with_capacity(raft_log_size as usize + 10 * 1024 * 1024);
         let mut rlog_meta = StoreRaftLogBackupMeta::default();
@@ -416,6 +635,11 @@ impl Worker {
     }
 }
 
+pub(crate) struct ObjectStorageWorkerHandle {
+    task_sender: Sender<ObjectStorageTask>,
+    handle: JoinHandle<()>,
+}
+
 /// Magic Number of rlog files. It's picked by running
 ///    echo rfengine.rlog | sha1sum
 /// and taking the leading 64 bits.
@@ -476,11 +700,23 @@ pub(crate) fn wal_file_name(dir: &Path, epoch_id: u32) -> PathBuf {
 }
 
 pub(crate) enum Task {
-    Rotate { epoch_id: u32 },
+    Rotate {
+        epoch_id: u32,
+    },
     Truncates(Vec<Vec<RaftLogBlock>>),
     Close,
     Backup(BackupTask),
-    Write(WriteBatch),
+    Dump {
+        epoch_id: u32,
+        start_off: u64,
+        end_off: u64,
+        callback: Box<dyn FnOnce(std::result::Result<Bytes, String>) + Send>,
+    },
+    Write {
+        wb: WriteBatch,
+    },
+    Flush,
+    Snapshot, // Used for dfs_worker callback to trigger snapshot.
 }
 
 #[derive(Default, Debug, Serialize, Deserialize)]
@@ -493,14 +729,20 @@ pub struct BackupConfig {
     pub incremental: bool,
     pub wal_epoch: u32,
     pub start_offset: u64,
+    pub lightweight: bool,
 }
 
 impl Display for BackupConfig {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "cluster_id {}, store_id {}, incremental {}, wal_epoch {}, start_offset {} ",
-            self.cluster_id, self.store_id, self.incremental, self.wal_epoch, self.start_offset,
+            "cluster_id {}, store_id {}, incremental {}, lightweight {} wal_epoch {}, start_offset {} ",
+            self.cluster_id,
+            self.store_id,
+            self.incremental,
+            self.lightweight,
+            self.wal_epoch,
+            self.start_offset,
         )
     }
 }
@@ -525,6 +767,10 @@ impl BackupTask {
             config,
         }
     }
+
+    pub fn is_lightweight(&self) -> bool {
+        self.config.lightweight
+    }
 }
 
 #[cfg(test)]
@@ -532,7 +778,7 @@ mod tests {
     use std::{
         collections::HashMap,
         fs, iter,
-        sync::atomic::{AtomicU32, AtomicU64},
+        sync::atomic::{AtomicBool, AtomicU32, AtomicU64},
     };
 
     use bytes::Buf;
@@ -583,15 +829,18 @@ mod tests {
         let tmp_dir = tempfile::tempdir().unwrap();
         let tmp_path = tmp_dir.path();
         defer!(fs::remove_dir_all(tmp_path).unwrap());
-        let (_, rx) = tikv_util::mpsc::unbounded();
+        let (tx, rx) = tikv_util::mpsc::unbounded();
         let engine_id = 999;
         let manifest = Manifest::open(tmp_path, AtomicU64::new(engine_id).into()).unwrap();
         let mut worker = Worker::new(
             tmp_path.to_path_buf(),
             rx,
+            tx,
             manifest,
             AtomicU32::new(0).into(),
             None,
+            None,
+            std::sync::Arc::new(AtomicBool::new(true)),
         );
         let epoch = 990;
         let mut cs = ChangeSet::new();
@@ -626,7 +875,9 @@ mod tests {
             cs.mut_peers().push(meta_pb);
         }
         let mut store_meta = StoreBackupMeta::default();
-        let (key, object) = worker.backup_raft_log_files(&cs, &mut store_meta).unwrap();
+        let (key, object) = worker
+            .backup_raft_log_files(&cs, &mut store_meta, false)
+            .unwrap();
         let raft_file_key = store_raft_log_file_key(engine_id, epoch);
         assert_eq!(raft_file_key, key);
         let mut raft_meta = StoreRaftLogBackupMeta::default();
@@ -691,15 +942,18 @@ mod tests {
         let tmp_dir = tempfile::tempdir().unwrap();
         let tmp_path = tmp_dir.path();
         defer!(fs::remove_dir_all(tmp_path).unwrap());
-        let (_, rx) = tikv_util::mpsc::unbounded();
+        let (tx, rx) = tikv_util::mpsc::unbounded();
         let engine_id = 1999;
         let manifest = Manifest::open(tmp_path, AtomicU64::new(engine_id).into()).unwrap();
         let mut worker = Worker::new(
             tmp_path.to_path_buf(),
             rx,
+            tx,
             manifest,
             AtomicU32::new(0).into(),
             None,
+            None,
+            std::sync::Arc::new(AtomicBool::new(true)),
         );
         let mut cs = ChangeSet::new();
         let mut peer_data_map = HashMap::new();
@@ -735,7 +989,9 @@ mod tests {
         }
         // 1. backup
         let mut store_meta = StoreBackupMeta::default();
-        let (key, object) = worker.backup_raft_log_files(&cs, &mut store_meta).unwrap();
+        let (key, object) = worker
+            .backup_raft_log_files(&cs, &mut store_meta, false)
+            .unwrap();
         let raft_file_key = store_raft_log_file_key(engine_id, cs.epoch_id);
         assert_eq!(raft_file_key, key);
 
@@ -781,7 +1037,7 @@ mod tests {
         );
         wal_writer.open_file(cs.epoch_id + 1, 0).unwrap();
         // checksum inner should succeeds.
-        let engine = RfEngine::open(tmp_path2, &cfg).unwrap();
+        let engine = RfEngine::open(tmp_path2, &cfg, None).unwrap();
         // 4. Check peer data, restored data should be same with previous one.
         for peer_id in peers_range {
             let cache_peer_data = peer_data_map.get(&peer_id).unwrap();

@@ -14,6 +14,7 @@ extern crate serde_derive;
 mod config;
 pub use config::Config as RfEngineConfig;
 
+pub mod dfs_worker;
 pub mod engine;
 pub mod iterator;
 pub mod load;
@@ -28,6 +29,7 @@ pub mod writer;
 
 use std::num::ParseIntError;
 
+pub use dfs_worker::*;
 pub use engine::*;
 use iterator::*;
 use metrics::*;
@@ -52,6 +54,8 @@ pub enum Error {
     Open(String),
     #[error("Corruption: {0}")]
     Corruption(String),
+    #[error("Other error: {0}")]
+    Other(String),
 }
 
 impl From<std::io::Error> for Error {
@@ -66,5 +70,11 @@ impl From<std::io::Error> for Error {
 impl From<ParseIntError> for Error {
     fn from(_: ParseIntError) -> Self {
         Error::ParseError
+    }
+}
+
+impl From<String> for Error {
+    fn from(msg: String) -> Self {
+        Error::Other(msg)
     }
 }

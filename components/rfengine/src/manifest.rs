@@ -266,6 +266,14 @@ impl Manifest {
     pub(crate) fn get_engine_id(&self) -> u64 {
         self.engine_id.load(Ordering::SeqCst)
     }
+
+    // Check if we should do snapshot in `handle_rotate`.
+    //
+    // We only do snapshot after compact done for simplify the logic, at this time
+    // `self.epoch_id == self.first_epoch`.
+    pub(crate) fn should_snapshot(&self) -> bool {
+        self.epoch_id == self.first_epoch
+    }
 }
 
 pub(crate) fn manifest_path(dir: &Path) -> PathBuf {

@@ -904,7 +904,7 @@ impl TikvServer {
     // This method is also used by cse-ctl for cluster restore.
     pub fn init_raft_engine(conf: &TikvConfig) -> rfengine::Result<RfEngine> {
         let raft_db_path = Path::new(&conf.raft_store.raftdb_path);
-        RfEngine::open(raft_db_path, &conf.rfengine)
+        RfEngine::open(raft_db_path, &conf.rfengine, None)
     }
 
     // This method is also used by cse-ctl for cluster restore.

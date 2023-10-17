@@ -3,7 +3,7 @@
 use std::{fs, path::Path};
 
 use byteorder::{ByteOrder, LittleEndian};
-use bytes::Buf;
+use bytes::{Buf, Bytes};
 use tikv_util::info;
 
 use crate::{log_batch::RaftLogOp, manifest::Manifest, *};
@@ -38,31 +38,8 @@ impl RfEngineCore {
             wal_offset = offset;
         }
         let mut writer = self.writer.lock().unwrap();
-        // Delete the following 7 lines and function get_wal_header at the next wal
-        // upgrade.
-        if !self.is_empty() {
-            match self.get_wal_header(epoch_id) {
-                Ok(wal_header) => writer.version = wal_header.version,
-                Err(Error::Eof) => {}
-                Err(e) => return Err(e),
-            };
-        }
         writer.open_file(epoch_id, wal_offset)?;
         Ok(async_offset)
-    }
-
-    pub(crate) fn get_wal_header(&self, mut epoch_id: u32) -> Result<WalHeader> {
-        loop {
-            match check_wal_header(self.wal_dir(), epoch_id) {
-                Ok(wal_header) => {
-                    return Ok(wal_header);
-                }
-                Err(Error::Eof) => {
-                    epoch_id -= 1;
-                }
-                Err(e) => return Err(e),
-            };
-        }
     }
 
     pub(crate) fn load_wal_file(&mut self, epoch_id: u32, load_async: bool) -> Result<(u64, u64)> {
@@ -71,14 +48,14 @@ impl RfEngineCore {
         let mut async_offset = 0;
         if self.is_async_wal_enabled() && load_async {
             let mut async_it = WalIterator::new(self.dir.to_path_buf(), epoch_id);
-            async_it.iterate_batch(|_| {
+            async_it.iterate_batch(|_, _| {
                 async_batch_cnt += 1;
             })?;
             async_offset = async_it.offset;
         }
         let mut sync_batch_idx = 0;
         let mut it = WalIterator::new(self.wal_dir().to_path_buf(), epoch_id);
-        it.iterate_batch(|data| {
+        it.iterate_batch(|data, _| {
             sync_batch_idx += 1;
             let mut wb = if self.is_async_wal_enabled() && sync_batch_idx > async_batch_cnt {
                 Some(WriteBatch::new())
@@ -95,10 +72,35 @@ impl RfEngineCore {
                 }
             });
             if let Some(wb) = wb {
-                self.task_sender.send(Task::Write(wb)).unwrap();
+                self.task_sender.send(Task::Write { wb }).unwrap();
             }
         })?;
+        info!("load wal done, it.offset {}", it.offset);
         Ok((it.offset, async_offset))
+    }
+
+    // `replay_wal_file` replay a wal chunk data to rfengine. It's used for
+    // lightweight restoration to recover a `BackupCluster` from an previous
+    // snapshot.
+    pub fn replay_wal_file(
+        &self,
+        file_data: Bytes,
+        epoch_id: u32,
+        end_offset: u64, // u64::MAX means replay all the chunk
+    ) -> Result<()> {
+        let mut it = WalIterator::new_from_chunks(file_data, epoch_id);
+        it.iterate_batch(|data, offset| {
+            // `offset` is the data read position after `data` be read.
+            if offset > end_offset {
+                return;
+            }
+            let mut wb = WriteBatch::new();
+            WalIterator::iterate_peer_batch(data, |peer_batch| {
+                wb.peers.insert(peer_batch.peer_id, peer_batch);
+            });
+            self.write(wb).unwrap();
+        })?;
+        Ok(())
     }
 
     pub(crate) fn load_raft_log_file(

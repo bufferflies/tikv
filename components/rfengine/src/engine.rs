@@ -9,7 +9,7 @@ use std::{
     os::unix::fs::{FileExt, MetadataExt},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         Arc, Mutex, RwLock,
     },
     thread::{self, JoinHandle},
@@ -19,11 +19,12 @@ use bytes::{Buf, Bytes};
 use dashmap::mapref::one::Ref;
 use engine_traits::{GetObjectOptions, ObjectStorage};
 use file_system::open_direct_file;
+use kvengine::dfs::DFSConfig;
 use kvproto::raft_serverpb;
 use protobuf::Message;
 use raft_proto::{eraftpb, eraftpb::Entry};
 use rfenginepb::{ClusterBackupMeta, StoreBackupMeta, StoreRaftLogBackupMeta};
-use tikv_util::{info, mpsc::Sender, time::Instant, warn};
+use tikv_util::{error, info, mpsc::Sender, time::Instant, warn};
 
 use crate::{
     config::Config,
@@ -35,6 +36,7 @@ use crate::{
 };
 
 pub const TRUNCATE_ALL_INDEX: u64 = u64::MAX;
+pub const MAX_EPOCH_BACKWARD: u32 = 100;
 
 /// `RfEngine` is a persistent storage engine for multi-raft logs.
 /// It stores part of raft logs and states(key/value pair) in memory and
@@ -98,8 +100,8 @@ impl Deref for RfEngine {
 }
 
 impl RfEngine {
-    pub fn open(dir: &Path, cfg: &Config) -> Result<Self> {
-        let core = RfEngineCore::open(dir, cfg)?;
+    pub fn open(dir: &Path, cfg: &Config, dfs_conf: Option<DFSConfig>) -> Result<Self> {
+        let core = RfEngineCore::open(dir, cfg, dfs_conf)?;
         Ok(Self {
             core: Arc::new(core),
         })
@@ -122,6 +124,10 @@ pub struct RfEngineCore {
     pub(crate) worker_handle: Mutex<WorkerHandle>,
 
     pub(crate) engine_id: Arc<AtomicU64>,
+
+    pub(crate) lightweight: bool,
+
+    dfs_worker_healthy: Arc<AtomicBool>,
 }
 
 pub(crate) struct WorkerHandle {
@@ -130,7 +136,7 @@ pub(crate) struct WorkerHandle {
 }
 
 impl RfEngineCore {
-    fn open(dir: &Path, cfg: &Config) -> Result<Self> {
+    fn open(dir: &Path, cfg: &Config, dfs_conf: Option<DFSConfig>) -> Result<Self> {
         let wal_size = cfg.target_file_size.0 as usize;
         let compression_threshold = cfg.batch_compression_threshold.0 as usize;
         let wal_sync_dir = (!cfg.wal_sync_dir.is_empty()).then(|| PathBuf::from(&cfg.wal_sync_dir));
@@ -147,6 +153,8 @@ impl RfEngineCore {
             compacted_epoch.clone(),
             false,
         );
+
+        let dfs_worker_healthy = Arc::new(AtomicBool::new(true));
         let mut en = Self {
             dir: dir.to_owned(),
             wal_sync_dir,
@@ -155,10 +163,12 @@ impl RfEngineCore {
             writer: Mutex::new(writer),
             task_sender: tx.clone(),
             worker_handle: Mutex::new(WorkerHandle {
-                task_sender: tx,
+                task_sender: tx.clone(),
                 handle: None,
             }),
             engine_id,
+            lightweight: cfg.lightweight_backup,
+            dfs_worker_healthy: dfs_worker_healthy.clone(),
         };
         let async_offset = en.load(&manifest)?;
         {
@@ -175,12 +185,27 @@ impl RfEngineCore {
             } else {
                 None
             };
+
+            let object_storage_config = if cfg.lightweight_backup {
+                Some(ObjectStorageConfig::new(
+                    dir.to_owned(),
+                    cfg.wal_chunk_target_file_size.0 as usize,
+                    CompressionType::Lz4Compression,
+                    dfs_conf.unwrap(),
+                ))
+            } else {
+                None
+            };
+
             let mut worker = Worker::new(
                 dir.to_owned(),
                 rx,
+                tx,
                 manifest,
                 compacted_epoch,
                 async_wal_writer,
+                object_storage_config,
+                dfs_worker_healthy,
             );
             let join_handle = thread::spawn(move || worker.run());
             en.worker_handle.lock().unwrap().handle = Some(join_handle);
@@ -244,7 +269,7 @@ impl RfEngineCore {
             self.task_sender.send(Task::Rotate { epoch_id }).unwrap();
         }
         if self.is_async_wal_enabled() {
-            self.task_sender.send(Task::Write(wb)).unwrap();
+            self.task_sender.send(Task::Write { wb }).unwrap();
         }
         ENGINE_PERSIST_DURATION_HISTOGRAM.observe(timer.saturating_elapsed_secs());
         Ok(size)
@@ -349,6 +374,10 @@ impl RfEngineCore {
                     .count();
             }
         });
+    }
+
+    pub fn flush_worker(&self) {
+        self.task_sender.send(Task::Flush).unwrap();
     }
 
     pub fn stop_worker(&self) {
@@ -476,6 +505,10 @@ impl RfEngineCore {
         self.engine_id.load(Ordering::Acquire)
     }
 
+    pub fn is_dfs_worker_healthy(&self) -> bool {
+        self.dfs_worker_healthy.load(Ordering::Acquire)
+    }
+
     pub fn get_region_peer_map(&self) -> HashMap<u64, u64> {
         let mut region_to_peer = HashMap::with_capacity(self.peers.len());
         let mut id_pairs = Vec::with_capacity(self.peers.len());
@@ -543,6 +576,23 @@ impl RfEngineCore {
         Ok(buf.len() - old_len)
     }
 
+    pub fn dump_wal_chunk(
+        &self,
+        epoch_id: u32,
+        start_off: u64,
+        end_off: u64,
+        callback: Box<dyn FnOnce(std::result::Result<Bytes, String>) + Send>,
+    ) {
+        self.task_sender
+            .send(Task::Dump {
+                epoch_id,
+                start_off,
+                end_off,
+                callback,
+            })
+            .unwrap();
+    }
+
     pub fn backup(&self, mut task: BackupTask) {
         if !self.is_async_wal_enabled() {
             // Note: when async wal is enabled, `file_off` is acquired from
@@ -553,8 +603,32 @@ impl RfEngineCore {
         self.task_sender.send(Task::Backup(task)).unwrap();
     }
 
+    pub fn lightweight_backup(&self) -> Result<StoreBackupMeta> {
+        // Do not allow lightweight backup if dfs worker unhealthy.
+        if !self.is_dfs_worker_healthy() {
+            return Err(Error::Other("dfs worker unhelathy".to_string()));
+        }
+        let engine_id = self.get_engine_id();
+        let writer = self.writer.lock().unwrap();
+        let wal_epoch = writer.epoch_id;
+        let file_off = writer.file_off;
+        drop(writer);
+        let mut backup_meta = StoreBackupMeta::default();
+        backup_meta.set_store_id(engine_id);
+        backup_meta.set_epoch(wal_epoch);
+        backup_meta.set_offset(file_off);
+        RFENGINE_BACKUP_COUNTER
+            .with_label_values(&["lightweight_success"])
+            .inc();
+        Ok(backup_meta)
+    }
+
     pub(crate) fn is_async_wal_enabled(&self) -> bool {
         self.wal_sync_dir.is_some()
+    }
+
+    pub fn is_lightweight_backup_enabled(&self) -> bool {
+        self.lightweight
     }
 
     pub fn load_region_state(
@@ -574,9 +648,11 @@ fn restore_all_raft_logs(
     object_storage: &Arc<dyn ObjectStorage>,
     store_meta: &StoreBackupMeta,
     dir: &Path,
+    snapshot_rlog: Option<String>,
 ) {
     let store_id = store_meta.store_id;
-    let raft_file_key = store_raft_log_file_key(store_id, store_meta.get_manifest().epoch_id);
+    let raft_file_key = snapshot_rlog
+        .unwrap_or_else(|| store_raft_log_file_key(store_id, store_meta.get_manifest().epoch_id));
     let raft_file = object_storage
         .get_objects(vec![(raft_file_key, GetObjectOptions::default())])
         .unwrap();
@@ -604,9 +680,11 @@ fn restore_keyspace_raft_logs(
     store_meta: &StoreBackupMeta,
     dir: &Path,
     keyspace_id: u32,
+    snapshot_rlog: Option<String>,
 ) {
     let store_id = store_meta.store_id;
-    let raft_file_key = store_raft_log_file_key(store_id, store_meta.get_manifest().epoch_id);
+    let raft_file_key = snapshot_rlog
+        .unwrap_or_else(|| store_raft_log_file_key(store_id, store_meta.get_manifest().epoch_id));
     let option = GetObjectOptions {
         start_off: store_meta.raft_meta_start_off,
         end_off: None,
@@ -652,6 +730,133 @@ fn restore_keyspace_raft_logs(
     }
 }
 
+// For lightweight restore, find a latest snapshot full backup before
+// `cluster_backup.backup_ts` and replay all WAL chunk files from snapshot epoch
+// to epoch of the backup.
+pub fn lightweight_restore(
+    object_storage: Arc<dyn ObjectStorage>,
+    prefix: &str,
+    cluster_backup: &ClusterBackupMeta,
+    store_id: u64,
+    dir: &Path,
+    keyspace: Option<u32>,
+) -> Result<u32> {
+    let store_meta = cluster_backup
+        .get_stores()
+        .iter()
+        .find(|x| x.store_id == store_id)
+        .expect("store not found");
+    init_wal_files(dir, None).unwrap();
+    // `store_meta` in cluster_backup should not contains manifest, use
+    // store_meta.get_epoch() as backup epoch_id.
+    let epoch_id = store_meta.get_epoch();
+    let start_epoch = if epoch_id > MAX_EPOCH_BACKWARD {
+        epoch_id - MAX_EPOCH_BACKWARD
+    } else {
+        1
+    };
+
+    // Find the latest snapshot smaller than cluster_backup epoch.
+    info!("try to find snapshot before backup epoch {}", epoch_id);
+    let snapshot = match object_storage.list_objects(
+        &snapshot_rlog_key_suffix(start_epoch),
+        Some(&snapshot_rlog_key_prefix(store_id)),
+        Some(MAX_EPOCH_BACKWARD),
+    ) {
+        Ok((objects, _)) => {
+            if objects.is_empty() {
+                None
+            } else {
+                objects.into_iter().rev().find(|obj| {
+                    let obj_epoch = parse_epoch_from_snapshot_key(Some(obj.key.deref())).unwrap();
+                    obj_epoch < epoch_id
+                })
+            }
+        }
+        Err(err) => {
+            error!("failed to list snapshot full backup files: {}", err);
+            None
+        }
+    };
+    let snap_key = snapshot.map(|snap| {
+        snap.key
+            .strip_prefix(&format!("{}/", prefix))
+            .unwrap()
+            .to_owned()
+    });
+
+    // Fetch store backup meta from object storage.
+    let snap_store_meta = match parse_epoch_from_snapshot_key(snap_key.as_deref()) {
+        Some(snap_epoch) => {
+            info!(
+                "fetch last snapshot {} snap epoch {} before backup epoch {}",
+                snap_key.as_deref().unwrap(),
+                snap_epoch,
+                epoch_id
+            );
+            let store_meta_key = snapshot_store_meta_key(store_id, snap_epoch);
+            let store_backup_meta = object_storage
+                .get_objects(vec![(store_meta_key, GetObjectOptions::default())])
+                .map(|data| {
+                    let mut meta = StoreBackupMeta::default();
+                    meta.merge_from_bytes(data[0].1.chunk()).unwrap();
+                    meta
+                })?;
+
+            assert_eq!(snap_epoch, store_backup_meta.get_manifest().epoch_id);
+            store_backup_meta
+        }
+        None => {
+            // If no snapshot available and the start_epoch > 1, it means data incomplete.
+            if start_epoch > 1 {
+                let msg = format!("no snapshot available from epoch {}", start_epoch);
+                error!("{}", msg);
+                return Err(Error::Other(msg));
+            }
+            info!("no snapshot available from epoch 1, create empty manifest file");
+            StoreBackupMeta::default()
+        }
+    };
+
+    // If no snapshot found, no need to restore raft log files.
+    if snap_key.is_some() {
+        match keyspace {
+            Some(keyspace_id) => {
+                info!(
+                    "lightweight restore keyspace {} raft log files from snapshot {:?}",
+                    keyspace_id, snap_key
+                );
+                restore_keyspace_raft_logs(
+                    &object_storage,
+                    &snap_store_meta,
+                    dir,
+                    keyspace_id,
+                    snap_key,
+                );
+            }
+            None => {
+                info!(
+                    "lightweight restore all raft log files from snapshot {:?}",
+                    snap_key
+                );
+                restore_all_raft_logs(&object_storage, &snap_store_meta, dir, snap_key);
+            }
+        };
+    }
+
+    info!("manifest file path: {:?}", manifest_path(dir));
+    let manifest_file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(manifest_path(dir))
+        .unwrap();
+
+    persist_change_set(&manifest_file, 0, snap_store_meta.get_manifest()).unwrap();
+
+    Ok(snap_store_meta.get_manifest().epoch_id)
+}
+
 // If keyspace is none, restore all keyspaces, else, only restore given one.
 pub fn restore(
     object_storage: Arc<dyn ObjectStorage>,
@@ -692,9 +897,9 @@ pub fn restore(
     }
     match keyspace {
         Some(keyspace_id) => {
-            restore_keyspace_raft_logs(&object_storage, store_meta, dir, keyspace_id)
+            restore_keyspace_raft_logs(&object_storage, store_meta, dir, keyspace_id, None)
         }
-        None => restore_all_raft_logs(&object_storage, store_meta, dir),
+        None => restore_all_raft_logs(&object_storage, store_meta, dir, None),
     }
     let manifest_file = OpenOptions::new()
         .create(true)
@@ -964,7 +1169,7 @@ mod tests {
         init_logger();
         let tmp_dir = tempfile::tempdir().unwrap();
         let cfg = Config::new(128 * 1024_usize);
-        let engine = RfEngine::open(tmp_dir.path(), &cfg).unwrap();
+        let engine = RfEngine::open(tmp_dir.path(), &cfg, None).unwrap();
         let mut wb = WriteBatch::new();
         for peer_id in 1..=10_u64 {
             let (key, val) = make_state_kv(2, 1);
@@ -1016,7 +1221,7 @@ mod tests {
         engine.stop_worker();
 
         for _ in 0..2 {
-            let engine = RfEngine::open(tmp_dir.path(), &cfg).unwrap();
+            let engine = RfEngine::open(tmp_dir.path(), &cfg, None).unwrap();
             let mut wb = WriteBatch::new();
             for &(peer_id, region_id, truncated_idx) in truncated_regions.iter() {
                 wb.truncate_raft_log(peer_id, region_id, truncated_idx);
@@ -1176,7 +1381,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let cfg = Config::new(128 * 1024);
-        let engine = RfEngine::open(dir.path(), &cfg).unwrap();
+        let engine = RfEngine::open(dir.path(), &cfg, None).unwrap();
 
         // Write 10 logs and states to 2 region.
         let mut data_map = HashMap::new();
@@ -1350,7 +1555,7 @@ mod tests {
         let wal_size = 128 * 1024_usize;
         let dir_path = tmp_dir.path();
         let cfg = Config::new(wal_size);
-        let engine = RfEngine::open(dir_path, &cfg).unwrap();
+        let engine = RfEngine::open(dir_path, &cfg, None).unwrap();
         let mut wb = WriteBatch::new();
         for peer_id in 1..=10_u64 {
             let (key, val) = make_state_kv(2, 1);
@@ -1371,7 +1576,7 @@ mod tests {
         assert_eq!(engine.peers.len(), 10);
         engine.stop_worker();
         for _ in 0..2 {
-            let engine = RfEngine::open(dir_path, &cfg).unwrap();
+            let engine = RfEngine::open(dir_path, &cfg, None).unwrap();
             assert_eq!(engine.peers.len(), 10);
             engine.stop_worker();
         }
@@ -1386,7 +1591,7 @@ mod tests {
             let filename = wal_file_name(dir_path, ep);
             let mut it = WalIterator::new(dir_path.to_owned(), ep);
             let fd = File::open(filename.clone()).unwrap();
-            let mut buf_reader = BufReader::new(fd);
+            let mut buf_reader: Box<dyn std::io::Read> = Box::new(BufReader::new(fd));
             let wal_header = it.check_wal_header(&mut buf_reader).unwrap();
             let mut offsets = vec![it.offset];
             loop {
@@ -1417,7 +1622,7 @@ mod tests {
                         buf[*pos] += 1;
                         fd.write_all_at(buf.as_ref(), *offset).unwrap();
                         fd.sync_data().unwrap();
-                        assert!(RfEngine::open(dir_path, &cfg).is_err());
+                        assert!(RfEngine::open(dir_path, &cfg, None).is_err());
                         buf[*pos] -= 1;
                         fd.write_all_at(buf.as_ref(), *offset).unwrap();
                         fd.sync_data().unwrap();
@@ -1433,7 +1638,7 @@ mod tests {
         let tmp_dir = tempfile::tempdir().unwrap();
         let wal_size = 4096 * 10;
         let cfg = Config::new(wal_size);
-        let engine = RfEngine::open(tmp_dir.path(), &cfg).unwrap();
+        let engine = RfEngine::open(tmp_dir.path(), &cfg, None).unwrap();
         for i in 1..=50 {
             let mut wb = WriteBatch::new();
             wb.append_raft_log(1, 2, &make_log_data(i, 128));

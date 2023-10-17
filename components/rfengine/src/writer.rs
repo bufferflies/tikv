@@ -2,9 +2,9 @@
 
 use std::{
     alloc::{self, Layout},
-    cmp,
+    cmp, fs,
     fs::File,
-    io::Read,
+    io::{Read, Seek, SeekFrom},
     os::unix::prelude::FileExt,
     path::{Path, PathBuf},
     ptr::NonNull,
@@ -14,7 +14,7 @@ use std::{
     },
 };
 
-use bytes::{Buf, BufMut};
+use bytes::{Buf, BufMut, Bytes};
 use file_system::open_direct_file;
 use tikv_util::time::Instant;
 
@@ -321,6 +321,24 @@ impl WalWriter {
         Ok(())
     }
 
+    pub(crate) fn dump_wal_chunk(
+        &self,
+        epoch_id: u32,
+        start_off: u64,
+        end_off: u64,
+    ) -> Result<Bytes> {
+        if end_off > self.file_off {
+            return Err(Error::Eof);
+        }
+
+        let mut file = fs::File::open(wal_file_name(&self.dir, epoch_id))?;
+        file.seek(SeekFrom::Start(start_off))?;
+        let dump_len = (end_off - start_off) as usize;
+        let mut buf = vec![0; dump_len];
+        file.read_exact(&mut buf)?;
+        Ok(Bytes::from(buf))
+    }
+
     fn file(&self) -> &File {
         self.fd.as_ref().unwrap()
     }
@@ -338,12 +356,6 @@ impl WalWriter {
     }
 
     pub(crate) fn flush(&mut self) -> Result<(usize, bool)> {
-        let mut rotated = false;
-        if self.should_rotate() {
-            self.rotate()?;
-            rotated = true;
-        }
-
         match self.current_version {
             Version::V1 => {
                 self.format_v1();
@@ -364,6 +376,16 @@ impl WalWriter {
         // An empty batch header is added after each new batch to differentiate the old
         // record.
         write_eof(&mut self.buf);
+
+        let mut rotated = false;
+        // Check should_rotate or should_chunk after put this write batch to buf avoid
+        // file size overflow.
+        if self.should_rotate() {
+            self.rotate()?;
+            // Writer epoch increased, also need update epoch_id in buf
+            self.buf.as_mut().put_u32_le(self.epoch_id);
+            rotated = true;
+        }
 
         let timer = Instant::now_coarse();
         self.file().write_all_at(self.buf.as_ref(), self.file_off)?;
@@ -422,9 +444,7 @@ impl WalWriter {
     }
 
     fn should_rotate(&self) -> bool {
-        let eof_len = DmaBuffer::aligned_len(BATCH_HEADER_SIZE);
-        let current_size =
-            DmaBuffer::aligned_len(self.buf.len()) + eof_len + self.file_off as usize;
+        let current_size = self.buf.len() + self.file_off as usize;
         let compacted_epoch = self.compacted_epoch.load(Ordering::SeqCst);
         // If the current epoch id is 5, the rotated epoch id is 6, it would overwrite
         // epoch 2 wal, so we need to make sure epoch 2 is compacted.

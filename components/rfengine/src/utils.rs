@@ -45,10 +45,16 @@ fn is_api_v2_region(region: &metapb::Region) -> bool {
 
 pub fn compress_lz4(uncompressed: &[u8], compressed_buf: &mut Vec<u8>) -> std::io::Result<usize> {
     let compress_bound: i32 = unsafe { lz4::liblz4::LZ4_compressBound(uncompressed.len() as i32) };
-    compressed_buf.resize(4 + compress_bound as usize, 0);
-    let size = lz4::block::compress_to_buffer(uncompressed, None, true, compressed_buf)?;
-    compressed_buf.truncate(size);
-    Ok(size)
+    let existed_bytes = compressed_buf.len();
+    compressed_buf.resize(existed_bytes + 4 + compress_bound as usize, 0);
+    let size = lz4::block::compress_to_buffer(
+        uncompressed,
+        None,
+        true,
+        &mut compressed_buf[existed_bytes..],
+    )?;
+    compressed_buf.truncate(existed_bytes + size);
+    Ok(existed_bytes + size)
 }
 
 pub fn decompress_lz4(content: &[u8]) -> std::io::Result<Vec<u8>> {
@@ -89,7 +95,6 @@ pub fn wal_file_key(store_id: u64, epoch_id: u32, start_off: u64, end_off: u64) 
     )
 }
 
-#[allow(dead_code)]
 pub(crate) fn snapshot_store_meta_key(store_id: u64, epoch: u32) -> String {
     format!(
         "store_backup/{:016x}/snapshots/m{:08x}.meta",
@@ -97,7 +102,6 @@ pub(crate) fn snapshot_store_meta_key(store_id: u64, epoch: u32) -> String {
     )
 }
 
-#[allow(dead_code)]
 pub(crate) fn snapshot_rlog_key(store_id: u64, epoch: u32) -> String {
     format!(
         "store_backup/{:016x}/snapshots/r{:08x}.rlog",
@@ -105,12 +109,10 @@ pub(crate) fn snapshot_rlog_key(store_id: u64, epoch: u32) -> String {
     )
 }
 
-#[allow(dead_code)]
 pub(crate) fn snapshot_rlog_key_suffix(epoch: u32) -> String {
     format!("{:08x}.rlog", epoch)
 }
 
-#[allow(dead_code)]
 pub(crate) fn snapshot_rlog_key_prefix(store_id: u64) -> String {
     format!("store_backup/{:016x}/snapshots/r", store_id)
 }
@@ -291,6 +293,12 @@ pub mod tests {
         assert!(size < data.len());
         let decompressed = super::decompress_lz4(&compressed).unwrap();
         assert_eq!(data, decompressed);
+
+        let mut compressed_with_data = b"header".to_vec();
+        let _ = super::compress_lz4(&data, &mut compressed_with_data).unwrap();
+        assert_eq!(compressed_with_data.len(), size + 6);
+        assert_eq!(&compressed_with_data[0..6], b"header".as_slice());
+        assert_eq!(&compressed_with_data[6..], compressed.as_slice());
     }
 
     #[test]

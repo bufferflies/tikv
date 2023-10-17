@@ -338,6 +338,7 @@ fn get_backup_config(
         cluster_id,
         store_id,
         incremental,
+        lightweight: false,
         wal_epoch: 0,
         start_offset: 0,
     };

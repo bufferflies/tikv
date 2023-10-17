@@ -20,6 +20,7 @@ pub(crate) struct WalIterator {
     epoch_id: u32,
     buf: BytesMut,
     pub(crate) offset: u64,
+    in_mem_reader: Option<Box<dyn Read>>,
 }
 
 const MAX_BATCH_SIZE: usize = 256 * 1024 * 1024;
@@ -31,7 +32,22 @@ impl WalIterator {
             epoch_id,
             buf: BytesMut::new(),
             offset: 0,
+            in_mem_reader: None,
         }
+    }
+
+    pub(crate) fn new_from_chunks(file_data: Bytes, epoch_id: u32) -> Self {
+        Self {
+            dir: PathBuf::new(),
+            epoch_id,
+            buf: BytesMut::new(),
+            offset: 0,
+            in_mem_reader: Some(Box::new(file_data.reader())),
+        }
+    }
+
+    fn in_mem_iterator(&self) -> bool {
+        self.in_mem_reader.is_some()
     }
 
     pub(crate) fn iterate_peer_batch(data: Bytes, mut f: impl FnMut(PeerBatch)) {
@@ -45,11 +61,15 @@ impl WalIterator {
 
     pub(crate) fn iterate_batch<F>(&mut self, mut f: F) -> Result<()>
     where
-        F: FnMut(Bytes),
+        F: FnMut(Bytes, u64),
     {
-        let filename = wal_file_name(self.dir.as_path(), self.epoch_id);
-        let fd = fs::File::open(filename)?;
-        let mut buf_reader = BufReader::new(fd);
+        let mut buf_reader: Box<dyn std::io::Read> = if self.in_mem_iterator() {
+            self.in_mem_reader.take().unwrap()
+        } else {
+            let filename = wal_file_name(self.dir.as_path(), self.epoch_id);
+            let fd = fs::File::open(filename)?;
+            Box::new(BufReader::new(fd))
+        };
         let header = match self.check_wal_header(&mut buf_reader) {
             Ok(header) => header,
             Err(Error::Eof) => {
@@ -69,7 +89,7 @@ impl WalIterator {
                     if data.is_empty() {
                         return Ok(());
                     }
-                    f(data);
+                    f(data, self.offset);
                 }
             }
         }
@@ -77,7 +97,7 @@ impl WalIterator {
 
     pub(crate) fn check_wal_header(
         &mut self,
-        reader: &mut BufReader<fs::File>,
+        reader: &mut Box<dyn std::io::Read>,
     ) -> Result<WalHeader> {
         let mut buf = [0u8; WalHeader::len()];
         reader.read_exact(&mut buf)?;
@@ -104,7 +124,7 @@ impl WalIterator {
 
     pub(crate) fn read_batch(
         &mut self,
-        reader: &mut BufReader<fs::File>,
+        reader: &mut Box<dyn std::io::Read>,
         header: &WalHeader,
     ) -> Result<Bytes> {
         let mut header_buf = [0u8; BATCH_HEADER_SIZE];

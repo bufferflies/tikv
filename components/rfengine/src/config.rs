@@ -24,6 +24,16 @@ pub struct Config {
     /// The directory to store the wal files for synchronous write.
     /// It's used to reduce the latency of writing wal.
     pub wal_sync_dir: String,
+
+    /// Whether to enable the lightweight backup.
+    ///
+    /// Default: false
+    pub lightweight_backup: bool,
+
+    /// Target file size for wal chunk files.
+    ///
+    /// Default: "64MB"
+    pub wal_chunk_target_file_size: ReadableSize,
 }
 
 impl Default for Config {
@@ -33,6 +43,8 @@ impl Default for Config {
             target_file_size: ReadableSize::mb(512),
             worker_rate_limit: ReadableSize::mb(125),
             wal_sync_dir: "".to_owned(),
+            lightweight_backup: false,
+            wal_chunk_target_file_size: ReadableSize::mb(64),
         }
     }
 }
