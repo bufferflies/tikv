@@ -235,7 +235,12 @@ impl ServerCluster {
     }
 
     pub fn wait_pd_region_count(&self, count: usize) {
-        for _ in 0..10 {
+        self.wait_pd_region_count_opt(count, Duration::from_secs(5));
+    }
+
+    pub fn wait_pd_region_count_opt(&self, count: usize, timeout: Duration) {
+        let start_time = Instant::now_coarse();
+        while start_time.saturating_elapsed() < timeout {
             if self.pd_client.get_regions_number() == count {
                 return;
             }
