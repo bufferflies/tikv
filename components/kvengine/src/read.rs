@@ -829,6 +829,10 @@ impl SnapAccessCore {
         }
         num_blocks
     }
+
+    pub fn get_keyspace_id(&self) -> u32 {
+        self.data.keyspace_id
+    }
 }
 
 pub struct Iterator {

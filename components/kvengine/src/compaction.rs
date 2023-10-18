@@ -11,10 +11,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use api_version::{
-    api_v2::{self, KEYSPACE_PREFIX_LEN},
-    ApiV2, KeyMode, KvFormat,
-};
 use bytes::{Buf, Bytes, BytesMut};
 use cloud_encryption::{EncryptionKey, MasterKey};
 use http::StatusCode;
@@ -439,62 +435,54 @@ impl Engine {
         }
     }
 
-    pub fn get_managed_safe_ts(&self, key: &[u8]) -> u64 {
+    pub fn get_managed_safe_ts(&self, keyspace_id: u32) -> u64 {
         let gc_safe_point_ts = load_u64(&self.managed_safe_ts);
         debug!(
-            "Get gc safe point v1, key:{:?}, gc safepoint:{}",
-            log_wrappers::Value::key(key),
-            gc_safe_point_ts,
+            "Get gc safe point v1, keyspace_id:{:?}, gc safepoint:{}",
+            keyspace_id, gc_safe_point_ts,
         );
         gc_safe_point_ts
     }
 
-    pub fn get_keyspace_gc_safepoint_v2(&self, key: &[u8]) -> u64 {
+    pub fn get_keyspace_gc_safepoint_v2(&self, keyspace_id: u32) -> u64 {
         match &self.ks_safepoint_v2 {
             Some(sp_map) => {
-                if key.len() >= KEYSPACE_PREFIX_LEN && ApiV2::parse_key_mode(key) == KeyMode::Txn {
+                if keyspace_id > 0 {
                     // Api v2 key.
-                    let keyspace_id = ApiV2::get_keyspace_id(key);
-                    let keyspace_id_u32 = ApiV2::get_u32_keyspace_id(keyspace_id);
-
-                    let keyspace_sp_ts = sp_map.get(&keyspace_id_u32);
+                    let keyspace_sp_ts = sp_map.get(&keyspace_id);
                     match keyspace_sp_ts {
                         None => {
                             if self.opts.disable_safe_point_fallback_v1 {
                                 debug!(
-                                    "Can not get gc safe point v2, and refuse to get gc safe point v1, key:{:?}, keyspace_id:{}",
-                                    log_wrappers::Value::key(key),
-                                    keyspace_id_u32
+                                    "Can not get gc safe point v2, and refuse to get gc safe point v1, keyspace_id:{}",
+                                    keyspace_id
                                 );
                                 return 0;
                             }
                             debug!(
-                                "Can not get gc safe point v2, get gc safe point v1, key:{:?}, keyspace_id:{}",
-                                log_wrappers::Value::key(key),
-                                keyspace_id_u32
+                                "Can not get gc safe point v2, get gc safe point v1, keyspace_id:{}",
+                                keyspace_id
                             );
                             // Api v1 key.
-                            self.get_managed_safe_ts(key)
+                            self.get_managed_safe_ts(keyspace_id)
                         }
                         Some(ks2sp) => {
                             let ks_gc_sp = *ks2sp.value();
                             debug!(
-                                "Get gc safe point v2, key:{:?}, keyspace_id:{}, gc safepoint:{}",
-                                log_wrappers::Value::key(key),
-                                keyspace_id_u32,
-                                ks_gc_sp
+                                "Get gc safe point v2, keyspace_id:{}, gc safepoint:{}",
+                                keyspace_id, ks_gc_sp
                             );
                             ks_gc_sp
                         }
                     }
                 } else {
                     // Api v1 key.
-                    self.get_managed_safe_ts(key)
+                    self.get_managed_safe_ts(keyspace_id)
                 }
             }
             None => {
                 // Api v1 key.
-                self.get_managed_safe_ts(key)
+                self.get_managed_safe_ts(keyspace_id)
             }
         }
     }
@@ -614,7 +602,7 @@ impl Engine {
             trim_over_bound: false,
             cf,
             level,
-            safe_ts: self.get_keyspace_gc_safepoint_v2(range.outer_start.chunk()),
+            safe_ts: self.get_keyspace_gc_safepoint_v2(range.keyspace_id),
             block_size: self.opts.table_builder_options.block_size,
             max_table_size: self.opts.table_builder_options.max_table_size,
             compression_tp: self.opts.table_builder_options.compression_tps[level],
@@ -900,28 +888,10 @@ impl Engine {
     }
 
     fn get_blob_table_build_options_or_none(&self, shard: &Shard) -> Option<BlobTableBuildOptions> {
-        if shard.outer_start.len() >= api_v2::KEYSPACE_PREFIX_LEN {
-            let start_key_mode = ApiV2::parse_key_mode(&shard.outer_start);
-            let end_key_mode = ApiV2::parse_key_mode(&shard.outer_end);
-            if (start_key_mode == KeyMode::Raw || start_key_mode == KeyMode::Txn)
-                && (end_key_mode == KeyMode::Raw || end_key_mode == KeyMode::Txn)
-            {
-                let keyspace_id =
-                    ApiV2::get_u32_keyspace_id(ApiV2::get_keyspace_id(&shard.outer_start));
-                match self
-                    .per_keyspace_configs
-                    .get(&keyspace_id)
-                    .map(|c| c.blob_table_build_options)
-                {
-                    Some(bt_build_options) => {
-                        if bt_build_options.min_blob_size != 0 {
-                            return Some(bt_build_options);
-                        } else {
-                            return None;
-                        }
-                    }
-                    _ => return None,
-                };
+        if shard.keyspace_id > 0 {
+            let conf = self.per_keyspace_configs.get(&shard.keyspace_id)?;
+            if conf.blob_table_build_options.min_blob_size != 0 {
+                return Some(conf.blob_table_build_options);
             }
         }
         None
@@ -1010,7 +980,7 @@ impl Engine {
             estimated_num_files,
         );
         let l0_compaction = L0Compaction {
-            safe_ts: self.get_keyspace_gc_safepoint_v2(&req.outer_start),
+            safe_ts: self.get_keyspace_gc_safepoint_v2(shard.keyspace_id),
             l0_tables: l0_tbls,
             multi_cf_l1_tables: multi_cfs_l1_tbls,
             sst_config,
@@ -1192,7 +1162,7 @@ impl Engine {
         let l1_plus: L1PlusCompaction = L1PlusCompaction {
             cf,
             level,
-            safe_ts: self.get_keyspace_gc_safepoint_v2(&req.outer_start),
+            safe_ts: self.get_keyspace_gc_safepoint_v2(shard.keyspace_id),
             keep_latest_obsolete_tombstone: has_overlap,
             upper_level: upper_level_table_ids,
             lower_level: lower_level_table_ids,
@@ -1249,7 +1219,7 @@ impl Engine {
             estimated_num_files,
         );
         let major_compaction = MajorCompaction {
-            safe_ts: self.get_keyspace_gc_safepoint_v2(&req.outer_start),
+            safe_ts: self.get_keyspace_gc_safepoint_v2(shard.keyspace_id),
             l0_tables: data.l0_tbls.iter().map(|t| t.id()).collect(),
             ln_tables,
             blob_tables: data.blob_tbl_map.keys().copied().collect(),

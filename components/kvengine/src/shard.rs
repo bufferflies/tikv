@@ -12,6 +12,7 @@ use std::{
     },
 };
 
+use api_version::ApiV2;
 use bytes::{Buf, BufMut, Bytes};
 use cloud_encryption::{EncryptionKey, MasterKey};
 use dashmap::DashMap;
@@ -1644,14 +1645,19 @@ pub struct ShardRange {
     pub outer_start: Bytes,
     pub outer_end: Bytes,
     pub inner_key_off: usize,
+    pub keyspace_id: u32,
 }
 
 impl ShardRange {
     pub fn new(outer_start: &[u8], outer_end: &[u8], inner_key_off: usize) -> Self {
+        let keyspace_id = ApiV2::get_keyspace_prefix(outer_start)
+            .map(|prefix| ApiV2::get_u32_keyspace_id(ApiV2::get_keyspace_id(prefix)))
+            .unwrap_or_default();
         Self {
             outer_start: Bytes::from(outer_start.to_vec()),
             outer_end: Bytes::from(outer_end.to_vec()),
             inner_key_off,
+            keyspace_id,
         }
     }
 
@@ -1905,5 +1911,15 @@ mod tests {
             truncate_ts
         );
         assert_eq!(truncate_ts.inner(), ts);
+    }
+
+    #[test]
+    fn test_range_keyspace_id() {
+        let mut range = ShardRange::new(&[b'x', 0, 0, 1], &[b'x', 0, 0, 2], 4);
+        assert_eq!(range.keyspace_id, 1);
+        range = ShardRange::new(&[], GLOBAL_SHARD_END_KEY, 0);
+        assert_eq!(range.keyspace_id, 0);
+        range = ShardRange::new(&[b't', 0, 0, 0], &[], 0);
+        assert_eq!(range.keyspace_id, 0);
     }
 }

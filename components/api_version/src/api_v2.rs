@@ -49,7 +49,7 @@ impl KvFormat for ApiV2 {
     const IS_TTL_ENABLED: bool = true;
 
     fn parse_key_mode(key: &[u8]) -> KeyMode {
-        if key.is_empty() {
+        if key.len() < KEYSPACE_PREFIX_LEN {
             return KeyMode::Unknown;
         }
 
