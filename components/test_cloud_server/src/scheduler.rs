@@ -3,6 +3,7 @@
 use std::{
     collections::HashSet,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use api_version::api_v2::KEYSPACE_PREFIX_LEN;
@@ -12,6 +13,7 @@ use kvproto::metapb::{Peer, PeerRole, Region};
 use pd_client::PdClient;
 use rand::Rng;
 use test_pd_client::TestPdClient;
+use tikv_util::{time::Instant, warn};
 
 use crate::{must_wait, try_wait};
 
@@ -273,14 +275,21 @@ impl Scheduler {
             }
         }
         self.pd.try_merge_region(source.id, target.id);
-        try_wait(
-            || {
-                let region = block_on(self.pd.get_region_by_id(target.id))
-                    .unwrap()
-                    .unwrap();
-                region.start_key.eq(&left.start_key) && region.end_key.eq(&right.end_key)
-            },
-            5,
-        )
+
+        let start_time = Instant::now_coarse();
+        while start_time.saturating_elapsed() < Duration::from_secs(5) {
+            let region = match block_on(self.pd.get_region_by_id(target.id)).unwrap() {
+                Some(region) => region,
+                None => {
+                    warn!("Scheduler::merge_random_region: target region not exists"; "target" => ?target, "source" => ?source);
+                    return false;
+                }
+            };
+            if region.start_key.eq(&left.start_key) && region.end_key.eq(&right.end_key) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        false
     }
 }
