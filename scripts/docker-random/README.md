@@ -16,6 +16,12 @@ To use Docker-Random, ensure that Docker is installed on your system. Docker pro
     cd scripts/docker-random
     ./make-bin.sh
     ```
+   
+    Note that the executable is built as release target by default. If you wish to build it as debug target, execute the following command:
+
+    ```
+    ./make-bin.sh --debug
+    ```
 
 3. **Run the Tests**: After building the executable, execute the random tests by running the main script:
 
