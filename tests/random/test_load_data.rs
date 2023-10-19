@@ -136,7 +136,7 @@ fn do_load_data(
         data_batch_size,
         generate_key,
         i_to_val,
-        Duration::from_secs(60), // longer than expected. TODO: inspect the reason
+        Duration::from_secs(30),
         |_| 0,
     );
     info!(

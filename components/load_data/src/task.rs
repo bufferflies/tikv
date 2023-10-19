@@ -60,6 +60,7 @@ const ALLOCATE_ID_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const RETRY_SLEEP_DURATION: Duration = Duration::from_millis(100);
 const MAX_RETRY_TIMES: usize = 10;
 const MAX_SLEEP_DURATION: Duration = Duration::from_secs(30);
+const GET_SHARD_META_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub struct LoadTaskWorker {
     config: LoadDataConfig,
@@ -331,12 +332,11 @@ impl LoadTaskWorker {
         if self.task_ctx.inner_key_off.is_none() {
             let key_len = (&chunk_data[0..]).get_u16_le();
             let first_key = chunk_data.slice(2..2 + key_len as usize);
-            let region = self.ctx.pd.get_region(first_key.chunk())?;
-            let region_id = region.get_id();
-            let shard_meta = self
-                .ctx
-                .runtime
-                .block_on(get_shard_meta(&self.ctx.pd, region_id))?;
+            let shard_meta = self.ctx.runtime.block_on(get_shard_meta(
+                &self.ctx.pd,
+                first_key.chunk(),
+                GET_SHARD_META_TIMEOUT,
+            ))?;
             let snapshot = shard_meta.get_snapshot();
             self.task_ctx.inner_key_off = Some(snapshot.inner_key_off as usize);
             self.task_ctx.key_prefix = first_key.slice(..snapshot.inner_key_off as usize).to_vec();
@@ -906,28 +906,45 @@ async fn ingest_files_to_leader(
     }
 }
 
-async fn get_shard_meta(pd: &Arc<dyn PdClient>, shard_id: u64) -> Result<kvenginepb::ChangeSet> {
+async fn get_shard_meta(
+    pd: &Arc<dyn PdClient>,
+    shard_key: &[u8],
+    timeout: Duration,
+) -> Result<kvenginepb::ChangeSet> {
     let http_client = hyper::client::Client::new();
+    let start_time = Instant::now_coarse();
     let mut retry = 0;
     loop {
-        if retry > MAX_RETRY_TIMES {
+        if start_time.saturating_elapsed() >= timeout {
             return Err(Error::Other(box_err!(
-                "get_shard_meta failed, shard_id: {}",
-                shard_id
+                "get_shard_meta failed, key: {:?}",
+                shard_key
             )));
         }
         if retry > 0 {
-            tokio::time::sleep(Duration::from_secs(6)).await;
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
         retry += 1;
+
+        let region_res = pd.get_region_async(shard_key).await;
+        if region_res.is_err() {
+            error!(
+                "get_shard_meta: get region error: {:?}, key: {:?}",
+                region_res.unwrap_err(),
+                shard_key
+            );
+            continue;
+        }
+        let shard_id = region_res.unwrap().get_id();
 
         let store_res = get_leader_store(pd, shard_id, None).await;
         if store_res.is_err() {
             error!(
-                "get_shard_meta: get leader error: {:?}",
-                store_res.unwrap_err()
+                "get_shard_meta: get leader error: {:?}, key: {:?}, shard_id: {}",
+                store_res.unwrap_err(),
+                shard_key,
+                shard_id
             );
-            tokio::time::sleep(Duration::from_secs(1)).await;
             continue;
         }
         let store = store_res.unwrap();
