@@ -14,7 +14,7 @@ on:
 jobs:
   build-arm64:
     name: Build ARM64 Image
-    runs-on: arm64
+    runs-on: [arm64, cse]
     timeout-minutes: 120
     steps:
       - name: Check out Code
@@ -29,7 +29,7 @@ jobs:
             xexplorersun/tikv:cse-${{ github.sha }}-arm64
   build-amd64:
     name: Build AMD64 Image
-    runs-on: amd64
+    runs-on: [amd64, cse]
     timeout-minutes: 120
     outputs:
       image: tikv-cse:${{ github.sha }}-amd64
@@ -46,7 +46,7 @@ jobs:
             xexplorersun/tikv:cse-${{ github.sha }}-amd64
   multi-arch:
     name: Create Multi-Architecture Image
-    runs-on: amd64
+    runs-on: [amd64, cse]
     needs: ["build-arm64", "build-amd64"]
     steps:
       - name: create-manifest
@@ -60,7 +60,7 @@ jobs:
 
   sync-image:
     name: Sync image to GCR
-    runs-on: amd64
+    runs-on: [amd64, cse]
     needs: [ "multi-arch" ]
     if: ${{ inputs.overwrite_gcr || github.ref == 'refs/heads/cloud-engine' }}
     env:

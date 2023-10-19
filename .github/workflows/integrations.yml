@@ -12,7 +12,7 @@ concurrency:
 jobs:
   dev:
     name: Run integrations tests
-    runs-on: x64
+    runs-on: [x64, cse]
     env:
       RUSTFLAGS: -Dwarnings
       FAIL_POINT: "1"
