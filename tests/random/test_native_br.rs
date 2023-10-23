@@ -10,6 +10,7 @@ use kvengine::dfs::{DFSConfig, S3Fs};
 use native_br::{
     backup_worker,
     error::Error,
+    restore::get_cluster_backup_meta,
     restore_keyspace,
     restore_keyspace::{ReportRestoreStepTrait, RestoreStep},
 };
@@ -85,7 +86,12 @@ pub(crate) fn spawn_incremental_backup(
             let guard = lock.mutex_lock().await;
             let backup_ts = client.get_ts().into_inner();
             let ref_store = keyspace_manager.ref_stores().dump(keyspace_id);
-            drop(guard);
+            // Downgrade to shared lock, to enable write workloads on the keyspace, but
+            // block restore workload.
+            // As in scene of restoration, `truncate_ts` cannot truncate the extra restored
+            // data after `backup_ts`.
+            // See https://github.com/tidbcloud/cloud-storage-engine/issues/1094.
+            let shared_guard = guard.downgrade();
 
             let backup_file = match backup_worker.instant_backup().await {
                 Ok(backup_file) => backup_file,
@@ -103,6 +109,7 @@ pub(crate) fn spawn_incremental_backup(
                 keyspace_id,
                 ref_store,
             });
+            drop(shared_guard);
 
             info!(
                 "backup done: keyspace {}, file {:?}",
@@ -199,6 +206,7 @@ pub(crate) fn spawn_restore_keyspace(
                 // during the whole backup process, which is not efficient.
                 // And actually there are only trivial differences between PiTR and snapshot
                 // restore.
+                let backup_name = backup.backup_name.clone();
                 match do_restore_keyspace(
                     pd_client.clone(),
                     &runtime,
@@ -206,7 +214,7 @@ pub(crate) fn spawn_restore_keyspace(
                     security_config.clone(),
                     source_keyspace,
                     target_keyspace,
-                    &backup.backup_name,
+                    &backup_name,
                     Some(backup.backup_ts),
                     reporter.clone(),
                 ) {
@@ -239,12 +247,22 @@ pub(crate) fn spawn_restore_keyspace(
                     },
                     10,
                 );
-                assert!(
-                    verify_res.is_ok(),
-                    "{} verify_keyspace_with_ref_store (after restore): {:?}",
-                    tag,
-                    verify_res
-                );
+                if verify_res.is_err() {
+                    let s3fs = S3Fs::new(
+                        dfs_config.prefix,
+                        dfs_config.s3_endpoint,
+                        dfs_config.s3_key_id,
+                        dfs_config.s3_secret_key,
+                        dfs_config.s3_region,
+                        dfs_config.s3_bucket,
+                    );
+                    let backup_meta = get_cluster_backup_meta(&s3fs, backup_name);
+                    info!("{} backup_meta: {:?}", tag, backup_meta);
+                    panic!(
+                        "{} verify_keyspace_with_ref_store (after restore): {:?}",
+                        tag, verify_res
+                    );
+                }
             }
             info!("{} restore keyspace success", tag);
             RESTORE_COUNTER.fetch_add(1, Ordering::Relaxed);

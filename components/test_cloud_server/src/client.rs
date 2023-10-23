@@ -1612,7 +1612,7 @@ impl ClusterTxnClient {
     }
 
     fn tag_from_key(&self, key: &[u8]) -> String {
-        let region = self.pd_client.get_region(key.as_ref()).unwrap();
+        let region = self.pd_client.get_region(&encode_bytes(key)).unwrap();
         format!(
             "{}:{}",
             region.get_id(),

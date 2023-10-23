@@ -69,7 +69,7 @@ pub fn get_cluster_backup_meta(s3fs: &S3Fs, name: String) -> ClusterBackupMeta {
     let mut cluster_backup = ClusterBackupMeta::new();
     cluster_backup.merge_from_bytes(&data).unwrap();
     info!(
-        "Restore cluster_id {}, alloc_id {}, backup_ts {}, safe_ts {}, store cnt {}",
+        "get_cluster_backup_meta: cluster_id {}, alloc_id {}, backup_ts {}, safe_ts {}, store cnt {}",
         cluster_backup.cluster_id,
         cluster_backup.alloc_id,
         cluster_backup.backup_ts,
