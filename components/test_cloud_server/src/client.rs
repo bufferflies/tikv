@@ -1462,7 +1462,7 @@ impl ClusterTxnClient {
             .await
             {
                 Ok(Ok(kvs)) => return Ok(kvs),
-                Ok(Err(err)) if Self::is_kv_error_retryable(&err) => {
+                Ok(Err(err)) if Self::is_kv_error_retryable(&tag, &err) => {
                     self.log_kv_error(&tag, &err);
                     last_error = Some(err);
                     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -1525,7 +1525,7 @@ impl ClusterTxnClient {
                 .await
             {
                 Ok(_) => return Ok(()),
-                Err(err) if Self::is_kv_error_retryable(&err) => {
+                Err(err) if Self::is_kv_error_retryable(&tag, &err) => {
                     self.log_kv_error(&tag, &err);
                     last_error = Some(err);
                     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -1540,18 +1540,30 @@ impl ClusterTxnClient {
         Err(last_error.unwrap().into())
     }
 
-    pub(crate) fn is_kv_error_retryable(err: &tikv_client::Error) -> bool {
+    pub(crate) fn is_kv_error_retryable(tag: &str, err: &tikv_client::Error) -> bool {
         match err {
             tikv_client::Error::Grpc(_)
             | tikv_client::Error::GrpcAPI(_)
             | tikv_client::Error::Channel(_) => true,
             tikv_client::Error::RegionError(_) => true,
             tikv_client::Error::PessimisticLockError { inner, .. } => {
-                Self::is_kv_error_retryable(inner)
+                Self::is_kv_error_retryable(tag, inner)
+            }
+            tikv_client::Error::MultipleKeyErrors(key_errors) => key_errors
+                .iter()
+                .all(|err| Self::is_kv_error_retryable(tag, err)),
+            tikv_client::Error::KeyError(key_err) => {
+                Self::is_key_error_retryable(tag, key_err.as_ref())
             }
             tikv_client::Error::ResolveLockError(_) => true,
             _ => false,
         }
+    }
+
+    fn is_key_error_retryable(tag: &str, key_err: &tikv_client::proto::kvrpcpb::KeyError) -> bool {
+        let ok = !key_err.retryable.is_empty();
+        info!("{} ClusterTxnClient::is_key_error_retryable", tag; "key_err" => ?key_err, "ok" => ok);
+        ok
     }
 
     fn log_kv_error(&self, tag: &str, err: &tikv_client::Error) {
