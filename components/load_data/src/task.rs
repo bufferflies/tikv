@@ -100,7 +100,7 @@ pub enum LoadTaskMsg {
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
 pub struct LoadTaskStates {
-    pub start_ts: u64,
+    pub task_id: String,
     pub canceled: bool,
     pub finished: bool,
     pub error: String,
@@ -141,6 +141,7 @@ pub struct LoadDataContext {
 
 #[derive(Clone)]
 pub struct TaskContext {
+    pub task_id: String,
     pub start_ts: u64,
     pub commit_ts: u64,
     pub inner_key_off: Option<usize>,
@@ -221,14 +222,14 @@ impl LoadTaskWorker {
     pub fn new(config: LoadDataConfig, context: LoadDataContext, task_ctx: TaskContext) -> Self {
         let (sender, receiver) = tikv_util::mpsc::unbounded();
         let mut states = LoadTaskStates::default();
-        states.start_ts = task_ctx.start_ts;
+        states.task_id = task_ctx.task_id.clone();
         let scheduler = LoadTaskScheduler {
             sender,
             states: Arc::new(Mutex::new(states)),
             thread_handle: None,
         };
         let (file_tx, file_rx) = tikv_util::mpsc::unbounded();
-        let task_dir = context.dir.join(format!("{}", task_ctx.start_ts));
+        let task_dir = context.dir.join(task_ctx.task_id.as_str());
         Self {
             config,
             ctx: context,
@@ -275,11 +276,11 @@ impl LoadTaskWorker {
                     compression_type,
                 } => {
                     if self.scheduler.is_canceled() {
-                        warn!("task {} is canceled, do not build", self.task_ctx.start_ts);
+                        warn!("task {} is canceled, do not build", self.task_ctx.task_id);
                         continue;
                     }
                     if self.scheduler.is_finished() {
-                        warn!("task {} is finished, skip build", self.task_ctx.start_ts);
+                        warn!("task {} is finished, skip build", self.task_ctx.task_id);
                         continue;
                     }
                     if let Err(err) = self.build(chunk_ids, compression_type) {
@@ -309,21 +310,21 @@ impl LoadTaskWorker {
         if self.handled_chunks.contains(&chunk_id) {
             warn!(
                 "{} skip duplicated chunk {}",
-                self.task_ctx.start_ts, chunk_id
+                self.task_ctx.task_id, chunk_id
             );
             return Ok(());
         }
         if self.scheduler.is_canceled() {
             warn!(
                 "task {} is canceled, skip add chunk {}",
-                self.task_ctx.start_ts, chunk_id
+                self.task_ctx.task_id, chunk_id
             );
             return Ok(());
         }
         if self.scheduler.is_finished() {
             warn!(
                 "task {} is finished, skip add chunk {}",
-                self.task_ctx.start_ts, chunk_id
+                self.task_ctx.task_id, chunk_id
             );
             return Ok(());
         }
@@ -364,7 +365,7 @@ impl LoadTaskWorker {
             if key_prefix.chunk() != self.task_ctx.key_prefix.as_slice() {
                 let err_msg = format!(
                     "{} chunk data key prefix inconsistent, first chunk: {:?}, chunk: {:?}",
-                    self.task_ctx.start_ts,
+                    self.task_ctx.task_id,
                     self.task_ctx.key_prefix,
                     key_prefix.chunk()
                 );
@@ -379,7 +380,7 @@ impl LoadTaskWorker {
         if self.in_mem_size > self.ctx.max_in_mem_size {
             info!(
                 "{} flush to local file on in_mem_size {}",
-                self.task_ctx.start_ts, self.in_mem_size
+                self.task_ctx.task_id, self.in_mem_size
             );
             let kv_pairs = mem::take(&mut self.kv_pairs);
             let tx = self.file_tx.clone();
@@ -442,7 +443,7 @@ impl LoadTaskWorker {
             if !self.handled_chunks.contains(&id) {
                 return Err(Error::CheckError(format!(
                     "{} chunk {} is not handled",
-                    self.task_ctx.start_ts, id
+                    self.task_ctx.task_id, id
                 )));
             }
         }
@@ -464,12 +465,12 @@ impl LoadTaskWorker {
             self.file_idx += 1;
         }
         if self.readers.is_empty() {
-            info!("{} build empty data", self.task_ctx.start_ts);
+            info!("{} build empty data", self.task_ctx.task_id);
             self.scheduler.set_finished(vec![]);
             return Ok(());
         }
 
-        info!("{} start build", self.task_ctx.start_ts);
+        info!("{} start build", self.task_ctx.task_id);
         let (tx, rx) = tikv_util::mpsc::unbounded();
         let mut sent_count = 0;
         let mut recv_count = 0;
@@ -509,7 +510,7 @@ impl LoadTaskWorker {
         for _ in 0..(sent_count - recv_count) {
             match rx.recv().unwrap() {
                 Err(err) => {
-                    error!("{} create file failed {}", self.task_ctx.start_ts, err);
+                    error!("{} create file failed {}", self.task_ctx.task_id, err);
                     errs.push(err);
                 }
                 Ok(sst_meta) => {
@@ -528,7 +529,7 @@ impl LoadTaskWorker {
                 merge_iter.duplicated_entries_size
             );
         }
-        info!("{} finish build", self.task_ctx.start_ts);
+        info!("{} finish build", self.task_ctx.task_id);
         self.ingest(sst_metas, mem::take(&mut merge_iter.duplicated_entries))
     }
 
@@ -541,11 +542,11 @@ impl LoadTaskWorker {
     ) {
         let ctx = self.ctx.clone();
         let block_size = self.config.block_size;
-        let start_ts = self.task_ctx.start_ts;
+        let task_id = self.task_ctx.task_id.clone();
         let encryption_key = self.task_ctx.encryption_key.clone();
 
         self.ctx.runtime.spawn(async move {
-            info!("{} start build sst file {}", start_ts, file_id);
+            info!("{} start build sst file {}", task_id, file_id);
             let mut builder = Builder::new(
                 file_id,
                 block_size,
@@ -579,7 +580,7 @@ impl LoadTaskWorker {
                 size: data.len(),
                 keys: entries,
             };
-            info!("{} finish build sst file {:?}", start_ts, sst_meta);
+            info!("{} finish build sst file {:?}", task_id, sst_meta);
             let opts = Options::new(0, 0);
             let res = ctx
                 .dfs
@@ -623,7 +624,7 @@ impl LoadTaskWorker {
     fn split_regions(&self, split_keys: &[Vec<u8>]) -> Result<Vec<u64>> {
         info!(
             "{} start split, keys {:?}",
-            self.task_ctx.start_ts, split_keys
+            self.task_ctx.task_id, split_keys
         );
         let mut retry = 0;
         let mut split_keys = split_keys.to_owned();
@@ -649,7 +650,7 @@ impl LoadTaskWorker {
                 .block_on(self.ctx.pd.split_regions(unprocessed_keys.clone()));
             match result {
                 Err(e) => {
-                    error!("{} split failed {:?}", self.task_ctx.start_ts, e);
+                    error!("{} split failed {:?}", self.task_ctx.task_id, e);
                     if retry >= MAX_RETRY_TIMES {
                         return Err(Error::PdError(e));
                     }
@@ -670,7 +671,7 @@ impl LoadTaskWorker {
         new_regions_id.dedup();
         info!(
             "{} finish split, new regions_id {:?}",
-            self.task_ctx.start_ts, new_regions_id
+            self.task_ctx.task_id, new_regions_id
         );
         Ok(new_regions_id)
     }
@@ -683,7 +684,7 @@ impl LoadTaskWorker {
         if sst_metas.is_empty() {
             return Ok(());
         }
-        info!("{} start ingest", self.task_ctx.start_ts);
+        info!("{} start ingest", self.task_ctx.task_id);
         sst_metas.sort_by(|a, b| a.id.cmp(&b.id));
         let key_prefix = self.task_ctx.key_prefix.to_vec();
         let inner_key_off = self.task_ctx.inner_key_off.unwrap();
@@ -692,10 +693,7 @@ impl LoadTaskWorker {
         let new_regions_id = self.split_regions(&coarse_split_keys)?;
         let result = self.ctx.pd.scatter_regions_by_id(new_regions_id);
         if let Err(err) = result {
-            error!(
-                "{} scatter regions failed {:?}",
-                self.task_ctx.start_ts, err
-            );
+            error!("{} scatter regions failed {:?}", self.task_ctx.task_id, err);
         }
         for i in 0..coarse_split_keys.len() - 1 {
             let mut encoded_start_key = coarse_split_keys[i].as_slice();
@@ -717,7 +715,7 @@ impl LoadTaskWorker {
             self.ingest_group(group_ssts)?;
         }
         self.scheduler.set_finished(dup_entries);
-        info!("{} finished ingest", self.task_ctx.start_ts);
+        info!("{} finished ingest", self.task_ctx.task_id);
         Ok(())
     }
 
@@ -763,7 +761,7 @@ impl LoadTaskWorker {
                 Err(err) if is_error_retryable(&err) => {
                     warn!(
                         "{} ingest_group_to_range failed {:?}, retry {}",
-                        self.task_ctx.start_ts, err, retry
+                        self.task_ctx.task_id, err, retry
                     );
                     last_error = Some(err);
                     std::thread::sleep(std::cmp::min(
@@ -854,12 +852,9 @@ impl LoadTaskWorker {
 
     fn remove_local_files(&self) {
         if let Err(err) = fs::remove_dir_all(&self.task_dir) {
-            error!(
-                "failed to remove task {}, {:?}",
-                self.task_ctx.start_ts, err
-            );
+            error!("failed to remove task {}, {:?}", self.task_ctx.task_id, err);
         } else {
-            info!("removed local files for task {}", self.task_ctx.start_ts);
+            info!("removed local files for task {}", self.task_ctx.task_id);
         }
     }
 }

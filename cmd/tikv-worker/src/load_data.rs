@@ -26,25 +26,25 @@ pub(crate) const MAX_IN_MEM_SIZE: usize = 256 * 1024 * 1024;
 /// Remote load data worker API:
 ///
 /// 1. init task:
-///   POST /load_data?cluster_id=%d&start_ts=%d&commit_ts=%d
+///   POST /load_data?cluster_id=%d&task_id=%s&start_ts=%d&commit_ts=%d
 ///
 /// 2. put chunk:
-///   PUT /load_data?cluster_id=%d&start_ts=%d&chunk_id=%d
+///   PUT /load_data?cluster_id=%d&task_id=%s&chunk_id=%d
 ///   key_len(2) + key(key_len) + val_len(4) + value(val_len)
 ///   key_len(2) + key(key_len) + val_len(4) + value(val_len)
 ///   ...
 ///
 /// 3. build task:
-///   POST /load_data?cluster_id=%d&start_ts=%d&build=true&compression=zstd&
+///   POST /load_data?cluster_id=%d&task_id=%s&build=true&compression=zstd&
 ///        split_size=%d&split_keys=%d
 ///
 /// 4. get task states:
-///   GET /load_data?cluster_id=%d&start_ts=%d
+///   GET /load_data?cluster_id=%d&task_id=%s
 ///   {"canceled": false, "finished": false, "error": "", "created-files": 10,
 ///   "ingested-regions": 3}
 ///
 /// 5. clean up task:
-///   DELETE /load_data?cluster_id=%d&start_ts=%d
+///   DELETE /load_data?cluster_id=%d&task_id=%s
 pub(crate) async fn handle_load_data(
     manager: Arc<LoadDataManager>,
     req: hyper::Request<hyper::Body>,
@@ -62,8 +62,11 @@ pub(crate) async fn handle_load_data(
             ),
         ));
     }
-    let start_ts = get_u64_param(&query_pairs, "start_ts").unwrap_or_default();
-    if start_ts == 0 {
+    let task_id = query_pairs
+        .get("task_id")
+        .map(|x| x.to_string())
+        .unwrap_or_default();
+    if task_id.is_empty() {
         if *req.method() == Method::GET {
             let tasks = manager.list_tasks();
             let json = serde_json::to_string(&tasks).unwrap();
@@ -72,26 +75,34 @@ pub(crate) async fn handle_load_data(
                 .body(json.into())
                 .unwrap());
         }
-        return Ok(make_response(
-            StatusCode::BAD_REQUEST,
-            "start_ts is missing",
-        ));
+        return Ok(make_response(StatusCode::BAD_REQUEST, "task_id is missing"));
     }
     match *req.method() {
         Method::GET => {
-            if let Some(states) = manager.get_task_states(start_ts) {
+            if let Some(states) = manager.get_task_states(&task_id) {
                 let json = serde_json::to_string(&states).unwrap();
-                Ok(Response::builder()
+                return Ok(Response::builder()
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(json.into())
-                    .unwrap())
-            } else {
-                Ok(make_response(StatusCode::NOT_FOUND, ""))
+                    .unwrap());
             }
+            if manager.worker_scaler.is_some() {
+                let worker_scaler = manager.worker_scaler.as_ref().unwrap();
+                let worker_pod_addr = worker_scaler.get_worker_addr_by_task_id(&task_id).await;
+                if let Some(addr) = worker_pod_addr {
+                    let resp = Response::builder()
+                        .header("Location", addr)
+                        .status(StatusCode::FOUND)
+                        .body(Body::empty())
+                        .unwrap();
+                    return Ok(resp);
+                }
+            }
+            Ok(make_response(StatusCode::NOT_FOUND, ""))
         }
         Method::POST => {
             if query_pairs.get("build").map(|x| x.as_ref()) == Some("true") {
-                if !manager.has_task(start_ts) {
+                if !manager.has_task(&task_id) {
                     Ok(make_response(StatusCode::NOT_FOUND, ""))
                 } else {
                     let compression = query_pairs
@@ -101,7 +112,7 @@ pub(crate) async fn handle_load_data(
                     let body = get_body(req).await?;
                     match serde_json::from_slice(&body) {
                         Ok(chunk_ids) => {
-                            manager.build(start_ts, &compression, chunk_ids);
+                            manager.build(&task_id, &compression, chunk_ids);
                             Ok(make_response(StatusCode::OK, ""))
                         }
                         Err(err) => {
@@ -109,9 +120,10 @@ pub(crate) async fn handle_load_data(
                         }
                     }
                 }
-            } else if manager.has_task(start_ts) {
+            } else if manager.has_task(&task_id) {
                 Ok(make_response(StatusCode::BAD_REQUEST, "task exists"))
             } else {
+                let start_ts = get_u64_param(&query_pairs, "start_ts").unwrap_or_default();
                 let commit_ts = get_u64_param(&query_pairs, "commit_ts").unwrap_or_default();
                 let data_size = get_u64_param(&query_pairs, "data_size").unwrap_or_default();
                 if data_size > manager.worker_scaler_conf.max_size.0 {
@@ -132,7 +144,7 @@ pub(crate) async fn handle_load_data(
                     let worker_scaler = manager.worker_scaler.as_ref().unwrap();
                     let data_size_gb = data_size / 1024 / 1024 / 1024;
                     let worker_pod_res = worker_scaler
-                        .create_worker(start_ts, data_size_gb as usize)
+                        .create_worker(&task_id, data_size_gb as usize)
                         .await;
                     match worker_pod_res {
                         Ok(worker_pod) => {
@@ -153,6 +165,7 @@ pub(crate) async fn handle_load_data(
                     }
                 }
                 let task_ctx = TaskContext {
+                    task_id,
                     start_ts,
                     commit_ts,
                     inner_key_off: None,
@@ -173,15 +186,15 @@ pub(crate) async fn handle_load_data(
                 ));
             }
             let body = get_body(req).await?;
-            manager.put_chunk(start_ts, chunk_id, body.into());
+            manager.put_chunk(&task_id, chunk_id, body.into());
             Ok(make_response(StatusCode::OK, ""))
         }
         Method::DELETE => {
-            if !manager.has_task(start_ts) {
+            if !manager.has_task(&task_id) {
                 Ok(make_response(StatusCode::NOT_FOUND, ""))
             } else {
                 // step 4: on finish, client call DELETE task
-                manager.delete(start_ts);
+                manager.delete(&task_id);
                 Ok(make_response(StatusCode::OK, ""))
             }
         }
@@ -190,7 +203,7 @@ pub(crate) async fn handle_load_data(
 }
 
 pub(crate) struct LoadDataManager {
-    running_tasks: Arc<dashmap::DashMap<u64, LoadTaskScheduler>>,
+    running_tasks: Arc<dashmap::DashMap<String, LoadTaskScheduler>>,
     config: LoadDataConfig,
     ctx: LoadDataContext,
     worker_scaler: Option<WorkerScaler>,
@@ -226,8 +239,8 @@ impl LoadDataManager {
         }
     }
 
-    pub(crate) fn get_task_states(&self, start_ts: u64) -> Option<LoadTaskStates> {
-        self.running_tasks.get(&start_ts).map(|x| {
+    pub(crate) fn get_task_states(&self, task_id: &str) -> Option<LoadTaskStates> {
+        self.running_tasks.get(task_id).map(|x| {
             let thread_finished = x
                 .thread_handle
                 .as_ref()
@@ -261,8 +274,8 @@ impl LoadDataManager {
             .collect()
     }
 
-    pub(crate) fn has_task(&self, start_ts: u64) -> bool {
-        self.running_tasks.contains_key(&start_ts)
+    pub(crate) fn has_task(&self, task_id: &str) -> bool {
+        self.running_tasks.contains_key(task_id)
     }
 
     pub(crate) fn init_task(&self, task_ctx: TaskContext) {
@@ -273,16 +286,16 @@ impl LoadDataManager {
             worker.run();
         });
         scheduler.set_thread_handle(thread_handle);
-        self.running_tasks.insert(task_ctx.start_ts, scheduler);
+        self.running_tasks.insert(task_ctx.task_id, scheduler);
     }
 
-    pub(crate) fn build(&self, start_ts: u64, compression: &str, chunk_ids: Vec<u64>) {
+    pub(crate) fn build(&self, task_id: &str, compression: &str, chunk_ids: Vec<u64>) {
         let compression_type = match compression {
             "lz4" => LZ4_COMPRESSION,
             "zstd" => ZSTD_COMPRESSION,
             _ => NO_COMPRESSION,
         };
-        let scheduler = self.running_tasks.get(&start_ts).unwrap().clone();
+        let scheduler = self.running_tasks.get(task_id).unwrap().clone();
         scheduler
             .sender
             .send(LoadTaskMsg::Build {
@@ -292,8 +305,8 @@ impl LoadDataManager {
             .unwrap();
     }
 
-    pub(crate) fn put_chunk(&self, start_ts: u64, chunk_id: u64, chunk_data: Bytes) {
-        let scheduler = self.running_tasks.get(&start_ts).unwrap().clone();
+    pub(crate) fn put_chunk(&self, task_id: &str, chunk_id: u64, chunk_data: Bytes) {
+        let scheduler = self.running_tasks.get(task_id).unwrap().clone();
         scheduler
             .sender
             .send(LoadTaskMsg::AddChunk {
@@ -303,8 +316,8 @@ impl LoadDataManager {
             .unwrap();
     }
 
-    pub(crate) fn delete(&self, start_ts: u64) {
-        if let Some((_, scheduler)) = self.running_tasks.remove(&start_ts) {
+    pub(crate) fn delete(&self, task_id: &str) {
+        if let Some((_, scheduler)) = self.running_tasks.remove(task_id) {
             scheduler.cancel("deleted".to_string());
             scheduler.sender.send(LoadTaskMsg::Cleanup).unwrap();
         }

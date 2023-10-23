@@ -16,7 +16,9 @@ pub fn init_task(
     start_ts: u64,
     commit_ts: u64,
 ) -> LoadTaskScheduler {
+    let task_id = format!("load_data_{}", start_ts);
     let task_ctx = TaskContext {
+        task_id,
         start_ts,
         commit_ts,
         inner_key_off: None,

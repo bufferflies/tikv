@@ -112,7 +112,7 @@ pub(crate) struct WorkerScalerCore {
     cluster_id: u64,
     in_k8s: bool,
     http_client: hyper::Client<HttpConnector>,
-    pods_map: Mutex<HashMap<u64, WorkerPod>>, // task_id -> WorkerPod
+    pods_map: Mutex<HashMap<String, WorkerPod>>, // task_id -> WorkerPod
 }
 
 #[derive(Clone, Debug, Default)]
@@ -293,9 +293,9 @@ impl WorkerScaler {
     }
 
     async fn clean_up_finished_workers(&self) {
-        let task_ids: Vec<u64> = self.pods_map.lock().await.keys().cloned().collect();
+        let task_ids: Vec<String> = self.pods_map.lock().await.keys().cloned().collect();
         for task_id in task_ids {
-            self.maybe_clean_up(task_id).await;
+            self.maybe_clean_up(&task_id).await;
         }
     }
 
@@ -314,7 +314,7 @@ impl WorkerScaler {
         for pvc in pvcs.items.iter_mut() {
             let name = pvc.name_any();
             let task_id = parse_task_id_by_pvc_name(&name, &self.pvc_template_name);
-            if task_id == 0 {
+            if task_id.is_empty() {
                 error!("failed to parse task id from pvc name {}", name);
                 continue;
             }
@@ -325,13 +325,13 @@ impl WorkerScaler {
         drop(pods_map);
         for task_id in orphan_pvc_tasks {
             info!("delete orphan pvc {}", task_id);
-            self.delete_pvc(task_id).await;
+            self.delete_pvc(&task_id).await;
         }
     }
 
     pub(crate) async fn create_worker(
         &self,
-        task_id: u64,
+        task_id: &str,
         data_size_gb: usize,
     ) -> kube::Result<WorkerPod> {
         {
@@ -342,7 +342,7 @@ impl WorkerScaler {
                     self.config.worker_count_limit
                 )));
             }
-            match pods_map.entry(task_id) {
+            match pods_map.entry(task_id.to_string()) {
                 Entry::Occupied(e) => {
                     if e.get().ip.is_some() {
                         return Ok(e.get().clone());
@@ -365,7 +365,7 @@ impl WorkerScaler {
             .wait_worker_pod_ready(task_id, Duration::from_secs(60 * 5))
             .await?;
         let mut pods_map = self.pods_map.lock().await;
-        pods_map.insert(task_id, worker_pod.clone());
+        pods_map.insert(task_id.to_string(), worker_pod.clone());
         Ok(worker_pod)
     }
 
@@ -457,7 +457,7 @@ impl WorkerScaler {
 
     async fn wait_worker_pod_ready(
         &self,
-        task_id: u64,
+        task_id: &str,
         timeout: Duration,
     ) -> kube::Result<WorkerPod> {
         let start = Instant::now();
@@ -482,14 +482,14 @@ impl WorkerScaler {
         }
     }
 
-    async fn delete_sts(&self, task_id: u64) {
+    async fn delete_sts(&self, task_id: &str) {
         let sts_name = new_worker_sts_name(task_id);
         if let Err(err) = self.sts_api.delete(&sts_name, &Default::default()).await {
             warn!("delete sts {} err {:?}", sts_name, err);
         }
     }
 
-    async fn delete_pvc(&self, task_id: u64) {
+    async fn delete_pvc(&self, task_id: &str) {
         let pvc_name = new_worker_pvc_name(&self.pvc_template_name, task_id);
         if let Err(err) = self.pvc_api.delete(&pvc_name, &Default::default()).await {
             warn!("delete pvc {} err {:?}", pvc_name, err);
@@ -538,9 +538,9 @@ impl WorkerScaler {
         None
     }
 
-    async fn maybe_clean_up(&self, task_id: u64) {
+    async fn maybe_clean_up(&self, task_id: &str) {
         let mut pods_map = self.pods_map.lock().await;
-        let worker_pod_opt = pods_map.get_mut(&task_id);
+        let worker_pod_opt = pods_map.get_mut(task_id);
         if worker_pod_opt.is_none() || worker_pod_opt.as_ref().unwrap().ip.is_none() {
             return;
         }
@@ -552,7 +552,7 @@ impl WorkerScaler {
             info!("clean up task {}", task_id);
             self.delete_sts(task_id).await;
             self.delete_pvc(task_id).await;
-            pods_map.remove(&task_id);
+            pods_map.remove(task_id);
         }
     }
 
@@ -566,36 +566,50 @@ impl WorkerScaler {
         ))
     }
 
+    pub(crate) async fn get_worker_addr_by_task_id(&self, task_id: &str) -> Option<String> {
+        let pods_map = self.pods_map.lock().await;
+        let worker_pod = pods_map.get(task_id);
+
+        if let Some(worker_pod) = worker_pod {
+            return self.get_worker_addr(worker_pod);
+        }
+        None
+    }
+
     pub(crate) fn get_worker_tasks_url(&self, worker_addr: String) -> String {
         format!("{}?cluster_id={}", worker_addr, self.cluster_id)
     }
 }
 
-fn parse_task_id_by_pod_name(pod_name: &str) -> u64 {
+fn parse_task_id_by_pod_name(pod_name: &str) -> String {
+    // pod name format: load-data-worker-{task-id}-0
+    // task-id: {lightning-task-id}-{table-id}-{engine-id}
     let fields: Vec<&str> = pod_name.split('-').collect();
-    if fields.len() == 5 {
-        return fields[3].parse::<u64>().unwrap_or(0);
+    if fields.len() == 7 {
+        return format!("{}-{}-{}", fields[3], fields[4], fields[5]);
     }
-    0
+    "".to_string()
 }
 
-fn parse_task_id_by_pvc_name(pvc_name: &str, pvc_template_name: &str) -> u64 {
+fn parse_task_id_by_pvc_name(pvc_name: &str, pvc_template_name: &str) -> String {
+    // pvc name format: {pvc-template-name}-load-data-worker-{task-id}-0
+    // task-id: {lightning-task-id}-{table-id}-{engine-id}
     let fields: Vec<&str> = pvc_name[pvc_template_name.len()..].split('-').collect();
-    if fields.len() == 6 {
-        return fields[4].parse::<u64>().unwrap_or(0);
+    if fields.len() == 8 {
+        return format!("{}-{}-{}", fields[4], fields[5], fields[6]);
     }
-    0
+    "".to_string()
 }
 
-fn new_worker_sts_name(task_id: u64) -> String {
+fn new_worker_sts_name(task_id: &str) -> String {
     format!("load-data-worker-{}", task_id)
 }
 
-fn new_worker_pod_name(task_id: u64) -> String {
+fn new_worker_pod_name(task_id: &str) -> String {
     format!("load-data-worker-{}-0", task_id)
 }
 
-fn new_worker_pvc_name(pvc_template_name: &str, task_id: u64) -> String {
+fn new_worker_pvc_name(pvc_template_name: &str, task_id: &str) -> String {
     format!("{}-load-data-worker-{}-0", pvc_template_name, task_id)
 }
 
@@ -701,7 +715,7 @@ mod tests {
 
     #[test]
     fn test_parse_task_id() {
-        let task_id = 101;
+        let task_id = "taskid-1-0";
         let pvc_template_name = "data0";
         let pod_name = new_worker_pod_name(task_id);
         let pvc_name = new_worker_pvc_name(pvc_template_name, task_id);
