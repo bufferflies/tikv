@@ -194,7 +194,7 @@ impl<S: Snapshot> CloudStore<S> {
     }
 }
 
-fn check_locks(
+pub fn check_locks(
     lock_iter: &mut read::Iterator,
     bypass_locks: &TsSet,
     start_ts: u64,

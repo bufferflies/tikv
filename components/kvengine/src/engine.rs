@@ -340,6 +340,12 @@ impl EngineCore {
     fn new_shard_from_change_set(&self, cs: ChangeSet) -> Shard {
         let engine_id = self.engine_id.load(Ordering::Acquire);
         let shard = Shard::new_for_ingest(engine_id, &cs, self.opts.clone(), &self.master_key);
+        info!(
+            "ingest shard {} mem_table_version {}, change {:?}",
+            shard.tag(),
+            shard.load_mem_table_version(),
+            &cs,
+        );
         let (l0s, blob_tbls, scfs) =
             create_snapshot_tables(cs.get_snapshot(), &cs, self.opts.for_restore);
         let data = ShardData::new(

@@ -110,6 +110,7 @@ itertools = "0.10"
 keyed_priority_queue = "0.4"
 keys = { workspace = true }
 kvengine = { workspace = true }
+kvenginepb = { workspace = true }
 kvproto = { workspace = true }
 lazy_static = "1.3"
 libc = "0.2"

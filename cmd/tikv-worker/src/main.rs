@@ -43,9 +43,11 @@ use rfstore::store::{PdIdAllocator, RegionSnapshot};
 use security::{SecurityConfig, SecurityManager};
 use slog::Level;
 use slog_global::{error, info};
+use tikv::coprocessor::remote_dispatcher::decode_remote_cop_request;
 use tikv_util::{
     config::{ReadableDuration, ReadableSize},
     metrics::{dump, dump_to},
+    quota_limiter::QuotaLimiter,
     sys::SysQuota,
     time::Instant,
 };
@@ -294,6 +296,7 @@ fn main() {
     let cache_fs_clone = cache_fs.clone();
     let pd_clone = pd.clone();
     let master_key_clone = master_key.clone();
+    let quota_limiter = Arc::new(QuotaLimiter::default());
     let server = server_builder.serve(make_service_fn(move |_| {
         let s3fs = s3fs_clone.clone();
         let cache_fs = cache_fs_clone.clone();
@@ -301,6 +304,7 @@ fn main() {
         let br_manager = br_manager.clone();
         let pd = pd_clone.clone();
         let master_key = master_key_clone.clone();
+        let quota_limiter = quota_limiter.clone();
         async move {
             // Create a status service.
             Ok::<_, hyper::Error>(service_fn(move |req: hyper::Request<hyper::Body>| {
@@ -310,6 +314,7 @@ fn main() {
                 let br_manager = br_manager.clone();
                 let pd = pd.clone();
                 let master_key = master_key.clone();
+                let quota_limiter = quota_limiter.clone();
                 async move {
                     let path = req.uri().path().to_owned();
                     match path.as_ref() {
@@ -329,6 +334,10 @@ fn main() {
                             .await
                         }
                         "/analyze" => handle_remote_analysis(cache_fs, req, master_key).await,
+                        "/coprocessor" => {
+                            handle_remote_coprocessor(cache_fs, req, master_key, quota_limiter)
+                                .await
+                        }
                         "/load_data" => handle_load_data(load_manager, req).await,
                         "/metrics" => handle_get_metrics(req).await,
                         native_br::BACKUPS_API_PATH => {
@@ -509,6 +518,64 @@ async fn handle_remote_analysis(
             Ok(hyper::Response::builder().status(500).body(body).unwrap())
         }
     }
+}
+
+async fn handle_remote_coprocessor(
+    dfs: Arc<dyn dfs::Dfs>,
+    req: hyper::Request<hyper::Body>,
+    master_key: MasterKey,
+    quota_limiter: Arc<QuotaLimiter>,
+) -> hyper::Result<hyper::Response<hyper::Body>> {
+    let req_body = hyper::body::to_bytes(req.into_body()).await?;
+    let decode_res = decode_remote_cop_request(req_body.chunk());
+    if let Err(err) = decode_res {
+        let body = hyper::Body::from(format!("{:?}", err));
+        return Ok(hyper::Response::builder().status(500).body(body).unwrap());
+    }
+    let (req_data, mem_data, snap_data) = decode_res.unwrap();
+    let mut cop_req = kvproto::coprocessor::Request::default();
+    if let Err(err) = cop_req.merge_from_bytes(req_data) {
+        let body = hyper::Body::from(format!("{:?}", err));
+        return Ok(hyper::Response::builder().status(500).body(body).unwrap());
+    }
+    let snap_access_res =
+        SnapAccess::construct_snapshot(dfs, mem_data, snap_data, &master_key).await;
+    if let Err(err) = snap_access_res.as_ref() {
+        let body = hyper::Body::from(format!("{:?}", err));
+        return Ok(hyper::Response::builder().status(500).body(body).unwrap());
+    }
+    let snap_access = snap_access_res.unwrap();
+    let tag = format!(
+        "ks{}:{}:{}",
+        snap_access.get_keyspace_id(),
+        snap_access.get_id(),
+        snap_access.get_version()
+    );
+    let snap = RegionSnapshot::from_snapshot(snap_access);
+    let result = tikv::coprocessor::parse_request_and_handle_remote_cop(
+        cop_req,
+        None,
+        Duration::from_secs(60),
+        quota_limiter,
+        snap,
+    )
+    .await;
+    if let Err(err) = result {
+        error!("{} remote coprocessor failed, error {:?}", tag, err);
+        let body = hyper::Body::from(format!("{:?}", err));
+        return Ok(hyper::Response::builder().status(500).body(body).unwrap());
+    }
+    let response = result.unwrap();
+    info!(
+        "{} finished remote coprocessor resp size {}",
+        tag,
+        response.data.len()
+    );
+    let response_data = response.write_to_bytes().unwrap();
+    Ok(hyper::Response::builder()
+        .status(200)
+        .body(response_data.into())
+        .unwrap())
 }
 
 pub(crate) fn get_all_stores_except_tiflash(

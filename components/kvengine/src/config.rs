@@ -33,6 +33,17 @@ pub struct Config {
     /// The number threshold of tombstone entries to trigger compaction.
     pub compaction_tombs_count: u64,
 
+    /// The remote coprocessor address to run heavy coprocessor requests.
+    pub remote_coprocessor_addr: String,
+
+    /// the minimum number of blocks for a coprocessor request to be run on
+    /// remote worker.
+    pub remote_coprocessor_min_blocks: usize,
+
+    /// the white list of keyspace ids to enable the remote coprocessor feature.
+    /// If empty, all keyspaces enable this feature.
+    pub remote_coprocessor_white_list: Vec<u32>,
+
     pub per_keyspace_configs: Vec<PerKeyspaceConfig>,
     // Note: `per_keyspace_configs` must be the last field. Otherwise serializing the config
     // will meet a "ValueAfterTable" error.
@@ -47,6 +58,9 @@ impl Default for Config {
             compaction_tombs_ratio: DEFAULT_COMPACTION_TOMBS_RATIO,
             compaction_tombs_count: DEFAULT_COMPACTION_TOMBS_COUNT,
             per_keyspace_configs: vec![],
+            remote_coprocessor_addr: "".to_string(),
+            remote_coprocessor_white_list: vec![],
+            remote_coprocessor_min_blocks: 512,
         }
     }
 }

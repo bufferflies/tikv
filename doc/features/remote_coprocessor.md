@@ -34,3 +34,20 @@ Upon receipt of the `DelegateResponse`, the tikv-worker:
 - Constructs the SnapAccess using the received memory table data and snapshot change set.
 - Reads the SST file in the Moka cache. If a cache miss occurs, it reads from S3.
 - Handle the request via `parse_request_and_handle_remote_cop`.
+
+## offload heavy requests
+
+tikv-server can be configured to offload resource-intensive coprocessor requests to remote workers. 
+This can significantly improve service stability in the case of unexpected large queries exhaust the cluster resource.
+
+example config:
+```
+[kvengine]
+remote-coprocessor-addr = "http://127.0.0.1:19000/coprocessor"
+remote-coprocessor-min-blocks = 256
+remote-coprocessor-white-list = [1]
+```
+
+- The `remote-coprocessor-addr` parameter specifies the address of the remote coprocessor worker to which heavy coprocessor requests will be offloaded.
+- The `remote-coprocessor-min-blocks` parameter defines the threshold for offloading a coprocessor request to the remote worker.
+- The `remote-coprocessor-white-list` parameter is used to specify a list of keyspaces that are eligible for this offloading feature. An empty white list ([]) enables the feature for all keyspaces.

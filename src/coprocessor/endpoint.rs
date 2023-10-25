@@ -9,13 +9,16 @@ use ::tracker::{
 };
 use api_version::{dispatch_api_version, KvFormat};
 use async_stream::try_stream;
-use bytes::Buf;
+use bytes::{Buf, BufMut};
 use concurrency_manager::ConcurrencyManager;
 use engine_traits::PerfLevel;
 use futures::{channel::mpsc, prelude::*};
 use futures_executor::block_on;
 use kvengine::UserMeta;
-use kvproto::{coprocessor as coppb, errorpb, kvrpcpb};
+use kvproto::{
+    coprocessor as coppb, errorpb, kvrpcpb,
+    kvrpcpb::{ScanDetailV2, TimeDetail},
+};
 use overload_protector::{CopTaskStats, OverloadProtector};
 use protobuf::{CodedInputStream, Message};
 use resource_metering::{FutureExt, ResourceTagFactory, StreamExt};
@@ -32,7 +35,7 @@ use crate::{
         cache::CachedRequestHandler,
         interceptors::*,
         metrics::*,
-        statistics::analyze::{RemoteContext, REMOTE_ANALYZE_TIMEOUT},
+        remote_dispatcher::{try_remote_dag_handler, RemoteContext, REMOTE_COP_FORMAT_V1},
         tracker::Tracker,
         Error, *,
     },
@@ -52,8 +55,6 @@ use crate::{
 /// light ones, which means they don't need a permit from the semaphore before
 /// execution.
 const LIGHT_TASK_THRESHOLD: Duration = Duration::from_millis(5);
-const ANALYZE_CACHE_CAPACITY: u64 = 64;
-pub const REMOTE_COP_MEM_FORMAT: u32 = 1;
 
 /// A pool to build and run Coprocessor request handlers.
 #[derive(Clone)]
@@ -132,39 +133,19 @@ impl<E: Engine> Endpoint<E> {
         }
     }
 
-    pub fn set_remote_url(&mut self, remote_url: String) {
-        if remote_url.is_empty() {
-            return;
-        }
-        let remote_ctx = if let Some(v) = self.remote_ctx.as_ref() {
-            let mut ctx = v.clone();
-            ctx.remote_url = remote_url;
-            ctx
-        } else {
-            let runtime = Arc::new(
-                tokio::runtime::Builder::new_multi_thread()
-                    .worker_threads(2)
-                    .enable_all()
-                    .thread_name("remote_coprocessor")
-                    .build()
-                    .unwrap(),
-            );
-            let client = hyper::Client::builder()
-                .pool_max_idle_per_host(0)
-                .build_http();
-            let analyze_cache = moka::future::Cache::builder()
-                .max_capacity(ANALYZE_CACHE_CAPACITY)
-                .time_to_live(REMOTE_ANALYZE_TIMEOUT * 2)
-                .build();
-            RemoteContext {
-                remote_req: RemoteAnalysisRequest::default(),
-                remote_url,
-                runtime,
-                analyze_cache,
-                client,
-            }
-        };
-        self.remote_ctx = Some(remote_ctx);
+    pub fn set_remote_url(
+        &mut self,
+        remote_analyze_url: String,
+        remote_cop_url: String,
+        remote_cop_min_blocks: usize,
+        remote_cop_white_list: Vec<u32>,
+    ) {
+        self.remote_ctx = RemoteContext::new(
+            remote_analyze_url,
+            remote_cop_url,
+            remote_cop_min_blocks,
+            remote_cop_white_list,
+        );
     }
 
     fn check_memory_locks(
@@ -295,7 +276,16 @@ impl<E: Engine> Endpoint<E> {
 
                 let batch_row_limit = self.get_batch_row_limit(is_streaming);
                 let quota_limiter = self.quota_limiter.clone();
+                let remote_ctx = self.remote_ctx.clone();
                 builder = Box::new(move |snap, req_ctx| {
+                    if let Some(handler) = try_remote_dag_handler::<E>(
+                        snap.get_kvengine_snap(),
+                        &dag,
+                        req_ctx,
+                        remote_ctx,
+                    ) {
+                        return Ok(handler);
+                    }
                     let data_version = snap.ext().get_data_version();
                     let store = CloudStore::new(
                         snap,
@@ -365,11 +355,7 @@ impl<E: Engine> Endpoint<E> {
                     max_handle_duration,
                     snap_bytes: Vec::new(),
                 };
-                let remote_ctx = self.remote_ctx.as_ref().map(|v| {
-                    let mut ctx = v.clone();
-                    ctx.remote_req = remote_req;
-                    ctx
-                });
+                let remote_ctx = self.remote_ctx.clone();
                 builder = Box::new(move |snap, req_ctx| {
                     statistics::analyze::AnalyzeContext::<_, F>::new(
                         analyze,
@@ -379,6 +365,7 @@ impl<E: Engine> Endpoint<E> {
                         req_ctx,
                         quota_limiter,
                         remote_ctx,
+                        remote_req,
                     )
                     .map(|h| h.into_boxed())
                 });
@@ -917,7 +904,7 @@ impl<E: Engine> Endpoint<E> {
                     let mem_size =
                         bincode::serialized_size(&rows).map_err(|e| Error::Other(e.to_string()))?;
                     let mut mem_data = Vec::with_capacity(mem_size as usize + 4);
-                    mem_data.extend_from_slice(&REMOTE_COP_MEM_FORMAT.to_be_bytes());
+                    mem_data.put_u32_le(REMOTE_COP_FORMAT_V1);
                     bincode::serialize_into(&mut mem_data, &rows)
                         .map_err(|e| Error::Other(e.to_string()))?;
                     resp.set_mem_table_data(mem_data);
@@ -1016,6 +1003,7 @@ fn parse_request_and_remote_analyze_impl<S: 'static + Snapshot, F: KvFormat>(
                 &req_ctx,
                 quota_limiter,
                 None,
+                RemoteAnalysisRequest::default(),
             )
             .unwrap();
             return block_on(handler.local_handle_request());
@@ -1063,7 +1051,7 @@ pub async fn parse_request_and_handle_remote_cop_impl<S: 'static + Snapshot, F: 
         None
     };
     let req_ctx: ReqContext;
-    match req.get_tp() {
+    let mut handler = match req.get_tp() {
         REQ_TYPE_DAG => {
             let mut dag = DagRequest::default();
             box_try!(dag.merge_from_bytes(&data));
@@ -1107,7 +1095,7 @@ pub async fn parse_request_and_handle_remote_cop_impl<S: 'static + Snapshot, F: 
                 0 => None,
                 i => Some(i),
             };
-            let mut handler = dag::DagHandlerBuilder::new(
+            dag::DagHandlerBuilder::new(
                 dag,
                 req_ctx.ranges.clone(),
                 store,
@@ -1119,8 +1107,7 @@ pub async fn parse_request_and_handle_remote_cop_impl<S: 'static + Snapshot, F: 
                 quota_limiter,
             )
             .data_version(data_version)
-            .build::<F>()?;
-            return handler.handle_request().await;
+            .build::<F>()?
         }
         REQ_TYPE_ANALYZE => {
             let (context, data, ranges, mut start_ts) = (
@@ -1164,17 +1151,19 @@ pub async fn parse_request_and_handle_remote_cop_impl<S: 'static + Snapshot, F: 
                 cache_match_version,
                 PerfLevel::Uninitialized,
             );
-            let mut handler = statistics::analyze::AnalyzeContext::<_, F>::new(
-                analyze,
-                req_ctx.ranges.clone(),
-                start_ts,
-                snap,
-                &req_ctx,
-                quota_limiter,
-                None,
+            Box::new(
+                statistics::analyze::AnalyzeContext::<_, F>::new(
+                    analyze,
+                    req_ctx.ranges.clone(),
+                    start_ts,
+                    snap,
+                    &req_ctx,
+                    quota_limiter,
+                    None,
+                    RemoteAnalysisRequest::default(),
+                )
+                .unwrap(),
             )
-            .unwrap();
-            return handler.handle_request().await;
         }
         REQ_TYPE_CHECKSUM => {
             let checksum = {
@@ -1209,18 +1198,38 @@ pub async fn parse_request_and_handle_remote_cop_impl<S: 'static + Snapshot, F: 
                 tracker.req_info.request_type = RequestType::CoprocessorChecksum;
                 tracker.req_info.start_ts = start_ts;
             });
-            let mut handler = checksum::ChecksumContext::new(
-                checksum,
-                req_ctx.ranges.clone(),
-                start_ts,
-                snap,
-                &req_ctx,
+            Box::new(
+                checksum::ChecksumContext::new(
+                    checksum,
+                    req_ctx.ranges.clone(),
+                    start_ts,
+                    snap,
+                    &req_ctx,
+                )
+                .unwrap(),
             )
-            .unwrap();
-            return handler.handle_request().await;
         }
         tp => return Err(Error::Other(format!("unsupported tp {}", tp))),
-    }
+    };
+    let mut resp = handler.handle_request().await?;
+
+    let mut exec_summary = ExecSummary::default();
+    handler.collect_scan_summary(&mut exec_summary);
+    let mut time_detail = TimeDetail::default();
+    time_detail.set_process_wall_time_ms((exec_summary.time_processed_ns / 1000000) as u64);
+
+    let mut storage_stats = Statistics::default();
+    handler.collect_scan_statistics(&mut storage_stats);
+
+    let mut detail_v2 = ScanDetailV2::default();
+    detail_v2.set_processed_versions(storage_stats.write.processed_keys as u64);
+    detail_v2.set_processed_versions_size(storage_stats.processed_size as u64);
+
+    let mut exec_details_v2 = kvrpcpb::ExecDetailsV2::default();
+    exec_details_v2.set_scan_detail_v2(detail_v2);
+    exec_details_v2.set_time_detail(time_detail);
+    resp.set_exec_details_v2(exec_details_v2);
+    Ok(resp)
 }
 
 fn make_error_batch_response(batch_resp: &mut coppb::StoreBatchTaskResponse, e: Error) {

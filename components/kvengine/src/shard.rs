@@ -226,12 +226,6 @@ impl Shard {
         shard.base_version.store(snap.base_version, Release);
         shard.meta_seq.store(cs.sequence, Release);
         shard.write_sequence.store(snap.data_sequence, Release);
-        info!(
-            "ingest shard {} mem_table_version {}, change {:?}",
-            shard.tag(),
-            shard.load_mem_table_version(),
-            &cs,
-        );
         shard
     }
 

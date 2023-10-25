@@ -648,7 +648,12 @@ impl TikvServer {
             Arc::new(QuotaLimiter::default()),
             Some(self.overload_protector.clone()),
         );
-        copr.set_remote_url(self.config.dfs.remote_analyzer_addr.clone());
+        copr.set_remote_url(
+            self.config.dfs.remote_analyzer_addr.clone(),
+            self.config.kvengine.remote_coprocessor_addr.clone(),
+            self.config.kvengine.remote_coprocessor_min_blocks,
+            self.config.kvengine.remote_coprocessor_white_list.clone(),
+        );
         // Create server
         let server = Server::new(
             node.id(),

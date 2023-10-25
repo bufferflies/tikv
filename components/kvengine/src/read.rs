@@ -119,7 +119,7 @@ impl SnapAccess {
         let inner_key_off = change_set.get_snapshot().get_inner_key_off() as usize;
         let mut wb = crate::table::memtable::WriteBatch::new();
         if !mem_table_data.is_empty() {
-            let format_version = mem_table_data.get_u32();
+            let format_version = mem_table_data.get_u32_le();
             if format_version != MEM_DATA_FORMAT_V1 {
                 return Err(Error::RemoteRead(format!(
                     "unsupported mem data format {}",

@@ -29,6 +29,7 @@ mod error;
 mod interceptors;
 pub(crate) mod metrics;
 pub mod readpool_impl;
+pub mod remote_dispatcher;
 mod statistics;
 mod tracker;
 
@@ -42,7 +43,7 @@ use kvproto::{coprocessor as coppb, kvrpcpb};
 use lazy_static::lazy_static;
 use metrics::ReqTag;
 use rand::prelude::*;
-pub use statistics::analyze::RemoteAnalysisRequest;
+pub use remote_dispatcher::RemoteAnalysisRequest;
 use tidb_query_common::execute_stats::ExecSummary;
 use tikv_alloc::{mem_trace, Id, MemoryTrace, MemoryTraceGuard};
 use tikv_util::{deadline::Deadline, time::Duration};

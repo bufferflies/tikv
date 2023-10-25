@@ -7689,6 +7689,7 @@ dependencies = [
  "keyed_priority_queue",
  "keys",
  "kvengine",
+ "kvenginepb",
  "kvproto",
  "lazy_static",
  "libc 0.2.132",

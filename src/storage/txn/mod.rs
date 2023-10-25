@@ -31,7 +31,7 @@ pub use self::{
         gc::gc,
         prewrite::{prewrite, CommitKind, TransactionKind, TransactionProperties},
     },
-    cloud_store::{CloudStore, CloudStoreScanner},
+    cloud_store::{check_locks, CloudStore, CloudStoreScanner},
     commands::{Command, RESOLVE_LOCK_BATCH_SIZE},
     latch::{Latches, Lock},
     scheduler::Scheduler,
