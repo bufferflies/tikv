@@ -167,9 +167,11 @@ impl ServerCluster {
             self.stop_node(node_id);
         }
     }
+
     pub fn stop_node(&mut self, node_id: u16) {
         if let Some(node) = self.servers.remove(&node_id) {
-            node.stop();
+            // Force stop node to cover the case wal chunk recovery.
+            node.force_stop(false);
         }
     }
 

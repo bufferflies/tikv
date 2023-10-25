@@ -10,7 +10,7 @@ use native_br::{backup, restore};
 use rand::Rng;
 use test_cloud_server::{client, oss::ObjectStorageService, ServerCluster};
 use tikv::config::TikvConfig;
-use tikv_util::info;
+use tikv_util::{config::ReadableSize, info};
 
 use crate::alloc_node_id;
 
@@ -20,13 +20,17 @@ const DATA_SIZE: usize = 2000;
 // TODO: make the test independent to S3/Minio.
 // TODO: test on more conditions (e.g. split and merge).
 
-fn start_cluster_and_full_backup(
+fn start_cluster_and_backup(
     backup_name: String,
     dfs_config: DFSConfig,
+    lightweight: bool,
 ) -> (rfenginepb::ClusterBackupMeta, client::RefStore) {
     let nodes = Vec::from_iter((0..NODES_SIZE).into_iter().map(|_| alloc_node_id()));
     let mut cluster = ServerCluster::new(nodes, |_, conf: &mut TikvConfig| {
         conf.dfs = dfs_config.clone();
+        conf.rfengine.lightweight_backup = lightweight;
+        conf.rfengine.target_file_size = ReadableSize(1024 * 1024);
+        conf.rfengine.wal_chunk_target_file_size = ReadableSize(128 * 1024);
     });
     cluster.wait_region_replicated(&[], 3);
     let mut client = cluster.new_client();
@@ -49,9 +53,14 @@ fn start_cluster_and_full_backup(
         ..Default::default()
     };
     let backup_ts = client.get_ts().into_inner();
+    let backup_type = if lightweight {
+        backup::BackupType::Lightweight
+    } else {
+        backup::BackupType::Full
+    };
     let (_, backup_meta) = backup::backup_cluster_with_ts(
         backup_config,
-        false,
+        backup_type,
         backup_name,
         cluster.get_pd_client().as_ref(),
         backup_ts,
@@ -136,7 +145,49 @@ fn test_native_full_backup() {
     let backup_name = format!("backup_{}", rand::thread_rng().gen::<u16>());
 
     let (backup_meta, ref_store) =
-        start_cluster_and_full_backup(backup_name.clone(), dfs_config.clone());
+        start_cluster_and_backup(backup_name.clone(), dfs_config.clone(), false);
+
+    let backup_dir = base_dir.path().join("backup");
+    restore_cluster(
+        backup_name,
+        backup_dir.as_path(),
+        dfs_config,
+        backup_meta,
+        ref_store,
+    );
+
+    // Don't graceful shutdown oss (`oss.shutdown()`), as some S3FS threads are
+    // still alive and holding connections.
+}
+
+#[test]
+fn test_native_lightweight_backup() {
+    test_util::init_log_for_test();
+
+    let base_dir = tempfile::Builder::new()
+        .prefix("test_restore_cluster")
+        .tempdir()
+        .unwrap();
+
+    let oss_dir = base_dir.path().join("oss");
+    let mut oss = ObjectStorageService::new(oss_dir);
+    oss.start_server();
+
+    let dfs_config = DFSConfig {
+        prefix: "test_lightweight_backup".to_string(),
+        s3_endpoint: format!("http://127.0.0.1:{}", oss.port()),
+        s3_key_id: "admin".to_string(),
+        s3_secret_key: "admin".to_string(),
+        s3_bucket: "test_lightweight_backup".to_string(),
+        s3_region: "local".to_string(),
+        zstd_compression_level: "3".to_string(),
+        ..Default::default()
+    };
+
+    let backup_name = format!("backup_{}", rand::thread_rng().gen::<u16>());
+
+    let (backup_meta, ref_store) =
+        start_cluster_and_backup(backup_name.clone(), dfs_config.clone(), true);
 
     let backup_dir = base_dir.path().join("backup");
     restore_cluster(

@@ -27,7 +27,9 @@ use rfenginepb::{
 use slog_global::*;
 use tikv_util::{
     mpsc::{Receiver, Sender},
+    sys::thread::StdThreadBuildWrapper,
     time::Instant,
+    DFS_WORKER_THREAD_NAME,
 };
 
 use crate::{
@@ -77,7 +79,10 @@ impl Worker {
                 rx,
                 callback,
             );
-            let handle = thread::spawn(move || object_storage_worker.run());
+            let handle = thread::Builder::new()
+                .name(DFS_WORKER_THREAD_NAME.to_string())
+                .spawn_wrapper(move || object_storage_worker.run())
+                .unwrap();
             Some(ObjectStorageWorkerHandle {
                 task_sender: tx,
                 handle,
@@ -105,8 +110,8 @@ impl Worker {
             match task {
                 Task::Rotate { epoch_id } => self.handle_rotate(epoch_id),
                 Task::Truncates(truncates) => drop(truncates),
-                Task::Close => {
-                    self.handle_close();
+                Task::Close { force } => {
+                    self.handle_close(force);
                     return;
                 }
                 Task::Backup(task) => self.handle_backup(task),
@@ -117,7 +122,6 @@ impl Worker {
                     callback,
                 } => self.handle_dump(epoch_id, start_off, end_off, callback),
                 Task::Write { wb } => self.handle_write(&wb),
-                Task::Flush => self.handle_flush(),
                 Task::Snapshot => {
                     info!("{}: init trigger snapshot", self.manifest.get_engine_id());
                     self.handle_snapshot()
@@ -126,13 +130,17 @@ impl Worker {
         }
     }
 
-    fn handle_close(&mut self) {
+    fn handle_close(&mut self, force: bool) {
         // Close and join object storage thread.
         if let Some(ObjectStorageWorkerHandle {
             task_sender,
             handle,
         }) = self.dfs_worker_handle.take()
         {
+            // If force close, we skip flushing wal chunk and close task thread.
+            if !force {
+                task_sender.send(ObjectStorageTask::Flush).unwrap();
+            }
             task_sender.send(ObjectStorageTask::Close).unwrap();
             handle.join().unwrap();
         }
@@ -154,7 +162,7 @@ impl Worker {
         epoch_id: u32,
         start_off: u64,
         end_off: u64,
-        callback: Box<dyn FnOnce(std::result::Result<Bytes, String>) + Send>,
+        callback: Box<dyn FnOnce(Result<Bytes>) + Send>,
     ) {
         if let Some(writer) = self.async_wal_writer.as_ref() {
             // Check the WAL chunk meta is valid.
@@ -168,7 +176,7 @@ impl Worker {
                     writer.file_off
                 );
                 error!("{}", msg);
-                callback(Err(msg));
+                callback(Err(Error::Other(msg)));
                 return;
             }
             // Dump the WAL chunk from offset start_off to end_off.
@@ -191,7 +199,7 @@ impl Worker {
                         err
                     );
                     error!("{}", msg);
-                    callback(Err(msg));
+                    callback(Err(Error::Other(msg)));
                 }
             }
         }
@@ -266,17 +274,6 @@ impl Worker {
                     .send(task)
                     .unwrap();
             }
-        }
-    }
-
-    fn handle_flush(&mut self) {
-        if self.is_lightweight_enabled() {
-            self.dfs_worker_handle
-                .as_ref()
-                .unwrap()
-                .task_sender
-                .send(ObjectStorageTask::Flush)
-                .unwrap();
         }
     }
 
@@ -704,18 +701,19 @@ pub(crate) enum Task {
         epoch_id: u32,
     },
     Truncates(Vec<Vec<RaftLogBlock>>),
-    Close,
+    Close {
+        force: bool,
+    },
     Backup(BackupTask),
     Dump {
         epoch_id: u32,
         start_off: u64,
         end_off: u64,
-        callback: Box<dyn FnOnce(std::result::Result<Bytes, String>) + Send>,
+        callback: Box<dyn FnOnce(Result<Bytes>) + Send>,
     },
     Write {
         wb: WriteBatch,
     },
-    Flush,
     Snapshot, // Used for dfs_worker callback to trigger snapshot.
 }
 
@@ -1037,7 +1035,7 @@ mod tests {
         );
         wal_writer.open_file(cs.epoch_id + 1, 0).unwrap();
         // checksum inner should succeeds.
-        let engine = RfEngine::open(tmp_path2, &cfg, None).unwrap();
+        let engine = RfEngine::open(tmp_path2, &cfg, None, None).unwrap();
         // 4. Check peer data, restored data should be same with previous one.
         for peer_id in peers_range {
             let cache_peer_data = peer_data_map.get(&peer_id).unwrap();

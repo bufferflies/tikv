@@ -11,7 +11,7 @@ use tikv_util::{
 
 use crate::{
     backup,
-    backup::{BackupConfig, IncrementalBackupFile, Result, SharedResult},
+    backup::{BackupConfig, BackupType, IncrementalBackupFile, Result, SharedResult},
     error::{Error, SharedError},
 };
 
@@ -19,12 +19,14 @@ type InstantBackupCallback = Box<dyn FnOnce(SharedResult<Arc<IncrementalBackupFi
 
 enum BackupTask {
     InstantBackup { cb: InstantBackupCallback },
+    LightweightBackup { cb: InstantBackupCallback },
 }
 
 impl fmt::Display for BackupTask {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             BackupTask::InstantBackup { .. } => write!(f, "instant backup"),
+            BackupTask::LightweightBackup { .. } => write!(f, "lightweight backup"),
         }
     }
 }
@@ -54,11 +56,14 @@ impl BackupWorker {
         self.worker.stop();
     }
 
-    pub async fn instant_backup(&self) -> Result<Arc<IncrementalBackupFile>> {
+    pub async fn instant_backup(&self, lightweight: bool) -> Result<Arc<IncrementalBackupFile>> {
         let (cb, fut) = tikv_util::future::paired_future_callback();
-        self.scheduler
-            .schedule(BackupTask::InstantBackup { cb })
-            .unwrap();
+        let task = if lightweight {
+            BackupTask::LightweightBackup { cb }
+        } else {
+            BackupTask::InstantBackup { cb }
+        };
+        self.scheduler.schedule(task).unwrap();
         fut.await.unwrap().map_err(|e| e.into())
     }
 }
@@ -114,32 +119,47 @@ impl BackupRunner {
         let pd_client = self.pd_client.clone();
         let last_backup_meta = self.last_backup_meta.take();
 
-        let exec_backup = |incremental: bool,
+        let exec_backup = |backup_type: BackupType,
                            last_backup_meta: Option<ClusterBackupMeta>|
          -> Result<(String, ClusterBackupMeta)> {
             backup::backup_cluster(
                 self.config.clone(),
-                incremental,
+                backup_type,
                 "".to_string(),
                 pd_client.as_ref(),
                 last_backup_meta,
             )
         };
 
-        let (backup_path, backup_meta) = match exec_backup(true, last_backup_meta) {
-            Ok(res) => Ok(res),
-            Err(e) if backup::need_full_backup(&e) => {
-                info!("Backup failed with {:?}, try full backup", e);
-                exec_backup(false, None)
-            }
-            Err(e) => Err(e),
-        }?;
+        let (backup_path, backup_meta) =
+            match exec_backup(BackupType::Incremental, last_backup_meta) {
+                Ok(res) => Ok(res),
+                Err(e) if backup::need_full_backup(&e) => {
+                    info!("Backup failed with {:?}, try full backup", e);
+                    exec_backup(BackupType::Full, None)
+                }
+                Err(e) => Err(e),
+            }?;
         debug!(
             "Backup succeeded: {:?}, meta: {:?}",
             backup_path, backup_meta
         );
         self.last_backup_meta = Some(backup_meta);
         Ok(IncrementalBackupFile::try_from_full_path(&backup_path).unwrap())
+    }
+
+    fn do_lightweight_backup(&mut self) -> Result<Arc<IncrementalBackupFile>> {
+        let pd_client = self.pd_client.clone();
+        let (backup_path, _) = backup::backup_cluster(
+            self.config.clone(),
+            BackupType::Lightweight,
+            "".to_string(),
+            pd_client.as_ref(),
+            None,
+        )?;
+        Ok(Arc::new(
+            IncrementalBackupFile::try_from_full_path(&backup_path).unwrap(),
+        ))
     }
 }
 
@@ -157,6 +177,13 @@ impl Runnable for BackupRunner {
                     return;
                 }
                 self.backup_request_queue.push(cb);
+            }
+            BackupTask::LightweightBackup { cb } => {
+                let res = match self.do_lightweight_backup() {
+                    Ok(backup_path) => Ok(backup_path),
+                    Err(err) => Err(SharedError::from(err)),
+                };
+                cb(res);
             }
         }
     }

@@ -699,6 +699,55 @@ impl StatusServer {
         })
     }
 
+    // URI: /rfengine/wal_chunk?epoch_id=xxx&start_off=xxx&end_off=xxx
+    async fn rfengine_wal_chunk(
+        req: Request<Body>,
+        engine: rfengine::RfEngine,
+    ) -> hyper::Result<Response<Body>> {
+        let bad_request_resp = |msg: &str| make_response(StatusCode::BAD_REQUEST, msg.to_owned());
+        if !engine.is_lightweight_backup_enabled() {
+            return Ok(bad_request_resp("lightweight backup not enabled"));
+        }
+
+        let query = req.uri().query().unwrap_or("");
+        let query_pairs: HashMap<_, _> = url::form_urlencoded::parse(query.as_bytes()).collect();
+        info!("/rfengine/wal_chunk {:?}", query_pairs);
+        if !query_pairs.contains_key("epoch_id")
+            || !query_pairs.contains_key("start_off")
+            || !query_pairs.contains_key("end_off")
+        {
+            return Ok(bad_request_resp("query parameters invalid"));
+        }
+        let (callback, future) = paired_future_callback();
+        let epoch_id = match u32::from_str(query_pairs.get("epoch_id").unwrap()) {
+            Ok(epoch_id) => epoch_id,
+            Err(err) => return Ok(bad_request_resp(err.to_string().as_str())),
+        };
+        let start_off = match u64::from_str(query_pairs.get("start_off").unwrap()) {
+            Ok(start_off) => start_off,
+            Err(err) => return Ok(bad_request_resp(err.to_string().as_str())),
+        };
+        let end_off = match u64::from_str(query_pairs.get("end_off").unwrap()) {
+            Ok(end_off) => end_off,
+            Err(err) => return Ok(bad_request_resp(err.to_string().as_str())),
+        };
+        engine.dump_wal_chunk(epoch_id, start_off, end_off, callback);
+
+        Ok(match future.await {
+            Ok(resp) => match resp {
+                Ok(chunk) => Response::builder().body(Body::from(chunk)).unwrap(),
+                Err(err) => {
+                    error!("rfengine_wal_chunk error: {}", err);
+                    make_response(StatusCode::BAD_REQUEST, format!("bad request {}", err))
+                }
+            },
+            Err(e) => make_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Internal Server Error {}", e),
+            ),
+        })
+    }
+
     // URI: /unsafe_recover/clear?cluster_id=xxx&[keyspace_id=xxx[&table_id=xxx]][&
     // region_id=xxx]
     async fn unsafe_recover(
@@ -981,6 +1030,15 @@ impl StatusServer {
             return Ok(make_response(StatusCode::BAD_REQUEST, "Bad request body"));
         }
         let backup_config = backup_config.unwrap();
+
+        // Check if lightweight backup enabled.
+        if backup_config.lightweight && !engine.is_lightweight_backup_enabled() {
+            return Ok(make_response(
+                StatusCode::BAD_REQUEST,
+                "lightweight backup not enabled",
+            ));
+        }
+
         let cluster_id = backup_config.cluster_id;
         let mut store_ident = StoreIdent::default();
         let data = engine
@@ -997,6 +1055,29 @@ impl StatusServer {
                 "cluster id mismatch",
             ));
         }
+
+        if backup_config.lightweight {
+            // lightweight backup is synchronous.
+            match engine.lightweight_backup() {
+                Ok(meta) => {
+                    info!("{}: lightweight backup finished", meta.store_id);
+                    return Ok(Response::builder()
+                        .body(Body::from(meta.write_to_bytes().unwrap()))
+                        .unwrap());
+                }
+                Err(err) => {
+                    error!(
+                        "{}: lightweight backup failed {:?}",
+                        store_ident.store_id, &err
+                    );
+                    return Ok(make_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Internal Server Error {}", err),
+                    ));
+                }
+            }
+        }
+
         let s3fs = kvengine::dfs::S3Fs::new(
             dfs_conf.prefix,
             dfs_conf.s3_endpoint,
@@ -1522,7 +1603,11 @@ impl StatusServer {
                                 }
                             }
                             (Method::GET, path) if path.starts_with("/rfengine") => {
-                                Self::dump_rfengine_stats(req, rfengine).await
+                                if path.starts_with("/rfengine/wal_chunk") {
+                                    Self::rfengine_wal_chunk(req, rfengine).await
+                                } else {
+                                    Self::dump_rfengine_stats(req, rfengine).await
+                                }
                             }
                             (Method::POST, path) if path.starts_with("/rfengine/backup") => {
                                 Self::backup_rfengine(

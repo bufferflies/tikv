@@ -774,7 +774,10 @@ impl BrContext {
         // Otherwise the data from previous backup to now will be lost, and can not be
         // restored by PiTR.
         progress_reporter.report_step(RestoreStep::InstantBackup);
-        let instant_backup = self.runtime.block_on(self.backup_worker.instant_backup())?;
+        let lightweight = config.native_br.enable_lightweight_backup;
+        let instant_backup = self
+            .runtime
+            .block_on(self.backup_worker.instant_backup(lightweight))?;
 
         let get_truncate_ts =
             |utc_time: Option<DateTime<Utc>>, restore_type: RestoreType| -> Option<u64> {
@@ -914,6 +917,8 @@ pub struct NativeBrConfig {
     whitelist: WhiteList,
     // The time-to-live when restore task has been in final state.
     restore_task_ttl: ReadableDuration,
+    // Enable lightweight instant backup during restore.
+    enable_lightweight_backup: bool,
 }
 
 impl Default for NativeBrConfig {
@@ -921,6 +926,7 @@ impl Default for NativeBrConfig {
         Self {
             whitelist: WhiteList::default(),
             restore_task_ttl: ReadableDuration::minutes(60),
+            enable_lightweight_backup: false,
         }
     }
 }

@@ -74,6 +74,41 @@ pub fn set_panic_when_unexpected_key_or_data(flag: bool) {
     PANIC_WHEN_UNEXPECTED_KEY_OR_DATA.store(flag, Ordering::SeqCst);
 }
 
+const PANIC_MARK_DFS_WORKER_FILE: &str = "panic_mark_dfs_worker_file";
+
+static SKIP_DFS_WORKER_ON_PANIC: AtomicBool = AtomicBool::new(true);
+
+pub fn set_skip_dfs_worker_on_panic() {
+    SKIP_DFS_WORKER_ON_PANIC.store(true, Ordering::SeqCst);
+}
+
+pub fn unset_skip_dfs_worker_on_panic() {
+    SKIP_DFS_WORKER_ON_PANIC.store(false, Ordering::SeqCst);
+}
+
+fn skip_dfs_worker_on_panic() -> bool {
+    SKIP_DFS_WORKER_ON_PANIC.load(Ordering::SeqCst)
+}
+
+pub const DFS_WORKER_THREAD_NAME: &str = "dfs_worker";
+fn is_dfs_worker_thread(name: &str) -> bool {
+    name == DFS_WORKER_THREAD_NAME
+}
+
+fn panic_mark_dfs_worker_file_path<P: AsRef<Path>>(data_dir: P) -> PathBuf {
+    data_dir.as_ref().join(PANIC_MARK_DFS_WORKER_FILE)
+}
+
+pub fn create_panic_mark_dfs_worker_file<P: AsRef<Path>>(data_dir: P) {
+    let file = panic_mark_dfs_worker_file_path(data_dir);
+    File::create(file).unwrap();
+}
+
+pub fn panic_mark_dfs_worker_file_exists<P: AsRef<Path>>(data_dir: P) -> bool {
+    let path = panic_mark_dfs_worker_file_path(data_dir);
+    file_exists(path)
+}
+
 static PANIC_MARK: AtomicBool = AtomicBool::new(false);
 
 pub fn set_panic_mark() {
@@ -567,6 +602,10 @@ pub fn set_panic_hook(panic_abort: bool, data_dir: &str) {
         if current_region > 0 {
             create_panic_region_file(data_dir.as_str(), current_region);
         }
+        if is_dfs_worker_thread(name) && skip_dfs_worker_on_panic() {
+            // If the panic is caused by dfs_worker, create panic file.
+            create_panic_mark_dfs_worker_file(data_dir.as_str());
+        }
 
         if panic_abort {
             process::abort();
@@ -730,6 +769,29 @@ mod tests {
             .unwrap();
         create_panic_mark_file(dir.path());
         assert!(panic_mark_file_exists(dir.path()));
+    }
+
+    #[test]
+    fn test_panic_mark_dfs_worker_file_path() {
+        let dir = Builder::new()
+            .prefix("test_panic_mark_dfs_worker_file_path")
+            .tempdir()
+            .unwrap();
+        let panic_mark_dfs_worker_file = panic_mark_dfs_worker_file_path(dir.path());
+        assert_eq!(
+            panic_mark_dfs_worker_file,
+            dir.path().join(PANIC_MARK_DFS_WORKER_FILE)
+        )
+    }
+
+    #[test]
+    fn test_panic_mark_dfs_worker_file_exists() {
+        let dir = Builder::new()
+            .prefix("test_panic_mark_dfs_worker_file_exists")
+            .tempdir()
+            .unwrap();
+        create_panic_mark_dfs_worker_file(dir.path());
+        assert!(panic_mark_dfs_worker_file_exists(dir.path()));
     }
 
     #[test]

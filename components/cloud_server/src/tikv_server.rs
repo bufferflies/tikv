@@ -866,6 +866,10 @@ impl TikvServer {
     }
 
     pub fn stop(self) {
+        self.force_stop(false);
+    }
+
+    pub fn force_stop(self, force: bool) {
         tikv_util::thread_group::mark_shutdown();
         let mut servers = self.servers.unwrap();
         servers
@@ -879,7 +883,7 @@ impl TikvServer {
         servers.lock_mgr.stop();
 
         self.to_stop.into_iter().for_each(|s| s.stop());
-        self.raw_engines.raft.stop_worker();
+        self.raw_engines.raft.stop_worker(force);
         self.overload_protector.stop();
         self.background_worker.stop();
     }
@@ -909,7 +913,13 @@ impl TikvServer {
     // This method is also used by cse-ctl for cluster restore.
     pub fn init_raft_engine(conf: &TikvConfig) -> rfengine::Result<RfEngine> {
         let raft_db_path = Path::new(&conf.raft_store.raftdb_path);
-        RfEngine::open(raft_db_path, &conf.rfengine, None)
+        let data_dir = Path::new(&conf.storage.data_dir);
+        RfEngine::open(
+            raft_db_path,
+            &conf.rfengine,
+            Some(data_dir),
+            Some(conf.dfs.clone()),
+        )
     }
 
     // This method is also used by cse-ctl for cluster restore.

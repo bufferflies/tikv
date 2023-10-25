@@ -17,8 +17,8 @@ use slog_global::*;
 use tikv_util::mpsc::{Receiver, Sender};
 
 use crate::{
-    compress_lz4, decompress_lz4, parse_wal_chunk_key, wal_chunk_file_key, wal_chunk_file_prefix,
-    wal_file_name, Error, Result, Task,
+    compress_lz4, decompress_lz4, last_wal_chunk_file_key, parse_wal_chunk_key, wal_chunk_file_key,
+    wal_chunk_file_prefix, wal_file_name, Error, Result, Task,
 };
 
 pub(crate) struct ObjectStorageConfig {
@@ -136,7 +136,7 @@ impl ObjectStorageWorker {
                 info!("no wal chunk found, rebuild from epoch {}", rebuild_epoch);
             }
             Some(key) => match parse_wal_chunk_key(Some(&key)) {
-                Some((epoch_id, _, file_off)) => {
+                Some((epoch_id, _, file_off, _)) => {
                     self.epoch_id = epoch_id;
                     self.start_off = file_off;
                     self.sync_off = file_off;
@@ -176,6 +176,10 @@ impl ObjectStorageWorker {
             // If dfs worker be marked unhealthy, skip handle all tasks. Downgrade to
             // disable lightweight backup and do not try to auto-recover.
             if !self.is_healthy() {
+                if matches!(task, ObjectStorageTask::Close) {
+                    info!("ObjectStorageWorker close");
+                    return;
+                }
                 continue;
             }
             match task {
@@ -198,21 +202,13 @@ impl ObjectStorageWorker {
                     }
                 }
                 ObjectStorageTask::Flush => {
-                    // The flush task is mainly used for instant full backup restore test.
-                    if !self.buf.is_empty() && self.next_chunk().is_err() {
+                    // Send flush task before close in normal case. If close without flush, we can
+                    // construct the case for wal chunk recovery in random test.
+                    if !self.buf.is_empty() && self.next_chunk(false).is_err() {
                         self.set_unhealthy()
                     }
                 }
                 ObjectStorageTask::Close => {
-                    // Do not flush the last chunk for random test the wal chunk rebuild logic.
-                    // info!(
-                    //     "flush last wal chunk epoch {} start_off {} end_off {}",
-                    //     self.epoch_id, self.start_off, self.sync_off
-                    // );
-                    // if !self.buf.is_empty() {
-                    //     self.next_chunk();
-                    // }
-
                     info!("ObjectStorageWorker close");
                     return;
                 }
@@ -241,7 +237,7 @@ impl ObjectStorageWorker {
         let bytes_read = fd.read(&mut self.buf[buf_start..buf_end])?;
         debug_assert_eq!(bytes_read, sync_len as usize);
 
-        let file_key = wal_chunk_file_key(store_id, self.epoch_id, self.start_off, file_off);
+        let file_key = last_wal_chunk_file_key(store_id, self.epoch_id, self.start_off, file_off);
         let chunk = self.take_chunk_data();
 
         if let Err(err) = self.s3fs.put_objects(vec![(file_key, Bytes::from(chunk))]) {
@@ -275,7 +271,7 @@ impl ObjectStorageWorker {
                 "{}: handle_sync put wal epoch {} chunk {}",
                 store_id, epoch_id, self.chunk_id
             );
-            self.next_chunk()?;
+            self.next_chunk(false)?;
         }
 
         // Sync WAL of `epoch_id` from `self.sync_off` to file_off
@@ -308,9 +304,9 @@ impl ObjectStorageWorker {
 
     fn handle_rotate(&mut self, epoch_id: u32) -> Result<()> {
         debug!("{}: handle_rotate epoch {}", self.get_engine_id(), epoch_id);
-        if !self.buf.is_empty() {
-            self.next_chunk()?;
-        }
+        // Call next_chunk even self.buf is empty. This can cover the case the last
+        // chunk flushed during stop with no `.last` suffix.
+        self.next_chunk(true)?;
         self.async_wal_file = None;
         self.epoch_id = epoch_id + 1;
         self.start_off = 0;
@@ -369,9 +365,13 @@ impl ObjectStorageWorker {
         chunk
     }
 
-    fn next_chunk(&mut self) -> Result<()> {
+    fn next_chunk(&mut self, rotate: bool) -> Result<()> {
         let store_id = self.get_engine_id();
-        let file_key = wal_chunk_file_key(store_id, self.epoch_id, self.start_off, self.sync_off);
+        let file_key = if rotate {
+            last_wal_chunk_file_key(store_id, self.epoch_id, self.start_off, self.sync_off)
+        } else {
+            wal_chunk_file_key(store_id, self.epoch_id, self.start_off, self.sync_off)
+        };
         let buf_len = self.buf.len();
         let chunk = self.take_chunk_data();
         info!(

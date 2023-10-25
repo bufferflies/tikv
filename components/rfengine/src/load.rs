@@ -87,6 +87,7 @@ impl RfEngineCore {
         file_data: Bytes,
         epoch_id: u32,
         end_offset: u64, // u64::MAX means replay all the chunk
+        full_restore: bool,
     ) -> Result<()> {
         let mut it = WalIterator::new_from_chunks(file_data, epoch_id);
         it.iterate_batch(|data, offset| {
@@ -98,7 +99,13 @@ impl RfEngineCore {
             WalIterator::iterate_peer_batch(data, |peer_batch| {
                 wb.peers.insert(peer_batch.peer_id, peer_batch);
             });
-            self.write(wb).unwrap();
+            if full_restore {
+                self.write(wb).unwrap();
+            } else {
+                // In scene of restore keyspace, we don't persist WAL to avoid unnecessray I/O,
+                // as the rfengine is only used temporarily during the restoration process.
+                self.apply(&mut wb);
+            }
         })?;
         Ok(())
     }

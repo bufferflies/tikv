@@ -61,6 +61,13 @@ const BACKUP_SERVICE_SAFEPOINT_TTL: Duration = Duration::from_secs(12 * 60 * 60)
 pub type Result<T> = std::result::Result<T, Error>;
 pub type SharedResult<T> = std::result::Result<T, SharedError>;
 
+#[derive(Clone, PartialEq)]
+pub enum BackupType {
+    Full,
+    Incremental,
+    Lightweight,
+}
+
 /// Generate full path `/<prefix>/backup/<name>`.
 /// When `name` is empty, `backup_ts` must be some.
 pub fn backup_file_full_path(prefix: String, name: String, backup_ts: Option<u64>) -> String {
@@ -94,7 +101,7 @@ pub fn execute_incremental_backup(config: BackupConfig, name: String, interval: 
     while let Some(Ok(_)) = block_on(interval.next()) {
         match backup_cluster(
             config.clone(),
-            true,
+            BackupType::Incremental,
             name.clone(),
             &pd_client,
             cluster_backup_meta.clone(),
@@ -107,7 +114,13 @@ pub fn execute_incremental_backup(config: BackupConfig, name: String, interval: 
                 if need_full_backup(&e) {
                     warn!("Incremental backup fails {:?}, fallback to full backup", e);
                     // If incremental backup fails, restart full backup automatically.
-                    match backup_cluster(config.clone(), false, name.clone(), &pd_client, None) {
+                    match backup_cluster(
+                        config.clone(),
+                        BackupType::Full,
+                        name.clone(),
+                        &pd_client,
+                        None,
+                    ) {
                         Ok((_, meta)) => cluster_backup_meta = Some(meta),
                         Err(e) => {
                             error!("Full backup still fail {:?}", e);
@@ -125,8 +138,15 @@ pub fn execute_incremental_backup(config: BackupConfig, name: String, interval: 
 pub fn execute_full_backup(config: BackupConfig, name: String) {
     // TODO: Set safepoint before backup and delete it after backup.
     let pd_client = create_pd_client(&config.security, &config.pd);
-    if let Err(e) = backup_cluster(config, false, name, &pd_client, None) {
+    if let Err(e) = backup_cluster(config, BackupType::Full, name, &pd_client, None) {
         error!("Full backup fail, {:?}", e)
+    }
+}
+
+pub fn execute_lightweight_backup(config: BackupConfig, name: String) {
+    let pd_client = create_pd_client(&config.security, &config.pd);
+    if let Err(e) = backup_cluster(config, BackupType::Lightweight, name, &pd_client, None) {
+        error!("lightweight backup fail, {:?}", e)
     }
 }
 
@@ -148,7 +168,7 @@ pub fn update_service_safe_point(pd_client: &dyn PdClient, safepoint: u64) -> Re
 // return backup file key(full path) and ClusterBackupMeta
 pub fn backup_cluster(
     config: BackupConfig,
-    incremental: bool,
+    backup_type: BackupType,
     name: String,
     pd_client: &dyn PdClient,
     last_backup_meta: Option<ClusterBackupMeta>,
@@ -168,7 +188,7 @@ pub fn backup_cluster(
 
     let ret = backup_cluster_with_ts(
         config,
-        incremental,
+        backup_type,
         name,
         pd_client,
         backup_ts,
@@ -183,7 +203,7 @@ pub fn backup_cluster(
 
 pub fn backup_cluster_with_ts(
     config: BackupConfig,
-    incremental: bool,
+    backup_type: BackupType,
     name: String,
     pd_client: &dyn PdClient,
     backup_ts: u64,
@@ -212,7 +232,7 @@ pub fn backup_cluster_with_ts(
         // consistency.
         check_backup_meta_consistency(&meta, &stores)?;
         meta
-    } else if !incremental {
+    } else if backup_type != BackupType::Incremental {
         ClusterBackupMeta::new()
     } else {
         // If no input backup meta, load latest one from s3.
@@ -222,6 +242,7 @@ pub fn backup_cluster_with_ts(
     };
     cluster_backup_meta.set_backup_ts(backup_ts);
     cluster_backup_meta.set_cluster_id(cluster_id);
+    cluster_backup_meta.set_is_lightweight(backup_type == BackupType::Lightweight);
 
     if !config.skip_keyspace_meta {
         runtime.block_on(backup_pd_keyspace_meta(&config, &mut cluster_backup_meta))?;
@@ -230,7 +251,12 @@ pub fn backup_cluster_with_ts(
     let num_stores = stores.len();
     let (tx, rx) = std::sync::mpsc::sync_channel(num_stores);
     for store in stores {
-        let config = get_backup_config(&cluster_backup_meta, cluster_id, store.id, incremental);
+        let config = get_backup_config(
+            &cluster_backup_meta,
+            cluster_id,
+            store.id,
+            backup_type.clone(),
+        );
         runtime.spawn(backup_store(config, store, tx.clone()));
     }
     let mut errs = vec![];
@@ -303,8 +329,11 @@ fn merge_store_backup_meta(
     cluster_backup_meta: &mut ClusterBackupMeta,
     store_backup_meta: StoreBackupMeta,
 ) {
-    // only full backup has manifest
-    if store_backup_meta.has_manifest() {
+    // Only full backup has manifest. Full backup and lightweight backup need merge
+    // store meta.
+    //
+    // BackupType::Full and BackupType::Lightweight.
+    if store_backup_meta.has_manifest() || cluster_backup_meta.is_lightweight {
         // remove the old one and add the new one.
         if let Some(index) = cluster_backup_meta
             .stores
@@ -317,6 +346,8 @@ fn merge_store_backup_meta(
     } else {
         // For incremental backup, only WAL is backed up.
         // Append new WAL chunks to original StoreBackupMeta.
+        //
+        // BackupType::Incremental
         let store = cluster_backup_meta
             .mut_stores()
             .iter_mut()
@@ -332,15 +363,17 @@ fn get_backup_config(
     backup_meta: &ClusterBackupMeta,
     cluster_id: u64,
     store_id: u64,
-    incremental: bool,
+    backup_type: BackupType,
 ) -> rfengine::BackupConfig {
+    let incremental = backup_type == BackupType::Incremental;
+    let lightweight = backup_type == BackupType::Lightweight;
     let mut config = rfengine::BackupConfig {
         cluster_id,
         store_id,
         incremental,
-        lightweight: false,
         wal_epoch: 0,
         start_offset: 0,
+        lightweight,
     };
     if incremental {
         let store_meta = backup_meta
@@ -420,6 +453,10 @@ async fn get_latest_backup_meta(s3fs: &S3Fs, cluster_id: u64) -> Result<ClusterB
     let mut meta = ClusterBackupMeta::new();
     meta.merge_from_bytes(&object).unwrap();
     if meta.cluster_id != cluster_id {
+        return Err(Error::MetaNotFound(cluster_id));
+    }
+    if meta.is_lightweight {
+        info!("latest cluster backup meta is lightweight, fallback to full backup");
         return Err(Error::MetaNotFound(cluster_id));
     }
     info!(

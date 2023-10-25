@@ -1,23 +1,35 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use cloud_server::TikvServer;
 use etcd_client::{Compare, CompareOp, Txn, TxnOp};
 use kvengine::dfs::{DFSConfig, Dfs, S3Fs};
+use pd_client::PdClient;
 use protobuf::Message;
 use rfenginepb::ClusterBackupMeta;
 use security::SecurityConfig;
 use slog_global::info;
+use tikv::config::TikvConfig;
+use tikv_util::config::ensure_dir_exist;
 
-use crate::{backup::backup_file_full_path, common::generate_etcd_connect_opt};
+use crate::{
+    backup::backup_file_full_path,
+    common::{generate_etcd_connect_opt, replay_wal_logs},
+    error::{Error, Result},
+};
 
 const PD_ROOT_PATH: &str = "/pd";
 const PD_CLUSTER_ID_PATH: &str = "/pd/cluster_id";
 const MAX_TXN_OPTS: usize = 128; // Default configuration in etcd server.
+
+struct MockPdClient {}
+
+impl PdClient for MockPdClient {}
 
 pub fn restore_tikv(config: &RestoreConfig, name: String, store_id: u64, path: &str) {
     let dfs_conf = config.dfs.clone();
@@ -30,15 +42,67 @@ pub fn restore_tikv(config: &RestoreConfig, name: String, store_id: u64, path: &
         dfs_conf.s3_bucket,
     );
     let cluster_backup = get_cluster_backup_meta(&s3fs, name);
+    let is_lightweight = cluster_backup.get_is_lightweight();
     if store_id > 0 {
-        rfengine::restore(
-            Arc::new(s3fs),
-            &cluster_backup,
-            store_id,
-            &PathBuf::from(path),
-            None,
-        );
+        if is_lightweight {
+            let truncate_ts = cluster_backup.backup_ts;
+            info!(
+                "start replay wal for store {} with truncate_ts {}",
+                store_id, truncate_ts
+            );
+            let tikv_conf = generate_store_config(path);
+            setup_raft_engine(store_id, &cluster_backup, &tikv_conf, Arc::new(s3fs)).unwrap();
+        } else {
+            rfengine::restore(
+                Arc::new(s3fs),
+                &cluster_backup,
+                store_id,
+                &PathBuf::from(path),
+                None,
+            );
+        }
     }
+}
+
+fn generate_store_config(path: &str) -> TikvConfig {
+    ensure_dir_exist(path).unwrap();
+
+    let mut config = TikvConfig::default();
+    config.raft_store.raftdb_path = path.to_string();
+    config.raft_engine.enable = false;
+    config
+}
+
+fn setup_raft_engine(
+    store_id: u64,
+    cluster_backup: &ClusterBackupMeta,
+    conf: &TikvConfig,
+    dfs: Arc<S3Fs>,
+) -> Result<()> {
+    let snap_epoch = rfengine::lightweight_restore(
+        dfs.clone(),
+        &dfs.get_prefix(),
+        cluster_backup,
+        store_id,
+        Path::new(&conf.raft_store.raftdb_path),
+        None,
+    )
+    .map_err(|x| Error::RfEngine(x))?;
+
+    let rf_engine = TikvServer::init_raft_engine(conf)?;
+
+    // `snap_epoch` is the latest snapshot manifest epoch. If no snapshot found,
+    // the `snap_epoch` is 0. Replay wal logs from `snap_epoch` + 1 to backup point.
+    replay_wal_logs(
+        Arc::new(MockPdClient {}),
+        dfs,
+        store_id,
+        cluster_backup,
+        &rf_engine,
+        snap_epoch,
+        true,
+    )?;
+    Ok(())
 }
 
 pub fn restore_pd(config: RestoreConfig, name: String) {

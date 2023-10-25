@@ -59,12 +59,19 @@ fn test_restore_keyspace() {
         .parse::<usize>()
         .unwrap_or(DEFAULT_TARGET_REGIONS);
 
-    test_restore_keyspace_opt(loop_count, target_regions, true);
+    test_restore_keyspace_opt(loop_count, target_regions, true, false);
     // Regression test for `inner_key_off` disabled.
-    test_restore_keyspace_opt(DEFAULT_LOOP_COUNT, target_regions, false);
+    test_restore_keyspace_opt(DEFAULT_LOOP_COUNT, target_regions, false, false);
+    // Regression test for `lightweight` enabled.
+    test_restore_keyspace_opt(DEFAULT_LOOP_COUNT, target_regions, true, true);
 }
 
-fn test_restore_keyspace_opt(loop_count: usize, target_regions: usize, enable_inner_key_off: bool) {
+fn test_restore_keyspace_opt(
+    loop_count: usize,
+    target_regions: usize,
+    enable_inner_key_off: bool,
+    lightweight: bool,
+) {
     let cases = vec![
         // keyspace_id, data_count, shuffle_regions, has_learner, loop_count
         (1, 1, None, false, 1),
@@ -103,6 +110,8 @@ fn test_restore_keyspace_opt(loop_count: usize, target_regions: usize, enable_in
             conf.coprocessor.region_split_size = ReadableSize::kb(128); // kv_opts.base_size = 8kb
             conf.coprocessor.region_bucket_size = ReadableSize::kb(64);
             conf.rfengine.target_file_size = ReadableSize::mb(1);
+            conf.rfengine.lightweight_backup = lightweight;
+            conf.rfengine.wal_chunk_target_file_size = ReadableSize::kb(128);
             conf.enable_inner_key_offset = enable_inner_key_off;
         },
     );
@@ -156,6 +165,7 @@ fn test_restore_keyspace_opt(loop_count: usize, target_regions: usize, enable_in
                 data_count,
                 shuffle_regions,
                 has_learner,
+                lightweight,
                 &runtime,
             );
         }
@@ -175,6 +185,7 @@ fn test_restore_keyspace_impl(
     data_count: usize,
     shuffle_regions: Option<usize>,
     has_learner: bool,
+    lightweight: bool,
     runtime: &Runtime,
 ) {
     step!("case: {}:{}", case_idx, loop_idx);
@@ -237,9 +248,14 @@ fn test_restore_keyspace_impl(
             loop_idx
         );
         step!("verify before backup ok");
+        let backup_type = if lightweight {
+            backup::BackupType::Lightweight
+        } else {
+            backup::BackupType::Full
+        };
         let (_, backup_meta) = backup::backup_cluster_with_ts(
             backup_config.clone(),
-            false,
+            backup_type,
             snapshot_backup_name.clone(),
             cluster.get_pd_client().as_ref(),
             backup_ts,
@@ -317,9 +333,14 @@ fn test_restore_keyspace_impl(
     let instant_backup_name = {
         let backup_ts = client.get_ts().into_inner();
         let instant_backup_name = generate_backup_name();
+        let backup_type = if lightweight {
+            backup::BackupType::Lightweight
+        } else {
+            backup::BackupType::Incremental
+        };
         let (_, backup_meta) = backup::backup_cluster_with_ts(
             backup_config,
-            true,
+            backup_type,
             instant_backup_name.clone(),
             cluster.get_pd_client().as_ref(),
             backup_ts,

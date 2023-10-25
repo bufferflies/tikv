@@ -93,7 +93,7 @@ pub(crate) fn spawn_incremental_backup(
             // See https://github.com/tidbcloud/cloud-storage-engine/issues/1094.
             let shared_guard = guard.downgrade();
 
-            let backup_file = match backup_worker.instant_backup().await {
+            let backup_file = match backup_worker.instant_backup(false).await {
                 Ok(backup_file) => backup_file,
                 Err(err) if is_backup_error_retryable(&err) => {
                     warn!("backup failed, retry: {:?}", err);

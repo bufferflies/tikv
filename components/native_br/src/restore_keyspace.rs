@@ -40,8 +40,8 @@ use tokio::runtime::Runtime;
 
 use crate::{
     common::{
-        load_peer_raft_state, load_rf_engine_meta, now, retain_sst_files, send_request_to_store,
-        RawRegion,
+        load_peer_raft_state, load_rf_engine_meta, now, replay_wal_logs, retain_sst_files,
+        send_request_to_store, RawRegion,
     },
     error::{
         Error,
@@ -196,9 +196,10 @@ pub fn restore_keyspace(
     reporter.report_step(RestoreStep::LoadBackupMeta);
     let cluster_backup = get_cluster_backup_meta(&s3fs, backup_name.to_owned());
     step!(
-        "Start restore keyspace {} from backup <{}>, range:[{},{}), target_range:[{},{}), backup ts:{}, safe ts:{} truncate ts:{:?}",
+        "Start restore keyspace {} from backup <{}>, lightweight:{} range:[{},{}), target_range:[{},{}), backup ts:{}, safe ts:{} truncate ts:{:?}",
         keyspace_tag,
         backup_name,
+        cluster_backup.is_lightweight,
         log_wrappers::hex_encode_upper(keyspace_start),
         log_wrappers::hex_encode_upper(keyspace_end),
         log_wrappers::hex_encode_upper(&target_keyspace_start),
@@ -654,15 +655,45 @@ impl BackupCluster {
         cluster_backup: &ClusterBackupMeta,
         conf: &TikvConfig,
     ) -> Result<()> {
-        rfengine::restore(
-            self.dfs.clone(),
-            cluster_backup,
-            store_id,
-            Path::new(&conf.raft_store.raftdb_path),
-            None, // TODO: pass `Some(keyspace_id)` in.
-        );
+        let is_lightweight = cluster_backup.is_lightweight;
+        let snap_epoch = if is_lightweight {
+            Some(
+                rfengine::lightweight_restore(
+                    self.dfs.clone(),
+                    &self.dfs.get_prefix(),
+                    cluster_backup,
+                    store_id,
+                    Path::new(&conf.raft_store.raftdb_path),
+                    None,
+                )
+                .map_err(|x| Error::RfEngine(x))?,
+            )
+        } else {
+            rfengine::restore(
+                self.dfs.clone(),
+                cluster_backup,
+                store_id,
+                Path::new(&conf.raft_store.raftdb_path),
+                None, // TODO: pass `Some(keyspace_id)` in.
+            );
+            None
+        };
 
         let rf_engine = TikvServer::init_raft_engine(conf)?;
+
+        if is_lightweight {
+            // `snap_epoch` is the lastest snapshot manifest epoch. If no snapshot found,
+            // the `snap_epoch` is 0. Replay wal logs from `snap_epoch` + 1 to backup point.
+            replay_wal_logs(
+                self.pd_client.clone(),
+                self.dfs.clone(),
+                store_id,
+                cluster_backup,
+                &rf_engine,
+                snap_epoch.unwrap(),
+                false,
+            )?;
+        }
         self.raft_engines.insert(store_id, rf_engine);
         Ok(())
     }
@@ -760,7 +791,7 @@ impl BackupCluster {
     fn stop_engines(&mut self) {
         let raft_engines = mem::take(&mut self.raft_engines);
         for rf in raft_engines.into_values() {
-            rf.stop_worker();
+            rf.stop_worker(true);
             drop(rf);
         }
         if let Some(kv_engine) = self.kv_engine.take() {
@@ -775,8 +806,10 @@ impl BackupCluster {
     }
 
     fn generate_store_config(&self, store_id: u64) -> TikvConfig {
-        let store_path = self.path.join(store_id.to_string());
-        let rf_engine_path = store_path.join("raft");
+        let (store_path, rf_engine_path) = (
+            self.path.join(store_id.to_string()),
+            self.path.join(store_id.to_string()).join("raft"),
+        );
 
         let mut config = TikvConfig::default();
         config.storage.data_dir = store_path.to_str().unwrap().to_string();
@@ -785,6 +818,8 @@ impl BackupCluster {
         config.rocksdb.max_background_jobs = 2;
         config.rocksdb.max_sub_compactions = 1;
         config.security = self.security_conf.clone();
+
+        config.raft_engine.enable = false;
 
         TikvServer::init_config(config).get_current()
     }

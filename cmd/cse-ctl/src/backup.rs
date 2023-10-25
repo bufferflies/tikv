@@ -4,7 +4,9 @@ use std::{path::PathBuf, time::Duration};
 
 use clap::Args;
 use kvengine::dfs::{DFSConfig, S3Fs};
-use native_br::backup::{execute_full_backup, execute_incremental_backup, BackupConfig};
+use native_br::backup::{
+    execute_full_backup, execute_incremental_backup, execute_lightweight_backup, BackupConfig,
+};
 use tikv_util::info;
 
 const INCREMENTAL_BACKUP_INTERVAL: u64 = 30; // seconds.
@@ -18,6 +20,9 @@ pub struct BackupArgs {
     /// used.
     #[clap(long, default_value_t = String::new())]
     pub name: String,
+    /// Lightweight backup or legacy backup.
+    #[clap(long)]
+    pub lightweight: bool,
     /// Incremental backup or full backup.
     #[clap(long)]
     pub incremental: bool,
@@ -46,7 +51,9 @@ pub struct BackupArgs {
 pub fn execute_backup(args: BackupArgs) {
     let config: BackupConfig = get_backup_config_from_args(&args);
     info!("Begin backup with config {:?}", config);
-    if args.incremental {
+    if args.lightweight {
+        execute_lightweight_backup(config, args.name);
+    } else if args.incremental {
         execute_incremental_backup(config, args.name, Duration::from_secs(args.interval))
     } else {
         execute_full_backup(config, args.name)

@@ -24,7 +24,9 @@ use kvproto::raft_serverpb;
 use protobuf::Message;
 use raft_proto::{eraftpb, eraftpb::Entry};
 use rfenginepb::{ClusterBackupMeta, StoreBackupMeta, StoreRaftLogBackupMeta};
-use tikv_util::{error, info, mpsc::Sender, time::Instant, warn};
+use tikv_util::{
+    error, info, mpsc::Sender, panic_mark_dfs_worker_file_exists, time::Instant, warn,
+};
 
 use crate::{
     config::Config,
@@ -100,8 +102,13 @@ impl Deref for RfEngine {
 }
 
 impl RfEngine {
-    pub fn open(dir: &Path, cfg: &Config, dfs_conf: Option<DFSConfig>) -> Result<Self> {
-        let core = RfEngineCore::open(dir, cfg, dfs_conf)?;
+    pub fn open(
+        dir: &Path,
+        cfg: &Config,
+        data_dir: Option<&Path>, // for check panic mark file exists
+        dfs_conf: Option<DFSConfig>,
+    ) -> Result<Self> {
+        let core = RfEngineCore::open(dir, cfg, data_dir, dfs_conf)?;
         Ok(Self {
             core: Arc::new(core),
         })
@@ -136,7 +143,12 @@ pub(crate) struct WorkerHandle {
 }
 
 impl RfEngineCore {
-    fn open(dir: &Path, cfg: &Config, dfs_conf: Option<DFSConfig>) -> Result<Self> {
+    fn open(
+        dir: &Path,
+        cfg: &Config,
+        data_dir: Option<&Path>,
+        dfs_conf: Option<DFSConfig>,
+    ) -> Result<Self> {
         let wal_size = cfg.target_file_size.0 as usize;
         let compression_threshold = cfg.batch_compression_threshold.0 as usize;
         let wal_sync_dir = (!cfg.wal_sync_dir.is_empty()).then(|| PathBuf::from(&cfg.wal_sync_dir));
@@ -186,13 +198,23 @@ impl RfEngineCore {
                 None
             };
 
-            let object_storage_config = if cfg.lightweight_backup {
-                Some(ObjectStorageConfig::new(
-                    dir.to_owned(),
-                    cfg.wal_chunk_target_file_size.0 as usize,
-                    CompressionType::Lz4Compression,
-                    dfs_conf.unwrap(),
-                ))
+            let object_storage_config: Option<ObjectStorageConfig> = if cfg.lightweight_backup {
+                if data_dir.is_some() && panic_mark_dfs_worker_file_exists(data_dir.unwrap()) {
+                    // If panic_mark_dfs_worker_file exists, skip init dfs worker thread and mark
+                    // dfs worker unhealthy.
+                    dfs_worker_healthy.store(false, Ordering::Release);
+                    error!(
+                        "lightweight backup is enabled, but panic_mark_dfs_worker_file exists, skip init dfs worker thread"
+                    );
+                    None
+                } else {
+                    Some(ObjectStorageConfig::new(
+                        dir.to_owned(),
+                        cfg.wal_chunk_target_file_size.0 as usize,
+                        CompressionType::Lz4Compression,
+                        dfs_conf.unwrap(),
+                    ))
+                }
             } else {
                 None
             };
@@ -376,14 +398,10 @@ impl RfEngineCore {
         });
     }
 
-    pub fn flush_worker(&self) {
-        self.task_sender.send(Task::Flush).unwrap();
-    }
-
-    pub fn stop_worker(&self) {
+    pub fn stop_worker(&self, force: bool) {
         let mut handle_ref = self.worker_handle.lock().unwrap();
         if let Some(h) = handle_ref.handle.take() {
-            handle_ref.task_sender.send(Task::Close).unwrap();
+            handle_ref.task_sender.send(Task::Close { force }).unwrap();
             h.join().unwrap();
         }
     }
@@ -581,7 +599,7 @@ impl RfEngineCore {
         epoch_id: u32,
         start_off: u64,
         end_off: u64,
-        callback: Box<dyn FnOnce(std::result::Result<Bytes, String>) + Send>,
+        callback: Box<dyn FnOnce(Result<Bytes>) + Send>,
     ) {
         self.task_sender
             .send(Task::Dump {
@@ -745,7 +763,7 @@ pub fn lightweight_restore(
         .get_stores()
         .iter()
         .find(|x| x.store_id == store_id)
-        .expect("store not found");
+        .ok_or(Error::Other(format!("store {} not found", store_id)))?;
     init_wal_files(dir, None).unwrap();
     // `store_meta` in cluster_backup should not contains manifest, use
     // store_meta.get_epoch() as backup epoch_id.
@@ -1169,7 +1187,7 @@ mod tests {
         init_logger();
         let tmp_dir = tempfile::tempdir().unwrap();
         let cfg = Config::new(128 * 1024_usize);
-        let engine = RfEngine::open(tmp_dir.path(), &cfg, None).unwrap();
+        let engine = RfEngine::open(tmp_dir.path(), &cfg, None, None).unwrap();
         let mut wb = WriteBatch::new();
         for peer_id in 1..=10_u64 {
             let (key, val) = make_state_kv(2, 1);
@@ -1218,10 +1236,10 @@ mod tests {
             old_entries_map.insert(peer_data.peer_id, peer_data.clone());
         }
         assert_eq!(old_entries_map.len(), 10);
-        engine.stop_worker();
+        engine.stop_worker(true);
 
         for _ in 0..2 {
-            let engine = RfEngine::open(tmp_dir.path(), &cfg, None).unwrap();
+            let engine = RfEngine::open(tmp_dir.path(), &cfg, None, None).unwrap();
             let mut wb = WriteBatch::new();
             for &(peer_id, region_id, truncated_idx) in truncated_regions.iter() {
                 wb.truncate_raft_log(peer_id, region_id, truncated_idx);
@@ -1381,7 +1399,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let cfg = Config::new(128 * 1024);
-        let engine = RfEngine::open(dir.path(), &cfg, None).unwrap();
+        let engine = RfEngine::open(dir.path(), &cfg, None, None).unwrap();
 
         // Write 10 logs and states to 2 region.
         let mut data_map = HashMap::new();
@@ -1555,7 +1573,7 @@ mod tests {
         let wal_size = 128 * 1024_usize;
         let dir_path = tmp_dir.path();
         let cfg = Config::new(wal_size);
-        let engine = RfEngine::open(dir_path, &cfg, None).unwrap();
+        let engine = RfEngine::open(dir_path, &cfg, None, None).unwrap();
         let mut wb = WriteBatch::new();
         for peer_id in 1..=10_u64 {
             let (key, val) = make_state_kv(2, 1);
@@ -1574,11 +1592,11 @@ mod tests {
             engine.write(wb).unwrap();
         }
         assert_eq!(engine.peers.len(), 10);
-        engine.stop_worker();
+        engine.stop_worker(true);
         for _ in 0..2 {
-            let engine = RfEngine::open(dir_path, &cfg, None).unwrap();
+            let engine = RfEngine::open(dir_path, &cfg, None, None).unwrap();
             assert_eq!(engine.peers.len(), 10);
-            engine.stop_worker();
+            engine.stop_worker(true);
         }
         let (compacted_epoch, current_epoch) = {
             let writer = engine.writer.lock().unwrap();
@@ -1622,7 +1640,7 @@ mod tests {
                         buf[*pos] += 1;
                         fd.write_all_at(buf.as_ref(), *offset).unwrap();
                         fd.sync_data().unwrap();
-                        assert!(RfEngine::open(dir_path, &cfg, None).is_err());
+                        assert!(RfEngine::open(dir_path, &cfg, None, None).is_err());
                         buf[*pos] -= 1;
                         fd.write_all_at(buf.as_ref(), *offset).unwrap();
                         fd.sync_data().unwrap();
@@ -1638,7 +1656,7 @@ mod tests {
         let tmp_dir = tempfile::tempdir().unwrap();
         let wal_size = 4096 * 10;
         let cfg = Config::new(wal_size);
-        let engine = RfEngine::open(tmp_dir.path(), &cfg, None).unwrap();
+        let engine = RfEngine::open(tmp_dir.path(), &cfg, None, None).unwrap();
         for i in 1..=50 {
             let mut wb = WriteBatch::new();
             wb.append_raft_log(1, 2, &make_log_data(i, 128));

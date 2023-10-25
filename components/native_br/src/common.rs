@@ -1,19 +1,25 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
-use std::{sync::Arc, time::Duration};
+use std::{str::FromStr, sync::Arc, time::Duration};
 
 use bytes::Bytes;
+use engine_traits::{GetObjectOptions, ListObjectContent, ObjectStorage};
 use etcd_client::{ConnectOptions, OpenSslClientConfig};
 use grpcio::EnvBuilder;
 use http::Request;
-use hyper::Body;
+use hyper::{Body, Uri};
 use kvengine::dfs::{Dfs, S3Fs};
 use kvproto::{metapb, metapb::Store};
 use pd_client::{PdClient, RpcClient};
 use protobuf::Message;
+use rfengine::{
+    assemble_wal_chunks, verify_wal_chunks_integrity, wal_chunk_file_prefix, wal_chunk_file_suffix,
+    RfEngine,
+};
+use rfenginepb::ClusterBackupMeta;
 use rfstore::store::state::RaftState;
 use security::{SecurityConfig, SecurityManager};
 use slog_global::error;
-use tikv_util::{box_err, codec::bytes::decode_bytes};
+use tikv_util::{box_err, codec::bytes::decode_bytes, info};
 
 use crate::error::Result;
 
@@ -220,4 +226,167 @@ fn retain_sst_files_in_batch(file_ids: &[u64], s3fs: &S3Fs, first_batch: bool) -
         ));
     }
     Ok(succeed_cnt)
+}
+
+async fn fetch_rfengine_wal_chunk(
+    store: Store,
+    epoch_id: u32,
+    start_off: u64,
+    end_off: u64,
+) -> Result<Bytes> {
+    let uri = Uri::from_str(&format!(
+        "http://{}/rfengine/wal_chunk?epoch_id={}&start_off={}&end_off={}",
+        &store.status_address, epoch_id, start_off, end_off
+    ))
+    .unwrap();
+    let req = Request::get(uri).body(Body::empty()).unwrap();
+    send_request_to_store(req, &store).await
+}
+
+// TODO: Filter out the write batches of specified keyspace to replay to save
+// memory.
+pub fn replay_wal_logs(
+    pd_client: Arc<dyn PdClient>,
+    dfs: Arc<S3Fs>,
+    store_id: u64,
+    cluster_backup: &ClusterBackupMeta,
+    rf: &RfEngine,
+    snap_epoch: u32,
+    full_restore: bool,
+) -> Result<()> {
+    let store_meta = cluster_backup
+        .get_stores()
+        .iter()
+        .find(|x| x.store_id == store_id)
+        .expect("store not found");
+    let backup_epoch = store_meta.get_epoch();
+    let backup_offset = store_meta.get_offset();
+    for replay_epoch in snap_epoch + 1..=backup_epoch {
+        let scan_prefix = wal_chunk_file_prefix(store_id, replay_epoch);
+        let scan_start = wal_chunk_file_suffix(0, 0);
+        info!(
+            "replay_wal_logs list chunks with prefix {} start_after {} replay_epoch {} backup meta epoch {}",
+            scan_prefix, scan_start, replay_epoch, backup_epoch
+        );
+
+        let dfs_clone = dfs.clone();
+        match dfs.list_objects(&scan_start, Some(&scan_prefix), None) {
+            Ok((chunks, _)) => {
+                replay_wal_chunks(
+                    pd_client.clone(),
+                    dfs_clone,
+                    store_id,
+                    chunks,
+                    rf,
+                    replay_epoch,
+                    backup_epoch,
+                    backup_offset,
+                    full_restore,
+                )?;
+            }
+            Err(err) => {
+                error!("list wal chunk files failed: {:?}", err);
+                return Err(box_err!("list wal chunk files failed: {:?}", err));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn replay_wal_chunks(
+    pd_client: Arc<dyn PdClient>,
+    dfs: Arc<S3Fs>,
+    store_id: u64,
+    chunks: Vec<ListObjectContent>,
+    rf: &RfEngine,
+    epoch_id: u32,
+    backup_epoch: u32,
+    backup_offset: u64,
+    full_restore: bool,
+) -> Result<()> {
+    let dfs_prefix = format!("{}/", dfs.get_prefix());
+    let chunk_keys = chunks
+        .into_iter()
+        .map(|chunk| {
+            chunk
+                .key
+                .as_str()
+                .strip_prefix(&dfs_prefix)
+                .unwrap_or_default()
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    if !verify_wal_chunks_integrity(&chunk_keys, epoch_id != backup_epoch) {
+        return Err(box_err!("wal chunk files integrity check failed"));
+    }
+    let chunk_keys_with_option = chunk_keys
+        .into_iter()
+        .map(|chunk| (chunk, GetObjectOptions::default()))
+        .collect::<Vec<_>>();
+    // Assemble WAL chunks in memory.
+    let mut chunk_objects = dfs.get_objects(chunk_keys_with_option).unwrap();
+    // Sort objects by chunk name.
+    chunk_objects.sort_by(|a, b| a.0.cmp(&b.0));
+    info!(
+        "wal chunk files in epoch {} {:?}",
+        epoch_id,
+        chunk_objects
+            .iter()
+            .map(|o| o.0.clone())
+            .collect::<Vec<_>>()
+    );
+    let chunks = chunk_objects
+        .into_iter()
+        .map(|(_, chunk)| chunk)
+        .collect::<Vec<_>>();
+    let mut epoch_wal = assemble_wal_chunks(chunks)?;
+
+    info!(
+        "assemble wal from chunks done, epoch {} wal size {} backup offset {}",
+        epoch_id,
+        epoch_wal.len(),
+        backup_offset
+    );
+    let end_offset = if backup_epoch == epoch_id && backup_offset <= epoch_wal.len() as u64 {
+        // Replay finished.
+        backup_offset
+    } else if backup_epoch == epoch_id {
+        // If the cluster is for full restore, the wal should be integrated.
+        if full_restore {
+            return Err(box_err!(
+                "wal chunk is not integrated, choose a earlier backup"
+            ));
+        }
+        // Need fetch the last chunk from server then append fetched data to epoch_wal.
+        let store = pd_client.get_store(store_id).unwrap();
+        let runtime = dfs.get_runtime();
+        let last_chunk = runtime.block_on(fetch_rfengine_wal_chunk(
+            store,
+            epoch_id,
+            epoch_wal.len() as u64,
+            backup_offset,
+        ))?;
+        info!(
+            "fetched last wal chunk start_off {} end_off {} data len {}",
+            epoch_wal.len(),
+            backup_offset,
+            last_chunk.len()
+        );
+        epoch_wal.extend(last_chunk);
+        epoch_wal.len() as u64
+    } else {
+        // This is a previous epoch, replay all chunks.
+        u64::MAX
+    };
+
+    info!(
+        "replay wal chunk file for epoch {} size {} end_offset {}",
+        epoch_id,
+        epoch_wal.len(),
+        end_offset
+    );
+    rf.replay_wal_file(epoch_wal.freeze(), epoch_id, end_offset, full_restore)?;
+
+    Ok(())
 }
