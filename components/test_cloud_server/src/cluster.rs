@@ -168,6 +168,7 @@ impl ServerCluster {
         }
     }
 
+    // Stop node gracefully.
     pub fn stop_node(&mut self, node_id: u16) {
         if let Some(node) = self.servers.remove(&node_id) {
             // Force stop node to cover the case wal chunk recovery.
@@ -175,10 +176,21 @@ impl ServerCluster {
         }
     }
 
-    pub fn restart_node(&mut self, node_id: u16, stop_dur: Duration) {
+    // Stop node without flush rfengine dfs worker if force is true.
+    fn stop_node_force(&mut self, node_id: u16, force: bool) {
+        if let Some(node) = self.servers.remove(&node_id) {
+            // Force stop node to cover the case wal chunk recovery.
+            node.force_stop(force);
+        }
+    }
+
+    pub fn restart_node(&mut self, node_id: u16, stop_dur: Duration, force: bool) {
         let store_id = self.get_store_id(node_id);
-        self.stop_node(node_id);
-        info!("node {} (store {}) stopped", node_id, store_id);
+        self.stop_node_force(node_id, force);
+        info!(
+            "node {} (store {}) stopped, force {}",
+            node_id, store_id, force
+        );
 
         std::thread::sleep(stop_dur);
         self.start_node(node_id, |_, _| {});

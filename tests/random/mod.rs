@@ -473,7 +473,8 @@ pub(crate) fn random_node_restart(cluster: &mut ServerCluster) {
     let nodes = cluster.get_nodes();
     let node_id = *nodes.choose(&mut rng).unwrap();
     let sleep_sec = rng.gen_range(0..3);
-    cluster.restart_node(node_id, Duration::from_secs(sleep_sec));
+    let force_stop = rng.gen();
+    cluster.restart_node(node_id, Duration::from_secs(sleep_sec), force_stop);
     NODE_RESTART_COUNTER.fetch_add(1, Ordering::Relaxed);
 }
 

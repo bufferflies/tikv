@@ -60,7 +60,7 @@ pub(crate) fn do_restore_keyspace(
     )
 }
 
-pub(crate) fn spawn_incremental_backup(
+pub(crate) fn spawn_backup(
     client: ClusterClient,
     keyspace_manager: KeyspaceManager,
     backup_worker: Arc<backup_worker::BackupWorker>,
@@ -93,7 +93,14 @@ pub(crate) fn spawn_incremental_backup(
             // See https://github.com/tidbcloud/cloud-storage-engine/issues/1094.
             let shared_guard = guard.downgrade();
 
-            let backup_file = match backup_worker.instant_backup(false).await {
+            let do_lightweight_backup = keyspace_id % 2 == 0;
+
+            if do_lightweight_backup {
+                info!("spawn lightweight backup");
+            } else {
+                info!("spawn incrementabl backup");
+            }
+            let backup_file = match backup_worker.instant_backup(do_lightweight_backup).await {
                 Ok(backup_file) => backup_file,
                 Err(err) if is_backup_error_retryable(&err) => {
                     warn!("backup failed, retry: {:?}", err);
@@ -112,16 +119,17 @@ pub(crate) fn spawn_incremental_backup(
             drop(shared_guard);
 
             info!(
-                "backup done: keyspace {}, file {:?}",
-                keyspace_id, backup_file,
+                "instant backup success, keyspace {}, lightweight {}, file {:?}",
+                keyspace_id, do_lightweight_backup, backup_file
             );
+
             BACKUP_COUNTER.fetch_add(1, Ordering::SeqCst);
 
             let backup_elapsed = last_backup_time.saturating_elapsed();
             tokio::time::sleep(interval.saturating_sub(backup_elapsed)).await;
             last_backup_time = Instant::now();
         }
-        info!("incremental backup thread exit");
+        info!("backup thread exit");
     })
 }
 

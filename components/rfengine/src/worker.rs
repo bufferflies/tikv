@@ -230,8 +230,8 @@ impl Worker {
             );
         }
 
-        // NOTE: Snapshot frequency is same as the compaction frequency. It is not
-        // configurable.
+        // NOTE: Snapshot frequency is same as the manifest rewritten frequency. It is
+        // not configurable.
         let should_snapshot = self.manifest.should_snapshot();
         if should_snapshot && self.is_lightweight_enabled() {
             self.handle_snapshot();

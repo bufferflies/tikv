@@ -29,7 +29,7 @@ use crate::{
     random_node_restart, spawn_create_keyspace, spawn_gc_worker, spawn_keyspace_write,
     spawn_major_compact, spawn_merge, spawn_move, spawn_transfer,
     test_load_data::{check_load_data, spawn_load_data},
-    test_native_br::{check_br, spawn_incremental_backup, spawn_restore_keyspace},
+    test_native_br::{check_br, spawn_backup, spawn_restore_keyspace},
     TikvConfig, BACKUP_COUNTER, CONCURRENCY, KEYSPACE_COUNTER, LOAD_DATA_COUNTER,
     MANUAL_MAJOR_COMPACT_COUNTER, MERGE_COUNTER, MOVE_COUNTER, NODE_RESTART_COUNTER,
     RESTORE_COUNTER, TABLE_COUNTER, TIMEOUT, TRANSFER_COUNTER, WRITE_COUNTER,
@@ -63,13 +63,14 @@ fn test_random_all() {
     );
     let pd_client = cluster.get_pd_client();
     let keyspace_manager = cluster.keyspace_manager().clone();
+
+    let backup_config = backup::BackupConfig {
+        dfs: dfs_config.clone(),
+        tolerate_err: 0, // TODO: enable tolerate_err = 1.
+        skip_keyspace_meta: true,
+        ..Default::default()
+    };
     let backup_worker = {
-        let backup_config = backup::BackupConfig {
-            dfs: dfs_config.clone(),
-            tolerate_err: 0, // TODO: enable tolerate_err = 1.
-            skip_keyspace_meta: true,
-            ..Default::default()
-        };
         Arc::new(backup_worker::BackupWorker::new(
             backup_config,
             pd_client.clone(),
@@ -129,7 +130,7 @@ fn test_random_all() {
         ));
     }
 
-    let mut async_handles = vec![spawn_incremental_backup(
+    let mut async_handles = vec![spawn_backup(
         cluster.new_client(),
         keyspace_manager,
         backup_worker,
@@ -222,6 +223,8 @@ fn prepare_cluster(
         conf.rfengine.target_file_size = ReadableSize::mb(1);
         conf.rfengine.batch_compression_threshold =
             ReadableSize::kb(rand::thread_rng().gen_range(0..2));
+        conf.rfengine.lightweight_backup = true;
+        conf.rfengine.wal_chunk_target_file_size = ReadableSize::kb(128);
         // TODO: test for both enable and disable inner_key_offset
         conf.enable_inner_key_offset = true;
         conf.security = security_conf.clone();
