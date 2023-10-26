@@ -70,6 +70,7 @@ fn generate_store_config(path: &str) -> TikvConfig {
     let mut config = TikvConfig::default();
     config.raft_store.raftdb_path = path.to_string();
     config.raft_engine.enable = false;
+    config.rfengine.lightweight_backup = false;
     config
 }
 

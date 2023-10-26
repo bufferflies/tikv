@@ -2,9 +2,9 @@
 
 use std::{
     alloc::{self, Layout},
-    cmp, fs,
+    cmp,
     fs::File,
-    io::{Read, Seek, SeekFrom},
+    io::Read,
     os::unix::prelude::FileExt,
     path::{Path, PathBuf},
     ptr::NonNull,
@@ -14,7 +14,7 @@ use std::{
     },
 };
 
-use bytes::{Buf, BufMut, Bytes};
+use bytes::{Buf, BufMut};
 use file_system::open_direct_file;
 use tikv_util::time::Instant;
 
@@ -319,24 +319,6 @@ impl WalWriter {
             };
         }
         Ok(())
-    }
-
-    pub(crate) fn dump_wal_chunk(
-        &self,
-        epoch_id: u32,
-        start_off: u64,
-        end_off: u64,
-    ) -> Result<Bytes> {
-        if end_off > self.file_off {
-            return Err(Error::Eof);
-        }
-
-        let mut file = fs::File::open(wal_file_name(&self.dir, epoch_id))?;
-        file.seek(SeekFrom::Start(start_off))?;
-        let dump_len = (end_off - start_off) as usize;
-        let mut buf = vec![0; dump_len];
-        file.read_exact(&mut buf)?;
-        Ok(Bytes::from(buf))
     }
 
     fn file(&self) -> &File {

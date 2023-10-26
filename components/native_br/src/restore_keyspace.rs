@@ -820,6 +820,7 @@ impl BackupCluster {
         config.security = self.security_conf.clone();
 
         config.raft_engine.enable = false;
+        config.rfengine.lightweight_backup = false;
 
         TikvServer::init_config(config).get_current()
     }

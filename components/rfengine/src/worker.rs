@@ -166,7 +166,8 @@ impl Worker {
     ) {
         if let Some(writer) = self.async_wal_writer.as_ref() {
             // Check the WAL chunk meta is valid.
-            if writer.epoch_id != epoch_id || start_off >= end_off || writer.file_off < end_off {
+            if epoch_id > writer.epoch_id || epoch_id + 3 < writer.epoch_id || start_off >= end_off
+            {
                 let msg = format!(
                     "{}: invalid dump wal chunk epoch {} start_off {} end_off {} file_off {}",
                     self.manifest.get_engine_id(),
@@ -187,7 +188,7 @@ impl Worker {
                 start_off,
                 end_off,
             );
-            match writer.dump_wal_chunk(epoch_id, start_off, end_off) {
+            match dump_wal_chunk(&self.dir, epoch_id, start_off, end_off) {
                 Ok(chunk) => callback(Ok(chunk)),
                 Err(err) => {
                     let msg = format!(
@@ -694,6 +695,22 @@ impl RlogHeader {
 pub(crate) fn wal_file_name(dir: &Path, epoch_id: u32) -> PathBuf {
     let idx = epoch_to_idx(epoch_id);
     dir.join(format!("{}.wal", idx))
+}
+
+fn dump_wal_chunk(dir: &Path, epoch_id: u32, start_off: u64, end_off: u64) -> Result<Bytes> {
+    // `epoch_id` already checked in the caller.
+    let mut file = fs::File::open(wal_file_name(dir, epoch_id))?;
+    let file_len = file.metadata()?.len();
+    if end_off > file_len {
+        return Err(Error::Eof);
+    }
+
+    // `start_off` < `end_off` already checked in the caller.
+    file.seek(SeekFrom::Start(start_off))?;
+    let dump_len = (end_off - start_off) as usize;
+    let mut buf = vec![0; dump_len];
+    file.read_exact(&mut buf)?;
+    Ok(Bytes::from(buf))
 }
 
 pub(crate) enum Task {
