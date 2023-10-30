@@ -146,7 +146,7 @@ pub struct CacheFs {
 impl CacheFs {
     pub fn new(cache_size: u64, s3_fs: Arc<S3Fs>) -> Self {
         let builder = moka::future::CacheBuilder::new(cache_size);
-        let builder = builder.time_to_idle(Duration::from_secs(600));
+        let builder = builder.time_to_idle(Duration::from_secs(3600));
         let builder = builder.weigher(|_, v: &Bytes| v.len() as u32);
         let cache = builder.build();
         Self { cache, s3_fs }
