@@ -26,7 +26,8 @@ pub struct BackupArgs {
     /// Incremental backup or full backup.
     #[clap(long)]
     pub incremental: bool,
-    /// Incremental backup interval, in seconds.
+    /// Backup interval for incremental or lightweight, in seconds. For
+    /// lightweight backup, interval set to 0 means only backup once.
     #[clap(long, default_value_t = INCREMENTAL_BACKUP_INTERVAL)]
     pub interval: u64,
     /// PD endpoints, use `,` to separate multiple PDs
@@ -52,7 +53,7 @@ pub fn execute_backup(args: BackupArgs) {
     let config: BackupConfig = get_backup_config_from_args(&args);
     info!("Begin backup with config {:?}", config);
     if args.lightweight {
-        execute_lightweight_backup(config, args.name);
+        execute_lightweight_backup(config, args.name, Duration::from_secs(args.interval));
     } else if args.incremental {
         execute_incremental_backup(config, args.name, Duration::from_secs(args.interval))
     } else {

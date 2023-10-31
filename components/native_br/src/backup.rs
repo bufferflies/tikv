@@ -90,6 +90,14 @@ pub fn execute_incremental_backup(config: BackupConfig, name: String, interval: 
         error!("Don't support non-empty name for incremental backup.");
         return;
     }
+
+    if interval.is_zero() {
+        error!(
+            "Interval must be positive for incremental backup. Use full or lightweight instead to backup once."
+        );
+        return;
+    }
+
     let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     let gap = interval.as_secs() - duration.as_secs() % interval.as_secs();
     let start_time = Instant::now()
@@ -143,10 +151,36 @@ pub fn execute_full_backup(config: BackupConfig, name: String) {
     }
 }
 
-pub fn execute_lightweight_backup(config: BackupConfig, name: String) {
+// Backup once if interval is 0.
+pub fn execute_lightweight_backup(config: BackupConfig, name: String, interval: Duration) {
     let pd_client = create_pd_client(&config.security, &config.pd);
-    if let Err(e) = backup_cluster(config, BackupType::Lightweight, name, &pd_client, None) {
-        error!("lightweight backup fail, {:?}", e)
+
+    // Once lightweight backup.
+    if interval.is_zero() {
+        if let Err(e) = backup_cluster(config, BackupType::Lightweight, name, &pd_client, None) {
+            error!("lightweight backup fail, {:?}", e)
+        }
+        return;
+    }
+
+    // Cron lightweight backup.
+    let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    let gap = interval.as_secs() - duration.as_secs() % interval.as_secs();
+    let start_time = Instant::now()
+        .checked_add(Duration::from_secs(gap))
+        .unwrap();
+    let mut interval = GLOBAL_TIMER_HANDLE.interval(start_time, interval).compat();
+
+    while let Some(Ok(_)) = block_on(interval.next()) {
+        if let Err(e) = backup_cluster(
+            config.clone(),
+            BackupType::Lightweight,
+            name.clone(),
+            &pd_client,
+            None,
+        ) {
+            error!("lightweight backup fail, {:?}", e)
+        }
     }
 }
 
