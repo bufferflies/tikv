@@ -948,6 +948,13 @@ impl TikvServer {
         kv_opts.local_dir = kv_engine_path;
         kv_opts.num_compactors = conf.rocksdb.max_background_jobs as usize;
         kv_opts.max_mem_table_size = conf.rocksdb.writecf.write_buffer_size.0;
+        if kv_opts.max_mem_table_size > kvengine::KV_ENGINE_MEM_TABLE_MAX_SIZE {
+            fatal!(
+                "max_mem_table_size {} is too large, should be no more than {}",
+                kv_opts.max_mem_table_size,
+                kvengine::KV_ENGINE_MEM_TABLE_MAX_SIZE
+            );
+        }
         // base_size affects compaction priority a lot, we should cap it to a smaller
         // size when we increase the region_split_size.
         kv_opts.base_size = (conf.coprocessor.region_split_size.0 / 16).min(32 * 1024 * 1024);

@@ -3282,6 +3282,14 @@ impl TikvConfig {
             );
         }
 
+        if self.rocksdb.writecf.write_buffer_size.0 > kvengine::KV_ENGINE_MEM_TABLE_MAX_SIZE {
+            return Err(format!(
+                "rocksdb.writecf.write_buffer_size is greater than {}",
+                kvengine::KV_ENGINE_MEM_TABLE_MAX_SIZE
+            )
+            .into());
+        }
+
         Ok(())
     }
 

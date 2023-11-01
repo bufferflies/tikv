@@ -13,6 +13,11 @@ pub(crate) const DEFAULT_COMPACTION_REQUEST_VERSION: u32 = 3;
 pub(crate) const DEFAULT_COMPACTION_TOMBS_RATIO: f64 = 0.2;
 pub(crate) const DEFAULT_COMPACTION_TOMBS_COUNT: u64 = 10000;
 
+/// The maximum size of a memtable is limited to 128MB. Otherwise it's possible
+/// to use up arena blocks and lead to panic.
+/// See `kvengine::table::memtable::arena::block_cap`.
+pub const MEM_TABLE_MAX_SIZE: u64 = 128 * 1024 * 1024;
+
 #[derive(Default, Clone, Serialize, Deserialize, PartialEq, Debug)]
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]

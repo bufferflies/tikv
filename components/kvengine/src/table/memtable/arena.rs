@@ -27,6 +27,10 @@ const MAX_VAL_SIZE: u32 = 1 << (24 - 1);
 
 const BLOCK_ALIGN: u32 = 8;
 const ALIGN_MASK: u32 = 0xffff_fff8;
+const MAX_NUM_BLOCKS: usize = 256;
+/// Block idx is encoded (see `ArenaAddr::new()`) as +1, so 254 is tha maximum
+/// available value.
+const BLOCK_IDX_MAX: usize = 254;
 const BLOCK_IDX_MASK: u64 = 0xff00_0000_0000_0000;
 const BLOCK_IDX_SHIFT: u64 = 56;
 const BLOCK_OFF_MASK: u64 = 0x00ff_ffff_0000_0000;
@@ -82,8 +86,6 @@ impl ArenaAddr {
         self.0 == NULL_ARENA_ADDR
     }
 }
-
-const MAX_NUM_BLOCKS: usize = 256;
 
 pub struct Arena {
     nodes: ArenaSegment,
@@ -226,6 +228,10 @@ impl ArenaSegment {
     fn grow(&self, min_size: u32) {
         let timer = Instant::now();
         let block_idx = self.block_idx.load(Ordering::Acquire) as usize;
+        if block_idx >= BLOCK_IDX_MAX {
+            self.panic_with_debug_info("grow failed: block idx exhausted");
+        }
+
         let new_block_idx = block_idx + 1;
         let mut new_block_size = block_cap(block_idx);
         if new_block_size < min_size {
@@ -263,6 +269,22 @@ impl ArenaSegment {
         self.get_block(addr.block_idx())
             .get_mut_bytes(addr.block_off(), addr.size())
     }
+
+    fn panic_with_debug_info(&self, msg: &str) {
+        let blocks = (0..self.blocks.len())
+            .into_iter()
+            .map(|idx| {
+                unsafe { self.blocks[idx].load(Ordering::Acquire).as_ref() }
+                    .map(|block| (block.len.load(Ordering::Acquire), block.cap))
+            })
+            .collect::<Vec<_>>();
+        panic!(
+            "{}: blocks: {:?}, self.block_idx: {}",
+            msg,
+            blocks,
+            self.block_idx.load(Ordering::Acquire)
+        );
+    }
 }
 
 impl Drop for ArenaSegment {
@@ -279,12 +301,29 @@ impl Drop for ArenaSegment {
     }
 }
 
+/// Calculate capacity of blocks.
+///
+/// When blocks are used up (255 in maximum), there is no way to solve but
+/// panic. So we allocate large memory when blocks are nearly exhausted.
+///
+/// Note: To avoid exhausted, another alternative solution is switching memtable
+/// before used up, but we do not adopt this currently, as it's not easy to
+/// switch memtable during applying a write batch. Besides, change timing of
+/// switching memtable is not backward compatible.
 fn block_cap(idx: usize) -> u32 {
-    let mut cap = (idx as u32 + 1) * 32 * 1024;
-    if cap > 640 * 1024 {
-        cap = 640 * 1024
+    if idx >= BLOCK_IDX_MAX {
+        32 * 1024 * 1024
+    } else if idx >= MAX_NUM_BLOCKS * 3 / 4 {
+        2 * 1024 * 1024
+    } else if idx >= MAX_NUM_BLOCKS / 2 {
+        1024 * 1024
+    } else {
+        let mut cap = (idx as u32 + 1) * 32 * 1024;
+        if cap > 640 * 1024 {
+            cap = 640 * 1024
+        }
+        cap
     }
-    cap
 }
 
 struct ArenaBlock {
@@ -295,7 +334,7 @@ struct ArenaBlock {
 
 impl ArenaBlock {
     fn new(cap: u32) -> Self {
-        let mut buf: Vec<u64> = vec![0; cap as usize / 8];
+        let mut buf: Vec<u64> = vec![0; (cap + 7) as usize / 8];
         let ptr = buf.as_mut_ptr() as *mut u8;
         mem::forget(buf);
         Self {
@@ -373,5 +412,24 @@ mod tests {
         let buf = arena.nodes.get_mut_bytes(addr);
         buf[0] = 3;
         println!("{:?}", arena.nodes.get_bytes(addr))
+    }
+
+    #[test]
+    fn test_arena_blocks_exhausted() {
+        let arena = Arena::new();
+        // block 0 is created on `new()` with 0 capacity.
+        for i in 1..=254 {
+            if i & 0x1 == 0 {
+                arena.values.alloc(1);
+            } else {
+                arena.values.alloc(block_cap(i));
+            }
+        }
+
+        // Alloc after blocks exhausted should panic.
+        let result = std::panic::catch_unwind(|| {
+            arena.values.alloc(MAX_VAL_SIZE);
+        });
+        assert!(result.is_err());
     }
 }
