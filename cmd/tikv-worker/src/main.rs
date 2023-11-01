@@ -43,7 +43,9 @@ use rfstore::store::{PdIdAllocator, RegionSnapshot};
 use security::{SecurityConfig, SecurityManager};
 use slog::Level;
 use slog_global::{error, info};
-use tikv::coprocessor::remote_dispatcher::decode_remote_cop_request;
+use tikv::{
+    coprocessor::remote_dispatcher::decode_remote_cop_request, server::status_server::StatusServer,
+};
 use tikv_util::{
     config::{ReadableDuration, ReadableSize},
     metrics::{dump, dump_to},
@@ -340,6 +342,9 @@ fn main() {
                         }
                         "/load_data" => handle_load_data(load_manager, req).await,
                         "/metrics" => handle_get_metrics(req).await,
+                        "/debug/pprof/profile" => {
+                            StatusServer::<u8, u8>::dump_cpu_prof_to_resp(req).await
+                        }
                         native_br::BACKUPS_API_PATH => {
                             native_br::handle_backup(br_manager, req).await
                         }
