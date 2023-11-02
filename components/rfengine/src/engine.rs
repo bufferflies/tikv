@@ -135,6 +135,8 @@ pub struct RfEngineCore {
     pub(crate) lightweight: bool,
 
     dfs_worker_healthy: Arc<AtomicBool>,
+
+    _lock: fslock::LockFile, // hold lock to avoid release
 }
 
 pub(crate) struct WorkerHandle {
@@ -153,6 +155,14 @@ impl RfEngineCore {
         let compression_threshold = cfg.batch_compression_threshold.0 as usize;
         let wal_sync_dir = (!cfg.wal_sync_dir.is_empty()).then(|| PathBuf::from(&cfg.wal_sync_dir));
         init_wal_files(dir, wal_sync_dir.as_ref())?;
+
+        // Lock the rfengine directory to prevent concurrent opening.
+        let lock_path = dir.join("LOCK");
+        let mut lock = fslock::LockFile::open(&lock_path)?;
+        if !lock.try_lock()? {
+            panic!("rfengine lock failed, maybe already used by another process");
+        }
+
         let engine_id = Arc::new(AtomicU64::new(0));
         let manifest = Manifest::open(dir, engine_id.clone())?;
         let (tx, rx) = tikv_util::mpsc::unbounded();
@@ -181,6 +191,7 @@ impl RfEngineCore {
             engine_id,
             lightweight: cfg.lightweight_backup,
             dfs_worker_healthy: dfs_worker_healthy.clone(),
+            _lock: lock,
         };
         let async_offset = en.load(&manifest)?;
         {

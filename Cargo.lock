@@ -5741,6 +5741,7 @@ dependencies = [
  "engine_traits",
  "error_code",
  "file_system",
+ "fslock",
  "kvengine",
  "kvproto",
  "lazy_static",

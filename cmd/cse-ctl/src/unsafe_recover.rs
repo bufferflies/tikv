@@ -1,6 +1,11 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{collections::HashSet, path::PathBuf, str::FromStr};
+use core::panic;
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+    str::FromStr,
+};
 
 use bytes::{Buf, BufMut, BytesMut};
 use clap::Args;
@@ -22,12 +27,22 @@ use tikv_util::{
     codec::{bytes::decode_bytes, number::NumberEncoder},
     info,
 };
-
 #[derive(Args)]
 pub struct UnsafeRecoverArgs {
-    /// The path of the raft engine.
+    /// The main path of the raft engine.
     #[clap(long)]
     pub path: PathBuf,
+
+    /// The sync wal dir of the raft engine.
+    /// This must be set because `wal_sync_dir` is enabled in
+    /// TiKV.
+    #[clap(long)]
+    pub wal_sync_dir: String,
+
+    /// Skip the check of `wal_sync_dir`.
+    /// This is useful when the `wal_sync_dir` is not set in TiKV.
+    #[clap(long)]
+    pub skip_wal_sync_dir: bool,
 
     /// Filter the region id to operate.
     #[clap(long)]
@@ -64,7 +79,17 @@ pub struct UnsafeRecoverArgs {
 }
 
 pub(crate) fn execute_unsafe_recover(args: UnsafeRecoverArgs) {
-    let cfg = rfengine::RfEngineConfig::default();
+    let mut cfg = rfengine::RfEngineConfig::default();
+    cfg.lightweight_backup = false;
+    cfg.wal_sync_dir = if !args.skip_wal_sync_dir {
+        // validate `wal_sync_dir` and wal files.
+        if !wal_sync_dir_validate(&PathBuf::from(&args.wal_sync_dir)) {
+            panic!("wal_sync_dir {} not exists", &args.wal_sync_dir);
+        }
+        args.wal_sync_dir
+    } else {
+        String::new()
+    };
     let rf = rfengine::RfEngine::open(&args.path, &cfg, None, None).unwrap();
     if let Some(create_empty) = args.create_empty {
         create_empty_regions(&rf, create_empty, args.commit);
@@ -141,6 +166,25 @@ pub(crate) fn execute_unsafe_recover(args: UnsafeRecoverArgs) {
         rf.write(wb).unwrap();
         info!("done")
     }
+}
+
+// Validate if the wal_sync_dir and wal files exists.
+fn wal_sync_dir_validate(wal_sync_dir: &Path) -> bool {
+    if wal_sync_dir.to_str().unwrap().is_empty() {
+        return false;
+    }
+    let wal_files = vec![
+        wal_sync_dir.join("0.wal"),
+        wal_sync_dir.join("1.wal"),
+        wal_sync_dir.join("2.wal"),
+        wal_sync_dir.join("3.wal"),
+    ];
+    for wal_file in wal_files {
+        if !wal_file.is_file() {
+            return false;
+        }
+    }
+    true
 }
 
 fn parse_stores(stores_str: &str) -> HashSet<u64> {
