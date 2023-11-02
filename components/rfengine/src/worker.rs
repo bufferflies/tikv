@@ -49,6 +49,7 @@ pub(crate) struct Worker {
     buf: Vec<u8>,
     compacted_epoch: Arc<AtomicU32>,
     async_wal_writer: Option<WalWriter>,
+    dfs_worker_healthy: Arc<AtomicBool>,
 }
 
 impl Worker {
@@ -75,7 +76,7 @@ impl Worker {
                 config,
                 epoch_id,
                 manifest.engine_id.clone(),
-                dfs_worker_healthy,
+                dfs_worker_healthy.clone(),
                 rx,
                 callback,
             );
@@ -98,11 +99,16 @@ impl Worker {
             buf: vec![],
             compacted_epoch,
             async_wal_writer,
+            dfs_worker_healthy,
         }
     }
 
     pub(crate) fn is_lightweight_enabled(&self) -> bool {
         self.dfs_worker_handle.is_some()
+    }
+
+    fn is_dfs_worker_healthy(&self) -> bool {
+        self.dfs_worker_healthy.load(Ordering::Acquire)
     }
 
     pub(crate) fn run(&mut self) {
@@ -150,7 +156,9 @@ impl Worker {
         if let Some(async_writer) = self.async_wal_writer.as_ref() {
             task.file_off = async_writer.file_off;
         }
-        if task.config.incremental {
+        if task.config.lightweight {
+            self.lightweight_backup(task);
+        } else if task.config.incremental {
             self.incremental_backup(task);
         } else {
             self.full_backup(task);
@@ -630,6 +638,28 @@ impl Worker {
             }
             Self::backup_callback(task, Ok(backup_meta), "incr_success", ob_start_time);
         });
+    }
+
+    fn lightweight_backup(&mut self, task: BackupTask) {
+        if !self.is_dfs_worker_healthy() {
+            return Self::backup_callback(
+                task,
+                Err("dfs worker unhealthy".to_string()),
+                "light_fail",
+                Instant::now(),
+            );
+        }
+
+        let engine_id = self.manifest.get_engine_id();
+        let wal_epoch = self.manifest.epoch_id + 1;
+        let file_off = task.file_off;
+
+        let mut backup_meta = StoreBackupMeta::default();
+        backup_meta.set_store_id(engine_id);
+        backup_meta.set_epoch(wal_epoch);
+        backup_meta.set_offset(file_off);
+
+        Self::backup_callback(task, Ok(backup_meta), "light_success", Instant::now());
     }
 }
 

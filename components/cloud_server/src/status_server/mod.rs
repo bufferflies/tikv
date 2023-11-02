@@ -1056,28 +1056,6 @@ impl StatusServer {
             ));
         }
 
-        if backup_config.lightweight {
-            // lightweight backup is synchronous.
-            match engine.lightweight_backup() {
-                Ok(meta) => {
-                    info!("{}: lightweight backup finished", meta.store_id);
-                    return Ok(Response::builder()
-                        .body(Body::from(meta.write_to_bytes().unwrap()))
-                        .unwrap());
-                }
-                Err(err) => {
-                    error!(
-                        "{}: lightweight backup failed {:?}",
-                        store_ident.store_id, &err
-                    );
-                    return Ok(make_response(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("Internal Server Error {}", err),
-                    ));
-                }
-            }
-        }
-
         let s3fs = kvengine::dfs::S3Fs::new(
             dfs_conf.prefix,
             dfs_conf.s3_endpoint,

@@ -578,6 +578,10 @@ mod tests {
             // Save chunk data to chunks_data.
             chunks_data.push(Bytes::from(chunk));
         }
+        // Append empty chunk to chunks_data should not affect the result.
+        worker.set_buf(vec![]);
+        let chunk = worker.take_chunk_data();
+        chunks_data.push(Bytes::from(chunk));
 
         // Assemble chunk data and verify with origin data.
         let assembled_data = assemble_wal_chunks(chunks_data).unwrap();

@@ -134,8 +134,6 @@ pub struct RfEngineCore {
 
     pub(crate) lightweight: bool,
 
-    dfs_worker_healthy: Arc<AtomicBool>,
-
     _lock: fslock::LockFile, // hold lock to avoid release
 }
 
@@ -190,7 +188,6 @@ impl RfEngineCore {
             }),
             engine_id,
             lightweight: cfg.lightweight_backup,
-            dfs_worker_healthy: dfs_worker_healthy.clone(),
             _lock: lock,
         };
         let async_offset = en.load(&manifest)?;
@@ -534,10 +531,6 @@ impl RfEngineCore {
         self.engine_id.load(Ordering::Acquire)
     }
 
-    pub fn is_dfs_worker_healthy(&self) -> bool {
-        self.dfs_worker_healthy.load(Ordering::Acquire)
-    }
-
     pub fn get_region_peer_map(&self) -> HashMap<u64, u64> {
         let mut region_to_peer = HashMap::with_capacity(self.peers.len());
         let mut id_pairs = Vec::with_capacity(self.peers.len());
@@ -630,26 +623,6 @@ impl RfEngineCore {
             task.file_off = writer.file_off;
         }
         self.task_sender.send(Task::Backup(task)).unwrap();
-    }
-
-    pub fn lightweight_backup(&self) -> Result<StoreBackupMeta> {
-        // Do not allow lightweight backup if dfs worker unhealthy.
-        if !self.is_dfs_worker_healthy() {
-            return Err(Error::Other("dfs worker unhelathy".to_string()));
-        }
-        let engine_id = self.get_engine_id();
-        let writer = self.writer.lock().unwrap();
-        let wal_epoch = writer.epoch_id;
-        let file_off = writer.file_off;
-        drop(writer);
-        let mut backup_meta = StoreBackupMeta::default();
-        backup_meta.set_store_id(engine_id);
-        backup_meta.set_epoch(wal_epoch);
-        backup_meta.set_offset(file_off);
-        RFENGINE_BACKUP_COUNTER
-            .with_label_values(&["lightweight_success"])
-            .inc();
-        Ok(backup_meta)
     }
 
     pub(crate) fn is_async_wal_enabled(&self) -> bool {

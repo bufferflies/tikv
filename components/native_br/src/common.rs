@@ -318,7 +318,11 @@ fn replay_wal_chunks(
         })
         .collect::<Vec<_>>();
     if !verify_wal_chunks_integrity(&chunk_keys, epoch_id != backup_epoch) {
-        return Err(box_err!("wal chunk files integrity check failed"));
+        let err_msg = format!(
+            "wal chunk files integrity check failed, epoch_id: {} backup_epoch: {} chunk_keys: {:?}",
+            epoch_id, backup_epoch, chunk_keys
+        );
+        return Err(box_err!(&err_msg));
     }
     let chunk_keys_with_option = chunk_keys
         .into_iter()

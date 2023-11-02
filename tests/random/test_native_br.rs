@@ -98,7 +98,7 @@ pub(crate) fn spawn_backup(
             if do_lightweight_backup {
                 info!("spawn lightweight backup");
             } else {
-                info!("spawn incrementabl backup");
+                info!("spawn incremental backup");
             }
             let backup_file = match backup_worker.instant_backup(do_lightweight_backup).await {
                 Ok(backup_file) => backup_file,

@@ -220,11 +220,11 @@ fn prepare_cluster(
         conf.raft_store.max_leader_missing_duration = ReadableDuration::secs(5);
         conf.rocksdb.writecf.block_size = ReadableSize::kb(4);
         conf.rocksdb.writecf.target_file_size_base = ReadableSize::kb(16);
-        conf.rfengine.target_file_size = ReadableSize::mb(1);
+        conf.rfengine.target_file_size = ReadableSize::mb(8);
         conf.rfengine.batch_compression_threshold =
             ReadableSize::kb(rand::thread_rng().gen_range(0..2));
         conf.rfengine.lightweight_backup = true;
-        conf.rfengine.wal_chunk_target_file_size = ReadableSize::kb(128);
+        conf.rfengine.wal_chunk_target_file_size = ReadableSize::kb(512);
         // TODO: test for both enable and disable inner_key_offset
         conf.enable_inner_key_offset = true;
         conf.security = security_conf.clone();
