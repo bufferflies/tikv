@@ -27,8 +27,9 @@ use crate::{
             blobtable::BlobTable,
             builder::{BlobTableBuildOptions, BlobTableBuilder},
         },
-        search,
+        get_tables_in_range,
         sstable::{self, builder::TableBuilderOptions, InMemFile, L0Builder, SsTable},
+        table::TableExt,
         InnerKey,
     },
     Error::{
@@ -1336,16 +1337,6 @@ impl KeyRange {
             self.right = Bytes::copy_from_slice(lower_biggest.deref());
         }
     }
-}
-
-pub(crate) fn get_tables_in_range(
-    tables: &[SsTable],
-    start: InnerKey<'_>,
-    end: InnerKey<'_>,
-) -> (usize, usize) {
-    let left = search(tables.len(), |i| start <= tables[i].biggest());
-    let right = search(tables.len(), |i| end < tables[i].smallest());
-    (left, right)
 }
 
 pub(crate) fn compact_l0(ctx: &CompactionCtx) -> Result<Vec<pb::TableCreate>> {

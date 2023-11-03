@@ -271,14 +271,20 @@ pub(crate) fn spawn_major_compact(
             let keyspace_id = keyspace_manager.get_uniform_random_keyspace(&mut rng);
 
             let stores = pd_client.get_all_stores(true).unwrap();
-            let mut handles = Vec::with_capacity(stores.len());
-            for store in stores {
-                handles.push(
-                    runtime.spawn(request_major_compact_on_store(store.clone(), keyspace_id)),
-                );
-            }
-            for handle in handles {
-                runtime.block_on(handle).unwrap().unwrap();
+            {
+                // To be mutual-exclusive with load_data.
+                let lock = keyspace_manager.get_keyspace_lock(keyspace_id);
+                let _guard = lock.extra_lock();
+
+                let mut handles = Vec::with_capacity(stores.len());
+                for store in stores {
+                    handles.push(
+                        runtime.spawn(request_major_compact_on_store(store.clone(), keyspace_id)),
+                    );
+                }
+                for handle in handles {
+                    runtime.block_on(handle).unwrap().unwrap();
+                }
             }
 
             MANUAL_MAJOR_COMPACT_COUNTER.fetch_add(1, Ordering::SeqCst);

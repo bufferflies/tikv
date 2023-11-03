@@ -25,10 +25,11 @@ use crate::{
     table::{
         self,
         blobtable::blobtable::BlobTable,
+        get_tables_in_range,
         memtable::{self, CfTable},
         search,
         sstable::{L0Table, SsTable},
-        InnerKey,
+        InnerKey, TableExt,
     },
     util::evenly_distribute,
     Iterator as TableIterator, *,
@@ -1359,6 +1360,13 @@ pub fn get_shard_property(key: &str, props: &kvenginepb::Properties) -> Option<V
         }
     }
     None
+}
+
+/// Returns the ingest id if it is a legacy ingest request from the TiDB BR
+/// tool.
+#[inline]
+pub fn is_legacy_ingest(ingest_files: &kvenginepb::IngestFiles) -> Option<Vec<u8>> {
+    get_shard_property(INGEST_ID_KEY, ingest_files.get_properties())
 }
 
 pub fn get_splitting_start_end<'a: 'b, 'b>(

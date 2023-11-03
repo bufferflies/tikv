@@ -34,6 +34,10 @@ pub enum Error {
     ReachConcurrencyLimit(usize),
     #[error("regions are not intact in range: {0}")]
     RegionsIntegrityError(String),
+    #[error("Ingest is overlapped with region existed data: {0}")]
+    IngestOverlap(String),
+    #[error("Multiply errors: {0:?}")]
+    MultiErrors(Vec<Error>),
     #[error("other {0}")]
     Other(#[from] Box<dyn std::error::Error + Send + Sync>),
 }

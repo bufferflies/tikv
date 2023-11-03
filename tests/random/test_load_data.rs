@@ -109,6 +109,15 @@ fn do_load_data(
     let lock = keyspace_manager.get_keyspace_lock(keyspace_id);
     let guard = runtime.block_on(lock.shared_lock());
 
+    // Load data would be conflict with major compaction, as major compaction will
+    // rewrite SST files and cause the deduplicate process of load data doesn't
+    // work. Currently we block major compaction by lock to work around this
+    // problem.
+    // Also note that in production environment the retry of ingest will fail (and
+    // will never succeed) due to the conflict.
+    // See `ShardMeta::check_overlap_for_load_data`.
+    let extra_guard = lock.extra_lock();
+
     // Init task.
     let start_ts = block_on(pd_client.get_tso()).unwrap().into_inner();
     let commit_ts = block_on(pd_client.get_tso()).unwrap().into_inner();
@@ -149,12 +158,15 @@ fn do_load_data(
         &scheduler,
         chunk_ids,
         COMPRESSION_TYPE,
-        Duration::from_secs(90), // longer than expected. TODO: inspect the reason
-    );
+        Duration::from_secs(30),
+    )
+    .unwrap();
     info!(
         "load_data: build finished, keyspace {}, table {}",
         keyspace_id, table_id
     );
+
+    drop(extra_guard);
 
     // Verify the data consistency, to find problems earlier.
     // Must be in lock context to block restore.

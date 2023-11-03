@@ -10,7 +10,7 @@ use moka::sync::SegmentedCache;
 use super::*;
 use crate::{
     max_ts_by_cf,
-    table::{blobtable::BlobRef, table::Result, InnerKey, Value},
+    table::{blobtable::BlobRef, table::Result, InnerKey, TableExt, Value},
     LOCK_CF, NUM_CFS, WRITE_CF,
 };
 

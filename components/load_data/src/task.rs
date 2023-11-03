@@ -23,7 +23,7 @@ use kvengine::{
     dfs::Options,
     get_shard_property,
     table::{sstable::Builder, InnerKey, Value},
-    IdVer, ShardTag, ENCRYPTION_KEY,
+    IdVer, ShardTag, ENCRYPTION_KEY, WRITE_CF, WRITE_CF_BOTTOM_LEVEL,
 };
 use kvproto::{encryptionpb::EncryptionMethod, metapb, pdpb};
 use pd_client::PdClient;
@@ -719,6 +719,19 @@ impl LoadTaskWorker {
         Ok(())
     }
 
+    fn is_ingest_error_retryable(err: &Error) -> bool {
+        match err {
+            Error::RegionNotFound(_)
+            | Error::LeaderNotFound(_)
+            | Error::RegionError(..)
+            | Error::PdError(_)
+            | Error::HyperError(_)
+            | Error::RegionsIntegrityError(_) => true,
+            Error::MultiErrors(errs) => errs.iter().all(Self::is_ingest_error_retryable),
+            _ => false,
+        }
+    }
+
     fn ingest_group(&self, sst_metas: Vec<SstMeta>) -> Result<()> {
         let key_prefix = self.task_ctx.key_prefix.to_vec();
         let split_keys = gen_split_keys(&key_prefix, &sst_metas, self.config.region_size, false);
@@ -735,17 +748,6 @@ impl LoadTaskWorker {
 
         let mut success_ranges = MergeRanges::default(); // keys of `success_ranges` are encoded. 
         let mut last_error: Option<Error> = None;
-        let is_error_retryable = |err: &Error| {
-            matches!(
-                err,
-                Error::RegionNotFound(_)
-                    | Error::LeaderNotFound(_)
-                    | Error::RegionError(..)
-                    | Error::PdError(_)
-                    | Error::HyperError(_)
-                    | Error::RegionsIntegrityError(_)
-            )
-        };
         for retry in 0..MAX_RETRY_TIMES {
             match self.ingest_group_to_range(
                 &key_prefix,
@@ -758,7 +760,7 @@ impl LoadTaskWorker {
                     debug_assert!(success_ranges.covered(&outer_first_key, &outer_last_key));
                     return Ok(());
                 }
-                Err(err) if is_error_retryable(&err) => {
+                Err(err) if Self::is_ingest_error_retryable(&err) => {
                     warn!(
                         "{} ingest_group_to_range failed {:?}, retry {}",
                         self.task_ctx.task_id, err, retry
@@ -797,11 +799,13 @@ impl LoadTaskWorker {
         }
         info!("scanned and filtered regions {:?}", regions);
 
-        let mut handle_ingest_res = |res: Result<metapb::Region>| -> Result<()> {
-            res.map(|mut region| {
+        let mut errors = vec![];
+        let mut handle_ingest_res = |res: Result<metapb::Region>| match res {
+            Ok(mut region) => {
                 success_ranges.insert(region.take_start_key(), region.take_end_key());
                 self.scheduler.add_ingested_regions();
-            })
+            }
+            Err(err) => errors.push(err),
         };
 
         let (tx, rx) = tikv_util::mpsc::unbounded();
@@ -831,11 +835,15 @@ impl LoadTaskWorker {
             if msg_cnt < INGEST_CONCURRENCY {
                 msg_cnt += 1;
             } else {
-                handle_ingest_res(rx.recv().unwrap())?;
+                handle_ingest_res(rx.recv().unwrap());
             }
         }
         for _ in 0..msg_cnt {
-            handle_ingest_res(rx.recv().unwrap())?;
+            handle_ingest_res(rx.recv().unwrap());
+        }
+
+        if !errors.is_empty() {
+            return Err(Error::MultiErrors(errors));
         }
         Ok(())
     }
@@ -893,6 +901,11 @@ async fn ingest_files_to_leader(
                     return Err(Error::LeaderNotFound(region.get_id()));
                 }
                 continue;
+            } else if errpb
+                .get_message()
+                .starts_with(rfstore::errors::INGEST_OVERLAP_ERROR_TAG)
+            {
+                return Err(Error::IngestOverlap(errpb.take_message()));
             } else {
                 return Err(Error::RegionError(region.get_id(), errpb));
             }
@@ -1021,8 +1034,8 @@ fn build_ingest_files(
         }
         let mut table_create = kvenginepb::TableCreate::new();
         table_create.set_id(sst_meta.id);
-        table_create.set_cf(0);
-        table_create.set_level(3);
+        table_create.set_cf(WRITE_CF as i32);
+        table_create.set_level(WRITE_CF_BOTTOM_LEVEL);
         table_create.set_smallest(sst_meta.smallest.clone());
         table_create.set_biggest(sst_meta.biggest.clone());
         table_creates.push(table_create);

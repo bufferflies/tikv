@@ -4,7 +4,7 @@ use std::cmp;
 
 use bytes::Bytes;
 
-use crate::{metrics::ENGINE_OPEN_FILES, IdVer, EXTRA_CF, NUM_CFS, WRITE_CF};
+use crate::{metrics::ENGINE_OPEN_FILES, table::TableExt, IdVer, EXTRA_CF, NUM_CFS, WRITE_CF};
 
 #[derive(Default, Debug, Serialize, Deserialize)]
 #[serde(default)]

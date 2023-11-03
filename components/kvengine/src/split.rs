@@ -18,7 +18,7 @@ use dashmap::mapref::entry::Entry;
 use kvenginepb as pb;
 use slog_global::info;
 
-use crate::*;
+use crate::{table::TableExt, *};
 
 #[derive(Debug)]
 pub struct CheckMergeResult {

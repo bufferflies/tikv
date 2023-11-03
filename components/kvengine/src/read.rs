@@ -12,7 +12,6 @@ use std::{
 use bytes::{Buf, Bytes, BytesMut};
 use cloud_encryption::{EncryptionKey, MasterKey};
 use kvenginepb as pb;
-use kvenginepb::IngestFiles;
 use protobuf::Message;
 
 use crate::{
@@ -20,7 +19,7 @@ use crate::{
         blobtable::blobtable::{BlobPrefetcher, BlobTable},
         memtable::{CfTable, Hint, WriteBatch},
         sstable::{InMemFile, L0Table, SsTable},
-        table, InnerKey,
+        table, InnerKey, TableExt,
     },
     *,
 };
@@ -794,25 +793,6 @@ impl SnapAccessCore {
 
     pub fn has_unloaded_tables(&self) -> bool {
         !self.data.unloaded_tbls.is_empty()
-    }
-
-    // check if the ingest files overlaps with the existing data in the shard.
-    pub fn overlap_ingest_files(&self, ingest_files: &IngestFiles) -> bool {
-        let table_creates = ingest_files.get_table_creates();
-        let cf = self.data.get_cf(WRITE_CF); // Ingest to WRITE_CF only.
-        for table_create in table_creates {
-            let inner_smallest = InnerKey::from_inner_buf(table_create.get_smallest());
-            let inner_biggest = InnerKey::from_inner_buf(table_create.get_biggest());
-            let lvl = cf.get_level(table_create.level as usize);
-            if let Some(old_tbl) = lvl.get_table(inner_smallest) {
-                // Ingest file with same file id is allowed for frontend retry. And will be
-                // de-duplicated in `ShardMeta::preprocess_change_set`.
-                if old_tbl.id() != table_create.id && old_tbl.smallest() <= inner_biggest {
-                    return true;
-                }
-            }
-        }
-        false
     }
 
     pub fn get_encryption_key(&self) -> Option<EncryptionKey> {

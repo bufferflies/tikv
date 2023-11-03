@@ -1,6 +1,7 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
 #![feature(hash_drain_filter)]
+#![feature(is_sorted)]
 #![cfg_attr(test, feature(test))]
 #[cfg(test)]
 extern crate test;
@@ -64,3 +65,5 @@ pub use write::*;
 pub const NUM_CFS: usize = 3;
 pub const CF_LEVELS: [usize; NUM_CFS] = [3, 2, 1];
 const CF_MANAGED: [bool; NUM_CFS] = [true, false, true];
+
+pub const WRITE_CF_BOTTOM_LEVEL: u32 = 3;

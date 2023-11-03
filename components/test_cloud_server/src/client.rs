@@ -67,7 +67,7 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 pub struct RefStore(HashMap<Vec<u8>, Option<Vec<u8>>>); // `None` means the key has been deleted.
 
 impl RefStore {

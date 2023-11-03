@@ -1,6 +1,6 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{io, mem::size_of, ops::Deref, ptr, result, slice};
+use std::{io, iter::Iterator as StdIterator, mem::size_of, ops::Deref, ptr, result, slice};
 
 use byteorder::{ByteOrder, LittleEndian};
 use thiserror::Error;
@@ -465,5 +465,157 @@ impl Deref for InnerKey<'_> {
 
     fn deref(&self) -> &[u8] {
         self.key
+    }
+}
+
+/// `TableExt` is used to make "table like" types (e.g. `TableCreate`,
+/// `FileMeta`, `SsTable`) comparable, and being able to check overlap with
+/// different types.
+pub trait TableExt: Sized {
+    fn smallest(&self) -> InnerKey<'_>;
+
+    fn biggest(&self) -> InnerKey<'_>;
+
+    /// Check whether the table overlaps with another one.
+    fn is_overlap_with<T: TableExt>(&self, other: &T) -> bool {
+        self.smallest() <= other.biggest() && other.smallest() <= self.biggest()
+    }
+
+    /// Find for the first one of `tables` that overlaps with the given table.
+    ///
+    /// Pass `is_sorted` to `None` if it's not sure whether `tables` is sorted
+    /// or not.
+    ///
+    /// Caller should ensure that `tables` should have no overlapped tables.
+    fn find_overlap<T: TableExt>(&self, tables: &[T], is_sorted: bool) -> Option<usize> {
+        if is_sorted {
+            let (left, right) = get_tables_in_range(tables, self.smallest(), self.biggest());
+            (left < right).then_some(left)
+        } else {
+            linear_search_overlap(self, tables)
+        }
+    }
+}
+
+fn linear_search_overlap<T1: TableExt, T2: TableExt>(t: &T1, tables: &[T2]) -> Option<usize> {
+    for (i, table) in tables.iter().enumerate() {
+        if table.is_overlap_with(t) {
+            return Some(i);
+        }
+    }
+    None
+}
+
+pub fn get_tables_in_range<T: TableExt>(
+    tables: &[T],
+    start: InnerKey<'_>,
+    end: InnerKey<'_>,
+) -> (usize, usize) {
+    let left = search(tables.len(), |i| start <= tables[i].biggest());
+    let right = search(tables.len(), |i| end < tables[i].smallest());
+    (left, right)
+}
+
+impl TableExt for kvenginepb::TableCreate {
+    fn smallest(&self) -> InnerKey<'_> {
+        InnerKey::from_inner_buf(self.get_smallest())
+    }
+
+    fn biggest(&self) -> InnerKey<'_> {
+        InnerKey::from_inner_buf(self.get_biggest())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_table_ext_is_overlap_with() {
+        let cases = vec![
+            (
+                (1, 2), // t1,
+                (3, 4), // t2
+                false,  // expected is_overlapping
+            ),
+            ((0, 0), (0, 0), true),
+            ((0, 0), (0, 5), true),
+            ((0, 0), (5, 5), false),
+            ((0, 10), (0, 0), true),
+            ((0, 10), (0, 5), true),
+            ((0, 10), (5, 5), true),
+            ((0, 10), (5, 10), true),
+            ((0, 10), (5, 20), true),
+            ((0, 10), (10, 20), true),
+            ((0, 10), (20, 20), false),
+            ((10, 10), (20, 20), false),
+        ];
+
+        for (idx, (t1, t2, expected)) in cases.into_iter().enumerate() {
+            let t1 = make_table(t1);
+            let t2 = make_table(t2);
+            assert_eq!(t1.is_overlap_with(&t2), expected, "case {}", idx);
+            assert_eq!(t2.is_overlap_with(&t1), expected, "case {}", idx);
+        }
+    }
+
+    #[test]
+    fn test_table_ext_search_overlap() {
+        let sorted_tables = vec![(1, 1), (2, 5), (10, 10), (20, 30)]
+            .into_iter()
+            .map(make_table)
+            .collect::<Vec<_>>();
+        let unsorted_tables = vec![(10, 10), (1, 1), (2, 5), (20, 30)]
+            .into_iter()
+            .map(make_table)
+            .collect::<Vec<_>>();
+        let cases = vec![
+            (
+                (0, 0), // t,
+                None,   // expect_sorted
+                None,   // expect_unsorted
+            ),
+            ((0, 1), Some(0), Some(1)),
+            ((0, 10), Some(0), Some(0)),
+            ((1, 1), Some(0), Some(1)),
+            ((1, 2), Some(0), Some(1)),
+            ((1, 10), Some(0), Some(0)),
+            ((2, 2), Some(1), Some(2)),
+            ((2, 5), Some(1), Some(2)),
+            ((2, 10), Some(1), Some(0)),
+            ((5, 5), Some(1), Some(2)),
+            ((5, 6), Some(1), Some(2)), // overlap with previous one
+            ((5, 10), Some(1), Some(0)),
+            ((6, 6), None, None),
+            ((6, 10), Some(2), Some(0)), // overlap with next one
+            ((10, 10), Some(2), Some(0)),
+            ((11, 11), None, None),
+            ((11, 20), Some(3), Some(3)),
+            ((20, 40), Some(3), Some(3)),
+            ((40, 40), None, None),
+        ];
+
+        for (idx, (t, expect_sorted, expect_unsorted)) in cases.into_iter().enumerate() {
+            let t = make_table(t);
+            assert_eq!(
+                t.find_overlap(&sorted_tables, true),
+                expect_sorted,
+                "case {}",
+                idx
+            );
+            assert_eq!(
+                t.find_overlap(&unsorted_tables, false),
+                expect_unsorted,
+                "case {}",
+                idx
+            );
+        }
+    }
+
+    fn make_table(t: (usize, usize)) -> kvenginepb::TableCreate {
+        let mut table = kvenginepb::TableCreate::default();
+        table.set_smallest(format!("{:04}", t.0).into_bytes());
+        table.set_biggest(format!("{:04}", t.1).into_bytes());
+        table
     }
 }

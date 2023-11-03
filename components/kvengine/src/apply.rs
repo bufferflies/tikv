@@ -18,7 +18,7 @@ use crate::{
         blobtable::blobtable::BlobTable,
         memtable::CfTable,
         sstable::{BlockCacheKey, L0Table, LocalFile, SsTable},
-        InnerKey,
+        InnerKey, TableExt,
     },
     *,
 };

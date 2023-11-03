@@ -32,7 +32,7 @@ use crate::{
     table::{
         memtable::CfTable,
         sstable::{BlockCacheKey, MAGIC_NUMBER, ZSTD_COMPRESSION},
-        InnerKey,
+        InnerKey, TableExt,
     },
     *,
 };

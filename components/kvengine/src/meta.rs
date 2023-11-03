@@ -9,7 +9,7 @@ use protobuf::Message;
 use slog_global::*;
 
 use super::*;
-use crate::table::InnerKey;
+use crate::table::{InnerKey, TableExt};
 
 #[derive(Default, Clone)]
 pub struct ShardMeta {
@@ -345,9 +345,7 @@ impl ShardMeta {
         }
         if cs.has_ingest_files() {
             let ingest_files = cs.mut_ingest_files();
-            if let Some(ingest_id) =
-                get_shard_property(INGEST_ID_KEY, ingest_files.get_properties())
-            {
+            if let Some(ingest_id) = is_legacy_ingest(ingest_files) {
                 // For legacy BR.
                 if let Some(old_ingest_id) = self.get_property(INGEST_ID_KEY) {
                     if ingest_id.eq(&old_ingest_id) {
@@ -419,6 +417,28 @@ impl ShardMeta {
         ingest_files.get_l0_creates().is_empty()
             && ingest_files.get_table_creates().is_empty()
             && ingest_files.get_blob_creates().is_empty()
+    }
+
+    pub fn check_overlap_for_load_data(
+        &self,
+        ingest_files: &pb::IngestFiles,
+    ) -> Option<(
+        u64, // existed file id
+        u64, // ingest file id
+    )> {
+        let ingest_tables = ingest_files.get_table_creates();
+        // Ingest tables should be sorted, but we still check here for safety.
+        let is_sorted = ingest_tables.is_sorted_by(|x, y| x.smallest().partial_cmp(&y.smallest()));
+
+        // Ingest files of load data will be in bottom level of WRITE_CF only.
+        for (&existed_file_id, existed_file) in self.files.iter().filter(|(_, f)| {
+            f.get_cf() == WRITE_CF as i32 && f.get_level() == WRITE_CF_BOTTOM_LEVEL
+        }) {
+            if let Some(i) = existed_file.find_overlap(ingest_tables, is_sorted) {
+                return Some((existed_file_id, ingest_tables[i].id));
+            }
+        }
+        None
     }
 
     fn apply_flush(&mut self, cs: &pb::ChangeSet) {
@@ -979,12 +999,14 @@ impl FileMeta {
     pub fn from_blob_table(table: &kvenginepb::BlobCreate) -> Self {
         Self::new(-1, BLOB_LEVEL, table.get_smallest(), table.get_biggest())
     }
+}
 
-    pub fn smallest(&self) -> InnerKey<'_> {
+impl TableExt for FileMeta {
+    fn smallest(&self) -> InnerKey<'_> {
         InnerKey::from_inner_buf(&self.smallest)
     }
 
-    pub fn biggest(&self) -> InnerKey<'_> {
+    fn biggest(&self) -> InnerKey<'_> {
         InnerKey::from_inner_buf(&self.biggest)
     }
 }
@@ -1331,6 +1353,59 @@ mod tests {
             assert!(!is_empty);
             let expected = make_ingest_files(&[10, 11], &[12], &[13, 14]);
             assert_eq!(ingest_files, expected);
+        }
+    }
+
+    #[test]
+    fn test_check_overlap_for_load_data() {
+        let make_smallest_biggest = |t: &(usize, usize)| {
+            (
+                format!("{:04}", t.0).into_bytes(),
+                format!("{:04}", t.1).into_bytes(),
+            )
+        };
+        let make_ingest_files = |ln: &[(usize, usize)]| -> pb::IngestFiles {
+            let mut ingest_files = pb::IngestFiles::default();
+            for (id, t) in ln.iter().enumerate() {
+                let (smallest, biggest) = make_smallest_biggest(t);
+                ingest_files
+                    .mut_table_creates()
+                    .push(kvenginepb::TableCreate {
+                        id: id as u64,
+                        smallest,
+                        biggest,
+                        ..Default::default()
+                    });
+            }
+            ingest_files
+        };
+        let make_meta = |files: &[(usize, usize)]| -> ShardMeta {
+            let mut meta = ShardMeta::default();
+            for (id, t) in files.iter().enumerate() {
+                let (smallest, biggest) = make_smallest_biggest(t);
+                meta.files.insert(
+                    id as u64,
+                    FileMeta::new(WRITE_CF as i32, 3, &smallest, &biggest),
+                );
+            }
+            meta
+        };
+
+        let ingest_files = make_ingest_files(&[(1, 1), (2, 5), (10, 20)]);
+        let cases = vec![
+            (
+                vec![(0, 0)], // existed files
+                None,         // expected
+            ),
+            (vec![(0, 0), (1, 2)], Some((1, 0))),
+            (vec![(0, 0), (6, 6), (8, 11)], Some((2, 2))),
+            (vec![(0, 0), (6, 6), (7, 7), (30, 40)], None),
+        ];
+
+        for (idx, (existed_files, expected)) in cases.into_iter().enumerate() {
+            let meta = make_meta(&existed_files);
+            let overlap = meta.check_overlap_for_load_data(&ingest_files);
+            assert_eq!(overlap, expected, "case {}", idx);
         }
     }
 }

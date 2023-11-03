@@ -125,11 +125,16 @@ impl ProposalQueue {
         term: u64,
         index: u64,
         current_term: u64,
+        preprocess_errors: &mut PreprocessErrors, // `&mut` due to Error is not clonable.
     ) -> Option<Proposal> {
         while let Some(p) = self.pop(term, index) {
             if p.term == term {
                 if p.index == index {
-                    return if p.cb.is_none() { None } else { Some(p) };
+                    return if p.cb.is_none() {
+                        None
+                    } else {
+                        Self::handle_preprocess_errors(p, preprocess_errors)
+                    };
                 } else {
                     panic!(
                         "{} unexpected callback at term {}, found index {}, expected {}",
@@ -160,6 +165,18 @@ impl ProposalQueue {
         if self.queue.capacity() > SHRINK_CACHE_CAPACITY && self.queue.len() < SHRINK_CACHE_CAPACITY
         {
             self.queue.shrink_to_fit();
+        }
+    }
+
+    fn handle_preprocess_errors(
+        p: Proposal,
+        preprocess_errors: &mut PreprocessErrors,
+    ) -> Option<Proposal> {
+        if let Some(err) = preprocess_errors.take_error(p.term, p.index) {
+            p.cb.invoke_with_response(cmd_resp::new_error(err));
+            None
+        } else {
+            Some(p)
         }
     }
 }
@@ -1644,10 +1661,14 @@ impl Peer {
         }
         let mut preprocess_ctx = PreprocessContext::from_raft_context(ctx);
         let mut preprocess_ref = PreprocessRef::from_peer(self);
+        let mut preprocess_errors = PreprocessErrors::default();
         for entry in &committed_entries {
-            preprocess_ref.preprocess_committed_entry(&mut preprocess_ctx, entry);
+            if let Some(err) = preprocess_ref.preprocess_committed_entry(&mut preprocess_ctx, entry)
+            {
+                preprocess_errors.insert_error(entry.term, entry.index, err);
+            }
         }
-        self.build_apply_msg(ctx, committed_entries, new_role);
+        self.build_apply_msg(ctx, committed_entries, new_role, preprocess_errors);
     }
 
     fn build_apply_msg(
@@ -1655,6 +1676,7 @@ impl Peer {
         ctx: &mut RaftContext,
         committed_entries: Vec<Entry>,
         new_role: Option<raft::StateRole>,
+        mut preprocess_errors: PreprocessErrors,
     ) {
         if let Some(last_entry) = committed_entries.last() {
             self.last_applying_idx = last_entry.get_index();
@@ -1670,8 +1692,13 @@ impl Peer {
             let cbs = committed_entries
                 .iter()
                 .filter_map(|e| {
-                    self.proposals
-                        .find_proposal(tag, e.get_term(), e.get_index(), current_term)
+                    self.proposals.find_proposal(
+                        tag,
+                        e.get_term(),
+                        e.get_index(),
+                        current_term,
+                        &mut preprocess_errors,
+                    )
                 })
                 .map(|mut p| {
                     if p.must_pass_epoch_check {
@@ -1700,11 +1727,36 @@ impl Peer {
     }
 }
 
+// wrap in `Option` to reduce memory usage, as in most time there should be no
+// error.
+#[derive(Default)]
+pub struct PreprocessErrors(Option<HashMap<(u64 /* term */, u64 /* index */), Error>>);
+
+impl PreprocessErrors {
+    pub fn insert_error(&mut self, term: u64, index: u64, err: Error) {
+        if self.0.is_none() {
+            self.0 = Some(HashMap::default());
+        }
+        self.0.as_mut().unwrap().insert((term, index), err);
+    }
+
+    pub fn take_error(&mut self, term: u64, index: u64) -> Option<Error> {
+        self.0.as_mut().and_then(|m| m.remove(&(term, index)))
+    }
+}
+
 // TODO: move to individual file.
 impl<'a> PreprocessRef<'a> {
-    pub fn preprocess_committed_entry(&mut self, ctx: &mut PreprocessContext<'_>, entry: &Entry) {
+    /// Return whether there is error during preprocessing committed entry which
+    /// should be informed caller by callback.
+    pub fn preprocess_committed_entry(
+        &mut self,
+        ctx: &mut PreprocessContext<'_>,
+        entry: &Entry,
+    ) -> Option<Error> {
+        let mut preprocess_err = None;
         if *self.preprocessed_index > 0 && entry.index <= *self.preprocessed_index {
-            return;
+            return None;
         }
         let mut no_kv = entry.data.is_empty();
         if let Some(cmd) = get_preprocess_cmd(entry) {
@@ -1712,12 +1764,14 @@ impl<'a> PreprocessRef<'a> {
             if cmd.has_custom_request() {
                 let custom_req = cmd.get_custom_request();
                 if is_engine_meta_log(custom_req.get_data()) {
-                    self.preprocess_change_set(ctx, entry, custom_req);
+                    if let Err(e) = self.preprocess_change_set(ctx, entry, custom_req) {
+                        preprocess_err = Some(e);
+                    }
                 }
             } else {
                 if let Err(err) = check_region_epoch(&cmd, self.get_preprocessed_region(), false) {
                     warn!("preprocess pending admin failed {:?}", err);
-                    return;
+                    return None;
                 }
                 let admin = cmd.get_admin_request();
                 if admin.has_splits() {
@@ -1738,6 +1792,7 @@ impl<'a> PreprocessRef<'a> {
             self.try_advance_meta(ctx, entry);
         }
         *self.preprocessed_index = entry.index;
+        preprocess_err
     }
 
     pub(crate) fn try_advance_meta(&mut self, ctx: &mut PreprocessContext<'_>, entry: &Entry) {
@@ -1770,7 +1825,7 @@ impl<'a> PreprocessRef<'a> {
         ctx: &mut PreprocessContext<'_>,
         entry: &Entry,
         custom_req: &CustomRequest,
-    ) {
+    ) -> Result<()> {
         let custom_log = rlog::CustomRaftLog::new_from_data(custom_req.get_data());
         let mut cs = custom_log.get_change_set().unwrap();
         cs.set_sequence(entry.get_index());
@@ -1795,13 +1850,33 @@ impl<'a> PreprocessRef<'a> {
                 "region" => tag,
                 "seq" => cs.get_sequence(),
             );
+        } else if cs.has_ingest_files()
+            && kvengine::is_legacy_ingest(cs.get_ingest_files()).is_none()
+        {
+            // It is not necessary to check overlap for legacy ingest.
+            // See `Ingest::convert_sst` & `ShardMeta::get_ingest_level`.
+            if let Some((existed_file_id, ingest_file_id)) =
+                shard_meta.check_overlap_for_load_data(cs.get_ingest_files())
+            {
+                warn!(
+                    "shard meta is overlapped ingest files";
+                    "region" => tag,
+                    "existed_file_id" => existed_file_id,
+                    "ingest_file_id" => ingest_file_id,
+                );
+                return Err(Error::IngestOverlap {
+                    region_id,
+                    existed_file_id,
+                    ingest_file_id,
+                });
+            }
         }
         if let Some(kv) = ctx.kv.as_ref() {
             // `ctx.kv` is `None` only in restore. In which we don't need `meta_committed`.
             kv.meta_committed(&cs, rejected);
         }
         if rejected {
-            return;
+            return Ok(());
         }
         if cs.has_restore_shard() {
             self.preprocess_restore_shard(ctx, entry, &mut cs);
@@ -1825,6 +1900,7 @@ impl<'a> PreprocessRef<'a> {
             }
         }
         ctx.apply_msgs.msgs.push(ApplyMsg::PrepareChangeSet(cs));
+        Ok(())
     }
 
     fn preprocess_restore_shard(
@@ -3241,14 +3317,14 @@ impl Peer {
     /// to target follower first to ensures it's ready to become leader.
     /// After that the real transfer leader process begin.
     ///
-    /// 1. pre_transfer_leader on leader:
-    ///     Leader will send a MsgTransferLeader to follower.
-    /// 2. execute_transfer_leader on follower
-    ///     If follower passes all necessary checks, it will reply an
-    ///     ACK with type MsgTransferLeader and its promised persistent index.
-    /// 3. execute_transfer_leader on leader:
-    ///     Leader checks if it's appropriate to transfer leadership. If it
-    ///     does, it calls raft transfer_leader API to do the remaining work.
+    /// 1. pre_transfer_leader on leader: Leader will send a MsgTransferLeader
+    ///    to follower.
+    /// 2. execute_transfer_leader on follower: If follower passes all necessary
+    ///    checks, it will reply an ACK with type MsgTransferLeader and its
+    ///    promised persistent index.
+    /// 3. execute_transfer_leader on leader: Leader checks if it's appropriate
+    ///    to transfer leadership. If it does, it calls raft transfer_leader API
+    ///    to do the remaining work.
     ///
     /// See also: tikv/rfcs#37.
     fn propose_transfer_leader(

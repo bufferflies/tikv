@@ -13,6 +13,11 @@ use crate::store::PeerMsg;
 
 pub const RAFTSTORE_IS_BUSY: &str = "raftstore is busy";
 
+// Used in `kvproto::Error::message` to indicate that the ingest is overlapped
+// with existed data. Clients will check error type by this string.
+// (`kvproto::Error` doesn't have suitable error type, so use fixed string)
+pub const INGEST_OVERLAP_ERROR_TAG: &str = "Ingest::Overlap";
+
 /// Describes why a message is discarded.
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum DiscardReason {
@@ -130,6 +135,13 @@ pub enum Error {
 
     #[error("txn types {0}")]
     TxnTypes(#[from] txn_types::Error),
+
+    #[error("Ingest file ({}) to region {} is overlapped with existed data ({})", .ingest_file_id, .region_id, .existed_file_id)]
+    IngestOverlap {
+        region_id: u64,
+        existed_file_id: u64,
+        ingest_file_id: u64,
+    },
 }
 
 impl From<Error> for errorpb::Error {
@@ -232,6 +244,17 @@ impl From<Error> for errorpb::Error {
                     .mut_proposal_in_merging_mode()
                     .set_region_id(region_id);
             }
+            Error::IngestOverlap {
+                region_id,
+                existed_file_id,
+                ingest_file_id,
+            } => {
+                // Note: clients will check error type by `INGEST_OVERLAP_ERROR_TAG`.
+                errorpb.set_message(format!(
+                    "{}: region has overlap data, region {}, existed file {}, ingest file {}",
+                    INGEST_OVERLAP_ERROR_TAG, region_id, existed_file_id, ingest_file_id,
+                ));
+            }
             _ => {}
         };
 
@@ -276,6 +299,7 @@ impl ErrorCodeExt for Error {
             Error::SendPeerMsgError(_) => error_code::raftstore::UNKNOWN,
             Error::SstImporter(e) => e.error_code(),
             Error::TxnTypes(e) => e.error_code(),
+            Error::IngestOverlap { .. } => error_code::raftstore::UNKNOWN,
         }
     }
 }

@@ -7,6 +7,7 @@ use futures::executor::block_on;
 use load_data::task::{
     LoadDataConfig, LoadDataContext, LoadTaskMsg, LoadTaskScheduler, LoadTaskWorker, TaskContext,
 };
+use tikv_util::{error, time::Instant};
 
 use crate::{client::RefStore, try_wait};
 
@@ -122,7 +123,7 @@ pub fn build(
     chunk_ids: Vec<u64>,
     compression_type: u8,
     timeout: Duration,
-) {
+) -> std::result::Result<(), String> {
     scheduler
         .sender
         .send(LoadTaskMsg::Build {
@@ -131,18 +132,17 @@ pub fn build(
         })
         .unwrap();
 
-    let ok = try_wait(
-        || {
-            assert!(
-                !scheduler.is_canceled(),
-                "task canceled: {}",
-                scheduler.error_msg()
-            );
-            scheduler.is_finished()
-        },
-        timeout.as_secs() as usize,
-    );
-    assert!(ok, "build timeout, states: {:?}", scheduler.states());
+    let start_time = Instant::now_coarse();
+    while start_time.saturating_elapsed() < timeout {
+        if scheduler.is_finished() {
+            return Ok(());
+        } else if scheduler.is_canceled() {
+            error!("build task canceled"; "error_msg" => scheduler.error_msg(), "states" => ?scheduler.states());
+            return Err(format!("task canceled: {}", scheduler.error_msg()));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    panic!("build timeout, states: {:?}", scheduler.states());
 }
 
 pub fn cleanup(scheduler: &LoadTaskScheduler) {

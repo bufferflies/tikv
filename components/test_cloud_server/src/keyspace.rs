@@ -3,7 +3,7 @@
 use std::{
     mem,
     ops::{Deref, DerefMut, Range},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard},
     time::Duration,
 };
 
@@ -121,6 +121,7 @@ impl KeyspaceManagerCore {
 pub struct KeyspaceMeta {
     _inner_key_off: usize,
     inner_lock: Arc<RwLock<()>>,
+    extra_lock: Arc<Mutex<()>>,
     tables: DashMap<i64 /* table_id */, TableMeta>,
 }
 
@@ -134,12 +135,13 @@ impl KeyspaceMeta {
         Self {
             _inner_key_off: inner_key_off,
             inner_lock: Default::default(),
+            extra_lock: Default::default(),
             tables,
         }
     }
 
-    pub fn inner_lock(&self) -> Arc<RwLock<()>> {
-        self.inner_lock.clone()
+    pub fn get_locks(&self) -> (Arc<RwLock<()>>, Arc<Mutex<()>>) {
+        (self.inner_lock.clone(), self.extra_lock.clone())
     }
 
     pub fn get_random_available_table(&self, rng: &mut ThreadRng) -> Option<i64> {
@@ -169,13 +171,19 @@ impl KeyspaceMeta {
 /// Mutual-exclusive (write) lock for: backup, restore (with verification),
 /// destroy_table.
 ///
-/// For load_data: data is ingested to new table, and the new table is not
-/// available until the ingest finished. So load_data doesn't need to be
-/// mutual-exclusive with reads/writes.
+/// For load_data:
+/// * Data is ingested to new table, and the new table is not available until
+///   the ingest finished. So load_data doesn't need to be mutual-exclusive with
+///   reads/writes.
+/// * Besides, acquire extra_lock to be mutual-exclusive with major_compaction.
 ///
 /// For destroy_table: downgrade to shared lock after set table to unavailable.
+///
+/// For major_compaction: acquire extra_lock to be mutual-exclusive with
+/// load_data.
 pub struct KeyspaceLockHelper {
     inner: Arc<RwLock<()>>,
+    extra: Arc<Mutex<()>>,
 }
 
 impl KeyspaceLockHelper {
@@ -190,13 +198,16 @@ impl KeyspaceLockHelper {
     pub async fn mutex_lock(&self) -> RwLockWriteGuard<'_, ()> {
         self.inner.write().await
     }
+
+    pub fn extra_lock(&self) -> MutexGuard<'_, ()> {
+        self.extra.lock().unwrap()
+    }
 }
 
 impl KeyspaceManager {
     pub fn get_keyspace_lock(&self, keyspace_id: u32) -> KeyspaceLockHelper {
-        KeyspaceLockHelper {
-            inner: self.keyspaces.get(&keyspace_id).unwrap().inner_lock(),
-        }
+        let (inner, extra) = self.keyspaces.get(&keyspace_id).unwrap().get_locks();
+        KeyspaceLockHelper { inner, extra }
     }
 }
 

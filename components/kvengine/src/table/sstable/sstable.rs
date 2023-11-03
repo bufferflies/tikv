@@ -163,6 +163,16 @@ impl SsTable {
     }
 }
 
+impl TableExt for SsTable {
+    fn smallest(&self) -> InnerKey<'_> {
+        self.core.smallest()
+    }
+
+    fn biggest(&self) -> InnerKey<'_> {
+        self.core.biggest()
+    }
+}
+
 pub struct SsTableCore {
     file: Arc<dyn File>,
     cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,

@@ -14,7 +14,10 @@ use file_system::{IoOp, IoType};
 use tikv_util::{mpsc::Receiver, time::Instant};
 
 use crate::{
-    apply::ChangeSet, metrics::ENGINE_LEVEL_WRITE_VEC, table::sstable::LocalFile, EngineCore, *,
+    apply::ChangeSet,
+    metrics::ENGINE_LEVEL_WRITE_VEC,
+    table::{sstable::LocalFile, table::TableExt},
+    EngineCore, *,
 };
 
 pub const BLOB_LEVEL: u32 = 1 << 31;

@@ -13,7 +13,7 @@ use log_wrappers::hex;
 use pd_client::PdClient;
 use protobuf::Message;
 use test_cloud_server::{
-    client::RequestOptions,
+    client::{RefStore, RequestOptions},
     load_data::{build, cleanup, init_task, put_chunks},
     oss::ObjectStorageService,
     ServerCluster,
@@ -170,7 +170,8 @@ fn impl_test_load_data(enable_inner_key_off: bool) {
         chunk_ids,
         COMPRESSION_TYPE,
         Duration::from_secs(10),
-    );
+    )
+    .unwrap();
     let states = scheduler.states();
     assert_eq!(
         states.duplicated_entries.len(),
@@ -204,6 +205,125 @@ fn impl_test_load_data(enable_inner_key_off: bool) {
 
     // Verify that a `table create` contains only one table id
     verify_table_creates(&cluster, enable_inner_key_off);
+
+    cluster.stop();
+}
+
+#[test]
+fn test_load_data_overlap() {
+    test_util::init_log_for_test();
+
+    let base_dir = tempfile::Builder::new()
+        .prefix("test_load_data")
+        .tempdir()
+        .unwrap();
+
+    let oss_dir = base_dir.path().join("oss");
+    let mut oss = ObjectStorageService::new(oss_dir);
+    oss.start_server();
+    let dfs_conf = DFSConfig {
+        prefix: "load_data".to_string(),
+        s3_endpoint: format!("http://127.0.0.1:{}", oss.port()),
+        s3_key_id: "admin".to_string(),
+        s3_secret_key: "admin".to_string(),
+        s3_bucket: "load_data".to_string(),
+        s3_region: "local".to_string(),
+        zstd_compression_level: "3".to_string(),
+        ..Default::default()
+    };
+
+    let runtime = Arc::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .thread_name("load_data_worker")
+            .enable_all()
+            .build()
+            .unwrap(),
+    );
+    let node_ids = alloc_node_id_vec(3);
+    let mut cluster = ServerCluster::new(node_ids.clone(), |_, conf: &mut TikvConfig| {
+        conf.dfs = dfs_conf.clone();
+        conf.enable_inner_key_offset = true;
+    });
+    cluster.wait_region_replicated(&[], 3);
+    let pd_client = cluster.get_pd_client();
+    let mut client = cluster.new_client();
+    client.split_keyspace(KEYSPACE_ID);
+
+    let load_data_config = LoadDataConfig {
+        block_size: 1024,
+        sst_file_size: 4 * 1024,
+        region_size: 16 * 1024,
+        coarse_split_size: 128 * 1024,
+    };
+    let dfs = Arc::new(kvengine::dfs::S3Fs::new(
+        dfs_conf.prefix,
+        dfs_conf.s3_endpoint,
+        dfs_conf.s3_key_id,
+        dfs_conf.s3_secret_key,
+        dfs_conf.s3_region,
+        dfs_conf.s3_bucket,
+    ));
+    let master_key = cluster.get_kvengine(node_ids[0]).get_master_key();
+
+    let do_load_data = || -> std::result::Result<RefStore, String> {
+        let load_data_dir = base_dir.path().join("load_data");
+        fs::create_dir_all(&load_data_dir).unwrap();
+        let start_ts = block_on(pd_client.get_tso()).unwrap().into_inner();
+        let commit_ts = block_on(pd_client.get_tso()).unwrap().into_inner();
+        let load_data_ctx = LoadDataContext {
+            dir: load_data_dir,
+            dfs: dfs.clone(),
+            pd: pd_client.clone(),
+            runtime: runtime.clone(),
+            max_in_mem_size: 1024, // 1KB
+            master_key: master_key.clone(),
+        };
+        let scheduler = init_task(load_data_config.clone(), load_data_ctx, start_ts, commit_ts);
+
+        // Put chunks.
+        let keyspace_prefix = table_key_prefix(5);
+        let i_to_key = move |i: usize| -> Vec<u8> { i_to_key_with_prefix(&keyspace_prefix, i) };
+        let (chunk_ids, ref_store) = put_chunks(
+            &scheduler,
+            DATA_COUNT,
+            DATA_BATCH_SIZE,
+            i_to_key,
+            i_to_val,
+            Duration::from_secs(10),
+            |_| 0,
+        );
+
+        // Build.
+        build(
+            &scheduler,
+            chunk_ids,
+            COMPRESSION_TYPE,
+            Duration::from_secs(10),
+        )?;
+
+        // Cleanup.
+        cleanup(&scheduler);
+
+        Ok(ref_store)
+    };
+
+    // Normal load data.
+    let ref_store0 = do_load_data().unwrap();
+    let verified_count = client
+        .verify_data_with_given_ref_store(&ref_store0, None, &RequestOptions::default())
+        .expect("verify_data_with_given_ref_store");
+    assert_eq!(verified_count, DATA_COUNT);
+
+    // Ingest overlap data.
+    let err = do_load_data().unwrap_err();
+    assert!(err.contains("Ingest::Overlap: region has overlap data"));
+
+    // Verify no data corruption.
+    let verified_count = client
+        .verify_data_with_given_ref_store(&ref_store0, None, &RequestOptions::default())
+        .expect("verify_data_with_given_ref_store");
+    assert_eq!(verified_count, DATA_COUNT);
 
     cluster.stop();
 }

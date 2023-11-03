@@ -21,7 +21,9 @@ use http::{Request, Uri};
 use hyper::Body;
 use itertools::Itertools;
 use kvengine::{
-    dfs::S3Fs, table::InnerKey, IdVer, ShardMeta, ShardRange, ShardStats, ShardTag, ENCRYPTION_KEY,
+    dfs::S3Fs,
+    table::{InnerKey, TableExt},
+    IdVer, ShardMeta, ShardRange, ShardStats, ShardTag, ENCRYPTION_KEY,
 };
 use kvenginepb as pb;
 use kvproto::{metapb, metapb::PeerRole, raft_serverpb::MergeState};

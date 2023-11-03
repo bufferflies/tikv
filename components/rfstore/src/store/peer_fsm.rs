@@ -1431,17 +1431,9 @@ impl<'a> PeerMsgHandler<'a> {
             callback.invoke_with_response(resp);
             return;
         }
-        // Check overlap.
-        if let Some(shard) = self.ctx.global.engines.kv.get_shard(cs.get_shard_id()) {
-            let snap = shard.new_snap_access();
-            if snap.overlap_ingest_files(cs.get_ingest_files()) {
-                let mut resp = RaftCmdResponse::default();
-                let err = resp.mut_header().mut_error();
-                err.set_message(format!("region {} has overlap data", cs.get_shard_id()));
-                callback.invoke_with_response(resp);
-                return;
-            }
-        }
+
+        // Note: overlap is checked in preprocess stage.
+
         let mut cmd = self.new_raft_cmd_request();
         let mut custom_builder = CustomBuilder::new();
         custom_builder.set_change_set(&cs);
