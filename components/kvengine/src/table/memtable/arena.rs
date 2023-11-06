@@ -40,6 +40,8 @@ const FLAG_MASK: u64 = 0x0000_0000_ff00_0000;
 const FLAG_SHIFT: u64 = 24;
 const FLAG_VALUE_NODE: u8 = 1;
 
+/// ArenaAddr is a u64 value encoded as:
+/// | block_idx (8B, 63 - 56) | block_off (24B, 55 - 32) | size (32B, 31 - 0) |
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ArenaAddr(pub u64);
 
@@ -312,7 +314,7 @@ impl Drop for ArenaSegment {
 /// switching memtable is not backward compatible.
 fn block_cap(idx: usize) -> u32 {
     if idx >= BLOCK_IDX_MAX {
-        32 * 1024 * 1024
+        16 * 1024 * 1024 // block_off is encoded as 24 bytes, so the max value is 16M.
     } else if idx >= MAX_NUM_BLOCKS * 3 / 4 {
         2 * 1024 * 1024
     } else if idx >= MAX_NUM_BLOCKS / 2 {
