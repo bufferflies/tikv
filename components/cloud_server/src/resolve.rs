@@ -179,6 +179,7 @@ mod tests {
     use kvproto::metapb;
     use pd_client::{PdClient, Result};
     use rfstore::router::RaftStoreBlackHole;
+    use security::GetSecurityManager;
 
     use super::*;
 
@@ -188,6 +189,8 @@ mod tests {
         start: Instant,
         store: metapb::Store,
     }
+
+    impl GetSecurityManager for MockPdClient {}
 
     impl PdClient for MockPdClient {
         fn get_store(&self, _: u64) -> Result<metapb::Store> {

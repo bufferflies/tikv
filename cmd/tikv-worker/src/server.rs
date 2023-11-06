@@ -1,0 +1,295 @@
+// Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
+
+use std::{
+    error::Error as StdError,
+    future::Future,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
+use bytes::Buf;
+use cloud_encryption::MasterKey;
+use flate2::{write::GzEncoder, Compression};
+use http::{
+    header::{ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_TYPE},
+    HeaderValue, Request, Response,
+};
+use hyper::{
+    server::accept::Accept,
+    service::{make_service_fn, service_fn},
+    Body,
+};
+use kvengine::{
+    dfs::{self, CacheFs, S3Fs},
+    SnapAccess,
+};
+use pd_client::RpcClient;
+use prometheus::TEXT_FORMAT;
+use protobuf::Message;
+use rfstore::store::{PdIdAllocator, RegionSnapshot};
+use tikv::{
+    coprocessor::remote_dispatcher::decode_remote_cop_request, server::status_server::StatusServer,
+};
+use tikv_util::{
+    error, info,
+    metrics::{dump, dump_to},
+    quota_limiter::QuotaLimiter,
+    time::InstantExt,
+};
+use tokio::io::{AsyncRead, AsyncWrite};
+
+use crate::{
+    load_data::{self, LoadDataManager},
+    native_br::{self, NativeBrManager},
+};
+
+pub(crate) struct Context {
+    pub compression_lvl: i32,
+    pub s3fs: Arc<S3Fs>,
+    pub cache_fs: Arc<CacheFs>,
+    pub load_manager: Arc<LoadDataManager>,
+    pub br_manager: Arc<NativeBrManager>,
+    pub pd: Arc<RpcClient>,
+    pub master_key: MasterKey,
+    pub quota_limiter: Arc<QuotaLimiter>,
+}
+
+#[macro_export]
+macro_rules! start_serve {
+    ($ctx:expr, $acceptor:expr) => {{
+        match $acceptor {
+            tikv_util::Either::Left(acceptor) => {
+                $crate::server::start($ctx, hyper::server::Server::builder(acceptor))
+            }
+            tikv_util::Either::Right(acceptor) => {
+                $crate::server::start($ctx, hyper::server::Server::builder(acceptor))
+            }
+        }
+    }};
+}
+
+pub(crate) fn start<I, C>(
+    ctx: Arc<Context>,
+    builder: hyper::server::Builder<I>,
+) -> Box<dyn Future<Output = hyper::Result<()>> + Send + Unpin>
+where
+    I: Accept<Conn = C, Error = std::io::Error> + Send + Unpin + 'static,
+    I::Error: Into<Box<dyn StdError + Send + Sync>>,
+    I::Conn: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let server = builder.serve(make_service_fn(move |_| {
+        let ctx = ctx.clone();
+        async move {
+            // Create a status service.
+            Ok::<_, hyper::Error>(service_fn(move |req: hyper::Request<hyper::Body>| {
+                let ctx = ctx.clone();
+                async move {
+                    let path = req.uri().path().to_owned();
+                    match path.as_ref() {
+                        "/healthz" => Ok(hyper::Response::builder()
+                            .status(200)
+                            .body(hyper::Body::from("ok"))
+                            .unwrap()),
+                        "/compact" => {
+                            let allocator = Arc::new(PdIdAllocator::new(ctx.pd.clone()));
+                            kvengine::handle_remote_compaction(
+                                ctx.s3fs.clone(),
+                                req,
+                                ctx.compression_lvl,
+                                allocator,
+                                ctx.master_key.clone(),
+                            )
+                            .await
+                        }
+                        "/analyze" => {
+                            handle_remote_analysis(
+                                ctx.cache_fs.clone(),
+                                req,
+                                ctx.master_key.clone(),
+                            )
+                            .await
+                        }
+                        "/coprocessor" => {
+                            handle_remote_coprocessor(
+                                ctx.cache_fs.clone(),
+                                req,
+                                ctx.master_key.clone(),
+                                ctx.quota_limiter.clone(),
+                            )
+                            .await
+                        }
+                        "/load_data" => {
+                            load_data::handle_load_data(ctx.load_manager.clone(), req).await
+                        }
+                        "/metrics" => handle_get_metrics(req).await,
+                        "/debug/pprof/profile" => {
+                            StatusServer::<u8, u8>::dump_cpu_prof_to_resp(req).await
+                        }
+                        native_br::BACKUPS_API_PATH => {
+                            native_br::handle_backup(ctx.br_manager.clone(), req).await
+                        }
+                        path if path.starts_with(native_br::RESTORE_KEYSPACE_API_PATH) => {
+                            native_br::handle_restore_keyspace(ctx.br_manager.clone(), req).await
+                        }
+                        path if path.starts_with(native_br::WHITELIST_API_PATH) => {
+                            native_br::handle_native_br_whitelist(ctx.br_manager.clone(), req).await
+                        }
+                        _ => Ok(hyper::Response::builder()
+                            .status(404)
+                            .body(hyper::Body::from("Not Found"))
+                            .unwrap()),
+                    }
+                }
+            }))
+        }
+    }));
+    Box::new(server)
+}
+
+async fn handle_remote_coprocessor(
+    dfs: Arc<dyn dfs::Dfs>,
+    req: hyper::Request<hyper::Body>,
+    master_key: MasterKey,
+    quota_limiter: Arc<QuotaLimiter>,
+) -> hyper::Result<hyper::Response<hyper::Body>> {
+    let req_body = hyper::body::to_bytes(req.into_body()).await?;
+    let decode_res = decode_remote_cop_request(req_body.chunk());
+    if let Err(err) = decode_res {
+        let body = hyper::Body::from(format!("{:?}", err));
+        return Ok(hyper::Response::builder().status(500).body(body).unwrap());
+    }
+    let (req_data, mem_data, snap_data) = decode_res.unwrap();
+    let mut cop_req = kvproto::coprocessor::Request::default();
+    if let Err(err) = cop_req.merge_from_bytes(req_data) {
+        let body = hyper::Body::from(format!("{:?}", err));
+        return Ok(hyper::Response::builder().status(500).body(body).unwrap());
+    }
+    let snap_access_res =
+        SnapAccess::construct_snapshot(dfs, mem_data, snap_data, &master_key).await;
+    if let Err(err) = snap_access_res.as_ref() {
+        let body = hyper::Body::from(format!("{:?}", err));
+        return Ok(hyper::Response::builder().status(500).body(body).unwrap());
+    }
+    let snap_access = snap_access_res.unwrap();
+    let tag = format!(
+        "ks{}:{}:{}",
+        snap_access.get_keyspace_id(),
+        snap_access.get_id(),
+        snap_access.get_version()
+    );
+    let snap = RegionSnapshot::from_snapshot(snap_access);
+    let result = tikv::coprocessor::parse_request_and_handle_remote_cop(
+        cop_req,
+        None,
+        Duration::from_secs(60),
+        quota_limiter,
+        snap,
+    )
+    .await;
+    if let Err(err) = result {
+        error!("{} remote coprocessor failed, error {:?}", tag, err);
+        let body = hyper::Body::from(format!("{:?}", err));
+        return Ok(hyper::Response::builder().status(500).body(body).unwrap());
+    }
+    let response = result.unwrap();
+    info!(
+        "{} finished remote coprocessor resp size {}",
+        tag,
+        response.data.len()
+    );
+    let response_data = response.write_to_bytes().unwrap();
+    Ok(hyper::Response::builder()
+        .status(200)
+        .body(response_data.into())
+        .unwrap())
+}
+
+async fn handle_remote_analysis(
+    dfs: Arc<dyn dfs::Dfs>,
+    req: hyper::Request<hyper::Body>,
+    master_key: MasterKey,
+) -> hyper::Result<hyper::Response<hyper::Body>> {
+    let mut start_time = Instant::now();
+    let req_body = hyper::body::to_bytes(req.into_body()).await?;
+    let result = serde_json::from_slice(req_body.chunk());
+    if result.is_err() {
+        let err_str = result.unwrap_err().to_string();
+        return Ok(hyper::Response::builder()
+            .status(400)
+            .body(err_str.into())
+            .unwrap());
+    }
+    let remote_req: tikv::coprocessor::RemoteAnalysisRequest = result.unwrap();
+    let tag = format!("[:{}]", remote_req.key);
+    let mut change_set = kvenginepb::ChangeSet::default();
+    change_set.merge_from_bytes(&remote_req.snap_bytes).unwrap();
+    let snap_access = SnapAccess::from_change_set(dfs, change_set, true, &master_key).await;
+    info!(
+        "start analyzing for {}, prepare snap time {:?}",
+        tag,
+        start_time.saturating_elapsed()
+    );
+    start_time = Instant::now();
+    let snap = RegionSnapshot::from_snapshot(snap_access);
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let result =
+            tikv::coprocessor::parse_request_and_remote_analyze::<RegionSnapshot>(remote_req, snap);
+        tx.send(result).unwrap();
+    });
+    match rx.await.unwrap() {
+        Ok(data) => {
+            info!(
+                "finish analyzing for {}, takes {:?}, data size {}",
+                tag,
+                start_time.saturating_elapsed(),
+                data.len(),
+            );
+            Ok(hyper::Response::builder()
+                .status(200)
+                .body(data.into())
+                .unwrap())
+        }
+        Err(err) => {
+            let err_str = format!("{:?}", err);
+            error!("failed to analyze for {}, error {}", tag, err_str);
+            let body = hyper::Body::from(err_str);
+            Ok(hyper::Response::builder().status(500).body(body).unwrap())
+        }
+    }
+}
+
+async fn handle_get_metrics(req: Request<Body>) -> hyper::Result<Response<Body>> {
+    let gz_encoding = client_accept_gzip(&req);
+    let metrics = if gz_encoding {
+        // gzip can reduce the body size to less than 1/10.
+        let mut encoder = GzEncoder::new(vec![], Compression::default());
+        dump_to(&mut encoder, true);
+        encoder.finish().unwrap()
+    } else {
+        dump(true).into_bytes()
+    };
+    let mut resp = Response::new(metrics.into());
+    resp.headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static(TEXT_FORMAT));
+    if gz_encoding {
+        resp.headers_mut()
+            .insert(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+    }
+    Ok(resp)
+}
+
+// check if the client allow return response with gzip compression
+// the following logic is port from prometheus's golang:
+// https://github.com/prometheus/client_golang/blob/24172847e35ba46025c49d90b8846b59eb5d9ead/prometheus/promhttp/http.go#L155-L176
+fn client_accept_gzip(req: &Request<Body>) -> bool {
+    let encoding = req
+        .headers()
+        .get(ACCEPT_ENCODING)
+        .map(|enc| enc.to_str().unwrap_or_default())
+        .unwrap_or_default();
+    encoding
+        .split(',')
+        .map(|s| s.trim())
+        .any(|s| s == "gzip" || s.starts_with("gzip;"))
+}

@@ -34,7 +34,7 @@ pub struct RemoteCopServer {
 
 impl RemoteCopServer {
     pub fn new(
-        pd: Arc<pd_client::RpcClient>,
+        pd: Arc<dyn PdClient>,
         dfs: Arc<dyn Dfs>,
         cfg: Config,
         master_key: MasterKey,
@@ -55,12 +55,13 @@ impl RemoteCopServer {
             .keepalive_timeout(Duration::from_secs(3))
             .build_args();
         let addr = SocketAddr::from_str(&cfg.addr).unwrap();
-        let ip = format!("{}", addr.ip());
-        let cop_service = CopService::new(pd, dfs, env.clone(), cfg, master_key);
+        let cop_service = CopService::new(pd.clone(), dfs, env.clone(), cfg, master_key);
         let sb = ServerBuilder::new(env)
             .channel_args(channel_args)
-            .register_service(create_tikv(cop_service))
-            .bind(ip, addr.port());
+            .register_service(create_tikv(cop_service));
+        let sb = pd
+            .get_security_mgr()
+            .bind(sb, &addr.ip().to_string(), addr.port());
         let grpc_server = sb.build().unwrap();
         Self { grpc_server }
     }
@@ -72,7 +73,7 @@ impl RemoteCopServer {
 
 #[derive(Clone)]
 pub struct CopService {
-    pd: Arc<pd_client::RpcClient>,
+    pd: Arc<dyn PdClient>,
     dfs: Arc<dyn Dfs>,
     env: Arc<Environment>,
     store_addrs: Arc<Mutex<HashMap<u64, String>>>,
@@ -84,7 +85,7 @@ pub struct CopService {
 
 impl CopService {
     fn new(
-        pd: Arc<pd_client::RpcClient>,
+        pd: Arc<dyn PdClient>,
         dfs: Arc<dyn Dfs>,
         env: Arc<Environment>,
         cfg: Config,

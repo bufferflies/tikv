@@ -950,6 +950,7 @@ where
                 resource_tag_factory,
                 Arc::clone(&self.quota_limiter),
                 None,
+                self.security_mgr.clone(),
             ),
             coprocessor_v2::Endpoint::new(&self.config.coprocessor_v2),
             self.resolver.clone().unwrap(),

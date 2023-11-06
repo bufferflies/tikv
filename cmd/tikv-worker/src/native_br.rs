@@ -1138,6 +1138,8 @@ mod tests {
     use std::str::FromStr;
 
     use kvengine::dfs::test_util::new_test_s3fs;
+    use pd_client::PdClient;
+    use security::GetSecurityManager;
     use tikv_util::config::ReadableDuration;
 
     use super::*;
@@ -1224,4 +1226,6 @@ mod tests {
     struct MockPdClient {}
 
     impl PdClient for MockPdClient {}
+
+    impl GetSecurityManager for MockPdClient {}
 }

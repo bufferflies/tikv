@@ -1,12 +1,13 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{collections::HashMap, default::Default, str::FromStr, sync::Arc, time::Duration};
+use std::{collections::HashMap, default::Default, sync::Arc, time::Duration};
 
 use api_version::ApiV2;
-use http::{Request, Uri};
+use http::Request;
 use hyper::Body;
 use kvproto::metapb::Store;
 use pd_client::{pd_control::PdControl, PdClient};
+use security::SecurityManager;
 use slog_global::{error, info};
 use tikv_util::{box_err, time::Instant};
 
@@ -29,14 +30,14 @@ pub struct TiFlashSycnRegionResp {
 async fn get_tiflash_keyspace_status(
     keyspace_id: u32,
     store: Store,
+    security_mgr: Arc<SecurityManager>,
 ) -> Result<TiFlashSycnRegionResp> {
-    let uri = Uri::from_str(&format!(
-        "http://{}/tiflash/sync-region/keyspace/{}",
+    let uri = security_mgr.build_uri(format!(
+        "{}/tiflash/sync-region/keyspace/{}",
         &store.status_address, keyspace_id
-    ))
-    .unwrap();
+    ))?;
     let req = Request::get(uri.clone()).body(Body::empty()).unwrap();
-    match send_request_to_store(req, &store).await {
+    match send_request_to_store(req, &store, security_mgr).await {
         Ok(resp) => Ok(serde_json::from_slice(&resp).unwrap()),
         Err(e) => Err(box_err!(
             "Fail to get tiflash keyspace {keyspace_id} status {uri}, err {:?}",
@@ -46,7 +47,7 @@ async fn get_tiflash_keyspace_status(
 }
 
 async fn wait_tiflash_replica_removed(
-    pd_client: &Arc<dyn PdClient>,
+    pd_client: Arc<dyn PdClient>,
     keyspace_id: u32,
 ) -> Result<()> {
     let mut stores: HashMap<u64, Store> = get_tiflash_storage_stores(pd_client.as_ref())?
@@ -59,10 +60,12 @@ async fn wait_tiflash_replica_removed(
         // wait a while for tiflash replica to be removed.
         std::thread::sleep(WAIT_TIFLASH_REMOVE_REPLICA_INTERVAL);
 
+        let security_mgr = pd_client.get_security_mgr();
         let mut handles = Vec::with_capacity(stores.len());
         for (id, store) in stores.clone() {
+            let security_mgr = security_mgr.clone();
             handles.push(async move {
-                get_tiflash_keyspace_status(keyspace_id, store)
+                get_tiflash_keyspace_status(keyspace_id, store, security_mgr.clone())
                     .await
                     .map(|r| (id, r))
             })
@@ -106,7 +109,7 @@ async fn wait_tiflash_replica_removed(
 pub async fn remove_tiflash_replia_of_keyspace(
     keyspace_id: u32,
     pd_control: &PdControl,
-    pd_client: &Arc<dyn PdClient>,
+    pd_client: Arc<dyn PdClient>,
 ) -> Result<()> {
     let (keyspace_start, keyspace_end) = ApiV2::get_txn_keyspace_range(keyspace_id);
     let (hex_start, hex_end) = (hex::encode(keyspace_start), hex::encode(keyspace_end));

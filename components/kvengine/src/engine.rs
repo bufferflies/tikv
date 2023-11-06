@@ -22,6 +22,7 @@ use dashmap::{mapref::entry::Entry, DashMap};
 use file_system::IoRateLimiter;
 use fslock;
 use moka::sync::SegmentedCache;
+use security::SecurityManager;
 use slog_global::info;
 use tikv_util::{mpsc, sys::thread::StdThreadBuildWrapper};
 
@@ -79,6 +80,7 @@ impl Engine {
         rate_limiter: Arc<IoRateLimiter>,
         ks_gc_sp_map: Option<Arc<DashMap<u32, u64>>>,
         master_key: MasterKey,
+        security_mgr: Arc<SecurityManager>,
     ) -> Result<Engine> {
         info!("open KVEngine");
         if !opts.local_dir.exists() {
@@ -121,6 +123,7 @@ impl Engine {
                 allow_fallback_local,
                 id_allocator.clone(),
                 master_key.clone(),
+                security_mgr,
             ),
             id_allocator,
             managed_safe_ts: AtomicU64::new(0),

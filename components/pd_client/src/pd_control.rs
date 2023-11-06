@@ -1,22 +1,22 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::str::FromStr;
+use std::sync::Arc;
 
 use bstr::ByteSlice;
 use bytes::Bytes;
-use http::{Method, Request, Uri};
+use http::{Method, Request};
 use hyper::Body;
+use security::SecurityManager;
 use slog_global::debug;
 use tikv_util::box_err;
-use url::Url;
 
 use crate::Config;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Sync + Send>>;
 
-const PD_CONFIG_PATH: &str = "/pd/api/v1/config";
-const PD_REGIONS_STORE_PATH: &str = "/pd/api/v1/regions/store";
-const PD_KEYSPACE_PATH: &str = "/pd/api/v2/keyspaces";
+const PD_CONFIG_PATH: &str = "pd/api/v1/config";
+const PD_REGIONS_STORE_PATH: &str = "pd/api/v1/regions/store";
+const PD_KEYSPACE_PATH: &str = "pd/api/v2/keyspaces";
 const PD_PLACEMENT_RULE_GROUP_PATH: &str = "pd/api/v1/config/placement-rule";
 const PD_PLACEMENT_RULE_PATH: &str = "pd/api/v1/config/rule";
 const TIFLASH_GROUP: &str = "tiflash";
@@ -49,27 +49,15 @@ pub struct Rule {
 /// interface. It's also expected to act like the tool `pd-ctl`.
 #[derive(Clone)]
 pub struct PdControl {
-    _config: Config,
-    // TODO: support TLS
-    _security_config: security::SecurityConfig,
-    endpoints: Vec<Url>,
+    security_mgr: Arc<SecurityManager>,
+    endpoints: Vec<String>,
 }
 
 impl PdControl {
-    pub fn new(config: Config, security_config: security::SecurityConfig) -> Result<Self> {
-        let mut endpoints = Vec::with_capacity(config.endpoints.len());
-        for endpoint in &config.endpoints {
-            let url = if !endpoint.starts_with("http") {
-                Url::parse(&format!("http://{endpoint}"))?
-            } else {
-                Url::parse(endpoint)?
-            };
-            endpoints.push(url);
-        }
+    pub fn new(config: Config, security_mgr: Arc<SecurityManager>) -> Result<Self> {
         Ok(Self {
-            _config: config,
-            _security_config: security_config,
-            endpoints,
+            endpoints: config.endpoints,
+            security_mgr,
         })
     }
 
@@ -79,11 +67,10 @@ impl PdControl {
         method: Method,
         body_data: Option<Vec<u8>>,
     ) -> Result<Bytes> {
-        let client = hyper::Client::new();
+        let client = self.security_mgr.http_client(hyper::Client::builder())?;
         let mut err = None;
-        for endpoint in &self.endpoints {
-            let uri = endpoint.join(&path).unwrap();
-            let uri = Uri::from_str(uri.as_str()).unwrap();
+        for endpoint in self.endpoints.iter() {
+            let uri = self.security_mgr.build_uri(format!("{endpoint}/{path}"))?;
             let req = Request::builder()
                 .method(method.clone())
                 .uri(uri)

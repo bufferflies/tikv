@@ -229,8 +229,13 @@ impl TikvServer {
         let io_rate_limiter = Arc::new(IoRateLimiter::new(IoRateLimitMode::WriteOnly, true, true));
         io_rate_limiter
             .set_io_rate_limit(config.storage.io_rate_limit.max_bytes_per_sec.0 as usize);
-        let raw_engines =
-            Self::init_raw_engines(pd_client.clone(), &config, dfs, io_rate_limiter.clone());
+        let raw_engines = Self::init_raw_engines(
+            pd_client.clone(),
+            &config,
+            dfs,
+            io_rate_limiter.clone(),
+            security_mgr.clone(),
+        );
 
         let store_path = Path::new(&config.storage.data_dir).to_owned();
 
@@ -647,6 +652,7 @@ impl TikvServer {
             resource_tag_factory,
             Arc::new(QuotaLimiter::default()),
             Some(self.overload_protector.clone()),
+            self.security_mgr.clone(),
         );
         copr.set_remote_url(
             self.config.dfs.remote_analyzer_addr.clone(),
@@ -924,13 +930,14 @@ impl TikvServer {
 
     // This method is also used by cse-ctl for cluster restore.
     pub fn init_kv_engine(
-        pd: Arc<dyn pd_client::PdClient>,
+        pd: Arc<dyn PdClient>,
         conf: &TikvConfig,
         dfs: Arc<dyn Dfs>,
         rate_limiter: Arc<IoRateLimiter>,
         meta_iter: &mut impl kvengine::MetaIterator,
         recoverer: impl kvengine::RecoverHandler + 'static,
         for_restore: bool,
+        security_mgr: Arc<SecurityManager>,
     ) -> kvengine::Result<(
         kvengine::Engine,
         mpsc::Sender<StoreMsg>,
@@ -1003,15 +1010,17 @@ impl TikvServer {
             rate_limiter,
             opt_ks_gc_sp_cache,
             master_key,
+            security_mgr,
         )?;
         Ok((kv_engine, sender, receiver))
     }
 
     fn init_raw_engines(
-        pd: Arc<dyn pd_client::PdClient>,
+        pd: Arc<dyn PdClient>,
         conf: &TikvConfig,
         dfs: Arc<dyn Dfs>,
         rate_limiter: Arc<IoRateLimiter>,
+        security_mgr: Arc<SecurityManager>,
     ) -> Engines {
         let panic_regions = Self::load_panic_regions(&conf.storage.data_dir);
         let black_list_regions = panic_regions
@@ -1040,6 +1049,7 @@ impl TikvServer {
             &mut meta_iter,
             recoverer,
             false,
+            security_mgr,
         )
         .unwrap();
         Engines::new(
@@ -1124,7 +1134,7 @@ fn get_store_regions(
         }
     };
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let pd_control = PdControl::new(conf.pd.clone(), conf.security.clone()).unwrap();
+    let pd_control = PdControl::new(conf.pd.clone(), pd.get_security_mgr()).unwrap();
     let max_store_down_time_secs = match rt.block_on(pd_control.get_config()) {
         Ok(pd_config) => {
             if !pd_config.schedule.max_store_down_time.is_empty() {

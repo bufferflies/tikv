@@ -465,6 +465,7 @@ mod tests {
     use futures::future::ok;
     use kvproto::metapb::*;
     use pd_client::{PdClient, PdFuture};
+    use security::GetSecurityManager;
     use txn_types::TimeStamp;
 
     use super::{BasicFlushObserver, FlushObserver, RegionIdWithVersion};
@@ -509,6 +510,8 @@ mod tests {
     struct MockPdClient {
         safepoint: RwLock<HashMap<String, TimeStamp>>,
     }
+
+    impl GetSecurityManager for MockPdClient {}
 
     impl PdClient for MockPdClient {
         fn update_service_safe_point(

@@ -14,6 +14,7 @@ use std::{
 use futures::StreamExt;
 use http::Uri;
 use hyper::client::HttpConnector;
+use hyper_rustls::HttpsConnector;
 use k8s_openapi::{
     api::{
         apps::v1::StatefulSet,
@@ -26,6 +27,7 @@ use kube::{
     Client as KubeClient,
 };
 use load_data::task::LoadTaskStates;
+use security::SecurityManager;
 use serde_json::json;
 use tikv_util::{box_err, config::ReadableSize, error, info, time::Instant, warn};
 use tokio::sync::Mutex;
@@ -111,8 +113,9 @@ pub(crate) struct WorkerScalerCore {
     pvc_template_name: String,
     cluster_id: u64,
     in_k8s: bool,
-    http_client: hyper::Client<HttpConnector>,
-    pods_map: Mutex<HashMap<String, WorkerPod>>, // task_id -> WorkerPod
+    http_client: hyper::Client<HttpsConnector<HttpConnector>>,
+    pods_map: Mutex<HashMap<String, WorkerPod>>,
+    security_mgr: Arc<SecurityManager>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -221,7 +224,11 @@ impl WorkerPod {
 }
 
 impl WorkerScaler {
-    pub(crate) async fn new(cfg: &WorkerScalerConfig, cluster_id: u64) -> kube::Result<Self> {
+    pub(crate) async fn new(
+        cfg: &WorkerScalerConfig,
+        cluster_id: u64,
+        security_mgr: Arc<SecurityManager>,
+    ) -> kube::Result<Self> {
         let kube_client = KubeClient::try_default().await?;
         let pvc_api: Api<PersistentVolumeClaim> =
             Api::namespaced(kube_client.clone(), &cfg.namespace);
@@ -254,7 +261,8 @@ impl WorkerScaler {
                 pvc_template_name,
                 cluster_id,
                 in_k8s,
-                http_client: hyper::Client::new(),
+                http_client: security_mgr.http_client(hyper::Client::builder()).unwrap(),
+                security_mgr,
             }),
         };
         worker_scaler.init().await?;
@@ -558,12 +566,15 @@ impl WorkerScaler {
 
     pub(crate) fn get_worker_addr(&self, worker_pod: &WorkerPod) -> Option<String> {
         let ip = worker_pod.ip.as_ref()?;
-        Some(format!(
-            "http://{}.{}.pod.cluster.local:{}/load_data",
-            ip.replace('.', "-"),
-            &self.config.namespace,
-            self.config.worker_port,
-        ))
+        self.security_mgr
+            .build_uri(format!(
+                "{}.{}.pod.cluster.local:{}/load_data",
+                ip.replace('.', "-"),
+                &self.config.namespace,
+                self.config.worker_port,
+            ))
+            .ok()
+            .map(|uri| uri.to_string())
     }
 
     pub(crate) async fn get_worker_addr_by_task_id(&self, task_id: &str) -> Option<String> {

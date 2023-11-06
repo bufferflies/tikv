@@ -45,7 +45,7 @@ use kvproto::{
     },
     replication_modepb::{ReplicationStatus, StoreDrAutoSyncStatus},
 };
-use security::SecurityManager;
+use security::{GetSecurityManager, SecurityManager};
 #[allow(unused_imports)]
 use tikv_util::{
     box_err,
@@ -665,6 +665,12 @@ impl<T: Debug> Stream for CachedDuplexResponse<T> {
                 Poll::Pending => return Poll::Pending,
             }
         }
+    }
+}
+
+impl GetSecurityManager for RpcClient {
+    fn get_security_mgr(&self) -> Arc<SecurityManager> {
+        self.raw_client.core.context.connector.security_mgr.clone()
     }
 }
 

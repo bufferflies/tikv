@@ -99,7 +99,7 @@ pub struct Inner {
     pub client_stub: PdClientStub,
     target: TargetInfo,
     members: GetMembersResponse,
-    security_mgr: Arc<SecurityManager>,
+    pub security_mgr: Arc<SecurityManager>,
     on_reconnect: Option<Box<dyn Fn() + Sync + Send + 'static>>,
     pub pending_heartbeat: Arc<AtomicU64>,
     pub pending_buckets: Arc<AtomicU64>,
@@ -535,7 +535,7 @@ pub type StubTuple = (
 #[derive(Clone)]
 pub struct PdConnector {
     pub(crate) env: Arc<Environment>,
-    security_mgr: Arc<SecurityManager>,
+    pub(crate) security_mgr: Arc<SecurityManager>,
 }
 
 impl PdConnector {

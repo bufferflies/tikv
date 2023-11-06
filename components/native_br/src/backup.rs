@@ -2,15 +2,14 @@
 
 use std::{
     path::Path,
-    str::FromStr,
-    sync::mpsc::SyncSender,
+    sync::{mpsc::SyncSender, Arc},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use bytes::Bytes;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use futures::{compat::Stream01CompatExt, executor::block_on, StreamExt};
-use http::{Request, Uri};
+use http::Request;
 use hyper::Body;
 use kvengine::dfs::{self, DFSConfig, S3Fs};
 use kvproto::metapb::Store;
@@ -18,7 +17,7 @@ use pd_client::PdClient;
 use protobuf::Message;
 use regex::Regex;
 use rfenginepb::{ClusterBackupMeta, StoreBackupMeta};
-use security::SecurityConfig;
+use security::{SecurityConfig, SecurityManager};
 use slog_global::{error, info, warn};
 use tikv::storage::mvcc::TimeStamp;
 use tikv_util::timer::GLOBAL_TIMER_HANDLE;
@@ -243,7 +242,7 @@ pub fn backup_cluster_with_ts(
     backup_ts: u64,
     last_backup_meta: Option<ClusterBackupMeta>,
 ) -> Result<(String, ClusterBackupMeta)> {
-    let stores = get_all_stores_except_tiflash(pd_client)?;
+    let stores = get_all_stores_except_tiflash(pd_client as &dyn PdClient)?;
     let cluster_id = pd_client.get_cluster_id()?;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -283,6 +282,7 @@ pub fn backup_cluster_with_ts(
     }
 
     let num_stores = stores.len();
+    let security_mgr = pd_client.get_security_mgr();
     let (tx, rx) = std::sync::mpsc::sync_channel(num_stores);
     for store in stores {
         let config = get_backup_config(
@@ -291,7 +291,12 @@ pub fn backup_cluster_with_ts(
             store.id,
             backup_type.clone(),
         );
-        runtime.spawn(backup_store(config, store, tx.clone()));
+        runtime.spawn(backup_store(
+            config,
+            store,
+            tx.clone(),
+            security_mgr.clone(),
+        ));
     }
     let mut errs = vec![];
     for _ in 0..num_stores {
@@ -344,12 +349,15 @@ async fn backup_store(
     config: rfengine::BackupConfig,
     store: Store,
     tx: SyncSender<Result<StoreBackupMeta>>,
+    security_mgr: Arc<SecurityManager>,
 ) {
-    let uri = Uri::from_str(&format!("http://{}/rfengine/backup", &store.status_address)).unwrap();
+    let uri = security_mgr
+        .build_uri(format!("{}/rfengine/backup", &store.status_address))
+        .unwrap();
     info!("Start backup with config {}", config);
     let json_string = serde_json::to_string(&config).unwrap();
     let req = Request::post(uri).body(Body::from(json_string)).unwrap();
-    match send_request_to_store(req, &store).await {
+    match send_request_to_store(req, &store, security_mgr).await {
         Ok(resp) => {
             let mut store_backup_meta = StoreBackupMeta::default();
             store_backup_meta.merge_from_bytes(&resp).unwrap();

@@ -7,7 +7,6 @@ use std::{
     mem,
     ops::Deref,
     path::PathBuf,
-    str::FromStr,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -16,7 +15,7 @@ use api_version::api_v2::KEYSPACE_PREFIX_LEN;
 use bytes::{Buf, BufMut, Bytes};
 use cloud_encryption::{EncryptionKey, MasterKey};
 use encryption::{DecrypterReader, EncrypterWriter, Iv};
-use http::{Request, Uri};
+use http::Request;
 use hyper::Body;
 use kvengine::{
     dfs,
@@ -334,7 +333,7 @@ impl LoadTaskWorker {
             let key_len = (&chunk_data[0..]).get_u16_le();
             let first_key = chunk_data.slice(2..2 + key_len as usize);
             let shard_meta = self.ctx.runtime.block_on(get_shard_meta(
-                &self.ctx.pd,
+                self.ctx.pd.clone(),
                 first_key.chunk(),
                 GET_SHARD_META_TIMEOUT,
             ))?;
@@ -873,16 +872,21 @@ async fn ingest_files_to_leader(
     region: &metapb::Region,
     mut leader: metapb::Peer,
 ) -> Result<()> {
-    let http_client = hyper::client::Client::new();
+    let security_mgr = pd.get_security_mgr();
+    let http_client = security_mgr.http_client(hyper::Client::builder())?;
     // Loop for retry on "not leader".
     loop {
-        let store = get_leader_store(&pd, region.get_id(), Some(&leader)).await?;
-        let uri = Uri::from_str(&format!(
-            "http://{}/ingest_files?cluster_id={}",
+        let store = get_leader_store(
+            pd.clone() as Arc<dyn PdClient>,
+            region.get_id(),
+            Some(&leader),
+        )
+        .await?;
+        let uri = security_mgr.build_uri(format!(
+            "{}/ingest_files?cluster_id={}",
             &store.status_address,
             pd.get_cluster_id().unwrap()
-        ))
-        .unwrap();
+        ))?;
         let body = cs.write_to_bytes().unwrap();
         let req = Request::post(uri).body(Body::from(body))?;
         let resp = http_client.request(req).await?;
@@ -915,11 +919,12 @@ async fn ingest_files_to_leader(
 }
 
 async fn get_shard_meta(
-    pd: &Arc<dyn PdClient>,
+    pd: Arc<dyn PdClient>,
     shard_key: &[u8],
     timeout: Duration,
 ) -> Result<kvenginepb::ChangeSet> {
-    let http_client = hyper::client::Client::new();
+    let security_mgr = pd.get_security_mgr();
+    let http_client = security_mgr.http_client(hyper::Client::builder())?;
     let start_time = Instant::now_coarse();
     let mut retry = 0;
     loop {
@@ -945,7 +950,7 @@ async fn get_shard_meta(
         }
         let shard_id = region_res.unwrap().get_id();
 
-        let store_res = get_leader_store(pd, shard_id, None).await;
+        let store_res = get_leader_store(pd.clone() as Arc<dyn PdClient>, shard_id, None).await;
         if store_res.is_err() {
             error!(
                 "get_shard_meta: get leader error: {:?}, key: {:?}, shard_id: {}",
@@ -956,11 +961,10 @@ async fn get_shard_meta(
             continue;
         }
         let store = store_res.unwrap();
-        let uri = Uri::from_str(&format!(
-            "http://{}/kvengine/meta/{}",
+        let uri = security_mgr.build_uri(format!(
+            "{}/kvengine/meta/{}",
             &store.status_address, shard_id
-        ))
-        .unwrap();
+        ))?;
         let req = Request::get(uri).body(Body::from(""))?;
         match http_client.request(req).await {
             Ok(resp) => {
@@ -988,7 +992,7 @@ async fn get_shard_meta(
 }
 
 async fn get_leader_store(
-    pd: &Arc<dyn PdClient>,
+    pd: Arc<dyn PdClient>,
     region_id: u64,
     leader: Option<&metapb::Peer>,
 ) -> Result<metapb::Store> {

@@ -12,6 +12,7 @@ use std::{
 use concurrency_manager::ConcurrencyManager;
 use futures::{executor::block_on, StreamExt};
 use kvproto::kvrpcpb::Context;
+use security::SecurityManager;
 use test_coprocessor::{DagSelect, Insert, ProductTable, Store};
 use tidb_query_datatype::codec::Datum;
 use tikv::{
@@ -230,6 +231,7 @@ fn setup_test_suite() -> (TestSuite, Store<RocksEngine>, Endpoint<RocksEngine>) 
         test_suite.get_tag_factory(),
         Arc::new(QuotaLimiter::default()),
         None,
+        Arc::new(SecurityManager::default()),
     );
     (test_suite, store, endpoint)
 }

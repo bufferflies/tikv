@@ -1174,6 +1174,7 @@ pub mod tests {
         eraftpb::{ConfState, Entry, HardState},
         Error as RaftError, GetEntriesContext, StorageError,
     };
+    use security::GetSecurityManager;
     use tempfile::{Builder, TempDir};
     use tikv_util::{
         store::{new_peer, new_witness_peer},
@@ -1304,6 +1305,8 @@ pub mod tests {
             Err(pd_client::Error::StoreTombstone(format!("{:?}", store_id)))
         }
     }
+
+    impl GetSecurityManager for TestPdClient {}
 
     #[test]
     fn test_storage_term() {

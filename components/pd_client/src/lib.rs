@@ -14,6 +14,7 @@ mod feature_gate;
 pub mod metrics;
 mod tso;
 mod util;
+use security::GetSecurityManager;
 pub use util::grpc_error_is_unimplemented;
 
 mod config;
@@ -256,7 +257,7 @@ pub const INVALID_ID: u64 = 0;
 /// creating the PdClient is enough and the PdClient will use this cluster id
 /// all the time.
 #[async_trait]
-pub trait PdClient: Send + Sync {
+pub trait PdClient: GetSecurityManager + Send + Sync {
     /// Load a list of GlobalConfig
     fn load_global_config(&self, _list: Vec<String>) -> PdFuture<HashMap<String, String>> {
         unimplemented!();

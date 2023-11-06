@@ -5,6 +5,7 @@ use std::sync::Arc;
 use concurrency_manager::ConcurrencyManager;
 use kvproto::kvrpcpb::Context;
 use resource_metering::ResourceTagFactory;
+use security::SecurityManager;
 use tidb_query_datatype::codec::Datum;
 use tikv::{
     config::CoprReadPoolConfig,
@@ -111,6 +112,7 @@ pub fn init_data_with_details<E: Engine>(
         ResourceTagFactory::new_for_test(),
         limiter.clone(),
         None,
+        Arc::new(SecurityManager::default()),
     );
     (store, copr, limiter)
 }

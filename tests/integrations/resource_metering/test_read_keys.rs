@@ -8,6 +8,7 @@ use grpcio::{ChannelBuilder, Environment};
 use kvproto::{coprocessor, kvrpcpb::*, resource_usage_agent::ResourceUsageRecord, tikvpb::*};
 use protobuf::Message;
 use resource_metering::ResourceTagFactory;
+use security::SecurityManager;
 use test_coprocessor::{DagSelect, ProductTable, Store};
 use test_raftstore::*;
 use test_util::alloc_port;
@@ -230,6 +231,7 @@ fn init_coprocessor_with_data(
         tag_factory,
         Arc::new(QuotaLimiter::default()),
         None,
+        Arc::new(SecurityManager::default()),
     )
 }
 

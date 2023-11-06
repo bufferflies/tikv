@@ -1107,7 +1107,7 @@ pub mod tests {
     use engine_test::kv::KvTestEngine;
     use futures::executor::block_on;
     use raftstore::coprocessor::RegionChangeReason;
-    use security::SecurityConfig;
+    use security::{GetSecurityManager, SecurityConfig};
     use tikv_util::worker::FutureWorker;
 
     use super::*;
@@ -1458,6 +1458,8 @@ pub mod tests {
     pub(crate) struct MockPdClient;
 
     impl PdClient for MockPdClient {}
+
+    impl GetSecurityManager for MockPdClient {}
 
     #[derive(Clone)]
     pub(crate) struct MockResolver;

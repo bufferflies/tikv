@@ -6,56 +6,34 @@ mod load_data;
 mod metrics;
 mod native_br;
 mod remote_cop;
+mod server;
 mod worker_scaler;
 
 use std::{
     io,
     path::{Path, PathBuf},
-    str::FromStr,
     sync::Arc,
     time::Duration,
 };
 
 use ::native_br::{backup::BackupConfig, restore::RestoreConfig};
 use clap::{App, Arg, ArgMatches};
-use cloud_encryption::MasterKey;
-use flate2::{write::GzEncoder, Compression};
 use grpcio::EnvBuilder;
-use http::{
-    header::{ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_TYPE},
-    HeaderValue, Request, Response, Uri,
-};
-use hyper::{
-    body::Buf,
-    service::{make_service_fn, service_fn},
-    Body,
-};
-use kvengine::{
-    dfs,
-    dfs::{DFSConfig, Dfs, S3Fs},
-    SnapAccess,
-};
+use kvengine::dfs::{DFSConfig, Dfs, S3Fs};
 use kvproto::metapb::Store;
 use pd_client::{PdClient, RpcClient};
-use prometheus::TEXT_FORMAT;
-use protobuf::Message;
-use rfstore::store::{PdIdAllocator, RegionSnapshot};
 use security::{SecurityConfig, SecurityManager};
 use slog::Level;
 use slog_global::{error, info};
-use tikv::{
-    coprocessor::remote_dispatcher::decode_remote_cop_request, server::status_server::StatusServer,
-};
 use tikv_util::{
     config::{ReadableDuration, ReadableSize},
-    metrics::{dump, dump_to},
     quota_limiter::QuotaLimiter,
     sys::SysQuota,
     time::Instant,
 };
 
 use crate::{
-    load_data::{handle_load_data, LoadDataManager, MAX_IN_MEM_SIZE},
+    load_data::{LoadDataManager, MAX_IN_MEM_SIZE},
     metrics::CPU_CORES_QUOTA_GAUGE,
     native_br::{NativeBrConfig, NativeBrManager},
     worker_scaler::{WorkerScaler, WorkerScalerConfig, LOAD_DATA_WORKER_ENV},
@@ -258,7 +236,7 @@ fn main() {
         .block_on(config.security.new_master_key());
     let env = Arc::new(EnvBuilder::new().cq_count(1).build());
     let pd = Arc::new(
-        RpcClient::new(&config.pd, Some(env), security_mgr)
+        RpcClient::new(&config.pd, Some(env), security_mgr.clone())
             .unwrap_or_else(|e| panic!("failed to create rpc client: {:?}", e)),
     );
     let is_load_data_worker = std::env::var(LOAD_DATA_WORKER_ENV).is_ok();
@@ -267,7 +245,11 @@ fn main() {
         let scaler_cfg = config.worker_scaler.clone();
         let cluster_id = pd.get_cluster_id().unwrap();
         let worker_scaler = thread_pool
-            .block_on(WorkerScaler::new(&scaler_cfg, cluster_id))
+            .block_on(WorkerScaler::new(
+                &scaler_cfg,
+                cluster_id,
+                security_mgr.clone(),
+            ))
             .unwrap();
         worker_scaler_opt = Some(worker_scaler.clone());
         thread_pool.spawn(async move {
@@ -293,79 +275,24 @@ fn main() {
     ));
     spawn_br_background_worker(br_manager.clone(), config_file_path);
 
-    let server_builder = hyper::Server::builder(incoming);
-    let s3fs_clone = s3fs.clone();
-    let cache_fs_clone = cache_fs.clone();
-    let pd_clone = pd.clone();
-    let master_key_clone = master_key.clone();
-    let quota_limiter = Arc::new(QuotaLimiter::default());
-    let server = server_builder.serve(make_service_fn(move |_| {
-        let s3fs = s3fs_clone.clone();
-        let cache_fs = cache_fs_clone.clone();
-        let load_manager = load_manager.clone();
-        let br_manager = br_manager.clone();
-        let pd = pd_clone.clone();
-        let master_key = master_key_clone.clone();
-        let quota_limiter = quota_limiter.clone();
-        async move {
-            // Create a status service.
-            Ok::<_, hyper::Error>(service_fn(move |req: hyper::Request<hyper::Body>| {
-                let s3fs = s3fs.clone();
-                let cache_fs = cache_fs.clone();
-                let load_manager = load_manager.clone();
-                let br_manager = br_manager.clone();
-                let pd = pd.clone();
-                let master_key = master_key.clone();
-                let quota_limiter = quota_limiter.clone();
-                async move {
-                    let path = req.uri().path().to_owned();
-                    match path.as_ref() {
-                        "/healthz" => Ok(hyper::Response::builder()
-                            .status(200)
-                            .body(hyper::Body::from("ok"))
-                            .unwrap()),
-                        "/compact" => {
-                            let allocator = Arc::new(PdIdAllocator::new(pd));
-                            kvengine::handle_remote_compaction(
-                                s3fs,
-                                req,
-                                compression_lvl,
-                                allocator,
-                                master_key,
-                            )
-                            .await
-                        }
-                        "/analyze" => handle_remote_analysis(cache_fs, req, master_key).await,
-                        "/coprocessor" => {
-                            handle_remote_coprocessor(cache_fs, req, master_key, quota_limiter)
-                                .await
-                        }
-                        "/load_data" => handle_load_data(load_manager, req).await,
-                        "/metrics" => handle_get_metrics(req).await,
-                        "/debug/pprof/profile" => {
-                            StatusServer::<u8, u8>::dump_cpu_prof_to_resp(req).await
-                        }
-                        native_br::BACKUPS_API_PATH => {
-                            native_br::handle_backup(br_manager, req).await
-                        }
-                        path if path.starts_with(native_br::RESTORE_KEYSPACE_API_PATH) => {
-                            native_br::handle_restore_keyspace(br_manager, req).await
-                        }
-                        path if path.starts_with(native_br::WHITELIST_API_PATH) => {
-                            native_br::handle_native_br_whitelist(br_manager, req).await
-                        }
-                        _ => Ok(hyper::Response::builder()
-                            .status(404)
-                            .body(hyper::Body::from("Not Found"))
-                            .unwrap()),
-                    }
-                }
-            }))
-        }
-    }));
+    let ctx = Arc::new(server::Context {
+        compression_lvl,
+        s3fs: s3fs.clone(),
+        cache_fs: cache_fs.clone(),
+        pd: pd.clone(),
+        load_manager,
+        br_manager,
+        master_key: master_key.clone(),
+        quota_limiter: Arc::new(QuotaLimiter::default()),
+    });
+    let acceptor = security_mgr.acceptor(incoming).unwrap();
+    let server = start_serve!(ctx, acceptor);
 
     if config.register {
-        let remote_compact_url = format!("http://{}/compact", config.addr);
+        let remote_compact_url = security_mgr
+            .build_uri(format!("{}/compact", config.addr))
+            .unwrap()
+            .to_string();
         let duration = config.update_interval.0;
         let pd_clone = pd.clone();
         std::thread::spawn(move || {
@@ -374,6 +301,7 @@ fn main() {
                     pd_clone.clone(),
                     s3fs.clone(),
                     remote_compact_url.clone(),
+                    security_mgr.clone(),
                 );
                 std::thread::sleep(duration);
             }
@@ -435,154 +363,6 @@ fn update_native_br_config(br_manager: Arc<NativeBrManager>, path: &Path) {
     }
 }
 
-async fn handle_get_metrics(req: Request<Body>) -> hyper::Result<Response<Body>> {
-    let gz_encoding = client_accept_gzip(&req);
-    let metrics = if gz_encoding {
-        // gzip can reduce the body size to less than 1/10.
-        let mut encoder = GzEncoder::new(vec![], Compression::default());
-        dump_to(&mut encoder, true);
-        encoder.finish().unwrap()
-    } else {
-        dump(true).into_bytes()
-    };
-    let mut resp = Response::new(metrics.into());
-    resp.headers_mut()
-        .insert(CONTENT_TYPE, HeaderValue::from_static(TEXT_FORMAT));
-    if gz_encoding {
-        resp.headers_mut()
-            .insert(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
-    }
-    Ok(resp)
-}
-
-// check if the client allow return response with gzip compression
-// the following logic is port from prometheus's golang:
-// https://github.com/prometheus/client_golang/blob/24172847e35ba46025c49d90b8846b59eb5d9ead/prometheus/promhttp/http.go#L155-L176
-fn client_accept_gzip(req: &Request<Body>) -> bool {
-    let encoding = req
-        .headers()
-        .get(ACCEPT_ENCODING)
-        .map(|enc| enc.to_str().unwrap_or_default())
-        .unwrap_or_default();
-    encoding
-        .split(',')
-        .map(|s| s.trim())
-        .any(|s| s == "gzip" || s.starts_with("gzip;"))
-}
-
-async fn handle_remote_analysis(
-    dfs: Arc<dyn dfs::Dfs>,
-    req: hyper::Request<hyper::Body>,
-    master_key: MasterKey,
-) -> hyper::Result<hyper::Response<hyper::Body>> {
-    let mut start_time = Instant::now();
-    let req_body = hyper::body::to_bytes(req.into_body()).await?;
-    let result = serde_json::from_slice(req_body.chunk());
-    if result.is_err() {
-        let err_str = result.unwrap_err().to_string();
-        return Ok(hyper::Response::builder()
-            .status(400)
-            .body(err_str.into())
-            .unwrap());
-    }
-    let remote_req: tikv::coprocessor::RemoteAnalysisRequest = result.unwrap();
-    let tag = format!("[:{}]", remote_req.key);
-    let mut change_set = kvenginepb::ChangeSet::default();
-    change_set.merge_from_bytes(&remote_req.snap_bytes).unwrap();
-    let snap_access = SnapAccess::from_change_set(dfs, change_set, true, &master_key).await;
-    info!(
-        "start analyzing for {}, prepare snap time {:?}",
-        tag,
-        start_time.saturating_elapsed()
-    );
-    start_time = Instant::now();
-    let snap = RegionSnapshot::from_snapshot(snap_access);
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    std::thread::spawn(move || {
-        let result =
-            tikv::coprocessor::parse_request_and_remote_analyze::<RegionSnapshot>(remote_req, snap);
-        tx.send(result).unwrap();
-    });
-    match rx.await.unwrap() {
-        Ok(data) => {
-            info!(
-                "finish analyzing for {}, takes {:?}, data size {}",
-                tag,
-                start_time.saturating_elapsed(),
-                data.len(),
-            );
-            Ok(hyper::Response::builder()
-                .status(200)
-                .body(data.into())
-                .unwrap())
-        }
-        Err(err) => {
-            let err_str = format!("{:?}", err);
-            error!("failed to analyze for {}, error {}", tag, err_str);
-            let body = hyper::Body::from(err_str);
-            Ok(hyper::Response::builder().status(500).body(body).unwrap())
-        }
-    }
-}
-
-async fn handle_remote_coprocessor(
-    dfs: Arc<dyn dfs::Dfs>,
-    req: hyper::Request<hyper::Body>,
-    master_key: MasterKey,
-    quota_limiter: Arc<QuotaLimiter>,
-) -> hyper::Result<hyper::Response<hyper::Body>> {
-    let req_body = hyper::body::to_bytes(req.into_body()).await?;
-    let decode_res = decode_remote_cop_request(req_body.chunk());
-    if let Err(err) = decode_res {
-        let body = hyper::Body::from(format!("{:?}", err));
-        return Ok(hyper::Response::builder().status(500).body(body).unwrap());
-    }
-    let (req_data, mem_data, snap_data) = decode_res.unwrap();
-    let mut cop_req = kvproto::coprocessor::Request::default();
-    if let Err(err) = cop_req.merge_from_bytes(req_data) {
-        let body = hyper::Body::from(format!("{:?}", err));
-        return Ok(hyper::Response::builder().status(500).body(body).unwrap());
-    }
-    let snap_access_res =
-        SnapAccess::construct_snapshot(dfs, mem_data, snap_data, &master_key).await;
-    if let Err(err) = snap_access_res.as_ref() {
-        let body = hyper::Body::from(format!("{:?}", err));
-        return Ok(hyper::Response::builder().status(500).body(body).unwrap());
-    }
-    let snap_access = snap_access_res.unwrap();
-    let tag = format!(
-        "ks{}:{}:{}",
-        snap_access.get_keyspace_id(),
-        snap_access.get_id(),
-        snap_access.get_version()
-    );
-    let snap = RegionSnapshot::from_snapshot(snap_access);
-    let result = tikv::coprocessor::parse_request_and_handle_remote_cop(
-        cop_req,
-        None,
-        Duration::from_secs(60),
-        quota_limiter,
-        snap,
-    )
-    .await;
-    if let Err(err) = result {
-        error!("{} remote coprocessor failed, error {:?}", tag, err);
-        let body = hyper::Body::from(format!("{:?}", err));
-        return Ok(hyper::Response::builder().status(500).body(body).unwrap());
-    }
-    let response = result.unwrap();
-    info!(
-        "{} finished remote coprocessor resp size {}",
-        tag,
-        response.data.len()
-    );
-    let response_data = response.write_to_bytes().unwrap();
-    Ok(hyper::Response::builder()
-        .status(200)
-        .body(response_data.into())
-        .unwrap())
-}
-
 pub(crate) fn get_all_stores_except_tiflash(
     pd_client: &Arc<RpcClient>,
 ) -> Result<Vec<Store>, pd_client::Error> {
@@ -598,7 +378,12 @@ pub(crate) fn get_all_stores_except_tiflash(
         .collect())
 }
 
-fn register_compactor_to_all_stores(pd: Arc<RpcClient>, dfs: Arc<S3Fs>, remote_url: String) {
+fn register_compactor_to_all_stores(
+    pd: Arc<RpcClient>,
+    dfs: Arc<S3Fs>,
+    remote_url: String,
+    security_mgr: Arc<SecurityManager>,
+) {
     let all_stores = get_all_stores_except_tiflash(&pd)
         .unwrap_or_else(|e| panic!("failed get all stores {:?}", e));
     let start_time = Instant::now();
@@ -607,8 +392,9 @@ fn register_compactor_to_all_stores(pd: Arc<RpcClient>, dfs: Arc<S3Fs>, remote_u
     for store in all_stores {
         let tx = tx.clone();
         let remote_url = remote_url.clone();
+        let security_mgr = security_mgr.clone();
         dfs.get_runtime().spawn(async move {
-            tx.send(register_compactor_to_store(store, remote_url.clone()).await)
+            tx.send(register_compactor_to_store(store, remote_url.clone(), security_mgr).await)
                 .unwrap();
         });
     }
@@ -627,13 +413,15 @@ fn register_compactor_to_all_stores(pd: Arc<RpcClient>, dfs: Arc<S3Fs>, remote_u
     );
 }
 
-async fn register_compactor_to_store(store: Store, remote_url: String) -> bool {
-    let uri = Uri::from_str(&format!(
-        "http://{}/kvengine/compactor",
-        &store.status_address
-    ))
-    .unwrap();
-    let client = hyper::Client::new();
+async fn register_compactor_to_store(
+    store: Store,
+    remote_url: String,
+    security_mgr: Arc<SecurityManager>,
+) -> bool {
+    let uri = security_mgr
+        .build_uri(format!("{}/kvengine/compactor", store.status_address))
+        .unwrap();
+    let client = security_mgr.http_client(hyper::Client::builder()).unwrap();
     let req = hyper::Request::builder()
         .method(hyper::Method::POST)
         .uri(uri)

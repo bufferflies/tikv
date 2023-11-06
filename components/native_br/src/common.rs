@@ -1,12 +1,12 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
-use std::{str::FromStr, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use engine_traits::{GetObjectOptions, ListObjectContent, ObjectStorage};
 use etcd_client::{ConnectOptions, OpenSslClientConfig};
 use grpcio::EnvBuilder;
 use http::Request;
-use hyper::{Body, Uri};
+use hyper::Body;
 use kvengine::dfs::{Dfs, S3Fs};
 use kvproto::{metapb, metapb::Store};
 use pd_client::{PdClient, RpcClient};
@@ -69,8 +69,12 @@ pub fn get_tiflash_storage_stores(pd_client: &dyn PdClient) -> Result<Vec<Store>
         .collect())
 }
 
-pub async fn send_request_to_store(req: Request<Body>, store: &Store) -> Result<Bytes> {
-    let client = hyper::Client::new();
+pub async fn send_request_to_store(
+    req: Request<Body>,
+    store: &Store,
+    security_mgr: Arc<SecurityManager>,
+) -> Result<Bytes> {
+    let client = security_mgr.http_client(hyper::Client::builder())?;
     let resp = client.request(req).await;
     if let Err(err) = resp {
         error!(
@@ -233,14 +237,14 @@ async fn fetch_rfengine_wal_chunk(
     epoch_id: u32,
     start_off: u64,
     end_off: u64,
+    security_mgr: Arc<SecurityManager>,
 ) -> Result<Bytes> {
-    let uri = Uri::from_str(&format!(
-        "http://{}/rfengine/wal_chunk?epoch_id={}&start_off={}&end_off={}",
+    let uri = security_mgr.build_uri(format!(
+        "{}/rfengine/wal_chunk?epoch_id={}&start_off={}&end_off={}",
         &store.status_address, epoch_id, start_off, end_off
-    ))
-    .unwrap();
+    ))?;
     let req = Request::get(uri).body(Body::empty()).unwrap();
-    send_request_to_store(req, &store).await
+    send_request_to_store(req, &store, security_mgr).await
 }
 
 // TODO: Filter out the write batches of specified keyspace to replay to save
@@ -365,11 +369,13 @@ fn replay_wal_chunks(
         // Need fetch the last chunk from server then append fetched data to epoch_wal.
         let store = pd_client.get_store(store_id).unwrap();
         let runtime = dfs.get_runtime();
+        let security_mgr = pd_client.get_security_mgr();
         let last_chunk = runtime.block_on(fetch_rfengine_wal_chunk(
             store,
             epoch_id,
             epoch_wal.len() as u64,
             backup_offset,
+            security_mgr,
         ))?;
         info!(
             "fetched last wal chunk start_off {} end_off {} data len {}",

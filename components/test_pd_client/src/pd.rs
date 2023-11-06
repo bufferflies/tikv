@@ -41,6 +41,7 @@ use pd_client::{
     BucketStat, Error, FeatureGate, Key, PdClient, PdFuture, RegionInfo, RegionStat, Result,
 };
 use raft::eraftpb::ConfChangeType;
+use security::GetSecurityManager;
 use tikv_util::{
     store::{check_key_in_region, find_peer, is_learner, new_peer, QueryStats},
     time::{Instant, UnixSecs},
@@ -1574,6 +1575,8 @@ impl TestPdClient {
         }
     }
 }
+
+impl GetSecurityManager for TestPdClient {}
 
 impl PdClient for TestPdClient {
     fn get_cluster_id(&self) -> Result<u64> {

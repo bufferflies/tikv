@@ -7,9 +7,7 @@ edition = "2018"
 publish = false
 
 [features]
-protobuf-codec = [
-    "protobuf/bytes",
-]
+protobuf-codec = ["protobuf/bytes"]
 testexport = []
 
 [dependencies]
@@ -36,6 +34,7 @@ futures = { version = "0.3", features = ["thread-pool"] }
 hex = "0.4"
 http = "0.2"
 hyper = "0.14"
+hyper-rustls = "0.24.2"
 hyper-tls = "0.5"
 kvenginepb = { path = "../kvenginepb", default-features = false }
 lazy_static = "1.3"
@@ -54,10 +53,14 @@ rusoto_core = "0.46.0"
 rusoto_credential = "0.46.0"
 rusoto_mock = "0.46.0"
 rusoto_s3 = "0.46.0"
+security = { workspace = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_derive = "1.0"
 serde_json = "1.0"
-slog = { version = "2.3", features = ["max_level_trace", "release_max_level_debug"] }
+slog = { version = "2.3", features = [
+    "max_level_trace",
+    "release_max_level_debug",
+] }
 slog-global = { version = "0.1", git = "https://github.com/breeswish/slog-global.git", rev = "d592f88e4dbba5eb439998463054f1a44fbf17b9" }
 slog-term = "2.4"
 thiserror = "1.0"
@@ -70,7 +73,9 @@ tracker = { path = "../tracker" }
 txn_types = { path = "../txn_types", default-features = false }
 url = "2"
 # xorf = { version = "0.8", features = ["serde"] }
-xorf = { git = "https://github.com/youjiali1995/xorf", branch = "0.8.0-custom-serde", features = ["serde"] }
+xorf = { git = "https://github.com/youjiali1995/xorf", branch = "0.8.0-custom-serde", features = [
+    "serde",
+] }
 zstd-sys = "2.0.7"
 
 [dependencies.rocksdb]

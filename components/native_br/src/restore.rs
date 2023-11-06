@@ -12,7 +12,7 @@ use kvengine::dfs::{DFSConfig, Dfs, S3Fs};
 use pd_client::PdClient;
 use protobuf::Message;
 use rfenginepb::ClusterBackupMeta;
-use security::SecurityConfig;
+use security::{GetSecurityManager, SecurityConfig};
 use slog_global::info;
 use tikv::config::TikvConfig;
 use tikv_util::config::ensure_dir_exist;
@@ -30,6 +30,8 @@ const MAX_TXN_OPTS: usize = 128; // Default configuration in etcd server.
 struct MockPdClient {}
 
 impl PdClient for MockPdClient {}
+
+impl GetSecurityManager for MockPdClient {}
 
 pub fn restore_tikv(config: &RestoreConfig, name: String, store_id: u64, path: &str) {
     let dfs_conf = config.dfs.clone();

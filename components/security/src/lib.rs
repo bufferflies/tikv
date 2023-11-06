@@ -1,5 +1,7 @@
 // Copyright 2017 TiKV Project Authors. Licensed under Apache-2.0.
 
+mod http;
+
 #[macro_use]
 extern crate serde_derive;
 
@@ -152,6 +154,12 @@ impl SecurityConfig {
         // use a fixed master key for test.
         let master_key = vec![1u8; 32];
         MasterKey::new(&master_key)
+    }
+}
+
+pub trait GetSecurityManager {
+    fn get_security_mgr(&self) -> Arc<SecurityManager> {
+        Arc::new(SecurityManager::default())
     }
 }
 

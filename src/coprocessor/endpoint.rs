@@ -22,6 +22,7 @@ use kvproto::{
 use overload_protector::{CopTaskStats, OverloadProtector};
 use protobuf::{CodedInputStream, Message};
 use resource_metering::{FutureExt, ResourceTagFactory, StreamExt};
+use security::SecurityManager;
 use tidb_query_common::execute_stats::ExecSummary;
 use tikv_alloc::trace::MemoryTraceGuard;
 use tikv_kv::SnapshotExt;
@@ -91,6 +92,8 @@ pub struct Endpoint<E: Engine> {
     remote_ctx: Option<RemoteContext>,
 
     pub overload_protector: Option<OverloadProtector>,
+
+    security_mgr: Arc<SecurityManager>,
 }
 
 impl<E: Engine> tikv_util::AssertSend for Endpoint<E> {}
@@ -103,6 +106,7 @@ impl<E: Engine> Endpoint<E> {
         resource_tag_factory: ResourceTagFactory,
         quota_limiter: Arc<QuotaLimiter>,
         overload_protector: Option<OverloadProtector>,
+        security_mgr: Arc<SecurityManager>,
     ) -> Self {
         // FIXME: When yatp is used, we need to limit coprocessor requests in progress
         // to avoid using too much memory. However, if there are a number of large
@@ -130,6 +134,7 @@ impl<E: Engine> Endpoint<E> {
             quota_limiter,
             remote_ctx: None,
             overload_protector,
+            security_mgr,
         }
     }
 
@@ -145,6 +150,7 @@ impl<E: Engine> Endpoint<E> {
             remote_cop_url,
             remote_cop_min_blocks,
             remote_cop_white_list,
+            self.security_mgr.clone(),
         );
     }
 
@@ -1559,6 +1565,7 @@ mod tests {
             ResourceTagFactory::new_for_test(),
             Arc::new(QuotaLimiter::default()),
             None,
+            Arc::new(SecurityManager::default()),
         );
 
         // a normal request
@@ -1601,6 +1608,7 @@ mod tests {
             ResourceTagFactory::new_for_test(),
             Arc::new(QuotaLimiter::default()),
             None,
+            Arc::new(SecurityManager::default()),
         );
         copr.recursion_limit = 100;
 
@@ -1640,6 +1648,7 @@ mod tests {
             ResourceTagFactory::new_for_test(),
             Arc::new(QuotaLimiter::default()),
             None,
+            Arc::new(SecurityManager::default()),
         );
 
         let mut req = coppb::Request::default();
@@ -1664,6 +1673,7 @@ mod tests {
             ResourceTagFactory::new_for_test(),
             Arc::new(QuotaLimiter::default()),
             None,
+            Arc::new(SecurityManager::default()),
         );
 
         let mut req = coppb::Request::default();
@@ -1713,6 +1723,7 @@ mod tests {
             ResourceTagFactory::new_for_test(),
             Arc::new(QuotaLimiter::default()),
             None,
+            Arc::new(SecurityManager::default()),
         );
 
         let (tx, rx) = mpsc::channel();
@@ -1762,6 +1773,7 @@ mod tests {
             ResourceTagFactory::new_for_test(),
             Arc::new(QuotaLimiter::default()),
             None,
+            Arc::new(SecurityManager::default()),
         );
 
         let handler_builder =
@@ -1788,6 +1800,7 @@ mod tests {
             ResourceTagFactory::new_for_test(),
             Arc::new(QuotaLimiter::default()),
             None,
+            Arc::new(SecurityManager::default()),
         );
 
         // Fail immediately
@@ -1842,6 +1855,7 @@ mod tests {
             ResourceTagFactory::new_for_test(),
             Arc::new(QuotaLimiter::default()),
             None,
+            Arc::new(SecurityManager::default()),
         );
 
         let handler_builder = Box::new(|_, _: &_| Ok(StreamFixture::new(vec![]).into_boxed()));
@@ -1871,6 +1885,7 @@ mod tests {
             ResourceTagFactory::new_for_test(),
             Arc::new(QuotaLimiter::default()),
             None,
+            Arc::new(SecurityManager::default()),
         );
 
         // handler returns `finished == true` should not be called again.
@@ -1971,6 +1986,7 @@ mod tests {
             ResourceTagFactory::new_for_test(),
             Arc::new(QuotaLimiter::default()),
             None,
+            Arc::new(SecurityManager::default()),
         );
 
         let counter = Arc::new(atomic::AtomicIsize::new(0));
@@ -2041,6 +2057,7 @@ mod tests {
             ResourceTagFactory::new_for_test(),
             Arc::new(QuotaLimiter::default()),
             None,
+            Arc::new(SecurityManager::default()),
         );
 
         let (tx, rx) = std::sync::mpsc::channel();
@@ -2365,6 +2382,7 @@ mod tests {
             ResourceTagFactory::new_for_test(),
             Arc::new(QuotaLimiter::default()),
             None,
+            Arc::new(SecurityManager::default()),
         );
 
         {
@@ -2429,6 +2447,7 @@ mod tests {
             ResourceTagFactory::new_for_test(),
             Arc::new(QuotaLimiter::default()),
             None,
+            Arc::new(SecurityManager::default()),
         );
         let mut req = coppb::Request::default();
         req.mut_context().set_isolation_level(IsolationLevel::Si);

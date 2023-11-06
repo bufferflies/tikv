@@ -14,9 +14,12 @@ use std::{
 use bytes::{Buf, Bytes, BytesMut};
 use cloud_encryption::{EncryptionKey, MasterKey};
 use http::StatusCode;
+use hyper::{client::HttpConnector, Client};
+use hyper_rustls::HttpsConnector;
 use kvenginepb as pb;
 use pb::{BlobCreate, TableCreate};
 use protobuf::Message;
+use security::SecurityManager;
 use slog_global::error;
 use tikv_util::mpsc;
 
@@ -83,7 +86,7 @@ pub struct CompactionClient {
     dfs: Arc<dyn dfs::Dfs>,
     id_allocator: Arc<dyn IdAllocator>,
     remote_compactors: Arc<Mutex<RemoteCompactors>>,
-    client: Option<hyper::Client<hyper::client::HttpConnector>>,
+    client: Option<Client<HttpsConnector<HttpConnector>>>,
     compression_lvl: i32,
     allow_fallback_local: bool,
     master_key: MasterKey,
@@ -97,11 +100,12 @@ impl CompactionClient {
         allow_fallback_local: bool,
         id_allocator: Arc<dyn IdAllocator>,
         master_key: MasterKey,
+        security_mgr: Arc<SecurityManager>,
     ) -> Self {
         let remote_compactors = RemoteCompactors::new(remote_url);
-        let client = hyper::Client::builder()
-            .pool_max_idle_per_host(0)
-            .build_http();
+        let client = security_mgr
+            .http_client(Client::builder().pool_max_idle_per_host(0).clone())
+            .unwrap();
         Self {
             dfs,
             remote_compactors: Arc::new(Mutex::new(remote_compactors)),

@@ -8,7 +8,6 @@ use std::{
     fmt, mem, ops,
     ops::Deref,
     path::{Path, PathBuf},
-    str::FromStr,
     sync::{Arc, RwLock},
     thread,
     time::Duration,
@@ -17,7 +16,7 @@ use std::{
 use api_version::ApiV2;
 use cloud_server::{RestoreShardResponse, TikvServer};
 use file_system::{IoRateLimitMode, IoRateLimiter};
-use http::{Request, Uri};
+use http::Request;
 use hyper::Body;
 use itertools::Itertools;
 use kvengine::{
@@ -123,7 +122,7 @@ pub fn restore_keyspace_with_cfg(
     truncate_ts: Option<u64>,
     reporter: Arc<dyn ReportRestoreStepTrait>,
 ) -> Result<RestoredKeyspace> {
-    let pd_control = PdControl::new(config.pd.clone(), config.security.clone())?;
+    let pd_control = PdControl::new(config.pd.clone(), pd_client.get_security_mgr())?;
     let keyspace_id = {
         let keyspace = runtime.block_on(pd_control.get_keyspace_by_name(keyspace_name))?;
         assert_eq!(keyspace_name, keyspace.name);
@@ -145,7 +144,7 @@ pub fn restore_keyspace_with_cfg(
         if let Err(e) = runtime.block_on(remove_tiflash_replia_of_keyspace(
             keyspace_id,
             &pd_control,
-            &pd_client,
+            pd_client.clone(),
         )) {
             error!("Keyspace {keyspace_id} remove tiflash replica err {:?}", e);
             return Err(e);
@@ -272,7 +271,7 @@ pub fn restore_keyspace(
         retry += 1;
 
         let mut target_regions = match runtime.block_on(get_target_regions(
-            &pd_client,
+            pd_client.as_ref() as &dyn PdClient,
             &target_keyspace_start,
             &target_keyspace_end,
         )) {
@@ -302,7 +301,7 @@ pub fn restore_keyspace(
 
             // Update target regions after split.
             target_regions = match runtime.block_on(get_target_regions(
-                &pd_client,
+                pd_client.as_ref(),
                 &target_keyspace_start,
                 &target_keyspace_end,
             )) {
@@ -738,6 +737,7 @@ impl BackupCluster {
                 &mut meta_iter,
                 recoverer.clone(),
                 true,
+                self.pd_client.get_security_mgr(),
             )?;
 
             // Move shards to meta_applier to apply meta change in `flush_mem_table`.
@@ -1831,7 +1831,7 @@ impl kvengine::MetaIterator for MetaIterator {
 }
 
 async fn get_target_regions(
-    pd_client: &Arc<dyn PdClient>,
+    pd_client: &dyn PdClient,
     start_key: &[u8],
     end_key: &[u8],
 ) -> Result<Vec<RawRegion>> {
@@ -1969,12 +1969,12 @@ async fn request_restore_snapshot(
         let store = pd_client.get_store_async(leader.get_store_id()).await?;
         let tag = ShardTag::new(store.get_id(), IdVer::new(cs.shard_id, cs.shard_ver));
 
-        let uri =
-            Uri::from_str(&format!("http://{}/restore-shard", &store.status_address)).unwrap();
+        let security_mgr = pd_client.get_security_mgr();
+        let uri = security_mgr.build_uri(format!("{}/restore-shard", &store.status_address))?;
         let req = Request::post(uri)
             .body(Body::from(post_data.clone()))
             .unwrap();
-        match send_request_to_store(req, &store).await {
+        match send_request_to_store(req, &store, security_mgr).await {
             Ok(resp) => {
                 let resp: RestoreShardResponse = serde_json::from_slice(&resp).unwrap();
                 debug!("{} request_restore_snapshot succeed", tag);

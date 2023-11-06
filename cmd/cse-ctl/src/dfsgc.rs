@@ -6,7 +6,6 @@ use std::{
     fmt::{Debug, Formatter},
     fs,
     path::PathBuf,
-    str::FromStr,
     sync::Arc,
     thread,
     time::{Duration, Instant},
@@ -16,7 +15,6 @@ use bytes::Buf;
 use chrono::DateTime;
 use clap::Args;
 use engine_traits::ListObjectContent;
-use http::Uri;
 use kvengine::{
     dfs,
     dfs::{DFSConfig, Dfs, S3Fs},
@@ -27,7 +25,7 @@ use native_br::{
     error::{Error, Result},
 };
 use pd_client::RpcClient;
-use security::SecurityConfig;
+use security::{GetSecurityManager, SecurityConfig, SecurityManager};
 use tikv_util::{box_err, config::ReadableDuration, error, info, warn};
 use tokio::sync::{mpsc::Sender, Mutex, Semaphore};
 /// DFS GC Rules:
@@ -299,10 +297,11 @@ impl GcWorker {
         let (tx, rx) = std::sync::mpsc::sync_channel(stores_len);
         for store in all_stores {
             let tx = tx.clone();
+            let security_mgr = self.pd.get_security_mgr().clone();
             self.s3fs.get_runtime().spawn(async move {
                 // Send failed when receive error from following `rx.recv()` and close the
                 // channel. So it can be ignored.
-                let _ = tx.send(Self::get_store_files(store).await);
+                let _ = tx.send(Self::get_store_files(store, security_mgr).await);
             });
         }
         let mut valid_files = HashSet::default();
@@ -335,10 +334,12 @@ impl GcWorker {
         Ok(())
     }
 
-    async fn get_store_files(store: Store) -> Result<Vec<(u64, Vec<u64>)>> {
-        let uri =
-            Uri::from_str(&format!("http://{}/kvengine/files", &store.status_address)).unwrap();
-        let client = hyper::Client::new();
+    async fn get_store_files(
+        store: Store,
+        security_mgr: Arc<SecurityManager>,
+    ) -> Result<Vec<(u64, Vec<u64>)>> {
+        let uri = security_mgr.build_uri(format!("{}/kvengine/files", &store.status_address))?;
+        let client = security_mgr.http_client(hyper::Client::builder())?;
         let resp = client
             .get(uri)
             .await

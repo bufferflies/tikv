@@ -188,6 +188,7 @@ mod tests {
     use collections::HashMap;
     use kvproto::metapb;
     use pd_client::{PdClient, Result};
+    use security::GetSecurityManager;
     use tikv_kv::FakeExtension;
 
     use super::*;
@@ -198,6 +199,8 @@ mod tests {
         start: Instant,
         store: metapb::Store,
     }
+
+    impl GetSecurityManager for MockPdClient {}
 
     impl PdClient for MockPdClient {
         fn get_store(&self, _: u64) -> Result<metapb::Store> {

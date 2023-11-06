@@ -17,6 +17,7 @@ use bytes::{Buf, Bytes};
 use cloud_encryption::MasterKey;
 use file_system::IoRateLimiter;
 use kvenginepb as pb;
+use security::SecurityManager;
 use tempfile::TempDir;
 use tikv_util::{mpsc, time::Instant};
 
@@ -70,6 +71,7 @@ fn new_test_engine_opt(
         rate_limiter,
         None,
         MasterKey::new(&[1u8; 32]),
+        Arc::new(SecurityManager::default()),
     )
     .unwrap();
     {

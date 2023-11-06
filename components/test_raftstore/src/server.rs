@@ -468,6 +468,7 @@ impl ServerCluster {
             res_tag_factory,
             quota_limiter,
             None,
+            Arc::new(SecurityManager::default()),
         );
         let copr_v2 = coprocessor_v2::Endpoint::new(&cfg.coprocessor_v2);
         let mut server = None;

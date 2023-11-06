@@ -31,7 +31,7 @@ use kvproto::{
     pdpb::{self, EventType, Member, WatchGcSafePointV2Response},
     replication_modepb::{RegionReplicationStatus, ReplicationStatus, StoreDrAutoSyncStatus},
 };
-use security::SecurityManager;
+use security::{GetSecurityManager, SecurityManager};
 use tikv_util::{
     box_err, debug, error, info, thd_name,
     time::{duration_to_sec, Instant},
@@ -59,6 +59,12 @@ pub struct RpcClient {
     // KS_SAFEPOINT_V2 is to cache keyspace id and gc safepoint v2.
     ks_safepoint_v2: Arc<DashMap<u32, u64>>,
     ks_gc_sp_revision: AtomicI64,
+}
+
+impl GetSecurityManager for RpcClient {
+    fn get_security_mgr(&self) -> Arc<SecurityManager> {
+        self.pd_client.inner.rl().security_mgr.clone()
+    }
 }
 
 impl RpcClient {

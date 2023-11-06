@@ -9,9 +9,12 @@ use std::{
 use async_trait::async_trait;
 use bytes::{Buf, BufMut, Bytes};
 use futures_util::compat::Future01CompatExt;
+use hyper::{client::HttpConnector, Client};
+use hyper_rustls::HttpsConnector;
 use kvengine::{SnapAccess, UserMeta, LOCK_CF};
 use kvproto::kvrpcpb::ExecDetailsV2;
 use protobuf::Message;
+use security::SecurityManager;
 use tidb_query_common::execute_stats::ExecSummary;
 use tikv_alloc::MemoryTraceGuard;
 use tikv_kv::{Engine, Statistics};
@@ -60,7 +63,7 @@ pub struct RemoteContextCore {
     pub cop_white_list: Vec<u32>,
     pub runtime: Arc<tokio::runtime::Runtime>,
     pub analyze_cache: moka::future::Cache<String, Result<Vec<u8>>>,
-    pub client: hyper::Client<hyper::client::HttpConnector>,
+    pub client: Client<HttpsConnector<HttpConnector>>,
 }
 
 pub trait CopWorkerProvider: Send + Sync {
@@ -83,6 +86,7 @@ impl RemoteContext {
         cop_worker_url: String,
         cop_min_blocks: usize,
         cop_white_list: Vec<u32>,
+        security_mgr: Arc<SecurityManager>,
     ) -> Option<Self> {
         if remote_analyze_url.is_empty() && cop_worker_url.is_empty() {
             return None;
@@ -95,9 +99,9 @@ impl RemoteContext {
                 .build()
                 .unwrap(),
         );
-        let client = hyper::Client::builder()
-            .pool_max_idle_per_host(0)
-            .build_http();
+        let client = security_mgr
+            .http_client(hyper::Client::builder().pool_max_idle_per_host(0).clone())
+            .unwrap();
         let analyze_cache = moka::future::Cache::builder()
             .max_capacity(ANALYZE_CACHE_CAPACITY)
             .time_to_live(REMOTE_ANALYZE_TIMEOUT * 2)

@@ -2,18 +2,17 @@
 
 use std::{
     collections::HashMap,
-    str::FromStr,
     sync::{mpsc::SyncSender, Arc},
     time::Duration,
 };
 
 use api_version::ApiV2;
-use http::{Request, Uri};
+use http::Request;
 use hyper::Body;
 use kvengine::{EngineStats, ShardStats, ShardTruncateTsStats};
 use kvproto::metapb::Store;
 use pd_client::PdClient;
-use security::SecurityConfig;
+use security::{SecurityConfig, SecurityManager};
 use slog_global::{error, info};
 use tikv_client::transaction::{Client as TiKVClient, ResolveLocksOptions};
 use tikv_util::time::Instant;
@@ -53,6 +52,7 @@ pub fn truncate_ts_with_cfg(
         }
     }
 
+    let security_mgr = pd_client.get_security_mgr();
     let start = Instant::now();
     while Instant::now().duration_since(start) < timeout {
         let stores = get_all_stores_except_tiflash(pd_client.as_ref())?;
@@ -66,6 +66,7 @@ pub fn truncate_ts_with_cfg(
             truncate_ts,
             range.clone(),
             &runtime,
+            security_mgr.clone(),
         ) {
             Ok(shard_cnt) => {
                 if shard_cnt == 0 {
@@ -92,6 +93,7 @@ pub fn truncate_ts_with_cfg(
             keyspace_id,
             &runtime,
             TRUNCATE_TS_QUERY_INTERVAL,
+            security_mgr.clone(),
         ) {
             error!("Fail to wait truncate ts finish {:?}", e);
         }
@@ -115,6 +117,7 @@ fn request_truncate_ts_on_all_stores(
     truncate_ts: u64,
     range: Option<(Vec<u8>, Vec<u8>)>,
     runtime: &Runtime,
+    security_mgr: Arc<SecurityManager>,
 ) -> Result<usize> {
     let mut shard_cnt = 0;
     let store_cnt = stores.len();
@@ -126,6 +129,7 @@ fn request_truncate_ts_on_all_stores(
             truncate_ts,
             range.clone(),
             tx.clone(),
+            security_mgr.clone(),
         ));
     }
     let mut last_err = None;
@@ -156,8 +160,11 @@ async fn request_truncate_ts_store(
     truncate_ts: u64,
     range: Option<(Vec<u8>, Vec<u8>)>,
     tx: SyncSender<Result<(u64, Vec<ShardTruncateTsStats>)>>,
+    security_mgr: Arc<SecurityManager>,
 ) {
-    let uri = Uri::from_str(&format!("http://{}/truncate-ts", &store.status_address)).unwrap();
+    let uri = security_mgr
+        .build_uri(format!("{}/truncate-ts", &store.status_address))
+        .unwrap();
     let store_id = store.get_id();
     let config = cloud_server::TruncateTsConfig {
         cluster_id,
@@ -166,7 +173,7 @@ async fn request_truncate_ts_store(
     };
     let json_string = serde_json::to_string(&config).unwrap();
     let req = Request::post(uri).body(Body::from(json_string)).unwrap();
-    match send_request_to_store(req, &store).await {
+    match send_request_to_store(req, &store, security_mgr).await {
         Ok(resp) => {
             let resp: Vec<ShardTruncateTsStats> = serde_json::from_slice(&resp).unwrap();
             tx.send(Ok((store_id, resp))).unwrap()
@@ -187,6 +194,7 @@ fn wait_truncate_ts_finish(
     keyspace_id: Option<u32>,
     runtime: &Runtime,
     interval: Duration,
+    security_mgr: Arc<SecurityManager>,
 ) -> Result<()> {
     for _ in 0..MAX_WAIT_TRUNCATE_TS_CNT {
         // wait a while for truncate finish.
@@ -195,7 +203,12 @@ fn wait_truncate_ts_finish(
         let cnt = stores.len();
         let (tx, rx) = std::sync::mpsc::sync_channel(cnt);
         for (_, store) in stores.clone() {
-            runtime.spawn(query_max_ts_store(store, keyspace_id, tx.clone()));
+            runtime.spawn(query_max_ts_store(
+                store,
+                keyspace_id,
+                tx.clone(),
+                security_mgr.clone(),
+            ));
         }
         let mut last_err = None;
         for _ in 0..cnt {
@@ -234,17 +247,21 @@ async fn query_max_ts_store(
     store: Store,
     keyspace_id: Option<u32>,
     tx: SyncSender<Result<(u64, u64)>>,
+    security_mgr: Arc<SecurityManager>,
 ) {
     let uri = match keyspace_id {
-        Some(id) => Uri::from_str(&format!(
-            "http://{}/kvengine/keyspace/{}",
-            &store.status_address, id
-        ))
-        .unwrap(),
-        None => Uri::from_str(&format!("http://{}/kvengine", &store.status_address)).unwrap(),
+        Some(id) => security_mgr
+            .build_uri(format!(
+                "{}/kvengine/keyspace/{}",
+                &store.status_address, id
+            ))
+            .unwrap(),
+        None => security_mgr
+            .build_uri(format!("{}/kvengine", &store.status_address))
+            .unwrap(),
     };
     let store_id = store.get_id();
-    let client = hyper::Client::new();
+    let client = security_mgr.http_client(hyper::Client::builder()).unwrap();
     match client.get(uri).await {
         Ok(resp) => {
             let body = hyper::body::to_bytes(resp.into_body()).await.unwrap();
