@@ -19,11 +19,12 @@ use rfenginepb::ClusterBackupMeta;
 use rfstore::store::state::RaftState;
 use security::{SecurityConfig, SecurityManager};
 use slog_global::error;
-use tikv_util::{box_err, codec::bytes::decode_bytes, info};
+use tikv_util::{box_err, codec::bytes::decode_bytes, info, time::Instant};
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 const MAX_S3_REQ_BATCH_SIZE: usize = 1024;
+const FETCH_RFENGINE_WAL_CHUCK_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub fn create_pd_client(security_conf: &SecurityConfig, pd_conf: &pd_client::Config) -> RpcClient {
     let security_mgr = Arc::new(
@@ -75,11 +76,12 @@ pub async fn send_request_to_store(
     security_mgr: Arc<SecurityManager>,
 ) -> Result<Bytes> {
     let client = security_mgr.http_client(hyper::Client::builder())?;
+    let uri_str = format!("{}", req.uri());
     let resp = client.request(req).await;
     if let Err(err) = resp {
         error!(
-            "send request to store failed, store {:?}, err {:?}",
-            store, err
+            "send request to store failed, store {:?}, err {:?}, uri {:?}",
+            store, err, uri_str
         );
         return Err(err.into());
     }
@@ -93,6 +95,32 @@ pub async fn send_request_to_store(
         Ok(body) => Ok(body),
         Err(e) => Err(box_err!("{:?} {:?}", store, e)),
     }
+}
+
+pub async fn send_request_to_store_with_retry<F>(
+    build_req: F,
+    store: &Store,
+    security_mgr: Arc<SecurityManager>,
+    timeout: Duration,
+) -> Result<Bytes>
+where
+    F: Fn() -> Request<Body>,
+{
+    let is_error_retryable = |err: &Error| matches!(err, Error::HttpError(_));
+    let mut last_err: Option<Error> = None;
+    let start_time = Instant::now_coarse();
+    while start_time.saturating_elapsed() < timeout {
+        let req = build_req();
+        match send_request_to_store(req, store, security_mgr.clone()).await {
+            Ok(resp) => return Ok(resp),
+            Err(err) if is_error_retryable(&err) => {
+                last_err = Some(err);
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Err(last_err.unwrap())
 }
 
 pub fn generate_etcd_connect_opt(security: &SecurityConfig) -> Result<ConnectOptions> {
@@ -243,8 +271,9 @@ async fn fetch_rfengine_wal_chunk(
         "{}/rfengine/wal_chunk?epoch_id={}&start_off={}&end_off={}",
         &store.status_address, epoch_id, start_off, end_off
     ))?;
-    let req = Request::get(uri).body(Body::empty()).unwrap();
-    send_request_to_store(req, &store, security_mgr).await
+    let req = || Request::get(uri.clone()).body(Body::empty()).unwrap();
+    send_request_to_store_with_retry(req, &store, security_mgr, FETCH_RFENGINE_WAL_CHUCK_TIMEOUT)
+        .await
 }
 
 // TODO: Filter out the write batches of specified keyspace to replay to save

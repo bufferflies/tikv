@@ -188,13 +188,12 @@ impl ServerCluster {
         let store_id = self.get_store_id(node_id);
         self.stop_node_force(node_id, force);
         info!(
-            "node {} (store {}) stopped, force {}",
-            node_id, store_id, force
+            "node stopped"; "node" => node_id, "store" => store_id, "force" => force,
         );
 
         std::thread::sleep(stop_dur);
         self.start_node(node_id, |_, _| {});
-        info!("node {} (store {}) restarted", node_id, store_id);
+        info!("node restarted"; "node" => node_id, "store" => store_id);
     }
 
     pub fn get_kvengine(&self, node_id: u16) -> kvengine::Engine {
