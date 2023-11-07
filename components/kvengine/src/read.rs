@@ -12,13 +12,14 @@ use std::{
 use bytes::{Buf, Bytes, BytesMut};
 use cloud_encryption::{EncryptionKey, MasterKey};
 use kvenginepb as pb;
+use moka::sync::SegmentedCache;
 use protobuf::Message;
 
 use crate::{
     table::{
         blobtable::blobtable::{BlobPrefetcher, BlobTable},
         memtable::{CfTable, Hint, WriteBatch},
-        sstable::{InMemFile, L0Table, SsTable},
+        sstable::{BlockCacheKey, InMemFile, L0Table, SsTable},
         table, InnerKey, TableExt,
     },
     *,
@@ -88,22 +89,34 @@ impl SnapAccess {
         change_set: pb::ChangeSet,
         ignore_lock: bool,
         master_key: &MasterKey,
+        block_cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
     ) -> Self {
         let core = Arc::new(
-            SnapAccessCore::from_change_set(dfs, change_set, None, ignore_lock, master_key).await,
+            SnapAccessCore::from_change_set(
+                dfs,
+                change_set,
+                None,
+                ignore_lock,
+                master_key,
+                block_cache,
+            )
+            .await,
         );
         Self { core }
     }
 
-    pub async fn from_change_set_and_memtable_data(
+    async fn from_change_set_and_memtable_data(
         dfs: Arc<dyn dfs::Dfs>,
         change_set: pb::ChangeSet,
         wb: &mut WriteBatch,
         master_key: &MasterKey,
+        block_cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
     ) -> Self {
         let wb = if wb.is_empty() { None } else { Some(wb) };
-        let core =
-            Arc::new(SnapAccessCore::from_change_set(dfs, change_set, wb, true, master_key).await);
+        let core = Arc::new(
+            SnapAccessCore::from_change_set(dfs, change_set, wb, true, master_key, block_cache)
+                .await,
+        );
         Self { core }
     }
 
@@ -112,6 +125,7 @@ impl SnapAccess {
         mut mem_table_data: &[u8],
         snapshot: &[u8],
         master_key: &MasterKey,
+        block_cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
     ) -> Result<Self> {
         let mut change_set = kvenginepb::ChangeSet::default();
         change_set.merge_from_bytes(snapshot).unwrap();
@@ -133,7 +147,14 @@ impl SnapAccess {
                 wb.put(key, 0, &row.user_meta.to_array(), 0, &row.value);
             }
         }
-        Ok(Self::from_change_set_and_memtable_data(dfs, change_set, &mut wb, master_key).await)
+        Ok(Self::from_change_set_and_memtable_data(
+            dfs,
+            change_set,
+            &mut wb,
+            master_key,
+            block_cache,
+        )
+        .await)
     }
 }
 
@@ -190,6 +211,7 @@ impl SnapAccessCore {
         wb: Option<&mut WriteBatch>,
         ignore_lock: bool,
         master_key: &MasterKey,
+        block_cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
     ) -> Self {
         let mut cs = ChangeSet::new(change_set);
         let mut ids = HashMap::new();
@@ -251,16 +273,24 @@ impl SnapAccessCore {
                         let blob_table = BlobTable::new(Arc::new(file)).unwrap();
                         cs.blob_tables.insert(id, blob_table);
                     } else if level == 0 {
-                        let l0_table =
-                            L0Table::new(Arc::new(file), None, ignore_lock, encryption_key.clone())
-                                .unwrap();
+                        let l0_table = L0Table::new(
+                            Arc::new(file),
+                            block_cache.clone(),
+                            ignore_lock,
+                            encryption_key.clone(),
+                        )
+                        .unwrap();
                         if let Some(l0_table) = l0_table {
                             cs.l0_tables.insert(id, l0_table);
                         }
                     } else {
-                        let ln_table =
-                            SsTable::new(Arc::new(file), None, level == 1, encryption_key.clone())
-                                .unwrap();
+                        let ln_table = SsTable::new(
+                            Arc::new(file),
+                            block_cache.clone(),
+                            level == 1,
+                            encryption_key.clone(),
+                        )
+                        .unwrap();
                         cs.ln_tables.insert(id, ln_table);
                     }
                 }

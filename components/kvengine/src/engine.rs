@@ -62,6 +62,7 @@ impl Debug for Engine {
 }
 
 const FILE_LOCK_SLOTS: usize = 1024;
+pub const BLOCK_CACHE_KEY_SIZE: usize = std::mem::size_of::<BlockCacheKey>();
 
 /// LoadTableFilterFn is used to filter tables which are not necessary to load
 /// from DFS to local disks during restoration.
@@ -97,7 +98,7 @@ impl Engine {
             max_capacity = 512 * opts.table_builder_options.block_size;
         }
         let cache: SegmentedCache<BlockCacheKey, Bytes> = SegmentedCache::builder(256)
-            .weigher(|_k: &BlockCacheKey, v: &Bytes| (12 + v.len()) as u32)
+            .weigher(|_k: &BlockCacheKey, v: &Bytes| (BLOCK_CACHE_KEY_SIZE + v.len()) as u32)
             .max_capacity(max_capacity as u64)
             .build();
         let (flush_tx, flush_rx) = mpsc::unbounded();

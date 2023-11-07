@@ -8005,6 +8005,7 @@ dependencies = [
  "kvproto",
  "lazy_static",
  "load_data",
+ "moka",
  "native_br",
  "pd_client",
  "prometheus",

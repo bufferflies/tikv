@@ -19,7 +19,10 @@ use std::{
 use ::native_br::{backup::BackupConfig, restore::RestoreConfig};
 use clap::{App, Arg, ArgMatches};
 use grpcio::EnvBuilder;
-use kvengine::dfs::{DFSConfig, Dfs, S3Fs};
+use kvengine::{
+    dfs::{DFSConfig, Dfs, S3Fs},
+    BLOCK_CACHE_KEY_SIZE,
+};
 use kvproto::metapb::Store;
 use pd_client::{PdClient, RpcClient};
 use security::{SecurityConfig, SecurityManager};
@@ -206,6 +209,16 @@ fn main() {
         ))
     };
 
+    let block_cache = if config.cop_block_cache_size.0 == 0 {
+        None
+    } else {
+        let cache = moka::sync::SegmentedCache::builder(256)
+            .weigher(|_k, v: &bytes::Bytes| (BLOCK_CACHE_KEY_SIZE + v.len()) as u32)
+            .max_capacity(config.cop_block_cache_size.0)
+            .build();
+        Some(cache)
+    };
+
     let thread_pool = Arc::new(
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -278,15 +291,16 @@ fn main() {
     let ctx = Arc::new(server::Context {
         compression_lvl,
         s3fs: s3fs.clone(),
-        cache_fs: cache_fs.clone(),
+        cache_fs,
         pd: pd.clone(),
         load_manager,
         br_manager,
-        master_key: master_key.clone(),
+        master_key,
         quota_limiter: Arc::new(QuotaLimiter::default()),
+        block_cache,
     });
     let acceptor = security_mgr.acceptor(incoming).unwrap();
-    let server = start_serve!(ctx, acceptor);
+    let server = start_serve!(ctx.clone(), acceptor);
 
     if config.register {
         let remote_compact_url = security_mgr
@@ -294,11 +308,10 @@ fn main() {
             .unwrap()
             .to_string();
         let duration = config.update_interval.0;
-        let pd_clone = pd.clone();
         std::thread::spawn(move || {
             loop {
                 register_compactor_to_all_stores(
-                    pd_clone.clone(),
+                    pd.clone(),
                     s3fs.clone(),
                     remote_compact_url.clone(),
                     security_mgr.clone(),
@@ -314,7 +327,7 @@ fn main() {
             addr: config.cop_addr.clone(),
             max_handle_duration: Duration::from_secs(60),
         };
-        let cop_server = remote_cop::RemoteCopServer::new(pd, cache_fs, cop_config, master_key);
+        let cop_server = remote_cop::RemoteCopServer::new(ctx, cop_config);
         cop_server_opt = Some(cop_server);
     }
     if let Some(server) = cop_server_opt.as_mut() {
@@ -450,6 +463,7 @@ pub struct Config {
     pub native_br: NativeBrConfig,
     pub cop_addr: String,
     pub cop_cache_size: ReadableSize,
+    pub cop_block_cache_size: ReadableSize,
     pub worker_scaler: WorkerScalerConfig,
 }
 
@@ -470,6 +484,7 @@ impl Default for Config {
             native_br: NativeBrConfig::default(),
             cop_addr: String::from("0.0.0.0:9500"),
             cop_cache_size: ReadableSize::gb(1),
+            cop_block_cache_size: ReadableSize::default(),
             worker_scaler: WorkerScalerConfig::default(),
         }
     }

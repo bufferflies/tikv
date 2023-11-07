@@ -2331,6 +2331,7 @@ impl<'a> DagTest<'a> {
                 &snapshot.memtable_rows,
                 &snapshot.cs,
                 &self.master_key,
+                None,
             )
             .await
             .unwrap();

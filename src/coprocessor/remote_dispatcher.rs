@@ -74,6 +74,9 @@ pub struct StaticCopWorkerProvider {
 
 impl CopWorkerProvider for StaticCopWorkerProvider {
     fn get(&self, _keyspace_id: u32, _start_ts: u64) -> Option<String> {
+        if self.worker_url.is_empty() {
+            return None;
+        }
         Some(self.worker_url.clone())
     }
 }

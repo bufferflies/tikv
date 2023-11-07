@@ -57,6 +57,10 @@ use crate::{
 /// execution.
 const LIGHT_TASK_THRESHOLD: Duration = Duration::from_millis(5);
 
+/// Coprocessor runs on the cop-worker is much cheaper than on the tikv-server.
+/// Modify the size to reduce RU consumption.
+const SIZE_DISCOUNT_PERCENT: usize = 50;
+
 /// A pool to build and run Coprocessor request handlers.
 #[derive(Clone)]
 pub struct Endpoint<E: Engine> {
@@ -1229,7 +1233,8 @@ pub async fn parse_request_and_handle_remote_cop_impl<S: 'static + Snapshot, F: 
 
     let mut detail_v2 = ScanDetailV2::default();
     detail_v2.set_processed_versions(storage_stats.write.processed_keys as u64);
-    detail_v2.set_processed_versions_size(storage_stats.processed_size as u64);
+    let discounted_size = storage_stats.processed_size * SIZE_DISCOUNT_PERCENT / 100;
+    detail_v2.set_processed_versions_size(discounted_size as u64);
 
     let mut exec_details_v2 = kvrpcpb::ExecDetailsV2::default();
     exec_details_v2.set_scan_detail_v2(detail_v2);

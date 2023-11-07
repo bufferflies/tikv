@@ -8,17 +8,18 @@ use std::{
     time::Duration,
 };
 
-use cloud_encryption::MasterKey;
 use futures::{FutureExt, TryFutureExt};
 use grpcio::{ChannelBuilder, EnvBuilder, Environment, RpcStatus, RpcStatusCode, ServerBuilder};
-use kvengine::dfs::Dfs;
 use kvproto::{
     coprocessor::{DelegateRequest, Request, Response},
     tikvpb::{create_tikv, Tikv, TikvClient},
 };
 use pd_client::PdClient;
+use security::GetSecurityManager;
 use tikv::coprocessor::parse_request_and_handle_remote_cop;
-use tikv_util::{quota_limiter::QuotaLimiter, thd_name, warn};
+use tikv_util::{thd_name, warn};
+
+use crate::server::Context;
 
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq, Debug)]
 #[serde(default)]
@@ -33,12 +34,7 @@ pub struct RemoteCopServer {
 }
 
 impl RemoteCopServer {
-    pub fn new(
-        pd: Arc<dyn PdClient>,
-        dfs: Arc<dyn Dfs>,
-        cfg: Config,
-        master_key: MasterKey,
-    ) -> RemoteCopServer {
+    pub(crate) fn new(ctx: Arc<Context>, cfg: Config) -> RemoteCopServer {
         let env = Arc::new(
             EnvBuilder::new()
                 .cq_count(16)
@@ -55,13 +51,12 @@ impl RemoteCopServer {
             .keepalive_timeout(Duration::from_secs(3))
             .build_args();
         let addr = SocketAddr::from_str(&cfg.addr).unwrap();
-        let cop_service = CopService::new(pd.clone(), dfs, env.clone(), cfg, master_key);
+        let cop_service = CopService::new(ctx, env.clone(), cfg);
+        let security_mgr = cop_service.ctx.pd.get_security_mgr();
         let sb = ServerBuilder::new(env)
             .channel_args(channel_args)
             .register_service(create_tikv(cop_service));
-        let sb = pd
-            .get_security_mgr()
-            .bind(sb, &addr.ip().to_string(), addr.port());
+        let sb = security_mgr.bind(sb, &addr.ip().to_string(), addr.port());
         let grpc_server = sb.build().unwrap();
         Self { grpc_server }
     }
@@ -73,33 +68,21 @@ impl RemoteCopServer {
 
 #[derive(Clone)]
 pub struct CopService {
-    pd: Arc<dyn PdClient>,
-    dfs: Arc<dyn Dfs>,
+    ctx: Arc<Context>,
     env: Arc<Environment>,
     store_addrs: Arc<Mutex<HashMap<u64, String>>>,
     channels: Arc<Mutex<HashMap<String, TikvClient>>>,
     cfg: Config,
-    quota_limiter: Arc<QuotaLimiter>,
-    master_key: MasterKey,
 }
 
 impl CopService {
-    fn new(
-        pd: Arc<dyn PdClient>,
-        dfs: Arc<dyn Dfs>,
-        env: Arc<Environment>,
-        cfg: Config,
-        master_key: MasterKey,
-    ) -> Self {
+    fn new(ctx: Arc<Context>, env: Arc<Environment>, cfg: Config) -> Self {
         Self {
-            pd,
-            dfs,
+            ctx,
             env,
             store_addrs: Arc::new(Mutex::new(HashMap::new())),
             channels: Arc::new(Mutex::new(HashMap::new())),
             cfg,
-            quota_limiter: Arc::new(QuotaLimiter::default()),
-            master_key,
         }
     }
 }
@@ -133,10 +116,8 @@ impl Tikv for CopService {
         delegate_req.set_ranges(key_ranges.into());
         delegate_req.set_start_ts(req.get_start_ts());
         let max_handle_duration = self.cfg.max_handle_duration;
-        let quota_limit = self.quota_limiter.clone();
+        let m_ctx = self.ctx.clone();
         let peer = Some(ctx.peer());
-        let dfs = self.dfs.clone();
-        let master_key = self.master_key.clone();
         let future = async move {
             let mut resp = client
                 .delegate_coprocessor_async(&delegate_req)
@@ -144,10 +125,11 @@ impl Tikv for CopService {
                 .await
                 .map_err(|e| tikv::coprocessor::Error::Other(format!("{:?}", e)))?;
             let snap_access = kvengine::SnapAccess::construct_snapshot(
-                dfs,
+                m_ctx.cache_fs.clone(),
                 &resp.take_mem_table_data(),
                 &resp.take_snapshot(),
-                &master_key,
+                &m_ctx.master_key,
+                m_ctx.block_cache.clone(),
             )
             .await
             .map_err(|e| tikv::coprocessor::Error::Other(format!("{:?}", e)))?;
@@ -156,7 +138,7 @@ impl Tikv for CopService {
                 req,
                 peer,
                 max_handle_duration,
-                quota_limit,
+                m_ctx.quota_limiter.clone(),
                 snapshot,
             )
             .await
@@ -191,7 +173,7 @@ impl CopService {
         if let Some(addr) = addrs.get(&store_id) {
             return Ok(addr.clone());
         }
-        let store = self.pd.get_store(store_id)?;
+        let store = self.ctx.pd.get_store(store_id)?;
         addrs.insert(store_id, store.address.clone());
         Ok(store.address)
     }

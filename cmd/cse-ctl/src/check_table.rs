@@ -517,6 +517,7 @@ impl BackupReader {
             meta.to_change_set(),
             false,
             &self.master_key,
+            None,
         ));
         let mut guard = self.snap_cache.lock().unwrap();
         *guard = Some(snap.clone());

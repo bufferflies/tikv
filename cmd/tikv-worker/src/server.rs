@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use bytes::Buf;
+use bytes::{Buf, Bytes};
 use cloud_encryption::MasterKey;
 use flate2::{write::GzEncoder, Compression};
 use http::{
@@ -20,7 +20,8 @@ use hyper::{
     Body,
 };
 use kvengine::{
-    dfs::{self, CacheFs, S3Fs},
+    dfs::{CacheFs, S3Fs},
+    table::sstable::BlockCacheKey,
     SnapAccess,
 };
 use pd_client::RpcClient;
@@ -52,6 +53,7 @@ pub(crate) struct Context {
     pub pd: Arc<RpcClient>,
     pub master_key: MasterKey,
     pub quota_limiter: Arc<QuotaLimiter>,
+    pub block_cache: Option<moka::sync::SegmentedCache<BlockCacheKey, Bytes>>,
 }
 
 #[macro_export]
@@ -101,23 +103,8 @@ where
                             )
                             .await
                         }
-                        "/analyze" => {
-                            handle_remote_analysis(
-                                ctx.cache_fs.clone(),
-                                req,
-                                ctx.master_key.clone(),
-                            )
-                            .await
-                        }
-                        "/coprocessor" => {
-                            handle_remote_coprocessor(
-                                ctx.cache_fs.clone(),
-                                req,
-                                ctx.master_key.clone(),
-                                ctx.quota_limiter.clone(),
-                            )
-                            .await
-                        }
+                        "/analyze" => handle_remote_analysis(ctx, req).await,
+                        "/coprocessor" => handle_remote_coprocessor(ctx, req).await,
                         "/load_data" => {
                             load_data::handle_load_data(ctx.load_manager.clone(), req).await
                         }
@@ -147,10 +134,8 @@ where
 }
 
 async fn handle_remote_coprocessor(
-    dfs: Arc<dyn dfs::Dfs>,
+    ctx: Arc<Context>,
     req: hyper::Request<hyper::Body>,
-    master_key: MasterKey,
-    quota_limiter: Arc<QuotaLimiter>,
 ) -> hyper::Result<hyper::Response<hyper::Body>> {
     let req_body = hyper::body::to_bytes(req.into_body()).await?;
     let decode_res = decode_remote_cop_request(req_body.chunk());
@@ -164,8 +149,14 @@ async fn handle_remote_coprocessor(
         let body = hyper::Body::from(format!("{:?}", err));
         return Ok(hyper::Response::builder().status(500).body(body).unwrap());
     }
-    let snap_access_res =
-        SnapAccess::construct_snapshot(dfs, mem_data, snap_data, &master_key).await;
+    let snap_access_res = SnapAccess::construct_snapshot(
+        ctx.cache_fs.clone(),
+        mem_data,
+        snap_data,
+        &ctx.master_key,
+        ctx.block_cache.clone(),
+    )
+    .await;
     if let Err(err) = snap_access_res.as_ref() {
         let body = hyper::Body::from(format!("{:?}", err));
         return Ok(hyper::Response::builder().status(500).body(body).unwrap());
@@ -182,7 +173,7 @@ async fn handle_remote_coprocessor(
         cop_req,
         None,
         Duration::from_secs(60),
-        quota_limiter,
+        ctx.quota_limiter.clone(),
         snap,
     )
     .await;
@@ -205,9 +196,8 @@ async fn handle_remote_coprocessor(
 }
 
 async fn handle_remote_analysis(
-    dfs: Arc<dyn dfs::Dfs>,
+    ctx: Arc<Context>,
     req: hyper::Request<hyper::Body>,
-    master_key: MasterKey,
 ) -> hyper::Result<hyper::Response<hyper::Body>> {
     let mut start_time = Instant::now();
     let req_body = hyper::body::to_bytes(req.into_body()).await?;
@@ -223,7 +213,14 @@ async fn handle_remote_analysis(
     let tag = format!("[:{}]", remote_req.key);
     let mut change_set = kvenginepb::ChangeSet::default();
     change_set.merge_from_bytes(&remote_req.snap_bytes).unwrap();
-    let snap_access = SnapAccess::from_change_set(dfs, change_set, true, &master_key).await;
+    let snap_access = SnapAccess::from_change_set(
+        ctx.s3fs.clone(),
+        change_set,
+        true,
+        &ctx.master_key,
+        ctx.block_cache.clone(),
+    )
+    .await;
     info!(
         "start analyzing for {}, prepare snap time {:?}",
         tag,
