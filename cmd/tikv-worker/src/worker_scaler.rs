@@ -13,8 +13,6 @@ use std::{
 
 use futures::StreamExt;
 use http::Uri;
-use hyper::client::HttpConnector;
-use hyper_rustls::HttpsConnector;
 use k8s_openapi::{
     api::{
         apps::v1::StatefulSet,
@@ -113,7 +111,7 @@ pub(crate) struct WorkerScalerCore {
     pvc_template_name: String,
     cluster_id: u64,
     in_k8s: bool,
-    http_client: hyper::Client<HttpsConnector<HttpConnector>>,
+    http_client: security::HttpClient,
     pods_map: Mutex<HashMap<String, WorkerPod>>,
     security_mgr: Arc<SecurityManager>,
 }

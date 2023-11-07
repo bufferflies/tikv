@@ -14,8 +14,7 @@ use std::{
 use bytes::{Buf, Bytes, BytesMut};
 use cloud_encryption::{EncryptionKey, MasterKey};
 use http::StatusCode;
-use hyper::{client::HttpConnector, Client};
-use hyper_rustls::HttpsConnector;
+use hyper::Client;
 use kvenginepb as pb;
 use pb::{BlobCreate, TableCreate};
 use protobuf::Message;
@@ -86,7 +85,7 @@ pub struct CompactionClient {
     dfs: Arc<dyn dfs::Dfs>,
     id_allocator: Arc<dyn IdAllocator>,
     remote_compactors: Arc<Mutex<RemoteCompactors>>,
-    client: Option<Client<HttpsConnector<HttpConnector>>>,
+    client: Option<security::HttpClient>,
     compression_lvl: i32,
     allow_fallback_local: bool,
     master_key: MasterKey,

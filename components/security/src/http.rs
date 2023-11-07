@@ -5,7 +5,7 @@
 use std::{convert::TryFrom, error::Error, fs, io, iter};
 
 use hyper::{client::HttpConnector, server::conn::AddrIncoming, Uri};
-use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder, TlsAcceptor};
+use hyper_rustls::{HttpsConnector, TlsAcceptor};
 use rustls::server::AllowAnyAuthenticatedClient;
 use rustls_pemfile::Item;
 use tikv_util::Either;
@@ -49,18 +49,9 @@ impl SecurityManager {
         Ok(acceptor)
     }
 
-    pub fn http_client(
-        &self,
-        client_builder: hyper::client::Builder,
-    ) -> Result<hyper::Client<HttpsConnector<HttpConnector>>> {
+    pub fn http_client(&self, client_builder: hyper::client::Builder) -> Result<HttpClient> {
         if self.cfg.ca_path.is_empty() {
-            Ok(client_builder.build(
-                HttpsConnectorBuilder::new()
-                    .with_native_roots()
-                    .https_or_http()
-                    .enable_http1()
-                    .build(),
-            ))
+            Ok(HttpClient::Http(hyper::Client::new()))
         } else {
             let ca = load_root_store(&self.cfg.ca_path)?;
             let cert = load_certs(&self.cfg.cert_path)?;
@@ -75,7 +66,7 @@ impl SecurityManager {
                 .https_only()
                 .enable_http1()
                 .build();
-            Ok(client_builder.build(connector))
+            Ok(HttpClient::Https(client_builder.build(connector)))
         }
     }
 }
@@ -116,4 +107,26 @@ fn load_root_store(filename: &str) -> io::Result<rustls::RootCertStore> {
         store.add(cert).map_err(error)?;
     }
     Ok(store)
+}
+
+#[derive(Clone)]
+pub enum HttpClient {
+    Http(hyper::Client<HttpConnector>),
+    Https(hyper::Client<HttpsConnector<HttpConnector>>),
+}
+
+impl HttpClient {
+    pub fn get(&self, uri: Uri) -> hyper::client::ResponseFuture {
+        match self {
+            HttpClient::Http(client) => client.get(uri),
+            HttpClient::Https(client) => client.get(uri),
+        }
+    }
+
+    pub fn request(&self, req: hyper::http::Request<hyper::Body>) -> hyper::client::ResponseFuture {
+        match self {
+            HttpClient::Http(client) => client.request(req),
+            HttpClient::Https(client) => client.request(req),
+        }
+    }
 }

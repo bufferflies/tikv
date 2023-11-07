@@ -9,8 +9,6 @@ use std::{
 use async_trait::async_trait;
 use bytes::{Buf, BufMut, Bytes};
 use futures_util::compat::Future01CompatExt;
-use hyper::{client::HttpConnector, Client};
-use hyper_rustls::HttpsConnector;
 use kvengine::{SnapAccess, UserMeta, LOCK_CF};
 use kvproto::kvrpcpb::ExecDetailsV2;
 use protobuf::Message;
@@ -63,7 +61,7 @@ pub struct RemoteContextCore {
     pub cop_white_list: Vec<u32>,
     pub runtime: Arc<tokio::runtime::Runtime>,
     pub analyze_cache: moka::future::Cache<String, Result<Vec<u8>>>,
-    pub client: Client<HttpsConnector<HttpConnector>>,
+    pub client: security::HttpClient,
 }
 
 pub trait CopWorkerProvider: Send + Sync {

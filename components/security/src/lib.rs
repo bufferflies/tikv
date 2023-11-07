@@ -1,6 +1,7 @@
 // Copyright 2017 TiKV Project Authors. Licensed under Apache-2.0.
 
 mod http;
+pub use http::HttpClient;
 
 #[macro_use]
 extern crate serde_derive;
