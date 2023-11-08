@@ -184,8 +184,9 @@ impl CopService {
         if let Some(channel) = channels.get(&addr) {
             return Ok(channel.clone());
         }
-        let builder = ChannelBuilder::new(self.env.clone());
-        let channel = builder.connect(&addr);
+        let cb = ChannelBuilder::new(self.env.clone());
+        let security_mgr = self.ctx.pd.get_security_mgr();
+        let channel = security_mgr.connect(cb, &addr);
         let client = TikvClient::new(channel);
         channels.insert(addr, client.clone());
         Ok(client)
