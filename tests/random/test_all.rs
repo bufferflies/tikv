@@ -53,7 +53,7 @@ fn test_random_all() {
     let _guard = runtime.enter();
 
     // Prepare.
-    let (_temp_dir, _oss, dfs_config) = prepare_dfs("random_br_");
+    let (_temp_dir, _oss, dfs_config) = prepare_dfs("random_");
     let security_conf = new_security_config();
     let mut cluster = prepare_cluster(
         &dfs_config,

@@ -24,6 +24,7 @@ use crate::{i_to_key, i_to_val, LOAD_DATA_COUNTER, TABLE_COUNTER};
 
 const MAX_IN_MEM_SIZE: usize = 10 * 1024; // 10KiB
 const COMPRESSION_TYPE: u8 = ZSTD_COMPRESSION;
+const LOAD_DATA_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(crate) fn spawn_load_data(
     pd_client: Arc<dyn PdClient>,
@@ -136,7 +137,7 @@ fn do_load_data(
     );
 
     // Put chunks.
-    let data_count = rng.gen_range(1..=20) * 1000_usize;
+    let data_count = rng.gen_range(1..=10) * 1000_usize; // generate at most about 2.5MB (10000 x 256) data, 160 (2.5MB / 16KB) SST files.
     let data_batch_size = rng.gen_range(1..=10) * 10_usize;
     let generate_key = move |i: usize| -> Vec<u8> { make_key(keyspace_id, table_id, &i_to_key(i)) };
     let (chunk_ids, ref_store) = put_chunks(
@@ -145,7 +146,7 @@ fn do_load_data(
         data_batch_size,
         generate_key,
         i_to_val,
-        Duration::from_secs(30),
+        LOAD_DATA_TIMEOUT,
         |_| 0,
     );
     info!(
@@ -154,13 +155,7 @@ fn do_load_data(
     );
 
     // Build.
-    build(
-        &scheduler,
-        chunk_ids,
-        COMPRESSION_TYPE,
-        Duration::from_secs(30),
-    )
-    .unwrap();
+    build(&scheduler, chunk_ids, COMPRESSION_TYPE, LOAD_DATA_TIMEOUT).unwrap();
     info!(
         "load_data: build finished, keyspace {}, table {}",
         keyspace_id, table_id

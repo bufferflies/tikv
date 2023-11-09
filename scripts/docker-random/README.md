@@ -46,6 +46,14 @@ To use Docker-Random, ensure that Docker is installed on your system. Docker pro
 
     Adjust *CONCURRENCY* based on the *CPU*, *MEMORY*, and available resources of your system.
 
+    Furthermore, the data generated during testing is stored in the file system of the Docker runtime, which is typically located at `/var/lib/docker/overlay2`. However, if you prefer to run the tests on a different disk, such as a faster NVMe disk, you can specify the `--tmp-path` argument:
+   
+    ```
+    ./docker-run-random.sh --tmp-path /path/to/tmp
+    ```
+   
+    Please note that it is recommended to avoid writing data and logs (which are located at `scripts/docker-random/logs`) to the same disk, as this could potentially cause performance issues.
+
 4. **Analyze the Results**: The logs of failed tests can be found in `scripts/docker-random/error-logs`. You can examine these logs to identify the causes of failure.
 
 5. **Stop the Tests**: The tests will terminate after running for 10000 x *CONCURRENCY* iterations. If you wish to stop the tests before completion, execute the following command:
