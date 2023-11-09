@@ -11,7 +11,11 @@ use std::{
     ops::Deref,
     path::{Path, PathBuf},
     result,
-    sync::{atomic::AtomicU64, Arc, Mutex},
+    sync::{
+        atomic,
+        atomic::{AtomicBool, AtomicU64},
+        Arc, Mutex,
+    },
     time::Duration,
 };
 
@@ -157,11 +161,25 @@ impl CacheFs {
 impl Dfs for CacheFs {
     async fn read_file(&self, file_id: u64, opts: Options) -> Result<Bytes> {
         let s3_fs = self.s3_fs.clone();
+        let cache_miss = Arc::new(AtomicBool::new(false));
+        let cache_miss_clone = cache_miss.clone();
         let file = self
             .cache
-            .try_get_with(file_id, async move { s3_fs.read_file(file_id, opts).await })
+            .try_get_with(file_id, async move {
+                cache_miss_clone.store(true, atomic::Ordering::Relaxed);
+                s3_fs.read_file(file_id, opts).await
+            })
             .await
             .map_err(|e| e.as_ref().clone())?;
+        if cache_miss.load(atomic::Ordering::Acquire) {
+            KVENGINE_CACHEFS_REQ_COUNTER_VEC
+                .with_label_values(&["miss"])
+                .inc();
+        } else {
+            KVENGINE_CACHEFS_REQ_COUNTER_VEC
+                .with_label_values(&["hit"])
+                .inc();
+        }
         Ok(file)
     }
     async fn create(&self, _file_id: u64, _data: Bytes, _opts: Options) -> Result<()> {

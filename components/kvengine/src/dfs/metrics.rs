@@ -23,4 +23,10 @@ lazy_static! {
         &["type"]
     )
     .unwrap();
+    pub static ref KVENGINE_CACHEFS_REQ_COUNTER_VEC: IntCounterVec = register_int_counter_vec!(
+        "kv_engine_cachefs_req_count",
+        "Count of kvengine cachefs requests hit/miss",
+        &["type"]
+    )
+    .unwrap();
 }

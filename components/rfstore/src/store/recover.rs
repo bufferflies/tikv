@@ -10,6 +10,7 @@ use kvenginepb::ChangeSet;
 use kvproto::{metapb, raft_cmdpb::RaftCmdRequest, raft_serverpb};
 use protobuf::Message;
 use raft_proto::eraftpb;
+use raftstore::store::metrics::BLACKLIST_REGION_GAUGE;
 use rfengine::{raft_state_key, region_state_key, WriteBatch, KV_ENGINE_META_KEY, STORE_IDENT_KEY};
 use slog_global::info;
 use tikv_util::warn;
@@ -38,6 +39,7 @@ pub struct BlackList {
 
 impl BlackList {
     pub fn new(mut keyspace_ids: Vec<u32>, mut region_ids: Vec<u64>) -> Self {
+        BLACKLIST_REGION_GAUGE.add(region_ids.len() as i64);
         Self {
             keyspace_ids: HashSet::from_iter(keyspace_ids.drain(..)),
             region_ids: HashSet::from_iter(region_ids.drain(..)),
@@ -47,6 +49,7 @@ impl BlackList {
     pub(crate) fn check_blocked(&mut self, region_id: u64, start: &[u8], end: &[u8]) -> bool {
         if let Some(keyspace_id) = get_keyspace_id(start, end) {
             if self.keyspace_ids.contains(&keyspace_id) {
+                BLACKLIST_REGION_GAUGE.inc();
                 self.region_ids.insert(region_id);
             }
         }
@@ -62,6 +65,7 @@ impl BlackList {
     }
 
     pub fn add_regions(&mut self, region_ids: Vec<u64>) {
+        BLACKLIST_REGION_GAUGE.add(region_ids.len() as i64);
         self.region_ids.extend(region_ids.into_iter());
     }
 }

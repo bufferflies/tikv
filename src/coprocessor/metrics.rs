@@ -175,6 +175,11 @@ lazy_static! {
         "The number of tasks waiting for the semaphore"
     )
     .unwrap();
+    pub static ref COPR_REMOTE_DAG_ESTIMATE_BLOCKS_HISTOGRAM: Histogram = register_histogram!(
+        "tikv_coprocessor_remote_dag_estimate_blocks",
+        "Bucketed histogram of remote dag estimate blocks",
+        exponential_buckets(1.0, 2.0, 20).unwrap()
+    ).unwrap();
     pub static ref MEM_LOCK_CHECK_HISTOGRAM_VEC: HistogramVec =
         register_histogram_vec!(
             "tikv_coprocessor_mem_lock_check_duration_seconds",

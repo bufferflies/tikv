@@ -21,7 +21,10 @@ use tipb::DagRequest;
 use txn_types::TsSet;
 
 use crate::{
-    coprocessor::{Error, ReqContext, RequestHandler, Result, MEMTRACE_ROOT, REQ_TYPE_DAG},
+    coprocessor::{
+        metrics::COPR_REMOTE_DAG_ESTIMATE_BLOCKS_HISTOGRAM, Error, ReqContext, RequestHandler,
+        Result, MEMTRACE_ROOT, REQ_TYPE_DAG,
+    },
     storage::txn::check_locks,
 };
 
@@ -159,6 +162,7 @@ pub(crate) fn try_remote_dag_handler<E: Engine>(
     if num_blocks < remote_ctx.cop_min_blocks {
         return None;
     }
+    COPR_REMOTE_DAG_ESTIMATE_BLOCKS_HISTOGRAM.observe(num_blocks as f64);
     let tag = format!("ks{}:{}:{}", keyspace_id, snap.get_id(), snap.get_version());
     info!("{} send remote coprocessor blocks:{}", tag, num_blocks);
     // reassemble a coprocessor request.

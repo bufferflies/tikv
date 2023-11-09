@@ -29,7 +29,11 @@ use prometheus::TEXT_FORMAT;
 use protobuf::Message;
 use rfstore::store::{PdIdAllocator, RegionSnapshot};
 use tikv::{
-    coprocessor::remote_dispatcher::decode_remote_cop_request, server::status_server::StatusServer,
+    coprocessor::{
+        remote_dispatcher::decode_remote_cop_request, REQ_TYPE_ANALYZE, REQ_TYPE_CHECKSUM,
+        REQ_TYPE_DAG,
+    },
+    server::status_server::StatusServer,
 };
 use tikv_util::{
     error, info,
@@ -41,6 +45,10 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::{
     load_data::{self, LoadDataManager},
+    metrics::{
+        REMOTE_COPR_DAG_REQ_COUNTER, REMOTE_COPR_DAG_RESP_SIZE, REMOTE_COPR_REQ_HANDLE_HISTOGRAM,
+        REMOTE_COPR_SNAPSHOT_HISTOGRAM,
+    },
     native_br::{self, NativeBrManager},
 };
 
@@ -149,6 +157,8 @@ async fn handle_remote_coprocessor(
         let body = hyper::Body::from(format!("{:?}", err));
         return Ok(hyper::Response::builder().status(500).body(body).unwrap());
     }
+    let req_type = cop_req.get_tp();
+    let ob_start = Instant::now();
     let snap_access_res = SnapAccess::construct_snapshot(
         ctx.cache_fs.clone(),
         mem_data,
@@ -161,6 +171,7 @@ async fn handle_remote_coprocessor(
         let body = hyper::Body::from(format!("{:?}", err));
         return Ok(hyper::Response::builder().status(500).body(body).unwrap());
     }
+    REMOTE_COPR_SNAPSHOT_HISTOGRAM.observe(ob_start.saturating_elapsed().as_secs_f64());
     let snap_access = snap_access_res.unwrap();
     let tag = format!(
         "ks{}:{}:{}",
@@ -169,6 +180,7 @@ async fn handle_remote_coprocessor(
         snap_access.get_version()
     );
     let snap = RegionSnapshot::from_snapshot(snap_access);
+    let ob_start = Instant::now();
     let result = tikv::coprocessor::parse_request_and_handle_remote_cop(
         cop_req,
         None,
@@ -182,12 +194,25 @@ async fn handle_remote_coprocessor(
         let body = hyper::Body::from(format!("{:?}", err));
         return Ok(hyper::Response::builder().status(500).body(body).unwrap());
     }
+    REMOTE_COPR_REQ_HANDLE_HISTOGRAM.observe(ob_start.saturating_elapsed().as_secs_f64());
     let response = result.unwrap();
     info!(
         "{} finished remote coprocessor resp size {}",
         tag,
         response.data.len()
     );
+
+    match req_type {
+        REQ_TYPE_DAG => {
+            REMOTE_COPR_DAG_REQ_COUNTER.inc();
+            REMOTE_COPR_DAG_RESP_SIZE.inc_by(response.data.len() as u64);
+        }
+        // TODO: add metrics for other request types
+        REQ_TYPE_ANALYZE => {}
+        REQ_TYPE_CHECKSUM => {}
+        _ => {}
+    }
+
     let response_data = response.write_to_bytes().unwrap();
     Ok(hyper::Response::builder()
         .status(200)

@@ -826,4 +826,9 @@ lazy_static! {
         "Safe point used for auto gc"
     )
     .unwrap();
+    pub static ref BLACKLIST_REGION_GAUGE: IntGauge = register_int_gauge!(
+        "tikv_raftstore_blacklist_region_total",
+        "Total number of blacklisted regions"
+    )
+    .unwrap();
 }
