@@ -379,7 +379,7 @@ txn_types = { path = "components/txn_types" }
 grpcio = { version = "0.10.4", default-features = false, features = ["openssl-vendored", "protobuf-codec", "nightly"] }
 grpcio-health = { version = "0.10.4", default-features = false, features = ["protobuf-codec"] }
 tipb = { git = "https://github.com/pingcap/tipb.git" }
-tikv-client = { version = "0.2.0", git = "https://github.com/tikv/client-rust.git", rev = "802b361df7717d367a0ce26b34111f2d3b142d18", default-features = false }
+tikv-client = { version = "0.2.0", git = "https://github.com/tikv/client-rust.git", rev = "b12f95e3b2723ed677f10694021545837d746aed", default-features = false }
 kvproto = { git = "https://github.com/pingcap/kvproto.git" }
 yatp = { git = "https://github.com/tikv/yatp.git", branch = "master" }
 moka = { version = "0.9.6", features = ["future"] }
