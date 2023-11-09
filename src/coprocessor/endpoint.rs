@@ -27,7 +27,10 @@ use txn_types::Lock;
 use crate::{
     coprocessor::{cache::CachedRequestHandler, interceptors::*, metrics::*, tracker::Tracker, *},
     read_pool::ReadPoolHandle,
-    server::Config,
+    server::{
+        metrics::{ResourcePriority, GRPC_MSG_CONTEXT_SWITCH_HISTOGRAM_STATIC,GRPC_MSG_TASK_BATCH_HISTOGRAM_STATIC},
+        Config,
+    },
     storage::{
         self,
         kv::{self, with_tls_engine, SnapContext},
@@ -407,7 +410,7 @@ impl<E: Engine> Endpoint<E> {
         semaphore: Option<Arc<Semaphore>>,
         mut tracker: Box<Tracker<E>>,
         handler_builder: RequestHandlerBuilder<E::Snap>,
-    ) -> Result<MemoryTraceGuard<coppb::Response>> {
+    ) -> Result<(MemoryTraceGuard<coppb::Response>,Instant)> {
         // When this function is being executed, it may be queued for a long time, so
         // that deadline may exceed.
         tracker.on_scheduled();
@@ -481,7 +484,7 @@ impl<E: Engine> Endpoint<E> {
         resp.set_exec_details(exec_details);
         resp.set_exec_details_v2(exec_details_v2);
         resp.set_latest_buckets_version(buckets_version);
-        Ok(resp)
+        Ok((resp,Instant::now()))
     }
 
     /// Handle a unary request and run on the read pool.
@@ -492,7 +495,7 @@ impl<E: Engine> Endpoint<E> {
         &self,
         req_ctx: ReqContext,
         handler_builder: RequestHandlerBuilder<E::Snap>,
-    ) -> impl Future<Output = Result<MemoryTraceGuard<coppb::Response>>> {
+    ) -> impl Future<Output = Result<(MemoryTraceGuard<coppb::Response>,Instant)>> {
         let priority = req_ctx.context.get_priority();
         let task_id = req_ctx.build_task_id();
         let key_ranges = req_ctx
@@ -539,6 +542,16 @@ impl<E: Engine> Endpoint<E> {
         mut req: coppb::Request,
         peer: Option<String>,
     ) -> impl Future<Output = MemoryTraceGuard<coppb::Response>> {
+        let resource_group_name = req
+            .get_context()
+            .get_resource_control_context()
+            .get_resource_group_name();
+        let mut resource_priority = ResourcePriority::unknown;
+        if let Some(resource_ctl) = self.resource_ctl.as_ref() {
+            let resource_group_priority =
+                resource_ctl.get_resource_group_priority(resource_group_name);
+            resource_priority = ResourcePriority::from(resource_group_priority);
+        }
         // Check the load of the read pool. If it's too busy, generate and return
         // error in the gRPC thread to avoid waiting in the queue of the read pool.
         if let Err(busy_err) = self.read_pool.check_busy_threshold(Duration::from_millis(
@@ -554,11 +567,14 @@ impl<E: Engine> Endpoint<E> {
             RequestType::Unknown,
             req.start_ts,
         )));
-        let result_of_batch = self.process_batch_tasks(&mut req, &peer);
+        let result_of_batch = self.process_batch_tasks(&mut req, &peer, resource_priority);
         set_tls_tracker_token(tracker);
         let result_of_future = self
             .parse_request_and_check_memory_locks(req, peer, false)
-            .map(|(handler_builder, req_ctx)| self.handle_unary_request(req_ctx, handler_builder));
+            .map(|(handler_builder, mut req_ctx)| {
+                req_ctx.resource_priority = resource_priority;
+                self.handle_unary_request(req_ctx, handler_builder)
+            });
         let fut = async move {
             let res = match result_of_future {
                 Err(e) => {
@@ -569,7 +585,12 @@ impl<E: Engine> Endpoint<E> {
                 }
                 Ok(handle_fut) => {
                     let (handle_res, batch_res) = futures::join!(handle_fut, result_of_batch);
-                    let mut res = handle_res.unwrap_or_else(|e| make_error_response(e).into());
+                    let mut res = handle_res.map(|(r,instant)|{
+                        GRPC_MSG_CONTEXT_SWITCH_HISTOGRAM_STATIC
+                            .get(resource_priority)
+                            .observe(instant.saturating_elapsed().as_secs_f64());
+                        r
+                    }).unwrap_or_else(|e| make_error_response(e).into());
                     res.set_batch_responses(batch_res.into());
                     GLOBAL_TRACKERS.with_tracker(tracker, |tracker| {
                         tracker.write_scan_detail(res.mut_exec_details_v2().mut_scan_detail_v2());
@@ -591,6 +612,7 @@ impl<E: Engine> Endpoint<E> {
         &self,
         req: &mut coppb::Request,
         peer: &Option<String>,
+        resource_priority: ResourcePriority,
     ) -> impl Future<Output = Vec<coppb::StoreBatchTaskResponse>> {
         let mut batch_futs = Vec::with_capacity(req.tasks.len());
         let batch_reqs: Vec<(coppb::Request, u64)> = req
@@ -609,6 +631,9 @@ impl<E: Engine> Endpoint<E> {
                 (new_req, task.get_task_id())
             })
             .collect();
+        GRPC_MSG_TASK_BATCH_HISTOGRAM_STATIC
+            .get(resource_priority)
+            .observe(batch_reqs.len() as f64);
         for (cur_req, task_id) in batch_reqs.into_iter() {
             let request_info = RequestInfo::new(
                 cur_req.get_context(),
@@ -618,14 +643,15 @@ impl<E: Engine> Endpoint<E> {
             let mut response = coppb::StoreBatchTaskResponse::new();
             response.set_task_id(task_id);
             match self.parse_request_and_check_memory_locks(cur_req, peer.clone(), false) {
-                Ok((handler_builder, req_ctx)) => {
+                Ok((handler_builder, mut req_ctx)) => {
                     let cur_tracker = GLOBAL_TRACKERS.insert(::tracker::Tracker::new(request_info));
                     set_tls_tracker_token(cur_tracker);
+                    req_ctx.resource_priority = resource_priority;
                     let fut = self.handle_unary_request(req_ctx, handler_builder);
                     let fut = async move {
                         let res = fut.await;
                         match res {
-                            Ok(mut resp) => {
+                            Ok( (mut resp,_i)) => {
                                 response.set_data(resp.take_data());
                                 if let Some(err) = resp.region_error.take() {
                                     response.set_region_error(err);

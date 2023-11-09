@@ -50,7 +50,10 @@ pub use self::{
     endpoint::Endpoint,
     error::{Error, Result},
 };
-use crate::storage::{mvcc::TimeStamp, Statistics};
+use crate::{
+    server::metrics::ResourcePriority,
+    storage::{mvcc::TimeStamp, Statistics},
+};
 
 pub const REQ_TYPE_DAG: i64 = 103;
 pub const REQ_TYPE_ANALYZE: i64 = 104;
@@ -145,6 +148,8 @@ pub struct ReqContext {
 
     /// Whether the request is allowed in the flashback state.
     pub allowed_in_flashback: bool,
+
+    pub resource_priority: ResourcePriority,
 }
 
 impl ReqContext {
@@ -189,6 +194,7 @@ impl ReqContext {
             upper_bound,
             perf_level,
             allowed_in_flashback: false,
+            resource_priority: ResourcePriority::unknown,
         }
     }
 

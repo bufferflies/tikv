@@ -144,6 +144,23 @@ make_auto_flush_static_metric! {
         "priority" => ResourcePriority,
     }
 
+    pub struct GrpcMsgWaitHistogramVec: LocalHistogram {
+        "type" => GrpcTypeKind,
+        "priority" => ResourcePriority,
+    }
+
+    pub struct GrpcMsgContextSwitchHistogramVec:LocalHistogram{
+        "priority" => ResourcePriority,
+    }
+
+    pub struct GrpcMsgTaskBatchHistogramVec:LocalHistogram{
+        "priority" => ResourcePriority,
+    }
+
+    pub struct CoprProcessHistogramVec:LocalHistogram{
+        "priority" => ResourcePriority,
+    }
+
     pub struct ReplicaReadLockCheckHistogramVec: LocalHistogram {
         "result" => ReplicaReadLockCheckResult,
     }
@@ -246,6 +263,39 @@ lazy_static! {
         exponential_buckets(5e-5, 2.0, 22).unwrap() // 50us ~ 104s
     )
     .unwrap();
+
+    pub static ref GRPC_MSG_CHANNEL_WAIT_HISTOGRAM_VEC: HistogramVec = register_histogram_vec!(
+        "tikv_grpc_msg_channel_wait_duration_seconds",
+        "Bucketed histogram of grpc server wait messages",
+        &["type","priority"],
+        exponential_buckets(5e-5, 2.0, 22).unwrap() // 50us ~ 104s
+    )
+    .unwrap();
+
+    pub static ref GRPC_MSG_CONTEXT_SWITCH_HISTOGRAM_VEC: HistogramVec = register_histogram_vec!(
+        "tikv_grpc_context_switch_duration_seconds",
+        "Bucketed histogram of grpc server wait messages",
+        &["priority"],
+        exponential_buckets(5e-5, 2.0, 22).unwrap() // 50us ~ 104s
+    )
+    .unwrap();
+
+    pub static ref GRPC_MSG_TASK_BATCH_HISTOGRAM_VEC: HistogramVec = register_histogram_vec!(
+        "tikv_grpc_msg_task_batch_size",
+        "Bucketed histogram of grpc server task batch",
+        &["priority"],
+        exponential_buckets(1f64, 2f64, 10).unwrap()
+    )
+    .unwrap();
+
+    pub static ref CORP_PROCESS_TIME_HISTOGRAM_VEC: HistogramVec = register_histogram_vec!(
+        "tikv_coprocessor_process_handle_seconds",
+        "Bucketed histogram of coprocessor process handle duration",
+        &["priority"],
+        exponential_buckets(5e-5, 2.0, 22).unwrap()
+    )
+    .unwrap();
+
     pub static ref SERVER_INFO_GAUGE_VEC: IntGaugeVec = register_int_gauge_vec!(
         "tikv_server_info",
         "Indicate the tikv server info, and the value is the server startup timestamp(s).",
@@ -282,6 +332,17 @@ lazy_static! {
 }
 
 lazy_static! {
+    pub static ref GRPC_MSG_CHANNEL_WAIT_HISTOGRAM_STATIC: GrpcMsgWaitHistogramVec =
+        auto_flush_from!(GRPC_MSG_CHANNEL_WAIT_HISTOGRAM_VEC, GrpcMsgWaitHistogramVec);
+    pub static ref GRPC_MSG_CONTEXT_SWITCH_HISTOGRAM_STATIC: GrpcMsgContextSwitchHistogramVec =
+        auto_flush_from!(GRPC_MSG_CONTEXT_SWITCH_HISTOGRAM_VEC, GrpcMsgContextSwitchHistogramVec);
+    pub static ref GRPC_MSG_TASK_BATCH_HISTOGRAM_STATIC: GrpcMsgTaskBatchHistogramVec = auto_flush_from!(
+        GRPC_MSG_TASK_BATCH_HISTOGRAM_VEC,
+        GrpcMsgTaskBatchHistogramVec
+    );
+    pub static ref CORP_PROCESS_TIME_HISTOGRAM_STATIC: CoprProcessHistogramVec =
+        auto_flush_from!(CORP_PROCESS_TIME_HISTOGRAM_VEC, CoprProcessHistogramVec);
+    
     pub static ref GRPC_MSG_HISTOGRAM_STATIC: GrpcMsgHistogramVec =
         auto_flush_from!(GRPC_MSG_HISTOGRAM_VEC, GrpcMsgHistogramVec);
     pub static ref GRPC_MSG_HISTOGRAM_GLOBAL: GrpcMsgHistogramGlobal =

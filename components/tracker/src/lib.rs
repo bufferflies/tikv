@@ -17,6 +17,7 @@ pub use self::{
 pub struct Tracker {
     pub req_info: RequestInfo,
     pub metrics: RequestMetrics,
+    pub finished_time: Instant,
     // TODO: Add request stage info
     // pub current_stage: RequestStage,
 }
@@ -26,6 +27,7 @@ impl Tracker {
         Self {
             req_info,
             metrics: Default::default(),
+            finished_time: Instant::now(),
         }
     }
 

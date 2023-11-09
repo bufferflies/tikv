@@ -11,7 +11,9 @@ use tikv_util::time::{self, Duration, Instant};
 use txn_types::Key;
 
 use super::metrics::*;
-use crate::{coprocessor::*, storage::Statistics};
+use crate::{
+    coprocessor::*, server::metrics::CORP_PROCESS_TIME_HISTOGRAM_STATIC, storage::Statistics,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum TrackerState {
@@ -147,7 +149,7 @@ impl<E: Engine> Tracker<E> {
             _ => unreachable!(),
         }
 
-        self.with_perf_context(|perf_context| {
+        self.with_perf_context(|perf_context: &mut Box<dyn PerfContext>| {
             perf_context.start_observe();
         });
         self.current_stage = TrackerState::ItemBegan(now);
@@ -244,7 +246,6 @@ impl<E: Engine> Tracker<E> {
             TrackerState::ItemFinished(_) => {}
             _ => unreachable!(),
         }
-
         self.req_lifetime = Instant::now() - self.request_begin_at;
         self.current_stage = TrackerState::AllItemFinished;
         self.track();
@@ -297,6 +298,10 @@ impl<E: Engine> Tracker<E> {
                 )
             });
         }
+
+        CORP_PROCESS_TIME_HISTOGRAM_STATIC
+            .get(self.req_ctx.resource_priority)
+            .observe(time::duration_to_sec(self.req_lifetime));
 
         // req time
         COPR_REQ_HISTOGRAM_STATIC

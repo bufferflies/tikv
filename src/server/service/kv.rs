@@ -1136,12 +1136,7 @@ fn response_batch_commands_request<F, T>(
 {
     let task = async move {
         if let Ok(resp) = resp.await {
-            let measure = GrpcRequestDuration {
-                begin,
-                label,
-                source,
-                resource_priority,
-            };
+            let measure = GrpcRequestDuration::new(begin, label, source, resource_priority);
             let task = MeasuredSingleResponse::new(id, resp, measure);
             if let Err(e) = tx.send_with(task, WakePolicy::Immediately) {
                 error!("KvService response batch commands fail"; "err" => ?e);
@@ -1347,7 +1342,13 @@ fn handle_measures_for_batch_commands(measures: &mut MeasuredBatchResponse) {
             begin,
             source,
             resource_priority,
+            send_time,
         } = measure;
+        GRPC_MSG_CHANNEL_WAIT_HISTOGRAM_STATIC
+            .get(label)
+            .get(resource_priority)
+            .observe(send_time.saturating_elapsed().as_secs_f64());
+
         let elapsed = now.saturating_duration_since(begin);
         GRPC_MSG_HISTOGRAM_STATIC
             .get(label)
@@ -2292,6 +2293,7 @@ pub mod batch_commands_request {
 #[derive(Debug)]
 pub struct GrpcRequestDuration {
     pub begin: Instant,
+    pub send_time: Instant,
     pub label: GrpcTypeKind,
     pub source: String,
     pub resource_priority: ResourcePriority,
@@ -2308,6 +2310,7 @@ impl GrpcRequestDuration {
             label,
             source,
             resource_priority,
+            send_time: Instant::now(),
         }
     }
 }
