@@ -7817,3 +7817,8 @@ dependencies = [
  "cc",
  "libc 0.2.146",
 ]
+
+[[patch.unused]]
+name = "grpcio"
+version = "0.13.0"
+source = "git+https://github.com/bufferflies/grpc-rs?branch=metrics#38f88f461028b80351714437d0be89fc312fad71"
