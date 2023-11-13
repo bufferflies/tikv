@@ -3,6 +3,7 @@
 #[macro_use]
 extern crate serde_derive;
 
+pub mod archive;
 pub mod backup;
 pub mod backup_worker;
 pub mod common;

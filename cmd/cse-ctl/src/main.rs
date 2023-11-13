@@ -3,6 +3,7 @@
 #[macro_use]
 extern crate serde_derive;
 
+mod archive;
 mod backup;
 mod check_table;
 mod dfsgc;
@@ -17,6 +18,7 @@ use clap::{Args, Parser, Subcommand};
 use slog::Drain;
 
 use crate::{
+    archive::{execute_archive, ArchiveArgs},
     backup::{execute_backup, execute_show_backup, BackupArgs, ShowBackupArgs},
     check_table::{execute_check_table, CheckTableArgs},
     dfsgc::{execute_dfsgc, DfsGcArgs},
@@ -42,6 +44,9 @@ fn main() {
         }
         Restore(restore_cmd) => {
             execute_restore_command(restore_cmd);
+        }
+        Archive(archive_args) => {
+            execute_archive(archive_args);
         }
         TruncateTs(args) => {
             execute_truncate_ts(args);
@@ -104,6 +109,8 @@ pub enum Commands {
     Backup(BackupArgs),
     /// Restore a backup.
     Restore(RestoreCommand),
+    /// Archive old backups.
+    Archive(ArchiveArgs),
     /// Truncate newer data than given ts
     TruncateTs(TruncateTsArgs),
     /// CheckTable check data consistency on each table.

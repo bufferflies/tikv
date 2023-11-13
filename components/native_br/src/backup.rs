@@ -40,7 +40,7 @@ const MAX_BATCH_GET_CNT: i64 = 1024;
 // 2. keyspace region label: "/pd/$cluster_id/region_label/keyspaces/"
 // 3. keyspace placement rules: "/pd/$cluster_id/rules/"
 // 4. keyspace group membership:
-//      "/pd/$cluster_id/tso/keyspace_groups/membership/"
+//    "/pd/$cluster_id/tso/keyspace_groups/membership/"
 // 5. resource group information: "resource_group/" (Note: no leading slash)
 // 6. tidb worker keys: "/tidb/remote/worker/"
 const PD_KEY_SPACE_META_PATH: [(&str, bool); 6] = [
@@ -626,7 +626,7 @@ pub struct BackupConfig {
 ///
 /// Manual backups without name also follow this rule.
 
-const INCREMENTAL_BACKUP_FOLDER_FORMAT: &str = "%Y%m%d";
+pub const INCREMENTAL_BACKUP_FOLDER_FORMAT: &str = "%Y%m%d";
 const INCREMENTAL_BACKUP_FILE_NAME_FORMAT: &str = "%H%M%S";
 
 #[derive(Clone, Debug, PartialEq, Eq)]

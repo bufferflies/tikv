@@ -20,6 +20,7 @@ use http::Request;
 use hyper::Body;
 use itertools::Itertools;
 use kvengine::{
+    dfs,
     dfs::S3Fs,
     table::{InnerKey, TableExt},
     IdVer, ShardMeta, ShardRange, ShardStats, ShardTag, ENCRYPTION_KEY,
@@ -40,16 +41,20 @@ use tikv_util::{box_err, merge_range::MergeRanges, mpsc, time::Instant, HandyRwL
 use tokio::runtime::Runtime;
 
 use crate::{
+    archive::{
+        get_cluster_backup_file_and_meta, get_incremental_backup_with_name, get_not_found_files,
+        ArchiveReader,
+    },
     common::{
         load_peer_raft_state, load_rf_engine_meta, now, replay_wal_logs, retain_sst_files,
         send_request_to_store, RawRegion,
     },
     error::{
         Error,
-        Error::{KeyspaceInnerKeyOffNotEnabled, RetryLimitExceeded},
+        Error::{KeyspaceInnerKeyOffNotEnabled, MetaNotFound, RetryLimitExceeded},
         Result,
     },
-    restore::{get_cluster_backup_meta, RestoreConfig},
+    restore::RestoreConfig,
     step,
     tiflash::remove_tiflash_replia_of_keyspace,
 };
@@ -195,7 +200,34 @@ pub fn restore_keyspace(
     let keyspace_tag = make_keyspace_tag(keyspace_id, target_keyspace_id);
 
     reporter.report_step(RestoreStep::LoadBackupMeta);
-    let cluster_backup = get_cluster_backup_meta(&s3fs, backup_name.to_owned());
+    let (cluster_backup, archive_reader) =
+        match get_cluster_backup_file_and_meta(&s3fs, backup_name.to_owned()) {
+            Ok((_, backup_meta)) => (backup_meta, None),
+            Err(dfs::Error::NoSuchKey(err)) => {
+                warn!(
+                    "The cluster backup meta {} is not found: {:?}, try the archive reader",
+                    backup_name.to_owned(),
+                    err
+                );
+                let backup_file =
+                    get_incremental_backup_with_name(s3fs.get_prefix(), backup_name.to_owned());
+                let backup_date = backup_file.created_at().date_naive();
+                let archive_reader = ArchiveReader::new(s3fs.clone(), &backup_date)?;
+                let backup_meta = archive_reader
+                    .read_meta_file()
+                    .map_err(|_| MetaNotFound(backup_file.id()))?;
+                (backup_meta, Some(archive_reader))
+            }
+            Err(err) => {
+                error!("get cluster backup meta {} failed: {:?}", backup_name, err);
+                return Err(Error::DfsError(err));
+            }
+        };
+    let truncate_ts = if archive_reader.is_none() {
+        truncate_ts
+    } else {
+        Some(cluster_backup.backup_ts)
+    };
     step!(
         "Start restore keyspace {} from backup <{}>, lightweight:{} range:[{},{}), target_range:[{},{}), backup ts:{}, safe ts:{} truncate ts:{:?}",
         keyspace_tag,
@@ -228,6 +260,8 @@ pub fn restore_keyspace(
         keyspace_id,
         target_keyspace_id,
         truncate_ts,
+        false,
+        archive_reader,
     )?;
     step!(
         "Keyspace {} restore {} shards from backup",
@@ -559,6 +593,8 @@ pub struct BackupCluster {
     keyspace_start: Vec<u8>,
     keyspace_end: Vec<u8>,
     truncate_ts: u64,
+    skip_kvengine: bool,
+    archive_reader: Option<ArchiveReader>,
 
     // store_id -> rf_engine.
     raft_engines: HashMap<u64, RfEngine>,
@@ -600,6 +636,8 @@ impl BackupCluster {
         keyspace_id: u32,
         target_keyspace_id: u32,
         truncate_ts: u64,
+        skip_kvengine: bool,
+        archive_reader: Option<ArchiveReader>,
     ) -> Result<BackupCluster> {
         let (keyspace_start, keyspace_end) = ApiV2::get_txn_keyspace_range(keyspace_id);
         let mut cluster = Self {
@@ -612,6 +650,8 @@ impl BackupCluster {
             keyspace_start,
             keyspace_end,
             truncate_ts,
+            skip_kvengine,
+            archive_reader,
             shards: Default::default(),
             raw_metas: Default::default(),
             raft_engines: Default::default(),
@@ -638,6 +678,11 @@ impl BackupCluster {
             )?;
         }
         cluster.load_shards()?;
+
+        if cluster.skip_kvengine {
+            return Ok(cluster);
+        }
+        cluster.check_all_shard_files()?;
 
         let stores_id: Vec<_> = cluster.get_all_stores_id().collect();
         for store_id in stores_id {
@@ -994,12 +1039,22 @@ impl BackupCluster {
     }
 
     // Should be called after load_shard.
-    fn get_all_shard_files(&self) -> Vec<u64> {
+    pub fn get_all_shard_files(&self) -> Vec<u64> {
         let mut files = vec![];
         for shard in self.shards.values() {
             files.append(&mut shard.meta.all_file_keys());
         }
         files
+    }
+
+    // Should be called after load_shard and before setup_kv_engine.
+    pub fn check_all_shard_files(&self) -> Result<()> {
+        if let Some(archive_reader) = &self.archive_reader {
+            let files = self.get_all_shard_files();
+            let not_found_files = get_not_found_files(&self.dfs, files)?;
+            archive_reader.restore_files(not_found_files)?;
+        }
+        Ok(())
     }
 
     fn get_leader_shards_and_preprocess(
@@ -1645,9 +1700,12 @@ impl BackupCluster {
         self.keyspace_start = keyspace_start;
         self.keyspace_end = keyspace_end;
 
-        let kv_engine = self.kv_engine.take().unwrap();
-        kv_engine.close();
-        drop(kv_engine);
+        if !self.skip_kvengine {
+            let kv_engine = self.kv_engine.take().unwrap();
+            kv_engine.close();
+            drop(kv_engine);
+        }
+
         if let Some(sender) = self.meta_sender.take() {
             sender.send(StoreMsg::Stop).unwrap();
         }
@@ -1666,6 +1724,12 @@ impl BackupCluster {
             store_configs.insert(store_id, store_config);
         }
         self.load_shards()?;
+
+        if self.skip_kvengine {
+            return Ok(());
+        }
+        self.check_all_shard_files()?;
+
         let stores_ids: Vec<_> = self.get_all_stores_id().collect();
         for store_id in stores_ids {
             self.setup_kv_engine(store_id, store_configs.get(&store_id).unwrap())?;

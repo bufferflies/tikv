@@ -344,6 +344,8 @@ pub enum Error {
     S3(String),
     #[error("Other error {0}")]
     Other(String),
+    #[error("The specified key {0} does not exist.")]
+    NoSuchKey(String),
 }
 
 impl From<io::Error> for Error {

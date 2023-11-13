@@ -23,8 +23,8 @@ use rusoto_core::{
     HttpClient, HttpDispatchError, Region, RusotoError,
 };
 use rusoto_s3::{
-    CopyObjectError, DeleteObjectError, GetObjectError, GetObjectTaggingError, ListObjectsV2Error,
-    PutObjectError, PutObjectTaggingError,
+    CopyObjectError, DeleteObjectError, GetObjectError, GetObjectTaggingError, HeadObjectError,
+    ListObjectsV2Error, PutObjectError, PutObjectTaggingError,
 };
 use tikv_util::time::Instant;
 use tokio::runtime::Runtime;
@@ -39,6 +39,7 @@ const READ_BODY_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub const STORAGE_CLASS_DEFAULT: &str = "STANDARD";
 pub const STORAGE_CLASS_STANDARD_IA: &str = "STANDARD_IA";
+pub const STORAGE_CLASS_GLACIER_IR: &str = "GLACIER_IR";
 
 const AWS_DOMAIN_STRING: &str = "amazonaws";
 
@@ -368,6 +369,35 @@ impl S3FsCore {
         }
     }
 
+    pub async fn exist(&self, key: String, file_name: String) -> Result<bool, dfs::Error> {
+        let mut retry_cnt = 0;
+        loop {
+            let req = self.new_request("HEAD", &key);
+            let result = self.dispatch(req, HeadObjectError::from_response).await;
+            if result.is_ok() {
+                return Ok(true);
+            }
+            let err = result.unwrap_err();
+            if let RusotoError::Service(HeadObjectError::NoSuchKey(err_msg)) = &err {
+                warn!("file {} not exist, err msg {}", &file_name, err_msg);
+                return Ok(false);
+            }
+            if self.is_err_not_found(&err) {
+                warn!("file {} not exist, err {}", &file_name, err.to_string());
+                return Ok(false);
+            }
+            if self.is_err_retryable(&err) && self.sleep_for_retry(&mut retry_cnt, &file_name).await
+            {
+                KVENGINE_DFS_RETRY_COUNTER_VEC
+                    .with_label_values(&["head"])
+                    .inc();
+                warn!("retry head file {}, error {:?}", &file_name, &err);
+                continue;
+            }
+            return Err(dfs::Error::S3(err.to_string()));
+        }
+    }
+
     fn new_request(&self, method: &str, key: &str) -> SignedRequest {
         let path = if self.virtual_host {
             format!("/{}", key)
@@ -462,7 +492,17 @@ impl S3FsCore {
             let err = result.unwrap_err();
             if let RusotoError::Service(GetObjectError::NoSuchKey(err_msg)) = &err {
                 error!("file {} not exist, err msg {}", &file_name, err_msg);
-                return Err(err.into());
+                return Err(dfs::Error::NoSuchKey(format!(
+                    "file {} not exist,",
+                    &file_name
+                )));
+            }
+            if self.is_err_not_found(&err) {
+                error!("file {} not exist, err {}", &file_name, err.to_string());
+                return Err(dfs::Error::NoSuchKey(format!(
+                    "file {} not exist,",
+                    &file_name
+                )));
             }
             if self.is_err_retryable(&err) && self.sleep_for_retry(&mut retry_cnt, &file_name).await
             {
@@ -482,12 +522,37 @@ impl S3FsCore {
         data: Bytes,
         file_name: String,
     ) -> crate::dfs::Result<()> {
+        self.put_object_with_options(key, data, file_name, None, None)
+            .await
+    }
+
+    pub async fn put_object_with_options(
+        &self,
+        key: String,
+        data: Bytes,
+        file_name: String,
+        tagging: Option<&Tagging>,
+        storage_class: Option<&str>,
+    ) -> crate::dfs::Result<()> {
         let mut retry_cnt = 0;
         let start_time = Instant::now();
         let data_len = data.len();
         loop {
             let mut req = self.new_request("PUT", &key);
             req.add_header("Content-Length", &format!("{}", data.len()));
+            if let Some(tagging) = tagging {
+                req.add_header("x-amz-tagging", &tagging.to_url_encoded());
+            }
+            if let Some(storage_class) = storage_class.as_ref() {
+                if self.is_on_aws() {
+                    req.add_header("x-amz-storage-class", storage_class);
+                } else {
+                    debug!(
+                        "{} ignore storage_class {} which is not supported by {}",
+                        key, storage_class, self.hostname
+                    );
+                }
+            }
             let data = data.clone();
             let stream = futures::stream::once(async move { Ok(data) });
             req.set_payload_stream(rusoto_core::ByteStream::new(stream));

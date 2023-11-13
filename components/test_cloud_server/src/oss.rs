@@ -175,6 +175,48 @@ impl ObjectStorageService {
         }
     }
 
+    async fn handle_head_object(
+        ctx: Arc<Mutex<ServiceContext>>,
+        req: Request<Body>,
+    ) -> Result<Response<Body>> {
+        let (parts, _) = req.into_parts();
+        let path = ctx.lock().unwrap().store_path.to_owned();
+        let file_path = Self::make_file_path(&path, parts.uri.path());
+        info!(
+            "handle_head_object: file_path {}",
+            file_path.to_str().unwrap()
+        );
+        let res = match fs::metadata(file_path.to_str().unwrap()).await {
+            Ok(_) => Response::new(Body::empty()),
+            Err(_) => {
+                info!("handle_get_object: path not found: {}", parts.uri.path());
+                Self::not_found()
+            }
+        };
+        Ok(res)
+    }
+
+    async fn handle_delete_object(
+        ctx: Arc<Mutex<ServiceContext>>,
+        req: Request<Body>,
+    ) -> Result<Response<Body>> {
+        let (parts, _) = req.into_parts();
+        let path = ctx.lock().unwrap().store_path.to_owned();
+        let file_path = Self::make_file_path(&path, parts.uri.path());
+        info!(
+            "handle_delete_object: file_path {}",
+            file_path.to_str().unwrap()
+        );
+        let res = match fs::remove_file(file_path.to_str().unwrap()).await {
+            Ok(_) => Response::new(Body::empty()),
+            Err(_) => {
+                info!("handle_get_object: path not found: {}", parts.uri.path());
+                Self::not_found()
+            }
+        };
+        Ok(res)
+    }
+
     async fn handle_get_object(
         ctx: Arc<Mutex<ServiceContext>>,
         req: Request<Body>,
@@ -430,10 +472,12 @@ impl ObjectStorageService {
             Method::GET if Self::is_list_objects_request(&req) => {
                 Self::handle_list_objects(ctx, req).await
             }
+            Method::HEAD => Self::handle_head_object(ctx, req).await,
             Method::GET => Self::handle_get_object(ctx, req).await,
             Method::DELETE if Self::is_tagging_object_request(&req) => {
                 Self::handle_delete_object_tag(ctx, req)
             }
+            Method::DELETE => Self::handle_delete_object(ctx, req).await,
             _ => Ok(Self::method_not_found()),
         };
         res.or_else(|e| {
@@ -525,7 +569,10 @@ fn visit_path(path: PathBuf, cb: &mut dyn FnMut(PathBuf)) {
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
-    use kvengine::dfs::{Dfs, Options, S3Fs};
+    use kvengine::{
+        dfs,
+        dfs::{Dfs, Options, S3Fs},
+    };
     use rand::prelude::ThreadRng;
 
     use super::*;
@@ -583,6 +630,8 @@ mod tests {
                 assert_eq!(write_data, read_data);
 
                 let key = fs.file_key(file_id);
+                let exist = fs.exist(key.clone(), file_id.to_string()).await.unwrap();
+                assert!(exist);
                 let opts = engine_traits::GetObjectOptions {
                     start_off: range.0 as u64,
                     end_off: Some(range.1 as u64),
@@ -596,11 +645,32 @@ mod tests {
                     start_off: range.0 as u64,
                     end_off: None,
                 };
-                let read_data = fs.get_object(key, file_id.to_string(), opts).await.unwrap();
+                let read_data = fs
+                    .get_object(key.clone(), file_id.to_string(), opts)
+                    .await
+                    .unwrap();
                 assert_eq!(write_data.slice(range.0..), read_data);
 
                 if idx % 7 == 0 {
                     fs.remove(file_id, None, options).await;
+                }
+
+                if idx % 7 == 6 {
+                    fs.delete_object(key.clone(), file_id.to_string())
+                        .await
+                        .unwrap();
+                    let exist = fs.exist(key.clone(), file_id.to_string()).await.unwrap();
+                    assert!(!exist);
+                    let err = fs
+                        .get_object(
+                            key,
+                            file_id.to_string(),
+                            engine_traits::GetObjectOptions::default(),
+                        )
+                        .await
+                        .err();
+                    let no_such_key = matches!(err, Some(dfs::Error::NoSuchKey(_)));
+                    assert!(no_such_key);
                 }
             });
             handles.push(handle);

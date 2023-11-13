@@ -151,6 +151,8 @@ pub(crate) fn execute_check_table(args: CheckTableArgs) {
         keyspace_id,
         keyspace_id,
         cluster_backup.backup_ts,
+        false,
+        None,
     )
     .unwrap();
     let check_table_ts = if config.timestamp > 0 {

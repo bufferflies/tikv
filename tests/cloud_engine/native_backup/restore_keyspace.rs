@@ -8,10 +8,10 @@ use std::{
     time::Duration,
 };
 
-use kvengine::dfs::{DFSConfig, S3Fs};
+use kvengine::dfs::{DFSConfig, Dfs, S3Fs};
 use kvproto::metapb;
 use native_br::{
-    backup,
+    archive, backup,
     common::now,
     restore_keyspace,
     restore_keyspace::{ReportRestoreStepTrait, RestoreStep},
@@ -28,6 +28,7 @@ use test_cloud_server::{
 use tikv::config::TikvConfig;
 use tikv_util::{config::ReadableSize, debug, info, store::new_learner_peer, warn};
 use tokio::runtime::Runtime;
+use txn_types::TimeStamp;
 
 use crate::alloc_node_id_vec;
 
@@ -37,6 +38,7 @@ const NODES_COUNT: usize = 4;
 const KEYSPACE_COUNT: usize = 3;
 const DEFAULT_LOOP_COUNT: usize = 3;
 const DEFAULT_TARGET_REGIONS: usize = 4;
+const BACKUP_DAYS: usize = 4;
 
 // The numbers have no special meaning, just to make them different.
 // Require to be larger than 72, see `i_to_val`.
@@ -59,11 +61,15 @@ fn test_restore_keyspace() {
         .parse::<usize>()
         .unwrap_or(DEFAULT_TARGET_REGIONS);
 
-    test_restore_keyspace_opt(loop_count, target_regions, true, false);
+    test_restore_keyspace_opt(loop_count, target_regions, true, false, false);
     // Regression test for `inner_key_off` disabled.
-    test_restore_keyspace_opt(DEFAULT_LOOP_COUNT, target_regions, false, false);
+    test_restore_keyspace_opt(DEFAULT_LOOP_COUNT, target_regions, false, false, false);
     // Regression test for `lightweight` enabled.
-    test_restore_keyspace_opt(DEFAULT_LOOP_COUNT, target_regions, true, true);
+    test_restore_keyspace_opt(DEFAULT_LOOP_COUNT, target_regions, true, true, false);
+    // Test archiving without `inner_key_off`and lightweight backup.
+    test_restore_keyspace_opt(DEFAULT_LOOP_COUNT, target_regions, false, false, true);
+    // Test archiving with `inner_key_off` and lightweight backup.
+    test_restore_keyspace_opt(DEFAULT_LOOP_COUNT, target_regions, true, true, true);
 }
 
 fn test_restore_keyspace_opt(
@@ -71,6 +77,7 @@ fn test_restore_keyspace_opt(
     target_regions: usize,
     enable_inner_key_off: bool,
     lightweight: bool,
+    archiving: bool,
 ) {
     let cases = vec![
         // keyspace_id, data_count, shuffle_regions, has_learner, loop_count
@@ -119,6 +126,13 @@ fn test_restore_keyspace_opt(
     let pd_client = cluster.get_pd_client();
     let mut client = cluster.new_client();
 
+    if archiving {
+        pd_client.set_tso(TimeStamp::compose(
+            chrono::Utc::now().timestamp_millis() as u64,
+            0,
+        ));
+    }
+
     // Split keyspaces.
     for keyspace_id in 0..=KEYSPACE_COUNT {
         client.split(&get_keyspace_prefix(keyspace_id as u32));
@@ -156,6 +170,21 @@ fn test_restore_keyspace_opt(
         }
 
         for loop_idx in 0..loop_count {
+            if archiving {
+                test_restore_archived_keyspace_impl(
+                    case_idx,
+                    loop_idx,
+                    &mut cluster,
+                    &dfs_config,
+                    keyspace_id,
+                    data_count,
+                    shuffle_regions,
+                    has_learner,
+                    lightweight,
+                    &runtime,
+                );
+                continue;
+            }
             test_restore_keyspace_impl(
                 case_idx,
                 loop_idx,
@@ -423,6 +452,259 @@ fn test_restore_keyspace_impl(
             "verify (pitr on restored data) done, kv count: {}",
             verify_res
         );
+    }
+
+    // Write more data to verify the sequences.
+    for id in 0..KEYSPACE_COUNT {
+        let count = if id as u32 == keyspace_id {
+            data_count
+        } else {
+            BASIC_DATA_COUNT
+        };
+        client.put_kv(
+            0..count,
+            gen_keyspace_key(id as u32),
+            i_to_val(FINAL_DATA_LEN),
+        );
+    }
+    client.verify_data_with_ref_store();
+    step!("verify more writes done");
+}
+
+fn test_restore_archived_keyspace_impl(
+    case_idx: usize,
+    loop_idx: usize,
+    cluster: &mut ServerCluster,
+    dfs_config: &DFSConfig,
+    keyspace_id: u32,
+    data_count: usize,
+    shuffle_regions: Option<usize>,
+    has_learner: bool,
+    lightweight: bool,
+    runtime: &Runtime,
+) {
+    step!("case: {}:{}", case_idx, loop_idx);
+    let mut rng = rand::thread_rng();
+    let mut client = cluster.new_client();
+    let i_to_key = gen_keyspace_key(keyspace_id);
+    let (keyspace_start, keyspace_end) = (
+        get_keyspace_prefix(keyspace_id),
+        get_keyspace_prefix(keyspace_id + 1),
+    );
+
+    let backup_config = backup::BackupConfig {
+        dfs: dfs_config.clone(),
+        skip_keyspace_meta: true,
+        ..Default::default()
+    };
+    let s3fs = Arc::new(S3Fs::new(
+        dfs_config.prefix.clone(),
+        dfs_config.s3_endpoint.clone(),
+        dfs_config.s3_key_id.clone(),
+        dfs_config.s3_secret_key.clone(),
+        dfs_config.s3_region.clone(),
+        dfs_config.s3_bucket.clone(),
+    ));
+    let reporter = Arc::new(DummyStepReporter::default());
+
+    let pd_client = cluster.get_pd_client();
+    let mut archive_config = archive::ArchiveConfig {
+        dfs: dfs_config.clone(),
+        max_archive_file_size: 1024 * 32,
+        dry_run: false,
+        ..Default::default()
+    };
+    archive_config.check_data_dir();
+    let mut keyspace_ids = vec![];
+    for keyspace_id in 0..KEYSPACE_COUNT {
+        keyspace_ids.push(keyspace_id as u32);
+    }
+
+    // Import, backup and archive every day.
+    let begin_archive_date =
+        chrono::NaiveDateTime::from_timestamp_millis(client.get_ts().physical() as i64).unwrap();
+    let mut date_time = begin_archive_date;
+    let mut backup_ts_list = Vec::with_capacity(BACKUP_DAYS);
+    let mut ref_store_list = Vec::with_capacity(BACKUP_DAYS);
+    let mut last_ref_store = client.dump_ref_store();
+    for idx in 0..BACKUP_DAYS {
+        // Import data.
+        client.put_kv(0..data_count, &i_to_key, i_to_val(IMPORT_DATA_LEN + idx));
+        step!("write done on {}", date_time.date());
+
+        client.verify_data_with_ref_store();
+        assert!(
+            client
+                .verify_data_with_given_ref_store(&last_ref_store, None, &RequestOptions::default())
+                .is_err(),
+            "case: {}:{}:{}",
+            case_idx,
+            loop_idx,
+            date_time.date(),
+        );
+        last_ref_store = client.dump_ref_store();
+        step!("verify ok on {}", date_time.date());
+
+        // Perform snapshot backup.
+        let backup_ts = client.get_ts().into_inner();
+        backup_ts_list.push(backup_ts);
+        ref_store_list.push(client.dump_ref_store());
+        let backup_type = if lightweight {
+            backup::BackupType::Lightweight
+        } else {
+            backup::BackupType::Full
+        };
+        let (_, backup_meta) = backup::backup_cluster_with_ts(
+            backup_config.clone(),
+            backup_type,
+            String::default(),
+            cluster.get_pd_client().as_ref(),
+            backup_ts,
+            None,
+        )
+        .expect("backup::backup_cluster");
+        info!("backup_cluster result: {:?}", backup_meta);
+
+        // Archive backup.
+        archive::archive_cluster_backup(
+            archive_config.clone(),
+            cluster.get_pd_client(),
+            s3fs.clone(),
+            begin_archive_date.date(),
+            date_time.date(),
+            Some(keyspace_ids.clone()),
+        )
+        .unwrap();
+        step!("archive done on {}", date_time.date());
+
+        date_time = date_time.checked_add_days(chrono::Days::new(1)).unwrap();
+        pd_client.set_tso(TimeStamp::compose(date_time.timestamp_millis() as u64, 0));
+    }
+
+    // Delete old backup.
+    {
+        let snapshot_backup_ts = backup_ts_list[0];
+        let snapshot_backup_date = chrono::NaiveDateTime::from_timestamp_millis(
+            TimeStamp::from(snapshot_backup_ts).physical() as i64,
+        )
+        .unwrap()
+        .date();
+        let archive_reader =
+            archive::ArchiveReader::new(s3fs.clone(), &snapshot_backup_date).unwrap();
+        let old_file_ids = archive_reader.get_file_ids();
+        s3fs.get_runtime().block_on(async {
+            for idx in 0..BACKUP_DAYS - 1 {
+                let backup_ts = backup_ts_list[idx];
+                let backup_key = backup::backup_file_full_path(
+                    s3fs.get_prefix(),
+                    String::default(),
+                    Some(backup_ts),
+                );
+                s3fs.delete_object(backup_key.clone(), backup_ts.to_string())
+                    .await
+                    .unwrap();
+            }
+            for file_id in old_file_ids {
+                s3fs.delete_object(s3fs.file_key(file_id), file_id.to_string())
+                    .await
+                    .unwrap();
+            }
+        });
+        step!(
+            "delete old backup meta and sst files done. case: {}:{}",
+            case_idx,
+            loop_idx,
+        );
+    }
+
+    for idx in 0..BACKUP_DAYS - 1 {
+        // Shuffle regions.
+        if let (Some(shuffle_regions), 0) = (shuffle_regions, loop_idx) {
+            let keyspace_prefix = get_keyspace_prefix(keyspace_id);
+            let region_count = client.pd_client.get_regions_number();
+            let mut i = 0;
+            while i < shuffle_regions {
+                let split_key = rng.gen::<usize>() % data_count;
+                if let Err(e) = client.try_split(&i_to_key(split_key)) {
+                    warn!("try split error: {:?}", e);
+                    continue;
+                }
+                i += 1;
+            }
+
+            cluster.wait_pd_region_min_count(region_count + shuffle_regions);
+            let split_region_count = client.pd_client.get_regions_number();
+
+            for _ in 0..(shuffle_regions / 2) {
+                let source_key = rng.gen::<usize>() % data_count;
+                if let Err(e) = client.try_merge_adjacent_region(
+                    &i_to_key(source_key),
+                    Some(&keyspace_prefix),
+                    Duration::from_secs(3),
+                ) {
+                    warn!("try_merge_adjacent_region fail: {:?}", e);
+                }
+            }
+
+            let merge_region_count = client.pd_client.get_regions_number();
+            step!(
+                "shuffle regions done, regions {} -> {} -> {}",
+                region_count,
+                split_region_count,
+                merge_region_count
+            );
+        }
+
+        // Restore keyspace.
+        {
+            let snapshot_backup_ts = backup_ts_list[idx];
+            let snapshot_backup_name =
+                backup::IncrementalBackupFile::from_backup_ts(snapshot_backup_ts).into_name();
+            restore_keyspace::restore_keyspace(
+                keyspace_id,
+                keyspace_id,
+                &snapshot_backup_name,
+                None,
+                s3fs.clone(),
+                SecurityConfig::default(),
+                cluster.get_pd_client(),
+                runtime,
+                None,
+                reporter.clone(),
+            )
+            .unwrap();
+            step!("restore done. case: {}:{}:{}", case_idx, loop_idx, idx);
+        }
+
+        // Verify restored data.
+        {
+            let mut verify_options: Vec<(Option<(&[u8], &[u8])>, RequestOptions)> =
+                vec![(None, RequestOptions::default())];
+            if has_learner {
+                verify_options.push((
+                    Some((&keyspace_start, &keyspace_end)),
+                    RequestOptions {
+                        peer_role: RequestPeerRole::Learner,
+                    },
+                ));
+            }
+            let mut verify_res = vec![];
+            for (range, opt) in verify_options {
+                verify_res.push(
+                    client
+                        .verify_data_with_given_ref_store(&ref_store_list[idx], range, &opt)
+                        .unwrap(),
+                );
+            }
+            step!(
+                "verify restore data done{}, kv count: {:?}, case: {}:{}:{}",
+                if has_learner { " (with learner)" } else { "" },
+                verify_res,
+                case_idx,
+                loop_idx,
+                idx
+            );
+        }
     }
 
     // Write more data to verify the sequences.

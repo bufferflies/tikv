@@ -66,6 +66,8 @@ pub enum Error {
     ReachConcurrencyLimit(usize),
     #[error(transparent)]
     SharedError(#[from] SharedError),
+    #[error("Archive error {0}")]
+    ArchiveError(String),
 }
 
 impl From<dfs::Error> for Error {
