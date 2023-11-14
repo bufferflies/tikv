@@ -899,6 +899,6 @@ mod tests {
                 .unwrap();
         });
 
-        oss.shutdown();
+        oss.graceful_shutdown();
     }
 }

@@ -74,7 +74,8 @@ impl ServiceContext {
 pub struct ObjectStorageService {
     store_path: PathBuf,
     svc_handle: Option<JoinHandle<()>>,
-    close_tx: Option<oneshot::Sender<()>>,
+    notify: Arc<tokio::sync::Notify>,      // for shutdown
+    close_tx: Option<oneshot::Sender<()>>, // for graceful shutdown
     port: Arc<AtomicU16>,
     runtime: Runtime,
 }
@@ -90,6 +91,7 @@ impl ObjectStorageService {
         Self {
             store_path: store_path.into(),
             svc_handle: None,
+            notify: Arc::new(tokio::sync::Notify::new()),
             close_tx: None,
             port: Default::default(),
             runtime,
@@ -523,14 +525,24 @@ impl ObjectStorageService {
         let (close_tx, close_rx) = oneshot::channel();
 
         let port = self.port.clone();
+        let notify = self.notify.clone();
         let svc_handle = self.runtime.spawn(async move {
             let server = Server::bind(&addr).serve(make_svc);
             port.store(server.local_addr().port(), Ordering::Release);
             let graceful = server.with_graceful_shutdown(async {
                 close_rx.await.ok();
             });
-            if let Err(e) = graceful.await {
-                error!("server error: {}", e);
+            tokio::select! {
+                _ = notify.notified() => {
+                    info!("server shutdown");
+                }
+                res = graceful => {
+                    if let Err(e) = res {
+                        error!("server error: {}", e);
+                    } else {
+                        info!("server graceful shutdown");
+                    }
+                }
             }
         });
         self.svc_handle = Some(svc_handle);
@@ -546,10 +558,17 @@ impl ObjectStorageService {
         info!("start_server on port {}", self.port());
     }
 
-    pub fn shutdown(&mut self) {
+    pub fn graceful_shutdown(&mut self) {
         if let Some(handle) = self.svc_handle.take() {
             let close_tx = self.close_tx.take().unwrap();
             close_tx.send(()).unwrap();
+            self.runtime.block_on(async { handle.await.unwrap() })
+        }
+    }
+
+    pub fn shutdown(&mut self) {
+        if let Some(handle) = self.svc_handle.take() {
+            self.notify.notify_waiters();
             self.runtime.block_on(async { handle.await.unwrap() })
         }
     }
@@ -677,7 +696,71 @@ mod tests {
         }
 
         runtime.block_on(futures::future::join_all(handles));
+        oss.graceful_shutdown();
+    }
+
+    #[test]
+    fn test_oss_shutdown() {
+        test_util::init_log_for_test();
+
+        let base_dir = tempfile::Builder::new()
+            .prefix("test_oss_shutdown")
+            .tempdir()
+            .unwrap();
+
+        let mut oss = ObjectStorageService::new(base_dir.path());
+        oss.start_server();
+
+        let s3fs = S3Fs::new(
+            "oss_test".to_string(),
+            format!("http://127.0.0.1:{}", oss.port()),
+            "admin".to_string(),
+            "admin".to_string(),
+            "local".to_string(),
+            "cse_test".to_string(),
+        );
+        let runtime = s3fs.get_runtime();
+
+        let file_id = 42;
+        let key = s3fs.file_key(file_id);
+        runtime
+            .block_on(s3fs.create(
+                file_id,
+                Bytes::from("test_oss_shutdown".to_string()),
+                Options::new(0, 0),
+            ))
+            .unwrap();
+
+        let fs = s3fs.clone();
+        let key_clone = key.clone();
+        let handle: JoinHandle<bool /* request_timeout */> = runtime.spawn(async move {
+            let start = Instant::now_coarse();
+            while start.saturating_elapsed() < Duration::from_secs(5) {
+                // When oss is shutdown, the exist request must timeout.
+                match tokio::time::timeout(
+                    Duration::from_secs(2),
+                    fs.exist(key_clone.clone(), file_id.to_string()),
+                )
+                .await
+                {
+                    Ok(exist) => {
+                        assert!(exist.unwrap());
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                    Err(_) => return true,
+                }
+            }
+            false
+        });
+
+        let exist = runtime
+            .block_on(s3fs.exist(key, file_id.to_string()))
+            .unwrap();
+        assert!(exist);
+        std::thread::sleep(Duration::from_millis(500));
         oss.shutdown();
+        let request_timeout = runtime.block_on(handle).unwrap();
+        assert!(request_timeout);
     }
 
     #[test]
@@ -726,7 +809,7 @@ mod tests {
         }
 
         runtime.block_on(futures::future::join_all(handles));
-        oss.shutdown();
+        oss.graceful_shutdown();
     }
 
     #[test]
@@ -847,6 +930,6 @@ mod tests {
             }
         });
 
-        oss.shutdown();
+        oss.graceful_shutdown();
     }
 }

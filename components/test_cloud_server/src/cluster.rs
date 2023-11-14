@@ -63,9 +63,14 @@ impl ServerCluster {
         F: Fn(u16, &mut TikvConfig),
     {
         tikv_util::thread_group::set_properties(Some(GroupProperties::default()));
+        // Use prefix to generate `tmp_dir` to indicate the usage of dir more clearly.
+        let tmp_dir = tempfile::Builder::new()
+            .prefix("cluster_")
+            .tempdir()
+            .unwrap();
         let mut cluster = Self {
             servers: HashMap::new(),
-            tmp_dir: TempDir::new().unwrap(),
+            tmp_dir,
             env: Arc::new(EnvBuilder::new().cq_count(2).build()),
             pd_client: Arc::new(TestPdClient::new(1, false)),
             pd_server: None,

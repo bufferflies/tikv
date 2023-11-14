@@ -16,7 +16,7 @@ pub fn init_task(
     ctx: LoadDataContext,
     start_ts: u64,
     commit_ts: u64,
-) -> LoadTaskScheduler {
+) -> (LoadTaskScheduler, std::thread::JoinHandle<()>) {
     let task_id = format!("load_data_{}", start_ts);
     let task_ctx = TaskContext {
         task_id,
@@ -29,7 +29,7 @@ pub fn init_task(
 
     let mut worker = LoadTaskWorker::new(config, ctx, task_ctx);
     let scheduler = worker.get_scheduler();
-    std::thread::spawn(move || {
+    let worker_handle = std::thread::spawn(move || {
         worker.run();
     });
 
@@ -38,7 +38,7 @@ pub fn init_task(
         "task canceled: {}",
         scheduler.error_msg()
     );
-    scheduler
+    (scheduler, worker_handle)
 }
 
 pub fn put_chunks<FnKey, FnVal, FnDup>(
@@ -145,7 +145,8 @@ pub fn build(
     panic!("build timeout, states: {:?}", scheduler.states());
 }
 
-pub fn cleanup(scheduler: &LoadTaskScheduler) {
+pub fn cleanup(scheduler: &LoadTaskScheduler, worker_handle: std::thread::JoinHandle<()>) {
     scheduler.cancel("deleted".to_string());
     scheduler.sender.send(LoadTaskMsg::Cleanup).unwrap();
+    worker_handle.join().unwrap();
 }

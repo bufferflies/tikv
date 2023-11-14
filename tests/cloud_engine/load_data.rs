@@ -142,7 +142,8 @@ fn impl_test_load_data(enable_inner_key_off: bool) {
             .block_on(request_major_compact_on_store(store, query.as_str()))
     }
 
-    let scheduler = init_task(load_data_config, load_data_ctx, start_ts, commit_ts);
+    let (scheduler, worker_handle) =
+        init_task(load_data_config, load_data_ctx, start_ts, commit_ts);
 
     // Put chunks.
     let keyspace_prefix = table_key_prefix(5);
@@ -195,7 +196,7 @@ fn impl_test_load_data(enable_inner_key_off: bool) {
     }
 
     // Cleanup.
-    cleanup(&scheduler);
+    cleanup(&scheduler, worker_handle);
 
     // Verify data consistency.
     let verified_count = client
@@ -279,7 +280,8 @@ fn test_load_data_overlap() {
             max_in_mem_size: 1024, // 1KB
             master_key: master_key.clone(),
         };
-        let scheduler = init_task(load_data_config.clone(), load_data_ctx, start_ts, commit_ts);
+        let (scheduler, worker_handle) =
+            init_task(load_data_config.clone(), load_data_ctx, start_ts, commit_ts);
 
         // Put chunks.
         let keyspace_prefix = table_key_prefix(5);
@@ -303,7 +305,7 @@ fn test_load_data_overlap() {
         )?;
 
         // Cleanup.
-        cleanup(&scheduler);
+        cleanup(&scheduler, worker_handle);
 
         Ok(ref_store)
     };

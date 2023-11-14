@@ -101,7 +101,7 @@ fn do_load_data(
     config: LoadDataConfig,
 ) {
     let temp_dir = tempfile::Builder::new()
-        .prefix("load_data")
+        .prefix("load_data_")
         .tempdir()
         .unwrap();
 
@@ -130,7 +130,7 @@ fn do_load_data(
         max_in_mem_size: MAX_IN_MEM_SIZE,
         master_key,
     };
-    let scheduler = init_task(config, load_data_ctx, start_ts, commit_ts);
+    let (scheduler, worker_handle) = init_task(config, load_data_ctx, start_ts, commit_ts);
     info!(
         "load_data.init_task: keyspace {}, table {}, start_ts {}, commit_ts {}",
         keyspace_id, table_id, start_ts, commit_ts
@@ -188,7 +188,7 @@ fn do_load_data(
     drop(guard);
 
     // Cleanup.
-    cleanup(&scheduler);
+    cleanup(&scheduler, worker_handle);
 }
 
 pub(crate) fn check_load_data() {
