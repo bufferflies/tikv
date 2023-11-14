@@ -256,16 +256,28 @@ impl Scheduler {
             Some((left, right)) => (left, right),
             None => return false,
         };
+
+        // To avoid deadlock, we need lock regions in same order. Lock the left region
+        // first.
+        let left_mutex = self.get_region_mutex(left.id);
+        let _left_guard = left_mutex.lock().unwrap();
+        if self.is_region_changed(left) {
+            return false;
+        }
+
+        // Also need to lock the right region to avoid schedule conflicts.
+        let right_mutex = self.get_region_mutex(right.id);
+        let _right_guard = right_mutex.lock().unwrap();
+        if self.is_region_changed(right) {
+            return false;
+        }
+
         let (source, target) = if rng.gen_ratio(1, 2) {
             (left, right)
         } else {
             (right, left)
         };
-        let mutex = self.get_region_mutex(source.id);
-        let _guard = mutex.lock().unwrap();
-        if self.is_region_changed(source) {
-            return false;
-        }
+
         let source_stores: HashSet<u64> = source.get_peers().iter().map(|p| p.store_id).collect();
         let target_stores: Vec<u64> = target.get_peers().iter().map(|p| p.store_id).collect();
         for target_store_id in &target_stores {
