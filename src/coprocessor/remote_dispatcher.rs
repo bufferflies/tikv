@@ -18,7 +18,7 @@ use tikv_alloc::MemoryTraceGuard;
 use tikv_kv::{Engine, Statistics};
 use tikv_util::{deadline::Deadline, time::Instant, timer::GLOBAL_TIMER_HANDLE};
 use tipb::DagRequest;
-use txn_types::TsSet;
+use txn_types::{TimeStamp, TsSet};
 
 use crate::{
     coprocessor::{
@@ -159,7 +159,8 @@ pub(crate) fn try_remote_dag_handler<E: Engine>(
         ranges.push((start, end))
     }
     let num_blocks = snap.estimated_range_blocks(&ranges);
-    if num_blocks < remote_ctx.cop_min_blocks {
+    let min_blocks = calc_min_blocks(req_ctx.txn_start_ts, remote_ctx.cop_min_blocks);
+    if num_blocks < min_blocks {
         return None;
     }
     COPR_REMOTE_DAG_ESTIMATE_BLOCKS_HISTOGRAM.observe(num_blocks as f64);
@@ -387,6 +388,26 @@ impl RequestHandler for RemoteDagDispatcher {
     }
 }
 
+/// If the query has already run for a long time, the additional latency for
+/// offloading to remote coprocessor is non-significant, we can decreases the
+/// min blocks to reduce the tikv-server resource consumption.
+fn calc_min_blocks(start_ts: TimeStamp, config_min_blocks: usize) -> usize {
+    const LONG_QUERY_MS: u64 = 15 * 1000;
+    let elapsed_ms = TimeStamp::physical_now().saturating_sub(start_ts.physical());
+    if elapsed_ms > LONG_QUERY_MS * 4 {
+        // 60s
+        config_min_blocks / 8
+    } else if elapsed_ms > LONG_QUERY_MS * 2 {
+        // 30s
+        config_min_blocks / 4
+    } else if elapsed_ms > LONG_QUERY_MS {
+        // 15s
+        config_min_blocks / 2
+    } else {
+        config_min_blocks
+    }
+}
+
 pub fn encode_remote_cop_request(
     cop_req: Vec<u8>,
     mem_data: Vec<u8>,
@@ -454,4 +475,25 @@ fn test_remote_cop_coded() {
     assert_eq!(cop_req, "cop_req".as_bytes());
     assert_eq!(mem_data, "mem_data".as_bytes());
     assert_eq!(snap_data, "snap_data".as_bytes());
+}
+
+#[test]
+fn test_calc_min_blocks() {
+    let conf_min_blocks = 512usize;
+    let ts = TimeStamp::default();
+    assert_eq!(calc_min_blocks(ts, conf_min_blocks), 64);
+    let ts = TimeStamp::max();
+    assert_eq!(calc_min_blocks(ts, conf_min_blocks), 512);
+
+    let phys_now = TimeStamp::physical_now();
+    let ts = TimeStamp::compose(phys_now - 70 * 1000, 1);
+    assert_eq!(calc_min_blocks(ts, conf_min_blocks), 64);
+    let ts = TimeStamp::compose(phys_now - 40 * 1000, 1);
+    assert_eq!(calc_min_blocks(ts, conf_min_blocks), 128);
+    let ts = TimeStamp::compose(phys_now - 20 * 1000, 1);
+    assert_eq!(calc_min_blocks(ts, conf_min_blocks), 256);
+    let ts = TimeStamp::compose(phys_now - 10 * 1000, 1);
+    assert_eq!(calc_min_blocks(ts, conf_min_blocks), 512);
+    let ts = TimeStamp::compose(phys_now + 20 * 1000, 1);
+    assert_eq!(calc_min_blocks(ts, conf_min_blocks), 512);
 }
