@@ -336,6 +336,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
             );
             let mut region_futures = vec![];
             for region in &regions {
+                tikv_util::set_current_region(region.id());
                 if let Some(snap) = kv.get_snap_access(region.id()) {
                     if !snap.has_data_in_prefix(&prefix) {
                         continue;
@@ -356,12 +357,14 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
                 );
                 info!("delete prefix {:?} for region {:?}", prefix, region);
             }
+            tikv_util::set_current_region(0);
             let _ = futures::future::join_all(region_futures).await;
             // Wait and check if all regions have applied delete prefix.
             let mut regions_applied = false;
             for i in 1..=5 {
                 let mut applied = true;
                 for region in &regions {
+                    tikv_util::set_current_region(region.id());
                     if let Some(snap) = kv.get_snap_access(region.id()) {
                         if snap.has_data_in_prefix(&prefix) {
                             applied = false;
@@ -369,6 +372,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
                         }
                     }
                 }
+                tikv_util::set_current_region(0);
                 if !applied {
                     let deadline = std::time::Instant::now() + Duration::from_secs(i);
                     let _ = GLOBAL_TIMER_HANDLE.delay(deadline).compat().await.is_ok();
