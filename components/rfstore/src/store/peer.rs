@@ -2241,6 +2241,16 @@ impl Peer {
         }
 
         let (term, idx) = self.pending_truncate.unwrap();
+        if ctx.global.engines.raft.has_dependents(self.region_id) {
+            info!(
+                "{} has dependents, skip truncate pending raft log, term {} index {}",
+                self.tag(),
+                term,
+                idx
+            );
+            return;
+        }
+
         if self.get_store().truncated_index() < idx && idx <= applied_index {
             self.mut_store()
                 .truncate_raft_log(&mut ctx.raft_wb, idx, term);

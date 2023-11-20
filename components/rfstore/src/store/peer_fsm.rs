@@ -1722,6 +1722,14 @@ impl<'a> PeerMsgHandler<'a> {
         let persisted_log_idx = self.peer.get_store().data_persisted_log_index().unwrap();
         to_truncate_idx = cmp::min(to_truncate_idx, persisted_log_idx);
 
+        // Check if we need to handle pending_truncate.
+        if let Some((_, idx)) = self.peer.pending_truncate {
+            if idx <= applied_idx {
+                to_truncate_idx = idx;
+                self.peer.pending_truncate = None;
+            }
+        }
+
         let truncated_idx = self.peer.get_store().truncated_index();
         if to_truncate_idx > truncated_idx {
             let to_truncate_term = self.peer.get_store().term(to_truncate_idx).unwrap();
