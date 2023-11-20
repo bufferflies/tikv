@@ -13,7 +13,7 @@ concurrency:
 jobs:
   dev:
     name: Run random tests
-    runs-on: [x64, cse]
+    runs-on: amd64
     env:
       RUSTFLAGS: -Dwarnings
       FAIL_POINT: "1"

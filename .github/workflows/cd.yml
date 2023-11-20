@@ -14,12 +14,11 @@ on:
 jobs:
   build-arm64:
     name: Build ARM64 Image
-    runs-on: [arm64, cse]
+    runs-on: arm64
     timeout-minutes: 120
     steps:
       - name: Check out Code
         uses: actions/checkout@v2
-
       - name: Build Image
         uses: docker/build-push-action@v2
         with:
@@ -27,16 +26,22 @@ jobs:
           push: true
           tags: |
             xexplorersun/tikv:cse-${{ github.sha }}-arm64
+      - name: Build Image Harbor
+        uses: docker/build-push-action@v2
+        with:
+          platforms: "linux/arm64"
+          push: true
+          tags: |
+            hub.pingcap.net/sunxiaoguang/serverless/tikv:${{ github.sha }}-arm64
   build-amd64:
     name: Build AMD64 Image
-    runs-on: [amd64, cse]
+    runs-on: amd64
     timeout-minutes: 120
     outputs:
       image: tikv-cse:${{ github.sha }}-amd64
     steps:
       - name: Check out Code
         uses: actions/checkout@v2
-
       - name: Build Image
         uses: docker/build-push-action@v2
         with:
@@ -44,9 +49,16 @@ jobs:
           push: true
           tags: |
             xexplorersun/tikv:cse-${{ github.sha }}-amd64
+      - name: Build Image Harbor
+        uses: docker/build-push-action@v2
+        with:
+          platforms: "linux/amd64"
+          push: true
+          tags: |
+            hub.pingcap.net/sunxiaoguang/serverless/tikv:${{ github.sha }}-amd64
   multi-arch:
     name: Create Multi-Architecture Image
-    runs-on: [amd64, cse]
+    runs-on: amd64
     needs: ["build-arm64", "build-amd64"]
     steps:
       - name: create-manifest
@@ -57,10 +69,18 @@ jobs:
       - name: push-manifest
         run: |
           docker manifest push xexplorersun/tikv:cse-${{ github.sha }}
+      - name: create-manifest-harbor
+        run: |
+          docker manifest create hub.pingcap.net/sunxiaoguang/serverless/tikv:${{ github.sha }} \
+          --amend hub.pingcap.net/sunxiaoguang/serverless/tikv:${{ github.sha }}-amd64 \
+          --amend hub.pingcap.net/sunxiaoguang/serverless/tikv:${{ github.sha }}-arm64
+      - name: push-manifest-harbor
+        run: |
+          docker manifest push hub.pingcap.net/sunxiaoguang/serverless/tikv:${{ github.sha }}
 
   sync-image:
     name: Sync image to GCR
-    runs-on: [amd64, cse]
+    runs-on: amd64
     needs: [ "multi-arch" ]
     if: ${{ inputs.overwrite_gcr || github.ref == 'refs/heads/cloud-engine' }}
     env:
