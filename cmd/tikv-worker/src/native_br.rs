@@ -646,6 +646,7 @@ impl RestoreProgressReporter {
             RestoreStep::RemoveTiFlashReplicas => (30, "remove tiflash replicas"),
             RestoreStep::LoadBackupMeta => (35, "load backup meta"),
             RestoreStep::ExtractBackupShards => (40, "extract backup shards"),
+            RestoreStep::ResolveLocks => (48, "resolve locks"),
             RestoreStep::FlushShards => (50, "flush shards"),
             RestoreStep::TruncateTs => (52, "truncate ts"),
             RestoreStep::SplitRegions => (55, "split regions"),

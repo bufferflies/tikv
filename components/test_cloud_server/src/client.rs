@@ -10,7 +10,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex,
     },
-    thread::sleep,
+    thread::{self, sleep},
     time::Duration,
 };
 
@@ -48,6 +48,8 @@ use crate::{
     must_wait, try_wait,
     txnlock::lock_resolver::{LockResolver, ResolveLocksOptions},
 };
+
+const MAX_WAIT_LOCK_DURATION: Duration = Duration::from_millis(500);
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -212,6 +214,42 @@ impl RawRegion {
     }
 }
 
+pub enum CommitAction {
+    /// Sync commit all keys.
+    SyncCommit,
+    /// Sync commit the primary key, then async commit the secondary keys.
+    /// When `delay == Duration::MAX`, the secondary keys will not be committed.
+    AsyncCommitSecondaryKeys(Duration /* delay */),
+    /// No key is committed. The transaction should be rolled back.
+    NoCommit,
+}
+
+impl Clone for ClusterClient {
+    fn clone(&self) -> Self {
+        // Do not copy region cache to reduce memory usage.
+        let make_clone = || -> Self {
+            Self {
+                pd_client: self.pd_client.clone(),
+                channels: self.channels.clone(),
+                region_ranges: Default::default(),
+                regions: Default::default(),
+                ref_store: self.ref_store.clone(),
+                max_ts: Default::default(),
+                lock_resolver: None,
+                api_version: self.api_version,
+            }
+        };
+        let mut cloned = make_clone();
+        let lock_resolver = if self.lock_resolver.is_some() {
+            Some(LockResolver::new(make_clone()))
+        } else {
+            None
+        };
+        cloned.lock_resolver = lock_resolver.map(|x| Box::new(x));
+        cloned
+    }
+}
+
 impl ClusterClient {
     pub fn get_ts(&self) -> TimeStamp {
         block_on(self.pd_client.get_tso()).unwrap()
@@ -229,6 +267,19 @@ impl ClusterClient {
     where
         F: Fn(usize) -> Vec<u8>,
     {
+        self.try_del_kv(rng, gen_key, CommitAction::SyncCommit)
+            .unwrap();
+    }
+
+    pub fn try_del_kv<F>(
+        &mut self,
+        rng: Range<usize>,
+        gen_key: F,
+        commit_action: CommitAction,
+    ) -> Result<()>
+    where
+        F: Fn(usize) -> Vec<u8>,
+    {
         let start_key = gen_key(rng.start);
         let start_ts = self.get_ts();
 
@@ -242,9 +293,17 @@ impl ClusterClient {
         let keys = mutations.iter().map(|m| m.get_key().to_vec()).collect();
         self.kv_prewrite(mutations.clone(), start_key, start_ts);
         let commit_ts = self.get_ts();
-        self.kv_commit(keys, start_ts, commit_ts);
+
+        match commit_action {
+            CommitAction::NoCommit => {
+                return Ok(());
+            }
+            commit_action => self.kv_commit_ext(keys, start_ts, commit_ts, commit_action),
+        }
+
         self.del_kv_in_ref_store(mutations);
         self.set_max_ts(commit_ts.into_inner());
+        Ok(())
     }
 
     fn del_kv_in_ref_store(&mut self, mutations: Vec<Mutation>) {
@@ -276,10 +335,17 @@ impl ClusterClient {
         F: Fn(usize) -> Vec<u8>,
         G: Fn(usize) -> Vec<u8>,
     {
-        self.try_put_kv(rng, gen_key, gen_val).unwrap();
+        self.try_put_kv(rng, gen_key, gen_val, CommitAction::SyncCommit)
+            .unwrap();
     }
 
-    pub fn try_put_kv<F, G>(&mut self, rng: Range<usize>, gen_key: F, gen_val: G) -> Result<()>
+    pub fn try_put_kv<F, G>(
+        &mut self,
+        rng: Range<usize>,
+        gen_key: F,
+        gen_val: G,
+        commit_action: CommitAction,
+    ) -> Result<()>
     where
         F: Fn(usize) -> Vec<u8>,
         G: Fn(usize) -> Vec<u8>,
@@ -299,7 +365,14 @@ impl ClusterClient {
         let put_time = Instant::now();
         self.kv_prewrite(mutations.clone(), start_key, start_ts);
         let commit_ts = self.get_ts();
-        self.kv_commit(keys, start_ts, commit_ts);
+
+        match commit_action {
+            CommitAction::NoCommit => {
+                return Ok(());
+            }
+            commit_action => self.kv_commit_ext(keys, start_ts, commit_ts, commit_action),
+        }
+
         let first = mutations.first().unwrap();
         self.verify_key_value(
             first.get_key(),
@@ -424,6 +497,35 @@ impl ClusterClient {
         let groups = self.group_keys_by_region(keys);
         for (id_ver, group_keys) in groups {
             self.kv_commit_single_region(id_ver, group_keys, start_ts, commit_ts);
+        }
+    }
+
+    /// Primary key is the first item of `keys`.
+    pub fn kv_commit_ext(
+        &mut self,
+        keys: Vec<Vec<u8>>,
+        start_ts: TimeStamp,
+        commit_ts: TimeStamp,
+        commit_action: CommitAction,
+    ) {
+        match commit_action {
+            CommitAction::SyncCommit => {
+                self.kv_commit(keys, start_ts, commit_ts);
+            }
+            CommitAction::AsyncCommitSecondaryKeys(delay) => {
+                let pk = keys[0].clone();
+                self.kv_commit(vec![pk], start_ts, commit_ts);
+
+                if delay < Duration::MAX {
+                    let secondary_keys = keys[1..].to_vec();
+                    let mut client = self.clone();
+                    thread::spawn(move || {
+                        thread::sleep(delay);
+                        client.kv_commit(secondary_keys, start_ts, commit_ts);
+                    });
+                }
+            }
+            CommitAction::NoCommit => {}
         }
     }
 
@@ -822,7 +924,8 @@ impl ClusterClient {
                 start_ts,
                 res.until_expire_ms()
             );
-            sleep(Duration::from_millis(res.until_expire_ms()));
+            // Sleep no more than MAX_WAIT_LOCK_DURATION to speed up tests.
+            sleep(Duration::from_millis(res.until_expire_ms()).min(MAX_WAIT_LOCK_DURATION));
         } else {
             info!(
                 "{} txn {} resolve_locks: all locks are resolved",

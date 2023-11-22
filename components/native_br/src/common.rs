@@ -1,5 +1,5 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, fmt, sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use engine_traits::{GetObjectOptions, ListObjectContent, ObjectStorage};
@@ -158,13 +158,28 @@ pub fn load_peer_raft_state(
     Some(raft_state)
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Default, PartialEq)]
 pub(crate) struct RawRegion {
     pub id: u64,
     pub raw_start: Vec<u8>,
     pub raw_end: Vec<u8>,
     pub epoch: metapb::RegionEpoch,
     pub peers: Vec<metapb::Peer>,
+}
+
+impl fmt::Debug for RawRegion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RawRegion")
+            .field("id", &self.id)
+            .field(
+                "raw_start",
+                &log_wrappers::hex_encode_upper(&self.raw_start),
+            )
+            .field("raw_end", &log_wrappers::hex_encode_upper(&self.raw_end))
+            .field("epoch", &self.epoch)
+            .field("peers", &self.peers)
+            .finish()
+    }
 }
 
 impl RawRegion {
@@ -174,6 +189,19 @@ impl RawRegion {
 
     pub fn get_end_key(&self) -> &[u8] {
         self.raw_end.as_slice()
+    }
+
+    /// Equal: `key` is within the boundary of the region.
+    /// Less: region is to the left of `key`.
+    /// Greater: region is to the right of `key`.
+    pub fn compare_with_key(&self, key: &[u8]) -> std::cmp::Ordering {
+        if self.raw_end.as_slice() <= key {
+            std::cmp::Ordering::Less
+        } else if self.raw_start.as_slice() > key {
+            std::cmp::Ordering::Greater
+        } else {
+            std::cmp::Ordering::Equal
+        }
     }
 }
 
@@ -428,4 +456,70 @@ fn replay_wal_chunks(
     rf.replay_wal_file(epoch_wal.freeze(), epoch_id, end_offset, full_restore)?;
 
     Ok(())
+}
+
+#[derive(Debug)]
+pub struct StorePeer {
+    pub store_id: u64,
+    pub peer_id: u64,
+}
+
+#[derive(Clone)]
+pub struct RegionMetaGetter {
+    pub shard_store_map: Arc<HashMap<u64 /* shard_id */, StorePeer>>,
+    pub raft_engines: Arc<HashMap<u64 /* store_id */, rfengine::RfEngine>>,
+}
+
+impl fmt::Debug for RegionMetaGetter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ShardMetaGetter")
+            .field("shard_store_map", &self.shard_store_map)
+            .field(
+                "raft_engines",
+                &self.raft_engines.keys().collect::<Vec<_>>(),
+            )
+            .finish()
+    }
+}
+
+impl RegionMetaGetter {
+    pub fn load_region_meta(
+        &self,
+        shard_id: u64,
+        shard_ver: u64,
+        kvengine_store_id: u64,
+    ) -> Option<metapb::Region> {
+        self.shard_store_map.get(&shard_id).and_then(|sp| {
+            self.raft_engines.get(&sp.store_id).map(|rf| {
+                let mut region_state =
+                    rf.load_region_state(sp.peer_id, shard_ver)
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "{}:{} failed to get region state, state key {:?}",
+                                shard_id,
+                                shard_ver,
+                                rfengine::region_state_key(shard_ver),
+                            );
+                        });
+                let mut region = region_state.take_region();
+
+                // Filter the leader peer by store id.
+                let mut peers = region.take_peers().into_vec();
+                peers.retain(|p| p.store_id == sp.store_id);
+                assert!(
+                    peers.len() == 1,
+                    "leader peer not found, region {:?}, store_id {}",
+                    rf.load_region_state(sp.peer_id, shard_ver).unwrap(),
+                    sp.store_id
+                );
+                // Move the peer to the same store with kvengine.
+                // To keep the region meta consistent with kvengine during applying committing
+                // locks.
+                peers[0].store_id = kvengine_store_id;
+                region.mut_peers().push(peers.pop().unwrap());
+
+                region
+            })
+        })
+    }
 }

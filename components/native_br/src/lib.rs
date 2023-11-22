@@ -8,6 +8,7 @@ pub mod backup;
 pub mod backup_worker;
 pub mod common;
 pub mod error;
+mod lock;
 pub mod restore;
 pub mod restore_keyspace;
 mod tiflash;

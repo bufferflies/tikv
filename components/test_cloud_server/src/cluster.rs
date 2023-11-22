@@ -424,6 +424,13 @@ impl ServerCluster {
         .unwrap();
         ClusterTxnClient::new(client, self.get_pd_client(), self.new_client())
     }
+
+    pub fn set_gc_safe_point(&self, ts: u64) {
+        self.pd_client.set_gc_safe_point(ts);
+        for node_id in self.get_nodes() {
+            self.get_kvengine(node_id).update_managed_safe_ts(ts);
+        }
+    }
 }
 
 pub fn new_test_config(base_dir: &Path, node_id: u16) -> TikvConfig {

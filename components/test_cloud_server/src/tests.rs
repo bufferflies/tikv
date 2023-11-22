@@ -10,7 +10,7 @@ use tikv_client::TimestampExt;
 use tikv_util::{codec::bytes::encode_bytes, info};
 use tokio::runtime::Runtime;
 
-use crate::ServerCluster;
+use crate::{client::CommitAction, ServerCluster};
 
 #[test]
 fn it_works() {
@@ -40,6 +40,36 @@ fn it_works() {
         cluster.wait_region_replicated(split_key, 3);
     }
     client.verify_data_with_ref_store();
+
+    client
+        .try_put_kv(
+            50..250,
+            i_to_key,
+            prefixed_i_to_val("async".to_string()),
+            CommitAction::AsyncCommitSecondaryKeys(Duration::from_millis(100)),
+        )
+        .unwrap();
+    client.verify_data_with_ref_store();
+
+    client
+        .try_put_kv(
+            150..300,
+            i_to_key,
+            prefixed_i_to_val("no".to_string()),
+            CommitAction::NoCommit,
+        )
+        .unwrap();
+    client.verify_data_with_ref_store();
+
+    client
+        .try_del_kv(
+            100..200,
+            i_to_key,
+            CommitAction::AsyncCommitSecondaryKeys(Duration::MAX),
+        )
+        .unwrap();
+    client.verify_data_with_ref_store();
+
     cluster.stop();
 }
 
@@ -226,4 +256,12 @@ fn i_to_key(i: usize) -> Vec<u8> {
 fn i_to_val(i: usize) -> Vec<u8> {
     // `repeat` must > 0. CSE treat empty value as not found.
     format!("val{:04}", i).repeat(i % 32 + 1).into_bytes()
+}
+
+fn prefixed_i_to_val(prefix: String) -> impl Fn(usize) -> Vec<u8> {
+    move |i| {
+        format!("{}:{:04}", prefix, i)
+            .repeat(i % 32 + 1)
+            .into_bytes()
+    }
 }

@@ -639,7 +639,8 @@ impl EngineCore {
         }
     }
 
-    fn collect_shard_id_vers(&self) -> Vec<IdVer> {
+    // Use `get_all_shard_id_vers` first.
+    pub fn collect_shard_id_vers(&self) -> Vec<IdVer> {
         self.shards
             .iter()
             .map(|x| IdVer::new(x.id, x.ver))

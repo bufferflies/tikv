@@ -24,8 +24,9 @@ use hyper::{
     service::{make_service_fn, service_fn},
     Body, HeaderMap, Method, Request, Response, Server, StatusCode,
 };
-use kvengine::dfs::{ListObjects, Tagging, STORAGE_CLASS_DEFAULT};
+use kvengine::dfs::{DFSConfig, ListObjects, Tagging, STORAGE_CLASS_DEFAULT};
 use rand::Rng;
+use tempfile::TempDir;
 use tikv_util::{debug, error, info, time::Instant};
 use tokio::{
     fs,
@@ -583,6 +584,27 @@ fn visit_path(path: PathBuf, cb: &mut dyn FnMut(PathBuf)) {
     } else {
         cb(path);
     }
+}
+
+pub fn prepare_dfs(prefix: &str) -> (TempDir, ObjectStorageService, DFSConfig) {
+    let base_dir = tempfile::Builder::new().prefix(prefix).tempdir().unwrap();
+
+    let oss_dir = base_dir.path().join("oss");
+    let mut oss = ObjectStorageService::new(oss_dir);
+    oss.start_server();
+
+    let dfs_config = DFSConfig {
+        prefix: prefix.to_string(),
+        s3_endpoint: format!("http://127.0.0.1:{}", oss.port()),
+        s3_key_id: "admin".to_string(),
+        s3_secret_key: "admin".to_string(),
+        s3_bucket: prefix.to_string(),
+        s3_region: "local".to_string(),
+        zstd_compression_level: "3".to_string(),
+        ..Default::default()
+    };
+
+    (base_dir, oss, dfs_config)
 }
 
 #[cfg(test)]

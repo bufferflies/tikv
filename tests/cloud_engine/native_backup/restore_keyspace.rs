@@ -8,7 +8,10 @@ use std::{
     time::Duration,
 };
 
-use kvengine::dfs::{DFSConfig, Dfs, S3Fs};
+use kvengine::{
+    dfs::{DFSConfig, Dfs, S3Fs},
+    ShardStats, CF_LEVELS, WRITE_CF,
+};
 use kvproto::metapb;
 use native_br::{
     archive, backup,
@@ -21,16 +24,19 @@ use pd_client::PdClient;
 use rand::Rng;
 use security::SecurityConfig;
 use test_cloud_server::{
-    client::{RequestOptions, RequestPeerRole},
-    oss::ObjectStorageService,
+    client::{CommitAction, RequestOptions, RequestPeerRole},
+    oss::prepare_dfs,
     try_wait, ServerCluster,
 };
+use test_pd_client::TestPdClient;
 use tikv::config::TikvConfig;
-use tikv_util::{config::ReadableSize, debug, info, store::new_learner_peer, warn};
+use tikv_util::{
+    codec::bytes::encode_bytes, config::ReadableSize, debug, info, store::new_learner_peer, warn,
+};
 use tokio::runtime::Runtime;
 use txn_types::TimeStamp;
 
-use crate::alloc_node_id_vec;
+use crate::{alloc_node_id_vec, request_major_compact_on_store};
 
 const BASIC_DATA_COUNT: usize = 10;
 const RANDOM_VALUE_LEN: usize = 64;
@@ -61,11 +67,11 @@ fn test_restore_keyspace() {
         .parse::<usize>()
         .unwrap_or(DEFAULT_TARGET_REGIONS);
 
-    test_restore_keyspace_opt(loop_count, target_regions, true, false, false);
+    test_restore_keyspace_opt(loop_count, target_regions, true, true, false);
     // Regression test for `inner_key_off` disabled.
     test_restore_keyspace_opt(DEFAULT_LOOP_COUNT, target_regions, false, false, false);
-    // Regression test for `lightweight` enabled.
-    test_restore_keyspace_opt(DEFAULT_LOOP_COUNT, target_regions, true, true, false);
+    // Regression test for `lightweight` disabled.
+    test_restore_keyspace_opt(DEFAULT_LOOP_COUNT, target_regions, true, false, false);
     // Test archiving without `inner_key_off`and lightweight backup.
     test_restore_keyspace_opt(DEFAULT_LOOP_COUNT, target_regions, false, false, true);
     // Test archiving with `inner_key_off` and lightweight backup.
@@ -87,26 +93,7 @@ fn test_restore_keyspace_opt(
         (2, 1, None, false, 1),
     ];
 
-    let base_dir = tempfile::Builder::new()
-        .prefix("test_restore_keyspace_")
-        .tempdir()
-        .unwrap();
-
-    let oss_dir = base_dir.path().join("oss");
-    let mut oss = ObjectStorageService::new(oss_dir);
-    oss.start_server();
-
-    let dfs_config = DFSConfig {
-        prefix: "pfx".to_string(),
-        s3_endpoint: format!("http://127.0.0.1:{}", oss.port()),
-        s3_key_id: "admin".to_string(),
-        s3_secret_key: "admin".to_string(),
-        s3_bucket: "bkt".to_string(),
-        s3_region: "local".to_string(),
-        zstd_compression_level: "3".to_string(),
-        ..Default::default()
-    };
-
+    let (_temp_dir, _oss, dfs_config) = prepare_dfs("test_restore_keyspace_");
     let mut cluster = ServerCluster::new(
         alloc_node_id_vec(NODES_COUNT),
         |_, conf: &mut TikvConfig| {
@@ -242,13 +229,29 @@ fn test_restore_keyspace_impl(
     let reporter = Arc::new(DummyStepReporter::default());
 
     // Import data.
-    client.put_kv(0..data_count, &i_to_key, i_to_val(IMPORT_DATA_LEN));
+    let commit_action = if rng.gen_ratio(2, 3) {
+        CommitAction::AsyncCommitSecondaryKeys(Duration::ZERO)
+    } else {
+        CommitAction::AsyncCommitSecondaryKeys(Duration::MAX)
+    };
+    client
+        .try_put_kv(
+            0..data_count,
+            &i_to_key,
+            i_to_val(IMPORT_DATA_LEN),
+            commit_action,
+        )
+        .unwrap();
     let origin_ref_store = client.dump_ref_store();
 
     // Prepare for PiTR.
     let truncate_ts = if rng.gen_ratio(1, 2) {
         let ts = client.get_ts();
-        client.put_kv(0..data_count, &i_to_key, i_to_val(PRE_PITR_DATA_LEN));
+        client.put_kv(
+            0..(data_count / 2).max(1),
+            &i_to_key,
+            i_to_val(PRE_PITR_DATA_LEN),
+        );
         step!("another writes for pitr done");
         client.verify_data_with_ref_store();
         Some(ts.into_inner())
@@ -261,7 +264,11 @@ fn test_restore_keyspace_impl(
     let backup_meta = {
         let backup_ts = client.get_ts().into_inner();
         // Put more data before backup to verify truncate ts take affect.
-        client.put_kv(0..data_count, &i_to_key, i_to_val(PRE_BACKUP_DATA_LEN));
+        client.put_kv(
+            0..(data_count / 2).max(1),
+            &i_to_key,
+            i_to_val(PRE_BACKUP_DATA_LEN),
+        );
         step!("another writes done");
         client.verify_data_with_ref_store();
         assert!(
@@ -724,6 +731,136 @@ fn test_restore_archived_keyspace_impl(
     step!("verify more writes done");
 }
 
+/// This test is to verify that `restore_keyspace` can resolve locks.
+///
+/// Resolving locks is necessary when a backup is performed after the primary
+/// key is committed but the secondary keys are not in a transaction.
+///
+/// See https://github.com/tidbcloud/cloud-storage-engine/issues/1134.
+#[test]
+fn test_restore_keyspace_with_resolve_locks() {
+    const KEYSPACE_ID: u32 = 1;
+
+    test_util::init_log_for_test();
+    let (_temp_dir, _oss, dfs_config) = prepare_dfs("test_restore_keyspace_");
+    let s3fs = Arc::new(S3Fs::new(
+        dfs_config.prefix.clone(),
+        dfs_config.s3_endpoint.clone(),
+        dfs_config.s3_key_id.clone(),
+        dfs_config.s3_secret_key.clone(),
+        dfs_config.s3_region.clone(),
+        dfs_config.s3_bucket.clone(),
+    ));
+    let reporter = Arc::new(DummyStepReporter::default());
+    let runtime = Runtime::new().unwrap();
+
+    let mut cluster = ServerCluster::new(
+        alloc_node_id_vec(NODES_COUNT),
+        |_, conf: &mut TikvConfig| {
+            conf.dfs = dfs_config.clone();
+            // Set small mem-table size to make data reach L0+.
+            conf.rocksdb.writecf.write_buffer_size = ReadableSize(128);
+            conf.coprocessor.region_split_size = ReadableSize::kb(128); // kv_opts.base_size = 8kb
+            conf.coprocessor.region_bucket_size = ReadableSize::kb(64);
+            conf.rfengine.target_file_size = ReadableSize::mb(1);
+            conf.rfengine.lightweight_backup = true;
+            conf.rfengine.wal_chunk_target_file_size = ReadableSize::kb(128);
+            conf.enable_inner_key_offset = true;
+        },
+    );
+    cluster.wait_region_replicated(&[], 3);
+    let pd_client = cluster.get_pd_client();
+    let mut client = cluster.new_client();
+    client.split(&get_keyspace_prefix(KEYSPACE_ID));
+    client.split(&get_keyspace_prefix(KEYSPACE_ID + 1));
+
+    // Import data
+    let i_to_key = gen_keyspace_key(KEYSPACE_ID);
+    client.put_kv(0..100, &i_to_key, i_to_val(BASIC_DATA_LEN));
+    // Delete data without committing secondary keys, to simulate the case that if
+    // we don't resolve locks during restoration, the secondary keys will be rolled
+    // back unexpectedly after deletion of primary key is compacted.
+    for range in vec![0..25, 25..50, 50..100] {
+        client
+            .try_del_kv(
+                range,
+                &i_to_key,
+                CommitAction::AsyncCommitSecondaryKeys(Duration::MAX),
+            )
+            .unwrap();
+    }
+    let origin_ref_store = client.dump_ref_store();
+
+    // Major compact to move data to L3, and trigger
+    // `kvengine::Engine::load_unloaded_tables`.
+    request_major_compaction(&runtime, &pd_client, KEYSPACE_ID);
+    wait_for_write_cf_l3_files(
+        &runtime,
+        &cluster,
+        &pd_client,
+        KEYSPACE_ID,
+        |n| n > 0,
+        Duration::from_secs(10),
+    );
+
+    // Perform backup.
+    let snapshot_backup_name = generate_backup_name();
+    {
+        let backup_ts = client.get_ts().into_inner();
+        let backup_config = backup::BackupConfig {
+            dfs: dfs_config,
+            skip_keyspace_meta: true,
+            ..Default::default()
+        };
+        let (_, backup_meta) = backup::backup_cluster_with_ts(
+            backup_config,
+            backup::BackupType::Lightweight,
+            snapshot_backup_name.clone(),
+            cluster.get_pd_client().as_ref(),
+            backup_ts,
+            None,
+        )
+        .expect("backup::backup_cluster");
+        info!("backup_cluster result: {:?}", backup_meta);
+    }
+
+    // Restore keyspace.
+    restore_keyspace::restore_keyspace(
+        KEYSPACE_ID,
+        KEYSPACE_ID,
+        &snapshot_backup_name,
+        None,
+        s3fs,
+        SecurityConfig::default(),
+        cluster.get_pd_client(),
+        &runtime,
+        None,
+        reporter,
+    )
+    .unwrap();
+
+    // Invoke major compaction to compact the deletion of primary key.
+    let ts = client.get_ts();
+    cluster.set_gc_safe_point(ts.into_inner());
+    request_major_compaction(&runtime, &pd_client, KEYSPACE_ID);
+    wait_for_write_cf_l3_files(
+        &runtime,
+        &cluster,
+        &pd_client,
+        KEYSPACE_ID,
+        |n| n == 0,
+        Duration::from_secs(10),
+    );
+    std::thread::sleep(Duration::from_secs(10));
+
+    // Verify restored data.
+    client
+        .verify_data_with_given_ref_store(&origin_ref_store, None, &RequestOptions::default())
+        .unwrap();
+
+    cluster.stop();
+}
+
 fn i_to_key(i: usize) -> Vec<u8> {
     format!("xkey_{:08}", i).into_bytes()
 }
@@ -843,6 +980,64 @@ fn check_learners(
 fn generate_backup_name() -> String {
     static BACKUP_ID: AtomicUsize = AtomicUsize::new(0);
     format!("{:04}", BACKUP_ID.fetch_add(1, Ordering::Relaxed))
+}
+
+fn request_major_compaction(runtime: &Runtime, pd_client: &TestPdClient, keyspace_id: u32) {
+    let stores = pd_client.get_all_stores(true).unwrap();
+    let mut handles = Vec::with_capacity(stores.len());
+    for store in stores {
+        handles.push(runtime.spawn(async move {
+            let query = format!("major_compact=true&keyspace_id={}", keyspace_id);
+            request_major_compact_on_store(&store, query.as_str(), true).await;
+        }));
+    }
+    for handle in handles {
+        runtime.block_on(handle).unwrap();
+    }
+}
+
+/// Wait for write cf L3 files to be generated.
+fn wait_for_write_cf_l3_files(
+    runtime: &Runtime,
+    cluster: &ServerCluster,
+    pd_client: &TestPdClient,
+    keyspace_id: u32,
+    expect: impl Fn(usize) -> bool,
+    timeout: Duration,
+) {
+    let regions = runtime
+        .block_on(pd_client.scan_regions(
+            encode_bytes(&get_keyspace_prefix(keyspace_id)),
+            encode_bytes(&get_keyspace_prefix(keyspace_id + 1)),
+            100,
+        ))
+        .unwrap();
+    info!("regions {:?}", regions);
+    let node_ids = cluster.get_nodes();
+    let get_stats = |region_id: u64| -> Vec<ShardStats> {
+        node_ids
+            .iter()
+            .filter_map(|id| cluster.get_kvengine(*id).get_shard_stat_opt(region_id))
+            .collect()
+    };
+    for region in regions {
+        let region_id = region.get_region().id;
+        let ok = try_wait(
+            || {
+                get_stats(region_id).iter().all(|stats| {
+                    let bottom_most_level = stats.cfs[WRITE_CF].levels.last().unwrap();
+                    bottom_most_level.level == CF_LEVELS[WRITE_CF]
+                        && expect(bottom_most_level.num_tables)
+                })
+            },
+            timeout.as_secs() as usize,
+        );
+        assert!(
+            ok,
+            "wait_for_write_cf_l3_files timeout, stats: {:?}",
+            get_stats(region_id)
+        );
+    }
 }
 
 #[derive(Default)]

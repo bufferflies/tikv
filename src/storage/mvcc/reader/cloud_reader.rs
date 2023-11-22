@@ -41,6 +41,8 @@ impl CloudReader {
         None
     }
 
+    /// Note: This method is also used by resolving locks during restoring
+    /// keyspace.
     pub fn get_txn_commit_record(
         &mut self,
         key: &Key,

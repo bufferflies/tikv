@@ -15,7 +15,7 @@ use native_br::{backup, backup_worker};
 use pd_client::PdClient;
 use rand::Rng;
 use security::SecurityConfig;
-use test_cloud_server::{try_wait_result, ServerCluster};
+use test_cloud_server::{oss::prepare_dfs, try_wait_result, ServerCluster};
 use tikv_util::{
     config::{ReadableDuration, ReadableSize},
     info,
@@ -25,9 +25,9 @@ use tikv_util::{
 use txn_types::Key;
 
 use crate::{
-    alloc_node_id_vec, generate_keyspace_key, new_security_config, prepare_dfs,
-    random_node_restart, spawn_create_keyspace, spawn_gc_worker, spawn_keyspace_write,
-    spawn_major_compact, spawn_merge, spawn_move, spawn_transfer,
+    alloc_node_id_vec, generate_keyspace_key, new_security_config, random_node_restart,
+    spawn_create_keyspace, spawn_gc_worker, spawn_keyspace_write, spawn_major_compact, spawn_merge,
+    spawn_move, spawn_transfer,
     test_load_data::{check_load_data, spawn_load_data},
     test_native_br::{check_br, spawn_backup, spawn_restore_keyspace},
     TikvConfig, BACKUP_COUNTER, CONCURRENCY, KEYSPACE_COUNTER, LOAD_DATA_COUNTER,

@@ -47,13 +47,14 @@ use crate::{
     },
     common::{
         load_peer_raft_state, load_rf_engine_meta, now, replay_wal_logs, retain_sst_files,
-        send_request_to_store, RawRegion,
+        send_request_to_store, RawRegion, RegionMetaGetter, StorePeer,
     },
     error::{
         Error,
         Error::{KeyspaceInnerKeyOffNotEnabled, MetaNotFound, RetryLimitExceeded},
         Result,
     },
+    lock::LockResolver,
     restore::RestoreConfig,
     step,
     tiflash::remove_tiflash_replia_of_keyspace,
@@ -67,6 +68,8 @@ const RESTORE_KEYSPACE_MAX_RETRY: usize = 20;
 
 const REPLICAS: usize = 3; // Number of replicas for each region.
 const QUORUM_REPLICAS: usize = REPLICAS / 2 + 1; // Number of replicas to form a quorum.
+
+const RESOLVE_LOCKS_BATCH_SIZE: usize = 1024;
 
 #[derive(Clone, Debug, Default)]
 pub struct RestoredKeyspace {
@@ -102,6 +105,7 @@ pub enum RestoreStep {
     RemoveTiFlashReplicas,
     LoadBackupMeta,
     ExtractBackupShards,
+    ResolveLocks,
     FlushShards,
     TruncateTs,
     SplitRegions,
@@ -269,7 +273,30 @@ pub fn restore_keyspace(
         cluster.shards_count()
     );
 
-    // trigger initial flush & flush mem-table to S3
+    // Resolve locks
+    // In order to avoid data inconsistency, it is necessary to commit all locks of
+    // secondary keys of a committed transaction that are in the backup.
+    // If this is not done, uncommitted secondary keys may be dropped when the
+    // committed record of primary key is compacted after restoration.
+    // This is likely to happen because the timestamp of restored data is generally
+    // smaller than the GC safepoint at that time.
+    reporter.report_step(RestoreStep::ResolveLocks);
+    let lock_resolver = LockResolver::new(
+        &keyspace_tag,
+        cluster.get_kvengine(),
+        truncate_ts,
+        RESOLVE_LOCKS_BATCH_SIZE,
+        cluster.get_shard_meta_getter(),
+    );
+    let resolved_locks = runtime.block_on(lock_resolver.resolve_locks())?;
+    cluster.add_shards_need_flush(&resolved_locks.resolved_shards);
+    step!(
+        "Keyspace {keyspace_tag} resolve {} locks of shards {:?}",
+        resolved_locks.total_locks_cnt,
+        resolved_locks.resolved_shards
+    );
+
+    // Trigger initial flush & flush mem-table to S3
     // NOTE: `cluster.shards` is NOT available before `flush_shards` finished.
     reporter.report_step(RestoreStep::FlushShards);
     let flush_cnt = cluster.flush_shards()?;
@@ -607,12 +634,14 @@ pub struct BackupCluster {
     raw_metas: HashMap<u64, pb::ChangeSet>,
     // store_id -> Vec<shard_id>.
     store_shards: HashMap<u64, Vec<u64>>,
+    // shard_id -> StorePeer{store_id, peer_id}. Used to resolve locks.
+    shards_store_map: Option<Arc<HashMap<u64 /* shard_id */, StorePeer>>>,
     // shard_id sorted by start_key.
     sorted_shards: Vec<u64>,
-    // store_id -> Vec<shard_id>.
-    shards_need_flush: HashMap<u64, Vec<u64>>,
-    // store_id -> Vec<shard_id>.
-    shards_need_truncate: HashMap<u64, Vec<u64>>,
+    // Set<shard_id>.
+    shards_need_flush: HashSet<u64>,
+    // Set<shard_id>.
+    shards_need_truncate: HashSet<u64>,
 
     meta_applier: Option<Arc<MetaApplier>>,
 
@@ -657,6 +686,7 @@ impl BackupCluster {
             raft_engines: Default::default(),
             kv_engine: Default::default(),
             store_shards: Default::default(),
+            shards_store_map: Default::default(),
             sorted_shards: Default::default(),
             shards_need_flush: Default::default(),
             shards_need_truncate: Default::default(),
@@ -754,13 +784,11 @@ impl BackupCluster {
         raw_metas
     }
 
-    fn get_shards_need_flush_and_truncate(&self, store_id: u64) -> Vec<u64> {
-        let mut ret_shards = self.shards_need_flush.get(&store_id).unwrap().to_owned();
-        let mut shard_need_truncate = self.shards_need_truncate.get(&store_id).unwrap().to_owned();
-        ret_shards.append(&mut shard_need_truncate);
-        ret_shards.sort_unstable();
-        ret_shards.dedup();
-        ret_shards
+    fn get_shards_need_flush_and_truncate(&self) -> Vec<u64> {
+        self.shards_need_flush
+            .union(&self.shards_need_truncate)
+            .cloned()
+            .collect()
     }
 
     fn setup_kv_engine(&mut self, store_id: u64, conf: &TikvConfig) -> Result<()> {
@@ -803,12 +831,15 @@ impl BackupCluster {
             self.kv_engine = Some(kv_engine);
         }
 
-        let shards_need_load = self.get_shards_need_flush_and_truncate(store_id);
+        // Load L0 & LOCK_CF of all shards for scanning locks.
+        // TODO: L0 & LOCK_CF with `max_ts` < `safe_ts` can be skipped.
+        // (Currently there is no `max_ts` for LOCK_CF of L0)
+        let store_shards = self.store_shards.get(&store_id).unwrap().to_owned();
         let raw_metas = self.take_raw_metas(store_id);
         let kv_engine = self.kv_engine.as_mut().unwrap();
-        if !shards_need_load.is_empty() {
+        if !store_shards.is_empty() {
             let mut meta_iter =
-                MetaIterator::new(kv_engine.get_engine_id(), shards_need_load, raw_metas);
+                MetaIterator::new(kv_engine.get_engine_id(), store_shards, raw_metas);
             let metas = kv_engine.read_meta(&mut meta_iter)?;
             info!(
                 "Keyspace {} kv_engine load {} shards in restore keyspace",
@@ -819,13 +850,7 @@ impl BackupCluster {
             // Load the following tables from DFS:
             // 1. Tables of shards need truncate, to get the `max_ts`.
             // 2. Tables has locks (L0 & LOCK_CF) to replay commit requests.
-            let shard_need_truncate: HashSet<u64> = HashSet::from_iter(
-                self.shards_need_truncate
-                    .get(&store_id)
-                    .unwrap()
-                    .iter()
-                    .copied(),
-            );
+            let shard_need_truncate = self.shards_need_truncate.clone();
             let table_filter = move |shard_id: u64, tb: &kvengine::FileMeta| -> bool {
                 shard_need_truncate.contains(&shard_id) || tb.has_locks()
             };
@@ -1019,21 +1044,32 @@ impl BackupCluster {
                 .insert(shard_id, shard.raw_meta.take().unwrap());
         }
 
-        for (&store_id, shards) in &self.store_shards {
-            let shards_need_flush = shards
+        self.shards_store_map = Some(Arc::new(
+            self.shards
                 .iter()
-                .filter(|&&shard_id| self.get_shard(shard_id).unwrap().need_flush)
-                .copied()
-                .collect();
-            self.shards_need_flush.insert(store_id, shards_need_flush);
-            let shards_need_truncate = shards
+                .map(|(&shard_id, shard)| {
+                    (
+                        shard_id,
+                        StorePeer {
+                            store_id: shard.store_id,
+                            peer_id: shard.peer_id,
+                        },
+                    )
+                })
+                .collect(),
+        ));
+        self.shards_need_flush.extend(
+            self.shards
                 .iter()
-                .filter(|&&id| self.get_shard(id).unwrap().meta.max_ts >= self.truncate_ts)
-                .copied()
-                .collect();
-            self.shards_need_truncate
-                .insert(store_id, shards_need_truncate);
-        }
+                .filter(|(_, shard)| shard.need_flush)
+                .map(|(&shard_id, _)| shard_id),
+        );
+        self.shards_need_truncate.extend(
+            self.shards
+                .iter()
+                .filter(|(_, shard)| shard.meta.max_ts >= self.truncate_ts)
+                .map(|(&shard_id, _)| shard_id),
+        );
 
         self.verify_shards()
     }
@@ -1378,17 +1414,30 @@ impl BackupCluster {
         self.kv_engine.as_ref().unwrap().clone()
     }
 
+    pub fn get_shard_meta_getter(&self) -> RegionMetaGetter {
+        RegionMetaGetter {
+            shard_store_map: self.shards_store_map.as_ref().unwrap().clone(),
+            raft_engines: Arc::new(self.raft_engines.clone()),
+        }
+    }
+
     #[inline]
     fn get_all_stores_id(&self) -> impl ExactSizeIterator<Item = u64> + '_ {
         self.store_shards.keys().copied()
     }
 
+    pub fn add_shards_need_flush(&mut self, shard_ids: &[u64]) {
+        self.shards_need_flush.extend(shard_ids);
+    }
+
     pub fn flush_shards(&mut self) -> Result<usize /* number of flushed shards */> {
-        let mut flush_cnt = 0_usize;
-        for store_id in self.get_all_stores_id() {
-            let shards_id = self.shards_need_flush.get(&store_id).unwrap();
-            // TODO: run in parallel.
-            flush_cnt += self.flush_shards_for_store(shards_id)?;
+        let kv_engine = self.kv_engine.as_ref().unwrap();
+        // TODO: run in parallel.
+        for &shard_id in &self.shards_need_flush {
+            let engine_shard = kv_engine
+                .get_shard(shard_id)
+                .unwrap_or_else(|| panic!("shard not found: {}", shard_id));
+            kv_engine.flush_shard_for_restore(&engine_shard);
         }
 
         self.check_flushed(Duration::from_secs(30))?;
@@ -1397,22 +1446,7 @@ impl BackupCluster {
         let mut shards = self.meta_applier.as_ref().unwrap().take_shards().unwrap();
         self.shards = mem::take(&mut shards);
 
-        Ok(flush_cnt)
-    }
-
-    fn flush_shards_for_store(
-        &self,
-        shards_id: &[u64],
-    ) -> Result<usize /* number of flushed shards */> {
-        let kv_engine = self.kv_engine.as_ref().unwrap();
-        for shard_id in shards_id {
-            let engine_shard = kv_engine
-                .get_shard(*shard_id)
-                .unwrap_or_else(|| panic!("shard not found: {}", *shard_id));
-            kv_engine.flush_shard_for_restore(&engine_shard);
-        }
-
-        Ok(shards_id.len())
+        Ok(self.shards_need_flush.len())
     }
 
     fn check_flushed(&self, timeout: Duration) -> Result<()> {
@@ -1447,12 +1481,8 @@ impl BackupCluster {
 
     fn truncate_ts(&mut self) -> Result<usize> {
         let mut truncate_cnt = 0_usize;
-        let stores_id: Vec<u64> = self.get_all_stores_id().collect();
-        for store_id in stores_id {
-            let shards_need_truncate = self.get_shards_need_flush_and_truncate(store_id);
-            for id in shards_need_truncate {
-                truncate_cnt += self.truncate_shard_ts(id)? as usize;
-            }
+        for shard_id in self.get_shards_need_flush_and_truncate() {
+            truncate_cnt += self.truncate_shard_ts(shard_id)? as usize;
         }
         Ok(truncate_cnt)
     }
@@ -1713,6 +1743,7 @@ impl BackupCluster {
         self.sorted_shards.clear();
         self.raw_metas.clear();
         self.store_shards.clear();
+        self.shards_store_map = None;
         self.shards.clear();
         self.shards_need_flush.clear();
         self.shards_need_truncate.clear();

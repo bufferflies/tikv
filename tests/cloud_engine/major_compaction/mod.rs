@@ -123,7 +123,7 @@ fn test_major_compaction() {
             "major_compact=true&keyspace_id=1&region_id={}",
             ks1_r1.get_id()
         );
-        runtime.block_on(request_major_compact_on_store(store, &query));
+        runtime.block_on(request_major_compact_on_store(store, &query, false));
     }
 
     let wait_for_major_compaction =
@@ -181,7 +181,7 @@ fn test_major_compaction() {
     // Trigger major compaction on one keyspace.
     for store in &stores {
         let query = "major_compact=true&keyspace_id=2";
-        runtime.block_on(request_major_compact_on_store(store, query));
+        runtime.block_on(request_major_compact_on_store(store, query, false));
     }
     assert!(wait_for_major_compaction(
         &cluster,

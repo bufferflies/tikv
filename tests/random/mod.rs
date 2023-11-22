@@ -18,16 +18,13 @@ use api_version::ApiV2;
 use futures::executor::block_on;
 use http::{Request, StatusCode, Uri};
 use hyper::Body;
-use kvengine::dfs::DFSConfig;
 use kvproto::{metapb::Store, pdpb::CheckPolicy};
 use pd_client::PdClient;
 use rand::{prelude::SliceRandom, Rng, RngCore};
 use security::SecurityConfig;
-use tempfile::TempDir;
 use test_cloud_server::{
     client::ClusterClient,
     keyspace::{ClusterKeyspaceClient, KeyspaceManager},
-    oss::ObjectStorageService,
     scheduler::Scheduler,
     try_wait, ServerCluster,
 };
@@ -501,27 +498,6 @@ pub(crate) fn generate_keyspace_key(keyspace_id: u32) -> impl Fn(usize) -> Vec<u
         key.extend(i_to_key(i));
         key
     }
-}
-
-pub(crate) fn prepare_dfs(prefix: &str) -> (TempDir, ObjectStorageService, DFSConfig) {
-    let base_dir = tempfile::Builder::new().prefix(prefix).tempdir().unwrap();
-
-    let oss_dir = base_dir.path().join("oss");
-    let mut oss = ObjectStorageService::new(oss_dir);
-    oss.start_server();
-
-    let dfs_config = DFSConfig {
-        prefix: prefix.to_string(),
-        s3_endpoint: format!("http://127.0.0.1:{}", oss.port()),
-        s3_key_id: "admin".to_string(),
-        s3_secret_key: "admin".to_string(),
-        s3_bucket: prefix.to_string(),
-        s3_region: "local".to_string(),
-        zstd_compression_level: "3".to_string(),
-        ..Default::default()
-    };
-
-    (base_dir, oss, dfs_config)
 }
 
 pub(crate) fn new_security_config() -> SecurityConfig {

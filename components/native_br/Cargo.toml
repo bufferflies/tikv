@@ -16,6 +16,8 @@ byteorder = "1.2"
 bytes = "1.0"
 chrono = "0.4"
 cloud_server = { workspace = true }
+concurrency_manager = { workspace = true }
+dashmap = "4.0"
 engine_traits = { workspace = true }
 etcd-client = { git = "https://github.com/pingcap/etcd-client", rev = "14a6f8731f1890d5fd2f6e16a9f0d0a306b0599e", features = ["pub-response-field", "tls-openssl-vendored"] }
 file_system = { workspace = true }
@@ -51,6 +53,7 @@ tikv = { workspace = true }
 tikv-client = { workspace = true }
 tikv_util = { workspace = true }
 tokio = { version = "1.12", features = ["full"] }
+txn_types = { workspace = true }
 url = "2"
 
 [dev-dependencies]

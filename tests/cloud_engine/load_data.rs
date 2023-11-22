@@ -139,7 +139,7 @@ fn impl_test_load_data(enable_inner_key_off: bool) {
         let query = format!("major_compact=true&keyspace_id={}", KEYSPACE_ID);
         load_data_ctx
             .runtime
-            .block_on(request_major_compact_on_store(store, query.as_str()))
+            .block_on(request_major_compact_on_store(store, query.as_str(), false))
     }
 
     let (scheduler, worker_handle) =

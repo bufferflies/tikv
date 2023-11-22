@@ -82,7 +82,11 @@ pub(crate) fn i_to_key_v1(i: usize) -> Vec<u8> {
     format!("m_{:03}", i).into_bytes()
 }
 
-pub(crate) async fn request_major_compact_on_store(store: &Store, query: &str) {
+pub(crate) async fn request_major_compact_on_store(
+    store: &Store,
+    query: &str,
+    permit_not_found: bool,
+) {
     let uri = Uri::from_str(&format!(
         "http://{}/major-compact?{}",
         &store.status_address, query
@@ -91,8 +95,10 @@ pub(crate) async fn request_major_compact_on_store(store: &Store, query: &str) {
     let req = Request::post(uri).body(Body::empty()).unwrap();
     let client = hyper::Client::new();
     let resp: http::Response<Body> = client.request(req).await.unwrap();
+    let is_success = resp.status().is_success()
+        || (permit_not_found && resp.status() == http::StatusCode::NOT_FOUND);
     assert!(
-        resp.status().is_success(),
+        is_success,
         "{:?}",
         hyper::body::to_bytes(resp.into_body()).await.unwrap()
     );

@@ -7,7 +7,11 @@ use bytes::Buf;
 use collections::HashSet;
 use kvengine::{Engine, Shard, ShardMeta};
 use kvenginepb::ChangeSet;
-use kvproto::{metapb, raft_cmdpb::RaftCmdRequest, raft_serverpb};
+use kvproto::{
+    metapb,
+    raft_cmdpb::{CustomRequest, RaftCmdRequest},
+    raft_serverpb,
+};
 use protobuf::Message;
 use raft_proto::eraftpb;
 use raftstore::store::metrics::BLACKLIST_REGION_GAUGE;
@@ -322,4 +326,25 @@ impl kvengine::MetaIterator for RecoverHandler {
     fn engine_id(&self) -> u64 {
         self.store_id
     }
+}
+
+pub fn apply_custom_log_in_recover(
+    engine: &Engine,
+    store_id: u64,
+    shard: &Arc<Shard>,
+    region_meta: metapb::Region,
+    custom_req: CustomRequest,
+) -> crate::errors::Result<()> {
+    let custom = CustomRaftLog::new_from_data(custom_req.get_data());
+    let applied_index = shard.get_write_sequence();
+    let mut ctx = ApplyContext::new(engine.clone(), None);
+    let applied_index_term = shard.get_property(TERM_KEY).unwrap().get_u64_le();
+    let apply_state = RaftApplyState::new(applied_index, applied_index_term);
+
+    let snap = shard.new_snap_access();
+    let mut applier = Applier::new_for_recover(store_id, region_meta, snap, apply_state);
+    ctx.exec_log_index = applied_index + 1;
+    ctx.exec_log_term = applied_index_term;
+    let _ = applier.exec_custom_log(&mut ctx, &custom)?;
+    Ok(())
 }

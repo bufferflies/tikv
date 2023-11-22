@@ -68,6 +68,8 @@ pub enum Error {
     SharedError(#[from] SharedError),
     #[error("Archive error {0}")]
     ArchiveError(String),
+    #[error("Mvcc error {0}")]
+    MvccError(#[from] tikv::storage::mvcc::Error),
 }
 
 impl From<dfs::Error> for Error {

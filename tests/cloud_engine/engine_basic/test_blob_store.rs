@@ -148,13 +148,13 @@ fn test_per_keyspace_config() {
 
     for store in &stores {
         let query = "major_compact=true&keyspace_id=1";
-        runtime.block_on(request_major_compact_on_store(store, query));
+        runtime.block_on(request_major_compact_on_store(store, query, false));
         let query = "major_compact=true&keyspace_id=2";
-        runtime.block_on(request_major_compact_on_store(store, query));
+        runtime.block_on(request_major_compact_on_store(store, query, false));
         let query = "major_compact=true&keyspace_id=3";
-        runtime.block_on(request_major_compact_on_store(store, query));
+        runtime.block_on(request_major_compact_on_store(store, query, false));
         let query = "major_compact=true&keyspace_id=4";
-        runtime.block_on(request_major_compact_on_store(store, query));
+        runtime.block_on(request_major_compact_on_store(store, query, false));
     }
 
     let wait_for_major_compaction =

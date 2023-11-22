@@ -4117,6 +4117,8 @@ dependencies = [
  "bytes",
  "chrono",
  "cloud_server",
+ "concurrency_manager",
+ "dashmap 4.0.2",
  "engine_traits",
  "etcd-client",
  "file_system",
@@ -4156,6 +4158,7 @@ dependencies = [
  "tikv-client",
  "tikv_util",
  "tokio",
+ "txn_types",
  "url",
 ]
 

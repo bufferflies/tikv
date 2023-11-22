@@ -125,7 +125,10 @@ impl MvccTxn {
     /// committing, a non-zero `commit_ts` needs to be provided; otherwise if
     /// the lock is removed due to rolling back, `commit_ts` must be set to
     /// zero.
-    pub(crate) fn unlock_key(
+    ///
+    /// Note: This method is also used by resolving locks during restoring
+    /// keyspace.
+    pub fn unlock_key(
         &mut self,
         key: Key,
         pessimistic: bool,
@@ -150,7 +153,9 @@ impl MvccTxn {
         self.modifies.push(write);
     }
 
-    pub(crate) fn put_write(&mut self, key: Key, ts: TimeStamp, value: Value) {
+    /// Note: This method is also used by resolving locks during restoring
+    /// keyspace.
+    pub fn put_write(&mut self, key: Key, ts: TimeStamp, value: Value) {
         let write = Modify::Put(CF_WRITE, key.append_ts(ts), value);
         self.write_size += write.size();
         self.modifies.push(write);
