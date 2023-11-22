@@ -26,6 +26,7 @@ use crate::{alloc_node_id_vec, request_major_compact_on_store};
 
 const KEYSPACE_ID: u32 = 123;
 const DATA_COUNT: usize = 2000;
+const WRITER_COUNT: usize = 5;
 const DATA_BATCH_SIZE: usize = 10;
 const COMPRESSION_TYPE: u8 = ZSTD_COMPRESSION;
 
@@ -155,8 +156,9 @@ fn impl_test_load_data(enable_inner_key_off: bool) {
             0
         }
     };
-    let (chunk_ids, ref_store) = put_chunks(
+    let ref_store = put_chunks(
         &scheduler,
+        WRITER_COUNT,
         DATA_COUNT,
         DATA_BATCH_SIZE,
         i_to_key,
@@ -166,13 +168,7 @@ fn impl_test_load_data(enable_inner_key_off: bool) {
     );
 
     // Build.
-    build(
-        &scheduler,
-        chunk_ids,
-        COMPRESSION_TYPE,
-        Duration::from_secs(10),
-    )
-    .unwrap();
+    build(&scheduler, COMPRESSION_TYPE, Duration::from_secs(10)).unwrap();
     let states = scheduler.states();
     assert_eq!(
         states.duplicated_entries.len(),
@@ -286,8 +282,9 @@ fn test_load_data_overlap() {
         // Put chunks.
         let keyspace_prefix = table_key_prefix(5);
         let i_to_key = move |i: usize| -> Vec<u8> { i_to_key_with_prefix(&keyspace_prefix, i) };
-        let (chunk_ids, ref_store) = put_chunks(
+        let ref_store = put_chunks(
             &scheduler,
+            WRITER_COUNT,
             DATA_COUNT,
             DATA_BATCH_SIZE,
             i_to_key,
@@ -297,12 +294,7 @@ fn test_load_data_overlap() {
         );
 
         // Build.
-        build(
-            &scheduler,
-            chunk_ids,
-            COMPRESSION_TYPE,
-            Duration::from_secs(10),
-        )?;
+        build(&scheduler, COMPRESSION_TYPE, Duration::from_secs(10))?;
 
         // Cleanup.
         cleanup(&scheduler, worker_handle);

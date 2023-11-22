@@ -139,9 +139,11 @@ fn do_load_data(
     // Put chunks.
     let data_count = rng.gen_range(1..=10) * 1000_usize; // generate at most about 2.5MB (10000 x 256) data, 160 (2.5MB / 16KB) SST files.
     let data_batch_size = rng.gen_range(1..=10) * 10_usize;
+    let writer_count = rng.gen_range(1..=5);
     let generate_key = move |i: usize| -> Vec<u8> { make_key(keyspace_id, table_id, &i_to_key(i)) };
-    let (chunk_ids, ref_store) = put_chunks(
+    let ref_store = put_chunks(
         &scheduler,
+        writer_count,
         data_count,
         data_batch_size,
         generate_key,
@@ -155,7 +157,7 @@ fn do_load_data(
     );
 
     // Build.
-    build(&scheduler, chunk_ids, COMPRESSION_TYPE, LOAD_DATA_TIMEOUT).unwrap();
+    build(&scheduler, COMPRESSION_TYPE, LOAD_DATA_TIMEOUT).unwrap();
     info!(
         "load_data: build finished, keyspace {}, table {}",
         keyspace_id, table_id

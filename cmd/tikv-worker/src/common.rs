@@ -6,15 +6,11 @@ use futures::{future::ok, TryStreamExt};
 use http::{header, Response, StatusCode};
 use hyper::Body;
 
-pub(crate) fn get_u64_param(
+pub(crate) fn get_param<T: FromStr>(
     query_pairs: &HashMap<Cow<'_, str>, Cow<'_, str>>,
     name: &str,
-) -> Option<u64> {
-    if let Some(x) = query_pairs.get(name) {
-        u64::from_str(x).map_or(None, |x| Some(x))
-    } else {
-        None
-    }
+) -> Option<T> {
+    query_pairs.get(name).and_then(|x| T::from_str(x).ok())
 }
 
 pub(crate) async fn get_body(req: hyper::Request<hyper::Body>) -> hyper::Result<Vec<u8>> {

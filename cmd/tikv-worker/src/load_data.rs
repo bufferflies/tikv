@@ -11,13 +11,13 @@ use kvengine::{
     table::sstable::{LZ4_COMPRESSION, NO_COMPRESSION, ZSTD_COMPRESSION},
 };
 use load_data::task::{
-    LoadDataConfig, LoadDataContext, LoadTaskMsg, LoadTaskScheduler, LoadTaskStates,
-    LoadTaskWorker, TaskContext,
+    FlushResult, LoadDataConfig, LoadDataContext, LoadTaskMsg, LoadTaskScheduler, LoadTaskStates,
+    LoadTaskWorker, PutChunkResult, TaskContext,
 };
 use pd_client::PdClient;
 
 use crate::{
-    common::{get_body, get_u64_param, make_response},
+    common::{get_body, get_param, make_response},
     worker_scaler::{WorkerScaler, WorkerScalerConfig},
 };
 
@@ -29,21 +29,24 @@ pub(crate) const MAX_IN_MEM_SIZE: usize = 256 * 1024 * 1024;
 ///   POST /load_data?cluster_id=%d&task_id=%s&start_ts=%d&commit_ts=%d
 ///
 /// 2. put chunk:
-///   PUT /load_data?cluster_id=%d&task_id=%s&chunk_id=%d
+///   PUT /load_data?cluster_id=%d&task_id=%s&writer_id=%d&chunk_id=%d
 ///   key_len(2) + key(key_len) + val_len(4) + value(val_len)
 ///   key_len(2) + key(key_len) + val_len(4) + value(val_len)
 ///   ...
 ///
-/// 3. build task:
+/// 3. flush:
+///   POST /load_data?cluster_id=%d&task_id=%s&flush=true
+///
+/// 4. build task:
 ///   POST /load_data?cluster_id=%d&task_id=%s&build=true&compression=zstd&
 ///        split_size=%d&split_keys=%d
 ///
-/// 4. get task states:
+/// 5. get task states:
 ///   GET /load_data?cluster_id=%d&task_id=%s
 ///   {"canceled": false, "finished": false, "error": "", "created-files": 10,
 ///   "ingested-regions": 3}
 ///
-/// 5. clean up task:
+/// 6. clean up task:
 ///   DELETE /load_data?cluster_id=%d&task_id=%s
 pub(crate) async fn handle_load_data(
     manager: Arc<LoadDataManager>,
@@ -51,7 +54,7 @@ pub(crate) async fn handle_load_data(
 ) -> hyper::Result<hyper::Response<hyper::Body>> {
     let query = req.uri().query().unwrap_or("");
     let query_pairs: HashMap<_, _> = url::form_urlencoded::parse(query.as_bytes()).collect();
-    let cluster_id = get_u64_param(&query_pairs, "cluster_id").unwrap_or_default();
+    let cluster_id = get_param::<u64>(&query_pairs, "cluster_id").unwrap_or_default();
     let pd_cluster_id = manager.ctx.pd.get_cluster_id().unwrap();
     if cluster_id != pd_cluster_id {
         return Ok(make_response(
@@ -109,23 +112,26 @@ pub(crate) async fn handle_load_data(
                         .get("compression")
                         .map(|x| x.to_string())
                         .unwrap_or_default();
-                    let body = get_body(req).await?;
-                    match serde_json::from_slice(&body) {
-                        Ok(chunk_ids) => {
-                            manager.build(&task_id, &compression, chunk_ids);
-                            Ok(make_response(StatusCode::OK, ""))
-                        }
-                        Err(err) => {
-                            Ok(make_response(StatusCode::BAD_REQUEST, format!("{:?}", err)))
-                        }
-                    }
+                    manager.build(&task_id, &compression);
+                    Ok(make_response(StatusCode::OK, ""))
+                }
+            } else if query_pairs.get("flush").map(|x| x.as_ref()) == Some("true") {
+                if !manager.has_task(&task_id) {
+                    Ok(make_response(StatusCode::NOT_FOUND, ""))
+                } else {
+                    let flush_res = manager.flush(&task_id).await;
+                    let json = serde_json::to_string(&flush_res).unwrap();
+                    Ok(Response::builder()
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(json.into())
+                        .unwrap())
                 }
             } else if manager.has_task(&task_id) {
                 Ok(make_response(StatusCode::BAD_REQUEST, "task exists"))
             } else {
-                let start_ts = get_u64_param(&query_pairs, "start_ts").unwrap_or_default();
-                let commit_ts = get_u64_param(&query_pairs, "commit_ts").unwrap_or_default();
-                let data_size = get_u64_param(&query_pairs, "data_size").unwrap_or_default();
+                let start_ts = get_param::<u64>(&query_pairs, "start_ts").unwrap_or_default();
+                let commit_ts = get_param::<u64>(&query_pairs, "commit_ts").unwrap_or_default();
+                let data_size = get_param::<u64>(&query_pairs, "data_size").unwrap_or_default();
                 if data_size > manager.worker_scaler_conf.max_size.0 {
                     return Ok(make_response(
                         StatusCode::BAD_REQUEST,
@@ -178,16 +184,26 @@ pub(crate) async fn handle_load_data(
             }
         }
         Method::PUT => {
-            let chunk_id = get_u64_param(&query_pairs, "chunk_id").unwrap_or_default();
-            if chunk_id == 0 {
+            let chunk_id = get_param::<u64>(&query_pairs, "chunk_id");
+            if chunk_id.is_none() {
                 return Ok(make_response(
                     StatusCode::BAD_REQUEST,
                     "chunk id is missing",
                 ));
             }
+            // To ensure compatibility, writer id can be None.
+            // TODO: check writer_id after all remote backends are upgraded.
+            let writer_id = get_param::<u64>(&query_pairs, "writer_id").unwrap_or_default();
             let body = get_body(req).await?;
-            manager.put_chunk(&task_id, chunk_id, body.into());
-            Ok(make_response(StatusCode::OK, ""))
+            let put_chunk_res = manager
+                .put_chunk(&task_id, writer_id, chunk_id.unwrap(), body.into())
+                .await;
+
+            let json = serde_json::to_string(&put_chunk_res).unwrap();
+            Ok(Response::builder()
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(json.into())
+                .unwrap())
         }
         Method::DELETE => {
             if !manager.has_task(&task_id) {
@@ -241,16 +257,7 @@ impl LoadDataManager {
 
     pub(crate) fn get_task_states(&self, task_id: &str) -> Option<LoadTaskStates> {
         self.running_tasks.get(task_id).map(|x| {
-            let thread_finished = x
-                .thread_handle
-                .as_ref()
-                .unwrap()
-                .lock()
-                .unwrap()
-                .is_finished();
-            if thread_finished {
-                x.cancel("task thread finished unexpectedly".to_string());
-            }
+            x.check_task_thread_finished();
             x.states.lock().unwrap().clone()
         })
     }
@@ -259,16 +266,7 @@ impl LoadDataManager {
         self.running_tasks
             .iter()
             .map(|x| {
-                let thread_finished = x
-                    .thread_handle
-                    .as_ref()
-                    .unwrap()
-                    .lock()
-                    .unwrap()
-                    .is_finished();
-                if thread_finished {
-                    x.cancel("task thread finished unexpectedly".to_string());
-                }
+                x.check_task_thread_finished();
                 x.states.lock().unwrap().clone()
             })
             .collect()
@@ -289,7 +287,7 @@ impl LoadDataManager {
         self.running_tasks.insert(task_ctx.task_id, scheduler);
     }
 
-    pub(crate) fn build(&self, task_id: &str, compression: &str, chunk_ids: Vec<u64>) {
+    pub(crate) fn build(&self, task_id: &str, compression: &str) {
         let compression_type = match compression {
             "lz4" => LZ4_COMPRESSION,
             "zstd" => ZSTD_COMPRESSION,
@@ -298,22 +296,36 @@ impl LoadDataManager {
         let scheduler = self.running_tasks.get(task_id).unwrap().clone();
         scheduler
             .sender
-            .send(LoadTaskMsg::Build {
-                chunk_ids,
-                compression_type,
-            })
+            .send(LoadTaskMsg::Build { compression_type })
             .unwrap();
     }
 
-    pub(crate) fn put_chunk(&self, task_id: &str, chunk_id: u64, chunk_data: Bytes) {
+    pub(crate) async fn flush(&self, task_id: &str) -> FlushResult {
         let scheduler = self.running_tasks.get(task_id).unwrap().clone();
+        let (cb, fut) = tikv_util::future::paired_future_callback();
+        scheduler.sender.send(LoadTaskMsg::Flush { cb }).unwrap();
+        fut.await.unwrap()
+    }
+
+    pub(crate) async fn put_chunk(
+        &self,
+        task_id: &str,
+        writer_id: u64,
+        chunk_id: u64,
+        chunk_data: Bytes,
+    ) -> PutChunkResult {
+        let scheduler = self.running_tasks.get(task_id).unwrap().clone();
+        let (cb, fut) = tikv_util::future::paired_future_callback();
         scheduler
             .sender
             .send(LoadTaskMsg::AddChunk {
+                writer_id,
                 chunk_id,
                 chunk_data,
+                cb,
             })
             .unwrap();
+        fut.await.unwrap()
     }
 
     pub(crate) fn delete(&self, task_id: &str) {

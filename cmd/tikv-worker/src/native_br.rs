@@ -28,7 +28,7 @@ use tikv_util::{config::ReadableDuration, debug, error, info, time::Instant, Han
 use tokio::runtime::Runtime;
 
 use crate::{
-    common::{get_u64_param, make_json_response, make_response},
+    common::{get_param, make_json_response, make_response},
     error::Error,
     metrics::{NATIVE_BR_COUNTER_VEC, NATIVE_BR_HISTOGRAM_VEC},
     Config,
@@ -70,7 +70,7 @@ pub(crate) async fn handle_backup(
 ) -> hyper::Result<hyper::Response<hyper::Body>> {
     let query = req.uri().query().unwrap_or("");
     let query_pairs: HashMap<_, _> = url::form_urlencoded::parse(query.as_bytes()).collect();
-    match get_u64_param(&query_pairs, "cluster_id") {
+    match get_param::<u64>(&query_pairs, "cluster_id") {
         Some(cluster_id) if cluster_id == manager.get_cluster_id().unwrap() => {}
         _ => {
             return Ok(make_response(
@@ -160,7 +160,7 @@ async fn get_backup_from_query(
 ) -> Result<RestoreSource> {
     match restore_type {
         RestoreType::Normal => {
-            let backup_id = match get_u64_param(query_pairs, "backup_id") {
+            let backup_id = match get_param::<u64>(query_pairs, "backup_id") {
                 Some(id) => id,
                 None => {
                     return Err(Error::CheckError("Backup ID is invalid".to_string()));
@@ -210,7 +210,7 @@ pub(crate) async fn handle_restore_keyspace(
     let query = req.uri().query().unwrap_or("");
     let query_pairs: HashMap<_, _> = url::form_urlencoded::parse(query.as_bytes()).collect();
 
-    match get_u64_param(&query_pairs, "cluster_id") {
+    match get_param::<u64>(&query_pairs, "cluster_id") {
         Some(cluster_id) if cluster_id == manager.get_cluster_id().unwrap() => {}
         _ => {
             return Ok(make_response(
@@ -446,7 +446,7 @@ pub(crate) async fn handle_native_br_whitelist(
     let query = req.uri().query().unwrap_or("");
     let query_pairs: HashMap<_, _> = url::form_urlencoded::parse(query.as_bytes()).collect();
 
-    match get_u64_param(&query_pairs, "cluster_id") {
+    match get_param::<u64>(&query_pairs, "cluster_id") {
         Some(cluster_id) if cluster_id == manager.get_cluster_id().unwrap() => {}
         _ => {
             return Ok(make_response(

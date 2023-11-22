@@ -1,7 +1,7 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    collections::HashSet,
+    collections::HashMap,
     fs,
     io::Write,
     mem,
@@ -73,26 +73,65 @@ pub struct LoadTaskWorker {
     reader_errs: Vec<Error>,
     scheduler: LoadTaskScheduler,
     receiver: Receiver<LoadTaskMsg>,
-    handled_chunks: HashSet<u64>,
+    unhandled_readers: Vec<UnhandledReader>,
     cached_file_ids: Vec<u64>,
-    file_tx: Sender<Result<KvPairsReader>>,
-    file_rx: Receiver<Result<KvPairsReader>>,
+    file_tx: Sender<UnhandledReader>,
+    file_rx: Receiver<UnhandledReader>,
+}
+
+pub struct UnhandledReader {
+    pub reader: Result<KvPairsReader>,
+    pub handled_chunk_ids: HashMap<u64 /* writer_id */, u64 /* chunk_id */>,
+    pub file_idx: usize, // used to keep readers in order as kv pairs are flush asynchronously.
 }
 
 pub enum LoadTaskMsg {
     AddChunk {
+        writer_id: u64,
         chunk_id: u64,
         chunk_data: Bytes,
+        cb: Box<dyn FnOnce(PutChunkResult) + Send>,
     },
     Build {
-        chunk_ids: Vec<u64>,
         compression_type: u8,
+    },
+    Flush {
+        cb: Box<dyn FnOnce(FlushResult) + Send>,
     },
     Cleanup,
     QueryUnhandledChunks {
-        chunk_ids: Vec<u64>,
-        cb: Box<dyn FnOnce(Vec<u64>) + Send>,
+        chunk_ids: HashMap<u64 /* writer_id */, u64 /* chunk_id */>,
+        cb: Box<dyn FnOnce(HashMap<u64, u64>) + Send>,
     },
+}
+
+#[derive(Default, Debug, Serialize, Deserialize, Clone)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+pub struct WritersStates {
+    pub handled_chunk_ids: HashMap<u64 /* writer_id */, u64 /* chunk_id */>,
+    pub flushed_chunk_ids: HashMap<u64 /* writer_id */, u64 /* chunk_id */>,
+}
+
+#[derive(Default, Debug, Serialize, Deserialize, Clone)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+pub struct PutChunkResult {
+    pub handled_chunk_id: u64,
+    pub flushed_chunk_id: u64,
+    pub is_canceled: bool,
+    pub is_finished: bool,
+    pub error: String,
+}
+
+#[derive(Default, Debug, Serialize, Deserialize, Clone)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+pub struct FlushResult {
+    pub flushed_chunk_ids: HashMap<u64 /* writer_id */, u64 /* chunk_id */>,
+    pub is_canceled: bool,
+    pub is_finished: bool,
+    pub error: String,
 }
 
 #[derive(Default, Debug, Serialize, Deserialize, Clone)]
@@ -152,6 +191,7 @@ pub struct TaskContext {
 pub struct LoadTaskScheduler {
     pub sender: Sender<LoadTaskMsg>,
     pub states: Arc<Mutex<LoadTaskStates>>,
+    pub writers: Arc<Mutex<WritersStates>>,
     pub thread_handle: Option<Arc<Mutex<std::thread::JoinHandle<()>>>>,
 }
 
@@ -161,6 +201,19 @@ impl LoadTaskScheduler {
         let mut states = self.states.lock().unwrap();
         states.canceled = true;
         states.error = err;
+    }
+
+    pub fn check_task_thread_finished(&self) {
+        let thread_finished = self
+            .thread_handle
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .is_finished();
+        if thread_finished {
+            self.cancel("task thread finished unexpectedly".to_string());
+        }
     }
 
     pub fn is_canceled(&self) -> bool {
@@ -204,11 +257,45 @@ impl LoadTaskScheduler {
         states.flushed_files = flushed_files;
     }
 
+    pub(crate) fn get_handled_chunks(&self) -> HashMap<u64, u64> {
+        let writers = self.writers.lock().unwrap();
+        writers.handled_chunk_ids.clone()
+    }
+
+    pub(crate) fn get_flushed_chunks(&self) -> HashMap<u64, u64> {
+        let writers = self.writers.lock().unwrap();
+        writers.flushed_chunk_ids.clone()
+    }
+
+    pub fn get_handled_chunk(&self, writer_id: &u64) -> u64 {
+        let writers = self.writers.lock().unwrap();
+        *writers.handled_chunk_ids.get(writer_id).unwrap_or(&0)
+    }
+
+    pub fn get_flushed_chunk(&self, writer_id: &u64) -> u64 {
+        let writers = self.writers.lock().unwrap();
+        *writers.flushed_chunk_ids.get(writer_id).unwrap_or(&0)
+    }
+
+    pub(crate) fn update_handled_chunk(&self, writer_id: u64, chunk_id: u64) {
+        let mut writers = self.writers.lock().unwrap();
+        let handled_chunk_id = writers.handled_chunk_ids.entry(writer_id).or_insert(0);
+        assert!(*handled_chunk_id == chunk_id - 1);
+        *handled_chunk_id = chunk_id;
+    }
+
+    pub(crate) fn update_flushed_chunk(&self, writer_id: u64, chunk_id: u64) {
+        let mut writers = self.writers.lock().unwrap();
+        let flushed_chunk_id = writers.flushed_chunk_ids.entry(writer_id).or_insert(0);
+        assert!(*flushed_chunk_id <= chunk_id);
+        *flushed_chunk_id = chunk_id;
+    }
+
     pub fn set_thread_handle(&mut self, thread_handle: std::thread::JoinHandle<()>) {
         self.thread_handle = Some(Arc::new(Mutex::new(thread_handle)))
     }
 
-    pub async fn query_unhandled_chunks(&self, chunk_ids: Vec<u64>) -> Vec<u64> {
+    pub async fn query_unhandled_chunks(&self, chunk_ids: HashMap<u64, u64>) -> HashMap<u64, u64> {
         let (cb, fut) = tikv_util::future::paired_future_callback();
         self.sender
             .send(LoadTaskMsg::QueryUnhandledChunks { chunk_ids, cb })
@@ -221,10 +308,12 @@ impl LoadTaskWorker {
     pub fn new(config: LoadDataConfig, context: LoadDataContext, task_ctx: TaskContext) -> Self {
         let (sender, receiver) = tikv_util::mpsc::unbounded();
         let mut states = LoadTaskStates::default();
+        let writers = WritersStates::default();
         states.task_id = task_ctx.task_id.clone();
         let scheduler = LoadTaskScheduler {
             sender,
             states: Arc::new(Mutex::new(states)),
+            writers: Arc::new(Mutex::new(writers)),
             thread_handle: None,
         };
         let (file_tx, file_rx) = tikv_util::mpsc::unbounded();
@@ -241,7 +330,7 @@ impl LoadTaskWorker {
             reader_errs: vec![],
             scheduler,
             receiver,
-            handled_chunks: Default::default(),
+            unhandled_readers: vec![],
             cached_file_ids: vec![],
             file_tx,
             file_rx,
@@ -253,10 +342,12 @@ impl LoadTaskWorker {
         while let Ok(msg) = self.receiver.recv() {
             match msg {
                 LoadTaskMsg::AddChunk {
+                    writer_id,
                     chunk_id,
                     chunk_data,
+                    cb,
                 } => {
-                    let res = self.handle_add_chunk(chunk_id, chunk_data);
+                    let res = self.handle_add_chunk(writer_id, chunk_id, chunk_data, cb);
                     if res.is_err() || !self.reader_errs.is_empty() {
                         let err_msg = if let Err(e) = res {
                             e.to_string()
@@ -264,16 +355,16 @@ impl LoadTaskWorker {
                             self.reader_errs.first().unwrap().to_string()
                         };
                         self.scheduler.cancel(err_msg);
-                        let remained = self.file_idx - self.reader_errs.len() - self.readers.len();
-                        for _ in 0..remained {
-                            self.recv_reader();
+                        if self.file_idx > self.reader_errs.len() + self.readers.len() {
+                            let recv_count = self.file_idx
+                                - self.reader_errs.len()
+                                - self.readers.len()
+                                - self.unhandled_readers.len();
+                            self.recv_reader(recv_count);
                         }
                     }
                 }
-                LoadTaskMsg::Build {
-                    chunk_ids,
-                    compression_type,
-                } => {
+                LoadTaskMsg::Build { compression_type } => {
                     if self.scheduler.is_canceled() {
                         warn!("task {} is canceled, do not build", self.task_ctx.task_id);
                         continue;
@@ -282,10 +373,34 @@ impl LoadTaskWorker {
                         warn!("task {} is finished, skip build", self.task_ctx.task_id);
                         continue;
                     }
-                    if let Err(err) = self.build(chunk_ids, compression_type) {
+                    if let Err(err) = self.build(compression_type) {
                         error!("build failed {:?}", err);
                         self.scheduler.cancel(err.to_string());
                     }
+                    continue;
+                }
+                LoadTaskMsg::Flush { cb } => {
+                    let mut flush_res = FlushResult::default();
+                    if self.scheduler.is_canceled() {
+                        warn!("task {} is canceled, do not build", self.task_ctx.task_id);
+                        flush_res.error = self.scheduler.error_msg();
+                        cb(flush_res);
+                        continue;
+                    }
+                    if self.scheduler.is_finished() {
+                        warn!("task {} is finished, skip flush", self.task_ctx.task_id);
+                        flush_res.error = self.scheduler.error_msg();
+                        flush_res.flushed_chunk_ids = self.scheduler.get_flushed_chunks();
+                        cb(flush_res);
+                        continue;
+                    }
+                    if let Err(err) = self.flush() {
+                        error!("flush failed {:?}", err);
+                        self.scheduler.cancel(err.to_string());
+                    }
+                    flush_res.error = self.scheduler.error_msg();
+                    flush_res.flushed_chunk_ids = self.scheduler.get_flushed_chunks();
+                    cb(flush_res);
                     continue;
                 }
                 LoadTaskMsg::Cleanup => {
@@ -293,8 +408,13 @@ impl LoadTaskWorker {
                     return;
                 }
                 LoadTaskMsg::QueryUnhandledChunks { mut chunk_ids, cb } => {
-                    chunk_ids.drain_filter(|x| self.handled_chunks.contains(x));
-                    cb(chunk_ids);
+                    let mut res: HashMap<u64, u64> = HashMap::new();
+                    for (writer_id, chunk_id) in chunk_ids.drain() {
+                        if self.scheduler.get_flushed_chunk(&writer_id) < chunk_id {
+                            res.insert(writer_id, chunk_id);
+                        }
+                    }
+                    cb(res);
                 }
             }
         }
@@ -304,30 +424,75 @@ impl LoadTaskWorker {
         self.scheduler.clone()
     }
 
-    pub(crate) fn handle_add_chunk(&mut self, chunk_id: u64, chunk_data: Bytes) -> Result<()> {
-        info!("handle add chunk {}, len {}", chunk_id, chunk_data.len());
-        if self.handled_chunks.contains(&chunk_id) {
-            warn!(
-                "{} skip duplicated chunk {}",
-                self.task_ctx.task_id, chunk_id
-            );
-            return Ok(());
-        }
+    pub(crate) fn handle_add_chunk(
+        &mut self,
+        writer_id: u64,
+        chunk_id: u64,
+        chunk_data: Bytes,
+        cb: Box<dyn FnOnce(PutChunkResult) + Send>,
+    ) -> Result<()> {
+        info!(
+            "{} handle add chunk {} with len {} for writer {}",
+            self.task_ctx.task_id,
+            chunk_id,
+            chunk_data.len(),
+            writer_id
+        );
+        let handled_chunk_id = self.scheduler.get_handled_chunk(&writer_id);
+        let flushed_chunk_id = self.scheduler.get_flushed_chunk(&writer_id);
+        let mut put_chunk_res = PutChunkResult {
+            handled_chunk_id,
+            flushed_chunk_id,
+            is_canceled: self.scheduler.is_canceled(),
+            is_finished: self.scheduler.is_finished(),
+            error: self.scheduler.error_msg(),
+        };
         if self.scheduler.is_canceled() {
             warn!(
-                "task {} is canceled, skip add chunk {}",
+                "{} is canceled, skip add chunk {}",
                 self.task_ctx.task_id, chunk_id
             );
+            cb(put_chunk_res);
             return Ok(());
         }
         if self.scheduler.is_finished() {
             warn!(
-                "task {} is finished, skip add chunk {}",
+                "{} is finished, skip add chunk {}",
                 self.task_ctx.task_id, chunk_id
             );
+            cb(put_chunk_res);
             return Ok(());
         }
-        self.handled_chunks.insert(chunk_id);
+
+        if chunk_data.is_empty() {
+            warn!(
+                "{} skip add chunk, chunk {} is empty for writer {}",
+                self.task_ctx.task_id, chunk_id, writer_id
+            );
+            cb(put_chunk_res);
+            return Ok(());
+        }
+        if handled_chunk_id != chunk_id - 1 {
+            warn!(
+                "{} skip chunk {} for writer {}, expect chunk {}",
+                self.task_ctx.task_id,
+                chunk_id,
+                writer_id,
+                handled_chunk_id + 1
+            );
+            put_chunk_res.error = format!(
+                "skip chunk {} for writer {}, expect chunk {}",
+                chunk_id,
+                writer_id,
+                handled_chunk_id + 1
+            );
+            cb(put_chunk_res);
+            return Ok(());
+        }
+        self.scheduler.update_handled_chunk(writer_id, chunk_id);
+        put_chunk_res.handled_chunk_id = chunk_id;
+        // call `cb` early to avoid waiting for flush
+        cb(put_chunk_res);
 
         if self.task_ctx.inner_key_off.is_none() {
             let key_len = (&chunk_data[0..]).get_u16_le();
@@ -376,40 +541,61 @@ impl LoadTaskWorker {
             self.kv_pairs.push(KvPair::new(inner_key, val));
             self.in_mem_size += 2 + key_len as usize + 4 + val_len as usize;
         }
+
         if self.in_mem_size > self.ctx.max_in_mem_size {
-            info!(
-                "{} flush to local file on in_mem_size {}",
-                self.task_ctx.task_id, self.in_mem_size
-            );
-            let kv_pairs = mem::take(&mut self.kv_pairs);
-            let tx = self.file_tx.clone();
-            let task_ctx = self.task_ctx.clone();
-            let file_path = self.file_path(self.file_idx);
-            let in_mem_size = self.in_mem_size;
-            self.file_idx += 1;
-            self.scheduler.set_flushed_files(self.file_idx);
-            std::thread::spawn(move || {
-                let res = flush_to_local_file(kv_pairs, task_ctx, file_path, in_mem_size);
-                tx.send(res).unwrap();
-            });
-            if self.file_idx > self.readers.len() + self.reader_errs.len() + FLUSH_FILE_CONCURRENCY
+            self.flush_mem_buf();
+            if self.file_idx
+                > self.readers.len()
+                    + self.reader_errs.len()
+                    + self.unhandled_readers.len()
+                    + FLUSH_FILE_CONCURRENCY
             {
-                self.recv_reader();
+                self.recv_reader(1);
             }
             self.in_mem_size = 0;
         }
         Ok(())
     }
 
-    fn recv_reader(&mut self) {
-        match self.file_rx.recv().unwrap() {
-            Err(err) => {
-                self.reader_errs.push(err);
-            }
-            Ok(reader) => {
-                self.readers.push(reader);
+    fn recv_reader(&mut self, mut recv_count: usize) {
+        while recv_count != 0 {
+            let reader = self.file_rx.recv().unwrap();
+            self.unhandled_readers.push(reader);
+            recv_count -= 1;
+        }
+        self.unhandled_readers
+            .sort_by(|a, b| a.file_idx.cmp(&b.file_idx));
+
+        let handled_file_idx = self.readers.len() + self.reader_errs.len();
+        let mut need_handled = self.unhandled_readers.len();
+        for (idx, unhandled_reader) in self.unhandled_readers.iter().enumerate() {
+            assert!(unhandled_reader.file_idx >= handled_file_idx + idx);
+            if unhandled_reader.file_idx > handled_file_idx + idx {
+                need_handled = idx;
+                break;
             }
         }
+
+        if need_handled == 0 {
+            return;
+        }
+        let mut handled_chunk_ids: HashMap<u64, u64> = HashMap::new();
+        for mut unhandled_reader in self.unhandled_readers.drain(0..need_handled) {
+            match unhandled_reader.reader {
+                Ok(reader) => {
+                    self.readers.push(reader);
+                    handled_chunk_ids = mem::take(&mut unhandled_reader.handled_chunk_ids);
+                }
+                Err(err) => {
+                    self.reader_errs.push(err);
+                }
+            }
+        }
+        for (writer_id, chunk_id) in handled_chunk_ids {
+            self.scheduler.update_flushed_chunk(writer_id, chunk_id);
+        }
+
+        info!("{} handle {} readers", self.task_ctx.task_id, need_handled);
     }
 
     fn alloc_file_id(&mut self) -> Result<u64> {
@@ -437,32 +623,72 @@ impl LoadTaskWorker {
         }
     }
 
-    fn build(&mut self, chunk_ids: Vec<u64>, compression_type: u8) -> Result<()> {
-        for id in chunk_ids {
-            if !self.handled_chunks.contains(&id) {
-                return Err(Error::CheckError(format!(
-                    "{} chunk {} is not handled",
-                    self.task_ctx.task_id, id
-                )));
-            }
+    fn flush_mem_buf(&mut self) {
+        info!(
+            "{} flush to local file on in_mem_size {}",
+            self.task_ctx.task_id, self.in_mem_size
+        );
+        let kv_pairs = mem::take(&mut self.kv_pairs);
+        let tx = self.file_tx.clone();
+        let task_ctx = self.task_ctx.clone();
+        let file_path = self.file_path(self.file_idx);
+        let in_mem_size = self.in_mem_size;
+        let handled_chunk_ids = self.scheduler.get_handled_chunks();
+        let file_idx = self.file_idx;
+        self.file_idx += 1;
+        self.scheduler.set_flushed_files(self.file_idx);
+        std::thread::spawn(move || {
+            let res = flush_to_local_file(kv_pairs, task_ctx, file_path, in_mem_size);
+            tx.send(UnhandledReader {
+                reader: res,
+                handled_chunk_ids,
+                file_idx,
+            })
+            .unwrap();
+        });
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        if !self.reader_errs.is_empty() {
+            return Err(self.reader_errs.pop().unwrap());
         }
-        while self.readers.len() + self.reader_errs.len() < self.file_idx {
-            self.recv_reader();
+
+        if !self.kv_pairs.is_empty() {
+            self.flush_mem_buf();
+        }
+        if self.readers.len() + self.reader_errs.len() < self.file_idx {
+            let recv_count = self.file_idx
+                - self.readers.len()
+                - self.reader_errs.len()
+                - self.unhandled_readers.len();
+            info!(
+                "{} still needs to receive {} readers",
+                self.task_ctx.task_id, recv_count
+            );
+            self.recv_reader(recv_count);
         }
         if !self.reader_errs.is_empty() {
             return Err(self.reader_errs.pop().unwrap());
         }
-        if !self.kv_pairs.is_empty() {
-            let kv_pairs = mem::take(&mut self.kv_pairs);
-            let reader = flush_to_local_file(
-                kv_pairs,
-                self.task_ctx.clone(),
-                self.file_path(self.file_idx),
-                self.in_mem_size,
-            )?;
-            self.readers.push(reader);
-            self.file_idx += 1;
+
+        self.in_mem_size = 0;
+        Ok(())
+    }
+
+    fn build(&mut self, compression_type: u8) -> Result<()> {
+        // to be compatible with old remote backend, we need to flush all kv pairs
+        // before build. TODO: remove it after all remote backend upgraded.
+        self.flush()?;
+
+        if !self.kv_pairs.is_empty() || self.readers.len() < self.file_idx {
+            return Err(Error::CheckError(format!(
+                "{} has {} unflushed kv pairs, {} unhandled files",
+                self.task_ctx.task_id,
+                self.kv_pairs.len(),
+                self.file_idx - self.readers.len()
+            )));
         }
+
         if self.readers.is_empty() {
             info!("{} build empty data", self.task_ctx.task_id);
             self.scheduler.set_finished(vec![]);

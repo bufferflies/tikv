@@ -1,6 +1,6 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{mem, time::Duration};
+use std::{collections::HashMap, mem, time::Duration};
 
 use bytes::{BufMut, BytesMut};
 use futures::executor::block_on;
@@ -43,19 +43,20 @@ pub fn init_task(
 
 pub fn put_chunks<FnKey, FnVal, FnDup>(
     scheduler: &LoadTaskScheduler,
+    writer_count: usize,
     data_count: usize,
     batch_size: usize,
     i_to_key: FnKey,
     i_to_val: FnVal,
     timeout: Duration,
     dup_count: FnDup,
-) -> (Vec<u64>, RefStore)
+) -> RefStore
 where
     FnKey: Fn(usize) -> Vec<u8>,
     FnVal: Fn(usize) -> Vec<u8>,
     FnDup: Fn(usize) -> usize,
 {
-    let mut chunk_ids = Vec::with_capacity((data_count as f64 / batch_size as f64).ceil() as usize);
+    let mut chunk_ids: HashMap<u64, u64> = HashMap::with_capacity(5);
     let mut ref_store = RefStore::default();
 
     let capacity = (mem::size_of::<u16>() /* key length */ + i_to_key(0).len() + mem::size_of::<u32>() /* val length */ + i_to_val(0).len())
@@ -87,19 +88,29 @@ where
             }
         }
 
-        let chunk_id = i as u64;
+        let writer_id = ((i / batch_size) % writer_count) as u64;
+        let chunk_id = chunk_ids.entry(writer_id).or_default();
+        let (cb, fut) = tikv_util::future::paired_future_callback();
+        *chunk_id += 1;
         scheduler
             .sender
             .send(LoadTaskMsg::AddChunk {
-                chunk_id,
+                writer_id,
+                chunk_id: *chunk_id,
                 chunk_data: buf.freeze(),
+                cb,
             })
             .unwrap();
-
-        chunk_ids.push(chunk_id)
+        let put_chunk_res = block_on(fut).unwrap();
+        assert!(!put_chunk_res.is_canceled);
+        assert!(!put_chunk_res.is_finished);
+        assert!(
+            put_chunk_res.error.is_empty(),
+            "put_chunks error: {}",
+            put_chunk_res.error
+        );
     }
 
-    let mut unhandled_chunk_ids = chunk_ids.clone();
     let ok = try_wait(
         || {
             assert!(
@@ -107,29 +118,29 @@ where
                 "task canceled: {}",
                 scheduler.error_msg()
             );
-            let mut res = block_on(scheduler.query_unhandled_chunks(unhandled_chunk_ids.clone()));
-            unhandled_chunk_ids = mem::take(&mut res);
-            unhandled_chunk_ids.is_empty()
+            let (cb, fut) = tikv_util::future::paired_future_callback();
+            scheduler.sender.send(LoadTaskMsg::Flush { cb }).unwrap();
+            let flushed_res = block_on(fut).unwrap();
+            !flushed_res.is_canceled
+                && !flushed_res.is_finished
+                && flushed_res.error.is_empty()
+                && flushed_res.flushed_chunk_ids.eq(&chunk_ids)
         },
         timeout.as_secs() as usize,
     );
     assert!(ok, "put_chunks timeout, states: {:?}", scheduler.states());
 
-    (chunk_ids, ref_store)
+    ref_store
 }
 
 pub fn build(
     scheduler: &LoadTaskScheduler,
-    chunk_ids: Vec<u64>,
     compression_type: u8,
     timeout: Duration,
 ) -> std::result::Result<(), String> {
     scheduler
         .sender
-        .send(LoadTaskMsg::Build {
-            chunk_ids,
-            compression_type,
-        })
+        .send(LoadTaskMsg::Build { compression_type })
         .unwrap();
 
     let start_time = Instant::now_coarse();
