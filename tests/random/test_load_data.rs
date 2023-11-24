@@ -20,7 +20,7 @@ use test_cloud_server::{
 use tikv_util::{info, time::Instant};
 use tokio::runtime::Runtime;
 
-use crate::{i_to_key, i_to_val, LOAD_DATA_COUNTER, TABLE_COUNTER};
+use crate::{generate_random_string, i_to_key, LOAD_DATA_COUNTER, TABLE_COUNTER};
 
 const MAX_IN_MEM_SIZE: usize = 10 * 1024; // 10KiB
 const COMPRESSION_TYPE: u8 = ZSTD_COMPRESSION;
@@ -147,7 +147,7 @@ fn do_load_data(
         data_count,
         data_batch_size,
         generate_key,
-        i_to_val,
+        generate_random_string(format!("ingest-{}-", commit_ts)),
         LOAD_DATA_TIMEOUT,
         |_| 0,
     );

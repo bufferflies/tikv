@@ -135,6 +135,7 @@ tidb_query_datatype = { workspace = true }
 tidb_query_executors = { workspace = true }
 tidb_query_expr = { workspace = true }
 tikv = { workspace = true }
+tikv-client = { workspace = true }
 tikv_util = { workspace = true }
 time = "0.1"
 tipb = { workspace = true }

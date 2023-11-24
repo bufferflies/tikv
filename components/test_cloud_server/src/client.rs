@@ -1405,8 +1405,8 @@ impl ClusterClient {
                 "{} val not equal for key {}, db: {:?}, ref store {:?}",
                 Self::tag_from_ctx(&ctx),
                 log_wrappers::hex_encode_upper(key),
-                val.map(|v| (v.len(), log_wrappers::hex_encode_upper(v))),
-                expect_val.map(|v| (v.len(), log_wrappers::hex_encode_upper(v)))
+                val.map(|v| (v.len(), tikv_util::escape(v))),
+                expect_val.map(|v| (v.len(), tikv_util::escape(v)))
             ));
         }
         Ok(())
@@ -1500,9 +1500,10 @@ impl ClusterTxnClient {
             let ref_val = ref_store.get(key);
             if ref_val.is_none() || ref_val.as_ref().unwrap().is_none() {
                 let err: Error = box_err!(
-                    "verify_data_by_scan: not found in ref store, db: {} -> {}",
+                    "verify_data_by_scan: not found in ref store, db: {} -> {}, ref_val {:?}",
                     log_wrappers::hex_encode_upper(key),
-                    log_wrappers::hex_encode_upper(kv.value())
+                    tikv_util::escape(kv.value()),
+                    ref_val
                 );
                 self.log_verify_error(key, None, &err);
                 return Err(err);
@@ -1512,9 +1513,9 @@ impl ClusterTxnClient {
                 let err: Error = box_err!(
                     "verify_data_by_scan: value not match for key {}, db: {}(len:{}), ref store: {}(len:{})",
                     log_wrappers::hex_encode_upper(key),
-                    log_wrappers::hex_encode_upper(kv.value()),
+                    tikv_util::escape(kv.value()),
                     kv.value().len(),
-                    log_wrappers::hex_encode_upper(ref_val),
+                    tikv_util::escape(ref_val),
                     ref_val.len()
                 );
                 self.log_verify_error(key, Some(kv.value()), &err);

@@ -30,6 +30,7 @@ use test_cloud_server::{
 };
 use test_pd_client::TestPdClient;
 use tikv::config::TikvConfig;
+use tikv_client::TimestampExt;
 use tikv_util::{
     box_err,
     config::{ReadableDuration, ReadableSize},
@@ -375,11 +376,21 @@ pub(crate) fn spawn_keyspace_write(
                     continue;
                 }
                 let _guard = guard.unwrap();
-                info!("[{}] thread write on keyspace {}", idx, keyspace_id);
+                let ver = client.current_timestamp().await.unwrap().version();
+                info!(
+                    "[{}] thread write on keyspace {}, ver {}",
+                    idx, keyspace_id, ver
+                );
 
                 if put_kv {
                     client
-                        .keyspace_put_kv(keyspace_id, table_id, i..(i + 10), i_to_key, i_to_val)
+                        .keyspace_put_kv(
+                            keyspace_id,
+                            table_id,
+                            i..(i + 10),
+                            i_to_key,
+                            generate_random_string(format!("write-{}-", ver)),
+                        )
                         .await
                         .unwrap();
                 } else {
@@ -497,6 +508,20 @@ pub(crate) fn generate_keyspace_key(keyspace_id: u32) -> impl Fn(usize) -> Vec<u
         let mut key = ApiV2::get_txn_keyspace_prefix(keyspace_id);
         key.extend(i_to_key(i));
         key
+    }
+}
+
+pub(crate) fn generate_random_string(prefix: String) -> impl Fn(usize) -> Vec<u8> {
+    move |i: usize| -> Vec<u8> {
+        let mut val = prefix.as_bytes().to_vec();
+        let n = i % 512 + 1;
+        val.reserve(n);
+        val.extend(
+            rand::thread_rng()
+                .sample_iter(&rand::distributions::Alphanumeric)
+                .take(n),
+        );
+        val
     }
 }
 
