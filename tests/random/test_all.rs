@@ -25,14 +25,14 @@ use tikv_util::{
 use txn_types::Key;
 
 use crate::{
-    alloc_node_id_vec, generate_keyspace_key, new_security_config, random_node_restart,
+    alloc_node_id_vec, check_gc, generate_keyspace_key, new_security_config, random_node_restart,
     spawn_create_keyspace, spawn_gc_worker, spawn_keyspace_write, spawn_major_compact, spawn_merge,
     spawn_move, spawn_transfer,
     test_load_data::{check_load_data, spawn_load_data},
     test_native_br::{check_br, spawn_backup, spawn_restore_keyspace},
-    TikvConfig, BACKUP_COUNTER, CONCURRENCY, KEYSPACE_COUNTER, LOAD_DATA_COUNTER,
-    MANUAL_MAJOR_COMPACT_COUNTER, MERGE_COUNTER, MOVE_COUNTER, NODE_RESTART_COUNTER,
-    RESTORE_COUNTER, TABLE_COUNTER, TIMEOUT, TRANSFER_COUNTER, WRITE_COUNTER,
+    TikvConfig, BACKUP_COUNTER, CONCURRENCY, GC_ADVANCE_SAFE_POINT_COUNTER, KEYSPACE_COUNTER,
+    LOAD_DATA_COUNTER, MANUAL_MAJOR_COMPACT_COUNTER, MERGE_COUNTER, MOVE_COUNTER,
+    NODE_RESTART_COUNTER, RESTORE_COUNTER, TABLE_COUNTER, TIMEOUT, TRANSFER_COUNTER, WRITE_COUNTER,
 };
 
 const INITIAL_KEYSPACE_COUNT: usize = 10;
@@ -49,7 +49,12 @@ const REGION_BUCKET_SIZE: ReadableSize = ReadableSize::kb(64);
 #[test]
 fn test_random_all() {
     test_util::init_log_for_test();
-    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(4)
+        .thread_name("random-workload")
+        .build()
+        .unwrap();
     let _guard = runtime.enter();
 
     // Prepare.
@@ -98,7 +103,6 @@ fn test_random_all() {
         spawn_merge(cluster.new_scheduler(), true),
         spawn_transfer(cluster.new_scheduler()),
         spawn_move(cluster.new_scheduler(), Arc::new(RwLock::new(()))),
-        spawn_gc_worker(cluster.get_pd_client(), TIMEOUT),
         spawn_create_keyspace(
             cluster.get_pd_client(),
             keyspace_manager.clone(),
@@ -130,13 +134,21 @@ fn test_random_all() {
         ));
     }
 
-    let mut async_handles = vec![spawn_backup(
-        cluster.new_client(),
-        keyspace_manager,
-        backup_worker,
-        Duration::from_secs(5),
-        TIMEOUT,
-    )];
+    let mut async_handles = vec![
+        spawn_backup(
+            cluster.new_client(),
+            keyspace_manager.clone(),
+            backup_worker,
+            Duration::from_secs(5),
+            TIMEOUT,
+        ),
+        spawn_gc_worker(
+            runtime.block_on(cluster.new_txn_client()),
+            pd_client.clone(),
+            keyspace_manager,
+            TIMEOUT,
+        ),
+    ];
     for idx in 0..CONCURRENCY {
         async_handles.push(spawn_keyspace_write(
             idx,
@@ -183,9 +195,10 @@ fn test_random_all() {
     let total_restore_count = RESTORE_COUNTER.load(Ordering::SeqCst);
     let total_load_data_count = LOAD_DATA_COUNTER.load(Ordering::SeqCst);
     let total_manual_major_compact = MANUAL_MAJOR_COMPACT_COUNTER.load(Ordering::SeqCst);
+    let total_gc_resolved_locks = GC_ADVANCE_SAFE_POINT_COUNTER.load(Ordering::SeqCst);
     let region_number = pd_client.get_regions_number();
     info!(
-        "TEST SUCCEED: write {}, keyspace {}, table {}, region {}, merge {}, move {}, transfer {}, node restart {}, backup {}, restore {}, load_data {}, manual_major_compact {}, verified_records {}",
+        "TEST SUCCEED: write {}, keyspace {}, table {}, region {}, merge {}, move {}, transfer {}, node restart {}, backup {}, restore {}, load_data {}, manual_major_compact {}, verified_records {}, gc {}",
         total_write_count,
         total_keyspace_count,
         total_table_count,
@@ -199,6 +212,7 @@ fn test_random_all() {
         total_load_data_count,
         total_manual_major_compact,
         verified_records_count,
+        total_gc_resolved_locks,
     );
 }
 
@@ -338,6 +352,7 @@ async fn verify_cluster(cluster: &mut ServerCluster) -> usize /* records count i
 
     check_br();
     check_load_data();
+    check_gc();
 
     records_cnt
 }

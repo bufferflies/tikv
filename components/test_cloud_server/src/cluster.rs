@@ -426,7 +426,7 @@ impl ServerCluster {
     }
 
     pub fn set_gc_safe_point(&self, ts: u64) {
-        self.pd_client.set_gc_safe_point(ts);
+        let _ = self.pd_client.set_gc_safe_point(ts).unwrap();
         for node_id in self.get_nodes() {
             self.get_kvengine(node_id).update_managed_safe_ts(ts);
         }

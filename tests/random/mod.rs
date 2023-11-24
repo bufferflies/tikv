@@ -23,7 +23,7 @@ use pd_client::PdClient;
 use rand::{prelude::SliceRandom, Rng, RngCore};
 use security::SecurityConfig;
 use test_cloud_server::{
-    client::ClusterClient,
+    client::{ClusterClient, ClusterTxnClient},
     keyspace::{ClusterKeyspaceClient, KeyspaceManager},
     scheduler::Scheduler,
     try_wait, ServerCluster,
@@ -34,10 +34,11 @@ use tikv_client::TimestampExt;
 use tikv_util::{
     box_err,
     config::{ReadableDuration, ReadableSize},
-    info,
+    error, info,
     time::Instant,
     warn,
 };
+use tokio::sync::Semaphore;
 use txn_types::Key;
 
 pub(crate) type Error = Box<dyn std::error::Error + Send + Sync + 'static>;
@@ -55,6 +56,7 @@ lazy_static::lazy_static! {
     pub static ref KEYSPACE_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref TABLE_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref MANUAL_MAJOR_COMPACT_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    pub static ref GC_ADVANCE_SAFE_POINT_COUNTER: AtomicUsize = AtomicUsize::new(0);
 }
 
 pub const TIMEOUT: Duration = Duration::from_secs(90);
@@ -62,6 +64,10 @@ pub const CONCURRENCY: usize = 4;
 
 const DEFAULT_INNER_KEY_OFFSET: usize = 4;
 const REQUEST_MAJOR_COMPACT_ON_STORE_TIMEOUT: Duration = Duration::from_secs(20);
+
+const KEYSPACE_CLEANUP_LOCKS_CONCURRENCY: usize = 4;
+const KEYSPACE_CLEANUP_LOCKS_TIMEOUT: Duration = Duration::from_secs(30);
+const GC_INTERVAL: Duration = Duration::from_secs(10);
 
 static NODE_ALLOCATOR: AtomicU16 = AtomicU16::new(1);
 
@@ -142,7 +148,7 @@ fn test_random_merge() {
         info!("start node {}", node_id);
         cluster.start_node(node_id, update_conf_fn);
         sleep(Duration::from_secs(10));
-        pd_client.set_gc_safe_point(ts.into_inner());
+        let _ = pd_client.set_gc_safe_point(ts.into_inner()).unwrap();
     }
     info!("stop node thread exit");
     for handle in handles {
@@ -237,16 +243,93 @@ pub(crate) fn spawn_transfer(scheduler: Scheduler) -> JoinHandle<()> {
     })
 }
 
-pub(crate) fn spawn_gc_worker(pd_client: Arc<TestPdClient>, timeout: Duration) -> JoinHandle<()> {
-    std::thread::spawn(move || {
+pub(crate) fn spawn_gc_worker(
+    client: ClusterTxnClient,
+    pd_client: Arc<TestPdClient>,
+    keyspace_manager: KeyspaceManager,
+    timeout: Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let semaphore = Arc::new(Semaphore::new(KEYSPACE_CLEANUP_LOCKS_CONCURRENCY));
         let start_time = Instant::now();
         while start_time.saturating_elapsed() < timeout {
-            let ts = block_on(pd_client.get_tso()).unwrap();
-            sleep(Duration::from_secs(10));
-            pd_client.set_gc_safe_point(ts.into_inner());
+            let safepoint = client.current_timestamp().await.unwrap();
+            let max_keyspace_id = keyspace_manager.max_keyspace_id().unwrap_or_default();
+
+            tokio::time::sleep(GC_INTERVAL).await;
+            info!(
+                "gc_worker: try advance safepoint to {}",
+                safepoint.version()
+            );
+
+            let mut handles = Vec::with_capacity(max_keyspace_id as usize + 1);
+            for keyspace_id in 0..=max_keyspace_id {
+                let start = ApiV2::get_txn_keyspace_prefix(keyspace_id);
+                let end = ApiV2::get_txn_keyspace_prefix(keyspace_id + 1);
+
+                let semaphore = semaphore.clone();
+                let inner_client = client.inner.clone();
+                let safepoint = safepoint.clone();
+                let h = tokio::spawn(async move {
+                    let permit = semaphore.acquire().await.unwrap();
+                    let res = tokio::time::timeout(
+                        KEYSPACE_CLEANUP_LOCKS_TIMEOUT,
+                        inner_client.cleanup_locks(start..end, &safepoint, Default::default()),
+                    )
+                    .await;
+                    drop(permit);
+
+                    match res {
+                        Ok(Ok(res)) => {
+                            // Should not have any error in `res`.
+                            assert!(
+                                res.key_error.is_none() && res.region_error.is_none(),
+                                "unexpected CleanupLocksResult, check client rust: key_error {:?}, region_error {:?}, keyspace_id {}",
+                                res.key_error,
+                                res.region_error,
+                                keyspace_id,
+                            );
+                            info!("gc_worker: cleanup_locks succeed"; "resolved_locks" => res.resolved_locks, "safepoint" => safepoint.version(), "keyspace_id" => keyspace_id);
+                            true
+                        }
+                        Ok(Err(err)) => {
+                            error!("gc_worker: cleanup_locks failed"; "err" => ?err, "safepoint" => safepoint.version(), "keyspace_id" => keyspace_id);
+                            false
+                        }
+                        Err(_elapsed) => {
+                            // Should not timeout for 30s.
+                            // TODO: inspect the reason.
+                            warn!("gc_worker: cleanup_locks timeout"; "safepoint" => safepoint.version(), "keyspace_id" => keyspace_id);
+                            false
+                        }
+                    }
+                });
+                handles.push(h);
+            }
+            let results = futures::future::join_all(handles).await;
+            if results.into_iter().all(|r| r.unwrap()) {
+                let new_safepoint = pd_client.set_gc_safe_point(safepoint.version()).unwrap();
+                assert!(new_safepoint <= safepoint.version());
+                if new_safepoint == safepoint.version() {
+                    info!("gc_worker: advance safepoint to {}", safepoint.version());
+                    GC_ADVANCE_SAFE_POINT_COUNTER.fetch_add(1, Ordering::SeqCst);
+                } else {
+                    warn!("gc_worker: update safepoint failed"; "safepoint" => safepoint.version());
+                }
+            }
         }
-        info!("gc worker thread exit");
+        info!("gc_worker thread exit");
     })
+}
+
+pub(crate) fn check_gc() {
+    // TODO: check times of GC after address the cleanup_locks timeout issue.
+    // let counter = GC_ADVANCE_SAFE_POINT_COUNTER.load(Ordering::SeqCst);
+    // assert!(
+    //     counter > 0,
+    //     "gc_worker: times of safe point advanced less than expected, actual
+    // {}",     counter,
+    // );
 }
 
 pub(crate) fn spawn_major_compact(

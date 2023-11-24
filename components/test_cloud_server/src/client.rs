@@ -1441,7 +1441,7 @@ type TxnClient = tikv_client::TransactionClient<ApiV2NoPrefixCodec>;
 
 /// ClusterTxnClient provides transaction operations.
 pub struct ClusterTxnClient {
-    inner: TxnClient,
+    pub inner: TxnClient,
 
     // Used to get extra info for debug.
     pd_client: Arc<TestPdClient>,

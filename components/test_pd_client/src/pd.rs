@@ -837,7 +837,7 @@ impl PdCluster {
     }
 
     // Used by gc_worker to advance gc safe point.
-    fn set_gc_safe_point(&mut self, safe_point: u64) -> Result<()> {
+    fn set_gc_safe_point(&mut self, safe_point: u64) -> Result<u64 /* new gc_safe_point */> {
         let svc_safe_point = GcServiceSafePoint {
             service: "gc_worker".to_owned(),
             safe_point,
@@ -849,7 +849,10 @@ impl PdCluster {
         self.gc_safe_point
     }
 
-    fn update_gc_service_safe_point(&mut self, svc_safe_point: GcServiceSafePoint) -> Result<()> {
+    fn update_gc_service_safe_point(
+        &mut self,
+        svc_safe_point: GcServiceSafePoint,
+    ) -> Result<u64 /* new gc_safe_point */> {
         info!("update_gc_service_safe_point: {:?}", svc_safe_point);
         match self
             .gc_service_safe_points
@@ -883,11 +886,12 @@ impl PdCluster {
             .map(|x| x.safe_point)
             .min()
             .unwrap_or(0);
+        let new_safe_point = self.get_gc_safe_point();
         info!(
             "update_gc_service_safe_point: new gc_safe_point {}",
-            self.get_gc_safe_point()
+            new_safe_point
         );
-        Ok(())
+        Ok(new_safe_point)
     }
 
     pub fn get_gc_service_safe_points(&self) -> Vec<GcServiceSafePoint> {
@@ -1477,8 +1481,11 @@ impl TestPdClient {
         self.cluster.rl().get_store_hotspots(store_id)
     }
 
-    pub fn set_gc_safe_point(&self, safe_point: u64) {
-        self.cluster.wl().set_gc_safe_point(safe_point).unwrap();
+    /// Set the GC safe point. The return "new gc_safe_point" would be less
+    /// than the given one when there is any service safe point blocking the
+    /// advancing of GC safe point.
+    pub fn set_gc_safe_point(&self, safe_point: u64) -> Result<u64 /* new gc_safe_point */> {
+        self.cluster.wl().set_gc_safe_point(safe_point)
     }
 
     pub fn get_gc_service_safe_points(&self) -> Vec<GcServiceSafePoint> {
@@ -2223,7 +2230,7 @@ mod tests {
         let get_gc_safe_point = || -> u64 { block_on(pd_client.get_gc_safe_point()).unwrap() };
 
         assert_eq!(get_gc_safe_point(), 0);
-        pd_client.set_gc_safe_point(10);
+        assert_eq!(pd_client.set_gc_safe_point(10).unwrap(), 10);
         assert_eq!(get_gc_safe_point(), 10);
 
         {
@@ -2233,7 +2240,7 @@ mod tests {
             assert_eq!(get_gc_safe_point(), 10);
         }
 
-        pd_client.set_gc_safe_point(20);
+        assert_eq!(pd_client.set_gc_safe_point(20).unwrap(), 15);
         assert_eq!(get_gc_safe_point(), 15);
 
         {
@@ -2245,14 +2252,14 @@ mod tests {
 
         {
             // Test multiple services.
-            pd_client.set_gc_safe_point(30);
+            assert_eq!(pd_client.set_gc_safe_point(30).unwrap(), 30);
             assert_eq!(get_gc_safe_point(), 30);
 
             update_svc_safe_point("svc1", 31).unwrap();
             update_svc_safe_point("svc2", 32).unwrap();
             assert_eq!(get_gc_safe_point(), 30);
 
-            pd_client.set_gc_safe_point(40);
+            assert_eq!(pd_client.set_gc_safe_point(40).unwrap(), 31);
             assert_eq!(get_gc_safe_point(), 31);
             update_svc_safe_point("svc1", 41).unwrap();
             assert_eq!(get_gc_safe_point(), 32);

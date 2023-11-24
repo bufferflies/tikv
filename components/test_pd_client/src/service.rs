@@ -356,6 +356,23 @@ impl PdMocker for Service {
         Some(Ok(resp))
     }
 
+    fn update_gc_safe_point(
+        &self,
+        req: &UpdateGcSafePointRequest,
+    ) -> Option<Result<UpdateGcSafePointResponse>> {
+        let mut resp = UpdateGcSafePointResponse::default();
+        resp.set_header(self.header());
+        match self.inner.set_gc_safe_point(req.get_safe_point()) {
+            Ok(new_safe_point) => {
+                resp.set_new_safe_point(new_safe_point);
+            }
+            Err(e) => {
+                set_error_header(resp.mut_header(), &e, ErrorType::Unknown);
+            }
+        }
+        Some(Ok(resp))
+    }
+
     fn get_operator(&self, req: &GetOperatorRequest) -> Option<Result<GetOperatorResponse>> {
         let resp = match self.inner.get_operator(req.get_region_id()) {
             Ok(mut resp) => {

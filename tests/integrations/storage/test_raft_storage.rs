@@ -367,7 +367,7 @@ fn test_auto_gc() {
     check_data(&mut cluster, &storages, &test_data2, 150, true);
     check_data(&mut cluster, &storages, &test_data3, 250, true);
 
-    pd_client.set_gc_safe_point(150);
+    let _ = pd_client.set_gc_safe_point(150).unwrap();
 
     for _ in 0..count {
         finish_signal_rx.recv().unwrap();
