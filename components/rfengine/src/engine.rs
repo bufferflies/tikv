@@ -732,34 +732,20 @@ fn restore_keyspace_raft_logs(
     }
 }
 
-// For lightweight restore, find a latest snapshot full backup before
-// `cluster_backup.backup_ts` and replay all WAL chunk files from snapshot epoch
-// to epoch of the backup.
-pub fn lightweight_restore(
+pub fn find_latest_snapshot(
     object_storage: Arc<dyn ObjectStorage>,
     prefix: &str,
-    cluster_backup: &ClusterBackupMeta,
-    store_id: u64,
-    dir: &Path,
-    keyspace: Option<u32>,
-) -> Result<u32> {
-    let store_meta = cluster_backup
-        .get_stores()
-        .iter()
-        .find(|x| x.store_id == store_id)
-        .ok_or(Error::Other(format!("store {} not found", store_id)))?;
-    init_wal_files(dir, None).unwrap();
-    // `store_meta` in cluster_backup should not contains manifest, use
-    // store_meta.get_epoch() as backup epoch_id.
+    store_meta: &StoreBackupMeta,
+) -> Result<Option<String>> {
     let epoch_id = store_meta.get_epoch();
     let start_epoch = if epoch_id > MAX_EPOCH_BACKWARD {
         epoch_id - MAX_EPOCH_BACKWARD
     } else {
         1
     };
+    let store_id = store_meta.get_store_id();
 
     // Find the latest snapshot smaller than cluster_backup epoch.
-    info!("try to find snapshot before backup epoch {}", epoch_id);
     let snapshot = match object_storage.list_objects(
         &snapshot_rlog_key_suffix(start_epoch),
         Some(&snapshot_rlog_key_prefix(store_id)),
@@ -780,12 +766,35 @@ pub fn lightweight_restore(
             None
         }
     };
-    let snap_key = snapshot.map(|snap| {
+    Ok(snapshot.map(|snap| {
         snap.key
             .strip_prefix(&format!("{}/", prefix))
             .unwrap()
             .to_owned()
-    });
+    }))
+}
+
+// For lightweight restore, find a latest snapshot full backup before
+// `cluster_backup.backup_ts` and replay all WAL chunk files from snapshot epoch
+// to epoch of the backup.
+pub fn lightweight_restore(
+    object_storage: Arc<dyn ObjectStorage>,
+    prefix: &str,
+    cluster_backup: &ClusterBackupMeta,
+    store_id: u64,
+    dir: &Path,
+    keyspace: Option<u32>,
+) -> Result<u32> {
+    let store_meta = cluster_backup
+        .get_stores()
+        .iter()
+        .find(|x| x.store_id == store_id)
+        .ok_or(Error::Other(format!("store {} not found", store_id)))?;
+    let epoch_id = store_meta.get_epoch();
+    init_wal_files(dir, None).unwrap();
+
+    info!("try to find snapshot before backup epoch {}", epoch_id);
+    let snap_key = find_latest_snapshot(object_storage.clone(), prefix, store_meta)?;
 
     // Fetch store backup meta from object storage.
     let snap_store_meta = match parse_epoch_from_snapshot_key(snap_key.as_deref()) {
@@ -809,9 +818,13 @@ pub fn lightweight_restore(
             store_backup_meta
         }
         None => {
-            // If no snapshot available and the start_epoch > 1, it means data incomplete.
-            if start_epoch > 1 {
-                let msg = format!("no snapshot available from epoch {}", start_epoch);
+            // If no snapshot available and the epoch_id > MAX_EPOCH_BACKWARD, it means
+            // data incomplete.
+            if epoch_id > MAX_EPOCH_BACKWARD {
+                let msg = format!(
+                    "no snapshot available from epoch {}",
+                    epoch_id - MAX_EPOCH_BACKWARD
+                );
                 error!("{}", msg);
                 return Err(Error::Other(msg));
             }

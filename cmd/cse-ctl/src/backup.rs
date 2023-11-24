@@ -1,14 +1,14 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{path::PathBuf, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use clap::Args;
 use kvengine::dfs::{DFSConfig, S3Fs};
 use native_br::backup::{
     execute_full_backup, execute_incremental_backup, execute_lightweight_backup, BackupConfig,
 };
+use rfengine::parse_epoch_from_snapshot_key;
 use tikv_util::info;
-
 const INCREMENTAL_BACKUP_INTERVAL: u64 = 30; // seconds.
 
 #[derive(Args)]
@@ -118,7 +118,7 @@ pub fn execute_show_backup(args: ShowBackupArgs) {
     config.dfs.override_from_env();
 
     let s3fs = S3Fs::new(
-        config.dfs.prefix,
+        config.dfs.prefix.clone(),
         config.dfs.s3_endpoint,
         config.dfs.s3_key_id,
         config.dfs.s3_secret_key,
@@ -139,6 +139,7 @@ pub fn execute_show_backup(args: ShowBackupArgs) {
         .map(|store| store.get_manifest().get_peers().len())
         .sum::<usize>();
     let keyspaces_count = cluster_backup.keyspace_meta.len();
+    let is_lightweight = cluster_backup.is_lightweight;
 
     println!("[Backup {}]", args.name);
     println!("  cluster_id: {}", cluster_backup.cluster_id);
@@ -148,22 +149,48 @@ pub fn execute_show_backup(args: ShowBackupArgs) {
     println!("  peers count: {}", peers_count);
     println!("  alloc_id: {}", cluster_backup.alloc_id);
     println!("  keyspaces count: {}", keyspaces_count);
+    println!("  lightweight: {}", is_lightweight);
 
     if args.verbose {
         for store in &cluster_backup.stores {
             println!();
             println!("[Store {}]", store.store_id);
-            println!("  WAL chunks:");
-            for file_key in store.get_wal_chunks().iter().map(|chunk| {
-                rfengine::wal_file_key(store.store_id, chunk.epoch, chunk.start_off, chunk.end_off)
-            }) {
+            if is_lightweight {
+                let object_storage = Arc::new(s3fs.clone());
+                let snap_key = rfengine::find_latest_snapshot(
+                    object_storage.clone(),
+                    &config.dfs.prefix,
+                    store,
+                )
+                .unwrap();
+                let snap_epoch =
+                    parse_epoch_from_snapshot_key(snap_key.as_deref()).unwrap_or_default();
                 println!(
-                    "    epoch: {}, file_key: {}",
-                    store.get_manifest().epoch_id,
-                    file_key
+                    "  Backup epoch: {}, latest snapshot epoch: {}, offset: {}, {} epoch need to replay",
+                    store.epoch,
+                    snap_epoch,
+                    store.offset,
+                    store.epoch - snap_epoch
                 );
+                // Get latest snapshot epoch
+            } else {
+                println!("  WAL chunks:");
+                for file_key in store.get_wal_chunks().iter().map(|chunk| {
+                    rfengine::wal_file_key(
+                        store.store_id,
+                        chunk.epoch,
+                        chunk.start_off,
+                        chunk.end_off,
+                    )
+                }) {
+                    println!(
+                        "    Backup epoch: {}, file_key: {}",
+                        store.get_manifest().epoch_id,
+                        file_key
+                    );
+                }
+                // TODO: output some readable information of `store.manifest`.
             }
-            // TODO: output some readable information of `store.manifest`.
         }
     }
 }
