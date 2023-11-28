@@ -114,6 +114,9 @@ pub struct Config {
     #[online_config(skip)]
     pub grpc_concurrency: usize,
     #[online_config(skip)]
+    pub grpc_slots_per_cq: usize,
+
+    #[online_config(skip)]
     pub grpc_concurrent_stream: i32,
     #[online_config(skip)]
     pub grpc_raft_conn_num: usize,
@@ -229,6 +232,7 @@ impl Default for Config {
             grpc_gzip_compression_level: DEFAULT_GRPC_GZIP_COMPRESSION_LEVEL,
             grpc_min_message_size_to_compress: DEFAULT_GRPC_MIN_MESSAGE_SIZE_TO_COMPRESS,
             grpc_concurrency: DEFAULT_GRPC_CONCURRENCY,
+            grpc_slots_per_cq: 0,
             grpc_concurrent_stream: DEFAULT_GRPC_CONCURRENT_STREAM,
             grpc_raft_conn_num: DEFAULT_GRPC_RAFT_CONN_NUM,
             grpc_stream_initial_window_size: ReadableSize(DEFAULT_GRPC_STREAM_INITIAL_WINDOW_SIZE),

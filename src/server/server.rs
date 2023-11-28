@@ -103,10 +103,13 @@ where
             .keepalive_timeout(self.cfg.value().grpc_keepalive_timeout.into())
             .build_args();
 
-        let sb = ServerBuilder::new(Arc::clone(&env))
+        let mut sb = ServerBuilder::new(Arc::clone(&env))
             .channel_args(channel_args)
             .register_service(create_tikv(self.kv_service.clone()))
             .register_service(create_health(self.health_service.clone()));
+        if self.cfg.value().grpc_slots_per_cq > 0 {
+            sb = sb.requests_slot_per_cq(self.cfg.value().grpc_slots_per_cq);
+        }
         Ok(self.security_mgr.bind(sb, &ip, addr.port()))
     }
 }
