@@ -119,8 +119,8 @@ pub struct WritersStates {
 pub struct PutChunkResult {
     pub handled_chunk_id: u64,
     pub flushed_chunk_id: u64,
-    pub is_canceled: bool,
-    pub is_finished: bool,
+    pub canceled: bool,
+    pub finished: bool,
     pub error: String,
 }
 
@@ -129,8 +129,8 @@ pub struct PutChunkResult {
 #[serde(rename_all = "kebab-case")]
 pub struct FlushResult {
     pub flushed_chunk_ids: HashMap<u64 /* writer_id */, u64 /* chunk_id */>,
-    pub is_canceled: bool,
-    pub is_finished: bool,
+    pub canceled: bool,
+    pub finished: bool,
     pub error: String,
 }
 
@@ -383,12 +383,14 @@ impl LoadTaskWorker {
                     let mut flush_res = FlushResult::default();
                     if self.scheduler.is_canceled() {
                         warn!("task {} is canceled, do not build", self.task_ctx.task_id);
+                        flush_res.canceled = true;
                         flush_res.error = self.scheduler.error_msg();
                         cb(flush_res);
                         continue;
                     }
                     if self.scheduler.is_finished() {
                         warn!("task {} is finished, skip flush", self.task_ctx.task_id);
+                        flush_res.finished = true;
                         flush_res.error = self.scheduler.error_msg();
                         flush_res.flushed_chunk_ids = self.scheduler.get_flushed_chunks();
                         cb(flush_res);
@@ -443,8 +445,8 @@ impl LoadTaskWorker {
         let mut put_chunk_res = PutChunkResult {
             handled_chunk_id,
             flushed_chunk_id,
-            is_canceled: self.scheduler.is_canceled(),
-            is_finished: self.scheduler.is_finished(),
+            canceled: self.scheduler.is_canceled(),
+            finished: self.scheduler.is_finished(),
             error: self.scheduler.error_msg(),
         };
         if self.scheduler.is_canceled() {

@@ -102,8 +102,8 @@ where
             })
             .unwrap();
         let put_chunk_res = block_on(fut).unwrap();
-        assert!(!put_chunk_res.is_canceled);
-        assert!(!put_chunk_res.is_finished);
+        assert!(!put_chunk_res.canceled);
+        assert!(!put_chunk_res.finished);
         assert!(
             put_chunk_res.error.is_empty(),
             "put_chunks error: {}",
@@ -121,8 +121,8 @@ where
             let (cb, fut) = tikv_util::future::paired_future_callback();
             scheduler.sender.send(LoadTaskMsg::Flush { cb }).unwrap();
             let flushed_res = block_on(fut).unwrap();
-            !flushed_res.is_canceled
-                && !flushed_res.is_finished
+            !flushed_res.canceled
+                && !flushed_res.finished
                 && flushed_res.error.is_empty()
                 && flushed_res.flushed_chunk_ids.eq(&chunk_ids)
         },
