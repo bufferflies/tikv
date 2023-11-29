@@ -11,7 +11,7 @@ use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use futures::{compat::Stream01CompatExt, executor::block_on, StreamExt};
 use http::Request;
 use hyper::Body;
-use kvengine::dfs::{self, DFSConfig, S3Fs};
+use kvengine::dfs::{DFSConfig, S3Fs};
 use kvproto::metapb::Store;
 use pd_client::PdClient;
 use protobuf::Message;
@@ -25,7 +25,8 @@ use tikv_util::timer::GLOBAL_TIMER_HANDLE;
 use crate::{
     common::{
         create_pd_client, generate_etcd_connect_opt, get_all_stores_except_tiflash,
-        send_request_to_store,
+        get_latest_backup_meta, send_request_to_store, INCREMENTAL_BACKUP_FILE_NAME_FORMAT,
+        INCREMENTAL_BACKUP_FOLDER_FORMAT,
     },
     error::{Error, SharedError},
 };
@@ -270,6 +271,10 @@ pub fn backup_cluster_with_ts(
     } else {
         // If no input backup meta, load latest one from s3.
         let meta = runtime.block_on(get_latest_backup_meta(&s3fs, cluster_id))?;
+        if meta.is_lightweight {
+            info!("latest cluster backup meta is lightweight, fallback to full backup");
+            return Err(Error::MetaNotFound(cluster_id));
+        }
         check_backup_meta_consistency(&meta, &stores)?;
         meta
     };
@@ -430,86 +435,6 @@ fn get_backup_config(
     config
 }
 
-/// Return full path of incremental backups in S3.
-pub async fn get_all_incremental_backups(
-    s3fs: &S3Fs,
-    start_date: &chrono::NaiveDate,
-    start_time: Option<&NaiveTime>,
-    max_count: usize,
-) -> dfs::Result<(Vec<IncrementalBackupFile>, bool)> {
-    let mut files = Vec::with_capacity(std::cmp::min(max_count, 1000));
-    let mut start_key = format!(
-        "{}/{}",
-        start_date.format(INCREMENTAL_BACKUP_FOLDER_FORMAT),
-        start_time
-            .map(|t| t.format(INCREMENTAL_BACKUP_FILE_NAME_FORMAT).to_string())
-            .unwrap_or_default()
-    );
-    let prefix = "backup/";
-
-    let mut reach_limit = false;
-    loop {
-        // TODO: pass in `max_count` for limit.
-        match s3fs.list(&start_key, Some(prefix), None).await {
-            Ok((backup_files, more, next_start_after)) => {
-                let mut inc_files = backup_files
-                    .into_iter()
-                    .filter_map(|f| IncrementalBackupFile::try_from_full_path(&f.key))
-                    .collect::<Vec<_>>();
-                files.append(&mut inc_files);
-                if files.len() > max_count {
-                    files.truncate(max_count);
-                    reach_limit = true;
-                }
-                if reach_limit || !more {
-                    break;
-                }
-                start_key = next_start_after.unwrap();
-            }
-            Err(e) => {
-                return Err(e);
-            }
-        }
-    }
-    Ok((files, reach_limit))
-}
-
-// If backup exist, return the latest one, else create a new ClusterBackupMeta.
-async fn get_latest_backup_meta(s3fs: &S3Fs, cluster_id: u64) -> Result<ClusterBackupMeta> {
-    let now = Utc::now();
-    let (files, _) = get_all_incremental_backups(s3fs, &now.date_naive(), None, usize::MAX).await?;
-    if files.is_empty() {
-        return Err(Error::MetaNotFound(cluster_id));
-    }
-    // Incremental backup file name is generated with `backup_file_full_path` named
-    // by creation time. The last should be the latest one.
-    let last_file = files.last().unwrap();
-    let full_path = last_file.full_path(&s3fs.get_prefix());
-    let object = s3fs
-        .get_object(
-            full_path.clone(),
-            full_path.clone(),
-            engine_traits::GetObjectOptions::default(),
-        )
-        .await?;
-    let mut meta = ClusterBackupMeta::new();
-    meta.merge_from_bytes(&object).unwrap();
-    if meta.cluster_id != cluster_id {
-        return Err(Error::MetaNotFound(cluster_id));
-    }
-    if meta.is_lightweight {
-        info!("latest cluster backup meta is lightweight, fallback to full backup");
-        return Err(Error::MetaNotFound(cluster_id));
-    }
-    info!(
-        "Get cluster {} latest backup meta {}, store cnt {}",
-        meta.cluster_id,
-        full_path,
-        meta.stores.len()
-    );
-    Ok(meta)
-}
-
 fn check_backup_meta_consistency(backup_meta: &ClusterBackupMeta, stores: &[Store]) -> Result<()> {
     if stores.len() != backup_meta.stores.len() {
         return Err(Error::TopoChanged(format!(
@@ -625,9 +550,6 @@ pub struct BackupConfig {
 /// Backup S3 path is `/<s3_prefix>/backup/{{backup_name}}`.
 ///
 /// Manual backups without name also follow this rule.
-
-pub const INCREMENTAL_BACKUP_FOLDER_FORMAT: &str = "%Y%m%d";
-const INCREMENTAL_BACKUP_FILE_NAME_FORMAT: &str = "%H%M%S";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IncrementalBackupFile {

@@ -15,6 +15,7 @@ use native_br::{
 };
 use pd_client::PdClient;
 use slog_global::{error, info};
+use tikv_util::config::ReadableSize;
 
 use crate::restore::Commands::{Keyspace, Pd, Tikv};
 
@@ -45,9 +46,17 @@ pub struct RestoreTikvArgs {
     /// The local path to load store files.
     #[clap(long)]
     pub path: String,
-    /// The store id to restore.
+    /// The store id in backup meta to restore.
     #[clap(long)]
     pub store_id: u64,
+    /// Add delta to generate the new store_id. Please keep the delta same in
+    /// the same cluster. This should be kept unchanged unless in particular
+    /// cases.
+    #[clap(long, default_value = "0")]
+    pub new_store_id_delta: u64,
+    /// WAL target file size.
+    #[clap(long, default_value = "512MB")]
+    pub wal_target_size: ReadableSize,
 }
 
 #[derive(Args)]
@@ -58,18 +67,23 @@ struct RestorePdArgs {
     /// The name of the backup file.
     #[clap(long)]
     pub name: String,
-    /// PD endpoints, use `,` to separate multiple PDs
+    /// PD endpoints, use `,` to separate multiple PDs.
     #[clap(long, default_value_t = String::new())]
     pub pd: String,
-    /// Path of file that contains list of trusted SSL CAs
+    /// Path of file that contains list of trusted SSL CAs.
     #[clap(long, default_value = "")]
     pub cacert: PathBuf,
-    /// Path of file that contains X509 certificate in PEM format
+    /// Path of file that contains X509 certificate in PEM format.
     #[clap(long, default_value = "")]
     pub cert: PathBuf,
-    /// Path of file that contains X509 key in PEM format
+    /// Path of file that contains X509 key in PEM format.
     #[clap(long, default_value = "")]
     pub key: PathBuf,
+    /// Add delta to generate the new store_id. Please keep the delta same with
+    /// restore tikv. This should be kept unchanged unless in particular
+    /// cases.
+    #[clap(long, default_value = "0")]
+    pub new_store_id_delta: u64,
 }
 
 #[derive(Args)]
@@ -89,16 +103,16 @@ pub struct RestoreKeyspaceArgs {
     /// The local working path for temporary files during restore.
     #[clap(long)]
     pub working_path: Option<String>,
-    /// PD endpoints, use `,` to separate multiple PDs
+    /// PD endpoints, use `,` to separate multiple PDs.
     #[clap(long, default_value_t = String::new())]
     pub pd: String,
-    /// Path of file that contains list of trusted SSL CAs
+    /// Path of file that contains list of trusted SSL CAs.
     #[clap(long, default_value = "")]
     pub cacert: PathBuf,
-    /// Path of file that contains X509 certificate in PEM format
+    /// Path of file that contains X509 certificate in PEM format.
     #[clap(long, default_value = "")]
     pub cert: PathBuf,
-    /// Path of file that contains X509 key in PEM format
+    /// Path of file that contains X509 key in PEM format.
     #[clap(long, default_value = "")]
     pub key: PathBuf,
 }
@@ -113,7 +127,13 @@ pub fn execute_restore_command(cmd: RestoreCommand) {
 
 fn execute_restore_tikv(args: RestoreTikvArgs) {
     let config = get_restore_tikv_config_from_args(&args);
-    restore_tikv(&config, args.name, args.store_id, &args.path);
+    restore_tikv(
+        &config,
+        args.name,
+        args.store_id,
+        args.new_store_id_delta,
+        &args.path,
+    );
 }
 
 fn execute_restore_pd(args: RestorePdArgs) {
@@ -203,6 +223,7 @@ fn get_restore_pd_config_from_args(args: &RestorePdArgs) -> RestoreConfig {
     if args.key.exists() {
         config.security.key_path = args.key.to_str().unwrap().to_owned();
     }
+    config.new_store_id_delta = args.new_store_id_delta;
     config.dfs.override_from_env();
     config.security.master_key.override_from_env();
     config
@@ -214,6 +235,8 @@ fn get_restore_tikv_config_from_args(args: &RestoreTikvArgs) -> RestoreConfig {
         let data = std::fs::read(args.config.clone()).expect("failed to read config file");
         config = toml::from_slice(&data).unwrap();
     }
+    // Override config file from args
+    config.wal_target_size = args.wal_target_size;
     config.dfs.override_from_env();
     config.security.master_key.override_from_env();
     config.skip_resolve_lock = false;

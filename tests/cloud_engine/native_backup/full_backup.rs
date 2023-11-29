@@ -17,6 +17,8 @@ use crate::alloc_node_id;
 const NODES_SIZE: usize = 3;
 const DATA_SIZE: usize = 2000;
 
+const WAL_TARGET_SIZE: ReadableSize = ReadableSize::mb(1);
+
 // TODO: make the test independent to S3/Minio.
 // TODO: test on more conditions (e.g. split and merge).
 
@@ -29,8 +31,8 @@ fn start_cluster_and_backup(
     let mut cluster = ServerCluster::new(nodes, |_, conf: &mut TikvConfig| {
         conf.dfs = dfs_config.clone();
         conf.rfengine.lightweight_backup = lightweight;
-        conf.rfengine.target_file_size = ReadableSize(1024 * 1024);
-        conf.rfengine.wal_chunk_target_file_size = ReadableSize(128 * 1024);
+        conf.rfengine.target_file_size = WAL_TARGET_SIZE;
+        conf.rfengine.wal_chunk_target_file_size = ReadableSize::kb(128);
     });
     cluster.wait_region_replicated(&[], 3);
     let mut client = cluster.new_client();
@@ -95,12 +97,14 @@ fn restore_cluster(
         let raft_db_path = get_storage_path(node_id).join("raft");
         let restore_config = restore::RestoreConfig {
             dfs: dfs_config.clone(),
+            wal_target_size: WAL_TARGET_SIZE,
             ..Default::default()
         };
         restore::restore_tikv(
             &restore_config,
             backup_name.to_string(),
             store.get_store_id(),
+            100,
             raft_db_path.to_str().unwrap(),
         );
     }

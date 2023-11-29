@@ -20,7 +20,7 @@ use dashmap::mapref::one::Ref;
 use engine_traits::{GetObjectOptions, ObjectStorage};
 use file_system::open_direct_file;
 use kvengine::dfs::DFSConfig;
-use kvproto::raft_serverpb;
+use kvproto::raft_serverpb::{self, StoreIdent};
 use protobuf::Message;
 use raft_proto::{eraftpb, eraftpb::Entry};
 use rfenginepb::{ClusterBackupMeta, StoreBackupMeta, StoreRaftLogBackupMeta};
@@ -990,6 +990,14 @@ fn copy_wal_files(dir: &Path, wal_sync_dir: &Path) -> Result<()> {
     }
     file_system::sync_dir(wal_sync_dir)?;
     Ok(())
+}
+
+pub fn load_store_ident(rf: &RfEngine) -> Option<StoreIdent> {
+    let val = rf.get_state(0, STORE_IDENT_KEY);
+    val.as_ref()?;
+    let mut ident = StoreIdent::new();
+    ident.merge_from_bytes(val.unwrap().chunk()).unwrap();
+    Some(ident)
 }
 
 #[derive(Debug, Clone, Default)]

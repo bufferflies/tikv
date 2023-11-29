@@ -15,7 +15,9 @@ use kvproto::{
 use protobuf::Message;
 use raft_proto::eraftpb;
 use raftstore::store::metrics::BLACKLIST_REGION_GAUGE;
-use rfengine::{raft_state_key, region_state_key, WriteBatch, KV_ENGINE_META_KEY, STORE_IDENT_KEY};
+use rfengine::{
+    load_store_ident, raft_state_key, region_state_key, WriteBatch, KV_ENGINE_META_KEY,
+};
 use slog_global::info;
 use tikv_util::warn;
 
@@ -165,14 +167,6 @@ impl RecoverHandler {
         }
         Ok(())
     }
-}
-
-fn load_store_ident(rf_engine: &rfengine::RfEngine) -> Option<raft_serverpb::StoreIdent> {
-    let val = rf_engine.get_state(0, STORE_IDENT_KEY);
-    val.as_ref()?;
-    let mut ident = raft_serverpb::StoreIdent::new();
-    ident.merge_from_bytes(val.unwrap().chunk()).unwrap();
-    Some(ident)
 }
 
 impl kvengine::RecoverHandler for RecoverHandler {

@@ -509,6 +509,7 @@ impl Config {
             // for now. TODO: Change it to false when Async Commit is enabled, and impl resolve
             // locks in restore_keyspace.
             skip_resolve_lock: true,
+            ..Default::default()
         }
     }
 }

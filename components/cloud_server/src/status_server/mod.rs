@@ -43,7 +43,8 @@ use pin_project::pin_project;
 use prometheus::TEXT_FORMAT;
 use protobuf::Message;
 use rfengine::{
-    raft_state_key, RfEngine, WriteBatch, KV_ENGINE_META_KEY, RAFT_TRUNCATED_STATE_KEY,
+    load_store_ident, raft_state_key, RfEngine, WriteBatch, KV_ENGINE_META_KEY,
+    RAFT_TRUNCATED_STATE_KEY,
 };
 use rfstore::{
     store::{
@@ -240,15 +241,6 @@ impl StatusServer {
         let mut raft_state = RaftState::default();
         raft_state.unmarshal(&raft_state_val);
         Some(raft_state)
-    }
-
-    fn load_store_ident(rf: &RfEngine) -> StoreIdent {
-        let mut store_ident = StoreIdent::default();
-        let data = rf
-            .get_state(0, rfengine::STORE_IDENT_KEY)
-            .unwrap_or_default();
-        store_ident.merge_from_bytes(data.chunk()).unwrap();
-        store_ident
     }
 
     fn write_empty_engine_meta(
@@ -770,7 +762,7 @@ impl StatusServer {
             Ok(cluster_id) => cluster_id,
             Err(e) => return Ok(bad_request_resp(e.to_string().as_str())),
         };
-        let store_ident = Self::load_store_ident(&rf);
+        let store_ident = load_store_ident(&rf).unwrap_or_default();
         if cluster_id != store_ident.cluster_id {
             return Ok(bad_request_resp("cluster_id not match"));
         }

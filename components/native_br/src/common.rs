@@ -2,12 +2,13 @@
 use std::{collections::HashMap, fmt, sync::Arc, time::Duration};
 
 use bytes::Bytes;
+use chrono::{NaiveTime, Utc};
 use engine_traits::{GetObjectOptions, ListObjectContent, ObjectStorage};
 use etcd_client::{ConnectOptions, OpenSslClientConfig};
 use grpcio::EnvBuilder;
 use http::Request;
 use hyper::Body;
-use kvengine::dfs::{Dfs, S3Fs};
+use kvengine::dfs::{self, Dfs, S3Fs};
 use kvproto::{metapb, metapb::Store};
 use pd_client::{PdClient, RpcClient};
 use protobuf::Message;
@@ -21,10 +22,15 @@ use security::{SecurityConfig, SecurityManager};
 use slog_global::error;
 use tikv_util::{box_err, codec::bytes::decode_bytes, info, time::Instant};
 
-use crate::error::{Error, Result};
+use crate::{
+    backup::IncrementalBackupFile,
+    error::{Error, Result},
+};
 
 const MAX_S3_REQ_BATCH_SIZE: usize = 1024;
 const FETCH_RFENGINE_WAL_CHUCK_TIMEOUT: Duration = Duration::from_secs(30);
+pub const INCREMENTAL_BACKUP_FOLDER_FORMAT: &str = "%Y%m%d";
+pub const INCREMENTAL_BACKUP_FILE_NAME_FORMAT: &str = "%H%M%S";
 
 pub fn create_pd_client(security_conf: &SecurityConfig, pd_conf: &pd_client::Config) -> RpcClient {
     let security_mgr = Arc::new(
@@ -456,6 +462,91 @@ fn replay_wal_chunks(
     rf.replay_wal_file(epoch_wal.freeze(), epoch_id, end_offset, full_restore)?;
 
     Ok(())
+}
+
+/// Return full path of incremental backups in S3.
+pub async fn get_all_incremental_backups(
+    s3fs: &S3Fs,
+    start_date: &chrono::NaiveDate,
+    start_time: Option<&NaiveTime>,
+    max_count: usize,
+) -> dfs::Result<(Vec<IncrementalBackupFile>, bool)> {
+    let mut files = Vec::with_capacity(std::cmp::min(max_count, 1000));
+    let mut start_key = format!(
+        "{}/{}",
+        start_date.format(INCREMENTAL_BACKUP_FOLDER_FORMAT),
+        start_time
+            .map(|t| t.format(INCREMENTAL_BACKUP_FILE_NAME_FORMAT).to_string())
+            .unwrap_or_default()
+    );
+    let prefix = "backup/";
+
+    let mut reach_limit = false;
+    loop {
+        // TODO: pass in `max_count` for limit.
+        match s3fs.list(&start_key, Some(prefix), None).await {
+            Ok((backup_files, more, next_start_after)) => {
+                let mut inc_files = backup_files
+                    .into_iter()
+                    .filter_map(|f| IncrementalBackupFile::try_from_full_path(&f.key))
+                    .collect::<Vec<_>>();
+                files.append(&mut inc_files);
+                if files.len() > max_count {
+                    files.truncate(max_count);
+                    reach_limit = true;
+                }
+                if reach_limit || !more {
+                    break;
+                }
+                start_key = next_start_after.unwrap();
+            }
+            Err(e) => {
+                return Err(e);
+            }
+        }
+    }
+    Ok((files, reach_limit))
+}
+
+// If backup exist, return the latest one, else create a new ClusterBackupMeta.
+pub async fn get_latest_backup_meta(s3fs: &S3Fs, cluster_id: u64) -> Result<ClusterBackupMeta> {
+    let now = Utc::now();
+    let (files, _) = get_all_incremental_backups(s3fs, &now.date_naive(), None, usize::MAX).await?;
+    if files.is_empty() {
+        return Err(Error::MetaNotFound(cluster_id));
+    }
+    // Incremental backup file name is generated with `backup_file_full_path` named
+    // by creation time. The last should be the latest one.
+    let last_file = files.last().unwrap();
+    let full_path = last_file.full_path(&s3fs.get_prefix());
+    let object = s3fs
+        .get_object(
+            full_path.clone(),
+            full_path.clone(),
+            engine_traits::GetObjectOptions::default(),
+        )
+        .await?;
+    let mut meta = ClusterBackupMeta::new();
+    meta.merge_from_bytes(&object).unwrap();
+    if meta.cluster_id != cluster_id {
+        return Err(Error::MetaNotFound(cluster_id));
+    }
+
+    info!(
+        "Get cluster {} latest backup meta {}, store cnt {}",
+        meta.cluster_id,
+        full_path,
+        meta.stores.len()
+    );
+    Ok(meta)
+}
+
+pub fn check_store_id_exists(s3fs: &S3Fs, store_id: u64) -> Result<bool> {
+    let prefix = format!("store_backup/{:016x}/", store_id);
+    let (files, ..) = s3fs
+        .get_runtime()
+        .block_on(s3fs.list("", Some(&prefix), None))?;
+    Ok(!files.is_empty())
 }
 
 #[derive(Debug)]

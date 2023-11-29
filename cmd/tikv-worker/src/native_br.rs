@@ -14,9 +14,9 @@ use http::{Method, StatusCode};
 use hyper::{Body, Response};
 use kvengine::dfs::S3Fs;
 use native_br::{
-    backup,
     backup::IncrementalBackupFile,
     backup_worker::BackupWorker,
+    common::get_all_incremental_backups,
     restore_keyspace::{
         restore_keyspace_with_cfg, ReportRestoreStepTrait, RestoreStep, RestoredKeyspace,
     },
@@ -982,7 +982,7 @@ impl NativeBrManager {
         start_backup_time: &DateTime<Utc>,
         max_count: usize,
     ) -> Result<(Vec<IncrementalBackupFile>, bool)> {
-        let (backups, has_more) = backup::get_all_incremental_backups(
+        let (backups, has_more) = get_all_incremental_backups(
             &self.context.s3fs,
             &start_backup_time.date_naive(),
             Some(&start_backup_time.time()),
