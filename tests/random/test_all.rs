@@ -24,16 +24,7 @@ use tikv_util::{
 };
 use txn_types::Key;
 
-use crate::{
-    alloc_node_id_vec, check_gc, generate_keyspace_key, new_security_config, random_node_restart,
-    spawn_create_keyspace, spawn_gc_worker, spawn_keyspace_write, spawn_major_compact, spawn_merge,
-    spawn_move, spawn_transfer,
-    test_load_data::{check_load_data, spawn_load_data},
-    test_native_br::{check_br, spawn_backup, spawn_restore_keyspace},
-    TikvConfig, BACKUP_COUNTER, CONCURRENCY, GC_ADVANCE_SAFE_POINT_COUNTER, KEYSPACE_COUNTER,
-    LOAD_DATA_COUNTER, MANUAL_MAJOR_COMPACT_COUNTER, MERGE_COUNTER, MOVE_COUNTER,
-    NODE_RESTART_COUNTER, RESTORE_COUNTER, TABLE_COUNTER, TIMEOUT, TRANSFER_COUNTER, WRITE_COUNTER,
-};
+use crate::{test_load_data::*, test_native_br::*, TikvConfig, *};
 
 const INITIAL_KEYSPACE_COUNT: usize = 10;
 const INITIAL_TABLE_COUNT: usize = 3;
@@ -283,9 +274,12 @@ fn prepare_cluster(
         .collect();
     pd_client.must_split_region(region0, CheckPolicy::Usekey, encoded_keys);
     cluster.wait_pd_region_min_count(keys.len() + 1);
-    cluster
-        .keyspace_manager()
-        .create_keyspaces(&keyspaces, 0, INITIAL_TABLE_COUNT, Some(&mut rng));
+    cluster.keyspace_manager().create_keyspaces(
+        &keyspaces,
+        DEFAULT_INNER_KEY_OFFSET,
+        INITIAL_TABLE_COUNT,
+        Some(&mut rng),
+    );
     KEYSPACE_COUNTER.store(initial_keyspace_count, Ordering::Relaxed);
     TABLE_COUNTER.store(
         initial_keyspace_count * INITIAL_TABLE_COUNT,
@@ -332,10 +326,7 @@ async fn verify_cluster(cluster: &mut ServerCluster) -> usize /* records count i
     for keyspace_id in cluster.keyspace_manager().ref_stores().all_keyspace_ids() {
         let mut client = cluster.new_keyspace_client().await;
         handles.push(tokio::spawn(async move {
-            (
-                keyspace_id,
-                client.verify_keyspace_with_ref_store(keyspace_id).await,
-            )
+            (keyspace_id, client.verify_keyspace(keyspace_id).await)
         }));
     }
     let mut records_cnt = 0;

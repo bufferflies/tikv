@@ -19,7 +19,7 @@ use rand::Rng;
 use security::SecurityConfig;
 use test_cloud_server::{
     client::ClusterClient,
-    keyspace::{ClusterKeyspaceClient, KeyspaceBackup, KeyspaceManager},
+    keyspace::{ClusterKeyspaceClient, KeyspaceManager},
     try_wait_result,
 };
 use tikv_util::{info, time::Instant, warn};
@@ -85,7 +85,7 @@ pub(crate) fn spawn_backup(
             let lock = keyspace_manager.get_keyspace_lock(keyspace_id);
             let guard = lock.mutex_lock().await;
             let backup_ts = client.get_ts().into_inner();
-            let ref_store = keyspace_manager.ref_stores().dump(keyspace_id);
+            let mut keyspace_backup = keyspace_manager.backup_keyspace(keyspace_id, backup_ts);
             // Downgrade to shared lock, to enable write workloads on the keyspace, but
             // block restore workload.
             // As in scene of restoration, `truncate_ts` cannot truncate the extra restored
@@ -110,12 +110,9 @@ pub(crate) fn spawn_backup(
                     panic!("backup failed: {:?}", err);
                 }
             };
-            keyspace_manager.add_backup(KeyspaceBackup {
-                backup_name: backup_file.name().to_string(),
-                backup_ts,
-                keyspace_id,
-                ref_store,
-            });
+
+            keyspace_backup.backup_name = Some(backup_file.name().to_string());
+            keyspace_manager.add_backup(keyspace_backup);
             drop(shared_guard);
 
             info!(
@@ -191,10 +188,8 @@ pub(crate) fn spawn_restore_keyspace(
             let source_keyspace = backup.keyspace_id;
             // TODO: test data branching.
             let target_keyspace = source_keyspace;
-            let tag = format!(
-                "{}->{}[{}]",
-                source_keyspace, target_keyspace, backup.backup_name
-            );
+            let backup_name = backup.backup_name().to_string();
+            let tag = format!("{}->{}[{}]", source_keyspace, target_keyspace, backup_name);
 
             // TODO: test without blocking write workloads.
             {
@@ -202,7 +197,7 @@ pub(crate) fn spawn_restore_keyspace(
                 let _guard = runtime.block_on(lock.mutex_lock());
 
                 runtime
-                    .block_on(client.verify_keyspace_with_ref_store(target_keyspace))
+                    .block_on(client.verify_keyspace(target_keyspace))
                     .unwrap_or_else(|err| {
                         panic!(
                             "{} verify_keyspace_with_ref_store (before restore): {:?}",
@@ -214,7 +209,6 @@ pub(crate) fn spawn_restore_keyspace(
                 // during the whole backup process, which is not efficient.
                 // And actually there are only trivial differences between PiTR and snapshot
                 // restore.
-                let backup_name = backup.backup_name.clone();
                 match do_restore_keyspace(
                     pd_client.clone(),
                     &runtime,
@@ -234,17 +228,14 @@ pub(crate) fn spawn_restore_keyspace(
                     }
                     Err(err) => panic!("{} restore failed: {:?}", tag, err),
                 }
-                keyspace_manager
-                    .ref_stores()
-                    .restore_keyspace(&tag, backup, target_keyspace);
+                keyspace_manager.restore_keyspace(&tag, backup, target_keyspace);
 
                 // To find data corruption early, and generate read workload as well.
                 // The retry should not be necessary.
                 // TODO: Remove the retry after verification issue is addressed.
                 let (verify_res, _) = try_wait_result(
                     || {
-                        let verify_res = runtime
-                            .block_on(client.verify_keyspace_with_ref_store(target_keyspace));
+                        let verify_res = runtime.block_on(client.verify_keyspace(target_keyspace));
                         if verify_res.is_err() {
                             warn!(
                                 "{} verify_keyspace_with_ref_store failed (after restore): {:?}",

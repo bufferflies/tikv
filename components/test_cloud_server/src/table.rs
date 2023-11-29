@@ -1,6 +1,9 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::{
+    fmt,
+    sync::atomic::{AtomicBool, AtomicI64, Ordering},
+};
 
 static NEXT_TABLE_ID: AtomicI64 = AtomicI64::new(1);
 
@@ -22,6 +25,15 @@ impl Clone for TableMeta {
     }
 }
 
+impl fmt::Debug for TableMeta {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TableMeta")
+            .field("id", &self.id)
+            .field("is_available", &self.is_available())
+            .finish()
+    }
+}
+
 impl TableMeta {
     pub fn new(is_available: bool) -> Self {
         let id = NEXT_TABLE_ID.fetch_add(1, Ordering::SeqCst);
@@ -39,22 +51,7 @@ impl TableMeta {
         self.is_available.load(Ordering::SeqCst)
     }
 
-    pub fn set_available(&self, is_available: bool) {
-        self.is_available.store(is_available, Ordering::SeqCst);
-    }
-
-    /// Operation sequence:
-    ///
-    /// 1. Acquire write lock of `keyspace.write`. To block write operations.
-    ///
-    /// 2. Call `table.set_available(false)`.
-    ///
-    /// 3. Downgrade write lock to read lock. To block restore operations.
-    ///
-    /// 4. Call `table.destroy_table`.
-    ///
-    /// 5. Release read lock.
-    pub fn destroy_table(&mut self) {
-        // TODO:
+    pub fn set_available(&self, is_available: bool) -> bool {
+        self.is_available.swap(is_available, Ordering::SeqCst)
     }
 }

@@ -66,7 +66,7 @@ pub(crate) fn spawn_load_data(
                 .new_table(false);
             TABLE_COUNTER.fetch_add(1, Ordering::Relaxed);
 
-            do_load_data(
+            let success = do_load_data(
                 keyspace_id,
                 table_id,
                 pd_client.clone(),
@@ -78,6 +78,10 @@ pub(crate) fn spawn_load_data(
                 master_key.clone(),
                 load_data_config.clone(),
             );
+            if !success {
+                // table is removed by restore.
+                continue;
+            }
 
             LOAD_DATA_COUNTER.fetch_add(1, Ordering::Relaxed);
             let elapsed = last_time.saturating_elapsed();
@@ -99,7 +103,7 @@ fn do_load_data(
     rng: &mut ThreadRng,
     master_key: MasterKey,
     config: LoadDataConfig,
-) {
+) -> bool /* success */ {
     let temp_dir = tempfile::Builder::new()
         .prefix("load_data_")
         .tempdir()
@@ -118,6 +122,20 @@ fn do_load_data(
     // will never succeed) due to the conflict.
     // See `ShardMeta::check_overlap_for_load_data`.
     let extra_guard = lock.extra_lock();
+
+    if keyspace_manager
+        .get_keyspace_meta(keyspace_id)
+        .unwrap()
+        .get_table(table_id)
+        .is_none()
+    {
+        // Should be caused by keyspace restore.
+        info!(
+            "do_load_data: skip load data, keyspace {} table {} not exists (removed by restore)",
+            keyspace_id, table_id
+        );
+        return false;
+    }
 
     // Init task.
     let start_ts = block_on(pd_client.get_tso()).unwrap().into_inner();
@@ -191,6 +209,7 @@ fn do_load_data(
 
     // Cleanup.
     cleanup(&scheduler, worker_handle);
+    true
 }
 
 pub(crate) fn check_load_data() {

@@ -1,7 +1,7 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    mem,
+    fmt, mem, ops,
     ops::{Deref, DerefMut, Range},
     sync::{Arc, Mutex, MutexGuard},
     time::Duration,
@@ -93,8 +93,22 @@ impl KeyspaceManagerCore {
         &self.ref_stores
     }
 
+    // Note: use with caution.
+    // The returned value will keep a read lock on `self.keyspaces`.
     pub fn get_keyspace_meta(&self, keyspace_id: u32) -> Option<Ref<'_, u32, KeyspaceMeta>> {
         self.keyspaces.get(&keyspace_id)
+    }
+
+    fn set_keyspace_meta(&self, keyspace_id: u32, meta: KeyspaceMetaCore) {
+        let mut keyspace = self.keyspaces.get_mut(&keyspace_id).unwrap();
+        assert_eq!(keyspace.inner_key_off, meta.inner_key_off);
+
+        info!(
+            "KeyspaceManager.set_keyspace_meta, keyspace_id {}, old {:?}, new {:?}",
+            keyspace_id, keyspace.core, meta
+        );
+
+        keyspace.core = meta;
     }
 
     pub fn get_random_available_table(
@@ -102,7 +116,8 @@ impl KeyspaceManagerCore {
         keyspace_id: u32,
         rng: &mut ThreadRng,
     ) -> Option<i64 /* table_id */> {
-        self.get_keyspace_meta(keyspace_id)
+        self.keyspaces
+            .get(&keyspace_id)
             .unwrap()
             .get_random_available_table(rng)
     }
@@ -115,14 +130,77 @@ impl KeyspaceManagerCore {
         let backups = self.backups.lock().unwrap();
         backups.iter().choose(rng).cloned()
     }
+
+    pub fn backup_keyspace(&self, keyspace_id: u32, backup_ts: u64) -> KeyspaceBackup {
+        let ref_store = self.ref_stores.dump(keyspace_id);
+        let meta = self.keyspaces.get(&keyspace_id).unwrap().core.clone();
+        KeyspaceBackup {
+            backup_name: None,
+            backup_ts,
+            keyspace_id,
+            ref_store,
+            meta,
+        }
+    }
+
+    pub fn restore_keyspace(&self, tag: &str, backup: KeyspaceBackup, target_keyspace: u32) {
+        let KeyspaceBackup {
+            ref_store, meta, ..
+        } = backup;
+        self.set_keyspace_meta(target_keyspace, meta);
+        self.ref_stores
+            .restore_keyspace(tag, ref_store, target_keyspace);
+    }
 }
 
-#[derive(Default)]
 pub struct KeyspaceMeta {
-    _inner_key_off: usize,
+    core: KeyspaceMetaCore,
     inner_lock: Arc<RwLock<()>>,
     extra_lock: Arc<Mutex<()>>,
+}
+
+impl ops::Deref for KeyspaceMeta {
+    type Target = KeyspaceMetaCore;
+
+    fn deref(&self) -> &Self::Target {
+        &self.core
+    }
+}
+
+impl ops::DerefMut for KeyspaceMeta {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.core
+    }
+}
+
+/// Used for keyspace meta backup & restore without locks.
+#[derive(Clone)]
+pub struct KeyspaceMetaCore {
+    inner_key_off: usize,
     tables: DashMap<i64 /* table_id */, TableMeta>,
+
+    /// Used to verify data considering the delete prefixes state of shard.
+    ///
+    /// As the operation of destroy range is async, in some scene the data
+    /// within the range to be destroyed is not determined.
+    del_prefixes: kvengine::DeletePrefixes,
+}
+
+impl fmt::Debug for KeyspaceMetaCore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KeyspaceMetaCore")
+            .field("inner_key_off", &self.inner_key_off)
+            .field(
+                "tables",
+                &self
+                    .tables
+                    .iter()
+                    .map(|x| (*x.key(), x.value().is_available()))
+                    .collect::<Vec<_>>(),
+            )
+            .field("del_prefixes", &self.del_prefixes)
+            .finish()
+    }
 }
 
 impl KeyspaceMeta {
@@ -133,10 +211,13 @@ impl KeyspaceMeta {
             tables.insert(table.id(), table);
         }
         Self {
-            _inner_key_off: inner_key_off,
+            core: KeyspaceMetaCore {
+                inner_key_off,
+                tables,
+                del_prefixes: kvengine::DeletePrefixes::new_with_inner_key_off(inner_key_off),
+            },
             inner_lock: Default::default(),
             extra_lock: Default::default(),
-            tables,
         }
     }
 
@@ -340,7 +421,7 @@ impl ClusterKeyspaceClient {
         Ok(())
     }
 
-    pub async fn verify_keyspace_with_ref_store(&mut self, keyspace_id: u32) -> Result<usize> {
+    pub async fn verify_keyspace(&mut self, keyspace_id: u32) -> Result<usize> {
         let ref_store = self
             .keyspace_manager
             .ref_stores()
@@ -354,7 +435,7 @@ impl ClusterKeyspaceClient {
     pub async fn verify_all_keyspaces(&mut self) -> Result<usize> {
         let mut cnt = 0;
         for keyspace_id in self.keyspace_manager.ref_stores().all_keyspace_ids() {
-            cnt += self.verify_keyspace_with_ref_store(keyspace_id).await?;
+            cnt += self.verify_keyspace(keyspace_id).await?;
         }
         Ok(cnt)
     }
@@ -381,10 +462,17 @@ pub fn make_key(keyspace_id: u32, table_id: i64, user_key: &[u8]) -> Vec<u8> {
 
 #[derive(Clone)]
 pub struct KeyspaceBackup {
-    pub backup_name: String,
+    pub backup_name: Option<String>,
     pub backup_ts: u64,
     pub keyspace_id: u32,
     pub ref_store: RefStore,
+    pub meta: KeyspaceMetaCore,
+}
+
+impl KeyspaceBackup {
+    pub fn backup_name(&self) -> &str {
+        self.backup_name.as_ref().unwrap()
+    }
 }
 
 #[derive(Default)]
@@ -411,22 +499,13 @@ impl KeyspaceRefStores {
             .clone()
     }
 
-    pub fn restore_keyspace(&self, tag: &str, backup: KeyspaceBackup, target_keyspace_id: u32) {
+    pub fn restore_keyspace(&self, tag: &str, ref_store: RefStore, target_keyspace_id: u32) {
+        if ref_store.is_empty() {
+            info!("{} ref store is empty in backup", tag);
+        }
         let target_ref_store = self.get_keyspace_ref_store(target_keyspace_id);
         let mut target_ref_store = target_ref_store.lock().unwrap();
-        if !backup.ref_store.is_empty() {
-            *target_ref_store = backup.ref_store;
-        } else {
-            // Empty ref store actually verify nothing. So set None to all entries.
-            // TODO: use kv_scan for data verification.
-            info!(
-                "{} ref store is empty in backup {}, set target_ref_store to all none",
-                tag, backup.backup_name
-            );
-            for v in target_ref_store.values_mut() {
-                *v = None;
-            }
-        }
+        *target_ref_store = ref_store;
     }
 
     pub fn keyspace_put_kv(&self, keyspace_id: u32, mutations: Vec<Mutation>) {
