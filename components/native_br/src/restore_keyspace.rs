@@ -1594,6 +1594,8 @@ impl BackupCluster {
             if let Some(encryption_key) = self.get_keyspace_encryption_key() {
                 meta.set_property(ENCRYPTION_KEY, encryption_key.as_slice());
             }
+            let mut properties_helper =
+                kvengine::util::PropertiesHelper::new_from_shard_meta(&meta);
             for shard_id in region.backup_shards_id {
                 let shard = self.get_shard(shard_id).unwrap();
                 for (&file_id, file_meta) in shard.meta.all_files() {
@@ -1611,8 +1613,10 @@ impl BackupCluster {
                 // Use `base_version` as table version, and `data_sequence` is 0.
                 // And they will be adjusted at server side in `restore_shard` procedure.
                 meta.base_version = cmp::max(meta.base_version, shard.table_version());
+                properties_helper.merge_shard_meta(&shard.meta);
             }
 
+            properties_helper.build_to_shard_meta(&mut meta);
             target_shards.push(meta);
         }
         (target_shards, sstables_cnt)

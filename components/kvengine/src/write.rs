@@ -169,7 +169,7 @@ impl Engine {
                     let prefix = v.chunk();
                     let mut del_prefixes =
                         DeletePrefixes::new_with_inner_key_off(shard.inner_key_off);
-                    del_prefixes.merge_in_place(prefix);
+                    del_prefixes.merge_prefix_in_place(prefix);
                     let data = shard.get_data();
                     let mem_tbl = data.get_writable_mem_table();
                     if del_prefixes

@@ -280,7 +280,7 @@ impl Shard {
     pub(crate) fn merge_del_prefix(&self, val: &[u8]) {
         info!("{} Shard::merge_del_prefix: {:?}", self.tag(), val);
         let mut pending_ops = self.pending_ops.write().unwrap();
-        let mut del_prefixes = (*pending_ops.del_prefixes).merge(val);
+        let mut del_prefixes = (*pending_ops.del_prefixes).merge_prefix(val);
         del_prefixes.schedule_at = self.gen_rand_schedule_del_range_time();
         pending_ops.del_prefixes = Arc::new(del_prefixes);
     }
@@ -1452,7 +1452,7 @@ impl DeletePrefixes {
     }
 
     #[must_use]
-    pub fn merge(&self, prefix: &[u8]) -> Self {
+    pub fn merge_prefix(&self, prefix: &[u8]) -> Self {
         assert!(prefix.len() >= self.inner_key_off);
 
         let mut new_prefixes = vec![];
@@ -1478,8 +1478,74 @@ impl DeletePrefixes {
         }
     }
 
-    pub fn merge_in_place(&mut self, prefix: &[u8]) {
-        let merged = self.merge(prefix);
+    pub fn merge_prefix_in_place(&mut self, prefix: &[u8]) {
+        let merged = self.merge_prefix(prefix);
+        *self = merged;
+    }
+
+    /// Merges multiple prefixes & self into a new one.
+    ///
+    /// `sorted_prefixes` must be sorted.
+    ///
+    /// If `sorted_prefixes` contains a prefix that is covered by another prefix
+    /// in it, the covered one will not be dropped.
+    ///
+    /// `schedule_at` & `inner_key_off` are copied from self.
+    #[must_use]
+    fn merge_prefixes<'a, S: AsRef<[u8]> + 'a>(
+        &self,
+        sorted_prefixes: impl Iterator<Item = S>,
+    ) -> Self {
+        let mut new_prefixes = Vec::with_capacity(self.prefixes.len());
+
+        let mut first_iter = self.prefixes.iter();
+        let mut first_opt = first_iter.next();
+        let mut second_iter = sorted_prefixes;
+        let mut second_opt = second_iter.next();
+
+        while let (Some(first), Some(second)) = (first_opt, second_opt.as_ref()) {
+            let second = second.as_ref();
+            if first.as_slice().starts_with(second) {
+                // `second` covers `first`
+                first_opt = first_iter.next();
+            } else if second.starts_with(first) {
+                // `first` covers `second`
+                second_opt = second_iter.next();
+            } else {
+                // `first` and `second` are not covered by each other
+                if first.as_slice() < second {
+                    new_prefixes.push(first.clone());
+                    first_opt = first_iter.next();
+                } else {
+                    new_prefixes.push(second.to_vec());
+                    second_opt = second_iter.next();
+                }
+            }
+        }
+
+        while let Some(first) = first_opt {
+            new_prefixes.push(first.clone());
+            first_opt = first_iter.next();
+        }
+        while let Some(second) = second_opt {
+            new_prefixes.push(second.as_ref().to_vec());
+            second_opt = second_iter.next();
+        }
+
+        let new_prefixes_nexts = DeletePrefixes::gen_prefixes_nexts(&new_prefixes);
+        Self {
+            prefixes: new_prefixes,
+            prefixes_nexts: new_prefixes_nexts,
+            schedule_at: self.schedule_at,
+            inner_key_off: self.inner_key_off,
+        }
+    }
+
+    /// Merge another `DeletePrefixes` into self.
+    ///
+    /// `schedule_at` & `inner_key_off` are unchanged.
+    pub fn merge(&mut self, other: &Self) {
+        let merged = self.merge_prefixes(other.prefixes.iter().map(|p| p.as_slice()));
         *self = merged;
     }
 
@@ -1586,6 +1652,35 @@ impl DeletePrefixes {
                 }
             }))
     }
+
+    /// Get ranges that are not covered by the delete prefixes.
+    pub fn get_complementary_ranges(
+        &self,
+        outer_start: &[u8],
+        outer_end: &[u8],
+    ) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let mut ranges = Vec::with_capacity(self.prefixes.len() + 1);
+        let mut start = outer_start.to_vec();
+        for (prefix, prefix_next) in self.prefixes.iter().zip(self.prefixes_nexts.iter()) {
+            if prefix_next.as_slice() <= outer_start {
+                continue;
+            }
+            if prefix.as_slice() >= outer_end {
+                break;
+            }
+            // `start` is possible to be equal to `prefix` here.
+            // e.q. prefixes: [00001, 00002] will generate iterations (00001, 00002),
+            // (00002, 00003).
+            if &start < prefix {
+                ranges.push((start.clone(), prefix.clone()));
+            }
+            start = prefix_next.clone();
+        }
+        if start.as_slice() < outer_end {
+            ranges.push((start, outer_end.to_vec()));
+        }
+        ranges
+    }
 }
 
 pub fn merge_del_prefixes_if_needed(
@@ -1604,7 +1699,7 @@ pub fn merge_del_prefixes_if_needed(
         .map(|b| DeletePrefixes::unmarshal(b.chunk(), inner_key_off))
         .unwrap_or_else(|| DeletePrefixes::new_with_inner_key_off(inner_key_off));
     for prefix in &second_prefixes.prefixes {
-        first_prefixes = first_prefixes.merge(prefix);
+        first_prefixes = first_prefixes.merge_prefix(prefix);
     }
     Some(first_prefixes.marshal())
 }
@@ -1705,7 +1800,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_delete_prefix() {
+    fn test_del_prefixes() {
         for inner_key_off in [0, 4] {
             let assert_prefix_invariant = |del_prefix: &DeletePrefixes| {
                 assert_eq!(del_prefix.prefixes.len(), del_prefix.prefixes_nexts.len());
@@ -1723,7 +1818,7 @@ mod tests {
             let mut del_prefix = DeletePrefixes::new_with_inner_key_off(inner_key_off);
             assert_prefix_invariant(&del_prefix);
             assert!(del_prefix.is_empty());
-            del_prefix = del_prefix.merge("0000101".as_bytes());
+            del_prefix = del_prefix.merge_prefix("0000101".as_bytes());
             assert!(!del_prefix.is_empty());
             assert_eq!(del_prefix.prefixes.len(), 1);
             assert_prefix_invariant(&del_prefix);
@@ -1736,7 +1831,7 @@ mod tests {
                 assert!(!del_prefix.cover_prefix(inner_prefix));
             }
 
-            del_prefix = del_prefix.merge("0000105".as_bytes());
+            del_prefix = del_prefix.merge_prefix("0000105".as_bytes());
             assert_prefix_invariant(&del_prefix);
             let bin = del_prefix.marshal();
             del_prefix = DeletePrefixes::unmarshal(&bin, inner_key_off);
@@ -1751,7 +1846,7 @@ mod tests {
                 assert!(!del_prefix.cover_prefix(inner_prefix));
             }
 
-            del_prefix = del_prefix.merge("000010".as_bytes());
+            del_prefix = del_prefix.merge_prefix("000010".as_bytes());
             assert_prefix_invariant(&del_prefix);
             assert_eq!(del_prefix.prefixes.len(), 1);
             for prefix in ["000010", "0000101", "0000103", "0000104"] {
@@ -1764,8 +1859,8 @@ mod tests {
             }
 
             del_prefix = DeletePrefixes::new_with_inner_key_off(inner_key_off);
-            del_prefix = del_prefix.merge("0000101".as_bytes());
-            del_prefix = del_prefix.merge("0000102".as_bytes());
+            del_prefix = del_prefix.merge_prefix("0000101".as_bytes());
+            del_prefix = del_prefix.merge_prefix("0000102".as_bytes());
             assert_prefix_invariant(&del_prefix);
             for (start, end) in [("0000101", "00001011"), ("0000102", "00001022")] {
                 let inner_start = InnerKey::from_outer_key(start.as_bytes(), inner_key_off);
@@ -1783,10 +1878,10 @@ mod tests {
             }
 
             del_prefix = DeletePrefixes::new_with_inner_key_off(inner_key_off);
-            del_prefix = del_prefix.merge("0000101".as_bytes());
-            del_prefix = del_prefix.merge("00001033".as_bytes());
-            del_prefix = del_prefix.merge("00001055".as_bytes());
-            del_prefix = del_prefix.merge("0000107".as_bytes());
+            del_prefix = del_prefix.merge_prefix("0000101".as_bytes());
+            del_prefix = del_prefix.merge_prefix("00001033".as_bytes());
+            del_prefix = del_prefix.merge_prefix("00001055".as_bytes());
+            del_prefix = del_prefix.merge_prefix("0000107".as_bytes());
             assert_prefix_invariant(&del_prefix);
 
             let split_del_range =
@@ -1811,12 +1906,13 @@ mod tests {
             assert_eq!(&split_del_range.prefixes[1], "00001055".as_bytes());
 
             del_prefix = DeletePrefixes::new_with_inner_key_off(inner_key_off)
-                .merge("0000100".as_bytes())
-                .merge("0000200".as_bytes())
-                .merge("0000300".as_bytes());
+                .merge_prefix("0000100".as_bytes())
+                .merge_prefix("0000200".as_bytes())
+                .merge_prefix("0000300".as_bytes());
             assert_prefix_invariant(&del_prefix);
             del_prefix = del_prefix.split(
-                &DeletePrefixes::new_with_inner_key_off(inner_key_off).merge("0000100".as_bytes()),
+                &DeletePrefixes::new_with_inner_key_off(inner_key_off)
+                    .merge_prefix("0000100".as_bytes()),
             );
             assert_prefix_invariant(&del_prefix);
             assert_eq!(del_prefix.prefixes.len(), 2);
@@ -1834,8 +1930,8 @@ mod tests {
             )));
             del_prefix = del_prefix.split(
                 &DeletePrefixes::new_with_inner_key_off(inner_key_off)
-                    .merge("0000200".as_bytes())
-                    .merge("0000300".as_bytes()),
+                    .merge_prefix("0000200".as_bytes())
+                    .merge_prefix("0000300".as_bytes()),
             );
             assert_prefix_invariant(&del_prefix);
             assert_eq!(del_prefix.prefixes.len(), 0);
@@ -1855,20 +1951,20 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_del_prefixes() {
+    fn test_del_prefixes_merge_prefix() {
         for inner_key_off in [0, 4] {
             let mut first = DeletePrefixes::new_with_inner_key_off(inner_key_off);
-            first = first.merge("0000101".as_bytes());
-            first = first.merge("00001033".as_bytes());
-            first = first.merge("00001055".as_bytes());
-            first = first.merge("0000107".as_bytes());
+            first = first.merge_prefix("0000101".as_bytes());
+            first = first.merge_prefix("00001033".as_bytes());
+            first = first.merge_prefix("00001055".as_bytes());
+            first = first.merge_prefix("0000107".as_bytes());
 
             let mut second = DeletePrefixes::new_with_inner_key_off(inner_key_off);
-            second = second.merge("0000101".as_bytes());
-            second = second.merge("00001022".as_bytes());
-            second = second.merge("00001044".as_bytes());
-            second = second.merge("00001066".as_bytes());
-            second = second.merge("0000107".as_bytes());
+            second = second.merge_prefix("0000101".as_bytes());
+            second = second.merge_prefix("00001022".as_bytes());
+            second = second.merge_prefix("00001044".as_bytes());
+            second = second.merge_prefix("00001066".as_bytes());
+            second = second.merge_prefix("0000107".as_bytes());
 
             let merged = merge_del_prefixes_if_needed(
                 Some(Bytes::from(first.marshal())),
@@ -1901,6 +1997,94 @@ mod tests {
                 merged_del_prefixes.prefixes,
                 rev_merged_del_prefixes.prefixes,
             );
+        }
+    }
+
+    #[test]
+    fn test_del_prefixes_merge_prefixes() {
+        let cases = vec![
+            (
+                vec![], // sorted_prefixes
+                vec![], // expected prefixes
+            ),
+            (vec!["00005000"], vec!["00005000"]),
+            (vec![], vec!["00005000"]),
+            (
+                vec!["00005000", "00005001", "00006"],
+                vec!["00005000", "00005001", "00006"],
+            ),
+            (
+                vec!["00004000", "0000500", "00007"],
+                vec!["00004000", "0000500", "00006", "00007"],
+            ),
+            (vec!["0000", "0001"], vec!["0000", "0001"]),
+            (vec!["00001"], vec!["0000", "0001"]),
+        ];
+
+        let mut del_prefix = DeletePrefixes::new_with_inner_key_off(4);
+        for (idx, (sorted_prefixes, expected_prefixes)) in cases.into_iter().enumerate() {
+            del_prefix.schedule_at = idx as u64;
+            del_prefix = del_prefix.merge_prefixes(sorted_prefixes.iter().map(|p| p.as_bytes()));
+            let expected_prefixes = expected_prefixes
+                .iter()
+                .map(|p| p.as_bytes().to_vec())
+                .collect::<Vec<_>>();
+            assert_eq!(del_prefix.prefixes, expected_prefixes, "case {}", idx);
+            assert_eq!(del_prefix.schedule_at, idx as u64);
+            assert_eq!(del_prefix.inner_key_off, 4);
+        }
+    }
+
+    #[test]
+    fn test_del_prefixes_complementary_ranges() {
+        let mut del_prefix = DeletePrefixes::new_with_inner_key_off(4);
+        del_prefix = del_prefix.merge_prefix("0000-1".as_bytes());
+        del_prefix = del_prefix.merge_prefix("0000-2".as_bytes());
+        del_prefix = del_prefix.merge_prefix("0000-33".as_bytes());
+        del_prefix = del_prefix.merge_prefix("0000-5".as_bytes());
+
+        let cases: Vec<(
+            (&str, &str),      // outer_range
+            Vec<(&str, &str)>, // expected
+        )> = vec![
+            (("0000-0", "0000-1"), vec![("0000-0", "0000-1")]),
+            (("0000-0", "0000-2"), vec![("0000-0", "0000-1")]),
+            (("0000-0", "0000-3"), vec![("0000-0", "0000-1")]),
+            (
+                ("0000-0", "0000-33"),
+                vec![("0000-0", "0000-1"), ("0000-3", "0000-33")],
+            ),
+            (
+                ("0000-0", "0000-333"),
+                vec![("0000-0", "0000-1"), ("0000-3", "0000-33")],
+            ),
+            (
+                ("0000-0", "0000-4"),
+                vec![
+                    ("0000-0", "0000-1"),
+                    ("0000-3", "0000-33"),
+                    ("0000-34", "0000-4"),
+                ],
+            ),
+            (
+                ("0000-0", "0000-9"),
+                vec![
+                    ("0000-0", "0000-1"),
+                    ("0000-3", "0000-33"),
+                    ("0000-34", "0000-5"),
+                    ("0000-6", "0000-9"),
+                ],
+            ),
+        ];
+
+        for (i, (outer_range, expected)) in cases.into_iter().enumerate() {
+            let ranges = del_prefix
+                .get_complementary_ranges(outer_range.0.as_bytes(), outer_range.1.as_bytes());
+            let expected = expected
+                .into_iter()
+                .map(|(start, end)| (start.as_bytes().to_vec(), end.as_bytes().to_vec()))
+                .collect::<Vec<_>>();
+            assert_eq!(ranges, expected, "case {}: {:?}", i, outer_range);
         }
     }
 

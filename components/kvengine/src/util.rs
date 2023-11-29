@@ -45,12 +45,43 @@ impl PropertiesHelper {
     }
 
     fn new(del_prefixes_bytes: Option<Bytes>, inner_key_off: usize) -> Self {
-        let del_prefixes = if let Some(prop) = del_prefixes_bytes {
-            DeletePrefixes::unmarshal(prop.chunk(), inner_key_off)
+        let del_prefixes = if let Some(bs) = del_prefixes_bytes {
+            DeletePrefixes::unmarshal(bs.chunk(), inner_key_off)
         } else {
             DeletePrefixes::new_with_inner_key_off(inner_key_off)
         };
         Self { del_prefixes }
+    }
+
+    pub fn merge_shard_meta(&mut self, other: &ShardMeta) {
+        self.merge(
+            other
+                .get_property(DEL_PREFIXES_KEY)
+                .map(|prop| prop.to_vec()),
+            other.range.inner_key_off,
+        );
+    }
+
+    // TODO: pub fn merge_shard(..)
+
+    fn merge(&mut self, del_prefixes_bytes: Option<Vec<u8>>, inner_key_off: usize) {
+        // `self.del_prefixes.inner_key_off` & `inner_key_off` are not necessarily
+        // equal.
+        if let Some(bs) = del_prefixes_bytes {
+            let del_prefixes = DeletePrefixes::unmarshal(&bs, inner_key_off);
+            self.del_prefixes.merge(&del_prefixes);
+        }
+    }
+
+    pub fn build_to_shard_meta(&self, meta: &mut ShardMeta) {
+        if !self.del_prefixes.prefixes.is_empty() {
+            info!(
+                "{} PropertiesMerger.build_to_shard_meta: {:?}",
+                meta.tag(),
+                self.del_prefixes
+            );
+            meta.set_property(DEL_PREFIXES_KEY, &self.del_prefixes.marshal());
+        }
     }
 
     fn split(&self, start_key: &[u8], end_key: &[u8]) -> DeletePrefixes {
