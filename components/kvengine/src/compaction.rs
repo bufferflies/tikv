@@ -510,7 +510,7 @@ impl Engine {
                 self.trigger_l1_plus_compaction(&shard, cf, level, id_ver)
             }
             Some(CompactionPriority::Major { .. }) => self.trigger_major_compaction(&shard),
-            Some(CompactionPriority::DestroyRange) => Some(self.destroy_range(&shard)),
+            Some(CompactionPriority::DestroyRange) => self.destroy_range(&shard).transpose(),
             Some(CompactionPriority::TruncateTs) => self.truncate_ts(&shard).transpose(),
             Some(CompactionPriority::TrimOverBound) => self.trim_over_bound(&shard).transpose(),
             None => {
@@ -618,10 +618,16 @@ impl Engine {
         }
     }
 
-    fn destroy_range(&self, shard: &Shard) -> Result<pb::ChangeSet> {
+    fn destroy_range(&self, shard: &Shard) -> Result<Option<pb::ChangeSet>> {
         let del_prefixes = shard.get_del_prefixes();
+        if del_prefixes.is_empty() {
+            info!(
+                "{} Engine::destroy_range: del_prefixes is empty, skip",
+                shard.tag()
+            );
+            return Ok(None);
+        }
         let data = shard.get_data();
-        assert!(!del_prefixes.is_empty());
         // Tables that full covered by delete-prefixes.
         let mut deletes = vec![];
         // Tables that partially covered by delete-prefixes.
@@ -693,7 +699,7 @@ impl Engine {
         cs.set_shard_ver(shard.ver);
         cs.set_property_key(DEL_PREFIXES_KEY.to_string());
         cs.set_property_value(del_prefixes.marshal());
-        Ok(cs)
+        Ok(Some(cs))
     }
 
     pub(crate) fn truncate_ts(&self, shard: &Shard) -> Result<Option<pb::ChangeSet>> {
@@ -2981,6 +2987,7 @@ impl CompactRunner {
         self.task_id += 1;
         let task_id = self.task_id;
         self.running.insert(id_ver, task_id);
+        self.pending.remove(&id_ver); // Remove from pending if it's there.
         let engine = self.engine.clone();
         std::thread::spawn(move || {
             tikv_util::set_current_region(id_ver.id);
