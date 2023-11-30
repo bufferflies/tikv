@@ -155,11 +155,20 @@ fn update_local_region_state_store_id(
             let mut region_local_state = load_region_state(rf, peer_id, cs.shard_ver).unwrap();
             let peers = region_local_state.mut_region().mut_peers();
 
-            // Remove learner peer if exists to remove TiFlash replica.
-            if let Some(pos) = peers
+            // Collect all learner peers if exists to remove TiFlash replica.
+            let to_remove_pos = peers
                 .iter()
-                .position(|peer| peer.get_role() == kvproto::metapb::PeerRole::Learner)
-            {
+                .enumerate()
+                .filter_map(|(idx, peer)| {
+                    if peer.get_role() == kvproto::metapb::PeerRole::Learner {
+                        Some(idx)
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<usize>>();
+            // Remove the peer in reverse order to avoid invalid pos index.
+            for pos in to_remove_pos.into_iter().rev() {
                 peers.remove(pos);
             }
 
