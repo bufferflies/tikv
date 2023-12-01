@@ -10,13 +10,14 @@ use kvenginepb::ChangeSet;
 use kvproto::{
     metapb,
     raft_cmdpb::{CustomRequest, RaftCmdRequest},
-    raft_serverpb,
+    raft_serverpb::{self, RegionLocalState},
 };
 use protobuf::Message;
 use raft_proto::eraftpb;
 use raftstore::store::metrics::BLACKLIST_REGION_GAUGE;
 use rfengine::{
-    load_store_ident, raft_state_key, region_state_key, WriteBatch, KV_ENGINE_META_KEY,
+    load_store_ident, raft_state_key, region_state_key, RfEngine, WriteBatch, KV_ENGINE_META_KEY,
+    TRUNCATE_ALL_INDEX,
 };
 use slog_global::info;
 use tikv_util::warn;
@@ -273,27 +274,83 @@ impl kvengine::MetaIterator for RecoverHandler {
     {
         let mut wb = WriteBatch::new();
         let region_to_peers = self.rf_engine.get_region_peer_map();
-        for (_, peer_id) in region_to_peers {
+        let destroy_peer = |rf: &RfEngine,
+                            mut region_local_state: RegionLocalState,
+                            wb: &mut WriteBatch,
+                            region_id,
+                            peer_id,
+                            shard_ver| {
+            rf.iterate_peer_states(peer_id, false, |k, _| {
+                wb.set_state(peer_id, region_id, k, &[]);
+            });
+            region_local_state.state = raft_serverpb::PeerState::Tombstone;
+            let region_state_val = region_local_state.write_to_bytes().unwrap();
+            let region_state_key = region_state_key(shard_ver);
+            wb.set_state(peer_id, region_id, &region_state_key, &region_state_val);
+            wb.truncate_raft_log(peer_id, region_id, TRUNCATE_ALL_INDEX);
+        };
+        for (region_id, peer_id) in region_to_peers {
             if let Some(val) = self.rf_engine.get_state(peer_id, KV_ENGINE_META_KEY) {
                 let mut cs = kvenginepb::ChangeSet::new();
                 if let Err(e) = cs.merge_from_bytes(&val) {
                     return Err(kvengine::Error::ErrOpen(e.to_string()));
                 }
+                assert_eq!(region_id, cs.shard_id);
+
+                let store_id = self.engine_id();
+                let region_local_state = load_region_state(&self.rf_engine, peer_id, cs.shard_ver)
+                    .unwrap_or_else(|| {
+                        tikv_util::set_current_region(region_id);
+                        panic!(
+                            "{}:{}:{} failed to get region state, state key {:?}",
+                            store_id,
+                            region_id,
+                            cs.shard_ver,
+                            region_state_key(cs.shard_ver),
+                        );
+                    });
+
+                // Check if the store exists in the region peers. The peer may be already
+                // removed in region local state, but not destroyed yet. It's safe to destroy
+                // it.
+                if !region_local_state
+                    .get_region()
+                    .get_peers()
+                    .iter()
+                    .any(|p| p.get_store_id() == store_id)
+                {
+                    warn!(
+                        "store {} not found in region peers {:?}, set it to tombstone",
+                        store_id,
+                        region_local_state.get_region()
+                    );
+                    destroy_peer(
+                        &self.rf_engine,
+                        region_local_state,
+                        &mut wb,
+                        region_id,
+                        peer_id,
+                        cs.shard_ver,
+                    );
+                    info!("destroy stale region {}", region_id);
+                    continue;
+                }
                 if let Some(contained_region_ids) = self.contained_region_ids.as_mut() {
-                    if !contained_region_ids.contains(&cs.shard_id) {
-                        warn!("region {} removed by pd", cs.shard_id);
-                        let region_id = cs.shard_id;
+                    if !contained_region_ids.contains(&region_id) {
+                        warn!("region {} removed by pd", region_id);
                         self.rf_engine.iterate_peer_states(peer_id, false, |k, _| {
                             wb.set_state(peer_id, region_id, k, &[]);
                         });
-                        let mut region_local_state =
-                            load_region_state(&self.rf_engine, peer_id, cs.shard_ver).unwrap();
-                        region_local_state.state = raft_serverpb::PeerState::Tombstone;
-                        let region_state_val = region_local_state.write_to_bytes().unwrap();
-                        let region_state_key = region_state_key(cs.shard_ver);
-                        wb.set_state(peer_id, region_id, &region_state_key, &region_state_val);
-                        wb.truncate_raft_log(peer_id, region_id, u64::MAX);
-                        info!("destroy removed region {:?}", region_local_state);
+
+                        destroy_peer(
+                            &self.rf_engine,
+                            region_local_state,
+                            &mut wb,
+                            region_id,
+                            peer_id,
+                            cs.shard_ver,
+                        );
+                        info!("destroy removed region {}", region_id);
                         continue;
                     }
                 }
