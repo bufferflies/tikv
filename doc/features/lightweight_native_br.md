@@ -34,6 +34,22 @@ Once `rfengine` is fully restored, subsequent processing logic is same as increm
 
 Lightweight backups also support full cluster restores. In both full and incremental restore scenarios, cluster restoration is performed by downloading `rfengine` data files from S3 to the local machine. In the case of lightweight backups, WAL chunks are replayed from the snapshot epoch to generate complete `rfengine` storage files locally. At last, the real store are bootstrapped with the data files.
 
+Considering that WAL chunks in S3 are persistent and cannot be deleted, conflicts arise when a cluster is restored using data from a previous epoch. The WAL chunks from the prior data conflict with the new data after restoration, leading to corruption of WAL chunks from that epoch or later epochs. This corruption renders lightweight backups invalid and unrecoverable.
+
+To prevent this, we establish a new store ID during full cluster restoration. This new store ID is generated using the alloc_id from the latest cluster backup metadata in S3:
+
+```
+new_store_id = alloc_id in latest backup meta + store_id ordered index in backup meta + 1 + delta
+```
+
+The `delta` is typically set to 0 by default. However, if conflicts arise with existing store IDs in S3, we should increase delta to a positive number to avoid these conflicts.
+
+After replaying WAL chunks, we iterate through all peers’ region local state in `rfengine` and update the store ID of peers to this new store ID. We also need to update the ident of the store itself in rfengine.
+
+Special attention should be paid to the delta value when restoring PD data. The delta value used in PD restoration is crucial for restoring the alloc_id. Therefore, we need to specify a delta value in PD restore that is either the same or larger than the one used in restore TiKV.
+
+The `wal-target-size` argument is set by default to `512MB`, which matches the `target-file-size` in the `rfengine` configuration. It’s important to adjust the `wal-target-size` whenever the config `target-file-size` in `rfengine` is altered, to ensure they remain consistent.
+
 ### Rebuilding WAL Persistence State
 
 WAL chunks are maintained in memory and are uploaded to S3 once they reach a certain size. Or  `dfs worker` will upload the WAL chunk in memory to S3 during `rfengine` gracefully shutting down. However, in cases of abnormal `rfengine` shutdown or crashes, the data in the memory-maintained WAL chunks will be lost. When `rfengine` is restarted, it searches for the last synchronized WAL epoch and offset from S3, then initializes `dfs worker`. When `dfs worker` processes `ObjectStorageTask::Sync` tasks, it verifies if the epoch matches. If not, it attempts to read earlier epoch WALs from S3 to rebuild the WAL chunk state.
