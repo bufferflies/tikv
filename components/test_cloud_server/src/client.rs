@@ -86,6 +86,14 @@ impl RefStore {
             self.0.insert(k, v);
         }
     }
+
+    pub fn destroy_range(&mut self, start: &[u8], end: &[u8]) {
+        for (k, v) in self.0.iter_mut() {
+            if k.as_slice() >= start && k.as_slice() < end {
+                *v = None;
+            }
+        }
+    }
 }
 
 impl Deref for RefStore {
@@ -1550,7 +1558,7 @@ impl ClusterTxnClient {
         } else {
             (MIN_TXN_KEY, MAX_TXN_KEY)
         };
-        let tag = self.tag_from_key(scan_range.0);
+        let tag = self.tag_from_key("kv_scan", scan_range.0);
 
         let mut snapshot = self
             .inner
@@ -1603,7 +1611,7 @@ impl ClusterTxnClient {
 
     pub async fn kv_mutate(&self, muts: Vec<Mutation>, timeout: Duration) -> Result<()> {
         assert!(!muts.is_empty());
-        let tag = self.tag_from_key(muts[0].get_key());
+        let tag = self.tag_from_key("kv_mutate", muts[0].get_key());
         let muts: Vec<KvMutation> = muts
             .into_iter()
             .map(|m| KvMutation {
@@ -1630,6 +1638,43 @@ impl ClusterTxnClient {
             {
                 Ok(_) => return Ok(()),
                 Err(err) if Self::is_kv_error_retryable(&tag, &err) => {
+                    self.log_kv_error(&tag, &err);
+                    last_error = Some(err);
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    continue;
+                }
+                Err(err) => {
+                    self.log_kv_error(&tag, &err);
+                    return Err(err.into());
+                }
+            }
+        }
+        Err(last_error.unwrap().into())
+    }
+
+    pub async fn kv_unsafe_destroy_range(
+        &self,
+        start: &[u8],
+        end: &[u8],
+        timeout: Duration,
+    ) -> Result<()> {
+        let tag = self.tag_from_key("kv_unsafe_destroy_range", start);
+        let is_error_retryable = |err: &tikv_client::Error| {
+            // Will get `MultipleKeyErrors` when region version not match.
+            matches!(err, tikv_client::Error::MultipleKeyErrors(_))
+                || Self::is_kv_error_retryable(&tag, err)
+        };
+
+        let start_time = Instant::now();
+        let mut last_error: Option<tikv_client::Error> = None;
+        while start_time.saturating_elapsed() < timeout {
+            match self
+                .inner
+                .unsafe_destroy_range((start, end).into_owned())
+                .await
+            {
+                Ok(_) => return Ok(()),
+                Err(err) if is_error_retryable(&err) => {
                     self.log_kv_error(&tag, &err);
                     last_error = Some(err);
                     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -1715,10 +1760,11 @@ impl ClusterTxnClient {
         error!("verify_key_value error: {:?}", res.unwrap_err());
     }
 
-    fn tag_from_key(&self, key: &[u8]) -> String {
+    fn tag_from_key(&self, interface: &str, key: &[u8]) -> String {
         let region = self.pd_client.get_region(&encode_bytes(key)).unwrap();
         format!(
-            "{}:{}",
+            "[{}] {}:{}",
+            interface,
             region.get_id(),
             region.get_region_epoch().get_version()
         )

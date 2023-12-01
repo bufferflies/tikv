@@ -7259,6 +7259,7 @@ dependencies = [
  "test_raftstore",
  "test_util",
  "thiserror",
+ "tidb_query_common",
  "tikv",
  "tikv-client",
  "tikv_util",

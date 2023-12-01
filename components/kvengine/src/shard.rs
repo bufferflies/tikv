@@ -238,7 +238,7 @@ impl Shard {
         self.active.store(active, Release);
     }
 
-    pub(crate) fn is_active(&self) -> bool {
+    pub fn is_active(&self) -> bool {
         self.active.load(Acquire)
     }
 

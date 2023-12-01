@@ -196,8 +196,10 @@ pub(crate) fn spawn_restore_keyspace(
                 let lock = keyspace_manager.get_keyspace_lock(target_keyspace);
                 let _guard = runtime.block_on(lock.mutex_lock());
 
+                // The process of destroying ranges is not determined. So skip verifying the
+                // destroying ranges.
                 runtime
-                    .block_on(client.verify_keyspace(target_keyspace))
+                    .block_on(client.verify_keyspace_and_skip_destroyed_ranges(target_keyspace))
                     .unwrap_or_else(|err| {
                         panic!(
                             "{} verify_keyspace_with_ref_store (before restore): {:?}",
@@ -235,7 +237,9 @@ pub(crate) fn spawn_restore_keyspace(
                 // TODO: Remove the retry after verification issue is addressed.
                 let (verify_res, _) = try_wait_result(
                     || {
-                        let verify_res = runtime.block_on(client.verify_keyspace(target_keyspace));
+                        let verify_res = runtime.block_on(
+                            client.verify_keyspace_and_skip_destroyed_ranges(target_keyspace),
+                        );
                         if verify_res.is_err() {
                             warn!(
                                 "{} verify_keyspace_with_ref_store failed (after restore): {:?}",

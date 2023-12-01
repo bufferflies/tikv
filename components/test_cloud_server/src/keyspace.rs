@@ -151,6 +151,31 @@ impl KeyspaceManagerCore {
         self.ref_stores
             .restore_keyspace(tag, ref_store, target_keyspace);
     }
+
+    pub fn destroy_range(&self, keyspace_id: u32, start: &[u8], end: &[u8]) {
+        assert!(tidb_query_common::util::is_prefix_next(start, end));
+        self.keyspaces
+            .get_mut(&keyspace_id)
+            .unwrap()
+            .del_prefixes
+            .merge_prefix_in_place(start);
+        self.ref_stores.destroy_range(keyspace_id, start, end);
+
+        info!(
+            "KeyspaceManager.destroy_range, keyspace {}, start {}, end {}, del_prefixes {:?}",
+            keyspace_id,
+            log_wrappers::hex_encode_upper(start),
+            log_wrappers::hex_encode_upper(end),
+            self.keyspaces.get(&keyspace_id).unwrap().del_prefixes
+        );
+    }
+
+    /// Get complementary ranges from destroyed ranges.
+    pub fn get_complementary_ranges(&self, keyspace_id: u32) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let keyspace = self.keyspaces.get(&keyspace_id).unwrap();
+        let (start, end) = ApiV2::get_txn_keyspace_range(keyspace_id);
+        keyspace.del_prefixes.get_complementary_ranges(&start, &end)
+    }
 }
 
 pub struct KeyspaceMeta {
@@ -432,12 +457,76 @@ impl ClusterKeyspaceClient {
             .await
     }
 
+    pub async fn verify_keyspace_and_skip_destroyed_ranges(
+        &mut self,
+        keyspace_id: u32,
+    ) -> Result<usize> {
+        let ref_store = self
+            .keyspace_manager
+            .ref_stores()
+            .get_keyspace_ref_store(keyspace_id);
+        let ref_store = ref_store.lock().unwrap().clone();
+
+        let ranges = self.keyspace_manager.get_complementary_ranges(keyspace_id);
+        info!(
+            "verify_keyspace_and_skip_destroyed_ranges, complementary_ranges: {:?}",
+            ranges
+        );
+        let mut cnt = 0;
+        for range in ranges {
+            cnt += self
+                .verify_data_by_scan(&ref_store, Some((&range.0, &range.1)))
+                .await?;
+        }
+        Ok(cnt)
+    }
+
     pub async fn verify_all_keyspaces(&mut self) -> Result<usize> {
         let mut cnt = 0;
         for keyspace_id in self.keyspace_manager.ref_stores().all_keyspace_ids() {
             cnt += self.verify_keyspace(keyspace_id).await?;
         }
         Ok(cnt)
+    }
+
+    pub async fn drop_table(&mut self, keyspace_id: u32, table_id: i64) -> Result<()> {
+        // Block writes to the keyspace.
+        let lock = self.keyspace_manager.get_keyspace_lock(keyspace_id);
+        let guard = lock.mutex_lock().await;
+
+        // Set unavailable to block writes to this table.
+        // Place in block to avoid dead lock. `keyspace` & `table` hold the lock of
+        // `DashMap`.
+        {
+            let keyspace = self
+                .keyspace_manager
+                .get_keyspace_meta(keyspace_id)
+                .unwrap();
+            let table = keyspace.get_table(table_id);
+            if table.is_none() {
+                // Should cause by restore.
+                info!("table not exists, skip drop table"; "keyspace" => keyspace_id, "table" => table_id);
+                return Ok(());
+            }
+            let previous_available = table.unwrap().set_available(false);
+            if !previous_available {
+                // Should be newly created and loading data.
+                info!("table unavailable, skip drop table"; "keyspace" => keyspace_id, "table" => table_id);
+                return Ok(());
+            }
+        }
+
+        // Downgrade to allow writes to others tables.
+        let _guard = guard.downgrade();
+
+        let start_key = make_key(keyspace_id, table_id, &[]);
+        let end_key = make_key(keyspace_id, table_id + 1, &[]);
+        self.inner
+            .kv_unsafe_destroy_range(&start_key, &end_key, Duration::from_secs(30))
+            .await?;
+        self.keyspace_manager
+            .destroy_range(keyspace_id, &start_key, &end_key);
+        Ok(())
     }
 }
 
@@ -455,8 +544,10 @@ pub fn make_key(keyspace_id: u32, table_id: i64, user_key: &[u8]) -> Vec<u8> {
     buf.extend_from_slice(&ApiV2::get_txn_keyspace_prefix(keyspace_id));
     buf.put_slice(TABLE_PREFIX);
     buf.put_i64(table_id);
-    buf.put_slice(RECORD_PREFIX_SEP);
-    buf.put_slice(user_key);
+    if !user_key.is_empty() {
+        buf.put_slice(RECORD_PREFIX_SEP);
+        buf.put_slice(user_key);
+    }
     buf.freeze().to_vec()
 }
 
@@ -532,5 +623,10 @@ impl KeyspaceRefStores {
         let target_ref_store = self.get_keyspace_ref_store(keyspace_id);
         let mut target_ref_store = target_ref_store.lock().unwrap();
         target_ref_store.ingest(ref_store);
+    }
+
+    pub fn destroy_range(&self, keyspace_id: u32, start: &[u8], end: &[u8]) {
+        let ref_store = self.get_keyspace_ref_store(keyspace_id);
+        ref_store.lock().unwrap().destroy_range(start, end);
     }
 }

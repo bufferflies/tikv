@@ -1,6 +1,7 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
 mod test_all;
+mod test_drop_table;
 mod test_load_data;
 mod test_native_br;
 
@@ -55,6 +56,7 @@ lazy_static::lazy_static! {
     pub static ref LOAD_DATA_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref KEYSPACE_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref TABLE_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    pub static ref DROP_TABLE_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref MANUAL_MAJOR_COMPACT_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref GC_ADVANCE_SAFE_POINT_COUNTER: AtomicUsize = AtomicUsize::new(0);
 }
@@ -68,6 +70,8 @@ const REQUEST_MAJOR_COMPACT_ON_STORE_TIMEOUT: Duration = Duration::from_secs(20)
 const KEYSPACE_CLEANUP_LOCKS_CONCURRENCY: usize = 4;
 const KEYSPACE_CLEANUP_LOCKS_TIMEOUT: Duration = Duration::from_secs(30);
 const GC_INTERVAL: Duration = Duration::from_secs(10);
+
+const DROP_TABLE_CONCURRENCY: usize = 2; // More than 1 thread to reduce the chance of blocked by other mutual-exclusive workloads for a long time.
 
 static NODE_ALLOCATOR: AtomicU16 = AtomicU16::new(1);
 

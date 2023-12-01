@@ -24,7 +24,7 @@ use tikv_util::{
 };
 use txn_types::Key;
 
-use crate::{test_load_data::*, test_native_br::*, TikvConfig, *};
+use crate::{test_drop_table::*, test_load_data::*, test_native_br::*, TikvConfig, *};
 
 const INITIAL_KEYSPACE_COUNT: usize = 10;
 const INITIAL_TABLE_COUNT: usize = 3;
@@ -140,6 +140,13 @@ fn test_random_all() {
             TIMEOUT,
         ),
     ];
+    for _ in 0..DROP_TABLE_CONCURRENCY {
+        async_handles.push(spawn_drop_table(
+            runtime.block_on(cluster.new_keyspace_client()),
+            Duration::from_secs(10),
+            TIMEOUT,
+        ));
+    }
     for idx in 0..CONCURRENCY {
         async_handles.push(spawn_keyspace_write(
             idx,
@@ -166,6 +173,11 @@ fn test_random_all() {
         }
     });
 
+    // Read requests can still get data before destroy range is done by compaction.
+    // So must wait for destroy range to finish before verifying.
+    info!("wait destroy range");
+    cluster.wait_for_destroy_range(Duration::from_secs(30));
+
     // Verify.
     info!("verify cluster");
     let verified_records_count = runtime.block_on(verify_cluster(&mut cluster));
@@ -178,6 +190,7 @@ fn test_random_all() {
     let total_write_count = WRITE_COUNTER.load(Ordering::SeqCst);
     let total_keyspace_count = KEYSPACE_COUNTER.load(Ordering::SeqCst);
     let total_table_count = TABLE_COUNTER.load(Ordering::SeqCst);
+    let total_drop_table_count = DROP_TABLE_COUNTER.load(Ordering::SeqCst);
     let total_merge_count = MERGE_COUNTER.load(Ordering::SeqCst);
     let total_move_count = MOVE_COUNTER.load(Ordering::SeqCst);
     let total_transfer_count = TRANSFER_COUNTER.load(Ordering::SeqCst);
@@ -189,10 +202,11 @@ fn test_random_all() {
     let total_gc_resolved_locks = GC_ADVANCE_SAFE_POINT_COUNTER.load(Ordering::SeqCst);
     let region_number = pd_client.get_regions_number();
     info!(
-        "TEST SUCCEED: write {}, keyspace {}, table {}, region {}, merge {}, move {}, transfer {}, node restart {}, backup {}, restore {}, load_data {}, manual_major_compact {}, verified_records {}, gc {}",
+        "TEST SUCCEED: write {}, keyspace {}, table {}, drop table {}, region {}, merge {}, move {}, transfer {}, node restart {}, backup {}, restore {}, load_data {}, manual_major_compact {}, verified_records {}, gc {}",
         total_write_count,
         total_keyspace_count,
         total_table_count,
+        total_drop_table_count,
         region_number,
         total_merge_count,
         total_move_count,
@@ -234,6 +248,7 @@ fn prepare_cluster(
         conf.enable_inner_key_offset = true;
         conf.security = security_conf.clone();
         conf.kvengine.compaction_tombs_count = 100;
+        conf.kvengine.max_del_range_delay = ReadableDuration(Duration::from_secs(3));
     };
     let mut cluster = ServerCluster::new(nodes, update_conf_fn);
     cluster.start_pd_server(1);
@@ -344,6 +359,7 @@ async fn verify_cluster(cluster: &mut ServerCluster) -> usize /* records count i
     check_br();
     check_load_data();
     check_gc();
+    check_drop_table();
 
     records_cnt
 }

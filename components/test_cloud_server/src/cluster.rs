@@ -16,20 +16,26 @@ use kvengine::{dfs::Dfs, ShardStats};
 use kvproto::{
     kvrpcpb,
     kvrpcpb::{Mutation, Op},
-    raft_cmdpb::RaftCmdRequest,
+    raft_cmdpb::{RaftCmdRequest, RaftCmdResponse, RaftRequestHeader},
 };
 use pd_client::PdClient;
-use rfstore::{store::Callback, RaftStoreRouter};
+use rfstore::{
+    store::{cmd_resp::message_error, Callback, CustomBuilder},
+    RaftStoreRouter,
+};
 use security::SecurityManager;
 use tempfile::TempDir;
 use test_pd_client::TestPdClient;
 use test_raftstore::find_peer;
 use tikv::{config::TikvConfig, import::SstImporter};
 use tikv_util::{
+    box_err,
+    codec::bytes::encode_bytes,
     config::{ReadableDuration, ReadableSize},
-    info,
+    error, info,
     thread_group::GroupProperties,
     time::Instant,
+    warn,
 };
 
 use crate::{
@@ -38,6 +44,8 @@ use crate::{
     scheduler::Scheduler,
     txnlock::lock_resolver::LockResolver,
 };
+
+pub type Error = Box<dyn std::error::Error + Send + Sync>;
 
 #[allow(dead_code)]
 pub struct ServerCluster {
@@ -213,8 +221,27 @@ impl ServerCluster {
 
     pub fn get_snap(&self, node_id: u16, key: &[u8]) -> kvengine::SnapAccess {
         let engine = self.get_kvengine(node_id);
-        let region = self.pd_client.get_region(key).unwrap();
+        let region = self.pd_client.get_region(&encode_bytes(key)).unwrap();
         engine.get_snap_access(region.id).unwrap()
+    }
+
+    /// Return `None` when there is no active shard.
+    pub fn get_active_shard(&self, shard_id: u64) -> Option<Arc<kvengine::Shard>> {
+        self.servers.values().find_map(|server| {
+            server
+                .get_kv_engine()
+                .get_shard(shard_id)
+                .and_then(|shard| shard.is_active().then_some(shard))
+        })
+    }
+
+    /// Get snap of active shard.
+    ///
+    /// Return `None` when there is no active shard.
+    pub fn get_active_snap(&self, key: &[u8]) -> Option<kvengine::SnapAccess> {
+        let region = self.pd_client.get_region(&encode_bytes(key)).unwrap();
+        let snap = self.get_active_shard(region.id)?.new_snap_access();
+        Some(snap)
     }
 
     pub fn get_sst_importer(&self, node_id: u16) -> Arc<SstImporter> {
@@ -222,14 +249,44 @@ impl ServerCluster {
         server.get_sst_importer()
     }
 
-    pub fn send_raft_command(&self, cmd: RaftCmdRequest) {
+    /// Return `None` when peer with specified `store_id` is not found.
+    pub fn send_raft_command(&self, cmd: RaftCmdRequest) -> Option<RaftCmdResponse> {
         let store_id = cmd.get_header().get_peer().get_store_id();
+        let tag = format!(
+            "{}:{}:{}",
+            store_id,
+            cmd.get_header().get_region_id(),
+            cmd.get_header().get_region_epoch().get_version()
+        );
+
         for server in self.servers.values() {
             if server.get_store_id() == store_id {
-                server.get_raft_router().send_command(cmd, Callback::None);
-                return;
+                let (cb, fut) = tikv_util::future::paired_future_callback();
+                let callback = Callback::write(Box::new(move |res| {
+                    cb(res);
+                }));
+
+                server.get_raft_router().send_command(cmd, callback);
+
+                return match block_on(fut) {
+                    Ok(res) => {
+                        if res.response.get_header().has_error() {
+                            warn!(
+                                "{} send_raft_command return error: {:?}",
+                                tag,
+                                res.response.get_header().get_error()
+                            );
+                        }
+                        Some(res.response)
+                    }
+                    Err(e) => {
+                        warn!("{} send_raft_command fail to get response: {:?}", tag, e);
+                        Some(message_error("fail to get response"))
+                    }
+                };
             }
         }
+        None
     }
 
     pub fn wait_region_replicated(&self, key: &[u8], replica_cnt: usize) {
@@ -379,6 +436,31 @@ impl ServerCluster {
         stats
     }
 
+    pub fn get_shard_stats(&self, shard_id: u64) -> RegionShardStats {
+        let mut stats = RegionShardStats::new(shard_id);
+        for server in self.servers.values() {
+            let store_id = server.get_store_id();
+            let kv_engine = server.get_kv_engine();
+            if let Some(shard_stats) = kv_engine.get_shard_stat_opt(shard_id) {
+                stats.shard_stats.insert(store_id, shard_stats);
+            }
+        }
+        stats
+    }
+
+    pub fn get_shards_has_del_prefixes(&self) -> Vec<ShardStats> {
+        self.servers
+            .values()
+            .flat_map(|server| {
+                server
+                    .get_kv_engine()
+                    .get_all_shard_stats()
+                    .into_iter()
+                    .filter(|stat| stat.has_del_prefixes)
+            })
+            .collect()
+    }
+
     pub fn set_dfs_delay(&self, delay: Duration) {
         self.dfs.as_ref().unwrap().set_delay(delay);
     }
@@ -430,6 +512,110 @@ impl ServerCluster {
         for node_id in self.get_nodes() {
             self.get_kvengine(node_id).update_managed_safe_ts(ts);
         }
+    }
+
+    pub fn flush_memtable(&self, region_id: u64) -> std::result::Result<(), Error> {
+        let mut client = self.new_client();
+        let ctx = client.new_rpc_ctx(region_id).unwrap();
+        let store_id = ctx.get_peer().get_store_id();
+        let version = ctx.get_region_epoch().get_version();
+        let tag = format!("{}:{}:{}", store_id, region_id, version);
+
+        let mut req = RaftCmdRequest::default();
+        let mut header = RaftRequestHeader::default();
+        header.set_region_id(ctx.get_region_id());
+        header.set_peer(ctx.get_peer().clone());
+        header.set_region_epoch(ctx.get_region_epoch().clone());
+        // header.set_term is not necessary, server side will skip checking term when
+        // it's not set.
+
+        info!("{} flush_memtable, header {:?}", tag, header);
+        req.set_header(header);
+        let mut custom_builder = CustomBuilder::new();
+        custom_builder.set_switch_mem_table(1);
+        req.set_custom_request(custom_builder.build());
+        match self.send_raft_command(req) {
+            Some(res) => {
+                if res.get_header().has_error() {
+                    Err(box_err!("{} flush_memtable err {:?}", tag, res))
+                } else {
+                    Ok(())
+                }
+            }
+            None => Err(box_err!("{} flush_memtable leader peer not found", tag)),
+        }
+    }
+
+    /// NOTE: Used only when there is no writes.
+    pub fn wait_for_memtable_flushed(&self, region_id: u64, timeout: Duration) -> bool {
+        try_wait(
+            || {
+                self.get_shard_stats(region_id)
+                    .shard_stats
+                    .iter()
+                    .all(|(_, shard)| shard.mem_table_size == 0 && shard.mem_table_count == 1)
+            },
+            timeout.as_secs() as usize,
+        )
+    }
+
+    /// Wait for destroy range finished.
+    ///
+    /// Trigger switch mem-tables if necessary.
+    ///
+    /// NOTE: Used only when there is no writes.
+    pub fn wait_for_destroy_range(&self, timeout: Duration) {
+        let get_pending_shards =
+            |not_ready_only: bool| -> HashMap<u64 /* region_id */, Vec<ShardStats>> {
+                let mut pending_shards = HashMap::new();
+                for shard in self.get_shards_has_del_prefixes() {
+                    if not_ready_only && shard.ready_to_destroy_range {
+                        continue;
+                    }
+
+                    pending_shards
+                        .entry(shard.id)
+                        .or_insert_with(|| Vec::with_capacity(3 /* replicas count */))
+                        .push(shard);
+                }
+                pending_shards
+            };
+
+        // Flush mem-table for pending shards which are not ready to destroy range.
+        let ok = try_wait(
+            || {
+                let pending_shards = get_pending_shards(true);
+                if pending_shards.is_empty() {
+                    return true;
+                }
+                for &region_id in pending_shards.keys() {
+                    if let Err(err) = self.flush_memtable(region_id) {
+                        error!("flush_memtable err: {:?}", err);
+                    }
+                }
+                sleep(Duration::from_millis(500));
+                pending_shards
+                    .iter()
+                    .all(|(&region_id, _)| self.wait_for_memtable_flushed(region_id, timeout / 5))
+            },
+            timeout.as_secs() as usize,
+        );
+        assert!(
+            ok,
+            "wait flush_memtable timeout, pending_shards: {:?}",
+            get_pending_shards(true)
+        );
+
+        // Wait for delete prefixes.
+        let ok = try_wait(
+            || self.get_shards_has_del_prefixes().is_empty(),
+            timeout.as_secs() as usize,
+        );
+        assert!(
+            ok,
+            "wait del_prefixes timeout, pending_shards: {:?}",
+            get_pending_shards(false)
+        );
     }
 }
 
@@ -503,6 +689,7 @@ where
     panic!("{}", fail_msg);
 }
 
+#[must_use]
 pub fn try_wait<F>(mut f: F, seconds: usize) -> bool
 where
     F: FnMut() -> bool,

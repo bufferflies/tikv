@@ -57,11 +57,11 @@ fn test_split_by_key() {
     let mut client = cluster.new_client();
     client.put_kv(0..5, i_to_key, i_to_key);
     let engine = cluster.get_kvengine(node_id);
-    try_wait(|| engine.get_all_shard_id_vers().len() == 2, 10);
+    let _ = try_wait(|| engine.get_all_shard_id_vers().len() == 2, 10);
     let shard_stats = engine.get_all_shard_stats();
     assert!(shard_stats.len() == 2, "{:?}", &shard_stats);
     client.put_kv(6..15, i_to_key, i_to_key);
-    try_wait(|| engine.get_all_shard_id_vers().len() == 5, 10);
+    let _ = try_wait(|| engine.get_all_shard_id_vers().len() == 5, 10);
     let shard_stats = engine.get_all_shard_stats();
     assert!(shard_stats.len() == 5, "{:?}", &shard_stats);
     cluster.stop();

@@ -6,11 +6,11 @@ use std::{sync::atomic::AtomicU16, time::Duration};
 
 use futures::executor::block_on;
 use pd_client::PdClient;
-use tikv_client::TimestampExt;
-use tikv_util::{codec::bytes::encode_bytes, info};
+use tikv_client::{IntoOwnedRange, TimestampExt};
+use tikv_util::{codec::bytes::encode_bytes, config::ReadableDuration, info};
 use tokio::runtime::Runtime;
 
-use crate::{client::CommitAction, ServerCluster};
+use crate::{client::CommitAction, try_wait, ServerCluster};
 
 #[test]
 fn it_works() {
@@ -179,7 +179,9 @@ fn test_client_split_region() {
 fn test_txn_client() {
     test_util::init_log_for_test();
     let node_ids = alloc_node_id_vec(3);
-    let mut cluster = ServerCluster::new(node_ids, |_, _| {});
+    let mut cluster = ServerCluster::new(node_ids, |_, conf| {
+        conf.kvengine.max_del_range_delay = ReadableDuration(Duration::from_secs(1));
+    });
 
     Runtime::new().unwrap().block_on(async {
         cluster.start_pd_server(1);
@@ -213,7 +215,7 @@ fn test_txn_client() {
             cluster.wait_pd_region_count(4);
             client.verify_data_with_ref_store();
         }
-        let ref_store = client.dump_ref_store();
+        let mut ref_store = client.dump_ref_store();
 
         // Verify by scan.
         assert_eq!(
@@ -230,6 +232,43 @@ fn test_txn_client() {
                 .unwrap(),
             150
         );
+
+        // Unsafe destroy range.
+        {
+            let key0 = i_to_key(0);
+            let key100 = i_to_key(100);
+            let key200 = i_to_key(200);
+            let prefix0 = &key0.as_slice()[..key0.len() - 2];
+            let prefix1 = &key100.as_slice()[..key100.len() - 2];
+            let prefix2 = &key200.as_slice()[..key200.len() - 2];
+            txn_client
+                .unsafe_destroy_range((prefix1, prefix2).into_owned())
+                .await
+                .unwrap();
+            ref_store.destroy_range(&key100, &key200);
+
+            let snap0 = cluster.get_active_snap(&key0).unwrap();
+            assert!(snap0.has_data_in_prefix(prefix0), "snap: {:?}", snap0);
+
+            let snap50 = cluster.get_active_snap(&i_to_key(50)).unwrap();
+            assert!(snap50.has_data_in_prefix(prefix0));
+            assert!(!snap50.has_data_in_prefix(prefix1));
+
+            let snap150 = cluster.get_active_snap(&i_to_key(150)).unwrap();
+            assert!(!snap150.has_data_in_prefix(prefix1));
+            let snap200 = cluster.get_active_snap(&i_to_key(200)).unwrap();
+            assert!(snap200.has_data_in_prefix(prefix2));
+
+            // Wait for del prefixes finished.
+            let ok = try_wait(|| cluster.get_shards_has_del_prefixes().is_empty(), 10);
+            assert!(ok, "{:?}", cluster.get_shards_has_del_prefixes());
+
+            let verified = txn_client
+                .verify_data_by_scan(&ref_store, None)
+                .await
+                .unwrap();
+            assert_eq!(verified, 200);
+        }
     });
 
     cluster.stop();
