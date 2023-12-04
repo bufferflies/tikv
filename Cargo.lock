@@ -1210,6 +1210,7 @@ name = "cloud_encryption"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "derive_more",
  "hmac",
  "openssl",
  "rand 0.8.5",

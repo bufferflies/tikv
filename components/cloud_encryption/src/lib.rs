@@ -6,6 +6,7 @@ extern crate serde_derive;
 use std::{ops::Deref, sync::Arc};
 
 use bytes::Buf;
+use derive_more::Deref;
 use hmac::{Hmac, Mac, NewMac};
 use openssl::{
     symm,
@@ -187,6 +188,25 @@ impl Deref for MasterKey {
     }
 }
 
+// ExportedMasterKey is a dedicated type for exported master key,
+// which is used to avoid accidentally printing the master key.
+#[derive(Deref)]
+pub struct ExportedMasterKey(Vec<u8>);
+
+impl ExportedMasterKey {
+    pub fn new(master_key: Vec<u8>) -> Self {
+        Self(master_key)
+    }
+}
+
+impl std::fmt::Debug for ExportedMasterKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("ExportedMasterKey")
+            .field(&"REDACTED".to_string())
+            .finish()
+    }
+}
+
 pub struct MasterKeyCore {
     master_key: Vec<u8>,
 }
@@ -214,6 +234,10 @@ impl MasterKeyCore {
         let plain_text =
             symm::decrypt(Cipher::aes_256_ctr(), &self.master_key, None, &cipher_text).unwrap();
         Ok(EncryptionKey::new(cipher_text, plain_text, key_ver))
+    }
+
+    pub fn export(&self) -> ExportedMasterKey {
+        ExportedMasterKey::new(self.master_key.clone())
     }
 }
 
