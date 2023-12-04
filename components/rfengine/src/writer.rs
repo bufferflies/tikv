@@ -3,9 +3,9 @@
 use std::{
     alloc::{self, Layout},
     cmp,
-    fs::File,
+    fs::{File, OpenOptions},
     io::Read,
-    os::unix::prelude::FileExt,
+    os::unix::{fs::OpenOptionsExt, prelude::FileExt},
     path::{Path, PathBuf},
     ptr::NonNull,
     sync::{
@@ -166,10 +166,12 @@ impl Version {
         match version {
             1 => Ok(Version::V1),
             2 => Ok(Version::V2),
-            _ => Err(Error::Corruption(format!(
-                "WAL version {:x} mismatch",
-                version
-            ))),
+            _ => Err(Error::Corruption {
+                msg: format!("WAL version mismatch: version {:x}", version),
+                epoch_id: 0,
+                offset: 0,
+                data: vec![],
+            }),
         }
     }
 }
@@ -200,11 +202,21 @@ impl WalHeader {
 
     pub(crate) fn decode(mut buf: &[u8]) -> Result<Self> {
         if buf.len() < Self::len() {
-            return Err(Error::Corruption("WAL header mismatch".to_owned()));
+            return Err(Error::Corruption {
+                msg: format!("WAL header mismatch: len {}", buf.len()),
+                epoch_id: 0,
+                offset: 0,
+                data: buf.to_vec(),
+            });
         }
         let magic_number = buf.get_u64_le();
         if magic_number != WAL_MAGIC_NUMBER {
-            return Err(Error::Corruption("WAL magic number mismatch".to_owned()));
+            return Err(Error::Corruption {
+                msg: format!("WAL magic number mismatch: magic_number {:x}", magic_number),
+                epoch_id: 0,
+                offset: 0,
+                data: buf.to_vec(),
+            });
         }
         let version = Version::from(buf.get_u64_le())?;
         let epoch_id = buf.get_u32_le();
@@ -220,7 +232,15 @@ pub(crate) fn check_wal_header(dir: &Path, epoch_id: u32) -> Result<WalHeader> {
             return match WalHeader::decode(&buf) {
                 Ok(header) => {
                     if header.epoch_id != epoch_id {
-                        return Err(Error::Corruption("WAL epoch id mismatch".to_owned()));
+                        return Err(Error::Corruption {
+                            msg: format!(
+                                "WAL epoch id mismatch: header.epoch_id {} != epoch_id {}",
+                                header.epoch_id, epoch_id
+                            ),
+                            epoch_id,
+                            offset: 0,
+                            data: buf.to_vec(),
+                        });
                     }
                     Ok(header)
                 }
@@ -300,8 +320,24 @@ impl WalWriter {
     pub(crate) fn open_file(&mut self, epoch_id: u32, file_off: u64) -> Result<()> {
         self.epoch_id = epoch_id;
         self.file_off = file_off;
-        let file = open_direct_file(&wal_file_name(&self.dir, epoch_id), true)?;
+
+        let filename = wal_file_name(&self.dir, epoch_id);
+        let file = if self.is_async {
+            // Must not use Direct I/O for async writer.
+            // Otherwise readers (`Worker` & `ObjectStorageWorker`) using buffer I/O would
+            // get incomplete data.
+            let flag = libc::O_DSYNC;
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .custom_flags(flag)
+                .open(filename)?
+        } else {
+            open_direct_file(&filename, true)?
+        };
         self.fd = Some(file);
+
         if file_off == 0 {
             self.current_version = self.version;
             self.write_header()?;

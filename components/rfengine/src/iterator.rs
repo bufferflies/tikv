@@ -7,6 +7,7 @@ use std::{
 };
 
 use bytes::{Buf, Bytes, BytesMut};
+use tikv_util::error;
 
 use crate::{
     worker::wal_file_name,
@@ -127,9 +128,9 @@ impl WalIterator {
         reader: &mut Box<dyn std::io::Read>,
         header: &WalHeader,
     ) -> Result<Bytes> {
-        let mut header_buf = [0u8; BATCH_HEADER_SIZE];
-        reader.read_exact(header_buf.as_mut_slice())?;
-        let mut header_buf = header_buf.as_slice();
+        let mut header_array = [0u8; BATCH_HEADER_SIZE];
+        reader.read_exact(header_array.as_mut_slice())?;
+        let mut header_buf = header_array.as_slice();
         let epoch_id = header_buf.get_u32_le();
         let checksum = header_buf.get_u32_le();
         let length = header_buf.get_u32_le() as usize;
@@ -137,18 +138,51 @@ impl WalIterator {
             return Err(Error::Eof);
         }
         if epoch_id != self.epoch_id {
-            return Err(Error::Corruption("epoch mismatch".to_owned()));
+            return Err(Error::Corruption {
+                msg: format!(
+                    "epoch mismatch: header.epoch_id {} != self.epoch_id {}",
+                    epoch_id, self.epoch_id
+                ),
+                epoch_id,
+                offset: self.offset,
+                data: header_array.to_vec(),
+            });
         }
         if length > MAX_BATCH_SIZE {
-            return Err(Error::Corruption("length mismatch".to_owned()));
+            return Err(Error::Corruption {
+                msg: format!("length mismatch: length {}", length),
+                epoch_id,
+                offset: self.offset,
+                data: header_array.to_vec(),
+            });
         }
         let aligned_length = DmaBuffer::aligned_len(BATCH_HEADER_SIZE + length);
         let remained_length = aligned_length - BATCH_HEADER_SIZE;
         self.buf.resize(remained_length, 0);
         reader.read_exact(&mut self.buf[..])?;
         let batch = &self.buf[..length];
-        if checksum != crc32c::crc32c(batch) {
-            return Err(Error::Corruption("checksum mismatch".to_owned()));
+        let actual_checksum = crc32c::crc32c(batch);
+        if checksum != actual_checksum {
+            error!("read_batch:checksum mismatch";
+                "epoch_id" => epoch_id,
+                "checksum" => checksum,
+                "actual_checksum" => actual_checksum,
+                "length" => length,
+                "aligned_length" => aligned_length,
+                "remained_length" => remained_length,
+                "self.offset" => self.offset,
+                "header" => log_wrappers::hex_encode_upper(header_array),
+                "batch" => log_wrappers::hex_encode_upper(batch),
+            );
+            return Err(Error::Corruption {
+                msg: format!(
+                    "checksum mismatch: header.checksum {:x}, batch.checksum {:x}",
+                    checksum, actual_checksum
+                ),
+                epoch_id,
+                offset: self.offset,
+                data: batch.to_vec(),
+            });
         }
         self.offset += aligned_length as u64;
         match header.version {

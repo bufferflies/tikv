@@ -52,8 +52,13 @@ pub enum Error {
     ParseError,
     #[error("Open error: {0}")]
     Open(String),
-    #[error("Corruption: {0}")]
-    Corruption(String),
+    #[error("Corruption: {msg}, epoch_id {epoch_id}, offset {offset}")]
+    Corruption {
+        msg: String,
+        epoch_id: u32,
+        offset: u64,
+        data: Vec<u8>,
+    },
     #[error("Other error: {0}")]
     Other(String),
 }

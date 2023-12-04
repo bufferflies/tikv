@@ -704,15 +704,33 @@ impl RlogHeader {
 
     pub(crate) fn decode(mut buf: &[u8]) -> Result<Self> {
         if buf.len() < Self::len() {
-            return Err(Error::Corruption("rlog header mismatch".to_owned()));
+            return Err(Error::Corruption {
+                msg: format!("rlog header mismatch: len {}", buf.len()),
+                epoch_id: 0,
+                offset: 0,
+                data: buf.to_vec(),
+            });
         }
         let magic_number = buf.get_u64_le();
         if magic_number != RLOG_MAGIC_NUMBER {
-            return Err(Error::Corruption("rlog magic number mismatch".to_owned()));
+            return Err(Error::Corruption {
+                msg: format!(
+                    "rlog magic number mismatch: magic_number {:x}",
+                    magic_number
+                ),
+                epoch_id: 0,
+                offset: 0,
+                data: buf.to_vec(),
+            });
         }
         let version = buf.get_u64_le();
         if version != RlogVersion::V1 as u64 {
-            return Err(Error::Corruption("rlog version mismatch".to_owned()));
+            return Err(Error::Corruption {
+                msg: format!("rlog version mismatch: version {}", version),
+                epoch_id: 0,
+                offset: 0,
+                data: buf.to_vec(),
+            });
         }
         let count = buf.get_u32_le();
         Ok(Self {

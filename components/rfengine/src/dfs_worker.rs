@@ -501,12 +501,22 @@ impl ChunkHeader {
 
     pub fn decode(mut buf: &[u8]) -> Result<Self> {
         if buf.len() < Self::len() {
-            return Err(Error::Corruption("chunk header mismatch".to_owned()));
+            return Err(Error::Corruption {
+                msg: format!("chunk header mismatch: len {}", buf.len()),
+                epoch_id: 0,
+                offset: 0,
+                data: buf.to_vec(),
+            });
         }
 
         let version = ChunkVersion::from(buf.get_u32_le());
         if version != ChunkVersion::V1 {
-            return Err(Error::Corruption("chunk version mismatch".to_owned()));
+            return Err(Error::Corruption {
+                msg: format!("chunk version mismatch: version {:?}", version),
+                epoch_id: 0,
+                offset: 0,
+                data: buf.to_vec(),
+            });
         }
         let compression_type = CompressionType::from(buf.get_u32_le());
         Ok(Self {

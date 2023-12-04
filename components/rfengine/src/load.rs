@@ -140,8 +140,17 @@ impl RfEngineCore {
             let end_off = end_offs[i] as usize;
             let log_data = &data[start_off..end_off - 4];
             let checksum = LittleEndian::read_u32(&data[end_off - 4..]);
-            if checksum != crc32c::crc32c(log_data) {
-                return Err(Error::Corruption("checksum mismatch".to_owned()));
+            let actual_checksum = crc32c::crc32c(log_data);
+            if checksum != actual_checksum {
+                return Err(Error::Corruption {
+                    msg: format!(
+                        "checksum mismatch: header.checksum {:x}, log_data.checksum {:x}",
+                        checksum, actual_checksum
+                    ),
+                    epoch_id: 0,
+                    offset: start_off as u64,
+                    data: log_data.to_vec(),
+                });
             }
             let raft_log = RaftLogOp::decode(log_data);
             peer_data.raft_logs.append(raft_log);
