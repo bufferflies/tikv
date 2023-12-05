@@ -3236,6 +3236,7 @@ impl Peer {
             // The admin request is rejected because it may need to update epoch checker
             // which introduces an uncertainty and may breaks the correctness of
             // epoch checker.
+            // Note: clients in test cases rely on the message to retry.
             return Err(box_err!(
                 "{} peer has not applied to current term, applied_term {}, current_term {}",
                 self.tag(),

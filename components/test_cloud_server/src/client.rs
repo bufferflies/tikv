@@ -879,6 +879,15 @@ impl ClusterClient {
             sleep(Duration::from_millis(100));
             return true;
         }
+        if region_err
+            .get_message()
+            .contains("peer has not applied to current term")
+        {
+            // Occurs when split region.
+            // See `rfstore::peer::Peer::propose_normal`.
+            sleep(Duration::from_millis(100));
+            return true;
+        }
         false
     }
 
