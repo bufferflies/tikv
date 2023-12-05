@@ -166,12 +166,17 @@ impl RfEngineCore {
         let (tx, rx) = tikv_util::mpsc::unbounded();
         let compacted_epoch = Arc::new(AtomicU32::new(manifest.epoch_id));
         let wal_dir = wal_sync_dir.as_deref().unwrap_or(dir);
+        let writer_type = if cfg.cli_mode {
+            WriterType::CliMode
+        } else {
+            WriterType::Sync
+        };
         let writer = WalWriter::new(
             wal_dir,
             wal_size,
             compression_threshold,
             compacted_epoch.clone(),
-            false,
+            writer_type,
         );
 
         let dfs_worker_healthy = Arc::new(AtomicBool::new(true));
@@ -198,7 +203,7 @@ impl RfEngineCore {
                     wal_size,
                     compression_threshold,
                     compacted_epoch.clone(),
-                    true,
+                    WriterType::Async,
                 );
                 async_wal_writer.open_file(manifest.epoch_id + 1, async_offset)?;
                 Some(async_wal_writer)

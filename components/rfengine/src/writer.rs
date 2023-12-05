@@ -5,7 +5,7 @@ use std::{
     cmp,
     fs::{File, OpenOptions},
     io::Read,
-    os::unix::{fs::OpenOptionsExt, prelude::FileExt},
+    os::unix::fs::{FileExt, OpenOptionsExt},
     path::{Path, PathBuf},
     ptr::NonNull,
     sync::{
@@ -22,6 +22,13 @@ use crate::{write_batch::PeerBatch, *};
 
 pub const BATCH_HEADER_SIZE: usize = 4 /* epoch_id */ + 4 /* checksum */ + 4 /* batch_len */;
 pub(crate) const INITIAL_BUF_SIZE: usize = 8 * 1024 * 1024;
+
+#[derive(PartialEq)]
+pub enum WriterType {
+    Sync,
+    Async,
+    CliMode, // Used for cli tools like full restoration.
+}
 
 /// `DmaBuffer` is a buffer used for direct I/O that follows the alignment
 /// restrictions on the length and address of user-space buffers.
@@ -279,7 +286,7 @@ pub(crate) struct WalWriter {
     // file_off is always aligned.
     pub(crate) file_off: u64,
     pub(crate) compacted_epoch: Arc<AtomicU32>,
-    pub(crate) is_async: bool,
+    pub(crate) writer_type: WriterType,
 }
 
 impl WalWriter {
@@ -288,7 +295,7 @@ impl WalWriter {
         wal_size: usize,
         compression_threshold: usize,
         compacted_epoch: Arc<AtomicU32>,
-        is_async: bool,
+        writer_type: WriterType,
     ) -> Self {
         let version = if compression_threshold == 0 {
             Version::V1
@@ -313,7 +320,7 @@ impl WalWriter {
             compression_threshold,
             file_off: 0,
             compacted_epoch,
-            is_async,
+            writer_type,
         }
     }
 
@@ -322,19 +329,29 @@ impl WalWriter {
         self.file_off = file_off;
 
         let filename = wal_file_name(&self.dir, epoch_id);
-        let file = if self.is_async {
-            // Must not use Direct I/O for async writer.
-            // Otherwise readers (`Worker` & `ObjectStorageWorker`) using buffer I/O would
-            // get incomplete data.
-            let flag = libc::O_DSYNC;
-            OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .custom_flags(flag)
-                .open(filename)?
-        } else {
-            open_direct_file(&filename, true)?
+        let file = match self.writer_type {
+            WriterType::Sync => open_direct_file(&filename, true)?,
+            WriterType::Async => {
+                // Must not use Direct I/O for async writer.
+                // Otherwise readers (`Worker` & `ObjectStorageWorker`) using buffer I/O would
+                // get incomplete data.
+                OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .custom_flags(libc::O_DSYNC)
+                    .open(filename)?
+            }
+            WriterType::CliMode => {
+                // For cli tools like full restoration, avoid using `O_DSYNC` to improve I/O
+                // performance. Data in the buffer will be flushed automatically
+                // when file is dropped.
+                OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .open(filename)?
+            }
         };
         self.fd = Some(file);
 
@@ -466,7 +483,9 @@ impl WalWriter {
         let compacted_epoch = self.compacted_epoch.load(Ordering::SeqCst);
         // If the current epoch id is 5, the rotated epoch id is 6, it would overwrite
         // epoch 2 wal, so we need to make sure epoch 2 is compacted.
-        current_size > self.wal_size && compacted_epoch + 4 > self.epoch_id && !self.is_async
+        current_size > self.wal_size
+            && compacted_epoch + 4 > self.epoch_id
+            && self.writer_type != WriterType::Async
     }
 
     pub(crate) fn rotate(&mut self) -> Result<()> {

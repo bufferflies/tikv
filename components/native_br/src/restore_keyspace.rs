@@ -758,7 +758,7 @@ impl BackupCluster {
         let rf_engine = TikvServer::init_raft_engine(conf)?;
 
         if is_lightweight {
-            // `snap_epoch` is the lastest snapshot manifest epoch. If no snapshot found,
+            // `snap_epoch` is the latest snapshot manifest epoch. If no snapshot found,
             // the `snap_epoch` is 0. Replay wal logs from `snap_epoch` + 1 to backup point.
             replay_wal_logs(
                 self.pd_client.clone(),

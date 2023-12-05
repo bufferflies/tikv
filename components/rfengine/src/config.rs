@@ -34,6 +34,14 @@ pub struct Config {
     ///
     /// Default: "64MB"
     pub wal_chunk_target_file_size: ReadableSize,
+
+    /// Open RfEngine in cli mode used by tools. Skip serde for this field to
+    /// avoid misconfiguration. If cli_mode is set, the sync WAL writer will
+    /// avoid sync to improve performance.
+    ///
+    /// Default: false
+    #[serde(skip)]
+    pub cli_mode: bool,
 }
 
 impl Default for Config {
@@ -45,6 +53,7 @@ impl Default for Config {
             wal_sync_dir: "".to_owned(),
             lightweight_backup: false,
             wal_chunk_target_file_size: ReadableSize::mb(64),
+            cli_mode: false,
         }
     }
 }

@@ -235,6 +235,7 @@ fn generate_store_config(path: &str, wal_target_size: ReadableSize) -> TikvConfi
     config.raft_engine.enable = false;
     config.rfengine.lightweight_backup = false;
     config.rfengine.target_file_size = wal_target_size;
+    config.rfengine.cli_mode = true;
     config
 }
 

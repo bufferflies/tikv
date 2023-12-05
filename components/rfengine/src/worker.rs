@@ -857,7 +857,7 @@ mod tests {
         raft_log_file_name, region_state_key, store_raft_log_file_key,
         tests::{get_txn_endkey_prefix, get_txn_startkey_prefix},
         write_batch::PeerBatch,
-        RfEngine, RfEngineConfig, WalWriter, Worker,
+        RfEngine, RfEngineConfig, WalWriter, Worker, WriterType,
     };
 
     fn generate_random_str() -> Vec<u8> {
@@ -1096,7 +1096,7 @@ mod tests {
             wal_size,
             1024,
             AtomicU32::new(cs.epoch_id + 1).into(),
-            false,
+            WriterType::Sync,
         );
         wal_writer.open_file(cs.epoch_id + 1, 0).unwrap();
         // checksum inner should succeeds.
