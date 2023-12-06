@@ -50,6 +50,7 @@ fn main() {
     init_logger(io::stdout(), DEFAULT_LOG_LEVEL);
     tikv_util::metrics::monitor_process()
         .unwrap_or_else(|e| panic!("failed to start process monitor: {}", e));
+    tikv_util::set_panic_hook(false, "/tmp");
     CPU_CORES_QUOTA_GAUGE.set(SysQuota::cpu_cores_quota());
     let matches = App::new("tikv-worker")
         .about("tikv remote worker")
