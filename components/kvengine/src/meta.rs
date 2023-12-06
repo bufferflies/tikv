@@ -244,19 +244,6 @@ impl ShardMeta {
     }
 
     fn is_duplicated_compaction(&self, comp: &mut pb::Compaction) -> bool {
-        if is_move_down(comp) {
-            if let Some(level) = self.file_level(comp.get_top_deletes()[0]) {
-                if level == comp.level {
-                    return false;
-                }
-            }
-            info!(
-                "{} skip duplicated move_down compaction level:{}",
-                self.tag(),
-                comp.level
-            );
-            return true;
-        }
         for i in 0..comp.get_top_deletes().len() {
             let id = comp.get_top_deletes()[i];
             if self.is_compaction_file_deleted(id, comp.level, comp) {
