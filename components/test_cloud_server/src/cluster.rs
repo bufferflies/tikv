@@ -553,7 +553,7 @@ impl ServerCluster {
                 self.get_shard_stats(region_id)
                     .shard_stats
                     .iter()
-                    .all(|(_, shard)| shard.mem_table_size == 0 && shard.mem_table_count == 1)
+                    .all(|(_, shard)| shard.mem_table_is_empty())
             },
             timeout.as_secs() as usize,
         )
@@ -590,7 +590,7 @@ impl ServerCluster {
                 }
                 for &region_id in pending_shards.keys() {
                     if let Err(err) = self.flush_memtable(region_id) {
-                        error!("flush_memtable err: {:?}", err);
+                        error!("flush_memtable failed"; "region_id" => region_id, "err" => ?err);
                     }
                 }
                 sleep(Duration::from_millis(500));

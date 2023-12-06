@@ -10,7 +10,7 @@ use std::{
 
 use kvengine::{
     dfs::{DFSConfig, Dfs, S3Fs},
-    ShardStats, CF_LEVELS, WRITE_CF,
+    ShardStats, WRITE_CF,
 };
 use kvproto::metapb;
 use native_br::{
@@ -791,15 +791,14 @@ fn test_restore_keyspace_with_resolve_locks() {
     }
     let origin_ref_store = client.dump_ref_store();
 
-    // Major compact to move data to L3, and trigger
+    // Wait for data of WRITE_CF being compacted to L1+, and trigger
     // `kvengine::Engine::load_unloaded_tables`.
-    request_major_compaction(&runtime, &pd_client, KEYSPACE_ID);
-    wait_for_write_cf_l3_files(
+    wait_for_keyspace_stats(
         &runtime,
         &cluster,
         &pd_client,
         KEYSPACE_ID,
-        |n| n > 0,
+        |stats| stats.cfs[WRITE_CF].levels.iter().any(|l| l.num_tables > 0),
         Duration::from_secs(10),
     );
 
@@ -839,16 +838,19 @@ fn test_restore_keyspace_with_resolve_locks() {
     )
     .unwrap();
 
-    // Invoke major compaction to compact the deletion of primary key.
+    // Invoke major compaction to reproduce issue by compacting the deletion of
+    // primary key.
+    // If restore keyspace do not resolve locks, the secondary keys of "put_kv" will
+    // not be compacted, and the following `wait_for_keyspace_stats` will fail.
     let ts = client.get_ts();
     cluster.set_gc_safe_point(ts.into_inner());
     request_major_compaction(&runtime, &pd_client, KEYSPACE_ID);
-    wait_for_write_cf_l3_files(
+    wait_for_keyspace_stats(
         &runtime,
         &cluster,
         &pd_client,
         KEYSPACE_ID,
-        |n| n == 0,
+        |stats| stats.cfs[WRITE_CF].levels.iter().all(|l| l.num_tables == 0),
         Duration::from_secs(10),
     );
     std::thread::sleep(Duration::from_secs(10));
@@ -996,13 +998,18 @@ fn request_major_compaction(runtime: &Runtime, pd_client: &TestPdClient, keyspac
     }
 }
 
-/// Wait for write cf L3 files to be generated.
-fn wait_for_write_cf_l3_files(
+/// Wait for stats of all regions in a keyspace to be expected.
+///
+/// Note that when any peer has the expected stats, the region will be
+/// considered as expected. In the scene of restoration, as we restore from
+/// rfengine of leader peer, when any peer become expected, the rfengine meta of
+/// leader must be expected.
+fn wait_for_keyspace_stats(
     runtime: &Runtime,
     cluster: &ServerCluster,
     pd_client: &TestPdClient,
     keyspace_id: u32,
-    expect: impl Fn(usize) -> bool,
+    expect: impl Fn(&ShardStats) -> bool,
     timeout: Duration,
 ) {
     let regions = runtime
@@ -1023,18 +1030,13 @@ fn wait_for_write_cf_l3_files(
     for region in regions {
         let region_id = region.get_region().id;
         let ok = try_wait(
-            || {
-                get_stats(region_id).iter().all(|stats| {
-                    let bottom_most_level = stats.cfs[WRITE_CF].levels.last().unwrap();
-                    bottom_most_level.level == CF_LEVELS[WRITE_CF]
-                        && expect(bottom_most_level.num_tables)
-                })
-            },
+            || get_stats(region_id).iter().any(|stats| expect(stats)),
             timeout.as_secs() as usize,
         );
         assert!(
             ok,
-            "wait_for_write_cf_l3_files timeout, stats: {:?}",
+            "wait_for_keyspace_stats timeout, region_id: {}, stats: {:?}",
+            region_id,
             get_stats(region_id)
         );
     }

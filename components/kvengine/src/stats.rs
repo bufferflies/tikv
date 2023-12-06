@@ -187,6 +187,13 @@ pub struct ShardStats {
     pub trim_over_bound: bool,
 }
 
+impl ShardStats {
+    #[inline]
+    pub fn mem_table_is_empty(&self) -> bool {
+        self.mem_table_size == 0 && self.mem_table_count == 1
+    }
+}
+
 #[derive(Default, Serialize, Deserialize, Debug)]
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
