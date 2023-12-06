@@ -22,10 +22,10 @@ jobs:
       EXTRA_CARGO_ARGS: --no-run
     steps:
       - uses: actions/checkout@v3
-      - name: Setup cmake
-        uses: jwlawson/actions-setup-cmake@v1.13
-        with:
-          github-api-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Check cmake & protoc # use local to work around github rate limit
+        run: |
+          cmake --version
+          protoc --version
       - name: Configure git for private modules
         env:
           TOKEN: ${{ secrets.GIT_ACTION_BOT }}
@@ -34,11 +34,6 @@ jobs:
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-      - name: Install Protoc
-        uses: arduino/setup-protoc@v1
-        with:
-          version: '3.14.0'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Run integrations tests
         env:
           CARGO_INCREMENTAL: "0"
