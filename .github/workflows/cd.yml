@@ -6,8 +6,8 @@ on:
       - cloud-engine
   workflow_dispatch:
     inputs:
-      overwrite_gcr:
-        description: "overwrite gcr daily-run image"
+      update_daily_run_image:
+        description: "update daily-run image"
         type: boolean
         default: false
 
@@ -81,32 +81,14 @@ jobs:
       - name: push-manifest-harbor
         run: |
           docker manifest push hub.pingcap.net/sunxiaoguang/serverless/tikv:${{ github.sha }}
-
-  sync-image:
-    name: Sync image to GCR
-    runs-on: amd64
-    needs: [ "multi-arch" ]
-    if: ${{ inputs.overwrite_gcr || github.ref == 'refs/heads/cloud-engine' }}
-    env:
-      GCR_IMAGE: xexplorersun/tikv-cse:v6.6.0
-      # Additional tag to label the image with the commit SHA.
-      ADDITIONAL_TAG: xexplorersun/tikv-cse:cse-${{ github.sha }}
-    steps:
-      - name: Set runner architecture
+      - name: set-additional-tags
+        if: ${{ inputs.update_daily_run_image || github.ref == 'refs/heads/cloud-engine' }}
         run: |
-          arch=$(uname -m)
-          if [ "$arch" = "x86_64" ]; then
-            echo "ARCH=amd64" >> $GITHUB_ENV
-          elif [ "$arch" = "aarch64" ]; then
-            echo "ARCH=arm64" >> $GITHUB_ENV
-          else
-            echo "ARCH=$arch" >> $GITHUB_ENV
-          fi
-      - name: Install regctl
-        run: |
-          curl -sLO https://github.com/regclient/regclient/releases/download/v0.4.0/regctl-linux-${{ env.ARCH }}
-          chmod +x regctl-linux-${{ env.ARCH }}
-      - name: Sync Image
-        run: |
-          ./regctl-linux-${{ env.ARCH }} image copy xexplorersun/tikv:cse-${{ github.sha }} ${{ env.GCR_IMAGE }} -v info
-          ./regctl-linux-${{ env.ARCH }} image copy xexplorersun/tikv:cse-${{ github.sha }} ${{ env.ADDITIONAL_TAG }} -v info
+          # Remove the local manifest entry if it exists
+          docker manifest rm hub.pingcap.net/keyspace/tikv-cse:v6.6.0 || true
+          
+          docker manifest create hub.pingcap.net/keyspace/tikv-cse:v6.6.0 \
+          --amend hub.pingcap.net/sunxiaoguang/serverless/tikv:${{ github.sha }}-amd64 \
+          --amend hub.pingcap.net/sunxiaoguang/serverless/tikv:${{ github.sha }}-arm64
+          
+          docker manifest push hub.pingcap.net/keyspace/tikv-cse:v6.6.0
