@@ -24,6 +24,7 @@ jobs:
         with:
           platforms: "linux/arm64"
           push: true
+          network: "host"
           tags: |
             xexplorersun/tikv:cse-${{ github.sha }}-arm64
       - name: Build Image Harbor
@@ -31,6 +32,7 @@ jobs:
         with:
           platforms: "linux/arm64"
           push: true
+          network: "host"
           tags: |
             hub.pingcap.net/sunxiaoguang/serverless/tikv:${{ github.sha }}-arm64
   build-amd64:
@@ -47,6 +49,7 @@ jobs:
         with:
           platforms: "linux/amd64"
           push: true
+          network: "host"
           tags: |
             xexplorersun/tikv:cse-${{ github.sha }}-amd64
       - name: Build Image Harbor
@@ -54,6 +57,7 @@ jobs:
         with:
           platforms: "linux/amd64"
           push: true
+          network: "host"
           tags: |
             hub.pingcap.net/sunxiaoguang/serverless/tikv:${{ github.sha }}-amd64
   multi-arch:
