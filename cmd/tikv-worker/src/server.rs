@@ -126,9 +126,6 @@ where
                         path if path.starts_with(native_br::RESTORE_KEYSPACE_API_PATH) => {
                             native_br::handle_restore_keyspace(ctx.br_manager.clone(), req).await
                         }
-                        path if path.starts_with(native_br::WHITELIST_API_PATH) => {
-                            native_br::handle_native_br_whitelist(ctx.br_manager.clone(), req).await
-                        }
                         _ => Ok(hyper::Response::builder()
                             .status(404)
                             .body(hyper::Body::from("Not Found"))

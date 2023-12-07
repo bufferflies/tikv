@@ -2,7 +2,7 @@
 
 use std::{
     borrow::Cow,
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     ops::Deref,
     sync::{Arc, Mutex, RwLock},
     thread,
@@ -44,7 +44,6 @@ const BACKUP_NAME_FORMAT: &str = "%Y%m%d%H%M%S";
 const INSTANT_BACKUP_INTERVAL: Duration = Duration::from_secs(60);
 pub(crate) const BACKUPS_API_PATH: &str = "/api/v1/backups";
 pub(crate) const RESTORE_KEYSPACE_API_PATH: &str = "/api/v1/restore_keyspace/";
-pub(crate) const WHITELIST_API_PATH: &str = "/api/v1/native_br/whitelist/";
 
 /// Backup and restore keyspace API:
 ///
@@ -60,9 +59,6 @@ pub(crate) const WHITELIST_API_PATH: &str = "/api/v1/native_br/whitelist/";
 ///   * GET    /api/v1/restore_keyspace/<restore_id>?cluster_id=%d&keyspace=%s
 ///   * DELETE /api/v1/restore_keyspace/<restore_id>?cluster_id=%d&keyspace=%s
 ///   * GET    /api/v1/restore_keyspace/?cluster_id=%d
-/// 3. whitelist
-///   * GET    /api/v1/native_br/whitelist/?cluster_id=%d
-///   * GET    /api/v1/native_br/whitelist/<keyspace>?cluster_id=%d
 
 pub(crate) async fn handle_backup(
     manager: Arc<NativeBrManager>,
@@ -251,17 +247,6 @@ pub(crate) async fn handle_restore_keyspace(
 
     let source_keyspace = source_keyspace.unwrap().to_string();
     let target_keyspace = target_keyspace.unwrap().to_string();
-    if !manager.is_keyspace_allowed(&source_keyspace)
-        || !manager.is_keyspace_allowed(&target_keyspace)
-    {
-        return Ok(make_response(
-            StatusCode::FORBIDDEN,
-            format!(
-                "Keyspace source {} or target {} is not in whitelist",
-                source_keyspace, target_keyspace
-            ),
-        ));
-    }
 
     let keyspace_tag = format!("{}->{}", source_keyspace, target_keyspace);
 
@@ -439,52 +424,6 @@ fn handle_error(err: Error) -> hyper::Result<Response<Body>> {
     }
 }
 
-pub(crate) async fn handle_native_br_whitelist(
-    manager: Arc<NativeBrManager>,
-    req: hyper::Request<hyper::Body>,
-) -> hyper::Result<hyper::Response<hyper::Body>> {
-    let query = req.uri().query().unwrap_or("");
-    let query_pairs: HashMap<_, _> = url::form_urlencoded::parse(query.as_bytes()).collect();
-
-    match get_param::<u64>(&query_pairs, "cluster_id") {
-        Some(cluster_id) if cluster_id == manager.get_cluster_id().unwrap() => {}
-        _ => {
-            return Ok(make_response(
-                StatusCode::BAD_REQUEST,
-                "Cluster ID mismatch",
-            ));
-        }
-    }
-
-    let keyspace = req
-        .uri()
-        .path()
-        .strip_prefix(WHITELIST_API_PATH)
-        .unwrap()
-        .to_string();
-    match *req.method() {
-        Method::GET => {
-            if keyspace.is_empty() {
-                // Get all whitelist, for debug use only.
-                Ok(make_json_response(
-                    StatusCode::OK,
-                    &manager.config.read().unwrap().native_br.whitelist,
-                ))
-            } else {
-                let resp = WhitelistResponse {
-                    is_allowed: manager.is_keyspace_allowed(&keyspace),
-                    keyspace,
-                };
-                Ok(make_json_response(StatusCode::OK, &resp))
-            }
-        }
-        _ => Ok(make_response(
-            StatusCode::BAD_REQUEST,
-            "Invalid whitelist method",
-        )),
-    }
-}
-
 #[derive(Clone, Debug)]
 enum RestoreSource {
     ExistFile(
@@ -584,13 +523,6 @@ impl RestoreState {
     fn is_retry(&self, new_state: &Self) -> bool {
         *self == Self::Error && *new_state == Self::Init
     }
-}
-
-#[derive(Default, Serialize, Deserialize, Debug)]
-#[serde(default)]
-struct WhitelistResponse {
-    keyspace: String,
-    is_allowed: bool,
 }
 
 #[derive(Clone, Copy, Default, Serialize, Deserialize, Debug, PartialEq)]
@@ -897,25 +829,10 @@ impl Drop for BrContext {
     }
 }
 
-#[derive(Clone, Default, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(default)]
-#[serde(rename_all = "kebab-case")]
-pub struct WhiteList {
-    enable: bool,
-    list: HashSet<String>,
-}
-
-impl WhiteList {
-    pub(crate) fn is_allowed(&self, keyspace: &String) -> bool {
-        !self.enable || self.list.contains(keyspace)
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
 pub struct NativeBrConfig {
-    whitelist: WhiteList,
     // The time-to-live when restore task has been in final state.
     restore_task_ttl: ReadableDuration,
     // Enable lightweight instant backup during restore.
@@ -925,7 +842,6 @@ pub struct NativeBrConfig {
 impl Default for NativeBrConfig {
     fn default() -> Self {
         Self {
-            whitelist: WhiteList::default(),
             restore_task_ttl: ReadableDuration::minutes(60),
             enable_lightweight_backup: false,
         }
@@ -1104,15 +1020,6 @@ impl NativeBrManager {
                 info!("{}({}) expired and removed", keyspace_name, restore_id);
             }
         }
-    }
-
-    fn is_keyspace_allowed(&self, keyspace: &String) -> bool {
-        self.config
-            .read()
-            .unwrap()
-            .native_br
-            .whitelist
-            .is_allowed(keyspace)
     }
 
     async fn get_next_backup_after_ts(

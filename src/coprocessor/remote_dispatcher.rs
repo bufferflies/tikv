@@ -61,7 +61,6 @@ pub struct RemoteContextCore {
     pub remote_analyze_url: String,
     pub cop_worker_provider: Arc<dyn CopWorkerProvider>,
     pub cop_min_blocks: usize,
-    pub cop_white_list: Vec<u32>,
     pub runtime: Arc<tokio::runtime::Runtime>,
     pub analyze_cache: moka::future::Cache<String, Result<Vec<u8>>>,
     pub client: security::HttpClient,
@@ -89,7 +88,6 @@ impl RemoteContext {
         remote_analyze_url: String,
         cop_worker_url: String,
         cop_min_blocks: usize,
-        cop_white_list: Vec<u32>,
         security_mgr: Arc<SecurityManager>,
     ) -> Option<Self> {
         if remote_analyze_url.is_empty() && cop_worker_url.is_empty() {
@@ -118,7 +116,6 @@ impl RemoteContext {
                 remote_analyze_url,
                 cop_min_blocks,
                 cop_worker_provider,
-                cop_white_list,
                 runtime,
                 analyze_cache,
                 client,
@@ -140,9 +137,6 @@ pub(crate) fn try_remote_dag_handler<E: Engine>(
         .cop_worker_provider
         .get(snap.get_keyspace_id(), start_ts)?;
     let keyspace_id = snap.get_keyspace_id();
-    if !remote_ctx.cop_white_list.is_empty() && !remote_ctx.cop_white_list.contains(&keyspace_id) {
-        return None;
-    }
     let last_executor = dag.get_executors().last().unwrap();
     if last_executor.has_limit() {
         let limit = last_executor.get_limit();

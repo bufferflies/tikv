@@ -147,13 +147,11 @@ impl<E: Engine> Endpoint<E> {
         remote_analyze_url: String,
         remote_cop_url: String,
         remote_cop_min_blocks: usize,
-        remote_cop_white_list: Vec<u32>,
     ) {
         self.remote_ctx = RemoteContext::new(
             remote_analyze_url,
             remote_cop_url,
             remote_cop_min_blocks,
-            remote_cop_white_list,
             self.security_mgr.clone(),
         );
     }

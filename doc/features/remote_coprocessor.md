@@ -51,12 +51,10 @@ example config:
 [kvengine]
 remote-coprocessor-addr = "http://127.0.0.1:19000/coprocessor"
 remote-coprocessor-min-blocks = 256
-remote-coprocessor-white-list = [1]
 ```
 
 - The `remote-coprocessor-addr` parameter specifies the address of the remote coprocessor worker to which heavy coprocessor requests will be offloaded.
 - The `remote-coprocessor-min-blocks` parameter defines the threshold for offloading a coprocessor request to the remote worker.
-- The `remote-coprocessor-white-list` parameter is used to specify a list of keyspaces that are eligible for this offloading feature. An empty white list ([]) enables the feature for all keyspaces.
 
 The tikv-server encodes the offload request with related memtable and snapshot data, and then dispatches the encoded request to worker using http/https.
 
