@@ -3,7 +3,7 @@ use std::{collections::HashMap, fmt, sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use chrono::{NaiveTime, Utc};
-use engine_traits::{GetObjectOptions, ListObjectContent, ObjectStorage};
+use engine_traits::{GetObjectOptions, ObjectStorage};
 use etcd_client::{ConnectOptions, OpenSslClientConfig};
 use grpcio::EnvBuilder;
 use http::Request;
@@ -13,8 +13,8 @@ use kvproto::{metapb, metapb::Store};
 use pd_client::{PdClient, RpcClient};
 use protobuf::Message;
 use rfengine::{
-    assemble_wal_chunks, verify_wal_chunks_integrity, wal_chunk_file_prefix, wal_chunk_file_suffix,
-    RfEngine,
+    assemble_wal_chunks, parse_wal_chunk_key, verify_wal_chunks_integrity, wal_chunk_file_prefix,
+    wal_chunk_file_suffix, RfEngine,
 };
 use rfenginepb::ClusterBackupMeta;
 use rfstore::store::state::RaftState;
@@ -328,6 +328,8 @@ pub fn replay_wal_logs(
         .expect("store not found");
     let backup_epoch = store_meta.get_epoch();
     let backup_offset = store_meta.get_offset();
+    let mut wal_chunks = vec![];
+    let dfs_prefix = format!("{}/", dfs.get_prefix());
     for replay_epoch in snap_epoch + 1..=backup_epoch {
         let scan_prefix = wal_chunk_file_prefix(store_id, replay_epoch);
         let scan_start = wal_chunk_file_suffix(0, 0);
@@ -336,20 +338,20 @@ pub fn replay_wal_logs(
             scan_prefix, scan_start, replay_epoch, backup_epoch
         );
 
-        let dfs_clone = dfs.clone();
         match dfs.list_objects(&scan_start, Some(&scan_prefix), None) {
             Ok((chunks, _)) => {
-                replay_wal_chunks(
-                    pd_client.clone(),
-                    dfs_clone,
-                    store_id,
-                    chunks,
-                    rf,
-                    replay_epoch,
-                    backup_epoch,
-                    backup_offset,
-                    full_restore,
-                )?;
+                let chunk_keys: Vec<String> = chunks
+                    .iter()
+                    .map(|chunk| {
+                        chunk
+                            .key
+                            .as_str()
+                            .strip_prefix(&dfs_prefix)
+                            .unwrap_or_default()
+                            .to_string()
+                    })
+                    .collect::<Vec<_>>();
+                wal_chunks.push((replay_epoch, chunk_keys));
             }
             Err(err) => {
                 error!("list wal chunk files failed: {:?}", err);
@@ -358,59 +360,111 @@ pub fn replay_wal_logs(
         }
     }
 
+    // Verify the wal chunk files integrity.
+    for (epoch_id, chunk_keys) in wal_chunks.iter() {
+        if !verify_wal_chunks_integrity(chunk_keys, *epoch_id != backup_epoch) {
+            let err_msg = format!(
+                "wal chunk files integrity check failed, epoch_id: {} backup_epoch: {} chunk_keys: {:?}",
+                epoch_id, backup_epoch, chunk_keys
+            );
+            return Err(box_err!(&err_msg));
+        }
+    }
+
+    // Download the wal chunk files concurrently.
+    let chunks_data = collect_all_chunk_files(dfs.clone(), wal_chunks)?;
+
+    // Replay epoch wal chunk files in order.
+    for (epoch_id, chunks) in chunks_data.into_iter() {
+        replay_wal_chunks(
+            pd_client.clone(),
+            dfs.clone(),
+            store_id,
+            chunks,
+            rf,
+            epoch_id,
+            backup_epoch,
+            backup_offset,
+            full_restore,
+        )?;
+    }
+
     Ok(())
+}
+
+// Collect wal chunk files concurrently and return the chunks data with order.
+// The data is compressed with lz4 and all chunks data size about 1GB at most,
+// so it's safe to keep all data in memory.
+fn collect_all_chunk_files(
+    dfs: Arc<S3Fs>,
+    wal_chunks: Vec<(u32, Vec<String>)>,
+) -> Result<Vec<(u32, Vec<Bytes>)>> {
+    let epoch_cnt = wal_chunks.len();
+    let objects_cnt = wal_chunks
+        .iter()
+        .map(|(_, chunks)| chunks.len())
+        .sum::<usize>();
+    let mut all_chunk_keys_with_option = Vec::with_capacity(objects_cnt);
+    for (_, chunk_keys) in wal_chunks.into_iter() {
+        all_chunk_keys_with_option.extend(
+            chunk_keys
+                .into_iter()
+                .map(|key| (key, GetObjectOptions::default()))
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    let chunks = dfs
+        .get_objects(all_chunk_keys_with_option)
+        .map_err(|e| Error::DfsError(dfs::Error::S3(e)))?;
+
+    let mut chunks_map = HashMap::with_capacity(epoch_cnt);
+    for (key, value) in chunks.into_iter() {
+        let (epoch_id, ..) = parse_wal_chunk_key(Some(&key)).unwrap();
+
+        info!(
+            "wal chunk file {} epoch {} size {}",
+            key,
+            epoch_id,
+            value.len()
+        );
+        chunks_map
+            .entry(epoch_id)
+            .or_insert_with(Vec::new)
+            .push((key, value));
+    }
+    let mut sorted_by_epoch = chunks_map.into_iter().collect::<Vec<_>>();
+    sorted_by_epoch.sort_by_key(|k| k.0);
+
+    let chunks_data = sorted_by_epoch
+        .into_iter()
+        .map(|(epoch_id, mut chunks_vec)| {
+            // Sort objects by chunk name.
+            chunks_vec.sort_by(|a, b| a.0.cmp(&b.0));
+            (
+                epoch_id,
+                chunks_vec
+                    .into_iter()
+                    .map(|(_, data)| data)
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<Vec<_>>();
+    Ok(chunks_data)
 }
 
 fn replay_wal_chunks(
     pd_client: Arc<dyn PdClient>,
     dfs: Arc<S3Fs>,
     store_id: u64,
-    chunks: Vec<ListObjectContent>,
+    chunks: Vec<Bytes>,
     rf: &RfEngine,
     epoch_id: u32,
     backup_epoch: u32,
     backup_offset: u64,
     full_restore: bool,
 ) -> Result<()> {
-    let dfs_prefix = format!("{}/", dfs.get_prefix());
-    let chunk_keys = chunks
-        .into_iter()
-        .map(|chunk| {
-            chunk
-                .key
-                .as_str()
-                .strip_prefix(&dfs_prefix)
-                .unwrap_or_default()
-                .to_string()
-        })
-        .collect::<Vec<_>>();
-    if !verify_wal_chunks_integrity(&chunk_keys, epoch_id != backup_epoch) {
-        let err_msg = format!(
-            "wal chunk files integrity check failed, epoch_id: {} backup_epoch: {} chunk_keys: {:?}",
-            epoch_id, backup_epoch, chunk_keys
-        );
-        return Err(box_err!(&err_msg));
-    }
-    let chunk_keys_with_option = chunk_keys
-        .into_iter()
-        .map(|chunk| (chunk, GetObjectOptions::default()))
-        .collect::<Vec<_>>();
     // Assemble WAL chunks in memory.
-    let mut chunk_objects = dfs.get_objects(chunk_keys_with_option).unwrap();
-    // Sort objects by chunk name.
-    chunk_objects.sort_by(|a, b| a.0.cmp(&b.0));
-    info!(
-        "wal chunk files in epoch {} {:?}",
-        epoch_id,
-        chunk_objects
-            .iter()
-            .map(|o| o.0.clone())
-            .collect::<Vec<_>>()
-    );
-    let chunks = chunk_objects
-        .into_iter()
-        .map(|(_, chunk)| chunk)
-        .collect::<Vec<_>>();
     let mut epoch_wal = assemble_wal_chunks(chunks)?;
 
     info!(
