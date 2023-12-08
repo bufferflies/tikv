@@ -41,4 +41,7 @@ jobs:
           CARGO_INCREMENTAL: "0"
         working-directory: ./
         run: |
-          make test-cloud-engine
+          make test-cloud-engine > run.log 2>&1
+      - name: Print log on error
+        if: failure()
+        run: tail -500 run.log
