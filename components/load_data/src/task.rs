@@ -51,7 +51,7 @@ const DEFAULT_REGION_SIZE: usize = 750 * 1024 * 1024; // 750MB
 const DEFAULT_COARSE_SPLIT_SIZE: usize = 32 * 1024 * 1024 * 1024; // 32GB
 
 const ZSTD_COMPRESSION_LEVEL: i32 = 3;
-const FLUSH_FILE_CONCURRENCY: usize = 8;
+const FLUSH_FILE_CONCURRENCY: usize = 4;
 const CREATE_FILE_CONCURRENCY: usize = 32;
 const INGEST_CONCURRENCY: usize = 4;
 
@@ -556,15 +556,11 @@ impl LoadTaskWorker {
             }
             self.in_mem_size = 0;
         }
+        self.try_recv_reader();
         Ok(())
     }
 
-    fn recv_reader(&mut self, mut recv_count: usize) {
-        while recv_count != 0 {
-            let reader = self.file_rx.recv().unwrap();
-            self.unhandled_readers.push(reader);
-            recv_count -= 1;
-        }
+    fn handle_readers(&mut self) {
         self.unhandled_readers
             .sort_by(|a, b| a.file_idx.cmp(&b.file_idx));
 
@@ -598,6 +594,22 @@ impl LoadTaskWorker {
         }
 
         info!("{} handle {} readers", self.task_ctx.task_id, need_handled);
+    }
+
+    fn try_recv_reader(&mut self) {
+        while let Ok(reader) = self.file_rx.try_recv() {
+            self.unhandled_readers.push(reader);
+        }
+        self.handle_readers();
+    }
+
+    fn recv_reader(&mut self, mut recv_count: usize) {
+        while recv_count != 0 {
+            let reader = self.file_rx.recv().unwrap();
+            self.unhandled_readers.push(reader);
+            recv_count -= 1;
+        }
+        self.handle_readers();
     }
 
     fn alloc_file_id(&mut self) -> Result<u64> {
@@ -640,7 +652,15 @@ impl LoadTaskWorker {
         self.file_idx += 1;
         self.scheduler.set_flushed_files(self.file_idx);
         std::thread::spawn(move || {
+            let start = Instant::now();
+            let task_id = task_ctx.task_id.clone();
             let res = flush_to_local_file(kv_pairs, task_ctx, file_path, in_mem_size);
+            info!(
+                "{} flush to local file {} takes {:?}",
+                task_id,
+                file_idx,
+                start.saturating_elapsed()
+            );
             tx.send(UnhandledReader {
                 reader: res,
                 handled_chunk_ids,
@@ -1334,6 +1354,7 @@ fn flush_to_local_file(
     in_mem_size: usize,
 ) -> Result<KvPairsReader> {
     kv_pairs.sort_by(|a, b| a.key.cmp(&b.key));
+
     let file = fs::OpenOptions::new()
         .create(true)
         .write(true)
