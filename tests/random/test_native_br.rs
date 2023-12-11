@@ -123,7 +123,11 @@ pub(crate) fn spawn_backup(
             BACKUP_COUNTER.fetch_add(1, Ordering::SeqCst);
 
             let backup_elapsed = last_backup_time.saturating_elapsed();
-            tokio::time::sleep(interval.saturating_sub(backup_elapsed)).await;
+            // No less than 1 second to avoid generating the same backup name.
+            let sleep_time = interval
+                .saturating_sub(backup_elapsed)
+                .max(Duration::from_millis(1100));
+            tokio::time::sleep(sleep_time).await;
             last_backup_time = Instant::now();
         }
         info!("backup thread exit");

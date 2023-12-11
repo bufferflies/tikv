@@ -1508,13 +1508,16 @@ impl ClusterTxnClient {
         let kv_pairs = self
             .kv_scan(range, limit, Duration::from_secs(60))
             .await
-            .unwrap();
+            .unwrap()
+            .collect::<Vec<_>>();
 
         let mut db_cnt = 0;
-        for kv in kv_pairs {
+        for kv in &kv_pairs {
             db_cnt += 1;
             let key: &[u8] = kv.key().into();
             let ref_val = ref_store.get(key);
+
+            // Not found in ref store.
             if ref_val.is_none() || ref_val.as_ref().unwrap().is_none() {
                 let err: Error = box_err!(
                     "verify_data_by_scan: not found in ref store, db: {} -> {}, ref_val {:?}",
@@ -1525,6 +1528,8 @@ impl ClusterTxnClient {
                 self.log_verify_error(key, None, &err);
                 return Err(err);
             }
+
+            // Value not match.
             let ref_val = ref_val.as_ref().unwrap().as_ref().unwrap();
             if ref_val != kv.value() {
                 let err: Error = box_err!(
@@ -1535,11 +1540,43 @@ impl ClusterTxnClient {
                     tikv_util::escape(ref_val),
                     ref_val.len()
                 );
-                self.log_verify_error(key, Some(kv.value()), &err);
+                self.log_verify_error(key, Some(ref_val), &err);
                 return Err(err);
             }
         }
+
+        // Not found in db.
         if ref_cnt != db_cnt {
+            assert!(ref_cnt > db_cnt, "ref_cnt: {}, db_cnt: {}", ref_cnt, db_cnt);
+            let mut diff_cnt = 0;
+            for (key, ref_val) in ref_store.iter() {
+                if ref_val.is_none() {
+                    continue;
+                }
+                if let Some(range) = range {
+                    if key.as_slice() < range.0 || key.as_slice() >= range.1 {
+                        continue;
+                    }
+                }
+
+                let res = kv_pairs.binary_search_by(|kv| {
+                    let k: &[u8] = kv.key().into();
+                    k.cmp(key)
+                });
+                if res.is_err() {
+                    let err: Error = box_err!(
+                        "verify_data_by_scan: not found in db, ref store: {} -> {:?}",
+                        log_wrappers::hex_encode_upper(key),
+                        tikv_util::escape(ref_val.as_ref().unwrap())
+                    );
+                    self.log_verify_error(key, ref_val.as_ref().map(|x| x.as_slice()), &err);
+
+                    diff_cnt += 1;
+                    if diff_cnt >= ref_cnt - db_cnt {
+                        break;
+                    }
+                }
+            }
             return Err(box_err!(
                 "verify_data_by_scan: entries count not match, db: {}, ref store: {}",
                 db_cnt,

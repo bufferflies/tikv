@@ -258,7 +258,7 @@ pub(crate) fn spawn_gc_worker(
         let start_time = Instant::now();
         while start_time.saturating_elapsed() < timeout {
             let safepoint = client.current_timestamp().await.unwrap();
-            let max_keyspace_id = keyspace_manager.max_keyspace_id().unwrap_or_default();
+            let all_keyspaces = keyspace_manager.get_all_keyspaces();
 
             tokio::time::sleep(GC_INTERVAL).await;
             info!(
@@ -266,8 +266,8 @@ pub(crate) fn spawn_gc_worker(
                 safepoint.version()
             );
 
-            let mut handles = Vec::with_capacity(max_keyspace_id as usize + 1);
-            for keyspace_id in 0..=max_keyspace_id {
+            let mut handles = Vec::with_capacity(all_keyspaces.len());
+            for &keyspace_id in &all_keyspaces {
                 let start = ApiV2::get_txn_keyspace_prefix(keyspace_id);
                 let end = ApiV2::get_txn_keyspace_prefix(keyspace_id + 1);
 
@@ -319,6 +319,17 @@ pub(crate) fn spawn_gc_worker(
                     GC_ADVANCE_SAFE_POINT_COUNTER.fetch_add(1, Ordering::SeqCst);
                 } else {
                     warn!("gc_worker: update safepoint failed"; "safepoint" => safepoint.version());
+                }
+
+                for keyspace_id in all_keyspaces {
+                    test_drop_table::pick_and_run_pending_destroy_range(
+                        keyspace_id,
+                        new_safepoint,
+                        &keyspace_manager,
+                        &client,
+                    )
+                    .await
+                    .unwrap();
                 }
             }
         }

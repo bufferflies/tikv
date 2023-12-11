@@ -18,6 +18,7 @@ use rand::{
     distributions::Distribution,
     prelude::{IteratorRandom, SliceRandom, ThreadRng},
 };
+use tikv_client::TimestampExt;
 use tikv_util::info;
 use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
@@ -89,6 +90,10 @@ impl KeyspaceManagerCore {
         self.keyspaces.iter().map(|item| *item.key()).max()
     }
 
+    pub fn get_all_keyspaces(&self) -> Vec<u32> {
+        self.keyspaces.iter().map(|item| *item.key()).collect()
+    }
+
     pub fn ref_stores(&self) -> &KeyspaceRefStores {
         &self.ref_stores
     }
@@ -152,18 +157,23 @@ impl KeyspaceManagerCore {
             .restore_keyspace(tag, ref_store, target_keyspace);
     }
 
-    pub fn destroy_range(&self, keyspace_id: u32, start: &[u8], end: &[u8]) {
-        assert!(tidb_query_common::util::is_prefix_next(start, end));
+    pub fn drop_table(&self, keyspace_id: u32, table_id: i64, ts: u64) {
+        let start = make_key(keyspace_id, table_id, &[]);
+        let end = make_key(keyspace_id, table_id + 1, &[]);
+        debug_assert!(tidb_query_common::util::is_prefix_next(&start, &end));
+
         self.keyspaces
             .get_mut(&keyspace_id)
             .unwrap()
             .del_prefixes
-            .merge_prefix_in_place(start);
-        self.ref_stores.destroy_range(keyspace_id, start, end);
+            .merge_prefix_in_place(&start);
+        self.ref_stores.destroy_range(keyspace_id, &start, &end);
+        self.schedule_destroy_range(ts, keyspace_id, table_id);
 
         info!(
-            "KeyspaceManager.destroy_range, keyspace {}, start {}, end {}, del_prefixes {:?}",
+            "KeyspaceManager.drop_table, keyspace {}, table {}, start {}, end {}, del_prefixes {:?}",
             keyspace_id,
+            table_id,
             log_wrappers::hex_encode_upper(start),
             log_wrappers::hex_encode_upper(end),
             self.keyspaces.get(&keyspace_id).unwrap().del_prefixes
@@ -175,6 +185,35 @@ impl KeyspaceManagerCore {
         let keyspace = self.keyspaces.get(&keyspace_id).unwrap();
         let (start, end) = ApiV2::get_txn_keyspace_range(keyspace_id);
         keyspace.del_prefixes.get_complementary_ranges(&start, &end)
+    }
+
+    /// Schedule destroy range to run after GC safepoint has gone by `ts`.
+    ///
+    /// To ensure that, the backup which contains the data before "drop table"
+    /// action, does not contain the "destroy range" process. As the "destroy
+    /// range" is "unsafe" and not recoverable.
+    ///
+    /// Note: also depends on the GC safe point is advanced only after the
+    /// backup is finished (see "service safe point").
+    fn schedule_destroy_range(&self, ts: u64, keyspace_id: u32, table_id: i64) {
+        self.keyspaces
+            .get_mut(&keyspace_id)
+            .unwrap()
+            .pending_destroy_range
+            .push(DestroyRangeTask { ts, table_id });
+    }
+
+    pub fn pick_destroy_range_tasks(
+        &self,
+        keyspace_id: u32,
+        gc_safepoint: u64,
+    ) -> Vec<DestroyRangeTask> {
+        self.keyspaces
+            .get_mut(&keyspace_id)
+            .unwrap()
+            .pending_destroy_range
+            .drain_filter(|task| task.ts < gc_safepoint)
+            .collect()
     }
 }
 
@@ -209,6 +248,10 @@ pub struct KeyspaceMetaCore {
     /// As the operation of destroy range is async, in some scene the data
     /// within the range to be destroyed is not determined.
     del_prefixes: kvengine::DeletePrefixes,
+
+    /// Used to make pending destroy range tasks be able to be backup and
+    /// restored.
+    pending_destroy_range: Vec<DestroyRangeTask>,
 }
 
 impl fmt::Debug for KeyspaceMetaCore {
@@ -240,6 +283,7 @@ impl KeyspaceMeta {
                 inner_key_off,
                 tables,
                 del_prefixes: kvengine::DeletePrefixes::new_with_inner_key_off(inner_key_off),
+                pending_destroy_range: Default::default(),
             },
             inner_lock: Default::default(),
             extra_lock: Default::default(),
@@ -264,6 +308,8 @@ impl KeyspaceMeta {
         table_id
     }
 
+    /// Use with caution, as the returned value will keep a read lock on
+    /// `tables`.
     pub fn get_table(&self, table_id: i64) -> Option<Ref<'_, i64, TableMeta>> {
         self.tables.get(&table_id)
     }
@@ -358,6 +404,12 @@ impl RandomHelper {
             .copied()
             .unwrap()
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct DestroyRangeTask {
+    pub ts: u64,
+    pub table_id: i64,
 }
 
 pub struct ClusterKeyspaceClient {
@@ -490,9 +542,8 @@ impl ClusterKeyspaceClient {
     }
 
     pub async fn drop_table(&mut self, keyspace_id: u32, table_id: i64) -> Result<()> {
-        // Block writes to the keyspace.
         let lock = self.keyspace_manager.get_keyspace_lock(keyspace_id);
-        let guard = lock.mutex_lock().await;
+        let _guard = lock.mutex_lock().await;
 
         // Set unavailable to block writes to this table.
         // Place in block to avoid dead lock. `keyspace` & `table` hold the lock of
@@ -516,16 +567,8 @@ impl ClusterKeyspaceClient {
             }
         }
 
-        // Downgrade to allow writes to others tables.
-        let _guard = guard.downgrade();
-
-        let start_key = make_key(keyspace_id, table_id, &[]);
-        let end_key = make_key(keyspace_id, table_id + 1, &[]);
-        self.inner
-            .kv_unsafe_destroy_range(&start_key, &end_key, Duration::from_secs(30))
-            .await?;
-        self.keyspace_manager
-            .destroy_range(keyspace_id, &start_key, &end_key);
+        let ts = self.inner.current_timestamp().await.unwrap().version();
+        self.keyspace_manager.drop_table(keyspace_id, table_id, ts);
         Ok(())
     }
 }

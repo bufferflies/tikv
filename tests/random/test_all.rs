@@ -136,7 +136,7 @@ fn test_random_all() {
         spawn_gc_worker(
             runtime.block_on(cluster.new_txn_client()),
             pd_client.clone(),
-            keyspace_manager,
+            keyspace_manager.clone(),
             TIMEOUT,
         ),
     ];
@@ -173,6 +173,19 @@ fn test_random_all() {
         }
     });
 
+    info!("run all pending destroy range");
+    let txn_client = runtime.block_on(cluster.new_txn_client());
+    let all_keyspaces = keyspace_manager.get_all_keyspaces();
+    for keyspace_id in all_keyspaces {
+        runtime
+            .block_on(pick_and_run_pending_destroy_range(
+                keyspace_id,
+                u64::MAX,
+                &keyspace_manager,
+                &txn_client,
+            ))
+            .unwrap();
+    }
     // Read requests can still get data before destroy range is done by compaction.
     // So must wait for destroy range to finish before verifying.
     info!("wait destroy range");
@@ -317,25 +330,6 @@ fn prepare_cluster(
 }
 
 async fn verify_cluster(cluster: &mut ServerCluster) -> usize /* records count in ref store */ {
-    // Check statistics.
-    let (res, data_stats) = try_wait_result(
-        || {
-            let stats = cluster.get_data_stats();
-            (stats.check_data(), stats)
-        },
-        20,
-    );
-    assert!(
-        res.is_ok(),
-        "check_data failed: {:?}, stats: {:?}",
-        res,
-        data_stats
-    );
-    cluster.wait_region_version_match();
-    data_stats
-        .check_buckets(&cluster.get_pd_client(), REGION_BUCKET_SIZE.0)
-        .unwrap();
-
     // Verify data.
     let mut handles = vec![];
     for keyspace_id in cluster.keyspace_manager().ref_stores().all_keyspace_ids() {
@@ -355,6 +349,27 @@ async fn verify_cluster(cluster: &mut ServerCluster) -> usize /* records count i
         });
     }
     assert!(records_cnt > 1000, "too few records in ref store");
+
+    // Check statistics.
+    // Check after verify data, to ensure that PD heartbeat have updated region
+    // stats.
+    let (res, data_stats) = try_wait_result(
+        || {
+            let stats = cluster.get_data_stats();
+            (stats.check_data(), stats)
+        },
+        20,
+    );
+    assert!(
+        res.is_ok(),
+        "check_data failed: {:?}, stats: {:?}",
+        res,
+        data_stats
+    );
+    cluster.wait_region_version_match();
+    data_stats
+        .check_buckets(&cluster.get_pd_client(), REGION_BUCKET_SIZE.0)
+        .unwrap();
 
     check_br();
     check_load_data();

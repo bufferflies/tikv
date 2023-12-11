@@ -2,7 +2,10 @@
 
 use std::{sync::atomic::Ordering, time::Duration};
 
-use test_cloud_server::keyspace::ClusterKeyspaceClient;
+use test_cloud_server::{
+    client::ClusterTxnClient,
+    keyspace::{make_key, ClusterKeyspaceClient, KeyspaceManager},
+};
 use tikv_util::{info, time::Instant};
 
 use crate::{DROP_TABLE_COUNTER, TABLE_COUNTER};
@@ -51,4 +54,44 @@ pub fn spawn_drop_table(
 pub(crate) fn check_drop_table() {
     let counter = DROP_TABLE_COUNTER.load(Ordering::SeqCst);
     assert!(counter >= 3, "too few drop table: {}", counter);
+}
+
+pub(crate) async fn pick_and_run_pending_destroy_range(
+    keyspace_id: u32,
+    gc_safepoint: u64,
+    keyspace_manager: &KeyspaceManager,
+    client: &ClusterTxnClient,
+) -> crate::Result<()> {
+    // Locking to make picking pending task & invoking destroy range (set
+    // `_del_prefixes` property) atomic (against backup & restore).
+    let lock = keyspace_manager.get_keyspace_lock(keyspace_id);
+    let _guard = lock.mutex_lock().await;
+
+    let tasks = keyspace_manager.pick_destroy_range_tasks(keyspace_id, gc_safepoint);
+    for task in tasks {
+        {
+            let keyspace = keyspace_manager.get_keyspace_meta(keyspace_id).unwrap();
+            let table = keyspace.get_table(task.table_id).unwrap();
+            assert!(
+                !table.is_available(),
+                "table should not be available: keyspace_id: {}, table: {:?}",
+                keyspace_id,
+                table.value(),
+            );
+        }
+
+        let start_key = make_key(keyspace_id, task.table_id, &[]);
+        let end_key = make_key(keyspace_id, task.table_id + 1, &[]);
+
+        info!("pick_and_run_pending_destroy_range: kv_unsafe_destroy_range";
+            "start_key" => log_wrappers::hex_encode_upper(&start_key),
+            "end_key" => log_wrappers::hex_encode_upper(&end_key),
+            "keyspace_id" => keyspace_id,
+            "task" => ?task,
+            "gc_safepoint" => gc_safepoint);
+        client
+            .kv_unsafe_destroy_range(&start_key, &end_key, Duration::from_secs(30))
+            .await?;
+    }
+    Ok(())
 }
