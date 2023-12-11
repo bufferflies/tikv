@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.3
 # This Docker image contains a minimal build environment for TiKV
 #
 # It contains all the tools necessary to reproduce official production builds of TiKV
@@ -50,6 +51,16 @@ RUN ln -s /usr/bin/cmake3 /usr/bin/cmake
 ENV LIBRARY_PATH /usr/local/lib:$LIBRARY_PATH
 ENV LD_LIBRARY_PATH /usr/local/lib:$LD_LIBRARY_PATH
 
+# Download proto zip
+RUN ARCH=$(arch | sed s/aarch64/aarch_64/) && \
+  curl -OL https://github.com/protocolbuffers/protobuf/releases/download/v3.14.0/protoc-3.14.0-linux-${ARCH}.zip && \
+  unzip -o protoc-3.14.0-linux-${ARCH}.zip -d ./proto 
+RUN chmod 755 -R ./proto/bin
+ENV BASE=/usr/local
+# Copy into path
+RUN cp ./proto/bin/protoc ${BASE}/bin
+RUN cp -R ./proto/include/* ${BASE}/include
+
 # Install Rustup
 RUN curl https://sh.rustup.rs -sSf | sh -s -- --no-modify-path --default-toolchain none -y
 ENV PATH /root/.cargo/bin/:$PATH
@@ -75,24 +86,21 @@ COPY cmd/ ./cmd/
 COPY components/ ./components/
 COPY src/ ./src/
 
-# Download proto zip
-RUN ARCH=$(arch | sed s/aarch64/aarch_64/) && \
-  curl -OL https://github.com/protocolbuffers/protobuf/releases/download/v3.14.0/protoc-3.14.0-linux-${ARCH}.zip && \
-  unzip -o protoc-3.14.0-linux-${ARCH}.zip -d ./proto 
-RUN chmod 755 -R ./proto/bin
-ENV BASE=/usr/local
-# Copy into path
-RUN cp ./proto/bin/protoc ${BASE}/bin
-RUN cp -R ./proto/include/* ${BASE}/include
-
 # Build binaries now
-RUN source /opt/rh/devtoolset-8/enable && make release
+# Use --mount=type=cache for the dependencies. Ref: https://github.com/moby/buildkit/blob/v0.10/frontend/dockerfile/docs/syntax.md#run---mounttypecache
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    --mount=type=cache,target=/tikv/target,sharing=locked \
+    source /opt/rh/devtoolset-8/enable && make release \
+    && cp /tikv/target/release/tikv-server /tikv-server \
+    && cp /tikv/target/release/cse-ctl /cse-ctl \
+    && cp /tikv/target/release/tikv-worker /tikv-worker
 
 # Export to a clean image
 FROM amazonlinux:2022.0.20220504.1
-COPY --from=builder /tikv/target/release/tikv-server /tikv-server
-COPY --from=builder /tikv/target/release/cse-ctl /cse-ctl
-COPY --from=builder /tikv/target/release/tikv-worker /tikv-worker
+COPY --from=builder /tikv-server /tikv-server
+COPY --from=builder /cse-ctl /cse-ctl
+COPY --from=builder /tikv-worker /tikv-worker
 
 EXPOSE 20160 20180
 
