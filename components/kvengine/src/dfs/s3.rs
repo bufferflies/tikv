@@ -37,7 +37,9 @@ const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
 const DISPATCH_TIMEOUT: Duration = Duration::from_secs(60);
 const READ_BODY_TIMEOUT: Duration = Duration::from_secs(60);
 
-pub const STORAGE_CLASS_DEFAULT: &str = "STANDARD";
+pub const STORAGE_CLASS_DEFAULT: &str = STORAGE_CLASS_INTELLIGENT_TIERING;
+pub const STORAGE_CLASS_INTELLIGENT_TIERING: &str = "INTELLIGENT_TIERING";
+pub const STORAGE_CLASS_STANDARD: &str = "STANDARD";
 pub const STORAGE_CLASS_STANDARD_IA: &str = "STANDARD_IA";
 pub const STORAGE_CLASS_GLACIER_IR: &str = "GLACIER_IR";
 
@@ -740,9 +742,15 @@ impl ObjectStorage for S3Fs {
             let full_key = format!("{}/{}", self.prefix, key);
             let fs = self.clone();
             handles.push(runtime.spawn(async move {
-                fs.put_object(full_key, data, key.clone())
-                    .await
-                    .map_err(|err| format!("put {} failed {:?}", &key, err))
+                fs.put_object_with_options(
+                    full_key,
+                    data,
+                    key.clone(),
+                    None,
+                    Some(STORAGE_CLASS_INTELLIGENT_TIERING),
+                )
+                .await
+                .map_err(|err| format!("put {} failed {:?}", &key, err))
             }));
         }
 
@@ -819,8 +827,14 @@ impl Dfs for S3Fs {
     }
 
     async fn create(&self, file_id: u64, data: Bytes, _opts: Options) -> crate::dfs::Result<()> {
-        self.put_object(self.file_key(file_id), data, file_id.to_string())
-            .await
+        self.put_object_with_options(
+            self.file_key(file_id),
+            data,
+            file_id.to_string(),
+            None,
+            Some(STORAGE_CLASS_INTELLIGENT_TIERING),
+        )
+        .await
     }
 
     /// Logically remove the file on S3 by tagging with "deleted=true".
