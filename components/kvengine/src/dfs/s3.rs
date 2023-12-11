@@ -327,6 +327,57 @@ impl S3FsCore {
         }
     }
 
+    pub async fn list_folders(
+        &self,
+        prefix: &str,
+        delimiter: Option<&str>,
+    ) -> crate::dfs::Result<Vec<String>> {
+        let prefix = format!("{}/{}", self.prefix.clone(), prefix);
+        let delimiter = delimiter.unwrap_or("/");
+        let mut retry_cnt = 0;
+        loop {
+            let mut req = self.new_request("GET", "");
+            let mut params = Params::new();
+            params.put("list-type", "2");
+            params.put("start-after", &prefix);
+            params.put("prefix", &prefix);
+            params.put("delimiter", delimiter);
+            req.set_params(params);
+            let mut result = self.dispatch(req, ListObjectsV2Error::from_response).await;
+            if result.is_ok() {
+                let response = result.unwrap();
+                let body_res = self.read_body(response).await;
+                if body_res.is_ok() {
+                    let body = body_res.unwrap();
+                    let body_str = body.to_str().unwrap();
+                    let list: ListObjects = quick_xml::de::from_str(body_str).unwrap();
+                    let prefixes = list
+                        .common_prefixes
+                        .into_iter()
+                        .map(|p| p.prefix)
+                        .collect::<Vec<_>>();
+                    return Ok(prefixes);
+                } else {
+                    result = Err(body_res.unwrap_err().into());
+                }
+            }
+            let err = result.unwrap_err();
+            if self.is_err_not_found(&err) {
+                return Ok(vec![]);
+            } else if self.is_err_retryable(&err) && retry_cnt < MAX_RETRY_COUNT {
+                retry_cnt += 1;
+                let retry_sleep = 2u64.pow(retry_cnt) * RETRY_SLEEP_MS;
+                tokio::time::sleep(Duration::from_millis(retry_sleep)).await;
+                continue;
+            }
+            error!(
+                "failed to list folders prefix {}, reach max retry count {}, err {:?}",
+                prefix, MAX_RETRY_COUNT, err,
+            );
+            return Err(err.into());
+        }
+    }
+
     pub async fn is_removed(&self, file_id: u64) -> Result<bool, dfs::Error> {
         let mut retry_cnt = 0;
         loop {
@@ -941,8 +992,16 @@ impl Dfs for S3Fs {
 #[serde(default)]
 #[serde(rename_all = "PascalCase")]
 pub struct ListObjects {
+    pub common_prefixes: Vec<CommonPrefix>,
     pub contents: Vec<ListObjectContent>,
     pub is_truncated: bool,
+}
+
+#[derive(Clone, Default, Debug, Serialize, Deserialize)]
+#[serde(default)]
+#[serde(rename_all = "PascalCase")]
+pub struct CommonPrefix {
+    pub prefix: String,
 }
 
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]

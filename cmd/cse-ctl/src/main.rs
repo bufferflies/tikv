@@ -9,6 +9,7 @@ mod check_table;
 mod dfsgc;
 mod restore;
 mod sst;
+mod stats;
 mod truncate_ts;
 mod unsafe_recover;
 
@@ -24,6 +25,7 @@ use crate::{
     dfsgc::{execute_dfsgc, DfsGcArgs},
     restore::{execute_restore_command, RestoreCommand},
     sst::{execute_show_sst, ShowSstArgs},
+    stats::{execute_stats, StatsArgs},
     truncate_ts::{execute_truncate_ts, TruncateTsArgs},
     unsafe_recover::{execute_unsafe_recover, UnsafeRecoverArgs},
     Commands::*,
@@ -47,6 +49,9 @@ fn main() {
         }
         Archive(archive_args) => {
             execute_archive(archive_args);
+        }
+        Stats(stats_arg) => {
+            execute_stats(stats_arg);
         }
         TruncateTs(args) => {
             execute_truncate_ts(args);
@@ -111,6 +116,8 @@ pub enum Commands {
     Restore(RestoreCommand),
     /// Archive old backups.
     Archive(ArchiveArgs),
+    /// Stats s3 objects.
+    Stats(StatsArgs),
     /// Truncate newer data than given ts
     TruncateTs(TruncateTsArgs),
     /// CheckTable check data consistency on each table.

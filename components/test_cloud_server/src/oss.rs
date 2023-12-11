@@ -24,7 +24,7 @@ use hyper::{
     service::{make_service_fn, service_fn},
     Body, HeaderMap, Method, Request, Response, Server, StatusCode,
 };
-use kvengine::dfs::{DFSConfig, ListObjects, Tagging, STORAGE_CLASS_DEFAULT};
+use kvengine::dfs::{CommonPrefix, DFSConfig, ListObjects, Tagging, STORAGE_CLASS_DEFAULT};
 use rand::Rng;
 use tempfile::TempDir;
 use tikv_util::{debug, error, info, time::Instant};
@@ -402,12 +402,14 @@ impl ObjectStorageService {
             .get("max-keys")
             .map(|x| x.parse::<usize>().unwrap())
             .unwrap_or(1000);
+        let delimiter = params.get("delimiter");
 
         let path = ctx.lock().unwrap().store_path.to_owned();
         let bucket_path = Self::make_file_path(&path, req.uri().path());
         let list_path = bucket_path.join(prefix);
         let list_pattern = list_path.to_str().unwrap().to_owned() + "*";
 
+        let mut common_prefixes = vec![];
         let mut files = vec![];
         let mut add_file = |file: PathBuf| {
             files.push(file);
@@ -415,7 +417,29 @@ impl ObjectStorageService {
         glob(&list_pattern) // use `glob` to support prefix when it's not a directory.
             .unwrap_or_else(|e| panic!("invalid pattern {}, {:?}", list_pattern, e))
             .filter_map(|x| x.ok())
-            .for_each(|x| visit_path(x, &mut add_file));
+            .for_each(|x| {
+                if delimiter.is_some() {
+                    if x.is_dir() {
+                        let prefix = x
+                            .strip_prefix(&bucket_path)
+                            .unwrap()
+                            .to_str()
+                            .map(|x| {
+                                if x.ends_with('/') {
+                                    x.to_string()
+                                } else {
+                                    format!("{}/", x)
+                                }
+                            })
+                            .unwrap();
+                        common_prefixes.push(CommonPrefix { prefix });
+                    } else {
+                        add_file(x);
+                    }
+                } else {
+                    visit_path(x, &mut add_file);
+                }
+            });
         files.sort_unstable();
         let start = if let Some(start_after) = start_after {
             let start_after = bucket_path.join(start_after);
@@ -452,6 +476,7 @@ impl ObjectStorageService {
             })
             .collect::<Vec<_>>();
         let list_objects = ListObjects {
+            common_prefixes,
             contents,
             is_truncated: end < files.len(),
         };
@@ -949,6 +974,19 @@ mod tests {
                 for i in 10..20 {
                     assert_eq!(objects[i - 10].key, keys_b[i]);
                 }
+            }
+
+            {
+                // list all with delimiter
+                let folders = s3fs.list_folders("", None).await.unwrap();
+                assert_eq!(folders.len(), 1);
+                assert_eq!(folders[0], format!("{}/B/", s3fs.get_prefix()));
+            }
+
+            {
+                // list with prefix and delimiter
+                let folders = s3fs.list_folders("B/", None).await.unwrap();
+                assert_eq!(folders.len(), 0);
             }
         });
 
