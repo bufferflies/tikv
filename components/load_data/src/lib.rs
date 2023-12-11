@@ -4,5 +4,6 @@
 
 mod error;
 pub use error::*;
+pub mod check_point_storage;
 mod kv;
 pub mod task;

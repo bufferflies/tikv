@@ -7,7 +7,7 @@ use std::{
     mem,
     ops::Deref,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard},
     time::Duration,
 };
 
@@ -41,6 +41,9 @@ use tikv_util::{
 };
 
 use crate::{
+    check_point_storage::{
+        LoadDataCheckPointCtx, LoadDataWorkerState, LocalFileCheckPointStorage, LocalFileInfo,
+    },
     error::{Error, Result},
     kv::{DuplicateEntry, KvPair, KvPairsReader, MergeIterator, SstMeta},
 };
@@ -77,12 +80,15 @@ pub struct LoadTaskWorker {
     cached_file_ids: Vec<u64>,
     file_tx: Sender<UnhandledReader>,
     file_rx: Receiver<UnhandledReader>,
+    check_point_store: Arc<Mutex<LocalFileCheckPointStorage>>,
 }
 
 pub struct UnhandledReader {
     pub reader: Result<KvPairsReader>,
     pub handled_chunk_ids: HashMap<u64 /* writer_id */, u64 /* chunk_id */>,
     pub file_idx: usize, // used to keep readers in order as kv pairs are flush asynchronously.
+    pub path: PathBuf,   // It is recorded in checkpoint, and used to recover the reader.
+    pub kv_count: usize, // It is recorded in checkpoint, and used to recover the reader.
 }
 
 pub enum LoadTaskMsg {
@@ -177,7 +183,7 @@ pub struct LoadDataContext {
     pub master_key: MasterKey,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct TaskContext {
     pub task_id: String,
     pub start_ts: u64,
@@ -289,6 +295,11 @@ impl LoadTaskScheduler {
         let flushed_chunk_id = writers.flushed_chunk_ids.entry(writer_id).or_insert(0);
         assert!(*flushed_chunk_id <= chunk_id);
         *flushed_chunk_id = chunk_id;
+        let states = self.states.lock().unwrap();
+        debug!(
+            "{} update flushed chunk by writer_id:{},chunk_id:{}",
+            states.task_id, writer_id, chunk_id
+        )
     }
 
     pub fn set_thread_handle(&mut self, thread_handle: std::thread::JoinHandle<()>) {
@@ -305,10 +316,28 @@ impl LoadTaskScheduler {
 }
 
 impl LoadTaskWorker {
-    pub fn new(config: LoadDataConfig, context: LoadDataContext, task_ctx: TaskContext) -> Self {
+    pub fn new(
+        config: LoadDataConfig,
+        context: LoadDataContext,
+        task_ctx: TaskContext,
+        check_point_ctx: LoadDataCheckPointCtx,
+    ) -> Self {
         let (sender, receiver) = tikv_util::mpsc::unbounded();
         let mut states = LoadTaskStates::default();
-        let writers = WritersStates::default();
+        let mut writers = WritersStates::default();
+        let mut file_idx = 0;
+        if check_point_ctx.get_is_recover()
+            && check_point_ctx.get_state() > LoadDataWorkerState::InitTask
+        {
+            writers.flushed_chunk_ids = check_point_ctx.get_flushed_chunk_ids();
+            writers.handled_chunk_ids = check_point_ctx.get_flushed_chunk_ids();
+            file_idx = check_point_ctx.get_flushed_file_idx() + 1;
+            info!(
+                "{} [check point] recover: writers.flushed_chunk_ids:{:?},writers.handled_chunk_ids:{:?},file_idx:{}",
+                task_ctx.task_id, writers.flushed_chunk_ids, writers.handled_chunk_ids, file_idx
+            );
+        }
+
         states.task_id = task_ctx.task_id.clone();
         let scheduler = LoadTaskScheduler {
             sender,
@@ -318,6 +347,16 @@ impl LoadTaskWorker {
         };
         let (file_tx, file_rx) = tikv_util::mpsc::unbounded();
         let task_dir = context.dir.join(task_ctx.task_id.as_str());
+
+        // Init checkpoint info.
+        let mut check_point_store =
+            LocalFileCheckPointStorage::new(check_point_ctx.clone()).unwrap();
+        if !check_point_ctx.get_is_recover() {
+            check_point_store.flush_check_point_ctx().unwrap();
+            check_point_store.print_log();
+        }
+        let check_point_store_arc = Arc::new(Mutex::new(check_point_store));
+
         Self {
             config,
             ctx: context,
@@ -325,7 +364,7 @@ impl LoadTaskWorker {
             task_dir,
             kv_pairs: vec![],
             in_mem_size: 0,
-            file_idx: 0,
+            file_idx,
             readers: vec![],
             reader_errs: vec![],
             scheduler,
@@ -334,6 +373,7 @@ impl LoadTaskWorker {
             cached_file_ids: vec![],
             file_tx,
             file_rx,
+            check_point_store: Arc::clone(&check_point_store_arc),
         }
     }
 
@@ -360,7 +400,19 @@ impl LoadTaskWorker {
                                 - self.reader_errs.len()
                                 - self.readers.len()
                                 - self.unhandled_readers.len();
-                            self.recv_reader(recv_count);
+                            let check_point_store_mutex = Arc::clone(&self.check_point_store);
+                            let mut check_point_store_guard =
+                                check_point_store_mutex.lock().unwrap();
+                            let recv_res =
+                                self.recv_reader(recv_count, &mut check_point_store_guard);
+                            if recv_res.is_err() || !self.reader_errs.is_empty() {
+                                let err_msg = if let Err(recv_err) = recv_res {
+                                    recv_err.to_string()
+                                } else {
+                                    self.reader_errs.first().unwrap().to_string()
+                                };
+                                self.scheduler.cancel(err_msg);
+                            }
                         }
                     }
                 }
@@ -396,7 +448,9 @@ impl LoadTaskWorker {
                         cb(flush_res);
                         continue;
                     }
-                    if let Err(err) = self.flush() {
+                    let check_point_store_mutex = Arc::clone(&self.check_point_store);
+                    let mut check_point_store_guard = check_point_store_mutex.lock().unwrap();
+                    if let Err(err) = self.flush(&mut check_point_store_guard) {
                         error!("flush failed {:?}", err);
                         self.scheduler.cancel(err.to_string());
                     }
@@ -424,6 +478,27 @@ impl LoadTaskWorker {
 
     pub fn get_scheduler(&self) -> LoadTaskScheduler {
         self.scheduler.clone()
+    }
+
+    pub fn set_inner_key_off_and_encrytion_key(&mut self, first_key: Bytes) -> Result<()> {
+        if self.task_ctx.inner_key_off.is_none() {
+            let shard_meta = self.ctx.runtime.block_on(get_shard_meta(
+                self.ctx.pd.clone(),
+                first_key.chunk(),
+                GET_SHARD_META_TIMEOUT,
+            ))?;
+            let snapshot = shard_meta.get_snapshot();
+            self.task_ctx.inner_key_off = Some(snapshot.inner_key_off as usize);
+            self.task_ctx.key_prefix = first_key.slice(..snapshot.inner_key_off as usize).to_vec();
+            self.task_ctx.encryption_key =
+                get_shard_property(ENCRYPTION_KEY, snapshot.get_properties()).map(|exported_key| {
+                    self.ctx
+                        .master_key
+                        .decrypt_encryption_key(&exported_key)
+                        .unwrap()
+                });
+        }
+        Ok(())
     }
 
     pub(crate) fn handle_add_chunk(
@@ -499,21 +574,10 @@ impl LoadTaskWorker {
         if self.task_ctx.inner_key_off.is_none() {
             let key_len = (&chunk_data[0..]).get_u16_le();
             let first_key = chunk_data.slice(2..2 + key_len as usize);
-            let shard_meta = self.ctx.runtime.block_on(get_shard_meta(
-                self.ctx.pd.clone(),
-                first_key.chunk(),
-                GET_SHARD_META_TIMEOUT,
-            ))?;
-            let snapshot = shard_meta.get_snapshot();
-            self.task_ctx.inner_key_off = Some(snapshot.inner_key_off as usize);
-            self.task_ctx.key_prefix = first_key.slice(..snapshot.inner_key_off as usize).to_vec();
-            self.task_ctx.encryption_key =
-                get_shard_property(ENCRYPTION_KEY, snapshot.get_properties()).map(|exported_key| {
-                    self.ctx
-                        .master_key
-                        .decrypt_encryption_key(&exported_key)
-                        .unwrap()
-                });
+            self.set_inner_key_off_and_encrytion_key(first_key.clone())?;
+            let check_point_store_mutex = Arc::clone(&self.check_point_store);
+            let mut check_point_store_guard = check_point_store_mutex.lock().unwrap();
+            check_point_store_guard.update_first_key(first_key)?;
         }
         let inner_key_off = self.task_ctx.inner_key_off.unwrap();
         let mut offset = 0;
@@ -544,6 +608,8 @@ impl LoadTaskWorker {
             self.in_mem_size += 2 + key_len as usize + 4 + val_len as usize;
         }
 
+        let check_point_store_mutex = Arc::clone(&self.check_point_store);
+        let mut check_point_store_guard = check_point_store_mutex.lock().unwrap();
         if self.in_mem_size > self.ctx.max_in_mem_size {
             self.flush_mem_buf();
             if self.file_idx
@@ -552,15 +618,18 @@ impl LoadTaskWorker {
                     + self.unhandled_readers.len()
                     + FLUSH_FILE_CONCURRENCY
             {
-                self.recv_reader(1);
+                self.recv_reader(1, &mut check_point_store_guard)?;
             }
             self.in_mem_size = 0;
         }
-        self.try_recv_reader();
+        self.try_recv_reader(&mut check_point_store_guard)?;
         Ok(())
     }
 
-    fn handle_readers(&mut self) {
+    fn handle_readers(
+        &mut self,
+        check_point_store_guard: &mut MutexGuard<'_, LocalFileCheckPointStorage>,
+    ) -> Result<()> {
         self.unhandled_readers
             .sort_by(|a, b| a.file_idx.cmp(&b.file_idx));
 
@@ -573,11 +642,13 @@ impl LoadTaskWorker {
                 break;
             }
         }
-
+        debug!("received need handle {} readers", need_handled);
         if need_handled == 0 {
-            return;
+            return Ok(());
         }
         let mut handled_chunk_ids: HashMap<u64, u64> = HashMap::new();
+        let mut max_file_idx = 0;
+        let mut local_file_infos = vec![];
         for mut unhandled_reader in self.unhandled_readers.drain(0..need_handled) {
             match unhandled_reader.reader {
                 Ok(reader) => {
@@ -585,31 +656,61 @@ impl LoadTaskWorker {
                     handled_chunk_ids = mem::take(&mut unhandled_reader.handled_chunk_ids);
                 }
                 Err(err) => {
-                    self.reader_errs.push(err);
+                    let err_str = err.to_string();
+                    self.reader_errs
+                        .push(Error::HandleReaderError(err_str.clone()));
+                    return Err(Error::HandleReaderError(err_str));
                 }
             }
+            if max_file_idx < unhandled_reader.file_idx {
+                max_file_idx = unhandled_reader.file_idx;
+            }
+            local_file_infos.push(LocalFileInfo {
+                path: unhandled_reader.path,
+                kv_count: unhandled_reader.kv_count,
+            })
         }
-        for (writer_id, chunk_id) in handled_chunk_ids {
+        for (writer_id, chunk_id) in handled_chunk_ids.clone() {
             self.scheduler.update_flushed_chunk(writer_id, chunk_id);
         }
 
+        // Due to flush is async,
+        // we need to update handled_chunk_ids and max_file_idx in handle_readers,
+        // to make sure the value of handled_chunk_ids and max_file_idx are always
+        // increasing.
+        check_point_store_guard.update_flushed_info(
+            handled_chunk_ids,
+            max_file_idx,
+            local_file_infos,
+        )?;
+
         info!("{} handle {} readers", self.task_ctx.task_id, need_handled);
+        Ok(())
     }
 
-    fn try_recv_reader(&mut self) {
+    fn try_recv_reader(
+        &mut self,
+        check_point_store_guard: &mut MutexGuard<'_, LocalFileCheckPointStorage>,
+    ) -> Result<()> {
         while let Ok(reader) = self.file_rx.try_recv() {
             self.unhandled_readers.push(reader);
         }
-        self.handle_readers();
+        self.handle_readers(check_point_store_guard)?;
+        Ok(())
     }
 
-    fn recv_reader(&mut self, mut recv_count: usize) {
+    fn recv_reader(
+        &mut self,
+        mut recv_count: usize,
+        check_point_store_guard: &mut MutexGuard<'_, LocalFileCheckPointStorage>,
+    ) -> Result<()> {
         while recv_count != 0 {
             let reader = self.file_rx.recv().unwrap();
             self.unhandled_readers.push(reader);
             recv_count -= 1;
         }
-        self.handle_readers();
+        self.handle_readers(check_point_store_guard)?;
+        Ok(())
     }
 
     fn alloc_file_id(&mut self) -> Result<u64> {
@@ -637,12 +738,67 @@ impl LoadTaskWorker {
         }
     }
 
+    // Recover readers from checkpoint.
+    fn recover_readers(&mut self, check_point_ctx: LoadDataCheckPointCtx) {
+        let paths = check_point_ctx.get_local_file_infos();
+        for local_file_info in paths.iter() {
+            let reader = reload_reader(local_file_info, self.task_ctx.clone());
+            self.readers.push(reader);
+        }
+    }
+
+    fn build(&mut self, compression_type: u8) -> Result<()> {
+        info!("{} start build.", self.task_ctx.task_id);
+
+        let check_point_store_mutex = Arc::clone(&self.check_point_store);
+        let mut check_point_store_guard = check_point_store_mutex.lock().unwrap();
+
+        // to be compatible with old remote backend, we need to flush all kv pairs
+        // before build. TODO: remove it after all remote backend upgraded.
+        self.flush(&mut check_point_store_guard)?;
+
+        let mut sst_metas = vec![];
+
+        if check_point_store_guard.get_state() < LoadDataWorkerState::BuildingSst {
+            check_point_store_guard.update_build_msg(compression_type)?;
+        }
+
+        if check_point_store_guard.get_state() == LoadDataWorkerState::BuildingSst {
+            // Begin to build sst.
+            self.build_sst(
+                &mut check_point_store_guard,
+                &mut sst_metas,
+                compression_type,
+            )?;
+            check_point_store_guard
+                .flush_check_point_ctx_with_state(LoadDataWorkerState::IngestingSst)?;
+        }
+
+        // Begin ingest sst.
+        if check_point_store_guard.get_state() == LoadDataWorkerState::IngestingSst {
+            if check_point_store_guard.check_point_ctx.get_is_recover() {
+                sst_metas = check_point_store_guard.get_sst_meta();
+            }
+            let res = self.ingest(
+                sst_metas,
+                check_point_store_guard
+                    .check_point_ctx
+                    .get_duplicated_entries(),
+                &mut check_point_store_guard,
+            );
+            info!("{} ingest end.", self.task_ctx.task_id);
+            return res;
+        }
+        Ok(())
+    }
+
     fn flush_mem_buf(&mut self) {
         info!(
             "{} flush to local file on in_mem_size {}",
             self.task_ctx.task_id, self.in_mem_size
         );
         let kv_pairs = mem::take(&mut self.kv_pairs);
+        let kv_count = kv_pairs.len();
         let tx = self.file_tx.clone();
         let task_ctx = self.task_ctx.clone();
         let file_path = self.file_path(self.file_idx);
@@ -654,7 +810,7 @@ impl LoadTaskWorker {
         std::thread::spawn(move || {
             let start = Instant::now();
             let task_id = task_ctx.task_id.clone();
-            let res = flush_to_local_file(kv_pairs, task_ctx, file_path, in_mem_size);
+            let res = flush_to_local_file(kv_pairs, task_ctx, file_path.clone(), in_mem_size);
             info!(
                 "{} flush to local file {} takes {:?}",
                 task_id,
@@ -665,12 +821,17 @@ impl LoadTaskWorker {
                 reader: res,
                 handled_chunk_ids,
                 file_idx,
+                path: file_path.clone(),
+                kv_count,
             })
             .unwrap();
         });
     }
 
-    fn flush(&mut self) -> Result<()> {
+    fn flush(
+        &mut self,
+        check_point_store_guard: &mut MutexGuard<'_, LocalFileCheckPointStorage>,
+    ) -> Result<()> {
         if !self.reader_errs.is_empty() {
             return Err(self.reader_errs.pop().unwrap());
         }
@@ -684,10 +845,15 @@ impl LoadTaskWorker {
                 - self.reader_errs.len()
                 - self.unhandled_readers.len();
             info!(
-                "{} still needs to receive {} readers",
-                self.task_ctx.task_id, recv_count
+                "{} still needs to receive {} readers, file_idx:{},self.readers.len():{},self.reader_errs.len():{},self.unhandled_readers.len():{}",
+                self.task_ctx.task_id,
+                recv_count,
+                self.file_idx,
+                self.readers.len(),
+                self.reader_errs.len(),
+                self.unhandled_readers.len()
             );
-            self.recv_reader(recv_count);
+            self.recv_reader(recv_count, check_point_store_guard)?;
         }
         if !self.reader_errs.is_empty() {
             return Err(self.reader_errs.pop().unwrap());
@@ -697,14 +863,21 @@ impl LoadTaskWorker {
         Ok(())
     }
 
-    fn build(&mut self, compression_type: u8) -> Result<()> {
-        // to be compatible with old remote backend, we need to flush all kv pairs
-        // before build. TODO: remove it after all remote backend upgraded.
-        self.flush()?;
-
+    fn build_sst(
+        &mut self,
+        check_point_store_guard: &mut MutexGuard<'_, LocalFileCheckPointStorage>,
+        sst_metas: &mut Vec<SstMeta>,
+        compression_type: u8,
+    ) -> Result<()> {
         if !self.kv_pairs.is_empty() || self.readers.len() < self.file_idx {
+            debug!(
+                "{} has {} not yet flushed kv pairs, {} unhandled files",
+                self.task_ctx.task_id,
+                self.kv_pairs.len(),
+                self.file_idx - self.readers.len()
+            );
             return Err(Error::CheckError(format!(
-                "{} has {} unflushed kv pairs, {} unhandled files",
+                "{} has {} not yet flushed kv pairs, {} unhandled files",
                 self.task_ctx.task_id,
                 self.kv_pairs.len(),
                 self.file_idx - self.readers.len()
@@ -717,13 +890,13 @@ impl LoadTaskWorker {
             return Ok(());
         }
 
-        info!("{} start build", self.task_ctx.task_id);
+        info!("{} start build sst.", self.task_ctx.task_id);
         let (tx, rx) = tikv_util::mpsc::unbounded();
         let mut sent_count = 0;
         let mut recv_count = 0;
         let readers = mem::take(&mut self.readers);
         let mut merge_iter = MergeIterator::new(readers, &self.task_ctx.key_prefix);
-        let mut sst_metas = vec![];
+
         let mut errs = vec![];
         while merge_iter.valid() {
             let batch = self.read_batch(&mut merge_iter)?;
@@ -777,7 +950,9 @@ impl LoadTaskWorker {
             );
         }
         info!("{} finish build", self.task_ctx.task_id);
-        self.ingest(sst_metas, mem::take(&mut merge_iter.duplicated_entries))
+        check_point_store_guard
+            .update_build_result(sst_metas.clone(), merge_iter.duplicated_entries)?;
+        Ok(())
     }
 
     fn spawn_build_file(
@@ -833,9 +1008,14 @@ impl LoadTaskWorker {
                 .dfs
                 .create(file_id, data, opts)
                 .await
-                .map(|_| sst_meta)
+                .map(|_| sst_meta.clone())
                 .map_err(|e| Error::from(e));
             sender.send(res).unwrap();
+            debug!(
+                "{} finish dfs create sst file {:?}",
+                task_id,
+                sst_meta.clone()
+            );
         });
     }
 
@@ -927,6 +1107,7 @@ impl LoadTaskWorker {
         &mut self,
         mut sst_metas: Vec<SstMeta>,
         dup_entries: Vec<DuplicateEntry>,
+        check_point_store_guard: &mut MutexGuard<'_, LocalFileCheckPointStorage>,
     ) -> Result<()> {
         if sst_metas.is_empty() {
             return Ok(());
@@ -963,6 +1144,8 @@ impl LoadTaskWorker {
         }
         self.scheduler.set_finished(dup_entries);
         info!("{} finished ingest", self.task_ctx.task_id);
+        check_point_store_guard
+            .flush_check_point_ctx_with_state(LoadDataWorkerState::IngestedSst)?;
         Ok(())
     }
 
@@ -1099,9 +1282,24 @@ impl LoadTaskWorker {
         self.task_dir.join(format!("kv_pairs_{}", file_idx))
     }
 
-    fn init_task_dir(&self) {
-        if let Err(err) = fs::create_dir(&self.task_dir) {
-            self.scheduler.cancel(format!("{:?}", err))
+    fn init_task_dir(&mut self) {
+        if !self.task_dir.is_dir() {
+            if let Err(err) = fs::create_dir(&self.task_dir) {
+                self.scheduler.cancel(format!("{:?}", err))
+            }
+        } else {
+            let check_point_store_mutex = Arc::clone(&self.check_point_store);
+            let check_point_store_guard = check_point_store_mutex.lock().unwrap();
+            if check_point_store_guard.check_point_ctx.get_is_recover() {
+                let check_point_ctx = check_point_store_guard.load_check_point_ctx();
+                info!("{} [check point] recover readers", self.task_ctx.task_id);
+                if let Err(err) =
+                    self.set_inner_key_off_and_encrytion_key(check_point_ctx.get_first_key())
+                {
+                    self.scheduler.cancel(format!("{:?}", err))
+                }
+                self.recover_readers(check_point_ctx);
+            }
         }
     }
 
@@ -1357,6 +1555,7 @@ fn flush_to_local_file(
 
     let file = fs::OpenOptions::new()
         .create(true)
+        .truncate(true)
         .write(true)
         .read(true)
         .open(path.as_path())?;
@@ -1397,6 +1596,33 @@ fn flush_to_local_file(
         kv_pairs.len(),
         reader,
     ))
+}
+
+fn reload_reader(local_file_info: &LocalFileInfo, task_ctx: TaskContext) -> KvPairsReader {
+    let file = fs::File::open(local_file_info.clone().path).unwrap();
+
+    let (method, key) = if let Some(key) = &task_ctx.encryption_key {
+        (EncryptionMethod::Aes256Ctr, key.current_key.as_slice())
+    } else {
+        (EncryptionMethod::Plaintext, "".as_bytes())
+    };
+
+    let iv = if task_ctx.encryption_key.is_some() {
+        let mut iv_buf = Vec::with_capacity(16);
+        iv_buf.put_u64(task_ctx.start_ts);
+        iv_buf.put_u64(task_ctx.commit_ts);
+        Iv::from_slice(&iv_buf).unwrap()
+    } else {
+        Iv::Empty
+    };
+
+    let reader = DecrypterReader::new(file, method, key, iv).unwrap();
+    KvPairsReader::new(
+        task_ctx.clone().start_ts,
+        task_ctx.clone().commit_ts,
+        local_file_info.kv_count,
+        reader,
+    )
 }
 
 fn verify_regions_boundary(

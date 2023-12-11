@@ -18,6 +18,7 @@ hyper = { version = "0.14", features = ["full"] }
 kvengine = { path = "../kvengine" }
 kvenginepb = { path = "../../components/kvenginepb" }
 kvproto = { git = "https://github.com/pingcap/kvproto.git" }
+lazy_static = { version = "1.4", features = [] }
 pd_client = { path = "../pd_client" }
 protobuf = "2.8"
 rfstore = { path = "../rfstore" }
@@ -30,7 +31,9 @@ slog = { version = "2.3", features = [
     "release_max_level_debug",
 ] }
 slog-global = { version = "0.1", git = "https://github.com/breeswish/slog-global.git", rev = "d592f88e4dbba5eb439998463054f1a44fbf17b9" }
+test_pd_client = { workspace = true }
 thiserror = "1.0"
 tidb_query_datatype = { path = "../tidb_query_datatype" }
+tikv-client = { workspace = true }
 tikv_util = { path = "../tikv_util" }
 tokio = { version = "1.12", features = ["full"] }

@@ -294,7 +294,7 @@ fn main() {
         s3fs: s3fs.clone(),
         cache_fs,
         pd: pd.clone(),
-        load_manager,
+        load_manager: load_manager.clone(),
         br_manager,
         master_key,
         quota_limiter: Arc::new(QuotaLimiter::default()),
@@ -302,6 +302,9 @@ fn main() {
     });
     let acceptor = security_mgr.acceptor(incoming).unwrap();
     let server = start_serve!(ctx.clone(), acceptor);
+
+    // try recover task from checkpoint.
+    load_manager.try_recover_tasks_by_check_point();
 
     if config.register {
         let remote_compact_url = security_mgr

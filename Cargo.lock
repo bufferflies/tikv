@@ -3746,6 +3746,7 @@ dependencies = [
  "kvengine",
  "kvenginepb",
  "kvproto",
+ "lazy_static",
  "pd_client",
  "protobuf",
  "rfstore",
@@ -3755,8 +3756,10 @@ dependencies = [
  "serde_json",
  "slog",
  "slog-global",
+ "test_pd_client",
  "thiserror",
  "tidb_query_datatype",
+ "tikv-client",
  "tikv_util",
  "tokio",
 ]

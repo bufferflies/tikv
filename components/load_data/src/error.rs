@@ -6,6 +6,8 @@ use kvengine::dfs;
 pub enum Error {
     #[error("check {0}")]
     CheckError(String),
+    #[error("handle reader {0}")]
+    HandleReaderError(String),
     #[error("canceled")]
     Canceled,
     #[error("pd error {0}")]

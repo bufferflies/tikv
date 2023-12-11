@@ -1,8 +1,5 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-#[macro_use]
-extern crate serde_derive;
-
 use std::{ops::Deref, sync::Arc};
 
 use bytes::Buf;
@@ -13,6 +10,7 @@ use openssl::{
     symm::{Cipher, Crypter, Mode},
 };
 use rand::RngCore;
+use serde_derive::{Deserialize, Serialize};
 
 type Hmac256 = Hmac<sha2::Sha256>;
 

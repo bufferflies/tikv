@@ -4,8 +4,12 @@ use std::{collections::HashMap, mem, time::Duration};
 
 use bytes::{BufMut, BytesMut};
 use futures::executor::block_on;
-use load_data::task::{
-    LoadDataConfig, LoadDataContext, LoadTaskMsg, LoadTaskScheduler, LoadTaskWorker, TaskContext,
+use load_data::{
+    check_point_storage::LoadDataCheckPointCtx,
+    task::{
+        LoadDataConfig, LoadDataContext, LoadTaskMsg, LoadTaskScheduler, LoadTaskWorker,
+        TaskContext,
+    },
 };
 use tikv_util::{error, time::Instant};
 
@@ -26,8 +30,9 @@ pub fn init_task(
         key_prefix: vec![],
         encryption_key: None,
     };
+    let check_point_ctx = LoadDataCheckPointCtx::new(task_ctx.clone());
 
-    let mut worker = LoadTaskWorker::new(config, ctx, task_ctx);
+    let mut worker = LoadTaskWorker::new(config, ctx, task_ctx, check_point_ctx);
     let scheduler = worker.get_scheduler();
     let worker_handle = std::thread::spawn(move || {
         worker.run();

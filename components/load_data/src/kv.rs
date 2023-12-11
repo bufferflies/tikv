@@ -78,7 +78,7 @@ impl KvPairsReader {
     }
 }
 
-#[derive(Default, Debug, Serialize, Deserialize, Clone)]
+#[derive(Default, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
 pub struct SstMeta {
@@ -100,7 +100,7 @@ pub struct MergeIterator {
     last_dup_entry_key: Vec<u8>,
 }
 
-#[derive(Default, Debug, Serialize, Deserialize, Clone)]
+#[derive(Default, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
 pub struct DuplicateEntry {

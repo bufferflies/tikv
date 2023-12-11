@@ -1,6 +1,6 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, fs, path::PathBuf, sync::Arc};
 
 use bytes::Bytes;
 use cloud_encryption::MasterKey;
@@ -10,11 +10,18 @@ use kvengine::{
     dfs,
     table::sstable::{LZ4_COMPRESSION, NO_COMPRESSION, ZSTD_COMPRESSION},
 };
-use load_data::task::{
-    FlushResult, LoadDataConfig, LoadDataContext, LoadTaskMsg, LoadTaskScheduler, LoadTaskStates,
-    LoadTaskWorker, PutChunkResult, TaskContext,
+use load_data::{
+    check_point_storage,
+    check_point_storage::{
+        LoadDataCheckPointCtx, LoadDataWorkerState::BuildingSst, LocalFileCheckPointStorage,
+    },
+    task::{
+        FlushResult, LoadDataConfig, LoadDataContext, LoadTaskMsg, LoadTaskScheduler,
+        LoadTaskStates, LoadTaskWorker, PutChunkResult, TaskContext,
+    },
 };
 use pd_client::PdClient;
+use tikv_util::debug;
 
 use crate::{
     common::{get_body, get_param, make_response},
@@ -255,6 +262,43 @@ impl LoadDataManager {
         }
     }
 
+    fn recover_task_by_check_point_file(&self, path: PathBuf) {
+        let file_data = LocalFileCheckPointStorage::read_file(path);
+        let mut check_point_ctx =
+            LocalFileCheckPointStorage::binary_to_check_point(file_data.as_str());
+        check_point_ctx.set_is_recover(true);
+        debug!(
+            "[check point] try recover task from checkpoint, file exists {}",
+            file_data
+        );
+        self.exec_task_by_check_point(check_point_ctx.clone());
+
+        if check_point_ctx.get_state() >= BuildingSst {
+            self.build(
+                check_point_ctx.get_task_id().as_str(),
+                LoadDataManager::compression_num_to_str(check_point_ctx.clone().get_compression()),
+            );
+        }
+    }
+
+    pub fn try_recover_tasks_by_check_point(&self) {
+        let check_point_dir = LocalFileCheckPointStorage::get_check_point_file_dir();
+        if !check_point_dir.is_dir() {
+            return;
+        }
+
+        let files = fs::read_dir(check_point_dir).unwrap();
+        for file in files.filter_map(Result::ok) {
+            let file_name = file.file_name();
+            let str_file_name = file_name.to_string_lossy();
+
+            if str_file_name.starts_with(check_point_storage::CHECKPOINT_WORKER_PREFIX) {
+                let path = file.path();
+                self.recover_task_by_check_point_file(path.clone());
+            }
+        }
+    }
+
     pub(crate) fn get_task_states(&self, task_id: &str) -> Option<LoadTaskStates> {
         self.running_tasks.get(task_id).map(|x| {
             x.check_task_thread_finished();
@@ -276,15 +320,53 @@ impl LoadDataManager {
         self.running_tasks.contains_key(task_id)
     }
 
+    pub(crate) fn exec_task_by_check_point(&self, check_point_ctx: LoadDataCheckPointCtx) {
+        let task_context = TaskContext {
+            task_id: check_point_ctx.get_task_id(),
+            start_ts: check_point_ctx.get_start_ts(),
+            commit_ts: check_point_ctx.get_commit_ts(),
+            inner_key_off: None,
+            key_prefix: vec![],
+            encryption_key: None,
+        };
+        let mut worker = LoadTaskWorker::new(
+            self.config.clone(),
+            self.ctx.clone(),
+            task_context.clone(),
+            check_point_ctx,
+        );
+        let mut scheduler = worker.get_scheduler();
+        let thread_handle = std::thread::spawn(move || {
+            worker.run();
+        });
+
+        scheduler.set_thread_handle(thread_handle);
+        self.running_tasks.insert(task_context.task_id, scheduler);
+    }
+
     pub(crate) fn init_task(&self, task_ctx: TaskContext) {
-        let mut worker =
-            LoadTaskWorker::new(self.config.clone(), self.ctx.clone(), task_ctx.clone());
+        let check_point = LoadDataCheckPointCtx::new(task_ctx.clone());
+        let mut worker = LoadTaskWorker::new(
+            self.config.clone(),
+            self.ctx.clone(),
+            task_ctx.clone(),
+            check_point,
+        );
         let mut scheduler = worker.get_scheduler();
         let thread_handle = std::thread::spawn(move || {
             worker.run();
         });
         scheduler.set_thread_handle(thread_handle);
         self.running_tasks.insert(task_ctx.task_id, scheduler);
+    }
+
+    fn compression_num_to_str(compression_type: u8) -> &'static str {
+        if compression_type == LZ4_COMPRESSION {
+            return "lz4";
+        } else if compression_type == ZSTD_COMPRESSION {
+            return "zstd";
+        }
+        ""
     }
 
     pub(crate) fn build(&self, task_id: &str, compression: &str) {
