@@ -543,6 +543,7 @@ impl<E: Engine> Endpoint<E> {
         mut req: coppb::Request,
         peer: Option<String>,
     ) -> impl Future<Output = MemoryTraceGuard<coppb::Response>> {
+        let now = Instant::now();
         // Check the load of the read pool. If it's too busy, generate and return
         // error in the gRPC thread to avoid waiting in the queue of the read pool.
         if let Err(busy_err) = self.read_pool.check_busy_threshold(Duration::from_millis(
@@ -573,9 +574,13 @@ impl<E: Engine> Endpoint<E> {
                     res.into()
                 }
                 Ok(handle_fut) => {
+                    let elapsed = now.saturating_elapsed();
                     let (handle_res, batch_res) = futures::join!(handle_fut, result_of_batch);
                     let mut res = handle_res.unwrap_or_else(|e| make_error_response(e).into());
                     res.set_batch_responses(batch_res.into());
+                    res.mut_exec_details_v2()
+                        .mut_time_detail_v2()
+                        .set_grpc_execute_time_ns(elapsed.as_nanos() as u64);
                     GLOBAL_TRACKERS.with_tracker(tracker, |tracker| {
                         tracker.write_scan_detail(res.mut_exec_details_v2().mut_scan_detail_v2());
                     });

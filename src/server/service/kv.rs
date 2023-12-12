@@ -1131,12 +1131,7 @@ fn response_batch_commands_request<F, T>(
 {
     let task = async move {
         if let Ok(resp) = resp.await {
-            let measure = GrpcRequestDuration {
-                begin,
-                label,
-                source,
-                resource_priority,
-            };
+            let measure = GrpcRequestDuration::new(begin, label, source, resource_priority);
             let task = MeasuredSingleResponse::new(id, resp, measure);
             if let Err(e) = tx.send_with(task, WakePolicy::Immediately) {
                 error!("KvService response batch commands fail"; "err" => ?e);
@@ -1224,6 +1219,7 @@ fn handle_batch_commands_request<E: Engine, L: LockManager, F: KvFormat>(
                     }
                 },
                 Some(batch_commands_request::request::Cmd::Coprocessor(req)) => {
+                    let begin_instant = Instant::now();
                     let resource_control_ctx = req.get_context().get_resource_control_context();
                     let mut resource_group_priority = ResourcePriority::unknown;
                     if let Some(resource_manager) = resource_manager {
@@ -1233,7 +1229,6 @@ fn handle_batch_commands_request<E: Engine, L: LockManager, F: KvFormat>(
                     GRPC_RESOURCE_GROUP_COUNTER_VEC
                     .with_label_values(&[resource_control_ctx.get_resource_group_name()])
                     .inc();
-                    let begin_instant = Instant::now();
                     let source = req.get_context().get_request_source().to_owned();
                     let resp = future_copr(copr, Some(peer.to_string()), req)
                         .map_ok(|resp| {
@@ -1326,12 +1321,15 @@ fn handle_measures_for_batch_commands(measures: &mut MeasuredBatchResponse) {
             begin,
             source,
             resource_priority,
+            grpc_instance,
         } = measure;
         let elapsed = now.saturating_duration_since(begin);
         GRPC_MSG_HISTOGRAM_STATIC
             .get(label)
             .get(resource_priority)
             .observe(elapsed.as_secs_f64());
+        let wait_us = now.saturating_duration_since(grpc_instance).as_nanos() as u64;
+
         record_request_source_metrics(source, elapsed);
         let exec_details = resp.cmd.as_mut().and_then(|cmd| match cmd {
             Get(resp) => Some(resp.mut_exec_details_v2()),
@@ -1353,6 +1351,9 @@ fn handle_measures_for_batch_commands(measures: &mut MeasuredBatchResponse) {
             exec_details
                 .mut_time_detail_v2()
                 .set_total_rpc_wall_time_ns(elapsed.as_nanos() as u64);
+            exec_details
+                .mut_time_detail_v2()
+                .set_grpc_wait_time_ns(wait_us);
         }
     }
 }
@@ -2274,7 +2275,9 @@ pub struct GrpcRequestDuration {
     pub label: GrpcTypeKind,
     pub source: String,
     pub resource_priority: ResourcePriority,
+    pub grpc_instance: Instant,
 }
+
 impl GrpcRequestDuration {
     pub fn new(
         begin: Instant,
@@ -2287,6 +2290,7 @@ impl GrpcRequestDuration {
             label,
             source,
             resource_priority,
+            grpc_instance: Instant::now(),
         }
     }
 }
