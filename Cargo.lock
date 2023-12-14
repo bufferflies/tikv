@@ -3471,6 +3471,7 @@ dependencies = [
  "byteorder",
  "bytes",
  "cloud_encryption",
+ "collections",
  "crc32c",
  "dashmap 4.0.2",
  "dyn-clone",

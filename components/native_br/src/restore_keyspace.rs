@@ -840,7 +840,7 @@ impl BackupCluster {
         if !store_shards.is_empty() {
             let mut meta_iter =
                 MetaIterator::new(kv_engine.get_engine_id(), store_shards, raw_metas);
-            let metas = kv_engine.read_meta(&mut meta_iter)?;
+            let (metas, _) = kvengine::EngineCore::read_meta(&mut meta_iter)?;
             info!(
                 "Keyspace {} kv_engine load {} shards in restore keyspace",
                 self.keyspace_id,

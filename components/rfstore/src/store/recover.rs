@@ -34,6 +34,7 @@ pub struct RecoverHandler {
     region_peer_map: Arc<HashMap<u64, u64>>,
     black_list: Option<BlackList>,
     contained_region_ids: Option<HashSet<u64>>,
+    files_in_blacklist: Vec<u64>,
 }
 
 pub const BLACK_LIST_FILE: &str = "black_list_file";
@@ -99,6 +100,7 @@ impl RecoverHandler {
             region_peer_map,
             black_list: None,
             contained_region_ids: None,
+            files_in_blacklist: vec![],
         }
     }
 
@@ -362,6 +364,16 @@ impl kvengine::MetaIterator for RecoverHandler {
                         snap.get_outer_end(),
                     ) {
                         warn!("region {} blocked by black list", cs.shard_id);
+                        // Collect all file ids for blacklisted region.
+                        snap.get_l0_creates().iter().for_each(|f| {
+                            self.files_in_blacklist.push(f.get_id());
+                        });
+                        snap.get_table_creates().iter().for_each(|f| {
+                            self.files_in_blacklist.push(f.get_id());
+                        });
+                        snap.get_blob_creates().iter().for_each(|f| {
+                            self.files_in_blacklist.push(f.get_id());
+                        });
                         continue;
                     }
                 }
@@ -372,6 +384,10 @@ impl kvengine::MetaIterator for RecoverHandler {
             self.rf_engine.write(wb).unwrap();
         }
         Ok(())
+    }
+
+    fn take_files_in_blacklist(&mut self) -> Vec<u64> {
+        std::mem::take(&mut self.files_in_blacklist)
     }
 
     fn engine_id(&self) -> u64 {

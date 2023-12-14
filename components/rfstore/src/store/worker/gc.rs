@@ -55,7 +55,8 @@ impl GcRunner {
 
     fn gc_kv_files(&self) -> kvengine::Result<()> {
         let kv_file_ids = self.collect_kv_file_ids();
-        self.remove_kv_garbage_files(&kv_file_ids)?;
+        let blacklist_file_ids = self.kv.get_files_in_blacklist();
+        self.remove_kv_garbage_files(&kv_file_ids, blacklist_file_ids.as_ref())?;
         Ok(())
     }
 
@@ -77,7 +78,11 @@ impl GcRunner {
         Some(all_file_ids)
     }
 
-    fn remove_kv_garbage_files(&self, kv_file_ids: &HashSet<u64>) -> kvengine::Result<()> {
+    fn remove_kv_garbage_files(
+        &self,
+        kv_file_ids: &HashSet<u64>,
+        blacklist_file_ids: &HashSet<u64>,
+    ) -> kvengine::Result<()> {
         let store_id = self.kv.get_engine_id();
         let entries = fs::read_dir(&self.kv.opts.local_dir)?;
         for e in entries {
@@ -94,6 +99,9 @@ impl GcRunner {
                 let id = sstable::parse_file_id(&path)?;
                 if !kv_file_ids.contains(&id) {
                     let _guard = self.kv.lock_file(id);
+                    if blacklist_file_ids.contains(&id) {
+                        continue;
+                    }
                     let meta = fs::metadata(&path)?;
                     if self.is_old_file(meta) {
                         Self::remove_file(store_id, &path)?;

@@ -1,7 +1,7 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     env,
     fmt::{Debug, Display, Formatter},
     iter::{FromIterator, Iterator},
@@ -18,6 +18,7 @@ use std::{
 
 use bytes::{BufMut, Bytes};
 use cloud_encryption::MasterKey;
+use collections::HashSet;
 use dashmap::{mapref::entry::Entry, DashMap};
 use file_system::IoRateLimiter;
 use fslock;
@@ -108,6 +109,7 @@ impl Engine {
         let allow_fallback_local = opts.allow_fallback_local;
         let file_locks = (0..FILE_LOCK_SLOTS).map(|_| Mutex::new(())).collect();
         let per_keyspace_configs = Arc::new(config.get_per_keyspace_configs());
+        let (metas, files_in_blacklist) = EngineCore::read_meta(meta_iter)?;
         let core = EngineCore {
             engine_id: AtomicU64::new(meta_iter.engine_id()),
             shards: DashMap::new(),
@@ -133,6 +135,7 @@ impl Engine {
             free_tx,
             loaded: AtomicBool::new(false),
             file_locks,
+            files_in_blacklist: Arc::new(files_in_blacklist),
             shutting_down: AtomicBool::new(false),
             ks_safepoint_v2: ks_gc_sp_map,
             master_key,
@@ -141,7 +144,7 @@ impl Engine {
             core: Arc::new(core),
             meta_change_listener,
         };
-        let metas = en.read_meta(meta_iter)?;
+
         info!("engine load {} shards", metas.len());
         en.load_shards(metas, recoverer, None)?;
         en.loaded.store(true, Ordering::Relaxed);
@@ -281,6 +284,7 @@ pub struct EngineCore {
     pub(crate) shutting_down: AtomicBool,
     pub(crate) ks_safepoint_v2: Option<Arc<DashMap<u32, u64>>>,
     pub(crate) master_key: MasterKey,
+    pub(crate) files_in_blacklist: Arc<HashSet<u64>>,
 }
 
 impl Drop for EngineCore {
@@ -299,14 +303,24 @@ impl EngineCore {
     }
 
     // This method is also used by native-br for cluster restore.
-    pub fn read_meta(&self, meta_iter: &mut impl MetaIterator) -> Result<HashMap<u64, ShardMeta>> {
+    pub fn read_meta(
+        meta_iter: &mut impl MetaIterator,
+    ) -> Result<(HashMap<u64, ShardMeta>, HashSet<u64>)> {
         let mut metas = HashMap::new();
+        let mut files_in_blacklist = HashSet::default();
         let engine_id = meta_iter.engine_id();
         meta_iter.iterate(|cs| {
             let meta = ShardMeta::new(engine_id, &cs);
             metas.insert(meta.id, meta);
         })?;
-        Ok(metas)
+
+        meta_iter
+            .take_files_in_blacklist()
+            .into_iter()
+            .for_each(|id| {
+                files_in_blacklist.insert(id);
+            });
+        Ok((metas, files_in_blacklist))
     }
 
     /// Load shard from meta and ingest to the engine.
@@ -433,6 +447,10 @@ impl EngineCore {
             return true;
         }
         false
+    }
+
+    pub fn get_files_in_blacklist(&self) -> Arc<HashSet<u64>> {
+        self.files_in_blacklist.clone()
     }
 
     pub fn size(&self) -> u64 {

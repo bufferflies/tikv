@@ -127,6 +127,9 @@ pub trait MetaIterator {
     where
         F: FnMut(kvenginepb::ChangeSet);
 
+    fn take_files_in_blacklist(&mut self) -> Vec<u64> {
+        vec![]
+    }
     fn engine_id(&self) -> u64;
 }
 
