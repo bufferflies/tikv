@@ -299,6 +299,7 @@ impl CloudReader {
                 };
                 writes.push((ts.into(), Write::new(write_type, um.start_ts.into(), None)));
             }
+            extra_iter.next();
         }
         writes
     }
