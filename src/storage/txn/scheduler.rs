@@ -1103,6 +1103,9 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         fail_point!("txn_before_process_read");
         debug!("process read cmd in worker pool"; "cid" => task.cid);
 
+        if let Some(snap_access) = snapshot.get_kvengine_snap() {
+            tikv_util::set_current_region(snap_access.get_id());
+        }
         let tag = task.cmd.tag();
 
         let begin_instant = Instant::now();
@@ -1124,6 +1127,10 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
     /// back to the `Scheduler`.
     async fn process_write(self, snapshot: E::Snap, task: Task, statistics: &mut Statistics) {
         fail_point!("txn_before_process_write");
+        let region_id = snapshot
+            .get_kvengine_snap()
+            .map(|snap| snap.get_id())
+            .unwrap_or_default();
         let write_bytes = task.cmd.write_bytes();
         let tag = task.cmd.tag();
         let cid = task.cid;
@@ -1167,6 +1174,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
             let begin_instant = Instant::now();
             let res = unsafe {
                 with_perf_context::<E, _, _>(tag, || {
+                    tikv_util::set_current_region(region_id);
                     task.cmd
                         .process_write(snapshot, context)
                         .map_err(StorageError::from)
@@ -1416,6 +1424,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
 
         let mut res = unsafe {
             with_tls_engine(|e: &mut E| {
+                tikv_util::set_current_region(region_id);
                 e.async_write(&ctx, to_be_write, subscribed, Some(on_applied))
             })
         };
