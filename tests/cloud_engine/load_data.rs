@@ -96,6 +96,7 @@ fn impl_test_load_data(enable_inner_key_off: bool) {
         sst_file_size: 4 * 1024,
         region_size: 16 * 1024,
         coarse_split_size: 128 * 1024,
+        enable_check_point: false,
     };
 
     let dfs = Arc::new(kvengine::dfs::S3Fs::new(
@@ -252,6 +253,7 @@ fn test_load_data_overlap() {
         sst_file_size: 4 * 1024,
         region_size: 16 * 1024,
         coarse_split_size: 128 * 1024,
+        enable_check_point: false,
     };
     let dfs = Arc::new(kvengine::dfs::S3Fs::new(
         dfs_conf.prefix,

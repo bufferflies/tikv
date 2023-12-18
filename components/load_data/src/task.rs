@@ -52,6 +52,7 @@ const DEFAULT_BLOCK_SIZE: usize = 64 * 1024; // 64KB
 const DEFAULT_SST_FILE_SIZE: usize = 48 * 1024 * 1024; // 48MB
 const DEFAULT_REGION_SIZE: usize = 750 * 1024 * 1024; // 750MB
 const DEFAULT_COARSE_SPLIT_SIZE: usize = 32 * 1024 * 1024 * 1024; // 32GB
+const DEFAULT_ENABLE_CHECK_POINT: bool = false;
 
 const ZSTD_COMPRESSION_LEVEL: i32 = 3;
 const FLUSH_FILE_CONCURRENCY: usize = 4;
@@ -154,12 +155,13 @@ pub struct LoadTaskStates {
     pub duplicated_entries: Vec<DuplicateEntry>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 pub struct LoadDataConfig {
     pub block_size: usize,
     pub sst_file_size: usize,
     pub region_size: usize,
     pub coarse_split_size: usize,
+    pub enable_check_point: bool,
 }
 
 impl Default for LoadDataConfig {
@@ -169,6 +171,7 @@ impl Default for LoadDataConfig {
             sst_file_size: DEFAULT_SST_FILE_SIZE,
             region_size: DEFAULT_REGION_SIZE,
             coarse_split_size: DEFAULT_COARSE_SPLIT_SIZE,
+            enable_check_point: DEFAULT_ENABLE_CHECK_POINT,
         }
     }
 }
@@ -1288,6 +1291,10 @@ impl LoadTaskWorker {
                 self.scheduler.cancel(format!("{:?}", err))
             }
         } else {
+            if !self.config.enable_check_point {
+                return;
+            }
+
             let check_point_store_mutex = Arc::clone(&self.check_point_store);
             let check_point_store_guard = check_point_store_mutex.lock().unwrap();
             if check_point_store_guard.check_point_ctx.get_is_recover() {

@@ -155,12 +155,20 @@ fn main() {
                 .value_name("Bool")
                 .help("run worker-scaler"),
         )
+        .arg(
+            Arg::with_name("enable-load-data-check-point")
+                .long("enable-load-data-check-point")
+                .takes_value(true)
+                .value_name("Bool")
+                .help("enable load data check point"),
+        )
         .get_matches();
 
     let mut config_file_path = None;
     let mut config: Config = match matches.value_of_os("config") {
         Some(config_path) => {
             let path = PathBuf::from(config_path);
+            info!("config path:{:?}", config_path);
             config_file_path = Some(path.clone());
             let result = std::fs::read(path);
             if result.is_err() {
@@ -185,7 +193,6 @@ fn main() {
     }
     config.dfs.override_from_env();
     config.security.master_key.override_from_env();
-
     // If zstd_compression_level is not set, set it to default value
     if config.dfs.zstd_compression_level.is_empty() {
         config.dfs.zstd_compression_level = ZSTD_COMPRESSION_LEVEL_FOR_REMOTE.to_string();
@@ -279,6 +286,7 @@ fn main() {
         master_key.clone(),
         worker_scaler_opt,
         config.worker_scaler.clone(),
+        config.enable_load_data_check_point,
     ));
     let br_manager = Arc::new(NativeBrManager::new(
         thread_pool.clone(),
@@ -469,6 +477,7 @@ pub struct Config {
     pub cop_cache_size: ReadableSize,
     pub cop_block_cache_size: ReadableSize,
     pub worker_scaler: WorkerScalerConfig,
+    pub enable_load_data_check_point: bool,
 }
 
 impl Default for Config {
@@ -490,6 +499,7 @@ impl Default for Config {
             cop_cache_size: ReadableSize::gb(1),
             cop_block_cache_size: ReadableSize::default(),
             worker_scaler: WorkerScalerConfig::default(),
+            enable_load_data_check_point: false,
         }
     }
 }
@@ -582,5 +592,9 @@ fn override_from_args(config: &mut Config, matches: &ArgMatches<'_>) {
 
     if let Some(run_worker_scaler) = matches.value_of("run-worker-scaler") {
         config.worker_scaler.run = run_worker_scaler == "true";
+    }
+
+    if let Some(enable_check_point) = matches.value_of("enable-load-data-check-point") {
+        config.enable_load_data_check_point = enable_check_point == "true";
     }
 }

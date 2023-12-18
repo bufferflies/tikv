@@ -243,8 +243,10 @@ impl LoadDataManager {
         master_key: MasterKey,
         worker_scaler: Option<WorkerScaler>,
         worker_scaler_conf: WorkerScalerConfig,
+        enable_check_point: bool,
     ) -> Self {
-        let config = LoadDataConfig::default();
+        let mut config = LoadDataConfig::default();
+        config.enable_check_point = enable_check_point;
         let context = LoadDataContext {
             pd,
             dir,
@@ -282,6 +284,10 @@ impl LoadDataManager {
     }
 
     pub fn try_recover_tasks_by_check_point(&self) {
+        if !self.config.enable_check_point {
+            return;
+        }
+
         let check_point_dir = LocalFileCheckPointStorage::get_check_point_file_dir();
         if !check_point_dir.is_dir() {
             return;
