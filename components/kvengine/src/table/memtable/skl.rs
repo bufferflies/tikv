@@ -290,6 +290,8 @@ impl SkipListCore {
             }
         }
         let data_size = batch.buf.len() + batch.entries.len() * AVG_NODE_SIZE;
+        // NOTE: user_data_size is not accurate when there are delete entries. So there
+        // is a possibility of `self.is_empty() == true` but `self.size() > 0`.
         self.user_data_size
             .fetch_add(data_size as u64, Ordering::AcqRel);
         if batch_max_ts > data_max_ts {

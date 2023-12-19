@@ -220,11 +220,11 @@ impl EngineCore {
 
     fn apply_flush(&self, shard: &Shard, cs: &ChangeSet) {
         let flush = cs.get_flush();
+        let old_data = shard.get_data();
+        let mut new_mem_tbls = old_data.mem_tbls.clone();
         if flush.has_l0_create() {
             let l0_id = flush.get_l0_create().get_id();
             let l0_tbl = cs.l0_tables.get(&l0_id).unwrap().clone();
-            let old_data = shard.get_data();
-            let mut new_mem_tbls = old_data.mem_tbls.clone();
             let last = new_mem_tbls.pop().unwrap();
             let last_version = last.get_version();
             if last_version != l0_tbl.version() {
@@ -253,6 +253,21 @@ impl EngineCore {
             );
             shard.set_data(new_data);
             self.send_free_mem_msg(FreeMemMsg::FreeMem(last));
+        } else {
+            // If there is no L0Create, it means the mem-table is empty during flush.
+            if new_mem_tbls.len() > 1 && new_mem_tbls.last().unwrap().is_empty() {
+                let last = new_mem_tbls.pop().unwrap();
+                let new_data = ShardData::new(
+                    old_data.range.clone(),
+                    new_mem_tbls,
+                    old_data.l0_tbls.clone(),
+                    old_data.blob_tbl_map.clone(),
+                    old_data.cfs.clone(),
+                    old_data.unloaded_tbls.clone(),
+                );
+                shard.set_data(new_data);
+                self.send_free_mem_msg(FreeMemMsg::FreeMem(last));
+            }
         }
     }
 
