@@ -244,6 +244,16 @@ impl LocalFileCheckPointStorage {
         Ok(())
     }
 
+    pub fn clean_check_point_data(&self) {
+        let file_path = self.get_file_path();
+        info!("remove check point data :{:?}", file_path);
+        if let Err(e) = fs::remove_file(file_path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                error!("failed to delete check point file: {}", e);
+            }
+        }
+    }
+
     fn get_file_path(&self) -> PathBuf {
         self.data_path.join(self.file_name.clone())
     }

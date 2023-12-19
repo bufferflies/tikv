@@ -202,12 +202,17 @@ pub struct LoadTaskScheduler {
     pub states: Arc<Mutex<LoadTaskStates>>,
     pub writers: Arc<Mutex<WritersStates>>,
     pub thread_handle: Option<Arc<Mutex<std::thread::JoinHandle<()>>>>,
+    pub check_point_store: Arc<Mutex<LocalFileCheckPointStorage>>,
 }
 
 impl LoadTaskScheduler {
     pub fn cancel(&self, err: String) {
         warn!("canceled {}", err);
         let mut states = self.states.lock().unwrap();
+        self.check_point_store
+            .lock()
+            .unwrap()
+            .clean_check_point_data();
         states.canceled = true;
         states.error = err;
     }
@@ -341,16 +346,6 @@ impl LoadTaskWorker {
             );
         }
 
-        states.task_id = task_ctx.task_id.clone();
-        let scheduler = LoadTaskScheduler {
-            sender,
-            states: Arc::new(Mutex::new(states)),
-            writers: Arc::new(Mutex::new(writers)),
-            thread_handle: None,
-        };
-        let (file_tx, file_rx) = tikv_util::mpsc::unbounded();
-        let task_dir = context.dir.join(task_ctx.task_id.as_str());
-
         // Init checkpoint info.
         let mut check_point_store =
             LocalFileCheckPointStorage::new(check_point_ctx.clone()).unwrap();
@@ -359,6 +354,17 @@ impl LoadTaskWorker {
             check_point_store.print_log();
         }
         let check_point_store_arc = Arc::new(Mutex::new(check_point_store));
+
+        states.task_id = task_ctx.task_id.clone();
+        let scheduler = LoadTaskScheduler {
+            sender,
+            states: Arc::new(Mutex::new(states)),
+            writers: Arc::new(Mutex::new(writers)),
+            thread_handle: None,
+            check_point_store: Arc::clone(&check_point_store_arc),
+        };
+        let (file_tx, file_rx) = tikv_util::mpsc::unbounded();
+        let task_dir = context.dir.join(task_ctx.task_id.as_str());
 
         Self {
             config,
@@ -1311,6 +1317,11 @@ impl LoadTaskWorker {
     }
 
     fn remove_local_files(&self) {
+        self.check_point_store
+            .lock()
+            .unwrap()
+            .clean_check_point_data();
+
         if let Err(err) = fs::remove_dir_all(&self.task_dir) {
             error!("failed to remove task {}, {:?}", self.task_ctx.task_id, err);
         } else {
