@@ -31,7 +31,6 @@ pub struct LockResolver {
     en: kvengine::Engine,
     shards: Arc<Vec<RawRegion>>,
     shard_meta_getter: RegionMetaGetter,
-    truncate_ts: u64,
     batch_size: usize,
     txn_status: TxnStatus,
     // `cm` is actually not used but meet the requirement of `MvccTxn`.
@@ -48,7 +47,6 @@ impl LockResolver {
     pub fn new(
         tag: &str,
         en: kvengine::Engine,
-        truncate_ts: u64,
         batch_size: usize,
         shard_meta_getter: RegionMetaGetter,
     ) -> Self {
@@ -65,7 +63,6 @@ impl LockResolver {
             en,
             shards,
             shard_meta_getter,
-            truncate_ts,
             batch_size,
             txn_status,
             cm: concurrency_manager::ConcurrencyManager::new(1.into()),
@@ -125,14 +122,10 @@ impl LockResolver {
         let mut start = Key::from_raw(&shard.outer_start);
         let end = Key::from_raw(&shard.outer_end);
         loop {
-            // We don't resolve locks with timestamp > max_ts, as they will be
-            // truncated even if they are committed.
-            let (kv_pairs, is_remain) = reader.scan_locks(
-                Some(&start),
-                Some(&end),
-                |lock| lock.ts.into_inner() <= self.truncate_ts,
-                self.batch_size,
-            )?;
+            // Resolve all locks, because LOCK_CF can't be truncated during truncate_ts. And
+            // the lock value in LOCK_CF is invalid for the new keyspace.
+            let (kv_pairs, is_remain) =
+                reader.scan_locks(Some(&start), Some(&end), |_| true, self.batch_size)?;
             info!("{} scan_locks", self.tag; "shard_id" => shard_id, "locks" => ?kv_pairs);
             if is_remain {
                 let mut raw_last = kv_pairs
@@ -156,14 +149,18 @@ impl LockResolver {
                 if commit_ts > 0 {
                     Self::commit_lock(&self.tag, &mut mvcc_txn, key, &lock, commit_ts.into())?;
                     locks_cnt += 1;
+                } else {
+                    // Rollback lock.
+                    Self::rollback(&self.tag, &mut mvcc_txn, key)?;
+                    locks_cnt += 1;
+                }
 
-                    if mvcc_txn.write_size() >= DEFAULT_TXN_BATCH_SIZE {
-                        let mt = std::mem::replace(
-                            &mut mvcc_txn,
-                            MvccTxn::new(TimeStamp::zero(), self.cm.clone()),
-                        );
-                        self.apply(&shard, mt)?;
-                    }
+                if mvcc_txn.write_size() >= DEFAULT_TXN_BATCH_SIZE {
+                    let mt = std::mem::replace(
+                        &mut mvcc_txn,
+                        MvccTxn::new(TimeStamp::zero(), self.cm.clone()),
+                    );
+                    self.apply(&shard, mt)?;
                 }
             }
 
@@ -175,6 +172,12 @@ impl LockResolver {
         if !mvcc_txn.is_empty() {
             self.apply(&shard, mvcc_txn)?;
         }
+
+        // Confirm all locks have been resolved.
+        let start = Key::from_raw(&shard.outer_start);
+        let (kv_pairs, _) = reader.scan_locks(Some(&start), Some(&end), |_| true, 1)?;
+        assert_eq!(kv_pairs.len(), 0, "{} has more locks to resolve", self.tag);
+
         Ok(locks_cnt)
     }
 
@@ -206,9 +209,24 @@ impl LockResolver {
         .set_last_change(lock.last_change_ts, lock.versions_to_last_change)
         .set_txn_source(lock.txn_source);
 
-        txn.put_write(key, commit_ts, write.as_ref().to_bytes());
-        // It's not necessary to unlock key. The lock will be removed on applying
-        // commit.
+        txn.put_write(key.clone(), commit_ts, write.as_ref().to_bytes());
+        // `unlock_key` only used to build resolve locks requests, and then will be
+        // ignored. The lock will be removed on applying commit.
+        txn.unlock_key(
+            key,
+            true,              // unused
+            TimeStamp::zero(), // unused
+        );
+        Ok(())
+    }
+
+    fn rollback(tag: &str, txn: &mut MvccTxn, key: Key) -> Result<()> {
+        info!("{} rollback", tag; "key" => ?key);
+        txn.unlock_key(
+            key,
+            true,              // unused
+            TimeStamp::zero(), // unused
+        );
         Ok(())
     }
 
@@ -228,7 +246,7 @@ impl LockResolver {
             )?;
 
         let mut write_data = WriteData::from_modifies(txn.into_modifies());
-        write_data.set_req_type(ReqType::Commit); // We don't rollback locks, so `Commit` is used.
+        write_data.set_req_type(ReqType::ResolveLock);
         let custom_req = modifies_to_requests(&kvrpcpb::Context::default(), &mut write_data);
         rfstore::store::apply_custom_log_in_recover(
             &self.en,
