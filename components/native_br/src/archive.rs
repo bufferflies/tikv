@@ -29,7 +29,7 @@ use crate::{
 pub const DEFAULT_MAX_ARCHIVE_FILE_SIZE: u64 = 1024 * 1024 * 1024;
 const ARCHIVE_PATH_PREFIX: &str = "archive";
 
-pub const LOAD_FILE_CONCURRENCY: usize = 256;
+pub const LOAD_FILE_CONCURRENCY: usize = 64;
 pub const OBJECT_ADDR_SIZE: usize = 20;
 
 /// Magic Number of the Archive index file. It's picked by running
@@ -139,6 +139,7 @@ pub struct ArchiveConfig {
     pub max_archive_file_size: u64,
     pub start_archive_duration: Duration,
     pub expiration_date: String,
+    pub concurrency: usize,
     pub dry_run: bool,
 }
 
@@ -154,6 +155,7 @@ impl ArchiveConfig {
             max_archive_file_size: DEFAULT_MAX_ARCHIVE_FILE_SIZE,
             start_archive_duration: Duration::from_secs(0),
             expiration_date,
+            concurrency: LOAD_FILE_CONCURRENCY,
             dry_run: true,
         }
     }
@@ -303,6 +305,7 @@ fn write_archive_packages_and_index(
     if !config.dry_run {
         let mut writer = ArchiveWriter::new(
             config.max_archive_file_size,
+            config.concurrency,
             s3fs,
             format_date,
             archive_backup.meta_data,
@@ -730,6 +733,7 @@ impl ArchiveIndex {
 
 struct ArchiveWriter {
     max_size: u64,
+    concurrency: usize,
     package_id: u32,
     index: ArchiveIndex,
     buf: Vec<u8>,
@@ -738,13 +742,20 @@ struct ArchiveWriter {
 }
 
 impl ArchiveWriter {
-    fn new(max_size: u64, s3fs: Arc<S3Fs>, date: String, meta_data: Bytes) -> Self {
+    fn new(
+        max_size: u64,
+        concurrency: usize,
+        s3fs: Arc<S3Fs>,
+        date: String,
+        meta_data: Bytes,
+    ) -> Self {
         let package_id: u32 = 0;
         let mut buf = Vec::new();
         let meta_address = ObjectAddress::new(package_id, buf.len() as u64, meta_data.len() as u64);
         buf.extend_from_slice(meta_data.as_bytes());
         Self {
             max_size,
+            concurrency,
             package_id,
             index: ArchiveIndex::new(meta_address),
             buf,
@@ -763,7 +774,7 @@ impl ArchiveWriter {
                 let res = s3fs.read_file(file_id, Options::new(0, 0)).await;
                 let _ = tx.send(res.map(|sst_data| (file_id, sst_data)));
             });
-            if msg_count < LOAD_FILE_CONCURRENCY {
+            if msg_count < self.concurrency {
                 msg_count += 1;
             } else {
                 self.recv_sst_data(&result_rx)?;
@@ -1114,7 +1125,7 @@ mod tests {
         assert!(!meta_data.is_empty());
         let backup_date = chrono::Utc::now().date_naive();
         let format_date = archive_format_date(&backup_date);
-        let mut writer = ArchiveWriter::new(1024, s3fs.clone(), format_date.clone(), meta_data);
+        let mut writer = ArchiveWriter::new(1024, 16, s3fs.clone(), format_date.clone(), meta_data);
         let mut file_ids = Vec::with_capacity(NUM_FILE_IDS as usize);
         for file_id in 0..NUM_FILE_IDS {
             file_ids.push(file_id)
@@ -1216,7 +1227,8 @@ mod tests {
             let meta_data = Bytes::from(cluster_meta.write_to_bytes().unwrap());
             let backup_date = get_date(j);
             let format_date = archive_format_date(&backup_date);
-            let mut writer = ArchiveWriter::new(512, s3fs.clone(), format_date.clone(), meta_data);
+            let mut writer =
+                ArchiveWriter::new(512, 16, s3fs.clone(), format_date.clone(), meta_data);
             let mut file_ids = Vec::with_capacity(num_file_ids as usize);
             for i in 0..num_file_ids {
                 let file_id = get_file_id(j, i);

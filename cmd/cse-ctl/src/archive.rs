@@ -3,7 +3,9 @@
 use std::{path::PathBuf, time::Duration};
 
 use clap::Args;
-use native_br::archive::{archive_with_cfg, ArchiveConfig, DEFAULT_MAX_ARCHIVE_FILE_SIZE};
+use native_br::archive::{
+    archive_with_cfg, ArchiveConfig, DEFAULT_MAX_ARCHIVE_FILE_SIZE, LOAD_FILE_CONCURRENCY,
+};
 use tikv_util::{config::ReadableDuration, info};
 
 #[derive(Args)]
@@ -33,6 +35,9 @@ pub struct ArchiveArgs {
     /// "%Y%m%d". e.g. 20060102
     #[clap(long, default_value_t = String::new())]
     pub expiration_date: String,
+    /// Concurrently do s3 requests.
+    #[clap(long, default_value_t = LOAD_FILE_CONCURRENCY)]
+    pub concurrency: usize,
     #[clap(long)]
     pub dry_run: bool,
 }
@@ -61,6 +66,7 @@ fn get_archive_config_from_args(args: &ArchiveArgs) -> ArchiveConfig {
     config.max_archive_file_size = args.max_archive_file_size;
     config.start_archive_duration = Duration::from(args.start_archive_duration);
     config.expiration_date = args.expiration_date.clone();
+    config.concurrency = args.concurrency;
     config.dry_run = args.dry_run;
     config.dfs.override_from_env();
     config.security.master_key.override_from_env();
