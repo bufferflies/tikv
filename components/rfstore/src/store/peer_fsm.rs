@@ -895,13 +895,13 @@ impl<'a> PeerMsgHandler<'a> {
         // ReadIndex can be processed on the replicas.
         let is_read_index_request =
             request.len() == 1 && request[0].get_cmd_type() == CmdType::ReadIndex;
-        let mut read_only = true;
-        for r in msg.get_requests() {
-            match r.get_cmd_type() {
-                CmdType::Get | CmdType::Snap | CmdType::ReadIndex => (),
-                _ => read_only = false,
-            }
-        }
+        let read_only = !msg.get_requests().is_empty()
+            && msg.get_requests().iter().all(|r| {
+                matches!(
+                    r.get_cmd_type(),
+                    CmdType::Get | CmdType::Snap | CmdType::ReadIndex
+                )
+            });
         let allow_replica_read = read_only && msg.get_header().get_replica_read();
         let flags = WriteBatchFlags::from_bits_check(msg.get_header().get_flags());
         let allow_stale_read = read_only && flags.contains(WriteBatchFlags::STALE_READ);
