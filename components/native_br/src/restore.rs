@@ -18,7 +18,7 @@ use rfstore::store::load_region_state;
 use security::{GetSecurityManager, SecurityConfig};
 use tikv::config::TikvConfig;
 use tikv_util::{
-    config::{ensure_dir_exist, ReadableSize},
+    config::{ensure_dir_exist, ReadableDuration, ReadableSize},
     debug, info, warn,
 };
 
@@ -443,7 +443,12 @@ async fn restore_pd_keyspace_meta(
     );
 }
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Debug, Default)]
+const DEFAULT_WAL_TARGET_SIZE: ReadableSize = ReadableSize::mb(512);
+pub const DEFAULT_TIMEOUT_WAIT_FLUSH: ReadableDuration = ReadableDuration::minutes(10);
+pub const DEFAULT_TIMEOUT_RESTORE_SNAPSHOT: ReadableDuration = ReadableDuration::minutes(10);
+pub const DEFAULT_RESTORE_MAX_RETRY: usize = 30;
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
 pub struct RestoreConfig {
@@ -453,4 +458,28 @@ pub struct RestoreConfig {
     pub skip_resolve_lock: bool,
     pub wal_target_size: ReadableSize,
     pub new_store_id_delta: u64,
+
+    /// The timeout for waiting the flush of mem-tables.
+    pub timeout_wait_flush: ReadableDuration,
+    /// The timeout for the requests of restoring snapshots to TiKV servers.
+    pub timeout_restore_snapshot: ReadableDuration,
+    /// The maximum number of retries for the process from split regions to
+    /// restore snapshots.
+    pub max_retry: usize,
+}
+
+impl Default for RestoreConfig {
+    fn default() -> Self {
+        Self {
+            pd: Default::default(),
+            security: Default::default(),
+            dfs: Default::default(),
+            skip_resolve_lock: false,
+            wal_target_size: DEFAULT_WAL_TARGET_SIZE,
+            new_store_id_delta: 0,
+            timeout_wait_flush: DEFAULT_TIMEOUT_WAIT_FLUSH,
+            timeout_restore_snapshot: DEFAULT_TIMEOUT_RESTORE_SNAPSHOT,
+            max_retry: DEFAULT_RESTORE_MAX_RETRY,
+        }
+    }
 }

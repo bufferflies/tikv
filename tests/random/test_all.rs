@@ -11,7 +11,7 @@ use futures::executor::block_on;
 use kvengine::dfs::DFSConfig;
 use kvproto::pdpb::CheckPolicy;
 use load_data::task::LoadDataConfig;
-use native_br::{backup, backup_worker};
+use native_br::{backup, backup_worker, restore::RestoreConfig};
 use pd_client::PdClient;
 use rand::Rng;
 use security::SecurityConfig;
@@ -103,12 +103,20 @@ fn test_random_all() {
         ),
         spawn_major_compact(cluster.get_pd_client(), keyspace_manager.clone(), TIMEOUT),
     ];
+
+    let restore_config = RestoreConfig {
+        dfs: dfs_config.clone(),
+        security: security_conf.clone(),
+        timeout_wait_flush: ReadableDuration::secs(30),
+        timeout_restore_snapshot: ReadableDuration::secs(30),
+        max_retry: 20,
+        ..Default::default()
+    };
     for _ in 0..RESTORE_CONCURRENCY {
         handles.push(spawn_restore_keyspace(
             cluster.get_pd_client(),
             runtime.block_on(cluster.new_keyspace_client()),
-            dfs_config.clone(),
-            security_conf.clone(),
+            restore_config.clone(),
             keyspace_manager.clone(),
             TIMEOUT,
         ));

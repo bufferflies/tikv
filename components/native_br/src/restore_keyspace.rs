@@ -63,9 +63,6 @@ use crate::{
 const WORKING_PATH_PREFIX: &str = "keyspace-restore";
 const ZSTD_COMPRESSION_LEVEL: &str = "5"; // The same as ZSTD_COMPRESSION_LEVEL_FOR_REMOTE.
 
-const REQUEST_RESTORE_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(30);
-const RESTORE_KEYSPACE_MAX_RETRY: usize = 20;
-
 const REPLICAS: usize = 3; // Number of replicas for each region.
 const QUORUM_REPLICAS: usize = REPLICAS / 2 + 1; // Number of replicas to form a quorum.
 
@@ -168,7 +165,7 @@ pub fn restore_keyspace_with_cfg(
         backup_name,
         working_path,
         s3fs,
-        config.security,
+        config,
         pd_client,
         runtime,
         truncate_ts,
@@ -182,7 +179,7 @@ pub fn restore_keyspace(
     backup_name: &str,
     working_path: Option<&str>,
     s3fs: Arc<S3Fs>,
-    security_conf: SecurityConfig,
+    config: RestoreConfig,
     pd_client: Arc<dyn PdClient>,
     runtime: &Runtime,
     truncate_ts: Option<u64>,
@@ -245,6 +242,13 @@ pub fn restore_keyspace(
         cluster_backup.safe_ts,
         truncate_ts,
     );
+    info!("{} restore config", keyspace_tag;
+        "skip_resolve_lock" => config.skip_resolve_lock,
+        "wal_target_size" => ?config.wal_target_size,
+        "new_store_id_delta" => config.new_store_id_delta,
+        "timeout_wait_flush" => ?config.timeout_wait_flush,
+        "timeout_restore_snapshot" => ?config.timeout_restore_snapshot,
+        "max_retry" => config.max_retry);
     debug!(
         "Keyspace {} get cluster backup meta: {:?}",
         keyspace_tag, cluster_backup
@@ -260,7 +264,7 @@ pub fn restore_keyspace(
         working_path,
         pd_client.clone(),
         s3fs.clone(),
-        security_conf,
+        config.security.clone(),
         keyspace_id,
         target_keyspace_id,
         truncate_ts,
@@ -299,7 +303,7 @@ pub fn restore_keyspace(
     // Trigger initial flush & flush mem-table to S3
     // NOTE: `cluster.shards` is NOT available before `flush_shards` finished.
     reporter.report_step(RestoreStep::FlushShards);
-    let flush_cnt = cluster.flush_shards()?;
+    let flush_cnt = cluster.flush_shards(config.timeout_wait_flush.0)?;
     step!("Keyspace {keyspace_tag} flush {flush_cnt} shards");
 
     reporter.report_step(RestoreStep::TruncateTs);
@@ -326,7 +330,7 @@ pub fn restore_keyspace(
     let mut last_error = None;
     let mut restore_bytes = 0;
     loop {
-        if retry > RESTORE_KEYSPACE_MAX_RETRY {
+        if retry > config.max_retry {
             return Err(RetryLimitExceeded(Box::new(last_error.unwrap())));
         }
         retry += 1;
@@ -416,7 +420,7 @@ pub fn restore_keyspace(
             pd_client.clone(),
             snapshots,
             &mut success_ranges,
-            REQUEST_RESTORE_SNAPSHOT_TIMEOUT,
+            config.timeout_restore_snapshot.0,
         )?;
         restore_bytes += ret.restore_bytes;
         step!(
@@ -1430,7 +1434,10 @@ impl BackupCluster {
         self.shards_need_flush.extend(shard_ids);
     }
 
-    pub fn flush_shards(&mut self) -> Result<usize /* number of flushed shards */> {
+    pub fn flush_shards(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<usize /* number of flushed shards */> {
         let kv_engine = self.kv_engine.as_ref().unwrap();
         // TODO: run in parallel.
         for &shard_id in &self.shards_need_flush {
@@ -1440,7 +1447,7 @@ impl BackupCluster {
             kv_engine.flush_shard_for_restore(&engine_shard);
         }
 
-        self.check_flushed(Duration::from_secs(30))?;
+        self.check_flushed(timeout)?;
 
         // Take back from meta_applier.
         let mut shards = self.meta_applier.as_ref().unwrap().take_shards().unwrap();

@@ -16,13 +16,13 @@ use kvproto::metapb;
 use native_br::{
     archive, backup,
     common::now,
+    restore::RestoreConfig,
     restore_keyspace,
     restore_keyspace::{ReportRestoreStepTrait, RestoreStep},
     step,
 };
 use pd_client::PdClient;
 use rand::Rng;
-use security::SecurityConfig;
 use test_cloud_server::{
     client::{CommitAction, RequestOptions, RequestPeerRole},
     oss::prepare_dfs,
@@ -395,7 +395,7 @@ fn test_restore_keyspace_impl(
         &snapshot_backup_name,
         None,
         s3fs.clone(),
-        SecurityConfig::default(),
+        RestoreConfig::default(),
         cluster.get_pd_client(),
         runtime,
         truncate_ts,
@@ -439,7 +439,7 @@ fn test_restore_keyspace_impl(
             &instant_backup_name,
             None,
             s3fs,
-            SecurityConfig::default(),
+            RestoreConfig::default(),
             cluster.get_pd_client(),
             runtime,
             Some(truncate_ts_pitr),
@@ -673,7 +673,7 @@ fn test_restore_archived_keyspace_impl(
                 &snapshot_backup_name,
                 None,
                 s3fs.clone(),
-                SecurityConfig::default(),
+                RestoreConfig::default(),
                 cluster.get_pd_client(),
                 runtime,
                 None,
@@ -830,7 +830,7 @@ fn test_restore_keyspace_with_resolve_locks() {
         &snapshot_backup_name,
         None,
         s3fs,
-        SecurityConfig::default(),
+        RestoreConfig::default(),
         cluster.get_pd_client(),
         &runtime,
         None,

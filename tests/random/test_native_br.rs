@@ -6,17 +6,16 @@ use std::{
     time::Duration,
 };
 
-use kvengine::dfs::{DFSConfig, S3Fs};
+use kvengine::dfs::S3Fs;
 use native_br::{
     backup_worker,
     error::Error,
-    restore::get_cluster_backup_meta,
+    restore::{get_cluster_backup_meta, RestoreConfig},
     restore_keyspace,
     restore_keyspace::{ReportRestoreStepTrait, RestoreStep},
 };
 use pd_client::PdClient;
 use rand::Rng;
-use security::SecurityConfig;
 use test_cloud_server::{
     client::ClusterClient,
     keyspace::{ClusterKeyspaceClient, KeyspaceManager},
@@ -30,14 +29,14 @@ use crate::{BACKUP_COUNTER, RESTORE_COUNTER};
 pub(crate) fn do_restore_keyspace(
     pd_client: Arc<dyn PdClient>,
     runtime: &Runtime,
-    dfs_config: DFSConfig,
-    security_config: SecurityConfig,
+    config: RestoreConfig,
     keyspace: u32,
     target_keyspace: u32,
     backup_name: &str,
     truncate_ts: Option<u64>,
     reporter: Arc<dyn ReportRestoreStepTrait>,
 ) -> native_br::Result<restore_keyspace::RestoredKeyspace> {
+    let dfs_config = config.dfs.clone();
     let s3fs = Arc::new(S3Fs::new(
         dfs_config.prefix,
         dfs_config.s3_endpoint,
@@ -52,7 +51,7 @@ pub(crate) fn do_restore_keyspace(
         backup_name,
         None,
         s3fs,
-        security_config,
+        config,
         pd_client,
         runtime,
         truncate_ts,
@@ -163,8 +162,7 @@ pub(crate) fn check_br() {
 pub(crate) fn spawn_restore_keyspace(
     pd_client: Arc<dyn PdClient>,
     mut client: ClusterKeyspaceClient,
-    dfs_config: DFSConfig,
-    security_config: SecurityConfig,
+    config: RestoreConfig,
     keyspace_manager: KeyspaceManager,
     timeout: Duration,
 ) -> JoinHandle<()> {
@@ -218,8 +216,7 @@ pub(crate) fn spawn_restore_keyspace(
                 match do_restore_keyspace(
                     pd_client.clone(),
                     &runtime,
-                    dfs_config.clone(),
-                    security_config.clone(),
+                    config.clone(),
                     source_keyspace,
                     target_keyspace,
                     &backup_name,
@@ -255,6 +252,7 @@ pub(crate) fn spawn_restore_keyspace(
                     10,
                 );
                 if verify_res.is_err() {
+                    let dfs_config = config.dfs.clone();
                     let s3fs = S3Fs::new(
                         dfs_config.prefix,
                         dfs_config.s3_endpoint,

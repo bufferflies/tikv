@@ -17,6 +17,7 @@ use native_br::{
     backup::IncrementalBackupFile,
     backup_worker::BackupWorker,
     common::get_all_incremental_backups,
+    restore,
     restore_keyspace::{
         restore_keyspace_with_cfg, ReportRestoreStepTrait, RestoreStep, RestoredKeyspace,
     },
@@ -50,9 +51,8 @@ pub(crate) const RESTORE_KEYSPACE_API_PATH: &str = "/api/v1/restore_keyspace/";
 /// 1. backup:
 ///   * GET    /api/v1/backups?cluster_id=%d&last_backup_time=<JSON_TIME_FORMAT>
 ///
-/// 2. restore keyspace:
-///    Specify backup_id&backup_name for normal restore or point_in_time for
-///    pitr
+/// 2. restore keyspace: Specify backup_id&backup_name for normal restore or
+///    point_in_time for pitr
 ///   * PUT    /api/v1/restore_keyspace/<restore_id>?cluster_id=%d&keyspace=%s&
 ///     backup_id=%d&backup_name=%s[&source_keyspace=%s]&
 ///     point_in_time=<JSON_TIME_FORMAT>
@@ -833,10 +833,18 @@ impl Drop for BrContext {
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
 pub struct NativeBrConfig {
-    // The time-to-live when restore task has been in final state.
+    /// The time-to-live when restore task has been in final state.
     restore_task_ttl: ReadableDuration,
-    // Enable lightweight instant backup during restore.
+    /// Enable lightweight instant backup during restore.
     enable_lightweight_backup: bool,
+
+    /// The timeout for waiting the flush of mem-tables.
+    pub restore_timeout_wait_flush: ReadableDuration,
+    /// The timeout for the requests of restoring snapshots to TiKV servers.
+    pub restore_timeout_restore_snapshot: ReadableDuration,
+    /// The maximum number of retries for the process from split regions to
+    /// restore snapshots.
+    pub restore_max_retry: usize,
 }
 
 impl Default for NativeBrConfig {
@@ -844,6 +852,9 @@ impl Default for NativeBrConfig {
         Self {
             restore_task_ttl: ReadableDuration::minutes(60),
             enable_lightweight_backup: false,
+            restore_timeout_wait_flush: restore::DEFAULT_TIMEOUT_WAIT_FLUSH,
+            restore_timeout_restore_snapshot: restore::DEFAULT_TIMEOUT_RESTORE_SNAPSHOT,
+            restore_max_retry: restore::DEFAULT_RESTORE_MAX_RETRY,
         }
     }
 }
