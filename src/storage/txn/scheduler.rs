@@ -693,6 +693,15 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
                 let tag = task.cmd.tag();
                 SCHED_STAGE_COUNTER_VEC.get(tag).snapshot.inc();
 
+                if !task.cmd.readonly() {
+                    // TiDB may incorrectly set `replica_read` to true when retrying even for write
+                    // commands. So we fix the flags here.
+                    // See https://github.com/tidbcloud/cloud-storage-engine/issues/1211.
+                    let ctx = task.cmd.ctx_mut();
+                    ctx.set_replica_read(false);
+                    ctx.set_stale_read(false);
+                }
+
                 let mut snap_ctx = SnapContext {
                     pb_ctx: task.cmd.ctx(),
                     ..Default::default()
