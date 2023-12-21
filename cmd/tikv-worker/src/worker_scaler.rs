@@ -16,8 +16,9 @@ use http::Uri;
 use k8s_openapi::{
     api::{
         apps::v1::StatefulSet,
-        core::v1::{EnvVar, PersistentVolumeClaim, Pod},
+        core::v1::{EnvVar, PersistentVolumeClaim, Pod, Service, ServicePort, ServiceSpec},
     },
+    apimachinery::pkg::{apis::meta::v1::ObjectMeta, util::intstr::IntOrString},
     serde_json,
 };
 use kube::{
@@ -44,7 +45,10 @@ const DEFAULT_TEMPLATE_STS_NAME: &str = "tikv-api";
 const DEFAULT_WORKER_COUNT_LIMIT: usize = 1024;
 
 const K8S_LABEL_NAME: &str = "app.kubernetes.io/name";
+const K8S_LABEL_SERVICE: &str = "app.kubernetes.io/service";
 const K8S_NAMESPACE_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/namespace";
+
+const NETWORK_PROTOCOL: &str = "TCP";
 
 pub const LOAD_DATA_WORKER_ENV: &str = "TIKV_LOAD_DATA_WORKER";
 
@@ -105,6 +109,7 @@ impl Deref for WorkerScaler {
 pub(crate) struct WorkerScalerCore {
     sts_template: StatefulSet,
     sts_api: Api<StatefulSet>,
+    svc_api: Api<Service>,
     pvc_api: Api<PersistentVolumeClaim>,
     pod_api: Api<Pod>,
     config: WorkerScalerConfig,
@@ -121,7 +126,7 @@ pub(crate) struct WorkerPod {
     name: String,
     started_at: i64,
     updated_at: i64,
-    ip: Option<String>,
+    svc_name: String,
     canceled: bool,
     finished_at: i64,
     flushed_files: usize,
@@ -130,7 +135,7 @@ pub(crate) struct WorkerPod {
 }
 
 impl WorkerPod {
-    fn new(pod: &Pod) -> Self {
+    fn new(task_id: &str, pod: &Pod) -> Self {
         let mut worker_pod = Self::default();
         worker_pod.name = pod.name_any();
         if let Some(status) = &pod.status {
@@ -138,7 +143,7 @@ impl WorkerPod {
                 worker_pod.started_at = start.0.timestamp();
                 worker_pod.updated_at = start.0.timestamp();
             }
-            worker_pod.ip = status.pod_ip.clone();
+            worker_pod.svc_name = new_worker_svc_name(task_id);
         }
         worker_pod
     }
@@ -231,6 +236,7 @@ impl WorkerScaler {
         let pvc_api: Api<PersistentVolumeClaim> =
             Api::namespaced(kube_client.clone(), &cfg.namespace);
         let sts_api: Api<StatefulSet> = Api::namespaced(kube_client.clone(), &cfg.namespace);
+        let svc_api: Api<Service> = Api::namespaced(kube_client.clone(), &cfg.namespace);
         let pod_api: Api<Pod> = Api::namespaced(kube_client.clone(), &cfg.namespace);
         let sts_template = sts_api.get(&cfg.template_sts_name).await?;
         let pvc_template_name = sts_template
@@ -251,6 +257,7 @@ impl WorkerScaler {
         let worker_scaler = Self {
             core: Arc::new(WorkerScalerCore {
                 sts_template,
+                svc_api,
                 sts_api,
                 pvc_api,
                 pod_api,
@@ -287,13 +294,16 @@ impl WorkerScaler {
         let list_params = ListParams::default()
             .labels(&self.config.label_selector())
             .timeout(15);
+        // TODO: the number of pods may not be consistent with the number of sts.
         let mut pods = self.pod_api.list(&list_params).await?;
         let mut pods_map = self.pods_map.lock().await;
         for pod in pods.items.drain(..) {
             let name = pod.name_any();
             let task_id = parse_task_id_by_pod_name(name.as_str());
+            assert!(!task_id.is_empty());
             info!("load pod {} task {}", name, task_id);
-            pods_map.insert(task_id, WorkerPod::new(&pod));
+            let worker_pod = WorkerPod::new(&task_id, &pod);
+            pods_map.insert(task_id, worker_pod);
         }
         Ok(())
     }
@@ -320,10 +330,7 @@ impl WorkerScaler {
         for pvc in pvcs.items.iter_mut() {
             let name = pvc.name_any();
             let task_id = parse_task_id_by_pvc_name(&name, &self.pvc_template_name);
-            if task_id.is_empty() {
-                error!("failed to parse task id from pvc name {}", name);
-                continue;
-            }
+            assert!(!task_id.is_empty());
             if !pods_map.contains_key(&task_id) {
                 orphan_pvc_tasks.push(task_id);
             }
@@ -348,25 +355,32 @@ impl WorkerScaler {
                     self.config.worker_count_limit
                 )));
             }
+
             match pods_map.entry(task_id.to_string()) {
-                Entry::Occupied(e) => {
-                    if e.get().ip.is_some() {
-                        return Ok(e.get().clone());
-                    }
+                Entry::Occupied(_) => {
+                    // don't return directly because the pod may be not ready.
                 }
                 Entry::Vacant(e) => {
                     let num_cores = calculate_num_cores(data_size_gb, self.config.worker_max_cores);
                     let storage_size_gb = max(data_size_gb * 2, WORKER_MIN_STORAGE_GB);
                     let sts_name = new_worker_sts_name(task_id);
+                    let svc_name = new_worker_svc_name(task_id);
                     self.create_sts(sts_name.clone(), num_cores, storage_size_gb)
                         .await?;
-                    info!("created sts {:?}", sts_name);
+                    self.create_svc(
+                        svc_name.clone(),
+                        sts_name.clone(),
+                        self.config.worker_port as i32,
+                    )
+                    .await?;
+                    info!("created sts {:?} with svc {:?}", sts_name, svc_name);
                     let mut worker_pod = WorkerPod::default();
                     worker_pod.name = new_worker_pod_name(task_id);
                     e.insert(worker_pod);
                 }
             }
         }
+
         let worker_pod = self
             .wait_worker_pod_ready(task_id, Duration::from_secs(60 * 5))
             .await?;
@@ -402,7 +416,8 @@ impl WorkerScaler {
         let pod_metadata = pod_template.metadata.as_mut().unwrap();
         pod_metadata.labels = Some(
             serde_json::from_value(json!({
-                K8S_LABEL_NAME: self.config.name.clone()
+                K8S_LABEL_NAME: self.config.name.clone(),
+                K8S_LABEL_SERVICE: sts_name.clone(),
             }))
             .unwrap(),
         );
@@ -483,7 +498,7 @@ impl WorkerScaler {
             }
             let status = pod.status.as_ref().unwrap();
             if status.phase == Some("Running".into()) {
-                return Ok(WorkerPod::new(&pod));
+                return Ok(WorkerPod::new(task_id, &pod));
             }
         }
     }
@@ -492,6 +507,13 @@ impl WorkerScaler {
         let sts_name = new_worker_sts_name(task_id);
         if let Err(err) = self.sts_api.delete(&sts_name, &Default::default()).await {
             warn!("delete sts {} err {:?}", sts_name, err);
+        }
+    }
+
+    async fn delete_svc(&self, task_id: &str) {
+        let svc_name = new_worker_svc_name(task_id);
+        if let Err(err) = self.svc_api.delete(&svc_name, &Default::default()).await {
+            warn!("delete sts {} err {:?}", svc_name, err);
         }
     }
 
@@ -547,7 +569,17 @@ impl WorkerScaler {
     async fn maybe_clean_up(&self, task_id: &str) {
         let mut pods_map = self.pods_map.lock().await;
         let worker_pod_opt = pods_map.get_mut(task_id);
-        if worker_pod_opt.is_none() || worker_pod_opt.as_ref().unwrap().ip.is_none() {
+        if worker_pod_opt.is_none() {
+            return;
+        }
+        let pod_name = new_worker_pod_name(task_id);
+        let pod = self.pod_api.get(&pod_name).await;
+        if let Err(err) = pod {
+            warn!("get pod {} err {:?}", pod_name, err);
+            return;
+        }
+        let pod = pod.unwrap();
+        if pod.status.is_none() || pod.status.unwrap().phase.unwrap() != "Running" {
             return;
         }
         let worker_pod = worker_pod_opt.unwrap();
@@ -557,19 +589,18 @@ impl WorkerScaler {
         if worker_pod.canceled {
             info!("clean up task {}", task_id);
             self.delete_sts(task_id).await;
+            self.delete_svc(task_id).await;
             self.delete_pvc(task_id).await;
             pods_map.remove(task_id);
         }
     }
 
     pub(crate) fn get_worker_addr(&self, worker_pod: &WorkerPod) -> Option<String> {
-        let ip = worker_pod.ip.as_ref()?;
+        let svc_name = worker_pod.svc_name.as_str();
         self.security_mgr
             .build_uri(format!(
-                "{}.{}.pod.cluster.local:{}/load_data",
-                ip.replace('.', "-"),
-                &self.config.namespace,
-                self.config.worker_port,
+                "{}.{}.svc.cluster.local:{}/load_data",
+                svc_name, &self.config.namespace, self.config.worker_port,
             ))
             .ok()
             .map(|uri| uri.to_string())
@@ -588,14 +619,61 @@ impl WorkerScaler {
     pub(crate) fn get_worker_tasks_url(&self, worker_addr: String) -> String {
         format!("{}?cluster_id={}", worker_addr, self.cluster_id)
     }
+
+    pub(crate) async fn create_svc(
+        &self,
+        name: String,
+        service: String,
+        port: i32,
+    ) -> kube::Result<()> {
+        let svc = Service {
+            metadata: ObjectMeta {
+                name: Some(name.clone()),
+                ..Default::default()
+            },
+            spec: Some(ServiceSpec {
+                // create a headless svc
+                cluster_ip: None,
+                selector: Some(
+                    [
+                        (K8S_LABEL_NAME.to_string(), self.config.name.to_string()),
+                        (K8S_LABEL_SERVICE.to_string(), service.to_string()),
+                    ]
+                    .iter()
+                    .cloned()
+                    .collect(),
+                ),
+                ports: Some(vec![ServicePort {
+                    name: Some(format!("{}-port", name)),
+                    port,
+                    protocol: Some(NETWORK_PROTOCOL.to_string()),
+                    target_port: Some(IntOrString::Int(port)),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        info!("create svc {}", name);
+        self.svc_api.create(&PostParams::default(), &svc).await?;
+        Ok(())
+    }
 }
 
 fn parse_task_id_by_pod_name(pod_name: &str) -> String {
     // pod name format: load-data-worker-{task-id}-0
     // task-id: {lightning-task-id}-{table-id}-{engine-id}
+    // example:
+    //  load-data-worker-1701753296955293956-139-0-0 or
+    //  load-data-worker-1701753296955293956-139--1-0
+    //
     let fields: Vec<&str> = pod_name.split('-').collect();
     if fields.len() == 7 {
+        // load-data-worker-1701753296955293956-139-0-0
         return format!("{}-{}-{}", fields[3], fields[4], fields[5]);
+    } else if fields.len() == 8 {
+        //  load-data-worker-1701753296955293956-139--1-0
+        return format!("{}-{}--{}", fields[3], fields[4], fields[6]);
     }
     "".to_string()
 }
@@ -606,12 +684,18 @@ fn parse_task_id_by_pvc_name(pvc_name: &str, pvc_template_name: &str) -> String 
     let fields: Vec<&str> = pvc_name[pvc_template_name.len()..].split('-').collect();
     if fields.len() == 8 {
         return format!("{}-{}-{}", fields[4], fields[5], fields[6]);
+    } else if fields.len() == 9 {
+        return format!("{}-{}--{}", fields[4], fields[5], fields[7]);
     }
     "".to_string()
 }
 
 fn new_worker_sts_name(task_id: &str) -> String {
     format!("load-data-worker-{}", task_id)
+}
+
+fn new_worker_svc_name(task_id: &str) -> String {
+    format!("load-data-worker-{}-service", task_id)
 }
 
 fn new_worker_pod_name(task_id: &str) -> String {
@@ -652,14 +736,15 @@ mod tests {
     use load_data::task::LoadTaskStates;
 
     use crate::worker_scaler::{
-        new_worker_pod_name, new_worker_pvc_name, parse_task_id_by_pod_name,
+        new_worker_pod_name, new_worker_pvc_name, new_worker_svc_name, parse_task_id_by_pod_name,
         parse_task_id_by_pvc_name, WorkerPod,
     };
 
     #[test]
     fn test_worker_pod_update() {
         let mut pod = Pod::default();
-        pod.metadata.name = Some("load-data-worker-1-0".to_string());
+        let task_id = "taskid-1-0";
+        pod.metadata.name = Some(new_worker_pod_name(task_id));
         pod.status = Some(Default::default());
         let status = pod.status.as_mut().unwrap();
         status.pod_ip = Some("127.0.0.1".to_string());
@@ -667,9 +752,10 @@ mod tests {
         status.start_time = Some(Time(now));
         let now_ts = now.timestamp();
 
-        let mut worker_pod = WorkerPod::new(&pod);
+        let mut worker_pod = WorkerPod::new(task_id, &pod);
         assert_eq!(worker_pod.started_at, now_ts);
         assert_eq!(worker_pod.updated_at, now_ts);
+        assert_eq!(worker_pod.svc_name, new_worker_svc_name(task_id));
 
         // worker pod is not canceled if no task states and not expired.
         worker_pod.update_task_states(None, now_ts + 40, 60);
@@ -680,14 +766,14 @@ mod tests {
         assert!(worker_pod.canceled);
 
         // worker pod is canceled if task is empty and expired.
-        worker_pod = WorkerPod::new(&pod);
+        worker_pod = WorkerPod::new(task_id, &pod);
         worker_pod.update_task_states(Some(vec![]), now_ts + 100, 60);
         assert!(worker_pod.canceled);
 
         // worker pod is canceled if task is canceled.
         let mut task_states = LoadTaskStates::default();
         task_states.canceled = true;
-        worker_pod = WorkerPod::new(&pod);
+        worker_pod = WorkerPod::new(task_id, &pod);
         worker_pod.update_task_states(Some(vec![task_states]), now_ts + 100, 60);
         assert!(worker_pod.canceled);
 
@@ -695,7 +781,7 @@ mod tests {
         // finish time.
         let mut task_states = LoadTaskStates::default();
         task_states.finished = true;
-        worker_pod = WorkerPod::new(&pod);
+        worker_pod = WorkerPod::new(task_id, &pod);
         worker_pod.update_task_states(Some(vec![task_states.clone()]), now_ts + 100, 60);
         // worker pod is not canceled if task finished duration not exceed expire time.
         assert!(!worker_pod.canceled);
@@ -704,7 +790,7 @@ mod tests {
         assert!(worker_pod.canceled);
 
         // worker pod is canceled if not finished and no progress for a long time.
-        worker_pod = WorkerPod::new(&pod);
+        worker_pod = WorkerPod::new(task_id, &pod);
         task_states = LoadTaskStates::default();
         task_states.created_files = 1;
         worker_pod.update_task_states(Some(vec![task_states.clone()]), now_ts + 100, 60);
@@ -724,14 +810,16 @@ mod tests {
 
     #[test]
     fn test_parse_task_id() {
-        let task_id = "taskid-1-0";
-        let pvc_template_name = "data0";
-        let pod_name = new_worker_pod_name(task_id);
-        let pvc_name = new_worker_pvc_name(pvc_template_name, task_id);
-        assert_eq!(task_id, parse_task_id_by_pod_name(pod_name.as_str()));
-        assert_eq!(
-            task_id,
-            parse_task_id_by_pvc_name(pvc_name.as_str(), pvc_template_name)
-        );
+        let task_ids = vec!["taskid-1-0", "taskid-1--0"];
+        for task_id in task_ids {
+            let pvc_template_name = "data0";
+            let pod_name = new_worker_pod_name(task_id);
+            let pvc_name = new_worker_pvc_name(pvc_template_name, task_id);
+            assert_eq!(task_id, parse_task_id_by_pod_name(pod_name.as_str()));
+            assert_eq!(
+                task_id,
+                parse_task_id_by_pvc_name(pvc_name.as_str(), pvc_template_name)
+            );
+        }
     }
 }
