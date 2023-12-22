@@ -10,7 +10,7 @@ mod server;
 mod worker_scaler;
 
 use std::{
-    io,
+    fs, io,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -277,6 +277,11 @@ fn main() {
             worker_scaler.run().await;
         });
     }
+
+    if !config.data_dir.is_empty() {
+        fs::create_dir_all(&config.data_dir).unwrap();
+    }
+
     let load_manager = Arc::new(LoadDataManager::new(
         pd.clone(),
         config.data_dir.clone().into(),

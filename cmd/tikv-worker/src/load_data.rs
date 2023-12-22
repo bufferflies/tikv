@@ -288,9 +288,11 @@ impl LoadDataManager {
             return;
         }
 
-        let check_point_dir = LocalFileCheckPointStorage::get_check_point_file_dir();
-        if !check_point_dir.is_dir() {
-            return;
+        let mut check_point_dir = self.ctx.dir.clone();
+
+        if check_point_dir.as_os_str().is_empty() {
+            // Use current dir.
+            check_point_dir = PathBuf::from(".");
         }
 
         let files = fs::read_dir(check_point_dir).unwrap();

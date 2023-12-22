@@ -348,7 +348,7 @@ impl LoadTaskWorker {
 
         // Init checkpoint info.
         let mut check_point_store =
-            LocalFileCheckPointStorage::new(check_point_ctx.clone()).unwrap();
+            LocalFileCheckPointStorage::new(check_point_ctx.clone(), context.dir.clone()).unwrap();
         if !check_point_ctx.get_is_recover() {
             check_point_store.flush_check_point_ctx().unwrap();
             check_point_store.print_log();

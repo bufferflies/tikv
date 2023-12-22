@@ -1,13 +1,6 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{
-    collections::HashMap,
-    fs,
-    fs::OpenOptions,
-    io::Write,
-    path::{Path, PathBuf},
-    sync::Mutex,
-};
+use std::{collections::HashMap, fs, fs::OpenOptions, io::Write, path::PathBuf, sync::Mutex};
 
 use bytes::Bytes;
 use serde_derive::{Deserialize, Serialize};
@@ -22,7 +15,6 @@ use crate::{
 
 pub type Result<T> = std::result::Result<T, Error>;
 pub const CHECKPOINT_WORKER_PREFIX: &str = "LOAD_DATA_CHECK_POINT_";
-pub const CHECKPOINT_FILE_DIR: &str = "load_data_checkpoint";
 lazy_static::lazy_static! {
     static ref FILE_LOCK: Mutex<()> = Mutex::new(());
 }
@@ -191,31 +183,18 @@ pub struct LocalFileCheckPointStorage {
 }
 
 impl LocalFileCheckPointStorage {
-    pub fn get_check_point_file_dir() -> PathBuf {
-        return Path::new(CHECKPOINT_FILE_DIR).to_path_buf();
-    }
-
     pub fn get_file_name_by_taskid(task_id: String) -> String {
         CHECKPOINT_WORKER_PREFIX.to_string() + &task_id
     }
-    pub fn new(check_point_ctx: LoadDataCheckPointCtx) -> Result<Self> {
-        let data_path = LocalFileCheckPointStorage::get_check_point_file_dir();
+    pub fn new(check_point_ctx: LoadDataCheckPointCtx, data_path: PathBuf) -> Result<Self> {
         let file_name =
             LocalFileCheckPointStorage::get_file_name_by_taskid(check_point_ctx.clone().task_id);
-        if !data_path.is_dir() {
-            LocalFileCheckPointStorage::init_data_dir(data_path.clone())?;
-        }
 
         Ok(Self {
             data_path,
             file_name,
             check_point_ctx,
         })
-    }
-
-    fn init_data_dir(data_path: PathBuf) -> Result<()> {
-        fs::create_dir_all(data_path)?;
-        Ok(())
     }
 
     fn check_point_ctx_to_binary(&self) -> Vec<u8> {
@@ -231,16 +210,17 @@ impl LocalFileCheckPointStorage {
         // Get mutex lock.
         let _lock = FILE_LOCK.lock();
 
-        if !Path::new(CHECKPOINT_FILE_DIR).to_path_buf().is_dir() {
-            LocalFileCheckPointStorage::init_data_dir(self.data_path.clone())?;
-        }
+        let tmp_file_path = self.file_name.clone() + ".tmp";
+        let tmp_file = self.data_path.join(tmp_file_path);
 
         let mut file = OpenOptions::new()
             .write(true)
             .truncate(true)
             .create(true)
-            .open(self.get_file_path())?;
+            .open(&tmp_file)?;
         file.write_all(content)?;
+
+        fs::rename(tmp_file, self.get_file_path())?;
         Ok(())
     }
 
@@ -382,27 +362,6 @@ impl LocalFileCheckPointStorage {
     }
 
     pub fn load_check_point_ctx(&self) -> LoadDataCheckPointCtx {
-        // When restart tikv worker, it need read check point ctx from storage.
-        if !self.data_path.is_dir() {
-            info!(
-                "{} [check point store] loaded file not exists {},",
-                self.check_point_ctx.task_id,
-                self.data_path
-                    .clone()
-                    .into_os_string()
-                    .into_string()
-                    .unwrap()
-            );
-            let task_ctx = TaskContext::default();
-
-            let check_point = LoadDataCheckPointCtx::new(task_ctx);
-            info!(
-                "{} [check point store] loaded check point:{:?},",
-                self.check_point_ctx.task_id, check_point
-            );
-            return check_point;
-        }
-
         let file_data = LocalFileCheckPointStorage::read_file(self.get_file_path());
         let check_point = LocalFileCheckPointStorage::binary_to_check_point(file_data.as_str());
         info!(
@@ -431,7 +390,10 @@ mod tests {
         };
         let check_point = LoadDataCheckPointCtx::new(task_ctx);
 
-        let mut store = LocalFileCheckPointStorage::new(check_point).unwrap();
+        let data_dir = "tikv_worker_dir";
+        fs::create_dir_all(data_dir).unwrap();
+        let mut store =
+            LocalFileCheckPointStorage::new(check_point, PathBuf::from(data_dir)).unwrap();
         store
             .flush_check_point_ctx_with_state(expect_state)
             .unwrap();
@@ -535,6 +497,8 @@ mod tests {
         let loaddata_checkpoint_msg = store.load_check_point_ctx();
         assert_eq!(sst_meta, loaddata_checkpoint_msg.sst_metas[0]);
         assert_eq!(entry, loaddata_checkpoint_msg.duplicated_entries[0]);
+
+        fs::remove_dir_all(data_dir).unwrap();
     }
 
     #[test]
