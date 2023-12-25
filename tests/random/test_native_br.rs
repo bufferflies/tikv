@@ -21,10 +21,11 @@ use test_cloud_server::{
     keyspace::{ClusterKeyspaceClient, KeyspaceManager},
     try_wait_result,
 };
+use test_pd_client::TestPdClient;
 use tikv_util::{info, time::Instant, warn};
 use tokio::runtime::Runtime;
 
-use crate::{BACKUP_COUNTER, RESTORE_COUNTER};
+use crate::{create_new_keyspace, BACKUP_COUNTER, RESTORE_COUNTER};
 
 pub(crate) fn do_restore_keyspace(
     pd_client: Arc<dyn PdClient>,
@@ -160,7 +161,7 @@ pub(crate) fn check_br() {
 }
 
 pub(crate) fn spawn_restore_keyspace(
-    pd_client: Arc<dyn PdClient>,
+    pd_client: Arc<TestPdClient>,
     mut client: ClusterKeyspaceClient,
     config: RestoreConfig,
     keyspace_manager: KeyspaceManager,
@@ -188,8 +189,17 @@ pub(crate) fn spawn_restore_keyspace(
             };
 
             let source_keyspace = backup.keyspace_id;
-            // TODO: test data branching.
-            let target_keyspace = source_keyspace;
+            let branching = rng.gen_bool(0.5);
+            let target_keyspace = if branching {
+                let new_keyspace = create_new_keyspace(&pd_client, &keyspace_manager, 0, &mut rng);
+                info!(
+                    "branching restore {}->{}, create new keyspace",
+                    source_keyspace, new_keyspace
+                );
+                new_keyspace
+            } else {
+                source_keyspace
+            };
             let backup_name = backup.backup_name().to_string();
             let tag = format!("{}->{}[{}]", source_keyspace, target_keyspace, backup_name);
 

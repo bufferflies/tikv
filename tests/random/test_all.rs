@@ -283,8 +283,9 @@ fn prepare_cluster(
     let mut keys = vec![];
     let mut keyspaces: Vec<u32> = vec![];
     let mut data_keys = vec![];
-    for keyspace_id in 0..initial_keyspace_count {
-        let keyspace_id = keyspace_id as u32;
+    for _ in 0..initial_keyspace_count {
+        // New keyspace must allocated by keyspace manager to avoid conflicts.
+        let keyspace_id = cluster.keyspace_manager().new_keyspace_id(1);
         keyspaces.push(keyspace_id);
         keys.push(ApiV2::get_txn_keyspace_prefix(keyspace_id));
         let i_to_key = generate_keyspace_key(keyspace_id);

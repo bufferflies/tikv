@@ -1681,6 +1681,22 @@ impl DeletePrefixes {
         }
         ranges
     }
+
+    pub fn rewrite_range_prefix(&mut self, prefix: &[u8]) {
+        assert_eq!(prefix.len(), self.inner_key_off, "unexpected prefix.len()");
+
+        // If the prefixes is empty or the prefixes no need to update, return.
+        if self.prefixes.is_empty() || self.prefixes.first().unwrap().starts_with(prefix) {
+            return;
+        }
+        let offset = self.inner_key_off;
+        self.prefixes.iter_mut().for_each(|p| {
+            p[0..offset].copy_from_slice(prefix);
+        });
+        self.prefixes_nexts.iter_mut().for_each(|p| {
+            p[0..offset].copy_from_slice(prefix);
+        });
+    }
 }
 
 pub fn merge_del_prefixes_if_needed(
@@ -2107,5 +2123,21 @@ mod tests {
         assert_eq!(range.keyspace_id, 0);
         range = ShardRange::new(&[b't', 0, 0, 0], &[], 0);
         assert_eq!(range.keyspace_id, 0);
+    }
+
+    #[test]
+    fn test_rewrite_range_prefix() {
+        let mut del_prefix = DeletePrefixes::new_with_inner_key_off(4);
+        del_prefix = del_prefix.merge_prefix("0000-01".as_bytes());
+        del_prefix = del_prefix.merge_prefix("0000-10".as_bytes());
+        del_prefix = del_prefix.merge_prefix("0000-21".as_bytes());
+        assert!(del_prefix.prefixes.contains(&"0000-01".as_bytes().to_vec()));
+        assert!(del_prefix.prefixes.contains(&"0000-10".as_bytes().to_vec()));
+        assert!(del_prefix.prefixes.contains(&"0000-21".as_bytes().to_vec()));
+
+        del_prefix.rewrite_range_prefix("1111".as_bytes());
+        assert!(del_prefix.prefixes.contains(&"1111-01".as_bytes().to_vec()));
+        assert!(del_prefix.prefixes.contains(&"1111-10".as_bytes().to_vec()));
+        assert!(del_prefix.prefixes.contains(&"1111-21".as_bytes().to_vec()));
     }
 }

@@ -21,7 +21,7 @@ use http::{Request, StatusCode, Uri};
 use hyper::Body;
 use kvproto::{metapb::Store, pdpb::CheckPolicy};
 use pd_client::PdClient;
-use rand::{prelude::SliceRandom, Rng, RngCore};
+use rand::{prelude::SliceRandom, rngs::ThreadRng, Rng, RngCore};
 use security::SecurityConfig;
 use test_cloud_server::{
     client::{ClusterClient, ClusterTxnClient},
@@ -516,24 +516,33 @@ pub fn spawn_create_keyspace(
         while start_time.saturating_elapsed() < timeout {
             sleep(Duration::from_secs(rng.gen_range(0..5)));
 
-            let max_keyspace = keyspace_manager.max_keyspace_id().unwrap();
-            let new_keyspace = rng.gen_range(max_keyspace + 1..=max_keyspace + 3);
-
-            must_split_region_for_keyspace(&pd_client, new_keyspace);
-            // Don't shuffle keyspaces. Otherwise we will not have a few big keyspaces.
-            // Note that the new keyspace will has less chance to be written.
-            keyspace_manager.create_keyspaces(
-                &[new_keyspace],
-                DEFAULT_INNER_KEY_OFFSET,
-                initial_table_count,
-                None,
-            );
-
-            KEYSPACE_COUNTER.fetch_add(1, Ordering::Relaxed);
-            TABLE_COUNTER.fetch_add(initial_table_count, Ordering::Relaxed);
+            let _ =
+                create_new_keyspace(&pd_client, &keyspace_manager, initial_table_count, &mut rng);
         }
         info!("create keyspace thread exit");
     })
+}
+
+fn create_new_keyspace(
+    pd_client: &Arc<TestPdClient>,
+    keyspace_manager: &KeyspaceManager,
+    initial_table_count: usize,
+    rng: &mut ThreadRng,
+) -> u32 {
+    let delta = rng.gen_range(1..=3);
+    let new_keyspace = keyspace_manager.new_keyspace_id(delta);
+    must_split_region_for_keyspace(pd_client, new_keyspace);
+    // Don't shuffle keyspaces. Otherwise we will not have a few big keyspaces.
+    keyspace_manager.create_keyspaces(
+        &[new_keyspace],
+        DEFAULT_INNER_KEY_OFFSET,
+        initial_table_count,
+        None,
+    );
+    KEYSPACE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    TABLE_COUNTER.fetch_add(initial_table_count, Ordering::Relaxed);
+
+    new_keyspace
 }
 
 fn must_split_region_for_keyspace(pd_client: &TestPdClient, keyspace_id: u32) {

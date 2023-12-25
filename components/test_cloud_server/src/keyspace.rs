@@ -3,7 +3,7 @@
 use std::{
     fmt, mem, ops,
     ops::{Deref, DerefMut, Range},
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{atomic::AtomicU32, Arc, Mutex, MutexGuard},
     time::Duration,
 };
 
@@ -46,12 +46,13 @@ pub struct KeyspaceManagerCore {
     ref_stores: KeyspaceRefStores,
     backups: Mutex<Vec<KeyspaceBackup>>,
     random: Mutex<RandomHelper>,
+    max_keyspace_id: AtomicU32,
 }
 
 impl KeyspaceManagerCore {
     pub fn create_keyspaces(
         &self,
-        keyspace_ids: &[u32],
+        keyspace_ids: &[u32], // keyspace_ids must be allocated by new_keyspace_id().
         inner_key_off: usize,
         table_count: usize,
         need_shuffle: Option<&mut ThreadRng>,
@@ -86,8 +87,12 @@ impl KeyspaceManagerCore {
         self.random.lock().unwrap().zipf_choose(rng)
     }
 
-    pub fn max_keyspace_id(&self) -> Option<u32> {
-        self.keyspaces.iter().map(|item| *item.key()).max()
+    pub fn new_keyspace_id(&self, delta: u32) -> u32 {
+        assert!(delta > 0);
+        self.max_keyspace_id
+            .fetch_add(delta, std::sync::atomic::Ordering::AcqRel)
+            + delta
+            - 1 // to generate keyspace id starts from 0.
     }
 
     pub fn get_all_keyspaces(&self) -> Vec<u32> {
@@ -104,9 +109,13 @@ impl KeyspaceManagerCore {
         self.keyspaces.get(&keyspace_id)
     }
 
-    fn set_keyspace_meta(&self, keyspace_id: u32, meta: KeyspaceMetaCore) {
+    fn set_keyspace_meta(&self, keyspace_id: u32, mut meta: KeyspaceMetaCore) {
         let mut keyspace = self.keyspaces.get_mut(&keyspace_id).unwrap();
         assert_eq!(keyspace.inner_key_off, meta.inner_key_off);
+
+        // Rewrite the del_prefixes with new keyspace prefix.
+        let keyspace_prefix = ApiV2::get_txn_keyspace_prefix(keyspace_id);
+        meta.del_prefixes.rewrite_range_prefix(&keyspace_prefix);
 
         info!(
             "KeyspaceManager.set_keyspace_meta, keyspace_id {}, old {:?}, new {:?}",
@@ -150,11 +159,14 @@ impl KeyspaceManagerCore {
 
     pub fn restore_keyspace(&self, tag: &str, backup: KeyspaceBackup, target_keyspace: u32) {
         let KeyspaceBackup {
-            ref_store, meta, ..
+            ref_store,
+            meta,
+            keyspace_id,
+            ..
         } = backup;
         self.set_keyspace_meta(target_keyspace, meta);
         self.ref_stores
-            .restore_keyspace(tag, ref_store, target_keyspace);
+            .restore_keyspace(tag, ref_store, keyspace_id, target_keyspace);
     }
 
     pub fn drop_table(&self, keyspace_id: u32, table_id: i64, ts: u64) {
@@ -633,10 +645,22 @@ impl KeyspaceRefStores {
             .clone()
     }
 
-    pub fn restore_keyspace(&self, tag: &str, ref_store: RefStore, target_keyspace_id: u32) {
+    pub fn restore_keyspace(
+        &self,
+        tag: &str,
+        mut ref_store: RefStore,
+        keyspace_id: u32,
+        target_keyspace_id: u32,
+    ) {
         if ref_store.is_empty() {
             info!("{} ref store is empty in backup", tag);
         }
+
+        if keyspace_id != target_keyspace_id {
+            // Convert the keyspace prefix in ref store to the target keyspace.
+            ref_store.rewrite_keyspace_prefix(target_keyspace_id);
+        }
+
         let target_ref_store = self.get_keyspace_ref_store(target_keyspace_id);
         let mut target_ref_store = target_ref_store.lock().unwrap();
         *target_ref_store = ref_store;

@@ -14,7 +14,10 @@ use std::{
     time::Duration,
 };
 
-use api_version::api_v2::TXN_KEY_PREFIX;
+use api_version::{
+    api_v2::{self, TXN_KEY_PREFIX},
+    ApiV2, KvFormat,
+};
 use futures::executor::block_on;
 use grpcio::Channel;
 use kvengine::ShardTag;
@@ -93,6 +96,20 @@ impl RefStore {
                 *v = None;
             }
         }
+    }
+
+    pub fn rewrite_keyspace_prefix(&mut self, target_keyspace_id: u32) {
+        let old_ref_store = std::mem::take(&mut self.0);
+        let target_prefix = ApiV2::get_txn_keyspace_prefix(target_keyspace_id);
+        let inner = old_ref_store
+            .into_iter()
+            .map(|(mut k, v)| {
+                assert_eq!(ApiV2::parse_key_mode(&k), api_version::KeyMode::Txn);
+                k[0..api_v2::KEYSPACE_PREFIX_LEN].copy_from_slice(&target_prefix);
+                (k, v)
+            })
+            .collect::<HashMap<_, _>>();
+        self.0 = inner;
     }
 }
 
