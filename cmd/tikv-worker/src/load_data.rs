@@ -21,7 +21,7 @@ use load_data::{
     },
 };
 use pd_client::PdClient;
-use tikv_util::debug;
+use tikv_util::{debug, info};
 
 use crate::{
     common::{get_body, get_param, make_response},
@@ -100,6 +100,7 @@ pub(crate) async fn handle_load_data(
                 let worker_scaler = manager.worker_scaler.as_ref().unwrap();
                 let worker_pod_addr = worker_scaler.get_worker_addr_by_task_id(&task_id).await;
                 if let Some(addr) = worker_pod_addr {
+                    info!("Get worker addr from cache:{}", addr);
                     let resp = Response::builder()
                         .header("Location", addr)
                         .status(StatusCode::FOUND)
@@ -148,6 +149,21 @@ pub(crate) async fn handle_load_data(
                         ),
                     ));
                 }
+
+                if manager.worker_scaler.is_some() {
+                    let worker_scaler = manager.worker_scaler.as_ref().unwrap();
+                    let worker_addr = worker_scaler.get_worker_addr_by_task_id(&task_id).await;
+                    if let Some(addr) = worker_addr {
+                        info!("Get worker addr from cache:{}", addr);
+                        let resp = Response::builder()
+                            .header("Location", addr)
+                            .status(StatusCode::FOUND)
+                            .body(Body::empty())
+                            .unwrap();
+                        return Ok(resp);
+                    }
+                }
+
                 let spawn_load_data_worker = manager.worker_scaler.is_some()
                     && (data_size > manager.worker_scaler_conf.spawn_data_size.0
                         || (manager.running_tasks.len()
@@ -162,6 +178,7 @@ pub(crate) async fn handle_load_data(
                     match worker_pod_res {
                         Ok(worker_pod) => {
                             let worker_addr = worker_scaler.get_worker_addr(&worker_pod).unwrap();
+                            info!("Get worker addr:{}", worker_addr);
                             let resp = Response::builder()
                                 .header("Location", worker_addr)
                                 .status(StatusCode::FOUND)
