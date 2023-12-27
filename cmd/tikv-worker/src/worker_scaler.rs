@@ -154,6 +154,9 @@ impl WorkerPod {
         now_timestamp: i64,
         expire_seconds: i64,
     ) {
+        if self.started_at == 0 {
+            return;
+        }
         if self.started_at > 0 {
             let start_duration_secs = now_timestamp - self.started_at;
             if start_duration_secs < expire_seconds {
