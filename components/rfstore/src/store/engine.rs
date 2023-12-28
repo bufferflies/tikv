@@ -68,6 +68,10 @@ impl KvWriteBatch {
             Entry::Vacant(v) => v.insert(kvengine::WriteBatch::new(region_id, inner_key_off)),
         }
     }
+
+    pub(crate) fn remove_engine_wb(&mut self, region_id: u64) -> Option<kvengine::WriteBatch> {
+        self.batches.remove(&region_id)
+    }
 }
 
 #[derive(Clone)]

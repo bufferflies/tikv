@@ -667,6 +667,12 @@ impl Applier {
                 }
                 ExecResult::SplitRegion { regions } => {
                     self.region = regions.last().unwrap().clone();
+                    // `inner_key_off` of the applier may be updated after split, reset
+                    // to None after split done. E.g. region a ['x001', 'x003') split to region b
+                    // ['x001', 'x002') and region a ['x002', 'x003'). Region a's inner_key_offset
+                    // will change from 0 to 4 if inner key enabled.
+                    self.inner_key_offset = None;
+                    ctx.wb.remove_engine_wb(self.region_id());
                 }
                 ExecResult::DeleteRange { .. } => {}
                 ExecResult::UnsafeDestroy { .. } => {}
