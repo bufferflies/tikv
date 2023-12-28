@@ -56,8 +56,19 @@ pub struct PdControl {
 
 impl PdControl {
     pub fn new(config: Config, security_mgr: Arc<SecurityManager>) -> Result<Self> {
+        let mut endpoints = Vec::with_capacity(config.endpoints.len());
+        for endpoint in &config.endpoints {
+            let url = if endpoint.starts_with("http://") {
+                endpoint.strip_prefix("http://").unwrap()
+            } else if endpoint.starts_with("https://") {
+                endpoint.strip_prefix("https://").unwrap()
+            } else {
+                endpoint
+            };
+            endpoints.push(url.to_string());
+        }
         Ok(Self {
-            endpoints: config.endpoints,
+            endpoints,
             security_mgr,
         })
     }
@@ -74,7 +85,7 @@ impl PdControl {
             let uri = self.security_mgr.build_uri(format!("{endpoint}/{path}"))?;
             let req = Request::builder()
                 .method(method.clone())
-                .uri(uri)
+                .uri(uri.clone())
                 .body(match body_data {
                     Some(ref data) => Body::from(data.to_owned()),
                     None => Body::empty(),
@@ -82,7 +93,13 @@ impl PdControl {
                 .unwrap();
             let resp = client.request(req).await;
             match resp {
-                Err(e) => err = Some(box_err!(e)),
+                Err(e) => {
+                    err = Some(box_err!(
+                        "PD uri[{}] error: {}",
+                        uri.to_string(),
+                        e.to_string()
+                    ))
+                }
                 Ok(resp) => {
                     let status = resp.status();
                     let body = hyper::body::to_bytes(resp.into_body()).await.unwrap();
