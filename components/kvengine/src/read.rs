@@ -472,7 +472,7 @@ impl SnapAccessCore {
             } else {
                 tbl.get(inner_key.deref(), version)
             };
-            path.mem_table += 1;
+            path.mem_table = path.mem_table.saturating_add(1);
             if v.is_valid() {
                 out_val_owner.resize(v.encoded_size(), 0);
                 v.encode(out_val_owner.as_mut_slice());
