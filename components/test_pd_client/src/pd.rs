@@ -1041,10 +1041,6 @@ impl TestPdClient {
             .take_region_epoch()
     }
 
-    pub fn get_regions_number(&self) -> usize {
-        self.cluster.rl().get_regions_number()
-    }
-
     pub fn disable_default_operator(&self) {
         self.cluster.wl().enable_peer_count_check = false;
     }
@@ -1148,15 +1144,6 @@ impl TestPdClient {
 
     pub fn add_region(&self, region: &metapb::Region) {
         self.cluster.wl().add_region(region)
-    }
-
-    pub fn transfer_leader(&self, region_id: u64, peer: metapb::Peer, peers: Vec<metapb::Peer>) {
-        let op = Operator::TransferLeader {
-            peer,
-            peers,
-            policy: SchedulePolicy::TillSuccess,
-        };
-        self.schedule_operator(region_id, op);
     }
 
     pub fn try_transfer_leader(&self, region_id: u64, peer: metapb::Peer) {
@@ -1263,55 +1250,9 @@ impl TestPdClient {
         })
     }
 
-    pub fn split_region(
-        &self,
-        mut region: metapb::Region,
-        policy: pdpb::CheckPolicy,
-        keys: Vec<Vec<u8>>,
-    ) {
-        let op = Operator::SplitRegion {
-            region_epoch: region.take_region_epoch(),
-            policy,
-            keys,
-        };
-        self.schedule_operator(region.get_id(), op);
-    }
-
-    pub fn must_split_region(
-        &self,
-        mut region: metapb::Region,
-        policy: pdpb::CheckPolicy,
-        keys: Vec<Vec<u8>>,
-    ) {
-        let expect_region_count = self.get_regions_number()
-            + if policy == pdpb::CheckPolicy::Usekey {
-                keys.len()
-            } else {
-                1
-            };
-        self.split_region(region.clone(), policy, keys.clone());
-        for i in 1..500 {
-            sleep_ms(10);
-            if self.get_regions_number() == expect_region_count {
-                return;
-            }
-            if i % 50 == 0 {
-                // Region epoch may have been changed. Refresh every 500ms.
-                region = block_on(self.must_get_region_by_id(region.get_id())).unwrap();
-                self.split_region(region.clone(), policy, keys.clone());
-            }
-        }
-        panic!("region {:?} is still not split.", region);
-    }
-
     pub fn must_add_peer(&self, region_id: u64, peer: metapb::Peer) {
         self.add_peer(region_id, peer.clone());
         self.must_have_peer(region_id, peer);
-    }
-
-    pub fn must_remove_peer(&self, region_id: u64, peer: metapb::Peer) {
-        self.remove_peer(region_id, peer.clone());
-        self.must_none_peer(region_id, peer);
     }
 
     pub fn must_joint_confchange(
@@ -1326,25 +1267,6 @@ impl TestPdClient {
     pub fn must_leave_joint(&self, region_id: u64) {
         self.leave_joint(region_id);
         self.must_not_in_joint(region_id);
-    }
-
-    pub fn merge_region(&self, from: u64, target: u64) {
-        let op = Operator::MergeRegion {
-            source_region_id: from,
-            target_region_id: target,
-            policy: Arc::new(RwLock::new(SchedulePolicy::TillSuccess)),
-        };
-        self.schedule_operator(from, op.clone());
-        self.schedule_operator(target, op);
-    }
-
-    pub fn try_merge_region(&self, from: u64, target: u64) {
-        let op = Operator::MergeRegion {
-            source_region_id: from,
-            target_region_id: target,
-            policy: Arc::new(RwLock::new(SchedulePolicy::Repeat(5))),
-        };
-        self.schedule_operator(from, op);
     }
 
     pub fn must_merge(&self, from: u64, target: u64) {
@@ -1541,14 +1463,6 @@ impl TestPdClient {
 
     pub fn must_set_unsafe_recovery_plan(&self, store_id: u64, plan: pdpb::RecoveryPlan) {
         self.cluster.wl().set_unsafe_recovery_plan(store_id, plan)
-    }
-
-    pub fn get_buckets(&self, region_id: u64) -> Option<BucketStat> {
-        self.cluster.rl().buckets.get(&region_id).cloned()
-    }
-
-    pub fn get_all_regions(&self) -> Vec<metapb::Region> {
-        self.cluster.rl().regions.values().cloned().collect()
     }
 
     fn must_get_region_by_id(&self, region_id: u64) -> PdFuture<metapb::Region> {
@@ -2144,6 +2058,111 @@ impl PdClient for TestPdClient {
 
         let guard = self.keyspace_encryption.read().unwrap();
         Ok(guard.get(&keyspace_id).cloned().unwrap_or_default())
+    }
+
+    fn get_buckets(&self, region_id: u64) -> Option<BucketStat> {
+        self.cluster.rl().buckets.get(&region_id).cloned()
+    }
+
+    fn get_buckets_async(&self, region_id: u64) -> PdFuture<Option<BucketStat>> {
+        let buckets = self.get_buckets(region_id);
+        Box::pin(async move { Ok(buckets) })
+    }
+}
+
+impl PdClientExt for TestPdClient {
+    fn get_regions_number(&self) -> usize {
+        self.cluster.rl().get_regions_number()
+    }
+
+    fn get_all_regions(&self) -> Vec<metapb::Region> {
+        self.cluster.rl().regions.values().cloned().collect()
+    }
+
+    fn transfer_leader(&self, region_id: u64, peer: metapb::Peer, peers: Vec<metapb::Peer>) {
+        let op = Operator::TransferLeader {
+            peer,
+            peers,
+            policy: SchedulePolicy::TillSuccess,
+        };
+        self.schedule_operator(region_id, op);
+    }
+
+    fn region_leader_must_be(&self, region_id: u64, peer: metapb::Peer) {
+        for _ in 0..500 {
+            sleep_ms(10);
+            if let Some(p) = self.cluster.rl().leaders.get(&region_id) {
+                if *p == peer {
+                    return;
+                }
+            }
+        }
+        panic!("region {} must have leader: {:?}", region_id, peer);
+    }
+
+    fn must_remove_peer(&self, region_id: u64, peer: metapb::Peer) {
+        self.remove_peer(region_id, peer.clone());
+        self.must_none_peer(region_id, peer);
+    }
+
+    fn must_split_region(
+        &self,
+        mut region: metapb::Region,
+        policy: pdpb::CheckPolicy,
+        keys: Vec<Vec<u8>>,
+    ) {
+        let expect_region_count = self.get_regions_number()
+            + if policy == pdpb::CheckPolicy::Usekey {
+                keys.len()
+            } else {
+                1
+            };
+        self.split_region(region.clone(), policy, keys.clone());
+        for i in 1..500 {
+            sleep_ms(10);
+            if self.get_regions_number() == expect_region_count {
+                return;
+            }
+            if i % 50 == 0 {
+                // Region epoch may have been changed. Refresh every 500ms.
+                region = block_on(self.must_get_region_by_id(region.get_id())).unwrap();
+                self.split_region(region.clone(), policy, keys.clone());
+            }
+        }
+        panic!("region {:?} is still not split.", region);
+    }
+
+    fn split_region(
+        &self,
+        mut region: metapb::Region,
+        policy: pdpb::CheckPolicy,
+        keys: Vec<Vec<u8>>,
+    ) {
+        let op = Operator::SplitRegion {
+            region_epoch: region.take_region_epoch(),
+            policy,
+            keys,
+        };
+        self.schedule_operator(region.get_id(), op);
+    }
+
+    fn merge_region(&self, from: u64, target: u64) {
+        let op = Operator::MergeRegion {
+            source_region_id: from,
+            target_region_id: target,
+            policy: Arc::new(RwLock::new(SchedulePolicy::TillSuccess)),
+        };
+        self.schedule_operator(from, op.clone());
+        self.schedule_operator(target, op);
+    }
+
+    fn try_merge_region(&self, from: u64, target: u64) {
+        let op = Operator::MergeRegion {
+            source_region_id: from,
+            target_region_id: target,
+            policy: Arc::new(RwLock::new(SchedulePolicy::Repeat(5))),
+        };
+        self.schedule_operator(from, op);
     }
 }
 

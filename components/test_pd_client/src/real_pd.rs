@@ -1,0 +1,180 @@
+// Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
+
+use std::sync::Arc;
+
+use futures::executor::block_on;
+use grpcio::EnvBuilder;
+use kvproto::{metapb, pdpb};
+use pd_client::{pd_control::PdControl, Config, PdClient};
+use security::{GetSecurityManager, SecurityConfig, SecurityManager};
+use url::Url;
+
+use crate::{PdClientExt, TestPdClient};
+
+const SCAN_REGION_BATCH_SIZE: usize = 256;
+
+impl PdClientExt for pd_client::RpcClient {
+    fn get_regions_number(&self) -> usize {
+        let pd_ctl = get_pd_control(self).unwrap();
+        block_on(pd_ctl.get_regions_number()).unwrap() as usize
+    }
+
+    fn get_all_regions(&self) -> Vec<metapb::Region> {
+        let mut start = vec![];
+        let mut regions = vec![];
+        loop {
+            let pd_regions =
+                block_on(self.scan_regions(start.clone(), vec![], SCAN_REGION_BATCH_SIZE)).unwrap();
+            let len = pd_regions.len();
+            regions.extend(pd_regions.into_iter().map(|mut r| r.take_region()));
+            if len < SCAN_REGION_BATCH_SIZE {
+                break;
+            }
+            let end_key = regions.last().unwrap().get_end_key();
+            if end_key.is_empty() {
+                break;
+            }
+            start = end_key.to_vec();
+            start.push(0);
+        }
+
+        // TODO: remove this assertion. May not always be true as regions are changing.
+        assert_eq!(
+            regions.len(),
+            self.get_regions_number(),
+            "regions: {:?}",
+            regions
+        );
+        regions
+    }
+
+    fn transfer_leader(&self, _region_id: u64, _peer: metapb::Peer, _peers: Vec<metapb::Peer>) {
+        unimplemented!()
+    }
+    fn region_leader_must_be(&self, _region_id: u64, _peer: metapb::Peer) {
+        unimplemented!()
+    }
+    fn must_remove_peer(&self, _region_id: u64, _peer: metapb::Peer) {
+        unimplemented!()
+    }
+    fn must_split_region(
+        &self,
+        _region: metapb::Region,
+        _policy: pdpb::CheckPolicy,
+        _keys: Vec<Vec<u8>>,
+    ) {
+        unimplemented!()
+    }
+
+    fn split_region(
+        &self,
+        _region: metapb::Region,
+        _policy: pdpb::CheckPolicy,
+        _keys: Vec<Vec<u8>>,
+    ) {
+        unimplemented!()
+    }
+
+    fn merge_region(&self, _from: u64, _target: u64) {
+        unimplemented!()
+    }
+
+    fn try_merge_region(&self, _from: u64, _target: u64) {
+        unimplemented!()
+    }
+}
+
+/// Wrap for `TestPdClient` as well as the test PD server to provide RPC
+/// service.
+pub struct TestPd {
+    client: Arc<TestPdClient>,
+    _server: Option<test_pd::Server<crate::Service>>,
+    endpoints: Option<Vec<String>>,
+}
+
+impl TestPd {
+    pub fn client(&self) -> Arc<TestPdClient> {
+        self.client.clone()
+    }
+}
+
+pub struct RealPd {
+    client: Arc<pd_client::RpcClient>,
+    endpoints: Vec<String>,
+}
+
+/// A wrapper to provide an uniform interface for both real and test (mock) PD.
+pub enum PdWrapper {
+    Test(TestPd),
+    Real(RealPd),
+}
+
+impl PdWrapper {
+    /// No PD server when `pd_server_count` is zero.
+    pub fn new_test(pd_server_count: usize) -> Self {
+        let client = Arc::new(TestPdClient::new(1, false));
+        let server = (pd_server_count > 0).then(|| {
+            let pd_service = crate::Service::new(client.clone());
+            test_pd::Server::with_case(pd_server_count, Arc::new(pd_service))
+        });
+        let endpoints = server.as_ref().map(|s| {
+            s.bind_addrs()
+                .into_iter()
+                .map(|(host, port)| format!("{}:{}", host, port))
+                .collect::<Vec<_>>()
+        });
+        Self::Test(TestPd {
+            client,
+            _server: server,
+            endpoints,
+        })
+    }
+
+    pub fn new_real(endpoints: Vec<String>) -> Self {
+        let env = Arc::new(EnvBuilder::new().cq_count(1).build());
+        let mgr = Arc::new(SecurityManager::new(&SecurityConfig::default()).unwrap());
+        let cfg = pd_client::Config::new(endpoints.clone());
+        cfg.validate().unwrap();
+        let client = pd_client::RpcClient::new(&cfg, Some(env), mgr)
+            .unwrap_or_else(|e| panic!("failed to create rpc client: {:?}", e));
+        Self::Real(RealPd {
+            client: Arc::new(client),
+            endpoints,
+        })
+    }
+
+    pub fn client(&self) -> Arc<dyn PdClientExt> {
+        match self {
+            PdWrapper::Test(c) => c.client.clone(),
+            PdWrapper::Real(c) => c.client.clone(),
+        }
+    }
+
+    pub fn test_client(&self) -> Option<Arc<TestPdClient>> {
+        match self {
+            Self::Test(pd) => Some(pd.client.clone()),
+            Self::Real(_) => None,
+        }
+    }
+
+    pub fn endpoints(&self) -> Option<&[String]> {
+        match self {
+            PdWrapper::Test(c) => c.endpoints.as_deref(),
+            PdWrapper::Real(c) => Some(&c.endpoints),
+        }
+    }
+}
+
+fn get_pd_control(rpc: &pd_client::RpcClient) -> pd_client::pd_control::Result<PdControl> {
+    let endpoints: Vec<String> = rpc
+        .get_leader()
+        .get_client_urls()
+        .iter()
+        .map(|url| {
+            let url = Url::parse(url).unwrap();
+            format!("{}:{}", url.host_str().unwrap(), url.port().unwrap_or(2739))
+        })
+        .collect();
+
+    PdControl::new(Config::new(endpoints), rpc.get_security_mgr())
+}

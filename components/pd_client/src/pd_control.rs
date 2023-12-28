@@ -20,6 +20,7 @@ const PD_KEYSPACE_PATH: &str = "pd/api/v2/keyspaces";
 const PD_PLACEMENT_RULE_GROUP_PATH: &str = "pd/api/v1/config/placement-rule";
 const PD_PLACEMENT_RULE_PATH: &str = "pd/api/v1/config/rule";
 const TIFLASH_GROUP: &str = "tiflash";
+const PD_STATS_REGION: &str = "pd/api/v1/stats/region";
 
 #[derive(Default, Serialize, Deserialize, Debug)]
 #[serde(default)]
@@ -157,6 +158,19 @@ impl PdControl {
             Err(err) => Err(box_err!("delete tiflash rule error: {:?}", err)),
         }
     }
+
+    // Ref: https://github.com/tidbcloud/pd-cse/blob/release-7.1-keyspace/server/api/stats.go
+    pub async fn get_regions_number(&self) -> Result<i32> {
+        let path = format!("{PD_STATS_REGION}?start_key=&end_key=&count=true");
+        match self.request_pd_restful(path, Method::GET, None).await {
+            Ok(resp) => {
+                let region_stats: RegionStats = serde_json::from_slice(&resp)?;
+                debug!("get_regions_number: {}", region_stats.count);
+                Ok(region_stats.count)
+            }
+            Err(err) => Err(box_err!("get_regions_number error: {:?}", err)),
+        }
+    }
 }
 
 #[derive(Default, Serialize, Deserialize, Debug)]
@@ -199,4 +213,11 @@ pub struct PdScheduleConfig {
 #[serde(rename_all = "kebab-case")]
 pub struct PdConfigFromApi {
     pub schedule: PdScheduleConfig,
+}
+
+#[derive(Default, Serialize, Deserialize, Debug)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+pub struct RegionStats {
+    pub count: i32,
 }

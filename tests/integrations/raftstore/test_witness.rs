@@ -6,6 +6,7 @@ use futures::executor::block_on;
 use kvproto::{metapb, raft_cmdpb::ChangePeerRequest, raft_serverpb::PeerState};
 use pd_client::PdClient;
 use raft::eraftpb::ConfChangeType;
+use test_pd_client::PdClientExt;
 use test_raftstore::*;
 use tikv_util::store::find_peer;
 

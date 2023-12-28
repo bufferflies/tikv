@@ -8,6 +8,7 @@ use kvproto::{
     metapb::{Peer, Region},
     tikvpb::TikvClient,
 };
+use test_pd_client::PdClientExt;
 use test_raftstore::*;
 use tikv_util::{config::ReadableDuration, HandyRwLock};
 

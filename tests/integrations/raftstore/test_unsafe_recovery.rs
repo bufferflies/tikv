@@ -6,6 +6,7 @@ use futures::executor::block_on;
 use kvproto::{metapb, pdpb};
 use pd_client::PdClient;
 use raft::eraftpb::{ConfChangeType, MessageType};
+use test_pd_client::PdClientExt;
 use test_raftstore::*;
 use tikv_util::{config::ReadableDuration, store::find_peer, HandyRwLock};
 

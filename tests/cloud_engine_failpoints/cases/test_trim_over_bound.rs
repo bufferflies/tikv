@@ -1,7 +1,6 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
 use futures::executor::block_on;
-use pd_client::PdClient;
 use slog_global::info;
 use test_cloud_server::ServerCluster;
 use tikv_util::config::ReadableSize;

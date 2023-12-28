@@ -6,6 +6,7 @@ use std::{sync::atomic::AtomicU16, time::Duration};
 
 use futures::executor::block_on;
 use pd_client::PdClient;
+use test_pd_client::PdWrapper;
 use tikv_client::{IntoOwnedRange, TimestampExt};
 use tikv_util::{codec::bytes::encode_bytes, config::ReadableDuration, info};
 use tokio::runtime::Runtime;
@@ -179,12 +180,16 @@ fn test_client_split_region() {
 fn test_txn_client() {
     test_util::init_log_for_test();
     let node_ids = alloc_node_id_vec(3);
-    let mut cluster = ServerCluster::new(node_ids, |_, conf| {
-        conf.kvengine.max_del_range_delay = ReadableDuration(Duration::from_secs(1));
-    });
+    let pd_wrapper = PdWrapper::new_test(1);
+    let mut cluster = ServerCluster::new_opt(
+        node_ids,
+        |_, conf| {
+            conf.kvengine.max_del_range_delay = ReadableDuration(Duration::from_secs(1));
+        },
+        pd_wrapper,
+    );
 
     Runtime::new().unwrap().block_on(async {
-        cluster.start_pd_server(1);
         let mut txn_client = cluster.new_txn_client().await;
 
         // Check TSO.
@@ -269,6 +274,58 @@ fn test_txn_client() {
                 .unwrap();
             assert_eq!(verified, 200);
         }
+    });
+
+    cluster.stop();
+}
+
+// Start pd-server to run this test:
+//   bin/pd-server --client-urls http://127.0.0.1:4379 --peer-urls http://127.0.0.1:4380 --config pd-cse.toml
+// Note the pd-server must be cleared before test, otherwise cluster will fail
+// when put store.
+#[test]
+fn test_on_real_pd() {
+    test_util::init_log_for_test();
+
+    let pd_addrs = match std::env::var("PD_ADDRS") {
+        Ok(s) => s.split(',').map(|s| s.to_owned()).collect(),
+        Err(_) => {
+            info!("PD_ADDRS not set, skip test_on_real_pd");
+            return;
+        }
+    };
+
+    let runtime = Runtime::new().unwrap();
+    let _guard = runtime.enter();
+
+    let node_ids = alloc_node_id_vec(3);
+    let pd_wrapper = PdWrapper::new_real(pd_addrs);
+    let mut cluster = ServerCluster::new_opt(node_ids, |_, _| {}, pd_wrapper);
+
+    runtime.block_on(async {
+        let pd_client = cluster.get_pd_client_ext();
+        info!(
+            "cluster id {}, tso {:?}",
+            pd_client.get_cluster_id().unwrap(),
+            pd_client.get_tso().await.unwrap()
+        );
+
+        // Prepare data.
+        let mut client = cluster.new_client();
+        client.put_kv(0..100, i_to_key, i_to_val);
+        client.put_kv(100..200, i_to_key, i_to_val);
+        client.put_kv(200..300, i_to_key, i_to_val);
+        client.verify_data_with_ref_store();
+
+        let mut txn_client = cluster.new_txn_client().await;
+        let ref_store = client.dump_ref_store();
+        assert_eq!(
+            txn_client
+                .verify_data_by_scan(&ref_store, None)
+                .await
+                .unwrap(),
+            300
+        );
     });
 
     cluster.stop();

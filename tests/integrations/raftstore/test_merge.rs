@@ -12,6 +12,7 @@ use kvproto::{
 use pd_client::PdClient;
 use raft::eraftpb::{ConfChangeType, MessageType};
 use raftstore::store::{Callback, LocksStatus};
+use test_pd_client::PdClientExt;
 use test_raftstore::*;
 use tikv::storage::{
     kv::{SnapContext, SnapshotExt},

@@ -7,6 +7,7 @@ use engine_traits::{CfNamesExt, Iterable, Peekable, RaftEngineReadOnly, SyncMuta
 use kvproto::raft_serverpb::{PeerState, RaftMessage, RegionLocalState, StoreIdent};
 use protobuf::Message;
 use raft::eraftpb::MessageType;
+use test_pd_client::PdClientExt;
 use test_raftstore::*;
 use tikv_util::{config::*, time::Instant};
 

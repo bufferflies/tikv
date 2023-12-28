@@ -16,6 +16,7 @@ use pd_client::PdClient;
 use rand::Rng;
 use security::SecurityConfig;
 use test_cloud_server::{oss::prepare_dfs, try_wait_result, ServerCluster};
+use test_pd_client::{PdClientExt, PdWrapper};
 use tikv_util::{
     config::{ReadableDuration, ReadableSize},
     info,
@@ -272,8 +273,8 @@ fn prepare_cluster(
         conf.kvengine.compaction_tombs_count = 100;
         conf.kvengine.max_del_range_delay = ReadableDuration(Duration::from_secs(3));
     };
-    let mut cluster = ServerCluster::new(nodes, update_conf_fn);
-    cluster.start_pd_server(1);
+    let pd_wrapper = PdWrapper::new_test(1);
+    let cluster = ServerCluster::new_opt(nodes, update_conf_fn, pd_wrapper);
     cluster.wait_region_replicated(&[], 3);
     let pd_client = cluster.get_pd_client();
     pd_client.disable_default_operator();

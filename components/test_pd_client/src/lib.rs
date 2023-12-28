@@ -6,6 +6,39 @@
 extern crate tikv_util;
 
 mod pd;
+mod real_pd;
+pub use real_pd::PdWrapper;
 mod service;
 
+use kvproto::{metapb, pdpb};
+
 pub use crate::{pd::*, service::*};
+
+/// Extension trait of `PdClient` for test purpose.
+///
+/// Used to provide uniform testing features based on both real & test (mock)
+/// PD.
+pub trait PdClientExt: pd_client::PdClient {
+    fn get_regions_number(&self) -> usize;
+
+    fn get_all_regions(&self) -> Vec<metapb::Region>;
+
+    fn transfer_leader(&self, region_id: u64, peer: metapb::Peer, peers: Vec<metapb::Peer>);
+
+    fn region_leader_must_be(&self, region_id: u64, peer: metapb::Peer);
+
+    fn must_remove_peer(&self, region_id: u64, peer: metapb::Peer);
+
+    fn must_split_region(
+        &self,
+        region: metapb::Region,
+        policy: pdpb::CheckPolicy,
+        keys: Vec<Vec<u8>>,
+    );
+
+    fn split_region(&self, region: metapb::Region, policy: pdpb::CheckPolicy, keys: Vec<Vec<u8>>);
+
+    fn merge_region(&self, from: u64, target: u64);
+
+    fn try_merge_region(&self, from: u64, target: u64);
+}

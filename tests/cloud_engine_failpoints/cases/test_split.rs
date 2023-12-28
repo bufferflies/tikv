@@ -2,6 +2,7 @@
 
 use pd_client::PdClient;
 use test_cloud_server::{try_wait, ServerCluster};
+use test_pd_client::PdClientExt;
 use tikv_util::store::find_peer;
 
 use super::{i_to_key, i_to_val};

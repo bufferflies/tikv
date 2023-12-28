@@ -25,7 +25,7 @@ use rfstore::{
 };
 use security::SecurityManager;
 use tempfile::TempDir;
-use test_pd_client::TestPdClient;
+use test_pd_client::{PdClientExt, PdWrapper, TestPdClient};
 use test_raftstore::find_peer;
 use tikv::{config::TikvConfig, import::SstImporter};
 use tikv_util::{
@@ -52,8 +52,8 @@ pub struct ServerCluster {
     servers: HashMap<u16 /* node_id */, TikvServer>,
     tmp_dir: TempDir,
     env: Arc<Environment>,
-    pd_client: Arc<TestPdClient>,
-    pd_server: Option<test_pd::Server<test_pd_client::Service>>,
+    pd_client: Arc<dyn PdClientExt>,
+    pd: PdWrapper,
     security_mgr: Arc<SecurityManager>,
     dfs: Option<Arc<dyn Dfs>>,
     channels: HashMap<u64, Channel>,
@@ -64,9 +64,16 @@ pub struct ServerCluster {
 }
 
 impl ServerCluster {
+    pub fn new<F>(nodes: Vec<u16>, update_conf: F) -> ServerCluster
+    where
+        F: Fn(u16, &mut TikvConfig),
+    {
+        Self::new_opt(nodes, update_conf, PdWrapper::new_test(0))
+    }
+
     // The node id is statically assigned, the temp dir and server address are
     // calculated by the node id.
-    pub fn new<F>(nodes: Vec<u16>, update_conf: F) -> ServerCluster
+    pub fn new_opt<F>(nodes: Vec<u16>, update_conf: F, pd_wrapper: PdWrapper) -> ServerCluster
     where
         F: Fn(u16, &mut TikvConfig),
     {
@@ -76,12 +83,13 @@ impl ServerCluster {
             .prefix("cluster_")
             .tempdir()
             .unwrap();
+        let pd_client = pd_wrapper.client();
         let mut cluster = Self {
             servers: HashMap::new(),
             tmp_dir,
             env: Arc::new(EnvBuilder::new().cq_count(2).build()),
-            pd_client: Arc::new(TestPdClient::new(1, false)),
-            pd_server: None,
+            pd_client,
+            pd: pd_wrapper,
             security_mgr: Arc::new(SecurityManager::new(&Default::default()).unwrap()),
             dfs: None,
             channels: HashMap::new(),
@@ -136,12 +144,13 @@ impl ServerCluster {
         self.confs.insert(node_id, config.clone());
 
         std::fs::create_dir_all(&config.storage.data_dir).unwrap();
+        let pd_client = self.get_pure_pd_client();
         let dfs = self.dfs.get_or_insert_with(|| Self::prepare_dfs(&config));
         let mut server = TikvServer::setup(
             config,
             self.security_mgr.clone(),
             self.env.clone(),
-            self.pd_client.clone(),
+            pd_client,
             dfs.clone(),
         );
         server.run();
@@ -162,7 +171,23 @@ impl ServerCluster {
         self.servers.get(&node_id).unwrap().get_store_id()
     }
 
+    /// Get `TestPdClient`.
+    ///
+    /// Panic if the cluster is not created with `TestPdClient`.
+    ///
+    /// It would be better to name as `get_test_pd_client` but just keep the old
+    /// name to avoid touch too many existed codes.
     pub fn get_pd_client(&self) -> Arc<TestPdClient> {
+        self.pd.test_client().unwrap_or_else(|| {
+            panic!("cluster is not created with TestPdClient");
+        })
+    }
+
+    pub fn get_pure_pd_client(&self) -> Arc<dyn PdClient> {
+        self.pd_client.clone() as Arc<dyn PdClient>
+    }
+
+    pub fn get_pd_client_ext(&self) -> Arc<dyn PdClientExt> {
         self.pd_client.clone()
     }
 
@@ -415,7 +440,7 @@ impl ServerCluster {
 
     pub fn new_scheduler(&self) -> Scheduler {
         Scheduler {
-            pd: self.pd_client.clone(),
+            pd: self.get_pd_client(),
             store_ids: self.get_stores(),
             lock: self.schedule_lock.clone(),
         }
@@ -467,36 +492,26 @@ impl ServerCluster {
 
     // Wait shard version match between PD & kvengine.
     pub fn wait_region_version_match(&self) {
-        let pd_client = self.get_pd_client();
+        let pd_client = self.pd_client.as_ref();
         let ok = try_wait(
             || {
                 let data_stats = self.get_data_stats();
-                data_stats.check_region_version_match(&pd_client).is_ok()
+                data_stats.check_region_version_match(pd_client).is_ok()
             },
             10,
         );
         let data_stats = self.get_data_stats();
         if !ok {
-            data_stats.check_region_version_match(&pd_client).unwrap();
+            data_stats.check_region_version_match(pd_client).unwrap();
         }
     }
 
-    pub fn start_pd_server(&mut self, pd_count: usize) {
-        let pd_service = test_pd_client::Service::new(self.pd_client.clone());
-        let pd_server = test_pd::Server::with_case(pd_count, Arc::new(pd_service));
-        self.pd_server = Some(pd_server);
-    }
-
-    pub fn pd_addrs(&self) -> Vec<(String, u16)> {
-        self.pd_server.as_ref().unwrap().bind_addrs()
+    pub fn pd_endpoints(&self) -> &[String] {
+        self.pd.endpoints().unwrap()
     }
 
     pub async fn new_txn_client(&self) -> ClusterTxnClient {
-        let pd_endpoints = self
-            .pd_addrs()
-            .into_iter()
-            .map(|(host, port)| format!("{}:{}", host, port))
-            .collect::<Vec<_>>();
+        let pd_endpoints = self.pd_endpoints().to_vec();
         let client = tikv_client::TransactionClient::new_with_codec(
             pd_endpoints,
             tikv_client::Config::default(),
@@ -504,11 +519,11 @@ impl ServerCluster {
         )
         .await
         .unwrap();
-        ClusterTxnClient::new(client, self.get_pd_client(), self.new_client())
+        ClusterTxnClient::new(client, self.get_pure_pd_client(), self.new_client())
     }
 
     pub fn set_gc_safe_point(&self, ts: u64) {
-        let _ = self.pd_client.set_gc_safe_point(ts).unwrap();
+        let _ = self.get_pd_client().set_gc_safe_point(ts).unwrap();
         for node_id in self.get_nodes() {
             self.get_kvengine(node_id).update_managed_safe_ts(ts);
         }
@@ -777,7 +792,7 @@ impl ClusterDataStats {
             .map(|stats| stats.shard_stats.values().next().unwrap())
     }
 
-    pub fn check_region_version_match(&self, pd_client: &TestPdClient) -> Result<(), String> {
+    pub fn check_region_version_match(&self, pd_client: &dyn PdClientExt) -> Result<(), String> {
         let regions = pd_client.get_all_regions();
         for region in regions {
             let region_id = region.get_id();

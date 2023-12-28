@@ -7335,6 +7335,7 @@ dependencies = [
  "tokio",
  "tokio-timer",
  "txn_types",
+ "url",
 ]
 
 [[package]]

@@ -29,7 +29,7 @@ use test_cloud_server::{
     scheduler::Scheduler,
     try_wait, ServerCluster,
 };
-use test_pd_client::TestPdClient;
+use test_pd_client::{PdClientExt, TestPdClient};
 use tikv::config::TikvConfig;
 use tikv_client::TimestampExt;
 use tikv_util::{

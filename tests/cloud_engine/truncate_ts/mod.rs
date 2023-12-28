@@ -10,7 +10,6 @@ use native_br::truncate_ts::{truncate_ts_with_cfg, TruncateTsConfig};
 use pd_client::PdClient;
 use rand::Rng;
 use test_cloud_server::{client::ClusterClient, ServerCluster};
-use test_pd_client::TestPdClient;
 use tikv_util::{info, time::Instant};
 use txn_types::TimeStamp;
 
@@ -117,7 +116,7 @@ fn random_update_kv(context: Arc<Mutex<TruncateTsContext>>) {
     }
 }
 
-fn must_get_tso(pd_client: Arc<TestPdClient>) -> TimeStamp {
+fn must_get_tso(pd_client: Arc<dyn PdClient>) -> TimeStamp {
     block_on(pd_client.get_tso()).unwrap()
 }
 
@@ -137,7 +136,7 @@ fn truncate_ts_and_verification(context: Arc<Mutex<TruncateTsContext>>) {
                 break;
             }
         }
-        let saved_tso = must_get_tso(context.lock().unwrap().client.pd_client.clone());
+        let saved_tso = must_get_tso(context.lock().unwrap().client.pd_client());
         info!("Get ts {} as the truncate ts", saved_tso);
         // wait a while to let update thread to write some data.
         std::thread::sleep(Duration::from_secs(rng.gen_range(0..max_sleep_time)));
@@ -184,7 +183,7 @@ fn execute_truncate_ts(client: &ClusterClient, ts: u64, keyspace_id: Option<u32>
     };
     truncate_ts_with_cfg(
         truncate_ts_cfg,
-        client.pd_client.clone(),
+        client.pd_client(),
         ts,
         Duration::from_secs(30),
         keyspace_id,

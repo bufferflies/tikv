@@ -7,6 +7,7 @@ use engine_traits::CF_LOCK;
 use kvproto::kvrpcpb::Context;
 use raft::eraftpb::MessageType;
 use raftstore::store::LocksStatus;
+use test_pd_client::PdClientExt;
 use test_raftstore::*;
 use tikv::storage::{
     kv::{SnapContext, SnapshotExt},

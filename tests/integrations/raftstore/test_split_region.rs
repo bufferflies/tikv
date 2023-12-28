@@ -16,6 +16,7 @@ use raftstore::{
     store::{Bucket, BucketRange, Callback, WriteResponse},
     Result,
 };
+use test_pd_client::PdClientExt;
 use test_raftstore::*;
 use tikv::storage::{kv::SnapshotExt, Snapshot};
 use tikv_util::config::*;

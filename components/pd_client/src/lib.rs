@@ -556,6 +556,14 @@ pub trait PdClient: GetSecurityManager + Send + Sync {
     fn get_keyspace_encryption(&self, _keyspace_id: u32) -> Result<KeyspaceEncryptionConfig> {
         unimplemented!();
     }
+
+    fn get_buckets(&self, _region_id: u64) -> Option<BucketStat> {
+        unimplemented!();
+    }
+
+    fn get_buckets_async(&self, _region_id: u64) -> PdFuture<Option<BucketStat>> {
+        unimplemented!();
+    }
 }
 
 const REQUEST_TIMEOUT: u64 = 2; // 2s

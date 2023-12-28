@@ -15,6 +15,7 @@ use raftstore::coprocessor::{
     BoxRegionChangeObserver, Coprocessor, ObserverContext, RegionChangeEvent, RegionChangeObserver,
     RegionChangeReason,
 };
+use test_pd_client::PdClientExt;
 use test_raftstore::{new_node_cluster, Cluster, NodeCluster};
 use tikv_util::{
     store::{find_peer, new_peer},

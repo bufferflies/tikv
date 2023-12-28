@@ -15,6 +15,7 @@ use kvproto::{
 use pd_client::PdClient;
 use rfstore::store::CustomBuilder;
 use test_cloud_server::ServerCluster;
+use test_pd_client::PdClientExt;
 use tikv_util::time::Instant;
 
 use crate::{

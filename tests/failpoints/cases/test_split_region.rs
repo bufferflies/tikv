@@ -26,6 +26,7 @@ use raftstore::{
     store::{config::Config as RaftstoreConfig, util::is_vote_msg, Callback, PeerMsg},
     Result,
 };
+use test_pd_client::PdClientExt;
 use test_raftstore::*;
 use tikv::storage::{kv::SnapshotExt, Snapshot};
 use tikv_util::{

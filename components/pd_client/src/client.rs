@@ -47,6 +47,7 @@ use super::{
     BucketStat, Config, Error, FeatureGate, PdClient, PdFuture, RegionInfo, RegionStat, Result,
     UnixSecs, REQUEST_TIMEOUT,
 };
+use crate::BucketMeta;
 
 pub const CQ_COUNT: usize = 1;
 pub const CLIENT_PREFIX: &str = "pd";
@@ -1368,5 +1369,68 @@ impl PdClient for RpcClient {
             }
         }
         Ok(KeyspaceEncryptionConfig::default())
+    }
+
+    /// Get buckets stat by region_id.
+    ///
+    /// Note: `BucketStat.meta.sizes` is empty.
+    fn get_buckets_async(&self, region_id: u64) -> PdFuture<Option<BucketStat>> {
+        let timer = Instant::now();
+
+        let mut req = pdpb::GetRegionByIdRequest::default();
+        req.set_header(self.header());
+        req.set_region_id(region_id);
+        req.set_need_buckets(true);
+
+        let executor = move |client: &Client, req: pdpb::GetRegionByIdRequest| {
+            let handler = {
+                let inner = client.inner.rl();
+                inner
+                    .client_stub
+                    .get_region_by_id_async_opt(&req, call_option_inner(&inner))
+                    .unwrap_or_else(|e| {
+                        panic!("fail to request PD {} err {:?}", "get_region_by_id", e);
+                    })
+            };
+            Box::pin(async move {
+                let mut resp = handler.await?;
+                PD_REQUEST_HISTOGRAM_VEC
+                    .with_label_values(&["get_buckets"])
+                    .observe(duration_to_sec(timer.saturating_elapsed()));
+                check_resp_header(resp.get_header())?;
+                if resp.has_buckets() {
+                    let mut region = resp.take_region();
+                    let mut buckets = resp.take_buckets();
+                    let stats = buckets.take_stats();
+                    let meta = BucketMeta {
+                        region_id: buckets.get_region_id(),
+                        version: buckets.get_version(),
+                        region_epoch: region.take_region_epoch(),
+                        keys: buckets.take_keys().into(),
+                        sizes: vec![], // Note: no `sizes` in PD.
+                    };
+                    let bucket_stat = BucketStat {
+                        meta: Arc::new(meta),
+                        stats,
+                        create_time: Instant::now()
+                            - Duration::from_millis(buckets.get_period_in_ms()),
+                    };
+                    Ok(Some(bucket_stat))
+                } else {
+                    Ok(None)
+                }
+            }) as PdFuture<_>
+        };
+
+        self.pd_client
+            .request(req, executor, LEADER_CHANGE_RETRY)
+            .execute()
+    }
+
+    /// Get buckets stat by region_id.
+    ///
+    /// Note: BucketStat.meta.sizes is empty.
+    fn get_buckets(&self, region_id: u64) -> Option<BucketStat> {
+        block_on(self.get_buckets_async(region_id)).unwrap()
     }
 }

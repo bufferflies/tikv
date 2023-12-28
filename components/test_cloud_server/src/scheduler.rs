@@ -12,7 +12,7 @@ use futures::executor::block_on;
 use kvproto::metapb::{Peer, PeerRole, Region};
 use pd_client::PdClient;
 use rand::Rng;
-use test_pd_client::TestPdClient;
+use test_pd_client::{PdClientExt, TestPdClient};
 use tikv_util::{time::Instant, warn};
 
 use crate::{must_wait, try_wait};

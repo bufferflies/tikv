@@ -34,7 +34,7 @@ use kvproto::{
 use pd_client::PdClient;
 use protobuf::ProtobufEnum;
 use rfstore::store::RegionIdVer;
-use test_pd_client::TestPdClient;
+use test_pd_client;
 use tikv::storage::mvcc::TimeStamp;
 use tikv_client::{
     proto::kvrpcpb::Mutation as KvMutation, CheckLevel, IntoOwnedRange, TransactionOptions,
@@ -128,7 +128,7 @@ impl DerefMut for RefStore {
 }
 
 pub struct ClusterClient {
-    pub pd_client: Arc<TestPdClient>,
+    pub pd_client: Arc<dyn test_pd_client::PdClientExt>,
     pub channels: HashMap<u64, Channel>,
     /// region_raw_end_key -> region_id
     pub(crate) region_ranges: BTreeMap<Vec<u8>, RegionIdVer>,
@@ -276,6 +276,10 @@ impl Clone for ClusterClient {
 }
 
 impl ClusterClient {
+    pub fn pd_client(&self) -> Arc<dyn PdClient> {
+        self.pd_client.clone() as Arc<dyn PdClient>
+    }
+
     pub fn get_ts(&self) -> TimeStamp {
         block_on(self.pd_client.get_tso()).unwrap()
     }
@@ -1478,7 +1482,7 @@ pub struct ClusterTxnClient {
     pub inner: TxnClient,
 
     // Used to get extra info for debug.
-    pd_client: Arc<TestPdClient>,
+    pd_client: Arc<dyn PdClient>,
     cluster_client: ClusterClient,
 }
 
@@ -1493,7 +1497,7 @@ impl Deref for ClusterTxnClient {
 impl ClusterTxnClient {
     pub fn new(
         inner: TxnClient,
-        pd_client: Arc<TestPdClient>,
+        pd_client: Arc<dyn PdClient>,
         cluster_client: ClusterClient,
     ) -> Self {
         Self {
