@@ -273,7 +273,7 @@ fn prepare_cluster(
         conf.kvengine.compaction_tombs_count = 100;
         conf.kvengine.max_del_range_delay = ReadableDuration(Duration::from_secs(3));
     };
-    let pd_wrapper = PdWrapper::new_test(1);
+    let pd_wrapper = PdWrapper::new_test(1, security_conf);
     let cluster = ServerCluster::new_opt(nodes, update_conf_fn, pd_wrapper);
     cluster.wait_region_replicated(&[], 3);
     let pd_client = cluster.get_pd_client();

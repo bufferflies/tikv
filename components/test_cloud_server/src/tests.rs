@@ -6,6 +6,7 @@ use std::{sync::atomic::AtomicU16, time::Duration};
 
 use futures::executor::block_on;
 use pd_client::PdClient;
+use security::SecurityConfig;
 use test_pd_client::PdWrapper;
 use tikv_client::{IntoOwnedRange, TimestampExt};
 use tikv_util::{codec::bytes::encode_bytes, config::ReadableDuration, info};
@@ -180,7 +181,7 @@ fn test_client_split_region() {
 fn test_txn_client() {
     test_util::init_log_for_test();
     let node_ids = alloc_node_id_vec(3);
-    let pd_wrapper = PdWrapper::new_test(1);
+    let pd_wrapper = PdWrapper::new_test(1, &SecurityConfig::default());
     let mut cluster = ServerCluster::new_opt(
         node_ids,
         |_, conf| {
@@ -299,7 +300,7 @@ fn test_on_real_pd() {
     let _guard = runtime.enter();
 
     let node_ids = alloc_node_id_vec(3);
-    let pd_wrapper = PdWrapper::new_real(pd_addrs);
+    let pd_wrapper = PdWrapper::new_real(pd_addrs, &SecurityConfig::default());
     let mut cluster = ServerCluster::new_opt(node_ids, |_, _| {}, pd_wrapper);
 
     runtime.block_on(async {

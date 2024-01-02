@@ -101,6 +101,24 @@ impl TestPd {
 pub struct RealPd {
     client: Arc<pd_client::RpcClient>,
     endpoints: Vec<String>,
+    security_mgr: Arc<SecurityManager>,
+}
+
+impl RealPd {
+    fn new_client_impl(
+        endpoints: Vec<String>,
+        security_mgr: Arc<SecurityManager>,
+    ) -> pd_client::RpcClient {
+        let env = Arc::new(EnvBuilder::new().cq_count(1).build());
+        let cfg = pd_client::Config::new(endpoints);
+        cfg.validate().unwrap();
+        pd_client::RpcClient::new(&cfg, Some(env), security_mgr)
+            .unwrap_or_else(|e| panic!("failed to create rpc client: {:?}", e))
+    }
+
+    pub fn new_client(&self) -> pd_client::RpcClient {
+        Self::new_client_impl(self.endpoints.clone(), self.security_mgr.clone())
+    }
 }
 
 /// A wrapper to provide an uniform interface for both real and test (mock) PD.
@@ -111,7 +129,7 @@ pub enum PdWrapper {
 
 impl PdWrapper {
     /// No PD server when `pd_server_count` is zero.
-    pub fn new_test(pd_server_count: usize) -> Self {
+    pub fn new_test(pd_server_count: usize, _security_conf: &SecurityConfig) -> Self {
         let client = Arc::new(TestPdClient::new(1, false));
         let server = (pd_server_count > 0).then(|| {
             let pd_service = crate::Service::new(client.clone());
@@ -130,19 +148,27 @@ impl PdWrapper {
         })
     }
 
-    pub fn new_real(endpoints: Vec<String>) -> Self {
-        let env = Arc::new(EnvBuilder::new().cq_count(1).build());
-        let mgr = Arc::new(SecurityManager::new(&SecurityConfig::default()).unwrap());
-        let cfg = pd_client::Config::new(endpoints.clone());
-        cfg.validate().unwrap();
-        let client = pd_client::RpcClient::new(&cfg, Some(env), mgr)
-            .unwrap_or_else(|e| panic!("failed to create rpc client: {:?}", e));
+    pub fn new_real(endpoints: Vec<String>, security_conf: &SecurityConfig) -> Self {
+        let security_mgr = Arc::new(SecurityManager::new(security_conf).unwrap());
+        let client = RealPd::new_client_impl(endpoints.clone(), security_mgr.clone());
         Self::Real(RealPd {
             client: Arc::new(client),
             endpoints,
+            security_mgr,
         })
     }
 
+    pub fn new_client(&self) -> Arc<dyn PdClient> {
+        match self {
+            PdWrapper::Test(c) => c.client.clone(),
+            PdWrapper::Real(c) => Arc::new(c.new_client()) as Arc<dyn PdClient>,
+        }
+    }
+
+    /// Get a shared PD client.
+    ///
+    /// Client side should be safe to use a shared client. But do NOT use it in
+    /// tikv-server side.
     pub fn client(&self) -> Arc<dyn PdClientExt> {
         match self {
             PdWrapper::Test(c) => c.client.clone(),

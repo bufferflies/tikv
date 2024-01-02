@@ -23,7 +23,7 @@ use rfstore::{
     store::{cmd_resp::message_error, Callback, CustomBuilder},
     RaftStoreRouter,
 };
-use security::SecurityManager;
+use security::{SecurityConfig, SecurityManager};
 use tempfile::TempDir;
 use test_pd_client::{PdClientExt, PdWrapper, TestPdClient};
 use test_raftstore::find_peer;
@@ -68,7 +68,11 @@ impl ServerCluster {
     where
         F: Fn(u16, &mut TikvConfig),
     {
-        Self::new_opt(nodes, update_conf, PdWrapper::new_test(0))
+        Self::new_opt(
+            nodes,
+            update_conf,
+            PdWrapper::new_test(0, &SecurityConfig::default()),
+        )
     }
 
     // The node id is statically assigned, the temp dir and server address are
@@ -144,7 +148,7 @@ impl ServerCluster {
         self.confs.insert(node_id, config.clone());
 
         std::fs::create_dir_all(&config.storage.data_dir).unwrap();
-        let pd_client = self.get_pure_pd_client();
+        let pd_client = self.pd.new_client(); // Different nodes must not share PD client.
         let dfs = self.dfs.get_or_insert_with(|| Self::prepare_dfs(&config));
         let mut server = TikvServer::setup(
             config,
