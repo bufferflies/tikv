@@ -15,7 +15,7 @@ use native_br::{backup, backup_worker, restore::RestoreConfig};
 use pd_client::PdClient;
 use rand::Rng;
 use security::SecurityConfig;
-use test_cloud_server::{oss::prepare_dfs, try_wait_result, ServerCluster};
+use test_cloud_server::{oss::prepare_dfs, tidb::TidbCluster, try_wait_result, ServerCluster};
 use test_pd_client::{PdClientExt, PdWrapper};
 use tikv_util::{
     config::{ReadableDuration, ReadableSize},
@@ -313,8 +313,13 @@ fn prepare_cluster(
         .collect();
     pd_client.must_split_region(region0, CheckPolicy::Usekey, encoded_keys);
     cluster.wait_pd_region_min_count(keys.len() + 1);
+    let keyspace_names = keyspaces
+        .iter()
+        .map(|&keyspace_id| TidbCluster::keyspace_name(keyspace_id as u16))
+        .collect();
     cluster.keyspace_manager().create_keyspaces(
         &keyspaces,
+        keyspace_names,
         DEFAULT_INNER_KEY_OFFSET,
         INITIAL_TABLE_COUNT,
         Some(&mut rng),
@@ -379,7 +384,7 @@ async fn verify_cluster(cluster: &mut ServerCluster) -> usize /* records count i
     );
     cluster.wait_region_version_match();
     data_stats
-        .check_buckets(&cluster.get_pd_client(), REGION_BUCKET_SIZE.0)
+        .check_buckets(cluster.get_pd_client_ext().as_ref(), REGION_BUCKET_SIZE.0)
         .unwrap();
 
     check_br();

@@ -4,6 +4,7 @@ mod test_all;
 mod test_drop_table;
 mod test_load_data;
 mod test_native_br;
+mod test_tidb;
 
 use std::{
     str::FromStr,
@@ -27,6 +28,7 @@ use test_cloud_server::{
     client::{ClusterClient, ClusterTxnClient},
     keyspace::{ClusterKeyspaceClient, KeyspaceManager},
     scheduler::Scheduler,
+    tidb::TidbCluster,
     try_wait, ServerCluster,
 };
 use test_pd_client::{PdClientExt, TestPdClient};
@@ -172,7 +174,7 @@ fn test_random_merge() {
 
     cluster.wait_region_version_match();
     data_stats
-        .check_buckets(&pd_client, bucket_size_kb * 1024)
+        .check_buckets(pd_client.as_ref(), bucket_size_kb * 1024)
         .unwrap();
     let mut client = cluster.new_client();
     client.verify_data_with_ref_store();
@@ -535,6 +537,7 @@ fn create_new_keyspace(
     // Don't shuffle keyspaces. Otherwise we will not have a few big keyspaces.
     keyspace_manager.create_keyspaces(
         &[new_keyspace],
+        vec![TidbCluster::keyspace_name(new_keyspace as u16)],
         DEFAULT_INNER_KEY_OFFSET,
         initial_table_count,
         None,

@@ -1,6 +1,6 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use bstr::ByteSlice;
 use bytes::Bytes;
@@ -8,7 +8,7 @@ use http::{Method, Request};
 use hyper::Body;
 use security::SecurityManager;
 use slog_global::debug;
-use tikv_util::box_err;
+use tikv_util::{box_err, info};
 
 use crate::Config;
 
@@ -19,8 +19,10 @@ const PD_REGIONS_STORE_PATH: &str = "pd/api/v1/regions/store";
 const PD_KEYSPACE_PATH: &str = "pd/api/v2/keyspaces";
 const PD_PLACEMENT_RULE_GROUP_PATH: &str = "pd/api/v1/config/placement-rule";
 const PD_PLACEMENT_RULE_PATH: &str = "pd/api/v1/config/rule";
-const TIFLASH_GROUP: &str = "tiflash";
 const PD_STATS_REGION: &str = "pd/api/v1/stats/region";
+const PD_HEALTH_PATH: &str = "health";
+
+const TIFLASH_GROUP: &str = "tiflash";
 
 #[derive(Default, Serialize, Deserialize, Debug)]
 #[serde(default)]
@@ -153,6 +155,22 @@ impl PdControl {
         }
     }
 
+    pub async fn create_keyspace(&self, params: CreateKeyspaceParams) -> Result<KeyspaceMeta> {
+        let query = PD_KEYSPACE_PATH.to_string();
+        let body_data = serde_json::to_vec(&params)?;
+        match self
+            .request_pd_restful(query, Method::POST, Some(body_data))
+            .await
+        {
+            Ok(resp) => {
+                let keyspace = serde_json::from_slice(&resp)?;
+                info!("create_keyspace: {:?}", keyspace);
+                Ok(keyspace)
+            }
+            Err(err) => Err(box_err!("create_keyspace error: {:?}", err)),
+        }
+    }
+
     pub async fn get_tiflash_placement_rule_group(&self) -> Result<Option<RuleGroup>> {
         let path = format!("{PD_PLACEMENT_RULE_GROUP_PATH}/{TIFLASH_GROUP}");
         match self.request_pd_restful(path, Method::GET, None).await {
@@ -188,6 +206,21 @@ impl PdControl {
             Err(err) => Err(box_err!("get_regions_number error: {:?}", err)),
         }
     }
+
+    // Ref: https://github.com/tidbcloud/pd-cse/blob/release-7.1-keyspace/server/api/health.go
+    pub async fn health(&self) -> Result<bool> {
+        match self
+            .request_pd_restful(PD_HEALTH_PATH.to_string(), Method::GET, None)
+            .await
+        {
+            Ok(resp) => {
+                let health: Health = serde_json::from_slice(&resp)?;
+                debug!("health: {:?}", health);
+                Ok(health.health == "true")
+            }
+            Err(err) => Err(box_err!("health error: {:?}", err)),
+        }
+    }
 }
 
 #[derive(Default, Serialize, Deserialize, Debug)]
@@ -199,6 +232,7 @@ pub struct KeyspaceMeta {
     pub state: String,
     pub created_at: u64,
     pub state_changed_at: u64,
+    pub config: HashMap<String, String>,
 }
 
 #[derive(Default, Serialize, Deserialize, Debug)]
@@ -237,4 +271,45 @@ pub struct PdConfigFromApi {
 #[serde(rename_all = "kebab-case")]
 pub struct RegionStats {
     pub count: i32,
+}
+
+#[derive(Default, Serialize, Deserialize, Debug)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+pub struct Health {
+    pub health: String, // Note: not a boolean.
+}
+
+#[derive(Default, Serialize, Deserialize, Debug)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+pub struct CreateKeyspaceParams {
+    pub name: String,
+    pub config: HashMap<String, String>,
+}
+
+impl CreateKeyspaceParams {
+    pub fn new(name: String) -> Self {
+        Self {
+            name,
+            config: HashMap::new(),
+        }
+    }
+
+    pub fn with_encryption(&mut self, enabled: bool) -> &mut Self {
+        self.config.insert(
+            KEYSPACE_CONFIG_ENCRYPTION_KEY.to_string(),
+            serde_json::to_string(&KeyspaceConfigEncryption { enabled }).unwrap(),
+        );
+        self
+    }
+}
+
+pub const KEYSPACE_CONFIG_ENCRYPTION_KEY: &str = "encryption";
+
+#[derive(Default, Serialize, Deserialize, Debug)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+pub struct KeyspaceConfigEncryption {
+    pub enabled: bool,
 }

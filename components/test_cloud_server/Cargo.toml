@@ -6,6 +6,7 @@ edition = "2021"
 
 [dependencies]
 api_version = { path = "../api_version" }
+bstr = "0.2.17"
 bytes = "1"
 chrono = "0.4"
 cloud_server = { path = "../cloud_server" }
@@ -44,5 +45,6 @@ tikv-client = { workspace = true }
 tikv_util = { path = "../tikv_util" }
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
+toml = "0.5"
 url = "2"
 zipf = "7.0"

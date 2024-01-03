@@ -53,15 +53,17 @@ impl KeyspaceManagerCore {
     pub fn create_keyspaces(
         &self,
         keyspace_ids: &[u32], // keyspace_ids must be allocated by new_keyspace_id().
+        keyspace_names: Vec<String>,
         inner_key_off: usize,
         table_count: usize,
         need_shuffle: Option<&mut ThreadRng>,
     ) {
-        for &keyspace_id in keyspace_ids {
+        assert_eq!(keyspace_ids.len(), keyspace_names.len());
+        for (&keyspace_id, keyspace_name) in keyspace_ids.iter().zip(keyspace_names.into_iter()) {
             match self.keyspaces.entry(keyspace_id) {
                 Entry::Occupied(_) => panic!("duplicated keyspace {}", keyspace_id),
                 Entry::Vacant(entry) => {
-                    entry.insert(KeyspaceMeta::new(inner_key_off, table_count));
+                    entry.insert(KeyspaceMeta::new(keyspace_name, inner_key_off, table_count));
                 }
             }
         }
@@ -252,6 +254,12 @@ impl ops::DerefMut for KeyspaceMeta {
 /// Used for keyspace meta backup & restore without locks.
 #[derive(Clone)]
 pub struct KeyspaceMetaCore {
+    /// Used to locate TiDB in `tidb::TidbCluster`.
+    ///
+    /// As keyspace id is allocated by PD (in real PD servers), it may not be
+    /// equal to TiDB index in `tidb::TidbCluster`.
+    name: String,
+
     inner_key_off: usize,
     tables: DashMap<i64 /* table_id */, TableMeta>,
 
@@ -269,6 +277,7 @@ pub struct KeyspaceMetaCore {
 impl fmt::Debug for KeyspaceMetaCore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("KeyspaceMetaCore")
+            .field("name", &self.name)
             .field("inner_key_off", &self.inner_key_off)
             .field(
                 "tables",
@@ -284,7 +293,7 @@ impl fmt::Debug for KeyspaceMetaCore {
 }
 
 impl KeyspaceMeta {
-    pub fn new(inner_key_off: usize, table_count: usize) -> Self {
+    pub fn new(name: String, inner_key_off: usize, table_count: usize) -> Self {
         let tables = DashMap::default();
         for _ in 0..table_count {
             let table = TableMeta::new(true);
@@ -292,6 +301,7 @@ impl KeyspaceMeta {
         }
         Self {
             core: KeyspaceMetaCore {
+                name,
                 inner_key_off,
                 tables,
                 del_prefixes: kvengine::DeletePrefixes::new_with_inner_key_off(inner_key_off),
@@ -324,6 +334,10 @@ impl KeyspaceMeta {
     /// `tables`.
     pub fn get_table(&self, table_id: i64) -> Option<Ref<'_, i64, TableMeta>> {
         self.tables.get(&table_id)
+    }
+
+    pub fn name(&self) -> String {
+        self.name.clone()
     }
 }
 

@@ -724,6 +724,24 @@ where
     false
 }
 
+pub async fn try_wait_result_async<F, E>(mut f: F, timeout: Duration) -> std::result::Result<(), E>
+where
+    F: FnMut() -> futures::future::BoxFuture<'static, std::result::Result<(), E>>,
+{
+    let begin = Instant::now_coarse();
+    let mut last_err: Option<E> = None;
+    while begin.saturating_elapsed() < timeout {
+        match f().await {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                last_err = Some(err);
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+    Err(last_err.unwrap())
+}
+
 /// A extended version of `try_wait` which can save and return an extra value
 /// from `f`.
 pub fn try_wait_result<F, T, E>(mut f: F, seconds: usize) -> (std::result::Result<(), E>, T)
@@ -817,7 +835,11 @@ impl ClusterDataStats {
         Ok(())
     }
 
-    pub fn check_buckets(&self, pd_client: &TestPdClient, bucket_size: u64) -> Result<(), String> {
+    pub fn check_buckets(
+        &self,
+        pd_client: &dyn PdClientExt,
+        bucket_size: u64,
+    ) -> Result<(), String> {
         let regions = pd_client.get_all_regions();
         for region in regions {
             let region_id = region.get_id();
@@ -835,18 +857,23 @@ impl ClusterDataStats {
                     }
                 }
                 let expected_bucket_count = (shard_size + bucket_size - 1) / bucket_size;
-                let actual_bucket_count = buckets.meta.sizes.len() as u64;
+                let actual_bucket_count = buckets.count() as u64;
                 let ratio = expected_bucket_count as f64 / actual_bucket_count as f64;
                 if !(0.3..=3.0).contains(&ratio) {
                     return Err(format!(
-                        "region {} buckets {:?}, shard size {}, expected {}, actual {}",
-                        region_id, buckets, shard_size, expected_bucket_count, actual_bucket_count
+                        "region {} buckets {:?}, shard size {}, expected {}, actual {}, region {:?}",
+                        region_id,
+                        buckets,
+                        shard_size,
+                        expected_bucket_count,
+                        actual_bucket_count,
+                        region,
                     ));
                 };
             } else {
                 return Err(format!(
-                    "region {} no buckets, shard size {}",
-                    region_id, shard_size
+                    "region {} no buckets, shard size {}, region {:?}",
+                    region_id, shard_size, region,
                 ));
             }
         }

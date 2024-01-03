@@ -1,0 +1,15 @@
+ARG VERSION=v7.1.0
+
+FROM hub-new.pingcap.net/keyspace/tidb:${VERSION} as tidb
+FROM hub-new.pingcap.net/keyspace/pd:${VERSION} as pd
+FROM hub-new.pingcap.net/kvaas/go-tpc:small-size as go-tpc
+
+FROM ubuntu:20.04
+
+COPY --from=tidb /tidb-server /tidb-server
+COPY --from=pd /pd-server /pd-server
+COPY --from=go-tpc /go-tpc /go-tpc
+
+ENV TIDB_BIN=/tidb-server
+ENV PD_BIN=/pd-server
+ENV TPC_BIN=/go-tpc

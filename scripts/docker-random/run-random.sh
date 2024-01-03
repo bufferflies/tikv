@@ -20,6 +20,11 @@ do
         mv "$LOG" /random/error-logs/
     fi
 
+    if [ "$TESTNAME" = "with_tidb" ]; then
+        pkill -9 tidb-server || true
+        pkill -9 pd-server || true
+    fi
+
     # TODO: optional keep data on error for debugging.
     # Note: When the container stops, the files from the last loop will not be automatically removed. However, they will be cleared during the next iterations.
     rm -rf "$TMPDIR" || true

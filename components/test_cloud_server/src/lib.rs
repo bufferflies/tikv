@@ -10,6 +10,7 @@ pub mod load_data;
 pub mod oss;
 pub mod scheduler;
 mod table;
+pub mod tidb;
 mod txnlock;
 
 pub use cluster::*;

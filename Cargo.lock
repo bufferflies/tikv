@@ -7232,6 +7232,7 @@ name = "test_cloud_server"
 version = "0.1.0"
 dependencies = [
  "api_version",
+ "bstr",
  "bytes",
  "chrono",
  "cloud_server",
@@ -7270,6 +7271,7 @@ dependencies = [
  "tikv_util",
  "tokio",
  "tokio-util",
+ "toml",
  "url",
  "zipf 7.0.0",
 ]
