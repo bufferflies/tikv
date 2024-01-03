@@ -912,7 +912,12 @@ impl StatusServer {
             );
         }
 
-        rf.write(wb).unwrap();
+        // Write batch to raft engine only when it's not empty. Or it will cause the wal
+        // iteration interrupted.
+        if !wb.is_empty() {
+            rf.write(wb).unwrap();
+        }
+
         Ok(make_response(
             StatusCode::OK,
             format!("{} region(s) clear success\n", target_regions_len),
@@ -955,14 +960,22 @@ impl StatusServer {
                 Err(err) => return Ok(bad_request_resp(err.to_string().as_str())),
             };
             let region_to_peers = rf.get_region_peer_map();
-            let &peer_id = region_to_peers.get(&region_id).unwrap();
-            let cs = load_raft_engine_meta(&rf, peer_id);
-            if cs.is_none() {
-                return Ok(not_found_resp(
-                    format!("region {} peer {} not exists", region_id, peer_id).as_str(),
-                ));
+            match region_to_peers.get(&region_id) {
+                Some(&peer_id) => {
+                    let cs = load_raft_engine_meta(&rf, peer_id);
+                    if cs.is_none() {
+                        return Ok(not_found_resp(
+                            format!("region {} peer {} not exists", region_id, peer_id).as_str(),
+                        ));
+                    }
+                    vec![region_id]
+                }
+                None => {
+                    return Ok(not_found_resp(
+                        format!("region {} not exists", region_id).as_str(),
+                    ));
+                }
             }
-            vec![region_id]
         } else if let Some(keyspace_id) = keyspace_id {
             let keyspace_id = match u32::from_str(keyspace_id) {
                 Ok(keyspace_id) => keyspace_id,
