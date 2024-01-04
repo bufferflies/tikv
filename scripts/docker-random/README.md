@@ -72,6 +72,10 @@ To use Docker-Random, ensure that Docker is installed on your system. Docker pro
 
         Versions list can be found in [hub-new.pingcap.net/keyspace/tidb](https://hub-new.pingcap.net/harbor/projects/116/repositories/tidb).
 
+    - `--no-rebuild-image`: Do NOT rebuild the testing Docker image.
+
+        By default we always rebuild the testing Docker image to ensure that we are testing on latest TiDB/PD. However, if you prefer not to rebuild the image, you can specify the `--no-rebuild-image` argument.
+
 4. **Analyze the Results**: The logs of failed tests can be found in `scripts/docker-random/error-logs`. You can examine these logs to identify the causes of failure.
 
 5. **Stop the Tests**: The tests will terminate after running for 10000 x *CONCURRENCY* iterations. If you wish to stop the tests before completion, execute the following command:

@@ -13,6 +13,8 @@ MEMORY="${MEMORY:-5g}"
 TMP_PATH=""
 TESTNAME="all"
 TIDB_VERSION="v7.1.0"
+REBUILD_IMAGE=1
+
 HELP=0
 
 PWD=$(pwd)
@@ -34,6 +36,10 @@ while [[ $# -gt 0 ]]; do
 		shift
 		shift
 		;;
+	--no-rebuild-image)
+		REBUILD_IMAGE=0
+		shift
+		;;
 	--help)
 		HELP=1
 		shift
@@ -52,13 +58,19 @@ if [ "$HELP" -eq 1 ]; then
 	echo "  --tmp-path     <temporary path>    Set the path for temporary data generated during testing"
 	echo "  --test         <all/with_tidb>     Set the name of test case to run"
 	echo "  --tidb-version <v6.6.0/v7.1.0/...> Set the version of TiDB for \"with_tidb\" test"
+	echo "  --no-rebuild-image                 Do NOT rebuild the testing Docker image"
 	exit 0
+fi
+
+BUILD_IMAGE_ARGS=""
+if [ "$REBUILD_IMAGE" -eq 1 ]; then
+	BUILD_IMAGE_ARGS+=" --pull --no-cache"
 fi
 
 IMAGE="ubuntu:20.04"
 if [ "$TESTNAME" = "with_tidb" ]; then
 	# Build image without context.
-	docker build -t random-tidb --build-arg VERSION="$TIDB_VERSION" - < Dockerfile.tidb
+	docker build $BUILD_IMAGE_ARGS -t random-tidb --build-arg VERSION="$TIDB_VERSION" - < Dockerfile.tidb
 	IMAGE="random-tidb"
 fi
 
