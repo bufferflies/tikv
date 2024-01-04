@@ -14,7 +14,7 @@ use engine_traits::GetObjectOptions;
 use kvengine::dfs::{self, DFSConfig, Dfs, Options, S3Fs, STORAGE_CLASS_GLACIER_IR};
 use kvproto::keyspacepb::{KeyspaceMeta, KeyspaceState};
 use pd_client::PdClient;
-use protobuf::Message;
+use protobuf::{Clear, Message};
 use rfenginepb::ClusterBackupMeta;
 use security::SecurityConfig;
 use tikv_util::{error, info, mpsc::Receiver, time::Instant, warn};
@@ -322,6 +322,22 @@ fn get_sorted_deleted_files(old: &HashSet<u64>, new: &HashSet<u64>) -> Vec<u64> 
     deleted
 }
 
+fn get_cluster_backup_keyspace_ids(cluster_backup: &ClusterBackupMeta) -> Vec<u32> {
+    let mut keyspace_ids = vec![];
+    let mut keyspace_meta = KeyspaceMeta::default();
+    for (k, v) in &cluster_backup.keyspace_meta {
+        let key_str = String::from_utf8_lossy(k);
+        if key_str.contains("/keyspaces/meta/") {
+            keyspace_meta.clear();
+            let res = keyspace_meta.merge_from_bytes(v);
+            if res.is_ok() && keyspace_meta.state == KeyspaceState::Enabled {
+                keyspace_ids.push(keyspace_meta.id);
+            }
+        }
+    }
+    keyspace_ids
+}
+
 fn get_cluster_backup_files(
     pd_client: Arc<dyn PdClient>,
     s3fs: Arc<S3Fs>,
@@ -339,22 +355,8 @@ fn get_cluster_backup_files(
         )));
     }
     let start_time = Instant::now();
-    let keyspace_ids = if let Some(keyspace_ids) = keyspace_ids {
-        keyspace_ids
-    } else {
-        let mut keyspace_ids = vec![];
-        for (k, v) in &cluster_backup.keyspace_meta {
-            let key_str = String::from_utf8_lossy(k);
-            if key_str.contains("/keyspaces/meta/") {
-                let mut keyspace_meta = KeyspaceMeta::default();
-                let res = keyspace_meta.merge_from_bytes(v);
-                if res.is_ok() && keyspace_meta.state == KeyspaceState::Enabled {
-                    keyspace_ids.push(keyspace_meta.id);
-                }
-            }
-        }
-        keyspace_ids
-    };
+    let keyspace_ids =
+        keyspace_ids.unwrap_or_else(|| get_cluster_backup_keyspace_ids(&cluster_backup));
 
     info!("keyspace ids {}", keyspace_ids.len());
     if keyspace_ids.is_empty() {
