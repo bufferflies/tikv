@@ -70,6 +70,8 @@ pub enum Error {
     ArchiveError(String),
     #[error("Mvcc error {0}")]
     MvccError(#[from] tikv::storage::mvcc::Error),
+    #[error("Backup error {0}")]
+    BackupError(String),
 }
 
 impl From<dfs::Error> for Error {

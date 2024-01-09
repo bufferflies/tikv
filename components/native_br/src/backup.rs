@@ -85,17 +85,21 @@ pub fn backup_file_full_path(prefix: String, name: String, backup_ts: Option<u64
         .to_string()
 }
 
-pub fn execute_incremental_backup(config: BackupConfig, name: String, interval: Duration) {
+pub fn execute_incremental_backup(
+    config: BackupConfig,
+    name: String,
+    interval: Duration,
+) -> Result<()> {
     if !name.is_empty() {
-        error!("Don't support non-empty name for incremental backup.");
-        return;
+        return Err(Error::BackupError(
+            "Don't support non-empty name for incremental backup.".to_string(),
+        ));
     }
 
     if interval.is_zero() {
-        error!(
-            "Interval must be positive for incremental backup. Use full or lightweight instead to backup once."
-        );
-        return;
+        return Err(Error::BackupError(
+            "Interval must be positive for incremental backup. Use full or lightweight instead to backup once.".to_string(),
+        ));
     }
 
     let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
@@ -131,8 +135,10 @@ pub fn execute_incremental_backup(config: BackupConfig, name: String, interval: 
                     ) {
                         Ok((_, meta)) => cluster_backup_meta = Some(meta),
                         Err(e) => {
-                            error!("Full backup still fail {:?}", e);
-                            return;
+                            return Err(Error::BackupError(format!(
+                                "Full backup still fail {:?}",
+                                e
+                            )));
                         }
                     }
                 } else {
@@ -141,26 +147,26 @@ pub fn execute_incremental_backup(config: BackupConfig, name: String, interval: 
             }
         }
     }
+    Ok(())
 }
 
-pub fn execute_full_backup(config: BackupConfig, name: String) {
+pub fn execute_full_backup(config: BackupConfig, name: String) -> Result<()> {
     // TODO: Set safepoint before backup and delete it after backup.
     let pd_client = create_pd_client(&config.security, &config.pd);
-    if let Err(e) = backup_cluster(config, BackupType::Full, name, &pd_client, None) {
-        error!("Full backup fail, {:?}", e)
-    }
+    backup_cluster(config, BackupType::Full, name, &pd_client, None).map(|_| ())
 }
 
 // Backup once if interval is 0.
-pub fn execute_lightweight_backup(config: BackupConfig, name: String, interval: Duration) {
+pub fn execute_lightweight_backup(
+    config: BackupConfig,
+    name: String,
+    interval: Duration,
+) -> Result<()> {
     let pd_client = create_pd_client(&config.security, &config.pd);
 
     // Once lightweight backup.
     if interval.is_zero() {
-        if let Err(e) = backup_cluster(config, BackupType::Lightweight, name, &pd_client, None) {
-            error!("lightweight backup fail, {:?}", e)
-        }
-        return;
+        return backup_cluster(config, BackupType::Lightweight, name, &pd_client, None).map(|_| ());
     }
 
     // Cron lightweight backup.
@@ -182,6 +188,7 @@ pub fn execute_lightweight_backup(config: BackupConfig, name: String, interval: 
             error!("lightweight backup fail, {:?}", e)
         }
     }
+    Ok(())
 }
 
 pub fn update_service_safe_point(pd_client: &dyn PdClient, safepoint: u64) -> Result<()> {

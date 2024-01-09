@@ -95,7 +95,7 @@ pub(crate) fn execute_stats(arg: StatsArgs) {
         Ok(())
     };
     if let Err(err) = stats() {
-        error!("execute stats error, try again: {:?}", err);
+        panic!("execute stats error: {:?}", err);
     }
 }
 

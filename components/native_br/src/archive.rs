@@ -89,7 +89,7 @@ pub const ARCHIVE_INDEX_FORMAT_V1: u32 = 1;
 // |          object file n          |
 // +---------------------------------+
 
-pub fn archive_with_cfg(config: ArchiveConfig) {
+pub fn archive_with_cfg(config: ArchiveConfig) -> Result<()> {
     let pd_client = Arc::new(create_pd_client(&config.security, &config.pd));
     let dfs_conf = config.dfs.clone();
     let s3fs = Arc::new(S3Fs::new(
@@ -116,16 +116,14 @@ pub fn archive_with_cfg(config: ArchiveConfig) {
     let begin_archive_date = expiration_date
         .checked_add_days(chrono::Days::new(1))
         .unwrap();
-    if let Err(e) = archive_cluster_backup(
+    archive_cluster_backup(
         config,
         pd_client,
         s3fs,
         begin_archive_date,
         end_archive_date,
         None,
-    ) {
-        error!("failed to archive cluster backup, err {:?}", e)
-    }
+    )
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug, Default)]
@@ -331,7 +329,12 @@ fn get_cluster_backup_keyspace_ids(cluster_backup: &ClusterBackupMeta) -> Vec<u3
             keyspace_meta.clear();
             let res = keyspace_meta.merge_from_bytes(v);
             if res.is_ok() && keyspace_meta.state == KeyspaceState::Enabled {
-                keyspace_ids.push(keyspace_meta.id);
+                if keyspace_meta.id == 0 {
+                    // The default keyspace does not have a specified keyspace prefix.
+                    info!("skip default keyspace id");
+                } else {
+                    keyspace_ids.push(keyspace_meta.id);
+                }
             }
         }
     }

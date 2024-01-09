@@ -53,11 +53,19 @@ pub fn execute_backup(args: BackupArgs) {
     let config: BackupConfig = get_backup_config_from_args(&args);
     info!("Begin backup with config {:?}", config);
     if args.lightweight {
-        execute_lightweight_backup(config, args.name, Duration::from_secs(args.interval));
+        if let Err(e) =
+            execute_lightweight_backup(config, args.name, Duration::from_secs(args.interval))
+        {
+            panic!("failed to execute lightweight backup, err {:?}", e)
+        }
     } else if args.incremental {
-        execute_incremental_backup(config, args.name, Duration::from_secs(args.interval))
-    } else {
-        execute_full_backup(config, args.name)
+        if let Err(e) =
+            execute_incremental_backup(config, args.name, Duration::from_secs(args.interval))
+        {
+            panic!("failed to execute incremental backup, err {:?}", e)
+        }
+    } else if let Err(e) = execute_full_backup(config, args.name) {
+        panic!("failed to execute full backup, err {:?}", e)
     }
 }
 

@@ -161,6 +161,7 @@ fn execute_restore_keyspace(args: RestoreKeyspaceArgs) {
                 target_keyspace,
                 err
             );
+            panic!("execute restore keyspace error: {:?}", err);
         }
     }
 }

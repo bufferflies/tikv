@@ -45,7 +45,9 @@ pub struct ArchiveArgs {
 pub fn execute_archive(args: ArchiveArgs) {
     let config: ArchiveConfig = get_archive_config_from_args(&args);
     info!("Begin archive with config {:?}", config);
-    archive_with_cfg(config);
+    if let Err(e) = archive_with_cfg(config) {
+        panic!("failed to archive cluster backup, err {:?}", e)
+    }
 }
 
 fn get_archive_config_from_args(args: &ArchiveArgs) -> ArchiveConfig {

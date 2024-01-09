@@ -144,13 +144,16 @@ pub(crate) fn execute_dfsgc(arg: DfsGcArgs) {
             runtime.block_on(gc_worker.remove_garbage_files(start_after.clone(), start_time))?;
             Ok(())
         };
-        if let Err(err) = gc() {
-            error!("execute gc error, try again: {:?}", err);
-        }
 
         if let Some(interval) = &arg.interval {
+            if let Err(err) = gc() {
+                error!("execute gc error, try again: {:?}", err);
+            }
             thread::sleep(Duration::from_secs(*interval));
         } else {
+            if let Err(err) = gc() {
+                panic!("execute gc error: {:?}", err);
+            }
             break;
         }
     }

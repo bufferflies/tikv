@@ -649,16 +649,8 @@ impl EngineCore {
         if !shard.is_active() {
             return;
         }
-        let fs = self.fs.clone();
-        let opts = dfs::Options::new(shard.id, shard.ver);
-        let runtime = fs.get_runtime();
-        for (id, cover) in del_files {
+        for (id, _cover) in del_files {
             self.set_local_file_mtime(id);
-            if cover {
-                let file_len = self.local_file_len(id);
-                let fs_n = fs.clone();
-                runtime.spawn(async move { fs_n.remove(id, file_len, opts).await });
-            }
         }
     }
 
@@ -672,7 +664,7 @@ impl EngineCore {
         }
     }
 
-    fn local_file_len(&self, file_id: u64) -> Option<u64> {
+    fn _local_file_len(&self, file_id: u64) -> Option<u64> {
         let local_file_path = self.local_sst_file_path(file_id);
         match std::fs::metadata(local_file_path) {
             Ok(metadata) => Some(metadata.len()),
