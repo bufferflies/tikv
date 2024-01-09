@@ -200,11 +200,12 @@ impl TsoServiceDiscovery {
         Ok(self.primary_tso_client.as_ref().unwrap().clone())
     }
 
-    fn get_tso_urls(&mut self) -> Result<Vec<String>> {
+    async fn get_tso_urls(&mut self) -> Result<Vec<String>> {
         let req = GetClusterInfoRequest::default();
         let mut resp = self
             .pd_client
-            .get_cluster_info_opt(&req, self.call_option.clone())?;
+            .get_cluster_info_async_opt(&req, self.call_option.clone())?
+            .await?;
         if resp.get_header().has_error() {
             return Err(box_err!(
                 "failed to get cluster info: {:?}",
@@ -219,9 +220,9 @@ impl TsoServiceDiscovery {
         Ok(urls)
     }
 
-    fn get_tso_server(&mut self) -> Result<String> {
+    async fn get_tso_server(&mut self) -> Result<String> {
         if self.addrs.is_empty() || self.failure_count >= self.addrs.len() {
-            self.addrs = self.get_tso_urls()?;
+            self.addrs = self.get_tso_urls().await?;
             self.failure_count = 0;
             self.selected_idx = 0;
             debug!("update tso server addrs, {:?}", self.addrs);
@@ -232,7 +233,7 @@ impl TsoServiceDiscovery {
     }
 
     pub(crate) async fn update_member(&mut self, connector: &PdConnector) -> Result<bool> {
-        let mut tso_server = self.get_tso_server()?;
+        let mut tso_server = self.get_tso_server().await?;
 
         // Find keyspace group by default keyspace id.
         // `find_group_by_keyspace_id` may be return error if some tso server is
@@ -255,7 +256,7 @@ impl TsoServiceDiscovery {
                 self.failure_count += 1;
             }
             // Try to use next tso server to find keyspace group.
-            tso_server = self.get_tso_server()?;
+            tso_server = self.get_tso_server().await?;
         }
         // All tso servers are unavailable, return TsoServerNotFound error.
         // NOTE: This will result to pd_client use the legacy tso mode. If tso server
