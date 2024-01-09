@@ -38,6 +38,10 @@ pub struct Config {
     ///
     /// Default is false.
     pub enable_forwarding: bool,
+    /// Use legacy tso.
+    ///
+    /// Default is false.
+    pub force_legacy_tso: bool,
 }
 
 impl Default for Config {
@@ -49,6 +53,7 @@ impl Default for Config {
             retry_log_every: 10,
             update_interval: ReadableDuration::minutes(10),
             enable_forwarding: false,
+            force_legacy_tso: false,
         }
     }
 }

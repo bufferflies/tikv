@@ -74,7 +74,8 @@ impl RpcClient {
         shared_env: Option<Arc<Environment>>,
         security_mgr: Arc<SecurityManager>,
     ) -> Result<RpcClient> {
-        block_on(Self::new_async(cfg, shared_env, security_mgr))
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(Self::new_async(cfg, shared_env, security_mgr))
     }
 
     pub async fn new_async(
@@ -106,16 +107,26 @@ impl RpcClient {
             match pd_connector.validate_endpoints(cfg, true).await {
                 Ok((client, target, members, tso)) => {
                     let cluster_id = members.get_header().get_cluster_id();
+                    let new_tso = if cfg.force_legacy_tso {
+                        None
+                    } else {
+                        // Create tso service discovery.
+                        pd_connector
+                            .init_tso_discovery(cluster_id, &client, target.call_option())
+                            .await;
+                        pd_connector.build_new_tso().await
+                    };
                     let rpc_client = RpcClient {
                         cluster_id,
                         pd_client: Arc::new(Client::new(
-                            Arc::clone(&env),
-                            security_mgr.clone(),
+                            security_mgr,
                             client,
                             members,
                             target,
                             tso.unwrap(),
+                            new_tso,
                             cfg.enable_forwarding,
+                            pd_connector,
                         )),
                         monitor: monitor.clone(),
                         ks_safepoint_v2: Arc::new(DashMap::default()),
@@ -175,6 +186,40 @@ impl RpcClient {
                     };
                     rpc_client.monitor.spawn(tso_check);
 
+                    if !cfg.force_legacy_tso {
+                        // `new_tso_check`
+                        let client = Arc::downgrade(&rpc_client.pd_client);
+                        let new_tso_check = async move {
+                            while let Some(cli) = client.upgrade() {
+                                let tso_exists = cli.new_tso.rl().is_some();
+                                if tso_exists {
+                                    let closed_fut = cli.new_tso.rl().as_ref().unwrap().closed();
+                                    closed_fut.await;
+                                    info!("New TSO stream is closed, reconnect to PD");
+                                }
+                                // Try to build the new tso. If build failure, just update the
+                                // client new_tso to None and wait for retry.
+                                // NOTE: the new tso will be unavailable until next retry if build
+                                // failure. It will use legacy tso instead.
+                                let new_tso = cli.pd_connector.build_new_tso().await;
+                                let build_success = new_tso.is_some();
+                                cli.update_new_tso(new_tso);
+                                if build_success {
+                                    // new tso updated, wait for tso closed.
+                                    continue;
+                                }
+
+                                warn!(
+                                    "failed to update new TSO server, will fallback to legacy TSO"
+                                );
+                                let _ = GLOBAL_TIMER_HANDLE
+                                    .delay(std::time::Instant::now() + duration)
+                                    .compat()
+                                    .await;
+                            }
+                        };
+                        rpc_client.monitor.spawn(new_tso_check);
+                    }
                     return Ok(rpc_client);
                 }
                 Err(e) => {
@@ -1008,7 +1053,7 @@ impl PdClient for RpcClient {
                     .client_stub
                     .get_gc_safe_point_async_opt(&req, call_option_inner(&inner))
                     .unwrap_or_else(|e| {
-                        panic!("fail to request PD {} err {:?}", "get_gc_saft_point", e)
+                        panic!("fail to request PD {} err {:?}", "get_gc_safe_point", e)
                     })
             };
             Box::pin(async move {
@@ -1051,7 +1096,13 @@ impl PdClient for RpcClient {
         let begin = Instant::now();
         let executor = move |client: &Client, _| {
             // Remove Box::pin and Compat when GLOBAL_TIMER_HANDLE supports futures 0.3
-            let ts_fut = Compat::new(Box::pin(client.inner.rl().tso.get_timestamp(count)));
+            let ts_fut = if client.new_tso.rl().is_some() {
+                Compat::new(Box::pin(
+                    client.new_tso.rl().as_ref().unwrap().get_timestamp(count),
+                ))
+            } else {
+                Compat::new(Box::pin(client.inner.rl().tso.get_timestamp(count)))
+            };
             let with_timeout = GLOBAL_TIMER_HANDLE
                 .timeout(
                     ts_fut,

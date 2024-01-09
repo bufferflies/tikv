@@ -13,5 +13,6 @@ define_error_codes!(
     STORE_TOMBSTONE => ("StoreTombstone", "", ""),
     GLOBAL_CONFIG_NOT_FOUND => ("GlobalConfigNotFound", "", ""),
     CHANNEL_DROP => ("ChannelDrop", "", ""),
+    TSO_SERVER_NOT_FOUND => ("TsoServerNotFound", "", ""),
     UNKNOWN => ("Unknown", "", "")
 );

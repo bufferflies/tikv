@@ -3539,7 +3539,7 @@ dependencies = [
 [[package]]
 name = "kvproto"
 version = "0.0.2"
-source = "git+https://github.com/tidbcloud/kvproto.git?branch=release-6.6-keyspace#6c1d2027bc8c279ebddea0f0d1dfdca7d0604716"
+source = "git+https://github.com/tidbcloud/kvproto.git?branch=release-7.5-serverless#1219af376d2f9f97a6155190f27a4e57415b6b24"
 dependencies = [
  "futures 0.3.28",
  "grpcio",

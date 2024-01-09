@@ -24,16 +24,18 @@ use grpcio::{
 use kvproto::{
     metapb::BucketStats,
     pdpb::{
-        ErrorType, GetMembersRequest, GetMembersResponse, Member, PdClient as PdClientStub,
-        RegionHeartbeatRequest, RegionHeartbeatResponse, ReportBucketsRequest,
-        ReportBucketsResponse, ResponseHeader,
+        ErrorType, GetClusterInfoRequest, GetMembersRequest, GetMembersResponse, Member,
+        PdClient as PdClientStub, RegionHeartbeatRequest, RegionHeartbeatResponse,
+        ReportBucketsRequest, ReportBucketsResponse, ResponseHeader,
     },
+    tsopb::{FindGroupByKeyspaceIdRequest, KeyspaceGroup, TsoClient as TsoClientStub},
 };
 use security::SecurityManager;
 use tikv_util::{
     box_err, debug, error, info, slow_log, time::Instant, timer::GLOBAL_TIMER_HANDLE, warn, Either,
     HandyRwLock,
 };
+use tokio::sync::Mutex;
 use tokio_timer::timer::Handle;
 
 use super::{
@@ -85,7 +87,6 @@ impl TargetInfo {
 }
 
 pub struct Inner {
-    env: Arc<Environment>,
     pub hb_sender: Either<
         Option<ClientDuplexSender<RegionHeartbeatRequest>>,
         UnboundedSender<RegionHeartbeatRequest>,
@@ -152,23 +153,211 @@ impl Stream for HeartbeatReceiver {
     }
 }
 
+pub(crate) struct TsoServiceDiscovery {
+    cluster_id: u64,
+    keyspace_id: u32, // use 0 as default keyspace group
+    addrs: Vec<String>,
+    selected_idx: usize,
+    failure_count: usize,
+    primary_addr: String,
+    primary_tso_client: Option<TsoClientStub>,
+    pd_client: PdClientStub,
+    call_option: CallOption,
+}
+
+impl TsoServiceDiscovery {
+    fn new(
+        cluster_id: u64,
+        keyspace_id: u32,
+        addrs: Vec<String>,
+        pd_client: PdClientStub,
+        call_option: CallOption,
+    ) -> TsoServiceDiscovery {
+        TsoServiceDiscovery {
+            cluster_id,
+            keyspace_id,
+            addrs,
+            primary_addr: String::new(),
+            primary_tso_client: None,
+            selected_idx: 0,
+            failure_count: 0,
+            pd_client,
+            call_option,
+        }
+    }
+
+    pub(crate) fn get_cluster_id(&self) -> u64 {
+        self.cluster_id
+    }
+
+    pub(crate) async fn get_tso_client(
+        &mut self,
+        connector: &PdConnector,
+    ) -> Result<TsoClientStub> {
+        if self.primary_tso_client.is_none() {
+            self.update_member(connector).await?;
+        }
+        Ok(self.primary_tso_client.as_ref().unwrap().clone())
+    }
+
+    fn get_tso_urls(&mut self) -> Result<Vec<String>> {
+        let req = GetClusterInfoRequest::default();
+        let mut resp = self
+            .pd_client
+            .get_cluster_info_opt(&req, self.call_option.clone())?;
+        if resp.get_header().has_error() {
+            return Err(box_err!(
+                "failed to get cluster info: {:?}",
+                resp.get_header().get_error()
+            ));
+        }
+        let urls = resp.take_tso_urls().into_vec();
+        if urls.is_empty() {
+            self.reset_primary_tso_client();
+            return Err(Error::TsoServerNotFound);
+        }
+        Ok(urls)
+    }
+
+    fn get_tso_server(&mut self) -> Result<String> {
+        if self.addrs.is_empty() || self.failure_count >= self.addrs.len() {
+            self.addrs = self.get_tso_urls()?;
+            self.failure_count = 0;
+            self.selected_idx = 0;
+            debug!("update tso server addrs, {:?}", self.addrs);
+        }
+        let idx = self.selected_idx;
+        self.selected_idx = (self.selected_idx + 1) % self.addrs.len();
+        Ok(self.addrs[idx].clone())
+    }
+
+    pub(crate) async fn update_member(&mut self, connector: &PdConnector) -> Result<bool> {
+        let mut tso_server = self.get_tso_server()?;
+
+        // Find keyspace group by default keyspace id.
+        // `find_group_by_keyspace_id` may be return error if some tso server is
+        // unavailable, so we need to retry to all tso servers until find a
+        // available tso server.
+        let mut keyspace_group = None;
+        for _ in 0..self.addrs.len() {
+            info!(
+                "pd_client: try to update member from tso server {:?}",
+                tso_server
+            );
+            if let Ok(group) = self
+                .find_group_by_keyspace_id(&tso_server, self.keyspace_id, connector)
+                .await
+            {
+                keyspace_group = Some(group);
+                break;
+            } else {
+                // If all tso servers fails, `get_tso_server()` will get tso urls from pd.
+                self.failure_count += 1;
+            }
+            // Try to use next tso server to find keyspace group.
+            tso_server = self.get_tso_server()?;
+        }
+        // All tso servers are unavailable, return TsoServerNotFound error.
+        // NOTE: This will result to pd_client use the legacy tso mode. If tso server
+        // comes backup later, the tso server will be updated in `update_loop`.
+        if keyspace_group.is_none() {
+            self.reset_primary_tso_client();
+            return Err(Error::TsoServerNotFound);
+        }
+        self.failure_count = 0;
+
+        let keyspace_group = keyspace_group.unwrap();
+        if keyspace_group.get_members().is_empty() {
+            self.reset_primary_tso_client();
+            return Err(Error::TsoServerNotFound);
+        }
+
+        // Update addrs
+        self.addrs = keyspace_group
+            .get_members()
+            .iter()
+            .map(|member| member.address.clone())
+            .collect();
+
+        info!(
+            "pd_client: find default keyspace group tso members {:?}",
+            self.addrs
+        );
+
+        // Find primary tso server
+        let primary_addr = keyspace_group
+            .get_members()
+            .iter()
+            .find(|member| member.is_primary)
+            .map(|member| member.address.clone());
+        if primary_addr.is_none() {
+            self.reset_primary_tso_client();
+            return Err(Error::TsoServerNotFound);
+        }
+        let primary_addr = primary_addr.unwrap();
+        if primary_addr != self.primary_addr {
+            info!(
+                "pd_client: update primary tso server, old: {:?}, new: {:?}",
+                self.primary_addr, primary_addr
+            );
+            self.primary_tso_client = Some(connector.connect_tso(&primary_addr).await?);
+            self.primary_addr = primary_addr;
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+
+    fn reset_primary_tso_client(&mut self) {
+        self.primary_tso_client = None;
+        self.primary_addr.clear();
+    }
+
+    async fn find_group_by_keyspace_id(
+        &self,
+        tso_addr: &str,
+        keyspace_id: u32,
+        connector: &PdConnector,
+    ) -> Result<KeyspaceGroup> {
+        let tso_client = connector.connect_tso(tso_addr).await?;
+        let mut req = FindGroupByKeyspaceIdRequest::default();
+        let header = req.mut_header();
+        header.set_cluster_id(self.cluster_id);
+        header.set_keyspace_id(keyspace_id);
+        header.set_keyspace_group_id(0);
+        req.set_keyspace_id(keyspace_id);
+        let mut resp = tso_client.find_group_by_keyspace_id_opt(&req, CallOption::default())?;
+
+        if resp.get_header().has_error() {
+            return Err(box_err!(
+                "failed to find group by keyspace id: {:?}",
+                resp.get_header().get_error()
+            ));
+        }
+        Ok(resp.take_keyspace_group())
+    }
+}
+
 /// A leader client doing requests asynchronous.
 pub struct Client {
     timer: Handle,
     pub(crate) inner: RwLock<Inner>,
     pub feature_gate: FeatureGate,
     enable_forwarding: bool,
+    pub(crate) pd_connector: PdConnector,
+    pub(crate) new_tso: RwLock<Option<TimestampOracle>>,
 }
 
 impl Client {
     pub(crate) fn new(
-        env: Arc<Environment>,
         security_mgr: Arc<SecurityManager>,
         client_stub: PdClientStub,
         members: GetMembersResponse,
         target: TargetInfo,
         tso: TimestampOracle,
+        new_tso: Option<TimestampOracle>,
         enable_forwarding: bool,
+        pd_connector: PdConnector,
     ) -> Client {
         if !target.direct_connected() {
             REQUEST_FORWARDED_GAUGE_VEC
@@ -184,7 +373,6 @@ impl Client {
         Client {
             timer: GLOBAL_TIMER_HANDLE.clone(),
             inner: RwLock::new(Inner {
-                env,
                 hb_sender: Either::Left(Some(hb_tx)),
                 hb_receiver: Either::Left(Some(hb_rx)),
                 buckets_sender: Either::Left(Some(buckets_tx)),
@@ -201,6 +389,8 @@ impl Client {
             }),
             feature_gate: FeatureGate::default(),
             enable_forwarding,
+            pd_connector,
+            new_tso: RwLock::new(new_tso),
         }
     }
 
@@ -271,6 +461,12 @@ impl Client {
         );
     }
 
+    pub fn update_new_tso(&self, tso: Option<TimestampOracle>) {
+        let mut new_tso = self.new_tso.wl();
+        *new_tso = tso;
+        info!("update pd client new tso");
+    }
+
     pub fn handle_region_heartbeat_response(
         self: &Arc<Self>,
         f: Box<dyn Fn(RegionHeartbeatResponse) + Send + 'static>,
@@ -336,11 +532,10 @@ impl Client {
                     .inc();
                 return Err(box_err!("cancel reconnection due to too small interval"));
             }
-            let connector = PdConnector::new(inner.env.clone(), inner.security_mgr.clone());
             let members = inner.members.clone();
             async move {
                 let direct_connected = self.inner.rl().target_info().direct_connected();
-                connector
+                self.pd_connector
                     .reconnect_pd(
                         members,
                         direct_connected,
@@ -396,7 +591,7 @@ impl Client {
     }
 }
 
-/// The context of sending requets.
+/// The context of sending requests.
 pub struct Request<Req, F> {
     remain_reconnect_count: usize,
     request_sent: usize,
@@ -535,12 +730,17 @@ pub type StubTuple = (
 #[derive(Clone)]
 pub struct PdConnector {
     pub(crate) env: Arc<Environment>,
+    tso_discovery: Arc<Mutex<Option<TsoServiceDiscovery>>>,
     pub(crate) security_mgr: Arc<SecurityManager>,
 }
 
 impl PdConnector {
     pub fn new(env: Arc<Environment>, security_mgr: Arc<SecurityManager>) -> PdConnector {
-        PdConnector { env, security_mgr }
+        PdConnector {
+            env,
+            security_mgr,
+            tso_discovery: Arc::new(Mutex::new(None)),
+        }
     }
 
     pub async fn validate_endpoints(&self, cfg: &Config, build_tso: bool) -> Result<StubTuple> {
@@ -588,9 +788,38 @@ impl PdConnector {
                     .await?
                     .unwrap();
                 info!("all PD endpoints are consistent"; "endpoints" => ?cfg.endpoints);
+
                 Ok(res)
             }
             _ => Err(box_err!("PD cluster failed to respond")),
+        }
+    }
+
+    pub async fn init_tso_discovery(
+        &self,
+        cluster_id: u64,
+        pd_client: &PdClientStub,
+        call_option: CallOption,
+    ) {
+        // Create tso service discovery
+        let tso_discovery =
+            TsoServiceDiscovery::new(cluster_id, 0, vec![], pd_client.clone(), call_option);
+
+        self.tso_discovery.lock().await.replace(tso_discovery);
+    }
+
+    pub async fn build_new_tso(&self) -> Option<TimestampOracle> {
+        let mut guard = self.tso_discovery.lock().await;
+        assert!(guard.is_some());
+        let tso_discovery = guard.as_mut().unwrap();
+        if let Err(err) = tso_discovery.update_member(self).await {
+            warn!("pd_client: tso service discover failed"; "err" => ?err);
+            None
+        } else if let Ok(tso_client) = tso_discovery.get_tso_client(self).await {
+            let cluster_id = tso_discovery.get_cluster_id();
+            Some(TimestampOracle::new(cluster_id, &tso_client, CallOption::default()).unwrap())
+        } else {
+            None
         }
     }
 
@@ -623,6 +852,24 @@ impl PdConnector {
             Ok(resp) => Ok((client, resp)),
             Err(e) => Err(Error::Grpc(e)),
         }
+    }
+
+    pub async fn connect_tso(&self, addr: &str) -> Result<TsoClientStub> {
+        info!("connecting to PD TSO endpoint"; "endpoints" => addr);
+        let addr_trim = trim_http_prefix(addr);
+        let channel = {
+            let cb = ChannelBuilder::new(self.env.clone())
+                .max_send_message_len(-1)
+                .max_receive_message_len(-1)
+                .keepalive_time(Duration::from_secs(10))
+                .keepalive_timeout(Duration::from_secs(3))
+                .max_reconnect_backoff(Duration::from_secs(5))
+                .initial_reconnect_backoff(Duration::from_secs(1));
+            self.security_mgr.connect(cb, addr_trim)
+        };
+
+        let client = TsoClientStub::new(channel);
+        Ok(client)
     }
 
     // load_members returns the PD members by calling getMember, there are two
@@ -712,7 +959,7 @@ impl PdConnector {
             Some((client, target_url)) => {
                 let info = TargetInfo::new(target_url, "");
                 let tso = if build_tso {
-                    Some(TimestampOracle::new(
+                    Some(TimestampOracle::new_legacy(
                         resp.get_header().get_cluster_id(),
                         &client,
                         info.call_option(),
@@ -731,7 +978,7 @@ impl PdConnector {
                 if enable_forwarding && has_network_error {
                     if let Ok(Some((client, info))) = self.try_forward(members, leader).await {
                         let tso = if build_tso {
-                            Some(TimestampOracle::new(
+                            Some(TimestampOracle::new_legacy(
                                 resp.get_header().get_cluster_id(),
                                 &client,
                                 info.call_option(),

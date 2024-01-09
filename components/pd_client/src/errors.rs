@@ -30,6 +30,8 @@ pub enum Error {
     DataCompacted(String),
     #[error("channel is dropped")]
     ChannelDrop,
+    #[error("tso server not found")]
+    TsoServerNotFound,
 }
 
 pub type Result<T> = result::Result<T, Error>;
@@ -41,6 +43,7 @@ impl Error {
             | Error::ClusterNotBootstrapped(_)
             | Error::StreamDisconnect(_)
             | Error::ChannelDrop
+            | Error::TsoServerNotFound
             | Error::DataCompacted(_) => true,
             Error::Other(_)
             | Error::RegionNotFound(_)
@@ -65,6 +68,7 @@ impl ErrorCodeExt for Error {
             Error::GlobalConfigNotFound(_) => error_code::pd::GLOBAL_CONFIG_NOT_FOUND,
             Error::DataCompacted(_) => error_code::pd::GLOBAL_CONFIG_NOT_FOUND,
             Error::ChannelDrop => error_code::pd::CHANNEL_DROP,
+            Error::TsoServerNotFound => error_code::pd::TSO_SERVER_NOT_FOUND,
             Error::Other(_) => error_code::pd::UNKNOWN,
         }
     }

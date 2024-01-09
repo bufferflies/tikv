@@ -22,7 +22,10 @@ use futures::{
     task::{AtomicWaker, Context, Poll},
 };
 use grpcio::{CallOption, WriteFlags};
-use kvproto::pdpb::{PdClient, TsoRequest, TsoResponse};
+use kvproto::{
+    pdpb::{PdClient, TsoRequest as LegacyTsoRequest, TsoResponse as LegacyTsoResponse},
+    tsopb::{TsoClient, TsoRequest, TsoResponse},
+};
 use tikv_util::{box_err, info, sys::thread::StdThreadBuildWrapper};
 use tokio::sync::{mpsc, oneshot, watch};
 use txn_types::TimeStamp;
@@ -51,35 +54,42 @@ pub struct TimestampOracle {
     close_rx: watch::Receiver<()>,
 }
 
-impl TimestampOracle {
-    pub(crate) fn new(
-        cluster_id: u64,
-        pd_client: &PdClient,
-        call_option: CallOption,
-    ) -> Result<TimestampOracle> {
-        let (request_tx, request_rx) = mpsc::channel(MAX_BATCH_SIZE);
-        let (rpc_sender, rpc_receiver) = pd_client.tso_opt(call_option)?;
-        let (close_tx, close_rx) = watch::channel(());
+macro_rules! define_new_tso {
+    ($name:ident, $client:ty, $run_tso:expr) => {
+        pub(crate) fn $name(
+            cluster_id: u64,
+            client: &$client,
+            call_option: CallOption,
+        ) -> Result<TimestampOracle> {
+            let (request_tx, request_rx) = mpsc::channel(MAX_BATCH_SIZE);
+            let (rpc_sender, rpc_receiver) = client.tso_opt(call_option)?;
+            let (close_tx, close_rx) = watch::channel(());
 
-        // Start a background thread to handle TSO requests and responses
-        thread::Builder::new()
-            .name("tso-worker".into())
-            .spawn_wrapper(move || {
-                block_on(run_tso(
-                    cluster_id,
-                    rpc_sender.sink_err_into(),
-                    rpc_receiver.err_into(),
-                    request_rx,
-                    close_tx,
-                ))
+            // Start a background thread to handle TSO requests and responses
+            thread::Builder::new()
+                .name("tso-worker".into())
+                .spawn_wrapper(move || {
+                    block_on($run_tso(
+                        cluster_id,
+                        rpc_sender.sink_err_into(),
+                        rpc_receiver.err_into(),
+                        request_rx,
+                        close_tx,
+                    ))
+                })
+                .expect("unable to create tso worker thread");
+
+            Ok(TimestampOracle {
+                request_tx,
+                close_rx,
             })
-            .expect("unable to create tso worker thread");
+        }
+    };
+}
 
-        Ok(TimestampOracle {
-            request_tx,
-            close_rx,
-        })
-    }
+impl TimestampOracle {
+    define_new_tso!(new, TsoClient, run_tso);
+    define_new_tso!(new_legacy, PdClient, run_tso_legacy);
 
     pub(crate) fn get_timestamp(
         &self,
@@ -107,62 +117,152 @@ impl TimestampOracle {
     }
 }
 
-async fn run_tso(
-    cluster_id: u64,
-    mut rpc_sender: impl Sink<(TsoRequest, WriteFlags), Error = Error> + Unpin,
-    mut rpc_receiver: impl Stream<Item = Result<TsoResponse>> + Unpin,
-    mut request_rx: mpsc::Receiver<TimestampRequest>,
-    close_tx: watch::Sender<()>,
-) {
-    // The `TimestampRequest`s which are waiting for the responses from the PD
-    // server
-    let pending_requests = Rc::new(RefCell::new(VecDeque::with_capacity(MAX_PENDING_COUNT)));
+macro_rules! define_run_tso {
+    ($name:ident, $request:ty, $response:ty, $request_stream:ty, $allocate_timestamps:ident, $legacy:literal) => {
+        async fn $name(
+            cluster_id: u64,
+            mut rpc_sender: impl Sink<($request, WriteFlags), Error = Error> + Unpin,
+            mut rpc_receiver: impl Stream<Item = Result<$response>> + Unpin,
+            mut request_rx: mpsc::Receiver<TimestampRequest>,
+            close_tx: watch::Sender<()>,
+        ) {
+            // The `TimestampRequest`s which are waiting for the responses from the PD
+            // server
+            let pending_requests = Rc::new(RefCell::new(VecDeque::with_capacity(MAX_PENDING_COUNT)));
+            let sending_future_waker = Rc::new(AtomicWaker::new());
 
-    // When there are too many pending requests, the `send_request` future will
-    // refuse to fetch more requests from the bounded channel. This waker is
-    // used to wake up the sending future if the queue containing pending
-    // requests is no longer full.
-    let sending_future_waker = Rc::new(AtomicWaker::new());
+            // When there are too many pending requests, the `send_request` future will
+            // refuse to fetch more requests from the bounded channel. This waker is
+            // used to wake up the sending future if the queue containing pending
+            // requests is no longer full.
+            let mut request_stream = <$request_stream>::new(
+                cluster_id,
+                &mut request_rx,
+                pending_requests.clone(),
+                sending_future_waker.clone(),
+            )
+            .map(Ok);
 
-    let mut request_stream = TsoRequestStream {
-        cluster_id,
-        request_rx: &mut request_rx,
-        pending_requests: pending_requests.clone(),
-        self_waker: sending_future_waker.clone(),
-    }
-    .map(Ok);
+            let send_requests = async move {
+                rpc_sender.send_all(&mut request_stream).await?;
+                rpc_sender.close().await?;
+                Ok(())
+            };
 
-    let send_requests = async move {
-        rpc_sender.send_all(&mut request_stream).await?;
-        rpc_sender.close().await?;
-        Ok(())
-    };
+            let receive_and_handle_responses = async move {
+                while let Some(Ok(resp)) = rpc_receiver.next().await {
+                    let mut pending_requests = pending_requests.borrow_mut();
 
-    let receive_and_handle_responses = async move {
-        while let Some(Ok(resp)) = rpc_receiver.next().await {
-            let mut pending_requests = pending_requests.borrow_mut();
+                    // Wake up the sending future blocked by too many pending requests as we are
+                    // consuming some of them here.
+                    if pending_requests.len() >= MAX_PENDING_COUNT {
+                        sending_future_waker.wake();
+                    }
 
-            // Wake up the sending future blocked by too many pending requests as we are
-            // consuming some of them here.
-            if pending_requests.len() >= MAX_PENDING_COUNT {
-                sending_future_waker.wake();
+                    $allocate_timestamps(&resp, &mut pending_requests)?;
+                    PD_PENDING_TSO_REQUEST_GAUGE.set(pending_requests.len() as i64);
+                }
+                Ok(())
+            };
+
+            let (send_res, recv_res): (Result<()>, Result<()>) =
+                join!(send_requests, receive_and_handle_responses);
+            let _ = close_tx.send(());
+            if $legacy {
+                info!(
+                    "Legacy TSO worker terminated";
+                    "sender_cause" => ?send_res.err(),
+                    "receiver_cause" => ?recv_res.err()
+                );
+            } else {
+                info!(
+                    "New TSO worker terminated";
+                    "sender_cause" => ?send_res.err(),
+                    "receiver_cause" => ?recv_res.err()
+                );
             }
-
-            allocate_timestamps(&resp, &mut pending_requests)?;
-            PD_PENDING_TSO_REQUEST_GAUGE.set(pending_requests.len() as i64);
         }
-        Ok(())
     };
+}
 
-    let (send_res, recv_res): (Result<()>, Result<()>) =
-        join!(send_requests, receive_and_handle_responses);
-    let _ = close_tx.send(());
-    info!("TSO worker terminated"; "sender_cause" => ?send_res.err(), "receiver_cause" => ?recv_res.err());
+define_run_tso!(
+    run_tso,
+    TsoRequest,
+    TsoResponse,
+    TsoRequestStream<'_>,
+    allocate_timestamps,
+    false
+);
+
+define_run_tso!(
+    run_tso_legacy,
+    LegacyTsoRequest,
+    LegacyTsoResponse,
+    LegacyTsoRequestStream<'_>,
+    allocate_timestamps_legacy,
+    true
+);
+
+macro_rules! define_tso_request_stream {
+    ($name:ident, $request:ty, $request_group:ty) => {
+        impl<'a> Stream for $name<'a> {
+            type Item = ($request, WriteFlags);
+
+            fn poll_next(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+            ) -> Poll<Option<Self::Item>> {
+                let pending_requests = self.pending_requests.clone();
+                let mut pending_requests = pending_requests.borrow_mut();
+
+                if pending_requests.len() < MAX_PENDING_COUNT {
+                    let mut requests = Vec::new();
+                    while requests.len() < MAX_BATCH_SIZE {
+                        match self.request_rx.poll_recv(cx) {
+                            Poll::Ready(Some(sender)) => {
+                                requests.push(sender);
+                            }
+                            Poll::Ready(None) if requests.is_empty() => {
+                                return Poll::Ready(None);
+                            }
+                            _ => break,
+                        }
+                    }
+                    if !requests.is_empty() {
+                        let mut req = <$request>::default();
+                        req.mut_header().cluster_id = self.cluster_id;
+                        req.count = requests.iter().map(|r| r.count).sum();
+
+                        let request_group = <$request_group>::new(req.clone(), requests);
+                        pending_requests.push_back(request_group);
+                        PD_PENDING_TSO_REQUEST_GAUGE.set(pending_requests.len() as i64);
+
+                        let write_flags = WriteFlags::default().buffer_hint(false);
+                        return Poll::Ready(Some((req, write_flags)));
+                    }
+                }
+
+                // Set the waker to the context, then the stream can be waked up after the
+                // pending queue is no longer full.
+                self.self_waker.register(cx.waker());
+                Poll::Pending
+            }
+        }
+    };
 }
 
 struct RequestGroup {
     tso_request: TsoRequest,
     requests: Vec<TimestampRequest>,
+}
+
+impl RequestGroup {
+    fn new(tso_request: TsoRequest, requests: Vec<TimestampRequest>) -> Self {
+        Self {
+            tso_request,
+            requests,
+        }
+    }
 }
 
 struct TsoRequestStream<'a> {
@@ -172,81 +272,95 @@ struct TsoRequestStream<'a> {
     self_waker: Rc<AtomicWaker>,
 }
 
-impl<'a> Stream for TsoRequestStream<'a> {
-    type Item = (TsoRequest, WriteFlags);
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let pending_requests = self.pending_requests.clone();
-        let mut pending_requests = pending_requests.borrow_mut();
-
-        if pending_requests.len() < MAX_PENDING_COUNT {
-            let mut requests = Vec::new();
-            while requests.len() < MAX_BATCH_SIZE {
-                match self.request_rx.poll_recv(cx) {
-                    Poll::Ready(Some(sender)) => {
-                        requests.push(sender);
-                    }
-                    Poll::Ready(None) if requests.is_empty() => {
-                        return Poll::Ready(None);
-                    }
-                    _ => break,
-                }
-            }
-            if !requests.is_empty() {
-                let mut req = TsoRequest::default();
-                req.mut_header().cluster_id = self.cluster_id;
-                req.count = requests.iter().map(|r| r.count).sum();
-
-                let request_group = RequestGroup {
-                    tso_request: req.clone(),
-                    requests,
-                };
-                pending_requests.push_back(request_group);
-                PD_PENDING_TSO_REQUEST_GAUGE.set(pending_requests.len() as i64);
-
-                let write_flags = WriteFlags::default().buffer_hint(false);
-                return Poll::Ready(Some((req, write_flags)));
-            }
+impl<'a> TsoRequestStream<'a> {
+    fn new(
+        cluster_id: u64,
+        request_rx: &'a mut mpsc::Receiver<TimestampRequest>,
+        pending_requests: Rc<RefCell<VecDeque<RequestGroup>>>,
+        self_waker: Rc<AtomicWaker>,
+    ) -> Self {
+        Self {
+            cluster_id,
+            request_rx,
+            pending_requests,
+            self_waker,
         }
-
-        // Set the waker to the context, then the stream can be waked up after the
-        // pending queue is no longer full.
-        self.self_waker.register(cx.waker());
-        Poll::Pending
     }
 }
 
-fn allocate_timestamps(
-    resp: &TsoResponse,
-    pending_requests: &mut VecDeque<RequestGroup>,
-) -> Result<()> {
-    // PD returns the timestamp with the biggest logical value. We can send back
-    // timestamps whose logical value is from `logical - count + 1` to `logical`
-    // using the senders in `pending`.
-    let tail_ts = resp
-        .timestamp
-        .as_ref()
-        .ok_or_else(|| -> Error { box_err!("No timestamp in TsoResponse") })?;
+macro_rules! define_allocate_timestamps {
+    ($name:ident, $response:ty, $request_group:ty) => {
+        fn $name(resp: &$response, pending_requests: &mut VecDeque<$request_group>) -> Result<()> {
+            // PD returns the timestamp with the biggest logical value. We can send back
+            // timestamps whose logical value is from `logical - count + 1` to `logical`
+            // using the senders in `pending`.
+            let tail_ts = resp
+                .timestamp
+                .as_ref()
+                .ok_or_else(|| -> Error { box_err!("No timestamp in TsoResponse") })?;
 
-    let mut offset = resp.count;
-    if let Some(RequestGroup {
-        tso_request,
-        requests,
-    }) = pending_requests.pop_front()
-    {
-        if tso_request.count != offset {
-            return Err(box_err!("PD gives unexpected number of timestamps"));
-        }
+            let mut offset = resp.count;
+            if let Some(request_group) = pending_requests.pop_front() {
+                if request_group.tso_request.count != offset {
+                    return Err(box_err!("PD gives unexpected number of timestamps"));
+                }
 
-        for request in requests {
-            offset -= request.count;
-            let physical = tail_ts.physical as u64;
-            let logical = tail_ts.logical as u64 - offset as u64;
-            let ts = TimeStamp::compose(physical, logical);
-            let _ = request.sender.send(ts);
+                for request in request_group.requests {
+                    offset -= request.count;
+                    let physical = tail_ts.physical as u64;
+                    let logical = tail_ts.logical as u64 - offset as u64;
+                    let ts = TimeStamp::compose(physical, logical);
+                    let _ = request.sender.send(ts);
+                }
+            } else {
+                return Err(box_err!("PD gives more TsoResponse than expected"));
+            };
+            Ok(())
         }
-    } else {
-        return Err(box_err!("PD gives more TsoResponse than expected"));
     };
-    Ok(())
 }
+
+struct LegacyRequestGroup {
+    tso_request: LegacyTsoRequest,
+    requests: Vec<TimestampRequest>,
+}
+
+impl LegacyRequestGroup {
+    fn new(tso_request: LegacyTsoRequest, requests: Vec<TimestampRequest>) -> Self {
+        Self {
+            tso_request,
+            requests,
+        }
+    }
+}
+
+struct LegacyTsoRequestStream<'a> {
+    cluster_id: u64,
+    request_rx: &'a mut mpsc::Receiver<TimestampRequest>,
+    pending_requests: Rc<RefCell<VecDeque<LegacyRequestGroup>>>,
+    self_waker: Rc<AtomicWaker>,
+}
+impl<'a> LegacyTsoRequestStream<'a> {
+    fn new(
+        cluster_id: u64,
+        request_rx: &'a mut mpsc::Receiver<TimestampRequest>,
+        pending_requests: Rc<RefCell<VecDeque<LegacyRequestGroup>>>,
+        self_waker: Rc<AtomicWaker>,
+    ) -> Self {
+        Self {
+            cluster_id,
+            request_rx,
+            pending_requests,
+            self_waker,
+        }
+    }
+}
+
+define_tso_request_stream!(TsoRequestStream, TsoRequest, RequestGroup);
+define_tso_request_stream!(LegacyTsoRequestStream, LegacyTsoRequest, LegacyRequestGroup);
+define_allocate_timestamps!(allocate_timestamps, TsoResponse, RequestGroup);
+define_allocate_timestamps!(
+    allocate_timestamps_legacy,
+    LegacyTsoResponse,
+    LegacyRequestGroup
+);

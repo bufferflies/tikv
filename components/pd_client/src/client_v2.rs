@@ -17,7 +17,7 @@ use std::{
     pin::Pin,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc, Mutex,
+        Arc, Mutex as StdMutex,
     },
     time::{Duration, Instant as StdInstant},
     u64,
@@ -57,7 +57,7 @@ use tikv_util::{
     timer::GLOBAL_TIMER_HANDLE,
     warn,
 };
-use tokio::sync::{broadcast, mpsc as tokio_mpsc};
+use tokio::sync::{broadcast, mpsc as tokio_mpsc, Mutex};
 use txn_types::TimeStamp;
 
 use super::{
@@ -80,7 +80,7 @@ fn request_timeout() -> Duration {
 /// Immutable context for making new connections.
 struct ConnectContext {
     cfg: Config,
-    connector: PdConnector,
+    connector: Arc<Mutex<PdConnector>>,
 }
 
 #[derive(Clone)]
@@ -97,8 +97,9 @@ impl RawClient {
             -1 => std::isize::MAX,
             v => v.saturating_add(1),
         };
+        let connector = ctx.connector.lock().await;
         for i in 0..retries {
-            match ctx.connector.validate_endpoints(&ctx.cfg, false).await {
+            match connector.validate_endpoints(&ctx.cfg, false).await {
                 Ok((stub, target_info, members, _)) => {
                     return Ok(RawClient {
                         stub,
@@ -128,8 +129,8 @@ impl RawClient {
         let members = self.members.clone();
         let direct_connected = self.target_info.direct_connected();
         slow_log!(start.saturating_elapsed(), "try reconnect pd");
-        let (stub, target_info, members, _) = match ctx
-            .connector
+        let connector = ctx.connector.lock().await;
+        let (stub, target_info, members, _) = match connector
             .reconnect_pd(
                 members,
                 direct_connected,
@@ -173,7 +174,7 @@ impl RawClient {
 struct CachedRawClientCore {
     context: ConnectContext,
 
-    latest: Mutex<RawClient>,
+    latest: StdMutex<RawClient>,
     version: AtomicU64,
     on_reconnect_tx: broadcast::Sender<()>,
 }
@@ -215,12 +216,12 @@ impl CachedRawClient {
         };
         let context = ConnectContext {
             cfg,
-            connector: PdConnector::new(env, security_mgr),
+            connector: Arc::new(Mutex::new(PdConnector::new(env, security_mgr))),
         };
         let (tx, rx) = broadcast::channel(1);
         let core = CachedRawClientCore {
             context,
-            latest: Mutex::new(client.clone()),
+            latest: StdMutex::new(client.clone()),
             version: AtomicU64::new(0),
             on_reconnect_tx: tx,
         };
@@ -506,7 +507,9 @@ impl RpcClient {
 
     #[cfg(feature = "testexport")]
     pub fn reset_to_lame_client(&mut self) {
-        let env = self.raw_client.core.context.connector.env.clone();
+        let env = block_on(self.raw_client.core.context.connector.lock())
+            .env
+            .clone();
         let lame = PdClientStub::new(Channel::lame(env, "0.0.0.0:0"));
         self.raw_client.core.latest.lock().unwrap().stub = lame.clone();
         self.raw_client.cache.stub = lame;
@@ -670,7 +673,9 @@ impl<T: Debug> Stream for CachedDuplexResponse<T> {
 
 impl GetSecurityManager for RpcClient {
     fn get_security_mgr(&self) -> Arc<SecurityManager> {
-        self.raw_client.core.context.connector.security_mgr.clone()
+        block_on(self.raw_client.core.context.connector.lock())
+            .security_mgr
+            .clone()
     }
 }
 
