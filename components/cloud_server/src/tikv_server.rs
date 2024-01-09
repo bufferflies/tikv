@@ -33,8 +33,8 @@ use futures::executor::block_on;
 use grpcio::{EnvBuilder, Environment};
 use kvengine::dfs::Dfs;
 use kvproto::{
-    brpb::create_backup, deadlock::create_deadlock, import_sstpb_grpc::create_import_sst,
-    raft_serverpb::StoreIdent,
+    brpb::create_backup, deadlock::create_deadlock, diagnosticspb_grpc::create_diagnostics,
+    import_sstpb_grpc::create_import_sst, raft_serverpb::StoreIdent,
 };
 use overload_protector::{OverloadProtector, OverloadProtectorWorker};
 use pd_client::{pd_control::PdControl, PdClient, RpcClient, INVALID_ID};
@@ -89,7 +89,7 @@ use crate::{
     raftkv::*,
     resolve,
     server::Server,
-    service::ImportSstService,
+    service::{DiagnosticsService, ImportSstService},
     setup::{initial_logger, initial_metric, validate_and_persist_config},
     status_server::StatusServer,
 };
@@ -803,6 +803,19 @@ impl TikvServer {
             Box::new(backup_endpoint.get_config_manager()),
         );
         backup_worker.start(backup_endpoint);
+
+        let diag_service = DiagnosticsService::new(
+            servers.server.get_debug_thread_pool().clone(),
+            self.config.log.file.filename.clone(),
+            self.config.slow_log_file.clone(),
+        );
+        if servers
+            .server
+            .register_service(create_diagnostics(diag_service))
+            .is_some()
+        {
+            fatal!("failed to register diagnostics service");
+        }
     }
 
     fn init_io_utility(&mut self) -> BytesFetcher {

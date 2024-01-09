@@ -1251,6 +1251,7 @@ dependencies = [
  "grpcio-health",
  "hex 0.4.2",
  "hyper",
+ "itertools",
  "keys",
  "kvengine",
  "kvenginepb",
@@ -1261,12 +1262,15 @@ dependencies = [
  "log_wrappers",
  "mime",
  "nix 0.11.1",
+ "nom 7.1.0",
+ "num_cpus",
  "online_config",
  "openssl",
  "overload_protector",
  "paste",
  "pd_client",
  "pin-project",
+ "pnet_datalink",
  "prometheus",
  "prometheus-static-metric",
  "promptly",
@@ -1278,6 +1282,7 @@ dependencies = [
  "regex",
  "resolved_ts",
  "resource_metering",
+ "rev_lines",
  "rfengine",
  "rfstore",
  "seahash",
@@ -1290,6 +1295,7 @@ dependencies = [
  "slog",
  "slog-global",
  "sst_importer",
+ "sysinfo 0.26.9",
  "tempfile",
  "thiserror",
  "tidb_query_common",
@@ -1308,6 +1314,7 @@ dependencies = [
  "url",
  "uuid 0.8.2",
  "vlog",
+ "walkdir",
  "yatp",
 ]
 
@@ -4300,6 +4307,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ntapi"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8a3895c6391c39d7fe7ebc444a87eb2991b2a0bc718fdabd071eec617fc68e4"
+dependencies = [
+ "winapi 0.3.9",
+]
+
+[[package]]
 name = "num"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5577,27 +5593,22 @@ dependencies = [
 
 [[package]]
 name = "rayon"
-version = "1.5.0"
+version = "1.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b0d8e0819fadc20c74ea8373106ead0600e3a67ef1fe8da56e39b9ae7275674"
+checksum = "9c27db03db7734835b3f53954b534c91069375ce6ccaa2e065441e07d9b6cdb1"
 dependencies = [
- "autocfg",
- "crossbeam-deque",
  "either",
  "rayon-core",
 ]
 
 [[package]]
 name = "rayon-core"
-version = "1.9.0"
+version = "1.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ab346ac5921dc62ffa9f89b7a773907511cdfa5490c572ae9be1be33e8afa4a"
+checksum = "5ce3fb6ad83f861aac485e76e1985cd109d9a3713802152be56c3b1f0e0658ed"
 dependencies = [
- "crossbeam-channel",
  "crossbeam-deque",
  "crossbeam-utils 0.8.8",
- "lazy_static",
- "num_cpus",
 ]
 
 [[package]]
@@ -7085,7 +7096,21 @@ dependencies = [
  "core-foundation-sys",
  "doc-comment",
  "libc 0.2.149",
- "ntapi",
+ "ntapi 0.3.3",
+ "once_cell",
+ "rayon",
+ "winapi 0.3.9",
+]
+
+[[package]]
+name = "sysinfo"
+version = "0.26.9"
+source = "git+https://github.com/tikv/sysinfo?branch=0.26-fix-cpu#5a1bcf08816979624ef2ad79cfb896de432a9501"
+dependencies = [
+ "cfg-if 1.0.0",
+ "core-foundation-sys",
+ "libc 0.2.149",
+ "ntapi 0.4.1",
  "once_cell",
  "rayon",
  "winapi 0.3.9",
@@ -7840,7 +7865,7 @@ dependencies = [
  "sst_importer",
  "strum 0.20.0",
  "sync_wrapper",
- "sysinfo",
+ "sysinfo 0.16.4",
  "tempfile",
  "test_sst_importer",
  "test_util",
@@ -8150,7 +8175,7 @@ dependencies = [
  "slog-global",
  "slog-json",
  "slog-term",
- "sysinfo",
+ "sysinfo 0.26.9",
  "tempfile",
  "thiserror",
  "tikv_alloc",

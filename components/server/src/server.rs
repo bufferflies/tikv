@@ -57,8 +57,8 @@ use grpcio::{EnvBuilder, Environment};
 use grpcio_health::HealthService;
 use kvproto::{
     brpb::create_backup, cdcpb::create_change_data, deadlock::create_deadlock,
-    debugpb::create_debug, diagnosticspb::create_diagnostics, import_sstpb::create_import_sst,
-    kvrpcpb::ApiVersion, logbackuppb::create_log_backup, recoverdatapb::create_recover_data,
+    debugpb::create_debug, import_sstpb::create_import_sst, kvrpcpb::ApiVersion,
+    logbackuppb::create_log_backup, recoverdatapb::create_recover_data,
     resource_usage_agent::create_resource_metering_pub_sub,
 };
 use pd_client::{PdClient, RpcClient};
@@ -96,7 +96,7 @@ use tikv::{
         lock_manager::LockManager,
         raftkv::ReplicaReadLockChecker,
         resolve,
-        service::{DebugService, DiagnosticsService},
+        service::DebugService,
         status_server::StatusServer,
         ttl::TtlChecker,
         KvEngineFactoryBuilder, Node, RaftKv, Server, CPU_CORES_QUOTA_GAUGE, DEFAULT_CLUSTER_ID,
@@ -1220,18 +1220,18 @@ where
         }
 
         // Create Diagnostics service
-        let diag_service = DiagnosticsService::new(
-            servers.server.get_debug_thread_pool().clone(),
-            self.config.log.file.filename.clone(),
-            self.config.slow_log_file.clone(),
-        );
-        if servers
-            .server
-            .register_service(create_diagnostics(diag_service))
-            .is_some()
-        {
-            fatal!("failed to register diagnostics service");
-        }
+        // let diag_service = DiagnosticsService::new(
+        //     servers.server.get_debug_thread_pool().clone(),
+        //     self.config.log.file.filename.clone(),
+        //     self.config.slow_log_file.clone(),
+        // );
+        // if servers
+        //     .server
+        //     .register_service(create_diagnostics(diag_service))
+        //     .is_some()
+        // {
+        //     fatal!("failed to register diagnostics service");
+        // }
 
         // Lock manager.
         if servers

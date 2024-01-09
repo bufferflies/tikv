@@ -53,6 +53,7 @@ grpcio = { version = "0.10", default-features = false, features = ["openssl-vend
 grpcio-health = { version = "0.10", default-features = false, features = ["protobuf-codec"] }
 hex = "0.4"
 hyper = { version = "0.14", features = ["full"] }
+itertools = "0.10"
 keys = { path = "../keys", default-features = false }
 kvengine = { path = "../kvengine", default-features = false }
 kvenginepb = { path = "../kvenginepb" }
@@ -63,12 +64,15 @@ log = { version = "0.4", features = ["max_level_trace", "release_max_level_debug
 log_wrappers = { path = "../log_wrappers" }
 mime = "0.3.13"
 nix = "0.11"
+nom = { version = "7.1.0", default-features = false, features = ["std"] }
+num_cpus = "1"
 online_config = { path = "../online_config" }
 openssl = "0.10"
 overload_protector = { workspace = true }
 paste = "1.0"
 pd_client = { path = "../pd_client", default-features = false }
 pin-project = "1.0"
+pnet_datalink = "0.23"
 prometheus = { version = "0.13", features = ["nightly"] }
 prometheus-static-metric = "0.5"
 promptly = "0.3.0"
@@ -80,6 +84,7 @@ rand = "0.8"
 regex = "1.5"
 resolved_ts = { path = "../resolved_ts", default-features = false }
 resource_metering = { path = "../resource_metering" }
+rev_lines = "0.2.1"
 rfengine = { path = "../rfengine", default-features = false }
 rfstore = { path = "../rfstore", default-features = false }
 seahash = "4.1.0"
@@ -91,6 +96,7 @@ serde_json = "1.0"
 slog = { version = "2.3", features = ["max_level_trace", "release_max_level_debug"] }
 slog-global = { version = "0.1", git = "https://github.com/breeswish/slog-global.git", rev = "d592f88e4dbba5eb439998463054f1a44fbf17b9" }
 sst_importer = { path = "../sst_importer" }
+sysinfo = "0.26"
 tempfile = "3.0"
 thiserror = "1.0"
 tidb_query_common = { path = "../tidb_query_common" }
@@ -109,6 +115,7 @@ txn_types = { path = "../txn_types", default-features = false }
 url = "2"
 uuid = { version = "0.8.1", features = ["serde", "v4"] }
 vlog = "0.1.4"
+walkdir = "2"
 yatp = { git = "https://github.com/tikv/yatp.git", branch = "master" }
 
 [target.'cfg(unix)'.dependencies]
