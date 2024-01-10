@@ -553,34 +553,12 @@ fn must_split_region_for_keyspace(pd_client: &TestPdClient, keyspace_id: u32) {
         ApiV2::get_txn_keyspace_prefix(keyspace_id),
         ApiV2::get_txn_keyspace_prefix(keyspace_id + 1),
     ];
-    let mut split_keys = keys
-        .into_iter()
-        .map(|k| Key::from_raw(&k).into_encoded())
+    let split_keys = keys
+        .iter()
+        .map(|k| Key::from_raw(k).into_encoded())
         .collect::<Vec<_>>();
-    let region_key = split_keys[0].clone();
-
-    let ok = try_wait(
-        || {
-            let region = pd_client.get_region(&split_keys[0]).unwrap();
-            if region.get_start_key() == split_keys[0] {
-                split_keys.remove(0);
-            }
-            if split_keys
-                .last()
-                .map_or(false, |last| region.get_end_key() == last.as_slice())
-            {
-                split_keys.pop();
-            }
-            if split_keys.is_empty() {
-                return true;
-            }
-            pd_client.split_region(region, CheckPolicy::Usekey, split_keys.clone());
-            false
-        },
-        10,
-    );
-    let new_region = pd_client.get_region(&region_key).unwrap();
-    assert!(ok, "split region failed: {:?}", new_region);
+    block_on(pd_client.split_regions(split_keys)).unwrap();
+    let new_region = pd_client.get_region(&keys[0]).unwrap();
     info!(
         "split region for keyspace {}: {:?}",
         keyspace_id, new_region

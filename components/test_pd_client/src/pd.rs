@@ -1795,7 +1795,7 @@ impl PdClient for TestPdClient {
         let mut region_ids: HashSet<u64> = HashSet::default();
 
         let start = Instant::now();
-        while !keys_set.is_empty() && start.saturating_elapsed() < Duration::from_secs(10) {
+        while !keys_set.is_empty() && start.saturating_elapsed() < Duration::from_secs(20) {
             let mut region_map: HashMap<
                 u64, // region_id
                 (metapb::Region, Vec<Vec<u8>> /* keys */),
@@ -2136,8 +2136,10 @@ impl PdClientExt for TestPdClient {
         &self,
         mut region: metapb::Region,
         policy: pdpb::CheckPolicy,
-        keys: Vec<Vec<u8>>,
+        mut keys: Vec<Vec<u8>>,
     ) {
+        // Make sure the keys are sorted.
+        keys.sort();
         let op = Operator::SplitRegion {
             region_epoch: region.take_region_epoch(),
             policy,
