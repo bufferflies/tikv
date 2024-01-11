@@ -1197,6 +1197,7 @@ impl PdRunner {
     }
 
     fn handle_report_region_buckets(&mut self, region_buckets: BucketStat) {
+        let store_id = self.store_id;
         let region_id = region_buckets.meta.region_id;
         self.merge_buckets(region_buckets);
         let report_buckets = self.region_buckets.get_mut(&region_id).unwrap();
@@ -1212,13 +1213,24 @@ impl PdRunner {
             .pd_client
             .report_region_buckets(&delta, Duration::from_secs(interval_second));
         let f = async move {
+            let tag = || {
+                PeerTag::new(
+                    store_id,
+                    RegionIdVer::new(region_id, delta.meta.region_epoch.version),
+                )
+            };
             if let Err(e) = resp.await {
                 debug!(
-                    "failed to send buckets";
+                    "{} failed to send buckets", tag();
                     "region_id" => region_id,
                     "version" => delta.meta.version,
                     "region_epoch" => ?delta.meta.region_epoch,
                     "err" => ?e
+                );
+            } else {
+                debug!("{} report_region_buckets", tag();
+                    "version" => delta.meta.version,
+                    "count" => delta.count(),
                 );
             }
         };

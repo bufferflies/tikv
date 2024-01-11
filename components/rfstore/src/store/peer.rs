@@ -1402,10 +1402,14 @@ impl Peer {
             return;
         }
         if let Some(shard) = ctx.global.engines.kv.get_shard(self.region_id) {
-            let estimated_size = shard.get_estimated_size();
+            let estimated_size = shard.get_estimate_size_write_cf_level_1plus();
             let bucket_size = ctx.cfg.region_bucket_size.0;
             let size_diff = estimated_size.abs_diff(self.last_bucket_split_region_size);
             if size_diff < bucket_size && self.buckets.is_some() {
+                debug!("{} update_buckets:skip", self.tag();
+                    "size_diff" => size_diff,
+                    "estimated_size" => estimated_size,
+                    "last_bucket_split_region_size" => self.last_bucket_split_region_size);
                 return;
             }
             let expected_bucket_count = (estimated_size + bucket_size - 1) / bucket_size;

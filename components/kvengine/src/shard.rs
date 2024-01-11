@@ -74,6 +74,10 @@ pub struct Shard {
     pub(crate) base_version: AtomicU64,
     // Size of all SSTables + all blobs referred (note, not the blob table size).
     pub(crate) estimated_size: AtomicU64,
+    // The estimated size of level 1+ in write cf.
+    // Used for calculating bucket count, which is concerning about the size of level 1+ write cf
+    // only.
+    pub(crate) estimated_size_write_cf_level_1plus: AtomicU64,
     pub(crate) estimated_entries: AtomicU64,
     pub(crate) max_ts: AtomicU64,
     pub(crate) estimated_kv_size: AtomicU64,
@@ -162,6 +166,7 @@ impl Shard {
             initial_flushed: Default::default(),
             base_version: Default::default(),
             estimated_size: Default::default(),
+            estimated_size_write_cf_level_1plus: Default::default(),
             estimated_entries: Default::default(),
             max_ts: Default::default(),
             estimated_kv_size: Default::default(),
@@ -251,14 +256,23 @@ impl Shard {
         let data = self.get_data();
 
         let mut lv_stats = data.get_l0_stats();
+        let mut size_write_cf_level_1plus = 0;
         data.for_each_level(|cf, l| {
-            lv_stats.add(&data.get_level_stats(cf, l), cf);
+            let cf_stats = data.get_level_stats(cf, l);
+            lv_stats.add(&cf_stats, cf);
+            if cf == WRITE_CF {
+                size_write_cf_level_1plus += cf_stats.data_size + cf_stats.blob_size;
+            }
             false
         });
 
         store_u64(
             &self.estimated_size,
             lv_stats.data_size + lv_stats.blob_size,
+        );
+        store_u64(
+            &self.estimated_size_write_cf_level_1plus,
+            size_write_cf_level_1plus,
         );
         store_u64(&self.estimated_entries, lv_stats.entries);
         store_u64(&self.sst_max_ts, lv_stats.max_ts);
@@ -496,6 +510,11 @@ impl Shard {
 
     pub fn get_estimated_size(&self) -> u64 {
         self.estimated_size.load(Ordering::Relaxed)
+    }
+
+    pub fn get_estimate_size_write_cf_level_1plus(&self) -> u64 {
+        self.estimated_size_write_cf_level_1plus
+            .load(Ordering::Relaxed)
     }
 
     pub fn get_estimated_entries(&self) -> u64 {

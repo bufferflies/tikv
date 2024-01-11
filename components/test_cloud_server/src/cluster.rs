@@ -12,7 +12,7 @@ use cloud_server::TikvServer;
 use dashmap::DashMap;
 use futures::executor::block_on;
 use grpcio::{Channel, ChannelBuilder, EnvBuilder, Environment};
-use kvengine::{dfs::Dfs, ShardStats};
+use kvengine::{dfs::Dfs, ShardStats, WRITE_CF};
 use kvproto::{
     kvrpcpb,
     kvrpcpb::{Mutation, Op},
@@ -844,8 +844,13 @@ impl ClusterDataStats {
         for region in regions {
             let region_id = region.get_id();
             let region_shard_stats = self.get_region_shard_stats(region_id).unwrap();
-            let shard_size = region_shard_stats.total_size;
-            if shard_size == 0 {
+            // Concern about write cf L1+ only. See `Peer::update_bucket`.
+            let shard_size_for_bucket: u64 = region_shard_stats.cfs[WRITE_CF]
+                .levels
+                .iter()
+                .map(|l| l.data_size + l.in_use_blob_size)
+                .sum();
+            if shard_size_for_bucket == 0 {
                 continue;
             }
             if let Some(buckets) = pd_client.get_buckets(region_id) {
@@ -856,24 +861,25 @@ impl ClusterDataStats {
                         assert!(prev_key < key, "region {} buckets {:?}", region_id, buckets);
                     }
                 }
-                let expected_bucket_count = (shard_size + bucket_size - 1) / bucket_size;
+                let expected_bucket_count = (shard_size_for_bucket + bucket_size - 1) / bucket_size;
                 let actual_bucket_count = buckets.count() as u64;
                 let ratio = expected_bucket_count as f64 / actual_bucket_count as f64;
                 if !(0.3..=3.0).contains(&ratio) {
                     return Err(format!(
-                        "region {} buckets {:?}, shard size {}, expected {}, actual {}, region {:?}",
+                        "region {} buckets {:?}, shard_size_for_bucket {}, expected {}, actual {}, region {:?}, shard stats {:?}",
                         region_id,
                         buckets,
-                        shard_size,
+                        shard_size_for_bucket,
                         expected_bucket_count,
                         actual_bucket_count,
                         region,
+                        region_shard_stats,
                     ));
                 };
             } else {
                 return Err(format!(
-                    "region {} no buckets, shard size {}, region {:?}",
-                    region_id, shard_size, region,
+                    "region {} no buckets, shard_size_for_bucket {}, region {:?}",
+                    region_id, shard_size_for_bucket, region,
                 ));
             }
         }

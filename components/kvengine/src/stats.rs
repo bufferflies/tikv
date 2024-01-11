@@ -157,6 +157,7 @@ pub struct ShardStats {
     pub total_blob_size: u64,
 
     pub l0_table_size: u64,
+    pub l0_cf_table_size: [u64; NUM_CFS],
     pub cfs: Vec<CfStats>,
 
     pub index_size: u64,
@@ -282,6 +283,7 @@ impl super::Shard {
         let mut shared_blob_tables = 0;
         let l0_table_count = data.l0_tbls.len();
         let mut l0_table_size = 0;
+        let mut l0_cf_table_size = [0; NUM_CFS];
         let mut total_blob_size = 0;
         let mut in_use_blob_size = 0;
         let blob_table_count = data.blob_tbl_map.len();
@@ -321,6 +323,12 @@ impl super::Shard {
                         }
                     }
                     in_use_blob_size += cf_tbl.total_blob_size();
+
+                    if self.cover_full_table(cf_tbl.smallest(), cf_tbl.biggest()) {
+                        l0_cf_table_size[cf] += cf_tbl.size();
+                    } else {
+                        l0_cf_table_size[cf] += cf_tbl.size() / 2;
+                    }
                 }
             }
         }
@@ -403,6 +411,7 @@ impl super::Shard {
             l0_table_count,
             blob_table_count,
             l0_table_size,
+            l0_cf_table_size,
             total_blob_size,
             in_use_blob_size,
             cfs,

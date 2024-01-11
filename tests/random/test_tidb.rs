@@ -260,7 +260,7 @@ async fn verify_cluster(cluster: &mut ServerCluster) -> usize {
     cluster.wait_region_version_match();
     data_stats
         .check_buckets(cluster.get_pd_client_ext().as_ref(), REGION_BUCKET_SIZE.0)
-        .unwrap();
+        .expect("check_buckets failed");
 
     0
 }

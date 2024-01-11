@@ -178,6 +178,7 @@ pub struct SsTableCore {
     cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
     filter: TtlCache<BinaryFuse8>,
     start_off: u64,
+    end_off: u64,
     footer: Footer,
     smallest_buf: Bytes,
     biggest_buf: Bytes,
@@ -255,6 +256,7 @@ impl SsTableCore {
             cache,
             filter: TtlCache::default(),
             start_off,
+            end_off,
             footer,
             smallest_buf,
             biggest_buf,
@@ -458,8 +460,11 @@ impl SsTableCore {
         self.file.id()
     }
 
+    /// The size on disk in bytes.
+    /// Should be equal to `self.file.size()` for L1+, and less than or equal to
+    /// for L0.
     pub fn size(&self) -> u64 {
-        self.file.size()
+        self.end_off - self.start_off
     }
 
     /// Get estimated size in [start, end) by number of blocks.
