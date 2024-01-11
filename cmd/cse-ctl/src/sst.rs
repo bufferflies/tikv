@@ -24,6 +24,11 @@ pub struct ShowSstArgs {
     /// The level of the SST file. 255 for BLOB.
     #[clap(long)]
     pub level: u32,
+    /// The path of local SST file.
+    ///
+    /// If specified, the SST file will be get from the path instead of DFS.
+    #[clap(long)]
+    pub local: Option<PathBuf>,
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug, Default)]
@@ -33,14 +38,14 @@ pub struct ShowSstConfig {
     pub dfs: DFSConfig,
 }
 
-pub fn execute_show_sst(args: ShowSstArgs) {
-    let mut config = ShowSstConfig::default();
-    if args.config.exists() {
-        let data = std::fs::read(args.config.clone()).expect("failed to read config file");
-        config = toml::from_slice(&data).unwrap();
-    }
-    config.dfs.override_from_env();
+fn get_file_data_from_local(local: PathBuf) -> bytes::Bytes {
+    let data = std::fs::read(&local).unwrap_or_else(|err| {
+        panic!("failed to read local file from {:?}: {:?}", local, err);
+    });
+    bytes::Bytes::from(data)
+}
 
+fn get_file_data_from_dfs(id: u64, config: ShowSstConfig) -> bytes::Bytes {
     let s3fs = S3Fs::new(
         config.dfs.prefix,
         config.dfs.s3_endpoint,
@@ -51,9 +56,23 @@ pub fn execute_show_sst(args: ShowSstArgs) {
     );
 
     let runtime = s3fs.get_runtime();
-    let data = runtime
-        .block_on(s3fs.read_file(args.id, Options::new(0, 0)))
-        .unwrap();
+    runtime
+        .block_on(s3fs.read_file(id, Options::new(0, 0)))
+        .expect("failed to read file from dfs")
+}
+
+pub fn execute_show_sst(args: ShowSstArgs) {
+    let mut config = ShowSstConfig::default();
+    if args.config.exists() {
+        let data = std::fs::read(args.config.clone()).expect("failed to read config file");
+        config = toml::from_slice(&data).unwrap();
+    }
+    config.dfs.override_from_env();
+
+    let data = match args.local {
+        Some(local) => get_file_data_from_local(local),
+        None => get_file_data_from_dfs(args.id, config),
+    };
     let file = Arc::new(InMemFile::new(args.id, data));
     if args.level == 0 {
         let l0 = L0Table::new(file, None, false, None).unwrap().unwrap();
