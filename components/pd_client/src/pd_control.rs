@@ -1,14 +1,15 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use bstr::ByteSlice;
 use bytes::Bytes;
 use http::{Method, Request};
 use hyper::Body;
 use security::SecurityManager;
+use serde::Deserialize;
 use slog_global::debug;
-use tikv_util::{box_err, config::ReadableDuration, info};
+use tikv_util::{box_err, config::ReadableDuration};
 
 use crate::Config;
 
@@ -21,6 +22,8 @@ const PD_PLACEMENT_RULE_GROUP_PATH: &str = "pd/api/v1/config/placement-rule";
 const PD_PLACEMENT_RULE_PATH: &str = "pd/api/v1/config/rule";
 const PD_STATS_REGION: &str = "pd/api/v1/stats/region";
 const PD_HEALTH_PATH: &str = "health";
+const PD_SCHEDULERS_PATH: &str = "pd/api/v1/schedulers";
+const PD_OPERATORS_PATH: &str = "pd/api/v1/operators";
 
 const TIFLASH_GROUP: &str = "tiflash";
 
@@ -77,10 +80,11 @@ impl PdControl {
 
     async fn request_pd_restful(
         &self,
-        path: String,
+        path: impl AsRef<str>,
         method: Method,
         body_data: Option<Vec<u8>>,
     ) -> Result<Bytes> {
+        let path = path.as_ref();
         let client = self.security_mgr.http_client(hyper::Client::builder())?;
         let mut err = None;
         for endpoint in self.endpoints.iter() {
@@ -106,6 +110,7 @@ impl PdControl {
                     let status = resp.status();
                     let body = hyper::body::to_bytes(resp.into_body()).await.unwrap();
                     if status.is_success() {
+                        debug!("request_pd_restful success: {}", body.to_str_lossy());
                         return Ok(body);
                     } else {
                         err = Some(box_err!(
@@ -119,68 +124,70 @@ impl PdControl {
         Err(err.expect("there must be error"))
     }
 
-    pub async fn get_config(&self) -> Result<PdConfigFromApi> {
-        let query = PD_CONFIG_PATH.to_string();
-        match self.request_pd_restful(query, Method::GET, None).await {
+    async fn get<T>(&self, path: impl AsRef<str>) -> Result<T>
+    where
+        T: std::fmt::Debug + for<'a> serde::de::Deserialize<'a>,
+    {
+        let path = path.as_ref();
+        match self.request_pd_restful(path, Method::GET, None).await {
             Ok(resp) => {
-                let pd_config = serde_json::from_slice(&resp)?;
-                debug!("pd_config: {:?}", pd_config);
-                Ok(pd_config)
+                let t: T = serde_json::from_slice(&resp)?;
+                debug!("pd_control::get"; "path" => path, "resp" => ?t);
+                Ok(t)
             }
-            Err(err) => Err(box_err!("get_config error: {:?}", err)),
+            Err(err) => Err(box_err!(
+                "pd_control::get failed: path: {}, err: {:?}",
+                path,
+                err
+            )),
         }
+    }
+
+    async fn post<Req, Resp>(&self, path: impl AsRef<str>, data: &Req) -> Result<Resp>
+    where
+        Req: serde::ser::Serialize,
+        Resp: std::fmt::Debug + for<'a> serde::de::Deserialize<'a>,
+    {
+        let path = path.as_ref();
+        let body_data = serde_json::to_vec(data)?;
+        match self
+            .request_pd_restful(path, Method::POST, Some(body_data))
+            .await
+        {
+            Ok(resp) => {
+                let t: Resp = serde_json::from_slice(&resp)?;
+                debug!("pd_control::post"; "path" => path, "resp" => ?t);
+                Ok(t)
+            }
+            Err(err) => Err(box_err!(
+                "pd_control::post failed: path: {}, err: {:?}",
+                path,
+                err
+            )),
+        }
+    }
+
+    pub async fn get_config(&self) -> Result<PdConfigFromApi> {
+        self.get(PD_CONFIG_PATH).await
     }
 
     pub async fn get_store_regions(&self, store_id: u64) -> Result<RegionsInfo> {
         let query = format!("{}/{}", PD_REGIONS_STORE_PATH, store_id);
-        match self.request_pd_restful(query, Method::GET, None).await {
-            Ok(resp) => {
-                let regions_info = serde_json::from_slice(&resp)?;
-                debug!("regions_info: {:?}", regions_info);
-                Ok(regions_info)
-            }
-            Err(err) => Err(box_err!("get_store_regions error: {:?}", err)),
-        }
+        self.get(query).await
     }
 
     pub async fn get_keyspace_by_name(&self, keyspace_name: &str) -> Result<KeyspaceMeta> {
         let query = format!("{PD_KEYSPACE_PATH}/{}", keyspace_name);
-        match self.request_pd_restful(query, Method::GET, None).await {
-            Ok(resp) => {
-                let keyspace = serde_json::from_slice(&resp)?;
-                debug!("get_keyspace: {:?}", keyspace);
-                Ok(keyspace)
-            }
-            Err(err) => Err(box_err!("get_keyspace_by_name error: {:?}", err)),
-        }
+        self.get(query).await
     }
 
     pub async fn create_keyspace(&self, params: CreateKeyspaceParams) -> Result<KeyspaceMeta> {
-        let query = PD_KEYSPACE_PATH.to_string();
-        let body_data = serde_json::to_vec(&params)?;
-        match self
-            .request_pd_restful(query, Method::POST, Some(body_data))
-            .await
-        {
-            Ok(resp) => {
-                let keyspace = serde_json::from_slice(&resp)?;
-                info!("create_keyspace: {:?}", keyspace);
-                Ok(keyspace)
-            }
-            Err(err) => Err(box_err!("create_keyspace error: {:?}", err)),
-        }
+        self.post(PD_KEYSPACE_PATH, &params).await
     }
 
     pub async fn get_tiflash_placement_rule_group(&self) -> Result<Option<RuleGroup>> {
         let path = format!("{PD_PLACEMENT_RULE_GROUP_PATH}/{TIFLASH_GROUP}");
-        match self.request_pd_restful(path, Method::GET, None).await {
-            Ok(resp) => {
-                let tiflash_rule_group = serde_json::from_slice(&resp)?;
-                debug!("get tiflash rule group: {:?}", tiflash_rule_group);
-                Ok(tiflash_rule_group)
-            }
-            Err(err) => Err(box_err!("get tiflash rule group error: {:?}", err)),
-        }
+        self.get(path).await
     }
 
     pub async fn remove_tiflash_placement_rule_by_id(&self, rule_id: &str) -> Result<()> {
@@ -197,35 +204,72 @@ impl PdControl {
     // Ref: https://github.com/tidbcloud/pd-cse/blob/release-7.1-keyspace/server/api/stats.go
     pub async fn get_regions_number(&self) -> Result<i32> {
         let path = format!("{PD_STATS_REGION}?start_key=&end_key=&count=true");
-        match self.request_pd_restful(path, Method::GET, None).await {
-            Ok(resp) => {
-                let region_stats: RegionStats = serde_json::from_slice(&resp)?;
-                debug!("get_regions_number: {}", region_stats.count);
-                Ok(region_stats.count)
-            }
-            Err(err) => Err(box_err!("get_regions_number error: {:?}", err)),
-        }
+        let region_stats: RegionStats = self.get(path).await?;
+        Ok(region_stats.count)
     }
 
     // Ref: https://github.com/tidbcloud/pd-cse/blob/release-7.1-keyspace/server/api/health.go
     pub async fn health(&self) -> Result<bool> {
-        match self
-            .request_pd_restful(PD_HEALTH_PATH.to_string(), Method::GET, None)
-            .await
-        {
-            Ok(resp) => {
-                let health: Health = serde_json::from_slice(&resp)?;
-                debug!("health: {:?}", health);
-                Ok(health.health == "true")
+        let health: Health = self.get(PD_HEALTH_PATH).await?;
+        Ok(health.health == "true")
+    }
+
+    // Ref: https://github.com/tidbcloud/pd-cse/blob/release-7.1-keyspace/server/api/scheduler.go
+    // `scheduler_name` can be "all" to pause or resume all schedulers.
+    // Pass `dur` as `Duration::ZERO` to resume the scheduler.
+    pub async fn pause_or_resume_scheduler(
+        &self,
+        scheduler_name: &str,
+        dur: Duration,
+    ) -> Result<()> {
+        let path = format!("{PD_SCHEDULERS_PATH}/{scheduler_name}");
+        let params = SchedulerDelay {
+            delay: dur.as_secs() as i64,
+        };
+        let body_data = serde_json::to_vec(&params)?;
+        let _ = self
+            .request_pd_restful(path, Method::POST, Some(body_data))
+            .await?;
+        Ok(())
+    }
+
+    // Note: only when `status` is `Some(SchedulerStatus::Paused)` will return
+    // schedulers with timestamps.
+    pub async fn list_schedulers(&self, status: Option<SchedulerStatus>) -> Result<Vec<Scheduler>> {
+        let status_str = match status {
+            Some(SchedulerStatus::Paused) => "paused",
+            Some(SchedulerStatus::Disabled) => "disabled",
+            None => "",
+        };
+        let query = format!("{PD_SCHEDULERS_PATH}?status={status_str}&timestamp=1");
+        match status {
+            Some(SchedulerStatus::Paused) => self.get(query).await,
+            Some(SchedulerStatus::Disabled) | None => {
+                let scheduler_names: Vec<String> = self.get(query).await?;
+                Ok(scheduler_names
+                    .into_iter()
+                    .map(|name| Scheduler {
+                        name,
+                        ..Default::default()
+                    })
+                    .collect())
             }
-            Err(err) => Err(box_err!("health error: {:?}", err)),
         }
+    }
+
+    // Ref: https://github.com/tidbcloud/pd-cse/blob/release-7.1-keyspace/server/api/operator.go
+    // Return array of strings, see https://github.com/tidbcloud/pd-cse/blob/release-7.1-keyspace/pkg/schedule/operator/operator.go, Operator.MarshalJSON
+    // E.g.:
+    // ```
+    // "balance-leader {transfer leader: store 5 to 6} (kind:leader, region:179(42,29), createAt:2024-01-09 08:31 :45.749305225 +0000 UTC m=+110.335827093,startAt:2024-01-09 08:31:45.749636244 +0000 UTC m=+110.336158110, currentStep:0, size:1, steps:[0:{transfer leader from store 5 to store 6}],timeout:[1m0s])"
+    // ````
+    pub async fn get_operators(&self) -> Result<Vec<String>> {
+        self.get(PD_OPERATORS_PATH).await
     }
 }
 
-#[derive(Default, Serialize, Deserialize, Debug)]
+#[derive(Default, Serialize, Deserialize, Debug, PartialEq, Eq)]
 #[serde(default)]
-#[serde(rename_all = "kebab-case")]
 pub struct KeyspaceMeta {
     pub id: u32,
     pub name: String,
@@ -237,7 +281,6 @@ pub struct KeyspaceMeta {
 
 #[derive(Default, Serialize, Deserialize, Debug)]
 #[serde(default)]
-#[serde(rename_all = "kebab-case")]
 pub struct RegionInfo {
     pub id: u64,
     pub start_key: String,
@@ -246,7 +289,6 @@ pub struct RegionInfo {
 
 #[derive(Default, Serialize, Deserialize, Debug)]
 #[serde(default)]
-#[serde(rename_all = "kebab-case")]
 pub struct RegionsInfo {
     pub count: u64,
     pub regions: Vec<RegionInfo>,
@@ -282,21 +324,18 @@ pub struct PdConfigFromApi {
 
 #[derive(Default, Serialize, Deserialize, Debug)]
 #[serde(default)]
-#[serde(rename_all = "kebab-case")]
 pub struct RegionStats {
     pub count: i32,
 }
 
 #[derive(Default, Serialize, Deserialize, Debug)]
 #[serde(default)]
-#[serde(rename_all = "kebab-case")]
 pub struct Health {
     pub health: String, // Note: not a boolean.
 }
 
 #[derive(Default, Serialize, Deserialize, Debug)]
 #[serde(default)]
-#[serde(rename_all = "kebab-case")]
 pub struct CreateKeyspaceParams {
     pub name: String,
     pub config: HashMap<String, String>,
@@ -323,7 +362,25 @@ pub const KEYSPACE_CONFIG_ENCRYPTION_KEY: &str = "encryption";
 
 #[derive(Default, Serialize, Deserialize, Debug)]
 #[serde(default)]
-#[serde(rename_all = "kebab-case")]
 pub struct KeyspaceConfigEncryption {
     pub enabled: bool,
+}
+
+#[derive(Default, Serialize, Deserialize, Debug)]
+#[serde(default)]
+pub struct SchedulerDelay {
+    pub delay: i64,
+}
+
+pub enum SchedulerStatus {
+    Paused,
+    Disabled,
+}
+
+#[derive(Default, Serialize, Deserialize, Debug)]
+#[serde(default)]
+pub struct Scheduler {
+    pub name: String,
+    pub paused_at: String,
+    pub resume_at: String,
 }

@@ -119,6 +119,10 @@ impl RealPd {
     pub fn new_client(&self) -> pd_client::RpcClient {
         Self::new_client_impl(self.endpoints.clone(), self.security_mgr.clone())
     }
+
+    pub fn get_pd_control(&self) -> pd_client::pd_control::Result<PdControl> {
+        get_pd_control(&self.client)
+    }
 }
 
 /// A wrapper to provide an uniform interface for both real and test (mock) PD.
@@ -187,6 +191,13 @@ impl PdWrapper {
         match self {
             PdWrapper::Test(c) => c.endpoints.as_deref(),
             PdWrapper::Real(c) => Some(&c.endpoints),
+        }
+    }
+
+    pub fn get_pd_control(&self) -> pd_client::pd_control::Result<PdControl> {
+        match self {
+            PdWrapper::Test(_) => unimplemented!("test PD does not support PD control interfaces"),
+            PdWrapper::Real(c) => c.get_pd_control(),
         }
     }
 }

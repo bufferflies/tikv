@@ -2,17 +2,23 @@
 
 //! Test for test_cloud_server & test_pd_client themselves.
 
-use std::{sync::atomic::AtomicU16, time::Duration};
+use std::{
+    sync::{atomic::AtomicU16, Arc},
+    time::Duration,
+};
 
 use futures::executor::block_on;
-use pd_client::PdClient;
+use pd_client::{
+    pd_control::{CreateKeyspaceParams, SchedulerStatus},
+    PdClient,
+};
 use security::SecurityConfig;
 use test_pd_client::PdWrapper;
 use tikv_client::{IntoOwnedRange, TimestampExt};
 use tikv_util::{codec::bytes::encode_bytes, config::ReadableDuration, info};
 use tokio::runtime::Runtime;
 
-use crate::{client::CommitAction, try_wait, ServerCluster};
+use crate::{client::CommitAction, try_wait, try_wait_result_async, ServerCluster};
 
 #[test]
 fn it_works() {
@@ -281,7 +287,10 @@ fn test_txn_client() {
 }
 
 // Start pd-server to run this test:
+// ```
 //   bin/pd-server --client-urls http://127.0.0.1:4379 --peer-urls http://127.0.0.1:4380 --config pd-cse.toml
+//   PD_ADDRS=127.0.0.1:4379 cargo test -p test_cloud_server test_on_real_pd
+// ```
 // Note the pd-server must be cleared before test, otherwise cluster will fail
 // when put store.
 #[test]
@@ -327,6 +336,132 @@ fn test_on_real_pd() {
                 .unwrap(),
             300
         );
+    });
+
+    cluster.stop();
+}
+
+// Start pd-server to run this test:
+// ```
+//   bin/pd-server --client-urls http://127.0.0.1:4379 --peer-urls http://127.0.0.1:4380 --config pd-cse.toml
+//   PD_ADDRS=127.0.0.1:4379 cargo test -p test_cloud_server test_pd_control
+// ```
+// Note the pd-server must be cleared before test, otherwise cluster will fail
+// when put store.
+#[test]
+fn test_pd_control() {
+    test_util::init_log_for_test();
+
+    let pd_addrs = match std::env::var("PD_ADDRS") {
+        Ok(s) => s.split(',').map(|s| s.to_owned()).collect(),
+        Err(_) => {
+            info!("PD_ADDRS not set, skip test_pd_control");
+            return;
+        }
+    };
+
+    let runtime = Runtime::new().unwrap();
+    let _guard = runtime.enter();
+
+    let node_ids = alloc_node_id_vec(3);
+    let pd_wrapper = PdWrapper::new_real(pd_addrs, &SecurityConfig::default());
+    let pd_ctl = Arc::new(pd_wrapper.get_pd_control().unwrap());
+    let mut cluster = ServerCluster::new_opt(node_ids, |_, _| {}, pd_wrapper);
+
+    runtime.block_on(async {
+        let ks_name = "ks_for_test";
+        let keyspace = pd_ctl
+            .create_keyspace(CreateKeyspaceParams {
+                name: ks_name.to_string(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        info!("pd_control::create_keyspace: {:?}", keyspace);
+        assert!(keyspace.created_at > 0);
+
+        let keyspace_get = pd_ctl.get_keyspace_by_name(ks_name).await.unwrap();
+        info!("pd_control::get_keyspace_by_name: {:?}", keyspace_get);
+        assert_eq!(keyspace, keyspace_get);
+
+        let pause_dur = Duration::from_secs(2);
+        try_wait_result_async(
+            || {
+                let pd_ctl = pd_ctl.clone();
+                Box::pin(async move {
+                    let schedulers = pd_ctl.list_schedulers(None).await.unwrap();
+                    if !schedulers.is_empty() {
+                        info!("pd_control::list_schedulers: {:?}", schedulers);
+                        Ok(())
+                    } else {
+                        Err("schedulers is empty".to_string())
+                    }
+                })
+            },
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+
+        let config = pd_ctl.get_config().await.unwrap();
+        info!("pd_control::get_config: {:?}", config);
+        assert!(!config.schedule.max_store_down_time.is_empty());
+
+        for store_id in cluster.get_stores() {
+            let store_regions = pd_ctl.get_store_regions(store_id).await.unwrap();
+            info!(
+                "pd_control::get_store_regions: store_id {}, regions: {:?}",
+                store_id, store_regions
+            );
+            if let Some(region) = store_regions.regions.first() {
+                assert!(!region.start_key.is_empty() || !region.end_key.is_empty())
+            }
+        }
+
+        let regions_num = pd_ctl.get_regions_number().await.unwrap();
+        info!("pd_control::get_regions_number: {:?}", regions_num);
+        assert!(regions_num > 0);
+
+        let health = pd_ctl.health().await.unwrap();
+        info!("pd_control::get_health: {:?}", health);
+
+        let tiflash_rule_group = pd_ctl.get_tiflash_placement_rule_group().await.unwrap();
+        info!(
+            "pd_control::get_tiflash_placement_rule_group: {:?}",
+            tiflash_rule_group
+        );
+
+        pd_ctl
+            .pause_or_resume_scheduler("all", pause_dur)
+            .await
+            .unwrap();
+        let schedulers = pd_ctl
+            .list_schedulers(Some(SchedulerStatus::Paused))
+            .await
+            .unwrap();
+        info!(
+            "pd_control::list_schedulers after pause {:?}: {:?}",
+            pause_dur, schedulers
+        );
+        if let Some(scheduler) = schedulers.first() {
+            assert!(!scheduler.paused_at.is_empty());
+        }
+
+        tokio::time::sleep(pause_dur + Duration::from_secs(1)).await;
+        let paused_schedulers = pd_ctl
+            .list_schedulers(Some(SchedulerStatus::Paused))
+            .await
+            .unwrap();
+        assert!(
+            paused_schedulers.is_empty(),
+            "paused_schedulers: {:?}",
+            paused_schedulers
+        );
+        let schedulers = pd_ctl.list_schedulers(None).await.unwrap();
+        info!("pd_control::list_schedulers after resume: {:?}", schedulers);
+
+        let operators = pd_ctl.get_operators().await.unwrap();
+        info!("pd_control::get_operators: {:?}", operators);
     });
 
     cluster.stop();
