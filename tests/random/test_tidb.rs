@@ -1,15 +1,17 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
+    ops::Div,
     path::PathBuf,
     sync::{atomic::Ordering, Arc},
     time::Duration,
 };
 
 use kvengine::dfs::DFSConfig;
+use pd_client::pd_control::PdScheduleConfig;
 use rand::Rng;
 use security::SecurityConfig;
-use test_cloud_server::{oss::prepare_dfs, tidb::TidbCluster, try_wait_result, ServerCluster};
+use test_cloud_server::{oss::prepare_dfs, tidb::*, try_wait_result, ServerCluster};
 use test_pd_client::PdWrapper;
 use tikv::config::TikvConfig;
 use tikv_util::{
@@ -20,7 +22,12 @@ use tikv_util::{
 
 use crate::*;
 
-const REGION_BUCKET_SIZE: ReadableSize = ReadableSize::kb(64);
+const REGION_SIZE: ReadableSize = ReadableSize::mb(1);
+// TiDB has records with 200kb+ size (see "mysql.stats_history"), so set bucket
+// size to 256kb.
+const REGION_BUCKET_SIZE: ReadableSize = ReadableSize::kb(256);
+// Ref: https://docs.pingcap.com/tidb/stable/pd-configuration-file#split-merge-interval
+const SPLIT_MERGE_INTERVAL: ReadableDuration = ReadableDuration::secs(10);
 
 const INITIAL_KEYSPACE_COUNT: usize = 4;
 const NODES_COUNT: usize = 4;
@@ -132,9 +139,19 @@ fn prepare_tidb_cluster(security_config: &SecurityConfig) -> TidbCluster {
         .map(|s| s.parse().unwrap())
         .unwrap_or(TIDB_STATUS_PORT_DEFAULT);
 
+    let max_merge_region_size = REGION_SIZE.div(5);
+    let max_merge_region_keys = max_merge_region_size.0 / 100; // Assume 100 bytes per key, about 2000 keys.
+    let pd_scheduler_config = PdScheduleConfig {
+        max_merge_region_size: max_merge_region_size.as_mb().max(1),
+        max_merge_region_keys,
+        split_merge_interval: SPLIT_MERGE_INTERVAL,
+        ..Default::default()
+    };
+
     let tc = TidbCluster::new(
         PathBuf::from(pd_bin),
         pd_port_base,
+        pd_scheduler_config,
         PathBuf::from(tidb_bin),
         tidb_port_base,
         tidb_status_port_base,
@@ -158,7 +175,7 @@ fn prepare_cluster(
     let dfs_config = Arc::new(dfs_config.clone());
     let update_conf_fn = move |_, conf: &mut TikvConfig| {
         conf.dfs = (*dfs_config).clone();
-        conf.coprocessor.region_split_size = ReadableSize::kb(192);
+        conf.coprocessor.region_split_size = REGION_SIZE;
         conf.coprocessor.region_bucket_size = REGION_BUCKET_SIZE;
         conf.raft_store.peer_stale_state_check_interval = ReadableDuration::secs(1);
         conf.raft_store.abnormal_leader_missing_duration = ReadableDuration::secs(3);

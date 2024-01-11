@@ -16,7 +16,10 @@ use dashmap::DashMap;
 use futures::executor::block_on;
 use grpcio::EnvBuilder;
 use hyper::{Body, Method, Request};
-use pd_client::{pd_control::PdControl, PdClient};
+use pd_client::{
+    pd_control::{PdControl, PdScheduleConfig},
+    PdClient,
+};
 use security::{HttpClient, SecurityConfig, SecurityManager};
 use serde_derive::Serialize;
 use tempfile::TempDir;
@@ -32,6 +35,7 @@ pub struct PdServers {
     data_path: PathBuf,
     port_base: u16,
     pre_alloc_keyspaces: u16,
+    schedule_config: PdScheduleConfig,
 
     security_mgr: Arc<SecurityManager>,
 
@@ -44,6 +48,7 @@ impl PdServers {
         data_path: PathBuf,
         port_base: u16,
         pre_alloc_keyspaces: u16,
+        schedule_config: PdScheduleConfig,
         security_mgr: Arc<SecurityManager>,
     ) -> Self {
         Self {
@@ -51,6 +56,7 @@ impl PdServers {
             data_path,
             port_base,
             pre_alloc_keyspaces,
+            schedule_config,
             security_mgr,
             children: DashMap::new(),
         }
@@ -72,11 +78,12 @@ impl PdServers {
 
         let config_file = self.data_path.join(format!("pd-{idx}.toml"));
         let config = PdConfig {
-            keyspace: PdConfigKeyspace {
+            keyspace: PdKeyspaceConfig {
                 pre_alloc: (1..=self.pre_alloc_keyspaces)
                     .map(|i| keyspace_name_by_idx(i))
                     .collect(),
             },
+            schedule: self.schedule_config.clone(),
             ..Default::default()
         };
         let toml = toml::to_string(&config).unwrap();
@@ -361,6 +368,7 @@ impl TidbCluster {
     pub fn new(
         pd_bin: PathBuf,
         pd_port_base: u16,
+        pd_schedule_config: PdScheduleConfig,
         tidb_bin: PathBuf,
         tidb_port_base: u16,
         tidb_status_port_base: u16,
@@ -378,6 +386,7 @@ impl TidbCluster {
             base_path.path().to_owned(),
             pd_port_base,
             pre_alloc_keyspaces,
+            pd_schedule_config,
             security_mgr.clone(),
         );
         let tidb = TidbServers::new(
@@ -452,17 +461,18 @@ impl ConnParams {
 #[derive(Default, Serialize)]
 #[serde(rename_all = "kebab-case")]
 struct PdConfig {
-    replication: PdConfigReplication,
-    keyspace: PdConfigKeyspace,
+    replication: PdReplicationConfig,
+    keyspace: PdKeyspaceConfig,
+    schedule: PdScheduleConfig,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "kebab-case")]
-struct PdConfigReplication {
+struct PdReplicationConfig {
     max_replicas: usize,
 }
 
-impl Default for PdConfigReplication {
+impl Default for PdReplicationConfig {
     fn default() -> Self {
         Self { max_replicas: 3 }
     }
@@ -470,7 +480,7 @@ impl Default for PdConfigReplication {
 
 #[derive(Default, Serialize)]
 #[serde(rename_all = "kebab-case")]
-struct PdConfigKeyspace {
+struct PdKeyspaceConfig {
     pre_alloc: Vec<String>,
 }
 

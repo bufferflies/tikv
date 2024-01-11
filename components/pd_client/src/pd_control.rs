@@ -8,7 +8,7 @@ use http::{Method, Request};
 use hyper::Body;
 use security::SecurityManager;
 use slog_global::debug;
-use tikv_util::{box_err, info};
+use tikv_util::{box_err, config::ReadableDuration, info};
 
 use crate::Config;
 
@@ -252,11 +252,25 @@ pub struct RegionsInfo {
     pub regions: Vec<RegionInfo>,
 }
 
-#[derive(Default, Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
 pub struct PdScheduleConfig {
     pub max_store_down_time: String,
+    pub max_merge_region_size: u64, // in MB.
+    pub max_merge_region_keys: u64,
+    pub split_merge_interval: ReadableDuration,
+}
+
+impl Default for PdScheduleConfig {
+    fn default() -> Self {
+        Self {
+            max_store_down_time: "30m".to_string(),
+            max_merge_region_size: 96,
+            max_merge_region_keys: 200000,
+            split_merge_interval: ReadableDuration::hours(1),
+        }
+    }
 }
 
 #[derive(Default, Serialize, Deserialize, Debug)]
