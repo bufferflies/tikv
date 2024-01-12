@@ -29,8 +29,14 @@ use crate::try_wait_result_async;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Sync + Send>>;
 
+pub enum PdServerMode {
+    Normal,
+    MicroServices { tso_count: u16 },
+}
+
 /// Starts/stops pd-servers and provides interfaces such as PD endpoints.
 pub struct PdServers {
+    mode: PdServerMode,
     bin_path: PathBuf,
     data_path: PathBuf,
     port_base: u16,
@@ -39,11 +45,13 @@ pub struct PdServers {
 
     security_mgr: Arc<SecurityManager>,
 
-    children: DashMap<u16 /* idx */, process::Child>,
+    servers: DashMap<u16 /* idx */, process::Child>,
+    tso_svcs: DashMap<u16 /* idx */, process::Child>,
 }
 
 impl PdServers {
     pub fn new(
+        mode: PdServerMode,
         bin_path: PathBuf,
         data_path: PathBuf,
         port_base: u16,
@@ -52,19 +60,27 @@ impl PdServers {
         security_mgr: Arc<SecurityManager>,
     ) -> Self {
         Self {
+            mode,
             bin_path,
             data_path,
             port_base,
             pre_alloc_keyspaces,
             schedule_config,
             security_mgr,
-            children: DashMap::new(),
+            servers: DashMap::new(),
+            tso_svcs: DashMap::new(),
         }
     }
 
     pub fn start(&self, count: u16) {
         for idx in 0..count {
             self.start_single(idx, count);
+        }
+
+        if let PdServerMode::MicroServices { tso_count } = self.mode {
+            for idx in 0..tso_count {
+                self.start_single_tso_service(idx);
+            }
         }
     }
 
@@ -90,6 +106,9 @@ impl PdServers {
         fs::write(&config_file, toml).unwrap();
 
         let mut cmd = Command::new(&self.bin_path);
+        if matches!(self.mode, PdServerMode::MicroServices { .. }) {
+            cmd.arg("services").arg("api");
+        }
         cmd.arg(format!("--name=pd-{}", idx))
             .arg(format!("--data-dir={}", data_dir.display()))
             .arg(format!("--log-file={}", log_file.display()))
@@ -105,8 +124,32 @@ impl PdServers {
             .arg(format!("--config={}", config_file.display()));
         info!("start pd-server"; "cmd" => ?cmd);
         let child = cmd.spawn().unwrap();
-        let old = self.children.insert(idx, child);
+        let old = self.servers.insert(idx, child);
         assert!(old.is_none(), "pd-{} already started (but dead ?)", idx);
+    }
+
+    fn start_single_tso_service(&self, idx: u16) {
+        let log_file = self.data_path.join(format!("pd-tso-{idx}.log"));
+        let mut cmd = Command::new(&self.bin_path);
+        cmd.arg("services")
+            .arg("tso")
+            .arg(format!(
+                "--backend-endpoints={}",
+                self.endpoints_with_scheme().join(",")
+            ))
+            .arg(format!(
+                "--listen-addr=http://127.0.0.1:{}",
+                self.tso_svc_port(idx)
+            ))
+            .arg(format!(
+                "--advertise-listen-addr=http://127.0.0.1:{}",
+                self.tso_svc_port(idx)
+            ))
+            .arg(format!("--log-file={}", log_file.display()));
+        info!("start pd-server tso"; "cmd" => ?cmd);
+        let child = cmd.spawn().unwrap();
+        let old = self.tso_svcs.insert(idx, child);
+        assert!(old.is_none(), "pd-tso-{} already started (but dead ?)", idx);
     }
 
     pub fn client_port(&self, idx: u16) -> u16 {
@@ -117,12 +160,26 @@ impl PdServers {
         self.client_port(idx) + 1
     }
 
+    pub fn tso_svc_port(&self, idx: u16) -> u16 {
+        self.client_port(idx) + 100
+    }
+
     pub fn endpoints(&self) -> Vec<String> {
-        self.children
+        self.servers
             .iter()
             .map(|kv| {
                 let idx = *kv.key();
                 format!("127.0.0.1:{}", self.client_port(idx))
+            })
+            .collect()
+    }
+
+    pub fn endpoints_with_scheme(&self) -> Vec<String> {
+        self.servers
+            .iter()
+            .map(|kv| {
+                let idx = *kv.key();
+                format!("http://127.0.0.1:{}", self.client_port(idx))
             })
             .collect()
     }
@@ -200,8 +257,8 @@ impl PdServers {
             .unwrap_or_else(|e| panic!("failed to create rpc client: {:?}", e))
     }
 
-    pub fn stop(&self, idx: u16) {
-        let (_, mut child) = self.children.remove(&idx).unwrap();
+    pub fn stop(&self, idx: u16, children: &DashMap<u16, process::Child>) {
+        let (_, mut child) = children.remove(&idx).unwrap();
         // TODO: gracefully stop by SIGINT
         child.kill().unwrap_or_else(|err| {
             panic!("pd-{} has exited unexpectedly: {}", idx, err);
@@ -209,9 +266,14 @@ impl PdServers {
     }
 
     pub fn stop_all(&self) {
-        let children = self.children.iter().map(|kv| *kv.key()).collect::<Vec<_>>();
-        for idx in children {
-            self.stop(idx);
+        let tso_svcs = self.tso_svcs.iter().map(|kv| *kv.key()).collect::<Vec<_>>();
+        for idx in tso_svcs {
+            self.stop(idx, &self.tso_svcs);
+        }
+
+        let servers = self.servers.iter().map(|kv| *kv.key()).collect::<Vec<_>>();
+        for idx in servers {
+            self.stop(idx, &self.servers);
         }
     }
 }
@@ -366,6 +428,7 @@ impl ops::Deref for TidbCluster {
 
 impl TidbCluster {
     pub fn new(
+        pd_mode: PdServerMode,
         pd_bin: PathBuf,
         pd_port_base: u16,
         pd_schedule_config: PdScheduleConfig,
@@ -382,6 +445,7 @@ impl TidbCluster {
         let base_path = tempfile::Builder::new().prefix("tc_").tempdir().unwrap();
 
         let pd = PdServers::new(
+            pd_mode,
             pd_bin,
             base_path.path().to_owned(),
             pd_port_base,

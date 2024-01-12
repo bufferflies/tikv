@@ -148,7 +148,14 @@ fn prepare_tidb_cluster(security_config: &SecurityConfig) -> TidbCluster {
         ..Default::default()
     };
 
+    let mut rng = rand::thread_rng();
+    let pd_mode = if rng.gen_ratio(1, 2) {
+        PdServerMode::Normal
+    } else {
+        PdServerMode::MicroServices { tso_count: 1 }
+    };
     let tc = TidbCluster::new(
+        pd_mode,
         PathBuf::from(pd_bin),
         pd_port_base,
         pd_scheduler_config,
