@@ -431,6 +431,33 @@ fn test_pd_control() {
             tiflash_rule_group
         );
 
+        for scheduler_name in &[
+            "shuffle-leader-scheduler",
+            "shuffle-region-scheduler",
+            "random-merge-scheduler",
+        ] {
+            pd_ctl
+                .create_scheduler(scheduler_name.to_string())
+                .await
+                .unwrap();
+        }
+
+        let operators = pd_ctl.get_operators().await.unwrap();
+        info!("pd_control::get_operators: {:?}", operators);
+        if let Some(op) = operators.first() {
+            pd_ctl
+                .cancel_operator_by_region(op.region_id)
+                .await
+                .unwrap();
+            info!("pd_control::cancel_operator_by_region: {:?}", op);
+
+            let operators = pd_ctl.get_operators().await.unwrap();
+            info!(
+                "pd_control::get_operators (after cancel the first one): {:?}",
+                operators
+            );
+        }
+
         pd_ctl
             .pause_or_resume_scheduler("all", pause_dur)
             .await
@@ -459,9 +486,6 @@ fn test_pd_control() {
         );
         let schedulers = pd_ctl.list_schedulers(None).await.unwrap();
         info!("pd_control::list_schedulers after resume: {:?}", schedulers);
-
-        let operators = pd_ctl.get_operators().await.unwrap();
-        info!("pd_control::get_operators: {:?}", operators);
     });
 
     cluster.stop();

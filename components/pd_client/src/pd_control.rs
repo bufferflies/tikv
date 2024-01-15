@@ -6,6 +6,7 @@ use bstr::ByteSlice;
 use bytes::Bytes;
 use http::{Method, Request};
 use hyper::Body;
+use kvproto::metapb;
 use security::SecurityManager;
 use serde::Deserialize;
 use slog_global::debug;
@@ -167,6 +168,21 @@ impl PdControl {
         }
     }
 
+    async fn delete(&self, path: impl AsRef<str>) -> Result<Bytes> {
+        let path = path.as_ref();
+        match self.request_pd_restful(path, Method::DELETE, None).await {
+            Ok(resp) => {
+                debug!("pd_control::delete"; "path" => path, "resp" => resp.to_str_lossy().as_ref());
+                Ok(resp)
+            }
+            Err(err) => Err(box_err!(
+                "pd_control::delete failed: path: {}, err: {:?}",
+                path,
+                err
+            )),
+        }
+    }
+
     pub async fn get_config(&self) -> Result<PdConfigFromApi> {
         self.get(PD_CONFIG_PATH).await
     }
@@ -192,13 +208,8 @@ impl PdControl {
 
     pub async fn remove_tiflash_placement_rule_by_id(&self, rule_id: &str) -> Result<()> {
         let path = format!("{PD_PLACEMENT_RULE_PATH}/{TIFLASH_GROUP}/{rule_id}");
-        match self.request_pd_restful(path, Method::DELETE, None).await {
-            Ok(_) => {
-                debug!("delete tiflash rule {}-{}", TIFLASH_GROUP, rule_id);
-                Ok(())
-            }
-            Err(err) => Err(box_err!("delete tiflash rule error: {:?}", err)),
-        }
+        let _ = self.delete(path).await?;
+        Ok(())
     }
 
     // Ref: https://github.com/tidbcloud/pd-cse/blob/release-7.1-keyspace/server/api/stats.go
@@ -257,14 +268,26 @@ impl PdControl {
         }
     }
 
+    pub async fn create_scheduler(&self, name: String) -> Result<()> {
+        let param = CreateSchedulerParam { name };
+        let body_data = serde_json::to_vec(&param)?;
+        let resp = self
+            .request_pd_restful(PD_SCHEDULERS_PATH, Method::POST, Some(body_data))
+            .await?;
+        debug!("pd_control::create_scheduler"; "resp" => resp.to_str_lossy().as_ref());
+        Ok(())
+    }
+
     // Ref: https://github.com/tidbcloud/pd-cse/blob/release-7.1-keyspace/server/api/operator.go
-    // Return array of strings, see https://github.com/tidbcloud/pd-cse/blob/release-7.1-keyspace/pkg/schedule/operator/operator.go, Operator.MarshalJSON
-    // E.g.:
-    // ```
-    // "balance-leader {transfer leader: store 5 to 6} (kind:leader, region:179(42,29), createAt:2024-01-09 08:31 :45.749305225 +0000 UTC m=+110.335827093,startAt:2024-01-09 08:31:45.749636244 +0000 UTC m=+110.336158110, currentStep:0, size:1, steps:[0:{transfer leader from store 5 to store 6}],timeout:[1m0s])"
-    // ````
-    pub async fn get_operators(&self) -> Result<Vec<String>> {
-        self.get(PD_OPERATORS_PATH).await
+    pub async fn get_operators(&self) -> Result<Vec<Operator>> {
+        let query = format!("{PD_OPERATORS_PATH}?object=1");
+        self.get(query).await
+    }
+
+    pub async fn cancel_operator_by_region(&self, region_id: u64) -> Result<()> {
+        let query = format!("{PD_OPERATORS_PATH}/{region_id}");
+        let _ = self.delete(query).await?;
+        Ok(())
     }
 }
 
@@ -383,4 +406,142 @@ pub struct Scheduler {
     pub name: String,
     pub paused_at: String,
     pub resume_at: String,
+}
+
+#[derive(Default, Serialize, Deserialize, Debug)]
+#[serde(default)]
+pub struct CreateSchedulerParam {
+    pub name: String,
+}
+
+#[derive(Default, Deserialize, Debug)]
+pub struct RegionEpoch {
+    pub conf_ver: u64,
+    pub version: u64,
+}
+
+impl From<&RegionEpoch> for metapb::RegionEpoch {
+    fn from(epoch: &RegionEpoch) -> Self {
+        let mut region_epoch = metapb::RegionEpoch::default();
+        region_epoch.set_conf_ver(epoch.conf_ver);
+        region_epoch.set_version(epoch.version);
+        region_epoch
+    }
+}
+
+pub type OpKindMask = u32; // bit mask of OpKind
+
+// Ref: https://github.com/tidbcloud/pd-cse/blob/release-7.1-keyspace/pkg/schedule/operator/operator.go
+#[derive(Default, Deserialize)]
+pub struct Operator {
+    pub desc: String,
+    pub brief: String,
+    pub region_id: u64,
+    pub region_epoch: RegionEpoch,
+    #[serde(rename = "kind")]
+    pub kind_mask: OpKindMask,
+}
+
+impl std::fmt::Debug for Operator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Operator")
+            .field("desc", &self.desc)
+            .field("brief", &self.brief)
+            .field("region_id", &self.region_id)
+            .field("region_epoch", &self.region_epoch)
+            .field("kind", &self.kind())
+            .finish()
+    }
+}
+
+impl Operator {
+    pub fn kind(&self) -> Vec<OpKind> {
+        let mut v = vec![];
+        if self.kind_mask & OpKind::OpAdmin as u32 != 0 {
+            v.push(OpKind::OpAdmin);
+        }
+        if self.kind_mask & OpKind::OpMerge as u32 != 0 {
+            v.push(OpKind::OpMerge);
+        }
+        if self.kind_mask & OpKind::OpRange as u32 != 0 {
+            v.push(OpKind::OpRange);
+        }
+        if self.kind_mask & OpKind::OpReplica as u32 != 0 {
+            v.push(OpKind::OpReplica);
+        }
+        if self.kind_mask & OpKind::OpSplit as u32 != 0 {
+            v.push(OpKind::OpSplit);
+        }
+        if self.kind_mask & OpKind::OpHotRegion as u32 != 0 {
+            v.push(OpKind::OpHotRegion);
+        }
+        if self.kind_mask & OpKind::OpRegion as u32 != 0 {
+            v.push(OpKind::OpRegion);
+        }
+        if self.kind_mask & OpKind::OpLeader as u32 != 0 {
+            v.push(OpKind::OpLeader);
+        }
+        if self.kind_mask & OpKind::OpWitnessLeader as u32 != 0 {
+            v.push(OpKind::OpWitnessLeader);
+        }
+        if self.kind_mask & OpKind::OpWitness as u32 != 0 {
+            v.push(OpKind::OpWitness);
+        }
+        if v.is_empty() {
+            v.push(OpKind::OpUnknown);
+        }
+        v
+    }
+}
+
+// Ref: https://github.com/tidbcloud/pd-cse/blob/release-7.1-keyspace/pkg/schedule/operator/kind.go
+#[derive(Debug, PartialEq)]
+#[repr(u32)]
+pub enum OpKind {
+    OpUnknown = 0,
+    OpAdmin = 1 << 0,
+    // Initiated by merge checker or merge scheduler. Note that it may not include region merge.
+    // the order describe the operator's producer and is very helpful to decouple scheduler or
+    // checker limit
+    OpMerge = 1 << 1,
+    // Initiated by range scheduler.
+    OpRange = 1 << 2,
+    // Initiated by replica checker.
+    OpReplica = 1 << 3,
+    // Include region split. Initiated by rule checker if `kind & OpAdmin == 0`.
+    OpSplit = 1 << 4,
+    // Initiated by hot region scheduler.
+    OpHotRegion = 1 << 5,
+    // Include peer addition or removal or switch witness. This means that this operator may take
+    // a long time.
+    OpRegion = 1 << 6,
+    // Include leader transfer.
+    OpLeader = 1 << 7,
+    // Include witness leader transfer.
+    OpWitnessLeader = 1 << 8,
+    // Include witness transfer.
+    OpWitness = 1 << 9,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_op_kind() {
+        let mut op = Operator::default();
+        assert_eq!(op.kind(), vec![OpKind::OpUnknown]);
+
+        op.kind_mask = OpKind::OpMerge as u32;
+        assert_eq!(op.kind(), vec![OpKind::OpMerge]);
+
+        op.kind_mask = OpKind::OpSplit as u32;
+        assert_eq!(op.kind(), vec![OpKind::OpSplit]);
+
+        op.kind_mask = OpKind::OpRegion as u32;
+        assert_eq!(op.kind(), vec![OpKind::OpRegion]);
+
+        op.kind_mask = (OpKind::OpAdmin as u32) | (OpKind::OpReplica as u32);
+        assert_eq!(op.kind(), vec![OpKind::OpAdmin, OpKind::OpReplica]);
+    }
 }
