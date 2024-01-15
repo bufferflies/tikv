@@ -327,7 +327,9 @@ impl TsoServiceDiscovery {
         header.set_keyspace_id(keyspace_id);
         header.set_keyspace_group_id(0);
         req.set_keyspace_id(keyspace_id);
-        let mut resp = tso_client.find_group_by_keyspace_id_opt(&req, CallOption::default())?;
+        let mut resp = tso_client
+            .find_group_by_keyspace_id_async_opt(&req, CallOption::default())?
+            .await?;
 
         if resp.get_header().has_error() {
             return Err(box_err!(
