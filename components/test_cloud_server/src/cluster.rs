@@ -18,6 +18,7 @@ use kvproto::{
     kvrpcpb::{Mutation, Op},
     raft_cmdpb::{RaftCmdRequest, RaftCmdResponse, RaftRequestHeader},
 };
+use log_wrappers::Value;
 use pd_client::PdClient;
 use rfstore::{
     store::{cmd_resp::message_error, Callback, CustomBuilder},
@@ -320,7 +321,15 @@ impl ServerCluster {
 
     pub fn wait_region_replicated(&self, key: &[u8], replica_cnt: usize) {
         for _ in 0..10 {
-            let region_info = self.pd_client.get_region_info(key).unwrap();
+            let region_info = match self.pd_client.get_region_info(key) {
+                Ok(region_info) => region_info,
+                Err(err) => {
+                    // The region may not exist during split. Retry.
+                    warn!("get_region_info failed"; "key" => Value::key(key), "err" => ?err);
+                    std::thread::sleep(Duration::from_millis(100));
+                    continue;
+                }
+            };
             let region_id = region_info.id;
             let region_ver = region_info.get_region_epoch().version;
             if region_info.region.get_peers().len() >= replica_cnt {
