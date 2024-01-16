@@ -13,7 +13,7 @@ use kvproto::metapb::{Peer, PeerRole, Region};
 use pd_client::PdClient;
 use rand::Rng;
 use test_pd_client::{PdClientExt, TestPdClient};
-use tikv_util::{time::Instant, warn};
+use tikv_util::{info, time::Instant, warn};
 
 use crate::{must_wait, try_wait};
 
@@ -59,6 +59,10 @@ impl Scheduler {
 
     fn move_peer(&self, region_id: u64, store_id: u64) {
         let peer_id = self.pd.alloc_id().unwrap();
+        // The peer maybe try to merge but not committed yet in the early check and the
+        // merge committed during the move_peer. So we need to tolerate this case. If
+        // the peer destroyed, just return.
+        let mut peer_destroyed = false;
         let mut peer = Peer::new();
         peer.store_id = store_id;
         peer.id = peer_id;
@@ -68,10 +72,20 @@ impl Scheduler {
                 self.pd.add_peer(region_id, peer.clone());
                 try_wait(
                     || {
-                        let region = block_on(self.pd.get_region_by_id(region_id))
+                        let region = block_on(self.pd.get_region_by_id(region_id)).unwrap();
+                        if region.is_none() {
+                            warn!(
+                                "move_peer: region {} not exists, should be merged",
+                                region_id
+                            );
+                            peer_destroyed = true;
+                            return true;
+                        }
+                        region
                             .unwrap()
-                            .unwrap();
-                        region.get_peers().iter().any(|peer| peer.id == peer_id)
+                            .get_peers()
+                            .iter()
+                            .any(|peer| peer.id == peer_id)
                     },
                     1,
                 )
@@ -86,6 +100,9 @@ impl Scheduler {
             )
             .as_str(),
         );
+        if peer_destroyed {
+            return;
+        }
         let mut peer = Peer::new();
         peer.store_id = store_id;
         peer.id = peer_id;
@@ -95,10 +112,17 @@ impl Scheduler {
                 self.pd.add_peer(region_id, peer.clone());
                 try_wait(
                     || {
-                        let region = block_on(self.pd.get_region_by_id(region_id))
-                            .unwrap()
-                            .unwrap();
+                        let region = block_on(self.pd.get_region_by_id(region_id)).unwrap();
+                        if region.is_none() {
+                            warn!(
+                                "move_peer: region {} not exists, should be merged",
+                                region_id
+                            );
+                            peer_destroyed = true;
+                            return true;
+                        }
                         region
+                            .unwrap()
                             .get_peers()
                             .iter()
                             .any(|peer| peer.id == peer_id && peer.role == PeerRole::Voter)
@@ -116,6 +140,9 @@ impl Scheduler {
             )
             .as_str(),
         );
+        if peer_destroyed {
+            return;
+        }
         let mut old_leader = Peer::default();
         let mut to_remove = Peer::default();
         must_wait(
@@ -137,6 +164,7 @@ impl Scheduler {
             10,
             format!("failed to get target peer, region id {}", region_id).as_str(),
         );
+
         must_wait(
             || {
                 let target_is_leader = block_on(self.pd.get_region_leader_by_id(region_id))
@@ -145,6 +173,10 @@ impl Scheduler {
                     .unwrap_or(false);
                 if target_is_leader {
                     self.pd.try_transfer_leader(region_id, old_leader.clone());
+                    info!(
+                        "move_peer: transfer leader, region id {} old leader id {} to_remove id {}",
+                        region_id, old_leader.id, to_remove.id
+                    );
                     if !try_wait(
                         || {
                             block_on(self.pd.get_region_leader_by_id(region_id))
