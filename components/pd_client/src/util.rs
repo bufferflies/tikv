@@ -228,7 +228,10 @@ impl TsoServiceDiscovery {
             self.selected_idx = 0;
             debug!("update tso server addrs, {:?}", self.addrs);
         }
-        let idx = self.selected_idx;
+
+        // `self.addrs` may be updated in update_member, so the selected_idx may be
+        // invalid. We need modulus here.
+        let idx = self.selected_idx % self.addrs.len();
         self.selected_idx = (self.selected_idx + 1) % self.addrs.len();
         Ok(self.addrs[idx].clone())
     }
