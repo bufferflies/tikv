@@ -15,7 +15,7 @@ pub mod metrics;
 mod tso;
 mod util;
 use security::GetSecurityManager;
-pub use util::grpc_error_is_unimplemented;
+pub use util::{check_regions_boundary, grpc_error_is_unimplemented};
 
 mod config;
 pub mod errors;

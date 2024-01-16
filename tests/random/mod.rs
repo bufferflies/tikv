@@ -61,6 +61,7 @@ lazy_static::lazy_static! {
     pub static ref DROP_TABLE_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref MANUAL_MAJOR_COMPACT_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref GC_ADVANCE_SAFE_POINT_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    pub static ref TPCC_COUNTER: AtomicUsize = AtomicUsize::new(0);
 }
 
 pub const TIMEOUT: Duration = Duration::from_secs(90);

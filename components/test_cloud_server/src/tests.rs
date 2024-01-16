@@ -398,7 +398,7 @@ fn test_pd_control() {
                     }
                 })
             },
-            Duration::from_secs(10),
+            10,
         )
         .await
         .unwrap();

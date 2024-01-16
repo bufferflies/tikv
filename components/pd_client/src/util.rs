@@ -22,6 +22,7 @@ use grpcio::{
     Environment, Error::RpcFailure, MetadataBuilder, Result as GrpcResult, RpcStatusCode,
 };
 use kvproto::{
+    metapb,
     metapb::BucketStats,
     pdpb::{
         ErrorType, GetClusterInfoRequest, GetMembersRequest, GetMembersResponse, Member,
@@ -1282,11 +1283,53 @@ pub fn grpc_error_is_unimplemented(e: &Error) -> bool {
     }
 }
 
+pub fn check_regions_boundary(
+    start_key: &[u8],
+    end_key: &[u8],
+    regions: &[metapb::Region],
+) -> crate::pd_control::Result<()> {
+    if !end_key.is_empty() && start_key >= end_key && regions.is_empty() {
+        return Ok(());
+    }
+    if regions.is_empty() {
+        return Err(box_err!("no region"));
+    }
+
+    let first_region = regions.first().unwrap();
+    let last_region = regions.last().unwrap();
+    if first_region.get_start_key() != start_key {
+        return Err(box_err!(
+            "unexpected start key of first region: {:?}, start_key: {:?}",
+            first_region,
+            start_key
+        ));
+    } else if last_region.get_end_key() != end_key {
+        return Err(box_err!(
+            "unexpected end key of last region: {:?}, end_key: {:?}",
+            last_region,
+            end_key
+        ));
+    }
+
+    for region in regions.windows(2) {
+        if region[0].get_end_key() != region[1].get_start_key() {
+            return Err(box_err!(
+                "region boundary not match: {:?}, {:?}",
+                region[0],
+                region[1]
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod test {
-    use kvproto::metapb::BucketStats;
+    use kvproto::{metapb, metapb::BucketStats};
 
-    use crate::{merge_bucket_stats, util::find_bucket_index};
+    use super::*;
+    use crate::merge_bucket_stats;
 
     #[test]
     fn test_merge_bucket_stats() {
@@ -1402,5 +1445,79 @@ mod test {
         assert_eq!(find_bucket_index(b"k0", &keys), Some(0));
         assert_eq!(find_bucket_index(b"k7", &keys), Some(4));
         assert_eq!(find_bucket_index(b"k8", &keys), Some(4));
+    }
+
+    #[test]
+    fn test_check_regions_boundary() {
+        let mk_key = |i: i32| -> Vec<u8> {
+            if i == i32::MIN || i == i32::MAX {
+                vec![]
+            } else {
+                format!("{:04}", i).into_bytes()
+            }
+        };
+        let mk_region = |start: i32, end: i32| -> metapb::Region {
+            let mut region = metapb::Region::default();
+            region.set_start_key(mk_key(start));
+            region.set_end_key(mk_key(end));
+            region
+        };
+        let mk_regions = |regions: Vec<(i32, i32)>| -> Vec<metapb::Region> {
+            regions
+                .into_iter()
+                .map(|(start, end)| mk_region(start, end))
+                .collect()
+        };
+
+        let cases: Vec<(
+            i32, // start_key
+            i32, // end_key
+            Vec<metapb::Region>,
+            bool, // expect success
+        )> = vec![
+            (i32::MIN, i32::MAX, vec![], false),
+            (
+                i32::MIN,
+                i32::MAX,
+                mk_regions(vec![(i32::MIN, i32::MAX)]),
+                true,
+            ),
+            (
+                i32::MIN,
+                i32::MAX,
+                mk_regions(vec![(i32::MIN, 1), (1, 2), (2, 10), (10, i32::MAX)]),
+                true,
+            ),
+            (
+                i32::MIN,
+                i32::MAX,
+                mk_regions(vec![(1, 2), (2, 10), (10, i32::MAX)]),
+                false,
+            ),
+            (
+                i32::MIN,
+                i32::MAX,
+                mk_regions(vec![(i32::MIN, 1), (1, 2), (2, 10)]),
+                false,
+            ),
+            (
+                i32::MIN,
+                i32::MAX,
+                mk_regions(vec![(i32::MIN, 1), (1, 2), (10, i32::MAX)]),
+                false,
+            ),
+            (i32::MIN, 2, vec![], false),
+            (i32::MIN, 2, mk_regions(vec![(i32::MIN, 2)]), true),
+            (2, 2, vec![], true),
+            (2, 10, mk_regions(vec![(2, 5), (6, 10)]), false),
+            (2, 10, mk_regions(vec![(2, 5), (5, 6), (6, 10)]), true),
+            (10, i32::MAX, vec![], false),
+            (10, i32::MAX, mk_regions(vec![(10, i32::MAX)]), true),
+        ];
+
+        for (idx, (start, end, regions, expect_success)) in cases.into_iter().enumerate() {
+            let result = check_regions_boundary(&mk_key(start), &mk_key(end), &regions);
+            assert_eq!(result.is_ok(), expect_success, "case {}", idx);
+        }
     }
 }

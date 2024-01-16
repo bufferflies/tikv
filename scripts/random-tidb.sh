@@ -6,8 +6,8 @@ mkdir -p random_logs
 
 for i in {1..1000}
 do
-    pkill -9 pd-server || true
-    pkill -9 tidb-server || true
+    pkill -9 pd-server &>/dev/null || true
+    pkill -9 tidb-server &>/dev/null || true
 
     TMPDIR=$(pwd)"/random_tmp/$i"
     export TMPDIR

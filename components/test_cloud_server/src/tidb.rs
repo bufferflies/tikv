@@ -201,7 +201,7 @@ impl PdServers {
                     }
                 })
             },
-            timeout,
+            timeout.as_secs() as usize,
         )
         .await
         .unwrap_or_else(|e| panic!("wait PD healthy timeout: {:?}", e));
@@ -224,7 +224,7 @@ impl PdServers {
                     }
                 })
             },
-            timeout,
+            timeout.as_secs() as usize,
         )
         .await
         .unwrap_or_else(|e| panic!("wait PD get_tso timeout: {:?}", e));
@@ -379,14 +379,14 @@ impl TidbServers {
                     }
                 })
             },
-            timeout,
+            timeout.as_secs() as usize,
         )
         .await
         .unwrap_or_else(|e| panic!("wait TiDB-{} healthy timeout: {:?}", idx, e));
         info!("TiDB-{idx} is ready");
     }
 
-    pub async fn must_all_health(&self, timeout: Duration) {
+    pub async fn must_all_healthy(&self, timeout: Duration) {
         let all = self.get_all_indexes();
         for idx in all {
             self.must_healthy(idx, timeout).await;
@@ -498,10 +498,10 @@ impl TidbClusterCore {
     pub async fn start_tidb(&self, count: u16, timeout: Duration) {
         let pd_endpoints = self.pd.endpoints();
         // Start from 1 as keyspace 0 is reserved.
-        for idx in 1..count {
+        for idx in 1..=count {
             self.tidb.start(idx, &pd_endpoints);
         }
-        self.tidb.must_all_health(timeout).await;
+        self.tidb.must_all_healthy(timeout).await;
     }
 }
 

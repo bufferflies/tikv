@@ -5,6 +5,8 @@ set -eu
 DOCKER_ID=$1
 TESTNAME=$2
 
+export RUST_BACKTRACE=1
+
 mkdir -p /random/logs /random/error-logs
 for i in $(seq -w 1 100000)
 do

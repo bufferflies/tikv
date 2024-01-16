@@ -8,10 +8,15 @@ use std::{
 };
 
 use kvengine::dfs::DFSConfig;
-use pd_client::pd_control::PdScheduleConfig;
+use pd_client::{
+    pd_control,
+    pd_control::{OpKind, PdScheduleConfig},
+};
 use rand::Rng;
 use security::SecurityConfig;
-use test_cloud_server::{oss::prepare_dfs, tidb::*, try_wait_result, ServerCluster};
+use test_cloud_server::{
+    oss::prepare_dfs, tidb::*, tpc::*, try_wait_async, try_wait_result, ServerCluster,
+};
 use test_pd_client::PdWrapper;
 use tikv::config::TikvConfig;
 use tikv_util::{
@@ -29,19 +34,33 @@ const REGION_BUCKET_SIZE: ReadableSize = ReadableSize::kb(256);
 // Ref: https://docs.pingcap.com/tidb/stable/pd-configuration-file#split-merge-interval
 const SPLIT_MERGE_INTERVAL: ReadableDuration = ReadableDuration::secs(10);
 
-const INITIAL_KEYSPACE_COUNT: usize = 4;
+// Test on only one keyspace to simulate a heavy tenant. Scenes of multiple
+// keyspaces are covered by test_random_all.
+const INITIAL_KEYSPACE_COUNT: usize = 1;
 const NODES_COUNT: usize = 4;
+const TEST_DURATION: Duration = Duration::from_secs(120); // Test for longer as TiDB bootstrap may cost 30s+.
 
 const PD_COUNT: usize = 1;
 const PD_BIN_ENV_KEY: &str = "PD_BIN";
 const PD_PORT_ENV_KEY: &str = "PD_PORT";
 const PD_PORT_DEFAULT: u16 = 2379;
+const PD_HEALTHY_TIMEOUT: Duration = Duration::from_secs(30);
 
 const TIDB_BIN_ENV_KEY: &str = "TIDB_BIN";
 const TIDB_PORT_ENV_KEY: &str = "TIDB_PORT";
 const TIDB_PORT_DEFAULT: u16 = 4000;
 const TIDB_STATUS_PORT_ENV_KEY: &str = "TIDB_STATUS_PORT";
 const TIDB_STATUS_PORT_DEFAULT: u16 = 10080;
+const TIDB_HEALTHY_TIMEOUT: Duration = Duration::from_secs(60);
+
+const TPC_BIN_ENV_KEY: &str = "TPC_BIN";
+const TPCC_WAREHOUSES: usize = 2;
+const TPCC_MAX_PROCS: usize = 1;
+const TPCC_THREADS: usize = 4; // Number of threads for each TPCC workload.
+const TPCC_RUN_DURATION: Duration = Duration::from_secs(10); // Duration of each TPCC run.
+const TPCC_WORKLOAD_CONCURRENCY: usize = 1;
+
+const VERIFY_HEALTHY_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[test]
 fn test_random_with_tidb() {
@@ -66,26 +85,59 @@ fn test_random_with_tidb() {
         Some(&tc),
     );
     let pd_client = cluster.get_pd_client_ext();
+    let pd_ctl = Arc::new(cluster.get_pd_control().unwrap());
+    let keyspace_manager = cluster.keyspace_manager().clone();
 
-    block_on(tc.start_tidb(INITIAL_KEYSPACE_COUNT as u16, Duration::from_secs(30)));
+    let tpc_bin = std::env::var(TPC_BIN_ENV_KEY).expect("env TPC_BIN is not set");
+    check_tpc_binary(&tpc_bin);
+
+    runtime.block_on(tc.start_tidb(INITIAL_KEYSPACE_COUNT as u16, TIDB_HEALTHY_TIMEOUT));
+    runtime.block_on(prepare_tpcc(
+        tc.clone(),
+        keyspace_manager.clone(),
+        &tpc_bin,
+        &keyspace_manager.get_all_keyspaces(),
+    ));
+
+    let mut async_handles = vec![];
+    for tpc_idx in 0..TPCC_WORKLOAD_CONCURRENCY {
+        async_handles.push(spawn_tpcc(
+            tc.clone(),
+            keyspace_manager.clone(),
+            &tpc_bin,
+            tpc_idx,
+            TPCC_RUN_DURATION,
+            TEST_DURATION,
+        ));
+    }
 
     // Main loop.
     let start_time = Instant::now();
-    while start_time.saturating_elapsed() < Duration::from_secs(10) {
+    while start_time.saturating_elapsed() < TEST_DURATION {
         // Restart nodes.
         random_node_restart(&mut cluster);
     }
 
     // Finish.
-    info!("test finished, stopping all workers");
+    runtime.block_on(async {
+        info!("test finished, stopping all workers");
+        for handle in async_handles {
+            handle.await.unwrap();
+        }
 
-    // Verify.
-    info!("verify cluster");
-    let verified_records_count = runtime.block_on(verify_cluster(&mut cluster));
+        // Make stats stable
+        info!("stop TiDB and schedulers");
+        tc.pd.must_healthy(VERIFY_HEALTHY_TIMEOUT).await;
+        tc.tidb.must_all_healthy(VERIFY_HEALTHY_TIMEOUT).await;
+        tc.tidb.stop_all(); // To stop background tasks.
+        stop_schedulers(pd_ctl).await;
+
+        info!("verify cluster");
+        verify_cluster(&mut cluster).await;
+    });
 
     // Stop cluster.
     info!("stopping cluster");
-    tc.tidb.stop_all();
     cluster.stop();
 
     // Statistics.
@@ -102,9 +154,10 @@ fn test_random_with_tidb() {
     let total_load_data_count = LOAD_DATA_COUNTER.load(Ordering::SeqCst);
     let total_manual_major_compact = MANUAL_MAJOR_COMPACT_COUNTER.load(Ordering::SeqCst);
     let total_gc_resolved_locks = GC_ADVANCE_SAFE_POINT_COUNTER.load(Ordering::SeqCst);
+    let total_tpcc_txns = TPCC_COUNTER.load(Ordering::SeqCst);
     let region_number = pd_client.get_regions_number();
     info!(
-        "TEST SUCCEED: write {}, keyspace {}, table {}, drop table {}, region {}, merge {}, move {}, transfer {}, node restart {}, backup {}, restore {}, load_data {}, manual_major_compact {}, verified_records {}, gc {}",
+        "TEST SUCCEED: write {}, keyspace {}, table {}, drop table {}, region {}, merge {}, move {}, transfer {}, node restart {}, backup {}, restore {}, load_data {}, manual_major_compact {}, gc {}, tpcc {}",
         total_write_count,
         total_keyspace_count,
         total_table_count,
@@ -118,8 +171,8 @@ fn test_random_with_tidb() {
         total_restore_count,
         total_load_data_count,
         total_manual_major_compact,
-        verified_records_count,
         total_gc_resolved_locks,
+        total_tpcc_txns,
     );
 
     tc.pd.stop_all();
@@ -165,7 +218,7 @@ fn prepare_tidb_cluster(security_config: &SecurityConfig) -> TidbCluster {
         INITIAL_KEYSPACE_COUNT as u16,
         security_config,
     );
-    block_on(tc.start_pd(PD_COUNT as u16, Duration::from_secs(30)));
+    block_on(tc.start_pd(PD_COUNT as u16, PD_HEALTHY_TIMEOUT));
     tc
 }
 
@@ -215,8 +268,8 @@ fn prepare_cluster(
             let pd_control = tc.pd.get_pd_control();
 
             // Initial keyspaces have been created by `pre_alloc_keyspaces` of PD.
-            // Note: starts from 1.
-            for idx in 1..initial_keyspace_count {
+            // Note: keyspaces allocation starts from 1.
+            for idx in 1..=initial_keyspace_count {
                 let keyspace_name = TidbCluster::keyspace_name(idx as u16);
                 let keyspace = block_on(pd_control.get_keyspace_by_name(&keyspace_name)).unwrap();
                 keyspaces.push(keyspace.id);
@@ -246,8 +299,73 @@ fn prepare_cluster(
     cluster
 }
 
+async fn stop_schedulers(pd_ctl: Arc<pd_control::PdControl>) {
+    // Pause all schedulers to make stats stable.
+    pd_ctl
+        .pause_or_resume_scheduler("all", Duration::MAX)
+        .await
+        .expect("pause schedulers failed");
+    let all_schedulers = pd_ctl.list_schedulers(None).await.unwrap();
+    // `list_schedulers(None)` does not return `paused_at` field. So invoke
+    // `list_schedulers(Paused)` again.
+    let paused_schedulers = pd_ctl
+        .list_schedulers(Some(pd_control::SchedulerStatus::Paused))
+        .await
+        .unwrap();
+    info!(
+        "all schedulers: {:?}, paused schedulers: {:?}",
+        all_schedulers, paused_schedulers
+    );
+
+    // Wait operators finished.
+    let ok = try_wait_async(
+        || {
+            let pd_ctl = pd_ctl.clone();
+            Box::pin(async move {
+                let is_region_op = |op: &pd_control::Operator| -> bool {
+                    for kind in [OpKind::OpMerge, OpKind::OpSplit] {
+                        if op.kind_mask & kind as u32 != 0 {
+                            return true;
+                        }
+                    }
+                    false
+                };
+                let operators = pd_ctl
+                    .get_operators()
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .filter(is_region_op)
+                    .collect::<Vec<_>>();
+                if operators.is_empty() {
+                    return true;
+                }
+
+                for op in operators {
+                    if let Err(err) = pd_ctl.cancel_operator_by_region(op.region_id).await {
+                        // Would fail when the operator has finished.
+                        warn!("cancel operator failed"; "op" => ?op, "err" => ?err);
+                    } else {
+                        info!("operator canceled"; "op" => ?op);
+                    }
+                }
+                false
+            })
+        },
+        10,
+    )
+    .await;
+    if !ok {
+        // It's OK to fail here. `verify_cluster` will retry.
+        warn!(
+            "wait operators finished timeout: {:?}",
+            pd_ctl.get_operators().await.unwrap()
+        );
+    }
+}
+
 // TODO: merge to `verify_cluster` in `test_all.rs`.
-async fn verify_cluster(cluster: &mut ServerCluster) -> usize {
+async fn verify_cluster(cluster: &mut ServerCluster) {
     // Check statistics.
     // Check after verify data, to ensure that PD heartbeat have updated region
     // stats.
@@ -265,9 +383,157 @@ async fn verify_cluster(cluster: &mut ServerCluster) -> usize {
         data_stats
     );
     cluster.wait_region_version_match();
-    data_stats
-        .check_buckets(cluster.get_pd_client_ext().as_ref(), REGION_BUCKET_SIZE.0)
-        .expect("check_buckets failed");
+    let (res, _) = try_wait_result(
+        || {
+            // There are still region changes after all schedulers & operators stopped, as
+            // tikv-server can also initiate region splits. So during retry, get cluster
+            // stats again.
+            // TODO: retry from last failed region.
+            let data_stats = cluster.get_data_stats();
+            let res = data_stats
+                .check_buckets(cluster.get_pd_client_ext().as_ref(), REGION_BUCKET_SIZE.0);
+            if res.is_err() {
+                warn!("check_buckets failed, err {:?}", res);
+            }
+            (res, ())
+        },
+        10,
+    );
+    res.expect("check_buckets failed");
 
-    0
+    check_tpc();
+}
+
+async fn prepare_tpcc(
+    tc: TidbCluster,
+    keyspace_manager: KeyspaceManager,
+    tpc_bin: &str,
+    keyspace_ids: &[u32],
+) {
+    let mut handles = Vec::with_capacity(TPCC_WORKLOAD_CONCURRENCY);
+    for tpc_idx in 0..TPCC_WORKLOAD_CONCURRENCY {
+        let tc = tc.clone();
+        let keyspace_manager = keyspace_manager.clone();
+        let tpc_bin = PathBuf::from_str(tpc_bin).unwrap();
+        let keyspace_ids = keyspace_ids.to_vec();
+        let task = async move {
+            let db = db_name_by_tpc_idx(tpc_idx);
+
+            for keyspace_id in keyspace_ids {
+                let keyspace_name = keyspace_manager
+                    .get_keyspace_meta(keyspace_id)
+                    .unwrap()
+                    .name();
+                let tag = format!("tpcc-{}[{}]-{}", keyspace_id, keyspace_name, tpc_idx);
+                let tidb_idx = TidbCluster::get_idx_by_keyspace_name(&keyspace_name);
+                let params = tc.tidb.conn_params(tidb_idx);
+
+                let mut tpc = Tpc::new(tag, tpc_bin.clone());
+                tpc.tpcc()
+                    .host(&params.host)
+                    .port(params.port)
+                    .user(&params.user)
+                    .password(&params.password)
+                    .db(&db)
+                    .warehouses(TPCC_WAREHOUSES)
+                    .max_procs(TPCC_MAX_PROCS);
+
+                let conn_string = params.conn_string("test");
+                let sql = format!("CREATE DATABASE IF NOT EXISTS `{}`", db);
+                let pool = sqlx::MySqlPool::connect(&conn_string).await.unwrap();
+                sqlx::query(&sql).execute(&pool).await.unwrap();
+
+                tpc.prepare(TPCC_THREADS).await.unwrap();
+                tpc.check().await.unwrap();
+            }
+        };
+        handles.push(tokio::spawn(task));
+    }
+
+    for handle in handles {
+        handle.await.unwrap();
+    }
+}
+
+fn spawn_tpcc(
+    tc: TidbCluster,
+    keyspace_manager: KeyspaceManager,
+    tpc_bin: &str,
+    tpc_idx: usize,
+    run_duration: Duration,
+    timeout: Duration,
+) -> tokio::task::JoinHandle<()> {
+    let tpc_bin = PathBuf::from_str(tpc_bin).unwrap();
+    tokio::spawn(async move {
+        let db = db_name_by_tpc_idx(tpc_idx);
+
+        let start_time = Instant::now();
+        while start_time.saturating_elapsed() < timeout {
+            let random_keyspace = || {
+                let mut rng = rand::thread_rng();
+                keyspace_manager.get_zipf_random_keyspace(&mut rng)
+            };
+            let keyspace_id = random_keyspace();
+            let keyspace_name = keyspace_manager
+                .get_keyspace_meta(keyspace_id)
+                .unwrap()
+                .name();
+            {
+                let lock = keyspace_manager.get_keyspace_lock(keyspace_id);
+                let guard = lock.try_shared_lock();
+                if guard.is_none() {
+                    tokio::task::yield_now().await;
+                    continue;
+                }
+                let _guard = guard.unwrap();
+
+                let tag = format!("tpcc-{}[{}]-{}", keyspace_id, keyspace_name, tpc_idx);
+                let tidb_idx = TidbCluster::get_idx_by_keyspace_name(&keyspace_name);
+                let params = tc.tidb.conn_params(tidb_idx);
+
+                let mut tpc = Tpc::new(tag, tpc_bin.clone());
+                tpc.tpcc()
+                    .host(&params.host)
+                    .port(params.port)
+                    .user(&params.user)
+                    .password(&params.password)
+                    .db(&db)
+                    .warehouses(TPCC_WAREHOUSES)
+                    .max_procs(TPCC_MAX_PROCS);
+
+                let txns = tpc
+                    .run(TPCC_THREADS, false, true, run_duration)
+                    .await
+                    .unwrap();
+                TPCC_COUNTER.fetch_add(txns, Ordering::Relaxed);
+                tpc.check().await.unwrap();
+            }
+        }
+    })
+}
+
+fn db_name_by_tpc_idx(tpc_idx: usize) -> String {
+    format!("tpcc_{tpc_idx}")
+}
+
+fn check_tpc_binary(tpc_bin: &str) {
+    let mut cmd = std::process::Command::new(tpc_bin);
+    cmd.arg("version");
+    let output = cmd.output().unwrap();
+    assert!(
+        output.status.success(),
+        "tpc binary check failed: {:?}",
+        output
+    );
+
+    info!("tpc binary check passed"; "output" => ?output);
+}
+
+fn check_tpc() {
+    let tpc_txns = TPCC_COUNTER.load(Ordering::Relaxed);
+    assert!(
+        tpc_txns >= 100,
+        "TPC-C transactions are too few: {}",
+        tpc_txns
+    );
 }

@@ -37,14 +37,6 @@ impl PdClientExt for pd_client::RpcClient {
             start = end_key.to_vec();
             start.push(0);
         }
-
-        // TODO: remove this assertion. May not always be true as regions are changing.
-        assert_eq!(
-            regions.len(),
-            self.get_regions_number(),
-            "regions: {:?}",
-            regions
-        );
         regions
     }
 

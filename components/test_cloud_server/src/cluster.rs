@@ -19,7 +19,7 @@ use kvproto::{
     raft_cmdpb::{RaftCmdRequest, RaftCmdResponse, RaftRequestHeader},
 };
 use log_wrappers::Value;
-use pd_client::PdClient;
+use pd_client::{check_regions_boundary, pd_control, PdClient};
 use rfstore::{
     store::{cmd_resp::message_error, Callback, CustomBuilder},
     RaftStoreRouter,
@@ -194,6 +194,10 @@ impl ServerCluster {
 
     pub fn get_pd_client_ext(&self) -> Arc<dyn PdClientExt> {
         self.pd_client.clone()
+    }
+
+    pub fn get_pd_control(&self) -> pd_control::Result<pd_control::PdControl> {
+        self.pd.get_pd_control()
     }
 
     pub fn get_nodes(&self) -> Vec<u16> {
@@ -513,9 +517,11 @@ impl ServerCluster {
             },
             10,
         );
-        let data_stats = self.get_data_stats();
         if !ok {
-            data_stats.check_region_version_match(pd_client).unwrap();
+            let data_stats = self.get_data_stats();
+            data_stats
+                .check_region_version_match(pd_client)
+                .expect("check_region_version_match failed");
         }
     }
 
@@ -733,11 +739,27 @@ where
     false
 }
 
-pub async fn try_wait_result_async<F, E>(mut f: F, timeout: Duration) -> std::result::Result<(), E>
+pub async fn try_wait_async<F>(mut f: F, seconds: usize) -> bool
+where
+    F: FnMut() -> futures::future::BoxFuture<'static, bool>,
+{
+    let begin = Instant::now_coarse();
+    let timeout = Duration::from_secs(seconds as u64);
+    while begin.saturating_elapsed() < timeout {
+        if f().await {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    false
+}
+
+pub async fn try_wait_result_async<F, E>(mut f: F, seconds: usize) -> std::result::Result<(), E>
 where
     F: FnMut() -> futures::future::BoxFuture<'static, std::result::Result<(), E>>,
 {
     let begin = Instant::now_coarse();
+    let timeout = Duration::from_secs(seconds as u64);
     let mut last_err: Option<E> = None;
     while begin.saturating_elapsed() < timeout {
         match f().await {
@@ -825,9 +847,16 @@ impl ClusterDataStats {
 
     pub fn check_region_version_match(&self, pd_client: &dyn PdClientExt) -> Result<(), String> {
         let regions = pd_client.get_all_regions();
-        for region in regions {
+        check_regions_boundary(&[], &[], &regions)
+            .map_err(|e| format!("check_regions_boundary failed: {:?}", e))?;
+        for region in &regions {
             let region_id = region.get_id();
-            let region_shard_stats = self.get_region_shard_stats(region_id).unwrap();
+            let region_shard_stats = self.get_region_shard_stats(region_id).ok_or_else(|| {
+                format!(
+                    "region not found in cluster, region:{:?}, cluster:{:?}",
+                    region, self.regions
+                )
+            })?;
             if region_shard_stats.total_size == 0 {
                 continue;
             }
@@ -850,9 +879,16 @@ impl ClusterDataStats {
         bucket_size: u64,
     ) -> Result<(), String> {
         let regions = pd_client.get_all_regions();
-        for region in regions {
+        check_regions_boundary(&[], &[], &regions)
+            .map_err(|e| format!("check_regions_boundary failed: {:?}", e))?;
+        for region in &regions {
             let region_id = region.get_id();
-            let region_shard_stats = self.get_region_shard_stats(region_id).unwrap();
+            let region_shard_stats = self.get_region_shard_stats(region_id).ok_or_else(|| {
+                format!(
+                    "region not found in cluster, region:{:?}, cluster:{:?}",
+                    region, self.regions
+                )
+            })?;
             // Concern about write cf L1+ only. See `Peer::update_bucket`.
             let shard_size_for_bucket: u64 = region_shard_stats.cfs[WRITE_CF]
                 .levels
