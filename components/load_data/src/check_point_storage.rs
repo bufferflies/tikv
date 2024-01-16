@@ -1,6 +1,14 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{collections::HashMap, fs, fs::OpenOptions, io::Write, path::PathBuf, sync::Mutex};
+use std::{
+    collections::HashMap,
+    fs,
+    fs::OpenOptions,
+    io::Write,
+    path::PathBuf,
+    sync::Mutex,
+    time::{Duration, SystemTime},
+};
 
 use bytes::Bytes;
 use serde_derive::{Deserialize, Serialize};
@@ -15,6 +23,12 @@ use crate::{
 
 pub type Result<T> = std::result::Result<T, Error>;
 pub const CHECKPOINT_WORKER_PREFIX: &str = "LOAD_DATA_CHECK_POINT_";
+
+// The expiration time of the canceled task file.
+pub const CANCELLED_CHECK_POINT_FILE_EXPIRE_SEC: u64 = 30 * 60;
+
+// The interval between each attempt to clean the checkpoint file.
+pub const CLEAN_CHECK_POINT_FILE_INTERVAL_SEC: u64 = 30 * 60;
 lazy_static::lazy_static! {
     static ref FILE_LOCK: Mutex<()> = Mutex::new(());
 }
@@ -84,7 +98,7 @@ pub struct LoadDataCheckPointCtx {
 
     local_file_infos: Vec<LocalFileInfo>, // Used to recover readers.
 
-    first_key: Bytes,
+    first_key: Bytes, // Used to update inner_key_off and encrytion_key.
 
     compression: u8, // Comes from build request, Used to build sst.
 
@@ -97,6 +111,11 @@ pub struct LoadDataCheckPointCtx {
 
     flushed_chunk_ids: HashMap<u64 /* writer_id */, u64 /* chunk_id */>,
     flushed_file_idx: usize,
+
+    // Used to recover LoadTaskStates.The lightning service periodically obtains the execution
+    // progress from LoadTaskStates.
+    pub canceled: bool,
+    pub error: String,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -120,6 +139,8 @@ impl LoadDataCheckPointCtx {
             first_key: Default::default(),
             flushed_chunk_ids: Default::default(),
             flushed_file_idx: 0,
+            canceled: false,
+            error: "".to_string(),
         }
     }
 
@@ -232,6 +253,13 @@ impl LocalFileCheckPointStorage {
                 error!("failed to delete check point file: {}", e);
             }
         }
+    }
+
+    pub fn update_cancel_and_errmsg(&mut self, canceled: bool, errmsg: String) -> Result<()> {
+        self.check_point_ctx.canceled = canceled;
+        self.check_point_ctx.error = errmsg;
+        self.flush_check_point_ctx()?;
+        Ok(())
     }
 
     fn get_file_path(&self) -> PathBuf {
@@ -372,8 +400,69 @@ impl LocalFileCheckPointStorage {
     }
 }
 
+// spawn_clean_check_point_files_worker scan the check point files under the
+// directory and clean up the cancel status files which have exceeded the
+// waiting time.
+pub fn spawn_clean_check_point_files_worker(
+    check_point_dir: PathBuf,
+    cancelled_task_check_point_file_expire_sec: u64,
+    clean_check_point_file_interval_sec: u64,
+) {
+    std::thread::spawn(move || {
+        loop {
+            try_clean_check_point_files(
+                check_point_dir.clone(),
+                cancelled_task_check_point_file_expire_sec,
+            );
+            std::thread::sleep(Duration::from_secs(clean_check_point_file_interval_sec));
+        }
+    });
+}
+
+fn try_clean_check_point_files(
+    check_point_dir: PathBuf,
+    cancelled_task_check_point_file_expire_sec: u64,
+) {
+    let files = fs::read_dir(check_point_dir).unwrap();
+    let dir_entries: Vec<fs::DirEntry> = files.filter_map(|r| r.ok()).collect();
+    for file in &dir_entries {
+        let file_name = file.file_name();
+        let str_file_name = file_name.to_string_lossy();
+        if str_file_name.starts_with(CHECKPOINT_WORKER_PREFIX) {
+            let path = file.path();
+
+            let file_data = LocalFileCheckPointStorage::read_file(path.clone());
+            let check_point_ctx =
+                LocalFileCheckPointStorage::binary_to_check_point(file_data.as_str());
+
+            if check_point_ctx.canceled {
+                try_clean_check_point_file(
+                    path.clone(),
+                    cancelled_task_check_point_file_expire_sec,
+                );
+            }
+        }
+    }
+}
+
+// Clean up files that have exceeded the wait time.
+pub fn try_clean_check_point_file(path: PathBuf, cancelled_task_check_point_file_expire_sec: u64) {
+    let metadata = fs::metadata(path.clone()).unwrap();
+    let modified_time = metadata.modified().unwrap();
+    let time_since_modified = SystemTime::now().duration_since(modified_time).unwrap();
+    let time_since_modified = time_since_modified.as_secs();
+    if time_since_modified > cancelled_task_check_point_file_expire_sec {
+        fs::remove_file(path.clone()).unwrap();
+        info!(
+            "[check point store] {:?} check point file has been removed due to being modified over {} sec ago.",
+            path, cancelled_task_check_point_file_expire_sec
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     #[test]
@@ -524,5 +613,64 @@ mod tests {
 
         let is_succ = state.transition(LoadDataWorkerState::IngestingSst);
         assert_eq!(false, is_succ);
+    }
+
+    // Test whether the file can be cleaned properly after the expire time is
+    // exceeded.
+    #[test]
+    fn test_clean_file() {
+        let check_point_dir = String::from("/tmp/test_check_point/");
+        if PathBuf::from(check_point_dir.clone()).is_dir() {
+            fs::remove_dir_all(check_point_dir.clone()).unwrap();
+        }
+        fs::create_dir(check_point_dir.clone()).unwrap();
+        let cancelled_task_check_point_file_expire_sec = 10;
+
+        let task_id1 = "task_id_001".to_string();
+        let store1 = make_test_check_point_storage(check_point_dir.clone(), task_id1);
+
+        // Sleep a while, wait file update time exceeds the expected wait time.
+        std::thread::sleep(Duration::from_secs(
+            cancelled_task_check_point_file_expire_sec + 1,
+        ));
+
+        // The file corresponding to path2 did not pass the wait time and was not
+        // cleaned
+        let task_id2 = "task_id_002".to_string();
+        let store2 = make_test_check_point_storage(check_point_dir.clone(), task_id2);
+
+        try_clean_check_point_files(
+            PathBuf::from(check_point_dir.clone()),
+            cancelled_task_check_point_file_expire_sec,
+        );
+
+        // The file of task_id1 should be deleted.
+        assert_eq!(false, store1.get_file_path().exists());
+        // The file of task_id2 was not cleaned up because the wait time was not
+        // reached.
+        assert_eq!(true, store2.get_file_path().exists());
+
+        fs::remove_dir_all(check_point_dir).unwrap();
+    }
+
+    fn make_test_check_point_storage(
+        check_point_dir: String,
+        task_id: String,
+    ) -> LocalFileCheckPointStorage {
+        let task_ctx = TaskContext {
+            task_id,
+            start_ts: 1_u64,
+            commit_ts: 1_u64,
+            inner_key_off: None,
+            key_prefix: vec![],
+            encryption_key: None,
+        };
+
+        let mut check_point = LoadDataCheckPointCtx::new(task_ctx);
+        check_point.canceled = true;
+        let mut store =
+            LocalFileCheckPointStorage::new(check_point, PathBuf::from(check_point_dir)).unwrap();
+        store.flush_check_point_ctx().unwrap();
+        store
     }
 }

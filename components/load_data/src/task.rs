@@ -209,10 +209,11 @@ impl LoadTaskScheduler {
     pub fn cancel(&self, err: String) {
         warn!("canceled {}", err);
         let mut states = self.states.lock().unwrap();
-        self.check_point_store
-            .lock()
-            .unwrap()
-            .clean_check_point_data();
+        let check_point_store_mutex = Arc::clone(&self.check_point_store);
+        let mut check_point_store_guard = check_point_store_mutex.lock().unwrap();
+        check_point_store_guard
+            .update_cancel_and_errmsg(true, err.clone())
+            .unwrap();
         states.canceled = true;
         states.error = err;
     }
@@ -334,18 +335,30 @@ impl LoadTaskWorker {
         let mut states = LoadTaskStates::default();
         let mut writers = WritersStates::default();
         let mut file_idx = 0;
-        if check_point_ctx.get_is_recover()
-            && check_point_ctx.get_state() > LoadDataWorkerState::InitTask
-        {
-            writers.flushed_chunk_ids = check_point_ctx.get_flushed_chunk_ids();
-            writers.handled_chunk_ids = check_point_ctx.get_flushed_chunk_ids();
-            file_idx = check_point_ctx.get_flushed_file_idx() + 1;
-            info!(
-                "{} [check point] recover: writers.flushed_chunk_ids:{:?},writers.handled_chunk_ids:{:?},file_idx:{}",
-                task_ctx.task_id, writers.flushed_chunk_ids, writers.handled_chunk_ids, file_idx
-            );
-        }
+        if check_point_ctx.get_is_recover() {
+            if check_point_ctx.get_state() > LoadDataWorkerState::InitTask {
+                writers.flushed_chunk_ids = check_point_ctx.get_flushed_chunk_ids();
+                writers.handled_chunk_ids = check_point_ctx.get_flushed_chunk_ids();
+                file_idx = check_point_ctx.get_flushed_file_idx() + 1;
+                info!(
+                    "{} [check point] recover: writers.flushed_chunk_ids:{:?},writers.handled_chunk_ids:{:?},file_idx:{}",
+                    task_ctx.task_id,
+                    writers.flushed_chunk_ids,
+                    writers.handled_chunk_ids,
+                    file_idx
+                );
+            }
 
+            // recover LoadTaskStates
+            states.canceled = check_point_ctx.canceled;
+            if check_point_ctx.get_state() == LoadDataWorkerState::IngestedSst {
+                states.finished = true;
+            }
+            states.error = check_point_ctx.error.clone();
+            states.flushed_files = check_point_ctx.get_flushed_file_idx();
+            states.created_files = check_point_ctx.get_sst_metas().len();
+            states.duplicated_entries = check_point_ctx.get_duplicated_entries();
+        }
         // Init checkpoint info.
         let mut check_point_store =
             LocalFileCheckPointStorage::new(check_point_ctx.clone(), context.dir.clone()).unwrap();
@@ -1303,7 +1316,9 @@ impl LoadTaskWorker {
 
             let check_point_store_mutex = Arc::clone(&self.check_point_store);
             let check_point_store_guard = check_point_store_mutex.lock().unwrap();
-            if check_point_store_guard.check_point_ctx.get_is_recover() {
+            if check_point_store_guard.check_point_ctx.get_is_recover()
+                && !check_point_store_guard.check_point_ctx.canceled
+            {
                 let check_point_ctx = check_point_store_guard.load_check_point_ctx();
                 info!("{} [check point] recover readers", self.task_ctx.task_id);
                 if let Err(err) =

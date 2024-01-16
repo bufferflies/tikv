@@ -13,7 +13,10 @@ use kvengine::{
 use load_data::{
     check_point_storage,
     check_point_storage::{
-        LoadDataCheckPointCtx, LoadDataWorkerState::BuildingSst, LocalFileCheckPointStorage,
+        spawn_clean_check_point_files_worker, LoadDataCheckPointCtx,
+        LoadDataWorkerState::{BuildingSst, IngestedSst},
+        LocalFileCheckPointStorage, CANCELLED_CHECK_POINT_FILE_EXPIRE_SEC,
+        CLEAN_CHECK_POINT_FILE_INTERVAL_SEC,
     },
     task::{
         FlushResult, LoadDataConfig, LoadDataContext, LoadTaskMsg, LoadTaskScheduler,
@@ -290,9 +293,13 @@ impl LoadDataManager {
             "[check point] try recover task from checkpoint, file exists {}",
             file_data
         );
+
         self.exec_task_by_check_point(check_point_ctx.clone());
 
-        if check_point_ctx.get_state() >= BuildingSst {
+        if check_point_ctx.get_state() >= BuildingSst
+            && check_point_ctx.get_state() < IngestedSst
+            && !check_point_ctx.canceled
+        {
             self.build(
                 check_point_ctx.get_task_id().as_str(),
                 LoadDataManager::compression_num_to_str(check_point_ctx.clone().get_compression()),
@@ -300,7 +307,7 @@ impl LoadDataManager {
         }
     }
 
-    pub fn try_recover_tasks_by_check_point(&self) {
+    pub fn try_recover_or_clean_tasks_by_check_point(&self) {
         if !self.config.enable_check_point {
             return;
         }
@@ -312,8 +319,16 @@ impl LoadDataManager {
             check_point_dir = PathBuf::from(".");
         }
 
-        let files = fs::read_dir(check_point_dir).unwrap();
-        for file in files.filter_map(Result::ok) {
+        let files = fs::read_dir(check_point_dir.clone()).unwrap();
+
+        spawn_clean_check_point_files_worker(
+            check_point_dir,
+            CANCELLED_CHECK_POINT_FILE_EXPIRE_SEC,
+            CLEAN_CHECK_POINT_FILE_INTERVAL_SEC,
+        );
+
+        let dir_entries: Vec<fs::DirEntry> = files.filter_map(|r| r.ok()).collect();
+        for file in dir_entries {
             let file_name = file.file_name();
             let str_file_name = file_name.to_string_lossy();
 

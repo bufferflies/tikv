@@ -317,7 +317,7 @@ fn main() {
     let server = start_serve!(ctx.clone(), acceptor);
 
     // try recover task from checkpoint.
-    load_manager.try_recover_tasks_by_check_point();
+    load_manager.try_recover_or_clean_tasks_by_check_point();
 
     if config.register {
         let remote_compact_url = security_mgr
