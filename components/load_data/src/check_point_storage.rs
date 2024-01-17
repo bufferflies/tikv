@@ -42,6 +42,12 @@ pub enum LoadDataWorkerState {
     IngestedSst = 100,
 }
 
+impl Default for LoadDataWorkerState {
+    fn default() -> Self {
+        Self::InitTask
+    }
+}
+
 impl LoadDataWorkerState {
     pub fn transition(&mut self, new_state: LoadDataWorkerState) -> bool {
         if !self.check_state(new_state) {
@@ -89,7 +95,8 @@ impl LoadDataWorkerState {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug, Default)]
+#[serde(default)]
 pub struct LoadDataCheckPointCtx {
     // From TaskContext.
     pub task_id: String, // Comes from TaskContext.
@@ -624,14 +631,14 @@ mod tests {
             fs::remove_dir_all(check_point_dir.clone()).unwrap();
         }
         fs::create_dir(check_point_dir.clone()).unwrap();
-        let cancelled_task_check_point_file_expire_sec = 10;
+        let cancelled_task_check_point_file_expire_sec = 1;
 
         let task_id1 = "task_id_001".to_string();
         let store1 = make_test_check_point_storage(check_point_dir.clone(), task_id1);
 
         // Sleep a while, wait file update time exceeds the expected wait time.
         std::thread::sleep(Duration::from_secs(
-            cancelled_task_check_point_file_expire_sec + 1,
+            cancelled_task_check_point_file_expire_sec + 2,
         ));
 
         // The file corresponding to path2 did not pass the wait time and was not
@@ -672,5 +679,10 @@ mod tests {
             LocalFileCheckPointStorage::new(check_point, PathBuf::from(check_point_dir)).unwrap();
         store.flush_check_point_ctx().unwrap();
         store
+    }
+
+    #[test]
+    fn test_check_point_default() {
+        let _ = LocalFileCheckPointStorage::binary_to_check_point("{}");
     }
 }
