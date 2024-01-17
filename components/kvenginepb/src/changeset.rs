@@ -1923,6 +1923,7 @@ pub struct Flush {
     pub properties: ::protobuf::SingularPtrField<Properties>,
     pub version: u64,
     pub max_ts: u64,
+    pub l0_creates: ::protobuf::RepeatedField<L0Create>,
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
     pub cached_size: ::protobuf::CachedSize,
@@ -2034,6 +2035,31 @@ impl Flush {
     pub fn set_max_ts(&mut self, v: u64) {
         self.max_ts = v;
     }
+
+    // repeated .enginepb.L0Create l0Creates = 6;
+
+
+    pub fn get_l0_creates(&self) -> &[L0Create] {
+        &self.l0_creates
+    }
+    pub fn clear_l0_creates(&mut self) {
+        self.l0_creates.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_l0_creates(&mut self, v: ::protobuf::RepeatedField<L0Create>) {
+        self.l0_creates = v;
+    }
+
+    // Mutable pointer to the field.
+    pub fn mut_l0_creates(&mut self) -> &mut ::protobuf::RepeatedField<L0Create> {
+        &mut self.l0_creates
+    }
+
+    // Take field
+    pub fn take_l0_creates(&mut self) -> ::protobuf::RepeatedField<L0Create> {
+        ::std::mem::replace(&mut self.l0_creates, ::protobuf::RepeatedField::new())
+    }
 }
 
 impl ::protobuf::Message for Flush {
@@ -2044,6 +2070,11 @@ impl ::protobuf::Message for Flush {
             }
         };
         for v in &self.properties {
+            if !v.is_initialized() {
+                return false;
+            }
+        };
+        for v in &self.l0_creates {
             if !v.is_initialized() {
                 return false;
             }
@@ -2075,6 +2106,9 @@ impl ::protobuf::Message for Flush {
                     let tmp = is.read_uint64()?;
                     self.max_ts = tmp;
                 },
+                6 => {
+                    ::protobuf::rt::read_repeated_message_into(wire_type, is, &mut self.l0_creates)?;
+                },
                 _ => {
                     ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
                 },
@@ -2101,6 +2135,10 @@ impl ::protobuf::Message for Flush {
         if self.max_ts != 0 {
             my_size += ::protobuf::rt::value_size(5, self.max_ts, ::protobuf::wire_format::WireTypeVarint);
         }
+        for value in &self.l0_creates {
+            let len = value.compute_size();
+            my_size += 1 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
+        };
         my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
         self.cached_size.set(my_size);
         my_size
@@ -2123,6 +2161,11 @@ impl ::protobuf::Message for Flush {
         if self.max_ts != 0 {
             os.write_uint64(5, self.max_ts)?;
         }
+        for v in &self.l0_creates {
+            os.write_tag(6, ::protobuf::wire_format::WireTypeLengthDelimited)?;
+            os.write_raw_varint32(v.get_cached_size())?;
+            v.write_to_with_cached_sizes(os)?;
+        };
         os.write_unknown_fields(self.get_unknown_fields())?;
         ::std::result::Result::Ok(())
     }
@@ -2185,6 +2228,11 @@ impl ::protobuf::Message for Flush {
                     |m: &Flush| { &m.max_ts },
                     |m: &mut Flush| { &mut m.max_ts },
                 ));
+                fields.push(::protobuf::reflect::accessor::make_repeated_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<L0Create>>(
+                    "l0Creates",
+                    |m: &Flush| { &m.l0_creates },
+                    |m: &mut Flush| { &mut m.l0_creates },
+                ));
                 ::protobuf::reflect::MessageDescriptor::new::<Flush>(
                     "Flush",
                     fields,
@@ -2211,6 +2259,7 @@ impl ::protobuf::Clear for Flush {
         self.properties.clear();
         self.version = 0;
         self.max_ts = 0;
+        self.l0_creates.clear();
         self.unknown_fields.clear();
     }
 }
@@ -2224,6 +2273,7 @@ impl ::protobuf::PbPrint for Flush {
         ::protobuf::PbPrint::fmt(&self.properties, "properties", buf);
         ::protobuf::PbPrint::fmt(&self.version, "version", buf);
         ::protobuf::PbPrint::fmt(&self.max_ts, "max_ts", buf);
+        ::protobuf::PbPrint::fmt(&self.l0_creates, "l0_creates", buf);
         if old_len < buf.len() {
           buf.push(' ');
         }
@@ -2238,6 +2288,7 @@ impl ::std::fmt::Debug for Flush {
         ::protobuf::PbPrint::fmt(&self.properties, "properties", &mut s);
         ::protobuf::PbPrint::fmt(&self.version, "version", &mut s);
         ::protobuf::PbPrint::fmt(&self.max_ts, "max_ts", &mut s);
+        ::protobuf::PbPrint::fmt(&self.l0_creates, "l0_creates", &mut s);
         write!(f, "{}", s)
     }
 }
@@ -5084,6 +5135,579 @@ impl ::protobuf::reflect::ProtobufValue for TableChange {
     }
 }
 
+#[derive(PartialEq,Clone,Default)]
+pub struct TxnFileRefs {
+    // message fields
+    pub txn_file_refs: ::protobuf::RepeatedField<TxnFileRef>,
+    // special fields
+    pub unknown_fields: ::protobuf::UnknownFields,
+    pub cached_size: ::protobuf::CachedSize,
+}
+
+impl<'a> ::std::default::Default for &'a TxnFileRefs {
+    fn default() -> &'a TxnFileRefs {
+        <TxnFileRefs as ::protobuf::Message>::default_instance()
+    }
+}
+
+impl TxnFileRefs {
+    pub fn new() -> TxnFileRefs {
+        ::std::default::Default::default()
+    }
+
+    // repeated .enginepb.TxnFileRef txn_file_refs = 1;
+
+
+    pub fn get_txn_file_refs(&self) -> &[TxnFileRef] {
+        &self.txn_file_refs
+    }
+    pub fn clear_txn_file_refs(&mut self) {
+        self.txn_file_refs.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_txn_file_refs(&mut self, v: ::protobuf::RepeatedField<TxnFileRef>) {
+        self.txn_file_refs = v;
+    }
+
+    // Mutable pointer to the field.
+    pub fn mut_txn_file_refs(&mut self) -> &mut ::protobuf::RepeatedField<TxnFileRef> {
+        &mut self.txn_file_refs
+    }
+
+    // Take field
+    pub fn take_txn_file_refs(&mut self) -> ::protobuf::RepeatedField<TxnFileRef> {
+        ::std::mem::replace(&mut self.txn_file_refs, ::protobuf::RepeatedField::new())
+    }
+}
+
+impl ::protobuf::Message for TxnFileRefs {
+    fn is_initialized(&self) -> bool {
+        for v in &self.txn_file_refs {
+            if !v.is_initialized() {
+                return false;
+            }
+        };
+        true
+    }
+
+    fn merge_from(&mut self, is: &mut ::protobuf::CodedInputStream) -> ::protobuf::ProtobufResult<()> {
+        while !is.eof()? {
+            let (field_number, wire_type) = is.read_tag_unpack()?;
+            match field_number {
+                1 => {
+                    ::protobuf::rt::read_repeated_message_into(wire_type, is, &mut self.txn_file_refs)?;
+                },
+                _ => {
+                    ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
+                },
+            };
+        }
+        ::std::result::Result::Ok(())
+    }
+
+    // Compute sizes of nested messages
+    #[allow(unused_variables)]
+    fn compute_size(&self) -> u32 {
+        let mut my_size = 0;
+        for value in &self.txn_file_refs {
+            let len = value.compute_size();
+            my_size += 1 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
+        };
+        my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
+        self.cached_size.set(my_size);
+        my_size
+    }
+
+    fn write_to_with_cached_sizes(&self, os: &mut ::protobuf::CodedOutputStream) -> ::protobuf::ProtobufResult<()> {
+        for v in &self.txn_file_refs {
+            os.write_tag(1, ::protobuf::wire_format::WireTypeLengthDelimited)?;
+            os.write_raw_varint32(v.get_cached_size())?;
+            v.write_to_with_cached_sizes(os)?;
+        };
+        os.write_unknown_fields(self.get_unknown_fields())?;
+        ::std::result::Result::Ok(())
+    }
+
+    fn get_cached_size(&self) -> u32 {
+        self.cached_size.get()
+    }
+
+    fn get_unknown_fields(&self) -> &::protobuf::UnknownFields {
+        &self.unknown_fields
+    }
+
+    fn mut_unknown_fields(&mut self) -> &mut ::protobuf::UnknownFields {
+        &mut self.unknown_fields
+    }
+
+    fn as_any(&self) -> &dyn (::std::any::Any) {
+        self as &dyn (::std::any::Any)
+    }
+    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
+        self as &mut dyn (::std::any::Any)
+    }
+    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+        self
+    }
+
+    fn descriptor(&self) -> &'static ::protobuf::reflect::MessageDescriptor {
+        Self::descriptor_static()
+    }
+
+    fn new() -> TxnFileRefs {
+        TxnFileRefs::new()
+    }
+
+    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
+        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy {
+            lock: ::protobuf::lazy::ONCE_INIT,
+            ptr: 0 as *const ::protobuf::reflect::MessageDescriptor,
+        };
+        unsafe {
+            descriptor.get(|| {
+                let mut fields = ::std::vec::Vec::new();
+                fields.push(::protobuf::reflect::accessor::make_repeated_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<TxnFileRef>>(
+                    "txn_file_refs",
+                    |m: &TxnFileRefs| { &m.txn_file_refs },
+                    |m: &mut TxnFileRefs| { &mut m.txn_file_refs },
+                ));
+                ::protobuf::reflect::MessageDescriptor::new::<TxnFileRefs>(
+                    "TxnFileRefs",
+                    fields,
+                    file_descriptor_proto()
+                )
+            })
+        }
+    }
+
+    fn default_instance() -> &'static TxnFileRefs {
+        static mut instance: ::protobuf::lazy::Lazy<TxnFileRefs> = ::protobuf::lazy::Lazy {
+            lock: ::protobuf::lazy::ONCE_INIT,
+            ptr: 0 as *const TxnFileRefs,
+        };
+        unsafe {
+            instance.get(TxnFileRefs::new)
+        }
+    }
+}
+
+impl ::protobuf::Clear for TxnFileRefs {
+    fn clear(&mut self) {
+        self.txn_file_refs.clear();
+        self.unknown_fields.clear();
+    }
+}
+
+impl ::protobuf::PbPrint for TxnFileRefs {
+    #[allow(unused_variables)]
+    fn fmt(&self, name: &str, buf: &mut String) {
+        ::protobuf::push_message_start(name, buf);
+        let old_len = buf.len();
+        ::protobuf::PbPrint::fmt(&self.txn_file_refs, "txn_file_refs", buf);
+        if old_len < buf.len() {
+          buf.push(' ');
+        }
+        buf.push('}');
+    }
+}
+impl ::std::fmt::Debug for TxnFileRefs {
+    #[allow(unused_variables)]
+    fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
+        let mut s = String::new();
+        ::protobuf::PbPrint::fmt(&self.txn_file_refs, "txn_file_refs", &mut s);
+        write!(f, "{}", s)
+    }
+}
+
+impl ::protobuf::reflect::ProtobufValue for TxnFileRefs {
+    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef {
+        ::protobuf::reflect::ProtobufValueRef::Message(self)
+    }
+}
+
+#[derive(PartialEq,Clone,Default)]
+pub struct TxnFileRef {
+    // message fields
+    pub start_ts: u64,
+    pub chunk_ids: ::std::vec::Vec<u64>,
+    pub version: u64,
+    pub user_meta: ::std::vec::Vec<u8>,
+    pub lock_val_prefix: ::std::vec::Vec<u8>,
+    pub shard_ver: u64,
+    // special fields
+    pub unknown_fields: ::protobuf::UnknownFields,
+    pub cached_size: ::protobuf::CachedSize,
+}
+
+impl<'a> ::std::default::Default for &'a TxnFileRef {
+    fn default() -> &'a TxnFileRef {
+        <TxnFileRef as ::protobuf::Message>::default_instance()
+    }
+}
+
+impl TxnFileRef {
+    pub fn new() -> TxnFileRef {
+        ::std::default::Default::default()
+    }
+
+    // uint64 start_ts = 1;
+
+
+    pub fn get_start_ts(&self) -> u64 {
+        self.start_ts
+    }
+    pub fn clear_start_ts(&mut self) {
+        self.start_ts = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_start_ts(&mut self, v: u64) {
+        self.start_ts = v;
+    }
+
+    // repeated uint64 chunk_ids = 2;
+
+
+    pub fn get_chunk_ids(&self) -> &[u64] {
+        &self.chunk_ids
+    }
+    pub fn clear_chunk_ids(&mut self) {
+        self.chunk_ids.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_chunk_ids(&mut self, v: ::std::vec::Vec<u64>) {
+        self.chunk_ids = v;
+    }
+
+    // Mutable pointer to the field.
+    pub fn mut_chunk_ids(&mut self) -> &mut ::std::vec::Vec<u64> {
+        &mut self.chunk_ids
+    }
+
+    // Take field
+    pub fn take_chunk_ids(&mut self) -> ::std::vec::Vec<u64> {
+        ::std::mem::replace(&mut self.chunk_ids, ::std::vec::Vec::new())
+    }
+
+    // uint64 version = 3;
+
+
+    pub fn get_version(&self) -> u64 {
+        self.version
+    }
+    pub fn clear_version(&mut self) {
+        self.version = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_version(&mut self, v: u64) {
+        self.version = v;
+    }
+
+    // bytes user_meta = 4;
+
+
+    pub fn get_user_meta(&self) -> &[u8] {
+        &self.user_meta
+    }
+    pub fn clear_user_meta(&mut self) {
+        self.user_meta.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_user_meta(&mut self, v: ::std::vec::Vec<u8>) {
+        self.user_meta = v;
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_user_meta(&mut self) -> &mut ::std::vec::Vec<u8> {
+        &mut self.user_meta
+    }
+
+    // Take field
+    pub fn take_user_meta(&mut self) -> ::std::vec::Vec<u8> {
+        ::std::mem::replace(&mut self.user_meta, ::std::vec::Vec::new())
+    }
+
+    // bytes lock_val_prefix = 5;
+
+
+    pub fn get_lock_val_prefix(&self) -> &[u8] {
+        &self.lock_val_prefix
+    }
+    pub fn clear_lock_val_prefix(&mut self) {
+        self.lock_val_prefix.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_lock_val_prefix(&mut self, v: ::std::vec::Vec<u8>) {
+        self.lock_val_prefix = v;
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_lock_val_prefix(&mut self) -> &mut ::std::vec::Vec<u8> {
+        &mut self.lock_val_prefix
+    }
+
+    // Take field
+    pub fn take_lock_val_prefix(&mut self) -> ::std::vec::Vec<u8> {
+        ::std::mem::replace(&mut self.lock_val_prefix, ::std::vec::Vec::new())
+    }
+
+    // uint64 shard_ver = 6;
+
+
+    pub fn get_shard_ver(&self) -> u64 {
+        self.shard_ver
+    }
+    pub fn clear_shard_ver(&mut self) {
+        self.shard_ver = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_shard_ver(&mut self, v: u64) {
+        self.shard_ver = v;
+    }
+}
+
+impl ::protobuf::Message for TxnFileRef {
+    fn is_initialized(&self) -> bool {
+        true
+    }
+
+    fn merge_from(&mut self, is: &mut ::protobuf::CodedInputStream) -> ::protobuf::ProtobufResult<()> {
+        while !is.eof()? {
+            let (field_number, wire_type) = is.read_tag_unpack()?;
+            match field_number {
+                1 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.start_ts = tmp;
+                },
+                2 => {
+                    ::protobuf::rt::read_repeated_uint64_into(wire_type, is, &mut self.chunk_ids)?;
+                },
+                3 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.version = tmp;
+                },
+                4 => {
+                    ::protobuf::rt::read_singular_proto3_bytes_into(wire_type, is, &mut self.user_meta)?;
+                },
+                5 => {
+                    ::protobuf::rt::read_singular_proto3_bytes_into(wire_type, is, &mut self.lock_val_prefix)?;
+                },
+                6 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.shard_ver = tmp;
+                },
+                _ => {
+                    ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
+                },
+            };
+        }
+        ::std::result::Result::Ok(())
+    }
+
+    // Compute sizes of nested messages
+    #[allow(unused_variables)]
+    fn compute_size(&self) -> u32 {
+        let mut my_size = 0;
+        if self.start_ts != 0 {
+            my_size += ::protobuf::rt::value_size(1, self.start_ts, ::protobuf::wire_format::WireTypeVarint);
+        }
+        for value in &self.chunk_ids {
+            my_size += ::protobuf::rt::value_size(2, *value, ::protobuf::wire_format::WireTypeVarint);
+        };
+        if self.version != 0 {
+            my_size += ::protobuf::rt::value_size(3, self.version, ::protobuf::wire_format::WireTypeVarint);
+        }
+        if !self.user_meta.is_empty() {
+            my_size += ::protobuf::rt::bytes_size(4, &self.user_meta);
+        }
+        if !self.lock_val_prefix.is_empty() {
+            my_size += ::protobuf::rt::bytes_size(5, &self.lock_val_prefix);
+        }
+        if self.shard_ver != 0 {
+            my_size += ::protobuf::rt::value_size(6, self.shard_ver, ::protobuf::wire_format::WireTypeVarint);
+        }
+        my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
+        self.cached_size.set(my_size);
+        my_size
+    }
+
+    fn write_to_with_cached_sizes(&self, os: &mut ::protobuf::CodedOutputStream) -> ::protobuf::ProtobufResult<()> {
+        if self.start_ts != 0 {
+            os.write_uint64(1, self.start_ts)?;
+        }
+        for v in &self.chunk_ids {
+            os.write_uint64(2, *v)?;
+        };
+        if self.version != 0 {
+            os.write_uint64(3, self.version)?;
+        }
+        if !self.user_meta.is_empty() {
+            os.write_bytes(4, &self.user_meta)?;
+        }
+        if !self.lock_val_prefix.is_empty() {
+            os.write_bytes(5, &self.lock_val_prefix)?;
+        }
+        if self.shard_ver != 0 {
+            os.write_uint64(6, self.shard_ver)?;
+        }
+        os.write_unknown_fields(self.get_unknown_fields())?;
+        ::std::result::Result::Ok(())
+    }
+
+    fn get_cached_size(&self) -> u32 {
+        self.cached_size.get()
+    }
+
+    fn get_unknown_fields(&self) -> &::protobuf::UnknownFields {
+        &self.unknown_fields
+    }
+
+    fn mut_unknown_fields(&mut self) -> &mut ::protobuf::UnknownFields {
+        &mut self.unknown_fields
+    }
+
+    fn as_any(&self) -> &dyn (::std::any::Any) {
+        self as &dyn (::std::any::Any)
+    }
+    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
+        self as &mut dyn (::std::any::Any)
+    }
+    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+        self
+    }
+
+    fn descriptor(&self) -> &'static ::protobuf::reflect::MessageDescriptor {
+        Self::descriptor_static()
+    }
+
+    fn new() -> TxnFileRef {
+        TxnFileRef::new()
+    }
+
+    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
+        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy {
+            lock: ::protobuf::lazy::ONCE_INIT,
+            ptr: 0 as *const ::protobuf::reflect::MessageDescriptor,
+        };
+        unsafe {
+            descriptor.get(|| {
+                let mut fields = ::std::vec::Vec::new();
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                    "start_ts",
+                    |m: &TxnFileRef| { &m.start_ts },
+                    |m: &mut TxnFileRef| { &mut m.start_ts },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_vec_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                    "chunk_ids",
+                    |m: &TxnFileRef| { &m.chunk_ids },
+                    |m: &mut TxnFileRef| { &mut m.chunk_ids },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                    "version",
+                    |m: &TxnFileRef| { &m.version },
+                    |m: &mut TxnFileRef| { &mut m.version },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeBytes>(
+                    "user_meta",
+                    |m: &TxnFileRef| { &m.user_meta },
+                    |m: &mut TxnFileRef| { &mut m.user_meta },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeBytes>(
+                    "lock_val_prefix",
+                    |m: &TxnFileRef| { &m.lock_val_prefix },
+                    |m: &mut TxnFileRef| { &mut m.lock_val_prefix },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                    "shard_ver",
+                    |m: &TxnFileRef| { &m.shard_ver },
+                    |m: &mut TxnFileRef| { &mut m.shard_ver },
+                ));
+                ::protobuf::reflect::MessageDescriptor::new::<TxnFileRef>(
+                    "TxnFileRef",
+                    fields,
+                    file_descriptor_proto()
+                )
+            })
+        }
+    }
+
+    fn default_instance() -> &'static TxnFileRef {
+        static mut instance: ::protobuf::lazy::Lazy<TxnFileRef> = ::protobuf::lazy::Lazy {
+            lock: ::protobuf::lazy::ONCE_INIT,
+            ptr: 0 as *const TxnFileRef,
+        };
+        unsafe {
+            instance.get(TxnFileRef::new)
+        }
+    }
+}
+
+impl ::protobuf::Clear for TxnFileRef {
+    fn clear(&mut self) {
+        self.start_ts = 0;
+        self.chunk_ids.clear();
+        self.version = 0;
+        self.user_meta.clear();
+        self.lock_val_prefix.clear();
+        self.shard_ver = 0;
+        self.unknown_fields.clear();
+    }
+}
+
+impl ::protobuf::PbPrint for TxnFileRef {
+    #[allow(unused_variables)]
+    fn fmt(&self, name: &str, buf: &mut String) {
+        ::protobuf::push_message_start(name, buf);
+        let old_len = buf.len();
+        ::protobuf::PbPrint::fmt(&self.start_ts, "start_ts", buf);
+        ::protobuf::PbPrint::fmt(&self.chunk_ids, "chunk_ids", buf);
+        ::protobuf::PbPrint::fmt(&self.version, "version", buf);
+        ::protobuf::PbPrint::fmt(&self.user_meta, "user_meta", buf);
+        ::protobuf::PbPrint::fmt(&self.lock_val_prefix, "lock_val_prefix", buf);
+        ::protobuf::PbPrint::fmt(&self.shard_ver, "shard_ver", buf);
+        if old_len < buf.len() {
+          buf.push(' ');
+        }
+        buf.push('}');
+    }
+}
+impl ::std::fmt::Debug for TxnFileRef {
+    #[allow(unused_variables)]
+    fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
+        let mut s = String::new();
+        ::protobuf::PbPrint::fmt(&self.start_ts, "start_ts", &mut s);
+        ::protobuf::PbPrint::fmt(&self.chunk_ids, "chunk_ids", &mut s);
+        ::protobuf::PbPrint::fmt(&self.version, "version", &mut s);
+        ::protobuf::PbPrint::fmt(&self.user_meta, "user_meta", &mut s);
+        ::protobuf::PbPrint::fmt(&self.lock_val_prefix, "lock_val_prefix", &mut s);
+        ::protobuf::PbPrint::fmt(&self.shard_ver, "shard_ver", &mut s);
+        write!(f, "{}", s)
+    }
+}
+
+impl ::protobuf::reflect::ProtobufValue for TxnFileRef {
+    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef {
+        ::protobuf::reflect::ProtobufValueRef::Message(self)
+    }
+}
+
 static file_descriptor_proto_data: &'static [u8] = b"\
     \n\x0fchangeset.proto\x12\x08enginepb\"\xba\x05\n\tChangeSet\x12\x11\n\
     \x07shardID\x18\x01\x20\x01(\x04B\0\x12\x12\n\x08shardVer\x18\x02\x20\
@@ -5111,16 +5735,17 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     \n\x0fMajorCompaction\x12.\n\rsstableChange\x18\x01\x20\x01(\x0b2\x15.en\
     ginepb.TableChangeB\0\x12-\n\rnewBlobTables\x18\x02\x20\x03(\x0b2\x14.en\
     ginepb.BlobCreateB\0\x12\x17\n\roldBlobTables\x18\x03\x20\x03(\x04B\0\
-    \x12\x14\n\nconflicted\x18\x04\x20\x01(\x08B\0:\0\"\x82\x01\n\x05Flush\
+    \x12\x14\n\nconflicted\x18\x04\x20\x01(\x08B\0:\0\"\xab\x01\n\x05Flush\
     \x12&\n\x08l0Create\x18\x01\x20\x01(\x0b2\x12.enginepb.L0CreateB\0\x12*\
     \n\nproperties\x18\x02\x20\x01(\x0b2\x14.enginepb.PropertiesB\0\x12\x11\
     \n\x07version\x18\x03\x20\x01(\x04B\0\x12\x10\n\x06max_ts\x18\x05\x20\
-    \x01(\x04B\0:\0\"\xc4\x02\n\x08Snapshot\x12\x15\n\x0bouter_start\x18\x01\
-    \x20\x01(\x0cB\0\x12\x13\n\touter_end\x18\x02\x20\x01(\x0cB\0\x12*\n\npr\
-    operties\x18\x03\x20\x01(\x0b2\x14.enginepb.PropertiesB\0\x12'\n\tl0Crea\
-    tes\x18\x05\x20\x03(\x0b2\x12.enginepb.L0CreateB\0\x12-\n\x0ctableCreate\
-    s\x18\x06\x20\x03(\x0b2\x15.enginepb.TableCreateB\0\x12\x15\n\x0bbaseVer\
-    sion\x18\x07\x20\x01(\x04B\0\x12\x17\n\rdata_sequence\x18\x08\x20\x01(\
+    \x01(\x04B\0\x12'\n\tl0Creates\x18\x06\x20\x03(\x0b2\x12.enginepb.L0Crea\
+    teB\0:\0\"\xc4\x02\n\x08Snapshot\x12\x15\n\x0bouter_start\x18\x01\x20\
+    \x01(\x0cB\0\x12\x13\n\touter_end\x18\x02\x20\x01(\x0cB\0\x12*\n\nproper\
+    ties\x18\x03\x20\x01(\x0b2\x14.enginepb.PropertiesB\0\x12'\n\tl0Creates\
+    \x18\x05\x20\x03(\x0b2\x12.enginepb.L0CreateB\0\x12-\n\x0ctableCreates\
+    \x18\x06\x20\x03(\x0b2\x15.enginepb.TableCreateB\0\x12\x15\n\x0bbaseVers\
+    ion\x18\x07\x20\x01(\x04B\0\x12\x17\n\rdata_sequence\x18\x08\x20\x01(\
     \x04B\0\x12+\n\x0bBlobCreates\x18\t\x20\x03(\x0b2\x14.enginepb.BlobCreat\
     eB\0\x12\x10\n\x06max_ts\x18\n\x20\x01(\x04B\0\x12\x17\n\rinner_key_off\
     \x18\x0b\x20\x01(\rB\0:\0\"A\n\x08L0Create\x12\x0c\n\x02ID\x18\x01\x20\
@@ -5144,7 +5769,12 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     \tB\0\x12\x10\n\x06values\x18\x03\x20\x03(\x0cB\0:\0\"m\n\x0bTableChange\
     \x12-\n\x0ctableDeletes\x18\x01\x20\x03(\x0b2\x15.enginepb.TableDeleteB\
     \0\x12-\n\x0ctableCreates\x18\x02\x20\x03(\x0b2\x15.enginepb.TableCreate\
-    B\0:\0B\0b\x06proto3\
+    B\0:\0\">\n\x0bTxnFileRefs\x12-\n\rtxn_file_refs\x18\x01\x20\x03(\x0b2\
+    \x14.enginepb.TxnFileRefB\0:\0\"\x8f\x01\n\nTxnFileRef\x12\x12\n\x08star\
+    t_ts\x18\x01\x20\x01(\x04B\0\x12\x13\n\tchunk_ids\x18\x02\x20\x03(\x04B\
+    \0\x12\x11\n\x07version\x18\x03\x20\x01(\x04B\0\x12\x13\n\tuser_meta\x18\
+    \x04\x20\x01(\x0cB\0\x12\x19\n\x0flock_val_prefix\x18\x05\x20\x01(\x0cB\
+    \0\x12\x13\n\tshard_ver\x18\x06\x20\x01(\x04B\0:\0B\0b\x06proto3\
 ";
 
 static mut file_descriptor_proto_lazy: ::protobuf::lazy::Lazy<::protobuf::descriptor::FileDescriptorProto> = ::protobuf::lazy::Lazy {

@@ -62,6 +62,8 @@ message Flush {
   Properties properties = 2;
   uint64 version = 3;
   uint64 max_ts = 5;
+  // used for txn file transaction which may be too large to flush a single L0 file.
+  repeated L0Create l0Creates = 6;
 }
 
 message Snapshot {
@@ -127,4 +129,21 @@ message TableChange {
   repeated TableDelete tableDeletes = 1;
   // Tables that created by destroy range / truncate ts.
   repeated TableCreate tableCreates = 2;
+}
+
+message TxnFileRefs {
+  repeated TxnFileRef txn_file_refs = 1;
+}
+
+message TxnFileRef {
+  uint64 start_ts = 1;
+  repeated uint64 chunk_ids = 2;
+  // The value of version is data_sequence for lock CF, commit_ts for write CF.
+  uint64 version = 3;
+  // empty for Lock CF,
+  bytes user_meta = 4;
+  // encoded txn_types::Lock without short value.
+  bytes lock_val_prefix = 5;
+  // Not used for now, but maybe useful for merge/split
+  uint64 shard_ver = 6;
 }
