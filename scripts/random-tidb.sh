@@ -1,5 +1,20 @@
 #!/usr/bin/env bash
 
+KEEP_TMP_ON_ERROR=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --keep-tmp-on-error)
+            KEEP_TMP_ON_ERROR=1
+            ;;
+        *)
+            echo "Usage: $0 [--keep-tmp-on-error]"
+            exit 1
+            ;;
+    esac
+    shift
+done
+
 export RUST_BACKTRACE=1
 
 mkdir -p random_logs
@@ -18,7 +33,11 @@ do
         echo -n "$i "
         grep 'TEST SUCCEED' random_logs/random_tidb_"$i".log;
         rm random_logs/random_tidb_"$i".log
+        rm -rf "$TMPDIR" || true
+    else
+        if [ "$KEEP_TMP_ON_ERROR" -ne 1 ]; then
+            rm -rf "$TMPDIR" || true
+        fi
     fi
 
-    rm -rf "$TMPDIR" || true
 done

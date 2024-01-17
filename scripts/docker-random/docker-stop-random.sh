@@ -12,17 +12,17 @@ while [[ $# -gt 0 ]]; do
 	--test)
 		TESTNAME="$2"
 		shift
-		shift
 		;;
 	--help)
 		HELP=1
-		shift
+		break
 		;;
 	*)
 		HELP=1
 		break
 		;;
 	esac
+	shift
 done
 
 if [ "$HELP" -eq 1 ]; then

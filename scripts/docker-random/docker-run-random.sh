@@ -14,6 +14,7 @@ TMP_PATH=""
 TESTNAME="all"
 TIDB_VERSION="v7.1.0"
 REBUILD_IMAGE=1
+RUN_ARGS=""
 
 HELP=0
 
@@ -24,31 +25,31 @@ while [[ $# -gt 0 ]]; do
 	--tmp-path)
 		TMP_PATH="$2"
 		shift
-		shift
 		;;
 	--test)
 		TESTNAME="$2"
-		shift
 		shift
 		;;
 	--tidb-version)
 		TIDB_VERSION="$2"
 		shift
-		shift
 		;;
 	--no-rebuild-image)
 		REBUILD_IMAGE=0
-		shift
+		;;
+	--keep-tmp-on-error)
+		RUN_ARGS+=" --keep-tmp-on-error"
 		;;
 	--help)
 		HELP=1
-		shift
+		break
 		;;
 	*)
 		HELP=1
 		break
 		;;
 	esac
+	shift
 done
 
 if [ "$HELP" -eq 1 ]; then
@@ -59,6 +60,7 @@ if [ "$HELP" -eq 1 ]; then
 	echo "  --test         <all/with_tidb>     Set the name of test case to run"
 	echo "  --tidb-version <v6.6.0/v7.1.0/...> Set the version of TiDB for \"with_tidb\" test"
 	echo "  --no-rebuild-image                 Do NOT rebuild the testing Docker image"
+	echo "  --keep-tmp-on-error                Keep temporary data on error for debugging"
 	exit 0
 fi
 
@@ -88,5 +90,5 @@ for((i=0;i<"$CONCURRENCY";i++)); do
     -v "$PWD":/random \
     $TMP_VOLUME \
     "$IMAGE" \
-    /bin/sh /random/run-random.sh "$i" "$TESTNAME"
+    /bin/sh /random/run-random.sh "$i" "$TESTNAME" $RUN_ARGS
 done

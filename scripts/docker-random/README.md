@@ -76,6 +76,8 @@ To use Docker-Random, ensure that Docker is installed on your system. Docker pro
 
         By default we always rebuild the testing Docker image to ensure that we are testing on latest TiDB/PD. However, if you prefer not to rebuild the image, you can specify the `--no-rebuild-image` argument.
 
+    - `--keep-tmp-on-error`: Keep temporary data (e.g. logs of TiDB and PD) on error for debugging.
+
 4. **Analyze the Results**: The logs of failed tests can be found in `scripts/docker-random/error-logs`. You can examine these logs to identify the causes of failure.
 
 5. **Stop the Tests**: The tests will terminate after running for 10000 x *CONCURRENCY* iterations. If you wish to stop the tests before completion, execute the following command:
