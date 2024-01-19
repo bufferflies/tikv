@@ -327,7 +327,7 @@ impl LocalFileCheckPointStorage {
         // Update local file infos.
         for local_file_info in local_file_infos {
             self.check_point_ctx.local_file_infos.push(local_file_info);
-            info!(
+            debug!(
                 "{} [check point store] update local_file_infos {:?}",
                 self.check_point_ctx.task_id,
                 self.check_point_ctx.local_file_infos.clone()
