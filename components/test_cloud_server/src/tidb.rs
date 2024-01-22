@@ -10,20 +10,17 @@ use std::{
     time::Duration,
 };
 
-use bstr::ByteSlice;
-use bytes::Bytes;
 use dashmap::DashMap;
 use futures::executor::block_on;
 use grpcio::EnvBuilder;
-use hyper::{Body, Method, Request};
 use pd_client::{
     pd_control::{PdControl, PdScheduleConfig},
     PdClient,
 };
-use security::{HttpClient, SecurityConfig, SecurityManager};
-use serde_derive::Serialize;
+use security::{RestfulClient, SecurityConfig, SecurityManager};
+use serde_derive::{Deserialize, Serialize};
 use tempfile::TempDir;
-use tikv_util::{box_err, debug, info};
+use tikv_util::{box_err, info};
 
 use crate::try_wait_result_async;
 
@@ -330,7 +327,7 @@ impl TidbServers {
         }
     }
 
-    pub fn start(&self, idx: u16, pd_endpoints: &[String]) {
+    pub fn start(&self, idx: u16, pd_endpoints: &[String], log_level: &str) {
         let pd_endpoints = pd_endpoints.join(",");
         let log_file = self.data_path.join(format!("tidb-{idx}.log"));
         let slow_log_file = self.data_path.join(format!("tidb-slow-{idx}.log"));
@@ -343,9 +340,10 @@ impl TidbServers {
         fs::write(&config_file, toml).unwrap();
 
         let mut cmd = Command::new(&self.bin_path);
-        cmd.arg("-L=info")
+        cmd.arg(format!("-L={}", log_level))
             .arg("--store=tikv")
             .arg("--host=127.0.0.1")
+            .arg("--status-host=127.0.0.1")
             .arg(format!("--path={}", pd_endpoints))
             .arg(format!("-P={}", self.port(idx)))
             .arg(format!("--status={}", self.status_port(idx)))
@@ -495,11 +493,11 @@ impl TidbClusterCore {
         self.pd.must_healthy(timeout).await;
     }
 
-    pub async fn start_tidb(&self, count: u16, timeout: Duration) {
+    pub async fn start_tidb(&self, count: u16, timeout: Duration, log_level: &str) {
         let pd_endpoints = self.pd.endpoints();
         // Start from 1 as keyspace 0 is reserved.
         for idx in 1..=count {
-            self.tidb.start(idx, &pd_endpoints);
+            self.tidb.start(idx, &pd_endpoints, log_level);
         }
         self.tidb.must_all_healthy(timeout).await;
     }
@@ -554,76 +552,39 @@ struct TidbConfig {
     keyspace_name: String,
 }
 
-const TIDB_STATUS_PATH: &str = "status";
+const TIDB_HEALTH_PATH: &str = "health";
+
+// Ref: https://github.com/tidbcloud/tidb-cse/blob/release-7.1-keyspace/server/health_handler.go
+// {"status":"up","token":"keyspace_a"}
+#[derive(Default, Deserialize, Debug)]
+#[serde(default)]
+struct TidbHealth {
+    status: String, // "up" or "down"
+    token: String,  // keyspace name
+}
 
 /// TidbControl provides access to HTTP APIs of TiDB, which are not included in
 /// gRPC interface. It's also expected to act like the tool `tidb-ctl`.
 #[derive(Clone)]
 pub struct TidbControl {
-    security_mgr: Arc<SecurityManager>,
-    endpoint: String,
-    client: HttpClient,
+    client: RestfulClient,
 }
 
 impl TidbControl {
     pub fn new(endpoint: String, security_mgr: Arc<SecurityManager>) -> Self {
-        let client = security_mgr.http_client(hyper::Client::builder()).unwrap();
-        Self {
-            endpoint,
-            security_mgr,
-            client,
-        }
-    }
-
-    async fn request_restful(
-        &self,
-        path: String,
-        method: Method,
-        body_data: Option<Vec<u8>>,
-    ) -> Result<Bytes> {
-        let uri = self
-            .security_mgr
-            .build_uri(format!("{}/{}", self.endpoint, path))?;
-        let req = Request::builder()
-            .method(method.clone())
-            .uri(uri)
-            .body(match body_data {
-                Some(ref data) => Body::from(data.to_owned()),
-                None => Body::empty(),
-            })
-            .unwrap();
-        let resp = self.client.request(req).await;
-        match resp {
-            Err(e) => Err(box_err!("request {} failed {:?}", path, e)),
-            Ok(resp) => {
-                let status = resp.status();
-                let body = hyper::body::to_bytes(resp.into_body()).await.unwrap();
-                if status.is_success() {
-                    Ok(body)
-                } else {
-                    Err(box_err!(
-                        "TiDB({}) path {} return error: {}: {}",
-                        self.endpoint,
-                        path,
-                        status,
-                        body.to_str_lossy()
-                    ))
-                }
-            }
-        }
+        let client = RestfulClient::new("tidb-ctl", vec![endpoint], security_mgr).unwrap();
+        Self { client }
     }
 
     pub async fn health(&self) -> Result<()> {
-        match self
-            .request_restful(TIDB_STATUS_PATH.to_string(), Method::GET, None)
-            .await
-        {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                let err = Err(box_err!("check TiDB healthy failed: {:?}", e));
-                debug!("{:?}", err);
-                err
+        let resp = self.client.get::<TidbHealth>(TIDB_HEALTH_PATH).await;
+        match resp {
+            Ok(health) if health.status == "up" => {
+                info!("tidb-ctl: health: {:?}", health);
+                Ok(())
             }
+            Ok(health) => Err(box_err!("tidb-ctl: unhealthy: {:?}", health)),
+            Err(e) => Err(box_err!("tidb-ctl: check healthy failed: {:?}", e)),
         }
     }
 }

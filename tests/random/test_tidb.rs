@@ -52,6 +52,7 @@ const TIDB_PORT_DEFAULT: u16 = 4000;
 const TIDB_STATUS_PORT_ENV_KEY: &str = "TIDB_STATUS_PORT";
 const TIDB_STATUS_PORT_DEFAULT: u16 = 10080;
 const TIDB_HEALTHY_TIMEOUT: Duration = Duration::from_secs(60);
+const TIDB_LOG_LEVEL: &str = "info";
 
 const TPC_BIN_ENV_KEY: &str = "TPC_BIN";
 const TPCC_WAREHOUSES: usize = 2;
@@ -91,7 +92,11 @@ fn test_random_with_tidb() {
     let tpc_bin = std::env::var(TPC_BIN_ENV_KEY).expect("env TPC_BIN is not set");
     check_tpc_binary(&tpc_bin);
 
-    runtime.block_on(tc.start_tidb(INITIAL_KEYSPACE_COUNT as u16, TIDB_HEALTHY_TIMEOUT));
+    runtime.block_on(tc.start_tidb(
+        INITIAL_KEYSPACE_COUNT as u16,
+        TIDB_HEALTHY_TIMEOUT,
+        TIDB_LOG_LEVEL,
+    ));
     runtime.block_on(prepare_tpcc(
         tc.clone(),
         keyspace_manager.clone(),

@@ -7,19 +7,24 @@ publish = false
 [dependencies]
 aws = { workspace = true }
 base64 = "0.13"
+bstr = "0.2"
+bytes = "1.0"
 cloud = { workspace = true }
 cloud_encryption = { workspace = true }
 collections = { workspace = true }
 encryption = { workspace = true }
 grpcio = { workspace = true }
+http = "0.2.8"
 hyper = { version = "0.14", features = ["full"] }
 hyper-rustls = "0.24.1"
 kvproto = { workspace = true }
 rustls = "0.21.8"
 rustls-pemfile = "1.0.3"
-serde = "1.0"
+serde = { version = "1.0", features = ["derive"] }
 serde_derive = "1.0"
 serde_json = "1.0"
+slog = { version = "2.3", features = ["max_level_trace", "release_max_level_debug"] }
+slog-global = { version = "0.1", git = "https://github.com/breeswish/slog-global.git", rev = "d592f88e4dbba5eb439998463054f1a44fbf17b9" }
 tikv_util = { workspace = true }
 
 [dev-dependencies]

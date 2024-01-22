@@ -3,14 +3,12 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use bstr::ByteSlice;
-use bytes::Bytes;
-use http::{Method, Request};
-use hyper::Body;
+use http::Method;
 use kvproto::metapb;
-use security::SecurityManager;
+use security::{RestfulClient, SecurityManager};
 use serde::Deserialize;
 use slog_global::debug;
-use tikv_util::{box_err, config::ReadableDuration};
+use tikv_util::config::ReadableDuration;
 
 use crate::Config;
 
@@ -56,172 +54,54 @@ pub struct Rule {
 /// interface. It's also expected to act like the tool `pd-ctl`.
 #[derive(Clone)]
 pub struct PdControl {
-    security_mgr: Arc<SecurityManager>,
-    endpoints: Vec<String>,
+    client: RestfulClient,
 }
 
 impl PdControl {
     pub fn new(config: Config, security_mgr: Arc<SecurityManager>) -> Result<Self> {
-        let mut endpoints = Vec::with_capacity(config.endpoints.len());
-        for endpoint in &config.endpoints {
-            let url = if endpoint.starts_with("http://") {
-                endpoint.strip_prefix("http://").unwrap()
-            } else if endpoint.starts_with("https://") {
-                endpoint.strip_prefix("https://").unwrap()
-            } else {
-                endpoint
-            };
-            endpoints.push(url.to_string());
-        }
-        Ok(Self {
-            endpoints,
-            security_mgr,
-        })
-    }
-
-    async fn request_pd_restful(
-        &self,
-        path: impl AsRef<str>,
-        method: Method,
-        body_data: Option<Vec<u8>>,
-    ) -> Result<Bytes> {
-        let path = path.as_ref();
-        let client = self.security_mgr.http_client(hyper::Client::builder())?;
-        let mut err = None;
-        for endpoint in self.endpoints.iter() {
-            let uri = self.security_mgr.build_uri(format!("{endpoint}/{path}"))?;
-            let req = Request::builder()
-                .method(method.clone())
-                .uri(uri.clone())
-                .body(match body_data {
-                    Some(ref data) => Body::from(data.to_owned()),
-                    None => Body::empty(),
-                })
-                .unwrap();
-            let resp = client.request(req).await;
-            match resp {
-                Err(e) => {
-                    err = Some(box_err!(
-                        "PD uri[{}] error: {}",
-                        uri.to_string(),
-                        e.to_string()
-                    ))
-                }
-                Ok(resp) => {
-                    let status = resp.status();
-                    let body = hyper::body::to_bytes(resp.into_body()).await.unwrap();
-                    if status.is_success() {
-                        debug!("request_pd_restful success: {}", body.to_str_lossy());
-                        return Ok(body);
-                    } else {
-                        err = Some(box_err!(
-                            "PD({endpoint}) return error: {status}: {}",
-                            body.to_str_lossy()
-                        ));
-                    }
-                }
-            }
-        }
-        Err(err.expect("there must be error"))
-    }
-
-    async fn get<T>(&self, path: impl AsRef<str>) -> Result<T>
-    where
-        T: std::fmt::Debug + for<'a> serde::de::Deserialize<'a>,
-    {
-        let path = path.as_ref();
-        match self.request_pd_restful(path, Method::GET, None).await {
-            Ok(resp) => {
-                let t: T = serde_json::from_slice(&resp)?;
-                debug!("pd_control::get"; "path" => path, "resp" => ?t);
-                Ok(t)
-            }
-            Err(err) => Err(box_err!(
-                "pd_control::get failed: path: {}, err: {:?}",
-                path,
-                err
-            )),
-        }
-    }
-
-    async fn post<Req, Resp>(&self, path: impl AsRef<str>, data: &Req) -> Result<Resp>
-    where
-        Req: serde::ser::Serialize,
-        Resp: std::fmt::Debug + for<'a> serde::de::Deserialize<'a>,
-    {
-        let path = path.as_ref();
-        let body_data = serde_json::to_vec(data)?;
-        match self
-            .request_pd_restful(path, Method::POST, Some(body_data))
-            .await
-        {
-            Ok(resp) => {
-                let t: Resp = serde_json::from_slice(&resp)?;
-                debug!("pd_control::post"; "path" => path, "resp" => ?t);
-                Ok(t)
-            }
-            Err(err) => Err(box_err!(
-                "pd_control::post failed: path: {}, err: {:?}",
-                path,
-                err
-            )),
-        }
-    }
-
-    async fn delete(&self, path: impl AsRef<str>) -> Result<Bytes> {
-        let path = path.as_ref();
-        match self.request_pd_restful(path, Method::DELETE, None).await {
-            Ok(resp) => {
-                debug!("pd_control::delete"; "path" => path, "resp" => resp.to_str_lossy().as_ref());
-                Ok(resp)
-            }
-            Err(err) => Err(box_err!(
-                "pd_control::delete failed: path: {}, err: {:?}",
-                path,
-                err
-            )),
-        }
+        let client = RestfulClient::new("pd_control", config.endpoints, security_mgr)?;
+        Ok(Self { client })
     }
 
     pub async fn get_config(&self) -> Result<PdConfigFromApi> {
-        self.get(PD_CONFIG_PATH).await
+        self.client.get(PD_CONFIG_PATH).await
     }
 
     pub async fn get_store_regions(&self, store_id: u64) -> Result<RegionsInfo> {
         let query = format!("{}/{}", PD_REGIONS_STORE_PATH, store_id);
-        self.get(query).await
+        self.client.get(query).await
     }
 
     pub async fn get_keyspace_by_name(&self, keyspace_name: &str) -> Result<KeyspaceMeta> {
         let query = format!("{PD_KEYSPACE_PATH}/{}", keyspace_name);
-        self.get(query).await
+        self.client.get(query).await
     }
 
     pub async fn create_keyspace(&self, params: CreateKeyspaceParams) -> Result<KeyspaceMeta> {
-        self.post(PD_KEYSPACE_PATH, &params).await
+        self.client.post(PD_KEYSPACE_PATH, &params).await
     }
 
     pub async fn get_tiflash_placement_rule_group(&self) -> Result<Option<RuleGroup>> {
         let path = format!("{PD_PLACEMENT_RULE_GROUP_PATH}/{TIFLASH_GROUP}");
-        self.get(path).await
+        self.client.get(path).await
     }
 
     pub async fn remove_tiflash_placement_rule_by_id(&self, rule_id: &str) -> Result<()> {
         let path = format!("{PD_PLACEMENT_RULE_PATH}/{TIFLASH_GROUP}/{rule_id}");
-        let _ = self.delete(path).await?;
+        let _ = self.client.delete(path).await?;
         Ok(())
     }
 
     // Ref: https://github.com/tidbcloud/pd-cse/blob/release-7.1-keyspace/server/api/stats.go
     pub async fn get_regions_number(&self) -> Result<i32> {
         let path = format!("{PD_STATS_REGION}?start_key=&end_key=&count=true");
-        let region_stats: RegionStats = self.get(path).await?;
+        let region_stats: RegionStats = self.client.get(path).await?;
         Ok(region_stats.count)
     }
 
     // Ref: https://github.com/tidbcloud/pd-cse/blob/release-7.1-keyspace/server/api/health.go
     pub async fn health(&self) -> Result<bool> {
-        let health: Health = self.get(PD_HEALTH_PATH).await?;
+        let health: Health = self.client.get(PD_HEALTH_PATH).await?;
         Ok(health.health == "true")
     }
 
@@ -239,7 +119,8 @@ impl PdControl {
         };
         let body_data = serde_json::to_vec(&params)?;
         let _ = self
-            .request_pd_restful(path, Method::POST, Some(body_data))
+            .client
+            .request(path, Method::POST, Some(body_data))
             .await?;
         Ok(())
     }
@@ -254,9 +135,9 @@ impl PdControl {
         };
         let query = format!("{PD_SCHEDULERS_PATH}?status={status_str}&timestamp=1");
         match status {
-            Some(SchedulerStatus::Paused) => self.get(query).await,
+            Some(SchedulerStatus::Paused) => self.client.get(query).await,
             Some(SchedulerStatus::Disabled) | None => {
-                let scheduler_names: Vec<String> = self.get(query).await?;
+                let scheduler_names: Vec<String> = self.client.get(query).await?;
                 Ok(scheduler_names
                     .into_iter()
                     .map(|name| Scheduler {
@@ -272,7 +153,8 @@ impl PdControl {
         let param = CreateSchedulerParam { name };
         let body_data = serde_json::to_vec(&param)?;
         let resp = self
-            .request_pd_restful(PD_SCHEDULERS_PATH, Method::POST, Some(body_data))
+            .client
+            .request(PD_SCHEDULERS_PATH, Method::POST, Some(body_data))
             .await?;
         debug!("pd_control::create_scheduler"; "resp" => resp.to_str_lossy().as_ref());
         Ok(())
@@ -281,12 +163,12 @@ impl PdControl {
     // Ref: https://github.com/tidbcloud/pd-cse/blob/release-7.1-keyspace/server/api/operator.go
     pub async fn get_operators(&self) -> Result<Vec<Operator>> {
         let query = format!("{PD_OPERATORS_PATH}?object=1");
-        self.get(query).await
+        self.client.get(query).await
     }
 
     pub async fn cancel_operator_by_region(&self, region_id: u64) -> Result<()> {
         let query = format!("{PD_OPERATORS_PATH}/{region_id}");
-        let _ = self.delete(query).await?;
+        let _ = self.client.delete(query).await?;
         Ok(())
     }
 }
