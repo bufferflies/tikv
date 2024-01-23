@@ -74,6 +74,7 @@ impl<S: Snapshot> ReadCommand<S> for ResolveLockReadPhase {
                 txn_status,
                 scan_key: next_scan_key,
                 key_locks: kv_pairs,
+                txn_file_status: Default::default(),
             };
             Ok(ProcessResult::NextCommand {
                 cmd: Command::ResolveLock(next_cmd),

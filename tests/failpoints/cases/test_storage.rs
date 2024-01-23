@@ -78,6 +78,7 @@ fn test_scheduler_leader_change_twice() {
                 None,
                 false,
                 AssertionLevel::Off,
+                vec![],
                 ctx0,
             ),
             Box::new(move |res: storage::Result<_>| {
@@ -299,6 +300,7 @@ fn test_scale_scheduler_pool() {
                     None,
                     false,
                     AssertionLevel::Off,
+                    vec![],
                     ctx.clone(),
                 ),
                 Box::new(move |res: storage::Result<_>| {
@@ -421,7 +423,13 @@ fn test_pipelined_pessimistic_lock() {
     rx.recv().unwrap();
     storage
         .sched_txn_command(
-            commands::Commit::new(vec![key.clone()], 10.into(), 20.into(), Context::default()),
+            commands::Commit::new(
+                vec![key.clone()],
+                10.into(),
+                20.into(),
+                false,
+                Context::default(),
+            ),
             expect_ok_callback(tx.clone(), 0),
         )
         .unwrap();
@@ -729,6 +737,7 @@ fn test_async_commit_prewrite_with_stale_max_ts_impl<F: KvFormat>() {
                     Some(vec![b"xk2".to_vec()]),
                     false,
                     AssertionLevel::Off,
+                    vec![],
                     ctx.clone(),
                 ),
                 Box::new(move |res: storage::Result<_>| {
@@ -876,6 +885,7 @@ fn test_async_apply_prewrite_impl<E: Engine, F: KvFormat>(
                     secondaries,
                     false,
                     AssertionLevel::Off,
+                    vec![],
                     ctx.clone(),
                 ),
                 Box::new(move |r| tx.send(r).unwrap()),
@@ -937,6 +947,7 @@ fn test_async_apply_prewrite_impl<E: Engine, F: KvFormat>(
                     vec![Key::from_raw(key)],
                     start_ts,
                     min_commit_ts,
+                    false,
                     ctx.clone(),
                 ),
                 Box::new(move |r| tx.send(r).unwrap()),
@@ -971,7 +982,13 @@ fn test_async_apply_prewrite_impl<E: Engine, F: KvFormat>(
         let (tx, rx) = channel();
         storage
             .sched_txn_command(
-                commands::Commit::new(vec![Key::from_raw(key)], start_ts, commit_ts, ctx.clone()),
+                commands::Commit::new(
+                    vec![Key::from_raw(key)],
+                    start_ts,
+                    commit_ts,
+                    false,
+                    ctx.clone(),
+                ),
                 Box::new(move |r| tx.send(r).unwrap()),
             )
             .unwrap();
@@ -1127,6 +1144,7 @@ fn test_async_apply_prewrite_fallback() {
                 Some(vec![]),
                 false,
                 AssertionLevel::Off,
+                vec![],
                 ctx.clone(),
             ),
             Box::new(move |r| tx.send(r).unwrap()),
@@ -1148,7 +1166,13 @@ fn test_async_apply_prewrite_fallback() {
     let (tx, rx) = channel();
     storage
         .sched_txn_command(
-            commands::Commit::new(vec![Key::from_raw(key)], 10.into(), res.min_commit_ts, ctx),
+            commands::Commit::new(
+                vec![Key::from_raw(key)],
+                10.into(),
+                res.min_commit_ts,
+                false,
+                ctx,
+            ),
             Box::new(move |r| tx.send(r).unwrap()),
         )
         .unwrap();
@@ -1214,6 +1238,7 @@ fn test_async_apply_prewrite_1pc_impl<E: Engine, F: KvFormat>(
                     None,
                     true,
                     AssertionLevel::Off,
+                    vec![],
                     ctx.clone(),
                 ),
                 Box::new(move |r| tx.send(r).unwrap()),
@@ -1412,7 +1437,7 @@ fn test_before_async_write_deadline() {
     fail::cfg("cleanup", "sleep(500)").unwrap();
     storage
         .sched_txn_command(
-            commands::Rollback::new(vec![Key::from_raw(b"k")], 10.into(), ctx),
+            commands::Rollback::new(vec![Key::from_raw(b"k")], 10.into(), false, ctx),
             Box::new(move |res: storage::Result<_>| {
                 tx.send(res).unwrap();
             }),
@@ -1444,7 +1469,7 @@ fn test_before_propose_deadline() {
     fail::cfg("pause_on_peer_collect_message", "sleep(500)").unwrap();
     storage
         .sched_txn_command(
-            commands::Rollback::new(vec![Key::from_raw(b"k")], 10.into(), ctx),
+            commands::Rollback::new(vec![Key::from_raw(b"k")], 10.into(), false, ctx),
             Box::new(move |res: storage::Result<_>| {
                 tx.send(res).unwrap();
             }),
@@ -1492,6 +1517,7 @@ fn test_resolve_lock_deadline() {
         None,
         false,
         AssertionLevel::Off,
+        vec![],
         ctx.clone(),
     );
     let (tx, rx) = channel();

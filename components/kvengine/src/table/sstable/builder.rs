@@ -51,7 +51,7 @@ impl Default for TableBuilderOptions {
 }
 
 #[derive(Default)]
-struct EntrySlice {
+pub(crate) struct EntrySlice {
     buf: Vec<u8>,
     end_offs: Vec<u32>,
 }
@@ -718,7 +718,7 @@ pub struct BuildResult {
     pub biggest: Vec<u8>,
 }
 
-fn key_diff_idx(k1: &[u8], k2: &[u8]) -> usize {
+pub(crate) fn key_diff_idx(k1: &[u8], k2: &[u8]) -> usize {
     let mut i: usize = 0;
     while i < k1.len() && i < k2.len() {
         if k1[i] != k2[i] {

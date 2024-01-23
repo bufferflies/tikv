@@ -51,6 +51,8 @@ command! {
             txn_status: HashMap<TimeStamp, TimeStamp>,
             scan_key: Option<Key>,
             key_locks: Vec<(Key, Lock)>,
+            // Used by file based transaction.
+            txn_file_status: HashMap<TimeStamp, TimeStamp>,
         }
 }
 

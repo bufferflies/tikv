@@ -30,6 +30,8 @@ command! {
             commit_ts: TimeStamp,
             /// The keys to resolve.
             resolve_keys: Vec<Key>,
+            /// Used by file based transaction.
+            is_txn_file: bool,
         }
 }
 

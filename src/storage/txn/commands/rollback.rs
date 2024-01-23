@@ -29,6 +29,8 @@ command! {
             keys: Vec<Key>,
             /// The transaction timestamp.
             start_ts: TimeStamp,
+            /// Used by file based transaction.
+            is_txn_file: bool,
         }
 }
 

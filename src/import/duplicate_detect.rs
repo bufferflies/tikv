@@ -245,6 +245,7 @@ mod tests {
         let cmd = commands::Rollback::new(
             data.into_iter().map(|key| Key::from_raw(&key)).collect(),
             start_ts.into(),
+            false,
             Context::default(),
         );
         let (tx, rx) = channel();
@@ -269,7 +270,8 @@ mod tests {
         let start_ts = ts - 1;
         let keys: Vec<Key> = data.iter().map(|(key, _)| Key::from_raw(key)).collect();
         prewrite_data(storage, primary, data, start_ts);
-        let cmd = commands::Commit::new(keys, start_ts.into(), ts.into(), Context::default());
+        let cmd =
+            commands::Commit::new(keys, start_ts.into(), ts.into(), false, Context::default());
         let (tx, rx) = channel();
         storage
             .sched_txn_command(

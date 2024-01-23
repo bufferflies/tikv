@@ -73,6 +73,8 @@ command! {
             /// Assertions is a mechanism to check the constraint on the previous version of data
             /// that must be satisfied as long as data is consistent.
             assertion_level: AssertionLevel,
+            /// Used in File based transaction.
+            txn_file_chunks: Vec<u64>,
         }
 }
 
@@ -80,7 +82,7 @@ impl std::fmt::Display for Prewrite {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "kv::command::prewrite mutations({:?}) primary({:?}) secondary_len({:?})@ {} {} {} {} {} {} {} {:?} | {:?}",
+            "kv::command::prewrite mutations({:?}) primary({:?}) secondary_len({:?})@ {} {} {} {} {} {} {} {:?} {:?} | {:?}",
             self.mutations,
             log_wrappers::Value::key(self.primary.as_slice()),
             self.secondary_keys.as_ref().map(|sk| sk.len()),
@@ -92,6 +94,7 @@ impl std::fmt::Display for Prewrite {
             self.max_commit_ts,
             self.try_one_pc,
             self.assertion_level,
+            self.txn_file_chunks,
             self.ctx,
         )
     }
@@ -122,6 +125,7 @@ impl Prewrite {
             None,
             false,
             AssertionLevel::Off,
+            vec![],
             Context::default(),
         )
     }
@@ -145,6 +149,7 @@ impl Prewrite {
             None,
             true,
             AssertionLevel::Off,
+            vec![],
             Context::default(),
         )
     }
@@ -168,6 +173,7 @@ impl Prewrite {
             None,
             false,
             AssertionLevel::Off,
+            vec![],
             Context::default(),
         )
     }
@@ -190,6 +196,7 @@ impl Prewrite {
             None,
             false,
             AssertionLevel::Off,
+            vec![],
             ctx,
         )
     }
@@ -1107,6 +1114,7 @@ mod tests {
             None,
             true,
             AssertionLevel::Off,
+            vec![],
             ctx,
         );
         prewrite_command(&mut engine, cm, &mut statistics, cmd).unwrap();
@@ -1377,6 +1385,7 @@ mod tests {
             Some(vec![]),
             false,
             AssertionLevel::Off,
+            vec![],
             Context::default(),
         );
 
@@ -1410,6 +1419,7 @@ mod tests {
                 Some(vec![k2.to_vec()]),
                 false,
                 AssertionLevel::Off,
+                vec![],
                 Context::default(),
             );
 
@@ -1709,6 +1719,7 @@ mod tests {
                     secondary_keys,
                     case.one_pc,
                     AssertionLevel::Off,
+                    vec![],
                     Context::default(),
                 )
             };
@@ -1824,6 +1835,7 @@ mod tests {
             Some(vec![]),
             false,
             AssertionLevel::Off,
+            vec![],
             Context::default(),
         );
         let context = WriteContext {
@@ -2235,6 +2247,7 @@ mod tests {
             Some(vec![]),
             false,
             AssertionLevel::Off,
+            vec![],
             Context::default(),
         );
         let context = WriteContext {
@@ -2465,6 +2478,7 @@ mod tests {
             Some(vec![]),
             false,
             AssertionLevel::Off,
+            vec![],
             Context::default(),
         );
         let context = WriteContext {

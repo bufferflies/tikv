@@ -35,6 +35,7 @@ const ASYNC_COMMIT_PREFIX: u8 = b'a';
 const ROLLBACK_TS_PREFIX: u8 = b'r';
 const LAST_CHANGE_PREFIX: u8 = b'l';
 const TXN_SOURCE_PREFIX: u8 = b's';
+const IS_TXN_FILE_PREFIX: u8 = b'T';
 
 impl LockType {
     pub fn from_mutation(mutation: &Mutation) -> Option<LockType> {
@@ -56,7 +57,7 @@ impl LockType {
         }
     }
 
-    fn to_u8(self) -> u8 {
+    pub fn to_u8(self) -> u8 {
         match self {
             LockType::Put => FLAG_PUT,
             LockType::Delete => FLAG_DELETE,
@@ -77,6 +78,7 @@ pub struct Lock {
     pub for_update_ts: TimeStamp,
     pub txn_size: u64,
     pub min_commit_ts: TimeStamp,
+    pub is_txn_file: bool,
     pub use_async_commit: bool,
     // Only valid when `use_async_commit` is true, and the lock is primary. Do not set
     // `secondaries` for secondaries.
@@ -154,6 +156,7 @@ impl Lock {
             txn_size,
             min_commit_ts,
             use_async_commit: false,
+            is_txn_file: false,
             secondaries: Vec::default(),
             rollback_ts: Vec::default(),
             last_change_ts: TimeStamp::zero(),
@@ -239,6 +242,9 @@ impl Lock {
             b.push(TXN_SOURCE_PREFIX);
             b.encode_var_u64(self.txn_source).unwrap();
         }
+        if self.is_txn_file {
+            b.push(IS_TXN_FILE_PREFIX);
+        }
         b
     }
 
@@ -306,6 +312,7 @@ impl Lock {
         let mut short_value = None;
         let mut for_update_ts = TimeStamp::zero();
         let mut txn_size: u64 = 0;
+        let mut is_txn_file = false;
         let mut min_commit_ts = TimeStamp::zero();
         let mut use_async_commit = false;
         let mut secondaries = Vec::new();
@@ -336,6 +343,9 @@ impl Lock {
                     secondaries = (0..len)
                         .map(|_| bytes::decode_compact_bytes(&mut b).map_err(Into::into))
                         .collect::<Result<_>>()?;
+                }
+                IS_TXN_FILE_PREFIX => {
+                    is_txn_file = true;
                 }
                 ROLLBACK_TS_PREFIX => {
                     let len = number::decode_var_u64(&mut b)? as usize;
@@ -376,6 +386,7 @@ impl Lock {
             lock = lock.use_async_commit(secondaries);
         }
         lock.rollback_ts = rollback_ts;
+        lock.is_txn_file = is_txn_file;
         Ok(lock)
     }
 
@@ -397,6 +408,7 @@ impl Lock {
         info.set_use_async_commit(self.use_async_commit);
         info.set_min_commit_ts(self.min_commit_ts.into_inner());
         info.set_secondaries(self.secondaries.into());
+        info.set_is_txn_file(self.is_txn_file);
         // The client does not care about last_change_ts, versions_to_last_version and
         // txn_source.
         info
@@ -1097,6 +1109,7 @@ mod tests {
             txn_size: 0,
             min_commit_ts: 20.into(),
             use_async_commit: false,
+            is_txn_file: false,
             secondaries: vec![],
             rollback_ts: vec![],
             last_change_ts: 8.into(),

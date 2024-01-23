@@ -1870,6 +1870,7 @@ mod tests {
                 vec![Key::from_raw(b"k")],
                 10.into(),
                 20.into(),
+                false,
                 Context::default(),
             )
             .into(),
@@ -1880,8 +1881,13 @@ mod tests {
                 Context::default(),
             )
             .into(),
-            commands::Rollback::new(vec![Key::from_raw(b"k")], 10.into(), Context::default())
-                .into(),
+            commands::Rollback::new(
+                vec![Key::from_raw(b"k")],
+                10.into(),
+                false,
+                Context::default(),
+            )
+            .into(),
             commands::PessimisticRollback::new(
                 vec![Key::from_raw(b"k")],
                 10.into(),
@@ -1905,6 +1911,7 @@ mod tests {
                         TimeStamp::zero(),
                     ),
                 )],
+                Default::default(),
                 Context::default(),
             )
             .into(),
@@ -1912,11 +1919,18 @@ mod tests {
                 10.into(),
                 TimeStamp::zero(),
                 vec![Key::from_raw(b"k")],
+                false,
                 Context::default(),
             )
             .into(),
-            commands::TxnHeartBeat::new(Key::from_raw(b"k"), 10.into(), 100, Context::default())
-                .into(),
+            commands::TxnHeartBeat::new(
+                Key::from_raw(b"k"),
+                10.into(),
+                100,
+                false,
+                Context::default(),
+            )
+            .into(),
         ];
 
         let latches = Latches::new(1024);

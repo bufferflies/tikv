@@ -51,6 +51,8 @@ command! {
             // lock, the transaction status could not be decided if the primary lock is pessimistic too and
             // it's still uncertain.
             resolving_pessimistic_lock: bool,
+            /// Used by file based transaction.
+            is_txn_file: bool,
         }
 }
 
@@ -187,6 +189,7 @@ pub mod tests {
             rollback_if_not_exist,
             force_sync_commit,
             resolving_pessimistic_lock,
+            is_txn_file: false,
             deadline: Deadline::from_now(DEFAULT_EXECUTION_DURATION_LIMIT),
         };
         let result = command
@@ -234,6 +237,7 @@ pub mod tests {
             rollback_if_not_exist,
             force_sync_commit,
             resolving_pessimistic_lock,
+            is_txn_file: false,
             deadline: Deadline::from_now(DEFAULT_EXECUTION_DURATION_LIMIT),
         };
         assert!(

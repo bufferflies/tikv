@@ -34,6 +34,8 @@ command! {
             /// The new TTL that will be used to update the lock's TTL. If the lock's TTL is already
             /// greater than `advise_ttl`, nothing will happen.
             advise_ttl: u64,
+            /// Used by file based transaction.
+            is_txn_file: bool,
         }
 }
 
@@ -130,6 +132,7 @@ pub mod tests {
             primary_key: Key::from_raw(primary_key),
             start_ts,
             advise_ttl,
+            is_txn_file: false,
             deadline: Deadline::from_now(DEFAULT_EXECUTION_DURATION_LIMIT),
         };
         let result = command
@@ -171,6 +174,7 @@ pub mod tests {
             primary_key: Key::from_raw(primary_key),
             start_ts,
             advise_ttl,
+            is_txn_file: false,
             deadline: Deadline::from_now(DEFAULT_EXECUTION_DURATION_LIMIT),
         };
         assert!(

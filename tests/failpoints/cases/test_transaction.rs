@@ -95,6 +95,7 @@ fn test_atomic_getting_max_ts_and_storing_memory_lock() {
                 Some(vec![]),
                 false,
                 AssertionLevel::Off,
+                vec![],
                 Context::default(),
             ),
             Box::new(move |res| {
@@ -146,6 +147,7 @@ fn test_snapshot_must_be_later_than_updating_max_ts() {
                 Some(vec![]),
                 false,
                 AssertionLevel::Off,
+                vec![],
                 Context::default(),
             ),
             Box::new(move |res| {
@@ -187,6 +189,7 @@ fn test_update_max_ts_before_scan_memory_locks() {
                 Some(vec![]),
                 false,
                 AssertionLevel::Off,
+                vec![],
                 Context::default(),
             ),
             Box::new(move |res| {
@@ -242,6 +245,7 @@ macro_rules! lock_release_test {
                         Some(vec![]),
                         false,
                         AssertionLevel::Off,
+                        vec![],
                         Context::default(),
                     ),
                     Box::new(move |res| {
@@ -318,6 +322,7 @@ fn test_max_commit_ts_error() {
                 Some(vec![b"k2".to_vec()]),
                 false,
                 AssertionLevel::Off,
+                vec![],
                 Context::default(),
             ),
             Box::new(move |res| {
@@ -375,6 +380,7 @@ fn test_exceed_max_commit_ts_in_the_middle_of_prewrite() {
                 Some(vec![]),
                 false,
                 AssertionLevel::Off,
+                vec![],
                 Context::default(),
             ),
             Box::new(move |res| {
@@ -423,6 +429,7 @@ fn test_exceed_max_commit_ts_in_the_middle_of_prewrite() {
                 Some(vec![]),
                 false,
                 AssertionLevel::Off,
+                vec![],
                 Context::default(),
             ),
             Box::new(move |res| {

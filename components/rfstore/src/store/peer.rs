@@ -2151,16 +2151,7 @@ impl<'a> PreprocessRef<'a> {
         let source_peer_id = get_peer_id_by_store_id(source_region, self.peer.store_id).unwrap();
         let mut new_meta = self.shard_meta().clone();
         let mut source = kvenginepb::ChangeSet::new();
-        // TODO: remove `get_old_source_meta`.
-        // Now we are changing `CommitMergeRequest.source_meta=4` to
-        // `CommitMergeRequest.source_meta=100`, but we can't make this change anytime
-        // soon. Because native-br backed up raft-log that contains old
-        // `CommitMergeRequest`, we need to wait for old `CommitMergeRequest` to
-        // expire.
-        let mut source_meta_bytes = commit_merge.get_source_meta();
-        if source_meta_bytes.is_empty() {
-            source_meta_bytes = commit_merge.get_old_source_meta();
-        }
+        let source_meta_bytes = commit_merge.get_source_meta();
         source.merge_from_bytes(source_meta_bytes).unwrap();
         let source_meta = ShardMeta::new(self.peer.store_id, &source);
         new_meta.commit_merge(&source_meta, entry.index);

@@ -265,7 +265,7 @@ impl<E: Engine, F: KvFormat> SyncTestStorage<E, F> {
         commit_ts: impl Into<TimeStamp>,
     ) -> Result<TxnStatus> {
         wait_op!(|cb| self.store.sched_txn_command(
-            commands::Commit::new(keys, start_ts.into(), commit_ts.into(), ctx),
+            commands::Commit::new(keys, start_ts.into(), commit_ts.into(), false, ctx),
             cb,
         ))
         .unwrap()
@@ -291,9 +291,10 @@ impl<E: Engine, F: KvFormat> SyncTestStorage<E, F> {
         keys: Vec<Key>,
         start_ts: impl Into<TimeStamp>,
     ) -> Result<()> {
-        wait_op!(|cb| self
-            .store
-            .sched_txn_command(commands::Rollback::new(keys, start_ts.into(), ctx), cb))
+        wait_op!(|cb| self.store.sched_txn_command(
+            commands::Rollback::new(keys, start_ts.into(), false, ctx),
+            cb
+        ))
         .unwrap()
     }
 

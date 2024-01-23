@@ -175,6 +175,7 @@ impl From<PrewriteRequest> for TypedCommand<PrewriteResult> {
                 secondary_keys,
                 req.get_try_one_pc(),
                 req.get_assertion_level(),
+                req.get_txn_file_chunks().into(),
                 req.take_context(),
             )
         } else {
@@ -248,6 +249,7 @@ impl From<CommitRequest> for TypedCommand<TxnStatus> {
             keys,
             req.get_start_version().into(),
             req.get_commit_version().into(),
+            req.get_is_txn_file(),
             req.take_context(),
         )
     }
@@ -267,7 +269,12 @@ impl From<CleanupRequest> for TypedCommand<()> {
 impl From<BatchRollbackRequest> for TypedCommand<()> {
     fn from(mut req: BatchRollbackRequest) -> Self {
         let keys = req.get_keys().iter().map(|x| Key::from_raw(x)).collect();
-        Rollback::new(keys, req.get_start_version().into(), req.take_context())
+        Rollback::new(
+            keys,
+            req.get_start_version().into(),
+            req.get_is_txn_file(),
+            req.take_context(),
+        )
     }
 }
 
@@ -290,6 +297,7 @@ impl From<TxnHeartBeatRequest> for TypedCommand<TxnStatus> {
             Key::from_raw(req.get_primary_lock()),
             req.get_start_version().into(),
             req.get_advise_lock_ttl(),
+            req.get_is_txn_file(),
             req.take_context(),
         )
     }
@@ -305,6 +313,7 @@ impl From<CheckTxnStatusRequest> for TypedCommand<TxnStatus> {
             req.get_rollback_if_not_exist(),
             req.get_force_sync_commit(),
             req.get_resolving_pessimistic_lock(),
+            req.get_is_txn_file(),
             req.take_context(),
         )
     }
@@ -349,7 +358,13 @@ impl From<ResolveLockRequest> for TypedCommand<()> {
             let start_ts: TimeStamp = req.get_start_version().into();
             assert!(!start_ts.is_zero());
             let commit_ts = req.get_commit_version().into();
-            ResolveLockLite::new(start_ts, commit_ts, resolve_keys, req.take_context())
+            ResolveLockLite::new(
+                start_ts,
+                commit_ts,
+                resolve_keys,
+                req.get_is_txn_file(),
+                req.take_context(),
+            )
         }
     }
 }
@@ -941,6 +956,7 @@ pub mod test_util {
             keys,
             TimeStamp::from(lock_ts),
             TimeStamp::from(commit_ts),
+            false,
             ctx,
         );
 
@@ -968,7 +984,7 @@ pub mod test_util {
         let ctx = Context::default();
         let snap = engine.snapshot(Default::default())?;
         let concurrency_manager = ConcurrencyManager::new(start_ts.into());
-        let cmd = Rollback::new(keys, TimeStamp::from(start_ts), ctx);
+        let cmd = Rollback::new(keys, TimeStamp::from(start_ts), false, ctx);
         let context = WriteContext {
             lock_mgr: &MockLockManager::new(),
             concurrency_manager,

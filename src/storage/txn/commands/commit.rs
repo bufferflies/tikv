@@ -31,6 +31,8 @@ command! {
             lock_ts: txn_types::TimeStamp,
             /// The commit timestamp.
             commit_ts: txn_types::TimeStamp,
+            /// Used in file based transaction.
+            is_txn_file: bool,
         }
 }
 
