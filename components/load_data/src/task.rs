@@ -13,6 +13,7 @@ use std::{
 
 use api_version::api_v2::KEYSPACE_PREFIX_LEN;
 use bytes::{Buf, BufMut, Bytes};
+use chrono::Utc;
 use cloud_encryption::{EncryptionKey, MasterKey};
 use encryption::{DecrypterReader, EncrypterWriter, Iv};
 use http::Request;
@@ -46,6 +47,11 @@ use crate::{
     },
     error::{Error, Result},
     kv::{DuplicateEntry, KvPair, KvPairsReader, MergeIterator, SstMeta},
+    metrics::{
+        LOAD_DATA_BUILD_SST_COUNTER, LOAD_DATA_BUILD_SST_TIME_MILLIS,
+        LOAD_DATA_HANDLE_ADD_CHUNK_COUNTER, LOAD_DATA_HANDLE_ADD_CHUNK_TIME_MILLIS,
+        LOAD_DATA_TASK_STATE,
+    },
 };
 
 const DEFAULT_BLOCK_SIZE: usize = 64 * 1024; // 64KB
@@ -208,6 +214,7 @@ pub struct LoadTaskScheduler {
 impl LoadTaskScheduler {
     pub fn cancel(&self, err: String) {
         warn!("canceled {}", err);
+
         let mut states = self.states.lock().unwrap();
         let check_point_store_mutex = Arc::clone(&self.check_point_store);
         let mut check_point_store_guard = check_point_store_mutex.lock().unwrap();
@@ -216,6 +223,12 @@ impl LoadTaskScheduler {
             .unwrap();
         states.canceled = true;
         states.error = err;
+
+        let now = Utc::now();
+        let millis = now.timestamp_millis();
+        LOAD_DATA_TASK_STATE
+            .with_label_values(&[&check_point_store_guard.check_point_ctx.task_id, "cancel"])
+            .set(millis as f64);
     }
 
     pub fn check_task_thread_finished(&self) {
@@ -409,6 +422,7 @@ impl LoadTaskWorker {
                     chunk_data,
                     cb,
                 } => {
+                    let start_time = std::time::Instant::now();
                     let res = self.handle_add_chunk(writer_id, chunk_id, chunk_data, cb);
                     if res.is_err() || !self.reader_errs.is_empty() {
                         let err_msg = if let Err(e) = res {
@@ -437,6 +451,13 @@ impl LoadTaskWorker {
                             }
                         }
                     }
+                    let elapsed = start_time.elapsed();
+                    LOAD_DATA_HANDLE_ADD_CHUNK_TIME_MILLIS
+                        .with_label_values(&[&self.task_ctx.task_id])
+                        .inc_by(elapsed.as_millis() as u64);
+                    LOAD_DATA_HANDLE_ADD_CHUNK_COUNTER
+                        .with_label_values(&[&self.task_ctx.task_id])
+                        .inc();
                 }
                 LoadTaskMsg::Build { compression_type } => {
                     if self.scheduler.is_canceled() {
@@ -537,6 +558,7 @@ impl LoadTaskWorker {
             chunk_data.len(),
             writer_id
         );
+
         let handled_chunk_id = self.scheduler.get_handled_chunk(&writer_id);
         let flushed_chunk_id = self.scheduler.get_flushed_chunk(&writer_id);
         let mut put_chunk_res = PutChunkResult {
@@ -984,6 +1006,7 @@ impl LoadTaskWorker {
         sender: Sender<Result<SstMeta>>,
         compression_type: u8,
     ) {
+        let start_time = std::time::Instant::now();
         let ctx = self.ctx.clone();
         let block_size = self.config.block_size;
         let task_id = self.task_ctx.task_id.clone();
@@ -1032,6 +1055,15 @@ impl LoadTaskWorker {
                 .await
                 .map(|_| sst_meta.clone())
                 .map_err(|e| Error::from(e));
+
+            let elapsed = start_time.elapsed();
+            LOAD_DATA_BUILD_SST_TIME_MILLIS
+                .with_label_values(&[&task_id])
+                .inc_by(elapsed.as_millis() as u64);
+            LOAD_DATA_BUILD_SST_COUNTER
+                .with_label_values(&[&task_id])
+                .inc();
+
             sender.send(res).unwrap();
             debug!(
                 "{} finish dfs create sst file {:?}",

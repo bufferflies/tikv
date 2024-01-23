@@ -11,12 +11,14 @@ use std::{
 };
 
 use bytes::Bytes;
+use chrono::Utc;
 use serde_derive::{Deserialize, Serialize};
 use tikv_client::Value;
 use tikv_util::{debug, error, info};
 
 use crate::{
     kv::{DuplicateEntry, SstMeta},
+    metrics::LOAD_DATA_TASK_STATE,
     task::TaskContext,
     Error,
 };
@@ -53,6 +55,7 @@ impl LoadDataWorkerState {
         if !self.check_state(new_state) {
             return false;
         }
+
         *self = new_state;
         true
     }
@@ -92,6 +95,16 @@ impl LoadDataWorkerState {
             }
         }
         false
+    }
+
+    fn as_str(&self) -> &str {
+        match *self {
+            LoadDataWorkerState::InitTask => "InitTask",
+            LoadDataWorkerState::AddingChunks => "AddingChunks",
+            LoadDataWorkerState::BuildingSst => "BuildingSst",
+            LoadDataWorkerState::IngestingSst => "IngestingSst",
+            LoadDataWorkerState::IngestedSst => "IngestedSst",
+        }
     }
 }
 
@@ -133,6 +146,12 @@ pub struct LocalFileInfo {
 
 impl LoadDataCheckPointCtx {
     pub fn new(task_ctx: TaskContext) -> Self {
+        let now = Utc::now();
+        let millis = now.timestamp_millis();
+        LOAD_DATA_TASK_STATE
+            .with_label_values(&[&task_ctx.task_id, LoadDataWorkerState::InitTask.as_str()])
+            .set(millis as f64);
+
         Self {
             task_id: task_ctx.clone().task_id,
             start_ts: task_ctx.start_ts,
@@ -280,6 +299,13 @@ impl LocalFileCheckPointStorage {
     fn transition(&mut self, new_state: LoadDataWorkerState) -> bool {
         let old_state = self.check_point_ctx.state;
         let is_succ = self.check_point_ctx.state.transition(new_state);
+        if old_state != new_state {
+            let now = Utc::now();
+            let millis = now.timestamp_millis();
+            LOAD_DATA_TASK_STATE
+                .with_label_values(&[&self.check_point_ctx.task_id, new_state.as_str()])
+                .set(millis as f64);
+        }
         if !is_succ {
             error!(
                 "{} [check point] transition try check state failed, from {:?} to {:?}",

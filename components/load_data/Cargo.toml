@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 api_version = { path = "../api_version" }
 bytes = "1.1"
+chrono = "0.4"
 cloud_encryption = { workspace = true }
 encryption = { workspace = true }
 futures = "0.3"
@@ -20,6 +21,7 @@ kvenginepb = { path = "../../components/kvenginepb" }
 kvproto = { git = "https://github.com/pingcap/kvproto.git" }
 lazy_static = { version = "1.4", features = [] }
 pd_client = { path = "../pd_client" }
+prometheus = { version = "0.13", features = ["nightly"] }
 protobuf = "2.8"
 rfstore = { path = "../rfstore" }
 security = { workspace = true }
@@ -37,3 +39,4 @@ tidb_query_datatype = { path = "../tidb_query_datatype" }
 tikv-client = { workspace = true }
 tikv_util = { path = "../tikv_util" }
 tokio = { version = "1.12", features = ["full"] }
+
