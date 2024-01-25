@@ -21,6 +21,7 @@ pub use timestamp::{TimeStamp, TsSet, TSO_PHYSICAL_SHIFT_BITS};
 pub use types::{
     insert_old_value_if_resolved, is_short_value, Key, KvPair, Mutation, MutationType, OldValue,
     OldValues, ReqType, TxnExtra, TxnExtraScheduler, Value, WriteBatchFlags, SHORT_VALUE_MAX_LEN,
+    SHORT_VALUE_PREFIX,
 };
 pub use write::{Write, WriteRef, WriteType};
 

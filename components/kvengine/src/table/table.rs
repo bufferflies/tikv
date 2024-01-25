@@ -526,6 +526,12 @@ impl TableExt for kvenginepb::TableCreate {
     }
 }
 
+pub fn encode_val_to_outer_val_owner(v: Value, outer_val_owner: &mut Vec<u8>) -> Value {
+    outer_val_owner.resize(v.encoded_size(), 0);
+    v.encode(outer_val_owner.as_mut_slice());
+    Value::decode(outer_val_owner)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

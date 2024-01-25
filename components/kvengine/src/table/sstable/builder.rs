@@ -58,14 +58,7 @@ pub(crate) struct EntrySlice {
 
 #[allow(dead_code)]
 impl EntrySlice {
-    fn new() -> Self {
-        Self {
-            buf: Vec::new(),
-            end_offs: Vec::new(),
-        }
-    }
-
-    fn append(&mut self, data: &[u8]) {
+    pub(crate) fn append(&mut self, data: &[u8]) {
         self.buf.extend_from_slice(data);
         self.end_offs.push(self.buf.len() as u32);
     }
@@ -86,15 +79,15 @@ impl EntrySlice {
         self.end_offs.push(new_len as u32);
     }
 
-    fn length(&self) -> usize {
+    pub(crate) fn length(&self) -> usize {
         self.end_offs.len()
     }
 
-    fn get_last(&self) -> &[u8] {
+    pub(crate) fn get_last(&self) -> &[u8] {
         self.get_entry(self.length() - 1)
     }
 
-    fn get_entry(&self, i: usize) -> &[u8] {
+    pub(crate) fn get_entry(&self, i: usize) -> &[u8] {
         let start_off = if i > 0 {
             self.end_offs[i - 1] as usize
         } else {
@@ -104,11 +97,11 @@ impl EntrySlice {
         &slice[start_off..self.end_offs[i] as usize]
     }
 
-    fn size(&self) -> usize {
+    pub(crate) fn size(&self) -> usize {
         self.buf.len() + self.end_offs.len() * 4
     }
 
-    fn reset(&mut self) {
+    pub(crate) fn reset(&mut self) {
         self.buf.truncate(0);
         self.end_offs.truncate(0);
     }
@@ -734,7 +727,7 @@ mod tests {
     use super::*;
     #[test]
     fn test_entry_slice() {
-        let mut es = EntrySlice::new();
+        let mut es = EntrySlice::default();
         es.append("abc".as_bytes());
         let val_buf = Value::encode_buf(1, &[1], 1, "abc".as_bytes());
         let val = Value::decode(&val_buf);
