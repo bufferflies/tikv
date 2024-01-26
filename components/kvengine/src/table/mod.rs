@@ -10,6 +10,7 @@ mod txn_file;
 
 pub use merge_iterator::*;
 pub use table::*;
+pub use txn_file::*;
 
 pub struct EncryptionProperty {
     pub data_key_id: u64,
