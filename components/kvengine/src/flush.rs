@@ -6,7 +6,7 @@ use std::{
     ops::Deref,
 };
 
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use cloud_encryption::EncryptionKey;
 use fail::fail_point;
 use kvenginepb as pb;
@@ -146,7 +146,7 @@ impl Engine {
             }
             flush.set_properties(filtered_props);
         }
-        let l0_builder = self.build_l0_table(
+        let mut l0_builder = self.build_l0_table(
             m,
             task.inner_start(),
             task.inner_end(),
@@ -156,7 +156,9 @@ impl Engine {
             return Ok(cs);
         }
         let (tx, rx) = tikv_util::mpsc::bounded(2);
-        self.persist_tables(l0_builder, tx, task.id_ver);
+        let data = l0_builder.finish();
+        let l0_create = l0_builder.to_l0_create();
+        self.persist_tables(data, l0_create, tx, task.id_ver);
         let mut errs = vec![];
         match rx.recv().unwrap() {
             Ok(l0_create) => {
@@ -235,20 +237,18 @@ impl Engine {
                 initial_flush.mut_blob_creates().push(blob_create.clone());
             }
         }
-        let mut builders = vec![];
+        let num_mem_tables = flush.mem_tbls.len();
+        let (tx, rx) = mpsc::bounded(num_mem_tables);
         for m in &flush.mem_tbls {
-            let l0_builder = self.build_l0_table(
+            let mut l0_builder = self.build_l0_table(
                 m,
                 task.inner_start(),
                 task.inner_end(),
                 task.encryption_key.clone(),
             );
-            builders.push(l0_builder);
-        }
-        let num_mem_tables = builders.len();
-        let (tx, rx) = tikv_util::mpsc::bounded(num_mem_tables);
-        for l0_builder in builders {
-            self.persist_tables(l0_builder, tx.clone(), task.id_ver);
+            let data = l0_builder.finish();
+            let l0_create = l0_builder.to_l0_create();
+            self.persist_tables(data, l0_create, tx.clone(), task.id_ver);
         }
         let mut errs = vec![];
         for _ in 0..num_mem_tables {
@@ -316,7 +316,8 @@ impl Engine {
 
     pub(crate) fn persist_tables(
         &self,
-        mut l0_builder: L0Builder,
+        data: Bytes,
+        l0_create: pb::L0Create,
         tx: tikv_util::mpsc::Sender<Result<pb::L0Create>>,
         id_ver: IdVer,
     ) {
@@ -324,8 +325,8 @@ impl Engine {
         self.fs.get_runtime().spawn(async move {
             let res = fs_clone
                 .create(
-                    l0_builder.get_fid(),
-                    l0_builder.finish(),
+                    l0_create.get_id(),
+                    data,
                     dfs::Options::new(id_ver.id, id_ver.ver),
                 )
                 .await;
@@ -333,11 +334,6 @@ impl Engine {
                 tx.send(Err(e.into())).unwrap();
                 return;
             }
-            let mut l0_create = pb::L0Create::new();
-            let (smallest_key, biggest_key) = l0_builder.smallest_biggest();
-            l0_create.set_id(l0_builder.get_fid());
-            l0_create.set_smallest(smallest_key.to_vec());
-            l0_create.set_biggest(biggest_key.to_vec());
             tx.send(Ok(l0_create)).unwrap();
         });
     }

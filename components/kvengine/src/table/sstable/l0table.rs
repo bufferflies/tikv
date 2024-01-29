@@ -312,6 +312,15 @@ impl L0Builder {
         (smallest_buf.freeze(), biggest_buf.freeze())
     }
 
+    pub fn to_l0_create(&self) -> kvenginepb::L0Create {
+        let (smallest, biggest) = self.smallest_biggest();
+        let mut l0_create = kvenginepb::L0Create::new();
+        l0_create.set_id(self.fid);
+        l0_create.set_smallest(smallest.to_vec());
+        l0_create.set_biggest(biggest.to_vec());
+        l0_create
+    }
+
     pub fn total_blob_size(&self) -> u64 {
         let mut total_blob_size = 0;
         for builder in &self.builders {
