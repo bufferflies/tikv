@@ -23,7 +23,7 @@ use kvengine::{
     dfs,
     dfs::S3Fs,
     table::{InnerKey, TableExt},
-    IdVer, ShardMeta, ShardRange, ShardStats, ShardTag, ENCRYPTION_KEY,
+    IdVer, ShardMeta, ShardRange, ShardStats, ShardTag, ENCRYPTION_KEY, GLOBAL_SHARD_END_KEY,
 };
 use kvenginepb as pb;
 use kvproto::{metapb, metapb::PeerRole, raft_serverpb::MergeState};
@@ -623,7 +623,6 @@ pub struct BackupCluster {
     keyspace_start: Vec<u8>,
     keyspace_end: Vec<u8>,
     truncate_ts: u64,
-    skip_kvengine: bool,
     archive_reader: Option<ArchiveReader>,
 
     // store_id -> rf_engine.
@@ -668,10 +667,14 @@ impl BackupCluster {
         keyspace_id: u32,
         target_keyspace_id: u32,
         truncate_ts: u64,
-        skip_kvengine: bool,
+        archiving: bool,
         archive_reader: Option<ArchiveReader>,
     ) -> Result<BackupCluster> {
-        let (keyspace_start, keyspace_end) = ApiV2::get_txn_keyspace_range(keyspace_id);
+        let (keyspace_start, keyspace_end) = if archiving {
+            (Vec::default(), GLOBAL_SHARD_END_KEY.to_vec())
+        } else {
+            ApiV2::get_txn_keyspace_range(keyspace_id)
+        };
         let mut cluster = Self {
             tag: make_keyspace_tag(keyspace_id, target_keyspace_id),
             path,
@@ -682,7 +685,6 @@ impl BackupCluster {
             keyspace_start,
             keyspace_end,
             truncate_ts,
-            skip_kvengine,
             archive_reader,
             shards: Default::default(),
             raw_metas: Default::default(),
@@ -712,7 +714,7 @@ impl BackupCluster {
         }
         cluster.load_shards()?;
 
-        if cluster.skip_kvengine {
+        if archiving {
             return Ok(cluster);
         }
         cluster.check_all_shard_files()?;
@@ -940,6 +942,35 @@ impl BackupCluster {
         prefix_shards
     }
 
+    fn collect_full_shards(store_id: u64, rf: &RfEngine) -> Vec<BackupShard> {
+        let region_peers = rf.get_region_peer_map();
+        let mut prefix_shards = vec![];
+        for (region_id, peer_id) in region_peers {
+            if region_id == 0 {
+                continue;
+            }
+            let meta = match load_rf_engine_meta(rf, peer_id) {
+                Some(meta) => meta,
+                None => {
+                    warn!(
+                        "region {} peer {} has no rf_engine meta",
+                        region_id, peer_id
+                    );
+                    continue;
+                }
+            };
+            assert_eq!(region_id, meta.shard_id);
+
+            let shard = Self::create_backup_shard(rf, store_id, region_id, peer_id, meta);
+            prefix_shards.push(shard);
+        }
+        prefix_shards
+    }
+
+    pub fn is_full_range(&self) -> bool {
+        self.keyspace_start.is_empty() && self.keyspace_end.eq(GLOBAL_SHARD_END_KEY)
+    }
+
     fn create_backup_shard(
         rf: &RfEngine,
         store_id: u64,
@@ -980,15 +1011,19 @@ impl BackupCluster {
         loop {
             let all_shards =
                 HashMap::from_iter(self.raft_engines.iter().map(|(store_id, rf_engine)| {
-                    (
-                        *store_id,
-                        Self::collect_keyspace_shards(
+                    if self.is_full_range() {
+                        (*store_id, Self::collect_full_shards(*store_id, rf_engine))
+                    } else {
+                        (
                             *store_id,
-                            rf_engine,
-                            &self.keyspace_start,
-                            &self.keyspace_end,
-                        ),
-                    )
+                            Self::collect_keyspace_shards(
+                                *store_id,
+                                rf_engine,
+                                &self.keyspace_start,
+                                &self.keyspace_end,
+                            ),
+                        )
+                    }
                 }));
 
             // Check whether backup is empty (for this keyspace).
@@ -1351,6 +1386,10 @@ impl BackupCluster {
 
     fn verify_shards(&self) -> Result<()> {
         debug_assert!(!self.sorted_shards.is_empty());
+        if self.is_full_range() {
+            self.verify_full_shards();
+            return Ok(());
+        }
 
         let first_shard = self.get_sorted_shard(0);
         let last_shard = self.get_sorted_shard(self.sorted_shards.len() - 1);
@@ -1380,6 +1419,25 @@ impl BackupCluster {
         }
 
         Ok(())
+    }
+
+    fn verify_full_shards(&self) {
+        let first_shard = self.get_sorted_shard(0);
+        let last_shard = self.get_sorted_shard(self.sorted_shards.len() - 1);
+        if first_shard.start() != self.keyspace_start {
+            warn!("start key of first region not match: {:?}", first_shard);
+        }
+        if last_shard.end() != self.keyspace_end {
+            warn!("end key of last region not match: {:?}", last_shard);
+        }
+
+        for shards_id in self.sorted_shards.windows(2) {
+            let left = self.get_shard(shards_id[0]).unwrap();
+            let right = self.get_shard(shards_id[1]).unwrap();
+            if left.end() != right.start() {
+                warn!("region boundary not match: {:?}, {:?}", left, right);
+            }
+        }
     }
 
     fn get_sorted_shard(&self, sorted_idx: usize) -> &BackupShard {
@@ -1740,11 +1798,9 @@ impl BackupCluster {
         self.keyspace_start = keyspace_start;
         self.keyspace_end = keyspace_end;
 
-        if !self.skip_kvengine {
-            let kv_engine = self.kv_engine.take().unwrap();
-            kv_engine.close();
-            drop(kv_engine);
-        }
+        let kv_engine = self.kv_engine.take().unwrap();
+        kv_engine.close();
+        drop(kv_engine);
 
         if let Some(sender) = self.meta_sender.take() {
             sender.send(StoreMsg::Stop).unwrap();
@@ -1766,9 +1822,6 @@ impl BackupCluster {
         }
         self.load_shards()?;
 
-        if self.skip_kvengine {
-            return Ok(());
-        }
         self.check_all_shard_files()?;
 
         let stores_ids: Vec<_> = self.get_all_stores_id().collect();

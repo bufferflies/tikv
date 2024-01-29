@@ -522,10 +522,6 @@ fn test_restore_archived_keyspace_impl(
         ..Default::default()
     };
     archive_config.check_data_dir();
-    let mut keyspace_ids = vec![];
-    for keyspace_id in 0..KEYSPACE_COUNT {
-        keyspace_ids.push(keyspace_id as u32);
-    }
 
     // Import, backup and archive every day.
     let begin_archive_date =
@@ -579,7 +575,6 @@ fn test_restore_archived_keyspace_impl(
             s3fs.clone(),
             begin_archive_date.date(),
             date_time.date(),
-            Some(keyspace_ids.clone()),
         )
         .unwrap();
         step!("archive done on {}", date_time.date());

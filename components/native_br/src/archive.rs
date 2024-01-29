@@ -12,9 +12,8 @@ use bytes::{Buf, BufMut, Bytes};
 use chrono::NaiveDate;
 use engine_traits::GetObjectOptions;
 use kvengine::dfs::{self, DFSConfig, Dfs, Options, S3Fs, STORAGE_CLASS_GLACIER_IR};
-use kvproto::keyspacepb::{KeyspaceMeta, KeyspaceState};
 use pd_client::PdClient;
-use protobuf::{Clear, Message};
+use protobuf::Message;
 use rfenginepb::ClusterBackupMeta;
 use security::SecurityConfig;
 use tikv_util::{error, info, mpsc::Receiver, time::Instant, warn};
@@ -108,10 +107,10 @@ pub fn archive_with_cfg(config: ArchiveConfig) -> Result<()> {
     let start_archive_duration = chrono::Duration::from_std(config.start_archive_duration).unwrap();
     let end_archive_date = (chrono::Utc::now() - start_archive_duration).date_naive();
     if expiration_date >= end_archive_date {
-        panic!(
+        return Err(Error::ArchiveError(format!(
             "start archive duration is invalid. expiration_date {}, start_archive_duration {}",
             expiration_date, start_archive_duration
-        );
+        )));
     }
     let begin_archive_date = expiration_date
         .checked_add_days(chrono::Days::new(1))
@@ -122,7 +121,6 @@ pub fn archive_with_cfg(config: ArchiveConfig) -> Result<()> {
         s3fs,
         begin_archive_date,
         end_archive_date,
-        None,
     )
 }
 
@@ -190,7 +188,6 @@ pub fn archive_cluster_backup(
     s3fs: Arc<S3Fs>,
     begin_archive_date: NaiveDate,
     end_archive_date: NaiveDate,
-    keyspace_ids: Option<Vec<u32>>,
 ) -> Result<()> {
     let cluster_id = pd_client.get_cluster_id()?;
     let mut backup_date = match get_latest_archive_date(&s3fs, &begin_archive_date) {
@@ -227,7 +224,6 @@ pub fn archive_cluster_backup(
             path.clone(),
             backup_date,
             old,
-            keyspace_ids.clone(),
         )?;
         old = Some(new);
         std::fs::remove_dir_all(&path).unwrap();
@@ -244,7 +240,6 @@ fn archive_backup_files(
     path: PathBuf,
     backup_date: NaiveDate,
     old: Option<ArchiveBackup>,
-    keyspace_ids: Option<Vec<u32>>,
 ) -> Result<ArchiveBackup> {
     let runtime = s3fs.get_runtime();
     let (backups, _) = runtime.block_on(get_daily_incremental_backups(&s3fs, &backup_date, 1))?;
@@ -267,7 +262,6 @@ fn archive_backup_files(
         cluster_backup,
         path,
         config.security.clone(),
-        keyspace_ids,
     )?;
     if let Some(old_archive_backup) = old {
         if old_archive_backup
@@ -320,27 +314,6 @@ fn get_sorted_deleted_files(old: &HashSet<u64>, new: &HashSet<u64>) -> Vec<u64> 
     deleted
 }
 
-fn get_cluster_backup_keyspace_ids(cluster_backup: &ClusterBackupMeta) -> Vec<u32> {
-    let mut keyspace_ids = vec![];
-    let mut keyspace_meta = KeyspaceMeta::default();
-    for (k, v) in &cluster_backup.keyspace_meta {
-        let key_str = String::from_utf8_lossy(k);
-        if key_str.contains("/keyspaces/meta/") {
-            keyspace_meta.clear();
-            let res = keyspace_meta.merge_from_bytes(v);
-            if res.is_ok() && keyspace_meta.state == KeyspaceState::Enabled {
-                if keyspace_meta.id == 0 {
-                    // The default keyspace does not have a specified keyspace prefix.
-                    info!("skip default keyspace id");
-                } else {
-                    keyspace_ids.push(keyspace_meta.id);
-                }
-            }
-        }
-    }
-    keyspace_ids
-}
-
 fn get_cluster_backup_files(
     pd_client: Arc<dyn PdClient>,
     s3fs: Arc<S3Fs>,
@@ -349,7 +322,6 @@ fn get_cluster_backup_files(
     cluster_backup: ClusterBackupMeta,
     path: PathBuf,
     security_conf: SecurityConfig,
-    keyspace_ids: Option<Vec<u32>>,
 ) -> Result<HashSet<u64>> {
     if cluster_backup.cluster_id != cluster_id {
         return Err(Error::ArchiveError(format!(
@@ -358,55 +330,29 @@ fn get_cluster_backup_files(
         )));
     }
     let start_time = Instant::now();
-    let keyspace_ids =
-        keyspace_ids.unwrap_or_else(|| get_cluster_backup_keyspace_ids(&cluster_backup));
-
-    info!("keyspace ids {}", keyspace_ids.len());
-    if keyspace_ids.is_empty() {
-        return Err(Error::ArchiveError("keyspace ids is empty".to_string()));
-    }
-    let keyspace_id = keyspace_ids[0];
-    let mut cluster = BackupCluster::new(
+    let cluster = BackupCluster::new(
         &cluster_backup,
         path,
         pd_client.clone(),
         s3fs,
         security_conf,
-        keyspace_id,
-        keyspace_id,
+        0,
+        0,
         cluster_backup.backup_ts,
         true,
         None,
     )?;
-    let mut all_files = HashSet::new();
-    collect_all_files(&mut all_files, &cluster, keyspace_id);
-    for i in 1..keyspace_ids.len() {
-        let keyspace_id = keyspace_ids[i];
-        match cluster.reset_keyspace(&cluster_backup, keyspace_id, keyspace_id) {
-            Ok(_) => {}
-            Err(e) => {
-                return Err(Error::ArchiveError(format!(
-                    "failed to reset keyspace {}, err {}",
-                    keyspace_id, e
-                )));
-            }
-        };
-        collect_all_files(&mut all_files, &cluster, keyspace_id);
-    }
+    let all_files = HashSet::from_iter(cluster.get_all_shard_files().drain(..));
+    let shards_count = cluster.shards_count();
     drop(cluster);
     info!(
-        "backup {} all_files {} takes {:?}",
+        "backup {} all_shards {} all_files {} takes {:?}",
         backup_name,
+        shards_count,
         all_files.len(),
         start_time.saturating_elapsed()
     );
     Ok(all_files)
-}
-
-fn collect_all_files(all_files: &mut HashSet<u64>, cluster: &BackupCluster, keyspace_id: u32) {
-    let files = cluster.get_all_shard_files();
-    info!("keyspace id {} files {}", keyspace_id, files.len());
-    all_files.extend(files.into_iter());
 }
 
 /// Return full path of daily incremental backups in S3.

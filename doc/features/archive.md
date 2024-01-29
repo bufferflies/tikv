@@ -59,7 +59,7 @@ Use the command `archive` in cse-ctl.
 
 In backups older than three months, compare the files contained in backups of adjacent dates. If a file that existed in the previous day's backup meta is not found in the next day's backup meta, it is considered a deleted file.
 - List backups older than three months.
-- Use the cluster backup meta to restore all keyspaces one by one, load all shards, and aggregate the files that the cluster is using that day.
+- Use the cluster backup meta to restore full shards, load all shards, and aggregate the files that the cluster is using that day.
 - Collect the files used on adjacent dates.
 - Check whether the SST files of the previous day exist on the next day. If a file does not exist on the next day, it is considered a file that was deleted between adjacent dates. Collect these deleted SST files
 
