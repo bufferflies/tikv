@@ -43,6 +43,7 @@ const DEFAULT_EXPIRE_SECONDS: i64 = 60 * 10;
 const DEFAULT_NAMESPACE: &str = "tidb-serverless";
 const DEFAULT_TEMPLATE_STS_NAME: &str = "tikv-api";
 const DEFAULT_WORKER_COUNT_LIMIT: usize = 1024;
+const DEFAULT_WAIT_POD_READY_TIMEOUT: u64 = 60 * 5;
 
 const K8S_LABEL_NAME: &str = "app.kubernetes.io/name";
 const K8S_LABEL_SERVICE: &str = "app.kubernetes.io/service";
@@ -385,7 +386,7 @@ impl WorkerScaler {
         }
 
         let worker_pod = self
-            .wait_worker_pod_ready(task_id, Duration::from_secs(60 * 5))
+            .wait_worker_pod_ready(task_id, Duration::from_secs(DEFAULT_WAIT_POD_READY_TIMEOUT))
             .await?;
         let mut pods_map = self.pods_map.lock().await;
         pods_map.insert(task_id.to_string(), worker_pod.clone());
@@ -610,13 +611,22 @@ impl WorkerScaler {
     }
 
     pub(crate) async fn get_worker_addr_by_task_id(&self, task_id: &str) -> Option<String> {
-        let pods_map = self.pods_map.lock().await;
-        let worker_pod = pods_map.get(task_id);
-
-        if let Some(worker_pod) = worker_pod {
-            return self.get_worker_addr(worker_pod);
+        let start = Instant::now();
+        let timeout = Duration::from_secs(DEFAULT_WAIT_POD_READY_TIMEOUT);
+        loop {
+            {
+                let pods_map = self.pods_map.lock().await;
+                let worker_pod = pods_map.get(task_id)?;
+                if !worker_pod.svc_name.is_empty() {
+                    return self.get_worker_addr(worker_pod);
+                }
+            }
+            if start.saturating_elapsed() > timeout {
+                warn!("{} wait for load data worker timeout", task_id);
+                return None;
+            }
+            tokio::time::sleep(Duration::from_secs(3)).await;
         }
-        None
     }
 
     pub(crate) fn get_worker_tasks_url(&self, worker_addr: String) -> String {
@@ -657,7 +667,7 @@ impl WorkerScaler {
             }),
             ..Default::default()
         };
-        info!("create svc {}", name);
+        info!("create svc {:?}", name);
         self.svc_api.create(&PostParams::default(), &svc).await?;
         Ok(())
     }

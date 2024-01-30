@@ -103,7 +103,7 @@ pub(crate) async fn handle_load_data(
                 let worker_scaler = manager.worker_scaler.as_ref().unwrap();
                 let worker_pod_addr = worker_scaler.get_worker_addr_by_task_id(&task_id).await;
                 if let Some(addr) = worker_pod_addr {
-                    info!("Get worker addr from cache:{}", addr);
+                    info!("Get worker addr from cache: {}", addr);
                     let resp = Response::builder()
                         .header("Location", addr)
                         .status(StatusCode::FOUND)
@@ -157,7 +157,7 @@ pub(crate) async fn handle_load_data(
                     let worker_scaler = manager.worker_scaler.as_ref().unwrap();
                     let worker_addr = worker_scaler.get_worker_addr_by_task_id(&task_id).await;
                     if let Some(addr) = worker_addr {
-                        info!("Get worker addr from cache:{}", addr);
+                        info!("Get worker addr from cache: {}", addr);
                         let resp = Response::builder()
                             .header("Location", addr)
                             .status(StatusCode::FOUND)
@@ -181,7 +181,7 @@ pub(crate) async fn handle_load_data(
                     match worker_pod_res {
                         Ok(worker_pod) => {
                             let worker_addr = worker_scaler.get_worker_addr(&worker_pod).unwrap();
-                            info!("Get worker addr:{}", worker_addr);
+                            info!("Get worker addr: {}", worker_addr);
                             let resp = Response::builder()
                                 .header("Location", worker_addr)
                                 .status(StatusCode::FOUND)
@@ -385,19 +385,27 @@ impl LoadDataManager {
     }
 
     pub(crate) fn init_task(&self, task_ctx: TaskContext) {
-        let check_point = LoadDataCheckPointCtx::new(task_ctx.clone());
-        let mut worker = LoadTaskWorker::new(
-            self.config.clone(),
-            self.ctx.clone(),
-            task_ctx.clone(),
-            check_point,
-        );
-        let mut scheduler = worker.get_scheduler();
-        let thread_handle = std::thread::spawn(move || {
-            worker.run();
-        });
-        scheduler.set_thread_handle(thread_handle);
-        self.running_tasks.insert(task_ctx.task_id, scheduler);
+        let task_id = task_ctx.task_id.clone();
+        match self.running_tasks.entry(task_id.clone()) {
+            dashmap::mapref::entry::Entry::Occupied(_) => {
+                info!("task {} already exists", task_id);
+            }
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                let check_point = LoadDataCheckPointCtx::new(task_ctx.clone());
+                let mut worker = LoadTaskWorker::new(
+                    self.config.clone(),
+                    self.ctx.clone(),
+                    task_ctx,
+                    check_point,
+                );
+                let mut scheduler = worker.get_scheduler();
+                let thread_handle = std::thread::spawn(move || {
+                    worker.run();
+                });
+                scheduler.set_thread_handle(thread_handle);
+                entry.insert(scheduler);
+            }
+        }
     }
 
     fn compression_num_to_str(compression_type: u8) -> &'static str {
