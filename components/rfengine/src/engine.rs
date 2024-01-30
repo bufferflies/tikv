@@ -1615,6 +1615,7 @@ mod tests {
                 writer.epoch_id,
             )
         };
+
         for ep in compacted_epoch + 1..=current_epoch {
             let filename = wal_file_name(dir_path, ep);
             let mut it = WalIterator::new(dir_path.to_owned(), ep);
@@ -1650,7 +1651,14 @@ mod tests {
                         buf[*pos] += 1;
                         fd.write_all_at(buf.as_ref(), *offset).unwrap();
                         fd.sync_data().unwrap();
-                        assert!(RfEngine::open(dir_path, &cfg, None, None).is_err());
+                        let open_engine = RfEngine::open(dir_path, &cfg, None, None);
+                        // RfEngine can auto recover from corruption for the last epoch wal
+                        // corruption.
+                        assert!(if ep == current_epoch {
+                            open_engine.is_ok()
+                        } else {
+                            open_engine.is_err()
+                        });
                         buf[*pos] -= 1;
                         fd.write_all_at(buf.as_ref(), *offset).unwrap();
                         fd.sync_data().unwrap();
