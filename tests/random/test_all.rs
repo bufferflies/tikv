@@ -40,7 +40,8 @@ const REGION_BUCKET_SIZE: ReadableSize = ReadableSize::kb(64);
 
 #[test]
 fn test_random_all() {
-    test_util::init_log_for_test();
+    // Use async log to avoid performance issue caused by I/O blocking.
+    test_util::init_log_for_test_async();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .worker_threads(4)

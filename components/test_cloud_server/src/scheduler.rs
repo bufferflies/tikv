@@ -57,6 +57,31 @@ impl Scheduler {
             .unwrap_or(true)
     }
 
+    async fn check_region_stats_exists(
+        &self,
+        store_id: u64,
+        region_id: u64,
+        region_ver: u64,
+    ) -> bool {
+        let store = self.pd.get_store(store_id).unwrap();
+        let uri = format!("http://{}/kvengine/{}", store.status_address, region_id);
+        let resp = reqwest::blocking::get(&uri);
+        if resp.is_err() {
+            warn!("check_region_stats_exists failed, err {:?}", resp.err());
+            return false;
+        }
+        let resp = resp.unwrap();
+        if resp.status() != reqwest::StatusCode::OK {
+            warn!(
+                "check_region_stats_exists failed, status {:?}",
+                resp.status()
+            );
+            return false;
+        }
+        let stats: kvengine::ShardStats = resp.json().unwrap();
+        stats.ver == region_ver
+    }
+
     fn move_peer(&self, region_id: u64, store_id: u64) {
         let peer_id = self.pd.alloc_id().unwrap();
         // The peer maybe try to merge but not committed yet in the early check and the
@@ -81,16 +106,17 @@ impl Scheduler {
                             peer_destroyed = true;
                             return true;
                         }
-                        region
-                            .unwrap()
-                            .get_peers()
-                            .iter()
-                            .any(|peer| peer.id == peer_id)
+                        let region = region.unwrap();
+                        let region_ver = region.get_region_epoch().get_version();
+
+                        // Wait until the learner complete restore snapshots, or the raft group will
+                        // lost majority if leader down at this point.
+                        block_on(self.check_region_stats_exists(store_id, region_id, region_ver))
                     },
                     1,
                 )
             },
-            10,
+            20,
             format!(
                 "failed to add learner, region id {}, store id {}, peer id {}, region {:?}",
                 region_id,

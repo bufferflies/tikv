@@ -22,6 +22,7 @@ use tikv_util::{
     debug, error, info,
     mpsc::{Receiver, Sender},
     time::{duration_to_sec, InstantExt},
+    warn,
 };
 
 use super::*;
@@ -59,6 +60,13 @@ impl Inboxes {
     }
 }
 
+#[derive(Debug, Default, Copy, Clone)]
+pub(crate) struct InboxPeerStat {
+    pub(crate) region_id: u64,
+    pub(crate) elapsed: Duration,
+    pub(crate) msg_cnt: usize,
+}
+
 pub(crate) struct RaftWorker {
     ctx: StoreContext,
     receiver: Receiver<(u64, PeerMsg)>,
@@ -73,6 +81,7 @@ pub(crate) struct RaftWorker {
 
 const MAX_BATCH_COUNT: usize = 1024;
 const MAX_BATCH_SIZE: usize = 1024 * 1024;
+const PEER_INBOX_STATISTIC_COUNT: usize = 5;
 
 impl RaftWorker {
     pub(crate) fn new(
@@ -108,20 +117,32 @@ impl RaftWorker {
     }
 
     pub(crate) fn run(&mut self) {
-        let mut inboxes = Inboxes::new();
+        let mut inboxes: Inboxes = Inboxes::new();
+        let mut inbox_peer_stats = vec![InboxPeerStat::default(); PEER_INBOX_STATISTIC_COUNT];
+        let store_id = self.ctx.store_id();
         loop {
             self.handle_store_msg();
             if self.store_fsm.stopped {
                 self.stop();
                 return;
             }
+
             let loop_start = match self.receive_msgs(&mut inboxes) {
                 Ok(start_time) => start_time,
                 Err(_) => return,
             };
             inboxes.inboxes.iter_mut().for_each(|(_, inbox)| {
-                self.process_inbox(inbox);
+                self.process_inbox(inbox, &mut inbox_peer_stats);
             });
+            let process_inbox_elapsed = loop_start.saturating_elapsed();
+            if process_inbox_elapsed > Duration::from_millis(50) {
+                inbox_peer_stats.sort_by(|a, b| b.elapsed.cmp(&a.elapsed));
+                warn!(
+                    "store_id: {} raft worker batch loop takes too long, process_inbox_elapsed: {:?}, top_{} peers: {:?}",
+                    store_id, process_inbox_elapsed, PEER_INBOX_STATISTIC_COUNT, inbox_peer_stats
+                );
+            }
+            inbox_peer_stats.fill(InboxPeerStat::default());
             if self.ctx.global.trans.need_flush() {
                 self.ctx.global.trans.flush();
             }
@@ -264,7 +285,7 @@ impl RaftWorker {
         }
     }
 
-    fn process_inbox(&mut self, inbox: &mut PeerInbox) {
+    fn process_inbox(&mut self, inbox: &mut PeerInbox, statistics: &mut [InboxPeerStat]) {
         if inbox.msgs.is_empty() {
             return;
         }
@@ -272,10 +293,32 @@ impl RaftWorker {
         if peer_fsm.stopped {
             return;
         }
-        tikv_util::set_current_region(peer_fsm.region_id());
+        let msg_len = inbox.msgs.len();
+        let region_id = peer_fsm.region_id();
+        let start = tikv_util::time::Instant::now_coarse();
+        tikv_util::set_current_region(region_id);
         PeerMsgHandler::new(&mut peer_fsm, &mut self.ctx).handle_msgs(&mut inbox.msgs);
         peer_fsm.peer.handle_raft_ready(&mut self.ctx, None);
         self.maybe_send_apply(&inbox.peer.applier, &peer_fsm);
+
+        // Filter out the elapsed time longer than recorded and replace the minimum one
+        // if any.
+        let elapsed = start.saturating_elapsed();
+        // If this peer handle cost is too short, skip the statistics to avoid iterate.
+        if elapsed < Duration::from_millis(10) {
+            return;
+        }
+        if let Some(min_index) = statistics
+            .iter()
+            .enumerate()
+            .filter(|(_, &stat)| stat.elapsed < elapsed)
+            .min_by_key(|&(_, &val)| val.elapsed)
+            .map(|(i, _)| i)
+        {
+            statistics[min_index].region_id = region_id;
+            statistics[min_index].elapsed = elapsed;
+            statistics[min_index].msg_cnt = msg_len;
+        }
     }
 
     fn maybe_send_apply(&mut self, applier: &Arc<Mutex<Applier>>, peer_fsm: &PeerFsm) {

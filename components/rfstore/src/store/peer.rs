@@ -3372,7 +3372,8 @@ impl Peer {
         if self.pending_merge_state.is_some() {
             return Err(Error::ProposalInMergingMode(self.region_id));
         }
-        if self.raft_group.raft.pending_conf_index > self.get_store().applied_index() {
+
+        if self.raft_group.raft.has_pending_conf() {
             info!(
                 "there is a pending conf change, try later";
                 "tag" => self.tag(),

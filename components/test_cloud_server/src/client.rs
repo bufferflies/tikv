@@ -1371,6 +1371,13 @@ impl ClusterClient {
                 if self.handle_region_epoch_not_match_or_not_found(region_err) {
                     continue;
                 }
+
+                if region_err
+                    .get_message()
+                    .contains("peer is applying snapshot")
+                {
+                    continue;
+                }
                 return Err(box_err!("{} unexpected error {:?}", tag, region_err));
             }
             if resp.has_error() {

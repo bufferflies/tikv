@@ -96,6 +96,16 @@ impl Drop for CaseTraceLogger {
 
 // A help function to initial logger.
 pub fn init_log_for_test() {
+    init_log_for_test_with_opt(false);
+}
+
+// A help function to initial logger with async drainer.
+// This is used for random test avoid performance issue.
+pub fn init_log_for_test_async() {
+    init_log_for_test_with_opt(true);
+}
+
+fn init_log_for_test_with_opt(use_async: bool) {
     static START: Once = Once::new();
     START.call_once(|| {
         let output = env::var("LOG_FILE").ok();
@@ -139,8 +149,8 @@ pub fn init_log_for_test() {
         tikv_util::logger::init_log(
             drainer,
             level,
-            false, // disable async drainer
-            true,  // init std log
+            use_async,
+            true, // init std log
             disabled_targets,
             100,
         )

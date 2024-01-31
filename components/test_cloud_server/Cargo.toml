@@ -27,6 +27,7 @@ protobuf = { version = "2.8", features = ["bytes"] }
 quick-xml = { version = "0.23.1", features = ["serialize"] }
 rand = "0.8"
 regex = "1.5"
+reqwest = { version = "0.11", default-features = false, features = ["blocking", "json"] }
 rfengine = { path = "../rfengine" }
 rfstore = { path = "../rfstore" }
 security = { path = "../security", default-features = false }

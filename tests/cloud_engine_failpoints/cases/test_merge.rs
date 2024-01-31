@@ -58,8 +58,15 @@ fn test_merge_pending_state_conflict() {
     fail::remove(schedule_merge_error_fp);
     fail::remove(on_follower_exec_rollback_merge_fp);
 
-    client.try_merge(&i_to_key(0), &i_to_key(10));
-    cluster.wait_pd_region_count(2);
+    // `try_merge` may be rollback by target region changed.
+    for _ in 0..10 {
+        client.try_merge(&i_to_key(0), &i_to_key(10));
+        if cluster.get_pd_client_ext().get_regions_number() == 2 {
+            break;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+
     client.verify_data_with_ref_store();
     cluster.stop();
 }

@@ -363,7 +363,11 @@ impl ServerCluster {
             }
             std::thread::sleep(Duration::from_millis(100));
         }
-        panic!("pd region count not match");
+        panic!(
+            "pd region count not match, {} != {}",
+            self.pd_client.get_regions_number(),
+            count
+        );
     }
 
     pub fn wait_pd_region_min_count(&self, min_count: usize) {
@@ -665,9 +669,9 @@ pub fn new_test_config(base_dir: &Path, node_id: u16) -> TikvConfig {
     config.server.grpc_keepalive_timeout = ReadableDuration::secs(1);
     config.dfs.s3_endpoint = "memory".to_string();
     config.dfs.zstd_compression_level = "3".to_string();
-    config.raft_store.raft_base_tick_interval = ReadableDuration::millis(10);
-    config.raft_store.raft_election_timeout_ticks = 50;
-    config.raft_store.raft_store_max_leader_lease = ReadableDuration::millis(20);
+    config.raft_store.raft_base_tick_interval = ReadableDuration::millis(50);
+    config.raft_store.raft_election_timeout_ticks = 10;
+    config.raft_store.raft_store_max_leader_lease = ReadableDuration::millis(450);
     config.raft_store.split_region_check_tick_interval = ReadableDuration::millis(100);
     config.raft_store.raft_log_gc_tick_interval = ReadableDuration::millis(100);
     config.raft_store.pd_heartbeat_tick_interval = ReadableDuration::millis(100);
