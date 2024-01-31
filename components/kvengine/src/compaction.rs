@@ -7,6 +7,7 @@ use std::{
     hash::Hash,
     iter::Iterator as StdIterator,
     ops::{Deref, Sub},
+    path::PathBuf,
     sync::{atomic::Ordering, Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -30,7 +31,9 @@ use crate::{
             builder::{BlobTableBuildOptions, BlobTableBuilder},
         },
         get_tables_in_range,
-        sstable::{self, builder::TableBuilderOptions, InMemFile, L0Builder, SsTable},
+        sstable::{
+            self, builder::TableBuilderOptions, File, InMemFile, L0Builder, LocalFile, SsTable,
+        },
         table::TableExt,
         InnerKey,
     },
@@ -89,6 +92,7 @@ pub struct CompactionClient {
     compression_lvl: i32,
     allow_fallback_local: bool,
     master_key: MasterKey,
+    local_dir: PathBuf,
 }
 
 impl CompactionClient {
@@ -100,6 +104,7 @@ impl CompactionClient {
         id_allocator: Arc<dyn IdAllocator>,
         master_key: MasterKey,
         security_mgr: Arc<SecurityManager>,
+        local_dir: PathBuf,
     ) -> Self {
         let remote_compactors = RemoteCompactors::new(remote_url);
         let client = security_mgr
@@ -113,6 +118,7 @@ impl CompactionClient {
             allow_fallback_local,
             id_allocator,
             master_key,
+            local_dir,
         }
     }
 
@@ -196,6 +202,7 @@ impl CompactionClient {
             compression_lvl: self.compression_lvl,
             id_allocator: self.id_allocator.clone(),
             encryption_key,
+            local_dir: Some(self.local_dir.clone()),
         };
         let req = &ctx.req;
         let mut remote_compactor = self.get_remote_compactor();
@@ -1352,8 +1359,17 @@ fn load_table_files(
     tbl_ids: &[u64],
     fs: Arc<dyn dfs::Dfs>,
     opts: dfs::Options,
-) -> Result<Vec<InMemFile>> {
+    local_dir: Option<&PathBuf>,
+) -> Result<Vec<Arc<dyn File>>> {
     let mut files = vec![];
+    if let Some(local_dir) = local_dir {
+        for &id in tbl_ids {
+            let file_path = local_dir.join(new_sst_filename(id));
+            let file: Arc<dyn File> = Arc::new(LocalFile::open(id, file_path.as_path(), false)?);
+            files.push(file);
+        }
+        return Ok(files);
+    }
     let (tx, rx) = std::sync::mpsc::sync_channel::<Result<(u64, Bytes)>>(tbl_ids.len());
     for id in tbl_ids {
         let aid = *id;
@@ -1373,7 +1389,7 @@ fn load_table_files(
         match rx.recv().unwrap() {
             Err(err) => errors.push(err),
             Ok((id, data)) => {
-                let file = InMemFile::new(id, data);
+                let file: Arc<dyn File> = Arc::new(InMemFile::new(id, data));
                 files.push(file);
             }
         }
@@ -1384,27 +1400,27 @@ fn load_table_files(
     Ok(files)
 }
 
-fn in_mem_files_to_l0_tables(
-    files: Vec<InMemFile>,
+fn files_to_l0_tables(
+    files: Vec<Arc<dyn File>>,
     encryption_key: Option<EncryptionKey>,
 ) -> Vec<sstable::L0Table> {
     files
         .into_iter()
         .map(|f| {
-            sstable::L0Table::new(Arc::new(f), None, false, encryption_key.clone())
+            sstable::L0Table::new(f, None, false, encryption_key.clone())
                 .unwrap()
                 .unwrap()
         })
         .collect()
 }
 
-fn in_mem_files_to_tables(
-    files: Vec<InMemFile>,
+fn files_to_tables(
+    files: Vec<Arc<dyn File>>,
     encryption_key: Option<EncryptionKey>,
 ) -> Vec<sstable::SsTable> {
     files
         .into_iter()
-        .map(|f| sstable::SsTable::new(Arc::new(f), None, false, encryption_key.clone()).unwrap())
+        .map(|f| sstable::SsTable::new(f, None, false, encryption_key.clone()).unwrap())
         .collect()
 }
 
@@ -1487,6 +1503,7 @@ pub async fn handle_remote_compaction(
         compression_lvl,
         id_allocator,
         encryption_key,
+        local_dir: None,
     };
     let (tx, rx) = tokio::sync::oneshot::channel();
     std::thread::spawn(move || {
@@ -1517,6 +1534,7 @@ pub(crate) struct CompactionCtx {
     pub(crate) compression_lvl: i32,
     pub(crate) id_allocator: Arc<dyn IdAllocator>,
     pub(crate) encryption_key: Option<EncryptionKey>,
+    pub(crate) local_dir: Option<PathBuf>,
 }
 
 fn local_compact(ctx: &CompactionCtx) -> Result<pb::ChangeSet> {
@@ -1612,13 +1630,14 @@ fn compact_destroy_range(
     assert_eq!(files.len(), req.file_ids.len());
 
     let opts = dfs::Options::new(req.shard_id, req.shard_ver);
-    let mut in_mem_files: HashMap<u64, InMemFile> = load_table_files(
+    let mut table_files: HashMap<u64, Arc<dyn File>> = load_table_files(
         &files.iter().map(|(id, ..)| *id).collect::<Vec<_>>(),
         dfs.clone(),
         opts,
+        ctx.local_dir.as_ref(),
     )?
     .into_iter()
-    .map(|file| (file.id, file))
+    .map(|file| (file.id(), file))
     .collect();
 
     let mut deletes = vec![];
@@ -1631,9 +1650,9 @@ fn compact_destroy_range(
         delete.set_level(level);
         delete.set_cf(cf);
         deletes.push(delete);
-        let file = in_mem_files.remove(&id).unwrap();
+        let file = table_files.remove(&id).unwrap();
         let (data, smallest, biggest) = if level == 0 {
-            let t = sstable::L0Table::new(Arc::new(file), None, false, ctx.encryption_key.clone())
+            let t = sstable::L0Table::new(file, None, false, ctx.encryption_key.clone())
                 .unwrap()
                 .unwrap();
             let mut builder =
@@ -1661,8 +1680,7 @@ fn compact_destroy_range(
             let (smallest, biggest) = builder.smallest_biggest();
             (data, smallest.to_vec(), biggest.to_vec())
         } else {
-            let t = sstable::SsTable::new(Arc::new(file), None, false, ctx.encryption_key.clone())
-                .unwrap();
+            let t = sstable::SsTable::new(file, None, false, ctx.encryption_key.clone()).unwrap();
             let mut builder = sstable::Builder::new(
                 new_id,
                 block_size,
@@ -1730,20 +1748,21 @@ fn compact_truncate_ts(
     assert!(!files.is_empty());
 
     let opts = dfs::Options::new(req.shard_id, req.shard_ver);
-    let mut in_mem_files: HashMap<u64, InMemFile> = load_table_files(
+    let mut table_files: HashMap<u64, Arc<dyn File>> = load_table_files(
         &files.iter().map(|(id, ..)| *id).collect::<Vec<_>>(),
         dfs.clone(),
         opts,
+        ctx.local_dir.as_ref(),
     )?
     .into_iter()
-    .map(|file| (file.id, file))
+    .map(|file| (file.id(), file))
     .collect();
 
     let mut deletes = vec![];
     let mut creates = vec![];
     let (tx, rx) = tikv_util::mpsc::bounded(req.file_ids.len());
     for (&(id, level, cf), &new_id) in files.iter().zip(req.file_ids.iter()) {
-        let file = in_mem_files.remove(&id).unwrap();
+        let file = table_files.remove(&id).unwrap();
 
         let mut delete = pb::TableDelete::new();
         delete.set_id(id);
@@ -1752,7 +1771,7 @@ fn compact_truncate_ts(
         deletes.push(delete);
 
         let (data, smallest, biggest) = if level == 0 {
-            let t = sstable::L0Table::new(Arc::new(file), None, false, ctx.encryption_key.clone())
+            let t = sstable::L0Table::new(file, None, false, ctx.encryption_key.clone())
                 .unwrap()
                 .unwrap();
             let mut builder =
@@ -1780,8 +1799,7 @@ fn compact_truncate_ts(
             let (smallest, biggest) = builder.smallest_biggest();
             (data, smallest.to_vec(), biggest.to_vec())
         } else {
-            let t = sstable::SsTable::new(Arc::new(file), None, false, ctx.encryption_key.clone())
-                .unwrap();
+            let t = sstable::SsTable::new(file, None, false, ctx.encryption_key.clone()).unwrap();
             let mut builder = sstable::Builder::new(
                 new_id,
                 block_size,
@@ -1853,20 +1871,21 @@ fn compact_trim_over_bound(
     assert_eq!(files.len(), req.file_ids.len());
 
     let opts = dfs::Options::new(req.shard_id, req.shard_ver);
-    let mut in_mem_files: HashMap<u64, InMemFile> = load_table_files(
+    let mut table_files: HashMap<u64, Arc<dyn File>> = load_table_files(
         &files.iter().map(|(id, ..)| *id).collect::<Vec<_>>(),
         dfs.clone(),
         opts,
+        ctx.local_dir.as_ref(),
     )?
     .into_iter()
-    .map(|file| (file.id, file))
+    .map(|file| (file.id(), file))
     .collect();
 
     let mut deletes = vec![];
     let mut creates = vec![];
     let (tx, rx) = tikv_util::mpsc::bounded(req.file_ids.len());
     for (&(id, level, cf), &new_id) in files.iter().zip(req.file_ids.iter()) {
-        let file = in_mem_files.remove(&id).unwrap();
+        let file = table_files.remove(&id).unwrap();
 
         let mut delete = pb::TableDelete::new();
         delete.set_id(id);
@@ -1875,7 +1894,7 @@ fn compact_trim_over_bound(
         deletes.push(delete);
 
         let (data, smallest, biggest) = if level == 0 {
-            let t = sstable::L0Table::new(Arc::new(file), None, false, ctx.encryption_key.clone())
+            let t = sstable::L0Table::new(file, None, false, ctx.encryption_key.clone())
                 .unwrap()
                 .unwrap();
             let mut builder =
@@ -1901,8 +1920,7 @@ fn compact_trim_over_bound(
             let (smallest, biggest) = builder.smallest_biggest();
             (data, smallest.to_vec(), biggest.to_vec())
         } else {
-            let t = sstable::SsTable::new(Arc::new(file), None, false, ctx.encryption_key.clone())
-                .unwrap();
+            let t = sstable::SsTable::new(file, None, false, ctx.encryption_key.clone()).unwrap();
             let mut builder = sstable::Builder::new(
                 new_id,
                 block_size,
@@ -2260,8 +2278,13 @@ fn l0_compact_v3(
     let req = &ctx.req;
     let fs = &ctx.dfs;
     let opts = dfs::Options::new(req.shard_id, req.shard_ver);
-    let l0_files = load_table_files(&l0_compaction.l0_tables, fs.clone(), opts)?;
-    let mut l0_tbls = in_mem_files_to_l0_tables(l0_files, ctx.encryption_key.clone());
+    let l0_files = load_table_files(
+        &l0_compaction.l0_tables,
+        fs.clone(),
+        opts,
+        ctx.local_dir.as_ref(),
+    )?;
+    let mut l0_tbls = files_to_l0_tables(l0_files, ctx.encryption_key.clone());
     l0_tbls.sort_by(|a, b| b.version().cmp(&a.version()));
     let mut comp = pb::Compaction::new();
     comp.set_top_deletes(l0_compaction.l0_tables.clone());
@@ -2278,8 +2301,8 @@ fn l0_compact_v3(
     let mut all_bt_creates = vec![];
     for cf in 0..NUM_CFS {
         let l1_ids = &l0_compaction.multi_cf_l1_tables[cf];
-        let l1_files = load_table_files(l1_ids, fs.clone(), opts)?;
-        let mut l1_tbls = in_mem_files_to_tables(l1_files, ctx.encryption_key.clone());
+        let l1_files = load_table_files(l1_ids, fs.clone(), opts, ctx.local_dir.as_ref())?;
+        let mut l1_tbls = files_to_tables(l1_files, ctx.encryption_key.clone());
         l1_tbls.sort_by(|a, b| a.smallest().cmp(&b.smallest()));
         let mut iters: Vec<Box<dyn table::Iterator>> = vec![];
         for l0_tbl in &l0_tbls {
@@ -2323,11 +2346,21 @@ fn l1_plus_compact_v3(
     let req = &ctx.req;
     let fs = &ctx.dfs;
     let opts = dfs::Options::new(req.shard_id, req.shard_ver);
-    let upper_files = load_table_files(&l1_plus_compaction.upper_level, fs.clone(), opts)?;
-    let mut upper_tables = in_mem_files_to_tables(upper_files, ctx.encryption_key.clone());
+    let upper_files = load_table_files(
+        &l1_plus_compaction.upper_level,
+        fs.clone(),
+        opts,
+        ctx.local_dir.as_ref(),
+    )?;
+    let mut upper_tables = files_to_tables(upper_files, ctx.encryption_key.clone());
     upper_tables.sort_by(|a, b| a.smallest().cmp(&b.smallest()));
-    let lower_files = load_table_files(&l1_plus_compaction.lower_level, fs.clone(), opts)?;
-    let mut lower_tables = in_mem_files_to_tables(lower_files, ctx.encryption_key.clone());
+    let lower_files = load_table_files(
+        &l1_plus_compaction.lower_level,
+        fs.clone(),
+        opts,
+        ctx.local_dir.as_ref(),
+    )?;
+    let mut lower_tables = files_to_tables(lower_files, ctx.encryption_key.clone());
     lower_tables.sort_by(|a, b| a.smallest().cmp(&b.smallest()));
     let upper_iter = Box::new(ConcatIterator::new_with_tables(upper_tables, false, false));
     let lower_iter = Box::new(ConcatIterator::new_with_tables(lower_tables, false, false));
@@ -2367,8 +2400,13 @@ fn major_compact_v3(
     ret.mut_old_blob_tables()
         .extend_from_slice(&major_compaction.blob_tables);
     let blob_tables = load_blob_tables(fs.clone(), &major_compaction.blob_tables, opts)?;
-    let l0_files = load_table_files(&major_compaction.l0_tables, fs.clone(), opts)?;
-    let mut l0_tbls = in_mem_files_to_l0_tables(l0_files, ctx.encryption_key.clone());
+    let l0_files = load_table_files(
+        &major_compaction.l0_tables,
+        fs.clone(),
+        opts,
+        ctx.local_dir.as_ref(),
+    )?;
+    let mut l0_tbls = files_to_l0_tables(l0_files, ctx.encryption_key.clone());
     l0_tbls.sort_by(|a, b| b.version().cmp(&a.version()));
     l0_tbls.iter().for_each(|tbl| {
         let mut tbl_delete = pb::TableDelete::new();
@@ -2396,8 +2434,8 @@ fn major_compact_v3(
                         .mut_table_deletes()
                         .push(tbl_delete);
                 });
-                let files = load_table_files(table_ids, fs.clone(), opts)?;
-                let mut tables = in_mem_files_to_tables(files, ctx.encryption_key.clone());
+                let files = load_table_files(table_ids, fs.clone(), opts, ctx.local_dir.as_ref())?;
+                let mut tables = files_to_tables(files, ctx.encryption_key.clone());
                 tables.sort_by(|a, b| a.smallest().cmp(&b.smallest()));
                 let level_concat_iter =
                     Box::new(ConcatIterator::new_with_tables(tables, false, false));
