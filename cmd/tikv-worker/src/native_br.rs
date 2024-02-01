@@ -845,6 +845,10 @@ pub struct NativeBrConfig {
     /// The maximum number of retries for the process from split regions to
     /// restore snapshots.
     pub restore_max_retry: usize,
+
+    /// Whether to tolerate unavailability of no more than one store when
+    /// backup.
+    pub backup_tolerate_err: bool,
 }
 
 impl Default for NativeBrConfig {
@@ -855,6 +859,7 @@ impl Default for NativeBrConfig {
             restore_timeout_wait_flush: restore::DEFAULT_TIMEOUT_WAIT_FLUSH,
             restore_timeout_restore_snapshot: restore::DEFAULT_TIMEOUT_RESTORE_SNAPSHOT,
             restore_max_retry: restore::DEFAULT_RESTORE_MAX_RETRY,
+            backup_tolerate_err: false,
         }
     }
 }

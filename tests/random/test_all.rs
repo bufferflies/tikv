@@ -64,7 +64,7 @@ fn test_random_all() {
 
     let backup_config = backup::BackupConfig {
         dfs: dfs_config.clone(),
-        tolerate_err: 0, // TODO: enable tolerate_err = 1.
+        tolerate_err: 1,
         skip_keyspace_meta: true,
         ..Default::default()
     };

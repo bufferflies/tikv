@@ -511,11 +511,12 @@ impl Default for Config {
 
 impl Config {
     pub fn to_backup_config(&self) -> BackupConfig {
+        let tolerate_err = usize::from(self.native_br.backup_tolerate_err);
         BackupConfig {
             pd: self.pd.clone(),
             security: self.security.clone(),
             dfs: self.dfs.clone(),
-            tolerate_err: 0,
+            tolerate_err,
             skip_keyspace_meta: false,
         }
     }
