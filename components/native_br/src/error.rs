@@ -72,6 +72,8 @@ pub enum Error {
     MvccError(#[from] tikv::storage::mvcc::Error),
     #[error("Backup error {0}")]
     BackupError(String),
+    #[error("Wal chunk integrity error {0}")]
+    WalChunkIntegrityError(String),
 }
 
 impl From<dfs::Error> for Error {

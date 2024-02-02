@@ -68,6 +68,8 @@ const QUORUM_REPLICAS: usize = REPLICAS / 2 + 1; // Number of replicas to form a
 
 const RESOLVE_LOCKS_BATCH_SIZE: usize = 1024;
 
+const WAL_CHUNK_INTEGRITY_CHECK_COUNT: usize = 3;
+
 #[derive(Clone, Debug, Default)]
 pub struct RestoredKeyspace {
     pub keyspace_id: u32,
@@ -765,15 +767,42 @@ impl BackupCluster {
         if is_lightweight {
             // `snap_epoch` is the latest snapshot manifest epoch. If no snapshot found,
             // the `snap_epoch` is 0. Replay wal logs from `snap_epoch` + 1 to backup point.
-            replay_wal_logs(
-                self.pd_client.clone(),
-                self.dfs.clone(),
-                store_id,
-                cluster_backup,
-                &rf_engine,
-                snap_epoch.unwrap(),
-                false,
-            )?;
+            let mut replay_wal_retry = 0;
+            loop {
+                match replay_wal_logs(
+                    self.pd_client.clone(),
+                    self.dfs.clone(),
+                    store_id,
+                    cluster_backup,
+                    &rf_engine,
+                    snap_epoch.unwrap(),
+                    false,
+                ) {
+                    Ok(_) => {
+                        break;
+                    }
+                    Err(Error::WalChunkIntegrityError(msg)) => {
+                        // If the dfs_worker upload the wal chunk is slow, there may be some wal
+                        // chunks are not uploaded to s3 in previous epoch. So we need to retry
+                        // replay wal chunks when meet wal chunks integrity error.
+                        replay_wal_retry += 1;
+                        if replay_wal_retry > WAL_CHUNK_INTEGRITY_CHECK_COUNT {
+                            return Err(Error::WalChunkIntegrityError(msg));
+                        }
+                        warn!(
+                            "{} wal chunk integrity check failed, retry replay wal chunks, retry {} times.",
+                            self.tag(),
+                            replay_wal_retry
+                        );
+                        let sleep_secs = 2u64.pow(replay_wal_retry as u32);
+                        std::thread::sleep(Duration::from_secs(sleep_secs));
+                        continue;
+                    }
+                    Err(e) => {
+                        return Err(e);
+                    }
+                }
+            }
         }
         self.raft_engines.insert(store_id, rf_engine);
         Ok(())

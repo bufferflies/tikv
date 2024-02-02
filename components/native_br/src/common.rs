@@ -367,7 +367,7 @@ pub fn replay_wal_logs(
                 "wal chunk files integrity check failed, epoch_id: {} backup_epoch: {} chunk_keys: {:?}",
                 epoch_id, backup_epoch, chunk_keys
             );
-            return Err(box_err!(&err_msg));
+            return Err(Error::WalChunkIntegrityError(err_msg));
         }
     }
 
