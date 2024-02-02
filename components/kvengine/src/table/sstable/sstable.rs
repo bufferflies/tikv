@@ -161,6 +161,10 @@ impl SsTable {
         }
         table::Value::new()
     }
+
+    pub(crate) fn clone_smallest(&self) -> Bytes {
+        self.smallest_buf.clone()
+    }
 }
 
 impl TableExt for SsTable {
@@ -662,7 +666,7 @@ impl Index {
         (&self.block_key_offs[i * 4..]).get_u32_le() as usize
     }
 
-    fn block_key(&self, i: usize) -> Bytes {
+    pub(crate) fn block_key(&self, i: usize) -> Bytes {
         let diff_key = self.block_diff_key(i);
         let mut buf = BytesMut::new();
         buf.extend_from_slice(self.common_prefix.chunk());

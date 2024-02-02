@@ -256,12 +256,13 @@ fn prepare_cluster(
     let dfs_config = Arc::new(dfs_config.clone());
     let update_conf_fn = move |_, conf: &mut TikvConfig| {
         conf.dfs = (*dfs_config).clone();
-        conf.coprocessor.region_split_size = ReadableSize::kb(192);
+        conf.coprocessor.region_split_size = ReadableSize::kb(256);
         conf.coprocessor.region_bucket_size = REGION_BUCKET_SIZE;
         conf.raft_store.peer_stale_state_check_interval = ReadableDuration::secs(1);
         conf.raft_store.abnormal_leader_missing_duration = ReadableDuration::secs(3);
         conf.raft_store.max_leader_missing_duration = ReadableDuration::secs(5);
         conf.rocksdb.writecf.block_size = ReadableSize::kb(4);
+        conf.rocksdb.writecf.write_buffer_size = ReadableSize::kb(48);
         conf.rocksdb.writecf.target_file_size_base = ReadableSize::kb(16);
         conf.rfengine.target_file_size = ReadableSize::mb(8);
         conf.rfengine.batch_compression_threshold =

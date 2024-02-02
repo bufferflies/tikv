@@ -760,12 +760,12 @@ fn test_get_suggest_split_key() {
 }
 
 fn test_get_suggest_split_key_impl(enable_inner_key_off: bool) {
-    let (engine, _) = new_test_engine_opt(enable_inner_key_off, 10);
+    let (engine, _) = new_test_engine_opt(enable_inner_key_off, 4096);
     let shard = engine.get_shard(1).unwrap();
 
     let range = ShardRange::new(
-        &i_to_key(100, 0).into_bytes(),
-        &i_to_key(200, 0).into_bytes(),
+        &i_to_key(30, 0).into_bytes(),
+        &i_to_key(600, 0).into_bytes(),
         shard.inner_key_off,
     );
     let shard = Shard::new(
@@ -778,81 +778,63 @@ fn test_get_suggest_split_key_impl(enable_inner_key_off: bool) {
     );
 
     let cases: Vec<(
+        Vec<(usize, usize)>,
         Vec<(i32, i32)>, // table ranges
         Option<i32>,     // expected suggest split key,
     )> = vec![
-        (vec![(0, 20), (20, 50), (50, 100)], None),
-        (vec![(0, 20), (20, 50), (100, 150), (150, 180)], Some(150)),
+        (vec![], vec![(20, 50)], None),
+        (vec![], vec![(20, 50), (100, 150), (150, 180)], Some(150)),
         (
+            vec![],
             vec![
                 (20, 50),
                 (100, 150), // in range
                 (150, 180), // in range
                 (180, 300), // in range
                 (300, 400),
-                (400, 500),
-                (500, 600),
-                (700, 800),
             ],
             Some(180),
         ),
         (
+            vec![],
             vec![
                 (20, 50),
                 (100, 150), // in range, key in block
-                (300, 400),
-                (400, 500),
-                (500, 600),
-                (700, 800),
             ],
-            Some(125),
+            Some(100),
         ),
         (
-            vec![
-                (20, 50),
-                (100, 200), // in range, key in block
-                (300, 400),
-                (400, 500),
-                (500, 600),
-                (700, 800),
-            ],
-            Some(150),
+            vec![(50, 400), (60, 460), (70, 670)], // L0 only
+            vec![],
+            Some(320),
         ),
         (
-            vec![
-                (20, 50),
-                (100, 500), // would be 366 if shard range is not considered
-                (500, 600),
-                (700, 800),
-            ],
-            Some(150),
+            vec![(70, 370)], // L0 + L1+
+            vec![(50, 80), (80, 100), (100, 120)],
+            Some(100),
         ),
         (
-            vec![
-                (20, 50),
-                (150, 151), // only one block
-                (500, 600),
-                (700, 800),
-            ],
-            None,
-        ),
-        (
-            vec![(20, 50), (197, 200), (500, 600), (700, 800)],
-            Some(199),
-        ),
-        (
-            vec![
-                (20, 50),
-                (198, 201), // will be 200 if shard range is not considered
-                (500, 600),
-                (700, 800),
-            ],
-            Some(199),
+            vec![(80, 380), (190, 570)], // more L0 + L1+
+            vec![(50, 80), (80, 100), (100, 120)],
+            Some(333),
         ),
     ];
-
-    for (idx, (table_ranges, expect_split_key)) in cases.into_iter().enumerate() {
-        let mut cf_builder = ShardCfBuilder::new(0);
+    let mut id_alloc = 1000;
+    for (idx, (l0_ranges, table_ranges, expect_split_key)) in cases.into_iter().enumerate() {
+        let mut l0_tables = vec![];
+        for (start, end) in l0_ranges {
+            let id = id_alloc;
+            id_alloc += 1;
+            let (begins, ends) = if idx % 2 == 0 {
+                ([start, 0, 0], [end, 0, 0])
+            } else {
+                ([0, start, 0], [0, end, 0])
+            };
+            let l0_file = new_l0table_file(&engine, id, begins, ends, id, [false, false, false]);
+            let l0_tbl = L0Table::new(l0_file, None, false, None).unwrap().unwrap();
+            l0_tables.push(l0_tbl);
+        }
+        let mut cf_builder = ShardCfBuilder::new(idx % 2);
         let mut saved_vals: Vec<Rc<String>> = Vec::new();
 
         for (i, (start, end)) in table_ranges.into_iter().enumerate() {
@@ -873,7 +855,7 @@ fn test_get_suggest_split_key_impl(enable_inner_key_off: bool) {
         let data = ShardData::new(
             range.clone(),
             vec![CfTable::new()],
-            vec![],
+            l0_tables,
             Arc::new(HashMap::default()),
             [cf_builder.build(), ShardCf::new(1), ShardCf::new(2)],
             HashMap::new(),
@@ -898,12 +880,12 @@ fn test_get_evenly_split_keys() {
 }
 
 fn test_get_evenly_split_keys_impl(enable_inner_key_off: bool) {
-    let (engine, _) = new_test_engine_opt(enable_inner_key_off, 10);
+    let (engine, _) = new_test_engine_opt(enable_inner_key_off, 4096);
     let shard = engine.get_shard(1).unwrap();
 
     let range = ShardRange::new(
-        &i_to_key(100, 0).into_bytes(),
-        &i_to_key(200, 0).into_bytes(),
+        &i_to_key(30, 0).into_bytes(),
+        &i_to_key(600, 0).into_bytes(),
         shard.inner_key_off,
     );
     let shard = Shard::new(
@@ -916,18 +898,21 @@ fn test_get_evenly_split_keys_impl(enable_inner_key_off: bool) {
     );
 
     let cases: Vec<(
-        Vec<(i32, i32)>,  // table ranges
-        usize,            // split count
-        Option<Vec<i32>>, // expected evenly split keys,
+        Vec<(usize, usize)>, // l0 ranges
+        Vec<(i32, i32)>,     // table ranges
+        usize,               // split count
+        Option<Vec<i32>>,    // expected evenly split keys,
     )> = vec![
-        (vec![(0, 20), (20, 50), (50, 100)], 1, None),
-        (vec![(0, 20), (20, 50), (50, 100)], 2, None),
+        (vec![], vec![(20, 50), (50, 100)], 1, None),
+        (vec![], vec![(20, 50), (50, 100)], 2, None),
         (
+            vec![],
             vec![(0, 20), (20, 50), (100, 150), (150, 180)],
             2,
             Some(vec![150]),
         ),
         (
+            vec![],
             vec![
                 (20, 50),
                 (100, 150), // in range
@@ -939,28 +924,29 @@ fn test_get_evenly_split_keys_impl(enable_inner_key_off: bool) {
             None,
         ),
         (
+            vec![],
             vec![
                 (20, 50),
                 (100, 150), // in range
                 (150, 180), // in range
                 (180, 300), // in range
-                (300, 400),
             ],
             2,
             Some(vec![180]),
         ),
         (
+            vec![],
             vec![
-                (20, 50),
-                (100, 150), // in range
+                (100, 120), // in range
+                (120, 150), // in range
                 (150, 180), // in range
                 (180, 300), // in range
-                (300, 400),
             ],
             3,
             Some(vec![150, 180]),
         ),
         (
+            vec![],
             vec![
                 (20, 50),
                 (100, 150), // in range
@@ -969,9 +955,10 @@ fn test_get_evenly_split_keys_impl(enable_inner_key_off: bool) {
                 (300, 400),
             ],
             4,
-            Some(vec![125, 150, 180]),
+            Some(vec![150, 180, 300]),
         ),
         (
+            vec![],
             vec![
                 (20, 50),
                 (100, 150), // in range
@@ -980,9 +967,10 @@ fn test_get_evenly_split_keys_impl(enable_inner_key_off: bool) {
                 (300, 400),
             ],
             5,
-            Some(vec![125, 150, 165, 180]),
+            Some(vec![150, 180, 300]),
         ),
         (
+            vec![],
             vec![
                 (20, 50),
                 (100, 150), // in range
@@ -991,12 +979,45 @@ fn test_get_evenly_split_keys_impl(enable_inner_key_off: bool) {
                 (300, 400),
             ],
             6,
-            Some(vec![125, 150, 165, 180, 190]),
+            Some(vec![150, 180, 300]),
+        ),
+        (
+            vec![(100, 400), (200, 500), (300, 600), (400, 700)], // L0 only
+            vec![],
+            4,
+            Some(vec![456, 556]),
+        ),
+        (
+            vec![(100, 400), (150, 550), (300, 700), (200, 800)], // L0 only
+            vec![],
+            4,
+            Some(vec![400, 456, 556]),
+        ),
+        (
+            vec![(100, 800), (200, 900)], // L0 + L1+
+            vec![(30, 80), (80, 100), (100, 130)],
+            4,
+            Some(vec![100, 356, 456]),
         ),
     ];
-
-    for (idx, (table_ranges, split_count, expect_split_keys)) in cases.into_iter().enumerate() {
-        let mut cf_builder = ShardCfBuilder::new(0);
+    let mut id_alloc = 1000;
+    for (idx, (l0_ranges, table_ranges, split_count, expect_split_keys)) in
+        cases.into_iter().enumerate()
+    {
+        let mut l0_tables = vec![];
+        for (start, end) in l0_ranges {
+            let id = id_alloc;
+            id_alloc += 1;
+            let (begins, ends) = if idx % 2 == 0 {
+                ([start, 0, 0], [end, 0, 0])
+            } else {
+                ([0, start, 0], [0, end, 0])
+            };
+            let l0_file = new_l0table_file(&engine, id, begins, ends, id, [false, false, false]);
+            let l0_tbl = L0Table::new(l0_file, None, false, None).unwrap().unwrap();
+            l0_tables.push(l0_tbl);
+        }
+        let mut cf_builder = ShardCfBuilder::new(idx % 2);
         let mut saved_vals: Vec<Rc<String>> = Vec::new();
 
         for (i, (start, end)) in table_ranges.into_iter().enumerate() {
@@ -1017,7 +1038,7 @@ fn test_get_evenly_split_keys_impl(enable_inner_key_off: bool) {
         let data = ShardData::new(
             range.clone(),
             vec![CfTable::new()],
-            vec![],
+            l0_tables,
             Arc::new(HashMap::default()),
             [cf_builder.build(), ShardCf::new(1), ShardCf::new(2)],
             HashMap::new(),
@@ -1403,7 +1424,7 @@ fn new_test_options(
     opts.local_dir = path.as_ref().to_path_buf();
     opts.base_size = 64 << 10;
     opts.table_builder_options.block_size = block_size;
-    opts.table_builder_options.max_table_size = 16 << 10;
+    opts.table_builder_options.max_table_size = 8 << 10;
     opts.max_mem_table_size = 16 << 10;
     opts.num_compactors = 2;
     opts.blob_table_build_options.min_blob_size = min_blob_size;

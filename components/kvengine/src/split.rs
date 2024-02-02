@@ -405,10 +405,6 @@ impl Engine {
         store_u64(&new_shard.write_sequence, sequence);
         store_u64(&new_shard.estimated_size, old_shard.get_estimated_size());
         store_u64(
-            &new_shard.estimated_size_write_cf_level_1plus,
-            old_shard.get_estimate_size_write_cf_level_1plus(),
-        );
-        store_u64(
             &new_shard.estimated_entries,
             old_shard.get_estimated_entries(),
         );

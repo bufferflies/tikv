@@ -74,10 +74,6 @@ pub struct Shard {
     pub(crate) base_version: AtomicU64,
     // Size of all SSTables + all blobs referred (note, not the blob table size).
     pub(crate) estimated_size: AtomicU64,
-    // The estimated size of level 1+ in write cf.
-    // Used for calculating bucket count, which is concerning about the size of level 1+ write cf
-    // only.
-    pub(crate) estimated_size_write_cf_level_1plus: AtomicU64,
     pub(crate) estimated_entries: AtomicU64,
     pub(crate) max_ts: AtomicU64,
     pub(crate) estimated_kv_size: AtomicU64,
@@ -166,7 +162,6 @@ impl Shard {
             initial_flushed: Default::default(),
             base_version: Default::default(),
             estimated_size: Default::default(),
-            estimated_size_write_cf_level_1plus: Default::default(),
             estimated_entries: Default::default(),
             max_ts: Default::default(),
             estimated_kv_size: Default::default(),
@@ -256,23 +251,14 @@ impl Shard {
         let data = self.get_data();
 
         let mut lv_stats = data.get_l0_stats();
-        let mut size_write_cf_level_1plus = 0;
         data.for_each_level(|cf, l| {
-            let cf_stats = data.get_level_stats(cf, l);
-            lv_stats.add(&cf_stats, cf);
-            if cf == WRITE_CF {
-                size_write_cf_level_1plus += cf_stats.data_size + cf_stats.blob_size;
-            }
+            lv_stats.add(&data.get_level_stats(cf, l), cf);
             false
         });
 
         store_u64(
             &self.estimated_size,
             lv_stats.data_size + lv_stats.blob_size,
-        );
-        store_u64(
-            &self.estimated_size_write_cf_level_1plus,
-            size_write_cf_level_1plus,
         );
         store_u64(&self.estimated_entries, lv_stats.entries);
         store_u64(&self.sst_max_ts, lv_stats.max_ts);
@@ -350,78 +336,85 @@ impl Shard {
 
     /// Get suggest key for region split.
     pub fn get_suggest_split_key(&self) -> Option<Bytes> {
-        let data = self.get_data();
-        let (max_level, left, right) = data.get_max_level_by_overlapping_tables_count()?;
-        let tables = &max_level.tables.as_slice()[left..right];
-        if tables.is_empty() {
+        let candidate_keys = self.get_candidate_inner_keys();
+        if candidate_keys.is_empty() {
             return None;
         }
-        // Split on block boundaries only when there is one table.
-        // As split on table boundaries would have lower cost for trim over bound data.
-        if tables.len() == 1 {
-            if let Some(inner_key) =
-                tables[0].get_suggest_split_key(Some(data.inner_start()), Some(data.inner_end()))
-            {
-                return Some(
-                    [self.key_prefix(), inner_key.to_vec().as_slice()]
-                        .concat()
-                        .into(),
-                );
-            }
-            return None;
-        }
-        let tbl_idx = tables.len() * 2 / 3;
-        Some(
-            [self.key_prefix(), tables[tbl_idx].smallest().deref()]
-                .concat()
-                .into(),
-        )
+        let split_idx = candidate_keys.len() * 2 / 3;
+        Some(self.to_outer_key(candidate_keys[split_idx].chunk()))
     }
 
-    /// Get evenly split keys, mainly for acquiring bucket keys.
+    fn to_outer_key(&self, inner_key: &[u8]) -> Bytes {
+        [self.key_prefix(), inner_key].concat().into()
+    }
+
+    fn get_candidate_inner_keys(&self) -> Vec<Bytes> {
+        let data = self.get_data();
+        let mut ln_tables = 0;
+        data.for_each_level(|_, lvl| {
+            ln_tables += lvl.tables.len();
+            false
+        });
+        let num_tables = data.l0_tbls.len() + ln_tables;
+        let mut candidate_inner_keys = Vec::with_capacity(num_tables);
+        for cf in WRITE_CF..=LOCK_CF {
+            let shard_cf = data.get_cf(cf);
+            for lvl in &shard_cf.levels {
+                for tbl in lvl.tables.iter() {
+                    if tbl.smallest() >= data.inner_start() {
+                        // table smallest must be less than inner_end or it will not be included.
+                        candidate_inner_keys.push(tbl.clone_smallest())
+                    }
+                }
+            }
+        }
+        let max_table_size = self.opt.table_builder_options.max_table_size;
+        let block_size = self.opt.table_builder_options.block_size;
+        let step = max_table_size / block_size;
+        for l0 in data.l0_tbls.iter() {
+            for cf in WRITE_CF..=LOCK_CF {
+                if let Some(tbl) = l0.get_cf(cf) {
+                    if tbl.size() < max_table_size as u64 {
+                        // ignore small l0 table.
+                        continue;
+                    }
+                    let idx = tbl.load_index();
+                    if idx.num_blocks() <= step {
+                        continue;
+                    }
+                    for i in (step..idx.num_blocks()).step_by(step) {
+                        let sample_key = idx.block_key(i);
+                        if sample_key.chunk() > data.inner_start().deref()
+                            && sample_key.chunk() < data.inner_end().deref()
+                        {
+                            candidate_inner_keys.push(sample_key);
+                        }
+                    }
+                }
+            }
+        }
+        candidate_inner_keys.sort_unstable();
+        candidate_inner_keys
+    }
+
     pub fn get_evenly_split_keys(&self, count: usize) -> Option<Vec<Bytes>> {
         if count <= 1 {
             return None;
         }
-
-        // Get tables in shard range.
-        let data = self.get_data();
-        let (max_level, left, right) = data.get_max_level_by_overlapping_tables_count()?;
-        let tables = &max_level.tables.as_slice()[left..right];
-        if tables.is_empty() {
+        let candidate_inner_keys = self.get_candidate_inner_keys();
+        if candidate_inner_keys.len() < 2 {
             return None;
         }
-
-        // Split at block boundaries when there are not enough tables.
-        if tables.len() < count {
-            let mut inner_keys = Vec::with_capacity(count);
-            let counts_in_table = evenly_distribute(count, tables.len());
-            debug_assert_eq!(counts_in_table.len(), tables.len());
-            for (i, (tbl, count_in_table)) in tables.iter().zip(counts_in_table).enumerate() {
-                let start = (i == 0).then_some(data.inner_start());
-                let end = (i == tables.len() - 1).then_some(data.inner_end());
-                inner_keys.extend(tbl.get_evenly_split_keys(start, end, count_in_table));
-            }
-            return Some(
-                inner_keys
-                    .into_iter()
-                    .skip(1)
-                    .map(|inner_key| [self.key_prefix(), inner_key.deref()].concat().into())
-                    .collect(),
-            );
-        }
-
         // Split at table boundaries.
-        let steps = evenly_distribute(tables.len(), count);
+        let steps = evenly_distribute(candidate_inner_keys.len(), count);
         let mut split_keys = Vec::with_capacity(count - 1);
-        let mut tbl_idx = steps[0];
+        let mut key_idx = steps[0];
         for step in steps.into_iter().skip(1) {
-            let tbl = &tables[tbl_idx];
-            let split_key = [self.key_prefix(), tbl.smallest().deref()].concat().into();
+            let split_key = self.to_outer_key(candidate_inner_keys[key_idx].chunk());
             split_keys.push(split_key);
-
-            tbl_idx += step;
+            key_idx += step;
         }
+        split_keys.dedup();
         Some(split_keys)
     }
 
@@ -510,11 +503,6 @@ impl Shard {
 
     pub fn get_estimated_size(&self) -> u64 {
         self.estimated_size.load(Ordering::Relaxed)
-    }
-
-    pub fn get_estimate_size_write_cf_level_1plus(&self) -> u64 {
-        self.estimated_size_write_cf_level_1plus
-            .load(Ordering::Relaxed)
     }
 
     pub fn get_estimated_entries(&self) -> u64 {
@@ -1030,26 +1018,6 @@ impl ShardDataCore {
 
     pub fn has_over_bound_data(&self) -> bool {
         self.has_mem_over_bound_data() || self.has_file_over_bound_data()
-    }
-
-    /// Get max level by count of overlapping tables.
-    /// Return level and range of the overlapping tables.
-    pub fn get_max_level_by_overlapping_tables_count(
-        &self,
-    ) -> Option<(
-        &LevelHandler,
-        usize, // left table index in shard range
-        usize, // exclusive right table index in shard range
-    )> {
-        self.get_cf(0)
-            .levels
-            .iter()
-            .map(|level| {
-                let (left, right) =
-                    level.overlapping_tables_exclusive_end(self.inner_start(), self.inner_end());
-                (level, left, right)
-            })
-            .max_by_key(|(_, left, right)| right - left)
     }
 }
 
