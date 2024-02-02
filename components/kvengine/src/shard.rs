@@ -361,7 +361,7 @@ impl Shard {
             let shard_cf = data.get_cf(cf);
             for lvl in &shard_cf.levels {
                 for tbl in lvl.tables.iter() {
-                    if tbl.smallest() >= data.inner_start() {
+                    if tbl.smallest() > data.inner_start() {
                         // table smallest must be less than inner_end or it will not be included.
                         candidate_inner_keys.push(tbl.clone_smallest())
                     }
