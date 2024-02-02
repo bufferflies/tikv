@@ -904,6 +904,7 @@ impl TikvServer {
         self.raw_engines.raft.stop_worker(force);
         self.overload_protector.stop();
         self.background_worker.stop();
+        self.raw_engines.kv.close();
     }
 
     pub fn get_kv_engine(&self) -> kvengine::Engine {

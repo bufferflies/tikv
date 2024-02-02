@@ -29,6 +29,7 @@ const DATA_COUNT: usize = 2000;
 const WRITER_COUNT: usize = 5;
 const DATA_BATCH_SIZE: usize = 10;
 const COMPRESSION_TYPE: u8 = ZSTD_COMPRESSION;
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[test]
 fn test_load_data() {
@@ -164,12 +165,12 @@ fn impl_test_load_data(enable_inner_key_off: bool) {
         DATA_BATCH_SIZE,
         i_to_key,
         i_to_val,
-        Duration::from_secs(10),
+        DEFAULT_TIMEOUT,
         dup_count_fn,
     );
 
     // Build.
-    build(&scheduler, COMPRESSION_TYPE, Duration::from_secs(10)).unwrap();
+    build(&scheduler, COMPRESSION_TYPE, DEFAULT_TIMEOUT).unwrap();
     let states = scheduler.states();
     assert_eq!(
         states.duplicated_entries.len(),

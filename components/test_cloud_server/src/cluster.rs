@@ -657,6 +657,12 @@ impl ServerCluster {
     }
 }
 
+impl Drop for ServerCluster {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 pub fn new_test_config(base_dir: &Path, node_id: u16) -> TikvConfig {
     let mut config = TikvConfig::default();
     config.storage.data_dir = format!("{}/{}", base_dir.to_str().unwrap(), node_id);
