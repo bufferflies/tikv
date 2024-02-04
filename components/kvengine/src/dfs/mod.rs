@@ -370,7 +370,7 @@ mod tests {
 
     #[test]
     fn test_local_fs() {
-        crate::tests::init_logger();
+        ::test_util::init_log_for_test();
 
         let local_dir = tempfile::tempdir().unwrap();
         let file_data = "abcdefgh".to_string().into_bytes();

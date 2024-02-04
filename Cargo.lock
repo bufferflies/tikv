@@ -3587,6 +3587,7 @@ dependencies = [
  "slog-global",
  "slog-term",
  "tempfile",
+ "test_util",
  "thiserror",
  "tidb_query_common",
  "tikv_alloc",

@@ -45,14 +45,34 @@ macro_rules! unwrap_or_return {
 
 const DEF_BLOCK_SIZE: usize = 4 << 10;
 
-fn new_test_engine() -> (Engine, mpsc::Sender<ApplyTask>) {
+/// Wrap `Engine` to make sure that it will be closed after the test, and not
+/// interfere with other tests.
+struct TestEngine {
+    engine: Engine,
+}
+
+impl std::ops::Deref for TestEngine {
+    type Target = Engine;
+
+    fn deref(&self) -> &Self::Target {
+        &self.engine
+    }
+}
+
+impl Drop for TestEngine {
+    fn drop(&mut self) {
+        self.engine.close();
+    }
+}
+
+fn new_test_engine() -> (TestEngine, mpsc::Sender<ApplyTask>) {
     new_test_engine_opt(false, DEF_BLOCK_SIZE)
 }
 
 fn new_test_engine_opt(
     enable_inner_key_off: bool,
     block_size: usize,
-) -> (Engine, mpsc::Sender<ApplyTask>) {
+) -> (TestEngine, mpsc::Sender<ApplyTask>) {
     let (listener_tx, listener_rx) = mpsc::unbounded();
     let tester = EngineTester::new(enable_inner_key_off, block_size);
     let meta_change_listener = Box::new(TestMetaChangeListener {
@@ -87,12 +107,12 @@ fn new_test_engine_opt(
     thread::spawn(move || {
         applier.run();
     });
-    (engine, applier_tx)
+    (TestEngine { engine }, applier_tx)
 }
 
 #[test]
 fn test_engine() {
-    init_logger();
+    ::test_util::init_log_for_test();
     let (engine, applier_tx) = new_test_engine();
     // FIXME(youjiali1995): split has bugs.
     //
@@ -128,7 +148,7 @@ fn test_engine() {
 
 #[test]
 fn test_destroy_range() {
-    init_logger();
+    ::test_util::init_log_for_test();
     let (engine, applier_tx) = new_test_engine();
     let mem_table_count = engine.get_shard_stat(1).mem_table_count;
     load_data(
@@ -270,7 +290,7 @@ fn test_destroy_range() {
 
 #[test]
 fn test_truncate_ts_request() {
-    init_logger();
+    ::test_util::init_log_for_test();
     // TODO: disable compaction, otherwise this case would be unstable.
     let (engine, applier_tx) = new_test_engine();
     let version = 1000;
@@ -329,7 +349,7 @@ fn test_truncate_ts_request() {
 
 #[test]
 fn test_truncate_ts() {
-    init_logger();
+    ::test_util::init_log_for_test();
     let (engine, applier_tx) = new_test_engine();
 
     // `tolerate_none`: set `true` when there is no data to be truncated.
@@ -554,7 +574,7 @@ fn test_truncate_ts() {
 // tombstone will be lost, cause deleted entries reappear.
 #[test]
 fn test_lost_tombstone_issue() {
-    init_logger();
+    ::test_util::init_log_for_test();
     let (engine, _) = new_test_engine();
     let shard = engine.get_shard(1).unwrap();
 
@@ -601,7 +621,7 @@ fn test_lost_tombstone_issue() {
 // the key, excluding the tombstoned key.
 #[test]
 fn test_read_iterator_all_versions() {
-    init_logger();
+    ::test_util::init_log_for_test();
     let (engine, _) = new_test_engine();
     let shard = engine.get_shard(1).unwrap();
     let cf = 0;
@@ -671,7 +691,7 @@ fn test_read_iterator_all_versions() {
 
 #[test]
 fn test_level_overlapping_tables() {
-    init_logger();
+    ::test_util::init_log_for_test();
     test_level_overlapping_tables_impl(false);
     test_level_overlapping_tables_impl(true);
 }
@@ -754,7 +774,7 @@ fn test_level_overlapping_tables_impl(enable_inner_key_off: bool) {
 
 #[test]
 fn test_get_suggest_split_key() {
-    init_logger();
+    ::test_util::init_log_for_test();
     test_get_suggest_split_key_impl(false);
     test_get_suggest_split_key_impl(true);
 }
@@ -874,7 +894,7 @@ fn test_get_suggest_split_key_impl(enable_inner_key_off: bool) {
 
 #[test]
 fn test_get_evenly_split_keys() {
-    init_logger();
+    ::test_util::init_log_for_test();
     test_get_evenly_split_keys_impl(false);
     test_get_evenly_split_keys_impl(true);
 }
@@ -1060,7 +1080,7 @@ fn test_get_evenly_split_keys_impl(enable_inner_key_off: bool) {
 
 #[test]
 fn test_refresh_stats() {
-    init_logger();
+    ::test_util::init_log_for_test();
     let (engine, _) = new_test_engine();
     let shard = engine.get_shard(1).unwrap();
 
@@ -1118,7 +1138,7 @@ fn test_refresh_stats() {
 
 #[test]
 fn test_l0table_ignore_lock() {
-    init_logger();
+    ::test_util::init_log_for_test();
     let (engine, _) = new_test_engine();
     let file = new_l0table_file(
         &engine,
@@ -1627,15 +1647,6 @@ fn get_shard_for_key(key: &[u8], en: &Engine) -> Arc<Shard> {
         }
     }
     en.get_shard(1).unwrap()
-}
-
-pub(crate) fn init_logger() {
-    use slog::Drain;
-    let decorator = slog_term::PlainDecorator::new(std::io::stdout());
-    let drain = slog_term::CompactFormat::new(decorator).build();
-    let drain = std::sync::Mutex::new(drain).fuse();
-    let logger = slog::Logger::root(drain, o!());
-    slog_global::set_global(logger);
 }
 
 fn try_wait<F>(f: F, seconds: usize) -> bool

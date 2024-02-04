@@ -86,3 +86,4 @@ features = ["encryption"]
 
 [dev-dependencies]
 tempfile = "3"
+test_util = { workspace = true }
