@@ -1,8 +1,16 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{io, iter::Iterator as StdIterator, mem::size_of, ops::Deref, ptr, result, slice};
+use std::{
+    fmt::{Debug, Formatter},
+    io,
+    iter::Iterator as StdIterator,
+    mem::size_of,
+    ops::Deref,
+    ptr, result, slice,
+};
 
 use byteorder::{ByteOrder, LittleEndian};
+use log_wrappers::hex_encode_upper;
 use thiserror::Error;
 
 use super::blobtable::BlobRef;
@@ -431,9 +439,15 @@ pub fn new_merge_iterator<'a>(
     }
 }
 
-#[derive(Clone, Copy, PartialOrd, PartialEq, Ord, Eq, Debug)]
+#[derive(Clone, Copy, PartialOrd, PartialEq, Ord, Eq)]
 pub struct InnerKey<'a> {
     key: &'a [u8],
+}
+
+impl Debug for InnerKey<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", hex_encode_upper(self.key))
+    }
 }
 
 impl<'a> InnerKey<'a> {
@@ -623,5 +637,12 @@ mod tests {
         table.set_smallest(format!("{:04}", t.0).into_bytes());
         table.set_biggest(format!("{:04}", t.1).into_bytes());
         table
+    }
+
+    #[test]
+    fn test_inner_key_debug() {
+        let buf = vec![128, 0, 255];
+        let inner_key = InnerKey::from_inner_buf(&buf);
+        assert_eq!(format!("{:?}", inner_key), "8000FF".to_string());
     }
 }
