@@ -43,4 +43,4 @@ jobs:
           cargo test -p tests --test random test_random_all > run.log 2>&1
       - name: Print log on error
         if: failure()
-        run: tail -500 run.log
+        run: tail -2500 run.log

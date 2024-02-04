@@ -46,6 +46,12 @@ lazy_static! {
     .unwrap();
     pub static ref ENGINE_OPEN_FILES: IntGauge =
         register_int_gauge!("kv_engine_open_files", "kv engine open files",).unwrap();
+    pub static ref ENGINE_LOAD_TABLE_FILES_ERROR: IntCounterVec = register_int_counter_vec!(
+        "kv_engine_load_table_files_error",
+        "Total number of kv engine load table files error",
+        &["type"]
+    )
+    .unwrap();
 }
 
 pub(crate) fn elapsed_secs(t: Instant) -> f64 {

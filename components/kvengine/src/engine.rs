@@ -128,6 +128,7 @@ impl Engine {
                 master_key.clone(),
                 security_mgr,
                 opts.local_dir.clone(),
+                opts.for_restore,
             ),
             id_allocator,
             managed_safe_ts: AtomicU64::new(0),

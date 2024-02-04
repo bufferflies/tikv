@@ -7,7 +7,7 @@ use std::{
     hash::Hash,
     iter::Iterator as StdIterator,
     ops::{Deref, Sub},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{atomic::Ordering, Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -93,6 +93,8 @@ pub struct CompactionClient {
     allow_fallback_local: bool,
     master_key: MasterKey,
     local_dir: PathBuf,
+    // Whether the compaction client is used during restore (trim over bound & truncate ts).
+    for_restore: bool,
 }
 
 impl CompactionClient {
@@ -105,6 +107,7 @@ impl CompactionClient {
         master_key: MasterKey,
         security_mgr: Arc<SecurityManager>,
         local_dir: PathBuf,
+        for_restore: bool,
     ) -> Self {
         let remote_compactors = RemoteCompactors::new(remote_url);
         let client = security_mgr
@@ -119,6 +122,7 @@ impl CompactionClient {
             id_allocator,
             master_key,
             local_dir,
+            for_restore,
         }
     }
 
@@ -203,6 +207,7 @@ impl CompactionClient {
             id_allocator: self.id_allocator.clone(),
             encryption_key,
             local_dir: Some(self.local_dir.clone()),
+            for_restore: self.for_restore,
         };
         let req = &ctx.req;
         let mut remote_compactor = self.get_remote_compactor();
@@ -1360,16 +1365,57 @@ fn load_table_files(
     fs: Arc<dyn dfs::Dfs>,
     opts: dfs::Options,
     local_dir: Option<&PathBuf>,
+    for_restore: bool,
+) -> Result<Vec<Arc<dyn File>>> {
+    if local_dir.is_none() {
+        return load_table_files_from_dfs(tbl_ids, fs, opts);
+    }
+
+    let (mut files_loaded, files_failed) =
+        load_table_files_from_local(tbl_ids, local_dir.unwrap(), for_restore);
+    if !files_failed.is_empty() {
+        files_loaded.extend(load_table_files_from_dfs(&files_failed, fs, opts)?);
+    }
+    Ok(files_loaded)
+}
+
+fn load_table_files_from_local(
+    tbl_ids: &[u64],
+    local_dir: &Path,
+    for_restore: bool,
+) -> (
+    Vec<Arc<dyn File>>, // files_loaded
+    Vec<u64>,           // files_failed
+) {
+    let mut files_loaded: Vec<Arc<dyn File>> = vec![];
+    let mut files_failed: Vec<u64> = vec![];
+    for &id in tbl_ids {
+        let file_path = local_dir.join(new_sst_filename(id));
+        match LocalFile::open(id, file_path.as_path(), false) {
+            Ok(f) => files_loaded.push(Arc::new(f)),
+            Err(e) => {
+                files_failed.push(id);
+                if !for_restore {
+                    warn!(
+                        "load_table_files_from_local: failed to open {}: {:?}",
+                        id, e
+                    );
+                    metrics::ENGINE_LOAD_TABLE_FILES_ERROR
+                        .with_label_values(&["compaction"])
+                        .inc();
+                }
+            }
+        }
+    }
+    (files_loaded, files_failed)
+}
+
+fn load_table_files_from_dfs(
+    tbl_ids: &[u64],
+    fs: Arc<dyn dfs::Dfs>,
+    opts: dfs::Options,
 ) -> Result<Vec<Arc<dyn File>>> {
     let mut files = vec![];
-    if let Some(local_dir) = local_dir {
-        for &id in tbl_ids {
-            let file_path = local_dir.join(new_sst_filename(id));
-            let file: Arc<dyn File> = Arc::new(LocalFile::open(id, file_path.as_path(), false)?);
-            files.push(file);
-        }
-        return Ok(files);
-    }
     let (tx, rx) = std::sync::mpsc::sync_channel::<Result<(u64, Bytes)>>(tbl_ids.len());
     for id in tbl_ids {
         let aid = *id;
@@ -1504,6 +1550,7 @@ pub async fn handle_remote_compaction(
         id_allocator,
         encryption_key,
         local_dir: None,
+        for_restore: false,
     };
     let (tx, rx) = tokio::sync::oneshot::channel();
     std::thread::spawn(move || {
@@ -1535,6 +1582,7 @@ pub(crate) struct CompactionCtx {
     pub(crate) id_allocator: Arc<dyn IdAllocator>,
     pub(crate) encryption_key: Option<EncryptionKey>,
     pub(crate) local_dir: Option<PathBuf>,
+    for_restore: bool,
 }
 
 fn local_compact(ctx: &CompactionCtx) -> Result<pb::ChangeSet> {
@@ -1635,6 +1683,7 @@ fn compact_destroy_range(
         dfs.clone(),
         opts,
         ctx.local_dir.as_ref(),
+        ctx.for_restore,
     )?
     .into_iter()
     .map(|file| (file.id(), file))
@@ -1753,6 +1802,7 @@ fn compact_truncate_ts(
         dfs.clone(),
         opts,
         ctx.local_dir.as_ref(),
+        ctx.for_restore,
     )?
     .into_iter()
     .map(|file| (file.id(), file))
@@ -1876,6 +1926,7 @@ fn compact_trim_over_bound(
         dfs.clone(),
         opts,
         ctx.local_dir.as_ref(),
+        ctx.for_restore,
     )?
     .into_iter()
     .map(|file| (file.id(), file))
@@ -2283,6 +2334,7 @@ fn l0_compact_v3(
         fs.clone(),
         opts,
         ctx.local_dir.as_ref(),
+        ctx.for_restore,
     )?;
     let mut l0_tbls = files_to_l0_tables(l0_files, ctx.encryption_key.clone());
     l0_tbls.sort_by(|a, b| b.version().cmp(&a.version()));
@@ -2301,7 +2353,13 @@ fn l0_compact_v3(
     let mut all_bt_creates = vec![];
     for cf in 0..NUM_CFS {
         let l1_ids = &l0_compaction.multi_cf_l1_tables[cf];
-        let l1_files = load_table_files(l1_ids, fs.clone(), opts, ctx.local_dir.as_ref())?;
+        let l1_files = load_table_files(
+            l1_ids,
+            fs.clone(),
+            opts,
+            ctx.local_dir.as_ref(),
+            ctx.for_restore,
+        )?;
         let mut l1_tbls = files_to_tables(l1_files, ctx.encryption_key.clone());
         l1_tbls.sort_by(|a, b| a.smallest().cmp(&b.smallest()));
         let mut iters: Vec<Box<dyn table::Iterator>> = vec![];
@@ -2351,6 +2409,7 @@ fn l1_plus_compact_v3(
         fs.clone(),
         opts,
         ctx.local_dir.as_ref(),
+        ctx.for_restore,
     )?;
     let mut upper_tables = files_to_tables(upper_files, ctx.encryption_key.clone());
     upper_tables.sort_by(|a, b| a.smallest().cmp(&b.smallest()));
@@ -2359,6 +2418,7 @@ fn l1_plus_compact_v3(
         fs.clone(),
         opts,
         ctx.local_dir.as_ref(),
+        ctx.for_restore,
     )?;
     let mut lower_tables = files_to_tables(lower_files, ctx.encryption_key.clone());
     lower_tables.sort_by(|a, b| a.smallest().cmp(&b.smallest()));
@@ -2405,6 +2465,7 @@ fn major_compact_v3(
         fs.clone(),
         opts,
         ctx.local_dir.as_ref(),
+        ctx.for_restore,
     )?;
     let mut l0_tbls = files_to_l0_tables(l0_files, ctx.encryption_key.clone());
     l0_tbls.sort_by(|a, b| b.version().cmp(&a.version()));
@@ -2434,7 +2495,13 @@ fn major_compact_v3(
                         .mut_table_deletes()
                         .push(tbl_delete);
                 });
-                let files = load_table_files(table_ids, fs.clone(), opts, ctx.local_dir.as_ref())?;
+                let files = load_table_files(
+                    table_ids,
+                    fs.clone(),
+                    opts,
+                    ctx.local_dir.as_ref(),
+                    ctx.for_restore,
+                )?;
                 let mut tables = files_to_tables(files, ctx.encryption_key.clone());
                 tables.sort_by(|a, b| a.smallest().cmp(&b.smallest()));
                 let level_concat_iter =

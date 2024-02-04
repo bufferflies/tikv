@@ -44,6 +44,7 @@ macro_rules! unwrap_or_return {
 }
 
 const DEF_BLOCK_SIZE: usize = 4 << 10;
+const DEF_MIN_BLOB_SIZE: u32 = 64;
 
 /// Wrap `Engine` to make sure that it will be closed after the test, and not
 /// interfere with other tests.
@@ -1434,10 +1435,10 @@ fn new_test_options(
             Ok(n) => n,
             Err(e) => {
                 warn!("MIN_BLOB_SIZE=<number>, got {}", e);
-                1024
+                DEF_MIN_BLOB_SIZE
             }
         },
-        Err(_) => 1024,
+        Err(_) => DEF_MIN_BLOB_SIZE,
     };
     info!("MIN_BLOB_SIZE={}", min_blob_size);
     let mut opts = Options::default();
