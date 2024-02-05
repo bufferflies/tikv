@@ -23,6 +23,7 @@ use tikv_util::{mpsc, time::Instant};
 
 use crate::{
     dfs::InMemFs,
+    limiter::{RegionLimiter, StoreLimiter},
     table::{
         memtable::CfTable,
         sstable::{File, InMemFile, L0Builder, L0Table, SsTable},
@@ -80,6 +81,7 @@ fn new_test_engine_opt(
         sender: listener_tx,
     });
     let rate_limiter = Arc::new(IoRateLimiter::new_for_test());
+    let store_limiter = Arc::new(StoreLimiter::dummy());
     let mut meta_iter = tester.clone();
     let engine = Engine::open(
         tester.fs.clone(),
@@ -90,6 +92,7 @@ fn new_test_engine_opt(
         tester.core.clone(),
         meta_change_listener,
         rate_limiter,
+        store_limiter,
         None,
         MasterKey::new(&[1u8; 32]),
         Arc::new(SecurityManager::default()),
@@ -601,6 +604,7 @@ fn test_lost_tombstone_issue() {
         Arc::new(HashMap::default()),
         [cf_builder.build(), ShardCf::new(1), ShardCf::new(2)],
         HashMap::new(),
+        RegionLimiter::dummy(),
     );
     shard.set_data(data);
     let pri = CompactionPriority::L1Plus {
@@ -655,6 +659,7 @@ fn test_read_iterator_all_versions() {
         Arc::new(HashMap::default()),
         [cf_builder.build(), ShardCf::new(1), ShardCf::new(2)],
         HashMap::new(),
+        RegionLimiter::dummy(),
     );
     shard.set_data(data);
 
@@ -726,6 +731,7 @@ fn test_level_overlapping_tables_impl(enable_inner_key_off: bool) {
         Arc::new(HashMap::default()),
         [cf_builder.build(), ShardCf::new(1), ShardCf::new(2)],
         HashMap::new(),
+        RegionLimiter::dummy(),
     );
 
     let cf0 = data.get_cf(0);
@@ -880,6 +886,7 @@ fn test_get_suggest_split_key_impl(enable_inner_key_off: bool) {
             Arc::new(HashMap::default()),
             [cf_builder.build(), ShardCf::new(1), ShardCf::new(2)],
             HashMap::new(),
+            RegionLimiter::dummy(),
         );
         shard.set_data(data);
 
@@ -1063,6 +1070,7 @@ fn test_get_evenly_split_keys_impl(enable_inner_key_off: bool) {
             Arc::new(HashMap::default()),
             [cf_builder.build(), ShardCf::new(1), ShardCf::new(2)],
             HashMap::new(),
+            RegionLimiter::dummy(),
         );
         shard.set_data(data);
 
@@ -1124,6 +1132,7 @@ fn test_refresh_stats() {
             extra_cf_builder.build(),
         ],
         HashMap::new(),
+        RegionLimiter::dummy(),
     );
     shard.set_data(data);
     shard.refresh_states();

@@ -4,6 +4,10 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use dyn_clone::DynClone;
 
+use self::config::{
+    DEFAULT_HARD_REGION_MEM_USAGE_LIMIT_MB, DEFAULT_MAX_REGION_SPEED_LIMIT_MB_PER_SEC,
+    DEFAULT_MIN_REGION_SPEED_LIMIT_MB_PER_SEC, DEFAULT_SOFT_REGION_MEM_USAGE_LIMIT_MB,
+};
 use crate::{
     config::{
         DEFAULT_COMPACTION_REQUEST_VERSION, DEFAULT_COMPACTION_TOMBS_COUNT,
@@ -65,6 +69,8 @@ pub struct Options {
     pub compaction_tombs_ratio: f64,
     /// The number threshold of tombstone entries to trigger compaction.
     pub compaction_tombs_count: u64,
+
+    pub flow_control: FlowControlOptions,
 }
 
 impl Default for Options {
@@ -91,6 +97,7 @@ impl Default for Options {
             compaction_request_version: DEFAULT_COMPACTION_REQUEST_VERSION,
             compaction_tombs_ratio: DEFAULT_COMPACTION_TOMBS_RATIO,
             compaction_tombs_count: DEFAULT_COMPACTION_TOMBS_COUNT,
+            flow_control: Default::default(),
         }
     }
 }
@@ -106,6 +113,39 @@ impl CfConfig {
         Self {
             managed,
             max_levels,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct FlowControlOptions {
+    pub enable: bool,
+    pub soft_region_mem_limit: u64,
+    pub hard_region_mem_limit: u64,
+    pub max_region_speed_limit: u64,
+    pub min_region_speed_limit: u64,
+}
+
+impl Default for FlowControlOptions {
+    fn default() -> Self {
+        Self {
+            enable: false,
+            soft_region_mem_limit: DEFAULT_SOFT_REGION_MEM_USAGE_LIMIT_MB << 20,
+            hard_region_mem_limit: DEFAULT_HARD_REGION_MEM_USAGE_LIMIT_MB << 20,
+            max_region_speed_limit: DEFAULT_MAX_REGION_SPEED_LIMIT_MB_PER_SEC << 20,
+            min_region_speed_limit: DEFAULT_MIN_REGION_SPEED_LIMIT_MB_PER_SEC << 20,
+        }
+    }
+}
+
+impl From<&FlowControlOptions> for limiter::LimiterOptions {
+    fn from(opt: &FlowControlOptions) -> Self {
+        Self {
+            enable: opt.enable,
+            soft_limit: opt.soft_region_mem_limit,
+            hard_limit: opt.hard_region_mem_limit,
+            max_speed_limit: opt.max_region_speed_limit,
+            min_speed_limit: opt.min_region_speed_limit,
         }
     }
 }

@@ -9,7 +9,7 @@ extern crate test;
 pub mod apply;
 pub mod compaction;
 mod concat_iterator;
-mod config;
+pub mod config;
 pub use config::{
     Config as KvEngineConfig, PerKeyspaceConfig as KvEnginePerKeyspaceConfig,
     MEM_TABLE_MAX_SIZE as KV_ENGINE_MEM_TABLE_MAX_SIZE,
@@ -19,6 +19,7 @@ pub mod engine;
 pub mod engine_trait;
 mod error;
 pub mod flush;
+pub mod limiter;
 pub mod meta;
 pub mod mvcc;
 pub mod options;

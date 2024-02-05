@@ -51,7 +51,10 @@ use resource_metering::{FutureExt, ResourceTagFactory};
 use smallvec::{smallvec, SmallVec};
 use tikv_kv::{Modify, Snapshot, SnapshotExt, WriteData, WriteEvent};
 use tikv_util::{
-    deadline::Deadline, quota_limiter::QuotaLimiter, time::Instant, timer::GLOBAL_TIMER_HANDLE,
+    deadline::Deadline,
+    quota_limiter::QuotaLimiter,
+    time::{duration_to_sec, Instant},
+    timer::GLOBAL_TIMER_HANDLE,
 };
 use tracker::{get_tls_tracker_token, set_tls_tracker_token, TrackerToken};
 use txn_types::TimeStamp;
@@ -75,12 +78,11 @@ use crate::{
         metrics::*,
         mvcc::{Error as MvccError, ErrorInner as MvccErrorInner, ReleasedLock},
         txn::{
-            commands,
             commands::{
-                Command, RawExt, ReleasedLocks, ResponsePolicy, WriteContext, WriteResult,
+                self, Command, RawExt, ReleasedLocks, ResponsePolicy, WriteContext, WriteResult,
                 WriteResultLockInfo,
             },
-            flow_controller::FlowController,
+            flow_controller::{FlowControlHelper, FlowController},
             latch::{Latches, Lock},
             sched_pool::{tls_collect_query, tls_collect_scan_details, SchedPool},
             Error, ErrorInner, ProcessResult,
@@ -264,8 +266,6 @@ struct SchedulerInner<L: LockManager> {
 
     // used for apiv2
     causal_ts_provider: Option<Arc<CausalTsProviderImpl>>,
-
-    control_mutex: Arc<tokio::sync::Mutex<bool>>,
 
     lock_mgr: L,
 
@@ -462,7 +462,6 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
                 feature_gate.clone(),
                 "sched-high-pri-pool",
             ),
-            control_mutex: Arc::new(tokio::sync::Mutex::new(false)),
             lock_mgr,
             concurrency_manager,
             pipelined_pessimistic_lock: dynamic_configs.pipelined_pessimistic_lock,
@@ -1136,10 +1135,8 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
     /// back to the `Scheduler`.
     async fn process_write(self, snapshot: E::Snap, task: Task, statistics: &mut Statistics) {
         fail_point!("txn_before_process_write");
-        let region_id = snapshot
-            .get_kvengine_snap()
-            .map(|snap| snap.get_id())
-            .unwrap_or_default();
+        let snap = snapshot.get_kvengine_snap();
+        let region_id = snap.as_ref().map(|snap| snap.get_id()).unwrap_or_default();
         let write_bytes = task.cmd.write_bytes();
         let tag = task.cmd.tag();
         let cid = task.cid;
@@ -1154,6 +1151,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         let max_ts_synced = snapshot.ext().is_max_ts_synced();
         let causal_ts_provider = self.inner.causal_ts_provider.clone();
         let concurrency_manager = self.inner.concurrency_manager.clone();
+        let region_limiter = snap.as_ref().map(|snap| snap.get_limiter().clone());
 
         let raw_ext = get_raw_ext(
             causal_ts_provider,
@@ -1334,38 +1332,52 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
             _ => (),
         }
 
-        if self.inner.flow_controller.enabled() {
-            if self.inner.flow_controller.is_unlimited(region_id) {
+        let flow_control = FlowControlHelper::new(
+            region_id,
+            write_size,
+            self.inner.flow_controller.clone(),
+            region_limiter,
+        );
+        if flow_control.enabled() {
+            if flow_control.is_unlimited() {
                 // no need to delay if unthrottled, just call consume to record write flow
-                let _ = self.inner.flow_controller.consume(region_id, write_size);
+                let _ = flow_control.consume();
             } else {
                 let start = Instant::now_coarse();
-                // Control mutex is used to ensure there is only one request consuming the
-                // quota. The delay may exceed 1s, and the speed limit is changed every second.
-                // If the speed of next second is larger than the one of first second, without
-                // the mutex, the write flow can't throttled strictly.
-                let control_mutex = self.inner.control_mutex.clone();
-                let _guard = control_mutex.lock().await;
-                let delay = self.inner.flow_controller.consume(region_id, write_size);
-                let delay_end = Instant::now_coarse() + delay;
-                while !self.inner.flow_controller.is_unlimited(region_id) {
-                    let now = Instant::now_coarse();
-                    if now >= delay_end {
-                        break;
-                    }
-                    if now >= deadline.inner() {
-                        scheduler.finish_with_err(cid, StorageErrorInner::DeadlineExceeded);
-                        self.inner.flow_controller.unconsume(region_id, write_size);
-                        SCHED_THROTTLE_TIME.observe(start.saturating_elapsed_secs());
-                        return;
-                    }
+
+                // Note: cloud storage engine remove the `control_mutex`.
+                let consume_delay = flow_control.consume();
+
+                let deadline_delay = deadline.inner().saturating_duration_since(start);
+                let deadline_exceeded = consume_delay >= deadline_delay;
+                if deadline_exceeded {
+                    flow_control.unconsume();
+                }
+
+                // Always sleep even if it must exceed deadline.
+                let delay = consume_delay.min(deadline_delay);
+                let after_delay = if delay > Duration::ZERO {
                     GLOBAL_TIMER_HANDLE
-                        .delay(std::time::Instant::now() + Duration::from_millis(1))
+                        .delay(std::time::Instant::now() + delay)
                         .compat()
                         .await
                         .unwrap();
+                    let after_delay = Instant::now_coarse();
+                    SCHED_THROTTLE_TIME.observe(duration_to_sec(
+                        after_delay.saturating_duration_since(start),
+                    ));
+                    after_delay
+                } else {
+                    start
+                };
+
+                if deadline_exceeded || after_delay >= deadline.inner() {
+                    scheduler.finish_with_err(cid, StorageErrorInner::DeadlineExceeded);
+                    if !deadline_exceeded {
+                        flow_control.unconsume();
+                    }
+                    return;
                 }
-                SCHED_THROTTLE_TIME.observe(start.saturating_elapsed_secs());
             }
         }
 
@@ -1506,8 +1518,8 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
                         // Only consume the quota when write succeeds, otherwise failed write
                         // requests may exhaust the quota and other write requests would be in long
                         // delay.
-                        if sched.inner.flow_controller.enabled() {
-                            sched.inner.flow_controller.unconsume(region_id, write_size);
+                        if flow_control.enabled() {
+                            flow_control.unconsume();
                         }
                     }
                     return;

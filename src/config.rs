@@ -84,8 +84,8 @@ use crate::{
 
 pub const DEFAULT_ROCKSDB_SUB_DIR: &str = "db";
 
-/// By default, block cache size will be set to 45% of system memory.
-pub const BLOCK_CACHE_RATE: f64 = 0.45;
+/// By default, block cache size will be set to 35% of system memory.
+pub const BLOCK_CACHE_RATE: f64 = 0.35;
 /// By default, TiKV will try to limit memory usage to 75% of system memory.
 pub const MEMORY_USAGE_LIMIT_RATE: f64 = 0.75;
 

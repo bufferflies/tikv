@@ -31,7 +31,10 @@ use file_system::{
 use fs2::FileExt;
 use futures::executor::block_on;
 use grpcio::{EnvBuilder, Environment};
-use kvengine::dfs::Dfs;
+use kvengine::{
+    dfs::Dfs,
+    limiter::{LimiterOptions, StoreLimiter},
+};
 use kvproto::{
     brpb::create_backup, deadlock::create_deadlock, diagnosticspb_grpc::create_diagnostics,
     import_sstpb_grpc::create_import_sst, raft_serverpb::StoreIdent,
@@ -67,7 +70,8 @@ use tikv::{
     storage::{
         self,
         mvcc::MvccConsistencyCheckObserver,
-        txn::flow_controller::{EngineFlowController, FlowController},
+        txn::flow_controller::{FlowController, CLOUD_MIN_THROTTLE_SPEED},
+        SCHED_WRITE_FLOW_GAUGE,
     },
 };
 use tikv_kv::Engine;
@@ -123,6 +127,7 @@ pub struct TikvServer {
     quota_limiter: Arc<QuotaLimiter>,
     io_rate_limiter: Arc<IoRateLimiter>,
     overload_protector: OverloadProtector,
+    flow_controller: Arc<FlowController>,
 }
 
 struct TikvEngines {
@@ -226,6 +231,7 @@ impl TikvServer {
         // Initialize and check config
         let cfg_controller = Self::init_config(config);
         let config = cfg_controller.get_current();
+        let (flow_controller, store_limiter) = Self::init_flow_control(&config);
         let io_rate_limiter = Arc::new(IoRateLimiter::new(IoRateLimitMode::WriteOnly, true, true));
         io_rate_limiter
             .set_io_rate_limit(config.storage.io_rate_limit.max_bytes_per_sec.0 as usize);
@@ -234,6 +240,7 @@ impl TikvServer {
             &config,
             dfs,
             io_rate_limiter.clone(),
+            store_limiter,
             security_mgr.clone(),
         );
 
@@ -299,6 +306,7 @@ impl TikvServer {
             quota_limiter,
             io_rate_limiter,
             overload_protector,
+            flow_controller: Arc::new(flow_controller),
         }
     }
 
@@ -596,7 +604,7 @@ impl TikvServer {
             lock_mgr.clone(),
             self.concurrency_manager.clone(),
             lock_mgr.get_storage_dynamic_configs(),
-            Arc::new(FlowController::Singleton(EngineFlowController::empty())),
+            self.flow_controller.clone(),
             reporter,
             resource_tag_factory.clone(),
             Arc::clone(&self.quota_limiter),
@@ -947,6 +955,7 @@ impl TikvServer {
         conf: &TikvConfig,
         dfs: Arc<dyn Dfs>,
         rate_limiter: Arc<IoRateLimiter>,
+        store_limiter: Arc<StoreLimiter>,
         meta_iter: &mut impl kvengine::MetaIterator,
         recoverer: impl kvengine::RecoverHandler + 'static,
         for_restore: bool,
@@ -999,6 +1008,17 @@ impl TikvServer {
         kv_opts.compaction_tombs_ratio = conf.kvengine.compaction_tombs_ratio;
         kv_opts.compaction_tombs_count = conf.kvengine.compaction_tombs_count;
         kv_opts.for_restore = for_restore;
+
+        kv_opts.flow_control.enable = conf.storage.flow_control.enable;
+        kv_opts.flow_control.soft_region_mem_limit =
+            conf.storage.flow_control.soft_region_mem_limit.0;
+        kv_opts.flow_control.hard_region_mem_limit =
+            conf.storage.flow_control.hard_region_mem_limit.0;
+        kv_opts.flow_control.max_region_speed_limit =
+            conf.storage.flow_control.max_region_speed_limit.0;
+        kv_opts.flow_control.min_region_speed_limit =
+            conf.storage.flow_control.min_region_speed_limit.0;
+
         let opts = Arc::new(kv_opts);
         let id_allocator = Arc::new(PdIdAllocator::new(pd.clone()));
 
@@ -1021,6 +1041,7 @@ impl TikvServer {
             id_allocator,
             meta_change_listener,
             rate_limiter,
+            store_limiter,
             opt_ks_gc_sp_cache,
             master_key,
             security_mgr,
@@ -1033,6 +1054,7 @@ impl TikvServer {
         conf: &TikvConfig,
         dfs: Arc<dyn Dfs>,
         rate_limiter: Arc<IoRateLimiter>,
+        store_limiter: Arc<StoreLimiter>,
         security_mgr: Arc<SecurityManager>,
     ) -> Engines {
         let panic_regions = Self::load_panic_regions(&conf.storage.data_dir);
@@ -1059,6 +1081,7 @@ impl TikvServer {
             conf,
             dfs,
             rate_limiter,
+            store_limiter,
             &mut meta_iter,
             recoverer,
             false,
@@ -1086,6 +1109,45 @@ impl TikvServer {
             }
         }
         panic_regions
+    }
+
+    fn init_flow_control(config: &TikvConfig) -> (FlowController, Arc<StoreLimiter>) {
+        let soft_limit = config
+            .storage
+            .flow_control
+            .soft_store_mem_limit
+            .as_ref()
+            .unwrap()
+            .0;
+        let hard_limit = config
+            .storage
+            .flow_control
+            .hard_store_mem_limit
+            .as_ref()
+            .unwrap()
+            .0;
+        let interval_ms = config
+            .raft_store
+            .pd_store_heartbeat_tick_interval
+            .as_millis();
+
+        // Memory usage of store is reported on every
+        // `pd_store_heartbeat_tick_interval`, so it's safe to set `max_speed_limit` to
+        // `hard_limit / interval`, that even if there is no flush in next period, the
+        // memory usage will not exceed `hard_limit`.
+        let max_speed_limit = hard_limit * 1_000 / interval_ms;
+
+        let options = LimiterOptions {
+            enable: config.storage.flow_control.enable,
+            soft_limit,
+            hard_limit,
+            max_speed_limit: max_speed_limit.max(CLOUD_MIN_THROTTLE_SPEED),
+            min_speed_limit: CLOUD_MIN_THROTTLE_SPEED,
+        };
+        info!("init_flow_control"; "options" => ?options);
+        let limiter = Arc::new(StoreLimiter::new(options, SCHED_WRITE_FLOW_GAUGE.clone()));
+        let flow_controller = FlowController::Cloud(limiter.clone());
+        (flow_controller, limiter)
     }
 }
 

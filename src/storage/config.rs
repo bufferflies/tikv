@@ -6,6 +6,10 @@ use std::{cmp::max, error::Error};
 
 use engine_rocks::raw::{Cache, LRUCacheOptions, MemoryAllocator};
 use file_system::{IoPriority, IoRateLimitMode, IoRateLimiter, IoType};
+use kvengine::config::{
+    DEFAULT_HARD_REGION_MEM_USAGE_LIMIT_MB, DEFAULT_MAX_REGION_SPEED_LIMIT_MB_PER_SEC,
+    DEFAULT_MIN_REGION_SPEED_LIMIT_MB_PER_SEC, DEFAULT_SOFT_REGION_MEM_USAGE_LIMIT_MB,
+};
 use kvproto::kvrpcpb::ApiVersion;
 use libc::c_int;
 use online_config::OnlineConfig;
@@ -30,6 +34,9 @@ const DEFAULT_SCHED_PENDING_WRITE_MB: u64 = 100;
 
 const DEFAULT_RESERVED_SPACE_GB: u64 = 5;
 const DEFAULT_RESERVED_RAFT_SPACE_GB: u64 = 1;
+
+pub const SOFT_STORE_MEM_LIMIT_RATE: f64 = 0.1;
+pub const HARD_STORE_MEM_LIMIT_RATE: f64 = 0.15;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, OnlineConfig)]
 #[serde(default)]
@@ -126,12 +133,8 @@ impl Config {
                 ).into()
             );
         }
+        self.flow_control.validate()?;
         self.io_rate_limit.validate()?;
-
-        if self.flow_control.enable {
-            warn!("Cloud storage engine doesn't support flow control in scheduler");
-            self.flow_control.enable = false;
-        }
 
         Ok(())
     }
@@ -176,18 +179,77 @@ pub struct FlowControlConfig {
     pub memtables_threshold: u64,
     #[online_config(skip)]
     pub l0_files_threshold: u64,
+
+    // Store level flow controls:
+    #[online_config(skip)]
+    pub soft_store_mem_limit: Option<ReadableSize>,
+    #[online_config(skip)]
+    pub hard_store_mem_limit: Option<ReadableSize>,
+
+    // Region level flow controls:
+    #[online_config(skip)]
+    pub soft_region_mem_limit: ReadableSize,
+    #[online_config(skip)]
+    pub hard_region_mem_limit: ReadableSize,
+    // Max speed limit of single region when size of memory usage reaches `soft_region_mem_limit`,
+    // per second.
+    #[online_config(skip)]
+    pub max_region_speed_limit: ReadableSize,
+    // Min speed limit of single region when size of memory usage reaches `hard_region_mem_limit`,
+    // per second.
+    #[online_config(skip)]
+    pub min_region_speed_limit: ReadableSize,
 }
 
 impl Default for FlowControlConfig {
     fn default() -> FlowControlConfig {
         FlowControlConfig {
-            // NOTE: cloud storage engine doesn't support it.
             enable: false,
             soft_pending_compaction_bytes_limit: ReadableSize::gb(192),
             hard_pending_compaction_bytes_limit: ReadableSize::gb(1024),
             memtables_threshold: 5,
             l0_files_threshold: 20,
+            soft_store_mem_limit: None,
+            hard_store_mem_limit: None,
+            soft_region_mem_limit: ReadableSize::mb(DEFAULT_SOFT_REGION_MEM_USAGE_LIMIT_MB),
+            hard_region_mem_limit: ReadableSize::mb(DEFAULT_HARD_REGION_MEM_USAGE_LIMIT_MB),
+            max_region_speed_limit: ReadableSize::mb(DEFAULT_MAX_REGION_SPEED_LIMIT_MB_PER_SEC),
+            min_region_speed_limit: ReadableSize::mb(DEFAULT_MIN_REGION_SPEED_LIMIT_MB_PER_SEC),
         }
+    }
+}
+
+impl FlowControlConfig {
+    pub fn validate(&mut self) -> Result<(), Box<dyn Error>> {
+        let total_mem = SysQuota::memory_limit_in_bytes() as f64;
+        if self.soft_store_mem_limit.is_none() {
+            let limit = (total_mem * SOFT_STORE_MEM_LIMIT_RATE) as u64;
+            self.soft_store_mem_limit = Some(ReadableSize(limit));
+        }
+        if self.hard_store_mem_limit.is_none() {
+            let limit = (total_mem * HARD_STORE_MEM_LIMIT_RATE) as u64;
+            self.hard_store_mem_limit = Some(ReadableSize(limit));
+        }
+        if self.soft_store_mem_limit.unwrap() > self.hard_store_mem_limit.unwrap() {
+            return Err(
+                    "storage.flow-control.soft-store-mem-limit should be less than or equal to storage.flow-control.hard-store-mem-limit."
+                        .into(),
+                );
+        }
+
+        if self.soft_region_mem_limit.0 > self.hard_region_mem_limit.0 {
+            return Err(
+                    "storage.flow-control.soft-region-mem-limit should be less than or equal to storage.flow-control.hard-region-mem-limit."
+                        .into(),
+                );
+        }
+        if self.min_region_speed_limit.0 > self.max_region_speed_limit.0 {
+            return Err(
+                    "storage.flow-control.min-region-speed-limit should be less than or equal to storage.flow-control.max-region-speed-limit."
+                        .into(),
+                );
+        }
+        Ok(())
     }
 }
 

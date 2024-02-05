@@ -30,6 +30,7 @@ use tikv_util::{mpsc, sys::thread::StdThreadBuildWrapper};
 use crate::{
     apply::ChangeSet,
     config::PerKeyspaceConfig,
+    limiter::{RegionLimiter, StoreLimiter},
     meta::ShardMeta,
     table::{
         memtable::CfTable,
@@ -80,6 +81,7 @@ impl Engine {
         id_allocator: Arc<dyn IdAllocator>,
         meta_change_listener: Box<dyn MetaChangeListener>,
         rate_limiter: Arc<IoRateLimiter>,
+        store_limiter: Arc<StoreLimiter>,
         ks_gc_sp_map: Option<Arc<DashMap<u32, u64>>>,
         master_key: MasterKey,
         security_mgr: Arc<SecurityManager>,
@@ -134,6 +136,7 @@ impl Engine {
             managed_safe_ts: AtomicU64::new(0),
             tmp_file_id: AtomicU64::new(0),
             rate_limiter,
+            store_limiter,
             free_tx,
             loaded: AtomicBool::new(false),
             file_locks,
@@ -264,6 +267,11 @@ impl Engine {
         self.flush_tx.send(FlushMsg::Stop).unwrap();
         self.free_tx.send(FreeMemMsg::Stop).unwrap();
     }
+
+    pub fn notify_memtables_size(&self, size: u64) {
+        let tag = ShardTag::new(self.get_engine_id(), IdVer::default());
+        self.store_limiter.update_usage(&tag, size);
+    }
 }
 
 pub struct EngineCore {
@@ -280,6 +288,7 @@ pub struct EngineCore {
     pub(crate) managed_safe_ts: AtomicU64,
     pub(crate) tmp_file_id: AtomicU64,
     pub(crate) rate_limiter: Arc<IoRateLimiter>,
+    pub(crate) store_limiter: Arc<StoreLimiter>,
     pub(crate) free_tx: mpsc::Sender<FreeMemMsg>,
     pub(crate) loaded: AtomicBool,
     pub(crate) file_locks: Vec<Mutex<()>>,
@@ -375,6 +384,7 @@ impl EngineCore {
             Arc::new(blob_tbls),
             scfs,
             cs.unloaded_tables,
+            RegionLimiter::new((&shard.opt.flow_control).into()),
         );
         shard.set_data(data);
         shard

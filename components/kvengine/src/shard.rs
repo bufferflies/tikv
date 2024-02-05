@@ -22,6 +22,7 @@ use slog_global::*;
 use tikv_util::codec::number::U64_SIZE;
 
 use crate::{
+    limiter::RegionLimiter,
     table::{
         self,
         blobtable::blobtable::BlobTable,
@@ -147,6 +148,7 @@ impl Shard {
     ) -> Self {
         let encryption_key = get_shard_property(ENCRYPTION_KEY, props)
             .map(|v| master_key.decrypt_encryption_key(&v).unwrap());
+        let limiter = RegionLimiter::new((&opt.flow_control).into());
         let shard = Self {
             engine_id,
             id: props.shard_id,
@@ -154,7 +156,7 @@ impl Shard {
             range: range.clone(),
             parent_id: 0,
             pending_ops: RwLock::new(ShardPendingOperations::new(range.inner_key_off)),
-            data: RwLock::new(ShardData::new_empty(range)),
+            data: RwLock::new(ShardData::new_empty(range, limiter)),
             opt,
             active: Default::default(),
             properties: Properties::new().apply_pb(props),
@@ -269,6 +271,8 @@ impl Shard {
         store_u64(&self.estimated_kv_size, lv_stats.kv_size);
         store_u64(&self.tombs, lv_stats.tombs);
         store_u64(&self.entries_write_cf, lv_stats.entries_write_cf);
+
+        data.refresh_for_limiter(&self.tag());
     }
 
     pub(crate) fn gen_rand_schedule_del_range_time(&self) -> u64 {
@@ -765,6 +769,7 @@ impl Shard {
             shard_data.blob_tbl_map.clone(),
             shard_data.cfs.clone(),
             shard_data.unloaded_tbls.clone(),
+            shard_data.limiter.clone(),
         );
         self.set_data(new_data);
     }
@@ -812,7 +817,7 @@ impl Deref for ShardData {
 }
 
 impl ShardData {
-    pub(crate) fn new_empty(shard_range: ShardRange) -> Self {
+    pub(crate) fn new_empty(shard_range: ShardRange, limiter: RegionLimiter) -> Self {
         Self::new(
             shard_range,
             vec![CfTable::new()],
@@ -820,6 +825,7 @@ impl ShardData {
             Arc::new(HashMap::new()),
             [ShardCf::new(0), ShardCf::new(1), ShardCf::new(2)],
             HashMap::new(),
+            limiter,
         )
     }
 
@@ -830,6 +836,7 @@ impl ShardData {
         blob_tbl_map: Arc<HashMap<u64, BlobTable>>,
         cfs: [ShardCf; 3],
         unloaded_tbls: HashMap<u64, FileMeta>,
+        limiter: RegionLimiter,
     ) -> Self {
         assert!(!mem_tbls.is_empty());
 
@@ -841,6 +848,7 @@ impl ShardData {
                 blob_tbl_map,
                 cfs,
                 unloaded_tbls,
+                limiter,
             }),
         }
     }
@@ -854,6 +862,7 @@ pub(crate) struct ShardDataCore {
     pub(crate) cfs: [ShardCf; 3],
     /// Tables that are not loaded from DFS yet.
     pub(crate) unloaded_tbls: HashMap<u64, FileMeta>,
+    pub limiter: RegionLimiter,
 }
 
 impl Deref for ShardDataCore {
@@ -912,6 +921,10 @@ impl ShardDataCore {
             max_ts = cmp::max(max_ts, t.data_max_ts());
         });
         max_ts
+    }
+
+    fn get_mem_table_size(&self) -> u64 {
+        self.mem_tbls.iter().map(|t| t.size()).sum()
     }
 
     pub(crate) fn get_l0_total_size(&self) -> u64 {
@@ -1018,6 +1031,11 @@ impl ShardDataCore {
 
     pub fn has_over_bound_data(&self) -> bool {
         self.has_mem_over_bound_data() || self.has_file_over_bound_data()
+    }
+
+    pub fn refresh_for_limiter(&self, tag: &ShardTag) {
+        let mem_table_size = self.get_mem_table_size();
+        self.limiter.update_usage(tag, mem_table_size);
     }
 }
 

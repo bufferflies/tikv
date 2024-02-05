@@ -34,6 +34,7 @@ use tikv_util::{
     codec::bytes::encode_bytes,
     config::{ReadableDuration, ReadableSize},
     error, info,
+    sys::SysQuota,
     thread_group::GroupProperties,
     time::Instant,
     warn,
@@ -45,6 +46,8 @@ use crate::{
     scheduler::Scheduler,
     txnlock::lock_resolver::LockResolver,
 };
+
+const REGION_MEM_LIMIT_RATIO: f64 = 0.2;
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 
@@ -62,6 +65,7 @@ pub struct ServerCluster {
     schedule_lock: Arc<DashMap<u64, Arc<Mutex<()>>>>,
     confs: HashMap<u16 /* node_id */, TikvConfig>,
     keyspace_manager: KeyspaceManager,
+    nodes_count: usize,
 }
 
 impl ServerCluster {
@@ -102,6 +106,7 @@ impl ServerCluster {
             schedule_lock: Arc::new(DashMap::new()),
             confs: Default::default(),
             keyspace_manager: Default::default(),
+            nodes_count: nodes.len(),
         };
         for node_id in nodes {
             cluster.start_node(node_id, &update_conf);
@@ -143,7 +148,7 @@ impl ServerCluster {
         let mut config = if let Some(config) = self.confs.remove(&node_id) {
             config
         } else {
-            new_test_config(self.tmp_dir.path(), node_id)
+            new_test_config(self.tmp_dir.path(), node_id, self.nodes_count)
         };
         update_conf(node_id, &mut config);
         self.confs.insert(node_id, config.clone());
@@ -663,7 +668,7 @@ impl Drop for ServerCluster {
     }
 }
 
-pub fn new_test_config(base_dir: &Path, node_id: u16) -> TikvConfig {
+pub fn new_test_config(base_dir: &Path, node_id: u16, nodes_count: usize) -> TikvConfig {
     let mut config = TikvConfig::default();
     config.storage.data_dir = format!("{}/{}", base_dir.to_str().unwrap(), node_id);
     config.storage.api_version = 2;
@@ -695,7 +700,32 @@ pub fn new_test_config(base_dir: &Path, node_id: u16) -> TikvConfig {
     config.server.raft_client_initial_reconnect_backoff = ReadableDuration::millis(100);
     config.server.raft_client_max_backoff = ReadableDuration::millis(250);
 
+    update_config_by_total_mem(&mut config, nodes_count);
     config
+        .storage
+        .flow_control
+        .validate()
+        .expect("storage.flow-control is invalid"); // To fill optional arguments.
+    config
+}
+
+fn update_config_by_total_mem(config: &mut TikvConfig, nodes_count: usize) {
+    let total_mem = (SysQuota::memory_limit_in_bytes() / nodes_count as u64) as f64;
+
+    config.storage.block_cache.capacity = Some(ReadableSize(
+        (total_mem * tikv::config::BLOCK_CACHE_RATE) as u64,
+    ));
+
+    let soft_store_mem_limit = total_mem * tikv::storage::config::SOFT_STORE_MEM_LIMIT_RATE;
+    let hard_store_mem_limit = total_mem * tikv::storage::config::HARD_STORE_MEM_LIMIT_RATE;
+    config.storage.flow_control.soft_store_mem_limit =
+        Some(ReadableSize(soft_store_mem_limit as u64));
+    config.storage.flow_control.hard_store_mem_limit =
+        Some(ReadableSize(hard_store_mem_limit as u64));
+    config.storage.flow_control.soft_region_mem_limit =
+        ReadableSize((soft_store_mem_limit * REGION_MEM_LIMIT_RATIO) as u64);
+    config.storage.flow_control.hard_region_mem_limit =
+        ReadableSize((hard_store_mem_limit * REGION_MEM_LIMIT_RATIO) as u64);
 }
 
 // Keep away from 20xxx ports to work around https://github.com/tidbcloud/cloud-storage-engine/issues/658.

@@ -18,6 +18,11 @@ pub(crate) const DEFAULT_COMPACTION_TOMBS_COUNT: u64 = 10000;
 /// See `kvengine::table::memtable::arena::block_cap`.
 pub const MEM_TABLE_MAX_SIZE: u64 = 128 * 1024 * 1024;
 
+pub const DEFAULT_SOFT_REGION_MEM_USAGE_LIMIT_MB: u64 = 256;
+pub const DEFAULT_HARD_REGION_MEM_USAGE_LIMIT_MB: u64 = 512;
+pub const DEFAULT_MAX_REGION_SPEED_LIMIT_MB_PER_SEC: u64 = 50;
+pub const DEFAULT_MIN_REGION_SPEED_LIMIT_MB_PER_SEC: u64 = 1;
+
 #[derive(Default, Clone, Serialize, Deserialize, PartialEq, Debug)]
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]

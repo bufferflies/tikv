@@ -115,6 +115,11 @@ soft-pending-compaction-bytes-limit = 1
 hard-pending-compaction-bytes-limit = 1
 memtables-threshold = 10
 l0-files-threshold = 10
+soft-store-mem-limit = "3200MB"
+soft-region-mem-limit = "128MB"
+hard-region-mem-limit = "768MB"
+max-region-speed-limit = "60MB"
+min-region-speed-limit = "10MB"
 
 [storage.io-rate-limit]
 max-bytes-per-sec = "1000MB"

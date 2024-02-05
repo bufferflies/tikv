@@ -18,7 +18,7 @@ use dashmap::mapref::entry::Entry;
 use kvenginepb as pb;
 use slog_global::info;
 
-use crate::{table::TableExt, *};
+use crate::{limiter::RegionLimiter, table::TableExt, *};
 
 #[derive(Debug)]
 pub struct CheckMergeResult {
@@ -127,6 +127,7 @@ impl Engine {
                 Arc::new(new_blob_tbl_map),
                 new_cfs,
                 old_data.unloaded_tbls.clone(),
+                RegionLimiter::new_from(&old_data.limiter),
             );
             new_shard.set_data(new_data);
         }
@@ -259,7 +260,10 @@ impl Engine {
                 old_shard.range,
             );
             old_shard.set_property(DEL_PREFIXES_KEY, &[]);
-            old_shard.set_data(ShardData::new_empty(old_shard.range.clone()));
+            old_shard.set_data(ShardData::new_empty(
+                old_shard.range.clone(),
+                old_shard.get_data().limiter.clone(),
+            ));
         }
         let mut new_shard = self.new_shard_version(&old_shard, sequence);
 
@@ -348,6 +352,7 @@ impl Engine {
                 Arc::new(blob_tbl_map),
                 new_cfs,
                 unloaded_tbls,
+                old_data.limiter.clone(),
             )
         } else {
             info!(
@@ -365,6 +370,7 @@ impl Engine {
                 old_data.blob_tbl_map.clone(),
                 old_data.cfs.clone(),
                 old_data.unloaded_tbls.clone(),
+                old_data.limiter.clone(),
             )
         };
         new_shard.set_data(data);

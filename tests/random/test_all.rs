@@ -274,6 +274,7 @@ fn prepare_cluster(
         conf.security = security_conf.clone();
         conf.kvengine.compaction_tombs_count = 100;
         conf.kvengine.max_del_range_delay = ReadableDuration(Duration::from_secs(3));
+        conf.storage.flow_control.enable = true;
     };
     let pd_wrapper = PdWrapper::new_test(1, security_conf);
     let cluster = ServerCluster::new_opt(nodes, update_conf_fn, pd_wrapper);

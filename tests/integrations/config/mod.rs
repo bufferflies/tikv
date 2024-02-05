@@ -684,6 +684,12 @@ fn test_serde_custom_tikv_config() {
             memtables_threshold: 10,
             soft_pending_compaction_bytes_limit: ReadableSize(1),
             hard_pending_compaction_bytes_limit: ReadableSize(1),
+            hard_store_mem_limit: None,
+            soft_store_mem_limit: Some(ReadableSize::mb(3200)),
+            hard_region_mem_limit: ReadableSize::mb(768),
+            soft_region_mem_limit: ReadableSize::mb(128),
+            max_region_speed_limit: ReadableSize::mb(60),
+            min_region_speed_limit: ReadableSize::mb(10),
         },
         block_cache: BlockCacheConfig {
             shared: true,

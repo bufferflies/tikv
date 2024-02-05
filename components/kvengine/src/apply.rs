@@ -250,6 +250,7 @@ impl EngineCore {
                 old_data.blob_tbl_map.clone(),
                 old_data.cfs.clone(),
                 old_data.unloaded_tbls.clone(),
+                old_data.limiter.clone(),
             );
             shard.set_data(new_data);
             self.send_free_mem_msg(FreeMemMsg::FreeMem(last));
@@ -264,6 +265,7 @@ impl EngineCore {
                     old_data.blob_tbl_map.clone(),
                     old_data.cfs.clone(),
                     old_data.unloaded_tbls.clone(),
+                    old_data.limiter.clone(),
                 );
                 shard.set_data(new_data);
                 self.send_free_mem_msg(FreeMemMsg::FreeMem(last));
@@ -294,6 +296,7 @@ impl EngineCore {
             Arc::new(blob_tbl_map),
             scfs,
             data.unloaded_tbls.clone(),
+            data.limiter.clone(),
         );
         shard.set_data(new_data);
         store_bool(&shard.initial_flushed, true);
@@ -356,6 +359,7 @@ impl EngineCore {
             Arc::new(new_blob_tbl_map),
             new_cfs,
             data.unloaded_tbls.clone(),
+            data.limiter.clone(),
         );
         shard.set_data(new_data);
         self.remove_dfs_files(shard, del_files);
@@ -454,6 +458,7 @@ impl EngineCore {
             Arc::new(new_blob_tbl_map),
             new_cfs,
             data.unloaded_tbls.clone(),
+            data.limiter.clone(),
         );
         shard.set_data(new_data);
         self.remove_dfs_files(shard, del_file_is_subrange);
@@ -541,6 +546,7 @@ impl EngineCore {
             data.blob_tbl_map.clone(),
             new_cfs,
             data.unloaded_tbls.clone(),
+            data.limiter.clone(),
         );
         assert_eq!(cs.get_property_key(), DEL_PREFIXES_KEY);
         let done = DeletePrefixes::unmarshal(cs.get_property_value(), shard.inner_key_off);
@@ -566,6 +572,7 @@ impl EngineCore {
             data.blob_tbl_map.clone(),
             new_cfs,
             data.unloaded_tbls.clone(),
+            data.limiter.clone(),
         );
         shard.set_data(new_data);
         let truncated_ts = TruncateTs::unmarshal(cs.get_property_value());
@@ -591,6 +598,7 @@ impl EngineCore {
             data.blob_tbl_map.clone(),
             new_cfs,
             data.unloaded_tbls.clone(),
+            data.limiter.clone(),
         );
         shard.set_data(new_data);
         shard.set_property(TRIM_OVER_BOUND, TRIM_OVER_BOUND_DISABLE);
@@ -718,6 +726,7 @@ impl EngineCore {
             Arc::new(new_blob_tbl_map),
             new_cfs,
             old_data.unloaded_tbls.clone(),
+            old_data.limiter.clone(),
         );
         shard.set_data(new_data);
         Ok(())
@@ -756,6 +765,7 @@ impl EngineCore {
             Arc::new(blob_tbl_map),
             cfs,
             snap_data.unloaded_tbls.clone(),
+            old_data.limiter.clone(),
         );
         new_shard.set_data(new_data);
         new_shard.set_active(old_shard.is_active());

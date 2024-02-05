@@ -309,6 +309,7 @@ impl EngineCore {
             Arc::new(new_blob_tbl_map),
             scfs,
             HashMap::new(),
+            data.limiter.clone(),
         );
         shard.set_data(new_data);
         Ok(())

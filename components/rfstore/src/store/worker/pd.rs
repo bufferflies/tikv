@@ -813,9 +813,14 @@ impl PdRunner {
 
         let kv_all_shard_stats = store_info.kv_engine.get_all_shard_stats();
         let kv_engine_stats = kvengine::Engine::get_engine_stats(kv_all_shard_stats);
+
+        store_info
+            .kv_engine
+            .notify_memtables_size(kv_engine_stats.mem_tables_size);
         for &id_ver in &kv_engine_stats.ready_destroy_range_shards {
             store_info.kv_engine.trigger_compact(id_ver);
         }
+
         for cf in 0..kv_engine_stats.cf_total_sizes.len() {
             STORE_ENGINE_SIZE_GAUGE_VEC
                 .with_label_values(&["kv", store_info.kv_engine.cf_names()[cf]])

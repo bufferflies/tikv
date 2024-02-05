@@ -53,6 +53,7 @@ pub mod errors;
 pub mod kv;
 pub mod lock_manager;
 pub(crate) mod metrics;
+pub use metrics::SCHED_WRITE_FLOW_GAUGE;
 pub mod mvcc;
 pub mod raw;
 pub mod txn;

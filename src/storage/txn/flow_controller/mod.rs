@@ -2,14 +2,16 @@
 pub mod singleton_flow_controller;
 pub mod tablet_flow_controller;
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
+use kvengine::limiter::{RegionLimiter, StoreLimiter};
 pub use singleton_flow_controller::EngineFlowController;
 pub use tablet_flow_controller::TabletFlowController;
 
 pub enum FlowController {
     Singleton(EngineFlowController),
     Tablet(TabletFlowController),
+    Cloud(Arc<StoreLimiter>),
 }
 
 macro_rules! flow_controller_fn {
@@ -18,6 +20,7 @@ macro_rules! flow_controller_fn {
             match self {
                 FlowController::Singleton(ref controller) => controller.$fn_name($region_id),
                 FlowController::Tablet(ref controller) => controller.$fn_name($region_id),
+                FlowController::Cloud(ref controller) => controller.$fn_name($region_id),
             }
         }
     };
@@ -28,6 +31,7 @@ macro_rules! flow_controller_fn {
                     controller.$fn_name($region_id, $bytes)
                 }
                 FlowController::Tablet(ref controller) => controller.$fn_name($region_id, $bytes),
+                FlowController::Cloud(ref controller) => controller.$fn_name($region_id, $bytes),
             }
         }
     };
@@ -46,12 +50,14 @@ impl FlowController {
         match self {
             FlowController::Singleton(ref controller) => controller.unconsume(region_id, bytes),
             FlowController::Tablet(ref controller) => controller.unconsume(region_id, bytes),
+            FlowController::Cloud(ref controller) => controller.unconsume(region_id, bytes),
         }
     }
     pub fn enable(&self, enable: bool) {
         match self {
             FlowController::Singleton(ref controller) => controller.enable(enable),
             FlowController::Tablet(ref controller) => controller.enable(enable),
+            FlowController::Cloud(ref controller) => controller.enable(enable),
         }
     }
 
@@ -59,6 +65,7 @@ impl FlowController {
         match self {
             FlowController::Singleton(ref controller) => controller.enabled(),
             FlowController::Tablet(ref controller) => controller.enabled(),
+            FlowController::Cloud(ref controller) => controller.enabled(),
         }
     }
 
@@ -71,6 +78,65 @@ impl FlowController {
             FlowController::Tablet(ref controller) => {
                 controller.set_speed_limit(region_id, speed_limit)
             }
+            FlowController::Cloud(ref controller) => {
+                controller.set_speed_limit(region_id, speed_limit)
+            }
+        }
+    }
+}
+
+pub const CLOUD_MIN_THROTTLE_SPEED: u64 = 1024 * 1024; // 1MB/s
+
+pub struct FlowControlHelper {
+    region_id: u64,
+    write_size: usize,
+    flow_controller: Arc<FlowController>,
+    region_limiter: Option<RegionLimiter>,
+}
+
+impl FlowControlHelper {
+    pub fn new(
+        region_id: u64,
+        write_size: usize,
+        flow_controller: Arc<FlowController>,
+        region_limiter: Option<RegionLimiter>,
+    ) -> Self {
+        Self {
+            region_id,
+            write_size,
+            flow_controller,
+            region_limiter,
+        }
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.flow_controller.enabled()
+            || self.region_limiter.as_ref().map_or(false, |s| s.enabled())
+    }
+
+    pub fn is_unlimited(&self) -> bool {
+        self.flow_controller.is_unlimited(self.region_id)
+            && self
+                .region_limiter
+                .as_ref()
+                .map_or(true, |s| s.is_unlimited(self.region_id))
+    }
+
+    pub fn consume(&self) -> Duration {
+        let mut dur = self
+            .flow_controller
+            .consume(self.region_id, self.write_size);
+        if let Some(s) = self.region_limiter.as_ref() {
+            dur = dur.max(s.consume(self.region_id, self.write_size));
+        }
+        dur
+    }
+
+    pub fn unconsume(&self) {
+        self.flow_controller
+            .unconsume(self.region_id, self.write_size);
+        if let Some(s) = self.region_limiter.as_ref() {
+            s.unconsume(self.region_id, self.write_size);
         }
     }
 }

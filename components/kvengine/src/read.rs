@@ -16,6 +16,7 @@ use moka::sync::SegmentedCache;
 use protobuf::Message;
 
 use crate::{
+    limiter::RegionLimiter,
     table::{
         blobtable::blobtable::{BlobPrefetcher, BlobTable},
         memtable::{CfTable, Hint, WriteBatch},
@@ -312,6 +313,7 @@ impl SnapAccessCore {
             Arc::new(blob_tbls),
             scfs,
             HashMap::new(),
+            RegionLimiter::new((&shard.opt.flow_control).into()), // Note: limiter is disabled here
         );
         shard.id = cs.shard_id;
         shard.set_data(data);
@@ -843,6 +845,10 @@ impl SnapAccessCore {
     pub fn get_keyspace_id(&self) -> u32 {
         self.data.keyspace_id
     }
+
+    pub fn get_limiter(&self) -> &RegionLimiter {
+        &self.data.limiter
+    }
 }
 
 pub struct Iterator {
@@ -1123,6 +1129,7 @@ mod tests {
             Arc::new(blob_tbls),
             scfs,
             HashMap::new(),
+            RegionLimiter::dummy(),
         );
         shard.set_data(data);
         let snap = shard.new_snap_access();

@@ -125,7 +125,9 @@ impl Engine {
             data.blob_tbl_map.clone(),
             data.cfs.clone(),
             data.unloaded_tbls.clone(),
+            data.limiter.clone(),
         );
+        new_data.refresh_for_limiter(&shard.tag());
         shard.set_data(new_data);
         info!(
             "shard {} switch mem-table version {}, size {}",

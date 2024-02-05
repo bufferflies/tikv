@@ -52,6 +52,12 @@ lazy_static! {
         &["type"]
     )
     .unwrap();
+    pub static ref ENGINE_THROTTLE_ACTION_COUNTER: IntCounterVec = register_int_counter_vec!(
+        "kv_engine_throttle_action_total",
+        "Total number of actions for flow control.",
+        &["level", "type"]
+    )
+    .unwrap();
 }
 
 pub(crate) fn elapsed_secs(t: Instant) -> f64 {

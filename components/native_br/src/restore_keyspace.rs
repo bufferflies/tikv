@@ -20,8 +20,8 @@ use http::Request;
 use hyper::Body;
 use itertools::Itertools;
 use kvengine::{
-    dfs,
-    dfs::S3Fs,
+    dfs::{self, S3Fs},
+    limiter::StoreLimiter,
     table::{InnerKey, TableExt},
     IdVer, ShardMeta, ShardRange, ShardStats, ShardTag, ENCRYPTION_KEY, GLOBAL_SHARD_END_KEY,
 };
@@ -834,6 +834,8 @@ impl BackupCluster {
                 Arc::new(IoRateLimiter::new(IoRateLimitMode::WriteOnly, true, true));
             io_rate_limiter
                 .set_io_rate_limit(conf.storage.io_rate_limit.max_bytes_per_sec.0 as usize);
+            // TODO: enable flow control to avoid OOM during recovery.
+            let store_limiter = Arc::new(StoreLimiter::dummy());
 
             let mut meta_iter = MetaIterator::new(store_id, Vec::new(), HashMap::new());
             let (kv_engine, sender, receiver) = TikvServer::init_kv_engine(
@@ -841,6 +843,7 @@ impl BackupCluster {
                 conf,
                 self.dfs.clone(),
                 io_rate_limiter,
+                store_limiter,
                 &mut meta_iter,
                 recoverer.clone(),
                 true,
