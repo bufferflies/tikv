@@ -2,6 +2,9 @@
 
 use lazy_static::lazy_static;
 use prometheus::*;
+use tikv_util::info;
+
+use crate::check_point_storage::LoadDataWorkerState;
 
 lazy_static! {
     pub static ref LOAD_DATA_HANDLE_ADD_CHUNK_TIME_MILLIS: IntCounterVec =
@@ -35,4 +38,25 @@ lazy_static! {
         &["task_id", "state"],
     )
     .unwrap();
+}
+
+pub fn remove_metrics(task_id: &str) {
+    info!("remove cancelled task metrics, task_id:{}", task_id);
+
+    let _ = LOAD_DATA_BUILD_SST_COUNTER.remove_label_values(&[task_id]);
+    let _ = LOAD_DATA_BUILD_SST_TIME_MILLIS.remove_label_values(&[task_id]);
+    let _ = LOAD_DATA_HANDLE_ADD_CHUNK_COUNTER.remove_label_values(&[task_id]);
+    let _ = LOAD_DATA_HANDLE_ADD_CHUNK_TIME_MILLIS.remove_label_values(&[task_id]);
+
+    let _ = LOAD_DATA_TASK_STATE
+        .remove_label_values(&[task_id, LoadDataWorkerState::InitTask.as_str()]);
+    let _ = LOAD_DATA_TASK_STATE
+        .remove_label_values(&[task_id, LoadDataWorkerState::AddingChunks.as_str()]);
+    let _ = LOAD_DATA_TASK_STATE
+        .remove_label_values(&[task_id, LoadDataWorkerState::BuildingSst.as_str()]);
+    let _ = LOAD_DATA_TASK_STATE
+        .remove_label_values(&[task_id, LoadDataWorkerState::IngestingSst.as_str()]);
+    let _ = LOAD_DATA_TASK_STATE
+        .remove_label_values(&[task_id, LoadDataWorkerState::IngestedSst.as_str()]);
+    let _ = LOAD_DATA_TASK_STATE.remove_label_values(&[task_id, "cancel"]);
 }

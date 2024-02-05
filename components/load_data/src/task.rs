@@ -15,6 +15,7 @@ use api_version::api_v2::KEYSPACE_PREFIX_LEN;
 use bytes::{Buf, BufMut, Bytes};
 use chrono::Utc;
 use cloud_encryption::{EncryptionKey, MasterKey};
+use dashmap::DashMap;
 use encryption::{DecrypterReader, EncrypterWriter, Iv};
 use http::Request;
 use hyper::Body;
@@ -70,7 +71,6 @@ const RETRY_SLEEP_DURATION: Duration = Duration::from_millis(100);
 const MAX_RETRY_TIMES: usize = 10;
 const MAX_SLEEP_DURATION: Duration = Duration::from_secs(30);
 const GET_SHARD_META_TIMEOUT: Duration = Duration::from_secs(60);
-
 pub struct LoadTaskWorker {
     config: LoadDataConfig,
     ctx: LoadDataContext,
@@ -209,6 +209,7 @@ pub struct LoadTaskScheduler {
     pub writers: Arc<Mutex<WritersStates>>,
     pub thread_handle: Option<Arc<Mutex<std::thread::JoinHandle<()>>>>,
     pub check_point_store: Arc<Mutex<LocalFileCheckPointStorage>>,
+    pub ended_tasks: Arc<DashMap<String, i64>>,
 }
 
 impl LoadTaskScheduler {
@@ -226,9 +227,12 @@ impl LoadTaskScheduler {
 
         let now = Utc::now();
         let millis = now.timestamp_millis();
+        let task_id = check_point_store_guard.check_point_ctx.task_id.clone();
         LOAD_DATA_TASK_STATE
-            .with_label_values(&[&check_point_store_guard.check_point_ctx.task_id, "cancel"])
+            .with_label_values(&[&task_id, "cancel"])
             .set(millis as f64);
+
+        self.ended_tasks.insert(task_id, millis);
     }
 
     pub fn check_task_thread_finished(&self) {
@@ -343,6 +347,7 @@ impl LoadTaskWorker {
         context: LoadDataContext,
         task_ctx: TaskContext,
         check_point_ctx: LoadDataCheckPointCtx,
+        ended_tasks: Arc<DashMap<String, i64>>,
     ) -> Self {
         let (sender, receiver) = tikv_util::mpsc::unbounded();
         let mut states = LoadTaskStates::default();
@@ -388,6 +393,7 @@ impl LoadTaskWorker {
             writers: Arc::new(Mutex::new(writers)),
             thread_handle: None,
             check_point_store: Arc::clone(&check_point_store_arc),
+            ended_tasks: Arc::clone(&ended_tasks),
         };
         let (file_tx, file_rx) = tikv_util::mpsc::unbounded();
         let task_dir = context.dir.join(task_ctx.task_id.as_str());
@@ -1230,7 +1236,7 @@ impl LoadTaskWorker {
             new_region_key(&key_prefix, &last_key)
         };
 
-        let mut success_ranges = MergeRanges::default(); // keys of `success_ranges` are encoded. 
+        let mut success_ranges = MergeRanges::default(); // keys of `success_ranges` are encoded.
         let mut last_error: Option<Error> = None;
         for retry in 0..MAX_RETRY_TIMES {
             match self.ingest_group_to_range(

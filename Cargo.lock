@@ -3816,6 +3816,7 @@ dependencies = [
  "bytes",
  "chrono",
  "cloud_encryption",
+ "dashmap 4.0.2",
  "encryption",
  "futures 0.3.28",
  "hex 0.4.2",

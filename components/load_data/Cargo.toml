@@ -11,6 +11,7 @@ api_version = { path = "../api_version" }
 bytes = "1.1"
 chrono = "0.4"
 cloud_encryption = { workspace = true }
+dashmap = "4.0"
 encryption = { workspace = true }
 futures = "0.3"
 hex = "0.4"

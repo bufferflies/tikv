@@ -1,6 +1,6 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{collections::HashMap, mem, time::Duration};
+use std::{collections::HashMap, mem, sync::Arc, time::Duration};
 
 use bytes::{BufMut, BytesMut};
 use futures::executor::block_on;
@@ -32,7 +32,13 @@ pub fn init_task(
     };
     let check_point_ctx = LoadDataCheckPointCtx::new(task_ctx.clone());
 
-    let mut worker = LoadTaskWorker::new(config, ctx, task_ctx, check_point_ctx);
+    let mut worker = LoadTaskWorker::new(
+        config,
+        ctx,
+        task_ctx,
+        check_point_ctx,
+        Arc::new(dashmap::DashMap::default()),
+    );
     let scheduler = worker.get_scheduler();
     let worker_handle = std::thread::spawn(move || {
         worker.run();

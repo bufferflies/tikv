@@ -251,6 +251,7 @@ pub(crate) struct LoadDataManager {
     ctx: LoadDataContext,
     worker_scaler: Option<WorkerScaler>,
     worker_scaler_conf: WorkerScalerConfig,
+    ended_tasks: Arc<dashmap::DashMap<String, i64>>,
 }
 
 impl LoadDataManager {
@@ -281,6 +282,7 @@ impl LoadDataManager {
             ctx: context,
             worker_scaler,
             worker_scaler_conf,
+            ended_tasks: Arc::new(dashmap::DashMap::default()),
         }
     }
 
@@ -325,6 +327,7 @@ impl LoadDataManager {
             check_point_dir,
             CANCELLED_CHECK_POINT_FILE_EXPIRE_SEC,
             CLEAN_CHECK_POINT_FILE_INTERVAL_SEC,
+            self.ended_tasks.clone(),
         );
 
         let dir_entries: Vec<fs::DirEntry> = files.filter_map(|r| r.ok()).collect();
@@ -374,6 +377,7 @@ impl LoadDataManager {
             self.ctx.clone(),
             task_context.clone(),
             check_point_ctx,
+            self.ended_tasks.clone(),
         );
         let mut scheduler = worker.get_scheduler();
         let thread_handle = std::thread::spawn(move || {
@@ -397,6 +401,7 @@ impl LoadDataManager {
                     self.ctx.clone(),
                     task_ctx,
                     check_point,
+                    self.ended_tasks.clone(),
                 );
                 let mut scheduler = worker.get_scheduler();
                 let thread_handle = std::thread::spawn(move || {

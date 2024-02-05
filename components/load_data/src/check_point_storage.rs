@@ -6,12 +6,13 @@ use std::{
     fs::OpenOptions,
     io::Write,
     path::PathBuf,
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
 
 use bytes::Bytes;
 use chrono::Utc;
+use dashmap::DashMap;
 use serde_derive::{Deserialize, Serialize};
 use tikv_client::Value;
 use tikv_util::{debug, error, info};
@@ -29,8 +30,10 @@ pub const CHECKPOINT_WORKER_PREFIX: &str = "LOAD_DATA_CHECK_POINT_";
 // The expiration time of the canceled task file.
 pub const CANCELLED_CHECK_POINT_FILE_EXPIRE_SEC: u64 = 30 * 60;
 
+pub const CANCELLED_TASK_METRIC_EXPIRE_SEC: i64 = 2 * 60;
+
 // The interval between each attempt to clean the checkpoint file.
-pub const CLEAN_CHECK_POINT_FILE_INTERVAL_SEC: u64 = 30 * 60;
+pub const CLEAN_CHECK_POINT_FILE_INTERVAL_SEC: u64 = 2 * 60;
 lazy_static::lazy_static! {
     static ref FILE_LOCK: Mutex<()> = Mutex::new(());
 }
@@ -97,7 +100,7 @@ impl LoadDataWorkerState {
         false
     }
 
-    fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         match *self {
             LoadDataWorkerState::InitTask => "InitTask",
             LoadDataWorkerState::AddingChunks => "AddingChunks",
@@ -440,9 +443,11 @@ pub fn spawn_clean_check_point_files_worker(
     check_point_dir: PathBuf,
     cancelled_task_check_point_file_expire_sec: u64,
     clean_check_point_file_interval_sec: u64,
+    ended_tasks: Arc<DashMap<String, i64>>,
 ) {
     std::thread::spawn(move || {
         loop {
+            remove_load_data_metrics(ended_tasks.clone());
             try_clean_check_point_files(
                 check_point_dir.clone(),
                 cancelled_task_check_point_file_expire_sec,
@@ -450,6 +455,24 @@ pub fn spawn_clean_check_point_files_worker(
             std::thread::sleep(Duration::from_secs(clean_check_point_file_interval_sec));
         }
     });
+}
+
+pub fn remove_load_data_metrics(ended_tasks: Arc<DashMap<String, i64>>) {
+    let now = Utc::now();
+    let now_millis = now.timestamp_millis();
+    let metric_safe_ts = now_millis - CANCELLED_TASK_METRIC_EXPIRE_SEC * 1000;
+    let mut to_remove_task_ids = vec![];
+    for task_metric in ended_tasks.iter() {
+        let task_id = task_metric.key();
+        if *task_metric.value() < metric_safe_ts {
+            crate::metrics::remove_metrics(task_id);
+            to_remove_task_ids.push(task_id.clone());
+        }
+    }
+
+    for remove_task_id in to_remove_task_ids {
+        ended_tasks.remove(&remove_task_id);
+    }
 }
 
 fn try_clean_check_point_files(
