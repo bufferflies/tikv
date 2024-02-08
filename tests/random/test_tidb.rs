@@ -45,13 +45,14 @@ const PD_BIN_ENV_KEY: &str = "PD_BIN";
 const PD_PORT_ENV_KEY: &str = "PD_PORT";
 const PD_PORT_DEFAULT: u16 = 2379;
 const PD_HEALTHY_TIMEOUT: Duration = Duration::from_secs(30);
+const PD_TSO_SVC_COUNT: usize = 2;
 
 const TIDB_BIN_ENV_KEY: &str = "TIDB_BIN";
 const TIDB_PORT_ENV_KEY: &str = "TIDB_PORT";
 const TIDB_PORT_DEFAULT: u16 = 4000;
 const TIDB_STATUS_PORT_ENV_KEY: &str = "TIDB_STATUS_PORT";
 const TIDB_STATUS_PORT_DEFAULT: u16 = 10080;
-const TIDB_HEALTHY_TIMEOUT: Duration = Duration::from_secs(60);
+const TIDB_HEALTHY_TIMEOUT: Duration = Duration::from_secs(120);
 const TIDB_LOG_LEVEL: &str = "info";
 
 const TPC_BIN_ENV_KEY: &str = "TPC_BIN";
@@ -65,7 +66,7 @@ const VERIFY_HEALTHY_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[test]
 fn test_random_with_tidb() {
-    test_util::init_log_for_test();
+    test_util::init_log_for_test_async();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .worker_threads(4)
@@ -115,6 +116,11 @@ fn test_random_with_tidb() {
             TEST_DURATION,
         ));
     }
+    async_handles.push(spawn_restart_tso_svc(
+        tc.clone(),
+        Duration::from_secs(10),
+        TEST_DURATION,
+    ));
 
     // Main loop.
     let start_time = Instant::now();
@@ -207,10 +213,12 @@ fn prepare_tidb_cluster(security_config: &SecurityConfig) -> TidbCluster {
     };
 
     let mut rng = rand::thread_rng();
-    let pd_mode = if rng.gen_ratio(1, 2) {
+    let pd_mode = if rng.gen_ratio(1, 10) {
         PdServerMode::Normal
     } else {
-        PdServerMode::MicroServices { tso_count: 1 }
+        PdServerMode::MicroServices {
+            tso_count: PD_TSO_SVC_COUNT as u16,
+        }
     };
     let tc = TidbCluster::new(
         pd_mode,
@@ -542,4 +550,38 @@ fn check_tpc() {
         "TPC-C transactions are too few: {}",
         tpc_txns
     );
+}
+
+fn spawn_restart_tso_svc(
+    tc: TidbCluster,
+    restart_interval: Duration,
+    timeout: Duration,
+) -> tokio::task::JoinHandle<()> {
+    let task = async move {
+        let tso_svc_count = match tc.pd.mode() {
+            PdServerMode::Normal => return,
+            PdServerMode::MicroServices { tso_count } => *tso_count,
+        };
+        let start_time = Instant::now_coarse();
+        while start_time.saturating_elapsed() < timeout {
+            let random = || {
+                let mut rng = rand::thread_rng();
+                let tso_svc_idx = rng.gen_range(0..tso_svc_count);
+                let interval_secs = restart_interval.as_secs();
+                let stop_dur =
+                    Duration::from_secs(rng.gen_range(interval_secs / 2..interval_secs * 3 / 2));
+                // Give some time for TSO service to campaign about the leader before next loop.
+                let loop_interval =
+                    Duration::from_secs(rng.gen_range(interval_secs / 2..interval_secs));
+                (tso_svc_idx, stop_dur, loop_interval)
+            };
+            let (tso_svc_idx, stop_dur, loop_interval) = random();
+
+            tc.pd
+                .restart_tso_svc(tso_svc_idx, stop_dur, PD_HEALTHY_TIMEOUT)
+                .await;
+            tokio::time::sleep(loop_interval).await;
+        }
+    };
+    tokio::spawn(task)
 }

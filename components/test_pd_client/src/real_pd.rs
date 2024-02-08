@@ -7,6 +7,7 @@ use grpcio::EnvBuilder;
 use kvproto::{metapb, pdpb};
 use pd_client::{pd_control::PdControl, Config, PdClient};
 use security::{GetSecurityManager, SecurityConfig, SecurityManager};
+use tikv_util::config::ReadableDuration;
 use url::Url;
 
 use crate::{PdClientExt, TestPdClient};
@@ -102,7 +103,8 @@ impl RealPd {
         security_mgr: Arc<SecurityManager>,
     ) -> pd_client::RpcClient {
         let env = Arc::new(EnvBuilder::new().cq_count(1).build());
-        let cfg = pd_client::Config::new(endpoints);
+        let mut cfg = pd_client::Config::new(endpoints);
+        cfg.update_interval = ReadableDuration::secs(1);
         cfg.validate().unwrap();
         pd_client::RpcClient::new(&cfg, Some(env), security_mgr)
             .unwrap_or_else(|e| panic!("failed to create rpc client: {:?}", e))

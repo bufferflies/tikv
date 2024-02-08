@@ -830,6 +830,13 @@ impl PdConnector {
         }
     }
 
+    pub async fn reset_tso_discover(&self) {
+        let mut guard = self.tso_discovery.lock().await;
+        assert!(guard.is_some());
+        let tso_discovery = guard.as_mut().unwrap();
+        tso_discovery.reset_primary_tso_client();
+    }
+
     pub async fn connect(&self, addr: &str) -> Result<(PdClientStub, GetMembersResponse)> {
         info!("connecting to PD endpoint"; "endpoints" => addr);
         let addr_trim = trim_http_prefix(addr);

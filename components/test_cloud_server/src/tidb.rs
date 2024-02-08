@@ -20,7 +20,7 @@ use pd_client::{
 use security::{RestfulClient, SecurityConfig, SecurityManager};
 use serde_derive::{Deserialize, Serialize};
 use tempfile::TempDir;
-use tikv_util::{box_err, info};
+use tikv_util::{box_err, config::ReadableDuration, info, warn};
 
 use crate::try_wait_result_async;
 
@@ -67,6 +67,10 @@ impl PdServers {
             servers: DashMap::new(),
             tso_svcs: DashMap::new(),
         }
+    }
+
+    pub fn mode(&self) -> &PdServerMode {
+        &self.mode
     }
 
     pub fn start(&self, count: u16) {
@@ -247,7 +251,9 @@ impl PdServers {
         let endpoints = self.endpoints();
         let env = Arc::new(EnvBuilder::new().cq_count(1).build());
         let mgr = self.security_mgr.clone();
-        let cfg = pd_client::Config::new(endpoints);
+        let mut cfg = pd_client::Config::new(endpoints);
+        // Set update_interval to 1 to speed up recover new tso from legacy tso
+        cfg.update_interval = ReadableDuration::secs(1);
         cfg.validate().unwrap();
         pd_client::RpcClient::new_async(&cfg, Some(env), mgr)
             .await
@@ -260,6 +266,46 @@ impl PdServers {
         child.kill().unwrap_or_else(|err| {
             panic!("pd-{} has exited unexpectedly: {}", idx, err);
         });
+    }
+
+    pub async fn restart_tso_svc(&self, idx: u16, stop_dur: Duration, healthy_timeout: Duration) {
+        self.stop(idx, &self.tso_svcs);
+        info!("tso-svc stopped"; "idx" => idx);
+        tokio::time::sleep(stop_dur).await;
+        self.start_single_tso_service(idx);
+        self.tso_svc_must_health(idx, healthy_timeout).await;
+        info!("tso-svc started"; "idx" => idx);
+    }
+
+    pub async fn tso_svc_must_health(&self, idx: u16, timeout: Duration) {
+        let client = RestfulClient::new(
+            "tso-svc-ctl",
+            vec![format!("127.0.0.1:{}", self.tso_svc_port(idx))],
+            self.security_mgr.clone(),
+        )
+        .unwrap();
+        try_wait_result_async(
+            || {
+                let client = client.clone();
+                Box::pin(async move {
+                    let res = client.get::<TsoSvcStatus>(PD_TSO_SVC_STATUS_PATH).await;
+                    match res {
+                        Ok(status) => {
+                            info!("tso-svc[{}]: status: {:?}", idx, status);
+                            Ok(())
+                        }
+                        Err(e) => {
+                            warn!("tso-svc[{}]: check healthy failed: {:?}", idx, e);
+                            Err(e)
+                        }
+                    }
+                })
+            },
+            timeout.as_secs() as usize,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("wait PD TSO healthy timeout: {:?}", e));
+        info!("PD TSO service is ready"; "idx" => idx);
     }
 
     pub fn stop_all(&self) {
@@ -544,6 +590,26 @@ impl Default for PdReplicationConfig {
 #[serde(rename_all = "kebab-case")]
 struct PdKeyspaceConfig {
     pre_alloc: Vec<String>,
+}
+
+const PD_TSO_SVC_STATUS_PATH: &str = "status";
+
+// Ref: https://github.com/tidbcloud/pd-cse/blob/release-7.1-keyspace/pkg/mcs/utils/util.go, StatusHandler
+// ```json
+// {
+//     "build_ts": "2024-01-16 03:25:40",
+//     "version": "v7.1.1-serverless",
+//     "git_hash": "d6175b7123e9e9ead933d26e9a9d331d5c53e0c0",
+//     "start_timestamp": 1705408116
+// }
+// ```
+#[derive(Default, Deserialize, Debug)]
+#[serde(default)]
+struct TsoSvcStatus {
+    build_ts: String,
+    version: String,
+    git_hash: String,
+    start_timestamp: u64,
 }
 
 #[derive(Default, Serialize)]

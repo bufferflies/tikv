@@ -104,6 +104,8 @@ const DEFAULT_METRICS_FLUSH_INTERVAL: Duration = Duration::from_millis(10_000);
 
 const ZSTD_COMPRESSION_LEVEL_FOR_LOCAL: &str = "3";
 
+const PD_CLIENT_RETRY_COUNT: usize = 10;
+
 /// A complete TiKV server.
 pub struct TikvServer {
     config: TikvConfig,
@@ -264,8 +266,27 @@ impl TikvServer {
         let region_info_accessor = RegionInfoAccessor::new(coprocessor_host.as_mut().unwrap());
 
         // Initialize concurrency manager
-        let latest_ts = block_on(pd_client.get_tso()).expect("failed to get timestamp from PD");
-        let concurrency_manager = ConcurrencyManager::new(latest_ts);
+        let mut latest_ts = None;
+        for idx in 0..PD_CLIENT_RETRY_COUNT {
+            match block_on(pd_client.get_tso()) {
+                Ok(ts) => {
+                    latest_ts = Some(ts);
+                    break;
+                }
+                Err(e) => {
+                    warn!(
+                        "failed to get timestamp from PD, retry {} times, error: {}",
+                        idx + 1,
+                        e
+                    );
+                }
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
+        if latest_ts.is_none() {
+            panic!("failed to get timestamp from PD");
+        }
+        let concurrency_manager = ConcurrencyManager::new(latest_ts.unwrap());
 
         // use different quota for front-end and back-end requests
         let quota_limiter = Arc::new(QuotaLimiter::new(

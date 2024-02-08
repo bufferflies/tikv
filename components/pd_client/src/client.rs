@@ -195,6 +195,8 @@ impl RpcClient {
                                 if tso_exists {
                                     let closed_fut = cli.new_tso.rl().as_ref().unwrap().closed();
                                     closed_fut.await;
+                                    // Reset the tso discover primary client, it's may be stale.
+                                    cli.pd_connector.reset_tso_discover().await;
                                     info!("New TSO stream is closed, reconnect to PD");
                                 }
                                 // Try to build the new tso. If build failure, just update the
@@ -206,6 +208,7 @@ impl RpcClient {
                                 cli.update_new_tso(new_tso);
                                 if build_success {
                                     // new tso updated, wait for tso closed.
+                                    info!("New TSO recovered, use new TSO instead of legacy TSO");
                                     continue;
                                 }
 
