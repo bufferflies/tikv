@@ -21,6 +21,7 @@ pub const PROP_KEY_TOMBS: &str = "tombs";
 pub const PROP_KEY_KV_SIZE: &str = "kv_size";
 pub const PROP_KEY_IN_USE_TOTAL_BLOB_SIZE: &str = "in_use_total_blob_size";
 pub const PROP_KEY_ENCRYPTION_VER: &str = "encryption_ver";
+pub const PROP_KEY_L0_VERSION: &str = "l0_ver";
 pub const AUX_INDEX_BINARY_FUSE8: u32 = 1;
 pub const INDEX_FORMAT_V1: u32 = 1;
 pub const BLOCK_FORMAT_V1: u32 = 1;
@@ -29,6 +30,7 @@ pub const LZ4_COMPRESSION: u8 = 1;
 pub const ZSTD_COMPRESSION: u8 = 2;
 pub const TABLE_FORMAT_V1: u16 = 1;
 pub const MAGIC_NUMBER: u32 = 2940551257;
+pub const MAGIC_NUMBER_SPLIT_L0: u32 = 2940551258;
 pub const BLOCK_ADDR_SIZE: usize = mem::size_of::<BlockAddress>();
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -37,6 +39,7 @@ pub struct TableBuilderOptions {
     pub max_table_size: usize,
     pub compression_tps: [u8; 3],
     pub compression_lvl: i32,
+    pub flush_split_l0: bool,
 }
 
 impl Default for TableBuilderOptions {
@@ -46,6 +49,7 @@ impl Default for TableBuilderOptions {
             max_table_size: 16 * 1024 * 1024,
             compression_tps: [LZ4_COMPRESSION, ZSTD_COMPRESSION, ZSTD_COMPRESSION],
             compression_lvl: 3,
+            flush_split_l0: false,
         }
     }
 }
@@ -126,6 +130,7 @@ pub struct Builder {
     /// Total size of the in use values stored in the blob table.
     total_blob_size: u64,
     encryption_key: Option<EncryptionKey>,
+    l0_version: u64,
 }
 
 impl Builder {
@@ -149,6 +154,10 @@ impl Builder {
         x
     }
 
+    pub fn set_l0_version(&mut self, l0_version: u64) {
+        self.l0_version = l0_version;
+    }
+
     pub fn reset(&mut self, sst_fid: u64) {
         self.sst_fid = sst_fid;
         self.block_builder.reset_all();
@@ -158,6 +167,8 @@ impl Builder {
         self.biggest.truncate(0);
         self.max_ts = 0;
         self.tombs = 0;
+        self.total_blob_size = 0;
+        self.old_entries = 0;
         self.kv_size = 0;
     }
 
@@ -298,7 +309,11 @@ impl Builder {
         footer.compression_type = self.block_builder.compression_tp;
         footer.checksum_type = self.checksum_tp;
         footer.table_format_version = TABLE_FORMAT_V1;
-        footer.magic = MAGIC_NUMBER;
+        footer.magic = if self.l0_version > 0 {
+            MAGIC_NUMBER_SPLIT_L0
+        } else {
+            MAGIC_NUMBER
+        };
         data_buf.extend_from_slice(footer.marshal());
 
         BuildResult {
@@ -349,6 +364,13 @@ impl Builder {
                 buf,
                 PROP_KEY_ENCRYPTION_VER.as_bytes(),
                 &encryption_key.current_ver.to_le_bytes(),
+            );
+        }
+        if self.l0_version > 0 {
+            Builder::add_property(
+                buf,
+                PROP_KEY_L0_VERSION.as_bytes(),
+                &self.l0_version.to_le_bytes(),
             );
         }
         if self.checksum_tp == CRC32C {

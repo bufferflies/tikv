@@ -44,6 +44,9 @@ impl EngineCore {
                     FileMeta::from_l0_table(flush.get_l0_create()),
                 );
             }
+            for l0 in flush.get_l0_creates() {
+                ids.insert(l0.get_id(), FileMeta::from_l0_table(l0));
+            }
         }
         if cs.has_compaction() {
             let comp = cs.get_compaction();

@@ -5,12 +5,13 @@ use std::{ops::Deref, sync::Arc};
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use cloud_encryption::EncryptionKey;
+use kvenginepb::L0Create;
 use moka::sync::SegmentedCache;
 
 use super::*;
 use crate::{
     max_ts_by_cf,
-    table::{blobtable::BlobRef, table::Result, InnerKey, TableExt, Value},
+    table::{blobtable::BlobRef, table::Result, Error, InnerKey, TableExt, Value},
     LOCK_CF, NUM_CFS, WRITE_CF,
 };
 
@@ -82,6 +83,11 @@ impl L0TableCore {
         let mut footer = L0Footer::default();
         let footer_buf = file.read(footer_off, L0_FOOTER_SIZE)?;
         footer.unmarshal(footer_buf.chunk());
+        if footer.magic == MAGIC_NUMBER_SPLIT_L0 {
+            return Self::new_write_cf_l0(file, cache, encryption_key);
+        } else if footer.magic != MAGIC_NUMBER {
+            return Err(Error::InvalidMagicNumber);
+        }
         let cf_offs_off = footer_off - 4 * NUM_CFS as u64;
         let cf_offs_buf = file.read(cf_offs_off, 4 * NUM_CFS)?;
         let mut cf_offs = [0u32; NUM_CFS];
@@ -128,6 +134,35 @@ impl L0TableCore {
             footer,
             file,
             cfs,
+            max_ts,
+            entries,
+            kv_size,
+            smallest,
+            biggest,
+            total_blob_size,
+        }))
+    }
+
+    fn new_write_cf_l0(
+        file: Arc<dyn File>,
+        cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
+        encryption_key: Option<EncryptionKey>,
+    ) -> Result<Option<Self>> {
+        let tbl = SsTable::new(file.clone(), cache, false, encryption_key)?;
+        let entries = tbl.entries as u64;
+        let kv_size = tbl.kv_size;
+        let mut footer = L0Footer::default();
+        footer.num_cfs = NUM_CFS as u32;
+        footer.magic = MAGIC_NUMBER;
+        footer.version = tbl.l0_version;
+        let smallest = tbl.clone_smallest();
+        let biggest = tbl.clone_biggest();
+        let max_ts = tbl.max_ts;
+        let total_blob_size = tbl.total_blob_size();
+        Ok(Some(Self {
+            footer,
+            file,
+            cfs: [Some(tbl), None, None],
             max_ts,
             entries,
             kv_size,
@@ -271,7 +306,7 @@ impl L0Builder {
         self.count += 1;
     }
 
-    pub fn finish(&mut self) -> Bytes {
+    pub fn finish(&mut self) -> (L0Create, Bytes) {
         let mut estimated_size = 0;
         for builder in &self.builders {
             estimated_size += builder.estimated_size();
@@ -291,34 +326,30 @@ impl L0Builder {
         buf.put_u64_le(self.version);
         buf.put_u32_le(NUM_CFS as u32);
         buf.put_u32_le(MAGIC_NUMBER);
-        Bytes::from(buf)
+        let (smallest, biggest) = self.smallest_biggest();
+        let mut l0_create = L0Create::new();
+        l0_create.set_id(self.fid);
+        l0_create.set_smallest(smallest);
+        l0_create.set_biggest(biggest);
+        (l0_create, buf.into())
     }
 
-    pub fn smallest_biggest(&self) -> (Bytes, Bytes) {
-        let mut smallest_buf = BytesMut::new();
-        let mut biggest_buf = BytesMut::new();
+    fn smallest_biggest(&self) -> (Vec<u8>, Vec<u8>) {
+        let mut smallest_buf = vec![];
+        let mut biggest_buf = vec![];
         for builder in &self.builders {
             if !builder.get_smallest().is_empty()
-                && (smallest_buf.is_empty() || builder.get_smallest() < smallest_buf)
+                && (smallest_buf.is_empty() || builder.get_smallest() < smallest_buf.as_slice())
             {
                 smallest_buf.truncate(0);
                 smallest_buf.extend_from_slice(builder.get_smallest());
             }
-            if builder.get_biggest() > biggest_buf {
+            if builder.get_biggest() > biggest_buf.as_slice() {
                 biggest_buf.truncate(0);
                 biggest_buf.extend_from_slice(builder.get_biggest());
             }
         }
-        (smallest_buf.freeze(), biggest_buf.freeze())
-    }
-
-    pub fn to_l0_create(&self) -> kvenginepb::L0Create {
-        let (smallest, biggest) = self.smallest_biggest();
-        let mut l0_create = kvenginepb::L0Create::new();
-        l0_create.set_id(self.fid);
-        l0_create.set_smallest(smallest.to_vec());
-        l0_create.set_biggest(biggest.to_vec());
-        l0_create
+        (smallest_buf, biggest_buf)
     }
 
     pub fn total_blob_size(&self) -> u64 {

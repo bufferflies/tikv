@@ -3,6 +3,7 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     iter::Iterator as StdIterator,
+    mem,
     ops::Deref,
 };
 
@@ -10,6 +11,7 @@ use bytes::{Bytes, BytesMut};
 use cloud_encryption::EncryptionKey;
 use fail::fail_point;
 use kvenginepb as pb;
+use kvenginepb::L0Create;
 use slog_global::info;
 use tikv_util::{
     mpsc,
@@ -22,7 +24,7 @@ use crate::{
         memtable,
         memtable::CfTable,
         sstable,
-        sstable::{L0Builder, L0Table, SsTable},
+        sstable::{Builder, L0Table, SsTable, NO_COMPRESSION},
         InnerKey, Iterator,
     },
     *,
@@ -146,26 +148,28 @@ impl Engine {
             }
             flush.set_properties(filtered_props);
         }
-        let mut l0_builder = self.build_l0_table(
-            m,
-            task.inner_start(),
-            task.inner_end(),
-            task.encryption_key.clone(),
-        );
-        if l0_builder.is_empty() {
+        let results = self.build_l0_tables(m, &task);
+        if results.is_empty() {
             return Ok(cs);
         }
-        let (tx, rx) = tikv_util::mpsc::bounded(2);
-        let data = l0_builder.finish();
-        let l0_create = l0_builder.to_l0_create();
-        self.persist_tables(data, l0_create, tx, task.id_ver);
+        let num_l0s = results.len();
+        let (tx, rx) = mpsc::bounded(num_l0s);
+        for (l0_create, data) in results {
+            self.persist_table(l0_create, data, tx.clone(), task.id_ver);
+        }
         let mut errs = vec![];
-        match rx.recv().unwrap() {
-            Ok(l0_create) => {
-                flush.set_l0_create(l0_create);
-            }
-            Err(err) => {
-                errs.push(err);
+        for _ in 0..num_l0s {
+            match rx.recv().unwrap() {
+                Ok(l0_create) => {
+                    if self.opts.table_builder_options.flush_split_l0 {
+                        flush.mut_l0_creates().push(l0_create);
+                    } else {
+                        flush.set_l0_create(l0_create);
+                    }
+                }
+                Err(err) => {
+                    errs.push(err);
+                }
             }
         }
         assert!(errs.is_empty());
@@ -237,28 +241,23 @@ impl Engine {
                 initial_flush.mut_blob_creates().push(blob_create.clone());
             }
         }
-        let num_mem_tables = flush.mem_tbls.len();
-        let (tx, rx) = mpsc::bounded(num_mem_tables);
+        let (tx, rx) = mpsc::unbounded();
+        let mut send_cnt = 0;
         for m in &flush.mem_tbls {
-            let mut l0_builder = self.build_l0_table(
-                m,
-                task.inner_start(),
-                task.inner_end(),
-                task.encryption_key.clone(),
-            );
-            let data = l0_builder.finish();
-            let l0_create = l0_builder.to_l0_create();
-            self.persist_tables(data, l0_create, tx.clone(), task.id_ver);
+            let results = self.build_l0_tables(m, &task);
+            for (l0_create, data) in results {
+                self.persist_table(l0_create, data, tx.clone(), task.id_ver);
+                send_cnt += 1;
+            }
         }
         let mut errs = vec![];
-        for _ in 0..num_mem_tables {
+        for _ in 0..send_cnt {
             match rx.recv().unwrap() {
                 Ok(l0_create) => {
                     initial_flush.mut_l0_creates().push(l0_create);
                 }
                 Err(err) => {
                     errs.push(err);
-                    break;
                 }
             }
         }
@@ -268,21 +267,68 @@ impl Engine {
         Err(errs.pop().unwrap())
     }
 
-    pub(crate) fn build_l0_table(
-        &self,
-        m: &CfTable,
-        start: InnerKey<'_>,
-        end: InnerKey<'_>,
-        encryption_key: Option<EncryptionKey>,
-    ) -> L0Builder {
-        let sst_fid = self.id_allocator.alloc_id(1).unwrap().pop().unwrap();
+    pub(crate) fn build_l0_tables(&self, m: &CfTable, task: &FlushTask) -> Vec<(L0Create, Bytes)> {
+        let start = task.inner_start();
+        let end = task.inner_end();
+        let opts = &self.opts.table_builder_options;
+        let split_l0_size = opts.max_table_size as u64 * 3 / 2; // use fixed ratio for split l0 size.
+        let write_cf_size = m.get_cf(WRITE_CF).size();
+        let (fid_count, l0_builder_start_cf) =
+            if opts.flush_split_l0 && write_cf_size > split_l0_size {
+                ((write_cf_size / split_l0_size) + 2, LOCK_CF)
+            } else {
+                (1, WRITE_CF)
+            };
+        let mut l0s = vec![];
+        let mut fids = self.id_allocator.alloc_id(fid_count as usize).unwrap();
+        let l0_fid = fids.pop().unwrap();
+        if l0_builder_start_cf == LOCK_CF {
+            let mut write_cf_builder = Builder::new(
+                fids.pop().unwrap(),
+                opts.block_size,
+                NO_COMPRESSION,
+                0,
+                task.encryption_key.clone(),
+            );
+            write_cf_builder.set_l0_version(m.get_version());
+            let mut it = m.get_cf(WRITE_CF).new_iterator(false);
+            it.seek(start);
+            let mut last_key = vec![];
+            while it.valid() {
+                let key = it.key();
+                if key >= end {
+                    break;
+                }
+                let is_new_key = key.deref() != last_key.as_slice();
+                if is_new_key {
+                    last_key.truncate(0);
+                    last_key.extend_from_slice(key.deref());
+                }
+                if write_cf_builder.estimated_size() as u64 > split_l0_size && is_new_key {
+                    // We can not ensure the order of l0 files with the same version, so we must
+                    // ensure a single key's multiple versions are stored
+                    // in a single file.
+                    l0s.push(Self::finish_builder_for_l0(&mut write_cf_builder));
+                    let next_fid = fids
+                        .pop()
+                        .unwrap_or_else(|| self.id_allocator.alloc_id(1).unwrap().pop().unwrap());
+                    write_cf_builder.reset(next_fid);
+                }
+                let v = it.value();
+                write_cf_builder.add(key, &v, None);
+                it.next_all_version();
+            }
+            if !write_cf_builder.is_empty() {
+                l0s.push(Self::finish_builder_for_l0(&mut write_cf_builder));
+            }
+        }
         let mut l0_builder = sstable::L0Builder::new(
-            sst_fid,
+            l0_fid,
             self.opts.table_builder_options.block_size,
             m.get_version(),
-            encryption_key,
+            task.encryption_key.clone(),
         );
-        for cf in 0..NUM_CFS {
+        for cf in l0_builder_start_cf..NUM_CFS {
             let skl = m.get_cf(cf);
             if skl.is_empty() {
                 continue;
@@ -311,13 +357,30 @@ impl Engine {
                 it.next_all_version();
             }
         }
-        l0_builder
+        if !l0_builder.is_empty() {
+            l0s.push(l0_builder.finish());
+        }
+        if l0s.len() > 1 {
+            let tag = ShardTag::new(self.get_engine_id(), task.id_ver);
+            info!("{} flush split to {} files", tag, l0s.len());
+        }
+        l0s
     }
 
-    pub(crate) fn persist_tables(
+    fn finish_builder_for_l0(builder: &mut Builder) -> (L0Create, Bytes) {
+        let mut data_buf = Vec::with_capacity(builder.estimated_size());
+        let mut res = builder.finish(0, &mut data_buf);
+        let mut l0_create = L0Create::new();
+        l0_create.set_id(res.id);
+        l0_create.set_smallest(mem::take(&mut res.smallest));
+        l0_create.set_biggest(mem::take(&mut res.biggest));
+        (l0_create, data_buf.into())
+    }
+
+    pub(crate) fn persist_table(
         &self,
-        data: Bytes,
         l0_create: pb::L0Create,
+        data: Bytes,
         tx: tikv_util::mpsc::Sender<Result<pb::L0Create>>,
         id_ver: IdVer,
     ) {

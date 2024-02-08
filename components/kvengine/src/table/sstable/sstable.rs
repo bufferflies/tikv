@@ -165,6 +165,10 @@ impl SsTable {
     pub(crate) fn clone_smallest(&self) -> Bytes {
         self.smallest_buf.clone()
     }
+
+    pub(crate) fn clone_biggest(&self) -> Bytes {
+        self.biggest_buf.clone()
+    }
 }
 
 impl TableExt for SsTable {
@@ -196,6 +200,7 @@ pub struct SsTableCore {
     old_idx: TtlCache<Index>,
     encryption_key: Option<EncryptionKey>,
     encryption_ver: u32,
+    pub l0_version: u64,
 }
 
 impl SsTableCore {
@@ -213,7 +218,7 @@ impl SsTableCore {
         }
         let footer_data = file.read(end_off - FOOTER_SIZE as u64, FOOTER_SIZE)?;
         footer.unmarshal(footer_data.chunk());
-        if footer.magic != MAGIC_NUMBER {
+        if footer.magic != MAGIC_NUMBER && footer.magic != MAGIC_NUMBER_SPLIT_L0 {
             return Err(table::Error::InvalidMagicNumber);
         }
         let props_data = file.read(
@@ -232,6 +237,7 @@ impl SsTableCore {
         let mut kv_size = None;
         let mut in_use_total_blob_size = 0u64;
         let mut encryption_ver = 0;
+        let mut l0_version = 0;
         while !prop_slice.is_empty() {
             let (key, val, remain) = parse_prop_data(prop_slice);
             prop_slice = remain;
@@ -253,6 +259,8 @@ impl SsTableCore {
                 in_use_total_blob_size = LittleEndian::read_u64(val);
             } else if key == PROP_KEY_ENCRYPTION_VER.as_bytes() {
                 encryption_ver = LittleEndian::read_u32(val);
+            } else if key == PROP_KEY_L0_VERSION.as_bytes() {
+                l0_version = LittleEndian::read_u64(val);
             }
         }
         let core = Self {
@@ -274,6 +282,7 @@ impl SsTableCore {
             old_idx: TtlCache::default(),
             encryption_ver,
             encryption_key,
+            l0_version,
         };
         Ok(core)
     }

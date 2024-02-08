@@ -1725,9 +1725,8 @@ fn compact_destroy_range(
             if builder.is_empty() {
                 continue;
             }
-            let data = builder.finish();
-            let (smallest, biggest) = builder.smallest_biggest();
-            (data, smallest.to_vec(), biggest.to_vec())
+            let (mut l0_create, data) = builder.finish();
+            (data, l0_create.take_smallest(), l0_create.take_biggest())
         } else {
             let t = sstable::SsTable::new(file, None, false, ctx.encryption_key.clone()).unwrap();
             let mut builder = sstable::Builder::new(
@@ -1845,9 +1844,8 @@ fn compact_truncate_ts(
             if builder.is_empty() {
                 continue;
             }
-            let data = builder.finish();
-            let (smallest, biggest) = builder.smallest_biggest();
-            (data, smallest.to_vec(), biggest.to_vec())
+            let (mut l0_create, data) = builder.finish();
+            (data, l0_create.take_smallest(), l0_create.take_biggest())
         } else {
             let t = sstable::SsTable::new(file, None, false, ctx.encryption_key.clone()).unwrap();
             let mut builder = sstable::Builder::new(
@@ -1967,9 +1965,8 @@ fn compact_trim_over_bound(
             if builder.is_empty() {
                 continue;
             }
-            let data = builder.finish();
-            let (smallest, biggest) = builder.smallest_biggest();
-            (data, smallest.to_vec(), biggest.to_vec())
+            let (mut l0_create, data) = builder.finish();
+            (data, l0_create.take_smallest(), l0_create.take_biggest())
         } else {
             let t = sstable::SsTable::new(file, None, false, ctx.encryption_key.clone()).unwrap();
             let mut builder = sstable::Builder::new(

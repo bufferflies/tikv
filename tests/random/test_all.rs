@@ -262,7 +262,7 @@ fn prepare_cluster(
         conf.raft_store.abnormal_leader_missing_duration = ReadableDuration::secs(3);
         conf.raft_store.max_leader_missing_duration = ReadableDuration::secs(5);
         conf.rocksdb.writecf.block_size = ReadableSize::kb(4);
-        conf.rocksdb.writecf.write_buffer_size = ReadableSize::kb(48);
+        conf.rocksdb.writecf.write_buffer_size = ReadableSize::kb(96);
         conf.rocksdb.writecf.target_file_size_base = ReadableSize::kb(16);
         conf.rfengine.target_file_size = ReadableSize::mb(8);
         conf.rfengine.batch_compression_threshold =
@@ -274,6 +274,7 @@ fn prepare_cluster(
         conf.security = security_conf.clone();
         conf.kvengine.compaction_tombs_count = 100;
         conf.kvengine.max_del_range_delay = ReadableDuration(Duration::from_secs(3));
+        conf.kvengine.flush_split_l0 = true;
         conf.storage.flow_control.enable = true;
     };
     let pd_wrapper = PdWrapper::new_test(1, security_conf);

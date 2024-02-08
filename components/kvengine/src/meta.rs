@@ -435,6 +435,9 @@ impl ShardMeta {
             let l0 = flush.get_l0_create();
             self.add_file(l0.id, -1, 0, l0.get_smallest(), l0.get_biggest());
         }
+        for l0 in flush.get_l0_creates() {
+            self.add_file(l0.id, -1, 0, l0.get_smallest(), l0.get_biggest());
+        }
         let new_data_seq = flush.get_version() - self.base_version;
         if self.data_sequence < new_data_seq {
             debug!(

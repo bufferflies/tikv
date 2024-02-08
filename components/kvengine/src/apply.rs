@@ -222,25 +222,34 @@ impl EngineCore {
         let flush = cs.get_flush();
         let old_data = shard.get_data();
         let mut new_mem_tbls = old_data.mem_tbls.clone();
-        if flush.has_l0_create() {
-            let l0_id = flush.get_l0_create().get_id();
-            let l0_tbl = cs.l0_tables.get(&l0_id).unwrap().clone();
+        if flush.has_l0_create() || !flush.get_l0_creates().is_empty() {
+            let mut l0s = vec![];
+            if flush.has_l0_create() {
+                let l0_id = flush.get_l0_create().get_id();
+                let l0_tbl = cs.l0_tables.get(&l0_id).unwrap().clone();
+                l0s.push(l0_tbl);
+            }
+            for l0_create in flush.get_l0_creates() {
+                let l0_tbl = cs.l0_tables.get(&l0_create.get_id()).unwrap().clone();
+                l0s.push(l0_tbl);
+            }
+            let l0_version = l0s.first().unwrap().version();
             let last = new_mem_tbls.pop().unwrap();
             let last_version = last.get_version();
-            if last_version != l0_tbl.version() {
+            if last_version != l0_version {
                 panic!(
                     "{} mem table last version {}, size {} not match L0 version {}, shard meta seq {}, flush seq {}",
                     shard.tag(),
                     last_version,
                     last.size(),
-                    l0_tbl.version(),
+                    l0_version,
                     shard.get_meta_sequence(),
                     cs.sequence,
                 );
             }
 
-            let mut new_l0_tbls = Vec::with_capacity(old_data.l0_tbls.len() + 1);
-            new_l0_tbls.push(l0_tbl);
+            let mut new_l0_tbls = Vec::with_capacity(old_data.l0_tbls.len() + l0s.len());
+            new_l0_tbls.extend_from_slice(l0s.as_slice());
             new_l0_tbls.extend_from_slice(old_data.l0_tbls.as_slice());
 
             let new_data = ShardData::new(

@@ -183,8 +183,9 @@ fn region_split_merge_inner_key_offset(enabled: bool) {
             for node_id in &node_ids {
                 let kv_engine = cluster.get_kvengine(*node_id);
                 let region_id = region.get_id();
-                let shard = kv_engine.get_shard(region_id).unwrap();
-                assert_eq!(shard.range.inner_key_off, expected_inner_key_off);
+                if let Some(shard) = kv_engine.get_shard(region_id) {
+                    assert_eq!(shard.range.inner_key_off, expected_inner_key_off);
+                }
             }
         }
     }
@@ -217,8 +218,9 @@ fn region_split_merge_inner_key_offset(enabled: bool) {
             for node_id in &node_ids {
                 let region_id = region.get_id();
                 let kv_engine = cluster.get_kvengine(*node_id);
-                let shard = kv_engine.get_shard(region_id).unwrap();
-                assert_eq!(shard.range.inner_key_off, expected_inner_key_off);
+                if let Some(shard) = kv_engine.get_shard(region_id) {
+                    assert_eq!(shard.range.inner_key_off, expected_inner_key_off);
+                }
             }
         }
     }

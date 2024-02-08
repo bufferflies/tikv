@@ -10,7 +10,6 @@ use std::{
 };
 
 use byteorder::{ByteOrder, LittleEndian};
-use log_wrappers::hex_encode_upper;
 use thiserror::Error;
 
 use super::blobtable::BlobRef;
@@ -446,7 +445,7 @@ pub struct InnerKey<'a> {
 
 impl Debug for InnerKey<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", hex_encode_upper(self.key))
+        write!(f, "{}", log_wrappers::hex_encode_upper(self.key))
     }
 }
 

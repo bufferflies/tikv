@@ -1455,7 +1455,8 @@ fn new_test_options(
     opts.base_size = 64 << 10;
     opts.table_builder_options.block_size = block_size;
     opts.table_builder_options.max_table_size = 8 << 10;
-    opts.max_mem_table_size = 16 << 10;
+    opts.table_builder_options.flush_split_l0 = true;
+    opts.max_mem_table_size = 32 << 10; // mem-table size should be much larger than max_table_size.
     opts.num_compactors = 2;
     opts.blob_table_build_options.min_blob_size = min_blob_size;
     opts.max_del_range_delay = Duration::from_secs(1);
@@ -1534,7 +1535,7 @@ fn new_l0table_file(
             builder.add(cf, InnerKey::from_inner_buf(key.as_bytes()), &val, None);
         }
     }
-    let data = builder.finish();
+    let (_, data) = builder.finish();
     let opts = dfs::Options::new(1, 1);
     let runtime = fs.get_runtime();
     runtime.block_on(fs.create(id, data.clone(), opts)).unwrap();

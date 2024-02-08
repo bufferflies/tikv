@@ -484,6 +484,9 @@ impl SnapAccessCore {
         let key_hash = farmhash::fingerprint64(inner_key.deref());
         for l0 in &self.data.l0_tbls {
             if let Some(tbl) = &l0.get_cf(cf) {
+                if inner_key < tbl.smallest() || tbl.biggest() < inner_key {
+                    continue;
+                }
                 let v = tbl.get(inner_key, version, key_hash, out_val_owner, 0);
                 path.l0 = path.l0.saturating_add(1);
                 if v.is_valid() {

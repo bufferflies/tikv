@@ -50,6 +50,9 @@ pub struct Config {
     /// remote worker.
     pub remote_coprocessor_min_blocks: usize,
 
+    /// if enabled, flush large L0 file will split into multiple files.
+    pub flush_split_l0: bool,
+
     pub per_keyspace_configs: Vec<PerKeyspaceConfig>,
     // Note: `per_keyspace_configs` must be the last field. Otherwise serializing the config
     // will meet a "ValueAfterTable" error.
@@ -66,6 +69,7 @@ impl Default for Config {
             per_keyspace_configs: vec![],
             remote_coprocessor_addr: "".to_string(),
             remote_coprocessor_min_blocks: 512,
+            flush_split_l0: false,
         }
     }
 }
