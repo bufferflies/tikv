@@ -3,6 +3,7 @@
 pub(super) mod arena;
 pub mod cftable;
 pub mod skl;
+mod skl_ext;
 
 pub use arena::*;
 pub use cftable::*;
