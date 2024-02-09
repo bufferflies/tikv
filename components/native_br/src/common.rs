@@ -399,7 +399,12 @@ fn collect_all_chunk_files(
     dfs: Arc<S3Fs>,
     wal_chunks: Vec<(u32, Vec<String>)>,
 ) -> Result<Vec<(u32, Vec<Bytes>)>> {
-    let epoch_cnt = wal_chunks.len();
+    // Should keep all epoch ids to properly handle epoch with no chunk.
+    let mut chunks_map: HashMap<u32, Vec<(String, Bytes)>> = HashMap::from_iter(
+        wal_chunks
+            .iter()
+            .map(|(epoch_id, chunks)| (*epoch_id, Vec::with_capacity(chunks.len()))),
+    );
     let objects_cnt = wal_chunks
         .iter()
         .map(|(_, chunks)| chunks.len())
@@ -418,7 +423,6 @@ fn collect_all_chunk_files(
         .get_objects(all_chunk_keys_with_option)
         .map_err(|e| Error::DfsError(dfs::Error::S3(e)))?;
 
-    let mut chunks_map = HashMap::with_capacity(epoch_cnt);
     for (key, value) in chunks.into_iter() {
         let (epoch_id, ..) = parse_wal_chunk_key(Some(&key)).unwrap();
 
@@ -428,10 +432,7 @@ fn collect_all_chunk_files(
             epoch_id,
             value.len()
         );
-        chunks_map
-            .entry(epoch_id)
-            .or_insert_with(Vec::new)
-            .push((key, value));
+        chunks_map.get_mut(&epoch_id).unwrap().push((key, value));
     }
     let mut sorted_by_epoch = chunks_map.into_iter().collect::<Vec<_>>();
     sorted_by_epoch.sort_by_key(|k| k.0);
@@ -468,10 +469,11 @@ fn replay_wal_chunks(
     let mut epoch_wal = assemble_wal_chunks(chunks)?;
 
     info!(
-        "assemble wal from chunks done, epoch {} wal size {} backup offset {}",
+        "assemble wal from chunks done, epoch {} wal size {} backup_epoch {} backup_offset {}",
         epoch_id,
         epoch_wal.len(),
-        backup_offset
+        backup_epoch,
+        backup_offset,
     );
     let end_offset = if backup_epoch == epoch_id && backup_offset <= epoch_wal.len() as u64 {
         // Replay finished.

@@ -858,6 +858,86 @@ fn test_restore_keyspace_with_resolve_locks() {
     cluster.stop();
 }
 
+/// This test is to verify that `restore_keyspace` can handle the case that in
+/// lightweight backup, the last epoch has no chunk in DFS.
+///
+/// See https://github.com/tidbcloud/cloud-storage-engine/issues/1319.
+#[test]
+fn test_restore_keyspace_with_no_chunk() {
+    const KEYSPACE_ID: u32 = 1;
+
+    test_util::init_log_for_test();
+    let (_temp_dir, _oss, dfs_config) = prepare_dfs("test_restore_keyspace_");
+    let s3fs = Arc::new(S3Fs::new(
+        dfs_config.prefix.clone(),
+        dfs_config.s3_endpoint.clone(),
+        dfs_config.s3_key_id.clone(),
+        dfs_config.s3_secret_key.clone(),
+        dfs_config.s3_region.clone(),
+        dfs_config.s3_bucket.clone(),
+    ));
+    let reporter = Arc::new(DummyStepReporter::default());
+    let runtime = Runtime::new().unwrap();
+
+    let mut cluster = ServerCluster::new(
+        alloc_node_id_vec(NODES_COUNT),
+        |_, conf: &mut TikvConfig| {
+            conf.dfs = dfs_config.clone();
+            conf.rfengine.lightweight_backup = true;
+            conf.enable_inner_key_offset = true;
+        },
+    );
+    cluster.wait_region_replicated(&[], 3);
+    let mut client = cluster.new_client();
+    client.split(&get_keyspace_prefix(KEYSPACE_ID));
+    client.split(&get_keyspace_prefix(KEYSPACE_ID + 1));
+
+    // Import small data
+    let i_to_key = gen_keyspace_key(KEYSPACE_ID);
+    client.put_kv(0..1, &i_to_key, i_to_val(BASIC_DATA_LEN));
+    client.verify_data_with_ref_store();
+
+    // Perform backup.
+    let snapshot_backup_name = generate_backup_name();
+    {
+        let backup_ts = client.get_ts().into_inner();
+        let backup_config = backup::BackupConfig {
+            dfs: dfs_config,
+            skip_keyspace_meta: true,
+            ..Default::default()
+        };
+        let (_, backup_meta) = backup::backup_cluster_with_ts(
+            backup_config,
+            backup::BackupType::Lightweight,
+            snapshot_backup_name.clone(),
+            cluster.get_pd_client().as_ref(),
+            backup_ts,
+            None,
+        )
+        .expect("backup::backup_cluster");
+        info!("backup_cluster result: {:?}", backup_meta);
+    }
+
+    // Restore keyspace.
+    restore_keyspace::restore_keyspace(
+        KEYSPACE_ID,
+        KEYSPACE_ID,
+        &snapshot_backup_name,
+        None,
+        s3fs,
+        RestoreConfig::default(),
+        cluster.get_pd_client(),
+        &runtime,
+        None,
+        reporter,
+    )
+    .unwrap();
+
+    // Verify restored data.
+    client.verify_data_with_ref_store();
+    cluster.stop();
+}
+
 fn i_to_key(i: usize) -> Vec<u8> {
     format!("xkey_{:08}", i).into_bytes()
 }

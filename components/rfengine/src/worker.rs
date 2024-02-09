@@ -177,11 +177,12 @@ impl Worker {
             if epoch_id > writer.epoch_id || epoch_id + 3 < writer.epoch_id || start_off >= end_off
             {
                 let msg = format!(
-                    "{}: invalid dump wal chunk epoch {} start_off {} end_off {} file_off {}",
+                    "{}: invalid dump wal chunk epoch {} start_off {} end_off {} writer epoch {}, file_off {}",
                     self.manifest.get_engine_id(),
                     epoch_id,
                     start_off,
                     end_off,
+                    writer.epoch_id,
                     writer.file_off
                 );
                 error!("{}", msg);
