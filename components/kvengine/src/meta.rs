@@ -530,6 +530,10 @@ impl ShardMeta {
             .any(|deleted| !self.has_file_at_level(deleted.get_id(), deleted.get_level()))
     }
 
+    pub fn is_empty_table_change(tc: &pb::TableChange) -> bool {
+        tc.get_table_deletes().is_empty() && tc.get_table_creates().is_empty()
+    }
+
     fn apply_table_change(&mut self, tc: &pb::TableChange) {
         for deleted in tc.get_table_deletes() {
             self.delete_file(deleted.get_id(), deleted.get_level());

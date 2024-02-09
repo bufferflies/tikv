@@ -751,6 +751,7 @@ impl Engine {
 
         let mut cs = if overlaps.is_empty() {
             let mut cs = pb::ChangeSet::default();
+            // Must `set_truncate_ts` for checking the type of ChangeSet properly.
             cs.set_truncate_ts(pb::TableChange::default());
             cs
         } else {

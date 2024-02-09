@@ -1728,7 +1728,7 @@ impl BackupCluster {
         let res_cs = kvengine
             .truncate_with_ts(&shard, self.truncate_ts.into())?
             .unwrap();
-        if res_cs.has_truncate_ts() {
+        if res_cs.has_truncate_ts() && !ShardMeta::is_empty_table_change(res_cs.get_truncate_ts()) {
             let shard = self.get_shard_mut(shard_id).unwrap();
             debug!(
                 "Keyspace {} before truncate ts: {:?}, table change: {:?}",
