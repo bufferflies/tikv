@@ -929,8 +929,9 @@ impl ClusterDataStats {
                     region, self.regions
                 )
             })?;
-            let shard_size: u64 = region_shard_stats.total_size;
-            if shard_size == 0 {
+            let shard_level_size: u64 =
+                region_shard_stats.total_size - region_shard_stats.mem_table_size;
+            if shard_level_size == 0 {
                 continue;
             }
             if let Some(buckets) = pd_client.get_buckets(region_id) {
@@ -941,15 +942,15 @@ impl ClusterDataStats {
                         assert!(prev_key < key, "region {} buckets {:?}", region_id, buckets);
                     }
                 }
-                let expected_bucket_count = (shard_size + bucket_size - 1) / bucket_size;
+                let expected_bucket_count = (shard_level_size + bucket_size - 1) / bucket_size;
                 let actual_bucket_count = buckets.count() as u64;
                 let ratio = expected_bucket_count as f64 / actual_bucket_count as f64;
                 if !(0.3..=3.0).contains(&ratio) {
                     return Err(format!(
-                        "region {} buckets {:?}, shard_size {}, expected {}, actual {}, region {:?}, shard stats {:?}",
+                        "region {} buckets {:?}, shard_level_size {}, expected {}, actual {}, region {:?}, shard stats {:?}",
                         region_id,
                         buckets,
-                        shard_size,
+                        shard_level_size,
                         expected_bucket_count,
                         actual_bucket_count,
                         region,
@@ -958,8 +959,8 @@ impl ClusterDataStats {
                 };
             } else {
                 return Err(format!(
-                    "region {} no buckets, shard_size {}, region {:?}",
-                    region_id, shard_size, region,
+                    "region {} no buckets, shard_level_size {}, region {:?}",
+                    region_id, shard_level_size, region,
                 ));
             }
         }
