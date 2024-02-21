@@ -21,7 +21,9 @@ use kvengine::{
 };
 use kvproto::keyspacepb::{KeyspaceMeta, KeyspaceState};
 use native_br::{
-    common::create_pd_client, restore::get_cluster_backup_meta, restore_keyspace::BackupCluster,
+    common::create_pd_client,
+    restore::{get_cluster_backup_meta, RestoreConfig},
+    restore_keyspace::BackupCluster,
 };
 use protobuf::Message;
 use schema::schema::{DbInfo, STATE_PUBLIC};
@@ -142,12 +144,16 @@ pub(crate) fn execute_check_table(args: CheckTableArgs) {
         config.keyspace_ids.clone()
     };
     let keyspace_id = keyspace_ids[0];
+    let restore_conf = RestoreConfig {
+        security: config.security.clone(),
+        ..Default::default()
+    };
     let mut cluster = BackupCluster::new(
         &cluster_backup,
         PathBuf::from(&config.data_dir),
         pd_client,
         s3fs.clone(),
-        config.security.clone(),
+        restore_conf,
         keyspace_id,
         keyspace_id,
         cluster_backup.backup_ts,

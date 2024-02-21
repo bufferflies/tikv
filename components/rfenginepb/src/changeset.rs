@@ -1709,6 +1709,7 @@ pub struct ClusterBackupMeta {
     pub keyspace_meta: ::std::collections::HashMap<::std::vec::Vec<u8>, ::std::vec::Vec<u8>>,
     pub meta_revision: i64,
     pub is_lightweight: bool,
+    pub tolerated_err: u32,
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
     pub cached_size: ::protobuf::CachedSize,
@@ -1864,6 +1865,21 @@ impl ClusterBackupMeta {
     pub fn set_is_lightweight(&mut self, v: bool) {
         self.is_lightweight = v;
     }
+
+    // uint32 tolerated_err = 9;
+
+
+    pub fn get_tolerated_err(&self) -> u32 {
+        self.tolerated_err
+    }
+    pub fn clear_tolerated_err(&mut self) {
+        self.tolerated_err = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_tolerated_err(&mut self, v: u32) {
+        self.tolerated_err = v;
+    }
 }
 
 impl ::protobuf::Message for ClusterBackupMeta {
@@ -1928,6 +1944,13 @@ impl ::protobuf::Message for ClusterBackupMeta {
                     let tmp = is.read_bool()?;
                     self.is_lightweight = tmp;
                 },
+                9 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint32()?;
+                    self.tolerated_err = tmp;
+                },
                 _ => {
                     ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
                 },
@@ -1963,6 +1986,9 @@ impl ::protobuf::Message for ClusterBackupMeta {
         if self.is_lightweight != false {
             my_size += 2;
         }
+        if self.tolerated_err != 0 {
+            my_size += ::protobuf::rt::value_size(9, self.tolerated_err, ::protobuf::wire_format::WireTypeVarint);
+        }
         my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
         self.cached_size.set(my_size);
         my_size
@@ -1992,6 +2018,9 @@ impl ::protobuf::Message for ClusterBackupMeta {
         }
         if self.is_lightweight != false {
             os.write_bool(8, self.is_lightweight)?;
+        }
+        if self.tolerated_err != 0 {
+            os.write_uint32(9, self.tolerated_err)?;
         }
         os.write_unknown_fields(self.get_unknown_fields())?;
         ::std::result::Result::Ok(())
@@ -2075,6 +2104,11 @@ impl ::protobuf::Message for ClusterBackupMeta {
                     |m: &ClusterBackupMeta| { &m.is_lightweight },
                     |m: &mut ClusterBackupMeta| { &mut m.is_lightweight },
                 ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint32>(
+                    "tolerated_err",
+                    |m: &ClusterBackupMeta| { &m.tolerated_err },
+                    |m: &mut ClusterBackupMeta| { &mut m.tolerated_err },
+                ));
                 ::protobuf::reflect::MessageDescriptor::new::<ClusterBackupMeta>(
                     "ClusterBackupMeta",
                     fields,
@@ -2105,6 +2139,7 @@ impl ::protobuf::Clear for ClusterBackupMeta {
         self.keyspace_meta.clear();
         self.meta_revision = 0;
         self.is_lightweight = false;
+        self.tolerated_err = 0;
         self.unknown_fields.clear();
     }
 }
@@ -2122,6 +2157,7 @@ impl ::protobuf::PbPrint for ClusterBackupMeta {
         ::protobuf::PbPrint::fmt(&self.keyspace_meta, "keyspace_meta", buf);
         ::protobuf::PbPrint::fmt(&self.meta_revision, "meta_revision", buf);
         ::protobuf::PbPrint::fmt(&self.is_lightweight, "is_lightweight", buf);
+        ::protobuf::PbPrint::fmt(&self.tolerated_err, "tolerated_err", buf);
         if old_len < buf.len() {
           buf.push(' ');
         }
@@ -2140,6 +2176,7 @@ impl ::std::fmt::Debug for ClusterBackupMeta {
         ::protobuf::PbPrint::fmt(&self.keyspace_meta, "keyspace_meta", &mut s);
         ::protobuf::PbPrint::fmt(&self.meta_revision, "meta_revision", &mut s);
         ::protobuf::PbPrint::fmt(&self.is_lightweight, "is_lightweight", &mut s);
+        ::protobuf::PbPrint::fmt(&self.tolerated_err, "tolerated_err", &mut s);
         write!(f, "{}", s)
     }
 }
@@ -3135,27 +3172,27 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     \x12\x0f\n\x05epoch\x18\x05\x20\x01(\rB\0\x12\x10\n\x06offset\x18\x06\
     \x20\x01(\x04B\0:\0\"E\n\x08WalChunk\x12\x0f\n\x05epoch\x18\x01\x20\x01(\
     \rB\0\x12\x13\n\tstart_off\x18\x02\x20\x01(\x04B\0\x12\x11\n\x07end_off\
-    \x18\x03\x20\x01(\x04B\0:\0\"\xc2\x02\n\x11ClusterBackupMeta\x12'\n\x06s\
+    \x18\x03\x20\x01(\x04B\0:\0\"\xdb\x02\n\x11ClusterBackupMeta\x12'\n\x06s\
     tores\x18\x01\x20\x03(\x0b2\x15.rfpb.StoreBackupMetaB\0\x12\x14\n\nclust\
     er_id\x18\x02\x20\x01(\x04B\0\x12\x13\n\tbackup_ts\x18\x03\x20\x01(\x04B\
     \0\x12\x12\n\x08alloc_id\x18\x04\x20\x01(\x04B\0\x12\x11\n\x07safe_ts\
     \x18\x05\x20\x01(\x04B\0\x12G\n\rkeyspace_meta\x18\x06\x20\x03(\x0b2..rf\
     pb.ClusterBackupMeta.keyspace_meta_MapEntryB\0\x12\x17\n\rmeta_revision\
     \x18\x07\x20\x01(\x03B\0\x12\x18\n\x0eis_lightweight\x18\x08\x20\x01(\
-    \x08B\0\x1a4\n\x16keyspace_meta_MapEntry\x12\t\n\x03key\x18\x01(\x0c\x12\
-    \x0b\n\x05value\x18\x02(\x0c:\x028\x01:\0\"}\n\x11RaftLogBackupFile\x12\
-    \x11\n\x07peer_id\x18\x01\x20\x01(\x04B\0\x12\x15\n\x0bfirst_index\x18\
-    \x02\x20\x01(\x04B\0\x12\x14\n\nlast_index\x18\x03\x20\x01(\x04B\0\x12\
-    \x13\n\tstart_off\x18\x04\x20\x01(\x04B\0\x12\x11\n\x07end_off\x18\x05\
-    \x20\x01(\x04B\0:\0\"W\n\x12KeySpaceBackupMeta\x12\x15\n\x0bkeyspace_id\
-    \x18\x01\x20\x01(\rB\0\x12(\n\x05files\x18\x02\x20\x03(\x0b2\x17.rfpb.Ra\
-    ftLogBackupFileB\0:\0\"(\n\x11RaftLogMetaHeader\x12\x11\n\x07version\x18\
-    \x01\x20\x01(\x04B\0:\0\"\xd7\x01\n\x16StoreRaftLogBackupMeta\x12)\n\x06\
-    header\x18\x01\x20\x01(\x0b2\x17.rfpb.RaftLogMetaHeaderB\0\x12D\n\traft_\
-    logs\x18\x02\x20\x03(\x0b2/.rfpb.StoreRaftLogBackupMeta.raft_logs_MapEnt\
-    ryB\0\x1aJ\n\x12raft_logs_MapEntry\x12\t\n\x03key\x18\x01(\r\x12%\n\x05v\
-    alue\x18\x02(\x0b2\x18.rfpb.KeySpaceBackupMeta:\x028\x01:\0B\0b\x06proto\
-    3\
+    \x08B\0\x12\x17\n\rtolerated_err\x18\t\x20\x01(\rB\0\x1a4\n\x16keyspace_\
+    meta_MapEntry\x12\t\n\x03key\x18\x01(\x0c\x12\x0b\n\x05value\x18\x02(\
+    \x0c:\x028\x01:\0\"}\n\x11RaftLogBackupFile\x12\x11\n\x07peer_id\x18\x01\
+    \x20\x01(\x04B\0\x12\x15\n\x0bfirst_index\x18\x02\x20\x01(\x04B\0\x12\
+    \x14\n\nlast_index\x18\x03\x20\x01(\x04B\0\x12\x13\n\tstart_off\x18\x04\
+    \x20\x01(\x04B\0\x12\x11\n\x07end_off\x18\x05\x20\x01(\x04B\0:\0\"W\n\
+    \x12KeySpaceBackupMeta\x12\x15\n\x0bkeyspace_id\x18\x01\x20\x01(\rB\0\
+    \x12(\n\x05files\x18\x02\x20\x03(\x0b2\x17.rfpb.RaftLogBackupFileB\0:\0\
+    \"(\n\x11RaftLogMetaHeader\x12\x11\n\x07version\x18\x01\x20\x01(\x04B\0:\
+    \0\"\xd7\x01\n\x16StoreRaftLogBackupMeta\x12)\n\x06header\x18\x01\x20\
+    \x01(\x0b2\x17.rfpb.RaftLogMetaHeaderB\0\x12D\n\traft_logs\x18\x02\x20\
+    \x03(\x0b2/.rfpb.StoreRaftLogBackupMeta.raft_logs_MapEntryB\0\x1aJ\n\x12\
+    raft_logs_MapEntry\x12\t\n\x03key\x18\x01(\r\x12%\n\x05value\x18\x02(\
+    \x0b2\x18.rfpb.KeySpaceBackupMeta:\x028\x01:\0B\0b\x06proto3\
 ";
 
 static mut file_descriptor_proto_lazy: ::protobuf::lazy::Lazy<::protobuf::descriptor::FileDescriptorProto> = ::protobuf::lazy::Lazy {

@@ -229,7 +229,7 @@ impl ServerCluster {
     }
 
     // Stop node without flush rfengine dfs worker if force is true.
-    fn stop_node_force(&mut self, node_id: u16, force: bool) {
+    pub fn stop_node_force(&mut self, node_id: u16, force: bool) {
         if let Some(node) = self.servers.remove(&node_id) {
             // Force stop node to cover the case wal chunk recovery.
             node.force_stop(force);

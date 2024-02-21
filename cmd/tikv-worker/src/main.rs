@@ -531,6 +531,7 @@ impl Config {
             skip_resolve_lock: true,
             timeout_wait_flush: self.native_br.restore_timeout_wait_flush,
             timeout_restore_snapshot: self.native_br.restore_timeout_restore_snapshot,
+            timeout_fetch_wal: self.native_br.restore_timeout_fetch_wal,
             max_retry: self.native_br.restore_max_retry,
             ..Default::default()
         }

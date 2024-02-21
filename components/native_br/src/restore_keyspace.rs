@@ -250,6 +250,8 @@ pub fn restore_keyspace(
         "new_store_id_delta" => config.new_store_id_delta,
         "timeout_wait_flush" => ?config.timeout_wait_flush,
         "timeout_restore_snapshot" => ?config.timeout_restore_snapshot,
+        "timeout_fetch_wal" => ?config.timeout_fetch_wal,
+        "tolerate_err" => ?config.tolerate_err,
         "max_retry" => config.max_retry);
     debug!(
         "Keyspace {} get cluster backup meta: {:?}",
@@ -266,7 +268,7 @@ pub fn restore_keyspace(
         working_path,
         pd_client.clone(),
         s3fs.clone(),
-        config.security.clone(),
+        config.clone(),
         keyspace_id,
         target_keyspace_id,
         truncate_ts,
@@ -666,7 +668,7 @@ impl BackupCluster {
         path: PathBuf,
         pd_client: Arc<dyn PdClient>,
         dfs: Arc<S3Fs>,
-        security_conf: SecurityConfig,
+        restore_conf: RestoreConfig,
         keyspace_id: u32,
         target_keyspace_id: u32,
         truncate_ts: u64,
@@ -678,6 +680,7 @@ impl BackupCluster {
         } else {
             ApiV2::get_txn_keyspace_range(keyspace_id)
         };
+        let security_conf = restore_conf.security.clone();
         let mut cluster = Self {
             tag: make_keyspace_tag(keyspace_id, target_keyspace_id),
             path,
@@ -705,16 +708,39 @@ impl BackupCluster {
 
         let mut store_configs = HashMap::with_capacity(cluster_meta.stores.len());
 
+        // If the cluster backup already has tolerate error, we can't tolerate more
+        // errors in restoration.
+        let mut tolerate_err = if cluster_meta.get_tolerated_err() > 0 {
+            0
+        } else {
+            restore_conf.tolerate_err
+        };
+        let fetch_wal_timeout = restore_conf.timeout_fetch_wal.0;
+
         for store in &cluster_meta.stores {
             let store_id = store.get_store_id();
             let store_config = cluster.generate_store_config(store_id);
             store_configs.insert(store_id, store_config);
 
-            cluster.setup_raft_engine(
+            // We can tolerate one store failure for lightweight restoration during fetch
+            // latest wal chunk from store.
+            if let Err(err) = cluster.setup_raft_engine(
                 store_id,
                 cluster_meta,
                 store_configs.get(&store_id).unwrap(),
-            )?;
+                fetch_wal_timeout,
+            ) {
+                if tolerate_err == 0 {
+                    return Err(err);
+                }
+                warn!(
+                    "Keyspace {} setup raft engine for store {} failed, tolerate it: {:?}",
+                    cluster.tag(),
+                    store_id,
+                    err
+                );
+                tolerate_err -= 1;
+            }
         }
         cluster.load_shards()?;
 
@@ -739,6 +765,7 @@ impl BackupCluster {
         store_id: u64,
         cluster_backup: &ClusterBackupMeta,
         conf: &TikvConfig,
+        fetch_wal_timeout: Duration,
     ) -> Result<()> {
         let is_lightweight = cluster_backup.is_lightweight;
         let snap_epoch = if is_lightweight {
@@ -779,6 +806,7 @@ impl BackupCluster {
                     &rf_engine,
                     snap_epoch.unwrap(),
                     false,
+                    fetch_wal_timeout,
                 ) {
                     Ok(_) => {
                         break;

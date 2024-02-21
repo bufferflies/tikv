@@ -3,7 +3,7 @@
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use cloud_server::TikvServer;
@@ -285,6 +285,7 @@ fn setup_raft_engine(
             &rf_engine,
             snap_epoch.unwrap(),
             true,
+            Duration::from_secs(1), // NOTE: Retry is unnecessary for full restoration.
         )?;
     }
     setup_raft_engine_new_store_id(&rf_engine, cluster_backup, store_id, alloc_id);
@@ -446,6 +447,7 @@ async fn restore_pd_keyspace_meta(
 const DEFAULT_WAL_TARGET_SIZE: ReadableSize = ReadableSize::mb(512);
 pub const DEFAULT_TIMEOUT_WAIT_FLUSH: ReadableDuration = ReadableDuration::minutes(10);
 pub const DEFAULT_TIMEOUT_RESTORE_SNAPSHOT: ReadableDuration = ReadableDuration::minutes(10);
+pub const DEFAULT_TIMEOUT_FETCH_WAL: ReadableDuration = ReadableDuration::secs(30);
 pub const DEFAULT_RESTORE_MAX_RETRY: usize = 30;
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
@@ -466,6 +468,11 @@ pub struct RestoreConfig {
     /// The maximum number of retries for the process from split regions to
     /// restore snapshots.
     pub max_retry: usize,
+    /// Tolerance error count during setup raft engine for lightweight
+    /// restoration.
+    pub tolerate_err: usize,
+    /// The timeout for retrying fetch wal chunk from store.
+    pub timeout_fetch_wal: ReadableDuration,
 }
 
 impl Default for RestoreConfig {
@@ -479,7 +486,9 @@ impl Default for RestoreConfig {
             new_store_id_delta: 0,
             timeout_wait_flush: DEFAULT_TIMEOUT_WAIT_FLUSH,
             timeout_restore_snapshot: DEFAULT_TIMEOUT_RESTORE_SNAPSHOT,
+            timeout_fetch_wal: DEFAULT_TIMEOUT_FETCH_WAL,
             max_retry: DEFAULT_RESTORE_MAX_RETRY,
+            tolerate_err: 0,
         }
     }
 }

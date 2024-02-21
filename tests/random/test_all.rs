@@ -111,6 +111,8 @@ fn test_random_all() {
         security: security_conf.clone(),
         timeout_wait_flush: ReadableDuration::secs(30),
         timeout_restore_snapshot: ReadableDuration::secs(30),
+        timeout_fetch_wal: ReadableDuration::secs(10),
+        tolerate_err: 1,
         max_retry: 20,
         ..Default::default()
     };

@@ -22,6 +22,7 @@ use crate::{
     backup::{backup_file_full_path, IncrementalBackupFile},
     common::{create_pd_client, INCREMENTAL_BACKUP_FOLDER_FORMAT},
     error::{Error, Result},
+    restore::RestoreConfig,
     restore_keyspace::BackupCluster,
 };
 
@@ -330,12 +331,16 @@ fn get_cluster_backup_files(
         )));
     }
     let start_time = Instant::now();
+    let restore_conf = RestoreConfig {
+        security: security_conf,
+        ..Default::default()
+    };
     let cluster = BackupCluster::new(
         &cluster_backup,
         path,
         pd_client.clone(),
         s3fs,
-        security_conf,
+        restore_conf,
         0,
         0,
         cluster_backup.backup_ts,

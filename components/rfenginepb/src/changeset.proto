@@ -65,6 +65,7 @@ message ClusterBackupMeta {
     map<bytes, bytes> keyspace_meta = 6;
     int64 meta_revision = 7;
     bool is_lightweight = 8;
+    uint32 tolerated_err = 9;
 }
 
 message RaftLogBackupFile {

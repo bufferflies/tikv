@@ -337,6 +337,7 @@ pub fn backup_cluster_with_ts(
     }
     cluster_backup_meta.set_alloc_id(alloc_id);
     cluster_backup_meta.set_safe_ts(safe_ts);
+    cluster_backup_meta.set_tolerated_err(errs.len() as u32);
     let stores = get_all_stores_except_tiflash(pd_client)?;
     check_backup_meta_consistency(&cluster_backup_meta, &stores)?;
 
@@ -346,12 +347,13 @@ pub fn backup_cluster_with_ts(
         .block_on(s3fs.put_object(backup_key.clone(), backup_data, backup_key.clone()))
         .unwrap();
     info!(
-        "cluster backup cluster_id:{}, backup_ts:{}, alloc_id:{}, safe_ts:{}, num_stores:{}, path:{}",
+        "cluster backup cluster_id:{}, backup_ts:{}, alloc_id:{}, safe_ts:{}, num_stores:{}, tolerance_errors:{}, path:{}",
         cluster_backup_meta.cluster_id,
         cluster_backup_meta.backup_ts,
         cluster_backup_meta.alloc_id,
         cluster_backup_meta.safe_ts,
         cluster_backup_meta.get_stores().len(),
+        cluster_backup_meta.get_tolerated_err(),
         backup_key,
     );
     Ok((backup_key, cluster_backup_meta))

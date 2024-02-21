@@ -28,7 +28,6 @@ use crate::{
 };
 
 const MAX_S3_REQ_BATCH_SIZE: usize = 1024;
-const FETCH_RFENGINE_WAL_CHUCK_TIMEOUT: Duration = Duration::from_secs(30);
 pub const INCREMENTAL_BACKUP_FOLDER_FORMAT: &str = "%Y%m%d";
 pub const INCREMENTAL_BACKUP_FILE_NAME_FORMAT: &str = "%H%M%S";
 
@@ -300,14 +299,14 @@ async fn fetch_rfengine_wal_chunk(
     start_off: u64,
     end_off: u64,
     security_mgr: Arc<SecurityManager>,
+    timeout: Duration,
 ) -> Result<Bytes> {
     let uri = security_mgr.build_uri(format!(
         "{}/rfengine/wal_chunk?epoch_id={}&start_off={}&end_off={}",
         &store.status_address, epoch_id, start_off, end_off
     ))?;
     let req = || Request::get(uri.clone()).body(Body::empty()).unwrap();
-    send_request_to_store_with_retry(req, &store, security_mgr, FETCH_RFENGINE_WAL_CHUCK_TIMEOUT)
-        .await
+    send_request_to_store_with_retry(req, &store, security_mgr, timeout).await
 }
 
 // TODO: Filter out the write batches of specified keyspace to replay to save
@@ -320,6 +319,7 @@ pub fn replay_wal_logs(
     rf: &RfEngine,
     snap_epoch: u32,
     full_restore: bool,
+    fetch_wal_timeout: Duration,
 ) -> Result<()> {
     let store_meta = cluster_backup
         .get_stores()
@@ -386,6 +386,7 @@ pub fn replay_wal_logs(
             backup_epoch,
             backup_offset,
             full_restore,
+            fetch_wal_timeout,
         )?;
     }
 
@@ -464,6 +465,7 @@ fn replay_wal_chunks(
     backup_epoch: u32,
     backup_offset: u64,
     full_restore: bool,
+    fetch_wal_timeout: Duration,
 ) -> Result<()> {
     // Assemble WAL chunks in memory.
     let mut epoch_wal = assemble_wal_chunks(chunks)?;
@@ -495,6 +497,7 @@ fn replay_wal_chunks(
             epoch_wal.len() as u64,
             backup_offset,
             security_mgr,
+            fetch_wal_timeout,
         ))?;
         info!(
             "fetched last wal chunk start_off {} end_off {} data len {}",

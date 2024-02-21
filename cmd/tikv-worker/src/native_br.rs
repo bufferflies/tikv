@@ -842,6 +842,8 @@ pub struct NativeBrConfig {
     pub restore_timeout_wait_flush: ReadableDuration,
     /// The timeout for the requests of restoring snapshots to TiKV servers.
     pub restore_timeout_restore_snapshot: ReadableDuration,
+    /// The timeout for fetching the latest wal chunk from store.
+    pub restore_timeout_fetch_wal: ReadableDuration,
     /// The maximum number of retries for the process from split regions to
     /// restore snapshots.
     pub restore_max_retry: usize,
@@ -849,6 +851,9 @@ pub struct NativeBrConfig {
     /// Whether to tolerate unavailability of no more than one store when
     /// backup.
     pub backup_tolerate_err: bool,
+    /// Whether to tolerate unavailability of no more than one store when
+    /// restore.
+    pub restore_tolerate_err: bool,
 }
 
 impl Default for NativeBrConfig {
@@ -858,8 +863,10 @@ impl Default for NativeBrConfig {
             enable_lightweight_backup: false,
             restore_timeout_wait_flush: restore::DEFAULT_TIMEOUT_WAIT_FLUSH,
             restore_timeout_restore_snapshot: restore::DEFAULT_TIMEOUT_RESTORE_SNAPSHOT,
+            restore_timeout_fetch_wal: restore::DEFAULT_TIMEOUT_FETCH_WAL,
             restore_max_retry: restore::DEFAULT_RESTORE_MAX_RETRY,
             backup_tolerate_err: false,
+            restore_tolerate_err: false,
         }
     }
 }
