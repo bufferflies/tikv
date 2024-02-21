@@ -22,8 +22,7 @@ use grpcio::{
     Environment, Error::RpcFailure, MetadataBuilder, Result as GrpcResult, RpcStatusCode,
 };
 use kvproto::{
-    metapb,
-    metapb::BucketStats,
+    metapb::{self, BucketStats},
     pdpb::{
         ErrorType, GetClusterInfoRequest, GetMembersRequest, GetMembersResponse, Member,
         PdClient as PdClientStub, RegionHeartbeatRequest, RegionHeartbeatResponse,
@@ -249,16 +248,12 @@ impl TsoServiceDiscovery {
                 "pd_client: try to update member from tso server {:?}",
                 tso_server
             );
-            if let Ok(group) = self
-                .find_group_by_keyspace_id(&tso_server, self.keyspace_id, connector)
-                .await
-            {
+            if let Ok(group) = self.find_group_by_keyspace_id(&tso_server, connector).await {
                 keyspace_group = Some(group);
                 break;
-            } else {
-                // If all tso servers fails, `get_tso_server()` will get tso urls from pd.
-                self.failure_count += 1;
             }
+            // If all tso servers fails, `get_tso_server()` will get tso urls from pd.
+            self.failure_count += 1;
             // Try to use next tso server to find keyspace group.
             tso_server = self.get_tso_server().await?;
         }
@@ -305,7 +300,11 @@ impl TsoServiceDiscovery {
                 "pd_client: update primary tso server, old: {:?}, new: {:?}",
                 self.primary_addr, primary_addr
             );
-            self.primary_tso_client = Some(connector.connect_tso(&primary_addr).await?);
+            self.reset_primary_tso_client();
+            let (client_stub, _) = connector
+                .connect_tso(&primary_addr, self.cluster_id, self.keyspace_id)
+                .await?;
+            self.primary_tso_client = Some(client_stub);
             self.primary_addr = primary_addr;
             return Ok(true);
         }
@@ -321,27 +320,12 @@ impl TsoServiceDiscovery {
     async fn find_group_by_keyspace_id(
         &self,
         tso_addr: &str,
-        keyspace_id: u32,
         connector: &PdConnector,
     ) -> Result<KeyspaceGroup> {
-        let tso_client = connector.connect_tso(tso_addr).await?;
-        let mut req = FindGroupByKeyspaceIdRequest::default();
-        let header = req.mut_header();
-        header.set_cluster_id(self.cluster_id);
-        header.set_keyspace_id(keyspace_id);
-        header.set_keyspace_group_id(0);
-        req.set_keyspace_id(keyspace_id);
-        let mut resp = tso_client
-            .find_group_by_keyspace_id_async_opt(&req, CallOption::default())?
+        let (_, keyspace_group) = connector
+            .connect_tso(tso_addr, self.cluster_id, self.keyspace_id)
             .await?;
-
-        if resp.get_header().has_error() {
-            return Err(box_err!(
-                "failed to find group by keyspace id: {:?}",
-                resp.get_header().get_error()
-            ));
-        }
-        Ok(resp.take_keyspace_group())
+        Ok(keyspace_group)
     }
 }
 
@@ -868,7 +852,12 @@ impl PdConnector {
         }
     }
 
-    pub async fn connect_tso(&self, addr: &str) -> Result<TsoClientStub> {
+    pub async fn connect_tso(
+        &self,
+        addr: &str,
+        cluster_id: u64,
+        keyspace_id: u32,
+    ) -> Result<(TsoClientStub, KeyspaceGroup)> {
         info!("connecting to PD TSO endpoint"; "endpoints" => addr);
         let addr_trim = trim_http_prefix(addr);
         let channel = {
@@ -883,11 +872,30 @@ impl PdConnector {
         };
 
         let client = TsoClientStub::new(channel);
-        Ok(client)
+        let mut req = FindGroupByKeyspaceIdRequest::default();
+        let header = req.mut_header();
+        header.set_cluster_id(cluster_id);
+        header.set_keyspace_id(keyspace_id);
+        header.set_keyspace_group_id(0);
+        req.set_keyspace_id(keyspace_id);
+        let mut resp = client
+            .find_group_by_keyspace_id_async_opt(
+                &req,
+                CallOption::default().timeout(Duration::from_secs(REQUEST_TIMEOUT)),
+            )?
+            .await?;
+
+        if resp.get_header().has_error() {
+            return Err(box_err!(
+                "failed to find group by keyspace id: {:?}",
+                resp.get_header().get_error()
+            ));
+        }
+        Ok((client, resp.take_keyspace_group()))
     }
 
     // load_members returns the PD members by calling getMember, there are two
-    // abnormal scenes for the reponse:
+    // abnormal scenes for the response:
     // 1. header has an error: the PD is not ready to serve.
     // 2. cluster id is zero: etcd start server but the follower did not get
     // cluster id yet.
