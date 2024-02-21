@@ -622,6 +622,7 @@ pub struct BackupCluster {
     dfs: Arc<S3Fs>,
     security_conf: SecurityConfig,
     keyspace_id: u32,
+    target_keyspace_id: u32,
     keyspace_start: Vec<u8>,
     keyspace_end: Vec<u8>,
     truncate_ts: u64,
@@ -684,6 +685,7 @@ impl BackupCluster {
             dfs,
             security_conf,
             keyspace_id,
+            target_keyspace_id,
             keyspace_start,
             keyspace_end,
             truncate_ts,
@@ -1692,6 +1694,7 @@ impl BackupCluster {
             }
             let mut properties_helper =
                 kvengine::util::PropertiesHelper::new_from_shard_meta(&meta);
+            properties_helper.set_rewrite_range_prefix(!self.is_inplace_restore());
             for shard_id in region.backup_shards_id {
                 let shard = self.get_shard(shard_id).unwrap();
                 for (&file_id, file_meta) in shard.meta.all_files() {
@@ -1818,6 +1821,10 @@ impl BackupCluster {
             .inner_key_off
     }
 
+    fn is_inplace_restore(&self) -> bool {
+        self.keyspace_id == self.target_keyspace_id
+    }
+
     pub fn reset_keyspace(
         &mut self,
         cluster_meta: &ClusterBackupMeta,
@@ -1827,6 +1834,7 @@ impl BackupCluster {
         let (keyspace_start, keyspace_end) = ApiV2::get_txn_keyspace_range(keyspace_id);
         self.tag = make_keyspace_tag(keyspace_id, target_keyspace_id);
         self.keyspace_id = keyspace_id;
+        self.target_keyspace_id = target_keyspace_id;
         self.keyspace_start = keyspace_start;
         self.keyspace_end = keyspace_end;
 
