@@ -66,7 +66,7 @@ const VERIFY_HEALTHY_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[test]
 fn test_random_with_tidb() {
-    test_util::init_log_for_test_async();
+    let _logger_guard = test_util::init_log_for_test_async();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .worker_threads(4)

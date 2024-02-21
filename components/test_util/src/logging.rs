@@ -9,6 +9,7 @@ use std::{
 };
 
 use slog::{self, Drain, OwnedKVList, Record};
+use tikv_util::logger;
 
 struct Serializer<'a>(&'a mut dyn std::io::Write);
 
@@ -99,13 +100,44 @@ pub fn init_log_for_test() {
     init_log_for_test_with_opt(false);
 }
 
-// A help function to initial logger with async drainer.
-// This is used for random test avoid performance issue.
-pub fn init_log_for_test_async() {
-    init_log_for_test_with_opt(true);
+/// AsyncLoggerGuard is used to collect remaining logs in the async logger on
+/// normal exit. As reference of the async logger is held by the static
+/// `ASYNC_LOGGER_GUARD`, it will not be dropped. So we use this guard to drop
+/// it, and flush the remaining logs.
+#[derive(Default)]
+pub struct AsyncLoggerGuard {}
+
+impl Drop for AsyncLoggerGuard {
+    fn drop(&mut self) {
+        // There might be remaining logs in the async logger.
+        // To collect remaining logs and also collect future logs, replace the old one
+        // with a terminal logger.
+        // When the old global async logger is replaced, the old async guard will be
+        // taken and dropped. In the drop() the async guard, it waits for the
+        // finish of the remaining logs in the async logger.
+        if let Some(level) = ::log::max_level().to_level() {
+            let drainer = logger::text_format(logger::term_writer(), true);
+            let _ = logger::init_log(
+                drainer,
+                logger::convert_log_level_to_slog_level(level),
+                false, // Use sync logger to avoid an unnecessary log thread.
+                false, // It is initialized already.
+                vec![],
+                0,
+            );
+        }
+    }
 }
 
-fn init_log_for_test_with_opt(use_async: bool) {
+// A help function to initial logger with async drainer.
+// This is used for random test avoid performance issue.
+#[must_use]
+pub fn init_log_for_test_async() -> Option<AsyncLoggerGuard> {
+    init_log_for_test_with_opt(true)
+}
+
+fn init_log_for_test_with_opt(use_async: bool) -> Option<AsyncLoggerGuard> {
+    let mut guard = None;
     static START: Once = Once::new();
     START.call_once(|| {
         let output = env::var("LOG_FILE").ok();
@@ -155,5 +187,11 @@ fn init_log_for_test_with_opt(use_async: bool) {
             100,
         )
         .unwrap();
+
+        if use_async {
+            guard = Some(AsyncLoggerGuard::default());
+        }
     });
+
+    guard
 }

@@ -7747,6 +7747,7 @@ dependencies = [
  "fail 0.5.0",
  "grpcio",
  "kvproto",
+ "log",
  "rand 0.8.5",
  "rand_isaac",
  "security",
