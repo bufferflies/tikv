@@ -43,6 +43,7 @@ extern crate tikv_alloc;
 mod metrics;
 #[cfg(test)]
 mod tests;
+pub mod txn_chunk_manager;
 
 pub use apply::*;
 pub use compaction::*;

@@ -270,7 +270,8 @@ fn retain_sst_files_in_batch(file_ids: &[u64], s3fs: &S3Fs, first_batch: bool) -
     let mut handles = Vec::with_capacity(file_cnt);
     for &id in file_ids {
         let s3fs = s3fs.clone();
-        handles.push(runtime.spawn(async move { s3fs.retain_file(id).await }));
+        let file_key = s3fs.file_key(id);
+        handles.push(runtime.spawn(async move { s3fs.retain_file(&file_key).await }));
     }
     // To avoid too much request to cause s3 SlowDown issue.
     if !first_batch {

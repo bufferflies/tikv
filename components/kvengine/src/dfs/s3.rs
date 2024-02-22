@@ -24,7 +24,7 @@ use rusoto_core::{
 };
 use rusoto_s3::{
     CopyObjectError, DeleteObjectError, GetObjectError, GetObjectTaggingError, HeadObjectError,
-    ListObjectsV2Error, PutObjectError, PutObjectTaggingError,
+    ListObjectsV2Error, PutObjectError,
 };
 use tikv_util::time::Instant;
 use tokio::runtime::Runtime;
@@ -186,6 +186,10 @@ impl S3FsCore {
     pub fn file_key(&self, file_id: u64) -> String {
         let idx = (fingerprint64(file_id.to_le_bytes().as_slice())) as u8;
         format!("{}/{:02x}/{:016x}.sst", self.prefix, idx, file_id)
+    }
+
+    pub fn txn_chunk_key(&self, id: u64) -> String {
+        format!("{}/txn/{}.txn", self.prefix, id)
     }
 
     pub fn get_prefix(&self) -> String {
@@ -378,11 +382,10 @@ impl S3FsCore {
         }
     }
 
-    pub async fn is_removed(&self, file_id: u64) -> Result<bool, dfs::Error> {
+    pub async fn is_removed(&self, file_key: &str) -> Result<bool, dfs::Error> {
         let mut retry_cnt = 0;
         loop {
-            let key = self.file_key(file_id);
-            let req = self.new_tagging_request("GET", &key);
+            let req = self.new_tagging_request("GET", file_key);
             let mut result = self
                 .dispatch(req, GetObjectTaggingError::from_response)
                 .await;
@@ -402,7 +405,7 @@ impl S3FsCore {
             if let RusotoError::Service(_) = err {
                 return Err(dfs::Error::S3(format!(
                     "Get file {} tagging fail {:?}",
-                    file_id, err
+                    file_key, err
                 )));
             }
             if self.is_err_retryable(&err) && retry_cnt < MAX_RETRY_COUNT {
@@ -410,14 +413,14 @@ impl S3FsCore {
                 let retry_sleep = 2u64.pow(retry_cnt) * RETRY_SLEEP_MS;
                 warn!(
                     "Get file {} tagging fail {:?}, retry_cnt {}, retry after {}ms",
-                    file_id, err, retry_cnt, retry_sleep
+                    file_key, err, retry_cnt, retry_sleep
                 );
                 tokio::time::sleep(Duration::from_millis(retry_sleep)).await;
                 continue;
             }
             return Err(dfs::Error::S3(format!(
                 "Get file {} tagging, reach max retry count {}, err {:?}",
-                file_id, MAX_RETRY_COUNT, err,
+                file_key, MAX_RETRY_COUNT, err,
             )));
         }
     }
@@ -708,18 +711,16 @@ impl S3FsCore {
     /// only AWS S3 support storage class.
     pub async fn copy_object(
         &self,
-        source_file_id: u64,
-        target_file_id: u64,
+        source_key: &str,
+        target_key: &str,
         target_tagging: Option<&Tagging>,
         target_storage_class: Option<&str>,
     ) -> Result<(), dfs::Error> {
         let mut retry_cnt = 0;
-        let source_key = format!("{}/{}", self.bucket, self.file_key(source_file_id));
-        let target_key = self.file_key(target_file_id);
-
+        let full_source_key = format!("{}/{}", self.bucket, source_key);
         loop {
-            let mut req = self.new_request("PUT", &target_key);
-            req.add_header("x-amz-copy-source", &source_key);
+            let mut req = self.new_request("PUT", target_key);
+            req.add_header("x-amz-copy-source", &full_source_key);
             req.add_header("x-amz-metadata-directive", "REPLACE");
             if let Some(target_tagging) = target_tagging {
                 req.add_header("x-amz-tagging", &target_tagging.to_url_encoded());
@@ -731,7 +732,7 @@ impl S3FsCore {
                 } else {
                     debug!(
                         "{} ignore target_storage_class {} which is not supported by {}",
-                        target_file_id, target_storage_class, self.hostname
+                        target_key, target_storage_class, self.hostname
                     );
                 }
             }
@@ -741,14 +742,14 @@ impl S3FsCore {
                     let retry_sleep = 2u64.pow(retry_cnt) * RETRY_SLEEP_MS;
                     warn!(
                         "retry copy file {}, retry count {}, retry after {}ms, err {:?}",
-                        target_file_id, retry_cnt, retry_sleep, err,
+                        target_key, retry_cnt, retry_sleep, err,
                     );
                     tokio::time::sleep(Duration::from_millis(retry_sleep)).await;
                     continue;
                 } else {
                     let err_msg = format!(
                         "failed to copy file {} from {}, reach max retry count {}, err {:?}",
-                        target_file_id, source_file_id, MAX_RETRY_COUNT, err,
+                        target_key, source_key, MAX_RETRY_COUNT, err,
                     );
                     error!("{}", err_msg);
                     return Err(dfs::Error::S3(err_msg));
@@ -758,12 +759,12 @@ impl S3FsCore {
         }
     }
 
-    pub async fn retain_file(&self, file_id: u64) -> Result<(), dfs::Error> {
-        if self.is_removed(file_id).await? {
+    pub async fn retain_file(&self, file_key: &str) -> Result<(), dfs::Error> {
+        if self.is_removed(file_key).await? {
             let empty_tagging = Tagging::default();
             self.copy_object(
-                file_id,
-                file_id,
+                file_key,
+                file_key,
                 Some(&empty_tagging),
                 Some(STORAGE_CLASS_DEFAULT),
             )
@@ -892,8 +893,6 @@ impl Dfs for S3Fs {
     /// And the file would be permanently removed after `gc_lifetime`. See
     /// `DfsGc`.
     async fn remove(&self, file_id: u64, file_len: Option<u64>, _opts: Options) {
-        // TODO: Reuse `copy_object` method.
-
         // Only AWS supports storage class.
         let target_storage_class = if self.is_on_aws() {
             let new_storage_class = self.choose_storage_class_for_removed_files(file_len);
@@ -901,72 +900,16 @@ impl Dfs for S3Fs {
         } else {
             None
         };
-
-        let mut retry_cnt = 0;
-        let mut copied = false;
-        loop {
-            let key = self.file_key(file_id);
-            // Copy object to update the creation time, as the s3 clean policy
-            // depends on the creation time.
-            if !copied {
-                let mut req = self.new_request("PUT", &key);
-                req.add_header("x-amz-copy-source", &format!("{}/{}", self.bucket, key));
-                req.add_header("x-amz-metadata-directive", "REPLACE");
-                req.add_header("x-amz-tagging", "deleted=true");
-                req.add_header("x-amz-tagging-directive", "REPLACE");
-                if let Some(target_storage_class) = target_storage_class {
-                    req.add_header("x-amz-storage-class", target_storage_class);
-                }
-                if let Err(err) = self.dispatch(req, CopyObjectError::from_response).await {
-                    if retry_cnt < MAX_RETRY_COUNT {
-                        retry_cnt += 1;
-                        let retry_sleep = 2u64.pow(retry_cnt) * RETRY_SLEEP_MS;
-                        warn!(
-                            "retry remove file {}, retry count {}, retry after {}ms, err {:?}",
-                            file_id, retry_cnt, retry_sleep, err,
-                        );
-                        tokio::time::sleep(Duration::from_millis(retry_sleep)).await;
-                        continue;
-                    } else {
-                        error!(
-                            "failed to remove file {}, reach max retry count {}, err {:?}",
-                            file_id, MAX_RETRY_COUNT, err,
-                        );
-                        return;
-                    }
-                }
-                copied = true;
-            }
-            if !self.hostname.contains("ksyuncs.com") {
-                return;
-            }
-            // ks3 doesn't support copy object with tagging, workaround to send another
-            // request. TODO: remove it when KS3 fixed the compatibility issue.
-            let mut req = self.new_tagging_request("PUT", &key);
-            let tagging = Tagging::new_single_deleted();
-            let tagging_xml = quick_xml::se::to_string(&tagging).unwrap();
-            let stream = futures::stream::once(async move { Ok(Bytes::from(tagging_xml)) });
-            req.set_content_type("application/xml".to_string());
-            req.set_payload_stream(rusoto_core::ByteStream::new(stream));
-            if let Err(err) = self
-                .dispatch(req, PutObjectTaggingError::from_response)
-                .await
-            {
-                if retry_cnt < MAX_RETRY_COUNT {
-                    retry_cnt += 1;
-                    let retry_sleep = 2u64.pow(retry_cnt) * RETRY_SLEEP_MS;
-                    tokio::time::sleep(Duration::from_millis(retry_sleep)).await;
-                    warn!("retry remove file {}, error {:?}", file_id, &err);
-                    continue;
-                } else {
-                    error!(
-                        "failed to remove file {}, reach max retry count {}, err {:?}",
-                        file_id, MAX_RETRY_COUNT, err,
-                    );
-                }
-            }
-            return;
-        }
+        let target_tagging = Tagging::new_single_deleted();
+        let file_key = self.file_key(file_id);
+        let _ = self
+            .copy_object(
+                &file_key,
+                &file_key,
+                Some(&target_tagging),
+                target_storage_class,
+            )
+            .await;
     }
 
     /// Permanently remove the file on S3.
@@ -981,6 +924,39 @@ impl Dfs for S3Fs {
 
         self.delete_object(self.file_key(file_id), file_id.to_string())
             .await
+    }
+
+    async fn read_txn_chunk(&self, id: u64) -> dfs::Result<Bytes> {
+        self.get_object(
+            self.txn_chunk_key(id),
+            id.to_string(),
+            GetObjectOptions::default(),
+        )
+        .await
+    }
+
+    async fn create_txn_chunk(&self, id: u64, data: Bytes) -> dfs::Result<()> {
+        self.put_object(self.txn_chunk_key(id), data, id.to_string())
+            .await
+    }
+
+    async fn remove_txn_chunk(&self, id: u64) {
+        // Only AWS supports storage class.
+        let target_storage_class = if self.is_on_aws() {
+            Some(STORAGE_CLASS_STANDARD_IA)
+        } else {
+            None
+        };
+        let target_tagging = Tagging::new_single_deleted();
+        let chunk_key = self.txn_chunk_key(id);
+        let _ = self
+            .copy_object(
+                &chunk_key,
+                &chunk_key,
+                Some(&target_tagging),
+                target_storage_class,
+            )
+            .await;
     }
 
     fn get_runtime(&self) -> &Runtime {

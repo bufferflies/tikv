@@ -6,7 +6,7 @@ mod s3;
 
 use std::{
     fmt::Debug,
-    io,
+    fs, io,
     io::{BufReader, Read, Write},
     ops::Deref,
     path::{Path, PathBuf},
@@ -50,6 +50,15 @@ pub trait Dfs: Sync + Send {
     /// Remove the file from DFS permanently.
     async fn permanently_remove(&self, file_id: u64, opts: Options) -> Result<()>;
 
+    /// read_txn_chunk the txn chunk to memory.
+    async fn read_txn_chunk(&self, id: u64) -> Result<Bytes>;
+
+    /// create_txn_chunk creates a new txn chunk.
+    async fn create_txn_chunk(&self, id: u64, data: Bytes) -> Result<()>;
+
+    /// remove_txn_chunk removes the txn chunk from the DFS.
+    async fn remove_txn_chunk(&self, id: u64);
+
     /// get_runtime gets the tokio runtime for the DFS.
     fn get_runtime(&self) -> &tokio::runtime::Runtime;
 
@@ -61,6 +70,7 @@ const REMOVE_DELAY: Duration = Duration::from_secs(90);
 
 pub struct InMemFs {
     files: dashmap::DashMap<u64, Bytes>,
+    txn_chunks: dashmap::DashMap<u64, Bytes>,
     pending_remove: dashmap::DashMap<u64, Instant>,
     runtime: tokio::runtime::Runtime,
     delay: Arc<Mutex<Duration>>,
@@ -76,6 +86,7 @@ impl InMemFs {
     pub fn new() -> Self {
         Self {
             files: Default::default(),
+            txn_chunks: Default::default(),
             pending_remove: Default::default(),
             runtime: tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(1)
@@ -131,6 +142,22 @@ impl Dfs for InMemFs {
         Ok(())
     }
 
+    async fn read_txn_chunk(&self, id: u64) -> Result<Bytes> {
+        if let Some(chunk) = self.txn_chunks.get(&id).as_deref() {
+            return Ok(chunk.clone());
+        }
+        Err(Error::TxnChunkNotExists(id))
+    }
+
+    async fn create_txn_chunk(&self, id: u64, data: Bytes) -> Result<()> {
+        self.txn_chunks.insert(id, data);
+        Ok(())
+    }
+
+    async fn remove_txn_chunk(&self, id: u64) {
+        self.txn_chunks.remove(&id);
+    }
+
     fn get_runtime(&self) -> &Runtime {
         &self.runtime
     }
@@ -155,11 +182,8 @@ impl CacheFs {
         let cache = builder.build();
         Self { cache, s3_fs }
     }
-}
 
-#[async_trait]
-impl Dfs for CacheFs {
-    async fn read_file(&self, file_id: u64, opts: Options) -> Result<Bytes> {
+    async fn read_file_inner(&self, file_id: u64, opts: Options, txn_chunk: bool) -> Result<Bytes> {
         let s3_fs = self.s3_fs.clone();
         let cache_miss = Arc::new(AtomicBool::new(false));
         let cache_miss_clone = cache_miss.clone();
@@ -167,7 +191,11 @@ impl Dfs for CacheFs {
             .cache
             .try_get_with(file_id, async move {
                 cache_miss_clone.store(true, atomic::Ordering::Relaxed);
-                s3_fs.read_file(file_id, opts).await
+                if txn_chunk {
+                    s3_fs.read_txn_chunk(file_id).await
+                } else {
+                    s3_fs.read_file(file_id, opts).await
+                }
             })
             .await
             .map_err(|e| e.as_ref().clone())?;
@@ -182,6 +210,13 @@ impl Dfs for CacheFs {
         }
         Ok(file)
     }
+}
+
+#[async_trait]
+impl Dfs for CacheFs {
+    async fn read_file(&self, file_id: u64, opts: Options) -> Result<Bytes> {
+        self.read_file_inner(file_id, opts, false).await
+    }
     async fn create(&self, _file_id: u64, _data: Bytes, _opts: Options) -> Result<()> {
         panic!("Do not call");
     }
@@ -191,6 +226,18 @@ impl Dfs for CacheFs {
     }
 
     async fn permanently_remove(&self, _file_id: u64, _opts: Options) -> Result<()> {
+        panic!("Do not call");
+    }
+
+    async fn read_txn_chunk(&self, id: u64) -> Result<Bytes> {
+        self.read_file_inner(id, Options::new(0, 0), true).await
+    }
+
+    async fn create_txn_chunk(&self, _id: u64, _data: Bytes) -> Result<()> {
+        panic!("Do not call");
+    }
+
+    async fn remove_txn_chunk(&self, _id: u64) {
         panic!("Do not call");
     }
 
@@ -229,6 +276,9 @@ impl LocalFs {
     }
     pub fn new_tmp_filename(&self, file_id: u64, tmp_id: u64) -> PathBuf {
         PathBuf::from(format!("{:016x}.{}.tmp", file_id, tmp_id))
+    }
+    pub fn local_txn_chunk_path(&self, id: u64) -> PathBuf {
+        self.dir.join("txn").join(format!("{:016x}.txn", id))
     }
 }
 
@@ -312,6 +362,25 @@ impl Dfs for LocalFs {
         Ok(())
     }
 
+    async fn read_txn_chunk(&self, id: u64) -> Result<Bytes> {
+        let local_txn_chunk_name = self.local_txn_chunk_path(id);
+        let data = fs::read(local_txn_chunk_name)?;
+        Ok(data.into())
+    }
+
+    async fn create_txn_chunk(&self, id: u64, data: Bytes) -> Result<()> {
+        let local_tmp_file_name = self.tmp_file_path(id);
+        fs::write(&local_tmp_file_name, data)?;
+        fs::rename(&local_tmp_file_name, self.local_txn_chunk_path(id))?;
+        Ok(())
+    }
+
+    async fn remove_txn_chunk(&self, id: u64) {
+        if let Err(err) = fs::remove_file(self.tmp_file_path(id)) {
+            error!("failed to remove local txn file {} {:?}", id, err);
+        }
+    }
+
     fn get_runtime(&self) -> &Runtime {
         &self.runtime
     }
@@ -340,6 +409,8 @@ pub enum Error {
     Io(String),
     #[error("File {0} not exists")]
     NotExists(u64),
+    #[error("Txn Chunk {0} not exists")]
+    TxnChunkNotExists(u64),
     #[error("S3 error {0}")]
     S3(String),
     #[error("Other error {0}")]

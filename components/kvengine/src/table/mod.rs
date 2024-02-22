@@ -6,7 +6,7 @@ pub mod merge_iterator;
 pub mod sstable;
 pub mod table;
 mod tests;
-mod txn_file;
+pub mod txn_file;
 
 pub use merge_iterator::*;
 pub use table::*;

@@ -848,9 +848,10 @@ mod tests {
                     .await
                     .unwrap();
                 fs.remove(file_id, None, options).await;
-                assert!(fs.is_removed(file_id).await.unwrap());
-                fs.retain_file(file_id).await.unwrap();
-                assert!(!fs.is_removed(file_id).await.unwrap());
+                let file_key = fs.file_key(file_id);
+                assert!(fs.is_removed(&file_key).await.unwrap());
+                fs.retain_file(&file_key).await.unwrap();
+                assert!(!fs.is_removed(&file_key).await.unwrap());
             });
             handles.push(handle);
         }

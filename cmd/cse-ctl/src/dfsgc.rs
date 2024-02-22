@@ -255,7 +255,7 @@ impl fmt::Display for GcStat {
 #[derive(Debug)]
 struct S3Object {
     pub file_id: u64,
-    pub _key: String,
+    pub key: String,
     pub last_modified: DateTime<chrono::Utc>,
     pub storage_class: String,
     pub size: u64, // in bytes.
@@ -265,7 +265,7 @@ impl S3Object {
     pub fn from_list_object_content(file_id: u64, obj: ListObjectContent) -> Self {
         Self {
             file_id,
-            _key: obj.key,
+            key: obj.key,
             last_modified: DateTime::parse_from_rfc3339(&obj.last_modified)
                 .expect("parse last_modified")
                 .into(),
@@ -449,7 +449,7 @@ impl GcWorker {
                     Ok(true) => {
                         warn!("{} in-used but removed: {:?}", s3_obj.file_id, s3_obj);
                         stat.lock().await.in_used_and_removed += 1;
-                        if let Err(e) = gc_worker.s3fs.retain_file(s3_obj.file_id).await {
+                        if let Err(e) = gc_worker.s3fs.retain_file(&s3_obj.key).await {
                             return Err(Error::DfsError(e));
                         }
                         info!("{} is retained", s3_obj.file_id);
@@ -473,7 +473,7 @@ impl GcWorker {
 
     async fn is_file_removed(&self, s3_obj: &S3Object) -> Result<bool> {
         Ok(Self::is_storage_class_for_remove(&s3_obj.storage_class)
-            || self.s3fs.is_removed(s3_obj.file_id).await?)
+            || self.s3fs.is_removed(&s3_obj.key).await?)
     }
 
     async fn remove_garbage_file(
