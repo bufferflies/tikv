@@ -273,7 +273,6 @@ impl ApiV2 {
     pub fn get_keyspace_id_str(key: &[u8]) -> String {
         let key_mode = ApiV2::parse_key_mode(key);
 
-        // let mut keyspace_id_string = String::new();
         if key_mode == KeyMode::Raw || key_mode == KeyMode::Txn {
             let keyspace_id = ApiV2::get_keyspace_id(key);
             let keyspace_id_u32 = ApiV2::get_u32_keyspace_id(keyspace_id);

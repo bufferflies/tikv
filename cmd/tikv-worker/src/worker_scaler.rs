@@ -587,16 +587,21 @@ impl WorkerScaler {
             return;
         }
         let worker_pod = worker_pod_opt.unwrap();
-        let tasks = self.get_pod_task_states_with_retry(worker_pod).await;
-        let now_timestamp = chrono::Utc::now().timestamp();
-        worker_pod.update_task_states(tasks, now_timestamp, self.config.expire_seconds);
+        // If this task has been completed during the last round of checks, the
+        // `canceled` flag will be set. We did not clean up the task
+        // immediately, this way we can ensure that the pod can survive for
+        // `CLEAN_UP_WORKER_TICK_INTERVAL` after completion.
         if worker_pod.canceled {
             info!("clean up task {}", task_id);
             self.delete_sts(task_id).await;
             self.delete_svc(task_id).await;
             self.delete_pvc(task_id).await;
             pods_map.remove(task_id);
+            return;
         }
+        let tasks = self.get_pod_task_states_with_retry(worker_pod).await;
+        let now_timestamp = chrono::Utc::now().timestamp();
+        worker_pod.update_task_states(tasks, now_timestamp, self.config.expire_seconds);
     }
 
     pub(crate) fn get_worker_addr(&self, worker_pod: &WorkerPod) -> Option<String> {

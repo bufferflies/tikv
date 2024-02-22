@@ -69,7 +69,8 @@ fn test_pd_client_deadlock() {
         request!(client => block_on(get_gc_safe_point())),
         request!(client => block_on(get_store_and_stats(0))),
         request!(client => get_operator(0)),
-        request!(client => load_global_config(vec![])),
+        request!(client => load_global_config_by_names(vec![])),
+        request!(client => load_global_config_by_path("".to_string())),
     ];
 
     for (name, func) in test_funcs {
@@ -98,11 +99,11 @@ fn test_pd_client_deadlock() {
 }
 
 #[test]
-fn test_load_global_config() {
+fn test_load_global_config_by_names() {
     let (mut _server, mut client) = new_test_server_and_client(ReadableDuration::millis(100));
     let res = futures::executor::block_on(async move {
         client
-            .load_global_config(
+            .load_global_config_by_names(
                 ["abc", "123", "xyz"]
                     .iter()
                     .map(|x| x.to_string())
@@ -111,7 +112,22 @@ fn test_load_global_config() {
             .await
     });
     for (k, v) in res.unwrap() {
-        assert_eq!(k, format!("/global/config/{}", v))
+        let s = std::str::from_utf8(&v).unwrap();
+        assert_eq!(k, format!("/global/config/{}", s));
+    }
+}
+
+#[test]
+fn test_load_global_config_by_path() {
+    let (mut _server, mut client) = new_test_server_and_client(ReadableDuration::millis(100));
+    let res = futures::executor::block_on(async move {
+        client
+            .load_global_config_by_path("/path/to/config/".to_string())
+            .await
+    });
+    for (k, v) in res.unwrap() {
+        assert_eq!(k, "/path/to/config/test");
+        assert_eq!(v, "test".as_bytes());
     }
 }
 
@@ -286,7 +302,12 @@ fn test_retry() {
     });
     test_retry_success(&mut client, |c| block_on(c.get_gc_safe_point()));
     test_retry_success(&mut client, |c| c.get_operator(0));
-    test_retry_success(&mut client, |c| block_on(c.load_global_config(vec![])));
+    test_retry_success(&mut client, |c| {
+        block_on(c.load_global_config_by_names(vec![]))
+    });
+    test_retry_success(&mut client, |c| {
+        block_on(c.load_global_config_by_path("".to_string()))
+    });
 
     fail::remove(pd_client_v2_timeout_fp);
     fail::remove(pd_client_v2_backoff_fp);

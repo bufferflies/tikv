@@ -11,7 +11,7 @@ use std::{
     time::Duration,
 };
 
-use api_version::api_v2::KEYSPACE_PREFIX_LEN;
+use api_version::{api_v2::KEYSPACE_PREFIX_LEN, ApiV2};
 use bytes::{Buf, BufMut, Bytes};
 use chrono::Utc;
 use cloud_encryption::{EncryptionKey, MasterKey};
@@ -51,7 +51,7 @@ use crate::{
     metrics::{
         LOAD_DATA_BUILD_SST_COUNTER, LOAD_DATA_BUILD_SST_TIME_MILLIS,
         LOAD_DATA_HANDLE_ADD_CHUNK_COUNTER, LOAD_DATA_HANDLE_ADD_CHUNK_TIME_MILLIS,
-        LOAD_DATA_TASK_STATE,
+        LOAD_DATA_TASK_STATE, LOAD_DATA_WRU_COST_COUNTER,
     },
 };
 
@@ -71,6 +71,11 @@ const RETRY_SLEEP_DURATION: Duration = Duration::from_millis(100);
 const MAX_RETRY_TIMES: usize = 10;
 const MAX_SLEEP_DURATION: Duration = Duration::from_secs(30);
 const GET_SHARD_META_TIMEOUT: Duration = Duration::from_secs(60);
+
+// the following constants are used to calculate RU consumption
+const DEFAULT_AVG_BATCH_PROPORTION: f64 = 0.5;
+const REPLICA_NUMS: f64 = 3.0;
+
 pub struct LoadTaskWorker {
     config: LoadDataConfig,
     ctx: LoadDataContext,
@@ -168,6 +173,7 @@ pub struct LoadDataConfig {
     pub region_size: usize,
     pub coarse_split_size: usize,
     pub enable_check_point: bool,
+    pub rg_config: Option<ResourceGroupConfig>,
 }
 
 impl Default for LoadDataConfig {
@@ -178,8 +184,25 @@ impl Default for LoadDataConfig {
             region_size: DEFAULT_REGION_SIZE,
             coarse_split_size: DEFAULT_COARSE_SPLIT_SIZE,
             enable_check_point: DEFAULT_ENABLE_CHECK_POINT,
+            rg_config: None,
         }
     }
+}
+
+#[derive(Default, Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+pub struct ResourceGroupConfig {
+    pub request_unit: RequestUnit,
+}
+
+#[derive(Default, Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+pub struct RequestUnit {
+    pub write_base_cost: f64,
+    pub write_per_batch_base_cost: f64,
+    pub write_cost_per_byte: f64,
 }
 
 #[derive(Clone)]
@@ -209,7 +232,9 @@ pub struct LoadTaskScheduler {
     pub writers: Arc<Mutex<WritersStates>>,
     pub thread_handle: Option<Arc<Mutex<std::thread::JoinHandle<()>>>>,
     pub check_point_store: Arc<Mutex<LocalFileCheckPointStorage>>,
-    pub ended_tasks: Arc<DashMap<String, i64>>,
+    pub ended_tasks: Arc<DashMap<String, (i64, Option<String>)>>, /* task_id -> (end_time,
+                                                                   * Option<keyspace_id>) */
+    pub keyspace_id: Arc<Mutex<Option<String>>>,
 }
 
 impl LoadTaskScheduler {
@@ -225,14 +250,19 @@ impl LoadTaskScheduler {
         states.canceled = true;
         states.error = err;
 
-        let now = Utc::now();
-        let millis = now.timestamp_millis();
+        let ts = Utc::now().timestamp();
         let task_id = check_point_store_guard.check_point_ctx.task_id.clone();
         LOAD_DATA_TASK_STATE
             .with_label_values(&[&task_id, "cancel"])
-            .set(millis as f64);
+            .set(ts as f64);
 
-        self.ended_tasks.insert(task_id, millis);
+        let keyspace_id = self.keyspace_id.lock().unwrap().clone();
+        self.ended_tasks.insert(task_id, (ts, keyspace_id));
+    }
+
+    pub fn set_keyspace_id(&self, keyspace_id: String) {
+        let mut keyspace_id_guard = self.keyspace_id.lock().unwrap();
+        *keyspace_id_guard = Some(keyspace_id);
     }
 
     pub fn check_task_thread_finished(&self) {
@@ -347,7 +377,8 @@ impl LoadTaskWorker {
         context: LoadDataContext,
         task_ctx: TaskContext,
         check_point_ctx: LoadDataCheckPointCtx,
-        ended_tasks: Arc<DashMap<String, i64>>,
+        ended_tasks: Arc<DashMap<String, (i64, Option<String>)>>, /* task_id -> (end_time,
+                                                                   * Option<keyspace_id>) */
     ) -> Self {
         let (sender, receiver) = tikv_util::mpsc::unbounded();
         let mut states = LoadTaskStates::default();
@@ -394,6 +425,7 @@ impl LoadTaskWorker {
             thread_handle: None,
             check_point_store: Arc::clone(&check_point_store_arc),
             ended_tasks: Arc::clone(&ended_tasks),
+            keyspace_id: Arc::new(Mutex::new(None)),
         };
         let (file_tx, file_rx) = tikv_util::mpsc::unbounded();
         let task_dir = context.dir.join(task_ctx.task_id.as_str());
@@ -798,7 +830,7 @@ impl LoadTaskWorker {
     }
 
     fn build(&mut self, compression_type: u8) -> Result<()> {
-        info!("{} start build.", self.task_ctx.task_id);
+        info!("{} start build", self.task_ctx.task_id);
 
         let check_point_store_mutex = Arc::clone(&self.check_point_store);
         let mut check_point_store_guard = check_point_store_mutex.lock().unwrap();
@@ -829,6 +861,21 @@ impl LoadTaskWorker {
             if check_point_store_guard.check_point_ctx.get_is_recover() {
                 sst_metas = check_point_store_guard.get_sst_meta();
             }
+            let mut data_size = 0;
+            let keyspace_id = if !sst_metas.is_empty() {
+                let key = if self.task_ctx.key_prefix.is_empty() {
+                    sst_metas.first().unwrap().smallest.as_slice()
+                } else {
+                    self.task_ctx.key_prefix.as_slice()
+                };
+                ApiV2::get_keyspace_id_str(key)
+            } else {
+                "".to_string()
+            };
+
+            for sst_meta in sst_metas.iter() {
+                data_size += sst_meta.size;
+            }
             let res = self.ingest(
                 sst_metas,
                 check_point_store_guard
@@ -836,7 +883,33 @@ impl LoadTaskWorker {
                     .get_duplicated_entries(),
                 &mut check_point_store_guard,
             );
-            info!("{} ingest end.", self.task_ctx.task_id);
+
+            let mut wru = 0.0;
+            if self.config.rg_config.is_some() && !keyspace_id.is_empty() {
+                let ru_config = &self.config.rg_config.as_ref().unwrap().request_unit;
+                // The calculation formula is a reference to the pd's ru consumption,
+                // ref https://github.com/tikv/pd/blob/master/client/resource_group/controller/model.go#L103.
+                //
+                // `write_base_cost + write_per_batch_base_cost * avg_batch_proportion +
+                // write_cost_per_byte * data_size * replica_nums`
+                //
+                // In the formula, we use the default value of `avg_batch_proportion` and
+                // `replica_nums`, which are 0.5 (same as the default value of
+                // `avg_batch_proportion` in pd) and 3.0 respectively.
+                wru = ru_config.write_base_cost
+                    + ru_config.write_per_batch_base_cost * DEFAULT_AVG_BATCH_PROPORTION
+                    + ru_config.write_cost_per_byte * data_size as f64 * REPLICA_NUMS;
+
+                LOAD_DATA_WRU_COST_COUNTER
+                    .with_label_values(&[&keyspace_id, &self.task_ctx.task_id])
+                    .inc_by(wru as u64);
+
+                self.scheduler.set_keyspace_id(keyspace_id.clone());
+            }
+            info!(
+                "{} ingest successfully, data size {}, ru ru_consumption {}, keyspace id {}",
+                self.task_ctx.task_id, data_size, wru, keyspace_id
+            );
             return res;
         }
         Ok(())
@@ -940,7 +1013,7 @@ impl LoadTaskWorker {
             return Ok(());
         }
 
-        info!("{} start build sst.", self.task_ctx.task_id);
+        info!("{} start build sst", self.task_ctx.task_id);
         let (tx, rx) = tikv_util::mpsc::unbounded();
         let mut sent_count = 0;
         let mut recv_count = 0;

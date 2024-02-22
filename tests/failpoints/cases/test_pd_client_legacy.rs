@@ -73,7 +73,8 @@ fn test_pd_client_deadlock() {
         request!(client => block_on(get_store_stats_async(0))),
         request!(client => get_operator(0)),
         request!(client => block_on(get_tso())),
-        request!(client => load_global_config(vec![])),
+        request!(client => load_global_config_by_names(vec![])),
+        request!(client => load_global_config_by_path("".to_string())),
     ];
 
     for (name, func) in test_funcs {
@@ -106,11 +107,11 @@ fn test_pd_client_deadlock() {
 }
 
 #[test]
-fn test_load_global_config() {
+fn test_load_global_config_by_names() {
     let (mut _server, client) = new_test_server_and_client(ReadableDuration::millis(100));
     let res = futures::executor::block_on(async move {
         client
-            .load_global_config(
+            .load_global_config_by_names(
                 ["abc", "123", "xyz"]
                     .iter()
                     .map(|x| x.to_string())
@@ -119,7 +120,22 @@ fn test_load_global_config() {
             .await
     });
     for (k, v) in res.unwrap() {
-        assert_eq!(k, format!("/global/config/{}", v))
+        let s = std::str::from_utf8(&v).unwrap();
+        assert_eq!(k, format!("/global/config/{}", s));
+    }
+}
+
+#[test]
+fn test_load_global_config_by_path() {
+    let (mut _server, client) = new_test_server_and_client(ReadableDuration::millis(100));
+    let res = futures::executor::block_on(async move {
+        client
+            .load_global_config_by_path("/path/to/config/".to_string())
+            .await
+    });
+    for (k, v) in res.unwrap() {
+        assert_eq!(k, "/path/to/config/test");
+        assert_eq!(v, "test".as_bytes());
     }
 }
 

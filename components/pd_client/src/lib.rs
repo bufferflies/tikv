@@ -32,7 +32,7 @@ use kvproto::{
     metapb, pdpb,
     replication_modepb::{RegionReplicationStatus, ReplicationStatus, StoreDrAutoSyncStatus},
 };
-use pdpb::{QueryStats, WatchGlobalConfigResponse};
+use pdpb::{LoadGlobalConfigRequest, QueryStats, WatchGlobalConfigResponse};
 use tikv_util::time::{Instant, UnixSecs};
 use txn_types::TimeStamp;
 
@@ -258,8 +258,24 @@ pub const INVALID_ID: u64 = 0;
 /// all the time.
 #[async_trait]
 pub trait PdClient: GetSecurityManager + Send + Sync {
-    /// Load a list of GlobalConfig
-    fn load_global_config(&self, _list: Vec<String>) -> PdFuture<HashMap<String, String>> {
+    /// Load GlobalConfig from PD by name
+    fn load_global_config_by_names(
+        &self,
+        _names: Vec<String>,
+    ) -> PdFuture<HashMap<String, Vec<u8>>> {
+        unimplemented!();
+    }
+
+    /// Load GlobalConfig from PD by path
+    fn load_global_config_by_path(&self, _path: String) -> PdFuture<HashMap<String, Vec<u8>>> {
+        unimplemented!();
+    }
+
+    /// Load GlobalConfig from PD
+    fn load_global_config(
+        &self,
+        _req: LoadGlobalConfigRequest,
+    ) -> PdFuture<HashMap<String, Vec<u8>>> {
         unimplemented!();
     }
 

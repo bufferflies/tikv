@@ -8,6 +8,8 @@ pub(crate) enum Error {
     CheckError(String),
     #[error("pd error {0}")]
     PdError(#[from] pd_client::Error),
+    #[error("serde_json error {0}")]
+    SerdeJsonError(#[from] serde_json::Error),
     #[error("dfs error {0}")]
     DfsError(#[from] dfs::Error),
     #[error("hyper error {0}")]

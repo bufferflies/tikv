@@ -16,6 +16,7 @@ use std::{
     time::Duration,
 };
 
+use ::load_data::task::ResourceGroupConfig;
 use ::native_br::{backup::BackupConfig, restore::RestoreConfig};
 use clap::{App, Arg, ArgMatches};
 use grpcio::EnvBuilder;
@@ -45,6 +46,7 @@ use crate::{
 const ZSTD_COMPRESSION_LEVEL_FOR_REMOTE: &str = "5";
 const DEFAULT_LOG_LEVEL: Level = Level::Info;
 const BACKGROUND_WORKER_INTERVAL: Duration = Duration::from_secs(60); //1min
+const RG_CONFIG_PATH: &str = "resource_group/controller";
 
 fn main() {
     init_logger(io::stdout(), DEFAULT_LOG_LEVEL);
@@ -154,6 +156,13 @@ fn main() {
                 .takes_value(true)
                 .value_name("Bool")
                 .help("run worker-scaler"),
+        )
+        .arg(
+            Arg::with_name("report-wru")
+                .long("report-wru")
+                .takes_value(true)
+                .value_name("Bool")
+                .help("report wru"),
         )
         .arg(
             Arg::with_name("enable-load-data-check-point")
@@ -282,6 +291,14 @@ fn main() {
         fs::create_dir_all(&config.data_dir).unwrap();
     }
 
+    let rg_config = if config.report_wru {
+        let rg_config = get_rg_config_from_pd(&pd, &thread_pool)
+            .unwrap_or_else(|e| panic!("failed to ru config: {:?}", e));
+        info!("get rg config from pd: {:?}", rg_config);
+        Some(rg_config)
+    } else {
+        None
+    };
     let load_manager = Arc::new(LoadDataManager::new(
         pd.clone(),
         config.data_dir.clone().into(),
@@ -292,6 +309,7 @@ fn main() {
         worker_scaler_opt,
         config.worker_scaler.clone(),
         config.enable_load_data_check_point,
+        rg_config,
     ));
     let br_manager = Arc::new(NativeBrManager::new(
         thread_pool.clone(),
@@ -316,7 +334,7 @@ fn main() {
     let acceptor = security_mgr.acceptor(incoming).unwrap();
     let server = start_serve!(ctx.clone(), acceptor);
 
-    // try recover task from checkpoint.
+    // try recover task from checkpoint
     load_manager.try_recover_or_clean_tasks_by_check_point();
 
     if config.register {
@@ -390,6 +408,22 @@ fn update_native_br_config(br_manager: Arc<NativeBrManager>, path: &Path) {
             Err(e) => error!("failed to parse config file {:?}", e),
         },
         Err(e) => error!("failed to read config file {:?}", e),
+    }
+}
+
+fn get_rg_config_from_pd(
+    pd_client: &Arc<RpcClient>,
+    runtime: &Arc<tokio::runtime::Runtime>,
+) -> Result<ResourceGroupConfig, error::Error> {
+    let configs =
+        runtime.block_on(pd_client.load_global_config_by_path(RG_CONFIG_PATH.to_string()))?;
+    if let Some(config) = configs.get(RG_CONFIG_PATH) {
+        let rg_config = serde_json::from_slice(config)?;
+        Ok(rg_config)
+    } else {
+        Err(error::Error::PdError(
+            pd_client::Error::GlobalConfigNotFound("ru config not found".to_string()),
+        ))
     }
 }
 
@@ -482,6 +516,7 @@ pub struct Config {
     pub cop_cache_size: ReadableSize,
     pub cop_block_cache_size: ReadableSize,
     pub worker_scaler: WorkerScalerConfig,
+    pub report_wru: bool,
     pub enable_load_data_check_point: bool,
 }
 
@@ -504,6 +539,7 @@ impl Default for Config {
             cop_cache_size: ReadableSize::gb(1),
             cop_block_cache_size: ReadableSize::default(),
             worker_scaler: WorkerScalerConfig::default(),
+            report_wru: false,
             enable_load_data_check_point: false,
         }
     }
@@ -602,6 +638,10 @@ fn override_from_args(config: &mut Config, matches: &ArgMatches<'_>) {
 
     if let Some(run_worker_scaler) = matches.value_of("run-worker-scaler") {
         config.worker_scaler.run = run_worker_scaler == "true";
+    }
+
+    if let Some(report_wru) = matches.value_of("report-wru") {
+        config.report_wru = report_wru == "true";
     }
 
     if let Some(enable_check_point) = matches.value_of("enable-load-data-check-point") {

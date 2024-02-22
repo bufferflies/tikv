@@ -34,11 +34,23 @@ pub trait PdMocker {
         req: &LoadGlobalConfigRequest,
     ) -> Option<Result<LoadGlobalConfigResponse>> {
         let mut send = vec![];
-        for r in req.get_names() {
+        let path = if req.get_config_path().is_empty() {
+            "/global/config/".to_owned()
+        } else {
+            req.get_config_path().to_owned()
+        };
+        if req.get_names().is_empty() {
             let mut i = GlobalConfigItem::default();
-            i.set_name(format!("/global/config/{}", r.clone()));
-            i.set_value(r.clone());
+            i.set_name(format!("{}{}", path, "test".to_owned()));
+            i.set_payload("test".to_owned().into_bytes());
             send.push(i);
+        } else {
+            for r in req.get_names() {
+                let mut i = GlobalConfigItem::default();
+                i.set_name(format!("{}{}", path, r.clone()));
+                i.set_payload(r.clone().into_bytes());
+                send.push(i);
+            }
         }
         let mut res = LoadGlobalConfigResponse::default();
         res.set_items(send.into());

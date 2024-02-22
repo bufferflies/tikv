@@ -4,6 +4,7 @@ use std::{collections::HashMap, fs, path::PathBuf, sync::Arc};
 
 use bytes::Bytes;
 use cloud_encryption::MasterKey;
+use dashmap::{mapref::entry::Entry, DashMap};
 use http::{header, Method, Response, StatusCode};
 use hyper::Body;
 use kvengine::{
@@ -20,7 +21,7 @@ use load_data::{
     },
     task::{
         FlushResult, LoadDataConfig, LoadDataContext, LoadTaskMsg, LoadTaskScheduler,
-        LoadTaskStates, LoadTaskWorker, PutChunkResult, TaskContext,
+        LoadTaskStates, LoadTaskWorker, PutChunkResult, ResourceGroupConfig, TaskContext,
     },
 };
 use pd_client::PdClient;
@@ -246,12 +247,13 @@ pub(crate) async fn handle_load_data(
 }
 
 pub(crate) struct LoadDataManager {
-    running_tasks: Arc<dashmap::DashMap<String, LoadTaskScheduler>>,
+    running_tasks: Arc<DashMap<String, LoadTaskScheduler>>,
     config: LoadDataConfig,
     ctx: LoadDataContext,
     worker_scaler: Option<WorkerScaler>,
     worker_scaler_conf: WorkerScalerConfig,
-    ended_tasks: Arc<dashmap::DashMap<String, i64>>,
+    ended_tasks: Arc<DashMap<String, (i64, Option<String>)>>, /* task_id -> (timestamp,
+                                                               * Option<keyspace_id>) */
 }
 
 impl LoadDataManager {
@@ -265,9 +267,11 @@ impl LoadDataManager {
         worker_scaler: Option<WorkerScaler>,
         worker_scaler_conf: WorkerScalerConfig,
         enable_check_point: bool,
+        rg_config: Option<ResourceGroupConfig>,
     ) -> Self {
         let mut config = LoadDataConfig::default();
         config.enable_check_point = enable_check_point;
+        config.rg_config = rg_config;
         let context = LoadDataContext {
             pd,
             dir,
@@ -277,12 +281,12 @@ impl LoadDataManager {
             master_key,
         };
         Self {
-            running_tasks: Arc::new(dashmap::DashMap::default()),
+            running_tasks: Arc::new(DashMap::default()),
             config,
             ctx: context,
             worker_scaler,
             worker_scaler_conf,
-            ended_tasks: Arc::new(dashmap::DashMap::default()),
+            ended_tasks: Arc::new(DashMap::default()),
         }
     }
 
@@ -310,26 +314,23 @@ impl LoadDataManager {
     }
 
     pub fn try_recover_or_clean_tasks_by_check_point(&self) {
-        if !self.config.enable_check_point {
-            return;
-        }
-
         let mut check_point_dir = self.ctx.dir.clone();
-
         if check_point_dir.as_os_str().is_empty() {
-            // Use current dir.
             check_point_dir = PathBuf::from(".");
         }
-
-        let files = fs::read_dir(check_point_dir.clone()).unwrap();
-
+        // spawn a worker to clean checkpoint files
         spawn_clean_check_point_files_worker(
-            check_point_dir,
+            check_point_dir.clone(),
             CANCELLED_CHECK_POINT_FILE_EXPIRE_SEC,
             CLEAN_CHECK_POINT_FILE_INTERVAL_SEC,
             self.ended_tasks.clone(),
         );
 
+        if !self.config.enable_check_point {
+            return;
+        }
+        // recover tasks from checkpoint files
+        let files = fs::read_dir(check_point_dir).unwrap();
         let dir_entries: Vec<fs::DirEntry> = files.filter_map(|r| r.ok()).collect();
         for file in dir_entries {
             let file_name = file.file_name();
@@ -391,10 +392,10 @@ impl LoadDataManager {
     pub(crate) fn init_task(&self, task_ctx: TaskContext) {
         let task_id = task_ctx.task_id.clone();
         match self.running_tasks.entry(task_id.clone()) {
-            dashmap::mapref::entry::Entry::Occupied(_) => {
+            Entry::Occupied(_) => {
                 info!("task {} already exists", task_id);
             }
-            dashmap::mapref::entry::Entry::Vacant(entry) => {
+            Entry::Vacant(entry) => {
                 let check_point = LoadDataCheckPointCtx::new(task_ctx.clone());
                 let mut worker = LoadTaskWorker::new(
                     self.config.clone(),

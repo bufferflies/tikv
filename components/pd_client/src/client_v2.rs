@@ -40,8 +40,9 @@ use grpcio::{
 use kvproto::{
     metapb,
     pdpb::{
-        self, GetMembersResponse, PdClient as PdClientStub, RegionHeartbeatRequest,
-        RegionHeartbeatResponse, ReportBucketsRequest, TsoRequest, TsoResponse,
+        self, GetMembersResponse, LoadGlobalConfigRequest, PdClient as PdClientStub,
+        RegionHeartbeatRequest, RegionHeartbeatResponse, ReportBucketsRequest, TsoRequest,
+        TsoResponse,
     },
     replication_modepb::{ReplicationStatus, StoreDrAutoSyncStatus},
 };
@@ -544,7 +545,17 @@ pub trait PdClient {
 
     fn fetch_cluster_id(&mut self) -> Result<u64>;
 
-    fn load_global_config(&mut self, list: Vec<String>) -> PdFuture<HashMap<String, String>>;
+    fn load_global_config_by_names(
+        &mut self,
+        list: Vec<String>,
+    ) -> PdFuture<HashMap<String, Vec<u8>>>;
+
+    fn load_global_config_by_path(&mut self, path: String) -> PdFuture<HashMap<String, Vec<u8>>>;
+
+    fn load_global_config(
+        &mut self,
+        req: LoadGlobalConfigRequest,
+    ) -> PdFuture<HashMap<String, Vec<u8>>>;
 
     fn watch_global_config(
         &mut self,
@@ -803,10 +814,25 @@ impl PdClient for RpcClient {
         Ok((tx, resp_rx))
     }
 
-    fn load_global_config(&mut self, list: Vec<String>) -> PdFuture<HashMap<String, String>> {
-        use kvproto::pdpb::LoadGlobalConfigRequest;
+    fn load_global_config_by_names(
+        &mut self,
+        list: Vec<String>,
+    ) -> PdFuture<HashMap<String, Vec<u8>>> {
         let mut req = LoadGlobalConfigRequest::new();
         req.set_names(list.into());
+        return self.load_global_config(req);
+    }
+
+    fn load_global_config_by_path(&mut self, path: String) -> PdFuture<HashMap<String, Vec<u8>>> {
+        let mut req = LoadGlobalConfigRequest::new();
+        req.set_config_path(path);
+        return self.load_global_config(req);
+    }
+
+    fn load_global_config(
+        &mut self,
+        req: LoadGlobalConfigRequest,
+    ) -> PdFuture<HashMap<String, Vec<u8>>> {
         let mut raw_client = self.raw_client.clone();
         Box::pin(async move {
             raw_client.wait_for_ready().await?;
@@ -818,7 +844,7 @@ impl PdClient for RpcClient {
                         if c.has_error() {
                             error!("failed to load global config with key {:?}", c.get_error());
                         } else {
-                            res.insert(c.get_name().to_owned(), c.get_value().to_owned());
+                            res.insert(c.get_name().to_owned(), c.get_payload().to_owned());
                         }
                     }
                     Ok(res)

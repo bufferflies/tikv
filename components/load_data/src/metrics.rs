@@ -32,6 +32,12 @@ lazy_static! {
         &["task_id"],
     )
     .unwrap();
+    pub static ref LOAD_DATA_WRU_COST_COUNTER: IntCounterVec = register_int_counter_vec!(
+        "tikv_worker_load_data_wru_cost_counter",
+        "Total count of the write request unit cost for load data",
+        &["keyspace_id", "task_id"],
+    )
+    .unwrap();
     pub static ref LOAD_DATA_TASK_STATE: GaugeVec = register_gauge_vec!(
         "tikv_worker_load_data_task_state",
         "load data task state changes and corresponding times",
@@ -40,13 +46,16 @@ lazy_static! {
     .unwrap();
 }
 
-pub fn remove_metrics(task_id: &str) {
+pub fn remove_metrics(task_id: &str, keyspace_id: Option<String>) {
     info!("remove cancelled task metrics, task_id:{}", task_id);
 
     let _ = LOAD_DATA_BUILD_SST_COUNTER.remove_label_values(&[task_id]);
     let _ = LOAD_DATA_BUILD_SST_TIME_MILLIS.remove_label_values(&[task_id]);
     let _ = LOAD_DATA_HANDLE_ADD_CHUNK_COUNTER.remove_label_values(&[task_id]);
     let _ = LOAD_DATA_HANDLE_ADD_CHUNK_TIME_MILLIS.remove_label_values(&[task_id]);
+    if let Some(keyspace_id) = keyspace_id {
+        let _ = LOAD_DATA_WRU_COST_COUNTER.remove_label_values(&[&keyspace_id, task_id]);
+    }
 
     let _ = LOAD_DATA_TASK_STATE
         .remove_label_values(&[task_id, LoadDataWorkerState::InitTask.as_str()]);

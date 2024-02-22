@@ -28,7 +28,7 @@ use kvproto::{
     keyspacepb,
     keyspacepb_grpc::KeyspaceClient,
     metapb,
-    pdpb::{self, EventType, Member, WatchGcSafePointV2Response},
+    pdpb::{self, EventType, LoadGlobalConfigRequest, Member, WatchGcSafePointV2Response},
     replication_modepb::{RegionReplicationStatus, ReplicationStatus, StoreDrAutoSyncStatus},
 };
 use security::{GetSecurityManager, SecurityManager};
@@ -448,10 +448,22 @@ impl fmt::Debug for RpcClient {
 const LEADER_CHANGE_RETRY: usize = 10;
 #[async_trait]
 impl PdClient for RpcClient {
-    fn load_global_config(&self, list: Vec<String>) -> PdFuture<HashMap<String, String>> {
-        use kvproto::pdpb::LoadGlobalConfigRequest;
+    fn load_global_config_by_names(&self, list: Vec<String>) -> PdFuture<HashMap<String, Vec<u8>>> {
         let mut req = LoadGlobalConfigRequest::new();
         req.set_names(list.into());
+        return self.load_global_config(req);
+    }
+
+    fn load_global_config_by_path(&self, path: String) -> PdFuture<HashMap<String, Vec<u8>>> {
+        let mut req = LoadGlobalConfigRequest::new();
+        req.set_config_path(path);
+        return self.load_global_config(req);
+    }
+
+    fn load_global_config(
+        &self,
+        req: LoadGlobalConfigRequest,
+    ) -> PdFuture<HashMap<String, Vec<u8>>> {
         let executor = |client: &Client, req| match client
             .inner
             .rl()
@@ -467,7 +479,7 @@ impl PdClient for RpcClient {
                             if c.has_error() {
                                 error!("failed to load global config with key {:?}", c.get_error());
                             } else {
-                                res.insert(c.get_name().to_owned(), c.get_value().to_owned());
+                                res.insert(c.get_name().to_owned(), c.get_payload().to_owned());
                             }
                         }
                         Ok(res)

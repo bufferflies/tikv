@@ -85,6 +85,7 @@ fn test_random_all() {
             region_size,
             coarse_split_size: region_size * 4,
             enable_check_point: false,
+            rg_config: None,
         }
     };
 

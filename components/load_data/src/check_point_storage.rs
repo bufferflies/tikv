@@ -19,7 +19,7 @@ use tikv_util::{debug, error, info};
 
 use crate::{
     kv::{DuplicateEntry, SstMeta},
-    metrics::LOAD_DATA_TASK_STATE,
+    metrics::{remove_metrics, LOAD_DATA_TASK_STATE},
     task::TaskContext,
     Error,
 };
@@ -443,7 +443,8 @@ pub fn spawn_clean_check_point_files_worker(
     check_point_dir: PathBuf,
     cancelled_task_check_point_file_expire_sec: u64,
     clean_check_point_file_interval_sec: u64,
-    ended_tasks: Arc<DashMap<String, i64>>,
+    ended_tasks: Arc<DashMap<String, (i64, Option<String>)>>, /* task_id -> (timestamp,
+                                                               * Option<keyspace_id>) */
 ) {
     std::thread::spawn(move || {
         loop {
@@ -457,15 +458,15 @@ pub fn spawn_clean_check_point_files_worker(
     });
 }
 
-pub fn remove_load_data_metrics(ended_tasks: Arc<DashMap<String, i64>>) {
-    let now = Utc::now();
-    let now_millis = now.timestamp_millis();
-    let metric_safe_ts = now_millis - CANCELLED_TASK_METRIC_EXPIRE_SEC * 1000;
+pub fn remove_load_data_metrics(ended_tasks: Arc<DashMap<String, (i64, Option<String>)>>) {
+    let now = Utc::now().timestamp();
+    let metric_safe_ts = now - CANCELLED_TASK_METRIC_EXPIRE_SEC;
     let mut to_remove_task_ids = vec![];
-    for task_metric in ended_tasks.iter() {
-        let task_id = task_metric.key();
-        if *task_metric.value() < metric_safe_ts {
-            crate::metrics::remove_metrics(task_id);
+    for ended_task in ended_tasks.iter() {
+        let task_id = ended_task.key();
+        let (ts, keyspace_id) = ended_task.value();
+        if *ts < metric_safe_ts {
+            remove_metrics(task_id, keyspace_id.clone());
             to_remove_task_ids.push(task_id.clone());
         }
     }
