@@ -752,7 +752,7 @@ pub fn find_latest_snapshot(
 
     // Find the latest snapshot smaller than cluster_backup epoch.
     let snapshot = match object_storage.list_objects(
-        &snapshot_rlog_key_suffix(start_epoch),
+        &snapshot_rlog_key_suffix(start_epoch - 1),
         Some(&snapshot_rlog_key_prefix(store_id)),
         Some(MAX_EPOCH_BACKWARD),
     ) {

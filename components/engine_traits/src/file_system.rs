@@ -94,7 +94,7 @@ pub trait ObjectStorage: Sync + Send {
     ) -> std::result::Result<Vec<(String, Bytes)>, String>;
     fn list_objects(
         &self,
-        start_after: &str,
+        start_after: &str, // The key to start after when listing objects (exclusive).
         prefix: Option<&str>,
         max_keys: Option<u32>,
     ) -> std::result::Result<(Vec<ListObjectContent>, Option<String>), String>;
