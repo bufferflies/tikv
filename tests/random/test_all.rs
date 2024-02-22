@@ -8,7 +8,7 @@ use std::{
 use api_version::ApiV2;
 use cloud_encryption::KeyspaceEncryptionConfig;
 use futures::executor::block_on;
-use kvengine::dfs::DFSConfig;
+use kvengine::dfs::{DFSConfig, S3Fs};
 use kvproto::pdpb::CheckPolicy;
 use load_data::task::LoadDataConfig;
 use native_br::{backup, backup_worker, restore::RestoreConfig};
@@ -93,6 +93,16 @@ fn test_random_all() {
     let ts = block_on(pd_client.get_tso()).unwrap();
     backup::update_service_safe_point(pd_client.as_ref(), ts.into_inner()).unwrap();
 
+    let dfs_conf = dfs_config.clone();
+    let s3fs = S3Fs::new(
+        dfs_conf.prefix,
+        dfs_conf.s3_endpoint,
+        dfs_conf.s3_key_id,
+        dfs_conf.s3_secret_key,
+        dfs_conf.s3_region,
+        dfs_conf.s3_bucket,
+    );
+
     // Start workloads & schedulers.
     let mut handles = vec![
         spawn_merge(cluster.new_scheduler(), true),
@@ -123,6 +133,7 @@ fn test_random_all() {
             runtime.block_on(cluster.new_keyspace_client()),
             restore_config.clone(),
             keyspace_manager.clone(),
+            &s3fs,
             TIMEOUT,
         ));
     }
@@ -144,6 +155,7 @@ fn test_random_all() {
             cluster.new_client(),
             keyspace_manager.clone(),
             backup_worker,
+            &s3fs,
             Duration::from_secs(5),
             TIMEOUT,
         ),

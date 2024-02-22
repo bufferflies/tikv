@@ -218,6 +218,7 @@ impl Worker {
     fn handle_rotate(&mut self, epoch_id: u32) {
         if let Some(async_writer) = self.async_wal_writer.as_mut() {
             assert_eq!(async_writer.epoch_id, epoch_id);
+            let file_off = async_writer.file_off;
             async_writer.rotate().unwrap();
 
             if self.is_lightweight_enabled() {
@@ -226,7 +227,7 @@ impl Worker {
                     .as_ref()
                     .unwrap()
                     .task_sender
-                    .send(ObjectStorageTask::Rotate { epoch_id })
+                    .send(ObjectStorageTask::Rotate { epoch_id, file_off })
                     .unwrap();
             }
         }

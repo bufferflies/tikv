@@ -1660,6 +1660,7 @@ fn get_shard_for_key(key: &[u8], en: &Engine) -> Arc<Shard> {
     en.get_shard(1).unwrap()
 }
 
+#[must_use]
 fn try_wait<F>(f: F, seconds: usize) -> bool
 where
     F: Fn() -> bool,

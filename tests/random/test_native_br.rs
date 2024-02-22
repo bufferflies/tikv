@@ -10,9 +10,8 @@ use kvengine::dfs::S3Fs;
 use native_br::{
     backup_worker,
     error::Error,
-    restore::{get_cluster_backup_meta, RestoreConfig},
-    restore_keyspace,
-    restore_keyspace::{ReportRestoreStepTrait, RestoreStep},
+    restore::{get_cluster_backup_meta, get_cluster_backup_meta_async, RestoreConfig},
+    restore_keyspace::{self, ReportRestoreStepTrait, RestoreStep},
 };
 use pd_client::PdClient;
 use rand::Rng;
@@ -64,9 +63,11 @@ pub(crate) fn spawn_backup(
     client: ClusterClient,
     keyspace_manager: KeyspaceManager,
     backup_worker: Arc<backup_worker::BackupWorker>,
+    s3fs: &S3Fs,
     interval: Duration,
     timeout: Duration,
 ) -> tokio::task::JoinHandle<()> {
+    let s3fs = s3fs.clone();
     tokio::spawn(async move {
         let start_time = Instant::now();
         let mut last_backup_time = start_time;
@@ -115,9 +116,11 @@ pub(crate) fn spawn_backup(
             keyspace_manager.add_backup(keyspace_backup);
             drop(shared_guard);
 
+            let backup_meta =
+                get_cluster_backup_meta_async(&s3fs, backup_file.name().to_string()).await;
             info!(
-                "instant backup success, keyspace {}, lightweight {}, file {:?}",
-                keyspace_id, do_lightweight_backup, backup_file
+                "instant backup success, keyspace {}, lightweight {}, file {:?}, backup_meta {:?}",
+                keyspace_id, do_lightweight_backup, backup_file, backup_meta,
             );
 
             BACKUP_COUNTER.fetch_add(1, Ordering::SeqCst);
@@ -165,8 +168,10 @@ pub(crate) fn spawn_restore_keyspace(
     mut client: ClusterKeyspaceClient,
     config: RestoreConfig,
     keyspace_manager: KeyspaceManager,
+    s3fs: &S3Fs,
     timeout: Duration,
 ) -> JoinHandle<()> {
+    let s3fs = s3fs.clone();
     std::thread::spawn(move || {
         let mut rng = rand::thread_rng();
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -262,15 +267,6 @@ pub(crate) fn spawn_restore_keyspace(
                     10,
                 );
                 if verify_res.is_err() {
-                    let dfs_config = config.dfs.clone();
-                    let s3fs = S3Fs::new(
-                        dfs_config.prefix,
-                        dfs_config.s3_endpoint,
-                        dfs_config.s3_key_id,
-                        dfs_config.s3_secret_key,
-                        dfs_config.s3_region,
-                        dfs_config.s3_bucket,
-                    );
                     let backup_meta = get_cluster_backup_meta(&s3fs, backup_name);
                     info!("{} backup_meta: {:?}", tag, backup_meta);
                     panic!(

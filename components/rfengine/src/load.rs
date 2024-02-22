@@ -211,13 +211,14 @@ pub(crate) fn is_last_wal(dir: &Path, epoch_id: u32) -> bool {
 #[cfg(test)]
 mod tests {
 
-    use std::{fs::OpenOptions, sync::atomic::Ordering};
+    use std::{fs::OpenOptions, sync::atomic::Ordering, time::Duration};
 
     use bytes::{BufMut, BytesMut};
     use raft_proto::eraftpb;
     use slog::o;
 
     use super::{config::Config, *};
+    use crate::tests::try_wait;
 
     fn init_logger() {
         use slog::Drain;
@@ -309,6 +310,7 @@ mod tests {
         // RfEngine should be able to recover from the corrupted async wal file.
         let engine = RfEngine::open(dir_path, &cfg, None, None).unwrap();
         assert_eq!(engine.peers.len(), 10);
+        check_async_wal(&engine, current_epoch, 0, it.offset, Duration::from_secs(5));
     }
 
     #[test]
@@ -373,6 +375,16 @@ mod tests {
         let engine = RfEngine::open(dir_path, &cfg, None, None).unwrap();
         assert_eq!(engine.peers.len(), 10);
 
+        let mut sync_it = WalIterator::new(sync_wal_path.to_owned(), current_epoch);
+        sync_it.iterate_batch(|_, _| {}).unwrap();
+        check_async_wal(
+            &engine,
+            current_epoch,
+            0,
+            sync_it.offset,
+            Duration::from_secs(5),
+        );
+
         // Write some more data to rotate the wal file.
         for idx in 1050..=1080 {
             let mut wb = WriteBatch::new();
@@ -425,5 +437,38 @@ mod tests {
         fs::copy(&manifest_filename_bak, &manifest_filename).unwrap();
         // RfEngine can not recover from the corrupted wal file in previous epoch.
         assert!(RfEngine::open(dir_path, &cfg, None, None).is_err());
+    }
+
+    fn check_async_wal(
+        engine: &RfEngine,
+        epoch: u32,
+        start_off: u64,
+        end_off: u64,
+        timeout: Duration,
+    ) {
+        let ok = try_wait(
+            || {
+                let (cb, fut) = tikv_util::future::paired_future_callback();
+                engine.dump_wal_chunk(epoch, start_off, end_off, cb);
+                let chunks = match futures::executor::block_on(fut).unwrap() {
+                    Ok(chunks) => chunks,
+                    Err(e) => {
+                        info!("dump wal chunk failed: {:?}", e);
+                        return false;
+                    }
+                };
+                let mut async_it = WalIterator::new_from_chunks(chunks, epoch);
+                if let Err(e) = async_it.iterate_batch(|_, _| {
+                    // Do nothing but verify checksum.
+                }) {
+                    // When async WAL has not catch up yet, it will meet the corrupted data again.
+                    info!("iterate batch failed: {:?}", e);
+                    return false;
+                }
+                async_it.offset == end_off
+            },
+            timeout.as_secs() as usize,
+        );
+        assert!(ok, "check async WAL failed");
     }
 }

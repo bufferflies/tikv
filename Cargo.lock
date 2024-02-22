@@ -5914,6 +5914,7 @@ dependencies = [
  "error_code",
  "file_system",
  "fslock",
+ "futures 0.3.28",
  "kvengine",
  "kvproto",
  "lazy_static",

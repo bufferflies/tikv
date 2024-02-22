@@ -227,18 +227,37 @@ pub fn wal_chunk_file_suffix(start_off: u64, end_off: u64) -> String {
 
 #[cfg(test)]
 pub mod tests {
+    use std::time::Duration;
+
     use api_version::{
         api_v2::{self, TXN_KEY_PREFIX},
         ApiV2,
     };
     use byteorder::{BigEndian, ByteOrder};
     use kvproto::metapb::Region;
+    use tikv_util::time::Instant;
 
     use crate::{
         get_region_keyspace_id, get_region_keyspace_id_str, last_wal_chunk_file_key,
         parse_epoch_from_snapshot_key, parse_wal_chunk_key, snapshot_rlog_key,
         verify_wal_chunks_integrity, wal_chunk_file_key,
     };
+
+    #[must_use]
+    pub fn try_wait<F>(f: F, seconds: usize) -> bool
+    where
+        F: Fn() -> bool,
+    {
+        let begin = Instant::now_coarse();
+        let timeout = Duration::from_secs(seconds as u64);
+        while begin.saturating_elapsed() < timeout {
+            if f() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(100))
+        }
+        false
+    }
 
     #[test]
     fn test_get_region_keyspace_id() {

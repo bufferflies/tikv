@@ -189,7 +189,18 @@ impl ObjectStorageWorker {
                         self.set_unhealthy()
                     }
                 }
-                ObjectStorageTask::Rotate { epoch_id } => {
+                ObjectStorageTask::Rotate { epoch_id, file_off } => {
+                    if self.need_sync(epoch_id, file_off) {
+                        info!("{} dfs worker need sync before rotate", self.get_engine_id();
+                            "current_epoch" => self.epoch_id, "current_sync_off" => self.sync_off,
+                            "epoch_id" => epoch_id, "file_off" => file_off,
+                        );
+                        if let Err(err) = self.handle_sync(epoch_id, file_off) {
+                            error!("dfs worker handle_sync failed, set unhealthy"; "err" => ?err);
+                            self.set_unhealthy();
+                            return;
+                        }
+                    }
                     if let Err(err) = self.handle_rotate(epoch_id) {
                         error!("dfs worker handle_rotate failed, set unhealthy"; "err" => ?err);
                         self.set_unhealthy()
@@ -251,6 +262,10 @@ impl ObjectStorageWorker {
         self.buf.clear();
 
         Ok(())
+    }
+
+    fn need_sync(&self, epoch_id: u32, file_off: u64) -> bool {
+        self.epoch_id < epoch_id || (self.epoch_id == epoch_id && self.sync_off < file_off)
     }
 
     fn handle_sync(&mut self, epoch_id: u32, file_off: u64) -> Result<()> {
@@ -533,6 +548,7 @@ pub(crate) enum ObjectStorageTask {
     }, // Sync the `epoch_id` wal file to `file_off`.
     Rotate {
         epoch_id: u32,
+        file_off: u64,
     }, // Rotate to next epoch.
     Snapshot {
         snapshot_objects: Vec<(String, Bytes)>,

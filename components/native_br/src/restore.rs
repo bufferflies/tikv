@@ -326,10 +326,15 @@ pub fn restore_pd(config: RestoreConfig, name: String) {
 }
 
 pub fn get_cluster_backup_meta(s3fs: &S3Fs, name: String) -> ClusterBackupMeta {
-    let backup_key = backup_file_full_path(s3fs.get_prefix(), name.clone(), None);
     let runtime = s3fs.get_runtime();
-    let data = runtime
-        .block_on(s3fs.get_object(backup_key, name, engine_traits::GetObjectOptions::default()))
+    runtime.block_on(get_cluster_backup_meta_async(s3fs, name))
+}
+
+pub async fn get_cluster_backup_meta_async(s3fs: &S3Fs, name: String) -> ClusterBackupMeta {
+    let backup_key = backup_file_full_path(s3fs.get_prefix(), name.clone(), None);
+    let data = s3fs
+        .get_object(backup_key, name, engine_traits::GetObjectOptions::default())
+        .await
         .unwrap();
     let mut cluster_backup = ClusterBackupMeta::new();
     cluster_backup.merge_from_bytes(&data).unwrap();

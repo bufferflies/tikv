@@ -41,5 +41,6 @@ tikv_util = { path = "../tikv_util" }
 tracker = { path = "../tracker" }
 
 [dev-dependencies]
+futures = "0.3"
 rand = "0.8"
 tempfile = "3.0"
