@@ -11,6 +11,8 @@ CPU="${CPU:-4}"
 MEMORY="${MEMORY:-5g}"
 
 TMP_PATH=""
+LOG_PATH=""
+PATH_SUFFIX=""
 TESTNAME="all"
 TIDB_VERSION="v7.1.0"
 REBUILD_IMAGE=1
@@ -25,6 +27,13 @@ while [[ $# -gt 0 ]]; do
 	--tmp-path)
 		TMP_PATH="$2"
 		shift
+		;;
+	--log-path)
+		LOG_PATH="$2"
+		shift
+		;;
+	--path-with-suffix)
+		PATH_SUFFIX=-$(date +%Y%m%d-%H%M%S)-$(git rev-parse --short HEAD)
 		;;
 	--test)
 		TESTNAME="$2"
@@ -57,6 +66,8 @@ if [ "$HELP" -eq 1 ]; then
 	echo "OPTIONS:"
 	echo "  --help                             Display this message"
 	echo "  --tmp-path     <temporary path>    Set the path for temporary data generated during testing"
+	echo "  --log-path     <log path>          Set the path for logs"
+	echo "  --path-with-suffix                 Add git commit and timestamp to the path as suffix"
 	echo "  --test         <all/with_tidb>     Set the name of test case to run"
 	echo "  --tidb-version <v6.6.0/v7.1.0/...> Set the version of TiDB for \"with_tidb\" test"
 	echo "  --no-rebuild-image                 Do NOT rebuild the testing Docker image"
@@ -72,23 +83,31 @@ fi
 IMAGE="ubuntu:20.04"
 if [ "$TESTNAME" = "with_tidb" ]; then
 	# Build image without context.
-	docker build $BUILD_IMAGE_ARGS -t random-tidb --build-arg VERSION="$TIDB_VERSION" - < Dockerfile.tidb
+	docker build $BUILD_IMAGE_ARGS -t random-tidb --build-arg VERSION="$TIDB_VERSION" - <Dockerfile.tidb
 	IMAGE="random-tidb"
 fi
 
-for((i=0;i<"$CONCURRENCY";i++)); do
-  TMP_VOLUME=""
-  if [ -n "$TMP_PATH" ]; then
-    # Containers should use different $TMPDIR, otherwise they will conflict on TIKV_LOCK_FILES.
-    mkdir -p "$TMP_PATH/$i"
-    ABSOLUTE_TMP_PATH=$(readlink -f "$TMP_PATH/$i")
-    TMP_VOLUME="-v $ABSOLUTE_TMP_PATH:/random-tmp"
-  fi
+LOG_VOLUME=""
+if [ -n "$LOG_PATH" ]; then
+	ABSOLUTE_LOG_PATH=$(readlink -f "${LOG_PATH}${PATH_SUFFIX}")
+	LOG_VOLUME="-v ${ABSOLUTE_LOG_PATH}:/random-logs"
+	RUN_ARGS+=" --log-path /random-logs"
+fi
 
-  docker run --name random-"$TESTNAME"-"$i" --cpus="$CPU" --memory="$MEMORY" \
-    -itd \
-    -v "$PWD":/random \
-    $TMP_VOLUME \
-    "$IMAGE" \
-    /bin/sh /random/run-random.sh "$i" "$TESTNAME" $RUN_ARGS
+for ((i = 0; i < "$CONCURRENCY"; i++)); do
+	TMP_VOLUME=""
+	if [ -n "$TMP_PATH" ]; then
+		# Containers should use different $TMPDIR, otherwise they will conflict on TIKV_LOCK_FILES.
+		mkdir -p "${TMP_PATH}${PATH_SUFFIX}/${i}"
+		ABSOLUTE_TMP_PATH=$(readlink -f "${TMP_PATH}${PATH_SUFFIX}/$i")
+		TMP_VOLUME="-v $ABSOLUTE_TMP_PATH:/random-tmp"
+	fi
+
+	docker run --name random-"$TESTNAME"-"$i" --cpus="$CPU" --memory="$MEMORY" \
+		-itd \
+		-v "$PWD":/random \
+		$TMP_VOLUME \
+		$LOG_VOLUME \
+		"$IMAGE" \
+		/bin/sh /random/run-random.sh "$i" "$TESTNAME" $RUN_ARGS
 done

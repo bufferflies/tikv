@@ -58,6 +58,10 @@ To use Docker-Random, ensure that Docker is installed on your system. Docker pro
 
         Please note that it is recommended to avoid writing data and logs (which are located at `scripts/docker-random/logs`) to the same disk, as this could potentially cause performance issues.
 
+    - `--log-path`: This specifies the path for logs.
+
+    - `--path-with-suffix`: Add git commit and timestamp to the path as suffix. This allows you to invoke another random test without clean up the log & tmp paths.
+
     - `--test`: This allows you to specify the test case to be run. Currently available test cases are `all` and `with_tidb`.
 
         ```shell

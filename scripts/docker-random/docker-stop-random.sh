@@ -2,8 +2,6 @@
 
 set -euo pipefail
 
-CONCURRENCY="${CONCURRENCY:-8}"
-
 TESTNAME="all"
 HELP=0
 
@@ -33,13 +31,14 @@ if [ "$HELP" -eq 1 ]; then
 	exit 0
 fi
 
-
 stop() {
-  docker stop random-"$TESTNAME"-"$1" && docker rm random-"$TESTNAME"-"$1"
+	docker stop "$1" && docker rm "$1"
 }
 
-for ((i=0;i<"$CONCURRENCY";i++)); do
-  stop "$i" &
+CONTAINERS=$(docker ps -aq --filter name=\^random-"$TESTNAME"-)
+
+for container in $CONTAINERS; do
+	stop "$container" &
 done
 
 wait
