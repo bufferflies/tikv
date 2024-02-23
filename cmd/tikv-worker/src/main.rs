@@ -7,6 +7,7 @@ mod metrics;
 mod native_br;
 mod remote_cop;
 mod server;
+mod txn_chunk;
 mod worker_scaler;
 
 use std::{

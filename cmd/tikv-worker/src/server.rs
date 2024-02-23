@@ -50,6 +50,7 @@ use crate::{
         REMOTE_COPR_SNAPSHOT_HISTOGRAM,
     },
     native_br::{self, NativeBrManager},
+    txn_chunk::handle_txn_chunk,
 };
 
 pub(crate) struct Context {
@@ -126,6 +127,7 @@ where
                         path if path.starts_with(native_br::RESTORE_KEYSPACE_API_PATH) => {
                             native_br::handle_restore_keyspace(ctx.br_manager.clone(), req).await
                         }
+                        "/txn_chunk" => handle_txn_chunk(ctx, req).await,
                         _ => Ok(hyper::Response::builder()
                             .status(404)
                             .body(hyper::Body::from("Not Found"))

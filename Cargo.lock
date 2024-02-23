@@ -8329,6 +8329,7 @@ dependencies = [
  "chrono",
  "clap 2.33.0",
  "cloud_encryption",
+ "crc32c",
  "dashmap 4.0.2",
  "file_system",
  "flate2",
