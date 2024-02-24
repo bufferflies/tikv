@@ -5936,6 +5936,7 @@ dependencies = [
  "slog-global",
  "slog-term",
  "tempfile",
+ "test_util",
  "thiserror",
  "tikv_alloc",
  "tikv_util",

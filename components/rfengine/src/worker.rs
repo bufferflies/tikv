@@ -857,7 +857,7 @@ mod tests {
         log_batch::{RaftLogOp, RaftLogs},
         manifest::{persist_change_set, Manifest},
         raft_log_file_name, region_state_key, store_raft_log_file_key,
-        tests::{get_txn_endkey_prefix, get_txn_startkey_prefix},
+        tests::{get_txn_endkey_prefix, get_txn_startkey_prefix, init_logger},
         write_batch::PeerBatch,
         RfEngine, RfEngineConfig, WalWriter, Worker, WriterType,
     };
@@ -891,6 +891,7 @@ mod tests {
 
     #[test]
     fn test_backup_raft_log_files() {
+        init_logger();
         let tmp_dir = tempfile::tempdir().unwrap();
         let tmp_path = tmp_dir.path();
         defer!(fs::remove_dir_all(tmp_path).unwrap());
@@ -1004,6 +1005,7 @@ mod tests {
 
     #[test]
     fn test_backup_and_load_raft_log_files() {
+        init_logger();
         let tmp_dir = tempfile::tempdir().unwrap();
         let tmp_path = tmp_dir.path();
         defer!(fs::remove_dir_all(tmp_path).unwrap());
@@ -1116,6 +1118,7 @@ mod tests {
 
     #[test]
     fn test_get_keyspace_id_from_peer() {
+        init_logger();
         let mut peer_meta = rfenginepb::PeerMeta::default();
         assert_eq!(Worker::get_keyspace_id_from_peer(&peer_meta), 16777215);
         write_keyspace_state(&mut peer_meta, 100);

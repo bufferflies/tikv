@@ -38,9 +38,14 @@ jobs:
       - name: Run random tests
         env:
           CARGO_INCREMENTAL: "0"
+          LOG_FILE: ${{ runner.temp }}/run.log
+          LOG_APPEND: "1"
         working-directory: ./
         run: |
-          cargo test -p tests --test random test_random_all > run.log 2>&1
-      - name: Print log on error
+          cargo test -p tests --test random test_random_all
+      - name: Upload log on error
         if: failure()
-        run: tail -2500 run.log
+        uses: actions/upload-artifact@v4
+        with:
+          name: run.log
+          path: ${{ runner.temp }}/run.log

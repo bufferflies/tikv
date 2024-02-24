@@ -1187,10 +1187,9 @@ mod tests {
     use engine_traits::Error as TraitError;
     use eraftpb::{Entry, EntryType};
     use protobuf::Message;
-    use slog::o;
 
     use super::*;
-    use crate::log_batch::RaftLogOp;
+    use crate::{log_batch::RaftLogOp, tests::init_logger};
 
     #[test]
     fn test_rfengine() {
@@ -1303,15 +1302,6 @@ mod tests {
         (key, val)
     }
 
-    fn init_logger() {
-        use slog::Drain;
-        let decorator = slog_term::PlainDecorator::new(std::io::stdout());
-        let drain = slog_term::CompactFormat::new(decorator).build();
-        let drain = std::sync::Mutex::new(drain).fuse();
-        let logger = slog::Logger::root(drain, o!());
-        slog_global::set_global(logger);
-    }
-
     fn new_raft_entry(tp: EntryType, term: u64, index: u64, data: &[u8], context: u8) -> Entry {
         let mut entry = Entry::new();
         entry.set_entry_type(tp);
@@ -1326,6 +1316,7 @@ mod tests {
 
     #[test]
     fn test_region_data() {
+        init_logger();
         let mut region_data = PeerData::new(1, 2);
 
         let mut region_batch = PeerBatch::new(1, 2);
@@ -1405,6 +1396,7 @@ mod tests {
 
     #[test]
     fn test_rfengine_basic() {
+        init_logger();
         const STATE_PREFIX: u8 = b'p';
 
         let dir = tempfile::tempdir().unwrap();
@@ -1579,6 +1571,7 @@ mod tests {
 
     #[test]
     fn test_rfengine_wal() {
+        init_logger();
         let tmp_dir = tempfile::tempdir().unwrap();
         let wal_size = 128 * 1024_usize;
         let dir_path = tmp_dir.path();
@@ -1725,6 +1718,7 @@ mod tests {
 
     #[test]
     fn test_init_wal_files() {
+        init_logger();
         let tmp_dir = tempfile::tempdir().unwrap();
         init_wal_files(tmp_dir.path(), None).unwrap();
         let check_file_exists = |path: &Path| {

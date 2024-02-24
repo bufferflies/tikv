@@ -462,6 +462,7 @@ test-cloud-engine:
 		-p cse-ctl -p tikv-worker \
 		-p test_cloud_server -p test_pd_client \
 		-p native_br -p load_data -p cloud_encryption \
+		-p cloud_server -p pd_client \
 		--tests
 
 test-cloud-engine-integration:

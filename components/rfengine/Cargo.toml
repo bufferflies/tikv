@@ -44,3 +44,4 @@ tracker = { path = "../tracker" }
 futures = "0.3"
 rand = "0.8"
 tempfile = "3.0"
+test_util = { workspace = true }

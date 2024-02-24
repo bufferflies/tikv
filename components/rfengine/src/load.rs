@@ -215,19 +215,9 @@ mod tests {
 
     use bytes::{BufMut, BytesMut};
     use raft_proto::eraftpb;
-    use slog::o;
 
     use super::{config::Config, *};
-    use crate::tests::try_wait;
-
-    fn init_logger() {
-        use slog::Drain;
-        let decorator = slog_term::PlainDecorator::new(std::io::stdout());
-        let drain = slog_term::CompactFormat::new(decorator).build();
-        let drain = std::sync::Mutex::new(drain).fuse();
-        let logger = slog::Logger::root(drain, o!());
-        slog_global::set_global(logger);
-    }
+    use crate::tests::{init_logger, try_wait};
 
     fn make_log_data(index: u64, size: usize) -> eraftpb::Entry {
         let mut entry = eraftpb::Entry::new();

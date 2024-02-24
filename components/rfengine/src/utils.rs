@@ -227,7 +227,7 @@ pub fn wal_chunk_file_suffix(start_off: u64, end_off: u64) -> String {
 
 #[cfg(test)]
 pub mod tests {
-    use std::time::Duration;
+    use std::{sync::Once, time::Duration};
 
     use api_version::{
         api_v2::{self, TXN_KEY_PREFIX},
@@ -242,6 +242,12 @@ pub mod tests {
         parse_epoch_from_snapshot_key, parse_wal_chunk_key, snapshot_rlog_key,
         verify_wal_chunks_integrity, wal_chunk_file_key,
     };
+
+    static INIT: Once = Once::new();
+
+    pub fn init_logger() {
+        INIT.call_once(test_util::init_log_for_test);
+    }
 
     #[must_use]
     pub fn try_wait<F>(f: F, seconds: usize) -> bool
