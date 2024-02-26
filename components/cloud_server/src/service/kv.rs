@@ -331,7 +331,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
             let mut resp = UnsafeDestroyRangeResponse::default();
             let regions = future.await?;
             info!(
-                "unsafe destroy range prefix {:?} for regions {:?}",
+                "unsafe_destroy_range: range prefix {:?} for regions {:?}",
                 prefix, regions
             );
             let mut region_futures = vec![];
@@ -342,59 +342,127 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
                         continue;
                     }
                 }
-                let (cb, fu) = paired_future_callback();
-                let callback = Callback::write(Box::new(move |_| {
-                    cb(());
-                }));
-                region_futures.push(fu);
-                ch.send_casual_msg(
-                    region.id(),
-                    CasualMessage::DeletePrefix {
-                        region_version: region.ver(),
-                        prefix: prefix.clone(),
-                        callback,
-                    },
-                );
-                info!("delete prefix {:?} for region {:?}", prefix, region);
+
+                let kv = kv.clone();
+                let region = *region;
+                let ch = ch.clone();
+                let prefix = prefix.clone();
+                let region_task = async move {
+                    let mut region_is_ready = false;
+                    for i in 1..=5 {
+                        // A shard should not change property DEL_PREFIXES_KEY before initial
+                        // flushed. The property DEL_PREFIXES_KEY is possible to be inconsistent
+                        // after split/merge, and it depends on initial flush to fix the
+                        // inconsistency.
+                        region_is_ready = match kv.get_shard(region.id()) {
+                            Some(shard)
+                                if shard.ver == region.ver() && shard.get_initial_flushed() =>
+                            {
+                                Ok::<bool, String>(true)
+                            }
+                            Some(shard) if shard.ver > region.ver() => Err(format!(
+                                "{} unsafe_destroy_range: region changed during delete range",
+                                region.id()
+                            )),
+                            _ => Ok(false),
+                        }?;
+                        if region_is_ready {
+                            break;
+                        }
+                        let deadline = std::time::Instant::now() + Duration::from_secs(i);
+                        let _ = GLOBAL_TIMER_HANDLE.delay(deadline).compat().await.is_ok();
+                    }
+                    if !region_is_ready {
+                        return Err(format!(
+                            "{} unsafe_destroy_range: region is not ready",
+                            region.id()
+                        ));
+                    }
+
+                    info!(
+                        "{} unsafe_destroy_range: request delete prefix {:?} for region {:?}",
+                        region.id(),
+                        prefix,
+                        region
+                    );
+                    let (cb, fu) = paired_future_callback();
+                    let callback = Callback::write(Box::new(move |res| {
+                        cb(res);
+                    }));
+                    ch.send_casual_msg(
+                        region.id(),
+                        CasualMessage::DeletePrefix {
+                            region_version: region.ver(),
+                            prefix,
+                            callback,
+                        },
+                    );
+                    match fu.await {
+                        Ok(res) => {
+                            if res.response.get_header().has_error() {
+                                return Err(format!(
+                                    "{} unsafe_destroy_range: request delete prefix failed: {:?}",
+                                    region.id(),
+                                    res.response.get_header().get_error()
+                                ));
+                            }
+                            Ok(())
+                        }
+                        Err(e) => Err(format!(
+                            "{} unsafe_destroy_range: request delete prefix canceled: {:?}",
+                            region.id(),
+                            e
+                        )),
+                    }
+                };
+                region_futures.push(region_task);
             }
+
             tikv_util::set_current_region(0);
-            let _ = futures::future::join_all(region_futures).await;
-            // Wait and check if all regions have applied delete prefix.
-            let mut regions_applied = false;
-            for i in 1..=5 {
-                let mut applied = true;
-                for region in &regions {
-                    tikv_util::set_current_region(region.id());
-                    if let Some(snap) = kv.get_snap_access(region.id()) {
-                        if snap.has_data_in_prefix(&prefix) {
-                            applied = false;
+            if let Err(e) = futures::future::join_all(region_futures)
+                .await
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()
+            {
+                resp.set_error(e);
+            } else {
+                // Wait and check if all regions have applied delete prefix.
+                let mut regions_applied = false;
+                for i in 1..=5 {
+                    let mut applied = true;
+                    for region in &regions {
+                        tikv_util::set_current_region(region.id());
+                        if let Some(snap) = kv.get_snap_access(region.id()) {
+                            if snap.has_data_in_prefix(&prefix) {
+                                applied = false;
+                                break;
+                            }
+                        }
+                    }
+                    tikv_util::set_current_region(0);
+                    if !applied {
+                        let deadline = std::time::Instant::now() + Duration::from_secs(i);
+                        let _ = GLOBAL_TIMER_HANDLE.delay(deadline).compat().await.is_ok();
+                        continue;
+                    }
+                    regions_applied = true;
+                    break;
+                }
+                if regions_applied {
+                    // At last, make sure all shards exists and not split.
+                    for region in &regions {
+                        let res = kv.get_shard_with_ver(region.id(), region.ver());
+                        if res.is_err() {
+                            resp.set_error(format!(
+                                "region {} changed during delete range",
+                                region.id()
+                            ));
                             break;
                         }
                     }
+                } else {
+                    resp.set_error("some region failed to delete range".to_string());
                 }
-                tikv_util::set_current_region(0);
-                if !applied {
-                    let deadline = std::time::Instant::now() + Duration::from_secs(i);
-                    let _ = GLOBAL_TIMER_HANDLE.delay(deadline).compat().await.is_ok();
-                    continue;
-                }
-                regions_applied = true;
-                break;
-            }
-            if regions_applied {
-                // At last, make sure all shards exists and not split.
-                for region in &regions {
-                    let res = kv.get_shard_with_ver(region.id(), region.ver());
-                    if res.is_err() {
-                        resp.set_error(format!(
-                            "region {} changed during delete range",
-                            region.id()
-                        ));
-                        break;
-                    }
-                }
-            } else {
-                resp.set_error("some region failed to delete range".to_string());
             }
             sink.success(resp).await?;
             GRPC_MSG_HISTOGRAM_STATIC

@@ -308,6 +308,16 @@ impl EngineCore {
             data.limiter.clone(),
         );
         shard.set_data(new_data);
+
+        if initial_flush.has_properties() {
+            let props = initial_flush.get_properties();
+            debug!("{} apply_initial_flush: overwrite properties", shard.tag(); "props" => ?props, "old" => ?shard.properties,);
+            debug_assert_eq!(props.get_keys().len(), props.get_values().len());
+            for (key, val) in props.keys.iter().zip(props.values.iter()) {
+                shard.set_property(key, val);
+            }
+        }
+
         store_bool(&shard.initial_flushed, true);
         // Switched memtables can't be flushed until initial flush finished, so we
         // trigger it actively.

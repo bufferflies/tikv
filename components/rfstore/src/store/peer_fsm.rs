@@ -1329,14 +1329,19 @@ impl<'a> PeerMsgHandler<'a> {
 
     fn on_delete_prefix(&mut self, region_version: u64, prefix: Vec<u8>, callback: Callback) {
         if !self.peer.is_leader() {
+            // As delete prefix requests are sent to all stores, not leader error can be
+            // ignored.
             callback.invoke_with_response(RaftCmdResponse::default());
             return;
         }
         let tag = self.peer.tag();
         let id_ver = tag.id_ver;
         if region_version != id_ver.ver() {
-            warn!("{} delete prefix version not match", tag);
-            callback.invoke_with_response(RaftCmdResponse::default());
+            warn!("{} on_delete_prefix: version not match", tag);
+            callback.invoke_with_response(new_error(Error::EpochNotMatch(
+                "on_delete_prefix: version not match".to_owned(),
+                vec![self.fsm.peer.region().clone()],
+            )));
             return;
         }
         let mut cmd = self.new_raft_cmd_request();

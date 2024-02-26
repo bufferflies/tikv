@@ -530,6 +530,15 @@ impl EngineCore {
             }
             false
         });
+
+        let mut props = kvenginepb::Properties::default();
+        for prop_key in PROPERTIES_NEED_INITIAL_FLUSH {
+            if let Some(prop_val) = shard.get_property(prop_key) {
+                props.keys.push(prop_key.to_string());
+                props.values.push(prop_val.to_vec());
+            }
+        }
+
         self.send_flush_msg(FlushMsg::Task(Box::new(FlushTask::new_initial(
             shard,
             InitialFlush {
@@ -537,6 +546,7 @@ impl EngineCore {
                 mem_tbls,
                 base_version: shard.get_base_version(),
                 data_sequence,
+                props: Some(props),
                 double_over_bound_l0s,
                 double_over_bound_tbls,
             },

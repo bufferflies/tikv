@@ -454,6 +454,7 @@ impl ShardMeta {
     }
 
     pub fn apply_initial_flush(&mut self, cs: &pb::ChangeSet) {
+        // Note: cs.initial_flush.properties is ignored.
         let props = self.properties.clone();
         let mut new_meta = Self::new(self.engine_id, cs);
         new_meta.range = self.range.clone();

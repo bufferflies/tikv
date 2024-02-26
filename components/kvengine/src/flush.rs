@@ -96,6 +96,7 @@ pub(crate) struct InitialFlush {
     pub(crate) mem_tbls: Vec<memtable::CfTable>,
     pub(crate) base_version: u64,
     pub(crate) data_sequence: u64,
+    pub(crate) props: Option<kvenginepb::Properties>,
     pub(crate) double_over_bound_l0s: Vec<L0Table>,
     pub(crate) double_over_bound_tbls: Vec<SsTable>,
 }
@@ -215,6 +216,9 @@ impl Engine {
         initial_flush.set_base_version(flush.base_version);
         initial_flush.set_data_sequence(flush.data_sequence);
         initial_flush.set_max_ts(max_ts);
+        if let Some(props) = flush.props.as_ref() {
+            initial_flush.set_properties(props.clone());
+        }
         for tbl_create in flush.parent_snap.get_table_creates() {
             if task.overlap_table(
                 InnerKey::from_inner_buf(tbl_create.get_smallest()),

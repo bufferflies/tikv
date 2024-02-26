@@ -101,6 +101,7 @@ pub struct Shard {
 // Note: when add new property, consider whether to add it to following process:
 // * `PropertiesHelper`
 // * `is_property_need_flush`
+// * `PROPERTIES_NEED_INITIAL_FLUSH`
 // * `is_property_change_set`
 pub const INGEST_ID_KEY: &str = "_ingest_id";
 pub const DEL_PREFIXES_KEY: &str = "_del_prefixes";
@@ -128,6 +129,12 @@ pub const MANUAL_MAJOR_COMPACTION_DISABLE: &[u8] = b"";
 pub fn is_property_need_flush(key: &str) -> bool {
     !(key == DEL_PREFIXES_KEY || key == TRUNCATE_TS_KEY)
 }
+
+/// Split/merge process would probably bring inconsistent between peers, and we
+/// utilize initial flush to fix the inconsistency.
+/// PROPERTIES_NEED_INITIAL_FLUSH are properties should be overwritten during
+/// initial flush by leader.
+pub const PROPERTIES_NEED_INITIAL_FLUSH: &[&str] = &[DEL_PREFIXES_KEY];
 
 impl Deref for Shard {
     type Target = ShardRange;
@@ -1310,7 +1317,7 @@ impl LevelHandler {
     }
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 pub struct Properties {
     m: DashMap<String, Bytes>,
 }
