@@ -628,6 +628,7 @@ mod tests {
             smallest,
             biggest,
             size: 3,
+            uncompressed_size: 3,
             keys: 3,
         };
 

@@ -874,7 +874,7 @@ impl LoadTaskWorker {
             };
 
             for sst_meta in sst_metas.iter() {
-                data_size += sst_meta.size;
+                data_size += sst_meta.uncompressed_size;
             }
             let res = self.ingest(
                 sst_metas,
@@ -1102,15 +1102,18 @@ impl LoadTaskWorker {
             );
             let mut entries = 0;
             let mut offset = 0;
+            let mut uncompressed_size = 0;
             while offset < batch.len() {
                 let key_len = (&batch[offset..]).get_u16_le() as usize;
                 offset += 2;
                 let key = &batch[offset..offset + key_len];
                 offset += key_len;
+                uncompressed_size += key_len;
                 let val_len = (&batch[offset..]).get_u32_le() as usize;
                 offset += 4;
                 let val = &batch[offset..offset + val_len];
                 offset += val_len;
+                uncompressed_size += val_len;
                 // The key is already trimmed prefix, so we can use `from_inner_buf` here.
                 let inner_key = InnerKey::from_inner_buf(key);
                 builder.add(inner_key, &Value::decode(val), None);
@@ -1124,6 +1127,7 @@ impl LoadTaskWorker {
                 smallest: builder.get_smallest().to_vec(),
                 biggest: builder.get_biggest().to_vec(),
                 size: data.len(),
+                uncompressed_size,
                 keys: entries,
             };
             info!("{} finish build sst file {:?}", task_id, sst_meta);

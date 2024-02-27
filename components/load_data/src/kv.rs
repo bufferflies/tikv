@@ -86,6 +86,7 @@ pub struct SstMeta {
     pub smallest: Vec<u8>,
     pub biggest: Vec<u8>,
     pub size: usize,
+    pub uncompressed_size: usize,
     pub keys: usize,
 }
 
