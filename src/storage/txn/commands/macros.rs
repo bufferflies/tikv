@@ -163,24 +163,28 @@ macro_rules! write_bytes {
 macro_rules! gen_lock {
     (empty) => {
         fn gen_lock(&self) -> crate::storage::txn::latch::Lock {
-            crate::storage::txn::latch::Lock::new::<(), _>(vec![])
+            let keyspace_id = self.ctx.get_keyspace_id();
+            crate::storage::txn::latch::Lock::new::<Vec<&Key>>(keyspace_id, vec![])
         }
     };
     ($field:ident) => {
         fn gen_lock(&self) -> crate::storage::txn::latch::Lock {
-            crate::storage::txn::latch::Lock::new(std::iter::once(&self.$field))
+            let keyspace_id = self.ctx.get_keyspace_id();
+            crate::storage::txn::latch::Lock::new(keyspace_id, std::iter::once(&self.$field))
         }
     };
     ($field:ident : multiple) => {
         fn gen_lock(&self) -> crate::storage::txn::latch::Lock {
-            crate::storage::txn::latch::Lock::new(&self.$field)
+            let keyspace_id = self.ctx.get_keyspace_id();
+            crate::storage::txn::latch::Lock::new(keyspace_id, &self.$field)
         }
     };
     ($field:ident : multiple $transform:tt) => {
         fn gen_lock(&self) -> crate::storage::txn::latch::Lock {
             #![allow(unused_parens)]
+            let keyspace_id = self.ctx.get_keyspace_id();
             let keys = self.$field.iter().map($transform);
-            crate::storage::txn::latch::Lock::new(keys)
+            crate::storage::txn::latch::Lock::new(keyspace_id, keys)
         }
     };
 }

@@ -10,6 +10,7 @@ pub mod scheduler;
 mod actions;
 mod cloud_store;
 mod latch;
+mod region_latch;
 mod store;
 
 use std::{error::Error as StdError, io::Error as IoError};
@@ -34,6 +35,7 @@ pub use self::{
     cloud_store::{check_locks, CloudStore, CloudStoreScanner},
     commands::{Command, RESOLVE_LOCK_BATCH_SIZE},
     latch::{Latches, Lock},
+    region_latch::GlobalLatches,
     scheduler::Scheduler,
     store::{
         EntryBatch, FixtureStore, FixtureStoreScanner, Scanner, SnapshotStore, Store, TxnEntry,

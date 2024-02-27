@@ -857,10 +857,13 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         // TODO: Update lock wait relationships after acquiring some locks.
 
         if do_wake_up {
+            let keyspace_id = tctx.lock.keyspace_id;
             let woken_up_resumable_lock_requests = tctx.woken_up_resumable_lock_requests;
             let next_cid = self.inner.gen_id();
-            let mut next_latches =
-                Self::gen_latches_for_lock_wait_entries(woken_up_resumable_lock_requests.iter());
+            let mut next_latches = Self::gen_latches_for_lock_wait_entries(
+                keyspace_id,
+                woken_up_resumable_lock_requests.iter(),
+            );
 
             self.release_latches(tctx.lock, cid, Some((next_cid, &next_latches)));
 
@@ -879,9 +882,10 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
     }
 
     fn gen_latches_for_lock_wait_entries<'a>(
+        keyspace_id: u32,
         entries: impl IntoIterator<Item = &'a Box<LockWaitEntry>>,
     ) -> Lock {
-        Lock::new(entries.into_iter().map(|entry| &entry.key))
+        Lock::new(keyspace_id, entries.into_iter().map(|entry| &entry.key))
     }
 
     /// Event handler for the request of waiting for lock
@@ -2005,7 +2009,7 @@ mod tests {
             latest_feature_gate(),
         );
 
-        let mut lock = Lock::new(&[Key::from_raw(b"b")]);
+        let mut lock = Lock::new(0, &[Key::from_raw(b"b")]);
         let cid = scheduler.inner.gen_id();
         assert!(scheduler.inner.latches.acquire(&mut lock, cid));
 
@@ -2054,7 +2058,7 @@ mod tests {
         block_on(f).unwrap().unwrap();
 
         // Acquire the latch, so that next command(req2) can't require all latches.
-        let mut lock = Lock::new(&[Key::from_raw(b"d")]);
+        let mut lock = Lock::new(0, &[Key::from_raw(b"d")]);
         let cid = scheduler.inner.gen_id();
         assert!(scheduler.inner.latches.acquire(&mut lock, cid));
 
@@ -2239,7 +2243,7 @@ mod tests {
             latest_feature_gate(),
         );
 
-        let mut lock = Lock::new(&[Key::from_raw(b"b")]);
+        let mut lock = Lock::new(0, &[Key::from_raw(b"b")]);
         let cid = scheduler.inner.gen_id();
         assert!(scheduler.inner.latches.acquire(&mut lock, cid));
 
