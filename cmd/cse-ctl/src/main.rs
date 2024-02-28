@@ -15,6 +15,7 @@ mod unsafe_recover;
 
 use std::{env, fs::OpenOptions, io};
 
+use backup::{execute_show_backup_list, ShowBackupListArgs};
 use clap::{Args, Parser, Subcommand};
 use slog::Drain;
 
@@ -136,6 +137,7 @@ pub struct ShowArgs {
 enum ShowCommands {
     /// Show the backup meta data.
     Backup(ShowBackupArgs),
+    BackupList(ShowBackupListArgs),
     Sst(ShowSstArgs),
 }
 
@@ -143,6 +145,9 @@ fn execute_show(args: ShowArgs) {
     match args.command {
         ShowCommands::Backup(args) => {
             execute_show_backup(args);
+        }
+        ShowCommands::BackupList(args) => {
+            execute_show_backup_list(args);
         }
         ShowCommands::Sst(args) => {
             execute_show_sst(args);

@@ -2,8 +2,9 @@
 
 use std::{path::PathBuf, sync::Arc};
 
+use chrono::{DateTime, NaiveDateTime, Utc};
 use clap::{Args, Subcommand};
-use kvengine::dfs::S3Fs;
+use kvengine::dfs::{Dfs, S3Fs};
 use native_br::{
     common::{create_pd_client, now},
     restore,
@@ -13,11 +14,18 @@ use native_br::{
     },
     step, step_error,
 };
-use pd_client::PdClient;
+use pd_client::{
+    pd_control::{KeyspaceMeta, PdControl},
+    PdClient,
+};
+use security::SecurityManager;
 use slog_global::{error, info};
 use tikv_util::config::ReadableSize;
 
-use crate::restore::Commands::{Keyspace, Pd, Tikv};
+use crate::{
+    backup::show_backup_summary,
+    restore::Commands::{Keyspace, Pd, Tikv},
+};
 
 #[derive(Args)]
 pub struct RestoreCommand {
@@ -100,6 +108,9 @@ pub struct RestoreKeyspaceArgs {
     /// The target keyspace.
     #[clap(long)]
     pub target_keyspace_name: Option<String>,
+    /// Truncate newer data than given ts.
+    #[clap(long)]
+    pub truncate_ts: Option<u64>,
     /// The local working path for temporary files during restore.
     #[clap(long)]
     pub working_path: Option<String>,
@@ -115,6 +126,9 @@ pub struct RestoreKeyspaceArgs {
     /// Path of file that contains X509 key in PEM format.
     #[clap(long, default_value = "")]
     pub key: PathBuf,
+    /// Keep silent and NO confirmation when restore. Use with caution.
+    #[clap(long)]
+    pub silent: bool,
 }
 
 pub fn execute_restore_command(cmd: RestoreCommand) {
@@ -142,11 +156,26 @@ fn execute_restore_pd(args: RestorePdArgs) {
 }
 
 fn execute_restore_keyspace(args: RestoreKeyspaceArgs) {
+    if std::env::var("LOG_FILE").is_err() {
+        std::env::set_var("LOG_FILE", "cse-ctl.log");
+    }
+    // The logger for test is enough.
+    ::test_util::init_log_for_test();
+
     let target_keyspace = args
         .target_keyspace_name
         .as_deref()
         .unwrap_or(&args.keyspace_name);
-    match execute_restore_keyspace_impl(&args) {
+    let config: restore::RestoreConfig = get_restore_keyspace_config_from_args(&args);
+
+    if !args.silent {
+        show_restore_keyspace_info(&args, &config, target_keyspace);
+        if !warning_prompt("WARNING: this action will OVERWRITE user data", "YES") {
+            return;
+        }
+    }
+
+    match execute_restore_keyspace_impl(&args, config) {
         Ok(_) => {
             step!(
                 "Restore keyspace {}->{} succeed",
@@ -161,15 +190,15 @@ fn execute_restore_keyspace(args: RestoreKeyspaceArgs) {
                 target_keyspace,
                 err
             );
-            panic!("execute restore keyspace error: {:?}", err);
+            std::process::exit(1);
         }
     }
 }
 
 fn execute_restore_keyspace_impl(
     args: &RestoreKeyspaceArgs,
+    config: restore::RestoreConfig,
 ) -> native_br::Result<RestoredKeyspace> {
-    let config: restore::RestoreConfig = get_restore_keyspace_config_from_args(args);
     let pd_client: Arc<dyn PdClient> = Arc::new(create_pd_client(&config.security, &config.pd));
     let dfs_config = config.dfs.clone();
     let s3fs = S3Fs::new(
@@ -200,7 +229,7 @@ fn execute_restore_keyspace_impl(
         Arc::new(s3fs),
         pd_client,
         &runtime,
-        None,
+        args.truncate_ts,
         reporter,
     )
 }
@@ -275,5 +304,90 @@ struct CliRestoreStepReporter {}
 impl ReportRestoreStepTrait for CliRestoreStepReporter {
     fn report_step(&self, _step: RestoreStep) {
         // TODO: friendly output for cli use.
+    }
+}
+
+fn show_restore_keyspace_info(
+    args: &RestoreKeyspaceArgs,
+    config: &restore::RestoreConfig,
+    target_keyspace_name: &str,
+) {
+    let security_mgr = Arc::new(
+        SecurityManager::new(&config.security)
+            .unwrap_or_else(|e| panic!("failed to create security manager: {:?}", e)),
+    );
+    let pd_ctl = PdControl::new(config.pd.clone(), security_mgr).unwrap();
+
+    let dfs_config = config.dfs.clone();
+    let s3fs = S3Fs::new(
+        dfs_config.prefix,
+        dfs_config.s3_endpoint,
+        dfs_config.s3_key_id,
+        dfs_config.s3_secret_key,
+        dfs_config.s3_region,
+        dfs_config.s3_bucket,
+    );
+    let rt = s3fs.get_runtime();
+
+    println!("Restore Keyspace");
+    println!();
+
+    let cluster_backup = native_br::restore::get_cluster_backup_meta(&s3fs, args.name.clone());
+    show_backup_summary(&cluster_backup, &args.name, 0);
+    println!();
+
+    let inplace = args.keyspace_name == target_keyspace_name;
+    let keyspace = rt
+        .block_on(pd_ctl.get_keyspace_by_name(&args.keyspace_name))
+        .unwrap();
+    if inplace {
+        println!("[Keyspace]");
+    } else {
+        println!("[Keyspace (source)]");
+    }
+    show_keyspace(&keyspace, 2);
+    println!();
+    if !inplace {
+        let target_keyspace = rt
+            .block_on(pd_ctl.get_keyspace_by_name(target_keyspace_name))
+            .unwrap();
+        println!("[Keyspace (target)]");
+        show_keyspace(&target_keyspace, 2);
+        println!();
+    }
+
+    if let Some(truncate_ts) = args.truncate_ts {
+        println!("truncate_ts: {}", truncate_ts);
+        println!();
+    }
+}
+
+fn show_keyspace(ks: &KeyspaceMeta, indent: usize) {
+    let indent = " ".repeat(indent);
+    println!("{}id: {}", indent, ks.id);
+    println!("{}name: {}", indent, ks.name);
+    println!("{}state: {}", indent, ks.state);
+
+    let created_at = NaiveDateTime::from_timestamp_opt(ks.created_at as i64, 0)
+        .expect("parse keyspace.created_at failed");
+    let created_at = DateTime::<Utc>::from_utc(created_at, Utc);
+    println!("{}created_at: {}", indent, created_at.to_rfc3339());
+
+    println!("{}config:", indent);
+    for (k, v) in &ks.config {
+        println!("{}  {}: {}", indent, k, v);
+    }
+}
+
+fn warning_prompt(message: &str, expected: &str) -> bool {
+    println!("{}", message);
+    println!("Type \"{}\" to continue, anything else to exit", expected);
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer).unwrap();
+    if answer.trim_end_matches('\n') == expected {
+        true
+    } else {
+        println!("exit.");
+        false
     }
 }

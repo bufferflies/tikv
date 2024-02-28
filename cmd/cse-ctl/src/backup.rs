@@ -2,10 +2,14 @@
 
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
+use chrono::{DateTime, NaiveDateTime, Utc};
 use clap::Args;
-use kvengine::dfs::{DFSConfig, S3Fs};
-use native_br::backup::{
-    execute_full_backup, execute_incremental_backup, execute_lightweight_backup, BackupConfig,
+use kvengine::dfs::{DFSConfig, Dfs, S3Fs};
+use native_br::{
+    backup::{
+        execute_full_backup, execute_incremental_backup, execute_lightweight_backup, BackupConfig,
+    },
+    common::get_all_incremental_backups,
 };
 use rfengine::parse_epoch_from_snapshot_key;
 use tikv_util::info;
@@ -136,34 +140,13 @@ pub fn execute_show_backup(args: ShowBackupArgs) {
 
     let cluster_backup = native_br::restore::get_cluster_backup_meta(&s3fs, args.name.clone());
 
-    let store_ids = cluster_backup
-        .get_stores()
-        .iter()
-        .map(|store| store.get_store_id())
-        .collect::<Vec<_>>();
-    let peers_count = cluster_backup
-        .get_stores()
-        .iter()
-        .map(|store| store.get_manifest().get_peers().len())
-        .sum::<usize>();
-    let keyspaces_count = cluster_backup.keyspace_meta.len();
-    let is_lightweight = cluster_backup.is_lightweight;
-
-    println!("[Backup {}]", args.name);
-    println!("  cluster_id: {}", cluster_backup.cluster_id);
-    println!("  backup_ts: {}", cluster_backup.backup_ts);
-    println!("  safe_ts: {}", cluster_backup.safe_ts);
-    println!("  stores: {:?}", store_ids);
-    println!("  peers count: {}", peers_count);
-    println!("  alloc_id: {}", cluster_backup.alloc_id);
-    println!("  keyspaces count: {}", keyspaces_count);
-    println!("  lightweight: {}", is_lightweight);
+    show_backup_summary(&cluster_backup, &args.name, 0);
 
     if args.verbose {
         for store in &cluster_backup.stores {
             println!();
             println!("[Store {}]", store.store_id);
-            if is_lightweight {
+            if cluster_backup.is_lightweight {
                 let object_storage = Arc::new(s3fs.clone());
                 let snap_key = rfengine::find_latest_snapshot(
                     object_storage.clone(),
@@ -201,4 +184,92 @@ pub fn execute_show_backup(args: ShowBackupArgs) {
             }
         }
     }
+}
+
+pub fn show_backup_summary(
+    cluster_backup: &rfenginepb::ClusterBackupMeta,
+    backup_name: &str,
+    indent: usize,
+) {
+    let indent = " ".repeat(indent);
+
+    let store_ids = cluster_backup
+        .get_stores()
+        .iter()
+        .map(|store| store.get_store_id())
+        .collect::<Vec<_>>();
+    let peers_count = cluster_backup
+        .get_stores()
+        .iter()
+        .map(|store| store.get_manifest().get_peers().len())
+        .sum::<usize>();
+    let keyspaces_count = cluster_backup.keyspace_meta.len();
+    let is_lightweight = cluster_backup.is_lightweight;
+
+    println!("{}[Backup {}]", indent, backup_name);
+    println!("{}  cluster_id: {}", indent, cluster_backup.cluster_id);
+    println!("{}  backup_ts: {}", indent, cluster_backup.backup_ts);
+    println!("{}  safe_ts: {}", indent, cluster_backup.safe_ts);
+    println!("{}  stores: {:?}", indent, store_ids);
+    println!("{}  peers count: {}", indent, peers_count);
+    println!("{}  alloc_id: {}", indent, cluster_backup.alloc_id);
+    println!("{}  keyspaces count: {}", indent, keyspaces_count);
+    println!("{}  lightweight: {}", indent, is_lightweight);
+}
+
+const START_TIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
+
+#[derive(Args)]
+pub struct ShowBackupListArgs {
+    /// The path of the config file.
+    #[clap(long, default_value = "")]
+    pub config: PathBuf,
+    /// The start time (UTC) of backup to list from, format: YYYY-MM-DD
+    /// HH:MM:SS.
+    #[clap(long, default_value = "")]
+    pub start: String,
+    /// The count limit of backup list.
+    #[clap(long, default_value = "50")]
+    pub limit: usize,
+}
+
+pub fn execute_show_backup_list(args: ShowBackupListArgs) {
+    let mut config = ShowBackupConfig::default();
+    if args.config.exists() {
+        let data = std::fs::read(args.config.clone()).expect("failed to read config file");
+        config = toml::from_slice(&data).unwrap();
+    }
+    config.dfs.override_from_env();
+
+    let s3fs = S3Fs::new(
+        config.dfs.prefix.clone(),
+        config.dfs.s3_endpoint,
+        config.dfs.s3_key_id,
+        config.dfs.s3_secret_key,
+        config.dfs.s3_region,
+        config.dfs.s3_bucket,
+    );
+    let rt = s3fs.get_runtime();
+
+    let start = if args.start.is_empty() {
+        Utc::now() - chrono::Duration::hours(1)
+    } else {
+        let start = NaiveDateTime::parse_from_str(&args.start, START_TIME_FORMAT)
+            .expect("failed to parse start time");
+        DateTime::<Utc>::from_utc(start, Utc)
+    };
+
+    let (backups, has_more) = rt
+        .block_on(get_all_incremental_backups(
+            &s3fs,
+            &start.date_naive(),
+            Some(&start.time()),
+            args.limit,
+        ))
+        .expect("failed to get all incremental backups");
+    println!("[Backup list]");
+    for f in backups {
+        println!("  {}", f.name());
+    }
+    println!("has_more: {}", has_more);
 }

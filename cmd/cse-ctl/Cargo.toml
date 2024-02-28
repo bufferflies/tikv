@@ -25,6 +25,7 @@ native_br = { workspace = true }
 pd_client = { workspace = true }
 protobuf = "2.8"
 rfengine = { workspace = true }
+rfenginepb = { workspace = true }
 rfstore = { workspace = true }
 schema = { workspace = true }
 security = { workspace = true }
@@ -35,6 +36,7 @@ serde_json = "1.0"
 slog = { version = "2.3", features = ["max_level_trace", "release_max_level_debug"] }
 slog-global = { version = "0.1", git = "https://github.com/breeswish/slog-global.git", rev = "d592f88e4dbba5eb439998463054f1a44fbf17b9" }
 slog-term = "2.4"
+test_util = { workspace = true }
 tidb_query_datatype = { workspace = true }
 tikv_util = { workspace = true }
 tokio = { version = "1.12", features = ["full"] }
