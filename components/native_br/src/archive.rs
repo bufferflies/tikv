@@ -781,6 +781,7 @@ impl ArchiveWriter {
                 key.clone(),
                 None,
                 Some(STORAGE_CLASS_GLACIER_IR),
+                None,
             ))
             .unwrap();
         info!("cluster archive package {} on {}", key, self.date.clone());

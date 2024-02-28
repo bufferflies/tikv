@@ -578,7 +578,7 @@ impl S3FsCore {
         data: Bytes,
         file_name: String,
     ) -> crate::dfs::Result<()> {
-        self.put_object_with_options(key, data, file_name, None, None)
+        self.put_object_with_options(key, data, file_name, None, None, None)
             .await
     }
 
@@ -589,6 +589,7 @@ impl S3FsCore {
         file_name: String,
         tagging: Option<&Tagging>,
         storage_class: Option<&str>,
+        checksum: Option<u32>, // checksum saved in big-endian order
     ) -> crate::dfs::Result<()> {
         let mut retry_cnt = 0;
         let start_time = Instant::now();
@@ -606,6 +607,18 @@ impl S3FsCore {
                     debug!(
                         "{} ignore storage_class {} which is not supported by {}",
                         key, storage_class, self.hostname
+                    );
+                }
+            }
+            if let Some(checksum) = checksum {
+                if self.is_on_aws() {
+                    // `x-amz-checksum-crc32c` value is base64 encoded in big-endian order.
+                    let checksum = base64::encode(checksum.to_be_bytes());
+                    req.add_header("x-amz-checksum-crc32c", &checksum);
+                } else {
+                    debug!(
+                        "{} ignore x-amz-checksum-crc32c which is not supported by {}",
+                        key, self.hostname
                     );
                 }
             }
@@ -800,6 +813,7 @@ impl ObjectStorage for S3Fs {
                     key.clone(),
                     None,
                     Some(STORAGE_CLASS_INTELLIGENT_TIERING),
+                    None,
                 )
                 .await
                 .map_err(|err| format!("put {} failed {:?}", &key, err))
@@ -879,12 +893,21 @@ impl Dfs for S3Fs {
     }
 
     async fn create(&self, file_id: u64, data: Bytes, _opts: Options) -> crate::dfs::Result<()> {
+        // Calculate checksum for the file. This can be used to ensure the data
+        // integrity when saving to dfs (s3 only) and verify the data integrity when
+        // getting objects from dfs.
+        let checksum = if self.is_on_aws() {
+            Some(crc32c::crc32c(&data))
+        } else {
+            None
+        };
         self.put_object_with_options(
             self.file_key(file_id),
             data,
             file_id.to_string(),
             None,
             Some(STORAGE_CLASS_INTELLIGENT_TIERING),
+            checksum,
         )
         .await
     }

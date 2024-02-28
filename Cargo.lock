@@ -3540,6 +3540,7 @@ dependencies = [
  "api_version",
  "async-trait",
  "aws",
+ "base64 0.13.0",
  "bincode",
  "bstr",
  "byteorder",
