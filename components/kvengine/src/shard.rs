@@ -17,6 +17,8 @@ use bytes::{Buf, BufMut, Bytes};
 use cloud_encryption::{EncryptionKey, MasterKey};
 use dashmap::DashMap;
 use kvenginepb as pb;
+use kvenginepb::TxnFileRefs;
+use protobuf::Message;
 use rand::Rng;
 use slog_global::*;
 use tikv_util::codec::number::U64_SIZE;
@@ -30,10 +32,10 @@ use crate::{
         memtable::{self, CfTable},
         search,
         sstable::{L0Table, SsTable},
-        InnerKey, TableExt,
+        InnerKey, TableExt, TxnFile,
     },
     util::evenly_distribute,
-    Iterator as TableIterator, *,
+    *,
 };
 
 #[derive(Clone)]
@@ -115,6 +117,7 @@ pub const TRIM_OVER_BOUND_DISABLE: &[u8] = b"";
 pub const MANUAL_MAJOR_COMPACTION: &str = "_manual_major_compaction";
 pub const MANUAL_MAJOR_COMPACTION_ENABLE: &[u8] = &[1];
 pub const MANUAL_MAJOR_COMPACTION_DISABLE: &[u8] = b"";
+pub const TXN_FILE_REF: &str = "_txn_file_ref";
 
 /// To indicate whether the property should be flush in mem-table flush process.
 ///
@@ -490,6 +493,11 @@ impl Shard {
         data.get_all_files()
     }
 
+    pub fn get_txn_chunks(&self) -> Vec<u64> {
+        let data = self.get_data();
+        data.get_txn_chunks()
+    }
+
     pub(crate) fn split_mem_tables(&self, parent_mem_tbls: &[CfTable]) -> Vec<CfTable> {
         let mut new_mem_tbls = vec![CfTable::new()];
         for old_mem_tbl in parent_mem_tbls {
@@ -776,6 +784,7 @@ impl Shard {
             shard_data.blob_tbl_map.clone(),
             shard_data.cfs.clone(),
             shard_data.unloaded_tbls.clone(),
+            shard_data.lock_txn_files.clone(),
             shard_data.limiter.clone(),
         );
         self.set_data(new_data);
@@ -808,6 +817,19 @@ impl Shard {
         }
         self.get_estimated_size() == 0
     }
+
+    pub(crate) fn clear_finished_txn_file_refs(&self, version: u64) {
+        if let Some(val) = self.get_property(TXN_FILE_REF) {
+            let mut txn_file_refs = TxnFileRefs::new();
+            txn_file_refs.merge_from_bytes(&val).unwrap();
+            info!("before clear refs {:?}", txn_file_refs);
+            let mut refs = txn_file_refs.take_txn_file_refs().into_vec();
+            refs.retain(|r| r.get_version() > version || !r.get_lock_val_prefix().is_empty());
+            txn_file_refs.set_txn_file_refs(refs.into());
+            let new_val = txn_file_refs.write_to_bytes().unwrap();
+            self.set_property(TXN_FILE_REF, &new_val);
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -832,6 +854,7 @@ impl ShardData {
             Arc::new(HashMap::new()),
             [ShardCf::new(0), ShardCf::new(1), ShardCf::new(2)],
             HashMap::new(),
+            vec![],
             limiter,
         )
     }
@@ -843,6 +866,7 @@ impl ShardData {
         blob_tbl_map: Arc<HashMap<u64, BlobTable>>,
         cfs: [ShardCf; 3],
         unloaded_tbls: HashMap<u64, FileMeta>,
+        lock_txn_files: Vec<TxnFile>,
         limiter: RegionLimiter,
     ) -> Self {
         assert!(!mem_tbls.is_empty());
@@ -851,6 +875,7 @@ impl ShardData {
             core: Arc::new(ShardDataCore {
                 range,
                 mem_tbls,
+                lock_txn_files,
                 l0_tbls,
                 blob_tbl_map,
                 cfs,
@@ -864,6 +889,7 @@ impl ShardData {
 pub(crate) struct ShardDataCore {
     pub(crate) range: ShardRange,
     pub(crate) mem_tbls: Vec<memtable::CfTable>,
+    pub(crate) lock_txn_files: Vec<TxnFile>,
     pub(crate) l0_tbls: Vec<L0Table>,
     pub(crate) blob_tbl_map: Arc<HashMap<u64, BlobTable>>,
     pub(crate) cfs: [ShardCf; 3],
@@ -903,6 +929,21 @@ impl ShardDataCore {
             }
             false
         });
+        files.sort_unstable();
+        files
+    }
+
+    pub(crate) fn get_txn_chunks(&self) -> Vec<u64> {
+        let mut files = Vec::new();
+        for txn_file in &self.lock_txn_files {
+            files.extend_from_slice(&txn_file.chunk_ids());
+        }
+        for mem_tbl in &self.mem_tbls {
+            let skl = mem_tbl.get_cf(WRITE_CF);
+            if let Some(txn_file) = skl.get_txn_file() {
+                files.extend_from_slice(&txn_file.chunk_ids());
+            }
+        }
         files.sort_unstable();
         files
     }

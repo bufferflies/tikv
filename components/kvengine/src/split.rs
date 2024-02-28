@@ -120,6 +120,8 @@ impl Engine {
                     new_cfs[cf].set_level(new_level);
                 }
             }
+            // Shards with txn files are not allowed to split.
+            debug_assert!(old_data.lock_txn_files.is_empty());
             let new_data = ShardData::new(
                 new_shard.range.clone(),
                 new_mem_tbls,
@@ -127,6 +129,7 @@ impl Engine {
                 Arc::new(new_blob_tbl_map),
                 new_cfs,
                 old_data.unloaded_tbls.clone(),
+                vec![],
                 RegionLimiter::new_from(&old_data.limiter),
             );
             new_shard.set_data(new_data);
@@ -345,6 +348,8 @@ impl Engine {
             for (&id, tbl) in old_data.unloaded_tbls.iter() {
                 unloaded_tbls.insert(id, tbl.clone());
             }
+            let mut lock_txn_files = old_data.lock_txn_files.clone();
+            lock_txn_files.extend_from_slice(&source.lock_txn_files);
             ShardData::new(
                 new_shard.range.clone(),
                 mem_tbls,
@@ -352,6 +357,7 @@ impl Engine {
                 Arc::new(blob_tbl_map),
                 new_cfs,
                 unloaded_tbls,
+                lock_txn_files,
                 old_data.limiter.clone(),
             )
         } else {
@@ -370,6 +376,7 @@ impl Engine {
                 old_data.blob_tbl_map.clone(),
                 old_data.cfs.clone(),
                 old_data.unloaded_tbls.clone(),
+                old_data.lock_txn_files.clone(),
                 old_data.limiter.clone(),
             )
         };

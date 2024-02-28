@@ -37,6 +37,7 @@ use crate::{
         sstable::{BlockCacheKey, MAGIC_NUMBER, ZSTD_COMPRESSION},
         InnerKey, TableExt,
     },
+    txn_chunk_manager::TxnChunkManager,
     *,
 };
 
@@ -111,6 +112,8 @@ impl Engine {
         let allow_fallback_local = opts.allow_fallback_local;
         let file_locks = (0..FILE_LOCK_SLOTS).map(|_| Mutex::new(())).collect();
         let per_keyspace_configs = Arc::new(config.get_per_keyspace_configs());
+        let txn_chunk_mgr =
+            TxnChunkManager::new(opts.local_dir.join("txn"), fs.clone(), cache.clone());
         let (metas, files_in_blacklist) = EngineCore::read_meta(meta_iter)?;
         let core = EngineCore {
             engine_id: AtomicU64::new(meta_iter.engine_id()),
@@ -144,6 +147,7 @@ impl Engine {
             shutting_down: AtomicBool::new(false),
             ks_safepoint_v2: ks_gc_sp_map,
             master_key,
+            txn_chunk_mgr,
         };
         let en = Engine {
             core: Arc::new(core),
@@ -295,6 +299,7 @@ pub struct EngineCore {
     pub(crate) shutting_down: AtomicBool,
     pub(crate) ks_safepoint_v2: Option<Arc<DashMap<u32, u64>>>,
     pub(crate) master_key: MasterKey,
+    pub(crate) txn_chunk_mgr: TxnChunkManager,
     pub(crate) files_in_blacklist: Arc<HashSet<u64>>,
 }
 
@@ -375,7 +380,7 @@ impl EngineCore {
             shard.load_mem_table_version(),
             &cs,
         );
-        let (l0s, blob_tbls, scfs) =
+        let (l0s, blob_tbls, scfs, lock_txn_files) =
             create_snapshot_tables(cs.get_snapshot(), &cs, self.opts.for_restore);
         let data = ShardData::new(
             shard.range.clone(),
@@ -384,6 +389,7 @@ impl EngineCore {
             Arc::new(blob_tbls),
             scfs,
             cs.unloaded_tables,
+            lock_txn_files,
             RegionLimiter::new((&shard.opt.flow_control).into()),
         );
         shard.set_data(data);
@@ -790,6 +796,10 @@ impl EngineCore {
     pub fn get_master_key(&self) -> MasterKey {
         self.master_key.clone()
     }
+
+    pub fn get_txn_chunk_manager(&self) -> TxnChunkManager {
+        self.txn_chunk_mgr.clone()
+    }
 }
 
 #[derive(Copy, Clone, Debug, Default)]
@@ -860,9 +870,13 @@ fn free_mem(free_rx: mpsc::Receiver<FreeMemMsg>) {
     loop {
         let cnt = free_rx.len();
         let mut tables = Vec::with_capacity(cnt);
+        let mut txn_files = vec![];
         for _ in 0..cnt {
             match free_rx.recv().unwrap() {
                 FreeMemMsg::FreeMem(tbl) => {
+                    if let Some(txn_file) = tbl.get_cf(WRITE_CF).get_txn_file() {
+                        txn_files.push(txn_file);
+                    }
                     tables.push(tbl);
                 }
                 FreeMemMsg::Stop => {
@@ -874,5 +888,8 @@ fn free_mem(free_rx: mpsc::Receiver<FreeMemMsg>) {
         }
         drop(tables);
         thread::sleep(Duration::from_secs(5));
+        for txn_file in txn_files {
+            txn_file.expire_ttl_cache();
+        }
     }
 }

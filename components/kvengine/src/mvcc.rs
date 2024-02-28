@@ -41,6 +41,10 @@ impl UserMeta {
         LittleEndian::write_u64(&mut array[9..], self.commit_ts);
         array
     }
+
+    pub fn is_rollback(&self) -> bool {
+        self.commit_ts == 0
+    }
 }
 
 pub fn encode_extra_txn_status_key(key: &[u8], start_ts: u64) -> Bytes {

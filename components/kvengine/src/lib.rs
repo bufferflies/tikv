@@ -29,6 +29,7 @@ pub mod shard;
 pub mod split;
 pub mod stats;
 pub mod table;
+pub mod txn_chunk_manager;
 pub mod util;
 pub mod write;
 
@@ -43,7 +44,6 @@ extern crate tikv_alloc;
 mod metrics;
 #[cfg(test)]
 mod tests;
-pub mod txn_chunk_manager;
 
 pub use apply::*;
 pub use compaction::*;

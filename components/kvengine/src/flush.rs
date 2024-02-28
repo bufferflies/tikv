@@ -11,7 +11,8 @@ use bytes::{Bytes, BytesMut};
 use cloud_encryption::EncryptionKey;
 use fail::fail_point;
 use kvenginepb as pb;
-use kvenginepb::L0Create;
+use kvenginepb::{L0Create, TxnFileRefs};
+use protobuf::Message;
 use slog_global::info;
 use tikv_util::{
     mpsc,
@@ -25,7 +26,7 @@ use crate::{
         memtable::CfTable,
         sstable,
         sstable::{Builder, L0Table, SsTable, NO_COMPRESSION},
-        InnerKey, Iterator,
+        InnerKey,
     },
     *,
 };
@@ -141,8 +142,11 @@ impl Engine {
         if let Some(props) = m.get_properties() {
             let mut filtered_props = kvenginepb::Properties::default();
             debug_assert_eq!(props.get_keys().len(), props.get_values().len());
-            for (key, val) in props.keys.into_iter().zip(props.values.into_iter()) {
+            for (key, mut val) in props.keys.into_iter().zip(props.values.into_iter()) {
                 if is_property_need_flush(&key) {
+                    if key == TXN_FILE_REF {
+                        val = clear_finished_txn_files(val);
+                    }
                     filtered_props.mut_keys().push(key);
                     filtered_props.mut_values().push(val);
                 }
@@ -276,7 +280,7 @@ impl Engine {
         let end = task.inner_end();
         let opts = &self.opts.table_builder_options;
         let split_l0_size = opts.max_table_size as u64 * 3 / 2; // use fixed ratio for split l0 size.
-        let write_cf_size = m.get_cf(WRITE_CF).size();
+        let write_cf_size = m.get_cf(WRITE_CF).size() as u64;
         let (fid_count, l0_builder_start_cf) =
             if opts.flush_split_l0 && write_cf_size > split_l0_size {
                 ((write_cf_size / split_l0_size) + 2, LOCK_CF)
@@ -626,6 +630,21 @@ pub(crate) fn change_set_table_version(cs: &kvenginepb::ChangeSet) -> u64 {
         return initial_flush.base_version + initial_flush.data_sequence;
     }
     unreachable!("unexpected change set {:?}", cs);
+}
+
+pub(crate) fn clear_finished_txn_files(v: Vec<u8>) -> Vec<u8> {
+    let mut txn_file_refs = TxnFileRefs::new();
+    txn_file_refs.merge_from_bytes(&v).unwrap();
+    let mut new_txn_file_refs = TxnFileRefs::new();
+    for txn_file_refs in txn_file_refs.txn_file_refs.into_vec() {
+        if !txn_file_refs.lock_val_prefix.is_empty() {
+            new_txn_file_refs.txn_file_refs.push(txn_file_refs);
+        }
+    }
+    if new_txn_file_refs.get_txn_file_refs().is_empty() {
+        return vec![];
+    }
+    new_txn_file_refs.write_to_bytes().unwrap()
 }
 
 pub(crate) struct FlushResult {

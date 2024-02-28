@@ -17,6 +17,8 @@ use bytes::{Buf, Bytes};
 use cloud_encryption::MasterKey;
 use file_system::IoRateLimiter;
 use kvenginepb as pb;
+use kvenginepb::{TxnFileRef, TxnFileRefs};
+use protobuf::Message;
 use security::SecurityManager;
 use tempfile::TempDir;
 use tikv_util::{mpsc, time::Instant};
@@ -27,7 +29,7 @@ use crate::{
     table::{
         memtable::CfTable,
         sstable::{File, InMemFile, L0Builder, L0Table, SsTable},
-        InnerKey, BIT_DELETE,
+        InnerKey, TxnChunkBuilder, TxnCtx, TxnFile, TxnFileId, BIT_DELETE, OP_PUT,
     },
     *,
 };
@@ -604,6 +606,7 @@ fn test_lost_tombstone_issue() {
         Arc::new(HashMap::default()),
         [cf_builder.build(), ShardCf::new(1), ShardCf::new(2)],
         HashMap::new(),
+        vec![],
         RegionLimiter::dummy(),
     );
     shard.set_data(data);
@@ -659,6 +662,7 @@ fn test_read_iterator_all_versions() {
         Arc::new(HashMap::default()),
         [cf_builder.build(), ShardCf::new(1), ShardCf::new(2)],
         HashMap::new(),
+        vec![],
         RegionLimiter::dummy(),
     );
     shard.set_data(data);
@@ -731,6 +735,7 @@ fn test_level_overlapping_tables_impl(enable_inner_key_off: bool) {
         Arc::new(HashMap::default()),
         [cf_builder.build(), ShardCf::new(1), ShardCf::new(2)],
         HashMap::new(),
+        vec![],
         RegionLimiter::dummy(),
     );
 
@@ -886,6 +891,7 @@ fn test_get_suggest_split_key_impl(enable_inner_key_off: bool) {
             Arc::new(HashMap::default()),
             [cf_builder.build(), ShardCf::new(1), ShardCf::new(2)],
             HashMap::new(),
+            vec![],
             RegionLimiter::dummy(),
         );
         shard.set_data(data);
@@ -1070,6 +1076,7 @@ fn test_get_evenly_split_keys_impl(enable_inner_key_off: bool) {
             Arc::new(HashMap::default()),
             [cf_builder.build(), ShardCf::new(1), ShardCf::new(2)],
             HashMap::new(),
+            vec![],
             RegionLimiter::dummy(),
         );
         shard.set_data(data);
@@ -1132,6 +1139,7 @@ fn test_refresh_stats() {
             extra_cf_builder.build(),
         ],
         HashMap::new(),
+        vec![],
         RegionLimiter::dummy(),
     );
     shard.set_data(data);
@@ -1166,6 +1174,232 @@ fn test_l0table_ignore_lock() {
     // See https://github.com/tidbcloud/cloud-storage-engine/issues/1026.
     let l0table_ignore_lock = L0Table::new(file, None, true, None).unwrap();
     assert!(l0table_ignore_lock.is_none());
+}
+
+#[test]
+fn test_txn_file() {
+    ::test_util::init_log_for_test();
+    let (engine, tx) = new_test_engine();
+    let chunk_id = 200;
+    build_txn_chunk(&engine, 200, 300, chunk_id);
+    let mut wb = WriteBatch::new(1, 0);
+    let txn_file_refs = make_txn_file_refs(1000, 200, make_lock_prefix(200), vec![]);
+    wb.set_property(TXN_FILE_REF, &txn_file_refs);
+    write_data(wb, &tx);
+    verify_lock(&engine, 200, 300);
+
+    // rollback the txn file.
+    let txn_file_refs = make_txn_file_refs(1000, 200, vec![], make_user_meta(1000, 0));
+    let mut wb = WriteBatch::new(1, 0);
+    wb.set_property(TXN_FILE_REF, &txn_file_refs);
+    write_data(wb, &tx);
+    let shard = engine.get_shard(1).unwrap();
+    assert!(shard.get_property(TXN_FILE_REF).unwrap().is_empty());
+    assert!(shard.get_txn_chunks().is_empty());
+
+    // concurrent txn files.
+    let txn1_chunk_id = 201;
+    build_txn_chunk(&engine, 200, 300, txn1_chunk_id);
+    let txn1_start_ts = 1003;
+    let txn1_lock = make_txn_file_refs(
+        txn1_start_ts,
+        txn1_chunk_id,
+        make_lock_prefix(txn1_start_ts),
+        vec![],
+    );
+    let mut wb = WriteBatch::new(1, 0);
+    wb.set_property(TXN_FILE_REF, &txn1_lock);
+    write_data(wb, &tx);
+    let txn2_chunk_id = 202;
+    build_txn_chunk(&engine, 300, 400, txn2_chunk_id);
+    let txn2_start_ts = 1004;
+    let txn2_lock = make_txn_file_refs(
+        txn2_start_ts,
+        txn2_chunk_id,
+        make_lock_prefix(txn2_start_ts),
+        vec![],
+    );
+    let mut wb = WriteBatch::new(1, 0);
+    wb.set_property(TXN_FILE_REF, &txn2_lock);
+    write_data(wb, &tx);
+    verify_lock(&engine, 200, 400);
+
+    let txn1_commit = make_txn_file_refs(
+        txn1_start_ts,
+        txn1_chunk_id,
+        vec![],
+        make_user_meta(txn1_start_ts, txn1_start_ts + 2),
+    );
+    let mut wb = WriteBatch::new(1, 0);
+    wb.set_property(TXN_FILE_REF, &txn1_commit);
+    write_data(wb, &tx);
+    verify_write(&engine, 200, 300);
+    verify_lock(&engine, 300, 400);
+
+    let conflict_chunk_id = 203;
+    let conflict_start_ts = 999;
+    build_txn_chunk(&engine, 250, 350, conflict_chunk_id);
+    engine.txn_chunk_mgr.prepare(conflict_chunk_id).unwrap();
+    let conflict_chunk = engine.txn_chunk_mgr.get(conflict_chunk_id).unwrap();
+    let conflict_ctx = TxnCtx::new(
+        vec![].into(),
+        make_lock_prefix(conflict_start_ts).into(),
+        conflict_start_ts,
+    );
+    let conflict_txn_file = TxnFile::new(
+        TxnFileId::new(1, 1, conflict_start_ts),
+        vec![conflict_chunk],
+        conflict_ctx,
+    )
+    .unwrap();
+    let snap = engine.get_snap_access(1).unwrap();
+    let (key, um) = snap
+        .get_txn_file_conflict_write(&conflict_txn_file)
+        .unwrap();
+    assert_eq!(key, i_to_key(250, 0).into_bytes());
+    assert_eq!(um.start_ts, txn1_start_ts);
+    let (key, lock) = snap.get_txn_file_conflict_lock(&conflict_txn_file).unwrap();
+    assert_eq!(key, i_to_key(300, 0).into_bytes());
+    assert_eq!(lock.ts.into_inner(), txn2_start_ts);
+
+    let mut flushed = false;
+    for _ in 0..10 {
+        let shard = engine.get_shard(1).unwrap();
+        let prop_val = shard.get_property(TXN_FILE_REF).unwrap();
+        let mut txn_file_refs = TxnFileRefs::default();
+        txn_file_refs.merge_from_bytes(&prop_val).unwrap();
+        if txn_file_refs.get_txn_file_refs().len() == 1 {
+            assert_eq!(txn_file_refs.get_txn_file_refs()[0].start_ts, txn2_start_ts);
+            flushed = true;
+            break;
+        }
+        thread::sleep(Duration::from_secs(1));
+    }
+    assert!(flushed);
+    verify_write(&engine, 200, 300);
+    verify_lock(&engine, 300, 400);
+
+    let txn2_commit = make_txn_file_refs(
+        txn2_start_ts,
+        txn2_chunk_id,
+        vec![],
+        make_user_meta(txn2_start_ts, txn2_start_ts + 2),
+    );
+    let mut wb = WriteBatch::new(1, 0);
+    wb.set_property(TXN_FILE_REF, &txn2_commit);
+    write_data(wb, &tx);
+    verify_write(&engine, 200, 400);
+    flushed = false;
+    for _ in 0..10 {
+        let shard = engine.get_shard(1).unwrap();
+        let prop_val = shard.get_property(TXN_FILE_REF).unwrap();
+        if prop_val.is_empty() {
+            flushed = true;
+            break;
+        }
+        thread::sleep(Duration::from_secs(1));
+    }
+    assert!(flushed);
+    verify_write(&engine, 200, 400);
+}
+
+fn build_txn_chunk(engine: &TestEngine, start: usize, end: usize, id: u64) {
+    let mut chunk_builder = TxnChunkBuilder::new(10);
+    for i in start..end {
+        let key_str = i_to_key(i as i32, 0);
+        chunk_builder.add_entry(key_str.as_bytes(), OP_PUT, key_str.as_bytes());
+    }
+    let mut buf = vec![];
+    chunk_builder.finish(&mut buf);
+    let runtime = engine.fs.get_runtime();
+    let fs = engine.fs.clone();
+    runtime
+        .block_on(fs.create_txn_chunk(id, buf.into()))
+        .unwrap();
+}
+
+fn make_txn_file_refs(
+    start_ts: u64,
+    chunk_id: u64,
+    lock_prefix: Vec<u8>,
+    user_meta: Vec<u8>,
+) -> Vec<u8> {
+    let mut txn_file_ref = TxnFileRef::new();
+    txn_file_ref.set_chunk_ids(vec![chunk_id]);
+    txn_file_ref.set_shard_ver(1);
+    txn_file_ref.set_start_ts(start_ts);
+    if !lock_prefix.is_empty() {
+        txn_file_ref.set_lock_val_prefix(lock_prefix);
+    }
+    if !user_meta.is_empty() {
+        txn_file_ref.set_user_meta(user_meta);
+    }
+    let mut txn_file_refs = TxnFileRefs::new();
+    txn_file_refs.mut_txn_file_refs().push(txn_file_ref);
+    txn_file_refs.write_to_bytes().unwrap()
+}
+
+fn make_lock_prefix(start_ts: u64) -> Vec<u8> {
+    let min_commit_ts = start_ts + 1;
+    let mut lock = txn_types::Lock::new(
+        txn_types::LockType::Put,
+        b"key".to_vec(),
+        start_ts.into(),
+        3000,
+        None,
+        0.into(),
+        100,
+        min_commit_ts.into(),
+    );
+    lock.is_txn_file = true;
+    lock.to_bytes()
+}
+
+fn make_user_meta(start_ts: u64, commit_ts: u64) -> Vec<u8> {
+    UserMeta::new(start_ts, commit_ts).to_array().to_vec()
+}
+
+fn verify_lock(engine: &TestEngine, start: usize, end: usize) {
+    let snap = engine.get_snap_access(1).unwrap();
+    for i in start..end {
+        let key = i_to_key(i as i32, 0);
+        let item = snap.get(LOCK_CF, key.as_bytes(), 0);
+        assert!(item.is_valid());
+        let lock = txn_types::Lock::parse(item.get_value()).unwrap();
+        assert_eq!(lock.primary, b"key".to_vec());
+        assert!(lock.is_txn_file);
+        assert_eq!(lock.short_value.unwrap().as_slice(), key.as_bytes());
+    }
+    let mut it = snap.new_iterator(LOCK_CF, false, false, None, false);
+    it.rewind();
+    let mut i = start;
+    while it.valid() {
+        let lock = txn_types::Lock::parse(it.val()).unwrap();
+        let key = i_to_key(i as i32, 0);
+        assert_eq!(lock.short_value.unwrap().as_slice(), key.as_bytes());
+        it.next();
+        i += 1;
+    }
+    assert_eq!(i, end);
+}
+
+fn verify_write(engine: &TestEngine, start: usize, end: usize) {
+    let snap = engine.get_snap_access(1).unwrap();
+    for i in start..end {
+        let key = i_to_key(i as i32, 0);
+        let item = snap.get(WRITE_CF, key.as_bytes(), u64::MAX);
+        assert_eq!(item.get_value(), key.as_bytes());
+    }
+    let mut it = snap.new_iterator(WRITE_CF, false, false, None, false);
+    it.rewind();
+    let mut i = start;
+    while it.valid() {
+        let key = i_to_key(i as i32, 0);
+        assert_eq!(it.val(), key.as_bytes());
+        it.next();
+        i += 1;
+    }
+    assert_eq!(i, end);
 }
 
 #[derive(Clone)]

@@ -3,6 +3,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt::{Debug, Formatter},
+    iter::Iterator,
     ops::Deref,
     sync::Arc,
 };
@@ -18,7 +19,7 @@ use crate::{
         blobtable::blobtable::BlobTable,
         memtable::CfTable,
         sstable::{BlockCacheKey, L0Table, LocalFile, SsTable},
-        InnerKey, TableExt,
+        InnerKey, TableExt, TxnFile,
     },
     *,
 };
@@ -30,6 +31,7 @@ pub struct ChangeSet {
     pub blob_tables: HashMap<u64, BlobTable>,
     /// Tables that are not loaded from DFS.
     pub unloaded_tables: HashMap<u64, FileMeta>,
+    pub lock_txn_files: Vec<TxnFile>,
 }
 
 impl Deref for ChangeSet {
@@ -54,6 +56,7 @@ impl ChangeSet {
             ln_tables: HashMap::new(),
             blob_tables: HashMap::new(),
             unloaded_tables: HashMap::new(),
+            lock_txn_files: vec![],
         }
     }
 
@@ -85,7 +88,12 @@ pub(crate) fn create_snapshot_tables(
     snap: &kvenginepb::Snapshot,
     tables: &ChangeSet,
     not_all_tables_loaded: bool,
-) -> (Vec<L0Table>, HashMap<u64, BlobTable>, [ShardCf; 3]) {
+) -> (
+    Vec<L0Table>,
+    HashMap<u64, BlobTable>,
+    [ShardCf; 3],
+    Vec<TxnFile>,
+) {
     // Note: Some tables in `snap` will not exist in `tables` if it's not necessary
     // to load from DFS.
     // Should only happen in restoration.
@@ -141,7 +149,7 @@ pub(crate) fn create_snapshot_tables(
         let scf = &mut scf_builders.as_mut_slice()[cf];
         scfs[cf] = scf.build();
     }
-    (l0_tbls, blob_tbl_map, scfs)
+    (l0_tbls, blob_tbl_map, scfs, tables.lock_txn_files.clone())
 }
 
 impl EngineCore {
@@ -247,7 +255,6 @@ impl EngineCore {
                     cs.sequence,
                 );
             }
-
             let mut new_l0_tbls = Vec::with_capacity(old_data.l0_tbls.len() + l0s.len());
             new_l0_tbls.extend_from_slice(l0s.as_slice());
             new_l0_tbls.extend_from_slice(old_data.l0_tbls.as_slice());
@@ -259,9 +266,11 @@ impl EngineCore {
                 old_data.blob_tbl_map.clone(),
                 old_data.cfs.clone(),
                 old_data.unloaded_tbls.clone(),
+                old_data.lock_txn_files.clone(),
                 old_data.limiter.clone(),
             );
             shard.set_data(new_data);
+            shard.clear_finished_txn_file_refs(flush.version);
             self.send_free_mem_msg(FreeMemMsg::FreeMem(last));
         } else {
             // If there is no L0Create, it means the mem-table is empty during flush.
@@ -274,6 +283,7 @@ impl EngineCore {
                     old_data.blob_tbl_map.clone(),
                     old_data.cfs.clone(),
                     old_data.unloaded_tbls.clone(),
+                    old_data.lock_txn_files.clone(),
                     old_data.limiter.clone(),
                 );
                 shard.set_data(new_data);
@@ -287,13 +297,17 @@ impl EngineCore {
         let data = shard.get_data();
         let mut mem_tbls = data.mem_tbls.clone();
 
-        let (l0s, blob_tbl_map, scfs) =
+        let (l0s, blob_tbl_map, scfs, lock_txn_files) =
             create_snapshot_tables(initial_flush, cs, self.opts.for_restore);
+        let mut max_flushed_mem_tbl_version = 0;
         mem_tbls.retain(|x| {
             let version = x.get_version();
             let flushed =
                 version > 0 && version <= initial_flush.base_version + initial_flush.data_sequence;
             if flushed {
+                if max_flushed_mem_tbl_version < version {
+                    max_flushed_mem_tbl_version = version;
+                }
                 self.send_free_mem_msg(FreeMemMsg::FreeMem(x.clone()));
             }
             !flushed
@@ -305,9 +319,11 @@ impl EngineCore {
             Arc::new(blob_tbl_map),
             scfs,
             data.unloaded_tbls.clone(),
+            lock_txn_files,
             data.limiter.clone(),
         );
         shard.set_data(new_data);
+        shard.clear_finished_txn_file_refs(max_flushed_mem_tbl_version);
 
         if initial_flush.has_properties() {
             let props = initial_flush.get_properties();
@@ -378,6 +394,7 @@ impl EngineCore {
             Arc::new(new_blob_tbl_map),
             new_cfs,
             data.unloaded_tbls.clone(),
+            data.lock_txn_files.clone(),
             data.limiter.clone(),
         );
         shard.set_data(new_data);
@@ -477,6 +494,7 @@ impl EngineCore {
             Arc::new(new_blob_tbl_map),
             new_cfs,
             data.unloaded_tbls.clone(),
+            data.lock_txn_files.clone(),
             data.limiter.clone(),
         );
         shard.set_data(new_data);
@@ -565,6 +583,7 @@ impl EngineCore {
             data.blob_tbl_map.clone(),
             new_cfs,
             data.unloaded_tbls.clone(),
+            data.lock_txn_files.clone(),
             data.limiter.clone(),
         );
         assert_eq!(cs.get_property_key(), DEL_PREFIXES_KEY);
@@ -591,6 +610,7 @@ impl EngineCore {
             data.blob_tbl_map.clone(),
             new_cfs,
             data.unloaded_tbls.clone(),
+            data.lock_txn_files.clone(),
             data.limiter.clone(),
         );
         shard.set_data(new_data);
@@ -617,6 +637,7 @@ impl EngineCore {
             data.blob_tbl_map.clone(),
             new_cfs,
             data.unloaded_tbls.clone(),
+            data.lock_txn_files.clone(),
             data.limiter.clone(),
         );
         shard.set_data(new_data);
@@ -745,6 +766,7 @@ impl EngineCore {
             Arc::new(new_blob_tbl_map),
             new_cfs,
             old_data.unloaded_tbls.clone(),
+            old_data.lock_txn_files.clone(),
             old_data.limiter.clone(),
         );
         shard.set_data(new_data);
@@ -775,7 +797,7 @@ impl EngineCore {
         );
         let snap_data = new_shard.get_data();
         let old_data = old_shard.get_data();
-        let (l0_tbls, blob_tbl_map, cfs) =
+        let (l0_tbls, blob_tbl_map, cfs, _) =
             create_snapshot_tables(cs.get_restore_shard(), cs, self.opts.for_restore);
         let new_data = ShardData::new(
             snap_data.range.clone(),
@@ -784,6 +806,7 @@ impl EngineCore {
             Arc::new(blob_tbl_map),
             cfs,
             snap_data.unloaded_tbls.clone(),
+            vec![],
             old_data.limiter.clone(),
         );
         new_shard.set_data(new_data);

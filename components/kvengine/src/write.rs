@@ -1,12 +1,14 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{cmp, collections::HashMap};
+use std::{cmp, collections::HashMap, iter::Iterator};
 
 use bytes::{Buf, BytesMut};
+use kvenginepb::{TxnFileRef, TxnFileRefs};
+use protobuf::Message;
 use slog_global::info;
 
 use crate::{
-    table::{self, memtable, InnerKey},
+    table::{self, memtable, InnerKey, TxnCtx, TxnFile, TxnFileId},
     *,
 };
 
@@ -72,6 +74,10 @@ impl WriteBatch {
         self.properties.insert(key.to_string(), BytesMut::from(val));
     }
 
+    pub fn get_property(&self, key: &str) -> Option<&BytesMut> {
+        self.properties.get(key)
+    }
+
     pub fn set_sequence(&mut self, seq: u64) {
         self.sequence = seq;
     }
@@ -125,6 +131,7 @@ impl Engine {
             data.blob_tbl_map.clone(),
             data.cfs.clone(),
             data.unloaded_tbls.clone(),
+            data.lock_txn_files.clone(),
             data.limiter.clone(),
         );
         new_data.refresh_for_limiter(&shard.tag());
@@ -225,6 +232,13 @@ impl Engine {
                     need_refresh_shard_states = true;
                     shard.properties.set(k.as_str(), v.chunk());
                 }
+                TXN_FILE_REF => {
+                    let need_switch = self.write_txn_file_ref(&shard, v.chunk());
+                    if need_switch {
+                        wb.set_switch_mem_table();
+                    }
+                    need_refresh_shard_states = true;
+                }
                 _ => {
                     shard.properties.set(k.as_str(), v.chunk());
                 }
@@ -244,6 +258,114 @@ impl Engine {
         }
     }
 
+    fn write_txn_file_ref(&self, shard: &Shard, v: &[u8]) -> bool {
+        let mut txn_file_refs = TxnFileRefs::new();
+        txn_file_refs.merge_from_bytes(v).unwrap();
+        let txn_file_ref = txn_file_refs.take_txn_file_refs().pop().unwrap();
+        let old_data = shard.get_data();
+        let mut lock_txn_files = old_data.lock_txn_files.clone();
+
+        let mut chunks = vec![];
+        for &chunk_id in &txn_file_ref.chunk_ids {
+            self.txn_chunk_mgr.prepare(chunk_id).unwrap();
+            let txn_chunk = self.txn_chunk_mgr.get(chunk_id).unwrap();
+            chunks.push(txn_chunk);
+        }
+        // txn_ctx_version is the data version
+        let txn_ctx_version = if !txn_file_ref.user_meta.is_empty() {
+            let um = UserMeta::from_slice(&txn_file_ref.user_meta);
+            um.commit_ts
+        } else {
+            txn_file_ref.version
+        };
+        let txn_ctx = TxnCtx::new(
+            txn_file_ref.user_meta.clone().into(),
+            txn_file_ref.lock_val_prefix.clone().into(),
+            txn_ctx_version,
+        );
+        let mut is_commit = false;
+        let mut is_rollback = false;
+        if !txn_file_ref.user_meta.is_empty() {
+            let user_meta = UserMeta::from_slice(&txn_file_ref.user_meta);
+            is_rollback = user_meta.is_rollback();
+            is_commit = !is_rollback;
+        }
+        let txn_file_id = TxnFileId::new(shard.id, shard.ver, txn_file_ref.start_ts);
+        let txn_file = TxnFile::new(txn_file_id, chunks, txn_ctx).unwrap();
+
+        Self::merge_txn_file_ref(shard, txn_file_ref, is_rollback);
+
+        // lock txn files will be merged into ShardData.
+        Self::merge_lock_txn_files(&mut lock_txn_files, &txn_file, is_commit || is_rollback);
+
+        // commit txn files will be added to the writable mem-table.
+        let mut mem_tbls = old_data.mem_tbls.clone();
+        if is_commit {
+            mem_tbls[0] = old_data
+                .get_writable_mem_table()
+                .add_write_cf_txn_files(txn_file);
+        }
+        let data = ShardData::new(
+            old_data.range.clone(),
+            mem_tbls,
+            old_data.l0_tbls.clone(),
+            old_data.blob_tbl_map.clone(),
+            old_data.cfs.clone(),
+            old_data.unloaded_tbls.clone(),
+            lock_txn_files,
+            old_data.limiter.clone(),
+        );
+        shard.set_data(data);
+        is_commit
+    }
+
+    fn merge_txn_file_ref(shard: &Shard, wb_ref: TxnFileRef, is_rollback: bool) {
+        let mut shard_txn_file_refs = TxnFileRefs::new();
+        if let Some(shard_txn_file_refs_data) = shard.get_property(TXN_FILE_REF) {
+            shard_txn_file_refs
+                .merge_from_bytes(shard_txn_file_refs_data.chunk())
+                .unwrap();
+        }
+        let mut shard_refs = shard_txn_file_refs.take_txn_file_refs().into_vec();
+        if let Some(idx) = shard_refs
+            .iter()
+            .position(|x| x.start_ts == wb_ref.start_ts)
+        {
+            if is_rollback {
+                shard_refs.remove(idx);
+            } else {
+                shard_refs[idx] = wb_ref;
+            }
+        } else {
+            debug_assert!(wb_ref.get_user_meta().is_empty());
+            shard_refs.push(wb_ref);
+        }
+        shard_txn_file_refs.set_txn_file_refs(shard_refs.into());
+        shard
+            .properties
+            .set(TXN_FILE_REF, &shard_txn_file_refs.write_to_bytes().unwrap());
+    }
+
+    fn merge_lock_txn_files(
+        shard_lock_txn_files: &mut Vec<TxnFile>,
+        txn_file: &TxnFile,
+        is_commit_or_rollback: bool,
+    ) {
+        if let Some(idx) = shard_lock_txn_files
+            .iter()
+            .position(|x| x.start_ts() == txn_file.start_ts())
+        {
+            if is_commit_or_rollback {
+                shard_lock_txn_files.remove(idx);
+            } else {
+                shard_lock_txn_files[idx] = txn_file.clone()
+            }
+        } else {
+            debug_assert!(!is_commit_or_rollback);
+            shard_lock_txn_files.push(txn_file.clone());
+        }
+    }
+
     fn update_write_batch_version(&self, wb: &mut WriteBatch, version: u64) {
         for cf in 0..NUM_CFS {
             if !CF_MANAGED[cf] {
@@ -251,6 +373,14 @@ impl Engine {
                     e.version = version;
                 });
             };
+        }
+        if let Some(txn_file_refs_bin) = wb.get_property(TXN_FILE_REF) {
+            let mut txn_file_refs = TxnFileRefs::new();
+            txn_file_refs.merge_from_bytes(txn_file_refs_bin).unwrap();
+            for txn_file_ref in txn_file_refs.mut_txn_file_refs().iter_mut() {
+                txn_file_ref.version = version;
+            }
+            wb.set_property(TXN_FILE_REF, &txn_file_refs.write_to_bytes().unwrap());
         }
     }
 

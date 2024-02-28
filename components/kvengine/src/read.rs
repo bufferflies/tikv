@@ -14,6 +14,7 @@ use cloud_encryption::{EncryptionKey, MasterKey};
 use kvenginepb as pb;
 use moka::sync::SegmentedCache;
 use protobuf::Message;
+use txn_types::Lock;
 
 use crate::{
     limiter::RegionLimiter,
@@ -21,7 +22,7 @@ use crate::{
         blobtable::blobtable::{BlobPrefetcher, BlobTable},
         memtable::{CfTable, Hint, WriteBatch},
         sstable::{BlockCacheKey, InMemFile, L0Table, SsTable},
-        table, InnerKey, TableExt,
+        table, InnerKey, SkipOpTxnFileIterator, TableExt, TxnFile, TxnFileIterator,
     },
     *,
 };
@@ -305,7 +306,8 @@ impl SnapAccessCore {
             panic!("errors is not empty: {:?}", errors);
         }
         let mut shard = Shard::new_for_ingest(0, &cs, Arc::new(Options::default()), master_key);
-        let (l0s, blob_tbls, scfs) = create_snapshot_tables(cs.get_snapshot(), &cs, ignore_lock);
+        let (l0s, blob_tbls, scfs, lock_txn_files) =
+            create_snapshot_tables(cs.get_snapshot(), &cs, ignore_lock);
         let data = ShardData::new(
             shard.range.clone(),
             mem_tbls,
@@ -313,6 +315,7 @@ impl SnapAccessCore {
             Arc::new(blob_tbls),
             scfs,
             HashMap::new(),
+            lock_txn_files,
             RegionLimiter::new((&shard.opt.flow_control).into()), // Note: limiter is disabled here
         );
         shard.id = cs.shard_id;
@@ -465,14 +468,22 @@ impl SnapAccessCore {
         path: &mut AccessPath,
         out_val_owner: &mut Vec<u8>,
     ) -> table::Value {
+        if cf == LOCK_CF {
+            for txn_file in &self.data.lock_txn_files {
+                let (_, val) = txn_file.get_value(inner_key, out_val_owner);
+                if val.is_valid() {
+                    return val;
+                }
+            }
+        }
         for i in 0..self.data.mem_tbls.len() {
             let tbl = self.data.mem_tbls.as_slice()[i].get_cf(cf);
             let v = if i == 0 && cf == 0 {
                 // only use hint for the first mem-table and cf 0.
                 let mut hint = self.get_hint.lock().unwrap();
-                tbl.get_with_hint(inner_key.deref(), version, &mut hint)
+                tbl.get_with_hint(inner_key, version, &mut hint, out_val_owner)
             } else {
-                tbl.get(inner_key.deref(), version)
+                tbl.get(inner_key, version, out_val_owner)
             };
             path.mem_table = path.mem_table.saturating_add(1);
             if v.is_valid() {
@@ -525,8 +536,15 @@ impl SnapAccessCore {
         fill_cache: bool,
     ) -> Box<dyn table::Iterator> {
         let mut iters: Vec<Box<dyn table::Iterator>> = Vec::new();
+        if cf == LOCK_CF && !self.data.lock_txn_files.is_empty() {
+            for txn_file in &self.data.lock_txn_files {
+                let txn_file_iter = TxnFileIterator::new(txn_file.clone(), reversed);
+                let skip_op_iter = SkipOpTxnFileIterator::new(txn_file_iter, false, true);
+                iters.push(Box::new(skip_op_iter))
+            }
+        }
         for mem_tbl in &self.data.mem_tbls {
-            iters.push(Box::new(mem_tbl.get_cf(cf).new_iterator(reversed)));
+            iters.push(mem_tbl.get_cf(cf).new_iterator(reversed));
         }
         for l0 in &self.data.l0_tbls {
             if let Some(tbl) = &l0.get_cf(cf) {
@@ -554,9 +572,37 @@ impl SnapAccessCore {
     pub fn new_mem_table_iterator(&self, cf: usize, reversed: bool) -> Box<dyn table::Iterator> {
         let mut iters: Vec<Box<dyn table::Iterator>> = Vec::new();
         for mem_tbl in &self.data.mem_tbls {
-            iters.push(Box::new(mem_tbl.get_cf(cf).new_iterator(reversed)));
+            iters.push(mem_tbl.get_cf(cf).new_iterator(reversed));
         }
         table::new_merge_iterator(iters, reversed)
+    }
+
+    pub fn new_delta_write_iterator(&self, since_ts: u64) -> Box<dyn table::Iterator> {
+        let mut iters: Vec<Box<dyn table::Iterator>> = Vec::new();
+        for mem_tbl in &self.data.mem_tbls {
+            if mem_tbl.data_max_ts() > since_ts {
+                iters.push(mem_tbl.get_cf(WRITE_CF).new_iterator(false));
+            }
+        }
+        for l0 in &self.data.l0_tbls {
+            if let Some(tbl) = &l0.get_cf(WRITE_CF) {
+                if tbl.max_ts > since_ts {
+                    iters.push(tbl.new_iterator(false, true));
+                }
+            }
+        }
+        let scf = self.data.get_cf(WRITE_CF);
+        for lh in scf.levels.as_slice() {
+            if lh.tables.len() == 0 || lh.max_ts < since_ts {
+                continue;
+            }
+            if lh.tables.len() == 1 {
+                iters.push(lh.tables[0].new_iterator(false, true));
+                continue;
+            }
+            iters.push(Box::new(ConcatIterator::new(lh.clone(), false, true)));
+        }
+        table::new_merge_iterator(iters, false)
     }
 
     pub fn get_write_sequence(&self) -> u64 {
@@ -589,8 +635,9 @@ impl SnapAccessCore {
 
     pub(crate) fn contains_in_older_table(&self, key: InnerKey<'_>, cf: usize) -> bool {
         let key_hash = farmhash::fingerprint64(key.deref());
+        let mut outer_val_owner = vec![];
         for tbl in &self.data.mem_tbls[1..] {
-            let val = tbl.get_cf(cf).get(key.deref(), u64::MAX);
+            let val = tbl.get_cf(cf).get(key, u64::MAX, &mut outer_val_owner);
             if val.is_valid() {
                 return !val.is_deleted();
             }
@@ -774,7 +821,7 @@ impl SnapAccessCore {
         let key_hash = farmhash::fingerprint64(inner_key.deref());
         for i in 0..self.data.mem_tbls.len() {
             let tbl = self.data.mem_tbls.as_slice()[i].get_cf(cf);
-            let v = tbl.get_newer(inner_key.deref(), version);
+            let v = tbl.get_newer(inner_key, version, out_val_owner);
             if v.is_valid() {
                 out_val_owner.resize(v.encoded_size(), 0);
                 v.encode(out_val_owner.as_mut_slice());
@@ -847,6 +894,90 @@ impl SnapAccessCore {
 
     pub fn get_keyspace_id(&self) -> u32 {
         self.data.keyspace_id
+    }
+
+    fn seek_txn_file(&self, iter: &mut Box<dyn table::Iterator>, txn_file: &TxnFile) {
+        if txn_file.smallest() < self.data.inner_start() {
+            iter.seek(self.data.inner_start());
+        } else {
+            iter.seek(txn_file.smallest());
+        }
+    }
+
+    fn get_upper_bound<'a>(&'a self, buf: &'a mut Vec<u8>, txn_file: &TxnFile) -> InnerKey<'_> {
+        if txn_file.biggest() < self.data.inner_end() {
+            buf.extend_from_slice(txn_file.biggest().deref());
+            buf.push(0);
+            InnerKey::from_inner_buf(buf)
+        } else {
+            self.data.inner_end()
+        }
+    }
+
+    pub fn get_txn_file_conflict_lock(&self, txn_file: &TxnFile) -> Option<(Vec<u8>, Lock)> {
+        let mut lock_iter = self.new_table_iterator(LOCK_CF, false, true);
+        self.seek_txn_file(&mut lock_iter, txn_file);
+        let mut upper_bound_buf = vec![];
+        let upper_bound = self.get_upper_bound(&mut upper_bound_buf, txn_file);
+        let mut outer_val_buf = vec![];
+        while lock_iter.valid() {
+            if lock_iter.key() >= upper_bound {
+                return None;
+            }
+            let lock_iter_val = lock_iter.value();
+            if !lock_iter_val.is_deleted()
+                && txn_file
+                    .get_value(lock_iter.key(), &mut outer_val_buf)
+                    .1
+                    .is_valid()
+            {
+                let conflict_lock = Lock::parse(lock_iter_val.get_value()).unwrap();
+                // Return outer key.
+                let mut key = self.data.prefix().to_vec();
+                key.extend_from_slice(lock_iter.key().as_ref());
+                return Some((key, conflict_lock));
+            }
+            lock_iter.next();
+        }
+        None
+    }
+
+    pub fn get_txn_file_conflict_write(&self, txn_file: &TxnFile) -> Option<(Vec<u8>, UserMeta)> {
+        let mut write_iter = self.new_delta_write_iterator(txn_file.start_ts());
+        self.seek_txn_file(&mut write_iter, txn_file);
+        let mut upper_bound_buf = vec![];
+        let upper_bound = self.get_upper_bound(&mut upper_bound_buf, txn_file);
+        let mut outer_val_buf = vec![];
+        while write_iter.valid() {
+            if write_iter.key() >= upper_bound {
+                return None;
+            }
+            if txn_file
+                .get_value(write_iter.key(), &mut outer_val_buf)
+                .1
+                .is_valid()
+            {
+                let write_iter_val = write_iter.value();
+                let um = UserMeta::from_slice(write_iter_val.user_meta());
+                if um.commit_ts > txn_file.start_ts() {
+                    // Return outer key.
+                    let mut key = self.data.prefix().to_vec();
+                    key.extend_from_slice(write_iter.key().as_ref());
+                    return Some((key, um));
+                }
+            }
+            write_iter.next();
+        }
+        None
+    }
+
+    pub fn get_lock_txn_file(&self, start_ts: u64) -> Option<TxnFile> {
+        for txn_file in &self.data.lock_txn_files {
+            if txn_file.start_ts() == start_ts {
+                return Some(txn_file.clone());
+            }
+        }
+        None
     }
 
     pub fn get_limiter(&self) -> &RegionLimiter {
@@ -1124,7 +1255,8 @@ mod tests {
             &master_key,
         );
 
-        let (l0s, blob_tbls, scfs) = create_snapshot_tables(cs.get_snapshot(), &cs, false);
+        let (l0s, blob_tbls, scfs, lock_txn_files) =
+            create_snapshot_tables(cs.get_snapshot(), &cs, false);
         let data = ShardData::new(
             shard.range.clone(),
             vec![CfTable::new()],
@@ -1132,6 +1264,7 @@ mod tests {
             Arc::new(blob_tbls),
             scfs,
             HashMap::new(),
+            lock_txn_files,
             RegionLimiter::dummy(),
         );
         shard.set_data(data);

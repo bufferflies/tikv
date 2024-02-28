@@ -11,7 +11,10 @@ use std::{
 };
 
 use super::{Arena, SkipList};
-use crate::{table::InnerKey, Iterator, EXTRA_CF, NUM_CFS, WRITE_CF};
+use crate::{
+    table::{memtable::skl_ext::SkipListExt, InnerKey, TxnFile},
+    EXTRA_CF, NUM_CFS, WRITE_CF,
+};
 
 #[derive(Clone)]
 pub struct CfTable {
@@ -56,10 +59,26 @@ impl CfTable {
             }),
         }
     }
+
+    pub fn add_write_cf_txn_files(&self, txn_file: TxnFile) -> Self {
+        let mut tbls = self.core.tbls.clone();
+        tbls[WRITE_CF] = tbls[WRITE_CF].add_txn_file(txn_file);
+        let arena = self.core.arena.clone();
+        let ver = AtomicU64::new(self.ver.load(Ordering::Acquire));
+        let props = Mutex::new(self.core.props.lock().unwrap().clone());
+        Self {
+            core: Arc::new(CfTableCore {
+                tbls,
+                arena,
+                ver,
+                props,
+            }),
+        }
+    }
 }
 
 pub struct CfTableCore {
-    tbls: [SkipList; NUM_CFS],
+    tbls: [SkipListExt; NUM_CFS],
     arena: Arc<Arena>,
     ver: AtomicU64,
     props: Mutex<Option<kvenginepb::Properties>>,
@@ -76,9 +95,9 @@ impl CfTableCore {
         let arena = Arc::new(Arena::new());
         Self {
             tbls: [
-                SkipList::new(Some(arena.clone())),
-                SkipList::new(Some(arena.clone())),
-                SkipList::new(Some(arena.clone())),
+                SkipListExt::new(SkipList::new(Some(arena.clone()))),
+                SkipListExt::new(SkipList::new(Some(arena.clone()))),
+                SkipListExt::new(SkipList::new(Some(arena.clone()))),
             ],
             arena,
             ver: AtomicU64::new(0),
@@ -86,7 +105,7 @@ impl CfTableCore {
         }
     }
 
-    pub fn get_cf(&self, cf: usize) -> &SkipList {
+    pub fn get_cf(&self, cf: usize) -> &SkipListExt {
         &self.tbls[cf]
     }
 
@@ -100,7 +119,7 @@ impl CfTableCore {
     }
 
     pub fn size(&self) -> u64 {
-        self.tbls.iter().map(|t| t.size()).sum()
+        self.tbls.iter().map(|t| t.size() as u64).sum()
     }
 
     pub fn set_version(&self, ver: u64) {
