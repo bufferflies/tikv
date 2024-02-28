@@ -23,6 +23,11 @@ pub trait File: Sync + Send {
     // size returns the size of the file.
     fn size(&self) -> u64;
 
+    // path returns the file path.
+    fn path(&self) -> Option<PathBuf> {
+        None
+    }
+
     // read reads the data at given offset.
     fn read(&self, off: u64, length: usize) -> table::Result<Bytes>;
 
@@ -85,6 +90,10 @@ impl File for LocalFile {
 
     fn size(&self) -> u64 {
         self.size
+    }
+
+    fn path(&self) -> Option<PathBuf> {
+        Some(self.path.clone())
     }
 
     fn read(&self, off: u64, length: usize) -> table::Result<Bytes> {

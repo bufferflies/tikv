@@ -226,7 +226,7 @@ impl SsTableCore {
             footer.properties_len(size as usize),
         )?;
         let mut prop_slice = props_data.chunk();
-        validate_checksum(prop_slice, footer.checksum_type)?;
+        validate_checksum_with_fix(prop_slice, footer.checksum_type, file.clone())?;
         prop_slice = &prop_slice[4..];
         let mut smallest_buf = Bytes::new();
         let mut biggest_buf = Bytes::new();
@@ -292,7 +292,8 @@ impl SsTableCore {
             .file
             .read(self.start_off + offset as u64, length)
             .unwrap();
-        Index::new(idx_data, self.footer.checksum_type)
+        self.validate_checksum_with_fix(idx_data.chunk(), self.footer.checksum_type)?;
+        Index::new(idx_data)
     }
 
     pub fn load_index(&self) -> Arc<Index> {
@@ -386,7 +387,7 @@ impl SsTableCore {
                 );
                 raw_block = Bytes::from(block)
             }
-            validate_checksum(raw_block.chunk(), self.footer.checksum_type)?;
+            self.validate_checksum_with_fix(raw_block.chunk(), self.footer.checksum_type)?;
             return Ok(raw_block.slice(4..));
         }
         buf.resize(length, 0);
@@ -404,7 +405,7 @@ impl SsTableCore {
         } else {
             self.file.read_at(buf, addr.curr_off as u64)?;
         }
-        validate_checksum(buf, self.footer.checksum_type)?;
+        self.validate_checksum_with_fix(buf, self.footer.checksum_type)?;
         let content = &buf[4..];
         match compression_type {
             LZ4_COMPRESSION => {
@@ -457,7 +458,7 @@ impl SsTableCore {
         let mut data = self
             .file
             .read(self.filter_offset() as u64, self.filter_size() as usize)?;
-        validate_checksum(data.chunk(), self.footer.checksum_type)?;
+        self.validate_checksum_with_fix(data.chunk(), self.footer.checksum_type)?;
         data.get_u32_le();
         assert_eq!(data.get_u32_le(), AUX_INDEX_BINARY_FUSE8);
         let len = data.get_u32_le();
@@ -581,6 +582,11 @@ impl SsTableCore {
     pub fn encryption_ver(&self) -> u32 {
         self.encryption_ver
     }
+
+    #[inline]
+    fn validate_checksum_with_fix(&self, data: &[u8], checksum_type: u8) -> Result<()> {
+        validate_checksum_with_fix(data, checksum_type, self.file.clone())
+    }
 }
 
 #[derive(Clone)]
@@ -592,8 +598,7 @@ pub struct Index {
 }
 
 impl Index {
-    fn new(mut data: Bytes, checksum_type: u8) -> Result<Self> {
-        validate_checksum(data.chunk(), checksum_type)?;
+    fn new(mut data: Bytes) -> Result<Self> {
         let _checksum = data.get_u32_le();
         assert_eq!(data.get_u32_le(), INDEX_FORMAT_V1);
         let num_blocks = data.get_u32_le() as usize;
@@ -717,6 +722,25 @@ fn validate_checksum(data: &[u8], checksum_type: u8) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[inline]
+fn validate_checksum_with_fix(data: &[u8], checksum_type: u8, file: Arc<dyn File>) -> Result<()> {
+    match validate_checksum(data, checksum_type) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            if let Some(file_path) = file.path() {
+                warn!(
+                    "file {} path {:?} failed to validate checksum, try to remove it from local disk",
+                    file.id(),
+                    file.path(),
+                );
+                // Just remove the sst file in local and download from dfs during next restart.
+                std::fs::remove_file(file_path)?;
+            }
+            Err(err)
+        }
+    }
 }
 
 const FILE_SUFFIX: &str = ".sst";
