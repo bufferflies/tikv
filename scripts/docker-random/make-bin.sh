@@ -2,6 +2,13 @@
 
 set -euo pipefail
 
+# Run from the Makefile environment
+SELF=$(realpath -s "$0")
+MAKEFILE_RUN=${MAKEFILE_RUN:-""}
+if [[ -z $MAKEFILE_RUN ]]; then
+	COMMAND="$SELF $*" exec make -f "$(dirname "$0")/../../Makefile" run
+fi
+
 RELEASE=1
 HELP=0
 while [[ $# -gt 0 ]]; do
@@ -29,22 +36,28 @@ if [ "$HELP" -eq 1 ]; then
 	exit 0
 fi
 
+declare -a BUILD_FLAG
+BUILD_FLAG=(
+	"--features"
+	"$TIKV_ENABLE_FEATURES"
+)
+
 PWD=$(pwd)
 TARGET_BIN="$PWD"/random-bin
 
-BUILD_FLAG=""
 TARGET_PATH="target/debug/deps"
 if [ "$RELEASE" -eq 1 ]; then
-    BUILD_FLAG="$BUILD_FLAG --release"
-    TARGET_PATH="target/release/deps"
+	BUILD_FLAG+=("--release")
+	TARGET_PATH="target/release/deps"
 fi
 
 cd ../..
 
-EXECUTABLE=$(cargo test $BUILD_FLAG -p tests --test random --no-run --message-format=json | grep -E -o "$TARGET_PATH"'/random-[a-z0-9]+' | tail -1)
+# "-p tikv" must be added, otherwise building will fail as some features are not contained in any package.
+EXECUTABLE=$(cargo test "${BUILD_FLAG[@]}" -p tests -p tikv --test random --no-run --message-format=json | grep -E -o "$TARGET_PATH"'/random-[a-z0-9]+' | tail -1)
 if [ -z "$EXECUTABLE" ]; then
-    echo "Failed to find executable"
-    exit 1
+	echo "Failed to find executable"
+	exit 1
 fi
 
 # "rm" + "cp" to avoid target text file busy.

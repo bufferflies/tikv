@@ -673,7 +673,9 @@ fn get_idx_from_keyspace_name(name: &str) -> u16 {
 fn check_binary(name: &str, bin_path: &Path) {
     let mut cmd = Command::new(bin_path);
     cmd.arg("-V");
-    let output = cmd.output().unwrap();
+    let output = cmd.output().unwrap_or_else(|e| {
+        panic!("check_binary {} at {:?} failed: {:?}", name, bin_path, e);
+    });
     assert!(
         output.status.success(),
         "{} --version failed: {:?}",

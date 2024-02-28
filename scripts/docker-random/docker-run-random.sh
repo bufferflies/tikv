@@ -16,7 +16,10 @@ PATH_SUFFIX=""
 TESTNAME="all"
 TIDB_VERSION="v7.1.0"
 REBUILD_IMAGE=1
-RUN_ARGS=""
+declare -a RUN_ARGS
+RUN_ARGS=()
+KEEP_TMP_ON_ERROR=0
+MEMORY_PROFILE=0
 
 HELP=0
 
@@ -47,7 +50,12 @@ while [[ $# -gt 0 ]]; do
 		REBUILD_IMAGE=0
 		;;
 	--keep-tmp-on-error)
-		RUN_ARGS+=" --keep-tmp-on-error"
+		KEEP_TMP_ON_ERROR=1
+		RUN_ARGS+=("--keep-tmp-on-error")
+		;;
+	--memory-profile)
+		MEMORY_PROFILE=1
+		RUN_ARGS+=("--memory-profile")
 		;;
 	--help)
 		HELP=1
@@ -72,26 +80,34 @@ if [ "$HELP" -eq 1 ]; then
 	echo "  --tidb-version <v6.6.0/v7.1.0/...> Set the version of TiDB for \"with_tidb\" test"
 	echo "  --no-rebuild-image                 Do NOT rebuild the testing Docker image"
 	echo "  --keep-tmp-on-error                Keep temporary data on error for debugging"
+	echo "  --memory-profile                   Enable memory profiling"
 	exit 0
 fi
 
-BUILD_IMAGE_ARGS=""
-if [ "$REBUILD_IMAGE" -eq 1 ]; then
-	BUILD_IMAGE_ARGS+=" --pull --no-cache"
+if [ "$MEMORY_PROFILE" -eq 1 ] && [ "$KEEP_TMP_ON_ERROR" -ne 1 ]; then
+	echo "WARNING: --keep-tmp-on-error is not enabled. The profile dumps will be removed after each test."
 fi
 
 IMAGE="ubuntu:20.04"
 if [ "$TESTNAME" = "with_tidb" ]; then
-	# Build image without context.
-	docker build $BUILD_IMAGE_ARGS -t random-tidb --build-arg VERSION="$TIDB_VERSION" - <Dockerfile.tidb
+	BUILD_TIDB_IMAGE_ARGS=""
+	if [ "$REBUILD_IMAGE" -eq 1 ]; then
+		BUILD_TIDB_IMAGE_ARGS+=" --pull --no-cache"
+	fi
+	docker build $BUILD_TIDB_IMAGE_ARGS -t random-tidb --build-arg VERSION="$TIDB_VERSION" - <Dockerfile.tidb
 	IMAGE="random-tidb"
+elif [ "$MEMORY_PROFILE" -eq 1 ]; then
+	# Parse profile dumps in an environment different with container for random test would fail to translate the addresses to symbols.
+	# So provide an image with tools.
+	docker build -t random-profile - <Dockerfile.profile
+	IMAGE="random-profile"
 fi
 
 LOG_VOLUME=""
 if [ -n "$LOG_PATH" ]; then
 	ABSOLUTE_LOG_PATH=$(readlink -f "${LOG_PATH}${PATH_SUFFIX}")
 	LOG_VOLUME="-v ${ABSOLUTE_LOG_PATH}:/random-logs"
-	RUN_ARGS+=" --log-path /random-logs"
+	RUN_ARGS+=("--log-path" "/random-logs")
 fi
 
 for ((i = 0; i < "$CONCURRENCY"; i++)); do
@@ -109,5 +125,5 @@ for ((i = 0; i < "$CONCURRENCY"; i++)); do
 		$TMP_VOLUME \
 		$LOG_VOLUME \
 		"$IMAGE" \
-		/bin/sh /random/run-random.sh "$i" "$TESTNAME" $RUN_ARGS
+		/bin/sh /random/run-random.sh "$i" "$TESTNAME" "${RUN_ARGS[@]}"
 done

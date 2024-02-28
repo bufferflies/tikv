@@ -82,6 +82,32 @@ To use Docker-Random, ensure that Docker is installed on your system. Docker pro
 
     - `--keep-tmp-on-error`: Keep temporary data (e.g. logs of TiDB and PD) on error for debugging.
 
+    - `--memory-profile`: Enable memory profile. Should be used with `--keep-tmp-on-error`, otherwise the profile dumps will be removed after the test has finished.
+
+        The profile interval is `1GiB`. See `opt.lg_prof_interval` in [jemalloc manual](https://jemalloc.net/jemalloc.3.html) for detail.
+
+        The profile dumps can be found in temporal path specified by the `--tmp-path` argument.
+
+        To convert the profile dump to PDF, use the following command (take the `jeprof.out.10.0.i0.heap` of container `random-all-0` test `000001` for example):
+
+        ```shell
+        docker exec -it random-all-0 bash -c 'jeprof --pdf /random/random-bin /random-tmp/000001/jeprof.out.10.0.i0.heap > /random-tmp/000001/prof.pdf'
+        ```
+
+        Then the PDF can be found in `<$TMPDIR>/0/000001/prof.pdf`.
+
+        If the container for random tests has been stopped, use the following command:
+
+        ```shell
+        docker run \
+            -v /xxx/cloud-storage-engine/scripts/docker-random:/random \
+            -v /xxx/random-tmp/0:/random-tmp \
+            random-profile \
+            /bin/bash -c 'jeprof --pdf /random/random-bin /random-tmp/000001/jeprof.out.10.0.i0.heap > /random-tmp/000001/prof.pdf'
+        ```
+
+        This command creates a new container `random-profile`, mounts the necessary volumes, and creates the PDF file.
+
 4. **Analyze the Results**: The logs of failed tests can be found in `scripts/docker-random/error-logs`. You can examine these logs to identify the causes of failure.
 
 5. **Stop the Tests**: The tests will terminate after running for 10000 x *CONCURRENCY* iterations. If you wish to stop the tests before completion, execute the following command:

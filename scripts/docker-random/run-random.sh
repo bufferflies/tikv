@@ -10,6 +10,7 @@ shift 2
 # Note: When the container stops, the files from the last loop will not be automatically removed. However, they will be cleared during the next iterations.
 KEEP_TMP_ON_ERROR=0
 LOG_PATH="/random"
+MEMORY_PROFILE=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -20,8 +21,11 @@ while [ $# -gt 0 ]; do
         LOG_PATH="$2"
         shift
         ;;
+    --memory-profile)
+        MEMORY_PROFILE=1
+        ;;
     *)
-        echo "Usage: $0 DOCKER_ID TESTNAME [--keep-tmp-on-error] [--log-path LOG_PATH]"
+        echo "Usage: $0 DOCKER_ID TESTNAME [--keep-tmp-on-error] [--log-path LOG_PATH] [--memory-profile]"
         exit 1
         ;;
     esac
@@ -34,6 +38,10 @@ mkdir -p "$LOG_PATH"/logs "$LOG_PATH"/error-logs
 for i in $(seq -w 1 100000); do
     export TMPDIR="/random-tmp/$i"
     mkdir -p "$TMPDIR"
+
+    if [ "$MEMORY_PROFILE" -eq 1 ]; then
+        export MALLOC_CONF="prof_leak:true,prof:true,lg_prof_interval:30,prof_final:true,prof_prefix:$TMPDIR/jeprof.out"
+    fi
 
     LOG="$LOG_PATH"/logs/random_"$TESTNAME"_"$i"_"$DOCKER_ID".log
     /random/random-bin test_random_"$TESTNAME" >"$LOG" 2>&1 || true
