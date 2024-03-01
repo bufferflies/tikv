@@ -61,12 +61,12 @@ declare -a RUN_ARGS
 RUN_ARGS=(
     "--path-with-suffix"
     "--log-path" "$WORKDIR/all-logs"
+    "--tmp-path" "$WORKDIR/all-tmp"
 )
 
 if [ "$MEMORY_PROFILE" -eq 1 ]; then
     RUN_ARGS+=(
         "--memory-profile"
-        "--tmp-path" "$WORKDIR/all-tmp"
         "--keep-tmp-on-error"
     )
 fi
