@@ -1095,9 +1095,10 @@ impl TikvServer {
             let black_list = BlackList::new(vec![], black_list_regions);
             meta_iter.set_black_list(black_list);
         }
-        if let Some(region_ids) = get_store_regions(pd.clone(), conf, rf_engine.clone()) {
-            meta_iter.set_contained_region_ids(region_ids);
-        }
+        // TODO: This feature is risky when multiple stores are shut down improperly
+        // if let Some(region_ids) = get_store_regions(pd.clone(), conf,
+        // rf_engine.clone()) {     meta_iter.
+        // set_contained_region_ids(region_ids); }
         let (kv_engine, sender, receiver) = Self::init_kv_engine(
             pd,
             conf,
@@ -1195,7 +1196,7 @@ fn load_black_list(black_list_path: &str) -> Option<BlackList> {
     None
 }
 
-fn get_store_regions(
+fn _get_store_regions(
     pd: Arc<dyn pd_client::PdClient>,
     conf: &TikvConfig,
     rf_engine: RfEngine,
