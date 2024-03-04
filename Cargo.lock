@@ -8412,6 +8412,7 @@ dependencies = [
  "into_other",
  "keys",
  "kvengine",
+ "kvenginepb",
  "kvproto",
  "log_wrappers",
  "panic_hook",

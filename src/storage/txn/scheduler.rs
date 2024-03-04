@@ -79,11 +79,12 @@ use crate::{
         mvcc::{Error as MvccError, ErrorInner as MvccErrorInner, ReleasedLock},
         txn::{
             commands::{
-                self, Command, RawExt, ReleasedLocks, ResponsePolicy, WriteContext, WriteResult,
-                WriteResultLockInfo,
+                self, txn_file::TxnFileCommand, Command, RawExt, ReleasedLocks, ResponsePolicy,
+                WriteContext, WriteResult, WriteResultLockInfo,
             },
             flow_controller::{FlowControlHelper, FlowController},
-            latch::{Latches, Lock},
+            latch::Lock,
+            region_latch::GlobalLatches,
             sched_pool::{tls_collect_query, tls_collect_scan_details, SchedPool},
             Error, ErrorInner, ProcessResult,
         },
@@ -249,7 +250,9 @@ struct SchedulerInner<L: LockManager> {
     id_alloc: CachePadded<AtomicU64>,
 
     // write concurrency control
-    latches: Latches,
+    latches: GlobalLatches,
+
+    engine: Option<kvengine::Engine>,
 
     sched_pending_write_threshold: usize,
 
@@ -445,7 +448,8 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         let inner = Arc::new(SchedulerInner {
             task_slots,
             id_alloc: AtomicU64::new(0).into(),
-            latches: Latches::new(config.scheduler_concurrency),
+            latches: GlobalLatches::new(config.scheduler_concurrency),
+            engine: engine.get_kvengine(),
             running_write_bytes: AtomicUsize::new(0).into(),
             sched_pending_write_threshold: config.scheduler_pending_write_threshold.0 as usize,
             worker_pool: SchedPool::new(
@@ -545,11 +549,36 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
             .get(priority_tag)
             .inc();
 
+        let (cmd, load_chunks) = if let Some(engine) = self.inner.engine.as_ref() {
+            TxnFileCommand::try_from(cmd, engine)
+        } else {
+            (cmd, vec![])
+        };
+        if !load_chunks.is_empty() {
+            let cloned_sched = self.clone();
+            let engine = self.inner.engine.as_ref().unwrap().clone();
+            std::thread::spawn(move || {
+                let manager = engine.get_txn_chunk_manager();
+                for chunk_id in load_chunks {
+                    if let Err(err) = manager.prepare(chunk_id) {
+                        callback.execute(ProcessResult::Failed {
+                            err: StorageErrorInner::Other(box_err!(err)).into(),
+                        });
+                        return;
+                    }
+                }
+                cloned_sched.schedule_command(Some(cid), cmd, callback, prepared_latches);
+            });
+            return;
+        }
+        let ts = cmd.ts().into_inner();
+        let region_id = cmd.ctx().get_region_id();
         let mut task_slot = self.inner.get_task_slot(cid);
         let tctx = task_slot.entry(cid).or_insert_with(|| {
             self.inner
                 .new_task_context(Task::new(cid, tracker, cmd), callback, prepared_latches)
         });
+        tctx.lock.set_region_id_start_ts(region_id, ts);
 
         if self.inner.latches.acquire(&mut tctx.lock, cid) {
             fail_point!("txn_scheduler_acquire_success");
@@ -1291,7 +1320,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
                 .store_lock_changes(cid, woken_up_resumable_entries);
         }
 
-        if to_be_write.modifies.is_empty() {
+        if to_be_write.modifies.is_empty() && to_be_write.txn_file.is_none() {
             scheduler.on_write_finished(cid, pr, Ok(()), lock_guards, false, false, tag);
             return;
         }

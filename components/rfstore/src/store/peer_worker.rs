@@ -282,6 +282,7 @@ impl RaftWorker {
             PeerMsg::PrepareChangeSetResult(..) => {}
             PeerMsg::Persisted(_) => {}
             PeerMsg::PrepareCommitMergeResult(..) => {}
+            PeerMsg::PrepareTxnFileResult(_) => {}
         }
     }
 

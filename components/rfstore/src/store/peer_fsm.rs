@@ -233,6 +233,9 @@ impl<'a> PeerMsgHandler<'a> {
                 PeerMsg::PrepareCommitMergeResult(res, commit_index) => {
                     self.on_prepared_commit_merge(res, commit_index);
                 }
+                PeerMsg::PrepareTxnFileResult(entry_index) => {
+                    self.on_prepared_txn_file(entry_index);
+                }
             }
         }
     }
@@ -1650,6 +1653,13 @@ impl<'a> PeerMsgHandler<'a> {
             source: res.unwrap(),
             commit_index,
         });
+    }
+
+    pub(crate) fn on_prepared_txn_file(&mut self, entry_index: u64) {
+        self.ctx
+            .apply_msgs
+            .msgs
+            .push(ApplyMsg::ResumeTxnFile(entry_index));
     }
 
     pub(crate) fn update_max_lag_metrics(&mut self) {

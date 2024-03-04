@@ -31,6 +31,7 @@ pub const TYPE_RESOLVE_LOCK: CustomRaftlogType = 8;
 pub const TYPE_SWITCH_MEM_TABLE: CustomRaftlogType = 9;
 pub const TYPE_TRIGGER_TRIM_OVER_BOUND: CustomRaftlogType = 10;
 pub const TYPE_TRIGGER_MAJOR_COMPACTION: CustomRaftlogType = 11;
+pub const TYPE_TXN_FILE_REF: CustomRaftlogType = 12;
 
 const HEADER_SIZE: usize = 2;
 
@@ -188,6 +189,12 @@ impl<'a> CustomRaftLog<'a> {
         let bin = &self.data[HEADER_SIZE..];
         TrimOverBoundParameter::unmarshal(bin)
     }
+
+    pub(crate) fn get_txn_file_ref(&self) -> crate::Result<kvenginepb::TxnFileRef> {
+        let mut txn_file_ref = kvenginepb::TxnFileRef::new();
+        txn_file_ref.merge_from_bytes(&self.data[HEADER_SIZE..])?;
+        Ok(txn_file_ref)
+    }
 }
 
 pub struct CustomBuilder {
@@ -279,6 +286,13 @@ impl CustomBuilder {
         self.set_type(TYPE_TRIGGER_TRIM_OVER_BOUND);
     }
 
+    pub fn set_txn_file(&mut self, txn_file_ref: &kvenginepb::TxnFileRef) {
+        assert_eq!(self.buf.len(), HEADER_SIZE);
+        let data = txn_file_ref.write_to_bytes().unwrap();
+        self.buf.extend_from_slice(&data);
+        self.set_type(TYPE_TXN_FILE_REF);
+    }
+
     pub fn set_type(&mut self, tp: CustomRaftlogType) {
         self.buf[0] = tp;
     }
@@ -315,6 +329,10 @@ pub fn is_engine_meta_log(data: &[u8]) -> bool {
 
 pub fn is_trigger_trim_over_bound(data: &[u8]) -> bool {
     data[0] == TYPE_TRIGGER_TRIM_OVER_BOUND
+}
+
+pub fn is_txn_file_ref(data: &[u8]) -> bool {
+    data[0] == TYPE_TXN_FILE_REF
 }
 
 #[derive(Clone, Copy, Default, Debug, PartialEq)]

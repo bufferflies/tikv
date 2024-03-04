@@ -42,6 +42,7 @@ use engine_traits::{
 use error_code::{self, ErrorCode, ErrorCodeExt};
 use futures::{compat::Future01CompatExt, future::BoxFuture, prelude::*};
 use into_other::IntoOther;
+use kvenginepb::TxnFileRef;
 use kvproto::{
     errorpb::Error as ErrorHeader,
     kvrpcpb::{Context, DiskFullOpt, ExtraOp as TxnExtraOp, KeyRange},
@@ -221,6 +222,7 @@ pub struct WriteData {
     pub extra: TxnExtra,
     pub deadline: Option<Deadline>,
     pub disk_full_opt: DiskFullOpt,
+    pub txn_file: Option<TxnFileRef>,
 }
 
 impl WriteData {
@@ -230,6 +232,7 @@ impl WriteData {
             extra,
             deadline: None,
             disk_full_opt: DiskFullOpt::NotAllowedOnFull,
+            txn_file: None,
         }
     }
 
@@ -241,6 +244,13 @@ impl WriteData {
         let mut total = 0;
         for m in &self.modifies {
             total += m.size();
+        }
+        if let Some(txn_file_ref) = &self.txn_file {
+            // The size is used by flow controller, we don't want txn file to be limited in
+            // the same way as normal writes, so we use a small value for each
+            // chunk.
+            // TODO: need to add a limiter in txn chunk manager.
+            total += txn_file_ref.chunk_ids.len() * 4096
         }
         total
     }
@@ -437,6 +447,10 @@ pub trait Engine: Send + Clone + 'static {
     /// the engine there is probably a notable difference in range, so
     /// engine may update its statistics.
     fn hint_change_in_range(&self, _start_key: Vec<u8>, _end_key: Vec<u8>) {}
+
+    fn get_kvengine(&self) -> Option<kvengine::Engine> {
+        None
+    }
 }
 
 /// A Snapshot is a consistent view of the underlying engine at a given point in

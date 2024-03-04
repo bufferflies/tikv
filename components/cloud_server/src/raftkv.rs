@@ -333,7 +333,7 @@ impl Engine for RaftKv {
     ) -> Self::WriteRes {
         let mut res = (|| {
             fail_point!("raftkv_async_write");
-            if batch.modifies.is_empty() {
+            if batch.modifies.is_empty() && batch.txn_file.is_none() {
                 return Err(KvError::from(KvErrorInner::EmptyRequest));
             }
             Ok(())
@@ -525,6 +525,10 @@ impl Engine for RaftKv {
             }
         }
     }
+
+    fn get_kvengine(&self) -> Option<kvengine::Engine> {
+        self.kv_engine()
+    }
 }
 
 #[derive(Clone)]
@@ -650,6 +654,10 @@ impl ReadIndexObserver for ReplicaReadLockChecker {
 pub fn modifies_to_requests(_ctx: &Context, data: &mut WriteData) -> CustomRequest {
     let builder = &mut rlog::CustomBuilder::new();
     let modifies = std::mem::take(&mut data.modifies);
+    if let Some(txn_file_ref) = data.txn_file.take() {
+        builder.set_txn_file(&txn_file_ref);
+        return builder.build();
+    }
     if data.extra.one_pc {
         build_one_pc(builder, modifies);
     } else {

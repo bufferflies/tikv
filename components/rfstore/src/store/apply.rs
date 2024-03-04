@@ -16,10 +16,11 @@ use bytes::{Buf, Bytes};
 use cloud_encryption::EncryptionKey;
 use fail::fail_point;
 use kvengine::{
-    mvcc, util::PropertiesHelper, ChangeSet, Engine, SnapAccess, UserMeta, ENCRYPTION_KEY,
-    MANUAL_MAJOR_COMPACTION, MANUAL_MAJOR_COMPACTION_ENABLE, TRIM_OVER_BOUND,
-    TRIM_OVER_BOUND_ENABLE,
+    encode_extra_txn_status_key, mvcc, util::PropertiesHelper, ChangeSet, Engine, SnapAccess,
+    UserMeta, ENCRYPTION_KEY, EXTRA_CF, LOCK_CF, MANUAL_MAJOR_COMPACTION,
+    MANUAL_MAJOR_COMPACTION_ENABLE, TRIM_OVER_BOUND, TRIM_OVER_BOUND_ENABLE, TXN_FILE_REF,
 };
+use kvenginepb::{TxnFileRef, TxnFileRefs};
 use kvproto::{
     metapb,
     metapb::{PeerRole, Region},
@@ -30,7 +31,7 @@ use kvproto::{
 };
 use pd_client::{new_bucket_write_stats, BucketStat};
 use prometheus::local::LocalHistogram;
-use protobuf::RepeatedField;
+use protobuf::{Message, RepeatedField};
 use raft::{
     eraftpb::{ConfChange, ConfChangeType, ConfChangeV2, EntryType},
     StateRole,
@@ -455,6 +456,66 @@ impl Applier {
         }
     }
 
+    pub(crate) fn exec_txn_file_ref(
+        &mut self,
+        engine: &Engine,
+        wb: &mut kvengine::WriteBatch,
+        txn_file_ref: TxnFileRef,
+    ) {
+        info!("apply txn file ref {:?}", txn_file_ref);
+        if !txn_file_ref.user_meta.is_empty() {
+            let txn_file_um = UserMeta::from_slice(&txn_file_ref.user_meta);
+            let snap = engine
+                .get_shard(self.region_id())
+                .unwrap()
+                .new_snap_access();
+            let start_ts = txn_file_ref.start_ts;
+            let lock_txn_file_opt = snap.get_lock_txn_file(start_ts);
+            if lock_txn_file_opt.is_none() {
+                error!("{} txn file not found, maybe duplicated", self.tag());
+                // TODO: verify it is duplicated
+                return;
+            }
+            let lock_txn_file = lock_txn_file_opt.unwrap();
+            let lock = txn_types::Lock::parse(lock_txn_file.get_lock_val_prefix()).unwrap();
+            let primary_key = lock.primary.as_slice();
+            let is_primary_region =
+                snap.get_start_key() <= primary_key && primary_key < snap.get_end_key();
+            if is_primary_region {
+                if txn_file_um.is_rollback() {
+                    let rollback_key = encode_extra_txn_status_key(primary_key, start_ts);
+                    let user_meta = UserMeta::new(start_ts, 0).to_array();
+                    wb.put(
+                        EXTRA_CF,
+                        rollback_key.chunk(),
+                        &[0],
+                        0,
+                        &user_meta,
+                        start_ts,
+                    );
+                } else {
+                    let item = snap.get(LOCK_CF, primary_key, 0);
+                    let primary_lock = txn_types::Lock::parse(item.get_value()).unwrap();
+                    if primary_lock.lock_type == LockType::Lock {
+                        let op_lock_key = encode_extra_txn_status_key(primary_key, start_ts);
+                        let user_meta = UserMeta::new(start_ts, txn_file_um.commit_ts).to_array();
+                        wb.put(
+                            EXTRA_CF,
+                            op_lock_key.chunk(),
+                            &[0],
+                            0,
+                            &user_meta,
+                            txn_file_um.commit_ts,
+                        );
+                    }
+                }
+            }
+        }
+        let mut txn_file_refs = TxnFileRefs::new();
+        txn_file_refs.mut_txn_file_refs().push(txn_file_ref);
+        wb.set_property(TXN_FILE_REF, &txn_file_refs.write_to_bytes().unwrap());
+    }
+
     fn exec_admin_cmd(
         &mut self,
         ctx: &mut ApplyContext,
@@ -586,6 +647,10 @@ impl Applier {
                 if !shard.get_manual_major_compaction() {
                     wb.set_property(MANUAL_MAJOR_COMPACTION, MANUAL_MAJOR_COMPACTION_ENABLE);
                 }
+            }
+            TYPE_TXN_FILE_REF => {
+                let txn_file_ref = cl.get_txn_file_ref().unwrap();
+                self.exec_txn_file_ref(engine, wb, txn_file_ref);
             }
             _ => panic!("unknown custom log type"),
         }
@@ -1483,6 +1548,52 @@ impl Applier {
         }
     }
 
+    fn handle_prepare_txn_file(
+        &mut self,
+        ctx: &mut ApplyContext,
+        txn_file_ref: TxnFileRef,
+        entry_index: u64,
+    ) {
+        self.paused_apply_queue
+            .pause(entry_index, &format!("{} txn file", self.tag()));
+        let txn_chunk_manager = ctx.engine.get_txn_chunk_manager();
+        let router = ctx.router.clone().unwrap();
+        let id = self.region_id();
+        std::thread::spawn(move || {
+            tikv_util::set_current_region(id);
+            for chunk_id in txn_file_ref.chunk_ids {
+                txn_chunk_manager.prepare(chunk_id).unwrap();
+            }
+            router.send(id, PeerMsg::PrepareTxnFileResult(entry_index));
+        });
+    }
+
+    fn handle_resume_txn_file(&mut self, ctx: &mut ApplyContext, commit_index: u64) {
+        // Resume txn file would be stale after restore snapshot.
+        if self.apply_state.applied_index >= commit_index {
+            info!(
+                "{} ignore stale resume txn file, applied_index {}, commit_index {}",
+                self.tag(),
+                self.apply_state.applied_index,
+                commit_index
+            );
+            return;
+        }
+
+        if !self
+            .paused_apply_queue
+            .pick_unpause(commit_index, &format!("{} txn file", self.tag()))
+        {
+            panic!(
+                "{} txn file unpause seq {} not found",
+                self.tag(),
+                commit_index
+            )
+        }
+        self.resume_handle_apply(ctx);
+        self.apply_prepared_change_set(ctx);
+    }
+
     pub(crate) fn handle_msg(&mut self, ctx: &mut ApplyContext, msg: ApplyMsg) {
         if self.stopped {
             info!("{} skip apply msg {:?}", self.tag(), msg);
@@ -1531,6 +1642,12 @@ impl Applier {
             }
             ApplyMsg::PrepareRollbackMerge(initial_flush_seq) => {
                 self.handle_prepare_rollback_merge(ctx, initial_flush_seq);
+            }
+            ApplyMsg::PrepareTxnFile(txn_file_ref, commit_index) => {
+                self.handle_prepare_txn_file(ctx, txn_file_ref, commit_index);
+            }
+            ApplyMsg::ResumeTxnFile(commit_index) => {
+                self.handle_resume_txn_file(ctx, commit_index);
             }
         }
     }

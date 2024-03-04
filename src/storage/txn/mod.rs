@@ -87,6 +87,7 @@ pub enum ProcessResult {
         previous_value: Option<Value>,
         succeed: bool,
     },
+    TxnFileResult,
 }
 
 impl ProcessResult {

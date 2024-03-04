@@ -125,6 +125,7 @@ impl std::fmt::Debug for Lock {
             .field("for_update_ts", &self.for_update_ts)
             .field("txn_size", &self.txn_size)
             .field("min_commit_ts", &self.min_commit_ts)
+            .field("is_txn_file", &self.is_txn_file)
             .field("use_async_commit", &self.use_async_commit)
             .field("secondaries", &secondary_keys)
             .field("rollback_ts", &self.rollback_ts)

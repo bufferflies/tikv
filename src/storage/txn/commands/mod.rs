@@ -23,6 +23,7 @@ pub(crate) mod resolve_lock;
 pub(crate) mod resolve_lock_lite;
 pub(crate) mod resolve_lock_readphase;
 pub(crate) mod rollback;
+pub(crate) mod txn_file;
 pub(crate) mod txn_heart_beat;
 
 use std::{
@@ -39,6 +40,7 @@ pub use atomic_store::RawAtomicStore;
 pub use check_secondary_locks::CheckSecondaryLocks;
 pub use check_txn_status::CheckTxnStatus;
 pub use cleanup::Cleanup;
+use collections::HashMap;
 pub use commit::Commit;
 pub use compare_and_swap::RawCompareAndSwap;
 use concurrency_manager::{ConcurrencyManager, KeyHandleGuard};
@@ -70,7 +72,7 @@ use crate::storage::{
     },
     metrics,
     mvcc::{Lock as MvccLock, ReleasedLock, SnapshotReader},
-    txn::{latch, ProcessResult, Result},
+    txn::{commands::txn_file::TxnFileCommand, latch, ProcessResult, Result},
     types::{
         MvccInfo, PessimisticLockParameters, PessimisticLockResults, PrewriteResult,
         SecondaryLocksStatus, StorageCallbackType, TxnStatus,
@@ -108,6 +110,7 @@ pub enum Command {
     RawAtomicStore(RawAtomicStore),
     FlashbackToVersionReadPhase(FlashbackToVersionReadPhase),
     FlashbackToVersion(FlashbackToVersion),
+    TxnFile(TxnFileCommand),
 }
 
 /// A `Command` with its return type, reified as the generic parameter `T`.
@@ -339,6 +342,12 @@ impl From<ResolveLockRequest> for TypedCommand<()> {
             .iter()
             .map(|key| Key::from_raw(key))
             .collect();
+        let txn_file_status: HashMap<TimeStamp, TimeStamp> = req
+            .get_txn_infos()
+            .iter()
+            .filter(|info| info.is_txn_file)
+            .map(|info| (info.txn.into(), info.status.into()))
+            .collect();
         let txn_status = if req.get_start_version() > 0 {
             iter::once((
                 req.get_start_version().into(),
@@ -348,11 +357,19 @@ impl From<ResolveLockRequest> for TypedCommand<()> {
         } else {
             req.take_txn_infos()
                 .into_iter()
+                .filter(|info| !info.is_txn_file)
                 .map(|info| (info.txn.into(), info.status.into()))
                 .collect()
         };
-
-        if resolve_keys.is_empty() {
+        if !txn_file_status.is_empty() {
+            ResolveLock::new(
+                txn_status,
+                None,
+                vec![],
+                txn_file_status,
+                req.take_context(),
+            )
+        } else if resolve_keys.is_empty() && !req.get_is_txn_file() {
             ResolveLockReadPhase::new(txn_status, None, req.take_context())
         } else {
             let start_ts: TimeStamp = req.get_start_version().into();
@@ -647,6 +664,7 @@ impl Command {
             Command::RawAtomicStore(t) => t,
             Command::FlashbackToVersionReadPhase(t) => t,
             Command::FlashbackToVersion(t) => t,
+            Command::TxnFile(t) => t,
         }
     }
 
@@ -673,6 +691,7 @@ impl Command {
             Command::RawAtomicStore(t) => t,
             Command::FlashbackToVersionReadPhase(t) => t,
             Command::FlashbackToVersion(t) => t,
+            Command::TxnFile(t) => t,
         }
     }
 
@@ -713,6 +732,7 @@ impl Command {
             Command::RawCompareAndSwap(t) => t.process_write(snapshot, context),
             Command::RawAtomicStore(t) => t.process_write(snapshot, context),
             Command::FlashbackToVersion(t) => t.process_write(snapshot, context),
+            Command::TxnFile(t) => t.process_write(snapshot, context),
             _ => panic!("unsupported write command"),
         }
     }

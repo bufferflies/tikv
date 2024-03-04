@@ -3,6 +3,7 @@
 use std::{borrow::Cow, collections::VecDeque, fmt, fmt::Debug, sync::Arc};
 
 use cloud_encryption::EncryptionKey;
+use kvenginepb::TxnFileRef;
 use kvproto::{
     kvrpcpb::ExtraOp as TxnExtraOp,
     metapb, pdpb,
@@ -43,6 +44,7 @@ pub enum PeerMsg {
         kvengine::Result<kvengine::ChangeSet>,
         u64, // commit index
     ),
+    PrepareTxnFileResult(u64 /* entry index */),
     Persisted(PersistReady),
 }
 
@@ -92,6 +94,8 @@ pub(crate) enum ApplyMsg {
     CheckSwitchMemTable {
         region_id: u64,
     },
+    PrepareTxnFile(TxnFileRef, u64 /* commit index */),
+    ResumeTxnFile(u64 /* commit index */),
 }
 
 pub enum StoreMsg {

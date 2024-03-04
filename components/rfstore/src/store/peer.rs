@@ -1771,6 +1771,11 @@ impl<'a> PreprocessRef<'a> {
                     if let Err(e) = self.preprocess_change_set(ctx, entry, custom_req) {
                         preprocess_err = Some(e);
                     }
+                } else if is_txn_file_ref(custom_req.get_data()) {
+                    no_kv = false;
+                    if let Err(e) = self.preprocess_txn_file_ref(ctx, entry, custom_req) {
+                        preprocess_err = Some(e);
+                    }
                 }
             } else {
                 if let Err(err) = check_region_epoch(&cmd, self.get_preprocessed_region(), false) {
@@ -2226,6 +2231,29 @@ impl<'a> PreprocessRef<'a> {
             }
             *self.preprocessed_region = Some(region);
         }
+    }
+
+    pub(crate) fn preprocess_txn_file_ref(
+        &mut self,
+        ctx: &mut PreprocessContext<'_>,
+        entry: &Entry,
+        custom_req: &CustomRequest,
+    ) -> Result<()> {
+        let custom_data = rlog::CustomRaftLog::new_from_data(custom_req.get_data());
+        let txn_file_ref = custom_data.get_txn_file_ref()?;
+        if ctx.kv.is_none() {
+            // kv is none in restore, we don't need to load txn file.
+            return Ok(());
+        }
+        let kv = ctx.kv.unwrap();
+        let chunk_manager = kv.get_txn_chunk_manager();
+        if chunk_manager.all_chunks_exists(txn_file_ref.get_chunk_ids()) {
+            return Ok(());
+        }
+        ctx.apply_msgs
+            .msgs
+            .push(ApplyMsg::PrepareTxnFile(txn_file_ref, entry.index));
+        Ok(())
     }
 }
 
@@ -3160,7 +3188,10 @@ impl Peer {
         let mut ctx = ProposalContext::empty();
         if req.has_custom_request() {
             let data = req.get_custom_request().get_data();
-            if rlog::is_engine_meta_log(data) || rlog::is_trigger_trim_over_bound(data) {
+            if rlog::is_engine_meta_log(data)
+                || rlog::is_trigger_trim_over_bound(data)
+                || rlog::is_txn_file_ref(data)
+            {
                 ctx.insert(ProposalContext::PRE_PROCESS);
             } else if self.encryption_key.is_some() {
                 // only encrypt entry with user data.
