@@ -274,7 +274,12 @@ impl EngineCore {
             self.send_free_mem_msg(FreeMemMsg::FreeMem(last));
         } else {
             // If there is no L0Create, it means the mem-table is empty during flush.
-            if new_mem_tbls.len() > 1 && new_mem_tbls.last().unwrap().is_empty() {
+            // It's possible that the mem-table is not empty but doesn't have any data.
+            // So we need to use has_data_in_range to check.
+            let last = new_mem_tbls.last().unwrap();
+            if new_mem_tbls.len() > 1
+                && !last.has_data_in_range(shard.inner_start(), shard.inner_end())
+            {
                 let last = new_mem_tbls.pop().unwrap();
                 let new_data = ShardData::new(
                     old_data.range.clone(),
