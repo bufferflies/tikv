@@ -242,7 +242,7 @@ impl ObjectStorageService {
                     let end = if r.1.is_none() {
                         file.metadata().await.unwrap().len()
                     } else {
-                        r.1.unwrap()
+                        r.1.unwrap() + 1
                     };
                     assert!(end > r.0);
                     // TODO: implement range read with FramedRead.

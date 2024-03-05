@@ -68,10 +68,13 @@ impl GetObjectOptions {
     }
 
     pub fn range_string(&self) -> String {
+        // https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObject.html
+        // For example, the first 10 bytes:
+        // Range: bytes=0-9
         format!(
             "{}-{}",
             self.start_off,
-            self.end_off.map_or(String::new(), |e| format!("{}", e))
+            self.end_off.map_or(String::new(), |e| format!("{}", e - 1))
         )
     }
 }
