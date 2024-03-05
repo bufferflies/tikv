@@ -76,49 +76,10 @@ pub fn execute_show_sst(args: ShowSstArgs) {
     let file = Arc::new(InMemFile::new(args.id, data));
     if args.level == 0 {
         let l0 = L0Table::new(file, None, false, None).unwrap().unwrap();
-        println!("[SST {}, level {}]", l0.id(), 0);
-        println!("  size: {}", l0.size());
-        println!("  max_ts: {}", l0.max_ts());
-        println!("  entries: {}", l0.entries());
-        println!("  tombs: {}", l0.tombs());
-        println!("  entries_write_cf: {}", l0.entries_write_cf());
-        println!("  kv_size: {}", l0.kv_size());
-        println!("  version: {}", l0.version());
-        println!(
-            "  smallest: {}",
-            log_wrappers::hex_encode_upper(l0.smallest().deref())
-        );
-        println!(
-            "  biggest: {}",
-            log_wrappers::hex_encode_upper(l0.biggest().deref())
-        );
-        println!("  total_blob_size: {}", l0.total_blob_size());
-
-        for cf in 0..kvengine::NUM_CFS {
-            println!("  [CF {}]", cf);
-            if let Some(tbl) = l0.get_cf(cf) {
-                print_sstable(tbl, 4);
-            } else {
-                println!("    None");
-            }
-        }
+        print_l0_table(&l0);
     } else if args.level == BLOB_LEVEL_FLAG {
         let blob = BlobTable::new(file).unwrap();
-        println!("[BLOB {}]", blob.id());
-        println!("  version: {}", blob.version());
-        println!("  size: {}", blob.size());
-        println!(
-            "  smallest: {}",
-            log_wrappers::hex_encode_upper(blob.smallest_key().deref())
-        );
-        println!(
-            "  biggest: {}",
-            log_wrappers::hex_encode_upper(blob.biggest_key().deref())
-        );
-        println!("  total_blob_size: {}", blob.total_blob_size());
-        println!("  compression_tp: {}", blob.compression_tp());
-        println!("  compression_lvl: {}", blob.compression_lvl());
-        println!("  min_blob_size: {}", blob.min_blob_size());
+        print_blob_table(&blob);
     } else {
         let ln = SsTable::new(file, None, false, None).unwrap();
         println!("[SST {}, level {}]", ln.id(), args.level);
@@ -126,7 +87,54 @@ pub fn execute_show_sst(args: ShowSstArgs) {
     }
 }
 
-fn print_sstable(tbl: &SsTable, indent: usize) {
+pub(crate) fn print_l0_table(l0: &L0Table) {
+    println!("[SST {}, level {}]", l0.id(), 0);
+    println!("  size: {}", l0.size());
+    println!("  max_ts: {}", l0.max_ts());
+    println!("  entries: {}", l0.entries());
+    println!("  tombs: {}", l0.tombs());
+    println!("  entries_write_cf: {}", l0.entries_write_cf());
+    println!("  kv_size: {}", l0.kv_size());
+    println!("  version: {}", l0.version());
+    println!(
+        "  smallest: {}",
+        log_wrappers::hex_encode_upper(l0.smallest().deref())
+    );
+    println!(
+        "  biggest: {}",
+        log_wrappers::hex_encode_upper(l0.biggest().deref())
+    );
+    println!("  total_blob_size: {}", l0.total_blob_size());
+
+    for cf in 0..kvengine::NUM_CFS {
+        println!("  [CF {}]", cf);
+        if let Some(tbl) = l0.get_cf(cf) {
+            print_sstable(tbl, 4);
+        } else {
+            println!("    None");
+        }
+    }
+}
+
+pub(crate) fn print_blob_table(blob: &BlobTable) {
+    println!("[BLOB {}]", blob.id());
+    println!("  version: {}", blob.version());
+    println!("  size: {}", blob.size());
+    println!(
+        "  smallest: {}",
+        log_wrappers::hex_encode_upper(blob.smallest_key().deref())
+    );
+    println!(
+        "  biggest: {}",
+        log_wrappers::hex_encode_upper(blob.biggest_key().deref())
+    );
+    println!("  total_blob_size: {}", blob.total_blob_size());
+    println!("  compression_tp: {}", blob.compression_tp());
+    println!("  compression_lvl: {}", blob.compression_lvl());
+    println!("  min_blob_size: {}", blob.min_blob_size());
+}
+
+pub(crate) fn print_sstable(tbl: &SsTable, indent: usize) {
     let indent = " ".repeat(indent);
     println!("{}size: {}", indent, tbl.size());
     println!("{}index_size: {}", indent, tbl.index_size());

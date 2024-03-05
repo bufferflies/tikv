@@ -1,12 +1,29 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{path::PathBuf, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
+use chrono::NaiveDate;
 use clap::Args;
-use native_br::archive::{
-    archive_with_cfg, ArchiveConfig, DEFAULT_MAX_ARCHIVE_FILE_SIZE, LOAD_FILE_CONCURRENCY,
+use kvengine::{
+    dfs::{DFSConfig, S3Fs},
+    table::{
+        blobtable::blobtable::BlobTable,
+        sstable::{InMemFile, L0Table, SsTable},
+    },
+};
+use native_br::{
+    archive::{
+        archive_with_cfg, ArchiveConfig, ArchiveReader, DEFAULT_MAX_ARCHIVE_FILE_SIZE,
+        LOAD_FILE_CONCURRENCY,
+    },
+    common::INCREMENTAL_BACKUP_FOLDER_FORMAT,
 };
 use tikv_util::{config::ReadableDuration, info};
+
+use crate::{
+    backup::ShowBackupConfig,
+    sst::{print_blob_table, print_l0_table, print_sstable},
+};
 
 #[derive(Args)]
 pub struct ArchiveArgs {
@@ -75,4 +92,69 @@ fn get_archive_config_from_args(args: &ArchiveArgs) -> ArchiveConfig {
     config.data_dir = args.data_dir.clone();
     config.check_data_dir();
     config
+}
+
+const BLOB_LEVEL_FLAG: u32 = 255;
+
+#[derive(Args)]
+pub struct ShowArchiveArgs {
+    /// The path of the config file.
+    #[clap(long, default_value = "")]
+    pub config: PathBuf,
+    /// The name of the archive file.
+    #[clap(long)]
+    pub date: String,
+    /// The id of th sst file in the archive.
+    /// If not specified, it shows all the ids in the archive file.
+    /// If specified, it shows the stats of the file and validate it.
+    #[clap(long)]
+    pub file_id: Option<u64>,
+    /// The level of the sst file in the archive.
+    /// If not specified, level one is
+    #[clap(long)]
+    pub file_level: Option<u32>,
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug, Default)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+pub struct ShowArchiveConfig {
+    pub dfs: DFSConfig,
+}
+
+pub fn execute_show_archive(args: ShowArchiveArgs) {
+    let mut config = ShowBackupConfig::default();
+    if args.config.exists() {
+        let data = std::fs::read(args.config.clone()).expect("failed to read config file");
+        config = toml::from_slice(&data).unwrap();
+    }
+    config.dfs.override_from_env();
+    let s3fs = Arc::new(S3Fs::new(
+        config.dfs.prefix.clone(),
+        config.dfs.s3_endpoint,
+        config.dfs.s3_key_id,
+        config.dfs.s3_secret_key,
+        config.dfs.s3_region,
+        config.dfs.s3_bucket,
+    ));
+    let date = NaiveDate::parse_from_str(&args.date, INCREMENTAL_BACKUP_FOLDER_FORMAT).unwrap();
+    let reader = ArchiveReader::new(s3fs, &date).unwrap();
+    if let Some(id) = args.file_id {
+        let data = reader.read_file(id).unwrap();
+        let file = Arc::new(InMemFile::new(id, data));
+        let level = args.file_level.unwrap_or(1);
+        if level == 0 {
+            let l0 = L0Table::new(file, None, false, None).unwrap().unwrap();
+            print_l0_table(&l0);
+        } else if level == BLOB_LEVEL_FLAG {
+            let blob = BlobTable::new(file).unwrap();
+            print_blob_table(&blob);
+        } else {
+            let ln = SsTable::new(file, None, false, None).unwrap();
+            println!("[SST {}, level {}]", ln.id(), level);
+            print_sstable(&ln, 2);
+        }
+    } else {
+        println!("archive file ids: {:?}", reader.get_file_ids());
+    }
 }

@@ -20,7 +20,7 @@ use clap::{Args, Parser, Subcommand};
 use slog::Drain;
 
 use crate::{
-    archive::{execute_archive, ArchiveArgs},
+    archive::{execute_archive, execute_show_archive, ArchiveArgs, ShowArchiveArgs},
     backup::{execute_backup, execute_show_backup, BackupArgs, ShowBackupArgs},
     check_table::{execute_check_table, CheckTableArgs},
     dfsgc::{execute_dfsgc, DfsGcArgs},
@@ -139,6 +139,7 @@ enum ShowCommands {
     Backup(ShowBackupArgs),
     BackupList(ShowBackupListArgs),
     Sst(ShowSstArgs),
+    Archive(ShowArchiveArgs),
 }
 
 fn execute_show(args: ShowArgs) {
@@ -151,6 +152,9 @@ fn execute_show(args: ShowArgs) {
         }
         ShowCommands::Sst(args) => {
             execute_show_sst(args);
+        }
+        ShowCommands::Archive(args) => {
+            execute_show_archive(args);
         }
     }
 }
