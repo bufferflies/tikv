@@ -270,16 +270,20 @@ impl ApiV2 {
             .get_u32()
     }
 
-    pub fn get_keyspace_id_str(key: &[u8]) -> String {
-        let key_mode = ApiV2::parse_key_mode(key);
-
+    /// Return `None` when the key is not an API V2 key.
+    pub fn get_u32_keyspace_id_by_key(key: &[u8]) -> Option<u32> {
+        let key_mode = Self::parse_key_mode(key);
         if key_mode == KeyMode::Raw || key_mode == KeyMode::Txn {
-            let keyspace_id = ApiV2::get_keyspace_id(key);
-            let keyspace_id_u32 = ApiV2::get_u32_keyspace_id(keyspace_id);
-            let keyspace_id_string = keyspace_id_u32.to_string();
-            return keyspace_id_string;
+            Some(Self::get_u32_keyspace_id(Self::get_keyspace_id(key)))
+        } else {
+            None
         }
-        String::new()
+    }
+
+    pub fn get_keyspace_id_str(key: &[u8]) -> String {
+        Self::get_u32_keyspace_id_by_key(key)
+            .map(|id| id.to_string())
+            .unwrap_or_default()
     }
 
     pub fn get_txn_keyspace_range(keyspace_id: u32) -> (Vec<u8>, Vec<u8>) {
@@ -535,6 +539,20 @@ mod tests {
 
         let keyspace_id_str = ApiV2::get_keyspace_id_str(user_key_prefix);
         assert_eq!(keyspace_id_pd_alloc_str, keyspace_id_str);
+    }
+
+    #[test]
+    fn test_get_u32_keyspace_id() {
+        let cases = vec![
+            (vec![], None),
+            (vec![b'x', 0], None),
+            (vec![b'x', 0, 0, 1], Some(1)),
+            (vec![b'x', 1, 2, 3, 4, 5], Some(0x10203)),
+        ];
+
+        for (key, expected) in cases.into_iter() {
+            assert_eq!(ApiV2::get_u32_keyspace_id_by_key(&key), expected);
+        }
     }
 
     #[test]

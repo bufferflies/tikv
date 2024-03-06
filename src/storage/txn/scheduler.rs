@@ -159,9 +159,15 @@ struct TaskContext {
 }
 
 impl TaskContext {
-    fn new(task: Task, cb: SchedulerTaskCallback, prepared_latches: Option<Lock>) -> TaskContext {
+    fn new(
+        mut task: Task,
+        cb: SchedulerTaskCallback,
+        prepared_latches: Option<Lock>,
+    ) -> TaskContext {
         let tag = task.cmd.tag();
         let lock = prepared_latches.unwrap_or_else(|| task.cmd.gen_lock());
+        task.cmd.ctx_mut().set_keyspace_id(lock.keyspace_id); // keyspace_id may be fixed in `Lock::new`.
+
         // The initial locks should be either all acquired or all not acquired.
         assert!(lock.owned_count == 0 || lock.owned_count == lock.required_hashes.len());
         // Write command should acquire write lock.

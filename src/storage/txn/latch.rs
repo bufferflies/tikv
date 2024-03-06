@@ -129,12 +129,37 @@ pub struct Lock {
 
 impl Lock {
     /// Creates a lock specifing all the required latches for a command.
-    pub fn new<'a, I>(keyspace_id: u32, keys: I) -> Lock
+    pub fn new<'a, I>(mut keyspace_id: u32, keys: I) -> Lock
     where
         I: IntoIterator<Item = &'a Key>,
     {
+        // Some clients are not setting keyspace_id in context correctly. So we check
+        // and fix here.
+        let mut is_first = true;
+        let mut check_and_fix_keyspace_id = |key: &Key| {
+            if is_first {
+                is_first = false;
+                let keyspace_id_of_key =
+                    ApiV2::get_u32_keyspace_id_by_key(key.as_encoded()).unwrap_or_default();
+                if keyspace_id != keyspace_id_of_key {
+                    // TODO: change to warning after client-rust is fixed.
+                    debug!(
+                        "Lock::new: keyspace_id is different";
+                        "req" => keyspace_id, "first key" => keyspace_id_of_key,
+                    );
+                    keyspace_id = keyspace_id_of_key;
+                }
+            }
+        };
+
         // prevent from deadlock, so we sort and deduplicate the index
-        let mut required_hashes: Vec<u64> = keys.into_iter().map(|key| Self::hash(key)).collect();
+        let mut required_hashes: Vec<u64> = keys
+            .into_iter()
+            .map(|key| {
+                check_and_fix_keyspace_id(key);
+                Self::hash(key)
+            })
+            .collect();
         required_hashes.sort_unstable();
         required_hashes.dedup();
         Lock {

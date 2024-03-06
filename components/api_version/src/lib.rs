@@ -275,13 +275,15 @@ mod tests {
         assert_eq!(ApiV1::parse_key_mode(&b"t_a"[..]), KeyMode::Unknown);
         assert_eq!(ApiV1Ttl::parse_key_mode(&b"ot"[..]), KeyMode::Raw);
         assert_eq!(
-            ApiV2::parse_key_mode(&[RAW_KEY_PREFIX, b'a', b'b']),
+            ApiV2::parse_key_mode(&[RAW_KEY_PREFIX, b'a', b'b', b'c']),
             KeyMode::Raw
         );
-        assert_eq!(ApiV2::parse_key_mode(&[RAW_KEY_PREFIX]), KeyMode::Raw);
-        assert_eq!(ApiV2::parse_key_mode(&[TXN_KEY_PREFIX]), KeyMode::Txn);
-        assert_eq!(ApiV2::parse_key_mode(&b"t_a"[..]), KeyMode::Tidb);
-        assert_eq!(ApiV2::parse_key_mode(&b"m"[..]), KeyMode::Tidb);
+        assert_eq!(
+            ApiV2::parse_key_mode(&[TXN_KEY_PREFIX, b'a', b'b', b'c']),
+            KeyMode::Txn
+        );
+        assert_eq!(ApiV2::parse_key_mode(&b"t_a\0\0"[..]), KeyMode::Tidb);
+        assert_eq!(ApiV2::parse_key_mode(&b"m\0\0\0"[..]), KeyMode::Tidb);
         assert_eq!(ApiV2::parse_key_mode(&b"ot"[..]), KeyMode::Unknown);
     }
 
@@ -297,35 +299,35 @@ mod tests {
             KeyMode::Raw
         );
         assert_eq!(
-            ApiV2::parse_range_mode((Some(b"t_a"), Some(b"t_z"))),
+            ApiV2::parse_range_mode((Some(b"t_a\0"), Some(b"t_z\0"))),
             KeyMode::Tidb
         );
         assert_eq!(
-            ApiV2::parse_range_mode((Some(b"t"), Some(b"u"))),
+            ApiV2::parse_range_mode((Some(b"t\0\0\0"), Some(b"u"))),
             KeyMode::Tidb
         );
         assert_eq!(
-            ApiV2::parse_range_mode((Some(b"m"), Some(b"n"))),
+            ApiV2::parse_range_mode((Some(b"m\0\0\0"), Some(b"n"))),
             KeyMode::Tidb
         );
         assert_eq!(
-            ApiV2::parse_range_mode((Some(b"m_a"), Some(b"m_z"))),
+            ApiV2::parse_range_mode((Some(b"m_a\0"), Some(b"m_z\0"))),
             KeyMode::Tidb
         );
         assert_eq!(
-            ApiV2::parse_range_mode((Some(b"x\0a"), Some(b"x\0z"))),
+            ApiV2::parse_range_mode((Some(b"x\0\0a"), Some(b"x\0\0z"))),
             KeyMode::Txn
         );
         assert_eq!(
-            ApiV2::parse_range_mode((Some(b"x"), Some(b"y"))),
+            ApiV2::parse_range_mode((Some(b"x\0\0\0"), Some(b"y"))),
             KeyMode::Txn
         );
         assert_eq!(
-            ApiV2::parse_range_mode((Some(b"r\0a"), Some(b"r\0z"))),
+            ApiV2::parse_range_mode((Some(b"r\0\0a"), Some(b"r\0\0z"))),
             KeyMode::Raw
         );
         assert_eq!(
-            ApiV2::parse_range_mode((Some(b"r"), Some(b"s"))),
+            ApiV2::parse_range_mode((Some(b"r\0\0\0"), Some(b"s"))),
             KeyMode::Raw
         );
         assert_eq!(
