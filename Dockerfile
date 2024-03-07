@@ -87,6 +87,12 @@ COPY components/ ./components/
 COPY src/ ./src/
 
 # Build binaries now
+ARG GIT_FALLBACK="Unknown (no git or not git repo)"
+ARG GIT_HASH=${GIT_FALLBACK}
+ARG GIT_BRANCH=${GIT_FALLBACK}
+ENV TIKV_BUILD_GIT_HASH=${GIT_HASH}
+ENV TIKV_BUILD_GIT_BRANCH=${GIT_BRANCH}
+
 # Use --mount=type=cache for the dependencies. Ref: https://github.com/moby/buildkit/blob/v0.10/frontend/dockerfile/docs/syntax.md#run---mounttypecache
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \

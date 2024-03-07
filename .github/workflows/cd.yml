@@ -32,6 +32,9 @@ jobs:
           push: true
           # To disable the unnecessary git pull
           context: .
+          build-args: |
+            GIT_HASH=${{ github.sha }}
+            GIT_BRANCH=${{ github.ref }}
           tags: |
             hub.pingcap.net/sunxiaoguang/serverless/tikv:${{ github.sha }}-arm64
   build-amd64:
@@ -56,6 +59,9 @@ jobs:
           push: true
           # To disable the unnecessary git pull
           context: .
+          build-args: |
+            GIT_HASH=${{ github.sha }}
+            GIT_BRANCH=${{ github.ref }}
           tags: |
             hub.pingcap.net/sunxiaoguang/serverless/tikv:${{ github.sha }}-amd64
   multi-arch:
