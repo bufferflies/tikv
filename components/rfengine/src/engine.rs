@@ -1614,10 +1614,10 @@ mod tests {
             let mut it = WalIterator::new(dir_path.to_owned(), ep);
             let fd = File::open(filename.clone()).unwrap();
             let mut buf_reader: Box<dyn std::io::Read> = Box::new(BufReader::new(fd));
-            let wal_header = it.check_wal_header(&mut buf_reader).unwrap();
+            it.check_wal_header(&mut buf_reader).unwrap();
             let mut offsets = vec![it.offset];
             loop {
-                match it.read_batch(&mut buf_reader, &wal_header) {
+                match it.read_batch(&mut buf_reader) {
                     Err(err) => {
                         if let Error::Eof = err {
                             break;

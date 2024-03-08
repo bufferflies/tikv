@@ -13,7 +13,7 @@ use crate::{
     worker::wal_file_name,
     write_batch::PeerBatch,
     writer::{DmaBuffer, WalHeader, BATCH_HEADER_SIZE},
-    Error, Result, Version,
+    Error, Result,
 };
 
 pub(crate) struct WalIterator {
@@ -71,15 +71,15 @@ impl WalIterator {
             let fd = fs::File::open(filename)?;
             Box::new(BufReader::new(fd))
         };
-        let header = match self.check_wal_header(&mut buf_reader) {
-            Ok(header) => header,
+        match self.check_wal_header(&mut buf_reader) {
+            Ok(()) => {}
             Err(Error::Eof) => {
                 return Ok(());
             }
             Err(e) => return Err(e),
         };
         loop {
-            match self.read_batch(&mut buf_reader, &header) {
+            match self.read_batch(&mut buf_reader) {
                 Err(err) => {
                     if let Error::Eof = err {
                         return Ok(());
@@ -96,15 +96,25 @@ impl WalIterator {
         }
     }
 
-    pub(crate) fn check_wal_header(
-        &mut self,
-        reader: &mut Box<dyn std::io::Read>,
-    ) -> Result<WalHeader> {
+    pub(crate) fn check_wal_header(&mut self, reader: &mut Box<dyn std::io::Read>) -> Result<()> {
         let mut buf = [0u8; WalHeader::len()];
         reader.read_exact(&mut buf)?;
         self.offset += WalHeader::len() as u64;
         match WalHeader::decode(&buf) {
-            Ok(header) => Ok(header),
+            Ok(header) => {
+                if header.epoch_id != self.epoch_id {
+                    return Err(Error::Corruption {
+                        msg: format!(
+                            "epoch mismatch: header.epoch_id {} != self.epoch_id {}",
+                            header.epoch_id, self.epoch_id
+                        ),
+                        epoch_id: header.epoch_id,
+                        offset: self.offset,
+                        data: buf.to_vec(),
+                    });
+                }
+                Ok(())
+            }
             Err(err) => {
                 // Haven't written the header.
                 if buf.iter().all(|v| *v == 0) {
@@ -123,11 +133,7 @@ impl WalIterator {
         }
     }
 
-    pub(crate) fn read_batch(
-        &mut self,
-        reader: &mut Box<dyn std::io::Read>,
-        header: &WalHeader,
-    ) -> Result<Bytes> {
+    pub(crate) fn read_batch(&mut self, reader: &mut Box<dyn std::io::Read>) -> Result<Bytes> {
         let mut header_array = [0u8; BATCH_HEADER_SIZE];
         reader.read_exact(header_array.as_mut_slice())?;
         let mut header_buf = header_array.as_slice();
@@ -185,18 +191,13 @@ impl WalIterator {
             });
         }
         self.offset += aligned_length as u64;
-        match header.version {
-            Version::V1 => Ok(Bytes::from(batch.to_vec())),
-            Version::V2 => {
-                let (mut compression_type, batch_data) = batch.split_at(4);
-                let compression = compression_type.get_u32_le() > 0;
-                if compression {
-                    let dst = lz4::block::decompress(batch_data, None)?;
-                    Ok(Bytes::from(dst))
-                } else {
-                    Ok(Bytes::from(batch_data.to_vec()))
-                }
-            }
+        let (mut compression_type, batch_data) = batch.split_at(4);
+        let compression = compression_type.get_u32_le() > 0;
+        if compression {
+            let dst = lz4::block::decompress(batch_data, None)?;
+            Ok(Bytes::from(dst))
+        } else {
+            Ok(Bytes::from(batch_data.to_vec()))
         }
     }
 }
