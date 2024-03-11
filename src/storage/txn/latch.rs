@@ -392,16 +392,16 @@ mod tests {
         let mut acquired_c = latches.acquire(&mut lock_c, cid_c);
         assert_eq!(acquired_c, false);
 
-        // a release lock, and get wakeup list
-        let wakeup = latches.release(&lock_a, cid_a, None);
+        // b release lock, and get wakeup list
+        let wakeup = latches.release(&lock_b, cid_b, None);
         assert_eq!(wakeup[0], cid_c);
 
-        // c acquire lock failed again, cause b occupied slot 4
+        // c acquire lock failed again, cause a occupied slot 3
         acquired_c = latches.acquire(&mut lock_c, cid_c);
         assert_eq!(acquired_c, false);
 
-        // b release lock, and get wakeup list
-        let wakeup = latches.release(&lock_b, cid_b, None);
+        // a release lock, and get wakeup list
+        let wakeup = latches.release(&lock_a, cid_a, None);
         assert_eq!(wakeup[0], cid_c);
 
         // finally c acquire lock success
