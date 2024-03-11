@@ -24,7 +24,7 @@ use kvengine::{
     table::sstable::BlockCacheKey,
     SnapAccess,
 };
-use pd_client::RpcClient;
+use pd_client::PdClient;
 use prometheus::TEXT_FORMAT;
 use protobuf::Message;
 use rfstore::store::{PdIdAllocator, RegionSnapshot};
@@ -46,7 +46,8 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use crate::{
     load_data::{self, LoadDataManager},
     metrics::{
-        REMOTE_COPR_DAG_REQ_COUNTER, REMOTE_COPR_DAG_RESP_SIZE, REMOTE_COPR_REQ_HANDLE_HISTOGRAM,
+        REMOTE_COMPACT_REQ_HANDLE_HISTOGRAM, REMOTE_COPR_DAG_REQ_COUNTER,
+        REMOTE_COPR_DAG_RESP_SIZE, REMOTE_COPR_REQ_HANDLE_HISTOGRAM,
         REMOTE_COPR_SNAPSHOT_HISTOGRAM,
     },
     native_br::{self, NativeBrManager},
@@ -59,7 +60,7 @@ pub(crate) struct Context {
     pub cache_fs: Arc<CacheFs>,
     pub load_manager: Arc<LoadDataManager>,
     pub br_manager: Arc<NativeBrManager>,
-    pub pd: Arc<RpcClient>,
+    pub pd: Arc<dyn PdClient>,
     pub master_key: MasterKey,
     pub quota_limiter: Arc<QuotaLimiter>,
     pub block_cache: Option<moka::sync::SegmentedCache<BlockCacheKey, Bytes>>,
@@ -102,15 +103,23 @@ where
                             .body(hyper::Body::from("ok"))
                             .unwrap()),
                         "/compact" => {
+                            let ob_start = Instant::now();
+
                             let allocator = Arc::new(PdIdAllocator::new(ctx.pd.clone()));
-                            kvengine::handle_remote_compaction(
+                            let resp = kvengine::handle_remote_compaction(
                                 ctx.s3fs.clone(),
                                 req,
                                 ctx.compression_lvl,
                                 allocator,
                                 ctx.master_key.clone(),
                             )
-                            .await
+                            .await;
+
+                            if resp.is_ok() && resp.as_ref().unwrap().status().is_success() {
+                                REMOTE_COMPACT_REQ_HANDLE_HISTOGRAM
+                                    .observe(ob_start.saturating_elapsed().as_secs_f64());
+                            }
+                            resp
                         }
                         "/analyze" => handle_remote_analysis(ctx, req).await,
                         "/coprocessor" => handle_remote_coprocessor(ctx, req).await,

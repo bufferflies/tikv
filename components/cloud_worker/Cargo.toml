@@ -1,0 +1,62 @@
+[package]
+name = "cloud_worker"
+version = "0.1.0"
+edition = "2018"
+publish = false
+
+[features]
+testexport = []
+
+[dependencies]
+api_version = { path = "../../components/api_version" }
+async-trait = "0.1"
+bincode = "1.3"
+bytes = "1.1"
+chrono = "0.4"
+cloud_encryption = { workspace = true }
+crc32c = "0.6.3"
+dashmap = "4.0"
+file_system = { path = "../../components/file_system" }
+flate2 = { version = "1.0", default-features = false, features = ["zlib"] }
+futures = "0.3"
+grpcio = { version = "0.10", default-features = false, features = ["openssl-vendored", "protobuf-codec"] }
+hex = "0.4"
+http = "0.2"
+hyper = { version = "0.14", features = ["full"] }
+hyper-rustls = "0.24.2"
+k8s-openapi = { version = "0.18.0", features = ["v1_26"] }
+kube = { version = "0.84.0", features = ["runtime", "derive", "ws"] }
+kvengine = { path = "../../components/kvengine" }
+kvenginepb = { path = "../../components/kvenginepb" }
+kvproto = { git = "https://github.com/pingcap/kvproto.git" }
+lazy_static = "1.3"
+load_data = { path = "../../components/load_data" }
+moka = { workspace = true }
+native_br = { path = "../../components/native_br" }
+pd_client = { path = "../../components/pd_client", default-features = false }
+prometheus = { version = "0.13", features = ["nightly"] }
+protobuf = "2.8"
+rfenginepb = { path = "../../components/rfenginepb" }
+rfstore = { path = "../../components/rfstore" }
+security = { path = "../../components/security", default-features = false }
+serde = { version = "1.0", features = ["derive"] }
+serde_derive = "1.0"
+serde_ignored = "0.1"
+serde_json = "1.0"
+slog = { version = "2.3", features = ["max_level_trace", "release_max_level_debug"] }
+slog-global = { version = "0.1", git = "https://github.com/breeswish/slog-global.git", rev = "d592f88e4dbba5eb439998463054f1a44fbf17b9" }
+slog-term = "2.4"
+thiserror = "1.0"
+tikv = { path = "../../", default-features = false }
+tikv_util = { path = "../../components/tikv_util" }
+tokio = { version = "1.12", features = ["full"] }
+tokio-util = "0.7.8"
+toml = "0.5"
+url = "2"
+
+[dev-dependencies]
+kvengine = { path = "../../components/kvengine", features = ["testexport"] }
+rand = "0.8.3"
+tempfile = "3.0"
+test_raftstore = { path = "../../components/test_raftstore" }
+test_util = { path = "../../components/test_util" }

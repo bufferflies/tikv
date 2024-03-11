@@ -538,6 +538,10 @@ impl ServerCluster {
         self.pd.endpoints().unwrap()
     }
 
+    pub fn status_addr(&self, node_id: u16) -> String {
+        node_status_addr(node_id)
+    }
+
     pub async fn new_txn_client(&self) -> ClusterTxnClient {
         let pd_endpoints = self.pd_endpoints().to_vec();
         let client = tikv_client::TransactionClient::new_with_codec(

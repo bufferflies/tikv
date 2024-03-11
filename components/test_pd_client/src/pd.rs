@@ -1500,6 +1500,13 @@ impl TestPdClient {
 impl GetSecurityManager for TestPdClient {}
 
 impl PdClient for TestPdClient {
+    fn load_global_config_by_path(
+        &self,
+        _path: String,
+    ) -> PdFuture<std::collections::HashMap<String, Vec<u8>>> {
+        Box::pin(ok(std::collections::HashMap::default()))
+    }
+
     fn get_cluster_id(&self) -> Result<u64> {
         Ok(self.cluster_id)
     }

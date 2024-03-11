@@ -6,7 +6,6 @@ use bytes::Buf;
 use http::{header, Request, Response, StatusCode};
 use hyper::Body;
 use kvengine::{dfs::Dfs, table::txn_file::TxnChunkBuilder};
-use pd_client::PdClient;
 
 use crate::{
     common::{get_body, make_response},

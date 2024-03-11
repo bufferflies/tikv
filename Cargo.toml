@@ -235,6 +235,7 @@ members = [
   "components/cloud/gcp",
   "components/cloud_encryption",
   "components/cloud_server",
+  "components/cloud_worker",
   "components/codec",
   "components/collections",
   "components/concurrency_manager",
@@ -312,6 +313,7 @@ cdc = { path = "components/cdc", default-features = false }
 cloud = { path = "components/cloud" }
 cloud_encryption = { path = "components/cloud_encryption" }
 cloud_server = { path = "components/cloud_server" }
+cloud_worker = { path = "components/cloud_worker" }
 codec = { path = "components/codec" }
 collections = { path = "components/collections" }
 concurrency_manager = { path = "components/concurrency_manager" }

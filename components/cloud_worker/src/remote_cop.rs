@@ -14,8 +14,6 @@ use kvproto::{
     coprocessor::{DelegateRequest, Request, Response},
     tikvpb::{create_tikv, Tikv, TikvClient},
 };
-use pd_client::PdClient;
-use security::GetSecurityManager;
 use tikv::coprocessor::parse_request_and_handle_remote_cop;
 use tikv_util::{thd_name, warn};
 

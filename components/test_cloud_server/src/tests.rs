@@ -7,18 +7,21 @@ use std::{
     time::Duration,
 };
 
+use cloud_worker::CloudWorker;
 use futures::executor::block_on;
 use pd_client::{
     pd_control::{CreateKeyspaceParams, SchedulerStatus},
     PdClient,
 };
-use security::SecurityConfig;
+use security::{RestfulClient, SecurityConfig, SecurityManager};
 use test_pd_client::PdWrapper;
 use tikv_client::{IntoOwnedRange, TimestampExt};
 use tikv_util::{codec::bytes::encode_bytes, config::ReadableDuration, info};
 use tokio::runtime::Runtime;
 
-use crate::{client::CommitAction, try_wait, try_wait_result_async, ServerCluster};
+use crate::{
+    client::CommitAction, oss::prepare_dfs, try_wait, try_wait_result_async, ServerCluster,
+};
 
 #[test]
 fn it_works() {
@@ -489,6 +492,94 @@ fn test_pd_control() {
     });
 
     cluster.stop();
+}
+
+#[test]
+fn test_tikv_worker() {
+    test_util::init_log_for_test();
+
+    let (_temp_dir, mut oss, dfs_config) = prepare_dfs("test");
+
+    let node_ids = alloc_node_id_vec(3);
+    let pd_wrapper = PdWrapper::new_test(1, &SecurityConfig::default());
+    let mut cluster = ServerCluster::new_opt(
+        node_ids.clone(),
+        |_, conf| {
+            conf.dfs = dfs_config.clone();
+            conf.kvengine.max_del_range_delay = ReadableDuration(Duration::from_secs(1));
+        },
+        pd_wrapper,
+    );
+
+    let tikv_worker_conf = cloud_worker::Config {
+        addr: "127.0.0.1:19000".to_string(),
+        pd: pd_client::Config::new(cluster.pd_endpoints().to_vec()),
+        dfs: dfs_config,
+        register: true,
+        ..Default::default()
+    };
+    let mut tikv_worker = CloudWorker::new(tikv_worker_conf, None, 4, cluster.get_pure_pd_client());
+    tikv_worker.start();
+
+    let rt = Runtime::new().unwrap();
+
+    let security_mgr = Arc::new(SecurityManager::default());
+    for node_id in node_ids {
+        let tikv_ctl = RestfulClient::new(
+            "tikv_ctl",
+            vec![cluster.status_addr(node_id)],
+            security_mgr.clone(),
+        )
+        .unwrap();
+        let ok = try_wait(
+            || {
+                let compactors: Vec<String> =
+                    rt.block_on(tikv_ctl.get("kvengine/compactor")).unwrap();
+                !compactors.is_empty()
+            },
+            10,
+        );
+        assert!(ok);
+    }
+
+    rt.block_on(async {
+        let mut txn_client = cluster.new_txn_client().await;
+
+        // Prepare data.
+        let mut client = cluster.new_client();
+        client.put_kv(0..100, i_to_key, i_to_val);
+        client.verify_data_with_ref_store();
+        let mut ref_store = client.dump_ref_store();
+
+        // Unsafe destroy range.
+        {
+            let key80 = i_to_key(80);
+            let key90 = i_to_key(90);
+            let prefix08 = &key80.as_slice()[..key80.len() - 1];
+            let prefix09 = &key90.as_slice()[..key90.len() - 1];
+            txn_client
+                .unsafe_destroy_range((prefix08, prefix09).into_owned())
+                .await
+                .unwrap();
+            ref_store.destroy_range(&key80, &key90);
+
+            // Wait for del prefixes finished.
+            let ok = try_wait(|| cluster.get_shards_has_del_prefixes().is_empty(), 10);
+            assert!(ok, "{:?}", cluster.get_shards_has_del_prefixes());
+
+            let verified = txn_client
+                .verify_data_by_scan(&ref_store, None)
+                .await
+                .unwrap();
+            assert_eq!(verified, 90);
+        }
+
+        assert!(cloud_worker::REMOTE_COMPACT_REQ_HANDLE_HISTOGRAM.get_sample_count() > 0);
+    });
+
+    cluster.stop();
+    tikv_worker.shutdown();
+    oss.shutdown();
 }
 
 static NODE_ALLOCATOR: AtomicU16 = AtomicU16::new(1);

@@ -459,7 +459,7 @@ x-build-dist-debug:
 test-cloud-engine:
 	cargo test \
 		-p kvengine -p rfstore -p rfengine \
-		-p cse-ctl -p tikv-worker \
+		-p cse-ctl -p tikv-worker -p cloud_worker \
 		-p test_cloud_server -p test_pd_client \
 		-p native_br -p load_data -p cloud_encryption \
 		-p cloud_server -p pd_client \
