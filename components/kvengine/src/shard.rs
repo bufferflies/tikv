@@ -95,8 +95,6 @@ pub struct Shard {
 
     pub(crate) compaction_priority: RwLock<Option<CompactionPriority>>,
 
-    pub(crate) parent_snap: RwLock<Option<pb::Snapshot>>,
-
     pub(crate) encryption_key: Option<EncryptionKey>,
 }
 
@@ -183,7 +181,6 @@ impl Shard {
             meta_seq: Default::default(),
             write_sequence: Default::default(),
             compaction_priority: RwLock::new(None),
-            parent_snap: RwLock::new(None),
             encryption_key,
         };
         {
@@ -233,8 +230,6 @@ impl Shard {
             store_bool(&shard.initial_flushed, true);
         } else {
             shard.parent_id = cs.get_parent().shard_id;
-            let mut guard = shard.parent_snap.write().unwrap();
-            *guard = Some(cs.get_parent().get_snapshot().clone());
         }
         shard.base_version.store(snap.base_version, Release);
         shard.meta_seq.store(cs.sequence, Release);
@@ -535,6 +530,10 @@ impl Shard {
             self.max_ts.load(Ordering::Relaxed),
             self.get_data().get_mem_table_max_ts(),
         )
+    }
+
+    pub fn get_sst_max_ts(&self) -> u64 {
+        self.sst_max_ts.load(Ordering::Relaxed)
     }
 
     pub fn get_estimated_kv_size(&self) -> u64 {

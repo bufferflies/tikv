@@ -1,7 +1,7 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     iter::Iterator as StdIterator,
     mem,
     ops::Deref,
@@ -25,8 +25,8 @@ use crate::{
         memtable,
         memtable::CfTable,
         sstable,
-        sstable::{Builder, L0Table, SsTable, NO_COMPRESSION},
-        InnerKey,
+        sstable::{Builder, NO_COMPRESSION},
+        InnerKey, TableExt,
     },
     *,
 };
@@ -78,8 +78,12 @@ impl FlushTask {
         Self::new(shard, None, Some(initial), shard.encryption_key.clone())
     }
 
-    pub(crate) fn overlap_table(&self, start_key: InnerKey<'_>, end_key: InnerKey<'_>) -> bool {
-        self.inner_start() <= end_key && start_key < self.inner_end()
+    pub(crate) fn table_double_overbound(
+        &self,
+        smallest: InnerKey<'_>,
+        biggest: InnerKey<'_>,
+    ) -> bool {
+        smallest < self.inner_start() && self.inner_end() <= biggest
     }
 
     pub(crate) fn table_version(&self) -> u64 {
@@ -93,13 +97,12 @@ impl FlushTask {
 
 #[derive(Clone)]
 pub(crate) struct InitialFlush {
-    pub(crate) parent_snap: pb::Snapshot,
     pub(crate) mem_tbls: Vec<memtable::CfTable>,
     pub(crate) base_version: u64,
     pub(crate) data_sequence: u64,
     pub(crate) props: Option<kvenginepb::Properties>,
-    pub(crate) double_over_bound_l0s: Vec<L0Table>,
-    pub(crate) double_over_bound_tbls: Vec<SsTable>,
+    pub(crate) shard_data: ShardData,
+    pub(crate) max_ts: u64,
 }
 
 impl InitialFlush {
@@ -192,26 +195,6 @@ impl Engine {
             flush.base_version,
             flush.data_sequence
         );
-        let max_ts = std::cmp::max(
-            flush.parent_snap.max_ts,
-            flush
-                .mem_tbls
-                .iter()
-                .map(|m| m.data_max_ts())
-                .max()
-                .unwrap_or(0),
-        );
-        let mut discard_overbound_tables: HashSet<u64> = HashSet::new();
-        for l0 in &flush.double_over_bound_l0s {
-            if !l0.has_data_in_range(task.inner_start(), task.inner_end()) {
-                discard_overbound_tables.insert(l0.id());
-            }
-        }
-        for tbl in &flush.double_over_bound_tbls {
-            if !tbl.has_overlap(task.inner_start(), task.inner_end(), false) {
-                discard_overbound_tables.insert(tbl.id());
-            }
-        }
         let mut cs = new_change_set(task.id_ver.id, task.id_ver.ver);
         let initial_flush = cs.mut_initial_flush();
         initial_flush.set_outer_start(task.range.outer_start.to_vec());
@@ -219,35 +202,47 @@ impl Engine {
         initial_flush.set_inner_key_off(task.range.inner_key_off as u32);
         initial_flush.set_base_version(flush.base_version);
         initial_flush.set_data_sequence(flush.data_sequence);
-        initial_flush.set_max_ts(max_ts);
+        initial_flush.set_max_ts(flush.max_ts);
         if let Some(props) = flush.props.as_ref() {
             initial_flush.set_properties(props.clone());
         }
-        for tbl_create in flush.parent_snap.get_table_creates() {
-            if task.overlap_table(
-                InnerKey::from_inner_buf(tbl_create.get_smallest()),
-                InnerKey::from_inner_buf(tbl_create.get_biggest()),
-            ) && !discard_overbound_tables.contains(&tbl_create.get_id())
+        for l0 in &flush.shard_data.l0_tbls {
+            if task.table_double_overbound(l0.smallest(), l0.biggest())
+                && !l0.has_data_in_range(task.inner_start(), task.inner_end())
             {
-                initial_flush.mut_table_creates().push(tbl_create.clone());
+                // only double overbound tables may not have any data in the shard range.
+                continue;
             }
+            let mut l0_create = L0Create::new();
+            l0_create.set_id(l0.id());
+            l0_create.set_smallest(l0.smallest().to_vec());
+            l0_create.set_biggest(l0.biggest().to_vec());
+            initial_flush.mut_l0_creates().push(l0_create);
         }
-        for l0_create in flush.parent_snap.get_l0_creates() {
-            if task.overlap_table(
-                InnerKey::from_inner_buf(l0_create.get_smallest()),
-                InnerKey::from_inner_buf(l0_create.get_biggest()),
-            ) && !discard_overbound_tables.contains(&l0_create.get_id())
-            {
-                initial_flush.mut_l0_creates().push(l0_create.clone());
+        flush.shard_data.for_each_level(|cf, lvl| {
+            for tbl in lvl.tables.iter() {
+                if task.table_double_overbound(tbl.smallest(), tbl.biggest())
+                    && !tbl.has_overlap(task.inner_start(), task.inner_end(), false)
+                {
+                    // only double overbound tables may not have any data in the shard range.
+                    continue;
+                }
+                let mut tbl_create = pb::TableCreate::new();
+                tbl_create.set_id(tbl.id());
+                tbl_create.set_cf(cf as i32);
+                tbl_create.set_level(lvl.level as u32);
+                tbl_create.set_smallest(tbl.smallest().to_vec());
+                tbl_create.set_biggest(tbl.biggest().to_vec());
+                initial_flush.mut_table_creates().push(tbl_create);
             }
-        }
-        for blob_create in flush.parent_snap.get_blob_creates() {
-            if task.overlap_table(
-                InnerKey::from_inner_buf(blob_create.get_smallest()),
-                InnerKey::from_inner_buf(blob_create.get_biggest()),
-            ) {
-                initial_flush.mut_blob_creates().push(blob_create.clone());
-            }
+            false
+        });
+        for blob in flush.shard_data.blob_tbl_map.values() {
+            let mut blob_create = pb::BlobCreate::new();
+            blob_create.set_id(blob.id());
+            blob_create.set_smallest(blob.smallest_key().to_vec());
+            blob_create.set_biggest(blob.biggest_key().to_vec());
+            initial_flush.mut_blob_creates().push(blob_create);
         }
         let (tx, rx) = mpsc::unbounded();
         let mut send_cnt = 0;

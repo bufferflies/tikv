@@ -2095,10 +2095,6 @@ impl<'a> PreprocessRef<'a> {
         merge_state.set_commit(entry.index);
         merge_state.set_min_index(prepare_merge.get_min_index());
         let parent_meta = self.shard_meta().clone();
-        let parent_snap = parent_meta.to_change_set().take_snapshot();
-        ctx.apply_msgs
-            .msgs
-            .push(ApplyMsg::PendingPrepareMerge(parent_snap, entry.index));
         let mut new_meta = parent_meta;
         new_meta.prepare_merge(entry.index);
         new_meta.set_property(TERM_KEY, &entry.term.to_le_bytes());
@@ -2176,14 +2172,7 @@ impl<'a> PreprocessRef<'a> {
             PeerState::Tombstone,
             Some(merge_state),
         );
-        let parent_snap = new_meta
-            .parent
-            .as_ref()
-            .unwrap()
-            .to_change_set()
-            .take_snapshot();
         let apply_msg = ApplyMsg::PrepareCommitMerge {
-            parent_snap,
             source,
             commit_index: entry.index,
         };

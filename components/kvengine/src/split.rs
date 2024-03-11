@@ -72,10 +72,6 @@ impl Engine {
                 &self.master_key,
             );
             new_shard.parent_id = old_shard.id;
-            {
-                let mut guard = new_shard.parent_snap.write().unwrap();
-                *guard = Some(cs.get_snapshot().clone());
-            }
             if new_shard.id == old_shard.id {
                 new_shard.set_active(old_shard.is_active());
                 store_u64(&new_shard.base_version, old_shard.get_base_version());
@@ -208,13 +204,7 @@ impl Engine {
         })
     }
 
-    pub fn prepare_merge(
-        &self,
-        shard_id: u64,
-        shard_ver: u64,
-        parent_snap: kvenginepb::Snapshot,
-        sequence: u64,
-    ) {
+    pub fn prepare_merge(&self, shard_id: u64, shard_ver: u64, sequence: u64) {
         let old_shard = self.get_shard_with_ver(shard_id, shard_ver).unwrap();
         self.prepare_update_shard_version(&old_shard, sequence);
         let mut new_shard = self.new_shard_version(&old_shard, sequence);
@@ -222,10 +212,6 @@ impl Engine {
         // commit merge. The initial_flushed of the new shard is false, set the
         // parent for later initial flush.
         new_shard.parent_id = old_shard.id;
-        {
-            let mut guard = new_shard.parent_snap.write().unwrap();
-            *guard = Some(parent_snap);
-        }
         info!("{} shard prepared merge", new_shard.tag());
         self.shards.insert(new_shard.id, Arc::new(new_shard));
     }
@@ -245,7 +231,6 @@ impl Engine {
         &self,
         shard_id: u64,
         shard_ver: u64,
-        parent_snap: kvenginepb::Snapshot,
         source: &ChangeSet,
         sequence: u64,
     ) -> Result<()> {
@@ -384,10 +369,6 @@ impl Engine {
         debug_assert_eq!(new_shard.range, new_shard.get_data().range);
 
         new_shard.parent_id = shard_id;
-        {
-            let mut guard = new_shard.parent_snap.write().unwrap();
-            *guard = Some(parent_snap);
-        }
         let all_files = new_shard.get_all_files();
         info!(
             "merged new shard {}, start {:x}, end {:x}, all files {:?}",

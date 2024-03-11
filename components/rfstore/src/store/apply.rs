@@ -239,11 +239,6 @@ pub(crate) struct Applier {
 
     pub(crate) pending_split: HashMap<u64, kvenginepb::ChangeSet>,
 
-    pub(crate) prepare_merge_parent_snap:
-        VecDeque<(kvenginepb::Snapshot, u64 /* commit index */)>,
-
-    pub(crate) commit_merge_parent_snaps: VecDeque<kvenginepb::Snapshot>,
-
     pub(crate) commit_merge_source_tables: HashMap<u64, ChangeSet>,
 
     pub(crate) paused_apply_queue: PausedApplyQueue,
@@ -1021,25 +1016,10 @@ impl Applier {
         &mut self,
         ctx: &mut ApplyContext,
     ) -> Result<(AdminResponse, ApplyResult)> {
-        debug_assert!(
-            !self.prepare_merge_parent_snap.is_empty(),
-            "{} exec_prepare_merge: prepare_merge_parent_snap is empty, log_index {}",
-            self.tag(),
-            ctx.exec_log_index,
-        );
         let star_time = Instant::now();
-        let (parent_snap, commit_index) = self.prepare_merge_parent_snap.pop_front().unwrap();
-        debug_assert_eq!(
-            commit_index,
-            ctx.exec_log_index,
-            "{} exec_prepare_merge: commit index not match, parent_snap {:?}",
-            self.tag(),
-            parent_snap
-        );
         ctx.engine.prepare_merge(
             self.region_id(),
             self.region.get_region_epoch().get_version(),
-            parent_snap,
             ctx.exec_log_index,
         );
         let mut region = self.region.clone();
@@ -1088,7 +1068,6 @@ impl Applier {
         request: &AdminRequest,
     ) -> Result<(AdminResponse, ApplyResult)> {
         let star_time = Instant::now();
-        let parent_snap = self.commit_merge_parent_snaps.pop_front().unwrap();
         let source_id = request.get_commit_merge().get_source().get_id();
         let source_tables = self
             .commit_merge_source_tables
@@ -1098,7 +1077,6 @@ impl Applier {
         ctx.engine.commit_merge(
             self.region_id(),
             region_ver,
-            parent_snap,
             &source_tables,
             ctx.exec_log_index,
         )?;
@@ -1464,11 +1442,9 @@ impl Applier {
     fn handle_prepare_commit_merge(
         &mut self,
         ctx: &mut ApplyContext,
-        parent_snap: kvenginepb::Snapshot,
         source: kvenginepb::ChangeSet,
         commit_index: u64,
     ) {
-        self.commit_merge_parent_snaps.push_back(parent_snap);
         let is_leader = self.is_leader();
         if let Ok(source_shard) = ctx
             .engine
@@ -1623,16 +1599,11 @@ impl Applier {
             ApplyMsg::CheckSwitchMemTable { region_id } => {
                 self.handle_check_switch_mem_table(ctx, region_id);
             }
-            ApplyMsg::PendingPrepareMerge(parent_snap, commit_index) => {
-                self.prepare_merge_parent_snap
-                    .push_back((parent_snap, commit_index));
-            }
             ApplyMsg::PrepareCommitMerge {
-                parent_snap,
                 source,
                 commit_index,
             } => {
-                self.handle_prepare_commit_merge(ctx, parent_snap, source, commit_index);
+                self.handle_prepare_commit_merge(ctx, source, commit_index);
             }
             ApplyMsg::ResumeCommitMerge {
                 source,

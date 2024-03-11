@@ -35,7 +35,7 @@ use crate::{
     table::{
         memtable::CfTable,
         sstable::{BlockCacheKey, MAGIC_NUMBER, ZSTD_COMPRESSION},
-        InnerKey, TableExt,
+        InnerKey,
     },
     txn_chunk_manager::TxnChunkManager,
     *,
@@ -500,43 +500,25 @@ impl EngineCore {
     }
 
     fn trigger_initial_flush(&self, shard: &Shard) {
-        let guard = shard.parent_snap.read().unwrap();
-        let parent_snap = guard.as_ref().unwrap().clone();
         let mut mem_tbls = vec![];
         let data = shard.get_data();
         // A newly split shard's meta_sequence is an in-mem state until initial flush.
         let data_sequence = shard.get_meta_sequence();
+        let base_version = shard.get_base_version();
+        let mut max_ts = shard.get_sst_max_ts();
         for mem_tbl in &data.mem_tbls.as_slice()[1..] {
             debug!(
-                "trigger initial flush check mem table version {}, size {}, parent base {} parent write {}",
+                "trigger initial flush check mem table version {}, size {}",
                 mem_tbl.get_version(),
                 mem_tbl.size(),
-                parent_snap.base_version,
-                parent_snap.data_sequence,
             );
-            if mem_tbl.get_version() > parent_snap.base_version + parent_snap.data_sequence
-                && mem_tbl.get_version() <= shard.get_base_version() + data_sequence
+            if mem_tbl.get_version() <= base_version + data_sequence
                 && mem_tbl.has_data_in_range(shard.inner_start(), shard.inner_end())
             {
+                max_ts = std::cmp::max(max_ts, mem_tbl.data_max_ts());
                 mem_tbls.push(mem_tbl.clone());
             }
         }
-        let mut double_over_bound_l0s = vec![];
-        for l0 in &data.l0_tbls {
-            if l0.smallest() < shard.inner_start() && l0.biggest() >= shard.inner_end() {
-                double_over_bound_l0s.push(l0.clone());
-            }
-        }
-        let mut double_over_bound_tbls = vec![];
-        data.for_each_level(|_cf, lvl| {
-            if let Some(tbl) = lvl.tables.first() {
-                if tbl.smallest() < shard.inner_start() && tbl.biggest() >= shard.inner_end() {
-                    double_over_bound_tbls.push(tbl.clone());
-                }
-            }
-            false
-        });
-
         let mut props = kvenginepb::Properties::default();
         for prop_key in PROPERTIES_NEED_INITIAL_FLUSH {
             if let Some(prop_val) = shard.get_property(prop_key) {
@@ -548,13 +530,12 @@ impl EngineCore {
         self.send_flush_msg(FlushMsg::Task(Box::new(FlushTask::new_initial(
             shard,
             InitialFlush {
-                parent_snap,
                 mem_tbls,
-                base_version: shard.get_base_version(),
+                base_version,
                 data_sequence,
                 props: Some(props),
-                double_over_bound_l0s,
-                double_over_bound_tbls,
+                shard_data: data,
+                max_ts,
             },
         ))));
     }
