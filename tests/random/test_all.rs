@@ -70,7 +70,7 @@ fn test_random_all() {
     };
     let backup_worker = {
         Arc::new(backup_worker::BackupWorker::new(
-            backup_config,
+            backup_config.clone(),
             pd_client.clone(),
             INSTANT_BACKUP_INTERVAL,
             100,
@@ -124,6 +124,7 @@ fn test_random_all() {
         timeout_restore_snapshot: ReadableDuration::secs(30),
         timeout_fetch_wal: ReadableDuration::secs(10),
         tolerate_err: 1,
+        strict_tolerate: true,
         max_retry: 20,
         ..Default::default()
     };
@@ -154,6 +155,7 @@ fn test_random_all() {
         spawn_backup(
             cluster.new_client(),
             keyspace_manager.clone(),
+            backup_config,
             backup_worker,
             &s3fs,
             Duration::from_secs(5),
@@ -235,13 +237,15 @@ fn test_random_all() {
     let total_transfer_count = TRANSFER_COUNTER.load(Ordering::SeqCst);
     let total_node_restart = NODE_RESTART_COUNTER.load(Ordering::SeqCst);
     let total_backup_count = BACKUP_COUNTER.load(Ordering::SeqCst);
+    let total_backup_tolerated_err_count = BACKUP_TOLERATED_ERR_COUNTER.load(Ordering::SeqCst);
     let total_restore_count = RESTORE_COUNTER.load(Ordering::SeqCst);
+    let total_restore_tolerated_err_count = RESTORE_TOLERATED_ERR_COUNTER.load(Ordering::SeqCst);
     let total_load_data_count = LOAD_DATA_COUNTER.load(Ordering::SeqCst);
     let total_manual_major_compact = MANUAL_MAJOR_COMPACT_COUNTER.load(Ordering::SeqCst);
     let total_gc_resolved_locks = GC_ADVANCE_SAFE_POINT_COUNTER.load(Ordering::SeqCst);
     let region_number = pd_client.get_regions_number();
     info!(
-        "TEST SUCCEED: write {}, keyspace {}, table {}, drop table {}, region {}, merge {}, move {}, transfer {}, node restart {}, backup {}, restore {}, load_data {}, manual_major_compact {}, verified_records {}, gc {}",
+        "TEST SUCCEED: write {}, keyspace {}, table {}, drop table {}, region {}, merge {}, move {}, transfer {}, node restart {}, backup {}, backup_tolerated_err {}, restore {}, restore_tolerated_err {}, load_data {}, manual_major_compact {}, verified_records {}, gc {}",
         total_write_count,
         total_keyspace_count,
         total_table_count,
@@ -252,7 +256,9 @@ fn test_random_all() {
         total_transfer_count,
         total_node_restart,
         total_backup_count,
+        total_backup_tolerated_err_count,
         total_restore_count,
+        total_restore_tolerated_err_count,
         total_load_data_count,
         total_manual_major_compact,
         verified_records_count,

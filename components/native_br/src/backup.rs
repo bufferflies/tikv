@@ -58,6 +58,9 @@ const BACKUP_GC_SERVICE_NAME: &str = "native_br";
 // will block GC.
 const BACKUP_SERVICE_SAFEPOINT_TTL: Duration = Duration::from_secs(12 * 60 * 60); // 12 hour.
 
+// Backup must not have more than 1 tolerated error of store.
+const BACKUP_MAX_TOLERATED_ERROR: usize = 1;
+
 pub type Result<T> = std::result::Result<T, Error>;
 pub type SharedResult<T> = std::result::Result<T, SharedError>;
 
@@ -303,13 +306,22 @@ pub fn backup_cluster_with_ts(
             store.id,
             backup_type.clone(),
         );
-        runtime.spawn(backup_store(
-            config,
-            store,
-            tx.clone(),
-            security_mgr.clone(),
-        ));
+        if let Some(config) = config {
+            runtime.spawn(backup_store(
+                config,
+                store,
+                tx.clone(),
+                security_mgr.clone(),
+            ));
+        } else {
+            // Treat tolerated error in incremental backup as error, to make sure that
+            // the `config.tolerate_err` will not be violated.
+            info!("incremental backup: last_backup.tolerated_err > 0"; "store_id" => store.id, "backup" => ?cluster_backup_meta);
+            tx.send(Err(Error::IncrementalBackupToleratedError(store.id)))
+                .unwrap();
+        }
     }
+
     let mut errs = vec![];
     for _ in 0..num_stores {
         match rx.recv().unwrap() {
@@ -326,8 +338,15 @@ pub fn backup_cluster_with_ts(
             "backup errors {:?}, tolerance {}",
             errs, config.tolerate_err
         );
+        // Errors return first to help caller to decide whether to retry.
+        let errors_return_first =
+            |e: &Error| matches!(e, Error::IncrementalBackupToleratedError(_));
         if errs.len() > config.tolerate_err {
-            return Err(errs.pop().unwrap());
+            if let Some(idx) = errs.iter().position(errors_return_first) {
+                return Err(errs.swap_remove(idx));
+            } else {
+                return Err(errs.pop().unwrap());
+            }
         }
     }
     let alloc_id = pd_client.alloc_id()?;
@@ -420,7 +439,7 @@ fn get_backup_config(
     cluster_id: u64,
     store_id: u64,
     backup_type: BackupType,
-) -> rfengine::BackupConfig {
+) -> Option<rfengine::BackupConfig> {
     let incremental = backup_type == BackupType::Incremental;
     let lightweight = backup_type == BackupType::Lightweight;
     let mut config = rfengine::BackupConfig {
@@ -432,20 +451,28 @@ fn get_backup_config(
         lightweight,
     };
     if incremental {
+        // store id existence is checked in check_backup_meta_consistency
         let store_meta = backup_meta
             .get_stores()
             .iter()
-            .find(|s| s.get_store_id() == store_id)
-            .unwrap(); // store id existence is checked in check_backup_meta_consistency
+            .find(|s| s.get_store_id() == store_id)?;
         let last_wal = store_meta.get_wal_chunks().last().unwrap();
         config.wal_epoch = last_wal.epoch;
         config.start_offset = last_wal.get_end_off();
     }
-    config
+    Some(config)
 }
 
 fn check_backup_meta_consistency(backup_meta: &ClusterBackupMeta, stores: &[Store]) -> Result<()> {
-    if stores.len() != backup_meta.stores.len() {
+    if backup_meta.tolerated_err > BACKUP_MAX_TOLERATED_ERROR as u32 {
+        error!("check_backup_meta_consistency: Tolerated error exceeds limit"; "backup" => ?backup_meta);
+        return Err(Error::BackupError(format!(
+            "Tolerated error {} exceeds limit {}",
+            backup_meta.tolerated_err, BACKUP_MAX_TOLERATED_ERROR
+        )));
+    }
+
+    if stores.len() != backup_meta.stores.len() + backup_meta.tolerated_err as usize {
         return Err(Error::TopoChanged(format!(
             "Stores' count changed during backup, cur: {}, backed up: {}",
             stores.len(),
@@ -462,7 +489,7 @@ fn check_backup_meta_consistency(backup_meta: &ClusterBackupMeta, stores: &[Stor
         })
         .map(|s| s.id)
         .collect();
-    if remain_stores.is_empty() {
+    if remain_stores.len() == backup_meta.tolerated_err as usize {
         Ok(())
     } else {
         Err(Error::TopoChanged(format!(
@@ -734,6 +761,16 @@ mod tests {
             });
         }
         check_backup_meta_consistency(&meta, &stores).unwrap();
+
+        stores.push(Store {
+            id: 10,
+            ..Default::default()
+        });
+        check_backup_meta_consistency(&meta, &stores).unwrap_err();
+        meta.set_tolerated_err(1);
+        check_backup_meta_consistency(&meta, &stores).unwrap();
+        stores.first_mut().unwrap().id = 11;
+        check_backup_meta_consistency(&meta, &stores).unwrap_err();
     }
 
     #[test]

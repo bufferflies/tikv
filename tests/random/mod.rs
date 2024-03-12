@@ -54,7 +54,9 @@ lazy_static::lazy_static! {
     pub static ref TRANSFER_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref NODE_RESTART_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref BACKUP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    pub static ref BACKUP_TOLERATED_ERR_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref RESTORE_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    pub static ref RESTORE_TOLERATED_ERR_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref LOAD_DATA_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref KEYSPACE_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref TABLE_COUNTER: AtomicUsize = AtomicUsize::new(0);

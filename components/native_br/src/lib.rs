@@ -9,6 +9,7 @@ pub mod backup_worker;
 pub mod common;
 pub mod error;
 mod lock;
+mod metrics;
 pub mod restore;
 pub mod restore_keyspace;
 mod tiflash;

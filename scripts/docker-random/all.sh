@@ -11,6 +11,8 @@ CONCURRENCY=12
 CPU=3
 MEMORY=3g
 MEMORY_PROFILE=0
+declare -a MAKE_BIN_ARGS
+MAKE_BIN_ARGS=()
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -33,6 +35,9 @@ while [ $# -gt 0 ]; do
     --memory-profile)
         MEMORY_PROFILE=1
         ;;
+    --debug)
+        MAKE_BIN_ARGS+=("--debug")
+        ;;
     *)
         echo "Usage: $0 --work-dir <WORKDIR> --concurrency <CONCURRENCY> --cpu <CPU> --memory <MEMORY> --memory-profile"
         exit 1
@@ -50,7 +55,7 @@ cd "$CWD" || exit 1
 
 git pull
 git merge origin/cloud-engine --signoff --no-edit
-./make-bin.sh
+./make-bin.sh "${MAKE_BIN_ARGS[@]}"
 
 mkdir -p "$WORKDIR"
 export CONCURRENCY

@@ -72,8 +72,14 @@ pub enum Error {
     MvccError(#[from] tikv::storage::mvcc::Error),
     #[error("Backup error {0}")]
     BackupError(String),
-    #[error("Wal chunk integrity error {0}")]
+    #[error("WAL chunk integrity error {0}")]
     WalChunkIntegrityError(String),
+    // IncrementalBackupToleratedError means that we are performing an incremental backup with a
+    // last backup having tolerated error of one store, but we meet the error of another store.
+    #[error("Incremental backup tolerated error for store {0}")]
+    IncrementalBackupToleratedError(u64 /* store id */),
+    #[error("Fetch RfEngine WAL chunk HTTP error {0}")]
+    RfengineHttpError(hyper::Error),
 }
 
 impl From<dfs::Error> for Error {

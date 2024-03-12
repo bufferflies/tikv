@@ -4276,6 +4276,7 @@ dependencies = [
  "lazy_static",
  "log_wrappers",
  "pd_client",
+ "prometheus",
  "protobuf",
  "raft",
  "regex",

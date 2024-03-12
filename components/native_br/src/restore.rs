@@ -476,6 +476,11 @@ pub struct RestoreConfig {
     /// Tolerance error count during setup raft engine for lightweight
     /// restoration.
     pub tolerate_err: usize,
+    /// Whether to strictly tolerate the specified errors (e.g.
+    /// RfengineHttpError) ONLY.
+    ///
+    /// By default, all kinds of errors can be tolerated.
+    pub strict_tolerate: bool,
     /// The timeout for retrying fetch wal chunk from store.
     pub timeout_fetch_wal: ReadableDuration,
 }
@@ -494,6 +499,7 @@ impl Default for RestoreConfig {
             timeout_fetch_wal: DEFAULT_TIMEOUT_FETCH_WAL,
             max_retry: DEFAULT_RESTORE_MAX_RETRY,
             tolerate_err: 0,
+            strict_tolerate: false,
         }
     }
 }

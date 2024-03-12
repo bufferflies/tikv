@@ -97,7 +97,7 @@ fn test_restore_keyspace_opt(
         (2, 1, None, false, 1),
     ];
 
-    let (_temp_dir, _oss, dfs_config) = prepare_dfs("test_restore_keyspace_");
+    let (_temp_dir, mut oss, dfs_config) = prepare_dfs("test_restore_keyspace_");
     let mut cluster = ServerCluster::new(
         alloc_node_id_vec(NODES_COUNT),
         |_, conf: &mut TikvConfig| {
@@ -192,8 +192,7 @@ fn test_restore_keyspace_opt(
     }
 
     cluster.stop();
-    // Don't graceful shutdown oss (`oss.shutdown()`), as some S3FS threads are
-    // still alive and holding connections.
+    oss.shutdown();
 }
 
 fn test_restore_keyspace_impl(
@@ -741,7 +740,7 @@ fn test_restore_keyspace_with_resolve_locks() {
     const KEYSPACE_ID: u32 = 1;
 
     test_util::init_log_for_test();
-    let (_temp_dir, _oss, dfs_config) = prepare_dfs("test_restore_keyspace_");
+    let (_temp_dir, mut oss, dfs_config) = prepare_dfs("test_restore_keyspace_");
     let s3fs = Arc::new(S3Fs::new(
         dfs_config.prefix.clone(),
         dfs_config.s3_endpoint.clone(),
@@ -860,6 +859,7 @@ fn test_restore_keyspace_with_resolve_locks() {
         .unwrap();
 
     cluster.stop();
+    oss.shutdown();
 }
 
 /// This test is to verify that `restore_keyspace` can handle the case that in
@@ -871,7 +871,7 @@ fn test_restore_keyspace_with_no_chunk() {
     const KEYSPACE_ID: u32 = 1;
 
     test_util::init_log_for_test();
-    let (_temp_dir, _oss, dfs_config) = prepare_dfs("test_restore_keyspace_");
+    let (_temp_dir, mut oss, dfs_config) = prepare_dfs("test_restore_keyspace_");
     let s3fs = Arc::new(S3Fs::new(
         dfs_config.prefix.clone(),
         dfs_config.s3_endpoint.clone(),
@@ -887,6 +887,8 @@ fn test_restore_keyspace_with_no_chunk() {
         alloc_node_id_vec(NODES_COUNT),
         |_, conf: &mut TikvConfig| {
             conf.dfs = dfs_config.clone();
+            conf.rfengine.target_file_size = ReadableSize::mb(512); // To prevent WAL to compact.
+            conf.rfengine.wal_chunk_target_file_size = ReadableSize::mb(64);
             conf.rfengine.lightweight_backup = true;
             conf.enable_inner_key_offset = true;
         },
@@ -940,14 +942,52 @@ fn test_restore_keyspace_with_no_chunk() {
     // Verify restored data.
     client.verify_data_with_ref_store();
     cluster.stop();
+    oss.shutdown();
+}
+
+#[derive(PartialEq, Debug)]
+enum RestoreResult {
+    AlwaysSucceed,
+    AlwaysFail,
+    DependsOnTolerateErr,
 }
 
 #[test]
 fn test_restore_keyspace_with_failed_store() {
+    test_util::init_log_for_test();
+    let cases = vec![
+        // fail_on_backup, fail_on_restore, fail_on_same_node, expected
+        (true, false, false, RestoreResult::AlwaysSucceed),
+        (false, true, false, RestoreResult::DependsOnTolerateErr),
+        (true, true, false, RestoreResult::AlwaysFail),
+        (true, true, true, RestoreResult::AlwaysSucceed),
+    ];
+    for (fail_on_backup, fail_on_restore, fail_on_same_node, expected) in cases {
+        test_restore_keyspace_with_failed_store_impl(
+            fail_on_backup,
+            fail_on_restore,
+            fail_on_same_node,
+            expected,
+        );
+    }
+}
+
+// fail_on_same_node: whether backup and restore fail on the same node.
+fn test_restore_keyspace_with_failed_store_impl(
+    fail_on_backup: bool,
+    fail_on_restore: bool,
+    fail_on_same_node: bool,
+    expected: RestoreResult,
+) {
+    info!("test_restore_keyspace_with_failed_store_impl";
+        "fail_on_backup" => fail_on_backup,
+        "fail_on_restore" => fail_on_restore,
+        "fail_on_same_node" => fail_on_same_node,
+        "expected" => ?expected,
+    );
     const KEYSPACE_ID: u32 = 1;
 
-    test_util::init_log_for_test();
-    let (_temp_dir, _oss, dfs_config) = prepare_dfs("test_restore_keyspace_");
+    let (_temp_dir, mut oss, dfs_config) = prepare_dfs("test_restore_keyspace_");
     let s3fs = Arc::new(S3Fs::new(
         dfs_config.prefix.clone(),
         dfs_config.s3_endpoint.clone(),
@@ -959,14 +999,15 @@ fn test_restore_keyspace_with_failed_store() {
     let reporter = Arc::new(DummyStepReporter::default());
     let runtime = Runtime::new().unwrap();
 
-    let mut cluster = ServerCluster::new(
-        alloc_node_id_vec(NODES_COUNT),
-        |_, conf: &mut TikvConfig| {
-            conf.dfs = dfs_config.clone();
-            conf.rfengine.lightweight_backup = true;
-            conf.enable_inner_key_offset = true;
-        },
-    );
+    // Use number of nodes of 3 to make sure that every node has WAL chunks not
+    // flushed yet.
+    let mut cluster = ServerCluster::new(alloc_node_id_vec(3), |_, conf: &mut TikvConfig| {
+        conf.dfs = dfs_config.clone();
+        conf.rfengine.target_file_size = ReadableSize::mb(512); // To prevent WAL to compact.
+        conf.rfengine.wal_chunk_target_file_size = ReadableSize::mb(64);
+        conf.rfengine.lightweight_backup = true;
+        conf.enable_inner_key_offset = true;
+    });
     cluster.wait_region_replicated(&[], 3);
     let mut client = cluster.new_client();
     client.split(&get_keyspace_prefix(KEYSPACE_ID));
@@ -976,16 +1017,25 @@ fn test_restore_keyspace_with_failed_store() {
     let i_to_key = gen_keyspace_key(KEYSPACE_ID);
     client.put_kv(0..1, &i_to_key, i_to_val(BASIC_DATA_LEN));
     client.verify_data_with_ref_store();
+    let origin_ref_store = client.dump_ref_store();
 
     // Perform backup.
     let snapshot_backup_name = generate_backup_name();
-    {
+    let backup_failed_node = {
         let backup_ts = client.get_ts().into_inner();
         let backup_config = backup::BackupConfig {
             dfs: dfs_config,
+            tolerate_err: 1,
             skip_keyspace_meta: true,
             ..Default::default()
         };
+
+        let failed_node_id = if fail_on_backup {
+            Some(stop_node(&mut cluster, true, None))
+        } else {
+            None
+        };
+
         let (_, backup_meta) = backup::backup_cluster_with_ts(
             backup_config,
             backup::BackupType::Lightweight,
@@ -996,13 +1046,34 @@ fn test_restore_keyspace_with_failed_store() {
         )
         .expect("backup::backup_cluster");
         info!("backup_cluster result: {:?}", backup_meta);
-    }
 
-    // Force stop one node without flush the last wal chunk to dfs.
-    let node_ids = cluster.get_nodes();
-    let mut rng = rand::thread_rng();
-    let failed_node_id = node_ids.choose(&mut rng).unwrap();
-    cluster.stop_node_force(*failed_node_id, true);
+        if let Some(node_id) = failed_node_id {
+            cluster.start_node(node_id, |_, _| {});
+        }
+        failed_node_id
+    };
+
+    // Put another data.
+    client.put_kv(1..2, &i_to_key, i_to_val(POST_BACKUP_DATA_LEN));
+    client.verify_data_with_ref_store();
+
+    if fail_on_restore {
+        // Force stop one node without flush the last WAL chunk to DFS.
+        let restore_failed_node = match backup_failed_node {
+            Some(node_id) => {
+                let node_id = if fail_on_same_node {
+                    node_id
+                } else {
+                    let mut node_ids = cluster.get_nodes();
+                    node_ids.retain(|&id| id != node_id);
+                    *node_ids.choose(&mut rand::thread_rng()).unwrap()
+                };
+                Some(node_id)
+            }
+            _ => None,
+        };
+        stop_node(&mut cluster, true, restore_failed_node);
+    }
 
     let mut restore_config = RestoreConfig {
         tolerate_err: 0,
@@ -1011,8 +1082,7 @@ fn test_restore_keyspace_with_failed_store() {
         ..Default::default()
     };
 
-    // Restore keyspace will failed without tolerate error.
-    restore_keyspace::restore_keyspace(
+    let res = restore_keyspace::restore_keyspace(
         KEYSPACE_ID,
         KEYSPACE_ID,
         &snapshot_backup_name,
@@ -1023,14 +1093,20 @@ fn test_restore_keyspace_with_failed_store() {
         &runtime,
         None,
         reporter.clone(),
-    )
-    .unwrap_err();
+    );
+    assert_eq!(
+        res.is_ok(),
+        expected == RestoreResult::AlwaysSucceed,
+        "res: {:?}, expected: {:?}",
+        res,
+        expected
+    );
 
     // Update tolerate error config and restore keyspace again.
     restore_config.tolerate_err = 1;
 
     // Restore keyspace.
-    restore_keyspace::restore_keyspace(
+    let res_tolerated = restore_keyspace::restore_keyspace(
         KEYSPACE_ID,
         KEYSPACE_ID,
         &snapshot_backup_name,
@@ -1041,12 +1117,40 @@ fn test_restore_keyspace_with_failed_store() {
         &runtime,
         None,
         reporter,
-    )
-    .unwrap();
+    );
+    assert_eq!(
+        res_tolerated.is_err(),
+        expected == RestoreResult::AlwaysFail,
+        "res: {:?}, expected: {:?}",
+        res,
+        expected
+    );
 
     // Verify restored data.
-    client.verify_data_with_ref_store();
+    if res.is_err() && res_tolerated.is_err() {
+        client.verify_data_with_ref_store();
+    } else {
+        client
+            .verify_data_with_given_ref_store(&origin_ref_store, None, &RequestOptions::default())
+            .unwrap();
+    }
     cluster.stop();
+    oss.shutdown();
+}
+
+// Stop random node when `node_id` is `None`.
+fn stop_node(cluster: &mut ServerCluster, force: bool, node_id: Option<u16>) -> u16 {
+    let failed_node_id = node_id.unwrap_or_else(|| {
+        let node_ids = cluster.get_nodes();
+        let mut rng = rand::thread_rng();
+        *node_ids.choose(&mut rng).unwrap()
+    });
+    let store_id = cluster.get_store_id(failed_node_id);
+
+    cluster.stop_node_force(failed_node_id, force);
+    info!("node stopped"; "node_id" => failed_node_id, "store_id" => store_id);
+
+    failed_node_id
 }
 
 fn i_to_key(i: usize) -> Vec<u8> {

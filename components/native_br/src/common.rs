@@ -307,7 +307,13 @@ async fn fetch_rfengine_wal_chunk(
         &store.status_address, epoch_id, start_off, end_off
     ))?;
     let req = || Request::get(uri.clone()).body(Body::empty()).unwrap();
-    send_request_to_store_with_retry(req, &store, security_mgr, timeout).await
+    // Use distinct error type for caller to decide whether to tolerate the error.
+    send_request_to_store_with_retry(req, &store, security_mgr, timeout)
+        .await
+        .map_err(|err| match err {
+            Error::HttpError(e) => Error::RfengineHttpError(e),
+            _ => err,
+        })
 }
 
 // TODO: Filter out the write batches of specified keyspace to replay to save

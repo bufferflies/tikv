@@ -76,6 +76,7 @@ pub struct RestoredKeyspace {
     pub target_keyspace_id: u32,
     pub ts: u64,
     pub restore_bytes: u64,
+    pub tolerated_err: usize,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -458,6 +459,7 @@ pub fn restore_keyspace(
         target_keyspace_id,
         ts: truncate_ts,
         restore_bytes,
+        tolerated_err: cluster.tolerated_err(),
     };
     Ok(restore_ret)
 }
@@ -653,6 +655,8 @@ pub struct BackupCluster {
     meta_applier: Option<Arc<MetaApplier>>,
 
     meta_sender: Option<mpsc::Sender<StoreMsg>>,
+
+    tolerated_err: usize,
     // new members need to check if need to clear in reset_keyspace.
 }
 
@@ -704,6 +708,7 @@ impl BackupCluster {
             shards_need_truncate: Default::default(),
             meta_applier: None,
             meta_sender: None,
+            tolerated_err: 0,
         };
 
         let mut store_configs = HashMap::with_capacity(cluster_meta.stores.len());
@@ -717,6 +722,19 @@ impl BackupCluster {
         };
         let fetch_wal_timeout = restore_conf.timeout_fetch_wal.0;
 
+        let is_error_can_tolerate = |err: &Error| -> bool {
+            if matches!(err, Error::RfengineHttpError(_)) {
+                true
+            } else if !restore_conf.strict_tolerate {
+                crate::metrics::NATIVE_BR_RESTORE_ERROR
+                    .with_label_values(&["setup_raft_engine"])
+                    .inc();
+                true
+            } else {
+                false
+            }
+        };
+
         for store in &cluster_meta.stores {
             let store_id = store.get_store_id();
             let store_config = cluster.generate_store_config(store_id);
@@ -724,22 +742,27 @@ impl BackupCluster {
 
             // We can tolerate one store failure for lightweight restoration during fetch
             // latest wal chunk from store.
-            if let Err(err) = cluster.setup_raft_engine(
+            match cluster.setup_raft_engine(
                 store_id,
                 cluster_meta,
                 store_configs.get(&store_id).unwrap(),
                 fetch_wal_timeout,
             ) {
-                if tolerate_err == 0 {
-                    return Err(err);
+                Err(err) if is_error_can_tolerate(&err) => {
+                    if tolerate_err == 0 {
+                        return Err(err);
+                    }
+                    warn!(
+                        "Keyspace {} setup raft engine for store {} failed, tolerate it: {:?}",
+                        cluster.tag(),
+                        store_id,
+                        err
+                    );
+                    tolerate_err -= 1;
+                    cluster.tolerated_err += 1;
                 }
-                warn!(
-                    "Keyspace {} setup raft engine for store {} failed, tolerate it: {:?}",
-                    cluster.tag(),
-                    store_id,
-                    err
-                );
-                tolerate_err -= 1;
+                Err(err) => return Err(err),
+                Ok(()) => {}
             }
         }
         cluster.load_shards()?;
@@ -1881,6 +1904,7 @@ impl BackupCluster {
         self.shards.clear();
         self.shards_need_flush.clear();
         self.shards_need_truncate.clear();
+        self.tolerated_err = 0;
 
         let mut store_configs = HashMap::with_capacity(cluster_meta.stores.len());
         for store in &cluster_meta.stores {
@@ -1904,6 +1928,10 @@ impl BackupCluster {
             .meta
             .get_property(ENCRYPTION_KEY)
             .map(|x| x.to_vec())
+    }
+
+    fn tolerated_err(&self) -> usize {
+        self.tolerated_err
     }
 }
 

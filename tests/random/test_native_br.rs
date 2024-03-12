@@ -8,6 +8,7 @@ use std::{
 
 use kvengine::dfs::S3Fs;
 use native_br::{
+    backup::BackupConfig,
     backup_worker,
     error::Error,
     restore::{get_cluster_backup_meta, get_cluster_backup_meta_async, RestoreConfig},
@@ -21,10 +22,18 @@ use test_cloud_server::{
     try_wait_result,
 };
 use test_pd_client::TestPdClient;
-use tikv_util::{info, time::Instant, warn};
+use tikv_util::{config::ReadableDuration, info, time::Instant, warn};
 use tokio::runtime::Runtime;
 
-use crate::{create_new_keyspace, BACKUP_COUNTER, RESTORE_COUNTER};
+use crate::{
+    create_new_keyspace, BACKUP_COUNTER, BACKUP_TOLERATED_ERR_COUNTER, RESTORE_COUNTER,
+    RESTORE_TOLERATED_ERR_COUNTER,
+};
+
+const FETCH_WAL_TIMEOUT: ReadableDuration = ReadableDuration::secs(30);
+// Use small duration to cover scene of error tolerance more easily.
+const FETCH_WAL_TIMEOUT_TOLERATE_ERR: ReadableDuration = ReadableDuration::secs(1);
+const RFENGINE_HTTP_ERROR_RETRY_TIMES: usize = 20;
 
 pub(crate) fn do_restore_keyspace(
     pd_client: Arc<dyn PdClient>,
@@ -62,6 +71,7 @@ pub(crate) fn do_restore_keyspace(
 pub(crate) fn spawn_backup(
     client: ClusterClient,
     keyspace_manager: KeyspaceManager,
+    config: BackupConfig,
     backup_worker: Arc<backup_worker::BackupWorker>,
     s3fs: &S3Fs,
     interval: Duration,
@@ -78,9 +88,11 @@ pub(crate) fn spawn_backup(
             // 3. As the keyspace of backup determines the keyspace to restore, we pick the
             //    random keyspace uniformly, to generate the scenario that some big
             //    keyspaces are never restored.
-            let keyspace_id = {
+            let (keyspace_id, do_lightweight_backup) = {
                 let mut rng = rand::thread_rng();
-                keyspace_manager.get_uniform_random_keyspace(&mut rng)
+                let keyspace_id = keyspace_manager.get_uniform_random_keyspace(&mut rng);
+                let do_lightweight_backup = rng.gen_ratio(4, 5);
+                (keyspace_id, do_lightweight_backup)
             };
 
             let lock = keyspace_manager.get_keyspace_lock(keyspace_id);
@@ -93,8 +105,6 @@ pub(crate) fn spawn_backup(
             // data after `backup_ts`.
             // See https://github.com/tidbcloud/cloud-storage-engine/issues/1094.
             let shared_guard = guard.downgrade();
-
-            let do_lightweight_backup = keyspace_id % 2 == 0;
 
             if do_lightweight_backup {
                 info!("spawn lightweight backup");
@@ -125,6 +135,12 @@ pub(crate) fn spawn_backup(
 
             BACKUP_COUNTER.fetch_add(1, Ordering::SeqCst);
 
+            assert!(backup_meta.tolerated_err as usize <= config.tolerate_err);
+            if backup_meta.tolerated_err > 0 {
+                BACKUP_TOLERATED_ERR_COUNTER
+                    .fetch_add(backup_meta.tolerated_err as usize, Ordering::Relaxed);
+            }
+
             let backup_elapsed = last_backup_time.saturating_elapsed();
             // No less than 1 second to avoid generating the same backup name.
             let sleep_time = interval
@@ -137,9 +153,13 @@ pub(crate) fn spawn_backup(
     })
 }
 
+// `Error::HttpError` is retryable even thought `tolerate_err` > 0, as there are
+// chances that backup is performed across the restart of more than one store.
 fn is_backup_error_retryable(err: &Error) -> bool {
     match err {
-        Error::TopoChanged(_) | Error::MetaNotFound(_) | Error::HttpError(_) => true,
+        Error::MetaNotFound(_)
+        | Error::HttpError(_)
+        | Error::IncrementalBackupToleratedError(_) => true,
         Error::SharedError(err) => is_backup_error_retryable(err.inner()),
         _ => false,
     }
@@ -166,7 +186,7 @@ pub(crate) fn check_br() {
 pub(crate) fn spawn_restore_keyspace(
     pd_client: Arc<TestPdClient>,
     mut client: ClusterKeyspaceClient,
-    config: RestoreConfig,
+    restore_config: RestoreConfig,
     keyspace_manager: KeyspaceManager,
     s3fs: &S3Fs,
     timeout: Duration,
@@ -184,7 +204,7 @@ pub(crate) fn spawn_restore_keyspace(
 
         let start_time = Instant::now();
         sleep(Duration::from_secs(3));
-        while start_time.saturating_elapsed() < timeout {
+        'next_restore: while start_time.saturating_elapsed() < timeout {
             let backup = match keyspace_manager.get_random_backup(&mut rng) {
                 Some(backup) => backup,
                 None => {
@@ -206,10 +226,20 @@ pub(crate) fn spawn_restore_keyspace(
                 source_keyspace
             };
             let backup_name = backup.backup_name().to_string();
+            let backup_meta = get_cluster_backup_meta(&s3fs, backup_name.clone());
             let tag = format!("{}->{}[{}]", source_keyspace, target_keyspace, backup_name);
 
+            let mut config = restore_config.clone();
+            config.timeout_fetch_wal = if config.tolerate_err > backup_meta.tolerated_err as usize {
+                FETCH_WAL_TIMEOUT_TOLERATE_ERR
+            } else {
+                FETCH_WAL_TIMEOUT
+            };
+            let config_tolerate_err = config.tolerate_err;
+
             // TODO: test without blocking write workloads.
-            {
+            let mut restored_keyspace = None;
+            'inner_retry: for _ in 0..RFENGINE_HTTP_ERROR_RETRY_TIMES {
                 let lock = keyspace_manager.get_keyspace_lock(target_keyspace);
                 let _guard = runtime.block_on(lock.mutex_lock());
 
@@ -228,7 +258,7 @@ pub(crate) fn spawn_restore_keyspace(
                 // during the whole backup process, which is not efficient.
                 // And actually there are only trivial differences between PiTR and snapshot
                 // restore.
-                match do_restore_keyspace(
+                restored_keyspace = match do_restore_keyspace(
                     pd_client.clone(),
                     &runtime,
                     config.clone(),
@@ -238,14 +268,21 @@ pub(crate) fn spawn_restore_keyspace(
                     Some(backup.backup_ts),
                     reporter.clone(),
                 ) {
-                    Ok(_) => {}
+                    Ok(res) => Some(res),
                     Err(Error::BackupEmptyForKeyspace(_)) => {
                         // Empty backup will happen on newly created keyspace. Retry.
                         warn!("{} backup is empty, retry", tag);
-                        continue;
+                        continue 'next_restore;
+                    }
+                    Err(Error::RfengineHttpError(err)) => {
+                        // We would still meet `RfengineHttpError` even thought `tolerate_err` > 0,
+                        // as there are chances that restoration is performed across the restart of
+                        // more than one store.
+                        warn!("{} meet RfengineHttpError, retry", tag; "err" => ?err);
+                        continue 'inner_retry;
                     }
                     Err(err) => panic!("{} restore failed: {:?}", tag, err),
-                }
+                };
                 keyspace_manager.restore_keyspace(&tag, backup, target_keyspace);
 
                 // To find data corruption early, and generate read workload as well.
@@ -267,16 +304,26 @@ pub(crate) fn spawn_restore_keyspace(
                     10,
                 );
                 if verify_res.is_err() {
-                    let backup_meta = get_cluster_backup_meta(&s3fs, backup_name);
                     info!("{} backup_meta: {:?}", tag, backup_meta);
                     panic!(
                         "{} verify_keyspace_with_ref_store (after restore): {:?}",
                         tag, verify_res
                     );
                 }
+
+                break;
             }
-            info!("{} restore keyspace success", tag);
+            let restored_keyspace = restored_keyspace.unwrap_or_else(|| {
+                panic!("{} RfengineHttpError retry limit exceeded", tag);
+            });
+            info!("{} restore keyspace success", tag; "res" => ?restored_keyspace);
             RESTORE_COUNTER.fetch_add(1, Ordering::Relaxed);
+
+            assert!(restored_keyspace.tolerated_err <= config_tolerate_err);
+            if restored_keyspace.tolerated_err > 0 {
+                RESTORE_TOLERATED_ERR_COUNTER
+                    .fetch_add(restored_keyspace.tolerated_err, Ordering::Relaxed);
+            }
 
             sleep(Duration::from_secs(rng.gen_range(0..10)));
         }
