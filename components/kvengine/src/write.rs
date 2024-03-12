@@ -251,7 +251,9 @@ impl Engine {
         let size = mem_tbl.size();
         if wb.switch_mem_table || size > self.opts.max_mem_table_size {
             self.switch_mem_table(&shard, version);
-            self.trigger_flush(&shard);
+            if let Err(err) = self.trigger_flush(&shard) {
+                warn!("{} trigger_flush error: {:?}", shard.tag(), err);
+            }
             0
         } else {
             size
@@ -384,7 +386,7 @@ impl Engine {
         }
     }
 
-    pub fn flush_shard_for_restore(&self, shard: &Shard) {
+    pub fn flush_shard_for_restore(&self, shard: &Shard) -> Result<()> {
         let ver = shard.get_base_version()
             + cmp::max(shard.get_write_sequence(), shard.get_meta_sequence())
             + 1;
@@ -397,8 +399,11 @@ impl Engine {
             shard.get_meta_sequence(),
         );
 
+        if !shard.get_initial_flushed() {
+            self.load_unloaded_tables(shard.id, shard.ver, false)?;
+        }
         self.switch_mem_table(shard, ver);
         self.set_shard_active(shard.id, true);
-        self.trigger_flush(shard);
+        self.trigger_flush(shard)
     }
 }

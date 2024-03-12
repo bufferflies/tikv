@@ -342,7 +342,9 @@ impl EngineCore {
         store_bool(&shard.initial_flushed, true);
         // Switched memtables can't be flushed until initial flush finished, so we
         // trigger it actively.
-        self.trigger_flush(shard);
+        if let Err(err) = self.trigger_flush(shard) {
+            warn!("{} trigger_flush error: {:?}", shard.tag(), err);
+        }
     }
 
     fn apply_compaction(&self, shard: &Shard, cs: &ChangeSet) {

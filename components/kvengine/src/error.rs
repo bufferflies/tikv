@@ -40,6 +40,8 @@ pub enum Error {
     CompactionNotRetryable(String),
     #[error("remote read error {0}")]
     RemoteRead(String),
+    #[error("Other error {0}")]
+    Other(#[from] Box<dyn std::error::Error + Send + Sync>),
 }
 
 impl From<table::Error> for Error {

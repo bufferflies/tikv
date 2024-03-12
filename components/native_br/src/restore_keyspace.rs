@@ -1563,7 +1563,7 @@ impl BackupCluster {
             let engine_shard = kv_engine
                 .get_shard(shard_id)
                 .unwrap_or_else(|| panic!("shard not found: {}", shard_id));
-            kv_engine.flush_shard_for_restore(&engine_shard);
+            kv_engine.flush_shard_for_restore(&engine_shard)?;
         }
 
         self.check_flushed(timeout)?;

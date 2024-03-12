@@ -25,7 +25,7 @@ use fslock;
 use moka::sync::SegmentedCache;
 use security::SecurityManager;
 use slog_global::info;
-use tikv_util::{mpsc, sys::thread::StdThreadBuildWrapper};
+use tikv_util::{box_err, mpsc, sys::thread::StdThreadBuildWrapper};
 
 use crate::{
     apply::ChangeSet,
@@ -479,13 +479,12 @@ impl EngineCore {
             .unwrap_or(0)
     }
 
-    pub(crate) fn trigger_flush(&self, shard: &Shard) {
+    pub(crate) fn trigger_flush(&self, shard: &Shard) -> Result<()> {
         if !shard.is_active() {
-            return;
+            return Ok(());
         }
         if !shard.get_initial_flushed() {
-            self.trigger_initial_flush(shard);
-            return;
+            return self.trigger_initial_flush(shard);
         }
         let data = shard.get_data();
         let mut mem_tbls = data.mem_tbls.clone();
@@ -497,11 +496,20 @@ impl EngineCore {
                 ))));
             }
         }
+        Ok(())
     }
 
-    fn trigger_initial_flush(&self, shard: &Shard) {
+    fn trigger_initial_flush(&self, shard: &Shard) -> Result<()> {
         let mut mem_tbls = vec![];
         let data = shard.get_data();
+        if !data.unloaded_tbls.is_empty() {
+            let msg = format!(
+                "{} trigger_initial_flush: shard has unloaded tables",
+                shard.tag()
+            );
+            error!("{}", msg; "unloaded_tables" => ?data.unloaded_tbls.keys());
+            return Err(box_err!("{}", msg));
+        }
         // A newly split shard's meta_sequence is an in-mem state until initial flush.
         let data_sequence = shard.get_meta_sequence();
         let base_version = shard.get_base_version();
@@ -538,6 +546,7 @@ impl EngineCore {
                 max_ts,
             },
         ))));
+        Ok(())
     }
 
     pub fn build_ingest_files(
@@ -705,7 +714,9 @@ impl EngineCore {
             shard.set_active(active);
             if active {
                 self.refresh_shard_states(&shard);
-                self.trigger_flush(&shard);
+                if let Err(err) = self.trigger_flush(&shard) {
+                    warn!("{} trigger_flush error: {:?}", shard.tag(), err);
+                }
             } else {
                 store_bool(&shard.compacting, false);
                 self.send_flush_msg(FlushMsg::Clear(shard_id));
