@@ -41,6 +41,8 @@ impl Engine {
         let mut new_shards = vec![];
         let new_shard_props = split.get_new_shards();
         let new_ver = old_shard.ver + new_shard_props.len() as u64 - 1;
+        let old_data = old_shard.get_data();
+        let old_del_prefixes = old_shard.pending_ops.read().unwrap().del_prefixes.clone();
         for i in 0..=split.keys.len() {
             let (start_key, end_key) = get_splitting_start_end(
                 old_shard.outer_start.chunk(),
@@ -85,9 +87,18 @@ impl Engine {
                 store_u64(&new_shard.meta_seq, initial_seq);
                 store_u64(&new_shard.write_sequence, initial_seq);
             }
+            if !old_del_prefixes.is_empty() {
+                // We need to use the old shard's DEL_PREFIXES_KEY to overwrite the new shard's
+                // DEL_PREFIXES_KEY. because the destroy_range compaction may have not
+                // applied to the shard.
+                let new_del_prefixes =
+                    old_del_prefixes.build_split(start_key, end_key, old_shard.inner_key_off);
+                if !new_del_prefixes.is_empty() {
+                    new_shard.set_property(DEL_PREFIXES_KEY, &new_del_prefixes.marshal());
+                }
+            }
             new_shards.push(Arc::new(new_shard));
         }
-        let old_data = old_shard.get_data();
         for new_shard in &new_shards {
             let new_mem_tbls = new_shard.split_mem_tables(&old_data.mem_tbls);
             let mut new_l0s = vec![];
