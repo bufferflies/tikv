@@ -659,13 +659,7 @@ impl<'a> PeerMsgHandler<'a> {
                 true
             }
             cmp::Ordering::Greater => {
-                if self.fsm.peer.maybe_destroy() {
-                    self.ctx.apply_msgs.msgs.push(ApplyMsg::UnsafeDestroy {
-                        region_id: self.region_id(),
-                    });
-                } else {
-                    self.ctx.raft_metrics.message_dropped.applying_snap.inc();
-                }
+                self.maybe_destroy();
                 true
             }
             cmp::Ordering::Equal => false,
@@ -693,14 +687,7 @@ impl<'a> PeerMsgHandler<'a> {
             "peer_id" => self.fsm.peer_id(),
             "to_peer" => ?msg.get_to_peer(),
         );
-        if self.fsm.peer.maybe_destroy() {
-            // Destroy the apply fsm first, wait for the reply msg from apply fsm
-            self.ctx.apply_msgs.msgs.push(ApplyMsg::UnsafeDestroy {
-                region_id: self.region_id(),
-            });
-        } else {
-            self.ctx.raft_metrics.message_dropped.applying_snap.inc();
-        }
+        self.maybe_destroy();
     }
 
     fn on_stale_merge(&mut self, target_region_id: u64) {
@@ -719,12 +706,7 @@ impl<'a> PeerMsgHandler<'a> {
         // index. If the merge succeed, all source peers are impossible in apply
         // snapshot state and must be initialized.
         // So `maybe_destroy` must succeed here.
-        if self.fsm.peer.maybe_destroy() {
-            // Destroy the apply fsm first, wait for the reply msg from apply fsm
-            self.ctx.apply_msgs.msgs.push(ApplyMsg::UnsafeDestroy {
-                region_id: self.region_id(),
-            });
-        }
+        self.maybe_destroy();
     }
 
     // Returns `Vec<(u64, bool)>` indicated (source_region_id, merge_to_this_peer)
@@ -2205,6 +2187,21 @@ impl<'a> PeerMsgHandler<'a> {
             if shard.check_need_gc_tombstones(safe_ts) {
                 kv.trigger_compact(shard.id_ver());
             }
+        }
+    }
+
+    fn maybe_destroy(&mut self) {
+        if self.fsm.peer.maybe_destroy(self.ctx) {
+            // Destroy the apply fsm first, wait for the reply msg from apply fsm
+            self.ctx.apply_msgs.msgs.push(ApplyMsg::UnsafeDestroy {
+                region_id: self.region_id(),
+            });
+        } else {
+            self.ctx
+                .raft_metrics
+                .message_dropped
+                .region_tombstone_peer
+                .inc();
         }
     }
 }

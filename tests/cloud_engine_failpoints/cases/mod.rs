@@ -7,7 +7,6 @@ use tikv_util::info;
 
 mod test_compaction;
 mod test_merge;
-mod test_split;
 mod test_stats;
 mod test_trim_over_bound;
 

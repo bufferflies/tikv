@@ -645,7 +645,7 @@ impl Peer {
         self.raft_group.raft.raft_log.last_index() + 1
     }
 
-    pub(crate) fn maybe_destroy(&mut self) -> bool {
+    pub(crate) fn maybe_destroy(&mut self, ctx: &RaftContext) -> bool {
         if self.pending_remove {
             info!(
                 "is being destroyed, skip";
@@ -668,6 +668,14 @@ impl Peer {
             // would delay forever.
             info!(
                 "region has not applied to preprocessed epoch, wait for apply";
+                "tag" => self.tag(),
+                "peer_id" => self.peer.get_id(),
+            );
+            return false;
+        }
+        if ctx.global.engines.raft.has_dependents(self.region_id) {
+            info!(
+                "region has dependent, wait for destroy";
                 "tag" => self.tag(),
                 "peer_id" => self.peer.get_id(),
             );
@@ -3409,13 +3417,17 @@ impl Peer {
         // check must be passed if the previous check that `pending_conf_index`
         // should be less than or equal to `self.get_store().applied_index()` is
         // passed.
-        if self.get_store().applied_index_term() != self.term() {
+        let store = self.get_store();
+        if store.applied_index_term() != self.term() {
             return Err(box_err!(
                 "{} peer has not applied to current term, applied_term {}, current_term {}",
                 self.tag(),
-                self.get_store().applied_index_term(),
+                store.applied_index_term(),
                 self.term()
             ));
+        }
+        if !store.initial_flushed() {
+            return Err(box_err!("{} peer has not initial flushed", self.tag()));
         }
         if let Some(index) = self.cmd_epoch_checker.propose_check_epoch(req, self.term()) {
             return Ok(Either::Right(index));
