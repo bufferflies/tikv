@@ -1633,6 +1633,9 @@ impl Applier {
             ApplyMsg::CheckSwitchMemTable { region_id } => {
                 self.handle_check_switch_mem_table(ctx, region_id);
             }
+            ApplyMsg::PrepareMerge => {
+                self.maybe_pause_for_split_merge();
+            }
             ApplyMsg::PrepareCommitMerge {
                 source,
                 commit_index,

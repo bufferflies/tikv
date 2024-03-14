@@ -77,6 +77,7 @@ pub(crate) enum ApplyMsg {
     PendingSplit(kvenginepb::ChangeSet),
     ApplyChangeSet(kvengine::ChangeSet),
     PrepareChangeSet(kvenginepb::ChangeSet),
+    PrepareMerge,
     PrepareCommitMerge {
         source: kvenginepb::ChangeSet,
         commit_index: u64,

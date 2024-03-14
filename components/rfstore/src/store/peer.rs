@@ -2100,6 +2100,7 @@ impl<'a> PreprocessRef<'a> {
         new_meta.set_property(TERM_KEY, &entry.term.to_le_bytes());
         self.update_meta_on_version_change(ctx, &new_meta, &region, Some(merge_state.clone()));
         *self.pending_merge_state = Some(merge_state);
+        ctx.apply_msgs.msgs.push(ApplyMsg::PrepareMerge);
     }
 
     pub(crate) fn preprocess_rollback_merge(
