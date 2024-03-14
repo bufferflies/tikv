@@ -487,9 +487,7 @@ impl SnapAccessCore {
             };
             path.mem_table = path.mem_table.saturating_add(1);
             if v.is_valid() {
-                out_val_owner.resize(v.encoded_size(), 0);
-                v.encode(out_val_owner.as_mut_slice());
-                return table::Value::decode(out_val_owner.as_slice());
+                return v;
             }
         }
         let key_hash = farmhash::fingerprint64(inner_key.deref());
