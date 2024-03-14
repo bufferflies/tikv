@@ -100,7 +100,6 @@ pub(crate) struct InitialFlush {
     pub(crate) mem_tbls: Vec<memtable::CfTable>,
     pub(crate) base_version: u64,
     pub(crate) data_sequence: u64,
-    pub(crate) props: Option<kvenginepb::Properties>,
     pub(crate) shard_data: ShardData,
     pub(crate) max_ts: u64,
 }
@@ -203,9 +202,6 @@ impl Engine {
         initial_flush.set_base_version(flush.base_version);
         initial_flush.set_data_sequence(flush.data_sequence);
         initial_flush.set_max_ts(flush.max_ts);
-        if let Some(props) = flush.props.as_ref() {
-            initial_flush.set_properties(props.clone());
-        }
         for l0 in &flush.shard_data.l0_tbls {
             if task.table_double_overbound(l0.smallest(), l0.biggest())
                 && !l0.has_data_in_range(task.inner_start(), task.inner_end())

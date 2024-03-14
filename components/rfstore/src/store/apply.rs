@@ -243,9 +243,8 @@ pub(crate) struct Applier {
 
     pub(crate) paused_apply_queue: PausedApplyQueue,
 
-    // The sequence of snapshot change set can be equal to other types, so we use
-    // (sequence, is_snapshot) to track.
-    pub(crate) scheduled_change_sets: VecDeque<(u64, bool)>,
+    // The ChangeSetType is used to decide whether to pause the apply task for split/merge.
+    pub(crate) scheduled_change_sets: VecDeque<(u64, ChangeSetType)>,
 
     pub(crate) prepared_change_sets: HashMap<u64, kvengine::ChangeSet>,
 
@@ -261,6 +260,40 @@ pub(crate) struct Applier {
 
     encryption_key: Option<EncryptionKey>,
     decryption_buf: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum ChangeSetType {
+    Normal,
+    Snapshot,
+    TrimOverBound,
+    InitialFlush,
+    DestroyRange,
+}
+
+impl ChangeSetType {
+    fn from_change_set(cs: &kvenginepb::ChangeSet) -> Self {
+        if cs.has_snapshot() {
+            ChangeSetType::Snapshot
+        } else if cs.has_trim_over_bound() {
+            ChangeSetType::TrimOverBound
+        } else if cs.has_initial_flush() {
+            ChangeSetType::InitialFlush
+        } else if cs.has_destroy_range() {
+            ChangeSetType::DestroyRange
+        } else {
+            ChangeSetType::Normal
+        }
+    }
+
+    fn should_pause_for_split_merge(&self) -> bool {
+        matches!(
+            self,
+            ChangeSetType::TrimOverBound
+                | ChangeSetType::InitialFlush
+                | ChangeSetType::DestroyRange
+        )
+    }
 }
 
 impl Applier {
@@ -1216,10 +1249,11 @@ impl Applier {
     }
 
     fn handle_apply_change_set(&mut self, ctx: &mut ApplyContext, cs: ChangeSet) {
+        let change_set_tp = ChangeSetType::from_change_set(&cs.change_set);
         if !self
             .scheduled_change_sets
             .iter()
-            .any(|&(seq, is_snapshot)| seq == cs.sequence && is_snapshot == cs.has_snapshot())
+            .any(|&(seq, cs_tp)| seq == cs.sequence && cs_tp == change_set_tp)
         {
             info!(
                 "{} discard outdated change set {:?}",
@@ -1382,9 +1416,8 @@ impl Applier {
         } else if cs.has_restore_shard() {
             self.handle_prepare_restore_shard(&cs);
         }
-
-        self.scheduled_change_sets
-            .push_back((cs.sequence, cs.has_snapshot()));
+        let cs_tp = ChangeSetType::from_change_set(&cs);
+        self.scheduled_change_sets.push_back((cs.sequence, cs_tp));
         let engine = ctx.engine.clone();
         let router = ctx.router.clone().unwrap();
         let is_leader = self.is_leader();
@@ -1445,25 +1478,8 @@ impl Applier {
         source: kvenginepb::ChangeSet,
         commit_index: u64,
     ) {
+        self.maybe_pause_for_split_merge();
         let is_leader = self.is_leader();
-        if let Ok(source_shard) = ctx
-            .engine
-            .get_shard_with_ver(source.shard_id, source.shard_ver)
-        {
-            if source_shard.get_meta_sequence() == source.sequence {
-                // TODO(optimize):
-                // All the files already in the local disk, prepare_change_set is non-blocking.
-                // But we still need to load block index for each file, later we can optimize to
-                // copy the opened tables from source shard.
-                let source_tables = ctx
-                    .engine
-                    .prepare_change_set(source, !is_leader, None)
-                    .unwrap();
-                self.commit_merge_source_tables
-                    .insert(source_shard.id, source_tables);
-                return;
-            }
-        }
         let engine = ctx.engine.clone();
 
         self.paused_apply_queue
@@ -1479,6 +1495,23 @@ impl Applier {
                 PeerMsg::PrepareCommitMergeResult(res, commit_index),
             );
         });
+    }
+
+    // When split or merge, the leader must have already initial flushed, but the
+    // follower may not. To avoid the follower diverge too much from the leader,
+    // we need to make sure the follower already initial flushed before apply
+    // split or merge. For commit merge, we also need to make sure the trim over
+    // bound has already applied, or we may have overlapping sst in the LSM
+    // tree.
+    fn maybe_pause_for_split_merge(&mut self) {
+        for &(seq, cs_tp) in &self.scheduled_change_sets {
+            if cs_tp.should_pause_for_split_merge() {
+                self.paused_apply_queue
+                    .pause(seq, &format!("{} {:?}", self.tag(), cs_tp));
+            }
+        }
+        self.paused_apply_queue.paused_sequences.sort_unstable();
+        self.paused_apply_queue.paused_sequences.dedup();
     }
 
     fn handle_resume_commit_merge(
@@ -1589,6 +1622,7 @@ impl Applier {
             ApplyMsg::PendingSplit(pending_split) => {
                 self.pending_split
                     .insert(pending_split.sequence, pending_split);
+                self.maybe_pause_for_split_merge();
             }
             ApplyMsg::PrepareChangeSet(cs) => {
                 self.handle_prepare_change_set(ctx, cs);
@@ -2149,7 +2183,7 @@ pub struct ApplyMetrics {
 #[derive(Default)]
 pub(crate) struct PausedApplyQueue {
     queue: VecDeque<MsgApply>,
-    paused_sequences: VecDeque<u64>,
+    paused_sequences: Vec<u64>,
 }
 
 impl PausedApplyQueue {
@@ -2170,18 +2204,21 @@ impl PausedApplyQueue {
     }
 
     pub fn paused_sequence(&self) -> Option<u64> {
-        self.paused_sequences.front().cloned()
+        self.paused_sequences.first().cloned()
     }
 
     pub fn pause(&mut self, seq: u64, label: &str) {
         info!("{} pause apply at {}", label, seq);
-        self.paused_sequences.push_back(seq);
+        self.paused_sequences.push(seq);
     }
 
     pub fn unpause(&mut self, label: &str) -> Option<u64> {
-        let paused_seq = self.paused_sequences.pop_front();
+        if self.paused_sequences.is_empty() {
+            return None;
+        }
+        let paused_seq = self.paused_sequences.remove(0);
         info!("{} unpause apply at {:?}", label, paused_seq);
-        paused_seq
+        Some(paused_seq)
     }
 
     /// Unpause by picking the expected seq in queue, and return true if found.
@@ -2218,7 +2255,7 @@ impl PausedApplyQueue {
         if self.queue.is_empty() {
             return None;
         }
-        if let Some(&seq) = self.paused_sequences.front() {
+        if let Some(&seq) = self.paused_sequences.first() {
             let front = self.queue.front_mut().unwrap();
             // Treat message with empty entries as not paused.
             // Otherwise, this message would block following available entries.

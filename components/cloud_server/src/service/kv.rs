@@ -343,42 +343,10 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
                     }
                 }
 
-                let kv = kv.clone();
                 let region = *region;
                 let ch = ch.clone();
                 let prefix = prefix.clone();
                 let region_task = async move {
-                    let mut region_is_ready = false;
-                    for i in 1..=5 {
-                        // A shard should not change property DEL_PREFIXES_KEY before initial
-                        // flushed. The property DEL_PREFIXES_KEY is possible to be inconsistent
-                        // after split/merge, and it depends on initial flush to fix the
-                        // inconsistency.
-                        region_is_ready = match kv.get_shard(region.id()) {
-                            Some(shard)
-                                if shard.ver == region.ver() && shard.get_initial_flushed() =>
-                            {
-                                Ok::<bool, String>(true)
-                            }
-                            Some(shard) if shard.ver > region.ver() => Err(format!(
-                                "{} unsafe_destroy_range: region changed during delete range",
-                                region.id()
-                            )),
-                            _ => Ok(false),
-                        }?;
-                        if region_is_ready {
-                            break;
-                        }
-                        let deadline = std::time::Instant::now() + Duration::from_secs(i);
-                        let _ = GLOBAL_TIMER_HANDLE.delay(deadline).compat().await.is_ok();
-                    }
-                    if !region_is_ready {
-                        return Err(format!(
-                            "{} unsafe_destroy_range: region is not ready",
-                            region.id()
-                        ));
-                    }
-
                     info!(
                         "{} unsafe_destroy_range: request delete prefix {:?} for region {:?}",
                         region.id(),
