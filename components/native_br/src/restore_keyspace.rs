@@ -2272,6 +2272,7 @@ struct PeerPreprocessor {
     pending_merge_state: Option<MergeState>,
     first_no_kv_idx: u64,
     last_no_kv_idx: u64,
+    learner_skip_idx: u64,
 }
 
 impl PeerPreprocessor {
@@ -2304,6 +2305,7 @@ impl PeerPreprocessor {
             pending_merge_state: merge_state,
             first_no_kv_idx: 0, // truncated ?
             last_no_kv_idx: 0,  // truncated ?
+            learner_skip_idx: 0,
         }
     }
 
@@ -2321,6 +2323,7 @@ impl PeerPreprocessor {
             pending_merge_state: &mut self.pending_merge_state,
             first_no_kv_idx: &mut self.first_no_kv_idx,
             last_no_kv_idx: &mut self.last_no_kv_idx,
+            learner_skip_idx: &mut self.learner_skip_idx,
         }
     }
 }

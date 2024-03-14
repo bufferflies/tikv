@@ -1960,6 +1960,11 @@ impl<'a> PreprocessRef<'a> {
             "{} set pending truncate raft log for restore_shard, term {} index {} old {:?}",
             tag, entry.term, entry.index, old
         );
+        // We use the last_index to set learner_skip_idx, but the last_index may not be
+        // committed and later truncated, so we need to check and update it here.
+        if *self.learner_skip_idx > entry.index - 1 {
+            *self.learner_skip_idx = entry.index - 1;
+        }
     }
 
     pub(crate) fn preprocess_pending_splits(
@@ -3767,6 +3772,7 @@ pub struct PreprocessRef<'a> {
     pub last_committed_split_idx: &'a mut u64,
     pub pending_truncate: &'a mut Option<(u64 /* term */, u64 /* index */)>,
     pub pending_merge_state: &'a mut Option<MergeState>,
+    pub learner_skip_idx: &'a mut u64,
 }
 
 impl<'a> PreprocessRef<'a> {
@@ -3781,6 +3787,7 @@ impl<'a> PreprocessRef<'a> {
             preprocessed_index,
             first_no_kv_idx,
             last_no_kv_idx,
+            learner_skip_idx,
         ) = (
             &mut peer.peer,
             &mut peer.last_committed_split_idx,
@@ -3789,6 +3796,7 @@ impl<'a> PreprocessRef<'a> {
             &mut peer.preprocessed_index,
             &mut peer.first_no_kv_idx,
             &mut peer.last_no_kv_idx,
+            &mut peer.learner_skip_idx,
         );
 
         let store = peer.raft_group.mut_store();
@@ -3812,6 +3820,7 @@ impl<'a> PreprocessRef<'a> {
             last_committed_split_idx,
             pending_truncate,
             pending_merge_state,
+            learner_skip_idx,
         }
     }
 
