@@ -673,7 +673,18 @@ impl Peer {
             );
             return false;
         }
-        if ctx.global.engines.raft.has_dependents(self.region_id) {
+        let mut wait_dependent = false;
+        ctx.global
+            .engines
+            .raft
+            .with_dependents(self.region_id, |deps| {
+                wait_dependent = if deps.contains(&self.region_id) {
+                    deps.len() > 1
+                } else {
+                    !deps.is_empty()
+                };
+            });
+        if wait_dependent {
             info!(
                 "region has dependent, wait for destroy";
                 "tag" => self.tag(),
