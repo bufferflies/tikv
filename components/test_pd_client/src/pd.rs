@@ -43,7 +43,7 @@ use pd_client::{
 use raft::eraftpb::ConfChangeType;
 use security::GetSecurityManager;
 use tikv_util::{
-    store::{check_key_in_region, find_peer, is_learner, new_peer, QueryStats},
+    store::{check_key_in_region, find_peer, is_learner, new_learner_peer, new_peer, QueryStats},
     time::{Instant, UnixSecs},
     timer::GLOBAL_TIMER_HANDLE,
     Either, HandyRwLock,
@@ -728,7 +728,8 @@ impl PdCluster {
                         .iter()
                         .all(|x| x.get_store_id() != *store_id)
                     {
-                        let peer = Either::Left(new_peer(*store_id, self.alloc_id().unwrap()));
+                        let peer =
+                            Either::Left(new_learner_peer(*store_id, self.alloc_id().unwrap()));
                         let policy = SchedulePolicy::Repeat(1);
                         return Some(Operator::AddPeer { peer, policy });
                     }
@@ -745,7 +746,21 @@ impl PdCluster {
                 let policy = SchedulePolicy::Repeat(1);
                 return Some(Operator::RemovePeer { peer, policy });
             }
-            _ => {}
+            _ => {
+                if let Some(learner) = region
+                    .get_peers()
+                    .iter()
+                    .find(|p| p.get_role() == PeerRole::Learner)
+                {
+                    let policy = SchedulePolicy::Repeat(1);
+                    let mut voter = learner.clone();
+                    voter.role = PeerRole::Voter;
+                    return Some(Operator::AddPeer {
+                        peer: Either::Left(voter),
+                        policy,
+                    });
+                }
+            }
         }
 
         None

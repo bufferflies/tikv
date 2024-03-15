@@ -16,6 +16,7 @@ use kvengine::{dfs::Dfs, ShardStats};
 use kvproto::{
     kvrpcpb,
     kvrpcpb::{Mutation, Op},
+    metapb::PeerRole,
     raft_cmdpb::{RaftCmdRequest, RaftCmdResponse, RaftRequestHeader},
 };
 use log_wrappers::Value;
@@ -341,7 +342,12 @@ impl ServerCluster {
             };
             let region_id = region_info.id;
             let region_ver = region_info.get_region_epoch().version;
-            if region_info.region.get_peers().len() >= replica_cnt {
+            let voter_count = region_info
+                .get_peers()
+                .iter()
+                .filter(|p| p.get_role() == PeerRole::Voter)
+                .count();
+            if voter_count >= replica_cnt {
                 let all_applied_snapshot = region_info.get_peers().iter().all(|peer| {
                     let node_id = self.get_server_node_id(peer.store_id);
                     let kv = self.get_kvengine(node_id);
