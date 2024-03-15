@@ -1,6 +1,7 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
+    cmp::{max, min},
     collections::HashMap,
     fs,
     io::Write,
@@ -1368,8 +1369,10 @@ impl LoadTaskWorker {
 
         let mut errors = vec![];
         let mut handle_ingest_res = |res: Result<metapb::Region>| match res {
-            Ok(mut region) => {
-                success_ranges.insert(region.take_start_key(), region.take_end_key());
+            Ok(region) => {
+                let success_start = max(region.get_start_key(), outer_first_key.as_slice());
+                let success_end = min(region.get_end_key(), outer_last_key.as_slice());
+                success_ranges.insert(success_start.to_vec(), success_end.to_vec());
                 self.scheduler.add_ingested_regions();
             }
             Err(err) => errors.push(err),
