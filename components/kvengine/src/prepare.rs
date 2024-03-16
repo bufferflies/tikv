@@ -119,8 +119,13 @@ impl EngineCore {
             "[{}:{}] is preparing change set, loading file by ids", cs.shard_id, cs.shard_ver;
             "ids" => ?ids.keys(),
         );
-        let encryption_key = if cs.has_snapshot() {
-            get_shard_property(ENCRYPTION_KEY, cs.get_snapshot().get_properties())
+        let encryption_key = if cs.has_snapshot() || cs.has_restore_shard() {
+            let snap = if cs.has_snapshot() {
+                cs.get_snapshot()
+            } else {
+                cs.get_restore_shard()
+            };
+            get_shard_property(ENCRYPTION_KEY, snap.get_properties())
                 .map(|v| self.master_key.decrypt_encryption_key(&v).unwrap())
         } else {
             match self.get_shard(cs.shard_id) {
