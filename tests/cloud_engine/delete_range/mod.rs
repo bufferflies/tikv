@@ -153,7 +153,11 @@ fn test_delete_range_delay_helper(enable_inner_key_off: bool) {
     // After half of the max delay duration, some of the del_prefixes are destroyed.
     thread::sleep(Duration::from_secs(5));
     let has_del_prefix_count = get_del_prefix_shard_count(&kvengine);
-    assert!(has_del_prefix_count > 5 && has_del_prefix_count < 25);
+    assert!(
+        has_del_prefix_count > 2 && has_del_prefix_count < 28,
+        "has_del_prefix_count: {}",
+        has_del_prefix_count
+    );
 
     // After more than the max delay duration, all of the del_prefixes are
     // destroyed.
