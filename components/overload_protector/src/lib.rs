@@ -36,12 +36,23 @@ pub struct CopTaskStats {
 #[serde(rename_all = "kebab-case")]
 pub struct OverloadConfig {
     pub enable: bool,
+    // If a transaction cumulatively read more than max_keys or more than max_data_size, it will be
+    // considered as an overload transaction. Upcoming coprocesor read requests of the same
+    // transaction will be rejected by the coprocessor with an 'OverloadProtection' error.
     pub max_keys: u64,
     pub max_data_size: ReadableSize,
+
+    // If a transaction read less than discard_keys during 'process_interval', it will not be taken
+    // into account when calculating the cumulative read requests and data size.
     #[online_config(skip)]
     pub discard_keys: u64,
+
+    // The interval to calculate and update the overload tasks.
     #[online_config(skip)]
     pub process_interval: ReadableDuration,
+
+    // If a task's physical time has a gap to now and exceeds task_expire, and its stats will not
+    // be taken into account for the next round of calculation.
     #[online_config(skip)]
     pub task_expire: ReadableDuration,
 }
@@ -74,12 +85,18 @@ impl OverloadConfig {
 }
 
 pub struct OverloadProtectorWorker {
-    cop_tasks: HashMap<u64, CopTaskStats>,
-    receiver: Receiver<WorkerMsg>,
-    protector: OverloadProtector,
-    last_process_time: Instant,
-    overload_tasks: HashMap<u64, CopTaskStats>,
     config: Box<OverloadConfig>,
+    protector: OverloadProtector,
+
+    // The receiver to receive the CopTaskStats after cop task execution.
+    receiver: Receiver<WorkerMsg>,
+
+    // Task id (transaction start ts) -> CopTaskStats
+    cop_tasks: HashMap<u64, CopTaskStats>,
+    // Overload task id -> CopTaskStats
+    overload_tasks: HashMap<u64, CopTaskStats>,
+    // The last time to calculate the overload tasks.
+    last_process_time: Instant,
 }
 
 enum WorkerMsg {
@@ -134,7 +151,7 @@ impl OverloadProtectorWorker {
 
     fn add_cop_task_stats(&mut self, stats: CopTaskStats) {
         let task_id = stats.task_id;
-        let old = self
+        let task_stats = self
             .cop_tasks
             .entry(task_id)
             .or_insert_with(|| CopTaskStats {
@@ -144,24 +161,35 @@ impl OverloadProtectorWorker {
                 data_size: 0,
                 duration_ms: 0,
             });
-        old.num_reqs += stats.num_reqs;
-        old.num_keys += stats.num_keys;
-        old.data_size += stats.data_size;
-        old.duration_ms += stats.duration_ms;
+        task_stats.num_reqs += stats.num_reqs;
+        task_stats.num_keys += stats.num_keys;
+        task_stats.data_size += stats.data_size;
+        task_stats.duration_ms += stats.duration_ms;
     }
 
     fn process_cop_task_stats(&mut self) {
-        let mut new_tasks = HashMap::with_capacity(self.cop_tasks.len());
+        let mut not_expired_tasks = HashMap::with_capacity(self.cop_tasks.len());
+        // Todo:
+        // If a task is calculated as an overload task, it will stay in the
+        // overload_tasks map forever. There is a potential risk that the map
+        // will grow infinitely. We need to find a way to remove the task from the map
+        // after a certain period.
         let mut new_overloads = self.overload_tasks.clone();
         let now = TimeStamp::physical_now();
         let task_expire_ms = self.config.task_expire.as_millis();
         for (task_id, stats) in self.cop_tasks.drain() {
+            // The task is not taken into account if it reads less than discard_keys.
             if stats.num_keys < self.config.discard_keys {
                 continue;
             }
+
+            // If the task is already overloaded, it will not be calculated again.
             if new_overloads.contains_key(&task_id) {
                 continue;
-            };
+            }
+
+            // If the task reads more than max_keys or max_data_size, it will be considered
+            // as an overload task.
             if stats.num_keys > self.config.max_keys
                 || stats.data_size > self.config.max_data_size.0
             {
@@ -169,13 +197,22 @@ impl OverloadProtectorWorker {
                 new_overloads.insert(task_id, stats);
                 continue;
             }
+
+            // If the task start time is too old, it will not be taken into account.
             let task_physical_time = TimeStamp::new(task_id).physical();
             if now.saturating_sub(task_physical_time) > task_expire_ms {
+                // Todo:
+                // In the future if we support stale read, a stale read request's physical time
+                // might have a gap with the current time, we probably need to
+                // find a better way like amw to handle this case.
                 continue;
             }
-            new_tasks.insert(task_id, stats);
+
+            // Put these tasks that not expired and not overloaded into the tasks map again.
+            not_expired_tasks.insert(task_id, stats);
         }
-        self.cop_tasks = new_tasks;
+
+        self.cop_tasks = not_expired_tasks;
         if !new_overloads.is_empty() || !self.overload_tasks.is_empty() {
             self.overload_tasks = new_overloads.clone();
             self.protector.update(new_overloads);
