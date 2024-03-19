@@ -1781,6 +1781,7 @@ impl<'a> PreprocessRef<'a> {
         if *self.preprocessed_index > 0 && entry.index <= *self.preprocessed_index {
             return None;
         }
+        *self.preprocessed_index = entry.index;
         let mut no_kv = entry.data.is_empty();
         if let Some(cmd) = get_preprocess_cmd(entry) {
             no_kv = true;
@@ -1819,7 +1820,6 @@ impl<'a> PreprocessRef<'a> {
         if no_kv {
             self.try_advance_meta(ctx, entry);
         }
-        *self.preprocessed_index = entry.index;
         preprocess_err
     }
 
