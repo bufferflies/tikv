@@ -5,7 +5,7 @@ use std::{
     cmp,
     collections::{HashMap, HashSet},
     default::Default,
-    fmt, mem, ops,
+    fmt, mem,
     ops::Deref,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
@@ -64,7 +64,6 @@ const WORKING_PATH_PREFIX: &str = "keyspace-restore";
 const ZSTD_COMPRESSION_LEVEL: &str = "5"; // The same as ZSTD_COMPRESSION_LEVEL_FOR_REMOTE.
 
 const REPLICAS: usize = 3; // Number of replicas for each region.
-const QUORUM_REPLICAS: usize = REPLICAS / 2 + 1; // Number of replicas to form a quorum.
 
 const RESOLVE_LOCKS_BATCH_SIZE: usize = 1024;
 
@@ -517,7 +516,7 @@ pub struct BackupShard {
     pub need_flush: bool,
     pub meta: ShardMeta,
     pub(crate) raw_meta: Option<pb::ChangeSet>, // used for kv engine recovery only.
-    raft_state: BackupRaftState,
+    raft_state: RaftState,
 }
 
 impl fmt::Debug for BackupShard {
@@ -579,37 +578,6 @@ impl BackupShard {
 
     pub fn table_version(&self) -> u64 {
         self.meta.base_version + self.meta.data_sequence
-    }
-}
-
-#[derive(Default, Clone, Debug, PartialEq)]
-struct BackupRaftState(pub RaftState);
-
-impl ops::Deref for BackupRaftState {
-    type Target = RaftState;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl ops::DerefMut for BackupRaftState {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-impl BackupRaftState {
-    fn faster_than(&self, other: &Self) -> bool {
-        (
-            self.get_last_index(),
-            self.get_commit(),
-            self.get_last_preprocessed_index(),
-        ) > (
-            other.get_last_index(),
-            other.get_commit(),
-            other.get_last_preprocessed_index(),
-        )
     }
 }
 
@@ -1079,7 +1047,7 @@ impl BackupCluster {
             need_flush: need_flush_mem_table || need_initial_flush,
             meta: ShardMeta::new(rf.get_engine_id(), &meta),
             raw_meta: Some(meta),
-            raft_state: BackupRaftState(raft_state),
+            raft_state,
         };
         debug!(
             "create_backup_shard: raft_last_index {:?}, {:?}",
@@ -1224,53 +1192,44 @@ impl BackupCluster {
         bool,                      // has_new_peer
     )> {
         let shards_cnt = all_shards.values().map(|x| x.len()).sum::<usize>() / REPLICAS;
-        // leader_shards: shard_id -> BackupShard.
-        let mut leader_shards = HashMap::with_capacity(shards_cnt);
-        // peers_last_index: shard_id -> Vec<last_index>
-        let mut peers_last_indexes: HashMap<u64, Vec<u64>> = HashMap::with_capacity(shards_cnt);
+        // shard_peers: shard_id -> Vec<(store_id, BackupShard)>
+        let mut shard_peers: HashMap<u64, Vec<BackupShard>> = HashMap::with_capacity(shards_cnt);
 
-        for mut shard in all_shards.into_values().flatten() {
-            peers_last_indexes
-                .entry(shard.region_id)
-                .or_default()
-                .push(shard.raft_state.get_last_index());
-            leader_shards
-                .entry(shard.region_id)
-                .and_modify(|old: &mut BackupShard| {
-                    if shard.raft_state.faster_than(&old.raft_state) {
-                        std::mem::swap(old, &mut shard);
-                    }
-                })
-                .or_insert(shard);
+        for shard in all_shards.into_values().flatten() {
+            shard_peers.entry(shard.region_id).or_default().push(shard);
+        }
+        let mut leader_shards = HashMap::with_capacity(shard_peers.len());
+        for (&shard_id, peers) in shard_peers.iter_mut() {
+            // Since we enabled raft pre-vote, the correct leader must have the max term and
+            // then max last index.
+            peers.sort_by(|a, b| {
+                let term_last_a = (
+                    a.raft_state.get_hard_state().get_term(),
+                    a.raft_state.get_last_index(),
+                );
+                let term_last_b = (
+                    b.raft_state.get_hard_state().get_term(),
+                    b.raft_state.get_last_index(),
+                );
+                term_last_a.cmp(&term_last_b)
+            });
+            let mut leader = peers.pop().unwrap();
+            if leader.raft_state.get_commit() < leader.raft_state.get_last_index() {
+                // If we tolerate error, the actual leader maybe missing, it's possible that the
+                // most up-to-date follower's last_index is already committed.
+                // It's possible that the original cluster eventually not committed to
+                // the last index, and the last index contains commit primary key timestamp
+                // lower than backup ts. But the probability is very low and the
+                // data is still consistent.
+                let mut hard_state = leader.raft_state.get_hard_state();
+                hard_state.set_commit(leader.raft_state.get_last_index());
+                leader.raft_state.set_hard_state(&hard_state);
+            }
+            leader_shards.insert(shard_id, leader);
         }
 
         let mut has_new_peer = false;
         for shard in leader_shards.values_mut() {
-            let mut last_indexes = peers_last_indexes.remove(&shard.region_id).unwrap();
-
-            // There is chance that `raft_state.commit` is not up-to-date.
-            // We infer the real commit index by quorum of `last_index`.
-            let quorum_last_idx = get_quorum_last_index(last_indexes.as_mut_slice());
-            if quorum_last_idx > shard.raft_state.get_commit() {
-                // NOTE: we don't update the new `commit_index` to rf_engine here because:
-                // 1. If shard version is not changed after `preprocess_shard`, the new
-                // `commit_index` will be overwritten together with new
-                // `last_preprocessed_index`.
-                // 2. If shard version is changed after `preprocess_shard`, the new
-                // `commit_index` only affects recover of parent shard, and it's
-                // useless in this scenario.
-                info!(
-                    "Keyspace {} shard {} update commit_index by quorum: {} -> {}",
-                    self.tag(),
-                    shard.region_id,
-                    shard.raft_state.get_commit(),
-                    quorum_last_idx
-                );
-                let mut hs = shard.raft_state.get_hard_state();
-                hs.set_commit(quorum_last_idx);
-                shard.raft_state.set_hard_state(&hs);
-            }
-
             // Preprocess if needed.
             if shard.raft_state.get_commit() > shard.raft_state.get_last_preprocessed_index() {
                 info!(
@@ -2253,12 +2212,6 @@ fn make_keyspace_tag(source_keyspace_id: u32, target_keyspace_id: u32) -> String
     format!("{}->{}", source_keyspace_id, target_keyspace_id)
 }
 
-fn get_quorum_last_index(last_indexes: &mut [u64]) -> u64 {
-    last_indexes.sort_by(|a, b| b.cmp(a)); // Reverse compare.
-    let quorum_size = cmp::min(last_indexes.len(), QUORUM_REPLICAS);
-    last_indexes[quorum_size - 1]
-}
-
 struct PeerPreprocessor {
     preprocessed_index: u64,
     region: metapb::Region,
@@ -2301,7 +2254,7 @@ impl PeerPreprocessor {
             last_committed_split_idx: 0,
             pending_truncate: None,
             raft_hard_state: shard.raft_state.get_hard_state(),
-            raft_state: shard.raft_state.0,
+            raft_state: shard.raft_state,
             pending_merge_state: merge_state,
             first_no_kv_idx: 0, // truncated ?
             last_no_kv_idx: 0,  // truncated ?
@@ -2554,31 +2507,6 @@ mod tests {
                 inner_key_off,
             );
             assert_eq!(aligned_regions, expected, "case: {}", case_idx);
-        }
-    }
-
-    #[test]
-    fn test_get_quorum_last_index() {
-        let cases = vec![
-            (vec![1], 1),
-            (vec![2, 1], 1),
-            (vec![1, 2], 1),
-            (vec![2, 2], 2),
-            (vec![1, 2, 3], 2),
-            (vec![3, 2, 1], 2),
-            (vec![3, 1, 3], 3),
-            (vec![3, 3, 3], 3),
-            (vec![4, 3, 3], 3),
-            (vec![4, 3, 4, 3], 4), // replicas = 3, quorum = 2
-        ];
-
-        for (i, (mut last_indexes, quorum_idx)) in cases.into_iter().enumerate() {
-            assert_eq!(
-                get_quorum_last_index(last_indexes.as_mut_slice()),
-                quorum_idx,
-                "#{}",
-                i
-            );
         }
     }
 }
