@@ -507,7 +507,10 @@ impl<'a> PeerMsgHandler<'a> {
 
         if msg.has_merge_target() {
             fail_point!("on_has_merge_target", |_| Ok(()));
-            self.on_stale_merge(msg.get_merge_target().get_id());
+            self.on_stale_merge(
+                msg.get_merge_target().get_id(),
+                msg.get_from_peer().get_id(),
+            );
             return Ok(());
         }
 
@@ -690,14 +693,15 @@ impl<'a> PeerMsgHandler<'a> {
         self.maybe_destroy();
     }
 
-    fn on_stale_merge(&mut self, target_region_id: u64) {
+    fn on_stale_merge(&mut self, target_region_id: u64, from_peer_id: u64) {
         if self.fsm.peer.pending_remove {
             return;
         }
         info!(
             "successful merge can't be continued, try to gc stale peer";
             "tag" => self.peer.tag(),
-            "peer_id" => self.fsm.peer_id(),
+            "from_peer_id" => from_peer_id,
+            "to_peer_id" => self.fsm.peer_id(),
             "target_region_id" => target_region_id,
             "merge_state" => ?self.fsm.peer.pending_merge_state,
         );

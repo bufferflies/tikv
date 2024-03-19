@@ -1798,9 +1798,11 @@ impl<'a> StoreMsgHandler<'a> {
             .engines
             .kv
             .set_shard_active(region.id, is_leader);
-        self.ctx
-            .store_meta
-            .set_region(region, &mut peer_fsm.peer, RegionChangeReason::CommitMerge);
+        self.ctx.store_meta.set_region(
+            region.clone(),
+            &mut peer_fsm.peer,
+            RegionChangeReason::CommitMerge,
+        );
         let tag = peer_fsm.peer.tag();
         if is_leader {
             peer_fsm.peer.heartbeat_pd(self.ctx);
@@ -1813,11 +1815,23 @@ impl<'a> StoreMsgHandler<'a> {
         }
         peer_fsm.peer.reset_buckets();
         drop(peer_fsm);
-        if let Some(source_peer) = self.ctx.try_get_peer(source.get_id()) {
-            let mut applier = source_peer.applier.lock().unwrap();
-            applier.destroy();
-            drop(applier);
-            self.on_destroy_peer(source.id, true);
+        let source_id = source.get_id();
+        if let Some(source_peer) = self.ctx.try_get_peer(source_id) {
+            // The source peer may have dependents, we should not destroy it directly.
+            // By sending a gc raft message, the source peer will call maybe_destory to
+            // check dependents before destroy.
+            let source_peer_fsm = source_peer.peer_fsm.lock().unwrap();
+            let source_peer = source_peer_fsm.get_peer().peer.clone();
+            drop(source_peer_fsm);
+            let mut gc_msg = RaftMessage::new();
+            gc_msg.set_from_peer(source_peer.clone());
+            gc_msg.set_to_peer(source_peer);
+            gc_msg.set_region_epoch(source.get_region_epoch().clone());
+            gc_msg.set_merge_target(region);
+            self.ctx
+                .global
+                .router
+                .send(source_id, PeerMsg::RaftMessage(gc_msg));
         }
     }
 
