@@ -464,7 +464,7 @@ pub(crate) struct Peer {
     /// True if the peer is being destroyed, but waiting for dependents empty.
     pub(crate) delay_destroy: bool,
     /// True if the delay_destroy is caused by successful commit merge.
-    pub(crate) delay_destroy_merged: bool,
+    pub(crate) delay_destroy_merged_target: Option<Region>,
 
     /// Record the instants of peers being added into the configuration.
     /// Remove them after they are not pending any more.
@@ -579,7 +579,7 @@ impl Peer {
             down_peer_ids: vec![],
             pending_remove: false,
             delay_destroy: false,
-            delay_destroy_merged: false,
+            delay_destroy_merged_target: None,
             leader_missing_time: Some(Instant::now()),
             last_applying_idx: applied_index,
             last_urgent_proposal_idx: u64::MAX,
@@ -673,18 +673,7 @@ impl Peer {
             );
             return false;
         }
-        let mut wait_dependent = false;
-        ctx.global
-            .engines
-            .raft
-            .with_dependents(self.region_id, |deps| {
-                wait_dependent = if deps.contains(&self.region_id) {
-                    deps.len() > 1
-                } else {
-                    !deps.is_empty()
-                };
-            });
-        if wait_dependent {
+        if !self.dependents_is_empty_or_only_self(ctx) {
             info!(
                 "region has dependent, wait for destroy";
                 "tag" => self.tag(),
@@ -699,7 +688,7 @@ impl Peer {
     pub(crate) fn destroy(
         &mut self,
         raft_wb: &mut rfengine::WriteBatch,
-        merged_by_target: bool,
+        merged_target: Option<Region>,
     ) -> Result<()> {
         let t = Instant::now();
 
@@ -720,16 +709,21 @@ impl Peer {
         if !self.get_store().is_initialized() {
             region.mut_peers().push(self.peer.clone());
         }
+        let merge_state = if self.pending_merge_state.is_some() {
+            self.pending_merge_state.clone()
+        } else {
+            merged_target.map(|r| {
+                let mut merge_state = MergeState::default();
+                merge_state.set_target(r);
+                merge_state
+            })
+        };
         write_peer_state(
             raft_wb,
             self.peer_id(),
             &region,
             PeerState::Tombstone,
-            if merged_by_target {
-                self.pending_merge_state.clone()
-            } else {
-                None
-            },
+            merge_state,
         );
 
         self.pending_reads.clear_all(Some(self.region_id));
@@ -834,19 +828,16 @@ impl Peer {
         self.get_pending_snapshot().is_some()
     }
 
-    pub fn ready_to_handle_pending_snapshot(&self, ctx: &RaftContext) -> bool {
-        // We can't apply snapshot until dependents are empty, because applying snapshot
-        // will clear meta and truncate raft logs which makes other peers fail
-        // to recover. If ourself is the last dependent, we can apply snapshot.
-        let mut ready = true;
+    pub fn dependents_is_empty_or_only_self(&self, ctx: &RaftContext) -> bool {
+        let mut empty_or_only_self = true;
         ctx.global
             .engines
             .raft
             .with_dependents(self.region_id, |dependents| {
-                ready = dependents.is_empty()
+                empty_or_only_self = dependents.is_empty()
                     || (dependents.len() == 1 && dependents.contains(&self.region_id))
             });
-        ready
+        empty_or_only_self
     }
 
     #[inline]
@@ -1554,7 +1545,10 @@ impl Peer {
             return;
         }
         if self.has_pending_snapshot() {
-            if !self.ready_to_handle_pending_snapshot(ctx) {
+            if !self.dependents_is_empty_or_only_self(ctx) {
+                // We can't apply snapshot until dependents are empty, because applying snapshot
+                // will clear meta and truncate raft logs which makes other peers fail
+                // to recover. If ourself is the last dependent, we can apply snapshot.
                 debug!(
                     "not ready to handle pending snapshot, skip";
                     "tag" => self.tag(),

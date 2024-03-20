@@ -1484,7 +1484,7 @@ impl<'a> StoreMsgHandler<'a> {
             .handle_raft_ready(&mut self.ctx.raft_ctx, None);
         if remove_self {
             drop(peer_fsm);
-            self.on_destroy_peer(region_id, false);
+            self.on_destroy_peer(region_id, None);
         }
         remove_self
     }
@@ -1514,7 +1514,7 @@ impl<'a> StoreMsgHandler<'a> {
         }
     }
 
-    fn on_destroy_peer(&mut self, region_id: u64, merged_by_target: bool) {
+    fn on_destroy_peer(&mut self, region_id: u64, merged_target: Option<Region>) {
         let peer = self.get_peer(region_id);
         let mut peer_fsm = peer.peer_fsm.lock().unwrap();
         fail_point!("destroy_peer");
@@ -1544,7 +1544,7 @@ impl<'a> StoreMsgHandler<'a> {
                 "peer_id" => peer_fsm.peer_id(),
             );
             peer_fsm.peer.delay_destroy = true;
-            peer_fsm.peer.delay_destroy_merged = merged_by_target;
+            peer_fsm.peer.delay_destroy_merged_target = merged_target;
             return;
         }
 
@@ -1566,10 +1566,7 @@ impl<'a> StoreMsgHandler<'a> {
                 "err" => %e,
             );
         }
-        if let Err(e) = peer_fsm
-            .peer
-            .destroy(&mut self.ctx.raft_wb, merged_by_target)
-        {
+        if let Err(e) = peer_fsm.peer.destroy(&mut self.ctx.raft_wb, merged_target) {
             // If not panic here, the peer will be recreated in the next restart,
             // then it will be gc again. But if some overlap region is created
             // before restarting, the gc action will delete the overlap region's
@@ -1697,7 +1694,7 @@ impl<'a> StoreMsgHandler<'a> {
                         // TODO: clean user properties?
                     }
                     ExecResult::UnsafeDestroy => {
-                        self.on_destroy_peer(region_id, false);
+                        self.on_destroy_peer(region_id, None);
                         return None;
                     }
                     ExecResult::PrepareMerge { region } => {
@@ -1743,9 +1740,9 @@ impl<'a> StoreMsgHandler<'a> {
             "tag" => peer_fsm.peer.tag(),
             "peer_id" => peer_fsm.peer_id(),
         );
-        let merged_by_target = peer_fsm.peer.delay_destroy_merged;
+        let merged_target = peer_fsm.peer.delay_destroy_merged_target.clone();
         drop(peer_fsm);
-        self.on_destroy_peer(region_id, merged_by_target);
+        self.on_destroy_peer(region_id, merged_target);
     }
 
     fn on_prepare_merge_request(&mut self, region_id: u64, req: RaftCmdRequest) {
@@ -1826,17 +1823,15 @@ impl<'a> StoreMsgHandler<'a> {
             // By sending a gc raft message, the source peer will call maybe_destory to
             // check dependents before destroy.
             let source_peer_fsm = source_peer.peer_fsm.lock().unwrap();
-            let source_peer = source_peer_fsm.get_peer().peer.clone();
+            let deps_empty_or_only_self = source_peer_fsm
+                .get_peer()
+                .dependents_is_empty_or_only_self(&self.ctx.raft_ctx);
             drop(source_peer_fsm);
-            let mut gc_msg = RaftMessage::new();
-            gc_msg.set_from_peer(source_peer.clone());
-            gc_msg.set_to_peer(source_peer);
-            gc_msg.set_region_epoch(source.get_region_epoch().clone());
-            gc_msg.set_merge_target(region);
-            self.ctx
-                .global
-                .router
-                .send(source_id, PeerMsg::RaftMessage(gc_msg));
+            if deps_empty_or_only_self {
+                let mut applier = source_peer.applier.lock().unwrap();
+                applier.destroy();
+            }
+            self.on_destroy_peer(source.id, Some(region));
         }
     }
 
