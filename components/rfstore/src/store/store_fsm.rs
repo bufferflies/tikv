@@ -1742,6 +1742,9 @@ impl<'a> StoreMsgHandler<'a> {
         );
         let merged_target = peer_fsm.peer.delay_destroy_merged_target.clone();
         drop(peer_fsm);
+        let mut applier = peer.applier.lock().unwrap();
+        applier.destroy();
+        drop(applier);
         self.on_destroy_peer(region_id, merged_target);
     }
 
