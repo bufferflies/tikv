@@ -1556,7 +1556,9 @@ impl Applier {
                     self.engine.meta_committed(&cs, false);
                     unwrap_or_return!(
                         self.engine.apply_change_set(
-                            self.engine.prepare_change_set(cs, false, None).unwrap()
+                            self.engine
+                                .prepare_change_set(cs, false, None, None)
+                                .unwrap()
                         ),
                         "applier apply changeset"
                     );

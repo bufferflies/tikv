@@ -351,7 +351,8 @@ impl EngineCore {
             }
         }
         info!("load and ingest shard {}", meta.tag());
-        let change_set = self.prepare_change_set(meta.to_change_set(), false, table_filter)?;
+        let change_set =
+            self.prepare_change_set(meta.to_change_set(), false, table_filter, None)?;
         self.ingest(change_set, false)?;
         let shard = self.get_shard(meta.id);
         Ok(shard.unwrap())
@@ -365,7 +366,8 @@ impl EngineCore {
         table_filter: Option<LoadTableFilterFn>,
     ) -> Result<Shard> {
         info!("load parent shard {}", meta.tag());
-        let change_set = self.prepare_change_set(meta.to_change_set(), false, table_filter)?;
+        let change_set =
+            self.prepare_change_set(meta.to_change_set(), false, table_filter, None)?;
         let shard = self.new_shard_from_change_set(change_set);
         shard.refresh_states();
         Ok(shard)

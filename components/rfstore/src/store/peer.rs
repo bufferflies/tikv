@@ -14,7 +14,7 @@ use cloud_encryption::EncryptionKey;
 use collections::{HashMap, HashSet};
 use error_code::ErrorCodeExt;
 use fail::fail_point;
-use kvengine::{util::PropertiesHelper, ShardMeta, ENCRYPTION_KEY};
+use kvengine::{get_shard_property, util::PropertiesHelper, ShardMeta, ENCRYPTION_KEY};
 use kvproto::{
     disk_usage::DiskUsage,
     kvrpcpb::ExtraOp as TxnExtraOp,
@@ -1927,7 +1927,10 @@ impl<'a> PreprocessRef<'a> {
                 ctx.remove_dependent(parent_id, self.region_id());
             }
         }
-        ctx.apply_msgs.msgs.push(ApplyMsg::PrepareChangeSet(cs));
+        ctx.apply_msgs.msgs.push(ApplyMsg::PrepareChangeSet {
+            cs,
+            encryption_key: self.encryption_key.clone(),
+        });
         Ok(())
     }
 
@@ -1964,6 +1967,15 @@ impl<'a> PreprocessRef<'a> {
         let props = snap.mut_properties();
         props.mut_keys().push(TERM_KEY.to_string());
         props.mut_values().push(entry.term.to_le_bytes().to_vec());
+
+        // Peer's encryption_key should be updated when branching with encryption
+        // enabled.
+        if let Some(en) = ctx.kv {
+            let master_key = en.get_master_key();
+            let encryption_key = get_shard_property(ENCRYPTION_KEY, snap.get_properties())
+                .map(|v| master_key.decrypt_encryption_key(&v).unwrap());
+            *self.encryption_key = encryption_key;
+        }
 
         // Set pending truncate raft log to trigger TiFlash acquiring latest snapshot.
         let old = self.pending_truncate.replace((entry.term, entry.index));
@@ -2094,6 +2106,15 @@ impl<'a> PreprocessRef<'a> {
         // shard_meta has updated, we also need to set the new version's raft state.
         self.write_raft_state(ctx);
         *self.preprocessed_region = Some(new_region.clone());
+        // Update peer's encryption_key when split a whole keyspace with encryption
+        // enabled.
+        if let Some(en) = ctx.kv {
+            let master_key = en.get_master_key();
+            let encryption_key = new_meta
+                .get_property(ENCRYPTION_KEY)
+                .map(|v| master_key.decrypt_encryption_key(&v).unwrap());
+            *self.encryption_key = encryption_key;
+        }
     }
 
     pub(crate) fn preprocess_prepare_merge(
@@ -3784,6 +3805,8 @@ pub struct PreprocessRef<'a> {
     pub pending_truncate: &'a mut Option<(u64 /* term */, u64 /* index */)>,
     pub pending_merge_state: &'a mut Option<MergeState>,
     pub learner_skip_idx: &'a mut u64,
+
+    pub encryption_key: &'a mut Option<EncryptionKey>,
 }
 
 impl<'a> PreprocessRef<'a> {
@@ -3799,6 +3822,7 @@ impl<'a> PreprocessRef<'a> {
             first_no_kv_idx,
             last_no_kv_idx,
             learner_skip_idx,
+            encryption_key,
         ) = (
             &mut peer.peer,
             &mut peer.last_committed_split_idx,
@@ -3808,6 +3832,7 @@ impl<'a> PreprocessRef<'a> {
             &mut peer.first_no_kv_idx,
             &mut peer.last_no_kv_idx,
             &mut peer.learner_skip_idx,
+            &mut peer.encryption_key,
         );
 
         let store = peer.raft_group.mut_store();
@@ -3832,6 +3857,7 @@ impl<'a> PreprocessRef<'a> {
             pending_truncate,
             pending_merge_state,
             learner_skip_idx,
+            encryption_key,
         }
     }
 

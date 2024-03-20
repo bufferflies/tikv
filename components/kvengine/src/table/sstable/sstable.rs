@@ -226,7 +226,12 @@ impl SsTableCore {
             footer.properties_len(size as usize),
         )?;
         let mut prop_slice = props_data.chunk();
-        validate_checksum_with_fix(prop_slice, footer.checksum_type, file.clone())?;
+        validate_checksum_with_fix(
+            prop_slice,
+            footer.checksum_type,
+            file.clone(),
+            encryption_key.as_ref(),
+        )?;
         prop_slice = &prop_slice[4..];
         let mut smallest_buf = Bytes::new();
         let mut biggest_buf = Bytes::new();
@@ -585,7 +590,12 @@ impl SsTableCore {
 
     #[inline]
     fn validate_checksum_with_fix(&self, data: &[u8], checksum_type: u8) -> Result<()> {
-        validate_checksum_with_fix(data, checksum_type, self.file.clone())
+        validate_checksum_with_fix(
+            data,
+            checksum_type,
+            self.file.clone(),
+            self.encryption_key.as_ref(),
+        )
     }
 }
 
@@ -725,15 +735,21 @@ fn validate_checksum(data: &[u8], checksum_type: u8) -> Result<()> {
 }
 
 #[inline]
-fn validate_checksum_with_fix(data: &[u8], checksum_type: u8, file: Arc<dyn File>) -> Result<()> {
+fn validate_checksum_with_fix(
+    data: &[u8],
+    checksum_type: u8,
+    file: Arc<dyn File>,
+    encryption_key: Option<&EncryptionKey>,
+) -> Result<()> {
     match validate_checksum(data, checksum_type) {
         Ok(()) => Ok(()),
         Err(err) => {
             if let Some(file_path) = file.path() {
                 warn!(
-                    "file {} path {:?} failed to validate checksum, try to remove it from local disk",
+                    "file {} path {:?} failed to validate checksum, encryption_key {:?}, try to remove it from local disk",
                     file.id(),
                     file.path(),
+                    encryption_key
                 );
                 // Just remove the sst file in local and download from dfs during next restart.
                 std::fs::remove_file(file_path)?;

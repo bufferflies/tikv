@@ -1585,10 +1585,10 @@ impl<'a> PeerMsgHandler<'a> {
             let change_set = store.restored_snapshot.take().unwrap().0;
             let reg = MsgRegistration::new(&self.peer);
             self.ctx.apply_msgs.msgs.push(ApplyMsg::Registration(reg));
-            self.ctx
-                .apply_msgs
-                .msgs
-                .push(ApplyMsg::PrepareChangeSet(change_set));
+            self.ctx.apply_msgs.msgs.push(ApplyMsg::PrepareChangeSet {
+                cs: change_set,
+                encryption_key: self.peer.encryption_key.clone(),
+            });
         }
     }
 

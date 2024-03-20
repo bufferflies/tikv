@@ -76,7 +76,10 @@ pub(crate) enum ApplyMsg {
     Registration(MsgRegistration),
     PendingSplit(kvenginepb::ChangeSet),
     ApplyChangeSet(kvengine::ChangeSet),
-    PrepareChangeSet(kvenginepb::ChangeSet),
+    PrepareChangeSet {
+        cs: kvenginepb::ChangeSet,
+        encryption_key: Option<EncryptionKey>,
+    },
     PrepareMerge,
     PrepareCommitMerge {
         source: kvenginepb::ChangeSet,

@@ -318,12 +318,9 @@ fn prepare_cluster(
         for i in 0..rng.gen_range(0..10) {
             data_keys.push(Key::from_raw(&i_to_key(i * 100)).into_encoded());
         }
-        let cfg = KeyspaceEncryptionConfig { enabled: true };
+        let cfg = KeyspaceEncryptionConfig { enabled: rng.gen() };
         match pd_client.set_keyspace_encryption(keyspace_id, cfg) {
             Ok(_) => {}
-            Err(err) if pd_client::grpc_error_is_unimplemented(&err) => {
-                info!("set_keyspace_encryption is not supported, skip");
-            }
             Err(err) => {
                 panic!("set_keyspace_encryption failed: {:?}", err)
             }

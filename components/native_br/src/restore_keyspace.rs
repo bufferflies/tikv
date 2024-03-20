@@ -14,6 +14,7 @@ use std::{
 };
 
 use api_version::ApiV2;
+use cloud_encryption::EncryptionKey;
 use cloud_server::{RestoreShardResponse, TikvServer};
 use file_system::{IoRateLimitMode, IoRateLimiter};
 use http::Request;
@@ -1980,7 +1981,7 @@ impl MetaApplier {
                     self.engine.meta_committed(&cs, false);
                     match self
                         .engine
-                        .prepare_change_set(cs, false, None)
+                        .prepare_change_set(cs, false, None, None)
                         .and_then(|cs| self.engine.apply_change_set(cs))
                     {
                         Ok(()) => debug!(
@@ -2226,6 +2227,7 @@ struct PeerPreprocessor {
     first_no_kv_idx: u64,
     last_no_kv_idx: u64,
     learner_skip_idx: u64,
+    encryption_key: Option<EncryptionKey>,
 }
 
 impl PeerPreprocessor {
@@ -2259,6 +2261,7 @@ impl PeerPreprocessor {
             first_no_kv_idx: 0, // truncated ?
             last_no_kv_idx: 0,  // truncated ?
             learner_skip_idx: 0,
+            encryption_key: None,
         }
     }
 
@@ -2277,6 +2280,7 @@ impl PeerPreprocessor {
             first_no_kv_idx: &mut self.first_no_kv_idx,
             last_no_kv_idx: &mut self.last_no_kv_idx,
             learner_skip_idx: &mut self.learner_skip_idx,
+            encryption_key: &mut self.encryption_key,
         }
     }
 }

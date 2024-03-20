@@ -1203,7 +1203,12 @@ impl<'a> StoreMsgHandler<'a> {
     pub(crate) fn register(&mut self, peer: PeerFsm) {
         let id = peer.peer.region().id;
         let tag = peer.peer.tag();
-        info!("register region {}, peer {}", tag, peer.peer.peer_id());
+        info!(
+            "register region {}, peer {}, encryption_key {:?}",
+            tag,
+            peer.peer.peer_id(),
+            peer.peer.encryption_key,
+        );
         let applier = Applier::new_from_peer(&peer);
         let new_peer = PeerStates::new(applier, peer);
         self.ctx.insert_peer(id, new_peer);

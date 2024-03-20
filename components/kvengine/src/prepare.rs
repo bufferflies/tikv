@@ -33,6 +33,8 @@ impl EngineCore {
         cs: kvenginepb::ChangeSet,
         use_direct_io: bool,
         table_filter: Option<LoadTableFilterFn>,
+        encryption_key: Option<EncryptionKey>, /* encryption_key will be ignored if cs is
+                                                * snapshot or restore_shard */
     ) -> Result<ChangeSet> {
         let mut ids: HashMap<u64, FileMeta> = HashMap::new();
         let mut cs = ChangeSet::new(cs);
@@ -115,10 +117,6 @@ impl EngineCore {
                 .collect();
         }
 
-        info!(
-            "[{}:{}] is preparing change set, loading file by ids", cs.shard_id, cs.shard_ver;
-            "ids" => ?ids.keys(),
-        );
         let encryption_key = if cs.has_snapshot() || cs.has_restore_shard() {
             let snap = if cs.has_snapshot() {
                 cs.get_snapshot()
@@ -128,15 +126,13 @@ impl EngineCore {
             get_shard_property(ENCRYPTION_KEY, snap.get_properties())
                 .map(|v| self.master_key.decrypt_encryption_key(&v).unwrap())
         } else {
-            match self.get_shard(cs.shard_id) {
-                Some(shard) => shard.encryption_key.clone(),
-                None => {
-                    // If shard not exists it means the peer has been destroyed, return the empty
-                    // changeset.
-                    return Ok(cs);
-                }
-            }
+            encryption_key
         };
+
+        info!(
+            "[{}:{}] is preparing change set, loading file by ids, encryption_key {:?}", cs.shard_id, cs.shard_ver, encryption_key;
+            "ids" => ?ids.keys(),
+        );
         self.load_tables_by_ids(
             cs.shard_id,
             cs.shard_ver,

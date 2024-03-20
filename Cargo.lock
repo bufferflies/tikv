@@ -4258,6 +4258,7 @@ dependencies = [
  "byteorder",
  "bytes",
  "chrono",
+ "cloud_encryption",
  "cloud_server",
  "concurrency_manager",
  "dashmap 4.0.2",

@@ -16,8 +16,8 @@ use bytes::{Buf, Bytes};
 use cloud_encryption::EncryptionKey;
 use fail::fail_point;
 use kvengine::{
-    encode_extra_txn_status_key, mvcc, util::PropertiesHelper, ChangeSet, Engine, SnapAccess,
-    UserMeta, ENCRYPTION_KEY, EXTRA_CF, LOCK_CF, MANUAL_MAJOR_COMPACTION,
+    encode_extra_txn_status_key, get_shard_property, mvcc, util::PropertiesHelper, ChangeSet,
+    Engine, SnapAccess, UserMeta, ENCRYPTION_KEY, EXTRA_CF, LOCK_CF, MANUAL_MAJOR_COMPACTION,
     MANUAL_MAJOR_COMPACTION_ENABLE, TRIM_OVER_BOUND, TRIM_OVER_BOUND_ENABLE, TXN_FILE_REF,
 };
 use kvenginepb::{TxnFileRef, TxnFileRefs};
@@ -1018,6 +1018,20 @@ impl Applier {
             return Err(box_err!("split conflict with conf change"));
         }
         let cs = cs.unwrap();
+        // Applier `encryption_key` should be updated after split to a whole keyspace
+        // with encryption enabled.
+        let encryption_key = if let Some(properties) = cs
+            .get_split()
+            .get_new_shards()
+            .iter()
+            .find(|s| s.get_shard_id() == self.region_id())
+        {
+            let master_key = ctx.engine.get_master_key();
+            get_shard_property(ENCRYPTION_KEY, properties)
+                .map(|v| master_key.decrypt_encryption_key(&v).unwrap())
+        } else {
+            None
+        };
         let mut resp = AdminResponse::default();
         if let Err(err) = ctx.engine.split(cs, RAFT_INIT_LOG_INDEX) {
             // This must be a follower that fall behind, we need to pause the apply and wait
@@ -1028,6 +1042,8 @@ impl Applier {
                 err
             );
         }
+        self.encryption_key = encryption_key;
+
         self.snap.take(); // snapshot is outdated.
         // clear the cache here or the locks doesn't belong to the new range would never
         // have chance to delete.
@@ -1319,6 +1335,14 @@ impl Applier {
             router.send(self.region_id(), PeerMsg::ApplySnapshotResult(cs));
         } else if cs.has_restore_shard() {
             debug_assert_eq!(self.region.get_region_epoch().get_version(), cs.shard_ver);
+            // Applier encryption_key may be updated after branching with encryption
+            // enabled.
+            let snap = cs.get_restore_shard();
+            let master_key = ctx.engine.get_master_key();
+            let encryption_key = get_shard_property(ENCRYPTION_KEY, snap.get_properties())
+                .map(|v| master_key.decrypt_encryption_key(&v).unwrap());
+            self.encryption_key = encryption_key;
+
             self.region.mut_region_epoch().set_version(cs.shard_ver + 1);
             exec_results.push_back(ExecResult::RestoreShard { cs });
         }
@@ -1409,7 +1433,12 @@ impl Applier {
         }
     }
 
-    fn handle_prepare_change_set(&mut self, ctx: &mut ApplyContext, cs: kvenginepb::ChangeSet) {
+    fn handle_prepare_change_set(
+        &mut self,
+        ctx: &mut ApplyContext,
+        cs: kvenginepb::ChangeSet,
+        encryption_key: Option<EncryptionKey>,
+    ) {
         if cs.has_ingest_files() {
             self.paused_apply_queue
                 .pause(cs.sequence, &format!("{} ingest", self.tag()));
@@ -1425,7 +1454,7 @@ impl Applier {
         std::thread::spawn(move || {
             let id = cs.shard_id;
             tikv_util::set_current_region(id);
-            let res = engine.prepare_change_set(cs, !is_leader, None);
+            let res = engine.prepare_change_set(cs, !is_leader, None, encryption_key);
             router.send(id, PeerMsg::PrepareChangeSetResult(res, peer_id));
         });
     }
@@ -1487,9 +1516,10 @@ impl Applier {
 
         let region_id = self.region_id();
         let router = ctx.router.as_ref().unwrap().clone();
+        let encryption_key = self.encryption_key.clone();
         std::thread::spawn(move || {
             tikv_util::set_current_region(source.shard_id);
-            let res = engine.prepare_change_set(source, !is_leader, None);
+            let res = engine.prepare_change_set(source, !is_leader, None, encryption_key);
             router.send(
                 region_id,
                 PeerMsg::PrepareCommitMergeResult(res, commit_index),
@@ -1624,8 +1654,8 @@ impl Applier {
                     .insert(pending_split.sequence, pending_split);
                 self.maybe_pause_for_split_merge();
             }
-            ApplyMsg::PrepareChangeSet(cs) => {
-                self.handle_prepare_change_set(ctx, cs);
+            ApplyMsg::PrepareChangeSet { cs, encryption_key } => {
+                self.handle_prepare_change_set(ctx, cs, encryption_key);
             }
             ApplyMsg::ApplyChangeSet(cs) => {
                 self.handle_apply_change_set(ctx, cs);

@@ -17,6 +17,7 @@ use std::{
 };
 
 use api_version::ApiV2;
+use cloud_encryption::KeyspaceEncryptionConfig;
 use futures::executor::block_on;
 use http::{Request, StatusCode, Uri};
 use hyper::Body;
@@ -537,7 +538,7 @@ fn create_new_keyspace(
 ) -> u32 {
     let delta = rng.gen_range(1..=3);
     let new_keyspace = keyspace_manager.new_keyspace_id(delta);
-    must_split_region_for_keyspace(pd_client, new_keyspace);
+    must_split_region_for_keyspace(pd_client, new_keyspace, rng);
     // Don't shuffle keyspaces. Otherwise we will not have a few big keyspaces.
     keyspace_manager.create_keyspaces(
         &[new_keyspace],
@@ -552,11 +553,13 @@ fn create_new_keyspace(
     new_keyspace
 }
 
-fn must_split_region_for_keyspace(pd_client: &TestPdClient, keyspace_id: u32) {
+fn must_split_region_for_keyspace(pd_client: &TestPdClient, keyspace_id: u32, rng: &mut ThreadRng) {
     let keys = vec![
         ApiV2::get_txn_keyspace_prefix(keyspace_id),
         ApiV2::get_txn_keyspace_prefix(keyspace_id + 1),
     ];
+    let cfg = KeyspaceEncryptionConfig { enabled: rng.gen() };
+    pd_client.set_keyspace_encryption(keyspace_id, cfg).unwrap();
     let split_keys = keys
         .iter()
         .map(|k| Key::from_raw(k).into_encoded())

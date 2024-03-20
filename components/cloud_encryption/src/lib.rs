@@ -27,6 +27,21 @@ pub struct EncryptionKey {
     pub core: Arc<EncryptionKeyCore>,
 }
 
+impl std::fmt::Debug for EncryptionKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("encryption_key")
+            .field(
+                "export",
+                &self
+                    .export()
+                    .iter()
+                    .map(|&num| format!("{:02X}", num))
+                    .collect::<String>(),
+            )
+            .finish()
+    }
+}
+
 impl EncryptionKey {
     pub fn new(cipher_text: Vec<u8>, plain_text: Vec<u8>, current_ver: u32) -> Self {
         let current_key = EncryptionKeyCore::new_current_key(&plain_text, current_ver);
