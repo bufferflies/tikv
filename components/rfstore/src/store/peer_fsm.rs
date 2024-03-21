@@ -798,7 +798,19 @@ impl<'a> PeerMsgHandler<'a> {
                 target_overbound,
                 source_require_empty,
                 target_require_empty,
+                inconsistent_encryption_key,
             } = check_result;
+
+            // If the two regions belongs to different keyspaces,
+            // `inconsistent_encryption_key` will always be false.
+            if inconsistent_encryption_key {
+                return Err(kvengine::Error::CheckMerge(format!(
+                    "shards have inconsistent encryption key, source:{:?}, target:{:?}",
+                    IdVer::new(id, version),
+                    IdVer::new(target_id, target_version)
+                ))
+                .into());
+            }
 
             if source_overbound || target_overbound {
                 let parameter = TrimOverBoundParameter {

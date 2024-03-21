@@ -472,6 +472,10 @@ impl Shard {
         }
     }
 
+    pub fn del_property(&self, key: &str) {
+        self.properties.remove(key);
+    }
+
     pub(crate) fn load_mem_table_version(&self) -> u64 {
         self.get_base_version() + self.write_sequence.load(Acquire)
     }

@@ -28,6 +28,9 @@ pub struct CheckMergeResult {
     /// source/target region is required to be empty, but it's not.
     pub source_require_empty: bool,
     pub target_require_empty: bool,
+
+    // source and target shards belong to same keyspace but with different encryption key.
+    pub inconsistent_encryption_key: bool,
 }
 
 impl Engine {
@@ -196,6 +199,25 @@ impl Engine {
             return Err(Error::CheckMerge("target not initial flushed".to_string()));
         }
 
+        let belongs_to_same_keyspace = ApiV2::is_belongs_to_same_keyspace(
+            &source_shard.outer_start,
+            &target_shard.outer_start,
+        );
+        // Check if the source and target shards belong to the same keyspace but have
+        // different encryption key property. This situation might occur during
+        // keyspace restoration. In such cases, merging should be avoided.
+        // If the source and target shards are from different keyspaces, the encryption
+        // key property will be removed in `commit_merge`.
+        let inconsistent_encryption_key = belongs_to_same_keyspace
+            && source_shard
+                .encryption_key
+                .as_ref()
+                .map(|k| k.cipher_text.clone())
+                != target_shard
+                    .encryption_key
+                    .as_ref()
+                    .map(|k| k.cipher_text.clone());
+
         let (clear_source, clear_target) =
             need_clear_region_data_on_merge(&source_shard.outer_start, &target_shard.outer_start);
         let shard_is_empty = |shard: &Shard| -> bool {
@@ -212,6 +234,7 @@ impl Engine {
             target_overbound: target_shard.has_over_bound_data(),
             source_require_empty,
             target_require_empty,
+            inconsistent_encryption_key,
         })
     }
 
@@ -248,6 +271,12 @@ impl Engine {
         let old_shard = self.get_shard_with_ver(shard_id, shard_ver)?;
         self.prepare_update_shard_version(&old_shard, sequence);
         let source_snap = source.get_snapshot();
+
+        let belongs_to_same_keyspace =
+            ApiV2::is_belongs_to_same_keyspace(&source_snap.outer_start, &old_shard.outer_start);
+        if !belongs_to_same_keyspace {
+            old_shard.del_property(ENCRYPTION_KEY);
+        }
 
         let (clear_source, clear_target) =
             need_clear_region_data_on_merge(&source_snap.outer_start, &old_shard.outer_start);

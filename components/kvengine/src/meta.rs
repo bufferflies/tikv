@@ -2,7 +2,10 @@
 
 use std::{cmp::max, collections::HashMap, iter::Iterator};
 
-use api_version::api_v2::{is_whole_keyspace_range, KEYSPACE_PREFIX_LEN};
+use api_version::{
+    api_v2::{is_whole_keyspace_range, KEYSPACE_PREFIX_LEN},
+    ApiV2,
+};
 use bytes::{Buf, Bytes};
 use kvenginepb as pb;
 use protobuf::Message;
@@ -868,6 +871,14 @@ impl ShardMeta {
     }
 
     pub fn commit_merge(&mut self, source: &ShardMeta, sequence: u64) {
+        // If the regions are not belong to the same keyspace, reset the encryption_key
+        // property.
+        let belongs_to_same_keyspace =
+            ApiV2::is_belongs_to_same_keyspace(&source.range.outer_start, &self.range.outer_start);
+        if !belongs_to_same_keyspace {
+            self.del_property(ENCRYPTION_KEY);
+        }
+
         let (clear_source, clear_target) =
             need_clear_region_data_on_merge(&source.range.outer_start, &self.range.outer_start);
 
