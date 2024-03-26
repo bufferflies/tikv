@@ -458,22 +458,11 @@ pub(crate) fn spawn_keyspace_write(
         let end = begin + 2000 - 10;
         let start_time = Instant::now();
         while start_time.saturating_elapsed() < timeout {
-            let random = || {
+            let random_keyspace = || {
                 let mut rng = rand::thread_rng();
-                let keyspace_id = client.keyspace_manager().get_zipf_random_keyspace(&mut rng);
-                let table_id = client
-                    .keyspace_manager()
-                    .get_random_available_table(keyspace_id, &mut rng);
-                let i = rng.gen_range(begin..end);
-                let put_kv = rng.gen_ratio(2, 3);
-                (keyspace_id, table_id, i, put_kv)
+                client.keyspace_manager().get_zipf_random_keyspace(&mut rng)
             };
-            let (keyspace_id, table_id, i, put_kv) = random();
-            let table_id = match table_id {
-                Some(table_id) => table_id,
-                None => continue,
-            };
-
+            let keyspace_id = random_keyspace();
             {
                 let lock = client.keyspace_manager().get_keyspace_lock(keyspace_id);
                 let guard = lock.try_shared_lock();
@@ -481,6 +470,22 @@ pub(crate) fn spawn_keyspace_write(
                     continue;
                 }
                 let _guard = guard.unwrap();
+
+                let random = || {
+                    let mut rng = rand::thread_rng();
+                    let table_id = client
+                        .keyspace_manager()
+                        .get_random_available_table(keyspace_id, &mut rng);
+                    let i = rng.gen_range(begin..end);
+                    let put_kv = rng.gen_ratio(2, 3);
+                    (table_id, i, put_kv)
+                };
+                let (table_id, i, put_kv) = random();
+                let table_id = match table_id {
+                    Some(table_id) => table_id,
+                    None => continue,
+                };
+
                 let ver = client.current_timestamp().await.unwrap().version();
                 info!(
                     "[{}] thread write on keyspace {}, ver {}",
