@@ -12,7 +12,10 @@ use std::{
 use bytes::Buf;
 use chrono::DateTime;
 use clap::Args;
-use kvengine::dfs::{DFSConfig, Dfs, S3Fs};
+use kvengine::dfs::{
+    DFSConfig, Dfs, S3Fs, STORAGE_CLASS_GLACIER_IR, STORAGE_CLASS_INTELLIGENT_TIERING,
+    STORAGE_CLASS_STANDARD, STORAGE_CLASS_STANDARD_IA,
+};
 use kvproto::metapb::Store;
 use native_br::{
     common::{create_pd_client, get_all_stores_except_tiflash},
@@ -231,6 +234,11 @@ struct Stats {
     rlog_stat: ObjectStat,
     meta_stat: ObjectStat,
     pack_stat: ObjectStat,
+    // S3 storage classes stats
+    intelligent_tiering_stat: ObjectStat,
+    standard_stat: ObjectStat,
+    standard_ia_stat: ObjectStat,
+    glacier_ir_stat: ObjectStat,
 }
 
 impl Stats {
@@ -242,6 +250,11 @@ impl Stats {
         self.rlog_stat.append(stats.rlog_stat);
         self.meta_stat.append(stats.meta_stat);
         self.pack_stat.append(stats.pack_stat);
+        self.intelligent_tiering_stat
+            .append(stats.intelligent_tiering_stat);
+        self.standard_stat.append(stats.standard_stat);
+        self.standard_ia_stat.append(stats.standard_ia_stat);
+        self.glacier_ir_stat.append(stats.glacier_ir_stat);
     }
 }
 
@@ -356,6 +369,19 @@ impl StatsWorker {
         info!("finished: rlog files valid, {}", stats.rlog_stat);
         info!("finished: meta files valid, {}", stats.meta_stat);
         info!("finished: pack files valid, {}", stats.pack_stat);
+        info!(
+            "finished: intelligent-tiering files valid, {}",
+            stats.intelligent_tiering_stat
+        );
+        info!("finished: standard files valid, {}", stats.standard_stat);
+        info!(
+            "finished: standard-ia files valid, {}",
+            stats.standard_ia_stat
+        );
+        info!(
+            "finished: glacier-ir files valid, {}",
+            stats.glacier_ir_stat
+        );
         Ok(())
     }
 
@@ -395,7 +421,16 @@ impl StatsWorker {
                         .expect("parse last_modified")
                         .into();
                 let duration = chrono::Utc::now() - last_modified;
-                if obj.key.ends_with(".wal") {
+                match obj.storage_class.as_ref() {
+                    STORAGE_CLASS_INTELLIGENT_TIERING => {
+                        stats.intelligent_tiering_stat.add(duration, size)
+                    }
+                    STORAGE_CLASS_STANDARD => stats.standard_stat.add(duration, size),
+                    STORAGE_CLASS_STANDARD_IA => stats.standard_ia_stat.add(duration, size),
+                    STORAGE_CLASS_GLACIER_IR => stats.glacier_ir_stat.add(duration, size),
+                    _ => {}
+                };
+                if obj.key.ends_with(".wal") || obj.key.ends_with(".wal.last") {
                     stats.wal_stat.add(duration, size);
                 } else if obj.key.ends_with(".rlog") {
                     stats.rlog_stat.add(duration, size);
@@ -445,6 +480,22 @@ impl StatsWorker {
         info!(
             "finished: pack files with prefix {} valid, {}",
             prefix, stats.pack_stat
+        );
+        info!(
+            "finished: intelligent-tiering files with prefix {} valid, {}",
+            prefix, stats.intelligent_tiering_stat
+        );
+        info!(
+            "finished: standard files with prefix {} valid, {}",
+            prefix, stats.standard_stat
+        );
+        info!(
+            "finished: standard-ia files with prefix {} valid, {}",
+            prefix, stats.standard_ia_stat
+        );
+        info!(
+            "finished: glacier-ir files with prefix {} valid, {}",
+            prefix, stats.glacier_ir_stat
         );
         Ok(stats)
     }
