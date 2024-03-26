@@ -324,8 +324,20 @@ impl Applier {
         snap: SnapAccess,
         apply_state: RaftApplyState,
     ) -> Self {
-        let peer_idx = get_peer_idx_by_store_id(&region, store_id);
-        let peer = region.peers[peer_idx].clone();
+        let peer = find_peer(&region, store_id)
+            .unwrap_or_else(|| {
+                // When recover a shard in restore, it's possible that the peer is just removed
+                // from the region, to avoid panic, we change the peer to the first
+                // one. This change is safe because in recover applier, peer is only
+                // used for logging.
+                let tag = PeerTag::new(store_id, RegionIdVer::from_region(&region));
+                warn!(
+                    "{} peer is not in region {:?}, change to the first one",
+                    tag, region
+                );
+                region.get_peers().first().unwrap()
+            })
+            .clone();
         let encryption_key = snap.get_encryption_key();
         Self {
             peer,
