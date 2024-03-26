@@ -1408,13 +1408,9 @@ impl<'a> PeerMsgHandler<'a> {
             not_leader.set_region_id(self.region_id());
             let leader_id = self.peer.leader_id();
             if leader_id != 0 {
-                let leader_peer = self
-                    .region()
-                    .get_peers()
-                    .iter()
-                    .find(|p| p.id == leader_id)
-                    .unwrap();
-                not_leader.set_leader(leader_peer.clone());
+                if let Some(p) = self.region().get_peers().iter().find(|p| p.id == leader_id) {
+                    not_leader.set_leader(p.clone());
+                }
             }
             callback.invoke_with_response(resp);
             return;
