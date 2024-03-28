@@ -268,7 +268,7 @@ fn test_cloud_store_reset_range_with_opt(enable_inner_key: bool) {
         })
         .collect();
     let start_ts = block_on(cluster.get_pd_client().get_tso()).unwrap();
-    client.kv_prewrite(mutations, i_to_key(21), start_ts);
+    client.kv_prewrite(mutations, i_to_key(21), start_ts, None);
 
     let snap = engine.get_snap_access(region_id).unwrap();
     let (locked, seeked) = (true, true);

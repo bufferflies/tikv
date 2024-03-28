@@ -729,14 +729,23 @@ fn test_restore_archived_keyspace_impl(
     step!("verify more writes done");
 }
 
+#[test]
+fn test_restore_keyspace_with_resolve_locks_sync() {
+    test_restore_keyspace_with_resolve_locks(false);
+}
+
+#[test]
+fn test_restore_keyspace_with_resolve_locks_async() {
+    test_restore_keyspace_with_resolve_locks(true);
+}
+
 /// This test is to verify that `restore_keyspace` can resolve locks.
 ///
 /// Resolving locks is necessary when a backup is performed after the primary
 /// key is committed but the secondary keys are not in a transaction.
 ///
 /// See https://github.com/tidbcloud/cloud-storage-engine/issues/1134.
-#[test]
-fn test_restore_keyspace_with_resolve_locks() {
+fn test_restore_keyspace_with_resolve_locks(async_commit: bool) {
     const KEYSPACE_ID: u32 = 1;
 
     test_util::init_log_for_test();
@@ -769,6 +778,9 @@ fn test_restore_keyspace_with_resolve_locks() {
     cluster.wait_region_replicated(&[], 3);
     let pd_client = cluster.get_pd_client();
     let mut client = cluster.new_client();
+    if async_commit {
+        client.set_async_commit();
+    }
     client.split(&get_keyspace_prefix(KEYSPACE_ID));
     client.split(&get_keyspace_prefix(KEYSPACE_ID + 1));
 
@@ -779,13 +791,12 @@ fn test_restore_keyspace_with_resolve_locks() {
     // we don't resolve locks during restoration, the secondary keys will be rolled
     // back unexpectedly after deletion of primary key is compacted.
     for range in vec![0..25, 25..50, 50..100] {
-        client
-            .try_del_kv(
-                range,
-                &i_to_key,
-                CommitAction::AsyncCommitSecondaryKeys(Duration::MAX),
-            )
-            .unwrap();
+        let commit_action = if async_commit {
+            CommitAction::AsyncCommit(Duration::MAX)
+        } else {
+            CommitAction::AsyncCommitSecondaryKeys(Duration::MAX)
+        };
+        client.try_del_kv(range, &i_to_key, commit_action).unwrap();
     }
     let origin_ref_store = client.dump_ref_store();
 

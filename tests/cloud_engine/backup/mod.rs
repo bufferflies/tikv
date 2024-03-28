@@ -224,7 +224,7 @@ pub fn must_kv_put(client: &mut ClusterClient, key_count: usize, versions: usize
                 let mutation = test_cloud_server::put_mut(&k, &v.repeat(50));
                 batch.push(mutation);
             }
-            client.kv_prewrite(batch.split_off(0), keys[0].clone(), start_ts);
+            client.kv_prewrite(batch.split_off(0), keys[0].clone(), start_ts, None);
             // Commit
             let commit_ts = client.get_ts();
             client.kv_commit(keys.split_off(0), start_ts, commit_ts);

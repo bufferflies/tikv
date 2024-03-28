@@ -1911,8 +1911,12 @@ impl<'a> Insert<'a> {
             }
         }
 
-        self.client
-            .kv_prewrite(mutations.clone(), first_key.unwrap().to_vec(), start_ts);
+        self.client.kv_prewrite(
+            mutations.clone(),
+            first_key.unwrap().to_vec(),
+            start_ts,
+            None,
+        );
 
         mutations
     }
@@ -1983,7 +1987,8 @@ impl<'a> Delete<'a> {
             }
 
             total_mutations.extend(mutations.to_owned());
-            self.client.kv_prewrite(mutations, key.to_vec(), start_ts);
+            self.client
+                .kv_prewrite(mutations, key.to_vec(), start_ts, None);
         }
 
         total_mutations

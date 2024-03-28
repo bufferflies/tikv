@@ -36,7 +36,7 @@ fn test_resolve_lock() {
         let pk = mutations[0].key.clone();
         let start_ts = client.get_ts();
         // prewrite but no commit.
-        client.kv_prewrite(mutations, pk, start_ts);
+        client.kv_prewrite(mutations, pk, start_ts, None);
 
         // prewrite should meet locks of previous prewrite.
         client.put_kv(0..20, i_to_key, i_to_val);
@@ -57,7 +57,7 @@ fn test_resolve_lock() {
         let keys: Vec<Vec<u8>> = mutations.iter().map(|m| m.get_key().to_vec()).collect();
         let start_ts = client.get_ts();
         let put_time = Instant::now();
-        client.kv_prewrite(mutations, keys[0].clone(), start_ts);
+        client.kv_prewrite(mutations, keys[0].clone(), start_ts, None);
 
         let mut client1 = cluster.new_client();
         let key0 = keys[5].clone();

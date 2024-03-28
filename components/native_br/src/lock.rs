@@ -1,6 +1,10 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{default::Default, sync::Arc};
+use std::{
+    collections::{hash_map::Entry::Vacant, HashMap},
+    default::Default,
+    sync::Arc,
+};
 
 use cloud_server::modifies_to_requests;
 use dashmap::DashMap;
@@ -296,36 +300,84 @@ impl TxnStatus {
     }
 
     fn check_txn_status_from_engine(&self, lock: &Lock) -> Result<u64 /* commit_id */> {
-        let shard_id = self.get_shard_by_key(&lock.primary);
+        let mut reader_cache = HashMap::new();
+        let cloud_reader = self.load_cloud_reader_by_key(&lock.primary, lock, &mut reader_cache)?;
+        let primary_key = Key::from_raw(&lock.primary);
+        if let Some(pk_lock) = cloud_reader.load_lock(&primary_key).unwrap() {
+            if lock.ts == pk_lock.ts {
+                return if lock.use_async_commit {
+                    self.check_secondary_locks(&pk_lock, &mut reader_cache)
+                } else {
+                    Ok(0)
+                };
+            }
+        }
+        Self::get_txn_status_from_cloud_reader(cloud_reader, &primary_key, lock.ts)
+    }
+
+    fn load_cloud_reader_by_key<'a>(
+        &'a self,
+        key: &[u8],
+        lock: &Lock,
+        reader_cache: &'a mut HashMap<u64, CloudReader>,
+    ) -> Result<&mut CloudReader> {
+        let shard_id = self.get_shard_by_key(key);
         if shard_id.is_none() {
             return Err(box_err!(
-                "shard not found for primary {:?}, lock {:?}",
-                tikv_util::escape(&lock.primary),
+                "shard not found for key {:?}, lock {:?}",
+                tikv_util::escape(key),
                 lock
             ));
         }
-
         let shard_id = shard_id.unwrap();
-        let mut snap = self.en.get_snap_access(shard_id).unwrap();
-        if snap.has_unloaded_tables() {
-            self.en
-                .load_unloaded_tables(snap.get_id(), snap.get_version(), false)?;
-            snap = self.en.get_snap_access(shard_id).unwrap();
+        if let Vacant(e) = reader_cache.entry(shard_id) {
+            let mut snap = self.en.get_snap_access(shard_id).unwrap();
+            if snap.has_unloaded_tables() {
+                self.en
+                    .load_unloaded_tables(snap.get_id(), snap.get_version(), false)?;
+                snap = self.en.get_snap_access(shard_id).unwrap();
+            }
+            // TODO: check memory usage & enable fill_cache
+            e.insert(CloudReader::new(snap, false));
         }
+        Ok(reader_cache.get_mut(&shard_id).unwrap())
+    }
 
-        let mut cloud_reader = CloudReader::new(snap, false); // TODO: check memory usage & enable fill_cache
+    fn get_txn_status_from_cloud_reader(
+        cloud_reader: &mut CloudReader,
+        key: &Key,
+        ts: TimeStamp,
+    ) -> Result<u64 /* commit_id */> {
         // Ref: check_txn_status_missing_lock
-        match cloud_reader.get_txn_commit_record(&Key::from_raw(&lock.primary), lock.ts)? {
+        match cloud_reader.get_txn_commit_record(key, ts)? {
             TxnCommitRecord::SingleRecord { commit_ts, write } => {
                 if write.write_type == WriteType::Rollback {
                     Ok(0)
                 } else {
-                    // TODO: Check secondaries for async commit.
                     Ok(commit_ts.into_inner())
                 }
             }
             _ => Ok(0),
         }
+    }
+
+    fn check_secondary_locks(
+        &self,
+        pk_lock: &Lock,
+        reader_cache: &mut HashMap<u64, CloudReader>,
+    ) -> Result<u64 /* commit_id */> {
+        for key in &pk_lock.secondaries {
+            let cloud_reader = self.load_cloud_reader_by_key(key, pk_lock, reader_cache)?;
+            let key = Key::from_raw(key);
+            match cloud_reader.load_lock(&key).unwrap() {
+                Some(lock) if lock.ts == pk_lock.ts => {}
+                _ => {
+                    return Self::get_txn_status_from_cloud_reader(cloud_reader, &key, pk_lock.ts);
+                }
+            }
+        }
+        // All locks found, use min_commit_ts as commit_ts.
+        Ok(pk_lock.min_commit_ts.into_inner())
     }
 
     fn get_shard_by_key(&self, key: &[u8]) -> Option<u64 /* shard_id */> {

@@ -457,6 +457,7 @@ impl ServerCluster {
             regions: Default::default(),
             ref_store: self.ref_store.clone(),
             max_ts: Default::default(),
+            async_commit: false,
             lock_resolver,
             api_version,
         }

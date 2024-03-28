@@ -136,6 +136,7 @@ pub struct ClusterClient {
     pub(crate) regions: HashMap<u64, RawRegion>,
     pub(crate) ref_store: Arc<Mutex<RefStore>>,
     pub(crate) max_ts: AtomicU64,
+    pub(crate) async_commit: bool,
 
     // `lock_resolver` embed a `ClusterClient` to reuse methods to communicate with tikv-server.
     // So we need the `Option<Box>` to resolve circular dependency.
@@ -247,6 +248,8 @@ pub enum CommitAction {
     AsyncCommitSecondaryKeys(Duration /* delay */),
     /// No key is committed. The transaction should be rolled back.
     NoCommit,
+    /// Async commit all keys.
+    AsyncCommit(Duration /* delay */),
 }
 
 impl Clone for ClusterClient {
@@ -260,6 +263,7 @@ impl Clone for ClusterClient {
                 regions: Default::default(),
                 ref_store: self.ref_store.clone(),
                 max_ts: Default::default(),
+                async_commit: self.async_commit,
                 lock_resolver: None,
                 api_version: self.api_version,
             }
@@ -319,8 +323,13 @@ impl ClusterClient {
             m.set_key(gen_key(i));
             mutations.push(m)
         }
-        let keys = mutations.iter().map(|m| m.get_key().to_vec()).collect();
-        self.kv_prewrite(mutations.clone(), start_key, start_ts);
+        let keys: Vec<Vec<u8>> = mutations.iter().map(|m| m.get_key().to_vec()).collect();
+        let secondaries = if self.async_commit {
+            Some(keys[1..].to_vec())
+        } else {
+            None
+        };
+        self.kv_prewrite(mutations.clone(), start_key, start_ts, secondaries);
         let commit_ts = self.get_ts();
 
         match commit_action {
@@ -390,9 +399,14 @@ impl ClusterClient {
             m.set_value(gen_val(i));
             mutations.push(m)
         }
-        let keys = mutations.iter().map(|m| m.get_key().to_vec()).collect();
+        let keys: Vec<Vec<u8>> = mutations.iter().map(|m| m.get_key().to_vec()).collect();
         let put_time = Instant::now();
-        self.kv_prewrite(mutations.clone(), start_key, start_ts);
+        let secondaries = if self.async_commit {
+            Some(keys[1..].to_vec())
+        } else {
+            None
+        };
+        self.kv_prewrite(mutations.clone(), start_key, start_ts, secondaries);
         let commit_ts = self.get_ts();
 
         match commit_action {
@@ -436,7 +450,7 @@ impl ClusterClient {
             .map(|m| m.get_key().to_vec())
             .collect::<Vec<_>>();
         let start_ts = self.get_ts();
-        self.kv_prewrite(muts, keys[0].clone(), start_ts);
+        self.kv_prewrite(muts, keys[0].clone(), start_ts, None);
 
         let commit_ts = self.get_ts();
         self.kv_commit(keys, start_ts, commit_ts);
@@ -444,10 +458,16 @@ impl ClusterClient {
         Ok(())
     }
 
-    pub fn kv_prewrite(&mut self, muts: Vec<Mutation>, pk: Vec<u8>, ts: TimeStamp) {
+    pub fn kv_prewrite(
+        &mut self,
+        muts: Vec<Mutation>,
+        pk: Vec<u8>,
+        ts: TimeStamp,
+        secondaries: Option<Vec<Vec<u8>>>,
+    ) {
         let groups = self.group_mutations_by_region(muts);
         for (id_ver, group_muts) in groups {
-            self.kv_prewrite_single_region(id_ver, group_muts, pk.clone(), ts);
+            self.kv_prewrite_single_region(id_ver, group_muts, pk.clone(), ts, &secondaries);
         }
     }
 
@@ -457,6 +477,7 @@ impl ClusterClient {
         muts: Vec<Mutation>,
         pk: Vec<u8>,
         ts: TimeStamp,
+        secondary_keys: &Option<Vec<Vec<u8>>>,
     ) {
         let region_id = id_ver.id();
         let mut store_id_errors = vec![];
@@ -467,7 +488,7 @@ impl ClusterClient {
                 .new_rpc_ctx(region_id)
                 .filter(|x| x.get_region_epoch().get_version() == id_ver.ver());
             if ctx.is_none() {
-                self.kv_prewrite(muts, pk, ts);
+                self.kv_prewrite(muts, pk, ts, secondary_keys.as_ref().cloned());
                 return;
             }
             let ctx = ctx.unwrap();
@@ -481,6 +502,12 @@ impl ClusterClient {
             prewrite_req.start_version = ts.into_inner();
             prewrite_req.lock_ttl = 3000;
             prewrite_req.min_commit_ts = prewrite_req.start_version + 1;
+            prewrite_req.use_async_commit = self.async_commit;
+            if let Some(secondary_keys) = secondary_keys {
+                if muts[0].get_key() == pk.as_slice() {
+                    prewrite_req.set_secondaries(secondary_keys.clone().into());
+                }
+            }
             debug!("{} prewrite {:?}", tag, prewrite_req);
             let result = kv_client.kv_prewrite(&prewrite_req);
             if result.is_err() {
@@ -497,7 +524,7 @@ impl ClusterClient {
                     continue;
                 }
                 if self.handle_region_epoch_not_match_or_not_found(region_err) {
-                    self.kv_prewrite(muts, pk, ts);
+                    self.kv_prewrite(muts, pk, ts, secondary_keys.as_ref().cloned());
                     return;
                 }
                 panic!("unexpected error {:?}", region_err);
@@ -555,6 +582,13 @@ impl ClusterClient {
                 }
             }
             CommitAction::NoCommit => {}
+            CommitAction::AsyncCommit(delay) => {
+                let mut client = self.clone();
+                thread::spawn(move || {
+                    thread::sleep(delay);
+                    client.kv_commit(keys, start_ts, commit_ts);
+                });
+            }
         }
     }
 
@@ -1467,6 +1501,10 @@ impl ClusterClient {
 
     pub fn ingest_ref_store(&mut self, mut ref_store: RefStore) {
         *self.ref_store.lock().unwrap() = std::mem::take(&mut ref_store);
+    }
+
+    pub fn set_async_commit(&mut self) {
+        self.async_commit = true;
     }
 }
 
