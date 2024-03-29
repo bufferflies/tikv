@@ -137,6 +137,7 @@ pub struct ArchiveConfig {
     pub start_archive_duration: Duration,
     pub expiration_date: String,
     pub concurrency: usize,
+    pub skip_no_meta_days: usize,
     pub dry_run: bool,
 }
 
@@ -153,6 +154,7 @@ impl ArchiveConfig {
             start_archive_duration: Duration::from_secs(0),
             expiration_date,
             concurrency: LOAD_FILE_CONCURRENCY,
+            skip_no_meta_days: 0,
             dry_run: true,
         }
     }
@@ -213,6 +215,10 @@ pub fn archive_cluster_backup(
 
     let path = PathBuf::from(&config.data_dir).join("stores");
     let mut old: Option<ArchiveBackup> = None;
+    let mut skip_once: Option<i64> = None;
+    if config.skip_no_meta_days > 0 {
+        skip_once = Some(config.skip_no_meta_days as i64)
+    }
     loop {
         if backup_date > end_archive_date {
             break;
@@ -228,6 +234,14 @@ pub fn archive_cluster_backup(
         )?;
         old = Some(new);
         std::fs::remove_dir_all(&path).unwrap();
+        if let Some(skip_no_meta_days) = skip_once.take() {
+            backup_date += chrono::Duration::days(skip_no_meta_days + 1);
+            warn!(
+                "skip {} days without meta to get backup meta on {}",
+                skip_no_meta_days, backup_date
+            );
+            continue;
+        }
         backup_date += chrono::Duration::days(1);
     }
     Ok(())
@@ -270,6 +284,11 @@ fn archive_backup_files(
             .checked_add_days(chrono::Days::new(1))
             .unwrap()
             .eq(&backup_date)
+            || old_archive_backup
+                .date
+                .checked_add_days(chrono::Days::new(config.skip_no_meta_days as u64 + 1))
+                .unwrap()
+                .eq(&backup_date)
         {
             write_archive_packages_and_index(config, s3fs, old_archive_backup, &files)?
         } else {
