@@ -1223,11 +1223,11 @@ fn add_learners(cluster: &mut ServerCluster, start: &[u8], end: &[u8]) {
 
         let learner_stores = stores
             .iter()
-            .filter(|&&store_id| region.peers().iter().all(|peer| peer.store_id != store_id))
+            .filter(|&&store_id| region.peers.iter().all(|peer| peer.store_id != store_id))
             .collect::<Vec<_>>();
         for &store_id in learner_stores {
             let learner_peer = new_learner_peer(store_id, pd_client.alloc_id().unwrap());
-            pd_client.must_add_peer(region.id(), learner_peer);
+            pd_client.must_add_peer(region.id, learner_peer);
         }
     }
 }
@@ -1237,7 +1237,7 @@ fn check_learners_impl(
     start: &[u8],
     end: &[u8],
     min_count: usize,
-) -> Vec<test_cloud_server::client::RawRegion> {
+) -> Vec<test_cloud_server::util::RawRegion> {
     let mut client = cluster.new_client();
 
     let mut res = vec![];
@@ -1247,7 +1247,7 @@ fn check_learners_impl(
         next_key = region.raw_end().to_owned();
 
         let learner_cnt = region
-            .peers()
+            .peers
             .iter()
             .filter(|peer| peer.get_role() == metapb::PeerRole::Learner)
             .count();

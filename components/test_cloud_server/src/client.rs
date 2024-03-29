@@ -28,7 +28,7 @@ use kvproto::{
         SplitRegionRequest,
     },
     metapb,
-    metapb::{Peer, Region, RegionEpoch},
+    metapb::Peer,
     tikvpb::TikvClient,
 };
 use pd_client::PdClient;
@@ -39,17 +39,12 @@ use tikv::storage::mvcc::TimeStamp;
 use tikv_client::{
     proto::kvrpcpb::Mutation as KvMutation, CheckLevel, IntoOwnedRange, TransactionOptions,
 };
-use tikv_util::{
-    box_err,
-    codec::bytes::{decode_bytes, encode_bytes},
-    debug, error, info,
-    time::Instant,
-    warn,
-};
+use tikv_util::{box_err, codec::bytes::encode_bytes, debug, error, info, time::Instant, warn};
 
 use crate::{
     must_wait, try_wait,
-    txnlock::lock_resolver::{LockResolver, ResolveLocksOptions},
+    txn::lock_resolver::{LockResolver, ResolveLocksOptions},
+    util::RawRegion,
 };
 
 const MAX_WAIT_LOCK_DURATION: Duration = Duration::from_millis(500);
@@ -167,76 +162,6 @@ impl Default for RequestOptions {
 impl RequestOptions {
     pub fn replica_read(&self) -> bool {
         !matches!(self.peer_role, RequestPeerRole::Leader)
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct RawRegion {
-    id: u64,
-    raw_start: Vec<u8>,
-    raw_end: Vec<u8>,
-    epoch: RegionEpoch,
-    peers: Vec<Peer>,
-    leader_idx: usize,
-}
-
-impl From<Region> for RawRegion {
-    fn from(mut region: Region) -> Self {
-        let raw_start = if region.start_key.is_empty() {
-            vec![]
-        } else {
-            let mut slice = region.start_key.as_slice();
-            decode_bytes(&mut slice, false).unwrap()
-        };
-        let raw_end = if region.end_key.is_empty() {
-            vec![255; 8]
-        } else {
-            let mut slice = region.end_key.as_slice();
-            decode_bytes(&mut slice, false).unwrap()
-        };
-        RawRegion {
-            id: region.id,
-            raw_start,
-            raw_end,
-            epoch: region.take_region_epoch(),
-            peers: region.take_peers().into_vec(),
-            leader_idx: 0,
-        }
-    }
-}
-
-impl RawRegion {
-    fn get_leader(&self) -> &Peer {
-        &self.peers[self.leader_idx]
-    }
-
-    fn id_ver(&self) -> RegionIdVer {
-        RegionIdVer::new(self.id, self.epoch.version)
-    }
-
-    fn update_leader(&mut self, leader: &Peer) -> bool {
-        if let Some(idx) = self.peers.iter().position(|p| p.id == leader.id) {
-            self.leader_idx = idx;
-            true
-        } else {
-            false
-        }
-    }
-
-    pub fn id(&self) -> u64 {
-        self.id
-    }
-
-    pub fn raw_start(&self) -> &[u8] {
-        &self.raw_start
-    }
-
-    pub fn raw_end(&self) -> &[u8] {
-        &self.raw_end
-    }
-
-    pub fn peers(&self) -> &[Peer] {
-        &self.peers
     }
 }
 
@@ -733,7 +658,7 @@ impl ClusterClient {
                 return Ok(());
             }
 
-            let ctx = self.new_rpc_ctx(region.id()).unwrap();
+            let ctx = self.new_rpc_ctx(region.id).unwrap();
             tag = Self::tag_from_ctx(&ctx);
             let client = self.get_kv_client(ctx.get_peer().get_store_id());
             let mut req = kvrpcpb::ResolveLockRequest::default();
@@ -751,7 +676,7 @@ impl ClusterClient {
                 ));
                 warn!("{:?}", last_err);
                 sleep(Duration::from_millis(100));
-                self.update_cache_by_id(region.id(), None);
+                self.update_cache_by_id(region.id, None);
                 continue;
             }
 
@@ -764,7 +689,7 @@ impl ClusterClient {
                     region_err
                 ));
                 warn!("{:?}", last_err);
-                if self.handle_retryable_error(region.id(), region_err) {
+                if self.handle_retryable_error(region.id, region_err) {
                     continue;
                 }
                 if self.handle_region_epoch_not_match_or_not_found(region_err) {

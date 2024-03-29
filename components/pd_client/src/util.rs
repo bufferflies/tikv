@@ -1,6 +1,8 @@
 // Copyright 2017 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
+    borrow::Cow,
+    error, fmt,
     pin::Pin,
     sync::{atomic::AtomicU64, Arc, RwLock},
     thread,
@@ -23,6 +25,7 @@ use grpcio::{
 };
 use kvproto::{
     metapb::{self, BucketStats},
+    pdpb,
     pdpb::{
         ErrorType, GetClusterInfoRequest, GetMembersRequest, GetMembersResponse, Member,
         PdClient as PdClientStub, RegionHeartbeatRequest, RegionHeartbeatResponse,
@@ -30,10 +33,15 @@ use kvproto::{
     },
     tsopb::{FindGroupByKeyspaceIdRequest, KeyspaceGroup, TsoClient as TsoClientStub},
 };
+use log_wrappers::Value;
 use security::SecurityManager;
 use tikv_util::{
-    box_err, debug, error, info, slow_log, time::Instant, timer::GLOBAL_TIMER_HANDLE, warn, Either,
-    HandyRwLock,
+    box_err,
+    codec::bytes::{decode_bytes, encode_bytes},
+    debug, error, info, slow_log,
+    time::Instant,
+    timer::GLOBAL_TIMER_HANDLE,
+    warn, Either, HandyRwLock,
 };
 use tokio::sync::Mutex;
 use tokio_timer::timer::Handle;
@@ -1301,10 +1309,25 @@ pub fn grpc_error_is_unimplemented(e: &Error) -> bool {
     }
 }
 
-pub fn check_regions_boundary(
+pub fn compare_region_end_key(lhs: &[u8], rhs: &[u8]) -> std::cmp::Ordering {
+    if lhs.is_empty() {
+        if rhs.is_empty() {
+            return std::cmp::Ordering::Equal;
+        }
+        return std::cmp::Ordering::Greater;
+    }
+    if rhs.is_empty() {
+        return std::cmp::Ordering::Less;
+    }
+    lhs.cmp(rhs)
+}
+
+// `key_is_encoded` indicates that whether `start_key` & `end_key` are encoded.
+pub fn check_regions_boundary<R: RegionLike + fmt::Debug>(
     start_key: &[u8],
     end_key: &[u8],
-    regions: &[metapb::Region],
+    key_is_encoded: bool,
+    regions: &[R],
 ) -> crate::pd_control::Result<()> {
     if !end_key.is_empty() && start_key >= end_key && regions.is_empty() {
         return Ok(());
@@ -1313,15 +1336,18 @@ pub fn check_regions_boundary(
         return Err(box_err!("no region"));
     }
 
+    let start_key = convert_key_encoding(start_key, key_is_encoded, R::KEY_ENCODED)?;
+    let end_key = convert_key_encoding(end_key, key_is_encoded, R::KEY_ENCODED)?;
+
     let first_region = regions.first().unwrap();
     let last_region = regions.last().unwrap();
-    if first_region.get_start_key() != start_key {
+    if first_region.start_key() > start_key.as_ref() {
         return Err(box_err!(
             "unexpected start key of first region: {:?}, start_key: {:?}",
             first_region,
             start_key
         ));
-    } else if last_region.get_end_key() != end_key {
+    } else if compare_region_end_key(last_region.end_key(), end_key.as_ref()).is_lt() {
         return Err(box_err!(
             "unexpected end key of last region: {:?}, end_key: {:?}",
             last_region,
@@ -1330,7 +1356,7 @@ pub fn check_regions_boundary(
     }
 
     for region in regions.windows(2) {
-        if region[0].get_end_key() != region[1].get_start_key() {
+        if region[0].end_key() != region[1].start_key() {
             return Err(box_err!(
                 "region boundary not match: {:?}, {:?}",
                 region[0],
@@ -1342,8 +1368,74 @@ pub fn check_regions_boundary(
     Ok(())
 }
 
+pub type ConvertError = Box<dyn error::Error + Sync + Send>;
+
+pub fn convert_key_encoding(
+    mut key: &[u8],
+    key_is_encoded: bool,
+    expected_encoding: bool,
+) -> std::result::Result<Cow<'_, [u8]>, ConvertError> {
+    if key.is_empty() {
+        return Ok(Cow::Borrowed(key));
+    }
+
+    Ok(match (key_is_encoded, expected_encoding) {
+        (true, true) | (false, false) => Cow::Borrowed(key),
+        (true, false) => Cow::Owned(decode_bytes(&mut key, false).map_err(
+            |err| -> ConvertError { box_err!("decode error, key {}: {:?}", Value::key(key), err) },
+        )?),
+        (false, true) => Cow::Owned(encode_bytes(key)),
+    })
+}
+
+pub trait RegionLike {
+    /// Indicate whether keys in region is encoded.
+    const KEY_ENCODED: bool;
+    fn id(&self) -> u64;
+    fn epoch(&self) -> &metapb::RegionEpoch;
+    fn start_key(&self) -> &[u8];
+    fn end_key(&self) -> &[u8];
+}
+
+impl RegionLike for metapb::Region {
+    const KEY_ENCODED: bool = true;
+    fn id(&self) -> u64 {
+        self.id
+    }
+    fn epoch(&self) -> &metapb::RegionEpoch {
+        self.get_region_epoch()
+    }
+    fn start_key(&self) -> &[u8] {
+        &self.start_key
+    }
+    fn end_key(&self) -> &[u8] {
+        &self.end_key
+    }
+}
+
+impl RegionLike for pdpb::Region {
+    const KEY_ENCODED: bool = true;
+    fn id(&self) -> u64 {
+        self.get_region().id
+    }
+    fn epoch(&self) -> &metapb::RegionEpoch {
+        self.get_region().get_region_epoch()
+    }
+    fn start_key(&self) -> &[u8] {
+        &self.get_region().start_key
+    }
+    fn end_key(&self) -> &[u8] {
+        &self.get_region().end_key
+    }
+}
+
 #[cfg(test)]
 mod test {
+    use std::cmp::{
+        Ordering,
+        Ordering::{Equal, Greater, Less},
+    };
+
     use kvproto::{metapb, metapb::BucketStats};
 
     use super::*;
@@ -1466,6 +1558,64 @@ mod test {
     }
 
     #[test]
+    fn test_compare_region_end_key() {
+        let cases: Vec<(&[u8], &[u8], Ordering)> = vec![
+            (b"", b"", Equal),
+            (b"", b"k1", Greater),
+            (b"k1", b"", Less),
+            (b"k1", b"k1", Equal),
+            (b"k1", b"k2", Less),
+            (b"k2", b"k1", Greater),
+        ];
+
+        for (lhs, rhs, expected) in cases {
+            assert_eq!(compare_region_end_key(lhs, rhs), expected);
+        }
+    }
+
+    #[test]
+    fn test_convert_key_encoding() {
+        let cases = vec![
+            // key, key_is_encoded, expect_encoding, expected.
+            ("", false, true, ""),
+            ("xkey00001", false, false, "xkey00001"),
+            (
+                "xkey0000\\3771\\000\\000\\000\\000\\000\\000\\000\\370",
+                true,
+                true,
+                "xkey0000\\3771\\000\\000\\000\\000\\000\\000\\000\\370",
+            ),
+            (
+                "xkey00001",
+                false,
+                true,
+                "xkey0000\\3771\\000\\000\\000\\000\\000\\000\\000\\370",
+            ),
+        ];
+        for (key, key_is_encoded, expected_encoding, expected) in cases {
+            let key = tikv_util::unescape(key);
+            let expected = tikv_util::unescape(expected);
+
+            assert_eq!(
+                &expected,
+                convert_key_encoding(&key, key_is_encoded, expected_encoding)
+                    .unwrap()
+                    .as_ref()
+            );
+            assert_eq!(
+                &key,
+                convert_key_encoding(&expected, expected_encoding, key_is_encoded)
+                    .unwrap()
+                    .as_ref()
+            );
+        }
+
+        let illegal_key =
+            tikv_util::unescape("xkey0000\\3771\\000\\000\\000\\000\\000\\000\\000\\360");
+        convert_key_encoding(&illegal_key, true, false).unwrap_err();
+    }
+
+    #[test]
     fn test_check_regions_boundary() {
         let mk_key = |i: i32| -> Vec<u8> {
             if i == i32::MIN || i == i32::MAX {
@@ -1529,12 +1679,20 @@ mod test {
             (2, 2, vec![], true),
             (2, 10, mk_regions(vec![(2, 5), (6, 10)]), false),
             (2, 10, mk_regions(vec![(2, 5), (5, 6), (6, 10)]), true),
+            (
+                2,
+                10,
+                mk_regions(vec![(i32::MIN, 5), (5, 6), (6, i32::MAX)]),
+                true,
+            ),
+            (2, 10, mk_regions(vec![(i32::MIN, i32::MAX)]), true),
             (10, i32::MAX, vec![], false),
             (10, i32::MAX, mk_regions(vec![(10, i32::MAX)]), true),
+            (10, i32::MAX, mk_regions(vec![(10, 20)]), false),
         ];
 
         for (idx, (start, end, regions, expect_success)) in cases.into_iter().enumerate() {
-            let result = check_regions_boundary(&mk_key(start), &mk_key(end), &regions);
+            let result = check_regions_boundary(&mk_key(start), &mk_key(end), true, &regions);
             assert_eq!(result.is_ok(), expect_success, "case {}", idx);
         }
     }

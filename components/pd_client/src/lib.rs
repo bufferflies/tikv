@@ -13,7 +13,7 @@ mod client_v2;
 mod feature_gate;
 pub mod metrics;
 mod tso;
-mod util;
+pub mod util;
 use security::GetSecurityManager;
 pub use util::{check_regions_boundary, grpc_error_is_unimplemented};
 

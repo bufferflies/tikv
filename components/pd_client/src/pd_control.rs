@@ -3,6 +3,7 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use bstr::ByteSlice;
+use bytes::Bytes;
 use http::Method;
 use kvproto::metapb;
 use security::{RestfulClient, SecurityManager};
@@ -117,7 +118,7 @@ impl PdControl {
         let params = SchedulerDelay {
             delay: dur.as_secs() as i64,
         };
-        let body_data = serde_json::to_vec(&params)?;
+        let body_data = Bytes::from(serde_json::to_vec(&params)?);
         let _ = self
             .client
             .request(path, Method::POST, Some(body_data))
@@ -151,7 +152,7 @@ impl PdControl {
 
     pub async fn create_scheduler(&self, name: String) -> Result<()> {
         let param = CreateSchedulerParam { name };
-        let body_data = serde_json::to_vec(&param)?;
+        let body_data = Bytes::from(serde_json::to_vec(&param)?);
         let resp = self
             .client
             .request(PD_SCHEDULERS_PATH, Method::POST, Some(body_data))

@@ -4854,6 +4854,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bstr",
+ "bytes",
  "cloud_encryption",
  "collections",
  "dashmap 4.0.2",
@@ -7620,6 +7621,7 @@ dependencies = [
  "chrono",
  "cloud_server",
  "cloud_worker",
+ "crc32c",
  "dashmap 4.0.2",
  "engine_traits",
  "futures 0.3.28",
@@ -7643,6 +7645,7 @@ dependencies = [
  "security",
  "serde",
  "serde_derive",
+ "serde_json",
  "slog",
  "slog-global",
  "tempfile",

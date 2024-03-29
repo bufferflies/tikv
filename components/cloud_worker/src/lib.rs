@@ -37,6 +37,7 @@ use tikv_util::{
     time::Instant,
 };
 use tokio::{runtime::Runtime, task::JoinHandle};
+pub use txn_chunk::CreateTxnChunkResp;
 
 use crate::{
     load_data::{LoadDataManager, MAX_IN_MEM_SIZE},
@@ -270,19 +271,19 @@ impl CloudWorker {
             self.pd.clone(),
         );
         let addr = self.addr().to_string();
-        info!("{} worker server start", addr; "config" => ?self.config);
+        info!("{} cloud_worker server start", addr; "config" => ?self.config);
 
         let notify = self.notify.clone();
         let svc_handle = self.thread_pool.spawn(async move {
             tokio::select! {
                 _ = notify.notified() => {
-                    info!("{} worker server shutdown", addr);
+                    info!("{} cloud_worker server shutdown", addr);
                 }
                 res = server => {
                     if let Err(e) = res {
-                        error!("{} worker server error: {:?}", addr, e);
+                        error!("{} cloud_worker server error: {:?}", addr, e);
                     } else {
-                        info!("{} worker server graceful shutdown", addr);
+                        info!("{} cloud_worker server graceful shutdown", addr);
                     }
                 }
             }

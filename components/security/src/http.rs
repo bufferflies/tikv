@@ -182,7 +182,7 @@ impl RestfulClient {
         &self,
         path: impl AsRef<str>,
         method: Method,
-        body_data: Option<Vec<u8>>,
+        body_data: Option<Bytes>,
     ) -> Result<Bytes> {
         let path = path.as_ref();
         let client = self.security_mgr.http_client(hyper::Client::builder())?;
@@ -198,7 +198,7 @@ impl RestfulClient {
                 .method(method.clone())
                 .uri(uri)
                 .body(match body_data {
-                    Some(ref data) => Body::from(data.to_owned()),
+                    Some(ref data) => Body::from(data.clone()),
                     None => Body::empty(),
                 })
                 .unwrap();
@@ -247,7 +247,7 @@ impl RestfulClient {
         Resp: std::fmt::Debug + for<'a> serde::de::Deserialize<'a>,
     {
         let path = path.as_ref();
-        let body_data = serde_json::to_vec(data)?;
+        let body_data = Bytes::from(serde_json::to_vec(data)?);
         match self.request(path, Method::POST, Some(body_data)).await {
             Ok(resp) => {
                 let t: Resp = serde_json::from_slice(&resp)?;

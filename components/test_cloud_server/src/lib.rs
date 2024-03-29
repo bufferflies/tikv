@@ -2,6 +2,7 @@
 
 #![feature(drain_filter)]
 #![feature(trait_upcasting)]
+#![feature(slice_pattern)]
 
 pub mod client;
 pub mod cluster;
@@ -12,8 +13,8 @@ pub mod scheduler;
 mod table;
 pub mod tidb;
 pub mod tpc;
-mod txnlock;
-
+pub mod txn;
+pub mod util;
 pub use cluster::*;
 
 #[cfg(test)]

@@ -45,7 +45,7 @@ use crate::{
     client::{ApiV2NoPrefixCodec, ClusterClient, ClusterTxnClient, RefStore},
     keyspace::{ClusterKeyspaceClient, KeyspaceManager},
     scheduler::Scheduler,
-    txnlock::lock_resolver::LockResolver,
+    txn::lock_resolver::LockResolver,
 };
 
 const REGION_MEM_LIMIT_RATIO: f64 = 0.2;
@@ -899,7 +899,7 @@ impl ClusterDataStats {
 
     pub fn check_region_version_match(&self, pd_client: &dyn PdClientExt) -> Result<(), String> {
         let regions = pd_client.get_all_regions();
-        check_regions_boundary(&[], &[], &regions)
+        check_regions_boundary(&[], &[], true, &regions)
             .map_err(|e| format!("check_regions_boundary failed: {:?}", e))?;
         for region in &regions {
             let region_id = region.get_id();
@@ -931,7 +931,7 @@ impl ClusterDataStats {
         bucket_size: u64,
     ) -> Result<(), String> {
         let regions = pd_client.get_all_regions();
-        check_regions_boundary(&[], &[], &regions)
+        check_regions_boundary(&[], &[], true, &regions)
             .map_err(|e| format!("check_regions_boundary failed: {:?}", e))?;
         for region in &regions {
             let region_id = region.get_id();
