@@ -212,28 +212,18 @@ fn test_backup_and_import() {
     cluster2.stop();
 }
 
-pub fn must_kv_put(client: &mut ClusterClient, key_count: usize, versions: usize) {
-    let mut batch = Vec::with_capacity(1024);
-    let mut keys = Vec::with_capacity(1024);
+fn must_kv_put(client: &mut ClusterClient, key_count: usize, versions: usize) {
     // Write 50 times to include more different ts.
     let batch_size = (key_count / 50).clamp(1, 1024);
     for _ in 0..versions {
         let mut j = 0;
         while j < key_count {
-            let start_ts = client.get_ts();
             let limit = cmp::min(key_count, j + batch_size);
-            batch.clear();
-            keys.clear();
-            for i in j..limit {
-                let (k, v) = (format!("xkey_{}", i), format!("value_{}", i));
-                keys.push(k.clone().into_bytes());
-                let mutation = test_cloud_server::put_mut(&k, &v.repeat(50));
-                batch.push(mutation);
-            }
-            client.kv_prewrite(batch.split_off(0), keys[0].clone(), start_ts, None);
-            // Commit
-            let commit_ts = client.get_ts();
-            client.kv_commit(keys.split_off(0), start_ts, commit_ts);
+            client.put_kv(
+                j..limit,
+                |i| format!("xkey_{}", i).into_bytes(),
+                |i| format!("value_{}", i).repeat(50).into_bytes(),
+            );
             j = limit;
         }
     }

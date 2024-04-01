@@ -7,7 +7,6 @@ use std::{
     time::Duration,
 };
 
-use cloud_worker::CloudWorker;
 use futures::executor::block_on;
 use pd_client::{
     pd_control::{CreateKeyspaceParams, SchedulerStatus},
@@ -20,7 +19,9 @@ use tikv_util::{codec::bytes::encode_bytes, config::ReadableDuration, info};
 use tokio::runtime::Runtime;
 
 use crate::{
-    client::CommitAction, oss::prepare_dfs, try_wait, try_wait_result_async, ServerCluster,
+    client::{CommitAction, MutateOptions},
+    oss::prepare_dfs,
+    try_wait, try_wait_result_async, ServerCluster,
 };
 
 #[test]
@@ -57,7 +58,10 @@ fn it_works() {
             50..250,
             i_to_key,
             prefixed_i_to_val("async".to_string()),
-            CommitAction::AsyncCommitSecondaryKeys(Duration::from_millis(100)),
+            MutateOptions {
+                commit_action: CommitAction::AsyncCommitSecondaryKeys(Duration::from_millis(100)),
+                ..Default::default()
+            },
         )
         .unwrap();
     client.verify_data_with_ref_store();
@@ -67,7 +71,10 @@ fn it_works() {
             150..300,
             i_to_key,
             prefixed_i_to_val("no".to_string()),
-            CommitAction::NoCommit,
+            MutateOptions {
+                commit_action: CommitAction::NoCommit,
+                ..Default::default()
+            },
         )
         .unwrap();
     client.verify_data_with_ref_store();
@@ -76,7 +83,10 @@ fn it_works() {
         .try_del_kv(
             100..200,
             i_to_key,
-            CommitAction::AsyncCommitSecondaryKeys(Duration::MAX),
+            MutateOptions {
+                commit_action: CommitAction::AsyncCommitSecondaryKeys(Duration::MAX),
+                ..Default::default()
+            },
         )
         .unwrap();
     client.verify_data_with_ref_store();
@@ -510,16 +520,7 @@ fn test_tikv_worker() {
         },
         pd_wrapper,
     );
-
-    let tikv_worker_conf = cloud_worker::Config {
-        addr: "127.0.0.1:19000".to_string(),
-        pd: pd_client::Config::new(cluster.pd_endpoints().to_vec()),
-        dfs: dfs_config,
-        register: true,
-        ..Default::default()
-    };
-    let mut tikv_worker = CloudWorker::new(tikv_worker_conf, None, 4, cluster.get_pure_pd_client());
-    tikv_worker.start();
+    cluster.start_tikv_workers(2, 2, true);
 
     let rt = Runtime::new().unwrap();
 
@@ -578,7 +579,6 @@ fn test_tikv_worker() {
     });
 
     cluster.stop();
-    tikv_worker.shutdown();
     oss.shutdown();
 }
 

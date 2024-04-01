@@ -10,10 +10,10 @@ use bytes::Bytes;
 use futures::executor::block_on;
 use kvengine::SnapAccess;
 use kvenginepb::ChangeSet;
-use kvproto::kvrpcpb::{Mutation, Op};
+use kvproto::kvrpcpb::Op;
 use pd_client::PdClient;
 use protobuf::Message;
-use test_cloud_server::{must_wait, try_wait, ServerCluster};
+use test_cloud_server::{client::TxnMutations, must_wait, try_wait, util::Mutation, ServerCluster};
 use test_util::init_log_for_test;
 use tikv::storage::{txn::CloudStoreScanner, Scanner};
 use tikv_util::config::ReadableSize;
@@ -260,15 +260,16 @@ fn test_cloud_store_reset_range_with_opt(enable_inner_key: bool) {
     let mutations: Vec<Mutation> = keys_nums
         .iter()
         .map(|&k_num| {
-            let mut m = Mutation::new();
-            m.key = i_to_key(k_num);
-            m.value = i_to_val(k_num);
-            m.op = Op::Put;
+            let mut m = Mutation::default();
+            m.set_key(i_to_key(k_num));
+            m.set_value(i_to_val(k_num));
+            m.set_op(Op::Put);
             m
         })
         .collect();
     let start_ts = block_on(cluster.get_pd_client().get_tso()).unwrap();
-    client.kv_prewrite(mutations, i_to_key(21), start_ts, None);
+    let txn_muts = TxnMutations::from_normal(mutations);
+    client.kv_prewrite(txn_muts.primary(), None, txn_muts, start_ts);
 
     let snap = engine.get_snap_access(region_id).unwrap();
     let (locked, seeked) = (true, true);

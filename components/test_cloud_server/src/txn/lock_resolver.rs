@@ -157,6 +157,7 @@ impl LockResolver {
                 lock.lock_version,
                 commit_version,
                 lock.key.clone(),
+                lock.is_txn_file,
                 clean_regions,
             )?;
             Ok(status)
@@ -263,6 +264,7 @@ impl LockResolver {
         // 2.3 No lock -- pessimistic lock rollback, concurrence prewrite.
         let resolving_pessimistic_lock =
             lock.map_or(false, |l| l.lock_type == kvrpcpb::Op::PessimisticLock);
+        let is_txn_file = lock.map_or(false, |l| l.is_txn_file);
         let mut resp = self.cluster_client.kv_check_txn_status(
             primary,
             txn_id,
@@ -271,6 +273,7 @@ impl LockResolver {
             rollback_if_not_exist,
             false,
             resolving_pessimistic_lock,
+            is_txn_file,
         )?;
         if resp.has_error() {
             let mut key_err = resp.take_error();

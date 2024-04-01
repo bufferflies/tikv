@@ -24,7 +24,7 @@ use native_br::{
 use pd_client::PdClient;
 use rand::{seq::SliceRandom, Rng};
 use test_cloud_server::{
-    client::{CommitAction, RequestOptions, RequestPeerRole},
+    client::{CommitAction, MutateOptions, RequestOptions, RequestPeerRole},
     oss::prepare_dfs,
     try_wait, ServerCluster,
 };
@@ -296,7 +296,10 @@ fn test_restore_keyspace_impl(
             0..data_count,
             &i_to_key,
             i_to_val(IMPORT_DATA_LEN),
-            commit_action,
+            MutateOptions {
+                commit_action,
+                ..Default::default()
+            },
         )
         .unwrap();
     let origin_ref_store = client.dump_ref_store();
@@ -369,7 +372,7 @@ fn test_restore_keyspace_impl(
         let mut i = 0;
         while i < shuffle_regions {
             let split_key = rng.gen::<usize>() % data_count;
-            if let Err(e) = client.try_split(&i_to_key(split_key)) {
+            if let Err(e) = client.try_split(&i_to_key(split_key), 1) {
                 warn!("try split error: {:?}", e);
                 continue;
             }
@@ -684,7 +687,7 @@ fn test_restore_archived_keyspace_impl(
             let mut i = 0;
             while i < shuffle_regions {
                 let split_key = rng.gen::<usize>() % data_count;
-                if let Err(e) = client.try_split(&i_to_key(split_key)) {
+                if let Err(e) = client.try_split(&i_to_key(split_key), 1) {
                     warn!("try split error: {:?}", e);
                     continue;
                 }
@@ -850,7 +853,16 @@ fn test_restore_keyspace_with_resolve_locks(async_commit: bool) {
         } else {
             CommitAction::AsyncCommitSecondaryKeys(Duration::MAX)
         };
-        client.try_del_kv(range, &i_to_key, commit_action).unwrap();
+        client
+            .try_del_kv(
+                range,
+                &i_to_key,
+                MutateOptions {
+                    commit_action,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
     }
     let origin_ref_store = client.dump_ref_store();
 

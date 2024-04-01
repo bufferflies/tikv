@@ -2,8 +2,9 @@
 
 use std::{thread, time::Duration};
 
+use bytes::Bytes;
 use kvproto::kvrpcpb;
-use test_cloud_server::ServerCluster;
+use test_cloud_server::{client::TxnMutations, util::Mutation, ServerCluster};
 use tikv_util::time::Instant;
 
 use crate::{alloc_node_id_vec, i_to_key, i_to_val};
@@ -26,17 +27,16 @@ fn test_resolve_lock() {
     {
         let mut mutations = vec![];
         for i in 0..10 {
-            mutations.push(kvrpcpb::Mutation {
-                key: i_to_key(i),
-                value: i_to_val(i),
+            mutations.push(Mutation {
+                key: Bytes::from(i_to_key(i)),
+                value: Bytes::from(i_to_val(i)),
                 op: kvrpcpb::Op::Put,
-                ..Default::default()
             });
         }
-        let pk = mutations[0].key.clone();
         let start_ts = client.get_ts();
         // prewrite but no commit.
-        client.kv_prewrite(mutations, pk, start_ts, None);
+        let txn_muts = TxnMutations::from_normal(mutations);
+        client.kv_prewrite(txn_muts.primary(), None, txn_muts, start_ts);
 
         // prewrite should meet locks of previous prewrite.
         client.put_kv(0..20, i_to_key, i_to_val);
@@ -47,29 +47,27 @@ fn test_resolve_lock() {
     {
         let mut mutations = vec![];
         for i in 30..40 {
-            mutations.push(kvrpcpb::Mutation {
-                key: i_to_key(i),
-                value: i_to_val(i),
+            mutations.push(Mutation {
+                key: Bytes::from(i_to_key(i)),
+                value: Bytes::from(i_to_val(i)),
                 op: kvrpcpb::Op::Put,
-                ..Default::default()
             });
         }
-        let keys: Vec<Vec<u8>> = mutations.iter().map(|m| m.get_key().to_vec()).collect();
         let start_ts = client.get_ts();
         let put_time = Instant::now();
-        client.kv_prewrite(mutations, keys[0].clone(), start_ts, None);
+        let txn_muts = TxnMutations::from_normal(mutations);
+        client.kv_prewrite(txn_muts.primary(), None, txn_muts.clone(), start_ts);
 
         let mut client1 = cluster.new_client();
-        let key0 = keys[5].clone();
         let handle = thread::spawn(move || {
             // `get_key` should wait until committed, and get the committed value.
-            let (val, _) = client1.must_get_key(&key0, put_time);
+            let (val, _) = client1.must_get_key(&i_to_key(35), put_time);
             assert_eq!(val, i_to_val(35));
         });
 
         thread::sleep(Duration::from_secs(1));
         let commit_ts = client.get_ts();
-        client.kv_commit(keys, start_ts, commit_ts);
+        client.kv_commit(txn_muts, start_ts, commit_ts);
 
         handle.join().unwrap();
         client.verify_data_with_ref_store();

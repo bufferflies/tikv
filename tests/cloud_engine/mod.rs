@@ -70,16 +70,20 @@ pub(crate) fn is_region_belongs_to_keyspace(
 }
 
 pub(crate) fn i_to_key(i: usize) -> Vec<u8> {
-    format!("xkey_{:03}", i).into_bytes()
+    format!("xkey_{:08}", i).into_bytes()
 }
 
 pub(crate) fn i_to_val(i: usize) -> Vec<u8> {
     format!("val_{:03}", i).into_bytes().repeat(3)
 }
 
+pub(crate) fn i_to_val_opt(prefix: &str, repeat: usize) -> impl Fn(usize) -> Vec<u8> + '_ {
+    move |i: usize| -> Vec<u8> { format!("{}{:03}", prefix, i).into_bytes().repeat(repeat) }
+}
+
 /// Generate keys of API v1 (TiDB metas)
 pub(crate) fn i_to_key_v1(i: usize) -> Vec<u8> {
-    format!("m_{:03}", i).into_bytes()
+    format!("m_{:08}", i).into_bytes()
 }
 
 pub(crate) async fn request_major_compact_on_store(

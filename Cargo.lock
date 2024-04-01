@@ -7828,6 +7828,7 @@ dependencies = [
 name = "tests"
 version = "0.0.1"
 dependencies = [
+ "anyhow",
  "api_version",
  "arrow",
  "async-trait",
@@ -8264,7 +8265,7 @@ dependencies = [
 [[package]]
 name = "tikv-client"
 version = "0.3.0"
-source = "git+https://github.com/tikv/client-rust.git?rev=bd14485ca796a4026fb404b9b56c61a83c13284a#bd14485ca796a4026fb404b9b56c61a83c13284a"
+source = "git+https://github.com/pingyu/client-rust.git?branch=txn-file#bc1ac81632507c8f3ed4b94f4fcafe02e5266114"
 dependencies = [
  "async-recursion",
  "async-trait",

@@ -7,11 +7,15 @@ use codec::prelude::NumberEncoder;
 use kvengine::{table::table::Row, SnapAccess};
 use kvproto::{
     coprocessor::{self as coppb, Request},
-    kvrpcpb::{ApiVersion, Context, Mutation},
+    kvrpcpb::{ApiVersion, Context},
 };
 use protobuf::Message;
 use rfstore::store::RegionSnapshot;
-use test_cloud_server::{client::ClusterClient, ServerCluster};
+use test_cloud_server::{
+    client::{ClusterClient, TxnMutations},
+    util::Mutation,
+    ServerCluster,
+};
 use test_coprocessor::{
     next_id, offset_for_column, Column, ColumnBuilder, DagChunkSpliter, DagSelect, Table,
     TableBuilder, TYPE_LONG, TYPE_VAR_CHAR,
@@ -1870,7 +1874,6 @@ impl<'a> Insert<'a> {
 
         let mut mutations = vec![];
         let table = row_cache.table();
-        let mut first_key = None;
 
         for row in row_cache.rows() {
             let handle = row
@@ -1905,18 +1908,11 @@ impl<'a> Insert<'a> {
 
                 mutations.push(m);
             }
-
-            if first_key.is_none() {
-                first_key = Some(key);
-            }
         }
 
-        self.client.kv_prewrite(
-            mutations.clone(),
-            first_key.unwrap().to_vec(),
-            start_ts,
-            None,
-        );
+        let txn_muts = TxnMutations::from_normal(mutations.clone());
+        self.client
+            .kv_prewrite(txn_muts.primary(), None, txn_muts, start_ts);
 
         mutations
     }
@@ -1987,8 +1983,9 @@ impl<'a> Delete<'a> {
             }
 
             total_mutations.extend(mutations.to_owned());
+            let txn_muts = TxnMutations::from_normal(mutations.clone());
             self.client
-                .kv_prewrite(mutations, key.to_vec(), start_ts, None);
+                .kv_prewrite(txn_muts.primary(), None, txn_muts, start_ts);
         }
 
         total_mutations

@@ -5,7 +5,10 @@ use std::{thread, time::Duration};
 use futures::executor::block_on;
 use kvproto::kvrpcpb;
 use pd_client::PdClient;
-use test_cloud_server::{client::RequestOptions, try_wait, ServerCluster};
+use test_cloud_server::{
+    client::{ClusterClientOptions, RequestOptions},
+    try_wait, ServerCluster,
+};
 use test_pd_client::PdClientExt;
 use tikv::config::TikvConfig;
 use tikv_util::{
@@ -337,7 +340,10 @@ fn region_merge_keyspaces(enable_inner_key_offset: bool) {
         conf.enable_inner_key_offset = enable_inner_key_offset;
     });
 
-    let mut client_v1 = cluster.new_client_opt(true, kvrpcpb::ApiVersion::V1);
+    let mut client_v1 = cluster.new_client_opt(ClusterClientOptions {
+        api_version: kvrpcpb::ApiVersion::V1,
+        ..Default::default()
+    });
     let mut client = cluster.new_client();
     // 1. Generate 1 APIv1 region and 2 keyspace regions.
     // 2. Put some keys to the regions.

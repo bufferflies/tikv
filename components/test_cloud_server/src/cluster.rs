@@ -3,18 +3,21 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU16, Ordering::Relaxed},
+        Arc, Mutex,
+    },
     thread::sleep,
     time::Duration,
 };
 
 use cloud_server::TikvServer;
+use cloud_worker::CloudWorker;
 use dashmap::DashMap;
 use futures::executor::block_on;
 use grpcio::{Channel, ChannelBuilder, EnvBuilder, Environment};
 use kvengine::{dfs::Dfs, ShardStats};
 use kvproto::{
-    kvrpcpb,
     kvrpcpb::{Mutation, Op},
     metapb::PeerRole,
     raft_cmdpb::{RaftCmdRequest, RaftCmdResponse, RaftRequestHeader},
@@ -42,13 +45,14 @@ use tikv_util::{
 };
 
 use crate::{
-    client::{ApiV2NoPrefixCodec, ClusterClient, ClusterTxnClient, RefStore},
+    client::{ApiV2NoPrefixCodec, ClusterClient, ClusterClientOptions, ClusterTxnClient, RefStore},
     keyspace::{ClusterKeyspaceClient, KeyspaceManager},
     scheduler::Scheduler,
-    txn::lock_resolver::LockResolver,
+    txn::{lock_resolver::LockResolver, txn_file::TxnFileHelper},
 };
 
 const REGION_MEM_LIMIT_RATIO: f64 = 0.2;
+static TIKV_WORKER_IDX_ALLOCATOR: AtomicU16 = AtomicU16::new(0);
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 
@@ -67,6 +71,7 @@ pub struct ServerCluster {
     confs: HashMap<u16 /* node_id */, TikvConfig>,
     keyspace_manager: KeyspaceManager,
     nodes_count: usize,
+    tikv_workers: HashMap<u16 /* idx */, CloudWorker>,
 }
 
 impl ServerCluster {
@@ -108,6 +113,7 @@ impl ServerCluster {
             confs: Default::default(),
             keyspace_manager: Default::default(),
             nodes_count: nodes.len(),
+            tikv_workers: Default::default(),
         };
         for node_id in nodes {
             cluster.start_node(node_id, &update_conf);
@@ -219,6 +225,9 @@ impl ServerCluster {
         let nodes = self.get_nodes();
         for node_id in nodes {
             self.stop_node(node_id);
+        }
+        for (_, worker) in self.tikv_workers.drain() {
+            worker.shutdown();
         }
     }
 
@@ -442,15 +451,16 @@ impl ServerCluster {
     }
 
     pub fn new_client(&self) -> ClusterClient {
-        self.new_client_opt(true, kvrpcpb::ApiVersion::V2)
+        self.new_client_opt(ClusterClientOptions::default())
     }
 
-    pub fn new_client_opt(
-        &self,
-        with_lock_resolver: bool,
-        api_version: kvrpcpb::ApiVersion,
-    ) -> ClusterClient {
-        let lock_resolver = with_lock_resolver.then(|| Box::new(self.new_lock_resolver()));
+    pub fn new_client_opt(&self, options: ClusterClientOptions) -> ClusterClient {
+        let lock_resolver = options
+            .with_lock_resolver
+            .then(|| Box::new(self.new_lock_resolver()));
+        let txn_file_helper = options
+            .txn_file_max_chunk_size
+            .and_then(|size| self.new_txn_client_helper(size));
         ClusterClient {
             pd_client: self.pd_client.clone(),
             channels: self.channels.clone(),
@@ -460,7 +470,8 @@ impl ServerCluster {
             max_ts: Default::default(),
             async_commit: false,
             lock_resolver,
-            api_version,
+            api_version: options.api_version,
+            txn_file_helper,
         }
     }
 
@@ -482,7 +493,10 @@ impl ServerCluster {
 
     pub fn new_lock_resolver(&self) -> LockResolver {
         // `with_lock_resolver` must be false, otherwise it will cause dead loop.
-        LockResolver::new(self.new_client_opt(false, kvrpcpb::ApiVersion::V2))
+        LockResolver::new(self.new_client_opt(ClusterClientOptions {
+            with_lock_resolver: false,
+            ..Default::default()
+        }))
     }
 
     pub fn get_data_stats(&self) -> ClusterDataStats {
@@ -671,6 +685,53 @@ impl ServerCluster {
             "wait del_prefixes timeout, pending_shards: {:?}",
             get_pending_shards(false)
         );
+    }
+
+    fn tikv_worker_addr(idx: u16) -> String {
+        format!("127.0.0.1:{}", 19000 + idx)
+    }
+
+    pub fn start_tikv_workers(&mut self, workers_cnt: usize, threads_cnt: usize, register: bool) {
+        assert!(
+            self.tikv_workers.is_empty(),
+            "start tikv workers more than once is not supported"
+        );
+        let tikv_config = self.confs.iter().next().unwrap().1;
+        for _ in 0..workers_cnt {
+            let idx = TIKV_WORKER_IDX_ALLOCATOR.fetch_add(1, Relaxed);
+            let tikv_worker_conf = cloud_worker::Config {
+                addr: Self::tikv_worker_addr(idx),
+                pd: pd_client::Config::new(self.pd_endpoints().to_vec()),
+                security: tikv_config.security.clone(),
+                dfs: tikv_config.dfs.clone(),
+                register,
+                ..Default::default()
+            };
+
+            let mut worker = CloudWorker::new(
+                tikv_worker_conf,
+                None,
+                threads_cnt,
+                self.get_pure_pd_client(),
+            );
+            worker.start();
+            self.tikv_workers.insert(idx, worker);
+        }
+    }
+
+    pub fn new_txn_client_helper(&self, max_chunk_size: usize) -> Option<Arc<TxnFileHelper>> {
+        if self.tikv_workers.is_empty() {
+            None
+        } else {
+            let endpoints = self
+                .tikv_workers
+                .keys()
+                .map(|&idx| Self::tikv_worker_addr(idx))
+                .collect::<Vec<_>>();
+            let helper =
+                TxnFileHelper::new(max_chunk_size, endpoints, self.security_mgr.clone()).unwrap();
+            Some(Arc::new(helper))
+        }
     }
 }
 

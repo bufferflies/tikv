@@ -1,8 +1,10 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
+use anyhow::{self, bail};
 use bytes::Bytes;
+use futures::future::join_all;
 use kvengine::{
     dfs::Dfs,
     table::txn_file::{TxnChunkBuilder, OP_PUT},
@@ -11,17 +13,25 @@ use kvproto::kvrpcpb::{
     BatchRollbackRequest, CheckTxnStatusRequest, CommitRequest, PrewriteRequest,
     ResolveLockRequest, TxnHeartBeatRequest,
 };
+use security::SecurityConfig;
 use test_cloud_server::{
-    client::{ClusterClient, RequestOptions},
+    client::{
+        ClusterClient, ClusterClientOptions, CommitAction, MutateOptions, RequestOptions,
+        TxnWriteMethod,
+    },
+    oss::prepare_dfs,
     ServerCluster,
 };
-use tikv_util::time::Instant;
+use test_pd_client::PdWrapper;
+use tikv_util::{info, time::Instant};
 
-use crate::{alloc_node_id_vec, i_to_key, i_to_val};
+use crate::{alloc_node_id_vec, generate_keyspace_key, i_to_key, i_to_val, i_to_val_opt};
 
-#[allow(clippy::redundant_clone)]
+const NODES_COUNT: usize = 3;
+const KEYSPACE_ID: u32 = 10;
+
 #[test]
-fn test_txn_file() {
+fn test_txn_file_commands() {
     test_util::init_log_for_test();
     let mut cluster = ServerCluster::new(alloc_node_id_vec(3), |_, _| {});
     cluster.wait_region_replicated(&[], 3);
@@ -38,7 +48,7 @@ fn test_txn_file() {
 
     let mut req = PrewriteRequest::new();
     req.set_context(ctx.clone());
-    req.set_txn_file_chunks(chunk_ids.clone());
+    req.set_txn_file_chunks(chunk_ids);
     req.set_primary_lock(primary_lock.clone());
     req.set_lock_ttl(6000);
     req.set_start_version(start_ts);
@@ -64,7 +74,7 @@ fn test_txn_file() {
     let mut req = TxnHeartBeatRequest::new();
     req.set_context(ctx.clone());
     req.set_start_version(start_ts);
-    req.set_primary_lock(primary_lock.clone());
+    req.set_primary_lock(primary_lock);
     req.set_advise_lock_ttl(10000);
     req.set_is_txn_file(true);
     let resp = kv_client.kv_txn_heart_beat(&req).unwrap();
@@ -84,8 +94,8 @@ fn test_txn_file() {
 
     let mut req = PrewriteRequest::new();
     req.set_context(ctx.clone());
-    req.set_txn_file_chunks(chunk_ids.clone());
-    req.set_primary_lock(primary_lock.clone());
+    req.set_txn_file_chunks(chunk_ids);
+    req.set_primary_lock(primary_lock);
     req.set_lock_ttl(6000);
     req.set_start_version(start_ts);
     req.set_min_commit_ts(start_ts + 1);
@@ -104,8 +114,8 @@ fn test_txn_file() {
 
     let mut req = PrewriteRequest::new();
     req.set_context(ctx.clone());
-    req.set_txn_file_chunks(chunk_ids.clone());
-    req.set_primary_lock(primary_lock.clone());
+    req.set_txn_file_chunks(chunk_ids);
+    req.set_primary_lock(primary_lock);
     req.set_lock_ttl(6000);
     req.set_start_version(start_ts);
     req.set_min_commit_ts(start_ts + 1);
@@ -124,15 +134,15 @@ fn test_txn_file() {
 
     let mut req = PrewriteRequest::new();
     req.set_context(ctx.clone());
-    req.set_txn_file_chunks(chunk_ids.clone());
-    req.set_primary_lock(primary_lock.clone());
+    req.set_txn_file_chunks(chunk_ids);
+    req.set_primary_lock(primary_lock);
     req.set_lock_ttl(6000);
     req.set_start_version(start_ts);
     req.set_min_commit_ts(start_ts + 1);
     kv_client.kv_prewrite(&req).unwrap();
 
     let mut req = CommitRequest::new();
-    req.set_context(ctx.clone());
+    req.set_context(ctx);
     req.set_start_version(start_ts);
     req.set_is_txn_file(true);
     let commit_ts = client.get_ts().into_inner();
@@ -141,6 +151,175 @@ fn test_txn_file() {
 
     verify_range(&mut client, 0, 300);
     cluster.stop();
+}
+
+#[ignore]
+#[test]
+fn test_txn_file_basic() {
+    test_util::init_log_for_test();
+
+    let cases = vec![
+        // size_factor, write_method, enable_inner_key_off
+        (10, TxnWriteMethod::FileBased, true),
+        // TODO: (10, TxnWriteMethod::FileBased, false),
+        // Regression tests:
+        (1, TxnWriteMethod::FileBased, true),
+        // TODO: (1, TxnWriteMethod::FileBased, false),
+        (1, TxnWriteMethod::Normal, true),
+    ];
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .thread_name("test-txn-file-basic")
+        .worker_threads(cases.len())
+        .enable_all()
+        .build()
+        .unwrap();
+    let mut handles = Vec::with_capacity(cases.len());
+    for (size_factor, txn_write_method, enable_inner_key_off) in cases {
+        handles.push(rt.spawn_blocking(move || {
+            test_txn_file_basic_impl(size_factor, txn_write_method, enable_inner_key_off)
+        }));
+    }
+    rt.block_on(join_all(handles));
+}
+
+fn test_txn_file_basic_impl(
+    size_factor: usize,
+    write_method: TxnWriteMethod,
+    enable_inner_key_off: bool,
+) {
+    let (_temp_dir, mut oss, dfs_config) = prepare_dfs("test");
+
+    let node_ids = alloc_node_id_vec(NODES_COUNT);
+    let pd_wrapper = PdWrapper::new_test(1, &SecurityConfig::default(), None);
+    let cluster_id = pd_wrapper.client().get_cluster_id().unwrap();
+    info!("test_txn_file_basic";
+        "size_factor" => size_factor,
+        "enable_inner_key_off" => enable_inner_key_off,
+        "write_method" => ?write_method,
+        "cluster_id" => cluster_id);
+    let mut cluster = ServerCluster::new_opt(
+        node_ids,
+        |_, conf| {
+            conf.dfs = dfs_config.clone();
+            conf.enable_inner_key_offset = enable_inner_key_off;
+        },
+        pd_wrapper,
+    );
+    cluster.start_tikv_workers(1, 2, false);
+    cluster.wait_region_replicated(&[], 3);
+
+    let gen_key = generate_keyspace_key(KEYSPACE_ID);
+
+    let mut verify_data = {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut client = cluster.new_client();
+        let mut txn_client = rt.block_on(cluster.new_txn_client());
+
+        move |range: Option<(&[u8], &[u8])>, expected: usize| -> anyhow::Result<()> {
+            let guard = client.ref_store();
+            let ref_store = guard.lock().unwrap();
+            let cnt = rt
+                .block_on(txn_client.verify_data_by_scan(&ref_store, range))
+                .unwrap();
+            if cnt != expected {
+                bail!("txn client verify data failed, expect {expected}, got {cnt}");
+            }
+            let cnt = client
+                .verify_data_with_given_ref_store(&ref_store, range, &RequestOptions::default())
+                .unwrap();
+            if cnt != expected {
+                bail!("client verify data failed, expect {expected}, got {cnt}");
+            }
+            Ok(())
+        }
+    };
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _enter = rt.enter();
+
+    let mut client = cluster.new_client_opt(ClusterClientOptions {
+        txn_file_max_chunk_size: Some(1024),
+        ..Default::default()
+    });
+
+    client.split_keyspace(KEYSPACE_ID);
+
+    {
+        // To work around that data not existed in ref store will not be checked.
+        let guard = client.ref_store();
+        let mut ref_store = guard.lock().unwrap();
+        for k in 0..20 * size_factor {
+            ref_store.del_kv(gen_key(k));
+        }
+    }
+
+    {
+        client
+            .try_put_kv(
+                0..10 * size_factor,
+                &gen_key,
+                i_to_val_opt("value0_", 3),
+                MutateOptions {
+                    commit_action: CommitAction::AsyncCommitSecondaryKeys(Duration::ZERO),
+                    write_method,
+                },
+            )
+            .unwrap();
+        verify_data(None, 10 * size_factor).unwrap();
+    }
+
+    {
+        // Verify locks of committed txn.
+        client
+            .try_put_kv(
+                size_factor..11 * size_factor,
+                &gen_key,
+                i_to_val_opt("value1_", 3),
+                MutateOptions {
+                    commit_action: CommitAction::AsyncCommitSecondaryKeys(Duration::MAX),
+                    write_method,
+                },
+            )
+            .unwrap();
+        // Verify on non-primary txn file when there are more than one.
+        verify_data(
+            Some((&gen_key(6 * size_factor), &gen_key(11 * size_factor))),
+            5 * size_factor,
+        )
+        .unwrap();
+    }
+
+    {
+        // Verify rollback & resolve locks.
+        client
+            .try_put_kv(
+                2 * size_factor..12 * size_factor,
+                &gen_key,
+                i_to_val_opt("value2_", 3),
+                MutateOptions {
+                    commit_action: CommitAction::NoCommit,
+                    write_method,
+                },
+            )
+            .unwrap();
+        let start = Instant::now_coarse();
+        // Verify on non-primary txn file when there are more than one.
+        verify_data(
+            Some((&gen_key(7 * size_factor), &gen_key(12 * size_factor))),
+            4 * size_factor,
+        )
+        .unwrap();
+        // Wait until locks expired.
+        // Note that txn client will not wait lock timeout during scan because of min
+        // commit ts pushed.
+        let elapsed = start.saturating_elapsed();
+        assert!(elapsed > Duration::from_secs(2), "elapsed {:?}", elapsed);
+    }
+
+    verify_data(None, 11 * size_factor).unwrap();
+    cluster.stop();
+    oss.shutdown();
 }
 
 fn build_txn_files(dfs: &Arc<dyn Dfs>, start_ts: u64, start: usize, end: usize) -> Vec<u64> {

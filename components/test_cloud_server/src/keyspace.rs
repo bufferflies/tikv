@@ -13,7 +13,7 @@ use dashmap::{
     mapref::{entry::Entry, one::Ref},
     DashMap,
 };
-use kvproto::kvrpcpb::{Mutation, Op};
+use kvproto::kvrpcpb::Op;
 use rand::{
     distributions::Distribution,
     prelude::{IteratorRandom, SliceRandom, ThreadRng},
@@ -25,6 +25,7 @@ use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use crate::{
     client::{ClusterTxnClient, RefStore, Result},
     table::TableMeta,
+    util::Mutation,
 };
 
 #[derive(Clone, Default)]

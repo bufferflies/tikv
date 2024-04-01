@@ -1,6 +1,8 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
+use core::slice::SlicePattern;
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, HashMap, HashSet},
     ops::{
         Bound::{Excluded, Included, Unbounded},
@@ -18,20 +20,20 @@ use api_version::{
     api_v2::{self, TXN_KEY_PREFIX},
     ApiV2, KvFormat,
 };
+use bytes::Bytes;
 use futures::executor::block_on;
 use grpcio::Channel;
 use kvengine::ShardTag;
 use kvproto::{
     coprocessor as coppb, errorpb, kvrpcpb,
     kvrpcpb::{
-        CommitRequest, Context, GetRequest, IsolationLevel, Mutation, Op, PrewriteRequest,
-        SplitRegionRequest,
+        CommitRequest, Context, GetRequest, IsolationLevel, Op, PrewriteRequest, SplitRegionRequest,
     },
     metapb,
     metapb::Peer,
     tikvpb::TikvClient,
 };
-use pd_client::PdClient;
+use pd_client::{check_regions_boundary, PdClient};
 use protobuf::ProtobufEnum;
 use rfstore::store::RegionIdVer;
 use test_pd_client;
@@ -43,11 +45,15 @@ use tikv_util::{box_err, codec::bytes::encode_bytes, debug, error, info, time::I
 
 use crate::{
     must_wait, try_wait,
-    txn::lock_resolver::{LockResolver, ResolveLocksOptions},
-    util::RawRegion,
+    txn::{
+        lock_resolver::{LockResolver, ResolveLocksOptions},
+        txn_file::{TxnFileChunk, TxnFileHelper},
+    },
+    util::{Mutation, RawRegion},
 };
 
 const MAX_WAIT_LOCK_DURATION: Duration = Duration::from_millis(500);
+const SCAN_REGIONS_MAX_BATCH_SIZE: usize = 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -122,6 +128,23 @@ impl DerefMut for RefStore {
     }
 }
 
+#[derive(Clone)]
+pub struct ClusterClientOptions {
+    pub with_lock_resolver: bool,
+    pub api_version: kvrpcpb::ApiVersion,
+    pub txn_file_max_chunk_size: Option<usize>,
+}
+
+impl Default for ClusterClientOptions {
+    fn default() -> Self {
+        Self {
+            with_lock_resolver: true,
+            api_version: kvrpcpb::ApiVersion::V2,
+            txn_file_max_chunk_size: None,
+        }
+    }
+}
+
 pub struct ClusterClient {
     pub pd_client: Arc<dyn test_pd_client::PdClientExt>,
     pub channels: HashMap<u64, Channel>,
@@ -139,6 +162,8 @@ pub struct ClusterClient {
     pub(crate) lock_resolver: Option<Box<LockResolver>>,
 
     pub(crate) api_version: kvrpcpb::ApiVersion,
+
+    pub(crate) txn_file_helper: Option<Arc<TxnFileHelper>>,
 }
 
 // Named as `RequestPeerRole` to avoid conflict with `metapb::PeerRole`.
@@ -165,6 +190,7 @@ impl RequestOptions {
     }
 }
 
+#[derive(Clone)]
 pub enum CommitAction {
     /// Sync commit all keys.
     SyncCommit,
@@ -175,6 +201,21 @@ pub enum CommitAction {
     NoCommit,
     /// Async commit all keys.
     AsyncCommit(Duration /* delay */),
+}
+
+#[derive(Clone)]
+pub struct MutateOptions {
+    pub commit_action: CommitAction,
+    pub write_method: TxnWriteMethod,
+}
+
+impl Default for MutateOptions {
+    fn default() -> Self {
+        Self {
+            commit_action: CommitAction::SyncCommit,
+            write_method: TxnWriteMethod::Normal,
+        }
+    }
 }
 
 impl Clone for ClusterClient {
@@ -191,6 +232,7 @@ impl Clone for ClusterClient {
                 async_commit: self.async_commit,
                 lock_resolver: None,
                 api_version: self.api_version,
+                txn_file_helper: self.txn_file_helper.clone(),
             }
         };
         let mut cloned = make_clone();
@@ -215,8 +257,11 @@ impl ClusterClient {
 
     pub fn del_table_rows_commit(&mut self, start_ts: TimeStamp, mutations: &[Mutation]) {
         let commit_ts = self.get_ts();
-        let keys = mutations.iter().map(|m| m.get_key().to_vec()).collect();
-        self.kv_commit(keys, start_ts, commit_ts);
+        self.kv_commit(
+            TxnMutations::from_normal(mutations.to_vec()),
+            start_ts,
+            commit_ts,
+        );
         self.del_kv_in_ref_store(mutations.to_vec());
         self.set_max_ts(commit_ts.into_inner());
     }
@@ -225,7 +270,7 @@ impl ClusterClient {
     where
         F: Fn(usize) -> Vec<u8>,
     {
-        self.try_del_kv(rng, gen_key, CommitAction::SyncCommit)
+        self.try_del_kv(rng, gen_key, MutateOptions::default())
             .unwrap();
     }
 
@@ -233,12 +278,11 @@ impl ClusterClient {
         &mut self,
         rng: Range<usize>,
         gen_key: F,
-        commit_action: CommitAction,
+        options: MutateOptions,
     ) -> Result<()>
     where
         F: Fn(usize) -> Vec<u8>,
     {
-        let start_key = gen_key(rng.start);
         let start_ts = self.get_ts();
 
         let mut mutations = vec![];
@@ -248,20 +292,27 @@ impl ClusterClient {
             m.set_key(gen_key(i));
             mutations.push(m)
         }
-        let keys: Vec<Vec<u8>> = mutations.iter().map(|m| m.get_key().to_vec()).collect();
-        let secondaries = if self.async_commit {
-            Some(keys[1..].to_vec())
-        } else {
-            None
-        };
-        self.kv_prewrite(mutations.clone(), start_key, start_ts, secondaries);
+        let txn_muts = block_on(TxnMutations::build(
+            mutations.clone(),
+            options.write_method,
+            self.txn_file_helper.clone(),
+        ))?;
+        let secondaries = self.async_commit.then(|| txn_muts.secondaries());
+        self.kv_prewrite(
+            txn_muts.primary(),
+            secondaries.as_ref(),
+            txn_muts.clone(),
+            start_ts,
+        );
         let commit_ts = self.get_ts();
 
-        match commit_action {
+        match options.commit_action {
             CommitAction::NoCommit => {
                 return Ok(());
             }
-            commit_action => self.kv_commit_ext(keys, start_ts, commit_ts, commit_action),
+            commit_action => {
+                self.kv_commit_ext(txn_muts, start_ts, commit_ts, commit_action);
+            }
         }
 
         self.del_kv_in_ref_store(mutations);
@@ -280,8 +331,8 @@ impl ClusterClient {
         let put_time = Instant::now();
         let commit_ts = self.get_ts();
         let first = mutations.first().unwrap().clone();
-        let keys = mutations.iter().map(|m| m.get_key().to_vec()).collect();
-        self.kv_commit(keys, start_ts, commit_ts);
+        let txn_muts = TxnMutations::from_normal(mutations.to_vec());
+        self.kv_commit(txn_muts, start_ts, commit_ts);
         self.verify_key_value(
             first.get_key(),
             Some(first.get_value()),
@@ -298,7 +349,7 @@ impl ClusterClient {
         F: Fn(usize) -> Vec<u8>,
         G: Fn(usize) -> Vec<u8>,
     {
-        self.try_put_kv(rng, gen_key, gen_val, CommitAction::SyncCommit)
+        self.try_put_kv(rng, gen_key, gen_val, MutateOptions::default())
             .unwrap();
     }
 
@@ -307,13 +358,12 @@ impl ClusterClient {
         rng: Range<usize>,
         gen_key: F,
         gen_val: G,
-        commit_action: CommitAction,
+        options: MutateOptions,
     ) -> Result<()>
     where
         F: Fn(usize) -> Vec<u8>,
         G: Fn(usize) -> Vec<u8>,
     {
-        let start_key = gen_key(rng.start);
         let start_ts = self.get_ts();
 
         let mut mutations = vec![];
@@ -324,24 +374,32 @@ impl ClusterClient {
             m.set_value(gen_val(i));
             mutations.push(m)
         }
-        let keys: Vec<Vec<u8>> = mutations.iter().map(|m| m.get_key().to_vec()).collect();
+        let first = mutations.first().unwrap().clone();
+        let txn_muts = block_on(TxnMutations::build(
+            mutations.clone(),
+            options.write_method,
+            self.txn_file_helper.clone(),
+        ))?;
+        let secondaries = self.async_commit.then(|| txn_muts.secondaries());
+
         let put_time = Instant::now();
-        let secondaries = if self.async_commit {
-            Some(keys[1..].to_vec())
-        } else {
-            None
-        };
-        self.kv_prewrite(mutations.clone(), start_key, start_ts, secondaries);
+        self.kv_prewrite(
+            txn_muts.primary(),
+            secondaries.as_ref(),
+            txn_muts.clone(),
+            start_ts,
+        );
         let commit_ts = self.get_ts();
 
-        match commit_action {
+        match options.commit_action {
             CommitAction::NoCommit => {
                 return Ok(());
             }
-            commit_action => self.kv_commit_ext(keys, start_ts, commit_ts, commit_action),
+            commit_action => {
+                self.kv_commit_ext(txn_muts, start_ts, commit_ts, commit_action);
+            }
         }
 
-        let first = mutations.first().unwrap();
         self.verify_key_value(
             first.get_key(),
             Some(first.get_value()),
@@ -370,39 +428,44 @@ impl ClusterClient {
 
     pub fn kv_mutate(&mut self, muts: Vec<Mutation>) -> Result<()> {
         assert!(!muts.is_empty());
-        let keys = muts
-            .iter()
-            .map(|m| m.get_key().to_vec())
-            .collect::<Vec<_>>();
+        let txn_muts = TxnMutations::from_normal(muts);
+        let secondaries = self.async_commit.then(|| txn_muts.secondaries());
         let start_ts = self.get_ts();
-        self.kv_prewrite(muts, keys[0].clone(), start_ts, None);
+        self.kv_prewrite(
+            txn_muts.primary(),
+            secondaries.as_ref(),
+            txn_muts.clone(),
+            start_ts,
+        );
 
         let commit_ts = self.get_ts();
-        self.kv_commit(keys, start_ts, commit_ts);
+        self.kv_commit(txn_muts, start_ts, commit_ts);
         self.set_max_ts(commit_ts.into_inner());
         Ok(())
     }
 
     pub fn kv_prewrite(
         &mut self,
-        muts: Vec<Mutation>,
-        pk: Vec<u8>,
+        pk: Bytes,
+        secondaries: Option<&Vec<Bytes>>,
+        muts: TxnMutations,
         ts: TimeStamp,
-        secondaries: Option<Vec<Vec<u8>>>,
     ) {
-        let groups = self.group_mutations_by_region(muts);
+        // Don't use muts.primary() for pk & muts.secondaries() for secondary keys, as
+        // `kv_prewrite` will recursively be invoked in `kv_prewrite_single_region`.
+        let groups = muts.group_by_regions(self, PrimaryFilter::All).unwrap();
         for (id_ver, group_muts) in groups {
-            self.kv_prewrite_single_region(id_ver, group_muts, pk.clone(), ts, &secondaries);
+            self.kv_prewrite_single_region(id_ver, pk.clone(), secondaries, group_muts, ts);
         }
     }
 
     pub fn kv_prewrite_single_region(
         &mut self,
         id_ver: RegionIdVer,
-        muts: Vec<Mutation>,
-        pk: Vec<u8>,
+        pk: Bytes,
+        secondary_keys: Option<&Vec<Bytes>>,
+        muts: TxnMutations,
         ts: TimeStamp,
-        secondary_keys: &Option<Vec<Vec<u8>>>,
     ) {
         let region_id = id_ver.id();
         let mut store_id_errors = vec![];
@@ -413,7 +476,7 @@ impl ClusterClient {
                 .new_rpc_ctx(region_id)
                 .filter(|x| x.get_region_epoch().get_version() == id_ver.ver());
             if ctx.is_none() {
-                self.kv_prewrite(muts, pk, ts, secondary_keys.as_ref().cloned());
+                self.kv_prewrite(pk, secondary_keys, muts, ts);
                 return;
             }
             let ctx = ctx.unwrap();
@@ -422,15 +485,21 @@ impl ClusterClient {
             let kv_client = self.get_kv_client(store_id);
             let mut prewrite_req = PrewriteRequest::default();
             prewrite_req.set_context(ctx);
-            prewrite_req.set_mutations(muts.clone().into());
-            prewrite_req.primary_lock = pk.clone();
+            muts.set_prewrite_req(&mut prewrite_req);
+            prewrite_req.primary_lock = pk.to_vec();
             prewrite_req.start_version = ts.into_inner();
             prewrite_req.lock_ttl = 3000;
             prewrite_req.min_commit_ts = prewrite_req.start_version + 1;
             prewrite_req.use_async_commit = self.async_commit;
             if let Some(secondary_keys) = secondary_keys {
-                if muts[0].get_key() == pk.as_slice() {
-                    prewrite_req.set_secondaries(secondary_keys.clone().into());
+                if muts.primary() == pk {
+                    prewrite_req.set_secondaries(
+                        secondary_keys
+                            .iter()
+                            .map(|k| k.to_vec())
+                            .collect::<Vec<_>>()
+                            .into(),
+                    );
                 }
             }
             debug!("{} prewrite {:?}", tag, prewrite_req);
@@ -449,7 +518,7 @@ impl ClusterClient {
                     continue;
                 }
                 if self.handle_region_epoch_not_match_or_not_found(region_err) {
-                    self.kv_prewrite(muts, pk, ts, secondary_keys.as_ref().cloned());
+                    self.kv_prewrite(pk, secondary_keys, muts, ts);
                     return;
                 }
                 panic!("unexpected error {:?}", region_err);
@@ -471,38 +540,44 @@ impl ClusterClient {
         panic!("{} prewrite failed {:?}", region_id, store_id_errors,);
     }
 
-    pub fn kv_commit(&mut self, keys: Vec<Vec<u8>>, start_ts: TimeStamp, commit_ts: TimeStamp) {
+    pub fn kv_commit(&mut self, muts: TxnMutations, start_ts: TimeStamp, commit_ts: TimeStamp) {
         // fail_point!("kv_commmit");
         // println!("{:?}", fail::list());
 
-        let groups = self.group_keys_by_region(keys);
-        for (id_ver, group_keys) in groups {
-            self.kv_commit_single_region(id_ver, group_keys, start_ts, commit_ts);
+        let groups = muts.group_by_regions(self, PrimaryFilter::All).unwrap();
+        for (id_ver, group_muts) in groups {
+            self.kv_commit_single_region(id_ver, group_muts, start_ts, commit_ts);
         }
     }
 
     /// Primary key is the first item of `keys`.
     pub fn kv_commit_ext(
         &mut self,
-        keys: Vec<Vec<u8>>,
+        muts: TxnMutations,
         start_ts: TimeStamp,
         commit_ts: TimeStamp,
         commit_action: CommitAction,
     ) {
         match commit_action {
-            CommitAction::SyncCommit => {
-                self.kv_commit(keys, start_ts, commit_ts);
-            }
+            CommitAction::SyncCommit => self.kv_commit(muts, start_ts, commit_ts),
             CommitAction::AsyncCommitSecondaryKeys(delay) => {
-                let pk = keys[0].clone();
-                self.kv_commit(vec![pk], start_ts, commit_ts);
+                let mut primary_groups = muts
+                    .group_by_regions(self, PrimaryFilter::PrimaryOnly)
+                    .unwrap();
+                assert_eq!(primary_groups.len(), 1);
+                let (id_ver, group_muts) = primary_groups.swap_remove(0);
+                self.kv_commit_single_region(id_ver, group_muts, start_ts, commit_ts);
 
                 if delay < Duration::MAX {
-                    let secondary_keys = keys[1..].to_vec();
                     let mut client = self.clone();
                     thread::spawn(move || {
                         thread::sleep(delay);
-                        client.kv_commit(secondary_keys, start_ts, commit_ts);
+                        let secondary_groups = muts
+                            .group_by_regions(&mut client, PrimaryFilter::Secondaries)
+                            .unwrap();
+                        for (id_ver, group_muts) in secondary_groups {
+                            client.kv_commit_single_region(id_ver, group_muts, start_ts, commit_ts);
+                        }
                     });
                 }
             }
@@ -511,7 +586,7 @@ impl ClusterClient {
                 let mut client = self.clone();
                 thread::spawn(move || {
                     thread::sleep(delay);
-                    client.kv_commit(keys, start_ts, commit_ts);
+                    client.kv_commit(muts, start_ts, commit_ts);
                 });
             }
         }
@@ -520,7 +595,7 @@ impl ClusterClient {
     pub fn kv_commit_single_region(
         &mut self,
         id_ver: RegionIdVer,
-        keys: Vec<Vec<u8>>,
+        muts: TxnMutations,
         start_ts: TimeStamp,
         commit_ts: TimeStamp,
     ) {
@@ -533,7 +608,7 @@ impl ClusterClient {
                 .new_rpc_ctx(region_id)
                 .filter(|x| x.get_region_epoch().get_version() == id_ver.ver());
             if ctx.is_none() {
-                self.kv_commit(keys, start_ts, commit_ts);
+                self.kv_commit(muts, start_ts, commit_ts);
                 return;
             }
             let ctx = ctx.unwrap();
@@ -542,7 +617,7 @@ impl ClusterClient {
             let mut commit_req = CommitRequest::default();
             commit_req.set_context(ctx);
             commit_req.start_version = start_ts.into_inner();
-            commit_req.set_keys(keys.clone().into());
+            muts.set_commit_req(&mut commit_req);
             commit_req.commit_version = commit_ts.into_inner();
             let result = kv_client.kv_commit(&commit_req);
             if result.is_err() {
@@ -559,7 +634,7 @@ impl ClusterClient {
                     continue;
                 }
                 if self.handle_region_epoch_not_match_or_not_found(region_err) {
-                    self.kv_commit(keys, start_ts, commit_ts);
+                    self.kv_commit(muts, start_ts, commit_ts);
                     return;
                 }
                 panic!("unexpected error {:?}", region_err);
@@ -583,6 +658,7 @@ impl ClusterClient {
         rollback_if_not_exist: bool,
         force_sync_commit: bool,
         resolving_pessimistic_lock: bool,
+        is_txn_file: bool,
     ) -> Result<kvrpcpb::CheckTxnStatusResponse> {
         let stat_time = Instant::now();
         let timeout = Duration::from_secs(5);
@@ -602,6 +678,7 @@ impl ClusterClient {
             req.set_rollback_if_not_exist(rollback_if_not_exist);
             req.set_force_sync_commit(force_sync_commit);
             req.set_resolving_pessimistic_lock(resolving_pessimistic_lock);
+            req.set_is_txn_file(is_txn_file);
             // TODO: req.set_verify_is_primary
             let result = client.kv_check_txn_status(&req);
             if result.is_err() {
@@ -646,12 +723,22 @@ impl ClusterClient {
         start_version: u64,
         commit_version: Option<u64>,
         key: Vec<u8>,
+        is_txn_file: bool,
         clean_regions: &mut HashSet<RegionIdVer>,
     ) -> Result<()> {
         let stat_time = Instant::now();
         let timeout = Duration::from_secs(15);
         let mut last_err: Option<Error> = None;
         let mut tag = ShardTag::default();
+
+        let mut req = kvrpcpb::ResolveLockRequest::default();
+        req.set_start_version(start_version);
+        if let Some(commit_version) = commit_version {
+            req.set_commit_version(commit_version);
+        }
+        req.set_keys(vec![key.clone()].into());
+        req.set_is_txn_file(is_txn_file);
+
         while stat_time.saturating_elapsed() < timeout {
             let region = self.get_region_by_key(&key);
             if clean_regions.contains(&region.id_ver()) {
@@ -661,12 +748,8 @@ impl ClusterClient {
             let ctx = self.new_rpc_ctx(region.id).unwrap();
             tag = Self::tag_from_ctx(&ctx);
             let client = self.get_kv_client(ctx.get_peer().get_store_id());
-            let mut req = kvrpcpb::ResolveLockRequest::default();
             req.set_context(ctx);
-            req.set_start_version(start_version);
-            if let Some(commit_version) = commit_version {
-                req.set_commit_version(commit_version);
-            }
+            debug!("{} kv_resolve_lock", tag; "req" => ?req);
             let result = client.kv_resolve_lock(&req);
             if result.is_err() {
                 last_err = Some(box_err!(
@@ -713,6 +796,26 @@ impl ClusterClient {
         panic!("{} kv_resolve_lock failed {:?}", tag, last_err.unwrap());
     }
 
+    pub fn kv_resolve_lock_for_mutations(
+        &mut self,
+        start_version: u64,
+        commit_version: Option<u64>,
+        muts: Vec<Mutation>,
+        is_txn_file: bool,
+    ) -> Result<()> {
+        let mut clean_regions = HashSet::new();
+        for mut m in muts {
+            self.kv_resolve_lock(
+                start_version,
+                commit_version,
+                m.take_key(),
+                is_txn_file,
+                &mut clean_regions,
+            )?;
+        }
+        Ok(())
+    }
+
     fn group_mutations_by_region(
         &mut self,
         mut mutations: Vec<Mutation>,
@@ -721,18 +824,6 @@ impl ClusterClient {
         for m in mutations.drain(..) {
             let region = self.get_region_by_key(m.get_key());
             groups.entry(region.id_ver()).or_default().push(m);
-        }
-        groups
-    }
-
-    fn group_keys_by_region(
-        &mut self,
-        mut keys: Vec<Vec<u8>>,
-    ) -> HashMap<RegionIdVer, Vec<Vec<u8>>> {
-        let mut groups: HashMap<RegionIdVer, Vec<Vec<u8>>> = HashMap::new();
-        for key in keys.drain(..) {
-            let region = self.get_region_by_key(&key);
-            groups.entry(region.id_ver()).or_default().push(key);
         }
         groups
     }
@@ -761,14 +852,48 @@ impl ClusterClient {
             .get_region(&encode_bytes(key))
             .unwrap()
             .into();
-        for (raw_end, id) in self.get_regions_in_range(&region.raw_start, &region.raw_end) {
-            self.region_ranges.remove(&raw_end);
-            self.regions.remove(&id);
+        self.update_cache_by_id(region.id, Some(region.clone()));
+        region
+    }
+
+    pub fn scan_regions(
+        &mut self,
+        start_key: &[u8],
+        end_key: &[u8],
+        limit: usize,
+    ) -> Result<Vec<RawRegion>> {
+        let mut regions = vec![];
+        let mut start = encode_bytes(start_key);
+        let end = encode_bytes(end_key);
+        while limit == 0 || regions.len() < limit {
+            let batch_size = if limit == 0 {
+                SCAN_REGIONS_MAX_BATCH_SIZE
+            } else {
+                (limit - regions.len()).min(SCAN_REGIONS_MAX_BATCH_SIZE)
+            };
+            let batch = block_on(self.pd_client.scan_regions(
+                start.clone(),
+                end.clone(),
+                batch_size,
+            ))?;
+            if batch.is_empty() {
+                break;
+            }
+            let return_size = batch.len();
+            start = batch.last().unwrap().get_region().end_key.clone();
+            for mut region in batch {
+                let mut raw_region: RawRegion = region.take_region().into();
+                raw_region.update_leader(region.get_leader());
+                self.update_cache_by_id(raw_region.id, Some(raw_region.clone()));
+                regions.push(raw_region);
+            }
+            if start.is_empty() || return_size < batch_size {
+                break;
+            }
         }
-        self.region_ranges
-            .insert(region.raw_end.clone(), region.id_ver());
-        self.regions.insert(region.id, region);
-        self.get_region_from_cache(key).unwrap()
+
+        check_regions_boundary(start_key, end_key, false, &regions)?;
+        Ok(regions)
     }
 
     pub fn clear_region_cache(&mut self) {
@@ -788,7 +913,16 @@ impl ClusterClient {
         } else {
             return;
         };
-        for (raw_end, id) in self.get_regions_in_range(&region.raw_start, &region.raw_end) {
+
+        if let Some(old_region) = self.regions.get(&region_id) {
+            if old_region.equal(&region) {
+                return;
+            }
+        }
+
+        for (raw_end, id) in
+            self.get_regions_in_range_from_cache(&region.raw_start, &region.raw_end)
+        {
             self.region_ranges.remove(&raw_end);
             self.regions.remove(&id);
         }
@@ -812,7 +946,7 @@ impl ClusterClient {
         None
     }
 
-    fn get_regions_in_range(&self, start: &[u8], end: &[u8]) -> Vec<(Vec<u8>, u64)> {
+    fn get_regions_in_range_from_cache(&self, start: &[u8], end: &[u8]) -> Vec<(Vec<u8>, u64)> {
         self.region_ranges
             .range((Excluded(start.to_vec()), Included(end.to_vec())))
             .map(|(raw_end, &id_ver)| (raw_end.clone(), id_ver.id()))
@@ -1041,11 +1175,13 @@ impl ClusterClient {
     }
 
     pub fn split(&mut self, key: &[u8]) {
-        self.try_split(key).expect("ClusterClient::split");
+        self.try_split(key, 1).expect("ClusterClient::split");
     }
 
-    pub fn try_split(&mut self, key: &[u8]) -> Result<()> {
-        for _ in 0..10 {
+    pub fn try_split(&mut self, key: &[u8], timeout_secs: usize) -> Result<()> {
+        let start = Instant::now_coarse();
+        let timeout = Duration::from_secs(timeout_secs as u64);
+        while start.saturating_elapsed() < timeout {
             let region_id = self.get_region_id(key);
             let ctx = self.new_rpc_ctx(region_id).unwrap();
             let client = self.get_kv_client(ctx.get_peer().get_store_id());
@@ -1138,6 +1274,24 @@ impl ClusterClient {
         self.pd_client
             .try_merge_region(source_region.id, target_region.id);
         true
+    }
+
+    /// Try to merge and wait for regions merged.
+    /// Return true: merged.
+    /// Return false: timeout.
+    pub fn try_merge_and_wait(
+        &mut self,
+        source_key: &[u8],
+        target_key: &[u8],
+        timeout_secs: usize,
+    ) -> bool /* merged or not */ {
+        try_wait(
+            || {
+                let sent = self.try_merge(source_key, target_key);
+                !sent // `sent` == true only when not merged.
+            },
+            timeout_secs,
+        )
     }
 
     pub fn try_merge_adjacent_region(
@@ -1416,6 +1570,10 @@ impl ClusterClient {
         Ok(())
     }
 
+    pub fn ref_store(&self) -> Arc<Mutex<RefStore>> {
+        self.ref_store.clone()
+    }
+
     pub fn ref_store_contains_key(&self, key: &[u8]) -> bool {
         self.ref_store.lock().unwrap().contains_key(key)
     }
@@ -1430,6 +1588,10 @@ impl ClusterClient {
 
     pub fn set_async_commit(&mut self) {
         self.async_commit = true;
+    }
+
+    pub fn txn_file_helper(&self) -> Option<Arc<TxnFileHelper>> {
+        self.txn_file_helper.clone()
     }
 }
 
@@ -1653,8 +1815,8 @@ impl ClusterTxnClient {
             .into_iter()
             .map(|m| KvMutation {
                 op: m.op.value(),
-                key: m.key,
-                value: m.value,
+                key: m.key.to_vec(),
+                value: m.value.to_vec(),
                 ..Default::default()
             })
             .collect();
@@ -1805,5 +1967,172 @@ impl ClusterTxnClient {
             region.get_id(),
             region.get_region_epoch().get_version()
         )
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum TxnWriteMethod {
+    Normal,
+    FileBased,
+}
+
+#[derive(Clone)]
+pub enum TxnMutations {
+    Muts {
+        muts: Vec<Mutation>,
+    },
+    Chunks {
+        chunks: Vec<TxnFileChunk>,
+        helper: Arc<TxnFileHelper>,
+    },
+}
+
+pub enum PrimaryFilter {
+    All,
+    PrimaryOnly,
+    Secondaries,
+}
+
+impl TxnMutations {
+    pub async fn build(
+        muts: Vec<Mutation>,
+        write_method: TxnWriteMethod,
+        txn_file_helper: Option<Arc<TxnFileHelper>>,
+    ) -> Result<Self> {
+        match write_method {
+            TxnWriteMethod::Normal => Ok(TxnMutations::Muts { muts }),
+            TxnWriteMethod::FileBased => {
+                let helper = txn_file_helper.unwrap();
+                let chunks = helper.build_txn_chunks(muts).await?;
+                Ok(TxnMutations::Chunks { chunks, helper })
+            }
+        }
+    }
+
+    pub fn from_normal(muts: Vec<Mutation>) -> Self {
+        TxnMutations::Muts { muts }
+    }
+
+    pub fn primary(&self) -> Bytes {
+        match self {
+            Self::Muts { muts } => muts.first().unwrap().key.clone(),
+            Self::Chunks { chunks, .. } => chunks.first().unwrap().outer_smallest.clone(),
+        }
+    }
+
+    pub fn secondaries(&self) -> Vec<Bytes> {
+        match self {
+            Self::Muts { muts } => muts.iter().skip(1).map(|m| m.key.clone()).collect(),
+            Self::Chunks { .. } => panic!("async commit for file based is not supported"),
+        }
+    }
+
+    pub fn first(&self) -> Option<&Mutation> {
+        match self {
+            Self::Muts { muts } => muts.first(),
+            Self::Chunks { .. } => None,
+        }
+    }
+
+    pub fn group_by_regions(
+        &self,
+        client: &mut ClusterClient,
+        primary_filter: PrimaryFilter,
+    ) -> Result<Vec<(RegionIdVer, Self)>> {
+        Ok(match self {
+            Self::Muts { muts } => {
+                let muts = match primary_filter {
+                    PrimaryFilter::All => muts.clone(),
+                    PrimaryFilter::PrimaryOnly => muts[..1].to_vec(),
+                    PrimaryFilter::Secondaries => muts[1..].to_vec(),
+                };
+                client
+                    .group_mutations_by_region(muts)
+                    .into_iter()
+                    .map(|(r, muts)| (r, TxnMutations::Muts { muts }))
+                    .collect()
+            }
+            Self::Chunks { chunks, helper } => {
+                let chunks = match primary_filter {
+                    PrimaryFilter::All => Cow::from(chunks),
+                    PrimaryFilter::PrimaryOnly => Cow::from(vec![chunks[0].clone()]),
+                    PrimaryFilter::Secondaries => Cow::from(chunks),
+                };
+
+                let start_key = chunks.first().unwrap().outer_smallest.as_slice();
+                let biggest = chunks.last().unwrap().outer_biggest.as_slice();
+                let mut end_key = Vec::with_capacity(biggest.len());
+                end_key.extend_from_slice(biggest);
+                end_key.push(0);
+
+                let regions = client.scan_regions(start_key, &end_key, 0)?;
+                let region_muts = TxnFileHelper::group_txn_chunks_by_regions(&chunks, regions)
+                    .into_iter()
+                    .map(|(r, chunks)| {
+                        (
+                            r,
+                            TxnMutations::Chunks {
+                                chunks,
+                                helper: helper.clone(),
+                            },
+                        )
+                    });
+                match primary_filter {
+                    PrimaryFilter::All => region_muts.collect(),
+                    PrimaryFilter::PrimaryOnly => region_muts.take(1).collect(),
+                    PrimaryFilter::Secondaries => region_muts.skip(1).collect(),
+                }
+            }
+        })
+    }
+
+    pub fn set_prewrite_req(&self, req: &mut PrewriteRequest) {
+        match self {
+            Self::Muts { muts } => {
+                let mutations = muts
+                    .iter()
+                    .map(|m| kvrpcpb::Mutation::from(m))
+                    .collect::<Vec<_>>();
+                req.set_mutations(mutations.into());
+            }
+            Self::Chunks { chunks, .. } => {
+                let chunk_ids = chunks.iter().map(|c| c.chunk_id).collect::<Vec<_>>();
+                req.set_txn_file_chunks(chunk_ids);
+            }
+        }
+    }
+
+    pub fn set_commit_req(&self, req: &mut CommitRequest) {
+        match self {
+            Self::Muts { muts } => {
+                let keys = muts.iter().map(|m| m.key.to_vec()).collect::<Vec<_>>();
+                req.set_keys(keys.into());
+            }
+            Self::Chunks { chunks, .. } => {
+                let keys = chunks
+                    .iter()
+                    .map(|c| c.outer_smallest.to_vec())
+                    .collect::<Vec<_>>();
+                req.set_keys(keys.into());
+                req.set_is_txn_file(true);
+            }
+        }
+    }
+
+    pub fn set_rollback_req(&self, req: &mut kvrpcpb::BatchRollbackRequest) {
+        match self {
+            Self::Muts { muts } => {
+                let keys = muts.iter().map(|m| m.key.to_vec()).collect::<Vec<_>>();
+                req.set_keys(keys.into());
+            }
+            Self::Chunks { chunks, .. } => {
+                let keys = chunks
+                    .iter()
+                    .map(|c| c.outer_smallest.to_vec())
+                    .collect::<Vec<_>>();
+                req.set_keys(keys.into());
+                req.set_is_txn_file(true);
+            }
+        }
     }
 }
