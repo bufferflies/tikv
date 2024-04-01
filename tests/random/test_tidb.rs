@@ -270,7 +270,7 @@ fn prepare_cluster(
 
     let pd_wrapper = match tc {
         Some(tc) => PdWrapper::new_real(tc.pd.endpoints(), security_conf),
-        None => PdWrapper::new_test(1, security_conf),
+        None => PdWrapper::new_test(1, security_conf, None),
     };
     let cluster = ServerCluster::new_opt(nodes, update_conf_fn, pd_wrapper);
     cluster.wait_region_replicated(&[], 3);

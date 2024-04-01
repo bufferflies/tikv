@@ -19,13 +19,17 @@ use kvproto::{
     kvrpcpb::ApiVersion,
 };
 use rand::Rng;
+use security::SecurityConfig;
 use tempfile::Builder;
 use test_cloud_server::{client::ClusterClient, ServerCluster};
+use test_pd_client::PdWrapper;
 use tikv::config::TikvConfig;
 use tikv_util::config::{ReadableDuration, ReadableSize};
 use txn_types::TimeStamp;
 
 use crate::alloc_node_id;
+
+const CLUSTER_ID: u64 = 10000;
 
 fn assert_same_file_name(s1: String, s2: String) {
     let tokens1: Vec<&str> = s1.split('_').collect();
@@ -88,7 +92,8 @@ fn test_backup_and_import() {
         conf.raft_store.local_file_gc_timeout = ReadableDuration::millis(500);
         conf.raft_store.local_file_gc_tick_interval = ReadableDuration::millis(200);
     };
-    let mut cluster1 = ServerCluster::new(vec![node_id], update_conf);
+    let pd1 = PdWrapper::new_test(0, &SecurityConfig::default(), Some(CLUSTER_ID));
+    let mut cluster1 = ServerCluster::new_opt(vec![node_id], update_conf, pd1);
     // Backup file should be empty.
     let tmp = Builder::new().tempdir().unwrap();
     let mut client1 = cluster1.new_client();
@@ -125,7 +130,8 @@ fn test_backup_and_import() {
 
     // Use importer to restore backup files.
     let node2_id = alloc_node_id();
-    let mut cluster2 = ServerCluster::new(vec![node2_id], update_conf);
+    let pd2 = PdWrapper::new_test(0, &SecurityConfig::default(), Some(CLUSTER_ID));
+    let mut cluster2 = ServerCluster::new_opt(vec![node2_id], update_conf, pd2);
     let mut client2 = cluster2.new_client();
     let store_id = client2.get_stores().pop().unwrap();
     let region_id = client2.get_region_id(b"");

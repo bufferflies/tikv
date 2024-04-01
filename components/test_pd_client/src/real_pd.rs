@@ -1,6 +1,9 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 
 use futures::executor::block_on;
 use grpcio::EnvBuilder;
@@ -119,6 +122,8 @@ impl RealPd {
     }
 }
 
+static CLUSTER_ID_ALLOCATOR: AtomicU64 = AtomicU64::new(1);
+
 /// A wrapper to provide an uniform interface for both real and test (mock) PD.
 pub enum PdWrapper {
     Test(TestPd),
@@ -127,8 +132,14 @@ pub enum PdWrapper {
 
 impl PdWrapper {
     /// No PD server when `pd_server_count` is zero.
-    pub fn new_test(pd_server_count: usize, _security_conf: &SecurityConfig) -> Self {
-        let client = Arc::new(TestPdClient::new(1, false));
+    pub fn new_test(
+        pd_server_count: usize,
+        _security_conf: &SecurityConfig,
+        cluster_id: Option<u64>,
+    ) -> Self {
+        let cluster_id =
+            cluster_id.unwrap_or_else(|| CLUSTER_ID_ALLOCATOR.fetch_add(1, Ordering::Relaxed));
+        let client = Arc::new(TestPdClient::new(cluster_id, false));
         let server = (pd_server_count > 0).then(|| {
             let pd_service = crate::Service::new(client.clone());
             test_pd::Server::with_case(pd_server_count, Arc::new(pd_service))

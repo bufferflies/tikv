@@ -71,28 +71,82 @@ fn test_restore_keyspace() {
         .parse::<usize>()
         .unwrap_or(DEFAULT_TARGET_REGIONS);
 
-    test_restore_keyspace_opt(loop_count, target_regions, true, true, false);
-    // Regression test for `inner_key_off` disabled.
-    test_restore_keyspace_opt(DEFAULT_LOOP_COUNT, target_regions, false, false, false);
-    // Regression test for `lightweight` disabled.
-    test_restore_keyspace_opt(DEFAULT_LOOP_COUNT, target_regions, true, false, false);
-    // Test archiving without `inner_key_off`and lightweight backup.
-    test_restore_keyspace_opt(DEFAULT_LOOP_COUNT, target_regions, false, false, true);
-    // Test archiving with `inner_key_off` and lightweight backup.
-    test_restore_keyspace_opt(DEFAULT_LOOP_COUNT, target_regions, true, true, true);
+    test_restore_keyspace_opt(TestRestoreKeyspaceOptions {
+        loop_count,
+        target_regions,
+        enable_inner_key_off: true,
+        lightweight: true,
+        archiving: false,
+    });
 }
 
-fn test_restore_keyspace_opt(
+#[test]
+fn test_restore_keyspace_regression() {
+    // Regression test for `inner_key_off` disabled.
+    test_restore_keyspace_opt(TestRestoreKeyspaceOptions {
+        enable_inner_key_off: false,
+        lightweight: false,
+        archiving: false,
+        ..Default::default()
+    });
+    // Regression test for `lightweight` disabled.
+    test_restore_keyspace_opt(TestRestoreKeyspaceOptions {
+        enable_inner_key_off: true,
+        lightweight: false,
+        archiving: false,
+        ..Default::default()
+    });
+}
+
+#[test]
+fn test_restore_keyspace_with_archive() {
+    // Test archiving without `inner_key_off`and lightweight backup.
+    test_restore_keyspace_opt(TestRestoreKeyspaceOptions {
+        enable_inner_key_off: false,
+        lightweight: false,
+        archiving: true,
+        ..Default::default()
+    });
+    // Test archiving with `inner_key_off` and lightweight backup.
+    test_restore_keyspace_opt(TestRestoreKeyspaceOptions {
+        enable_inner_key_off: true,
+        lightweight: true,
+        archiving: true,
+        ..Default::default()
+    });
+}
+
+struct TestRestoreKeyspaceOptions {
     loop_count: usize,
     target_regions: usize,
     enable_inner_key_off: bool,
     lightweight: bool,
     archiving: bool,
-) {
+}
+
+impl Default for TestRestoreKeyspaceOptions {
+    fn default() -> Self {
+        TestRestoreKeyspaceOptions {
+            loop_count: DEFAULT_LOOP_COUNT,
+            target_regions: DEFAULT_TARGET_REGIONS,
+            enable_inner_key_off: true,
+            lightweight: true,
+            archiving: false,
+        }
+    }
+}
+
+fn test_restore_keyspace_opt(options: TestRestoreKeyspaceOptions) {
     let cases = vec![
         // keyspace_id, data_count, shuffle_regions, has_learner, loop_count
         (1, 1, None, false, 1),
-        (1, 100, Some(target_regions), false, loop_count),
+        (
+            1,
+            100,
+            Some(options.target_regions),
+            false,
+            options.loop_count,
+        ),
         (1, 100, None, true, 1), // Don't shuffle regions for stability.
         (2, 1, None, false, 1),
     ];
@@ -108,16 +162,16 @@ fn test_restore_keyspace_opt(
             conf.coprocessor.region_split_size = ReadableSize::kb(128); // kv_opts.base_size = 8kb
             conf.coprocessor.region_bucket_size = ReadableSize::kb(64);
             conf.rfengine.target_file_size = ReadableSize::mb(1);
-            conf.rfengine.lightweight_backup = lightweight;
+            conf.rfengine.lightweight_backup = options.lightweight;
             conf.rfengine.wal_chunk_target_file_size = ReadableSize::kb(128);
-            conf.enable_inner_key_offset = enable_inner_key_off;
+            conf.enable_inner_key_offset = options.enable_inner_key_off;
         },
     );
     cluster.wait_region_replicated(&[], 3);
     let pd_client = cluster.get_pd_client();
     let mut client = cluster.new_client();
 
-    if archiving {
+    if options.archiving {
         pd_client.set_tso(TimeStamp::compose(
             chrono::Utc::now().timestamp_millis() as u64,
             0,
@@ -161,7 +215,7 @@ fn test_restore_keyspace_opt(
         }
 
         for loop_idx in 0..loop_count {
-            if archiving {
+            if options.archiving {
                 test_restore_archived_keyspace_impl(
                     case_idx,
                     loop_idx,
@@ -171,7 +225,7 @@ fn test_restore_keyspace_opt(
                     data_count,
                     shuffle_regions,
                     has_learner,
-                    lightweight,
+                    options.lightweight,
                     &runtime,
                 );
                 continue;
@@ -185,7 +239,7 @@ fn test_restore_keyspace_opt(
                 data_count,
                 shuffle_regions,
                 has_learner,
-                lightweight,
+                options.lightweight,
                 &runtime,
             );
         }

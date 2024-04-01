@@ -420,6 +420,8 @@ impl PdCluster {
         let mut meta = metapb::Cluster::default();
         meta.set_id(cluster_id);
         meta.set_max_peer_count(3);
+        // To distinguish different test cases when running in parallel.
+        let base_id = AtomicUsize::new(1000 * cluster_id as usize);
 
         let mut cluster = PdCluster {
             meta,
@@ -430,7 +432,7 @@ impl PdCluster {
             region_approximate_keys: HashMap::default(),
             region_last_report_ts: HashMap::default(),
             region_last_report_term: HashMap::default(),
-            base_id: AtomicUsize::new(1000),
+            base_id,
             store_stats: HashMap::default(),
             store_hotspots: HashMap::default(),
             split_count: 0,

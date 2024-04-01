@@ -77,7 +77,7 @@ impl ServerCluster {
         Self::new_opt(
             nodes,
             update_conf,
-            PdWrapper::new_test(0, &SecurityConfig::default()),
+            PdWrapper::new_test(0, &SecurityConfig::default(), None),
         )
     }
 
@@ -156,6 +156,7 @@ impl ServerCluster {
 
         std::fs::create_dir_all(&config.storage.data_dir).unwrap();
         let pd_client = self.pd.new_client(); // Different nodes must not share PD client.
+        config.server.cluster_id = pd_client.get_cluster_id().unwrap();
         let dfs = self.dfs.get_or_insert_with(|| Self::prepare_dfs(&config));
         let mut server = TikvServer::setup(
             config,

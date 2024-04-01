@@ -466,5 +466,5 @@ test-cloud-engine:
 		--tests
 
 test-cloud-engine-integration:
-	# --test-threads=1 to run test case in serial for stability.
-	cargo test -p tests --test cloud_engine --test cloud_engine_failpoints -- --test-threads=1 --nocapture
+	# --test-threads=2 to limit work loads for stability.
+	cargo test -p tests --test cloud_engine --test cloud_engine_failpoints -- --test-threads=2 --nocapture

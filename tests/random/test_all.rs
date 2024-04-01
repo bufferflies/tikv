@@ -298,7 +298,7 @@ fn prepare_cluster(
         conf.kvengine.flush_split_l0 = true;
         conf.storage.flow_control.enable = true;
     };
-    let pd_wrapper = PdWrapper::new_test(1, security_conf);
+    let pd_wrapper = PdWrapper::new_test(1, security_conf, None);
     let cluster = ServerCluster::new_opt(nodes, update_conf_fn, pd_wrapper);
     cluster.wait_region_replicated(&[], 3);
     let pd_client = cluster.get_pd_client();

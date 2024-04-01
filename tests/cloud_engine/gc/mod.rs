@@ -50,8 +50,8 @@ fn test_local_file_gc() {
         let file_path = new_filename(file_id, kv.opts.local_dir.as_path());
         assert!(file_path.exists());
     }
-    for _ in 0..10 {
-        if !new_file_path.exists() {
+    for _ in 0..20 {
+        if !new_file_path.exists() && !new_tmp_file_path.exists() {
             break;
         }
         std::thread::sleep(Duration::from_secs(1));

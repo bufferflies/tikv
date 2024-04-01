@@ -190,7 +190,7 @@ fn test_client_split_region() {
 fn test_txn_client() {
     test_util::init_log_for_test();
     let node_ids = alloc_node_id_vec(3);
-    let pd_wrapper = PdWrapper::new_test(1, &SecurityConfig::default());
+    let pd_wrapper = PdWrapper::new_test(1, &SecurityConfig::default(), None);
     let mut cluster = ServerCluster::new_opt(
         node_ids,
         |_, conf| {
@@ -501,7 +501,7 @@ fn test_tikv_worker() {
     let (_temp_dir, mut oss, dfs_config) = prepare_dfs("test");
 
     let node_ids = alloc_node_id_vec(3);
-    let pd_wrapper = PdWrapper::new_test(1, &SecurityConfig::default());
+    let pd_wrapper = PdWrapper::new_test(1, &SecurityConfig::default(), None);
     let mut cluster = ServerCluster::new_opt(
         node_ids.clone(),
         |_, conf| {
