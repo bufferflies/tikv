@@ -1523,6 +1523,8 @@ impl ClusterClient {
             .expect("verify_data_with_ref_store");
     }
 
+    // Note: return verified number of existed entries only, to be uniform with
+    // `ClusterTxnClient::verify_data_by_scan`.
     pub fn verify_data_with_given_ref_store(
         &mut self,
         ref_store: &RefStore,
@@ -1530,6 +1532,7 @@ impl ClusterClient {
         options: &RequestOptions,
     ) -> Result<usize> {
         let mut cnt = 0;
+        let mut deleted_cnt = 0;
         let start_time = Instant::now();
         for (k, v) in ref_store.iter() {
             if let Some(range) = range {
@@ -1538,11 +1541,16 @@ impl ClusterClient {
                 }
             }
             self.verify_key_value(k, v.as_ref(), start_time, options)?;
-            cnt += 1;
+            if v.is_some() {
+                cnt += 1;
+            } else {
+                deleted_cnt += 1;
+            }
         }
         info!(
-            "verify_data_with_given_ref_store: verified keys {}, takes {:?}",
+            "verify_data_with_given_ref_store: verified keys: {}/{} (existed/deleted), takes {:?}",
             cnt,
+            deleted_cnt,
             start_time.saturating_elapsed()
         );
         Ok(cnt)
