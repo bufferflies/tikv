@@ -681,6 +681,70 @@ impl ClusterClient {
         Err(errors.pop().unwrap().1)
     }
 
+    pub fn kv_rollback(&mut self, muts: TxnMutations, start_ts: TimeStamp) -> Result<()> {
+        let groups = muts.group_by_regions(self, PrimaryFilter::All).unwrap();
+        for (id_ver, group_muts) in groups {
+            self.kv_rollback_single_region(id_ver, group_muts, start_ts)?;
+        }
+        Ok(())
+    }
+
+    pub fn kv_rollback_single_region(
+        &mut self,
+        id_ver: RegionIdVer,
+        muts: TxnMutations,
+        start_ts: TimeStamp,
+    ) -> Result<()> {
+        let region_id = id_ver.id();
+        let mut errors: Vec<(ShardTag, Error)> = vec![];
+        let start_time = Instant::now();
+        let timeout = Duration::from_secs(15);
+        while start_time.saturating_elapsed() < timeout {
+            let ctx = self
+                .new_rpc_ctx(region_id)
+                .filter(|x| x.get_region_epoch().get_version() == id_ver.ver());
+            if ctx.is_none() {
+                return self.kv_rollback(muts, start_ts);
+            }
+            let ctx = ctx.unwrap();
+            let tag = Self::tag_from_ctx(&ctx);
+            let store_id = ctx.get_peer().get_store_id();
+            let kv_client = self.get_kv_client(store_id);
+            let mut rollback_req = kvrpcpb::BatchRollbackRequest::default();
+            rollback_req.set_context(ctx);
+            rollback_req.start_version = start_ts.into_inner();
+            muts.set_rollback_req(&mut rollback_req);
+            let result = kv_client.kv_batch_rollback(&rollback_req);
+            if let Err(err) = result {
+                errors.push((tag, err.into()));
+                sleep(Duration::from_millis(100));
+                self.update_cache_by_id(region_id, None);
+                continue;
+            }
+            let mut rollback_resp = result.unwrap();
+            if rollback_resp.has_region_error() {
+                let region_err = rollback_resp.take_region_error();
+                if self.handle_retryable_error(region_id, &region_err) {
+                    errors.push((tag, Error::RegionError(region_err)));
+                    continue;
+                }
+                if self.handle_region_epoch_not_match_or_not_found(&region_err) {
+                    return self.kv_rollback(muts, start_ts);
+                }
+                error!("{} unexpected error {:?}", tag, region_err);
+                return Err(Error::RegionError(region_err));
+            }
+            if rollback_resp.has_error() {
+                let key_err = rollback_resp.take_error();
+                error!("{} rollback failed with key error {:?}", tag, key_err);
+                return Err(Error::KeyError(key_err));
+            }
+            return Ok(());
+        }
+        error!("{} rollback failed {:?}", region_id, errors);
+        Err(errors.pop().unwrap().1)
+    }
+
     // TODO: eliminate duplicated codes for handling network & region errors.
     pub fn kv_check_txn_status(
         &mut self,
