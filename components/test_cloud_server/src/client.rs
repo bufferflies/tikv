@@ -69,6 +69,10 @@ pub enum Error {
     Grpc(#[from] grpcio::Error),
     #[error("TiKV Client error {0}")]
     TikvClient(#[from] tikv_client::Error),
+    #[error("Region error {0:?}")]
+    RegionError(errorpb::Error),
+    #[error("Key error {0:?}")]
+    KeyError(kvrpcpb::KeyError),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -261,7 +265,8 @@ impl ClusterClient {
             TxnMutations::from_normal(mutations.to_vec()),
             start_ts,
             commit_ts,
-        );
+        )
+        .expect("kv_commit");
         self.del_kv_in_ref_store(mutations.to_vec());
         self.set_max_ts(commit_ts.into_inner());
     }
@@ -303,7 +308,7 @@ impl ClusterClient {
             secondaries.as_ref(),
             txn_muts.clone(),
             start_ts,
-        );
+        )?;
         let commit_ts = self.get_ts();
 
         match options.commit_action {
@@ -311,7 +316,7 @@ impl ClusterClient {
                 return Ok(());
             }
             commit_action => {
-                self.kv_commit_ext(txn_muts, start_ts, commit_ts, commit_action);
+                self.kv_commit_ext(txn_muts, start_ts, commit_ts, commit_action)?;
             }
         }
 
@@ -332,7 +337,8 @@ impl ClusterClient {
         let commit_ts = self.get_ts();
         let first = mutations.first().unwrap().clone();
         let txn_muts = TxnMutations::from_normal(mutations.to_vec());
-        self.kv_commit(txn_muts, start_ts, commit_ts);
+        self.kv_commit(txn_muts, start_ts, commit_ts)
+            .expect("kv_commit");
         self.verify_key_value(
             first.get_key(),
             Some(first.get_value()),
@@ -388,7 +394,7 @@ impl ClusterClient {
             secondaries.as_ref(),
             txn_muts.clone(),
             start_ts,
-        );
+        )?;
         let commit_ts = self.get_ts();
 
         match options.commit_action {
@@ -396,7 +402,7 @@ impl ClusterClient {
                 return Ok(());
             }
             commit_action => {
-                self.kv_commit_ext(txn_muts, start_ts, commit_ts, commit_action);
+                self.kv_commit_ext(txn_muts, start_ts, commit_ts, commit_action)?;
             }
         }
 
@@ -436,10 +442,10 @@ impl ClusterClient {
             secondaries.as_ref(),
             txn_muts.clone(),
             start_ts,
-        );
+        )?;
 
         let commit_ts = self.get_ts();
-        self.kv_commit(txn_muts, start_ts, commit_ts);
+        self.kv_commit(txn_muts, start_ts, commit_ts)?;
         self.set_max_ts(commit_ts.into_inner());
         Ok(())
     }
@@ -450,13 +456,14 @@ impl ClusterClient {
         secondaries: Option<&Vec<Bytes>>,
         muts: TxnMutations,
         ts: TimeStamp,
-    ) {
+    ) -> Result<()> {
         // Don't use muts.primary() for pk & muts.secondaries() for secondary keys, as
         // `kv_prewrite` will recursively be invoked in `kv_prewrite_single_region`.
         let groups = muts.group_by_regions(self, PrimaryFilter::All).unwrap();
         for (id_ver, group_muts) in groups {
-            self.kv_prewrite_single_region(id_ver, pk.clone(), secondaries, group_muts, ts);
+            self.kv_prewrite_single_region(id_ver, pk.clone(), secondaries, group_muts, ts)?;
         }
+        Ok(())
     }
 
     pub fn kv_prewrite_single_region(
@@ -466,9 +473,9 @@ impl ClusterClient {
         secondary_keys: Option<&Vec<Bytes>>,
         muts: TxnMutations,
         ts: TimeStamp,
-    ) {
+    ) -> Result<()> {
         let region_id = id_ver.id();
-        let mut store_id_errors = vec![];
+        let mut errors: Vec<(ShardTag, Error)> = vec![];
         let start_time = Instant::now();
         let timeout = Duration::from_secs(15);
         while start_time.saturating_elapsed() < timeout {
@@ -476,8 +483,7 @@ impl ClusterClient {
                 .new_rpc_ctx(region_id)
                 .filter(|x| x.get_region_epoch().get_version() == id_ver.ver());
             if ctx.is_none() {
-                self.kv_prewrite(pk, secondary_keys, muts, ts);
-                return;
+                return self.kv_prewrite(pk, secondary_keys, muts, ts);
             }
             let ctx = ctx.unwrap();
             let tag = Self::tag_from_ctx(&ctx);
@@ -504,24 +510,24 @@ impl ClusterClient {
             }
             debug!("{} prewrite {:?}", tag, prewrite_req);
             let result = kv_client.kv_prewrite(&prewrite_req);
-            if result.is_err() {
-                store_id_errors.push((store_id, format!("{:?}", result.unwrap_err())));
+            if let Err(err) = result {
+                errors.push((tag, err.into()));
                 sleep(Duration::from_millis(100));
                 self.update_cache_by_id(region_id, None);
                 continue;
             }
             let mut resp = result.unwrap();
             if resp.has_region_error() {
-                let region_err = resp.get_region_error();
-                if self.handle_retryable_error(region_id, region_err) {
-                    store_id_errors.push((store_id, format!("{:?}", region_err)));
+                let region_err = resp.take_region_error();
+                if self.handle_retryable_error(region_id, &region_err) {
+                    errors.push((tag, Error::RegionError(region_err)));
                     continue;
                 }
-                if self.handle_region_epoch_not_match_or_not_found(region_err) {
-                    self.kv_prewrite(pk, secondary_keys, muts, ts);
-                    return;
+                if self.handle_region_epoch_not_match_or_not_found(&region_err) {
+                    return self.kv_prewrite(pk, secondary_keys, muts, ts);
                 }
-                panic!("unexpected error {:?}", region_err);
+                error!("{} unexpected error {:?}", tag, region_err);
+                return Err(Error::RegionError(region_err));
             }
             let key_errors = resp.take_errors();
             if !key_errors.is_empty() {
@@ -531,23 +537,32 @@ impl ClusterClient {
                     prewrite_req.start_version,
                     false,
                     key_errors.into_vec(),
-                )
-                .expect("handle_key_errors");
+                )?;
                 continue;
             }
-            return;
+            return Ok(());
         }
-        panic!("{} prewrite failed {:?}", region_id, store_id_errors,);
+        error!("{} prewrite failed {:?}", region_id, errors);
+        Err(errors.pop().unwrap().1)
     }
 
-    pub fn kv_commit(&mut self, muts: TxnMutations, start_ts: TimeStamp, commit_ts: TimeStamp) {
+    // Return the actual commit_ts, which would be larger than commit_ts in request.
+    pub fn kv_commit(
+        &mut self,
+        muts: TxnMutations,
+        start_ts: TimeStamp,
+        mut commit_ts: TimeStamp,
+    ) -> Result<TimeStamp> {
         // fail_point!("kv_commmit");
         // println!("{:?}", fail::list());
 
         let groups = muts.group_by_regions(self, PrimaryFilter::All).unwrap();
         for (id_ver, group_muts) in groups {
-            self.kv_commit_single_region(id_ver, group_muts, start_ts, commit_ts);
+            commit_ts = self
+                .kv_commit_single_region(id_ver, group_muts, start_ts, commit_ts)?
+                .max(commit_ts);
         }
+        Ok(commit_ts)
     }
 
     /// Primary key is the first item of `keys`.
@@ -555,18 +570,19 @@ impl ClusterClient {
         &mut self,
         muts: TxnMutations,
         start_ts: TimeStamp,
-        commit_ts: TimeStamp,
+        mut commit_ts: TimeStamp,
         commit_action: CommitAction,
-    ) {
+    ) -> Result<Option<TimeStamp>> {
         match commit_action {
-            CommitAction::SyncCommit => self.kv_commit(muts, start_ts, commit_ts),
+            CommitAction::SyncCommit => Ok(Some(self.kv_commit(muts, start_ts, commit_ts)?)),
             CommitAction::AsyncCommitSecondaryKeys(delay) => {
                 let mut primary_groups = muts
                     .group_by_regions(self, PrimaryFilter::PrimaryOnly)
                     .unwrap();
                 assert_eq!(primary_groups.len(), 1);
                 let (id_ver, group_muts) = primary_groups.swap_remove(0);
-                self.kv_commit_single_region(id_ver, group_muts, start_ts, commit_ts);
+                commit_ts =
+                    self.kv_commit_single_region(id_ver, group_muts, start_ts, commit_ts)?;
 
                 if delay < Duration::MAX {
                     let mut client = self.clone();
@@ -576,18 +592,26 @@ impl ClusterClient {
                             .group_by_regions(&mut client, PrimaryFilter::Secondaries)
                             .unwrap();
                         for (id_ver, group_muts) in secondary_groups {
-                            client.kv_commit_single_region(id_ver, group_muts, start_ts, commit_ts);
+                            if let Err(err) = client
+                                .kv_commit_single_region(id_ver, group_muts, start_ts, commit_ts)
+                            {
+                                warn!("secondaries commit failed: {:?}", err; "start_ts" => ?start_ts);
+                            }
                         }
                     });
                 }
+                Ok(Some(commit_ts))
             }
-            CommitAction::NoCommit => {}
+            CommitAction::NoCommit => Ok(None),
             CommitAction::AsyncCommit(delay) => {
                 let mut client = self.clone();
                 thread::spawn(move || {
                     thread::sleep(delay);
-                    client.kv_commit(muts, start_ts, commit_ts);
+                    if let Err(err) = client.kv_commit(muts, start_ts, commit_ts) {
+                        warn!("async commit failed: {:?}", err; "start_ts" => ?start_ts);
+                    }
                 });
+                Ok(None)
             }
         }
     }
@@ -597,10 +621,10 @@ impl ClusterClient {
         id_ver: RegionIdVer,
         muts: TxnMutations,
         start_ts: TimeStamp,
-        commit_ts: TimeStamp,
-    ) {
+        mut commit_ts: TimeStamp,
+    ) -> Result<TimeStamp> {
         let region_id = id_ver.id();
-        let mut store_id_errors = vec![];
+        let mut errors: Vec<(ShardTag, Error)> = vec![];
         let start_time = Instant::now();
         let timeout = Duration::from_secs(15);
         while start_time.saturating_elapsed() < timeout {
@@ -608,10 +632,10 @@ impl ClusterClient {
                 .new_rpc_ctx(region_id)
                 .filter(|x| x.get_region_epoch().get_version() == id_ver.ver());
             if ctx.is_none() {
-                self.kv_commit(muts, start_ts, commit_ts);
-                return;
+                return self.kv_commit(muts, start_ts, commit_ts);
             }
             let ctx = ctx.unwrap();
+            let tag = Self::tag_from_ctx(&ctx);
             let store_id = ctx.get_peer().get_store_id();
             let kv_client = self.get_kv_client(store_id);
             let mut commit_req = CommitRequest::default();
@@ -620,32 +644,41 @@ impl ClusterClient {
             muts.set_commit_req(&mut commit_req);
             commit_req.commit_version = commit_ts.into_inner();
             let result = kv_client.kv_commit(&commit_req);
-            if result.is_err() {
-                store_id_errors.push((store_id, format!("{:?}", result.unwrap_err())));
+            if let Err(err) = result {
+                errors.push((tag, err.into()));
                 sleep(Duration::from_millis(100));
                 self.update_cache_by_id(region_id, None);
                 continue;
             }
-            let commit_resp = result.unwrap();
+            let mut commit_resp = result.unwrap();
             if commit_resp.has_region_error() {
-                let region_err = commit_resp.get_region_error();
-                if self.handle_retryable_error(region_id, region_err) {
-                    store_id_errors.push((store_id, format!("{:?}", region_err)));
+                let region_err = commit_resp.take_region_error();
+                if self.handle_retryable_error(region_id, &region_err) {
+                    errors.push((tag, Error::RegionError(region_err)));
                     continue;
                 }
-                if self.handle_region_epoch_not_match_or_not_found(region_err) {
-                    self.kv_commit(muts, start_ts, commit_ts);
-                    return;
+                if self.handle_region_epoch_not_match_or_not_found(&region_err) {
+                    return self.kv_commit(muts, start_ts, commit_ts);
                 }
-                panic!("unexpected error {:?}", region_err);
+                error!("{} unexpected error {:?}", tag, region_err);
+                return Err(Error::RegionError(region_err));
             }
             if commit_resp.has_error() {
-                let key_err = commit_resp.get_error();
-                panic!("{} commit failed with key error {:?}", region_id, key_err);
+                let key_err = commit_resp.take_error();
+                if key_err.has_commit_ts_expired() {
+                    errors.push((tag, Error::KeyError(key_err)));
+                    commit_ts = self.get_ts();
+                    info!("{} commit_ts expired, retry {:?}", tag, commit_ts);
+                    continue;
+                }
+                error!("{} commit failed with key error {:?}", tag, key_err);
+                return Err(Error::KeyError(key_err));
             }
-            return;
+            commit_ts = TimeStamp::from(commit_resp.commit_version);
+            return Ok(commit_ts);
         }
-        panic!("{} commit failed {:?}", region_id, store_id_errors,);
+        error!("{} commit failed {:?}", region_id, errors);
+        Err(errors.pop().unwrap().1)
     }
 
     // TODO: eliminate duplicated codes for handling network & region errors.
@@ -763,37 +796,43 @@ impl ClusterClient {
                 continue;
             }
 
-            let resp = result.unwrap();
+            let mut resp = result.unwrap();
             if resp.has_region_error() {
-                let region_err = resp.get_region_error();
+                let region_err = resp.take_region_error();
                 last_err = Some(box_err!(
                     "{} kv_resolve_lock: region_err {:?}",
                     tag,
                     region_err
                 ));
                 warn!("{:?}", last_err);
-                if self.handle_retryable_error(region.id, region_err) {
+                if self.handle_retryable_error(region.id, &region_err) {
                     continue;
                 }
-                if self.handle_region_epoch_not_match_or_not_found(region_err) {
+                if self.handle_region_epoch_not_match_or_not_found(&region_err) {
                     continue;
                 }
-                panic!("{:?}", last_err);
+                error!(
+                    "{} kv_resolve_lock failed, start_version {}, error {:?}",
+                    tag, start_version, region_err
+                );
+                return Err(Error::RegionError(region_err));
             }
 
             if resp.has_error() {
-                panic!(
+                let key_err = resp.take_error();
+                error!(
                     "{} kv_resolve_lock failed, start_version {}, error {:?}",
-                    tag,
-                    start_version,
-                    resp.get_error()
+                    tag, start_version, key_err
                 );
+                return Err(Error::KeyError(key_err));
             }
 
             clean_regions.insert(region.id_ver());
             return Ok(());
         }
-        panic!("{} kv_resolve_lock failed {:?}", tag, last_err.unwrap());
+        let last_err = last_err.unwrap();
+        error!("{} kv_resolve_lock failed {:?}", tag, last_err);
+        Err(last_err)
     }
 
     pub fn kv_resolve_lock_for_mutations(

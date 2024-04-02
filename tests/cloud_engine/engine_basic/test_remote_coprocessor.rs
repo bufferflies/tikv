@@ -1912,7 +1912,8 @@ impl<'a> Insert<'a> {
 
         let txn_muts = TxnMutations::from_normal(mutations.clone());
         self.client
-            .kv_prewrite(txn_muts.primary(), None, txn_muts, start_ts);
+            .kv_prewrite(txn_muts.primary(), None, txn_muts, start_ts)
+            .expect("kv_prewrite");
 
         mutations
     }
@@ -1985,7 +1986,8 @@ impl<'a> Delete<'a> {
             total_mutations.extend(mutations.to_owned());
             let txn_muts = TxnMutations::from_normal(mutations.clone());
             self.client
-                .kv_prewrite(txn_muts.primary(), None, txn_muts, start_ts);
+                .kv_prewrite(txn_muts.primary(), None, txn_muts, start_ts)
+                .expect("kv_prewrite");
         }
 
         total_mutations
