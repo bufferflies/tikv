@@ -1,8 +1,9 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{iter::Iterator as StdIterator, ops::Deref, sync::Arc};
+use std::{fmt, iter::Iterator as StdIterator, ops::Deref, sync::Arc};
 
 use bytes::{Buf, BufMut, Bytes};
+use log_wrappers::Value as LogValue;
 use moka::sync::SegmentedCache;
 use tikv_util::codec::number::NumberEncoder;
 
@@ -13,7 +14,7 @@ use crate::{
         sstable::{key_diff_idx, BlockCacheKey, EntrySlice, File, TtlCache},
         Error, InnerKey, Iterator, Result, Value,
     },
-    USER_META_SIZE,
+    UserMeta, USER_META_SIZE,
 };
 
 const TXN_FILE_PROP_CHECK_NON_EXIST_COUNT: &str = "check_ne";
@@ -53,6 +54,19 @@ pub struct TxnCtx {
     user_meta: Bytes,
     lock_val_prefix: Bytes,
     version: u64,
+}
+
+impl fmt::Debug for TxnCtx {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut de = f.debug_struct("TxnCtx");
+        if !self.user_meta.is_empty() {
+            let um = UserMeta::from_slice(&self.user_meta);
+            de.field("user_meta", &um);
+        }
+        de.field("lock_val_prefix", &LogValue::value(&self.lock_val_prefix))
+            .field("version", &self.version)
+            .finish()
+    }
 }
 
 impl TxnCtx {
@@ -130,6 +144,16 @@ impl TxnFile {
 
     pub fn biggest(&self) -> InnerKey<'_> {
         self.chunks.last().unwrap().index.biggest()
+    }
+}
+
+impl fmt::Debug for TxnFile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TxnFile")
+            .field("id", &self.id)
+            .field("txn_ctx", &self.txn_ctx)
+            .field("size", &self.size)
+            .finish()
     }
 }
 

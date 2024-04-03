@@ -1183,13 +1183,14 @@ fn test_txn_file() {
     let chunk_id = 200;
     build_txn_chunk(&engine, 200, 300, chunk_id);
     let mut wb = WriteBatch::new(1, 0);
-    let txn_file_refs = make_txn_file_refs(1000, 200, make_lock_prefix(200), vec![]);
+    let txn_file_refs = make_txn_file_refs(1000, vec![chunk_id], make_lock_prefix(200), vec![]);
     wb.set_property(TXN_FILE_REF, &txn_file_refs);
+    engine.txn_chunk_mgr.prepare(chunk_id).unwrap();
     write_data(wb, &tx);
     verify_lock(&engine, 200, 300);
 
     // rollback the txn file.
-    let txn_file_refs = make_txn_file_refs(1000, 200, vec![], make_user_meta(1000, 0));
+    let txn_file_refs = make_txn_file_refs(1000, vec![chunk_id], vec![], make_user_meta(1000, 0));
     let mut wb = WriteBatch::new(1, 0);
     wb.set_property(TXN_FILE_REF, &txn_file_refs);
     write_data(wb, &tx);
@@ -1203,30 +1204,38 @@ fn test_txn_file() {
     let txn1_start_ts = 1003;
     let txn1_lock = make_txn_file_refs(
         txn1_start_ts,
-        txn1_chunk_id,
+        vec![txn1_chunk_id],
         make_lock_prefix(txn1_start_ts),
         vec![],
     );
     let mut wb = WriteBatch::new(1, 0);
     wb.set_property(TXN_FILE_REF, &txn1_lock);
+    engine
+        .txn_chunk_mgr
+        .prepare_txn_chunks(&[txn1_chunk_id])
+        .unwrap();
     write_data(wb, &tx);
     let txn2_chunk_id = 202;
     build_txn_chunk(&engine, 300, 400, txn2_chunk_id);
     let txn2_start_ts = 1004;
     let txn2_lock = make_txn_file_refs(
         txn2_start_ts,
-        txn2_chunk_id,
+        vec![txn2_chunk_id],
         make_lock_prefix(txn2_start_ts),
         vec![],
     );
     let mut wb = WriteBatch::new(1, 0);
     wb.set_property(TXN_FILE_REF, &txn2_lock);
+    engine
+        .txn_chunk_mgr
+        .prepare_txn_chunks(&[txn2_chunk_id])
+        .unwrap();
     write_data(wb, &tx);
     verify_lock(&engine, 200, 400);
 
     let txn1_commit = make_txn_file_refs(
         txn1_start_ts,
-        txn1_chunk_id,
+        vec![txn1_chunk_id],
         vec![],
         make_user_meta(txn1_start_ts, txn1_start_ts + 2),
     );
@@ -1281,7 +1290,7 @@ fn test_txn_file() {
 
     let txn2_commit = make_txn_file_refs(
         txn2_start_ts,
-        txn2_chunk_id,
+        vec![txn2_chunk_id],
         vec![],
         make_user_meta(txn2_start_ts, txn2_start_ts + 2),
     );
@@ -1303,6 +1312,41 @@ fn test_txn_file() {
     verify_write(&engine, 200, 400);
 }
 
+#[test]
+fn test_txn_file_multiple() {
+    ::test_util::init_log_for_test();
+    let (engine, tx) = new_test_engine();
+
+    let chunks_id: Vec<u64> = (100..500).step_by(10).collect();
+    let start_ts = 2000;
+    for &chunk_id in &chunks_id {
+        let start = chunk_id as usize;
+        build_txn_chunk(&engine, start, start + 10, chunk_id);
+    }
+    let mut wb = WriteBatch::new(1, 0);
+    let txn_file_refs = make_txn_file_refs(
+        start_ts,
+        chunks_id.clone(),
+        make_lock_prefix(start_ts),
+        vec![],
+    );
+    wb.set_property(TXN_FILE_REF, &txn_file_refs);
+    engine.txn_chunk_mgr.prepare_txn_chunks(&chunks_id).unwrap();
+    write_data(wb, &tx);
+    verify_lock(&engine, 100, 500);
+
+    let txn4_commit = make_txn_file_refs(
+        start_ts,
+        chunks_id,
+        vec![],
+        make_user_meta(start_ts, start_ts + 2),
+    );
+    let mut wb = WriteBatch::new(1, 0);
+    wb.set_property(TXN_FILE_REF, &txn4_commit);
+    write_data(wb, &tx);
+    verify_write(&engine, 100, 500);
+}
+
 fn build_txn_chunk(engine: &TestEngine, start: usize, end: usize, id: u64) {
     let mut chunk_builder = TxnChunkBuilder::new(10);
     for i in start..end {
@@ -1320,12 +1364,12 @@ fn build_txn_chunk(engine: &TestEngine, start: usize, end: usize, id: u64) {
 
 fn make_txn_file_refs(
     start_ts: u64,
-    chunk_id: u64,
+    chunks_id: Vec<u64>,
     lock_prefix: Vec<u8>,
     user_meta: Vec<u8>,
 ) -> Vec<u8> {
     let mut txn_file_ref = TxnFileRef::new();
-    txn_file_ref.set_chunk_ids(vec![chunk_id]);
+    txn_file_ref.set_chunk_ids(chunks_id);
     txn_file_ref.set_shard_ver(1);
     txn_file_ref.set_start_ts(start_ts);
     if !lock_prefix.is_empty() {

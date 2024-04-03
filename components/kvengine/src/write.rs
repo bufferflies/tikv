@@ -8,7 +8,7 @@ use protobuf::Message;
 use slog_global::info;
 
 use crate::{
-    table::{self, memtable, InnerKey, TxnCtx, TxnFile, TxnFileId},
+    table::{self, memtable, InnerKey, TxnFile},
     *,
 };
 
@@ -263,28 +263,11 @@ impl Engine {
     fn write_txn_file_ref(&self, shard: &Shard, v: &[u8]) -> bool {
         let mut txn_file_refs = TxnFileRefs::new();
         txn_file_refs.merge_from_bytes(v).unwrap();
+        debug_assert_eq!(txn_file_refs.txn_file_refs.len(), 1);
         let txn_file_ref = txn_file_refs.take_txn_file_refs().pop().unwrap();
         let old_data = shard.get_data();
         let mut lock_txn_files = old_data.lock_txn_files.clone();
 
-        let mut chunks = vec![];
-        for &chunk_id in &txn_file_ref.chunk_ids {
-            self.txn_chunk_mgr.prepare(chunk_id).unwrap();
-            let txn_chunk = self.txn_chunk_mgr.get(chunk_id).unwrap();
-            chunks.push(txn_chunk);
-        }
-        // txn_ctx_version is the data version
-        let txn_ctx_version = if !txn_file_ref.user_meta.is_empty() {
-            let um = UserMeta::from_slice(&txn_file_ref.user_meta);
-            um.commit_ts
-        } else {
-            txn_file_ref.version
-        };
-        let txn_ctx = TxnCtx::new(
-            txn_file_ref.user_meta.clone().into(),
-            txn_file_ref.lock_val_prefix.clone().into(),
-            txn_ctx_version,
-        );
         let mut is_commit = false;
         let mut is_rollback = false;
         if !txn_file_ref.user_meta.is_empty() {
@@ -292,8 +275,10 @@ impl Engine {
             is_rollback = user_meta.is_rollback();
             is_commit = !is_rollback;
         }
-        let txn_file_id = TxnFileId::new(shard.id, shard.ver, txn_file_ref.start_ts);
-        let txn_file = TxnFile::new(txn_file_id, chunks, txn_ctx).unwrap();
+        let txn_file = self
+            .txn_chunk_mgr
+            .load_txn_file_from_ref(shard.id, shard.ver, &txn_file_ref, true)
+            .unwrap();
 
         Self::merge_txn_file_ref(shard, txn_file_ref, is_rollback);
 

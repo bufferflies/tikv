@@ -12,16 +12,19 @@ use bytes::{Buf, Bytes};
 use dashmap::DashMap;
 use moka::sync::SegmentedCache;
 use regex::Regex;
-use tikv_util::HandyRwLock;
+use tikv_util::{box_err, HandyRwLock};
 
 use crate::{
     dfs::Dfs,
     table::{
         sstable::{BlockCacheKey, LocalFile},
         txn_file::TxnChunk,
+        TxnCtx, TxnFile, TxnFileId,
     },
-    Result,
+    Error, Result, UserMeta,
 };
+
+const READ_DFS_CONCURRENCY: usize = 4;
 
 #[derive(Clone)]
 pub struct TxnChunkManager {
@@ -115,6 +118,74 @@ impl TxnChunkManagerCore {
         Ok(())
     }
 
+    pub fn prepare_txn_chunks(&self, txn_chunks_id: &[u64]) -> Result<()> {
+        let (tx, rx) = tikv_util::mpsc::bounded(READ_DFS_CONCURRENCY);
+        let runtime = self.dfs.get_runtime();
+        let mut msg_count: usize = 0;
+        for &chunk_id in txn_chunks_id {
+            {
+                let entry = self.txn_chunks.entry(chunk_id).or_default().clone();
+                let mut guard = entry.chunk_data.write().unwrap();
+                if guard.is_some() {
+                    continue;
+                }
+
+                let local_file_path = self.local_file_path(chunk_id);
+                if local_file_path.exists() {
+                    let txn_chunk = self.load_txn_chunk(chunk_id, local_file_path)?;
+                    *guard = Some(txn_chunk);
+                    continue;
+                }
+            }
+
+            let dfs = self.dfs.clone();
+            let tx = tx.clone();
+            runtime.spawn(async move {
+                let file_data = dfs.read_txn_chunk(chunk_id).await;
+                if let Err(err) = tx.send((chunk_id, file_data)) {
+                    // Error should happen only when prepare_txn_chunks exit with error.
+                    warn!("prepare_txn_chunks: send error: {:?}", err; "chunk_id" => chunk_id);
+                }
+            });
+            msg_count += 1;
+
+            if msg_count >= READ_DFS_CONCURRENCY {
+                self.recv_txn_chunk_file_data(&rx)?;
+                msg_count -= 1;
+            }
+        }
+        for _ in 0..msg_count {
+            self.recv_txn_chunk_file_data(&rx)?;
+        }
+        Ok(())
+    }
+
+    fn recv_txn_chunk_file_data(
+        &self,
+        rx: &tikv_util::mpsc::Receiver<(u64, crate::dfs::Result<Bytes>)>,
+    ) -> Result<()> {
+        let (chunk_id, file_data) = rx.recv().unwrap();
+        let file_data = file_data.map_err(|err| -> Error {
+            box_err!("read_txn_chunk failed: {:?}, chunk_id {}", err, chunk_id)
+        })?;
+        let entry = self.txn_chunks.entry(chunk_id).or_default().clone();
+        let mut guard = entry.chunk_data.write().unwrap();
+        if guard.is_some() {
+            return Ok(());
+        }
+        let local_file_path = self.local_file_path(chunk_id);
+        if !local_file_path.exists() {
+            let file_name = chunk_id.to_string();
+            let txn_file_tmp_path = self.local_path.join(format!("{}.tmp", file_name));
+            fs::write(&txn_file_tmp_path, file_data.chunk())?;
+            let local_file_path = self.local_file_path(chunk_id);
+            fs::rename(&txn_file_tmp_path, local_file_path)?;
+        }
+        let txn_chunk = self.load_txn_chunk(chunk_id, local_file_path)?;
+        *guard = Some(txn_chunk);
+        Ok(())
+    }
+
     fn load_txn_chunk(&self, txn_chunk_id: u64, path: PathBuf) -> Result<TxnChunk> {
         let file = LocalFile::open(txn_chunk_id, path.as_path(), false)?;
         let txn_chunk = TxnChunk::new(Arc::new(file), Some(self.cache.clone()))?;
@@ -153,6 +224,59 @@ impl TxnChunkManagerCore {
 
     fn local_file_path(&self, txn_chunk_id: u64) -> PathBuf {
         self.local_path.join(format!("{:016x}.txn", txn_chunk_id))
+    }
+
+    pub fn load_txn_file_from_ref(
+        &self,
+        shard_id: u64,
+        shard_ver: u64,
+        txn_file_ref: &kvenginepb::TxnFileRef,
+        is_prepared: bool,
+    ) -> Result<TxnFile> {
+        let mut chunks = Vec::with_capacity(txn_file_ref.chunk_ids.len());
+        for &chunk_id in &txn_file_ref.chunk_ids {
+            if !is_prepared {
+                self.prepare(chunk_id)?;
+            }
+            let txn_chunk = self.get(chunk_id).ok_or_else(|| -> Error {
+                box_err!("txn chunk is not prepared, chunk_id {}", chunk_id)
+            })?;
+            chunks.push(txn_chunk);
+        }
+        // txn_ctx_version is the data version
+        let txn_ctx_version = if !txn_file_ref.user_meta.is_empty() {
+            let um = UserMeta::from_slice(&txn_file_ref.user_meta);
+            um.commit_ts
+        } else {
+            txn_file_ref.version
+        };
+        let txn_ctx = TxnCtx::new(
+            txn_file_ref.user_meta.clone().into(),
+            txn_file_ref.lock_val_prefix.clone().into(),
+            txn_ctx_version,
+        );
+        let txn_file_id = TxnFileId::new(shard_id, shard_ver, txn_file_ref.start_ts);
+        Ok(TxnFile::new(txn_file_id, chunks, txn_ctx)?)
+    }
+
+    pub fn load_txn_files_from_refs(
+        &self,
+        shard_id: u64,
+        shard_ver: u64,
+        txn_file_refs: &[kvenginepb::TxnFileRef],
+    ) -> Result<Vec<TxnFile>> {
+        let txn_chunks_id = txn_file_refs
+            .iter()
+            .flat_map(|txn_file_ref| txn_file_ref.chunk_ids.iter())
+            .copied()
+            .collect::<Vec<_>>();
+        self.prepare_txn_chunks(&txn_chunks_id)?;
+        txn_file_refs
+            .iter()
+            .map(|txn_file_ref| {
+                self.load_txn_file_from_ref(shard_id, shard_ver, txn_file_ref, true)
+            })
+            .collect()
     }
 }
 

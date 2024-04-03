@@ -12,6 +12,7 @@ use std::{
 use bytes::{Buf, Bytes, BytesMut};
 use cloud_encryption::{EncryptionKey, MasterKey};
 use kvenginepb as pb;
+use kvenginepb::TxnFileRef;
 use moka::sync::SegmentedCache;
 use protobuf::Message;
 use txn_types::Lock;
@@ -217,6 +218,7 @@ impl SnapAccessCore {
     ) -> Self {
         let mut cs = ChangeSet::new(change_set);
         let mut ids = HashMap::new();
+        let mut _txn_file_refs: Vec<TxnFileRef> = vec![];
         let mem_tbls = vec![CfTable::new()];
         // FIXME: Iterate over all memtables
         if let Some(wb) = wb {
@@ -237,6 +239,10 @@ impl SnapAccessCore {
             for blob in snap.get_blob_creates() {
                 ids.insert(blob.id, BLOB_LEVEL);
             }
+            // TODO: load lock_txn_files
+            // if !ignore_lock {
+            //     _txn_file_refs = collect_snap_lock_txn_file_refs(snap);
+            // }
             get_shard_property(ENCRYPTION_KEY, snap.get_properties())
                 .map(|v| master_key.decrypt_encryption_key(&v).unwrap())
         } else {
@@ -305,6 +311,9 @@ impl SnapAccessCore {
         if !errors.is_empty() {
             panic!("errors is not empty: {:?}", errors);
         }
+
+        // TODO: load lock_txn_files
+
         let mut shard = Shard::new_for_ingest(0, &cs, Arc::new(Options::default()), master_key);
         let (l0s, blob_tbls, scfs, lock_txn_files) =
             create_snapshot_tables(cs.get_snapshot(), &cs, ignore_lock);

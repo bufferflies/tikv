@@ -11,6 +11,8 @@ use std::{
 use bytes::{Buf, Bytes};
 use cloud_encryption::EncryptionKey;
 use file_system::{IoOp, IoType};
+use kvenginepb::{TxnFileRef, TxnFileRefs};
+use protobuf::Message;
 use tikv_util::{mpsc::Receiver, time::Instant};
 
 use crate::{
@@ -37,6 +39,7 @@ impl EngineCore {
                                                 * snapshot or restore_shard */
     ) -> Result<ChangeSet> {
         let mut ids: HashMap<u64, FileMeta> = HashMap::new();
+        let mut lock_txn_file_refs: Vec<TxnFileRef> = vec![];
         let mut cs = ChangeSet::new(cs);
         if cs.has_flush() {
             let flush = cs.get_flush();
@@ -78,12 +81,16 @@ impl EngineCore {
         }
         if cs.has_snapshot() {
             self.collect_snap_ids(cs.get_snapshot(), &mut ids);
+            lock_txn_file_refs
+                .extend(collect_snap_lock_txn_file_refs(cs.get_snapshot()).into_iter());
         }
         if cs.has_initial_flush() {
             self.collect_snap_ids(cs.get_initial_flush(), &mut ids);
         }
         if cs.has_restore_shard() {
             self.collect_snap_ids(cs.get_restore_shard(), &mut ids);
+            lock_txn_file_refs
+                .extend(collect_snap_lock_txn_file_refs(cs.get_snapshot()).into_iter());
         }
         if cs.has_ingest_files() {
             let ingest_files = cs.get_ingest_files();
@@ -107,9 +114,10 @@ impl EngineCore {
             }
         }
 
+        let tag = ShardTag::new(self.get_engine_id(), IdVer::from_change_set(&cs));
         if let Some(table_filter) = table_filter {
             info!(
-                "[{}:{}] is preparing change set (before table filter)", cs.shard_id, cs.shard_ver;
+                "{} is preparing change set (before table filter)", tag;
                 "ids" => ?ids.keys(),
             );
             cs.unloaded_tables = ids
@@ -130,8 +138,9 @@ impl EngineCore {
         };
 
         info!(
-            "[{}:{}] is preparing change set, loading file by ids, encryption_key {:?}", cs.shard_id, cs.shard_ver, encryption_key;
+            "{} is preparing change set, loading file by ids", tag;
             "ids" => ?ids.keys(),
+            "encryption_key" => ?encryption_key,
         );
         self.load_tables_by_ids(
             cs.shard_id,
@@ -139,8 +148,22 @@ impl EngineCore {
             &ids,
             &mut cs,
             use_direct_io,
-            encryption_key,
+            encryption_key.clone(),
         )?;
+
+        if !lock_txn_file_refs.is_empty() {
+            cs.lock_txn_files = self.txn_chunk_mgr.load_txn_files_from_refs(
+                cs.shard_id,
+                cs.shard_ver,
+                &lock_txn_file_refs,
+            )?;
+            info!(
+                "{} is preparing change set, load lock txn files", tag;
+                "lock_txn_files" => ?cs.lock_txn_files,
+                "encryption_key" => ?encryption_key,
+            );
+        }
+
         Ok(cs)
     }
 
@@ -386,4 +409,21 @@ impl EngineCore {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.opts.local_dir.join(new_tmp_filename(file_id, tmp_id))
     }
+}
+
+pub(crate) fn collect_snap_lock_txn_file_refs(snap: &kvenginepb::Snapshot) -> Vec<TxnFileRef> {
+    let props = snap.get_properties();
+    debug_assert_eq!(props.keys.len(), props.values.len());
+    for (key, val) in props.get_keys().iter().zip(props.get_values().iter()) {
+        if key == TXN_FILE_REF {
+            let mut txn_file_refs = TxnFileRefs::new();
+            txn_file_refs.merge_from_bytes(val).unwrap();
+            return txn_file_refs
+                .take_txn_file_refs()
+                .into_iter()
+                .filter(|r| !r.lock_val_prefix.is_empty())
+                .collect::<Vec<_>>();
+        }
+    }
+    vec![]
 }
