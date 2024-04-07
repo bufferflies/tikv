@@ -99,6 +99,10 @@ pub struct Config {
     pub apply_pool_size: usize,
 
     pub enable_inner_key_offset: bool,
+
+    pub enable_aux_worker_duration: ReadableDuration,
+
+    pub aux_worker_count: usize,
 }
 
 impl Default for Config {
@@ -141,6 +145,8 @@ impl Default for Config {
             channel_capacity: 40960,
             apply_pool_size: 3,
             enable_inner_key_offset: false,
+            enable_aux_worker_duration: ReadableDuration::millis(1),
+            aux_worker_count: 1,
         }
     }
 }

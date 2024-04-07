@@ -190,9 +190,10 @@ impl<'a> PeerMsgHandler<'a> {
         PeerMsgHandler { fsm, ctx }
     }
 
-    pub fn handle_msgs(&mut self, msgs: &mut Vec<PeerMsg>) {
+    #[allow(clippy::vec_box)]
+    pub fn handle_msgs(&mut self, msgs: &mut Vec<Box<PeerMsg>>) {
         for m in msgs.drain(..) {
-            match m {
+            match *m {
                 PeerMsg::RaftMessage(msg) => {
                     let msg_type = msg.get_message().get_msg_type();
                     let from_store = msg.get_from_peer().get_store_id();

@@ -64,6 +64,13 @@ Handle raft procedure.
 - Build raft messages from ready persist messages and send IoTask to IoWorker. See [RaftWorker::persist_state](https://github.com/tidbcloud/cloud-storage-engine/blob/78cff98b979e041edb71b2b5057f5f3029ba6d8c/components/rfstore/src/store/peer_worker.rs#L128).
 - Send apply message to apply worker. See [RaftWorker::maybe_send_apply](https://github.com/tidbcloud/cloud-storage-engine/blob/78cff98b979e041edb71b2b5057f5f3029ba6d8c/components/rfstore/src/store/peer_worker.rs#L279).
 
+## 3.5 aux_worker
+
+RaftAuxWorker is used to handle part of the raft task to eliminate single thread bottleneck.
+It handles raft worker tasks except `handle_store_msg` and `receive_msgs`.
+On each loop, the main raft worker must sync the aux raft worker to avoid race.
+If the main raft worker is not busy, it does not use aux worker to reduce the overhead of context switching.
+
 # 4. ApplyWorker main loop
 
 Main loop see [ApplyWorker::run](https://github.com/tidbcloud/cloud-storage-engine/blob/78cff98b979e041edb71b2b5057f5f3029ba6d8c/components/rfstore/src/store/peer_worker.rs#L339).

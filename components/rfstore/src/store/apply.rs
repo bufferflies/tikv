@@ -2209,7 +2209,7 @@ impl ApplyContext {
                 bucket_stat: applier.buckets.take().map(Box::new),
             };
             let region_id = applier.region.get_id();
-            let msg = PeerMsg::ApplyResult(apply_res);
+            let msg = Box::new(PeerMsg::ApplyResult(apply_res));
             if let Err(err) = router.peer_sender.send((region_id, msg)) {
                 warn!("send apply result error {:?}", err);
             }

@@ -158,11 +158,14 @@ impl RaftStoreRouter for RaftStoreBlackHole {
 #[derive(Clone)]
 pub struct RaftRouter {
     pub(crate) store_sender: Sender<StoreMsg>,
-    pub(crate) peer_sender: Sender<(u64, PeerMsg)>,
+    pub(crate) peer_sender: Sender<(u64, Box<PeerMsg>)>,
 }
 
 impl RaftRouter {
-    pub(crate) fn new(peer_sender: Sender<(u64, PeerMsg)>, store_sender: Sender<StoreMsg>) -> Self {
+    pub(crate) fn new(
+        peer_sender: Sender<(u64, Box<PeerMsg>)>,
+        store_sender: Sender<StoreMsg>,
+    ) -> Self {
         Self {
             store_sender,
             peer_sender,
@@ -170,7 +173,7 @@ impl RaftRouter {
     }
 
     pub(crate) fn send(&self, id: u64, msg: PeerMsg) {
-        if let Err(err) = self.peer_sender.send((id, msg)) {
+        if let Err(err) = self.peer_sender.send((id, Box::new(msg))) {
             warn!("send failed {:?}", err)
         }
     }

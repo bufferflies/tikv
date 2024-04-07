@@ -72,7 +72,7 @@ pub struct RaftBatchSystem {
     workers: Option<Workers>,
 
     // Change to none after spawn.
-    peer_receiver: Option<Receiver<(u64, PeerMsg)>>,
+    peer_receiver: Option<Receiver<(u64, Box<PeerMsg>)>>,
     store_fsm: Option<StoreFsm>,
     join_handles: Vec<JoinHandle<()>>,
 }

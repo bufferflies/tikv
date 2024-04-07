@@ -1,7 +1,7 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{hash_map::Entry, HashMap, VecDeque},
     ops::{Deref, DerefMut},
 };
 
@@ -59,8 +59,14 @@ impl WriteBatch {
     }
 
     pub(crate) fn merge_peer(&mut self, peer_batch: PeerBatch) {
-        self.get_peer(peer_batch.peer_id, peer_batch.meta.region_id)
-            .merge(peer_batch);
+        match self.peers.entry(peer_batch.peer_id) {
+            Entry::Occupied(old_peer_batch) => {
+                old_peer_batch.into_mut().merge(peer_batch);
+            }
+            Entry::Vacant(e) => {
+                e.insert(peer_batch);
+            }
+        }
     }
 
     pub fn merge_write_batch(&mut self, other: WriteBatch) {

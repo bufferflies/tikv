@@ -21,6 +21,7 @@ use rfengine::WriteBatch;
 use tikv_util::{
     debug, error, info,
     mpsc::{Receiver, Sender},
+    sys::thread::StdThreadBuildWrapper,
     time::{duration_to_sec, InstantExt},
     warn,
 };
@@ -43,9 +44,69 @@ impl PeerStates {
     }
 }
 
+#[allow(clippy::vec_box)]
 pub(crate) struct PeerInbox {
     pub(crate) peer: PeerStates,
-    pub(crate) msgs: Vec<PeerMsg>,
+    pub(crate) msgs: Vec<Box<PeerMsg>>,
+}
+
+impl PeerInbox {
+    pub(crate) fn process(
+        &mut self,
+        ctx: &mut RaftContext,
+        apply_senders: &[Sender<Option<ApplyBatch>>],
+        statistics: Option<&mut [InboxPeerStat]>,
+    ) {
+        if self.msgs.is_empty() {
+            return;
+        }
+        let mut peer_fsm = self.peer.peer_fsm.lock().unwrap();
+        if peer_fsm.stopped {
+            return;
+        }
+        let msg_len = self.msgs.len();
+        let region_id = peer_fsm.region_id();
+        let start = tikv_util::time::Instant::now_coarse();
+        tikv_util::set_current_region(region_id);
+        PeerMsgHandler::new(&mut peer_fsm, ctx).handle_msgs(&mut self.msgs);
+        peer_fsm.peer.handle_raft_ready(ctx, None);
+        if !ctx.apply_msgs.msgs.is_empty() {
+            let peer_batch = ApplyBatch {
+                msgs: mem::take(&mut ctx.apply_msgs.msgs),
+                applier: self.peer.applier.clone(),
+                applying_cnt: peer_fsm.applying_cnt.clone(),
+                send_time: tikv_util::time::Instant::now(),
+            };
+            peer_batch
+                .applying_cnt
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            apply_senders[peer_fsm.apply_worker_idx]
+                .send(Some(peer_batch))
+                .unwrap();
+        }
+        if statistics.is_none() {
+            return;
+        }
+        let statistics = statistics.unwrap();
+        // Filter out the elapsed time longer than recorded and replace the minimum one
+        // if any.
+        let elapsed = start.saturating_elapsed();
+        // If this peer handle cost is too short, skip the statistics to avoid iterate.
+        if elapsed < Duration::from_millis(10) {
+            return;
+        }
+        if let Some(min_index) = statistics
+            .iter()
+            .enumerate()
+            .filter(|(_, &stat)| stat.elapsed < elapsed)
+            .min_by_key(|&(_, &val)| val.elapsed)
+            .map(|(i, _)| i)
+        {
+            statistics[min_index].region_id = region_id;
+            statistics[min_index].elapsed = elapsed;
+            statistics[min_index].msg_cnt = msg_len;
+        }
+    }
 }
 
 pub(crate) struct Inboxes {
@@ -69,7 +130,7 @@ pub(crate) struct InboxPeerStat {
 
 pub(crate) struct RaftWorker {
     ctx: StoreContext,
-    receiver: Receiver<(u64, PeerMsg)>,
+    receiver: Receiver<(u64, Box<PeerMsg>)>,
     router: RaftRouter,
     apply_senders: Vec<Sender<Option<ApplyBatch>>>,
     io_sender: Sender<Option<IoTask>>,
@@ -77,6 +138,13 @@ pub(crate) struct RaftWorker {
     tick_seg_idx: usize,
     tick_millis: u64,
     store_fsm: StoreFsm,
+    batch_msg_count: usize,
+    process_inbox_duration: Duration,
+    aux_task_senders: Vec<Sender<Vec<PeerInbox>>>,
+    aux_res_receivers: Vec<Receiver<()>>,
+    sent_aux_task: Vec<bool>,
+    enable_aux_duration: Duration,
+    aux_handles: Vec<std::thread::JoinHandle<()>>,
 }
 
 const MAX_BATCH_COUNT: usize = 1024;
@@ -86,7 +154,7 @@ const PEER_INBOX_STATISTIC_COUNT: usize = 5;
 impl RaftWorker {
     pub(crate) fn new(
         ctx: StoreContext,
-        receiver: Receiver<(u64, PeerMsg)>,
+        receiver: Receiver<(u64, Box<PeerMsg>)>,
         router: RaftRouter,
         io_sender: Sender<Option<IoTask>>,
         store_fsm: StoreFsm,
@@ -100,6 +168,7 @@ impl RaftWorker {
             apply_receivers.push(receiver);
         }
         let tick_millis = ctx.cfg.raft_base_tick_interval.as_millis();
+        let enable_aux_duration = ctx.cfg.enable_aux_worker_duration.0;
         (
             Self {
                 ctx,
@@ -111,6 +180,13 @@ impl RaftWorker {
                 tick_seg_idx: 0,
                 tick_millis,
                 store_fsm,
+                batch_msg_count: 0,
+                process_inbox_duration: Duration::ZERO,
+                aux_task_senders: vec![],
+                aux_res_receivers: vec![],
+                sent_aux_task: vec![],
+                enable_aux_duration,
+                aux_handles: vec![],
             },
             apply_receivers,
         )
@@ -120,6 +196,22 @@ impl RaftWorker {
         let mut inboxes: Inboxes = Inboxes::new();
         let mut inbox_peer_stats = vec![InboxPeerStat::default(); PEER_INBOX_STATISTIC_COUNT];
         let store_id = self.ctx.store_id();
+        for i in 0..self.ctx.cfg.aux_worker_count {
+            let (mut aux_worker, aux_result_rx) = RaftAuxWorker::new(
+                self.ctx.global.clone(),
+                self.apply_senders.clone(),
+                self.io_sender.clone(),
+            );
+            let aux_task_tx = aux_worker.task_tx.clone();
+            self.aux_task_senders.push(aux_task_tx);
+            self.aux_res_receivers.push(aux_result_rx);
+            self.sent_aux_task.push(false);
+            let aux_handle = std::thread::Builder::new()
+                .name(format!("raftstore_{}", i + 1))
+                .spawn_wrapper(move || aux_worker.run())
+                .unwrap();
+            self.aux_handles.push(aux_handle);
+        }
         loop {
             self.handle_store_msg();
             if self.store_fsm.stopped {
@@ -131,23 +223,78 @@ impl RaftWorker {
                 Ok(start_time) => start_time,
                 Err(_) => return,
             };
-            inboxes.inboxes.iter_mut().for_each(|(_, inbox)| {
-                self.process_inbox(inbox, &mut inbox_peer_stats);
+            // If store msg is empty, we can sync aux_worker after receive latest messages.
+            self.sync_aux_worker();
+            let mut inboxes_vec: Vec<PeerInbox> =
+                inboxes.inboxes.drain().map(|(_, inbox)| inbox).collect();
+            self.try_send_aux_task(&mut inboxes_vec);
+            inboxes_vec.into_iter().for_each(|mut inbox| {
+                inbox.process(
+                    &mut self.ctx,
+                    &self.apply_senders,
+                    Some(&mut inbox_peer_stats),
+                );
             });
-            let process_inbox_elapsed = loop_start.saturating_elapsed();
-            if process_inbox_elapsed > Duration::from_millis(50) {
+            self.process_inbox_duration = loop_start.saturating_elapsed();
+            if self.process_inbox_duration > Duration::from_millis(50) {
                 inbox_peer_stats.sort_by(|a, b| b.elapsed.cmp(&a.elapsed));
                 warn!(
                     "store_id: {} raft worker batch loop takes too long, process_inbox_elapsed: {:?}, top_{} peers: {:?}",
-                    store_id, process_inbox_elapsed, PEER_INBOX_STATISTIC_COUNT, inbox_peer_stats
+                    store_id,
+                    self.process_inbox_duration,
+                    PEER_INBOX_STATISTIC_COUNT,
+                    inbox_peer_stats
                 );
             }
             inbox_peer_stats.fill(InboxPeerStat::default());
             if self.ctx.global.trans.need_flush() {
                 self.ctx.global.trans.flush();
             }
-            self.persist_state();
-            self.batch_end(loop_start.saturating_elapsed());
+            persist_states(&mut self.ctx, &self.io_sender);
+            batch_end(&mut self.ctx, loop_start.saturating_elapsed());
+        }
+    }
+
+    fn try_send_aux_task(&mut self, inboxes: &mut Vec<PeerInbox>) {
+        if !self.ctx.raft_ctx.raft_wb.is_empty() {
+            // The raft_wb is written by handling store messages, do not use aux worker to
+            // avoid race.
+            return;
+        }
+        if self.process_inbox_duration < self.enable_aux_duration {
+            // If the raft worker is not busy, use aux worker introduces extra latency.
+            return;
+        }
+        if self.ctx.cfg.aux_worker_count == 0 {
+            return;
+        }
+        let mut aux_inboxes = vec![];
+        let mut aux_msg_count = 0;
+        let mut aux_worker_idx = 0;
+        let target_aux_msg_count = self.batch_msg_count / (self.ctx.cfg.aux_worker_count + 1);
+        while let Some(inbox) = inboxes.pop() {
+            aux_msg_count += inbox.msgs.len();
+            aux_inboxes.push(inbox);
+            if aux_msg_count > target_aux_msg_count {
+                self.aux_task_senders[aux_worker_idx]
+                    .send(mem::take(&mut aux_inboxes))
+                    .unwrap();
+                self.sent_aux_task[aux_worker_idx] = true;
+                aux_msg_count = 0;
+                aux_worker_idx += 1;
+                if aux_worker_idx == self.ctx.cfg.aux_worker_count {
+                    break;
+                }
+            }
+        }
+    }
+
+    fn sync_aux_worker(&mut self) {
+        for i in 0..self.ctx.cfg.aux_worker_count {
+            if self.sent_aux_task[i] {
+                self.aux_res_receivers[i].recv().unwrap();
+                self.sent_aux_task[i] = false;
+            }
         }
     }
 
@@ -162,10 +309,17 @@ impl RaftWorker {
                 peer_fsm.peer.pending_reads.clear_all(None);
             }
         }
+        for aux_task_tx in self.aux_task_senders.drain(..) {
+            let _ = aux_task_tx.send(vec![]);
+        }
+        for handle in self.aux_handles.drain(..) {
+            let _ = handle.join();
+        }
     }
 
     fn handle_store_msg(&mut self) {
         while let Ok(msg) = self.store_fsm.receiver.try_recv() {
+            self.sync_aux_worker();
             let mut store_handler = StoreMsgHandler::new(&mut self.store_fsm, &mut self.ctx);
             if let Some(apply_region) = store_handler.handle_msg(msg) {
                 let peer = self.ctx.get_peer(apply_region);
@@ -188,26 +342,17 @@ impl RaftWorker {
         &mut self,
         inboxes: &mut Inboxes,
     ) -> std::result::Result<tikv_util::time::Instant, RecvTimeoutError> {
-        inboxes.inboxes.retain(|_, inbox| -> bool {
-            if inbox.msgs.is_empty() {
-                false
-            } else {
-                inbox.msgs.truncate(0);
-                true
-            }
-        });
+        self.batch_msg_count = 0;
         let res = self.receiver.recv_timeout(Duration::from_millis(10));
         let receive_time = tikv_util::time::Instant::now();
         match res {
             Ok((region_id, msg)) => {
                 let mut batch_size = msg.size();
-                let mut batch_cnt = 1;
                 self.append_msg(inboxes, region_id, msg);
                 while let Ok((region_id, msg)) = self.receiver.try_recv() {
                     batch_size += msg.size();
-                    batch_cnt += 1;
                     self.append_msg(inboxes, region_id, msg);
-                    if batch_cnt > MAX_BATCH_COUNT || batch_size > MAX_BATCH_SIZE {
+                    if self.batch_msg_count > MAX_BATCH_COUNT || batch_size > MAX_BATCH_SIZE {
                         break;
                     }
                 }
@@ -220,22 +365,26 @@ impl RaftWorker {
             (tick_elapsed_millis * PEER_SEGMENTS as u64 / self.tick_millis) as usize,
             PEER_SEGMENTS,
         );
+        let mut tick_cnt = 0;
         for seg_idx in self.tick_seg_idx..next_tick_seg_idx {
             let peer_map = &self.ctx.peers[seg_idx];
             peer_map.iter().for_each(
                 |(&region_id, peer)| match inboxes.inboxes.entry(region_id) {
                     Entry::Occupied(mut entry) => {
-                        entry.get_mut().msgs.push(PeerMsg::Tick);
+                        entry.get_mut().msgs.push(Box::new(PeerMsg::Tick));
+                        tick_cnt += 1;
                     }
                     Entry::Vacant(entry) => {
                         entry.insert(PeerInbox {
                             peer: peer.clone(),
-                            msgs: vec![PeerMsg::Tick],
+                            msgs: vec![Box::new(PeerMsg::Tick)],
                         });
+                        tick_cnt += 1;
                     }
                 },
             );
         }
+        self.batch_msg_count += tick_cnt;
         if next_tick_seg_idx == PEER_SEGMENTS {
             self.last_tick = Instant::now();
             self.tick_seg_idx = 0;
@@ -245,9 +394,10 @@ impl RaftWorker {
         Ok(receive_time)
     }
 
-    fn append_msg(&mut self, inboxes: &mut Inboxes, region_id: u64, msg: PeerMsg) {
+    fn append_msg(&mut self, inboxes: &mut Inboxes, region_id: u64, msg: Box<PeerMsg>) {
         if let Some(inbox) = inboxes.inboxes.get_mut(&region_id) {
             inbox.msgs.push(msg);
+            self.batch_msg_count += 1;
             return;
         }
         if let Some(peer) = self.ctx.try_get_peer(region_id) {
@@ -258,9 +408,10 @@ impl RaftWorker {
                     msgs: vec![msg],
                 },
             );
+            self.batch_msg_count += 1;
             return;
         }
-        match msg {
+        match *msg {
             PeerMsg::RaftMessage(msg) => {
                 self.router.send_store(StoreMsg::RaftMessage(msg));
             }
@@ -286,42 +437,6 @@ impl RaftWorker {
         }
     }
 
-    fn process_inbox(&mut self, inbox: &mut PeerInbox, statistics: &mut [InboxPeerStat]) {
-        if inbox.msgs.is_empty() {
-            return;
-        }
-        let mut peer_fsm = inbox.peer.peer_fsm.lock().unwrap();
-        if peer_fsm.stopped {
-            return;
-        }
-        let msg_len = inbox.msgs.len();
-        let region_id = peer_fsm.region_id();
-        let start = tikv_util::time::Instant::now_coarse();
-        tikv_util::set_current_region(region_id);
-        PeerMsgHandler::new(&mut peer_fsm, &mut self.ctx).handle_msgs(&mut inbox.msgs);
-        peer_fsm.peer.handle_raft_ready(&mut self.ctx, None);
-        self.maybe_send_apply(&inbox.peer.applier, &peer_fsm);
-
-        // Filter out the elapsed time longer than recorded and replace the minimum one
-        // if any.
-        let elapsed = start.saturating_elapsed();
-        // If this peer handle cost is too short, skip the statistics to avoid iterate.
-        if elapsed < Duration::from_millis(10) {
-            return;
-        }
-        if let Some(min_index) = statistics
-            .iter()
-            .enumerate()
-            .filter(|(_, &stat)| stat.elapsed < elapsed)
-            .min_by_key(|&(_, &val)| val.elapsed)
-            .map(|(i, _)| i)
-        {
-            statistics[min_index].region_id = region_id;
-            statistics[min_index].elapsed = elapsed;
-            statistics[min_index].msg_cnt = msg_len;
-        }
-    }
-
     fn maybe_send_apply(&mut self, applier: &Arc<Mutex<Applier>>, peer_fsm: &PeerFsm) {
         if !self.ctx.apply_msgs.msgs.is_empty() {
             let peer_batch = ApplyBatch {
@@ -338,29 +453,55 @@ impl RaftWorker {
                 .unwrap();
         }
     }
+}
 
-    fn persist_state(&mut self) {
-        if self.ctx.persist_readies.is_empty() && self.ctx.raft_wb.is_empty() {
-            return;
-        }
-        let mut raft_wb = mem::take(&mut self.ctx.raft_wb);
-        self.ctx.global.engines.raft.apply(&mut raft_wb);
-        let readies = mem::take(&mut self.ctx.persist_readies);
-        let io_task = IoTask { raft_wb, readies };
-        self.io_sender.send(Some(io_task)).unwrap();
+pub(crate) struct RaftAuxWorker {
+    ctx: RaftContext,
+    task_tx: Sender<Vec<PeerInbox>>,
+    task_rx: Receiver<Vec<PeerInbox>>,
+    result_tx: Sender<()>,
+    apply_senders: Vec<Sender<Option<ApplyBatch>>>,
+    io_sender: Sender<Option<IoTask>>,
+}
+
+impl RaftAuxWorker {
+    fn new(
+        ctx: GlobalContext,
+        apply_senders: Vec<Sender<Option<ApplyBatch>>>,
+        io_sender: Sender<Option<IoTask>>,
+    ) -> (Self, Receiver<()>) {
+        let ctx = RaftContext::new(ctx);
+        let (task_tx, task_rx) = tikv_util::mpsc::bounded(1);
+        let (result_tx, result_rx) = tikv_util::mpsc::bounded(1);
+        (
+            Self {
+                ctx,
+                task_tx,
+                task_rx,
+                result_tx,
+                apply_senders,
+                io_sender,
+            },
+            result_rx,
+        )
     }
 
-    fn batch_end(&mut self, batch_duration: Duration) {
-        if batch_duration > Duration::from_millis(50) {
-            info!("raft worker batch loop takes {:?}", batch_duration);
+    fn run(&mut self) {
+        while let Ok(inboxes) = self.task_rx.recv() {
+            if inboxes.is_empty() {
+                return;
+            }
+            let loop_start = tikv_util::time::Instant::now();
+            for mut inbox in inboxes {
+                inbox.process(&mut self.ctx, &self.apply_senders, None);
+            }
+            if self.ctx.global.trans.need_flush() {
+                self.ctx.global.trans.flush();
+            }
+            persist_states(&mut self.ctx, &self.io_sender);
+            self.result_tx.send(()).unwrap();
+            batch_end(&mut self.ctx, loop_start.saturating_elapsed());
         }
-        self.ctx
-            .raft_metrics
-            .store_time
-            .observe(duration_to_sec(batch_duration));
-        self.ctx.raft_metrics.maybe_flush();
-        self.ctx.current_time = None;
-        self.ctx.global.destroying.clear();
     }
 }
 
@@ -401,6 +542,29 @@ impl ApplyWorker {
             }
         }
     }
+}
+
+fn persist_states(ctx: &mut RaftContext, io_sender: &Sender<Option<IoTask>>) {
+    if ctx.persist_readies.is_empty() && ctx.raft_wb.is_empty() {
+        return;
+    }
+    let mut raft_wb = mem::take(&mut ctx.raft_wb);
+    ctx.global.engines.raft.apply(&mut raft_wb);
+    let readies = mem::take(&mut ctx.persist_readies);
+    let io_task = IoTask { raft_wb, readies };
+    io_sender.send(Some(io_task)).unwrap();
+}
+
+fn batch_end(ctx: &mut RaftContext, batch_duration: Duration) {
+    if batch_duration > Duration::from_millis(50) {
+        info!("raft worker batch loop takes {:?}", batch_duration);
+    }
+    ctx.raft_metrics
+        .store_time
+        .observe(duration_to_sec(batch_duration));
+    ctx.raft_metrics.maybe_flush();
+    ctx.current_time = None;
+    ctx.global.destroying.clear();
 }
 
 pub(crate) struct IoWorker {
