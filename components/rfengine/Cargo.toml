@@ -10,7 +10,7 @@ publish = false
 api_version = { path = "../api_version" }
 byteorder = "1.2"
 bytes = "1.0"
-crc32c = "0.6.3"
+crc32c = { workspace = true }
 dashmap = "4.0"
 engine_traits = { path = "../engine_traits", default-features = false }
 error_code = { path = "../error_code", default-features = false }

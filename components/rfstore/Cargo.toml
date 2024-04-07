@@ -14,7 +14,7 @@ bytes = "1.0"
 cloud_encryption = { workspace = true }
 collections = { path = "../collections" }
 concurrency_manager = { path = "../concurrency_manager", default-features = false }
-crc32c = "0.6.3"
+crc32c = { workspace = true }
 crossbeam = "0.8"
 dashmap = "4.0"
 derivative = "2"
