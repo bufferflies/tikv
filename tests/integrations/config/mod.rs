@@ -671,6 +671,7 @@ fn test_serde_custom_tikv_config() {
         max_key_size: 4096,
         scheduler_concurrency: 123,
         scheduler_worker_pool_size: 1,
+        scheduler_txn_file_worker_pool_size: 2,
         scheduler_pending_write_threshold: ReadableSize::kb(123),
         reserve_space: ReadableSize::gb(10),
         reserve_raft_space: ReadableSize::gb(2),

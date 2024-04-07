@@ -6,10 +6,11 @@ use api_version::ApiV2;
 use bytes::Bytes;
 use kvengine::{
     table::txn_file::{TxnCtx, TxnFile, TxnFileId, TxnFileIterator, OP_CHECK_NOT_EXIST, OP_INSERT},
+    txn_chunk_manager::TxnChunkManager,
     Iterator, SnapAccess, UserMeta, LOCK_CF, WRITE_CF,
 };
 use kvenginepb::TxnFileRef;
-use kvproto::kvrpcpb::{Context, WriteConflictReason};
+use kvproto::kvrpcpb::WriteConflictReason;
 use tikv_kv::{Snapshot, WriteData};
 use txn_types::{Key, LockType, TimeStamp, WriteType};
 
@@ -22,7 +23,7 @@ use crate::storage::{
             ResolveLockLite, ResolveLockReadPhase, ResponsePolicy, Rollback, TxnHeartBeat,
             WriteCommand, WriteContext, WriteResult,
         },
-        Command, Lock,
+        Command, Error, Lock, Result,
     },
     types, ProcessResult, TxnStatus,
 };
@@ -45,8 +46,8 @@ impl TxnFileCommand {
             Some(txn_types::Lock::parse(&txn_file_ref.lock_val_prefix).unwrap())
         };
         info!(
-            "new txn file command {:?}, lock {:?}",
-            txn_file_ref, lock_prefix
+            "new txn file command {:?}, txn_file_ref {:?}, lock {:?}",
+            inner_cmd, txn_file_ref, lock_prefix
         );
         Command::TxnFile(TxnFileCommand {
             inner_cmd: Some(Box::new(inner_cmd)),
@@ -78,72 +79,61 @@ impl TxnFileCommand {
         txn_file_ref
     }
 
-    fn build_commit_txn_file_ref(req: &Commit, engine: &kvengine::Engine) -> TxnFileRef {
+    fn build_commit_txn_file_ref(req: &Commit, snap: &SnapAccess) -> TxnFileRef {
         let mut txn_file_ref = TxnFileRef::new();
         let user_meta = UserMeta::new(req.lock_ts.into_inner(), req.commit_ts.into_inner());
         txn_file_ref.set_user_meta(user_meta.to_array().to_vec());
         txn_file_ref.set_shard_ver(req.get_ctx().get_region_epoch().get_version());
         txn_file_ref.set_start_ts(user_meta.start_ts);
-        let chunk_ids = Self::get_region_txn_file_chunks(engine, req.get_ctx(), user_meta.start_ts);
+        let chunk_ids = Self::get_region_txn_file_chunks(snap, txn_file_ref.start_ts);
         txn_file_ref.set_chunk_ids(chunk_ids);
         txn_file_ref
     }
 
-    fn build_rollback_txn_file_ref(req: &Rollback, engine: &kvengine::Engine) -> TxnFileRef {
+    fn build_rollback_txn_file_ref(req: &Rollback, snap: &SnapAccess) -> TxnFileRef {
         let mut txn_file_ref = TxnFileRef::new();
         let user_meta = UserMeta::new(req.start_ts.into_inner(), 0);
         txn_file_ref.set_user_meta(user_meta.to_array().to_vec());
         txn_file_ref.set_shard_ver(req.get_ctx().get_region_epoch().get_version());
         txn_file_ref.set_start_ts(user_meta.start_ts);
-        let chunk_ids = Self::get_region_txn_file_chunks(engine, req.get_ctx(), user_meta.start_ts);
+        let chunk_ids = Self::get_region_txn_file_chunks(snap, txn_file_ref.start_ts);
         txn_file_ref.set_chunk_ids(chunk_ids);
         txn_file_ref
     }
 
-    fn build_txn_heartbeat_txn_file_ref(
-        req: &TxnHeartBeat,
-        engine: &kvengine::Engine,
-    ) -> TxnFileRef {
+    fn build_txn_heartbeat_txn_file_ref(req: &TxnHeartBeat, snap: &SnapAccess) -> TxnFileRef {
         let mut txn_file_ref = TxnFileRef::new();
         txn_file_ref.set_shard_ver(req.get_ctx().get_region_epoch().get_version());
         txn_file_ref.set_start_ts(req.start_ts.into_inner());
-        // lock_prefix will be set on process_write.
-        let chunk_ids =
-            Self::get_region_txn_file_chunks(engine, req.get_ctx(), req.start_ts.into_inner());
+        let chunk_ids = Self::get_region_txn_file_chunks(snap, txn_file_ref.start_ts);
         txn_file_ref.set_chunk_ids(chunk_ids);
         txn_file_ref
     }
 
-    fn build_check_txn_status_txn_file_ref(
-        req: &CheckTxnStatus,
-        engine: &kvengine::Engine,
-    ) -> TxnFileRef {
+    fn build_check_txn_status_txn_file_ref(req: &CheckTxnStatus, snap: &SnapAccess) -> TxnFileRef {
         let mut txn_file_ref = TxnFileRef::new();
         txn_file_ref.set_shard_ver(req.get_ctx().get_region_epoch().get_version());
         txn_file_ref.set_start_ts(req.ts().into_inner());
-        // lock_prefix will be set on process_write.
-        let chunk_ids =
-            Self::get_region_txn_file_chunks(engine, req.get_ctx(), req.ts().into_inner());
+        let chunk_ids = Self::get_region_txn_file_chunks(snap, txn_file_ref.start_ts);
         txn_file_ref.set_chunk_ids(chunk_ids);
         txn_file_ref
     }
 
     fn build_resolve_lock_lite_txn_file_ref(
         req: &ResolveLockLite,
-        engine: &kvengine::Engine,
+        snap: &SnapAccess,
     ) -> TxnFileRef {
         let mut txn_file_ref = TxnFileRef::new();
         txn_file_ref.set_shard_ver(req.get_ctx().get_region_epoch().get_version());
         txn_file_ref.set_start_ts(req.ts().into_inner());
         let user_meta = UserMeta::new(req.start_ts.into_inner(), req.commit_ts.into_inner());
         txn_file_ref.set_user_meta(user_meta.to_array().to_vec());
-        let chunk_ids =
-            Self::get_region_txn_file_chunks(engine, req.get_ctx(), req.ts().into_inner());
+        let chunk_ids = Self::get_region_txn_file_chunks(snap, txn_file_ref.start_ts);
         txn_file_ref.set_chunk_ids(chunk_ids);
         txn_file_ref
     }
 
-    fn build_resolve_lock_txn_file_ref(req: &ResolveLock, engine: &kvengine::Engine) -> TxnFileRef {
+    fn build_resolve_lock_txn_file_ref(req: &ResolveLock, snap: &SnapAccess) -> TxnFileRef {
         // If there are multiple txn file transactions to resolve, we resolve them one
         // by one until txn_file_status map is empty.
         let (txn_id, commit_ts) = req.txn_file_status.iter().next().unwrap();
@@ -152,105 +142,58 @@ impl TxnFileCommand {
         txn_file_ref.set_start_ts(req.ts().into_inner());
         let user_meta = UserMeta::new(txn_id.into_inner(), commit_ts.into_inner());
         txn_file_ref.set_user_meta(user_meta.to_array().to_vec());
-        let chunk_ids =
-            Self::get_region_txn_file_chunks(engine, req.get_ctx(), req.ts().into_inner());
+        let chunk_ids = Self::get_region_txn_file_chunks(snap, txn_file_ref.start_ts);
         txn_file_ref.set_chunk_ids(chunk_ids);
         txn_file_ref
     }
 
-    fn try_build_txn_file_ref(cmd: &Command, engine: &kvengine::Engine) -> Option<TxnFileRef> {
-        match cmd {
+    fn try_build_txn_file_ref(cmd: &Command, snap: &SnapAccess) -> Result<TxnFileRef> {
+        debug_assert!(cmd.can_build_txn_file());
+        Ok(match cmd {
             Command::Prewrite(req) => {
-                if !req.txn_file_chunks.is_empty() {
-                    return Some(Self::build_prewrite_txn_file_ref(req));
+                if !req.mutations.is_empty() {
+                    return Err(box_err!(
+                        "invalid txn file prewrite with mutations {:?}",
+                        cmd
+                    ));
                 }
-                assert!(!req.mutations.is_empty());
+                Self::build_prewrite_txn_file_ref(req)
             }
-            Command::Commit(req) => {
-                if req.is_txn_file {
-                    return Some(Self::build_commit_txn_file_ref(req, engine));
-                }
-            }
-            Command::Rollback(req) => {
-                if req.is_txn_file {
-                    return Some(Self::build_rollback_txn_file_ref(req, engine));
-                }
-            }
-            Command::TxnHeartBeat(req) => {
-                if req.is_txn_file {
-                    return Some(Self::build_txn_heartbeat_txn_file_ref(req, engine));
-                }
-            }
-            Command::CheckTxnStatus(req) => {
-                if req.is_txn_file {
-                    return Some(Self::build_check_txn_status_txn_file_ref(req, engine));
-                }
-            }
-            Command::ResolveLockLite(req) => {
-                if req.is_txn_file {
-                    return Some(Self::build_resolve_lock_lite_txn_file_ref(req, engine));
-                }
-            }
-            Command::ResolveLock(req) => {
-                if !req.txn_file_status.is_empty() {
-                    return Some(Self::build_resolve_lock_txn_file_ref(req, engine));
-                }
-            }
-            Command::AcquirePessimisticLock(_) => {}
-            Command::AcquirePessimisticLockResumed(_) => {}
-            Command::PrewritePessimistic(_) => {}
-            Command::PessimisticRollback(_) => {}
-            Command::Cleanup(_) => {}
-            Command::CheckSecondaryLocks(_) => {}
-            Command::ResolveLockReadPhase(_) => {}
-            Command::Pause(_) => {}
-            Command::MvccByKey(_) => {}
-            Command::MvccByStartTs(_) => {}
-            Command::RawCompareAndSwap(_) => {}
-            Command::RawAtomicStore(_) => {}
-            Command::FlashbackToVersionReadPhase(_) => {}
-            Command::FlashbackToVersion(_) => {}
-            Command::TxnFile(_) => {}
-        }
-        None
+            Command::Commit(req) => Self::build_commit_txn_file_ref(req, snap),
+            Command::Rollback(req) => Self::build_rollback_txn_file_ref(req, snap),
+            Command::TxnHeartBeat(req) => Self::build_txn_heartbeat_txn_file_ref(req, snap),
+            Command::CheckTxnStatus(req) => Self::build_check_txn_status_txn_file_ref(req, snap),
+            Command::ResolveLockLite(req) => Self::build_resolve_lock_lite_txn_file_ref(req, snap),
+            Command::ResolveLock(req) => Self::build_resolve_lock_txn_file_ref(req, snap),
+            _ => unreachable!("unexpected command {:?}", cmd),
+        })
     }
 
-    pub(crate) fn try_from(cmd: Command, engine: &kvengine::Engine) -> (Command, Vec<u64>) {
-        if let Some(txn_file_ref) = Self::try_build_txn_file_ref(&cmd, engine) {
-            let txn_chunk_manager = engine.get_txn_chunk_manager();
-            if !txn_chunk_manager.all_chunks_exists(txn_file_ref.get_chunk_ids()) {
-                return (cmd, txn_file_ref.get_chunk_ids().to_vec());
-            }
-            let mut txn_chunks = vec![];
-            let start_ts = txn_file_ref.start_ts;
-            let user_meta = Bytes::copy_from_slice(&txn_file_ref.user_meta);
-            let lock_val_prefix = Bytes::copy_from_slice(&txn_file_ref.lock_val_prefix);
-            let txn_ctx = TxnCtx::new(user_meta, lock_val_prefix, 0);
-            for &chunk_id in &txn_file_ref.chunk_ids {
-                txn_chunk_manager.prepare(chunk_id).unwrap();
-                let txn_chunk = txn_chunk_manager.get(chunk_id).unwrap();
-                txn_chunks.push(txn_chunk);
-            }
-            let txn_file_id = TxnFileId::new(cmd.ctx().region_id, txn_file_ref.shard_ver, start_ts);
-            let txn_file = TxnFile::new(txn_file_id, txn_chunks, txn_ctx).unwrap();
-            return (Self::new(cmd, txn_file_ref, txn_file), vec![]);
+    pub(crate) fn try_from<S: Snapshot>(
+        cmd: Command,
+        snapshot: S,
+        txn_chunk_manager: TxnChunkManager,
+    ) -> Result<Command> {
+        let snap = snapshot.get_kvengine_snap().unwrap();
+        let txn_file_ref = Self::try_build_txn_file_ref(&cmd, snap)?;
+        let mut txn_chunks = Vec::with_capacity(txn_file_ref.chunk_ids.len());
+        let start_ts = txn_file_ref.start_ts;
+        let user_meta = Bytes::copy_from_slice(&txn_file_ref.user_meta);
+        let lock_val_prefix = Bytes::copy_from_slice(&txn_file_ref.lock_val_prefix);
+        let txn_ctx = TxnCtx::new(user_meta, lock_val_prefix, 0);
+        for &chunk_id in &txn_file_ref.chunk_ids {
+            let txn_chunk = txn_chunk_manager
+                .get(chunk_id)
+                .ok_or_else(|| -> Error { box_err!("txn chunk not prepared: {}", chunk_id) })?;
+            txn_chunks.push(txn_chunk);
         }
-        (cmd, vec![])
+        let txn_file_id = TxnFileId::new(cmd.ctx().region_id, txn_file_ref.shard_ver, start_ts);
+        let txn_file = TxnFile::new(txn_file_id, txn_chunks, txn_ctx).unwrap();
+        Ok(Self::new(cmd, txn_file_ref, txn_file))
     }
 
-    // if the txn file chunks not found, it's ok that we
-    fn get_region_txn_file_chunks(
-        engine: &kvengine::Engine,
-        ctx: &Context,
-        start_ts: u64,
-    ) -> Vec<u64> {
-        let region_id = ctx.get_region_id();
-        let snap = engine.get_snap_access(region_id);
-        if snap.is_none() {
-            return vec![];
-        }
-        snap.unwrap()
-            .get_lock_txn_file(start_ts)
+    fn get_region_txn_file_chunks(snap: &SnapAccess, start_ts: u64) -> Vec<u64> {
+        snap.get_lock_txn_file(start_ts)
             .map_or(vec![], |x| x.chunk_ids())
     }
 
@@ -665,6 +608,8 @@ impl<S: Snapshot, L: LockManager> WriteCommand<S, L> for TxnFileCommand {
         let snap = snapshot.get_kvengine_snap().unwrap();
         let cmd = mem::take(&mut self.inner_cmd).unwrap();
         let ctx = cmd.ctx().clone();
+        info!("txn file process write"; "cmd" => ?cmd, "txn_file_ref" => ?self.txn_file_ref, "ctx" => ?ctx, "snap" => ?snap);
+
         let pr = match *cmd {
             Command::Prewrite(_) => self.process_prewrite(snap)?,
             Command::Commit(commit) => self.process_commit(snap, commit.commit_ts)?,
@@ -722,5 +667,13 @@ impl std::fmt::Display for TxnFileCommand {
 impl std::fmt::Debug for TxnFileCommand {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self)
+    }
+}
+
+pub(crate) fn command_chunks_to_load(cmd: &Command) -> &[u64] {
+    if let Command::Prewrite(req) = cmd {
+        &req.txn_file_chunks
+    } else {
+        &[]
     }
 }

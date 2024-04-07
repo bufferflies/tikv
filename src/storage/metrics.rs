@@ -273,6 +273,15 @@ make_auto_flush_static_metric! {
     pub struct InMemoryPessimisticLockingCounter: LocalIntCounter {
         "result" => InMemoryPessimisticLockingResult,
     }
+
+    pub label_enum TxnFileStage {
+        prepare,
+    }
+
+    pub struct SchedTxnFileDurationVec: LocalHistogram {
+        "type" => CommandKind,
+        "stage" => TxnFileStage,
+    }
 }
 
 impl From<ServerGcKeysCF> for GcKeysCF {
@@ -601,4 +610,14 @@ lazy_static! {
         exponential_buckets(1.0, 2.0, 16).unwrap()
     )
     .unwrap();
+
+    pub static ref SCHED_TXN_FILE_HISTOGRAM_VEC: HistogramVec = register_histogram_vec!(
+        "tikv_scheduler_txn_file_duration_seconds",
+        "Bucketed histogram of txn file command execution",
+        &["type", "stage"],
+        exponential_buckets(0.00001, 2.0, 26).unwrap()
+    )
+    .unwrap();
+    pub static ref SCHED_TXN_FILE_HISTOGRAM_VEC_STATIC: SchedTxnFileDurationVec =
+        auto_flush_from!(SCHED_TXN_FILE_HISTOGRAM_VEC, SchedTxnFileDurationVec);
 }

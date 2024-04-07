@@ -196,3 +196,11 @@ macro_rules! property {
         }
     };
 }
+
+macro_rules! can_build_txn_file {
+    () => {
+        fn can_build_txn_file(&self) -> bool {
+            self.is_txn_file
+        }
+    };
+}

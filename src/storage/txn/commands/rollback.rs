@@ -41,6 +41,7 @@ impl CommandExt for Rollback {
     ts!(start_ts);
     write_bytes!(keys: multiple);
     gen_lock!(keys: multiple);
+    can_build_txn_file!();
 }
 
 impl<S: Snapshot, L: LockManager> WriteCommand<S, L> for Rollback {

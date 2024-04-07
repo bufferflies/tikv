@@ -94,6 +94,7 @@ gc-ratio-threshold = 1.2
 max-key-size = 4096
 scheduler-concurrency = 123
 scheduler-worker-pool-size = 1
+scheduler-txn-file-worker-pool-size = 2
 scheduler-pending-write-threshold = "123KB"
 enable-async-apply-prewrite = true
 reserve-space = "10GB"

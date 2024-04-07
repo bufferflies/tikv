@@ -70,6 +70,10 @@ impl CommandExt for ResolveLock {
     }
 
     gen_lock!(key_locks: multiple(|(key, _)| key));
+
+    fn can_build_txn_file(&self) -> bool {
+        !self.txn_file_status.is_empty()
+    }
 }
 
 impl<S: Snapshot, L: LockManager> WriteCommand<S, L> for ResolveLock {

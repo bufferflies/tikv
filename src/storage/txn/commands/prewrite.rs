@@ -250,6 +250,10 @@ impl CommandExt for Prewrite {
     }
 
     gen_lock!(mutations: multiple(|x| x.key()));
+
+    fn can_build_txn_file(&self) -> bool {
+        !self.txn_file_chunks.is_empty()
+    }
 }
 
 impl<S: Snapshot, L: LockManager> WriteCommand<S, L> for Prewrite {

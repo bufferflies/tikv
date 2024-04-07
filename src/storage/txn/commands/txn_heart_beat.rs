@@ -46,6 +46,7 @@ impl CommandExt for TxnHeartBeat {
     ts!(start_ts);
     write_bytes!(primary_key);
     gen_lock!(primary_key);
+    can_build_txn_file!();
 }
 
 impl<S: Snapshot, L: LockManager> WriteCommand<S, L> for TxnHeartBeat {

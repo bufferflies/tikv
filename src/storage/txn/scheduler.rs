@@ -79,8 +79,8 @@ use crate::{
         mvcc::{Error as MvccError, ErrorInner as MvccErrorInner, ReleasedLock},
         txn::{
             commands::{
-                self, txn_file::TxnFileCommand, Command, RawExt, ReleasedLocks, ResponsePolicy,
-                WriteContext, WriteResult, WriteResultLockInfo,
+                self, txn_file, txn_file::TxnFileCommand, Command, RawExt, ReleasedLocks,
+                ResponsePolicy, WriteContext, WriteResult, WriteResultLockInfo,
             },
             flow_controller::{FlowControlHelper, FlowController},
             latch::Lock,
@@ -267,6 +267,9 @@ struct SchedulerInner<L: LockManager> {
 
     // high priority commands and system commands will be delivered to this pool
     high_priority_pool: SchedPool,
+
+    // txn file worker pool for preparing txn files.
+    txn_file_worker_pool: tokio::runtime::Runtime,
 
     // used to control write flow
     running_write_bytes: CachePadded<AtomicUsize>,
@@ -472,6 +475,12 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
                 feature_gate.clone(),
                 "sched-high-pri-pool",
             ),
+            txn_file_worker_pool: tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(config.scheduler_txn_file_worker_pool_size)
+                .thread_name("txn-file-worker-pool")
+                .enable_all()
+                .build()
+                .unwrap(),
             lock_mgr,
             concurrency_manager,
             pipelined_pessimistic_lock: dynamic_configs.pipelined_pessimistic_lock,
@@ -555,30 +564,13 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
             .get(priority_tag)
             .inc();
 
-        let (cmd, load_chunks) = if let Some(engine) = self.inner.engine.as_ref() {
-            TxnFileCommand::try_from(cmd, engine)
-        } else {
-            (cmd, vec![])
-        };
-        if !load_chunks.is_empty() {
-            let cloned_sched = self.clone();
-            let engine = self.inner.engine.as_ref().unwrap().clone();
-            std::thread::spawn(move || {
-                let manager = engine.get_txn_chunk_manager();
-                for chunk_id in load_chunks {
-                    if let Err(err) = manager.prepare(chunk_id) {
-                        callback.execute(ProcessResult::Failed {
-                            err: StorageErrorInner::Other(box_err!(err)).into(),
-                        });
-                        return;
-                    }
-                }
-                cloned_sched.schedule_command(Some(cid), cmd, callback, prepared_latches);
-            });
+        let region_id = cmd.ctx().get_region_id();
+        tikv_util::set_current_region(region_id);
+        if cmd.can_build_txn_file() {
+            self.build_and_schedule_txn_file_cmd(tag, cid, cmd, callback, prepared_latches);
             return;
         }
         let ts = cmd.ts().into_inner();
-        let region_id = cmd.ctx().get_region_id();
         let mut task_slot = self.inner.get_task_slot(cid);
         let tctx = task_slot.entry(cid).or_insert_with(|| {
             self.inner
@@ -1769,6 +1761,89 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
                 .lock_wait_queues
                 .push_lock_wait(entry, Default::default());
         }
+    }
+
+    // Build commands with `can_build_txn_file() == true` to TxnFileCommand, and
+    // re-schedule it.
+    fn build_and_schedule_txn_file_cmd(
+        &self,
+        tag: CommandKind,
+        cid: u64,
+        cmd: Command,
+        callback: SchedulerTaskCallback,
+        prepared_latches: Option<Lock>,
+    ) {
+        let sched = self.clone();
+        let manager = self.inner.engine.as_ref().unwrap().get_txn_chunk_manager();
+        self.inner.txn_file_worker_pool.spawn_blocking(move || {
+            let region_id = cmd.ctx().get_region_id();
+            tikv_util::set_current_region(region_id);
+
+            let chunks_id = txn_file::command_chunks_to_load(&cmd);
+            let start = Instant::now();
+            if let Err(err) = manager.prepare_txn_chunks(chunks_id) {
+                callback.execute(ProcessResult::Failed {
+                    err: StorageErrorInner::Other(box_err!(err)).into(),
+                });
+                return;
+            }
+            let prepare_dur = start.saturating_elapsed();
+            SCHED_TXN_FILE_HISTOGRAM_VEC_STATIC
+                .get(tag)
+                .prepare
+                .observe(prepare_dur.as_secs_f64());
+            info!("build_and_schedule_txn_file_cmd: prepare txn file chunks";
+                "region_id" => region_id,
+                "cid" => cid,
+                "chunks_id" => ?chunks_id,
+                "chunks_count" => chunks_id.len(),
+                "takes" => ?prepare_dur,
+            );
+
+            sched
+                .clone()
+                .get_sched_pool(cmd.priority())
+                .pool
+                .spawn(async move {
+                    let snap_ctx = SnapContext {
+                        pb_ctx: cmd.ctx(),
+                        ..Default::default()
+                    };
+                    match unsafe {
+                        with_tls_engine(|engine: &mut E| kv::snapshot(engine, snap_ctx))
+                    }
+                    .await
+                    {
+                        Ok(snapshot) => {
+                            SCHED_STAGE_COUNTER_VEC.get(tag).snapshot_ok.inc();
+                            let txn_file_cmd =
+                                match TxnFileCommand::try_from(cmd, snapshot, manager) {
+                                    Ok(txn_file_cmd) => txn_file_cmd,
+                                    Err(err) => {
+                                        callback.execute(ProcessResult::Failed {
+                                            err: StorageError::from(err),
+                                        });
+                                        return;
+                                    }
+                                };
+                            sched.schedule_command(
+                                Some(cid),
+                                txn_file_cmd,
+                                callback,
+                                prepared_latches,
+                            );
+                        }
+                        Err(err) => {
+                            SCHED_STAGE_COUNTER_VEC.get(tag).snapshot_err.inc();
+                            info!("get snapshot failed"; "cid" => cid, "err" => ?err);
+                            callback.execute(ProcessResult::Failed {
+                                err: StorageError::from(err),
+                            });
+                        }
+                    }
+                })
+                .unwrap();
+        });
     }
 }
 

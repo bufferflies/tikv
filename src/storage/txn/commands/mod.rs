@@ -591,6 +591,10 @@ pub trait CommandExt: Display {
     fn write_bytes(&self) -> usize;
 
     fn gen_lock(&self) -> latch::Lock;
+
+    fn can_build_txn_file(&self) -> bool {
+        false
+    }
 }
 
 pub struct RawExt {
@@ -790,6 +794,10 @@ impl Command {
 
     pub fn deadline(&self) -> Deadline {
         self.command_ext().deadline()
+    }
+
+    pub fn can_build_txn_file(&self) -> bool {
+        self.command_ext().can_build_txn_file()
     }
 }
 

@@ -43,6 +43,7 @@ impl CommandExt for ResolveLockLite {
     property!(is_sys_cmd);
     write_bytes!(resolve_keys: multiple);
     gen_lock!(resolve_keys: multiple);
+    can_build_txn_file!();
 }
 
 impl<S: Snapshot, L: LockManager> WriteCommand<S, L> for ResolveLockLite {
