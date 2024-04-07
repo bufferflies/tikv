@@ -1111,13 +1111,13 @@ impl PdClient for RpcClient {
         let begin = Instant::now();
         let executor = move |client: &Client, _| {
             // Remove Box::pin and Compat when GLOBAL_TIMER_HANDLE supports futures 0.3
-            let ts_fut = if client.new_tso.rl().is_some() {
-                Compat::new(Box::pin(
-                    client.new_tso.rl().as_ref().unwrap().get_timestamp(count),
-                ))
+            let new_tso_guard = client.new_tso.rl();
+            let ts_fut = Compat::new(Box::pin(if new_tso_guard.is_some() {
+                new_tso_guard.as_ref().unwrap().get_timestamp(count)
             } else {
-                Compat::new(Box::pin(client.inner.rl().tso.get_timestamp(count)))
-            };
+                drop(new_tso_guard);
+                client.inner.rl().tso.get_timestamp(count)
+            }));
             let with_timeout = GLOBAL_TIMER_HANDLE
                 .timeout(
                     ts_fut,
