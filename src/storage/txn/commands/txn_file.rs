@@ -16,6 +16,7 @@ use txn_types::{Key, LockType, TimeStamp, WriteType};
 
 use crate::storage::{
     lock_manager::LockManager,
+    mvcc,
     mvcc::{CloudReader, ErrorInner, TxnCommitRecord},
     txn::{
         commands::{
@@ -335,25 +336,76 @@ impl TxnFileCommand {
         Ok(None)
     }
 
+    // Return Ok(None) when all keys are out of region, and the status of txn is
+    // unknown.
+    fn check_txn_commit_record_by_keys(
+        &self,
+        keys: &[Key],
+        start_ts: TimeStamp,
+        commit_ts: TimeStamp,
+        snap_access: &SnapAccess,
+    ) -> crate::storage::mvcc::Result<Option<TimeStamp>> {
+        let mut reader = CloudReader::new(snap_access.clone(), true);
+        for key in keys {
+            let raw_key = key.to_raw()?;
+            if snap_access.get_start_key() <= raw_key.as_slice()
+                && raw_key.as_slice() < snap_access.get_end_key()
+            {
+                return match reader.get_txn_commit_record(key, start_ts)?.info() {
+                    Some((_, WriteType::Rollback)) | None => {
+                        // None: related Rollback has been collapsed.
+                        // Rollback: rollback by concurrent transaction.
+                        info!(
+                            "txn conflict (lock not found)";
+                            "key" => %key,
+                            "start_ts" => start_ts,
+                            "commit_ts" => commit_ts,
+                        );
+                        Err(ErrorInner::TxnLockNotFound {
+                            start_ts,
+                            commit_ts,
+                            key: raw_key,
+                        }
+                        .into())
+                    }
+                    // Committed by concurrent transaction.
+                    Some((commit_ts, WriteType::Put))
+                    | Some((commit_ts, WriteType::Delete))
+                    | Some((commit_ts, WriteType::Lock)) => Ok(Some(commit_ts)),
+                };
+            }
+        }
+        Ok(None)
+    }
+
     fn process_commit(
         &mut self,
         snap_access: &SnapAccess,
         commit_ts: TimeStamp,
+        keys: Option<Vec<Key>>,
     ) -> crate::storage::mvcc::Result<ProcessResult> {
-        if let Some((key, conflict_lock)) = self.get_conflict_lock(snap_access) {
-            if conflict_lock.ts != self.ts() {
-                return Err(ErrorInner::TxnLockNotFound {
-                    start_ts: self.ts(),
+        let start_ts = self.ts();
+        if commit_ts <= start_ts {
+            return Err(box_err!(
+                "Invalid transaction tso with start_ts:{start_ts}, commit_ts:{commit_ts}"
+            ));
+        }
+        if let Some(lock_txn_file) = snap_access.get_lock_txn_file(self.txn_file_ref.start_ts) {
+            let lock = txn_types::Lock::parse(lock_txn_file.get_lock_val_prefix())?;
+            debug_assert_eq!(lock.ts, self.ts());
+            if commit_ts < lock.min_commit_ts {
+                info!(
+                    "trying to commit with smaller commit_ts than min_commit_ts";
+                    "lock" => ?lock,
+                    "start_ts" => start_ts,
+                    "commit_ts" => commit_ts,
+                    "min_commit_ts" => lock.min_commit_ts,
+                );
+                return Err(ErrorInner::CommitTsExpired {
+                    start_ts,
                     commit_ts,
-                    key,
-                }
-                .into());
-            }
-            if conflict_lock.is_pessimistic_lock() {
-                return Err(ErrorInner::LockTypeNotMatch {
-                    start_ts: self.ts(),
-                    key,
-                    pessimistic: true,
+                    key: lock.primary.clone(),
+                    min_commit_ts: lock.min_commit_ts,
                 }
                 .into());
             }
@@ -361,14 +413,15 @@ impl TxnFileCommand {
             return Ok(ProcessResult::TxnStatus {
                 txn_status: TxnStatus::committed(commit_ts),
             });
-        }
-        if let Some(commit_ts) = self.check_txn_commit_record(snap_access)? {
-            return Ok(ProcessResult::TxnStatus {
-                txn_status: TxnStatus::committed(commit_ts),
-            });
-        }
-        if let Some((_, user_meta)) = self.get_conflict_write(snap_access) {
-            if user_meta.start_ts == self.txn_file_ref.start_ts {
+        } else if let Some(keys) = keys.as_ref() {
+            if let Some(_new_commit_ts) = self.check_txn_commit_record_by_keys(
+                keys.as_slice(),
+                start_ts,
+                commit_ts,
+                snap_access,
+            )? {
+                // Normal txn return the commit_ts in request other than the committed record.
+                // We keep the same here.
                 return Ok(ProcessResult::TxnStatus {
                     txn_status: TxnStatus::committed(commit_ts),
                 });
@@ -385,20 +438,44 @@ impl TxnFileCommand {
     fn process_rollback(
         &mut self,
         snap_access: &SnapAccess,
+        keys: Option<Vec<Key>>,
     ) -> crate::storage::mvcc::Result<ProcessResult> {
-        if snap_access
-            .get_lock_txn_file(self.txn_file_ref.start_ts)
-            .is_none()
-        {
-            return Err(ErrorInner::TxnLockNotFound {
-                start_ts: self.txn_file_ref.start_ts.into(),
+        let start_ts = self.ts();
+        if let Some(lock_txn_file) = snap_access.get_lock_txn_file(self.txn_file_ref.start_ts) {
+            // TODO: remove this check when it's stable enough.
+            let lock = txn_types::Lock::parse(lock_txn_file.get_lock_val_prefix())?;
+            debug_assert_eq!(lock.ts, start_ts);
+
+            self.modified = true;
+            Ok(ProcessResult::Res)
+        } else if let Some(keys) = keys {
+            let mut cloud_reader = CloudReader::new(snap_access.clone(), true);
+            for key in keys {
+                match self.process_check_txn_status_missing_lock(&mut cloud_reader, key.clone())? {
+                    TxnStatus::RolledBack | TxnStatus::LockNotExist => {}
+                    TxnStatus::Committed { commit_ts } => {
+                        return Err(ErrorInner::Committed {
+                            start_ts: self.ts(),
+                            commit_ts,
+                            key: key.into_raw()?,
+                        }
+                        .into());
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            // Note: normal txn will proceed to write the rollback record when lock not
+            // exist. But we can not do so here because when lock file not
+            // exist, we don't know all the keys.
+            Ok(ProcessResult::Res)
+        } else {
+            Err(ErrorInner::TxnLockNotFound {
+                start_ts,
                 commit_ts: Default::default(),
                 key: vec![],
             }
-            .into());
+            .into())
         }
-        self.modified = true;
-        Ok(ProcessResult::Res)
     }
 
     fn process_check_txn_status(
@@ -418,7 +495,8 @@ impl TxnFileCommand {
                 );
             }
         }
-        self.process_check_txn_status_missing_lock(&mut reader, primary_key)
+        let txn_status = self.process_check_txn_status_missing_lock(&mut reader, primary_key)?;
+        Ok(ProcessResult::TxnStatus { txn_status })
     }
 
     fn process_check_txn_status_lock_exists(
@@ -448,10 +526,11 @@ impl TxnFileCommand {
 
                 if lock.min_commit_ts < current_ts {
                     lock.min_commit_ts = current_ts;
-                    lock.short_value = None;
-                    self.txn_file_ref.set_lock_val_prefix(lock.to_bytes());
-                    self.modified = true;
                 }
+
+                lock.short_value = None;
+                self.txn_file_ref.set_lock_val_prefix(lock.to_bytes());
+                self.modified = true;
             }
 
             // As long as the primary lock's min_commit_ts > caller_start_ts, locks belong
@@ -472,7 +551,7 @@ impl TxnFileCommand {
         &mut self,
         reader: &mut CloudReader,
         primary_key: Key,
-    ) -> crate::storage::mvcc::Result<ProcessResult> {
+    ) -> crate::storage::mvcc::Result<TxnStatus> {
         let txn_status =
             match reader.get_txn_commit_record(&primary_key, self.txn_file_ref.start_ts.into())? {
                 TxnCommitRecord::SingleRecord { commit_ts, write } => {
@@ -485,7 +564,7 @@ impl TxnFileCommand {
                 TxnCommitRecord::None { .. } => TxnStatus::LockNotExist,
                 _ => unreachable!(),
             };
-        Ok(ProcessResult::TxnStatus { txn_status })
+        Ok(txn_status)
     }
 
     fn process_txn_heartbeat(
@@ -526,12 +605,23 @@ impl TxnFileCommand {
         &mut self,
         snap_access: &SnapAccess,
         commit_ts: TimeStamp,
+        resolve_keys: Option<Vec<Key>>,
     ) -> crate::storage::mvcc::Result<ProcessResult> {
-        if commit_ts.is_zero() {
-            return self.process_rollback(snap_access);
+        let res = if commit_ts.is_zero() {
+            self.process_rollback(snap_access, resolve_keys)
+        } else {
+            self.process_commit(snap_access, commit_ts, resolve_keys)
+        };
+        match res {
+            Ok(_) => Ok(ProcessResult::Res),
+            Err(err @ mvcc::Error(box ErrorInner::TxnLockNotFound { .. })) => {
+                // If the lock is not found, it means the transaction is already committed or
+                // rollbacked by others. We can safely ignore it.
+                info!("process_resolve_txn_lock: txn lock not found"; "err" => ?err, "start_ts" => self.ts());
+                Ok(ProcessResult::Res)
+            }
+            Err(err) => Err(err),
         }
-        self.process_commit(snap_access, commit_ts)?;
-        Ok(ProcessResult::Res)
     }
 
     fn process_resolve_lock(
@@ -540,7 +630,7 @@ impl TxnFileCommand {
         mut resolve_lock: ResolveLock,
     ) -> crate::storage::mvcc::Result<ProcessResult> {
         let um = UserMeta::from_slice(self.txn_file_ref.get_user_meta());
-        self.process_resolve_txn_lock(snap_access, um.commit_ts.into())?;
+        self.process_resolve_txn_lock(snap_access, um.commit_ts.into(), None)?;
         resolve_lock.txn_file_status.remove(&self.ts());
         if resolve_lock.txn_file_status.is_empty() && resolve_lock.txn_status.is_empty() {
             // All locks are resolved.
@@ -612,8 +702,10 @@ impl<S: Snapshot, L: LockManager> WriteCommand<S, L> for TxnFileCommand {
 
         let pr = match *cmd {
             Command::Prewrite(_) => self.process_prewrite(snap)?,
-            Command::Commit(commit) => self.process_commit(snap, commit.commit_ts)?,
-            Command::Rollback(_) => self.process_rollback(snap)?,
+            Command::Commit(commit) => {
+                self.process_commit(snap, commit.commit_ts, Some(commit.keys))?
+            }
+            Command::Rollback(rollback) => self.process_rollback(snap, Some(rollback.keys))?,
             Command::TxnHeartBeat(txn_heartbeat) => {
                 let primary_key = txn_heartbeat.primary_key.to_raw().unwrap();
                 self.process_txn_heartbeat(snap, primary_key, txn_heartbeat.advise_ttl)?
@@ -626,7 +718,7 @@ impl<S: Snapshot, L: LockManager> WriteCommand<S, L> for TxnFileCommand {
             )?,
             Command::ResolveLock(resolve) => self.process_resolve_lock(snap, resolve)?,
             Command::ResolveLockLite(resolve) => {
-                self.process_resolve_txn_lock(snap, resolve.commit_ts)?
+                self.process_resolve_txn_lock(snap, resolve.commit_ts, Some(resolve.resolve_keys))?
             }
             _ => {
                 return Err(box_err!("unsupported txn file command"));

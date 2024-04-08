@@ -417,7 +417,7 @@ impl ClusterClient {
         Ok(())
     }
 
-    fn put_kv_in_ref_store(&mut self, mutations: Vec<Mutation>) {
+    pub fn put_kv_in_ref_store(&mut self, mutations: Vec<Mutation>) {
         let mut ref_store = self.ref_store.lock().unwrap();
         for mut m in mutations {
             ref_store.put_kv(m.take_key(), m.take_value());

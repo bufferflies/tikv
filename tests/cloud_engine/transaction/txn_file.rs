@@ -1,25 +1,30 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{sync::Arc, time::Duration};
+use std::{sync::Arc, thread, time::Duration};
 
 use anyhow::{self, bail};
 use bytes::Bytes;
-use futures::future::join_all;
+use futures::{executor::block_on, future::join_all};
 use kvengine::{
     dfs::Dfs,
     table::txn_file::{TxnChunkBuilder, OP_PUT},
 };
-use kvproto::kvrpcpb::{
-    BatchRollbackRequest, CheckTxnStatusRequest, CommitRequest, PrewriteRequest,
-    ResolveLockRequest, TxnHeartBeatRequest,
+use kvproto::{
+    kvrpcpb,
+    kvrpcpb::{
+        BatchRollbackRequest, CheckTxnStatusRequest, CommitRequest, PrewriteRequest,
+        ResolveLockRequest, TxnHeartBeatRequest,
+    },
 };
 use security::SecurityConfig;
 use test_cloud_server::{
+    client,
     client::{
         ClusterClient, ClusterClientOptions, CommitAction, MutateOptions, RequestOptions,
-        TxnWriteMethod,
+        TxnMutations, TxnWriteMethod,
     },
     oss::prepare_dfs,
+    util::Mutation,
     ServerCluster,
 };
 use test_pd_client::PdWrapper;
@@ -153,7 +158,6 @@ fn test_txn_file_commands() {
     cluster.stop();
 }
 
-#[ignore]
 #[test]
 fn test_txn_file_basic() {
     test_util::init_log_for_test();
@@ -322,6 +326,334 @@ fn test_txn_file_basic_impl(
     oss.shutdown();
 }
 
+// Tests for abnormal processes.
+#[test]
+fn test_txn_file_abnormal() {
+    test_util::init_log_for_test();
+
+    let cases = vec![
+        (10, true), // data_count, use_txn_file
+        (100, true),
+        // To verify that the behavior is the same as normal txn.
+        (100, false),
+    ];
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .thread_name("test-txn-file-abnormal")
+        .worker_threads(cases.len())
+        .enable_all()
+        .build()
+        .unwrap();
+    let handles = cases
+        .into_iter()
+        .map(|(data_count, use_txn_file)| {
+            rt.spawn_blocking(move || test_txn_file_abnormal_impl(data_count, use_txn_file))
+        })
+        .collect::<Vec<_>>();
+    rt.block_on(join_all(handles));
+}
+
+fn test_txn_file_abnormal_impl(data_count: usize, use_txn_file: bool) {
+    let write_method = if use_txn_file {
+        TxnWriteMethod::FileBased
+    } else {
+        TxnWriteMethod::Normal
+    };
+    let (_temp_dir, mut oss, dfs_config) = prepare_dfs("test");
+
+    let node_ids = alloc_node_id_vec(NODES_COUNT);
+    let pd_wrapper = PdWrapper::new_test(1, &SecurityConfig::default(), None);
+    let cluster_id = pd_wrapper.client().get_cluster_id().unwrap();
+    info!("test_txn_file_abnormal_process"; "data_count" => data_count, "write_method" => ?write_method, "cluster_id" => cluster_id);
+    let mut cluster = ServerCluster::new_opt(
+        node_ids,
+        |_, conf| {
+            conf.dfs = dfs_config.clone();
+            conf.enable_inner_key_offset = true;
+        },
+        pd_wrapper,
+    );
+    cluster.start_tikv_workers(1, 2, false);
+    cluster.wait_region_replicated(&[], 3);
+
+    let gen_key = generate_keyspace_key(KEYSPACE_ID);
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .thread_name("test-abnormal-process")
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .unwrap();
+    let _enter = rt.enter();
+
+    let mut client = cluster.new_client_opt(ClusterClientOptions {
+        txn_file_max_chunk_size: Some(1024),
+        ..Default::default()
+    });
+    client.split_keyspace(KEYSPACE_ID);
+    client.try_split(&gen_key(data_count / 2), 5).unwrap();
+    {
+        // To work around that data not existed in ref store will not be checked.
+        let guard = client.ref_store();
+        let mut ref_store = guard.lock().unwrap();
+        for k in 0..data_count {
+            ref_store.del_kv(gen_key(k));
+        }
+    }
+
+    let txn_file_helper = client.txn_file_helper();
+    let make_mutations = |value: &str| -> (Vec<Mutation>, TxnMutations) {
+        let gen_val = i_to_val_opt(value, 3);
+        let mut mutations = vec![];
+        for i in 0..data_count {
+            let mut m = Mutation::default();
+            m.set_op(kvrpcpb::Op::Put);
+            m.set_key(gen_key(i));
+            m.set_value(gen_val(i));
+            mutations.push(m);
+        }
+        let txn_muts = block_on(TxnMutations::build(
+            mutations.clone(),
+            write_method,
+            txn_file_helper.clone(),
+        ))
+        .unwrap();
+        (mutations, txn_muts)
+    };
+
+    // Commit without prewrite:
+    {
+        let (_, txn_muts) = make_mutations("with_prewrite");
+        let start_ts = client.get_ts();
+        let commit_ts = client.get_ts();
+        let err = client.kv_commit(txn_muts, start_ts, commit_ts).unwrap_err();
+        expect_err_msg(&err, "TxnLockNotFound");
+        client.verify_data_with_ref_store();
+    }
+
+    // Commit after rollback.
+    {
+        let (_, txn_muts0) = make_mutations("after_rollback");
+        let start_ts0 = client.get_ts();
+        client
+            .kv_prewrite(txn_muts0.primary(), None, txn_muts0.clone(), start_ts0)
+            .unwrap();
+
+        let (muts1, txn_muts1) = make_mutations("after_rollback_1");
+        let start_ts1 = client.get_ts();
+        // Will rollback txn0.
+        client
+            .kv_prewrite(txn_muts1.primary(), None, txn_muts1.clone(), start_ts1)
+            .unwrap();
+
+        let commit_ts0 = client.get_ts();
+        let err = client
+            .kv_commit(txn_muts0, start_ts0, commit_ts0)
+            .unwrap_err();
+        expect_err_msg(&err, "TxnLockNotFound");
+
+        let commit_ts1 = client.get_ts();
+        client.kv_commit(txn_muts1, start_ts1, commit_ts1).unwrap();
+        client.put_kv_in_ref_store(muts1);
+        client.verify_data_with_ref_store();
+    }
+
+    // Write conflict & duplicated commit.
+    {
+        let (muts0, txn_muts0) = make_mutations("write_conflict");
+        let start_ts0 = client.get_ts();
+        client
+            .kv_prewrite(txn_muts0.primary(), None, txn_muts0.clone(), start_ts0)
+            .unwrap();
+
+        let commit_ts0 = client.get_ts();
+        let txn_muts0_clone = txn_muts0.clone();
+        let mut client_clone = client.clone();
+        let txn0 = rt.spawn_blocking(move || {
+            thread::sleep(Duration::from_secs(1));
+            let new_commit_ts = client_clone
+                .kv_commit(txn_muts0_clone.clone(), start_ts0, commit_ts0)
+                .unwrap();
+            assert!(
+                new_commit_ts > commit_ts0,
+                "commit_ts0: {}, new_commit_ts: {}",
+                commit_ts0,
+                new_commit_ts
+            );
+            new_commit_ts
+        });
+
+        let (_, txn_muts1) = make_mutations("write_conflict_1");
+        let start_ts1 = client.get_ts();
+        let err = client
+            .kv_prewrite(txn_muts1.primary(), None, txn_muts1, start_ts1)
+            .unwrap_err();
+        expect_err_msg(&err, "WriteConflict");
+
+        let _new_commit_ts0 = rt.block_on(txn0).unwrap();
+        client.put_kv_in_ref_store(muts0);
+        client.verify_data_with_ref_store();
+
+        // Duplicated commit.
+        // Note: commit for secondary keys would fail for TxnLockNotFound error, when
+        // there is no key in the region.
+        let dup_commit_ts = client
+            .kv_commit_ext(
+                txn_muts0,
+                start_ts0,
+                commit_ts0,
+                CommitAction::AsyncCommitSecondaryKeys(Duration::ZERO),
+            )
+            .unwrap()
+            .unwrap();
+        // Will return the commit_ts in request other than of committed record.
+        assert_eq!(dup_commit_ts, commit_ts0);
+        client.verify_data_with_ref_store();
+    }
+
+    // Rollback
+    {
+        let (muts, txn_muts) = make_mutations("rollback");
+
+        // Rollback a not existed txn.
+        let mut start_ts = client.get_ts();
+        client.kv_rollback(txn_muts.clone(), start_ts).unwrap();
+        if !use_txn_file {
+            // Normal txn will write rollback record even the txn is not exist.
+            // But file based txn can not do so.
+            let err = client
+                .kv_prewrite(txn_muts.primary(), None, txn_muts.clone(), start_ts)
+                .unwrap_err();
+            expect_err_msg(&err, "WriteConflict");
+            start_ts = client.get_ts();
+        }
+        client
+            .kv_prewrite(txn_muts.primary(), None, txn_muts.clone(), start_ts)
+            .unwrap();
+        client.kv_rollback(txn_muts.clone(), start_ts).unwrap();
+
+        // Duplicated rollback.
+        client.kv_rollback(txn_muts.clone(), start_ts).unwrap();
+
+        // Prewrite after rollback.
+        let err = client
+            .kv_prewrite(txn_muts.primary(), None, txn_muts.clone(), start_ts)
+            .unwrap_err();
+        expect_err_msg(&err, "WriteConflict");
+
+        // Commit after rollback.
+        let commit_ts = client.get_ts();
+        let err = client
+            .kv_commit(txn_muts.clone(), start_ts, commit_ts)
+            .unwrap_err();
+        expect_err_msg(&err, "TxnLockNotFound");
+
+        client.verify_data_with_ref_store();
+
+        // Committed.
+        let start_ts = client.get_ts();
+        let commit_ts = client.get_ts();
+        client
+            .kv_prewrite(txn_muts.primary(), None, txn_muts.clone(), start_ts)
+            .unwrap();
+        client
+            .kv_commit(txn_muts.clone(), start_ts, commit_ts)
+            .unwrap();
+        // Rollback after committed.
+        let err = client.kv_rollback(txn_muts, start_ts).unwrap_err();
+        expect_err_msg(&err, "Committed");
+
+        client.put_kv_in_ref_store(muts);
+        client.verify_data_with_ref_store();
+    }
+
+    // Resolve lock
+    {
+        let (muts, txn_muts) = make_mutations("resolve_lock");
+
+        // Resolve a not existed txn.
+        let mut start_ts = client.get_ts();
+        client
+            .kv_resolve_lock_for_mutations(start_ts.into_inner(), None, muts.clone(), use_txn_file)
+            .unwrap();
+        if !use_txn_file {
+            // Normal txn will write rollback record even the txn is not exist.
+            // But file based txn can not do so.
+            let err = client
+                .kv_prewrite(txn_muts.primary(), None, txn_muts.clone(), start_ts)
+                .unwrap_err();
+            expect_err_msg(&err, "WriteConflict");
+            start_ts = client.get_ts();
+        }
+        client
+            .kv_prewrite(txn_muts.primary(), None, txn_muts.clone(), start_ts)
+            .unwrap();
+        // Rollback the not committed txn.
+        client
+            .kv_resolve_lock_for_mutations(start_ts.into_inner(), None, muts.clone(), use_txn_file)
+            .unwrap();
+
+        // Duplicated resolve lock.
+        client
+            .kv_resolve_lock_for_mutations(start_ts.into_inner(), None, muts.clone(), use_txn_file)
+            .unwrap();
+
+        // Prewrite after rollback.
+        let err = client
+            .kv_prewrite(txn_muts.primary(), None, txn_muts.clone(), start_ts)
+            .unwrap_err();
+        expect_err_msg(&err, "WriteConflict");
+
+        // Commit after rollback.
+        let commit_ts = client.get_ts();
+        let err = client
+            .kv_commit(txn_muts.clone(), start_ts, commit_ts)
+            .unwrap_err();
+        expect_err_msg(&err, "TxnLockNotFound");
+
+        client.verify_data_with_ref_store();
+
+        // Committed.
+        let start_ts = client.get_ts();
+        let commit_ts = client.get_ts();
+        client
+            .kv_prewrite(txn_muts.primary(), None, txn_muts.clone(), start_ts)
+            .unwrap();
+        client.kv_commit(txn_muts, start_ts, commit_ts).unwrap();
+        // Rollback after committed.
+        let err = client
+            .kv_resolve_lock_for_mutations(start_ts.into_inner(), None, muts.clone(), use_txn_file)
+            .unwrap_err();
+        expect_err_msg(&err, "Committed");
+
+        // Duplicated commit.
+        client
+            .kv_resolve_lock_for_mutations(
+                start_ts.into_inner(),
+                Some(commit_ts.into_inner()),
+                muts.clone(),
+                use_txn_file,
+            )
+            .unwrap();
+        let commit_ts = client.get_ts();
+        client
+            .kv_resolve_lock_for_mutations(
+                start_ts.into_inner(),
+                Some(commit_ts.into_inner()),
+                muts.clone(),
+                use_txn_file,
+            )
+            .unwrap();
+
+        client.put_kv_in_ref_store(muts);
+        client.verify_data_with_ref_store();
+    }
+
+    client.verify_data_with_ref_store();
+    cluster.stop();
+    oss.shutdown();
+}
+
 fn build_txn_files(dfs: &Arc<dyn Dfs>, start_ts: u64, start: usize, end: usize) -> Vec<u64> {
     let mut chunk_ids = vec![];
     let mut txn_chunk_builder = TxnChunkBuilder::new(10);
@@ -354,4 +686,8 @@ fn verify_range(client: &mut ClusterClient, start: usize, end: usize) {
             .verify_key_value(&key, Some(&val), put_time, &opt)
             .unwrap();
     }
+}
+
+fn expect_err_msg(err: &client::Error, msg: &str) {
+    assert!(err.to_string().contains(msg), "err: {:?}", err);
 }
