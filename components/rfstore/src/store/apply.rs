@@ -29,6 +29,7 @@ use kvproto::{
         ChangePeerRequest, RaftCmdRequest, RaftCmdResponse, RaftRequestHeader, RaftResponseHeader,
     },
 };
+use log_wrappers::Value;
 use pd_client::{new_bucket_write_stats, BucketStat};
 use prometheus::local::LocalHistogram;
 use protobuf::{Message, RepeatedField};
@@ -502,7 +503,7 @@ impl Applier {
         wb: &mut kvengine::WriteBatch,
         txn_file_ref: TxnFileRef,
     ) {
-        info!("apply txn file ref {:?}", txn_file_ref);
+        info!("{} apply txn file ref {:?}", self.tag(), txn_file_ref);
         if !txn_file_ref.user_meta.is_empty() {
             let txn_file_um = UserMeta::from_slice(&txn_file_ref.user_meta);
             let snap = engine
@@ -512,7 +513,7 @@ impl Applier {
             let start_ts = txn_file_ref.start_ts;
             let lock_txn_file_opt = snap.get_lock_txn_file(start_ts);
             if lock_txn_file_opt.is_none() {
-                error!("{} txn file not found, maybe duplicated", self.tag());
+                error!("{} lock txn file not found, maybe duplicated", self.tag());
                 // TODO: verify it is duplicated
                 return;
             }
@@ -535,7 +536,18 @@ impl Applier {
                     );
                 } else {
                     let item = snap.get(LOCK_CF, primary_key, 0);
-                    let primary_lock = txn_types::Lock::parse(item.get_value()).unwrap();
+                    let primary_lock =
+                        txn_types::Lock::parse(item.get_value()).unwrap_or_else(|err| {
+                            panic!(
+                                "{} apply txn file ref: parse lock error: {:?}, value {}, primary_key {}, start_ts {}, lock_txn_file {:?}",
+                                self.tag(),
+                                err,
+                                &Value::value(item.get_value()),
+                                &Value::key(primary_key),
+                                start_ts,
+                                lock_txn_file,
+                            );
+                        });
                     if primary_lock.lock_type == LockType::Lock {
                         let op_lock_key = encode_extra_txn_status_key(primary_key, start_ts);
                         let user_meta = UserMeta::new(start_ts, txn_file_um.commit_ts).to_array();

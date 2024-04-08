@@ -261,6 +261,9 @@ impl Value {
 
     #[inline(always)]
     pub fn get_value(&self) -> &[u8] {
+        if self.is_value_empty() {
+            return &[];
+        }
         unsafe {
             if self.blob_ptr.is_null() {
                 slice::from_raw_parts::<u8>(self.ptr.add(self.user_meta_len()), self.value_len())
