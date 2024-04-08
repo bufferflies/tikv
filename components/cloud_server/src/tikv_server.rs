@@ -395,6 +395,9 @@ impl TikvServer {
 
         tikv_util::set_panic_hook(config.abort_on_panic, &config.storage.data_dir);
 
+        // Init memory related settings.
+        config.memory.init();
+
         info!(
             "using config";
             "config" => serde_json::to_string(&config).unwrap(),
@@ -893,7 +896,6 @@ impl TikvServer {
                 self.cfg_controller.take().unwrap(),
                 Arc::new(self.config.security.clone()),
                 self.router.clone(),
-                self.store_path.clone(),
                 self.raw_engines.kv.clone(),
                 self.raw_engines.raft.clone(),
             ) {

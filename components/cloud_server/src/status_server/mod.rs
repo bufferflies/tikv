@@ -1,9 +1,11 @@
 // Copyright 2018 TiKV Project Authors. Licensed under Apache-2.0.
 
+mod profile;
+
 use std::{
+    env::args,
     error::Error as StdError,
     net::SocketAddr,
-    path::PathBuf,
     pin::Pin,
     str::{self, FromStr},
     sync::Arc,
@@ -17,7 +19,7 @@ use bytes::{Buf, BufMut, BytesMut};
 use collections::HashMap;
 use flate2::{write::GzEncoder, Compression};
 use futures::{
-    compat::{Compat01As03, Stream01CompatExt},
+    compat::Compat01As03,
     future::{ok, poll_fn},
     prelude::*,
 };
@@ -40,6 +42,7 @@ use openssl::{
     x509::X509,
 };
 use pin_project::pin_project;
+use profile::*;
 use prometheus::TEXT_FORMAT;
 use protobuf::Message;
 use rfengine::{
@@ -58,10 +61,7 @@ use security::{self, SecurityConfig};
 use serde_json::Value;
 use tikv::{
     config::{ConfigController, LogLevel},
-    server::status_server::profile::{
-        activate_heap_profile, deactivate_heap_profile, jeprof_heap_profile, list_heap_profiles,
-        read_file, start_one_cpu_profile, start_one_heap_profile,
-    },
+    server::status_server::profile::start_one_cpu_profile,
 };
 use tikv_util::{
     codec::bytes::decode_bytes,
@@ -74,7 +74,7 @@ use tikv_util::{
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite},
-    runtime::{Builder, Handle, Runtime},
+    runtime::{Builder, Runtime},
     sync::oneshot::{self, Receiver, Sender},
 };
 use tokio_openssl::SslStream;
@@ -127,7 +127,6 @@ pub struct StatusServer {
     cfg_controller: ConfigController,
     router: RaftRouter,
     security_config: Arc<SecurityConfig>,
-    store_path: PathBuf,
     kvengine: kvengine::Engine,
     rfengine: rfengine::RfEngine,
 }
@@ -138,7 +137,6 @@ impl StatusServer {
         cfg_controller: ConfigController,
         security_config: Arc<SecurityConfig>,
         router: RaftRouter,
-        store_path: PathBuf,
         kvengine: kvengine::Engine,
         rfengine: rfengine::RfEngine,
     ) -> Result<Self> {
@@ -159,74 +157,9 @@ impl StatusServer {
             cfg_controller,
             router,
             security_config,
-            store_path,
             kvengine,
             rfengine,
         })
-    }
-
-    fn list_heap_prof(_req: Request<Body>) -> hyper::Result<Response<Body>> {
-        let profiles = match list_heap_profiles() {
-            Ok(s) => s,
-            Err(e) => return Ok(make_response(StatusCode::INTERNAL_SERVER_ERROR, e)),
-        };
-
-        let text = profiles
-            .into_iter()
-            .map(|(f, ct)| format!("{}\t\t{}", f, ct))
-            .collect::<Vec<_>>()
-            .join("\n")
-            .into_bytes();
-
-        let response = Response::builder()
-            .header("Content-Type", mime::TEXT_PLAIN.to_string())
-            .header("Content-Length", text.len())
-            .body(text.into())
-            .unwrap();
-        Ok(response)
-    }
-
-    async fn activate_heap_prof(
-        req: Request<Body>,
-        store_path: PathBuf,
-    ) -> hyper::Result<Response<Body>> {
-        let query = req.uri().query().unwrap_or("");
-        let query_pairs: HashMap<_, _> = url::form_urlencoded::parse(query.as_bytes()).collect();
-
-        let interval: u64 = match query_pairs.get("interval") {
-            Some(val) => match val.parse() {
-                Ok(val) => val,
-                Err(err) => return Ok(make_response(StatusCode::BAD_REQUEST, err.to_string())),
-            },
-            None => 60,
-        };
-
-        let interval = Duration::from_secs(interval);
-        let period = GLOBAL_TIMER_HANDLE
-            .interval(Instant::now() + interval, interval)
-            .compat()
-            .map_ok(|_| ())
-            .map_err(|_| TIMER_CANCELED.to_owned())
-            .into_stream();
-        let (tx, rx) = oneshot::channel();
-        let callback = move || tx.send(()).unwrap_or_default();
-        let res = Handle::current().spawn(activate_heap_profile(period, store_path, callback));
-        if rx.await.is_ok() {
-            let msg = "activate heap profile success";
-            Ok(make_response(StatusCode::OK, msg))
-        } else {
-            let errmsg = format!("{:?}", res.await);
-            Ok(make_response(StatusCode::INTERNAL_SERVER_ERROR, errmsg))
-        }
-    }
-
-    fn deactivate_heap_prof(_req: Request<Body>) -> hyper::Result<Response<Body>> {
-        let body = if deactivate_heap_profile() {
-            "deactivate heap profile success"
-        } else {
-            "no heap profile is running"
-        };
-        Ok(make_response(StatusCode::OK, body))
     }
 
     fn load_raft_state(rf: &RfEngine, peer_id: u64, ver: u64) -> Option<RaftState> {
@@ -320,35 +253,27 @@ impl StatusServer {
         raft_state
     }
 
-    #[allow(dead_code)]
-    async fn dump_heap_prof_to_resp(req: Request<Body>) -> hyper::Result<Response<Body>> {
+    fn dump_heap_prof_to_resp(req: Request<Body>) -> hyper::Result<Response<Body>> {
         let query = req.uri().query().unwrap_or("");
         let query_pairs: HashMap<_, _> = url::form_urlencoded::parse(query.as_bytes()).collect();
 
         let use_jeprof = query_pairs.get("jeprof").map(|x| x.as_ref()) == Some("true");
+        if use_jeprof {
+            return Ok(make_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "jeprof=true is not supported on CSE",
+            ));
+        }
 
-        let result = if let Some(name) = query_pairs.get("name") {
-            if use_jeprof {
-                jeprof_heap_profile(name)
-            } else {
-                read_file(name)
-            }
-        } else {
-            let mut seconds = 10;
-            if let Some(s) = query_pairs.get("seconds") {
-                match s.parse() {
-                    Ok(val) => seconds = val,
-                    Err(_) => {
-                        let errmsg = "request should have seconds argument".to_owned();
-                        return Ok(make_response(StatusCode::BAD_REQUEST, errmsg));
-                    }
-                }
-            }
-            let timer = GLOBAL_TIMER_HANDLE.delay(Instant::now() + Duration::from_secs(seconds));
-            let end = Compat01As03::new(timer)
-                .map_err(|_| TIMER_CANCELED.to_owned())
-                .into_future();
-            start_one_heap_profile(end, use_jeprof).await
+        let result = {
+            let file = match dump_one_heap_profile() {
+                Ok(file) => file,
+                Err(e) => return Ok(make_response(StatusCode::INTERNAL_SERVER_ERROR, e)),
+            };
+            let path = file.path();
+            read_file(path.to_string_lossy().as_ref())
+            // Note: file, which is a NamedTempFile, is supposed to be unlinked
+            // when it is dropped here.
         };
 
         match result {
@@ -402,6 +327,90 @@ impl StatusServer {
                 .unwrap(),
             Err(_) => make_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error"),
         })
+    }
+
+    fn get_cmdline(_req: Request<Body>) -> hyper::Result<Response<Body>> {
+        let args = args().fold(String::new(), |mut a, b| {
+            a.push_str(&b);
+            a.push('\x00');
+            a
+        });
+        let response = Response::builder()
+            .header("Content-Type", mime::TEXT_PLAIN.to_string())
+            .header("X-Content-Type-Options", "nosniff")
+            .body(args.into())
+            .unwrap();
+        Ok(response)
+    }
+
+    fn get_symbol_count(req: Request<Body>) -> hyper::Result<Response<Body>> {
+        assert_eq!(req.method(), Method::GET);
+        // We don't know how many symbols we have, but we
+        // do have symbol information. pprof only cares whether
+        // this number is 0 (no symbols available) or > 0.
+        let text = "num_symbols: 1\n";
+        let response = Response::builder()
+            .header("Content-Type", mime::TEXT_PLAIN.to_string())
+            .header("X-Content-Type-Options", "nosniff")
+            .header("Content-Length", text.len())
+            .body(text.into())
+            .unwrap();
+        Ok(response)
+    }
+
+    // The request and response format follows pprof remote server
+    // https://gperftools.github.io/gperftools/pprof_remote_servers.html
+    // Here is the go pprof implementation:
+    // https://github.com/golang/go/blob/3857a89e7eb872fa22d569e70b7e076bec74ebbb/src/net/http/pprof/pprof.go#L191
+    async fn get_symbol(req: Request<Body>) -> hyper::Result<Response<Body>> {
+        assert_eq!(req.method(), Method::POST);
+        let mut text = String::new();
+        let body_bytes = hyper::body::to_bytes(req.into_body()).await?;
+        let body = String::from_utf8(body_bytes.to_vec());
+        if body.is_err() {
+            return Ok(make_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Body is not a valid UTF8",
+            ));
+        }
+        let body = body.unwrap();
+
+        // The request body is a list of addr to be resolved joined by '+'.
+        // Resolve addrs with addr2line and write the symbols each per line in
+        // response.
+        for pc in body.split('+') {
+            let addr = usize::from_str_radix(pc.trim_start_matches("0x"), 16).unwrap_or(0);
+            if addr == 0 {
+                info!("invalid addr: {}", addr);
+                continue;
+            }
+
+            // Would be multiple symbols if inlined.
+            let mut syms = vec![];
+            backtrace::resolve(addr as *mut std::ffi::c_void, |sym| {
+                let name = sym
+                    .name()
+                    .unwrap_or_else(|| backtrace::SymbolName::new(b"<unknown>"));
+                syms.push(name.to_string());
+            });
+
+            if !syms.is_empty() {
+                // join inline functions with '--'
+                let f = syms.join("--");
+                // should be <hex address> <function name>
+                text.push_str(format!("{:#x} {}\n", addr, f).as_str());
+            } else {
+                info!("can't resolve mapped addr: {:#x}", addr);
+                text.push_str(format!("{:#x} ??\n", addr).as_str());
+            }
+        }
+        let response = Response::builder()
+            .header("Content-Type", mime::TEXT_PLAIN.to_string())
+            .header("X-Content-Type-Options", "nosniff")
+            .header("Content-Length", text.len())
+            .body(text.into())
+            .unwrap();
+        Ok(response)
     }
 
     async fn update_config(
@@ -1483,7 +1492,6 @@ impl StatusServer {
         let security_config = self.security_config.clone();
         let cfg_controller = self.cfg_controller.clone();
         let router = self.router.clone();
-        let store_path = self.store_path.clone();
         let engine = self.kvengine.clone();
         let rfengine = self.rfengine.clone();
         // Start to serve.
@@ -1492,7 +1500,6 @@ impl StatusServer {
             let security_config = security_config.clone();
             let cfg_controller = cfg_controller.clone();
             let router = router.clone();
-            let store_path = store_path.clone();
             let engine = engine.clone();
             let rfengine = rfengine.clone();
             async move {
@@ -1503,7 +1510,6 @@ impl StatusServer {
                     let security_config = security_config.clone();
                     let cfg_controller = cfg_controller.clone();
                     let router = router.clone();
-                    let store_path = store_path.clone();
                     let engine = engine.clone();
                     let rfengine = rfengine.clone();
                     async move {
@@ -1541,16 +1547,32 @@ impl StatusServer {
                                 Self::handle_get_metrics(req, &cfg_controller)
                             }
                             (Method::GET, "/status") => Ok(Response::default()),
-                            (Method::GET, "/debug/pprof/heap_list") => Self::list_heap_prof(req),
+                            (Method::GET, "/debug/pprof/heap_list") => {
+                                Ok(make_response(
+                                    StatusCode::GONE,
+                                    "Deprecated, heap profiling is always enabled by default, just use /debug/pprof/heap to get the heap profile when needed",
+                                ))
+                            }
                             (Method::GET, "/debug/pprof/heap_activate") => {
-                                Self::activate_heap_prof(req, store_path).await
+                                Ok(make_response(
+                                    StatusCode::GONE,
+                                    "Deprecated, use config `memory.enable_heap_profiling` to toggle",
+                                ))
                             }
                             (Method::GET, "/debug/pprof/heap_deactivate") => {
-                                Self::deactivate_heap_prof(req)
+                                Ok(make_response(
+                                    StatusCode::GONE,
+                                    "Deprecated, use config `memory.enable_heap_profiling` to toggle",
+                                ))
                             }
-                            // (Method::GET, "/debug/pprof/heap") => {
-                            //     Self::dump_heap_prof_to_resp(req).await
-                            // }
+                            (Method::GET, "/debug/pprof/heap") => {
+                                Self::dump_heap_prof_to_resp(req)
+                            }
+                            (Method::GET, "/debug/pprof/cmdline") => Self::get_cmdline(req),
+                            (Method::GET, "/debug/pprof/symbol") => {
+                                Self::get_symbol_count(req)
+                            }
+                            (Method::POST, "/debug/pprof/symbol") => Self::get_symbol(req).await,
                             (Method::GET, "/config") => {
                                 Self::get_config(req, &cfg_controller).await
                             }

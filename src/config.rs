@@ -2793,6 +2793,72 @@ impl ConfigManager for LogConfigManager {
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug, OnlineConfig)]
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
+pub struct MemoryConfig {
+    // Whether enable the heap profiling which may have a bit performance overhead about 2% for the
+    // default sample rate.
+    pub enable_heap_profiling: bool,
+
+    // Average interval between allocation samples, as measured in bytes of allocation activity.
+    // Increasing the sampling interval decreases profile fidelity, but also decreases the
+    // computational overhead.
+    // The default sample interval is 512 KB. It only accepts power of two, otherwise it will be
+    // rounded up to the next power of two.
+    pub profiling_sample_per_bytes: ReadableSize,
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            enable_heap_profiling: true,
+            profiling_sample_per_bytes: ReadableSize::kb(512),
+        }
+    }
+}
+
+impl MemoryConfig {
+    pub fn init(&self) {
+        if self.enable_heap_profiling {
+            if let Err(e) = tikv_alloc::activate_prof() {
+                error!("failed to enable heap profiling"; "err" => ?e);
+                return;
+            }
+            if let Err(e) = tikv_alloc::set_prof_sample(self.profiling_sample_per_bytes.0) {
+                error!("failed to set heap profiling sample"; "err" => ?e);
+                return;
+            }
+            info!(
+                "heap profiling is enabled";
+                "sample_per_bytes" => ?self.profiling_sample_per_bytes,
+            );
+        } else {
+            info!("heap profiling is not enabled");
+        }
+    }
+}
+
+pub struct MemoryConfigManager;
+
+impl ConfigManager for MemoryConfigManager {
+    fn dispatch(&mut self, changes: ConfigChange) -> CfgResult<()> {
+        if let Some(ConfigValue::Bool(enable)) = changes.get("enable_heap_profiling") {
+            if *enable {
+                tikv_alloc::activate_prof()?;
+            } else {
+                tikv_alloc::deactivate_prof()?;
+            }
+        }
+
+        if let Some(ConfigValue::Size(sample_rate)) = changes.get("profiling_sample_per_bytes") {
+            tikv_alloc::set_prof_sample(*sample_rate)?;
+        }
+        info!("update memory config"; "config" => ?changes);
+        Ok(())
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug, OnlineConfig)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
 pub struct QuotaConfig {
     pub foreground_cpu_time: usize,
     pub foreground_write_bandwidth: ReadableSize,
@@ -2891,6 +2957,9 @@ pub struct TikvConfig {
 
     #[online_config(submodule)]
     pub log: LogConfig,
+
+    #[online_config(submodule)]
+    pub memory: MemoryConfig,
 
     #[online_config(submodule)]
     pub quota: QuotaConfig,
@@ -2997,6 +3066,7 @@ impl Default for TikvConfig {
             black_list_path: "".to_owned(),
             enable_inner_key_offset: false,
             log: LogConfig::default(),
+            memory: MemoryConfig::default(),
             quota: QuotaConfig::default(),
             readpool: ReadPoolConfig::default(),
             server: ServerConfig::default(),
@@ -3944,6 +4014,7 @@ pub enum Module {
     BackupStream,
     Quota,
     Log,
+    Memory,
     Unknown(String),
 }
 
@@ -3973,6 +4044,7 @@ impl From<&str> for Module {
             "overload" => Module::Overload,
             "quota" => Module::Quota,
             "log" => Module::Log,
+            "memory" => Module::Memory,
             n => Module::Unknown(n.to_owned()),
         }
     }
