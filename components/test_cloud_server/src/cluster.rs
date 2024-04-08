@@ -887,27 +887,23 @@ where
     Err(last_err.unwrap())
 }
 
-/// A extended version of `try_wait` which can save and return an extra value
-/// from `f`.
-pub fn try_wait_result<F, T, E>(mut f: F, seconds: usize) -> (std::result::Result<(), E>, T)
+pub fn try_wait_result<F, T, E>(mut f: F, seconds: usize) -> std::result::Result<T, E>
 where
-    F: FnMut() -> (std::result::Result<(), E>, T),
+    F: FnMut() -> std::result::Result<T, E>,
 {
     let begin = Instant::now_coarse();
     let timeout = Duration::from_secs(seconds as u64);
     let mut last_err = None;
-    let mut last_val = None;
     while begin.saturating_elapsed() < timeout {
         match f() {
-            (Ok(()), val) => return (Ok(()), val),
-            (Err(err), val) => {
+            Ok(t) => return Ok(t),
+            Err(err) => {
                 last_err = Some(err);
-                last_val = Some(val);
                 sleep(Duration::from_millis(100));
             }
         }
     }
-    (Err(last_err.unwrap()), last_val.unwrap())
+    Err(last_err.unwrap())
 }
 
 #[derive(Default, Debug)]

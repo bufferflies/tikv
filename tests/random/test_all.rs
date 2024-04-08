@@ -391,19 +391,17 @@ async fn verify_cluster(cluster: &mut ServerCluster) -> usize /* records count i
     // Check statistics.
     // Check after verify data, to ensure that PD heartbeat have updated region
     // stats.
-    let (res, data_stats) = try_wait_result(
+    let data_stats = try_wait_result(
         || {
             let stats = cluster.get_data_stats();
-            (stats.check_data(), stats)
+            match stats.check_data() {
+                Ok(()) => Ok(stats),
+                Err(err) => Err((err, stats)),
+            }
         },
         20,
-    );
-    assert!(
-        res.is_ok(),
-        "check_data failed: {:?}, stats: {:?}",
-        res,
-        data_stats
-    );
+    )
+    .expect("check_data failed");
     cluster.wait_region_version_match();
     data_stats
         .check_buckets(cluster.get_pd_client_ext().as_ref(), REGION_BUCKET_SIZE.0)

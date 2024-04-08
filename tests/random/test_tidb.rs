@@ -383,21 +383,16 @@ async fn verify_cluster(cluster: &mut ServerCluster) {
     // Check statistics.
     // Check after verify data, to ensure that PD heartbeat have updated region
     // stats.
-    let (res, data_stats) = try_wait_result(
+    try_wait_result(
         || {
             let stats = cluster.get_data_stats();
-            (stats.check_data(), stats)
+            stats.check_data().map_err(|err| (err, stats))
         },
         20,
-    );
-    assert!(
-        res.is_ok(),
-        "check_data failed: {:?}, stats: {:?}",
-        res,
-        data_stats
-    );
+    )
+    .expect("check_data failed");
     cluster.wait_region_version_match();
-    let (res, _) = try_wait_result(
+    try_wait_result(
         || {
             // There are still region changes after all schedulers & operators stopped, as
             // tikv-server can also initiate region splits. So during retry, get cluster
@@ -409,11 +404,11 @@ async fn verify_cluster(cluster: &mut ServerCluster) {
             if res.is_err() {
                 warn!("check_buckets failed, err {:?}", res);
             }
-            (res, ())
+            res.map_err(|err| (err, data_stats))
         },
         10,
-    );
-    res.expect("check_buckets failed");
+    )
+    .expect("check_buckets failed");
 
     check_tpc();
 }

@@ -33,7 +33,12 @@ use kvproto::{
     metapb::Peer,
     tikvpb::TikvClient,
 };
-use pd_client::{check_regions_boundary, PdClient};
+use log_wrappers::Value;
+use pd_client::{
+    check_regions_boundary,
+    util::{compare_region_end_key, RegionLike},
+    PdClient,
+};
 use protobuf::ProtobufEnum;
 use rfstore::store::RegionIdVer;
 use test_pd_client;
@@ -41,10 +46,16 @@ use tikv::storage::mvcc::TimeStamp;
 use tikv_client::{
     proto::kvrpcpb::Mutation as KvMutation, CheckLevel, IntoOwnedRange, TransactionOptions,
 };
-use tikv_util::{box_err, codec::bytes::encode_bytes, debug, error, info, time::Instant, warn};
+use tikv_util::{
+    box_err,
+    codec::bytes::{decode_bytes, encode_bytes},
+    debug, error, info,
+    time::Instant,
+    warn,
+};
 
 use crate::{
-    must_wait, try_wait,
+    must_wait, try_wait, try_wait_result,
     txn::{
         lock_resolver::{LockResolver, ResolveLocksOptions},
         txn_file::{TxnFileChunk, TxnFileHelper},
@@ -959,44 +970,73 @@ impl ClusterClient {
         region
     }
 
-    pub fn scan_regions(
-        &mut self,
-        start_key: &[u8],
-        end_key: &[u8],
-        limit: usize,
-    ) -> Result<Vec<RawRegion>> {
-        let mut regions = vec![];
-        let mut start = encode_bytes(start_key);
-        let end = encode_bytes(end_key);
-        while limit == 0 || regions.len() < limit {
-            let batch_size = if limit == 0 {
-                SCAN_REGIONS_MAX_BATCH_SIZE
-            } else {
-                (limit - regions.len()).min(SCAN_REGIONS_MAX_BATCH_SIZE)
-            };
-            let batch = block_on(self.pd_client.scan_regions(
-                start.clone(),
-                end.clone(),
-                batch_size,
-            ))?;
-            if batch.is_empty() {
-                break;
+    fn scan_regions(&mut self, raw_start: &[u8], raw_end: &[u8]) -> Result<Vec<RawRegion>> {
+        if !raw_end.is_empty() && raw_start >= raw_end {
+            return Ok(vec![]);
+        }
+
+        let mut raw_regions: Vec<RawRegion> = vec![];
+        let mut encoded_start = encode_bytes(raw_start);
+        let encoded_end = encode_bytes(raw_end);
+        loop {
+            let batch = try_wait_result(
+                || -> Result<Vec<kvproto::pdpb::Region>> {
+                    let batch = block_on(self.pd_client.scan_regions(
+                        encoded_start.clone(),
+                        encoded_end.clone(),
+                        SCAN_REGIONS_MAX_BATCH_SIZE,
+                    ))?;
+                    debug!(
+                        "scan_regions: {:?}, start {}, end {}",
+                        batch,
+                        &Value::key(&encoded_start),
+                        &Value::key(&encoded_end)
+                    );
+                    let last = batch
+                        .last()
+                        .ok_or_else(|| Error::Other(box_err!("empty batch")))?;
+                    check_regions_boundary(&encoded_start, last.end_key(), true, &batch)?;
+                    Ok(batch)
+                },
+                10,
+            )?;
+
+            // Handle overlapping with previous batch.
+            if !raw_regions.is_empty() {
+                let raw_first_key = decode_bytes(&mut batch.first().unwrap().start_key(), false)
+                    .map_err(|err| (err, batch.first()))
+                    .expect("decode_bytes");
+                if raw_regions.last().unwrap().end_key() != raw_first_key {
+                    let idx = raw_regions
+                        .iter()
+                        .rev()
+                        .position(|r| r.start_key() <= raw_first_key.as_slice())
+                        .unwrap();
+                    encoded_start = encode_bytes(raw_regions[idx].start_key());
+                    raw_regions.truncate(idx);
+                    continue;
+                }
             }
-            let return_size = batch.len();
-            start = batch.last().unwrap().get_region().end_key.clone();
+
+            encoded_start = batch.last().unwrap().end_key().to_vec();
             for mut region in batch {
                 let mut raw_region: RawRegion = region.take_region().into();
                 raw_region.update_leader(region.get_leader());
                 self.update_cache_by_id(raw_region.id, Some(raw_region.clone()));
-                regions.push(raw_region);
+                raw_regions.push(raw_region);
             }
-            if start.is_empty() || return_size < batch_size {
+            if compare_region_end_key(&encoded_start, &encoded_end).is_ge() {
                 break;
             }
         }
 
-        check_regions_boundary(start_key, end_key, false, &regions)?;
-        Ok(regions)
+        check_regions_boundary(raw_start, raw_end, false, &raw_regions).unwrap_or_else(|err| {
+            panic!(
+                "check_regions_boundary, err {:?}, regions {:?}",
+                err, raw_regions
+            )
+        });
+        Ok(raw_regions)
     }
 
     pub fn clear_region_cache(&mut self) {
@@ -2176,7 +2216,7 @@ impl TxnMutations {
                 end_key.extend_from_slice(biggest);
                 end_key.push(0);
 
-                let regions = client.scan_regions(start_key, &end_key, 0)?;
+                let regions = client.scan_regions(start_key, &end_key)?;
                 let region_muts = TxnFileHelper::group_txn_chunks_by_regions(&chunks, regions)
                     .into_iter()
                     .map(|(r, chunks)| {

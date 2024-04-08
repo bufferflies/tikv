@@ -288,7 +288,7 @@ pub(crate) fn spawn_restore_keyspace(
                 // To find data corruption early, and generate read workload as well.
                 // The retry should not be necessary.
                 // TODO: Remove the retry after verification issue is addressed.
-                let (verify_res, _) = try_wait_result(
+                let verify_res = try_wait_result(
                     || {
                         let verify_res = runtime.block_on(
                             client.verify_keyspace_and_skip_destroyed_ranges(target_keyspace),
@@ -299,7 +299,7 @@ pub(crate) fn spawn_restore_keyspace(
                                 tag, verify_res
                             );
                         }
-                        (verify_res.map(|_| ()), ())
+                        verify_res
                     },
                     10,
                 );
