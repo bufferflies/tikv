@@ -92,7 +92,7 @@ impl SkipListExt {
         outer_owner: &mut Vec<u8>,
     ) -> Value {
         if let Some(v) = self.try_get_from_txn_file(key, version, outer_owner) {
-            return encode_val_to_outer_val_owner(v, outer_owner);
+            return v;
         }
         let v = self.skl.get_with_hint(key.deref(), version, h);
         if v.is_valid() {
@@ -103,7 +103,7 @@ impl SkipListExt {
 
     pub fn get(&self, key: InnerKey<'_>, version: u64, outer_owner: &mut Vec<u8>) -> Value {
         if let Some(v) = self.try_get_from_txn_file(key, version, outer_owner) {
-            return encode_val_to_outer_val_owner(v, outer_owner);
+            return v;
         }
         let v = self.skl.get(key.deref(), version);
         if v.is_valid() {
