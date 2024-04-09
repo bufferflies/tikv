@@ -46,6 +46,9 @@ use crate::{
 
 const MAJOR_COMPACTION_MIN_REQUEST_VERSION: u32 = 3;
 
+// Do not skip L1 tables if there are too many small L1 tables.
+const MAX_SKIP_L1_TABLES: usize = 16;
+
 static RETRY_INTERVAL: Duration = Duration::from_secs(600);
 
 #[derive(Default, Eq, PartialEq, Hash, Clone)]
@@ -955,7 +958,9 @@ impl Engine {
             let lh = data.get_cf(cf).get_level(1);
             let mut l1_tbls = vec![];
             for tbl in lh.tables.as_slice() {
-                if tbl.biggest() < smallest || tbl.smallest() > biggest {
+                let non_overlapping = tbl.biggest() < smallest || tbl.smallest() > biggest;
+                // Do not skip if there are too many L1 tables.
+                if lh.tables.len() < MAX_SKIP_L1_TABLES && non_overlapping {
                     info!(
                         "{} skip L1 table {} for L0 compaction, tbl smallest {:?}, tbl biggest {:?}, L0 smallest {:?}, L0 biggest {:?}",
                         tag,
