@@ -2101,12 +2101,13 @@ impl PdClientExt for TestPdClient {
         self.must_none_peer(region_id, peer);
     }
 
-    fn must_split_region(
+    fn must_split_region_opt(
         &self,
         mut region: metapb::Region,
         policy: pdpb::CheckPolicy,
         keys: Vec<Vec<u8>>,
-    ) {
+        timeout: Duration,
+    ) -> Result<()> {
         let expect_region_count = self.get_regions_number()
             + if policy == pdpb::CheckPolicy::Usekey {
                 keys.len()
@@ -2114,18 +2115,24 @@ impl PdClientExt for TestPdClient {
                 1
             };
         self.split_region(region.clone(), policy, keys.clone());
-        for i in 1..500 {
+        let start = Instant::now_coarse();
+        let mut i = 0;
+        while start.saturating_elapsed() < timeout {
             sleep_ms(10);
             if self.get_regions_number() == expect_region_count {
-                return;
+                return Ok(());
             }
+            i += 1;
             if i % 50 == 0 {
                 // Region epoch may have been changed. Refresh every 500ms.
                 region = block_on(self.must_get_region_by_id(region.get_id())).unwrap();
                 self.split_region(region.clone(), policy, keys.clone());
             }
         }
-        panic!("region {:?} is still not split.", region);
+        Err(Error::Other(box_err!(
+            "region {:?} is still not split.",
+            region
+        )))
     }
 
     fn split_region(

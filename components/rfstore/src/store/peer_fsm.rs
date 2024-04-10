@@ -35,7 +35,9 @@ use raft_proto::eraftpb;
 use raftstore::store::util;
 use rand::{thread_rng, Rng};
 use tikv_util::{
-    box_err, debug, error, info,
+    box_err,
+    codec::bytes::decode_bytes,
+    debug, error, info,
     store::{find_peer, is_learner, region_on_same_stores},
     time::duration_to_sec,
     trace, warn,
@@ -57,7 +59,8 @@ use crate::{
         PEER_TICK_RAFT, PEER_TICK_RAFT_LOG_GC, PEER_TICK_SPLIT_CHECK,
         PEER_TICK_SWITCH_MEM_TABLE_CHECK,
     },
-    DiscardReason, Error, RaftStoreRouter, Result,
+    DiscardReason, Error, RaftStoreRouter, Result, MERGE_REGION_WITH_TXN_FILE_LOCKS_ERR_MSG,
+    SPLIT_REGION_WITH_TXN_FILE_LOCKS_ERR_MSG,
 };
 
 /// Limits the maximum number of regions returned by error.
@@ -1285,6 +1288,15 @@ impl<'a> PeerMsgHandler<'a> {
                     self.fsm.peer.tag()
                 ));
             }
+            if let Err(err) = decode_bytes(&mut key.as_slice(), false) {
+                error!(
+                    "split key decode error";
+                    "tag" => self.peer.tag(),
+                    "peer_id" => self.fsm.peer_id(),
+                    "err" => ?err,
+                );
+                return Err(box_err!("{} split key decode failed", self.fsm.peer.tag()));
+            }
         }
         if !self.fsm.peer.is_leader() {
             // region on this store is no longer leader, skipped.
@@ -1326,6 +1338,21 @@ impl<'a> PeerMsgHandler<'a> {
         if !self.peer.get_store().initial_flushed() {
             return Err(Error::Transport(DiscardReason::Full));
         }
+
+        if let Some(shard_meta) = self.peer.get_store().shard_meta.as_ref() {
+            if shard_meta.has_txn_file_locks() {
+                info!("prepare split: txn file locks exist, retry later";
+                    "tag" => self.peer.tag(),
+                    "txn_file_locks" => ?shard_meta.txn_file_locks(),
+                );
+                return Err(box_err!(
+                    "{} prepare split: {}, retry later",
+                    self.fsm.peer.tag(),
+                    SPLIT_REGION_WITH_TXN_FILE_LOCKS_ERR_MSG
+                ));
+            }
+        }
+
         Ok(())
     }
 
@@ -1501,7 +1528,7 @@ impl<'a> PeerMsgHandler<'a> {
         let cb = Callback::write(Box::new(move |resp| {
             if resp.response.get_header().has_error() {
                 let err_msg = resp.response.get_header().get_error().get_message();
-                warn!("{} failed to propose engine change set {:?}", tag, err_msg);
+                warn!("{} failed to propose engine change set", tag; "err" => ?err_msg, "cs" => ?cs);
                 if err_msg.contains("raft: proposal dropped") {
                     // Proposal may dropped due to leader transfer in progress.
                     router.send_store(StoreMsg::GenerateEngineChangeSet(cs));
@@ -1978,6 +2005,21 @@ impl<'a> PeerMsgHandler<'a> {
         let (request, target_id) = {
             let state = self.fsm.peer.pending_merge_state.as_ref().unwrap();
             let expect_region = state.get_target();
+
+            if let Some(source_meta) = self.fsm.peer.get_store().shard_meta.as_ref() {
+                if source_meta.has_txn_file_locks() {
+                    let tag = self.peer.tag();
+                    info!("{} fail to schedule merge: source region has txn file locks", tag;
+                        "target" => ?expect_region,
+                        "txn_file_locks" => ?source_meta.txn_file_locks(),
+                    );
+                    return Err(box_err!(
+                        "{}: {}",
+                        tag,
+                        MERGE_REGION_WITH_TXN_FILE_LOCKS_ERR_MSG
+                    ));
+                }
+            }
 
             if !self.validate_merge_peer(expect_region, store_meta)? {
                 // Wait till next round.

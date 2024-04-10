@@ -12,6 +12,10 @@ use tikv_util::codec;
 use crate::store::PeerMsg;
 
 pub const RAFTSTORE_IS_BUSY: &str = "raftstore is busy";
+pub const SPLIT_REGION_WITH_TXN_FILE_LOCKS_ERR_MSG: &str =
+    "fail to split region with txn file locks";
+pub const MERGE_REGION_WITH_TXN_FILE_LOCKS_ERR_MSG: &str =
+    "fail to merge source region with txn file locks";
 
 // Used in `kvproto::Error::message` to indicate that the ingest is overlapped
 // with existed data. Clients will check error type by this string.

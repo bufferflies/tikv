@@ -196,7 +196,7 @@ pub fn parse_data_at<T: Message + Default>(data: &[u8], index: u64, tag: PeerTag
     result
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct PeerTag {
     pub store_id: u64,
     pub id_ver: RegionIdVer,

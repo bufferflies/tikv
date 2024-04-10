@@ -235,6 +235,10 @@ impl kvengine::RecoverHandler for RecoverHandler {
                 }
                 Self::execute_admin_request(&mut applier, &mut ctx, req)?;
             } else if let Some(custom) = rlog::get_custom_log(&req) {
+                if rlog::is_txn_file_ref(custom.data.chunk()) {
+                    let txn_file_ref = custom.get_txn_file_ref().unwrap();
+                    prepare_txn_file_ref(engine, &txn_file_ref)?;
+                }
                 if let Some(mut cs) = get_async_change_set(&custom) {
                     cs.sequence = e.get_index();
                     if meta.ver == cs.get_shard_ver() && !meta.is_duplicated_change_set(&mut cs) {
@@ -267,6 +271,14 @@ fn get_async_change_set(custom: &CustomRaftLog<'_>) -> Option<ChangeSet> {
         }
     }
     None
+}
+
+fn prepare_txn_file_ref(
+    kv: &Engine,
+    txn_file_ref: &kvenginepb::TxnFileRef,
+) -> kvengine::Result<()> {
+    let manager = kv.get_txn_chunk_manager();
+    manager.prepare_txn_chunks(&txn_file_ref.chunk_ids)
 }
 
 impl kvengine::MetaIterator for RecoverHandler {

@@ -1,8 +1,11 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc,
+use std::{
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::Duration,
 };
 
 use futures::executor::block_on;
@@ -53,12 +56,13 @@ impl PdClientExt for pd_client::RpcClient {
     fn must_remove_peer(&self, _region_id: u64, _peer: metapb::Peer) {
         unimplemented!()
     }
-    fn must_split_region(
+    fn must_split_region_opt(
         &self,
         _region: metapb::Region,
         _policy: pdpb::CheckPolicy,
         _keys: Vec<Vec<u8>>,
-    ) {
+        _timeout: Duration,
+    ) -> pd_client::Result<()> {
         unimplemented!()
     }
 

@@ -701,6 +701,7 @@ impl ServerCluster {
             let idx = TIKV_WORKER_IDX_ALLOCATOR.fetch_add(1, Relaxed);
             let tikv_worker_conf = cloud_worker::Config {
                 addr: Self::tikv_worker_addr(idx),
+                cop_addr: "".to_string(),
                 pd: pd_client::Config::new(self.pd_endpoints().to_vec()),
                 security: tikv_config.security.clone(),
                 dfs: tikv_config.dfs.clone(),

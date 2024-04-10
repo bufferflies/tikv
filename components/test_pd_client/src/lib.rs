@@ -7,6 +7,9 @@ extern crate tikv_util;
 
 mod pd;
 mod real_pd;
+
+use std::time::Duration;
+
 pub use real_pd::PdWrapper;
 mod service;
 
@@ -34,7 +37,18 @@ pub trait PdClientExt: pd_client::PdClient {
         region: metapb::Region,
         policy: pdpb::CheckPolicy,
         keys: Vec<Vec<u8>>,
-    );
+    ) {
+        self.must_split_region_opt(region, policy, keys, Duration::from_secs(5))
+            .expect("must_split_region");
+    }
+
+    fn must_split_region_opt(
+        &self,
+        region: metapb::Region,
+        policy: pdpb::CheckPolicy,
+        keys: Vec<Vec<u8>>,
+        timeout: Duration,
+    ) -> pd_client::Result<()>;
 
     fn split_region(&self, region: metapb::Region, policy: pdpb::CheckPolicy, keys: Vec<Vec<u8>>);
 

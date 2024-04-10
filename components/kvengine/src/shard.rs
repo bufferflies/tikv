@@ -490,6 +490,10 @@ impl Shard {
         data.get_txn_chunks()
     }
 
+    pub fn has_txn_file_locks(&self) -> bool {
+        !self.get_data().lock_txn_files.is_empty()
+    }
+
     pub(crate) fn split_mem_tables(&self, parent_mem_tbls: &[CfTable]) -> Vec<CfTable> {
         let mut new_mem_tbls = vec![CfTable::new()];
         for old_mem_tbl in parent_mem_tbls {

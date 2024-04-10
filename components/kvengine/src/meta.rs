@@ -1,6 +1,10 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{cmp::max, collections::HashMap, iter::Iterator};
+use std::{
+    cmp::max,
+    collections::{HashMap, HashSet},
+    iter::Iterator,
+};
 
 use api_version::{
     api_v2::{is_whole_keyspace_range, KEYSPACE_PREFIX_LEN},
@@ -8,6 +12,7 @@ use api_version::{
 };
 use bytes::{Buf, Bytes};
 use kvenginepb as pb;
+use kvenginepb::TxnFileRef;
 use protobuf::Message;
 use slog_global::*;
 
@@ -31,6 +36,8 @@ pub struct ShardMeta {
     // max_ts is the max ts in all sst files.
     pub max_ts: u64,
     pub parent: Option<Box<ShardMeta>>,
+
+    pub(crate) txn_file_locks: HashSet<u64 /* txn start_ts */>,
 }
 
 impl ShardMeta {
@@ -461,6 +468,7 @@ impl ShardMeta {
         let mut new_meta = Self::new(self.engine_id, cs);
         new_meta.range = self.range.clone();
         new_meta.properties = props;
+        new_meta.txn_file_locks = self.txn_file_locks.clone();
         // self.data_sequence may be advanced on raft log gc tick.
         new_meta.data_sequence = std::cmp::max(new_meta.data_sequence, self.data_sequence);
         new_meta.max_ts = std::cmp::max(new_meta.max_ts, self.max_ts);
@@ -942,6 +950,75 @@ impl ShardMeta {
         self.base_version = max(source_mem_tbl_version, target_mem_tbl_version) - sequence;
         self.parent = Some(Box::new(parent));
         self.seq = sequence;
+    }
+
+    // Use with caution, make sure that `kv` is up-to-date.
+    pub fn recover_from_kv(&mut self, kv: &crate::engine::Engine) {
+        if let Some(shard) = kv.get_shard(self.id) {
+            let data = shard.get_data();
+
+            // txn_file_locks:
+            if !data.lock_txn_files.is_empty() {
+                let txn_file_locks = data
+                    .lock_txn_files
+                    .iter()
+                    .map(|lock_txn_file| {
+                        let lock = txn_types::Lock::parse(lock_txn_file.get_lock_val_prefix())
+                            .unwrap_or_else(|err| {
+                                panic!(
+                                    "{} parse lock_val_prefix error: {:?}, lock_txn_file: {:?}",
+                                    self.tag(),
+                                    err,
+                                    lock_txn_file
+                                );
+                            });
+                        lock.ts.into_inner()
+                    })
+                    .collect();
+                self.txn_file_locks = txn_file_locks;
+                info!(
+                    "{} ShardMeta recover txn file locks: {:?}",
+                    self.tag(),
+                    self.txn_file_locks
+                );
+            }
+        }
+    }
+
+    pub fn merge_txn_file_ref(&mut self, wb_ref: &TxnFileRef, log_index: u64) {
+        if wb_ref.get_user_meta().is_empty() {
+            self.txn_file_locks.insert(wb_ref.start_ts);
+            info!("{} ShardMeta merge txn file locks (insert by lock)", self.tag();
+                "wb_ref" => ?wb_ref,
+                "log_index" => log_index,
+                "merged" => ?self.txn_file_locks,
+            );
+        } else {
+            let user_meta = UserMeta::from_slice(wb_ref.get_user_meta());
+            let existed = self.txn_file_locks.remove(&wb_ref.start_ts);
+            debug_assert!(
+                existed,
+                "{} unexpected txn not existed, wb_ref {:?}, log_index {}, current locks {:?}",
+                self.tag(),
+                wb_ref,
+                log_index,
+                self.txn_file_locks
+            );
+            info!("{} ShardMeta merge txn file locks (remove by commit/rollback)", self.tag();
+                "wb_ref" => ?wb_ref,
+                "log_index" => log_index,
+                "commit_ts" => user_meta.commit_ts,
+                "merged" => ?self.txn_file_locks,
+            );
+        }
+    }
+
+    pub fn has_txn_file_locks(&self) -> bool {
+        !self.txn_file_locks.is_empty()
+    }
+
+    pub fn txn_file_locks(&self) -> &HashSet<u64> {
+        &self.txn_file_locks
     }
 }
 

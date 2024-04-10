@@ -24,6 +24,7 @@ use test_cloud_server::{
         TxnMutations, TxnWriteMethod,
     },
     oss::prepare_dfs,
+    try_wait,
     util::Mutation,
     ServerCluster,
 };
@@ -322,6 +323,185 @@ fn test_txn_file_basic_impl(
     }
 
     verify_data(None, 11 * size_factor).unwrap();
+    cluster.stop();
+    oss.shutdown();
+}
+
+#[test]
+fn test_txn_file_split_merge() {
+    test_util::init_log_for_test();
+    let (_temp_dir, mut oss, dfs_config) = prepare_dfs("test");
+
+    let node_ids = alloc_node_id_vec(NODES_COUNT);
+    let pd_wrapper = PdWrapper::new_test(1, &SecurityConfig::default(), None);
+    let mut cluster = ServerCluster::new_opt(
+        node_ids,
+        |_, conf| {
+            conf.dfs = dfs_config.clone();
+            conf.enable_inner_key_offset = true;
+        },
+        pd_wrapper,
+    );
+    cluster.start_tikv_workers(1, 2, false);
+    cluster.wait_region_replicated(&[], 3);
+
+    let gen_key = generate_keyspace_key(KEYSPACE_ID);
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _enter = rt.enter();
+
+    let mut client = cluster.new_client_opt(ClusterClientOptions {
+        txn_file_max_chunk_size: Some(1024),
+        ..Default::default()
+    });
+    client.split_keyspace(KEYSPACE_ID);
+    client.try_split(&gen_key(100), 5).unwrap();
+    {
+        // To work around that data not existed in ref store will not be checked.
+        let guard = client.ref_store();
+        let mut ref_store = guard.lock().unwrap();
+        for k in 0..200 {
+            ref_store.del_kv(gen_key(k));
+        }
+    }
+
+    // Put the locks:
+    client
+        .try_put_kv(
+            100..200,
+            &gen_key,
+            i_to_val_opt("value0_", 3),
+            MutateOptions {
+                commit_action: CommitAction::NoCommit,
+                write_method: TxnWriteMethod::FileBased,
+            },
+        )
+        .unwrap();
+    client
+        .try_put_kv(
+            0..100,
+            &gen_key,
+            i_to_val_opt("value1_", 3),
+            MutateOptions {
+                commit_action: CommitAction::NoCommit,
+                write_method: TxnWriteMethod::FileBased,
+            },
+        )
+        .unwrap();
+
+    // Fail to split:
+    let err = client.try_split(&gen_key(20), 1).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains(rfstore::SPLIT_REGION_WITH_TXN_FILE_LOCKS_ERR_MSG)
+    );
+    // Another split path. Note this split request would succeed after locks are
+    // cleanup.
+    client.try_split_by_pd(&gen_key(50), 1).unwrap_err();
+
+    // Clean up the lock:
+    info!("cleanup the locks (0..100");
+    client
+        .try_put_kv(
+            0..100,
+            &gen_key,
+            i_to_val_opt("value2_", 3),
+            MutateOptions {
+                commit_action: CommitAction::SyncCommit,
+                write_method: TxnWriteMethod::FileBased,
+            },
+        )
+        .unwrap();
+    // Can split:
+    let ok = try_wait(
+        || {
+            info!("split on {:?}", gen_key(20));
+            match client.try_split(&gen_key(20), 5) {
+                Ok(_) => true,
+                Err(err)
+                    if err
+                        .to_string()
+                        .contains(rfstore::SPLIT_REGION_WITH_TXN_FILE_LOCKS_ERR_MSG) =>
+                {
+                    false
+                }
+                Err(err) => panic!("split failed: {:?}", err),
+            }
+        },
+        5,
+    );
+    assert!(ok, "split key 20 failed");
+    client
+        .try_split(&gen_key(80), 5)
+        .expect("split key 80 failed");
+
+    // Clean up the lock:
+    info!("cleanup the locks (100..200");
+    // Note: verify data will not clean up locks when locks are not expired.
+    client.verify_data_with_ref_store();
+    // Can split:
+    let ok = try_wait(
+        || {
+            info!("split on {:?}", gen_key(150));
+            match client.try_split(&gen_key(150), 5) {
+                Ok(_) => true,
+                Err(err)
+                    if err
+                        .to_string()
+                        .contains(rfstore::SPLIT_REGION_WITH_TXN_FILE_LOCKS_ERR_MSG) =>
+                {
+                    false
+                }
+                Err(err) => panic!("split failed: {:?}", err),
+            }
+        },
+        5,
+    );
+    assert!(ok, "split key 150 failed");
+
+    // Current regions in [, 100):
+    // [, 20), [20, 80), [80, 100), or [,20), [20,50), [50,80), [80, 100)
+
+    // Write the lock to the middle region(s):
+    client
+        .try_put_kv(
+            40..60,
+            &gen_key,
+            i_to_val_opt("value3_", 3),
+            MutateOptions {
+                commit_action: CommitAction::NoCommit,
+                write_method: TxnWriteMethod::FileBased,
+            },
+        )
+        .unwrap();
+
+    // Fail to merge source region has locks.
+    let ok = client.try_merge_and_wait(&gen_key(50), &gen_key(100), 1);
+    assert!(!ok, "source region having locks merged");
+
+    // Succeed to merge when target region has locks
+    let ok = client.try_merge_and_wait(&gen_key(0), &gen_key(45), 5);
+    assert!(ok, "source region having no lock not merged");
+
+    // Clean up locks:
+    client
+        .try_put_kv(
+            40..60,
+            &gen_key,
+            i_to_val_opt("value4_", 3),
+            MutateOptions {
+                commit_action: CommitAction::SyncCommit,
+                write_method: TxnWriteMethod::FileBased,
+            },
+        )
+        .unwrap();
+
+    // Succeed to merge:
+    client.try_merge_and_wait(&gen_key(50), &gen_key(100), 5);
+    assert!(ok, "region having no lock not merged");
+
+    // Verify:
+    client.verify_data_with_ref_store();
     cluster.stop();
     oss.shutdown();
 }

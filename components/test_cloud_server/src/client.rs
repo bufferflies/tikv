@@ -1356,6 +1356,20 @@ impl ClusterClient {
         Err(box_err!("failed to split key {:?}", key))
     }
 
+    pub fn try_split_by_pd(&self, key: &[u8], timeout_secs: usize) -> Result<()> {
+        let encoded_key = encode_bytes(key);
+        let region = self.pd_client.get_region(&encoded_key)?;
+        if region.start_key == encoded_key || region.end_key == encoded_key {
+            return Ok(());
+        }
+        Ok(self.pd_client.must_split_region_opt(
+            region,
+            kvproto::pdpb::CheckPolicy::Usekey,
+            vec![encoded_key],
+            Duration::from_secs(timeout_secs as u64),
+        )?)
+    }
+
     pub fn split_keyspace(&mut self, keyspace_id: u32) {
         let (start_key, end_key) = api_version::ApiV2::get_txn_keyspace_range(keyspace_id);
         let encoded_start = encode_bytes(&start_key);

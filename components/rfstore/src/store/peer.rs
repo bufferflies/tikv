@@ -1798,7 +1798,9 @@ impl<'a> PreprocessRef<'a> {
                 }
                 let admin = cmd.get_admin_request();
                 if admin.has_splits() {
-                    self.preprocess_pending_splits(ctx, entry, &cmd);
+                    if let Err(e) = self.preprocess_pending_splits(ctx, entry, &cmd) {
+                        preprocess_err = Some(e);
+                    }
                 } else if admin.has_prepare_merge() {
                     self.preprocess_prepare_merge(ctx, entry, &cmd);
                 } else if admin.has_rollback_merge() {
@@ -1989,11 +1991,19 @@ impl<'a> PreprocessRef<'a> {
         ctx: &mut PreprocessContext<'_>,
         entry: &Entry,
         req: &RaftCmdRequest,
-    ) {
+    ) -> Result<()> {
         let tag = self.tag();
         if let Err(err) = check_region_epoch(req, self.get_preprocessed_region(), false) {
             warn!("{} preprocess pending split failed {:?}", tag, err);
-            return;
+            return Err(err);
+        }
+        if self.shard_meta().has_txn_file_locks() {
+            warn!("{} preprocess_pending_splits failed, shard has txn file locks", tag;
+                "txn_file_locks" => ?self.shard_meta().txn_file_locks(),
+            );
+            return Err(Error::Other(
+                SPLIT_REGION_WITH_TXN_FILE_LOCKS_ERR_MSG.into(),
+            ));
         }
         let regions = split_gen_new_region_metas(
             self.store_id(),
@@ -2065,6 +2075,7 @@ impl<'a> PreprocessRef<'a> {
             ctx.raft
                 .add_dependent(self.region_id(), new_region.get_id());
         }
+        Ok(())
     }
 
     pub(crate) fn update_meta_on_version_change(
@@ -2270,6 +2281,10 @@ impl<'a> PreprocessRef<'a> {
     ) -> Result<()> {
         let custom_data = rlog::CustomRaftLog::new_from_data(custom_req.get_data());
         let txn_file_ref = custom_data.get_txn_file_ref()?;
+
+        let shard_meta = self.mut_shard_meta();
+        shard_meta.merge_txn_file_ref(&txn_file_ref, entry.index);
+
         if ctx.kv.is_none() {
             // kv is none in restore, we don't need to load txn file.
             return Ok(());

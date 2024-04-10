@@ -1495,8 +1495,9 @@ impl Applier {
         if !self.is_leader() {
             return;
         }
+        let tag = self.tag();
         let mem_state = self.mut_mem_table_state(&ctx.engine);
-        if mem_state.need_switch(now) {
+        if mem_state.need_switch(&tag, now) {
             let mut custom_builder = CustomBuilder::new();
             custom_builder.set_switch_mem_table(mem_state.mem_table_size);
             let mut req = self.new_raft_cmd_request();
@@ -1816,7 +1817,7 @@ impl MemTableState {
         }
     }
 
-    fn need_switch(&self, now: Instant) -> bool {
+    fn need_switch(&self, tag: &PeerTag, now: Instant) -> bool {
         if self.mem_table_size == 0 {
             return false;
         }
@@ -1825,7 +1826,7 @@ impl MemTableState {
                 return false;
             }
             // The proposal maybe failed for some reason, propose again.
-            warn!("propose switch mem-table expired, propose again");
+            warn!("{} propose switch mem-table expired, propose again", tag);
         }
         // Avoid too many mem-tables flush at the same time.
         let jitter_seconds = self.mem_table_size % MAX_JITTER_SECONDS;
@@ -2458,7 +2459,7 @@ mod tests {
                 .map(|secs| Instant::now() + Duration::from_secs(secs));
             let check_time = Instant::now() + Duration::from_secs(case.check_time);
             assert_eq!(
-                states.need_switch(check_time),
+                states.need_switch(&PeerTag::default(), check_time),
                 case.check_result,
                 "{:?}",
                 case

@@ -45,6 +45,12 @@ impl Engine {
         let new_shard_props = split.get_new_shards();
         let new_ver = old_shard.ver + new_shard_props.len() as u64 - 1;
         let old_data = old_shard.get_data();
+        assert!(
+            old_data.lock_txn_files.is_empty(),
+            "{} shard with txn files are not allowed to split, lock_txn_files {:?}",
+            old_shard.tag(),
+            old_data.lock_txn_files
+        );
         let old_del_prefixes = old_shard.pending_ops.read().unwrap().del_prefixes.clone();
         for i in 0..=split.keys.len() {
             let (start_key, end_key) = get_splitting_start_end(
@@ -130,8 +136,6 @@ impl Engine {
                     new_cfs[cf].set_level(new_level);
                 }
             }
-            // Shards with txn files are not allowed to split.
-            debug_assert!(old_data.lock_txn_files.is_empty());
             let new_data = ShardData::new(
                 new_shard.range.clone(),
                 new_mem_tbls,
@@ -194,6 +198,10 @@ impl Engine {
         if !source_shard.get_initial_flushed() {
             return Err(Error::CheckMerge("source not initial flushed".to_string()));
         }
+        if source_shard.has_txn_file_locks() {
+            return Err(Error::CheckMerge("source has txn file locks".to_string()));
+        }
+
         let target_shard = self.get_shard_with_ver(target_id, target_ver)?;
         if !target_shard.get_initial_flushed() {
             return Err(Error::CheckMerge("target not initial flushed".to_string()));
@@ -373,8 +381,13 @@ impl Engine {
             for (&id, tbl) in old_data.unloaded_tbls.iter() {
                 unloaded_tbls.insert(id, tbl.clone());
             }
-            let mut lock_txn_files = old_data.lock_txn_files.clone();
-            lock_txn_files.extend_from_slice(&source.lock_txn_files);
+            let lock_txn_files = old_data.lock_txn_files.clone();
+            assert!(
+                source.lock_txn_files.is_empty(),
+                "{} source shard with txn file locks are not allowed to be merged, source {:?}",
+                old_shard.tag(),
+                source
+            );
             ShardData::new(
                 new_shard.range.clone(),
                 mem_tbls,
