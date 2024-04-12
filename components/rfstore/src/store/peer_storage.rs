@@ -240,7 +240,7 @@ impl PeerStorage {
         let truncated_state = init_truncated_state(&engines.raft, peer_id, &region);
         let mut shard_meta: Option<ShardMeta> = None;
         if apply_state.applied_index > 0 {
-            let meta = load_engine_meta(&engines, store_id, peer_id).unwrap();
+            let meta = load_engine_meta(&engines.raft, store_id, peer_id).unwrap();
             if let Some(parent) = &meta.parent {
                 engines.raft.add_dependent(parent.id, meta.id);
             }
@@ -711,13 +711,15 @@ pub(crate) fn write_raft_state(
     raft_wb.set_state(peer_id, meta.id, &key, &raft_state.marshal());
 }
 
-pub fn load_engine_meta(engines: &Engines, store_id: u64, peer_id: u64) -> Option<ShardMeta> {
-    let shard_meta_bin = engines.raft.get_state(peer_id, KV_ENGINE_META_KEY)?;
+pub fn load_engine_meta(
+    raft: &rfengine::RfEngine,
+    store_id: u64,
+    peer_id: u64,
+) -> Option<ShardMeta> {
+    let shard_meta_bin = raft.get_state(peer_id, KV_ENGINE_META_KEY)?;
     let mut change_set = kvenginepb::ChangeSet::default();
     change_set.merge_from_bytes(&shard_meta_bin).unwrap();
-    let mut shard_meta = ShardMeta::new(store_id, &change_set);
-    shard_meta.recover_from_kv(&engines.kv);
-    Some(shard_meta)
+    Some(ShardMeta::new(store_id, &change_set))
 }
 
 pub fn encode_snap_data(region: &metapb::Region, change_set: &kvenginepb::ChangeSet) -> Bytes {

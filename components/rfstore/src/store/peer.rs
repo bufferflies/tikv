@@ -2282,8 +2282,31 @@ impl<'a> PreprocessRef<'a> {
         let custom_data = rlog::CustomRaftLog::new_from_data(custom_req.get_data());
         let txn_file_ref = custom_data.get_txn_file_ref()?;
 
+        let shard_meta = self.shard_meta();
+        if shard_meta.ver != txn_file_ref.shard_ver {
+            warn!(
+                "{} preprocess txn file ref: shard meta version not match", self.tag();
+                "shard_meta.ver" => shard_meta.ver,
+                "req.shard_ver" => txn_file_ref.shard_ver,
+                "log_index" => entry.index,
+            );
+            return Err(Error::EpochNotMatch(
+                "preprocess txn file ref: version not match".to_owned(),
+                vec![self.region.clone()],
+            ));
+        }
+
+        let peer_id = self.peer_id();
+        let region_id = self.region_id();
+
         let shard_meta = self.mut_shard_meta();
         shard_meta.merge_txn_file_ref(&txn_file_ref, entry.index);
+        ctx.raft_wb.set_state(
+            peer_id,
+            region_id,
+            KV_ENGINE_META_KEY,
+            &shard_meta.marshal(),
+        );
 
         if ctx.kv.is_none() {
             // kv is none in restore, we don't need to load txn file.

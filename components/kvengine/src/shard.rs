@@ -17,8 +17,6 @@ use bytes::{Buf, BufMut, Bytes};
 use cloud_encryption::{EncryptionKey, MasterKey};
 use dashmap::DashMap;
 use kvenginepb as pb;
-use kvenginepb::TxnFileRefs;
-use protobuf::Message;
 use rand::Rng;
 use slog_global::*;
 use tikv_util::codec::number::U64_SIZE;
@@ -34,7 +32,7 @@ use crate::{
         sstable::{L0Table, SsTable},
         InnerKey, TableExt, TxnFile,
     },
-    util::evenly_distribute,
+    util::{evenly_distribute, TxnFileRefPropertyHelper},
     *,
 };
 
@@ -127,7 +125,8 @@ pub const TXN_FILE_REF: &str = "_txn_file_ref";
 /// mem-table would be applied lately than in `ShardMeta`.
 #[inline]
 pub fn is_property_need_flush(key: &str) -> bool {
-    !(key == DEL_PREFIXES_KEY || key == TRUNCATE_TS_KEY)
+    let no_flush = matches!(key, DEL_PREFIXES_KEY | TRUNCATE_TS_KEY | TXN_FILE_REF);
+    !no_flush
 }
 
 impl Deref for Shard {
@@ -820,14 +819,10 @@ impl Shard {
 
     pub(crate) fn clear_finished_txn_file_refs(&self, version: u64) {
         if let Some(val) = self.get_property(TXN_FILE_REF) {
-            let mut txn_file_refs = TxnFileRefs::new();
-            txn_file_refs.merge_from_bytes(&val).unwrap();
-            info!("before clear refs {:?}", txn_file_refs);
-            let mut refs = txn_file_refs.take_txn_file_refs().into_vec();
-            refs.retain(|r| r.get_version() > version || !r.get_lock_val_prefix().is_empty());
-            txn_file_refs.set_txn_file_refs(refs.into());
-            let new_val = txn_file_refs.write_to_bytes().unwrap();
-            self.set_property(TXN_FILE_REF, &new_val);
+            let mut prop = TxnFileRefPropertyHelper::from_property(Some(val)).unwrap();
+            prop.clear_finished(version);
+            self.set_property(TXN_FILE_REF, &prop.marshall());
+            info!("{} clear finished txn file ref", self.tag(); "prop" => ?prop);
         }
     }
 }

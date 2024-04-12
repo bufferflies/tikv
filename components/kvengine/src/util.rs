@@ -1,8 +1,11 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
 use bytes::{Buf, Bytes};
+use log_wrappers::Value;
+use protobuf::Message;
+use tikv_util::box_err;
 
-use crate::{DeletePrefixes, ShardMeta, DEL_PREFIXES_KEY};
+use crate::{DeletePrefixes, ShardMeta, ShardTag, UserMeta, DEL_PREFIXES_KEY};
 
 /// A helper function to evenly distribute `total` into `count` parts.
 /// Note: when `total` <= `count`, return `[1; total]`.
@@ -122,6 +125,74 @@ impl PropertiesHelper {
             props.mut_keys().push(DEL_PREFIXES_KEY.to_owned());
             props.mut_values().push(split_del_prefixes.marshal());
         }
+    }
+}
+
+#[derive(Debug)]
+pub struct TxnFileRefPropertyHelper {
+    txn_file_refs: kvenginepb::TxnFileRefs,
+}
+
+impl TxnFileRefPropertyHelper {
+    pub fn from_property(data: Option<Bytes>) -> crate::Result<Self> {
+        let mut txn_file_refs = kvenginepb::TxnFileRefs::new();
+        if let Some(data) = data {
+            txn_file_refs
+                .merge_from_bytes(&data)
+                .map_err(|err| -> crate::Error {
+                    box_err!(
+                        "failed to unmarshal TxnFileRefs: {:?}, data: {}",
+                        err,
+                        &Value::value(&data)
+                    )
+                })?;
+        }
+        Ok(Self { txn_file_refs })
+    }
+
+    pub fn marshall(&self) -> Vec<u8> {
+        self.txn_file_refs.write_to_bytes().unwrap()
+    }
+
+    pub fn merge_txn_file_ref(
+        &mut self,
+        tag: &ShardTag,
+        wb_ref: &kvenginepb::TxnFileRef,
+    ) -> (bool /* is_commit */, bool /* is_rollback */) {
+        let (is_commit, is_rollback) = if wb_ref.get_user_meta().is_empty() {
+            (false, false)
+        } else {
+            let user_meta = UserMeta::from_slice(&wb_ref.user_meta);
+            let is_rollback = user_meta.is_rollback();
+            (!is_rollback, is_rollback)
+        };
+
+        let mut refs = self.txn_file_refs.take_txn_file_refs().into_vec();
+        if let Some(idx) = refs.iter().position(|x| x.start_ts == wb_ref.start_ts) {
+            if is_rollback {
+                refs.remove(idx);
+            } else {
+                refs[idx] = wb_ref.clone();
+            }
+        } else {
+            debug_assert!(
+                !is_commit && !is_rollback,
+                "{} merge txn file ref: lock not found: wb_ref: {:?}, current: {:?}",
+                tag,
+                wb_ref,
+                self.txn_file_refs
+            );
+            refs.push(wb_ref.clone());
+        }
+        self.txn_file_refs.set_txn_file_refs(refs.into());
+
+        (is_commit, is_rollback)
+    }
+
+    pub fn clear_finished(&mut self, version: u64) {
+        let mut refs = self.txn_file_refs.take_txn_file_refs().into_vec();
+        refs.retain(|r| r.get_version() > version || !r.get_lock_val_prefix().is_empty());
+        self.txn_file_refs.set_txn_file_refs(refs.into());
     }
 }
 

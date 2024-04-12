@@ -17,7 +17,10 @@ use protobuf::Message;
 use slog_global::*;
 
 use super::*;
-use crate::table::{InnerKey, TableExt};
+use crate::{
+    table::{InnerKey, TableExt},
+    util::TxnFileRefPropertyHelper,
+};
 
 #[derive(Default, Clone)]
 pub struct ShardMeta {
@@ -52,6 +55,17 @@ impl ShardMeta {
         } else {
             unreachable!();
         };
+
+        let txn_file_locks = collect_snap_lock_txn_file_refs(snap)
+            .into_iter()
+            .filter_map(|txn_file_ref| {
+                txn_file_ref
+                    .get_user_meta()
+                    .is_empty()
+                    .then_some(txn_file_ref.start_ts)
+            })
+            .collect();
+
         let mut meta = Self {
             engine_id,
             id: cs.shard_id,
@@ -62,6 +76,7 @@ impl ShardMeta {
             base_version: snap.base_version,
             data_sequence: snap.data_sequence,
             max_ts: snap.max_ts,
+            txn_file_locks,
             ..Default::default()
         };
         for l0 in snap.get_l0_creates() {
@@ -441,6 +456,7 @@ impl ShardMeta {
     fn apply_flush(&mut self, cs: &pb::ChangeSet) {
         let flush = cs.get_flush();
         self.apply_properties(flush.get_properties());
+        self.clear_finished_txn_file_refs(flush.get_version());
         if flush.has_l0_create() {
             let l0 = flush.get_l0_create();
             self.add_file(l0.id, -1, 0, l0.get_smallest(), l0.get_biggest());
@@ -952,49 +968,22 @@ impl ShardMeta {
         self.seq = sequence;
     }
 
-    // Use with caution, make sure that `kv` is up-to-date.
-    pub fn recover_from_kv(&mut self, kv: &crate::engine::Engine) {
-        if let Some(shard) = kv.get_shard(self.id) {
-            let data = shard.get_data();
-
-            // txn_file_locks:
-            if !data.lock_txn_files.is_empty() {
-                let txn_file_locks = data
-                    .lock_txn_files
-                    .iter()
-                    .map(|lock_txn_file| {
-                        let lock = txn_types::Lock::parse(lock_txn_file.get_lock_val_prefix())
-                            .unwrap_or_else(|err| {
-                                panic!(
-                                    "{} parse lock_val_prefix error: {:?}, lock_txn_file: {:?}",
-                                    self.tag(),
-                                    err,
-                                    lock_txn_file
-                                );
-                            });
-                        lock.ts.into_inner()
-                    })
-                    .collect();
-                self.txn_file_locks = txn_file_locks;
-                info!(
-                    "{} ShardMeta recover txn file locks: {:?}",
-                    self.tag(),
-                    self.txn_file_locks
-                );
-            }
-        }
-    }
-
     pub fn merge_txn_file_ref(&mut self, wb_ref: &TxnFileRef, log_index: u64) {
-        if wb_ref.get_user_meta().is_empty() {
+        let tag = self.tag();
+
+        let mut prop =
+            TxnFileRefPropertyHelper::from_property(self.get_property(TXN_FILE_REF)).unwrap();
+        let (is_commit, is_rollback) = prop.merge_txn_file_ref(&tag, wb_ref);
+        self.set_property(TXN_FILE_REF, &prop.marshall());
+
+        if !is_commit && !is_rollback {
             self.txn_file_locks.insert(wb_ref.start_ts);
-            info!("{} ShardMeta merge txn file locks (insert by lock)", self.tag();
+            debug!("{} ShardMeta merge txn file locks (insert by lock)", self.tag();
                 "wb_ref" => ?wb_ref,
                 "log_index" => log_index,
                 "merged" => ?self.txn_file_locks,
             );
         } else {
-            let user_meta = UserMeta::from_slice(wb_ref.get_user_meta());
             let existed = self.txn_file_locks.remove(&wb_ref.start_ts);
             debug_assert!(
                 existed,
@@ -1004,12 +993,27 @@ impl ShardMeta {
                 log_index,
                 self.txn_file_locks
             );
-            info!("{} ShardMeta merge txn file locks (remove by commit/rollback)", self.tag();
+            debug!("{} ShardMeta merge txn file locks (remove by commit/rollback)", self.tag();
                 "wb_ref" => ?wb_ref,
                 "log_index" => log_index,
-                "commit_ts" => user_meta.commit_ts,
                 "merged" => ?self.txn_file_locks,
             );
+        }
+
+        info!("{} ShardMeta merge txn file ref", tag;
+            "wb_ref" => ?wb_ref,
+            "prop" => ?prop,
+            "locks" => ?self.txn_file_locks,
+            "is_commit" => is_commit,
+            "is_rollback" => is_rollback);
+    }
+
+    pub(crate) fn clear_finished_txn_file_refs(&mut self, version: u64) {
+        if let Some(val) = self.get_property(TXN_FILE_REF) {
+            let mut prop = TxnFileRefPropertyHelper::from_property(Some(val)).unwrap();
+            prop.clear_finished(version);
+            self.set_property(TXN_FILE_REF, &prop.marshall());
+            info!("{} ShardMeta clear finished txn file ref", self.tag(); "version" => version, "prop" => ?prop);
         }
     }
 

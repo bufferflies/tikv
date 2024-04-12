@@ -9,6 +9,7 @@ use slog_global::info;
 
 use crate::{
     table::{self, memtable, InnerKey, TxnFile},
+    util::TxnFileRefPropertyHelper,
     *,
 };
 
@@ -268,19 +269,12 @@ impl Engine {
         let old_data = shard.get_data();
         let mut lock_txn_files = old_data.lock_txn_files.clone();
 
-        let mut is_commit = false;
-        let mut is_rollback = false;
-        if !txn_file_ref.user_meta.is_empty() {
-            let user_meta = UserMeta::from_slice(&txn_file_ref.user_meta);
-            is_rollback = user_meta.is_rollback();
-            is_commit = !is_rollback;
-        }
         let txn_file = self
             .txn_chunk_mgr
             .load_txn_file_from_ref(shard.id, shard.ver, &txn_file_ref, true)
             .unwrap();
 
-        Self::merge_txn_file_ref(shard, txn_file_ref, is_rollback);
+        let (is_commit, is_rollback) = Self::merge_txn_file_ref(shard, txn_file_ref);
 
         // lock txn files will be merged into ShardData.
         Self::merge_lock_txn_files(&mut lock_txn_files, &txn_file, is_commit || is_rollback);
@@ -306,31 +300,17 @@ impl Engine {
         is_commit
     }
 
-    fn merge_txn_file_ref(shard: &Shard, wb_ref: TxnFileRef, is_rollback: bool) {
-        let mut shard_txn_file_refs = TxnFileRefs::new();
-        if let Some(shard_txn_file_refs_data) = shard.get_property(TXN_FILE_REF) {
-            shard_txn_file_refs
-                .merge_from_bytes(shard_txn_file_refs_data.chunk())
-                .unwrap();
-        }
-        let mut shard_refs = shard_txn_file_refs.take_txn_file_refs().into_vec();
-        if let Some(idx) = shard_refs
-            .iter()
-            .position(|x| x.start_ts == wb_ref.start_ts)
-        {
-            if is_rollback {
-                shard_refs.remove(idx);
-            } else {
-                shard_refs[idx] = wb_ref;
-            }
-        } else {
-            debug_assert!(wb_ref.get_user_meta().is_empty());
-            shard_refs.push(wb_ref);
-        }
-        shard_txn_file_refs.set_txn_file_refs(shard_refs.into());
-        shard
-            .properties
-            .set(TXN_FILE_REF, &shard_txn_file_refs.write_to_bytes().unwrap());
+    fn merge_txn_file_ref(
+        shard: &Shard,
+        wb_ref: TxnFileRef,
+    ) -> (bool /* is_commit */, bool /* is_rollback */) {
+        let tag = shard.tag();
+        let mut prop =
+            TxnFileRefPropertyHelper::from_property(shard.get_property(TXN_FILE_REF)).unwrap();
+        let (is_commit, is_rollback) = prop.merge_txn_file_ref(&tag, &wb_ref);
+        shard.properties.set(TXN_FILE_REF, &prop.marshall());
+        info!("{} merge txn file ref", tag; "wb_ref" => ?wb_ref, "prop" => ?prop);
+        (is_commit, is_rollback)
     }
 
     fn merge_lock_txn_files(
