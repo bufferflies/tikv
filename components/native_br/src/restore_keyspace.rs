@@ -70,6 +70,8 @@ const RESOLVE_LOCKS_BATCH_SIZE: usize = 1024;
 
 const WAL_CHUNK_INTEGRITY_CHECK_COUNT: usize = 3;
 
+const RESTORE_RFENGINE_CONCURRENCY: usize = 3;
+
 #[derive(Clone, Debug, Default)]
 pub struct RestoredKeyspace {
     pub keyspace_id: u32,
@@ -703,37 +705,80 @@ impl BackupCluster {
                 false
             }
         };
+        let mut raft_engines: HashMap<u64, RfEngine> = Default::default();
+        let mut cluster_tolerated_err = 0;
+        let mut recv_restore_rfenigne =
+            |result_rx: &mpsc::Receiver<Result<(u64, TikvConfig, RfEngine)>>| -> Result<()> {
+                // We can tolerate one store failure for lightweight restoration during fetch
+                // latest wal chunk from store.
+                match result_rx.recv().unwrap() {
+                    Err(err) if is_error_can_tolerate(&err) => {
+                        if tolerate_err == 0 {
+                            return Err(err);
+                        }
+                        warn!(
+                            "Keyspace {} setup raft engine failed, tolerate it: {:?}",
+                            cluster.tag(),
+                            err
+                        );
+                        tolerate_err -= 1;
+                        cluster_tolerated_err += 1;
+                    }
+                    Err(err) => return Err(err),
+                    Ok((store_id, store_config, rf_engine)) => {
+                        store_configs.insert(store_id, store_config);
+                        raft_engines.insert(store_id, rf_engine);
+                        tikv_util::info!(
+                            "Keyspace {} setup raft engine for store {} done",
+                            cluster.tag(),
+                            store_id
+                        );
+                    }
+                }
+                Ok(())
+            };
+        let (result_tx, result_rx) = tikv_util::mpsc::bounded(cluster_meta.stores.len());
+        let mut msg_count = 0;
 
         for store in &cluster_meta.stores {
             let store_id = store.get_store_id();
             let store_config = cluster.generate_store_config(store_id);
-            store_configs.insert(store_id, store_config);
 
-            // We can tolerate one store failure for lightweight restoration during fetch
-            // latest wal chunk from store.
-            match cluster.setup_raft_engine(
-                store_id,
-                cluster_meta,
-                store_configs.get(&store_id).unwrap(),
-                fetch_wal_timeout,
-            ) {
-                Err(err) if is_error_can_tolerate(&err) => {
-                    if tolerate_err == 0 {
-                        return Err(err);
-                    }
+            let tx = result_tx.clone();
+            let cluster_backup_meta = cluster_meta.clone();
+            let pd_client = cluster.pd_client.clone();
+            let s3fs = cluster.dfs.clone();
+            let keyspace_tag = cluster.tag().to_string();
+            std::thread::spawn(move || {
+                let res = BackupCluster::setup_raft_engine(
+                    store_id,
+                    &cluster_backup_meta,
+                    &store_config,
+                    pd_client,
+                    s3fs,
+                    keyspace_tag.clone(),
+                    fetch_wal_timeout,
+                );
+                if res.is_err() {
                     warn!(
-                        "Keyspace {} setup raft engine for store {} failed, tolerate it: {:?}",
-                        cluster.tag(),
-                        store_id,
-                        err
+                        "Keyspace {} setup raft engine for store {} failed",
+                        keyspace_tag, store_id
                     );
-                    tolerate_err -= 1;
-                    cluster.tolerated_err += 1;
                 }
-                Err(err) => return Err(err),
-                Ok(()) => {}
+                let _ = tx.send(res.map(|rf_engine| (store_id, store_config, rf_engine)));
+            });
+
+            if msg_count < RESTORE_RFENGINE_CONCURRENCY {
+                msg_count += 1;
+            } else {
+                recv_restore_rfenigne(&result_rx)?;
             }
         }
+        for _ in 0..msg_count {
+            recv_restore_rfenigne(&result_rx)?;
+        }
+        cluster.raft_engines = raft_engines;
+        cluster.tolerated_err = cluster_tolerated_err;
         cluster.load_shards()?;
 
         if archiving {
@@ -753,18 +798,20 @@ impl BackupCluster {
     }
 
     fn setup_raft_engine(
-        &mut self,
         store_id: u64,
         cluster_backup: &ClusterBackupMeta,
         conf: &TikvConfig,
+        pd_client: Arc<dyn PdClient>,
+        dfs: Arc<S3Fs>,
+        tag: String,
         fetch_wal_timeout: Duration,
-    ) -> Result<()> {
+    ) -> Result<RfEngine> {
         let is_lightweight = cluster_backup.is_lightweight;
         let snap_epoch = if is_lightweight {
             Some(
                 rfengine::lightweight_restore(
-                    self.dfs.clone(),
-                    &self.dfs.get_prefix(),
+                    dfs.clone(),
+                    &dfs.get_prefix(),
                     cluster_backup,
                     store_id,
                     Path::new(&conf.raft_store.raftdb_path),
@@ -774,7 +821,7 @@ impl BackupCluster {
             )
         } else {
             rfengine::restore(
-                self.dfs.clone(),
+                dfs.clone(),
                 cluster_backup,
                 store_id,
                 Path::new(&conf.raft_store.raftdb_path),
@@ -791,8 +838,8 @@ impl BackupCluster {
             let mut replay_wal_retry = 0;
             loop {
                 match replay_wal_logs(
-                    self.pd_client.clone(),
-                    self.dfs.clone(),
+                    pd_client.clone(),
+                    dfs.clone(),
                     store_id,
                     cluster_backup,
                     &rf_engine,
@@ -813,8 +860,7 @@ impl BackupCluster {
                         }
                         warn!(
                             "{} wal chunk integrity check failed, retry replay wal chunks, retry {} times.",
-                            self.tag(),
-                            replay_wal_retry
+                            tag, replay_wal_retry
                         );
                         let sleep_secs = 2u64.pow(replay_wal_retry as u32);
                         std::thread::sleep(Duration::from_secs(sleep_secs));
@@ -826,8 +872,7 @@ impl BackupCluster {
                 }
             }
         }
-        self.raft_engines.insert(store_id, rf_engine);
-        Ok(())
+        Ok(rf_engine)
     }
 
     // Take all raw metas to release memory.

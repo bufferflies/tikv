@@ -269,10 +269,9 @@ impl Manifest {
 
     // Check if we should do snapshot in `handle_rotate`.
     //
-    // We only do snapshot after manifest rewritten done for simplify the logic, at
-    // this time `self.epoch_id == self.first_epoch`.
+    // We only do snapshot every 4 epochs.
     pub(crate) fn should_snapshot(&self) -> bool {
-        self.epoch_id == self.first_epoch
+        self.epoch_id % 4 == 0
     }
 }
 
