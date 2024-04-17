@@ -33,9 +33,9 @@ jobs:
           TOKEN: ${{ secrets.GIT_ACTION_BOT }}
         run: git config --global url."https://${TOKEN}@github.com/".insteadOf "https://github.com/"
       - name: Install `rust` toolchain
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@master
         with:
-          profile: minimal
+          toolchain: nightly-2022-11-15
           components: clippy, rustfmt
       - name: Check format
         working-directory: ./
