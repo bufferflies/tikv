@@ -1,16 +1,8 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{
-    cmp::max,
-    collections::{hash_map::Entry, HashMap},
-    default::Default,
-    fs,
-    ops::Deref,
-    str::FromStr,
-    sync::Arc,
-    time::Duration,
-};
+use std::{cmp::max, default::Default, fs, ops::Deref, str::FromStr, sync::Arc, time::Duration};
 
+use dashmap::{mapref::entry::Entry, DashMap};
 use futures::StreamExt;
 use http::Uri;
 use k8s_openapi::{
@@ -29,9 +21,9 @@ use load_data::task::LoadTaskStates;
 use security::SecurityManager;
 use serde_json::json;
 use tikv_util::{box_err, config::ReadableSize, error, info, time::Instant, warn};
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 
-const CLEAN_UP_WORKER_TICK_INTERVAL: u64 = 30;
+const CLEAN_UP_WORKER_TICK_INTERVAL: u64 = 60;
 const WORKER_MIN_STORAGE_GB: usize = 64;
 const DEFAULT_LOAD_DATA_WORKER_NAME: &str = "load-data-worker";
 const DEFAULT_LOAD_DATA_WORKER_PORT: u16 = 19500;
@@ -118,7 +110,7 @@ pub(crate) struct WorkerScalerCore {
     cluster_id: u64,
     in_k8s: bool,
     http_client: security::HttpClient,
-    pods_map: Mutex<HashMap<String, WorkerPod>>,
+    pods_map: DashMap<String, Arc<RwLock<WorkerPod>>>,
     security_mgr: Arc<SecurityManager>,
 }
 
@@ -143,10 +135,21 @@ impl WorkerPod {
             if let Some(start) = &status.start_time {
                 worker_pod.started_at = start.0.timestamp();
                 worker_pod.updated_at = start.0.timestamp();
+                worker_pod.svc_name = new_worker_svc_name(task_id);
             }
-            worker_pod.svc_name = new_worker_svc_name(task_id);
         }
         worker_pod
+    }
+
+    fn init(&mut self, task_id: &str, pod: &Pod) {
+        self.name = pod.name_any();
+        if let Some(status) = &pod.status {
+            if let Some(start) = &status.start_time {
+                self.started_at = start.0.timestamp();
+                self.updated_at = start.0.timestamp();
+                self.svc_name = new_worker_svc_name(task_id);
+            }
+        }
     }
 
     fn update_task_states(
@@ -265,7 +268,7 @@ impl WorkerScaler {
                 sts_api,
                 pvc_api,
                 pod_api,
-                pods_map: Mutex::new(HashMap::new()),
+                pods_map: dashmap::DashMap::default(),
                 config: cfg.clone(),
                 pvc_template_name,
                 cluster_id,
@@ -300,20 +303,20 @@ impl WorkerScaler {
             .timeout(15);
         // TODO: the number of pods may not be consistent with the number of sts.
         let mut pods = self.pod_api.list(&list_params).await?;
-        let mut pods_map = self.pods_map.lock().await;
         for pod in pods.items.drain(..) {
             let name = pod.name_any();
             let task_id = parse_task_id_by_pod_name(name.as_str());
             assert!(!task_id.is_empty());
             info!("load pod {} task {}", name, task_id);
             let worker_pod = WorkerPod::new(&task_id, &pod);
-            pods_map.insert(task_id, worker_pod);
+            self.pods_map
+                .insert(task_id, Arc::new(RwLock::new(worker_pod)));
         }
         Ok(())
     }
 
     async fn clean_up_finished_workers(&self) {
-        let task_ids: Vec<String> = self.pods_map.lock().await.keys().cloned().collect();
+        let task_ids: Vec<String> = self.pods_map.iter().map(|x| x.key().clone()).collect();
         for task_id in task_ids {
             self.maybe_clean_up(&task_id).await;
         }
@@ -330,16 +333,14 @@ impl WorkerScaler {
         }
         let mut pvcs = res.unwrap();
         let mut orphan_pvc_tasks = vec![];
-        let pods_map = self.pods_map.lock().await;
         for pvc in pvcs.items.iter_mut() {
             let name = pvc.name_any();
             let task_id = parse_task_id_by_pvc_name(&name, &self.pvc_template_name);
             assert!(!task_id.is_empty());
-            if !pods_map.contains_key(&task_id) {
+            if !self.pods_map.contains_key(&task_id) {
                 orphan_pvc_tasks.push(task_id);
             }
         }
-        drop(pods_map);
         for task_id in orphan_pvc_tasks {
             info!("delete orphan pvc {}", task_id);
             self.delete_pvc(&task_id).await;
@@ -350,47 +351,52 @@ impl WorkerScaler {
         &self,
         task_id: &str,
         data_size_gb: usize,
-    ) -> kube::Result<WorkerPod> {
-        {
-            let mut pods_map = self.pods_map.lock().await;
-            if pods_map.len() >= self.config.worker_count_limit {
-                return Err(kube::Error::Service(box_err!(
-                    "worker count limit {} reached",
-                    self.config.worker_count_limit
-                )));
-            }
+    ) -> kube::Result<()> {
+        if self.pods_map.len() >= self.config.worker_count_limit {
+            return Err(kube::Error::Service(box_err!(
+                "worker count limit {} reached",
+                self.config.worker_count_limit
+            )));
+        }
 
-            match pods_map.entry(task_id.to_string()) {
-                Entry::Occupied(_) => {
-                    // don't return directly because the pod may be not ready.
-                }
-                Entry::Vacant(e) => {
-                    let num_cores = calculate_num_cores(data_size_gb, self.config.worker_max_cores);
-                    let storage_size_gb = max(data_size_gb * 2, WORKER_MIN_STORAGE_GB);
-                    let sts_name = new_worker_sts_name(task_id);
-                    let svc_name = new_worker_svc_name(task_id);
-                    self.create_sts(sts_name.clone(), num_cores, storage_size_gb)
-                        .await?;
-                    self.create_svc(
-                        svc_name.clone(),
-                        sts_name.clone(),
-                        self.config.worker_port as i32,
-                    )
-                    .await?;
-                    info!("created sts {:?} with svc {:?}", sts_name, svc_name);
-                    let mut worker_pod = WorkerPod::default();
-                    worker_pod.name = new_worker_pod_name(task_id);
-                    e.insert(worker_pod);
-                }
+        let mut create_worker = false;
+        match self.pods_map.entry(task_id.to_string()) {
+            Entry::Occupied(_) => {
+                // don't return directly because the pod may be not ready.
+            }
+            Entry::Vacant(e) => {
+                let mut worker_pod = WorkerPod::default();
+                worker_pod.name = new_worker_pod_name(task_id);
+                e.insert(Arc::new(RwLock::new(worker_pod)));
+                create_worker = true;
             }
         }
 
-        let worker_pod = self
+        if create_worker {
+            let num_cores = calculate_num_cores(data_size_gb, self.config.worker_max_cores);
+            let storage_size_gb = max(data_size_gb * 2, WORKER_MIN_STORAGE_GB);
+            let sts_name = new_worker_sts_name(task_id);
+            let svc_name = new_worker_svc_name(task_id);
+            self.create_sts(sts_name.clone(), num_cores, storage_size_gb)
+                .await?;
+            self.create_svc(
+                svc_name.clone(),
+                sts_name.clone(),
+                self.config.worker_port as i32,
+            )
+            .await?;
+            info!("created sts {:?} with svc {:?}", sts_name, svc_name);
+        }
+
+        let pod = self
             .wait_worker_pod_ready(task_id, Duration::from_secs(DEFAULT_WAIT_POD_READY_TIMEOUT))
             .await?;
-        let mut pods_map = self.pods_map.lock().await;
-        pods_map.insert(task_id.to_string(), worker_pod.clone());
-        Ok(worker_pod)
+        let locked_worker_pod = self.pods_map.get_mut(task_id).unwrap().clone();
+        let mut worker_pod = locked_worker_pod.write().await;
+        if worker_pod.started_at == 0 {
+            worker_pod.init(task_id, &pod);
+        }
+        Ok(())
     }
 
     async fn create_sts(
@@ -480,11 +486,7 @@ impl WorkerScaler {
         Ok(())
     }
 
-    async fn wait_worker_pod_ready(
-        &self,
-        task_id: &str,
-        timeout: Duration,
-    ) -> kube::Result<WorkerPod> {
+    async fn wait_worker_pod_ready(&self, task_id: &str, timeout: Duration) -> kube::Result<Pod> {
         let start = Instant::now();
         let pod_name = new_worker_pod_name(task_id);
         loop {
@@ -502,7 +504,7 @@ impl WorkerScaler {
             }
             let status = pod.status.as_ref().unwrap();
             if status.phase == Some("Running".into()) {
-                return Ok(WorkerPod::new(task_id, &pod));
+                return Ok(pod);
             }
         }
     }
@@ -528,8 +530,11 @@ impl WorkerScaler {
         }
     }
 
-    async fn get_pod_task_states(&self, worker_pod: &WorkerPod) -> Option<Vec<LoadTaskStates>> {
-        let worker_addr = self.get_worker_addr(worker_pod)?;
+    async fn get_pod_task_states(
+        &self,
+        worker_pod_name: &str,
+        worker_addr: &str,
+    ) -> Option<Vec<LoadTaskStates>> {
         let load_data_url = self.get_worker_tasks_url(worker_addr);
         let resp_body = if self.in_k8s {
             let uri = Uri::from_str(load_data_url.as_str()).unwrap();
@@ -547,7 +552,7 @@ impl WorkerScaler {
             let ap = AttachParams::default();
             let proc = self
                 .pod_api
-                .exec(&worker_pod.name, vec!["curl", load_data_url.as_str()], &ap)
+                .exec(worker_pod_name, vec!["curl", load_data_url.as_str()], &ap)
                 .await
                 .ok()?;
             get_proc_output(proc).await
@@ -558,24 +563,25 @@ impl WorkerScaler {
 
     async fn get_pod_task_states_with_retry(
         &self,
-        worker_pod: &WorkerPod,
+        worker_pod_name: &str,
+        worker_addr: &str,
     ) -> Option<Vec<LoadTaskStates>> {
         for _ in 0..6 {
-            let tasks = self.get_pod_task_states(worker_pod).await;
+            let tasks = self.get_pod_task_states(worker_pod_name, worker_addr).await;
             if tasks.is_some() {
                 return tasks;
             }
+            info!(
+                "{} can't get tasks with addr {}",
+                worker_pod_name, worker_addr
+            );
             tokio::time::sleep(Duration::from_secs(10)).await;
         }
         None
     }
 
     async fn maybe_clean_up(&self, task_id: &str) {
-        let mut pods_map = self.pods_map.lock().await;
-        let worker_pod_opt = pods_map.get_mut(task_id);
-        if worker_pod_opt.is_none() {
-            return;
-        }
+        info!("try to clean up {}", task_id);
         let pod_name = new_worker_pod_name(task_id);
         let pod = self.pod_api.get(&pod_name).await;
         if let Err(err) = pod {
@@ -583,11 +589,15 @@ impl WorkerScaler {
             return;
         }
         let pod = pod.unwrap();
-        if pod.status.is_none() || pod.status.unwrap().phase.unwrap() != "Running" {
+        if pod.status.is_none() || pod.status.clone().unwrap().phase.unwrap() != "Running" {
             return;
         }
-        let worker_pod = worker_pod_opt.unwrap();
-        // If this task has been completed during the last round of checks, the
+
+        let locked_worker_pod = self.pods_map.get_mut(task_id).unwrap().clone();
+        let mut worker_pod = locked_worker_pod.write().await;
+        if worker_pod.started_at == 0 {
+            worker_pod.init(task_id, &pod);
+        }
         // `canceled` flag will be set. We did not clean up the task
         // immediately, this way we can ensure that the pod can survive for
         // `CLEAN_UP_WORKER_TICK_INTERVAL` after completion.
@@ -596,11 +606,24 @@ impl WorkerScaler {
             self.delete_sts(task_id).await;
             self.delete_svc(task_id).await;
             self.delete_pvc(task_id).await;
-            pods_map.remove(task_id);
+            self.pods_map.remove(task_id);
             return;
         }
-        let tasks = self.get_pod_task_states_with_retry(worker_pod).await;
+        let worker_addr = self.get_worker_addr(&worker_pod);
+        if worker_addr.is_none() {
+            error!("{} cann't get worker addr", task_id);
+            return;
+        }
+        let worker_pod_name = worker_pod.name.clone();
+        // release lock
+        drop(worker_pod);
+
+        let tasks = self
+            .get_pod_task_states_with_retry(&worker_pod_name, &worker_addr.unwrap())
+            .await;
         let now_timestamp = chrono::Utc::now().timestamp();
+
+        let mut worker_pod = locked_worker_pod.write().await;
         worker_pod.update_task_states(tasks, now_timestamp, self.config.expire_seconds);
     }
 
@@ -620,10 +643,10 @@ impl WorkerScaler {
         let timeout = Duration::from_secs(DEFAULT_WAIT_POD_READY_TIMEOUT);
         loop {
             {
-                let pods_map = self.pods_map.lock().await;
-                let worker_pod = pods_map.get(task_id)?;
+                let locked_worker_pod = self.pods_map.get(task_id)?;
+                let worker_pod = locked_worker_pod.read().await;
                 if !worker_pod.svc_name.is_empty() {
-                    return self.get_worker_addr(worker_pod);
+                    return self.get_worker_addr(&worker_pod);
                 }
             }
             if start.saturating_elapsed() > timeout {
@@ -634,7 +657,7 @@ impl WorkerScaler {
         }
     }
 
-    pub(crate) fn get_worker_tasks_url(&self, worker_addr: String) -> String {
+    pub(crate) fn get_worker_tasks_url(&self, worker_addr: &str) -> String {
         format!("{}?cluster_id={}", worker_addr, self.cluster_id)
     }
 

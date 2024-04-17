@@ -153,12 +153,13 @@ pub(crate) async fn handle_load_data(
                         ),
                     ));
                 }
+                info!("{} init task with data size {}", task_id, data_size);
 
                 if manager.worker_scaler.is_some() {
                     let worker_scaler = manager.worker_scaler.as_ref().unwrap();
                     let worker_addr = worker_scaler.get_worker_addr_by_task_id(&task_id).await;
                     if let Some(addr) = worker_addr {
-                        info!("Get worker addr from cache: {}", addr);
+                        info!("{} get worker addr from cache: {}", task_id, addr);
                         let resp = Response::builder()
                             .header("Location", addr)
                             .status(StatusCode::FOUND)
@@ -173,16 +174,20 @@ pub(crate) async fn handle_load_data(
                         || (manager.running_tasks.len()
                             > manager.worker_scaler_conf.spawn_running_tasks
                             && data_size != 0));
+                info!("current running tasks {}", manager.running_tasks.len());
                 if spawn_load_data_worker {
                     let worker_scaler = manager.worker_scaler.as_ref().unwrap();
                     let data_size_gb = data_size / 1024 / 1024 / 1024;
-                    let worker_pod_res = worker_scaler
+                    let res = worker_scaler
                         .create_worker(&task_id, data_size_gb as usize)
                         .await;
-                    match worker_pod_res {
-                        Ok(worker_pod) => {
-                            let worker_addr = worker_scaler.get_worker_addr(&worker_pod).unwrap();
-                            info!("Get worker addr: {}", worker_addr);
+                    match res {
+                        Ok(()) => {
+                            let worker_addr = worker_scaler
+                                .get_worker_addr_by_task_id(&task_id)
+                                .await
+                                .unwrap();
+                            info!("{} get worker addr: {}", task_id, worker_addr);
                             let resp = Response::builder()
                                 .header("Location", worker_addr)
                                 .status(StatusCode::FOUND)
@@ -199,7 +204,7 @@ pub(crate) async fn handle_load_data(
                     }
                 }
                 let task_ctx = TaskContext {
-                    task_id,
+                    task_id: task_id.clone(),
                     start_ts,
                     commit_ts,
                     inner_key_off: None,
@@ -208,6 +213,7 @@ pub(crate) async fn handle_load_data(
                 };
                 // step 1: on start, client call init task
                 manager.init_task(task_ctx);
+                info!("{} init task successfully", task_id);
                 Ok(make_response(StatusCode::OK, ""))
             }
         }
