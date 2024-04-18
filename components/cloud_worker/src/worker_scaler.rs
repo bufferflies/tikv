@@ -37,8 +37,10 @@ const DEFAULT_TEMPLATE_STS_NAME: &str = "tikv-api";
 const DEFAULT_WORKER_COUNT_LIMIT: usize = 1024;
 const DEFAULT_WAIT_POD_READY_TIMEOUT: u64 = 60 * 5;
 
+const APP_LABEL: &str = "app";
 const K8S_LABEL_NAME: &str = "app.kubernetes.io/name";
 const K8S_LABEL_SERVICE: &str = "app.kubernetes.io/service";
+const K8S_LABEL_COMPONENT: &str = "app.kubernetes.io/component";
 const K8S_NAMESPACE_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/namespace";
 
 const NETWORK_PROTOCOL: &str = "TCP";
@@ -424,13 +426,12 @@ impl WorkerScaler {
         spec.replicas = Some(1);
         let pod_template = &mut spec.template;
         let pod_metadata = pod_template.metadata.as_mut().unwrap();
-        pod_metadata.labels = Some(
-            serde_json::from_value(json!({
-                K8S_LABEL_NAME: self.config.name.clone(),
-                K8S_LABEL_SERVICE: sts_name.clone(),
-            }))
-            .unwrap(),
-        );
+        let mut labels = pod_metadata.labels.take().unwrap_or_default();
+        labels.insert(APP_LABEL.to_string(), self.config.name.clone());
+        labels.insert(K8S_LABEL_NAME.to_string(), self.config.name.clone());
+        labels.insert(K8S_LABEL_COMPONENT.to_string(), self.config.name.clone());
+        labels.insert(K8S_LABEL_SERVICE.to_string(), sts_name.clone());
+        pod_metadata.labels = Some(labels);
         let pod_template_spec = pod_template.spec.as_mut().unwrap();
         let pod_container = pod_template_spec.containers.first_mut().unwrap();
         let request_cpu = format!("{}", num_cores);
