@@ -69,7 +69,14 @@ Handle raft procedure.
 RaftAuxWorker is used to handle part of the raft task to eliminate single thread bottleneck.
 It handles raft worker tasks except `handle_store_msg` and `receive_msgs`.
 On each loop, the main raft worker must sync the aux raft worker to avoid race.
-If the main raft worker is not busy, it does not use aux worker to reduce the overhead of context switching.
+The aux worker count can be configured by 
+
+```
+[raftstore]
+store-pool-size = 2
+````
+
+The aux worker count is `store-pool-size - 1`.
 
 # 4. ApplyWorker main loop
 

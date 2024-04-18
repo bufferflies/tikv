@@ -100,8 +100,6 @@ pub struct Config {
 
     pub enable_inner_key_offset: bool,
 
-    pub enable_aux_worker_duration: ReadableDuration,
-
     pub aux_worker_count: usize,
 }
 
@@ -145,7 +143,6 @@ impl Default for Config {
             channel_capacity: 40960,
             apply_pool_size: 3,
             enable_inner_key_offset: false,
-            enable_aux_worker_duration: ReadableDuration::millis(1),
             aux_worker_count: 1,
         }
     }
@@ -204,6 +201,7 @@ impl Config {
         cfg.enable_region_bucket = old_cop.enable_region_bucket;
         cfg.region_bucket_size = old_cop.region_bucket_size;
 
+        cfg.aux_worker_count = old.store_batch_system.pool_size.saturating_sub(1);
         cfg.apply_pool_size = old.apply_batch_system.pool_size;
         cfg.local_file_gc_tick_interval = old.local_file_gc_tick_interval;
         cfg.local_file_gc_timeout = old.local_file_gc_timeout;

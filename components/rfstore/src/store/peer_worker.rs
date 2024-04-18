@@ -139,17 +139,18 @@ pub(crate) struct RaftWorker {
     tick_millis: u64,
     store_fsm: StoreFsm,
     batch_msg_count: usize,
-    process_inbox_duration: Duration,
     aux_task_senders: Vec<Sender<Vec<PeerInbox>>>,
     aux_res_receivers: Vec<Receiver<()>>,
     sent_aux_task: Vec<bool>,
-    enable_aux_duration: Duration,
     aux_handles: Vec<std::thread::JoinHandle<()>>,
 }
 
 const MAX_BATCH_COUNT: usize = 1024;
 const MAX_BATCH_SIZE: usize = 1024 * 1024;
 const PEER_INBOX_STATISTIC_COUNT: usize = 5;
+
+// The inbox count is 1 or 2 in most of the cases.
+const AUX_MIN_INBOX_COUNT: usize = 2;
 
 impl RaftWorker {
     pub(crate) fn new(
@@ -168,7 +169,6 @@ impl RaftWorker {
             apply_receivers.push(receiver);
         }
         let tick_millis = ctx.cfg.raft_base_tick_interval.as_millis();
-        let enable_aux_duration = ctx.cfg.enable_aux_worker_duration.0;
         (
             Self {
                 ctx,
@@ -181,11 +181,9 @@ impl RaftWorker {
                 tick_millis,
                 store_fsm,
                 batch_msg_count: 0,
-                process_inbox_duration: Duration::ZERO,
                 aux_task_senders: vec![],
                 aux_res_receivers: vec![],
                 sent_aux_task: vec![],
-                enable_aux_duration,
                 aux_handles: vec![],
             },
             apply_receivers,
@@ -235,15 +233,12 @@ impl RaftWorker {
                     Some(&mut inbox_peer_stats),
                 );
             });
-            self.process_inbox_duration = loop_start.saturating_elapsed();
-            if self.process_inbox_duration > Duration::from_millis(50) {
+            let process_inbox_duration = loop_start.saturating_elapsed();
+            if process_inbox_duration > Duration::from_millis(50) {
                 inbox_peer_stats.sort_by(|a, b| b.elapsed.cmp(&a.elapsed));
                 warn!(
                     "store_id: {} raft worker batch loop takes too long, process_inbox_elapsed: {:?}, top_{} peers: {:?}",
-                    store_id,
-                    self.process_inbox_duration,
-                    PEER_INBOX_STATISTIC_COUNT,
-                    inbox_peer_stats
+                    store_id, process_inbox_duration, PEER_INBOX_STATISTIC_COUNT, inbox_peer_stats
                 );
             }
             inbox_peer_stats.fill(InboxPeerStat::default());
@@ -261,11 +256,13 @@ impl RaftWorker {
             // avoid race.
             return;
         }
-        if self.process_inbox_duration < self.enable_aux_duration {
-            // If the raft worker is not busy, use aux worker introduces extra latency.
+        if self.ctx.cfg.aux_worker_count == 0 {
             return;
         }
-        if self.ctx.cfg.aux_worker_count == 0 {
+        if inboxes.len() <= AUX_MIN_INBOX_COUNT {
+            // The aux worker is helpful only when the main raft worker is busy.
+            // When the inboxes.len() is small, redirect the task to aux worker doesn't
+            // have any benefit but increase the latency.
             return;
         }
         let mut aux_inboxes = vec![];
@@ -275,7 +272,7 @@ impl RaftWorker {
         while let Some(inbox) = inboxes.pop() {
             aux_msg_count += inbox.msgs.len();
             aux_inboxes.push(inbox);
-            if aux_msg_count > target_aux_msg_count {
+            if aux_msg_count >= target_aux_msg_count {
                 self.aux_task_senders[aux_worker_idx]
                     .send(mem::take(&mut aux_inboxes))
                     .unwrap();
@@ -286,6 +283,12 @@ impl RaftWorker {
                     break;
                 }
             }
+        }
+        if !aux_inboxes.is_empty() {
+            self.aux_task_senders[aux_worker_idx]
+                .send(mem::take(&mut aux_inboxes))
+                .unwrap();
+            self.sent_aux_task[aux_worker_idx] = true;
         }
     }
 
