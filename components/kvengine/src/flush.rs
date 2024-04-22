@@ -174,7 +174,10 @@ impl Engine {
                 }
             }
         }
-        assert!(errs.is_empty());
+        if !errs.is_empty() {
+            error!("{} flush mem-tables failed {:?}", tag, errs);
+            return Err(errs.pop().unwrap());
+        }
         Ok(cs)
     }
 
