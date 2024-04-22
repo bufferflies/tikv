@@ -248,6 +248,7 @@ impl RemoteDagDispatcher {
             .map_err(|e| Error::Other(e.to_string()))?;
         let client = self.remote_ctx.client.clone();
         let (tx, rx) = tokio::sync::oneshot::channel();
+        let tag = self.tag.clone();
         self.remote_ctx.runtime.spawn(async move {
             let res = tokio::time::timeout(
                 deadline.saturating_duration_since(Instant::now_coarse()),
@@ -270,7 +271,9 @@ impl RemoteDagDispatcher {
             )
             .await
             .unwrap_or_else(|_| Err(Error::DeadlineExceeded));
-            tx.send(res).unwrap();
+            if let Err(_err) = tx.send(res) {
+                warn!("{} send remote coprocessor response failed", tag);
+            }
         });
         rx.await.unwrap()
     }

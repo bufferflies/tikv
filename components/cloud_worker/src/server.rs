@@ -40,6 +40,7 @@ use tikv_util::{
     metrics::{dump, dump_to},
     quota_limiter::QuotaLimiter,
     time::InstantExt,
+    warn,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -262,10 +263,16 @@ async fn handle_remote_analysis(
     start_time = Instant::now();
     let snap = RegionSnapshot::from_snapshot(snap_access);
     let (tx, rx) = tokio::sync::oneshot::channel();
+    let tag_clone = tag.clone();
     std::thread::spawn(move || {
         let result =
             tikv::coprocessor::parse_request_and_remote_analyze::<RegionSnapshot>(remote_req, snap);
-        tx.send(result).unwrap();
+        if let Err(_err) = tx.send(result) {
+            // Send failed only when `rx` is dropped, should happen only when the server is
+            // shutting down. Don't print out the error as it contains the full
+            // data of result.
+            warn!("{} failed to send analyze result", tag_clone);
+        }
     });
     match rx.await.unwrap() {
         Ok(data) => {

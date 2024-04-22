@@ -1562,7 +1562,12 @@ pub async fn handle_remote_compaction(
     std::thread::spawn(move || {
         tikv_util::set_current_region(ctx.req.shard_id);
         let result = local_compact(&ctx);
-        tx.send(result).unwrap();
+        if let Err(err) = tx.send(result) {
+            // Send failed only when `rx` is dropped, should happen only when the server is
+            // shutting down.
+            let tag = ShardTag::from_comp_req(&ctx.req);
+            warn!("{} failed to send compaction result: {:?}", tag, err);
+        }
     });
     match rx.await.unwrap() {
         Ok(cs) => {
