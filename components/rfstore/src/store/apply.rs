@@ -428,7 +428,9 @@ impl Applier {
         // Maybe snap is stale, try to get snap access again.
         snap = kv.get_snap_access(region_id).unwrap();
         self.snap = Some(snap.clone());
-        let item = snap.get(mvcc::LOCK_CF, key, u64::MAX);
+        // If the lock is txn file, the commit will be executed in exec_txn_file_ref.
+        // So we don't need to read the txn files here.
+        let item = snap.get_non_txn_file_lock(key);
         if item.value_len() > 0 {
             return item.get_value().to_vec();
         }

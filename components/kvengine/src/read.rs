@@ -461,11 +461,27 @@ impl SnapAccessCore {
             version,
             &mut item.path,
             item.owned_val.as_mut().unwrap(),
+            false,
         );
         if item.val.is_blob_ref() {
             item.owned_blob = Some(self.fetch_blob(inner_key, &item.val));
             item.val.fill_in_blob(item.owned_blob.as_ref().unwrap());
         }
+        item
+    }
+
+    pub fn get_non_txn_file_lock(&self, key: &[u8]) -> Item<'_> {
+        let inner_key = InnerKey::from_outer_key(key, self.data.inner_key_off);
+        let mut item = Item::new();
+        item.owned_val = Some(vec![]);
+        item.val = self.get_value(
+            LOCK_CF,
+            inner_key,
+            u64::MAX,
+            &mut item.path,
+            item.owned_val.as_mut().unwrap(),
+            true,
+        );
         item
     }
 
@@ -476,8 +492,9 @@ impl SnapAccessCore {
         version: u64,
         path: &mut AccessPath,
         out_val_owner: &mut Vec<u8>,
+        ignore_txn_file: bool,
     ) -> table::Value {
-        if cf == LOCK_CF {
+        if cf == LOCK_CF && !ignore_txn_file {
             for txn_file in &self.data.lock_txn_files {
                 let (_, val) = txn_file.get_value(inner_key, out_val_owner);
                 if val.is_valid() {
