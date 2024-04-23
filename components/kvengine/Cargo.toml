@@ -78,7 +78,7 @@ url = "2"
 xorf = { git = "https://github.com/youjiali1995/xorf", branch = "0.8.0-custom-serde", features = [
     "serde",
 ] }
-zstd-sys = "2.0.7"
+zstd-sys = "2.0.9"
 
 [dependencies.rocksdb]
 git = "https://github.com/tikv/rust-rocksdb.git"
