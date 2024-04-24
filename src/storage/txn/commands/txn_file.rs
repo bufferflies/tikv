@@ -11,6 +11,7 @@ use kvengine::{
 };
 use kvenginepb::TxnFileRef;
 use kvproto::kvrpcpb::WriteConflictReason;
+use protobuf::Message;
 use tikv_kv::{Snapshot, WriteData};
 use txn_types::{Key, LockType, TimeStamp, WriteType};
 
@@ -672,7 +673,11 @@ impl CommandExt for TxnFileCommand {
     }
 
     fn write_bytes(&self) -> usize {
-        self.txn_file.size() * 64 * 1024 * 1024
+        let mut bytes = self.txn_file_ref.compute_size() as usize;
+        if let Command::Prewrite(_) = self.inner_cmd.as_ref().unwrap().as_ref() {
+            bytes += self.txn_file.size();
+        }
+        bytes
     }
 
     fn gen_lock(&self) -> Lock {
