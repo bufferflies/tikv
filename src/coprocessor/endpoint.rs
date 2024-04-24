@@ -26,7 +26,7 @@ use security::SecurityManager;
 use tidb_query_common::execute_stats::ExecSummary;
 use tikv_alloc::trace::MemoryTraceGuard;
 use tikv_kv::SnapshotExt;
-use tikv_util::{quota_limiter::QuotaLimiter, time::Instant};
+use tikv_util::{codec::bytes::encode_bytes, quota_limiter::QuotaLimiter, time::Instant};
 use tipb::{AnalyzeReq, AnalyzeType, ChecksumRequest, ChecksumScanOn, DagRequest, ExecType};
 use tokio::sync::Semaphore;
 use txn_types::Lock;
@@ -488,16 +488,19 @@ impl<E: Engine> Endpoint<E> {
         let latest_buckets = snapshot.ext().get_buckets();
 
         // Check if the buckets version is latest.
-        // skip if request don't carry this bucket version.
         if let Some(ref buckets) = latest_buckets &&
-            buckets.version > tracker.req_ctx.context.buckets_version &&
-            tracker.req_ctx.context.buckets_version != 0 {
-                let mut bucket_not_match = errorpb::BucketVersionNotMatch::default();
-                bucket_not_match.set_version(buckets.version);
-                bucket_not_match.set_keys(buckets.keys.clone().into());
-                let mut err = errorpb::Error::default();
-                err.set_bucket_version_not_match(bucket_not_match);
-                return Err(Error::Region(err));
+            buckets.version > tracker.req_ctx.context.buckets_version {
+                // check if the request has large range, we don't need to return error if the range is small.
+                let lower_bound_key = encode_bytes(&tracker.req_ctx.lower_bound);
+                let upper_bound_key = encode_bytes(&tracker.req_ctx.upper_bound);
+                if buckets.span_count(&lower_bound_key, &upper_bound_key) > 1 {
+                    let mut bucket_not_match = errorpb::BucketVersionNotMatch::default();
+                    bucket_not_match.set_version(buckets.version);
+                    bucket_not_match.set_keys(buckets.keys.clone().into());
+                    let mut err = errorpb::Error::default();
+                    err.set_bucket_version_not_match(bucket_not_match);
+                    return Err(Error::Region(err));
+                }
         }
         // When snapshot is retrieved, deadline may exceed.
         tracker.on_snapshot_finished();

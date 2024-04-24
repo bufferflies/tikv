@@ -2022,6 +2022,7 @@ impl PdClient for TestPdClient {
             .and_modify(|current| {
                 if current.meta < buckets.meta {
                     std::mem::swap(current, &mut buckets);
+                    return;
                 }
 
                 pd_client::merge_bucket_stats(

@@ -489,10 +489,9 @@ pub(crate) struct Peer {
     /// lead_transferee if the peer is in a leadership transferring.
     pub lead_transferee: u64,
 
-    /// Record the region size at the time of last buckets splitting. If the
-    /// diff between current region size and this exceeds a threshold,
-    /// buckets will be refreshed.
-    pub(crate) last_bucket_split_region_size: u64,
+    /// Record the shard meta sequence at the time of last buckets splitting. If
+    /// the meta sequence changed, buckets will be refreshed.
+    pub(crate) last_bucket_update_meta_sequence: u64,
 
     pub(crate) buckets: Option<BucketStat>,
     pub(crate) bucket_version: u64,
@@ -599,7 +598,7 @@ impl Peer {
             cmd_epoch_checker: Default::default(),
             need_campaign: false,
             lead_transferee: raft::INVALID_ID,
-            last_bucket_split_region_size: 0,
+            last_bucket_update_meta_sequence: 0,
             buckets: None,
             bucket_version: 0,
             pending_merge_state: None,
@@ -1307,11 +1306,6 @@ impl Peer {
         }
     }
 
-    pub(crate) fn reset_buckets(&mut self) {
-        self.buckets = None;
-        self.last_bucket_split_region_size = 0;
-    }
-
     fn on_role_changed(&mut self, ctx: &mut RaftContext, ready: &Ready) {
         // Update leader lease when the Raft state changes.
         if let Some(ss) = ready.ss() {
@@ -1374,7 +1368,6 @@ impl Peer {
                 .snapshot_not_ready_peers
                 .borrow_mut()
                 .clear();
-            self.reset_buckets();
         }
         self.lead_transferee = self.raft_group.raft.lead_transferee.unwrap_or_default();
     }
@@ -1407,21 +1400,22 @@ impl Peer {
         None
     }
 
-    fn update_buckets(&mut self, ctx: &RaftContext) {
+    pub fn update_buckets(&mut self, ctx: &RaftContext) {
         if !ctx.cfg.enable_region_bucket {
             return;
         }
         if let Some(shard) = ctx.global.engines.kv.get_shard(self.region_id) {
-            let estimated_size = shard.get_estimated_size();
-            let bucket_size = ctx.cfg.region_bucket_size.0;
-            let size_diff = estimated_size.abs_diff(self.last_bucket_split_region_size);
-            if size_diff < bucket_size && self.buckets.is_some() {
+            // Update the buckets whenever the shard meta sequence change, so the bucket
+            // keys would be more accurate than size diff.
+            let meta_sequence = shard.get_meta_sequence();
+            if meta_sequence == self.last_bucket_update_meta_sequence {
                 debug!("{} update_buckets:skip", self.tag();
-                    "size_diff" => size_diff,
-                    "estimated_size" => estimated_size,
-                    "last_bucket_split_region_size" => self.last_bucket_split_region_size);
+                    "last_bucket_update_meta_sequence" => self.last_bucket_update_meta_sequence);
                 return;
             }
+            self.last_bucket_update_meta_sequence = meta_sequence;
+            let bucket_size = ctx.cfg.region_bucket_size.0;
+            let estimated_size = shard.get_estimated_size();
             let expected_bucket_count = (estimated_size + bucket_size - 1) / bucket_size;
             let mut bucket_keys = vec![self.region().get_start_key().to_vec()];
             if let Some(keys) = shard.get_evenly_split_keys(expected_bucket_count as usize) {
@@ -1438,14 +1432,26 @@ impl Peer {
                 bucket_keys.dedup();
             }
             bucket_keys.push(self.region().get_end_key().to_vec());
+            if let Some(old_buckets) = self.buckets.as_ref() {
+                if old_buckets.meta.keys == bucket_keys {
+                    // Skip update if the keys are same.
+                    info!("{} skip update buckets for same keys", self.tag());
+                    return;
+                }
+            }
             let mut bucket_meta = BucketMeta::new(self.region(), bucket_keys, bucket_size);
             bucket_meta.version = self.bucket_version;
             bucket_meta.incr_version(self.term());
+            info!(
+                "{} update buckets version {}, keys {}",
+                self.tag(),
+                bucket_meta.version,
+                bucket_meta.keys.len()
+            );
             let stats = new_bucket_write_stats(&bucket_meta);
             let bucket_stat = BucketStat::new(Arc::new(bucket_meta), stats);
             self.bucket_version = bucket_stat.meta.version;
             self.buckets = Some(bucket_stat);
-            self.last_bucket_split_region_size = estimated_size;
             if let Some(mut reader) = ctx.global.readers.get_mut(&self.region_id) {
                 reader.update(ReadProgress::RegionBuckets(
                     self.buckets.as_ref().unwrap().meta.clone(),

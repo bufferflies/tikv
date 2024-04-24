@@ -1262,7 +1262,6 @@ impl<'a> StoreMsgHandler<'a> {
                 );
             }
         }
-        peer_fsm.peer.reset_buckets();
 
         let mut new_peers = vec![];
         for new_region in regions {
@@ -1818,7 +1817,6 @@ impl<'a> StoreMsgHandler<'a> {
                 "peer_id" => peer_fsm.peer_id(),
             );
         }
-        peer_fsm.peer.reset_buckets();
         drop(peer_fsm);
         let source_id = source.get_id();
         if let Some(source_peer) = self.ctx.try_get_peer(source_id) {

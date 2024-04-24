@@ -1153,6 +1153,11 @@ impl<'a> PeerMsgHandler<'a> {
                 self.split_by_iterate(shard);
                 return true;
             }
+            if self.fsm.peer.last_bucket_update_meta_sequence != shard.get_meta_sequence() {
+                // In case the region is under heavy write, we need to update the bucket more
+                // frequently than pd heartbeat.
+                self.fsm.peer.update_buckets(self.ctx);
+            }
             let region_max_size = self.ctx.cfg.region_split_size.0 * 3 / 2;
             let region_max_entries = self.ctx.cfg.region_split_keys * 3 / 2;
             raftstore::coprocessor::metrics::REGION_SIZE_HISTOGRAM.observe(estimated_size as f64);

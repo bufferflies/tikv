@@ -94,7 +94,7 @@ pub struct BucketMeta {
     pub region_id: u64,
     pub version: u64,
     pub region_epoch: metapb::RegionEpoch,
-    pub keys: Vec<Vec<u8>>,
+    pub keys: Vec<Vec<u8>>, // keys are encoded.
     pub sizes: Vec<u64>,
 }
 
@@ -169,6 +169,18 @@ impl BucketMeta {
         self.sizes[idx - 1] += self.sizes[idx];
         self.keys.remove(idx);
         self.sizes.remove(idx);
+    }
+
+    pub fn span_count(&self, encoded_lower_bound: &[u8], encoded_upper_bound: &[u8]) -> usize {
+        let mut overlap_count = 0;
+        let start = 1;
+        let end = self.keys.len() - 1;
+        for key in &self.keys[start..end] {
+            if encoded_lower_bound <= key.as_slice() && key.as_slice() < encoded_upper_bound {
+                overlap_count += 1;
+            }
+        }
+        overlap_count
     }
 }
 
