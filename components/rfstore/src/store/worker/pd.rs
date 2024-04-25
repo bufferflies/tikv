@@ -268,27 +268,24 @@ impl ReportBucket {
                     self.current_stat.meta.clone(),
                     pd_client::new_bucket_stats(&self.current_stat.meta),
                 );
-                // Buckets may be changed, recalculate last stats according to current meta.
-                merge_bucket_stats(
-                    &delta.meta.keys,
-                    &mut delta.stats,
-                    &last.meta.keys,
-                    &last.stats,
-                );
+                if last.meta.version != self.current_stat.meta.version {
+                    // Do not update delta if the bucket version is changed for simplicity.
+                    return delta;
+                }
                 for i in 0..delta.meta.keys.len() - 1 {
                     delta.stats.write_bytes[i] =
-                        self.current_stat.stats.write_bytes[i] - delta.stats.write_bytes[i];
+                        self.current_stat.stats.write_bytes[i] - last.stats.write_bytes[i];
                     delta.stats.write_keys[i] =
-                        self.current_stat.stats.write_keys[i] - delta.stats.write_keys[i];
+                        self.current_stat.stats.write_keys[i] - last.stats.write_keys[i];
                     delta.stats.write_qps[i] =
-                        self.current_stat.stats.write_qps[i] - delta.stats.write_qps[i];
+                        self.current_stat.stats.write_qps[i] - last.stats.write_qps[i];
 
                     delta.stats.read_bytes[i] =
-                        self.current_stat.stats.read_bytes[i] - delta.stats.read_bytes[i];
+                        self.current_stat.stats.read_bytes[i] - last.stats.read_bytes[i];
                     delta.stats.read_keys[i] =
-                        self.current_stat.stats.read_keys[i] - delta.stats.read_keys[i];
+                        self.current_stat.stats.read_keys[i] - last.stats.read_keys[i];
                     delta.stats.read_qps[i] =
-                        self.current_stat.stats.read_qps[i] - delta.stats.read_qps[i];
+                        self.current_stat.stats.read_qps[i] - last.stats.read_qps[i];
                 }
                 delta
             }

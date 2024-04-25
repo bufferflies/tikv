@@ -1198,7 +1198,7 @@ pub fn find_bucket_index<S: AsRef<[u8]>>(key: &[u8], bucket_keys: &[S]) -> Optio
 
 /// Merge incoming bucket stats. If a range in new buckets overlaps with
 /// multiple ranges in current buckets, stats of the new range will be added to
-/// all stats of current ranges.
+/// the first overlapped range.
 pub fn merge_bucket_stats<C: AsRef<[u8]>, I: AsRef<[u8]>>(
     cur: &[C],
     cur_stats: &mut BucketStats,
@@ -1263,18 +1263,18 @@ pub fn merge_bucket_stats<C: AsRef<[u8]>, I: AsRef<[u8]>>(
     for new_idx in 0..(incoming.len() - 1) {
         let start = &incoming[new_idx];
         let end = &incoming[new_idx + 1];
-        if let Some((start_idx, end_idx)) = find_overlay_ranges((start.as_ref(), end.as_ref()), cur)
+        if let Some((start_idx, _end_idx)) =
+            find_overlay_ranges((start.as_ref(), end.as_ref()), cur)
         {
-            for cur_idx in start_idx..=end_idx {
-                stats_add!(cur_stats, cur_idx, delta_stats, new_idx, read_bytes);
-                stats_add!(cur_stats, cur_idx, delta_stats, new_idx, write_bytes);
+            let cur_idx = start_idx;
+            stats_add!(cur_stats, cur_idx, delta_stats, new_idx, read_bytes);
+            stats_add!(cur_stats, cur_idx, delta_stats, new_idx, write_bytes);
 
-                stats_add!(cur_stats, cur_idx, delta_stats, new_idx, read_qps);
-                stats_add!(cur_stats, cur_idx, delta_stats, new_idx, write_qps);
+            stats_add!(cur_stats, cur_idx, delta_stats, new_idx, read_qps);
+            stats_add!(cur_stats, cur_idx, delta_stats, new_idx, write_qps);
 
-                stats_add!(cur_stats, cur_idx, delta_stats, new_idx, read_keys);
-                stats_add!(cur_stats, cur_idx, delta_stats, new_idx, write_keys);
-            }
+            stats_add!(cur_stats, cur_idx, delta_stats, new_idx, read_keys);
+            stats_add!(cur_stats, cur_idx, delta_stats, new_idx, write_keys);
         }
     }
 }
@@ -1453,7 +1453,7 @@ mod test {
             (
                 (vec![b"k1", b"k3", b"k5", b"k7", b"k9"], vec![1, 1, 1, 1]),
                 (vec![b"k0", b"k6", b"k8"], vec![1, 1]),
-                vec![2, 2, 3, 2],
+                vec![2, 1, 2, 1],
             ),
             (
                 (vec![b"k0", b"k6", b"k8"], vec![1, 1]),
@@ -1461,7 +1461,7 @@ mod test {
                     vec![b"k1", b"k3", b"k5", b"k7", b"k9", b"ka"],
                     vec![1, 1, 1, 1, 1],
                 ),
-                vec![4, 3],
+                vec![4, 2],
             ),
             (
                 (vec![b"k4", b"k6", b"kb"], vec![1, 1]),
@@ -1469,7 +1469,7 @@ mod test {
                     vec![b"k1", b"k3", b"k5", b"k7", b"k9", b"ka"],
                     vec![1, 1, 1, 1, 1],
                 ),
-                vec![3, 4],
+                vec![3, 3],
             ),
             (
                 (vec![b"k3", b"k5", b"k7"], vec![1, 1]),
@@ -1484,7 +1484,7 @@ mod test {
             (
                 (vec![b"", b"k1", b""], vec![1, 1]),
                 (vec![b"", b"k2", b""], vec![1, 1]),
-                vec![2, 3],
+                vec![2, 2],
             ),
             (
                 (vec![b"", b""], vec![1]),
@@ -1494,7 +1494,7 @@ mod test {
             (
                 (vec![b"", b"k1", b""], vec![1, 1]),
                 (vec![b"", b""], vec![1]),
-                vec![2, 2],
+                vec![2, 1],
             ),
             (
                 (vec![b"", b"k1", b""], vec![1, 1]),
