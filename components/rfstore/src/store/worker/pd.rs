@@ -1201,9 +1201,10 @@ impl PdRunner {
         self.remote.spawn(f);
     }
 
-    fn handle_report_region_buckets(&mut self, region_buckets: BucketStat) {
+    fn handle_report_region_buckets(&mut self, mut region_buckets: BucketStat) {
         let store_id = self.store_id;
         let region_id = region_buckets.meta.region_id;
+        region_buckets.prepare_report();
         self.merge_buckets(region_buckets);
         let report_buckets = self.region_buckets.get_mut(&region_id).unwrap();
         let last_report_ts = if report_buckets.last_report_ts.is_zero() {
@@ -1242,31 +1243,23 @@ impl PdRunner {
         self.remote.spawn(f);
     }
 
-    fn merge_buckets(&mut self, buckets: BucketStat) {
+    fn merge_buckets(&mut self, mut buckets: BucketStat) {
         let region_id = buckets.meta.region_id;
-        let report_bucket = self.region_buckets.entry(region_id).or_default();
-        let current = &mut report_bucket.current_stat;
-        if current.meta < buckets.meta {
-            let mut new_stat = BucketStat::new(
-                buckets.meta.clone(),
-                pd_client::new_bucket_stats(&buckets.meta),
-            );
-            if !current.meta.keys.is_empty() {
+        self.region_buckets
+            .entry(region_id)
+            .and_modify(|report_bucket| {
+                let current = &mut report_bucket.current_stat;
+                if current.meta < buckets.meta {
+                    mem::swap(current, &mut buckets);
+                }
                 merge_bucket_stats(
-                    &new_stat.meta.keys,
-                    &mut new_stat.stats,
                     &current.meta.keys,
-                    &current.stats,
+                    &mut current.stats,
+                    &buckets.meta.keys,
+                    &buckets.stats,
                 );
-            }
-            *current = new_stat;
-        }
-        merge_bucket_stats(
-            &current.meta.keys,
-            &mut current.stats,
-            &buckets.meta.keys,
-            &buckets.stats,
-        );
+            })
+            .or_insert_with(|| ReportBucket::new(buckets));
     }
 
     fn handle_sync_region(

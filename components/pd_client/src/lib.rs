@@ -259,6 +259,16 @@ impl BucketStat {
         let val = self.stats.mut_read_bytes().remove(idx);
         self.stats.mut_read_bytes()[idx - 1] += val;
     }
+
+    // We create the buckets with write bytes and write keys.
+    // Before report, we need to init other stats to avoid index out of bound panic.
+    pub fn prepare_report(&mut self) {
+        let count = self.stats.write_bytes.len();
+        self.stats.set_write_qps(vec![0; count]);
+        self.stats.set_read_bytes(vec![0; count]);
+        self.stats.set_read_keys(vec![0; count]);
+        self.stats.set_read_qps(vec![0; count]);
+    }
 }
 
 pub const INVALID_ID: u64 = 0;
