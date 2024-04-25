@@ -483,6 +483,7 @@ impl RegionCollector {
     fn handle_raftstore_event(&mut self, event: RaftStoreEvent) {
         {
             let region = event.get_region();
+            tikv_util::set_current_region(region.id);
             if region.get_peers().is_empty() {
                 // Ignore messages with empty peers.
                 // In raftstore `Peer::replicate`, the region meta's fields are all initialized
