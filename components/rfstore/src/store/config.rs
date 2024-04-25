@@ -5,7 +5,10 @@ use std::time::Duration;
 use online_config::OnlineConfig;
 use raftstore::coprocessor;
 use serde::{Deserialize, Serialize};
-use tikv_util::config::{ReadableDuration, ReadableSize};
+use tikv_util::{
+    config::{ReadableDuration, ReadableSize},
+    info,
+};
 use time::Duration as TimeDuration;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, OnlineConfig)]
@@ -143,7 +146,7 @@ impl Default for Config {
             channel_capacity: 40960,
             apply_pool_size: 3,
             enable_inner_key_offset: false,
-            aux_worker_count: 1,
+            aux_worker_count: 0,
         }
     }
 }
@@ -202,6 +205,17 @@ impl Config {
         cfg.region_bucket_size = old_cop.region_bucket_size;
 
         cfg.aux_worker_count = old.store_batch_system.pool_size.saturating_sub(1);
+        if cfg.aux_worker_count == 0 {
+            let num_cpus = tikv_util::sys::SysQuota::cpu_cores_quota();
+            if num_cpus >= 32.0 {
+                // automatically enable aux worker on large machines.
+                cfg.aux_worker_count = num_cpus as usize / 16 - 1;
+                info!(
+                    "set aux worker count to {} for large machine",
+                    cfg.aux_worker_count
+                );
+            }
+        }
         cfg.apply_pool_size = old.apply_batch_system.pool_size;
         cfg.local_file_gc_tick_interval = old.local_file_gc_tick_interval;
         cfg.local_file_gc_timeout = old.local_file_gc_timeout;

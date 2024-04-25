@@ -763,6 +763,7 @@ pub fn new_test_config(base_dir: &Path, node_id: u16, nodes_count: usize) -> Tik
     config.raft_store.pd_heartbeat_tick_interval = ReadableDuration::millis(100);
     config.raft_store.pd_store_heartbeat_tick_interval = ReadableDuration::millis(100);
     config.raft_store.max_peer_down_duration = ReadableDuration::secs(4);
+    config.raft_store.store_batch_system.pool_size = 2;
     config.rocksdb.writecf.write_buffer_size = ReadableSize::kb(16);
     config.rocksdb.writecf.block_size = ReadableSize::kb(4);
     config.rocksdb.writecf.target_file_size_base = ReadableSize::kb(32);

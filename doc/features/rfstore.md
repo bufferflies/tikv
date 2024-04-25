@@ -77,6 +77,7 @@ store-pool-size = 2
 ````
 
 The aux worker count is `store-pool-size - 1`.
+If the number of CPU cores is larger than 32, it will be set to `number_cores / 16 -1`.
 
 # 4. ApplyWorker main loop
 
