@@ -43,6 +43,9 @@ pub struct Config {
     /// The number threshold of tombstone entries to trigger compaction.
     pub compaction_tombs_count: u64,
 
+    /// The remote worker address to run analyze and checksum requests.
+    pub remote_worker_addr: String,
+
     /// The remote coprocessor address to run heavy coprocessor requests.
     pub remote_coprocessor_addr: String,
 
@@ -67,6 +70,7 @@ impl Default for Config {
             compaction_tombs_ratio: DEFAULT_COMPACTION_TOMBS_RATIO,
             compaction_tombs_count: DEFAULT_COMPACTION_TOMBS_COUNT,
             per_keyspace_configs: vec![],
+            remote_worker_addr: "".to_string(),
             remote_coprocessor_addr: "".to_string(),
             remote_coprocessor_min_blocks: 512,
             flush_split_l0: false,

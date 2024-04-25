@@ -9,12 +9,10 @@ use ::tracker::{
 };
 use api_version::{dispatch_api_version, KvFormat};
 use async_stream::try_stream;
-use bytes::{Buf, BufMut};
 use concurrency_manager::ConcurrencyManager;
 use engine_traits::PerfLevel;
 use futures::{channel::mpsc, prelude::*};
 use futures_executor::block_on;
-use kvengine::UserMeta;
 use kvproto::{
     coprocessor as coppb, errorpb, kvrpcpb,
     kvrpcpb::{ScanDetailV2, TimeDetail},
@@ -36,7 +34,7 @@ use crate::{
         cache::CachedRequestHandler,
         interceptors::*,
         metrics::*,
-        remote_dispatcher::{try_remote_dag_handler, RemoteContext, REMOTE_COP_FORMAT_V1},
+        remote_dispatcher::{try_remote_dag_handler, RemoteContext, RemoteRequest},
         tracker::Tracker,
         Error, *,
     },
@@ -145,11 +143,13 @@ impl<E: Engine> Endpoint<E> {
     pub fn set_remote_url(
         &mut self,
         remote_analyze_url: String,
+        remote_worker_url: String,
         remote_cop_url: String,
         remote_cop_min_blocks: usize,
     ) {
         self.remote_ctx = RemoteContext::new(
             remote_analyze_url,
+            remote_worker_url,
             remote_cop_url,
             remote_cop_min_blocks,
             self.security_mgr.clone(),
@@ -218,7 +218,9 @@ impl<E: Engine> Endpoint<E> {
         fail_point!("coprocessor_parse_request", |_| Err(box_err!(
             "unsupported tp (failpoint)"
         )));
-        let req_bytes = if self.remote_ctx.is_some() && req.get_tp() == REQ_TYPE_ANALYZE {
+        let cop_req = if self.remote_ctx.is_some()
+            && (req.get_tp() == REQ_TYPE_ANALYZE || req.get_tp() == REQ_TYPE_CHECKSUM)
+        {
             req.write_to_bytes().unwrap()
         } else {
             Vec::default()
@@ -333,15 +335,11 @@ impl<E: Engine> Endpoint<E> {
                     AnalyzeType::TypeFullSampling => ReqTag::analyze_full_sampling,
                     AnalyzeType::TypeSampleIndex => unimplemented!(),
                 };
-                let mut max_handle_duration = self.max_handle_duration;
-                if self.remote_ctx.is_some() {
-                    max_handle_duration *= 5;
-                }
                 req_ctx = ReqContext::new(
                     tag,
                     context,
                     ranges,
-                    max_handle_duration,
+                    self.max_handle_duration,
                     peer,
                     None,
                     start_ts.into(),
@@ -356,12 +354,27 @@ impl<E: Engine> Endpoint<E> {
                 Endpoint::<E>::check_memory_locks(&self.concurrency_manager, &req_ctx)?;
 
                 let quota_limiter = self.quota_limiter.clone();
-                let remote_req = RemoteAnalysisRequest {
-                    key: String::default(),
-                    req_bytes,
-                    peer: req_ctx.peer.clone().unwrap_or_default(),
-                    max_handle_duration,
-                    snap_bytes: Vec::new(),
+                let is_old_req = if let Some(remote_ctx) = self.remote_ctx.clone().take() {
+                    !remote_ctx.remote_analyze_url.is_empty()
+                } else {
+                    false
+                };
+                let (remote_analysis_req, remote_req) = if is_old_req {
+                    let remote_analysis_req = RemoteAnalysisRequest {
+                        key: String::default(),
+                        req_bytes: cop_req,
+                        peer: req_ctx.peer.clone().unwrap_or_default(),
+                        max_handle_duration: self.max_handle_duration,
+                        snap_bytes: Vec::new(),
+                    };
+                    (remote_analysis_req, RemoteRequest::default())
+                } else {
+                    let remote_req = RemoteRequest {
+                        key: String::default(),
+                        cop_req,
+                        req_body: Vec::new(),
+                    };
+                    (RemoteAnalysisRequest::default(), remote_req)
                 };
                 let remote_ctx = self.remote_ctx.clone();
                 builder = Box::new(move |snap, req_ctx| {
@@ -373,6 +386,7 @@ impl<E: Engine> Endpoint<E> {
                         req_ctx,
                         quota_limiter,
                         remote_ctx,
+                        remote_analysis_req,
                         remote_req,
                     )
                     .map(|h| h.into_boxed())
@@ -409,6 +423,12 @@ impl<E: Engine> Endpoint<E> {
 
                 Endpoint::<E>::check_memory_locks(&self.concurrency_manager, &req_ctx)?;
 
+                let remote_req = RemoteRequest {
+                    key: String::default(),
+                    cop_req,
+                    req_body: Vec::new(),
+                };
+                let remote_ctx = self.remote_ctx.clone();
                 builder = Box::new(move |snap, req_ctx| {
                     checksum::ChecksumContext::new(
                         checksum,
@@ -416,6 +436,8 @@ impl<E: Engine> Endpoint<E> {
                         start_ts,
                         snap,
                         req_ctx,
+                        remote_ctx,
+                        remote_req,
                     )
                     .map(|h| h.into_boxed())
                 });
@@ -908,30 +930,8 @@ impl<E: Engine> Endpoint<E> {
                         !req_ctx.context.get_not_fill_cache(),
                     );
                     cloud_store.check_locks_in_range(&req_ctx.lower_bound, &req_ctx.upper_bound)?;
-                    let mut mem_iterator = cloud_store.new_memtable_iterator();
-                    let mut rows = vec![];
                     let mut resp = coppb::DelegateResponse::default();
-                    for (range_start, range_end) in &ranges {
-                        mem_iterator.seek(range_start.chunk());
-                        while mem_iterator.valid() {
-                            let key = mem_iterator.key();
-                            if key >= range_end.chunk() {
-                                break;
-                            }
-                            rows.push(kvengine::table::Row {
-                                key: key.to_vec(),
-                                user_meta: UserMeta::from_slice(mem_iterator.user_meta()),
-                                value: mem_iterator.val().to_vec(),
-                            });
-                            mem_iterator.next();
-                        }
-                    }
-                    let mem_size =
-                        bincode::serialized_size(&rows).map_err(|e| Error::Other(e.to_string()))?;
-                    let mut mem_data = Vec::with_capacity(mem_size as usize + 4);
-                    mem_data.put_u32_le(REMOTE_COP_FORMAT_V1);
-                    bincode::serialize_into(&mut mem_data, &rows)
-                        .map_err(|e| Error::Other(e.to_string()))?;
+                    let mem_data = snap_access.build_mem_data(&ranges, req.start_ts);
                     resp.set_mem_table_data(mem_data);
                     let (_, snapshot) = snap_access.marshal(ranges.as_slice(), true, false);
                     resp.set_snapshot(snapshot);
@@ -1029,6 +1029,7 @@ fn parse_request_and_remote_analyze_impl<S: 'static + Snapshot, F: KvFormat>(
                 quota_limiter,
                 None,
                 RemoteAnalysisRequest::default(),
+                RemoteRequest::default(),
             )
             .unwrap();
             return block_on(handler.local_handle_request());
@@ -1135,17 +1136,6 @@ pub async fn parse_request_and_handle_remote_cop_impl<S: 'static + Snapshot, F: 
             .build::<F>()?
         }
         REQ_TYPE_ANALYZE => {
-            let (context, data, ranges, mut start_ts) = (
-                req.take_context(),
-                req.take_data(),
-                req.take_ranges().to_vec(),
-                req.get_start_ts(),
-            );
-            let cache_match_version = if req.get_is_cache_enabled() {
-                Some(req.get_cache_if_match_version())
-            } else {
-                None
-            };
             let analyze = {
                 let mut input = CodedInputStream::from_bytes(&data);
                 input.set_recursion_limit(1000);
@@ -1186,6 +1176,7 @@ pub async fn parse_request_and_handle_remote_cop_impl<S: 'static + Snapshot, F: 
                     quota_limiter,
                     None,
                     RemoteAnalysisRequest::default(),
+                    RemoteRequest::default(),
                 )
                 .unwrap(),
             )
@@ -1230,6 +1221,8 @@ pub async fn parse_request_and_handle_remote_cop_impl<S: 'static + Snapshot, F: 
                     start_ts,
                     snap,
                     &req_ctx,
+                    None,
+                    RemoteRequest::default(),
                 )
                 .unwrap(),
             )

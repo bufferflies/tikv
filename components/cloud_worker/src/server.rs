@@ -20,6 +20,7 @@ use hyper::{
     Body,
 };
 use kvengine::{
+    dfs,
     dfs::{CacheFs, S3Fs},
     table::sstable::BlockCacheKey,
     SnapAccess,
@@ -47,8 +48,9 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use crate::{
     load_data::{self, LoadDataManager},
     metrics::{
-        REMOTE_COMPACT_REQ_HANDLE_HISTOGRAM, REMOTE_COPR_DAG_REQ_COUNTER,
-        REMOTE_COPR_DAG_RESP_SIZE, REMOTE_COPR_REQ_HANDLE_HISTOGRAM,
+        REMOTE_ANALYZE_REQ_COUNTER, REMOTE_ANALYZE_RESP_SIZE, REMOTE_CHECKSUM_REQ_COUNTER,
+        REMOTE_CHECKSUM_RESP_SIZE, REMOTE_COMPACT_REQ_HANDLE_HISTOGRAM,
+        REMOTE_COPR_DAG_REQ_COUNTER, REMOTE_COPR_DAG_RESP_SIZE, REMOTE_COPR_REQ_HANDLE_HISTOGRAM,
         REMOTE_COPR_SNAPSHOT_HISTOGRAM,
     },
     native_br::{self, NativeBrManager},
@@ -167,9 +169,14 @@ async fn handle_remote_coprocessor(
         return Ok(hyper::Response::builder().status(500).body(body).unwrap());
     }
     let req_type = cop_req.get_tp();
+    let dfs: Arc<dyn dfs::Dfs> = match req_type {
+        REQ_TYPE_DAG => ctx.cache_fs.clone(),
+        _ => ctx.s3fs.clone(),
+    };
+
     let ob_start = Instant::now();
     let snap_access_res = SnapAccess::construct_snapshot(
-        ctx.cache_fs.clone(),
+        dfs,
         mem_data,
         snap_data,
         &ctx.master_key,
@@ -182,8 +189,15 @@ async fn handle_remote_coprocessor(
     }
     REMOTE_COPR_SNAPSHOT_HISTOGRAM.observe(ob_start.saturating_elapsed().as_secs_f64());
     let snap_access = snap_access_res.unwrap();
+    let req_type_str = match req_type {
+        REQ_TYPE_DAG => "dag".to_string(),
+        REQ_TYPE_ANALYZE => "analyze".to_string(),
+        REQ_TYPE_CHECKSUM => "checksum".to_string(),
+        _ => "".to_string(),
+    };
     let tag = format!(
-        "ks{}:{}:{}",
+        "{} ks{}:{}:{}",
+        req_type_str,
         snap_access.get_keyspace_id(),
         snap_access.get_id(),
         snap_access.get_version()
@@ -216,9 +230,14 @@ async fn handle_remote_coprocessor(
             REMOTE_COPR_DAG_REQ_COUNTER.inc();
             REMOTE_COPR_DAG_RESP_SIZE.inc_by(response.data.len() as u64);
         }
-        // TODO: add metrics for other request types
-        REQ_TYPE_ANALYZE => {}
-        REQ_TYPE_CHECKSUM => {}
+        REQ_TYPE_ANALYZE => {
+            REMOTE_ANALYZE_REQ_COUNTER.inc();
+            REMOTE_ANALYZE_RESP_SIZE.inc_by(response.data.len() as u64);
+        }
+        REQ_TYPE_CHECKSUM => {
+            REMOTE_CHECKSUM_REQ_COUNTER.inc();
+            REMOTE_CHECKSUM_RESP_SIZE.inc_by(response.data.len() as u64);
+        }
         _ => {}
     }
 

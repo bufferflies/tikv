@@ -2,17 +2,28 @@
 
 use api_version::ApiV1;
 use async_trait::async_trait;
-use kvproto::coprocessor::{KeyRange, Response};
+use bytes::Bytes;
+use kvproto::{
+    coprocessor::{KeyRange, Response},
+    kvrpcpb::ExecDetailsV2,
+};
 use protobuf::Message;
 use tidb_query_common::storage::{
     scanner::{RangesScanner, RangesScannerOptions},
     Range,
 };
 use tikv_alloc::trace::MemoryTraceGuard;
+use tikv_util::time::Instant;
 use tipb::{ChecksumAlgorithm, ChecksumRequest, ChecksumResponse};
 
 use crate::{
-    coprocessor::{dag::TikvStorage, *},
+    coprocessor::{
+        dag::TikvStorage,
+        remote_dispatcher::{
+            encode_remote_request_body, remote_handle_request, RemoteContext, RemoteRequest,
+        },
+        *,
+    },
     storage::{txn::CloudStore, Snapshot, Statistics},
 };
 
@@ -20,6 +31,9 @@ use crate::{
 pub struct ChecksumContext<S: Snapshot> {
     req: ChecksumRequest,
     scanner: RangesScanner<TikvStorage<CloudStore<S>>, ApiV1>,
+    remote_ctx: Option<RemoteContext>,
+    remote_req: RemoteRequest,
+    remote_exec_details: Option<ExecDetailsV2>,
 }
 
 impl<S: Snapshot> ChecksumContext<S> {
@@ -29,7 +43,29 @@ impl<S: Snapshot> ChecksumContext<S> {
         start_ts: u64,
         snap: S,
         req_ctx: &ReqContext,
+        remote_ctx: Option<RemoteContext>,
+        mut remote_req: RemoteRequest,
     ) -> Result<Self> {
+        let remote_ctx = remote_ctx.map(|ctx| {
+            let mut kv_ranges = Vec::with_capacity(ranges.len());
+            for range in &ranges {
+                let kv_range = (
+                    Bytes::copy_from_slice(&range.start),
+                    Bytes::copy_from_slice(&range.end),
+                );
+                kv_ranges.push(kv_range)
+            }
+            let (key, req_body) = encode_remote_request_body(
+                &remote_req.cop_req,
+                kv_ranges.as_slice(),
+                start_ts,
+                snap.get_kvengine_snap().unwrap(),
+                true,
+            );
+            remote_req.key = format!("checksum:{}", key);
+            remote_req.req_body = req_body;
+            ctx
+        });
         let store = CloudStore::new(
             snap,
             start_ts,
@@ -47,13 +83,16 @@ impl<S: Snapshot> ChecksumContext<S> {
             is_key_only: false,
             is_scanned_range_aware: false,
         });
-        Ok(Self { req, scanner })
+        Ok(Self {
+            req,
+            scanner,
+            remote_ctx,
+            remote_req,
+            remote_exec_details: None,
+        })
     }
-}
 
-#[async_trait]
-impl<S: Snapshot> RequestHandler for ChecksumContext<S> {
-    async fn handle_request(&mut self) -> Result<MemoryTraceGuard<Response>> {
+    async fn local_handle_request(&mut self) -> Result<Vec<u8>> {
         let algorithm = self.req.get_algorithm();
         if algorithm != ChecksumAlgorithm::Crc64Xor {
             return Err(box_err!("unknown checksum algorithm {:?}", algorithm));
@@ -88,13 +127,78 @@ impl<S: Snapshot> RequestHandler for ChecksumContext<S> {
         resp.set_total_kvs(total_kvs);
         resp.set_total_bytes(total_bytes as u64);
         let data = box_try!(resp.write_to_bytes());
+        Ok(data)
+    }
+}
 
-        let mut resp = Response::default();
-        resp.set_data(data);
-        Ok(resp.into())
+#[async_trait]
+impl<S: Snapshot> RequestHandler for ChecksumContext<S> {
+    async fn handle_request(&mut self) -> Result<MemoryTraceGuard<Response>> {
+        let start_time = Instant::now_coarse();
+        let is_remote = self.remote_ctx.is_some();
+        let remote_tag = self
+            .remote_ctx
+            .as_ref()
+            .map(|ctx| {
+                format!(
+                    " url [{}] [{}]",
+                    ctx.remote_worker_url.clone(),
+                    self.remote_req.key.clone(),
+                )
+            })
+            .unwrap_or_default();
+        let tag = format!("is remote {}{}", is_remote, remote_tag);
+        let ret = if let Some(remote_ctx) = &self.remote_ctx {
+            remote_handle_request(
+                "checksum".to_string(),
+                tag.clone(),
+                remote_ctx.clone(),
+                self.remote_req.clone(),
+            )
+            .await
+            // Do not fallback to local if remote checksum failed. Or else it
+            // may cause server overloaded.
+        } else {
+            self.local_handle_request().await.map(|data| {
+                let mut resp = Response::default();
+                resp.set_data(data);
+                resp
+            })
+        };
+        match ret {
+            Ok(mut resp) => {
+                info!(
+                    "checksum response data size {}, takes {:?}, {}",
+                    resp.data.len(),
+                    start_time.saturating_elapsed(),
+                    tag,
+                );
+                if is_remote {
+                    self.remote_exec_details = resp.exec_details_v2.take();
+                }
+                Ok(resp.into())
+            }
+            Err(Error::Other(e)) => {
+                error!("checksum other failed, {} error {}", tag, e,);
+                let mut resp = Response::default();
+                resp.set_other_error(e);
+                Ok(resp.into())
+            }
+            Err(e) => {
+                error!("checksum failed, {} error {:?}", tag, e,);
+                Err(e)
+            }
+        }
     }
 
     fn collect_scan_statistics(&mut self, dest: &mut Statistics) {
+        if let Some(exec_details_v2) = self.remote_exec_details.as_ref() {
+            if let Some(scan_detail_v2) = exec_details_v2.scan_detail_v2.as_ref() {
+                dest.processed_size = scan_detail_v2.processed_versions_size as usize;
+                dest.write.processed_keys = scan_detail_v2.processed_versions as usize;
+            }
+            return;
+        }
         self.scanner.collect_storage_stats(dest)
     }
 }

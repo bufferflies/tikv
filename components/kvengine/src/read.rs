@@ -9,7 +9,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use cloud_encryption::{EncryptionKey, MasterKey};
 use kvenginepb as pb;
 use kvenginepb::TxnFileRef;
@@ -817,6 +817,33 @@ impl SnapAccessCore {
             "".to_string()
         };
         (key, cs.write_to_bytes().unwrap())
+    }
+
+    pub fn build_mem_data(&self, ranges: &[(Bytes, Bytes)], start_ts: u64) -> Vec<u8> {
+        let mut mem_iterator = self.new_memtable_iterator(0, false, false, Some(start_ts));
+        let mut rows = vec![];
+        for (range_start, range_end) in ranges {
+            mem_iterator.seek(range_start.chunk());
+            while mem_iterator.valid() {
+                let key = mem_iterator.key();
+                if key >= range_end.chunk() {
+                    break;
+                }
+                rows.push(table::Row {
+                    key: key.to_vec(),
+                    user_meta: UserMeta::from_slice(mem_iterator.user_meta()),
+                    value: mem_iterator.val().to_vec(),
+                });
+                mem_iterator.next();
+            }
+        }
+        let mem_size = bincode::serialized_size(&rows)
+            .map_err(|e| Error::Other(e))
+            .unwrap();
+        let mut mem_data = Vec::with_capacity(mem_size as usize + 4);
+        mem_data.put_u32_le(MEM_DATA_FORMAT_V1);
+        bincode::serialize_into(&mut mem_data, &rows).unwrap();
+        mem_data
     }
 
     pub fn get_all_files(&self) -> Vec<u64> {

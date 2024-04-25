@@ -43,7 +43,7 @@ use kvproto::{coprocessor as coppb, kvrpcpb};
 use lazy_static::lazy_static;
 use metrics::ReqTag;
 use rand::prelude::*;
-pub use remote_dispatcher::RemoteAnalysisRequest;
+pub use remote_dispatcher::{RemoteAnalysisRequest, RemoteRequest};
 use tidb_query_common::execute_stats::ExecSummary;
 use tikv_alloc::{mem_trace, Id, MemoryTrace, MemoryTraceGuard};
 use tikv_util::{deadline::Deadline, time::Duration};

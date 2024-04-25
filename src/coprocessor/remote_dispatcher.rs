@@ -9,8 +9,8 @@ use std::{
 use async_trait::async_trait;
 use bytes::{Buf, BufMut, Bytes};
 use futures_util::compat::Future01CompatExt;
-use kvengine::{SnapAccess, UserMeta, LOCK_CF};
-use kvproto::kvrpcpb::ExecDetailsV2;
+use kvengine::{SnapAccess, LOCK_CF};
+use kvproto::{coprocessor::Response, kvrpcpb::ExecDetailsV2};
 use protobuf::Message;
 use security::SecurityManager;
 use tidb_query_common::execute_stats::ExecSummary;
@@ -28,9 +28,10 @@ use crate::{
     storage::txn::check_locks,
 };
 
-const ANALYZE_CACHE_CAPACITY: u64 = 64;
+const REMOTE_REQUEST_CACHE_CAPACITY: u64 = 64;
 
-pub const REMOTE_ANALYZE_TIMEOUT: Duration = Duration::from_secs(300);
+pub const REMOTE_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+pub const INCOMPLETE_MESSAGE: &str = "connection closed before message completed";
 
 pub const REMOTE_COP_FORMAT_V1: u32 = 1;
 
@@ -43,6 +44,117 @@ pub struct RemoteAnalysisRequest {
     pub snap_bytes: Vec<u8>,
     pub max_handle_duration: Duration,
     pub peer: String,
+}
+
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+pub struct RemoteRequest {
+    pub key: String,
+    pub cop_req: Vec<u8>,
+    pub req_body: Vec<u8>,
+}
+
+pub async fn remote_request(
+    remote_ctx: RemoteContext,
+    remote_addr: String,
+    tag: String,
+    req_body: Vec<u8>,
+    deadline: Instant,
+) -> Result<Vec<u8>> {
+    let req = hyper::Request::builder()
+        .method(hyper::Method::POST)
+        .uri(&remote_addr)
+        .header("content-type", "application/octet-stream")
+        .body(hyper::Body::from(req_body))
+        .map_err(|e| Error::Other(e.to_string()))?;
+    let client = remote_ctx.client.clone();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    remote_ctx.runtime.spawn(async move {
+        let res = tokio::time::timeout(
+            deadline.saturating_duration_since(Instant::now_coarse()),
+            async move {
+                let response = client.request(req).await.map_err(|e| {
+                    if e.is_incomplete_message() {
+                        Error::Other(INCOMPLETE_MESSAGE.to_string())
+                    } else {
+                        Error::Other(e.to_string())
+                    }
+                })?;
+                let success = response.status().is_success();
+                let body = hyper::body::to_bytes(response.into_body())
+                    .await
+                    .map_err(|e| Error::Other(e.to_string()))?;
+                if !success {
+                    return Err(Error::Other(
+                        String::from_utf8_lossy(body.chunk()).to_string(),
+                    ));
+                }
+                Ok(body.to_vec())
+            },
+        )
+        .await
+        .unwrap_or_else(|_| Err(Error::DeadlineExceeded));
+        if let Err(_err) = tx.send(res) {
+            warn!("{} send remote coprocessor response failed", tag);
+        }
+    });
+    rx.await.unwrap()
+}
+
+pub async fn remote_handle_request(
+    req_type: String,
+    tag: String,
+    remote_ctx: RemoteContext,
+    remote_req: RemoteRequest,
+) -> Result<Response> {
+    info!("handle {} request, {}", req_type, tag.clone());
+    let ctx = remote_ctx.clone();
+    let remote_request_cache = remote_ctx.remote_request_cache.clone();
+    let remote_req = remote_req.clone();
+    let key = remote_req.key.clone();
+    let req_body = remote_req.req_body;
+    let result = remote_request_cache
+        .clone()
+        .get_with(key, async move {
+            remote_request(
+                ctx,
+                remote_ctx.remote_worker_url.clone(),
+                tag,
+                req_body,
+                Instant::now_coarse().add(REMOTE_REQUEST_TIMEOUT),
+            )
+            .await
+        })
+        .await;
+    let mut invalidate_cache = false;
+    let ret = match result {
+        result @ Ok(_) => result,
+        Err(Error::Other(e)) => {
+            if e.eq(INCOMPLETE_MESSAGE) {
+                invalidate_cache = true;
+            }
+            Err(Error::Other(e))
+        }
+        Err(Error::DeadlineExceeded) => {
+            invalidate_cache = true;
+            Err(Error::DeadlineExceeded)
+        }
+        Err(e) => Err(e),
+    };
+    if invalidate_cache {
+        let key = &remote_req.key;
+        warn!(
+            "{} other failed, incomplete message error, invalidate cached value for the key [:{}]",
+            req_type, key,
+        );
+        remote_request_cache.invalidate(key).await;
+    }
+    ret.map(|resp_body| {
+        let mut resp = Response::default();
+        resp.merge_from_bytes(&resp_body).unwrap();
+        resp
+    })
 }
 
 #[derive(Clone)]
@@ -59,10 +171,11 @@ impl Deref for RemoteContext {
 
 pub struct RemoteContextCore {
     pub remote_analyze_url: String,
+    pub remote_worker_url: String,
     pub cop_worker_provider: Arc<dyn CopWorkerProvider>,
     pub cop_min_blocks: usize,
     pub runtime: Arc<tokio::runtime::Runtime>,
-    pub analyze_cache: moka::future::Cache<String, Result<Vec<u8>>>,
+    pub remote_request_cache: moka::future::Cache<String, Result<Vec<u8>>>,
     pub client: security::HttpClient,
 }
 
@@ -86,11 +199,15 @@ impl CopWorkerProvider for StaticCopWorkerProvider {
 impl RemoteContext {
     pub fn new(
         remote_analyze_url: String,
+        remote_worker_url: String,
         cop_worker_url: String,
         cop_min_blocks: usize,
         security_mgr: Arc<SecurityManager>,
     ) -> Option<Self> {
-        if remote_analyze_url.is_empty() && cop_worker_url.is_empty() {
+        if remote_analyze_url.is_empty()
+            && remote_worker_url.is_empty()
+            && cop_worker_url.is_empty()
+        {
             return None;
         }
         let runtime = Arc::new(
@@ -104,9 +221,9 @@ impl RemoteContext {
         let client = security_mgr
             .http_client(hyper::Client::builder().pool_max_idle_per_host(0).clone())
             .unwrap();
-        let analyze_cache = moka::future::Cache::builder()
-            .max_capacity(ANALYZE_CACHE_CAPACITY)
-            .time_to_live(REMOTE_ANALYZE_TIMEOUT * 2)
+        let remote_request_cache = moka::future::Cache::builder()
+            .max_capacity(REMOTE_REQUEST_CACHE_CAPACITY)
+            .time_to_live(REMOTE_REQUEST_TIMEOUT * 5)
             .build();
         let cop_worker_provider = Arc::new(StaticCopWorkerProvider {
             worker_url: cop_worker_url,
@@ -114,10 +231,11 @@ impl RemoteContext {
         Some(Self {
             core: Arc::new(RemoteContextCore {
                 remote_analyze_url,
+                remote_worker_url,
                 cop_min_blocks,
                 cop_worker_provider,
                 runtime,
-                analyze_cache,
+                remote_request_cache,
                 client,
             }),
         })
@@ -237,45 +355,22 @@ impl RemoteDagDispatcher {
 
     async fn dispatch(&self, deadline: Instant) -> Result<Vec<u8>> {
         let cop_req: Vec<u8> = self.req.write_to_bytes().unwrap();
-        let mem_data = self.build_mem_data();
-        let (_, snap_data) = self.snap.marshal(&self.ranges, true, false);
-        let req_body = encode_remote_cop_request(cop_req, mem_data, snap_data);
-        let req = hyper::Request::builder()
-            .method(hyper::Method::POST)
-            .uri(&self.worker_addr)
-            .header("content-type", "application/octet-stream")
-            .body(hyper::Body::from(req_body))
-            .map_err(|e| Error::Other(e.to_string()))?;
-        let client = self.remote_ctx.client.clone();
-        let (tx, rx) = tokio::sync::oneshot::channel();
         let tag = self.tag.clone();
-        self.remote_ctx.runtime.spawn(async move {
-            let res = tokio::time::timeout(
-                deadline.saturating_duration_since(Instant::now_coarse()),
-                async move {
-                    let response = client
-                        .request(req)
-                        .await
-                        .map_err(|e| Error::Other(e.to_string()))?;
-                    let success = response.status().is_success();
-                    let body = hyper::body::to_bytes(response.into_body())
-                        .await
-                        .map_err(|e| Error::Other(e.to_string()))?;
-                    if !success {
-                        return Err(Error::Other(
-                            String::from_utf8_lossy(body.chunk()).to_string(),
-                        ));
-                    }
-                    Ok(body.to_vec())
-                },
-            )
-            .await
-            .unwrap_or_else(|_| Err(Error::DeadlineExceeded));
-            if let Err(_err) = tx.send(res) {
-                warn!("{} send remote coprocessor response failed", tag);
-            }
-        });
-        rx.await.unwrap()
+        let (_, req_body) = encode_remote_request_body(
+            &cop_req,
+            &self.ranges,
+            self.req.start_ts,
+            &self.snap,
+            false,
+        );
+        remote_request(
+            self.remote_ctx.clone(),
+            self.worker_addr.clone(),
+            tag,
+            req_body,
+            deadline,
+        )
+        .await
     }
 
     async fn dispatch_with_retry(&self, deadline: Deadline) -> Result<Vec<u8>> {
@@ -303,35 +398,6 @@ impl RemoteDagDispatcher {
                 }
             }
         }
-    }
-
-    fn build_mem_data(&self) -> Vec<u8> {
-        let mut mem_iterator =
-            self.snap
-                .new_memtable_iterator(0, false, false, Some(self.req.start_ts));
-        let mut rows = vec![];
-        for (range_start, range_end) in &self.ranges {
-            mem_iterator.seek(range_start.chunk());
-            while mem_iterator.valid() {
-                let key = mem_iterator.key();
-                if key >= range_end.chunk() {
-                    break;
-                }
-                rows.push(kvengine::table::Row {
-                    key: key.to_vec(),
-                    user_meta: UserMeta::from_slice(mem_iterator.user_meta()),
-                    value: mem_iterator.val().to_vec(),
-                });
-                mem_iterator.next();
-            }
-        }
-        let mem_size = bincode::serialized_size(&rows)
-            .map_err(|e| Error::Other(e.to_string()))
-            .unwrap();
-        let mut mem_data = Vec::with_capacity(mem_size as usize + 4);
-        mem_data.put_u32_le(REMOTE_COP_FORMAT_V1);
-        bincode::serialize_into(&mut mem_data, &rows).unwrap();
-        mem_data
     }
 }
 
@@ -405,21 +471,30 @@ fn calc_min_blocks(start_ts: TimeStamp, config_min_blocks: usize) -> usize {
     }
 }
 
-pub fn encode_remote_cop_request(
-    cop_req: Vec<u8>,
-    mem_data: Vec<u8>,
-    snap_data: Vec<u8>,
-) -> Vec<u8> {
+pub fn encode_remote_request_body(
+    cop_req: &[u8],
+    ranges: &[(Bytes, Bytes)],
+    start_ts: u64,
+    snap: &SnapAccess,
+    cache_key: bool,
+) -> (String, Vec<u8>) {
+    let mem_data = snap.build_mem_data(ranges, start_ts);
+    let (key, snap_data) = snap.marshal(ranges, true, cache_key);
+    let req_body = encode_remote_cop_request(cop_req, &mem_data, &snap_data);
+    (key, req_body)
+}
+
+pub fn encode_remote_cop_request(cop_req: &[u8], mem_data: &[u8], snap_data: &[u8]) -> Vec<u8> {
     let extra_len = 4 * 4;
     let mut req_body: Vec<u8> =
         Vec::with_capacity(extra_len + cop_req.len() + mem_data.len() + snap_data.len());
     req_body.put_u32_le(REMOTE_COP_FORMAT_V1);
     req_body.put_u32_le(cop_req.len() as u32);
-    req_body.extend_from_slice(&cop_req);
+    req_body.extend_from_slice(cop_req);
     req_body.put_u32_le(mem_data.len() as u32);
-    req_body.extend_from_slice(&mem_data);
+    req_body.extend_from_slice(mem_data);
     req_body.put_u32_le(snap_data.len() as u32);
-    req_body.extend_from_slice(&snap_data);
+    req_body.extend_from_slice(snap_data);
     req_body
 }
 
@@ -467,10 +542,22 @@ fn test_remote_cop_coded() {
     let cop_req = b"cop_req".to_vec();
     let mem_data = b"mem_data".to_vec();
     let snap_data = b"snap_data".to_vec();
-    let req_body = encode_remote_cop_request(cop_req, mem_data, snap_data);
+    let req_body = encode_remote_cop_request(&cop_req, &mem_data, &snap_data);
     let (cop_req, mem_data, snap_data) = decode_remote_cop_request(&req_body).unwrap();
     assert_eq!(cop_req, "cop_req".as_bytes());
     assert_eq!(mem_data, "mem_data".as_bytes());
+    assert_eq!(snap_data, "snap_data".as_bytes());
+}
+
+#[test]
+fn test_remote_cop_coded_with_empty_mem() {
+    let cop_req = b"cop_req".to_vec();
+    let mem_data = b"".to_vec();
+    let snap_data = b"snap_data".to_vec();
+    let req_body = encode_remote_cop_request(&cop_req, &mem_data, &snap_data);
+    let (cop_req, mem_data, snap_data) = decode_remote_cop_request(&req_body).unwrap();
+    assert_eq!(cop_req, "cop_req".as_bytes());
+    assert_eq!(mem_data, "".as_bytes());
     assert_eq!(snap_data, "snap_data".as_bytes());
 }
 

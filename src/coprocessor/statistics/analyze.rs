@@ -8,7 +8,10 @@ use std::{
 use api_version::KvFormat;
 use async_trait::async_trait;
 use bytes::{Buf, Bytes};
-use kvproto::coprocessor::{KeyRange, Response};
+use kvproto::{
+    coprocessor::{KeyRange, Response},
+    kvrpcpb::ExecDetailsV2,
+};
 use mur3::Hasher128;
 use protobuf::Message;
 use rand::{rngs::StdRng, Rng};
@@ -40,14 +43,19 @@ use tipb::{self, AnalyzeColumnsReq, AnalyzeIndexReq, AnalyzeReq, AnalyzeType};
 
 use super::{cmsketch::CmSketch, fmsketch::FmSketch, histogram::Histogram};
 use crate::{
-    coprocessor::{dag::TikvStorage, remote_dispatcher::RemoteContext, MEMTRACE_ANALYZE, *},
+    coprocessor::{
+        dag::TikvStorage,
+        remote_dispatcher::{
+            encode_remote_cop_request, remote_handle_request, RemoteContext, INCOMPLETE_MESSAGE,
+            REMOTE_REQUEST_TIMEOUT,
+        },
+        MEMTRACE_ANALYZE, *,
+    },
     storage::{txn::CloudStore, Snapshot, Statistics},
 };
 
 const ANALYZE_VERSION_V1: i32 = 1;
 const ANALYZE_VERSION_V2: i32 = 2;
-pub const REMOTE_ANALYZE_TIMEOUT: Duration = Duration::from_secs(300);
-const INCOMPLETE_MESSAGE: &str = "connection closed before message completed";
 
 // `AnalyzeContext` is used to handle `AnalyzeReq`
 pub struct AnalyzeContext<S: Snapshot, F: KvFormat> {
@@ -58,7 +66,9 @@ pub struct AnalyzeContext<S: Snapshot, F: KvFormat> {
     quota_limiter: Arc<QuotaLimiter>,
     _phantom: PhantomData<F>,
     remote_ctx: Option<RemoteContext>,
-    remote_req: RemoteAnalysisRequest,
+    remote_analysis_req: RemoteAnalysisRequest,
+    remote_req: RemoteRequest,
+    remote_exec_details: Option<ExecDetailsV2>,
     is_auto_analyze: bool,
 }
 
@@ -71,14 +81,15 @@ impl<S: Snapshot, F: KvFormat> AnalyzeContext<S, F> {
         req_ctx: &ReqContext,
         quota_limiter: Arc<QuotaLimiter>,
         remote_ctx: Option<RemoteContext>,
-        mut remote_req: RemoteAnalysisRequest,
+        mut remote_analysis_req: RemoteAnalysisRequest,
+        mut remote_req: RemoteRequest,
     ) -> Result<Self> {
         let remote_ctx = remote_ctx.map(|ctx| {
-            let mut kv_ranges = Vec::new();
-            for range in ranges.clone() {
+            let mut kv_ranges = Vec::with_capacity(ranges.len());
+            for range in &ranges {
                 let kv_range = (
-                    Bytes::from(range.start.clone()),
-                    Bytes::from(range.end.clone()),
+                    Bytes::copy_from_slice(&range.start),
+                    Bytes::copy_from_slice(&range.end),
                 );
                 kv_ranges.push(kv_range)
             }
@@ -86,8 +97,18 @@ impl<S: Snapshot, F: KvFormat> AnalyzeContext<S, F> {
                 snap.get_kvengine_snap()
                     .unwrap()
                     .marshal(kv_ranges.as_slice(), false, true);
-            remote_req.key = key;
-            remote_req.snap_bytes = snap_bytes;
+            if !ctx.remote_analyze_url.is_empty() {
+                remote_analysis_req.key = key;
+                remote_analysis_req.snap_bytes = snap_bytes;
+            } else {
+                let req_body = encode_remote_cop_request(
+                    &remote_req.cop_req,
+                    Vec::default().as_slice(),
+                    &snap_bytes,
+                );
+                remote_req.key = format!("analyze:{}", key);
+                remote_req.req_body = req_body;
+            }
             ctx
         });
         let store = CloudStore::new(
@@ -106,8 +127,10 @@ impl<S: Snapshot, F: KvFormat> AnalyzeContext<S, F> {
             quota_limiter,
             _phantom: PhantomData,
             remote_ctx,
+            remote_analysis_req,
             remote_req,
             is_auto_analyze,
+            remote_exec_details: None,
         })
     }
 
@@ -325,7 +348,7 @@ async fn remote_analyze(
         .map_err(|e| Error::Other(e.to_string()))?;
     let client = remote_ctx.client.clone();
     tokio::time::timeout(
-        deadline.saturating_duration_since(Instant::now()),
+        deadline.saturating_duration_since(Instant::now_coarse()),
         async move {
             let response = client.request(req).await.map_err(|e| {
                 if e.is_incomplete_message() {
@@ -353,68 +376,101 @@ async fn remote_analyze(
 #[async_trait]
 impl<S: Snapshot, F: KvFormat> RequestHandler for AnalyzeContext<S, F> {
     async fn handle_request(&mut self) -> Result<MemoryTraceGuard<Response>> {
-        let start_time = Instant::now();
+        let start_time = Instant::now_coarse();
         let is_remote = self.remote_ctx.is_some();
         let remote_tag = self
             .remote_ctx
             .as_ref()
             .map(|ctx| {
-                format!(
-                    " url [{}] [:{}]",
-                    ctx.remote_analyze_url.clone(),
-                    self.remote_req.key.clone(),
-                )
+                if !ctx.remote_analyze_url.is_empty() {
+                    format!(
+                        " url [{}] [{}]",
+                        ctx.remote_analyze_url.clone(),
+                        self.remote_analysis_req.key.clone(),
+                    )
+                } else {
+                    format!(
+                        " url [{}] [{}]",
+                        ctx.remote_worker_url.clone(),
+                        self.remote_req.key.clone(),
+                    )
+                }
             })
             .unwrap_or_default();
         let tag = format!("is remote {}{}", is_remote, remote_tag);
-        info!("handle analyze request, {}", tag);
-        let ret = if is_remote {
-            let remote_ctx = self.remote_ctx.as_ref().unwrap();
-            let ctx = remote_ctx.clone();
-            let analyze_cache = remote_ctx.analyze_cache.clone();
-            let remote_req = self.remote_req.clone();
-            let key = self.remote_req.key.clone();
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            remote_ctx.runtime.spawn(async move {
-                let result = analyze_cache
-                    .get_with(key, async move {
-                        remote_analyze(ctx, &remote_req, start_time.add(REMOTE_ANALYZE_TIMEOUT))
+        let ret = if let Some(remote_ctx) = &self.remote_ctx {
+            if !remote_ctx.remote_analyze_url.is_empty() {
+                let ctx = remote_ctx.clone();
+                let remote_request_cache = remote_ctx.remote_request_cache.clone();
+                let remote_analysis_req = self.remote_analysis_req.clone();
+                let key = self.remote_analysis_req.key.clone();
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                remote_ctx.runtime.spawn(async move {
+                    let result = remote_request_cache
+                        .get_with(key, async move {
+                            remote_analyze(
+                                ctx,
+                                &remote_analysis_req,
+                                start_time.add(REMOTE_REQUEST_TIMEOUT),
+                            )
                             .await
-                    })
-                    .await;
-                tx.send(result).unwrap();
-            });
-            match rx.await.unwrap() {
-                result @ Ok(_) => result,
-                Err(Error::Other(e)) => {
-                    if e.eq(INCOMPLETE_MESSAGE) {
-                        let key = &self.remote_req.key;
-                        warn!(
-                            "analyze other failed, incomplete message error, invalidate cached value for the key [:{}]",
-                            key,
-                        );
-                        remote_ctx.analyze_cache.clone().invalidate(key).await;
+                        })
+                        .await;
+                    tx.send(result).unwrap();
+                });
+                match rx.await.unwrap() {
+                    Ok(data) => {
+                        let mut resp = Response::default();
+                        resp.set_data(data);
+                        Ok(resp)
                     }
-                    Err(Error::Other(e))
+                    Err(Error::Other(e)) => {
+                        if e.eq(INCOMPLETE_MESSAGE) {
+                            let key = &self.remote_analysis_req.key;
+                            warn!(
+                                "analyze other failed, incomplete message error, invalidate cached value for the key [:{}]",
+                                key,
+                            );
+                            remote_ctx
+                                .remote_request_cache
+                                .clone()
+                                .invalidate(key)
+                                .await;
+                        }
+                        Err(Error::Other(e))
+                    }
+                    Err(e) => Err(e),
                 }
-                Err(e) => Err(e),
+            } else {
+                remote_handle_request(
+                    "analyze".to_string(),
+                    tag.clone(),
+                    remote_ctx.clone(),
+                    self.remote_req.clone(),
+                )
+                .await
             }
             // Do not fallback to local if remote analyze failed. Or else it may
             // cause server overloaded.
         } else {
-            self.local_handle_request().await
+            self.local_handle_request().await.map(|data| {
+                let mut resp = Response::default();
+                resp.set_data(data);
+                resp
+            })
         };
         match ret {
-            Ok(data) => {
+            Ok(mut resp) => {
                 info!(
                     "analyze response data size {}, takes {:?}, {}",
-                    data.len(),
+                    resp.data.len(),
                     start_time.saturating_elapsed(),
                     tag,
                 );
-                let memory_size = data.capacity();
-                let mut resp = Response::default();
-                resp.set_data(data);
+                let memory_size = resp.data.capacity();
+                if is_remote {
+                    self.remote_exec_details = resp.exec_details_v2.take();
+                }
                 Ok(MEMTRACE_ANALYZE.trace_guard(resp, memory_size))
             }
             Err(Error::Other(e)) => {
@@ -431,6 +487,16 @@ impl<S: Snapshot, F: KvFormat> RequestHandler for AnalyzeContext<S, F> {
     }
 
     fn collect_scan_statistics(&mut self, dest: &mut Statistics) {
+        if let Some(exec_details_v2) = self.remote_exec_details.take() {
+            if let Some(scan_detail_v2) = exec_details_v2.scan_detail_v2.as_ref() {
+                dest.processed_size += scan_detail_v2.processed_versions_size as usize;
+                dest.write.processed_keys = dest
+                    .write
+                    .processed_keys
+                    .saturating_add(scan_detail_v2.processed_versions as usize);
+            }
+            return;
+        }
         dest.add(&self.storage_stats);
         self.storage_stats = Statistics::default();
     }

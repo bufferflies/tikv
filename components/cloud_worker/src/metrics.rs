@@ -32,6 +32,30 @@ lazy_static! {
     )
     .unwrap();
 
+    pub static ref REMOTE_ANALYZE_REQ_COUNTER: IntCounter = register_int_counter!(
+        "tikv_worker_remote_analyze_request_counter",
+        "Total count of remote analyze requests",
+    )
+    .unwrap();
+
+    pub static ref REMOTE_ANALYZE_RESP_SIZE: IntCounter = register_int_counter!(
+        "tikv_worker_remote_analyze_response_size",
+        "Total size of remote analyze responses",
+    )
+    .unwrap();
+
+    pub static ref REMOTE_CHECKSUM_REQ_COUNTER: IntCounter = register_int_counter!(
+        "tikv_worker_remote_checksum_request_counter",
+        "Total count of remote checksum requests",
+    )
+    .unwrap();
+
+    pub static ref REMOTE_CHECKSUM_RESP_SIZE: IntCounter = register_int_counter!(
+        "tikv_worker_remote_checksum_response_size",
+        "Total size of remote checksum responses",
+    )
+    .unwrap();
+
     pub static ref REMOTE_COPR_SNAPSHOT_HISTOGRAM: Histogram = register_histogram!(
         "tikv_worker_remote_cop_snapshot_duration_seconds",
         "Bucketed histogram of remote copr snapshot duration",
