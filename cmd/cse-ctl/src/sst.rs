@@ -38,7 +38,7 @@ pub struct ShowSstConfig {
     pub dfs: DFSConfig,
 }
 
-fn get_file_data_from_local(local: PathBuf) -> bytes::Bytes {
+pub(crate) fn get_file_data_from_local(local: PathBuf) -> bytes::Bytes {
     let data = std::fs::read(&local).unwrap_or_else(|err| {
         panic!("failed to read local file from {:?}: {:?}", local, err);
     });

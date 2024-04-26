@@ -265,7 +265,7 @@ pub struct TxnChunkInner {
 }
 
 #[derive(Clone)]
-struct TxnChunkIndex {
+pub struct TxnChunkIndex {
     block_offs: Bytes,
     key_offs: Bytes,
     keys: Bytes,
@@ -312,6 +312,10 @@ impl TxnChunkIndex {
     pub fn biggest(&self) -> InnerKey<'_> {
         let off = self.get_block_key_off(self.num_blocks);
         InnerKey::from_inner_buf(&self.keys[off..])
+    }
+
+    pub fn num_blocks(&self) -> usize {
+        self.num_blocks
     }
 }
 
@@ -388,6 +392,10 @@ impl TxnChunkInner {
 
     pub fn get_inserts(&self) -> u32 {
         self.inserts
+    }
+
+    pub fn get_index(&self) -> &TxnChunkIndex {
+        &self.index
     }
 
     pub fn load_block(&self, pos: usize) -> Result<Bytes> {
@@ -674,7 +682,7 @@ impl Iterator for TxnFileIterator {
     }
 }
 
-struct TxnChunkIterator {
+pub struct TxnChunkIterator {
     chunk: TxnChunk,
     block_iter: TxnChunkBlockIterator,
     num_blocks: usize,
@@ -683,7 +691,7 @@ struct TxnChunkIterator {
 }
 
 impl TxnChunkIterator {
-    fn new(chunk: TxnChunk, reverse: bool) -> Self {
+    pub fn new(chunk: TxnChunk, reverse: bool) -> Self {
         let num_blocks = chunk.index.num_blocks;
         Self {
             chunk,
@@ -754,7 +762,7 @@ impl TxnChunkIterator {
         }
     }
 
-    fn next(&mut self) {
+    pub fn next(&mut self) {
         if self.reverse {
             self.prev_inner();
         } else {
@@ -762,7 +770,7 @@ impl TxnChunkIterator {
         }
     }
 
-    fn rewind(&mut self) {
+    pub fn rewind(&mut self) {
         if self.reverse {
             self.block_pos = self.num_blocks - 1;
             if self.load_block() {
@@ -802,15 +810,15 @@ impl TxnChunkIterator {
         }
     }
 
-    fn key(&self) -> InnerKey<'_> {
+    pub fn key(&self) -> InnerKey<'_> {
         InnerKey::from_inner_buf(&self.block_iter.key_buf)
     }
 
-    fn get_value(&self) -> &[u8] {
+    pub fn get_value(&self) -> &[u8] {
         self.block_iter.get_val()
     }
 
-    fn valid(&self) -> bool {
+    pub fn valid(&self) -> bool {
         self.block_iter.num_keys > 0 && self.block_iter.err.is_none()
     }
 }

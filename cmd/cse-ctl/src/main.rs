@@ -11,6 +11,7 @@ mod restore;
 mod sst;
 mod stats;
 mod truncate_ts;
+mod txn_file;
 mod unsafe_recover;
 
 use std::{env, fs::OpenOptions, io};
@@ -28,6 +29,7 @@ use crate::{
     sst::{execute_show_sst, ShowSstArgs},
     stats::{execute_stats, StatsArgs},
     truncate_ts::{execute_truncate_ts, TruncateTsArgs},
+    txn_file::{execute_show_txn_chunk, ShowTxnChunkArgs},
     unsafe_recover::{execute_unsafe_recover, UnsafeRecoverArgs},
     Commands::*,
 };
@@ -140,6 +142,7 @@ enum ShowCommands {
     BackupList(ShowBackupListArgs),
     Sst(ShowSstArgs),
     Archive(ShowArchiveArgs),
+    TxnChunk(ShowTxnChunkArgs),
 }
 
 fn execute_show(args: ShowArgs) {
@@ -155,6 +158,9 @@ fn execute_show(args: ShowArgs) {
         }
         ShowCommands::Archive(args) => {
             execute_show_archive(args);
+        }
+        ShowCommands::TxnChunk(args) => {
+            execute_show_txn_chunk(args);
         }
     }
 }
