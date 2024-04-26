@@ -384,21 +384,19 @@ impl<L: LockManager> SchedulerInner<L> {
     ///
     /// Returns a deadline error if the deadline is exceeded. Returns the `Task`
     /// if all latches are acquired, returns `None` otherwise.
-    fn acquire_lock_on_wakeup(&self, cid: u64) -> Result<Option<Task>, StorageError> {
+    fn acquire_lock_on_wakeup(
+        &self,
+        cid: u64,
+    ) -> Result<Option<Task>, (u64 /* region_id */, StorageError)> {
         let mut task_slot = self.get_task_slot(cid);
         let tctx = task_slot.get_mut(&cid).unwrap();
-        // Check deadline early during acquiring latches to avoid expired requests
-        // blocking other requests.
-        if let Err(e) = tctx.task.as_ref().unwrap().cmd.deadline().check() {
-            // `acquire_lock_on_wakeup` is called when another command releases its locks
-            // and wakes up command `cid`. This command inserted its lock before
-            // and now the lock is at the front of the queue. The actual
-            // acquired count is one more than the `owned_count` recorded in the
-            // lock, so we increase one to make `release` work.
-            tctx.lock.owned_count += 1;
-            return Err(e.into());
-        }
         if self.latches.acquire(&mut tctx.lock, cid) {
+            // Check deadline early.
+            // TODO: implement a fast path to release without acquiring the latch.
+            if let Err(e) = tctx.task.as_ref().unwrap().cmd.deadline().check() {
+                info!("acquire_lock_on_wakeup: deadline exceeded"; "cid" => cid, "lock" => ?tctx.lock);
+                return Err((tctx.lock.region_id, e.into()));
+            }
             tctx.on_schedule();
             return Ok(tctx.task.take());
         }
@@ -649,7 +647,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
                 self.execute(task);
             }
             Ok(None) => {}
-            Err(err) => {
+            Err((region_id, err)) => {
                 // Spawn the finish task to the pool to avoid stack overflow
                 // when many queuing tasks fail successively.
                 let this = self.clone();
@@ -657,6 +655,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
                     .worker_pool
                     .pool
                     .spawn(async move {
+                        tikv_util::set_current_region(region_id);
                         this.finish_with_err(cid, err);
                     })
                     .unwrap();

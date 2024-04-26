@@ -119,14 +119,14 @@ impl GlobalLatches {
     }
 }
 
-#[allow(unused)]
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct RegionTxnLatch {
     before_txn_cmd_count: usize,
     checked_txn_cmd_count: usize,
     txn_file_latch: Option<TxnFileLatch>,
 }
 
+#[derive(Debug)]
 struct TxnFileLatch {
     start_ts: u64,
     txn_file: TxnFile,
@@ -134,7 +134,6 @@ struct TxnFileLatch {
     waiting_tasks: Vec<u64>,
 }
 
-#[allow(unused)]
 impl RegionTxnLatch {
     fn acquire_txn_lock(&mut self, lock: &mut Lock, who: u64) -> bool {
         if let Some(txn_file_latch) = self.txn_file_latch.as_mut() {
@@ -171,7 +170,12 @@ impl RegionTxnLatch {
     fn release_txn_lock(&mut self, lock: &Lock, who: u64) -> Vec<u64> {
         self.before_txn_cmd_count = self.checked_txn_cmd_count;
         self.checked_txn_cmd_count = 0;
-        let mut txn_file_latch = self.txn_file_latch.take().unwrap();
+        let txn_file_latch = self.txn_file_latch.take().unwrap_or_else(|| {
+            panic!(
+                "release_txn_lock: txn file latch not exist, region_id: {}, lock: {:?}, who: {}, self: {:?}",
+                lock.region_id, lock, who, self
+            );
+        });
         assert_eq!(lock.start_ts, txn_file_latch.start_ts);
         assert_eq!(txn_file_latch.cid, who);
         txn_file_latch.waiting_tasks

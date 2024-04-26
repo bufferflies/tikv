@@ -104,7 +104,7 @@ impl Latch {
 }
 
 /// Lock required for a command.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Lock {
     /// The hash value of the keys that a command must acquire before being able
     /// to be processed.
