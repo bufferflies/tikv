@@ -179,6 +179,7 @@ impl kvengine::RecoverHandler for RecoverHandler {
         shard: &Arc<Shard>,
         meta: &ShardMeta,
     ) -> kvengine::Result<()> {
+        let tag = shard.tag();
         let applied_index = shard.get_write_sequence();
         let mut ctx = ApplyContext::new(engine.clone(), None);
         let applied_index_term = shard.get_property(TERM_KEY).unwrap().get_u64_le();
@@ -188,9 +189,7 @@ impl kvengine::RecoverHandler for RecoverHandler {
         let high_idx = preprocessed_index + 1;
         info!(
             "{} recover from applied {} to index {}",
-            shard.tag(),
-            applied_index,
-            preprocessed_index,
+            tag, applied_index, preprocessed_index,
         );
         let mut entries = Vec::with_capacity((high_idx.saturating_sub(low_idx)) as usize);
         let &peer_id = self.region_peer_map.get(&shard.id).unwrap();
@@ -201,7 +200,7 @@ impl kvengine::RecoverHandler for RecoverHandler {
                 let truncated_state = load_raft_truncated_state(&self.rf_engine, peer_id);
                 let err_msg = format!(
                     "{} entries unavailable err: {:?}, stats {:?}, truncated_state: {:?}, low: {}, high {}",
-                    shard.tag(),
+                    tag,
                     e,
                     stats,
                     truncated_state,
@@ -227,13 +226,18 @@ impl kvengine::RecoverHandler for RecoverHandler {
             if req.has_admin_request() {
                 let admin = req.get_admin_request();
                 if admin.has_splits() || admin.has_prepare_merge() || admin.has_commit_merge() {
-                    // We are recovering an parent shard, we need to switch the mem-table for
-                    // children to copy.
-                    engine.switch_mem_table(shard, meta.base_version + ctx.exec_log_index);
-                    // It is the last command for a parent shard, we should return here.
-                    return Ok(());
+                    if shard.has_txn_file_locks() {
+                        info!("{} recover: split/merge ignored due to txn file locks", tag; "log_index" => ctx.exec_log_index);
+                    } else {
+                        // We are recovering an parent shard, we need to switch the mem-table for
+                        // children to copy.
+                        engine.switch_mem_table(shard, meta.base_version + ctx.exec_log_index);
+                        // It is the last command for a parent shard, we should return here.
+                        return Ok(());
+                    }
+                } else {
+                    Self::execute_admin_request(&mut applier, &mut ctx, req)?;
                 }
-                Self::execute_admin_request(&mut applier, &mut ctx, req)?;
             } else if let Some(custom) = rlog::get_custom_log(&req) {
                 if rlog::is_txn_file_ref(custom.data.chunk()) {
                     let txn_file_ref = custom.get_txn_file_ref().unwrap();
@@ -246,9 +250,9 @@ impl kvengine::RecoverHandler for RecoverHandler {
                         let cs = engine.prepare_change_set(cs, false, None, None)?;
                         engine.apply_change_set(cs)?;
                     }
-                } else if let Err(e) = applier.exec_custom_log(&mut ctx, &custom) {
+                } else if let Err(err) = applier.exec_custom_log(&mut ctx, &custom) {
                     // Only duplicated pre-split may fail, we can ignore this error.
-                    warn!("failed to execute custom log {:?}", e);
+                    warn!("{} failed to execute custom log {:?}", tag, err);
                 }
             }
             applier.apply_state.applied_index = ctx.exec_log_index;
