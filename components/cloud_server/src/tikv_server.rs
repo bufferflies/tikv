@@ -991,11 +991,9 @@ impl TikvServer {
     )> {
         let kv_engine_path = PathBuf::from(&conf.storage.data_dir).join(Path::new("db"));
         let mut kv_opts = kvengine::Options::default();
+        let total_mem = SysQuota::memory_limit_in_bytes();
         let capacity = match conf.storage.block_cache.capacity {
-            None => {
-                let total_mem = SysQuota::memory_limit_in_bytes();
-                ((total_mem as f64) * tikv::config::BLOCK_CACHE_RATE) as usize
-            }
+            None => ((total_mem as f64) * tikv::config::BLOCK_CACHE_RATE) as usize,
             Some(c) => c.0 as usize,
         };
         kv_opts.local_dir = kv_engine_path;
@@ -1043,6 +1041,13 @@ impl TikvServer {
             conf.storage.flow_control.max_region_speed_limit.0;
         kv_opts.flow_control.min_region_speed_limit =
             conf.storage.flow_control.min_region_speed_limit.0;
+
+        kv_opts.txn_file_worker_pool_size =
+            conf.kvengine.txn_file_worker_pool_size.unwrap_or_else(|| {
+                // 32GB -> 16, 16GB -> 8
+                let size = (total_mem >> 30) as usize / 2;
+                size.clamp(2, 64)
+            });
 
         let opts = Arc::new(kv_opts);
         let id_allocator = Arc::new(PdIdAllocator::new(pd.clone()));

@@ -1620,15 +1620,25 @@ impl Applier {
         txn_file_ref: TxnFileRef,
         entry_index: u64,
     ) {
+        let tag = self.tag();
         self.paused_apply_queue
-            .pause(entry_index, &format!("{} txn file", self.tag()));
+            .pause(entry_index, &format!("{} txn file", tag));
         let txn_chunk_manager = ctx.engine.get_txn_chunk_manager();
         let router = ctx.router.clone().unwrap();
         let id = self.region_id();
-        std::thread::spawn(move || {
+        let worker_pool = txn_chunk_manager.worker_pool().clone();
+        let start = Instant::now();
+        worker_pool.spawn_blocking(move || {
             tikv_util::set_current_region(id);
-            for chunk_id in txn_file_ref.chunk_ids {
-                txn_chunk_manager.prepare(chunk_id).unwrap();
+            PREPARE_TASK_WAIT_TIME_HISTOGRAM
+                .with_label_values(&["txn"])
+                .observe(duration_to_sec(start.saturating_elapsed()));
+            if let Err(err) = txn_chunk_manager.prepare_txn_chunks(&txn_file_ref.chunk_ids) {
+                // We can't handle the error here, just panic.
+                panic!(
+                    "{} failed to prepare txn chunks, err {:?}, txn_file_ref {:?}, entry_index {}",
+                    tag, err, txn_file_ref, entry_index
+                );
             }
             router.send(id, PeerMsg::PrepareTxnFileResult(entry_index));
         });

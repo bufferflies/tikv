@@ -53,8 +53,6 @@ pub struct Config {
     pub scheduler_concurrency: usize,
     pub scheduler_worker_pool_size: usize,
     #[online_config(skip)]
-    pub scheduler_txn_file_worker_pool_size: usize,
-    #[online_config(skip)]
     pub scheduler_pending_write_threshold: ReadableSize,
     #[online_config(skip)]
     // Reserve disk space to make tikv would have enough space to compact when disk is full.
@@ -88,7 +86,6 @@ impl Default for Config {
             max_key_size: DEFAULT_MAX_KEY_SIZE,
             scheduler_concurrency: DEFAULT_SCHED_CONCURRENCY,
             scheduler_worker_pool_size: (cpu_num / 2.).clamp(1., 8.) as usize,
-            scheduler_txn_file_worker_pool_size: (cpu_num / 4.).clamp(1., 4.) as usize,
             scheduler_pending_write_threshold: ReadableSize::mb(DEFAULT_SCHED_PENDING_WRITE_MB),
             reserve_space: ReadableSize::gb(DEFAULT_RESERVED_SPACE_GB),
             reserve_raft_space: ReadableSize::gb(DEFAULT_RESERVED_RAFT_SPACE_GB),

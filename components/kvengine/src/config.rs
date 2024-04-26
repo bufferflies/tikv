@@ -56,6 +56,8 @@ pub struct Config {
     /// if enabled, flush large L0 file will split into multiple files.
     pub flush_split_l0: bool,
 
+    pub txn_file_worker_pool_size: Option<usize>,
+
     pub per_keyspace_configs: Vec<PerKeyspaceConfig>,
     // Note: `per_keyspace_configs` must be the last field. Otherwise serializing the config
     // will meet a "ValueAfterTable" error.
@@ -74,6 +76,7 @@ impl Default for Config {
             remote_coprocessor_addr: "".to_string(),
             remote_coprocessor_min_blocks: 512,
             flush_split_l0: false,
+            txn_file_worker_pool_size: None,
         }
     }
 }

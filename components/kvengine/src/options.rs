@@ -71,6 +71,8 @@ pub struct Options {
     pub compaction_tombs_count: u64,
 
     pub flow_control: FlowControlOptions,
+
+    pub txn_file_worker_pool_size: usize,
 }
 
 impl Default for Options {
@@ -98,6 +100,7 @@ impl Default for Options {
             compaction_tombs_ratio: DEFAULT_COMPACTION_TOMBS_RATIO,
             compaction_tombs_count: DEFAULT_COMPACTION_TOMBS_COUNT,
             flow_control: Default::default(),
+            txn_file_worker_pool_size: 16,
         }
     }
 }

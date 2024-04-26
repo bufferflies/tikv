@@ -268,9 +268,6 @@ struct SchedulerInner<L: LockManager> {
     // high priority commands and system commands will be delivered to this pool
     high_priority_pool: SchedPool,
 
-    // txn file worker pool for preparing txn files.
-    txn_file_worker_pool: tokio::runtime::Runtime,
-
     // used to control write flow
     running_write_bytes: CachePadded<AtomicUsize>,
 
@@ -475,12 +472,6 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
                 feature_gate.clone(),
                 "sched-high-pri-pool",
             ),
-            txn_file_worker_pool: tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(config.scheduler_txn_file_worker_pool_size)
-                .thread_name("txn-file-worker-pool")
-                .enable_all()
-                .build()
-                .unwrap(),
             lock_mgr,
             concurrency_manager,
             pipelined_pessimistic_lock: dynamic_configs.pipelined_pessimistic_lock,
@@ -1775,12 +1766,15 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
     ) {
         let sched = self.clone();
         let manager = self.inner.engine.as_ref().unwrap().get_txn_chunk_manager();
-        self.inner.txn_file_worker_pool.spawn_blocking(move || {
+        let worker_pool = manager.worker_pool().clone();
+        let mut start = Instant::now();
+        worker_pool.spawn_blocking(move || {
             let region_id = cmd.ctx().get_region_id();
             tikv_util::set_current_region(region_id);
 
+            let wait_dur = start.saturating_elapsed();
+            start = Instant::now();
             let chunks_id = txn_file::command_chunks_to_load(&cmd);
-            let start = Instant::now();
             if let Err(err) = manager.prepare_txn_chunks(chunks_id) {
                 callback.execute(ProcessResult::Failed {
                     err: StorageErrorInner::Other(box_err!(err)).into(),
@@ -1797,7 +1791,8 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
                 "cid" => cid,
                 "chunks_id" => ?chunks_id,
                 "chunks_count" => chunks_id.len(),
-                "takes" => ?prepare_dur,
+                "wait_dur" => ?wait_dur,
+                "prepare_dur" => ?prepare_dur,
             );
 
             sched

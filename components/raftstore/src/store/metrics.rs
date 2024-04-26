@@ -487,6 +487,14 @@ lazy_static! {
             exponential_buckets(0.00001, 2.0, 26).unwrap()
         ).unwrap();
 
+    pub static ref PREPARE_TASK_WAIT_TIME_HISTOGRAM: HistogramVec =
+        register_histogram_vec!(
+            "tikv_raftstore_prepare_wait_time_duration_secs",
+            "Bucketed histogram of prepare task wait time duration.",
+            &["type"],
+            exponential_buckets(0.00001, 2.0, 26).unwrap()
+        ).unwrap();
+
     pub static ref APPLY_TASK_WAIT_TIME_HISTOGRAM: Histogram =
         register_histogram!(
             "tikv_raftstore_apply_wait_time_duration_secs",

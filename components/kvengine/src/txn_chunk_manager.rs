@@ -36,13 +36,23 @@ impl TxnChunkManager {
         local_path: PathBuf,
         dfs: Arc<dyn Dfs>,
         cache: SegmentedCache<BlockCacheKey, Bytes>,
+        worker_pool_size: usize,
     ) -> Self {
+        info!("create txn chunk manager"; "worker_pool_size" => worker_pool_size);
+        let worker_pool = tokio::runtime::Builder::new_multi_thread()
+            .thread_name("txn-chunk-worker")
+            .worker_threads(1) // currently not used.
+            .max_blocking_threads(worker_pool_size)
+            .enable_all()
+            .build()
+            .unwrap();
         let manager = Self {
             core: Arc::new(TxnChunkManagerCore {
                 local_path,
                 dfs,
                 txn_chunks: DashMap::new(),
                 cache,
+                worker_pool,
             }),
         };
         manager.init().unwrap();
@@ -63,6 +73,7 @@ pub struct TxnChunkManagerCore {
     dfs: Arc<dyn Dfs>,
     txn_chunks: DashMap<u64, Arc<TxnChunkEntry>>,
     cache: SegmentedCache<BlockCacheKey, Bytes>,
+    worker_pool: tokio::runtime::Runtime,
 }
 
 struct TxnChunkEntry {
@@ -95,6 +106,10 @@ impl TxnChunkManagerCore {
             }
         }
         Ok(())
+    }
+
+    pub fn worker_pool(&self) -> &tokio::runtime::Handle {
+        self.worker_pool.handle()
     }
 
     pub fn prepare(&self, txn_chunk_id: u64) -> Result<()> {
@@ -309,7 +324,7 @@ mod tests {
             .max_capacity(1024 * 1024u64)
             .build();
         let txn_chunk_manager =
-            TxnChunkManager::new(tmp_dir.path().to_path_buf(), dfs.clone(), cache.clone());
+            TxnChunkManager::new(tmp_dir.path().to_path_buf(), dfs.clone(), cache.clone(), 2);
         let runtime = dfs.get_runtime();
         for chunk_id in 1u64..=3 {
             let mut chunk_builder = TxnChunkBuilder::new(10);
@@ -331,7 +346,7 @@ mod tests {
         assert!(txn_chunk_manager.get(1).is_none());
         drop(txn_chunk_manager);
         // After process restart, the remained txn chunks are all loaded.
-        let txn_chunk_manager = TxnChunkManager::new(tmp_dir.path().to_path_buf(), dfs, cache);
+        let txn_chunk_manager = TxnChunkManager::new(tmp_dir.path().to_path_buf(), dfs, cache, 2);
         assert!(txn_chunk_manager.get(1).is_none());
         assert!(txn_chunk_manager.all_chunks_exists(&[2, 3]));
     }
