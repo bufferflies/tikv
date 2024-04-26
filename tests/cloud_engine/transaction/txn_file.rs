@@ -23,6 +23,7 @@ use test_cloud_server::{
         ClusterClient, ClusterClientOptions, CommitAction, MutateOptions, RequestOptions,
         TxnMutations, TxnWriteMethod,
     },
+    must_wait,
     oss::prepare_dfs,
     try_wait,
     util::Mutation,
@@ -829,6 +830,68 @@ fn test_txn_file_abnormal_impl(data_count: usize, use_txn_file: bool) {
         client.verify_data_with_ref_store();
     }
 
+    client.verify_data_with_ref_store();
+    cluster.stop();
+    oss.shutdown();
+}
+
+#[test]
+fn test_txn_file_move_down() {
+    test_util::init_log_for_test();
+    let (_temp_dir, mut oss, dfs_config) = prepare_dfs("test");
+    let node_ids = alloc_node_id_vec(NODES_COUNT);
+    let first_node = node_ids[0];
+    let pd_wrapper = PdWrapper::new_test(1, &SecurityConfig::default(), None);
+    let cluster_id = pd_wrapper.client().get_cluster_id().unwrap();
+    info!("test_txn_file_move_down"; "cluster_id" => cluster_id);
+    let mut cluster = ServerCluster::new_opt(
+        node_ids,
+        |_, conf| {
+            conf.dfs = dfs_config.clone();
+            conf.enable_inner_key_offset = true;
+            conf.kvengine.flush_split_l0 = true;
+        },
+        pd_wrapper,
+    );
+    cluster.start_tikv_workers(1, 2, false);
+    cluster.wait_region_replicated(&[], 3);
+
+    let gen_key = generate_keyspace_key(KEYSPACE_ID);
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _enter = rt.enter();
+
+    let mut client = cluster.new_client_opt(ClusterClientOptions {
+        txn_file_max_chunk_size: Some(256 * 1024),
+        ..Default::default()
+    });
+
+    client.split_keyspace(KEYSPACE_ID);
+    let num_keys = 10000;
+    {
+        client
+            .try_put_kv(
+                0..num_keys,
+                &gen_key,
+                i_to_val_opt("value0_", 3),
+                MutateOptions {
+                    commit_action: CommitAction::AsyncCommitSecondaryKeys(Duration::ZERO),
+                    write_method: TxnWriteMethod::FileBased,
+                },
+            )
+            .unwrap();
+    }
+    must_wait(
+        || {
+            let kvengine = cluster.get_kvengine(first_node);
+            let stats = kvengine.get_all_shard_stats();
+            stats
+                .iter()
+                .all(|s| s.l0_table_count == 0 && s.mem_table_size == 0)
+        },
+        5,
+        "wait for compaction",
+    );
     client.verify_data_with_ref_store();
     cluster.stop();
     oss.shutdown();

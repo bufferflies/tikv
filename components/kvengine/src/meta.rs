@@ -144,13 +144,18 @@ impl ShardMeta {
 
     fn move_down_file(&mut self, id: u64, cf: i32, level: u32) {
         let mut fm = self.files.get_mut(&id).unwrap();
-        assert!(
-            fm.get_level() + 1 == level,
+        assert_eq!(
+            fm.get_level() + 1,
+            level,
             "fm.level {} level {}",
             fm.get_level(),
             level
         );
-        assert!(fm.cf == cf as i8);
+        if fm.cf == -1 {
+            fm.cf = cf as i8;
+        } else {
+            assert_eq!(fm.cf, cf as i8);
+        }
         fm.level = level as u8;
     }
 

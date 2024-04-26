@@ -153,7 +153,7 @@ impl L0TableCore {
         let kv_size = tbl.kv_size;
         let mut footer = L0Footer::default();
         footer.num_cfs = NUM_CFS as u32;
-        footer.magic = MAGIC_NUMBER;
+        footer.magic = MAGIC_NUMBER_SPLIT_L0;
         footer.version = tbl.l0_version;
         let smallest = tbl.clone_smallest();
         let biggest = tbl.clone_biggest();
@@ -265,6 +265,10 @@ impl L0TableCore {
 
     pub fn total_blob_size(&self) -> u64 {
         self.total_blob_size
+    }
+
+    pub fn is_write_cf_only(&self) -> bool {
+        self.footer.magic == MAGIC_NUMBER_SPLIT_L0
     }
 }
 

@@ -364,9 +364,10 @@ impl EngineCore {
         let mut new_blob_tbl_map = data.blob_tbl_map.as_ref().clone();
         assert!(!is_blob_file(comp.level));
         if comp.level == 0 {
+            let is_move_down = is_move_down(comp);
             new_l0s.retain(|x| {
                 let is_deleted = comp.get_top_deletes().contains(&x.id());
-                if is_deleted {
+                if is_deleted && !is_move_down {
                     del_files.insert(x.id(), shard.cover_full_table(x.smallest(), x.biggest()));
                 }
                 !is_deleted
@@ -679,8 +680,17 @@ impl EngineCore {
             for new_tbl_create in comp.get_table_creates() {
                 if new_tbl_create.cf as usize == cf {
                     let new_tbl = if is_move_down(comp) {
-                        let old_top_level = old_scf.get_level(level - 1);
-                        old_top_level.get_table_by_id(new_tbl_create.id).unwrap()
+                        if comp.level == 0 {
+                            let old_l0 = data
+                                .l0_tbls
+                                .iter()
+                                .find(|l0| l0.id() == new_tbl_create.id)
+                                .unwrap();
+                            old_l0.get_cf(WRITE_CF).clone().unwrap()
+                        } else {
+                            let old_top_level = old_scf.get_level(level - 1);
+                            old_top_level.get_table_by_id(new_tbl_create.id).unwrap()
+                        }
                     } else {
                         cs.ln_tables.get(&new_tbl_create.get_id()).unwrap().clone()
                     };

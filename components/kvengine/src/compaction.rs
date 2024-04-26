@@ -1,6 +1,5 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use core::panic;
 use std::{
     cmp::Ordering as CmpOrdering,
     collections::{HashMap, HashSet},
@@ -931,6 +930,10 @@ impl Engine {
             store_bool(&shard.compacting, false);
             return None;
         }
+        if let Some(res) = self.try_move_down_l0(shard, &data) {
+            info!("{} move down l0", tag);
+            return Some(Ok(res));
+        }
         let mut req = self.new_compact_request_with_shard(shard, -1, 0);
         let mut l0_tbls = vec![];
         let mut multi_cfs_l1_tbls = vec![];
@@ -1017,6 +1020,57 @@ impl Engine {
         req.compaction_tp = CompactionType::L0(l0_compaction);
         info!("start compact L0 for {}", tag);
         Some(self.comp_client.compact(req))
+    }
+
+    fn try_move_down_l0(&self, shard: &Shard, shard_data: &ShardData) -> Option<pb::ChangeSet> {
+        if !shard_data.l0_tbls.iter().any(|l0| l0.is_write_cf_only()) {
+            return None;
+        }
+        let mut move_down_l0s = vec![];
+        for (i, l0_tbl) in shard_data.l0_tbls.iter().enumerate() {
+            if !l0_tbl.is_write_cf_only() {
+                continue;
+            }
+            let l0_write_cf_tbl = l0_tbl.get_cf(WRITE_CF).as_ref().unwrap();
+            let overlap_below_l0 = shard_data.l0_tbls[i + 1..].iter().any(|below_l0| {
+                if let Some(below_write_cf) = below_l0.get_cf(WRITE_CF) {
+                    return below_write_cf.is_overlap_with(l0_write_cf_tbl);
+                }
+                false
+            });
+            if overlap_below_l0 {
+                continue;
+            }
+            let l1 = shard_data.cfs[WRITE_CF].get_level(1);
+            if l0_write_cf_tbl
+                .find_overlap(l1.tables.as_slice(), true)
+                .is_some()
+            {
+                continue;
+            }
+            let mut table_create = pb::TableCreate::default();
+            table_create.set_id(l0_tbl.id());
+            table_create.set_level(1);
+            table_create.set_cf(WRITE_CF as i32);
+            table_create.set_smallest(l0_write_cf_tbl.smallest().to_vec());
+            table_create.set_biggest(l0_write_cf_tbl.biggest().to_vec());
+            move_down_l0s.push(table_create);
+        }
+        if move_down_l0s.is_empty() {
+            return None;
+        }
+        let mut cs = new_change_set(shard.id, shard.ver);
+        let comp = cs.mut_compaction();
+        comp.set_cf(-1);
+        comp.set_level(0);
+        comp.set_top_deletes(
+            move_down_l0s
+                .iter()
+                .map(|tbl_create| tbl_create.id)
+                .collect(),
+        );
+        comp.set_table_creates(move_down_l0s.into());
+        Some(cs)
     }
 
     fn trigger_l1_plus_compaction(
