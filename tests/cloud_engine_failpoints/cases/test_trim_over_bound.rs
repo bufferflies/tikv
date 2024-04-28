@@ -1,5 +1,7 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
+use std::time::Duration;
+
 use futures::executor::block_on;
 use slog_global::info;
 use test_cloud_server::ServerCluster;
@@ -35,6 +37,13 @@ fn test_trim_over_bound_impl(split_key_idx: usize, do_leader_transfer: bool) {
     client.split(&prev_keyspace);
 
     client.put_kv(100..200, i_to_key, random_value_1kb);
+
+    let region_id = client.get_region_id(&i_to_key(100));
+    assert!(
+        cluster.wait_for_memtable_flushed(region_id, Duration::from_secs(5)),
+        "stats: {:?}",
+        cluster.get_data_stats()
+    );
 
     // Disable compaction to make shards over bound after split.
     fail::cfg(fp, "return").unwrap();
