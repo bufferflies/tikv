@@ -7,7 +7,7 @@ use std::{
 
 use tikv_util::config::ReadableDuration;
 
-use crate::table::blobtable::builder::BlobTableBuildOptions;
+use crate::table::{blobtable::builder::BlobTableBuildOptions, ChecksumType};
 
 pub(crate) const DEFAULT_COMPACTION_REQUEST_VERSION: u32 = 3;
 pub(crate) const DEFAULT_COMPACTION_TOMBS_RATIO: f64 = 0.2;
@@ -58,6 +58,8 @@ pub struct Config {
 
     pub txn_file_worker_pool_size: Option<usize>,
 
+    pub checksum_type: ChecksumType,
+
     pub per_keyspace_configs: Vec<PerKeyspaceConfig>,
     // Note: `per_keyspace_configs` must be the last field. Otherwise serializing the config
     // will meet a "ValueAfterTable" error.
@@ -77,6 +79,7 @@ impl Default for Config {
             remote_coprocessor_min_blocks: 512,
             flush_split_l0: false,
             txn_file_worker_pool_size: None,
+            checksum_type: ChecksumType::Crc32c,
         }
     }
 }

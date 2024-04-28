@@ -5,7 +5,10 @@ use std::sync::Arc;
 use bytes::Buf;
 use http::{header, Request, Response, StatusCode};
 use hyper::Body;
-use kvengine::{dfs::Dfs, table::txn_file::TxnChunkBuilder};
+use kvengine::{
+    dfs::Dfs,
+    table::{txn_file::TxnChunkBuilder, ChecksumType},
+};
 
 use crate::{
     common::{get_body, make_response},
@@ -49,7 +52,7 @@ pub(crate) async fn create_txn_chunk(
     let data_len = body.len() - 4;
     let checksum = (&body[data_len..]).get_u32_le();
     let mut body_buf = &body[..data_len];
-    if crc32c::crc32c(body_buf) != checksum {
+    if ChecksumType::Crc32.checksum(body_buf) != checksum {
         return Ok(make_response(StatusCode::BAD_REQUEST, "checksum mismatch"));
     }
     let mut txn_chunk_builder = TxnChunkBuilder::new(4096);
@@ -108,7 +111,7 @@ mod tests {
             buf.put_u32_le(val.len() as u32);
             buf.extend_from_slice(val.as_bytes());
         }
-        let check_sum = crc32c::crc32c(buf);
+        let check_sum = crc32fast::hash(buf);
         buf.put_u32_le(check_sum);
         let chunk_id = 155;
         let dfs: Arc<dyn Dfs> = Arc::new(InMemFs::new());

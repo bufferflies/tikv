@@ -62,6 +62,64 @@ pub trait Iterator: Send {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ChecksumType {
+    None,
+    Crc32c,
+    Crc32,
+}
+
+impl Default for ChecksumType {
+    fn default() -> Self {
+        ChecksumType::Crc32c
+    }
+}
+
+impl ChecksumType {
+    pub fn value(&self) -> u8 {
+        match self {
+            ChecksumType::None => 0,
+            ChecksumType::Crc32c => 1,
+            ChecksumType::Crc32 => 2,
+        }
+    }
+
+    pub fn checksum(&self, data: &[u8]) -> u32 {
+        match self {
+            ChecksumType::None => 0,
+            ChecksumType::Crc32c => crc32c::crc32c(data),
+            ChecksumType::Crc32 => crc32fast::hash(data),
+        }
+    }
+
+    pub fn append(&self, checksum: u32, data: &[u8]) -> u32 {
+        match self {
+            ChecksumType::None => 0,
+            ChecksumType::Crc32c => crc32c::crc32c_append(checksum, data),
+            ChecksumType::Crc32 => {
+                let mut hasher = crc32fast::Hasher::new_with_initial(checksum);
+                hasher.update(data);
+                hasher.finalize()
+            }
+        }
+    }
+}
+
+impl From<u8> for ChecksumType {
+    fn from(v: u8) -> Self {
+        match v {
+            0 => ChecksumType::None,
+            1 => ChecksumType::Crc32c,
+            2 => ChecksumType::Crc32,
+            _ => {
+                error!("unknown checksum type {}", v);
+                ChecksumType::None
+            }
+        }
+    }
+}
+
 pub const BIT_DELETE: u8 = 1;
 pub const BIT_HAS_OLD_VERSION: u8 = 2;
 pub const BIT_BLOB_REF: u8 = 4;

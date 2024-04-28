@@ -22,6 +22,7 @@ use ::load_data::task::ResourceGroupConfig;
 use ::native_br::{backup::BackupConfig, restore::RestoreConfig};
 use kvengine::{
     dfs::{DFSConfig, Dfs, S3Fs},
+    table::ChecksumType,
     BLOCK_CACHE_KEY_SIZE,
 };
 use kvproto::metapb::Store;
@@ -110,6 +111,7 @@ fn start_server(
         .zstd_compression_level
         .parse()
         .expect("Unable to parse zstd compression level");
+    let checksum_type = config.checksum_type;
 
     let incoming = {
         let _enter = thread_pool.enter();
@@ -156,6 +158,7 @@ fn start_server(
         s3fs.clone(),
         thread_pool.clone(),
         MAX_IN_MEM_SIZE,
+        checksum_type,
         master_key.clone(),
         worker_scaler_opt,
         config.worker_scaler.clone(),
@@ -173,6 +176,7 @@ fn start_server(
 
     let ctx = Arc::new(server::Context {
         compression_lvl,
+        checksum_type,
         s3fs: s3fs.clone(),
         cache_fs,
         pd: pd.clone(),
@@ -431,6 +435,7 @@ pub struct Config {
     pub worker_scaler: WorkerScalerConfig,
     pub report_wru: bool,
     pub enable_load_data_check_point: bool,
+    pub checksum_type: ChecksumType,
 }
 
 impl Default for Config {
@@ -454,6 +459,7 @@ impl Default for Config {
             worker_scaler: WorkerScalerConfig::default(),
             report_wru: false,
             enable_load_data_check_point: false,
+            checksum_type: ChecksumType::Crc32c,
         }
     }
 }

@@ -614,7 +614,7 @@ impl S3FsCore {
                 if self.is_on_aws() {
                     // `x-amz-checksum-crc32c` value is base64 encoded in big-endian order.
                     let checksum = base64::encode(checksum.to_be_bytes());
-                    req.add_header("x-amz-checksum-crc32c", &checksum);
+                    req.add_header("x-amz-checksum-crc32", &checksum);
                 } else {
                     debug!(
                         "{} ignore x-amz-checksum-crc32c which is not supported by {}",
@@ -806,6 +806,11 @@ impl ObjectStorage for S3Fs {
         for (key, data) in objects {
             let full_key = format!("{}/{}", self.prefix, key);
             let fs = self.clone();
+            let checksum = if self.is_on_aws() {
+                Some(crc32fast::hash(&data))
+            } else {
+                None
+            };
             handles.push(runtime.spawn(async move {
                 fs.put_object_with_options(
                     full_key,
@@ -813,7 +818,7 @@ impl ObjectStorage for S3Fs {
                     key.clone(),
                     None,
                     Some(STORAGE_CLASS_INTELLIGENT_TIERING),
-                    None,
+                    checksum,
                 )
                 .await
                 .map_err(|err| format!("put {} failed {:?}", &key, err))
@@ -897,7 +902,7 @@ impl Dfs for S3Fs {
         // integrity when saving to dfs (s3 only) and verify the data integrity when
         // getting objects from dfs.
         let checksum = if self.is_on_aws() {
-            Some(crc32c::crc32c(&data))
+            Some(crc32fast::hash(&data))
         } else {
             None
         };

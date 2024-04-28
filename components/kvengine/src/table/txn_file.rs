@@ -12,7 +12,7 @@ use crate::{
     table::{
         encode_val_to_outer_val_owner, search,
         sstable::{key_diff_idx, BlockCacheKey, EntrySlice, File, TtlCache},
-        Error, InnerKey, Iterator, Result, Value,
+        ChecksumType, Error, InnerKey, Iterator, Result, Value,
     },
     UserMeta, USER_META_SIZE,
 };
@@ -21,7 +21,6 @@ const TXN_FILE_PROP_CHECK_NON_EXIST_COUNT: &str = "check_ne";
 const TXN_FILE_PROP_INSERT_COUNT: &str = "insert";
 
 const TXN_FILE_FORMAT: u16 = 1;
-const TXN_FILE_CHECKSUM_TYPE: u8 = 1;
 const TXN_FILE_MAGIC: u32 = 2785588940;
 const U32_SIZE: usize = std::mem::size_of::<u32>();
 
@@ -327,11 +326,11 @@ impl TxnChunkInner {
         let footer = Self::load_footer(&file)?;
         let idx_length = footer.hash_index_offset - footer.index_offset;
         let raw_idx_data = file.read(footer.index_offset as u64, idx_length as usize)?;
-        let idx_data = Self::validate_and_trim_checksum(raw_idx_data)?;
+        let idx_data = Self::validate_and_trim_checksum(raw_idx_data, footer.checksum_type)?;
         let properties_length =
             file.size() as usize - footer.properties_offset as usize - TXN_FILE_CHUNK_FOOTER_SIZE;
         let raw_properties = file.read(footer.properties_offset as u64, properties_length)?;
-        let properties = Self::validate_and_trim_checksum(raw_properties)?;
+        let properties = Self::validate_and_trim_checksum(raw_properties, footer.checksum_type)?;
         let mut inserts = 0;
         let mut check_non_exists = 0;
         let mut prop_slice = properties.chunk();
@@ -417,17 +416,17 @@ impl TxnChunkInner {
 
     fn read_block_from_file(&self, offset: u64, length: usize) -> Result<Bytes> {
         let raw_block = self.file.read(offset, length)?;
-        Self::validate_and_trim_checksum(raw_block)
+        Self::validate_and_trim_checksum(raw_block, self.footer.checksum_type)
     }
 
-    fn validate_and_trim_checksum(data: Bytes) -> Result<Bytes> {
+    fn validate_and_trim_checksum(data: Bytes, checksum_type: u8) -> Result<Bytes> {
         if data.len() < 4 {
             return Err(Error::InvalidChecksum(String::from("data is too short")));
         }
         let content_len = data.len() - 4;
         let checksum = (&data[content_len..]).get_u32_le();
         let content = data.slice(..data.len() - 4);
-        let got_checksum = crc32c::crc32c(&content);
+        let got_checksum = ChecksumType::from(checksum_type).checksum(&content);
         if checksum != got_checksum {
             return Err(Error::InvalidChecksum(format!(
                 "checksum mismatch expect {} got {}",
@@ -446,7 +445,8 @@ impl TxnChunkInner {
         let offset = self.footer.hash_index_offset as u64;
         let length = (self.footer.properties_offset as usize) - offset as usize;
         let raw_hash_idx_data = self.file.read(offset, length)?;
-        let hash_idx_data = Self::validate_and_trim_checksum(raw_hash_idx_data).unwrap();
+        let hash_idx_data =
+            Self::validate_and_trim_checksum(raw_hash_idx_data, self.footer.checksum_type).unwrap();
         Ok(TxnChunkHashIndex::new(hash_idx_data))
     }
 }
@@ -934,12 +934,14 @@ pub struct TxnChunkBuilder {
     hash_idx_builder: HashIndexBuilder,
     insert_count: u32,
     check_not_exist_count: u32,
+    checksum_type: ChecksumType,
 }
 
 impl TxnChunkBuilder {
     pub fn new(target_block_entries: usize) -> Self {
         let mut builder = Self::default();
         builder.target_block_entries = target_block_entries;
+        builder.checksum_type = ChecksumType::Crc32;
         builder
     }
 
@@ -972,7 +974,7 @@ impl TxnChunkBuilder {
                 &self.insert_count.to_le_bytes(),
             );
         }
-        let checksum = crc32c::crc32c(buf);
+        let checksum = self.checksum_type.checksum(buf);
         buf.put_u32_le(checksum);
     }
 
@@ -1014,7 +1016,7 @@ impl TxnChunkBuilder {
             let val = self.block.tmp_vals.get_entry(i);
             self.data_buf.extend_from_slice(val);
         }
-        let checksum = crc32c::crc32c(&self.data_buf[block_offset..]);
+        let checksum = self.checksum_type.checksum(&self.data_buf[block_offset..]);
         self.data_buf.put_u32_le(checksum);
         self.biggest_key.truncate(0);
         self.biggest_key
@@ -1042,7 +1044,7 @@ impl TxnChunkBuilder {
             self.idx_buf.extend_from_slice(block_key)
         }
         self.idx_buf.extend_from_slice(&self.biggest_key);
-        let checksum = crc32c::crc32c(&self.idx_buf);
+        let checksum = self.checksum_type.checksum(&self.idx_buf);
         self.idx_buf.put_u32_le(checksum);
     }
 
@@ -1052,8 +1054,8 @@ impl TxnChunkBuilder {
         }
         self.build_index();
         let (bucket_buf, entry_buf) = self.hash_idx_builder.build();
-        let mut hash_index_checksum = crc32c::crc32c(&bucket_buf);
-        hash_index_checksum = crc32c::crc32c_append(hash_index_checksum, &entry_buf);
+        let mut hash_index_checksum = self.checksum_type.checksum(&bucket_buf);
+        hash_index_checksum = self.checksum_type.append(hash_index_checksum, &entry_buf);
         let hash_index_len = bucket_buf.len() + entry_buf.len() + 4;
         let mut props = vec![];
         self.build_properties(&mut props);
@@ -1077,7 +1079,7 @@ impl TxnChunkBuilder {
             hash_index_offset,
             properties_offset,
             reserved: 0,
-            checksum_type: TXN_FILE_CHECKSUM_TYPE,
+            checksum_type: self.checksum_type.value(),
             format_version: TXN_FILE_FORMAT,
             magic: TXN_FILE_MAGIC,
         };

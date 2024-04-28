@@ -109,6 +109,7 @@ impl Engine {
         let (compact_tx, compact_rx) = mpsc::unbounded();
         let (free_tx, free_rx) = mpsc::unbounded();
         let compression_lvl = opts.table_builder_options.compression_lvl;
+        let checksum_type = config.checksum_type;
         let allow_fallback_local = opts.allow_fallback_local;
         let file_locks = (0..FILE_LOCK_SLOTS).map(|_| Mutex::new(())).collect();
         let per_keyspace_configs = Arc::new(config.get_per_keyspace_configs());
@@ -132,6 +133,7 @@ impl Engine {
                 fs.clone(),
                 opts.remote_compactor_addr.clone(),
                 compression_lvl,
+                checksum_type,
                 allow_fallback_local,
                 id_allocator.clone(),
                 master_key.clone(),
@@ -569,11 +571,13 @@ impl EngineCore {
         let block_size = self.opts.table_builder_options.block_size;
         let max_table_size = self.opts.table_builder_options.max_table_size;
         let zstd_compression_lvl = self.opts.table_builder_options.compression_lvl;
+        let checksum_type = self.comp_client.checksum_type;
         let mut builder = table::sstable::Builder::new(
             0,
             block_size,
             ZSTD_COMPRESSION,
             zstd_compression_lvl,
+            checksum_type,
             shard.encryption_key.clone(),
         );
         let mut fids = vec![];

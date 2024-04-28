@@ -15,6 +15,7 @@ bytes = "1.1"
 chrono = "0.4"
 cloud_encryption = { workspace = true }
 crc32c = { workspace = true }
+crc32fast = "1.4.0"
 dashmap = "4.0"
 file_system = { path = "../../components/file_system" }
 flate2 = { version = "1.0", default-features = false, features = ["zlib"] }

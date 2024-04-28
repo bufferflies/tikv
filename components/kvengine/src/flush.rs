@@ -276,6 +276,7 @@ impl Engine {
             } else {
                 (1, WRITE_CF)
             };
+        let checksum_type = self.comp_client.checksum_type;
         let mut l0s = vec![];
         let mut fids = self.id_allocator.alloc_id(fid_count as usize).unwrap();
         let l0_fid = fids.pop().unwrap();
@@ -285,6 +286,7 @@ impl Engine {
                 opts.block_size,
                 NO_COMPRESSION,
                 0,
+                checksum_type,
                 task.encryption_key.clone(),
             );
             write_cf_builder.set_l0_version(m.get_version());
@@ -323,6 +325,7 @@ impl Engine {
             l0_fid,
             self.opts.table_builder_options.block_size,
             m.get_version(),
+            checksum_type,
             task.encryption_key.clone(),
         );
         for cf in l0_builder_start_cf..NUM_CFS {

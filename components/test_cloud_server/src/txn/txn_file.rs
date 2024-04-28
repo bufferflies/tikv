@@ -93,7 +93,7 @@ impl TxnFileHelper {
     }
 
     async fn flush_to_tikv_worker(&self, mut buf: BytesMut) -> Result<u64 /* chunk_id */> {
-        let checksum = crc32c::crc32c(buf.as_slice());
+        let checksum = crc32fast::hash(buf.as_slice());
         buf.put_u32_le(checksum);
 
         let data = buf.freeze();

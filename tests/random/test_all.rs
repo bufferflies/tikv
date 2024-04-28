@@ -8,7 +8,10 @@ use std::{
 use api_version::ApiV2;
 use cloud_encryption::KeyspaceEncryptionConfig;
 use futures::executor::block_on;
-use kvengine::dfs::{DFSConfig, S3Fs};
+use kvengine::{
+    dfs::{DFSConfig, S3Fs},
+    table::ChecksumType,
+};
 use kvproto::pdpb::CheckPolicy;
 use load_data::task::LoadDataConfig;
 use native_br::{backup, backup_worker, restore::RestoreConfig};
@@ -86,6 +89,7 @@ fn test_random_all() {
             coarse_split_size: region_size * 4,
             enable_check_point: false,
             rg_config: None,
+            checksum_type: ChecksumType::Crc32c,
         }
     };
 

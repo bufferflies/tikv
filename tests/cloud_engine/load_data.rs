@@ -6,7 +6,10 @@ use api_version::{api_v2::KEYSPACE_PREFIX_LEN, ApiV2};
 use bytes::Bytes;
 use cloud_encryption::KeyspaceEncryptionConfig;
 use futures::executor::block_on;
-use kvengine::{dfs::DFSConfig, table::sstable::ZSTD_COMPRESSION};
+use kvengine::{
+    dfs::DFSConfig,
+    table::{sstable::ZSTD_COMPRESSION, ChecksumType},
+};
 use kvenginepb::ChangeSet;
 use load_data::task::{LoadDataConfig, LoadDataContext};
 use log_wrappers::hex;
@@ -99,6 +102,7 @@ fn impl_test_load_data(enable_inner_key_off: bool) {
         coarse_split_size: 128 * 1024,
         enable_check_point: false,
         rg_config: None,
+        checksum_type: ChecksumType::Crc32c,
     };
 
     let dfs = Arc::new(kvengine::dfs::S3Fs::new(
@@ -257,6 +261,7 @@ fn test_load_data_overlap() {
         coarse_split_size: 128 * 1024,
         enable_check_point: false,
         rg_config: None,
+        checksum_type: ChecksumType::Crc32c,
     };
     let dfs = Arc::new(kvengine::dfs::S3Fs::new(
         dfs_conf.prefix,

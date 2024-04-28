@@ -34,7 +34,7 @@ use crate::{
             self, builder::TableBuilderOptions, File, InMemFile, L0Builder, LocalFile, SsTable,
         },
         table::TableExt,
-        InnerKey,
+        ChecksumType, InnerKey,
     },
     Error::{
         CompactionNotRetryable, FallbackLocalCompactorDisabled, IncompatibleRemoteCompactor,
@@ -92,6 +92,7 @@ pub struct CompactionClient {
     remote_compactors: Arc<Mutex<RemoteCompactors>>,
     client: Option<security::HttpClient>,
     compression_lvl: i32,
+    pub(crate) checksum_type: ChecksumType,
     allow_fallback_local: bool,
     master_key: MasterKey,
     local_dir: PathBuf,
@@ -104,6 +105,7 @@ impl CompactionClient {
         dfs: Arc<dyn dfs::Dfs>,
         remote_url: String,
         compression_lvl: i32,
+        checksum_type: ChecksumType,
         allow_fallback_local: bool,
         id_allocator: Arc<dyn IdAllocator>,
         master_key: MasterKey,
@@ -120,6 +122,7 @@ impl CompactionClient {
             remote_compactors: Arc::new(Mutex::new(remote_compactors)),
             client: Some(client),
             compression_lvl,
+            checksum_type,
             allow_fallback_local,
             id_allocator,
             master_key,
@@ -206,6 +209,7 @@ impl CompactionClient {
             req: Arc::new(req),
             dfs: self.dfs.clone(),
             compression_lvl: self.compression_lvl,
+            checksum_type: self.checksum_type,
             id_allocator: self.id_allocator.clone(),
             encryption_key,
             local_dir: Some(self.local_dir.clone()),
@@ -1569,6 +1573,7 @@ pub async fn handle_remote_compaction(
     dfs: Arc<dyn dfs::Dfs>,
     req: hyper::Request<hyper::Body>,
     compression_lvl: i32,
+    checksum_type: ChecksumType,
     id_allocator: Arc<dyn IdAllocator>,
     master_key: MasterKey,
 ) -> hyper::Result<hyper::Response<hyper::Body>> {
@@ -1611,6 +1616,7 @@ pub async fn handle_remote_compaction(
         encryption_key,
         local_dir: None,
         for_restore: false,
+        checksum_type,
     };
     let (tx, rx) = tokio::sync::oneshot::channel();
     std::thread::spawn(move || {
@@ -1644,6 +1650,7 @@ pub(crate) struct CompactionCtx {
     pub(crate) req: Arc<CompactionRequest>,
     pub(crate) dfs: Arc<dyn dfs::Dfs>,
     pub(crate) compression_lvl: i32,
+    pub(crate) checksum_type: ChecksumType,
     pub(crate) id_allocator: Arc<dyn IdAllocator>,
     pub(crate) encryption_key: Option<EncryptionKey>,
     pub(crate) local_dir: Option<PathBuf>,
@@ -1739,6 +1746,7 @@ fn compact_destroy_range(
     let req = &ctx.req;
     let dfs = &ctx.dfs;
     let compression_lvl = ctx.compression_lvl;
+    let checksum_type = ctx.checksum_type;
     assert!(!del_prefix.is_empty() && !files.is_empty());
     assert_eq!(files.len(), req.file_ids.len());
 
@@ -1769,8 +1777,13 @@ fn compact_destroy_range(
             let t = sstable::L0Table::new(file, None, false, ctx.encryption_key.clone())
                 .unwrap()
                 .unwrap();
-            let mut builder =
-                L0Builder::new(new_id, block_size, t.version(), ctx.encryption_key.clone());
+            let mut builder = L0Builder::new(
+                new_id,
+                block_size,
+                t.version(),
+                checksum_type,
+                ctx.encryption_key.clone(),
+            );
             for cf in 0..NUM_CFS {
                 if let Some(cf_t) = t.get_cf(cf) {
                     let mut iter = cf_t.new_iterator(false, false);
@@ -1799,6 +1812,7 @@ fn compact_destroy_range(
                 block_size,
                 t.compression_type(),
                 compression_lvl,
+                ctx.checksum_type,
                 ctx.encryption_key.clone(),
             );
             let mut iter = t.new_iterator(false, false);
@@ -1858,6 +1872,7 @@ fn compact_truncate_ts(
     let req = &ctx.req;
     let dfs = &ctx.dfs;
     let compression_lvl = ctx.compression_lvl;
+    let checksum_type = ctx.checksum_type;
     assert!(!files.is_empty());
 
     let opts = dfs::Options::new(req.shard_id, req.shard_ver);
@@ -1888,8 +1903,13 @@ fn compact_truncate_ts(
             let t = sstable::L0Table::new(file, None, false, ctx.encryption_key.clone())
                 .unwrap()
                 .unwrap();
-            let mut builder =
-                L0Builder::new(new_id, block_size, t.version(), ctx.encryption_key.clone());
+            let mut builder = L0Builder::new(
+                new_id,
+                block_size,
+                t.version(),
+                checksum_type,
+                ctx.encryption_key.clone(),
+            );
             for cf in 0..NUM_CFS {
                 if let Some(cf_t) = t.get_cf(cf) {
                     let mut iter = cf_t.new_iterator(false, false);
@@ -1918,6 +1938,7 @@ fn compact_truncate_ts(
                 block_size,
                 t.compression_type(),
                 compression_lvl,
+                checksum_type,
                 ctx.encryption_key.clone(),
             );
             let mut iter = t.new_iterator(false, false);
@@ -1980,6 +2001,7 @@ fn compact_trim_over_bound(
     let req = &ctx.req;
     let dfs = &ctx.dfs;
     let compression_lvl = ctx.compression_lvl;
+    let checksum_tp = ctx.checksum_type;
     assert!(!files.is_empty());
     assert_eq!(files.len(), req.file_ids.len());
 
@@ -2011,8 +2033,13 @@ fn compact_trim_over_bound(
             let t = sstable::L0Table::new(file, None, false, ctx.encryption_key.clone())
                 .unwrap()
                 .unwrap();
-            let mut builder =
-                L0Builder::new(new_id, block_size, t.version(), ctx.encryption_key.clone());
+            let mut builder = L0Builder::new(
+                new_id,
+                block_size,
+                t.version(),
+                checksum_tp,
+                ctx.encryption_key.clone(),
+            );
             for cf in 0..NUM_CFS {
                 if let Some(cf_t) = t.get_cf(cf) {
                     let mut iter = cf_t.new_iterator(false, false);
@@ -2039,6 +2066,7 @@ fn compact_trim_over_bound(
                 block_size,
                 t.compression_type(),
                 compression_lvl,
+                checksum_tp,
                 ctx.encryption_key.clone(),
             );
             let mut iter = t.new_iterator(false, false);
@@ -2167,6 +2195,7 @@ fn compact_for_cf(
     let end = ctx.req.inner_end();
     let fs = &ctx.dfs;
     let compression_lvl = ctx.compression_lvl;
+    let checksum_tp = ctx.checksum_type;
     let (tx, rx) = tikv_util::mpsc::bounded(ctx.req.file_ids.len());
     let mut cur_sst_id = allocate_id();
 
@@ -2175,6 +2204,7 @@ fn compact_for_cf(
         sst_config.block_size,
         sst_config.compression_tps[target_lvl as usize - 1],
         compression_lvl,
+        checksum_tp,
         ctx.encryption_key.clone(),
     );
     let mut cur_blob_table_id = 0;

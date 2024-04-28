@@ -11,7 +11,7 @@ use moka::sync::SegmentedCache;
 use super::*;
 use crate::{
     max_ts_by_cf,
-    table::{blobtable::BlobRef, table::Result, Error, InnerKey, TableExt, Value},
+    table::{blobtable::BlobRef, table::Result, ChecksumType, Error, InnerKey, TableExt, Value},
     LOCK_CF, NUM_CFS, WRITE_CF,
 };
 
@@ -284,11 +284,19 @@ impl L0Builder {
         fid: u64,
         block_size: usize,
         version: u64,
+        checksum_type: ChecksumType,
         encryption_key: Option<EncryptionKey>,
     ) -> Self {
         let mut builders = Vec::with_capacity(4);
         for _ in 0..NUM_CFS {
-            let builder = Builder::new(fid, block_size, NO_COMPRESSION, 0, encryption_key.clone());
+            let builder = Builder::new(
+                fid,
+                block_size,
+                NO_COMPRESSION,
+                0,
+                checksum_type,
+                encryption_key.clone(),
+            );
             builders.push(builder);
         }
         Self {

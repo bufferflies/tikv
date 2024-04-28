@@ -9,9 +9,9 @@ use farmhash;
 use xorf::BinaryFuse8;
 
 use super::super::table::Value;
-use crate::table::{blobtable::BlobRef, InnerKey, BIT_HAS_OLD_VERSION, VALUE_VERSION_LEN};
-
-pub const CRC32C: u8 = 1;
+use crate::table::{
+    blobtable::BlobRef, ChecksumType, InnerKey, BIT_HAS_OLD_VERSION, VALUE_VERSION_LEN,
+};
 pub const PROP_KEY_SMALLEST: &str = "smallest";
 pub const PROP_KEY_BIGGEST: &str = "biggest";
 pub const PROP_KEY_MAX_TS: &str = "max_ts";
@@ -117,7 +117,7 @@ pub struct Builder {
     block_builder: BlockBuilder,
     old_builder: BlockBuilder,
     block_size: usize,
-    checksum_tp: u8,
+    checksum_type: ChecksumType,
     key_hashes: Vec<u64>,
     smallest: Vec<u8>,
     biggest: Vec<u8>,
@@ -140,11 +140,12 @@ impl Builder {
         block_size: usize,
         compression_tp: u8,
         compression_lvl: i32,
+        checksum_type: ChecksumType,
         encryption_key: Option<EncryptionKey>,
     ) -> Self {
         let mut x = Self::default();
         x.sst_fid = sst_fid;
-        x.checksum_tp = CRC32C;
+        x.checksum_type = checksum_type;
         x.block_size = block_size;
         x.block_builder.compression_tp = compression_tp;
         x.block_builder.compression_lvl = compression_lvl;
@@ -195,11 +196,11 @@ impl Builder {
             // Only try to finish block when the key is different than last.
             if self.block_builder.need_finish_block(self.block_size) {
                 self.block_builder
-                    .finish_block(self.sst_fid, self.checksum_tp);
+                    .finish_block(self.sst_fid, self.checksum_type);
             }
             if self.old_builder.need_finish_block(self.block_size) {
                 self.old_builder
-                    .finish_block(self.sst_fid, self.checksum_tp);
+                    .finish_block(self.sst_fid, self.checksum_type);
             }
             self.kv_size += (key.len() + val.user_meta_len()) as u64;
             if let Some(blob_ref) = blob_ref {
@@ -257,11 +258,11 @@ impl Builder {
             let last_key = self.block_builder.block.tmp_keys.get_last();
             self.biggest.extend_from_slice(last_key);
             self.block_builder
-                .finish_block(self.sst_fid, self.checksum_tp);
+                .finish_block(self.sst_fid, self.checksum_type);
         }
         if self.old_builder.block.kv_size > 0 {
             self.old_builder
-                .finish_block(self.sst_fid, self.checksum_tp);
+                .finish_block(self.sst_fid, self.checksum_type);
         }
         assert_eq!(self.block_builder.block_keys.length() > 0, true);
         if let Some(encryption_key) = &self.encryption_key {
@@ -282,11 +283,11 @@ impl Builder {
         }
         let old_data_section_size = self.old_builder.buf.len() as u32;
 
-        self.block_builder.build_index(base_off, self.checksum_tp);
+        self.block_builder.build_index(base_off, self.checksum_type);
         data_buf.extend_from_slice(self.block_builder.buf.as_slice());
         let index_section_size = self.block_builder.buf.len() as u32;
         self.old_builder
-            .build_index(base_off + data_section_size, self.checksum_tp);
+            .build_index(base_off + data_section_size, self.checksum_type);
         data_buf.extend_from_slice(self.old_builder.buf.as_slice());
         let old_index_section_size = self.old_builder.buf.len() as u32;
         let aux_index_section_size = if let Ok(filter) = BinaryFuse8::try_from(&self.key_hashes) {
@@ -307,7 +308,7 @@ impl Builder {
         footer.aux_index_offset = footer.old_index_offset + old_index_section_size;
         footer.properties_offset = footer.aux_index_offset + aux_index_section_size;
         footer.compression_type = self.block_builder.compression_tp;
-        footer.checksum_type = self.checksum_tp;
+        footer.checksum_type = self.checksum_type.value();
         footer.table_format_version = TABLE_FORMAT_V1;
         footer.magic = if self.l0_version > 0 {
             MAGIC_NUMBER_SPLIT_L0
@@ -329,10 +330,8 @@ impl Builder {
         buf.put_u32_le(AUX_INDEX_BINARY_FUSE8);
         buf.put_u32_le(fuse8.len() as u32);
         buf.extend_from_slice(fuse8);
-        if self.checksum_tp == CRC32C {
-            let checksum = crc32c::crc32c(&buf[(origin_len + 4)..]);
-            LittleEndian::write_u32(&mut buf[origin_len..], checksum);
-        }
+        let checksum = self.checksum_type.checksum(&buf[(origin_len + 4)..]);
+        LittleEndian::write_u32(&mut buf[origin_len..], checksum);
     }
 
     fn build_properties(&self, buf: &mut Vec<u8>) {
@@ -373,10 +372,8 @@ impl Builder {
                 &self.l0_version.to_le_bytes(),
             );
         }
-        if self.checksum_tp == CRC32C {
-            let checksum = crc32c::crc32c(&buf[(origin_len + 4)..]);
-            LittleEndian::write_u32(&mut buf[origin_len..], checksum);
-        }
+        let checksum = self.checksum_type.checksum(&buf[(origin_len + 4)..]);
+        LittleEndian::write_u32(&mut buf[origin_len..], checksum);
     }
 
     pub fn is_empty(&self) -> bool {
@@ -559,7 +556,7 @@ impl BlockBuilder {
         self.block.kv_size - self.block.tmp_keys.length() * self.block.common_prefix_len
     }
 
-    fn finish_block(&mut self, sst_fid: u64, checksum_tp: u8) {
+    fn finish_block(&mut self, sst_fid: u64, checksum_tp: ChecksumType) {
         self.block_keys.append(self.block.tmp_keys.get_entry(0));
         self.block_addrs
             .push(BlockAddress::new(sst_fid, self.buf.len() as u32));
@@ -594,10 +591,7 @@ impl BlockBuilder {
             ZSTD_COMPRESSION => self.compress_zstd(),
             _ => panic!("unexpected compression type {}", self.compression_tp),
         }
-        let mut checksum = 0u32;
-        if checksum_tp == CRC32C {
-            checksum = crc32c::crc32c(&self.buf[begin_off..]);
-        }
+        let checksum = checksum_tp.checksum(&self.buf[begin_off..]);
         let slice = self.buf.as_mut_slice();
         LittleEndian::write_u32(&mut slice[(begin_off - 4)..], checksum);
         self.block.reset()
@@ -622,7 +616,7 @@ impl BlockBuilder {
         self.block_addrs.truncate(0);
     }
 
-    fn build_index(&mut self, base_off: u32, checksum_tp: u8) {
+    fn build_index(&mut self, base_off: u32, checksum_tp: ChecksumType) {
         self.buf.truncate(0);
         let num_blocks = self.block_addrs.len();
         // checksum place holder.
@@ -656,10 +650,9 @@ impl BlockBuilder {
             let block_key = self.block_keys.get_entry(i);
             self.buf.extend_from_slice(&block_key[common_prefix_len..]);
         }
-        if checksum_tp == CRC32C {
-            let slice = self.buf.as_mut_slice();
-            LittleEndian::write_u32(slice, crc32c::crc32c(&slice[4..]))
-        }
+        let slice = self.buf.as_mut_slice();
+        let checksum = checksum_tp.checksum(&slice[4..]);
+        LittleEndian::write_u32(slice, checksum)
     }
 
     fn compress_lz4(&mut self) {

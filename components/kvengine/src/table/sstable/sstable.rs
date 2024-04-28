@@ -714,7 +714,7 @@ impl BlockCacheKey {
     }
 }
 
-fn validate_checksum(data: &[u8], checksum_type: u8) -> Result<()> {
+fn validate_checksum(data: &[u8], checksum_type: ChecksumType) -> Result<()> {
     if data.len() < 4 {
         return Err(table::Error::InvalidChecksum(String::from(
             "data is too short",
@@ -722,14 +722,12 @@ fn validate_checksum(data: &[u8], checksum_type: u8) -> Result<()> {
     }
     let checksum = LittleEndian::read_u32(data);
     let content = &data[4..];
-    if checksum_type == CRC32C {
-        let got_checksum = crc32c::crc32c(content);
-        if checksum != got_checksum {
-            return Err(table::Error::InvalidChecksum(format!(
-                "checksum mismatch expect {} got {}",
-                checksum, got_checksum
-            )));
-        }
+    let got_checksum = checksum_type.checksum(content);
+    if checksum != got_checksum {
+        return Err(table::Error::InvalidChecksum(format!(
+            "{:?} checksum mismatch expect {} got {}",
+            checksum_type, checksum, got_checksum
+        )));
     }
     Ok(())
 }
@@ -741,7 +739,7 @@ fn validate_checksum_with_fix(
     file: Arc<dyn File>,
     encryption_key: Option<&EncryptionKey>,
 ) -> Result<()> {
-    match validate_checksum(data, checksum_type) {
+    match validate_checksum(data, checksum_type.into()) {
         Ok(()) => Ok(()),
         Err(err) => {
             if let Some(file_path) = file.path() {
@@ -835,7 +833,14 @@ pub(crate) fn build_test_table_with_kvs(kvs: &Vec<(String, String)>, load_filter
 
 #[cfg(test)]
 pub(crate) fn new_table_builder_for_test(sst_fid: u64) -> Builder {
-    Builder::new(sst_fid, 4096, NO_COMPRESSION, 0, None)
+    Builder::new(
+        sst_fid,
+        4096,
+        NO_COMPRESSION,
+        0,
+        ChecksumType::default(),
+        None,
+    )
 }
 
 #[cfg(test)]

@@ -8,7 +8,7 @@ use bytes::{BufMut, Bytes, BytesMut};
 use super::BlobRef;
 use crate::table::{
     sstable::{LZ4_COMPRESSION, NO_COMPRESSION, ZSTD_COMPRESSION},
-    InnerKey, Value,
+    ChecksumType, InnerKey, Value,
 };
 
 pub type ValueLength = u32; // Max value length is 4GB
@@ -184,11 +184,8 @@ impl BlobTableBuilder {
                 _ => panic!("unexpected compression type {}", self.compression_tp),
             }
         };
-
-        let mut checksum = 0u32;
-        if self.checksum_tp == CRC32C {
-            checksum = crc32c::crc32c(&self.buf[(begin_off + BLOB_ENTRY_VALUE_OFFSET)..]);
-        }
+        let checksum = ChecksumType::from(self.checksum_tp)
+            .checksum(&self.buf[(begin_off + BLOB_ENTRY_VALUE_OFFSET)..]);
         let slice = self.buf.as_mut_slice();
         LittleEndian::write_u32(&mut slice[begin_off..], checksum); // put checksum at the reserved place.
         LittleEndian::write_u32(

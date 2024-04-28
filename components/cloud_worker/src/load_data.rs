@@ -9,7 +9,10 @@ use http::{header, Method, Response, StatusCode};
 use hyper::Body;
 use kvengine::{
     dfs,
-    table::sstable::{LZ4_COMPRESSION, NO_COMPRESSION, ZSTD_COMPRESSION},
+    table::{
+        sstable::{LZ4_COMPRESSION, NO_COMPRESSION, ZSTD_COMPRESSION},
+        ChecksumType,
+    },
 };
 use load_data::{
     check_point_storage,
@@ -269,6 +272,7 @@ impl LoadDataManager {
         dfs: Arc<dyn dfs::Dfs>,
         runtime: Arc<tokio::runtime::Runtime>,
         max_in_mem_size: usize,
+        checksum_type: ChecksumType,
         master_key: MasterKey,
         worker_scaler: Option<WorkerScaler>,
         worker_scaler_conf: WorkerScalerConfig,
@@ -278,6 +282,7 @@ impl LoadDataManager {
         let mut config = LoadDataConfig::default();
         config.enable_check_point = enable_check_point;
         config.rg_config = rg_config;
+        config.checksum_type = checksum_type;
         let context = LoadDataContext {
             pd,
             dir,

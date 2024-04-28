@@ -22,7 +22,7 @@ use hyper::{
 use kvengine::{
     dfs,
     dfs::{CacheFs, S3Fs},
-    table::sstable::BlockCacheKey,
+    table::{sstable::BlockCacheKey, ChecksumType},
     SnapAccess,
 };
 use pd_client::PdClient;
@@ -59,6 +59,7 @@ use crate::{
 
 pub(crate) struct Context {
     pub compression_lvl: i32,
+    pub checksum_type: ChecksumType,
     pub s3fs: Arc<S3Fs>,
     pub cache_fs: Arc<CacheFs>,
     pub load_manager: Arc<LoadDataManager>,
@@ -113,6 +114,7 @@ where
                                 ctx.s3fs.clone(),
                                 req,
                                 ctx.compression_lvl,
+                                ctx.checksum_type,
                                 allocator,
                                 ctx.master_key.clone(),
                             )

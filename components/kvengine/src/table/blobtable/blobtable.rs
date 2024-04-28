@@ -7,7 +7,7 @@ use bytes::{Buf, Bytes};
 use super::{builder::*, BlobRef};
 use crate::table::{
     sstable::{File, LZ4_COMPRESSION, NO_COMPRESSION, ZSTD_COMPRESSION},
-    Error, InnerKey, Result,
+    ChecksumType, Error, InnerKey, Result,
 };
 
 #[derive(Clone)]
@@ -137,7 +137,8 @@ impl BlobTable {
         assert_eq!(compressed_len, size);
         let compressed_data =
             &data[BLOB_ENTRY_VALUE_OFFSET..BLOB_ENTRY_VALUE_OFFSET + size as usize];
-        if self.footer.checksum_type == CRC32C && checksum != crc32c::crc32c(compressed_data) {
+        let got_checksum = ChecksumType::from(self.footer.checksum_type).checksum(compressed_data);
+        if checksum != got_checksum {
             return Err(Error::InvalidChecksum("blob checkusm mismatch".to_owned()));
         }
         return match self.footer.compression_type {

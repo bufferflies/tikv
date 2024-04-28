@@ -29,7 +29,7 @@ use crate::{
     table::{
         memtable::CfTable,
         sstable::{File, InMemFile, L0Builder, L0Table, SsTable},
-        InnerKey, TxnChunkBuilder, TxnCtx, TxnFile, TxnFileId, BIT_DELETE, OP_PUT,
+        ChecksumType, InnerKey, TxnChunkBuilder, TxnCtx, TxnFile, TxnFileId, BIT_DELETE, OP_PUT,
     },
     *,
 };
@@ -1767,8 +1767,14 @@ fn new_table(
     let comp_lvl = engine.opts.table_builder_options.compression_lvl;
     let fs = engine.fs.clone();
 
-    let mut builder =
-        table::sstable::builder::Builder::new(id, block_size, comp_tp, comp_lvl, None);
+    let mut builder = table::sstable::builder::Builder::new(
+        id,
+        block_size,
+        comp_tp,
+        comp_lvl,
+        ChecksumType::Crc32c,
+        None,
+    );
     for i in begin..end {
         let key = i_to_key(i as i32, 0);
         let val = if del {
@@ -1803,7 +1809,7 @@ fn new_l0table_file(
     let block_size = engine.opts.table_builder_options.block_size;
     let fs = engine.fs.clone();
 
-    let mut builder = L0Builder::new(id, block_size, version, None);
+    let mut builder = L0Builder::new(id, block_size, version, ChecksumType::Crc32c, None);
     for cf in 0..NUM_CFS {
         for i in begin[cf]..end[cf] {
             let key = i_to_key(i as i32, 0);

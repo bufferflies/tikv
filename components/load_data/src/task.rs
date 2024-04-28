@@ -24,7 +24,7 @@ use kvengine::{
     dfs,
     dfs::Options,
     get_shard_property,
-    table::{sstable::Builder, InnerKey, Value},
+    table::{sstable::Builder, ChecksumType, InnerKey, Value},
     IdVer, ShardTag, ENCRYPTION_KEY, WRITE_CF, WRITE_CF_BOTTOM_LEVEL,
 };
 use kvproto::{encryptionpb::EncryptionMethod, metapb, pdpb};
@@ -175,6 +175,7 @@ pub struct LoadDataConfig {
     pub coarse_split_size: usize,
     pub enable_check_point: bool,
     pub rg_config: Option<ResourceGroupConfig>,
+    pub checksum_type: ChecksumType,
 }
 
 impl Default for LoadDataConfig {
@@ -186,6 +187,7 @@ impl Default for LoadDataConfig {
             coarse_split_size: DEFAULT_COARSE_SPLIT_SIZE,
             enable_check_point: DEFAULT_ENABLE_CHECK_POINT,
             rg_config: None,
+            checksum_type: ChecksumType::Crc32c,
         }
     }
 }
@@ -1090,6 +1092,7 @@ impl LoadTaskWorker {
         let ctx = self.ctx.clone();
         let block_size = self.config.block_size;
         let task_id = self.task_ctx.task_id.clone();
+        let checksum_type = self.config.checksum_type;
         let encryption_key = self.task_ctx.encryption_key.clone();
 
         self.ctx.runtime.spawn(async move {
@@ -1099,6 +1102,7 @@ impl LoadTaskWorker {
                 block_size,
                 compression_type,
                 ZSTD_COMPRESSION_LEVEL,
+                checksum_type,
                 encryption_key,
             );
             let mut entries = 0;
