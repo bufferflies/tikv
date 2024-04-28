@@ -879,13 +879,13 @@ impl LoadTaskWorker {
             for sst_meta in sst_metas.iter() {
                 data_size += sst_meta.uncompressed_size;
             }
-            let res = self.ingest(
+            self.ingest(
                 sst_metas,
                 check_point_store_guard
                     .check_point_ctx
                     .get_duplicated_entries(),
                 &mut check_point_store_guard,
-            );
+            )?;
 
             let mut wru = 0.0;
             if self.config.rg_config.is_some() && !keyspace_id.is_empty() {
@@ -913,7 +913,6 @@ impl LoadTaskWorker {
                 "{} ingest successfully, data size {}, ru ru_consumption {}, keyspace id {}",
                 self.task_ctx.task_id, data_size, wru, keyspace_id
             );
-            return res;
         }
         Ok(())
     }
