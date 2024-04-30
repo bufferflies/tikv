@@ -282,6 +282,11 @@ impl ObjectStorageWorker {
         let store_id = self.get_engine_id();
 
         if self.should_chunk(sync_len as usize) {
+            if let Some(async_wal_file) = &self.async_wal_file {
+                // sync data before write to S3, to avoid S3 file ahead of async local file
+                // after restart.
+                async_wal_file.sync_data()?;
+            }
             info!(
                 "{}: handle_sync put wal epoch {} chunk {}",
                 store_id, epoch_id, self.chunk_id

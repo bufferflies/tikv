@@ -5,7 +5,7 @@ use std::{
     cmp,
     fs::{File, OpenOptions},
     io::Read,
-    os::unix::fs::{FileExt, OpenOptionsExt},
+    os::unix::fs::FileExt,
     path::{Path, PathBuf},
     ptr::NonNull,
     sync::{
@@ -326,6 +326,9 @@ impl WalWriter {
         let file = match self.writer_type {
             WriterType::Sync => open_direct_file(&filename, true)?,
             WriterType::Async => {
+                if let Some(fd) = &self.fd {
+                    fd.sync_all()?;
+                }
                 // Must not use Direct I/O for async writer.
                 // Otherwise readers (`Worker` & `ObjectStorageWorker`) using buffer I/O would
                 // get incomplete data.
@@ -333,7 +336,6 @@ impl WalWriter {
                     .read(true)
                     .write(true)
                     .create(true)
-                    .custom_flags(libc::O_DSYNC)
                     .open(filename)?
             }
             WriterType::CliMode => {

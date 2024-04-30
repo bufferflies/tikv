@@ -320,9 +320,13 @@ impl Worker {
         let _ = file_system::sync_dir(self.dir.as_path());
         let engine_id = self.manifest.get_engine_id();
         let duration = timer.saturating_elapsed();
+        let pending_tasks = self.task_rx.len();
         info!(
-            "{}: epoch {} compact wal file generated {} files takes {:?}",
-            engine_id, epoch_id, generated_files, duration,
+            "{}: compact wal", engine_id;
+            "size" => it.offset,
+            "generated_files" => generated_files,
+            "takes" => ?duration,
+            "pending_tasks"  => pending_tasks,
         );
         self.manifest.handle_compaction(change_set)?;
         ENGINE_COMPACT_WAL_DURATION_HISTOGRAM.observe(duration.as_secs_f64());
