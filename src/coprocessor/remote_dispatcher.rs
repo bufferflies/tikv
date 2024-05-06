@@ -173,7 +173,7 @@ pub struct RemoteContextCore {
     pub remote_analyze_url: String,
     pub remote_worker_url: String,
     pub cop_worker_provider: Arc<dyn CopWorkerProvider>,
-    pub cop_min_blocks: usize,
+    pub cop_min_blocks_size: usize,
     pub runtime: Arc<tokio::runtime::Runtime>,
     pub remote_request_cache: moka::future::Cache<String, Result<Vec<u8>>>,
     pub client: security::HttpClient,
@@ -201,7 +201,7 @@ impl RemoteContext {
         remote_analyze_url: String,
         remote_worker_url: String,
         cop_worker_url: String,
-        cop_min_blocks: usize,
+        cop_min_blocks_size: usize,
         security_mgr: Arc<SecurityManager>,
     ) -> Option<Self> {
         if remote_analyze_url.is_empty()
@@ -232,7 +232,7 @@ impl RemoteContext {
             core: Arc::new(RemoteContextCore {
                 remote_analyze_url,
                 remote_worker_url,
-                cop_min_blocks,
+                cop_min_blocks_size,
                 cop_worker_provider,
                 runtime,
                 remote_request_cache,
@@ -270,14 +270,18 @@ pub(crate) fn try_remote_dag_handler<E: Engine>(
         let end = Bytes::copy_from_slice(&ran.end);
         ranges.push((start, end))
     }
-    let num_blocks = snap.estimated_range_blocks(&ranges);
-    let min_blocks = calc_min_blocks(req_ctx.txn_start_ts, remote_ctx.cop_min_blocks);
-    if num_blocks < min_blocks {
+    let blocks_size = snap.estimated_range_blocks_size(&ranges);
+    let min_blocks_size =
+        calc_min_blocks_size(req_ctx.txn_start_ts, remote_ctx.cop_min_blocks_size);
+    if blocks_size < min_blocks_size {
         return None;
     }
-    COPR_REMOTE_DAG_ESTIMATE_BLOCKS_HISTOGRAM.observe(num_blocks as f64);
+    COPR_REMOTE_DAG_ESTIMATE_BLOCKS_HISTOGRAM.observe(blocks_size as f64);
     let tag = format!("ks{}:{}:{}", keyspace_id, snap.get_id(), snap.get_version());
-    info!("{} send remote coprocessor blocks:{}", tag, num_blocks);
+    info!(
+        "{} send remote coprocessor blocks_size:{}",
+        tag, blocks_size
+    );
     // reassemble a coprocessor request.
     let mut cop_req = kvproto::coprocessor::Request::default();
     cop_req.set_context(req_ctx.context.clone());
@@ -453,21 +457,21 @@ impl RequestHandler for RemoteDagDispatcher {
 
 /// If the query has already run for a long time, the additional latency for
 /// offloading to remote coprocessor is non-significant, we can decreases the
-/// min blocks to reduce the tikv-server resource consumption.
-fn calc_min_blocks(start_ts: TimeStamp, config_min_blocks: usize) -> usize {
+/// min blocks size to reduce the tikv-server resource consumption.
+fn calc_min_blocks_size(start_ts: TimeStamp, config_min_blocks_size: usize) -> usize {
     const LONG_QUERY_MS: u64 = 15 * 1000;
     let elapsed_ms = TimeStamp::physical_now().saturating_sub(start_ts.physical());
     if elapsed_ms > LONG_QUERY_MS * 4 {
         // 60s
-        config_min_blocks / 8
+        config_min_blocks_size / 8
     } else if elapsed_ms > LONG_QUERY_MS * 2 {
         // 30s
-        config_min_blocks / 4
+        config_min_blocks_size / 4
     } else if elapsed_ms > LONG_QUERY_MS {
         // 15s
-        config_min_blocks / 2
+        config_min_blocks_size / 2
     } else {
-        config_min_blocks
+        config_min_blocks_size
     }
 }
 
@@ -563,21 +567,21 @@ fn test_remote_cop_coded_with_empty_mem() {
 
 #[test]
 fn test_calc_min_blocks() {
-    let conf_min_blocks = 512usize;
+    let conf_min_blocks_size = 512usize;
     let ts = TimeStamp::default();
-    assert_eq!(calc_min_blocks(ts, conf_min_blocks), 64);
+    assert_eq!(calc_min_blocks_size(ts, conf_min_blocks_size), 64);
     let ts = TimeStamp::max();
-    assert_eq!(calc_min_blocks(ts, conf_min_blocks), 512);
+    assert_eq!(calc_min_blocks_size(ts, conf_min_blocks_size), 512);
 
     let phys_now = TimeStamp::physical_now();
     let ts = TimeStamp::compose(phys_now - 70 * 1000, 1);
-    assert_eq!(calc_min_blocks(ts, conf_min_blocks), 64);
+    assert_eq!(calc_min_blocks_size(ts, conf_min_blocks_size), 64);
     let ts = TimeStamp::compose(phys_now - 40 * 1000, 1);
-    assert_eq!(calc_min_blocks(ts, conf_min_blocks), 128);
+    assert_eq!(calc_min_blocks_size(ts, conf_min_blocks_size), 128);
     let ts = TimeStamp::compose(phys_now - 20 * 1000, 1);
-    assert_eq!(calc_min_blocks(ts, conf_min_blocks), 256);
+    assert_eq!(calc_min_blocks_size(ts, conf_min_blocks_size), 256);
     let ts = TimeStamp::compose(phys_now - 10 * 1000, 1);
-    assert_eq!(calc_min_blocks(ts, conf_min_blocks), 512);
+    assert_eq!(calc_min_blocks_size(ts, conf_min_blocks_size), 512);
     let ts = TimeStamp::compose(phys_now + 20 * 1000, 1);
-    assert_eq!(calc_min_blocks(ts, conf_min_blocks), 512);
+    assert_eq!(calc_min_blocks_size(ts, conf_min_blocks_size), 512);
 }

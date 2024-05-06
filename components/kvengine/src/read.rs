@@ -932,15 +932,15 @@ impl SnapAccessCore {
         self.encryption_key.clone()
     }
 
-    pub fn estimated_range_blocks(&self, ranges: &[(Bytes, Bytes)]) -> usize {
+    pub fn estimated_range_blocks_size(&self, ranges: &[(Bytes, Bytes)]) -> usize {
         // ignore L0 tables, only estimate L1+ for simplicity and performance.
         let inner_key_off = self.data.inner_key_off;
-        let mut num_blocks = 0;
+        let mut blocks_size = 0;
         let write_cf = &self.data.cfs[0];
         for lvl in &write_cf.levels {
-            num_blocks += lvl.range_blocks(ranges, inner_key_off);
+            blocks_size += lvl.range_blocks_size(ranges, inner_key_off);
         }
-        num_blocks
+        blocks_size
     }
 
     pub fn get_keyspace_id(&self) -> u32 {
@@ -1266,7 +1266,7 @@ mod tests {
     use crate::table::sstable::build_test_table_with_kvs;
 
     #[test]
-    fn test_estimated_range_blocks() {
+    fn test_estimated_range_blocks_size() {
         let mut cs_pb = kvenginepb::ChangeSet::default();
         let mut cs = ChangeSet::new(cs_pb.clone());
         let snap = cs_pb.mut_snapshot();
@@ -1327,8 +1327,8 @@ mod tests {
                 Bytes::from(format!("key{:05x}", end)),
             )
         };
-        let total_num_blocks = snap.estimated_range_blocks(&[build_range_fn(0, 10000)]);
-        assert_eq!(total_num_blocks, 312);
+        let total_blocks_size = snap.estimated_range_blocks_size(&[build_range_fn(0, 10000)]);
+        assert_eq!(total_blocks_size, 1103598);
 
         // verify that many small ranges are properly deduplicated, num blocks never
         // exceed total.
@@ -1337,34 +1337,34 @@ mod tests {
             let small_range = build_range_fn(i, i + 5);
             many_small_ranges.push(small_range);
         }
-        let many_small_ranges_num_blocks = snap.estimated_range_blocks(&many_small_ranges);
-        assert_eq!(many_small_ranges_num_blocks, total_num_blocks);
+        let many_small_ranges_blocks_size = snap.estimated_range_blocks_size(&many_small_ranges);
+        assert_eq!(many_small_ranges_blocks_size + 2, total_blocks_size);
 
-        let half_num_blocks = snap.estimated_range_blocks(&[build_range_fn(5000, 10000)]);
-        assert_eq!(half_num_blocks, 155);
+        let half_num_blocks = snap.estimated_range_blocks_size(&[build_range_fn(5000, 10000)]);
+        assert_eq!(half_num_blocks, 548238);
 
         for i in (100..10000).step_by(100) {
-            let num_blocks = snap.estimated_range_blocks(&[build_range_fn(i, i + 1)]);
-            // some range on level 1 doesn't overlap any table, so blocks nay be 2
-            assert!(num_blocks == 3 || num_blocks == 2);
+            let blocks_size = snap.estimated_range_blocks_size(&[build_range_fn(i, i + 1)]);
+            // some range on level 1 doesn't overlap any table, so blocks_size may vary.
+            assert!(blocks_size == 10543 || blocks_size == 6983);
         }
 
-        let num_blocks = snap.estimated_range_blocks(&[
+        let blocks_size = snap.estimated_range_blocks_size(&[
             build_range_fn(1, 2),
             build_range_fn(2, 3),
             build_range_fn(3, 4),
             build_range_fn(4, 5),
         ]);
         // each level only access one block.
-        assert_eq!(num_blocks, 3);
+        assert_eq!(blocks_size, 10543);
 
-        let num_blocks = snap.estimated_range_blocks(&[
+        let blocks_size = snap.estimated_range_blocks_size(&[
             build_range_fn(1, 2),
             build_range_fn(2000, 2001),
             build_range_fn(3000, 3001),
             build_range_fn(4000, 4001),
         ]);
         // each range on each level access one block.
-        assert_eq!(num_blocks, 12);
+        assert_eq!(blocks_size, 42172);
     }
 }

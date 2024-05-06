@@ -1306,8 +1306,12 @@ impl LevelHandler {
         first.smallest() < start || last.biggest() >= end
     }
 
-    pub(crate) fn range_blocks(&self, ranges: &[(Bytes, Bytes)], inner_key_off: usize) -> usize {
-        let mut num_blocks = 0;
+    pub(crate) fn range_blocks_size(
+        &self,
+        ranges: &[(Bytes, Bytes)],
+        inner_key_off: usize,
+    ) -> usize {
+        let mut blocks_size = 0;
         let mut prev_table_id = 0;
         let mut prev_block_right = 0;
         for ran in ranges {
@@ -1320,16 +1324,17 @@ impl LevelHandler {
             let overlap_tables = &self.tables[left..right];
             let first_table = overlap_tables.first().unwrap();
             let first_idx = first_table.load_index();
+            let first_avg_block_size = first_table.kv_size as usize / first_idx.num_blocks();
             let first_block_left = first_idx.seek_block(start_key.as_ref()).saturating_sub(1);
             let first_block_right = if overlap_tables.len() == 1 {
                 first_idx.seek_block_bigger_or_equal(end_key.as_ref())
             } else {
                 first_idx.num_blocks()
             };
-            num_blocks += first_block_right - first_block_left;
+            blocks_size += (first_block_right - first_block_left) * first_avg_block_size;
             if first_table.id() == prev_table_id && first_block_left < prev_block_right {
                 // do not count duplicated block.
-                num_blocks -= 1;
+                blocks_size -= first_avg_block_size;
             }
             if overlap_tables.len() == 1 {
                 prev_table_id = first_table.id();
@@ -1339,17 +1344,18 @@ impl LevelHandler {
             if overlap_tables.len() > 2 {
                 let middle_tables = &overlap_tables[1..overlap_tables.len() - 1];
                 for middle_table in middle_tables {
-                    num_blocks += middle_table.load_index().num_blocks();
+                    blocks_size += middle_table.kv_size as usize;
                 }
             }
             let last_table = overlap_tables.last().unwrap();
             let last_idx = last_table.load_index();
             let last_block_right = last_idx.seek_block_bigger_or_equal(end_key.as_ref());
-            num_blocks += last_block_right;
+            let last_avg_block_size = last_table.kv_size as usize / last_idx.num_blocks();
+            blocks_size += last_block_right * last_avg_block_size;
             prev_table_id = last_table.id();
             prev_block_right = last_block_right;
         }
-        num_blocks
+        blocks_size
     }
 }
 

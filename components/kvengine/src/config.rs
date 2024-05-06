@@ -51,7 +51,7 @@ pub struct Config {
 
     /// the minimum number of blocks for a coprocessor request to be run on
     /// remote worker.
-    pub remote_coprocessor_min_blocks: usize,
+    pub remote_coprocessor_min_blocks_size: usize,
 
     /// if enabled, flush large L0 file will split into multiple files.
     pub flush_split_l0: bool,
@@ -76,7 +76,7 @@ impl Default for Config {
             per_keyspace_configs: vec![],
             remote_worker_addr: "".to_string(),
             remote_coprocessor_addr: "".to_string(),
-            remote_coprocessor_min_blocks: 512,
+            remote_coprocessor_min_blocks_size: 32 * 1024 * 1024,
             flush_split_l0: false,
             txn_file_worker_pool_size: None,
             checksum_type: ChecksumType::Crc32c,

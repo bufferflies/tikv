@@ -690,7 +690,7 @@ impl TikvServer {
             self.config.dfs.remote_analyzer_addr.clone(),
             self.config.kvengine.remote_worker_addr.clone(),
             self.config.kvengine.remote_coprocessor_addr.clone(),
-            self.config.kvengine.remote_coprocessor_min_blocks,
+            self.config.kvengine.remote_coprocessor_min_blocks_size,
         );
         // Create server
         let server = Server::new(
