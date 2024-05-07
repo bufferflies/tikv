@@ -27,7 +27,7 @@ use crate::{
 // higher level ttl is longer than lower level.
 const IDX_TTL_LEVELS: [u64; 4] = [60 * 8, 60 * 4, 60 * 2, 60];
 const FILTER_TTL_LEVELS: [u64; 4] = [60 * 2, 60, 30, 15];
-const SMALL_VALUE_SIZE: usize = 128;
+const SMALL_VALUE_SIZE: u64 = 96;
 
 #[derive(Clone)]
 pub struct SsTable {
@@ -87,7 +87,7 @@ impl SsTable {
     ) -> table::Value {
         // For small value on level 3, load the filter is not cost-effective.
         // TODO: avoid build filter on level 3 small value table.
-        let small_value = self.footer.data_len() < self.entries as usize * SMALL_VALUE_SIZE;
+        let small_value = self.kv_size < self.entries as u64 * SMALL_VALUE_SIZE;
         let skip_filter = small_value && level == 3;
         if self.filter_size() > 0 && !skip_filter {
             let filter = self
