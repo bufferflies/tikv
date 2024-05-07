@@ -919,8 +919,8 @@ impl Engine {
     fn get_blob_table_build_options_or_none(&self, shard: &Shard) -> Option<BlobTableBuildOptions> {
         if shard.keyspace_id > 0 {
             let conf = self.per_keyspace_configs.get(&shard.keyspace_id)?;
-            if conf.blob_table_build_options.min_blob_size != 0 {
-                return Some(conf.blob_table_build_options);
+            if conf.enable_blob {
+                return Some(self.opts.blob_table_build_options);
             }
         }
         None

@@ -23,12 +23,28 @@ pub const DEFAULT_HARD_REGION_MEM_USAGE_LIMIT_MB: u64 = 512;
 pub const DEFAULT_MAX_REGION_SPEED_LIMIT_MB_PER_SEC: u64 = 50;
 pub const DEFAULT_MIN_REGION_SPEED_LIMIT_MB_PER_SEC: u64 = 1;
 
-#[derive(Default, Clone, Serialize, Deserialize, PartialEq, Debug)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
 pub struct PerKeyspaceConfig {
     pub keyspace: u32,
-    pub blob_table_build_options: BlobTableBuildOptions,
+
+    /// The factor of default split size for the keyspace, valid range from 0.1
+    /// to 10.0.
+    pub split_size_factor: f64,
+
+    /// enable blob table for the keyspace.
+    pub enable_blob: bool,
+}
+
+impl Default for PerKeyspaceConfig {
+    fn default() -> Self {
+        Self {
+            keyspace: 0,
+            split_size_factor: 1.0,
+            enable_blob: false,
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
@@ -61,9 +77,10 @@ pub struct Config {
     pub checksum_type: ChecksumType,
 
     pub per_keyspace_configs: Vec<PerKeyspaceConfig>,
-    // Note: `per_keyspace_configs` must be the last field. Otherwise serializing the config
+    // Note: `blob_table_build_options` must be the last field. Otherwise serializing the config
     // will meet a "ValueAfterTable" error.
     // See https://docs.rs/toml/0.5.11/toml/ser/enum.Error.html#variant.ValueAfterTable.
+    pub blob_table_build_options: BlobTableBuildOptions,
 }
 
 impl Default for Config {
@@ -73,13 +90,14 @@ impl Default for Config {
             compaction_request_version: DEFAULT_COMPACTION_REQUEST_VERSION,
             compaction_tombs_ratio: DEFAULT_COMPACTION_TOMBS_RATIO,
             compaction_tombs_count: DEFAULT_COMPACTION_TOMBS_COUNT,
-            per_keyspace_configs: vec![],
             remote_worker_addr: "".to_string(),
             remote_coprocessor_addr: "".to_string(),
             remote_coprocessor_min_blocks_size: 32 * 1024 * 1024,
             flush_split_l0: false,
             txn_file_worker_pool_size: None,
             checksum_type: ChecksumType::Crc32c,
+            blob_table_build_options: Default::default(),
+            per_keyspace_configs: vec![],
         }
     }
 }
@@ -88,6 +106,13 @@ impl Config {
     pub fn validate(&self) -> Result<(), Box<dyn Error>> {
         let mut keyspace_set = HashSet::new();
         for cfg in &self.per_keyspace_configs {
+            if cfg.split_size_factor > 10.0 || cfg.split_size_factor < 0.1 {
+                return Err(format!(
+                    "invalid split size factor {} for keyspace {}",
+                    cfg.split_size_factor, cfg.keyspace
+                )
+                .into());
+            }
             if !keyspace_set.insert(cfg.keyspace) {
                 return Err(format!("duplicate keyspace {}", cfg.keyspace).into());
             }

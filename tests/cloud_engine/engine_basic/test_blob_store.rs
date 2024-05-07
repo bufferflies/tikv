@@ -3,10 +3,7 @@
 use std::time::Duration;
 
 use api_version::ApiV2;
-use kvengine::{
-    table::blobtable::builder::BlobTableBuildOptions, KvEnginePerKeyspaceConfig, CF_LEVELS,
-    WRITE_CF,
-};
+use kvengine::{KvEnginePerKeyspaceConfig, CF_LEVELS, WRITE_CF};
 use kvproto::{
     metapb::Store,
     pdpb::CheckPolicy,
@@ -30,26 +27,26 @@ fn test_per_keyspace_config() {
     for _ in 0..node_cnt {
         nodes.push(alloc_node_id());
     }
-    let mut k1_bt_config = BlobTableBuildOptions::default();
-    let mut k2_bt_config = BlobTableBuildOptions::default();
-    let mut k3_bt_config = BlobTableBuildOptions::default();
-    k1_bt_config.min_blob_size = 1000;
-    k1_bt_config.target_blob_table_size = 1;
-    k2_bt_config.min_blob_size = 0;
-    k3_bt_config.min_blob_size = 5000;
     let mut cluster = ServerCluster::new(nodes.clone(), |_, conf| {
+        conf.kvengine.blob_table_build_options.min_blob_size = 1000;
+        conf.kvengine
+            .blob_table_build_options
+            .target_blob_table_size = 1;
         conf.kvengine.per_keyspace_configs = vec![
             KvEnginePerKeyspaceConfig {
                 keyspace: 1,
-                blob_table_build_options: k1_bt_config,
+                split_size_factor: 1.0,
+                enable_blob: true,
             },
             KvEnginePerKeyspaceConfig {
                 keyspace: 2,
-                blob_table_build_options: k2_bt_config,
+                split_size_factor: 1.0,
+                enable_blob: false,
             },
             KvEnginePerKeyspaceConfig {
                 keyspace: 3,
-                blob_table_build_options: k3_bt_config,
+                split_size_factor: 1.0,
+                enable_blob: true,
             },
         ];
     });
@@ -221,7 +218,7 @@ fn test_per_keyspace_config() {
     };
     assert_ne!(num_blob_tables_in_shard(&cluster, &nodes, ks1.get_id()), 0);
     assert_eq!(num_blob_tables_in_shard(&cluster, &nodes, ks2.get_id()), 0);
-    assert_eq!(num_blob_tables_in_shard(&cluster, &nodes, ks3.get_id()), 0);
+    assert_ne!(num_blob_tables_in_shard(&cluster, &nodes, ks3.get_id()), 0);
     assert_eq!(num_blob_tables_in_shard(&cluster, &nodes, ks4.get_id()), 0);
 
     cluster.stop();

@@ -1024,6 +1024,7 @@ impl TikvServer {
                 )
             });
         kv_opts.table_builder_options.flush_split_l0 = conf.kvengine.flush_split_l0;
+        kv_opts.blob_table_build_options = conf.kvengine.blob_table_build_options;
         kv_opts.allow_fallback_local = conf.dfs.allow_fallback_local;
         kv_opts.enable_inner_key_offset = conf.enable_inner_key_offset;
         kv_opts.max_del_range_delay = conf.kvengine.max_del_range_delay.into();

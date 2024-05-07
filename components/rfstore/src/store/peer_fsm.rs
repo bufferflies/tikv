@@ -1158,8 +1158,20 @@ impl<'a> PeerMsgHandler<'a> {
                 // frequently than pd heartbeat.
                 self.fsm.peer.update_buckets(self.ctx);
             }
-            let region_max_size = self.ctx.cfg.region_split_size.0 * 3 / 2;
-            let region_max_entries = self.ctx.cfg.region_split_keys * 3 / 2;
+            let mut region_max_size = self.ctx.cfg.region_split_size.0 * 3 / 2;
+            let mut region_max_entries = self.ctx.cfg.region_split_keys * 3 / 2;
+            if let Some(keyspace_config) = self
+                .ctx
+                .global
+                .engines
+                .kv
+                .get_keyspace_config(shard.keyspace_id)
+            {
+                region_max_size =
+                    (region_max_size as f64 * keyspace_config.split_size_factor) as u64;
+                region_max_entries =
+                    (region_max_entries as f64 * keyspace_config.split_size_factor) as u64;
+            }
             raftstore::coprocessor::metrics::REGION_SIZE_HISTOGRAM.observe(estimated_size as f64);
             raftstore::coprocessor::metrics::REGION_KEYS_HISTOGRAM
                 .observe(estimated_entries as f64);

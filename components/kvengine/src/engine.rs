@@ -793,6 +793,10 @@ impl EngineCore {
     pub fn get_txn_chunk_manager(&self) -> TxnChunkManager {
         self.txn_chunk_mgr.clone()
     }
+
+    pub fn get_keyspace_config(&self, keyspace_id: u32) -> Option<&PerKeyspaceConfig> {
+        self.per_keyspace_configs.get(&keyspace_id)
+    }
 }
 
 #[derive(Copy, Clone, Debug, Default)]

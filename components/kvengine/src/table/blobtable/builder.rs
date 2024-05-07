@@ -101,7 +101,7 @@ impl Default for BlobTableBuildOptions {
     fn default() -> Self {
         Self {
             compression_type: LZ4_COMPRESSION,
-            min_blob_size: 1024,
+            min_blob_size: 4096,
             max_blob_table_size: 64 * 1024 * 1024,
             target_blob_table_size: 2 * 1024 * 1024,
         }
