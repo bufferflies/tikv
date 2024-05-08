@@ -406,6 +406,7 @@ impl TxnChunkInner {
                 let cache_key = BlockCacheKey::new(self.file.id(), block_off as u32);
                 cache
                     .try_get_with(cache_key, || {
+                        crate::metrics::ENGINE_CACHE_MISS.inc_by(1);
                         self.read_block_from_file(block_off as u64, length)
                     })
                     .map_err(|err| err.as_ref().clone())
