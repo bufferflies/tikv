@@ -1,13 +1,13 @@
 // Copyright 2017 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    cmp::Reverse, collections::BinaryHeap, hash::Hasher, marker::PhantomData, mem, ops::Add,
+    cmp::Reverse, collections::BinaryHeap, hash::Hasher, marker::PhantomData, mem,
     string::ToString, sync::Arc,
 };
 
 use api_version::KvFormat;
 use async_trait::async_trait;
-use bytes::{Buf, Bytes};
+use bytes::Bytes;
 use kvproto::{
     coprocessor::{KeyRange, Response},
     kvrpcpb::ExecDetailsV2,
@@ -45,10 +45,7 @@ use super::{cmsketch::CmSketch, fmsketch::FmSketch, histogram::Histogram};
 use crate::{
     coprocessor::{
         dag::TikvStorage,
-        remote_dispatcher::{
-            encode_remote_cop_request, remote_handle_request, RemoteContext, INCOMPLETE_MESSAGE,
-            REMOTE_REQUEST_TIMEOUT,
-        },
+        remote_dispatcher::{encode_remote_cop_request, remote_handle_request, RemoteContext},
         MEMTRACE_ANALYZE, *,
     },
     storage::{txn::CloudStore, Snapshot, Statistics},
@@ -66,7 +63,6 @@ pub struct AnalyzeContext<S: Snapshot, F: KvFormat> {
     quota_limiter: Arc<QuotaLimiter>,
     _phantom: PhantomData<F>,
     remote_ctx: Option<RemoteContext>,
-    remote_analysis_req: RemoteAnalysisRequest,
     remote_req: RemoteRequest,
     remote_exec_details: Option<ExecDetailsV2>,
     is_auto_analyze: bool,
@@ -81,7 +77,6 @@ impl<S: Snapshot, F: KvFormat> AnalyzeContext<S, F> {
         req_ctx: &ReqContext,
         quota_limiter: Arc<QuotaLimiter>,
         remote_ctx: Option<RemoteContext>,
-        mut remote_analysis_req: RemoteAnalysisRequest,
         mut remote_req: RemoteRequest,
     ) -> Result<Self> {
         let remote_ctx = remote_ctx.map(|ctx| {
@@ -97,18 +92,13 @@ impl<S: Snapshot, F: KvFormat> AnalyzeContext<S, F> {
                 snap.get_kvengine_snap()
                     .unwrap()
                     .marshal(kv_ranges.as_slice(), false, true);
-            if !ctx.remote_analyze_url.is_empty() {
-                remote_analysis_req.key = key;
-                remote_analysis_req.snap_bytes = snap_bytes;
-            } else {
-                let req_body = encode_remote_cop_request(
-                    &remote_req.cop_req,
-                    Vec::default().as_slice(),
-                    &snap_bytes,
-                );
-                remote_req.key = format!("analyze:{}", key);
-                remote_req.req_body = req_body;
-            }
+            let req_body = encode_remote_cop_request(
+                &remote_req.cop_req,
+                Vec::default().as_slice(),
+                &snap_bytes,
+            );
+            remote_req.key = format!("analyze:{}", key);
+            remote_req.req_body = req_body;
             ctx
         });
         let store = CloudStore::new(
@@ -127,7 +117,6 @@ impl<S: Snapshot, F: KvFormat> AnalyzeContext<S, F> {
             quota_limiter,
             _phantom: PhantomData,
             remote_ctx,
-            remote_analysis_req,
             remote_req,
             is_auto_analyze,
             remote_exec_details: None,
@@ -334,45 +323,6 @@ impl<S: Snapshot, F: KvFormat> AnalyzeContext<S, F> {
     }
 }
 
-async fn remote_analyze(
-    remote_ctx: RemoteContext,
-    req: &RemoteAnalysisRequest,
-    deadline: Instant,
-) -> Result<Vec<u8>> {
-    let body_str = serde_json::to_string(req).unwrap();
-    let req = hyper::Request::builder()
-        .method(hyper::Method::POST)
-        .uri(&remote_ctx.remote_analyze_url)
-        .header("content-type", "application/json")
-        .body(hyper::Body::from(body_str))
-        .map_err(|e| Error::Other(e.to_string()))?;
-    let client = remote_ctx.client.clone();
-    tokio::time::timeout(
-        deadline.saturating_duration_since(Instant::now_coarse()),
-        async move {
-            let response = client.request(req).await.map_err(|e| {
-                if e.is_incomplete_message() {
-                    Error::Other(INCOMPLETE_MESSAGE.to_string())
-                } else {
-                    Error::Other(e.to_string())
-                }
-            })?;
-            let success = response.status().is_success();
-            let body = hyper::body::to_bytes(response.into_body())
-                .await
-                .map_err(|e| Error::Other(e.to_string()))?;
-            if !success {
-                return Err(Error::Other(
-                    String::from_utf8_lossy(body.chunk()).to_string(),
-                ));
-            }
-            Ok(body.to_vec())
-        },
-    )
-    .await
-    .map_err(|elapsed| Error::Other(elapsed.to_string()))?
-}
-
 #[async_trait]
 impl<S: Snapshot, F: KvFormat> RequestHandler for AnalyzeContext<S, F> {
     async fn handle_request(&mut self) -> Result<MemoryTraceGuard<Response>> {
@@ -382,74 +332,22 @@ impl<S: Snapshot, F: KvFormat> RequestHandler for AnalyzeContext<S, F> {
             .remote_ctx
             .as_ref()
             .map(|ctx| {
-                if !ctx.remote_analyze_url.is_empty() {
-                    format!(
-                        " url [{}] [{}]",
-                        ctx.remote_analyze_url.clone(),
-                        self.remote_analysis_req.key.clone(),
-                    )
-                } else {
-                    format!(
-                        " url [{}] [{}]",
-                        ctx.remote_worker_url.clone(),
-                        self.remote_req.key.clone(),
-                    )
-                }
+                format!(
+                    " url [{}] [{}]",
+                    ctx.remote_worker_url.clone(),
+                    self.remote_req.key.clone(),
+                )
             })
             .unwrap_or_default();
         let tag = format!("is remote {}{}", is_remote, remote_tag);
         let ret = if let Some(remote_ctx) = &self.remote_ctx {
-            if !remote_ctx.remote_analyze_url.is_empty() {
-                let ctx = remote_ctx.clone();
-                let remote_request_cache = remote_ctx.remote_request_cache.clone();
-                let remote_analysis_req = self.remote_analysis_req.clone();
-                let key = self.remote_analysis_req.key.clone();
-                let (tx, rx) = tokio::sync::oneshot::channel();
-                remote_ctx.runtime.spawn(async move {
-                    let result = remote_request_cache
-                        .get_with(key, async move {
-                            remote_analyze(
-                                ctx,
-                                &remote_analysis_req,
-                                start_time.add(REMOTE_REQUEST_TIMEOUT),
-                            )
-                            .await
-                        })
-                        .await;
-                    tx.send(result).unwrap();
-                });
-                match rx.await.unwrap() {
-                    Ok(data) => {
-                        let mut resp = Response::default();
-                        resp.set_data(data);
-                        Ok(resp)
-                    }
-                    Err(Error::Other(e)) => {
-                        if e.eq(INCOMPLETE_MESSAGE) {
-                            let key = &self.remote_analysis_req.key;
-                            warn!(
-                                "analyze other failed, incomplete message error, invalidate cached value for the key [:{}]",
-                                key,
-                            );
-                            remote_ctx
-                                .remote_request_cache
-                                .clone()
-                                .invalidate(key)
-                                .await;
-                        }
-                        Err(Error::Other(e))
-                    }
-                    Err(e) => Err(e),
-                }
-            } else {
-                remote_handle_request(
-                    "analyze".to_string(),
-                    tag.clone(),
-                    remote_ctx.clone(),
-                    self.remote_req.clone(),
-                )
-                .await
-            }
+            remote_handle_request(
+                "analyze".to_string(),
+                tag.clone(),
+                remote_ctx.clone(),
+                self.remote_req.clone(),
+            )
+            .await
             // Do not fallback to local if remote analyze failed. Or else it may
             // cause server overloaded.
         } else {

@@ -22,8 +22,6 @@ pub struct Config {
 
     pub zstd_compression_level: String,
 
-    pub remote_analyzer_addr: String,
-
     pub allow_fallback_local: bool,
 }
 
@@ -38,7 +36,6 @@ impl Default for Config {
             s3_region: "".to_string(),
             remote_compactor_addr: "".to_string(),
             zstd_compression_level: "".to_string(),
-            remote_analyzer_addr: "".to_string(),
             allow_fallback_local: true,
         }
     }
@@ -71,7 +68,6 @@ impl Config {
         Self::env_or_default("DFS_S3_SECRET_KEY", &mut self.s3_secret_key);
         Self::env_or_default("DFS_S3_REGION", &mut self.s3_region);
         Self::env_or_default("DFS_REMOTE_COMPACTOR_ADDR", &mut self.remote_compactor_addr);
-        Self::env_or_default("DFS_REMOTE_ANALYZER_ADDR", &mut self.remote_analyzer_addr);
         Self::env_or_default(
             "DFS_ZSTD_COMPRESSION_LEVEL",
             &mut self.zstd_compression_level,

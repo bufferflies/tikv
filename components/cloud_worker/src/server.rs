@@ -41,7 +41,6 @@ use tikv_util::{
     metrics::{dump, dump_to},
     quota_limiter::QuotaLimiter,
     time::InstantExt,
-    warn,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -126,7 +125,6 @@ where
                             }
                             resp
                         }
-                        "/analyze" => handle_remote_analysis(ctx, req).await,
                         "/coprocessor" => handle_remote_coprocessor(ctx, req).await,
                         "/load_data" => {
                             load_data::handle_load_data(ctx.load_manager.clone(), req).await
@@ -248,73 +246,6 @@ async fn handle_remote_coprocessor(
         .status(200)
         .body(response_data.into())
         .unwrap())
-}
-
-async fn handle_remote_analysis(
-    ctx: Arc<Context>,
-    req: hyper::Request<hyper::Body>,
-) -> hyper::Result<hyper::Response<hyper::Body>> {
-    let mut start_time = Instant::now();
-    let req_body = hyper::body::to_bytes(req.into_body()).await?;
-    let result = serde_json::from_slice(req_body.chunk());
-    if result.is_err() {
-        let err_str = result.unwrap_err().to_string();
-        return Ok(hyper::Response::builder()
-            .status(400)
-            .body(err_str.into())
-            .unwrap());
-    }
-    let remote_req: tikv::coprocessor::RemoteAnalysisRequest = result.unwrap();
-    let tag = format!("[:{}]", remote_req.key);
-    let mut change_set = kvenginepb::ChangeSet::default();
-    change_set.merge_from_bytes(&remote_req.snap_bytes).unwrap();
-    let snap_access = SnapAccess::from_change_set(
-        ctx.s3fs.clone(),
-        change_set,
-        true,
-        &ctx.master_key,
-        ctx.block_cache.clone(),
-    )
-    .await;
-    info!(
-        "start analyzing for {}, prepare snap time {:?}",
-        tag,
-        start_time.saturating_elapsed()
-    );
-    start_time = Instant::now();
-    let snap = RegionSnapshot::from_snapshot(snap_access);
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let tag_clone = tag.clone();
-    std::thread::spawn(move || {
-        let result =
-            tikv::coprocessor::parse_request_and_remote_analyze::<RegionSnapshot>(remote_req, snap);
-        if let Err(_err) = tx.send(result) {
-            // Send failed only when `rx` is dropped, should happen only when the server is
-            // shutting down. Don't print out the error as it contains the full
-            // data of result.
-            warn!("{} failed to send analyze result", tag_clone);
-        }
-    });
-    match rx.await.unwrap() {
-        Ok(data) => {
-            info!(
-                "finish analyzing for {}, takes {:?}, data size {}",
-                tag,
-                start_time.saturating_elapsed(),
-                data.len(),
-            );
-            Ok(hyper::Response::builder()
-                .status(200)
-                .body(data.into())
-                .unwrap())
-        }
-        Err(err) => {
-            let err_str = format!("{:?}", err);
-            error!("failed to analyze for {}, error {}", tag, err_str);
-            let body = hyper::Body::from(err_str);
-            Ok(hyper::Response::builder().status(500).body(body).unwrap())
-        }
-    }
 }
 
 async fn handle_get_metrics(req: Request<Body>) -> hyper::Result<Response<Body>> {

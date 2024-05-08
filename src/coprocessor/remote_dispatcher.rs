@@ -38,17 +38,6 @@ pub const REMOTE_COP_FORMAT_V1: u32 = 1;
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
-pub struct RemoteAnalysisRequest {
-    pub key: String,
-    pub req_bytes: Vec<u8>,
-    pub snap_bytes: Vec<u8>,
-    pub max_handle_duration: Duration,
-    pub peer: String,
-}
-
-#[derive(Default, Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-#[serde(rename_all = "kebab-case")]
 pub struct RemoteRequest {
     pub key: String,
     pub cop_req: Vec<u8>,
@@ -170,7 +159,6 @@ impl Deref for RemoteContext {
 }
 
 pub struct RemoteContextCore {
-    pub remote_analyze_url: String,
     pub remote_worker_url: String,
     pub cop_worker_provider: Arc<dyn CopWorkerProvider>,
     pub cop_min_blocks_size: usize,
@@ -198,16 +186,12 @@ impl CopWorkerProvider for StaticCopWorkerProvider {
 
 impl RemoteContext {
     pub fn new(
-        remote_analyze_url: String,
         remote_worker_url: String,
         cop_worker_url: String,
         cop_min_blocks_size: usize,
         security_mgr: Arc<SecurityManager>,
     ) -> Option<Self> {
-        if remote_analyze_url.is_empty()
-            && remote_worker_url.is_empty()
-            && cop_worker_url.is_empty()
-        {
+        if remote_worker_url.is_empty() && cop_worker_url.is_empty() {
             return None;
         }
         let runtime = Arc::new(
@@ -230,7 +214,6 @@ impl RemoteContext {
         });
         Some(Self {
             core: Arc::new(RemoteContextCore {
-                remote_analyze_url,
                 remote_worker_url,
                 cop_min_blocks_size,
                 cop_worker_provider,

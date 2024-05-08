@@ -37,13 +37,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 pub use checksum::checksum_crc64_xor;
-pub use endpoint::{parse_request_and_handle_remote_cop, parse_request_and_remote_analyze};
+pub use endpoint::parse_request_and_handle_remote_cop;
 use engine_traits::PerfLevel;
 use kvproto::{coprocessor as coppb, kvrpcpb};
 use lazy_static::lazy_static;
 use metrics::ReqTag;
 use rand::prelude::*;
-pub use remote_dispatcher::{RemoteAnalysisRequest, RemoteRequest};
+pub use remote_dispatcher::RemoteRequest;
 use tidb_query_common::execute_stats::ExecSummary;
 use tikv_alloc::{mem_trace, Id, MemoryTrace, MemoryTraceGuard};
 use tikv_util::{deadline::Deadline, time::Duration};
