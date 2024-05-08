@@ -1,6 +1,7 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
+    ffi::OsStr,
     fmt::{Display, Formatter, Write},
     fs,
     fs::Metadata,
@@ -108,7 +109,7 @@ impl GcRunner {
         for e in entries {
             let entry = e?;
             let path = entry.path();
-            if path.is_dir() && path.ends_with(".txn") {
+            if path.is_dir() && path.file_name() == Some(OsStr::new("txn")) {
                 self.remove_kv_garbage_txn_files(path, txn_chunk_ids)?;
                 continue;
             }
@@ -195,6 +196,7 @@ impl GcRunner {
                         let _guard = self.kv.lock_file(id);
                         if self.is_old_file(meta) {
                             txn_chunk_manager.remove(id);
+                            info!("{} local file GC remove txn file", store_id; "filename" => filename, "id" => id);
                         }
                     }
                 } else {
