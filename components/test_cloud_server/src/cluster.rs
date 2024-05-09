@@ -1073,7 +1073,18 @@ impl RegionShardStats {
                 || stats.l0_table_count != first_stats.l0_table_count
                 || stats.ver != first_stats.ver
             {
-                return Err("inconsistent stats".into());
+                let err_msg = format!(
+                    "inconsistent stats, first: {}:{}:{}: {:?}, current: {}:{}:{}: {:?}",
+                    first_id,
+                    first_stats.id,
+                    first_stats.ver,
+                    first_stats,
+                    store_id,
+                    stats.id,
+                    stats.ver,
+                    stats
+                );
+                return Err(err_msg);
             }
         }
         Ok(())
