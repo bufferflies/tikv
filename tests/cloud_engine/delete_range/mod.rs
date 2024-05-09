@@ -116,7 +116,7 @@ fn test_delete_range_lost_table_delete() {
             all_stats.into_iter().map(|s| s.total_size).sum::<u64>() == 0
         },
         15,
-        "wait for total size to be 0",
+        || "wait for total size to be 0".to_string(),
     );
 }
 

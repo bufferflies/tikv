@@ -890,7 +890,7 @@ fn test_txn_file_move_down() {
                 .all(|s| s.l0_table_count == 0 && s.mem_table_size == 0)
         },
         5,
-        "wait for compaction",
+        || "wait for compaction".to_string(),
     );
     client.verify_data_with_ref_store();
     cluster.stop();

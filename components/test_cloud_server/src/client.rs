@@ -1395,7 +1395,7 @@ impl ClusterClient {
                 region.get_end_key() == keys.get(1).unwrap()
             },
             20,
-            "split_keyspace",
+            || "split_keyspace".to_string(),
         );
     }
 

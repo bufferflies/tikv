@@ -284,7 +284,7 @@ fn test_raft_log_gc_size_limit() {
             curr_truncated_idx > prev_truncated_idx && curr_truncated_idx > 40
         },
         3,
-        "raft log size limit doesn't take effect",
+        || "raft log size limit doesn't take effect".to_string(),
     );
     cluster.stop();
 }

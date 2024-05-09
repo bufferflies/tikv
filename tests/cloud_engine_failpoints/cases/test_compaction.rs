@@ -40,7 +40,7 @@ fn test_retry_failed_flush() {
                 > 0
         },
         3,
-        "failed to flush memtables in time",
+        || "failed to flush memtables in time".to_string(),
     );
     cluster.stop();
 }

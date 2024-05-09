@@ -824,9 +824,10 @@ pub fn put_mut(key: &str, val: &str) -> Mutation {
     mutation
 }
 
-pub fn must_wait<F>(mut f: F, seconds: usize, fail_msg: &str)
+pub fn must_wait<F, FnMsg>(mut f: F, seconds: usize, fail_msg: FnMsg)
 where
     F: FnMut() -> bool,
+    FnMsg: FnOnce() -> String,
 {
     let begin = Instant::now_coarse();
     let timeout = Duration::from_secs(seconds as u64);
@@ -836,7 +837,7 @@ where
         }
         sleep(Duration::from_millis(100))
     }
-    panic!("{}", fail_msg);
+    panic!("{}", fail_msg());
 }
 
 #[must_use]

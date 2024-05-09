@@ -186,7 +186,7 @@ fn test_snap_marshal_with_opt(enable_inner_key_offset: bool) {
     must_wait(
         || check_table_count(Bytes::from(i_to_key(0)), Bytes::from(i_to_key(500)), true),
         10,
-        "snapshot table count is zero",
+        || "snapshot table count is zero".to_string(),
     );
     client.put_kv(200..300, i_to_key, i_to_val);
     client.put_kv(300..400, i_to_key, i_to_val);
@@ -194,7 +194,7 @@ fn test_snap_marshal_with_opt(enable_inner_key_offset: bool) {
     must_wait(
         || check_table_count(Bytes::from("x123"), Bytes::from("x124"), false),
         10,
-        "snapshot table count is zero",
+        || "snapshot table count is zero".to_string(),
     );
     cluster.stop();
 }

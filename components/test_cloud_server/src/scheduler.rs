@@ -116,15 +116,16 @@ impl Scheduler {
                     1,
                 )
             },
-            20,
-            format!(
-                "failed to add learner, region id {}, store id {}, peer id {}, region {:?}",
-                region_id,
-                store_id,
-                peer_id,
-                block_on(self.pd.get_region_by_id(region_id)).unwrap()
-            )
-            .as_str(),
+            30,
+            || {
+                format!(
+                    "failed to add learner, region id {}, store id {}, peer id {}, region {:?}",
+                    region_id,
+                    store_id,
+                    peer_id,
+                    block_on(self.pd.get_region_by_id(region_id)).unwrap()
+                )
+            },
         );
         if peer_destroyed {
             return;
@@ -156,15 +157,16 @@ impl Scheduler {
                     1,
                 )
             },
-            10,
-            format!(
-                "failed to promote learner, region id {}, store id {}, peer id {}, region {:?}",
-                region_id,
-                store_id,
-                peer_id,
-                block_on(self.pd.get_region_by_id(region_id)).unwrap()
-            )
-            .as_str(),
+            30,
+            || {
+                format!(
+                    "failed to promote learner, region id {}, store id {}, peer id {}, region {:?}",
+                    region_id,
+                    store_id,
+                    peer_id,
+                    block_on(self.pd.get_region_by_id(region_id)).unwrap()
+                )
+            },
         );
         if peer_destroyed {
             return;
@@ -187,8 +189,8 @@ impl Scheduler {
                     })
                     .unwrap_or(false)
             },
-            10,
-            format!("failed to get target peer, region id {}", region_id).as_str(),
+            20,
+            || format!("failed to get target peer, region id {}", region_id),
         );
 
         must_wait(
@@ -226,12 +228,13 @@ impl Scheduler {
                     3,
                 )
             },
-            15,
-            format!(
-                "failed to remove peer id {} region id {} leader id {}",
-                to_remove.id, region_id, old_leader.id
-            )
-            .as_str(),
+            30,
+            || {
+                format!(
+                    "failed to remove peer id {} region id {} leader id {}",
+                    to_remove.id, region_id, old_leader.id
+                )
+            },
         );
     }
 
