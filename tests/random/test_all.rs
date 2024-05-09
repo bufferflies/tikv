@@ -16,7 +16,7 @@ use kvproto::pdpb::CheckPolicy;
 use load_data::task::LoadDataConfig;
 use native_br::{backup, backup_worker, restore::RestoreConfig};
 use pd_client::PdClient;
-use rand::Rng;
+use rand::{seq::IteratorRandom, Rng};
 use security::SecurityConfig;
 use test_cloud_server::{oss::prepare_dfs, tidb::TidbCluster, try_wait_result, ServerCluster};
 use test_pd_client::{PdClientExt, PdWrapper};
@@ -31,6 +31,8 @@ use txn_types::Key;
 use crate::{test_drop_table::*, test_load_data::*, test_native_br::*, TikvConfig, *};
 
 const INITIAL_KEYSPACE_COUNT: usize = 10;
+const BIG_REGION_SIZE_KEYSPACE_COUNT: usize = 2;
+const BIG_REGION_SIZE_FACTOR_OPTIONS: &[f64] = &[2.0, 3.0, 4.0];
 const INITIAL_TABLE_COUNT: usize = 3;
 const NODES_COUNT: usize = 4;
 const RESTORE_CONCURRENCY: usize = 2;
@@ -279,6 +281,22 @@ fn prepare_cluster(
     let mut rng = rand::thread_rng();
     let nodes = alloc_node_id_vec(nodes_count);
     let dfs_config = Arc::new(dfs_config.clone());
+
+    let big_region_size_keyspaces = (0..initial_keyspace_count as u32)
+        .choose_multiple(&mut rng, BIG_REGION_SIZE_KEYSPACE_COUNT);
+    let per_keyspace_configs = big_region_size_keyspaces
+        .into_iter()
+        .map(|keyspace| kvengine::config::PerKeyspaceConfig {
+            keyspace,
+            split_size_factor: *BIG_REGION_SIZE_FACTOR_OPTIONS
+                .iter()
+                .choose(&mut rng)
+                .unwrap(),
+            ..Default::default()
+        })
+        .collect::<Vec<_>>();
+    info!("prepare_cluster"; "per_keyspace_configs" => ?per_keyspace_configs);
+
     let update_conf_fn = move |_, conf: &mut TikvConfig| {
         conf.dfs = (*dfs_config).clone();
         conf.coprocessor.region_split_size = ReadableSize::kb(256);
@@ -300,6 +318,7 @@ fn prepare_cluster(
         conf.kvengine.compaction_tombs_count = 100;
         conf.kvengine.max_del_range_delay = ReadableDuration(Duration::from_secs(3));
         conf.kvengine.flush_split_l0 = true;
+        conf.kvengine.per_keyspace_configs = per_keyspace_configs.clone();
         conf.storage.flow_control.enable = true;
     };
     let pd_wrapper = PdWrapper::new_test(1, security_conf, None);
