@@ -1,9 +1,11 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use bytes::{Buf, Bytes};
+use std::collections::HashSet;
+
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use log_wrappers::Value;
 use protobuf::Message;
-use tikv_util::box_err;
+use tikv_util::{box_err, codec::number::U64_SIZE};
 
 use crate::{DeletePrefixes, ShardMeta, ShardTag, UserMeta, DEL_PREFIXES_KEY};
 
@@ -193,6 +195,46 @@ impl TxnFileRefPropertyHelper {
         let mut refs = self.txn_file_refs.take_txn_file_refs().into_vec();
         refs.retain(|r| r.get_version() > version || !r.get_lock_val_prefix().is_empty());
         self.txn_file_refs.set_txn_file_refs(refs.into());
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct TxnFileLocks {
+    inner: HashSet<u64 /* txn start_ts */>,
+}
+
+impl TxnFileLocks {
+    pub fn marshall(&self) -> Bytes {
+        let mut buf = BytesMut::with_capacity(self.inner.len() * U64_SIZE);
+        for &ts in &self.inner {
+            buf.put_u64(ts);
+        }
+        buf.freeze()
+    }
+
+    pub fn unmarshall(mut buf: Bytes) -> Self {
+        let mut locks = HashSet::with_capacity(buf.len() / U64_SIZE);
+        while buf.has_remaining() {
+            locks.insert(buf.get_u64());
+        }
+        Self { inner: locks }
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    // Return whether modified, i.e., `start_ts` is newly inserted.
+    #[inline]
+    pub fn insert(&mut self, start_ts: u64) -> bool {
+        self.inner.insert(start_ts)
+    }
+
+    // Return whether modified, i.e., an existed `start_ts` is removed.
+    #[inline]
+    pub fn remove(&mut self, start_ts: u64) -> bool {
+        self.inner.remove(&start_ts)
     }
 }
 

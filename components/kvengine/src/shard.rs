@@ -113,6 +113,7 @@ pub const MANUAL_MAJOR_COMPACTION: &str = "_manual_major_compaction";
 pub const MANUAL_MAJOR_COMPACTION_ENABLE: &[u8] = &[1];
 pub const MANUAL_MAJOR_COMPACTION_DISABLE: &[u8] = b"";
 pub const TXN_FILE_REF: &str = "_txn_file_ref";
+pub const TXN_FILE_LOCKS: &str = "_txn_file_locks";
 
 /// To indicate whether the property should be flush in mem-table flush process.
 ///
@@ -125,7 +126,7 @@ pub const TXN_FILE_REF: &str = "_txn_file_ref";
 /// mem-table would be applied lately than in `ShardMeta`.
 #[inline]
 pub fn is_property_need_flush(key: &str) -> bool {
-    let no_flush = matches!(key, DEL_PREFIXES_KEY | TRUNCATE_TS_KEY | TXN_FILE_REF);
+    let no_flush = matches!(key, DEL_PREFIXES_KEY | TRUNCATE_TS_KEY | TXN_FILE_LOCKS);
     !no_flush
 }
 
@@ -1381,6 +1382,10 @@ impl Properties {
         self.m.insert(key.to_string(), Bytes::copy_from_slice(val));
     }
 
+    pub fn set_bytes(&self, key: &str, val: Bytes) {
+        self.m.insert(key.to_string(), val);
+    }
+
     pub fn get(&self, key: &str) -> Option<Bytes> {
         let bin = self.m.get(key)?;
         Some(bin.value().clone())
@@ -1409,6 +1414,15 @@ impl Properties {
             self.set(key, val.as_slice());
         }
         self
+    }
+
+    // Complement properties from `props` if it's currently not set in self.
+    pub fn complement_merge(&mut self, props: Self) {
+        for (k, v) in props.m.into_iter() {
+            if let dashmap::mapref::entry::Entry::Vacant(e) = self.m.entry(k) {
+                e.insert(v);
+            }
+        }
     }
 }
 
