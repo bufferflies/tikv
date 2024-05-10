@@ -46,7 +46,7 @@ impl Engine {
         let new_ver = old_shard.ver + new_shard_props.len() as u64 - 1;
         let old_data = old_shard.get_data();
         assert!(
-            old_data.lock_txn_files.is_empty(),
+            !old_data.has_txn_file_locks(),
             "{} shard with txn files are not allowed to split, lock_txn_files {:?}",
             old_shard.tag(),
             old_data.lock_txn_files
@@ -246,8 +246,18 @@ impl Engine {
         })
     }
 
-    pub fn prepare_merge(&self, shard_id: u64, shard_ver: u64, sequence: u64) {
+    pub fn prepare_merge(&self, shard_id: u64, shard_ver: u64, sequence: u64) -> Result<()> {
         let old_shard = self.get_shard_with_ver(shard_id, shard_ver).unwrap();
+        let old_data = old_shard.get_data();
+
+        if old_data.has_txn_file_locks() {
+            warn!("{} prepare_merge denied, shard has txn file locks", old_shard.tag();
+                "txn_file_locks" => ?old_data.lock_txn_files);
+            return Err(Error::Other(
+                MERGE_REGION_WITH_TXN_FILE_LOCKS_ERR_MSG.into(),
+            ));
+        }
+
         self.prepare_update_shard_version(&old_shard, sequence);
         let mut new_shard = self.new_shard_version(&old_shard, sequence);
         // source shard may have non-empty mem-table, we need to flush them before
@@ -256,6 +266,7 @@ impl Engine {
         new_shard.parent_id = old_shard.id;
         info!("{} shard prepared merge", new_shard.tag());
         self.shards.insert(new_shard.id, Arc::new(new_shard));
+        Ok(())
     }
 
     pub fn rollback_merge(&self, shard_id: u64, shard_ver: u64, sequence: u64) {

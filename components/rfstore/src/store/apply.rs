@@ -1096,7 +1096,7 @@ impl Applier {
             self.region_id(),
             self.region.get_region_epoch().get_version(),
             ctx.exec_log_index,
-        );
+        )?;
         let mut region = self.region.clone();
         let epoch = region.mut_region_epoch();
         epoch.version += 1;

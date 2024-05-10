@@ -2,6 +2,9 @@
 
 use crate::{dfs, table};
 
+pub const MERGE_REGION_WITH_TXN_FILE_LOCKS_ERR_MSG: &str =
+    "fail to merge source region with txn file locks";
+
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, thiserror::Error)]

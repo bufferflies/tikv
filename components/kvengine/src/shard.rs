@@ -489,8 +489,9 @@ impl Shard {
         data.get_txn_chunks()
     }
 
+    #[inline]
     pub fn has_txn_file_locks(&self) -> bool {
-        !self.get_data().lock_txn_files.is_empty()
+        self.get_data().has_txn_file_locks()
     }
 
     pub(crate) fn split_mem_tables(&self, parent_mem_tbls: &[CfTable]) -> Vec<CfTable> {
@@ -941,6 +942,11 @@ impl ShardDataCore {
         }
         files.sort_unstable();
         files
+    }
+
+    #[inline]
+    pub(crate) fn has_txn_file_locks(&self) -> bool {
+        !self.lock_txn_files.is_empty()
     }
 
     pub(crate) fn for_each_level<F>(&self, mut f: F)

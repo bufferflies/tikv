@@ -2004,7 +2004,7 @@ impl<'a> PreprocessRef<'a> {
             return Err(err);
         }
         if self.shard_meta().has_txn_file_locks() {
-            warn!("{} preprocess_pending_splits failed, shard has txn file locks", tag;
+            warn!("{} preprocess_pending_splits denied, shard has txn file locks", tag;
                 "txn_file_locks" => ?self.shard_meta().txn_file_locks(),
             );
             return Err(Error::Other(
@@ -2134,6 +2134,13 @@ impl<'a> PreprocessRef<'a> {
         entry: &Entry,
         req: &RaftCmdRequest,
     ) {
+        if self.shard_meta().has_txn_file_locks() {
+            // Error response is returned by `exec_admin_cmd`, so do not return error here.
+            warn!("{} preprocess_prepare_merge denied, shard has txn file locks", self.tag();
+                "txn_file_locks" => ?self.shard_meta().txn_file_locks());
+            return;
+        }
+
         let prepare_merge = req.get_admin_request().get_prepare_merge();
         let mut region = self.get_preprocessed_region().clone();
         let region_version = region.get_region_epoch().get_version() + 1;

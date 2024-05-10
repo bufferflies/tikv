@@ -225,16 +225,15 @@ impl kvengine::RecoverHandler for RecoverHandler {
             }
             if req.has_admin_request() {
                 let admin = req.get_admin_request();
-                if admin.has_splits() || admin.has_prepare_merge() || admin.has_commit_merge() {
-                    if shard.has_txn_file_locks() {
-                        info!("{} recover: split/merge ignored due to txn file locks", tag; "log_index" => ctx.exec_log_index);
-                    } else {
-                        // We are recovering an parent shard, we need to switch the mem-table for
-                        // children to copy.
-                        engine.switch_mem_table(shard, meta.base_version + ctx.exec_log_index);
-                        // It is the last command for a parent shard, we should return here.
-                        return Ok(());
-                    }
+                let is_split_or_prepare_merge = admin.has_splits() || admin.has_prepare_merge();
+                if is_split_or_prepare_merge && shard.has_txn_file_locks() {
+                    info!("{} recover: split/prepare_merge is ignored due to txn file locks", tag; "log_index" => ctx.exec_log_index);
+                } else if is_split_or_prepare_merge || admin.has_commit_merge() {
+                    // We are recovering an parent shard, we need to switch the mem-table for
+                    // children to copy.
+                    engine.switch_mem_table(shard, meta.base_version + ctx.exec_log_index);
+                    // It is the last command for a parent shard, we should return here.
+                    return Ok(());
                 } else {
                     Self::execute_admin_request(&mut applier, &mut ctx, req)?;
                 }
