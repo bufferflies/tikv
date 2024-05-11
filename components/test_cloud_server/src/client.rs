@@ -530,7 +530,7 @@ impl ClusterClient {
             let mut resp = result.unwrap();
             if resp.has_region_error() {
                 let region_err = resp.take_region_error();
-                if self.handle_retryable_error(region_id, &region_err) {
+                if self.handle_retryable_error(&tag, &region_err) {
                     errors.push((tag, Error::RegionError(region_err)));
                     continue;
                 }
@@ -664,7 +664,7 @@ impl ClusterClient {
             let mut commit_resp = result.unwrap();
             if commit_resp.has_region_error() {
                 let region_err = commit_resp.take_region_error();
-                if self.handle_retryable_error(region_id, &region_err) {
+                if self.handle_retryable_error(&tag, &region_err) {
                     errors.push((tag, Error::RegionError(region_err)));
                     continue;
                 }
@@ -735,7 +735,7 @@ impl ClusterClient {
             let mut rollback_resp = result.unwrap();
             if rollback_resp.has_region_error() {
                 let region_err = rollback_resp.take_region_error();
-                if self.handle_retryable_error(region_id, &region_err) {
+                if self.handle_retryable_error(&tag, &region_err) {
                     errors.push((tag, Error::RegionError(region_err)));
                     continue;
                 }
@@ -810,7 +810,7 @@ impl ClusterClient {
                     region_err
                 ));
                 warn!("{:?}", last_err);
-                if self.handle_retryable_error(region_id, region_err) {
+                if self.handle_retryable_error(&tag, region_err) {
                     continue;
                 }
                 if self.handle_region_epoch_not_match_or_not_found(region_err) {
@@ -880,7 +880,7 @@ impl ClusterClient {
                     region_err
                 ));
                 warn!("{:?}", last_err);
-                if self.handle_retryable_error(region.id, &region_err) {
+                if self.handle_retryable_error(&tag, &region_err) {
                     continue;
                 }
                 if self.handle_region_epoch_not_match_or_not_found(&region_err) {
@@ -1096,7 +1096,8 @@ impl ClusterClient {
             .collect()
     }
 
-    fn handle_retryable_error(&mut self, region_id: u64, region_err: &errorpb::Error) -> bool {
+    fn handle_retryable_error(&mut self, tag: &ShardTag, region_err: &errorpb::Error) -> bool {
+        let region_id = tag.id_ver.id;
         if region_err.has_not_leader() {
             let region = self.regions.get_mut(&region_id).unwrap();
             if region_err.get_not_leader().has_leader() {
@@ -1109,6 +1110,24 @@ impl ClusterClient {
             sleep(Duration::from_millis(100));
             self.update_cache_by_id(region_id, None);
             return true;
+        }
+        if region_err.has_epoch_not_match() {
+            // Handle the scene that PD has newer region version than current TiKV leader by
+            // invalidate cache & retry later.
+            if let Some(region) = region_err
+                .get_epoch_not_match()
+                .get_current_regions()
+                .iter()
+                .find(|r| r.id == region_id)
+            {
+                if region.get_region_epoch().get_version() < tag.id_ver.ver {
+                    warn!("{} tikv has older region version", tag; "current_region" => ?region, "region_err" => ?region_err);
+                    sleep(Duration::from_millis(100));
+                    self.update_cache_by_id(region_id, None);
+                    return true;
+                }
+            }
+            return false;
         }
         if region_err.has_proposal_in_merging_mode() {
             sleep(Duration::from_millis(100));
@@ -1327,6 +1346,7 @@ impl ClusterClient {
         while start.saturating_elapsed() < timeout {
             let region_id = self.get_region_id(key);
             let ctx = self.new_rpc_ctx(region_id).unwrap();
+            let tag = Self::tag_from_ctx(&ctx);
             let client = self.get_kv_client(ctx.get_peer().get_store_id());
             let mut split_req = SplitRegionRequest::default();
             split_req.set_context(ctx);
@@ -1334,7 +1354,7 @@ impl ClusterClient {
             let mut resp = client.split_region(&split_req)?;
             if resp.has_region_error() {
                 let region_err = resp.get_region_error();
-                if self.handle_retryable_error(region_id, region_err) {
+                if self.handle_retryable_error(&tag, region_err) {
                     sleep(Duration::from_millis(100));
                     continue;
                 }
@@ -1551,6 +1571,7 @@ impl ClusterClient {
             }
 
             let ctx = ctx.unwrap();
+            let tag = Self::tag_from_ctx(&ctx);
             let store_id = ctx.get_peer().get_store_id();
             let client = self.get_kv_client(store_id);
 
@@ -1580,7 +1601,7 @@ impl ClusterClient {
 
                 store_id_errors.push((store_id, format!("{:?}", region_err)));
 
-                if self.handle_retryable_error(region_id, region_err) {
+                if self.handle_retryable_error(&tag, region_err) {
                     continue;
                 }
 
@@ -1635,7 +1656,7 @@ impl ClusterClient {
             if resp.has_region_error() {
                 let region_err = resp.get_region_error();
                 store_id_errors.push((store_id, format!("{:?}", region_err)));
-                if self.handle_retryable_error(region_id, region_err) {
+                if self.handle_retryable_error(&tag, region_err) {
                     continue;
                 }
                 if self.handle_region_epoch_not_match_or_not_found(region_err) {

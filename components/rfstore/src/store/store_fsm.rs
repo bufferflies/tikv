@@ -1776,6 +1776,14 @@ impl<'a> StoreMsgHandler<'a> {
             &mut peer_fsm.peer,
             RegionChangeReason::PrepareMerge,
         );
+        if is_leader {
+            peer_fsm.peer.heartbeat_pd(self.ctx);
+            info!(
+                "notify pd with prepare merge";
+                "tag" => peer_fsm.peer.tag(),
+                "peer_id" => peer_fsm.peer_id(),
+            );
+        }
     }
 
     fn on_check_merge(&mut self, region_id: u64) {
