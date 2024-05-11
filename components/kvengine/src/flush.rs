@@ -26,6 +26,7 @@ use crate::{
         sstable::{Builder, NO_COMPRESSION},
         InnerKey, TableExt,
     },
+    util::TxnFileRefPropertyHelper,
     *,
 };
 
@@ -100,6 +101,7 @@ pub(crate) struct InitialFlush {
     pub(crate) data_sequence: u64,
     pub(crate) shard_data: ShardData,
     pub(crate) max_ts: u64,
+    pub(crate) properties: Option<kvenginepb::Properties>,
 }
 
 impl InitialFlush {
@@ -142,8 +144,11 @@ impl Engine {
         if let Some(props) = m.get_properties() {
             let mut filtered_props = kvenginepb::Properties::default();
             debug_assert_eq!(props.get_keys().len(), props.get_values().len());
-            for (key, val) in props.keys.into_iter().zip(props.values.into_iter()) {
+            for (key, mut val) in props.keys.into_iter().zip(props.values.into_iter()) {
                 if is_property_need_flush(&key) {
+                    if key == TXN_FILE_REF {
+                        val = clear_finished_txn_files(&tag, val, flush_version);
+                    }
                     filtered_props.mut_keys().push(key);
                     filtered_props.mut_values().push(val);
                 }
@@ -181,9 +186,9 @@ impl Engine {
         Ok(cs)
     }
 
-    pub(crate) fn flush_initial(&self, task: FlushTask) -> Result<pb::ChangeSet> {
+    pub(crate) fn flush_initial(&self, mut task: FlushTask) -> Result<pb::ChangeSet> {
         fail_point!("kvengine_flush_initial");
-        let flush = task.initial.as_ref().unwrap();
+        let flush = task.initial.take().unwrap();
         let tag = ShardTag::new(self.get_engine_id(), task.id_ver);
         info!(
             "{} initial flush {} mem-tables, base_version {}, data_sequence {}",
@@ -200,6 +205,21 @@ impl Engine {
         initial_flush.set_base_version(flush.base_version);
         initial_flush.set_data_sequence(flush.data_sequence);
         initial_flush.set_max_ts(flush.max_ts);
+        if let Some(props) = flush.properties {
+            let flush_version = flush.base_version + flush.data_sequence;
+            let mut filtered_props = kvenginepb::Properties::default();
+            debug_assert_eq!(props.get_keys().len(), props.get_values().len());
+            for (key, mut val) in props.keys.into_iter().zip(props.values.into_iter()) {
+                if is_property_need_initial_flush(&key) {
+                    if key == TXN_FILE_REF {
+                        val = clear_finished_txn_files(&tag, val, flush_version);
+                    }
+                    filtered_props.mut_keys().push(key);
+                    filtered_props.mut_values().push(val);
+                }
+            }
+            initial_flush.set_properties(filtered_props);
+        }
         for l0 in &flush.shard_data.l0_tbls {
             if task.table_double_overbound(l0.smallest(), l0.biggest())
                 && !l0.has_data_in_range(task.inner_start(), task.inner_end())
@@ -622,6 +642,13 @@ pub(crate) fn change_set_table_version(cs: &kvenginepb::ChangeSet) -> u64 {
         return initial_flush.base_version + initial_flush.data_sequence;
     }
     unreachable!("unexpected change set {:?}", cs);
+}
+
+pub(crate) fn clear_finished_txn_files(tag: &ShardTag, v: Vec<u8>, version: u64) -> Vec<u8> {
+    let mut prop = TxnFileRefPropertyHelper::from_property(Some(Bytes::from(v))).unwrap();
+    prop.clear_finished(version);
+    info!("{} flush mem-table: clear finished txn files", tag; "prop" => ?prop, "version" => version);
+    prop.marshall()
 }
 
 pub(crate) struct FlushResult {

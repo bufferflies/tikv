@@ -270,7 +270,6 @@ impl EngineCore {
                 old_data.limiter.clone(),
             );
             shard.set_data(new_data);
-            shard.clear_finished_txn_file_refs(flush.version);
             self.send_free_mem_msg(FreeMemMsg::FreeMem(last));
         } else {
             // If there is no L0Create, it means the mem-table is empty during flush.
@@ -295,6 +294,7 @@ impl EngineCore {
                 self.send_free_mem_msg(FreeMemMsg::FreeMem(last));
             }
         }
+        shard.clear_finished_txn_file_refs(flush.version);
     }
 
     fn apply_initial_flush(&self, shard: &Shard, cs: &ChangeSet) {

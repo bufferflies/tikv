@@ -16,7 +16,7 @@ use slog_global::*;
 use super::*;
 use crate::{
     table::{InnerKey, TableExt},
-    util::{TxnFileLocks, TxnFileRefPropertyHelper},
+    util::TxnFileLocks,
 };
 
 #[derive(Default, Clone)]
@@ -459,7 +459,6 @@ impl ShardMeta {
     fn apply_flush(&mut self, cs: &pb::ChangeSet) {
         let flush = cs.get_flush();
         self.apply_properties(flush.get_properties());
-        self.clear_finished_txn_file_refs(flush.get_version());
         if flush.has_l0_create() {
             let l0 = flush.get_l0_create();
             self.add_file(l0.id, -1, 0, l0.get_smallest(), l0.get_biggest());
@@ -483,14 +482,19 @@ impl ShardMeta {
     }
 
     pub fn apply_initial_flush(&mut self, cs: &pb::ChangeSet) {
-        let props = self.properties.clone();
+        let old_props = self.properties.clone();
         let mut new_meta = Self::new(self.engine_id, cs);
         new_meta.range = self.range.clone();
-        new_meta.properties = props;
+        new_meta.properties.complement_merge(old_props);
         new_meta.txn_file_locks = self.txn_file_locks.clone();
         // self.data_sequence may be advanced on raft log gc tick.
         new_meta.data_sequence = std::cmp::max(new_meta.data_sequence, self.data_sequence);
         new_meta.max_ts = std::cmp::max(new_meta.max_ts, self.max_ts);
+        info!("{} apply_initial_flush", self.tag();
+            "prop" => ?new_meta.properties,
+            "data_seq" => new_meta.data_sequence,
+            "max_ts" => new_meta.max_ts,
+            "txn_file_locks" => ?new_meta.txn_file_locks);
         *self = new_meta;
     }
 
@@ -1005,15 +1009,6 @@ impl ShardMeta {
             "prop" => &LogValue::value(self.get_property(TXN_FILE_LOCKS).unwrap_or_default().chunk()),
             "locks" => ?self.txn_file_locks);
         modified
-    }
-
-    pub(crate) fn clear_finished_txn_file_refs(&mut self, version: u64) {
-        if let Some(val) = self.get_property(TXN_FILE_REF) {
-            let mut prop = TxnFileRefPropertyHelper::from_property(Some(val)).unwrap();
-            prop.clear_finished(version);
-            self.set_property(TXN_FILE_REF, &prop.marshall());
-            info!("{} ShardMeta clear finished txn file ref", self.tag(); "version" => version, "prop" => ?prop);
-        }
     }
 
     pub fn has_txn_file_locks(&self) -> bool {

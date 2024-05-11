@@ -522,17 +522,26 @@ impl EngineCore {
         let data_sequence = shard.get_meta_sequence();
         let base_version = shard.get_base_version();
         let mut max_ts = shard.get_sst_max_ts();
+        let mut properties: Option<kvenginepb::Properties> = None;
         for mem_tbl in &data.mem_tbls.as_slice()[1..] {
             debug!(
                 "trigger initial flush check mem table version {}, size {}",
                 mem_tbl.get_version(),
                 mem_tbl.size(),
             );
-            if mem_tbl.get_version() <= base_version + data_sequence
-                && mem_tbl.has_data_in_range(shard.inner_start(), shard.inner_end())
-            {
-                max_ts = std::cmp::max(max_ts, mem_tbl.data_max_ts());
-                mem_tbls.push(mem_tbl.clone());
+            if mem_tbl.get_version() <= base_version + data_sequence {
+                if properties.is_none() {
+                    // To persist properties of first mem-table.
+                    properties = Some(mem_tbl.get_properties().unwrap_or_default());
+                    info!("{} trigger_initial_flush with properties", shard.tag();
+                        "props" => ?properties,
+                        "data_seq" => data_sequence,
+                        "base_ver" => base_version);
+                }
+                if mem_tbl.has_data_in_range(shard.inner_start(), shard.inner_end()) {
+                    max_ts = std::cmp::max(max_ts, mem_tbl.data_max_ts());
+                    mem_tbls.push(mem_tbl.clone());
+                }
             }
         }
         self.send_flush_msg(FlushMsg::Task(Box::new(FlushTask::new_initial(
@@ -543,6 +552,7 @@ impl EngineCore {
                 data_sequence,
                 shard_data: data,
                 max_ts,
+                properties,
             },
         ))));
         Ok(())

@@ -98,37 +98,45 @@ pub struct Shard {
 
 // Note: when add new property, consider whether to add it to following process:
 // * `PropertiesHelper`
+// * `is_property_need_initial_flush`
 // * `is_property_need_flush`
 // * `is_property_change_set`
+
+// Following properties are maintained by Shard, and should be flushed to
+// `ShardMeta` for persistence.
+pub const TERM_KEY: &str = "term";
 pub const INGEST_ID_KEY: &str = "_ingest_id";
+pub const TRIM_OVER_BOUND: &str = "_trim_over_bound";
+pub const MANUAL_MAJOR_COMPACTION: &str = "_manual_major_compaction";
+pub const TXN_FILE_REF: &str = "_txn_file_ref";
+
+// Following properties are maintained by ShardMeta, and should be skipped
+// during flush.
 pub const DEL_PREFIXES_KEY: &str = "_del_prefixes";
 pub const TRUNCATE_TS_KEY: &str = "_truncate_ts";
+pub const TXN_FILE_LOCKS: &str = "_txn_file_locks";
 pub const ENCRYPTION_KEY: &str = "_encryption";
 
-pub const TRIM_OVER_BOUND: &str = "_trim_over_bound";
+// Note: TERM_KEY should not be flushed during initial flush, to keep
+// `ShardMeta.data_sequence` consistent with `TERM_KEY`.
+#[inline]
+pub fn is_property_need_initial_flush(key: &str) -> bool {
+    matches!(
+        key,
+        INGEST_ID_KEY | TRIM_OVER_BOUND | MANUAL_MAJOR_COMPACTION | TXN_FILE_REF
+    )
+}
+
+#[inline]
+pub fn is_property_need_flush(key: &str) -> bool {
+    matches!(key, TERM_KEY) || is_property_need_initial_flush(key)
+}
+
 pub const TRIM_OVER_BOUND_ENABLE: &[u8] = &[1];
 pub const TRIM_OVER_BOUND_DISABLE: &[u8] = b"";
 
-pub const MANUAL_MAJOR_COMPACTION: &str = "_manual_major_compaction";
 pub const MANUAL_MAJOR_COMPACTION_ENABLE: &[u8] = &[1];
 pub const MANUAL_MAJOR_COMPACTION_DISABLE: &[u8] = b"";
-pub const TXN_FILE_REF: &str = "_txn_file_ref";
-pub const TXN_FILE_LOCKS: &str = "_txn_file_locks";
-
-/// To indicate whether the property should be flush in mem-table flush process.
-///
-/// Most properties are applied to `Shard.properties` first. Then flush to
-/// `ShardMeta` and persist.
-///
-/// But some other properties are set in `ShardMeta` first, then set or recover
-/// to `Shard`. If `flush` operation get properties from mem-table and set to
-/// `ShardMeta` on `apply_flush`, it will cause inconsistency, as properties in
-/// mem-table would be applied lately than in `ShardMeta`.
-#[inline]
-pub fn is_property_need_flush(key: &str) -> bool {
-    let no_flush = matches!(key, DEL_PREFIXES_KEY | TRUNCATE_TS_KEY | TXN_FILE_LOCKS);
-    !no_flush
-}
 
 impl Deref for Shard {
     type Target = ShardRange;
@@ -824,7 +832,7 @@ impl Shard {
             let mut prop = TxnFileRefPropertyHelper::from_property(Some(val)).unwrap();
             prop.clear_finished(version);
             self.set_property(TXN_FILE_REF, &prop.marshall());
-            info!("{} clear finished txn file ref", self.tag(); "prop" => ?prop);
+            info!("{} clear finished txn file ref", self.tag(); "prop" => ?prop, "version" => version);
         }
     }
 }
@@ -2213,5 +2221,26 @@ mod tests {
         assert!(del_prefix.prefixes.contains(&"1111-01".as_bytes().to_vec()));
         assert!(del_prefix.prefixes.contains(&"1111-10".as_bytes().to_vec()));
         assert!(del_prefix.prefixes.contains(&"1111-21".as_bytes().to_vec()));
+    }
+
+    #[test]
+    fn test_properties() {
+        let cases: Vec<(
+            &'static str, // property_key
+            bool,         // need_initial_flush
+            bool,         // need_flush
+        )> = vec![
+            (TERM_KEY, false, true),
+            (TXN_FILE_REF, true, true),
+            (TXN_FILE_LOCKS, false, false),
+        ];
+
+        for (property_key, need_initial_flush, need_flush) in cases {
+            assert_eq!(
+                is_property_need_initial_flush(property_key),
+                need_initial_flush
+            );
+            assert_eq!(is_property_need_flush(property_key), need_flush);
+        }
     }
 }
