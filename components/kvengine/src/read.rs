@@ -641,6 +641,14 @@ impl SnapAccessCore {
         self.data.outer_end.chunk()
     }
 
+    pub fn get_inner_start(&self) -> InnerKey<'_> {
+        self.data.inner_start()
+    }
+
+    pub fn get_inner_end(&self) -> InnerKey<'_> {
+        self.data.inner_end()
+    }
+
     pub fn clone_end_key(&self) -> Bytes {
         self.data.outer_end.clone()
     }
@@ -966,6 +974,9 @@ impl SnapAccessCore {
     }
 
     pub fn get_txn_file_conflict_lock(&self, txn_file: &TxnFile) -> Option<(Vec<u8>, Lock)> {
+        if txn_file.is_empty() {
+            return None;
+        }
         let mut lock_iter = self.new_table_iterator(LOCK_CF, false, true);
         self.seek_txn_file(&mut lock_iter, txn_file);
         let mut upper_bound_buf = vec![];
@@ -994,6 +1005,9 @@ impl SnapAccessCore {
     }
 
     pub fn get_txn_file_conflict_write(&self, txn_file: &TxnFile) -> Option<(Vec<u8>, UserMeta)> {
+        if txn_file.is_empty() {
+            return None;
+        }
         let mut write_iter = self.new_delta_write_iterator(txn_file.start_ts());
         self.seek_txn_file(&mut write_iter, txn_file);
         let mut upper_bound_buf = vec![];

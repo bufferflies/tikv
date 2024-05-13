@@ -153,7 +153,7 @@ mod tests {
             txn_file::{TxnChunk, TxnChunkBuilder, TxnCtx, TxnFile, TxnFileId, OP_PUT},
             InnerKey,
         },
-        UserMeta, WRITE_CF,
+        UserMeta, GLOBAL_SHARD_END_KEY, WRITE_CF,
     };
 
     fn new_key(i: i32) -> String {
@@ -202,7 +202,15 @@ mod tests {
         let txn_file_chunk_file = Arc::new(InMemFile::new(1, txn_file_chunk_data));
         let txn_file_chunk = TxnChunk::new(txn_file_chunk_file, None).unwrap();
         let user_meta = UserMeta::new(102, 103).to_array().to_vec();
-        let txn_ctx = TxnCtx::new(user_meta.into(), Bytes::new(), 103);
+        let lower_bound = InnerKey::from_inner_buf(b"");
+        let upper_bound = InnerKey::from_inner_buf(GLOBAL_SHARD_END_KEY);
+        let txn_ctx = TxnCtx::new(
+            user_meta.into(),
+            Bytes::new(),
+            103,
+            lower_bound,
+            upper_bound,
+        );
         let txn_file_id = TxnFileId::new(1, 1, 102);
         let txn_file = TxnFile::new(txn_file_id, vec![txn_file_chunk], txn_ctx).unwrap();
         let skl_ext = SkipListExt::new(skl).add_txn_file(txn_file);

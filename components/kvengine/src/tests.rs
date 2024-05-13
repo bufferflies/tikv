@@ -1250,15 +1250,19 @@ fn test_txn_file() {
     build_txn_chunk(&engine, 250, 350, conflict_chunk_id);
     engine.txn_chunk_mgr.prepare(conflict_chunk_id).unwrap();
     let conflict_chunk = engine.txn_chunk_mgr.get(conflict_chunk_id).unwrap();
+    let lower_bound = InnerKey::from_inner_buf(b"");
+    let upper_bound = InnerKey::from_inner_buf(GLOBAL_SHARD_END_KEY);
     let conflict_ctx = TxnCtx::new(
         vec![].into(),
         make_lock_prefix(conflict_start_ts).into(),
         conflict_start_ts,
+        lower_bound,
+        upper_bound,
     );
     let conflict_txn_file = TxnFile::new(
         TxnFileId::new(1, 1, conflict_start_ts),
         vec![conflict_chunk],
-        conflict_ctx,
+        conflict_ctx.clone(),
     )
     .unwrap();
     let snap = engine.get_snap_access(1).unwrap();
@@ -1270,6 +1274,15 @@ fn test_txn_file() {
     let (key, lock) = snap.get_txn_file_conflict_lock(&conflict_txn_file).unwrap();
     assert_eq!(key, i_to_key(300, 0).into_bytes());
     assert_eq!(lock.ts.into_inner(), txn2_start_ts);
+
+    let empty_txn_file = TxnFile::new(
+        TxnFileId::new(1, 1, conflict_start_ts),
+        vec![],
+        conflict_ctx,
+    )
+    .unwrap();
+    assert!(snap.get_txn_file_conflict_write(&empty_txn_file).is_none());
+    assert!(snap.get_txn_file_conflict_lock(&empty_txn_file).is_none());
 
     let mut flushed = false;
     for _ in 0..10 {
@@ -1378,6 +1391,8 @@ fn make_txn_file_refs(
     if !user_meta.is_empty() {
         txn_file_ref.set_user_meta(user_meta);
     }
+    txn_file_ref.set_inner_lower_bound(vec![]);
+    txn_file_ref.set_inner_upper_bound(GLOBAL_SHARD_END_KEY.to_vec());
     let mut txn_file_refs = TxnFileRefs::new();
     txn_file_refs.mut_txn_file_refs().push(txn_file_ref);
     txn_file_refs.write_to_bytes().unwrap()

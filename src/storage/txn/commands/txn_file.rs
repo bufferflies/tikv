@@ -3,7 +3,6 @@
 use std::{cmp::Ordering, iter::Iterator as StdIterator, mem, ops::Deref};
 
 use api_version::ApiV2;
-use bytes::Bytes;
 use kvengine::{
     table::txn_file::{TxnCtx, TxnFile, TxnFileId, TxnFileIterator, OP_CHECK_NOT_EXIST, OP_INSERT},
     txn_chunk_manager::TxnChunkManager,
@@ -34,6 +33,8 @@ pub struct TxnFileCommand {
     pub txn_file_ref: TxnFileRef,
     modified: bool,
     pub lock_prefix: Option<txn_types::Lock>,
+    // `txn_file` represents the request data from command. Get existed locks from
+    // `SnapAccess::get_lock_txn_file()`.
     pub txn_file: TxnFile,
     pub inner_cmd: Option<Box<Command>>,
 }
@@ -60,7 +61,7 @@ impl TxnFileCommand {
         })
     }
 
-    fn build_prewrite_txn_file_ref(req: &Prewrite) -> TxnFileRef {
+    fn build_prewrite_txn_file_ref(req: &Prewrite, snap: &SnapAccess) -> TxnFileRef {
         let mut lock = txn_types::Lock::new(
             LockType::Put,
             req.primary.clone(),
@@ -78,6 +79,8 @@ impl TxnFileCommand {
         txn_file_ref.set_shard_ver(req.get_ctx().get_region_epoch().get_version());
         txn_file_ref.set_start_ts(req.start_ts.into_inner());
         txn_file_ref.set_chunk_ids(req.txn_file_chunks.clone());
+        txn_file_ref.set_inner_lower_bound(snap.get_inner_start().to_vec());
+        txn_file_ref.set_inner_upper_bound(snap.get_inner_end().to_vec());
         txn_file_ref
     }
 
@@ -87,8 +90,7 @@ impl TxnFileCommand {
         txn_file_ref.set_user_meta(user_meta.to_array().to_vec());
         txn_file_ref.set_shard_ver(req.get_ctx().get_region_epoch().get_version());
         txn_file_ref.set_start_ts(user_meta.start_ts);
-        let chunk_ids = Self::get_region_txn_file_chunks(snap, txn_file_ref.start_ts);
-        txn_file_ref.set_chunk_ids(chunk_ids);
+        Self::build_txn_file_ref_from_region(snap, txn_file_ref.start_ts, &mut txn_file_ref);
         txn_file_ref
     }
 
@@ -98,8 +100,7 @@ impl TxnFileCommand {
         txn_file_ref.set_user_meta(user_meta.to_array().to_vec());
         txn_file_ref.set_shard_ver(req.get_ctx().get_region_epoch().get_version());
         txn_file_ref.set_start_ts(user_meta.start_ts);
-        let chunk_ids = Self::get_region_txn_file_chunks(snap, txn_file_ref.start_ts);
-        txn_file_ref.set_chunk_ids(chunk_ids);
+        Self::build_txn_file_ref_from_region(snap, txn_file_ref.start_ts, &mut txn_file_ref);
         txn_file_ref
     }
 
@@ -107,8 +108,7 @@ impl TxnFileCommand {
         let mut txn_file_ref = TxnFileRef::new();
         txn_file_ref.set_shard_ver(req.get_ctx().get_region_epoch().get_version());
         txn_file_ref.set_start_ts(req.start_ts.into_inner());
-        let chunk_ids = Self::get_region_txn_file_chunks(snap, txn_file_ref.start_ts);
-        txn_file_ref.set_chunk_ids(chunk_ids);
+        Self::build_txn_file_ref_from_region(snap, txn_file_ref.start_ts, &mut txn_file_ref);
         txn_file_ref
     }
 
@@ -116,8 +116,7 @@ impl TxnFileCommand {
         let mut txn_file_ref = TxnFileRef::new();
         txn_file_ref.set_shard_ver(req.get_ctx().get_region_epoch().get_version());
         txn_file_ref.set_start_ts(req.ts().into_inner());
-        let chunk_ids = Self::get_region_txn_file_chunks(snap, txn_file_ref.start_ts);
-        txn_file_ref.set_chunk_ids(chunk_ids);
+        Self::build_txn_file_ref_from_region(snap, txn_file_ref.start_ts, &mut txn_file_ref);
         txn_file_ref
     }
 
@@ -130,8 +129,7 @@ impl TxnFileCommand {
         txn_file_ref.set_start_ts(req.ts().into_inner());
         let user_meta = UserMeta::new(req.start_ts.into_inner(), req.commit_ts.into_inner());
         txn_file_ref.set_user_meta(user_meta.to_array().to_vec());
-        let chunk_ids = Self::get_region_txn_file_chunks(snap, txn_file_ref.start_ts);
-        txn_file_ref.set_chunk_ids(chunk_ids);
+        Self::build_txn_file_ref_from_region(snap, txn_file_ref.start_ts, &mut txn_file_ref);
         txn_file_ref
     }
 
@@ -144,8 +142,7 @@ impl TxnFileCommand {
         txn_file_ref.set_start_ts(req.ts().into_inner());
         let user_meta = UserMeta::new(txn_id.into_inner(), commit_ts.into_inner());
         txn_file_ref.set_user_meta(user_meta.to_array().to_vec());
-        let chunk_ids = Self::get_region_txn_file_chunks(snap, txn_file_ref.start_ts);
-        txn_file_ref.set_chunk_ids(chunk_ids);
+        Self::build_txn_file_ref_from_region(snap, txn_file_ref.start_ts, &mut txn_file_ref);
         txn_file_ref
     }
 
@@ -159,7 +156,7 @@ impl TxnFileCommand {
                         cmd
                     ));
                 }
-                Self::build_prewrite_txn_file_ref(req)
+                Self::build_prewrite_txn_file_ref(req, snap)
             }
             Command::Commit(req) => Self::build_commit_txn_file_ref(req, snap),
             Command::Rollback(req) => Self::build_rollback_txn_file_ref(req, snap),
@@ -180,9 +177,7 @@ impl TxnFileCommand {
         let txn_file_ref = Self::try_build_txn_file_ref(&cmd, snap)?;
         let mut txn_chunks = Vec::with_capacity(txn_file_ref.chunk_ids.len());
         let start_ts = txn_file_ref.start_ts;
-        let user_meta = Bytes::copy_from_slice(&txn_file_ref.user_meta);
-        let lock_val_prefix = Bytes::copy_from_slice(&txn_file_ref.lock_val_prefix);
-        let txn_ctx = TxnCtx::new(user_meta, lock_val_prefix, 0);
+        let txn_ctx = TxnCtx::from_txn_file_ref(&txn_file_ref);
         for &chunk_id in &txn_file_ref.chunk_ids {
             let txn_chunk = txn_chunk_manager
                 .get(chunk_id)
@@ -194,9 +189,19 @@ impl TxnFileCommand {
         Ok(Self::new(cmd, txn_file_ref, txn_file))
     }
 
-    fn get_region_txn_file_chunks(snap: &SnapAccess, start_ts: u64) -> Vec<u64> {
-        snap.get_lock_txn_file(start_ts)
-            .map_or(vec![], |x| x.chunk_ids())
+    fn build_txn_file_ref_from_region(
+        snap: &SnapAccess,
+        start_ts: u64,
+        txn_file_ref: &mut TxnFileRef,
+    ) {
+        if let Some(txn_file) = snap.get_lock_txn_file(start_ts) {
+            txn_file_ref.set_chunk_ids(txn_file.chunk_ids());
+            txn_file_ref.set_inner_lower_bound(txn_file.lower_bound().to_vec());
+            txn_file_ref.set_inner_upper_bound(txn_file.upper_bound().to_vec());
+        } else {
+            txn_file_ref.set_inner_lower_bound(snap.get_inner_start().to_vec());
+            txn_file_ref.set_inner_upper_bound(snap.get_inner_end().to_vec());
+        }
     }
 
     fn get_conflict_lock(&self, snap_access: &SnapAccess) -> Option<(Vec<u8>, txn_types::Lock)> {

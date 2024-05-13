@@ -5335,6 +5335,8 @@ pub struct TxnFileRef {
     pub user_meta: ::std::vec::Vec<u8>,
     pub lock_val_prefix: ::std::vec::Vec<u8>,
     pub shard_ver: u64,
+    pub inner_lower_bound: ::std::vec::Vec<u8>,
+    pub inner_upper_bound: ::std::vec::Vec<u8>,
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
     pub cached_size: ::protobuf::CachedSize,
@@ -5472,6 +5474,58 @@ impl TxnFileRef {
     pub fn set_shard_ver(&mut self, v: u64) {
         self.shard_ver = v;
     }
+
+    // bytes inner_lower_bound = 7;
+
+
+    pub fn get_inner_lower_bound(&self) -> &[u8] {
+        &self.inner_lower_bound
+    }
+    pub fn clear_inner_lower_bound(&mut self) {
+        self.inner_lower_bound.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_inner_lower_bound(&mut self, v: ::std::vec::Vec<u8>) {
+        self.inner_lower_bound = v;
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_inner_lower_bound(&mut self) -> &mut ::std::vec::Vec<u8> {
+        &mut self.inner_lower_bound
+    }
+
+    // Take field
+    pub fn take_inner_lower_bound(&mut self) -> ::std::vec::Vec<u8> {
+        ::std::mem::replace(&mut self.inner_lower_bound, ::std::vec::Vec::new())
+    }
+
+    // bytes inner_upper_bound = 8;
+
+
+    pub fn get_inner_upper_bound(&self) -> &[u8] {
+        &self.inner_upper_bound
+    }
+    pub fn clear_inner_upper_bound(&mut self) {
+        self.inner_upper_bound.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_inner_upper_bound(&mut self, v: ::std::vec::Vec<u8>) {
+        self.inner_upper_bound = v;
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_inner_upper_bound(&mut self) -> &mut ::std::vec::Vec<u8> {
+        &mut self.inner_upper_bound
+    }
+
+    // Take field
+    pub fn take_inner_upper_bound(&mut self) -> ::std::vec::Vec<u8> {
+        ::std::mem::replace(&mut self.inner_upper_bound, ::std::vec::Vec::new())
+    }
 }
 
 impl ::protobuf::Message for TxnFileRef {
@@ -5513,6 +5567,12 @@ impl ::protobuf::Message for TxnFileRef {
                     let tmp = is.read_uint64()?;
                     self.shard_ver = tmp;
                 },
+                7 => {
+                    ::protobuf::rt::read_singular_proto3_bytes_into(wire_type, is, &mut self.inner_lower_bound)?;
+                },
+                8 => {
+                    ::protobuf::rt::read_singular_proto3_bytes_into(wire_type, is, &mut self.inner_upper_bound)?;
+                },
                 _ => {
                     ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
                 },
@@ -5543,6 +5603,12 @@ impl ::protobuf::Message for TxnFileRef {
         if self.shard_ver != 0 {
             my_size += ::protobuf::rt::value_size(6, self.shard_ver, ::protobuf::wire_format::WireTypeVarint);
         }
+        if !self.inner_lower_bound.is_empty() {
+            my_size += ::protobuf::rt::bytes_size(7, &self.inner_lower_bound);
+        }
+        if !self.inner_upper_bound.is_empty() {
+            my_size += ::protobuf::rt::bytes_size(8, &self.inner_upper_bound);
+        }
         my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
         self.cached_size.set(my_size);
         my_size
@@ -5566,6 +5632,12 @@ impl ::protobuf::Message for TxnFileRef {
         }
         if self.shard_ver != 0 {
             os.write_uint64(6, self.shard_ver)?;
+        }
+        if !self.inner_lower_bound.is_empty() {
+            os.write_bytes(7, &self.inner_lower_bound)?;
+        }
+        if !self.inner_upper_bound.is_empty() {
+            os.write_bytes(8, &self.inner_upper_bound)?;
         }
         os.write_unknown_fields(self.get_unknown_fields())?;
         ::std::result::Result::Ok(())
@@ -5639,6 +5711,16 @@ impl ::protobuf::Message for TxnFileRef {
                     |m: &TxnFileRef| { &m.shard_ver },
                     |m: &mut TxnFileRef| { &mut m.shard_ver },
                 ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeBytes>(
+                    "inner_lower_bound",
+                    |m: &TxnFileRef| { &m.inner_lower_bound },
+                    |m: &mut TxnFileRef| { &mut m.inner_lower_bound },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeBytes>(
+                    "inner_upper_bound",
+                    |m: &TxnFileRef| { &m.inner_upper_bound },
+                    |m: &mut TxnFileRef| { &mut m.inner_upper_bound },
+                ));
                 ::protobuf::reflect::MessageDescriptor::new::<TxnFileRef>(
                     "TxnFileRef",
                     fields,
@@ -5667,6 +5749,8 @@ impl ::protobuf::Clear for TxnFileRef {
         self.user_meta.clear();
         self.lock_val_prefix.clear();
         self.shard_ver = 0;
+        self.inner_lower_bound.clear();
+        self.inner_upper_bound.clear();
         self.unknown_fields.clear();
     }
 }
@@ -5682,6 +5766,8 @@ impl ::protobuf::PbPrint for TxnFileRef {
         ::protobuf::PbPrint::fmt(&self.user_meta, "user_meta", buf);
         ::protobuf::PbPrint::fmt(&self.lock_val_prefix, "lock_val_prefix", buf);
         ::protobuf::PbPrint::fmt(&self.shard_ver, "shard_ver", buf);
+        ::protobuf::PbPrint::fmt(&self.inner_lower_bound, "inner_lower_bound", buf);
+        ::protobuf::PbPrint::fmt(&self.inner_upper_bound, "inner_upper_bound", buf);
         if old_len < buf.len() {
           buf.push(' ');
         }
@@ -5698,6 +5784,8 @@ impl ::std::fmt::Debug for TxnFileRef {
         ::protobuf::PbPrint::fmt(&self.user_meta, "user_meta", &mut s);
         ::protobuf::PbPrint::fmt(&self.lock_val_prefix, "lock_val_prefix", &mut s);
         ::protobuf::PbPrint::fmt(&self.shard_ver, "shard_ver", &mut s);
+        ::protobuf::PbPrint::fmt(&self.inner_lower_bound, "inner_lower_bound", &mut s);
+        ::protobuf::PbPrint::fmt(&self.inner_upper_bound, "inner_upper_bound", &mut s);
         write!(f, "{}", s)
     }
 }
@@ -5770,11 +5858,13 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     \x12-\n\x0ctableDeletes\x18\x01\x20\x03(\x0b2\x15.enginepb.TableDeleteB\
     \0\x12-\n\x0ctableCreates\x18\x02\x20\x03(\x0b2\x15.enginepb.TableCreate\
     B\0:\0\">\n\x0bTxnFileRefs\x12-\n\rtxn_file_refs\x18\x01\x20\x03(\x0b2\
-    \x14.enginepb.TxnFileRefB\0:\0\"\x8f\x01\n\nTxnFileRef\x12\x12\n\x08star\
+    \x14.enginepb.TxnFileRefB\0:\0\"\xc9\x01\n\nTxnFileRef\x12\x12\n\x08star\
     t_ts\x18\x01\x20\x01(\x04B\0\x12\x13\n\tchunk_ids\x18\x02\x20\x03(\x04B\
     \0\x12\x11\n\x07version\x18\x03\x20\x01(\x04B\0\x12\x13\n\tuser_meta\x18\
     \x04\x20\x01(\x0cB\0\x12\x19\n\x0flock_val_prefix\x18\x05\x20\x01(\x0cB\
-    \0\x12\x13\n\tshard_ver\x18\x06\x20\x01(\x04B\0:\0B\0b\x06proto3\
+    \0\x12\x13\n\tshard_ver\x18\x06\x20\x01(\x04B\0\x12\x1b\n\x11inner_lower\
+    _bound\x18\x07\x20\x01(\x0cB\0\x12\x1b\n\x11inner_upper_bound\x18\x08\
+    \x20\x01(\x0cB\0:\0B\0b\x06proto3\
 ";
 
 static mut file_descriptor_proto_lazy: ::protobuf::lazy::Lazy<::protobuf::descriptor::FileDescriptorProto> = ::protobuf::lazy::Lazy {

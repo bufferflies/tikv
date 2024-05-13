@@ -455,3 +455,10 @@ incremental = false
 debug-assertions = false
 overflow-checks = false
 rpath = false
+
+# Ref: https://proptest-rs.github.io/proptest/proptest/tips-and-best-practices.html#setting-opt-level
+[profile.test.package.proptest]
+opt-level = 3
+
+[profile.test.package.rand_chacha]
+opt-level = 3

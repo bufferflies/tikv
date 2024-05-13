@@ -92,8 +92,10 @@ mod tests {
     use http::Method;
     use kvengine::{
         dfs::{Dfs, InMemFs},
-        table::{sstable::InMemFile, TxnChunk, TxnCtx, TxnFile, TxnFileId, TxnFileIterator},
-        Iterator, UserMeta,
+        table::{
+            sstable::InMemFile, InnerKey, TxnChunk, TxnCtx, TxnFile, TxnFileId, TxnFileIterator,
+        },
+        Iterator, UserMeta, GLOBAL_SHARD_END_KEY,
     };
 
     use crate::txn_chunk::{create_txn_chunk, CreateTxnChunkResp};
@@ -138,7 +140,9 @@ mod tests {
         assert!(!chunk_data.is_empty());
         let txn_chunk = TxnChunk::new(Arc::new(InMemFile::new(155, chunk_data)), None).unwrap();
         let user_meta = UserMeta::new(1, 2).to_array().to_vec();
-        let txn_ctx = TxnCtx::new(user_meta.into(), vec![].into(), 2);
+        let lower_bound = InnerKey::from_inner_buf(b"");
+        let upper_bound = InnerKey::from_inner_buf(GLOBAL_SHARD_END_KEY);
+        let txn_ctx = TxnCtx::new(user_meta.into(), vec![].into(), 2, lower_bound, upper_bound);
         let txn_file = TxnFile::new(TxnFileId::new(1, 1, 1), vec![txn_chunk], txn_ctx).unwrap();
         let mut iter = TxnFileIterator::new(txn_file, false);
         iter.rewind();

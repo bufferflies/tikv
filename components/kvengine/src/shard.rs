@@ -1889,6 +1889,7 @@ impl fmt::Debug for ShardRange {
                 &log_wrappers::hex_encode_upper(&self.outer_end),
             )
             .field("inner_key_off", &self.inner_key_off)
+            .field("keyspace_id", &self.keyspace_id)
             .finish()
     }
 }

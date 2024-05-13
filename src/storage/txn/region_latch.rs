@@ -186,8 +186,10 @@ impl RegionTxnLatch {
 mod tests {
     use api_version::ApiV2;
     use kvengine::{
-        table::{sstable::InMemFile, TxnChunk, TxnChunkBuilder, TxnCtx, TxnFileId, OP_PUT},
-        UserMeta,
+        table::{
+            sstable::InMemFile, InnerKey, TxnChunk, TxnChunkBuilder, TxnCtx, TxnFileId, OP_PUT,
+        },
+        UserMeta, GLOBAL_SHARD_END_KEY,
     };
     use txn_types::Key;
 
@@ -232,7 +234,10 @@ mod tests {
         let normal_cid = 1;
         assert!(global_latches.acquire(&mut normal_lock, normal_cid));
 
-        let txn_file = make_txn_file(100, 200, 1000);
+        let lower_bound = InnerKey::from_inner_buf(b"");
+        let upper_bound = InnerKey::from_inner_buf(GLOBAL_SHARD_END_KEY);
+
+        let txn_file = make_txn_file(100, 200, 1000, lower_bound, upper_bound);
         let mut txn_lock = make_txn_lock(txn_file);
         let txn_lock_cid = 2;
         // The lock before the txn file blocks txn file lock.
@@ -253,7 +258,7 @@ mod tests {
         assert!(!global_latches.acquire(&mut normal_lock_conflict, normal_conflict_cid));
 
         // another txn file will be blocked by txn lock.
-        let txn_file_2 = make_txn_file(300, 400, 1010);
+        let txn_file_2 = make_txn_file(300, 400, 1010, lower_bound, upper_bound);
         let mut txn_lock_2 = make_txn_lock(txn_file_2);
         let txn_lock_2_cid = 5;
         assert!(!global_latches.acquire(&mut txn_lock_2, txn_lock_2_cid));
@@ -276,11 +281,23 @@ mod tests {
         assert!(global_latches.acquire(&mut txn_lock_2, txn_lock_2_cid));
     }
 
-    fn make_txn_file(start: usize, end: usize, start_ts: u64) -> TxnFile {
+    fn make_txn_file(
+        start: usize,
+        end: usize,
+        start_ts: u64,
+        lower_bound: InnerKey<'_>,
+        upper_bound: InnerKey<'_>,
+    ) -> TxnFile {
         let txn_file_id = TxnFileId::new(1, 1, start_ts);
         let txn_chunk = make_txn_chunk(start, end, start_ts);
         let user_meta = UserMeta::new(start_ts, start_ts + 1).to_array().to_vec();
-        let txn_ctx = TxnCtx::new(user_meta.into(), vec![].into(), start_ts + 1);
+        let txn_ctx = TxnCtx::new(
+            user_meta.into(),
+            vec![].into(),
+            start_ts + 1,
+            lower_bound,
+            upper_bound,
+        );
         TxnFile::new(txn_file_id, vec![txn_chunk], txn_ctx).unwrap()
     }
 

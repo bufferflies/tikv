@@ -146,4 +146,9 @@ message TxnFileRef {
   bytes lock_val_prefix = 5;
   // Not used for now, but maybe useful for merge/split
   uint64 shard_ver = 6;
+
+  // Lower bound without keyspace prefix.
+  bytes inner_lower_bound = 7;
+  // Upper bound (exclusive) without keyspace prefix.
+  bytes inner_upper_bound = 8;
 }

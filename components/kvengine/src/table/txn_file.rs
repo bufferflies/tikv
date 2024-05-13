@@ -52,7 +52,10 @@ impl TxnFileId {
 pub struct TxnCtx {
     user_meta: Bytes,
     lock_val_prefix: Bytes,
+    // The version of data, i.e. data_sequence for lock CF, commit_ts for write CF.
     version: u64,
+    lower_bound_buf: Bytes,
+    upper_bound_buf: Bytes,
 }
 
 impl fmt::Debug for TxnCtx {
@@ -64,21 +67,55 @@ impl fmt::Debug for TxnCtx {
         }
         de.field("lock_val_prefix", &LogValue::value(&self.lock_val_prefix))
             .field("version", &self.version)
+            .field("lower_bound", &self.lower_bound())
+            .field("upper_bound", &self.upper_bound())
             .finish()
     }
 }
 
 impl TxnCtx {
-    pub fn new(user_meta: Bytes, lock_val_prefix: Bytes, version: u64) -> Self {
+    pub fn new(
+        user_meta: Bytes,
+        lock_val_prefix: Bytes,
+        version: u64,
+        lower_bound: InnerKey<'_>,
+        upper_bound: InnerKey<'_>,
+    ) -> Self {
         Self {
             user_meta,
             lock_val_prefix,
             version,
+            lower_bound_buf: Bytes::copy_from_slice(lower_bound.deref()),
+            upper_bound_buf: Bytes::copy_from_slice(upper_bound.deref()),
+        }
+    }
+
+    pub fn from_txn_file_ref(txn_file_ref: &kvenginepb::TxnFileRef) -> Self {
+        let version = if !txn_file_ref.user_meta.is_empty() {
+            let um = UserMeta::from_slice(&txn_file_ref.user_meta);
+            um.commit_ts
+        } else {
+            txn_file_ref.version
+        };
+        Self {
+            user_meta: txn_file_ref.user_meta.clone().into(),
+            lock_val_prefix: txn_file_ref.lock_val_prefix.clone().into(),
+            version,
+            lower_bound_buf: txn_file_ref.inner_lower_bound.clone().into(),
+            upper_bound_buf: txn_file_ref.inner_upper_bound.clone().into(),
         }
     }
 
     pub fn is_lock(&self) -> bool {
         !self.lock_val_prefix.is_empty()
+    }
+
+    pub fn lower_bound(&self) -> InnerKey<'_> {
+        InnerKey::from_inner_buf(&self.lower_bound_buf)
+    }
+
+    pub fn upper_bound(&self) -> InnerKey<'_> {
+        InnerKey::from_inner_buf(&self.upper_bound_buf)
     }
 }
 
@@ -88,13 +125,26 @@ pub struct TxnFile {
 }
 
 impl TxnFile {
-    pub fn new(id: TxnFileId, chunks: Vec<TxnChunk>, txn_ctx: TxnCtx) -> Result<Self> {
+    pub fn new(id: TxnFileId, mut chunks: Vec<TxnChunk>, txn_ctx: TxnCtx) -> Result<Self> {
+        debug_assert!(
+            !txn_ctx.upper_bound().deref().is_empty(),
+            "txn_ctx {:?}",
+            txn_ctx
+        );
+        chunks.retain(|chunk| {
+            chunk.index.smallest() < txn_ctx.upper_bound()
+                && txn_ctx.lower_bound() <= chunk.index.biggest()
+        });
         Ok(Self {
             inner: Arc::new(TxnFileInner::new(id, chunks, txn_ctx)),
         })
     }
 
     pub fn get_value(&self, key: InnerKey<'_>, outer_val_owner: &mut Vec<u8>) -> (u8, Value) {
+        if self.is_empty() || key < self.txn_ctx.lower_bound() || key >= self.txn_ctx.upper_bound()
+        {
+            return (0, Value::new());
+        }
         for (i, chunk) in self.chunks.iter().enumerate() {
             if let Some(chunk_iter) = chunk.get_value(key) {
                 let mut file_iter = TxnFileIterator::new(self.clone(), false);
@@ -152,6 +202,7 @@ impl fmt::Debug for TxnFile {
             .field("id", &self.id)
             .field("txn_ctx", &self.txn_ctx)
             .field("size", &self.size)
+            .field("chunks", &self.chunk_ids())
             .finish()
     }
 }
@@ -205,11 +256,38 @@ impl TxnFileInner {
     pub fn size(&self) -> usize {
         self.size
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.chunks.is_empty()
+    }
+
+    pub fn lower_bound(&self) -> InnerKey<'_> {
+        self.txn_ctx.lower_bound()
+    }
+
+    pub fn upper_bound(&self) -> InnerKey<'_> {
+        self.txn_ctx.upper_bound()
+    }
 }
 
 #[derive(Clone)]
 pub struct TxnChunk {
     inner: Arc<TxnChunkInner>,
+}
+
+impl fmt::Debug for TxnChunk {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let chunk_index = self.get_index();
+        f.debug_struct("TxnChunk")
+            .field("id", &self.id())
+            .field("size", &self.size())
+            .field("inserts", &self.get_inserts())
+            .field("check_not_exists", &self.get_check_non_exists())
+            .field("num_blocks", &chunk_index.num_blocks())
+            .field("smallest", &chunk_index.smallest())
+            .field("biggest", &chunk_index.biggest())
+            .finish()
+    }
 }
 
 impl TxnChunk {
@@ -224,17 +302,22 @@ impl TxnChunk {
     }
 
     fn get_value(&self, key: InnerKey<'_>) -> Option<TxnChunkIterator> {
-        if key < self.index.smallest() || key > self.index.biggest() {
-            return None;
-        }
         let key_hash = farmhash::fingerprint64(key.as_ref());
         let hash_index = self.load_hash_index().unwrap();
         if let Some(key_addr) = hash_index.get_entry(key_hash) {
             let mut iter = TxnChunkIterator::new(self.clone(), false);
             iter.locate_key(key_addr);
+            debug_assert!(
+                iter.valid(),
+                "txn chunk: {:?}, iter: {:?}, key: {:?}, addr: {:?}",
+                self,
+                iter,
+                key,
+                key_addr,
+            );
             if iter.key() != key {
                 // There may be hash conflict.
-                warn!("hash conflict");
+                warn!("hash conflict"; "key" => ?key, "file" => self.file.id());
                 iter.seek(key);
             }
             if iter.valid() && iter.key() == key {
@@ -533,6 +616,20 @@ pub struct TxnFileIterator {
     chunk_iter: Option<TxnChunkIterator>,
     chunk_idx: usize,
     val_buf: Vec<u8>,
+    over_bounded: bool,
+}
+
+impl fmt::Debug for TxnFileIterator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TxnFileIterator")
+            .field("file", &self.file)
+            .field("reverse", &self.reverse)
+            .field("chunk_iter", &self.chunk_iter)
+            .field("chunk_idx", &self.chunk_idx)
+            .field("val_buf", &LogValue::value(&self.val_buf))
+            .field("over_bounded", &self.over_bounded)
+            .finish()
+    }
 }
 
 impl TxnFileIterator {
@@ -548,6 +645,7 @@ impl TxnFileIterator {
             chunk_iter: None,
             chunk_idx: 0,
             val_buf,
+            over_bounded: false,
         }
     }
 
@@ -558,15 +656,40 @@ impl TxnFileIterator {
     fn seek_chunk(&mut self, chunk_idx: usize, chunk: TxnChunk, key: InnerKey<'_>) {
         self.chunk_idx = chunk_idx;
         let mut chunk_iter = TxnChunkIterator::new(chunk, self.reverse);
-        chunk_iter.seek(key);
+        if self.reverse && chunk_idx + 1 == self.file.chunks.len() && key >= self.file.upper_bound()
+        {
+            chunk_iter.seek(self.file.upper_bound());
+            if chunk_iter.valid() && chunk_iter.key() == self.file.upper_bound() {
+                chunk_iter.next();
+            }
+        } else if !self.reverse && chunk_idx == 0 && key < self.file.lower_bound() {
+            chunk_iter.seek(self.file.lower_bound());
+        } else {
+            chunk_iter.seek(key);
+        }
         self.chunk_iter = Some(chunk_iter);
         self.sync_val();
+    }
+
+    fn sync_over_bound(&mut self) -> bool /* over_bounded */ {
+        let chunk_iter = self.chunk_iter.as_ref().unwrap();
+        if self.chunk_idx == 0 && chunk_iter.key() < self.file.lower_bound()
+            || self.chunk_idx + 1 == self.file.chunks.len()
+                && chunk_iter.key() >= self.file.upper_bound()
+        {
+            self.over_bounded = true;
+        }
+        self.over_bounded
     }
 
     fn sync_val(&mut self) {
         if !self.valid() {
             return;
         }
+        if self.sync_over_bound() {
+            return;
+        }
+
         let chunk_iter = self.chunk_iter.as_ref().unwrap();
         let op = chunk_iter.block_iter.op;
         let val = chunk_iter.get_value();
@@ -628,20 +751,23 @@ impl Iterator for TxnFileIterator {
     }
 
     fn rewind(&mut self) {
-        let chunk = if self.reverse {
-            self.chunk_idx = self.file.chunks.len() - 1;
-            self.file.chunks.last().unwrap().clone()
+        if self.file.is_empty() {
+            return;
+        }
+        self.over_bounded = false;
+        let file = self.file.clone();
+        if self.reverse {
+            self.seek(file.upper_bound());
         } else {
-            self.chunk_idx = 0;
-            self.file.chunks.first().unwrap().clone()
-        };
-        let mut chunk_iter = TxnChunkIterator::new(chunk, self.reverse);
-        chunk_iter.rewind();
-        self.chunk_iter = Some(chunk_iter);
-        self.sync_val();
+            self.seek(file.lower_bound());
+        }
     }
 
     fn seek(&mut self, key: InnerKey<'_>) {
+        if self.file.is_empty() {
+            return;
+        }
+        self.over_bounded = false;
         if self.reverse {
             for (i, chunk) in self.file.chunks.iter().enumerate().rev() {
                 if key >= chunk.index.smallest() {
@@ -676,10 +802,13 @@ impl Iterator for TxnFileIterator {
     }
 
     fn valid(&self) -> bool {
-        self.chunk_iter
-            .as_ref()
-            .map(|it| it.valid())
-            .unwrap_or_default()
+        !self.file.is_empty()
+            && !self.over_bounded
+            && self
+                .chunk_iter
+                .as_ref()
+                .map(|it| it.valid())
+                .unwrap_or_default()
     }
 }
 
@@ -689,6 +818,18 @@ pub struct TxnChunkIterator {
     num_blocks: usize,
     block_pos: usize,
     reverse: bool,
+}
+
+impl fmt::Debug for TxnChunkIterator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TxnChunkIterator")
+            .field("chunk", &self.chunk)
+            .field("block_iter", &self.block_iter)
+            .field("num_blocks", &self.num_blocks)
+            .field("block_pos", &self.block_pos)
+            .field("reverse", &self.reverse)
+            .finish()
+    }
 }
 
 impl TxnChunkIterator {
@@ -707,7 +848,7 @@ impl TxnChunkIterator {
         self.block_pos = self.chunk.index.seek_block(key).saturating_sub(1);
         if self.load_block() {
             self.block_iter.seek(key);
-            if self.block_iter.err.is_some() && self.block_pos + 1 < self.num_blocks {
+            if !self.block_iter.valid() && self.block_pos + 1 < self.num_blocks {
                 self.block_pos += 1;
                 if self.load_block() {
                     self.block_iter.seek(key);
@@ -785,7 +926,7 @@ impl TxnChunkIterator {
         }
     }
 
-    fn seek(&mut self, key: InnerKey<'_>) {
+    pub fn seek(&mut self, key: InnerKey<'_>) {
         if self.reverse {
             if self.chunk.index.biggest() < key {
                 self.rewind();
@@ -806,8 +947,12 @@ impl TxnChunkIterator {
             }
         }
         self.seek_inner(key.deref());
-        if self.reverse && self.key() > key {
-            self.prev_inner();
+        if self.reverse {
+            if self.block_iter.valid() && self.key() > key {
+                self.prev_inner();
+            } else if !self.block_iter.valid() {
+                self.rewind();
+            }
         }
     }
 
@@ -820,7 +965,7 @@ impl TxnChunkIterator {
     }
 
     pub fn valid(&self) -> bool {
-        self.block_iter.num_keys > 0 && self.block_iter.err.is_none()
+        self.block_iter.num_keys > 0 && self.block_iter.valid()
     }
 }
 
@@ -836,6 +981,21 @@ struct TxnChunkBlockIterator {
     val_start: usize,
     val_end: usize,
     err: Option<table::Error>,
+}
+
+impl fmt::Debug for TxnChunkBlockIterator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TxnChunkBlockIterator")
+            .field("num_keys", &self.num_keys)
+            .field("key_buf", &LogValue::key(&self.key_buf))
+            .field("common_prefix_len", &self.common_prefix_len)
+            .field("entry_idx", &self.entry_idx)
+            .field("op", &self.op)
+            .field("val_start", &self.val_start)
+            .field("val_end", &self.val_end)
+            .field("err", &self.err)
+            .finish()
+    }
 }
 
 impl TxnChunkBlockIterator {
@@ -904,6 +1064,10 @@ impl TxnChunkBlockIterator {
             self.val_start = entry_start + 2 + key_len + 1;
             self.val_end = entry_end;
         }
+    }
+
+    fn valid(&self) -> bool {
+        self.err.is_none()
     }
 
     fn get_entry_off(&self, i: usize) -> usize {
@@ -1189,7 +1353,7 @@ pub struct HashIndexBuilder {
     key_hashes: Vec<(u64, KeyAddr)>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct KeyAddr {
     pub block_idx: u16,
     pub key_idx: u16,
@@ -1237,9 +1401,10 @@ impl HashIndexBuilder {
 
 #[cfg(test)]
 mod tests {
-    use std::{iter::Iterator as StdIterator, ops::Deref, sync::Arc};
+    use std::{collections::HashSet, iter::Iterator as StdIterator, ops::Deref, sync::Arc};
 
     use bstr::ByteSlice;
+    use proptest::prelude::*;
     use txn_types::LockType;
 
     use crate::{
@@ -1251,7 +1416,7 @@ mod tests {
             InnerKey, Iterator, SkipOpTxnFileIterator, TxnCtx, TxnFile, TxnFileId, TxnFileIterator,
             OP_DELETE, OP_LOCK,
         },
-        UserMeta,
+        UserMeta, GLOBAL_SHARD_END_KEY,
     };
 
     #[test]
@@ -1395,11 +1560,15 @@ mod tests {
         let chunk_4 = build_txn_chunk(200, 250, 4, op_fn);
         let chunk_5 = build_txn_chunk(250, 300, 5, op_fn);
         let id = TxnFileId::new(10, 1, 3);
-        let txn_ctx = TxnCtx {
-            user_meta: UserMeta::new(3, 5).to_array().to_vec().into(),
-            lock_val_prefix: Default::default(),
-            version: 3,
-        };
+        let lower_bound = InnerKey::from_inner_buf(b"");
+        let upper_bound = InnerKey::from_inner_buf(GLOBAL_SHARD_END_KEY);
+        let txn_ctx = TxnCtx::new(
+            UserMeta::new(3, 5).to_array().to_vec().into(),
+            Default::default(),
+            3,
+            lower_bound,
+            upper_bound,
+        );
         // test get
         let txn_file = TxnFile::new(
             id,
@@ -1538,7 +1707,13 @@ mod tests {
         );
         lock_prefix.is_txn_file = true;
         lock_prefix.to_bytes();
-        let txn_ctx = TxnCtx::new(vec![].into(), lock_prefix.to_bytes().into(), 1);
+        let txn_ctx = TxnCtx::new(
+            vec![].into(),
+            lock_prefix.to_bytes().into(),
+            1,
+            lower_bound,
+            upper_bound,
+        );
         let txn_file = TxnFile::new(id, txn_file.chunks.clone(), txn_ctx).unwrap();
         let check_lock = |lock: &txn_types::Lock, i: usize| {
             assert_eq!(lock.primary, vec![1]);
@@ -1588,6 +1763,200 @@ mod tests {
             check_lock(&lock, i);
             i += 2;
             iter.next();
+        }
+    }
+
+    prop_compose! {
+        // Choose small values to cover corner case easily.
+        fn arb_chunks(max_chunk_size: usize, max_chunks_num: usize)
+            (chunks_size in prop::collection::vec(1..max_chunk_size, 1..max_chunks_num))
+            -> (usize, usize, Vec<TxnChunk>, TxnFileRefStore)
+        {
+            const CHUNKS_START: usize = 100;
+            let mut next_chunk: usize = CHUNKS_START;
+            let mut chunks = Vec::with_capacity(chunks_size.len());
+            let mut chunk_ref = TxnFileRefStore::default();
+            for chunk_size in chunks_size {
+                let chunk = build_txn_chunk(next_chunk, next_chunk + chunk_size, next_chunk as u64, |_| OP_PUT);
+                chunks.push(chunk);
+                chunk_ref.put_batch(next_chunk, next_chunk + chunk_size, |_| OP_PUT);
+                next_chunk += chunk_size;
+            }
+            (CHUNKS_START, next_chunk, chunks, chunk_ref)
+        }
+    }
+    prop_compose! {
+        fn arb_bounded_args(chunk_start: usize, chunk_end: usize)
+            (lower_bound in chunk_start-1..=chunk_end+1)
+            (
+                lower_bound in Just(lower_bound),
+                upper_bound in lower_bound+1..=chunk_end+2,
+                reverse in any::<bool>(),
+                keys in prop::collection::hash_set(chunk_start-2..=chunk_end+3, 1..(chunk_end-chunk_start+6).min(10)),
+            )
+            -> (usize, usize, bool, HashSet<usize>)
+        {
+            (lower_bound, upper_bound, reverse, keys)
+        }
+    }
+    proptest! {
+        #[test]
+        fn test_txn_file_bounded((chunks_start, chunks_end, chunks, chunk_ref) in arb_chunks(50, 5)) {
+            proptest!(|(
+                (lower_bound, upper_bound, reverse, keys) in arb_bounded_args(chunks_start, chunks_end)
+            )| {
+                let lower_bound_key = get_test_key("batch", lower_bound);
+                let upper_bound_key = get_test_key("batch", upper_bound);
+
+                let id = TxnFileId::new(10, 1, 3);
+                let txn_ctx = TxnCtx::new(
+                    UserMeta::new(3, 5).to_array().to_vec().into(),
+                    Default::default(),
+                    3,
+                    InnerKey::from_inner_buf(lower_bound_key.as_bytes()),
+                    InnerKey::from_inner_buf(upper_bound_key.as_bytes()),
+                );
+                let txn_file = TxnFile::new(id, chunks.clone(), txn_ctx).unwrap();
+
+                let mut iter = TxnFileIterator::new(txn_file.clone(), reverse);
+                iter.rewind();
+
+                let chunk_ref = chunk_ref.slice(&lower_bound_key, &upper_bound_key);
+                for r in chunk_ref.iter(reverse) {
+                    prop_assert!(iter.valid());
+                    let key = iter.key();
+                    let val = iter.value();
+                    prop_assert_eq!(key.deref(), r.key.as_bytes());
+                    prop_assert_eq!(iter.get_op(), r.op);
+                    prop_assert_eq!(val.get_value(), r.val.as_bytes());
+                    iter.next();
+                }
+                prop_assert!(!iter.valid(), "iter: {:?}, chunk_ref: {:?}", iter, chunk_ref);
+
+                let mut outer_owner = vec![];
+                for (i, key) in keys.into_iter().enumerate() {
+                    let key_str = get_test_key("batch", key);
+
+                    {
+                        let (op, got_val) = txn_file.get_value(InnerKey::from_inner_buf(key_str.as_bytes()), &mut outer_owner);
+                        if let Some(r) = chunk_ref.get_value(&key_str) {
+                            prop_assert!(got_val.is_valid());
+                            prop_assert_eq!(got_val.get_value(), r.val.as_bytes());
+                            prop_assert_eq!(op, r.op);
+                        } else {
+                            prop_assert!(!got_val.is_valid());
+                        }
+                    }
+
+                    {
+                        iter.seek(InnerKey::from_inner_buf(key_str.as_bytes()));
+                        for r in chunk_ref.seek(&key_str, reverse) {
+                            prop_assert!(iter.valid());
+                            let key = iter.key();
+                            let val = iter.value();
+                            prop_assert_eq!(key.deref(), r.key.as_bytes());
+                            prop_assert_eq!(iter.get_op(), r.op);
+                            prop_assert_eq!(val.get_value(), r.val.as_bytes());
+                            iter.next();
+                        }
+                        prop_assert!(!iter.valid(), "case {}, key {}, iter {:?}", i, key, iter);
+                    }
+                }
+            });
+        }
+
+    }
+
+    #[derive(Debug)]
+    struct TxnFileRefStoreItem {
+        key: String,
+        op: u8,
+        val: String,
+    }
+
+    #[derive(Default, Debug)]
+    struct TxnFileRefStore {
+        vec: Vec<TxnFileRefStoreItem>,
+    }
+
+    impl TxnFileRefStore {
+        // NOTE: All batches must be in order and no overlapping.
+        pub fn put_batch<F>(&mut self, start: usize, end: usize, op_fn: F)
+        where
+            F: Fn(usize) -> u8,
+        {
+            self.vec.reserve((end - start) / 2);
+            for i in (start..end).step_by(2) {
+                let key = get_test_key("batch", i);
+                let val = get_test_value(i);
+                let op = op_fn(i);
+                self.vec.push(TxnFileRefStoreItem { key, op, val });
+            }
+        }
+
+        pub fn slice(
+            &self,
+            lower_bound_key: &str,
+            upper_bound_key: &str,
+        ) -> TxnFileRefStoreSlice<'_> {
+            let lower_bound = self
+                .vec
+                .binary_search_by_key(&lower_bound_key, |x| &x.key)
+                .unwrap_or_else(|x| x);
+            let upper_bound = self
+                .vec
+                .binary_search_by_key(&upper_bound_key, |x| &x.key)
+                .unwrap_or_else(|x| x);
+            TxnFileRefStoreSlice {
+                slice: &self.vec[lower_bound..upper_bound],
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct TxnFileRefStoreSlice<'a> {
+        slice: &'a [TxnFileRefStoreItem],
+    }
+
+    impl<'a> TxnFileRefStoreSlice<'a> {
+        pub fn iter(
+            &self,
+            reverse: bool,
+        ) -> Box<dyn StdIterator<Item = &TxnFileRefStoreItem> + '_> {
+            if reverse {
+                Box::new(self.slice.iter().rev())
+            } else {
+                Box::new(self.slice.iter())
+            }
+        }
+
+        fn seek_pos(&self, key: &str, reverse: bool) -> Option<usize> {
+            match self.slice.binary_search_by_key(&key, |x| &x.key) {
+                Ok(x) => Some(x),
+                #[allow(clippy::unnecessary_lazy_evaluations)]
+                Err(x) if reverse => (x > 0).then(|| x - 1),
+                Err(x) if !reverse => (x < self.slice.len()).then_some(x),
+                _ => unreachable!(),
+            }
+        }
+
+        pub fn seek(
+            &self,
+            key: &str,
+            reverse: bool,
+        ) -> Box<dyn StdIterator<Item = &TxnFileRefStoreItem> + '_> {
+            match self.seek_pos(key, reverse) {
+                Some(x) if reverse => Box::new(self.slice[..=x].iter().rev()),
+                Some(x) if !reverse => Box::new(self.slice[x..].iter()),
+                None => Box::new(self.slice[0..0].iter()),
+                _ => unreachable!(),
+            }
+        }
+
+        pub fn get_value(&self, key: &str) -> Option<&'a TxnFileRefStoreItem> {
+            self.seek_pos(key, false)
+                .filter(|&x| self.slice[x].key == key)
+                .map(|x| &self.slice[x])
         }
     }
 }

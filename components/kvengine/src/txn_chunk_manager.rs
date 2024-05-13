@@ -21,7 +21,7 @@ use crate::{
         txn_file::TxnChunk,
         TxnCtx, TxnFile, TxnFileId,
     },
-    Error, Result, UserMeta,
+    Error, Result,
 };
 
 const READ_DFS_CONCURRENCY: usize = 4;
@@ -258,18 +258,7 @@ impl TxnChunkManagerCore {
             })?;
             chunks.push(txn_chunk);
         }
-        // txn_ctx_version is the data version
-        let txn_ctx_version = if !txn_file_ref.user_meta.is_empty() {
-            let um = UserMeta::from_slice(&txn_file_ref.user_meta);
-            um.commit_ts
-        } else {
-            txn_file_ref.version
-        };
-        let txn_ctx = TxnCtx::new(
-            txn_file_ref.user_meta.clone().into(),
-            txn_file_ref.lock_val_prefix.clone().into(),
-            txn_ctx_version,
-        );
+        let txn_ctx = TxnCtx::from_txn_file_ref(txn_file_ref);
         let txn_file_id = TxnFileId::new(shard_id, shard_ver, txn_file_ref.start_ts);
         Ok(TxnFile::new(txn_file_id, chunks, txn_ctx)?)
     }

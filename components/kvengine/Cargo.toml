@@ -87,5 +87,6 @@ package = "rocksdb"
 features = ["encryption"]
 
 [dev-dependencies]
+proptest = "1.4"
 tempfile = "3"
 test_util = { workspace = true }
