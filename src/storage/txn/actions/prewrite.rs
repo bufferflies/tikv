@@ -78,7 +78,10 @@ pub fn prewrite<S: Snapshot>(
 
     // Note that the `prev_write` may have invalid GC fence.
     let (mut prev_write, mut prev_write_loaded) = if !mutation.skip_constraint_check() {
-        (mutation.check_for_newer_version(reader)?, true)
+        (
+            mutation.check_for_newer_version(reader)?,
+            mutation.should_not_exist || txn_props.need_old_value,
+        )
     } else {
         (None, false)
     };
@@ -369,6 +372,48 @@ impl<'a> PrewriteMutation<'a> {
             if let Some((ts, write)) = cloud_reader.get_extra(&self.key, self.txn_props.start_ts) {
                 MVCC_CONFLICT_COUNTER.rolled_back.inc();
                 self.write_conflict_error(&write, ts, WriteConflictReason::SelfRolledBack)?;
+            }
+            if !self.should_not_exist && !self.txn_props.need_old_value {
+                // If old value is not needed, we can only access the newer version to check
+                // write conflict.
+                let (check_ts, conflict_reason) = match self.txn_props.kind {
+                    TransactionKind::Optimistic(_) => (
+                        self.txn_props.start_ts,
+                        Some(WriteConflictReason::Optimistic),
+                    ),
+                    TransactionKind::Pessimistic(for_update_ts) => {
+                        if self.pessimistic_action == DoConstraintCheck {
+                            (
+                                self.txn_props.start_ts,
+                                Some(WriteConflictReason::LazyUniquenessCheck),
+                            )
+                        } else {
+                            (for_update_ts, None)
+                        }
+                    }
+                };
+                if let Some((commit_ts, write)) = cloud_reader.get_newer(&self.key, check_ts)? {
+                    match conflict_reason {
+                        Some(reason) => {
+                            MVCC_CONFLICT_COUNTER.prewrite_write_conflict.inc();
+                            self.write_conflict_error(&write, commit_ts, reason)?;
+                        }
+                        None => {
+                            warn!("conflicting write was found, pessimistic lock must be lost for the corresponding row key"; 
+                            "key" => %self.key, 
+                            "start_ts" => self.txn_props.start_ts, 
+                            "for_update_ts" => check_ts,
+                            "conflicting start_ts" => write.start_ts,
+                            "conflicting commit_ts" => commit_ts);
+                            return Err(ErrorInner::PessimisticLockNotFound {
+                                start_ts: self.txn_props.start_ts,
+                                key: self.key.clone().into_raw()?,
+                            }
+                            .into());
+                        }
+                    }
+                }
+                return Ok(None);
             }
         }
 

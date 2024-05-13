@@ -115,13 +115,13 @@ impl SkipListExt {
     pub fn get_newer(&self, key: InnerKey<'_>, version: u64, outer_owner: &mut Vec<u8>) -> Value {
         if let Some(txn_file) = self.txn_file.as_ref() {
             let (op, val) = txn_file.get_value(key, outer_owner);
-            if val.is_valid() && val.version > version && op != OP_LOCK && op != OP_CHECK_NOT_EXIST
+            if val.is_valid() && val.version >= version && op != OP_LOCK && op != OP_CHECK_NOT_EXIST
             {
                 return val;
             }
         }
-        let v = self.skl.get(key.deref(), version);
-        if v.is_valid() && v.version > version {
+        let v = self.skl.get_newer(key.deref(), version);
+        if v.is_valid() {
             return encode_val_to_outer_val_owner(v, outer_owner);
         }
         Value::new()
@@ -233,22 +233,15 @@ mod tests {
 
         // test get newer.
         let key = new_key(10);
+        let inner_key = InnerKey::from_inner_buf(key.as_bytes());
         let mut outer_key_owner = vec![];
-        let val = skl_ext.get_newer(
-            InnerKey::from_inner_buf(key.as_bytes()),
-            102,
-            &mut outer_key_owner,
-        );
+        let mut val = skl_ext.get_newer(inner_key, 102, &mut outer_key_owner);
         assert!(val.is_valid());
         assert_eq!(val.version, 103);
-
-        let key = new_key(10);
-        let mut outer_key_owner = vec![];
-        let val = skl_ext.get_newer(
-            InnerKey::from_inner_buf(key.as_bytes()),
-            103,
-            &mut outer_key_owner,
-        );
+        val = skl_ext.get_newer(inner_key, 103, &mut outer_key_owner);
+        assert!(val.is_valid());
+        assert_eq!(val.version, 103);
+        val = skl_ext.get_newer(inner_key, 104, &mut outer_key_owner);
         assert!(!val.is_valid());
 
         // test iterator.
