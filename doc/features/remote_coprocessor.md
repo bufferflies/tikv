@@ -50,11 +50,11 @@ example config:
 ```
 [kvengine]
 remote-coprocessor-addr = "http://127.0.0.1:19000/coprocessor"
-remote-coprocessor-min-blocks = 256
+remote-coprocessor-min-blocks-size = 32000000
 ```
 
 - The `remote-coprocessor-addr` parameter specifies the address of the remote coprocessor worker to which heavy coprocessor requests will be offloaded.
-- The `remote-coprocessor-min-blocks` parameter defines the threshold for offloading a coprocessor request to the remote worker.
+- The `remote-coprocessor-min-blocks-size` parameter defines the blocks size threshold for offloading a coprocessor request to the remote worker.
 
 The tikv-server encodes the offload request with related memtable and snapshot data, and then dispatches the encoded request to worker using http/https.
 
@@ -66,3 +66,23 @@ The tikv-worker using `/coprocessor` endpoint to handle the offload request.
 - Construct the SnapAccess using the received memory table data and snapshot change set.
 - Reads the SST files in the cachefs.
 - Handle the request via `parse_request_and_handle_remote_cop`.
+
+### cop-limiter
+
+The cop-limit is configured on the tikv-worker to throttle the coprocessor requests when the memory
+usage exceeds the threshold to avoid OOM.
+
+example config:
+```
+[cop-limiter]
+high-mem-ratio = 0.8
+wait-min-duration = "100ms"
+wait-max-duration = "3s"
+sample-ttl = "60s"
+```
+
+When the memory usage above `high-mem-ratio`, the cop-limiter will throttle the coprocessor requests.
+Each throttled request will wait until the memory usage drops below the `high-mem-ratio`.
+To avoid thundering herd, a single wait sleeps for a random duration between `wait-min-duration` and `wait-max-duration`.
+Each request's response size is sampled and collected in a sliding window to calculate each keyspace's throughput.
+The `sample-ttl` defined the sliding window duration.

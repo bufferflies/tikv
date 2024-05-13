@@ -180,6 +180,7 @@ fn main() {
     if config.dfs.zstd_compression_level.is_empty() {
         config.dfs.zstd_compression_level = ZSTD_COMPRESSION_LEVEL_FOR_REMOTE.to_string();
     }
+    config.validate().unwrap();
 
     let security_mgr = Arc::new(
         SecurityManager::new(&config.security)

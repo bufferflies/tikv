@@ -194,6 +194,10 @@ pub fn path_in_diff_mount_point(_path1: &str, _path2: &str) -> bool {
     false
 }
 
+pub fn set_memory_usage_for_test(usage: u64) {
+    GLOBAL_MEMORY_USAGE.store(usage, Ordering::Release);
+}
+
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;

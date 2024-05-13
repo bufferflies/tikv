@@ -1,6 +1,7 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
 mod common;
+mod cop_limiter;
 mod error;
 mod load_data;
 mod metrics;
@@ -34,13 +35,14 @@ use slog_global::{error, info};
 use tikv_util::{
     config::{ReadableDuration, ReadableSize},
     quota_limiter::QuotaLimiter,
-    sys::SysQuota,
+    sys::{record_global_memory_usage, SysQuota},
     time::Instant,
 };
 use tokio::{runtime::Runtime, task::JoinHandle};
 pub use txn_chunk::CreateTxnChunkResp;
 
 use crate::{
+    cop_limiter::{CopLimiter, CopLimiterConfig},
     load_data::{LoadDataManager, MAX_IN_MEM_SIZE},
     native_br::{NativeBrConfig, NativeBrManager},
     worker_scaler::{WorkerScaler, WorkerScalerConfig, LOAD_DATA_WORKER_ENV},
@@ -174,6 +176,8 @@ fn start_server(
     ));
     spawn_br_background_worker(br_manager.clone(), config_file_path);
 
+    let cop_limiter = CopLimiter::new(config.cop_limiter.clone());
+
     let ctx = Arc::new(server::Context {
         compression_lvl,
         checksum_type,
@@ -185,6 +189,7 @@ fn start_server(
         master_key,
         quota_limiter: Arc::new(QuotaLimiter::default()),
         block_cache,
+        cop_limiter,
     });
     let acceptor = security_mgr.acceptor(incoming).unwrap();
     let server = start_serve!(ctx.clone(), acceptor);
@@ -290,6 +295,12 @@ impl CloudWorker {
                         info!("{} cloud_worker server graceful shutdown", addr);
                     }
                 }
+            }
+        });
+        self.thread_pool.spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                record_global_memory_usage();
             }
         });
         self.svc_handle = Some(svc_handle);
@@ -436,6 +447,7 @@ pub struct Config {
     pub report_wru: bool,
     pub enable_load_data_check_point: bool,
     pub checksum_type: ChecksumType,
+    pub cop_limiter: CopLimiterConfig,
 }
 
 impl Default for Config {
@@ -460,6 +472,7 @@ impl Default for Config {
             report_wru: false,
             enable_load_data_check_point: false,
             checksum_type: ChecksumType::Crc32c,
+            cop_limiter: CopLimiterConfig::default(),
         }
     }
 }
@@ -490,5 +503,10 @@ impl Config {
             max_retry: self.native_br.restore_max_retry,
             ..Default::default()
         }
+    }
+
+    pub fn validate(&self) -> Result<(), Box<dyn std::error::Error>> {
+        self.cop_limiter.validate()?;
+        Ok(())
     }
 }

@@ -45,6 +45,7 @@ use tikv_util::{
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::{
+    cop_limiter::CopLimiter,
     load_data::{self, LoadDataManager},
     metrics::{
         REMOTE_ANALYZE_REQ_COUNTER, REMOTE_ANALYZE_RESP_SIZE, REMOTE_CHECKSUM_REQ_COUNTER,
@@ -67,6 +68,7 @@ pub(crate) struct Context {
     pub master_key: MasterKey,
     pub quota_limiter: Arc<QuotaLimiter>,
     pub block_cache: Option<moka::sync::SegmentedCache<BlockCacheKey, Bytes>>,
+    pub cop_limiter: CopLimiter,
 }
 
 #[macro_export]
@@ -168,6 +170,17 @@ async fn handle_remote_coprocessor(
         let body = hyper::Body::from(format!("{:?}", err));
         return Ok(hyper::Response::builder().status(500).body(body).unwrap());
     }
+    let cop_ctx = cop_req.get_context();
+    let keyspace_id = cop_ctx.keyspace_id;
+    let timeout = Duration::from_millis(cop_ctx.get_max_execution_duration_ms());
+    if !ctx
+        .cop_limiter
+        .wait_for_high_mem_usage(keyspace_id, timeout)
+        .await
+    {
+        let body = hyper::Body::from("memory pressure is too high");
+        return Ok(hyper::Response::builder().status(500).body(body).unwrap());
+    }
     let req_type = cop_req.get_tp();
     let dfs: Arc<dyn dfs::Dfs> = match req_type {
         REQ_TYPE_DAG => ctx.cache_fs.clone(),
@@ -240,7 +253,8 @@ async fn handle_remote_coprocessor(
         }
         _ => {}
     }
-
+    ctx.cop_limiter
+        .add_sample(keyspace_id, response.data.len() as u64, Instant::now());
     let response_data = response.write_to_bytes().unwrap();
     Ok(hyper::Response::builder()
         .status(200)
