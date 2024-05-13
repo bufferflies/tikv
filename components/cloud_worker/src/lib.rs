@@ -168,7 +168,7 @@ fn start_server(
         rg_config,
     ));
     let br_manager = Arc::new(NativeBrManager::new(
-        thread_pool,
+        thread_pool.clone(),
         pd.clone(),
         s3fs.clone(),
         Some(config.data_dir.clone()),
@@ -229,6 +229,13 @@ fn start_server(
         server.start();
         info!("remote cop server started");
     }
+
+    thread_pool.spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            record_global_memory_usage();
+        }
+    });
 
     server
 }
@@ -295,12 +302,6 @@ impl CloudWorker {
                         info!("{} cloud_worker server graceful shutdown", addr);
                     }
                 }
-            }
-        });
-        self.thread_pool.spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                record_global_memory_usage();
             }
         });
         self.svc_handle = Some(svc_handle);
