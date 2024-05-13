@@ -1865,8 +1865,16 @@ impl<'a> PreprocessRef<'a> {
         let opt_parent_id = self.parent_id();
         let shard_meta = self.shard_meta();
         let mut rejected = false;
+        let mut err: Option<Error> = None;
         if shard_meta.ver != cs.get_shard_ver() {
             rejected = true;
+            err = Some(Error::EpochNotMatch(
+                format!(
+                    "preprocess change set: current version of region {} is {}",
+                    region_id, shard_meta.ver
+                ),
+                vec![self.region.clone()],
+            ));
             warn!(
                 "shard meta not match";
                 "region" => tag,
@@ -1906,6 +1914,9 @@ impl<'a> PreprocessRef<'a> {
             kv.meta_committed(&cs, rejected);
         }
         if rejected {
+            if let Some(err) = err {
+                return Err(err);
+            }
             return Ok(());
         }
         if cs.has_restore_shard() {
