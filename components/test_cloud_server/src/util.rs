@@ -125,22 +125,6 @@ impl From<metapb::Region> for RawRegion {
 }
 
 impl RawRegion {
-    #[cfg(test)]
-    pub(crate) fn new_for_test(id: u64, ver: u64, raw_start: Vec<u8>, raw_end: Vec<u8>) -> Self {
-        let epoch = RegionEpoch {
-            version: ver,
-            ..Default::default()
-        };
-        RawRegion {
-            id,
-            raw_start,
-            raw_end,
-            epoch,
-            peers: vec![],
-            leader_idx: 0,
-        }
-    }
-
     pub fn get_leader(&self) -> &Peer {
         &self.peers[self.leader_idx]
     }

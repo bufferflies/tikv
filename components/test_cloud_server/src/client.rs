@@ -1,6 +1,5 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
-use core::slice::SlicePattern;
 use std::{
     borrow::Cow,
     collections::{BTreeMap, HashMap, HashSet},
@@ -970,7 +969,8 @@ impl ClusterClient {
         region
     }
 
-    fn scan_regions(&mut self, raw_start: &[u8], raw_end: &[u8]) -> Result<Vec<RawRegion>> {
+    // Note: `scan_regions` do not use region cache.
+    pub fn scan_regions(&mut self, raw_start: &[u8], raw_end: &[u8]) -> Result<Vec<RawRegion>> {
         if !raw_end.is_empty() && raw_start >= raw_end {
             return Ok(vec![]);
         }
@@ -2245,18 +2245,11 @@ impl TxnMutations {
                     PrimaryFilter::Secondaries => Cow::from(chunks),
                 };
 
-                let start_key = chunks.first().unwrap().outer_smallest.as_slice();
-                let biggest = chunks.last().unwrap().outer_biggest.as_slice();
-                let mut end_key = Vec::with_capacity(biggest.len());
-                end_key.extend_from_slice(biggest);
-                end_key.push(0);
-
-                let regions = client.scan_regions(start_key, &end_key)?;
-                let region_muts = TxnFileHelper::group_txn_chunks_by_regions(&chunks, regions)
+                let region_muts = Self::group_txn_chunks_by_regions(&chunks, client)
                     .into_iter()
                     .map(|(r, chunks)| {
                         (
-                            r,
+                            r.id_ver(),
                             TxnMutations::Chunks {
                                 chunks,
                                 helper: helper.clone(),
@@ -2270,6 +2263,39 @@ impl TxnMutations {
                 }
             }
         })
+    }
+
+    fn group_txn_chunks_by_regions(
+        chunks: &[TxnFileChunk],
+        client: &mut ClusterClient,
+    ) -> Vec<(RawRegion, Vec<TxnFileChunk>)> {
+        let mut region_chunks = HashMap::new();
+        for chunk in chunks {
+            let regions = Self::get_txn_chunks_regions(chunk, client);
+            for region in regions {
+                region_chunks
+                    .entry(region.id_ver())
+                    .or_insert_with(|| (region, vec![]))
+                    .1
+                    .push(chunk.clone());
+            }
+        }
+        let mut region_chunks = region_chunks.into_values().collect::<Vec<_>>();
+        region_chunks.sort_by(|a, b| a.0.start_key().cmp(b.0.start_key()));
+        info!("group_txn_chunks_by_regions"; "region_chunks" => ?region_chunks);
+        region_chunks
+    }
+
+    fn get_txn_chunks_regions(chunk: &TxnFileChunk, client: &mut ClusterClient) -> Vec<RawRegion> {
+        let mut regions = vec![];
+        let mut start_key = chunk.outer_smallest.to_vec();
+        while start_key <= chunk.outer_biggest {
+            let region = client.get_region_by_key(&start_key);
+            start_key.clear();
+            start_key.extend_from_slice(region.end_key());
+            regions.push(region);
+        }
+        regions
     }
 
     pub fn set_prewrite_req(&self, req: &mut PrewriteRequest) {
