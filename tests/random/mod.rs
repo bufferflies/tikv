@@ -23,7 +23,7 @@ use http::{Request, StatusCode, Uri};
 use hyper::Body;
 use kvproto::{metapb::Store, pdpb::CheckPolicy};
 use pd_client::PdClient;
-use rand::{prelude::SliceRandom, rngs::ThreadRng, Rng, RngCore};
+use rand::prelude::*;
 use security::SecurityConfig;
 use test_cloud_server::{
     client::{ClusterClient, ClusterTxnClient},
@@ -42,7 +42,7 @@ use tikv_util::{
     time::Instant,
     warn,
 };
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedRwLockWriteGuard, Semaphore};
 use txn_types::Key;
 
 pub(crate) type Error = Box<dyn std::error::Error + Send + Sync + 'static>;
@@ -528,48 +528,68 @@ pub fn spawn_create_keyspace(
         while start_time.saturating_elapsed() < timeout {
             sleep(Duration::from_secs(rng.gen_range(0..5)));
 
-            let _ =
-                create_new_keyspace(&pd_client, &keyspace_manager, initial_table_count, &mut rng);
+            let _ = block_on(create_new_keyspace(
+                &pd_client,
+                &keyspace_manager,
+                initial_table_count,
+                false,
+            ));
         }
         info!("create keyspace thread exit");
     })
 }
 
-fn create_new_keyspace(
+async fn create_new_keyspace(
     pd_client: &Arc<TestPdClient>,
     keyspace_manager: &KeyspaceManager,
     initial_table_count: usize,
-    rng: &mut ThreadRng,
-) -> u32 {
-    let delta = rng.gen_range(1..=3);
+    locked: bool,
+) -> (u32, Option<OwnedRwLockWriteGuard<()>>) {
+    let random = || -> (u32, bool) {
+        let mut rng = thread_rng();
+        let delta = rng.gen_range(1..=3);
+        let enable_encryption = rng.gen();
+        (delta, enable_encryption)
+    };
+    let (delta, enable_encryption) = random();
+
     let new_keyspace = keyspace_manager.new_keyspace_id(delta);
-    must_split_region_for_keyspace(pd_client, new_keyspace, rng);
-    // Don't shuffle keyspaces. Otherwise we will not have a few big keyspaces.
-    keyspace_manager.create_keyspaces(
-        &[new_keyspace],
-        vec![TidbCluster::keyspace_name(new_keyspace as u16)],
-        DEFAULT_INNER_KEY_OFFSET,
-        initial_table_count,
-        None,
-    );
+    must_split_region_for_keyspace(pd_client, new_keyspace, enable_encryption).await;
+    // `create_single_keyspace` do not shuffle keyspaces. Then we will have a few
+    // big keyspaces.
+    let lock = keyspace_manager
+        .create_single_keyspace(
+            new_keyspace,
+            TidbCluster::keyspace_name(new_keyspace as u16),
+            DEFAULT_INNER_KEY_OFFSET,
+            initial_table_count,
+            locked,
+        )
+        .await;
     KEYSPACE_COUNTER.fetch_add(1, Ordering::Relaxed);
     TABLE_COUNTER.fetch_add(initial_table_count, Ordering::Relaxed);
 
-    new_keyspace
+    (new_keyspace, lock)
 }
 
-fn must_split_region_for_keyspace(pd_client: &TestPdClient, keyspace_id: u32, rng: &mut ThreadRng) {
+async fn must_split_region_for_keyspace(
+    pd_client: &TestPdClient,
+    keyspace_id: u32,
+    enable_encryption: bool,
+) {
     let keys = vec![
         ApiV2::get_txn_keyspace_prefix(keyspace_id),
         ApiV2::get_txn_keyspace_prefix(keyspace_id + 1),
     ];
-    let cfg = KeyspaceEncryptionConfig { enabled: rng.gen() };
-    pd_client.set_keyspace_encryption(keyspace_id, cfg).unwrap();
+    if enable_encryption {
+        let cfg = KeyspaceEncryptionConfig { enabled: true };
+        pd_client.set_keyspace_encryption(keyspace_id, cfg).unwrap();
+    }
     let split_keys = keys
         .iter()
         .map(|k| Key::from_raw(k).into_encoded())
         .collect::<Vec<_>>();
-    block_on(pd_client.split_regions(split_keys)).unwrap();
+    pd_client.split_regions(split_keys).await.unwrap();
     let new_region = pd_client.get_region(&keys[0]).unwrap();
     info!(
         "split region for keyspace {}: {:?}",

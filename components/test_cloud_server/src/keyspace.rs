@@ -20,7 +20,7 @@ use rand::{
 };
 use tikv_client::TimestampExt;
 use tikv_util::info;
-use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
 use crate::{
     client::{ClusterTxnClient, RefStore, Result},
@@ -73,6 +73,30 @@ impl KeyspaceManagerCore {
             .lock()
             .unwrap()
             .add_keyspaces(keyspace_ids, need_shuffle);
+    }
+
+    pub async fn create_single_keyspace(
+        &self,
+        keyspace_id: u32,
+        keyspace_name: String,
+        inner_key_off: usize,
+        table_count: usize,
+        locked: bool,
+    ) -> Option<OwnedRwLockWriteGuard<()>> {
+        let ks_meta = KeyspaceMeta::new(keyspace_name, inner_key_off, table_count);
+        let lock_opt = if locked {
+            let lock = ks_meta.get_locks();
+            Some(lock.mutex_lock().await)
+        } else {
+            None
+        };
+        let old = self.keyspaces.insert(keyspace_id, ks_meta);
+        assert!(old.is_none());
+        self.random
+            .lock()
+            .unwrap()
+            .add_keyspaces(&[keyspace_id], None);
+        lock_opt
     }
 
     pub fn get_uniform_random_keyspace(&self, rng: &mut ThreadRng) -> u32 {
@@ -313,8 +337,11 @@ impl KeyspaceMeta {
         }
     }
 
-    pub fn get_locks(&self) -> (Arc<RwLock<()>>, Arc<Mutex<()>>) {
-        (self.inner_lock.clone(), self.extra_lock.clone())
+    pub fn get_locks(&self) -> KeyspaceLockHelper {
+        KeyspaceLockHelper {
+            inner: self.inner_lock.clone(),
+            extra: self.extra_lock.clone(),
+        }
     }
 
     pub fn get_random_available_table(&self, rng: &mut ThreadRng) -> Option<i64> {
@@ -366,16 +393,16 @@ pub struct KeyspaceLockHelper {
 }
 
 impl KeyspaceLockHelper {
-    pub fn try_shared_lock(&self) -> Option<RwLockReadGuard<'_, ()>> {
-        self.inner.try_read().ok()
+    pub fn try_shared_lock(&self) -> Option<OwnedRwLockReadGuard<()>> {
+        self.inner.clone().try_read_owned().ok()
     }
 
-    pub async fn shared_lock(&self) -> RwLockReadGuard<'_, ()> {
-        self.inner.read().await
+    pub async fn shared_lock(&self) -> OwnedRwLockReadGuard<()> {
+        self.inner.clone().read_owned().await
     }
 
-    pub async fn mutex_lock(&self) -> RwLockWriteGuard<'_, ()> {
-        self.inner.write().await
+    pub async fn mutex_lock(&self) -> OwnedRwLockWriteGuard<()> {
+        self.inner.clone().write_owned().await
     }
 
     pub fn extra_lock(&self) -> MutexGuard<'_, ()> {
@@ -385,8 +412,7 @@ impl KeyspaceLockHelper {
 
 impl KeyspaceManager {
     pub fn get_keyspace_lock(&self, keyspace_id: u32) -> KeyspaceLockHelper {
-        let (inner, extra) = self.keyspaces.get(&keyspace_id).unwrap().get_locks();
-        KeyspaceLockHelper { inner, extra }
+        self.keyspaces.get(&keyspace_id).unwrap().get_locks()
     }
 }
 

@@ -215,15 +215,17 @@ pub(crate) fn spawn_restore_keyspace(
 
             let source_keyspace = backup.keyspace_id;
             let branching = rng.gen_bool(0.5);
-            let target_keyspace = if branching {
-                let new_keyspace = create_new_keyspace(&pd_client, &keyspace_manager, 0, &mut rng);
+            let (target_keyspace, target_keyspace_lock_guard) = if branching {
+                let (new_keyspace, lock_guard) =
+                    runtime.block_on(create_new_keyspace(&pd_client, &keyspace_manager, 0, true));
+                assert!(lock_guard.is_some());
                 info!(
                     "branching restore {}->{}, create new keyspace",
                     source_keyspace, new_keyspace
                 );
-                new_keyspace
+                (new_keyspace, lock_guard)
             } else {
-                source_keyspace
+                (source_keyspace, None)
             };
             let backup_name = backup.backup_name().to_string();
             let backup_meta = get_cluster_backup_meta(&s3fs, backup_name.clone());
@@ -240,8 +242,10 @@ pub(crate) fn spawn_restore_keyspace(
             // TODO: test without blocking write workloads.
             let mut restored_keyspace = None;
             'inner_retry: for _ in 0..RFENGINE_HTTP_ERROR_RETRY_TIMES {
-                let lock = keyspace_manager.get_keyspace_lock(target_keyspace);
-                let _guard = runtime.block_on(lock.mutex_lock());
+                let _guard = target_keyspace_lock_guard.is_none().then(|| {
+                    let lock = keyspace_manager.get_keyspace_lock(target_keyspace);
+                    runtime.block_on(lock.mutex_lock())
+                });
 
                 // The process of destroying ranges is not determined. So skip verifying the
                 // destroying ranges.
@@ -313,6 +317,7 @@ pub(crate) fn spawn_restore_keyspace(
 
                 break;
             }
+            drop(target_keyspace_lock_guard);
             let restored_keyspace = restored_keyspace.unwrap_or_else(|| {
                 panic!("{} RfengineHttpError retry limit exceeded", tag);
             });
