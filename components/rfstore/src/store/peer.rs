@@ -1404,6 +1404,9 @@ impl Peer {
         if !ctx.cfg.enable_region_bucket {
             return;
         }
+        if !self.has_applied_to_current_term() {
+            return;
+        }
         if let Some(shard) = ctx.global.engines.kv.get_shard(self.region_id) {
             // Update the buckets whenever the shard meta sequence change, so the bucket
             // keys would be more accurate than size diff.
