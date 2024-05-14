@@ -1534,7 +1534,8 @@ impl Applier {
         source: kvenginepb::ChangeSet,
         commit_index: u64,
     ) {
-        self.maybe_pause_for_split_merge();
+        let shard = ctx.engine.get_shard(self.region_id()).unwrap();
+        self.maybe_pause_for_split_merge(shard.has_over_bound_data());
         let is_leader = self.is_leader();
         let engine = ctx.engine.clone();
 
@@ -1560,9 +1561,11 @@ impl Applier {
     // split or merge. For commit merge, we also need to make sure the trim over
     // bound has already applied, or we may have overlapping sst in the LSM
     // tree.
-    fn maybe_pause_for_split_merge(&mut self) {
+    // If the shard has overbound, the overbound table maybe removed by a
+    // compaction, So we need to wait for all change sets.
+    fn maybe_pause_for_split_merge(&mut self, has_over_bound_data: bool) {
         for &(seq, cs_tp) in &self.scheduled_change_sets {
-            if cs_tp.should_pause_for_split_merge() {
+            if cs_tp.should_pause_for_split_merge() || has_over_bound_data {
                 self.paused_apply_queue
                     .pause(seq, &format!("{} {:?}", self.tag(), cs_tp));
             }
@@ -1689,7 +1692,7 @@ impl Applier {
             ApplyMsg::PendingSplit(pending_split) => {
                 self.pending_split
                     .insert(pending_split.sequence, pending_split);
-                self.maybe_pause_for_split_merge();
+                self.maybe_pause_for_split_merge(false);
             }
             ApplyMsg::PrepareChangeSet { cs, encryption_key } => {
                 self.handle_prepare_change_set(ctx, cs, encryption_key);
@@ -1701,7 +1704,8 @@ impl Applier {
                 self.handle_check_switch_mem_table(ctx, region_id);
             }
             ApplyMsg::PrepareMerge => {
-                self.maybe_pause_for_split_merge();
+                let shard = ctx.engine.get_shard(self.region_id()).unwrap();
+                self.maybe_pause_for_split_merge(shard.has_over_bound_data());
             }
             ApplyMsg::PrepareCommitMerge {
                 source,
