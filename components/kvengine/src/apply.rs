@@ -218,10 +218,10 @@ impl EngineCore {
         // Note that the shard may have been destroyed (e.g. by merge, in rfstore
         // thread) at this point.
         if let Some(shard) = self.get_shard(cs.shard_id) {
+            self.refresh_shard_states(&shard);
             // Since shard maybe replaced, we update the meta_seq here to avoid the
             // the case that the old shard's meta_sequence mismatch the old shard data.
             store_u64(&shard.meta_seq, cs.sequence);
-            self.refresh_shard_states(&shard);
         }
 
         Ok(())
