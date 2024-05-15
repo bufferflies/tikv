@@ -1940,7 +1940,7 @@ impl<'a> PreprocessRef<'a> {
         );
         if cs.has_initial_flush() || cs.has_snapshot() || cs.has_restore_shard() {
             if let Some(parent_id) = opt_parent_id {
-                ctx.remove_dependent(parent_id, self.region_id());
+                ctx.add_remove_dependent(parent_id, self.region_id());
             }
         }
         ctx.apply_msgs.msgs.push(ApplyMsg::PrepareChangeSet {
@@ -3971,6 +3971,7 @@ pub struct PreprocessContext<'a> {
     pub store_id: u64,
     pub raft: &'a rfengine::RfEngine,
     pub raft_wb: &'a mut rfengine::WriteBatch,
+    pub remove_dependents: &'a mut Vec<(u64 /* parent_id */, u64 /* dependent_id */)>,
     pub apply_msgs: &'a mut ApplyMsgs,
     pub cfg: &'a Config,
     pub destroying: &'a mut std::collections::HashSet<u64>,
@@ -3986,6 +3987,7 @@ impl<'a> PreprocessContext<'a> {
             store_id: raft_ctx.store_id(),
             raft: &raft_ctx.global.engines.raft,
             raft_wb: &mut raft_ctx.raft_wb,
+            remove_dependents: &mut raft_ctx.remove_dependents,
             apply_msgs: &mut raft_ctx.apply_msgs,
             cfg: &raft_ctx.cfg,
             destroying: &mut raft_ctx.global.destroying,
@@ -3995,13 +3997,9 @@ impl<'a> PreprocessContext<'a> {
     }
 
     // Region(dependent_id) depends on Region(parent_id).
-    // Note: duplicated with RaftContext::remove_dependent.
-    pub fn remove_dependent(&self, parent_id: u64, dependent_id: u64) {
-        let dependent_len = self.raft.remove_dependent(parent_id, dependent_id);
-        if dependent_len == 0 && parent_id != dependent_id {
-            if let Some(router) = self.router {
-                router.send_store(StoreMsg::DependentsEmpty(parent_id));
-            }
-        }
+    // Remove dependent will be done after preprocess is persisted.
+    // See https://github.com/tidbcloud/cloud-storage-engine/issues/1540.
+    pub fn add_remove_dependent(&mut self, parent_id: u64, dependent_id: u64) {
+        self.remove_dependents.push((parent_id, dependent_id));
     }
 }

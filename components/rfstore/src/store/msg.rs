@@ -153,6 +153,7 @@ pub struct PersistReady {
 pub(crate) struct IoTask {
     pub(crate) readies: Vec<PersistReady>,
     pub(crate) raft_wb: rfengine::WriteBatch,
+    pub(crate) remove_dependents: Vec<(u64 /* parent_id */, u64 /* dependent_id */)>,
 }
 
 #[derive(Debug)]

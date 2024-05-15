@@ -552,9 +552,14 @@ fn persist_states(ctx: &mut RaftContext, io_sender: &Sender<Option<IoTask>>) {
         return;
     }
     let mut raft_wb = mem::take(&mut ctx.raft_wb);
+    let remove_dependents = mem::take(&mut ctx.remove_dependents);
     ctx.global.engines.raft.apply(&mut raft_wb);
     let readies = mem::take(&mut ctx.persist_readies);
-    let io_task = IoTask { raft_wb, readies };
+    let io_task = IoTask {
+        raft_wb,
+        readies,
+        remove_dependents,
+    };
     io_sender.send(Some(io_task)).unwrap();
 }
 
@@ -649,6 +654,10 @@ impl IoWorker {
                 }
                 let region_id = ready.region_id;
                 self.router.send(region_id, PeerMsg::Persisted(ready));
+            }
+
+            for (parent_id, dependent_id) in task.remove_dependents {
+                remove_dependent(&self.engine, &self.router, parent_id, dependent_id);
             }
         }
         if self.trans.need_flush() {

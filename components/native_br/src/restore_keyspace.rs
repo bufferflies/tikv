@@ -1397,6 +1397,7 @@ impl BackupCluster {
 
         // Prepare context.
         let mut raft_wb = rfengine::WriteBatch::new();
+        let mut remove_dependents = Vec::new();
         let mut apply_msgs = ApplyMsgs::default();
         let raft_cfg = rfstore::store::Config::default();
         let mut destroying = HashSet::new();
@@ -1405,6 +1406,7 @@ impl BackupCluster {
             kv: None,
             raft: rf_engine,
             raft_wb: &mut raft_wb,
+            remove_dependents: &mut remove_dependents,
             apply_msgs: &mut apply_msgs,
             cfg: &raft_cfg,
             router: None,

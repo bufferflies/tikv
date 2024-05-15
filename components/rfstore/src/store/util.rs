@@ -15,7 +15,10 @@ use protobuf::Message;
 use slog::{Key, Record, Serializer};
 use tikv_util::{box_err, codec::bytes::decode_bytes, debug, error, time::Instant};
 
-use crate::{store::SPLIT_FLAG_ENCRYPTION_KEYS, Error, Result};
+use crate::{
+    store::{StoreMsg, SPLIT_FLAG_ENCRYPTION_KEYS},
+    Error, RaftRouter, Result,
+};
 
 /// WARNING: `NORMAL_REQ_CHECK_VER` and `NORMAL_REQ_CHECK_CONF_VER` **MUST NOT**
 /// be changed. The reason is the same as `admin_cmd_epoch_lookup`.
@@ -343,5 +346,18 @@ impl kvengine::IdAllocator for PdIdAllocator {
                 }
             }
         }
+    }
+}
+
+// Region(dependent_id) depends on Region(parent_id).
+pub fn remove_dependent(
+    rfengine: &rfengine::RfEngine,
+    router: &RaftRouter,
+    parent_id: u64,
+    dependent_id: u64,
+) {
+    let dependent_len = rfengine.remove_dependent(parent_id, dependent_id);
+    if dependent_len == 0 && parent_id != dependent_id {
+        router.send_store(StoreMsg::DependentsEmpty(parent_id));
     }
 }

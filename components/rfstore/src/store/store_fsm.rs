@@ -532,6 +532,7 @@ pub(crate) struct RaftContext {
     pub(crate) apply_msgs: ApplyMsgs,
     pub(crate) persist_readies: Vec<PersistReady>,
     pub(crate) raft_wb: rfengine::WriteBatch,
+    pub(crate) remove_dependents: Vec<(u64 /* parent_id */, u64 /* dependent_id */)>,
     pub(crate) current_time: Option<Timespec>,
     pub(crate) raft_metrics: RaftMetrics,
     pub(crate) cfg: Config,
@@ -603,6 +604,7 @@ impl RaftContext {
             apply_msgs: ApplyMsgs { msgs: vec![] },
             persist_readies: vec![],
             raft_wb: rfengine::WriteBatch::new(),
+            remove_dependents: vec![],
             current_time: None,
             raft_metrics: RaftMetrics::new(false),
             cfg,
@@ -656,18 +658,14 @@ impl RaftContext {
     }
 
     // Region(dependent_id) depends on Region(parent_id).
-    // Note: duplicated with PreprocessContext::remove_dependent.
+    #[inline]
     pub fn remove_dependent(&self, parent_id: u64, dependent_id: u64) {
-        let dependent_len = self
-            .global
-            .engines
-            .raft
-            .remove_dependent(parent_id, dependent_id);
-        if dependent_len == 0 && parent_id != dependent_id {
-            self.global
-                .router
-                .send_store(StoreMsg::DependentsEmpty(parent_id));
-        }
+        remove_dependent(
+            &self.global.engines.raft,
+            &self.global.router,
+            parent_id,
+            dependent_id,
+        );
     }
 }
 
