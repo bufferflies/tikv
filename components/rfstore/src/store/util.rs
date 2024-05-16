@@ -357,7 +357,7 @@ pub fn remove_dependent(
     dependent_id: u64,
 ) {
     let dependent_len = rfengine.remove_dependent(parent_id, dependent_id);
-    if dependent_len == 0 && parent_id != dependent_id {
+    if dependent_len == 0 {
         router.send_store(StoreMsg::DependentsEmpty(parent_id));
     }
 }
