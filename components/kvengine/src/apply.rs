@@ -303,8 +303,8 @@ impl EngineCore {
         let data = shard.get_data();
         let mut mem_tbls = data.mem_tbls.clone();
 
-        // initial_flush do not carry TXN_FILE_REF property, `lock_txn_files` is always
-        // empty.
+        // `lock_txn_files` is ignored because it does not depend on initial flush to
+        // keep consistency between peers, as only target region has txn file locks.
         let (l0s, blob_tbl_map, scfs, _lock_txn_files) =
             create_snapshot_tables(initial_flush, cs, self.opts.for_restore);
         let mut max_flushed_mem_tbl_version = 0;
@@ -330,7 +330,9 @@ impl EngineCore {
             data.lock_txn_files.clone(),
             data.limiter.clone(),
         );
-        info!("{} apply_initial_flush", shard.tag(); "lock txn files" => ?new_data.lock_txn_files);
+        info!("{} apply_initial_flush", shard.tag();
+            "seq" => cs.sequence,
+            "lock_txn_files" => ?new_data.lock_txn_files);
         shard.set_data(new_data);
         shard.clear_finished_txn_file_refs(max_flushed_mem_tbl_version);
 

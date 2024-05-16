@@ -114,10 +114,13 @@ impl WriteBatch {
 }
 
 impl Engine {
-    pub fn switch_mem_table(&self, shard: &Shard, version: u64) {
+    // `force`: Should be set to `true` during split/merge, to help initial flush
+    // get the properties need to be flush.
+    // See https://github.com/tidbcloud/cloud-storage-engine/issues/1553.
+    pub fn switch_mem_table(&self, shard: &Shard, version: u64, force: bool) {
         let data = shard.get_data();
         let mem_table = data.get_writable_mem_table();
-        if mem_table.size() == 0 {
+        if !force && mem_table.size() == 0 {
             return;
         }
         mem_table.set_version(version);
@@ -138,10 +141,11 @@ impl Engine {
         new_data.refresh_for_limiter(&shard.tag());
         shard.set_data(new_data);
         info!(
-            "shard {} switch mem-table version {}, size {}",
+            "shard {} switch mem-table version {}, size {}, force {}",
             shard.tag(),
             version,
-            mem_table.size()
+            mem_table.size(),
+            force,
         );
         let props = shard.properties.to_pb(shard.id);
         mem_table.set_properties(props);
@@ -251,7 +255,7 @@ impl Engine {
         store_u64(&shard.write_sequence, wb.sequence);
         let size = mem_tbl.size();
         if wb.switch_mem_table || size > self.opts.max_mem_table_size {
-            self.switch_mem_table(&shard, version);
+            self.switch_mem_table(&shard, version, false);
             if let Err(err) = self.trigger_flush(&shard) {
                 warn!("{} trigger_flush error: {:?}", shard.tag(), err);
             }
@@ -367,7 +371,7 @@ impl Engine {
         if !shard.get_initial_flushed() {
             self.load_unloaded_tables(shard.id, shard.ver, false)?;
         }
-        self.switch_mem_table(shard, ver);
+        self.switch_mem_table(shard, ver, false);
         self.set_shard_active(shard.id, true);
         self.trigger_flush(shard)
     }

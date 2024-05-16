@@ -231,7 +231,7 @@ impl kvengine::RecoverHandler for RecoverHandler {
                 } else if is_split_or_prepare_merge || admin.has_commit_merge() {
                     // We are recovering an parent shard, we need to switch the mem-table for
                     // children to copy.
-                    engine.switch_mem_table(shard, meta.base_version + ctx.exec_log_index);
+                    engine.switch_mem_table(shard, meta.base_version + ctx.exec_log_index, true);
                     // It is the last command for a parent shard, we should return here.
                     return Ok(());
                 } else {
