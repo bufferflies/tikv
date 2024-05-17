@@ -250,7 +250,7 @@ impl Engine {
                     .load_and_ingest_shard(&meta, load_table_filter)
                     .unwrap();
                 if let Some(parent) = parent_shard {
-                    shard.add_parent_mem_tbls(parent)
+                    shard.add_parent_data(parent)
                 }
                 recoverer.recover(&engine, &shard, &meta).unwrap();
                 token_tx.send(true).unwrap();

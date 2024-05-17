@@ -101,6 +101,7 @@ pub struct Shard {
 // * `is_property_need_initial_flush`
 // * `is_property_need_flush`
 // * `is_property_change_set`
+// * `PROPERTIES_COPY_FROM_PARENT_IN_RECOVERY`
 
 // Following properties are maintained by Shard, and should be flushed to
 // `ShardMeta` for persistence.
@@ -131,6 +132,10 @@ pub fn is_property_need_initial_flush(key: &str) -> bool {
 pub fn is_property_need_flush(key: &str) -> bool {
     matches!(key, TERM_KEY) || is_property_need_initial_flush(key)
 }
+
+// Properties will change in parent shard during recovery.
+// See `Shard::add_parent_data`.
+const PROPERTIES_COPY_FROM_PARENT_IN_RECOVERY: &[&str] = &[DEL_PREFIXES_KEY, TXN_FILE_REF];
 
 pub const TRIM_OVER_BOUND_ENABLE: &[u8] = &[1];
 pub const TRIM_OVER_BOUND_DISABLE: &[u8] = b"";
@@ -780,12 +785,25 @@ impl Shard {
         self.is_active() && self.get_initial_flushed()
     }
 
-    pub(crate) fn add_parent_mem_tbls(&self, parent: Arc<Shard>) {
+    pub(crate) fn add_parent_data(&self, parent: Arc<Shard>) {
         let shard_data = self.get_data();
         let parent_data = parent.get_data();
+
         let mem_tbls = self.split_mem_tables(&parent_data.mem_tbls);
         let mem_tbl_vers: Vec<u64> = mem_tbls.iter().map(|tbl| tbl.get_version()).collect();
-        info!("{} add parent mem-tables {:?}", self.tag(), mem_tbl_vers);
+
+        for prop_key in PROPERTIES_COPY_FROM_PARENT_IN_RECOVERY {
+            if let Some(val) = parent.get_property(prop_key) {
+                self.set_property(prop_key, &val);
+            }
+        }
+
+        let lock_txn_files = parent_data.lock_txn_files.clone();
+
+        info!("{} add parent data", self.tag();
+            "mem-tables" => ?mem_tbl_vers,
+            "lock_txn_files" => ?lock_txn_files.iter().map(|x| x.start_ts()).collect::<Vec<_>>(),
+            "properties" => ?self.properties.multi_get(PROPERTIES_COPY_FROM_PARENT_IN_RECOVERY));
         let new_data = ShardData::new(
             shard_data.range.clone(),
             mem_tbls,
@@ -793,7 +811,7 @@ impl Shard {
             shard_data.blob_tbl_map.clone(),
             shard_data.cfs.clone(),
             shard_data.unloaded_tbls.clone(),
-            shard_data.lock_txn_files.clone(),
+            lock_txn_files,
             shard_data.limiter.clone(),
         );
         self.set_data(new_data);
@@ -1397,6 +1415,14 @@ impl Properties {
     pub fn get(&self, key: &str) -> Option<Bytes> {
         let bin = self.m.get(key)?;
         Some(bin.value().clone())
+    }
+
+    pub fn multi_get(&self, keys: &[&str]) -> Vec<(String, Bytes)> {
+        self.m
+            .iter()
+            .filter(|x| keys.contains(&x.key().as_str()))
+            .map(|x| (x.key().clone(), x.value().clone()))
+            .collect()
     }
 
     pub fn remove(&self, key: &str) {
