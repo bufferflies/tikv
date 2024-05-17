@@ -39,7 +39,7 @@ impl Engine {
         let sequence = cs.get_sequence();
 
         let old_shard = self.get_shard_with_ver(cs.shard_id, cs.shard_ver)?;
-        self.prepare_update_shard_version(&old_shard, sequence);
+        self.prepare_update_shard_version(&old_shard, sequence, true);
 
         let mut new_shards = vec![];
         let new_shard_props = split.get_new_shards();
@@ -177,12 +177,20 @@ impl Engine {
         Ok(())
     }
 
-    pub(crate) fn prepare_update_shard_version(&self, shard: &Shard, sequence: u64) {
+    // `force_switch_mem_table` must be set `true` when & only when the shard need
+    // initial flush, i.e. during split/prepare-merge/commit-merge.
+    // See https://github.com/tidbcloud/cloud-storage-engine/issues/1557.
+    pub(crate) fn prepare_update_shard_version(
+        &self,
+        shard: &Shard,
+        sequence: u64,
+        force_switch_mem_table: bool,
+    ) {
         shard.write_sequence.store(sequence, Release);
         let version = shard.load_mem_table_version();
         // Switch the old shard mem-table, so the first mem-table is always empty.
         // ignore the read-only mem-table to be flushed. let the new shard handle it.
-        self.switch_mem_table(shard, version, true);
+        self.switch_mem_table(shard, version, force_switch_mem_table);
         self.send_flush_msg(FlushMsg::Clear(shard.id));
         self.send_compact_msg(CompactMsg::Clear(IdVer::new(shard.id, shard.ver)));
     }
@@ -258,7 +266,7 @@ impl Engine {
             ));
         }
 
-        self.prepare_update_shard_version(&old_shard, sequence);
+        self.prepare_update_shard_version(&old_shard, sequence, true);
         let mut new_shard = self.new_shard_version(&old_shard, sequence);
         // source shard may have non-empty mem-table, we need to flush them before
         // commit merge. The initial_flushed of the new shard is false, set the
@@ -271,7 +279,7 @@ impl Engine {
 
     pub fn rollback_merge(&self, shard_id: u64, shard_ver: u64, sequence: u64) {
         let old_shard = self.get_shard_with_ver(shard_id, shard_ver).unwrap();
-        self.prepare_update_shard_version(&old_shard, sequence);
+        self.prepare_update_shard_version(&old_shard, sequence, false);
         let new_shard = self.new_shard_version(&old_shard, sequence);
         // There is no write during merging state, so we can directly set
         // initial_flushed to true.
@@ -288,7 +296,7 @@ impl Engine {
         sequence: u64,
     ) -> Result<()> {
         let old_shard = self.get_shard_with_ver(shard_id, shard_ver)?;
-        self.prepare_update_shard_version(&old_shard, sequence);
+        self.prepare_update_shard_version(&old_shard, sequence, true);
         let source_snap = source.get_snapshot();
 
         let belongs_to_same_keyspace =
