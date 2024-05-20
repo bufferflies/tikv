@@ -975,8 +975,21 @@ impl ShardMeta {
         self.seq = sequence;
     }
 
-    pub fn merge_txn_file_ref(&mut self, wb_ref: &TxnFileRef, log_index: u64) -> bool {
+    pub fn merge_txn_file_ref(&mut self, wb_ref: &TxnFileRef, log_index: u64) -> bool /* modified */
+    {
         let tag = self.tag();
+
+        if log_index > 0 {
+            if self.seq >= log_index {
+                info!("{} skip stale merge txn file ref", tag;
+                    "seq" => self.seq,
+                    "log_index" => log_index,
+                    "wb_ref" => ?wb_ref);
+                return false;
+            }
+            self.seq = log_index;
+        }
+
         let modified = if wb_ref.get_user_meta().is_empty() {
             let inserted = self.txn_file_locks.insert(wb_ref.start_ts);
             debug!("{} ShardMeta merge txn file locks (insert by lock)", tag;
@@ -1005,6 +1018,7 @@ impl ShardMeta {
         }
         info!("{} ShardMeta merge txn file ref", tag;
             "wb_ref" => ?wb_ref,
+            "log_index" => log_index,
             "modified" => modified,
             "prop" => &LogValue::value(self.get_property(TXN_FILE_LOCKS).unwrap_or_default().chunk()),
             "locks" => ?self.txn_file_locks);
