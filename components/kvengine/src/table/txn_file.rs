@@ -1,8 +1,9 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{fmt, iter::Iterator as StdIterator, ops::Deref, sync::Arc};
+use std::{cmp, fmt, iter::Iterator as StdIterator, ops::Deref, sync::Arc};
 
 use bytes::{Buf, BufMut, Bytes};
+use itertools::Itertools;
 use log_wrappers::Value as LogValue;
 use moka::sync::SegmentedCache;
 use tikv_util::codec::number::NumberEncoder;
@@ -117,6 +118,10 @@ impl TxnCtx {
     pub fn upper_bound(&self) -> InnerKey<'_> {
         InnerKey::from_inner_buf(&self.upper_bound_buf)
     }
+
+    pub fn set_lock_val_prefix(&mut self, lock_val_prefix: Bytes) {
+        self.lock_val_prefix = lock_val_prefix;
+    }
 }
 
 #[derive(Clone)]
@@ -179,6 +184,10 @@ impl TxnFile {
         self.txn_ctx.lock_val_prefix.chunk()
     }
 
+    pub fn lock_val_prefix(&self) -> Bytes {
+        self.txn_ctx.lock_val_prefix.clone()
+    }
+
     pub fn get_inserts(&self) -> u32 {
         self.chunks.iter().map(|chunk| chunk.inserts).sum()
     }
@@ -193,6 +202,38 @@ impl TxnFile {
 
     pub fn biggest(&self) -> InnerKey<'_> {
         self.chunks.last().unwrap().index.biggest()
+    }
+
+    pub fn merge_chunks(lhs: &Self, rhs: &Self) -> Vec<TxnChunk> {
+        let merge_iter =
+            lhs.chunks
+                .clone()
+                .into_iter()
+                .merge_join_by(rhs.chunks.clone().into_iter(), |m, n| {
+                    if m.id() == n.id() {
+                        cmp::Ordering::Equal
+                    } else {
+                        m.get_index().smallest().cmp(&n.get_index().smallest())
+                    }
+                });
+        merge_iter
+            .into_iter()
+            .map(|x| match x {
+                itertools::EitherOrBoth::Both(x, _) => x,
+                itertools::EitherOrBoth::Left(x) => x,
+                itertools::EitherOrBoth::Right(x) => x,
+            })
+            .collect()
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        for chunks in self.chunks.windows(2) {
+            if chunks[0].index.biggest() >= chunks[1].index.smallest() {
+                error!("txn chunks overlap"; "txn_file" => ?self, "chunk0" => ?chunks[0], "chunk1" => ?chunks[1]);
+                return Err(Error::Other("txn chunks overlap".to_string()));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -235,6 +276,10 @@ impl TxnFileInner {
 
     pub fn version(&self) -> u64 {
         self.txn_ctx.version
+    }
+
+    pub fn txn_ctx(&self) -> &TxnCtx {
+        &self.txn_ctx
     }
 
     pub fn shard_ver(&self) -> u64 {

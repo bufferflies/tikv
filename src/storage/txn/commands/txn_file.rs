@@ -10,6 +10,7 @@ use kvengine::{
 };
 use kvenginepb::TxnFileRef;
 use kvproto::kvrpcpb::WriteConflictReason;
+use log_wrappers::Value as LogValue;
 use protobuf::Message;
 use tikv_kv::{Snapshot, WriteData};
 use txn_types::{Key, LockType, TimeStamp, WriteType};
@@ -263,15 +264,64 @@ impl TxnFileCommand {
         Ok(())
     }
 
+    fn try_merge_txn_file_locks(
+        &mut self,
+        snap_access: &SnapAccess,
+    ) -> crate::storage::mvcc::Result<bool /* is_existed_and_equal */> {
+        if let Some(existed) = snap_access.get_lock_txn_file(self.txn_file.start_ts()) {
+            // The only scene to merge txn file locks is region merge after parts of txn
+            // chunks have been prewrite.
+            if existed.lower_bound() < self.txn_file.lower_bound()
+                || self.txn_file.upper_bound() < existed.upper_bound()
+                || self.txn_file.id().shard_id != existed.id().shard_id
+                || self.txn_file.shard_ver() < existed.shard_ver()
+            {
+                error!("unexpected txn file locks of same transaction"; "start_ts" => self.ts(), "txn_file" => ?self.txn_file, "existed" => ?existed);
+                return Err(box_err!(
+                    "unexpected txn file locks of same transaction, start_ts: {}",
+                    self.ts()
+                ));
+            }
+
+            if self.txn_file.chunk_ids() == existed.chunk_ids() {
+                info!("txn file locks are equal"; "start_ts" => self.ts(), "txn_file" => ?self.txn_file, "existed" => ?existed);
+                return Ok(true);
+            }
+
+            let merged_chunks = TxnFile::merge_chunks(&self.txn_file, &existed);
+            let mut txn_ctx = self.txn_file.txn_ctx().clone();
+            // Use existed `lock_val_prefix` as it would be updated, e.g, by
+            // check_txn_status.
+            txn_ctx.set_lock_val_prefix(existed.lock_val_prefix());
+            let new_txn_file = TxnFile::new(self.txn_file.id(), merged_chunks, txn_ctx)?;
+            new_txn_file.validate()?;
+
+            info!("merge txn file locks"; "start_ts" => self.ts(), "req" => ?self.txn_file, "existed" => ?existed, "merged" => ?new_txn_file);
+            self.txn_file = new_txn_file;
+            self.txn_file_ref.set_chunk_ids(self.txn_file.chunk_ids());
+            self.txn_file_ref
+                .set_lock_val_prefix(self.txn_file.get_lock_val_prefix().to_vec());
+        }
+        Ok(false)
+    }
+
     fn process_prewrite(
         &mut self,
         snap_access: &SnapAccess,
     ) -> crate::storage::mvcc::Result<ProcessResult> {
-        if let Some((key, conflict_lock)) = self.get_conflict_lock(snap_access) {
+        self.txn_file.validate()?;
+        let lock_is_existed_and_equal = self.try_merge_txn_file_locks(snap_access)?;
+        if lock_is_existed_and_equal {
+            info!("process_prewrite: ignore duplicated prewrite"; "start_ts" => self.ts());
+        } else if let Some((key, conflict_lock)) = self.get_conflict_lock(snap_access) {
             if conflict_lock.ts != self.ts() {
                 return Err(ErrorInner::KeyIsLocked(conflict_lock.into_lock_info(key)).into());
             }
-            // already locked, do not modify.
+            error!("unexpected lock of same transaction"; "start_ts" => self.ts(), "conflict_lock" => ?conflict_lock, "key" => &LogValue::key(&key));
+            return Err(box_err!(
+                "unexpected lock of same transaction, start_ts: {}",
+                self.ts()
+            ));
         } else {
             if let Some(commit_ts) = self.check_txn_commit_record(snap_access)? {
                 // already committed

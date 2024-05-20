@@ -3642,6 +3642,7 @@ dependencies = [
  "hyper",
  "hyper-rustls",
  "hyper-tls",
+ "itertools",
  "kvenginepb",
  "lazy_static",
  "libc 0.2.149",

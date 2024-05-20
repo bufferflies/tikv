@@ -39,6 +39,7 @@ http = "0.2"
 hyper = "0.14"
 hyper-rustls = "0.24.2"
 hyper-tls = "0.5"
+itertools = "0.10"
 kvenginepb = { path = "../kvenginepb", default-features = false }
 lazy_static = "1.3"
 libc = "0.2"

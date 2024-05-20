@@ -1,6 +1,6 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{sync::Arc, thread, time::Duration};
+use std::{ops::Range, sync::Arc, thread, time::Duration};
 
 use anyhow::{self, bail};
 use bytes::Bytes;
@@ -895,6 +895,58 @@ fn test_txn_file_move_down() {
     client.verify_data_with_ref_store();
     cluster.stop();
     oss.shutdown();
+}
+
+#[test]
+fn test_txn_file_merge() {
+    test_util::init_log_for_test();
+
+    let cases = vec![
+        vec![1..2, 3..5, 0..1, 2..3],
+        vec![1..3, 2..4, 3..5, 0..2],
+        vec![0..5; 3],
+    ];
+
+    for ranges in cases {
+        test_txn_file_merge_impl(ranges);
+    }
+}
+
+fn test_txn_file_merge_impl(ranges: Vec<Range<usize>>) {
+    let mut cluster = ServerCluster::new(alloc_node_id_vec(3), |_, _| {});
+    cluster.wait_region_replicated(&[], 3);
+    let mut client = cluster.new_client();
+    let dfs = cluster.get_dfs().unwrap();
+    let region_id = client.get_region_id(&[]);
+    let ctx = client.new_rpc_ctx(region_id).unwrap();
+    let kv_client = client.get_kv_client(ctx.get_peer().get_store_id());
+
+    let start_ts = client.get_ts().into_inner();
+    let chunk_ids = build_txn_files(&dfs, start_ts, 0, 500);
+    assert_eq!(chunk_ids.len(), 5);
+    let primary_lock = i_to_key(0);
+
+    for range in ranges {
+        let mut req = PrewriteRequest::new();
+        req.set_context(ctx.clone());
+        req.set_txn_file_chunks(chunk_ids[range].to_vec());
+        req.set_primary_lock(primary_lock.clone());
+        req.set_lock_ttl(6000);
+        req.set_start_version(start_ts);
+        req.set_min_commit_ts(start_ts + 1);
+        kv_client.kv_prewrite(&req).unwrap();
+    }
+
+    let mut req = CommitRequest::new();
+    req.set_context(ctx);
+    req.set_start_version(start_ts);
+    req.set_is_txn_file(true);
+    let commit_ts = client.get_ts().into_inner();
+    req.set_commit_version(commit_ts);
+    kv_client.kv_commit(&req).unwrap();
+
+    verify_range(&mut client, 0, 500);
+    cluster.stop();
 }
 
 fn build_txn_files(dfs: &Arc<dyn Dfs>, start_ts: u64, start: usize, end: usize) -> Vec<u64> {

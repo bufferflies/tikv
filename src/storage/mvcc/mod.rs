@@ -333,6 +333,12 @@ impl From<::pd_client::Error> for ErrorInner {
     }
 }
 
+impl From<::kvengine::table::Error> for ErrorInner {
+    fn from(err: ::kvengine::table::Error) -> Self {
+        box_err!("KvEngine({})", err)
+    }
+}
+
 impl From<txn_types::Error> for ErrorInner {
     fn from(err: txn_types::Error) -> Self {
         match err {

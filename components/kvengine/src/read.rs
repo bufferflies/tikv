@@ -356,7 +356,7 @@ impl SnapAccessCore {
             read_ts,
             key,
             val: table::Value::new(),
-            inner: self.new_table_iterator(cf, reversed, fill_cache),
+            inner: self.new_table_iterator(cf, reversed, fill_cache, None),
             blob_prefetcher: None,
             data,
             range: None,
@@ -384,7 +384,7 @@ impl SnapAccessCore {
             read_ts: self.get_read_ts(cf, read_ts),
             key,
             val: table::Value::new(),
-            inner: self.new_table_iterator(cf, reversed, fill_cache),
+            inner: self.new_table_iterator(cf, reversed, fill_cache, None),
             blob_prefetcher,
             data,
             range: None,
@@ -558,10 +558,16 @@ impl SnapAccessCore {
         cf: usize,
         reversed: bool,
         fill_cache: bool,
+        skip_txn_file_with_start_ts: Option<u64>,
     ) -> Box<dyn table::Iterator> {
         let mut iters: Vec<Box<dyn table::Iterator>> = Vec::new();
         if cf == LOCK_CF && !self.data.lock_txn_files.is_empty() {
             for txn_file in &self.data.lock_txn_files {
+                if skip_txn_file_with_start_ts
+                    .map_or(false, |start_ts| txn_file.start_ts() == start_ts)
+                {
+                    continue;
+                }
                 let txn_file_iter = TxnFileIterator::new(txn_file.clone(), reversed);
                 let skip_op_iter = SkipOpTxnFileIterator::new(txn_file_iter, false, true);
                 iters.push(Box::new(skip_op_iter))
@@ -981,7 +987,8 @@ impl SnapAccessCore {
         if txn_file.is_empty() {
             return None;
         }
-        let mut lock_iter = self.new_table_iterator(LOCK_CF, false, true);
+        let mut lock_iter =
+            self.new_table_iterator(LOCK_CF, false, true, Some(txn_file.start_ts()));
         self.seek_txn_file(&mut lock_iter, txn_file);
         let mut upper_bound_buf = vec![];
         let upper_bound = self.get_upper_bound(&mut upper_bound_buf, txn_file);
