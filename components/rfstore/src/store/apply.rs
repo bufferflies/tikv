@@ -16,9 +16,10 @@ use bytes::{Buf, Bytes};
 use cloud_encryption::EncryptionKey;
 use fail::fail_point;
 use kvengine::{
-    encode_extra_txn_status_key, get_shard_property, mvcc, util::PropertiesHelper, ChangeSet,
-    Engine, SnapAccess, UserMeta, ENCRYPTION_KEY, EXTRA_CF, LOCK_CF, MANUAL_MAJOR_COMPACTION,
-    MANUAL_MAJOR_COMPACTION_ENABLE, TRIM_OVER_BOUND, TRIM_OVER_BOUND_ENABLE, TXN_FILE_REF,
+    encode_extra_txn_status_key, get_shard_property, mvcc, table::InnerKey, util::PropertiesHelper,
+    ChangeSet, Engine, SnapAccess, UserMeta, ENCRYPTION_KEY, EXTRA_CF, LOCK_CF,
+    MANUAL_MAJOR_COMPACTION, MANUAL_MAJOR_COMPACTION_ENABLE, TRIM_OVER_BOUND,
+    TRIM_OVER_BOUND_ENABLE, TXN_FILE_REF,
 };
 use kvenginepb::{TxnFileRef, TxnFileRefs};
 use kvproto::{
@@ -522,9 +523,11 @@ impl Applier {
             let lock_txn_file = lock_txn_file_opt.unwrap();
             let lock = txn_types::Lock::parse(lock_txn_file.get_lock_val_prefix()).unwrap();
             let primary_key = lock.primary.as_slice();
-            let is_primary_region =
-                snap.get_start_key() <= primary_key && primary_key < snap.get_end_key();
-            if is_primary_region {
+            let inner_primary_key =
+                InnerKey::from_outer_key(primary_key, snap.get_inner_key_offset());
+            let is_primary = lock_txn_file.lower_bound() <= inner_primary_key
+                && inner_primary_key < lock_txn_file.upper_bound();
+            if is_primary {
                 if txn_file_um.is_rollback() {
                     let rollback_key = encode_extra_txn_status_key(primary_key, start_ts);
                     let user_meta = UserMeta::new(start_ts, 0).to_array();

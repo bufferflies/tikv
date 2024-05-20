@@ -653,6 +653,10 @@ impl SnapAccessCore {
         self.data.outer_end.clone()
     }
 
+    pub fn get_inner_key_offset(&self) -> usize {
+        self.data.range.inner_key_off
+    }
+
     pub fn get_tag(&self) -> ShardTag {
         self.tag
     }
