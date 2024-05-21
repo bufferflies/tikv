@@ -1229,7 +1229,7 @@ impl Iterator {
             // always seek if not reset monotonic range.
             if self.reversed {
                 self.inner.seek(inner_upper_bound);
-                if self.inner.key() == inner_upper_bound {
+                if self.inner.valid() && self.inner.key() == inner_upper_bound {
                     self.inner.next();
                 }
             } else {
