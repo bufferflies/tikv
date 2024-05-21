@@ -33,6 +33,12 @@ const TIMESTAMP_FORMAT: &str = "%Y/%m/%d %H:%M:%S%.3f %:z";
 
 static LOG_LEVEL: AtomicUsize = AtomicUsize::new(usize::max_value());
 
+#[cfg(feature = "env-logger")]
+pub type LevelFilter<D> = slog_envlogger::EnvLogger<D>;
+
+#[cfg(not(feature = "env-logger"))]
+pub type LevelFilter<D> = GlobalLevelFilter<D>;
+
 pub fn init_log<D>(
     drain: D,
     level: Level,
@@ -83,8 +89,7 @@ where
             threshold: slow_threshold,
             inner: drain,
         };
-        let filtered = GlobalLevelFilter::new(drain.filter(filter).fuse());
-
+        let filtered = LevelFilter::new(drain.filter(filter).fuse());
         (slog::Logger::root(filtered, slog_o!()), Some(guard))
     } else {
         let drain = LogAndFuse(Mutex::new(drain));
@@ -92,7 +97,7 @@ where
             threshold: slow_threshold,
             inner: drain,
         };
-        let filtered = GlobalLevelFilter::new(drain.filter(filter).fuse());
+        let filtered = LevelFilter::new(drain.filter(filter).fuse());
         (slog::Logger::root(filtered, slog_o!()), None)
     };
 

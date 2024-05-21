@@ -33,6 +33,11 @@ cloud-storage-grpc = ["sst_importer/cloud-storage-grpc"]
 cloud-storage-dylib = ["sst_importer/cloud-storage-dylib"]
 pprof-fp = ["pprof/frame-pointer"]
 
+# Usage: set environment variable RUST_LOG (e.g, export RUST_LOG="info,raft=debug")
+# Ref: https://docs.rs/env_logger/latest/env_logger/#enabling-logging
+# Note: there is more overhead. Use for debugging only.
+env-logger = ["tikv_util/env-logger"]
+
 # for testing configure propegate to other crates
 # https://stackoverflow.com/questions/41700543/can-we-share-test-utilites-between-crates
 testing = []

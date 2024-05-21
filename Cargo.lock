@@ -139,6 +139,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dabe5a181f83789739c194cbe5a897dde195078fac08568d09221fd6137a7ba8"
 
 [[package]]
+name = "arc-swap"
+version = "1.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69f7f8c3906b62b754cd5326047894316021dcfe5a194c8ea52bdd94934a3457"
+
+[[package]]
 name = "arrayvec"
 version = "0.4.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7050,11 +7056,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "slog-envlogger"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "906a1a0bc43fed692df4b82a5e2fbfc3733db8dad8bb514ab27a4f23ad04f5c0"
+dependencies = [
+ "log",
+ "regex",
+ "slog",
+ "slog-async",
+ "slog-scope",
+ "slog-stdlog",
+ "slog-term",
+]
+
+[[package]]
 name = "slog-global"
 version = "0.1.0"
 source = "git+https://github.com/breeswish/slog-global.git?rev=d592f88e4dbba5eb439998463054f1a44fbf17b9#d592f88e4dbba5eb439998463054f1a44fbf17b9"
 dependencies = [
- "arc-swap",
+ "arc-swap 0.4.8",
  "lazy_static",
  "log",
  "slog",
@@ -7070,6 +7091,28 @@ dependencies = [
  "serde",
  "serde_json",
  "slog",
+]
+
+[[package]]
+name = "slog-scope"
+version = "4.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2f95a4b4c3274cd2869549da82b57ccc930859bdbf5bcea0424bc5f140b3c786"
+dependencies = [
+ "arc-swap 1.7.1",
+ "lazy_static",
+ "slog",
+]
+
+[[package]]
+name = "slog-stdlog"
+version = "4.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6706b2ace5bbae7291d3f8d2473e2bfab073ccd7d03670946197aec98471fa3e"
+dependencies = [
+ "log",
+ "slog",
+ "slog-scope",
 ]
 
 [[package]]
@@ -8572,6 +8615,7 @@ dependencies = [
  "serde_json",
  "slog",
  "slog-async",
+ "slog-envlogger",
  "slog-global",
  "slog-json",
  "slog-term",
