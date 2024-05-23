@@ -428,7 +428,10 @@ impl RfEngineCore {
     pub fn add_dependent(&self, region_id: u64, dependent_id: u64) {
         let hs_ref = self.dependants.entry(region_id).or_default();
         let mut hs = hs_ref.write().unwrap();
-        hs.insert(dependent_id);
+        let newly_inserted = hs.insert(dependent_id);
+        if !newly_inserted {
+            return;
+        }
         let len = hs.len();
         drop(hs);
         drop(hs_ref);

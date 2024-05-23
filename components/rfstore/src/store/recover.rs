@@ -16,7 +16,7 @@ use protobuf::Message;
 use raft_proto::eraftpb;
 use raftstore::store::metrics::BLACKLIST_REGION_GAUGE;
 use rfengine::{
-    load_store_ident, raft_state_key, region_state_key, RfEngine, WriteBatch, KV_ENGINE_META_KEY,
+    load_store_ident, raft_state_key, region_state_key, WriteBatch, KV_ENGINE_META_KEY,
     TRUNCATE_ALL_INDEX,
 };
 use slog_global::info;
@@ -284,29 +284,38 @@ fn prepare_txn_file_ref(
     manager.prepare_txn_chunks(&txn_file_ref.chunk_ids)
 }
 
+struct PeerToDestroy {
+    region_local_state: RegionLocalState,
+    region_id: u64,
+    peer_id: u64,
+    shard_ver: u64,
+    parent_id: Option<u64>,
+}
+
 impl kvengine::MetaIterator for RecoverHandler {
     fn iterate<F>(&mut self, mut f: F) -> kvengine::Result<()>
     where
         F: FnMut(ChangeSet),
     {
+        let store_id = self.engine_id();
         let mut wb = WriteBatch::new();
         let region_to_peers = self.rf_engine.get_region_peer_map();
-        let destroy_peer = |rf: &RfEngine,
-                            mut region_local_state: RegionLocalState,
-                            wb: &mut WriteBatch,
-                            region_id,
-                            peer_id,
-                            shard_ver| {
-            rf.iterate_peer_states(peer_id, false, |k, _| {
-                wb.set_state(peer_id, region_id, k, &[]);
+
+        let mut peers_to_destroy = vec![];
+        let mut region_ids_to_destroy = HashSet::default();
+        let mut destroy_peer = |region_local_state, region_id, peer_id, shard_ver, parent_id| {
+            peers_to_destroy.push(PeerToDestroy {
+                region_local_state,
+                region_id,
+                peer_id,
+                shard_ver,
+                parent_id,
             });
-            region_local_state.state = raft_serverpb::PeerState::Tombstone;
-            let region_state_val = region_local_state.write_to_bytes().unwrap();
-            let region_state_key = region_state_key(shard_ver);
-            wb.set_state(peer_id, region_id, &region_state_key, &region_state_val);
-            wb.truncate_raft_log(peer_id, region_id, TRUNCATE_ALL_INDEX);
+            region_ids_to_destroy.insert(region_id);
         };
+
         for (region_id, peer_id) in region_to_peers {
+            tikv_util::set_current_region(region_id);
             if let Some(val) = self.rf_engine.get_state(peer_id, KV_ENGINE_META_KEY) {
                 let mut cs = kvenginepb::ChangeSet::new();
                 if let Err(e) = cs.merge_from_bytes(&val) {
@@ -314,10 +323,8 @@ impl kvengine::MetaIterator for RecoverHandler {
                 }
                 assert_eq!(region_id, cs.shard_id);
 
-                let store_id = self.engine_id();
                 let region_local_state = load_region_state(&self.rf_engine, peer_id, cs.shard_ver)
                     .unwrap_or_else(|| {
-                        tikv_util::set_current_region(region_id);
                         panic!(
                             "{}:{}:{} failed to get region state, state key {:?}",
                             store_id,
@@ -326,6 +333,12 @@ impl kvengine::MetaIterator for RecoverHandler {
                             region_state_key(cs.shard_ver),
                         );
                     });
+
+                let parent_id = cs.has_parent().then(|| {
+                    let parent = cs.get_parent();
+                    self.rf_engine.add_dependent(parent.shard_id, region_id);
+                    parent.shard_id
+                });
 
                 // Check if the store exists in the region peers. The peer may be already
                 // removed in region local state, but not destroyed yet. It's safe to destroy
@@ -342,32 +355,24 @@ impl kvengine::MetaIterator for RecoverHandler {
                         region_local_state.get_region()
                     );
                     destroy_peer(
-                        &self.rf_engine,
                         region_local_state,
-                        &mut wb,
                         region_id,
                         peer_id,
                         cs.shard_ver,
+                        parent_id,
                     );
-                    info!("destroy stale region {}", region_id);
                     continue;
                 }
                 if let Some(contained_region_ids) = self.contained_region_ids.as_mut() {
                     if !contained_region_ids.contains(&region_id) {
                         warn!("region {} removed by pd", region_id);
-                        self.rf_engine.iterate_peer_states(peer_id, false, |k, _| {
-                            wb.set_state(peer_id, region_id, k, &[]);
-                        });
-
                         destroy_peer(
-                            &self.rf_engine,
                             region_local_state,
-                            &mut wb,
                             region_id,
                             peer_id,
                             cs.shard_ver,
+                            parent_id,
                         );
-                        info!("destroy removed region {}", region_id);
                         continue;
                     }
                 }
@@ -395,6 +400,44 @@ impl kvengine::MetaIterator for RecoverHandler {
                 f(cs);
             }
         }
+
+        for mut peer in peers_to_destroy {
+            let mut has_dependent = false;
+            self.rf_engine
+                .with_dependents(peer.region_id, |dependents| {
+                    has_dependent = dependents
+                        .iter()
+                        .any(|dependent_id| !region_ids_to_destroy.contains(dependent_id));
+                });
+            if has_dependent {
+                continue;
+            }
+
+            self.rf_engine
+                .iterate_peer_states(peer.peer_id, false, |k, _| {
+                    wb.set_state(peer.peer_id, peer.region_id, k, &[]);
+                });
+            peer.region_local_state.state = raft_serverpb::PeerState::Tombstone;
+            let region_state_val = peer.region_local_state.write_to_bytes().unwrap();
+            let region_state_key = region_state_key(peer.shard_ver);
+            wb.set_state(
+                peer.peer_id,
+                peer.region_id,
+                &region_state_key,
+                &region_state_val,
+            );
+            wb.truncate_raft_log(peer.peer_id, peer.region_id, TRUNCATE_ALL_INDEX);
+            if let Some(&parent_id) = peer.parent_id.as_ref() {
+                self.rf_engine.remove_dependent(parent_id, peer.region_id);
+            }
+            info!(
+                "{}:{}:{} destroy stale/removed peer",
+                store_id, peer.region_id, peer.shard_ver;
+                "peer_id" => peer.peer_id,
+                "parent_id" => peer.parent_id,
+            );
+        }
+
         if !wb.is_empty() {
             self.rf_engine.write(wb).unwrap();
         }
