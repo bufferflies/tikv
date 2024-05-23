@@ -5,6 +5,7 @@ mod test_drop_table;
 mod test_load_data;
 mod test_native_br;
 mod test_tidb;
+mod test_txn_file;
 
 use std::{
     str::FromStr,
@@ -50,6 +51,7 @@ pub(crate) type Result<T> = std::result::Result<T, Error>;
 
 lazy_static::lazy_static! {
     pub static ref WRITE_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    pub static ref TXN_FILE_WRITE_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref MOVE_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref MERGE_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref TRANSFER_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -68,7 +70,8 @@ lazy_static::lazy_static! {
 }
 
 pub const TIMEOUT: Duration = Duration::from_secs(90);
-pub const CONCURRENCY: usize = 4;
+pub const WRITE_CONCURRENCY: usize = 4;
+pub const TXN_FILE_WRITE_CONCURRENCY: usize = 2;
 
 const DEFAULT_INNER_KEY_OFFSET: usize = 4;
 const REQUEST_MAJOR_COMPACT_ON_STORE_TIMEOUT: Duration = Duration::from_secs(20);

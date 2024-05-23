@@ -1760,6 +1760,10 @@ impl ClusterClient {
         self.ref_store.clone()
     }
 
+    pub fn replace_ref_store(&mut self, ref_store: Arc<Mutex<RefStore>>) -> Arc<Mutex<RefStore>> {
+        std::mem::replace(&mut self.ref_store, ref_store)
+    }
+
     pub fn ref_store_contains_key(&self, key: &[u8]) -> bool {
         self.ref_store.lock().unwrap().contains_key(key)
     }

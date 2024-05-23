@@ -7948,6 +7948,7 @@ dependencies = [
  "cdc",
  "chrono",
  "cloud_encryption",
+ "cloud_worker",
  "codec",
  "collections",
  "concurrency_manager",

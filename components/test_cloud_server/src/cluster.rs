@@ -687,8 +687,11 @@ impl ServerCluster {
         );
     }
 
-    fn tikv_worker_addr(idx: u16) -> String {
-        format!("127.0.0.1:{}", 19000 + idx)
+    pub fn tikv_worker_endpoints(&self) -> Vec<String> {
+        self.tikv_workers
+            .keys()
+            .map(|&idx| tikv_worker_addr(idx))
+            .collect()
     }
 
     pub fn start_tikv_workers(&mut self, workers_cnt: usize, threads_cnt: usize, register: bool) {
@@ -700,7 +703,7 @@ impl ServerCluster {
         for _ in 0..workers_cnt {
             let idx = TIKV_WORKER_IDX_ALLOCATOR.fetch_add(1, Relaxed);
             let tikv_worker_conf = cloud_worker::Config {
-                addr: Self::tikv_worker_addr(idx),
+                addr: tikv_worker_addr(idx),
                 cop_addr: "".to_string(),
                 pd: pd_client::Config::new(self.pd_endpoints().to_vec()),
                 security: tikv_config.security.clone(),
@@ -724,11 +727,7 @@ impl ServerCluster {
         if self.tikv_workers.is_empty() {
             None
         } else {
-            let endpoints = self
-                .tikv_workers
-                .keys()
-                .map(|&idx| Self::tikv_worker_addr(idx))
-                .collect::<Vec<_>>();
+            let endpoints = self.tikv_worker_endpoints();
             let helper =
                 TxnFileHelper::new(max_chunk_size, endpoints, self.security_mgr.clone()).unwrap();
             Some(Arc::new(helper))
@@ -814,6 +813,10 @@ fn node_addr(node_id: u16) -> String {
 // TODO: Remove this work around.
 fn node_status_addr(node_id: u16) -> String {
     format!("127.0.0.1:{}", node_id + 25000)
+}
+
+fn tikv_worker_addr(idx: u16) -> String {
+    format!("127.0.0.1:{}", 19000 + idx)
 }
 
 pub fn put_mut(key: &str, val: &str) -> Mutation {

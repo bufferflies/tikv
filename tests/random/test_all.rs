@@ -18,7 +18,10 @@ use native_br::{backup, backup_worker, restore::RestoreConfig};
 use pd_client::PdClient;
 use rand::{seq::IteratorRandom, Rng};
 use security::SecurityConfig;
-use test_cloud_server::{oss::prepare_dfs, tidb::TidbCluster, try_wait_result, ServerCluster};
+use test_cloud_server::{
+    client::ClusterClientOptions, oss::prepare_dfs, tidb::TidbCluster, try_wait_result,
+    ServerCluster,
+};
 use test_pd_client::{PdClientExt, PdWrapper};
 use tikv_util::{
     config::{ReadableDuration, ReadableSize},
@@ -28,13 +31,19 @@ use tikv_util::{
 };
 use txn_types::Key;
 
-use crate::{test_drop_table::*, test_load_data::*, test_native_br::*, TikvConfig, *};
+use crate::{
+    test_drop_table::*, test_load_data::*, test_native_br::*, test_txn_file::*, TikvConfig, *,
+};
 
 const INITIAL_KEYSPACE_COUNT: usize = 10;
 const BIG_REGION_SIZE_KEYSPACE_COUNT: usize = 2;
 const BIG_REGION_SIZE_FACTOR_OPTIONS: &[f64] = &[2.0, 3.0, 4.0];
 const INITIAL_TABLE_COUNT: usize = 3;
+
 const NODES_COUNT: usize = 4;
+const TIKV_WORKERS_COUNT: usize = 2;
+const TIKV_WORKERS_THREADS_COUNT: usize = 2;
+
 const RESTORE_CONCURRENCY: usize = 2;
 const LOAD_DATA_CONCURRENCY: usize = 2;
 // `INSTANT_BACKUP_INTERVAL` is more than 1 second as the incremental backup
@@ -181,10 +190,24 @@ fn test_random_all() {
             TIMEOUT,
         ));
     }
-    for idx in 0..CONCURRENCY {
+
+    // Write workloads:
+    for idx in 0..WRITE_CONCURRENCY {
         async_handles.push(spawn_keyspace_write(
             idx,
             runtime.block_on(cluster.new_keyspace_client()),
+            TIMEOUT,
+        ));
+    }
+    for i in 0..TXN_FILE_WRITE_CONCURRENCY {
+        handles.push(spawn_txn_file_write(
+            WRITE_CONCURRENCY,
+            i,
+            cluster.new_client_opt(ClusterClientOptions {
+                txn_file_max_chunk_size: Some(TXN_CHUNK_MAX_SIZE),
+                ..Default::default()
+            }),
+            keyspace_manager.clone(),
             TIMEOUT,
         ));
     }
@@ -235,6 +258,7 @@ fn test_random_all() {
 
     // Statistics.
     let total_write_count = WRITE_COUNTER.load(Ordering::SeqCst);
+    let total_txn_file_write_count = TXN_FILE_WRITE_COUNTER.load(Ordering::SeqCst);
     let total_keyspace_count = KEYSPACE_COUNTER.load(Ordering::SeqCst);
     let total_table_count = TABLE_COUNTER.load(Ordering::SeqCst);
     let total_drop_table_count = DROP_TABLE_COUNTER.load(Ordering::SeqCst);
@@ -251,8 +275,9 @@ fn test_random_all() {
     let total_gc_resolved_locks = GC_ADVANCE_SAFE_POINT_COUNTER.load(Ordering::SeqCst);
     let region_number = pd_client.get_regions_number();
     info!(
-        "TEST SUCCEED: write {}, keyspace {}, table {}, drop table {}, region {}, merge {}, move {}, transfer {}, node restart {}, backup {}, backup_tolerated_err {}, restore {}, restore_tolerated_err {}, load_data {}, manual_major_compact {}, verified_records {}, gc {}",
+        "TEST SUCCEED: write {}, txn file write {}, keyspace {}, table {}, drop table {}, region {}, merge {}, move {}, transfer {}, node restart {}, backup {}, backup_tolerated_err {}, restore {}, restore_tolerated_err {}, load_data {}, manual_major_compact {}, verified_records {}, gc {}",
         total_write_count,
+        total_txn_file_write_count,
         total_keyspace_count,
         total_table_count,
         total_drop_table_count,
@@ -322,7 +347,8 @@ fn prepare_cluster(
         conf.storage.flow_control.enable = true;
     };
     let pd_wrapper = PdWrapper::new_test(1, security_conf, None);
-    let cluster = ServerCluster::new_opt(nodes, update_conf_fn, pd_wrapper);
+    let mut cluster = ServerCluster::new_opt(nodes, update_conf_fn, pd_wrapper);
+    cluster.start_tikv_workers(TIKV_WORKERS_COUNT, TIKV_WORKERS_THREADS_COUNT, true);
     cluster.wait_region_replicated(&[], 3);
     let pd_client = cluster.get_pd_client();
     pd_client.disable_default_operator();
