@@ -366,18 +366,23 @@ impl TxnStatus {
         pk_lock: &Lock,
         reader_cache: &mut HashMap<u64, CloudReader>,
     ) -> Result<u64 /* commit_id */> {
+        let mut commit_ts = pk_lock.min_commit_ts;
         for key in &pk_lock.secondaries {
             let cloud_reader = self.load_cloud_reader_by_key(key, pk_lock, reader_cache)?;
             let key = Key::from_raw(key);
             match cloud_reader.load_lock(&key).unwrap() {
-                Some(lock) if lock.ts == pk_lock.ts => {}
+                Some(lock) if lock.ts == pk_lock.ts => {
+                    if commit_ts < lock.min_commit_ts {
+                        commit_ts = lock.min_commit_ts;
+                    }
+                }
                 _ => {
                     return Self::get_txn_status_from_cloud_reader(cloud_reader, &key, pk_lock.ts);
                 }
             }
         }
         // All locks found, use min_commit_ts as commit_ts.
-        Ok(pk_lock.min_commit_ts.into_inner())
+        Ok(commit_ts.into_inner())
     }
 
     fn get_shard_by_key(&self, key: &[u8]) -> Option<u64 /* shard_id */> {
