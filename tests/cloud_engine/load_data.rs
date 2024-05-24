@@ -205,7 +205,7 @@ fn impl_test_load_data(enable_inner_key_off: bool) {
     let verified_count = client
         .verify_data_with_given_ref_store(&ref_store, None, &RequestOptions::default())
         .expect("verify_data_with_given_ref_store");
-    assert_eq!(verified_count, DATA_COUNT);
+    assert_eq!(verified_count, (DATA_COUNT, 0));
 
     // Verify that a `table create` contains only one table id
     verify_table_creates(&cluster, enable_inner_key_off);
@@ -317,7 +317,7 @@ fn test_load_data_overlap() {
     let verified_count = client
         .verify_data_with_given_ref_store(&ref_store0, None, &RequestOptions::default())
         .expect("verify_data_with_given_ref_store");
-    assert_eq!(verified_count, DATA_COUNT);
+    assert_eq!(verified_count, (DATA_COUNT, 0));
 
     // Ingest overlap data.
     let err = do_load_data().unwrap_err();
@@ -327,7 +327,7 @@ fn test_load_data_overlap() {
     let verified_count = client
         .verify_data_with_given_ref_store(&ref_store0, None, &RequestOptions::default())
         .expect("verify_data_with_given_ref_store");
-    assert_eq!(verified_count, DATA_COUNT);
+    assert_eq!(verified_count, (DATA_COUNT, 0));
 
     cluster.stop();
 }

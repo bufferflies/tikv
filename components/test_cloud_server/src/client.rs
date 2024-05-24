@@ -1708,8 +1708,8 @@ impl ClusterClient {
         ref_store: &RefStore,
         range: Option<(&[u8], &[u8])>,
         options: &RequestOptions,
-    ) -> Result<usize> {
-        let mut cnt = 0;
+    ) -> Result<(usize, usize)> {
+        let mut existed_cnt = 0;
         let mut deleted_cnt = 0;
         let start_time = Instant::now();
         for (k, v) in ref_store.iter() {
@@ -1720,18 +1720,18 @@ impl ClusterClient {
             }
             self.verify_key_value(k, v.as_ref(), start_time, options)?;
             if v.is_some() {
-                cnt += 1;
+                existed_cnt += 1;
             } else {
                 deleted_cnt += 1;
             }
         }
         info!(
             "verify_data_with_given_ref_store: verified keys: {}/{} (existed/deleted), takes {:?}",
-            cnt,
+            existed_cnt,
             deleted_cnt,
             start_time.saturating_elapsed()
         );
-        Ok(cnt)
+        Ok((existed_cnt, deleted_cnt))
     }
 
     pub fn verify_key_value<T: AsRef<[u8]> + ?Sized>(

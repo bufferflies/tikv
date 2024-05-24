@@ -23,12 +23,16 @@ use native_br::{
 };
 use pd_client::PdClient;
 use rand::{seq::SliceRandom, Rng};
+use security::SecurityConfig;
 use test_cloud_server::{
-    client::{CommitAction, MutateOptions, RequestOptions, RequestPeerRole},
+    client::{
+        ClusterClientOptions, CommitAction, MutateOptions, RequestOptions, RequestPeerRole,
+        TxnWriteMethod,
+    },
     oss::prepare_dfs,
     try_wait, ServerCluster,
 };
-use test_pd_client::TestPdClient;
+use test_pd_client::{PdWrapper, TestPdClient};
 use tikv::config::TikvConfig;
 use tikv_util::{
     codec::bytes::encode_bytes,
@@ -517,7 +521,7 @@ fn test_restore_keyspace_impl(
             .unwrap();
         step!(
             "verify (pitr on restored data) done, kv count: {}",
-            verify_res
+            verify_res.0
         );
     }
 
@@ -817,8 +821,10 @@ fn test_restore_keyspace_with_resolve_locks(async_commit: bool) {
     ));
     let reporter = Arc::new(DummyStepReporter::default());
     let runtime = Runtime::new().unwrap();
+    let _enter = runtime.enter();
 
-    let mut cluster = ServerCluster::new(
+    let pd_wrapper = PdWrapper::new_test(1, &SecurityConfig::default(), None);
+    let mut cluster = ServerCluster::new_opt(
         alloc_node_id_vec(NODES_COUNT),
         |_, conf: &mut TikvConfig| {
             conf.dfs = dfs_config.clone();
@@ -831,10 +837,15 @@ fn test_restore_keyspace_with_resolve_locks(async_commit: bool) {
             conf.rfengine.wal_chunk_target_file_size = ReadableSize::kb(128);
             conf.enable_inner_key_offset = true;
         },
+        pd_wrapper,
     );
+    cluster.start_tikv_workers(1, 2, false);
     cluster.wait_region_replicated(&[], 3);
     let pd_client = cluster.get_pd_client();
-    let mut client = cluster.new_client();
+    let mut client = cluster.new_client_opt(ClusterClientOptions {
+        txn_file_max_chunk_size: Some(1024),
+        ..Default::default()
+    });
     if async_commit {
         client.set_async_commit();
     }
@@ -843,7 +854,7 @@ fn test_restore_keyspace_with_resolve_locks(async_commit: bool) {
 
     // Import data
     let i_to_key = gen_keyspace_key(KEYSPACE_ID);
-    client.put_kv(0..100, &i_to_key, i_to_val(BASIC_DATA_LEN));
+    client.put_kv(0..200, &i_to_key, i_to_val(BASIC_DATA_LEN));
     // Delete data without committing secondary keys, to simulate the case that if
     // we don't resolve locks during restoration, the secondary keys will be rolled
     // back unexpectedly after deletion of primary key is compacted.
@@ -864,7 +875,6 @@ fn test_restore_keyspace_with_resolve_locks(async_commit: bool) {
             )
             .unwrap();
     }
-    let origin_ref_store = client.dump_ref_store();
 
     // Wait for data of WRITE_CF being compacted to L1+, and trigger
     // `kvengine::Engine::load_unloaded_tables`.
@@ -876,6 +886,44 @@ fn test_restore_keyspace_with_resolve_locks(async_commit: bool) {
         |stats| stats.cfs[WRITE_CF].levels.iter().any(|l| l.num_tables > 0),
         Duration::from_secs(10),
     );
+
+    // Import data by txn file
+    // Note that txn file does not support async commit.
+    {
+        for i in [125, 150, 220] {
+            // Split region to make secondary batches of txn chunks.
+            client.split(&i_to_key(i));
+        }
+        let options = if async_commit {
+            MutateOptions {
+                commit_action: CommitAction::AsyncCommit(Duration::MAX),
+                write_method: TxnWriteMethod::Normal,
+            }
+        } else {
+            MutateOptions {
+                commit_action: CommitAction::AsyncCommitSecondaryKeys(Duration::MAX),
+                write_method: TxnWriteMethod::FileBased,
+            }
+        };
+        client.try_del_kv(100..200, &i_to_key, options).unwrap();
+
+        // Test rollback of txn file locks.
+        if !async_commit {
+            client
+                .try_put_kv(
+                    200..300,
+                    &i_to_key,
+                    i_to_val(IMPORT_DATA_LEN),
+                    MutateOptions {
+                        commit_action: CommitAction::NoCommit,
+                        write_method: TxnWriteMethod::FileBased,
+                    },
+                )
+                .unwrap();
+        }
+    }
+
+    let origin_ref_store = client.dump_ref_store();
 
     // Perform backup.
     let snapshot_backup_name = generate_backup_name();
@@ -931,9 +979,10 @@ fn test_restore_keyspace_with_resolve_locks(async_commit: bool) {
     std::thread::sleep(Duration::from_secs(10));
 
     // Verify restored data.
-    client
+    let verified_cnt = client
         .verify_data_with_given_ref_store(&origin_ref_store, None, &RequestOptions::default())
         .unwrap();
+    assert_eq!(verified_cnt, (0, 200));
 
     cluster.stop();
     oss.shutdown();

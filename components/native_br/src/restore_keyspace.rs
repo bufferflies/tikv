@@ -301,8 +301,9 @@ pub fn restore_keyspace(
     let resolved_locks = runtime.block_on(lock_resolver.resolve_locks())?;
     cluster.add_shards_need_flush(&resolved_locks.resolved_shards);
     step!(
-        "Keyspace {keyspace_tag} resolve {} locks of shards {:?}",
-        resolved_locks.total_locks_cnt,
+        "Keyspace {keyspace_tag} resolve {} locks / {} lock_txn_files of shards {:?}",
+        resolved_locks.total_normal_locks_cnt,
+        resolved_locks.total_lock_txn_files_cnt,
         resolved_locks.resolved_shards
     );
 

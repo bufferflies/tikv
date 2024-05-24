@@ -456,7 +456,7 @@ impl kvengine::MetaIterator for RecoverHandler {
 pub fn apply_custom_log_in_recover(
     engine: &Engine,
     store_id: u64,
-    shard: &Arc<Shard>,
+    shard: &Shard,
     region_meta: metapb::Region,
     custom_req: CustomRequest,
 ) -> crate::errors::Result<()> {

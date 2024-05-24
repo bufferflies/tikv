@@ -231,7 +231,7 @@ fn test_txn_file_basic_impl(
             if cnt != expected {
                 bail!("txn client verify data failed, expect {expected}, got {cnt}");
             }
-            let cnt = client
+            let (cnt, _) = client
                 .verify_data_with_given_ref_store(&ref_store, range, &RequestOptions::default())
                 .unwrap();
             if cnt != expected {

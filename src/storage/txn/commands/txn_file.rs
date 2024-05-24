@@ -85,6 +85,7 @@ impl TxnFileCommand {
         txn_file_ref
     }
 
+    // Note: modify native_br::lock::LockResolver accordingly if here is changed.
     fn build_commit_txn_file_ref(req: &Commit, snap: &SnapAccess) -> TxnFileRef {
         let mut txn_file_ref = TxnFileRef::new();
         let user_meta = UserMeta::new(req.lock_ts.into_inner(), req.commit_ts.into_inner());
@@ -95,6 +96,7 @@ impl TxnFileCommand {
         txn_file_ref
     }
 
+    // Note: modify native_br::lock::LockResolver accordingly if here is changed.
     fn build_rollback_txn_file_ref(req: &Rollback, snap: &SnapAccess) -> TxnFileRef {
         let mut txn_file_ref = TxnFileRef::new();
         let user_meta = UserMeta::new(req.start_ts.into_inner(), 0);

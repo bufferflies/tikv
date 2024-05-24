@@ -8,7 +8,7 @@ use std::{
 
 use cloud_server::modifies_to_requests;
 use dashmap::DashMap;
-use kvengine::Shard;
+use kvengine::{Shard, UserMeta};
 use kvproto::kvrpcpb;
 use tikv::storage::{
     kv::WriteData,
@@ -43,8 +43,9 @@ pub struct LockResolver {
 
 #[derive(Debug)]
 pub struct ResolvedLocks {
-    pub total_locks_cnt: usize,
-    pub resolved_shards: Vec<u64>, // The shards that have locks which are resolved.
+    pub total_normal_locks_cnt: usize,
+    pub total_lock_txn_files_cnt: usize, // Number of lock txn files resolved.
+    pub resolved_shards: Vec<u64>,       // The shards that have locks which are resolved.
 }
 
 impl LockResolver {
@@ -75,7 +76,8 @@ impl LockResolver {
 
     pub async fn resolve_locks(&self) -> Result<ResolvedLocks> {
         let mut resolved_locks = ResolvedLocks {
-            total_locks_cnt: 0,
+            total_normal_locks_cnt: 0,
+            total_lock_txn_files_cnt: 0,
             resolved_shards: vec![],
         };
         let mut handles = Vec::with_capacity(self.shards.len());
@@ -89,9 +91,10 @@ impl LockResolver {
             ));
         }
         for (shard_id, handle) in handles {
-            let locks_cnt = handle.await.unwrap()?;
-            if locks_cnt > 0 {
-                resolved_locks.total_locks_cnt += locks_cnt;
+            let (normal_locks_cnt, lock_txn_files_cnt) = handle.await.unwrap()?;
+            if normal_locks_cnt > 0 || lock_txn_files_cnt > 0 {
+                resolved_locks.total_normal_locks_cnt += normal_locks_cnt;
+                resolved_locks.total_lock_txn_files_cnt += lock_txn_files_cnt;
                 resolved_locks.resolved_shards.push(shard_id);
             }
         }
@@ -116,7 +119,37 @@ impl LockResolver {
         shards
     }
 
-    async fn resolve_shard(&self, shard_id: u64) -> Result<usize /* locks_cnt */> {
+    async fn resolve_shard(
+        &self,
+        shard_id: u64,
+    ) -> Result<(
+        usize, // normal_locks_cnt
+        usize, // txn_file_locks_cnt
+    )> {
+        // Resolve txn file locks first. Otherwise, txn file locks will be met during
+        // resolving normal locks.
+        let txn_file_locks_cnt = self.resolve_shard_txn_file_locks(shard_id).await?;
+        let normal_locks_cnt = self.resolve_shard_normal_locks(shard_id).await?;
+
+        // Confirm all locks have been resolved.
+        // Note: get a new SnapAccess for scan locks.
+        let shard = self.en.get_shard(shard_id).unwrap();
+        let snap = shard.new_snap_access();
+        let mut reader = CloudReader::new(snap, false);
+        let start = Key::from_raw(&shard.outer_start);
+        let end = Key::from_raw(&shard.outer_end);
+        let (kv_pairs, _) = reader.scan_locks(Some(&start), Some(&end), |_| true, 10)?;
+        assert!(
+            kv_pairs.is_empty(),
+            "{} has more locks to resolve: {:?}",
+            self.tag,
+            kv_pairs
+        );
+
+        Ok((normal_locks_cnt, txn_file_locks_cnt))
+    }
+
+    async fn resolve_shard_normal_locks(&self, shard_id: u64) -> Result<usize /* locks_cnt */> {
         let mut locks_cnt = 0;
         let mut mvcc_txn = MvccTxn::new(TimeStamp::zero(), self.cm.clone());
 
@@ -164,7 +197,7 @@ impl LockResolver {
                         &mut mvcc_txn,
                         MvccTxn::new(TimeStamp::zero(), self.cm.clone()),
                     );
-                    self.apply(&shard, mt)?;
+                    self.apply(&shard, Some(mt), None)?;
                 }
             }
 
@@ -174,13 +207,8 @@ impl LockResolver {
         }
 
         if !mvcc_txn.is_empty() {
-            self.apply(&shard, mvcc_txn)?;
+            self.apply(&shard, Some(mvcc_txn), None)?;
         }
-
-        // Confirm all locks have been resolved.
-        let start = Key::from_raw(&shard.outer_start);
-        let (kv_pairs, _) = reader.scan_locks(Some(&start), Some(&end), |_| true, 1)?;
-        assert_eq!(kv_pairs.len(), 0, "{} has more locks to resolve", self.tag);
 
         Ok(locks_cnt)
     }
@@ -234,13 +262,18 @@ impl LockResolver {
         Ok(())
     }
 
-    fn apply(&self, shard: &Arc<Shard>, txn: MvccTxn) -> Result<()> {
+    fn apply(
+        &self,
+        shard: &Shard,
+        txn: Option<MvccTxn>,
+        txn_file_ref: Option<kvenginepb::TxnFileRef>,
+    ) -> Result<()> {
         let store_id = self.en.get_engine_id();
         let region_meta = self
             .shard_meta_getter
             .load_region_meta(shard.id, shard.ver, store_id)
-            .ok_or::<Error>(
-                box_err!(
+            .ok_or_else::<Error, _>(
+                || box_err!(
                     "{} apply: load_region_meta failed, shard_id {}, shard_ver {}, shard_meta_getter {:?}",
                     self.tag,
                     shard.id,
@@ -249,8 +282,18 @@ impl LockResolver {
                 )
             )?;
 
-        let mut write_data = WriteData::from_modifies(txn.into_modifies());
-        write_data.set_req_type(ReqType::ResolveLock);
+        let mut write_data = if let Some(txn) = txn {
+            let mut write_data = WriteData::from_modifies(txn.into_modifies());
+            write_data.set_req_type(ReqType::ResolveLock);
+            write_data
+        } else if let Some(txn_file_ref) = txn_file_ref {
+            let mut write_data = WriteData::default();
+            write_data.txn_file = Some(txn_file_ref);
+            write_data
+        } else {
+            unreachable!()
+        };
+
         let custom_req = modifies_to_requests(&kvrpcpb::Context::default(), &mut write_data);
         rfstore::store::apply_custom_log_in_recover(
             &self.en,
@@ -268,6 +311,92 @@ impl LockResolver {
             )
         })?;
         Ok(())
+    }
+
+    async fn resolve_shard_txn_file_locks(
+        &self,
+        shard_id: u64,
+    ) -> Result<usize /* lock_txn_files_cnt */> {
+        let shard = self.en.get_shard(shard_id).unwrap();
+        let snap = shard.new_snap_access();
+
+        let lock_txn_files = snap.get_lock_txn_files();
+        for lock_txn_file in lock_txn_files {
+            let lock =
+                Lock::parse(lock_txn_file.get_lock_val_prefix()).map_err(|err| -> Error {
+                    box_err!(
+                        "{} parse lock error: shard_id {}, lock_txn_file {:?}, err {:?}",
+                        self.tag,
+                        shard_id,
+                        lock_txn_file,
+                        err
+                    )
+                })?;
+            let commit_ts = self.txn_status.check_txn_status(&self.tag, &lock).await?;
+            let txn_file_ref = if commit_ts > 0 {
+                self.commit_txn_file_lock(&snap, lock_txn_file, &lock, commit_ts.into())?
+            } else {
+                self.rollback_txn_file_lock(&snap, lock_txn_file, &lock)?
+            };
+            self.apply(&shard, None, Some(txn_file_ref))?;
+        }
+        Ok(lock_txn_files.len())
+    }
+
+    fn commit_txn_file_lock(
+        &self,
+        snap: &kvengine::SnapAccess,
+        lock_txn_file: &kvengine::table::TxnFile,
+        lock: &Lock,
+        commit_ts: TimeStamp,
+    ) -> Result<kvenginepb::TxnFileRef> {
+        info!("{} commit_txn_file_lock", self.tag;
+            "lock_txn_file" => ?lock_txn_file,
+            "lock" => ?lock,
+            "commit_ts" => ?commit_ts);
+        if commit_ts < lock.min_commit_ts {
+            return Err(box_err!(
+                "{} trying to commit with smaller commit_ts than min_commit_ts, lock {:?}, commit_ts {:?}, min_commit_ts {:?}",
+                self.tag,
+                lock,
+                commit_ts,
+                lock.min_commit_ts
+            ));
+        }
+        self.build_txn_file_ref(snap, lock_txn_file, lock, commit_ts)
+    }
+
+    fn rollback_txn_file_lock(
+        &self,
+        snap: &kvengine::SnapAccess,
+        lock_txn_file: &kvengine::table::TxnFile,
+        lock: &Lock,
+    ) -> Result<kvenginepb::TxnFileRef> {
+        info!("{} rollback_txn_file_lock", self.tag;
+            "lock_txn_file" => ?lock_txn_file,
+            "lock" => ?lock);
+        self.build_txn_file_ref(snap, lock_txn_file, lock, TimeStamp::zero())
+    }
+
+    // Ref: TxnFileCommand::build_commit_txn_file_ref
+    fn build_txn_file_ref(
+        &self,
+        snap: &kvengine::SnapAccess,
+        lock_txn_file: &kvengine::table::TxnFile,
+        lock: &Lock,
+        commit_ts: TimeStamp,
+    ) -> Result<kvenginepb::TxnFileRef> {
+        let mut txn_file_ref = kvenginepb::TxnFileRef::new();
+
+        let user_meta = UserMeta::new(lock.ts.into_inner(), commit_ts.into_inner());
+        txn_file_ref.set_user_meta(user_meta.to_array().to_vec());
+        txn_file_ref.set_shard_ver(snap.get_version());
+        txn_file_ref.set_start_ts(user_meta.start_ts);
+
+        txn_file_ref.set_chunk_ids(lock_txn_file.chunk_ids());
+        txn_file_ref.set_inner_upper_bound(lock_txn_file.lower_bound().to_vec());
+        txn_file_ref.set_inner_upper_bound(lock_txn_file.upper_bound().to_vec());
+        Ok(txn_file_ref)
     }
 }
 

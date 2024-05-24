@@ -1056,6 +1056,10 @@ impl SnapAccessCore {
         None
     }
 
+    pub fn get_lock_txn_files(&self) -> &[TxnFile] {
+        &self.data.lock_txn_files
+    }
+
     pub fn get_limiter(&self) -> &RegionLimiter {
         &self.data.limiter
     }
