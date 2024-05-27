@@ -313,7 +313,7 @@ impl Drop for ArenaSegment {
 /// switch memtable during applying a write batch. Besides, change timing of
 /// switching memtable is not backward compatible.
 fn block_cap(idx: usize) -> u32 {
-    if idx >= BLOCK_IDX_MAX {
+    if idx >= MAX_NUM_BLOCKS - 32 {
         16 * 1024 * 1024 // block_off is encoded as 24 bytes, so the max value is 16M.
     } else if idx >= MAX_NUM_BLOCKS * 3 / 4 {
         2 * 1024 * 1024
@@ -420,18 +420,22 @@ mod tests {
     fn test_arena_blocks_exhausted() {
         let arena = Arena::new();
         // block 0 is created on `new()` with 0 capacity.
-        for i in 1..=254 {
+        for i in 1..=224 {
             if i & 0x1 == 0 {
                 arena.values.alloc(1);
             } else {
                 arena.values.alloc(block_cap(i));
             }
         }
-
+        let total_size = arena.values.total_size.load(Ordering::Acquire);
         // Alloc after blocks exhausted should panic.
         let result = std::panic::catch_unwind(|| {
-            arena.values.alloc(MAX_VAL_SIZE);
+            for _ in 0..100 {
+                arena.values.alloc(MAX_VAL_SIZE);
+            }
         });
         assert!(result.is_err());
+        let max_total_size = arena.values.total_size.load(Ordering::Acquire);
+        assert_eq!(max_total_size - total_size, MAX_VAL_SIZE * 60);
     }
 }
