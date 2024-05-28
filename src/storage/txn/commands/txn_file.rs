@@ -285,7 +285,10 @@ impl TxnFileCommand {
                 ));
             }
 
-            if self.txn_file.chunk_ids() == existed.chunk_ids() {
+            if self.txn_file.chunk_ids() == existed.chunk_ids()
+                && self.txn_file.lower_bound() == existed.lower_bound()
+                && self.txn_file.upper_bound() == existed.upper_bound()
+            {
                 info!("txn file locks are equal"; "start_ts" => self.ts(), "txn_file" => ?self.txn_file, "existed" => ?existed);
                 return Ok(true);
             }
