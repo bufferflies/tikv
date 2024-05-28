@@ -269,6 +269,7 @@ fn test_txn_file_basic_impl(
                 MutateOptions {
                     commit_action: CommitAction::AsyncCommitSecondaryKeys(Duration::ZERO),
                     write_method,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -285,6 +286,7 @@ fn test_txn_file_basic_impl(
                 MutateOptions {
                     commit_action: CommitAction::AsyncCommitSecondaryKeys(Duration::MAX),
                     write_method,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -306,6 +308,7 @@ fn test_txn_file_basic_impl(
                 MutateOptions {
                     commit_action: CommitAction::NoCommit,
                     write_method,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -375,6 +378,7 @@ fn test_txn_file_split_merge() {
             MutateOptions {
                 commit_action: CommitAction::NoCommit,
                 write_method: TxnWriteMethod::FileBased,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -386,6 +390,7 @@ fn test_txn_file_split_merge() {
             MutateOptions {
                 commit_action: CommitAction::NoCommit,
                 write_method: TxnWriteMethod::FileBased,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -410,6 +415,7 @@ fn test_txn_file_split_merge() {
             MutateOptions {
                 commit_action: CommitAction::SyncCommit,
                 write_method: TxnWriteMethod::FileBased,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -472,6 +478,7 @@ fn test_txn_file_split_merge() {
             MutateOptions {
                 commit_action: CommitAction::NoCommit,
                 write_method: TxnWriteMethod::FileBased,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -493,6 +500,7 @@ fn test_txn_file_split_merge() {
             MutateOptions {
                 commit_action: CommitAction::SyncCommit,
                 write_method: TxnWriteMethod::FileBased,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -877,6 +885,7 @@ fn test_txn_file_move_down() {
                 MutateOptions {
                     commit_action: CommitAction::AsyncCommitSecondaryKeys(Duration::ZERO),
                     write_method: TxnWriteMethod::FileBased,
+                    ..Default::default()
                 },
             )
             .unwrap();

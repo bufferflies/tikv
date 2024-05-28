@@ -56,10 +56,10 @@ pub(crate) fn spawn_txn_file_write(
                 let i = rng.gen_range(begin..end);
                 let put_kv = rng.gen_ratio(2, 3);
 
-                let ver = client.get_ts().into_inner();
+                let start_ts = client.get_ts();
                 info!(
-                    "[{}] thread txn file write on keyspace {}, ver {}",
-                    thread_idx, keyspace_id, ver
+                    "[{}] thread txn file write on keyspace {}, start_ts {}, put_kv {}",
+                    thread_idx, keyspace_id, start_ts, put_kv
                 );
 
                 let gen_key = |i| {
@@ -77,8 +77,9 @@ pub(crate) fn spawn_txn_file_write(
                         .try_put_kv(
                             i..(i + 10),
                             gen_key,
-                            generate_random_string(format!("txnf-{}-", ver)),
+                            generate_random_string(format!("txnf-{}-", start_ts)),
                             MutateOptions {
+                                start_ts: Some(start_ts),
                                 commit_action: CommitAction::AsyncCommitSecondaryKeys(
                                     Duration::ZERO,
                                 ),
@@ -92,6 +93,7 @@ pub(crate) fn spawn_txn_file_write(
                             i..(i + 10),
                             gen_key,
                             MutateOptions {
+                                start_ts: Some(start_ts),
                                 commit_action: CommitAction::AsyncCommitSecondaryKeys(
                                     Duration::ZERO,
                                 ),

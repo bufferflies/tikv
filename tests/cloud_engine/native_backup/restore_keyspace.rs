@@ -898,11 +898,13 @@ fn test_restore_keyspace_with_resolve_locks(async_commit: bool) {
             MutateOptions {
                 commit_action: CommitAction::AsyncCommit(Duration::MAX),
                 write_method: TxnWriteMethod::Normal,
+                ..Default::default()
             }
         } else {
             MutateOptions {
                 commit_action: CommitAction::AsyncCommitSecondaryKeys(Duration::MAX),
                 write_method: TxnWriteMethod::FileBased,
+                ..Default::default()
             }
         };
         client.try_del_kv(100..200, &i_to_key, options).unwrap();
@@ -917,6 +919,7 @@ fn test_restore_keyspace_with_resolve_locks(async_commit: bool) {
                     MutateOptions {
                         commit_action: CommitAction::NoCommit,
                         write_method: TxnWriteMethod::FileBased,
+                        ..Default::default()
                     },
                 )
                 .unwrap();

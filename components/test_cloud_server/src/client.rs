@@ -219,6 +219,7 @@ pub enum CommitAction {
 
 #[derive(Clone)]
 pub struct MutateOptions {
+    pub start_ts: Option<TimeStamp>,
     pub commit_action: CommitAction,
     pub write_method: TxnWriteMethod,
 }
@@ -226,6 +227,7 @@ pub struct MutateOptions {
 impl Default for MutateOptions {
     fn default() -> Self {
         Self {
+            start_ts: None,
             commit_action: CommitAction::SyncCommit,
             write_method: TxnWriteMethod::Normal,
         }
@@ -298,7 +300,7 @@ impl ClusterClient {
     where
         F: Fn(usize) -> Vec<u8>,
     {
-        let start_ts = self.get_ts();
+        let start_ts = options.start_ts.unwrap_or_else(|| self.get_ts());
 
         let mut mutations = vec![];
         for i in rng {
@@ -380,7 +382,7 @@ impl ClusterClient {
         F: Fn(usize) -> Vec<u8>,
         G: Fn(usize) -> Vec<u8>,
     {
-        let start_ts = self.get_ts();
+        let start_ts = options.start_ts.unwrap_or_else(|| self.get_ts());
 
         let mut mutations = vec![];
         for i in rng {
