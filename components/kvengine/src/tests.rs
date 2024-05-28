@@ -556,7 +556,10 @@ fn test_truncate_ts() {
 
     {
         // Truncate all.
-        set_truncate_ts(999, false);
+        // Note: Truncate all would be very fast as it just remove SSTs from meta, so
+        // tolerate none here. If set truncate ts does not succeed, the `check_get`
+        // must fail.
+        set_truncate_ts(999, true);
         wait_for_truncate_ts();
         check_get(
             0,
