@@ -1028,12 +1028,18 @@ impl SnapAccessCore {
             if write_iter.key() >= upper_bound {
                 return None;
             }
-            if txn_file
-                .get_value(write_iter.key(), &mut outer_val_buf)
-                .1
-                .is_valid()
+            let write_iter_val = write_iter.value();
+            if !write_iter_val.is_deleted()
+                && txn_file
+                    .get_value(write_iter.key(), &mut outer_val_buf)
+                    .1
+                    .is_valid()
             {
-                let write_iter_val = write_iter.value();
+                debug_assert!(
+                    !write_iter_val.user_meta().is_empty(),
+                    "write_iter_val: {:?}",
+                    write_iter_val,
+                );
                 let um = UserMeta::from_slice(write_iter_val.user_meta());
                 if um.commit_ts > txn_file.start_ts() {
                     // Return outer key.
