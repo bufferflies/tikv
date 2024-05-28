@@ -5,7 +5,7 @@ use std::{
     iter::Iterator as StdIterator,
     ops::Deref,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
 };
@@ -43,18 +43,17 @@ impl CfTable {
     }
 
     pub fn new_split(&self) -> Self {
-        if self.is_empty() {
-            return Self::new();
-        }
         let tbls = self.core.tbls.clone();
         let arena = self.core.arena.clone();
         let ver = AtomicU64::new(self.ver.load(Ordering::Acquire));
+        let force_switch = AtomicBool::new(self.force_switch.load(Ordering::Acquire));
         let props = Mutex::new(self.core.props.lock().unwrap().clone());
         Self {
             core: Arc::new(CfTableCore {
                 tbls,
                 arena,
                 ver,
+                force_switch,
                 props,
             }),
         }
@@ -65,12 +64,14 @@ impl CfTable {
         tbls[WRITE_CF] = tbls[WRITE_CF].add_txn_file(txn_file);
         let arena = self.core.arena.clone();
         let ver = AtomicU64::new(self.ver.load(Ordering::Acquire));
+        let force_switch = AtomicBool::new(self.force_switch.load(Ordering::Acquire));
         let props = Mutex::new(self.core.props.lock().unwrap().clone());
         Self {
             core: Arc::new(CfTableCore {
                 tbls,
                 arena,
                 ver,
+                force_switch,
                 props,
             }),
         }
@@ -81,6 +82,7 @@ pub struct CfTableCore {
     tbls: [SkipListExt; NUM_CFS],
     arena: Arc<Arena>,
     ver: AtomicU64,
+    force_switch: AtomicBool,
     props: Mutex<Option<kvenginepb::Properties>>,
 }
 
@@ -101,6 +103,7 @@ impl CfTableCore {
             ],
             arena,
             ver: AtomicU64::new(0),
+            force_switch: AtomicBool::new(false),
             props: Mutex::new(None),
         }
     }
@@ -136,6 +139,14 @@ impl CfTableCore {
 
     pub fn get_version(&self) -> u64 {
         self.ver.load(Ordering::Acquire)
+    }
+
+    pub fn set_force_switch(&self) {
+        self.force_switch.store(true, Ordering::Release);
+    }
+
+    pub fn is_force_switch(&self) -> bool {
+        self.force_switch.load(Ordering::Acquire)
     }
 
     pub fn has_data_in_range(&self, start: InnerKey<'_>, end: InnerKey<'_>) -> bool {

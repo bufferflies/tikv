@@ -124,6 +124,9 @@ impl Engine {
             return;
         }
         mem_table.set_version(version);
+        if force {
+            mem_table.set_force_switch();
+        }
         let new_tbl = memtable::CfTable::new();
         let mut new_mem_tbls = Vec::with_capacity(data.mem_tbls.len() + 1);
         new_mem_tbls.push(new_tbl);

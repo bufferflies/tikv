@@ -511,7 +511,9 @@ impl Shard {
     pub(crate) fn split_mem_tables(&self, parent_mem_tbls: &[CfTable]) -> Vec<CfTable> {
         let mut new_mem_tbls = vec![CfTable::new()];
         for old_mem_tbl in parent_mem_tbls {
-            if old_mem_tbl.has_data_in_range(self.inner_start(), self.inner_end()) {
+            if old_mem_tbl.is_force_switch()
+                || old_mem_tbl.has_data_in_range(self.inner_start(), self.inner_end())
+            {
                 new_mem_tbls.push(old_mem_tbl.new_split());
             }
         }
