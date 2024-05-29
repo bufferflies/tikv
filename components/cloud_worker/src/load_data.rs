@@ -44,8 +44,10 @@ pub(crate) const MAX_IN_MEM_SIZE: usize = 256 * 1024 * 1024;
 ///
 /// 2. put chunk:
 ///   PUT /load_data?cluster_id=%d&task_id=%s&writer_id=%d&chunk_id=%d
-///   key_len(2) + key(key_len) + val_len(4) + value(val_len)
-///   key_len(2) + key(key_len) + val_len(4) + value(val_len)
+///   key_len(2) + key(key_len) + val_len(4) + value(val_len) + row_id_len(2) +
+/// row_id(row_id_len)
+///   key_len(2) + key(key_len) + val_len(4) + value(val_len) + row_id_len(2) +
+/// row_id(row_id_len)
 ///   ...
 ///
 /// 3. flush:
@@ -147,6 +149,7 @@ pub(crate) async fn handle_load_data(
                 let start_ts = get_param::<u64>(&query_pairs, "start_ts").unwrap_or_default();
                 let commit_ts = get_param::<u64>(&query_pairs, "commit_ts").unwrap_or_default();
                 let data_size = get_param::<u64>(&query_pairs, "data_size").unwrap_or_default();
+                let new_client = get_param::<bool>(&query_pairs, "new_client").unwrap_or_default();
                 if data_size > manager.worker_scaler_conf.max_size.0 {
                     return Ok(make_response(
                         StatusCode::BAD_REQUEST,
@@ -213,6 +216,7 @@ pub(crate) async fn handle_load_data(
                     inner_key_off: None,
                     key_prefix: vec![],
                     encryption_key: None,
+                    new_client,
                 };
                 // step 1: on start, client call init task
                 manager.init_task(task_ctx);
@@ -383,6 +387,7 @@ impl LoadDataManager {
             inner_key_off: None,
             key_prefix: vec![],
             encryption_key: None,
+            new_client: check_point_ctx.new_client,
         };
         let mut worker = LoadTaskWorker::new(
             self.config.clone(),

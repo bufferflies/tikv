@@ -1,7 +1,7 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    cmp::{max, min},
+    cmp::{max, min, Ordering},
     collections::HashMap,
     fs,
     io::Write,
@@ -226,6 +226,8 @@ pub struct TaskContext {
     pub inner_key_off: Option<usize>,
     pub key_prefix: Vec<u8>,
     pub encryption_key: Option<EncryptionKey>,
+    // TODO(zeminzhou): remove new_client field when the old client is deprecated.
+    pub new_client: bool,
 }
 
 #[derive(Clone)]
@@ -675,7 +677,13 @@ impl LoadTaskWorker {
             offset += 4;
             let val = chunk_data.slice(offset..offset + val_len as usize);
             offset += val_len as usize;
-
+            let mut row_id = Bytes::default();
+            if self.task_ctx.new_client {
+                let row_id_len = (&chunk_data[offset..]).get_u16_le();
+                offset += 2;
+                row_id = chunk_data.slice(offset..offset + row_id_len as usize);
+                offset += row_id_len as usize;
+            }
             let key_prefix = key.slice(..inner_key_off);
             if key_prefix.chunk() != self.task_ctx.key_prefix.as_slice() {
                 let err_msg = format!(
@@ -689,7 +697,7 @@ impl LoadTaskWorker {
             }
 
             let inner_key = key.slice(inner_key_off..);
-            self.kv_pairs.push(KvPair::new(inner_key, val));
+            self.kv_pairs.push(KvPair::new(inner_key, val, row_id));
             self.in_mem_size += 2 + key_len as usize + 4 + val_len as usize;
         }
 
@@ -970,7 +978,7 @@ impl LoadTaskWorker {
                 - self.reader_errs.len()
                 - self.unhandled_readers.len();
             info!(
-                "{} still needs to receive {} readers, file_idx:{},self.readers.len():{},self.reader_errs.len():{},self.unhandled_readers.len():{}",
+                "{} still needs to receive {} readers, file_idx: {}, readers count: {}, reader_errs count: {}, unhandled_readers count: {}",
                 self.task_ctx.task_id,
                 recv_count,
                 self.file_idx,
@@ -1368,7 +1376,10 @@ impl LoadTaskWorker {
                 success_ranges.covered(&region.get_region().start_key, &region.get_region().end_key)
             });
         }
-        info!("scanned and filtered regions {:?}", regions);
+        info!(
+            "{} scanned and filtered regions {:?}",
+            self.task_ctx.task_id, regions
+        );
 
         let mut errors = vec![];
         let mut handle_ingest_res = |res: Result<metapb::Region>| match res {
@@ -1394,13 +1405,14 @@ impl LoadTaskWorker {
                 return Err(Error::Canceled);
             }
             let pd_cli = self.ctx.pd.clone();
+            let task_id = self.task_ctx.task_id.clone();
             let tx = tx.clone();
             self.ctx.runtime.spawn(async move {
                 let region = pd_region.take_region();
                 let leader = pd_region.take_leader();
                 info!(
-                    "ingest_group_to_range: region: {:?}, leader: {:?}, cs: {:?}",
-                    region, leader, cs
+                    "{} ingest_group_to_range: region: {:?}, leader: {:?}, cs: {:?}",
+                    task_id, region, leader, cs
                 );
                 let res = ingest_files_to_leader(pd_cli, cs, &region, leader).await;
                 let _ = tx.send(res.map(|_| region));
@@ -1705,7 +1717,13 @@ fn flush_to_local_file(
     path: PathBuf,
     in_mem_size: usize,
 ) -> Result<KvPairsReader> {
-    kv_pairs.sort_by(|a, b| a.key.cmp(&b.key));
+    kv_pairs.sort_by(|a, b| {
+        let order = a.key.cmp(&b.key);
+        if order == Ordering::Equal {
+            return a.row_id.cmp(&b.row_id);
+        }
+        order
+    });
 
     let file = fs::OpenOptions::new()
         .create(true)
@@ -1733,6 +1751,8 @@ fn flush_to_local_file(
         buf.extend_from_slice(pair.key.chunk());
         buf.put_u32_le(pair.val.len() as u32);
         buf.extend_from_slice(pair.val.chunk());
+        buf.put_u16_le(pair.row_id.len() as u16);
+        buf.extend_from_slice(pair.row_id.chunk());
         if buf.len() >= 128 * 1024 {
             writer.write_all(&buf)?;
             buf.clear();

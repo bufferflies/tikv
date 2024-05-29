@@ -159,6 +159,7 @@ fn do_load_data(
     let data_batch_size = rng.gen_range(1..=10) * 10_usize;
     let writer_count = rng.gen_range(1..=5);
     let generate_key = move |i: usize| -> Vec<u8> { make_key(keyspace_id, table_id, &i_to_key(i)) };
+    let generate_row_id = move |i: usize| -> Vec<u8> { i.to_be_bytes().to_vec() };
     let ref_store = put_chunks(
         &scheduler,
         writer_count,
@@ -166,6 +167,7 @@ fn do_load_data(
         data_batch_size,
         generate_key,
         generate_random_string(format!("ingest-{}-", commit_ts)),
+        generate_row_id,
         LOAD_DATA_TIMEOUT,
         |_| 0,
     );

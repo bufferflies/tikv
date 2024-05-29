@@ -156,6 +156,7 @@ fn impl_test_load_data(enable_inner_key_off: bool) {
     // Put chunks.
     let keyspace_prefix = table_key_prefix(5);
     let i_to_key = move |i: usize| -> Vec<u8> { i_to_key_with_prefix(&keyspace_prefix, i) };
+    let i_to_row_id = move |i: usize| -> Vec<u8> { i.to_be_bytes().to_vec() };
     let dup_count_fn = |i| {
         if i % DATA_BATCH_SIZE == 0 {
             i % 3 + 1
@@ -170,6 +171,7 @@ fn impl_test_load_data(enable_inner_key_off: bool) {
         DATA_BATCH_SIZE,
         i_to_key,
         i_to_val,
+        i_to_row_id,
         DEFAULT_TIMEOUT,
         dup_count_fn,
     );
@@ -292,6 +294,7 @@ fn test_load_data_overlap() {
         // Put chunks.
         let keyspace_prefix = table_key_prefix(5);
         let i_to_key = move |i: usize| -> Vec<u8> { i_to_key_with_prefix(&keyspace_prefix, i) };
+        let i_to_row_id = move |i: usize| -> Vec<u8> { i.to_be_bytes().to_vec() };
         let ref_store = put_chunks(
             &scheduler,
             WRITER_COUNT,
@@ -299,6 +302,7 @@ fn test_load_data_overlap() {
             DATA_BATCH_SIZE,
             i_to_key,
             i_to_val,
+            i_to_row_id,
             Duration::from_secs(10),
             |_| 0,
         );

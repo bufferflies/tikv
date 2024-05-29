@@ -29,6 +29,7 @@ pub fn init_task(
         inner_key_off: None,
         key_prefix: vec![],
         encryption_key: None,
+        new_client: true,
     };
     let check_point_ctx = LoadDataCheckPointCtx::new(task_ctx.clone());
 
@@ -52,19 +53,21 @@ pub fn init_task(
     (scheduler, worker_handle)
 }
 
-pub fn put_chunks<FnKey, FnVal, FnDup>(
+pub fn put_chunks<FnKey, FnVal, FnRowId, FnDup>(
     scheduler: &LoadTaskScheduler,
     writer_count: usize,
     data_count: usize,
     batch_size: usize,
     i_to_key: FnKey,
     i_to_val: FnVal,
+    i_to_row_id: FnRowId,
     timeout: Duration,
     dup_count: FnDup,
 ) -> RefStore
 where
     FnKey: Fn(usize) -> Vec<u8>,
     FnVal: Fn(usize) -> Vec<u8>,
+    FnRowId: Fn(usize) -> Vec<u8>,
     FnDup: Fn(usize) -> usize,
 {
     let mut chunk_ids: HashMap<u64, u64> = HashMap::with_capacity(5);
@@ -81,21 +84,40 @@ where
             }
             let key = i_to_key(idx);
             let val = i_to_val(idx);
+            let row_id = i_to_row_id(idx);
 
             buf.put_u16_le(key.len() as u16);
             buf.put_slice(&key);
             buf.put_u32_le(val.len() as u32);
             buf.put_slice(&val);
+            buf.put_u16_le(row_id.len() as u16);
+            buf.put_slice(&row_id);
 
             ref_store.put_kv(key, val);
             for k in 1..=dup_count(idx) {
+                // Repeated key is the same as the original key with some row_id.
+                // Repeated key is caused by resending some data after the client restarts.
+                let repeated_key = i_to_key(idx);
+                let repeated_val = i_to_val(idx + k);
+                let repeated_row_id = i_to_row_id(idx);
+                buf.put_u16_le(repeated_key.len() as u16);
+                buf.put_slice(&repeated_key);
+                buf.put_u32_le(repeated_val.len() as u32);
+                buf.put_slice(&repeated_val);
+                buf.put_u16_le(repeated_row_id.len() as u16);
+                buf.put_slice(&repeated_row_id);
+
+                // Duplicate key is the same as the original key with different row_id.
                 let dup_key = i_to_key(idx);
                 let dup_val = i_to_val(idx + k);
+                let dup_row_id = i_to_val(idx + k);
                 buf.put_u16_le(dup_key.len() as u16);
                 buf.put_slice(&dup_key);
                 buf.put_u32_le(dup_val.len() as u32);
                 buf.put_slice(&dup_val);
-                // do not put dup_key into ref_store
+                buf.put_u16_le(dup_row_id.len() as u16);
+                buf.put_slice(&dup_row_id);
+                // do not put repeated_key/dup_key into ref_store
             }
         }
 

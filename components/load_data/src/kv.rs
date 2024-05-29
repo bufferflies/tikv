@@ -17,17 +17,19 @@ const MAX_DUP_SIZE: usize = 64 * 1024 * 1024;
 pub struct KvPair {
     pub key: Bytes,
     pub val: Bytes,
+    pub row_id: Bytes,
 }
 
 impl KvPair {
-    pub fn new(key: Bytes, val: Bytes) -> KvPair {
-        Self { key, val }
+    pub fn new(key: Bytes, val: Bytes, row_id: Bytes) -> KvPair {
+        Self { key, val, row_id }
     }
 }
 
 pub struct KvPairsReader {
     key_buf: Vec<u8>,
     val_buf: Vec<u8>,
+    row_id_buf: Vec<u8>,
     val_base_len: usize,
     count: usize,
     idx: usize,
@@ -43,6 +45,7 @@ impl KvPairsReader {
         Self {
             key_buf: vec![],
             val_buf,
+            row_id_buf: vec![],
             val_base_len,
             count,
             idx: 0,
@@ -52,6 +55,10 @@ impl KvPairsReader {
 
     fn key(&self) -> &[u8] {
         &self.key_buf
+    }
+
+    fn row_id(&self) -> &[u8] {
+        &self.row_id_buf
     }
 
     fn valid(&self) -> bool {
@@ -75,6 +82,13 @@ impl KvPairsReader {
         self.buf_reader
             .read_exact(&mut self.val_buf[self.val_base_len..])
             .unwrap();
+        let mut row_id_len_buf = [0u8; 2];
+        self.buf_reader.read_exact(&mut row_id_len_buf[..]).unwrap();
+        let row_id_len = u16::from_le_bytes(row_id_len_buf);
+        self.row_id_buf.resize(row_id_len as usize, 0);
+        self.buf_reader
+            .read_exact(&mut self.row_id_buf[..])
+            .unwrap();
     }
 }
 
@@ -95,10 +109,12 @@ pub struct MergeIterator {
     heap: Vec<Box<KvPairsReader>>,
     prev_key: Vec<u8>,
     prev_val: Vec<u8>,
+    prev_row_id: Vec<u8>,
     key_prefix: Vec<u8>,
     pub(crate) duplicated_entries: Vec<DuplicateEntry>,
     pub(crate) duplicated_entries_size: usize,
     last_dup_entry_key: Vec<u8>,
+    last_dup_entry_row_id: Vec<u8>,
 }
 
 #[derive(Default, Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -120,14 +136,17 @@ impl MergeIterator {
             heap,
             prev_key: vec![],
             prev_val: vec![],
+            prev_row_id: vec![],
             key_prefix: key_prefix.to_vec(),
             duplicated_entries: vec![],
             duplicated_entries_size: 0,
             last_dup_entry_key: vec![],
+            last_dup_entry_row_id: vec![],
         };
         it.init_heap();
         it.prev_key = it.key().to_vec();
         it.prev_val = it.value().to_vec();
+        it.prev_row_id = it.row_id().to_vec();
         it
     }
 
@@ -161,7 +180,11 @@ impl MergeIterator {
     }
 
     fn less(&mut self, a: usize, b: usize) -> bool {
-        self.heap[a].key() < self.heap[b].key()
+        match self.heap[a].key().cmp(self.heap[b].key()) {
+            std::cmp::Ordering::Less => true,
+            std::cmp::Ordering::Equal => self.heap[a].row_id() < self.heap[b].row_id(),
+            std::cmp::Ordering::Greater => false,
+        }
     }
 
     pub fn key(&self) -> &[u8] {
@@ -170,6 +193,10 @@ impl MergeIterator {
 
     pub fn value(&self) -> &[u8] {
         &self.heap[0].val_buf
+    }
+
+    pub fn row_id(&self) -> &[u8] {
+        self.heap[0].row_id()
     }
 
     pub fn valid(&self) -> bool {
@@ -202,8 +229,16 @@ impl MergeIterator {
         self.down(0);
         let key = self.heap[0].key();
         let val = self.heap[0].val_buf.as_slice();
+        let row_id = self.heap[0].row_id();
         let val_base_len = self.heap[0].val_base_len;
         if key == self.prev_key.as_slice() {
+            // For old load data client, the row_id is empty. So we only need
+            // to compare row_id when it's not empty.
+            //
+            // TODO(zeminzhou): remove this check after all clients are updated.
+            if !row_id.is_empty() && row_id == self.prev_row_id.as_slice() {
+                return Ok(true);
+            }
             if self.duplicated_entries_size > MAX_DUP_SIZE {
                 return Err(Error::TooManyDuplicatedKeys(
                     self.duplicated_entries.len().to_string(),
@@ -211,9 +246,19 @@ impl MergeIterator {
             }
             let val_str = hex::encode(&val[val_base_len..]);
             if let Some(entry) = self.duplicated_entries.last_mut() {
+                // For old client, the row_id always is empty, and no repeated keys in
+                // KvPairsReader. So we don't need to compare row_id.
+                //
+                // For new client, the row_id is not empty, and there may be repeated keys in
+                // KvPairsReader. So we need to compare row_id to avoid adding the repeated
+                // values.
+                //
+                // TODO(zeminzhou): remove this check after all clients are updated.
                 if self.last_dup_entry_key.as_slice() == key {
-                    self.duplicated_entries_size += val.len();
-                    entry.values.push(val_str);
+                    if row_id.is_empty() || self.last_dup_entry_row_id.as_slice() != row_id {
+                        self.duplicated_entries_size += val.len();
+                        entry.values.push(val_str);
+                    }
                     return Ok(true);
                 }
             }
@@ -226,12 +271,15 @@ impl MergeIterator {
             };
             self.duplicated_entries.push(dup_entry);
             self.last_dup_entry_key = key.to_vec();
+            self.last_dup_entry_row_id = row_id.to_vec();
             return Ok(true);
         }
         self.prev_key.truncate(0);
         self.prev_key.extend_from_slice(key);
         self.prev_val.truncate(0);
         self.prev_val.extend_from_slice(val);
+        self.prev_row_id.truncate(0);
+        self.prev_row_id.extend_from_slice(row_id);
         Ok(false)
     }
 }
