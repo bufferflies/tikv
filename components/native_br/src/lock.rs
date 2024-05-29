@@ -15,7 +15,7 @@ use tikv::storage::{
     mvcc::{CloudReader, Key, MvccTxn, TxnCommitRecord, WriteType},
 };
 use tikv_util::{box_err, info};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
 use txn_types::{Lock, ReqType, TimeStamp};
 
 use crate::{
@@ -39,6 +39,10 @@ pub struct LockResolver {
     txn_status: TxnStatus,
     // `cm` is actually not used but meet the requirement of `MvccTxn`.
     cm: concurrency_manager::ConcurrencyManager,
+    // `apply_locks` is used to make applying process mutual exclusive for each shard. As
+    // commit/rollback locks will be conflict with `load_unloaded_tbls` during
+    // `check_txn_status`.
+    apply_locks: ApplyLocks,
 }
 
 #[derive(Debug)]
@@ -58,10 +62,12 @@ impl LockResolver {
         let shards = Arc::new(Self::collect_shards(&en));
         info!("{} collect_shards", tag; "shards" => ?shards);
 
+        let apply_locks = ApplyLocks::default();
         let txn_status = TxnStatus {
             en: en.clone(),
             shards: shards.clone(),
             txns: Default::default(),
+            apply_locks: apply_locks.clone(),
         };
         Self {
             tag: Arc::new(tag.to_string()),
@@ -71,6 +77,7 @@ impl LockResolver {
             batch_size,
             txn_status,
             cm: concurrency_manager::ConcurrencyManager::new(1.into()),
+            apply_locks,
         }
     }
 
@@ -197,7 +204,7 @@ impl LockResolver {
                         &mut mvcc_txn,
                         MvccTxn::new(TimeStamp::zero(), self.cm.clone()),
                     );
-                    self.apply(&shard, Some(mt), None)?;
+                    self.apply(&shard, Some(mt), None).await?;
                 }
             }
 
@@ -207,7 +214,7 @@ impl LockResolver {
         }
 
         if !mvcc_txn.is_empty() {
-            self.apply(&shard, Some(mvcc_txn), None)?;
+            self.apply(&shard, Some(mvcc_txn), None).await?;
         }
 
         Ok(locks_cnt)
@@ -262,7 +269,7 @@ impl LockResolver {
         Ok(())
     }
 
-    fn apply(
+    async fn apply(
         &self,
         shard: &Shard,
         txn: Option<MvccTxn>,
@@ -295,6 +302,7 @@ impl LockResolver {
         };
 
         let custom_req = modifies_to_requests(&kvrpcpb::Context::default(), &mut write_data);
+        let guard = self.apply_locks.lock(shard.id).await;
         rfstore::store::apply_custom_log_in_recover(
             &self.en,
             store_id,
@@ -310,6 +318,7 @@ impl LockResolver {
                 err
             )
         })?;
+        drop(guard);
         Ok(())
     }
 
@@ -338,7 +347,7 @@ impl LockResolver {
             } else {
                 self.rollback_txn_file_lock(&snap, lock_txn_file, &lock)?
             };
-            self.apply(&shard, None, Some(txn_file_ref))?;
+            self.apply(&shard, None, Some(txn_file_ref)).await?;
         }
         Ok(lock_txn_files.len())
     }
@@ -405,6 +414,7 @@ struct TxnStatus {
     en: kvengine::Engine,
     shards: Arc<Vec<RawRegion>>,
     txns: Arc<DashMap<u64 /* txn_id */, Arc<RwLock<Option<u64 /* commit_id */>>>>>,
+    apply_locks: ApplyLocks,
 }
 
 impl TxnStatus {
@@ -422,20 +432,23 @@ impl TxnStatus {
             return Ok(commit_ts);
         }
 
-        let commit_ts = self.check_txn_status_from_engine(lock)?;
+        let commit_ts = self.check_txn_status_from_engine(lock).await?;
         *status = Some(commit_ts);
         info!("{} check_txn_status", tag; "lock" => ?lock, "commit_ts" => ?commit_ts);
         Ok(commit_ts)
     }
 
-    fn check_txn_status_from_engine(&self, lock: &Lock) -> Result<u64 /* commit_id */> {
+    async fn check_txn_status_from_engine(&self, lock: &Lock) -> Result<u64 /* commit_id */> {
         let mut reader_cache = HashMap::new();
-        let cloud_reader = self.load_cloud_reader_by_key(&lock.primary, lock, &mut reader_cache)?;
+        let cloud_reader = self
+            .load_cloud_reader_by_key(&lock.primary, lock, &mut reader_cache)
+            .await?;
         let primary_key = Key::from_raw(&lock.primary);
         if let Some(pk_lock) = cloud_reader.load_lock(&primary_key).unwrap() {
             if lock.ts == pk_lock.ts {
                 return if lock.use_async_commit {
                     self.check_secondary_locks(&pk_lock, &mut reader_cache)
+                        .await
                 } else {
                     Ok(0)
                 };
@@ -444,7 +457,7 @@ impl TxnStatus {
         Self::get_txn_status_from_cloud_reader(cloud_reader, &primary_key, lock.ts)
     }
 
-    fn load_cloud_reader_by_key<'a>(
+    async fn load_cloud_reader_by_key<'a>(
         &'a self,
         key: &[u8],
         lock: &Lock,
@@ -462,8 +475,10 @@ impl TxnStatus {
         if let Vacant(e) = reader_cache.entry(shard_id) {
             let mut snap = self.en.get_snap_access(shard_id).unwrap();
             if snap.has_unloaded_tables() {
+                let guard = self.apply_locks.lock(shard_id).await;
                 self.en
                     .load_unloaded_tables(snap.get_id(), snap.get_version(), false)?;
+                drop(guard);
                 snap = self.en.get_snap_access(shard_id).unwrap();
             }
             // TODO: check memory usage & enable fill_cache
@@ -490,14 +505,16 @@ impl TxnStatus {
         }
     }
 
-    fn check_secondary_locks(
+    async fn check_secondary_locks(
         &self,
         pk_lock: &Lock,
         reader_cache: &mut HashMap<u64, CloudReader>,
     ) -> Result<u64 /* commit_id */> {
         let mut commit_ts = pk_lock.min_commit_ts;
         for key in &pk_lock.secondaries {
-            let cloud_reader = self.load_cloud_reader_by_key(key, pk_lock, reader_cache)?;
+            let cloud_reader = self
+                .load_cloud_reader_by_key(key, pk_lock, reader_cache)
+                .await?;
             let key = Key::from_raw(key);
             match cloud_reader.load_lock(&key).unwrap() {
                 Some(lock) if lock.ts == pk_lock.ts => {
@@ -519,5 +536,19 @@ impl TxnStatus {
             .binary_search_by(|x| x.compare_with_key(key))
             .ok()
             .map(|idx| self.shards[idx].id)
+    }
+}
+
+#[derive(Default, Clone)]
+struct ApplyLocks {
+    inner: Arc<Mutex<HashMap<u64 /* shard_id */, Arc<Mutex<()>>>>>,
+}
+
+impl ApplyLocks {
+    pub async fn lock(&self, shard_id: u64) -> OwnedMutexGuard<()> {
+        let mut inner = self.inner.lock().await;
+        let lock = inner.entry(shard_id).or_default().clone();
+        drop(inner);
+        lock.lock_owned().await
     }
 }
