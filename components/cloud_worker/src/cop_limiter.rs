@@ -142,6 +142,7 @@ impl CopLimiter {
     pub(crate) async fn wait_for_high_mem_usage(
         &self,
         keyspace_id: u32,
+        tag: &str,
         mut timeout: Duration,
     ) -> bool {
         let usage = get_global_memory_usage();
@@ -162,7 +163,7 @@ impl CopLimiter {
             let wait_dur = Duration::from_millis(wait_millis);
             info!(
                 "wait for memory high usage";
-                "keyspace_id" => keyspace_id,
+                "tag" => tag,
                 "wait_dur" => ?wait_dur,
                 "mem_usage" => usage,
             );
@@ -173,7 +174,7 @@ impl CopLimiter {
         }
         info!(
             "wait memory high usage timeout";
-            "keyspace_id" => keyspace_id,
+            "tag" => tag,
         );
         false
     }
@@ -198,19 +199,20 @@ mod tests {
         let high_mem_usage = cop_limiter.high_mem_usage;
         set_memory_usage_for_test(high_mem_usage);
         let runtime = tokio::runtime::Runtime::new().unwrap();
-
-        let pass = runtime.block_on(cop_limiter.wait_for_high_mem_usage(1, Duration::from_secs(1)));
+        let tag = "ks:1:1:1:1";
+        let pass =
+            runtime.block_on(cop_limiter.wait_for_high_mem_usage(1, tag, Duration::from_secs(1)));
         // pass because there is no samples.
         assert!(pass);
 
         cop_limiter.add_sample(1, 100, Instant::now());
         cop_limiter.add_sample(2, 200, Instant::now());
         let pass_1 =
-            runtime.block_on(cop_limiter.wait_for_high_mem_usage(1, Duration::from_secs(1)));
+            runtime.block_on(cop_limiter.wait_for_high_mem_usage(1, tag, Duration::from_secs(1)));
         // pass because the throughput is below average.
         assert!(pass_1);
         let pass_2 =
-            runtime.block_on(cop_limiter.wait_for_high_mem_usage(2, Duration::from_secs(1)));
+            runtime.block_on(cop_limiter.wait_for_high_mem_usage(2, tag, Duration::from_secs(1)));
         // not pass because the throughput is above average.
         assert!(!pass_2);
 
@@ -222,16 +224,22 @@ mod tests {
             assert_eq!(core.keyspace_throughputs.len(), 1);
             assert_eq!(core.total_throughput, 50);
         }
-        let pass =
-            runtime.block_on(cop_limiter.wait_for_high_mem_usage(1, Duration::from_millis(500)));
+        let pass = runtime.block_on(cop_limiter.wait_for_high_mem_usage(
+            1,
+            tag,
+            Duration::from_millis(500),
+        ));
         // not pass because only a single keyspace, throughput equal to average.
         assert!(!pass);
         runtime.spawn(async move {
             tokio::time::sleep(Duration::from_millis(200)).await;
             set_memory_usage_for_test(high_mem_usage / 2);
         });
-        let pass =
-            runtime.block_on(cop_limiter.wait_for_high_mem_usage(1, Duration::from_millis(500)));
+        let pass = runtime.block_on(cop_limiter.wait_for_high_mem_usage(
+            1,
+            tag,
+            Duration::from_millis(500),
+        ));
         // the memory usage decreased, so the request should pass.
         assert!(pass);
     }

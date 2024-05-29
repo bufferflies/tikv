@@ -172,22 +172,37 @@ async fn handle_remote_coprocessor(
     }
     let cop_ctx = cop_req.get_context();
     let keyspace_id = cop_ctx.keyspace_id;
+    let start_ts = cop_req.get_start_ts();
+    let handle_start = Instant::now();
+    let req_type = cop_req.get_tp();
+    let req_type_str = match req_type {
+        REQ_TYPE_DAG => "dag".to_string(),
+        REQ_TYPE_ANALYZE => "analyze".to_string(),
+        REQ_TYPE_CHECKSUM => "checksum".to_string(),
+        _ => "".to_string(),
+    };
+    let tag = format!(
+        "{} ks{}:{}:{}:{}",
+        req_type_str,
+        keyspace_id,
+        cop_ctx.get_region_id(),
+        cop_ctx.get_region_epoch().get_version(),
+        start_ts,
+    );
     let timeout = Duration::from_millis(cop_ctx.get_max_execution_duration_ms());
     if !ctx
         .cop_limiter
-        .wait_for_high_mem_usage(keyspace_id, timeout)
+        .wait_for_high_mem_usage(keyspace_id, &tag, timeout)
         .await
     {
         let body = hyper::Body::from("memory pressure is too high");
         return Ok(hyper::Response::builder().status(500).body(body).unwrap());
     }
-    let req_type = cop_req.get_tp();
+    let snap_start = Instant::now();
     let dfs: Arc<dyn dfs::Dfs> = match req_type {
         REQ_TYPE_DAG => ctx.cache_fs.clone(),
         _ => ctx.s3fs.clone(),
     };
-
-    let ob_start = Instant::now();
     let snap_access_res = SnapAccess::construct_snapshot(
         dfs,
         mem_data,
@@ -200,23 +215,11 @@ async fn handle_remote_coprocessor(
         let body = hyper::Body::from(format!("{:?}", err));
         return Ok(hyper::Response::builder().status(500).body(body).unwrap());
     }
-    REMOTE_COPR_SNAPSHOT_HISTOGRAM.observe(ob_start.saturating_elapsed().as_secs_f64());
+    let snap_duration = snap_start.saturating_elapsed();
+    REMOTE_COPR_SNAPSHOT_HISTOGRAM.observe(snap_duration.as_secs_f64());
     let snap_access = snap_access_res.unwrap();
-    let req_type_str = match req_type {
-        REQ_TYPE_DAG => "dag".to_string(),
-        REQ_TYPE_ANALYZE => "analyze".to_string(),
-        REQ_TYPE_CHECKSUM => "checksum".to_string(),
-        _ => "".to_string(),
-    };
-    let tag = format!(
-        "{} ks{}:{}:{}",
-        req_type_str,
-        snap_access.get_keyspace_id(),
-        snap_access.get_id(),
-        snap_access.get_version()
-    );
     let snap = RegionSnapshot::from_snapshot(snap_access);
-    let ob_start = Instant::now();
+    let process_start = Instant::now();
     let result = tikv::coprocessor::parse_request_and_handle_remote_cop(
         cop_req,
         None,
@@ -230,12 +233,19 @@ async fn handle_remote_coprocessor(
         let body = hyper::Body::from(format!("{:?}", err));
         return Ok(hyper::Response::builder().status(500).body(body).unwrap());
     }
-    REMOTE_COPR_REQ_HANDLE_HISTOGRAM.observe(ob_start.saturating_elapsed().as_secs_f64());
+    let process_duration = process_start.saturating_elapsed();
+    let handle_duration = handle_start.saturating_elapsed();
+    REMOTE_COPR_REQ_HANDLE_HISTOGRAM.observe(handle_duration.as_secs_f64());
     let response = result.unwrap();
     info!(
-        "{} finished remote coprocessor resp size {}",
-        tag,
-        response.data.len()
+        "finished remote coprocessor";
+        "tag" => tag,
+        "req_size" => req_body.len(),
+        "resp_size" => response.data.len(),
+        "timeout" => ?timeout,
+        "snap_duration" => ?snap_duration,
+        "process_duration" => ?process_duration,
+        "handle_duration" => ?handle_duration,
     );
 
     match req_type {
