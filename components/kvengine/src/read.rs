@@ -326,6 +326,7 @@ impl SnapAccessCore {
             HashMap::new(),
             lock_txn_files,
             RegionLimiter::new((&shard.opt.flow_control).into()), // Note: limiter is disabled here
+            NEW_DATA_UPDATE_COUNTER,
         );
         shard.id = cs.shard_id;
         shard.set_data(data);
@@ -1352,6 +1353,7 @@ mod tests {
             HashMap::new(),
             lock_txn_files,
             RegionLimiter::dummy(),
+            NEW_DATA_UPDATE_COUNTER,
         );
         shard.set_data(data);
         let snap = shard.new_snap_access();

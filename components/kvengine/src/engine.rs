@@ -399,6 +399,7 @@ impl EngineCore {
             cs.unloaded_tables,
             lock_txn_files,
             RegionLimiter::new((&shard.opt.flow_control).into()),
+            NEW_DATA_UPDATE_COUNTER,
         );
         shard.set_data(data);
         shard

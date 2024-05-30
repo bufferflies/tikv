@@ -49,6 +49,10 @@ macro_rules! unwrap_or_return {
 const DEF_BLOCK_SIZE: usize = 4 << 10;
 const DEF_MIN_BLOB_SIZE: u32 = 64;
 
+// The shard get from TestEngine has been ingest once, so the update counter
+// starts from NEW_DATA_UPDATE_COUNTER + 1.
+const TEST_ENGINE_NEW_DATA_UPDATE_COUNTER: u64 = NEW_DATA_UPDATE_COUNTER + 1;
+
 /// Wrap `Engine` to make sure that it will be closed after the test, and not
 /// interfere with other tests.
 struct TestEngine {
@@ -611,6 +615,7 @@ fn test_lost_tombstone_issue() {
         HashMap::new(),
         vec![],
         RegionLimiter::dummy(),
+        TEST_ENGINE_NEW_DATA_UPDATE_COUNTER,
     );
     shard.set_data(data);
     let pri = CompactionPriority::L1Plus {
@@ -667,6 +672,7 @@ fn test_read_iterator_all_versions() {
         HashMap::new(),
         vec![],
         RegionLimiter::dummy(),
+        TEST_ENGINE_NEW_DATA_UPDATE_COUNTER,
     );
     shard.set_data(data);
 
@@ -740,6 +746,7 @@ fn test_level_overlapping_tables_impl(enable_inner_key_off: bool) {
         HashMap::new(),
         vec![],
         RegionLimiter::dummy(),
+        TEST_ENGINE_NEW_DATA_UPDATE_COUNTER,
     );
 
     let cf0 = data.get_cf(0);
@@ -896,8 +903,9 @@ fn test_get_suggest_split_key_impl(enable_inner_key_off: bool) {
             HashMap::new(),
             vec![],
             RegionLimiter::dummy(),
+            TEST_ENGINE_NEW_DATA_UPDATE_COUNTER,
         );
-        shard.set_data(data);
+        shard.set_data_opt(data, false);
 
         let key = shard.get_suggest_split_key();
         assert_eq!(
@@ -1081,8 +1089,9 @@ fn test_get_evenly_split_keys_impl(enable_inner_key_off: bool) {
             HashMap::new(),
             vec![],
             RegionLimiter::dummy(),
+            TEST_ENGINE_NEW_DATA_UPDATE_COUNTER,
         );
-        shard.set_data(data);
+        shard.set_data_opt(data, false);
 
         let split_keys = shard.get_evenly_split_keys(split_count);
         assert_eq!(
@@ -1144,6 +1153,7 @@ fn test_refresh_stats() {
         HashMap::new(),
         vec![],
         RegionLimiter::dummy(),
+        TEST_ENGINE_NEW_DATA_UPDATE_COUNTER,
     );
     shard.set_data(data);
     shard.refresh_states();

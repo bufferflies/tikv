@@ -145,6 +145,7 @@ impl Engine {
                 old_data.unloaded_tbls.clone(),
                 vec![],
                 RegionLimiter::new_from(&old_data.limiter),
+                NEW_DATA_UPDATE_COUNTER,
             );
             new_shard.set_data(new_data);
         }
@@ -315,10 +316,13 @@ impl Engine {
                 old_shard.range,
             );
             old_shard.set_property(DEL_PREFIXES_KEY, &[]);
-            old_shard.set_data(ShardData::new_empty(
-                old_shard.range.clone(),
-                old_shard.get_data().limiter.clone(),
-            ));
+            old_shard.set_data_opt(
+                ShardData::new_empty(
+                    old_shard.range.clone(),
+                    old_shard.get_data().limiter.clone(),
+                ),
+                false,
+            );
         }
         let mut new_shard = self.new_shard_version(&old_shard, sequence);
 
@@ -416,6 +420,7 @@ impl Engine {
                 unloaded_tbls,
                 lock_txn_files,
                 old_data.limiter.clone(),
+                old_data.update_counter + 1,
             )
         } else {
             info!(
@@ -435,6 +440,7 @@ impl Engine {
                 old_data.unloaded_tbls.clone(),
                 old_data.lock_txn_files.clone(),
                 old_data.limiter.clone(),
+                old_data.update_counter + 1,
             )
         };
         new_shard.set_data(data);
@@ -464,7 +470,7 @@ impl Engine {
             old_shard.opt.clone(),
             &self.master_key,
         );
-        new_shard.set_data(old_shard.get_data());
+        new_shard.set_data_opt(old_shard.get_data(), false);
         new_shard.set_active(old_shard.is_active());
         store_u64(&new_shard.base_version, old_shard.get_base_version());
         store_u64(&new_shard.meta_seq, sequence);

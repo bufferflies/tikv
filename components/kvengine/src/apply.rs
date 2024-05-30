@@ -269,6 +269,7 @@ impl EngineCore {
                 old_data.unloaded_tbls.clone(),
                 old_data.lock_txn_files.clone(),
                 old_data.limiter.clone(),
+                old_data.update_counter + 1,
             );
             shard.set_data(new_data);
             self.send_free_mem_msg(FreeMemMsg::FreeMem(last));
@@ -290,6 +291,7 @@ impl EngineCore {
                     old_data.unloaded_tbls.clone(),
                     old_data.lock_txn_files.clone(),
                     old_data.limiter.clone(),
+                    old_data.update_counter + 1,
                 );
                 shard.set_data(new_data);
                 self.send_free_mem_msg(FreeMemMsg::FreeMem(last));
@@ -329,6 +331,7 @@ impl EngineCore {
             data.unloaded_tbls.clone(),
             data.lock_txn_files.clone(),
             data.limiter.clone(),
+            data.update_counter + 1,
         );
         info!("{} apply_initial_flush", shard.tag();
             "seq" => cs.sequence,
@@ -401,6 +404,7 @@ impl EngineCore {
             data.unloaded_tbls.clone(),
             data.lock_txn_files.clone(),
             data.limiter.clone(),
+            data.update_counter + 1,
         );
         shard.set_data(new_data);
         self.remove_dfs_files(shard, del_files);
@@ -501,6 +505,7 @@ impl EngineCore {
             data.unloaded_tbls.clone(),
             data.lock_txn_files.clone(),
             data.limiter.clone(),
+            data.update_counter + 1,
         );
         shard.set_data(new_data);
         self.remove_dfs_files(shard, del_file_is_subrange);
@@ -590,6 +595,7 @@ impl EngineCore {
             data.unloaded_tbls.clone(),
             data.lock_txn_files.clone(),
             data.limiter.clone(),
+            data.update_counter + 1,
         );
         assert_eq!(cs.get_property_key(), DEL_PREFIXES_KEY);
         let done = DeletePrefixes::unmarshal(cs.get_property_value(), shard.inner_key_off);
@@ -617,6 +623,7 @@ impl EngineCore {
             data.unloaded_tbls.clone(),
             data.lock_txn_files.clone(),
             data.limiter.clone(),
+            data.update_counter + 1,
         );
         shard.set_data(new_data);
         let truncated_ts = TruncateTs::unmarshal(cs.get_property_value());
@@ -644,6 +651,7 @@ impl EngineCore {
             data.unloaded_tbls.clone(),
             data.lock_txn_files.clone(),
             data.limiter.clone(),
+            data.update_counter + 1,
         );
         shard.set_data(new_data);
         shard.set_property(TRIM_OVER_BOUND, TRIM_OVER_BOUND_DISABLE);
@@ -782,6 +790,7 @@ impl EngineCore {
             old_data.unloaded_tbls.clone(),
             old_data.lock_txn_files.clone(),
             old_data.limiter.clone(),
+            old_data.update_counter + 1,
         );
         shard.set_data(new_data);
         Ok(())
@@ -822,6 +831,7 @@ impl EngineCore {
             snap_data.unloaded_tbls.clone(),
             vec![],
             old_data.limiter.clone(),
+            NEW_DATA_UPDATE_COUNTER,
         );
         new_shard.set_data(new_data);
         new_shard.set_active(old_shard.is_active());

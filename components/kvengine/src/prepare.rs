@@ -338,6 +338,7 @@ impl EngineCore {
             HashMap::new(),
             data.lock_txn_files.clone(),
             data.limiter.clone(),
+            data.update_counter + 1,
         );
         shard.set_data(new_data);
         Ok(())

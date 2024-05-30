@@ -140,6 +140,7 @@ impl Engine {
             data.unloaded_tbls.clone(),
             data.lock_txn_files.clone(),
             data.limiter.clone(),
+            data.update_counter + 1,
         );
         new_data.refresh_for_limiter(&shard.tag());
         shard.set_data(new_data);
@@ -302,6 +303,7 @@ impl Engine {
             old_data.unloaded_tbls.clone(),
             lock_txn_files,
             old_data.limiter.clone(),
+            old_data.update_counter + 1,
         );
         shard.set_data(data);
         is_commit

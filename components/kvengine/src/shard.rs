@@ -143,6 +143,9 @@ pub const TRIM_OVER_BOUND_DISABLE: &[u8] = b"";
 pub const MANUAL_MAJOR_COMPACTION_ENABLE: &[u8] = &[1];
 pub const MANUAL_MAJOR_COMPACTION_DISABLE: &[u8] = b"";
 
+pub(crate) const INITIAL_UPDATE_COUNTER: u64 = 0;
+pub(crate) const NEW_DATA_UPDATE_COUNTER: u64 = 1;
+
 impl Deref for Shard {
     type Target = ShardRange;
 
@@ -742,7 +745,24 @@ impl Shard {
     }
 
     pub(crate) fn set_data(&self, data: ShardData) {
+        self.set_data_opt(data, true);
+    }
+
+    pub(crate) fn set_data_opt(&self, data: ShardData, check_update_counter: bool) {
         let mut guard = self.data.write().unwrap();
+        if check_update_counter {
+            debug_assert_eq!(
+                guard.update_counter + 1,
+                data.update_counter,
+                "{} set_data: update counter mismatch: old: {:?}, new: {:?}",
+                self.tag(),
+                guard,
+                data
+            );
+            if guard.update_counter + 1 != data.update_counter {
+                warn!("{} set_data: update counter mismatch", self.tag(); "old" => ?guard, "new" => ?data);
+            }
+        }
         *guard = data
     }
 
@@ -815,6 +835,7 @@ impl Shard {
             shard_data.unloaded_tbls.clone(),
             lock_txn_files,
             shard_data.limiter.clone(),
+            shard_data.update_counter + 1,
         );
         self.set_data(new_data);
     }
@@ -862,6 +883,21 @@ pub(crate) struct ShardData {
     pub(crate) core: Arc<ShardDataCore>,
 }
 
+impl fmt::Debug for ShardData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ShardData")
+            .field("range", &self.range)
+            .field("files", &self.get_all_files())
+            .field("txn_chunks", &self.get_txn_chunks())
+            .field("mem_table_max_ts", &self.get_mem_table_max_ts())
+            .field("mem_table_size", &self.get_mem_table_size())
+            .field("l0_total_size", &self.get_l0_total_size())
+            .field("unloaded_tbls", &self.unloaded_tbls)
+            .field("update_counter", &self.update_counter)
+            .finish()
+    }
+}
+
 impl Deref for ShardData {
     type Target = ShardDataCore;
 
@@ -881,6 +917,7 @@ impl ShardData {
             HashMap::new(),
             vec![],
             limiter,
+            INITIAL_UPDATE_COUNTER,
         )
     }
 
@@ -893,6 +930,7 @@ impl ShardData {
         unloaded_tbls: HashMap<u64, FileMeta>,
         lock_txn_files: Vec<TxnFile>,
         limiter: RegionLimiter,
+        update_counter: u64,
     ) -> Self {
         assert!(!mem_tbls.is_empty());
 
@@ -906,6 +944,7 @@ impl ShardData {
                 cfs,
                 unloaded_tbls,
                 limiter,
+                update_counter,
             }),
         }
     }
@@ -921,6 +960,7 @@ pub(crate) struct ShardDataCore {
     /// Tables that are not loaded from DFS yet.
     pub(crate) unloaded_tbls: HashMap<u64, FileMeta>,
     pub limiter: RegionLimiter,
+    pub update_counter: u64,
 }
 
 impl Deref for ShardDataCore {
