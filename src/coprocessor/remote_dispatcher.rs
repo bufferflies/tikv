@@ -30,7 +30,7 @@ use crate::{
 
 const REMOTE_REQUEST_CACHE_CAPACITY: u64 = 64;
 
-pub const REMOTE_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+pub const REMOTE_REQUEST_TIMEOUT: Duration = Duration::from_secs(60 * 5);
 pub const INCOMPLETE_MESSAGE: &str = "connection closed before message completed";
 
 pub const REMOTE_COP_FORMAT_V1: u32 = 1;
