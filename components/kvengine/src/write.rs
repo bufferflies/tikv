@@ -162,9 +162,9 @@ impl Engine {
         });
         let version = shard.get_base_version() + wb.sequence;
         self.update_write_batch_version(wb, version);
-        let data = shard.get_data();
+        let mut data = shard.get_data();
         let snap = shard.new_snap_access();
-        let mem_tbl = data.get_writable_mem_table();
+        let mut mem_tbl = data.get_writable_mem_table();
         for cf in 0..NUM_CFS {
             mem_tbl
                 .get_cf(cf)
@@ -188,8 +188,6 @@ impl Engine {
                     let mut del_prefixes =
                         DeletePrefixes::new_with_inner_key_off(shard.inner_key_off);
                     del_prefixes.merge_prefix_in_place(prefix);
-                    let data = shard.get_data();
-                    let mem_tbl = data.get_writable_mem_table();
                     if del_prefixes
                         .inner_delete_ranges()
                         .any(|(start, end)| mem_tbl.has_data_in_range(start, end))
@@ -221,8 +219,6 @@ impl Engine {
                     // TODO: handle duplicated property.
                     if shard.set_truncate_ts(v.chunk()) {
                         wb.set_switch_mem_table();
-                        let data = shard.get_data();
-                        let mem_tbl = data.get_writable_mem_table();
                         if mem_tbl.data_max_ts() > shard.get_truncate_ts().unwrap().inner() {
                             wb.set_switch_mem_table();
                         }
@@ -247,6 +243,9 @@ impl Engine {
                         wb.set_switch_mem_table();
                     }
                     need_refresh_shard_states = true;
+
+                    data = shard.get_data();
+                    mem_tbl = data.get_writable_mem_table();
                 }
                 _ => {
                     shard.properties.set(k.as_str(), v.chunk());
