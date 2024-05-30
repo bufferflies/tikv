@@ -189,9 +189,9 @@ impl ShardMeta {
     }
 
     pub fn apply_change_set(&mut self, cs: &pb::ChangeSet) {
-        if cs.sequence > 0 {
-            self.seq = cs.sequence;
-        }
+        // Keep this assert. As we will invoke this method directly in some scene.
+        debug_assert!(cs.sequence > 0, "{}: invalid cs: {:?}", self.tag(), cs);
+        self.seq = cs.sequence;
         if cs.has_initial_flush() {
             self.apply_initial_flush(cs);
             return;
@@ -307,7 +307,9 @@ impl ShardMeta {
     }
 
     pub fn is_duplicated_change_set(&self, cs: &mut pb::ChangeSet) -> bool {
-        if cs.sequence > 0 && self.seq >= cs.sequence {
+        // Keep this assert. As we will invoke this method directly in some scene.
+        debug_assert!(cs.sequence > 0, "{}: invalid cs: {:?}", self.tag(), cs);
+        if self.seq >= cs.sequence {
             info!(
                 "{} skip duplicated change {:?}, meta_seq {}",
                 self.tag(),
@@ -979,16 +981,14 @@ impl ShardMeta {
     {
         let tag = self.tag();
 
-        if log_index > 0 {
-            if self.seq >= log_index {
-                info!("{} skip stale merge txn file ref", tag;
-                    "seq" => self.seq,
-                    "log_index" => log_index,
-                    "wb_ref" => ?wb_ref);
-                return false;
-            }
-            self.seq = log_index;
+        if self.seq >= log_index {
+            info!("{} skip stale merge txn file ref", tag;
+                "seq" => self.seq,
+                "log_index" => log_index,
+                "wb_ref" => ?wb_ref);
+            return false;
         }
+        self.seq = log_index;
 
         let modified = if wb_ref.get_user_meta().is_empty() {
             let inserted = self.txn_file_locks.insert(wb_ref.start_ts);
@@ -1295,7 +1295,11 @@ mod tests {
                     },
                 ];
 
+                let mut seq = 5; // RAFT_INIT_LOG_INDEX
                 for mut cs in changesets {
+                    cs.set_sequence(seq);
+                    seq += 1;
+
                     let mut meta = meta.clone();
                     assert_eq!(
                         meta.is_duplicated_change_set(&mut cs),

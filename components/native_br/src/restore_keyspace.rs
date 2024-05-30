@@ -1787,11 +1787,12 @@ impl BackupCluster {
             .get_shard_with_ver(shard_meta.id, shard_meta.ver)
             .expect("Could not find shard with meta");
         let keyspace_id = self.keyspace_id;
-        let res_cs = kvengine
+        let mut res_cs = kvengine
             .truncate_with_ts(&shard, self.truncate_ts.into())?
             .unwrap();
         if res_cs.has_truncate_ts() && !ShardMeta::is_empty_table_change(res_cs.get_truncate_ts()) {
             let shard = self.get_shard_mut(shard_id).unwrap();
+            res_cs.set_sequence(shard.meta.seq + 1);
             debug!(
                 "Keyspace {} before truncate ts: {:?}, table change: {:?}",
                 keyspace_id,
@@ -1813,10 +1814,11 @@ impl BackupCluster {
         let shard = self.get_shard(shard_id).unwrap();
         let kvengine = self.kv_engine.as_ref().unwrap();
 
-        let res_cs = kvengine.trim_over_bound_by_meta(&shard.meta)?;
+        let mut res_cs = kvengine.trim_over_bound_by_meta(&shard.meta)?;
         let keyspace_id = self.keyspace_id;
         if res_cs.has_trim_over_bound() {
             let shard = self.get_shard_mut(shard_id).unwrap();
+            res_cs.set_sequence(shard.meta.seq + 1);
             debug!(
                 "Keyspace {} before trim_over_bound: {:?}, table change: {:?}",
                 keyspace_id,

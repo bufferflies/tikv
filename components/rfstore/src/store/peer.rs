@@ -1780,6 +1780,7 @@ impl<'a> PreprocessRef<'a> {
         ctx: &mut PreprocessContext<'_>,
         entry: &Entry,
     ) -> Option<Error> {
+        debug_assert!(entry.index > 0, "{} invalid entry: {:?}", self.tag(), entry);
         let mut preprocess_err = None;
         if *self.preprocessed_index > 0 && entry.index <= *self.preprocessed_index {
             return None;
