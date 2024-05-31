@@ -2018,7 +2018,18 @@ impl<'a> PreprocessRef<'a> {
             warn!("{} preprocess pending split failed {:?}", tag, err);
             return Err(err);
         }
-        if self.shard_meta().has_txn_file_locks() {
+        let shard_meta = self.shard_meta();
+        if shard_meta.seq >= entry.index {
+            // Duplicated split should happen only in restore snapshot. In this scene, the
+            // split must be denied by txn file locks. So skip preprocess & apply.
+            info!(
+                "{} preprocess_pending_splits: skip duplicated req", tag;
+                "meta_seq" => shard_meta.seq,
+                "entry.index" => entry.index,
+            );
+            return Ok(());
+        }
+        if shard_meta.has_txn_file_locks() {
             warn!("{} preprocess_pending_splits denied, shard has txn file locks", tag;
                 "txn_file_locks" => ?self.shard_meta().txn_file_locks(),
             );
@@ -2149,9 +2160,22 @@ impl<'a> PreprocessRef<'a> {
         entry: &Entry,
         req: &RaftCmdRequest,
     ) {
-        if self.shard_meta().has_txn_file_locks() {
+        let tag = self.tag();
+        let shard_meta = self.shard_meta();
+        if shard_meta.seq >= entry.index {
+            // Duplicated prepare merge should happen only in restore snapshot. In this
+            // scene, the prepare merge must be denied by txn file locks. So skip preprocess
+            // & apply.
+            info!(
+                "{} preprocess_prepare_merge: skip duplicated req", tag;
+                "meta_seq" => shard_meta.seq,
+                "entry.index" => entry.index,
+            );
+            return;
+        }
+        if shard_meta.has_txn_file_locks() {
             // Error response is returned by `exec_admin_cmd`, so do not return error here.
-            warn!("{} preprocess_prepare_merge denied, shard has txn file locks", self.tag();
+            warn!("{} preprocess_prepare_merge denied, shard has txn file locks", tag;
                 "txn_file_locks" => ?self.shard_meta().txn_file_locks());
             return;
         }
