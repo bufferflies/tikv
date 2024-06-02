@@ -17,7 +17,7 @@ use bytes::Bytes;
 use http::{Method, Request};
 use hyper::{client::HttpConnector, server::conn::AddrIncoming, Body, Uri};
 use hyper_rustls::{HttpsConnector, TlsAcceptor};
-use rustls::server::AllowAnyAuthenticatedClient;
+use rustls::server::AllowAnyAnonymousOrAuthenticatedClient;
 use rustls_pemfile::Item;
 use tikv_util::{box_err, debug, Either};
 
@@ -50,11 +50,11 @@ impl SecurityManager {
 
         let tls_config = rustls::ServerConfig::builder()
             .with_safe_defaults()
-            .with_client_cert_verifier(AllowAnyAuthenticatedClient::new(ca).boxed())
+            .with_client_cert_verifier(AllowAnyAnonymousOrAuthenticatedClient::new(ca).boxed())
             .with_single_cert(cert, key)?;
         let acceptor = TlsAcceptor::builder()
             .with_tls_config(tls_config)
-            .with_all_versions_alpn()
+            .with_alpn_protocols(vec![b"http/1.1".to_vec(), b"h2".to_vec()])
             .with_incoming(incoming);
 
         Ok(acceptor)
@@ -311,7 +311,7 @@ mod tests {
             vec![
                 "127.0.0.1".to_string(),
                 "127.0.0.2:4379".to_string(),
-                "127.0.0.3:4380".to_string()
+                "127.0.0.3:4380".to_string(),
             ]
         );
     }
