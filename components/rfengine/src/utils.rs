@@ -95,14 +95,14 @@ pub fn wal_file_key(store_id: u64, epoch_id: u32, start_off: u64, end_off: u64) 
     )
 }
 
-pub(crate) fn snapshot_store_meta_key(store_id: u64, epoch: u32) -> String {
+pub fn snapshot_store_meta_key(store_id: u64, epoch: u32) -> String {
     format!(
         "store_backup/{:016x}/snapshots/m{:08x}.meta",
         store_id, epoch
     )
 }
 
-pub(crate) fn snapshot_rlog_key(store_id: u64, epoch: u32) -> String {
+pub fn snapshot_rlog_key(store_id: u64, epoch: u32) -> String {
     format!(
         "store_backup/{:016x}/snapshots/r{:08x}.rlog",
         store_id, epoch

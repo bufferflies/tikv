@@ -8,6 +8,7 @@ use std::{
     time::Duration,
 };
 
+use engine_traits::ObjectStorage;
 use kvengine::{
     dfs::{DFSConfig, Dfs, S3Fs},
     ShardStats, WRITE_CF,
@@ -80,7 +81,6 @@ fn test_restore_keyspace() {
         target_regions,
         enable_inner_key_off: true,
         lightweight: true,
-        archiving: false,
     });
 }
 
@@ -90,32 +90,28 @@ fn test_restore_keyspace_regression() {
     test_restore_keyspace_opt(TestRestoreKeyspaceOptions {
         enable_inner_key_off: false,
         lightweight: false,
-        archiving: false,
         ..Default::default()
     });
     // Regression test for `lightweight` disabled.
     test_restore_keyspace_opt(TestRestoreKeyspaceOptions {
         enable_inner_key_off: true,
         lightweight: false,
-        archiving: false,
         ..Default::default()
     });
 }
 
 #[test]
 fn test_restore_keyspace_with_archive() {
-    // Test archiving without `inner_key_off`and lightweight backup.
-    test_restore_keyspace_opt(TestRestoreKeyspaceOptions {
+    // Test archiving without `inner_key_off`.
+    test_restore_archived_keyspace_opt(TestRestoreKeyspaceOptions {
         enable_inner_key_off: false,
-        lightweight: false,
-        archiving: true,
+        lightweight: true,
         ..Default::default()
     });
-    // Test archiving with `inner_key_off` and lightweight backup.
-    test_restore_keyspace_opt(TestRestoreKeyspaceOptions {
+    // Test archiving with `inner_key_off`.
+    test_restore_archived_keyspace_opt(TestRestoreKeyspaceOptions {
         enable_inner_key_off: true,
         lightweight: true,
-        archiving: true,
         ..Default::default()
     });
 }
@@ -125,7 +121,6 @@ struct TestRestoreKeyspaceOptions {
     target_regions: usize,
     enable_inner_key_off: bool,
     lightweight: bool,
-    archiving: bool,
 }
 
 impl Default for TestRestoreKeyspaceOptions {
@@ -135,7 +130,6 @@ impl Default for TestRestoreKeyspaceOptions {
             target_regions: DEFAULT_TARGET_REGIONS,
             enable_inner_key_off: true,
             lightweight: true,
-            archiving: false,
         }
     }
 }
@@ -175,13 +169,6 @@ fn test_restore_keyspace_opt(options: TestRestoreKeyspaceOptions) {
     let pd_client = cluster.get_pd_client();
     let mut client = cluster.new_client();
 
-    if options.archiving {
-        pd_client.set_tso(TimeStamp::compose(
-            chrono::Utc::now().timestamp_millis() as u64,
-            0,
-        ));
-    }
-
     // Split keyspaces.
     for keyspace_id in 0..=KEYSPACE_COUNT {
         client.split(&get_keyspace_prefix(keyspace_id as u32));
@@ -219,21 +206,6 @@ fn test_restore_keyspace_opt(options: TestRestoreKeyspaceOptions) {
         }
 
         for loop_idx in 0..loop_count {
-            if options.archiving {
-                test_restore_archived_keyspace_impl(
-                    case_idx,
-                    loop_idx,
-                    &mut cluster,
-                    &dfs_config,
-                    keyspace_id,
-                    data_count,
-                    shuffle_regions,
-                    has_learner,
-                    options.lightweight,
-                    &runtime,
-                );
-                continue;
-            }
             test_restore_keyspace_impl(
                 case_idx,
                 loop_idx,
@@ -542,6 +514,80 @@ fn test_restore_keyspace_impl(
     step!("verify more writes done");
 }
 
+fn test_restore_archived_keyspace_opt(options: TestRestoreKeyspaceOptions) {
+    let cases = vec![
+        // keyspace_id, data_count, loop_count
+        (1, 1, 1),
+        (1, 100, options.loop_count),
+        (2, 1, 1),
+    ];
+
+    let (_temp_dir, mut oss, dfs_config) = prepare_dfs("test_restore_keyspace_");
+    let mut cluster = ServerCluster::new(
+        alloc_node_id_vec(NODES_COUNT),
+        |_, conf: &mut TikvConfig| {
+            conf.dfs = dfs_config.clone();
+            // Set small mem-table size to make data reach L1 and generate over bound
+            // shards.
+            conf.rocksdb.writecf.write_buffer_size = ReadableSize::kb(1);
+            conf.coprocessor.region_split_size = ReadableSize::kb(128); // kv_opts.base_size = 8kb
+            conf.coprocessor.region_bucket_size = ReadableSize::kb(64);
+            conf.rfengine.target_file_size = ReadableSize::kb(128);
+            conf.rfengine.lightweight_backup = options.lightweight;
+            conf.rfengine.wal_chunk_target_file_size = ReadableSize::kb(32);
+            conf.enable_inner_key_offset = options.enable_inner_key_off;
+        },
+    );
+    cluster.wait_region_replicated(&[], 3);
+    let pd_client = cluster.get_pd_client();
+    let mut client = cluster.new_client();
+
+    pd_client.set_tso(TimeStamp::compose(
+        chrono::Utc::now().timestamp_millis() as u64,
+        0,
+    ));
+
+    // Split keyspaces.
+    for keyspace_id in 0..=KEYSPACE_COUNT {
+        client.split(&get_keyspace_prefix(keyspace_id as u32));
+    }
+    cluster.wait_pd_region_count(KEYSPACE_COUNT + 2);
+
+    // Import basic data.
+    for keyspace_id in 0..KEYSPACE_COUNT {
+        client.put_kv(
+            0..BASIC_DATA_COUNT,
+            gen_keyspace_key(keyspace_id as u32),
+            i_to_val(BASIC_DATA_LEN),
+        );
+    }
+
+    let runtime = Runtime::new().unwrap();
+
+    // Run cases.
+    for (case_idx, &(keyspace_id, data_count, loop_count)) in cases.iter().enumerate() {
+        step!("case group: {case_idx}");
+
+        pd_client.enable_default_operator(); // Remove learners by peer count check.
+
+        for loop_idx in 0..loop_count {
+            test_restore_archived_keyspace_impl(
+                case_idx,
+                loop_idx,
+                &mut cluster,
+                &dfs_config,
+                keyspace_id,
+                data_count,
+                options.lightweight,
+                &runtime,
+            );
+        }
+    }
+
+    cluster.stop();
+    oss.shutdown();
+}
+
 fn test_restore_archived_keyspace_impl(
     case_idx: usize,
     loop_idx: usize,
@@ -549,19 +595,12 @@ fn test_restore_archived_keyspace_impl(
     dfs_config: &DFSConfig,
     keyspace_id: u32,
     data_count: usize,
-    shuffle_regions: Option<usize>,
-    has_learner: bool,
     lightweight: bool,
     runtime: &Runtime,
 ) {
     step!("case: {}:{}", case_idx, loop_idx);
-    let mut rng = rand::thread_rng();
     let mut client = cluster.new_client();
     let i_to_key = gen_keyspace_key(keyspace_id);
-    let (keyspace_start, keyspace_end) = (
-        get_keyspace_prefix(keyspace_id),
-        get_keyspace_prefix(keyspace_id + 1),
-    );
 
     let backup_config = backup::BackupConfig {
         dfs: dfs_config.clone(),
@@ -632,6 +671,10 @@ fn test_restore_archived_keyspace_impl(
         .expect("backup::backup_cluster");
         info!("backup_cluster result: {:?}", backup_meta);
 
+        for node_id in cluster.get_nodes() {
+            cluster.get_rfengine(node_id).upload_wal_chunk();
+        }
+
         // Archive backup.
         archive::archive_cluster_backup(
             archive_config.clone(),
@@ -657,7 +700,49 @@ fn test_restore_archived_keyspace_impl(
         .date();
         let archive_reader =
             archive::ArchiveReader::new(s3fs.clone(), &snapshot_backup_date).unwrap();
+
+        let last_archived_snapshot_backup_date = chrono::NaiveDateTime::from_timestamp_millis(
+            TimeStamp::from(backup_ts_list[BACKUP_DAYS - 2]).physical() as i64,
+        )
+        .unwrap()
+        .date();
+        let last_archive_reader =
+            archive::ArchiveReader::new(s3fs.clone(), &last_archived_snapshot_backup_date).unwrap();
+
+        let mut old_wal_rlog_keys = Vec::new();
+        let mut old_wal_chunks_len = 0;
+        for node_id in cluster.get_nodes() {
+            let store_id = cluster.get_store_id(node_id);
+            let store_meta = archive_reader.get_store_wal_rlog_meta(store_id).unwrap();
+            let last_archived_store_meta = last_archive_reader
+                .get_store_wal_rlog_meta(store_id)
+                .unwrap();
+            for epoch_id in
+                store_meta.snapshot_epoch_id..=last_archived_store_meta.snapshot_epoch_id
+            {
+                if epoch_id < last_archived_store_meta.snapshot_epoch_id {
+                    let old_meta_key = rfengine::snapshot_store_meta_key(store_id, epoch_id);
+                    old_wal_rlog_keys.push(format!("{}/{}", s3fs.get_prefix(), old_meta_key));
+                    let old_rlog_key = rfengine::snapshot_rlog_key(store_id, epoch_id);
+                    old_wal_rlog_keys.push(format!("{}/{}", s3fs.get_prefix(), old_rlog_key));
+                }
+                let old_wal_chunk_prefix = rfengine::wal_chunk_file_prefix(store_id, epoch_id);
+                let old_wal_chunk_keys = s3fs
+                    .list_objects("", Some(&old_wal_chunk_prefix), None)
+                    .map(|(objects, _)| {
+                        objects
+                            .iter()
+                            .map(|object| object.key.clone())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap();
+                old_wal_chunks_len += old_wal_chunk_keys.len();
+                old_wal_rlog_keys.extend(old_wal_chunk_keys)
+            }
+        }
         let old_file_ids = archive_reader.get_file_ids();
+        let old_file_ids_len = old_file_ids.len();
+        let mut deleted_old_wal_rlog_cnt = 0;
         s3fs.get_runtime().block_on(async {
             for idx in 0..BACKUP_DAYS - 1 {
                 let backup_ts = backup_ts_list[idx];
@@ -670,57 +755,38 @@ fn test_restore_archived_keyspace_impl(
                     .await
                     .unwrap();
             }
+
+            for wal_rlog_key in old_wal_rlog_keys {
+                if s3fs
+                    .exist(wal_rlog_key.clone(), wal_rlog_key.clone())
+                    .await
+                    .unwrap()
+                {
+                    s3fs.delete_object(wal_rlog_key.clone(), wal_rlog_key)
+                        .await
+                        .unwrap();
+                    deleted_old_wal_rlog_cnt += 1;
+                }
+            }
+
             for file_id in old_file_ids {
                 s3fs.delete_object(s3fs.file_key(file_id), file_id.to_string())
                     .await
                     .unwrap();
             }
         });
+        let old_rlog_len = (deleted_old_wal_rlog_cnt - old_wal_chunks_len) / 2;
         step!(
-            "delete old backup meta and sst files done. case: {}:{}",
+            "delete old backup meta, snap rlog {}, wal chunks {} and sst files {} done. case: {}:{}",
+            old_rlog_len,
+            old_wal_chunks_len,
+            old_file_ids_len,
             case_idx,
             loop_idx,
         );
     }
 
     for idx in 0..BACKUP_DAYS - 1 {
-        // Shuffle regions.
-        if let (Some(shuffle_regions), 0) = (shuffle_regions, loop_idx) {
-            let keyspace_prefix = get_keyspace_prefix(keyspace_id);
-            let region_count = client.pd_client.get_regions_number();
-            let mut i = 0;
-            while i < shuffle_regions {
-                let split_key = rng.gen::<usize>() % data_count;
-                if let Err(e) = client.try_split(&i_to_key(split_key), 1) {
-                    warn!("try split error: {:?}", e);
-                    continue;
-                }
-                i += 1;
-            }
-
-            cluster.wait_pd_region_min_count(region_count + shuffle_regions);
-            let split_region_count = client.pd_client.get_regions_number();
-
-            for _ in 0..(shuffle_regions / 2) {
-                let source_key = rng.gen::<usize>() % data_count;
-                if let Err(e) = client.try_merge_adjacent_region(
-                    &i_to_key(source_key),
-                    Some(&keyspace_prefix),
-                    Duration::from_secs(3),
-                ) {
-                    warn!("try_merge_adjacent_region fail: {:?}", e);
-                }
-            }
-
-            let merge_region_count = client.pd_client.get_regions_number();
-            step!(
-                "shuffle regions done, regions {} -> {} -> {}",
-                region_count,
-                split_region_count,
-                merge_region_count
-            );
-        }
-
         // Restore keyspace.
         {
             let snapshot_backup_ts = backup_ts_list[idx];
@@ -744,16 +810,8 @@ fn test_restore_archived_keyspace_impl(
 
         // Verify restored data.
         {
-            let mut verify_options: Vec<(Option<(&[u8], &[u8])>, RequestOptions)> =
+            let verify_options: Vec<(Option<(&[u8], &[u8])>, RequestOptions)> =
                 vec![(None, RequestOptions::default())];
-            if has_learner {
-                verify_options.push((
-                    Some((&keyspace_start, &keyspace_end)),
-                    RequestOptions {
-                        peer_role: RequestPeerRole::Learner,
-                    },
-                ));
-            }
             let mut verify_res = vec![];
             for (range, opt) in verify_options {
                 verify_res.push(
@@ -763,8 +821,7 @@ fn test_restore_archived_keyspace_impl(
                 );
             }
             step!(
-                "verify restore data done{}, kv count: {:?}, case: {}:{}:{}",
-                if has_learner { " (with learner)" } else { "" },
+                "verify restore data done, kv count: {:?}, case: {}:{}:{}",
                 verify_res,
                 case_idx,
                 loop_idx,

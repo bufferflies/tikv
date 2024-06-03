@@ -44,11 +44,12 @@ use tokio::runtime::Runtime;
 use crate::{
     archive::{
         get_cluster_backup_file_and_meta, get_incremental_backup_with_name, get_not_found_files,
-        ArchiveReader,
+        ArchiveReader, StoreMeta,
     },
     common::{
-        load_peer_raft_state, load_rf_engine_meta, now, replay_wal_logs, retain_sst_files,
-        send_request_to_store, RawRegion, RegionMetaGetter, StorePeer,
+        collect_store_wal_rlog_files, load_peer_raft_state, load_rf_engine_meta, now,
+        replay_wal_logs, retain_sst_files, send_request_to_store, RawRegion, RegionMetaGetter,
+        StorePeer,
     },
     error::{
         Error,
@@ -68,9 +69,9 @@ const REPLICAS: usize = 3; // Number of replicas for each region.
 
 const RESOLVE_LOCKS_BATCH_SIZE: usize = 1024;
 
-const WAL_CHUNK_INTEGRITY_CHECK_COUNT: usize = 3;
+pub const WAL_CHUNK_INTEGRITY_CHECK_COUNT: usize = 3;
 
-const RESTORE_RFENGINE_CONCURRENCY: usize = 3;
+pub const RESTORE_RFENGINE_CONCURRENCY: usize = 3;
 
 #[derive(Clone, Debug, Default)]
 pub struct RestoredKeyspace {
@@ -750,6 +751,12 @@ impl BackupCluster {
             let pd_client = cluster.pd_client.clone();
             let s3fs = cluster.dfs.clone();
             let keyspace_tag = cluster.tag().to_string();
+            let archive_store_meta = if let Some(archive_reader) = &cluster.archive_reader {
+                let store_meta = archive_reader.get_store_wal_rlog_meta(store_id)?;
+                Some((archive_reader.get_start_date(), store_meta))
+            } else {
+                None
+            };
             std::thread::spawn(move || {
                 let res = BackupCluster::setup_raft_engine(
                     store_id,
@@ -757,8 +764,9 @@ impl BackupCluster {
                     &store_config,
                     pd_client,
                     s3fs,
-                    keyspace_tag.clone(),
                     fetch_wal_timeout,
+                    archiving,
+                    archive_store_meta,
                 );
                 if res.is_err() {
                     warn!(
@@ -804,22 +812,24 @@ impl BackupCluster {
         conf: &TikvConfig,
         pd_client: Arc<dyn PdClient>,
         dfs: Arc<S3Fs>,
-        tag: String,
         fetch_wal_timeout: Duration,
+        archiving: bool,
+        archive_store_meta: Option<(String, StoreMeta)>, // archive date, archive store meta
     ) -> Result<RfEngine> {
-        let is_lightweight = cluster_backup.is_lightweight;
-        let snap_epoch = if is_lightweight {
-            Some(
-                rfengine::lightweight_restore(
-                    dfs.clone(),
-                    &dfs.get_prefix(),
-                    cluster_backup,
-                    store_id,
-                    Path::new(&conf.raft_store.raftdb_path),
-                    None,
-                )
-                .map_err(|x| Error::RfEngine(x))?,
+        let wals = if cluster_backup.is_lightweight {
+            let wal_rlog_files = if let Some((date, store_meta)) = archive_store_meta {
+                ArchiveReader::read_store_wal_rlog_files(&dfs, date, store_meta)?
+            } else {
+                collect_store_wal_rlog_files(dfs.clone(), cluster_backup, store_id)?
+            };
+            rfengine::lightweight_restore(
+                Path::new(&conf.raft_store.raftdb_path),
+                wal_rlog_files.snap_epoch,
+                wal_rlog_files.snap_meta,
+                wal_rlog_files.snap_rlog,
             )
+            .map_err(|x| Error::RfEngine(x))?;
+            Some(wal_rlog_files.wals)
         } else {
             rfengine::restore(
                 dfs.clone(),
@@ -833,45 +843,20 @@ impl BackupCluster {
 
         let rf_engine = TikvServer::init_raft_engine(conf)?;
 
-        if is_lightweight {
-            // `snap_epoch` is the latest snapshot manifest epoch. If no snapshot found,
-            // the `snap_epoch` is 0. Replay wal logs from `snap_epoch` + 1 to backup point.
-            let mut replay_wal_retry = 0;
-            loop {
-                match replay_wal_logs(
-                    pd_client.clone(),
-                    dfs.clone(),
-                    store_id,
-                    cluster_backup,
-                    &rf_engine,
-                    snap_epoch.unwrap(),
-                    false,
-                    fetch_wal_timeout,
-                ) {
-                    Ok(_) => {
-                        break;
-                    }
-                    Err(Error::WalChunkIntegrityError(msg)) => {
-                        // If the dfs_worker upload the wal chunk is slow, there may be some wal
-                        // chunks are not uploaded to s3 in previous epoch. So we need to retry
-                        // replay wal chunks when meet wal chunks integrity error.
-                        replay_wal_retry += 1;
-                        if replay_wal_retry > WAL_CHUNK_INTEGRITY_CHECK_COUNT {
-                            return Err(Error::WalChunkIntegrityError(msg));
-                        }
-                        warn!(
-                            "{} wal chunk integrity check failed, retry replay wal chunks, retry {} times.",
-                            tag, replay_wal_retry
-                        );
-                        let sleep_secs = 2u64.pow(replay_wal_retry as u32);
-                        std::thread::sleep(Duration::from_secs(sleep_secs));
-                        continue;
-                    }
-                    Err(e) => {
-                        return Err(e);
-                    }
-                }
-            }
+        if let Some(wals) = wals {
+            // When archiving, the dfs should have complete wal chunks.
+            let complete_wal_chunks = archiving;
+            replay_wal_logs(
+                pd_client.clone(),
+                dfs,
+                store_id,
+                cluster_backup,
+                &rf_engine,
+                complete_wal_chunks,
+                false,
+                fetch_wal_timeout,
+                wals,
+            )?;
         }
         Ok(rf_engine)
     }

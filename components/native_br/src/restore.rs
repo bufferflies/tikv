@@ -25,7 +25,8 @@ use tikv_util::{
 use crate::{
     backup::backup_file_full_path,
     common::{
-        check_store_id_exists, generate_etcd_connect_opt, get_latest_backup_meta, replay_wal_logs,
+        check_store_id_exists, collect_store_wal_rlog_files, generate_etcd_connect_opt,
+        get_latest_backup_meta, replay_wal_logs,
     },
     error::{Error, Result},
 };
@@ -248,18 +249,16 @@ fn setup_raft_engine(
     path: &str,
     dfs: Arc<S3Fs>,
 ) -> Result<()> {
-    let snap_epoch = if lightweight {
-        Some(
-            rfengine::lightweight_restore(
-                dfs.clone(),
-                &dfs.get_prefix(),
-                cluster_backup,
-                store_id,
-                Path::new(&conf.raft_store.raftdb_path),
-                None,
-            )
-            .map_err(|x| Error::RfEngine(x))?,
+    let wals = if lightweight {
+        let wal_rlog_files = collect_store_wal_rlog_files(dfs.clone(), cluster_backup, store_id)?;
+        rfengine::lightweight_restore(
+            Path::new(&conf.raft_store.raftdb_path),
+            wal_rlog_files.snap_epoch,
+            wal_rlog_files.snap_meta,
+            wal_rlog_files.snap_rlog,
         )
+        .map_err(|x| Error::RfEngine(x))?;
+        Some(wal_rlog_files.wals)
     } else {
         rfengine::restore(
             dfs.clone(),
@@ -274,7 +273,7 @@ fn setup_raft_engine(
     let rf_engine = TikvServer::init_raft_engine(conf)?;
     rf_engine.set_engine_id(store_id);
 
-    if lightweight {
+    if let Some(wals) = wals {
         // `snap_epoch` is the latest snapshot manifest epoch. If no snapshot found,
         // the `snap_epoch` is 0. Replay wal logs from `snap_epoch` + 1 to backup point.
         replay_wal_logs(
@@ -283,9 +282,10 @@ fn setup_raft_engine(
             store_id,
             cluster_backup,
             &rf_engine,
-            snap_epoch.unwrap(),
+            true,
             true,
             Duration::from_secs(1), // NOTE: Retry is unnecessary for full restoration.
+            wals,
         )?;
     }
     setup_raft_engine_new_store_id(&rf_engine, cluster_backup, store_id, alloc_id);

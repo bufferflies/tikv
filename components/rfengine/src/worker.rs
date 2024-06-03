@@ -127,6 +127,7 @@ impl Worker {
                     end_off,
                     callback,
                 } => self.handle_dump(epoch_id, start_off, end_off, callback),
+                Task::Upload => self.handle_flush(),
                 Task::Write { wb } => self.handle_write(&wb),
                 Task::Snapshot => {
                     info!("{}: init trigger snapshot", self.manifest.get_engine_id());
@@ -149,6 +150,18 @@ impl Worker {
             }
             task_sender.send(ObjectStorageTask::Close).unwrap();
             handle.join().unwrap();
+        }
+    }
+
+    fn handle_flush(&mut self) {
+        if self.is_lightweight_enabled() {
+            // Send flush task to object storage worker.
+            self.dfs_worker_handle
+                .as_ref()
+                .unwrap()
+                .task_sender
+                .send(ObjectStorageTask::Flush)
+                .unwrap();
         }
     }
 
@@ -780,6 +793,7 @@ pub(crate) enum Task {
         end_off: u64,
         callback: Box<dyn FnOnce(Result<Bytes>) + Send>,
     },
+    Upload,
     Write {
         wb: WriteBatch,
     },

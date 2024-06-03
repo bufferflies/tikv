@@ -69,16 +69,16 @@ testexport = ["raftstore/testexport", "tikv/testexport", "pd_client/testexport"]
 profiling = ["profiler/profiling"]
 
 test-engine-kv-rocksdb = [
-  "raftstore/test-engine-kv-rocksdb"
+    "raftstore/test-engine-kv-rocksdb"
 ]
 test-engine-raft-raft-engine = [
-  "raftstore/test-engine-raft-raft-engine"
+    "raftstore/test-engine-raft-raft-engine"
 ]
 test-engines-rocksdb = [
-  "raftstore/test-engines-rocksdb",
+    "raftstore/test-engines-rocksdb",
 ]
 test-engines-panic = [
-  "raftstore/test-engines-panic",
+    "raftstore/test-engines-panic",
 ]
 jemalloc = ["tikv/jemalloc"]
 mimalloc = ["tikv/mimalloc"]
@@ -125,11 +125,12 @@ raft = { version = "0.7.0", default-features = false, features = ["protobuf-code
 raft_log_engine = { workspace = true }
 raftstore = { workspace = true }
 rand = "0.8.3"
+rfengine = { workspace = true }
 rfenginepb = { workspace = true }
 rfstore = { workspace = true }
 slog = { version = "2.3", features = ["max_level_trace", "release_max_level_debug"] }
 slog-global = { version = "0.1", git = "https://github.com/breeswish/slog-global.git", rev = "d592f88e4dbba5eb439998463054f1a44fbf17b9" }
-sqlx = { version = "0.5", features = [ "runtime-tokio-rustls", "mysql" ] }
+sqlx = { version = "0.5", features = ["runtime-tokio-rustls", "mysql"] }
 tempfile = "3.0"
 tidb_query_aggr = { workspace = true }
 tidb_query_common = { workspace = true }

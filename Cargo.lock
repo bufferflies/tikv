@@ -7995,6 +7995,7 @@ dependencies = [
  "rand 0.8.5",
  "rand_xorshift",
  "resource_metering",
+ "rfengine",
  "rfenginepb",
  "rfstore",
  "security",

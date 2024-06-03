@@ -20,10 +20,13 @@ use tikv_util::{error, info, mpsc::Receiver, time::Instant, warn};
 
 use crate::{
     backup::{backup_file_full_path, IncrementalBackupFile},
-    common::{create_pd_client, INCREMENTAL_BACKUP_FOLDER_FORMAT},
+    common::{
+        collect_store_wal_rlog_files, create_pd_client, StoreWalRlog,
+        INCREMENTAL_BACKUP_FOLDER_FORMAT,
+    },
     error::{Error, Result},
     restore::RestoreConfig,
-    restore_keyspace::BackupCluster,
+    restore_keyspace::{BackupCluster, RESTORE_RFENGINE_CONCURRENCY},
 };
 
 pub const DEFAULT_MAX_ARCHIVE_FILE_SIZE: u64 = 1024 * 1024 * 1024;
@@ -38,6 +41,7 @@ pub const OBJECT_ADDR_SIZE: usize = 20;
 const ARCHIVE_MAGIC_NUMBER: u32 = 0x923d4deb;
 
 pub const ARCHIVE_INDEX_FORMAT_V1: u32 = 1;
+pub const ARCHIVE_INDEX_FORMAT_V2: u32 = 2;
 
 // Object address format:
 //
@@ -49,7 +53,7 @@ pub const ARCHIVE_INDEX_FORMAT_V1: u32 = 1;
 // |           length: u64           |
 // +---------------------------------+
 //
-// Archive index format:
+// Archive index format v1:
 //
 // +---------------------------------+
 // |        magic number: u32        |
@@ -67,6 +71,98 @@ pub const ARCHIVE_INDEX_FORMAT_V1: u32 = 1;
 // |             ...                 |
 // +---------------------------------+
 // |            file id n            |
+// +---------------------------------+
+// |       sst object address 1      |
+// +---------------------------------+
+// |       sst object address 2      |
+// +---------------------------------+
+// |             ...                 |
+// +---------------------------------+
+// |       sst object address n      |
+// +---------------------------------+
+//
+// Wal meta format:
+//
+// +---------------------------------+
+// |          epoch id: u32          |
+// +---------------------------------+
+// |      num of wal chunks: u32     |
+// +---------------------------------+
+// |    wal chunk object address 1   |
+// +---------------------------------+
+// |    wal chunk object address 2   |
+// +---------------------------------+
+// |               ...               |
+// +---------------------------------+
+// |    wal chunk object address n   |
+// +---------------------------------+
+//
+// Store backup meta format:
+//
+// +---------------------------------+
+// |          store id: u64          |
+// +---------------------------------+
+// |     snapshot epoch id: u32      |
+// +---------------------------------+
+// |  snapshot meta object address   |
+// +---------------------------------+
+// |  snapshot rlog object address   |
+// +---------------------------------+
+// |      num of wal metas: u32      |
+// +---------------------------------+
+// |      wal meta length 1: u32     |
+// +---------------------------------+
+// |      wal meta length 2: u32     |
+// +---------------------------------+
+// |               ...               |
+// +---------------------------------+
+// |      wal meta length n: u32     |
+// +---------------------------------+
+// |            wal meta 1           |
+// +---------------------------------+
+// |            wal meta 2           |
+// +---------------------------------+
+// |               ...               |
+// +---------------------------------+
+// |            wal meta n           |
+// +---------------------------------+
+//
+// Archive index format v2:
+//
+// +---------------------------------+
+// |        magic number: u32        |
+// +---------------------------------+
+// |          version: u32           |
+// +---------------------------------+
+// |   cluster meta object address   |
+// +---------------------------------+
+// |        num of stores: u32       |
+// +---------------------------------+
+// |    store meta length 1: u32     |
+// +---------------------------------+
+// |    store meta length 2: u32     |
+// +---------------------------------+
+// |               ...               |
+// +---------------------------------+
+// |    store meta length n: u32     |
+// +---------------------------------+
+// |          store meta 1           |
+// +---------------------------------+
+// |          store meta 2           |
+// +---------------------------------+
+// |               ...               |
+// +---------------------------------+
+// |          store meta n           |
+// +---------------------------------+
+// |      num of file ids: u32       |
+// +---------------------------------+
+// |          file id 1: u64         |
+// +---------------------------------+
+// |          file id 2: u64         |
+// +---------------------------------+
+// |             ...                 |
+// +---------------------------------+
+// |          file id n: u64         |
 // +---------------------------------+
 // |       sst object address 1      |
 // +---------------------------------+
@@ -315,14 +411,45 @@ fn write_archive_packages_and_index(
     );
     let format_date = archive_format_date(&archive_backup.date);
     if !config.dry_run {
+        let mut cluster_backup = ClusterBackupMeta::new();
+        cluster_backup
+            .merge_from_bytes(&archive_backup.meta_data)
+            .unwrap();
         let mut writer = ArchiveWriter::new(
             config.max_archive_file_size,
             config.concurrency,
-            s3fs,
+            s3fs.clone(),
             format_date,
             archive_backup.meta_data,
         );
-        writer.append_files(deleted)?;
+        let (result_tx, result_rx) = tikv_util::mpsc::bounded(cluster_backup.stores.len());
+        let mut recv_store_wal_rlog_files =
+            |result_rx: &Receiver<Result<StoreWalRlog>>| -> Result<()> {
+                let store_wal_rlog_files = result_rx.recv().unwrap()?;
+                writer.append_store_wal_rlog_files(store_wal_rlog_files);
+                Ok(())
+            };
+        let mut msg_count = 0;
+        for store in &cluster_backup.stores {
+            let store_id = store.get_store_id();
+            let dfs = s3fs.clone();
+            let cluster_backup_meta = cluster_backup.clone();
+            let tx = result_tx.clone();
+            std::thread::spawn(move || {
+                let store_wal_rlog_files =
+                    collect_store_wal_rlog_files(dfs, &cluster_backup_meta, store_id);
+                let _ = tx.send(store_wal_rlog_files);
+            });
+            if msg_count < RESTORE_RFENGINE_CONCURRENCY {
+                msg_count += 1;
+            } else {
+                recv_store_wal_rlog_files(&result_rx)?;
+            }
+        }
+        for _ in 0..msg_count {
+            recv_store_wal_rlog_files(&result_rx)?;
+        }
+        writer.append_sst_files(deleted)?;
         writer.finish();
     }
     Ok(())
@@ -349,7 +476,13 @@ fn get_cluster_backup_files(
             cluster_id, cluster_backup.cluster_id,
         )));
     }
-    let start_time = Instant::now();
+    if !cluster_backup.is_lightweight {
+        return Err(Error::ArchiveError(
+            "only support lightweight backups".to_string(),
+        ));
+    }
+    let start_time = Instant::now_coarse();
+
     let restore_conf = RestoreConfig {
         security: security_conf,
         ..Default::default()
@@ -542,6 +675,9 @@ pub fn get_archive_index(s3fs: &S3Fs, date: String) -> Result<(ArchiveIndex, Byt
 }
 
 pub async fn get_archived_object(s3fs: &S3Fs, archive_addr: ArchiveAddress) -> Result<Bytes> {
+    if archive_addr.object_addr.length == 0 {
+        return Ok(Bytes::new());
+    }
     let package_key = archive_package_key(
         s3fs.get_prefix(),
         archive_addr.date.clone(),
@@ -562,6 +698,64 @@ pub async fn get_archived_object(s3fs: &S3Fs, archive_addr: ArchiveAddress) -> R
             );
             Error::DfsError(e)
         });
+}
+
+pub fn get_archived_wals(
+    s3fs: &S3Fs,
+    date: String,
+    store_meta: &StoreMeta,
+) -> Result<Vec<(u32, Vec<Bytes>)>> {
+    let mut wals = Vec::with_capacity(store_meta.wal_metas.len());
+    let mut handles = vec![];
+    let runtime = s3fs.get_runtime();
+    for wal_meta in &store_meta.wal_metas {
+        let epoch = wal_meta.epoch_id;
+        for wal_chunk_address in &wal_meta.wal_chunk_addresses {
+            let key = (
+                epoch,
+                wal_chunk_address.package_id,
+                wal_chunk_address.offset,
+            );
+            let wal_chunk_archive_addr = ArchiveAddress::new(date.clone(), *wal_chunk_address);
+            let fs = s3fs.clone();
+            handles.push(runtime.spawn(async move {
+                get_archived_object(&fs, wal_chunk_archive_addr)
+                    .await
+                    .map(|data| (key, epoch, data))
+            }));
+        }
+    }
+    let mut wal_chunks = vec![];
+    let mut errs = vec![];
+    for res in runtime.block_on(futures::future::join_all(handles)) {
+        match res.unwrap() {
+            Ok((key, epoch, data)) => {
+                wal_chunks.push((key, epoch, data));
+            }
+            Err(err) => {
+                errs.push(err);
+            }
+        }
+    }
+    if !errs.is_empty() {
+        return Err(Error::ArchiveError(format!("{:?}", errs)));
+    }
+    wal_chunks.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    let mut last_wal = (0, vec![]);
+    for (_, epoch, data) in wal_chunks.into_iter() {
+        if epoch == last_wal.0 {
+            last_wal.1.push(data);
+            continue;
+        }
+        if !last_wal.1.is_empty() {
+            wals.push(last_wal)
+        }
+        last_wal = (epoch, vec![data]);
+    }
+    if !last_wal.1.is_empty() {
+        wals.push(last_wal)
+    }
+    Ok(wals)
 }
 
 pub fn get_not_found_files(s3fs: &S3Fs, file_ids: Vec<u64>) -> Result<Vec<u64>> {
@@ -632,32 +826,204 @@ impl ObjectAddress {
     }
 }
 
+#[derive(Default, Clone, Debug)]
+pub struct WalMeta {
+    pub epoch_id: u32,
+    pub wal_chunk_addresses: Vec<ObjectAddress>,
+}
+
+impl WalMeta {
+    pub fn new(epoch_id: u32, wal_chunk_addresses: Vec<ObjectAddress>) -> Self {
+        Self {
+            epoch_id,
+            wal_chunk_addresses,
+        }
+    }
+
+    pub fn marshal(&self, buf: &mut Vec<u8>) {
+        buf.put_u32_le(self.epoch_id);
+        let num_wal_chunks = self.wal_chunk_addresses.len();
+        buf.put_u32_le(num_wal_chunks as u32);
+        for i in 0..num_wal_chunks {
+            self.wal_chunk_addresses[i].marshal(buf);
+        }
+    }
+
+    pub fn unmarshal(mut buf: &[u8]) -> Self {
+        let epoch_id = buf.get_u32_le();
+        let num_wal_chunks = buf.get_u32_le();
+        let mut wal_chunk_addresses = Vec::with_capacity(num_wal_chunks as usize);
+        for _i in 0..num_wal_chunks {
+            wal_chunk_addresses.push(ObjectAddress::unmarshal(buf));
+            buf.advance(OBJECT_ADDR_SIZE);
+        }
+        Self {
+            epoch_id,
+            wal_chunk_addresses,
+        }
+    }
+}
+
+#[derive(Default, Clone, Debug)]
+pub struct StoreMeta {
+    pub store_id: u64,
+    pub snapshot_epoch_id: u32,
+    pub snapshot_meta_address: ObjectAddress,
+    pub snapshot_rlog_address: ObjectAddress,
+    pub wal_metas: Vec<WalMeta>,
+}
+
+impl StoreMeta {
+    pub fn new(
+        store_id: u64,
+        snapshot_epoch_id: u32,
+        snapshot_meta_address: ObjectAddress,
+        snapshot_rlog_address: ObjectAddress,
+        wal_metas: Vec<WalMeta>,
+    ) -> Self {
+        Self {
+            store_id,
+            snapshot_epoch_id,
+            snapshot_meta_address,
+            snapshot_rlog_address,
+            wal_metas,
+        }
+    }
+
+    pub fn marshal(&self, buf: &mut Vec<u8>) {
+        buf.put_u64_le(self.store_id);
+        buf.put_u32_le(self.snapshot_epoch_id);
+        self.snapshot_meta_address.marshal(buf);
+        self.snapshot_rlog_address.marshal(buf);
+        let num_wal_metas = self.wal_metas.len();
+        buf.put_u32_le(num_wal_metas as u32);
+        let length_start_off = buf.len();
+        unsafe {
+            buf.advance_mut(4 * num_wal_metas);
+        }
+        let mut offset = buf.len();
+        let mut lengths = Vec::with_capacity(num_wal_metas);
+        for i in 0..num_wal_metas {
+            self.wal_metas[i].marshal(buf);
+            lengths.push(buf.len() - offset);
+            offset = buf.len();
+        }
+        let (_, mut length_buf) = buf.split_at_mut(length_start_off);
+        for i in 0..num_wal_metas {
+            length_buf.put_u32_le(lengths[i] as u32);
+        }
+    }
+
+    pub fn unmarshal(mut buf: &[u8]) -> Self {
+        let store_id = buf.get_u64_le();
+        let snapshot_epoch_id = buf.get_u32_le();
+        let snapshot_meta_address = ObjectAddress::unmarshal(buf);
+        buf.advance(OBJECT_ADDR_SIZE);
+        let snapshot_rlog_address = ObjectAddress::unmarshal(buf);
+        buf.advance(OBJECT_ADDR_SIZE);
+        let num_wal_metas = buf.get_u32_le() as usize;
+        let mut lengths = Vec::with_capacity(num_wal_metas);
+        for _i in 0..num_wal_metas {
+            lengths.push(buf.get_u32_le() as usize);
+        }
+        let mut wal_metas = Vec::with_capacity(num_wal_metas);
+        for i in 0..num_wal_metas {
+            let wal_meta = WalMeta::unmarshal(buf);
+            wal_metas.push(wal_meta);
+            buf.advance(lengths[i]);
+        }
+
+        Self {
+            store_id,
+            snapshot_epoch_id,
+            snapshot_meta_address,
+            snapshot_rlog_address,
+            wal_metas,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct ArchiveIndex {
+    version: u32,
     meta_address: ObjectAddress,
+    store_metas: Vec<StoreMeta>,
     sst_file_ids: Vec<u64>,
     sst_addresses: Vec<ObjectAddress>,
 }
 
 #[allow(dead_code)]
 impl ArchiveIndex {
-    pub fn new(meta_address: ObjectAddress) -> Self {
+    pub fn new(version: u32, meta_address: ObjectAddress) -> Self {
         Self {
+            version,
             meta_address,
+            store_metas: Vec::new(),
             sst_file_ids: Vec::new(),
             sst_addresses: Vec::new(),
         }
     }
 
-    pub fn append(&mut self, file_id: u64, file_address: ObjectAddress) {
+    pub fn append_store_meta(&mut self, store_meta: StoreMeta) {
+        self.store_metas.push(store_meta);
+    }
+
+    pub fn append_sst_meta(&mut self, file_id: u64, file_address: ObjectAddress) {
         self.sst_file_ids.push(file_id);
         self.sst_addresses.push(file_address);
     }
 
     pub fn marshal(&self, buf: &mut Vec<u8>) {
         buf.put_u32_le(ARCHIVE_MAGIC_NUMBER);
-        buf.put_u32_le(ARCHIVE_INDEX_FORMAT_V1);
+        match self.version {
+            ARCHIVE_INDEX_FORMAT_V1 => {
+                buf.put_u32_le(ARCHIVE_INDEX_FORMAT_V1);
+                self.marshal_v1(buf);
+            }
+            ARCHIVE_INDEX_FORMAT_V2 => {
+                buf.put_u32_le(ARCHIVE_INDEX_FORMAT_V2);
+                self.marshal_v2(buf);
+            }
+            _ => {
+                panic!(
+                    "archive version is not match, got {}, expect {} or {}",
+                    self.version, ARCHIVE_INDEX_FORMAT_V1, ARCHIVE_INDEX_FORMAT_V2
+                )
+            }
+        }
+    }
+
+    pub fn marshal_v1(&self, buf: &mut Vec<u8>) {
         self.meta_address.marshal(buf);
+        let num_file_ids = self.sst_file_ids.len();
+        buf.put_u32_le(num_file_ids as u32);
+        for i in 0..num_file_ids {
+            buf.put_u64_le(self.sst_file_ids[i]);
+        }
+        for i in 0..num_file_ids {
+            self.sst_addresses[i].marshal(buf);
+        }
+    }
+
+    pub fn marshal_v2(&self, buf: &mut Vec<u8>) {
+        self.meta_address.marshal(buf);
+        let num_store_metas = self.store_metas.len();
+        buf.put_u32_le(num_store_metas as u32);
+        let length_start_off = buf.len();
+        unsafe {
+            buf.advance_mut(4 * num_store_metas);
+        }
+        let mut offset = buf.len();
+        let mut lengths = Vec::with_capacity(num_store_metas);
+        for i in 0..num_store_metas {
+            self.store_metas[i].marshal(buf);
+            lengths.push(buf.len() - offset);
+            offset = buf.len();
+        }
+        let (_, mut length_buf) = buf.split_at_mut(length_start_off);
+        for i in 0..num_store_metas {
+            length_buf.put_u32_le(lengths[i] as u32);
+        }
         let num_file_ids = self.sst_file_ids.len();
         buf.put_u32_le(num_file_ids as u32);
         for i in 0..num_file_ids {
@@ -676,12 +1042,17 @@ impl ArchiveIndex {
             ));
         }
         let version = buf.get_u32_le();
-        if version != ARCHIVE_INDEX_FORMAT_V1 {
-            return Err(Error::ArchiveError(format!(
-                "archive version is not match, got {}, expect {}",
-                version, ARCHIVE_INDEX_FORMAT_V1
-            )));
+        match version {
+            ARCHIVE_INDEX_FORMAT_V1 => ArchiveIndex::unmarshal_v1(buf),
+            ARCHIVE_INDEX_FORMAT_V2 => ArchiveIndex::unmarshal_v2(buf),
+            _ => Err(Error::ArchiveError(format!(
+                "archive version is not match, got {}, expect {} or {}",
+                version, ARCHIVE_INDEX_FORMAT_V1, ARCHIVE_INDEX_FORMAT_V2
+            ))),
         }
+    }
+
+    pub fn unmarshal_v1(mut buf: &[u8]) -> Result<Self> {
         let meta_address = ObjectAddress::unmarshal(buf);
         buf.advance(OBJECT_ADDR_SIZE);
         let num_file_ids = buf.get_u32_le();
@@ -695,14 +1066,45 @@ impl ArchiveIndex {
             buf.advance(OBJECT_ADDR_SIZE);
         }
         Ok(Self {
+            version: ARCHIVE_INDEX_FORMAT_V1,
             meta_address,
+            store_metas: Vec::new(),
             sst_file_ids,
             sst_addresses,
         })
     }
 
-    pub fn get_meta_address(&self) -> ObjectAddress {
-        self.meta_address
+    pub fn unmarshal_v2(mut buf: &[u8]) -> Result<Self> {
+        let meta_address = ObjectAddress::unmarshal(buf);
+        buf.advance(OBJECT_ADDR_SIZE);
+        let num_store_metas = buf.get_u32_le() as usize;
+        let mut lengths = Vec::with_capacity(num_store_metas);
+        for _i in 0..num_store_metas {
+            lengths.push(buf.get_u32_le() as usize);
+        }
+        let mut store_metas = Vec::with_capacity(num_store_metas);
+        for i in 0..num_store_metas {
+            let store_meta = StoreMeta::unmarshal(buf);
+            store_metas.push(store_meta);
+            buf.advance(lengths[i]);
+        }
+        let num_file_ids = buf.get_u32_le();
+        let mut sst_file_ids = Vec::new();
+        for _i in 0..num_file_ids {
+            sst_file_ids.push(buf.get_u64_le());
+        }
+        let mut sst_addresses = Vec::new();
+        for _i in 0..num_file_ids {
+            sst_addresses.push(ObjectAddress::unmarshal(buf));
+            buf.advance(OBJECT_ADDR_SIZE);
+        }
+        Ok(Self {
+            version: ARCHIVE_INDEX_FORMAT_V2,
+            meta_address,
+            store_metas,
+            sst_file_ids,
+            sst_addresses,
+        })
     }
 }
 
@@ -728,18 +1130,43 @@ impl ArchiveWriter {
         let mut buf = Vec::new();
         let meta_address = ObjectAddress::new(package_id, buf.len() as u64, meta_data.len() as u64);
         buf.extend_from_slice(meta_data.as_bytes());
+
         Self {
             max_size,
             concurrency,
             package_id,
-            index: ArchiveIndex::new(meta_address),
+            index: ArchiveIndex::new(ARCHIVE_INDEX_FORMAT_V2, meta_address),
             buf,
             s3fs,
             date,
         }
     }
 
-    fn append_files(&mut self, file_ids: Vec<u64>) -> Result<()> {
+    fn append_store_wal_rlog_files(&mut self, store_wal_rlog: StoreWalRlog) {
+        info!("append {}", store_wal_rlog);
+        let snap_meta_address = self.append_file(store_wal_rlog.snap_meta);
+        let snap_rlog_address = self.append_file(store_wal_rlog.snap_rlog);
+        let mut wal_metas: Vec<WalMeta> = Vec::with_capacity(store_wal_rlog.wals.len());
+        for (epoch_id, wal_chunks) in store_wal_rlog.wals {
+            let mut wal_chunk_addresses = Vec::with_capacity(wal_chunks.len());
+            for wal_chunk in wal_chunks {
+                let wal_chunk_address = self.append_file(wal_chunk);
+                wal_chunk_addresses.push(wal_chunk_address);
+            }
+            let wal_meta = WalMeta::new(epoch_id, wal_chunk_addresses);
+            wal_metas.push(wal_meta);
+        }
+        let store_meta = StoreMeta::new(
+            store_wal_rlog.store_id,
+            store_wal_rlog.snap_epoch,
+            snap_meta_address,
+            snap_rlog_address,
+            wal_metas,
+        );
+        self.index.append_store_meta(store_meta);
+    }
+
+    fn append_sst_files(&mut self, file_ids: Vec<u64>) -> Result<()> {
         let (result_tx, result_rx) = tikv_util::mpsc::bounded(file_ids.len());
         let mut msg_count = 0;
         for file_id in file_ids {
@@ -763,23 +1190,26 @@ impl ArchiveWriter {
 
     fn recv_sst_data(&mut self, result_tx: &Receiver<dfs::Result<(u64, Bytes)>>) -> Result<()> {
         let (file_id, sst_data) = result_tx.recv().unwrap()?;
-        self.append_file(file_id, sst_data);
+        self.append_sst_file(file_id, sst_data);
         Ok(())
     }
 
-    fn append_file(&mut self, file_id: u64, sst_data: Bytes) {
+    fn append_sst_file(&mut self, file_id: u64, sst_data: Bytes) {
+        let object_address = self.append_file(sst_data);
+        self.index.append_sst_meta(file_id, object_address);
+    }
+
+    fn append_file(&mut self, file_data: Bytes) -> ObjectAddress {
         if self.should_rotate() {
             self.rotate();
         }
-        self.index.append(
-            file_id,
-            ObjectAddress::new(
-                self.package_id,
-                self.buf.len() as u64,
-                sst_data.len() as u64,
-            ),
+        let object_address = ObjectAddress::new(
+            self.package_id,
+            self.buf.len() as u64,
+            file_data.len() as u64,
         );
-        self.buf.extend_from_slice(sst_data.as_bytes());
+        self.buf.extend_from_slice(file_data.as_bytes());
+        object_address
     }
 
     fn should_rotate(&self) -> bool {
@@ -836,6 +1266,7 @@ impl ArchiveAddress {
 pub struct ArchiveReader {
     start_date: String,
     meta_archive_address: Option<ArchiveAddress>,
+    store_metas: Vec<StoreMeta>,
     archive_addresses: HashMap<u64, ArchiveAddress>,
     s3fs: Arc<S3Fs>,
 }
@@ -855,6 +1286,7 @@ impl ArchiveReader {
             )));
         }
         let mut meta_archive_address: Option<ArchiveAddress> = None;
+        let mut store_metas: Vec<StoreMeta> = Vec::new();
         let mut archive_addresses: HashMap<u64, ArchiveAddress> = HashMap::new();
         for index_key in index_keys {
             let date = parse_index_date(&index_key.clone());
@@ -863,8 +1295,10 @@ impl ArchiveReader {
                 meta_archive_address = Some(ArchiveAddress::new(
                     date.clone(),
                     archive_index.meta_address,
-                ))
+                ));
+                store_metas = archive_index.store_metas;
             }
+
             let num_file_ids = archive_index.sst_addresses.len();
             for i in 0..num_file_ids {
                 archive_addresses.insert(
@@ -876,9 +1310,14 @@ impl ArchiveReader {
         Ok(Self {
             start_date,
             meta_archive_address,
+            store_metas,
             archive_addresses,
             s3fs,
         })
+    }
+
+    pub fn get_start_date(&self) -> String {
+        self.start_date.clone()
     }
 
     pub fn get_meta_archive_addr(&self) -> Option<ArchiveAddress> {
@@ -906,6 +1345,40 @@ impl ArchiveReader {
             "failed to find archive meta file on {}",
             self.start_date
         )));
+    }
+
+    pub fn get_store_wal_rlog_meta(&self, store_id: u64) -> Result<StoreMeta> {
+        self.store_metas
+            .iter()
+            .find(|x| x.store_id == store_id)
+            .cloned()
+            .ok_or(Error::ArchiveError(format!(
+                "failed to find archive store {} wal rlog files on {}, store_metas {}",
+                store_id,
+                self.start_date,
+                self.store_metas.len()
+            )))
+    }
+
+    pub fn read_store_wal_rlog_files(
+        s3fs: &S3Fs,
+        date: String,
+        store_meta: StoreMeta,
+    ) -> Result<StoreWalRlog> {
+        let snap_epoch = store_meta.snapshot_epoch_id;
+        let meta_archive_addr = ArchiveAddress::new(date.clone(), store_meta.snapshot_meta_address);
+        let snap_meta = s3fs
+            .get_runtime()
+            .block_on(get_archived_object(s3fs, meta_archive_addr))?;
+        let rlog_archive_addr = ArchiveAddress::new(date.clone(), store_meta.snapshot_rlog_address);
+        let snap_rlog = s3fs
+            .get_runtime()
+            .block_on(get_archived_object(s3fs, rlog_archive_addr))?;
+        let wals = get_archived_wals(s3fs, date, &store_meta)?;
+        let store_wal_rlog =
+            StoreWalRlog::new(store_meta.store_id, snap_epoch, snap_meta, snap_rlog, wals);
+        info!("read {} done", store_wal_rlog);
+        Ok(store_wal_rlog)
     }
 
     pub fn get_file_archive_addr(&self, file_id: u64) -> Option<ArchiveAddress> {
@@ -1102,11 +1575,32 @@ mod tests {
         let backup_date = chrono::Utc::now().date_naive();
         let format_date = archive_format_date(&backup_date);
         let mut writer = ArchiveWriter::new(1024, 16, s3fs.clone(), format_date.clone(), meta_data);
+
+        let get_snap_epoch = |i: u64| (i + 10) as u32;
+        let get_wal_epoch = |i: u64| (i + 11) as u32;
+        for i in 0..NUM_STORES {
+            let store_id = i;
+            let snap_epoch = get_snap_epoch(store_id);
+            let mut store_backup_meta = StoreBackupMeta::default();
+            store_backup_meta.set_store_id(store_id);
+            store_backup_meta.set_epoch(snap_epoch);
+            let snap_meta = Bytes::from(store_backup_meta.write_to_bytes().unwrap());
+            let snap_rlog = Bytes::from(format!("store:{}", store_id));
+            let wal_epoch = get_wal_epoch(store_id);
+            let wals = vec![(
+                wal_epoch,
+                vec![Bytes::from(format!("wal_epoch:{}", wal_epoch))],
+            )];
+            let store_wal_rlog_files =
+                StoreWalRlog::new(store_id, snap_epoch, snap_meta, snap_rlog, wals);
+            writer.append_store_wal_rlog_files(store_wal_rlog_files)
+        }
+
         let mut file_ids = Vec::with_capacity(NUM_FILE_IDS as usize);
         for file_id in 0..NUM_FILE_IDS {
             file_ids.push(file_id)
         }
-        writer.append_files(file_ids).unwrap();
+        writer.append_sst_files(file_ids).unwrap();
         writer.finish();
         let num_packages = writer.package_id;
         s3fs.get_runtime().block_on(async {
@@ -1118,9 +1612,11 @@ mod tests {
         });
         let (archive_index, data) = get_archive_index(&s3fs, format_date.clone()).unwrap();
         assert!(!data.is_empty());
+        assert_eq!(archive_index.version, ARCHIVE_INDEX_FORMAT_V2);
+        assert_eq!(archive_index.store_metas.len(), NUM_STORES as usize);
         assert_eq!(archive_index.sst_file_ids.len(), NUM_FILE_IDS as usize);
         {
-            let meta_address = archive_index.get_meta_address();
+            let meta_address = archive_index.meta_address;
             let archive_address = ArchiveAddress::new(format_date.clone(), meta_address);
             let data = s3fs
                 .get_runtime()
@@ -1133,6 +1629,18 @@ mod tests {
             for i in 0..NUM_STORES {
                 assert_eq!(cluster_backup.stores[i as usize].store_id, i);
             }
+        }
+
+        for store_meta in &archive_index.store_metas {
+            assert_eq!(
+                store_meta.snapshot_epoch_id,
+                get_snap_epoch(store_meta.store_id)
+            );
+            assert_eq!(store_meta.wal_metas.len(), 1);
+            assert_eq!(
+                store_meta.wal_metas[0].epoch_id,
+                get_wal_epoch(store_meta.store_id)
+            );
         }
 
         for i in 0..NUM_FILE_IDS as usize {
@@ -1177,6 +1685,10 @@ mod tests {
         let first_date = chrono::Utc::now().date_naive() - chrono::Duration::days(NUM_DATES as i64);
         let get_date = |j: u64| first_date + chrono::Duration::days(j as i64);
         let get_num_stores = |j: u64| j + 8;
+        let get_snap_epoch = |j: u64| (j + 10) as u32;
+        let get_snap_rlog = |j: u64| Bytes::from(b"r".repeat(j as usize + 10).to_vec());
+        let get_wal_epoch = |j: u64| (j + 11) as u32;
+        let get_wal_chunk = |j: u64| Bytes::from(b"r".repeat(j as usize + 11).to_vec());
         let get_num_file_ids = |j: u64| j + 3;
         let get_file_id = |j: u64, i: u64| j * 1000 + i + 200;
         let get_sst_data =
@@ -1205,23 +1717,61 @@ mod tests {
             let format_date = archive_format_date(&backup_date);
             let mut writer =
                 ArchiveWriter::new(512, 16, s3fs.clone(), format_date.clone(), meta_data);
+
+            for i in 0..num_stores {
+                let store_id = i;
+                let snap_epoch = get_snap_epoch(store_id);
+                let mut store_backup_meta = StoreBackupMeta::default();
+                store_backup_meta.set_store_id(store_id);
+                let snap_meta = Bytes::from(store_backup_meta.write_to_bytes().unwrap());
+                let snap_rlog = get_snap_rlog(store_id);
+                let wal_epoch = get_wal_epoch(store_id);
+                let wals = vec![(wal_epoch, vec![get_wal_chunk(store_id)])];
+                let store_wal_rlog_files =
+                    StoreWalRlog::new(store_id, snap_epoch, snap_meta, snap_rlog, wals);
+                writer.append_store_wal_rlog_files(store_wal_rlog_files)
+            }
+
             let mut file_ids = Vec::with_capacity(num_file_ids as usize);
             for i in 0..num_file_ids {
                 let file_id = get_file_id(j, i);
                 file_ids.push(file_id)
             }
-            writer.append_files(file_ids).unwrap();
+            writer.append_sst_files(file_ids).unwrap();
             writer.finish();
         }
         let start_date = get_date(0);
         let reader = ArchiveReader::new(s3fs, &start_date).unwrap();
+        let num_stores = get_num_stores(0);
         {
             let cluster_backup_meta = reader.read_meta_file().unwrap();
             assert_eq!(cluster_backup_meta.cluster_id, CLUSTER_ID);
-            let num_stores = get_num_stores(0);
             assert_eq!(cluster_backup_meta.stores.len(), num_stores as usize);
             for i in 0..num_stores {
                 assert_eq!(cluster_backup_meta.stores[i as usize].store_id, i);
+            }
+        }
+        {
+            assert_eq!(reader.store_metas.len(), num_stores as usize);
+            for i in 0..num_stores {
+                let store_id = i;
+                let store_meta = reader.get_store_wal_rlog_meta(store_id).unwrap();
+                let store_wal_rlog = ArchiveReader::read_store_wal_rlog_files(
+                    &reader.s3fs,
+                    reader.get_start_date(),
+                    store_meta,
+                )
+                .unwrap();
+                assert_eq!(store_wal_rlog.snap_epoch, get_snap_epoch(store_id));
+                let mut store_backup_meta = StoreBackupMeta::default();
+                store_backup_meta
+                    .merge_from_bytes(store_wal_rlog.snap_meta.chunk())
+                    .unwrap();
+                assert_eq!(store_backup_meta.store_id, store_id);
+                assert_eq!(store_wal_rlog.snap_rlog, get_snap_rlog(store_id));
+                assert_eq!(store_wal_rlog.wals.len(), 1);
+                assert_eq!(store_wal_rlog.wals[0].0, get_wal_epoch(store_id));
+                assert_eq!(store_wal_rlog.wals[0].1[0], get_wal_chunk(store_id));
             }
         }
         for j in 0..NUM_DATES {

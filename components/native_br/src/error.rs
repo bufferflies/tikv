@@ -72,6 +72,8 @@ pub enum Error {
     MvccError(#[from] tikv::storage::mvcc::Error),
     #[error("Backup error {0}")]
     BackupError(String),
+    #[error("No snapshot available error {0}")]
+    NoSnapshotAvailableError(String),
     #[error("WAL chunk integrity error {0}")]
     WalChunkIntegrityError(String),
     // IncrementalBackupToleratedError means that we are performing an incremental backup with a

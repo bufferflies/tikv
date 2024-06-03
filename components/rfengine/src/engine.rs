@@ -606,6 +606,11 @@ impl RfEngineCore {
         Ok(buf.len() - old_len)
     }
 
+    // Upload latest wal chunk to object storage
+    pub fn upload_wal_chunk(&self) {
+        self.task_sender.send(Task::Upload).unwrap();
+    }
+
     pub fn dump_wal_chunk(
         &self,
         epoch_id: u32,
@@ -667,6 +672,14 @@ fn restore_all_raft_logs(
         .get_objects(vec![(raft_file_key, GetObjectOptions::default())])
         .unwrap();
     let (_, rlog_data) = raft_file.first().unwrap();
+    restore_all_raft_logs_with_snap_rlog_file(store_meta, dir, rlog_data);
+}
+
+fn restore_all_raft_logs_with_snap_rlog_file(
+    store_meta: &StoreBackupMeta,
+    dir: &Path,
+    rlog_data: &Bytes,
+) {
     let mut raft_meta = StoreRaftLogBackupMeta::default();
     let size = rlog_data.len();
     debug_assert!(size as u64 > store_meta.raft_meta_start_off);
@@ -786,85 +799,18 @@ pub fn find_latest_snapshot(
 // `cluster_backup.backup_ts` and replay all WAL chunk files from snapshot epoch
 // to epoch of the backup.
 pub fn lightweight_restore(
-    object_storage: Arc<dyn ObjectStorage>,
-    prefix: &str,
-    cluster_backup: &ClusterBackupMeta,
-    store_id: u64,
     dir: &Path,
-    keyspace: Option<u32>,
+    snap_epoch: u32,
+    snap_meta: Bytes,
+    snap_rlog: Bytes,
 ) -> Result<u32> {
-    let store_meta = cluster_backup
-        .get_stores()
-        .iter()
-        .find(|x| x.store_id == store_id)
-        .ok_or(Error::Other(format!("store {} not found", store_id)))?;
-    let epoch_id = store_meta.get_epoch();
     init_wal_files(dir, None).unwrap();
 
-    info!("try to find snapshot before backup epoch {}", epoch_id);
-    let snap_key = find_latest_snapshot(object_storage.clone(), prefix, store_meta)?;
-
-    // Fetch store backup meta from object storage.
-    let snap_store_meta = match parse_epoch_from_snapshot_key(snap_key.as_deref()) {
-        Some(snap_epoch) => {
-            info!(
-                "fetch last snapshot {} snap epoch {} before backup epoch {}",
-                snap_key.as_deref().unwrap(),
-                snap_epoch,
-                epoch_id
-            );
-            let store_meta_key = snapshot_store_meta_key(store_id, snap_epoch);
-            let store_backup_meta = object_storage
-                .get_objects(vec![(store_meta_key, GetObjectOptions::default())])
-                .map(|data| {
-                    let mut meta = StoreBackupMeta::default();
-                    meta.merge_from_bytes(data[0].1.chunk()).unwrap();
-                    meta
-                })?;
-
-            assert_eq!(snap_epoch, store_backup_meta.get_manifest().epoch_id);
-            store_backup_meta
-        }
-        None => {
-            // If no snapshot available and the epoch_id > MAX_EPOCH_BACKWARD, it means
-            // data incomplete.
-            if epoch_id > MAX_EPOCH_BACKWARD {
-                let msg = format!(
-                    "no snapshot available from epoch {}",
-                    epoch_id - MAX_EPOCH_BACKWARD
-                );
-                error!("{}", msg);
-                return Err(Error::Other(msg));
-            }
-            info!("no snapshot available from epoch 1, create empty manifest file");
-            StoreBackupMeta::default()
-        }
-    };
-
-    // If no snapshot found, no need to restore raft log files.
-    if snap_key.is_some() {
-        match keyspace {
-            Some(keyspace_id) => {
-                info!(
-                    "lightweight restore keyspace {} raft log files from snapshot {:?}",
-                    keyspace_id, snap_key
-                );
-                restore_keyspace_raft_logs(
-                    &object_storage,
-                    &snap_store_meta,
-                    dir,
-                    keyspace_id,
-                    snap_key,
-                );
-            }
-            None => {
-                info!(
-                    "lightweight restore all raft log files from snapshot {:?}",
-                    snap_key
-                );
-                restore_all_raft_logs(&object_storage, &snap_store_meta, dir, snap_key);
-            }
-        };
+    let mut snap_store_meta = StoreBackupMeta::default();
+    if snap_epoch > 0 {
+        snap_store_meta.merge_from_bytes(snap_meta.chunk()).unwrap();
+        assert_eq!(snap_epoch, snap_store_meta.get_manifest().epoch_id);
+        restore_all_raft_logs_with_snap_rlog_file(&snap_store_meta, dir, &snap_rlog);
     }
 
     info!("manifest file path: {:?}", manifest_path(dir));
