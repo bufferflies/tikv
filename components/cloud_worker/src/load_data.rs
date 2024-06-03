@@ -225,6 +225,9 @@ pub(crate) async fn handle_load_data(
             }
         }
         Method::PUT => {
+            if !manager.has_task(&task_id) {
+                return Ok(make_response(StatusCode::BAD_REQUEST, "task not found"));
+            }
             let chunk_id = get_param::<u64>(&query_pairs, "chunk_id");
             if chunk_id.is_none() {
                 return Ok(make_response(
@@ -232,12 +235,16 @@ pub(crate) async fn handle_load_data(
                     "chunk id is missing",
                 ));
             }
-            // To ensure compatibility, writer id can be None.
-            // TODO: check writer_id after all remote backends are upgraded.
-            let writer_id = get_param::<u64>(&query_pairs, "writer_id").unwrap_or_default();
+            let writer_id = get_param::<u64>(&query_pairs, "writer_id");
+            if writer_id.is_none() {
+                return Ok(make_response(
+                    StatusCode::BAD_REQUEST,
+                    "writer id is missing",
+                ));
+            }
             let body = get_body(req).await?;
             let put_chunk_res = manager
-                .put_chunk(&task_id, writer_id, chunk_id.unwrap(), body.into())
+                .put_chunk(&task_id, writer_id.unwrap(), chunk_id.unwrap(), body.into())
                 .await;
 
             let json = serde_json::to_string(&put_chunk_res).unwrap();
