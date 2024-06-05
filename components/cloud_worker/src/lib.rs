@@ -15,7 +15,9 @@ use std::{
     fs,
     future::Future,
     path::{Path, PathBuf},
+    pin::Pin,
     sync::Arc,
+    task::{Context, Poll},
     time::Duration,
 };
 
@@ -45,11 +47,37 @@ use crate::{
     cop_limiter::{CopLimiter, CopLimiterConfig},
     load_data::{LoadDataManager, MAX_IN_MEM_SIZE},
     native_br::{NativeBrConfig, NativeBrManager},
+    remote_cop::RemoteCopServer,
     worker_scaler::{WorkerScaler, WorkerScalerConfig, LOAD_DATA_WORKER_ENV},
 };
 
 const BACKGROUND_WORKER_INTERVAL: Duration = Duration::from_secs(60); //1min
 const RG_CONFIG_PATH: &str = "resource_group/controller";
+
+struct ServerFuture {
+    http_server: Box<dyn Future<Output = hyper::Result<()>> + Send + Unpin>,
+    _grpc_server: Option<RemoteCopServer>,
+}
+
+impl ServerFuture {
+    pub fn new(
+        http_server: Box<dyn Future<Output = hyper::Result<()>> + Send + Unpin>,
+        grpc_server: Option<RemoteCopServer>,
+    ) -> Self {
+        ServerFuture {
+            http_server,
+            _grpc_server: grpc_server,
+        }
+    }
+}
+
+impl Future for ServerFuture {
+    type Output = hyper::Result<()>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Pin::new(&mut self.http_server).poll(cx)
+    }
+}
 
 pub fn run_cloud_worker(config: Config, config_file_path: Option<PathBuf>, pd: Arc<dyn PdClient>) {
     let thread_pool = Arc::new(
@@ -237,7 +265,7 @@ fn start_server(
         }
     });
 
-    server
+    Box::new(ServerFuture::new(server, cop_server_opt))
 }
 
 pub struct CloudWorker {
