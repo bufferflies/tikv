@@ -10,6 +10,7 @@ use std::{
 };
 
 use byteorder::{ByteOrder, LittleEndian};
+use bytes::BufMut;
 use thiserror::Error;
 
 use super::blobtable::BlobRef;
@@ -445,6 +446,18 @@ where
     i
 }
 
+pub(crate) fn parse_prop_data(mut prop_data: &[u8]) -> (&[u8], &[u8], &[u8]) {
+    let key_len = LittleEndian::read_u16(prop_data) as usize;
+    prop_data = &prop_data[2..];
+    let key = &prop_data[..key_len];
+    prop_data = &prop_data[key_len..];
+    let val_len = LittleEndian::read_u32(prop_data) as usize;
+    prop_data = &prop_data[4..];
+    let val = &prop_data[..val_len];
+    let remained = &prop_data[val_len..];
+    (key, val, remained)
+}
+
 #[derive(Clone, Copy, Default)]
 pub struct LocalAddr {
     pub start: usize,
@@ -604,6 +617,13 @@ pub fn encode_val_to_outer_val_owner(v: Value, outer_val_owner: &mut Vec<u8>) ->
     outer_val_owner.resize(v.encoded_size(), 0);
     v.encode(outer_val_owner.as_mut_slice());
     Value::decode(outer_val_owner)
+}
+
+pub fn add_property(buf: &mut Vec<u8>, key: &[u8], val: &[u8]) {
+    buf.put_u16_le(key.len() as u16);
+    buf.extend_from_slice(key);
+    buf.put_u32_le(val.len() as u32);
+    buf.extend_from_slice(val);
 }
 
 #[cfg(test)]

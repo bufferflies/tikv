@@ -17,6 +17,7 @@ aws = { path = "../cloud/aws" }
 base64 = "0.13"
 bincode = "1.3"
 bstr = "0.2"
+bytemuck = "1.14.3"
 byteorder = "1.2"
 bytes = "1.0"
 cloud_encryption = { workspace = true }
@@ -69,9 +70,11 @@ slog-global = { version = "0.1", git = "https://github.com/breeswish/slog-global
 slog-term = "2.4"
 thiserror = "1.0"
 tidb_query_common = { path = "../tidb_query_common", default-features = false }
+tidb_query_datatype = { path = "../tidb_query_datatype", default-features = false }
 tikv_alloc = { path = "../tikv_alloc" }
 tikv_util = { path = "../tikv_util", default-features = false }
 time = "0.1"
+tipb = { workspace = true }
 tokio = { version = "1.5", features = ["full"] }
 tracker = { path = "../tracker" }
 txn_types = { path = "../txn_types", default-features = false }
