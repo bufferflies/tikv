@@ -91,12 +91,12 @@ impl ColumnarReader for ColumnarTableReader {
         &self.schema
     }
 
-    fn seek(&mut self, mut handle: &[u8]) -> crate::table::Result<()> {
+    fn seek(&mut self, handle: &[u8]) -> crate::table::Result<()> {
         let pack_idx = self.table_meta.handle_index.search_pack_idx(handle);
         self.handle_reader.load_pack(pack_idx)?;
         let handle_buffer = &self.handle_reader.pack_buffer;
         let row_idx_in_pack = if self.handle_reader.col_meta.fixed_size > 0 {
-            let int_handle = handle.get_i64_le();
+            let int_handle = (&handle[..]).get_i64_le();
             search(handle_buffer.length(), |i| {
                 handle_buffer.get_int_handle_value(i) >= int_handle
             })
@@ -678,10 +678,38 @@ mod tests {
     #[derive(Default, Clone)]
     struct RefRow {
         handle: Vec<u8>,
+        is_common_handle: bool,
         version: u64,
         is_deleted: bool,
         c0: Option<i64>,
         c1: Option<Bytes>,
+    }
+
+    impl RefRow {
+        fn in_bound(&self, mut start: &[u8], mut end: &[u8]) -> bool {
+            if self.is_common_handle {
+                self.handle.as_slice() >= start && self.handle.as_slice() < end
+            } else {
+                let handle = self.handle.as_slice().get_i64_le();
+                handle >= start.get_i64_le() && handle < end.get_i64_le()
+            }
+        }
+
+        fn cmp(&self, other: &Self) -> Ordering {
+            let order = if self.is_common_handle {
+                self.handle.cmp(&other.handle)
+            } else {
+                self.handle
+                    .as_slice()
+                    .get_i64_le()
+                    .cmp(&other.handle.as_slice().get_i64_le())
+            };
+            if order.is_eq() {
+                other.version.cmp(&self.version)
+            } else {
+                order
+            }
+        }
     }
 
     fn new_column_info(col_id: i64) -> ColumnInfo {
@@ -753,6 +781,7 @@ mod tests {
             ref_row.handle = (i as i64).to_le_bytes().to_vec();
         } else {
             ref_row.handle = i_to_common_handle(i);
+            ref_row.is_common_handle = true;
         }
         ref_row.version = version;
         if block.handles.fixed_size > 0 {
@@ -820,6 +849,19 @@ mod tests {
     }
 
     fn verify_with_ref_rows(block: &Block, ref_rows: &[RefRow]) {
+        if block.handles.length() != ref_rows.len() {
+            println!("diff len {} {}", block.handles.length(), ref_rows.len());
+            for i in 0..ref_rows.len() {
+                let handle = ref_rows[i].handle.as_slice();
+                println!("ref handle {:?}", handle);
+            }
+            for i in 0..block.handles.length() {
+                let handle = block.handles.get_not_null_value(i);
+                println!("block handle {:?}", handle);
+            }
+            panic!("diff len");
+        }
+
         for i in 0..ref_rows.len() {
             let ref_row = &ref_rows[i];
             assert_eq!(ref_row.handle, block.handles.get_not_null_value(i), "{}", i);
@@ -852,15 +894,9 @@ mod tests {
             merged.retain(|r| r.version <= read_ts);
         }
         if let Some((start, end)) = bound {
-            merged.retain(|r| r.handle >= start && r.handle < end);
+            merged.retain(|r| r.in_bound(&start, &end));
         }
-        merged.sort_by(|a, b| {
-            if a.handle != b.handle {
-                a.handle.cmp(&b.handle)
-            } else {
-                b.version.cmp(&a.version)
-            }
-        });
+        merged.sort_by(|a, b| a.cmp(b));
         if read_ts.is_some() {
             merged.dedup_by(|a, b| a.handle == b.handle);
             merged.retain(|r| !r.is_deleted);
@@ -871,7 +907,12 @@ mod tests {
     #[test]
     fn test_reader() {
         init_log_for_test();
-        for common_handle in [false, true] {
+        let mut options = vec![];
+        let mut rng = rand::thread_rng();
+        for _ in 0..100 {
+            options.push(rng.gen_bool(0.5))
+        }
+        for common_handle in options {
             let schema = new_schema(1, common_handle);
             let (file_1, ref_1) = build_table(1, &schema, 100, 150, 100);
             let (file_2, ref_2) = build_table(2, &schema, 140, 190, 110);
@@ -880,9 +921,9 @@ mod tests {
             let ref_rows = vec![ref_1, ref_2, ref_3];
             let mut block = Block::new(&schema);
             let mut rng = rand::thread_rng();
-            let start_handle = rng.gen_range(90i64..170i64);
-            let end_handle = start_handle + rng.gen_range(1i64..200i64);
             for read_ts in [90, 100, 110, 120] {
+                let start_handle = rng.gen_range(90i64..170i64);
+                let end_handle = start_handle + rng.gen_range(1i64..200i64);
                 let mut mvcc_reader = new_mvcc_reader(&schema, &files, read_ts);
                 if common_handle {
                     let common_start_handle = i_to_common_handle(start_handle as i32);

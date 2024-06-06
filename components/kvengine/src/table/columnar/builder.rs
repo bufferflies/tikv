@@ -189,12 +189,7 @@ impl ColumnarFileBuilder {
         let last_table = self.tables.last().unwrap();
         let biggest_table_id = last_table.schema.table_id;
         let biggest_is_int_handle = last_table.handle_builder.col_meta.fixed_size > 0;
-        let mut biggest_handle = first_table
-            .handle_builder
-            .handle_index
-            .last()
-            .unwrap()
-            .as_slice();
+        let mut biggest_handle = first_table.handle_builder.max_handle.as_slice();
         let biggest_key = if biggest_is_int_handle {
             let biggest_int_handle = biggest_handle.get_i64_le();
             encode_row_key(biggest_table_id, biggest_int_handle)
@@ -259,7 +254,7 @@ impl ColumnarTableBuilder {
 
     fn append_block(&mut self, block: &Block, start_offset: usize, end_offset: usize) {
         self.handle_builder
-            .append(&block.handles, start_offset, end_offset);
+            .append_handle(&block.handles, start_offset, end_offset);
         self.version_builder
             .append(&block.versions, start_offset, end_offset);
         for (i, col_buf) in block.columns.iter().enumerate() {
@@ -273,9 +268,6 @@ impl ColumnarTableBuilder {
 
     fn finish_table(&mut self) {
         self.handle_builder.finish_pack();
-        self.handle_builder
-            .handle_index
-            .push(self.handle_builder.max_handle.clone());
         self.compressed_handle_index = self.handle_builder.build_handle_index();
         self.version_builder.finish_pack();
         for col_builder in &mut self.column_builders {
@@ -405,7 +397,6 @@ impl ColumnarColumnBuilder {
     }
 
     pub(crate) fn append(&mut self, input: &ColumnBuffer, row_offset: usize, row_end_off: usize) {
-        assert!(row_end_off > 0);
         let mut current_offset = row_offset;
         while current_offset < row_end_off {
             let pack_remain = self.pack_max_row_count - self.pack_buffer.length();
@@ -427,18 +418,38 @@ impl ColumnarColumnBuilder {
         }
     }
 
+    pub(crate) fn append_handle(
+        &mut self,
+        input: &ColumnBuffer,
+        row_offset: usize,
+        row_end_off: usize,
+    ) {
+        debug_assert!(self.is_handle);
+        for i in row_offset..row_end_off {
+            let handle = input.get_not_null_value(i);
+            let current_length = self.pack_buffer.length();
+            if current_length >= self.pack_max_row_count {
+                let last_handle = self.pack_buffer.get_not_null_value(current_length - 1);
+                if last_handle != handle {
+                    self.finish_pack();
+                }
+            }
+            self.pack_buffer.push_value(handle);
+            self.row_count += 1;
+        }
+    }
+
     fn finish_pack(&mut self) {
-        if self.pack_buffer.length() == 0 {
+        let current_length = self.pack_buffer.length();
+        if current_length == 0 {
             return;
         }
         if self.is_handle {
-            self.handle_index
-                .push(self.pack_buffer.get_not_null_value(0).to_vec());
+            let pack_first_handle = self.pack_buffer.get_not_null_value(0).to_vec();
+            self.handle_index.push(pack_first_handle);
+            let last_handle = self.pack_buffer.get_not_null_value(current_length - 1);
             self.max_handle.truncate(0);
-            self.max_handle.extend_from_slice(
-                self.pack_buffer
-                    .get_not_null_value(self.pack_buffer.length() - 1),
-            );
+            self.max_handle.extend_from_slice(last_handle);
         }
         self.fill_uncompressed_buf();
         if let Some(mut min_max) = self.col_meta.min_max.take() {
