@@ -6226,7 +6226,7 @@ dependencies = [
 [[package]]
 name = "rusoto_core"
 version = "0.46.0"
-source = "git+https://github.com/tikv/rusoto?branch=cse#4ebb63fc2ce107fcee66f5a5f1653f6a3b46b927"
+source = "git+https://github.com/tikv/rusoto?branch=cse#d6ffce8898ce5d03ada531401437985b727393a4"
 dependencies = [
  "async-trait",
  "base64 0.13.0",
@@ -6250,7 +6250,7 @@ dependencies = [
 [[package]]
 name = "rusoto_credential"
 version = "0.46.0"
-source = "git+https://github.com/tikv/rusoto?branch=cse#4ebb63fc2ce107fcee66f5a5f1653f6a3b46b927"
+source = "git+https://github.com/tikv/rusoto?branch=cse#d6ffce8898ce5d03ada531401437985b727393a4"
 dependencies = [
  "async-trait",
  "chrono",
@@ -6267,7 +6267,7 @@ dependencies = [
 [[package]]
 name = "rusoto_kms"
 version = "0.46.0"
-source = "git+https://github.com/tikv/rusoto?branch=cse#4ebb63fc2ce107fcee66f5a5f1653f6a3b46b927"
+source = "git+https://github.com/tikv/rusoto?branch=cse#d6ffce8898ce5d03ada531401437985b727393a4"
 dependencies = [
  "async-trait",
  "bytes",
@@ -6280,7 +6280,7 @@ dependencies = [
 [[package]]
 name = "rusoto_mock"
 version = "0.46.0"
-source = "git+https://github.com/tikv/rusoto?branch=cse#4ebb63fc2ce107fcee66f5a5f1653f6a3b46b927"
+source = "git+https://github.com/tikv/rusoto?branch=cse#d6ffce8898ce5d03ada531401437985b727393a4"
 dependencies = [
  "async-trait",
  "chrono",
@@ -6294,7 +6294,7 @@ dependencies = [
 [[package]]
 name = "rusoto_s3"
 version = "0.46.0"
-source = "git+https://github.com/tikv/rusoto?branch=cse#4ebb63fc2ce107fcee66f5a5f1653f6a3b46b927"
+source = "git+https://github.com/tikv/rusoto?branch=cse#d6ffce8898ce5d03ada531401437985b727393a4"
 dependencies = [
  "async-trait",
  "bytes",
@@ -6308,7 +6308,7 @@ dependencies = [
 [[package]]
 name = "rusoto_signature"
 version = "0.46.0"
-source = "git+https://github.com/tikv/rusoto?branch=cse#4ebb63fc2ce107fcee66f5a5f1653f6a3b46b927"
+source = "git+https://github.com/tikv/rusoto?branch=cse#d6ffce8898ce5d03ada531401437985b727393a4"
 dependencies = [
  "base64 0.13.0",
  "bytes",
@@ -6333,7 +6333,7 @@ dependencies = [
 [[package]]
 name = "rusoto_sts"
 version = "0.46.0"
-source = "git+https://github.com/tikv/rusoto?branch=cse#4ebb63fc2ce107fcee66f5a5f1653f6a3b46b927"
+source = "git+https://github.com/tikv/rusoto?branch=cse#d6ffce8898ce5d03ada531401437985b727393a4"
 dependencies = [
  "async-trait",
  "bytes",
