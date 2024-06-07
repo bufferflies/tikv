@@ -13,7 +13,7 @@ use crate::table::{
     add_property,
     columnar::columnar::{
         compress_pack, get_unsigned, Block, ColumnBuffer, ColumnMeta, ColumnarFileFooter, Schema,
-        COLUMNAR_MAGIC, HANDLE_COL_ID, VERSION_COL_ID,
+        COLUMNAR_MAGIC, HANDLE_COL_ID, TXN_ID_COL_ID, VERSION_COL_ID,
     },
     sstable::LZ4_COMPRESSION,
     ChecksumType,
@@ -34,6 +34,15 @@ pub fn new_version_column_info() -> ColumnInfo {
     col_info.set_column_id(VERSION_COL_ID as i64);
     col_info.set_tp(FieldTypeTp::LongLong as i32);
     let flag = FieldTypeFlag::UNSIGNED.bits();
+    col_info.set_flag(flag as i32);
+    col_info
+}
+
+pub fn new_txn_id_column_info() -> ColumnInfo {
+    let mut col_info = ColumnInfo::new();
+    col_info.set_column_id(TXN_ID_COL_ID as i64);
+    col_info.set_tp(FieldTypeTp::LongLong as i32);
+    let flag = FieldTypeFlag::UNSIGNED.bits() | FieldTypeFlag::NOT_NULL.bits();
     col_info.set_flag(flag as i32);
     col_info
 }
@@ -204,6 +213,7 @@ pub struct ColumnarTableBuilder {
     schema: Schema,
     handle_builder: ColumnarColumnBuilder,
     version_builder: ColumnarColumnBuilder,
+    txn_id_builder: ColumnarColumnBuilder,
     column_builders: Vec<ColumnarColumnBuilder>,
     compressed_handle_index: Vec<u8>,
     properties: Vec<u8>,
@@ -237,10 +247,14 @@ impl ColumnarTableBuilder {
             pack_max_size,
             false,
         );
+        let txn_id_col = schema.txn_id_column.as_ref().unwrap().clone();
+        let txn_id_builder =
+            ColumnarColumnBuilder::new(txn_id_col, pack_max_row_count, pack_max_size, false);
         Self {
             schema,
             handle_builder,
             version_builder,
+            txn_id_builder,
             column_builders,
             compressed_handle_index: vec![],
             properties: vec![],
@@ -257,6 +271,9 @@ impl ColumnarTableBuilder {
             .append_handle(&block.handles, start_offset, end_offset);
         self.version_builder
             .append(&block.versions, start_offset, end_offset);
+        let txn_id_buf = block.txn_ids.as_ref().unwrap();
+        self.txn_id_builder
+            .append(txn_id_buf, start_offset, end_offset);
         for (i, col_buf) in block.columns.iter().enumerate() {
             let col_builder = &mut self.column_builders[i];
             col_builder.append(col_buf, start_offset, end_offset);
@@ -268,8 +285,24 @@ impl ColumnarTableBuilder {
 
     fn finish_table(&mut self) {
         self.handle_builder.finish_pack();
+        // handle index add the handle next to the max handle
+        // to avoid out of range seek load the last pack.
+        if self.handle_builder.col_meta.fixed_size > 0 {
+            let next_handle = self.handle_builder.max_handle.as_slice().get_i64_le();
+            // if the handle is already i64::MAX, there is no next handle.
+            if next_handle != i64::MAX {
+                self.handle_builder
+                    .handle_index
+                    .push((next_handle + 1).to_le_bytes().to_vec());
+            }
+        } else {
+            let mut next_handle = self.handle_builder.max_handle.clone();
+            next_handle.push(0);
+            self.handle_builder.handle_index.push(next_handle);
+        };
         self.compressed_handle_index = self.handle_builder.build_handle_index();
         self.version_builder.finish_pack();
+        self.txn_id_builder.finish_pack();
         for col_builder in &mut self.column_builders {
             col_builder.finish_pack();
         }
@@ -289,6 +322,8 @@ impl ColumnarTableBuilder {
         total_size.add(handle_col_size);
         let version_col_size = self.version_builder.compute_size();
         total_size.add(version_col_size);
+        let txn_id_col_size = self.txn_id_builder.compute_size();
+        total_size.add(txn_id_col_size);
         for col_builder in &self.column_builders {
             let col_size = col_builder.compute_size();
             total_size.add(col_size);
@@ -318,6 +353,14 @@ impl ColumnarTableBuilder {
             output_buf.extend_from_slice(pack);
         }
 
+        self.txn_id_builder
+            .col_meta
+            .pack_offsets
+            .update_base(output_buf.len() as u32);
+        for pack in &self.txn_id_builder.compressed_packs {
+            output_buf.extend_from_slice(pack);
+        }
+
         for column in &mut self.column_builders {
             column
                 .col_meta
@@ -329,10 +372,11 @@ impl ColumnarTableBuilder {
         }
 
         // index part:
-        let num_columns = self.column_builders.len() as u32 + 2;
+        let num_columns = self.column_builders.len() as u32 + 3;
         output_buf.put_u32_le(num_columns);
         self.handle_builder.col_meta.write_to(output_buf);
         self.version_builder.col_meta.write_to(output_buf);
+        self.txn_id_builder.col_meta.write_to(output_buf);
         for column in &mut self.column_builders {
             column.col_meta.write_to(output_buf);
         }

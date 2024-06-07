@@ -166,6 +166,29 @@ impl RowSlice<'_> {
             Ok(None)
         }
     }
+
+    pub fn max_col_id(&self) -> i32 {
+        match self {
+            RowSlice::Big {
+                non_null_ids,
+                null_ids,
+                ..
+            } => {
+                let max_non_null_id = non_null_ids.get(non_null_ids.len() - 1).unwrap_or(0);
+                let max_null_id = null_ids.get(null_ids.len() - 1).unwrap_or(0);
+                max_non_null_id.max(max_null_id) as i32
+            }
+            RowSlice::Small {
+                non_null_ids,
+                null_ids,
+                ..
+            } => {
+                let max_non_null_id = non_null_ids.get(non_null_ids.len() - 1).unwrap_or(0);
+                let max_null_id = null_ids.get(null_ids.len() - 1).unwrap_or(0);
+                max_non_null_id.max(max_null_id) as i32
+            }
+        }
+    }
 }
 
 /// Decodes `len` number of ints from `buf` in little endian
@@ -210,6 +233,10 @@ impl<'a, T: PrimInt> LeBytes<'a, T> {
         } else {
             unsafe { Some(self.get_unchecked(index)) }
         }
+    }
+
+    fn len(&self) -> usize {
+        self.slice.len() / std::mem::size_of::<T>()
     }
 
     #[inline]

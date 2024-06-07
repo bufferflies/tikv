@@ -3,13 +3,24 @@
 use std::{
     cmp::{min, Ordering},
     mem,
+    ops::Deref,
     sync::Arc,
 };
 
 use bytes::Buf;
-use tidb_query_datatype::codec::datum::{
-    BYTES_FLAG, COMPACT_BYTES_FLAG, DECIMAL_FLAG, DURATION_FLAG, FLOAT_FLAG, INT_FLAG, JSON_FLAG,
-    NIL_FLAG, UINT_FLAG, VAR_INT_FLAG, VAR_UINT_FLAG, VECTOR_FLOAT32_FLAG,
+use tidb_query_datatype::{
+    codec::{
+        datum::{
+            BYTES_FLAG, COMPACT_BYTES_FLAG, DECIMAL_FLAG, DURATION_FLAG, FLOAT_FLAG, INT_FLAG,
+            JSON_FLAG, NIL_FLAG, UINT_FLAG, VAR_INT_FLAG, VAR_UINT_FLAG, VECTOR_FLOAT32_FLAG,
+        },
+        row::v2::{decode_v2_u64, RowSlice},
+        table::{
+            decode_common_handle, decode_int_handle, encode_common_handle_for_test, encode_row_key,
+            PREFIX_LEN,
+        },
+    },
+    FieldTypeTp,
 };
 use tikv_util::codec::{
     bytes::{decode_bytes, decode_compact_bytes},
@@ -17,12 +28,18 @@ use tikv_util::codec::{
 };
 use tipb::ColumnInfo;
 
-use crate::table::{
-    columnar::columnar::{
-        decompress_pack, Block, ColumnBuffer, ColumnMeta, ColumnarFile, Schema, TableMeta,
+use crate::{
+    table,
+    table::{
+        columnar::columnar::{
+            decompress_pack, get_fixed_size, Block, ColumnBuffer, ColumnMeta, ColumnarFile, Schema,
+            TableMeta,
+        },
+        search,
+        sstable::File,
+        InnerKey,
     },
-    search,
-    sstable::File,
+    UserMeta,
 };
 
 pub trait ColumnarReader {
@@ -36,6 +53,7 @@ pub(crate) struct ColumnarTableReader {
     schema: Schema,
     handle_reader: ColumnarColumnReader,
     version_reader: ColumnarColumnReader,
+    txn_id_reader: Option<ColumnarColumnReader>,
     columns_readers: Vec<ColumnarColumnReader>,
 }
 
@@ -45,6 +63,7 @@ impl ColumnarTableReader {
         columnar_file: &ColumnarFile,
         table_id: i64,
         columns: Vec<ColumnInfo>,
+        need_txn_id: bool,
     ) -> ColumnarTableReader {
         let table_meta = columnar_file.get_table(table_id);
         debug_assert_eq!(table_meta.table_id, table_id);
@@ -53,6 +72,7 @@ impl ColumnarTableReader {
             table_id,
             handle_column: table_meta.handle_column.col_info.clone(),
             version_column: table_meta.version_column.col_info.clone(),
+            txn_id_column: need_txn_id.then(|| table_meta.txn_id_column.col_info.clone()),
             columns,
         };
         let handle_column_id = schema.handle_column.get_column_id();
@@ -63,6 +83,9 @@ impl ColumnarTableReader {
             ColumnarColumnReader::new(file.clone(), table_meta.handle_column.clone(), false);
         let version_reader =
             ColumnarColumnReader::new(file.clone(), table_meta.version_column.clone(), false);
+        let txn_id_reader = need_txn_id.then(|| {
+            ColumnarColumnReader::new(file.clone(), table_meta.txn_id_column.clone(), false)
+        });
         let columns_readers = schema
             .columns
             .iter()
@@ -81,6 +104,7 @@ impl ColumnarTableReader {
             schema,
             handle_reader,
             version_reader,
+            txn_id_reader,
             columns_readers,
         }
     }
@@ -108,6 +132,9 @@ impl ColumnarReader for ColumnarTableReader {
         self.handle_reader.row_idx_in_pack = row_idx_in_pack;
         let row_idx = self.handle_reader.pack_row_start + row_idx_in_pack;
         self.version_reader.set_row_idx(row_idx)?;
+        if let Some(txn_id_reader) = &mut self.txn_id_reader {
+            txn_id_reader.set_row_idx(row_idx)?;
+        }
         for col_reader in &mut self.columns_readers {
             col_reader.set_row_idx(row_idx)?;
         }
@@ -117,6 +144,9 @@ impl ColumnarReader for ColumnarTableReader {
     fn read(&mut self, block: &mut Block, limit: usize) -> crate::table::Result<usize> {
         let read_row = self.handle_reader.read(&mut block.handles, limit)?;
         self.version_reader.read(&mut block.versions, limit)?;
+        if let Some(txn_id_reader) = &mut self.txn_id_reader {
+            txn_id_reader.read(block.txn_ids.as_mut().unwrap(), limit)?;
+        }
         for (i, col) in self.columns_readers.iter_mut().enumerate() {
             col.read(&mut block.columns[i], limit)?;
         }
@@ -394,6 +424,9 @@ impl ColumnarMvccReader {
             self.filter_block
                 .versions
                 .append(&block.versions, start, end);
+            if let Some(filter_txn_ids) = &mut self.filter_block.txn_ids {
+                filter_txn_ids.append(block.txn_ids.as_ref().unwrap(), start, end);
+            }
             for (i, col) in self.filter_block.columns.iter_mut().enumerate() {
                 col.append(&block.columns[i], start, end);
             }
@@ -653,26 +686,211 @@ fn parse_default_val(col_info: &ColumnInfo) -> Option<Vec<u8>> {
     Some(val)
 }
 
+pub struct ColumnarRowTableReader {
+    schema: Schema,
+    iter: Box<dyn table::Iterator>,
+    prefix: Vec<u8>,
+    default_vals: Vec<Option<Vec<u8>>>,
+    is_int_handle: bool,
+    check_schema: bool,
+    keyspace_id: u32,
+    max_col_id: i32,
+}
+
+impl ColumnarRowTableReader {
+    pub fn new(
+        keyspace_id: u32,
+        schema: Schema,
+        iter: Box<dyn table::Iterator>,
+        check_schema: bool,
+    ) -> ColumnarRowTableReader {
+        let mut prefix = encode_row_key(schema.table_id, 0);
+        prefix.truncate(PREFIX_LEN);
+        let is_int_handle = get_fixed_size(&schema.handle_column) > 0;
+        let default_vals = schema
+            .columns
+            .iter()
+            .map(|col| parse_default_val(col))
+            .collect();
+        let max_col_id = schema
+            .columns
+            .iter()
+            .map(|col| col.get_column_id())
+            .max()
+            .unwrap_or_default() as i32;
+        ColumnarRowTableReader {
+            keyspace_id,
+            schema,
+            iter,
+            prefix,
+            default_vals,
+            is_int_handle,
+            check_schema,
+            max_col_id,
+        }
+    }
+
+    fn decode_row_columns(&self, block: &mut Block, row_value: &[u8]) -> table::Result<()> {
+        let row_slice = RowSlice::from_bytes(row_value).unwrap();
+        if self.check_schema {
+            let row_max_col_id = row_slice.max_col_id();
+            if self.max_col_id < row_max_col_id {
+                let err_info = format!(
+                    "ks:{} tbl:{} col:{}",
+                    self.keyspace_id, self.schema.table_id, row_max_col_id
+                );
+                return Err(table::Error::SchemaOutOfDate(err_info));
+            }
+        }
+        let values = row_slice.values();
+        for (offset, col_info) in self.schema.columns.iter().enumerate() {
+            let col_id = col_info.get_column_id();
+            let col_buf = &mut block.columns[offset];
+            if row_slice.search_in_null_ids(col_id) {
+                col_buf.push_null();
+                continue;
+            }
+            if let Some((start, end)) = row_slice.search_in_non_null_ids(col_id).unwrap() {
+                let col_val = &values[start..end];
+                let ft = FieldTypeTp::from_u8(col_info.get_tp() as u8).unwrap();
+                match ft {
+                    FieldTypeTp::Tiny
+                    | FieldTypeTp::Short
+                    | FieldTypeTp::Int24
+                    | FieldTypeTp::Long
+                    | FieldTypeTp::LongLong
+                    | FieldTypeTp::Date
+                    | FieldTypeTp::DateTime
+                    | FieldTypeTp::Timestamp
+                    | FieldTypeTp::Enum
+                    | FieldTypeTp::Bit
+                    | FieldTypeTp::Set
+                    | FieldTypeTp::Year
+                    | FieldTypeTp::Duration => {
+                        let v = decode_v2_u64(col_val).unwrap();
+                        col_buf.push_value(&v.to_le_bytes());
+                    }
+                    FieldTypeTp::Unspecified
+                    | FieldTypeTp::Float
+                    | FieldTypeTp::Double
+                    | FieldTypeTp::Null
+                    | FieldTypeTp::NewDate
+                    | FieldTypeTp::VarChar
+                    | FieldTypeTp::Json
+                    | FieldTypeTp::NewDecimal
+                    | FieldTypeTp::TinyBlob
+                    | FieldTypeTp::MediumBlob
+                    | FieldTypeTp::LongBlob
+                    | FieldTypeTp::Blob
+                    | FieldTypeTp::VarString
+                    | FieldTypeTp::String
+                    | FieldTypeTp::Geometry
+                    | FieldTypeTp::TiDbVectorFloat32 => {
+                        col_buf.push_value(col_val);
+                    }
+                }
+            } else if let Some(default_val) = &self.default_vals[offset] {
+                col_buf.push_value(default_val);
+            } else {
+                col_buf.push_null();
+            }
+        }
+        Ok(())
+    }
+}
+
+impl ColumnarReader for ColumnarRowTableReader {
+    fn schema(&self) -> &Schema {
+        &self.schema
+    }
+
+    fn seek(&mut self, handle: &[u8]) -> table::Result<()> {
+        let row_key = if self.is_int_handle {
+            encode_row_key(self.schema.table_id, (&handle[..]).get_i64_le())
+        } else {
+            encode_common_handle_for_test(self.schema.table_id, handle)
+        };
+        self.iter.seek(InnerKey::from_inner_buf(&row_key));
+        Ok(())
+    }
+
+    fn read(&mut self, block: &mut Block, limit: usize) -> table::Result<usize> {
+        let mut read_rows = 0;
+        while self.iter.valid() && read_rows < limit {
+            let key = self.iter.key();
+            if !key.deref().starts_with(&self.prefix) {
+                break;
+            }
+            if self.is_int_handle {
+                let int_handle = decode_int_handle(key.deref()).unwrap();
+                block.handles.push_value(&int_handle.to_le_bytes());
+            } else {
+                let common_handle = decode_common_handle(key.deref()).unwrap();
+                block.handles.push_value(common_handle);
+            }
+            let value = self.iter.value();
+            let version = value.version;
+            assert_eq!(self.schema.txn_id_column.is_some(), block.txn_ids.is_some());
+            if let Some(txn_id_col) = block.txn_ids.as_mut() {
+                let user_meta = value.user_meta();
+                let txn_id = if user_meta.is_empty() {
+                    0u64
+                } else {
+                    let um = UserMeta::from_slice(value.user_meta());
+                    um.start_ts
+                };
+                txn_id_col.push_value(&txn_id.to_le_bytes());
+            }
+            let row_value = value.get_value();
+            let is_deleted = row_value.is_empty();
+            block.versions.push_version(version, is_deleted);
+            if is_deleted {
+                for col in &mut block.columns {
+                    if col.nullable {
+                        col.push_null();
+                    } else {
+                        col.push_zero();
+                    }
+                }
+            } else {
+                self.decode_row_columns(block, row_value)?;
+            }
+            read_rows += 1;
+            self.iter.next_all_version();
+        }
+        Ok(read_rows)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use bytes::Bytes;
     use rand::Rng;
     use test_util::init_log_for_test;
-    use tidb_query_datatype::{Collation::Utf8Mb4GeneralCi, FieldTypeTp};
+    use tidb_query_datatype::{
+        codec::row::v2::encoder_for_test::{Column, RowEncoder},
+        expr::EvalContext,
+        Collation::Utf8Mb4GeneralCi,
+        FieldTypeTp,
+    };
 
     use super::*;
-    use crate::table::{
-        columnar::{
-            builder::{
-                new_common_handle_column_info, new_int_handle_column_info, new_version_column_info,
-                ColumnarFileBuilder, ColumnarTableBuilder,
+    use crate::{
+        table::{
+            columnar::{
+                builder::{
+                    new_common_handle_column_info, new_int_handle_column_info,
+                    new_txn_id_column_info, new_version_column_info, ColumnarFileBuilder,
+                    ColumnarTableBuilder,
+                },
+                columnar::ColumnarFile,
+                reader::{ColumnarMvccReader, ColumnarReader, ColumnarTableReader},
             },
-            columnar::ColumnarFile,
-            reader::{ColumnarMvccReader, ColumnarReader, ColumnarTableReader},
+            memtable::{CfTable, WriteBatch},
+            sstable::InMemFile,
         },
-        sstable::InMemFile,
+        UserMeta, WRITE_CF,
     };
 
     #[derive(Default, Clone)]
@@ -680,9 +898,10 @@ mod tests {
         handle: Vec<u8>,
         is_common_handle: bool,
         version: u64,
+        txn_id: u64,
         is_deleted: bool,
         c0: Option<i64>,
-        c1: Option<Bytes>,
+        c1: Option<Vec<u8>>,
     }
 
     impl RefRow {
@@ -727,6 +946,7 @@ mod tests {
             schema.handle_column = new_int_handle_column_info();
         }
         schema.version_column = new_version_column_info();
+        schema.txn_id_column = Some(new_txn_id_column_info());
         let mut col_1 = new_column_info(1);
         col_1.set_tp(FieldTypeTp::LongLong as i32);
         let mut col_2 = new_column_info(2);
@@ -744,29 +964,54 @@ mod tests {
         end: i32,
         version: u64,
     ) -> (Arc<dyn File>, Vec<RefRow>) {
-        let mut block = Block::new(schema);
-        let mut table_builder = ColumnarTableBuilder::new(schema.clone(), 8, 256, true);
         let mut rng = rand::thread_rng();
-        let mut ref_rows = vec![];
+        let mut ref_rows: Vec<RefRow> = vec![];
+        let is_common_handle = get_fixed_size(&schema.handle_column) == 0;
         for i in start..end {
-            ref_rows.push(append_row(&mut block, i, version));
+            ref_rows.push(new_ref_row(i, version, is_common_handle));
             if rng.gen_ratio(1, 8) {
-                ref_rows.push(append_row(&mut block, i, version - 1));
+                ref_rows.push(new_ref_row(i, version - 1, is_common_handle));
             }
             if rng.gen_ratio(1, 16) {
-                let is_tombstone = rng.gen_ratio(1, 10);
-                if is_tombstone {
-                    ref_rows.push(append_row(&mut block, i, 0));
-                } else {
-                    ref_rows.push(append_row(&mut block, i, version - 2));
-                }
-            }
-            if block.handles.length() > rng.gen_range(4..16) {
-                table_builder.add_block(&block);
-                block.reset();
+                ref_rows.push(new_ref_row(i, version - 2, is_common_handle));
             }
         }
-        if block.handles.length() > 0 {
+        let mut eval_ctx = EvalContext::default();
+        let mut wb = WriteBatch::new();
+        for ref_row in ref_rows.iter().rev() {
+            let row_key = if is_common_handle {
+                encode_common_handle_for_test(schema.table_id, ref_row.handle.as_slice())
+            } else {
+                encode_row_key(schema.table_id, ref_row.handle.as_slice().get_i64_le())
+            };
+            let inner_key = InnerKey::from_inner_buf(&row_key);
+            let mut row_val = vec![];
+            let cols = vec![
+                Column::new(1, ref_row.c0),
+                Column::new(2, ref_row.c1.clone()),
+            ];
+            if !ref_row.is_deleted {
+                row_val.write_row(&mut eval_ctx, cols).unwrap();
+            }
+            let user_meta = UserMeta::new(ref_row.txn_id, ref_row.version).to_array();
+            wb.put(inner_key, 0, &user_meta, ref_row.version, &row_val);
+        }
+        let cf_tbl = CfTable::new();
+        cf_tbl.get_cf(WRITE_CF).put_batch(&mut wb, None, WRITE_CF);
+        let iter = cf_tbl.get_cf(WRITE_CF).new_iterator(false);
+        let mut row_tbl_reader = ColumnarRowTableReader::new(1, schema.clone(), iter, false);
+        let mut block = Block::new(schema);
+        let mut table_builder = ColumnarTableBuilder::new(schema.clone(), 8, 256, true);
+        row_tbl_reader.seek(&ref_rows[0].handle).unwrap();
+        let mut read_rows = 0;
+        while read_rows < ref_rows.len() {
+            block.reset();
+            let limit = rng.gen_range(2..10);
+            let read = row_tbl_reader.read(&mut block, limit).unwrap();
+            if read == 0 {
+                break;
+            }
+            read_rows += read;
             table_builder.add_block(&block);
         }
         let mut file_builder = ColumnarFileBuilder::new(file_id, None);
@@ -775,33 +1020,23 @@ mod tests {
         (Arc::new(InMemFile::new(1, file_data.into())), ref_rows)
     }
 
-    fn append_row(block: &mut Block, i: i32, version: u64) -> RefRow {
+    fn new_ref_row(i: i32, version: u64, is_common_handle: bool) -> RefRow {
         let mut ref_row = RefRow::default();
-        if block.handles.fixed_size > 0 {
-            ref_row.handle = (i as i64).to_le_bytes().to_vec();
-        } else {
+        ref_row.is_common_handle = is_common_handle;
+        if is_common_handle {
             ref_row.handle = i_to_common_handle(i);
-            ref_row.is_common_handle = true;
+        } else {
+            ref_row.handle = (i as i64).to_le_bytes().to_vec();
         }
         ref_row.version = version;
-        if block.handles.fixed_size > 0 {
-            block.handles.push_value(&(i as i64).to_le_bytes());
-        } else {
-            block.handles.push_value(&i_to_common_handle(i));
-        }
+        ref_row.txn_id = version - 1;
         let mut rng = rand::thread_rng();
-        let is_delete = version == 0 || rng.gen_ratio(1, 10);
+        let is_delete = rng.gen_ratio(1, 10);
         ref_row.is_deleted = is_delete;
-        block.versions.push_version(version, is_delete);
         let is_null = is_delete || rng.gen_ratio(1, 5);
-        if is_null {
-            block.columns[0].push_null();
-            block.columns[1].push_null();
-        } else {
+        if !is_null {
             ref_row.c0 = Some(i as i64);
-            ref_row.c1 = Some(i_to_string_col(i, version).into());
-            block.columns[0].push_value(&(i as i64).to_le_bytes());
-            block.columns[1].push_value(&i_to_string_col(i, version));
+            ref_row.c1 = Some(i_to_string_col(i, version));
         }
         ref_row
     }
@@ -824,7 +1059,8 @@ mod tests {
             let schema = new_schema(1, common_handle);
             let (file, ref_rows) = build_table(1, &schema, 100, 150, 100);
             let columnar_file = ColumnarFile::open(file).unwrap();
-            let mut reader = ColumnarTableReader::new(&columnar_file, 1, schema.columns.clone());
+            let mut reader =
+                ColumnarTableReader::new(&columnar_file, 1, schema.columns.clone(), true);
             reader.seek(&0u64.to_le_bytes()).unwrap();
             let mut block = Block::new(&schema);
             reader.read(&mut block, 100).unwrap();
@@ -840,8 +1076,12 @@ mod tests {
         let mut readers: Vec<Box<dyn ColumnarReader>> = vec![];
         for file in files {
             let columnar_file = ColumnarFile::open(file.clone()).unwrap();
-            let reader =
-                ColumnarTableReader::new(&columnar_file, schema.table_id, schema.columns.clone());
+            let reader = ColumnarTableReader::new(
+                &columnar_file,
+                schema.table_id,
+                schema.columns.clone(),
+                schema.txn_id_column.is_some(),
+            );
             readers.push(Box::new(reader));
         }
         let merge_reader = ColumnarMergeReader::new(schema.clone(), readers);
@@ -849,19 +1089,6 @@ mod tests {
     }
 
     fn verify_with_ref_rows(block: &Block, ref_rows: &[RefRow]) {
-        if block.handles.length() != ref_rows.len() {
-            println!("diff len {} {}", block.handles.length(), ref_rows.len());
-            for i in 0..ref_rows.len() {
-                let handle = ref_rows[i].handle.as_slice();
-                println!("ref handle {:?}", handle);
-            }
-            for i in 0..block.handles.length() {
-                let handle = block.handles.get_not_null_value(i);
-                println!("block handle {:?}", handle);
-            }
-            panic!("diff len");
-        }
-
         for i in 0..ref_rows.len() {
             let ref_row = &ref_rows[i];
             assert_eq!(ref_row.handle, block.handles.get_not_null_value(i), "{}", i);
@@ -876,7 +1103,10 @@ mod tests {
                 );
             }
             if let Some(c1) = &ref_row.c1 {
-                assert_eq!(c1.chunk(), block.columns[1].get_nullable_value(i).unwrap());
+                assert_eq!(
+                    c1.as_slice(),
+                    block.columns[1].get_nullable_value(i).unwrap()
+                );
             }
         }
     }

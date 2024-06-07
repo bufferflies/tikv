@@ -407,6 +407,8 @@ pub enum Error {
     Io(String),
     #[error("EOF")]
     Eof,
+    #[error("Schema out of date: {0}")]
+    SchemaOutOfDate(String),
     #[error("{0}")]
     Other(String),
 }

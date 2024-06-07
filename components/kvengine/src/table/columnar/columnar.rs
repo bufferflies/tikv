@@ -20,6 +20,7 @@ use crate::table::{
 
 pub(crate) const HANDLE_COL_ID: i32 = -1;
 pub(crate) const VERSION_COL_ID: i32 = -1024;
+pub(crate) const TXN_ID_COL_ID: i32 = -1034;
 
 pub const COLUMNAR_MAGIC: u32 = 0xc01e32ae;
 
@@ -28,6 +29,7 @@ pub struct Schema {
     pub table_id: i64,
     pub handle_column: ColumnInfo,
     pub version_column: ColumnInfo,
+    pub txn_id_column: Option<ColumnInfo>,
     pub columns: Vec<ColumnInfo>,
 }
 
@@ -102,6 +104,7 @@ pub(crate) struct TableMeta {
     pub(crate) handle_index: HandleIndex,
     pub(crate) handle_column: Arc<ColumnMeta>,
     pub(crate) version_column: Arc<ColumnMeta>,
+    pub(crate) txn_id_column: Arc<ColumnMeta>,
     pub(crate) columns: HashMap<i32, Arc<ColumnMeta>>,
 }
 
@@ -112,8 +115,10 @@ impl TableMeta {
         buf = remained;
         let (version_column, remained) = ColumnMeta::parse(buf);
         buf = remained;
+        let (txn_id_column, remained) = ColumnMeta::parse(buf);
+        buf = remained;
         let mut columns = HashMap::default();
-        for _ in 0..(num_cols - 2) {
+        for _ in 0..(num_cols - 3) {
             let (col, remained) = ColumnMeta::parse(buf);
             buf = remained;
             columns.insert(col.col_info.get_column_id() as i32, Arc::new(col));
@@ -138,6 +143,7 @@ impl TableMeta {
             handle_index,
             handle_column: Arc::new(handle_column),
             version_column: Arc::new(version_column),
+            txn_id_column: Arc::new(txn_id_column),
             columns,
         }
     }
@@ -484,13 +490,17 @@ impl ColumnBuffer {
     }
 
     pub(crate) fn push_null(&mut self) {
+        self.push_zero();
+        self.nulls.push(1);
+    }
+
+    pub(crate) fn push_zero(&mut self) {
         if self.fixed_size > 0 {
             self.data_buf
                 .resize(self.data_buf.len() + self.fixed_size, 0);
         } else {
             self.offsets.push(self.data_buf.len() as u32);
         }
-        self.nulls.push(1);
     }
 
     // version is not 0 and delete is true represents mvcc delete.
@@ -560,7 +570,7 @@ impl ColumnBuffer {
     }
 
     pub(crate) fn get_version(&self, idx: usize) -> u64 {
-        debug_assert!(self.col_id == VERSION_COL_ID);
+        debug_assert!(self.col_id == VERSION_COL_ID || self.col_id == TXN_ID_COL_ID);
         (&self.data_buf[idx * 8..]).get_u64_le()
     }
 
@@ -660,24 +670,26 @@ impl ColumnBuffer {
 pub struct Block {
     pub(crate) handles: ColumnBuffer,
     pub(crate) versions: ColumnBuffer,
+    pub(crate) txn_ids: Option<ColumnBuffer>,
     pub(crate) columns: Vec<ColumnBuffer>,
 }
 
 impl Block {
     pub(crate) fn new(schema: &Schema) -> Self {
         let handles = ColumnBuffer::new_from_col_info(&schema.handle_column);
-        let versions = ColumnBuffer::new(VERSION_COL_ID, 8, true);
+        let versions = ColumnBuffer::new_from_col_info(&schema.version_column);
+        let txn_ids = schema
+            .txn_id_column
+            .as_ref()
+            .map(|x| ColumnBuffer::new_from_col_info(x));
         let mut columns = vec![];
         for col_info in &schema.columns {
-            columns.push(ColumnBuffer::new(
-                col_info.get_column_id() as i32,
-                get_fixed_size(col_info),
-                get_nullable(col_info),
-            ));
+            columns.push(ColumnBuffer::new_from_col_info(col_info));
         }
         Self {
             handles,
             versions,
+            txn_ids,
             columns,
         }
     }
@@ -685,12 +697,18 @@ impl Block {
     pub(crate) fn reset(&mut self) {
         self.handles.reset();
         self.versions.reset();
+        if let Some(txn_ids) = self.txn_ids.as_mut() {
+            txn_ids.reset();
+        }
         self.columns.iter_mut().for_each(|col| col.reset());
     }
 
     pub(crate) fn truncate(&mut self, length: usize) {
         self.handles.truncate(length);
         self.versions.truncate(length);
+        if let Some(txn_ids) = self.txn_ids.as_mut() {
+            txn_ids.truncate(length);
+        }
         for col in &mut self.columns {
             col.truncate(length);
         }
@@ -701,6 +719,9 @@ impl Block {
             .append(&other.handles, row_offset, row_end_offset);
         self.versions
             .append(&other.versions, row_offset, row_end_offset);
+        if let Some(txn_ids) = self.txn_ids.as_mut() {
+            txn_ids.append(other.txn_ids.as_ref().unwrap(), row_offset, row_end_offset);
+        }
         for (col, other_col) in self.columns.iter_mut().zip(&other.columns) {
             col.append(other_col, row_offset, row_end_offset);
         }
