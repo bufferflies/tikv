@@ -882,7 +882,7 @@ mod tests {
                 builder::{
                     new_common_handle_column_info, new_int_handle_column_info,
                     new_txn_id_column_info, new_version_column_info, ColumnarFileBuilder,
-                    ColumnarTableBuilder,
+                    ColumnarTableBuildOptions, ColumnarTableBuilder,
                 },
                 columnar::ColumnarFile,
                 reader::{ColumnarMvccReader, ColumnarReader, ColumnarTableReader},
@@ -1001,7 +1001,10 @@ mod tests {
         let iter = cf_tbl.get_cf(WRITE_CF).new_iterator(false);
         let mut row_tbl_reader = ColumnarRowTableReader::new(1, schema.clone(), iter, false);
         let mut block = Block::new(schema);
-        let mut table_builder = ColumnarTableBuilder::new(schema.clone(), 8, 256, true);
+        let mut opts = ColumnarTableBuildOptions::default();
+        opts.pack_max_row_count = 8;
+        opts.pack_max_size = 256;
+        let mut table_builder = ColumnarTableBuilder::new(schema.clone(), opts, true);
         row_tbl_reader.seek(&ref_rows[0].handle).unwrap();
         let mut read_rows = 0;
         while read_rows < ref_rows.len() {

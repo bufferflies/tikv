@@ -10,8 +10,8 @@ use tipb::ColumnInfo;
 
 use crate::table::{
     columnar::builder::{
-        TableOffset, ENCODING_TYPE_NONE, PACK_FORMAT, PROP_KEY_BIGGEST, PROP_KEY_L0_VERSION,
-        PROP_KEY_MAX_VERSION, PROP_KEY_SMALLEST,
+        TableOffset, ENCODING_TYPE_NONE, PACK_FORMAT, PROP_KEY_BIGGEST, PROP_KEY_MAX_VERSION,
+        PROP_KEY_SMALLEST, PROP_KEY_SNAP_VERSION,
     },
     parse_prop_data, search,
     sstable::{File, LZ4_COMPRESSION},
@@ -365,7 +365,7 @@ impl ColumnarFile {
                 biggest_key = val.to_vec();
             } else if key == PROP_KEY_MAX_VERSION.as_bytes() {
                 max_version = val.get_u64_le();
-            } else if key == PROP_KEY_L0_VERSION.as_bytes() {
+            } else if key == PROP_KEY_SNAP_VERSION.as_bytes() {
                 l0_version = Some(val.get_u64_le());
             }
             prop_remain = remain;

@@ -27,7 +27,7 @@ pub const MAX_COLUMNAR_LEVEL: usize = 2;
 pub const PROP_KEY_SMALLEST: &str = "smallest";
 pub const PROP_KEY_BIGGEST: &str = "biggest";
 pub const PROP_KEY_MAX_VERSION: &str = "max_ver";
-pub const PROP_KEY_L0_VERSION: &str = "l0_ver";
+pub const PROP_KEY_SNAP_VERSION: &str = "snap_ver";
 
 pub fn new_version_column_info() -> ColumnInfo {
     let mut col_info = ColumnInfo::new();
@@ -66,7 +66,7 @@ pub fn new_common_handle_column_info() -> ColumnInfo {
 
 pub struct ColumnarFileBuilder {
     pub file_id: u64,
-    l0_version: Option<u64>,
+    snap_version: Option<u64>,
     tables: Vec<ColumnarTableBuilder>,
 }
 
@@ -115,12 +115,35 @@ impl TableOffset {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+pub struct ColumnarTableBuildOptions {
+    pub compression_type: u8,
+    pub checksum_type: u8,
+    pub max_columnar_table_size: usize,
+    pub pack_max_row_count: usize,
+    pub pack_max_size: usize,
+}
+
+impl Default for ColumnarTableBuildOptions {
+    fn default() -> Self {
+        Self {
+            compression_type: LZ4_COMPRESSION,
+            checksum_type: ChecksumType::Crc32.value(),
+            max_columnar_table_size: 32 * 1024 * 1024,
+            pack_max_row_count: 8192,
+            pack_max_size: 256 * 1024,
+        }
+    }
+}
+
 #[allow(dead_code)]
 impl ColumnarFileBuilder {
-    pub fn new(file_id: u64, l0_version: Option<u64>) -> Self {
+    pub fn new(file_id: u64, snap_version: Option<u64>) -> Self {
         ColumnarFileBuilder {
             file_id,
-            l0_version,
+            snap_version,
             tables: vec![],
         }
     }
@@ -153,11 +176,11 @@ impl ColumnarFileBuilder {
             PROP_KEY_MAX_VERSION.as_bytes(),
             &max_version.to_le_bytes(),
         );
-        if let Some(l0_version) = self.l0_version {
+        if let Some(snap_version) = self.snap_version {
             add_property(
                 &mut property_buf,
-                PROP_KEY_L0_VERSION.as_bytes(),
-                &l0_version.to_le_bytes(),
+                PROP_KEY_SNAP_VERSION.as_bytes(),
+                &snap_version.to_le_bytes(),
             );
         }
         total_size += property_buf.len();
@@ -222,12 +245,9 @@ pub struct ColumnarTableBuilder {
 
 #[allow(dead_code)]
 impl ColumnarTableBuilder {
-    pub fn new(
-        schema: Schema,
-        pack_max_row_count: usize,
-        pack_max_size: usize,
-        need_min_max: bool,
-    ) -> Self {
+    pub fn new(schema: Schema, opts: ColumnarTableBuildOptions, need_min_max: bool) -> Self {
+        let pack_max_row_count = opts.pack_max_row_count;
+        let pack_max_size = opts.pack_max_size;
         let mut column_builders = vec![];
         for col_info in &schema.columns {
             let col_builder = ColumnarColumnBuilder::new(
@@ -399,6 +419,7 @@ pub struct ColumnarColumnBuilder {
     uncompressed_buf: Vec<u8>,
     compressed_buf: Vec<u8>,
     compressed_packs: Vec<Vec<u8>>,
+    estimated_size: usize,
 }
 
 #[derive(Default, Copy, Clone, Debug)]
@@ -437,6 +458,7 @@ impl ColumnarColumnBuilder {
             uncompressed_buf: vec![],
             compressed_buf: vec![],
             compressed_packs: vec![],
+            estimated_size: 0,
         }
     }
 
@@ -511,6 +533,7 @@ impl ColumnarColumnBuilder {
         self.col_meta
             .pack_offsets
             .push(total_len + pack.len() as u32, self.row_count);
+        self.estimated_size += pack.len();
         self.compressed_packs.push(pack);
         self.pack_buffer.reset();
     }

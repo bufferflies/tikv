@@ -29,6 +29,7 @@ use crate::{
             blobtable::BlobTable,
             builder::{BlobTableBuildOptions, BlobTableBuilder},
         },
+        columnar::builder::ColumnarTableBuildOptions,
         get_tables_in_range,
         sstable::{
             self, builder::TableBuilderOptions, File, InMemFile, L0Builder, LocalFile, SsTable,
@@ -417,6 +418,15 @@ pub struct L1PlusCompaction {
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
+pub struct ColumnarCompaction {
+    level: u32,
+    safe_ts: u64,
+    source_row_tables: Vec<(u32, u64)>,      // (level, id)
+    source_columnar_tables: Vec<(u32, u64)>, // (level, id)
+    columnar_config: ColumnarTableBuildOptions,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
 pub enum InPlaceCompaction {
     #[default]
     Unknown,
@@ -437,6 +447,7 @@ pub enum CompactionType {
         block_size: usize,
         spec: InPlaceCompaction,
     },
+    Columnar(ColumnarCompaction),
 }
 
 const MAX_COMPACTION_EXPAND_SIZE: u64 = 256 * 1024 * 1024;
@@ -1732,6 +1743,9 @@ fn local_compact(ctx: &CompactionCtx) -> Result<pb::ChangeSet> {
             cs.set_major_compaction(major_compact_v3(ctx, major_compaction, &mut allocate_id)?);
         }
         CompactionType::Unknown => unreachable!(),
+        CompactionType::Columnar(_) => {
+            unimplemented!()
+        }
     }
     Ok(cs)
 }
