@@ -60,13 +60,13 @@ pub trait Dfs: Sync + Send {
     async fn remove_txn_chunk(&self, id: u64);
 
     /// create_schema_file create a new schema file.
-    async fn create_schema_file(&self, keyspace_id: u32, id: u64, data: Bytes) -> Result<()>;
+    async fn create_schema_file(&self, id: u64, data: Bytes) -> Result<()>;
 
     /// read_schema_file read the schema file to memory.
-    async fn read_schema_file(&self, keyspace_id: u32, id: u64) -> Result<Bytes>;
+    async fn read_schema_file(&self, id: u64) -> Result<Bytes>;
 
     /// remove_schema_file removes the schema file from the DFS.
-    async fn remove_schema_file(&self, keyspace_id: u32, id: u64);
+    async fn remove_schema_file(&self, id: u64);
 
     /// get_runtime gets the tokio runtime for the DFS.
     fn get_runtime(&self) -> &tokio::runtime::Runtime;
@@ -80,7 +80,7 @@ const REMOVE_DELAY: Duration = Duration::from_secs(90);
 pub struct InMemFs {
     files: dashmap::DashMap<u64, Bytes>,
     txn_chunks: dashmap::DashMap<u64, Bytes>,
-    schema_files: dashmap::DashMap<(u32, u64), Bytes>,
+    schema_files: dashmap::DashMap<u64, Bytes>,
     pending_remove: dashmap::DashMap<u64, Instant>,
     runtime: tokio::runtime::Runtime,
     delay: Arc<Mutex<Duration>>,
@@ -169,20 +169,20 @@ impl Dfs for InMemFs {
         self.txn_chunks.remove(&id);
     }
 
-    async fn create_schema_file(&self, keyspace_id: u32, id: u64, data: Bytes) -> Result<()> {
-        self.schema_files.insert((keyspace_id, id), data);
+    async fn create_schema_file(&self, id: u64, data: Bytes) -> Result<()> {
+        self.schema_files.insert(id, data);
         Ok(())
     }
 
-    async fn read_schema_file(&self, keyspace_id: u32, id: u64) -> Result<Bytes> {
-        if let Some(file) = self.schema_files.get(&(keyspace_id, id)).as_deref() {
+    async fn read_schema_file(&self, id: u64) -> Result<Bytes> {
+        if let Some(file) = self.schema_files.get(&id).as_deref() {
             return Ok(file.clone());
         }
         Err(Error::NotExists(id))
     }
 
-    async fn remove_schema_file(&self, keyspace_id: u32, id: u64) {
-        self.schema_files.remove(&(keyspace_id, id));
+    async fn remove_schema_file(&self, id: u64) {
+        self.schema_files.remove(&id);
     }
 
     fn get_runtime(&self) -> &Runtime {
@@ -221,7 +221,6 @@ impl CacheFs {
         file_id: u64,
         opts: Options,
         file_type: FileType,
-        keyspace_id: Option<u32>,
     ) -> Result<Bytes> {
         let s3_fs = self.s3_fs.clone();
         let cache_miss = Arc::new(AtomicBool::new(false));
@@ -233,7 +232,7 @@ impl CacheFs {
                 match file_type {
                     FileType::Sst => s3_fs.read_file(file_id, opts).await,
                     FileType::TxnChunk => s3_fs.read_txn_chunk(file_id).await,
-                    FileType::Schema => s3_fs.read_schema_file(keyspace_id.unwrap(), file_id).await,
+                    FileType::Schema => s3_fs.read_schema_file(file_id).await,
                 }
             })
             .await
@@ -254,8 +253,7 @@ impl CacheFs {
 #[async_trait]
 impl Dfs for CacheFs {
     async fn read_file(&self, file_id: u64, opts: Options) -> Result<Bytes> {
-        self.read_file_inner(file_id, opts, FileType::Sst, None)
-            .await
+        self.read_file_inner(file_id, opts, FileType::Sst).await
     }
     async fn create(&self, _file_id: u64, _data: Bytes, _opts: Options) -> Result<()> {
         panic!("Do not call");
@@ -270,7 +268,7 @@ impl Dfs for CacheFs {
     }
 
     async fn read_txn_chunk(&self, id: u64) -> Result<Bytes> {
-        self.read_file_inner(id, Options::new(0, 0), FileType::TxnChunk, None)
+        self.read_file_inner(id, Options::new(0, 0), FileType::TxnChunk)
             .await
     }
 
@@ -282,16 +280,16 @@ impl Dfs for CacheFs {
         panic!("Do not call");
     }
 
-    async fn create_schema_file(&self, _keyspace_id: u32, _id: u64, _data: Bytes) -> Result<()> {
+    async fn create_schema_file(&self, _id: u64, _data: Bytes) -> Result<()> {
         panic!("Do not call");
     }
 
-    async fn read_schema_file(&self, keyspace_id: u32, id: u64) -> Result<Bytes> {
-        self.read_file_inner(id, Options::new(0, 0), FileType::Schema, Some(keyspace_id))
+    async fn read_schema_file(&self, id: u64) -> Result<Bytes> {
+        self.read_file_inner(id, Options::new(0, 0), FileType::Schema)
             .await
     }
 
-    async fn remove_schema_file(&self, _keyspace_id: u32, _id: u64) {
+    async fn remove_schema_file(&self, _id: u64) {
         panic!("Do not call");
     }
 
@@ -334,10 +332,8 @@ impl LocalFs {
     pub fn local_txn_chunk_path(&self, id: u64) -> PathBuf {
         self.dir.join("txn").join(format!("{:016x}.txn", id))
     }
-    pub fn local_schema_file_path(&self, keyspace_id: u32, id: u64) -> PathBuf {
-        self.dir
-            .join("schema")
-            .join(format!("{}/{:016x}.schema", keyspace_id, id))
+    pub fn local_schema_file_path(&self, id: u64) -> PathBuf {
+        self.dir.join("schema").join(format!("{:016x}.schema", id))
     }
 }
 
@@ -440,24 +436,21 @@ impl Dfs for LocalFs {
         }
     }
 
-    async fn create_schema_file(&self, keyspace_id: u32, id: u64, data: Bytes) -> Result<()> {
+    async fn create_schema_file(&self, id: u64, data: Bytes) -> Result<()> {
         let local_tmp_file_name = self.tmp_file_path(id);
         fs::write(&local_tmp_file_name, data)?;
-        fs::rename(
-            &local_tmp_file_name,
-            self.local_schema_file_path(keyspace_id, id),
-        )?;
+        fs::rename(&local_tmp_file_name, self.local_schema_file_path(id))?;
         Ok(())
     }
 
-    async fn read_schema_file(&self, keyspace_id: u32, id: u64) -> Result<Bytes> {
-        let local_schema_file_name = self.local_schema_file_path(keyspace_id, id);
+    async fn read_schema_file(&self, id: u64) -> Result<Bytes> {
+        let local_schema_file_name = self.local_schema_file_path(id);
         let data = fs::read(local_schema_file_name)?;
         Ok(data.into())
     }
 
-    async fn remove_schema_file(&self, keyspace_id: u32, id: u64) {
-        if let Err(err) = fs::remove_file(self.local_schema_file_path(keyspace_id, id)) {
+    async fn remove_schema_file(&self, id: u64) {
+        if let Err(err) = fs::remove_file(self.local_schema_file_path(id)) {
             error!("failed to remove local schema file {} {:?}", id, err);
         }
     }

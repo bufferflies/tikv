@@ -197,8 +197,8 @@ impl S3FsCore {
         format!("{}/{:02x}/{:016x}.col", self.prefix, idx, id)
     }
 
-    pub fn schema_file_key(&self, keyspace_id: u32, id: u64) -> String {
-        format!("{}/schema/{}/{:016x}.schema", self.prefix, keyspace_id, id)
+    pub fn schema_file_key(&self, id: u64) -> String {
+        format!("{}/schema/{:016x}.schema", self.prefix, id)
     }
 
     pub fn get_prefix(&self) -> String {
@@ -996,21 +996,21 @@ impl Dfs for S3Fs {
             .await;
     }
 
-    async fn create_schema_file(&self, keyspace_id: u32, id: u64, data: Bytes) -> dfs::Result<()> {
-        self.put_object(self.schema_file_key(keyspace_id, id), data, id.to_string())
+    async fn create_schema_file(&self, id: u64, data: Bytes) -> dfs::Result<()> {
+        self.put_object(self.schema_file_key(id), data, id.to_string())
             .await
     }
 
-    async fn read_schema_file(&self, keyspace_id: u32, id: u64) -> dfs::Result<Bytes> {
+    async fn read_schema_file(&self, id: u64) -> dfs::Result<Bytes> {
         self.get_object(
-            self.schema_file_key(keyspace_id, id),
+            self.schema_file_key(id),
             id.to_string(),
             GetObjectOptions::default(),
         )
         .await
     }
 
-    async fn remove_schema_file(&self, keyspace_id: u32, id: u64) {
+    async fn remove_schema_file(&self, id: u64) {
         // Only AWS supports storage class.
         let target_storage_class = if self.is_on_aws() {
             Some(STORAGE_CLASS_DEFAULT)
@@ -1018,7 +1018,7 @@ impl Dfs for S3Fs {
             None
         };
         let target_tagging = Tagging::new_single_deleted();
-        let schema_file_key = self.schema_file_key(keyspace_id, id);
+        let schema_file_key = self.schema_file_key(id);
         let _ = self
             .copy_object(
                 &schema_file_key,
@@ -1270,7 +1270,7 @@ mod tests {
         let file_data2 = file_data.clone();
         let f = async move {
             match fs
-                .create_schema_file(123, 1234, bytes::Bytes::from(file_data2))
+                .create_schema_file(1234, bytes::Bytes::from(file_data2))
                 .await
             {
                 Ok(_) => {
@@ -1290,7 +1290,7 @@ mod tests {
         let local_file = local_dir.path().join(format!("{:016x}.schema", 1234));
         let move_local_file = local_file.clone();
         let f = async move {
-            match fs.read_schema_file(123, 1234).await {
+            match fs.read_schema_file(1234).await {
                 Ok(data) => {
                     let mut file = std::fs::File::create(&move_local_file).unwrap();
                     file.write_all(data.chunk()).unwrap();
@@ -1315,7 +1315,7 @@ mod tests {
         let fs = s3fs.clone();
         let (tx, rx) = tikv_util::mpsc::bounded(1);
         let f = async move {
-            fs.remove_schema_file(123, 1234).await;
+            fs.remove_schema_file(1234).await;
             tx.send(true).unwrap();
         };
         s3fs.runtime.spawn(f);
