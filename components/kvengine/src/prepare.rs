@@ -41,6 +41,7 @@ impl EngineCore {
         let mut ids: HashMap<u64, FileMeta> = HashMap::new();
         let mut lock_txn_file_refs: Vec<TxnFileRef> = vec![];
         let mut cs = ChangeSet::new(cs);
+        let mut snap = None;
         if cs.has_flush() {
             let flush = cs.get_flush();
             if flush.has_l0_create() {
@@ -80,17 +81,13 @@ impl EngineCore {
             }
         }
         if cs.has_snapshot() {
-            self.collect_snap_ids(cs.get_snapshot(), &mut ids);
-            lock_txn_file_refs
-                .extend(collect_snap_lock_txn_file_refs(cs.get_snapshot()).into_iter());
+            snap = Some(cs.get_snapshot());
         }
         if cs.has_initial_flush() {
             self.collect_snap_ids(cs.get_initial_flush(), &mut ids);
         }
         if cs.has_restore_shard() {
-            self.collect_snap_ids(cs.get_restore_shard(), &mut ids);
-            lock_txn_file_refs
-                .extend(collect_snap_lock_txn_file_refs(cs.get_snapshot()).into_iter());
+            snap = Some(cs.get_restore_shard());
         }
         if cs.has_ingest_files() {
             let ingest_files = cs.get_ingest_files();
@@ -113,6 +110,13 @@ impl EngineCore {
                 ids.insert(blob.get_id(), FileMeta::from_blob_table(blob));
             }
         }
+        let mut encryption_key = encryption_key;
+        if let Some(snap) = snap {
+            self.collect_snap_ids(snap, &mut ids);
+            lock_txn_file_refs.extend(collect_snap_lock_txn_file_refs(snap).into_iter());
+            encryption_key = get_shard_property(ENCRYPTION_KEY, snap.get_properties())
+                .map(|v| self.master_key.decrypt_encryption_key(&v).unwrap())
+        }
 
         let tag = ShardTag::new(self.get_engine_id(), IdVer::from_change_set(&cs));
         if let Some(table_filter) = table_filter {
@@ -124,18 +128,6 @@ impl EngineCore {
                 .drain_filter(|_, tb| !table_filter(cs.shard_id, tb)) // !table_filter: table will not load
                 .collect();
         }
-
-        let encryption_key = if cs.has_snapshot() || cs.has_restore_shard() {
-            let snap = if cs.has_snapshot() {
-                cs.get_snapshot()
-            } else {
-                cs.get_restore_shard()
-            };
-            get_shard_property(ENCRYPTION_KEY, snap.get_properties())
-                .map(|v| self.master_key.decrypt_encryption_key(&v).unwrap())
-        } else {
-            encryption_key
-        };
 
         info!(
             "{} is preparing change set, loading file by ids", tag;
