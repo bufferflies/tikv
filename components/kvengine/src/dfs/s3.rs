@@ -192,6 +192,15 @@ impl S3FsCore {
         format!("{}/txn/{}.txn", self.prefix, id)
     }
 
+    pub fn columnar_file_key(&self, id: u64) -> String {
+        let idx = (fingerprint64(id.to_le_bytes().as_slice())) as u8;
+        format!("{}/{:02x}/{:016x}.col", self.prefix, idx, id)
+    }
+
+    pub fn schema_file_key(&self, keyspace_id: u32, id: u64) -> String {
+        format!("{}/schema/{}/{:016x}.schema", self.prefix, keyspace_id, id)
+    }
+
     pub fn get_prefix(&self) -> String {
         self.prefix.clone()
     }
@@ -987,6 +996,39 @@ impl Dfs for S3Fs {
             .await;
     }
 
+    async fn create_schema_file(&self, keyspace_id: u32, id: u64, data: Bytes) -> dfs::Result<()> {
+        self.put_object(self.schema_file_key(keyspace_id, id), data, id.to_string())
+            .await
+    }
+
+    async fn read_schema_file(&self, keyspace_id: u32, id: u64) -> dfs::Result<Bytes> {
+        self.get_object(
+            self.schema_file_key(keyspace_id, id),
+            id.to_string(),
+            GetObjectOptions::default(),
+        )
+        .await
+    }
+
+    async fn remove_schema_file(&self, keyspace_id: u32, id: u64) {
+        // Only AWS supports storage class.
+        let target_storage_class = if self.is_on_aws() {
+            Some(STORAGE_CLASS_DEFAULT)
+        } else {
+            None
+        };
+        let target_tagging = Tagging::new_single_deleted();
+        let schema_file_key = self.schema_file_key(keyspace_id, id);
+        let _ = self
+            .copy_object(
+                &schema_file_key,
+                &schema_file_key,
+                Some(&target_tagging),
+                target_storage_class,
+            )
+            .await;
+    }
+
     fn get_runtime(&self) -> &Runtime {
         &self.runtime
     }
@@ -1208,6 +1250,72 @@ mod tests {
         let (tx, rx) = tikv_util::mpsc::bounded(1);
         let f = async move {
             fs.remove(321, None, Options::new(1, 1)).await;
+            tx.send(true).unwrap();
+        };
+        s3fs.runtime.spawn(f);
+        assert!(rx.recv().unwrap());
+        let _ = fs::remove_file(local_file);
+    }
+
+    #[test]
+    fn test_s3_schema_file() {
+        ::test_util::init_log_for_test();
+
+        let local_dir = tempfile::tempdir().unwrap();
+        let file_data = "abcdefgh".to_string().into_bytes();
+        let s3fs = new_test_s3fs(&file_data);
+        let (tx, rx) = tikv_util::mpsc::bounded(1);
+
+        let fs = s3fs.clone();
+        let file_data2 = file_data.clone();
+        let f = async move {
+            match fs
+                .create_schema_file(123, 1234, bytes::Bytes::from(file_data2))
+                .await
+            {
+                Ok(_) => {
+                    tx.send(true).unwrap();
+                    println!("create ok");
+                }
+                Err(err) => {
+                    tx.send(false).unwrap();
+                    println!("create error {:?}", err)
+                }
+            }
+        };
+        s3fs.runtime.spawn(f);
+        assert!(rx.recv().unwrap());
+        let fs = s3fs.clone();
+        let (tx, rx) = tikv_util::mpsc::bounded(1);
+        let local_file = local_dir.path().join(format!("{:016x}.schema", 1234));
+        let move_local_file = local_file.clone();
+        let f = async move {
+            match fs.read_schema_file(123, 1234).await {
+                Ok(data) => {
+                    let mut file = std::fs::File::create(&move_local_file).unwrap();
+                    file.write_all(data.chunk()).unwrap();
+                    tx.send(true).unwrap();
+                    println!("prefetch ok");
+                }
+                Err(err) => {
+                    tx.send(false).unwrap();
+                    println!("prefetch failed {:?}", err)
+                }
+            }
+        };
+        s3fs.runtime.spawn(f);
+        assert!(rx.recv().unwrap());
+        let data = std::fs::read(&local_file).unwrap();
+        assert_eq!(&data, &file_data);
+        let file = LocalFile::open(1234, &local_file, false).unwrap();
+        assert_eq!(file.size(), 8u64);
+        assert_eq!(file.id(), 1234u64);
+        let data = file.read(0, 8).unwrap();
+        assert_eq!(&data, &file_data);
+        let fs = s3fs.clone();
+        let (tx, rx) = tikv_util::mpsc::bounded(1);
+        let f = async move {
+            fs.remove_schema_file(123, 1234).await;
             tx.send(true).unwrap();
         };
         s3fs.runtime.spawn(f);
