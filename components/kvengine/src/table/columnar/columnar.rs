@@ -24,7 +24,7 @@ pub(crate) const TXN_ID_COL_ID: i32 = -1034;
 
 pub const COLUMNAR_MAGIC: u32 = 0xc01e32ae;
 
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone, Debug, PartialEq)]
 pub struct Schema {
     pub table_id: i64,
     pub handle_column: ColumnInfo,

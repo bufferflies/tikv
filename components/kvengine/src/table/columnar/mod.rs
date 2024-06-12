@@ -3,3 +3,4 @@
 pub mod builder;
 pub mod columnar;
 pub mod reader;
+pub mod schema_file;
