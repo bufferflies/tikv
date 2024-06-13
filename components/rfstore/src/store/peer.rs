@@ -52,7 +52,9 @@ use raftstore::{
 };
 use rfengine::KV_ENGINE_META_KEY;
 use tikv_util::{
-    box_err, debug, error, info,
+    box_err,
+    codec::bytes::decode_bytes,
+    debug, error, info,
     time::{duration_to_sec, monotonic_raw_now, InstantExt},
     warn,
     worker::Scheduler,
@@ -173,7 +175,8 @@ impl ProposalQueue {
         preprocess_errors: &mut PreprocessErrors,
     ) -> Option<Proposal> {
         if let Some(err) = preprocess_errors.take_error(p.term, p.index) {
-            p.cb.invoke_with_response(cmd_resp::new_error(err));
+            let (resp, key_errs) = cmd_resp::new_with_key_error(err);
+            p.cb.invoke_with_response_ext(resp, key_errs);
             None
         } else {
             Some(p)
@@ -2033,9 +2036,33 @@ impl<'a> PreprocessRef<'a> {
             warn!("{} preprocess_pending_splits denied, shard has txn file locks", tag;
                 "txn_file_locks" => ?self.shard_meta().txn_file_locks(),
             );
-            return Err(Error::Other(
-                SPLIT_REGION_WITH_TXN_FILE_LOCKS_ERR_MSG.into(),
-            ));
+            let mut first_split_key = req
+                .get_admin_request()
+                .get_splits()
+                .get_requests()
+                .first()
+                .map(|r| r.get_split_key())
+                .unwrap_or_default();
+            if first_split_key.is_empty() {
+                return Err(box_err!("missing split key"));
+            }
+            let raw_split_key = decode_bytes(&mut first_split_key, false).map_err(|err| {
+                Error::Other(box_err!(
+                    "failed to decode split key: {:?}, req {:?}",
+                    err,
+                    req
+                ))
+            })?;
+            let key_errs = shard_meta
+                .txn_file_locks()
+                .get_key_errors(&raw_split_key)
+                .map_err(|err| {
+                    error!("{} preprocess_pending_splits: get txn file key errors failed", tag;
+                        "txn_file_locks" => ?shard_meta.txn_file_locks(),
+                        "err" => ?err);
+                    Error::Other(box_err!("get txn file key errors failed"))
+                })?;
+            return Err(Error::KeyErrors(key_errs));
         }
         let regions = split_gen_new_region_metas(
             self.store_id(),

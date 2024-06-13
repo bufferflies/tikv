@@ -397,10 +397,19 @@ fn test_txn_file_split_merge() {
 
     // Fail to split:
     let err = client.try_split(&gen_key(20), 1).unwrap_err();
-    assert!(
-        err.to_string()
-            .contains(rfstore::SPLIT_REGION_WITH_TXN_FILE_LOCKS_ERR_MSG)
-    );
+    match err {
+        client::Error::KeyErrors(key_errs) => {
+            assert_eq!(key_errs.len(), 1);
+            let key_err = &key_errs[0];
+            assert!(key_err.has_locked());
+            let lock_info = key_err.get_locked();
+            assert_eq!(lock_info.key, gen_key(20));
+            assert_eq!(lock_info.primary_lock, gen_key(0));
+        }
+        _ => {
+            panic!("unexpected error: {:?}", err);
+        }
+    }
     // Another split path. Note this split request would succeed after locks are
     // cleanup.
     client.try_split_by_pd(&gen_key(50), 1).unwrap_err();
@@ -425,11 +434,8 @@ fn test_txn_file_split_merge() {
             info!("split on {:?}", gen_key(20));
             match client.try_split(&gen_key(20), 5) {
                 Ok(_) => true,
-                Err(err)
-                    if err
-                        .to_string()
-                        .contains(rfstore::SPLIT_REGION_WITH_TXN_FILE_LOCKS_ERR_MSG) =>
-                {
+                Err(client::Error::KeyErrors(key_errs)) => {
+                    info!("try split encounter locks, try again"; "key_errs" => ?key_errs);
                     false
                 }
                 Err(err) => panic!("split failed: {:?}", err),
@@ -452,11 +458,8 @@ fn test_txn_file_split_merge() {
             info!("split on {:?}", gen_key(150));
             match client.try_split(&gen_key(150), 5) {
                 Ok(_) => true,
-                Err(err)
-                    if err
-                        .to_string()
-                        .contains(rfstore::SPLIT_REGION_WITH_TXN_FILE_LOCKS_ERR_MSG) =>
-                {
+                Err(client::Error::KeyErrors(key_errs)) => {
+                    info!("try split encounter locks, try again"; "key_errs" => ?key_errs);
                     false
                 }
                 Err(err) => panic!("split failed: {:?}", err),

@@ -597,7 +597,9 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
         let task = async move {
             let mut res = f.await?;
             let mut resp = SplitRegionResponse::default();
-            if res.response.get_header().has_error() {
+            if let Some(key_errs) = res.key_errors {
+                resp.set_errors(key_errs.into());
+            } else if res.response.get_header().has_error() {
                 resp.set_region_error(res.response.mut_header().take_error());
             } else {
                 let admin_resp = res.response.mut_admin_response();

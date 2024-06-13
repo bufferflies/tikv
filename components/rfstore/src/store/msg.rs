@@ -270,6 +270,9 @@ pub struct ReadResponse {
 #[derive(Debug)]
 pub struct WriteResponse {
     pub response: RaftCmdResponse,
+
+    // Used for split_region only.
+    pub key_errors: Option<Vec<kvproto::kvrpcpb::KeyError>>,
 }
 
 pub type ReadCallback = Box<dyn FnOnce(ReadResponse) + Send>;
@@ -319,6 +322,14 @@ impl Callback {
     }
 
     pub fn invoke_with_response(self, resp: RaftCmdResponse) {
+        self.invoke_with_response_ext(resp, None);
+    }
+
+    pub fn invoke_with_response_ext(
+        self,
+        resp: RaftCmdResponse,
+        key_errs: Option<Vec<kvproto::kvrpcpb::KeyError>>,
+    ) {
         match self {
             Callback::None => (),
             Callback::Read(read) => {
@@ -330,7 +341,10 @@ impl Callback {
                 read(resp);
             }
             Callback::Write { cb, .. } => {
-                let resp = WriteResponse { response: resp };
+                let resp = WriteResponse {
+                    response: resp,
+                    key_errors: key_errs,
+                };
                 cb(resp);
             }
         }

@@ -991,7 +991,9 @@ impl ShardMeta {
         self.seq = log_index;
 
         let modified = if wb_ref.get_user_meta().is_empty() {
-            let inserted = self.txn_file_locks.insert(wb_ref.start_ts);
+            let inserted = self
+                .txn_file_locks
+                .insert(wb_ref.start_ts, wb_ref.get_lock_val_prefix());
             debug!("{} ShardMeta merge txn file locks (insert by lock)", tag;
                 "wb_ref" => ?wb_ref,
                 "log_index" => log_index,

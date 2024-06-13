@@ -15,6 +15,7 @@ pub const MAX_VAR_U64_LEN: usize = 10;
 pub const U64_SIZE: usize = 8;
 pub const I64_SIZE: usize = 8;
 pub const F64_SIZE: usize = 8;
+pub const U32_SIZE: usize = 4;
 
 fn order_encode_i64(v: i64) -> u64 {
     v as u64 ^ SIGN_MARK

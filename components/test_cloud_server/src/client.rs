@@ -83,6 +83,8 @@ pub enum Error {
     RegionError(errorpb::Error),
     #[error("Key error {0:?}")]
     KeyError(kvrpcpb::KeyError),
+    #[error("Key errors {0:?}")]
+    KeyErrors(Vec<kvrpcpb::KeyError>),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -1354,6 +1356,14 @@ impl ClusterClient {
             split_req.set_context(ctx);
             split_req.set_split_key(key.to_vec());
             let mut resp = client.split_region(&split_req)?;
+            if !resp.get_errors().is_empty() {
+                info!(
+                    "{} try_split: encounters key errors: {:?}",
+                    tag,
+                    resp.get_errors()
+                );
+                return Err(Error::KeyErrors(resp.take_errors().into()));
+            }
             if resp.has_region_error() {
                 let region_err = resp.get_region_error();
                 if self.handle_retryable_error(&tag, region_err) {

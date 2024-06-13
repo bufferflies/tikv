@@ -12,8 +12,6 @@ use tikv_util::codec;
 use crate::store::PeerMsg;
 
 pub const RAFTSTORE_IS_BUSY: &str = "raftstore is busy";
-pub const SPLIT_REGION_WITH_TXN_FILE_LOCKS_ERR_MSG: &str =
-    "fail to split region with txn file locks";
 pub const MERGE_REGION_WITH_TXN_FILE_LOCKS_ERR_MSG: &str =
     "fail to merge source region with txn file locks";
 
@@ -146,6 +144,9 @@ pub enum Error {
         existed_file_id: u64,
         ingest_file_id: u64,
     },
+
+    #[error("Key errors {0:?}")]
+    KeyErrors(Vec<kvproto::kvrpcpb::KeyError>),
 }
 
 impl From<Error> for errorpb::Error {
@@ -304,6 +305,7 @@ impl ErrorCodeExt for Error {
             Error::SstImporter(e) => e.error_code(),
             Error::TxnTypes(e) => e.error_code(),
             Error::IngestOverlap { .. } => error_code::raftstore::UNKNOWN,
+            Error::KeyErrors(_) => error_code::raftstore::UNKNOWN,
         }
     }
 }

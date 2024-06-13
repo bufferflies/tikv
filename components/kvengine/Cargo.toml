@@ -42,6 +42,7 @@ hyper-rustls = "0.24.2"
 hyper-tls = "0.5"
 itertools = "0.10"
 kvenginepb = { path = "../kvenginepb", default-features = false }
+kvproto = { workspace = true }
 lazy_static = "1.3"
 libc = "0.2"
 log_wrappers = { path = "../log_wrappers" }

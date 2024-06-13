@@ -1,11 +1,14 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::collections::HashSet;
-
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use collections::{HashMap, HashMapEntry};
+use kvproto::kvrpcpb;
 use log_wrappers::Value;
 use protobuf::Message;
-use tikv_util::{box_err, codec::number::U64_SIZE};
+use tikv_util::{
+    box_err,
+    codec::number::{U32_SIZE, U64_SIZE},
+};
 
 use crate::{DeletePrefixes, ShardMeta, ShardTag, UserMeta, DEL_PREFIXES_KEY};
 
@@ -200,22 +203,34 @@ impl TxnFileRefPropertyHelper {
 
 #[derive(Debug, Default, Clone)]
 pub struct TxnFileLocks {
-    inner: HashSet<u64 /* txn start_ts */>,
+    inner: HashMap<u64 /* txn start_ts */, Bytes /* lock_val_prefix */>,
 }
 
 impl TxnFileLocks {
     pub fn marshall(&self) -> Bytes {
-        let mut buf = BytesMut::with_capacity(self.inner.len() * U64_SIZE);
-        for &ts in &self.inner {
+        let size = self
+            .inner
+            .values()
+            .map(|lock| U64_SIZE /* start_ts */ + U32_SIZE /* lock_len */ + lock.len())
+            .sum();
+        let mut buf = BytesMut::with_capacity(size);
+        for (&ts, lock) in &self.inner {
             buf.put_u64(ts);
+            buf.put_u32(lock.len() as u32);
+            buf.put(lock.as_ref());
         }
         buf.freeze()
     }
 
     pub fn unmarshall(mut buf: Bytes) -> Self {
-        let mut locks = HashSet::with_capacity(buf.len() / U64_SIZE);
+        let mut locks = HashMap::default();
         while buf.has_remaining() {
-            locks.insert(buf.get_u64());
+            debug_assert!(buf.remaining() >= U64_SIZE + U32_SIZE, "buf: {:?}", buf);
+            let start_ts = buf.get_u64();
+            let lock_len = buf.get_u32() as usize;
+            debug_assert!(buf.remaining() >= lock_len, "buf: {:?}", buf);
+            let lock = buf.split_to(lock_len);
+            locks.insert(start_ts, lock);
         }
         Self { inner: locks }
     }
@@ -227,14 +242,48 @@ impl TxnFileLocks {
 
     // Return whether modified, i.e., `start_ts` is newly inserted.
     #[inline]
-    pub fn insert(&mut self, start_ts: u64) -> bool {
-        self.inner.insert(start_ts)
+    pub fn insert(&mut self, start_ts: u64, lock_val_prefix: &[u8]) -> bool /* modified */ {
+        match self.inner.entry(start_ts) {
+            HashMapEntry::Vacant(e) => {
+                e.insert(Bytes::copy_from_slice(lock_val_prefix));
+                true
+            }
+            HashMapEntry::Occupied(_) => {
+                // Value of `lock_val_prefix` may be different (for `min_commit_ts`), but can be
+                // ignored, as it does not affect resolving the lock.
+                false
+            }
+        }
     }
 
     // Return whether modified, i.e., an existed `start_ts` is removed.
     #[inline]
-    pub fn remove(&mut self, start_ts: u64) -> bool {
-        self.inner.remove(&start_ts)
+    pub fn remove(&mut self, start_ts: u64) -> bool /* modified */ {
+        self.inner.remove(&start_ts).is_some()
+    }
+
+    // Note:
+    // * `raw_key` is used to locate the region, it's not necessary to be in the txn
+    //   file. Resolving txn file locks do not depend on the key.
+    // * It's unreasonable that all locks from different transactions are of the
+    //   same key. But currently TiDB/client-go does not complain about it.
+    pub fn get_key_errors(&self, raw_key: &[u8]) -> crate::Result<Vec<kvrpcpb::KeyError>> {
+        let mut key_errors = Vec::with_capacity(self.inner.len());
+        for (start_ts, lock_val_prefix) in self.inner.iter() {
+            let lock = txn_types::Lock::parse(lock_val_prefix).map_err(|err| {
+                crate::Error::Other(box_err!(
+                    "failed to parse lock: start_ts {}, lock_val_prefix {:?}, err {:?}",
+                    start_ts,
+                    lock_val_prefix,
+                    err
+                ))
+            })?;
+            let lock_info = lock.into_lock_info(raw_key.to_vec());
+            let mut key_err = kvrpcpb::KeyError::default();
+            key_err.set_locked(lock_info);
+            key_errors.push(key_err);
+        }
+        Ok(key_errors)
     }
 }
 
@@ -302,5 +351,23 @@ mod tests {
                 b"x0201077".to_vec(),
             ]
         );
+    }
+
+    #[test]
+    fn test_txn_file_locks() {
+        let mut locks = TxnFileLocks::default();
+        assert!(locks.insert(1, "a".as_bytes()));
+        assert!(locks.insert(2, "b".as_bytes()));
+        assert!(!locks.insert(1, "c".as_bytes()));
+
+        let data = locks.marshall();
+        let locks1 = TxnFileLocks::unmarshall(data);
+        assert_eq!(locks.inner, locks1.inner);
+
+        assert!(locks.remove(1));
+        assert!(!locks.remove(1));
+        assert!(locks.remove(2));
+        assert!(!locks.remove(2));
+        assert!(locks.is_empty());
     }
 }

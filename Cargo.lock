@@ -3651,6 +3651,7 @@ dependencies = [
  "hyper-tls",
  "itertools",
  "kvenginepb",
+ "kvproto",
  "lazy_static",
  "libc 0.2.149",
  "log_wrappers",
@@ -3704,7 +3705,7 @@ dependencies = [
 [[package]]
 name = "kvproto"
 version = "0.0.2"
-source = "git+https://github.com/tidbcloud/kvproto.git?branch=release-7.5-serverless#369bbbf7b45eafef747e04657de0f3f28c970a07"
+source = "git+https://github.com/tidbcloud/kvproto.git?branch=release-7.5-serverless#63716e09027ada60979b8f1e418fb76754cb830f"
 dependencies = [
  "futures 0.3.28",
  "grpcio",

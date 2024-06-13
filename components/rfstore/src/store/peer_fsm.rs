@@ -46,7 +46,7 @@ use txn_types::{Key, WriteBatchFlags};
 
 use crate::{
     store::{
-        cmd_resp::{bind_term, message_error, new_error},
+        cmd_resp::{bind_term, message_error, new_error, new_with_key_error},
         ingest::convert_sst,
         load_last_peer_state,
         msg::Callback,
@@ -60,7 +60,6 @@ use crate::{
         PEER_TICK_SWITCH_MEM_TABLE_CHECK,
     },
     DiscardReason, Error, RaftStoreRouter, Result, MERGE_REGION_WITH_TXN_FILE_LOCKS_ERR_MSG,
-    SPLIT_REGION_WITH_TXN_FILE_LOCKS_ERR_MSG,
 };
 
 /// Limits the maximum number of regions returned by error.
@@ -1257,7 +1256,8 @@ impl<'a> PeerMsgHandler<'a> {
                 "source" => source,
                 "error" => ?e,
             );
-            cb.invoke_with_response(new_error(e));
+            let (resp, key_errs) = new_with_key_error(e);
+            cb.invoke_with_response_ext(resp, key_errs);
             return;
         }
         info!(
@@ -1362,11 +1362,17 @@ impl<'a> PeerMsgHandler<'a> {
                     "tag" => self.peer.tag(),
                     "txn_file_locks" => ?shard_meta.txn_file_locks(),
                 );
-                return Err(box_err!(
-                    "{} prepare split: {}, retry later",
-                    self.fsm.peer.tag(),
-                    SPLIT_REGION_WITH_TXN_FILE_LOCKS_ERR_MSG
-                ));
+                let raw_key =
+                    decode_bytes(&mut split_keys.first().unwrap().as_slice(), false).unwrap();
+                let key_errs = shard_meta
+                    .txn_file_locks()
+                    .get_key_errors(&raw_key).map_err(|err| {
+                    error!("{} validate_split_region: get txn file key errors failed", self.peer.tag();
+                        "txn_file_locks" => ?shard_meta.txn_file_locks(),
+                        "err" => ?err);
+                    Error::Other(box_err!("get txn file key errors failed"))
+                })?;
+                return Err(Error::KeyErrors(key_errs));
             }
         }
 

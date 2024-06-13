@@ -24,6 +24,16 @@ pub fn new_error(err: Error) -> RaftCmdResponse {
     resp
 }
 
+pub fn new_with_key_error(
+    mut err: Error,
+) -> (RaftCmdResponse, Option<Vec<kvproto::kvrpcpb::KeyError>>) {
+    let key_errs = match &mut err {
+        Error::KeyErrors(key_errs) => Some(std::mem::take(key_errs)),
+        _ => None,
+    };
+    (new_error(err), key_errs)
+}
+
 pub fn err_resp(e: Error, term: u64) -> RaftCmdResponse {
     let mut resp = new_error(e);
     bind_term(&mut resp, term);
