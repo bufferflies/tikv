@@ -1532,18 +1532,19 @@ async fn ingest_files_to_leader(
 
 async fn get_shard_meta(
     pd: Arc<dyn PdClient>,
-    shard_key: &[u8],
+    shard_raw_key: &[u8],
     timeout: Duration,
 ) -> Result<kvenginepb::ChangeSet> {
     let security_mgr = pd.get_security_mgr();
     let http_client = security_mgr.http_client(hyper::Client::builder())?;
+    let encoded_key = encode_bytes(shard_raw_key);
     let start_time = Instant::now_coarse();
     let mut retry = 0;
     loop {
         if start_time.saturating_elapsed() >= timeout {
             return Err(Error::Other(box_err!(
                 "get_shard_meta failed, key: {:?}",
-                shard_key
+                shard_raw_key
             )));
         }
         if retry > 0 {
@@ -1551,12 +1552,12 @@ async fn get_shard_meta(
         }
         retry += 1;
 
-        let region_res = pd.get_region_async(shard_key).await;
+        let region_res = pd.get_region_async(&encoded_key).await;
         if region_res.is_err() {
             error!(
                 "get_shard_meta: get region error: {:?}, key: {:?}",
                 region_res.unwrap_err(),
-                shard_key
+                encoded_key
             );
             continue;
         }
@@ -1567,7 +1568,7 @@ async fn get_shard_meta(
             error!(
                 "get_shard_meta: get leader error: {:?}, key: {:?}, shard_id: {}",
                 store_res.unwrap_err(),
-                shard_key,
+                shard_raw_key,
                 shard_id
             );
             continue;
