@@ -26,6 +26,7 @@ use crate::{
     table::{
         self,
         blobtable::blobtable::BlobTable,
+        columnar::schema_file::SchemaFile,
         get_tables_in_range,
         memtable::{self, CfTable},
         search,
@@ -803,6 +804,10 @@ impl Shard {
         ShardTag::new(self.engine_id, IdVer::new(self.id, self.ver))
     }
 
+    pub fn get_schema_file(&self) -> Option<SchemaFile> {
+        self.data.read().unwrap().schema_file.clone()
+    }
+
     pub(crate) fn ready_to_compact(&self) -> bool {
         self.is_active() && self.get_initial_flushed()
     }
@@ -836,6 +841,7 @@ impl Shard {
             lock_txn_files,
             shard_data.limiter.clone(),
             shard_data.update_counter + 1,
+            shard_data.schema_file.clone(),
         );
         self.set_data(new_data);
     }
@@ -918,6 +924,7 @@ impl ShardData {
             vec![],
             limiter,
             INITIAL_UPDATE_COUNTER,
+            None,
         )
     }
 
@@ -931,6 +938,7 @@ impl ShardData {
         lock_txn_files: Vec<TxnFile>,
         limiter: RegionLimiter,
         update_counter: u64,
+        schema_file: Option<SchemaFile>,
     ) -> Self {
         assert!(!mem_tbls.is_empty());
 
@@ -945,6 +953,7 @@ impl ShardData {
                 unloaded_tbls,
                 limiter,
                 update_counter,
+                schema_file,
             }),
         }
     }
@@ -961,6 +970,7 @@ pub(crate) struct ShardDataCore {
     pub(crate) unloaded_tbls: HashMap<u64, FileMeta>,
     pub limiter: RegionLimiter,
     pub update_counter: u64,
+    pub(crate) schema_file: Option<SchemaFile>,
 }
 
 impl Deref for ShardDataCore {

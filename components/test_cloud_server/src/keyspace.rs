@@ -364,6 +364,17 @@ impl KeyspaceMeta {
         self.tables.get(&table_id)
     }
 
+    pub fn get_all_available_tables(&self) -> Vec<i64> {
+        let mut ids: Vec<i64> = self
+            .tables
+            .iter()
+            .filter(|t| t.is_available())
+            .map(|t| t.id())
+            .collect();
+        ids.sort();
+        ids
+    }
+
     pub fn name(&self) -> String {
         self.name.clone()
     }

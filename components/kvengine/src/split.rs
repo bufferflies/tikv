@@ -136,6 +136,7 @@ impl Engine {
                     new_cfs[cf].set_level(new_level);
                 }
             }
+            let schema_file = old_data.schema_file.clone();
             let new_data = ShardData::new(
                 new_shard.range.clone(),
                 new_mem_tbls,
@@ -146,6 +147,7 @@ impl Engine {
                 vec![],
                 RegionLimiter::new_from(&old_data.limiter),
                 NEW_DATA_UPDATE_COUNTER,
+                schema_file,
             );
             new_shard.set_data(new_data);
         }
@@ -421,6 +423,7 @@ impl Engine {
                 lock_txn_files,
                 old_data.limiter.clone(),
                 old_data.update_counter + 1,
+                old_data.schema_file.clone(),
             )
         } else {
             info!(
@@ -441,6 +444,7 @@ impl Engine {
                 old_data.lock_txn_files.clone(),
                 old_data.limiter.clone(),
                 old_data.update_counter + 1,
+                old_data.schema_file.clone(),
             )
         };
         new_shard.set_data(data);

@@ -17,6 +17,7 @@ use crate::{
     meta::is_move_down,
     table::{
         blobtable::blobtable::BlobTable,
+        columnar::schema_file::SchemaFile,
         memtable::CfTable,
         sstable::{BlockCacheKey, L0Table, LocalFile, SsTable},
         InnerKey, TableExt, TxnFile,
@@ -32,6 +33,7 @@ pub struct ChangeSet {
     /// Tables that are not loaded from DFS.
     pub unloaded_tables: HashMap<u64, FileMeta>,
     pub lock_txn_files: Vec<TxnFile>,
+    pub schema_file: Option<SchemaFile>,
 }
 
 impl Deref for ChangeSet {
@@ -57,6 +59,7 @@ impl ChangeSet {
             blob_tables: HashMap::new(),
             unloaded_tables: HashMap::new(),
             lock_txn_files: vec![],
+            schema_file: None,
         }
     }
 
@@ -64,18 +67,23 @@ impl ChangeSet {
         &mut self,
         id: u64,
         file: LocalFile,
-        level: u32,
+        meta: &FileMeta,
         cache: SegmentedCache<BlockCacheKey, Bytes>,
         encryption_key: Option<EncryptionKey>,
     ) -> Result<()> {
-        if is_blob_file(level) {
+        if meta.is_blob_file() {
             let blob_table = BlobTable::new(Arc::new(file))?;
             self.blob_tables.insert(id, blob_table);
-        } else if level == 0 {
+        } else if meta.get_level() == 0 {
             let l0_table = L0Table::new(Arc::new(file), Some(cache), false, encryption_key)?;
             self.l0_tables.insert(id, l0_table.unwrap());
         } else {
-            let ln_table = SsTable::new(Arc::new(file), Some(cache), level == 1, encryption_key)?;
+            let ln_table = SsTable::new(
+                Arc::new(file),
+                Some(cache),
+                meta.get_level() == 1,
+                encryption_key,
+            )?;
             self.ln_tables.insert(id, ln_table);
         }
         Ok(())
@@ -211,6 +219,8 @@ impl EngineCore {
             self.apply_ingest_files(&shard, &cs)?;
         } else if cs.has_restore_shard() {
             self.apply_restore_shard(&shard, &cs)?;
+        } else if cs.has_update_schema_meta() {
+            self.apply_update_schema_meta(&shard, &cs);
         }
         debug!("{} finished applying change set: {:?}", shard.tag(), cs);
 
@@ -270,6 +280,7 @@ impl EngineCore {
                 old_data.lock_txn_files.clone(),
                 old_data.limiter.clone(),
                 old_data.update_counter + 1,
+                old_data.schema_file.clone(),
             );
             shard.set_data(new_data);
             self.send_free_mem_msg(FreeMemMsg::FreeMem(last));
@@ -292,6 +303,7 @@ impl EngineCore {
                     old_data.lock_txn_files.clone(),
                     old_data.limiter.clone(),
                     old_data.update_counter + 1,
+                    old_data.schema_file.clone(),
                 );
                 shard.set_data(new_data);
                 self.send_free_mem_msg(FreeMemMsg::FreeMem(last));
@@ -332,6 +344,7 @@ impl EngineCore {
             data.lock_txn_files.clone(),
             data.limiter.clone(),
             data.update_counter + 1,
+            data.schema_file.clone(),
         );
         info!("{} apply_initial_flush", shard.tag();
             "seq" => cs.sequence,
@@ -405,6 +418,7 @@ impl EngineCore {
             data.lock_txn_files.clone(),
             data.limiter.clone(),
             data.update_counter + 1,
+            data.schema_file.clone(),
         );
         shard.set_data(new_data);
         self.remove_dfs_files(shard, del_files);
@@ -506,6 +520,7 @@ impl EngineCore {
             data.lock_txn_files.clone(),
             data.limiter.clone(),
             data.update_counter + 1,
+            data.schema_file.clone(),
         );
         shard.set_data(new_data);
         self.remove_dfs_files(shard, del_file_is_subrange);
@@ -596,6 +611,7 @@ impl EngineCore {
             data.lock_txn_files.clone(),
             data.limiter.clone(),
             data.update_counter + 1,
+            data.schema_file.clone(),
         );
         assert_eq!(cs.get_property_key(), DEL_PREFIXES_KEY);
         let done = DeletePrefixes::unmarshal(cs.get_property_value(), shard.inner_key_off);
@@ -624,6 +640,7 @@ impl EngineCore {
             data.lock_txn_files.clone(),
             data.limiter.clone(),
             data.update_counter + 1,
+            data.schema_file.clone(),
         );
         shard.set_data(new_data);
         let truncated_ts = TruncateTs::unmarshal(cs.get_property_value());
@@ -652,6 +669,7 @@ impl EngineCore {
             data.lock_txn_files.clone(),
             data.limiter.clone(),
             data.update_counter + 1,
+            data.schema_file.clone(),
         );
         shard.set_data(new_data);
         shard.set_property(TRIM_OVER_BOUND, TRIM_OVER_BOUND_DISABLE);
@@ -791,6 +809,7 @@ impl EngineCore {
             old_data.lock_txn_files.clone(),
             old_data.limiter.clone(),
             old_data.update_counter + 1,
+            old_data.schema_file.clone(),
         );
         shard.set_data(new_data);
         Ok(())
@@ -832,6 +851,7 @@ impl EngineCore {
             vec![],
             old_data.limiter.clone(),
             NEW_DATA_UPDATE_COUNTER,
+            old_data.schema_file.clone(),
         );
         new_shard.set_data(new_data);
         new_shard.set_active(old_shard.is_active());
@@ -857,5 +877,22 @@ impl EngineCore {
         self.shards.insert(new_shard.id, Arc::new(new_shard));
 
         Ok(())
+    }
+
+    fn apply_update_schema_meta(&self, shard: &Shard, cs: &ChangeSet) {
+        let old_data = shard.get_data();
+        let new_data = ShardData::new(
+            old_data.range.clone(),
+            old_data.mem_tbls.clone(),
+            old_data.l0_tbls.clone(),
+            old_data.blob_tbl_map.clone(),
+            old_data.cfs.clone(),
+            old_data.unloaded_tbls.clone(),
+            old_data.lock_txn_files.clone(),
+            old_data.limiter.clone(),
+            old_data.update_counter + 1,
+            cs.schema_file.clone(),
+        );
+        shard.set_data(new_data);
     }
 }

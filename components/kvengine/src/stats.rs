@@ -186,6 +186,7 @@ pub struct ShardStats {
     pub ready_to_destroy_range: bool,
     pub truncate_ts: Option<u64>,
     pub trim_over_bound: bool,
+    pub schema_version: i64,
 }
 
 impl ShardStats {
@@ -397,6 +398,11 @@ impl super::Shard {
         let compaction_level = priority.as_ref().map_or(0, |x| x.level());
         let compaction_score = priority.as_ref().map_or(0f64, |x| x.score());
         let pending_ops = self.pending_ops.read().unwrap();
+        let schema_version = data
+            .schema_file
+            .as_ref()
+            .map(|sf| sf.get_version())
+            .unwrap_or_default();
         ShardStats {
             id: self.id,
             ver: self.ver,
@@ -440,6 +446,7 @@ impl super::Shard {
             ready_to_destroy_range: Self::ready_to_destroy_range(&pending_ops.del_prefixes, &data),
             truncate_ts: pending_ops.truncate_ts.map(|x| x.inner()),
             trim_over_bound: pending_ops.trim_over_bound,
+            schema_version,
         }
     }
 }

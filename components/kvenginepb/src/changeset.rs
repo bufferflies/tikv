@@ -48,6 +48,8 @@ pub struct ChangeSet {
     pub trim_over_bound: ::protobuf::SingularPtrField<TableChange>,
     pub restore_shard: ::protobuf::SingularPtrField<Snapshot>,
     pub major_compaction: ::protobuf::SingularPtrField<MajorCompaction>,
+    pub update_schema_meta: ::protobuf::SingularPtrField<SchemaMeta>,
+    pub columnar_compaction: ::protobuf::SingularPtrField<ColumnarCompaction>,
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
     pub cached_size: ::protobuf::CachedSize,
@@ -586,6 +588,72 @@ impl ChangeSet {
     pub fn take_major_compaction(&mut self) -> MajorCompaction {
         self.major_compaction.take().unwrap_or_else(|| MajorCompaction::new())
     }
+
+    // .enginepb.SchemaMeta update_schema_meta = 23;
+
+
+    pub fn get_update_schema_meta(&self) -> &SchemaMeta {
+        self.update_schema_meta.as_ref().unwrap_or_else(|| SchemaMeta::default_instance())
+    }
+    pub fn clear_update_schema_meta(&mut self) {
+        self.update_schema_meta.clear();
+    }
+
+    pub fn has_update_schema_meta(&self) -> bool {
+        self.update_schema_meta.is_some()
+    }
+
+    // Param is passed by value, moved
+    pub fn set_update_schema_meta(&mut self, v: SchemaMeta) {
+        self.update_schema_meta = ::protobuf::SingularPtrField::some(v);
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_update_schema_meta(&mut self) -> &mut SchemaMeta {
+        if self.update_schema_meta.is_none() {
+            self.update_schema_meta.set_default();
+        }
+        self.update_schema_meta.as_mut().unwrap()
+    }
+
+    // Take field
+    pub fn take_update_schema_meta(&mut self) -> SchemaMeta {
+        self.update_schema_meta.take().unwrap_or_else(|| SchemaMeta::new())
+    }
+
+    // .enginepb.ColumnarCompaction columnar_compaction = 24;
+
+
+    pub fn get_columnar_compaction(&self) -> &ColumnarCompaction {
+        self.columnar_compaction.as_ref().unwrap_or_else(|| ColumnarCompaction::default_instance())
+    }
+    pub fn clear_columnar_compaction(&mut self) {
+        self.columnar_compaction.clear();
+    }
+
+    pub fn has_columnar_compaction(&self) -> bool {
+        self.columnar_compaction.is_some()
+    }
+
+    // Param is passed by value, moved
+    pub fn set_columnar_compaction(&mut self, v: ColumnarCompaction) {
+        self.columnar_compaction = ::protobuf::SingularPtrField::some(v);
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_columnar_compaction(&mut self) -> &mut ColumnarCompaction {
+        if self.columnar_compaction.is_none() {
+            self.columnar_compaction.set_default();
+        }
+        self.columnar_compaction.as_mut().unwrap()
+    }
+
+    // Take field
+    pub fn take_columnar_compaction(&mut self) -> ColumnarCompaction {
+        self.columnar_compaction.take().unwrap_or_else(|| ColumnarCompaction::new())
+    }
 }
 
 impl ::protobuf::Message for ChangeSet {
@@ -646,6 +714,16 @@ impl ::protobuf::Message for ChangeSet {
             }
         };
         for v in &self.major_compaction {
+            if !v.is_initialized() {
+                return false;
+            }
+        };
+        for v in &self.update_schema_meta {
+            if !v.is_initialized() {
+                return false;
+            }
+        };
+        for v in &self.columnar_compaction {
             if !v.is_initialized() {
                 return false;
             }
@@ -734,6 +812,12 @@ impl ::protobuf::Message for ChangeSet {
                 22 => {
                     ::protobuf::rt::read_singular_message_into(wire_type, is, &mut self.major_compaction)?;
                 },
+                23 => {
+                    ::protobuf::rt::read_singular_message_into(wire_type, is, &mut self.update_schema_meta)?;
+                },
+                24 => {
+                    ::protobuf::rt::read_singular_message_into(wire_type, is, &mut self.columnar_compaction)?;
+                },
                 _ => {
                     ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
                 },
@@ -812,6 +896,14 @@ impl ::protobuf::Message for ChangeSet {
             my_size += 2 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
         }
         if let Some(ref v) = self.major_compaction.as_ref() {
+            let len = v.compute_size();
+            my_size += 2 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
+        }
+        if let Some(ref v) = self.update_schema_meta.as_ref() {
+            let len = v.compute_size();
+            my_size += 2 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
+        }
+        if let Some(ref v) = self.columnar_compaction.as_ref() {
             let len = v.compute_size();
             my_size += 2 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
         }
@@ -899,6 +991,16 @@ impl ::protobuf::Message for ChangeSet {
         }
         if let Some(ref v) = self.major_compaction.as_ref() {
             os.write_tag(22, ::protobuf::wire_format::WireTypeLengthDelimited)?;
+            os.write_raw_varint32(v.get_cached_size())?;
+            v.write_to_with_cached_sizes(os)?;
+        }
+        if let Some(ref v) = self.update_schema_meta.as_ref() {
+            os.write_tag(23, ::protobuf::wire_format::WireTypeLengthDelimited)?;
+            os.write_raw_varint32(v.get_cached_size())?;
+            v.write_to_with_cached_sizes(os)?;
+        }
+        if let Some(ref v) = self.columnar_compaction.as_ref() {
+            os.write_tag(24, ::protobuf::wire_format::WireTypeLengthDelimited)?;
             os.write_raw_varint32(v.get_cached_size())?;
             v.write_to_with_cached_sizes(os)?;
         }
@@ -1039,6 +1141,16 @@ impl ::protobuf::Message for ChangeSet {
                     |m: &ChangeSet| { &m.major_compaction },
                     |m: &mut ChangeSet| { &mut m.major_compaction },
                 ));
+                fields.push(::protobuf::reflect::accessor::make_singular_ptr_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<SchemaMeta>>(
+                    "update_schema_meta",
+                    |m: &ChangeSet| { &m.update_schema_meta },
+                    |m: &mut ChangeSet| { &mut m.update_schema_meta },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_singular_ptr_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<ColumnarCompaction>>(
+                    "columnar_compaction",
+                    |m: &ChangeSet| { &m.columnar_compaction },
+                    |m: &mut ChangeSet| { &mut m.columnar_compaction },
+                ));
                 ::protobuf::reflect::MessageDescriptor::new::<ChangeSet>(
                     "ChangeSet",
                     fields,
@@ -1080,6 +1192,8 @@ impl ::protobuf::Clear for ChangeSet {
         self.trim_over_bound.clear();
         self.restore_shard.clear();
         self.major_compaction.clear();
+        self.update_schema_meta.clear();
+        self.columnar_compaction.clear();
         self.unknown_fields.clear();
     }
 }
@@ -1108,6 +1222,8 @@ impl ::protobuf::PbPrint for ChangeSet {
         ::protobuf::PbPrint::fmt(&self.trim_over_bound, "trim_over_bound", buf);
         ::protobuf::PbPrint::fmt(&self.restore_shard, "restore_shard", buf);
         ::protobuf::PbPrint::fmt(&self.major_compaction, "major_compaction", buf);
+        ::protobuf::PbPrint::fmt(&self.update_schema_meta, "update_schema_meta", buf);
+        ::protobuf::PbPrint::fmt(&self.columnar_compaction, "columnar_compaction", buf);
         if old_len < buf.len() {
           buf.push(' ');
         }
@@ -1137,6 +1253,8 @@ impl ::std::fmt::Debug for ChangeSet {
         ::protobuf::PbPrint::fmt(&self.trim_over_bound, "trim_over_bound", &mut s);
         ::protobuf::PbPrint::fmt(&self.restore_shard, "restore_shard", &mut s);
         ::protobuf::PbPrint::fmt(&self.major_compaction, "major_compaction", &mut s);
+        ::protobuf::PbPrint::fmt(&self.update_schema_meta, "update_schema_meta", &mut s);
+        ::protobuf::PbPrint::fmt(&self.columnar_compaction, "columnar_compaction", &mut s);
         write!(f, "{}", s)
     }
 }
@@ -1917,6 +2035,257 @@ impl ::protobuf::reflect::ProtobufValue for MajorCompaction {
 }
 
 #[derive(PartialEq,Clone,Default)]
+pub struct SchemaMeta {
+    // message fields
+    pub keyspace_id: u32,
+    pub file_id: u64,
+    pub version: i64,
+    // special fields
+    pub unknown_fields: ::protobuf::UnknownFields,
+    pub cached_size: ::protobuf::CachedSize,
+}
+
+impl<'a> ::std::default::Default for &'a SchemaMeta {
+    fn default() -> &'a SchemaMeta {
+        <SchemaMeta as ::protobuf::Message>::default_instance()
+    }
+}
+
+impl SchemaMeta {
+    pub fn new() -> SchemaMeta {
+        ::std::default::Default::default()
+    }
+
+    // uint32 keyspace_id = 1;
+
+
+    pub fn get_keyspace_id(&self) -> u32 {
+        self.keyspace_id
+    }
+    pub fn clear_keyspace_id(&mut self) {
+        self.keyspace_id = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_keyspace_id(&mut self, v: u32) {
+        self.keyspace_id = v;
+    }
+
+    // uint64 file_id = 2;
+
+
+    pub fn get_file_id(&self) -> u64 {
+        self.file_id
+    }
+    pub fn clear_file_id(&mut self) {
+        self.file_id = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_file_id(&mut self, v: u64) {
+        self.file_id = v;
+    }
+
+    // int64 version = 3;
+
+
+    pub fn get_version(&self) -> i64 {
+        self.version
+    }
+    pub fn clear_version(&mut self) {
+        self.version = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_version(&mut self, v: i64) {
+        self.version = v;
+    }
+}
+
+impl ::protobuf::Message for SchemaMeta {
+    fn is_initialized(&self) -> bool {
+        true
+    }
+
+    fn merge_from(&mut self, is: &mut ::protobuf::CodedInputStream) -> ::protobuf::ProtobufResult<()> {
+        while !is.eof()? {
+            let (field_number, wire_type) = is.read_tag_unpack()?;
+            match field_number {
+                1 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint32()?;
+                    self.keyspace_id = tmp;
+                },
+                2 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.file_id = tmp;
+                },
+                3 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_int64()?;
+                    self.version = tmp;
+                },
+                _ => {
+                    ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
+                },
+            };
+        }
+        ::std::result::Result::Ok(())
+    }
+
+    // Compute sizes of nested messages
+    #[allow(unused_variables)]
+    fn compute_size(&self) -> u32 {
+        let mut my_size = 0;
+        if self.keyspace_id != 0 {
+            my_size += ::protobuf::rt::value_size(1, self.keyspace_id, ::protobuf::wire_format::WireTypeVarint);
+        }
+        if self.file_id != 0 {
+            my_size += ::protobuf::rt::value_size(2, self.file_id, ::protobuf::wire_format::WireTypeVarint);
+        }
+        if self.version != 0 {
+            my_size += ::protobuf::rt::value_size(3, self.version, ::protobuf::wire_format::WireTypeVarint);
+        }
+        my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
+        self.cached_size.set(my_size);
+        my_size
+    }
+
+    fn write_to_with_cached_sizes(&self, os: &mut ::protobuf::CodedOutputStream) -> ::protobuf::ProtobufResult<()> {
+        if self.keyspace_id != 0 {
+            os.write_uint32(1, self.keyspace_id)?;
+        }
+        if self.file_id != 0 {
+            os.write_uint64(2, self.file_id)?;
+        }
+        if self.version != 0 {
+            os.write_int64(3, self.version)?;
+        }
+        os.write_unknown_fields(self.get_unknown_fields())?;
+        ::std::result::Result::Ok(())
+    }
+
+    fn get_cached_size(&self) -> u32 {
+        self.cached_size.get()
+    }
+
+    fn get_unknown_fields(&self) -> &::protobuf::UnknownFields {
+        &self.unknown_fields
+    }
+
+    fn mut_unknown_fields(&mut self) -> &mut ::protobuf::UnknownFields {
+        &mut self.unknown_fields
+    }
+
+    fn as_any(&self) -> &dyn (::std::any::Any) {
+        self as &dyn (::std::any::Any)
+    }
+    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
+        self as &mut dyn (::std::any::Any)
+    }
+    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+        self
+    }
+
+    fn descriptor(&self) -> &'static ::protobuf::reflect::MessageDescriptor {
+        Self::descriptor_static()
+    }
+
+    fn new() -> SchemaMeta {
+        SchemaMeta::new()
+    }
+
+    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
+        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy {
+            lock: ::protobuf::lazy::ONCE_INIT,
+            ptr: 0 as *const ::protobuf::reflect::MessageDescriptor,
+        };
+        unsafe {
+            descriptor.get(|| {
+                let mut fields = ::std::vec::Vec::new();
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint32>(
+                    "keyspace_id",
+                    |m: &SchemaMeta| { &m.keyspace_id },
+                    |m: &mut SchemaMeta| { &mut m.keyspace_id },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                    "file_id",
+                    |m: &SchemaMeta| { &m.file_id },
+                    |m: &mut SchemaMeta| { &mut m.file_id },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeInt64>(
+                    "version",
+                    |m: &SchemaMeta| { &m.version },
+                    |m: &mut SchemaMeta| { &mut m.version },
+                ));
+                ::protobuf::reflect::MessageDescriptor::new::<SchemaMeta>(
+                    "SchemaMeta",
+                    fields,
+                    file_descriptor_proto()
+                )
+            })
+        }
+    }
+
+    fn default_instance() -> &'static SchemaMeta {
+        static mut instance: ::protobuf::lazy::Lazy<SchemaMeta> = ::protobuf::lazy::Lazy {
+            lock: ::protobuf::lazy::ONCE_INIT,
+            ptr: 0 as *const SchemaMeta,
+        };
+        unsafe {
+            instance.get(SchemaMeta::new)
+        }
+    }
+}
+
+impl ::protobuf::Clear for SchemaMeta {
+    fn clear(&mut self) {
+        self.keyspace_id = 0;
+        self.file_id = 0;
+        self.version = 0;
+        self.unknown_fields.clear();
+    }
+}
+
+impl ::protobuf::PbPrint for SchemaMeta {
+    #[allow(unused_variables)]
+    fn fmt(&self, name: &str, buf: &mut String) {
+        ::protobuf::push_message_start(name, buf);
+        let old_len = buf.len();
+        ::protobuf::PbPrint::fmt(&self.keyspace_id, "keyspace_id", buf);
+        ::protobuf::PbPrint::fmt(&self.file_id, "file_id", buf);
+        ::protobuf::PbPrint::fmt(&self.version, "version", buf);
+        if old_len < buf.len() {
+          buf.push(' ');
+        }
+        buf.push('}');
+    }
+}
+impl ::std::fmt::Debug for SchemaMeta {
+    #[allow(unused_variables)]
+    fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
+        let mut s = String::new();
+        ::protobuf::PbPrint::fmt(&self.keyspace_id, "keyspace_id", &mut s);
+        ::protobuf::PbPrint::fmt(&self.file_id, "file_id", &mut s);
+        ::protobuf::PbPrint::fmt(&self.version, "version", &mut s);
+        write!(f, "{}", s)
+    }
+}
+
+impl ::protobuf::reflect::ProtobufValue for SchemaMeta {
+    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef {
+        ::protobuf::reflect::ProtobufValueRef::Message(self)
+    }
+}
+
+#[derive(PartialEq,Clone,Default)]
 pub struct ColumnarCompaction {
     // message fields
     pub columnar_change: ::protobuf::SingularPtrField<TableChange>,
@@ -2549,7 +2918,8 @@ pub struct Snapshot {
     pub max_ts: u64,
     pub inner_key_off: u32,
     pub columnar_creates: ::protobuf::RepeatedField<TableCreate>,
-    pub schema_file_id: u64,
+    pub schema_meta: ::protobuf::SingularPtrField<SchemaMeta>,
+    pub columnar_snap_version: u64,
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
     pub cached_size: ::protobuf::CachedSize,
@@ -2811,19 +3181,52 @@ impl Snapshot {
         ::std::mem::replace(&mut self.columnar_creates, ::protobuf::RepeatedField::new())
     }
 
-    // uint64 schema_file_id = 13;
+    // .enginepb.SchemaMeta schema_meta = 13;
 
 
-    pub fn get_schema_file_id(&self) -> u64 {
-        self.schema_file_id
+    pub fn get_schema_meta(&self) -> &SchemaMeta {
+        self.schema_meta.as_ref().unwrap_or_else(|| SchemaMeta::default_instance())
     }
-    pub fn clear_schema_file_id(&mut self) {
-        self.schema_file_id = 0;
+    pub fn clear_schema_meta(&mut self) {
+        self.schema_meta.clear();
+    }
+
+    pub fn has_schema_meta(&self) -> bool {
+        self.schema_meta.is_some()
     }
 
     // Param is passed by value, moved
-    pub fn set_schema_file_id(&mut self, v: u64) {
-        self.schema_file_id = v;
+    pub fn set_schema_meta(&mut self, v: SchemaMeta) {
+        self.schema_meta = ::protobuf::SingularPtrField::some(v);
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_schema_meta(&mut self) -> &mut SchemaMeta {
+        if self.schema_meta.is_none() {
+            self.schema_meta.set_default();
+        }
+        self.schema_meta.as_mut().unwrap()
+    }
+
+    // Take field
+    pub fn take_schema_meta(&mut self) -> SchemaMeta {
+        self.schema_meta.take().unwrap_or_else(|| SchemaMeta::new())
+    }
+
+    // uint64 columnar_snap_version = 14;
+
+
+    pub fn get_columnar_snap_version(&self) -> u64 {
+        self.columnar_snap_version
+    }
+    pub fn clear_columnar_snap_version(&mut self) {
+        self.columnar_snap_version = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_columnar_snap_version(&mut self, v: u64) {
+        self.columnar_snap_version = v;
     }
 }
 
@@ -2850,6 +3253,11 @@ impl ::protobuf::Message for Snapshot {
             }
         };
         for v in &self.columnar_creates {
+            if !v.is_initialized() {
+                return false;
+            }
+        };
+        for v in &self.schema_meta {
             if !v.is_initialized() {
                 return false;
             }
@@ -2911,11 +3319,14 @@ impl ::protobuf::Message for Snapshot {
                     ::protobuf::rt::read_repeated_message_into(wire_type, is, &mut self.columnar_creates)?;
                 },
                 13 => {
+                    ::protobuf::rt::read_singular_message_into(wire_type, is, &mut self.schema_meta)?;
+                },
+                14 => {
                     if wire_type != ::protobuf::wire_format::WireTypeVarint {
                         return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
                     }
                     let tmp = is.read_uint64()?;
-                    self.schema_file_id = tmp;
+                    self.columnar_snap_version = tmp;
                 },
                 _ => {
                     ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
@@ -2967,8 +3378,12 @@ impl ::protobuf::Message for Snapshot {
             let len = value.compute_size();
             my_size += 1 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
         };
-        if self.schema_file_id != 0 {
-            my_size += ::protobuf::rt::value_size(13, self.schema_file_id, ::protobuf::wire_format::WireTypeVarint);
+        if let Some(ref v) = self.schema_meta.as_ref() {
+            let len = v.compute_size();
+            my_size += 1 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
+        }
+        if self.columnar_snap_version != 0 {
+            my_size += ::protobuf::rt::value_size(14, self.columnar_snap_version, ::protobuf::wire_format::WireTypeVarint);
         }
         my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
         self.cached_size.set(my_size);
@@ -3019,8 +3434,13 @@ impl ::protobuf::Message for Snapshot {
             os.write_raw_varint32(v.get_cached_size())?;
             v.write_to_with_cached_sizes(os)?;
         };
-        if self.schema_file_id != 0 {
-            os.write_uint64(13, self.schema_file_id)?;
+        if let Some(ref v) = self.schema_meta.as_ref() {
+            os.write_tag(13, ::protobuf::wire_format::WireTypeLengthDelimited)?;
+            os.write_raw_varint32(v.get_cached_size())?;
+            v.write_to_with_cached_sizes(os)?;
+        }
+        if self.columnar_snap_version != 0 {
+            os.write_uint64(14, self.columnar_snap_version)?;
         }
         os.write_unknown_fields(self.get_unknown_fields())?;
         ::std::result::Result::Ok(())
@@ -3119,10 +3539,15 @@ impl ::protobuf::Message for Snapshot {
                     |m: &Snapshot| { &m.columnar_creates },
                     |m: &mut Snapshot| { &mut m.columnar_creates },
                 ));
+                fields.push(::protobuf::reflect::accessor::make_singular_ptr_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<SchemaMeta>>(
+                    "schema_meta",
+                    |m: &Snapshot| { &m.schema_meta },
+                    |m: &mut Snapshot| { &mut m.schema_meta },
+                ));
                 fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
-                    "schema_file_id",
-                    |m: &Snapshot| { &m.schema_file_id },
-                    |m: &mut Snapshot| { &mut m.schema_file_id },
+                    "columnar_snap_version",
+                    |m: &Snapshot| { &m.columnar_snap_version },
+                    |m: &mut Snapshot| { &mut m.columnar_snap_version },
                 ));
                 ::protobuf::reflect::MessageDescriptor::new::<Snapshot>(
                     "Snapshot",
@@ -3157,7 +3582,8 @@ impl ::protobuf::Clear for Snapshot {
         self.max_ts = 0;
         self.inner_key_off = 0;
         self.columnar_creates.clear();
-        self.schema_file_id = 0;
+        self.schema_meta.clear();
+        self.columnar_snap_version = 0;
         self.unknown_fields.clear();
     }
 }
@@ -3178,7 +3604,8 @@ impl ::protobuf::PbPrint for Snapshot {
         ::protobuf::PbPrint::fmt(&self.max_ts, "max_ts", buf);
         ::protobuf::PbPrint::fmt(&self.inner_key_off, "inner_key_off", buf);
         ::protobuf::PbPrint::fmt(&self.columnar_creates, "columnar_creates", buf);
-        ::protobuf::PbPrint::fmt(&self.schema_file_id, "schema_file_id", buf);
+        ::protobuf::PbPrint::fmt(&self.schema_meta, "schema_meta", buf);
+        ::protobuf::PbPrint::fmt(&self.columnar_snap_version, "columnar_snap_version", buf);
         if old_len < buf.len() {
           buf.push(' ');
         }
@@ -3200,7 +3627,8 @@ impl ::std::fmt::Debug for Snapshot {
         ::protobuf::PbPrint::fmt(&self.max_ts, "max_ts", &mut s);
         ::protobuf::PbPrint::fmt(&self.inner_key_off, "inner_key_off", &mut s);
         ::protobuf::PbPrint::fmt(&self.columnar_creates, "columnar_creates", &mut s);
-        ::protobuf::PbPrint::fmt(&self.schema_file_id, "schema_file_id", &mut s);
+        ::protobuf::PbPrint::fmt(&self.schema_meta, "schema_meta", &mut s);
+        ::protobuf::PbPrint::fmt(&self.columnar_snap_version, "columnar_snap_version", &mut s);
         write!(f, "{}", s)
     }
 }
@@ -6158,7 +6586,7 @@ impl ::protobuf::reflect::ProtobufValue for TxnFileRef {
 }
 
 static file_descriptor_proto_data: &'static [u8] = b"\
-    \n\x0fchangeset.proto\x12\x08enginepb\"\xba\x05\n\tChangeSet\x12\x11\n\
+    \n\x0fchangeset.proto\x12\x08enginepb\"\xab\x06\n\tChangeSet\x12\x11\n\
     \x07shardID\x18\x01\x20\x01(\x04B\0\x12\x12\n\x08shardVer\x18\x02\x20\
     \x01(\x04B\0\x12*\n\ncompaction\x18\x04\x20\x01(\x0b2\x14.enginepb.Compa\
     ctionB\0\x12\x20\n\x05flush\x18\x05\x20\x01(\x0b2\x0f.enginepb.FlushB\0\
@@ -6175,62 +6603,67 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     bleChangeB\0\x120\n\x0ftrim_over_bound\x18\x14\x20\x01(\x0b2\x15.enginep\
     b.TableChangeB\0\x12+\n\rrestore_shard\x18\x15\x20\x01(\x0b2\x12.enginep\
     b.SnapshotB\0\x125\n\x10major_compaction\x18\x16\x20\x01(\x0b2\x19.engin\
-    epb.MajorCompactionB\0:\0\"\xcd\x01\n\nCompaction\x12\x0c\n\x02cf\x18\
-    \x01\x20\x01(\x05B\0\x12\x0f\n\x05level\x18\x02\x20\x01(\rB\0\x12-\n\x0c\
-    tableCreates\x18\x03\x20\x03(\x0b2\x15.enginepb.TableCreateB\0\x12\x14\n\
-    \ntopDeletes\x18\x04\x20\x03(\x04B\0\x12\x17\n\rbottomDeletes\x18\x05\
-    \x20\x03(\x04B\0\x12\x14\n\nconflicted\x18\x06\x20\x01(\x08B\0\x12*\n\nb\
-    lobTables\x18\x07\x20\x03(\x0b2\x14.enginepb.BlobCreateB\0:\0\"\xa1\x01\
-    \n\x0fMajorCompaction\x12.\n\rsstableChange\x18\x01\x20\x01(\x0b2\x15.en\
-    ginepb.TableChangeB\0\x12-\n\rnewBlobTables\x18\x02\x20\x03(\x0b2\x14.en\
-    ginepb.BlobCreateB\0\x12\x17\n\roldBlobTables\x18\x03\x20\x03(\x04B\0\
-    \x12\x14\n\nconflicted\x18\x04\x20\x01(\x08B\0:\0\"`\n\x12ColumnarCompac\
-    tion\x120\n\x0fcolumnar_change\x18\x01\x20\x01(\x0b2\x15.enginepb.TableC\
-    hangeB\0\x12\x16\n\x0csnap_version\x18\x02\x20\x01(\x04B\0:\0\"\xab\x01\
-    \n\x05Flush\x12&\n\x08l0Create\x18\x01\x20\x01(\x0b2\x12.enginepb.L0Crea\
-    teB\0\x12*\n\nproperties\x18\x02\x20\x01(\x0b2\x14.enginepb.PropertiesB\
-    \0\x12\x11\n\x07version\x18\x03\x20\x01(\x04B\0\x12\x10\n\x06max_ts\x18\
-    \x05\x20\x01(\x04B\0\x12'\n\tl0Creates\x18\x06\x20\x03(\x0b2\x12.enginep\
-    b.L0CreateB\0:\0\"\x90\x03\n\x08Snapshot\x12\x15\n\x0bouter_start\x18\
-    \x01\x20\x01(\x0cB\0\x12\x13\n\touter_end\x18\x02\x20\x01(\x0cB\0\x12*\n\
-    \nproperties\x18\x03\x20\x01(\x0b2\x14.enginepb.PropertiesB\0\x12'\n\tl0\
-    Creates\x18\x05\x20\x03(\x0b2\x12.enginepb.L0CreateB\0\x12-\n\x0ctableCr\
-    eates\x18\x06\x20\x03(\x0b2\x15.enginepb.TableCreateB\0\x12\x15\n\x0bbas\
-    eVersion\x18\x07\x20\x01(\x04B\0\x12\x17\n\rdata_sequence\x18\x08\x20\
-    \x01(\x04B\0\x12+\n\x0bBlobCreates\x18\t\x20\x03(\x0b2\x14.enginepb.Blob\
-    CreateB\0\x12\x10\n\x06max_ts\x18\n\x20\x01(\x04B\0\x12\x17\n\rinner_key\
-    _off\x18\x0b\x20\x01(\rB\0\x120\n\x0fcolumnarCreates\x18\x0c\x20\x03(\
-    \x0b2\x15.enginepb.TableCreateB\0\x12\x18\n\x0eschema_file_id\x18\r\x20\
-    \x01(\x04B\0:\0\"A\n\x08L0Create\x12\x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\
-    \x12\x12\n\x08smallest\x18\x02\x20\x01(\x0cB\0\x12\x11\n\x07biggest\x18\
-    \x03\x20\x01(\x0cB\0:\0\"C\n\nBlobCreate\x12\x0c\n\x02ID\x18\x01\x20\x01\
-    (\x04B\0\x12\x12\n\x08smallest\x18\x02\x20\x01(\x0cB\0\x12\x11\n\x07bigg\
-    est\x18\x03\x20\x01(\x0cB\0:\0\"~\n\x0bTableCreate\x12\x0c\n\x02ID\x18\
-    \x01\x20\x01(\x04B\0\x12\x0f\n\x05level\x18\x02\x20\x01(\rB\0\x12\x0c\n\
-    \x02CF\x18\x03\x20\x01(\x05B\0\x12\x12\n\x08smallest\x18\x04\x20\x01(\
-    \x0cB\0\x12\x11\n\x07biggest\x18\x05\x20\x01(\x0cB\0\x12\x19\n\x0fcolumn\
-    ar_tables\x18\x06\x20\x01(\rB\0:\0\"<\n\x0bTableDelete\x12\x0c\n\x02ID\
-    \x18\x01\x20\x01(\x04B\0\x12\x0f\n\x05level\x18\x02\x20\x01(\rB\0\x12\
-    \x0c\n\x02CF\x18\x03\x20\x01(\x05B\0:\0\"D\n\x05Split\x12)\n\tnewShards\
-    \x18\x01\x20\x03(\x0b2\x14.enginepb.PropertiesB\0\x12\x0e\n\x04Keys\x18\
-    \x03\x20\x03(\x0cB\0:\0\"\xd2\x01\n\x0bIngestFiles\x12'\n\tl0Creates\x18\
-    \x01\x20\x03(\x0b2\x12.enginepb.L0CreateB\0\x12-\n\x0ctableCreates\x18\
-    \x02\x20\x03(\x0b2\x15.enginepb.TableCreateB\0\x12*\n\nproperties\x18\
-    \x03\x20\x01(\x0b2\x14.enginepb.PropertiesB\0\x12+\n\x0bBlobCreates\x18\
-    \x04\x20\x03(\x0b2\x14.enginepb.BlobCreateB\0\x12\x10\n\x06max_ts\x18\
-    \x05\x20\x01(\x04B\0:\0\"C\n\nProperties\x12\x11\n\x07shardID\x18\x01\
-    \x20\x01(\x04B\0\x12\x0e\n\x04keys\x18\x02\x20\x03(\tB\0\x12\x10\n\x06va\
-    lues\x18\x03\x20\x03(\x0cB\0:\0\"m\n\x0bTableChange\x12-\n\x0ctableDelet\
-    es\x18\x01\x20\x03(\x0b2\x15.enginepb.TableDeleteB\0\x12-\n\x0ctableCrea\
-    tes\x18\x02\x20\x03(\x0b2\x15.enginepb.TableCreateB\0:\0\">\n\x0bTxnFile\
-    Refs\x12-\n\rtxn_file_refs\x18\x01\x20\x03(\x0b2\x14.enginepb.TxnFileRef\
-    B\0:\0\"\xc9\x01\n\nTxnFileRef\x12\x12\n\x08start_ts\x18\x01\x20\x01(\
-    \x04B\0\x12\x13\n\tchunk_ids\x18\x02\x20\x03(\x04B\0\x12\x11\n\x07versio\
-    n\x18\x03\x20\x01(\x04B\0\x12\x13\n\tuser_meta\x18\x04\x20\x01(\x0cB\0\
-    \x12\x19\n\x0flock_val_prefix\x18\x05\x20\x01(\x0cB\0\x12\x13\n\tshard_v\
-    er\x18\x06\x20\x01(\x04B\0\x12\x1b\n\x11inner_lower_bound\x18\x07\x20\
-    \x01(\x0cB\0\x12\x1b\n\x11inner_upper_bound\x18\x08\x20\x01(\x0cB\0:\0B\
-    \0b\x06proto3\
+    epb.MajorCompactionB\0\x122\n\x12update_schema_meta\x18\x17\x20\x01(\x0b\
+    2\x14.enginepb.SchemaMetaB\0\x12;\n\x13columnar_compaction\x18\x18\x20\
+    \x01(\x0b2\x1c.enginepb.ColumnarCompactionB\0:\0\"\xcd\x01\n\nCompaction\
+    \x12\x0c\n\x02cf\x18\x01\x20\x01(\x05B\0\x12\x0f\n\x05level\x18\x02\x20\
+    \x01(\rB\0\x12-\n\x0ctableCreates\x18\x03\x20\x03(\x0b2\x15.enginepb.Tab\
+    leCreateB\0\x12\x14\n\ntopDeletes\x18\x04\x20\x03(\x04B\0\x12\x17\n\rbot\
+    tomDeletes\x18\x05\x20\x03(\x04B\0\x12\x14\n\nconflicted\x18\x06\x20\x01\
+    (\x08B\0\x12*\n\nblobTables\x18\x07\x20\x03(\x0b2\x14.enginepb.BlobCreat\
+    eB\0:\0\"\xa1\x01\n\x0fMajorCompaction\x12.\n\rsstableChange\x18\x01\x20\
+    \x01(\x0b2\x15.enginepb.TableChangeB\0\x12-\n\rnewBlobTables\x18\x02\x20\
+    \x03(\x0b2\x14.enginepb.BlobCreateB\0\x12\x17\n\roldBlobTables\x18\x03\
+    \x20\x03(\x04B\0\x12\x14\n\nconflicted\x18\x04\x20\x01(\x08B\0:\0\"K\n\n\
+    SchemaMeta\x12\x15\n\x0bkeyspace_id\x18\x01\x20\x01(\rB\0\x12\x11\n\x07f\
+    ile_id\x18\x02\x20\x01(\x04B\0\x12\x11\n\x07version\x18\x03\x20\x01(\x03\
+    B\0:\0\"`\n\x12ColumnarCompaction\x120\n\x0fcolumnar_change\x18\x01\x20\
+    \x01(\x0b2\x15.enginepb.TableChangeB\0\x12\x16\n\x0csnap_version\x18\x02\
+    \x20\x01(\x04B\0:\0\"\xab\x01\n\x05Flush\x12&\n\x08l0Create\x18\x01\x20\
+    \x01(\x0b2\x12.enginepb.L0CreateB\0\x12*\n\nproperties\x18\x02\x20\x01(\
+    \x0b2\x14.enginepb.PropertiesB\0\x12\x11\n\x07version\x18\x03\x20\x01(\
+    \x04B\0\x12\x10\n\x06max_ts\x18\x05\x20\x01(\x04B\0\x12'\n\tl0Creates\
+    \x18\x06\x20\x03(\x0b2\x12.enginepb.L0CreateB\0:\0\"\xc4\x03\n\x08Snapsh\
+    ot\x12\x15\n\x0bouter_start\x18\x01\x20\x01(\x0cB\0\x12\x13\n\touter_end\
+    \x18\x02\x20\x01(\x0cB\0\x12*\n\nproperties\x18\x03\x20\x01(\x0b2\x14.en\
+    ginepb.PropertiesB\0\x12'\n\tl0Creates\x18\x05\x20\x03(\x0b2\x12.enginep\
+    b.L0CreateB\0\x12-\n\x0ctableCreates\x18\x06\x20\x03(\x0b2\x15.enginepb.\
+    TableCreateB\0\x12\x15\n\x0bbaseVersion\x18\x07\x20\x01(\x04B\0\x12\x17\
+    \n\rdata_sequence\x18\x08\x20\x01(\x04B\0\x12+\n\x0bBlobCreates\x18\t\
+    \x20\x03(\x0b2\x14.enginepb.BlobCreateB\0\x12\x10\n\x06max_ts\x18\n\x20\
+    \x01(\x04B\0\x12\x17\n\rinner_key_off\x18\x0b\x20\x01(\rB\0\x120\n\x0fco\
+    lumnarCreates\x18\x0c\x20\x03(\x0b2\x15.enginepb.TableCreateB\0\x12+\n\
+    \x0bschema_meta\x18\r\x20\x01(\x0b2\x14.enginepb.SchemaMetaB\0\x12\x1f\n\
+    \x15columnar_snap_version\x18\x0e\x20\x01(\x04B\0:\0\"A\n\x08L0Create\
+    \x12\x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\x12\x12\n\x08smallest\x18\x02\
+    \x20\x01(\x0cB\0\x12\x11\n\x07biggest\x18\x03\x20\x01(\x0cB\0:\0\"C\n\nB\
+    lobCreate\x12\x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\x12\x12\n\x08smallest\
+    \x18\x02\x20\x01(\x0cB\0\x12\x11\n\x07biggest\x18\x03\x20\x01(\x0cB\0:\0\
+    \"~\n\x0bTableCreate\x12\x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\x12\x0f\n\
+    \x05level\x18\x02\x20\x01(\rB\0\x12\x0c\n\x02CF\x18\x03\x20\x01(\x05B\0\
+    \x12\x12\n\x08smallest\x18\x04\x20\x01(\x0cB\0\x12\x11\n\x07biggest\x18\
+    \x05\x20\x01(\x0cB\0\x12\x19\n\x0fcolumnar_tables\x18\x06\x20\x01(\rB\0:\
+    \0\"<\n\x0bTableDelete\x12\x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\x12\x0f\n\
+    \x05level\x18\x02\x20\x01(\rB\0\x12\x0c\n\x02CF\x18\x03\x20\x01(\x05B\0:\
+    \0\"D\n\x05Split\x12)\n\tnewShards\x18\x01\x20\x03(\x0b2\x14.enginepb.Pr\
+    opertiesB\0\x12\x0e\n\x04Keys\x18\x03\x20\x03(\x0cB\0:\0\"\xd2\x01\n\x0b\
+    IngestFiles\x12'\n\tl0Creates\x18\x01\x20\x03(\x0b2\x12.enginepb.L0Creat\
+    eB\0\x12-\n\x0ctableCreates\x18\x02\x20\x03(\x0b2\x15.enginepb.TableCrea\
+    teB\0\x12*\n\nproperties\x18\x03\x20\x01(\x0b2\x14.enginepb.PropertiesB\
+    \0\x12+\n\x0bBlobCreates\x18\x04\x20\x03(\x0b2\x14.enginepb.BlobCreateB\
+    \0\x12\x10\n\x06max_ts\x18\x05\x20\x01(\x04B\0:\0\"C\n\nProperties\x12\
+    \x11\n\x07shardID\x18\x01\x20\x01(\x04B\0\x12\x0e\n\x04keys\x18\x02\x20\
+    \x03(\tB\0\x12\x10\n\x06values\x18\x03\x20\x03(\x0cB\0:\0\"m\n\x0bTableC\
+    hange\x12-\n\x0ctableDeletes\x18\x01\x20\x03(\x0b2\x15.enginepb.TableDel\
+    eteB\0\x12-\n\x0ctableCreates\x18\x02\x20\x03(\x0b2\x15.enginepb.TableCr\
+    eateB\0:\0\">\n\x0bTxnFileRefs\x12-\n\rtxn_file_refs\x18\x01\x20\x03(\
+    \x0b2\x14.enginepb.TxnFileRefB\0:\0\"\xc9\x01\n\nTxnFileRef\x12\x12\n\
+    \x08start_ts\x18\x01\x20\x01(\x04B\0\x12\x13\n\tchunk_ids\x18\x02\x20\
+    \x03(\x04B\0\x12\x11\n\x07version\x18\x03\x20\x01(\x04B\0\x12\x13\n\tuse\
+    r_meta\x18\x04\x20\x01(\x0cB\0\x12\x19\n\x0flock_val_prefix\x18\x05\x20\
+    \x01(\x0cB\0\x12\x13\n\tshard_ver\x18\x06\x20\x01(\x04B\0\x12\x1b\n\x11i\
+    nner_lower_bound\x18\x07\x20\x01(\x0cB\0\x12\x1b\n\x11inner_upper_bound\
+    \x18\x08\x20\x01(\x0cB\0:\0B\0b\x06proto3\
 ";
 
 static mut file_descriptor_proto_lazy: ::protobuf::lazy::Lazy<::protobuf::descriptor::FileDescriptorProto> = ::protobuf::lazy::Lazy {

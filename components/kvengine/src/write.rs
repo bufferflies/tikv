@@ -141,6 +141,7 @@ impl Engine {
             data.lock_txn_files.clone(),
             data.limiter.clone(),
             data.update_counter + 1,
+            data.schema_file.clone(),
         );
         new_data.refresh_for_limiter(&shard.tag());
         shard.set_data(new_data);
@@ -303,6 +304,7 @@ impl Engine {
             lock_txn_files,
             old_data.limiter.clone(),
             old_data.update_counter + 1,
+            old_data.schema_file.clone(),
         );
         shard.set_data(data);
         is_commit

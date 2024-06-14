@@ -3,6 +3,7 @@
 use std::{borrow::Cow, collections::VecDeque, fmt, fmt::Debug, sync::Arc};
 
 use cloud_encryption::EncryptionKey;
+use kvengine::table::columnar::schema_file::SchemaFile;
 use kvenginepb::TxnFileRef;
 use kvproto::{
     kvrpcpb::ExtraOp as TxnExtraOp,
@@ -449,6 +450,7 @@ pub enum CasualMessage {
         major_compact: bool,
         callback: Callback,
     },
+    UpdateSchemaFile(SchemaFile),
 }
 
 impl fmt::Debug for CasualMessage {
@@ -484,6 +486,14 @@ impl fmt::Debug for CasualMessage {
             }
             CasualMessage::MajorCompact { major_compact, .. } => {
                 write!(fmt, "major compact {:?}", major_compact)
+            }
+            CasualMessage::UpdateSchemaFile(schema_file) => {
+                write!(
+                    fmt,
+                    "update schema file id:{}, ver:{}",
+                    schema_file.get_file_id(),
+                    schema_file.get_version()
+                )
             }
         }
     }

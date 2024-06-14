@@ -2,8 +2,12 @@
 
 use std::{collections::HashMap, sync::Arc};
 
+use api_version::api_v2::KEYSPACE_PREFIX_LEN;
 use bytes::{Buf, BufMut};
 use protobuf::Message;
+use tidb_query_datatype::codec::table::{
+    decode_table_id, INDEX_PREFIX_SEP, RECORD_PREFIX_SEP, TABLE_PREFIX, TABLE_PREFIX_KEY_LEN,
+};
 use tipb::TableInfo;
 
 use crate::table::{
@@ -19,6 +23,7 @@ use crate::table::{
 pub const SCHEMA_FILE_MAGIC: u32 = 0x5353484D;
 pub const SCHEMA_FILE_FORMAT_VER: u16 = 1;
 
+#[derive(Clone)]
 pub struct SchemaFile {
     core: Arc<SchemaFileCore>,
 }
@@ -26,7 +31,7 @@ pub struct SchemaFile {
 pub(crate) struct SchemaFileCore {
     file_id: u64,
     keyspace_id: u32,
-    schema_version: i64,
+    version: i64,
     tables: HashMap<i64, Schema>,
 }
 
@@ -118,12 +123,23 @@ impl SchemaFile {
         let core = SchemaFileCore {
             file_id,
             keyspace_id,
-            schema_version,
+            version: schema_version,
             tables,
         };
         Ok(SchemaFile {
             core: Arc::new(core),
         })
+    }
+
+    pub fn new_tombstone(schema_version: i64) -> SchemaFile {
+        Self {
+            core: Arc::new(SchemaFileCore {
+                file_id: 0,
+                keyspace_id: 0,
+                version: schema_version,
+                tables: HashMap::new(),
+            }),
+        }
     }
 
     pub fn get_table(&self, table_id: i64) -> Option<&Schema> {
@@ -134,12 +150,54 @@ impl SchemaFile {
         self.core.keyspace_id
     }
 
-    pub fn get_schema_version(&self) -> i64 {
-        self.core.schema_version
+    pub fn get_version(&self) -> i64 {
+        self.core.version
     }
 
     pub fn get_file_id(&self) -> u64 {
         self.core.file_id
+    }
+
+    pub fn is_tombstone(&self) -> bool {
+        self.core.file_id == 0
+    }
+
+    // overlap checks if the Shard contains any rows in any of the schema tables.
+    pub fn overlap(&self, mut start_key: &[u8], mut end_key: &[u8], keyspace_id: u32) -> bool {
+        if keyspace_id != self.get_keyspace_id() {
+            return false;
+        }
+        if keyspace_id > 0 {
+            start_key.advance(KEYSPACE_PREFIX_LEN);
+            end_key.advance(KEYSPACE_PREFIX_LEN);
+        }
+        if !end_key.is_empty() && end_key < TABLE_PREFIX {
+            // meta data region is not overlapped.
+            return false;
+        }
+        let start_table_id = decode_table_id(start_key).unwrap_or(0);
+        let mut end_table_id = decode_table_id(end_key).unwrap_or(i64::MAX);
+        if end_key.len() >= TABLE_PREFIX_KEY_LEN
+            && &end_key[TABLE_PREFIX_KEY_LEN..] < RECORD_PREFIX_SEP
+        {
+            // When end key is smaller than the table first record key, it doesn't overlap
+            // the table.
+            end_table_id -= 1;
+        }
+        if start_table_id == end_table_id && start_table_id > 0 && start_table_id < i64::MAX {
+            // The shard only contains a single table's index is not overlapped.
+            if start_key[TABLE_PREFIX_KEY_LEN..].starts_with(INDEX_PREFIX_SEP)
+                && end_key[TABLE_PREFIX_KEY_LEN..].starts_with(INDEX_PREFIX_SEP)
+            {
+                return false;
+            }
+        }
+        for &table_id in self.core.tables.keys() {
+            if start_table_id <= table_id && table_id <= end_table_id {
+                return true;
+            }
+        }
+        false
     }
 }
 
@@ -167,7 +225,11 @@ pub fn build_schema_file(keyspace_id: u32, schema_version: i64, tables: Vec<Sche
 
 #[cfg(test)]
 mod tests {
-    use tidb_query_datatype::{Collation::Utf8Mb4GeneralCi, FieldTypeTp};
+    use api_version::{api_v2::TIDB_META_KEY_PREFIX, ApiV2};
+    use tidb_query_datatype::{
+        codec::table::RECORD_PREFIX_SEP, Collation::Utf8Mb4GeneralCi, FieldTypeTp,
+    };
+    use tikv_util::codec::number::NumberEncoder;
 
     use super::*;
     use crate::table::{
@@ -192,14 +254,14 @@ mod tests {
         let keyspace_id = 1;
         let schema_version = 1234i64;
         let schema_1 = Schema {
-            table_id: 1,
+            table_id: 10,
             handle_column: new_common_handle_column_info(),
             version_column: new_version_column_info(),
             txn_id_column: Some(new_txn_id_column_info()),
             columns: vec![new_column_info(3, true), new_column_info(4, false)],
         };
         let schema_2 = Schema {
-            table_id: 2,
+            table_id: 20,
             handle_column: new_int_handle_column_info(),
             version_column: new_version_column_info(),
             txn_id_column: Some(new_txn_id_column_info()),
@@ -209,8 +271,102 @@ mod tests {
         let data = build_schema_file(keyspace_id, schema_version, schemas.clone());
         let file = Arc::new(InMemFile::new(100, data.into()));
         let schema_file = SchemaFile::open(file).unwrap();
-        assert_eq!(&schemas[0], schema_file.get_table(1).unwrap());
-        assert_eq!(&schemas[1], schema_file.get_table(2).unwrap());
-        assert_eq!(schema_version, schema_file.get_schema_version());
+        assert_eq!(&schemas[0], schema_file.get_table(10).unwrap());
+        assert_eq!(&schemas[1], schema_file.get_table(20).unwrap());
+        assert_eq!(schema_version, schema_file.get_version());
+
+        for case in vec![
+            OverlapCase {
+                start_key: ApiV2::get_txn_keyspace_prefix(keyspace_id),
+                end_key: encode_meta_key(keyspace_id, b"def"),
+                overlap: false,
+            },
+            OverlapCase {
+                start_key: ApiV2::get_txn_keyspace_prefix(keyspace_id),
+                end_key: ApiV2::get_txn_keyspace_prefix(keyspace_id + 1),
+                overlap: true,
+            },
+            OverlapCase {
+                start_key: encode_table_key(keyspace_id, 20, false, b""),
+                end_key: ApiV2::get_txn_keyspace_prefix(keyspace_id + 1),
+                overlap: true,
+            },
+            OverlapCase {
+                start_key: encode_table_key(keyspace_id, 21, true, b""),
+                end_key: ApiV2::get_txn_keyspace_prefix(keyspace_id + 1),
+                overlap: false,
+            },
+            OverlapCase {
+                start_key: encode_meta_key(keyspace_id, b"abc"),
+                end_key: encode_meta_key(keyspace_id, b"def"),
+                overlap: false,
+            },
+            OverlapCase {
+                start_key: encode_meta_key(keyspace_id, b"abc"),
+                end_key: encode_table_key(keyspace_id, 13, true, b""),
+                overlap: true,
+            },
+            OverlapCase {
+                start_key: encode_table_key(keyspace_id, 1, true, b""),
+                end_key: encode_table_key(keyspace_id, 10, false, b""),
+                overlap: false,
+            },
+            OverlapCase {
+                start_key: encode_table_key(keyspace_id, 1, true, b""),
+                end_key: encode_table_key(keyspace_id, 10, true, b""),
+                overlap: true,
+            },
+            OverlapCase {
+                start_key: encode_table_key(keyspace_id, 10, true, b""),
+                end_key: encode_table_key(keyspace_id, 13, false, b""),
+                overlap: true,
+            },
+            OverlapCase {
+                start_key: encode_table_key(keyspace_id, 10, false, b"012"),
+                end_key: encode_table_key(keyspace_id, 10, false, b"123"),
+                overlap: false,
+            },
+            OverlapCase {
+                start_key: encode_table_key(keyspace_id, 10, false, b"012"),
+                end_key: encode_table_key(keyspace_id, 10, true, b"123"),
+                overlap: true,
+            },
+        ] {
+            assert_eq!(
+                schema_file.overlap(&case.start_key, &case.end_key, keyspace_id),
+                case.overlap,
+                "{:?}",
+                case
+            );
+        }
+    }
+
+    #[derive(Debug)]
+    struct OverlapCase {
+        start_key: Vec<u8>,
+        end_key: Vec<u8>,
+        overlap: bool,
+    }
+
+    fn encode_table_key(keyspace_id: u32, table_id: i64, is_row: bool, suffix: &[u8]) -> Vec<u8> {
+        let mut key = Vec::with_capacity(KEYSPACE_PREFIX_LEN + TABLE_PREFIX_KEY_LEN);
+        key.put(ApiV2::get_txn_keyspace_prefix(keyspace_id).as_slice());
+        key.put(TABLE_PREFIX);
+        key.encode_i64(table_id).unwrap();
+        if is_row {
+            key.put(RECORD_PREFIX_SEP);
+        } else {
+            key.put(INDEX_PREFIX_SEP);
+        }
+        key.put(suffix);
+        key
+    }
+
+    fn encode_meta_key(keyspace_id: u32, suffix: &[u8]) -> Vec<u8> {
+        let mut key = Vec::with_capacity(KEYSPACE_PREFIX_LEN + TABLE_PREFIX_KEY_LEN);
+        key.put(ApiV2::get_txn_keyspace_prefix(keyspace_id).as_slice());
+        key.push(TIDB_META_KEY_PREFIX);
+        key.put(suffix);
+        key
     }
 }

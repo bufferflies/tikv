@@ -8,7 +8,7 @@ use api_version::{
 };
 use bytes::{Buf, Bytes};
 use kvenginepb as pb;
-use kvenginepb::TxnFileRef;
+use kvenginepb::{SchemaMeta, TxnFileRef};
 use log_wrappers::Value as LogValue;
 use protobuf::Message;
 use slog_global::*;
@@ -36,6 +36,8 @@ pub struct ShardMeta {
     // max_ts is the max ts in all sst files.
     pub max_ts: u64,
     pub parent: Option<Box<ShardMeta>>,
+    pub schema_file_id: u64,
+    pub schema_file_ver: i64,
 
     pub(crate) txn_file_locks: TxnFileLocks,
 }
@@ -98,6 +100,11 @@ impl ShardMeta {
             let parent_meta = Box::new(Self::new(engine_id, cs.get_parent()));
             meta.parent = Some(parent_meta);
         }
+        if snap.has_schema_meta() {
+            let sm = snap.get_schema_meta();
+            meta.schema_file_id = sm.get_file_id();
+            meta.schema_file_ver = sm.get_version();
+        }
         meta
     }
 
@@ -155,7 +162,7 @@ impl ShardMeta {
 
     pub fn add_file(&mut self, id: u64, cf: i32, level: u32, smallest: &[u8], biggest: &[u8]) {
         self.files
-            .insert(id, FileMeta::new(cf, level, smallest, biggest));
+            .insert(id, FileMeta::new(cf, level, smallest, biggest, 0));
     }
 
     fn delete_file(&mut self, id: u64, level: u32) {
@@ -226,6 +233,12 @@ impl ShardMeta {
         }
         if cs.has_major_compaction() {
             self.apply_major_compaction(cs.get_major_compaction());
+            return;
+        }
+        if cs.has_update_schema_meta() {
+            let sm = cs.get_update_schema_meta();
+            self.schema_file_id = sm.get_file_id();
+            self.schema_file_ver = sm.get_version();
             return;
         }
         if !cs.get_property_key().is_empty() {
@@ -385,6 +398,17 @@ impl ShardMeta {
         }
         if cs.has_restore_shard() {
             // TODO: skip duplicated
+        }
+        if cs.has_update_schema_meta() {
+            let schema_version = cs.get_update_schema_meta().get_version();
+            if schema_version <= self.schema_file_ver {
+                info!(
+                    "{} skip duplicated update schema meta version {}",
+                    self.tag(),
+                    schema_version
+                );
+                return true;
+            }
         }
         false
     }
@@ -795,6 +819,12 @@ impl ShardMeta {
                 snap.mut_table_creates().push(tbl);
             }
         }
+        if self.schema_file_ver > 0 {
+            let mut sm = SchemaMeta::new();
+            sm.set_file_id(self.schema_file_id);
+            sm.set_version(self.schema_file_ver);
+            snap.set_schema_meta(sm);
+        }
         cs.set_snapshot(snap);
         if let Some(parent) = &self.parent {
             cs.set_parent(parent.to_change_set());
@@ -1040,12 +1070,13 @@ impl ShardMeta {
 pub struct FileMeta {
     pub cf: i8,
     pub level: u8,
+    pub columnar_tables: u32,
     pub smallest: Bytes,
     pub biggest: Bytes,
 }
 
 impl FileMeta {
-    fn new(cf: i32, level: u32, smallest: &[u8], biggest: &[u8]) -> Self {
+    fn new(cf: i32, level: u32, smallest: &[u8], biggest: &[u8], columnar_tables: u32) -> Self {
         let meta_level = if is_blob_file(level) {
             1u8 << 7
         } else {
@@ -1054,6 +1085,7 @@ impl FileMeta {
         Self {
             cf: cf as i8,
             level: meta_level,
+            columnar_tables,
             smallest: Bytes::copy_from_slice(smallest),
             biggest: Bytes::copy_from_slice(biggest),
         }
@@ -1061,6 +1093,10 @@ impl FileMeta {
 
     pub fn is_blob_file(&self) -> bool {
         (self.level & (1u8 << 7)) > 0
+    }
+
+    pub fn is_columnar_file(&self) -> bool {
+        self.columnar_tables > 0
     }
 
     pub fn get_level(&self) -> u32 {
@@ -1080,7 +1116,7 @@ impl FileMeta {
     }
 
     pub fn from_l0_table(table: &kvenginepb::L0Create) -> Self {
-        Self::new(-1, 0, table.get_smallest(), table.get_biggest())
+        Self::new(-1, 0, table.get_smallest(), table.get_biggest(), 0)
     }
 
     pub fn from_table(table: &kvenginepb::TableCreate) -> Self {
@@ -1089,11 +1125,12 @@ impl FileMeta {
             table.level,
             table.get_smallest(),
             table.get_biggest(),
+            table.columnar_tables,
         )
     }
 
     pub fn from_blob_table(table: &kvenginepb::BlobCreate) -> Self {
-        Self::new(-1, BLOB_LEVEL, table.get_smallest(), table.get_biggest())
+        Self::new(-1, BLOB_LEVEL, table.get_smallest(), table.get_biggest(), 0)
     }
 }
 
@@ -1107,10 +1144,9 @@ impl TableExt for FileMeta {
     }
 }
 
-#[cfg(test)]
 impl Default for FileMeta {
     fn default() -> Self {
-        Self::new(0, 0, b"", b"")
+        Self::new(0, 0, b"", b"", 0)
     }
 }
 
@@ -1187,13 +1223,13 @@ mod tests {
     fn test_delete_file_with_level() {
         let files = vec![
             // L0:
-            (1, FileMeta::new(0, 0, b"", b"")),
+            (1, FileMeta::new(0, 0, b"", b"", 0)),
             // L1:
-            (101, FileMeta::new(0, 1, b"", b"")),
-            (102, FileMeta::new(0, 1, b"", b"")),
+            (101, FileMeta::new(0, 1, b"", b"", 0)),
+            (102, FileMeta::new(0, 1, b"", b"", 0)),
             // L2:
-            (201, FileMeta::new(0, 2, b"", b"")),
-            (202, FileMeta::new(0, 2, b"", b"")),
+            (201, FileMeta::new(0, 2, b"", b"", 0)),
+            (202, FileMeta::new(0, 2, b"", b"", 0)),
         ];
 
         // comp_level, top_deletes, bottom_deletes, is_duplicated, result_files
@@ -1485,7 +1521,7 @@ mod tests {
                 let (smallest, biggest) = make_smallest_biggest(t);
                 meta.files.insert(
                     id as u64,
-                    FileMeta::new(WRITE_CF as i32, 3, &smallest, &biggest),
+                    FileMeta::new(WRITE_CF as i32, 3, &smallest, &biggest, 0),
                 );
             }
             meta

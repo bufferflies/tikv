@@ -3,6 +3,7 @@
 mod profile;
 
 use std::{
+    borrow::Cow,
     env::args,
     error::Error as StdError,
     net::SocketAddr,
@@ -1316,6 +1317,57 @@ impl StatusServer {
         }
     }
 
+    async fn handle_schema_file(
+        req: Request<Body>,
+        router: RaftRouter,
+        engine: kvengine::Engine,
+    ) -> hyper::Result<Response<Body>> {
+        let bad_request_resp = |msg: &str| make_response(StatusCode::BAD_REQUEST, msg.to_owned());
+        let query = req.uri().query().unwrap_or("");
+        let query_pairs: HashMap<_, _> = url::form_urlencoded::parse(query.as_bytes()).collect();
+        let keyspace_id = match get_uint_param(&query_pairs, "keyspace_id") {
+            Some(keyspace_id) => keyspace_id,
+            None => {
+                return Ok(bad_request_resp("keyspace_id not found"));
+            }
+        };
+        let file_id = match get_uint_param(&query_pairs, "file_id") {
+            Some(file_id) => file_id,
+            None => {
+                return Ok(bad_request_resp("file_id not found"));
+            }
+        };
+        let schema_file = match engine.load_schema_file(file_id).await {
+            Ok(file) => file,
+            Err(e) => {
+                let msg = format!("failed to load schema file {:?}", e);
+                return Ok(make_response(StatusCode::INTERNAL_SERVER_ERROR, msg));
+            }
+        };
+        let (start, end) = ApiV2::get_txn_keyspace_range(keyspace_id as u32);
+        let (callback, future) = paired_future_callback();
+        router.send_store_msg(StoreMsg::GetRegionsInRange {
+            start,
+            end,
+            callback,
+        });
+        let res = future.await;
+        if res.is_err() {
+            return Ok(make_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to get regions in range",
+            ));
+        }
+        let region_id_vers = res.unwrap();
+        for region_id_ver in region_id_vers {
+            router.send_casual_msg(
+                region_id_ver.id(),
+                CasualMessage::UpdateSchemaFile(schema_file.clone()),
+            );
+        }
+        Ok(Response::new(Body::empty()))
+    }
+
     pub fn stop(self) {
         let _ = self.tx.send(());
         self.thread_pool.shutdown_timeout(Duration::from_secs(3));
@@ -1339,6 +1391,10 @@ fn get_last_path_segment(path: &str) -> &str {
         }
     }
     last
+}
+
+fn get_uint_param(query_pairs: &HashMap<Cow<'_, str>, Cow<'_, str>>, key: &str) -> Option<u64> {
+    query_pairs.get(key).and_then(|v| u64::from_str(v).ok())
 }
 
 impl StatusServer {
@@ -1648,6 +1704,9 @@ impl StatusServer {
                             }
                             (Method::POST, path) if path.starts_with("/major-compact") => {
                                 Self::major_compact(req, rfengine, router).await
+                            }
+                            (Method::POST, path) if path.starts_with("/schema_file") => {
+                                Self::handle_schema_file(req, router, engine).await
                             }
                             _ => Ok(make_response(StatusCode::NOT_FOUND, "path not found")),
                         }

@@ -2,6 +2,7 @@
 
 use std::{
     collections::HashMap,
+    fs,
     io::Write,
     iter::Iterator,
     path::PathBuf,
@@ -10,6 +11,7 @@ use std::{
 
 use bytes::{Buf, Bytes};
 use cloud_encryption::EncryptionKey;
+use dashmap::mapref::entry::Entry;
 use file_system::{IoOp, IoType};
 use kvenginepb::{TxnFileRef, TxnFileRefs};
 use protobuf::Message;
@@ -18,7 +20,11 @@ use tikv_util::{mpsc::Receiver, time::Instant};
 use crate::{
     apply::ChangeSet,
     metrics::ENGINE_LEVEL_WRITE_VEC,
-    table::{sstable::LocalFile, table::TableExt},
+    table::{
+        columnar::schema_file::SchemaFile,
+        sstable::{InMemFile, LocalFile},
+        table::TableExt,
+    },
     EngineCore, *,
 };
 
@@ -40,8 +46,10 @@ impl EngineCore {
     ) -> Result<ChangeSet> {
         let mut ids: HashMap<u64, FileMeta> = HashMap::new();
         let mut lock_txn_file_refs: Vec<TxnFileRef> = vec![];
+        let mut schema_file = None;
         let mut cs = ChangeSet::new(cs);
         let mut snap = None;
+        let mut schema_meta = None;
         if cs.has_flush() {
             let flush = cs.get_flush();
             if flush.has_l0_create() {
@@ -110,12 +118,30 @@ impl EngineCore {
                 ids.insert(blob.get_id(), FileMeta::from_blob_table(blob));
             }
         }
+        if cs.has_update_schema_meta() {
+            schema_meta = Some(cs.get_update_schema_meta());
+        }
         let mut encryption_key = encryption_key;
         if let Some(snap) = snap {
             self.collect_snap_ids(snap, &mut ids);
             lock_txn_file_refs.extend(collect_snap_lock_txn_file_refs(snap).into_iter());
             encryption_key = get_shard_property(ENCRYPTION_KEY, snap.get_properties())
-                .map(|v| self.master_key.decrypt_encryption_key(&v).unwrap())
+                .map(|v| self.master_key.decrypt_encryption_key(&v).unwrap());
+            if snap.has_schema_meta() {
+                schema_meta = Some(snap.get_schema_meta());
+            }
+        }
+        if let Some(schema_meta) = schema_meta {
+            let schema_file_id = schema_meta.get_file_id();
+            if schema_file_id == 0 {
+                schema_file = Some(SchemaFile::new_tombstone(schema_meta.get_version()));
+            } else {
+                schema_file = Some(
+                    self.fs
+                        .get_runtime()
+                        .block_on(self.load_schema_file(schema_file_id))?,
+                );
+            }
         }
 
         let tag = ShardTag::new(self.get_engine_id(), IdVer::from_change_set(&cs));
@@ -155,7 +181,7 @@ impl EngineCore {
                 "encryption_key" => ?encryption_key,
             );
         }
-
+        cs.schema_file = schema_file;
         Ok(cs)
     }
 
@@ -187,31 +213,19 @@ impl EngineCore {
         for (&id, tb) in ids {
             if tb.is_blob_file() {
                 if let Ok(file) = self.open_blob_table_file(id) {
-                    cs.add_file(
-                        id,
-                        file,
-                        tb.get_level(),
-                        self.cache.clone(),
-                        encryption_key.clone(),
-                    )?;
+                    cs.add_file(id, file, tb, self.cache.clone(), encryption_key.clone())?;
                     continue;
                 }
             } else if let Ok(file) = self.open_sstable_file(id) {
-                cs.add_file(
-                    id,
-                    file,
-                    tb.get_level(),
-                    self.cache.clone(),
-                    encryption_key.clone(),
-                )?;
+                cs.add_file(id, file, tb, self.cache.clone(), encryption_key.clone())?;
                 continue;
             }
-            let level = tb.get_level();
             let fs = self.fs.clone();
             let tx = result_tx.clone();
+            let file_meta = tb.clone();
             runtime.spawn(async move {
                 let res = fs.read_file(id, opts).await;
-                let _ = tx.send(res.map(|data| (id, level, data)));
+                let _ = tx.send(res.map(|data| (id, file_meta, data)));
             });
             if msg_count < LOAD_FILE_CONCURRENCY {
                 msg_count += 1;
@@ -229,26 +243,26 @@ impl EngineCore {
         &self,
         cs: &mut ChangeSet,
         use_direct_io: bool,
-        result_tx: &Receiver<dfs::Result<(u64, u32, Bytes)>>,
+        result_tx: &Receiver<dfs::Result<(u64, FileMeta, Bytes)>>,
         encryption_key: Option<EncryptionKey>,
     ) -> Result<()> {
-        let (id, level, data) = result_tx.recv().unwrap()?;
+        let (id, meta, data) = result_tx.recv().unwrap()?;
         let data_len = data.len();
         let start = Instant::now();
-        self.write_local_file(id, data, use_direct_io, is_blob_file(level))?;
+        self.write_local_file(id, data, use_direct_io, &meta)?;
         info!(
             "write local file {} takes {:?}",
             id,
             start.saturating_elapsed()
         );
-        let file = if is_blob_file(level) {
+        let file = if meta.is_blob_file() {
             self.open_blob_table_file(id)?
         } else {
             self.open_sstable_file(id)?
         };
-        cs.add_file(id, file, level, self.cache.clone(), encryption_key)?;
+        cs.add_file(id, file, &meta, self.cache.clone(), encryption_key)?;
         ENGINE_LEVEL_WRITE_VEC
-            .with_label_values(&[&level.to_string()])
+            .with_label_values(&[&meta.get_level().to_string()])
             .inc_by(data_len as u64);
         Ok(())
     }
@@ -331,6 +345,7 @@ impl EngineCore {
             data.lock_txn_files.clone(),
             data.limiter.clone(),
             data.update_counter + 1,
+            data.schema_file.clone(),
         );
         shard.set_data(new_data);
         Ok(())
@@ -341,9 +356,9 @@ impl EngineCore {
         id: u64,
         data: Bytes,
         use_direct_io: bool,
-        blob_file: bool,
+        meta: &FileMeta,
     ) -> std::io::Result<()> {
-        let local_file_name = if blob_file {
+        let local_file_name = if meta.is_blob_file() {
             self.local_blob_file_path(id)
         } else {
             self.local_sst_file_path(id)
@@ -388,12 +403,49 @@ impl EngineCore {
         )?)
     }
 
+    pub async fn load_schema_file(&self, id: u64) -> Result<SchemaFile> {
+        if let Some(schema_file) = self.schema_files.get(&id) {
+            return Ok(schema_file.clone());
+        }
+        let local_schema_file_path = self.local_schema_file_path(id);
+        let res = fs::read(local_schema_file_path.as_path());
+        if res.is_ok() {
+            let in_mem_file = InMemFile::new(id, res.unwrap().into());
+            let schema_file = SchemaFile::open(Arc::new(in_mem_file))?;
+            return match self.schema_files.entry(id) {
+                Entry::Occupied(e) => Ok(e.get().clone()),
+                Entry::Vacant(e) => {
+                    e.insert(schema_file.clone());
+                    Ok(schema_file)
+                }
+            };
+        }
+        let data = self.fs.read_schema_file(id).await?;
+        let in_mem_file = InMemFile::new(id, data.clone());
+        let schema_file = SchemaFile::open(Arc::new(in_mem_file))?;
+        match self.schema_files.entry(id) {
+            Entry::Occupied(e) => return Ok(e.get().clone()),
+            Entry::Vacant(e) => {
+                e.insert(schema_file.clone());
+            }
+        }
+        // Only the first one will write the file to disk.
+        let tmp_file_name = self.tmp_file_path(id);
+        fs::write(&tmp_file_name, data.chunk())?;
+        fs::rename(&tmp_file_name, local_schema_file_path.as_path())?;
+        Ok(schema_file)
+    }
+
     pub(crate) fn local_sst_file_path(&self, file_id: u64) -> PathBuf {
         self.opts.local_dir.join(new_sst_filename(file_id))
     }
 
     pub(crate) fn local_blob_file_path(&self, file_id: u64) -> PathBuf {
         self.opts.local_dir.join(new_blob_filename(file_id))
+    }
+
+    pub(crate) fn local_schema_file_path(&self, file_id: u64) -> PathBuf {
+        self.opts.local_dir.join(new_schema_filename(file_id))
     }
 
     fn tmp_file_path(&self, file_id: u64) -> PathBuf {

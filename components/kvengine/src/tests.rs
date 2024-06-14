@@ -616,6 +616,7 @@ fn test_lost_tombstone_issue() {
         vec![],
         RegionLimiter::dummy(),
         TEST_ENGINE_NEW_DATA_UPDATE_COUNTER,
+        None,
     );
     shard.set_data(data);
     let pri = CompactionPriority::L1Plus {
@@ -673,6 +674,7 @@ fn test_read_iterator_all_versions() {
         vec![],
         RegionLimiter::dummy(),
         TEST_ENGINE_NEW_DATA_UPDATE_COUNTER,
+        None,
     );
     shard.set_data(data);
 
@@ -747,6 +749,7 @@ fn test_level_overlapping_tables_impl(enable_inner_key_off: bool) {
         vec![],
         RegionLimiter::dummy(),
         TEST_ENGINE_NEW_DATA_UPDATE_COUNTER,
+        None,
     );
 
     let cf0 = data.get_cf(0);
@@ -904,6 +907,7 @@ fn test_get_suggest_split_key_impl(enable_inner_key_off: bool) {
             vec![],
             RegionLimiter::dummy(),
             TEST_ENGINE_NEW_DATA_UPDATE_COUNTER,
+            None,
         );
         shard.set_data_opt(data, false);
 
@@ -1090,6 +1094,7 @@ fn test_get_evenly_split_keys_impl(enable_inner_key_off: bool) {
             vec![],
             RegionLimiter::dummy(),
             TEST_ENGINE_NEW_DATA_UPDATE_COUNTER,
+            None,
         );
         shard.set_data_opt(data, false);
 
@@ -1154,6 +1159,7 @@ fn test_refresh_stats() {
         vec![],
         RegionLimiter::dummy(),
         TEST_ENGINE_NEW_DATA_UPDATE_COUNTER,
+        None,
     );
     shard.set_data(data);
     shard.refresh_states();

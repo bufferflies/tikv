@@ -33,6 +33,7 @@ use crate::{
     limiter::{RegionLimiter, StoreLimiter},
     meta::ShardMeta,
     table::{
+        columnar::schema_file::SchemaFile,
         memtable::CfTable,
         sstable::{BlockCacheKey, MAGIC_NUMBER, ZSTD_COMPRESSION},
         InnerKey,
@@ -154,6 +155,7 @@ impl Engine {
             ks_safepoint_v2: ks_gc_sp_map,
             master_key,
             txn_chunk_mgr,
+            schema_files: Arc::new(DashMap::new()),
         };
         let en = Engine {
             core: Arc::new(core),
@@ -307,6 +309,7 @@ pub struct EngineCore {
     pub(crate) master_key: MasterKey,
     pub(crate) txn_chunk_mgr: TxnChunkManager,
     pub(crate) files_in_blacklist: Arc<HashSet<u64>>,
+    pub(crate) schema_files: Arc<DashMap<u64, SchemaFile>>,
 }
 
 impl Drop for EngineCore {
@@ -390,6 +393,13 @@ impl EngineCore {
         );
         let (l0s, blob_tbls, scfs, lock_txn_files) =
             create_snapshot_tables(cs.get_snapshot(), &cs, self.opts.for_restore);
+        let schema_file = cs.get_snapshot().has_schema_meta().then(|| {
+            let schema_file_id = cs.get_snapshot().get_schema_meta().get_file_id();
+            let runtime = self.fs.get_runtime();
+            runtime
+                .block_on(self.load_schema_file(schema_file_id))
+                .unwrap()
+        });
         let data = ShardData::new(
             shard.range.clone(),
             vec![CfTable::new()],
@@ -400,6 +410,7 @@ impl EngineCore {
             lock_txn_files,
             RegionLimiter::new((&shard.opt.flow_control).into()),
             NEW_DATA_UPDATE_COUNTER,
+            schema_file,
         );
         shard.set_data(data);
         shard
@@ -865,6 +876,10 @@ pub fn new_tmp_filename(file_id: u64, tmp_id: u64) -> PathBuf {
 
 pub fn new_blob_filename(file_id: u64) -> PathBuf {
     PathBuf::from(format!("{:016x}.sst", file_id))
+}
+
+pub fn new_schema_filename(file_id: u64) -> PathBuf {
+    PathBuf::from(format!("{:016x}.schema", file_id))
 }
 
 pub(crate) enum FreeMemMsg {

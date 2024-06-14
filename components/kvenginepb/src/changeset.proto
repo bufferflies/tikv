@@ -38,6 +38,8 @@ message ChangeSet {
   TableChange trim_over_bound = 20;
   Snapshot restore_shard = 21;
   MajorCompaction major_compaction = 22;
+  SchemaMeta update_schema_meta = 23;
+  ColumnarCompaction columnar_compaction = 24;
 }
 
 message Compaction {
@@ -55,6 +57,12 @@ message MajorCompaction {
   repeated BlobCreate newBlobTables = 2;
   repeated uint64 oldBlobTables = 3;
   bool conflicted = 4;
+}
+
+message SchemaMeta {
+  uint32 keyspace_id = 1;
+  uint64 file_id = 2;
+  int64 version = 3;
 }
 
 message ColumnarCompaction {
@@ -83,7 +91,8 @@ message Snapshot {
   uint64 max_ts = 10;
   uint32 inner_key_off = 11;
   repeated TableCreate columnarCreates = 12;
-  uint64 schema_file_id = 13;
+  SchemaMeta schema_meta = 13;
+  uint64 columnar_snap_version = 14;
 }
 
 message L0Create {

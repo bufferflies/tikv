@@ -16,8 +16,9 @@ use bytes::Buf;
 use error_code::ErrorCodeExt;
 use fail::fail_point;
 use kvengine::{
-    CheckMergeResult, IdVer, Shard, TruncateTs, DEL_PREFIXES_KEY, MANUAL_MAJOR_COMPACTION,
-    MANUAL_MAJOR_COMPACTION_DISABLE, MANUAL_MAJOR_COMPACTION_ENABLE, TRUNCATE_TS_KEY,
+    table::columnar::schema_file::SchemaFile, CheckMergeResult, IdVer, Shard, TruncateTs,
+    DEL_PREFIXES_KEY, MANUAL_MAJOR_COMPACTION, MANUAL_MAJOR_COMPACTION_DISABLE,
+    MANUAL_MAJOR_COMPACTION_ENABLE, TRUNCATE_TS_KEY,
 };
 use kvproto::{
     import_sstpb::SwitchMode,
@@ -279,6 +280,7 @@ impl<'a> PeerMsgHandler<'a> {
                 major_compact,
                 callback,
             } => self.on_manual_major_compact(major_compact, callback),
+            CasualMessage::UpdateSchemaFile(schema_file) => self.on_update_schema_file(schema_file),
         }
     }
 
@@ -1448,6 +1450,41 @@ impl<'a> PeerMsgHandler<'a> {
         custom_builder.set_change_set(&cs);
         cmd.set_custom_request(custom_builder.build());
         self.propose_raft_command(cmd, callback, None);
+    }
+
+    fn on_update_schema_file(&mut self, schema_file: SchemaFile) {
+        if !self.peer.is_leader() {
+            return;
+        }
+        let shard_meta = self.peer.get_store().shard_meta.as_ref().unwrap();
+        let overlap = schema_file.overlap(
+            &shard_meta.range.outer_start,
+            &shard_meta.range.outer_end,
+            shard_meta.range.keyspace_id,
+        );
+        let tag = self.peer.tag();
+        let mut change_set = kvengine::new_change_set(shard_meta.id, shard_meta.ver);
+        let update_schema_meta = change_set.mut_update_schema_meta();
+        update_schema_meta.set_file_id(schema_file.get_file_id());
+        update_schema_meta.set_version(schema_file.get_version());
+        if shard_meta.schema_file_ver >= schema_file.get_version() {
+            info!("{} skip stale schema file", tag);
+            return;
+        }
+        if !overlap {
+            if shard_meta.schema_file_id > 0 {
+                info!("{} update schema file, remove non overlap", tag);
+                update_schema_meta.set_file_id(0);
+            } else {
+                return;
+            }
+        }
+        info!(
+            "{} propose update schema file {}",
+            tag,
+            schema_file.get_file_id()
+        );
+        self.propose_change_set(change_set);
     }
 
     fn on_ingest_files(&mut self, cs: kvenginepb::ChangeSet, callback: Callback) {
