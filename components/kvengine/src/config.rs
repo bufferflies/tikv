@@ -93,9 +93,9 @@ impl Default for Config {
             remote_worker_addr: "".to_string(),
             remote_coprocessor_addr: "".to_string(),
             remote_coprocessor_min_blocks_size: 32 * 1024 * 1024,
-            flush_split_l0: false,
+            flush_split_l0: true,
             txn_file_worker_pool_size: None,
-            checksum_type: ChecksumType::Crc32c,
+            checksum_type: ChecksumType::Crc32,
             blob_table_build_options: Default::default(),
             per_keyspace_configs: vec![],
         }
