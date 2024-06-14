@@ -405,8 +405,13 @@ fn register_compactor_to_all_stores(
     remote_url: String,
     security_mgr: Arc<SecurityManager>,
 ) {
-    let all_stores = get_all_stores_except_tiflash(&pd)
-        .unwrap_or_else(|e| panic!("failed get all stores {:?}", e));
+    let all_stores = match get_all_stores_except_tiflash(&pd) {
+        Ok(stores) => stores,
+        Err(e) => {
+            error!("failed to get all stores {:?}", e);
+            return;
+        }
+    };
     let start_time = Instant::now();
     let stores_len = all_stores.len();
     let (tx, rx) = std::sync::mpsc::sync_channel(stores_len);
@@ -448,8 +453,22 @@ async fn register_compactor_to_store(
         .uri(uri)
         .body(hyper::Body::from(remote_url))
         .expect("request builder");
-    let resp = client.request(req).await.unwrap();
-    resp.status() == hyper::StatusCode::OK
+    match client.request(req).await {
+        Ok(resp) => {
+            let ok = resp.status() == hyper::StatusCode::OK;
+            if !ok {
+                error!(
+                    "failed to register compactor to store";
+                    "store" => ?store, "status" => ?resp.status()
+                );
+            }
+            ok
+        }
+        Err(err) => {
+            error!("failed to register compactor to store"; "store" => ?store, "err" => ?err);
+            false
+        }
+    }
 }
 
 #[macro_use]

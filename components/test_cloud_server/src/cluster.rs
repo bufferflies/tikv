@@ -53,6 +53,7 @@ use crate::{
 
 const REGION_MEM_LIMIT_RATIO: f64 = 0.2;
 static TIKV_WORKER_IDX_ALLOCATOR: AtomicU16 = AtomicU16::new(0);
+const TIKV_WORKER_UPDATE_INTERVAL: ReadableDuration = ReadableDuration::secs(10);
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 
@@ -706,6 +707,7 @@ impl ServerCluster {
                 addr: tikv_worker_addr(idx),
                 cop_addr: "".to_string(),
                 pd: pd_client::Config::new(self.pd_endpoints().to_vec()),
+                update_interval: TIKV_WORKER_UPDATE_INTERVAL,
                 security: tikv_config.security.clone(),
                 dfs: tikv_config.dfs.clone(),
                 register,
