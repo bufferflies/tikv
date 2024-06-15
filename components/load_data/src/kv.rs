@@ -115,6 +115,8 @@ pub struct MergeIterator {
     pub(crate) duplicated_entries_size: usize,
     last_dup_entry_key: Vec<u8>,
     last_dup_entry_row_id: Vec<u8>,
+    // TODO(zeminzhou): remove this field after all clients are updated.
+    new_client: bool,
 }
 
 #[derive(Default, Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -126,7 +128,7 @@ pub struct DuplicateEntry {
 }
 
 impl MergeIterator {
-    pub fn new(readers: Vec<KvPairsReader>, key_prefix: &[u8]) -> Self {
+    pub fn new(readers: Vec<KvPairsReader>, key_prefix: &[u8], new_client: bool) -> Self {
         let mut heap = Vec::with_capacity(readers.len());
         for mut reader in readers {
             reader.next();
@@ -142,6 +144,7 @@ impl MergeIterator {
             duplicated_entries_size: 0,
             last_dup_entry_key: vec![],
             last_dup_entry_row_id: vec![],
+            new_client,
         };
         it.init_heap();
         it.prev_key = it.key().to_vec();
@@ -236,9 +239,10 @@ impl MergeIterator {
             // to compare row_id when it's not empty.
             //
             // TODO(zeminzhou): remove this check after all clients are updated.
-            if !row_id.is_empty() && row_id == self.prev_row_id.as_slice() {
+            if self.new_client && row_id == self.prev_row_id.as_slice() {
                 return Ok(true);
             }
+
             if self.duplicated_entries_size > MAX_DUP_SIZE {
                 return Err(Error::TooManyDuplicatedKeys(
                     self.duplicated_entries.len().to_string(),
