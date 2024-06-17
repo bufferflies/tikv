@@ -409,6 +409,8 @@ pub enum Error {
     Eof,
     #[error("Schema out of date: {0}")]
     SchemaOutOfDate(String),
+    #[error("Need encryption key for txn chunk {chunk_id}, encryption version {encryption_ver}")]
+    NeedEncryptionKey { chunk_id: u64, encryption_ver: u32 },
     #[error("{0}")]
     Other(String),
 }

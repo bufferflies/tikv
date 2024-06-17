@@ -4,6 +4,7 @@ use std::{collections::HashMap, iter::FromIterator, sync::Arc};
 
 use api_version::{ApiV2, KeyMode, KvFormat};
 use bytes::Buf;
+use cloud_encryption::EncryptionKey;
 use collections::HashSet;
 use kvengine::{Engine, Shard, ShardMeta};
 use kvenginepb::ChangeSet;
@@ -211,6 +212,7 @@ impl kvengine::RecoverHandler for RecoverHandler {
             })?;
 
         let snap = shard.new_snap_access();
+        let encryption_key = snap.get_encryption_key();
         let mut applier = Applier::new_for_recover(self.store_id, region_meta, snap, apply_state);
 
         for e in &entries {
@@ -240,7 +242,7 @@ impl kvengine::RecoverHandler for RecoverHandler {
             } else if let Some(custom) = rlog::get_custom_log(&req) {
                 if rlog::is_txn_file_ref(custom.data.chunk()) {
                     let txn_file_ref = custom.get_txn_file_ref().unwrap();
-                    prepare_txn_file_ref(engine, &txn_file_ref)?;
+                    prepare_txn_file_ref(engine, &txn_file_ref, encryption_key.clone())?;
                 }
                 if let Some(mut cs) = get_async_change_set(&custom) {
                     cs.sequence = e.get_index();
@@ -279,9 +281,10 @@ fn get_async_change_set(custom: &CustomRaftLog<'_>) -> Option<ChangeSet> {
 fn prepare_txn_file_ref(
     kv: &Engine,
     txn_file_ref: &kvenginepb::TxnFileRef,
+    encryption_key: Option<EncryptionKey>,
 ) -> kvengine::Result<()> {
     let manager = kv.get_txn_chunk_manager();
-    manager.prepare_txn_chunks(&txn_file_ref.chunk_ids)
+    manager.prepare_txn_chunks(&txn_file_ref.chunk_ids, encryption_key)
 }
 
 struct PeerToDestroy {

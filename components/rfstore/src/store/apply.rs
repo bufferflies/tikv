@@ -1625,6 +1625,7 @@ impl Applier {
         ctx: &mut ApplyContext,
         txn_file_ref: TxnFileRef,
         entry_index: u64,
+        encryption_key: Option<EncryptionKey>,
     ) {
         let tag = self.tag();
         self.paused_apply_queue
@@ -1639,7 +1640,9 @@ impl Applier {
             PREPARE_TASK_WAIT_TIME_HISTOGRAM
                 .with_label_values(&["txn"])
                 .observe(duration_to_sec(start.saturating_elapsed()));
-            if let Err(err) = txn_chunk_manager.prepare_txn_chunks(&txn_file_ref.chunk_ids) {
+            if let Err(err) =
+                txn_chunk_manager.prepare_txn_chunks(&txn_file_ref.chunk_ids, encryption_key)
+            {
                 // We can't handle the error here, just panic.
                 panic!(
                     "{} failed to prepare txn chunks, err {:?}, txn_file_ref {:?}, entry_index {}",
@@ -1725,8 +1728,12 @@ impl Applier {
             ApplyMsg::PrepareRollbackMerge(initial_flush_seq) => {
                 self.handle_prepare_rollback_merge(ctx, initial_flush_seq);
             }
-            ApplyMsg::PrepareTxnFile(txn_file_ref, commit_index) => {
-                self.handle_prepare_txn_file(ctx, txn_file_ref, commit_index);
+            ApplyMsg::PrepareTxnFile {
+                txn_file_ref,
+                commit_index,
+                encryption_key,
+            } => {
+                self.handle_prepare_txn_file(ctx, txn_file_ref, commit_index, encryption_key);
             }
             ApplyMsg::ResumeTxnFile(commit_index) => {
                 self.handle_resume_txn_file(ctx, commit_index);

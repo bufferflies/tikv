@@ -302,7 +302,7 @@ mod tests {
     }
 
     fn make_txn_chunk(start: usize, end: usize, chunk_id: u64) -> TxnChunk {
-        let mut txn_chunk_builder = TxnChunkBuilder::new(10);
+        let mut txn_chunk_builder = TxnChunkBuilder::new(chunk_id, 10, None);
         for i in start..end {
             let key = i_to_key(i);
             txn_chunk_builder.add_entry(&key, OP_PUT, &key);
@@ -310,7 +310,7 @@ mod tests {
         let mut buf = vec![];
         txn_chunk_builder.finish(&mut buf);
         let in_mem_file = Arc::new(InMemFile::new(chunk_id, buf.into()));
-        TxnChunk::new(in_mem_file, None).unwrap()
+        TxnChunk::new(in_mem_file, None, None).unwrap()
     }
 
     fn i_to_key(i: usize) -> Vec<u8> {

@@ -97,7 +97,11 @@ pub(crate) enum ApplyMsg {
     CheckSwitchMemTable {
         region_id: u64,
     },
-    PrepareTxnFile(TxnFileRef, u64 /* commit index */),
+    PrepareTxnFile {
+        txn_file_ref: TxnFileRef,
+        commit_index: u64,
+        encryption_key: Option<EncryptionKey>,
+    },
     ResumeTxnFile(u64 /* commit index */),
 }
 

@@ -30,12 +30,10 @@ use tokio::runtime::Runtime;
 
 use crate::{
     common::{get_param, make_json_response, make_response},
-    error::Error,
+    error::{Error, Result},
     metrics::{NATIVE_BR_COUNTER_VEC, NATIVE_BR_HISTOGRAM_VEC},
     Config,
 };
-
-pub(crate) type Result<T> = std::result::Result<T, Error>;
 
 const MIN_PITR_INTERVAL_GAP_SECONDS: i64 = 1; // 1s
 pub(crate) const MAX_RESTORE_CONCURRENCY: usize = 128;

@@ -2397,9 +2397,11 @@ impl<'a> PreprocessRef<'a> {
         if chunk_manager.all_chunks_exists(txn_file_ref.get_chunk_ids()) {
             return Ok(());
         }
-        ctx.apply_msgs
-            .msgs
-            .push(ApplyMsg::PrepareTxnFile(txn_file_ref, entry.index));
+        ctx.apply_msgs.msgs.push(ApplyMsg::PrepareTxnFile {
+            txn_file_ref,
+            commit_index: entry.index,
+            encryption_key: self.encryption_key.clone(),
+        });
         Ok(())
     }
 }

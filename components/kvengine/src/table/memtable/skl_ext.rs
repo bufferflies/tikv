@@ -180,8 +180,8 @@ mod tests {
         skl.put_batch(&mut wb, None, WRITE_CF);
     }
 
-    fn build_txn_file_chunk_data(keys: Vec<i32>) -> Bytes {
-        let mut batch_builder = TxnChunkBuilder::new(10);
+    fn build_txn_file_chunk_data(chunk_id: u64, keys: Vec<i32>) -> Bytes {
+        let mut batch_builder = TxnChunkBuilder::new(chunk_id, 10, None);
         for i in keys {
             let key = new_key(i);
             let val = new_val(i);
@@ -198,9 +198,10 @@ mod tests {
         write_skl_write_cf(&skl, vec![5, 10, 15], 100, 101);
         // write CF skip list data will always written before txn file data, because
         // mem-table will instantly switch after apply TxnFile commit.
-        let txn_file_chunk_data = build_txn_file_chunk_data(vec![10, 12, 18]);
-        let txn_file_chunk_file = Arc::new(InMemFile::new(1, txn_file_chunk_data));
-        let txn_file_chunk = TxnChunk::new(txn_file_chunk_file, None).unwrap();
+        let chunk_id = 1;
+        let txn_file_chunk_data = build_txn_file_chunk_data(chunk_id, vec![10, 12, 18]);
+        let txn_file_chunk_file = Arc::new(InMemFile::new(chunk_id, txn_file_chunk_data));
+        let txn_file_chunk = TxnChunk::new(txn_file_chunk_file, None, None).unwrap();
         let user_meta = UserMeta::new(102, 103).to_array().to_vec();
         let lower_bound = InnerKey::from_inner_buf(b"");
         let upper_bound = InnerKey::from_inner_buf(GLOBAL_SHARD_END_KEY);

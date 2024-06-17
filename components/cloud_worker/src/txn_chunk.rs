@@ -1,24 +1,88 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
+use api_version::{api_v2, ApiV2};
 use bytes::Buf;
+use cloud_encryption::EncryptionKey;
+use dashmap::DashMap;
 use http::{header, Request, Response, StatusCode};
 use hyper::Body;
 use kvengine::{
     dfs::Dfs,
+    get_shard_property,
     table::{txn_file::TxnChunkBuilder, ChecksumType},
+    ENCRYPTION_KEY,
 };
+use load_data::task::get_shard_meta;
+use tikv_util::{box_err, warn};
 
 use crate::{
-    common::{get_body, make_response},
+    common::{get_body, get_param, make_response},
+    error::{Error, Result},
     server::Context,
 };
+
+const GET_SHARD_META_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Txn Chunk API
+///
+/// * GET /txn_chunk?keyspace_id=<keyspace_id>: query txn file is available for
+///   this keyspace or not
+///
+///   Return: { "available": true/false }
+///
+/// * POST /txn_chunk?keyspace_id=<keyspace_id>: submit data for creating txn
+///   chunk.
+///
+///   Return: { "chunk_id": <chunk_id> }
 
 pub(crate) async fn handle_txn_chunk(
     ctx: Arc<Context>,
     req: Request<Body>,
 ) -> hyper::Result<Response<Body>> {
+    let query = req.uri().query().unwrap_or("");
+    let query_pairs: HashMap<_, _> = url::form_urlencoded::parse(query.as_bytes()).collect();
+
+    let keyspace_id = match get_param::<u32>(&query_pairs, "keyspace_id") {
+        None => {
+            return Ok(make_response(
+                StatusCode::BAD_REQUEST,
+                "missing keyspace id",
+            ));
+        }
+        Some(keyspace_id) => keyspace_id,
+    };
+    let keyspace_info = match ctx
+        .txn_chunk_handler
+        .acquire_keyspace_info(ctx.clone(), keyspace_id)
+        .await
+    {
+        Ok(keyspace_info) => keyspace_info,
+        Err(err) => {
+            return Ok(make_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to acquire keyspace info {:?}", err),
+            ));
+        }
+    };
+
+    if *req.method() == http::Method::GET {
+        let resp = GetAvailabilityResp {
+            available: keyspace_info.available,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        return Ok(Response::builder()
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(json.into())
+            .unwrap());
+    } else if !keyspace_info.available {
+        return Ok(make_response(
+            StatusCode::FORBIDDEN,
+            "keyspace is not available for file based transaction",
+        ));
+    }
+
     let chunk_id = match ctx.pd.get_tso().await {
         Ok(tso) => tso.into_inner(),
         Err(err) => {
@@ -28,7 +92,19 @@ pub(crate) async fn handle_txn_chunk(
             ));
         }
     };
-    create_txn_chunk(chunk_id, ctx.s3fs.clone(), req).await
+    create_txn_chunk(
+        chunk_id,
+        ctx.s3fs.clone(),
+        req,
+        keyspace_info.encryption_key,
+    )
+    .await
+}
+
+#[derive(Default, Serialize, Deserialize, Debug)]
+#[serde(default)]
+pub struct GetAvailabilityResp {
+    pub available: bool,
 }
 
 #[derive(Default, Serialize, Deserialize, Debug)]
@@ -41,6 +117,7 @@ pub(crate) async fn create_txn_chunk(
     chunk_id: u64,
     dfs: Arc<dyn Dfs>,
     req: Request<Body>,
+    encryption_key: Option<EncryptionKey>,
 ) -> hyper::Result<Response<Body>> {
     if *req.method() != http::Method::POST {
         return Ok(make_response(StatusCode::BAD_REQUEST, "invalid method"));
@@ -55,7 +132,7 @@ pub(crate) async fn create_txn_chunk(
     if ChecksumType::Crc32.checksum(body_buf) != checksum {
         return Ok(make_response(StatusCode::BAD_REQUEST, "checksum mismatch"));
     }
-    let mut txn_chunk_builder = TxnChunkBuilder::new(4096);
+    let mut txn_chunk_builder = TxnChunkBuilder::new(chunk_id, 4096, encryption_key);
     while !body_buf.is_empty() {
         let key_len = body_buf.get_u16_le() as usize;
         let key = &body_buf[..key_len];
@@ -81,6 +158,65 @@ pub(crate) async fn create_txn_chunk(
         .header(header::CONTENT_TYPE, "application/json")
         .body(json.into())
         .unwrap())
+}
+
+#[derive(Clone)]
+struct KeyspaceInfo {
+    available: bool,
+    encryption_key: Option<EncryptionKey>,
+}
+
+#[derive(Default)]
+pub(crate) struct TxnChunkHandler {
+    keyspaces: DashMap<u32 /* keyspace_id */, KeyspaceInfo>,
+}
+
+impl TxnChunkHandler {
+    async fn acquire_keyspace_info(
+        &self,
+        ctx: Arc<Context>,
+        keyspace_id: u32,
+    ) -> Result<KeyspaceInfo> {
+        if let Some(keyspace_info) = self.keyspaces.get(&keyspace_id) {
+            return Ok(keyspace_info.value().clone());
+        }
+
+        let (keyspace_start, keyspace_end) = ApiV2::get_txn_keyspace_range(keyspace_id);
+        let shard_meta = get_shard_meta(ctx.pd.clone(), &keyspace_start, GET_SHARD_META_TIMEOUT)
+            .await
+            .map_err(|err| {
+                Error::Other(box_err!(
+                    "get shard meta failed: {:?}, keyspace_id: {}",
+                    err,
+                    keyspace_id
+                ))
+            })?;
+        let snapshot = shard_meta.get_snapshot();
+
+        if snapshot.outer_start < keyspace_start || keyspace_end < snapshot.outer_end {
+            // Would happen if the keyspace has not been created or has been merged.
+            warn!("acquire_keyspace_info: keyspace range mismatch"; "keyspace_id" => keyspace_id, "snapshot" => ?snapshot);
+            return Err(box_err!("keyspace range mismatch"));
+        }
+
+        let available = snapshot.inner_key_off == api_v2::KEYSPACE_PREFIX_LEN as u32;
+        let encryption_key = if available {
+            get_shard_property(ENCRYPTION_KEY, snapshot.get_properties()).map(|exported_key| {
+                ctx.master_key
+                    .decrypt_encryption_key(&exported_key)
+                    .unwrap()
+            })
+        } else {
+            None
+        };
+
+        let keyspace_info = KeyspaceInfo {
+            available,
+            encryption_key,
+        };
+        self.keyspaces.insert(keyspace_id, keyspace_info.clone());
+        Ok(keyspace_info)
+    }
 }
 
 #[cfg(test)]
@@ -123,7 +259,7 @@ mod tests {
             .unwrap();
         let mut res = dfs
             .get_runtime()
-            .block_on(create_txn_chunk(chunk_id, dfs.clone(), req))
+            .block_on(create_txn_chunk(chunk_id, dfs.clone(), req, None))
             .unwrap();
         assert!(res.status().is_success());
         let body = dfs
@@ -138,7 +274,8 @@ mod tests {
             .block_on(dfs.read_txn_chunk(chunk_id))
             .unwrap();
         assert!(!chunk_data.is_empty());
-        let txn_chunk = TxnChunk::new(Arc::new(InMemFile::new(155, chunk_data)), None).unwrap();
+        let txn_chunk =
+            TxnChunk::new(Arc::new(InMemFile::new(155, chunk_data)), None, None).unwrap();
         let user_meta = UserMeta::new(1, 2).to_array().to_vec();
         let lower_bound = InnerKey::from_inner_buf(b"");
         let upper_bound = InnerKey::from_inner_buf(GLOBAL_SHARD_END_KEY);

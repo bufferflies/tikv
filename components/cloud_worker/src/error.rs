@@ -26,4 +26,8 @@ pub(crate) enum Error {
     DateTimeParseError(#[from] chrono::ParseError),
     #[error("ReachLimit {0}")]
     ReachConcurrencyLimit(usize),
+    #[error("Other error {0}")]
+    Other(#[from] Box<dyn std::error::Error + Send + Sync>),
 }
+
+pub(crate) type Result<T> = std::result::Result<T, Error>;

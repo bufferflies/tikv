@@ -9,6 +9,7 @@ use std::{
 };
 
 use bytes::{Buf, Bytes};
+use cloud_encryption::EncryptionKey;
 use dashmap::DashMap;
 use moka::sync::SegmentedCache;
 use regex::Regex;
@@ -16,6 +17,7 @@ use tikv_util::{box_err, HandyRwLock};
 
 use crate::{
     dfs::Dfs,
+    table,
     table::{
         sstable::{BlockCacheKey, LocalFile},
         txn_file::TxnChunk,
@@ -98,7 +100,15 @@ impl TxnChunkManagerCore {
             for entry in read_dir.flatten() {
                 let file_name = entry.file_name();
                 if let Some(txn_file_id) = parse_txn_chunk_id(file_name.to_str().unwrap()) {
-                    let txn_chunk = self.load_txn_chunk(txn_file_id, entry.path())?;
+                    // We don't have the encryption key here, we can do nothing but skip the
+                    // encrypted files.
+                    // As the number of encrypted files is expected to be small, this should be
+                    // fine.
+                    let txn_chunk = match self.load_txn_chunk(txn_file_id, entry.path(), None) {
+                        Ok(txn_chunk) => txn_chunk,
+                        Err(Error::TableError(table::Error::NeedEncryptionKey { .. })) => continue,
+                        Err(err) => return Err(err),
+                    };
                     let files_entry = self.txn_chunks.entry(txn_file_id).or_default().clone();
                     let mut guard = files_entry.chunk_data.wl();
                     *guard = Some(txn_chunk)
@@ -112,7 +122,7 @@ impl TxnChunkManagerCore {
         self.worker_pool.handle()
     }
 
-    pub fn prepare(&self, txn_chunk_id: u64) -> Result<()> {
+    pub fn prepare(&self, txn_chunk_id: u64, encryption_key: Option<EncryptionKey>) -> Result<()> {
         let entry = self.txn_chunks.entry(txn_chunk_id).or_default().clone();
         let mut guard = entry.chunk_data.write().unwrap();
         if guard.is_some() {
@@ -128,12 +138,16 @@ impl TxnChunkManagerCore {
             let local_file_path = self.local_file_path(txn_chunk_id);
             fs::rename(&txn_file_tmp_path, local_file_path)?;
         }
-        let txn_chunk = self.load_txn_chunk(txn_chunk_id, local_file_path)?;
+        let txn_chunk = self.load_txn_chunk(txn_chunk_id, local_file_path, encryption_key)?;
         *guard = Some(txn_chunk);
         Ok(())
     }
 
-    pub fn prepare_txn_chunks(&self, txn_chunks_id: &[u64]) -> Result<()> {
+    pub fn prepare_txn_chunks(
+        &self,
+        txn_chunks_id: &[u64],
+        encryption_key: Option<EncryptionKey>,
+    ) -> Result<()> {
         let (tx, rx) = tikv_util::mpsc::bounded(READ_DFS_CONCURRENCY);
         let runtime = self.dfs.get_runtime();
         let mut msg_count: usize = 0;
@@ -147,7 +161,8 @@ impl TxnChunkManagerCore {
 
                 let local_file_path = self.local_file_path(chunk_id);
                 if local_file_path.exists() {
-                    let txn_chunk = self.load_txn_chunk(chunk_id, local_file_path)?;
+                    let txn_chunk =
+                        self.load_txn_chunk(chunk_id, local_file_path, encryption_key.clone())?;
                     *guard = Some(txn_chunk);
                     continue;
                 }
@@ -165,12 +180,12 @@ impl TxnChunkManagerCore {
             msg_count += 1;
 
             if msg_count >= READ_DFS_CONCURRENCY {
-                self.recv_txn_chunk_file_data(&rx)?;
+                self.recv_txn_chunk_file_data(&rx, encryption_key.clone())?;
                 msg_count -= 1;
             }
         }
         for _ in 0..msg_count {
-            self.recv_txn_chunk_file_data(&rx)?;
+            self.recv_txn_chunk_file_data(&rx, encryption_key.clone())?;
         }
         Ok(())
     }
@@ -178,6 +193,7 @@ impl TxnChunkManagerCore {
     fn recv_txn_chunk_file_data(
         &self,
         rx: &tikv_util::mpsc::Receiver<(u64, crate::dfs::Result<Bytes>)>,
+        encryption_key: Option<EncryptionKey>,
     ) -> Result<()> {
         let (chunk_id, file_data) = rx.recv().unwrap();
         let file_data = file_data.map_err(|err| -> Error {
@@ -196,14 +212,19 @@ impl TxnChunkManagerCore {
             let local_file_path = self.local_file_path(chunk_id);
             fs::rename(&txn_file_tmp_path, local_file_path)?;
         }
-        let txn_chunk = self.load_txn_chunk(chunk_id, local_file_path)?;
+        let txn_chunk = self.load_txn_chunk(chunk_id, local_file_path, encryption_key)?;
         *guard = Some(txn_chunk);
         Ok(())
     }
 
-    fn load_txn_chunk(&self, txn_chunk_id: u64, path: PathBuf) -> Result<TxnChunk> {
+    fn load_txn_chunk(
+        &self,
+        txn_chunk_id: u64,
+        path: PathBuf,
+        encryption_key: Option<EncryptionKey>,
+    ) -> Result<TxnChunk> {
         let file = LocalFile::open(txn_chunk_id, path.as_path(), false)?;
-        let txn_chunk = TxnChunk::new(Arc::new(file), Some(self.cache.clone()))?;
+        let txn_chunk = TxnChunk::new(Arc::new(file), Some(self.cache.clone()), encryption_key)?;
         Ok(txn_chunk)
     }
 
@@ -241,17 +262,19 @@ impl TxnChunkManagerCore {
         self.local_path.join(format!("{:016x}.txn", txn_chunk_id))
     }
 
+    // `encryption_key` is required only when `is_prepared` is false.
     pub fn load_txn_file_from_ref(
         &self,
         shard_id: u64,
         shard_ver: u64,
         txn_file_ref: &kvenginepb::TxnFileRef,
         is_prepared: bool,
+        encryption_key: Option<EncryptionKey>,
     ) -> Result<TxnFile> {
         let mut chunks = Vec::with_capacity(txn_file_ref.chunk_ids.len());
         for &chunk_id in &txn_file_ref.chunk_ids {
             if !is_prepared {
-                self.prepare(chunk_id)?;
+                self.prepare(chunk_id, encryption_key.clone())?;
             }
             let txn_chunk = self.get(chunk_id).ok_or_else(|| -> Error {
                 box_err!("txn chunk is not prepared, chunk_id {}", chunk_id)
@@ -268,17 +291,18 @@ impl TxnChunkManagerCore {
         shard_id: u64,
         shard_ver: u64,
         txn_file_refs: &[kvenginepb::TxnFileRef],
+        encryption_key: Option<EncryptionKey>,
     ) -> Result<Vec<TxnFile>> {
         let txn_chunks_id = txn_file_refs
             .iter()
             .flat_map(|txn_file_ref| txn_file_ref.chunk_ids.iter())
             .copied()
             .collect::<Vec<_>>();
-        self.prepare_txn_chunks(&txn_chunks_id)?;
+        self.prepare_txn_chunks(&txn_chunks_id, encryption_key)?;
         txn_file_refs
             .iter()
             .map(|txn_file_ref| {
-                self.load_txn_file_from_ref(shard_id, shard_ver, txn_file_ref, true)
+                self.load_txn_file_from_ref(shard_id, shard_ver, txn_file_ref, true, None)
             })
             .collect()
     }
@@ -316,7 +340,7 @@ mod tests {
             TxnChunkManager::new(tmp_dir.path().to_path_buf(), dfs.clone(), cache.clone(), 2);
         let runtime = dfs.get_runtime();
         for chunk_id in 1u64..=3 {
-            let mut chunk_builder = TxnChunkBuilder::new(10);
+            let mut chunk_builder = TxnChunkBuilder::new(chunk_id, 10, None);
             for i in 0..100 {
                 let key = format!("{:02}/{:02}", chunk_id, i);
                 chunk_builder.add_entry(key.as_bytes(), OP_PUT, key.as_bytes());
@@ -328,7 +352,7 @@ mod tests {
                 .unwrap();
         }
         for chunk_id in 1u64..=3 {
-            txn_chunk_manager.prepare(chunk_id).unwrap();
+            txn_chunk_manager.prepare(chunk_id, None).unwrap();
             assert!(txn_chunk_manager.get(chunk_id).is_some());
         }
         txn_chunk_manager.remove(1);

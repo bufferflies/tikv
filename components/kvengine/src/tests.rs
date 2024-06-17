@@ -14,11 +14,12 @@ use std::{
 };
 
 use bytes::{Buf, Bytes};
-use cloud_encryption::MasterKey;
+use cloud_encryption::{EncryptionKey, MasterKey};
 use file_system::IoRateLimiter;
 use kvenginepb as pb;
 use kvenginepb::{TxnFileRef, TxnFileRefs};
 use protobuf::Message;
+use rand::prelude::*;
 use security::SecurityManager;
 use tempfile::TempDir;
 use tikv_util::{mpsc, time::Instant};
@@ -1198,13 +1199,21 @@ fn test_l0table_ignore_lock() {
 #[test]
 fn test_txn_file() {
     ::test_util::init_log_for_test();
+    test_txn_file_impl(None);
+    test_txn_file_impl(Some(&generate_encryption_key()));
+}
+
+fn test_txn_file_impl(enc_key: Option<&EncryptionKey>) {
     let (engine, tx) = new_test_engine();
     let chunk_id = 200;
-    build_txn_chunk(&engine, 200, 300, chunk_id);
+    build_txn_chunk(&engine, 200, 300, chunk_id, enc_key);
     let mut wb = WriteBatch::new(1, 0);
     let txn_file_refs = make_txn_file_refs(1000, vec![chunk_id], make_lock_prefix(200), vec![]);
     wb.set_property(TXN_FILE_REF, &txn_file_refs);
-    engine.txn_chunk_mgr.prepare(chunk_id).unwrap();
+    engine
+        .txn_chunk_mgr
+        .prepare(chunk_id, enc_key.cloned())
+        .unwrap();
     write_data(wb, &tx);
     verify_lock(&engine, 200, 300);
 
@@ -1219,7 +1228,7 @@ fn test_txn_file() {
 
     // concurrent txn files.
     let txn1_chunk_id = 201;
-    build_txn_chunk(&engine, 200, 300, txn1_chunk_id);
+    build_txn_chunk(&engine, 200, 300, txn1_chunk_id, enc_key);
     let txn1_start_ts = 1003;
     let txn1_lock = make_txn_file_refs(
         txn1_start_ts,
@@ -1231,11 +1240,11 @@ fn test_txn_file() {
     wb.set_property(TXN_FILE_REF, &txn1_lock);
     engine
         .txn_chunk_mgr
-        .prepare_txn_chunks(&[txn1_chunk_id])
+        .prepare_txn_chunks(&[txn1_chunk_id], enc_key.cloned())
         .unwrap();
     write_data(wb, &tx);
     let txn2_chunk_id = 202;
-    build_txn_chunk(&engine, 300, 400, txn2_chunk_id);
+    build_txn_chunk(&engine, 300, 400, txn2_chunk_id, enc_key);
     let txn2_start_ts = 1004;
     let txn2_lock = make_txn_file_refs(
         txn2_start_ts,
@@ -1247,7 +1256,7 @@ fn test_txn_file() {
     wb.set_property(TXN_FILE_REF, &txn2_lock);
     engine
         .txn_chunk_mgr
-        .prepare_txn_chunks(&[txn2_chunk_id])
+        .prepare_txn_chunks(&[txn2_chunk_id], enc_key.cloned())
         .unwrap();
     write_data(wb, &tx);
     verify_lock(&engine, 200, 400);
@@ -1266,8 +1275,11 @@ fn test_txn_file() {
 
     let conflict_chunk_id = 203;
     let conflict_start_ts = 999;
-    build_txn_chunk(&engine, 250, 350, conflict_chunk_id);
-    engine.txn_chunk_mgr.prepare(conflict_chunk_id).unwrap();
+    build_txn_chunk(&engine, 250, 350, conflict_chunk_id, enc_key);
+    engine
+        .txn_chunk_mgr
+        .prepare(conflict_chunk_id, enc_key.cloned())
+        .unwrap();
     let conflict_chunk = engine.txn_chunk_mgr.get(conflict_chunk_id).unwrap();
     let lower_bound = InnerKey::from_inner_buf(b"");
     let upper_bound = InnerKey::from_inner_buf(GLOBAL_SHARD_END_KEY);
@@ -1347,13 +1359,18 @@ fn test_txn_file() {
 #[test]
 fn test_txn_file_multiple() {
     ::test_util::init_log_for_test();
+    test_txn_file_multiple_impl(None);
+    test_txn_file_multiple_impl(Some(&generate_encryption_key()));
+}
+
+fn test_txn_file_multiple_impl(enc_key: Option<&EncryptionKey>) {
     let (engine, tx) = new_test_engine();
 
     let chunks_id: Vec<u64> = (100..500).step_by(10).collect();
     let start_ts = 2000;
     for &chunk_id in &chunks_id {
         let start = chunk_id as usize;
-        build_txn_chunk(&engine, start, start + 10, chunk_id);
+        build_txn_chunk(&engine, start, start + 10, chunk_id, enc_key);
     }
     let mut wb = WriteBatch::new(1, 0);
     let txn_file_refs = make_txn_file_refs(
@@ -1363,7 +1380,10 @@ fn test_txn_file_multiple() {
         vec![],
     );
     wb.set_property(TXN_FILE_REF, &txn_file_refs);
-    engine.txn_chunk_mgr.prepare_txn_chunks(&chunks_id).unwrap();
+    engine
+        .txn_chunk_mgr
+        .prepare_txn_chunks(&chunks_id, enc_key.cloned())
+        .unwrap();
     write_data(wb, &tx);
     verify_lock(&engine, 100, 500);
 
@@ -1379,8 +1399,14 @@ fn test_txn_file_multiple() {
     verify_write(&engine, 100, 500);
 }
 
-fn build_txn_chunk(engine: &TestEngine, start: usize, end: usize, id: u64) {
-    let mut chunk_builder = TxnChunkBuilder::new(10);
+fn build_txn_chunk(
+    engine: &TestEngine,
+    start: usize,
+    end: usize,
+    id: u64,
+    enc_key: Option<&EncryptionKey>,
+) {
+    let mut chunk_builder = TxnChunkBuilder::new(id, 10, enc_key.cloned());
     for i in start..end {
         let key_str = i_to_key(i as i32, 0);
         chunk_builder.add_entry(key_str.as_bytes(), OP_PUT, key_str.as_bytes());
@@ -1994,4 +2020,10 @@ where
         thread::sleep(Duration::from_millis(100))
     }
     false
+}
+
+pub(crate) fn generate_encryption_key() -> EncryptionKey {
+    let master_key_plain_text = thread_rng().gen::<[u8; 32]>().to_vec();
+    let master_key = MasterKey::new(&master_key_plain_text);
+    master_key.generate_encryption_key()
 }

@@ -3,6 +3,7 @@
 use std::{cmp, fmt, iter::Iterator as StdIterator, ops::Deref, sync::Arc};
 
 use bytes::{Buf, BufMut, Bytes};
+use cloud_encryption::EncryptionKey;
 use itertools::Itertools;
 use log_wrappers::Value as LogValue;
 use moka::sync::SegmentedCache;
@@ -20,6 +21,7 @@ use crate::{
 
 const TXN_FILE_PROP_CHECK_NON_EXIST_COUNT: &str = "check_ne";
 const TXN_FILE_PROP_INSERT_COUNT: &str = "insert";
+const TXN_FILE_PROP_ENCRYPTION_VER: &str = "encryption_ver";
 
 const TXN_FILE_FORMAT: u16 = 1;
 const TXN_FILE_MAGIC: u32 = 2785588940;
@@ -339,8 +341,9 @@ impl TxnChunk {
     pub fn new(
         file: Arc<dyn File>,
         cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
+        encryption_key: Option<EncryptionKey>,
     ) -> Result<Self> {
-        let inner = TxnChunkInner::new(file, cache)?;
+        let inner = TxnChunkInner::new(file, cache, encryption_key)?;
         Ok(Self {
             inner: Arc::new(inner),
         })
@@ -389,6 +392,8 @@ pub struct TxnChunkInner {
     hash_index: TtlCache<TxnChunkHashIndex>,
     inserts: u32,
     check_non_exists: u32,
+    encryption_key: Option<EncryptionKey>,
+    encryption_ver: u32,
 }
 
 #[derive(Clone)]
@@ -450,6 +455,7 @@ impl TxnChunkInner {
     pub fn new(
         file: Arc<dyn File>,
         cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
+        encryption_key: Option<EncryptionKey>,
     ) -> Result<Self> {
         let footer = Self::load_footer(&file)?;
         let idx_length = footer.hash_index_offset - footer.index_offset;
@@ -461,6 +467,7 @@ impl TxnChunkInner {
         let properties = Self::validate_and_trim_checksum(raw_properties, footer.checksum_type)?;
         let mut inserts = 0;
         let mut check_non_exists = 0;
+        let mut encryption_ver = 0;
         let mut prop_slice = properties.chunk();
         while !prop_slice.is_empty() {
             let (key, mut val, remained) = Self::parse_prop_data(prop_slice);
@@ -468,6 +475,14 @@ impl TxnChunkInner {
                 inserts = val.get_u32_le();
             } else if key == TXN_FILE_PROP_CHECK_NON_EXIST_COUNT.as_bytes() {
                 check_non_exists = val.get_u32_le();
+            } else if key == TXN_FILE_PROP_ENCRYPTION_VER.as_bytes() {
+                encryption_ver = val.get_u32_le();
+                if encryption_key.is_none() {
+                    return Err(Error::NeedEncryptionKey {
+                        chunk_id: file.id(),
+                        encryption_ver,
+                    });
+                }
             }
             prop_slice = remained;
         }
@@ -480,6 +495,8 @@ impl TxnChunkInner {
             hash_index: TtlCache::default(),
             check_non_exists,
             inserts,
+            encryption_key,
+            encryption_ver,
         };
         chunk.load_hash_index()?;
         Ok(chunk)
@@ -525,7 +542,7 @@ impl TxnChunkInner {
         &self.index
     }
 
-    pub fn load_block(&self, pos: usize) -> Result<Bytes> {
+    pub fn load_block(&self, pos: usize, decryption_buf: &mut Vec<u8>) -> Result<Bytes> {
         let block_off = self.index.get_block_off(pos);
         let next_block_off = self.index.get_block_off(pos + 1);
         let length = next_block_off - block_off;
@@ -535,16 +552,35 @@ impl TxnChunkInner {
                 cache
                     .try_get_with(cache_key, || {
                         crate::metrics::ENGINE_CACHE_MISS.inc_by(1);
-                        self.read_block_from_file(block_off as u64, length)
+                        self.read_block_from_file(block_off as u64, length, decryption_buf)
                     })
                     .map_err(|err| err.as_ref().clone())
             }
-            None => self.read_block_from_file(block_off as u64, length),
+            None => self.read_block_from_file(block_off as u64, length, decryption_buf),
         }
     }
 
-    fn read_block_from_file(&self, offset: u64, length: usize) -> Result<Bytes> {
-        let raw_block = self.file.read(offset, length)?;
+    fn read_block_from_file(
+        &self,
+        offset: u64,
+        length: usize,
+        decryption_buf: &mut Vec<u8>,
+    ) -> Result<Bytes> {
+        let raw_block = if let Some(encryption_key) = &self.encryption_key {
+            decryption_buf.resize(length, 0);
+            self.file.read_at(decryption_buf, offset)?;
+            let mut block = Vec::with_capacity(length + encryption_key.encryption_block_size());
+            encryption_key.decrypt(
+                decryption_buf,
+                self.file.id(),
+                offset as u32,
+                self.encryption_ver,
+                &mut block,
+            );
+            Bytes::from(block)
+        } else {
+            self.file.read(offset, length)?
+        };
         Self::validate_and_trim_checksum(raw_block, self.footer.checksum_type)
     }
 
@@ -863,6 +899,7 @@ pub struct TxnChunkIterator {
     num_blocks: usize,
     block_pos: usize,
     reverse: bool,
+    decryption_buf: Vec<u8>,
 }
 
 impl fmt::Debug for TxnChunkIterator {
@@ -886,6 +923,7 @@ impl TxnChunkIterator {
             num_blocks,
             block_pos: 0,
             reverse,
+            decryption_buf: Vec::new(),
         }
     }
 
@@ -903,7 +941,10 @@ impl TxnChunkIterator {
     }
 
     fn load_block(&mut self) -> bool {
-        match self.chunk.load_block(self.block_pos) {
+        match self
+            .chunk
+            .load_block(self.block_pos, &mut self.decryption_buf)
+        {
             Ok(block) => {
                 let block_key = self.chunk.index.block_key(self.block_pos);
                 self.block_iter.set_block(block_key, block);
@@ -1134,6 +1175,7 @@ impl TxnChunkBlockIterator {
 
 #[derive(Default)]
 pub struct TxnChunkBuilder {
+    chunk_id: u64,
     data_buf: Vec<u8>,
     block: TxnChunkBlockBuffer,
     block_keys: EntrySlice,
@@ -1145,14 +1187,22 @@ pub struct TxnChunkBuilder {
     insert_count: u32,
     check_not_exist_count: u32,
     checksum_type: ChecksumType,
+    encryption_key: Option<EncryptionKey>,
 }
 
 impl TxnChunkBuilder {
-    pub fn new(target_block_entries: usize) -> Self {
-        let mut builder = Self::default();
-        builder.target_block_entries = target_block_entries;
-        builder.checksum_type = ChecksumType::Crc32;
-        builder
+    pub fn new(
+        chunk_id: u64,
+        target_block_entries: usize,
+        encryption_key: Option<EncryptionKey>,
+    ) -> Self {
+        Self {
+            chunk_id,
+            target_block_entries,
+            checksum_type: ChecksumType::Crc32,
+            encryption_key,
+            ..Default::default()
+        }
     }
 
     pub fn add_entry(&mut self, key: &[u8], op: u8, val: &[u8]) {
@@ -1183,6 +1233,13 @@ impl TxnChunkBuilder {
                 TXN_FILE_PROP_INSERT_COUNT.as_bytes(),
                 &self.insert_count.to_le_bytes(),
             );
+        }
+        if let Some(encryption_key) = &self.encryption_key {
+            Self::add_property(
+                buf,
+                TXN_FILE_PROP_ENCRYPTION_VER.as_bytes(),
+                &encryption_key.current_ver.to_le_bytes(),
+            )
         }
         let checksum = self.checksum_type.checksum(buf);
         buf.put_u32_le(checksum);
@@ -1258,6 +1315,22 @@ impl TxnChunkBuilder {
         self.idx_buf.put_u32_le(checksum);
     }
 
+    fn build_blocks(&self, output: &mut Vec<u8>) {
+        if let Some(encryption_key) = &self.encryption_key {
+            for (i, &start) in self.block_offsets.iter().enumerate() {
+                let end = if i + 1 < self.block_offsets.len() {
+                    self.block_offsets[i + 1]
+                } else {
+                    self.data_buf.len() as u32
+                };
+                let data = &self.data_buf[start as usize..end as usize];
+                encryption_key.encrypt(data, self.chunk_id, start, output);
+            }
+        } else {
+            output.extend_from_slice(&self.data_buf);
+        }
+    }
+
     pub fn finish(&mut self, data_buf: &mut Vec<u8>) {
         if self.block.length() > 0 {
             self.finish_block();
@@ -1275,7 +1348,7 @@ impl TxnChunkBuilder {
             + props.len()
             + TXN_FILE_CHUNK_FOOTER_SIZE;
         data_buf.reserve(size);
-        data_buf.extend_from_slice(&self.data_buf);
+        self.build_blocks(data_buf);
         data_buf.extend_from_slice(&self.idx_buf);
         data_buf.extend_from_slice(&bucket_buf);
         data_buf.extend_from_slice(&entry_buf);
@@ -1449,6 +1522,7 @@ mod tests {
     use std::{collections::HashSet, iter::Iterator as StdIterator, ops::Deref, sync::Arc};
 
     use bstr::ByteSlice;
+    use cloud_encryption::EncryptionKey;
     use proptest::prelude::*;
     use txn_types::LockType;
 
@@ -1461,20 +1535,32 @@ mod tests {
             InnerKey, Iterator, SkipOpTxnFileIterator, TxnCtx, TxnFile, TxnFileId, TxnFileIterator,
             OP_DELETE, OP_LOCK,
         },
+        tests::generate_encryption_key,
         UserMeta, GLOBAL_SHARD_END_KEY,
     };
 
     #[test]
     fn test_txn_chunk() {
-        let chunk = build_txn_chunk(0, 100, 1, |i| {
-            if i < 50 {
-                OP_INSERT
-            } else if i < 60 {
-                OP_CHECK_NOT_EXIST
-            } else {
-                OP_PUT
-            }
-        });
+        test_txn_chunk_impl(None);
+        test_txn_chunk_impl(Some(&generate_encryption_key()));
+    }
+
+    fn test_txn_chunk_impl(enc_key: Option<&EncryptionKey>) {
+        let chunk = build_txn_chunk(
+            0,
+            100,
+            1,
+            |i| {
+                if i < 50 {
+                    OP_INSERT
+                } else if i < 60 {
+                    OP_CHECK_NOT_EXIST
+                } else {
+                    OP_PUT
+                }
+            },
+            enc_key,
+        );
         assert_eq!(chunk.id(), 1);
         assert_eq!(chunk.get_inserts(), 25);
         assert_eq!(chunk.get_check_non_exists(), 5);
@@ -1567,11 +1653,17 @@ mod tests {
         assert_eq!(get_test_value(98).as_bytes(), iter.get_value());
     }
 
-    fn build_txn_chunk<F>(start: usize, end: usize, id: u64, op_fn: F) -> TxnChunk
+    fn build_txn_chunk<F>(
+        start: usize,
+        end: usize,
+        id: u64,
+        op_fn: F,
+        enc_key: Option<&EncryptionKey>,
+    ) -> TxnChunk
     where
         F: Fn(usize) -> u8,
     {
-        let mut chunk_builder = TxnChunkBuilder::new(10);
+        let mut chunk_builder = TxnChunkBuilder::new(id, 10, enc_key.cloned());
         for i in (start..end).step_by(2) {
             let key = get_test_key("batch", i);
             let val = get_test_value(i);
@@ -1581,11 +1673,16 @@ mod tests {
         let mut chunk_data = vec![];
         chunk_builder.finish(&mut chunk_data);
         let chunk_file = Arc::new(InMemFile::new(id, chunk_data.into()));
-        TxnChunk::new(chunk_file, None).unwrap()
+        TxnChunk::new(chunk_file, None, enc_key.cloned()).unwrap()
     }
 
     #[test]
     fn test_txn_file() {
+        test_txn_file_impl(None);
+        test_txn_file_impl(Some(&generate_encryption_key()));
+    }
+
+    fn test_txn_file_impl(enc_key: Option<&EncryptionKey>) {
         let op_fn = |i: usize| {
             if i < 100 {
                 OP_LOCK
@@ -1599,11 +1696,11 @@ mod tests {
                 OP_PUT
             }
         };
-        let chunk_1 = build_txn_chunk(50, 100, 1, op_fn);
-        let chunk_2 = build_txn_chunk(100, 150, 2, op_fn);
-        let chunk_3 = build_txn_chunk(150, 200, 3, op_fn);
-        let chunk_4 = build_txn_chunk(200, 250, 4, op_fn);
-        let chunk_5 = build_txn_chunk(250, 300, 5, op_fn);
+        let chunk_1 = build_txn_chunk(50, 100, 1, op_fn, enc_key);
+        let chunk_2 = build_txn_chunk(100, 150, 2, op_fn, enc_key);
+        let chunk_3 = build_txn_chunk(150, 200, 3, op_fn, enc_key);
+        let chunk_4 = build_txn_chunk(200, 250, 4, op_fn, enc_key);
+        let chunk_5 = build_txn_chunk(250, 300, 5, op_fn, enc_key);
         let id = TxnFileId::new(10, 1, 3);
         let lower_bound = InnerKey::from_inner_buf(b"");
         let upper_bound = InnerKey::from_inner_buf(GLOBAL_SHARD_END_KEY);
@@ -1814,15 +1911,19 @@ mod tests {
     prop_compose! {
         // Choose small values to cover corner case easily.
         fn arb_chunks(max_chunk_size: usize, max_chunks_num: usize)
-            (chunks_size in prop::collection::vec(1..max_chunk_size, 1..max_chunks_num))
+            (
+                chunks_size in prop::collection::vec(1..max_chunk_size, 1..max_chunks_num),
+                enable_enc in any::<bool>(),
+            )
             -> (usize, usize, Vec<TxnChunk>, TxnFileRefStore)
         {
             const CHUNKS_START: usize = 100;
             let mut next_chunk: usize = CHUNKS_START;
             let mut chunks = Vec::with_capacity(chunks_size.len());
             let mut chunk_ref = TxnFileRefStore::default();
+            let enc_key = enable_enc.then(generate_encryption_key);
             for chunk_size in chunks_size {
-                let chunk = build_txn_chunk(next_chunk, next_chunk + chunk_size, next_chunk as u64, |_| OP_PUT);
+                let chunk = build_txn_chunk(next_chunk, next_chunk + chunk_size, next_chunk as u64, |_| OP_PUT, enc_key.as_ref());
                 chunks.push(chunk);
                 chunk_ref.put_batch(next_chunk, next_chunk + chunk_size, |_| OP_PUT);
                 next_chunk += chunk_size;

@@ -4,6 +4,7 @@ use std::{ops::Range, sync::Arc, thread, time::Duration};
 
 use anyhow::{self, bail};
 use bytes::Bytes;
+use cloud_encryption::KeyspaceEncryptionConfig;
 use futures::{executor::block_on, future::join_all};
 use kvengine::{
     dfs::Dfs,
@@ -16,6 +17,7 @@ use kvproto::{
         ResolveLockRequest, TxnHeartBeatRequest,
     },
 };
+use pd_client::PdClient;
 use security::SecurityConfig;
 use test_cloud_server::{
     client,
@@ -165,13 +167,12 @@ fn test_txn_file_basic() {
     test_util::init_log_for_test();
 
     let cases = vec![
-        // size_factor, write_method, enable_inner_key_off
+        // size_factor, write_method, enable_encryption
+        (10, TxnWriteMethod::FileBased, false),
         (10, TxnWriteMethod::FileBased, true),
-        // TODO: (10, TxnWriteMethod::FileBased, false),
         // Regression tests:
-        (1, TxnWriteMethod::FileBased, true),
-        // TODO: (1, TxnWriteMethod::FileBased, false),
-        (1, TxnWriteMethod::Normal, true),
+        (1, TxnWriteMethod::FileBased, false),
+        (1, TxnWriteMethod::Normal, false),
     ];
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -181,9 +182,9 @@ fn test_txn_file_basic() {
         .build()
         .unwrap();
     let mut handles = Vec::with_capacity(cases.len());
-    for (size_factor, txn_write_method, enable_inner_key_off) in cases {
+    for (size_factor, txn_write_method, enable_encryption) in cases {
         handles.push(rt.spawn_blocking(move || {
-            test_txn_file_basic_impl(size_factor, txn_write_method, enable_inner_key_off)
+            test_txn_file_basic_impl(size_factor, txn_write_method, enable_encryption)
         }));
     }
     rt.block_on(join_all(handles));
@@ -192,7 +193,7 @@ fn test_txn_file_basic() {
 fn test_txn_file_basic_impl(
     size_factor: usize,
     write_method: TxnWriteMethod,
-    enable_inner_key_off: bool,
+    enable_encryption: bool,
 ) {
     let (_temp_dir, mut oss, dfs_config) = prepare_dfs("test");
 
@@ -201,14 +202,14 @@ fn test_txn_file_basic_impl(
     let cluster_id = pd_wrapper.client().get_cluster_id().unwrap();
     info!("test_txn_file_basic";
         "size_factor" => size_factor,
-        "enable_inner_key_off" => enable_inner_key_off,
+        "enable_encryption" => enable_encryption,
         "write_method" => ?write_method,
         "cluster_id" => cluster_id);
     let mut cluster = ServerCluster::new_opt(
         node_ids,
         |_, conf| {
             conf.dfs = dfs_config.clone();
-            conf.enable_inner_key_offset = enable_inner_key_off;
+            conf.enable_inner_key_offset = true;
         },
         pd_wrapper,
     );
@@ -243,6 +244,14 @@ fn test_txn_file_basic_impl(
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _enter = rt.enter();
+
+    if enable_encryption {
+        let cfg = KeyspaceEncryptionConfig { enabled: true };
+        cluster
+            .get_pd_client()
+            .set_keyspace_encryption(KEYSPACE_ID, cfg)
+            .unwrap();
+    }
 
     let mut client = cluster.new_client_opt(ClusterClientOptions {
         txn_file_max_chunk_size: Some(1024),
@@ -963,8 +972,8 @@ fn test_txn_file_merge_impl(ranges: Vec<Range<usize>>) {
 
 fn build_txn_files(dfs: &Arc<dyn Dfs>, start_ts: u64, start: usize, end: usize) -> Vec<u64> {
     let mut chunk_ids = vec![];
-    let mut txn_chunk_builder = TxnChunkBuilder::new(10);
     let mut chunk_id = start_ts + 1;
+    let mut txn_chunk_builder = TxnChunkBuilder::new(chunk_id, 10, None);
     for i in start..end {
         let key = i_to_key(i);
         let val = i_to_val(i);
@@ -972,7 +981,7 @@ fn build_txn_files(dfs: &Arc<dyn Dfs>, start_ts: u64, start: usize, end: usize) 
         if (i + 1) % 100 == 0 {
             let mut data_buf = vec![];
             txn_chunk_builder.finish(&mut data_buf);
-            txn_chunk_builder = TxnChunkBuilder::new(10);
+            txn_chunk_builder = TxnChunkBuilder::new(chunk_id, 10, None);
             dfs.get_runtime()
                 .block_on(dfs.create_txn_chunk(chunk_id, Bytes::from(data_buf)))
                 .unwrap();

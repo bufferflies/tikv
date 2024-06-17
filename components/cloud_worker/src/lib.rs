@@ -48,6 +48,7 @@ use crate::{
     load_data::{LoadDataManager, MAX_IN_MEM_SIZE},
     native_br::{NativeBrConfig, NativeBrManager},
     remote_cop::RemoteCopServer,
+    txn_chunk::TxnChunkHandler,
     worker_scaler::{WorkerScaler, WorkerScalerConfig, LOAD_DATA_WORKER_ENV},
 };
 
@@ -203,6 +204,7 @@ fn start_server(
         config.clone(),
     ));
     spawn_br_background_worker(br_manager.clone(), config_file_path);
+    let txn_chunk_handler = Arc::new(TxnChunkHandler::default());
 
     let cop_limiter = CopLimiter::new(config.cop_limiter.clone());
 
@@ -214,6 +216,7 @@ fn start_server(
         pd: pd.clone(),
         load_manager: load_manager.clone(),
         br_manager,
+        txn_chunk_handler,
         master_key,
         quota_limiter: Arc::new(QuotaLimiter::default()),
         block_cache,

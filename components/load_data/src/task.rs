@@ -566,7 +566,7 @@ impl LoadTaskWorker {
         self.scheduler.clone()
     }
 
-    pub fn set_inner_key_off_and_encrytion_key(&mut self, first_key: Bytes) -> Result<()> {
+    pub fn set_inner_key_off_and_encryption_key(&mut self, first_key: Bytes) -> Result<()> {
         if self.task_ctx.inner_key_off.is_none() {
             let shard_meta = self.ctx.runtime.block_on(get_shard_meta(
                 self.ctx.pd.clone(),
@@ -661,7 +661,7 @@ impl LoadTaskWorker {
         if self.task_ctx.inner_key_off.is_none() {
             let key_len = (&chunk_data[0..]).get_u16_le();
             let first_key = chunk_data.slice(2..2 + key_len as usize);
-            self.set_inner_key_off_and_encrytion_key(first_key.clone())?;
+            self.set_inner_key_off_and_encryption_key(first_key.clone())?;
             let check_point_store_mutex = Arc::clone(&self.check_point_store);
             let mut check_point_store_guard = check_point_store_mutex.lock().unwrap();
             check_point_store_guard.update_first_key(first_key)?;
@@ -1456,7 +1456,7 @@ impl LoadTaskWorker {
                 let check_point_ctx = check_point_store_guard.load_check_point_ctx();
                 info!("{} [check point] recover readers", self.task_ctx.task_id);
                 if let Err(err) =
-                    self.set_inner_key_off_and_encrytion_key(check_point_ctx.get_first_key())
+                    self.set_inner_key_off_and_encryption_key(check_point_ctx.get_first_key())
                 {
                     self.scheduler.cancel(format!("{:?}", err))
                 }
@@ -1531,7 +1531,9 @@ async fn ingest_files_to_leader(
     }
 }
 
-async fn get_shard_meta(
+// Note: also used by `TxnChunkHandler`.
+// TODO: find a better place for this method.
+pub async fn get_shard_meta(
     pd: Arc<dyn PdClient>,
     shard_raw_key: &[u8],
     timeout: Duration,

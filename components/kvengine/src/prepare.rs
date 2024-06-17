@@ -174,6 +174,7 @@ impl EngineCore {
                 cs.shard_id,
                 cs.shard_ver,
                 &lock_txn_file_refs,
+                encryption_key.clone(),
             )?;
             info!(
                 "{} is preparing change set, load lock txn files", tag;

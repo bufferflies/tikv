@@ -279,7 +279,7 @@ impl Engine {
 
         let txn_file = self
             .txn_chunk_mgr
-            .load_txn_file_from_ref(shard.id, shard.ver, &txn_file_ref, true)
+            .load_txn_file_from_ref(shard.id, shard.ver, &txn_file_ref, true, None)
             .unwrap();
 
         let (is_commit, is_rollback) = Self::merge_txn_file_ref(shard, txn_file_ref);

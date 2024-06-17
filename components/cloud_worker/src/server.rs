@@ -54,7 +54,7 @@ use crate::{
         REMOTE_COPR_SNAPSHOT_HISTOGRAM,
     },
     native_br::{self, NativeBrManager},
-    txn_chunk::handle_txn_chunk,
+    txn_chunk::{handle_txn_chunk, TxnChunkHandler},
 };
 
 pub(crate) struct Context {
@@ -64,6 +64,7 @@ pub(crate) struct Context {
     pub cache_fs: Arc<CacheFs>,
     pub load_manager: Arc<LoadDataManager>,
     pub br_manager: Arc<NativeBrManager>,
+    pub txn_chunk_handler: Arc<TxnChunkHandler>,
     pub pd: Arc<dyn PdClient>,
     pub master_key: MasterKey,
     pub quota_limiter: Arc<QuotaLimiter>,

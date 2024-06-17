@@ -3,6 +3,7 @@
 use core::slice::SlicePattern;
 use std::{error::Error, fmt, mem, sync::Arc};
 
+use api_version::ApiV2;
 use bytes::{BufMut, Bytes, BytesMut};
 use cloud_worker::CreateTxnChunkResp;
 use hyper::Method;
@@ -44,6 +45,7 @@ impl TxnFileHelper {
             return Ok(vec![]);
         }
 
+        let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(&muts[0].key).unwrap();
         let total_size = muts
             .iter()
             .map(|m| m.key.len() - DEFAULT_INNER_KEY_OFFSET + m.value.len() + TXN_ENTRY_OVERHEAD)
@@ -62,7 +64,7 @@ impl TxnFileHelper {
             {
                 let buf_to_flush =
                     mem::replace(&mut buf, BytesMut::with_capacity(self.max_chunk_size));
-                let chunk_id = self.flush_to_tikv_worker(buf_to_flush).await?;
+                let chunk_id = self.flush_to_tikv_worker(keyspace_id, buf_to_flush).await?;
                 chunks.push(TxnFileChunk {
                     chunk_id,
                     outer_smallest: outer_smallest.take().unwrap(),
@@ -80,7 +82,7 @@ impl TxnFileHelper {
         }
 
         if !buf.is_empty() {
-            let chunk_id = self.flush_to_tikv_worker(buf).await?;
+            let chunk_id = self.flush_to_tikv_worker(keyspace_id, buf).await?;
             chunks.push(TxnFileChunk {
                 chunk_id,
                 outer_smallest: outer_smallest.unwrap(),
@@ -91,15 +93,17 @@ impl TxnFileHelper {
         Ok(chunks)
     }
 
-    async fn flush_to_tikv_worker(&self, mut buf: BytesMut) -> Result<u64 /* chunk_id */> {
+    async fn flush_to_tikv_worker(
+        &self,
+        keyspace_id: u32,
+        mut buf: BytesMut,
+    ) -> Result<u64 /* chunk_id */> {
         let checksum = crc32fast::hash(buf.as_slice());
         buf.put_u32_le(checksum);
 
+        let path = format!("txn_chunk?keyspace_id={keyspace_id}");
         let data = buf.freeze();
-        let resp = self
-            .cli
-            .request("txn_chunk", Method::POST, Some(data))
-            .await?;
+        let resp = self.cli.request(path, Method::POST, Some(data)).await?;
         let resp: CreateTxnChunkResp = serde_json::from_slice(&resp)?;
         Ok(resp.chunk_id)
     }
