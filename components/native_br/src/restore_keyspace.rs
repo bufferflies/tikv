@@ -8,7 +8,7 @@ use std::{
     fmt, mem,
     ops::Deref,
     path::{Path, PathBuf},
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, RwLock},
     thread,
     time::Duration,
 };
@@ -903,12 +903,20 @@ impl BackupCluster {
                 self.pd_client.get_security_mgr(),
             )?;
 
+            let encryption_key = self.get_keyspace_exported_encryption_key().map(|exported| {
+                kv_engine
+                    .get_master_key()
+                    .decrypt_encryption_key(&exported)
+                    .unwrap()
+            });
+
             // Move shards to meta_applier to apply meta change in `flush_mem_table`.
             // Move back after flush finished.
             let shards = mem::take(&mut self.shards);
             let meta_applier = Arc::new(MetaApplier::new(
                 self.keyspace_id,
                 kv_engine.clone(),
+                encryption_key,
                 shards,
                 receiver,
             ));
@@ -1584,6 +1592,15 @@ impl BackupCluster {
 
         self.check_flushed(timeout)?;
 
+        let errors = self.meta_applier.as_ref().unwrap().take_errors();
+        if !errors.is_empty() {
+            return Err(box_err!(
+                "{} meta_applier meet errors: {:?}",
+                self.tag,
+                errors
+            ));
+        }
+
         // Take back from meta_applier.
         let mut shards = self.meta_applier.as_ref().unwrap().take_shards().unwrap();
         self.shards = mem::take(&mut shards);
@@ -1733,7 +1750,7 @@ impl BackupCluster {
                 region.target_region.get_end_key(),
                 inner_key_off,
             );
-            if let Some(encryption_key) = self.get_keyspace_encryption_key() {
+            if let Some(encryption_key) = self.get_keyspace_exported_encryption_key() {
                 meta.set_property(ENCRYPTION_KEY, encryption_key.as_slice());
             }
             let mut properties_helper =
@@ -1918,7 +1935,7 @@ impl BackupCluster {
         Ok(())
     }
 
-    fn get_keyspace_encryption_key(&self) -> Option<Vec<u8>> {
+    fn get_keyspace_exported_encryption_key(&self) -> Option<Vec<u8>> {
         self.get_sorted_shard(0)
             .meta
             .get_property(ENCRYPTION_KEY)
@@ -1933,8 +1950,10 @@ impl BackupCluster {
 struct MetaApplier {
     keyspace_id: u32,
     engine: kvengine::Engine,
+    encryption_key: Option<EncryptionKey>,
     shards: RwLock<Option<HashMap<u64, BackupShard>>>,
     store_rx: mpsc::Receiver<StoreMsg>,
+    errors: Mutex<Vec<Error>>,
 }
 
 impl Drop for MetaApplier {
@@ -1950,19 +1969,27 @@ impl MetaApplier {
     fn new(
         keyspace_id: u32,
         engine: kvengine::Engine,
+        encryption_key: Option<EncryptionKey>,
         shards: HashMap<u64, BackupShard>,
         store_rx: mpsc::Receiver<StoreMsg>,
     ) -> Self {
         Self {
             keyspace_id,
             engine,
+            encryption_key,
             shards: RwLock::new(Some(shards)),
             store_rx,
+            errors: Default::default(),
         }
     }
 
     pub fn take_shards(&self) -> Option<HashMap<u64, BackupShard>> {
         self.shards.wl().take()
+    }
+
+    pub fn take_errors(&self) -> Vec<Error> {
+        let mut errors = self.errors.lock().unwrap();
+        mem::take(&mut *errors)
     }
 
     fn run(&self) {
@@ -2016,7 +2043,7 @@ impl MetaApplier {
                     self.engine.meta_committed(&cs, false);
                     match self
                         .engine
-                        .prepare_change_set(cs, false, None, None)
+                        .prepare_change_set(cs, false, None, self.encryption_key.clone())
                         .and_then(|cs| self.engine.apply_change_set(cs))
                     {
                         Ok(()) => debug!(
@@ -2024,10 +2051,15 @@ impl MetaApplier {
                             self.keyspace_id, tag
                         ),
                         Err(err) => {
-                            error!(
+                            let msg = format!(
                                 "Keyspace {} shard {} MetaApplier apply change set failed: {:?}",
                                 self.keyspace_id, tag, err
-                            )
+                            );
+                            error!("{}", msg);
+                            self.errors
+                                .lock()
+                                .unwrap()
+                                .push(Error::Other(box_err!("{}", msg)));
                         }
                     }
                 }

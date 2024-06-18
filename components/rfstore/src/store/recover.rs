@@ -248,7 +248,8 @@ impl kvengine::RecoverHandler for RecoverHandler {
                     cs.sequence = e.get_index();
                     if meta.ver == cs.get_shard_ver() && !meta.is_duplicated_change_set(&mut cs) {
                         // We don't have a background region worker now, should do it synchronously.
-                        let cs = engine.prepare_change_set(cs, false, None, None)?;
+                        let cs =
+                            engine.prepare_change_set(cs, false, None, encryption_key.clone())?;
                         engine.apply_change_set(cs)?;
                     }
                 } else if let Err(err) = applier.exec_custom_log(&mut ctx, &custom) {

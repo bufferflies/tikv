@@ -360,6 +360,7 @@ impl EngineCore {
             }
         }
         info!("load and ingest shard {}", meta.tag());
+        // Encryption key is not necessary for change set of snapshot.
         let change_set =
             self.prepare_change_set(meta.to_change_set(), false, table_filter, None)?;
         self.ingest(change_set, false)?;
@@ -375,6 +376,7 @@ impl EngineCore {
         table_filter: Option<LoadTableFilterFn>,
     ) -> Result<Shard> {
         info!("load parent shard {}", meta.tag());
+        // Encryption key is not necessary for change set of snapshot.
         let change_set =
             self.prepare_change_set(meta.to_change_set(), false, table_filter, None)?;
         let shard = self.new_shard_from_change_set(change_set);
