@@ -460,11 +460,13 @@ impl TxnChunkInner {
         let footer = Self::load_footer(&file)?;
         let idx_length = footer.hash_index_offset - footer.index_offset;
         let raw_idx_data = file.read(footer.index_offset as u64, idx_length as usize)?;
-        let idx_data = Self::validate_and_trim_checksum(raw_idx_data, footer.checksum_type)?;
+        let idx_data =
+            Self::validate_and_trim_checksum(file.as_ref(), raw_idx_data, footer.checksum_type)?;
         let properties_length =
             file.size() as usize - footer.properties_offset as usize - TXN_FILE_CHUNK_FOOTER_SIZE;
         let raw_properties = file.read(footer.properties_offset as u64, properties_length)?;
-        let properties = Self::validate_and_trim_checksum(raw_properties, footer.checksum_type)?;
+        let properties =
+            Self::validate_and_trim_checksum(file.as_ref(), raw_properties, footer.checksum_type)?;
         let mut inserts = 0;
         let mut check_non_exists = 0;
         let mut encryption_ver = 0;
@@ -581,10 +583,14 @@ impl TxnChunkInner {
         } else {
             self.file.read(offset, length)?
         };
-        Self::validate_and_trim_checksum(raw_block, self.footer.checksum_type)
+        Self::validate_and_trim_checksum(self.file.as_ref(), raw_block, self.footer.checksum_type)
     }
 
-    fn validate_and_trim_checksum(data: Bytes, checksum_type: u8) -> Result<Bytes> {
+    fn validate_and_trim_checksum(
+        file: &dyn File,
+        data: Bytes,
+        checksum_type: u8,
+    ) -> Result<Bytes> {
         if data.len() < 4 {
             return Err(Error::InvalidChecksum(String::from("data is too short")));
         }
@@ -593,9 +599,15 @@ impl TxnChunkInner {
         let content = data.slice(..data.len() - 4);
         let got_checksum = ChecksumType::from(checksum_type).checksum(&content);
         if checksum != got_checksum {
+            if let Some(path) = file.path().as_ref() {
+                let res = std::fs::remove_file(path);
+                warn!("remove corrupted txn file"; "file_id" => file.id(), "path" => ?path, "res" => ?res);
+            }
             return Err(Error::InvalidChecksum(format!(
-                "checksum mismatch expect {} got {}",
-                checksum, got_checksum
+                "checksum mismatch expect {} got {} file_id {}",
+                checksum,
+                got_checksum,
+                file.id()
             )));
         }
         Ok(content)
@@ -610,8 +622,12 @@ impl TxnChunkInner {
         let offset = self.footer.hash_index_offset as u64;
         let length = (self.footer.properties_offset as usize) - offset as usize;
         let raw_hash_idx_data = self.file.read(offset, length)?;
-        let hash_idx_data =
-            Self::validate_and_trim_checksum(raw_hash_idx_data, self.footer.checksum_type).unwrap();
+        let hash_idx_data = Self::validate_and_trim_checksum(
+            self.file.as_ref(),
+            raw_hash_idx_data,
+            self.footer.checksum_type,
+        )
+        .unwrap();
         Ok(TxnChunkHashIndex::new(hash_idx_data))
     }
 }
@@ -929,18 +945,16 @@ impl TxnChunkIterator {
 
     fn seek_inner(&mut self, key: &[u8]) {
         self.block_pos = self.chunk.index.seek_block(key).saturating_sub(1);
-        if self.load_block() {
+        self.load_block();
+        self.block_iter.seek(key);
+        if !self.block_iter.valid() && self.block_pos + 1 < self.num_blocks {
+            self.block_pos += 1;
+            self.load_block();
             self.block_iter.seek(key);
-            if !self.block_iter.valid() && self.block_pos + 1 < self.num_blocks {
-                self.block_pos += 1;
-                if self.load_block() {
-                    self.block_iter.seek(key);
-                }
-            }
         }
     }
 
-    fn load_block(&mut self) -> bool {
+    fn load_block(&mut self) {
         match self
             .chunk
             .load_block(self.block_pos, &mut self.decryption_buf)
@@ -948,11 +962,9 @@ impl TxnChunkIterator {
             Ok(block) => {
                 let block_key = self.chunk.index.block_key(self.block_pos);
                 self.block_iter.set_block(block_key, block);
-                true
             }
             Err(err) => {
-                self.block_iter.err = Some(err);
-                false
+                panic!("load block failed, err {:?}, chunk {:?}", err, self.chunk);
             }
         }
     }
@@ -964,9 +976,8 @@ impl TxnChunkIterator {
         }
         if self.block_pos + 1 < self.num_blocks {
             self.block_pos += 1;
-            if self.load_block() {
-                self.block_iter.set_idx(0);
-            }
+            self.load_block();
+            self.block_iter.set_idx(0);
         }
     }
 
@@ -977,17 +988,15 @@ impl TxnChunkIterator {
         }
         if self.block_pos > 0 {
             self.block_pos -= 1;
-            if self.load_block() {
-                self.block_iter.set_idx(self.block_iter.num_keys as i32 - 1);
-            }
+            self.load_block();
+            self.block_iter.set_idx(self.block_iter.num_keys as i32 - 1);
         }
     }
 
     fn locate_key(&mut self, key_addr: KeyAddr) {
         self.block_pos = key_addr.block_idx as usize;
-        if self.load_block() {
-            self.block_iter.set_idx(key_addr.key_idx as i32);
-        }
+        self.load_block();
+        self.block_iter.set_idx(key_addr.key_idx as i32);
     }
 
     pub fn next(&mut self) {
@@ -1001,14 +1010,12 @@ impl TxnChunkIterator {
     pub fn rewind(&mut self) {
         if self.reverse {
             self.block_pos = self.num_blocks - 1;
-            if self.load_block() {
-                self.block_iter.set_idx(self.block_iter.num_keys as i32 - 1);
-            }
+            self.load_block();
+            self.block_iter.set_idx(self.block_iter.num_keys as i32 - 1);
         } else {
             self.block_pos = 0;
-            if self.load_block() {
-                self.block_iter.set_idx(0);
-            }
+            self.load_block();
+            self.block_iter.set_idx(0);
         }
     }
 
