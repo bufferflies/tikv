@@ -1144,7 +1144,7 @@ impl LoadTaskWorker {
                 keys: entries,
             };
             info!("{} finish build sst file {:?}", task_id, sst_meta);
-            let opts = Options::new(0, 0);
+            let opts = Options::default();
             let res = ctx
                 .dfs
                 .create(file_id, data, opts)

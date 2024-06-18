@@ -16,7 +16,8 @@ use regex::Regex;
 use tikv_util::{box_err, HandyRwLock};
 
 use crate::{
-    dfs::Dfs,
+    dfs,
+    dfs::{Dfs, FileType},
     table,
     table::{
         sstable::{BlockCacheKey, LocalFile},
@@ -132,7 +133,8 @@ impl TxnChunkManagerCore {
         if !local_file_path.exists() {
             let file_name = txn_chunk_id.to_string();
             let runtime = self.dfs.get_runtime();
-            let file_data = runtime.block_on(self.dfs.read_txn_chunk(txn_chunk_id))?;
+            let opts = dfs::Options::default().with_type(FileType::TxnChunk);
+            let file_data = runtime.block_on(self.dfs.read_file(txn_chunk_id, opts))?;
             let txn_file_tmp_path = self.local_path.join(format!("{}.tmp", file_name));
             fs::write(&txn_file_tmp_path, file_data.chunk())?;
             let local_file_path = self.local_file_path(txn_chunk_id);
@@ -171,7 +173,8 @@ impl TxnChunkManagerCore {
             let dfs = self.dfs.clone();
             let tx = tx.clone();
             runtime.spawn(async move {
-                let file_data = dfs.read_txn_chunk(chunk_id).await;
+                let opts = dfs::Options::default().with_type(FileType::TxnChunk);
+                let file_data = dfs.read_file(chunk_id, opts).await;
                 if let Err(err) = tx.send((chunk_id, file_data)) {
                     // Error should happen only when prepare_txn_chunks exit with error.
                     warn!("prepare_txn_chunks: send error: {:?}", err; "chunk_id" => chunk_id);
@@ -339,6 +342,7 @@ mod tests {
         let txn_chunk_manager =
             TxnChunkManager::new(tmp_dir.path().to_path_buf(), dfs.clone(), cache.clone(), 2);
         let runtime = dfs.get_runtime();
+        let opts = dfs::Options::default().with_type(FileType::TxnChunk);
         for chunk_id in 1u64..=3 {
             let mut chunk_builder = TxnChunkBuilder::new(chunk_id, 10, None);
             for i in 0..100 {
@@ -348,7 +352,7 @@ mod tests {
             let mut buf = vec![];
             chunk_builder.finish(&mut buf);
             runtime
-                .block_on(dfs.create_txn_chunk(chunk_id, buf.into()))
+                .block_on(dfs.create(chunk_id, buf.into(), opts))
                 .unwrap();
         }
         for chunk_id in 1u64..=3 {

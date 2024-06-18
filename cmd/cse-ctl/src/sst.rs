@@ -57,7 +57,7 @@ fn get_file_data_from_dfs(id: u64, config: ShowSstConfig) -> bytes::Bytes {
 
     let runtime = s3fs.get_runtime();
     runtime
-        .block_on(s3fs.read_file(id, Options::new(0, 0)))
+        .block_on(s3fs.read_file(id, Options::default()))
         .expect("failed to read file from dfs")
 }
 

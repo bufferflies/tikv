@@ -11,7 +11,7 @@ use bstr::ByteSlice;
 use bytes::{Buf, BufMut, Bytes};
 use chrono::NaiveDate;
 use engine_traits::GetObjectOptions;
-use kvengine::dfs::{self, DFSConfig, Dfs, Options, S3Fs, STORAGE_CLASS_GLACIER_IR};
+use kvengine::dfs::{self, DFSConfig, Dfs, FileType, Options, S3Fs, STORAGE_CLASS_GLACIER_IR};
 use pd_client::PdClient;
 use protobuf::Message;
 use rfenginepb::ClusterBackupMeta;
@@ -776,7 +776,7 @@ pub fn get_not_found_files(s3fs: &S3Fs, file_ids: Vec<u64>) -> Result<Vec<u64>> 
         let tx = result_tx.clone();
         s3fs.get_runtime().spawn(async move {
             let res = dfs
-                .exist(dfs.file_key(file_id), format!("{}", file_id))
+                .exist(dfs.file_key(file_id, FileType::Sst), format!("{}", file_id))
                 .await;
             let _ = tx.send(res.map(|exist| (file_id, exist)));
         });
@@ -1173,7 +1173,7 @@ impl ArchiveWriter {
             let s3fs = self.s3fs.clone();
             let tx = result_tx.clone();
             self.s3fs.get_runtime().spawn(async move {
-                let res = s3fs.read_file(file_id, Options::new(0, 0)).await;
+                let res = s3fs.read_file(file_id, Options::default()).await;
                 let _ = tx.send(res.map(|sst_data| (file_id, sst_data)));
             });
             if msg_count < self.concurrency {
@@ -1412,7 +1412,7 @@ impl ArchiveReader {
         return self
             .s3fs
             .get_runtime()
-            .block_on(self.s3fs.create(file_id, date, Options::new(0, 0)))
+            .block_on(self.s3fs.create(file_id, date, Options::default()))
             .map_err(|e| {
                 error!(
                     "failed to restore archive file {}, err {}",
@@ -1463,7 +1463,7 @@ impl ArchiveReader {
                 }
                 let data = res.unwrap();
                 let res = s3fs
-                    .create(file_id, data, Options::new(0, 0))
+                    .create(file_id, data, Options::default())
                     .await
                     .map_err(|e| {
                         error!(
@@ -1555,7 +1555,7 @@ mod tests {
         s3fs.get_runtime().block_on(async {
             for i in 0..NUM_FILE_IDS {
                 let file_id = get_file_id(i);
-                let opts = dfs::Options::new(0, 0);
+                let opts = dfs::Options::default();
                 let sst_data = get_sst_data(file_id);
                 s3fs.create(file_id, sst_data, opts).await.unwrap();
             }
@@ -1698,7 +1698,7 @@ mod tests {
             s3fs.get_runtime().block_on(async {
                 for i in 0..num_file_ids {
                     let file_id = get_file_id(j, i);
-                    let opts = dfs::Options::new(0, 0);
+                    let opts = dfs::Options::default();
                     let sst_data = get_sst_data(file_id);
                     s3fs.create(file_id, sst_data, opts).await.unwrap();
                 }

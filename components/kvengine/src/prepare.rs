@@ -19,6 +19,7 @@ use tikv_util::{mpsc::Receiver, time::Instant};
 
 use crate::{
     apply::ChangeSet,
+    dfs::FileType,
     metrics::ENGINE_LEVEL_WRITE_VEC,
     table::{
         columnar::schema_file::SchemaFile,
@@ -209,7 +210,7 @@ impl EngineCore {
     ) -> Result<()> {
         let (result_tx, result_rx) = tikv_util::mpsc::bounded(ids.len());
         let runtime = self.fs.get_runtime();
-        let opts = dfs::Options::new(shard_id, shard_ver);
+        let opts = dfs::Options::default().with_shard(shard_id, shard_ver);
         let mut msg_count = 0;
         for (&id, tb) in ids {
             if tb.is_blob_file() {
@@ -421,7 +422,8 @@ impl EngineCore {
                 }
             };
         }
-        let data = self.fs.read_schema_file(id).await?;
+        let opts = dfs::Options::default().with_type(FileType::Schema);
+        let data = self.fs.read_file(id, opts).await?;
         let in_mem_file = InMemFile::new(id, data.clone());
         let schema_file = SchemaFile::open(Arc::new(in_mem_file))?;
         match self.schema_files.entry(id) {

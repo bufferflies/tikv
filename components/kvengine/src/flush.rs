@@ -410,7 +410,7 @@ impl Engine {
                 .create(
                     l0_create.get_id(),
                     data,
-                    dfs::Options::new(id_ver.id, id_ver.ver),
+                    dfs::Options::default().with_shard(id_ver.id, id_ver.ver),
                 )
                 .await;
             if let Err(e) = res {

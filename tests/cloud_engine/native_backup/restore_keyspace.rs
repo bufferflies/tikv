@@ -10,7 +10,7 @@ use std::{
 
 use engine_traits::ObjectStorage;
 use kvengine::{
-    dfs::{DFSConfig, Dfs, S3Fs},
+    dfs::{DFSConfig, Dfs, FileType, S3Fs},
     ShardStats, WRITE_CF,
 };
 use kvproto::metapb;
@@ -770,7 +770,7 @@ fn test_restore_archived_keyspace_impl(
             }
 
             for file_id in old_file_ids {
-                s3fs.delete_object(s3fs.file_key(file_id), file_id.to_string())
+                s3fs.delete_object(s3fs.file_key(file_id, FileType::Sst), file_id.to_string())
                     .await
                     .unwrap();
             }

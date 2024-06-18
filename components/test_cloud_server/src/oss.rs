@@ -637,7 +637,7 @@ mod tests {
     use bytes::Bytes;
     use kvengine::{
         dfs,
-        dfs::{Dfs, Options, S3Fs},
+        dfs::{Dfs, FileType, Options, S3Fs},
     };
     use rand::prelude::ThreadRng;
 
@@ -677,7 +677,7 @@ mod tests {
         let mut rng = rand::thread_rng();
         let mut handles = Vec::with_capacity(TEST_COUNT);
         for idx in 0..TEST_COUNT {
-            let options = Options::new(0, 0);
+            let options = Options::default();
             let file_id = rng.gen::<u32>() as u64;
             let write_data = {
                 let mut buf = [0u8; TEST_DATA_SIZE];
@@ -695,7 +695,7 @@ mod tests {
                 let read_data = fs.read_file(file_id, options).await.unwrap();
                 assert_eq!(write_data, read_data);
 
-                let key = fs.file_key(file_id);
+                let key = fs.file_key(file_id, FileType::Sst);
                 let exist = fs.exist(key.clone(), file_id.to_string()).await.unwrap();
                 assert!(exist);
                 let opts = engine_traits::GetObjectOptions {
@@ -769,12 +769,12 @@ mod tests {
         let runtime = s3fs.get_runtime();
 
         let file_id = 42;
-        let key = s3fs.file_key(file_id);
+        let key = s3fs.file_key(file_id, FileType::Sst);
         runtime
             .block_on(s3fs.create(
                 file_id,
                 Bytes::from("test_oss_shutdown".to_string()),
-                Options::new(0, 0),
+                Options::default(),
             ))
             .unwrap();
 
@@ -835,7 +835,7 @@ mod tests {
         let mut rng = rand::thread_rng();
         let mut handles = Vec::with_capacity(TEST_COUNT);
         for _ in 0..TEST_COUNT {
-            let options = Options::new(0, 0);
+            let options = Options::default();
             let file_id = rng.gen::<u32>() as u64;
             let write_data = {
                 let mut buf = [0u8; TEST_DATA_SIZE];
@@ -848,7 +848,7 @@ mod tests {
                     .await
                     .unwrap();
                 fs.remove(file_id, None, options).await;
-                let file_key = fs.file_key(file_id);
+                let file_key = fs.file_key(file_id, FileType::Sst);
                 assert!(fs.is_removed(&file_key).await.unwrap());
                 fs.retain_file(&file_key).await.unwrap();
                 assert!(!fs.is_removed(&file_key).await.unwrap());

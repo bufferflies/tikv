@@ -9,6 +9,7 @@ use dashmap::DashMap;
 use http::{header, Request, Response, StatusCode};
 use hyper::Body;
 use kvengine::{
+    dfs,
     dfs::Dfs,
     get_shard_property,
     table::{txn_file::TxnChunkBuilder, ChecksumType},
@@ -146,7 +147,8 @@ pub(crate) async fn create_txn_chunk(
     drop(body);
     let mut txn_chunk_buf = vec![];
     txn_chunk_builder.finish(&mut txn_chunk_buf);
-    if let Err(err) = dfs.create_txn_chunk(chunk_id, txn_chunk_buf.into()).await {
+    let opts = dfs::Options::default().with_type(dfs::FileType::TxnChunk);
+    if let Err(err) = dfs.create(chunk_id, txn_chunk_buf.into(), opts).await {
         return Ok(make_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("failed to create txn chunk file {:?}", err),
@@ -227,7 +229,8 @@ mod tests {
     use futures::StreamExt;
     use http::Method;
     use kvengine::{
-        dfs::{Dfs, InMemFs},
+        dfs,
+        dfs::{Dfs, FileType, InMemFs},
         table::{
             sstable::InMemFile, InnerKey, TxnChunk, TxnCtx, TxnFile, TxnFileId, TxnFileIterator,
         },
@@ -269,9 +272,10 @@ mod tests {
             .unwrap();
         let resp: CreateTxnChunkResp = serde_json::from_slice(body.chunk()).unwrap();
         assert_eq!(resp.chunk_id, 155);
+        let opts = dfs::Options::default().with_type(FileType::TxnChunk);
         let chunk_data = dfs
             .get_runtime()
-            .block_on(dfs.read_txn_chunk(chunk_id))
+            .block_on(dfs.read_file(chunk_id, opts))
             .unwrap();
         assert!(!chunk_data.is_empty());
         let txn_chunk =

@@ -8,7 +8,7 @@ use etcd_client::{ConnectOptions, OpenSslClientConfig};
 use grpcio::EnvBuilder;
 use http::Request;
 use hyper::Body;
-use kvengine::dfs::{self, Dfs, S3Fs};
+use kvengine::dfs::{self, Dfs, FileType, S3Fs};
 use kvproto::{metapb, metapb::Store};
 use pd_client::{PdClient, RpcClient};
 use protobuf::Message;
@@ -271,7 +271,7 @@ fn retain_sst_files_in_batch(file_ids: &[u64], s3fs: &S3Fs, first_batch: bool) -
     let mut handles = Vec::with_capacity(file_cnt);
     for &id in file_ids {
         let s3fs = s3fs.clone();
-        let file_key = s3fs.file_key(id);
+        let file_key = s3fs.file_key(id, FileType::Sst);
         handles.push(runtime.spawn(async move { s3fs.retain_file(&file_key).await }));
     }
     // To avoid too much request to cause s3 SlowDown issue.

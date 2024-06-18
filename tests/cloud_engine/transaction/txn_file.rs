@@ -7,7 +7,8 @@ use bytes::Bytes;
 use cloud_encryption::KeyspaceEncryptionConfig;
 use futures::{executor::block_on, future::join_all};
 use kvengine::{
-    dfs::Dfs,
+    dfs,
+    dfs::{Dfs, FileType},
     table::txn_file::{TxnChunkBuilder, OP_PUT},
 };
 use kvproto::{
@@ -982,8 +983,9 @@ fn build_txn_files(dfs: &Arc<dyn Dfs>, start_ts: u64, start: usize, end: usize) 
             let mut data_buf = vec![];
             txn_chunk_builder.finish(&mut data_buf);
             txn_chunk_builder = TxnChunkBuilder::new(chunk_id, 10, None);
+            let opts = dfs::Options::default().with_type(FileType::TxnChunk);
             dfs.get_runtime()
-                .block_on(dfs.create_txn_chunk(chunk_id, Bytes::from(data_buf)))
+                .block_on(dfs.create(chunk_id, Bytes::from(data_buf), opts))
                 .unwrap();
             chunk_ids.push(chunk_id);
             chunk_id += 1;

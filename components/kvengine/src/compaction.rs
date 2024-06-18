@@ -1764,7 +1764,7 @@ fn compact_destroy_range(
     assert!(!del_prefix.is_empty() && !files.is_empty());
     assert_eq!(files.len(), req.file_ids.len());
 
-    let opts = dfs::Options::new(req.shard_id, req.shard_ver);
+    let opts = dfs::Options::default().with_shard(req.shard_id, req.shard_ver);
     let mut table_files: HashMap<u64, Arc<dyn File>> = load_table_files(
         &files.iter().map(|(id, ..)| *id).collect::<Vec<_>>(),
         dfs.clone(),
@@ -1889,7 +1889,7 @@ fn compact_truncate_ts(
     let checksum_type = ctx.checksum_type;
     assert!(!files.is_empty());
 
-    let opts = dfs::Options::new(req.shard_id, req.shard_ver);
+    let opts = dfs::Options::default().with_shard(req.shard_id, req.shard_ver);
     let mut table_files: HashMap<u64, Arc<dyn File>> = load_table_files(
         &files.iter().map(|(id, ..)| *id).collect::<Vec<_>>(),
         dfs.clone(),
@@ -2019,7 +2019,7 @@ fn compact_trim_over_bound(
     assert!(!files.is_empty());
     assert_eq!(files.len(), req.file_ids.len());
 
-    let opts = dfs::Options::new(req.shard_id, req.shard_ver);
+    let opts = dfs::Options::default().with_shard(req.shard_id, req.shard_ver);
     let mut table_files: HashMap<u64, Arc<dyn File>> = load_table_files(
         &files.iter().map(|(id, ..)| *id).collect::<Vec<_>>(),
         dfs.clone(),
@@ -2434,7 +2434,7 @@ fn l0_compact_v3(
 ) -> Result<pb::Compaction> {
     let req = &ctx.req;
     let fs = &ctx.dfs;
-    let opts = dfs::Options::new(req.shard_id, req.shard_ver);
+    let opts = dfs::Options::default().with_shard(req.shard_id, req.shard_ver);
     let l0_files = load_table_files(
         &l0_compaction.l0_tables,
         fs.clone(),
@@ -2509,7 +2509,7 @@ fn l1_plus_compact_v3(
 ) -> Result<pb::Compaction> {
     let req = &ctx.req;
     let fs = &ctx.dfs;
-    let opts = dfs::Options::new(req.shard_id, req.shard_ver);
+    let opts = dfs::Options::default().with_shard(req.shard_id, req.shard_ver);
     let upper_files = load_table_files(
         &l1_plus_compaction.upper_level,
         fs.clone(),
@@ -2561,7 +2561,7 @@ fn major_compact_v3(
 ) -> Result<pb::MajorCompaction> {
     let req = &ctx.req;
     let fs = &ctx.dfs;
-    let opts = dfs::Options::new(req.shard_id, req.shard_ver);
+    let opts = dfs::Options::default().with_shard(req.shard_id, req.shard_ver);
     let mut ret = pb::MajorCompaction::new();
     ret.mut_old_blob_tables()
         .extend_from_slice(&major_compaction.blob_tables);

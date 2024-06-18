@@ -25,7 +25,7 @@ use tempfile::TempDir;
 use tikv_util::{mpsc, time::Instant};
 
 use crate::{
-    dfs::InMemFs,
+    dfs::{FileType, InMemFs},
     limiter::{RegionLimiter, StoreLimiter},
     table::{
         memtable::CfTable,
@@ -1415,9 +1415,8 @@ fn build_txn_chunk(
     chunk_builder.finish(&mut buf);
     let runtime = engine.fs.get_runtime();
     let fs = engine.fs.clone();
-    runtime
-        .block_on(fs.create_txn_chunk(id, buf.into()))
-        .unwrap();
+    let opts = dfs::Options::default().with_type(FileType::TxnChunk);
+    runtime.block_on(fs.create(id, buf.into(), opts)).unwrap();
 }
 
 fn make_txn_file_refs(
@@ -1851,7 +1850,7 @@ fn new_table(
     let mut data_buf = Vec::new();
     builder.finish(0, &mut data_buf);
     let data = Bytes::from(data_buf);
-    let opts = dfs::Options::new(1, 1);
+    let opts = dfs::Options::default();
     let runtime = fs.get_runtime();
     runtime.block_on(fs.create(id, data.clone(), opts)).unwrap();
     let file = InMemFile::new(id, data);
@@ -1882,7 +1881,7 @@ fn new_l0table_file(
         }
     }
     let (_, data) = builder.finish();
-    let opts = dfs::Options::new(1, 1);
+    let opts = dfs::Options::default();
     let runtime = fs.get_runtime();
     runtime.block_on(fs.create(id, data.clone(), opts)).unwrap();
     Arc::new(InMemFile::new(id, data))

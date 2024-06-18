@@ -482,7 +482,7 @@ impl GcWorker {
         start_time: &DateTime<chrono::Utc>,
         stat: &mut Arc<Mutex<GcStat>>,
     ) -> Result<()> {
-        let opts = dfs::Options::new(0, 0);
+        let opts = dfs::Options::default();
         let removed = match self.is_file_removed(s3_obj).await {
             Ok(removed) => removed,
             Err(e) => {

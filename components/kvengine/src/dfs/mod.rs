@@ -6,7 +6,7 @@ mod s3;
 
 use std::{
     fmt::Debug,
-    fs, io,
+    io,
     io::{BufReader, Read, Write},
     ops::Deref,
     path::{Path, PathBuf},
@@ -50,24 +50,6 @@ pub trait Dfs: Sync + Send {
     /// Remove the file from DFS permanently.
     async fn permanently_remove(&self, file_id: u64, opts: Options) -> Result<()>;
 
-    /// read_txn_chunk the txn chunk to memory.
-    async fn read_txn_chunk(&self, id: u64) -> Result<Bytes>;
-
-    /// create_txn_chunk creates a new txn chunk.
-    async fn create_txn_chunk(&self, id: u64, data: Bytes) -> Result<()>;
-
-    /// remove_txn_chunk removes the txn chunk from the DFS.
-    async fn remove_txn_chunk(&self, id: u64);
-
-    /// create_schema_file create a new schema file.
-    async fn create_schema_file(&self, id: u64, data: Bytes) -> Result<()>;
-
-    /// read_schema_file read the schema file to memory.
-    async fn read_schema_file(&self, id: u64) -> Result<Bytes>;
-
-    /// remove_schema_file removes the schema file from the DFS.
-    async fn remove_schema_file(&self, id: u64);
-
     /// get_runtime gets the tokio runtime for the DFS.
     fn get_runtime(&self) -> &tokio::runtime::Runtime;
 
@@ -79,8 +61,6 @@ const REMOVE_DELAY: Duration = Duration::from_secs(90);
 
 pub struct InMemFs {
     files: dashmap::DashMap<u64, Bytes>,
-    txn_chunks: dashmap::DashMap<u64, Bytes>,
-    schema_files: dashmap::DashMap<u64, Bytes>,
     pending_remove: dashmap::DashMap<u64, Instant>,
     runtime: tokio::runtime::Runtime,
     delay: Arc<Mutex<Duration>>,
@@ -96,8 +76,6 @@ impl InMemFs {
     pub fn new() -> Self {
         Self {
             files: Default::default(),
-            txn_chunks: Default::default(),
-            schema_files: Default::default(),
             pending_remove: Default::default(),
             runtime: tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(1)
@@ -153,38 +131,6 @@ impl Dfs for InMemFs {
         Ok(())
     }
 
-    async fn read_txn_chunk(&self, id: u64) -> Result<Bytes> {
-        if let Some(chunk) = self.txn_chunks.get(&id).as_deref() {
-            return Ok(chunk.clone());
-        }
-        Err(Error::TxnChunkNotExists(id))
-    }
-
-    async fn create_txn_chunk(&self, id: u64, data: Bytes) -> Result<()> {
-        self.txn_chunks.insert(id, data);
-        Ok(())
-    }
-
-    async fn remove_txn_chunk(&self, id: u64) {
-        self.txn_chunks.remove(&id);
-    }
-
-    async fn create_schema_file(&self, id: u64, data: Bytes) -> Result<()> {
-        self.schema_files.insert(id, data);
-        Ok(())
-    }
-
-    async fn read_schema_file(&self, id: u64) -> Result<Bytes> {
-        if let Some(file) = self.schema_files.get(&id).as_deref() {
-            return Ok(file.clone());
-        }
-        Err(Error::NotExists(id))
-    }
-
-    async fn remove_schema_file(&self, id: u64) {
-        self.schema_files.remove(&id);
-    }
-
     fn get_runtime(&self) -> &Runtime {
         &self.runtime
     }
@@ -195,10 +141,12 @@ impl Dfs for InMemFs {
     }
 }
 
+#[derive(Clone, Copy)]
 pub enum FileType {
     Sst,
     TxnChunk,
     Schema,
+    Columnar,
 }
 
 #[derive(Clone)]
@@ -216,12 +164,7 @@ impl CacheFs {
         Self { cache, s3_fs }
     }
 
-    async fn read_file_inner(
-        &self,
-        file_id: u64,
-        opts: Options,
-        file_type: FileType,
-    ) -> Result<Bytes> {
+    async fn read_file_inner(&self, file_id: u64, opts: Options) -> Result<Bytes> {
         let s3_fs = self.s3_fs.clone();
         let cache_miss = Arc::new(AtomicBool::new(false));
         let cache_miss_clone = cache_miss.clone();
@@ -229,11 +172,7 @@ impl CacheFs {
             .cache
             .try_get_with(file_id, async move {
                 cache_miss_clone.store(true, atomic::Ordering::Relaxed);
-                match file_type {
-                    FileType::Sst => s3_fs.read_file(file_id, opts).await,
-                    FileType::TxnChunk => s3_fs.read_txn_chunk(file_id).await,
-                    FileType::Schema => s3_fs.read_schema_file(file_id).await,
-                }
+                s3_fs.read_file(file_id, opts).await
             })
             .await
             .map_err(|e| e.as_ref().clone())?;
@@ -253,7 +192,7 @@ impl CacheFs {
 #[async_trait]
 impl Dfs for CacheFs {
     async fn read_file(&self, file_id: u64, opts: Options) -> Result<Bytes> {
-        self.read_file_inner(file_id, opts, FileType::Sst).await
+        self.read_file_inner(file_id, opts).await
     }
     async fn create(&self, _file_id: u64, _data: Bytes, _opts: Options) -> Result<()> {
         panic!("Do not call");
@@ -264,32 +203,6 @@ impl Dfs for CacheFs {
     }
 
     async fn permanently_remove(&self, _file_id: u64, _opts: Options) -> Result<()> {
-        panic!("Do not call");
-    }
-
-    async fn read_txn_chunk(&self, id: u64) -> Result<Bytes> {
-        self.read_file_inner(id, Options::new(0, 0), FileType::TxnChunk)
-            .await
-    }
-
-    async fn create_txn_chunk(&self, _id: u64, _data: Bytes) -> Result<()> {
-        panic!("Do not call");
-    }
-
-    async fn remove_txn_chunk(&self, _id: u64) {
-        panic!("Do not call");
-    }
-
-    async fn create_schema_file(&self, _id: u64, _data: Bytes) -> Result<()> {
-        panic!("Do not call");
-    }
-
-    async fn read_schema_file(&self, id: u64) -> Result<Bytes> {
-        self.read_file_inner(id, Options::new(0, 0), FileType::Schema)
-            .await
-    }
-
-    async fn remove_schema_file(&self, _id: u64) {
         panic!("Do not call");
     }
 
@@ -314,11 +227,17 @@ impl LocalFs {
     pub fn local_blob_file_path(&self, file_id: u64) -> PathBuf {
         self.dir.join(self.blob_filename(file_id))
     }
+    pub fn local_columnar_file_path(&self, file_id: u64) -> PathBuf {
+        self.dir.join(self.columnar_filename(file_id))
+    }
     pub fn sst_filename(&self, file_id: u64) -> PathBuf {
         PathBuf::from(format!("{:016x}.sst", file_id))
     }
     pub fn blob_filename(&self, file_id: u64) -> PathBuf {
         PathBuf::from(format!("{:016x}.blob", file_id))
+    }
+    pub fn columnar_filename(&self, file_id: u64) -> PathBuf {
+        PathBuf::from(format!("{:016x}.col", file_id))
     }
     pub fn tmp_file_path(&self, file_id: u64) -> PathBuf {
         let tmp_id = self
@@ -334,6 +253,14 @@ impl LocalFs {
     }
     pub fn local_schema_file_path(&self, id: u64) -> PathBuf {
         self.dir.join("schema").join(format!("{:016x}.schema", id))
+    }
+    pub fn local_file_path(&self, file_id: u64, file_type: FileType) -> PathBuf {
+        match file_type {
+            FileType::Sst => self.local_sst_file_path(file_id),
+            FileType::TxnChunk => self.local_txn_chunk_path(file_id),
+            FileType::Schema => self.local_schema_file_path(file_id),
+            FileType::Columnar => self.local_columnar_file_path(file_id),
+        }
     }
 }
 
@@ -373,8 +300,8 @@ impl LocalFsCore {
 
 #[async_trait]
 impl Dfs for LocalFs {
-    async fn read_file(&self, file_id: u64, _opts: Options) -> Result<Bytes> {
-        let local_file_name = self.local_sst_file_path(file_id);
+    async fn read_file(&self, file_id: u64, opts: Options) -> Result<Bytes> {
+        let local_file_name = self.local_file_path(file_id, opts.file_type);
         let fd = std::fs::File::open(local_file_name)?;
         let mut reader = BufReader::new(fd);
         let mut buf = Vec::new();
@@ -385,8 +312,8 @@ impl Dfs for LocalFs {
         Ok(Bytes::from(buf))
     }
 
-    async fn create(&self, file_id: u64, data: Bytes, _opts: Options) -> Result<()> {
-        let local_file_name = self.local_sst_file_path(file_id);
+    async fn create(&self, file_id: u64, data: Bytes, opts: Options) -> Result<()> {
+        let local_file_name = self.local_file_path(file_id, opts.file_type);
         let tmp_file_name = self.tmp_file_path(file_id);
         let mut file = std::fs::File::create(&tmp_file_name)?;
         let mut start_off = 0;
@@ -405,8 +332,8 @@ impl Dfs for LocalFs {
         Ok(())
     }
 
-    async fn remove(&self, file_id: u64, _file_len: Option<u64>, _opts: Options) {
-        let local_file_path = self.local_sst_file_path(file_id);
+    async fn remove(&self, file_id: u64, _file_len: Option<u64>, opts: Options) {
+        let local_file_path = self.local_file_path(file_id, opts.file_type);
         if let Err(err) = std::fs::remove_file(local_file_path) {
             error!("failed to remove local file {:?}", err);
         }
@@ -417,44 +344,6 @@ impl Dfs for LocalFs {
         Ok(())
     }
 
-    async fn read_txn_chunk(&self, id: u64) -> Result<Bytes> {
-        let local_txn_chunk_name = self.local_txn_chunk_path(id);
-        let data = fs::read(local_txn_chunk_name)?;
-        Ok(data.into())
-    }
-
-    async fn create_txn_chunk(&self, id: u64, data: Bytes) -> Result<()> {
-        let local_tmp_file_name = self.tmp_file_path(id);
-        fs::write(&local_tmp_file_name, data)?;
-        fs::rename(&local_tmp_file_name, self.local_txn_chunk_path(id))?;
-        Ok(())
-    }
-
-    async fn remove_txn_chunk(&self, id: u64) {
-        if let Err(err) = fs::remove_file(self.local_txn_chunk_path(id)) {
-            error!("failed to remove local txn file {} {:?}", id, err);
-        }
-    }
-
-    async fn create_schema_file(&self, id: u64, data: Bytes) -> Result<()> {
-        let local_tmp_file_name = self.tmp_file_path(id);
-        fs::write(&local_tmp_file_name, data)?;
-        fs::rename(&local_tmp_file_name, self.local_schema_file_path(id))?;
-        Ok(())
-    }
-
-    async fn read_schema_file(&self, id: u64) -> Result<Bytes> {
-        let local_schema_file_name = self.local_schema_file_path(id);
-        let data = fs::read(local_schema_file_name)?;
-        Ok(data.into())
-    }
-
-    async fn remove_schema_file(&self, id: u64) {
-        if let Err(err) = fs::remove_file(self.local_schema_file_path(id)) {
-            error!("failed to remove local schema file {} {:?}", id, err);
-        }
-    }
-
     fn get_runtime(&self) -> &Runtime {
         &self.runtime
     }
@@ -462,15 +351,35 @@ impl Dfs for LocalFs {
 
 #[derive(Clone, Copy)]
 pub struct Options {
+    pub file_type: FileType,
     pub shard_id: u64,
     pub shard_ver: u64,
 }
 
-impl Options {
-    pub fn new(shard_id: u64, shard_ver: u64) -> Self {
+impl Default for Options {
+    fn default() -> Self {
         Self {
+            file_type: FileType::Sst,
+            shard_id: 0,
+            shard_ver: 0,
+        }
+    }
+}
+
+impl Options {
+    pub fn with_shard(&self, shard_id: u64, shard_ver: u64) -> Self {
+        Self {
+            file_type: self.file_type,
             shard_id,
             shard_ver,
+        }
+    }
+
+    pub fn with_type(&self, file_type: FileType) -> Self {
+        Self {
+            file_type,
+            shard_id: self.shard_id,
+            shard_ver: self.shard_ver,
         }
     }
 }
@@ -529,7 +438,7 @@ mod tests {
                 .create(
                     file_id,
                     bytes::Bytes::from(file_data_clone),
-                    Options::new(1, 1),
+                    Options::default(),
                 )
                 .await
             {
@@ -548,7 +457,7 @@ mod tests {
         let fs = localfs.clone();
         let (tx, rx) = tikv_util::mpsc::bounded(1);
         let f = async move {
-            let opts = Options::new(1, 1);
+            let opts = Options::default();
             match fs.read_file(file_id, opts).await {
                 Ok(data) => {
                     assert_eq!(&data, &file_data);
@@ -570,7 +479,7 @@ mod tests {
         let fs = localfs.clone();
         let (tx, rx) = tikv_util::mpsc::bounded(1);
         let f = async move {
-            fs.remove(file_id, None, Options::new(1, 1)).await;
+            fs.remove(file_id, None, Options::default()).await;
             tx.send(true).unwrap();
         };
         localfs.runtime.spawn(f);

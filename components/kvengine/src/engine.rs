@@ -589,7 +589,7 @@ impl EngineCore {
             .mut_keys()
             .push(INGEST_ID_KEY.to_string());
         ingest_files.mut_properties().mut_values().push(ingest_id);
-        let opts = dfs::Options::new(shard_id, shard_ver);
+        let opts = dfs::Options::default().with_shard(shard_id, shard_ver);
         let (tx, rx) = tikv_util::mpsc::unbounded();
         let mut tbl_cnt = 0;
         let block_size = self.opts.table_builder_options.block_size;

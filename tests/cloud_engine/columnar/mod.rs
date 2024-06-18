@@ -4,10 +4,14 @@ use std::time::Duration;
 
 use api_version::ApiV2;
 use hyper::Body;
-use kvengine::table::columnar::{
-    builder::{new_int_handle_column_info, new_txn_id_column_info, new_version_column_info},
-    columnar::Schema,
-    schema_file::build_schema_file,
+use kvengine::{
+    dfs,
+    dfs::FileType,
+    table::columnar::{
+        builder::{new_int_handle_column_info, new_txn_id_column_info, new_version_column_info},
+        columnar::Schema,
+        schema_file::build_schema_file,
+    },
 };
 use pd_client::PdClient;
 use test_cloud_server::{must_wait, ServerCluster};
@@ -32,8 +36,9 @@ fn test_schema_file() {
     let schema_version = 10;
     let schema_file_data = build_schema_file(keyspace_id, schema_version, schemas);
     let schema_file_id = 100;
+    let opts = dfs::Options::default().with_type(FileType::Schema);
     dfs.get_runtime()
-        .block_on(dfs.create_schema_file(schema_file_id, schema_file_data.into()))
+        .block_on(dfs.create(schema_file_id, schema_file_data.into(), opts))
         .unwrap();
     let status_addr = cluster.status_addr(node_id);
     dfs.get_runtime().block_on(send_schema_file_request(
@@ -65,7 +70,7 @@ fn test_schema_file() {
     let new_schema_file_data = build_schema_file(keyspace_id, new_schema_version, new_schemas);
     let new_schema_file_id = 101;
     dfs.get_runtime()
-        .block_on(dfs.create_schema_file(new_schema_file_id, new_schema_file_data.into()))
+        .block_on(dfs.create(new_schema_file_id, new_schema_file_data.into(), opts))
         .unwrap();
     dfs.get_runtime().block_on(send_schema_file_request(
         &status_addr,

@@ -250,7 +250,7 @@ impl SnapAccessCore {
         };
         let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel();
         let runtime = dfs.get_runtime();
-        let opts = dfs::Options::new(cs.shard_id, cs.shard_ver);
+        let opts = dfs::Options::default().with_shard(cs.shard_id, cs.shard_ver);
         let mut msg_count = 0;
         for (&id, &level) in &ids {
             let tx = result_tx.clone();

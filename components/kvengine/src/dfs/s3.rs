@@ -29,7 +29,7 @@ use rusoto_s3::{
 use tikv_util::time::Instant;
 use tokio::runtime::Runtime;
 
-use crate::dfs::{self, metrics::*, Dfs, Error, Options};
+use crate::dfs::{self, metrics::*, Dfs, Error, FileType, Options};
 
 const MAX_RETRY_COUNT: u32 = 9;
 const RETRY_SLEEP_MS: u64 = 500;
@@ -183,22 +183,22 @@ impl S3FsCore {
         }
     }
 
-    pub fn file_key(&self, file_id: u64) -> String {
+    pub fn file_key(&self, file_id: u64, file_type: FileType) -> String {
         let idx = (fingerprint64(file_id.to_le_bytes().as_slice())) as u8;
-        format!("{}/{:02x}/{:016x}.sst", self.prefix, idx, file_id)
-    }
-
-    pub fn txn_chunk_key(&self, id: u64) -> String {
-        format!("{}/txn/{}.txn", self.prefix, id)
-    }
-
-    pub fn columnar_file_key(&self, id: u64) -> String {
-        let idx = (fingerprint64(id.to_le_bytes().as_slice())) as u8;
-        format!("{}/{:02x}/{:016x}.col", self.prefix, idx, id)
-    }
-
-    pub fn schema_file_key(&self, id: u64) -> String {
-        format!("{}/schema/{:016x}.schema", self.prefix, id)
+        match file_type {
+            FileType::Sst => {
+                format!("{}/{:02x}/{:016x}.sst", self.prefix, idx, file_id)
+            }
+            FileType::TxnChunk => {
+                format!("{}/txn/{}.txn", self.prefix, file_id)
+            }
+            FileType::Schema => {
+                format!("{}/schema/{:016x}.schema", self.prefix, file_id)
+            }
+            FileType::Columnar => {
+                format!("{}/col/{:02x}/{:016x}.col", self.prefix, idx, file_id)
+            }
+        }
     }
 
     pub fn get_prefix(&self) -> String {
@@ -897,16 +897,16 @@ impl ObjectStorage for S3Fs {
 
 #[async_trait]
 impl Dfs for S3Fs {
-    async fn read_file(&self, file_id: u64, _opts: Options) -> crate::dfs::Result<Bytes> {
+    async fn read_file(&self, file_id: u64, opts: Options) -> crate::dfs::Result<Bytes> {
         self.get_object(
-            self.file_key(file_id),
+            self.file_key(file_id, opts.file_type),
             file_id.to_string(),
             GetObjectOptions::default(),
         )
         .await
     }
 
-    async fn create(&self, file_id: u64, data: Bytes, _opts: Options) -> crate::dfs::Result<()> {
+    async fn create(&self, file_id: u64, data: Bytes, opts: Options) -> crate::dfs::Result<()> {
         // Calculate checksum for the file. This can be used to ensure the data
         // integrity when saving to dfs (s3 only) and verify the data integrity when
         // getting objects from dfs.
@@ -916,7 +916,7 @@ impl Dfs for S3Fs {
             None
         };
         self.put_object_with_options(
-            self.file_key(file_id),
+            self.file_key(file_id, opts.file_type),
             data,
             file_id.to_string(),
             None,
@@ -929,7 +929,7 @@ impl Dfs for S3Fs {
     /// Logically remove the file on S3 by tagging with "deleted=true".
     /// And the file would be permanently removed after `gc_lifetime`. See
     /// `DfsGc`.
-    async fn remove(&self, file_id: u64, file_len: Option<u64>, _opts: Options) {
+    async fn remove(&self, file_id: u64, file_len: Option<u64>, opts: Options) {
         // Only AWS supports storage class.
         let target_storage_class = if self.is_on_aws() {
             let new_storage_class = self.choose_storage_class_for_removed_files(file_len);
@@ -938,7 +938,7 @@ impl Dfs for S3Fs {
             None
         };
         let target_tagging = Tagging::new_single_deleted();
-        let file_key = self.file_key(file_id);
+        let file_key = self.file_key(file_id, opts.file_type);
         let _ = self
             .copy_object(
                 &file_key,
@@ -951,7 +951,7 @@ impl Dfs for S3Fs {
 
     /// Permanently remove the file on S3.
     /// This method should be used by `DfsGc` ONLY to meet GC rules.
-    async fn permanently_remove(&self, file_id: u64, _opts: Options) -> crate::dfs::Result<()> {
+    async fn permanently_remove(&self, file_id: u64, opts: Options) -> crate::dfs::Result<()> {
         if self.is_on_aws() {
             return Err(Error::Other(format!(
                 "{} permanently_remove is forbidden on AWS",
@@ -959,74 +959,8 @@ impl Dfs for S3Fs {
             )));
         }
 
-        self.delete_object(self.file_key(file_id), file_id.to_string())
+        self.delete_object(self.file_key(file_id, opts.file_type), file_id.to_string())
             .await
-    }
-
-    async fn read_txn_chunk(&self, id: u64) -> dfs::Result<Bytes> {
-        self.get_object(
-            self.txn_chunk_key(id),
-            id.to_string(),
-            GetObjectOptions::default(),
-        )
-        .await
-    }
-
-    async fn create_txn_chunk(&self, id: u64, data: Bytes) -> dfs::Result<()> {
-        self.put_object(self.txn_chunk_key(id), data, id.to_string())
-            .await
-    }
-
-    async fn remove_txn_chunk(&self, id: u64) {
-        // Only AWS supports storage class.
-        let target_storage_class = if self.is_on_aws() {
-            Some(STORAGE_CLASS_STANDARD_IA)
-        } else {
-            None
-        };
-        let target_tagging = Tagging::new_single_deleted();
-        let chunk_key = self.txn_chunk_key(id);
-        let _ = self
-            .copy_object(
-                &chunk_key,
-                &chunk_key,
-                Some(&target_tagging),
-                target_storage_class,
-            )
-            .await;
-    }
-
-    async fn create_schema_file(&self, id: u64, data: Bytes) -> dfs::Result<()> {
-        self.put_object(self.schema_file_key(id), data, id.to_string())
-            .await
-    }
-
-    async fn read_schema_file(&self, id: u64) -> dfs::Result<Bytes> {
-        self.get_object(
-            self.schema_file_key(id),
-            id.to_string(),
-            GetObjectOptions::default(),
-        )
-        .await
-    }
-
-    async fn remove_schema_file(&self, id: u64) {
-        // Only AWS supports storage class.
-        let target_storage_class = if self.is_on_aws() {
-            Some(STORAGE_CLASS_DEFAULT)
-        } else {
-            None
-        };
-        let target_tagging = Tagging::new_single_deleted();
-        let schema_file_key = self.schema_file_key(id);
-        let _ = self
-            .copy_object(
-                &schema_file_key,
-                &schema_file_key,
-                Some(&target_tagging),
-                target_storage_class,
-            )
-            .await;
     }
 
     fn get_runtime(&self) -> &Runtime {
@@ -1203,7 +1137,7 @@ mod tests {
         let file_data2 = file_data.clone();
         let f = async move {
             match fs
-                .create(321, bytes::Bytes::from(file_data2), Options::new(1, 1))
+                .create(321, bytes::Bytes::from(file_data2), Options::default())
                 .await
             {
                 Ok(_) => {
@@ -1223,7 +1157,7 @@ mod tests {
         let local_file = new_filename(321, local_dir.path());
         let move_local_file = local_file.clone();
         let f = async move {
-            let opts = Options::new(1, 1);
+            let opts = Options::default();
             match fs.read_file(321, opts).await {
                 Ok(data) => {
                     let mut file = std::fs::File::create(&move_local_file).unwrap();
@@ -1249,7 +1183,7 @@ mod tests {
         let fs = s3fs.clone();
         let (tx, rx) = tikv_util::mpsc::bounded(1);
         let f = async move {
-            fs.remove(321, None, Options::new(1, 1)).await;
+            fs.remove(321, None, Options::default()).await;
             tx.send(true).unwrap();
         };
         s3fs.runtime.spawn(f);
@@ -1268,11 +1202,9 @@ mod tests {
 
         let fs = s3fs.clone();
         let file_data2 = file_data.clone();
+        let opts = Options::default().with_type(FileType::Schema);
         let f = async move {
-            match fs
-                .create_schema_file(1234, bytes::Bytes::from(file_data2))
-                .await
-            {
+            match fs.create(1234, bytes::Bytes::from(file_data2), opts).await {
                 Ok(_) => {
                     tx.send(true).unwrap();
                     println!("create ok");
@@ -1290,7 +1222,7 @@ mod tests {
         let local_file = local_dir.path().join(format!("{:016x}.schema", 1234));
         let move_local_file = local_file.clone();
         let f = async move {
-            match fs.read_schema_file(1234).await {
+            match fs.read_file(1234, opts).await {
                 Ok(data) => {
                     let mut file = std::fs::File::create(&move_local_file).unwrap();
                     file.write_all(data.chunk()).unwrap();
@@ -1315,7 +1247,7 @@ mod tests {
         let fs = s3fs.clone();
         let (tx, rx) = tikv_util::mpsc::bounded(1);
         let f = async move {
-            fs.remove_schema_file(1234).await;
+            fs.remove(1234, None, opts).await;
             tx.send(true).unwrap();
         };
         s3fs.runtime.spawn(f);
@@ -1327,14 +1259,14 @@ mod tests {
     fn test_parse_sst_file() {
         let s3fs = new_test_s3fs(b"abcdefgh");
 
-        let file_key = s3fs.file_key(random());
+        let file_key = s3fs.file_key(random(), FileType::Sst);
         assert_eq!(
             format!("{}/{}", "prefix", s3fs.parse_sst_file_suffix(&file_key)),
             file_key
         );
 
         for file_id in [0, 42, 0x1_0000_0000, 0xffff_ffff_ffff_ffff] {
-            let file_key = s3fs.file_key(file_id);
+            let file_key = s3fs.file_key(file_id, FileType::Sst);
             assert_eq!(s3fs.try_parse_file_id(&file_key), Some(file_id));
         }
 
