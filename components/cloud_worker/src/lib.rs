@@ -7,6 +7,7 @@ mod load_data;
 mod metrics;
 mod native_br;
 mod remote_cop;
+mod schema_manager;
 mod server;
 mod txn_chunk;
 mod worker_scaler;
@@ -32,6 +33,7 @@ use kvproto::metapb::Store;
 #[cfg(feature = "testexport")]
 pub use metrics::REMOTE_COMPACT_REQ_HANDLE_HISTOGRAM;
 use pd_client::PdClient;
+use schema_manager::{SchemaManager, SchemaManagerConfig};
 use security::{SecurityConfig, SecurityManager};
 use slog_global::{error, info};
 use tikv_util::{
@@ -224,6 +226,16 @@ fn start_server(
     });
     let acceptor = security_mgr.acceptor(incoming).unwrap();
     let server = start_serve!(ctx.clone(), acceptor);
+
+    if config.schema_manager.enabled {
+        let schema_manager = SchemaManager::new(
+            ctx.clone(),
+            security_mgr.clone(),
+            config.schema_manager.clone(),
+            config.pd.endpoints.as_ref(),
+        );
+        schema_manager.run(thread_pool.clone());
+    }
 
     // try recover task from checkpoint
     load_manager.try_recover_or_clean_tasks_by_check_point();
@@ -499,6 +511,7 @@ pub struct Config {
     pub enable_load_data_check_point: bool,
     pub checksum_type: ChecksumType,
     pub cop_limiter: CopLimiterConfig,
+    pub schema_manager: SchemaManagerConfig,
 }
 
 impl Default for Config {
@@ -524,6 +537,7 @@ impl Default for Config {
             enable_load_data_check_point: false,
             checksum_type: ChecksumType::Crc32c,
             cop_limiter: CopLimiterConfig::default(),
+            schema_manager: SchemaManagerConfig::default(),
         }
     }
 }

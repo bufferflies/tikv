@@ -5,5 +5,7 @@ extern crate serde_derive;
 
 mod load;
 pub mod schema;
+mod sync;
 
 pub use load::{load_schema, KvScanner};
+pub use sync::{sync_schema, KvGetter};

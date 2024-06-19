@@ -199,6 +199,34 @@ impl SchemaFile {
         }
         false
     }
+
+    pub fn contains(&self, others: &[Schema]) -> bool {
+        for schema in others {
+            if self.get_table(schema.table_id).is_none()
+                || !self.get_table(schema.table_id).unwrap().eq(schema)
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    pub fn has_overlap_ids(&self, others: &[i64]) -> bool {
+        for tbl_id in others {
+            if self.core.tables.contains_key(tbl_id) {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn export_schemas(&self) -> HashMap<i64, Schema> {
+        self.core.tables.clone()
+    }
+
+    pub fn schema_count(&self) -> usize {
+        self.core.tables.len()
+    }
 }
 
 pub fn build_schema_file(keyspace_id: u32, schema_version: i64, tables: Vec<Schema>) -> Vec<u8> {
@@ -339,6 +367,44 @@ mod tests {
                 case
             );
         }
+    }
+
+    #[test]
+    fn test_contains_schema() {
+        let keyspace_id = 1;
+        let schema_version = 1234i64;
+        let schema_1 = Schema {
+            table_id: 10,
+            handle_column: new_common_handle_column_info(),
+            version_column: new_version_column_info(),
+            txn_id_column: Some(new_txn_id_column_info()),
+            columns: vec![new_column_info(3, true), new_column_info(4, false)],
+        };
+        let schema_2 = Schema {
+            table_id: 20,
+            handle_column: new_int_handle_column_info(),
+            version_column: new_version_column_info(),
+            txn_id_column: Some(new_txn_id_column_info()),
+            columns: vec![new_column_info(3, false), new_column_info(4, true)],
+        };
+        let schema_3 = Schema {
+            table_id: 30,
+            handle_column: new_int_handle_column_info(),
+            version_column: new_version_column_info(),
+            txn_id_column: Some(new_txn_id_column_info()),
+            columns: vec![new_column_info(3, false), new_column_info(4, true)],
+        };
+        let schemas = vec![schema_1.clone(), schema_2.clone()];
+        let data = build_schema_file(keyspace_id, schema_version, schemas.clone());
+        let file = Arc::new(InMemFile::new(100, data.into()));
+        let schema_file = SchemaFile::open(file).unwrap();
+        assert!(schema_file.contains(&schemas));
+        let reverse_schemas = vec![schema_2.clone(), schema_1.clone()];
+        assert!(schema_file.contains(&reverse_schemas));
+        let single_schema = vec![schema_1.clone()];
+        assert!(schema_file.contains(&single_schema));
+        let more_schema = vec![schema_1, schema_2, schema_3];
+        assert!(!schema_file.contains(&more_schema));
     }
 
     #[derive(Debug)]

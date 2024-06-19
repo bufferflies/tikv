@@ -8,7 +8,7 @@ use tikv_util::{
         bytes::{decode_bytes, encode_bytes},
         number::NumberEncoder,
     },
-    info, warn,
+    debug, warn,
 };
 
 use crate::schema::{DbInfo, TableInfo, STATE_PUBLIC};
@@ -27,7 +27,7 @@ pub async fn load_schema(
     let last_idx = end.len() - 1;
     end[last_idx] += 1;
     let pairs = kv_scanner.scan(&start, &end).await?;
-    info!(
+    debug!(
         "scan pairs {}, start {:?}, end {:?}",
         pairs.len(),
         start,

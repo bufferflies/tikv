@@ -1,5 +1,15 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
+use tidb_query_datatype::{
+    codec::{
+        datum,
+        mysql::{Decimal, Duration, Time, TimeType},
+        Datum,
+    },
+    expr::EvalContext,
+    Collation, FieldTypeFlag, FieldTypeTp,
+};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DbInfo {
     #[serde(rename = "id")]
@@ -13,7 +23,7 @@ pub struct DbInfo {
     pub state: SchemaState,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CiStr {
     #[serde(rename = "O")]
     pub o: String,
@@ -39,10 +49,23 @@ pub struct TableInfo {
     pub partition: Option<PartitionInfo>,
     pub version: u16,
     pub is_columnar: bool,
+    pub tiflash_replica: Option<TiFlashReplica>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TiFlashReplica {
+    #[serde(rename = "Count")]
+    pub count: u64,
+    #[serde(rename = "LocationLabels")]
+    pub location_labels: Vec<String>,
+    #[serde(rename = "Available")]
+    pub available: bool,
+    #[serde(rename = "AvailablePartitionIDs")]
+    pub available_partition_ids: Option<Vec<i64>>,
 }
 
 // ColumnInfo provides meta data describing of a table column.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ColumnInfo {
     pub id: i64,
     pub name: CiStr,
@@ -95,7 +118,7 @@ pub struct IndexColumn {
     pub length: isize,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct FieldType {
     pub tp: i64,
@@ -109,7 +132,7 @@ pub struct FieldType {
     pub array: Option<bool>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SchemaState(u8);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,4 +173,235 @@ pub struct PartitionDefinition {
     pub less_than: Option<Vec<String>>,
     pub in_values: Option<Vec<Vec<String>>>,
     pub comment: Option<String>,
+}
+
+// SchemaDiff contains the schema modification at a particular schema version.
+// It is used to reduce schema reload cost.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaDiff {
+    pub version: i64,
+    #[serde(rename = "type")]
+    pub action_type: ActionType,
+    pub schema_id: i64,
+    pub table_id: i64,
+    pub old_table_id: i64,
+    pub old_schema_id: i64,
+    pub regenerate_schema_map: bool,
+    pub affected_opts: Option<Vec<AffectedOption>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActionType(u8);
+
+// AffectedOption is used when a ddl affects multi tables.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AffectedOption {
+    pub schema_id: i64,
+    pub table_id: i64,
+    pub old_table_id: i64,
+    pub old_schema_id: i64,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct SchemaVersionResponse {
+    pub version: i64,
+    pub schemas: Vec<TableInfo>,
+}
+
+pub fn convert_column_infos_to_tipb(
+    column_infos: &[ColumnInfo],
+    pk_is_handle: bool,
+) -> Vec<tipb::ColumnInfo> {
+    let mut tipb_column_infos = Vec::with_capacity(column_infos.len());
+    let mut ctx = EvalContext::default();
+    for column_info in column_infos {
+        let mut ci = tipb::ColumnInfo::new();
+        ci.set_column_id(column_info.id);
+        ci.set_tp(column_info.field_type.tp as i32);
+        ci.set_flag(column_info.field_type.flag as i32);
+        ci.set_column_len(column_info.field_type.flen as i32);
+        ci.set_decimal(column_info.field_type.decimal as i32);
+        ci.set_elems(
+            column_info
+                .field_type
+                .elems
+                .as_ref()
+                .cloned()
+                .unwrap_or_default()
+                .into(),
+        );
+        ci.set_array(column_info.field_type.array.unwrap_or_default());
+        let collation = Collation::from_name(column_info.field_type.collate.as_str()).unwrap();
+        ci.set_collation(collation as i32);
+        let is_pk_handle = column_info.field_type.flag as u32 & FieldTypeFlag::PRIMARY_KEY.bits()
+            != 0
+            && pk_is_handle;
+        ci.set_pk_handle(is_pk_handle);
+        let default_val = decode_default_value_to_datum(&mut ctx, column_info)
+            .map(|v| datum::encode_value(&mut EvalContext::default(), &[v]).unwrap())
+            .unwrap_or_default();
+        ci.set_default_val(default_val);
+        tipb_column_infos.push(ci);
+    }
+    tipb_column_infos
+}
+
+// Ref: SetPBColumnsDefaultValue in TiDB.
+// https://github.com/pingcap/tidb/blob/45318da24d8e4c0c6aab836d291a33f949dd18bf/pkg/table/tables/tables.go#L2303-L2329
+// If origin_default is none, return None.
+fn decode_default_value_to_datum(ctx: &mut EvalContext, c: &ColumnInfo) -> Option<Datum> {
+    if !c.generated_expr_string.is_empty() && !c.generated_stored {
+        return Some(Datum::Null);
+    }
+
+    // return None if origin_default is none.
+    c.origin_default.as_ref()?;
+
+    let field_type_tp = FieldTypeTp::from_u8(c.field_type.tp as u8).unwrap();
+    let field_flag = c.field_type.flag;
+
+    let default = c.origin_default.as_ref().unwrap();
+    let result = match field_type_tp {
+        FieldTypeTp::Tiny
+        | FieldTypeTp::Short
+        | FieldTypeTp::Int24
+        | FieldTypeTp::Long
+        | FieldTypeTp::LongLong => {
+            if field_flag as u32 & FieldTypeFlag::UNSIGNED.bits() == FieldTypeFlag::UNSIGNED.bits()
+            {
+                default.parse::<u64>().map(|v| Datum::U64(v)).map_err(|e| {
+                    tidb_query_datatype::codec::Error::InvalidDataType(format!(
+                        "Invalid unsigned integer: {:?}",
+                        e
+                    ))
+                })
+            } else {
+                default.parse::<i64>().map(|v| Datum::I64(v)).map_err(|e| {
+                    tidb_query_datatype::codec::Error::InvalidDataType(format!(
+                        "Invalid signed integer: {:?}",
+                        e
+                    ))
+                })
+            }
+        }
+        FieldTypeTp::Year => default.parse::<u64>().map(|v| Datum::U64(v)).map_err(|e| {
+            tidb_query_datatype::codec::Error::InvalidDataType(format!(
+                "Invalid signed integer: {:?}",
+                e
+            ))
+        }),
+
+        FieldTypeTp::Float | FieldTypeTp::Double => {
+            default.parse::<f64>().map(|v| Datum::F64(v)).map_err(|e| {
+                tidb_query_datatype::codec::Error::InvalidDataType(format!(
+                    "Invalid float number: {:?}",
+                    e
+                ))
+            })
+        }
+        FieldTypeTp::Date | FieldTypeTp::DateTime | FieldTypeTp::Timestamp => {
+            // TODO: handle timezone
+            let x = default.to_lowercase();
+            if x == "current_timestamp" || x == "current_data" {
+                Time::parse_datetime(
+                    ctx,
+                    chrono::Utc::now()
+                        .format("%Y-%m-%d %H:%M:%S")
+                        .to_string()
+                        .as_str(),
+                    c.field_type.decimal as i8,
+                    false,
+                )
+                .map(|t| Datum::Time(t))
+                .map_err(|e| {
+                    tidb_query_datatype::codec::Error::InvalidDataType(format!(
+                        "Invalid datetime: {:?}",
+                        e
+                    ))
+                })
+            } else if x == "0000-00-00 00:00:00" {
+                Time::parse_from_i64(
+                    ctx,
+                    0,
+                    TimeType::try_from(field_type_tp).unwrap(),
+                    c.field_type.decimal as i8,
+                )
+                .map(|t| Datum::Time(t))
+                .map_err(|e| {
+                    tidb_query_datatype::codec::Error::InvalidDataType(format!(
+                        "Invalid datetime: {:?}",
+                        e
+                    ))
+                })
+            } else {
+                Time::parse(
+                    ctx,
+                    default.as_str(),
+                    TimeType::try_from(field_type_tp).unwrap(),
+                    c.field_type.decimal as i8,
+                    false,
+                )
+                .map(|t| Datum::Time(t))
+                .map_err(|e| {
+                    tidb_query_datatype::codec::Error::InvalidDataType(format!(
+                        "Invalid datetime: {:?}",
+                        e
+                    ))
+                })
+            }
+        }
+
+        FieldTypeTp::NewDecimal => Decimal::from_bytes(default.as_bytes())
+            .map(|v| Datum::Dec(v.unwrap()))
+            .map_err(|_| {
+                tidb_query_datatype::codec::Error::InvalidDataType("Invalid decimal".to_string())
+            }),
+        FieldTypeTp::String
+        | FieldTypeTp::VarString
+        | FieldTypeTp::VarChar
+        | FieldTypeTp::TinyBlob => Ok(Datum::Bytes(default.as_bytes().to_vec())),
+        FieldTypeTp::Duration => {
+            parse_duration(default.as_str(), c.field_type.decimal as i8).map(|v| Datum::Dur(v))
+        }
+        _ => Ok(Datum::Bytes(vec![])),
+    };
+    if let Ok(datum) = result {
+        Some(datum)
+    } else {
+        Some(Datum::Bytes(vec![]))
+    }
+}
+
+fn parse_duration(input: &str, fsp: i8) -> tidb_query_datatype::codec::Result<Duration> {
+    let parts: Vec<&str> = input.split(':').collect();
+    if parts.len() != 3 {
+        return Err(tidb_query_datatype::codec::Error::InvalidDataType(
+            "Invalid input: must be in the format HH:MM:SS".to_string(),
+        ));
+    }
+
+    let hours = parts[0].parse::<i64>().map_err(|_| {
+        tidb_query_datatype::codec::Error::InvalidDataType("Invalid hours".to_string())
+    })?;
+    let minutes = parts[1].parse::<u64>().map_err(|_| {
+        tidb_query_datatype::codec::Error::InvalidDataType("Invalid minutes".to_string())
+    })?;
+    let seconds = parts[2].parse::<u64>().map_err(|_| {
+        tidb_query_datatype::codec::Error::InvalidDataType("Invalid seconds".to_string())
+    })?;
+
+    if minutes >= 60 || seconds >= 60 {
+        return Err(tidb_query_datatype::codec::Error::InvalidDataType(
+            "Minutes and seconds must be less than 60".to_string(),
+        ));
+    }
+
+    let secs = if hours < 0 {
+        -hours * 3600 - minutes as i64 * 60 - seconds as i64
+    } else {
+        hours * 3600 + minutes as i64 * 60 + seconds as i64
+    };
+
+    Duration::from_secs(secs, fsp)
 }

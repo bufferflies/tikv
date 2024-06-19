@@ -137,6 +137,19 @@ impl Collation {
         }
     }
 
+    pub fn from_name(name: &str) -> Result<Self, DataTypeError> {
+        match name {
+            "utf8mb4_bin" => Ok(Collation::Utf8Mb4Bin),
+            "utf8mb4_general_ci" => Ok(Collation::Utf8Mb4GeneralCi),
+            "utf8mb4_unicode_ci" => Ok(Collation::Utf8Mb4UnicodeCi),
+            "latin1_bin" => Ok(Collation::Latin1Bin),
+            "binary" => Ok(Collation::Binary),
+            "gbk_bin" => Ok(Collation::GbkBin),
+            "gbk_chinese_ci" => Ok(Collation::GbkChineseCi),
+            _ => Err(DataTypeError::UnsupportedCollation { code: 0 }),
+        }
+    }
+
     pub fn is_bin_collation(&self) -> bool {
         matches!(self, Collation::Utf8Mb4Bin | Collation::Latin1Bin)
     }
@@ -178,6 +191,9 @@ bitflags! {
     pub struct FieldTypeFlag: u32 {
         /// Field can't be NULL.
         const NOT_NULL = 1;
+
+        /// Field is part of a primary key.
+        const PRIMARY_KEY = 1 << 1;
 
         /// Field is unsigned.
         const UNSIGNED = 1 << 5;

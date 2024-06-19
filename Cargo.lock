@@ -1390,6 +1390,7 @@ dependencies = [
  "rand 0.8.5",
  "rfenginepb",
  "rfstore",
+ "schema",
  "security",
  "serde",
  "serde_derive",
@@ -1403,6 +1404,7 @@ dependencies = [
  "test_util",
  "thiserror",
  "tikv",
+ "tikv-client",
  "tikv_util",
  "tokio",
  "tokio-util",
@@ -6533,9 +6535,10 @@ dependencies = [
 name = "schema"
 version = "0.1.0"
 dependencies = [
+ "api_version",
  "async-trait",
  "bytes",
- "kvengine",
+ "chrono",
  "serde",
  "serde_derive",
  "serde_ignored",
@@ -6543,7 +6546,9 @@ dependencies = [
  "slog",
  "slog-global",
  "slog-term",
+ "tidb_query_datatype",
  "tikv_util",
+ "tipb",
 ]
 
 [[package]]

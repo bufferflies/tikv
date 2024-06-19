@@ -63,6 +63,21 @@ impl super::Engine {
             .collect()
     }
 
+    pub fn get_all_active_shard_stats_lite(&self) -> Vec<ShardStatsLite> {
+        self.get_all_shard_id_vers()
+            .into_iter()
+            .filter_map(|id_ver| {
+                self.get_shard(id_ver.id).and_then(|shard| {
+                    if shard.is_active() {
+                        Some(shard.get_stats().into())
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect()
+    }
+
     pub fn get_shard_stat(&self, region_id: u64) -> ShardStats {
         self.get_shard_stat_opt(region_id).unwrap_or_default()
     }
@@ -193,6 +208,34 @@ impl ShardStats {
     #[inline]
     pub fn mem_table_is_empty(&self) -> bool {
         self.mem_table_size == 0 && self.mem_table_count == 1
+    }
+}
+
+#[derive(Default, Serialize, Deserialize, Debug)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+pub struct ShardStatsLite {
+    pub id: u64,
+    pub ver: u64,
+    pub start: Bytes,
+    pub end: Bytes,
+    pub inner_key_off: usize,
+    // Total size of all SST files and blobs referenced by the shard (not blob table file size).
+    pub total_size: u64,
+    pub schema_version: i64,
+}
+
+impl From<ShardStats> for ShardStatsLite {
+    fn from(s: ShardStats) -> Self {
+        Self {
+            id: s.id,
+            ver: s.ver,
+            start: s.start,
+            end: s.end,
+            inner_key_off: s.inner_key_off,
+            total_size: s.total_size,
+            schema_version: s.schema_version,
+        }
     }
 }
 
