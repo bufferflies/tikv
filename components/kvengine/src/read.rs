@@ -2,7 +2,6 @@
 
 use core::panic;
 use std::{
-    collections::HashMap,
     fmt::{Debug, Formatter},
     marker::PhantomData,
     ops::Deref,
@@ -12,7 +11,6 @@ use std::{
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use cloud_encryption::{EncryptionKey, MasterKey};
 use kvenginepb as pb;
-use kvenginepb::TxnFileRef;
 use moka::sync::SegmentedCache;
 use protobuf::Message;
 use txn_types::Lock;
@@ -20,9 +18,9 @@ use txn_types::Lock;
 use crate::{
     limiter::RegionLimiter,
     table::{
-        blobtable::blobtable::{BlobPrefetcher, BlobTable},
-        memtable::{CfTable, Hint, WriteBatch},
-        sstable::{BlockCacheKey, InMemFile, L0Table, SsTable},
+        blobtable::blobtable::BlobPrefetcher,
+        memtable::{Hint, WriteBatch},
+        sstable::BlockCacheKey,
         table, InnerKey, SkipOpTxnFileIterator, TableExt, TxnFile, TxnFileIterator,
     },
     *,
@@ -216,121 +214,8 @@ impl SnapAccessCore {
         master_key: &MasterKey,
         block_cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
     ) -> Self {
-        let mut cs = ChangeSet::new(change_set);
-        let mut ids = HashMap::new();
-        let mut _txn_file_refs: Vec<TxnFileRef> = vec![];
-        let mem_tbls = vec![CfTable::new()];
-        // FIXME: Iterate over all memtables
-        if let Some(wb) = wb {
-            let mem_tbl = mem_tbls[0].get_cf(WRITE_CF);
-            mem_tbl.put_batch(wb, None, WRITE_CF);
-            // Insert a dummy record, that should be ignored, so that we
-            // don't have to fiddle too much with the code below.
-            ids.insert(0, 0);
-        }
-        let encryption_key = if cs.has_snapshot() {
-            let snap = cs.get_snapshot();
-            for l0 in snap.get_l0_creates() {
-                ids.insert(l0.id, 0);
-            }
-            for ln in snap.get_table_creates() {
-                ids.insert(ln.id, ln.level);
-            }
-            for blob in snap.get_blob_creates() {
-                ids.insert(blob.id, BLOB_LEVEL);
-            }
-            // TODO: load lock_txn_files
-            // if !ignore_lock {
-            //     _txn_file_refs = collect_snap_lock_txn_file_refs(snap);
-            // }
-            get_shard_property(ENCRYPTION_KEY, snap.get_properties())
-                .map(|v| master_key.decrypt_encryption_key(&v).unwrap())
-        } else {
-            None
-        };
-        let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel();
-        let runtime = dfs.get_runtime();
-        let opts = dfs::Options::default().with_shard(cs.shard_id, cs.shard_ver);
-        let mut msg_count = 0;
-        for (&id, &level) in &ids {
-            let tx = result_tx.clone();
-            if id == 0 {
-                tx.send(Ok((0, 0, None))).unwrap();
-            } else {
-                let fs = dfs.clone();
-                let tx = result_tx.clone();
-                runtime.spawn(async move {
-                    let res = fs.read_file(id, opts).await;
-                    tx.send(res.map(|data| (id, level, Some(data))))
-                        .map_err(|_| "send file data failed")
-                        .unwrap();
-                });
-            }
-            msg_count += 1;
-        }
-        let mut errors = vec![];
-        for _ in 0..msg_count {
-            match result_rx.recv().await.unwrap() {
-                Ok((id, _, None)) => {
-                    assert_eq!(id, 0);
-                }
-                Ok((id, level, Some(data))) => {
-                    assert!(id != 0);
-                    let file = InMemFile::new(id, data);
-                    if is_blob_file(level) {
-                        let blob_table = BlobTable::new(Arc::new(file)).unwrap();
-                        cs.blob_tables.insert(id, blob_table);
-                    } else if level == 0 {
-                        let l0_table = L0Table::new(
-                            Arc::new(file),
-                            block_cache.clone(),
-                            ignore_lock,
-                            encryption_key.clone(),
-                        )
-                        .unwrap();
-                        if let Some(l0_table) = l0_table {
-                            cs.l0_tables.insert(id, l0_table);
-                        }
-                    } else {
-                        let ln_table = SsTable::new(
-                            Arc::new(file),
-                            block_cache.clone(),
-                            level == 1,
-                            encryption_key.clone(),
-                        )
-                        .unwrap();
-                        cs.ln_tables.insert(id, ln_table);
-                    }
-                }
-                Err(err) => {
-                    error!("prefetch failed {:?}", &err);
-                    errors.push(err);
-                }
-            }
-        }
-        if !errors.is_empty() {
-            panic!("errors is not empty: {:?}", errors);
-        }
-
-        // TODO: load lock_txn_files
-
-        let mut shard = Shard::new_for_ingest(0, &cs, Arc::new(Options::default()), master_key);
-        let (l0s, blob_tbls, scfs, lock_txn_files) =
-            create_snapshot_tables(cs.get_snapshot(), &cs, ignore_lock);
-        let data = ShardData::new(
-            shard.range.clone(),
-            mem_tbls,
-            l0s,
-            Arc::new(blob_tbls),
-            scfs,
-            HashMap::new(),
-            lock_txn_files,
-            RegionLimiter::new((&shard.opt.flow_control).into()), // Note: limiter is disabled here
-            NEW_DATA_UPDATE_COUNTER,
-            cs.schema_file.clone(),
-        );
-        shard.id = cs.shard_id;
-        shard.set_data(data);
+        let shard =
+            Shard::from_change_set(dfs, change_set, wb, ignore_lock, master_key, block_cache).await;
         Self::new(&shard)
     }
 
@@ -675,6 +560,10 @@ impl SnapAccessCore {
 
     pub fn get_version(&self) -> u64 {
         self.tag.id_ver.ver
+    }
+
+    pub fn get_meta_seq(&self) -> u64 {
+        self.meta_seq
     }
 
     pub(crate) fn contains_in_older_table(&self, key: InnerKey<'_>, cf: usize) -> bool {
@@ -1295,12 +1184,12 @@ impl Iterator {
 
 #[cfg(test)]
 mod tests {
-    use std::iter::Iterator;
+    use std::{collections::HashMap, iter::Iterator};
 
     use kvenginepb::TableCreate;
 
     use super::*;
-    use crate::table::sstable::build_test_table_with_kvs;
+    use crate::table::{memtable::CfTable, sstable::build_test_table_with_kvs};
 
     #[test]
     fn test_estimated_range_blocks_size() {

@@ -16,7 +16,8 @@ use api_version::ApiV2;
 use bytes::{Buf, BufMut, Bytes};
 use cloud_encryption::{EncryptionKey, MasterKey};
 use dashmap::DashMap;
-use kvenginepb as pb;
+use kvenginepb::{self as pb, TxnFileRef};
+use moka::sync::SegmentedCache;
 use rand::Rng;
 use slog_global::*;
 use tikv_util::codec::number::U64_SIZE;
@@ -28,9 +29,9 @@ use crate::{
         blobtable::blobtable::BlobTable,
         columnar::schema_file::SchemaFile,
         get_tables_in_range,
-        memtable::{self, CfTable},
+        memtable::{self, CfTable, WriteBatch},
         search,
-        sstable::{L0Table, SsTable},
+        sstable::{BlockCacheKey, InMemFile, L0Table, SsTable},
         InnerKey, TableExt, TxnFile,
     },
     util::{evenly_distribute, TxnFileRefPropertyHelper},
@@ -245,6 +246,148 @@ impl Shard {
         shard.meta_seq.store(cs.sequence, Release);
         shard.write_sequence.store(snap.data_sequence, Release);
         shard
+    }
+
+    pub async fn from_change_set(
+        dfs: Arc<dyn dfs::Dfs>,
+        change_set: pb::ChangeSet,
+        wb: Option<&mut WriteBatch>,
+        ignore_lock: bool,
+        master_key: &MasterKey,
+        block_cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
+    ) -> Self {
+        let mut cs = ChangeSet::new(change_set);
+        let mut ids = HashMap::new();
+        let mut _txn_file_refs: Vec<TxnFileRef> = vec![];
+        let mem_tbls = vec![CfTable::new()];
+        // FIXME: Iterate over all memtables
+        if let Some(wb) = wb {
+            let mem_tbl = mem_tbls[0].get_cf(WRITE_CF);
+            mem_tbl.put_batch(wb, None, WRITE_CF);
+            // Insert a dummy record, that should be ignored, so that we
+            // don't have to fiddle too much with the code below.
+            ids.insert(0, 0);
+        }
+        let encryption_key = if cs.has_snapshot() {
+            let snap = cs.get_snapshot();
+            for l0 in snap.get_l0_creates() {
+                ids.insert(l0.id, 0);
+            }
+            for ln in snap.get_table_creates() {
+                ids.insert(ln.id, ln.level);
+            }
+            for blob in snap.get_blob_creates() {
+                ids.insert(blob.id, BLOB_LEVEL);
+            }
+            // TODO: load lock_txn_files
+            // if !ignore_lock {
+            //     _txn_file_refs = collect_snap_lock_txn_file_refs(snap);
+            // }
+            get_shard_property(ENCRYPTION_KEY, snap.get_properties())
+                .map(|v| master_key.decrypt_encryption_key(&v).unwrap())
+        } else {
+            None
+        };
+        let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel();
+        let runtime = dfs.get_runtime();
+        let opts = dfs::Options::default().with_shard(cs.shard_id, cs.shard_ver);
+        let mut msg_count = 0;
+        for (&id, &level) in &ids {
+            let tx = result_tx.clone();
+            if id == 0 {
+                tx.send(Ok((0, 0, None))).unwrap();
+            } else {
+                let fs = dfs.clone();
+                let tx = result_tx.clone();
+                runtime.spawn(async move {
+                    let res = fs.read_file(id, opts).await;
+                    tx.send(res.map(|data| (id, level, Some(data))))
+                        .map_err(|_| "send file data failed")
+                        .unwrap();
+                });
+            }
+            msg_count += 1;
+        }
+        let mut errors = vec![];
+        for _ in 0..msg_count {
+            match result_rx.recv().await.unwrap() {
+                Ok((id, _, None)) => {
+                    assert_eq!(id, 0);
+                }
+                Ok((id, level, Some(data))) => {
+                    assert!(id != 0);
+                    let file = InMemFile::new(id, data);
+                    if is_blob_file(level) {
+                        let blob_table = BlobTable::new(Arc::new(file)).unwrap();
+                        cs.blob_tables.insert(id, blob_table);
+                    } else if level == 0 {
+                        let l0_table = L0Table::new(
+                            Arc::new(file),
+                            block_cache.clone(),
+                            ignore_lock,
+                            encryption_key.clone(),
+                        )
+                        .unwrap();
+                        if let Some(l0_table) = l0_table {
+                            cs.l0_tables.insert(id, l0_table);
+                        }
+                    } else {
+                        let ln_table = SsTable::new(
+                            Arc::new(file),
+                            block_cache.clone(),
+                            level == 1,
+                            encryption_key.clone(),
+                        )
+                        .unwrap();
+                        cs.ln_tables.insert(id, ln_table);
+                    }
+                }
+                Err(err) => {
+                    error!("prefetch failed {:?}", &err);
+                    errors.push(err);
+                }
+            }
+        }
+        if !errors.is_empty() {
+            panic!("errors is not empty: {:?}", errors);
+        }
+
+        // TODO: load lock_txn_files
+
+        let mut shard = Shard::new_for_ingest(0, &cs, Arc::new(Options::default()), master_key);
+        let (l0s, blob_tbls, scfs, lock_txn_files) =
+            create_snapshot_tables(cs.get_snapshot(), &cs, ignore_lock);
+        let data = ShardData::new(
+            shard.range.clone(),
+            mem_tbls,
+            l0s,
+            Arc::new(blob_tbls),
+            scfs,
+            HashMap::new(),
+            lock_txn_files,
+            RegionLimiter::new((&shard.opt.flow_control).into()), // Note: limiter is disabled here
+            NEW_DATA_UPDATE_COUNTER,
+            cs.schema_file.clone(),
+        );
+        shard.id = cs.shard_id;
+        shard.set_data(data);
+        shard
+    }
+
+    pub fn get_cf_total_size(&self, cf: usize) -> u64 {
+        let mut total_size = 0;
+        let data = self.get_data();
+        for cf_tbl in &data.mem_tbls {
+            let tbl = cf_tbl.get_cf(cf);
+            total_size += tbl.size() as u64;
+        }
+        let shard_cf = data.get_cf(cf);
+        for lh in shard_cf.levels.iter() {
+            for tbl in lh.tables.iter() {
+                total_size += tbl.kv_size;
+            }
+        }
+        total_size
     }
 
     pub fn id_ver(&self) -> IdVer {
