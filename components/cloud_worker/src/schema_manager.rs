@@ -249,7 +249,7 @@ impl Default for SchemaManagerConfig {
             keyspace_refresh_interval: KEYSPACE_REFRESH_INTERVAL,
             schema_refresh_threshold: SCHEMA_REFRESH_THRESHOLD,
             http_timeout: DEFAULT_TIMEOUT,
-            enabled: true,
+            enabled: false,
         }
     }
 }
