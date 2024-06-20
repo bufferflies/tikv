@@ -11,7 +11,7 @@ use std::{
 };
 
 use collections::HashSet;
-use kvengine::table::sstable;
+use kvengine::{table::sstable, IoContext};
 use kvproto::import_sstpb::SwitchMode;
 use sst_importer::SstImporter;
 use tikv_util::{error, info, warn, worker::Runnable};
@@ -105,9 +105,9 @@ impl GcRunner {
         txn_chunk_ids: &HashSet<u64>,
     ) -> kvengine::Result<()> {
         let store_id = self.kv.get_engine_id();
-        let entries = fs::read_dir(&self.kv.opts.local_dir)?;
+        let entries = fs::read_dir(&self.kv.opts.local_dir).ctx("gc.read_dir")?;
         for e in entries {
-            let entry = e?;
+            let entry = e.ctx("gc.entry")?;
             let path = entry.path();
             if path.is_dir() && path.file_name() == Some(OsStr::new("txn")) {
                 self.remove_kv_garbage_txn_files(path, txn_chunk_ids)?;
@@ -115,11 +115,14 @@ impl GcRunner {
             }
             let path_str = path.to_str().unwrap();
             if path_str.ends_with(".tmp") {
-                let meta = entry.metadata()?;
+                let meta = entry
+                    .metadata()
+                    .with_ctx(|| format!("gc.tmp.metadata: {path_str}"))?;
                 if !self.is_old_file(meta) {
                     continue;
                 }
-                Self::remove_file(store_id, &path)?;
+                Self::remove_file(store_id, &path)
+                    .with_ctx(|| format!("gc.tmp.remove_file: {path_str}"))?;
             } else if path_str.ends_with(".sst") {
                 let id = sstable::parse_file_id(&path)?;
                 if !kv_file_ids.contains(&id) {
@@ -127,9 +130,9 @@ impl GcRunner {
                     if blacklist_file_ids.contains(&id) {
                         continue;
                     }
-                    let meta = fs::metadata(&path)?;
+                    let meta = fs::metadata(&path).table_ctx(id, "gc.sst.metadata")?;
                     if self.is_old_file(meta) {
-                        Self::remove_file(store_id, &path)?;
+                        Self::remove_file(store_id, &path).table_ctx(id, "gc.sst.remove_file")?;
                     }
                 }
             } else if !path_str.ends_with("LOCK") {
@@ -174,12 +177,14 @@ impl GcRunner {
         kv_txn_chunk_ids: &HashSet<u64>,
     ) -> kvengine::Result<()> {
         let store_id = self.kv.get_engine_id();
-        let entries = fs::read_dir(txn_path.as_path())?;
+        let entries = fs::read_dir(txn_path.as_path()).ctx("gc.txn.read_dir")?;
         let txn_chunk_manager = self.kv.get_txn_chunk_manager();
         for e in entries {
-            let entry = e?;
+            let entry = e.ctx("gc.txn.entry")?;
             let path = entry.path();
-            let meta = entry.metadata()?;
+            let meta = entry
+                .metadata()
+                .with_ctx(|| format!("gc.txn.metadata: {path:?}"))?;
             let filename = path
                 .file_name()
                 .unwrap_or_default()
@@ -189,7 +194,8 @@ impl GcRunner {
                 if !self.is_old_file(meta) {
                     continue;
                 }
-                Self::remove_file(store_id, &path)?;
+                Self::remove_file(store_id, &path)
+                    .with_ctx(|| format!("gc.txn.tmp.remove_file: {path:?}"))?;
             } else if filename.ends_with(".txn") {
                 if let Some(id) = kvengine::txn_chunk_manager::parse_txn_chunk_id(filename) {
                     if !kv_txn_chunk_ids.contains(&id) {

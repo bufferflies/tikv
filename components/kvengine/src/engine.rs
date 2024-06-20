@@ -96,8 +96,8 @@ impl Engine {
             panic!("path {:?} is not dir", &opts.local_dir);
         }
         let lock_path = opts.local_dir.join("LOCK");
-        let mut x = fslock::LockFile::open(&lock_path)?;
-        x.lock()?;
+        let mut x = fslock::LockFile::open(&lock_path).ctx("engine.open.open_lockfile")?;
+        x.lock().ctx("engine.open.lock")?;
         let mut max_capacity = opts.max_block_cache_size as usize;
         if max_capacity < 512 * opts.table_builder_options.block_size {
             max_capacity = 512 * opts.table_builder_options.block_size;

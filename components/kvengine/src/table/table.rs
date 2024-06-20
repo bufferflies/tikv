@@ -2,7 +2,6 @@
 
 use std::{
     fmt::{Debug, Formatter},
-    io,
     iter::Iterator as StdIterator,
     mem::size_of,
     ops::Deref,
@@ -413,13 +412,6 @@ pub enum Error {
     NeedEncryptionKey { chunk_id: u64, encryption_ver: u32 },
     #[error("{0}")]
     Other(String),
-}
-
-impl From<io::Error> for Error {
-    #[inline]
-    fn from(e: io::Error) -> Error {
-        Error::Io(e.to_string())
-    }
 }
 
 impl From<dfs::Error> for Error {

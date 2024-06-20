@@ -20,6 +20,7 @@ use tikv_util::{mpsc::Receiver, time::Instant};
 use crate::{
     apply::ChangeSet,
     dfs::FileType,
+    error::IoContext,
     metrics::ENGINE_LEVEL_WRITE_VEC,
     table::{
         columnar::schema_file::SchemaFile,
@@ -359,7 +360,7 @@ impl EngineCore {
         data: Bytes,
         use_direct_io: bool,
         meta: &FileMeta,
-    ) -> std::io::Result<()> {
+    ) -> Result<()> {
         let local_file_name = if meta.is_blob_file() {
             self.local_blob_file_path(id)
         } else {
@@ -370,21 +371,28 @@ impl EngineCore {
         if use_direct_io {
             let mut writer =
                 file_system::DirectWriter::new(self.rate_limiter.clone(), IoType::Compaction);
-            writer.write_to_file(data.chunk(), &tmp_file_name)?;
+            writer
+                .write_to_file(data.chunk(), &tmp_file_name)
+                .table_ctx(id, "write_local_file.direct_write_tmp")?;
         } else {
-            let mut file = std::fs::File::create(&tmp_file_name)?;
+            let mut file = std::fs::File::create(&tmp_file_name)
+                .table_ctx(id, "write_local_file.create_tmp")?;
             let mut start_off = 0;
             let write_batch_size = 256 * 1024;
             while start_off < data.len() {
                 self.rate_limiter
                     .request(IoType::Compaction, IoOp::Write, write_batch_size);
                 let end_off = std::cmp::min(start_off + write_batch_size, data.len());
-                file.write_all(&data[start_off..end_off])?;
+                file.write_all(&data[start_off..end_off])
+                    .table_ctx(id, "write_local_file.write_tmp")?;
                 start_off = end_off;
             }
-            file.sync_data()?;
+            file.sync_data()
+                .table_ctx(id, "write_local_file.sync_tmp")?;
         }
         std::fs::rename(&tmp_file_name, local_file_name)
+            .table_ctx(id, "write_local_file.rename")?;
+        Ok(())
     }
 
     fn open_sstable_file(&self, id: u64) -> Result<LocalFile> {
@@ -434,8 +442,9 @@ impl EngineCore {
         }
         // Only the first one will write the file to disk.
         let tmp_file_name = self.tmp_file_path(id);
-        fs::write(&tmp_file_name, data.chunk())?;
-        fs::rename(&tmp_file_name, local_schema_file_path.as_path())?;
+        fs::write(&tmp_file_name, data.chunk()).table_ctx(id, "load_schema_file.write_tmp")?;
+        fs::rename(&tmp_file_name, local_schema_file_path.as_path())
+            .table_ctx(id, "load_schema_file.rename")?;
         Ok(schema_file)
     }
 

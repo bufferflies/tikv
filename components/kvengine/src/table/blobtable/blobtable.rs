@@ -5,9 +5,12 @@ use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, Bytes};
 
 use super::{builder::*, BlobRef};
-use crate::table::{
-    sstable::{File, LZ4_COMPRESSION, NO_COMPRESSION, ZSTD_COMPRESSION},
-    ChecksumType, Error, InnerKey, Result,
+use crate::{
+    error::IoContext,
+    table::{
+        sstable::{File, LZ4_COMPRESSION, NO_COMPRESSION, ZSTD_COMPRESSION},
+        ChecksumType, Error, InnerKey, Result,
+    },
 };
 
 #[derive(Clone)]
@@ -149,7 +152,8 @@ impl BlobTable {
                     compressed_data,
                     Some(original_len as i32),
                     decompressed_buf,
-                )?;
+                )
+                .table_ctx(0, "blob.lz4_decompress")?;
                 Ok(true)
             }
             ZSTD_COMPRESSION => unsafe {

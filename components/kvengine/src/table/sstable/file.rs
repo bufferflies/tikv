@@ -11,7 +11,7 @@ use std::{
 
 use bytes::Bytes;
 
-use crate::table::table;
+use crate::{error::IoContext, table::table};
 
 // 30 minutes idle file would be closed.
 const FILE_TTL: u64 = 30 * 60;
@@ -53,19 +53,10 @@ pub struct LocalFile {
 impl LocalFile {
     pub fn open(id: u64, path: &Path, set_mtime: bool) -> table::Result<LocalFile> {
         if set_mtime {
-            filetime::set_file_mtime(path, filetime::FileTime::now()).map_err(|e| {
-                table::Error::Io(format!(
-                    "failed to set_file_mtime for {}: {:?}, path {:?}",
-                    id, e, path
-                ))
-            })?;
+            filetime::set_file_mtime(path, filetime::FileTime::now())
+                .table_ctx(id, "local.open.set_file_mtime")?;
         }
-        let meta = std::fs::metadata(path).map_err(|e| {
-            table::Error::Io(format!(
-                "failed to get metadata for {}: {:?}, path {:?}",
-                id, e, path
-            ))
-        })?;
+        let meta = std::fs::metadata(path).table_ctx(id, "local.open.metadata")?;
         let local_file = LocalFile {
             id,
             size: meta.size(),
@@ -76,10 +67,8 @@ impl LocalFile {
     }
 
     fn get_file(&self) -> table::Result<Arc<std::fs::File>> {
-        self.fd.get(|| {
-            std::fs::File::open(self.path.as_path())
-                .map_err(|e| table::Error::Io(format!("failed to open file {}: {:?}", self.id, e)))
-        })
+        self.fd
+            .get(|| std::fs::File::open(self.path.as_path()).table_ctx(self.id, "local.get_file"))
     }
 }
 
@@ -99,13 +88,15 @@ impl File for LocalFile {
     fn read(&self, off: u64, length: usize) -> table::Result<Bytes> {
         let mut buf = vec![0; length];
         let fd = self.get_file()?;
-        fd.read_at(&mut buf, off)?;
+        fd.read_at(&mut buf, off)
+            .table_ctx(self.id(), "local.read")?;
         Ok(Bytes::from(buf))
     }
 
     fn read_at(&self, buf: &mut [u8], offset: u64) -> table::Result<()> {
         let fd = self.get_file()?;
-        fd.read_at(buf, offset)?;
+        fd.read_at(buf, offset)
+            .table_ctx(self.id(), "local.read_at")?;
         Ok(())
     }
 

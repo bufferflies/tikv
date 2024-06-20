@@ -1,5 +1,10 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
+use std::{
+    fmt::{Debug, Display},
+    io,
+};
+
 use crate::{dfs, table};
 
 pub const MERGE_REGION_WITH_TXN_FILE_LOCKS_ERR_MSG: &str =
@@ -25,8 +30,8 @@ pub enum Error {
     TableError(table::Error),
     #[error("dfs error {0}")]
     DfsError(dfs::Error),
-    #[error("IO error {0}")]
-    Io(std::io::Error),
+    #[error("IO error {ctx}: {err}")]
+    Io { err: io::Error, ctx: String },
     #[error("remote compaction {0}")]
     RemoteCompaction(String),
     #[error("apply change set {0}")]
@@ -59,12 +64,6 @@ impl From<dfs::Error> for Error {
     }
 }
 
-impl From<std::io::Error> for Error {
-    fn from(e: std::io::Error) -> Self {
-        Error::Io(e)
-    }
-}
-
 impl From<hyper::Error> for Error {
     fn from(e: hyper::Error) -> Self {
         Error::RemoteCompaction(e.to_string())
@@ -75,4 +74,75 @@ impl From<http::Error> for Error {
     fn from(e: http::Error) -> Self {
         Error::RemoteCompaction(e.to_string())
     }
+}
+
+// Ref: [`anyhow::Context`](https://github.com/dtolnay/anyhow/blob/1.0.26/src/lib.rs#L543)
+pub trait IoContext<T> {
+    fn ctx<C>(self, ctx: C) -> Result<T>
+    where
+        C: Display + Send + Sync + 'static;
+
+    fn with_ctx<C, F>(self, f: F) -> Result<T>
+    where
+        C: Display + Send + Sync + 'static,
+        F: FnOnce() -> C;
+
+    fn table_ctx<C>(self, file_id: u64, ctx: C) -> table::Result<T>
+    where
+        C: Display + Send + Sync + 'static;
+
+    fn with_table_ctx<C, F>(self, f: F) -> table::Result<T>
+    where
+        C: Display + Send + Sync + 'static,
+        F: FnOnce() -> (u64, C);
+}
+
+impl<T> IoContext<T> for io::Result<T> {
+    fn ctx<C>(self, ctx: C) -> Result<T>
+    where
+        C: Display + Send + Sync + 'static,
+    {
+        self.map_err(|err| Error::Io {
+            err,
+            ctx: format!("{ctx}"),
+        })
+    }
+
+    fn with_ctx<C, F>(self, ctx_fn: F) -> Result<T>
+    where
+        C: Display + Send + Sync + 'static,
+        F: FnOnce() -> C,
+    {
+        self.map_err(|err| Error::Io {
+            err,
+            ctx: format!("{}", ctx_fn()),
+        })
+    }
+
+    fn table_ctx<C>(self, file_id: u64, ctx: C) -> table::Result<T>
+    where
+        C: Display + Send + Sync + 'static,
+    {
+        self.map_err(|err| table::Error::Io(table_ctx_to_str(file_id, ctx, err)))
+    }
+
+    fn with_table_ctx<C, F>(self, ctx_fn: F) -> table::Result<T>
+    where
+        C: Display + Send + Sync + 'static,
+        F: FnOnce() -> (u64, C),
+    {
+        self.map_err(|err| {
+            let (file_id, ctx) = ctx_fn();
+            table::Error::Io(table_ctx_to_str(file_id, ctx, err))
+        })
+    }
+}
+
+#[inline]
+fn table_ctx_to_str<C, E>(file_id: u64, ctx: C, err: E) -> String
+where
+    C: Display + Send + Sync + 'static,
+    E: Debug,
+{
+    format!("{ctx}:{file_id}: {err:?}")
 }

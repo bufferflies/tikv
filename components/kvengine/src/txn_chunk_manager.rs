@@ -18,6 +18,7 @@ use tikv_util::{box_err, HandyRwLock};
 use crate::{
     dfs,
     dfs::{Dfs, FileType},
+    error::IoContext,
     table,
     table::{
         sstable::{BlockCacheKey, LocalFile},
@@ -94,10 +95,10 @@ impl Default for TxnChunkEntry {
 impl TxnChunkManagerCore {
     fn init(&self) -> Result<()> {
         if !self.local_path.exists() {
-            fs::create_dir_all(&self.local_path)?;
+            fs::create_dir_all(&self.local_path).ctx("txn_chunk_mgr.init.create_dir")?;
         }
         if self.local_path.is_dir() {
-            let read_dir = fs::read_dir(&self.local_path)?;
+            let read_dir = fs::read_dir(&self.local_path).ctx("txn_chunk_mgr.init.read_dir")?;
             for entry in read_dir.flatten() {
                 let file_name = entry.file_name();
                 if let Some(txn_file_id) = parse_txn_chunk_id(file_name.to_str().unwrap()) {
@@ -136,9 +137,11 @@ impl TxnChunkManagerCore {
             let opts = dfs::Options::default().with_type(FileType::TxnChunk);
             let file_data = runtime.block_on(self.dfs.read_file(txn_chunk_id, opts))?;
             let txn_file_tmp_path = self.local_path.join(format!("{}.tmp", file_name));
-            fs::write(&txn_file_tmp_path, file_data.chunk())?;
+            fs::write(&txn_file_tmp_path, file_data.chunk())
+                .table_ctx(txn_chunk_id, "txn_chunk_mgr.prepare.write_tmp")?;
             let local_file_path = self.local_file_path(txn_chunk_id);
-            fs::rename(&txn_file_tmp_path, local_file_path)?;
+            fs::rename(&txn_file_tmp_path, local_file_path)
+                .table_ctx(txn_chunk_id, "txn_chunk.prepare.rename")?;
         }
         let txn_chunk = self.load_txn_chunk(txn_chunk_id, local_file_path, encryption_key)?;
         *guard = Some(txn_chunk);
@@ -211,9 +214,11 @@ impl TxnChunkManagerCore {
         if !local_file_path.exists() {
             let file_name = chunk_id.to_string();
             let txn_file_tmp_path = self.local_path.join(format!("{}.tmp", file_name));
-            fs::write(&txn_file_tmp_path, file_data.chunk())?;
+            fs::write(&txn_file_tmp_path, file_data.chunk())
+                .table_ctx(chunk_id, "txn_chunk_mgr.recv_chunk.write_tmp")?;
             let local_file_path = self.local_file_path(chunk_id);
-            fs::rename(&txn_file_tmp_path, local_file_path)?;
+            fs::rename(&txn_file_tmp_path, local_file_path)
+                .table_ctx(chunk_id, "txn_chunk_mgr.recv_chunk.rename")?;
         }
         let txn_chunk = self.load_txn_chunk(chunk_id, local_file_path, encryption_key)?;
         *guard = Some(txn_chunk);

@@ -22,6 +22,7 @@ use crate::{
         *,
     },
     util::evenly_distribute,
+    IoContext,
 };
 
 // higher level ttl is longer than lower level.
@@ -414,7 +415,8 @@ impl SsTableCore {
         let content = &buf[4..];
         match compression_type {
             LZ4_COMPRESSION => {
-                let block = lz4::block::decompress(content, None)?;
+                let block = lz4::block::decompress(content, None)
+                    .table_ctx(self.file.id(), "sst.read_block.lz4_decompress")?;
                 Ok(Bytes::from(block))
             }
             ZSTD_COMPRESSION => {
@@ -750,7 +752,8 @@ fn validate_checksum_with_fix(
                     encryption_key
                 );
                 // Just remove the sst file in local and download from dfs during next restart.
-                std::fs::remove_file(file_path)?;
+                std::fs::remove_file(file_path)
+                    .table_ctx(file.id(), "sst.validate_checksum.remove_file")?;
             }
             Err(err)
         }
