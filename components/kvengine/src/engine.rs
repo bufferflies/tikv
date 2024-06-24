@@ -763,6 +763,11 @@ impl EngineCore {
         self.send_compact_msg(CompactMsg::Compact(id_ver));
     }
 
+    #[inline]
+    pub fn pause_compaction(&self, id_ver: IdVer, seq: u64) {
+        self.send_compact_msg(CompactMsg::Pause { id_ver, seq });
+    }
+
     pub fn get_cache_size(&self) -> u64 {
         self.cache.weighted_size()
     }

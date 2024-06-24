@@ -271,6 +271,7 @@ pub(crate) enum ChangeSetType {
     TrimOverBound,
     InitialFlush,
     DestroyRange,
+    Compaction { shard_ver: u64 },
 }
 
 impl ChangeSetType {
@@ -283,6 +284,10 @@ impl ChangeSetType {
             ChangeSetType::InitialFlush
         } else if cs.has_destroy_range() {
             ChangeSetType::DestroyRange
+        } else if cs.has_compaction() || cs.has_major_compaction() || cs.has_columnar_compaction() {
+            ChangeSetType::Compaction {
+                shard_ver: cs.shard_ver,
+            }
         } else {
             ChangeSetType::Normal
         }
@@ -1246,8 +1251,15 @@ impl Applier {
 
     fn on_role_changed(&mut self, ctx: &mut ApplyContext, new_role: StateRole) {
         self.role = new_role;
-        ctx.engine
-            .set_shard_active(self.region.get_id(), self.is_leader());
+        let region_id = self.region.get_id();
+        let is_leader = self.is_leader();
+        if is_leader {
+            if let Some((seq, shard_ver)) = self.last_scheduled_compaction() {
+                let id_ver = kvengine::IdVer::new(region_id, shard_ver);
+                ctx.engine.pause_compaction(id_ver, seq);
+            }
+        }
+        ctx.engine.set_shard_active(region_id, is_leader);
     }
 
     fn is_leader(&self) -> bool {
@@ -1575,6 +1587,16 @@ impl Applier {
         }
         self.paused_apply_queue.paused_sequences.sort_unstable();
         self.paused_apply_queue.paused_sequences.dedup();
+    }
+
+    fn last_scheduled_compaction(&self) -> Option<(u64 /* seq */, u64 /* shard_ver */)> {
+        self.scheduled_change_sets
+            .iter()
+            .rev()
+            .find_map(|&(seq, cs_tp)| match cs_tp {
+                ChangeSetType::Compaction { shard_ver } => Some((seq, shard_ver)),
+                _ => None,
+            })
     }
 
     fn handle_resume_commit_merge(

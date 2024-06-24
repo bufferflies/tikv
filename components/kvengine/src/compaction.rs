@@ -2,7 +2,7 @@
 
 use std::{
     cmp::Ordering as CmpOrdering,
-    collections::{HashMap, HashSet},
+    collections::{hash_map::Entry, HashMap, HashSet},
     hash::Hash,
     iter::Iterator as StdIterator,
     ops::{Deref, Sub},
@@ -525,8 +525,7 @@ impl Engine {
         runner.run();
     }
 
-    pub(crate) fn compact(&self, id_ver: IdVer) -> Option<Result<pb::ChangeSet>> {
-        let shard = self.get_shard_with_ver(id_ver.id, id_ver.ver).ok()?;
+    pub(crate) fn compact(&self, shard: Arc<Shard>) -> Option<Result<pb::ChangeSet>> {
         let tag = shard.tag();
         if !shard.ready_to_compact() {
             info!("Shard {} is not ready for compaction", tag);
@@ -536,7 +535,7 @@ impl Engine {
         match shard.get_compaction_priority() {
             Some(CompactionPriority::L0 { .. }) => self.trigger_l0_compaction(&shard),
             Some(CompactionPriority::L1Plus { cf, level, .. }) => {
-                self.trigger_l1_plus_compaction(&shard, cf, level, id_ver)
+                self.trigger_l1_plus_compaction(&shard, cf, level)
             }
             Some(CompactionPriority::Major { .. }) => self.trigger_major_compaction(&shard),
             Some(CompactionPriority::DestroyRange) => self.destroy_range(&shard).transpose(),
@@ -1093,7 +1092,6 @@ impl Engine {
         shard: &Shard,
         cf: isize,
         level: usize,
-        id_ver: IdVer,
     ) -> Option<Result<pb::ChangeSet>> {
         let tag = shard.tag();
         let data = shard.get_data();
@@ -1226,7 +1224,7 @@ impl Engine {
                 })
                 .collect::<Vec<_>>();
             comp.set_table_creates(tbl_creates.into());
-            let mut cs = new_change_set(id_ver.id, id_ver.ver);
+            let mut cs = new_change_set(shard.id, shard.ver);
             cs.set_compaction(comp);
             return Some(Ok(cs));
         }
@@ -2665,6 +2663,16 @@ pub(crate) enum CompactMsg {
     /// This simplifies the logic, avoid race condition.
     Clear(IdVer),
 
+    /// Pause message is used to pause compaction when a shard becomes leader
+    /// but there are scheduled compactions.
+    ///
+    /// In this scene, we need to prevent new compaction tasks. Otherwise,
+    /// compaction based on stale shard meta may be conflict with scheduled
+    /// compactions.
+    ///
+    /// `seq` is the maximum log index sequence of scheduled compactions.
+    Pause { id_ver: IdVer, seq: u64 },
+
     /// Stop background compact thread.
     Stop,
 }
@@ -2687,6 +2695,9 @@ pub(crate) struct CompactRunner {
     /// `pending` contains shards that want to do compaction but the job queue
     /// is full now.
     pending: HashSet<IdVer>,
+    /// `paused_seq` is used to indicate that compaction should be paused until
+    /// `Shard::meta_seq >= paused_seq`.
+    paused_seq: HashMap<IdVer, u64>,
 }
 
 impl CompactRunner {
@@ -2698,6 +2709,7 @@ impl CompactRunner {
             running: Default::default(),
             notified: Default::default(),
             pending: Default::default(),
+            paused_seq: Default::default(),
         }
     }
 
@@ -2715,6 +2727,20 @@ impl CompactRunner {
                 CompactMsg::Applied(id_ver) => self.compaction_applied(id_ver),
 
                 CompactMsg::Clear(id_ver) => self.clear(id_ver),
+
+                CompactMsg::Pause { id_ver, seq } => {
+                    let old_seq = self.paused_seq.insert(id_ver, seq);
+
+                    let tag = ShardTag::new(self.engine.get_engine_id(), id_ver);
+                    info!("{} compaction paused", tag; "seq" => seq, "old_seq" => ?old_seq);
+                    debug_assert!(
+                        old_seq.map_or(true, |old| old <= seq),
+                        "{}: compaction paused old_seq {:?} > seq {}",
+                        tag,
+                        old_seq,
+                        seq
+                    );
+                }
 
                 CompactMsg::Stop => {
                     info!(
@@ -2737,6 +2763,19 @@ impl CompactRunner {
             self.pending.insert(id_ver);
             return;
         }
+
+        let shard = match self.engine.get_shard_with_ver(id_ver.id, id_ver.ver) {
+            Ok(shard) => shard,
+            Err(_) => {
+                self.pending.remove(&id_ver);
+                return;
+            }
+        };
+
+        if self.is_paused(id_ver, shard.get_meta_sequence()) {
+            return;
+        }
+
         self.task_id += 1;
         let task_id = self.task_id;
         self.running.insert(id_ver, task_id);
@@ -2744,7 +2783,7 @@ impl CompactRunner {
         let engine = self.engine.clone();
         std::thread::spawn(move || {
             tikv_util::set_current_region(id_ver.id);
-            let result = Box::new(engine.compact(id_ver));
+            let result = Box::new(engine.compact(shard));
             engine.send_compact_msg(CompactMsg::Finish {
                 task_id,
                 id_ver,
@@ -2853,5 +2892,22 @@ impl CompactRunner {
 
     fn is_compacting(&self, id_ver: IdVer) -> bool {
         self.running.contains_key(&id_ver) || self.notified.contains(&id_ver)
+    }
+
+    fn is_paused(&mut self, id_ver: IdVer, meta_seq: u64) -> bool {
+        match self.paused_seq.entry(id_ver) {
+            Entry::Occupied(entry) => {
+                let paused_seq = *entry.get();
+                if meta_seq < paused_seq {
+                    true
+                } else {
+                    entry.remove();
+                    let tag = ShardTag::new(self.engine.get_engine_id(), id_ver);
+                    info!("{} compaction resumed", tag; "meta_seq" => meta_seq, "paused_seq" => paused_seq);
+                    false
+                }
+            }
+            Entry::Vacant(_) => false,
+        }
     }
 }
