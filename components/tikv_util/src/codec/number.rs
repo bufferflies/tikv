@@ -12,6 +12,7 @@ use super::{BytesSlice, Error, Result};
 const SIGN_MARK: u64 = 0x8000000000000000;
 pub const MAX_VAR_I64_LEN: usize = 10;
 pub const MAX_VAR_U64_LEN: usize = 10;
+pub const U16_SIZE: usize = 2;
 pub const U64_SIZE: usize = 8;
 pub const I64_SIZE: usize = 8;
 pub const F64_SIZE: usize = 8;

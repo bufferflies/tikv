@@ -7,7 +7,7 @@ use log_wrappers::Value;
 use protobuf::Message;
 use tikv_util::{
     box_err,
-    codec::number::{U32_SIZE, U64_SIZE},
+    codec::number::{U16_SIZE, U32_SIZE, U64_SIZE},
 };
 
 use crate::{DeletePrefixes, ShardMeta, ShardTag, UserMeta, DEL_PREFIXES_KEY};
@@ -203,17 +203,25 @@ impl TxnFileRefPropertyHelper {
 
 #[derive(Debug, Default, Clone)]
 pub struct TxnFileLocks {
+    // Shard meta sequence (log index) on changed. Used for de-duplication.
+    seq: u64,
     inner: HashMap<u64 /* txn start_ts */, Bytes /* lock_val_prefix */>,
 }
 
+const TXN_FILE_LOCKS_FORMAT_VER: u16 = 1;
+
 impl TxnFileLocks {
     pub fn marshall(&self) -> Bytes {
-        let size = self
+        let size: usize = self
             .inner
             .values()
             .map(|lock| U64_SIZE /* start_ts */ + U32_SIZE /* lock_len */ + lock.len())
             .sum();
-        let mut buf = BytesMut::with_capacity(size);
+        let capacity = U16_SIZE /* ver */ + U64_SIZE /* seq */ + size;
+
+        let mut buf = BytesMut::with_capacity(capacity);
+        buf.put_u16(TXN_FILE_LOCKS_FORMAT_VER);
+        buf.put_u64(self.seq);
         for (&ts, lock) in &self.inner {
             buf.put_u64(ts);
             buf.put_u32(lock.len() as u32);
@@ -223,6 +231,11 @@ impl TxnFileLocks {
     }
 
     pub fn unmarshall(mut buf: Bytes) -> Self {
+        debug_assert!(buf.len() >= U16_SIZE + U64_SIZE, "buf: {:?}", buf);
+        let ver = buf.get_u16();
+        let seq = buf.get_u64();
+        debug_assert_eq!(ver, TXN_FILE_LOCKS_FORMAT_VER, "buf: {:?}", buf);
+
         let mut locks = HashMap::default();
         while buf.has_remaining() {
             debug_assert!(buf.remaining() >= U64_SIZE + U32_SIZE, "buf: {:?}", buf);
@@ -232,7 +245,7 @@ impl TxnFileLocks {
             let lock = buf.split_to(lock_len);
             locks.insert(start_ts, lock);
         }
-        Self { inner: locks }
+        Self { seq, inner: locks }
     }
 
     #[inline]
@@ -240,9 +253,19 @@ impl TxnFileLocks {
         self.inner.is_empty()
     }
 
-    // Return whether modified, i.e., `start_ts` is newly inserted.
     #[inline]
-    pub fn insert(&mut self, start_ts: u64, lock_val_prefix: &[u8]) -> bool /* modified */ {
+    pub fn seq(&self) -> u64 {
+        self.seq
+    }
+
+    // Return whether modified, i.e., `start_ts` is newly inserted.
+    // Duplication should be checked before insert.
+    #[inline]
+    pub fn insert(&mut self, seq: u64, start_ts: u64, lock_val_prefix: &[u8]) -> bool /* modified */
+    {
+        debug_assert!(self.seq < seq);
+        self.seq = seq;
+
         match self.inner.entry(start_ts) {
             HashMapEntry::Vacant(e) => {
                 e.insert(Bytes::copy_from_slice(lock_val_prefix));
@@ -257,8 +280,11 @@ impl TxnFileLocks {
     }
 
     // Return whether modified, i.e., an existed `start_ts` is removed.
+    // Duplication should be checked before remove.
     #[inline]
-    pub fn remove(&mut self, start_ts: u64) -> bool /* modified */ {
+    pub fn remove(&mut self, seq: u64, start_ts: u64) -> bool /* modified */ {
+        debug_assert!(self.seq < seq);
+        self.seq = seq;
         self.inner.remove(&start_ts).is_some()
     }
 
@@ -356,18 +382,18 @@ mod tests {
     #[test]
     fn test_txn_file_locks() {
         let mut locks = TxnFileLocks::default();
-        assert!(locks.insert(1, "a".as_bytes()));
-        assert!(locks.insert(2, "b".as_bytes()));
-        assert!(!locks.insert(1, "c".as_bytes()));
+        assert!(locks.insert(1, 1, "a".as_bytes()));
+        assert!(locks.insert(2, 2, "b".as_bytes()));
+        assert!(!locks.insert(3, 1, "c".as_bytes()));
 
         let data = locks.marshall();
         let locks1 = TxnFileLocks::unmarshall(data);
         assert_eq!(locks.inner, locks1.inner);
 
-        assert!(locks.remove(1));
-        assert!(!locks.remove(1));
-        assert!(locks.remove(2));
-        assert!(!locks.remove(2));
+        assert!(locks.remove(4, 1));
+        assert!(!locks.remove(5, 1));
+        assert!(locks.remove(6, 2));
+        assert!(!locks.remove(7, 2));
         assert!(locks.is_empty());
     }
 }

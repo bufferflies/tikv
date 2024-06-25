@@ -26,6 +26,7 @@ pub struct ShardMeta {
     pub ver: u64,
     pub range: ShardRange,
     // sequence is the raft log index of the applied change set.
+    // Should be updated and ONLY be updated when LSM is changed.
     pub seq: u64,
     pub(crate) files: HashMap<u64, FileMeta>,
 
@@ -1011,19 +1012,20 @@ impl ShardMeta {
     {
         let tag = self.tag();
 
-        if self.seq >= log_index {
+        if self.txn_file_locks.seq() >= log_index {
             info!("{} skip stale merge txn file ref", tag;
-                "seq" => self.seq,
+                "seq" => self.txn_file_locks.seq(),
                 "log_index" => log_index,
                 "wb_ref" => ?wb_ref);
             return false;
         }
-        self.seq = log_index;
 
         let modified = if wb_ref.get_user_meta().is_empty() {
-            let inserted = self
-                .txn_file_locks
-                .insert(wb_ref.start_ts, wb_ref.get_lock_val_prefix());
+            let inserted = self.txn_file_locks.insert(
+                log_index,
+                wb_ref.start_ts,
+                wb_ref.get_lock_val_prefix(),
+            );
             debug!("{} ShardMeta merge txn file locks (insert by lock)", tag;
                 "wb_ref" => ?wb_ref,
                 "log_index" => log_index,
@@ -1031,7 +1033,7 @@ impl ShardMeta {
             );
             inserted
         } else {
-            let existed = self.txn_file_locks.remove(wb_ref.start_ts);
+            let existed = self.txn_file_locks.remove(log_index, wb_ref.start_ts);
             debug_assert!(
                 existed,
                 "{} unexpected txn not existed, wb_ref {:?}, log_index {}, current locks {:?}",
