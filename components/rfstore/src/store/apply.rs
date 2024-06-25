@@ -262,6 +262,16 @@ pub(crate) struct Applier {
 
     encryption_key: Option<EncryptionKey>,
     decryption_buf: Vec<u8>,
+
+    /// Shard is waiting to be active/inactive until the raft logs of previous
+    /// term are all been preprocessed, so that all change sets proposed by
+    /// the previous leader are scheduled.
+    ///
+    /// Note that the `role` of applier is NOT pending.
+    shard_pending_active: Option<(
+        u64,  // current term
+        bool, // is_active
+    )>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1249,17 +1259,21 @@ impl Applier {
         ctx.finish_for(self, results);
     }
 
-    fn on_role_changed(&mut self, ctx: &mut ApplyContext, new_role: StateRole) {
+    fn on_role_changed(&mut self, new_role: StateRole) {
         self.role = new_role;
+        self.shard_pending_active = Some((self.term, self.is_leader()));
+    }
+
+    fn set_shard_active(&self, ctx: &ApplyContext, active: bool) {
+        debug_assert_eq!(self.is_leader(), active);
         let region_id = self.region.get_id();
-        let is_leader = self.is_leader();
-        if is_leader {
+        if active {
             if let Some((seq, shard_ver)) = self.last_scheduled_compaction() {
                 let id_ver = kvengine::IdVer::new(region_id, shard_ver);
                 ctx.engine.pause_compaction(id_ver, seq);
             }
         }
-        ctx.engine.set_shard_active(region_id, is_leader);
+        ctx.engine.set_shard_active(region_id, active);
     }
 
     fn is_leader(&self) -> bool {
@@ -1292,7 +1306,13 @@ impl Applier {
         self.handle_raft_committed_entries(ctx, apply.entries.drain(..));
         self.snap.take();
         if let Some(state) = apply.new_role {
-            self.on_role_changed(ctx, state);
+            self.on_role_changed(state);
+        }
+        if let Some((pending_term, is_active)) = self.shard_pending_active {
+            if ctx.exec_log_term >= pending_term {
+                self.set_shard_active(ctx, is_active);
+                self.shard_pending_active = None;
+            }
         }
         if self.pending_remove {
             self.destroy();
