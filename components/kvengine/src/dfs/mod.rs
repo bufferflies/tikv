@@ -24,6 +24,7 @@ use bytes::Bytes;
 pub use config::Config as DFSConfig;
 use file_system;
 use metrics::*;
+use moka::future::ConcurrentCacheExt;
 pub use s3::*;
 use thiserror::Error;
 use tikv_util::time::Instant;
@@ -158,7 +159,7 @@ pub struct CacheFs {
 impl CacheFs {
     pub fn new(cache_size: u64, s3_fs: Arc<S3Fs>) -> Self {
         let builder = moka::future::CacheBuilder::new(cache_size);
-        let builder = builder.time_to_idle(Duration::from_secs(3600));
+        // Do not set TTL to make the memory usage stable over time.
         let builder = builder.weigher(|_, v: &Bytes| v.len() as u32);
         let cache = builder.build();
         Self { cache, s3_fs }
@@ -177,6 +178,9 @@ impl CacheFs {
             .await
             .map_err(|e| e.as_ref().clone())?;
         if cache_miss.load(atomic::Ordering::Acquire) {
+            // In case the CacheFS exceeds its capacity, we explicitly sync it when new
+            // entry is added.
+            self.cache.sync();
             KVENGINE_CACHEFS_REQ_COUNTER_VEC
                 .with_label_values(&["miss"])
                 .inc();
