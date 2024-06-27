@@ -1309,7 +1309,7 @@ impl Applier {
             self.on_role_changed(state);
         }
         if let Some((pending_term, is_active)) = self.shard_pending_active {
-            if ctx.exec_log_term >= pending_term {
+            if self.apply_state.applied_index_term >= pending_term {
                 self.set_shard_active(ctx, is_active);
                 self.shard_pending_active = None;
             }
