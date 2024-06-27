@@ -783,9 +783,7 @@ impl SnapAccessCore {
             let tbl = self.data.mem_tbls.as_slice()[i].get_cf(cf);
             let v = tbl.get_newer(inner_key, version, out_val_owner);
             if v.is_valid() {
-                out_val_owner.resize(v.encoded_size(), 0);
-                v.encode(out_val_owner.as_mut_slice());
-                return table::Value::decode(out_val_owner.as_slice());
+                return v;
             }
         }
         for l0 in &self.data.l0_tbls {
