@@ -190,10 +190,10 @@ impl S3FsCore {
                 format!("{}/{:02x}/{:016x}.sst", self.prefix, idx, file_id)
             }
             FileType::TxnChunk => {
-                format!("{}/txn/{}.txn", self.prefix, file_id)
+                format!("{}/txn/{:02x}/{:016x}.txn", self.prefix, idx, file_id)
             }
             FileType::Schema => {
-                format!("{}/schema/{:016x}.schema", self.prefix, file_id)
+                format!("{}/schema/{:02x}/{:016x}.schema", self.prefix, idx, file_id)
             }
             FileType::Columnar => {
                 format!("{}/col/{:02x}/{:016x}.col", self.prefix, idx, file_id)
