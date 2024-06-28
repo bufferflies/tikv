@@ -7,7 +7,9 @@ use std::{
 
 use tikv_util::config::ReadableDuration;
 
-use crate::table::{blobtable::builder::BlobTableBuildOptions, ChecksumType};
+use crate::table::{
+    blobtable::builder::BlobTableBuildOptions, columnar::ColumnarTableBuildOptions, ChecksumType,
+};
 
 pub(crate) const DEFAULT_COMPACTION_REQUEST_VERSION: u32 = 3;
 pub(crate) const DEFAULT_COMPACTION_TOMBS_RATIO: f64 = 0.2;
@@ -81,6 +83,8 @@ pub struct Config {
     // will meet a "ValueAfterTable" error.
     // See https://docs.rs/toml/0.5.11/toml/ser/enum.Error.html#variant.ValueAfterTable.
     pub blob_table_build_options: BlobTableBuildOptions,
+
+    pub columnar_table_build_options: ColumnarTableBuildOptions,
 }
 
 impl Default for Config {
@@ -98,6 +102,7 @@ impl Default for Config {
             checksum_type: ChecksumType::Crc32,
             blob_table_build_options: Default::default(),
             per_keyspace_configs: vec![],
+            columnar_table_build_options: Default::default(),
         }
     }
 }

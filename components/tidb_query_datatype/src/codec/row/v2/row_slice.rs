@@ -174,8 +174,16 @@ impl RowSlice<'_> {
                 null_ids,
                 ..
             } => {
-                let max_non_null_id = non_null_ids.get(non_null_ids.len() - 1).unwrap_or(0);
-                let max_null_id = null_ids.get(null_ids.len() - 1).unwrap_or(0);
+                let max_non_null_id = if non_null_ids.len() > 0 {
+                    non_null_ids.get(non_null_ids.len() - 1).unwrap()
+                } else {
+                    0
+                };
+                let max_null_id = if null_ids.len() > 0 {
+                    null_ids.get(null_ids.len() - 1).unwrap()
+                } else {
+                    0
+                };
                 max_non_null_id.max(max_null_id) as i32
             }
             RowSlice::Small {
@@ -183,8 +191,16 @@ impl RowSlice<'_> {
                 null_ids,
                 ..
             } => {
-                let max_non_null_id = non_null_ids.get(non_null_ids.len() - 1).unwrap_or(0);
-                let max_null_id = null_ids.get(null_ids.len() - 1).unwrap_or(0);
+                let max_non_null_id = if non_null_ids.len() > 0 {
+                    non_null_ids.get(non_null_ids.len() - 1).unwrap()
+                } else {
+                    0
+                };
+                let max_null_id = if null_ids.len() > 0 {
+                    null_ids.get(null_ids.len() - 1).unwrap()
+                } else {
+                    0
+                };
                 max_non_null_id.max(max_null_id) as i32
             }
         }

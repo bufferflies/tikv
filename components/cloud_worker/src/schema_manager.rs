@@ -1,4 +1,5 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
+
 use std::{
     collections::HashMap,
     fs,
@@ -18,13 +19,10 @@ use kvengine::{
     dfs,
     dfs::Dfs,
     table::{
+        columnar,
         columnar::{
-            builder::{
-                new_common_handle_column_info, new_int_handle_column_info, new_txn_id_column_info,
-                new_version_column_info,
-            },
-            columnar::Schema,
-            schema_file::{self, SchemaFile},
+            new_common_handle_column_info, new_int_handle_column_info, new_txn_id_column_info,
+            new_version_column_info, Schema, SchemaFile,
         },
         sstable::{File, LocalFile, NO_COMPRESSION},
         ChecksumType,
@@ -457,7 +455,7 @@ impl SchemaManager {
                 }
 
                 let new_schema_file_data =
-                    schema_file::build_schema_file(keyspace_id, schema_version, schemas.unwrap());
+                    columnar::build_schema_file(keyspace_id, schema_version, schemas.unwrap());
                 let file_id = self.ctx.pd.alloc_id()?;
                 let dfs = self.ctx.s3fs.clone();
                 let tx_clone = tx.clone();
@@ -887,9 +885,7 @@ mod tests {
     use bytes::Bytes;
     use kvengine::table::{
         columnar::{
-            builder::{new_int_handle_column_info, new_version_column_info},
-            columnar::Schema,
-            schema_file,
+            build_schema_file, new_int_handle_column_info, new_version_column_info, Schema,
         },
         sstable::LocalFile,
     };
@@ -935,7 +931,7 @@ mod tests {
             };
             schemas.push(schema);
         }
-        let schema_file_data = schema_file::build_schema_file(1234, 100, schemas.clone());
+        let schema_file_data = build_schema_file(1234, 100, schemas.clone());
         write_schema_file_to_local(dir.path(), 1234, 1000, Bytes::from(schema_file_data)).unwrap();
         schemas.push(Schema {
             table_id: 11,
@@ -944,7 +940,7 @@ mod tests {
             txn_id_column: None,
             columns: vec![new_int_handle_column_info()],
         });
-        let schema_file_data = schema_file::build_schema_file(1234, 201, schemas);
+        let schema_file_data = build_schema_file(1234, 201, schemas);
         write_schema_file_to_local(dir.path(), 1234, 1001, Bytes::from(schema_file_data)).unwrap();
 
         // schema_file is the newest schema file of the keyspace.

@@ -27,7 +27,7 @@ use crate::{
     table::{
         self,
         blobtable::blobtable::BlobTable,
-        columnar::schema_file::SchemaFile,
+        columnar::{ColumnarFile, SchemaFile},
         get_tables_in_range,
         memtable::{self, CfTable, WriteBatch},
         search,
@@ -92,6 +92,13 @@ pub struct Shard {
 
     // write_sequence is the raft log index of the applied write batch.
     pub(crate) write_sequence: AtomicU64,
+
+    // snap_version is the latest L0 table's version, equals to:
+    //     ShardMeta.data_sequence + ShardMeta.base_version
+    pub(crate) snap_version: AtomicU64,
+    // col_snap_version is the latest L0 table's version that has been compacted to
+    // columnar file. It is used to determine whether the columnar file is up-to-date.
+    pub(crate) col_snap_version: AtomicU64,
 
     pub(crate) compaction_priority: RwLock<Option<CompactionPriority>>,
 
@@ -191,6 +198,8 @@ impl Shard {
             entries_write_cf: Default::default(),
             meta_seq: Default::default(),
             write_sequence: Default::default(),
+            snap_version: Default::default(),
+            col_snap_version: Default::default(),
             compaction_priority: RwLock::new(None),
             encryption_key,
         };
@@ -245,6 +254,12 @@ impl Shard {
         shard.base_version.store(snap.base_version, Release);
         shard.meta_seq.store(cs.sequence, Release);
         shard.write_sequence.store(snap.data_sequence, Release);
+        shard
+            .snap_version
+            .store(snap.base_version + snap.data_sequence, Release);
+        shard
+            .col_snap_version
+            .store(cs.get_snapshot().get_columnar_snap_version(), Release);
         shard
     }
 
@@ -355,7 +370,7 @@ impl Shard {
         // TODO: load lock_txn_files
 
         let mut shard = Shard::new_for_ingest(0, &cs, Arc::new(Options::default()), master_key);
-        let (l0s, blob_tbls, scfs, lock_txn_files) =
+        let (l0s, blob_tbls, scfs, lock_txn_files, col_levels) =
             create_snapshot_tables(cs.get_snapshot(), &cs, ignore_lock);
         let data = ShardData::new(
             shard.range.clone(),
@@ -368,6 +383,7 @@ impl Shard {
             RegionLimiter::new((&shard.opt.flow_control).into()), // Note: limiter is disabled here
             NEW_DATA_UPDATE_COUNTER,
             cs.schema_file.clone(),
+            col_levels,
         );
         shard.id = cs.shard_id;
         shard.set_data(data);
@@ -675,6 +691,14 @@ impl Shard {
         self.write_sequence.load(Ordering::Acquire)
     }
 
+    pub fn get_snap_version(&self) -> u64 {
+        self.snap_version.load(Ordering::Acquire)
+    }
+
+    pub fn get_columnar_snap_version(&self) -> u64 {
+        self.col_snap_version.load(Ordering::Acquire)
+    }
+
     pub fn get_meta_sequence(&self) -> u64 {
         self.meta_seq.load(Ordering::Acquire)
     }
@@ -782,6 +806,11 @@ impl Shard {
                 *lock = Some(CompactionPriority::Major { score: f64::MAX });
                 return;
             }
+        }
+        if data.schema_file.is_some() && !data.col_levels.unconverted_l0s.is_empty() {
+            let mut lock = self.compaction_priority.write().unwrap();
+            *lock = Some(CompactionPriority::L0ToColumnar);
+            return;
         }
         let mut score = 0.0;
         let mut cf_with_highest_score = -1;
@@ -985,6 +1014,7 @@ impl Shard {
             shard_data.limiter.clone(),
             shard_data.update_counter + 1,
             shard_data.schema_file.clone(),
+            shard_data.col_levels.clone(),
         );
         self.set_data(new_data);
     }
@@ -1068,6 +1098,7 @@ impl ShardData {
             limiter,
             INITIAL_UPDATE_COUNTER,
             None,
+            ColumnarLevels::new(),
         )
     }
 
@@ -1082,6 +1113,7 @@ impl ShardData {
         limiter: RegionLimiter,
         update_counter: u64,
         schema_file: Option<SchemaFile>,
+        col_levels: ColumnarLevels,
     ) -> Self {
         assert!(!mem_tbls.is_empty());
 
@@ -1097,6 +1129,7 @@ impl ShardData {
                 limiter,
                 update_counter,
                 schema_file,
+                col_levels,
             }),
         }
     }
@@ -1114,6 +1147,7 @@ pub(crate) struct ShardDataCore {
     pub limiter: RegionLimiter,
     pub update_counter: u64,
     pub(crate) schema_file: Option<SchemaFile>,
+    pub(crate) col_levels: ColumnarLevels,
 }
 
 impl Deref for ShardDataCore {
@@ -2112,6 +2146,65 @@ impl fmt::Debug for ShardRange {
             .field("inner_key_off", &self.inner_key_off)
             .field("keyspace_id", &self.keyspace_id)
             .finish()
+    }
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct ColumnarLevel {
+    pub(crate) level: usize,
+    pub(crate) files: Vec<ColumnarFile>,
+}
+
+impl ColumnarLevel {
+    pub(crate) fn new(level: usize) -> Self {
+        Self {
+            level,
+            files: vec![],
+        }
+    }
+
+    pub(crate) fn sort(&mut self) {
+        if self.level < 2 {
+            self.files.sort_by(|a, b| {
+                let a_l0_version = a.get_l0_version().unwrap();
+                let b_l0_version = b.get_l0_version().unwrap();
+                b_l0_version.cmp(&a_l0_version)
+            })
+        } else {
+            self.files
+                .sort_by(|a, b| a.get_smallest().cmp(&b.get_smallest()))
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct ColumnarLevels {
+    pub(crate) unconverted_l0s: Vec<L0Table>,
+    pub(crate) levels: Vec<ColumnarLevel>,
+}
+
+impl ColumnarLevels {
+    pub(crate) fn new() -> Self {
+        Self {
+            unconverted_l0s: vec![],
+            levels: vec![
+                ColumnarLevel::new(0),
+                ColumnarLevel::new(1),
+                ColumnarLevel::new(2),
+            ],
+        }
+    }
+
+    pub(crate) fn sort(&mut self) {
+        self.levels.iter_mut().for_each(|l| l.sort());
+    }
+
+    pub(crate) fn add_file(&mut self, level: usize, file: ColumnarFile) {
+        self.levels[level].files.push(file);
+    }
+
+    pub(crate) fn retain(&mut self, f: impl Fn(&ColumnarFile) -> bool) {
+        self.levels.iter_mut().for_each(|l| l.files.retain(&f));
     }
 }
 

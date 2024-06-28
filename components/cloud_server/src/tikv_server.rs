@@ -1048,6 +1048,7 @@ impl TikvServer {
                 let size = (total_mem >> 30) as usize / 2;
                 size.clamp(2, 64)
             });
+        kv_opts.columnar_build_options = conf.kvengine.columnar_table_build_options;
 
         let opts = Arc::new(kv_opts);
         let id_allocator = Arc::new(PdIdAllocator::new(pd.clone()));

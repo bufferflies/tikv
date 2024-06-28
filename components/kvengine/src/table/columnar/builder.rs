@@ -68,6 +68,9 @@ pub struct ColumnarFileBuilder {
     pub file_id: u64,
     snap_version: Option<u64>,
     tables: Vec<ColumnarTableBuilder>,
+    pub(crate) estimated_size: usize,
+    pub(crate) smallest: Vec<u8>,
+    pub(crate) biggest: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -144,15 +147,22 @@ impl ColumnarFileBuilder {
         ColumnarFileBuilder {
             file_id,
             snap_version,
+            estimated_size: 0,
             tables: vec![],
+            smallest: vec![],
+            biggest: vec![],
         }
     }
 
     pub fn add_table(&mut self, table: ColumnarTableBuilder) {
+        self.estimated_size += table.get_estimated_size();
         self.tables.push(table);
     }
 
     pub fn build(&mut self) -> Vec<u8> {
+        if self.tables.is_empty() {
+            return vec![];
+        }
         self.tables
             .sort_by(|a, b| a.schema.table_id.cmp(&b.schema.table_id));
         let mut tables_offsets = vec![];
@@ -169,8 +179,18 @@ impl ColumnarFileBuilder {
         }
         let mut property_buf = vec![];
         let (smallest, biggest) = self.build_smallest_biggest();
-        add_property(&mut property_buf, PROP_KEY_SMALLEST.as_bytes(), &smallest);
-        add_property(&mut property_buf, PROP_KEY_BIGGEST.as_bytes(), &biggest);
+        self.smallest = smallest;
+        self.biggest = biggest;
+        add_property(
+            &mut property_buf,
+            PROP_KEY_SMALLEST.as_bytes(),
+            &self.smallest,
+        );
+        add_property(
+            &mut property_buf,
+            PROP_KEY_BIGGEST.as_bytes(),
+            &self.biggest,
+        );
         add_property(
             &mut property_buf,
             PROP_KEY_MAX_VERSION.as_bytes(),
@@ -230,6 +250,16 @@ impl ColumnarFileBuilder {
         };
         (smallest_key, biggest_key)
     }
+
+    pub(crate) fn num_tables(&self) -> usize {
+        self.tables.len()
+    }
+
+    pub(crate) fn reset(&mut self, id: u64) {
+        self.file_id = id;
+        self.estimated_size = 0;
+        self.tables.clear();
+    }
 }
 
 pub struct ColumnarTableBuilder {
@@ -282,12 +312,10 @@ impl ColumnarTableBuilder {
         }
     }
 
-    pub(crate) fn add_block(&mut self, block: &Block) {
-        self.append_block(block, 0, block.handles.length());
-    }
-
-    fn append_block(&mut self, block: &Block, start_offset: usize, end_offset: usize) {
-        self.handle_builder
+    pub(crate) fn append_block(&mut self, block: &Block, start_offset: usize) -> usize {
+        let mut end_offset = block.length();
+        end_offset = self
+            .handle_builder
             .append_handle(&block.handles, start_offset, end_offset);
         self.version_builder
             .append(&block.versions, start_offset, end_offset);
@@ -301,6 +329,7 @@ impl ColumnarTableBuilder {
         for i in start_offset..end_offset {
             self.max_version = max(self.max_version, block.versions.get_version(i))
         }
+        end_offset
     }
 
     fn finish_table(&mut self) {
@@ -338,6 +367,9 @@ impl ColumnarTableBuilder {
 
     pub(crate) fn compute_size(&self) -> DataSizeTuple {
         let mut total_size = DataSizeTuple::default();
+        if self.handle_builder.row_count == 0 {
+            return total_size;
+        }
         let handle_col_size = self.handle_builder.compute_size();
         total_size.add(handle_col_size);
         let version_col_size = self.version_builder.compute_size();
@@ -404,6 +436,16 @@ impl ColumnarTableBuilder {
         output_buf.extend_from_slice(&self.compressed_handle_index);
         output_buf.put_u32_le(self.properties.len() as u32);
         output_buf.extend_from_slice(&self.properties);
+    }
+
+    pub(crate) fn get_estimated_size(&self) -> usize {
+        let mut estimated_size = self.handle_builder.estimated_size
+            + self.version_builder.estimated_size
+            + self.txn_id_builder.estimated_size;
+        for cb in &self.column_builders {
+            estimated_size += cb.estimated_size;
+        }
+        estimated_size
     }
 }
 
@@ -489,7 +531,7 @@ impl ColumnarColumnBuilder {
         input: &ColumnBuffer,
         row_offset: usize,
         row_end_off: usize,
-    ) {
+    ) -> usize {
         debug_assert!(self.is_handle);
         for i in row_offset..row_end_off {
             let handle = input.get_not_null_value(i);
@@ -498,11 +540,13 @@ impl ColumnarColumnBuilder {
                 let last_handle = self.pack_buffer.get_not_null_value(current_length - 1);
                 if last_handle != handle {
                     self.finish_pack();
+                    return i;
                 }
             }
             self.pack_buffer.push_value(handle);
             self.row_count += 1;
         }
+        row_end_off
     }
 
     fn finish_pack(&mut self) {

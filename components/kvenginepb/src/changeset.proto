@@ -68,6 +68,7 @@ message SchemaMeta {
 message ColumnarCompaction {
   TableChange columnar_change = 1;
   uint64 snap_version = 2;
+  repeated uint64 row_l0s = 3;
 }
 
 message Flush {
@@ -93,6 +94,7 @@ message Snapshot {
   repeated TableCreate columnarCreates = 12;
   SchemaMeta schema_meta = 13;
   uint64 columnar_snap_version = 14;
+  repeated uint64 unconverted_l0s = 15;
 }
 
 message L0Create {

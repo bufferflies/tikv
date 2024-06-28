@@ -3,6 +3,7 @@
 use std::{
     cmp::{max, min},
     collections::HashMap,
+    iter::Iterator,
     sync::{
         atomic::{Ordering, Ordering::Release},
         Arc,
@@ -14,6 +15,7 @@ use api_version::{
     ApiV2, KeyMode, KvFormat,
 };
 use bytes::{Buf, Bytes};
+use collections::HashSet;
 use dashmap::mapref::entry::Entry;
 use kvenginepb as pb;
 use slog_global::info;
@@ -96,6 +98,7 @@ impl Engine {
                 store_u64(&new_shard.meta_seq, initial_seq);
                 store_u64(&new_shard.write_sequence, initial_seq);
             }
+            store_u64(&new_shard.snap_version, old_shard.get_snap_version());
             if !old_del_prefixes.is_empty() {
                 // We need to use the old shard's DEL_PREFIXES_KEY to overwrite the new shard's
                 // DEL_PREFIXES_KEY. because the destroy_range compaction may have not
@@ -108,12 +111,22 @@ impl Engine {
             }
             new_shards.push(Arc::new(new_shard));
         }
+        let unconverted_l0s: HashSet<u64> = old_data
+            .col_levels
+            .unconverted_l0s
+            .iter()
+            .map(|l0| l0.id())
+            .collect();
         for new_shard in &new_shards {
             let new_mem_tbls = new_shard.split_mem_tables(&old_data.mem_tbls);
             let mut new_l0s = vec![];
+            let mut new_unconverted_l0s = vec![];
             for l0 in &old_data.l0_tbls {
                 if new_shard.overlap_table(l0.smallest(), l0.biggest()) {
                     new_l0s.push(l0.clone());
+                    if unconverted_l0s.contains(&l0.id()) {
+                        new_unconverted_l0s.push(l0.clone());
+                    }
                 }
             }
             let mut new_blob_tbl_map = HashMap::new();
@@ -137,6 +150,16 @@ impl Engine {
                 }
             }
             let schema_file = old_data.schema_file.clone();
+            let mut new_col_levels = ColumnarLevels::new();
+            new_col_levels.unconverted_l0s = new_unconverted_l0s;
+            for col_level in &old_data.col_levels.levels {
+                let new_col_level = &mut new_col_levels.levels[col_level.level];
+                for col_file in &col_level.files {
+                    if new_shard.overlap_table(col_file.get_smallest(), col_file.get_biggest()) {
+                        new_col_level.files.push(col_file.clone());
+                    }
+                }
+            }
             let new_data = ShardData::new(
                 new_shard.range.clone(),
                 new_mem_tbls,
@@ -148,6 +171,7 @@ impl Engine {
                 RegionLimiter::new_from(&old_data.limiter),
                 NEW_DATA_UPDATE_COUNTER,
                 schema_file,
+                new_col_levels,
             );
             new_shard.set_data(new_data);
         }
@@ -413,6 +437,12 @@ impl Engine {
                 old_shard.tag(),
                 source
             );
+            let mut columnar_levels = old_data.col_levels.clone();
+            for columnar_create in source_snap.get_columnar_creates() {
+                let col = source.col_files.get(&columnar_create.id).unwrap().clone();
+                columnar_levels.add_file(columnar_create.level as usize, col);
+            }
+            columnar_levels.sort();
             ShardData::new(
                 new_shard.range.clone(),
                 mem_tbls,
@@ -424,6 +454,7 @@ impl Engine {
                 old_data.limiter.clone(),
                 old_data.update_counter + 1,
                 old_data.schema_file.clone(),
+                columnar_levels,
             )
         } else {
             info!(
@@ -445,6 +476,7 @@ impl Engine {
                 old_data.limiter.clone(),
                 old_data.update_counter + 1,
                 old_data.schema_file.clone(),
+                old_data.col_levels.clone(),
             )
         };
         new_shard.set_data(data);

@@ -3,7 +3,7 @@
 use std::{borrow::Cow, collections::VecDeque, fmt, fmt::Debug, sync::Arc};
 
 use cloud_encryption::EncryptionKey;
-use kvengine::table::columnar::schema_file::SchemaFile;
+use kvengine::table::columnar::SchemaFile;
 use kvenginepb::TxnFileRef;
 use kvproto::{
     kvrpcpb::ExtraOp as TxnExtraOp,

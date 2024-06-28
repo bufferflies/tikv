@@ -327,6 +327,7 @@ impl PackOffsets {
     }
 }
 
+#[derive(Clone)]
 pub struct ColumnarFile {
     core: Arc<ColumnarFileCore>,
 }
@@ -424,7 +425,7 @@ struct ColumnarFileCore {
     tables: HashMap<i64, Arc<TableMeta>>,
 }
 
-pub(crate) struct ColumnBuffer {
+pub struct ColumnBuffer {
     pub(crate) col_id: i32,
     pub(crate) nullable: bool,
     pub(crate) fixed_size: usize,
@@ -481,7 +482,7 @@ impl ColumnBuffer {
         self.length()
     }
 
-    pub fn reset(&mut self) {
+    pub(crate) fn reset(&mut self) {
         if self.fixed_size == 0 {
             self.offsets.truncate(1);
         }
@@ -524,8 +525,7 @@ impl ColumnBuffer {
         }
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn get_nullable_value(&self, idx: usize) -> Option<&[u8]> {
+    pub fn get_nullable_value(&self, idx: usize) -> Option<&[u8]> {
         debug_assert!(self.nullable);
         if self.nulls[idx] == 1 {
             return None;
@@ -542,7 +542,7 @@ impl ColumnBuffer {
     }
 
     #[inline]
-    pub(crate) fn get_not_null_value(&self, idx: usize) -> &[u8] {
+    pub fn get_not_null_value(&self, idx: usize) -> &[u8] {
         debug_assert!(
             !self.nullable || self.nulls[idx] == 0,
             "id: {}, nulls: {:?}, idx {}",
@@ -562,19 +562,19 @@ impl ColumnBuffer {
     }
 
     #[inline]
-    pub(crate) fn get_int_handle_value(&self, idx: usize) -> i64 {
+    pub fn get_int_handle_value(&self, idx: usize) -> i64 {
         debug_assert!(self.fixed_size == 8);
         let start = idx * self.fixed_size;
         let end = (idx + 1) * self.fixed_size;
         (&self.data_buf[start..end]).get_i64_le()
     }
 
-    pub(crate) fn get_version(&self, idx: usize) -> u64 {
+    pub fn get_version(&self, idx: usize) -> u64 {
         debug_assert!(self.col_id == VERSION_COL_ID || self.col_id == TXN_ID_COL_ID);
         (&self.data_buf[idx * 8..]).get_u64_le()
     }
 
-    pub(crate) fn is_null(&self, idx: usize) -> bool {
+    pub fn is_null(&self, idx: usize) -> bool {
         debug_assert!(self.nullable);
         self.nulls[idx] == 1
     }
@@ -675,7 +675,7 @@ pub struct Block {
 }
 
 impl Block {
-    pub(crate) fn new(schema: &Schema) -> Self {
+    pub fn new(schema: &Schema) -> Self {
         let handles = ColumnBuffer::new_from_col_info(&schema.handle_column);
         let versions = ColumnBuffer::new_from_col_info(&schema.version_column);
         let txn_ids = schema
@@ -725,6 +725,22 @@ impl Block {
         for (col, other_col) in self.columns.iter_mut().zip(&other.columns) {
             col.append(other_col, row_offset, row_end_offset);
         }
+    }
+
+    pub fn length(&self) -> usize {
+        self.handles.length()
+    }
+
+    pub fn get_handle_buf(&self) -> &ColumnBuffer {
+        &self.handles
+    }
+
+    pub fn get_version_buf(&self) -> &ColumnBuffer {
+        &self.versions
+    }
+
+    pub fn get_columns(&self) -> &[ColumnBuffer] {
+        &self.columns
     }
 }
 

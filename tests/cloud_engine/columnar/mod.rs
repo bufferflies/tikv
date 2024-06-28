@@ -1,21 +1,31 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::time::Duration;
+use std::{sync::Mutex, time::Duration};
 
 use api_version::ApiV2;
+use bytes::Buf;
 use hyper::Body;
 use kvengine::{
     dfs,
     dfs::FileType,
-    table::columnar::{
-        builder::{new_int_handle_column_info, new_txn_id_column_info, new_version_column_info},
-        columnar::Schema,
-        schema_file::build_schema_file,
+    table::{
+        columnar,
+        columnar::{
+            build_schema_file, new_int_handle_column_info, new_txn_id_column_info,
+            new_version_column_info, Schema,
+        },
     },
 };
 use pd_client::PdClient;
 use test_cloud_server::{must_wait, ServerCluster};
-use tidb_query_datatype::{codec::table::TABLE_PREFIX, Collation, FieldTypeTp};
+use tidb_query_datatype::{
+    codec::{
+        row::v2::encoder_for_test::{Column, RowEncoder},
+        table::{encode_row_key, TABLE_PREFIX},
+    },
+    expr::EvalContext,
+    Collation, FieldTypeTp,
+};
 use tikv_util::codec::{bytes::encode_bytes, number::NumberEncoder};
 use tipb::ColumnInfo;
 use txn_types::Key;
@@ -120,6 +130,135 @@ fn test_schema_file() {
             assert_eq!(stats.schema_version, new_schema_version);
         }
     }
+}
+
+#[test]
+fn test_covert_row_to_columnar() {
+    test_util::init_log_for_test();
+    let node_id = alloc_node_id();
+    let mut cluster = ServerCluster::new(vec![node_id], |_, conf| {
+        conf.enable_inner_key_offset = true;
+        conf.kvengine
+            .columnar_table_build_options
+            .max_columnar_table_size = 1024;
+        conf.kvengine
+            .columnar_table_build_options
+            .pack_max_row_count = 9;
+    });
+    let dfs = cluster.get_dfs().unwrap();
+    let keyspace_id = 7;
+    let table_ids = dfs
+        .get_runtime()
+        .block_on(create_keyspace_and_split_tables(&mut cluster, keyspace_id));
+    let table_id = table_ids[1];
+    let schemas = build_schemas(vec![table_id]);
+    let mut schema = schemas[0].clone();
+    schema.txn_id_column = None;
+    let schema_version = 10;
+    let schema_file_data = build_schema_file(keyspace_id, schema_version, schemas);
+    let schema_file_id = 100;
+    let opts = dfs::Options::default().with_type(FileType::Schema);
+    dfs.get_runtime()
+        .block_on(dfs.create(schema_file_id, schema_file_data.into(), opts))
+        .unwrap();
+    let status_addr = cluster.status_addr(node_id);
+    dfs.get_runtime().block_on(send_schema_file_request(
+        &status_addr,
+        keyspace_id,
+        schema_file_id,
+    ));
+    let kvengine = cluster.get_kvengine(node_id);
+    must_wait(
+        || {
+            let all_id_vers = kvengine.get_all_shard_id_vers();
+            for id_ver in all_id_vers {
+                if let Ok(shard) = kvengine.get_shard_with_ver(id_ver.id, id_ver.ver) {
+                    if shard.get_schema_file().is_some() {
+                        return true;
+                    }
+                }
+            }
+            false
+        },
+        10,
+        || "failed to build schema file".to_string(),
+    );
+    let mut client = cluster.new_client();
+    let ctx = Mutex::new(EvalContext::default());
+    client.put_kv(
+        0..100,
+        |i: usize| gen_row_key(keyspace_id, table_id, i),
+        |i: usize| gen_row_val(&ctx, i),
+    );
+    client.put_kv(
+        100..200,
+        |i: usize| gen_row_key(keyspace_id, table_id, i),
+        |i: usize| gen_row_val(&ctx, i),
+    );
+    let mut shard_id = None;
+    must_wait(
+        || {
+            let all_id_vers = kvengine.get_all_shard_id_vers();
+            for id_ver in all_id_vers {
+                if let Ok(shard) = kvengine.get_shard_with_ver(id_ver.id, id_ver.ver) {
+                    let snap_version = shard.get_snap_version();
+                    let columnar_snap_version = shard.get_columnar_snap_version();
+                    if snap_version == columnar_snap_version && columnar_snap_version >= 29 {
+                        shard_id = Some(id_ver.id);
+                        return true;
+                    }
+                }
+            }
+            false
+        },
+        10,
+        || "failed to build columnar file".to_string(),
+    );
+    let shard_id = shard_id.unwrap();
+    let shard = kvengine.get_shard(shard_id).unwrap();
+    let snap_access = shard.new_snap_access();
+    let ts = client.get_ts().into_inner();
+    let mut columnar_reader = snap_access.new_columnar_mvcc_reader(&schema, ts).unwrap();
+    let start_handle = 0i64.to_le_bytes().to_vec();
+    let end_handle = 190i64.to_le_bytes().to_vec();
+    columnar_reader
+        .set_handle_range(&start_handle, &end_handle)
+        .unwrap();
+    let mut block = columnar::Block::new(&schema);
+    let read_rows = columnar_reader.read_block(&mut block, 200).unwrap();
+    assert_eq!(read_rows, 190);
+    for i in 0..read_rows {
+        let handle = block.get_handle_buf().get_int_handle_value(i);
+        assert_eq!(handle, i as i64);
+        let columns = block.get_columns();
+        assert_eq!(columns[0].get_not_null_value(i).get_i64_le(), i as i64);
+        let str_val = gen_str_val(i);
+        assert_eq!(columns[1].get_not_null_value(i), &str_val);
+    }
+}
+
+fn gen_row_key(keyspace_id: u32, table_id: i64, i: usize) -> Vec<u8> {
+    let mut key = ApiV2::get_txn_keyspace_prefix(keyspace_id);
+    let table_key = encode_row_key(table_id, i as i64);
+    key.extend_from_slice(&table_key);
+    key
+}
+
+fn gen_row_val(ctx: &Mutex<EvalContext>, i: usize) -> Vec<u8> {
+    let mut row_val = vec![];
+    let str_val = gen_str_val(i);
+    let cols = vec![
+        Column::new(1, Some(i as i64)),
+        Column::new(2, Some(str_val)),
+    ];
+    let mut guard = ctx.lock().unwrap();
+    row_val.write_row(&mut guard, cols).unwrap();
+    row_val
+}
+
+fn gen_str_val(i: usize) -> Vec<u8> {
+    let repeat = 1 + i % 16;
+    format!("abc_{}", i).repeat(repeat).into_bytes()
 }
 
 fn build_schemas(table_ids: Vec<i64>) -> Vec<Schema> {

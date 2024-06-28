@@ -17,7 +17,7 @@ use crate::{
     meta::is_move_down,
     table::{
         blobtable::blobtable::BlobTable,
-        columnar::schema_file::SchemaFile,
+        columnar::{ColumnarFile, SchemaFile},
         memtable::CfTable,
         sstable::{BlockCacheKey, L0Table, LocalFile, SsTable},
         InnerKey, TableExt, TxnFile,
@@ -34,6 +34,7 @@ pub struct ChangeSet {
     pub unloaded_tables: HashMap<u64, FileMeta>,
     pub lock_txn_files: Vec<TxnFile>,
     pub schema_file: Option<SchemaFile>,
+    pub col_files: HashMap<u64, ColumnarFile>,
 }
 
 impl Deref for ChangeSet {
@@ -60,6 +61,7 @@ impl ChangeSet {
             unloaded_tables: HashMap::new(),
             lock_txn_files: vec![],
             schema_file: None,
+            col_files: HashMap::new(),
         }
     }
 
@@ -74,6 +76,9 @@ impl ChangeSet {
         if meta.is_blob_file() {
             let blob_table = BlobTable::new(Arc::new(file))?;
             self.blob_tables.insert(id, blob_table);
+        } else if meta.is_columnar_file() {
+            self.col_files
+                .insert(id, ColumnarFile::open(Arc::new(file))?);
         } else if meta.get_level() == 0 {
             let l0_table = L0Table::new(Arc::new(file), Some(cache), false, encryption_key)?;
             self.l0_tables.insert(id, l0_table.unwrap());
@@ -101,6 +106,7 @@ pub(crate) fn create_snapshot_tables(
     HashMap<u64, BlobTable>,
     [ShardCf; 3],
     Vec<TxnFile>,
+    ColumnarLevels,
 ) {
     // Note: Some tables in `snap` will not exist in `tables` if it's not necessary
     // to load from DFS.
@@ -157,7 +163,30 @@ pub(crate) fn create_snapshot_tables(
         let scf = &mut scf_builders.as_mut_slice()[cf];
         scfs[cf] = scf.build();
     }
-    (l0_tbls, blob_tbl_map, scfs, tables.lock_txn_files.clone())
+    let mut col_levels = ColumnarLevels::new();
+    for col_create in snap.get_columnar_creates() {
+        if let Some(col_file) = tables.col_files.get(&col_create.id) {
+            col_levels.add_file(col_create.level as usize, col_file.clone());
+        } else {
+            assert!(
+                not_all_tables_loaded,
+                "columnar_create: {:?}, tables: {:?}",
+                col_create, tables,
+            );
+        }
+    }
+    for &l0_id in snap.get_unconverted_l0s() {
+        let unconverted_l0 = l0_tbls.iter().find(|l0| l0.id() == l0_id).unwrap().clone();
+        col_levels.unconverted_l0s.push(unconverted_l0);
+    }
+    col_levels.sort();
+    (
+        l0_tbls,
+        blob_tbl_map,
+        scfs,
+        tables.lock_txn_files.clone(),
+        col_levels,
+    )
 }
 
 impl EngineCore {
@@ -199,6 +228,7 @@ impl EngineCore {
             || cs.has_truncate_ts()
             || cs.has_trim_over_bound()
             || cs.has_major_compaction()
+            || cs.has_columnar_compaction()
         {
             if cs.has_compaction() {
                 self.apply_compaction(&shard, &cs);
@@ -210,6 +240,8 @@ impl EngineCore {
                 self.apply_trim_over_bound(&shard, &cs);
             } else if cs.has_major_compaction() {
                 self.apply_major_compaction(&shard, &cs);
+            } else if cs.has_columnar_compaction() {
+                self.apply_columnar_compaction(&shard, &cs);
             }
             store_bool(&shard.compacting, false);
             self.send_compact_msg(CompactMsg::Applied(IdVer::new(shard.id, shard.ver)));
@@ -269,6 +301,10 @@ impl EngineCore {
             let mut new_l0_tbls = Vec::with_capacity(old_data.l0_tbls.len() + l0s.len());
             new_l0_tbls.extend_from_slice(l0s.as_slice());
             new_l0_tbls.extend_from_slice(old_data.l0_tbls.as_slice());
+            let mut col_levels = old_data.col_levels.clone();
+            if old_data.schema_file.is_some() {
+                col_levels.unconverted_l0s.extend_from_slice(l0s.as_slice());
+            }
 
             let new_data = ShardData::new(
                 old_data.range.clone(),
@@ -281,6 +317,7 @@ impl EngineCore {
                 old_data.limiter.clone(),
                 old_data.update_counter + 1,
                 old_data.schema_file.clone(),
+                col_levels,
             );
             shard.set_data(new_data);
             self.send_free_mem_msg(FreeMemMsg::FreeMem(last));
@@ -304,11 +341,13 @@ impl EngineCore {
                     old_data.limiter.clone(),
                     old_data.update_counter + 1,
                     old_data.schema_file.clone(),
+                    old_data.col_levels.clone(),
                 );
                 shard.set_data(new_data);
                 self.send_free_mem_msg(FreeMemMsg::FreeMem(last));
             }
         }
+        store_u64(&shard.snap_version, flush.get_version());
         shard.clear_finished_txn_file_refs(flush.version);
     }
 
@@ -319,7 +358,7 @@ impl EngineCore {
 
         // `lock_txn_files` is ignored because it does not depend on initial flush to
         // keep consistency between peers, as only target region has txn file locks.
-        let (l0s, blob_tbl_map, scfs, _lock_txn_files) =
+        let (l0s, blob_tbl_map, scfs, _lock_txn_files, col_levels) =
             create_snapshot_tables(initial_flush, cs, self.opts.for_restore);
         let mut max_flushed_mem_tbl_version = 0;
         mem_tbls.retain(|x| {
@@ -345,6 +384,7 @@ impl EngineCore {
             data.limiter.clone(),
             data.update_counter + 1,
             data.schema_file.clone(),
+            col_levels,
         );
         info!("{} apply_initial_flush", shard.tag();
             "seq" => cs.sequence,
@@ -419,6 +459,7 @@ impl EngineCore {
             data.limiter.clone(),
             data.update_counter + 1,
             data.schema_file.clone(),
+            data.col_levels.clone(),
         );
         shard.set_data(new_data);
         self.remove_dfs_files(shard, del_files);
@@ -521,37 +562,52 @@ impl EngineCore {
             data.limiter.clone(),
             data.update_counter + 1,
             data.schema_file.clone(),
+            data.col_levels.clone(),
         );
         shard.set_data(new_data);
         self.remove_dfs_files(shard, del_file_is_subrange);
         shard.set_property(MANUAL_MAJOR_COMPACTION, MANUAL_MAJOR_COMPACTION_DISABLE);
     }
 
-    fn get_sstables_from_table_change(
+    fn get_tables_from_table_change(
         &self,
         data: &ShardData,
         cs: &ChangeSet,
         tc: &pb::TableChange,
         del_files: &mut HashMap<u64, bool>,
-    ) -> (Vec<L0Table>, [ShardCf; 3]) {
+    ) -> (Vec<L0Table>, [ShardCf; 3], ColumnarLevels) {
         let mut new_l0s = data.l0_tbls.clone();
         let mut new_cfs = data.cfs.clone();
+        let mut new_col_levels = data.col_levels.clone();
         // Group files by cf and level.
         let mut grouped = HashMap::new();
+        let mut all_deletes = HashSet::new();
         for deleted in tc.get_table_deletes() {
             grouped
                 .entry((deleted.get_cf() as usize, deleted.get_level() as usize))
                 .or_insert_with(|| (Vec::new(), Vec::new()))
                 .0
                 .push(deleted.get_id());
+            all_deletes.insert(deleted.get_id());
+        }
+        for col_level in &mut new_col_levels.levels {
+            col_level
+                .files
+                .retain(|c| !all_deletes.contains(&c.get_file().id()));
         }
         for created in tc.get_table_creates() {
+            if created.columnar_tables > 0 {
+                let col_file = cs.col_files.get(&created.get_id()).unwrap().clone();
+                new_col_levels.add_file(created.get_level() as usize, col_file);
+                continue;
+            }
             grouped
                 .entry((created.get_cf() as usize, created.get_level() as usize))
                 .or_insert_with(|| (Vec::new(), Vec::new()))
                 .1
                 .push(created.get_id());
         }
+        new_col_levels.sort();
 
         for ((cf, level), (deletes, creates)) in grouped {
             if level == 0 {
@@ -591,7 +647,7 @@ impl EngineCore {
             }
         }
 
-        (new_l0s, new_cfs)
+        (new_l0s, new_cfs, new_col_levels)
     }
 
     fn apply_destroy_range(&self, shard: &Shard, cs: &ChangeSet) {
@@ -599,7 +655,8 @@ impl EngineCore {
         let data = shard.get_data();
         let tc = cs.get_destroy_range();
         let mut del_files = HashMap::new();
-        let (new_l0s, new_cfs) = self.get_sstables_from_table_change(&data, cs, tc, &mut del_files);
+        let (new_l0s, new_cfs, col_levels) =
+            self.get_tables_from_table_change(&data, cs, tc, &mut del_files);
 
         let new_data = ShardData::new(
             data.range.clone(),
@@ -612,6 +669,7 @@ impl EngineCore {
             data.limiter.clone(),
             data.update_counter + 1,
             data.schema_file.clone(),
+            col_levels,
         );
         assert_eq!(cs.get_property_key(), DEL_PREFIXES_KEY);
         let done = DeletePrefixes::unmarshal(cs.get_property_value(), shard.inner_key_off);
@@ -628,7 +686,8 @@ impl EngineCore {
         let data = shard.get_data();
         let tc = cs.get_truncate_ts();
         let mut del_files = HashMap::new();
-        let (new_l0s, new_cfs) = self.get_sstables_from_table_change(&data, cs, tc, &mut del_files);
+        let (new_l0s, new_cfs, col_levels) =
+            self.get_tables_from_table_change(&data, cs, tc, &mut del_files);
         assert_eq!(cs.get_property_key(), TRUNCATE_TS_KEY);
         let new_data = ShardData::new(
             data.range.clone(),
@@ -641,6 +700,7 @@ impl EngineCore {
             data.limiter.clone(),
             data.update_counter + 1,
             data.schema_file.clone(),
+            col_levels,
         );
         shard.set_data(new_data);
         let truncated_ts = TruncateTs::unmarshal(cs.get_property_value());
@@ -658,7 +718,8 @@ impl EngineCore {
         let data = shard.get_data();
         let tc = cs.get_trim_over_bound();
         let mut del_files = HashMap::new();
-        let (new_l0s, new_cfs) = self.get_sstables_from_table_change(&data, cs, tc, &mut del_files);
+        let (new_l0s, new_cfs, col_levels) =
+            self.get_tables_from_table_change(&data, cs, tc, &mut del_files);
         let new_data = ShardData::new(
             data.range.clone(),
             data.mem_tbls.clone(),
@@ -670,6 +731,7 @@ impl EngineCore {
             data.limiter.clone(),
             data.update_counter + 1,
             data.schema_file.clone(),
+            col_levels,
         );
         shard.set_data(new_data);
         shard.set_property(TRIM_OVER_BOUND, TRIM_OVER_BOUND_DISABLE);
@@ -810,6 +872,7 @@ impl EngineCore {
             old_data.limiter.clone(),
             old_data.update_counter + 1,
             old_data.schema_file.clone(),
+            old_data.col_levels.clone(),
         );
         shard.set_data(new_data);
         Ok(())
@@ -839,8 +902,9 @@ impl EngineCore {
         );
         let snap_data = new_shard.get_data();
         let old_data = old_shard.get_data();
-        let (l0_tbls, blob_tbl_map, cfs, _) =
+        let (l0_tbls, blob_tbl_map, cfs, _, col_levels) =
             create_snapshot_tables(cs.get_restore_shard(), cs, self.opts.for_restore);
+        let schema_file = cs.schema_file.clone();
         let new_data = ShardData::new(
             snap_data.range.clone(),
             vec![CfTable::new()],
@@ -851,7 +915,8 @@ impl EngineCore {
             vec![],
             old_data.limiter.clone(),
             NEW_DATA_UPDATE_COUNTER,
-            old_data.schema_file.clone(),
+            schema_file,
+            col_levels,
         );
         new_shard.set_data(new_data);
         new_shard.set_active(old_shard.is_active());
@@ -892,7 +957,43 @@ impl EngineCore {
             old_data.limiter.clone(),
             old_data.update_counter + 1,
             cs.schema_file.clone(),
+            old_data.col_levels.clone(),
         );
         shard.set_data(new_data);
+    }
+
+    fn apply_columnar_compaction(&self, shard: &Shard, cs: &ChangeSet) {
+        let col_comp = cs.get_columnar_compaction();
+        let col_change = col_comp.get_columnar_change();
+        let old_data = shard.get_data();
+        let mut new_col_levels = old_data.col_levels.clone();
+        let deletes: HashSet<u64> = col_change
+            .get_table_deletes()
+            .iter()
+            .map(|del| del.get_id())
+            .collect();
+        new_col_levels.retain(|c| !deletes.contains(&c.get_file().id()));
+        for create in col_change.get_table_creates() {
+            let col_file = cs.col_files.get(&create.get_id()).unwrap().clone();
+            new_col_levels.add_file(create.get_level() as usize, col_file);
+        }
+        new_col_levels
+            .unconverted_l0s
+            .retain(|l0| !col_comp.row_l0s.contains(&l0.id()));
+        let new_data = ShardData::new(
+            old_data.range.clone(),
+            old_data.mem_tbls.clone(),
+            old_data.l0_tbls.clone(),
+            old_data.blob_tbl_map.clone(),
+            old_data.cfs.clone(),
+            old_data.unloaded_tbls.clone(),
+            old_data.lock_txn_files.clone(),
+            old_data.limiter.clone(),
+            old_data.update_counter + 1,
+            old_data.schema_file.clone(),
+            new_col_levels,
+        );
+        shard.set_data(new_data);
+        store_u64(&shard.col_snap_version, col_comp.get_snap_version());
     }
 }

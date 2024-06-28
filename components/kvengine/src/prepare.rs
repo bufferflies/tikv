@@ -23,7 +23,7 @@ use crate::{
     error::IoContext,
     metrics::ENGINE_LEVEL_WRITE_VEC,
     table::{
-        columnar::schema_file::SchemaFile,
+        columnar::SchemaFile,
         sstable::{InMemFile, LocalFile},
         table::TableExt,
     },
@@ -123,6 +123,12 @@ impl EngineCore {
         if cs.has_update_schema_meta() {
             schema_meta = Some(cs.get_update_schema_meta());
         }
+        if cs.has_columnar_compaction() {
+            let columnar_comp = cs.get_columnar_compaction();
+            for tbl in columnar_comp.get_columnar_change().get_table_creates() {
+                ids.insert(tbl.get_id(), FileMeta::from_table(tbl));
+            }
+        }
         let mut encryption_key = encryption_key;
         if let Some(snap) = snap {
             self.collect_snap_ids(snap, &mut ids);
@@ -219,6 +225,11 @@ impl EngineCore {
                     cs.add_file(id, file, tb, self.cache.clone(), encryption_key.clone())?;
                     continue;
                 }
+            } else if tb.columnar_tables > 0 {
+                if let Ok(file) = self.open_columnar_file(id) {
+                    cs.add_file(id, file, tb, self.cache.clone(), encryption_key.clone())?;
+                    continue;
+                }
             } else if let Ok(file) = self.open_sstable_file(id) {
                 cs.add_file(id, file, tb, self.cache.clone(), encryption_key.clone())?;
                 continue;
@@ -309,7 +320,7 @@ impl EngineCore {
         for (id, tbl) in cs.blob_tables.drain() {
             new_blob_tbl_map.insert(id, tbl);
         }
-
+        let mut new_columnar_levels = data.col_levels.clone();
         // level n
         let mut scf_builders = vec![];
         for cf in 0..NUM_CFS {
@@ -328,6 +339,11 @@ impl EngineCore {
             .into_iter()
             .filter(|(_, tbl)| tbl.get_level() > 0 && !tbl.is_blob_file())
         {
+            if tbl.is_columnar_file() {
+                let col_file = cs.col_files.get(&id).unwrap().clone();
+                new_columnar_levels.add_file(tbl.level as usize, col_file);
+                continue;
+            }
             let sst = cs.ln_tables.get(&id).unwrap();
             let scf = &mut scf_builders.as_mut_slice()[tbl.get_cf() as usize];
             scf.add_table(sst.clone(), tbl.get_level() as usize);
@@ -337,6 +353,7 @@ impl EngineCore {
             let scf = &mut scf_builders.as_mut_slice()[cf];
             scfs[cf] = scf.build();
         }
+        new_columnar_levels.sort();
 
         let new_data = ShardData::new(
             data.range.clone(),
@@ -349,6 +366,7 @@ impl EngineCore {
             data.limiter.clone(),
             data.update_counter + 1,
             data.schema_file.clone(),
+            new_columnar_levels,
         );
         shard.set_data(new_data);
         Ok(())
@@ -413,6 +431,15 @@ impl EngineCore {
         )?)
     }
 
+    fn open_columnar_file(&self, id: u64) -> Result<LocalFile> {
+        let _guard = self.lock_file(id);
+        Ok(LocalFile::open(
+            id,
+            self.local_columnar_file_path(id).as_path(),
+            self.loaded.load(Relaxed),
+        )?)
+    }
+
     pub async fn load_schema_file(&self, id: u64) -> Result<SchemaFile> {
         if let Some(schema_file) = self.schema_files.get(&id) {
             return Ok(schema_file.clone());
@@ -458,6 +485,10 @@ impl EngineCore {
 
     pub(crate) fn local_schema_file_path(&self, file_id: u64) -> PathBuf {
         self.opts.local_dir.join(new_schema_filename(file_id))
+    }
+
+    pub(crate) fn local_columnar_file_path(&self, file_id: u64) -> PathBuf {
+        self.opts.local_dir.join(new_columnar_filename(file_id))
     }
 
     fn tmp_file_path(&self, file_id: u64) -> PathBuf {

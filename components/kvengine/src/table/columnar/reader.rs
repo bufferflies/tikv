@@ -362,7 +362,7 @@ impl ColumnarMvccReader {
             for i in 0..block.handles.length() {
                 let handle = block.handles.get_int_handle_value(i);
                 let version = block.versions.get_version(i);
-                if version > self.read_ts || handle == prev_handle {
+                if version > self.read_ts || (i > 0 && handle == prev_handle) {
                     self.finish_range(i);
                     continue;
                 }
@@ -613,7 +613,9 @@ impl ColumnarReader for ColumnarMergeReader {
             reader.seek(handle)?;
         }
         self.heap.retain(|r| r.valid());
-        self.init_heap();
+        if !self.heap.is_empty() {
+            self.init_heap();
+        }
         Ok(())
     }
 
@@ -805,7 +807,7 @@ impl ColumnarReader for ColumnarRowTableReader {
     }
 
     fn seek(&mut self, handle: &[u8]) -> table::Result<()> {
-        let row_key = if self.is_int_handle {
+        let row_key = if self.is_int_handle && !handle.is_empty() {
             encode_row_key(self.schema.table_id, (&handle[..]).get_i64_le())
         } else {
             encode_common_handle_for_test(self.schema.table_id, handle)
@@ -1006,16 +1008,20 @@ mod tests {
         opts.pack_max_size = 256;
         let mut table_builder = ColumnarTableBuilder::new(schema.clone(), opts, true);
         row_tbl_reader.seek(&ref_rows[0].handle).unwrap();
-        let mut read_rows = 0;
-        while read_rows < ref_rows.len() {
-            block.reset();
-            let limit = rng.gen_range(2..10);
-            let read = row_tbl_reader.read(&mut block, limit).unwrap();
-            if read == 0 {
-                break;
+        let mut append_rows = 0;
+        let mut block_off = 0;
+        while append_rows < ref_rows.len() {
+            if block_off == block.length() {
+                block_off = 0;
+                block.reset();
+                let limit = rng.gen_range(2..10);
+                let read = row_tbl_reader.read(&mut block, limit).unwrap();
+                if read == 0 {
+                    break;
+                }
             }
-            read_rows += read;
-            table_builder.add_block(&block);
+            block_off = table_builder.append_block(&block, block_off);
+            append_rows += block.length() - block_off;
         }
         let mut file_builder = ColumnarFileBuilder::new(file_id, None);
         file_builder.add_table(table_builder);

@@ -16,9 +16,9 @@ use bytes::Buf;
 use error_code::ErrorCodeExt;
 use fail::fail_point;
 use kvengine::{
-    table::columnar::schema_file::SchemaFile, CheckMergeResult, IdVer, Shard, TruncateTs,
-    DEL_PREFIXES_KEY, MANUAL_MAJOR_COMPACTION, MANUAL_MAJOR_COMPACTION_DISABLE,
-    MANUAL_MAJOR_COMPACTION_ENABLE, TRUNCATE_TS_KEY,
+    table::columnar::SchemaFile, CheckMergeResult, IdVer, Shard, TruncateTs, DEL_PREFIXES_KEY,
+    MANUAL_MAJOR_COMPACTION, MANUAL_MAJOR_COMPACTION_DISABLE, MANUAL_MAJOR_COMPACTION_ENABLE,
+    TRUNCATE_TS_KEY,
 };
 use kvproto::{
     import_sstpb::SwitchMode,

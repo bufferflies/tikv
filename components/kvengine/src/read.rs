@@ -19,6 +19,10 @@ use crate::{
     limiter::RegionLimiter,
     table::{
         blobtable::blobtable::BlobPrefetcher,
+        columnar::{
+            ColumnarMergeReader, ColumnarMvccReader, ColumnarReader, ColumnarRowTableReader,
+            ColumnarTableReader, Schema,
+        },
         memtable::{Hint, WriteBatch},
         sstable::BlockCacheKey,
         table, InnerKey, SkipOpTxnFileIterator, TableExt, TxnFile, TxnFileIterator,
@@ -179,6 +183,7 @@ pub struct SnapAccessCore {
     _base_version: u64,
     meta_seq: u64,
     write_sequence: u64,
+    columnar_snap_version: u64,
     data: ShardData,
     get_hint: Mutex<Hint>,
     blob_table_prefetch_size: usize,
@@ -191,10 +196,12 @@ impl SnapAccessCore {
         let base_version = shard.get_base_version();
         let meta_seq = shard.get_meta_sequence();
         let write_sequence = shard.get_write_sequence();
+        let columnar_snap_version = shard.get_columnar_snap_version();
         let data = shard.get_data();
         Self {
             tag: shard.tag(),
             write_sequence,
+            columnar_snap_version,
             meta_seq,
             _base_version: base_version,
             managed_ts: 0,
@@ -958,6 +965,48 @@ impl SnapAccessCore {
     pub fn get_limiter(&self) -> &RegionLimiter {
         &self.data.limiter
     }
+
+    pub fn new_columnar_mvcc_reader(
+        &self,
+        schema: &Schema,
+        read_ts: u64,
+    ) -> Option<ColumnarMvccReader> {
+        if self.columnar_snap_version == 0 {
+            return None;
+        }
+        let mut readers: Vec<Box<dyn ColumnarReader>> = vec![];
+        for mem in &self.data.mem_tbls {
+            let skl = mem.get_cf(WRITE_CF);
+            if !skl.is_empty() {
+                let iter = skl.new_iterator(false);
+                let row_reader =
+                    ColumnarRowTableReader::new(self.data.keyspace_id, schema.clone(), iter, false);
+                readers.push(Box::new(row_reader));
+            }
+        }
+        for l0 in &self.data.col_levels.unconverted_l0s {
+            if let Some(l0_write) = l0.get_cf(WRITE_CF) {
+                let iter = l0_write.new_iterator(false, true);
+                let row_reader =
+                    ColumnarRowTableReader::new(self.data.keyspace_id, schema.clone(), iter, false);
+                readers.push(Box::new(row_reader));
+            }
+        }
+        for columnar_level in &self.data.col_levels.levels {
+            for col_file in &columnar_level.files {
+                let col_reader = ColumnarTableReader::new(
+                    col_file,
+                    schema.table_id,
+                    schema.columns.clone(),
+                    false,
+                );
+                readers.push(Box::new(col_reader));
+            }
+        }
+        let merged_reader = ColumnarMergeReader::new(schema.clone(), readers);
+        let mvcc_reader = ColumnarMvccReader::new(Box::new(merged_reader), schema, read_ts);
+        Some(mvcc_reader)
+    }
 }
 
 pub struct Iterator {
@@ -1230,7 +1279,7 @@ mod tests {
             &master_key,
         );
 
-        let (l0s, blob_tbls, scfs, lock_txn_files) =
+        let (l0s, blob_tbls, scfs, lock_txn_files, col_lvls) =
             create_snapshot_tables(cs.get_snapshot(), &cs, false);
         let data = ShardData::new(
             shard.range.clone(),
@@ -1243,6 +1292,7 @@ mod tests {
             RegionLimiter::dummy(),
             NEW_DATA_UPDATE_COUNTER,
             cs.schema_file.clone(),
+            col_lvls,
         );
         shard.set_data(data);
         let snap = shard.new_snap_access();

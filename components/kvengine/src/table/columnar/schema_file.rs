@@ -1,6 +1,6 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, ops::Deref, sync::Arc};
 
 use api_version::api_v2::KEYSPACE_PREFIX_LEN;
 use bytes::{Buf, BufMut};
@@ -17,7 +17,7 @@ use crate::table::{
         columnar::Schema,
     },
     sstable::{File, NO_COMPRESSION},
-    ChecksumType,
+    ChecksumType, InnerKey,
 };
 
 pub const SCHEMA_FILE_MAGIC: u32 = 0x5353484D;
@@ -198,6 +198,17 @@ impl SchemaFile {
             }
         }
         false
+    }
+
+    pub fn overlap_tables(&self, smallest: InnerKey<'_>, biggest: InnerKey<'_>) -> Vec<i64> {
+        let start_table_id = decode_table_id(smallest.deref()).unwrap_or(0);
+        let end_table_id = decode_table_id(biggest.deref()).unwrap_or(i64::MAX);
+        self.core
+            .tables
+            .keys()
+            .filter(|&&tid| start_table_id <= tid && tid <= end_table_id)
+            .copied()
+            .collect()
     }
 
     pub fn contains(&self, others: &[Schema]) -> bool {

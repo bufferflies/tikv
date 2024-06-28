@@ -142,6 +142,7 @@ impl Engine {
             data.limiter.clone(),
             data.update_counter + 1,
             data.schema_file.clone(),
+            data.col_levels.clone(),
         );
         new_data.refresh_for_limiter(&shard.tag());
         shard.set_data(new_data);
@@ -305,6 +306,7 @@ impl Engine {
             old_data.limiter.clone(),
             old_data.update_counter + 1,
             old_data.schema_file.clone(),
+            old_data.col_levels.clone(),
         );
         shard.set_data(data);
         is_commit

@@ -33,7 +33,7 @@ use crate::{
     limiter::{RegionLimiter, StoreLimiter},
     meta::ShardMeta,
     table::{
-        columnar::schema_file::SchemaFile,
+        columnar::SchemaFile,
         memtable::CfTable,
         sstable::{BlockCacheKey, MAGIC_NUMBER, ZSTD_COMPRESSION},
         InnerKey,
@@ -393,7 +393,7 @@ impl EngineCore {
             shard.load_mem_table_version(),
             &cs,
         );
-        let (l0s, blob_tbls, scfs, lock_txn_files) =
+        let (l0s, blob_tbls, scfs, lock_txn_files, col_lvls) =
             create_snapshot_tables(cs.get_snapshot(), &cs, self.opts.for_restore);
         let schema_file = cs.get_snapshot().has_schema_meta().then(|| {
             let schema_file_id = cs.get_snapshot().get_schema_meta().get_file_id();
@@ -413,6 +413,7 @@ impl EngineCore {
             RegionLimiter::new((&shard.opt.flow_control).into()),
             NEW_DATA_UPDATE_COUNTER,
             schema_file,
+            col_lvls,
         );
         shard.set_data(data);
         shard
@@ -887,6 +888,10 @@ pub fn new_blob_filename(file_id: u64) -> PathBuf {
 
 pub fn new_schema_filename(file_id: u64) -> PathBuf {
     PathBuf::from(format!("{:016x}.schema", file_id))
+}
+
+pub fn new_columnar_filename(file_id: u64) -> PathBuf {
+    PathBuf::from(format!("{:016x}.col", file_id))
 }
 
 pub(crate) enum FreeMemMsg {

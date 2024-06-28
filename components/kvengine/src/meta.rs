@@ -39,6 +39,8 @@ pub struct ShardMeta {
     pub parent: Option<Box<ShardMeta>>,
     pub schema_file_id: u64,
     pub schema_file_ver: i64,
+    pub columnar_snap_version: u64,
+    pub unconverted_l0s: Vec<u64>,
 
     pub(crate) txn_file_locks: TxnFileLocks,
 }
@@ -73,29 +75,22 @@ impl ShardMeta {
             base_version: snap.base_version,
             data_sequence: snap.data_sequence,
             max_ts: snap.max_ts,
+            columnar_snap_version: snap.columnar_snap_version,
+            unconverted_l0s: snap.unconverted_l0s.clone(),
             txn_file_locks,
             ..Default::default()
         };
         for l0 in snap.get_l0_creates() {
-            meta.add_file(l0.id, -1, 0, l0.get_smallest(), l0.get_biggest());
+            meta.add_file(l0.id, FileMeta::from_l0_table(l0));
         }
         for blob in snap.get_blob_creates() {
-            meta.add_file(
-                blob.id,
-                -1,
-                BLOB_LEVEL,
-                blob.get_smallest(),
-                blob.get_biggest(),
-            );
+            meta.add_file(blob.id, FileMeta::from_blob_table(blob));
         }
         for tbl in snap.get_table_creates() {
-            meta.add_file(
-                tbl.id,
-                tbl.cf,
-                tbl.level,
-                tbl.get_smallest(),
-                tbl.get_biggest(),
-            );
+            meta.add_file(tbl.id, FileMeta::from_table(tbl));
+        }
+        for col in snap.get_columnar_creates() {
+            meta.add_file(col.get_id(), FileMeta::from_table(col));
         }
         if cs.has_parent() {
             let parent_meta = Box::new(Self::new(engine_id, cs.get_parent()));
@@ -161,9 +156,8 @@ impl ShardMeta {
         fm.level = level as u8;
     }
 
-    pub fn add_file(&mut self, id: u64, cf: i32, level: u32, smallest: &[u8], biggest: &[u8]) {
-        self.files
-            .insert(id, FileMeta::new(cf, level, smallest, biggest, 0));
+    pub fn add_file(&mut self, id: u64, file_meta: FileMeta) {
+        self.files.insert(id, file_meta);
     }
 
     fn delete_file(&mut self, id: u64, level: u32) {
@@ -240,6 +234,10 @@ impl ShardMeta {
             let sm = cs.get_update_schema_meta();
             self.schema_file_id = sm.get_file_id();
             self.schema_file_ver = sm.get_version();
+            return;
+        }
+        if cs.has_columnar_compaction() {
+            self.apply_columnar_compaction(cs.get_columnar_compaction());
             return;
         }
         if !cs.get_property_key().is_empty() {
@@ -486,12 +484,18 @@ impl ShardMeta {
     fn apply_flush(&mut self, cs: &pb::ChangeSet) {
         let flush = cs.get_flush();
         self.apply_properties(flush.get_properties());
+        let mut new_l0s = vec![];
         if flush.has_l0_create() {
             let l0 = flush.get_l0_create();
-            self.add_file(l0.id, -1, 0, l0.get_smallest(), l0.get_biggest());
+            self.add_file(l0.id, FileMeta::from_l0_table(l0));
+            new_l0s.push(l0.id);
         }
         for l0 in flush.get_l0_creates() {
-            self.add_file(l0.id, -1, 0, l0.get_smallest(), l0.get_biggest());
+            self.add_file(l0.id, FileMeta::from_l0_table(l0));
+            new_l0s.push(l0.id);
+        }
+        if self.schema_file_id > 0 {
+            self.unconverted_l0s.extend_from_slice(&new_l0s);
         }
         let new_data_seq = flush.get_version() - self.base_version;
         if self.data_sequence < new_data_seq {
@@ -539,22 +543,10 @@ impl ShardMeta {
             self.delete_file(*id, comp.level + 1);
         }
         for tbl in comp.get_table_creates() {
-            self.add_file(
-                tbl.id,
-                tbl.cf,
-                tbl.level,
-                tbl.get_smallest(),
-                tbl.get_biggest(),
-            )
+            self.add_file(tbl.get_id(), FileMeta::from_table(tbl));
         }
         for blob_table in comp.get_blob_tables() {
-            self.add_file(
-                blob_table.get_id(),
-                -1,
-                BLOB_LEVEL,
-                blob_table.get_smallest(),
-                blob_table.get_biggest(),
-            );
+            self.add_file(blob_table.get_id(), FileMeta::from_blob_table(blob_table));
         }
     }
 
@@ -563,25 +555,13 @@ impl ShardMeta {
             self.delete_file(delete.get_id(), delete.get_level());
         }
         for create in comp.get_sstable_change().get_table_creates() {
-            self.add_file(
-                create.id,
-                create.cf,
-                create.level,
-                create.get_smallest(),
-                create.get_biggest(),
-            );
+            self.add_file(create.id, FileMeta::from_table(create));
         }
         for delete in comp.get_old_blob_tables() {
             self.delete_file(*delete, BLOB_LEVEL);
         }
         for create in comp.get_new_blob_tables() {
-            self.add_file(
-                create.get_id(),
-                -1,
-                BLOB_LEVEL,
-                create.get_smallest(),
-                create.get_biggest(),
-            );
+            self.add_file(create.get_id(), FileMeta::from_blob_table(create));
         }
     }
 
@@ -600,13 +580,7 @@ impl ShardMeta {
             self.delete_file(deleted.get_id(), deleted.get_level());
         }
         for created in tc.get_table_creates() {
-            self.add_file(
-                created.id,
-                created.cf,
-                created.level,
-                created.get_smallest(),
-                created.get_biggest(),
-            );
+            self.add_file(created.id, FileMeta::from_table(created));
         }
     }
 
@@ -666,25 +640,13 @@ impl ShardMeta {
         self.max_ts = std::cmp::max(self.max_ts, ingest_files.max_ts);
         self.apply_properties(ingest_files.get_properties());
         for tbl in ingest_files.get_table_creates() {
-            self.add_file(tbl.id, 0, tbl.level, tbl.get_smallest(), tbl.get_biggest());
+            self.add_file(tbl.id, FileMeta::from_table(tbl));
         }
         for l0_tbl in ingest_files.get_l0_creates() {
-            self.add_file(
-                l0_tbl.id,
-                -1,
-                0,
-                l0_tbl.get_smallest(),
-                l0_tbl.get_biggest(),
-            );
+            self.add_file(l0_tbl.id, FileMeta::from_l0_table(l0_tbl));
         }
         for blob_tbl in ingest_files.get_blob_creates() {
-            self.add_file(
-                blob_tbl.id,
-                -1,
-                BLOB_LEVEL,
-                blob_tbl.get_smallest(),
-                blob_tbl.get_biggest(),
-            );
+            self.add_file(blob_tbl.id, FileMeta::from_blob_table(blob_tbl));
         }
     }
 
@@ -774,16 +736,38 @@ impl ShardMeta {
             // Although `max_ts` will be updated in initial flush again, still set here to
             // avoid issue in unexpected corner case.
             meta.max_ts = self.max_ts;
+            meta.schema_file_id = self.schema_file_id;
+            meta.schema_file_ver = self.schema_file_ver;
             new_shards.push(meta);
         }
         for new_shard in &mut new_shards {
             for (fid, fm) in &old.files {
                 if new_shard.overlap_table(fm.smallest(), fm.biggest()) {
+                    if fm.get_level() == 0
+                        && new_shard.schema_file_id > 0
+                        && old.unconverted_l0s.contains(fid)
+                    {
+                        new_shard.unconverted_l0s.push(*fid);
+                    }
                     new_shard.files.insert(*fid, fm.clone());
                 }
             }
         }
         new_shards
+    }
+
+    pub fn apply_columnar_compaction(&mut self, comp: &pb::ColumnarCompaction) {
+        let col_change = comp.get_columnar_change();
+        for col_create in col_change.get_table_creates() {
+            self.files
+                .insert(col_create.get_id(), FileMeta::from_table(col_create));
+        }
+        for col_delete in col_change.get_table_deletes() {
+            self.files.remove(&col_delete.get_id());
+        }
+        self.unconverted_l0s
+            .retain(|unconverted_l0| !comp.row_l0s.contains(unconverted_l0));
+        self.columnar_snap_version = self.columnar_snap_version.max(comp.snap_version);
     }
 
     pub fn to_change_set(&self) -> pb::ChangeSet {
@@ -797,6 +781,7 @@ impl ShardMeta {
         snap.set_base_version(self.base_version);
         snap.set_data_sequence(self.data_sequence);
         snap.set_max_ts(self.max_ts);
+        snap.set_columnar_snap_version(self.columnar_snap_version);
         for (k, v) in self.files.iter() {
             if v.is_blob_file() {
                 let mut blob = pb::BlobCreate::new();
@@ -804,6 +789,12 @@ impl ShardMeta {
                 blob.set_smallest(v.smallest.to_vec());
                 blob.set_biggest(v.biggest.to_vec());
                 snap.mut_blob_creates().push(blob);
+            } else if v.is_columnar_file() {
+                let mut col_file = pb::TableCreate::new();
+                col_file.set_id(*k);
+                col_file.set_level(v.get_level());
+                col_file.set_columnar_tables(v.columnar_tables);
+                snap.mut_columnar_creates().push(col_file);
             } else if v.get_level() == 0 {
                 let mut l0 = pb::L0Create::new();
                 l0.set_id(*k);
@@ -826,6 +817,7 @@ impl ShardMeta {
             sm.set_version(self.schema_file_ver);
             snap.set_schema_meta(sm);
         }
+        snap.set_unconverted_l0s(self.unconverted_l0s.clone());
         cs.set_snapshot(snap);
         if let Some(parent) = &self.parent {
             cs.set_parent(parent.to_change_set());
@@ -986,6 +978,10 @@ impl ShardMeta {
                 self.range.inner_key_off,
             ) {
                 self.set_property(DEL_PREFIXES_KEY, &new_del_prefixes);
+            }
+            if source.schema_file_ver >= self.schema_file_ver {
+                self.schema_file_id = source.schema_file_id;
+                self.schema_file_ver = source.schema_file_ver;
             }
         } else {
             info!(

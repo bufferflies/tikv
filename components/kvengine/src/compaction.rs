@@ -11,6 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use api_version::ApiV2;
 use bytes::{Buf, Bytes, BytesMut};
 use cloud_encryption::{EncryptionKey, MasterKey};
 use http::StatusCode;
@@ -24,12 +25,16 @@ use tikv_util::mpsc;
 
 use crate::{
     dfs,
+    dfs::FileType,
     table::{
         blobtable::{
             blobtable::BlobTable,
             builder::{BlobTableBuildOptions, BlobTableBuilder},
         },
-        columnar::builder::ColumnarTableBuildOptions,
+        columnar::{
+            Block, ColumnarFileBuilder, ColumnarMergeReader, ColumnarReader,
+            ColumnarRowTableReader, ColumnarTableBuildOptions, ColumnarTableBuilder, SchemaFile,
+        },
         get_tables_in_range,
         sstable::{
             self, builder::TableBuilderOptions, File, InMemFile, L0Builder, LocalFile, SsTable,
@@ -421,8 +426,10 @@ pub struct L1PlusCompaction {
 pub struct ColumnarCompaction {
     level: u32,
     safe_ts: u64,
-    source_row_tables: Vec<(u32, u64)>,      // (level, id)
-    source_columnar_tables: Vec<(u32, u64)>, // (level, id)
+    snap_version: u64,
+    source_row_files: Vec<(u32, u64)>,      // (level, id)
+    source_columnar_files: Vec<(u32, u64)>, // (level, id)
+    schema_file_id: u64,
     columnar_config: ColumnarTableBuildOptions,
 }
 
@@ -541,6 +548,7 @@ impl Engine {
             Some(CompactionPriority::DestroyRange) => self.destroy_range(&shard).transpose(),
             Some(CompactionPriority::TruncateTs) => self.truncate_ts(&shard).transpose(),
             Some(CompactionPriority::TrimOverBound) => self.trim_over_bound(&shard).transpose(),
+            Some(CompactionPriority::L0ToColumnar) => self.trigger_l0_to_columnar(&shard),
             None => {
                 info!("Shard {} is not urgent for compaction", tag);
                 store_bool(&shard.compacting, false);
@@ -1331,6 +1339,40 @@ impl Engine {
         Some(self.comp_client.compact(req))
     }
 
+    pub(crate) fn trigger_l0_to_columnar(&self, shard: &Shard) -> Option<Result<pb::ChangeSet>> {
+        let tag = shard.tag();
+        let data = shard.get_data();
+        if data.col_levels.unconverted_l0s.is_empty() {
+            store_bool(&shard.compacting, false);
+            return None;
+        }
+        let schema_file = shard.get_schema_file()?;
+        let mut req = self.new_compact_request_with_shard(shard, 0, 0);
+        let mut source_row_tables = vec![];
+        let mut snap_version = 0;
+        for l0 in &data.col_levels.unconverted_l0s {
+            source_row_tables.push((0, l0.id()));
+            snap_version = snap_version.max(l0.version());
+        }
+        let num_l0s = source_row_tables.len();
+        let columnar_compaction = ColumnarCompaction {
+            level: 0,
+            safe_ts: self.get_keyspace_gc_safepoint_v2(shard.keyspace_id),
+            snap_version,
+            source_row_files: source_row_tables,
+            source_columnar_files: vec![],
+            schema_file_id: schema_file.get_file_id(),
+            columnar_config: self.opts.columnar_build_options,
+        };
+        req.compaction_tp = CompactionType::Columnar(columnar_compaction);
+        self.set_alloc_ids_for_request(&mut req, num_l0s, num_l0s);
+        info!(
+            "start covert L0 to columnar for {}, num_l0s {}",
+            tag, num_l0s
+        );
+        Some(self.comp_client.compact(req))
+    }
+
     pub(crate) fn handle_compact_response(&self, cs: pb::ChangeSet) {
         self.meta_change_listener.on_change_set(cs);
     }
@@ -1344,6 +1386,7 @@ pub(crate) enum CompactionPriority {
     DestroyRange,
     TruncateTs,
     TrimOverBound,
+    L0ToColumnar,
 }
 
 impl CompactionPriority {
@@ -1355,6 +1398,7 @@ impl CompactionPriority {
             CompactionPriority::DestroyRange => f64::MAX,
             CompactionPriority::TruncateTs => f64::MAX,
             CompactionPriority::TrimOverBound => f64::MAX,
+            CompactionPriority::L0ToColumnar => 2.0,
         }
     }
 
@@ -1366,6 +1410,7 @@ impl CompactionPriority {
             CompactionPriority::DestroyRange => -1,
             CompactionPriority::TruncateTs => -1,
             CompactionPriority::TrimOverBound => -1,
+            CompactionPriority::L0ToColumnar => 0,
         }
     }
 
@@ -1377,6 +1422,7 @@ impl CompactionPriority {
             CompactionPriority::DestroyRange => -1,
             CompactionPriority::TruncateTs => -1,
             CompactionPriority::TrimOverBound => -1,
+            CompactionPriority::L0ToColumnar => 0,
         }
     }
 }
@@ -1740,10 +1786,14 @@ fn local_compact(ctx: &CompactionCtx) -> Result<pb::ChangeSet> {
         CompactionType::Major(major_compaction) => {
             cs.set_major_compaction(major_compact_v3(ctx, major_compaction, &mut allocate_id)?);
         }
-        CompactionType::Unknown => unreachable!(),
-        CompactionType::Columnar(_) => {
-            unimplemented!()
+        CompactionType::Columnar(columnar_compaction) => {
+            cs.set_columnar_compaction(columnar_compact(
+                ctx,
+                columnar_compaction,
+                &mut allocate_id,
+            )?);
         }
+        CompactionType::Unknown => unreachable!(),
     }
     Ok(cs)
 }
@@ -2130,7 +2180,7 @@ fn compact_trim_over_bound(
 }
 
 enum FilePersistResult {
-    SsTableCreate(pb::TableCreate),
+    TableCreate(pb::TableCreate),
     BlobTableCreate(pb::BlobCreate),
 }
 
@@ -2158,7 +2208,7 @@ fn persist_sst(
             fs_clone
                 .create(id, buf.into(), opts)
                 .await
-                .map(|_| FilePersistResult::SsTableCreate(tbl_create)),
+                .map(|_| FilePersistResult::TableCreate(tbl_create)),
         )
         .unwrap();
     });
@@ -2184,6 +2234,33 @@ fn persist_blob_table(
                 .create(id, buf, opts)
                 .await
                 .map(|_| FilePersistResult::BlobTableCreate(blob_table_create)),
+        )
+        .unwrap();
+    });
+}
+
+fn persist_columnar_file(
+    target_lvl: u32,
+    builder: &mut ColumnarFileBuilder,
+    tx: mpsc::Sender<dfs::Result<pb::TableCreate>>,
+    fs: Arc<dyn dfs::Dfs>,
+    opts: dfs::Options,
+) {
+    let id = builder.file_id;
+    let buf = builder.build();
+    let mut table_create = pb::TableCreate::new();
+    table_create.set_id(id);
+    table_create.set_smallest(builder.smallest.clone());
+    table_create.set_biggest(builder.biggest.clone());
+    table_create.set_columnar_tables(builder.num_tables() as u32);
+    table_create.set_level(target_lvl);
+    let fs_clone = fs.clone();
+    fs.get_runtime().spawn(async move {
+        tx.send(
+            fs_clone
+                .create(id, buf.into(), opts.with_type(FileType::Columnar))
+                .await
+                .map(|_| table_create),
         )
         .unwrap();
     });
@@ -2411,7 +2488,7 @@ fn compact_for_cf(
     for _ in 0..cnt {
         match rx.recv().unwrap() {
             Err(err) => errors.push(err),
-            Ok(FilePersistResult::SsTableCreate(tbl_create)) => {
+            Ok(FilePersistResult::TableCreate(tbl_create)) => {
                 sst_creates.push(tbl_create);
             }
             Ok(FilePersistResult::BlobTableCreate(blob_table_create)) => {
@@ -2640,6 +2717,140 @@ fn major_compact_v3(
         }
     }
     Ok(ret)
+}
+
+fn columnar_compact(
+    ctx: &CompactionCtx,
+    columnar_compaction: &ColumnarCompaction,
+    allocate_id: &mut dyn FnMut() -> u64,
+) -> Result<pb::ColumnarCompaction> {
+    if !columnar_compaction.source_row_files.is_empty() {
+        convert_row_file_to_columnar_file(ctx, columnar_compaction, allocate_id)
+    } else {
+        compact_columnar_files(ctx, columnar_compaction, allocate_id)
+    }
+}
+
+fn convert_row_file_to_columnar_file(
+    ctx: &CompactionCtx,
+    columnar_compaction: &ColumnarCompaction,
+    allocate_id: &mut dyn FnMut() -> u64,
+) -> Result<pb::ColumnarCompaction> {
+    let mut ret = pb::ColumnarCompaction::new();
+    ret.set_snap_version(columnar_compaction.snap_version);
+    let row_l0s: Vec<u64> = columnar_compaction
+        .source_row_files
+        .iter()
+        .filter(|(lvl, _)| *lvl == 0)
+        .map(|(_, id)| *id)
+        .collect();
+    ret.set_row_l0s(row_l0s);
+    let opts = dfs::Options::default().with_type(FileType::Schema);
+    let runtime = ctx.dfs.get_runtime();
+    let schema_file_id = columnar_compaction.schema_file_id;
+    let schema_file_data = runtime.block_on(ctx.dfs.read_file(schema_file_id, opts))?;
+    let schema_file = SchemaFile::open(Arc::new(InMemFile::new(schema_file_id, schema_file_data)))?;
+    let l0_ids: Vec<u64> = columnar_compaction
+        .source_row_files
+        .iter()
+        .map(|(_, id)| *id)
+        .collect();
+    let opts = dfs::Options::default().with_shard(ctx.req.shard_id, ctx.req.shard_ver);
+    let l0_files = load_table_files(
+        &l0_ids,
+        ctx.dfs.clone(),
+        opts,
+        ctx.local_dir.as_ref(),
+        ctx.for_restore,
+    )?;
+    let l0_tbls = files_to_l0_tables(l0_files, ctx.encryption_key.clone());
+    let smallest = l0_tbls.iter().map(|l0| l0.smallest()).min().unwrap();
+    let biggest = l0_tbls.iter().map(|l0| l0.biggest()).max().unwrap();
+    let overlap_tables = schema_file.overlap_tables(smallest, biggest);
+    if overlap_tables.is_empty() {
+        return Ok(ret);
+    }
+    let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(&ctx.req.outer_start).unwrap_or_default();
+    let mut file_builder =
+        ColumnarFileBuilder::new(allocate_id(), Some(columnar_compaction.snap_version));
+    let pack_max_row_count = columnar_compaction.columnar_config.pack_max_row_count;
+    let max_table_size = columnar_compaction.columnar_config.max_columnar_table_size;
+    let mut cnt = 0;
+    let (tx, rx) = mpsc::bounded(ctx.req.file_ids.len());
+    for overlap_table in overlap_tables {
+        let schema = schema_file.get_table(overlap_table).unwrap();
+        let mut columnar_readers: Vec<Box<dyn ColumnarReader>> = vec![];
+        for l0_tbl in &l0_tbls {
+            if let Some(tbl) = l0_tbl.get_cf(WRITE_CF) {
+                let iter = tbl.new_iterator(false, false);
+                let reader = ColumnarRowTableReader::new(keyspace_id, schema.clone(), iter, true);
+                columnar_readers.push(Box::new(reader));
+            }
+        }
+        if columnar_readers.is_empty() {
+            continue;
+        }
+        let mut merge_reader = ColumnarMergeReader::new(schema.clone(), columnar_readers);
+        let mut block = Block::new(schema);
+        merge_reader.seek(&[])?;
+        let mut res = merge_reader.read(&mut block, pack_max_row_count)?;
+        let mut row_count = 0;
+        let mut tbl_builder =
+            ColumnarTableBuilder::new(schema.clone(), columnar_compaction.columnar_config, false);
+        let mut block_offset = 0;
+        while res > 0 {
+            row_count += res;
+            block_offset = tbl_builder.append_block(&block, block_offset);
+            if block_offset < block.length() {
+                res = block.length() - block_offset;
+                let estimated_size = tbl_builder.get_estimated_size() + file_builder.estimated_size;
+                if estimated_size > max_table_size {
+                    file_builder.add_table(tbl_builder);
+                    cnt += 1;
+                    persist_columnar_file(0, &mut file_builder, tx.clone(), ctx.dfs.clone(), opts);
+                    file_builder.reset(allocate_id());
+                    tbl_builder = ColumnarTableBuilder::new(
+                        schema.clone(),
+                        columnar_compaction.columnar_config,
+                        false,
+                    );
+                }
+            } else {
+                block.reset();
+                block_offset = 0;
+                res = merge_reader.read(&mut block, pack_max_row_count)?;
+            }
+        }
+        if row_count > 0 {
+            file_builder.add_table(tbl_builder);
+        }
+    }
+    if file_builder.num_tables() > 0 {
+        cnt += 1;
+        persist_columnar_file(0, &mut file_builder, tx, ctx.dfs.clone(), opts);
+    }
+    let change = ret.mut_columnar_change();
+    let mut errors = vec![];
+    for _ in 0..cnt {
+        match rx.recv().unwrap() {
+            Err(err) => errors.push(err),
+            Ok(tbl_create) => {
+                change.mut_table_creates().push(tbl_create);
+            }
+        }
+    }
+    if !errors.is_empty() {
+        return Err(errors.pop().unwrap().into());
+    }
+    Ok(ret)
+}
+
+fn compact_columnar_files(
+    _ctx: &CompactionCtx,
+    _columnar_compaction: &ColumnarCompaction,
+    _allocate_id: &mut dyn FnMut() -> u64,
+) -> Result<pb::ColumnarCompaction> {
+    unimplemented!()
 }
 
 pub(crate) enum CompactMsg {

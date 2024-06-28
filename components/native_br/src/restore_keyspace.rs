@@ -1760,13 +1760,7 @@ impl BackupCluster {
                 let shard = self.get_shard(shard_id).unwrap();
                 for (&file_id, file_meta) in shard.meta.all_files() {
                     if meta.overlap_table(file_meta.smallest(), file_meta.biggest()) {
-                        meta.add_file(
-                            file_id,
-                            file_meta.cf as i32,
-                            file_meta.level as u32,
-                            &file_meta.smallest,
-                            &file_meta.biggest,
-                        );
+                        meta.add_file(file_id, file_meta.clone());
                         sstables_cnt += 1;
                     }
                 }

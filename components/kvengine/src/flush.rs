@@ -11,7 +11,7 @@ use bytes::{Bytes, BytesMut};
 use cloud_encryption::EncryptionKey;
 use fail::fail_point;
 use kvenginepb as pb;
-use kvenginepb::L0Create;
+use kvenginepb::{L0Create, SchemaMeta};
 use tikv_util::{
     info, mpsc,
     time::{monotonic_raw_now, timespec_to_ns},
@@ -258,6 +258,28 @@ impl Engine {
             blob_create.set_biggest(blob.biggest_key().to_vec());
             initial_flush.mut_blob_creates().push(blob_create);
         }
+        if let Some(schema_file) = &flush.shard_data.schema_file {
+            // After split, the schema file may not overlap the schema file anymore.
+            if schema_file.overlap(
+                &task.range.outer_start,
+                &task.range.outer_end,
+                task.range.keyspace_id,
+            ) {
+                let mut schema_meta = SchemaMeta::new();
+                schema_meta.set_file_id(schema_file.get_file_id());
+                schema_meta.set_version(schema_file.get_version());
+                schema_meta.set_keyspace_id(schema_file.get_keyspace_id());
+                initial_flush.set_schema_meta(schema_meta);
+                let unconverted_l0s = flush
+                    .shard_data
+                    .col_levels
+                    .unconverted_l0s
+                    .iter()
+                    .map(|l0| l0.id())
+                    .collect();
+                initial_flush.set_unconverted_l0s(unconverted_l0s);
+            }
+        }
         let (tx, rx) = mpsc::unbounded();
         let mut send_cnt = 0;
         for m in &flush.mem_tbls {
@@ -271,6 +293,9 @@ impl Engine {
         for _ in 0..send_cnt {
             match rx.recv().unwrap() {
                 Ok(l0_create) => {
+                    if initial_flush.has_schema_meta() {
+                        initial_flush.mut_unconverted_l0s().push(l0_create.get_id());
+                    }
                     initial_flush.mut_l0_creates().push(l0_create);
                 }
                 Err(err) => {
