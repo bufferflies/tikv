@@ -240,10 +240,11 @@ impl PeerStorage {
         let truncated_state = init_truncated_state(&engines.raft, peer_id, &region);
         let mut shard_meta: Option<ShardMeta> = None;
         if apply_state.applied_index > 0 {
-            let meta = load_engine_meta(&engines.raft, store_id, peer_id).unwrap();
+            let mut meta = load_engine_meta(&engines.raft, store_id, peer_id).unwrap();
             if let Some(parent) = &meta.parent {
                 engines.raft.add_dependent(parent.id, meta.id);
             }
+            meta.recover_txn_file_locks_from_kv(&engines.kv);
             shard_meta = Some(meta);
         }
         let last_term = init_last_term(&engines, peer_id, &region, raft_state)?;

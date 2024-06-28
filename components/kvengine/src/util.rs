@@ -1,16 +1,13 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use bytes::{Buf, BufMut, Bytes, BytesMut};
-use collections::{HashMap, HashMapEntry};
+use bytes::{Buf, Bytes};
+use collections::HashMap;
 use kvproto::kvrpcpb;
 use log_wrappers::Value;
 use protobuf::Message;
-use tikv_util::{
-    box_err,
-    codec::number::{U16_SIZE, U32_SIZE, U64_SIZE},
-};
+use tikv_util::box_err;
 
-use crate::{DeletePrefixes, ShardMeta, ShardTag, UserMeta, DEL_PREFIXES_KEY};
+use crate::{table::TxnFile, DeletePrefixes, ShardMeta, ShardTag, UserMeta, DEL_PREFIXES_KEY};
 
 /// A helper function to evenly distribute `total` into `count` parts.
 /// Note: when `total` <= `count`, return `[1; total]`.
@@ -133,6 +130,31 @@ impl PropertiesHelper {
     }
 }
 
+pub trait TxnFileRefExt {
+    fn is_locked(&self) -> bool;
+    fn is_commit_or_rollback(&self) -> bool {
+        !self.is_locked()
+    }
+    fn get_commit_or_rollback(&self) -> (bool /* is_commit */, bool /* is_rollback */);
+}
+
+impl TxnFileRefExt for kvenginepb::TxnFileRef {
+    #[inline]
+    fn is_locked(&self) -> bool {
+        self.get_user_meta().is_empty()
+    }
+
+    fn get_commit_or_rollback(&self) -> (bool, bool) {
+        if self.is_locked() {
+            (false, false)
+        } else {
+            let user_meta = UserMeta::from_slice(&self.user_meta);
+            let is_rollback = user_meta.is_rollback();
+            (!is_rollback, is_rollback)
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct TxnFileRefPropertyHelper {
     txn_file_refs: kvenginepb::TxnFileRefs,
@@ -164,14 +186,7 @@ impl TxnFileRefPropertyHelper {
         tag: &ShardTag,
         wb_ref: &kvenginepb::TxnFileRef,
     ) -> (bool /* is_commit */, bool /* is_rollback */) {
-        let (is_commit, is_rollback) = if wb_ref.get_user_meta().is_empty() {
-            (false, false)
-        } else {
-            let user_meta = UserMeta::from_slice(&wb_ref.user_meta);
-            let is_rollback = user_meta.is_rollback();
-            (!is_rollback, is_rollback)
-        };
-
+        let (is_commit, is_rollback) = wb_ref.get_commit_or_rollback();
         let mut refs = self.txn_file_refs.take_txn_file_refs().into_vec();
         if let Some(idx) = refs.iter().position(|x| x.start_ts == wb_ref.start_ts) {
             if is_rollback {
@@ -199,52 +214,34 @@ impl TxnFileRefPropertyHelper {
         refs.retain(|r| r.get_version() > version || !r.get_lock_val_prefix().is_empty());
         self.txn_file_refs.set_txn_file_refs(refs.into());
     }
+
+    pub fn into_txn_file_locks(self, seq: u64) -> TxnFileLocks {
+        let locks: HashMap<u64, Bytes> = self
+            .txn_file_refs
+            .txn_file_refs
+            .into_iter()
+            .filter_map(|r| {
+                r.is_locked()
+                    .then(|| (r.start_ts, Bytes::from(r.lock_val_prefix)))
+            })
+            .collect();
+        TxnFileLocks { seq, inner: locks }
+    }
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct TxnFileLocks {
-    // Shard meta sequence (log index) on changed. Used for de-duplication.
+    // Log index on changed. Only used for (debug) assert that seq is increasing.
     seq: u64,
     inner: HashMap<u64 /* txn start_ts */, Bytes /* lock_val_prefix */>,
 }
 
-const TXN_FILE_LOCKS_FORMAT_VER: u16 = 1;
-
 impl TxnFileLocks {
-    pub fn marshall(&self) -> Bytes {
-        let size: usize = self
-            .inner
-            .values()
-            .map(|lock| U64_SIZE /* start_ts */ + U32_SIZE /* lock_len */ + lock.len())
-            .sum();
-        let capacity = U16_SIZE /* ver */ + U64_SIZE /* seq */ + size;
-
-        let mut buf = BytesMut::with_capacity(capacity);
-        buf.put_u16(TXN_FILE_LOCKS_FORMAT_VER);
-        buf.put_u64(self.seq);
-        for (&ts, lock) in &self.inner {
-            buf.put_u64(ts);
-            buf.put_u32(lock.len() as u32);
-            buf.put(lock.as_ref());
-        }
-        buf.freeze()
-    }
-
-    pub fn unmarshall(mut buf: Bytes) -> Self {
-        debug_assert!(buf.len() >= U16_SIZE + U64_SIZE, "buf: {:?}", buf);
-        let ver = buf.get_u16();
-        let seq = buf.get_u64();
-        debug_assert_eq!(ver, TXN_FILE_LOCKS_FORMAT_VER, "buf: {:?}", buf);
-
-        let mut locks = HashMap::default();
-        while buf.has_remaining() {
-            debug_assert!(buf.remaining() >= U64_SIZE + U32_SIZE, "buf: {:?}", buf);
-            let start_ts = buf.get_u64();
-            let lock_len = buf.get_u32() as usize;
-            debug_assert!(buf.remaining() >= lock_len, "buf: {:?}", buf);
-            let lock = buf.split_to(lock_len);
-            locks.insert(start_ts, lock);
-        }
+    pub fn from_lock_txn_files(seq: u64, lock_txn_files: &[TxnFile]) -> Self {
+        let locks = lock_txn_files
+            .iter()
+            .map(|t| (t.start_ts(), t.lock_val_prefix()))
+            .collect();
         Self { seq, inner: locks }
     }
 
@@ -258,31 +255,21 @@ impl TxnFileLocks {
         self.seq
     }
 
-    // Return whether modified, i.e., `start_ts` is newly inserted.
     // Duplication should be checked before insert.
     #[inline]
-    pub fn insert(&mut self, seq: u64, start_ts: u64, lock_val_prefix: &[u8]) -> bool /* modified */
-    {
+    pub fn insert(&mut self, seq: u64, start_ts: u64, lock_val_prefix: &[u8]) {
         debug_assert!(self.seq < seq);
         self.seq = seq;
-
-        match self.inner.entry(start_ts) {
-            HashMapEntry::Vacant(e) => {
-                e.insert(Bytes::copy_from_slice(lock_val_prefix));
-                true
-            }
-            HashMapEntry::Occupied(_) => {
-                // Value of `lock_val_prefix` may be different (for `min_commit_ts`), but can be
-                // ignored, as it does not affect resolving the lock.
-                false
-            }
-        }
+        // Value of `lock_val_prefix` may be different (for `min_commit_ts`), but can be
+        // ignored, as it does not affect resolving the lock.
+        self.inner
+            .entry(start_ts)
+            .or_insert_with(|| Bytes::copy_from_slice(lock_val_prefix));
     }
 
-    // Return whether modified, i.e., an existed `start_ts` is removed.
     // Duplication should be checked before remove.
     #[inline]
-    pub fn remove(&mut self, seq: u64, start_ts: u64) -> bool /* modified */ {
+    pub fn remove(&mut self, seq: u64, start_ts: u64) -> bool {
         debug_assert!(self.seq < seq);
         self.seq = seq;
         self.inner.remove(&start_ts).is_some()
@@ -377,23 +364,5 @@ mod tests {
                 b"x0201077".to_vec(),
             ]
         );
-    }
-
-    #[test]
-    fn test_txn_file_locks() {
-        let mut locks = TxnFileLocks::default();
-        assert!(locks.insert(1, 1, "a".as_bytes()));
-        assert!(locks.insert(2, 2, "b".as_bytes()));
-        assert!(!locks.insert(3, 1, "c".as_bytes()));
-
-        let data = locks.marshall();
-        let locks1 = TxnFileLocks::unmarshall(data);
-        assert_eq!(locks.inner, locks1.inner);
-
-        assert!(locks.remove(4, 1));
-        assert!(!locks.remove(5, 1));
-        assert!(locks.remove(6, 2));
-        assert!(!locks.remove(7, 2));
-        assert!(locks.is_empty());
     }
 }

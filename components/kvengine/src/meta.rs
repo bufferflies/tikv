@@ -9,14 +9,14 @@ use api_version::{
 use bytes::{Buf, Bytes};
 use kvenginepb as pb;
 use kvenginepb::{SchemaMeta, TxnFileRef};
-use log_wrappers::Value as LogValue;
 use protobuf::Message;
 use slog_global::*;
+use util::TxnFileRefExt as _;
 
 use super::*;
 use crate::{
     table::{InnerKey, TableExt},
-    util::TxnFileLocks,
+    util::{TxnFileLocks, TxnFileRefPropertyHelper},
 };
 
 #[derive(Default, Clone)]
@@ -59,11 +59,9 @@ impl ShardMeta {
         };
 
         let properties = Properties::new().apply_pb(snap.get_properties());
-        let txn_file_locks = if let Some(bs) = properties.get(TXN_FILE_LOCKS) {
-            TxnFileLocks::unmarshall(bs)
-        } else {
-            TxnFileLocks::default()
-        };
+        let txn_file_locks = TxnFileRefPropertyHelper::from_property(properties.get(TXN_FILE_REF))
+            .unwrap()
+            .into_txn_file_locks(snap.data_sequence);
 
         let mut meta = Self {
             engine_id,
@@ -1004,30 +1002,21 @@ impl ShardMeta {
         self.seq = sequence;
     }
 
-    pub fn merge_txn_file_ref(&mut self, wb_ref: &TxnFileRef, log_index: u64) -> bool /* modified */
-    {
+    pub fn merge_txn_file_ref(&mut self, wb_ref: &TxnFileRef, log_index: u64) {
         let tag = self.tag();
 
-        if self.txn_file_locks.seq() >= log_index {
-            info!("{} skip stale merge txn file ref", tag;
-                "seq" => self.txn_file_locks.seq(),
-                "log_index" => log_index,
-                "wb_ref" => ?wb_ref);
-            return false;
-        }
+        debug_assert!(
+            self.txn_file_locks.seq() < log_index,
+            "{} duplicated merge txn file ref, seq {}, log_index {}, wb_ref {:?}",
+            tag,
+            self.txn_file_locks.seq(),
+            log_index,
+            wb_ref
+        );
 
-        let modified = if wb_ref.get_user_meta().is_empty() {
-            let inserted = self.txn_file_locks.insert(
-                log_index,
-                wb_ref.start_ts,
-                wb_ref.get_lock_val_prefix(),
-            );
-            debug!("{} ShardMeta merge txn file locks (insert by lock)", tag;
-                "wb_ref" => ?wb_ref,
-                "log_index" => log_index,
-                "merged" => ?self.txn_file_locks,
-            );
-            inserted
+        if wb_ref.is_locked() {
+            self.txn_file_locks
+                .insert(log_index, wb_ref.start_ts, wb_ref.get_lock_val_prefix());
         } else {
             let existed = self.txn_file_locks.remove(log_index, wb_ref.start_ts);
             debug_assert!(
@@ -1035,24 +1024,11 @@ impl ShardMeta {
                 "{} unexpected txn not existed, wb_ref {:?}, log_index {}, current locks {:?}",
                 tag, wb_ref, log_index, self.txn_file_locks
             );
-            debug!("{} ShardMeta merge txn file locks (remove by commit/rollback)", tag;
-                "wb_ref" => ?wb_ref,
-                "log_index" => log_index,
-                "merged" => ?self.txn_file_locks,
-            );
-            existed
-        };
-
-        if modified {
-            self.set_property_bytes(TXN_FILE_LOCKS, self.txn_file_locks.marshall())
         }
         info!("{} ShardMeta merge txn file ref", tag;
             "wb_ref" => ?wb_ref,
             "log_index" => log_index,
-            "modified" => modified,
-            "prop" => &LogValue::value(self.get_property(TXN_FILE_LOCKS).unwrap_or_default().chunk()),
             "locks" => ?self.txn_file_locks);
-        modified
     }
 
     pub fn has_txn_file_locks(&self) -> bool {
@@ -1061,6 +1037,21 @@ impl ShardMeta {
 
     pub fn txn_file_locks(&self) -> &TxnFileLocks {
         &self.txn_file_locks
+    }
+
+    pub fn recover_txn_file_locks_from_kv(&mut self, kv: &Engine) {
+        match kv.get_shard_with_ver(self.id, self.ver) {
+            Ok(shard) => {
+                self.txn_file_locks = TxnFileLocks::from_lock_txn_files(
+                    shard.get_write_sequence(),
+                    shard.get_data().get_lock_txn_files(),
+                );
+                info!("{} recover txn file locks from kv", self.tag(); "locks" => ?self.txn_file_locks);
+            }
+            Err(err) => {
+                warn!("{} failed to get shard", self.tag(); "err" => ?err);
+            }
+        }
     }
 }
 

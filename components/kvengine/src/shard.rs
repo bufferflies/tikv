@@ -124,7 +124,6 @@ pub const TXN_FILE_REF: &str = "_txn_file_ref";
 // during flush.
 pub const DEL_PREFIXES_KEY: &str = "_del_prefixes";
 pub const TRUNCATE_TS_KEY: &str = "_truncate_ts";
-pub const TXN_FILE_LOCKS: &str = "_txn_file_locks";
 pub const ENCRYPTION_KEY: &str = "_encryption";
 
 // Note: TERM_KEY should not be flushed during initial flush, to keep
@@ -1203,6 +1202,11 @@ impl ShardDataCore {
     #[inline]
     pub(crate) fn has_txn_file_locks(&self) -> bool {
         !self.lock_txn_files.is_empty()
+    }
+
+    #[inline]
+    pub(crate) fn get_lock_txn_files(&self) -> &[TxnFile] {
+        &self.lock_txn_files
     }
 
     pub(crate) fn for_each_level<F>(&self, mut f: F)
@@ -2547,7 +2551,7 @@ mod tests {
         )> = vec![
             (TERM_KEY, false, true),
             (TXN_FILE_REF, true, true),
-            (TXN_FILE_LOCKS, false, false),
+            (TRUNCATE_TS_KEY, false, false),
         ];
 
         for (property_key, need_initial_flush, need_flush) in cases {

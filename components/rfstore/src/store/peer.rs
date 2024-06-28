@@ -2375,18 +2375,8 @@ impl<'a> PreprocessRef<'a> {
             ));
         }
 
-        let peer_id = self.peer_id();
-        let region_id = self.region_id();
-
-        let shard_meta = self.mut_shard_meta();
-        if shard_meta.merge_txn_file_ref(&txn_file_ref, entry.index) {
-            ctx.raft_wb.set_state(
-                peer_id,
-                region_id,
-                KV_ENGINE_META_KEY,
-                &shard_meta.marshal(),
-            );
-        }
+        self.mut_shard_meta()
+            .merge_txn_file_ref(&txn_file_ref, entry.index);
 
         if ctx.kv.is_none() {
             // kv is none in restore, we don't need to load txn file.
