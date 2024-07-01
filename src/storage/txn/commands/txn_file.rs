@@ -62,7 +62,13 @@ impl TxnFileCommand {
         })
     }
 
-    fn build_prewrite_txn_file_ref(req: &Prewrite, snap: &SnapAccess) -> TxnFileRef {
+    fn build_prewrite_txn_file_ref(req: &Prewrite, snap: &SnapAccess) -> Result<TxnFileRef> {
+        if !req.txn_file_chunks.is_sorted() {
+            return Err(box_err!(
+                "txn file chunks are not sorted: {:?}",
+                req.txn_file_chunks
+            ));
+        }
         let mut lock = txn_types::Lock::new(
             LockType::Put,
             req.primary.clone(),
@@ -82,7 +88,7 @@ impl TxnFileCommand {
         txn_file_ref.set_chunk_ids(req.txn_file_chunks.clone());
         txn_file_ref.set_inner_lower_bound(snap.get_inner_start().to_vec());
         txn_file_ref.set_inner_upper_bound(snap.get_inner_end().to_vec());
-        txn_file_ref
+        Ok(txn_file_ref)
     }
 
     // Note: modify native_br::lock::LockResolver accordingly if here is changed.
@@ -159,7 +165,7 @@ impl TxnFileCommand {
                         cmd
                     ));
                 }
-                Self::build_prewrite_txn_file_ref(req, snap)
+                Self::build_prewrite_txn_file_ref(req, snap)?
             }
             Command::Commit(req) => Self::build_commit_txn_file_ref(req, snap),
             Command::Rollback(req) => Self::build_rollback_txn_file_ref(req, snap),

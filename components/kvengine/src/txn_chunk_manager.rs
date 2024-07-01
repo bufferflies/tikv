@@ -1,19 +1,15 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{
-    default::Default,
-    fs,
-    ops::Deref,
-    path::PathBuf,
-    sync::{Arc, RwLock},
-};
+use std::{default::Default, fs, ops::Deref, path::PathBuf, sync::Arc};
 
 use bytes::{Buf, Bytes};
 use cloud_encryption::EncryptionKey;
 use dashmap::DashMap;
+use futures::executor::block_on;
 use moka::sync::SegmentedCache;
 use regex::Regex;
-use tikv_util::{box_err, HandyRwLock};
+use tikv_util::box_err;
+use tokio::sync::{OwnedRwLockWriteGuard, RwLock};
 
 use crate::{
     dfs,
@@ -75,19 +71,20 @@ impl Deref for TxnChunkManager {
 pub struct TxnChunkManagerCore {
     local_path: PathBuf,
     dfs: Arc<dyn Dfs>,
-    txn_chunks: DashMap<u64, Arc<TxnChunkEntry>>,
+    txn_chunks: DashMap<u64, TxnChunkEntry>,
     cache: SegmentedCache<BlockCacheKey, Bytes>,
     worker_pool: tokio::runtime::Runtime,
 }
 
+#[derive(Clone)]
 struct TxnChunkEntry {
-    chunk_data: RwLock<Option<TxnChunk>>,
+    chunk_data: Arc<RwLock<Option<TxnChunk>>>,
 }
 
 impl Default for TxnChunkEntry {
     fn default() -> Self {
         Self {
-            chunk_data: RwLock::new(None),
+            chunk_data: Arc::new(RwLock::new(None)),
         }
     }
 }
@@ -112,7 +109,7 @@ impl TxnChunkManagerCore {
                         Err(err) => return Err(err),
                     };
                     let files_entry = self.txn_chunks.entry(txn_file_id).or_default().clone();
-                    let mut guard = files_entry.chunk_data.wl();
+                    let mut guard = block_on(files_entry.chunk_data.write());
                     *guard = Some(txn_chunk)
                 }
             }
@@ -126,7 +123,7 @@ impl TxnChunkManagerCore {
 
     pub fn prepare(&self, txn_chunk_id: u64, encryption_key: Option<EncryptionKey>) -> Result<()> {
         let entry = self.txn_chunks.entry(txn_chunk_id).or_default().clone();
-        let mut guard = entry.chunk_data.write().unwrap();
+        let mut guard = block_on(entry.chunk_data.write());
         if guard.is_some() {
             return Ok(());
         }
@@ -153,24 +150,30 @@ impl TxnChunkManagerCore {
         txn_chunks_id: &[u64],
         encryption_key: Option<EncryptionKey>,
     ) -> Result<()> {
+        // Should be sorted to avoid deadlocks.
+        debug_assert!(
+            txn_chunks_id.is_sorted(),
+            "txn_chunks_id is not sorted: {:?}",
+            txn_chunks_id
+        );
+        info!("prepare txn chunks: {:?}", txn_chunks_id);
+
         let (tx, rx) = tikv_util::mpsc::bounded(READ_DFS_CONCURRENCY);
         let runtime = self.dfs.get_runtime();
         let mut msg_count: usize = 0;
         for &chunk_id in txn_chunks_id {
-            {
-                let entry = self.txn_chunks.entry(chunk_id).or_default().clone();
-                let mut guard = entry.chunk_data.write().unwrap();
-                if guard.is_some() {
-                    continue;
-                }
+            let entry = self.txn_chunks.entry(chunk_id).or_default().clone();
+            let mut guard = block_on(entry.chunk_data.write_owned());
+            if guard.is_some() {
+                continue;
+            }
 
-                let local_file_path = self.local_file_path(chunk_id);
-                if local_file_path.exists() {
-                    let txn_chunk =
-                        self.load_txn_chunk(chunk_id, local_file_path, encryption_key.clone())?;
-                    *guard = Some(txn_chunk);
-                    continue;
-                }
+            let local_file_path = self.local_file_path(chunk_id);
+            if local_file_path.exists() {
+                let txn_chunk =
+                    self.load_txn_chunk(chunk_id, local_file_path, encryption_key.clone())?;
+                *guard = Some(txn_chunk);
+                continue;
             }
 
             let dfs = self.dfs.clone();
@@ -178,7 +181,7 @@ impl TxnChunkManagerCore {
             runtime.spawn(async move {
                 let opts = dfs::Options::default().with_type(FileType::TxnChunk);
                 let file_data = dfs.read_file(chunk_id, opts).await;
-                if let Err(err) = tx.send((chunk_id, file_data)) {
+                if let Err(err) = tx.send((chunk_id, file_data, guard)) {
                     // Error should happen only when prepare_txn_chunks exit with error.
                     warn!("prepare_txn_chunks: send error: {:?}", err; "chunk_id" => chunk_id);
                 }
@@ -198,18 +201,17 @@ impl TxnChunkManagerCore {
 
     fn recv_txn_chunk_file_data(
         &self,
-        rx: &tikv_util::mpsc::Receiver<(u64, crate::dfs::Result<Bytes>)>,
+        rx: &tikv_util::mpsc::Receiver<(
+            u64,
+            crate::dfs::Result<Bytes>,
+            OwnedRwLockWriteGuard<Option<TxnChunk>>,
+        )>,
         encryption_key: Option<EncryptionKey>,
     ) -> Result<()> {
-        let (chunk_id, file_data) = rx.recv().unwrap();
+        let (chunk_id, file_data, mut guard) = rx.recv().unwrap();
         let file_data = file_data.map_err(|err| -> Error {
             box_err!("read_txn_chunk failed: {:?}, chunk_id {}", err, chunk_id)
         })?;
-        let entry = self.txn_chunks.entry(chunk_id).or_default().clone();
-        let mut guard = entry.chunk_data.write().unwrap();
-        if guard.is_some() {
-            return Ok(());
-        }
         let local_file_path = self.local_file_path(chunk_id);
         if !local_file_path.exists() {
             let file_name = chunk_id.to_string();
@@ -257,7 +259,7 @@ impl TxnChunkManagerCore {
 
     pub fn get(&self, txn_chunk_id: u64) -> Option<TxnChunk> {
         let entry = self.txn_chunks.get(&txn_chunk_id)?.clone();
-        let guard = entry.chunk_data.rl();
+        let guard = block_on(entry.chunk_data.read());
         guard.clone()
     }
 
