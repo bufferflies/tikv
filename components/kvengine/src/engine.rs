@@ -738,15 +738,18 @@ impl EngineCore {
         if let Some(shard) = self.get_shard(shard_id) {
             info!("shard {} set active {}", shard.tag(), active);
             shard.set_active(active);
+
+            // Shard will become active from a previous active state, without an inactive
+            // state in between. So always clear the flags.
+            store_bool(&shard.compacting, false);
+            self.send_flush_msg(FlushMsg::Clear(shard_id));
+            self.send_compact_msg(CompactMsg::Clear(IdVer::new(shard.id, shard.ver)));
+
             if active {
                 self.refresh_shard_states(&shard);
                 if let Err(err) = self.trigger_flush(&shard) {
                     warn!("{} trigger_flush error: {:?}", shard.tag(), err);
                 }
-            } else {
-                store_bool(&shard.compacting, false);
-                self.send_flush_msg(FlushMsg::Clear(shard_id));
-                self.send_compact_msg(CompactMsg::Clear(IdVer::new(shard.id, shard.ver)));
             }
         }
     }
