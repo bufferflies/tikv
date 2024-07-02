@@ -285,7 +285,7 @@ fn prepare_txn_file_ref(
     encryption_key: Option<EncryptionKey>,
 ) -> kvengine::Result<()> {
     let manager = kv.get_txn_chunk_manager();
-    manager.prepare_txn_chunks(&txn_file_ref.chunk_ids, encryption_key)
+    manager.prepare_txn_chunks(txn_file_ref.chunk_ids.clone(), encryption_key)
 }
 
 struct PeerToDestroy {

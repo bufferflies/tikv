@@ -1683,7 +1683,7 @@ impl Applier {
                 .with_label_values(&["txn"])
                 .observe(duration_to_sec(start.saturating_elapsed()));
             if let Err(err) =
-                txn_chunk_manager.prepare_txn_chunks(&txn_file_ref.chunk_ids, encryption_key)
+                txn_chunk_manager.prepare_txn_chunks(txn_file_ref.chunk_ids.clone(), encryption_key)
             {
                 // We can't handle the error here, just panic.
                 panic!(

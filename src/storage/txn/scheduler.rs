@@ -1796,7 +1796,8 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
 
                                     let wait_dur = start.saturating_elapsed();
                                     start = Instant::now();
-                                    manager.prepare_txn_chunks(&chunks_id, encryption_key)?;
+                                    manager
+                                        .prepare_txn_chunks(chunks_id.clone(), encryption_key)?;
                                     let prepare_dur = start.saturating_elapsed();
                                     SCHED_TXN_FILE_HISTOGRAM_VEC_STATIC
                                         .get(tag)

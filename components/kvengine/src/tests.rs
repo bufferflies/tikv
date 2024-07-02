@@ -1246,7 +1246,7 @@ fn test_txn_file_impl(enc_key: Option<&EncryptionKey>) {
     wb.set_property(TXN_FILE_REF, &txn1_lock);
     engine
         .txn_chunk_mgr
-        .prepare_txn_chunks(&[txn1_chunk_id], enc_key.cloned())
+        .prepare_txn_chunks(vec![txn1_chunk_id], enc_key.cloned())
         .unwrap();
     write_data(wb, &tx);
     let txn2_chunk_id = 202;
@@ -1262,7 +1262,7 @@ fn test_txn_file_impl(enc_key: Option<&EncryptionKey>) {
     wb.set_property(TXN_FILE_REF, &txn2_lock);
     engine
         .txn_chunk_mgr
-        .prepare_txn_chunks(&[txn2_chunk_id], enc_key.cloned())
+        .prepare_txn_chunks(vec![txn2_chunk_id], enc_key.cloned())
         .unwrap();
     write_data(wb, &tx);
     verify_lock(&engine, 200, 400);
@@ -1388,7 +1388,7 @@ fn test_txn_file_multiple_impl(enc_key: Option<&EncryptionKey>) {
     wb.set_property(TXN_FILE_REF, &txn_file_refs);
     engine
         .txn_chunk_mgr
-        .prepare_txn_chunks(&chunks_id, enc_key.cloned())
+        .prepare_txn_chunks(chunks_id.clone(), enc_key.cloned())
         .unwrap();
     write_data(wb, &tx);
     verify_lock(&engine, 100, 500);

@@ -147,21 +147,17 @@ impl TxnChunkManagerCore {
 
     pub fn prepare_txn_chunks(
         &self,
-        txn_chunks_id: &[u64],
+        mut txn_chunks_id: Vec<u64>,
         encryption_key: Option<EncryptionKey>,
     ) -> Result<()> {
-        // Should be sorted to avoid deadlocks.
-        debug_assert!(
-            txn_chunks_id.is_sorted(),
-            "txn_chunks_id is not sorted: {:?}",
-            txn_chunks_id
-        );
+        // Sort to avoid deadlocks.
+        txn_chunks_id.sort();
         info!("prepare txn chunks: {:?}", txn_chunks_id);
 
         let (tx, rx) = tikv_util::mpsc::bounded(READ_DFS_CONCURRENCY);
         let runtime = self.dfs.get_runtime();
         let mut msg_count: usize = 0;
-        for &chunk_id in txn_chunks_id {
+        for chunk_id in txn_chunks_id {
             let entry = self.txn_chunks.entry(chunk_id).or_default().clone();
             let mut guard = block_on(entry.chunk_data.write_owned());
             if guard.is_some() {
@@ -308,7 +304,7 @@ impl TxnChunkManagerCore {
             .flat_map(|txn_file_ref| txn_file_ref.chunk_ids.iter())
             .copied()
             .collect::<Vec<_>>();
-        self.prepare_txn_chunks(&txn_chunks_id, encryption_key)?;
+        self.prepare_txn_chunks(txn_chunks_id, encryption_key)?;
         txn_file_refs
             .iter()
             .map(|txn_file_ref| {
