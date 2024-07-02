@@ -262,13 +262,7 @@ impl EngineCore {
     ) -> Result<()> {
         let (id, meta, data) = result_tx.recv().unwrap()?;
         let data_len = data.len();
-        let start = Instant::now();
         self.write_local_file(id, data, use_direct_io, &meta)?;
-        info!(
-            "write local file {} takes {:?}",
-            id,
-            start.saturating_elapsed()
-        );
         let file = if meta.is_blob_file() {
             self.open_blob_table_file(id)?
         } else {
@@ -379,6 +373,7 @@ impl EngineCore {
         use_direct_io: bool,
         meta: &FileMeta,
     ) -> Result<()> {
+        let start = Instant::now();
         let local_file_name = if meta.is_blob_file() {
             self.local_blob_file_path(id)
         } else {
@@ -408,8 +403,16 @@ impl EngineCore {
             file.sync_data()
                 .table_ctx(id, "write_local_file.sync_tmp")?;
         }
-        std::fs::rename(&tmp_file_name, local_file_name)
-            .table_ctx(id, "write_local_file.rename")?;
+        std::fs::rename(&tmp_file_name, &local_file_name).table_ctx(
+            id,
+            format!("write_local_file.rename {tmp_file_name:?} -> {local_file_name:?}"),
+        )?;
+        info!(
+            "write local file {} takes {:?}",
+            id,
+            start.saturating_elapsed();
+            "tmp_file_name" => ?tmp_file_name,
+        );
         Ok(())
     }
 
