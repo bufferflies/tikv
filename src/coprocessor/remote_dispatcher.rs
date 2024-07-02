@@ -22,8 +22,8 @@ use txn_types::{TimeStamp, TsSet};
 
 use crate::{
     coprocessor::{
-        metrics::COPR_REMOTE_DAG_ESTIMATE_BLOCKS_HISTOGRAM, Error, ReqContext, RequestHandler,
-        Result, MEMTRACE_ROOT, REQ_TYPE_DAG,
+        metrics::{COPR_REMOTE_DAG_ESTIMATE_BLOCKS_HISTOGRAM, COPR_REMOTE_PROCESSED_SIZE},
+        Error, ReqContext, RequestHandler, Result, MEMTRACE_ROOT, REQ_TYPE_DAG,
     },
     storage::txn::check_locks,
 };
@@ -398,6 +398,11 @@ impl RequestHandler for RemoteDagDispatcher {
                 let memory_size = data.capacity();
                 let mut resp = kvproto::coprocessor::Response::default();
                 resp.merge_from_bytes(&data).unwrap();
+                let processed_size = resp
+                    .get_exec_details_v2()
+                    .get_scan_detail_v2()
+                    .get_processed_versions_size();
+                COPR_REMOTE_PROCESSED_SIZE.inc_by(processed_size);
                 self.exec_details = resp.exec_details_v2.take();
                 Ok(MEMTRACE_ROOT.trace_guard(resp, memory_size))
             }

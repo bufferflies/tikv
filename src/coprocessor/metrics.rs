@@ -180,6 +180,10 @@ lazy_static! {
         "Bucketed histogram of remote dag estimate blocks",
         exponential_buckets(1.0, 2.0, 20).unwrap()
     ).unwrap();
+    pub static ref COPR_REMOTE_PROCESSED_SIZE: IntCounter = register_int_counter!(
+        "tikv_coprocessor_remote_processed_size",
+        "Total size of remote coprocessor processed data",
+    ).unwrap();
     pub static ref MEM_LOCK_CHECK_HISTOGRAM_VEC: HistogramVec =
         register_histogram_vec!(
             "tikv_coprocessor_mem_lock_check_duration_seconds",
