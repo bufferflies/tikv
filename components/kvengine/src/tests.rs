@@ -771,7 +771,7 @@ fn test_level_overlapping_tables(#[case] enable_inner_key_off: bool) {
 
     let cf0 = data.get_cf(0);
     let level1 = cf0.get_level(1);
-    let get_overlapping_tables = |start: i32, end: i32| -> (usize, usize) {
+    let get_overlapping_tables = |start: usize, end: usize| -> (usize, usize) {
         level1.overlapping_tables_exclusive_end(
             engine.key_builder.i_to_inner_key(start).as_ref(),
             engine.key_builder.i_to_inner_key(end).as_ref(),
@@ -838,8 +838,9 @@ fn test_get_suggest_split_key(#[case] enable_inner_key_off: bool) {
 
     let cases: Vec<(
         Vec<(usize, usize)>,
-        Vec<(i32, i32)>,            // table ranges
-        (Option<i32>, Option<i32>), // expected suggest split key, inner key off (enable,disable)
+        Vec<(usize, usize)>, // table ranges
+        // expected suggest split key, inner key off (enable,disable)
+        (Option<usize>, Option<usize>),
     )> = vec![
         (vec![], vec![(20, 50)], (None, None)),
         (
@@ -905,8 +906,8 @@ fn test_get_suggest_split_key(#[case] enable_inner_key_off: bool) {
                 new_table(
                     &engine,
                     i as u64 + 1,
-                    start as usize,
-                    end as usize,
+                    start,
+                    end,
                     100 + i as u64,
                     false,
                     &mut saved_vals,
@@ -969,10 +970,10 @@ fn test_get_evenly_split_keys(#[case] enable_inner_key_off: bool) {
 
     let cases: Vec<(
         Vec<(usize, usize)>, // l0 ranges
-        Vec<(i32, i32)>,     // table ranges
+        Vec<(usize, usize)>, // table ranges
         usize,               // split count
         // expected evenly split keys, inner key off (enable,disable)
-        (Option<Vec<i32>>, Option<Vec<i32>>),
+        (Option<Vec<usize>>, Option<Vec<usize>>),
     )> = vec![
         (vec![], vec![(20, 50), (50, 100)], 1, (None, None)),
         (vec![], vec![(20, 50), (50, 100)], 2, (None, None)),
@@ -1096,8 +1097,8 @@ fn test_get_evenly_split_keys(#[case] enable_inner_key_off: bool) {
                 new_table(
                     &engine,
                     i as u64 + 1,
-                    start as usize,
-                    end as usize,
+                    start,
+                    end,
                     100 + i as u64,
                     false,
                     &mut saved_vals,
@@ -1224,26 +1225,37 @@ fn test_l0table_ignore_lock() {
     assert!(l0table_ignore_lock.is_none());
 }
 
-#[test]
-fn test_txn_file() {
-    ::test_util::init_log_for_test();
-    test_txn_file_impl(None);
-    test_txn_file_impl(Some(&generate_encryption_key()));
+fn new_tidb_key_builder(enable_inner_key_off: bool) -> KeyBuilder {
+    KeyBuilder::new(KEYSPACE_ID, enable_inner_key_off, "t_")
 }
 
-fn test_txn_file_impl(enc_key: Option<&EncryptionKey>) {
-    let (engine, tx) = new_test_engine();
+#[rstest]
+#[case::base(None, true)]
+#[case::enc(Some(generate_encryption_key()), true)]
+#[case::disable_key_off(None, false)]
+#[case::enc_disable_key_off(Some(generate_encryption_key()), false)]
+fn test_txn_file(#[case] enc_key: Option<EncryptionKey>, #[case] enable_inner_key_off: bool) {
+    ::test_util::init_log_for_test();
+    let enc_key = enc_key.as_ref();
+    let kb = new_tidb_key_builder(enable_inner_key_off);
+    let (engine, tx) = new_test_engine_opt(enable_inner_key_off, DEF_BLOCK_SIZE);
     let chunk_id = 200;
-    build_txn_chunk(&engine, 200, 300, chunk_id, enc_key);
+    build_txn_chunk(&engine, 200, 300, chunk_id, enc_key, enable_inner_key_off);
+    let primary = kb.i_to_outer_key(0);
     let mut wb = WriteBatch::new(1, 0);
-    let txn_file_refs = make_txn_file_refs(1000, vec![chunk_id], make_lock_prefix(200), vec![]);
+    let txn_file_refs = make_txn_file_refs(
+        1000,
+        vec![chunk_id],
+        make_lock_prefix(primary.clone(), 200),
+        vec![],
+    );
     wb.set_property(TXN_FILE_REF, &txn_file_refs);
     engine
         .txn_chunk_mgr
         .prepare(chunk_id, enc_key.cloned())
         .unwrap();
     write_data(wb, &tx);
-    verify_lock(&engine, 200, 300);
+    verify_lock(&engine, 200, 300, &kb);
 
     // rollback the txn file.
     let txn_file_refs = make_txn_file_refs(1000, vec![chunk_id], vec![], make_user_meta(1000, 0));
@@ -1256,12 +1268,19 @@ fn test_txn_file_impl(enc_key: Option<&EncryptionKey>) {
 
     // concurrent txn files.
     let txn1_chunk_id = 201;
-    build_txn_chunk(&engine, 200, 300, txn1_chunk_id, enc_key);
+    build_txn_chunk(
+        &engine,
+        200,
+        300,
+        txn1_chunk_id,
+        enc_key,
+        enable_inner_key_off,
+    );
     let txn1_start_ts = 1003;
     let txn1_lock = make_txn_file_refs(
         txn1_start_ts,
         vec![txn1_chunk_id],
-        make_lock_prefix(txn1_start_ts),
+        make_lock_prefix(primary.clone(), txn1_start_ts),
         vec![],
     );
     let mut wb = WriteBatch::new(1, 0);
@@ -1272,12 +1291,19 @@ fn test_txn_file_impl(enc_key: Option<&EncryptionKey>) {
         .unwrap();
     write_data(wb, &tx);
     let txn2_chunk_id = 202;
-    build_txn_chunk(&engine, 300, 400, txn2_chunk_id, enc_key);
+    build_txn_chunk(
+        &engine,
+        300,
+        400,
+        txn2_chunk_id,
+        enc_key,
+        enable_inner_key_off,
+    );
     let txn2_start_ts = 1004;
     let txn2_lock = make_txn_file_refs(
         txn2_start_ts,
         vec![txn2_chunk_id],
-        make_lock_prefix(txn2_start_ts),
+        make_lock_prefix(primary.clone(), txn2_start_ts),
         vec![],
     );
     let mut wb = WriteBatch::new(1, 0);
@@ -1287,7 +1313,7 @@ fn test_txn_file_impl(enc_key: Option<&EncryptionKey>) {
         .prepare_txn_chunks(vec![txn2_chunk_id], enc_key.cloned())
         .unwrap();
     write_data(wb, &tx);
-    verify_lock(&engine, 200, 400);
+    verify_lock(&engine, 200, 400, &kb);
 
     let txn1_commit = make_txn_file_refs(
         txn1_start_ts,
@@ -1298,12 +1324,19 @@ fn test_txn_file_impl(enc_key: Option<&EncryptionKey>) {
     let mut wb = WriteBatch::new(1, 0);
     wb.set_property(TXN_FILE_REF, &txn1_commit);
     write_data(wb, &tx);
-    verify_write(&engine, 200, 300);
-    verify_lock(&engine, 300, 400);
+    verify_write(&engine, 200, 300, &kb);
+    verify_lock(&engine, 300, 400, &kb);
 
     let conflict_chunk_id = 203;
     let conflict_start_ts = 999;
-    build_txn_chunk(&engine, 250, 350, conflict_chunk_id, enc_key);
+    build_txn_chunk(
+        &engine,
+        250,
+        350,
+        conflict_chunk_id,
+        enc_key,
+        enable_inner_key_off,
+    );
     engine
         .txn_chunk_mgr
         .prepare(conflict_chunk_id, enc_key.cloned())
@@ -1313,7 +1346,7 @@ fn test_txn_file_impl(enc_key: Option<&EncryptionKey>) {
     let upper_bound = InnerKey::from_inner_buf(GLOBAL_SHARD_END_KEY);
     let conflict_ctx = TxnCtx::new(
         vec![].into(),
-        make_lock_prefix(conflict_start_ts).into(),
+        make_lock_prefix(primary, conflict_start_ts).into(),
         conflict_start_ts,
         lower_bound,
         upper_bound,
@@ -1328,10 +1361,10 @@ fn test_txn_file_impl(enc_key: Option<&EncryptionKey>) {
     let (key, um) = snap
         .get_txn_file_conflict_write(&conflict_txn_file)
         .unwrap();
-    assert_eq!(key, i_to_tidb_key(250, 0).into_bytes());
+    assert_eq!(key, kb.i_to_outer_key(250));
     assert_eq!(um.start_ts, txn1_start_ts);
     let (key, lock) = snap.get_txn_file_conflict_lock(&conflict_txn_file).unwrap();
-    assert_eq!(key, i_to_tidb_key(300, 0).into_bytes());
+    assert_eq!(key, kb.i_to_outer_key(300));
     assert_eq!(lock.ts.into_inner(), txn2_start_ts);
 
     let empty_txn_file = TxnFile::new(
@@ -1357,8 +1390,8 @@ fn test_txn_file_impl(enc_key: Option<&EncryptionKey>) {
         thread::sleep(Duration::from_secs(1));
     }
     assert!(flushed);
-    verify_write(&engine, 200, 300);
-    verify_lock(&engine, 300, 400);
+    verify_write(&engine, 200, 300, &kb);
+    verify_lock(&engine, 300, 400, &kb);
 
     let txn2_commit = make_txn_file_refs(
         txn2_start_ts,
@@ -1369,7 +1402,7 @@ fn test_txn_file_impl(enc_key: Option<&EncryptionKey>) {
     let mut wb = WriteBatch::new(1, 0);
     wb.set_property(TXN_FILE_REF, &txn2_commit);
     write_data(wb, &tx);
-    verify_write(&engine, 200, 400);
+    verify_write(&engine, 200, 400, &kb);
     flushed = false;
     for _ in 0..10 {
         let shard = engine.get_shard(1).unwrap();
@@ -1381,30 +1414,42 @@ fn test_txn_file_impl(enc_key: Option<&EncryptionKey>) {
         thread::sleep(Duration::from_secs(1));
     }
     assert!(flushed);
-    verify_write(&engine, 200, 400);
+    verify_write(&engine, 200, 400, &kb);
 }
 
-#[test]
-fn test_txn_file_multiple() {
+#[rstest]
+#[case::base(None, true)]
+#[case::enc(Some(generate_encryption_key()), true)]
+#[case::disable_key_off(None, false)]
+#[case::enc_disable_key_off(Some(generate_encryption_key()), false)]
+fn test_txn_file_multiple(
+    #[case] enc_key: Option<EncryptionKey>,
+    #[case] enable_inner_key_off: bool,
+) {
     ::test_util::init_log_for_test();
-    test_txn_file_multiple_impl(None);
-    test_txn_file_multiple_impl(Some(&generate_encryption_key()));
-}
-
-fn test_txn_file_multiple_impl(enc_key: Option<&EncryptionKey>) {
-    let (engine, tx) = new_test_engine();
+    let enc_key = enc_key.as_ref();
+    let kb = new_tidb_key_builder(enable_inner_key_off);
+    let (engine, tx) = new_test_engine_opt(enable_inner_key_off, DEF_BLOCK_SIZE);
 
     let chunks_id: Vec<u64> = (100..500).step_by(10).collect();
+    let primary = kb.i_to_outer_key(0);
     let start_ts = 2000;
     for &chunk_id in &chunks_id {
         let start = chunk_id as usize;
-        build_txn_chunk(&engine, start, start + 10, chunk_id, enc_key);
+        build_txn_chunk(
+            &engine,
+            start,
+            start + 10,
+            chunk_id,
+            enc_key,
+            enable_inner_key_off,
+        );
     }
     let mut wb = WriteBatch::new(1, 0);
     let txn_file_refs = make_txn_file_refs(
         start_ts,
         chunks_id.clone(),
-        make_lock_prefix(start_ts),
+        make_lock_prefix(primary, start_ts),
         vec![],
     );
     wb.set_property(TXN_FILE_REF, &txn_file_refs);
@@ -1413,7 +1458,7 @@ fn test_txn_file_multiple_impl(enc_key: Option<&EncryptionKey>) {
         .prepare_txn_chunks(chunks_id.clone(), enc_key.cloned())
         .unwrap();
     write_data(wb, &tx);
-    verify_lock(&engine, 100, 500);
+    verify_lock(&engine, 100, 500, &kb);
 
     let txn4_commit = make_txn_file_refs(
         start_ts,
@@ -1424,7 +1469,7 @@ fn test_txn_file_multiple_impl(enc_key: Option<&EncryptionKey>) {
     let mut wb = WriteBatch::new(1, 0);
     wb.set_property(TXN_FILE_REF, &txn4_commit);
     write_data(wb, &tx);
-    verify_write(&engine, 100, 500);
+    verify_write(&engine, 100, 500, &kb);
 }
 
 fn build_txn_chunk(
@@ -1433,11 +1478,14 @@ fn build_txn_chunk(
     end: usize,
     id: u64,
     enc_key: Option<&EncryptionKey>,
+    enable_inner_key_off: bool,
 ) {
-    let mut chunk_builder = TxnChunkBuilder::new(id, 10, enc_key.cloned(), KEYSPACE_ID, true);
+    let kb = new_tidb_key_builder(enable_inner_key_off);
+    let mut chunk_builder =
+        TxnChunkBuilder::new(id, 10, enc_key.cloned(), KEYSPACE_ID, enable_inner_key_off);
     for i in start..end {
-        let key_str = i_to_tidb_key(i as i32, 0);
-        chunk_builder.add_entry(NoPrefixKey(key_str.as_bytes()), OP_PUT, key_str.as_bytes());
+        let key = kb.i_to_key(i);
+        chunk_builder.add_entry(NoPrefixKey(&key), OP_PUT, &key);
     }
     let mut buf = vec![];
     chunk_builder.finish(&mut buf);
@@ -1470,11 +1518,11 @@ fn make_txn_file_refs(
     txn_file_refs.write_to_bytes().unwrap()
 }
 
-fn make_lock_prefix(start_ts: u64) -> Vec<u8> {
+fn make_lock_prefix(primary: Vec<u8>, start_ts: u64) -> Vec<u8> {
     let min_commit_ts = start_ts + 1;
     let mut lock = txn_types::Lock::new(
         txn_types::LockType::Put,
-        b"key".to_vec(),
+        primary,
         start_ts.into(),
         3000,
         None,
@@ -1490,43 +1538,45 @@ fn make_user_meta(start_ts: u64, commit_ts: u64) -> Vec<u8> {
     UserMeta::new(start_ts, commit_ts).to_array().to_vec()
 }
 
-fn verify_lock(engine: &TestEngine, start: usize, end: usize) {
+fn verify_lock(engine: &TestEngine, start: usize, end: usize, kb: &KeyBuilder) {
     let snap = engine.get_snap_access(1).unwrap();
     for i in start..end {
-        let key = i_to_tidb_key(i as i32, 0);
-        let item = snap.get(LOCK_CF, key.as_bytes(), 0);
+        let key = kb.i_to_outer_key(i);
+        let val = kb.i_to_key(i);
+        let item = snap.get(LOCK_CF, &key, 0);
         assert!(item.is_valid());
         let lock = txn_types::Lock::parse(item.get_value()).unwrap();
-        assert_eq!(lock.primary, b"key".to_vec());
+        assert_eq!(lock.primary, kb.i_to_outer_key(0));
         assert!(lock.is_txn_file);
-        assert_eq!(lock.short_value.unwrap().as_slice(), key.as_bytes());
+        assert_eq!(lock.short_value.unwrap(), val.as_slice());
     }
     let mut it = snap.new_iterator(LOCK_CF, false, false, None, false);
     it.rewind();
     let mut i = start;
     while it.valid() {
         let lock = txn_types::Lock::parse(it.val()).unwrap();
-        let key = i_to_tidb_key(i as i32, 0);
-        assert_eq!(lock.short_value.unwrap().as_slice(), key.as_bytes());
+        let val = kb.i_to_key(i);
+        assert_eq!(lock.short_value.unwrap(), val.as_slice());
         it.next();
         i += 1;
     }
     assert_eq!(i, end);
 }
 
-fn verify_write(engine: &TestEngine, start: usize, end: usize) {
+fn verify_write(engine: &TestEngine, start: usize, end: usize, kb: &KeyBuilder) {
     let snap = engine.get_snap_access(1).unwrap();
     for i in start..end {
-        let key = i_to_tidb_key(i as i32, 0);
-        let item = snap.get(WRITE_CF, key.as_bytes(), u64::MAX);
-        assert_eq!(item.get_value(), key.as_bytes());
+        let key = kb.i_to_outer_key(i);
+        let val = kb.i_to_key(i);
+        let item = snap.get(WRITE_CF, &key, u64::MAX);
+        assert_eq!(item.get_value(), val.as_slice());
     }
     let mut it = snap.new_iterator(WRITE_CF, false, false, None, false);
     it.rewind();
     let mut i = start;
     while it.valid() {
-        let key = i_to_tidb_key(i as i32, 0);
-        assert_eq!(it.val(), key.as_bytes());
+        let val = kb.i_to_key(i);
+        assert_eq!(it.val(), val.as_slice());
         it.next();
         i += 1;
     }
@@ -1847,17 +1897,6 @@ fn i_to_key(i: i32, min_blob_size: u32) -> String {
     }
 }
 
-// Temporarily used to make the tests pass.
-// Use KeyBuilder to generate keys according to `enable_inner_key_off`.
-fn i_to_tidb_key(i: i32, min_blob_size: u32) -> String {
-    if min_blob_size > 0 {
-        // 4 -> strlen("tkey")
-        format!("tkey{:0>1$}", i, min_blob_size as usize - 3)
-    } else {
-        format!("tkey{:0>1$}", i, 6)
-    }
-}
-
 fn new_table(
     engine: &TestEngine,
     id: u64,
@@ -1881,7 +1920,7 @@ fn new_table(
         None,
     );
     for i in begin..end {
-        let key = engine.key_builder.i_to_inner_key(i as i32);
+        let key = engine.key_builder.i_to_inner_key(i);
         let val = if del {
             table::Value::new_with_meta_version(BIT_DELETE, version, 0, &[])
         } else {
@@ -1917,7 +1956,7 @@ fn new_l0table_file(
     let mut builder = L0Builder::new(id, block_size, version, ChecksumType::Crc32c, None);
     for cf in 0..NUM_CFS {
         for i in begin[cf]..end[cf] {
-            let key = engine.key_builder.i_to_inner_key(i as i32);
+            let key = engine.key_builder.i_to_inner_key(i);
             if del[cf] {
                 let val = table::Value::new_with_meta_version(BIT_DELETE, version, 0, &[]);
                 builder.add(cf, key.as_ref(), &val, None);
