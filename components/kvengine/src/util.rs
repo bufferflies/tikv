@@ -301,6 +301,51 @@ impl TxnFileLocks {
 }
 
 #[cfg(test)]
+pub(crate) mod test_util {
+    use api_version::ApiV2;
+    use bytes::Bytes;
+
+    use crate::table::OwnedInnerKey;
+
+    pub(crate) struct KeyBuilder {
+        keyspace_id: u32,
+        enable_inner_key_off: bool,
+        prefix: String,
+    }
+
+    impl KeyBuilder {
+        // prefix: reserved to generate TiDB keys (prefix as "t_").
+        pub fn new(keyspace_id: u32, enable_inner_key_off: bool, prefix: &str) -> Self {
+            Self {
+                keyspace_id,
+                enable_inner_key_off,
+                prefix: prefix.to_string(),
+            }
+        }
+
+        pub fn i_to_inner_key(&self, i: i32) -> OwnedInnerKey {
+            let v = if self.enable_inner_key_off {
+                self.i_to_key(i)
+            } else {
+                self.i_to_outer_key(i)
+            };
+            OwnedInnerKey::new(Bytes::from(v))
+        }
+
+        pub fn i_to_outer_key(&self, i: i32) -> Vec<u8> {
+            let mut key = ApiV2::get_txn_keyspace_prefix(self.keyspace_id);
+            key.extend_from_slice(&self.i_to_key(i));
+            key
+        }
+
+        #[inline]
+        pub fn i_to_key(&self, i: i32) -> Vec<u8> {
+            format!("{}key{:06}", self.prefix, i).into_bytes()
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use api_version::api_v2::KEYSPACE_PREFIX_LEN;
 

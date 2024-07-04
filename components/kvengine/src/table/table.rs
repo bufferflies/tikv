@@ -551,6 +551,30 @@ impl Deref for InnerKey<'_> {
     }
 }
 
+pub struct OwnedInnerKey {
+    inner: bytes::Bytes,
+}
+
+impl Debug for OwnedInnerKey {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", &self.inner)
+    }
+}
+
+impl OwnedInnerKey {
+    pub fn new(inner: bytes::Bytes) -> Self {
+        Self { inner }
+    }
+
+    pub fn as_ref(&self) -> InnerKey<'_> {
+        InnerKey::from_inner_buf(&self.inner)
+    }
+
+    pub fn into_inner(self) -> bytes::Bytes {
+        self.inner
+    }
+}
+
 /// `TableExt` is used to make "table like" types (e.g. `TableCreate`,
 /// `FileMeta`, `SsTable`) comparable, and being able to check overlap with
 /// different types.

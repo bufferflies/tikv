@@ -13,6 +13,7 @@ use std::{
     vec,
 };
 
+use api_version::{api_v2::KEYSPACE_PREFIX_LEN, ApiV2};
 use bytes::{Buf, Bytes};
 use cloud_encryption::{EncryptionKey, MasterKey};
 use file_system::IoRateLimiter;
@@ -20,9 +21,11 @@ use kvenginepb as pb;
 use kvenginepb::{TxnFileRef, TxnFileRefs};
 use protobuf::Message;
 use rand::prelude::*;
+use rstest::rstest;
 use security::SecurityManager;
 use tempfile::TempDir;
 use tikv_util::{mpsc, time::Instant};
+use util::test_util::KeyBuilder;
 
 use crate::{
     dfs::{FileType, InMemFs},
@@ -47,6 +50,8 @@ macro_rules! unwrap_or_return {
     };
 }
 
+const KEYSPACE_ID: u32 = 42;
+
 const DEF_BLOCK_SIZE: usize = 4 << 10;
 const DEF_MIN_BLOB_SIZE: u32 = 64;
 
@@ -58,6 +63,7 @@ const TEST_ENGINE_NEW_DATA_UPDATE_COUNTER: u64 = NEW_DATA_UPDATE_COUNTER + 1;
 /// interfere with other tests.
 struct TestEngine {
     engine: Engine,
+    key_builder: KeyBuilder,
 }
 
 impl std::ops::Deref for TestEngine {
@@ -118,7 +124,14 @@ fn new_test_engine_opt(
     thread::spawn(move || {
         applier.run();
     });
-    (TestEngine { engine }, applier_tx)
+    let key_builder = KeyBuilder::new(KEYSPACE_ID, enable_inner_key_off, "");
+    (
+        TestEngine {
+            engine,
+            key_builder,
+        },
+        applier_tx,
+    )
 }
 
 #[test]
@@ -593,7 +606,7 @@ fn test_lost_tombstone_issue() {
     let shard = engine.get_shard(1).unwrap();
 
     let mut cf_builder = ShardCfBuilder::new(0);
-    let mut saved_vals: Vec<Rc<String>> = Vec::new();
+    let mut saved_vals: Vec<Rc<Vec<u8>>> = Vec::new();
 
     cf_builder.add_table(
         new_table(&engine, 11, 0, 100, 101, false, &mut saved_vals),
@@ -646,7 +659,7 @@ fn test_read_iterator_all_versions() {
     let cf = 0;
 
     let mut cf_builder = ShardCfBuilder::new(cf);
-    let mut saved_vals: Vec<Rc<String>> = Vec::new();
+    let mut saved_vals: Vec<Rc<Vec<u8>>> = Vec::new();
 
     // 0..50 has only version 101
     // 50..70 has version 101 and 102
@@ -706,26 +719,25 @@ fn test_read_iterator_all_versions() {
     let mut expected_keys_iter = expected_keys.iter();
 
     while iter.valid() {
-        let key = i_to_key(expected_keys_iter.next().unwrap().to_owned(), 0);
-        assert_eq!(iter.key(), key.as_bytes());
-        assert_eq!(iter.val(), key.repeat(2).as_bytes());
+        let key = engine
+            .key_builder
+            .i_to_outer_key(expected_keys_iter.next().unwrap().to_owned());
+        assert_eq!(iter.key(), key.as_slice());
+        assert_eq!(iter.val(), key.repeat(2).as_slice());
         iter.next();
     }
 }
 
-#[test]
-fn test_level_overlapping_tables() {
+#[rstest]
+#[case::enable_key_off(true)]
+#[case::disable_key_off(false)]
+fn test_level_overlapping_tables(#[case] enable_inner_key_off: bool) {
     ::test_util::init_log_for_test();
-    test_level_overlapping_tables_impl(false);
-    test_level_overlapping_tables_impl(true);
-}
-
-fn test_level_overlapping_tables_impl(enable_inner_key_off: bool) {
     let (engine, _) = new_test_engine_opt(enable_inner_key_off, DEF_BLOCK_SIZE);
     let shard = engine.get_shard(1).unwrap();
 
     let mut cf_builder = ShardCfBuilder::new(0);
-    let mut saved_vals: Vec<Rc<String>> = Vec::new();
+    let mut saved_vals: Vec<Rc<Vec<u8>>> = Vec::new();
 
     let table_ranges: Vec<(usize, usize)> = vec![(10, 20), (50, 100), (120, 200)];
     for (i, (start, end)) in table_ranges.into_iter().enumerate() {
@@ -760,8 +772,8 @@ fn test_level_overlapping_tables_impl(enable_inner_key_off: bool) {
     let level1 = cf0.get_level(1);
     let get_overlapping_tables = |start: i32, end: i32| -> (usize, usize) {
         level1.overlapping_tables_exclusive_end(
-            InnerKey::from_inner_buf(&i_to_key(start, 0).into_bytes()),
-            InnerKey::from_inner_buf(&i_to_key(end, 0).into_bytes()),
+            engine.key_builder.i_to_inner_key(start).as_ref(),
+            engine.key_builder.i_to_inner_key(end).as_ref(),
         )
     };
 
@@ -801,20 +813,17 @@ fn test_level_overlapping_tables_impl(enable_inner_key_off: bool) {
     assert_eq!(get_overlapping_tables(200, 300), (3, 3));
 }
 
-#[test]
-fn test_get_suggest_split_key() {
+#[rstest]
+#[case::enable_key_off(true)]
+#[case::disable_key_off(false)]
+fn test_get_suggest_split_key(#[case] enable_inner_key_off: bool) {
     ::test_util::init_log_for_test();
-    test_get_suggest_split_key_impl(false);
-    test_get_suggest_split_key_impl(true);
-}
-
-fn test_get_suggest_split_key_impl(enable_inner_key_off: bool) {
     let (engine, _) = new_test_engine_opt(enable_inner_key_off, 4096);
     let shard = engine.get_shard(1).unwrap();
 
     let range = ShardRange::new(
-        &i_to_key(30, 0).into_bytes(),
-        &i_to_key(600, 0).into_bytes(),
+        &engine.key_builder.i_to_outer_key(30),
+        &engine.key_builder.i_to_outer_key(600),
         shard.inner_key_off,
     );
     let shard = Shard::new(
@@ -828,11 +837,15 @@ fn test_get_suggest_split_key_impl(enable_inner_key_off: bool) {
 
     let cases: Vec<(
         Vec<(usize, usize)>,
-        Vec<(i32, i32)>, // table ranges
-        Option<i32>,     // expected suggest split key,
+        Vec<(i32, i32)>,            // table ranges
+        (Option<i32>, Option<i32>), // expected suggest split key, inner key off (enable,disable)
     )> = vec![
-        (vec![], vec![(20, 50)], None),
-        (vec![], vec![(20, 50), (100, 150), (150, 180)], Some(150)),
+        (vec![], vec![(20, 50)], (None, None)),
+        (
+            vec![],
+            vec![(20, 50), (100, 150), (150, 180)],
+            (Some(150), Some(150)),
+        ),
         (
             vec![],
             vec![
@@ -842,7 +855,7 @@ fn test_get_suggest_split_key_impl(enable_inner_key_off: bool) {
                 (180, 300), // in range
                 (300, 400),
             ],
-            Some(180),
+            (Some(180), Some(180)),
         ),
         (
             vec![],
@@ -850,22 +863,22 @@ fn test_get_suggest_split_key_impl(enable_inner_key_off: bool) {
                 (20, 50),
                 (100, 150), // in range, key in block
             ],
-            Some(100),
+            (Some(100), Some(100)),
         ),
         (
             vec![(50, 400), (60, 460), (70, 670)], // L0 only
             vec![],
-            Some(320),
+            (Some(320), Some(270)),
         ),
         (
             vec![(70, 370)], // L0 + L1+
             vec![(50, 80), (80, 100), (100, 120)],
-            Some(100),
+            (Some(100), Some(100)),
         ),
         (
             vec![(80, 380), (190, 570)], // more L0 + L1+
             vec![(50, 80), (80, 100), (100, 120)],
-            Some(333),
+            (Some(333), Some(280)),
         ),
     ];
     let mut id_alloc = 1000;
@@ -884,7 +897,7 @@ fn test_get_suggest_split_key_impl(enable_inner_key_off: bool) {
             l0_tables.push(l0_tbl);
         }
         let mut cf_builder = ShardCfBuilder::new(idx % 2);
-        let mut saved_vals: Vec<Rc<String>> = Vec::new();
+        let mut saved_vals: Vec<Rc<Vec<u8>>> = Vec::new();
 
         for (i, (start, end)) in table_ranges.into_iter().enumerate() {
             cf_builder.add_table(
@@ -917,29 +930,31 @@ fn test_get_suggest_split_key_impl(enable_inner_key_off: bool) {
         shard.set_data_opt(data, false);
 
         let key = shard.get_suggest_split_key();
+        let expect_split_key = if enable_inner_key_off {
+            expect_split_key.0
+        } else {
+            expect_split_key.1
+        };
         assert_eq!(
             key.map(|k| k.to_vec()),
-            expect_split_key.map(|i| i_to_key(i, 0).into_bytes()),
+            expect_split_key.map(|i| engine.key_builder.i_to_outer_key(i)),
             "case {}",
             idx
         );
     }
 }
 
-#[test]
-fn test_get_evenly_split_keys() {
+#[rstest]
+#[case::enable_key_off(true)]
+#[case::disable_key_off(false)]
+fn test_get_evenly_split_keys(#[case] enable_inner_key_off: bool) {
     ::test_util::init_log_for_test();
-    test_get_evenly_split_keys_impl(false);
-    test_get_evenly_split_keys_impl(true);
-}
-
-fn test_get_evenly_split_keys_impl(enable_inner_key_off: bool) {
     let (engine, _) = new_test_engine_opt(enable_inner_key_off, 4096);
     let shard = engine.get_shard(1).unwrap();
 
     let range = ShardRange::new(
-        &i_to_key(30, 0).into_bytes(),
-        &i_to_key(600, 0).into_bytes(),
+        &engine.key_builder.i_to_outer_key(30),
+        &engine.key_builder.i_to_outer_key(600),
         shard.inner_key_off,
     );
     let shard = Shard::new(
@@ -955,15 +970,16 @@ fn test_get_evenly_split_keys_impl(enable_inner_key_off: bool) {
         Vec<(usize, usize)>, // l0 ranges
         Vec<(i32, i32)>,     // table ranges
         usize,               // split count
-        Option<Vec<i32>>,    // expected evenly split keys,
+        // expected evenly split keys, inner key off (enable,disable)
+        (Option<Vec<i32>>, Option<Vec<i32>>),
     )> = vec![
-        (vec![], vec![(20, 50), (50, 100)], 1, None),
-        (vec![], vec![(20, 50), (50, 100)], 2, None),
+        (vec![], vec![(20, 50), (50, 100)], 1, (None, None)),
+        (vec![], vec![(20, 50), (50, 100)], 2, (None, None)),
         (
             vec![],
             vec![(0, 20), (20, 50), (100, 150), (150, 180)],
             2,
-            Some(vec![150]),
+            (Some(vec![150]), Some(vec![150])),
         ),
         (
             vec![],
@@ -975,7 +991,7 @@ fn test_get_evenly_split_keys_impl(enable_inner_key_off: bool) {
                 (300, 400),
             ],
             1,
-            None,
+            (None, None),
         ),
         (
             vec![],
@@ -986,7 +1002,7 @@ fn test_get_evenly_split_keys_impl(enable_inner_key_off: bool) {
                 (180, 300), // in range
             ],
             2,
-            Some(vec![180]),
+            (Some(vec![180]), Some(vec![180])),
         ),
         (
             vec![],
@@ -997,7 +1013,7 @@ fn test_get_evenly_split_keys_impl(enable_inner_key_off: bool) {
                 (180, 300), // in range
             ],
             3,
-            Some(vec![150, 180]),
+            (Some(vec![150, 180]), Some(vec![150, 180])),
         ),
         (
             vec![],
@@ -1009,7 +1025,7 @@ fn test_get_evenly_split_keys_impl(enable_inner_key_off: bool) {
                 (300, 400),
             ],
             4,
-            Some(vec![150, 180, 300]),
+            (Some(vec![150, 180, 300]), Some(vec![150, 180, 300])),
         ),
         (
             vec![],
@@ -1021,7 +1037,7 @@ fn test_get_evenly_split_keys_impl(enable_inner_key_off: bool) {
                 (300, 400),
             ],
             5,
-            Some(vec![150, 180, 300]),
+            (Some(vec![150, 180, 300]), Some(vec![150, 180, 300])),
         ),
         (
             vec![],
@@ -1033,25 +1049,25 @@ fn test_get_evenly_split_keys_impl(enable_inner_key_off: bool) {
                 (300, 400),
             ],
             6,
-            Some(vec![150, 180, 300]),
+            (Some(vec![150, 180, 300]), Some(vec![150, 180, 300])),
         ),
         (
             vec![(100, 400), (200, 500), (300, 600), (400, 700)], // L0 only
             vec![],
             4,
-            Some(vec![456, 556]),
+            (Some(vec![456, 556]), Some(vec![406, 506])),
         ),
         (
             vec![(100, 400), (150, 550), (300, 700), (200, 800)], // L0 only
             vec![],
             4,
-            Some(vec![400, 456, 556]),
+            (Some(vec![400, 456, 556]), Some(vec![350, 406, 506])),
         ),
         (
             vec![(100, 800), (200, 900)], // L0 + L1+
             vec![(30, 80), (80, 100), (100, 130)],
             4,
-            Some(vec![100, 356, 456]),
+            (Some(vec![100, 356, 456]), Some(vec![306, 406, 512])),
         ),
     ];
     let mut id_alloc = 1000;
@@ -1072,7 +1088,7 @@ fn test_get_evenly_split_keys_impl(enable_inner_key_off: bool) {
             l0_tables.push(l0_tbl);
         }
         let mut cf_builder = ShardCfBuilder::new(idx % 2);
-        let mut saved_vals: Vec<Rc<String>> = Vec::new();
+        let mut saved_vals: Vec<Rc<Vec<u8>>> = Vec::new();
 
         for (i, (start, end)) in table_ranges.into_iter().enumerate() {
             cf_builder.add_table(
@@ -1105,11 +1121,16 @@ fn test_get_evenly_split_keys_impl(enable_inner_key_off: bool) {
         shard.set_data_opt(data, false);
 
         let split_keys = shard.get_evenly_split_keys(split_count);
+        let expect_split_keys = if enable_inner_key_off {
+            expect_split_keys.0
+        } else {
+            expect_split_keys.1
+        };
         assert_eq!(
             split_keys.map(|keys| keys.into_iter().map(|k| k.to_vec()).collect::<Vec<_>>()),
             expect_split_keys.map(|keys| keys
                 .into_iter()
-                .map(|i| i_to_key(i, 0).into_bytes())
+                .map(|i| engine.key_builder.i_to_outer_key(i))
                 .collect::<Vec<_>>()),
             "case {}",
             idx
@@ -1120,10 +1141,10 @@ fn test_get_evenly_split_keys_impl(enable_inner_key_off: bool) {
 #[test]
 fn test_refresh_stats() {
     ::test_util::init_log_for_test();
-    let (engine, _) = new_test_engine();
+    let (engine, _) = new_test_engine_opt(true, DEF_BLOCK_SIZE);
     let shard = engine.get_shard(1).unwrap();
 
-    let mut saved_vals: Vec<Rc<String>> = Vec::new();
+    let mut saved_vals: Vec<Rc<Vec<u8>>> = Vec::new();
 
     let mut write_cf_builder = ShardCfBuilder::new(WRITE_CF);
     write_cf_builder.add_table(
@@ -1537,7 +1558,7 @@ impl Deref for EngineTester {
 
 impl EngineTester {
     fn new(enable_inner_key_off: bool, block_size: usize) -> Self {
-        let initial_cs = new_initial_cs();
+        let initial_cs = new_initial_cs(enable_inner_key_off);
         let initial_meta = ShardMeta::new(1, &initial_cs);
         let metas = dashmap::DashMap::new();
         metas.insert(1, Arc::new(initial_meta));
@@ -1765,14 +1786,21 @@ impl Splitter {
     }
 }
 
-fn new_initial_cs() -> pb::ChangeSet {
+fn new_initial_cs(enable_inner_key_off: bool) -> pb::ChangeSet {
     let mut cs = pb::ChangeSet::new();
     cs.set_shard_id(1);
     cs.set_shard_ver(1);
     cs.set_sequence(1);
     let mut snap = pb::Snapshot::new();
     snap.set_base_version(1);
-    snap.set_outer_end(GLOBAL_SHARD_END_KEY.to_vec());
+    if enable_inner_key_off {
+        let (start, end) = ApiV2::get_txn_keyspace_range(KEYSPACE_ID);
+        snap.set_outer_start(start);
+        snap.set_outer_end(end);
+        snap.set_inner_key_off(KEYSPACE_PREFIX_LEN as u32);
+    } else {
+        snap.set_outer_end(GLOBAL_SHARD_END_KEY.to_vec());
+    }
     let props = snap.mut_properties();
     props.shard_id = 1;
     cs.set_snapshot(snap);
@@ -1819,13 +1847,13 @@ fn i_to_key(i: i32, min_blob_size: u32) -> String {
 }
 
 fn new_table(
-    engine: &Engine,
+    engine: &TestEngine,
     id: u64,
     begin: usize,
     end: usize,
     version: u64,
     del: bool,
-    saved_vals: &mut Vec<Rc<String>>,
+    saved_vals: &mut Vec<Rc<Vec<u8>>>,
 ) -> SsTable {
     let block_size = engine.opts.table_builder_options.block_size;
     let comp_tp = engine.opts.table_builder_options.compression_tps[0];
@@ -1841,17 +1869,17 @@ fn new_table(
         None,
     );
     for i in begin..end {
-        let key = i_to_key(i as i32, 0);
+        let key = engine.key_builder.i_to_inner_key(i as i32);
         let val = if del {
             table::Value::new_with_meta_version(BIT_DELETE, version, 0, &[])
         } else {
-            let val = Rc::new(key.repeat(2));
+            let val = Rc::new(key.as_ref().repeat(2));
             // Save the val with Rc, make sure the val_rc stay valid during the iterator
             // liftcycle.
             saved_vals.push(val.clone());
-            table::Value::new_with_meta_version(0, version, 0, val.as_bytes())
+            table::Value::new_with_meta_version(0, version, 0, &val)
         };
-        builder.add(InnerKey::from_inner_buf(key.as_bytes()), &val, None);
+        builder.add(key.as_ref(), &val, None);
     }
     let mut data_buf = Vec::new();
     builder.finish(0, &mut data_buf);
@@ -1864,7 +1892,7 @@ fn new_table(
 }
 
 fn new_l0table_file(
-    engine: &Engine,
+    engine: &TestEngine,
     id: u64,
     begin: [usize; NUM_CFS],
     end: [usize; NUM_CFS],
@@ -1877,13 +1905,15 @@ fn new_l0table_file(
     let mut builder = L0Builder::new(id, block_size, version, ChecksumType::Crc32c, None);
     for cf in 0..NUM_CFS {
         for i in begin[cf]..end[cf] {
-            let key = i_to_key(i as i32, 0);
-            let val = if del[cf] {
-                table::Value::new_with_meta_version(BIT_DELETE, version, 0, &[])
+            let key = engine.key_builder.i_to_inner_key(i as i32);
+            if del[cf] {
+                let val = table::Value::new_with_meta_version(BIT_DELETE, version, 0, &[]);
+                builder.add(cf, key.as_ref(), &val, None);
             } else {
-                table::Value::new_with_meta_version(0, version, 0, key.repeat(2).as_bytes())
-            };
-            builder.add(cf, InnerKey::from_inner_buf(key.as_bytes()), &val, None);
+                let val_buf = key.as_ref().repeat(2);
+                let val = table::Value::new_with_meta_version(0, version, 0, &val_buf);
+                builder.add(cf, key.as_ref(), &val, None);
+            }
         }
     }
     let (_, data) = builder.finish();

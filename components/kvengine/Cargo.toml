@@ -93,5 +93,6 @@ features = ["encryption"]
 
 [dev-dependencies]
 proptest = "1.4"
+rstest = "0.18"
 tempfile = "3"
 test_util = { workspace = true }
