@@ -1,15 +1,17 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    fmt::{Debug, Formatter},
+    fmt::{self, Debug, Formatter},
     iter::Iterator as StdIterator,
     mem::size_of,
     ops::Deref,
     ptr, result, slice,
 };
 
+use api_version::{api_v2, ApiV2, KeyMode, KvFormat};
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::BufMut;
+use log_wrappers::Value as LogValue;
 use thiserror::Error;
 
 use super::blobtable::BlobRef;
@@ -575,6 +577,43 @@ impl OwnedInnerKey {
     }
 }
 
+/// The user key without keyspace prefix.
+///
+/// A simple wrapper to make sure that the key and interface is properly used.
+///
+/// Currently used for building txn chunks as the hash index is always using
+/// keys without keyspace prefix, no matter whether inner key offset is enabled
+/// or not.
+///
+/// No prefix key is required to be a valid TiDB key (starts with "t" or "m") to
+/// make conversion from `InnerKey` work.
+#[derive(PartialEq)]
+pub struct NoPrefixKey<'a>(pub &'a [u8]);
+
+impl fmt::Debug for NoPrefixKey<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", LogValue::key(self.0))
+    }
+}
+
+impl Deref for NoPrefixKey<'_> {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.0
+    }
+}
+
+impl<'a> NoPrefixKey<'a> {
+    pub fn from_inner_key(inner_key: &'a InnerKey<'a>) -> Option<Self> {
+        match ApiV2::parse_key_mode(inner_key.deref()) {
+            KeyMode::Txn => Some(Self(&inner_key.deref()[api_v2::KEYSPACE_PREFIX_LEN..])),
+            KeyMode::Tidb => Some(Self(inner_key.deref())),
+            _ => None,
+        }
+    }
+}
+
 /// `TableExt` is used to make "table like" types (e.g. `TableCreate`,
 /// `FileMeta`, `SsTable`) comparable, and being able to check overlap with
 /// different types.
@@ -744,5 +783,24 @@ mod tests {
         let buf = vec![128, 0, 255];
         let inner_key = InnerKey::from_inner_buf(&buf);
         assert_eq!(format!("{:?}", inner_key), "8000FF".to_string());
+    }
+
+    #[test]
+    fn test_no_prefix_key() {
+        let cases: Vec<(&[u8], Option<&[u8]>)> = vec![
+            (b"tkey1", Some(b"tkey1")),
+            (b"m0n0n", Some(b"m0n0n")),
+            (b"x123tkey1", Some(b"tkey1")),
+            (b"", None),
+            (b"a", None),
+            (b"r123", None),
+        ];
+
+        for (inner_key, expected) in cases {
+            let inner_key = InnerKey::from_inner_buf(inner_key);
+            let no_prefix = NoPrefixKey::from_inner_key(&inner_key);
+            let expected = expected.map(|x| NoPrefixKey(x));
+            assert_eq!(no_prefix, expected);
+        }
     }
 }

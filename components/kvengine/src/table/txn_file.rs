@@ -2,6 +2,7 @@
 
 use std::{cmp, fmt, iter::Iterator as StdIterator, ops::Deref, sync::Arc};
 
+use api_version::{api_v2::KEYSPACE_PREFIX_LEN, ApiV2};
 use bytes::{Buf, BufMut, Bytes};
 use cloud_encryption::EncryptionKey;
 use itertools::Itertools;
@@ -14,7 +15,7 @@ use crate::{
     table::{
         encode_val_to_outer_val_owner, search,
         sstable::{key_diff_idx, BlockCacheKey, EntrySlice, File, TtlCache},
-        ChecksumType, Error, InnerKey, Iterator, Result, Value,
+        ChecksumType, Error, InnerKey, Iterator, NoPrefixKey, Result, Value,
     },
     UserMeta, USER_META_SIZE,
 };
@@ -350,22 +351,24 @@ impl TxnChunk {
     }
 
     fn get_value(&self, key: InnerKey<'_>) -> Option<TxnChunkIterator> {
-        let key_hash = farmhash::fingerprint64(key.as_ref());
+        let no_prefix_key = NoPrefixKey::from_inner_key(&key)?;
+        let key_hash = farmhash::fingerprint64(no_prefix_key.deref());
         let hash_index = self.load_hash_index().unwrap();
         if let Some(key_addr) = hash_index.get_entry(key_hash) {
             let mut iter = TxnChunkIterator::new(self.clone(), false);
             iter.locate_key(key_addr);
             debug_assert!(
                 iter.valid(),
-                "txn chunk: {:?}, iter: {:?}, key: {:?}, addr: {:?}",
+                "txn chunk: {:?}, iter: {:?}, key: {:?}, no_prefix_key: {:?}, addr: {:?}",
                 self,
                 iter,
                 key,
+                no_prefix_key,
                 key_addr,
             );
             if iter.key() != key {
                 // There may be hash conflict.
-                warn!("hash conflict"; "key" => ?key, "file" => self.file.id());
+                warn!("hash conflict"; "iter.key" => ?iter.key(), "key" => ?key, "no_prefix_key" => ?no_prefix_key, "file" => self.file.id());
                 iter.seek(key);
             }
             if iter.valid() && iter.key() == key {
@@ -1195,6 +1198,10 @@ pub struct TxnChunkBuilder {
     check_not_exist_count: u32,
     checksum_type: ChecksumType,
     encryption_key: Option<EncryptionKey>,
+
+    // `entry_key_buf` is used to build txn chunks for keyspaces with inner key offset disabled.
+    // Note that hash index is ALWAYS without prefix.
+    entry_key_buf: Option<Vec<u8>>,
 }
 
 impl TxnChunkBuilder {
@@ -1202,18 +1209,32 @@ impl TxnChunkBuilder {
         chunk_id: u64,
         target_block_entries: usize,
         encryption_key: Option<EncryptionKey>,
+        keyspace_id: u32,
+        enable_inner_key_off: bool,
     ) -> Self {
+        let entry_key_buf =
+            (!enable_inner_key_off).then(|| ApiV2::get_txn_keyspace_prefix(keyspace_id));
         Self {
             chunk_id,
             target_block_entries,
             checksum_type: ChecksumType::Crc32,
             encryption_key,
+            entry_key_buf,
             ..Default::default()
         }
     }
 
-    pub fn add_entry(&mut self, key: &[u8], op: u8, val: &[u8]) {
-        let key_hash = farmhash::fingerprint64(key);
+    pub fn add_entry(&mut self, no_prefix_key: NoPrefixKey<'_>, op: u8, val: &[u8]) {
+        let key_hash = farmhash::fingerprint64(no_prefix_key.deref());
+
+        let key = if let Some(entry_key_buf) = self.entry_key_buf.as_mut() {
+            entry_key_buf.truncate(KEYSPACE_PREFIX_LEN);
+            entry_key_buf.extend_from_slice(no_prefix_key.deref());
+            entry_key_buf.as_slice()
+        } else {
+            no_prefix_key.deref()
+        };
+
         let block_idx = self.block_offsets.len() as u16;
         let key_idx = self.block.tmp_keys.length() as u16;
         self.hash_idx_builder
@@ -1535,16 +1556,18 @@ mod tests {
 
     use crate::{
         table::{
-            sstable::{get_test_key, get_test_value, InMemFile},
+            sstable::{get_test_value, get_tidb_test_key, InMemFile},
             txn_file::{
                 TxnChunk, TxnChunkBuilder, TxnChunkIterator, OP_CHECK_NOT_EXIST, OP_INSERT, OP_PUT,
             },
-            InnerKey, Iterator, SkipOpTxnFileIterator, TxnCtx, TxnFile, TxnFileId, TxnFileIterator,
-            OP_DELETE, OP_LOCK,
+            InnerKey, Iterator, NoPrefixKey, SkipOpTxnFileIterator, TxnCtx, TxnFile, TxnFileId,
+            TxnFileIterator, OP_DELETE, OP_LOCK,
         },
         tests::generate_encryption_key,
         UserMeta, GLOBAL_SHARD_END_KEY,
     };
+
+    const KEYSPACE_ID: u32 = 42;
 
     #[test]
     fn test_txn_chunk() {
@@ -1575,19 +1598,21 @@ mod tests {
         let mut hashes = vec![1];
         let hash_idx = chunk.load_hash_index().unwrap();
         assert!(!hash_idx.any_exists(&hashes));
-        hashes.push(farmhash::fingerprint64(get_test_key("batch", 0).as_bytes()));
+        hashes.push(farmhash::fingerprint64(
+            get_tidb_test_key("batch", 0).as_bytes(),
+        ));
         assert!(hash_idx.any_exists(&hashes));
 
         assert_eq!(
             chunk.index.smallest().deref(),
-            get_test_key("batch", 0).as_bytes()
+            get_tidb_test_key("batch", 0).as_bytes()
         );
         assert_eq!(
             chunk.index.biggest().deref(),
-            get_test_key("batch", 98).as_bytes()
+            get_tidb_test_key("batch", 98).as_bytes()
         );
         for i in 0..100 {
-            let key = get_test_key("batch", i);
+            let key = get_tidb_test_key("batch", i);
             let inner_key = InnerKey::from_inner_buf(key.as_bytes());
             let iter_opt = chunk.get_value(inner_key);
             if i % 2 == 0 {
@@ -1611,25 +1636,25 @@ mod tests {
         while iter.valid() {
             let key = iter.key();
             let val = iter.get_value();
-            assert_eq!(get_test_key("batch", i).as_bytes(), key.deref());
+            assert_eq!(get_tidb_test_key("batch", i).as_bytes(), key.deref());
             assert_eq!(get_test_value(i).as_bytes(), val);
             iter.next();
             i += 2;
         }
         assert_eq!(i, 100);
         for i in 0..99 {
-            let key = get_test_key("batch", i);
+            let key = get_tidb_test_key("batch", i);
             iter.seek(InnerKey::from_inner_buf(key.as_bytes()));
-            let expect_key = get_test_key("batch", i + i % 2);
+            let expect_key = get_tidb_test_key("batch", i + i % 2);
             assert!(iter.valid(), "{}", i);
             assert_eq!(expect_key.as_bytes(), iter.key().deref(), "{}", i);
         }
-        iter.seek(InnerKey::from_inner_buf(b"a"));
+        iter.seek(InnerKey::from_inner_buf(b"t_a"));
         assert!(iter.valid());
-        assert_eq!(get_test_key("batch", 0).as_bytes(), iter.key().deref());
+        assert_eq!(get_tidb_test_key("batch", 0).as_bytes(), iter.key().deref());
         assert_eq!(get_test_value(0).as_bytes(), iter.get_value());
 
-        iter.seek(InnerKey::from_inner_buf(b"c"));
+        iter.seek(InnerKey::from_inner_buf(b"t_c"));
         assert!(!iter.valid());
 
         iter = TxnChunkIterator::new(chunk, true);
@@ -1638,25 +1663,28 @@ mod tests {
         while iter.valid() {
             let key = iter.key();
             let val = iter.get_value();
-            assert_eq!(get_test_key("batch", i).as_bytes(), key.deref());
+            assert_eq!(get_tidb_test_key("batch", i).as_bytes(), key.deref());
             assert_eq!(get_test_value(i).as_bytes(), val);
             iter.next();
             i = i.saturating_sub(2);
         }
         assert_eq!(i, 0);
         for i in 0..100 {
-            let key = get_test_key("batch", i);
+            let key = get_tidb_test_key("batch", i);
             iter.seek(InnerKey::from_inner_buf(key.as_bytes()));
-            let expect_key = get_test_key("batch", i - i % 2);
+            let expect_key = get_tidb_test_key("batch", i - i % 2);
             assert!(iter.valid());
             assert_eq!(expect_key.as_bytes(), iter.key().deref());
         }
-        iter.seek(InnerKey::from_inner_buf(b"a"));
+        iter.seek(InnerKey::from_inner_buf(b"t_a"));
         assert!(!iter.valid());
 
-        iter.seek(InnerKey::from_inner_buf(b"c"));
+        iter.seek(InnerKey::from_inner_buf(b"t_c"));
         assert!(iter.valid());
-        assert_eq!(get_test_key("batch", 98).as_bytes(), iter.key().deref());
+        assert_eq!(
+            get_tidb_test_key("batch", 98).as_bytes(),
+            iter.key().deref()
+        );
         assert_eq!(get_test_value(98).as_bytes(), iter.get_value());
     }
 
@@ -1670,12 +1698,12 @@ mod tests {
     where
         F: Fn(usize) -> u8,
     {
-        let mut chunk_builder = TxnChunkBuilder::new(id, 10, enc_key.cloned());
+        let mut chunk_builder = TxnChunkBuilder::new(id, 10, enc_key.cloned(), KEYSPACE_ID, true);
         for i in (start..end).step_by(2) {
-            let key = get_test_key("batch", i);
+            let key = get_tidb_test_key("batch", i);
             let val = get_test_value(i);
             let op = op_fn(i);
-            chunk_builder.add_entry(key.as_bytes(), op, val.as_bytes());
+            chunk_builder.add_entry(NoPrefixKey(key.as_bytes()), op, val.as_bytes());
         }
         let mut chunk_data = vec![];
         chunk_builder.finish(&mut chunk_data);
@@ -1731,7 +1759,7 @@ mod tests {
 
         let mut outer_owner = vec![];
         for i in 50..300 {
-            let key = get_test_key("batch", i);
+            let key = get_tidb_test_key("batch", i);
             let (op, got_val) =
                 txn_file.get_value(InnerKey::from_inner_buf(key.as_bytes()), &mut outer_owner);
             if i % 2 == 0 {
@@ -1748,7 +1776,7 @@ mod tests {
         iter.rewind();
         let mut i = 50;
         while iter.valid() {
-            let key = get_test_key("batch", i);
+            let key = get_tidb_test_key("batch", i);
             let val = get_test_value(i);
             assert_eq!(iter.key().deref(), key.as_bytes());
             assert_eq!(iter.get_op(), op_fn(i));
@@ -1759,9 +1787,9 @@ mod tests {
         }
         assert_eq!(i, 300);
         for i in 50..300 {
-            let seek_key = get_test_key("batch", i);
+            let seek_key = get_tidb_test_key("batch", i);
             iter.seek(InnerKey::from_inner_buf(seek_key.as_bytes()));
-            let expect_key = get_test_key("batch", i + i % 2);
+            let expect_key = get_tidb_test_key("batch", i + i % 2);
             let expect_val = get_test_value(i + i % 2);
             if i == 299 {
                 assert!(!iter.valid());
@@ -1772,7 +1800,7 @@ mod tests {
                 let next_i = i + i % 2 + 2;
                 if next_i < 300 {
                     // next after seek.
-                    let next_key = get_test_key("batch", next_i);
+                    let next_key = get_tidb_test_key("batch", next_i);
                     iter.next();
                     assert!(iter.valid());
                     assert_eq!(iter.key().deref(), next_key.as_bytes());
@@ -1785,7 +1813,7 @@ mod tests {
         let mut i = 300;
         while iter.valid() {
             i -= 2;
-            let key = get_test_key("batch", i);
+            let key = get_tidb_test_key("batch", i);
             let val = get_test_value(i);
             assert_eq!(iter.key().deref(), key.as_bytes());
             assert_eq!(iter.get_op(), op_fn(i));
@@ -1795,9 +1823,9 @@ mod tests {
         }
         assert_eq!(i, 50);
         for i in 49..300 {
-            let seek_key = get_test_key("batch", i);
+            let seek_key = get_tidb_test_key("batch", i);
             iter.seek(InnerKey::from_inner_buf(seek_key.as_bytes()));
-            let expect_key = get_test_key("batch", i - i % 2);
+            let expect_key = get_tidb_test_key("batch", i - i % 2);
             let expect_val = get_test_value(i - i % 2);
             if i == 49 {
                 assert!(!iter.valid());
@@ -1808,7 +1836,7 @@ mod tests {
                 let next_i = i - i % 2 - 2;
                 if next_i >= 50 {
                     // next after seek.
-                    let next_key = get_test_key("batch", next_i);
+                    let next_key = get_tidb_test_key("batch", next_i);
                     iter.next();
                     assert!(iter.valid());
                     assert_eq!(iter.key().deref(), next_key.as_bytes(), "{}", i);
@@ -1825,11 +1853,11 @@ mod tests {
             cnt += 1;
         }
         assert_eq!(cnt, 100);
-        let check_not_exist_start_key = get_test_key("batch", 150);
+        let check_not_exist_start_key = get_tidb_test_key("batch", 150);
         skip_op_iter.seek(InnerKey::from_inner_buf(
             check_not_exist_start_key.as_bytes(),
         ));
-        let expect_key = get_test_key("batch", 200);
+        let expect_key = get_tidb_test_key("batch", 200);
         assert!(skip_op_iter.valid());
         assert_eq!(skip_op_iter.key().deref(), expect_key.as_bytes());
 
@@ -1890,7 +1918,7 @@ mod tests {
             }
         };
         for i in 50..300 {
-            let key = get_test_key("batch", i);
+            let key = get_tidb_test_key("batch", i);
             let (_, val) =
                 txn_file.get_value(InnerKey::from_inner_buf(key.as_bytes()), &mut outer_owner);
             if i % 2 == 0 {
@@ -1905,7 +1933,7 @@ mod tests {
         iter.rewind();
         let mut i = 50;
         while iter.valid() {
-            let key = get_test_key("batch", i);
+            let key = get_tidb_test_key("batch", i);
             assert_eq!(iter.key().deref(), key.as_bytes());
             let val = iter.value();
             let lock = txn_types::Lock::parse(val.get_value()).unwrap();
@@ -1958,8 +1986,8 @@ mod tests {
             proptest!(|(
                 (lower_bound, upper_bound, reverse, keys) in arb_bounded_args(chunks_start, chunks_end)
             )| {
-                let lower_bound_key = get_test_key("batch", lower_bound);
-                let upper_bound_key = get_test_key("batch", upper_bound);
+                let lower_bound_key = get_tidb_test_key("batch", lower_bound);
+                let upper_bound_key = get_tidb_test_key("batch", upper_bound);
 
                 let id = TxnFileId::new(10, 1, 3);
                 let txn_ctx = TxnCtx::new(
@@ -1988,7 +2016,7 @@ mod tests {
 
                 let mut outer_owner = vec![];
                 for (i, key) in keys.into_iter().enumerate() {
-                    let key_str = get_test_key("batch", key);
+                    let key_str = get_tidb_test_key("batch", key);
 
                     {
                         let (op, got_val) = txn_file.get_value(InnerKey::from_inner_buf(key_str.as_bytes()), &mut outer_owner);
@@ -2040,7 +2068,7 @@ mod tests {
         {
             self.vec.reserve((end - start) / 2);
             for i in (start..end).step_by(2) {
-                let key = get_test_key("batch", i);
+                let key = get_tidb_test_key("batch", i);
                 let val = get_test_value(i);
                 let op = op_fn(i);
                 self.vec.push(TxnFileRefStoreItem { key, op, val });

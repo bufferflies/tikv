@@ -330,7 +330,7 @@ mod tests {
     use super::*;
     use crate::{
         dfs::InMemFs,
-        table::{TxnChunkBuilder, OP_PUT},
+        table::{NoPrefixKey, TxnChunkBuilder, OP_PUT},
         BLOCK_CACHE_KEY_SIZE,
     };
 
@@ -347,10 +347,10 @@ mod tests {
         let runtime = dfs.get_runtime();
         let opts = dfs::Options::default().with_type(FileType::TxnChunk);
         for chunk_id in 1u64..=3 {
-            let mut chunk_builder = TxnChunkBuilder::new(chunk_id, 10, None);
+            let mut chunk_builder = TxnChunkBuilder::new(chunk_id, 10, None, 0, true);
             for i in 0..100 {
                 let key = format!("{:02}/{:02}", chunk_id, i);
-                chunk_builder.add_entry(key.as_bytes(), OP_PUT, key.as_bytes());
+                chunk_builder.add_entry(NoPrefixKey(key.as_bytes()), OP_PUT, key.as_bytes());
             }
             let mut buf = vec![];
             chunk_builder.finish(&mut buf);

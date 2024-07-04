@@ -151,13 +151,13 @@ mod tests {
             memtable::{skl_ext::SkipListExt, SkipList, WriteBatch},
             sstable::InMemFile,
             txn_file::{TxnChunk, TxnChunkBuilder, TxnCtx, TxnFile, TxnFileId, OP_PUT},
-            InnerKey,
+            InnerKey, NoPrefixKey,
         },
         UserMeta, GLOBAL_SHARD_END_KEY, WRITE_CF,
     };
 
     fn new_key(i: i32) -> String {
-        format!("key{:05}", i)
+        format!("t_key{:05}", i)
     }
 
     fn new_val(i: i32) -> String {
@@ -181,11 +181,11 @@ mod tests {
     }
 
     fn build_txn_file_chunk_data(chunk_id: u64, keys: Vec<i32>) -> Bytes {
-        let mut batch_builder = TxnChunkBuilder::new(chunk_id, 10, None);
+        let mut batch_builder = TxnChunkBuilder::new(chunk_id, 10, None, 0, true);
         for i in keys {
             let key = new_key(i);
             let val = new_val(i);
-            batch_builder.add_entry(key.as_bytes(), OP_PUT, val.as_bytes());
+            batch_builder.add_entry(NoPrefixKey(key.as_bytes()), OP_PUT, val.as_bytes());
         }
         let mut data_buf = vec![];
         batch_builder.finish(&mut data_buf);

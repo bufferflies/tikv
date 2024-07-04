@@ -8043,6 +8043,7 @@ dependencies = [
  "rfengine",
  "rfenginepb",
  "rfstore",
+ "rstest",
  "security",
  "serde",
  "serde_derive",

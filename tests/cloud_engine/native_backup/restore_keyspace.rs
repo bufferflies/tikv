@@ -1340,7 +1340,7 @@ fn stop_node(cluster: &mut ServerCluster, force: bool, node_id: Option<u16>) -> 
 }
 
 fn i_to_key(i: usize) -> Vec<u8> {
-    format!("xkey_{:08}", i).into_bytes()
+    format!("tkey_{:08}", i).into_bytes()
 }
 
 fn random_val() -> Vec<u8> {

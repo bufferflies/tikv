@@ -50,7 +50,7 @@ pub(crate) fn get_keyspace_prefix(keyspace_id: u32) -> Vec<u8> {
 pub(crate) fn generate_keyspace_key(keyspace_id: u32) -> impl Fn(usize) -> Vec<u8> {
     move |i: usize| -> Vec<u8> {
         let mut key = get_keyspace_prefix(keyspace_id);
-        key.extend(i_to_key(i));
+        key.extend(i_to_tidb_key(i));
         key
     }
 }
@@ -72,6 +72,10 @@ pub(crate) fn is_region_belongs_to_keyspace(
 
 pub(crate) fn i_to_key(i: usize) -> Vec<u8> {
     format!("xkey_{:08}", i).into_bytes()
+}
+
+pub(crate) fn i_to_tidb_key(i: usize) -> Vec<u8> {
+    format!("t_key_{:08}", i).into_bytes()
 }
 
 pub(crate) fn i_to_val(i: usize) -> Vec<u8> {

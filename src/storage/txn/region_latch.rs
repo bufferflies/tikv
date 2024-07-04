@@ -187,7 +187,8 @@ mod tests {
     use api_version::ApiV2;
     use kvengine::{
         table::{
-            sstable::InMemFile, InnerKey, TxnChunk, TxnChunkBuilder, TxnCtx, TxnFileId, OP_PUT,
+            sstable::InMemFile, InnerKey, NoPrefixKey, TxnChunk, TxnChunkBuilder, TxnCtx,
+            TxnFileId, OP_PUT,
         },
         UserMeta, GLOBAL_SHARD_END_KEY,
     };
@@ -302,10 +303,10 @@ mod tests {
     }
 
     fn make_txn_chunk(start: usize, end: usize, chunk_id: u64) -> TxnChunk {
-        let mut txn_chunk_builder = TxnChunkBuilder::new(chunk_id, 10, None);
+        let mut txn_chunk_builder = TxnChunkBuilder::new(chunk_id, 10, None, 0, true);
         for i in start..end {
             let key = i_to_key(i);
-            txn_chunk_builder.add_entry(&key, OP_PUT, &key);
+            txn_chunk_builder.add_entry(NoPrefixKey(&key), OP_PUT, &key);
         }
         let mut buf = vec![];
         txn_chunk_builder.finish(&mut buf);

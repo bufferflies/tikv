@@ -9,10 +9,9 @@ use dashmap::DashMap;
 use http::{header, Request, Response, StatusCode};
 use hyper::Body;
 use kvengine::{
-    dfs,
-    dfs::Dfs,
+    dfs::{self, Dfs},
     get_shard_property,
-    table::{txn_file::TxnChunkBuilder, ChecksumType},
+    table::{txn_file::TxnChunkBuilder, ChecksumType, NoPrefixKey},
     ENCRYPTION_KEY,
 };
 use load_data::task::get_shard_meta;
@@ -68,20 +67,14 @@ pub(crate) async fn handle_txn_chunk(
         }
     };
 
+    // TODO: remove this API after client-go is updated.
     if *req.method() == http::Method::GET {
-        let resp = GetAvailabilityResp {
-            available: keyspace_info.available,
-        };
+        let resp = GetAvailabilityResp { available: true };
         let json = serde_json::to_string(&resp).unwrap();
         return Ok(Response::builder()
             .header(header::CONTENT_TYPE, "application/json")
             .body(json.into())
             .unwrap());
-    } else if !keyspace_info.available {
-        return Ok(make_response(
-            StatusCode::FORBIDDEN,
-            "keyspace is not available for file based transaction",
-        ));
     }
 
     let chunk_id = match ctx.pd.get_tso().await {
@@ -93,13 +86,7 @@ pub(crate) async fn handle_txn_chunk(
             ));
         }
     };
-    create_txn_chunk(
-        chunk_id,
-        ctx.s3fs.clone(),
-        req,
-        keyspace_info.encryption_key,
-    )
-    .await
+    create_txn_chunk(chunk_id, ctx.s3fs.clone(), req, keyspace_id, &keyspace_info).await
 }
 
 #[derive(Default, Serialize, Deserialize, Debug)]
@@ -118,7 +105,8 @@ pub(crate) async fn create_txn_chunk(
     chunk_id: u64,
     dfs: Arc<dyn Dfs>,
     req: Request<Body>,
-    encryption_key: Option<EncryptionKey>,
+    keyspace_id: u32,
+    keyspace_info: &KeyspaceInfo,
 ) -> hyper::Result<Response<Body>> {
     if *req.method() != http::Method::POST {
         return Ok(make_response(StatusCode::BAD_REQUEST, "invalid method"));
@@ -133,7 +121,13 @@ pub(crate) async fn create_txn_chunk(
     if ChecksumType::Crc32.checksum(body_buf) != checksum {
         return Ok(make_response(StatusCode::BAD_REQUEST, "checksum mismatch"));
     }
-    let mut txn_chunk_builder = TxnChunkBuilder::new(chunk_id, 4096, encryption_key);
+    let mut txn_chunk_builder = TxnChunkBuilder::new(
+        chunk_id,
+        4096,
+        keyspace_info.encryption_key.clone(),
+        keyspace_id,
+        keyspace_info.enable_inner_key_off,
+    );
     while !body_buf.is_empty() {
         let key_len = body_buf.get_u16_le() as usize;
         let key = &body_buf[..key_len];
@@ -142,7 +136,7 @@ pub(crate) async fn create_txn_chunk(
         let val_len = body_buf.get_u32_le() as usize;
         let val = &body_buf[..val_len];
         body_buf.advance(val_len);
-        txn_chunk_builder.add_entry(key, op, val);
+        txn_chunk_builder.add_entry(NoPrefixKey(key), op, val);
     }
     drop(body);
     let mut txn_chunk_buf = vec![];
@@ -163,8 +157,8 @@ pub(crate) async fn create_txn_chunk(
 }
 
 #[derive(Clone)]
-struct KeyspaceInfo {
-    available: bool,
+pub(crate) struct KeyspaceInfo {
+    enable_inner_key_off: bool,
     encryption_key: Option<EncryptionKey>,
 }
 
@@ -201,19 +195,19 @@ impl TxnChunkHandler {
             return Err(box_err!("keyspace range mismatch"));
         }
 
-        let available = snapshot.inner_key_off == api_v2::KEYSPACE_PREFIX_LEN as u32;
-        let encryption_key = if available {
+        let enable_inner_key_off = snapshot.inner_key_off > 0;
+        if enable_inner_key_off {
+            assert_eq!(snapshot.inner_key_off, api_v2::KEYSPACE_PREFIX_LEN as u32);
+        }
+        let encryption_key =
             get_shard_property(ENCRYPTION_KEY, snapshot.get_properties()).map(|exported_key| {
                 ctx.master_key
                     .decrypt_encryption_key(&exported_key)
                     .unwrap()
-            })
-        } else {
-            None
-        };
+            });
 
         let keyspace_info = KeyspaceInfo {
-            available,
+            enable_inner_key_off,
             encryption_key,
         };
         self.keyspaces.insert(keyspace_id, keyspace_info.clone());
@@ -237,7 +231,7 @@ mod tests {
         Iterator, UserMeta, GLOBAL_SHARD_END_KEY,
     };
 
-    use crate::txn_chunk::{create_txn_chunk, CreateTxnChunkResp};
+    use crate::txn_chunk::{create_txn_chunk, CreateTxnChunkResp, KeyspaceInfo};
 
     #[test]
     fn test_create_txn_chunk() {
@@ -260,9 +254,19 @@ mod tests {
             .method(Method::POST)
             .body(hyper::Body::from(req_body))
             .unwrap();
+        let keyspace_info = KeyspaceInfo {
+            enable_inner_key_off: true,
+            encryption_key: None,
+        };
         let mut res = dfs
             .get_runtime()
-            .block_on(create_txn_chunk(chunk_id, dfs.clone(), req, None))
+            .block_on(create_txn_chunk(
+                chunk_id,
+                dfs.clone(),
+                req,
+                0,
+                &keyspace_info,
+            ))
             .unwrap();
         assert!(res.status().is_success());
         let body = dfs

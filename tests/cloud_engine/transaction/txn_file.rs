@@ -7,9 +7,11 @@ use bytes::Bytes;
 use cloud_encryption::KeyspaceEncryptionConfig;
 use futures::{executor::block_on, future::join_all};
 use kvengine::{
-    dfs,
-    dfs::{Dfs, FileType},
-    table::txn_file::{TxnChunkBuilder, OP_PUT},
+    dfs::{self, Dfs, FileType},
+    table::{
+        txn_file::{TxnChunkBuilder, OP_PUT},
+        NoPrefixKey,
+    },
 };
 use kvproto::{
     kvrpcpb,
@@ -17,8 +19,10 @@ use kvproto::{
         BatchRollbackRequest, CheckTxnStatusRequest, CommitRequest, PrewriteRequest,
         ResolveLockRequest, TxnHeartBeatRequest,
     },
+    tikvpb::TikvClient,
 };
 use pd_client::PdClient;
+use rstest::rstest;
 use security::SecurityConfig;
 use test_cloud_server::{
     client,
@@ -33,28 +37,44 @@ use test_cloud_server::{
     ServerCluster,
 };
 use test_pd_client::PdWrapper;
-use tikv_util::{info, time::Instant};
+use tikv::config::TikvConfig;
+use tikv_util::{info, time::Instant, warn};
 
-use crate::{alloc_node_id_vec, generate_keyspace_key, i_to_key, i_to_val, i_to_val_opt};
+use crate::{alloc_node_id_vec, generate_keyspace_key, i_to_tidb_key, i_to_val, i_to_val_opt};
 
 const NODES_COUNT: usize = 3;
 const KEYSPACE_ID: u32 = 10;
 
-#[test]
-fn test_txn_file_commands() {
+#[rstest]
+#[case::enable_key_off(true)]
+#[case::disable_key_off(false)]
+fn test_txn_file_commands(#[case] enable_inner_key_off: bool) {
     test_util::init_log_for_test();
-    let mut cluster = ServerCluster::new(alloc_node_id_vec(3), |_, _| {});
+    let mut cluster = ServerCluster::new(alloc_node_id_vec(3), |_, conf: &mut TikvConfig| {
+        conf.enable_inner_key_offset = enable_inner_key_off;
+    });
     cluster.wait_region_replicated(&[], 3);
-    let mut client = cluster.new_client();
     let dfs = cluster.get_dfs().unwrap();
-    let region_id = client.get_region_id(&[]);
-    let ctx = client.new_rpc_ctx(region_id).unwrap();
-    let kv_client = client.get_kv_client(ctx.get_peer().get_store_id());
+
+    let mut client = cluster.new_client();
+    let mut prepare_ctx = |key: &[u8]| -> (u64, kvrpcpb::Context, TikvClient) {
+        let region_id = client.get_region_id(key);
+        let ctx = client.new_rpc_ctx(region_id).unwrap();
+        let kv_client = client.get_kv_client(ctx.get_peer().get_store_id());
+        (region_id, ctx, kv_client)
+    };
+
+    let mut client = cluster.new_client();
+    client.split_keyspace(KEYSPACE_ID);
+
+    let gen_key = generate_keyspace_key(KEYSPACE_ID);
+    let primary_lock = gen_key(0);
+    cluster.wait_region_replicated(&primary_lock, 3);
+    let (mut region_id, mut ctx, mut kv_client) = prepare_ctx(&primary_lock);
 
     // test rollback lock.
     let start_ts = client.get_ts().into_inner();
-    let chunk_ids = build_txn_files(&dfs, start_ts, 0, 300);
-    let primary_lock = i_to_key(0);
+    let chunk_ids = build_txn_files(&dfs, start_ts, 0, 300, enable_inner_key_off);
 
     let mut req = PrewriteRequest::new();
     req.set_context(ctx.clone());
@@ -63,7 +83,22 @@ fn test_txn_file_commands() {
     req.set_lock_ttl(6000);
     req.set_start_version(start_ts);
     req.set_min_commit_ts(start_ts + 1);
-    kv_client.kv_prewrite(&req).unwrap();
+    let ok = try_wait(
+        || {
+            let resp = kv_client.kv_prewrite(&req).unwrap();
+            assert!(resp.get_errors().is_empty(), "resp {:?}", resp);
+            if resp.has_region_error() {
+                warn!("prewrite got region error {:?}", resp.get_region_error());
+                (region_id, ctx, kv_client) = prepare_ctx(&primary_lock);
+                req.set_context(ctx.clone());
+                false
+            } else {
+                true
+            }
+        },
+        10,
+    );
+    assert!(ok);
 
     let mut req = CheckTxnStatusRequest::new();
     req.set_context(ctx.clone());
@@ -72,6 +107,11 @@ fn test_txn_file_commands() {
     req.set_caller_start_ts(start_ts + 5);
     req.set_is_txn_file(true);
     let resp = kv_client.kv_check_txn_status(&req).unwrap();
+    assert!(
+        !resp.has_error() && !resp.has_region_error(),
+        "resp {:?}",
+        resp
+    );
     let lock_info = resp.get_lock_info();
     // verify that min commit ts is pushed.
     assert_eq!(
@@ -88,6 +128,11 @@ fn test_txn_file_commands() {
     req.set_advise_lock_ttl(10000);
     req.set_is_txn_file(true);
     let resp = kv_client.kv_txn_heart_beat(&req).unwrap();
+    assert!(
+        !resp.has_error() && !resp.has_region_error(),
+        "resp {:?}",
+        resp
+    );
     // verify that lock ttl is pushed.
     assert_eq!(resp.lock_ttl, 10000);
 
@@ -95,12 +140,17 @@ fn test_txn_file_commands() {
     req.set_context(ctx.clone());
     req.set_is_txn_file(true);
     req.set_start_version(start_ts);
-    kv_client.kv_batch_rollback(&req).unwrap();
+    let resp = kv_client.kv_batch_rollback(&req).unwrap();
+    assert!(
+        !resp.has_error() && !resp.has_region_error(),
+        "resp {:?}",
+        resp
+    );
 
     // test rollback lock.
     let start_ts = client.get_ts().into_inner();
-    let chunk_ids = build_txn_files(&dfs, start_ts, 0, 300);
-    let primary_lock = i_to_key(0);
+    let chunk_ids = build_txn_files(&dfs, start_ts, 0, 300, enable_inner_key_off);
+    let primary_lock = gen_key(0);
 
     let mut req = PrewriteRequest::new();
     req.set_context(ctx.clone());
@@ -109,18 +159,28 @@ fn test_txn_file_commands() {
     req.set_lock_ttl(6000);
     req.set_start_version(start_ts);
     req.set_min_commit_ts(start_ts + 1);
-    kv_client.kv_prewrite(&req).unwrap();
+    let resp = kv_client.kv_prewrite(&req).unwrap();
+    assert!(
+        resp.get_errors().is_empty() && !resp.has_region_error(),
+        "resp {:?}",
+        resp
+    );
 
     let mut req = BatchRollbackRequest::new();
     req.set_context(ctx.clone());
     req.set_is_txn_file(true);
     req.set_start_version(start_ts);
-    kv_client.kv_batch_rollback(&req).unwrap();
+    let resp = kv_client.kv_batch_rollback(&req).unwrap();
+    assert!(
+        !resp.has_error() && !resp.has_region_error(),
+        "resp {:?}",
+        resp
+    );
 
     // test resolve lock.
     let start_ts = client.get_ts().into_inner();
-    let chunk_ids = build_txn_files(&dfs, start_ts, 0, 300);
-    let primary_lock = i_to_key(0);
+    let chunk_ids = build_txn_files(&dfs, start_ts, 0, 300, enable_inner_key_off);
+    let primary_lock = gen_key(0);
 
     let mut req = PrewriteRequest::new();
     req.set_context(ctx.clone());
@@ -129,18 +189,28 @@ fn test_txn_file_commands() {
     req.set_lock_ttl(6000);
     req.set_start_version(start_ts);
     req.set_min_commit_ts(start_ts + 1);
-    kv_client.kv_prewrite(&req).unwrap();
+    let resp = kv_client.kv_prewrite(&req).unwrap();
+    assert!(
+        resp.get_errors().is_empty() && !resp.has_region_error(),
+        "resp {:?}",
+        resp
+    );
 
     let mut req = ResolveLockRequest::new();
     req.set_context(ctx.clone());
     req.set_start_version(start_ts);
     req.set_is_txn_file(true);
-    kv_client.kv_resolve_lock(&req).unwrap();
+    let resp = kv_client.kv_resolve_lock(&req).unwrap();
+    assert!(
+        !resp.has_error() && !resp.has_region_error(),
+        "resp {:?}",
+        resp
+    );
 
     // test success 2pc.
     let start_ts = client.get_ts().into_inner();
-    let chunk_ids = build_txn_files(&dfs, start_ts, 0, 300);
-    let primary_lock = i_to_key(0);
+    let chunk_ids = build_txn_files(&dfs, start_ts, 0, 300, enable_inner_key_off);
+    let primary_lock = gen_key(0);
 
     let mut req = PrewriteRequest::new();
     req.set_context(ctx.clone());
@@ -149,7 +219,12 @@ fn test_txn_file_commands() {
     req.set_lock_ttl(6000);
     req.set_start_version(start_ts);
     req.set_min_commit_ts(start_ts + 1);
-    kv_client.kv_prewrite(&req).unwrap();
+    let resp = kv_client.kv_prewrite(&req).unwrap();
+    assert!(
+        resp.get_errors().is_empty() && !resp.has_region_error(),
+        "resp {:?}",
+        resp
+    );
 
     let mut req = CommitRequest::new();
     req.set_context(ctx);
@@ -157,14 +232,21 @@ fn test_txn_file_commands() {
     req.set_is_txn_file(true);
     let commit_ts = client.get_ts().into_inner();
     req.set_commit_version(commit_ts);
-    kv_client.kv_commit(&req).unwrap();
+    let resp = kv_client.kv_commit(&req).unwrap();
+    assert!(
+        !resp.has_error() && !resp.has_region_error(),
+        "resp {:?}",
+        resp
+    );
 
     verify_range(&mut client, 0, 300);
     cluster.stop();
 }
 
-#[test]
-fn test_txn_file_basic() {
+#[rstest]
+#[case::enable_key_off(true)]
+#[case::disable_key_off(false)]
+fn test_txn_file_basic(#[case] enable_inner_key_off: bool) {
     test_util::init_log_for_test();
 
     let cases = vec![
@@ -185,7 +267,12 @@ fn test_txn_file_basic() {
     let mut handles = Vec::with_capacity(cases.len());
     for (size_factor, txn_write_method, enable_encryption) in cases {
         handles.push(rt.spawn_blocking(move || {
-            test_txn_file_basic_impl(size_factor, txn_write_method, enable_encryption)
+            test_txn_file_basic_impl(
+                size_factor,
+                txn_write_method,
+                enable_encryption,
+                enable_inner_key_off,
+            )
         }));
     }
     rt.block_on(join_all(handles));
@@ -195,6 +282,7 @@ fn test_txn_file_basic_impl(
     size_factor: usize,
     write_method: TxnWriteMethod,
     enable_encryption: bool,
+    enable_inner_key_off: bool,
 ) {
     let (_temp_dir, mut oss, dfs_config) = prepare_dfs("test");
 
@@ -204,13 +292,14 @@ fn test_txn_file_basic_impl(
     info!("test_txn_file_basic";
         "size_factor" => size_factor,
         "enable_encryption" => enable_encryption,
+        "enable_inner_key_off" => enable_inner_key_off,
         "write_method" => ?write_method,
         "cluster_id" => cluster_id);
     let mut cluster = ServerCluster::new_opt(
         node_ids,
         |_, conf| {
             conf.dfs = dfs_config.clone();
-            conf.enable_inner_key_offset = true;
+            conf.enable_inner_key_offset = enable_inner_key_off;
         },
         pd_wrapper,
     );
@@ -341,8 +430,10 @@ fn test_txn_file_basic_impl(
     oss.shutdown();
 }
 
-#[test]
-fn test_txn_file_split_merge() {
+#[rstest]
+#[case::enable_key_off(true)]
+#[case::disable_key_off(false)]
+fn test_txn_file_split_merge(#[case] enable_inner_key_off: bool) {
     test_util::init_log_for_test();
     let (_temp_dir, mut oss, dfs_config) = prepare_dfs("test");
 
@@ -352,7 +443,7 @@ fn test_txn_file_split_merge() {
         node_ids,
         |_, conf| {
             conf.dfs = dfs_config.clone();
-            conf.enable_inner_key_offset = true;
+            conf.enable_inner_key_offset = enable_inner_key_off;
         },
         pd_wrapper,
     );
@@ -529,8 +620,10 @@ fn test_txn_file_split_merge() {
 }
 
 // Tests for abnormal processes.
-#[test]
-fn test_txn_file_abnormal() {
+#[rstest]
+#[case::enable_key_off(true)]
+#[case::disable_key_off(false)]
+fn test_txn_file_abnormal(#[case] enable_inner_key_off: bool) {
     test_util::init_log_for_test();
 
     let cases = vec![
@@ -549,13 +642,15 @@ fn test_txn_file_abnormal() {
     let handles = cases
         .into_iter()
         .map(|(data_count, use_txn_file)| {
-            rt.spawn_blocking(move || test_txn_file_abnormal_impl(data_count, use_txn_file))
+            rt.spawn_blocking(move || {
+                test_txn_file_abnormal_impl(data_count, use_txn_file, enable_inner_key_off)
+            })
         })
         .collect::<Vec<_>>();
     rt.block_on(join_all(handles));
 }
 
-fn test_txn_file_abnormal_impl(data_count: usize, use_txn_file: bool) {
+fn test_txn_file_abnormal_impl(data_count: usize, use_txn_file: bool, enable_inner_key_off: bool) {
     let write_method = if use_txn_file {
         TxnWriteMethod::FileBased
     } else {
@@ -571,7 +666,7 @@ fn test_txn_file_abnormal_impl(data_count: usize, use_txn_file: bool) {
         node_ids,
         |_, conf| {
             conf.dfs = dfs_config.clone();
-            conf.enable_inner_key_offset = true;
+            conf.enable_inner_key_offset = enable_inner_key_off;
         },
         pd_wrapper,
     );
@@ -856,8 +951,10 @@ fn test_txn_file_abnormal_impl(data_count: usize, use_txn_file: bool) {
     oss.shutdown();
 }
 
-#[test]
-fn test_txn_file_move_down() {
+#[rstest]
+#[case::enable_key_off(true)]
+#[case::disable_key_off(false)]
+fn test_txn_file_move_down(#[case] enable_inner_key_off: bool) {
     test_util::init_log_for_test();
     let (_temp_dir, mut oss, dfs_config) = prepare_dfs("test");
     let node_ids = alloc_node_id_vec(NODES_COUNT);
@@ -869,7 +966,7 @@ fn test_txn_file_move_down() {
         node_ids,
         |_, conf| {
             conf.dfs = dfs_config.clone();
-            conf.enable_inner_key_offset = true;
+            conf.enable_inner_key_offset = enable_inner_key_off;
             conf.kvengine.flush_split_l0 = true;
         },
         pd_wrapper,
@@ -919,8 +1016,10 @@ fn test_txn_file_move_down() {
     oss.shutdown();
 }
 
-#[test]
-fn test_txn_file_merge() {
+#[rstest]
+#[case::enable_key_off(true)]
+#[case::disable_key_off(false)]
+fn test_txn_file_merge(#[case] enable_inner_key_off: bool) {
     test_util::init_log_for_test();
 
     let cases = vec![
@@ -930,23 +1029,35 @@ fn test_txn_file_merge() {
     ];
 
     for ranges in cases {
-        test_txn_file_merge_impl(ranges);
+        test_txn_file_merge_impl(ranges, enable_inner_key_off);
     }
 }
 
-fn test_txn_file_merge_impl(ranges: Vec<Range<usize>>) {
-    let mut cluster = ServerCluster::new(alloc_node_id_vec(3), |_, _| {});
-    cluster.wait_region_replicated(&[], 3);
-    let mut client = cluster.new_client();
+fn test_txn_file_merge_impl(ranges: Vec<Range<usize>>, enable_inner_key_off: bool) {
+    let mut cluster = ServerCluster::new(alloc_node_id_vec(3), |_, mut conf| {
+        conf.enable_inner_key_offset = enable_inner_key_off;
+    });
     let dfs = cluster.get_dfs().unwrap();
-    let region_id = client.get_region_id(&[]);
-    let ctx = client.new_rpc_ctx(region_id).unwrap();
-    let kv_client = client.get_kv_client(ctx.get_peer().get_store_id());
+    cluster.wait_region_replicated(&[], 3);
+
+    let mut client = cluster.new_client();
+    let mut prepare_ctx = |key: &[u8]| -> (u64, kvrpcpb::Context, TikvClient) {
+        let region_id = client.get_region_id(key);
+        let ctx = client.new_rpc_ctx(region_id).unwrap();
+        let kv_client = client.get_kv_client(ctx.get_peer().get_store_id());
+        (region_id, ctx, kv_client)
+    };
+
+    let mut client = cluster.new_client();
+    client.split_keyspace(KEYSPACE_ID);
 
     let start_ts = client.get_ts().into_inner();
-    let chunk_ids = build_txn_files(&dfs, start_ts, 0, 500);
+    let chunk_ids = build_txn_files(&dfs, start_ts, 0, 500, enable_inner_key_off);
     assert_eq!(chunk_ids.len(), 5);
-    let primary_lock = i_to_key(0);
+
+    let gen_key = generate_keyspace_key(KEYSPACE_ID);
+    let primary_lock = gen_key(0);
+    let (mut region_id, mut ctx, mut kv_client) = prepare_ctx(&primary_lock);
 
     for range in ranges {
         let mut req = PrewriteRequest::new();
@@ -956,7 +1067,23 @@ fn test_txn_file_merge_impl(ranges: Vec<Range<usize>>) {
         req.set_lock_ttl(6000);
         req.set_start_version(start_ts);
         req.set_min_commit_ts(start_ts + 1);
-        kv_client.kv_prewrite(&req).unwrap();
+
+        let ok = try_wait(
+            || {
+                let resp = kv_client.kv_prewrite(&req).unwrap();
+                assert!(resp.get_errors().is_empty(), "resp {:?}", resp);
+                if resp.has_region_error() {
+                    warn!("prewrite got region error {:?}", resp.get_region_error());
+                    (region_id, ctx, kv_client) = prepare_ctx(&primary_lock);
+                    req.set_context(ctx.clone());
+                    false
+                } else {
+                    true
+                }
+            },
+            10,
+        );
+        assert!(ok);
     }
 
     let mut req = CommitRequest::new();
@@ -965,24 +1092,37 @@ fn test_txn_file_merge_impl(ranges: Vec<Range<usize>>) {
     req.set_is_txn_file(true);
     let commit_ts = client.get_ts().into_inner();
     req.set_commit_version(commit_ts);
-    kv_client.kv_commit(&req).unwrap();
+    let resp = kv_client.kv_commit(&req).unwrap();
+    assert!(
+        !resp.has_error() && !resp.has_region_error(),
+        "resp {:?}",
+        resp
+    );
 
     verify_range(&mut client, 0, 500);
     cluster.stop();
 }
 
-fn build_txn_files(dfs: &Arc<dyn Dfs>, start_ts: u64, start: usize, end: usize) -> Vec<u64> {
+fn build_txn_files(
+    dfs: &Arc<dyn Dfs>,
+    start_ts: u64,
+    start: usize,
+    end: usize,
+    enable_inner_key_off: bool,
+) -> Vec<u64> {
     let mut chunk_ids = vec![];
     let mut chunk_id = start_ts + 1;
-    let mut txn_chunk_builder = TxnChunkBuilder::new(chunk_id, 10, None);
+    let mut txn_chunk_builder =
+        TxnChunkBuilder::new(chunk_id, 10, None, KEYSPACE_ID, enable_inner_key_off);
     for i in start..end {
-        let key = i_to_key(i);
+        let key = i_to_tidb_key(i);
         let val = i_to_val(i);
-        txn_chunk_builder.add_entry(&key, OP_PUT, &val);
+        txn_chunk_builder.add_entry(NoPrefixKey(&key), OP_PUT, &val);
         if (i + 1) % 100 == 0 {
             let mut data_buf = vec![];
             txn_chunk_builder.finish(&mut data_buf);
-            txn_chunk_builder = TxnChunkBuilder::new(chunk_id, 10, None);
+            txn_chunk_builder =
+                TxnChunkBuilder::new(chunk_id, 10, None, KEYSPACE_ID, enable_inner_key_off);
             let opts = dfs::Options::default().with_type(FileType::TxnChunk);
             dfs.get_runtime()
                 .block_on(dfs.create(chunk_id, Bytes::from(data_buf), opts))
@@ -996,8 +1136,9 @@ fn build_txn_files(dfs: &Arc<dyn Dfs>, start_ts: u64, start: usize, end: usize) 
 
 fn verify_range(client: &mut ClusterClient, start: usize, end: usize) {
     let put_time = Instant::now();
+    let gen_key = generate_keyspace_key(KEYSPACE_ID);
     for i in start..end {
-        let key = i_to_key(i);
+        let key = gen_key(i);
         let val = i_to_val(i);
         let opt = RequestOptions::default();
         client

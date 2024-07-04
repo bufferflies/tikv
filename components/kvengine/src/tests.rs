@@ -33,7 +33,8 @@ use crate::{
     table::{
         memtable::CfTable,
         sstable::{File, InMemFile, L0Builder, L0Table, SsTable},
-        ChecksumType, InnerKey, TxnChunkBuilder, TxnCtx, TxnFile, TxnFileId, BIT_DELETE, OP_PUT,
+        ChecksumType, InnerKey, NoPrefixKey, TxnChunkBuilder, TxnCtx, TxnFile, TxnFileId,
+        BIT_DELETE, OP_PUT,
     },
     *,
 };
@@ -1327,10 +1328,10 @@ fn test_txn_file_impl(enc_key: Option<&EncryptionKey>) {
     let (key, um) = snap
         .get_txn_file_conflict_write(&conflict_txn_file)
         .unwrap();
-    assert_eq!(key, i_to_key(250, 0).into_bytes());
+    assert_eq!(key, i_to_tidb_key(250, 0).into_bytes());
     assert_eq!(um.start_ts, txn1_start_ts);
     let (key, lock) = snap.get_txn_file_conflict_lock(&conflict_txn_file).unwrap();
-    assert_eq!(key, i_to_key(300, 0).into_bytes());
+    assert_eq!(key, i_to_tidb_key(300, 0).into_bytes());
     assert_eq!(lock.ts.into_inner(), txn2_start_ts);
 
     let empty_txn_file = TxnFile::new(
@@ -1433,10 +1434,10 @@ fn build_txn_chunk(
     id: u64,
     enc_key: Option<&EncryptionKey>,
 ) {
-    let mut chunk_builder = TxnChunkBuilder::new(id, 10, enc_key.cloned());
+    let mut chunk_builder = TxnChunkBuilder::new(id, 10, enc_key.cloned(), KEYSPACE_ID, true);
     for i in start..end {
-        let key_str = i_to_key(i as i32, 0);
-        chunk_builder.add_entry(key_str.as_bytes(), OP_PUT, key_str.as_bytes());
+        let key_str = i_to_tidb_key(i as i32, 0);
+        chunk_builder.add_entry(NoPrefixKey(key_str.as_bytes()), OP_PUT, key_str.as_bytes());
     }
     let mut buf = vec![];
     chunk_builder.finish(&mut buf);
@@ -1492,7 +1493,7 @@ fn make_user_meta(start_ts: u64, commit_ts: u64) -> Vec<u8> {
 fn verify_lock(engine: &TestEngine, start: usize, end: usize) {
     let snap = engine.get_snap_access(1).unwrap();
     for i in start..end {
-        let key = i_to_key(i as i32, 0);
+        let key = i_to_tidb_key(i as i32, 0);
         let item = snap.get(LOCK_CF, key.as_bytes(), 0);
         assert!(item.is_valid());
         let lock = txn_types::Lock::parse(item.get_value()).unwrap();
@@ -1505,7 +1506,7 @@ fn verify_lock(engine: &TestEngine, start: usize, end: usize) {
     let mut i = start;
     while it.valid() {
         let lock = txn_types::Lock::parse(it.val()).unwrap();
-        let key = i_to_key(i as i32, 0);
+        let key = i_to_tidb_key(i as i32, 0);
         assert_eq!(lock.short_value.unwrap().as_slice(), key.as_bytes());
         it.next();
         i += 1;
@@ -1516,7 +1517,7 @@ fn verify_lock(engine: &TestEngine, start: usize, end: usize) {
 fn verify_write(engine: &TestEngine, start: usize, end: usize) {
     let snap = engine.get_snap_access(1).unwrap();
     for i in start..end {
-        let key = i_to_key(i as i32, 0);
+        let key = i_to_tidb_key(i as i32, 0);
         let item = snap.get(WRITE_CF, key.as_bytes(), u64::MAX);
         assert_eq!(item.get_value(), key.as_bytes());
     }
@@ -1524,7 +1525,7 @@ fn verify_write(engine: &TestEngine, start: usize, end: usize) {
     it.rewind();
     let mut i = start;
     while it.valid() {
-        let key = i_to_key(i as i32, 0);
+        let key = i_to_tidb_key(i as i32, 0);
         assert_eq!(it.val(), key.as_bytes());
         it.next();
         i += 1;
@@ -1843,6 +1844,17 @@ fn i_to_key(i: i32, min_blob_size: u32) -> String {
         format!("key{:0>1$}", i, min_blob_size as usize - 3)
     } else {
         format!("key{:0>1$}", i, 6)
+    }
+}
+
+// Temporarily used to make the tests pass.
+// Use KeyBuilder to generate keys according to `enable_inner_key_off`.
+fn i_to_tidb_key(i: i32, min_blob_size: u32) -> String {
+    if min_blob_size > 0 {
+        // 4 -> strlen("tkey")
+        format!("tkey{:0>1$}", i, min_blob_size as usize - 3)
+    } else {
+        format!("tkey{:0>1$}", i, 6)
     }
 }
 
