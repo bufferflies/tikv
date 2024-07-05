@@ -72,8 +72,14 @@ const _MAX_REGIONS_IN_ERROR: usize = 10;
 pub struct PeerFsm {
     pub(crate) peer: Peer,
     pub(crate) stopped: bool,
-    // apply_worker_idx is initialized randomly, and can be changed based on workload.
+    // leader_apply_worker_idx and follower_apply_worker_idx are initialized randomly,
+    // and apply_worker_idx can use the corresponding worker index based on the role.
     pub(crate) apply_worker_idx: usize,
+    leader_apply_worker_idx: usize,
+    // If follower_apply_worker_idx is non-zero,
+    // the follower's apply batch is sent to follower apply worker,
+    // otherwise follower and leader share the apply worker.
+    follower_apply_worker_idx: usize,
     // applying_cnt is increased by raft worker and decreased by apply worker.
     // When we need to change the worker idx, we need to make sure the applying_cnt is zero.
     pub(crate) applying_cnt: Arc<AtomicU64>,
@@ -106,10 +112,19 @@ impl PeerFsm {
             "region" => peer.tag(),
             "peer_id" => peer.peer_id(),
         );
+        let apply_worker_idx = thread_rng().gen_range(0..cfg.apply_pool_size);
+        let leader_apply_worker_idx = apply_worker_idx;
+        let follower_apply_worker_idx = if cfg.apply_follower_pool_size > 0 {
+            cfg.apply_pool_size + thread_rng().gen_range(0..cfg.apply_follower_pool_size)
+        } else {
+            0
+        };
         Ok(PeerFsm {
             peer,
             stopped: false,
-            apply_worker_idx: thread_rng().gen_range(0..cfg.apply_pool_size),
+            apply_worker_idx,
+            leader_apply_worker_idx,
+            follower_apply_worker_idx,
             applying_cnt: Arc::new(AtomicU64::new(0)),
             ticker: Ticker::new(cfg),
         })
@@ -139,13 +154,37 @@ impl PeerFsm {
             "region" => peer.tag(),
             "peer_id" => peer.peer_id(),
         );
+        let apply_worker_idx = thread_rng().gen_range(0..cfg.apply_pool_size);
+        let leader_apply_worker_idx = apply_worker_idx;
+        let follower_apply_worker_idx = if cfg.apply_follower_pool_size > 0 {
+            cfg.apply_pool_size + thread_rng().gen_range(0..cfg.apply_follower_pool_size)
+        } else {
+            0
+        };
         Ok(PeerFsm {
             peer,
             stopped: false,
             ticker: Ticker::new(cfg),
-            apply_worker_idx: thread_rng().gen_range(0..cfg.apply_pool_size),
+            apply_worker_idx,
+            leader_apply_worker_idx,
+            follower_apply_worker_idx,
             applying_cnt: Arc::new(AtomicU64::new(0)),
         })
+    }
+
+    #[inline]
+    pub fn may_change_apply_worker(&mut self) {
+        if self.follower_apply_worker_idx == 0 {
+            return;
+        }
+        if self.applying_cnt.load(Ordering::SeqCst) > 0 {
+            return;
+        }
+        self.apply_worker_idx = if self.peer.is_leader() {
+            self.leader_apply_worker_idx
+        } else {
+            self.follower_apply_worker_idx
+        };
     }
 
     #[inline]

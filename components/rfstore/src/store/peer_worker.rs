@@ -71,6 +71,7 @@ impl PeerInbox {
         PeerMsgHandler::new(&mut peer_fsm, ctx).handle_msgs(&mut self.msgs);
         peer_fsm.peer.handle_raft_ready(ctx, None);
         if !ctx.apply_msgs.msgs.is_empty() {
+            peer_fsm.may_change_apply_worker();
             let peer_batch = ApplyBatch {
                 msgs: mem::take(&mut ctx.apply_msgs.msgs),
                 applier: self.peer.applier.clone(),
@@ -160,10 +161,10 @@ impl RaftWorker {
         io_sender: Sender<Option<IoTask>>,
         store_fsm: StoreFsm,
     ) -> (Self, Vec<Receiver<Option<ApplyBatch>>>) {
-        let apply_pool_size = ctx.cfg.apply_pool_size;
-        let mut apply_senders = Vec::with_capacity(apply_pool_size);
-        let mut apply_receivers = Vec::with_capacity(apply_pool_size);
-        for _ in 0..apply_pool_size {
+        let all_apply_pool_size = ctx.cfg.apply_pool_size + ctx.cfg.apply_follower_pool_size;
+        let mut apply_senders = Vec::with_capacity(all_apply_pool_size);
+        let mut apply_receivers = Vec::with_capacity(all_apply_pool_size);
+        for _ in 0..all_apply_pool_size {
             let (sender, receiver) = tikv_util::mpsc::unbounded();
             apply_senders.push(sender);
             apply_receivers.push(receiver);
@@ -326,9 +327,9 @@ impl RaftWorker {
             let mut store_handler = StoreMsgHandler::new(&mut self.store_fsm, &mut self.ctx);
             if let Some(apply_region) = store_handler.handle_msg(msg) {
                 let peer = self.ctx.get_peer(apply_region);
-                let peer_fsm = peer.peer_fsm.lock().unwrap();
+                let mut peer_fsm = peer.peer_fsm.lock().unwrap();
                 let applier = peer.applier.clone();
-                self.maybe_send_apply(&applier, &peer_fsm);
+                self.maybe_send_apply(&applier, &mut peer_fsm);
             }
         }
         if self.store_fsm.last_tick.saturating_elapsed().as_millis() as u64
@@ -440,8 +441,9 @@ impl RaftWorker {
         }
     }
 
-    fn maybe_send_apply(&mut self, applier: &Arc<Mutex<Applier>>, peer_fsm: &PeerFsm) {
+    fn maybe_send_apply(&mut self, applier: &Arc<Mutex<Applier>>, peer_fsm: &mut PeerFsm) {
         if !self.ctx.apply_msgs.msgs.is_empty() {
+            peer_fsm.may_change_apply_worker();
             let peer_batch = ApplyBatch {
                 msgs: mem::take(&mut self.ctx.apply_msgs.msgs),
                 applier: applier.clone(),

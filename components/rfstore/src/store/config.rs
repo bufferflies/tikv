@@ -101,6 +101,8 @@ pub struct Config {
 
     pub apply_pool_size: usize,
 
+    pub apply_follower_pool_size: usize,
+
     pub enable_inner_key_offset: bool,
 
     pub aux_worker_count: usize,
@@ -144,7 +146,8 @@ impl Default for Config {
             // We should turn on this only in our tests.
             consistency_check_interval: ReadableDuration::secs(0),
             channel_capacity: 40960,
-            apply_pool_size: 3,
+            apply_pool_size: 2,
+            apply_follower_pool_size: 2,
             enable_inner_key_offset: false,
             aux_worker_count: 0,
         }
@@ -217,6 +220,8 @@ impl Config {
             }
         }
         cfg.apply_pool_size = old.apply_batch_system.pool_size;
+        cfg.apply_follower_pool_size = old.apply_batch_system.low_priority_pool_size;
+
         cfg.local_file_gc_tick_interval = old.local_file_gc_tick_interval;
         cfg.local_file_gc_timeout = old.local_file_gc_timeout;
 

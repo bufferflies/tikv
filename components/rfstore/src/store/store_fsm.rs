@@ -192,6 +192,7 @@ impl RaftBatchSystem {
             .unwrap();
         self.join_handles.push(handle);
         let peer_receiver = self.peer_receiver.take().unwrap();
+        let apply_pool_size = store_ctx.cfg.apply_pool_size;
         let (mut rw, mut apply_receivers) = RaftWorker::new(
             store_ctx,
             peer_receiver,
@@ -210,11 +211,16 @@ impl RaftBatchSystem {
         self.join_handles.push(handle);
 
         for (i, apply_receiver) in apply_receivers.drain(..).enumerate() {
+            let thread_name = if i < apply_pool_size {
+                format!("apply_{}", i)
+            } else {
+                format!("follower_apply_{}", i - apply_pool_size)
+            };
             let props = tikv_util::thread_group::current_properties();
             let mut aw =
                 ApplyWorker::new(ctx.engines.kv.clone(), ctx.router.clone(), apply_receiver);
             let handle = std::thread::Builder::new()
-                .name(format!("apply_{}", i))
+                .name(thread_name)
                 .spawn_wrapper(move || {
                     tikv_util::thread_group::set_properties(props);
                     aw.run();
