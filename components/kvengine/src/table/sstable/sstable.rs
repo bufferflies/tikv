@@ -866,13 +866,6 @@ pub(crate) fn get_test_key(prefix: &str, i: usize) -> String {
     format!("{}{:04}", prefix, i)
 }
 
-// Temporarily used to make the tests pass.
-// Use KeyBuilder to generate keys according to `enable_inner_key_off`.
-#[cfg(test)]
-pub(crate) fn get_tidb_test_key(prefix: &str, i: usize) -> String {
-    format!("t_{}{:04}", prefix, i)
-}
-
 #[cfg(test)]
 pub(crate) fn create_sst_table(
     prefix: &str,

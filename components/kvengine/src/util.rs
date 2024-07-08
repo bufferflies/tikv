@@ -307,6 +307,7 @@ pub(crate) mod test_util {
 
     use crate::table::OwnedInnerKey;
 
+    #[derive(Debug)]
     pub(crate) struct KeyBuilder {
         keyspace_id: u32,
         enable_inner_key_off: bool,
