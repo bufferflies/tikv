@@ -16,7 +16,7 @@ use kvproto::pdpb::CheckPolicy;
 use load_data::task::LoadDataConfig;
 use native_br::{backup, backup_worker, restore::RestoreConfig};
 use pd_client::PdClient;
-use rand::{seq::IteratorRandom, Rng};
+use rand::prelude::*;
 use security::SecurityConfig;
 use test_cloud_server::{
     client::ClusterClientOptions, oss::prepare_dfs, tidb::TidbCluster, try_wait_result,
@@ -51,6 +51,7 @@ const LOAD_DATA_CONCURRENCY: usize = 2;
 const INSTANT_BACKUP_INTERVAL: Duration = Duration::from_millis(1050);
 
 const REGION_BUCKET_SIZE: ReadableSize = ReadableSize::kb(64);
+const ENABLE_INNER_KEY_OFF_RATIO: f64 = 0.8; // 80% chance to enable inner key offset
 
 #[test]
 fn test_random_all() {
@@ -64,6 +65,9 @@ fn test_random_all() {
         .unwrap();
     let _guard = runtime.enter();
 
+    let enable_inner_key_off: bool = thread_rng().gen_bool(ENABLE_INNER_KEY_OFF_RATIO);
+    info!("enable_inner_key_off: {}", enable_inner_key_off);
+
     // Prepare.
     let (_temp_dir, _oss, dfs_config) = prepare_dfs("oss_");
     let security_conf = new_security_config();
@@ -72,6 +76,7 @@ fn test_random_all() {
         &security_conf,
         NODES_COUNT,
         INITIAL_KEYSPACE_COUNT,
+        enable_inner_key_off,
     );
     let pd_client = cluster.get_pd_client();
     let keyspace_manager = cluster.keyspace_manager().clone();
@@ -150,6 +155,7 @@ fn test_random_all() {
             restore_config.clone(),
             keyspace_manager.clone(),
             &s3fs,
+            enable_inner_key_off,
             TIMEOUT,
         ));
     }
@@ -302,6 +308,7 @@ fn prepare_cluster(
     security_conf: &SecurityConfig,
     nodes_count: usize,
     initial_keyspace_count: usize,
+    enable_inner_key_off: bool,
 ) -> ServerCluster {
     let mut rng = rand::thread_rng();
     let nodes = alloc_node_id_vec(nodes_count);
@@ -337,8 +344,7 @@ fn prepare_cluster(
             ReadableSize::kb(rand::thread_rng().gen_range(0..2));
         conf.rfengine.lightweight_backup = true;
         conf.rfengine.wal_chunk_target_file_size = ReadableSize::kb(512);
-        // TODO: test for both enable and disable inner_key_offset
-        conf.enable_inner_key_offset = true;
+        conf.enable_inner_key_offset = enable_inner_key_off;
         conf.security = security_conf.clone();
         conf.kvengine.compaction_tombs_count = 100;
         conf.kvengine.max_del_range_delay = ReadableDuration(Duration::from_secs(3));

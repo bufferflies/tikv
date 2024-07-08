@@ -12,7 +12,7 @@ use pd_client::{
     pd_control,
     pd_control::{OpKind, PdScheduleConfig},
 };
-use rand::Rng;
+use rand::prelude::*;
 use security::SecurityConfig;
 use test_cloud_server::{
     oss::prepare_dfs, tidb::*, tpc::*, try_wait_async, try_wait_result, ServerCluster,
@@ -64,6 +64,8 @@ const TPCC_WORKLOAD_CONCURRENCY: usize = 1;
 
 const VERIFY_HEALTHY_TIMEOUT: Duration = Duration::from_secs(10);
 
+const ENABLE_INNER_KEY_OFF_RATIO: f64 = 0.8; // 80% chance to enable inner key offset
+
 #[test]
 fn test_random_with_tidb() {
     let _logger_guard = test_util::init_log_for_test_async();
@@ -75,6 +77,9 @@ fn test_random_with_tidb() {
         .unwrap();
     let _guard = runtime.enter();
 
+    let enable_inner_key_off: bool = thread_rng().gen_bool(ENABLE_INNER_KEY_OFF_RATIO);
+    info!("enable_inner_key_off: {}", enable_inner_key_off);
+
     // Prepare.
     let (_temp_dir, _oss, dfs_config) = prepare_dfs("oss_");
     let security_conf = new_security_config();
@@ -84,6 +89,7 @@ fn test_random_with_tidb() {
         &security_conf,
         NODES_COUNT,
         INITIAL_KEYSPACE_COUNT,
+        enable_inner_key_off,
         Some(&tc),
     );
     let pd_client = cluster.get_pd_client_ext();
@@ -241,6 +247,7 @@ fn prepare_cluster(
     security_conf: &SecurityConfig,
     nodes_count: usize,
     initial_keyspace_count: usize,
+    enable_inner_key_off: bool,
     tc: Option<&TidbCluster>,
 ) -> ServerCluster {
     let mut rng = rand::thread_rng();
@@ -260,8 +267,7 @@ fn prepare_cluster(
             ReadableSize::kb(rand::thread_rng().gen_range(0..2));
         conf.rfengine.lightweight_backup = true;
         conf.rfengine.wal_chunk_target_file_size = ReadableSize::kb(512);
-        // TODO: test for both enable and disable inner_key_offset
-        conf.enable_inner_key_offset = true;
+        conf.enable_inner_key_offset = enable_inner_key_off;
         conf.security = security_conf.clone();
         conf.kvengine.compaction_tombs_count = 100;
         conf.kvengine.max_del_range_delay = ReadableDuration(Duration::from_secs(3));
