@@ -300,15 +300,15 @@ impl TxnFileLocks {
     }
 }
 
-#[cfg(test)]
-pub(crate) mod test_util {
+#[cfg(any(test, feature = "testexport"))]
+pub mod test_util {
     use api_version::ApiV2;
     use bytes::Bytes;
 
     use crate::table::OwnedInnerKey;
 
     #[derive(Debug)]
-    pub(crate) struct KeyBuilder {
+    pub struct KeyBuilder {
         keyspace_id: u32,
         enable_inner_key_off: bool,
         prefix: String,

@@ -8378,6 +8378,7 @@ dependencies = [
  "rev_lines",
  "rfengine",
  "rfstore",
+ "rstest",
  "seahash",
  "security",
  "semver 0.11.0",

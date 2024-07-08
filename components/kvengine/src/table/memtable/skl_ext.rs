@@ -145,6 +145,7 @@ mod tests {
     use std::{ops::Deref, sync::Arc};
 
     use bytes::Bytes;
+    use rstest::rstest;
 
     use crate::{
         table::{
@@ -153,24 +154,29 @@ mod tests {
             txn_file::{TxnChunk, TxnChunkBuilder, TxnCtx, TxnFile, TxnFileId, OP_PUT},
             InnerKey, NoPrefixKey,
         },
+        util::test_util::KeyBuilder,
         UserMeta, GLOBAL_SHARD_END_KEY, WRITE_CF,
     };
 
-    fn new_key(i: i32) -> String {
-        format!("t_key{:05}", i)
-    }
+    const KEYSPACE_ID: u32 = 42;
 
-    fn new_val(i: i32) -> String {
+    fn new_val(i: usize) -> String {
         format!("val{:05}", i)
     }
 
-    fn write_skl_write_cf(skl: &SkipList, keys: Vec<i32>, start_ts: u64, commit_ts: u64) {
+    fn write_skl_write_cf(
+        skl: &SkipList,
+        keys: Vec<usize>,
+        start_ts: u64,
+        commit_ts: u64,
+        kb: &KeyBuilder,
+    ) {
         let mut wb = WriteBatch::new();
         for i in keys {
-            let key = new_key(i);
+            let key = kb.i_to_inner_key(i);
             let val = new_val(i);
             wb.put(
-                InnerKey::from_inner_buf(key.as_bytes()),
+                key.as_ref(),
                 0,
                 &UserMeta::new(start_ts, commit_ts).to_array(),
                 commit_ts,
@@ -180,26 +186,36 @@ mod tests {
         skl.put_batch(&mut wb, None, WRITE_CF);
     }
 
-    fn build_txn_file_chunk_data(chunk_id: u64, keys: Vec<i32>) -> Bytes {
-        let mut batch_builder = TxnChunkBuilder::new(chunk_id, 10, None, 0, true);
+    fn build_txn_file_chunk_data(
+        chunk_id: u64,
+        keys: Vec<usize>,
+        enable_inner_key_off: bool,
+        kb: &KeyBuilder,
+    ) -> Bytes {
+        let mut batch_builder =
+            TxnChunkBuilder::new(chunk_id, 10, None, KEYSPACE_ID, enable_inner_key_off);
         for i in keys {
-            let key = new_key(i);
+            let key = kb.i_to_key(i);
             let val = new_val(i);
-            batch_builder.add_entry(NoPrefixKey(key.as_bytes()), OP_PUT, val.as_bytes());
+            batch_builder.add_entry(NoPrefixKey(&key), OP_PUT, val.as_bytes());
         }
         let mut data_buf = vec![];
         batch_builder.finish(&mut data_buf);
         data_buf.into()
     }
 
-    #[test]
-    fn test_skl_ext_write_cf() {
+    #[rstest]
+    #[case::enable_key_off(true)]
+    #[case::disable_key_off(false)]
+    fn test_skl_ext_write_cf(#[case] enable_inner_key_off: bool) {
         let skl = SkipList::new(None);
-        write_skl_write_cf(&skl, vec![5, 10, 15], 100, 101);
+        let kb = KeyBuilder::new(KEYSPACE_ID, enable_inner_key_off, "t_");
+        write_skl_write_cf(&skl, vec![5, 10, 15], 100, 101, &kb);
         // write CF skip list data will always written before txn file data, because
         // mem-table will instantly switch after apply TxnFile commit.
         let chunk_id = 1;
-        let txn_file_chunk_data = build_txn_file_chunk_data(chunk_id, vec![10, 12, 18]);
+        let txn_file_chunk_data =
+            build_txn_file_chunk_data(chunk_id, vec![10, 12, 18], enable_inner_key_off, &kb);
         let txn_file_chunk_file = Arc::new(InMemFile::new(chunk_id, txn_file_chunk_data));
         let txn_file_chunk = TxnChunk::new(txn_file_chunk_file, None, None).unwrap();
         let user_meta = UserMeta::new(102, 103).to_array().to_vec();
@@ -217,40 +233,31 @@ mod tests {
         let skl_ext = SkipListExt::new(skl).add_txn_file(txn_file);
 
         // test find key in skl.
-        let key = new_key(5);
+        let key = kb.i_to_inner_key(5);
         let mut outer_key_owner = vec![];
-        let val = skl_ext.get(
-            InnerKey::from_inner_buf(key.as_bytes()),
-            u64::MAX,
-            &mut outer_key_owner,
-        );
+        let val = skl_ext.get(key.as_ref(), u64::MAX, &mut outer_key_owner);
         assert_eq!(val.get_value(), new_val(5).as_bytes());
         assert_eq!(val.user_meta(), &UserMeta::new(100, 101).to_array());
         assert_eq!(val.version, 101);
 
         // test find key in txn file.
-        let key = new_key(10);
+        let key = kb.i_to_inner_key(10);
         let mut outer_key_owner = vec![];
-        let val = skl_ext.get(
-            InnerKey::from_inner_buf(key.as_bytes()),
-            u64::MAX,
-            &mut outer_key_owner,
-        );
+        let val = skl_ext.get(key.as_ref(), u64::MAX, &mut outer_key_owner);
         assert_eq!(val.get_value(), new_val(10).as_bytes());
         assert_eq!(val.user_meta(), &UserMeta::new(102, 103).to_array());
         assert_eq!(val.version, 103);
 
         // test get newer.
-        let key = new_key(10);
-        let inner_key = InnerKey::from_inner_buf(key.as_bytes());
+        let key = kb.i_to_inner_key(10);
         let mut outer_key_owner = vec![];
-        let mut val = skl_ext.get_newer(inner_key, 102, &mut outer_key_owner);
+        let mut val = skl_ext.get_newer(key.as_ref(), 102, &mut outer_key_owner);
         assert!(val.is_valid());
         assert_eq!(val.version, 103);
-        val = skl_ext.get_newer(inner_key, 103, &mut outer_key_owner);
+        val = skl_ext.get_newer(key.as_ref(), 103, &mut outer_key_owner);
         assert!(val.is_valid());
         assert_eq!(val.version, 103);
-        val = skl_ext.get_newer(inner_key, 104, &mut outer_key_owner);
+        val = skl_ext.get_newer(key.as_ref(), 104, &mut outer_key_owner);
         assert!(!val.is_valid());
 
         // test iterator.
