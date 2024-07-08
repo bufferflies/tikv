@@ -42,6 +42,18 @@ pub struct ShardMeta {
     pub columnar_snap_version: u64,
     pub unconverted_l0s: Vec<u64>,
 
+    /// The following are memory-based field(s).
+    ///
+    /// Recover process:
+    ///
+    /// * On restart: recover from shard after kvengine is recovered. See
+    ///   `ShardMeta::recover_txn_file_locks_from_kv`.
+    ///
+    /// * On restore from snapshot: replay raft logs from snapshot index
+    ///   (instead of meta.seq). See `PeerStorage::restore_snapshot`.
+    ///
+    /// * On restore from backup: replay raft logs from applied index (instead
+    ///   of preprocessed index). See `BackupCluster::preprocess_shard`.
     pub(crate) txn_file_locks: TxnFileLocks,
 }
 
@@ -100,6 +112,17 @@ impl ShardMeta {
             meta.schema_file_ver = sm.get_version();
         }
         meta
+    }
+
+    pub fn recover_txn_file_locks_from_kv(&mut self, kv: &Engine) {
+        match kv.get_shard_with_ver(self.id, self.ver) {
+            Ok(shard) => {
+                self.recover_txn_file_locks_from_shard(&shard);
+            }
+            Err(err) => {
+                warn!("{} recover_txn_file_locks_from_kv: failed to get shard", self.tag(); "err" => ?err);
+            }
+        }
     }
 
     pub fn tag(&self) -> ShardTag {
@@ -1039,19 +1062,12 @@ impl ShardMeta {
         &self.txn_file_locks
     }
 
-    pub fn recover_txn_file_locks_from_kv(&mut self, kv: &Engine) {
-        match kv.get_shard_with_ver(self.id, self.ver) {
-            Ok(shard) => {
-                self.txn_file_locks = TxnFileLocks::from_lock_txn_files(
-                    shard.get_write_sequence(),
-                    shard.get_data().get_lock_txn_files(),
-                );
-                info!("{} recover txn file locks from kv", self.tag(); "locks" => ?self.txn_file_locks);
-            }
-            Err(err) => {
-                warn!("{} failed to get shard", self.tag(); "err" => ?err);
-            }
-        }
+    pub fn recover_txn_file_locks_from_shard(&mut self, shard: &Shard) {
+        self.txn_file_locks = TxnFileLocks::from_lock_txn_files(
+            shard.get_write_sequence(),
+            shard.get_data().get_lock_txn_files(),
+        );
+        info!("{} recover txn file locks from shard", self.tag(); "locks" => ?self.txn_file_locks);
     }
 }
 

@@ -1776,6 +1776,10 @@ impl PreprocessErrors {
 
 // TODO: move to individual file.
 impl<'a> PreprocessRef<'a> {
+    /// `preprocess_committed_entry` would process entries from applied index
+    /// (of kvengine, during restore from snapshot or backup). So it should
+    /// be able to properly handle entries before `ShardMeta.seq`.
+    ///
     /// Return whether there is error during preprocessing committed entry which
     /// should be informed caller by callback.
     pub fn preprocess_committed_entry(
@@ -1806,7 +1810,7 @@ impl<'a> PreprocessRef<'a> {
                 }
             } else {
                 if let Err(err) = check_region_epoch(&cmd, self.get_preprocessed_region(), false) {
-                    warn!("preprocess pending admin failed {:?}", err);
+                    warn!("{} preprocess pending admin failed {:?}", self.tag(), err);
                     return None;
                 }
                 let admin = cmd.get_admin_request();

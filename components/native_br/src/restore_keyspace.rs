@@ -1357,10 +1357,9 @@ impl BackupCluster {
         old_shard: &mut BackupShard,
     ) -> Result<bool /* has_new_peer */> {
         let mut preprocessor = PeerPreprocessor::new(rf_engine, old_shard);
-        let mut preprocess_ref = preprocessor.as_ref();
 
         // Get raft logs.
-        let low_idx = old_shard.raft_state.get_last_preprocessed_index() + 1;
+        let low_idx = preprocessor.preprocessed_index + 1;
         let high_idx = old_shard.raft_state.get_commit() + 1;
         info!(
             "Keyspace {} shard {} preprocess Raft log [{}, {}), raft_state {:?}",
@@ -1368,7 +1367,7 @@ impl BackupCluster {
             old_shard.tag(),
             low_idx,
             high_idx,
-            preprocess_ref.raft_state,
+            preprocessor.raft_state,
         );
 
         let mut entries = Vec::with_capacity((high_idx.saturating_sub(low_idx)) as usize);
@@ -1408,6 +1407,7 @@ impl BackupCluster {
         };
 
         // Preprocess
+        let mut preprocess_ref = preprocessor.as_ref();
         for entry in &entries {
             preprocess_ref.preprocess_committed_entry(&mut ctx, entry);
         }
@@ -2308,8 +2308,14 @@ impl PeerPreprocessor {
         let merge_state = region_state
             .has_merge_state()
             .then(|| region_state.take_merge_state());
+
+        // Set `preprocessed_index` to the `data_sequence` to replay from last flush and
+        // restore memory-based fields of `ShardMeta`.
+        // See https://github.com/tidbcloud/cloud-storage-engine/issues/1680.
+        let preprocessed_index = shard.meta.data_sequence;
+
         Self {
-            preprocessed_index: shard.raft_state.get_last_preprocessed_index(),
+            preprocessed_index,
             region,
             preprocessed_region: None,
             peer,
