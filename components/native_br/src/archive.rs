@@ -234,6 +234,7 @@ pub struct ArchiveConfig {
     pub expiration_date: String,
     pub concurrency: usize,
     pub skip_no_meta_days: usize,
+    pub skip_shards: Option<HashSet<u64>>,
     pub dry_run: bool,
 }
 
@@ -251,6 +252,7 @@ impl ArchiveConfig {
             expiration_date,
             concurrency: LOAD_FILE_CONCURRENCY,
             skip_no_meta_days: 0,
+            skip_shards: None,
             dry_run: true,
         }
     }
@@ -371,6 +373,7 @@ fn archive_backup_files(
         cluster_id,
         file_name,
         cluster_backup,
+        config.skip_shards.clone(),
         path,
         config.security.clone(),
     )?;
@@ -410,7 +413,15 @@ fn write_archive_packages_and_index(
         archive_backup.date,
     );
     let format_date = archive_format_date(&archive_backup.date);
-    if !config.dry_run {
+    if config.dry_run {
+        let not_found_files = get_not_found_files(&s3fs, deleted)?;
+        if !not_found_files.is_empty() {
+            return Err(Error::ArchiveError(format!(
+                "deleted files not found {:?} on {}",
+                not_found_files, archive_backup.date,
+            )));
+        }
+    } else {
         let mut cluster_backup = ClusterBackupMeta::new();
         cluster_backup
             .merge_from_bytes(&archive_backup.meta_data)
@@ -467,6 +478,7 @@ fn get_cluster_backup_files(
     cluster_id: u64,
     backup_name: String,
     cluster_backup: ClusterBackupMeta,
+    skip_shards: Option<HashSet<u64>>,
     path: PathBuf,
     security_conf: SecurityConfig,
 ) -> Result<HashSet<u64>> {
@@ -499,7 +511,7 @@ fn get_cluster_backup_files(
         true,
         None,
     )?;
-    let all_files = HashSet::from_iter(cluster.get_all_shard_files().drain(..));
+    let all_files = HashSet::from_iter(cluster.get_all_shard_files(skip_shards).drain(..));
     let shards_count = cluster.shards_count();
     drop(cluster);
     info!(

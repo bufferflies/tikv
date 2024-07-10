@@ -1,6 +1,6 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{path::PathBuf, str::FromStr, sync::Arc, time::Duration};
 
 use chrono::NaiveDate;
 use clap::Args;
@@ -58,6 +58,9 @@ pub struct ArchiveArgs {
     /// Skip days without cluster backup meta.
     #[clap(long, default_value_t = 0)]
     pub skip_no_meta_days: usize,
+    /// Skip abnormal shards, use `,` to separate multiple shard ids
+    #[clap(long)]
+    pub skip_abnormal_shards: Option<String>,
     #[clap(long)]
     pub dry_run: bool,
 }
@@ -85,6 +88,12 @@ fn get_archive_config_from_args(args: &ArchiveArgs) -> ArchiveConfig {
     if args.key.exists() {
         config.security.key_path = args.key.to_str().unwrap().to_owned();
     }
+    config.skip_shards = args.skip_abnormal_shards.as_ref().map(|skip_shards_str| {
+        skip_shards_str
+            .split(',')
+            .map(|x| u64::from_str(x).unwrap())
+            .collect()
+    });
     config.max_archive_file_size = args.max_archive_file_size;
     config.start_archive_duration = Duration::from(args.start_archive_duration);
     config.expiration_date = args.expiration_date.clone();

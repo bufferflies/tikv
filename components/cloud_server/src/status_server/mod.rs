@@ -568,7 +568,7 @@ impl StatusServer {
             let all_active_lite = engine.get_all_active_shard_stats_lite();
             res = serde_json::to_string_pretty(&all_active_lite);
         } else if path.starts_with("/kvengine/files") {
-            let all_shard_files: Vec<(u64, Vec<u64>)> = engine
+            let mut all_shard_files: Vec<(u64, Vec<u64>)> = engine
                 .get_all_shard_id_vers()
                 .iter()
                 .filter_map(|id_ver| {
@@ -577,6 +577,14 @@ impl StatusServer {
                         .map(|shard| (shard.id, shard.get_all_files()))
                 })
                 .collect();
+            // add blacklist files to the collection of files in use,
+            // for simplicity, zero shard id represents the blacklist files
+            let blacklist_file_ids = engine
+                .get_files_in_blacklist()
+                .iter()
+                .copied()
+                .collect::<Vec<_>>();
+            all_shard_files.push((0, blacklist_file_ids));
             res = serde_json::to_string(&all_shard_files);
         } else if path.starts_with("/kvengine/compactor") {
             let remote_urls = engine.comp_client.get_remote_compactors();

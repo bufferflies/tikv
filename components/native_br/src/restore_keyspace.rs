@@ -444,7 +444,7 @@ pub fn restore_keyspace(
     }
 
     reporter.report_step(RestoreStep::RetainSstFiles);
-    let files = cluster.get_all_shard_files();
+    let files = cluster.get_all_shard_files(None);
     match retain_sst_files(files, &s3fs) {
         Err(e) => {
             return Err(box_err!(
@@ -1206,9 +1206,14 @@ impl BackupCluster {
     }
 
     // Should be called after load_shard.
-    pub fn get_all_shard_files(&self) -> Vec<u64> {
+    pub fn get_all_shard_files(&self, skip_shards: Option<HashSet<u64>>) -> Vec<u64> {
         let mut files = vec![];
         for shard in self.shards.values() {
+            if let Some(skip_shards) = &skip_shards {
+                if skip_shards.contains(&shard.region_id) {
+                    continue;
+                }
+            }
             files.append(&mut shard.meta.all_file_keys());
         }
         files
@@ -1217,7 +1222,7 @@ impl BackupCluster {
     // Should be called after load_shard and before setup_kv_engine.
     pub fn check_all_shard_files(&self) -> Result<()> {
         if let Some(archive_reader) = &self.archive_reader {
-            let files = self.get_all_shard_files();
+            let files = self.get_all_shard_files(None);
             let not_found_files = get_not_found_files(&self.dfs, files)?;
             archive_reader.restore_files(not_found_files)?;
         }
