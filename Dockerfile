@@ -19,35 +19,31 @@
 
 
 # The prepare image avoid ruining the cache of the builder
-FROM centos:7.9.2009 as prepare
+FROM amazonlinux:2022.0.20220504.1 as prepare
 WORKDIR /tikv
+
+RUN yum install -y findutils
 
 # This step will always ruin the cache
 # There isn't a way with docker to wildcard COPY and preserve the directory structure
 COPY . .
 RUN mkdir /output
 RUN for component in $(find . -type f -name 'Cargo.toml' -exec dirname {} \; | sort -u); do \
-     mkdir -p "/output/${component}/src" \
+  mkdir -p "/output/${component}/src" \
   && touch "/output/${component}/src/lib.rs" \
   && cp "${component}/Cargo.toml" "/output/${component}/Cargo.toml" \
   ; done
 
 
-FROM centos:7.9.2009 as builder
+FROM amazonlinux:2022.0.20220504.1 as builder
 
-RUN yum install -y epel-release && \
-    yum clean all && \
-    yum makecache
+RUN yum clean all && yum makecache
 
-RUN yum install -y centos-release-scl && \
-    yum install -y \
-      devtoolset-8 \
-      perl cmake3 && \
-    yum clean all
+RUN yum install -y \
+  make glibc-devel gcc patch \
+  perl cmake3 && \
+  yum clean all
 
-# CentOS gives cmake 3 a weird binary name, so we link it to something more normal
-# This is required by many build scripts, including ours.
-RUN ln -s /usr/bin/cmake3 /usr/bin/cmake
 ENV LIBRARY_PATH /usr/local/lib:$LIBRARY_PATH
 ENV LD_LIBRARY_PATH /usr/local/lib:$LD_LIBRARY_PATH
 
@@ -95,12 +91,12 @@ ENV TIKV_BUILD_GIT_BRANCH=${GIT_BRANCH}
 
 # Use --mount=type=cache for the dependencies. Ref: https://github.com/moby/buildkit/blob/v0.10/frontend/dockerfile/docs/syntax.md#run---mounttypecache
 RUN --mount=type=cache,target=/root/.cargo/registry \
-    --mount=type=cache,target=/root/.cargo/git \
-    --mount=type=cache,target=/tikv/target,sharing=locked \
-    source /opt/rh/devtoolset-8/enable && make release \
-    && cp /tikv/target/release/tikv-server /tikv-server \
-    && cp /tikv/target/release/cse-ctl /cse-ctl \
-    && cp /tikv/target/release/tikv-worker /tikv-worker
+  --mount=type=cache,target=/root/.cargo/git \
+  --mount=type=cache,target=/tikv/target,sharing=locked \
+  make release \
+  && cp /tikv/target/release/tikv-server /tikv-server \
+  && cp /tikv/target/release/cse-ctl /cse-ctl \
+  && cp /tikv/target/release/tikv-worker /tikv-worker
 
 # Export to a clean image
 FROM amazonlinux:2022.0.20220504.1
