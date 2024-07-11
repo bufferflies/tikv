@@ -695,7 +695,15 @@ impl SkipListCore {
                 }
             }
         } else {
-            node_addr = h.next[0];
+            // Even the recomputeHeight is 0, we still need to check match or we would
+            // delete a different key.
+            let next_addr = h.next[0];
+            if !next_addr.is_null() {
+                let node = deref(self.arena.get_node(next_addr));
+                if self.arena.get_key(node).eq(key) {
+                    node_addr = next_addr;
+                }
+            }
         }
         if node_addr.is_null() {
             return false;
@@ -1329,6 +1337,38 @@ mod tests {
         assert!(v.is_empty());
         let v = l.get_with_hint(&key, 2, &mut h);
         assert_eq!(v.get_value(), key.as_slice());
+    }
+
+    #[test]
+    fn test_delete_with_hint() {
+        let l = SkipList::new(None);
+        let mut wb = WriteBatch::new();
+        for i in 0..1000 {
+            let key = format!("key{:04}", i);
+            wb.put(
+                InnerKey::from_inner_buf(key.as_bytes()),
+                0,
+                &[],
+                0,
+                key.as_bytes(),
+            );
+        }
+        l.put_batch_impl(&mut wb, None, 0);
+        let mut h = l.hint.lock().unwrap();
+        for i in (0..1000).step_by(10) {
+            let del_key = format!("key{:04}", i);
+            l.delete_with_hint(del_key.as_bytes(), &mut h);
+            l.delete_with_hint(del_key.as_bytes(), &mut h);
+            l.delete_with_hint(del_key.as_bytes(), &mut h);
+        }
+        let mut cnt = 0;
+        let mut it = l.new_iterator(false);
+        it.rewind();
+        while it.valid() {
+            cnt += 1;
+            it.next();
+        }
+        assert_eq!(cnt, 900);
     }
 
     #[test]
