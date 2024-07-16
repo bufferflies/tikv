@@ -10,10 +10,12 @@ use std::{
 use bytes::Buf;
 use tidb_query_datatype::{
     codec::{
+        datum,
         datum::{
             BYTES_FLAG, COMPACT_BYTES_FLAG, DECIMAL_FLAG, DURATION_FLAG, FLOAT_FLAG, INT_FLAG,
             JSON_FLAG, NIL_FLAG, UINT_FLAG, VAR_INT_FLAG, VAR_UINT_FLAG, VECTOR_FLOAT32_FLAG,
         },
+        mysql::{DecimalDecoder, DecimalEncoder},
         row::v2::{decode_v2_u64, RowSlice},
         table::{
             decode_common_handle, decode_int_handle, encode_common_handle_for_test, encode_row_key,
@@ -31,9 +33,12 @@ use tipb::ColumnInfo;
 use crate::{
     table,
     table::{
-        columnar::columnar::{
-            decompress_pack, get_fixed_size, Block, ColumnBuffer, ColumnMeta, ColumnarFile, Schema,
-            TableMeta,
+        columnar::{
+            columnar::{
+                decompress_pack, get_fixed_size, Block, ColumnBuffer, ColumnMeta, ColumnarFile,
+                Schema, TableMeta,
+            },
+            get_primary_key,
         },
         search,
         sstable::File,
@@ -42,7 +47,7 @@ use crate::{
     UserMeta,
 };
 
-pub trait ColumnarReader {
+pub trait ColumnarReader: Send {
     fn schema(&self) -> &Schema;
     fn seek(&mut self, handle: &[u8]) -> crate::table::Result<()>;
     fn read(&mut self, block: &mut Block, limit: usize) -> crate::table::Result<usize>;
@@ -74,6 +79,7 @@ impl ColumnarTableReader {
             version_column: table_meta.version_column.col_info.clone(),
             txn_id_column: need_txn_id.then(|| table_meta.txn_id_column.col_info.clone()),
             columns,
+            pk_col_ids: table_meta.pk_col_ids.clone(),
         };
         let handle_column_id = schema.handle_column.get_column_id();
         schema
@@ -322,6 +328,7 @@ pub struct ColumnarMvccReader {
     range_start: usize,
     filter_block: Block,
     end_handle: Vec<u8>,
+    end_int_handle: Option<i64>,
 }
 
 #[allow(dead_code)]
@@ -335,6 +342,7 @@ impl ColumnarMvccReader {
             in_range: false,
             range_start: 0,
             end_handle: vec![],
+            end_int_handle: None,
         }
     }
 }
@@ -351,13 +359,27 @@ impl ColumnarMvccReader {
         Ok(())
     }
 
+    pub fn set_int_handle_range(
+        &mut self,
+        start_handle: i64,
+        end_handle: Option<i64>,
+    ) -> crate::table::Result<()> {
+        self.end_int_handle = end_handle;
+        self.src.seek(&start_handle.to_le_bytes())?;
+        self.ranges.clear();
+        Ok(())
+    }
+
+    pub fn get_schema(&self) -> &Schema {
+        self.src.schema()
+    }
+
     pub fn read_block(&mut self, block: &mut Block, limit: usize) -> crate::table::Result<usize> {
         self.ranges.clear();
         self.in_range = false;
         block.reset();
         let read_row = self.src.read(block, limit)?;
         if block.handles.fixed_size > 0 {
-            let end_handle = self.end_handle.as_slice().get_i64_le();
             let mut prev_handle = 0;
             for i in 0..block.handles.length() {
                 let handle = block.handles.get_int_handle_value(i);
@@ -371,7 +393,7 @@ impl ColumnarMvccReader {
                     self.finish_range(i);
                     continue;
                 }
-                if handle >= end_handle {
+                if self.end_int_handle.is_some() && handle >= self.end_int_handle.unwrap() {
                     self.finish_range(i);
                     break;
                 }
@@ -754,42 +776,18 @@ impl ColumnarRowTableReader {
             }
             if let Some((start, end)) = row_slice.search_in_non_null_ids(col_id).unwrap() {
                 let col_val = &values[start..end];
-                let ft = FieldTypeTp::from_u8(col_info.get_tp() as u8).unwrap();
-                match ft {
-                    FieldTypeTp::Tiny
-                    | FieldTypeTp::Short
-                    | FieldTypeTp::Int24
-                    | FieldTypeTp::Long
-                    | FieldTypeTp::LongLong
-                    | FieldTypeTp::Date
-                    | FieldTypeTp::DateTime
-                    | FieldTypeTp::Timestamp
-                    | FieldTypeTp::Enum
-                    | FieldTypeTp::Bit
-                    | FieldTypeTp::Set
-                    | FieldTypeTp::Year
-                    | FieldTypeTp::Duration => {
-                        let v = decode_v2_u64(col_val).unwrap();
-                        col_buf.push_value(&v.to_le_bytes());
+                Self::push_col_buf_with_field_type(col_buf, col_info, col_val);
+            } else if !self.is_int_handle && get_primary_key(col_info) {
+                // get value from common handle
+                let mut common_handle =
+                    block.handles.get_not_null_value(block.handles.length() - 1);
+                for &pk_col_id in &self.schema.pk_col_ids {
+                    let (datum, remain) = datum::split_datum(common_handle, false).unwrap();
+                    if pk_col_id == col_id {
+                        Self::push_col_buf_with_datum(col_buf, col_info, datum);
+                        break;
                     }
-                    FieldTypeTp::Unspecified
-                    | FieldTypeTp::Float
-                    | FieldTypeTp::Double
-                    | FieldTypeTp::Null
-                    | FieldTypeTp::NewDate
-                    | FieldTypeTp::VarChar
-                    | FieldTypeTp::Json
-                    | FieldTypeTp::NewDecimal
-                    | FieldTypeTp::TinyBlob
-                    | FieldTypeTp::MediumBlob
-                    | FieldTypeTp::LongBlob
-                    | FieldTypeTp::Blob
-                    | FieldTypeTp::VarString
-                    | FieldTypeTp::String
-                    | FieldTypeTp::Geometry
-                    | FieldTypeTp::TiDbVectorFloat32 => {
-                        col_buf.push_value(col_val);
-                    }
+                    common_handle = remain;
                 }
             } else if let Some(default_val) = &self.default_vals[offset] {
                 col_buf.push_value(default_val);
@@ -798,6 +796,93 @@ impl ColumnarRowTableReader {
             }
         }
         Ok(())
+    }
+
+    fn push_col_buf_with_field_type(
+        col_buf: &mut ColumnBuffer,
+        col_info: &ColumnInfo,
+        col_val: &[u8],
+    ) {
+        let ft = FieldTypeTp::from_u8(col_info.get_tp() as u8).unwrap();
+        match ft {
+            FieldTypeTp::Tiny
+            | FieldTypeTp::Short
+            | FieldTypeTp::Int24
+            | FieldTypeTp::Long
+            | FieldTypeTp::LongLong
+            | FieldTypeTp::Date
+            | FieldTypeTp::DateTime
+            | FieldTypeTp::Timestamp
+            | FieldTypeTp::Enum
+            | FieldTypeTp::Bit
+            | FieldTypeTp::Set
+            | FieldTypeTp::Year
+            | FieldTypeTp::Duration => {
+                let v = decode_v2_u64(col_val).unwrap();
+                col_buf.push_value(&v.to_le_bytes());
+            }
+            FieldTypeTp::Unspecified
+            | FieldTypeTp::Float
+            | FieldTypeTp::Double
+            | FieldTypeTp::Null
+            | FieldTypeTp::NewDate
+            | FieldTypeTp::VarChar
+            | FieldTypeTp::Json
+            | FieldTypeTp::NewDecimal
+            | FieldTypeTp::TinyBlob
+            | FieldTypeTp::MediumBlob
+            | FieldTypeTp::LongBlob
+            | FieldTypeTp::Blob
+            | FieldTypeTp::VarString
+            | FieldTypeTp::String
+            | FieldTypeTp::Geometry
+            | FieldTypeTp::TiDbVectorFloat32 => {
+                col_buf.push_value(col_val);
+            }
+        }
+    }
+
+    fn push_col_buf_with_datum(
+        col_buf: &mut ColumnBuffer,
+        col_info: &ColumnInfo,
+        mut datum: &[u8],
+    ) {
+        let flag = datum.get_u8();
+        match flag {
+            INT_FLAG | DURATION_FLAG => {
+                let v = decode_i64(&mut datum).unwrap();
+                col_buf.push_value(&v.to_le_bytes());
+            }
+            UINT_FLAG => {
+                let v = decode_u64(&mut datum).unwrap();
+                col_buf.push_value(&v.to_le_bytes());
+            }
+            BYTES_FLAG => {
+                let v = decode_bytes(&mut datum, false).unwrap();
+                col_buf.push_value(&v);
+            }
+            NIL_FLAG => {
+                col_buf.push_null();
+            }
+            FLOAT_FLAG => {
+                let v = decode_f64(&mut datum).unwrap();
+                col_buf.push_value(&v.to_le_bytes());
+            }
+            DECIMAL_FLAG => {
+                let v = datum.read_decimal().unwrap();
+                let mut buf = vec![];
+                let prec = col_info.get_column_len() as u8;
+                let frac = col_info.get_decimal() as u8;
+                buf.write_decimal(&v, prec, frac).unwrap();
+                col_buf.push_value(&buf);
+            }
+            JSON_FLAG | VECTOR_FLOAT32_FLAG | VAR_UINT_FLAG | VAR_INT_FLAG | COMPACT_BYTES_FLAG => {
+                unreachable!("invalid flag {} in common handle", flag)
+            }
+            _ => {
+                unreachable!("unknown flag {} in common handle", flag)
+            }
+        }
     }
 }
 
@@ -1106,16 +1191,10 @@ mod tests {
             assert_eq!(ref_row.c0.is_none(), block.columns[0].is_null(i));
             assert_eq!(ref_row.c1.is_none(), block.columns[1].is_null(i));
             if let Some(c0) = ref_row.c0 {
-                assert_eq!(
-                    c0,
-                    block.columns[0].get_nullable_value(i).unwrap().get_i64_le()
-                );
+                assert_eq!(c0, block.columns[0].get_value(i).unwrap().get_i64_le());
             }
             if let Some(c1) = &ref_row.c1 {
-                assert_eq!(
-                    c1.as_slice(),
-                    block.columns[1].get_nullable_value(i).unwrap()
-                );
+                assert_eq!(c1.as_slice(), block.columns[1].get_value(i).unwrap());
             }
         }
     }
@@ -1172,7 +1251,7 @@ mod tests {
                         .unwrap();
                 } else {
                     mvcc_reader
-                        .set_handle_range(&start_handle.to_le_bytes(), &end_handle.to_le_bytes())
+                        .set_int_handle_range(start_handle, Some(end_handle))
                         .unwrap();
                 }
                 mvcc_reader.read_block(&mut block, 500).unwrap();

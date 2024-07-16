@@ -100,6 +100,7 @@ impl BatchDagHandler {
         paging_size: Option<u64>,
         quota_limiter: Arc<QuotaLimiter>,
     ) -> Result<Self> {
+        let snap = store.get_kvengine_snap();
         Ok(Self {
             runner: tidb_query_executors::runner::BatchExecutorsRunner::from_request::<_, F>(
                 req,
@@ -110,6 +111,7 @@ impl BatchDagHandler {
                 is_streaming,
                 paging_size,
                 quota_limiter,
+                snap,
             )?,
             data_version,
         })

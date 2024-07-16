@@ -13,6 +13,7 @@ use cloud_encryption::{EncryptionKey, MasterKey};
 use kvenginepb as pb;
 use moka::sync::SegmentedCache;
 use protobuf::Message;
+use tipb::ColumnInfo;
 use txn_types::Lock;
 
 use crate::{
@@ -21,7 +22,7 @@ use crate::{
         blobtable::blobtable::BlobPrefetcher,
         columnar::{
             ColumnarMergeReader, ColumnarMvccReader, ColumnarReader, ColumnarRowTableReader,
-            ColumnarTableReader, Schema,
+            ColumnarTableReader, Schema, HANDLE_COL_ID,
         },
         memtable::{Hint, WriteBatch},
         sstable::BlockCacheKey,
@@ -968,12 +969,26 @@ impl SnapAccessCore {
 
     pub fn new_columnar_mvcc_reader(
         &self,
-        schema: &Schema,
+        table_id: i64,
+        columns: &[ColumnInfo],
         read_ts: u64,
     ) -> Option<ColumnarMvccReader> {
         if self.columnar_snap_version == 0 {
             return None;
         }
+        let schema_file = self.data.schema_file.as_ref()?;
+        let table_schema = schema_file.get_table(table_id)?;
+        let mut schema = Schema {
+            table_id,
+            handle_column: table_schema.handle_column.clone(),
+            version_column: table_schema.version_column.clone(),
+            txn_id_column: None,
+            columns: columns.to_vec(),
+            pk_col_ids: table_schema.pk_col_ids.clone(),
+        };
+        schema
+            .columns
+            .retain(|c| !c.get_pk_handle() && c.get_column_id() != HANDLE_COL_ID as i64);
         let mut readers: Vec<Box<dyn ColumnarReader>> = vec![];
         for mem in &self.data.mem_tbls {
             let skl = mem.get_cf(WRITE_CF);
@@ -1004,7 +1019,7 @@ impl SnapAccessCore {
             }
         }
         let merged_reader = ColumnarMergeReader::new(schema.clone(), readers);
-        let mvcc_reader = ColumnarMvccReader::new(Box::new(merged_reader), schema, read_ts);
+        let mvcc_reader = ColumnarMvccReader::new(Box::new(merged_reader), &schema, read_ts);
         Some(mvcc_reader)
     }
 }

@@ -15,6 +15,7 @@ use crate::table::{
     columnar::{
         builder::{new_txn_id_column_info, new_version_column_info},
         columnar::Schema,
+        get_primary_key,
     },
     sstable::{File, NO_COMPRESSION},
     ChecksumType, InnerKey,
@@ -110,6 +111,11 @@ impl SchemaFile {
             data.advance(table_info_len);
             let table_id = table_info.get_table_id();
             let mut columns = table_info.take_columns().into_vec();
+            let pk_col_ids: Vec<i64> = columns
+                .iter()
+                .filter(|c| get_primary_key(c))
+                .map(|c| c.get_column_id())
+                .collect();
             let handle_column = columns.pop().unwrap();
             let schema = Schema {
                 table_id,
@@ -117,6 +123,7 @@ impl SchemaFile {
                 version_column: new_version_column_info(),
                 txn_id_column: Some(new_txn_id_column_info()),
                 columns,
+                pk_col_ids,
             };
             tables.insert(table_id, schema);
         }
@@ -298,6 +305,7 @@ mod tests {
             version_column: new_version_column_info(),
             txn_id_column: Some(new_txn_id_column_info()),
             columns: vec![new_column_info(3, true), new_column_info(4, false)],
+            pk_col_ids: vec![],
         };
         let schema_2 = Schema {
             table_id: 20,
@@ -305,6 +313,7 @@ mod tests {
             version_column: new_version_column_info(),
             txn_id_column: Some(new_txn_id_column_info()),
             columns: vec![new_column_info(3, false), new_column_info(4, true)],
+            pk_col_ids: vec![],
         };
         let schemas = vec![schema_1, schema_2];
         let data = build_schema_file(keyspace_id, schema_version, schemas.clone());
@@ -390,6 +399,7 @@ mod tests {
             version_column: new_version_column_info(),
             txn_id_column: Some(new_txn_id_column_info()),
             columns: vec![new_column_info(3, true), new_column_info(4, false)],
+            pk_col_ids: vec![],
         };
         let schema_2 = Schema {
             table_id: 20,
@@ -397,6 +407,7 @@ mod tests {
             version_column: new_version_column_info(),
             txn_id_column: Some(new_txn_id_column_info()),
             columns: vec![new_column_info(3, false), new_column_info(4, true)],
+            pk_col_ids: vec![],
         };
         let schema_3 = Schema {
             table_id: 30,
@@ -404,6 +415,7 @@ mod tests {
             version_column: new_version_column_info(),
             txn_id_column: Some(new_txn_id_column_info()),
             columns: vec![new_column_info(3, false), new_column_info(4, true)],
+            pk_col_ids: vec![],
         };
         let schemas = vec![schema_1.clone(), schema_2.clone()];
         let data = build_schema_file(keyspace_id, schema_version, schemas.clone());

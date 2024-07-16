@@ -48,7 +48,7 @@ impl Enum {
             value: &self.value,
         }
     }
-    fn get_value_name(value: u64, elems: &[String]) -> &[u8] {
+    pub fn get_value_name(value: u64, elems: &[String]) -> &[u8] {
         let name = if value == 0 {
             ""
         } else {

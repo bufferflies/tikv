@@ -46,6 +46,14 @@ pub trait Store: Send {
         lower_bound: Option<Key>,
         upper_bound: Option<Key>,
     ) -> Result<Self::Scanner>;
+
+    fn get_kvengine_snap(&self) -> Option<kvengine::SnapAccess> {
+        None
+    }
+
+    fn get_read_ts(&self) -> u64 {
+        u64::MAX
+    }
 }
 
 /// [`Scanner`]s allow retrieving items or batches from a scan result.

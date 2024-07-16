@@ -425,6 +425,7 @@ impl<S: Snapshot, F: KvFormat> RowSampleBuilder<S, F> {
             return Err(box_err!("empty columns_info"));
         }
         let common_handle_ids = req.take_primary_column_ids();
+        let snap = storage.get_kvengine_snap();
         let table_scanner = BatchTableScanExecutor::new(
             storage,
             Arc::new(EvalConfig::default()),
@@ -434,6 +435,7 @@ impl<S: Snapshot, F: KvFormat> RowSampleBuilder<S, F> {
             false,
             false, // Streaming mode is not supported in Analyze request, always false here
             req.take_primary_prefix_column_ids(),
+            snap,
         )?;
         Ok(Self {
             data: table_scanner,
@@ -915,6 +917,7 @@ impl<S: Snapshot, F: KvFormat> SampleBuilder<S, F> {
             return Err(box_err!("empty columns_info"));
         }
         let common_handle_ids = req.take_primary_column_ids();
+        let snap = storage.get_kvengine_snap();
         let table_scanner = BatchTableScanExecutor::new(
             storage,
             Arc::new(EvalConfig::default()),
@@ -924,6 +927,7 @@ impl<S: Snapshot, F: KvFormat> SampleBuilder<S, F> {
             false,
             false, // Streaming mode is not supported in Analyze request, always false here
             req.take_primary_prefix_column_ids(),
+            snap,
         )?;
         Ok(Self {
             data: table_scanner,

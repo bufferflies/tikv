@@ -141,15 +141,18 @@ impl<S: Storage, F: KvFormat> BatchIndexScanExecutor<S, F> {
             physical_table_id_column_cnt,
             index_version: -1,
         };
-        let wrapper = ScanExecutor::new(ScanExecutorOptions {
-            imp,
-            storage,
-            key_ranges,
-            is_backward,
-            is_key_only: false,
-            accept_point_range: unique,
-            is_scanned_range_aware,
-        })?;
+        let wrapper = ScanExecutor::new(
+            ScanExecutorOptions {
+                imp,
+                storage,
+                key_ranges,
+                is_backward,
+                is_key_only: false,
+                accept_point_range: unique,
+                is_scanned_range_aware,
+            },
+            None,
+        )?;
         Ok(Self(wrapper))
     }
 }

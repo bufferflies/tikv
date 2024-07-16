@@ -31,6 +31,10 @@ impl<S: Store> TikvStorage<S> {
             },
         }
     }
+
+    pub fn get_kvengine_snap(&self) -> Option<kvengine::SnapAccess> {
+        self.store.get_kvengine_snap()
+    }
 }
 
 impl<S: Store> Storage for TikvStorage<S> {
@@ -117,5 +121,9 @@ impl<S: Store> Storage for TikvStorage<S> {
         }
         dest.add(&self.cf_stats_backlog);
         self.cf_stats_backlog = Statistics::default();
+    }
+
+    fn get_read_ts(&self) -> u64 {
+        self.store.get_read_ts()
     }
 }

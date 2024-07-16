@@ -52,6 +52,20 @@ pub struct TableInfo {
     pub tiflash_replica: Option<TiFlashReplica>,
 }
 
+impl TableInfo {
+    pub fn build_columnar(&self) -> bool {
+        if self.comment.contains("columnar_engine") {
+            return true;
+        }
+        if let Some(tiflash_replica) = &self.tiflash_replica {
+            if tiflash_replica.count > 0 {
+                return true;
+            }
+        }
+        false
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TiFlashReplica {
     #[serde(rename = "Count")]

@@ -46,9 +46,11 @@ test_raftstore = { path = "../test_raftstore" }
 test_util = { path = "../test_util" }
 thiserror = "1.0"
 tidb_query_common = { workspace = true }
+tidb_query_datatype = { workspace = true }
 tikv = { path = "../.." }
 tikv-client = { workspace = true }
 tikv_util = { path = "../tikv_util" }
+tipb = { workspace = true }
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
 toml = "0.5"

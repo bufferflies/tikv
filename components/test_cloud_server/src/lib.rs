@@ -6,6 +6,7 @@
 
 pub mod client;
 pub mod cluster;
+pub mod copr;
 pub mod keyspace;
 pub mod load_data;
 pub mod oss;

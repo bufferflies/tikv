@@ -204,6 +204,9 @@ impl EngineCore {
         for ln in snap.get_table_creates() {
             ids.insert(ln.id, FileMeta::from_table(ln));
         }
+        for col in snap.get_columnar_creates() {
+            ids.insert(col.id, FileMeta::from_table(col));
+        }
     }
 
     fn load_tables_by_ids(
@@ -237,8 +240,13 @@ impl EngineCore {
             let fs = self.fs.clone();
             let tx = result_tx.clone();
             let file_meta = tb.clone();
+            let file_type = if tb.is_columnar_file() {
+                FileType::Columnar
+            } else {
+                FileType::Sst
+            };
             runtime.spawn(async move {
-                let res = fs.read_file(id, opts).await;
+                let res = fs.read_file(id, opts.with_type(file_type)).await;
                 let _ = tx.send(res.map(|data| (id, file_meta, data)));
             });
             if msg_count < LOAD_FILE_CONCURRENCY {
@@ -263,7 +271,9 @@ impl EngineCore {
         let (id, meta, data) = result_tx.recv().unwrap()?;
         let data_len = data.len();
         self.write_local_file(id, data, use_direct_io, &meta)?;
-        let file = if meta.is_blob_file() {
+        let file = if meta.is_columnar_file() {
+            self.open_columnar_file(id)?
+        } else if meta.is_blob_file() {
             self.open_blob_table_file(id)?
         } else {
             self.open_sstable_file(id)?
@@ -374,7 +384,9 @@ impl EngineCore {
         meta: &FileMeta,
     ) -> Result<()> {
         let start = Instant::now();
-        let local_file_name = if meta.is_blob_file() {
+        let local_file_name = if meta.is_columnar_file() {
+            self.local_columnar_file_path(id)
+        } else if meta.is_blob_file() {
             self.local_blob_file_path(id)
         } else {
             self.local_sst_file_path(id)

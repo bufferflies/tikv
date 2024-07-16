@@ -5,6 +5,7 @@ use std::{collections::HashSet, sync::Arc};
 use api_version::KvFormat;
 use async_trait::async_trait;
 use collections::HashMap;
+use kvengine::SnapAccess;
 use kvproto::coprocessor::KeyRange;
 use smallvec::SmallVec;
 use tidb_query_common::{
@@ -22,7 +23,7 @@ use tidb_query_datatype::{
 use tipb::{ColumnInfo, FieldType, TableScan};
 
 use super::util::scan_executor::*;
-use crate::interface::*;
+use crate::{interface::*, util::columnar_scanner::build_columnar_scanner};
 
 pub struct BatchTableScanExecutor<S: Storage, F>(ScanExecutor<S, TableScanExecutorImpl, F>);
 
@@ -49,7 +50,15 @@ impl<S: Storage, F: KvFormat> BatchTableScanExecutor<S, F> {
         is_backward: bool,
         is_scanned_range_aware: bool,
         primary_prefix_column_ids: Vec<i64>,
+        snap: Option<SnapAccess>,
     ) -> Result<Self> {
+        let columnar_scanner = build_columnar_scanner(
+            snap.as_ref(),
+            &key_ranges,
+            &columns_info,
+            storage.get_read_ts(),
+        );
+
         let is_column_filled = vec![false; columns_info.len()];
         let mut is_key_only = true;
         let mut handle_indices = HandleIndicesVec::new();
@@ -97,16 +106,23 @@ impl<S: Storage, F: KvFormat> BatchTableScanExecutor<S, F> {
             primary_column_ids,
             is_column_filled,
         };
-        let wrapper = ScanExecutor::new(ScanExecutorOptions {
-            imp,
-            storage,
-            key_ranges,
-            is_backward,
-            is_key_only,
-            accept_point_range: no_common_handle,
-            is_scanned_range_aware,
-        })?;
+        let wrapper = ScanExecutor::new(
+            ScanExecutorOptions {
+                imp,
+                storage,
+                key_ranges,
+                is_backward,
+                is_key_only,
+                accept_point_range: no_common_handle,
+                is_scanned_range_aware,
+            },
+            columnar_scanner,
+        )?;
         Ok(Self(wrapper))
+    }
+
+    pub fn is_columnar(&self) -> bool {
+        self.0.is_columnar()
     }
 }
 
@@ -713,6 +729,7 @@ mod tests {
             false,
             false,
             vec![],
+            None,
         )
         .unwrap();
 
@@ -797,6 +814,7 @@ mod tests {
             false,
             false,
             vec![],
+            None,
         )
         .unwrap()
         .collect_summary(1);
@@ -940,6 +958,7 @@ mod tests {
                 false,
                 false,
                 vec![],
+                None,
             )
             .unwrap();
 
@@ -1047,6 +1066,7 @@ mod tests {
                 false,
                 false,
                 vec![],
+                None,
             )
             .unwrap();
 
@@ -1095,6 +1115,7 @@ mod tests {
                 false,
                 false,
                 vec![],
+                None,
             )
             .unwrap();
 
@@ -1137,6 +1158,7 @@ mod tests {
                 false,
                 false,
                 vec![],
+                None,
             )
             .unwrap();
 
@@ -1176,6 +1198,7 @@ mod tests {
                 false,
                 false,
                 vec![],
+                None,
             )
             .unwrap();
 
@@ -1197,6 +1220,7 @@ mod tests {
                 false,
                 false,
                 vec![],
+                None,
             )
             .unwrap();
 
@@ -1231,6 +1255,7 @@ mod tests {
                 false,
                 false,
                 vec![],
+                None,
             )
             .unwrap();
 
@@ -1281,6 +1306,7 @@ mod tests {
             false,
             false,
             vec![],
+            None,
         )
         .unwrap();
 
@@ -1389,6 +1415,7 @@ mod tests {
             false,
             false,
             primary_prefix_column_ids,
+            None,
         )
         .unwrap();
 
@@ -1570,6 +1597,7 @@ mod tests {
             false,
             false,
             vec![],
+            None,
         )
         .unwrap();
 

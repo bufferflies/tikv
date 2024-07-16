@@ -1,0 +1,244 @@
+// Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
+
+use std::{
+    convert::{TryFrom, TryInto},
+    sync::Arc,
+};
+
+use api_version::{api_v2::KEYSPACE_PREFIX_LEN, KeyMode, KvFormat};
+use bytes::buf::Buf;
+use kvengine::table::columnar::{Block, ColumnarMvccReader, HANDLE_COL_ID};
+use kvproto::coprocessor::KeyRange;
+use tidb_query_common::Result;
+use tidb_query_datatype::{
+    codec::{
+        batch::{LazyBatchColumn, LazyBatchColumnVec},
+        data_type::{ChunkedVec, Enum, Real, VectorValue},
+        mysql::{DecimalDecoder, Duration, JsonDecoder, Set, Time, VectorFloat32Decoder},
+        table,
+        table::PREFIX_LEN,
+    },
+    expr::EvalContext,
+    EvalType, FieldTypeTp,
+};
+use tikv_util::buffer_vec::BufferVec;
+use tipb::ColumnInfo;
+
+pub struct ColumnarScanner {
+    // The current scan position.
+    reader: ColumnarMvccReader,
+    output_offsets: Vec<i32>,
+    eval_types: Vec<EvalType>,
+    block: Block,
+    // TODO: support backward scan
+    _scan_backward_in_range: bool,
+}
+
+impl ColumnarScanner {
+    pub fn new(reader: ColumnarMvccReader, output_offsets: Vec<i32>) -> Self {
+        let schema = reader.get_schema();
+        let mut eval_types = vec![];
+        for &offset in &output_offsets {
+            let col_tp = if offset == -1 {
+                schema.handle_column.get_tp()
+            } else {
+                schema.columns[offset as usize].get_tp()
+            };
+            let tp = FieldTypeTp::from_u8(col_tp as u8).unwrap();
+            let eval_type = EvalType::try_from(tp).unwrap();
+            eval_types.push(eval_type);
+        }
+        let block = Block::new(schema);
+        Self {
+            reader,
+            output_offsets,
+            eval_types,
+            block,
+            _scan_backward_in_range: false,
+        }
+    }
+
+    pub async fn scan(&mut self, scan_rows: usize) -> (LazyBatchColumnVec, Result<bool>) {
+        let mut column_vec: Vec<LazyBatchColumn> = Vec::with_capacity(self.output_offsets.len());
+        for &eval_type in &self.eval_types {
+            let vec_val = LazyBatchColumn::decoded_with_capacity_and_tp(scan_rows, eval_type);
+            column_vec.push(vec_val);
+        }
+        let read_size = self.reader.read_block(&mut self.block, scan_rows).unwrap();
+        if read_size > 0 {
+            let schema = self.reader.get_schema();
+            let mut eval_ctx = EvalContext::default();
+            for (i, &output_off) in self.output_offsets.iter().enumerate() {
+                let (column_buf, column_info) = if output_off < 0 {
+                    (self.block.get_handle_buf(), &schema.handle_column)
+                } else {
+                    (
+                        &self.block.get_columns()[output_off as usize],
+                        &schema.columns[output_off as usize],
+                    )
+                };
+                match column_vec[i].mut_decoded() {
+                    VectorValue::Int(cv) => {
+                        for row_idx in 0..read_size {
+                            cv.push(
+                                column_buf
+                                    .get_value(row_idx)
+                                    .map(|mut v| v.get_u64_le() as i64),
+                            );
+                        }
+                    }
+                    VectorValue::Real(cv) => {
+                        for row_idx in 0..read_size {
+                            let real_val = column_buf
+                                .get_value(row_idx)
+                                .map(|mut v| Real::new(v.get_f64_le()));
+                            if let Some(Ok(real)) = real_val {
+                                cv.push_data(real);
+                            } else {
+                                cv.push_null();
+                            }
+                        }
+                    }
+                    VectorValue::Decimal(cv) => {
+                        for row_idx in 0..read_size {
+                            cv.push(
+                                column_buf
+                                    .get_value(row_idx)
+                                    .map(|mut v| v.read_decimal().unwrap()),
+                            );
+                        }
+                    }
+                    VectorValue::Bytes(cv) => {
+                        for row_idx in 0..read_size {
+                            cv.push_ref(column_buf.get_value(row_idx));
+                        }
+                    }
+                    VectorValue::DateTime(cv) => {
+                        let fsp = column_info.get_decimal() as i8;
+                        let time_type = FieldTypeTp::from_u8(column_info.get_tp() as u8)
+                            .unwrap()
+                            .try_into()
+                            .unwrap();
+                        for row_idx in 0..read_size {
+                            cv.push(column_buf.get_value(row_idx).map(|mut v| {
+                                let u64_val = v.get_u64_le();
+                                Time::from_packed_u64(&mut eval_ctx, u64_val, time_type, fsp)
+                                    .unwrap()
+                            }));
+                        }
+                    }
+                    VectorValue::Duration(cv) => {
+                        let fsp = column_info.get_decimal() as i8;
+                        for row_idx in 0..read_size {
+                            cv.push(column_buf.get_value(row_idx).map(|mut v| {
+                                let i64_val = v.get_i64_le();
+                                Duration::from_nanos(i64_val, fsp).unwrap()
+                            }));
+                        }
+                    }
+                    VectorValue::Json(cv) => {
+                        for row_idx in 0..read_size {
+                            cv.push(
+                                column_buf
+                                    .get_value(row_idx)
+                                    .map(|mut v| v.read_json().unwrap()),
+                            );
+                        }
+                    }
+                    VectorValue::Enum(cv) => {
+                        let elems = self.reader.get_schema().columns[i].get_elems();
+                        for row_idx in 0..read_size {
+                            cv.push(column_buf.get_value(row_idx).map(|mut v| {
+                                let value = v.get_u64_le();
+                                let name = Enum::get_value_name(value, elems);
+                                Enum::new(name.to_vec(), value)
+                            }));
+                        }
+                    }
+                    VectorValue::Set(cv) => {
+                        let data_buf = Arc::new(BufferVec::new());
+                        for row_idx in 0..read_size {
+                            cv.push(column_buf.get_value(row_idx).map(|mut v| {
+                                let value = v.get_u64_le();
+                                Set::new(data_buf.clone(), value)
+                            }));
+                        }
+                    }
+                    VectorValue::VectorFloat32(v) => {
+                        for row_idx in 0..read_size {
+                            v.push(
+                                column_buf
+                                    .get_value(row_idx)
+                                    .map(|mut v| v.read_vector_float32().unwrap()),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        // Update scanned keys end.
+        (
+            LazyBatchColumnVec::from(column_vec),
+            Ok(read_size < scan_rows),
+        )
+    }
+}
+
+pub fn build_columnar_scanner(
+    snap: Option<&kvengine::SnapAccess>,
+    key_ranges: &[KeyRange],
+    column_info: &[ColumnInfo],
+    start_ts: u64,
+) -> Option<ColumnarScanner> {
+    let snap = snap?;
+    if key_ranges.len() != 1 {
+        return None;
+    }
+    let key_range = &key_ranges[0];
+    if api_version::ApiV2::parse_key_mode(&key_range.start) != KeyMode::Txn {
+        return None;
+    }
+    let start = &key_range.start[KEYSPACE_PREFIX_LEN..];
+    let end = &key_range.end[KEYSPACE_PREFIX_LEN..];
+
+    let table_id = match table::decode_table_id(start) {
+        Ok(id) => id,
+        Err(e) => {
+            warn!(
+                "build_columnar_scanner, get table id from key range {:?} failed, err: {:?}",
+                key_range, e
+            );
+            return None;
+        }
+    };
+    let mut reader = snap.new_columnar_mvcc_reader(table_id, column_info, start_ts)?;
+    let mut output_offsets = vec![];
+    let mut col_offset = 0;
+    for col in column_info.iter() {
+        if col.get_column_id() == HANDLE_COL_ID as i64 || col.get_pk_handle() {
+            output_offsets.push(-1);
+        } else {
+            output_offsets.push(col_offset);
+            col_offset += 1;
+        }
+    }
+    if reader.get_schema().is_common_handle() {
+        let start_handle = table::decode_common_handle(start).ok()?;
+        let end_handle = table::decode_common_handle(end).ok()?;
+        reader.set_handle_range(start_handle, end_handle).ok()?;
+    } else {
+        let start_handle = table::decode_int_handle(start).unwrap_or(i64::MIN);
+        let end_handle = {
+            let h = table::decode_int_handle(end).unwrap_or(i64::MAX);
+            if h == i64::MAX && end.len() > PREFIX_LEN + 8 {
+                // If the end handle is i64::MAX appended a 0, then we need to include the
+                // i64::MAX value, use None to represent there is no upper bound.
+                None
+            } else {
+                Some(h)
+            }
+        };
+        reader.set_int_handle_range(start_handle, end_handle).ok()?;
+    }
+    Some(ColumnarScanner::new(reader, output_offsets))
+}

@@ -1,5 +1,7 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
+mod copr;
+
 use std::{sync::Mutex, time::Duration};
 
 use api_version::ApiV2;
@@ -218,12 +220,10 @@ fn test_covert_row_to_columnar() {
     let shard = kvengine.get_shard(shard_id).unwrap();
     let snap_access = shard.new_snap_access();
     let ts = client.get_ts().into_inner();
-    let mut columnar_reader = snap_access.new_columnar_mvcc_reader(&schema, ts).unwrap();
-    let start_handle = 0i64.to_le_bytes().to_vec();
-    let end_handle = 190i64.to_le_bytes().to_vec();
-    columnar_reader
-        .set_handle_range(&start_handle, &end_handle)
+    let mut columnar_reader = snap_access
+        .new_columnar_mvcc_reader(schema.table_id, &schema.columns, ts)
         .unwrap();
+    columnar_reader.set_int_handle_range(0, Some(190)).unwrap();
     let mut block = columnar::Block::new(&schema);
     let read_rows = columnar_reader.read_block(&mut block, 200).unwrap();
     assert_eq!(read_rows, 190);
@@ -278,6 +278,7 @@ fn build_schemas(table_ids: Vec<i64>) -> Vec<Schema> {
             version_column: new_version_column_info(),
             txn_id_column: Some(new_txn_id_column_info()),
             columns: vec![c1, c2],
+            pk_col_ids: vec![],
         };
         schemas.push(schema);
     }

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use bytes::{Buf, BufMut};
 use collections::HashMap;
 use protobuf::Message;
-use tidb_query_datatype::{FieldTypeFlag, FieldTypeTp};
+use tidb_query_datatype::{FieldTypeAccessor, FieldTypeFlag, FieldTypeTp};
 use tipb::ColumnInfo;
 
 use crate::table::{
@@ -18,7 +18,7 @@ use crate::table::{
     InnerKey,
 };
 
-pub(crate) const HANDLE_COL_ID: i32 = -1;
+pub const HANDLE_COL_ID: i32 = -1;
 pub(crate) const VERSION_COL_ID: i32 = -1024;
 pub(crate) const TXN_ID_COL_ID: i32 = -1034;
 
@@ -31,6 +31,23 @@ pub struct Schema {
     pub version_column: ColumnInfo,
     pub txn_id_column: Option<ColumnInfo>,
     pub columns: Vec<ColumnInfo>,
+    pub pk_col_ids: Vec<i64>,
+}
+
+impl Schema {
+    pub fn is_common_handle(&self) -> bool {
+        get_fixed_size(&self.handle_column) == 0
+    }
+
+    pub fn find_column_by_id(&self, id: i64) -> Option<&ColumnInfo> {
+        if let Some(c) = self.columns.iter().find(|c| c.get_column_id() == id) {
+            return Some(c);
+        }
+        if self.handle_column.get_column_id() == id {
+            return Some(&self.handle_column);
+        }
+        None
+    }
 }
 
 #[repr(C)]
@@ -106,6 +123,7 @@ pub(crate) struct TableMeta {
     pub(crate) version_column: Arc<ColumnMeta>,
     pub(crate) txn_id_column: Arc<ColumnMeta>,
     pub(crate) columns: HashMap<i32, Arc<ColumnMeta>>,
+    pub(crate) pk_col_ids: Vec<i64>,
 }
 
 impl TableMeta {
@@ -118,9 +136,13 @@ impl TableMeta {
         let (txn_id_column, remained) = ColumnMeta::parse(buf);
         buf = remained;
         let mut columns = HashMap::default();
+        let mut pk_col_ids = vec![];
         for _ in 0..(num_cols - 3) {
             let (col, remained) = ColumnMeta::parse(buf);
             buf = remained;
+            if get_primary_key(&col.col_info) {
+                pk_col_ids.push(col.col_info.get_column_id());
+            }
             columns.insert(col.col_info.get_column_id() as i32, Arc::new(col));
         }
         let mut uncompressed_buf = vec![];
@@ -145,6 +167,7 @@ impl TableMeta {
             version_column: Arc::new(version_column),
             txn_id_column: Arc::new(txn_id_column),
             columns,
+            pk_col_ids,
         }
     }
 }
@@ -525,22 +548,6 @@ impl ColumnBuffer {
         }
     }
 
-    pub fn get_nullable_value(&self, idx: usize) -> Option<&[u8]> {
-        debug_assert!(self.nullable);
-        if self.nulls[idx] == 1 {
-            return None;
-        }
-        if self.fixed_size == 0 {
-            let start = self.offsets[idx] as usize;
-            let end = self.offsets[idx + 1] as usize;
-            Some(&self.data_buf[start..end])
-        } else {
-            let start = idx * self.fixed_size;
-            let end = (idx + 1) * self.fixed_size;
-            Some(&self.data_buf[start..end])
-        }
-    }
-
     #[inline]
     pub fn get_not_null_value(&self, idx: usize) -> &[u8] {
         debug_assert!(
@@ -561,6 +568,13 @@ impl ColumnBuffer {
         }
     }
 
+    pub fn get_value(&self, idx: usize) -> Option<&[u8]> {
+        if self.nullable && self.nulls[idx] == 1 {
+            return None;
+        }
+        Some(self.get_not_null_value(idx))
+    }
+
     #[inline]
     pub fn get_int_handle_value(&self, idx: usize) -> i64 {
         debug_assert!(self.fixed_size == 8);
@@ -577,6 +591,14 @@ impl ColumnBuffer {
     pub fn is_null(&self, idx: usize) -> bool {
         debug_assert!(self.nullable);
         self.nulls[idx] == 1
+    }
+
+    pub fn is_nullable(&self) -> bool {
+        self.nullable
+    }
+
+    pub fn get_fixed_size(&self) -> usize {
+        self.fixed_size
     }
 
     pub(crate) fn append(
@@ -747,12 +769,12 @@ impl Block {
 pub(crate) fn get_fixed_size(col_info: &ColumnInfo) -> usize {
     let tp = FieldTypeTp::from_u8(col_info.get_tp() as u8).unwrap();
     match tp {
+        FieldTypeTp::Float => 4,
         FieldTypeTp::Tiny
         | FieldTypeTp::Short
         | FieldTypeTp::Int24
         | FieldTypeTp::Long
-        | FieldTypeTp::Float => 4,
-        FieldTypeTp::Double
+        | FieldTypeTp::Double
         | FieldTypeTp::Timestamp
         | FieldTypeTp::LongLong
         | FieldTypeTp::Date
@@ -791,11 +813,15 @@ pub(crate) fn can_build_min_max(col_info: &ColumnInfo) -> bool {
 }
 
 pub(crate) fn get_nullable(col_info: &ColumnInfo) -> bool {
-    col_info.get_flag() as u32 & FieldTypeFlag::NOT_NULL.bits() == 0
+    !col_info.flag().contains(FieldTypeFlag::NOT_NULL)
 }
 
 pub(crate) fn get_unsigned(col_info: &ColumnInfo) -> bool {
-    col_info.get_flag() as u32 & FieldTypeFlag::UNSIGNED.bits() == 1
+    col_info.flag().contains(FieldTypeFlag::UNSIGNED)
+}
+
+pub(crate) fn get_primary_key(col_info: &ColumnInfo) -> bool {
+    col_info.flag().contains(FieldTypeFlag::PRIMARY_KEY)
 }
 
 pub(crate) fn decompress_pack(mut compressed_pack: &[u8], out_buf: &mut Vec<u8>) {

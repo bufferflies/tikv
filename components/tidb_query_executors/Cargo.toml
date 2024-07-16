@@ -8,11 +8,13 @@ description = "A vector query engine to run TiDB pushed down executors"
 [dependencies]
 api_version = { path = "../api_version", default-features = false }
 async-trait = "0.1"
+bytes = "1.2.1"
 codec = { workspace = true }
 collections = { workspace = true }
 fail = "0.5"
 futures = { version = "0.3", features = ["compat"] }
 itertools = "0.10"
+kvengine = { workspace = true }
 kvproto = { workspace = true }
 log_wrappers = { workspace = true }
 match-template = "0.0.1"

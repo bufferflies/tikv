@@ -184,7 +184,8 @@ pub fn build_executors<S: Storage + 'static, F: KvFormat>(
     ranges: Vec<KeyRange>,
     config: Arc<EvalConfig>,
     is_scanned_range_aware: bool,
-) -> Result<Box<dyn BatchExecutor<StorageStats = S::Statistics>>> {
+    snap: Option<kvengine::SnapAccess>,
+) -> Result<(Box<dyn BatchExecutor<StorageStats = S::Statistics>>, bool)> {
     let mut executor_descriptors = executor_descriptors.into_iter();
     let mut first_ed = executor_descriptors
         .next()
@@ -194,6 +195,7 @@ pub fn build_executors<S: Storage + 'static, F: KvFormat>(
     // Limit executor use this flag to check if its src is table/index scan.
     // Performance enhancement for plan like: limit 1 -> table/index scan.
     let mut is_src_scan_executor = true;
+    let mut is_columnar = false;
 
     let mut executor: Box<dyn BatchExecutor<StorageStats = S::Statistics>> = match first_ed.get_tp()
     {
@@ -205,7 +207,7 @@ pub fn build_executors<S: Storage + 'static, F: KvFormat>(
             let primary_column_ids = descriptor.take_primary_column_ids();
             let primary_prefix_column_ids = descriptor.take_primary_prefix_column_ids();
 
-            Box::new(
+            let batch_table_scanner = Box::new(
                 BatchTableScanExecutor::<_, F>::new(
                     storage,
                     config.clone(),
@@ -215,9 +217,12 @@ pub fn build_executors<S: Storage + 'static, F: KvFormat>(
                     descriptor.get_desc(),
                     is_scanned_range_aware,
                     primary_prefix_column_ids,
+                    snap,
                 )?
                 .collect_summary(summary_slot_index),
-            )
+            );
+            is_columnar = batch_table_scanner.inner.is_columnar();
+            batch_table_scanner
         }
         ExecType::TypeIndexScan => {
             EXECUTOR_COUNT_METRICS.batch_index_scan.inc();
@@ -418,7 +423,7 @@ pub fn build_executors<S: Storage + 'static, F: KvFormat>(
         is_src_scan_executor = false;
     }
 
-    Ok(executor)
+    Ok((executor, is_columnar))
 }
 
 impl<SS: 'static> BatchExecutorsRunner<SS> {
@@ -431,6 +436,7 @@ impl<SS: 'static> BatchExecutorsRunner<SS> {
         is_streaming: bool,
         paging_size: Option<u64>,
         quota_limiter: Arc<QuotaLimiter>,
+        snap: Option<kvengine::SnapAccess>,
     ) -> Result<Self> {
         let executors_len = req.get_executors().len();
         let collect_exec_summary = req.get_collect_execution_summaries();
@@ -438,7 +444,7 @@ impl<SS: 'static> BatchExecutorsRunner<SS> {
         config.paging_size = paging_size;
         let config = Arc::new(config);
 
-        let out_most_executor = build_executors::<_, F>(
+        let (out_most_executor, is_columnar) = build_executors::<_, F>(
             req.take_executors().into(),
             storage,
             ranges,
@@ -446,7 +452,11 @@ impl<SS: 'static> BatchExecutorsRunner<SS> {
             is_streaming || paging_size.is_some(), /* For streaming and paging request,
                                                     * executors will continue scan from range
                                                     * end where last scan is finished */
+            snap,
         )?;
+        // Discard the paging option for columnar scanner, use the bucket to limit the
+        // result set.
+        let paging_size = if is_columnar { None } else { paging_size };
 
         let encode_type = if !is_arrow_encodable(out_most_executor.schema()) {
             EncodeType::TypeDefault

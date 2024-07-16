@@ -595,29 +595,15 @@ impl SchemaManager {
         };
         let mut to_be_removed = vec![];
         for ti in table_infos {
-            if ti.tiflash_replica.map(|t| t.count == 0).unwrap_or(true) {
-                to_be_removed.push(ti.id);
-                continue;
-            }
             if ti.cols.as_ref().map(|c| c.is_empty()).unwrap_or(true) {
                 to_be_removed.push(ti.id);
                 continue;
             }
-
-            let columns = convert_column_infos_to_tipb(ti.cols.as_ref().unwrap(), ti.pk_is_handle);
-            let handle_column = if ti.is_common_handle {
-                new_common_handle_column_info()
-            } else {
-                new_int_handle_column_info()
-            };
-            let schema = Schema {
-                table_id: ti.id,
-                handle_column,
-                version_column: new_version_column_info(),
-                txn_id_column: Some(new_txn_id_column_info()),
-                columns,
-            };
-            schemas.push(schema);
+            if !ti.build_columnar() {
+                to_be_removed.push(ti.id);
+                continue;
+            }
+            schemas.push(table_info_to_schema(&ti));
         }
 
         if let Ok(Some(schema_file)) = &local_schema_file {
@@ -635,6 +621,42 @@ impl SchemaManager {
             schemas = merge_schema_diffs(base, schemas, &to_be_removed);
         }
         Some(schemas)
+    }
+}
+
+fn table_info_to_schema(ti: &TableInfo) -> Schema {
+    let ti_cols = ti.cols.as_ref().unwrap();
+    let mut ti_pk_cols = vec![];
+    if let Some(idx_info) = ti.index_info.as_ref() {
+        let pk_idx = idx_info.iter().find(|idx| idx.is_primary);
+        if let Some(pk_idx) = pk_idx {
+            for idx_col in &pk_idx.idx_cols {
+                ti_pk_cols.push(ti_cols[idx_col.offset as usize].clone());
+            }
+        }
+    }
+    let pk_col_ids: Vec<i64> = ti_pk_cols.iter().map(|c| c.id).collect();
+    let pk_cols = convert_column_infos_to_tipb(&ti_pk_cols, ti.pk_is_handle);
+    let mut columns = convert_column_infos_to_tipb(ti.cols.as_ref().unwrap(), ti.pk_is_handle);
+    columns.retain(|c| !pk_col_ids.contains(&c.get_column_id()));
+    if !ti.pk_is_handle {
+        // make sure the common handle columns are ordered by offset.
+        columns.extend_from_slice(&pk_cols);
+    }
+    let handle_column = if ti.is_common_handle {
+        new_common_handle_column_info()
+    } else if ti.pk_is_handle {
+        pk_cols[0].clone()
+    } else {
+        new_int_handle_column_info()
+    };
+    Schema {
+        table_id: ti.id,
+        handle_column,
+        version_column: new_version_column_info(),
+        txn_id_column: Some(new_txn_id_column_info()),
+        columns,
+        pk_col_ids,
     }
 }
 
@@ -928,6 +950,7 @@ mod tests {
                 version_column: new_version_column_info(),
                 txn_id_column: None,
                 columns: vec![new_int_handle_column_info()],
+                pk_col_ids: vec![],
             };
             schemas.push(schema);
         }
@@ -939,6 +962,7 @@ mod tests {
             version_column: new_version_column_info(),
             txn_id_column: None,
             columns: vec![new_int_handle_column_info()],
+            pk_col_ids: vec![],
         });
         let schema_file_data = build_schema_file(1234, 201, schemas);
         write_schema_file_to_local(dir.path(), 1234, 1001, Bytes::from(schema_file_data)).unwrap();

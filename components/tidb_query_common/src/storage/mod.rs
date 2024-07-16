@@ -34,6 +34,10 @@ pub trait Storage: Send {
     fn met_uncacheable_data(&self) -> Option<bool>;
 
     fn collect_statistics(&mut self, dest: &mut Self::Statistics);
+
+    fn get_read_ts(&self) -> u64 {
+        u64::MAX
+    }
 }
 
 impl<T: Storage + ?Sized> Storage for Box<T> {

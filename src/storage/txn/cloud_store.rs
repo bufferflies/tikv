@@ -94,6 +94,14 @@ impl<S: Snapshot> super::Store for CloudStore<S> {
     ) -> Result<Self::Scanner> {
         self.scanner_inner(desc, lower_bound, upper_bound, false)
     }
+
+    fn get_kvengine_snap(&self) -> Option<kvengine::SnapAccess> {
+        Some(self.snapshot.clone())
+    }
+
+    fn get_read_ts(&self) -> u64 {
+        self.start_ts
+    }
 }
 
 impl<S: Snapshot> CloudStore<S> {

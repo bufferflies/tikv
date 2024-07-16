@@ -13,7 +13,7 @@ use tidb_query_common::{
 use tidb_query_datatype::{codec::batch::LazyBatchColumnVec, expr::EvalContext};
 use tipb::{ColumnInfo, FieldType};
 
-use crate::interface::*;
+use crate::{interface::*, util::columnar_scanner::ColumnarScanner};
 
 /// Common interfaces for table scan and index scan implementations.
 pub trait ScanExecutorImpl: Send {
@@ -52,6 +52,9 @@ pub struct ScanExecutor<S: Storage, I: ScanExecutorImpl, F> {
     /// or there was an error scanning the table, this flag will be set to
     /// `true` and `next_batch` should be never called again.
     is_ended: bool,
+
+    /// The columnar scanner that scans over column storage.
+    columnar_scanner: Option<ColumnarScanner>,
 }
 
 pub struct ScanExecutorOptions<S, I> {
@@ -75,6 +78,7 @@ impl<S: Storage, I: ScanExecutorImpl, F: KvFormat> ScanExecutor<S, I, F> {
             accept_point_range,
             is_scanned_range_aware,
         }: ScanExecutorOptions<S, I>,
+        columnar_scanner: Option<ColumnarScanner>,
     ) -> Result<Self> {
         tidb_query_datatype::codec::table::check_table_ranges::<F>(&key_ranges)?;
         if is_backward {
@@ -92,6 +96,7 @@ impl<S: Storage, I: ScanExecutorImpl, F: KvFormat> ScanExecutor<S, I, F> {
                 is_key_only,
                 is_scanned_range_aware,
             }),
+            columnar_scanner,
             is_ended: false,
         })
     }
@@ -130,6 +135,10 @@ impl<S: Storage, I: ScanExecutorImpl, F: KvFormat> ScanExecutor<S, I, F> {
 
         // Not drained
         Ok(false)
+    }
+
+    pub fn is_columnar(&self) -> bool {
+        self.columnar_scanner.is_some()
     }
 }
 
@@ -176,8 +185,14 @@ impl<S: Storage, I: ScanExecutorImpl, F: KvFormat> BatchExecutor for ScanExecuto
         assert!(!self.is_ended);
         assert!(scan_rows > 0);
 
-        let mut logical_columns = self.imp.build_column_vec(scan_rows);
-        let is_drained = self.fill_column_vec(scan_rows, &mut logical_columns).await;
+        let (logical_columns, is_drained) =
+            if let Some(columnar_scanner) = self.columnar_scanner.as_mut() {
+                columnar_scanner.scan(scan_rows).await
+            } else {
+                let mut logical_columns = self.imp.build_column_vec(scan_rows);
+                let is_drained = self.fill_column_vec(scan_rows, &mut logical_columns).await;
+                (logical_columns, is_drained)
+            };
 
         logical_columns.assert_columns_equal_length();
         let logical_rows = (0..logical_columns.rows_len()).collect();

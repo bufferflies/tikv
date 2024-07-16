@@ -280,18 +280,21 @@ impl Shard {
             mem_tbl.put_batch(wb, None, WRITE_CF);
             // Insert a dummy record, that should be ignored, so that we
             // don't have to fiddle too much with the code below.
-            ids.insert(0, 0);
+            ids.insert(0, FileMeta::default());
         }
         let encryption_key = if cs.has_snapshot() {
             let snap = cs.get_snapshot();
             for l0 in snap.get_l0_creates() {
-                ids.insert(l0.id, 0);
+                ids.insert(l0.id, FileMeta::from_l0_table(l0));
             }
             for ln in snap.get_table_creates() {
-                ids.insert(ln.id, ln.level);
+                ids.insert(ln.id, FileMeta::from_table(ln));
             }
             for blob in snap.get_blob_creates() {
-                ids.insert(blob.id, BLOB_LEVEL);
+                ids.insert(blob.id, FileMeta::from_blob_table(blob));
+            }
+            for columnar in snap.get_columnar_creates() {
+                ids.insert(columnar.id, FileMeta::from_table(columnar));
             }
             // TODO: load lock_txn_files
             // if !ignore_lock {
@@ -306,16 +309,17 @@ impl Shard {
         let runtime = dfs.get_runtime();
         let opts = dfs::Options::default().with_shard(cs.shard_id, cs.shard_ver);
         let mut msg_count = 0;
-        for (&id, &level) in &ids {
+        for (&id, fm) in &ids {
             let tx = result_tx.clone();
             if id == 0 {
-                tx.send(Ok((0, 0, None))).unwrap();
+                tx.send(Ok((0, FileMeta::default(), None))).unwrap();
             } else {
                 let fs = dfs.clone();
                 let tx = result_tx.clone();
+                let fm = fm.clone();
                 runtime.spawn(async move {
                     let res = fs.read_file(id, opts).await;
-                    tx.send(res.map(|data| (id, level, Some(data))))
+                    tx.send(res.map(|data| (id, fm, Some(data))))
                         .map_err(|_| "send file data failed")
                         .unwrap();
                 });
@@ -328,13 +332,16 @@ impl Shard {
                 Ok((id, _, None)) => {
                     assert_eq!(id, 0);
                 }
-                Ok((id, level, Some(data))) => {
+                Ok((id, fm, Some(data))) => {
                     assert!(id != 0);
                     let file = InMemFile::new(id, data);
-                    if is_blob_file(level) {
+                    if fm.is_columnar_file() {
+                        let columnar_file = ColumnarFile::open(Arc::new(file)).unwrap();
+                        cs.col_files.insert(id, columnar_file);
+                    } else if fm.is_blob_file() {
                         let blob_table = BlobTable::new(Arc::new(file)).unwrap();
                         cs.blob_tables.insert(id, blob_table);
-                    } else if level == 0 {
+                    } else if fm.get_level() == 0 {
                         let l0_table = L0Table::new(
                             Arc::new(file),
                             block_cache.clone(),
@@ -349,7 +356,7 @@ impl Shard {
                         let ln_table = SsTable::new(
                             Arc::new(file),
                             block_cache.clone(),
-                            level == 1,
+                            fm.get_level() == 1,
                             encryption_key.clone(),
                         )
                         .unwrap();
