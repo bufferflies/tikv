@@ -26,6 +26,7 @@ use moka::sync::SegmentedCache;
 use security::SecurityManager;
 use slog_global::info;
 use tikv_util::{box_err, mpsc, sys::thread::StdThreadBuildWrapper};
+use txn_chunk_manager::with_pool_size;
 
 use crate::{
     apply::ChangeSet,
@@ -115,10 +116,10 @@ impl Engine {
         let file_locks = (0..FILE_LOCK_SLOTS).map(|_| Mutex::new(())).collect();
         let per_keyspace_configs = Arc::new(config.get_per_keyspace_configs());
         let txn_chunk_mgr = TxnChunkManager::new(
-            opts.local_dir.join("txn"),
+            Some(opts.local_dir.join("txn")),
             fs.clone(),
-            cache.clone(),
-            opts.txn_file_worker_pool_size,
+            Some(cache.clone()),
+            with_pool_size(opts.txn_file_worker_pool_size),
         );
         let (metas, files_in_blacklist) = EngineCore::read_meta(meta_iter)?;
         let core = EngineCore {

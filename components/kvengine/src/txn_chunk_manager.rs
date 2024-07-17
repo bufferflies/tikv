@@ -17,7 +17,7 @@ use crate::{
     error::IoContext,
     table,
     table::{
-        sstable::{BlockCacheKey, LocalFile},
+        sstable::{BlockCacheKey, InMemFile, LocalFile},
         txn_file::TxnChunk,
         TxnCtx, TxnFile, TxnFileId,
     },
@@ -33,19 +33,12 @@ pub struct TxnChunkManager {
 
 impl TxnChunkManager {
     pub fn new(
-        local_path: PathBuf,
+        local_path: Option<PathBuf>,
         dfs: Arc<dyn Dfs>,
-        cache: SegmentedCache<BlockCacheKey, Bytes>,
-        worker_pool_size: usize,
+        cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
+        worker_pool: WorkerPool,
     ) -> Self {
-        info!("create txn chunk manager"; "worker_pool_size" => worker_pool_size);
-        let worker_pool = tokio::runtime::Builder::new_multi_thread()
-            .thread_name("txn-chunk-worker")
-            .worker_threads(1) // currently not used.
-            .max_blocking_threads(worker_pool_size)
-            .enable_all()
-            .build()
-            .unwrap();
+        info!("create txn chunk manager"; "worker_pool" => ?worker_pool);
         let manager = Self {
             core: Arc::new(TxnChunkManagerCore {
                 local_path,
@@ -68,12 +61,49 @@ impl Deref for TxnChunkManager {
     }
 }
 
+// If `TxnChunkManager` will be hold in an async context, create worker pool
+// outside and pass the handle to create it. Otherwise, it will panic when the
+// runtime is dropped in the async context.
+#[derive(Debug)]
+pub enum WorkerPool {
+    Pool(tokio::runtime::Runtime),
+    Handle(tokio::runtime::Handle),
+}
+
+impl WorkerPool {
+    pub fn handle(&self) -> &tokio::runtime::Handle {
+        match self {
+            WorkerPool::Pool(pool) => pool.handle(),
+            WorkerPool::Handle(handle) => handle,
+        }
+    }
+}
+
+pub fn with_pool_size(pool_size: usize) -> WorkerPool {
+    WorkerPool::Pool(
+        tokio::runtime::Builder::new_multi_thread()
+            .thread_name("txn-chunk-worker")
+            .worker_threads(1) // currently not used.
+            .max_blocking_threads(pool_size)
+            .enable_all()
+            .build()
+            .unwrap(),
+    )
+}
+
+pub fn with_pool_handle(handle: tokio::runtime::Handle) -> WorkerPool {
+    WorkerPool::Handle(handle)
+}
+
+// Memory based if `local_path` is None.
+// TODO: unify the process of file-based & memory-based to eliminate duplicated
+// codes.
 pub struct TxnChunkManagerCore {
-    local_path: PathBuf,
+    local_path: Option<PathBuf>,
     dfs: Arc<dyn Dfs>,
     txn_chunks: DashMap<u64, TxnChunkEntry>,
-    cache: SegmentedCache<BlockCacheKey, Bytes>,
-    worker_pool: tokio::runtime::Runtime,
+    cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
+    worker_pool: WorkerPool,
 }
 
 #[derive(Clone)]
@@ -91,26 +121,30 @@ impl Default for TxnChunkEntry {
 
 impl TxnChunkManagerCore {
     fn init(&self) -> Result<()> {
-        if !self.local_path.exists() {
-            fs::create_dir_all(&self.local_path).ctx("txn_chunk_mgr.init.create_dir")?;
-        }
-        if self.local_path.is_dir() {
-            let read_dir = fs::read_dir(&self.local_path).ctx("txn_chunk_mgr.init.read_dir")?;
-            for entry in read_dir.flatten() {
-                let file_name = entry.file_name();
-                if let Some(txn_file_id) = parse_txn_chunk_id(file_name.to_str().unwrap()) {
-                    // We don't have the encryption key here, we can do nothing but skip the
-                    // encrypted files.
-                    // As the number of encrypted files is expected to be small, this should be
-                    // fine.
-                    let txn_chunk = match self.load_txn_chunk(txn_file_id, entry.path(), None) {
-                        Ok(txn_chunk) => txn_chunk,
-                        Err(Error::TableError(table::Error::NeedEncryptionKey { .. })) => continue,
-                        Err(err) => return Err(err),
-                    };
-                    let files_entry = self.txn_chunks.entry(txn_file_id).or_default().clone();
-                    let mut guard = block_on(files_entry.chunk_data.write());
-                    *guard = Some(txn_chunk)
+        if let Some(local_path) = self.local_path.as_ref() {
+            if !local_path.exists() {
+                fs::create_dir_all(local_path).ctx("txn_chunk_mgr.init.create_dir")?;
+            }
+            if local_path.is_dir() {
+                let read_dir = fs::read_dir(local_path).ctx("txn_chunk_mgr.init.read_dir")?;
+                for entry in read_dir.flatten() {
+                    let file_name = entry.file_name();
+                    if let Some(txn_file_id) = parse_txn_chunk_id(file_name.to_str().unwrap()) {
+                        // We don't have the encryption key here, we can do nothing but skip the
+                        // encrypted files.
+                        // As the number of encrypted files is expected to be small, this should be
+                        // fine.
+                        let txn_chunk = match self.load_txn_chunk(txn_file_id, entry.path(), None) {
+                            Ok(txn_chunk) => txn_chunk,
+                            Err(Error::TableError(table::Error::NeedEncryptionKey { .. })) => {
+                                continue;
+                            }
+                            Err(err) => return Err(err),
+                        };
+                        let files_entry = self.txn_chunks.entry(txn_file_id).or_default().clone();
+                        let mut guard = block_on(files_entry.chunk_data.write());
+                        *guard = Some(txn_chunk)
+                    }
                 }
             }
         }
@@ -121,28 +155,45 @@ impl TxnChunkManagerCore {
         self.worker_pool.handle()
     }
 
-    pub fn prepare(&self, txn_chunk_id: u64, encryption_key: Option<EncryptionKey>) -> Result<()> {
+    pub fn prepare(
+        &self,
+        txn_chunk_id: u64,
+        encryption_key: Option<EncryptionKey>,
+    ) -> Result<TxnChunk> {
         let entry = self.txn_chunks.entry(txn_chunk_id).or_default().clone();
         let mut guard = block_on(entry.chunk_data.write());
-        if guard.is_some() {
-            return Ok(());
+        if let Some(txn_chunk) = guard.as_ref() {
+            return Ok(txn_chunk.clone());
         }
-        let local_file_path = self.local_file_path(txn_chunk_id);
-        if !local_file_path.exists() {
+
+        if let Some(local_file_path) = self.local_file_path(txn_chunk_id) {
+            if local_file_path.exists() {
+                let txn_chunk =
+                    self.load_txn_chunk(txn_chunk_id, local_file_path, encryption_key)?;
+                *guard = Some(txn_chunk.clone());
+                return Ok(txn_chunk);
+            }
+        }
+
+        let runtime = self.dfs.get_runtime();
+        let opts = dfs::Options::default().with_type(FileType::TxnChunk);
+        let file_data = runtime.block_on(self.dfs.read_file(txn_chunk_id, opts))?;
+
+        let txn_chunk = if let Some(local_path) = self.local_path.as_ref() {
             let file_name = txn_chunk_id.to_string();
-            let runtime = self.dfs.get_runtime();
-            let opts = dfs::Options::default().with_type(FileType::TxnChunk);
-            let file_data = runtime.block_on(self.dfs.read_file(txn_chunk_id, opts))?;
-            let txn_file_tmp_path = self.local_path.join(format!("{}.tmp", file_name));
+            let txn_file_tmp_path = local_path.join(format!("{}.tmp", file_name));
             fs::write(&txn_file_tmp_path, file_data.chunk())
                 .table_ctx(txn_chunk_id, "txn_chunk_mgr.prepare.write_tmp")?;
-            let local_file_path = self.local_file_path(txn_chunk_id);
-            fs::rename(&txn_file_tmp_path, local_file_path)
+            let local_file_path = self.local_file_path(txn_chunk_id).unwrap();
+            fs::rename(&txn_file_tmp_path, &local_file_path)
                 .table_ctx(txn_chunk_id, "txn_chunk.prepare.rename")?;
-        }
-        let txn_chunk = self.load_txn_chunk(txn_chunk_id, local_file_path, encryption_key)?;
-        *guard = Some(txn_chunk);
-        Ok(())
+            self.load_txn_chunk(txn_chunk_id, local_file_path, encryption_key)?
+        } else {
+            let file = InMemFile::new(txn_chunk_id, file_data);
+            TxnChunk::new(Arc::new(file), self.cache.clone(), encryption_key)?
+        };
+        *guard = Some(txn_chunk.clone());
+        Ok(txn_chunk)
     }
 
     pub fn prepare_txn_chunks(
@@ -164,12 +215,13 @@ impl TxnChunkManagerCore {
                 continue;
             }
 
-            let local_file_path = self.local_file_path(chunk_id);
-            if local_file_path.exists() {
-                let txn_chunk =
-                    self.load_txn_chunk(chunk_id, local_file_path, encryption_key.clone())?;
-                *guard = Some(txn_chunk);
-                continue;
+            if let Some(local_file_path) = self.local_file_path(chunk_id) {
+                if local_file_path.exists() {
+                    let txn_chunk =
+                        self.load_txn_chunk(chunk_id, local_file_path, encryption_key.clone())?;
+                    *guard = Some(txn_chunk);
+                    continue;
+                }
             }
 
             let dfs = self.dfs.clone();
@@ -208,17 +260,21 @@ impl TxnChunkManagerCore {
         let file_data = file_data.map_err(|err| -> Error {
             box_err!("read_txn_chunk failed: {:?}, chunk_id {}", err, chunk_id)
         })?;
-        let local_file_path = self.local_file_path(chunk_id);
-        if !local_file_path.exists() {
-            let file_name = chunk_id.to_string();
-            let txn_file_tmp_path = self.local_path.join(format!("{}.tmp", file_name));
-            fs::write(&txn_file_tmp_path, file_data.chunk())
-                .table_ctx(chunk_id, "txn_chunk_mgr.recv_chunk.write_tmp")?;
-            let local_file_path = self.local_file_path(chunk_id);
-            fs::rename(&txn_file_tmp_path, local_file_path)
-                .table_ctx(chunk_id, "txn_chunk_mgr.recv_chunk.rename")?;
-        }
-        let txn_chunk = self.load_txn_chunk(chunk_id, local_file_path, encryption_key)?;
+        let txn_chunk = if let Some(local_path) = self.local_path.as_ref() {
+            let local_file_path = self.local_file_path(chunk_id).unwrap();
+            if !local_file_path.exists() {
+                let file_name = chunk_id.to_string();
+                let txn_file_tmp_path = local_path.join(format!("{}.tmp", file_name));
+                fs::write(&txn_file_tmp_path, file_data.chunk())
+                    .table_ctx(chunk_id, "txn_chunk_mgr.recv_chunk.write_tmp")?;
+                fs::rename(&txn_file_tmp_path, &local_file_path)
+                    .table_ctx(chunk_id, "txn_chunk_mgr.recv_chunk.rename")?;
+            }
+            self.load_txn_chunk(chunk_id, local_file_path, encryption_key)?
+        } else {
+            let file = InMemFile::new(chunk_id, file_data);
+            TxnChunk::new(Arc::new(file), self.cache.clone(), encryption_key)?
+        };
         *guard = Some(txn_chunk);
         Ok(())
     }
@@ -230,7 +286,7 @@ impl TxnChunkManagerCore {
         encryption_key: Option<EncryptionKey>,
     ) -> Result<TxnChunk> {
         let file = LocalFile::open(txn_chunk_id, path.as_path(), false)?;
-        let txn_chunk = TxnChunk::new(Arc::new(file), Some(self.cache.clone()), encryption_key)?;
+        let txn_chunk = TxnChunk::new(Arc::new(file), self.cache.clone(), encryption_key)?;
         Ok(txn_chunk)
     }
 
@@ -260,12 +316,18 @@ impl TxnChunkManagerCore {
     }
 
     pub fn remove(&self, txn_chunk_id: u64) -> bool {
-        let _ = fs::remove_file(self.local_file_path(txn_chunk_id));
+        if let Some(local_file_path) = self.local_file_path(txn_chunk_id) {
+            let _ = fs::remove_file(local_file_path);
+        }
         self.txn_chunks.remove(&txn_chunk_id).is_some()
     }
 
-    fn local_file_path(&self, txn_chunk_id: u64) -> PathBuf {
-        self.local_path.join(format!("{:016x}.txn", txn_chunk_id))
+    fn local_file_path(&self, txn_chunk_id: u64) -> Option<PathBuf> {
+        Some(
+            self.local_path
+                .as_ref()?
+                .join(format!("{:016x}.txn", txn_chunk_id)),
+        )
     }
 
     // `encryption_key` is required only when `is_prepared` is false.
@@ -325,6 +387,7 @@ pub fn parse_txn_chunk_id(txn_chunk_name: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
     use tempfile::TempDir;
 
     use super::*;
@@ -334,19 +397,25 @@ mod tests {
         BLOCK_CACHE_KEY_SIZE,
     };
 
-    #[test]
-    fn test_txn_chunk_manager() {
-        let tmp_dir = TempDir::new().unwrap();
+    #[rstest]
+    #[case(Some(TempDir::new().unwrap()))]
+    #[case::in_mem(None)]
+    fn test_txn_chunk_manager(#[case] tmp_dir: Option<TempDir>) {
+        let local_path = tmp_dir.as_ref().map(|dir| dir.path().to_path_buf());
         let dfs: Arc<dyn Dfs> = Arc::new(InMemFs::new());
         let cache: SegmentedCache<BlockCacheKey, Bytes> = SegmentedCache::builder(256)
             .weigher(|_k: &BlockCacheKey, v: &Bytes| (BLOCK_CACHE_KEY_SIZE + v.len()) as u32)
             .max_capacity(1024 * 1024u64)
             .build();
-        let txn_chunk_manager =
-            TxnChunkManager::new(tmp_dir.path().to_path_buf(), dfs.clone(), cache.clone(), 2);
+        let txn_chunk_manager = TxnChunkManager::new(
+            local_path.clone(),
+            dfs.clone(),
+            Some(cache.clone()),
+            with_pool_size(2),
+        );
         let runtime = dfs.get_runtime();
         let opts = dfs::Options::default().with_type(FileType::TxnChunk);
-        for chunk_id in 1u64..=3 {
+        for chunk_id in 1u64..=6 {
             let mut chunk_builder = TxnChunkBuilder::new(chunk_id, 10, None, 0, true);
             for i in 0..100 {
                 let key = format!("{:02}/{:02}", chunk_id, i);
@@ -358,16 +427,28 @@ mod tests {
                 .block_on(dfs.create(chunk_id, buf.into(), opts))
                 .unwrap();
         }
+
         for chunk_id in 1u64..=3 {
             txn_chunk_manager.prepare(chunk_id, None).unwrap();
             assert!(txn_chunk_manager.get(chunk_id).is_some());
         }
+        txn_chunk_manager
+            .prepare_txn_chunks(vec![4, 5, 6], None)
+            .unwrap();
+        assert!(txn_chunk_manager.all_chunks_exists(&[4, 5, 6]));
+
         txn_chunk_manager.remove(1);
         assert!(txn_chunk_manager.get(1).is_none());
         drop(txn_chunk_manager);
-        // After process restart, the remained txn chunks are all loaded.
-        let txn_chunk_manager = TxnChunkManager::new(tmp_dir.path().to_path_buf(), dfs, cache, 2);
-        assert!(txn_chunk_manager.get(1).is_none());
-        assert!(txn_chunk_manager.all_chunks_exists(&[2, 3]));
+
+        let txn_chunk_manager =
+            TxnChunkManager::new(local_path.clone(), dfs, Some(cache), with_pool_size(2));
+        if local_path.is_some() {
+            // After process restart, the remained txn chunks are all loaded.
+            assert!(txn_chunk_manager.get(1).is_none());
+            assert!(txn_chunk_manager.all_chunks_exists(&[2, 3]));
+        } else {
+            assert!(!txn_chunk_manager.all_chunks_exists(&[2, 3]));
+        }
     }
 }
