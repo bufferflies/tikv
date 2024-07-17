@@ -3,7 +3,7 @@
 use std::{thread, time::Duration};
 
 use pd_client::PdClient;
-use test_cloud_server::{must_wait, ServerCluster};
+use test_cloud_server::{must_wait, oss, ServerCluster};
 use tikv::config::TikvConfig;
 use tikv_util::config::ReadableDuration;
 
@@ -63,7 +63,9 @@ fn test_delete_range_recover() {
 fn test_delete_range_recover_helper(enable_inner_key_off: bool) {
     test_util::init_log_for_test();
     let node_ids = &[alloc_node_id(), alloc_node_id(), alloc_node_id()];
+    let (_temp_dir, oss, dfs_config) = oss::prepare_dfs("oss_");
     let mut cluster = ServerCluster::new(node_ids.to_vec(), |_, conf: &mut TikvConfig| {
+        conf.dfs = dfs_config.clone();
         conf.enable_inner_key_offset = enable_inner_key_off;
     });
     let region = cluster.get_pd_client().get_region_info(&[]).unwrap();
@@ -72,7 +74,7 @@ fn test_delete_range_recover_helper(enable_inner_key_off: bool) {
         .iter()
         .find(|&&node_id| cluster.get_store_id(node_id) != leader_store_id)
         .unwrap();
-    cluster.set_dfs_delay(Duration::from_millis(10));
+    oss.set_delay(Duration::from_millis(10));
     for _ in 0..3 {
         let mut client = cluster.new_client();
         for i in 0..10 {

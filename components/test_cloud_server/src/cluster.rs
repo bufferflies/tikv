@@ -535,10 +535,6 @@ impl ServerCluster {
             .collect()
     }
 
-    pub fn set_dfs_delay(&self, delay: Duration) {
-        self.dfs.as_ref().unwrap().set_delay(delay);
-    }
-
     // Wait shard version match between PD & kvengine.
     pub fn wait_region_version_match(&self) {
         let pd_client = self.pd_client.as_ref();

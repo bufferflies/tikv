@@ -6,15 +6,14 @@ mod s3;
 
 use std::{
     fmt::Debug,
-    io,
-    io::{BufReader, Read, Write},
+    io::{self, BufReader, Read, Write},
     ops::Deref,
     path::{Path, PathBuf},
     result,
     sync::{
         atomic,
         atomic::{AtomicBool, AtomicU64},
-        Arc, Mutex,
+        Arc,
     },
     time::Duration,
 };
@@ -53,9 +52,6 @@ pub trait Dfs: Sync + Send {
 
     /// get_runtime gets the tokio runtime for the DFS.
     fn get_runtime(&self) -> &tokio::runtime::Runtime;
-
-    /// set read/write delay for test.
-    fn set_delay(&self, _delay: Duration) {}
 }
 
 const REMOVE_DELAY: Duration = Duration::from_secs(90);
@@ -64,7 +60,6 @@ pub struct InMemFs {
     files: dashmap::DashMap<u64, Bytes>,
     pending_remove: dashmap::DashMap<u64, Instant>,
     runtime: tokio::runtime::Runtime,
-    delay: Arc<Mutex<Duration>>,
 }
 
 impl Default for InMemFs {
@@ -83,21 +78,13 @@ impl InMemFs {
                 .enable_all()
                 .build()
                 .unwrap(),
-            delay: Arc::new(Mutex::new(Duration::default())),
         }
-    }
-
-    fn get_delay(&self) -> Duration {
-        let guard = self.delay.lock().unwrap();
-        *guard
     }
 }
 
 #[async_trait]
 impl Dfs for InMemFs {
     async fn read_file(&self, file_id: u64, _opts: Options) -> Result<Bytes> {
-        let delay = self.get_delay();
-        tokio::time::sleep(delay).await;
         if let Some(file) = self.files.get(&file_id).as_deref() {
             return Ok(file.clone());
         }
@@ -105,8 +92,6 @@ impl Dfs for InMemFs {
     }
 
     async fn create(&self, file_id: u64, data: Bytes, _opts: Options) -> Result<()> {
-        let delay = self.get_delay();
-        tokio::time::sleep(delay).await;
         self.files.insert(file_id, data);
         Ok(())
     }
@@ -134,11 +119,6 @@ impl Dfs for InMemFs {
 
     fn get_runtime(&self) -> &Runtime {
         &self.runtime
-    }
-
-    fn set_delay(&self, delay: Duration) {
-        let mut guard = self.delay.lock().unwrap();
-        *guard = delay;
     }
 }
 
