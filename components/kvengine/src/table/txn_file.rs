@@ -110,6 +110,14 @@ impl TxnCtx {
         }
     }
 
+    pub fn to_txn_file_ref(&self, txn_file_ref: &mut kvenginepb::TxnFileRef) {
+        txn_file_ref.set_user_meta(self.user_meta.to_vec());
+        txn_file_ref.set_lock_val_prefix(self.lock_val_prefix.to_vec());
+        txn_file_ref.set_version(self.version);
+        txn_file_ref.set_inner_lower_bound(self.lower_bound_buf.to_vec());
+        txn_file_ref.set_inner_upper_bound(self.upper_bound_buf.to_vec());
+    }
+
     pub fn is_lock(&self) -> bool {
         !self.lock_val_prefix.is_empty()
     }
@@ -238,6 +246,27 @@ impl TxnFile {
         }
         Ok(())
     }
+
+    pub fn to_txn_file_ref(
+        &self,
+        ranges: Option<&[(InnerKey<'_>, InnerKey<'_>)]>,
+    ) -> Option<kvenginepb::TxnFileRef> {
+        let chunk_ids = if let Some(ranges) = ranges {
+            self.chunk_ids_in_ranges(ranges)
+        } else {
+            self.chunk_ids()
+        };
+        if chunk_ids.is_empty() {
+            return None;
+        }
+
+        let mut txn_file_ref = kvenginepb::TxnFileRef::default();
+        txn_file_ref.set_start_ts(self.id.start_ts);
+        txn_file_ref.set_shard_ver(self.id.shard_ver);
+        self.txn_ctx.to_txn_file_ref(&mut txn_file_ref);
+        txn_file_ref.set_chunk_ids(chunk_ids);
+        Some(txn_file_ref)
+    }
 }
 
 impl fmt::Debug for TxnFile {
@@ -299,6 +328,14 @@ impl TxnFileInner {
 
     pub fn chunk_ids(&self) -> Vec<u64> {
         self.chunks.iter().map(|chunk| chunk.id()).collect()
+    }
+
+    pub fn chunk_ids_in_ranges(&self, ranges: &[(InnerKey<'_>, InnerKey<'_>)]) -> Vec<u64> {
+        self.chunks
+            .iter()
+            .filter(|chunk| ranges.iter().any(|range| chunk.in_range(*range)))
+            .map(|chunk| chunk.id())
+            .collect()
     }
 
     pub fn size(&self) -> usize {
@@ -376,6 +413,10 @@ impl TxnChunk {
             }
         }
         None
+    }
+
+    pub fn in_range(&self, range: (InnerKey<'_>, InnerKey<'_>)) -> bool {
+        self.index.smallest() < range.1 && range.0 <= self.index.biggest()
     }
 }
 
@@ -1692,6 +1733,40 @@ mod tests {
         assert_eq!(get_test_value(98).as_bytes(), iter.get_value());
     }
 
+    #[rstest]
+    #[case::enable_key_off(true)]
+    #[case::disable_key_off(false)]
+    fn test_txn_chunk_in_range(#[case] enable_inner_key_off: bool) {
+        let kb = new_key_builder(enable_inner_key_off);
+        let chunk = build_txn_chunk(10, 100, 1, |_| OP_PUT, None, enable_inner_key_off);
+
+        let cases: Vec<(
+            usize, // range start
+            usize, // range end
+            bool,  // expected in range
+        )> = vec![
+            (0, 1, false),
+            (0, 10, false),
+            (0, 50, true),
+            (0, 100, true),
+            (0, 200, true),
+            (10, 50, true),
+            (10, 100, true),
+            (10, 200, true),
+            (50, 100, true),
+            (50, 200, true),
+            (100, 200, false),
+        ];
+        for (start, end, expected) in cases {
+            let start_key = kb.i_to_inner_key(start);
+            let end_key = kb.i_to_inner_key(end);
+            assert_eq!(
+                chunk.in_range((start_key.as_ref(), end_key.as_ref())),
+                expected
+            );
+        }
+    }
+
     fn build_txn_chunk<F>(
         start: usize,
         end: usize,
@@ -1944,6 +2019,52 @@ mod tests {
             check_lock(&lock, i);
             i += 2;
             iter.next();
+        }
+    }
+
+    #[rstest]
+    #[case::enable_key_off(true)]
+    #[case::disable_key_off(false)]
+    fn test_txn_file_in_ranges(#[case] enable_inner_key_off: bool) {
+        let kb = new_key_builder(enable_inner_key_off);
+        let chunk_1 = build_txn_chunk(50, 100, 1, |_| OP_PUT, None, enable_inner_key_off);
+        let chunk_2 = build_txn_chunk(100, 150, 2, |_| OP_PUT, None, enable_inner_key_off);
+        let chunk_5 = build_txn_chunk(250, 300, 5, |_| OP_PUT, None, enable_inner_key_off);
+        let id = TxnFileId::new(10, 1, 3);
+        let lower_bound = InnerKey::from_inner_buf(b"");
+        let upper_bound = InnerKey::from_inner_buf(GLOBAL_SHARD_END_KEY);
+        let txn_ctx = TxnCtx::new(
+            UserMeta::new(3, 5).to_array().to_vec().into(),
+            Default::default(),
+            3,
+            lower_bound,
+            upper_bound,
+        );
+        // test get
+        let txn_file = TxnFile::new(id, vec![chunk_1, chunk_2, chunk_5], txn_ctx).unwrap();
+
+        let cases: Vec<(
+            Vec<(usize /* start */, usize /* end */)>, // range
+            Vec<u64>,                                  // chunks id in ranges
+        )> = vec![
+            (vec![(0, 100)], vec![1]),
+            (vec![(100, 250)], vec![2]),
+            (vec![(275, 325)], vec![5]),
+            (vec![(75, 275)], vec![1, 2, 5]),
+            (vec![(0, 400)], vec![1, 2, 5]),
+            (vec![(0, 50), (150, 250), (300, 400)], vec![]),
+        ];
+
+        for (ranges, expect_ids) in cases {
+            let owned_ranges = ranges
+                .into_iter()
+                .map(|(start, end)| (kb.i_to_inner_key(start), kb.i_to_inner_key(end)))
+                .collect::<Vec<_>>();
+            let ranges = owned_ranges
+                .iter()
+                .map(|(start, end)| (start.as_ref(), end.as_ref()))
+                .collect::<Vec<_>>();
+            assert_eq!(txn_file.chunk_ids_in_ranges(&ranges), expect_ids);
         }
     }
 
