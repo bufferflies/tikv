@@ -18,6 +18,7 @@ use std::{env, fs::OpenOptions, io};
 
 use backup::{execute_show_backup_list, ShowBackupListArgs};
 use clap::{Args, Parser, Subcommand};
+use native_br::common::step_to_stdout;
 use slog::Drain;
 
 use crate::{
@@ -36,6 +37,7 @@ use crate::{
 
 fn main() {
     init_logger();
+    step_to_stdout();
     let x: Cli = Cli::parse();
     match x.command {
         DfsGc(dfsgc_arg) => {

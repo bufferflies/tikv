@@ -1,5 +1,13 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
-use std::{collections::HashMap, fmt, fmt::Formatter, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    fmt::{self, Formatter},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 use bytes::{Buf, Bytes};
 use chrono::{NaiveTime, Utc};
@@ -240,18 +248,35 @@ pub fn now() -> String {
     chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false)
 }
 
+lazy_static::lazy_static! {
+    pub static ref STEP_TO_STDOUT: AtomicBool = AtomicBool::new(false);
+}
+
+pub fn step_to_stdout() {
+    STEP_TO_STDOUT.store(true, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn is_step_to_stdout() -> bool {
+    STEP_TO_STDOUT.load(Ordering::Relaxed)
+}
+
 #[macro_export]
 macro_rules! step( ($($args:tt)+) => {
     let msg = format!($($args)+);
     info!("{}", msg);
-    println!("[{}] {}", now(), msg);
+    if $crate::common::is_step_to_stdout() {
+        println!("[{}] {}", now(), msg);
+    }
 };);
 
 #[macro_export]
 macro_rules! step_error( ($($args:tt)+) => {
     let msg = format!($($args)+);
     error!("{}", msg);
-    eprintln!("[{}] {}", now(), msg);
+    if $crate::common::is_step_to_stdout() {
+        eprintln!("[{}] {}", now(), msg);
+    }
 };);
 
 pub fn retain_sst_files(file_ids: Vec<u64>, s3fs: &S3Fs) -> Result<usize> {
