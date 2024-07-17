@@ -4,12 +4,26 @@
 # crontab -e
 # 0 0 * * * /xxx/cloud-storage-engine/scripts/docker-random/tidb.sh >> /tmp/random-tidb.log 2>&1
 
-set -xeuo pipefail
+set -euo pipefail
 CONCURRENCY=4
 CPU=4
 MEMORY=8g
+MAKE_BIN_ARGS=""
+GIT_UPDATE=1
 
 WORKDIR="/data/nvme1n1/$LOGNAME/random"
+
+show_help() {
+    echo "Usage: $0 [OPTIONS]"
+    echo "OPTIONS:"
+    echo "  --work-dir DIR                  Set the work directory"
+    echo "  --concurrency NUM               Set the concurrency"
+    echo "  --cpu NUM                       Set the CPU"
+    echo "  --memory NUM                    Set the memory"
+    echo "  --make-bin \"[MAKE OPTIONS]\"     make-bin.sh arguments"
+    echo "  --git-no-update                 Do not update git"
+    echo "  -- [RUN OPTIONS]                docker-run-random.sh arguments"
+}
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -29,24 +43,43 @@ while [ $# -gt 0 ]; do
         MEMORY="$2"
         shift
         ;;
+    --make-bin)
+        MAKE_BIN_ARGS="$2"
+        shift
+        ;;
+    --git-no-update)
+        GIT_UPDATE=0
+        ;;
+    --)
+        shift
+        break
+        ;;
+    --help)
+        show_help
+        exit 0
+        ;;
     *)
-        echo "Usage: $0 --work-dir <WORKDIR> --concurrency <CONCURRENCY> --cpu <CPU> --memory <MEMORY>"
+        show_help
         exit 1
         ;;
     esac
     shift
 done
 
-echo "================== Radnom Test for TiDB $(date) =================="
+echo "================== Random Test for TiDB $(date) =================="
+
+set -x
 
 source "$HOME/.cargo/env"
 
 CWD=$(dirname "$(realpath -s "$0")")
 cd "$CWD" || exit 1
 
-git pull
-git merge origin/cloud-engine --signoff --no-edit
-./make-bin.sh
+if [ "$GIT_UPDATE" -eq 1 ]; then
+    git pull
+    git merge origin/cloud-engine --signoff --no-edit
+fi
+./make-bin.sh "$MAKE_BIN_ARGS"
 
 mkdir -p "$WORKDIR"
 
@@ -60,4 +93,5 @@ export MEMORY
     --keep-tmp-on-error \
     --test with_tidb \
     --log-path "$WORKDIR/tidb-logs" \
-    --tmp-path "$WORKDIR/tidb-tmp"
+    --tmp-path "$WORKDIR/tidb-tmp" \
+    "$@"

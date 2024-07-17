@@ -4,15 +4,28 @@
 # crontab -e
 # 0 0 * * * /xxx/cloud-storage-engine/scripts/docker-random/all.sh >> /tmp/random-all.log 2>&1
 
-set -xeuo pipefail
+set -euo pipefail
 
 WORKDIR="/data/nvme1n1/$LOGNAME/random"
 CONCURRENCY=12
 CPU=3
 MEMORY=3g
 MEMORY_PROFILE=0
-declare -a MAKE_BIN_ARGS
-MAKE_BIN_ARGS=()
+MAKE_BIN_ARGS=""
+GIT_UPDATE=1
+
+show_help() {
+    echo "Usage: $0 [OPTIONS]"
+    echo "OPTIONS:"
+    echo "  --work-dir DIR                  Set the work directory"
+    echo "  --concurrency NUM               Set the concurrency"
+    echo "  --cpu NUM                       Set the CPU"
+    echo "  --memory NUM                    Set the memory"
+    echo "  --memory-profile                Enable memory profile"
+    echo "  --make-bin \"[MAKE OPTIONS]\"     make-bin.sh arguments"
+    echo "  --git-no-update                 Do not update git"
+    echo "  -- [RUN OPTIONS]                docker-run-random.sh arguments"
+}
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -35,27 +48,43 @@ while [ $# -gt 0 ]; do
     --memory-profile)
         MEMORY_PROFILE=1
         ;;
-    --debug)
-        MAKE_BIN_ARGS+=("--debug")
+    --make-bin)
+        MAKE_BIN_ARGS="$2"
+        shift
+        ;;
+    --git-no-update)
+        GIT_UPDATE=0
+        ;;
+    --)
+        shift
+        break
+        ;;
+    --help)
+        show_help
+        exit 0
         ;;
     *)
-        echo "Usage: $0 --work-dir <WORKDIR> --concurrency <CONCURRENCY> --cpu <CPU> --memory <MEMORY> --memory-profile"
+        show_help
         exit 1
         ;;
     esac
     shift
 done
 
-echo "================== Radnom Test for All $(date) =================="
+echo "================== Random Test for All $(date) =================="
+
+set -x
 
 source "$HOME/.cargo/env"
 
 CWD=$(dirname "$(realpath -s "$0")")
 cd "$CWD" || exit 1
 
-git pull
-git merge origin/cloud-engine --signoff --no-edit
-./make-bin.sh "${MAKE_BIN_ARGS[@]}"
+if [ "$GIT_UPDATE" -eq 1 ]; then
+    git pull
+    git merge origin/cloud-engine --signoff --no-edit
+fi
+./make-bin.sh "$MAKE_BIN_ARGS"
 
 mkdir -p "$WORKDIR"
 export CONCURRENCY
@@ -77,4 +106,4 @@ if [ "$MEMORY_PROFILE" -eq 1 ]; then
 fi
 
 ./docker-stop-random.sh
-./docker-run-random.sh "${RUN_ARGS[@]}"
+./docker-run-random.sh "${RUN_ARGS[@]}" "$@"

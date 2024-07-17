@@ -21,7 +21,19 @@ RUN_ARGS=()
 KEEP_TMP_ON_ERROR=0
 MEMORY_PROFILE=0
 
-HELP=0
+show_help() {
+	echo "Usage: $0 [OPTIONS]"
+	echo "OPTIONS:"
+	echo "  --help                             Display this message"
+	echo "  --tmp-path     <temporary path>    Set the path for temporary data generated during testing"
+	echo "  --log-path     <log path>          Set the path for logs"
+	echo "  --path-with-suffix                 Add git commit and timestamp to the path as suffix"
+	echo "  --test         <all/with_tidb>     Set the name of test case to run"
+	echo "  --tidb-version <v6.6.0/v7.1.0/...> Set the version of TiDB for \"with_tidb\" test"
+	echo "  --no-rebuild-image                 Do NOT rebuild the testing Docker image"
+	echo "  --keep-tmp-on-error                Keep temporary data on error for debugging"
+	echo "  --memory-profile                   Enable memory profiling"
+}
 
 PWD=$(pwd)
 
@@ -58,31 +70,16 @@ while [[ $# -gt 0 ]]; do
 		RUN_ARGS+=("--memory-profile")
 		;;
 	--help)
-		HELP=1
-		break
+		show_help
+		exit 0
 		;;
 	*)
-		HELP=1
-		break
+		show_help
+		exit 1
 		;;
 	esac
 	shift
 done
-
-if [ "$HELP" -eq 1 ]; then
-	echo "Usage: $0 [OPTIONS]"
-	echo "OPTIONS:"
-	echo "  --help                             Display this message"
-	echo "  --tmp-path     <temporary path>    Set the path for temporary data generated during testing"
-	echo "  --log-path     <log path>          Set the path for logs"
-	echo "  --path-with-suffix                 Add git commit and timestamp to the path as suffix"
-	echo "  --test         <all/with_tidb>     Set the name of test case to run"
-	echo "  --tidb-version <v6.6.0/v7.1.0/...> Set the version of TiDB for \"with_tidb\" test"
-	echo "  --no-rebuild-image                 Do NOT rebuild the testing Docker image"
-	echo "  --keep-tmp-on-error                Keep temporary data on error for debugging"
-	echo "  --memory-profile                   Enable memory profiling"
-	exit 0
-fi
 
 if [ "$MEMORY_PROFILE" -eq 1 ] && [ "$KEEP_TMP_ON_ERROR" -ne 1 ]; then
 	echo "WARNING: --keep-tmp-on-error is not enabled. The profile dumps will be removed after each test."

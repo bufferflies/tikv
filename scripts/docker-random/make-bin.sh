@@ -9,31 +9,40 @@ if [[ -z $MAKEFILE_RUN ]]; then
 	COMMAND="$SELF $*" exec make -f "$(dirname "$0")/../../Makefile" run
 fi
 
+show_help() {
+	echo "Usage: $0 [OPTIONS]"
+	echo "OPTIONS:"
+	echo "  --help        Display this message"
+	echo "  --debug       Make test binary as debug target"
+	echo "  --env-logger  Enable env-logger"
+}
+
 RELEASE=1
-HELP=0
+ENV_LOGGER=0
+
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 	--debug)
 		RELEASE=0
 		shift
 		;;
-	--help)
-		HELP=1
+	--env-logger)
+		ENV_LOGGER=1
 		shift
 		;;
+	--help)
+		show_help
+		exit 0
+		;;
 	*)
-		HELP=1
-		break
+		show_help
+		exit 1
 		;;
 	esac
 done
 
-if [ "$HELP" -eq 1 ]; then
-	echo "Usage: $0 [OPTIONS]"
-	echo "OPTIONS:"
-	echo "  --help     Display this message"
-	echo "  --debug    Make test binary as debug target"
-	exit 0
+if [ "$ENV_LOGGER" -eq 1 ]; then
+	TIKV_ENABLE_FEATURES="$TIKV_ENABLE_FEATURES env-logger"
 fi
 
 declare -a BUILD_FLAG

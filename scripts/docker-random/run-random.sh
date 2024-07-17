@@ -33,6 +33,9 @@ while [ $# -gt 0 ]; do
 done
 
 export RUST_BACKTRACE=1
+export LOG_LEVEL=info
+# Components pattern for env_logger. E.g. export RUST_LOG="info,raft=debug"
+export RUST_LOG="info"
 
 mkdir -p "$LOG_PATH"/logs "$LOG_PATH"/error-logs
 for i in $(seq -w 1 100000); do

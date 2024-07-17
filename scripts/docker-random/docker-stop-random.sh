@@ -3,7 +3,13 @@
 set -euo pipefail
 
 TESTNAME="all"
-HELP=0
+
+show_help() {
+	echo "Usage: $0 [OPTIONS]"
+	echo "OPTIONS:"
+	echo "  --help                 Display this message"
+	echo "  --test <all/with_tidb> Set the name of test case to stop"
+}
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
@@ -12,24 +18,16 @@ while [[ $# -gt 0 ]]; do
 		shift
 		;;
 	--help)
-		HELP=1
-		break
+		show_help
+		exit 0
 		;;
 	*)
-		HELP=1
-		break
+		show_help
+		exit 1
 		;;
 	esac
 	shift
 done
-
-if [ "$HELP" -eq 1 ]; then
-	echo "Usage: $0 [OPTIONS]"
-	echo "OPTIONS:"
-	echo "  --help                 Display this message"
-	echo "  --test <all/with_tidb> Set the name of test case to stop"
-	exit 0
-fi
 
 stop() {
 	docker stop "$1" && docker rm "$1"

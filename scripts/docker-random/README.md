@@ -113,8 +113,7 @@ To use Docker-Random, ensure that Docker is installed on your system. Docker pro
 5. **Stop the Tests**: The tests will terminate after running for 10000 x *CONCURRENCY* iterations. If you wish to stop the tests before completion, execute the following command:
 
     ```shell
-    export CONCURRENCY=12
     ./docker-stop-random.sh
     ```
 
-    Note that the environment variable of *CONCURRENCY* and `--test` argument must be the same with the values when running `docker-run-random.sh`.
+   Note that the `--test` argument must be the same with the values when running `docker-run-random.sh`.
