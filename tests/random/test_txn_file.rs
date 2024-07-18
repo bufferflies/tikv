@@ -12,7 +12,8 @@ use tikv_util::{debug, info, time::Instant};
 
 use crate::{generate_random_string, i_to_key, TXN_FILE_WRITE_COUNTER};
 
-pub(crate) const TXN_CHUNK_MAX_SIZE: usize = 1024;
+pub(crate) const TXN_FILE_MIN_SIZE: usize = 64;
+pub(crate) const TXN_CHUNK_MAX_SIZE: usize = 256;
 
 pub(crate) fn spawn_txn_file_write(
     begin_idx: usize,

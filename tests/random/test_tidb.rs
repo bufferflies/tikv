@@ -25,7 +25,10 @@ use tikv_util::{
     time::Instant,
 };
 
-use crate::*;
+use crate::{
+    test_txn_file::{TXN_CHUNK_MAX_SIZE, TXN_FILE_MIN_SIZE},
+    *,
+};
 
 const REGION_SIZE: ReadableSize = ReadableSize::mb(1);
 // TiDB has records with 200kb+ size (see "mysql.stats_history"), so set bucket
@@ -39,6 +42,9 @@ const SPLIT_MERGE_INTERVAL: ReadableDuration = ReadableDuration::secs(10);
 const INITIAL_KEYSPACE_COUNT: usize = 1;
 const NODES_COUNT: usize = 4;
 const TEST_DURATION: Duration = Duration::from_secs(120); // Test for longer as TiDB bootstrap may cost 30s+.
+
+const TIKV_WORKERS_COUNT: usize = 2;
+const TIKV_WORKERS_THREADS_COUNT: usize = 2;
 
 const PD_COUNT: usize = 1;
 const PD_BIN_ENV_KEY: &str = "PD_BIN";
@@ -61,6 +67,7 @@ const TIFLASH_HEALTHY_TIMEOUT: Duration = Duration::from_secs(120);
 
 const TPC_WORKLOAD_SWITCH_ENV_KEY: &str = "TPC_WORKLOAD";
 const TPC_BIN_ENV_KEY: &str = "TPC_BIN";
+const TPC_USE_TXN_FILE_RATIO: f64 = 0.5;
 const TPCC_WAREHOUSES: usize = 2;
 const TPCC_MAX_PROCS: usize = 1;
 const TPCC_THREADS: usize = 4; // Number of threads for each TPCC workload.
@@ -106,11 +113,17 @@ fn test_random_with_tidb() {
 
     let start_tidb = {
         let tc = tc.clone();
+        let tikv_worker_addr = cluster.tikv_worker_endpoints().pop().unwrap();
         runtime.spawn(async move {
             tc.start_tidb(
                 INITIAL_KEYSPACE_COUNT as u16,
                 TIDB_HEALTHY_TIMEOUT,
                 TIDB_LOG_LEVEL,
+                StartTidbOptions {
+                    tikv_worker_addr,
+                    txn_chunk_max_size: TXN_CHUNK_MAX_SIZE as u64,
+                    txn_file_min_mutation_size: Some(TXN_FILE_MIN_SIZE as u64),
+                },
             )
             .await
         })
@@ -132,6 +145,9 @@ fn test_random_with_tidb() {
 
     let tpc_switch_on = env_switch(TPC_WORKLOAD_SWITCH_ENV_KEY);
 
+    let mut rng = thread_rng();
+    let tpc_use_txn_file = rng.gen_bool(TPC_USE_TXN_FILE_RATIO);
+
     let mut prepare_tasks = vec![];
     if tpc_switch_on {
         let all_keyspaces = keyspace_manager.get_all_keyspaces();
@@ -140,6 +156,7 @@ fn test_random_with_tidb() {
             keyspace_manager.clone(),
             tpc_bin.clone(),
             all_keyspaces,
+            tpc_use_txn_file,
         )));
     }
     runtime.block_on(futures::future::join_all(prepare_tasks));
@@ -321,7 +338,8 @@ fn prepare_cluster(
         Some(tc) => PdWrapper::new_real(tc.pd.endpoints(), security_conf),
         None => PdWrapper::new_test(1, security_conf, None),
     };
-    let cluster = ServerCluster::new_opt(nodes, update_conf_fn, pd_wrapper);
+    let mut cluster = ServerCluster::new_opt(nodes, update_conf_fn, pd_wrapper);
+    cluster.start_tikv_workers(TIKV_WORKERS_COUNT, TIKV_WORKERS_THREADS_COUNT, true);
     cluster.wait_region_replicated(&[], 3);
 
     let mut keyspaces: Vec<u32> = vec![];
@@ -469,6 +487,7 @@ async fn prepare_tpcc(
     keyspace_manager: KeyspaceManager,
     tpc_bin: String,
     keyspace_ids: Vec<u32>,
+    use_txn_file: bool,
 ) {
     let mut handles = Vec::with_capacity(TPCC_WORKLOAD_CONCURRENCY);
     for tpc_idx in 0..TPCC_WORKLOAD_CONCURRENCY {
@@ -499,12 +518,30 @@ async fn prepare_tpcc(
                     .max_procs(TPCC_MAX_PROCS);
 
                 let conn_string = params.conn_string("test");
-                let sql = format!("CREATE DATABASE IF NOT EXISTS `{}`", db);
                 let pool = sqlx::MySqlPool::connect(&conn_string).await.unwrap();
-                sqlx::query(&sql).execute(&pool).await.unwrap();
+
+                info!("{} prepare_tpcc", tag; "use_txn_file" => use_txn_file);
+
+                let mut sqls = vec![format!("CREATE DATABASE IF NOT EXISTS `{}`", db)];
+                if use_txn_file {
+                    sqls.push("SET GLOBAL tidb_txn_mode = 'optimistic'".to_string());
+                    sqls.push("SET GLOBAL tidb_enable_txn_file = 'ON'".to_string());
+                }
+                for sql in sqls {
+                    info!("{} executing sql", tag; "sql" => &sql);
+                    sqlx::query(&sql).execute(&pool).await.unwrap();
+                }
 
                 tpc.prepare(TPCC_THREADS).await.unwrap();
                 tpc.check().await.unwrap();
+
+                // Use txn file during preparation only. As using optimistic transaction for
+                // TPC-C will meet lots of write conflicts.
+                if use_txn_file {
+                    let sql = "SET GLOBAL tidb_txn_mode = 'pessimistic'";
+                    info!("{} executing sql", tag; "sql" => &sql);
+                    sqlx::query(sql).execute(&pool).await.unwrap();
+                }
             }
         };
         handles.push(tokio::spawn(task));

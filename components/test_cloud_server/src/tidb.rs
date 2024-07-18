@@ -26,6 +26,8 @@ use tikv_util::{box_err, config::ReadableDuration, info, warn};
 
 use crate::{tiflash::TiFlashServers, try_wait, try_wait_result_async};
 
+const TXN_CHUNK_WRITER_CONCURRENCY: u64 = 4;
+
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Sync + Send>>;
 
 pub enum PdServerMode {
@@ -375,15 +377,28 @@ impl TidbServers {
         }
     }
 
-    pub fn start(&self, idx: u16, pd_endpoints: &[String], log_level: &str) {
+    pub fn start(
+        &self,
+        idx: u16,
+        pd_endpoints: &[String],
+        log_level: &str,
+        options: StartTidbOptions,
+    ) {
         let pd_endpoints = pd_endpoints.join(",");
         let log_file = self.data_path.join(format!("tidb-{idx}.log"));
         let slow_log_file = self.data_path.join(format!("tidb-slow-{idx}.log"));
 
         let config_file = self.data_path.join(format!("tidb-{idx}.toml"));
-        let config = TidbConfig {
+        let mut config = TidbConfig {
             keyspace_name: keyspace_name_by_idx(idx),
+            ..Default::default()
         };
+        if let Some(txn_file_min_mutation_size) = options.txn_file_min_mutation_size {
+            config.tikv_client.txn_chunk_writer_addr = options.tikv_worker_addr;
+            config.tikv_client.txn_chunk_writer_concurrency = TXN_CHUNK_WRITER_CONCURRENCY;
+            config.tikv_client.txn_chunk_max_size = options.txn_chunk_max_size;
+            config.tikv_client.txn_file_min_mutation_size = txn_file_min_mutation_size;
+        }
         let toml = toml::to_string(&config).unwrap();
         fs::write(&config_file, toml).unwrap();
 
@@ -531,6 +546,13 @@ impl TidbCluster {
     }
 }
 
+#[derive(Default, Clone)]
+pub struct StartTidbOptions {
+    pub tikv_worker_addr: String,
+    pub txn_chunk_max_size: u64,
+    pub txn_file_min_mutation_size: Option<u64>,
+}
+
 pub struct TidbClusterCore {
     _data_path: TempDir,
 
@@ -546,11 +568,18 @@ impl TidbClusterCore {
         self.pd.must_healthy(timeout).await;
     }
 
-    pub async fn start_tidb(&self, count: u16, timeout: Duration, log_level: &str) {
+    pub async fn start_tidb(
+        &self,
+        count: u16,
+        timeout: Duration,
+        log_level: &str,
+        options: StartTidbOptions,
+    ) {
         let pd_endpoints = self.pd.endpoints();
         // Start from 1 as keyspace 0 is reserved.
         for idx in 1..=count {
-            self.tidb.start(idx, &pd_endpoints, log_level);
+            self.tidb
+                .start(idx, &pd_endpoints, log_level, options.clone());
         }
         self.tidb.must_all_healthy(timeout).await;
     }
@@ -655,6 +684,16 @@ struct TsoSvcStatus {
 #[serde(rename_all = "kebab-case")]
 struct TidbConfig {
     keyspace_name: String,
+    tikv_client: TikvClientConfig,
+}
+
+#[derive(Default, Serialize)]
+#[serde(rename_all = "kebab-case")]
+struct TikvClientConfig {
+    txn_chunk_writer_addr: String,
+    txn_chunk_writer_concurrency: u64,
+    txn_chunk_max_size: u64,
+    txn_file_min_mutation_size: u64,
 }
 
 const TIDB_HEALTH_PATH: &str = "health";
