@@ -69,6 +69,9 @@ while [[ $# -gt 0 ]]; do
 		MEMORY_PROFILE=1
 		RUN_ARGS+=("--memory-profile")
 		;;
+	--no-tpc)
+		RUN_ARGS+=("--no-tpc")
+		;;
 	--help)
 		show_help
 		exit 0

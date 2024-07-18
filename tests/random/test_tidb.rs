@@ -55,6 +55,11 @@ const TIDB_STATUS_PORT_DEFAULT: u16 = 10080;
 const TIDB_HEALTHY_TIMEOUT: Duration = Duration::from_secs(120);
 const TIDB_LOG_LEVEL: &str = "info";
 
+const TIFLASH_BIN_ENV_KEY: &str = "TIFLASH_BIN";
+const TIFLASH_SERVER_COUNT: usize = 1;
+const TIFLASH_HEALTHY_TIMEOUT: Duration = Duration::from_secs(120);
+
+const TPC_WORKLOAD_SWITCH_ENV_KEY: &str = "TPC_WORKLOAD";
 const TPC_BIN_ENV_KEY: &str = "TPC_BIN";
 const TPCC_WAREHOUSES: usize = 2;
 const TPCC_MAX_PROCS: usize = 1;
@@ -99,29 +104,61 @@ fn test_random_with_tidb() {
     let tpc_bin = std::env::var(TPC_BIN_ENV_KEY).expect("env TPC_BIN is not set");
     check_tpc_binary(&tpc_bin);
 
-    runtime.block_on(tc.start_tidb(
-        INITIAL_KEYSPACE_COUNT as u16,
-        TIDB_HEALTHY_TIMEOUT,
-        TIDB_LOG_LEVEL,
-    ));
-    runtime.block_on(prepare_tpcc(
-        tc.clone(),
-        keyspace_manager.clone(),
-        &tpc_bin,
-        &keyspace_manager.get_all_keyspaces(),
-    ));
+    let start_tidb = {
+        let tc = tc.clone();
+        runtime.spawn(async move {
+            tc.start_tidb(
+                INITIAL_KEYSPACE_COUNT as u16,
+                TIDB_HEALTHY_TIMEOUT,
+                TIDB_LOG_LEVEL,
+            )
+            .await
+        })
+    };
+    let start_tiflash = {
+        let tc = tc.clone();
+        runtime.spawn_blocking(move || {
+            tc.start_tiflash(
+                TIFLASH_SERVER_COUNT as u16,
+                &dfs_config,
+                TIFLASH_HEALTHY_TIMEOUT,
+            );
+        })
+    };
+    let (start_tidb, start_tiflash) =
+        runtime.block_on(async move { futures::join!(start_tidb, start_tiflash) });
+    start_tidb.unwrap();
+    start_tiflash.unwrap();
 
-    let mut async_handles = vec![];
-    for tpc_idx in 0..TPCC_WORKLOAD_CONCURRENCY {
-        async_handles.push(spawn_tpcc(
+    let tpc_switch_on = env_switch(TPC_WORKLOAD_SWITCH_ENV_KEY);
+
+    let mut prepare_tasks = vec![];
+    if tpc_switch_on {
+        let all_keyspaces = keyspace_manager.get_all_keyspaces();
+        prepare_tasks.push(runtime.spawn(prepare_tpcc(
             tc.clone(),
             keyspace_manager.clone(),
-            &tpc_bin,
-            tpc_idx,
-            TPCC_RUN_DURATION,
-            TEST_DURATION,
-        ));
+            tpc_bin.clone(),
+            all_keyspaces,
+        )));
     }
+    runtime.block_on(futures::future::join_all(prepare_tasks));
+
+    let mut async_handles = vec![];
+    if tpc_switch_on {
+        for tpc_idx in 0..TPCC_WORKLOAD_CONCURRENCY {
+            async_handles.push(spawn_tpcc(
+                tc.clone(),
+                keyspace_manager.clone(),
+                &tpc_bin,
+                tpc_idx,
+                TPCC_RUN_DURATION,
+                TEST_DURATION,
+            ));
+        }
+    }
+
+    assert!(!async_handles.is_empty(), "no workload to run");
     async_handles.push(spawn_restart_tso_svc(
         tc.clone(),
         Duration::from_secs(10),
@@ -146,11 +183,13 @@ fn test_random_with_tidb() {
         info!("stop TiDB and schedulers");
         tc.pd.must_healthy(VERIFY_HEALTHY_TIMEOUT).await;
         tc.tidb.must_all_healthy(VERIFY_HEALTHY_TIMEOUT).await;
+        tc.tiflash.must_all_healthy(VERIFY_HEALTHY_TIMEOUT).await;
         tc.tidb.stop_all(); // To stop background tasks.
+        tc.tiflash.stop_all();
         stop_schedulers(pd_ctl).await;
 
         info!("verify cluster");
-        verify_cluster(&mut cluster).await;
+        verify_cluster(&mut cluster, tpc_switch_on).await;
     });
 
     // Stop cluster.
@@ -209,6 +248,8 @@ fn prepare_tidb_cluster(security_config: &SecurityConfig) -> TidbCluster {
         .map(|s| s.parse().unwrap())
         .unwrap_or(TIDB_STATUS_PORT_DEFAULT);
 
+    let tiflash_bin = std::env::var(TIFLASH_BIN_ENV_KEY).expect("env TIFLASH_BIN is not set");
+
     let max_merge_region_size = REGION_SIZE.div(5);
     let max_merge_region_keys = max_merge_region_size.0 / 100; // Assume 100 bytes per key, about 2000 keys.
     let pd_scheduler_config = PdScheduleConfig {
@@ -234,6 +275,7 @@ fn prepare_tidb_cluster(security_config: &SecurityConfig) -> TidbCluster {
         PathBuf::from(tidb_bin),
         tidb_port_base,
         tidb_status_port_base,
+        PathBuf::from(tiflash_bin),
         INITIAL_KEYSPACE_COUNT as u16,
         security_config,
     );
@@ -260,6 +302,7 @@ fn prepare_cluster(
         conf.raft_store.peer_stale_state_check_interval = ReadableDuration::secs(1);
         conf.raft_store.abnormal_leader_missing_duration = ReadableDuration::secs(3);
         conf.raft_store.max_leader_missing_duration = ReadableDuration::secs(5);
+        conf.raft_store.pd_heartbeat_tick_interval = ReadableDuration::secs(1);
         conf.rocksdb.writecf.block_size = ReadableSize::kb(4);
         conf.rocksdb.writecf.target_file_size_base = ReadableSize::kb(16);
         conf.rfengine.target_file_size = ReadableSize::mb(8);
@@ -385,7 +428,7 @@ async fn stop_schedulers(pd_ctl: Arc<pd_control::PdControl>) {
 }
 
 // TODO: merge to `verify_cluster` in `test_all.rs`.
-async fn verify_cluster(cluster: &mut ServerCluster) {
+async fn verify_cluster(cluster: &mut ServerCluster, tpc_switch_on: bool) {
     // Check statistics.
     // Check after verify data, to ensure that PD heartbeat have updated region
     // stats.
@@ -416,20 +459,22 @@ async fn verify_cluster(cluster: &mut ServerCluster) {
     )
     .expect("check_buckets failed");
 
-    check_tpc();
+    if tpc_switch_on {
+        check_tpc();
+    }
 }
 
 async fn prepare_tpcc(
     tc: TidbCluster,
     keyspace_manager: KeyspaceManager,
-    tpc_bin: &str,
-    keyspace_ids: &[u32],
+    tpc_bin: String,
+    keyspace_ids: Vec<u32>,
 ) {
     let mut handles = Vec::with_capacity(TPCC_WORKLOAD_CONCURRENCY);
     for tpc_idx in 0..TPCC_WORKLOAD_CONCURRENCY {
         let tc = tc.clone();
         let keyspace_manager = keyspace_manager.clone();
-        let tpc_bin = PathBuf::from_str(tpc_bin).unwrap();
+        let tpc_bin = PathBuf::from_str(&tpc_bin).unwrap();
         let keyspace_ids = keyspace_ids.to_vec();
         let task = async move {
             let db = db_name_by_tpc_idx(tpc_idx);
@@ -443,7 +488,7 @@ async fn prepare_tpcc(
                 let tidb_idx = TidbCluster::get_idx_by_keyspace_name(&keyspace_name);
                 let params = tc.tidb.conn_params(tidb_idx);
 
-                let mut tpc = Tpc::new(tag, tpc_bin.clone());
+                let mut tpc = Tpc::new(tag.clone(), tpc_bin.clone());
                 tpc.tpcc()
                     .host(&params.host)
                     .port(params.port)

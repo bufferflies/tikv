@@ -11,6 +11,7 @@ shift 2
 KEEP_TMP_ON_ERROR=0
 LOG_PATH="/random"
 MEMORY_PROFILE=0
+TPC_WORKLOAD=1
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -24,6 +25,9 @@ while [ $# -gt 0 ]; do
     --memory-profile)
         MEMORY_PROFILE=1
         ;;
+    --no-tpc)
+        TPC_WORKLOAD=0
+        ;;
     *)
         echo "Usage: $0 DOCKER_ID TESTNAME [--keep-tmp-on-error] [--log-path LOG_PATH] [--memory-profile]"
         exit 1
@@ -36,6 +40,8 @@ export RUST_BACKTRACE=1
 export LOG_LEVEL=info
 # Components pattern for env_logger. E.g. export RUST_LOG="info,raft=debug"
 export RUST_LOG="info"
+
+export TPC_WORKLOAD
 
 mkdir -p "$LOG_PATH"/logs "$LOG_PATH"/error-logs
 for i in $(seq -w 1 100000); do

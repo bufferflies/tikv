@@ -13,6 +13,8 @@ use std::{
 use dashmap::DashMap;
 use futures::executor::block_on;
 use grpcio::EnvBuilder;
+use kvengine::dfs::DFSConfig;
+use kvproto::metapb;
 use pd_client::{
     pd_control::{PdControl, PdScheduleConfig},
     PdClient,
@@ -22,7 +24,7 @@ use serde_derive::{Deserialize, Serialize};
 use tempfile::TempDir;
 use tikv_util::{box_err, config::ReadableDuration, info, warn};
 
-use crate::try_wait_result_async;
+use crate::{tiflash::TiFlashServers, try_wait, try_wait_result_async};
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Sync + Send>>;
 
@@ -479,11 +481,13 @@ impl TidbCluster {
         tidb_bin: PathBuf,
         tidb_port_base: u16,
         tidb_status_port_base: u16,
+        tiflash_bin: PathBuf,
         pre_alloc_keyspaces: u16,
         security_conf: &SecurityConfig,
     ) -> Self {
         check_binary("pd_server", &pd_bin);
         check_binary("tidb-server", &tidb_bin);
+        check_binary("tiflash", &tiflash_bin);
 
         let security_mgr = Arc::new(SecurityManager::new(security_conf).unwrap());
         let base_path = tempfile::Builder::new().prefix("tc_").tempdir().unwrap();
@@ -502,13 +506,15 @@ impl TidbCluster {
             base_path.path().to_owned(),
             tidb_port_base,
             tidb_status_port_base,
-            security_mgr,
+            security_mgr.clone(),
         );
+        let tiflash = TiFlashServers::new(tiflash_bin, base_path.path().to_owned(), security_mgr);
 
         let inner = TidbClusterCore {
             _data_path: base_path,
             pd,
             tidb,
+            tiflash,
         };
 
         Self {
@@ -530,6 +536,7 @@ pub struct TidbClusterCore {
 
     pub pd: PdServers,
     pub tidb: TidbServers,
+    pub tiflash: TiFlashServers,
 }
 
 impl TidbClusterCore {
@@ -546,6 +553,38 @@ impl TidbClusterCore {
             self.tidb.start(idx, &pd_endpoints, log_level);
         }
         self.tidb.must_all_healthy(timeout).await;
+    }
+
+    pub fn start_tiflash(&self, count: u16, dfs: &DFSConfig, timeout: Duration) {
+        let pd_endpoints = self.pd.endpoints();
+        for idx in 0..count {
+            self.tiflash.start(idx, dfs.clone(), &pd_endpoints);
+        }
+        block_on(self.tiflash.must_all_healthy(timeout));
+        self.wait_tiflash_up(count, timeout);
+    }
+
+    pub fn wait_tiflash_up(&self, count: u16, timeout: Duration) {
+        let pd_client = self.pd.get_client();
+        let is_up_tiflash = |s: &metapb::Store| {
+            s.get_state() == metapb::StoreState::Up
+                && s.get_labels().iter().any(|l| {
+                    l.key.to_lowercase() == "engine" && l.value.to_lowercase() == "tiflash"
+                })
+        };
+        let ok = try_wait(
+            || {
+                let up_count = pd_client
+                    .get_all_stores(true)
+                    .unwrap()
+                    .into_iter()
+                    .filter(is_up_tiflash)
+                    .count();
+                up_count == count as usize
+            },
+            timeout.as_secs() as usize,
+        );
+        assert!(ok, "stores: {:?}", pd_client.get_all_stores(true).unwrap());
     }
 }
 
@@ -672,7 +711,11 @@ fn get_idx_from_keyspace_name(name: &str) -> u16 {
 /// Check binaries by running with "-V".
 fn check_binary(name: &str, bin_path: &Path) {
     let mut cmd = Command::new(bin_path);
-    cmd.arg("-V");
+    if name == "tiflash" {
+        cmd.arg("--version");
+    } else {
+        cmd.arg("-V");
+    }
     let output = cmd.output().unwrap_or_else(|e| {
         panic!("check_binary {} at {:?} failed: {:?}", name, bin_path, e);
     });

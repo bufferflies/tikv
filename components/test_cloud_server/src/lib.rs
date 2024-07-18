@@ -13,6 +13,7 @@ pub mod oss;
 pub mod scheduler;
 mod table;
 pub mod tidb;
+mod tiflash;
 pub mod tpc;
 pub mod txn;
 pub mod util;

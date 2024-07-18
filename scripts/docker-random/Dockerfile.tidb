@@ -1,7 +1,9 @@
 ARG VERSION=v7.1.0
+ARG TIFLASH_VERSION=v7.5.0
 
 FROM hub-new.pingcap.net/keyspace/tidb:${VERSION} as tidb
 FROM hub-new.pingcap.net/keyspace/pd:${VERSION} as pd
+FROM hub-new.pingcap.net/keyspace/tiflash:${TIFLASH_VERSION} as tiflash
 FROM hub-new.pingcap.net/kvaas/go-tpc:small-size as go-tpc
 
 FROM ubuntu:20.04
@@ -19,8 +21,10 @@ RUN sed -i s@/archive.ubuntu.com/@/apt.ksyun.cn/@g /etc/apt/sources.list && \
 
 COPY --from=tidb /tidb-server /tidb-server
 COPY --from=pd /pd-server /pd-server
+COPY --from=tiflash /tiflash /tiflash
 COPY --from=go-tpc /go-tpc /go-tpc
 
 ENV TIDB_BIN=/tidb-server
 ENV PD_BIN=/pd-server
+ENV TIFLASH_BIN=/tiflash/tiflash
 ENV TPC_BIN=/go-tpc

@@ -654,3 +654,11 @@ pub(crate) fn new_security_config() -> SecurityConfig {
     conf.master_key.key_id = "random".to_string();
     conf
 }
+
+// Switch acquired from env variable, `0` for false, `>0` for true.
+pub(crate) fn env_switch(env_key: &str) -> bool {
+    std::env::var(env_key)
+        .map(|s| s.parse().unwrap())
+        .unwrap_or(1)
+        > 0
+}
