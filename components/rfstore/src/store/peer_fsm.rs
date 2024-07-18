@@ -1624,6 +1624,7 @@ impl<'a> PeerMsgHandler<'a> {
         let custom_req = builder.build();
         req.set_custom_request(custom_req);
         let router = self.ctx.global.router.clone();
+        let kv = self.ctx.global.engines.kv.clone();
         let cb = Callback::write(Box::new(move |resp| {
             if resp.response.get_header().has_error() {
                 let err_msg = resp.response.get_header().get_error().get_message();
@@ -1631,6 +1632,9 @@ impl<'a> PeerMsgHandler<'a> {
                 if err_msg.contains("raft: proposal dropped") {
                     // Proposal may dropped due to leader transfer in progress.
                     router.send_store(StoreMsg::GenerateEngineChangeSet(cs));
+                } else {
+                    // Reset the state of flush worker or compactor.
+                    kv.meta_committed(&cs, true);
                 }
             } else {
                 info!("{} proposed meta change event", tag);

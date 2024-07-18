@@ -714,9 +714,18 @@ impl EngineCore {
     // group.
     pub fn meta_committed(&self, cs: &kvenginepb::ChangeSet, rejected: bool) {
         if cs.has_flush() || cs.has_initial_flush() {
-            let table_version = change_set_table_version(cs);
-            let id_ver = IdVer::new(cs.shard_id, cs.shard_ver);
-            self.send_flush_msg(FlushMsg::Committed((id_ver, table_version)));
+            if rejected {
+                self.send_flush_msg(FlushMsg::Clear(cs.shard_id));
+                if let Some(shard) = self.get_shard(cs.shard_id) {
+                    if let Err(err) = self.trigger_flush(&shard) {
+                        warn!("{} trigger_flush error: {:?}", shard.tag(), err);
+                    }
+                }
+            } else {
+                let table_version = change_set_table_version(cs);
+                let id_ver = IdVer::new(cs.shard_id, cs.shard_ver);
+                self.send_flush_msg(FlushMsg::Committed((id_ver, table_version)));
+            }
         }
         if rejected
             && (cs.has_compaction()
