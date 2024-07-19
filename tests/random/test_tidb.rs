@@ -26,6 +26,7 @@ use tikv_util::{
 };
 
 use crate::{
+    test_jepsen::*,
     test_txn_file::{TXN_CHUNK_MAX_SIZE, TXN_FILE_MIN_SIZE},
     *,
 };
@@ -61,6 +62,7 @@ const TIDB_STATUS_PORT_DEFAULT: u16 = 10080;
 const TIDB_HEALTHY_TIMEOUT: Duration = Duration::from_secs(120);
 const TIDB_LOG_LEVEL: &str = "info";
 
+const TIFLASH_SWITCH_ENV_KEY: &str = "USE_TIFLASH";
 const TIFLASH_BIN_ENV_KEY: &str = "TIFLASH_BIN";
 const TIFLASH_SERVER_COUNT: usize = 1;
 const TIFLASH_HEALTHY_TIMEOUT: Duration = Duration::from_secs(120);
@@ -74,7 +76,11 @@ const TPCC_THREADS: usize = 4; // Number of threads for each TPCC workload.
 const TPCC_RUN_DURATION: Duration = Duration::from_secs(10); // Duration of each TPCC run.
 const TPCC_WORKLOAD_CONCURRENCY: usize = 1;
 
-const VERIFY_HEALTHY_TIMEOUT: Duration = Duration::from_secs(10);
+const JEPSEN_WORKLOAD_SWITCH_ENV_KEY: &str = "JEPSEN_WORKLOAD";
+const JEPSEN_WORKLOAD_USE_TXN_FILE_ENV_KEY: &str = "JEPSEN_TXN_FILE";
+const JEPSEN_WORKLOAD_KEYSPACE: u32 = 1; // Keyspace starts from 1.
+
+const VERIFY_HEALTHY_TIMEOUT: Duration = Duration::from_secs(120);
 
 const ENABLE_INNER_KEY_OFF_RATIO: f64 = 0.8; // 80% chance to enable inner key offset
 
@@ -143,7 +149,10 @@ fn test_random_with_tidb() {
     start_tidb.unwrap();
     start_tiflash.unwrap();
 
+    let tiflash_switch_on = env_switch(TIFLASH_SWITCH_ENV_KEY);
     let tpc_switch_on = env_switch(TPC_WORKLOAD_SWITCH_ENV_KEY);
+    let jepsen_switch_on = env_switch(JEPSEN_WORKLOAD_SWITCH_ENV_KEY);
+    let jepsen_use_txn_file = env_switch(JEPSEN_WORKLOAD_USE_TXN_FILE_ENV_KEY);
 
     let mut rng = thread_rng();
     let tpc_use_txn_file = rng.gen_bool(TPC_USE_TXN_FILE_RATIO);
@@ -157,6 +166,14 @@ fn test_random_with_tidb() {
             tpc_bin.clone(),
             all_keyspaces,
             tpc_use_txn_file,
+        )));
+    }
+    if jepsen_switch_on {
+        prepare_tasks.push(runtime.spawn(prepare_jepsen_bank(
+            tc.clone(),
+            keyspace_manager.clone(),
+            JEPSEN_WORKLOAD_KEYSPACE,
+            tiflash_switch_on.then_some(TIFLASH_SERVER_COUNT),
         )));
     }
     runtime.block_on(futures::future::join_all(prepare_tasks));
@@ -173,6 +190,16 @@ fn test_random_with_tidb() {
                 TEST_DURATION,
             ));
         }
+    }
+    if jepsen_switch_on {
+        async_handles.push(runtime.spawn(run_jepsen_bank(
+            tc.clone(),
+            keyspace_manager,
+            JEPSEN_WORKLOAD_KEYSPACE,
+            jepsen_use_txn_file,
+            tiflash_switch_on,
+            TEST_DURATION,
+        )));
     }
 
     assert!(!async_handles.is_empty(), "no workload to run");
@@ -206,7 +233,7 @@ fn test_random_with_tidb() {
         stop_schedulers(pd_ctl).await;
 
         info!("verify cluster");
-        verify_cluster(&mut cluster, tpc_switch_on).await;
+        verify_cluster(&mut cluster, tpc_switch_on, jepsen_switch_on).await;
     });
 
     // Stop cluster.
@@ -228,9 +255,11 @@ fn test_random_with_tidb() {
     let total_manual_major_compact = MANUAL_MAJOR_COMPACT_COUNTER.load(Ordering::SeqCst);
     let total_gc_resolved_locks = GC_ADVANCE_SAFE_POINT_COUNTER.load(Ordering::SeqCst);
     let total_tpcc_txns = TPCC_COUNTER.load(Ordering::SeqCst);
+    let total_jepsen_bank = JEPSEN_BANK_TXN_COUNTER.load(Ordering::SeqCst);
+    let total_jepsen_bank_retry = JEPSEN_BANK_TXN_RETRY_COUNTER.load(Ordering::SeqCst);
     let region_number = pd_client.get_regions_number();
     info!(
-        "TEST SUCCEED: write {}, keyspace {}, table {}, drop table {}, region {}, merge {}, move {}, transfer {}, node restart {}, backup {}, restore {}, load_data {}, manual_major_compact {}, gc {}, tpcc {}",
+        "TEST SUCCEED: write {}, keyspace {}, table {}, drop table {}, region {}, merge {}, move {}, transfer {}, node restart {}, backup {}, restore {}, load_data {}, manual_major_compact {}, gc {}, tpcc {}, jepsen_bank {} (retry {})",
         total_write_count,
         total_keyspace_count,
         total_table_count,
@@ -246,6 +275,8 @@ fn test_random_with_tidb() {
         total_manual_major_compact,
         total_gc_resolved_locks,
         total_tpcc_txns,
+        total_jepsen_bank,
+        total_jepsen_bank_retry,
     );
 
     tc.pd.stop_all();
@@ -446,7 +477,7 @@ async fn stop_schedulers(pd_ctl: Arc<pd_control::PdControl>) {
 }
 
 // TODO: merge to `verify_cluster` in `test_all.rs`.
-async fn verify_cluster(cluster: &mut ServerCluster, tpc_switch_on: bool) {
+async fn verify_cluster(cluster: &mut ServerCluster, tpc_switch_on: bool, jepsen_switch_on: bool) {
     // Check statistics.
     // Check after verify data, to ensure that PD heartbeat have updated region
     // stats.
@@ -479,6 +510,9 @@ async fn verify_cluster(cluster: &mut ServerCluster, tpc_switch_on: bool) {
 
     if tpc_switch_on {
         check_tpc();
+    }
+    if jepsen_switch_on {
+        check_jepsen();
     }
 }
 
@@ -632,6 +666,17 @@ fn check_tpc() {
         tpc_txns >= 100,
         "TPC-C transactions are too few: {}",
         tpc_txns
+    );
+}
+
+fn check_jepsen() {
+    let jepsen_txns = JEPSEN_BANK_TXN_COUNTER.load(Ordering::Relaxed);
+    let threshold = 100;
+    assert!(
+        jepsen_txns >= threshold,
+        "Jepsen transactions are too few: {}, threshold: {}",
+        jepsen_txns,
+        threshold
     );
 }
 

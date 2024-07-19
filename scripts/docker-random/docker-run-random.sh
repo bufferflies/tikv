@@ -69,8 +69,17 @@ while [[ $# -gt 0 ]]; do
 		MEMORY_PROFILE=1
 		RUN_ARGS+=("--memory-profile")
 		;;
+	--no-tiflash)
+		RUN_ARGS+=("--no-tiflash")
+		;;
 	--no-tpc)
 		RUN_ARGS+=("--no-tpc")
+		;;
+	--no-jepsen)
+		RUN_ARGS+=("--no-jepsen")
+		;;
+	--jepsen-no-txn-file)
+		RUN_ARGS+=("--jepsen-no-txn-file")
 		;;
 	--help)
 		show_help

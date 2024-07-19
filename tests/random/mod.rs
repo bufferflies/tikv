@@ -2,6 +2,7 @@
 
 mod test_all;
 mod test_drop_table;
+mod test_jepsen;
 mod test_load_data;
 mod test_native_br;
 mod test_tidb;
@@ -67,6 +68,8 @@ lazy_static::lazy_static! {
     pub static ref MANUAL_MAJOR_COMPACT_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref GC_ADVANCE_SAFE_POINT_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref TPCC_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    pub static ref JEPSEN_BANK_TXN_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    pub static ref JEPSEN_BANK_TXN_RETRY_COUNTER: AtomicUsize = AtomicUsize::new(0);
 }
 
 pub const TIMEOUT: Duration = Duration::from_secs(90);

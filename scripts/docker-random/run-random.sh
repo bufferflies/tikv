@@ -11,7 +11,10 @@ shift 2
 KEEP_TMP_ON_ERROR=0
 LOG_PATH="/random"
 MEMORY_PROFILE=0
+USE_TIFLASH=1
 TPC_WORKLOAD=1
+JEPSEN_WORKLOAD=1
+JEPSEN_TXN_FILE=1
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -25,8 +28,17 @@ while [ $# -gt 0 ]; do
     --memory-profile)
         MEMORY_PROFILE=1
         ;;
+    --no-tiflash)
+        USE_TIFLASH=0
+        ;;
     --no-tpc)
         TPC_WORKLOAD=0
+        ;;
+    --no-jepsen)
+        JEPSEN_WORKLOAD=0
+        ;;
+    --jepsen-no-txn-file)
+        JEPSEN_TXN_FILE=0
         ;;
     *)
         echo "Usage: $0 DOCKER_ID TESTNAME [--keep-tmp-on-error] [--log-path LOG_PATH] [--memory-profile]"
@@ -41,7 +53,10 @@ export LOG_LEVEL=info
 # Components pattern for env_logger. E.g. export RUST_LOG="info,raft=debug"
 export RUST_LOG="info"
 
+export USE_TIFLASH
 export TPC_WORKLOAD
+export JEPSEN_WORKLOAD
+export JEPSEN_TXN_FILE
 
 mkdir -p "$LOG_PATH"/logs "$LOG_PATH"/error-logs
 for i in $(seq -w 1 100000); do
