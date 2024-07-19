@@ -20,14 +20,14 @@ struct SimpleIterator {
 
 #[allow(dead_code)]
 impl SimpleIterator {
-    fn new(keys: Vec<&'static str>, vals: Vec<&'static str>, reversed: bool) -> Self {
+    fn new(keys: Vec<&'static str>, vals: Vec<&'static str>, reversed: bool, version: u64) -> Self {
         let length = keys.len();
         let mut ks: Vec<Bytes> = vec![];
         let mut vs = vec![];
         let mut latest_off = vec![];
         for i in 0..length {
             ks.push(Bytes::from(keys[i]));
-            let val = Value::encode_buf(0, &[], 0, vals[i].as_bytes());
+            let val = Value::encode_buf(0, &[], version, vals[i].as_bytes());
             vs.push(val);
             latest_off.push(i);
         }
@@ -147,7 +147,7 @@ fn get_all(mut it: Box<dyn Iterator>) -> (Vec<Bytes>, Vec<Bytes>) {
 fn test_simple_iterator() {
     let keys = vec!["1", "2", "3"];
     let vals = vec!["v1", "v2", "v3"];
-    let mut it = Box::new(SimpleIterator::new(keys.clone(), vals.clone(), false));
+    let mut it = Box::new(SimpleIterator::new(keys.clone(), vals.clone(), false, 1));
     it.rewind();
     let (n_keys, n_vals) = get_all(it);
     for i in 0..keys.len() {
@@ -160,7 +160,7 @@ fn test_simple_iterator() {
 fn test_merge_single() {
     let keys = vec!["1", "2", "3"];
     let vals = vec!["v1", "v2", "v3"];
-    let it = SimpleIterator::new(keys.clone(), vals.clone(), false);
+    let it = SimpleIterator::new(keys.clone(), vals.clone(), false, 1);
     let mut merge_it = new_merge_iterator(vec![Box::new(it)], false);
     merge_it.rewind();
     let (n_keys, n_vals) = get_all(merge_it);
@@ -174,7 +174,7 @@ fn test_merge_single() {
 fn test_merge_single_resversed() {
     let keys = vec!["1", "2", "3"];
     let vals = vec!["v1", "v2", "v3"];
-    let it = SimpleIterator::new(keys.clone(), vals.clone(), true);
+    let it = SimpleIterator::new(keys.clone(), vals.clone(), true, 1);
     let mut merge_it = new_merge_iterator(vec![Box::new(it)], true);
     merge_it.rewind();
     let (n_keys, n_vals) = get_all(merge_it);
@@ -191,17 +191,20 @@ fn test_merge_more() {
         vec!["1", "3", "7"],
         vec!["a1", "a3", "a7"],
         false,
+        10,
     ));
     let it2 = Box::new(SimpleIterator::new(
         vec!["2", "3", "5"],
         vec!["b2", "b3", "b5"],
         false,
+        9,
     ));
-    let it3 = Box::new(SimpleIterator::new(vec!["1"], vec!["c1"], false));
+    let it3 = Box::new(SimpleIterator::new(vec!["1"], vec!["c1"], false, 8));
     let it4 = Box::new(SimpleIterator::new(
         vec!["1", "7", "9"],
         vec!["d1", "d7", "d9"],
         false,
+        7,
     ));
     let mut merge_it = new_merge_iterator(vec![it1, it2, it3, it4], false);
     let expected_keys = vec!["1", "2", "3", "5", "7", "9"];
@@ -218,7 +221,7 @@ fn test_merge_more() {
 fn test_merge_iterator_nested() {
     let keys = vec!["1", "2", "3"];
     let vals = vec!["v1", "v2", "v3"];
-    let it = Box::new(SimpleIterator::new(keys.clone(), vals.clone(), false));
+    let it = Box::new(SimpleIterator::new(keys.clone(), vals.clone(), false, 1));
     let merge1 = new_merge_iterator(vec![it], false);
     let mut merge2 = new_merge_iterator(vec![merge1], false);
     merge2.rewind();
@@ -235,17 +238,20 @@ fn test_merge_iterator_seek() {
         vec!["1", "3", "7"],
         vec!["a1", "a3", "a7"],
         false,
+        9,
     ));
     let it2 = Box::new(SimpleIterator::new(
         vec!["2", "3", "5"],
         vec!["b2", "b3", "b5"],
         false,
+        8,
     ));
-    let it3 = Box::new(SimpleIterator::new(vec!["1"], vec!["c1"], false));
+    let it3 = Box::new(SimpleIterator::new(vec!["1"], vec!["c1"], false, 7));
     let it4 = Box::new(SimpleIterator::new(
         vec!["1", "7", "9"],
         vec!["d1", "d7", "d9"],
         false,
+        6,
     ));
     let mut merge_it = new_merge_iterator(vec![it1, it2, it3, it4], false);
     merge_it.seek(InnerKey::from_inner_buf("4".as_bytes()));
@@ -264,17 +270,20 @@ fn test_merge_iterator_seek_reversed() {
         vec!["1", "3", "7"],
         vec!["a1", "a3", "a7"],
         true,
+        9,
     ));
     let it2 = Box::new(SimpleIterator::new(
         vec!["2", "3", "5"],
         vec!["b2", "b3", "b5"],
         true,
+        8,
     ));
-    let it3 = Box::new(SimpleIterator::new(vec!["1"], vec!["c1"], true));
+    let it3 = Box::new(SimpleIterator::new(vec!["1"], vec!["c1"], true, 7));
     let it4 = Box::new(SimpleIterator::new(
         vec!["1", "7", "9"],
         vec!["d1", "d7", "d9"],
         true,
+        6,
     ));
     let mut merge_it = new_merge_iterator(vec![it1, it2, it3, it4], true);
     merge_it.seek(InnerKey::from_inner_buf("5".as_bytes()));
@@ -293,17 +302,20 @@ fn test_merge_iterator_seek_invalid() {
         vec!["1", "3", "7"],
         vec!["a1", "a3", "a7"],
         false,
+        9,
     ));
     let it2 = Box::new(SimpleIterator::new(
         vec!["2", "3", "5"],
         vec!["b2", "b3", "b5"],
         false,
+        8,
     ));
-    let it3 = Box::new(SimpleIterator::new(vec!["1"], vec!["c1"], false));
+    let it3 = Box::new(SimpleIterator::new(vec!["1"], vec!["c1"], false, 7));
     let it4 = Box::new(SimpleIterator::new(
         vec!["1", "7", "9"],
         vec!["d1", "d7", "d9"],
         false,
+        6,
     ));
     let mut merge_it = new_merge_iterator(vec![it1, it2, it3, it4], false);
     merge_it.seek(InnerKey::from_inner_buf("f".as_bytes()));
@@ -316,17 +328,20 @@ fn test_merge_iterator_seek_invalid_reversed() {
         vec!["1", "3", "7"],
         vec!["a1", "a3", "a7"],
         true,
+        9,
     ));
     let it2 = Box::new(SimpleIterator::new(
         vec!["2", "3", "5"],
         vec!["b2", "b3", "b5"],
         true,
+        8,
     ));
-    let it3 = Box::new(SimpleIterator::new(vec!["1"], vec!["c1"], true));
+    let it3 = Box::new(SimpleIterator::new(vec!["1"], vec!["c1"], true, 7));
     let it4 = Box::new(SimpleIterator::new(
         vec!["1", "7", "9"],
         vec!["d1", "d7", "d9"],
         true,
+        6,
     ));
     let mut merge_it = new_merge_iterator(vec![it1, it2, it3, it4], true);
     merge_it.seek(InnerKey::from_inner_buf("0".as_bytes()));
@@ -339,9 +354,10 @@ fn merge_iterator_duplicated() {
         vec!["0", "1", "2"],
         vec!["0", "1", "2"],
         false,
+        9,
     ));
-    let it2 = Box::new(SimpleIterator::new(vec!["1"], vec!["1"], false));
-    let it3 = Box::new(SimpleIterator::new(vec!["2"], vec!["2"], false));
+    let it2 = Box::new(SimpleIterator::new(vec!["1"], vec!["1"], false, 8));
+    let it3 = Box::new(SimpleIterator::new(vec!["2"], vec!["2"], false, 7));
     let mut merge_it = new_merge_iterator(vec![it1, it2, it3], false);
     merge_it.rewind();
     let mut cnt = 0;

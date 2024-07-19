@@ -12,16 +12,14 @@ pub struct MergeIterator<'a> {
 }
 
 pub(crate) struct MergeIteratorChild<'a> {
-    is_first: bool,
     valid: bool,
     iter: Box<dyn Iterator + 'a>,
     ver: u64,
 }
 
 impl<'a> MergeIteratorChild<'a> {
-    pub(crate) fn new(is_first: bool, iter: Box<dyn Iterator + 'a>) -> Self {
+    pub(crate) fn new(iter: Box<dyn Iterator + 'a>) -> Self {
         MergeIteratorChild {
-            is_first,
             valid: false,
             iter,
             ver: 0,
@@ -125,7 +123,7 @@ impl<'a> MergeIterator<'a> {
             match self.smaller.iter.key().cmp(&self.bigger.iter.key()) {
                 Equal => {
                     self.same_key = true;
-                    if !self.smaller.is_first {
+                    if self.smaller.ver < self.bigger.ver {
                         self.swap();
                     }
                 }

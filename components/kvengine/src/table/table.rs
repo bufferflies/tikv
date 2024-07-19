@@ -491,8 +491,8 @@ pub fn new_merge_iterator<'a>(
             let second_iter: Box<dyn Iterator + 'a> = iters.pop().unwrap();
             let first_iter: Box<dyn Iterator + 'a> = iters.pop().unwrap();
             let first: Box<super::MergeIteratorChild<'a>> =
-                Box::new(super::MergeIteratorChild::new(true, first_iter));
-            let second = Box::new(super::MergeIteratorChild::new(false, second_iter));
+                Box::new(super::MergeIteratorChild::new(first_iter));
+            let second = Box::new(super::MergeIteratorChild::new(second_iter));
             let merge_iter = super::MergeIterator::new(first, second, reverse);
             Box::new(merge_iter)
         }
