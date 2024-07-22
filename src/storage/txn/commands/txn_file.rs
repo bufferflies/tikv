@@ -142,7 +142,7 @@ impl TxnFileCommand {
         let (txn_id, commit_ts) = req.txn_file_status.iter().next().unwrap();
         let mut txn_file_ref = TxnFileRef::new();
         txn_file_ref.set_shard_ver(req.get_ctx().get_region_epoch().get_version());
-        txn_file_ref.set_start_ts(req.ts().into_inner());
+        txn_file_ref.set_start_ts(txn_id.into_inner());
         let user_meta = UserMeta::new(txn_id.into_inner(), commit_ts.into_inner());
         txn_file_ref.set_user_meta(user_meta.to_array().to_vec());
         Self::build_txn_file_ref_from_region(snap, txn_file_ref.start_ts, &mut txn_file_ref);
@@ -692,7 +692,8 @@ impl TxnFileCommand {
     ) -> crate::storage::mvcc::Result<ProcessResult> {
         let um = UserMeta::from_slice(self.txn_file_ref.get_user_meta());
         self.process_resolve_txn_lock(snap_access, um.commit_ts.into(), None)?;
-        resolve_lock.txn_file_status.remove(&self.ts());
+        let resolved_txn = resolve_lock.txn_file_status.remove(&self.ts());
+        debug_assert!(resolved_txn.is_some());
         if resolve_lock.txn_file_status.is_empty() && resolve_lock.txn_status.is_empty() {
             // All locks are resolved.
             return Ok(ProcessResult::Res);

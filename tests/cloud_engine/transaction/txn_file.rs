@@ -207,6 +207,40 @@ fn test_txn_file_commands(#[case] enable_inner_key_off: bool) {
         resp
     );
 
+    // test resolve lock (batch).
+    let start_ts = client.get_ts().into_inner();
+    let chunk_ids = build_txn_files(&dfs, start_ts, 0, 300, enable_inner_key_off);
+    let primary_lock = gen_key(0);
+
+    let mut req = PrewriteRequest::new();
+    req.set_context(ctx.clone());
+    req.set_txn_file_chunks(chunk_ids);
+    req.set_primary_lock(primary_lock);
+    req.set_lock_ttl(6000);
+    req.set_start_version(start_ts);
+    req.set_min_commit_ts(start_ts + 1);
+    let resp = kv_client.kv_prewrite(&req).unwrap();
+    assert!(
+        resp.get_errors().is_empty() && !resp.has_region_error(),
+        "resp {:?}",
+        resp
+    );
+    let txn_info = kvrpcpb::TxnInfo {
+        txn: start_ts,
+        status: 0,
+        is_txn_file: true,
+        ..Default::default()
+    };
+    let mut req = ResolveLockRequest::new();
+    req.set_context(ctx.clone());
+    req.set_txn_infos(vec![txn_info].into());
+    let resp = kv_client.kv_resolve_lock(&req).unwrap();
+    assert!(
+        !resp.has_error() && !resp.has_region_error(),
+        "resp {:?}",
+        resp
+    );
+
     // test success 2pc.
     let start_ts = client.get_ts().into_inner();
     let chunk_ids = build_txn_files(&dfs, start_ts, 0, 300, enable_inner_key_off);
