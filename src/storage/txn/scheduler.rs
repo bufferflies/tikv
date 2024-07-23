@@ -1785,7 +1785,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
                     Ok(snapshot) => {
                         SCHED_STAGE_COUNTER_VEC.get(tag).snapshot_ok.inc();
                         let chunks_id = txn_file::command_chunks_to_load(&cmd);
-                        if !chunks_id.is_empty() {
+                        if !chunks_id.is_empty() && !manager.all_chunks_exists(chunks_id) {
                             let snap = snapshot.get_kvengine_snap().unwrap();
                             let encryption_key = snap.get_encryption_key();
                             let manager = manager.clone();
