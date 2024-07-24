@@ -59,6 +59,13 @@ RUN cp -R ./proto/include/* ${BASE}/include
 
 # Install Rustup
 RUN curl https://sh.rustup.rs -sSf | sh -s -- --no-modify-path --default-toolchain none -y
+SHELL ["/bin/bash", "-c"]
+RUN echo $'[source.crates-io]\n\
+replace-with = "aliyun"\n\
+[source.aliyun]\n\
+registry = "sparse+https://mirrors.aliyun.com/crates.io-index/"\n\
+' > /root/.cargo/config.toml
+ENV CARGO_UNSTABLE_SPARSE_REGISTRY true
 ENV PATH /root/.cargo/bin/:$PATH
 
 # Install the Rust toolchain
