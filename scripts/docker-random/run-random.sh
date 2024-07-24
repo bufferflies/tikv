@@ -83,5 +83,7 @@ for i in $(seq -w 1 100000); do
     if [ "$TESTNAME" = "with_tidb" ]; then
         pkill -9 tidb-server || true
         pkill -9 pd-server || true
+        pkill -9 tiflash || true
+        pkill -9 go-tpc || true
     fi
 done

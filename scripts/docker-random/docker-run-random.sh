@@ -97,7 +97,7 @@ if [ "$MEMORY_PROFILE" -eq 1 ] && [ "$KEEP_TMP_ON_ERROR" -ne 1 ]; then
 	echo "WARNING: --keep-tmp-on-error is not enabled. The profile dumps will be removed after each test."
 fi
 
-IMAGE="ubuntu:20.04"
+IMAGE="amazonlinux:2022.0.20220504.1"
 if [ "$TESTNAME" = "with_tidb" ]; then
 	BUILD_TIDB_IMAGE_ARGS=""
 	if [ "$REBUILD_IMAGE" -eq 1 ]; then
