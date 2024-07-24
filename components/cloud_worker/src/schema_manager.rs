@@ -668,7 +668,7 @@ fn table_info_to_schema(ti: &TableInfo) -> Schema {
     let handle_column = if ti.is_common_handle {
         new_common_handle_column_info()
     } else if ti.pk_is_handle {
-        pk_cols[0].clone()
+        columns.iter().find(|c| c.get_pk_handle()).unwrap().clone()
     } else {
         new_int_handle_column_info()
     };

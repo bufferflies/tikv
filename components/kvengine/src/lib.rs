@@ -68,4 +68,6 @@ pub const NUM_CFS: usize = 3;
 pub const CF_LEVELS: [usize; NUM_CFS] = [3, 2, 1];
 const CF_MANAGED: [bool; NUM_CFS] = [true, false, true];
 
+pub const COLUMNAR_LEVELS: usize = 3;
+
 pub const WRITE_CF_BOTTOM_LEVEL: u32 = 3;

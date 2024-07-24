@@ -4,7 +4,10 @@ use std::cmp;
 
 use bytes::Bytes;
 
-use crate::{metrics::ENGINE_OPEN_FILES, table::TableExt, IdVer, EXTRA_CF, NUM_CFS, WRITE_CF};
+use crate::{
+    metrics::ENGINE_OPEN_FILES, table::TableExt, IdVer, COLUMNAR_LEVELS, EXTRA_CF, NUM_CFS,
+    WRITE_CF,
+};
 
 #[derive(Default, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -41,6 +44,8 @@ pub struct EngineStats {
     pub old_entries: usize,
     pub tombs: usize,
     pub kv_size: u64,
+    pub txn_file_locks: usize,
+    pub columnar_levels: Vec<ColumnarLevelStats>,
     pub top_10_write: Vec<ShardStats>,
 }
 
@@ -89,6 +94,7 @@ impl super::Engine {
     pub fn get_engine_stats(mut shard_stats: Vec<ShardStats>) -> EngineStats {
         let mut engine_stats = EngineStats::new();
         engine_stats.num_shards = shard_stats.len();
+        engine_stats.columnar_levels = vec![ColumnarLevelStats::default(); COLUMNAR_LEVELS];
         for shard in &shard_stats {
             if shard.active {
                 engine_stats.num_active_shards += 1;
@@ -138,6 +144,12 @@ impl super::Engine {
                     engine_stats.level_total_sizes[i] += level_stat.data_size;
                     engine_stats.cf_total_sizes[cf] += level_stat.data_size;
                 }
+            }
+            engine_stats.txn_file_locks += shard.txn_file_locks;
+            for (i, col_level) in shard.columnar_levels.iter().enumerate() {
+                let engine_col_level = &mut engine_stats.columnar_levels[i];
+                engine_col_level.num_files += col_level.num_files;
+                engine_col_level.data_size += col_level.data_size;
             }
         }
         ENGINE_OPEN_FILES.set(engine_stats.open_files);
@@ -201,7 +213,11 @@ pub struct ShardStats {
     pub ready_to_destroy_range: bool,
     pub truncate_ts: Option<u64>,
     pub trim_over_bound: bool,
+    // Txn File Stats
+    pub txn_file_locks: usize,
+    // Columnar Stats
     pub schema_version: i64,
+    pub columnar_levels: Vec<ColumnarLevelStats>,
 }
 
 impl ShardStats {
@@ -244,6 +260,14 @@ impl From<ShardStats> for ShardStatsLite {
 #[serde(rename_all = "kebab-case")]
 pub struct CfStats {
     pub levels: Vec<LevelStats>,
+}
+
+#[derive(Default, Serialize, Deserialize, Debug, Clone)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+pub struct ColumnarLevelStats {
+    pub num_files: usize,
+    pub data_size: u64,
 }
 
 #[derive(Default, Clone, Debug, PartialEq)]
@@ -441,11 +465,17 @@ impl super::Shard {
         let compaction_level = priority.as_ref().map_or(0, |x| x.level());
         let compaction_score = priority.as_ref().map_or(0f64, |x| x.score());
         let pending_ops = self.pending_ops.read().unwrap();
+        let txn_file_locks = data.lock_txn_files.len();
         let schema_version = data
             .schema_file
             .as_ref()
             .map(|sf| sf.get_version())
             .unwrap_or_default();
+        let mut columnar_levels = vec![ColumnarLevelStats::default(); COLUMNAR_LEVELS];
+        for (i, l) in data.col_levels.levels.iter().enumerate() {
+            columnar_levels[i].num_files = l.files.len();
+            columnar_levels[i].data_size = l.files.iter().map(|c| c.get_file().size()).sum();
+        }
         ShardStats {
             id: self.id,
             ver: self.ver,
@@ -489,7 +519,9 @@ impl super::Shard {
             ready_to_destroy_range: Self::ready_to_destroy_range(&pending_ops.del_prefixes, &data),
             truncate_ts: pending_ops.truncate_ts.map(|x| x.inner()),
             trim_over_bound: pending_ops.trim_over_bound,
+            txn_file_locks,
             schema_version,
+            columnar_levels,
         }
     }
 }
