@@ -709,7 +709,7 @@ impl BackupCluster {
         };
         let mut raft_engines: HashMap<u64, RfEngine> = Default::default();
         let mut cluster_tolerated_err = 0;
-        let mut recv_restore_rfenigne =
+        let mut recv_restore_rfengine =
             |result_rx: &mpsc::Receiver<Result<(u64, TikvConfig, RfEngine)>>| -> Result<()> {
                 // We can tolerate one store failure for lightweight restoration during fetch
                 // latest wal chunk from store.
@@ -780,11 +780,11 @@ impl BackupCluster {
             if msg_count < RESTORE_RFENGINE_CONCURRENCY {
                 msg_count += 1;
             } else {
-                recv_restore_rfenigne(&result_rx)?;
+                recv_restore_rfengine(&result_rx)?;
             }
         }
         for _ in 0..msg_count {
-            recv_restore_rfenigne(&result_rx)?;
+            recv_restore_rfengine(&result_rx)?;
         }
         cluster.raft_engines = raft_engines;
         cluster.tolerated_err = cluster_tolerated_err;
@@ -1868,7 +1868,9 @@ impl BackupCluster {
             .into_iter()
             .map(|meta| {
                 let mut cs = meta.to_change_set();
-                let snap = cs.take_snapshot();
+                let mut snap = cs.take_snapshot();
+                // Reset schema meta before restore the shard to server.
+                snap.clear_schema_meta();
                 cs.set_restore_shard(snap);
                 cs
             })

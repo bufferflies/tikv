@@ -8,9 +8,14 @@ use std::{
     time::Duration,
 };
 
+use bytes::Bytes;
+use cloud_worker::broadcast_schema_update_to_all_stores;
 use engine_traits::ObjectStorage;
 use kvengine::{
-    dfs::{DFSConfig, Dfs, FileType, S3Fs},
+    dfs::{DFSConfig, Dfs, FileType, Options, S3Fs},
+    table::columnar::{
+        build_schema_file, new_int_handle_column_info, new_version_column_info, Schema,
+    },
     ShardStats, WRITE_CF,
 };
 use kvproto::metapb;
@@ -24,7 +29,7 @@ use native_br::{
 };
 use pd_client::PdClient;
 use rand::{seq::SliceRandom, Rng};
-use security::SecurityConfig;
+use security::{SecurityConfig, SecurityManager};
 use test_cloud_server::{
     client::{
         ClusterClientOptions, CommitAction, MutateOptions, RequestOptions, RequestPeerRole,
@@ -40,7 +45,7 @@ use tikv_util::{
     config::{ReadableDuration, ReadableSize},
     debug, info,
     store::new_learner_peer,
-    warn,
+    time, warn,
 };
 use tokio::runtime::Runtime;
 use txn_types::TimeStamp;
@@ -1124,6 +1129,144 @@ fn test_restore_keyspace_with_no_chunk() {
         reporter,
     )
     .unwrap();
+
+    // Verify restored data.
+    client.verify_data_with_ref_store();
+    cluster.stop();
+    oss.shutdown();
+}
+
+#[test]
+fn test_restore_keyspace_with_schema() {
+    const KEYSPACE_ID: u32 = 1;
+
+    test_util::init_log_for_test();
+    let (_temp_dir, mut oss, dfs_config) = prepare_dfs("test_restore_keyspace_");
+    let s3fs = Arc::new(S3Fs::new(
+        dfs_config.prefix.clone(),
+        dfs_config.s3_endpoint.clone(),
+        dfs_config.s3_key_id.clone(),
+        dfs_config.s3_secret_key.clone(),
+        dfs_config.s3_region.clone(),
+        dfs_config.s3_bucket.clone(),
+    ));
+    let reporter = Arc::new(DummyStepReporter::default());
+    let runtime = Runtime::new().unwrap();
+
+    let mut cluster = ServerCluster::new(
+        alloc_node_id_vec(NODES_COUNT),
+        |_, conf: &mut TikvConfig| {
+            conf.dfs = dfs_config.clone();
+            conf.rfengine.lightweight_backup = true;
+            conf.enable_inner_key_offset = true;
+        },
+    );
+    cluster.wait_region_replicated(&[], 3);
+    let mut client = cluster.new_client();
+    client.split(&get_keyspace_prefix(KEYSPACE_ID));
+    client.split(&get_keyspace_prefix(KEYSPACE_ID + 1));
+
+    // Import small data
+    let i_to_key = gen_keyspace_key(KEYSPACE_ID);
+    client.put_kv(0..1, &i_to_key, i_to_val(BASIC_DATA_LEN));
+    client.verify_data_with_ref_store();
+
+    // Set schema file
+    let mut schemas = vec![];
+    for i in 0..=10 {
+        let schema = Schema {
+            table_id: i,
+            handle_column: new_int_handle_column_info(),
+            version_column: new_version_column_info(),
+            txn_id_column: None,
+            columns: vec![new_int_handle_column_info()],
+            pk_col_ids: vec![],
+        };
+        schemas.push(schema);
+    }
+    let schema_version = 100;
+    let schema_file_data = build_schema_file(KEYSPACE_ID, schema_version, schemas.clone());
+    let file_id = client.pd_client.alloc_id().unwrap();
+    runtime
+        .block_on(s3fs.create(
+            file_id,
+            Bytes::from(schema_file_data),
+            Options::default().with_type(FileType::Schema),
+        ))
+        .unwrap();
+    let stores = client.pd_client.get_all_stores(true).unwrap();
+    let security_mgr = Arc::new(SecurityManager::new(&Default::default()).unwrap());
+    runtime
+        .block_on(broadcast_schema_update_to_all_stores(
+            &stores,
+            security_mgr,
+            time::Duration::from_secs(5),
+            KEYSPACE_ID,
+            file_id,
+        ))
+        .unwrap();
+    // Check the schema file already installed.
+    let data_stats = cluster.get_data_stats();
+    let mut schema_file_installed = false;
+    data_stats.iter_shard_stats(|_, shard_stats| {
+        if shard_stats.schema_version > 0 {
+            schema_file_installed = true;
+            return true;
+        }
+        false
+    });
+    assert!(schema_file_installed);
+
+    // Perform backup.
+    let snapshot_backup_name = generate_backup_name();
+    {
+        let backup_ts = client.get_ts().into_inner();
+        let backup_config = backup::BackupConfig {
+            dfs: dfs_config,
+            skip_keyspace_meta: true,
+            ..Default::default()
+        };
+        let (_, backup_meta) = backup::backup_cluster_with_ts(
+            backup_config,
+            backup::BackupType::Lightweight,
+            snapshot_backup_name.clone(),
+            cluster.get_pd_client().as_ref(),
+            backup_ts,
+            None,
+        )
+        .expect("backup::backup_cluster");
+        info!("backup_cluster result: {:?}", backup_meta);
+    }
+
+    // Restore keyspace.
+    restore_keyspace::restore_keyspace(
+        KEYSPACE_ID,
+        KEYSPACE_ID,
+        &snapshot_backup_name,
+        None,
+        s3fs,
+        RestoreConfig::default(),
+        cluster.get_pd_client(),
+        &runtime,
+        None,
+        reporter,
+    )
+    .unwrap();
+
+    // Wait a while for apply.
+    std::thread::sleep(Duration::from_secs(2));
+
+    // Check if the schema file is cleared after restoration.
+    let data_stats = cluster.get_data_stats();
+    let mut schema_file_installed = false;
+    data_stats.iter_shard_stats(|_, shard_stats| {
+        if shard_stats.schema_version > 0 {
+            schema_file_installed = true;
+            return true;
+        }
+        false
+    });
+    assert!(!schema_file_installed);
 
     // Verify restored data.
     client.verify_data_with_ref_store();

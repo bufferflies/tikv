@@ -3,7 +3,7 @@
 use kvengine::dfs;
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum Error {
+pub enum Error {
     #[error("check {0}")]
     CheckError(String),
     #[error("pd error {0}")]
@@ -38,4 +38,4 @@ pub(crate) enum Error {
     Other(#[from] Box<dyn std::error::Error + Send + Sync>),
 }
 
-pub(crate) type Result<T> = std::result::Result<T, Error>;
+pub type Result<T> = std::result::Result<T, Error>;

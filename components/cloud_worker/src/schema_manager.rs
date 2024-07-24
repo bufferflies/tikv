@@ -227,6 +227,12 @@ impl MetaFile {
             .get(&keyspace_id)
             .map(|m| m.last().cloned().unwrap())
     }
+
+    fn remove_keyspace(&self, keyspace_id: u32) -> Option<(u32, Vec<(u64, i64)>)> {
+        // The schema file will be removed by gc.
+        self.core.checked_version.remove(&keyspace_id);
+        self.core.files.remove(&keyspace_id)
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
@@ -401,6 +407,17 @@ impl SchemaManager {
             // Check the remote schema_version in store shard_stats to ensure the state
             // applied to kvengine.
             if let Ok(Some(schema_file)) = &local_schema_file {
+                if self.check_if_keyspace_restored(keyspace_shard_stats) {
+                    // If the keyspace is just restored, the schema_version in shard will be
+                    // reset to 0 after restoration. In this case, we should remove the old
+                    // schema file and try to rebuild it in next loop.
+                    if let Some((_, files)) = self.meta_file.remove_keyspace(keyspace_id) {
+                        let file_ids: Vec<u64> = files.iter().map(|f| f.0).collect();
+                        remove_schema_file_from_local(&self.config.dir, keyspace_id, &file_ids)
+                            .unwrap();
+                    }
+                    continue;
+                }
                 if self
                     .check_store_schema_version(
                         keyspace_id,
@@ -529,6 +546,11 @@ impl SchemaManager {
         let meta = self.meta_file.write();
         write_meta_file_to_local(&self.config.dir, Bytes::from(meta)).unwrap();
         Ok(())
+    }
+
+    // return true if the keyspace is just restored.
+    fn check_if_keyspace_restored(&self, keyspace_shard_stats: &[ShardStatsLite]) -> bool {
+        !keyspace_shard_stats.iter().any(|s| s.schema_version != 0)
     }
 
     // return true if sent broadcast to stores
@@ -846,6 +868,20 @@ fn write_schema_file_to_local<P: AsRef<Path>>(
     Ok(())
 }
 
+fn remove_schema_file_from_local<P: AsRef<Path>>(
+    base_dir: P,
+    keyspace_id: u32,
+    file_ids: &[u64],
+) -> Result<()> {
+    let dir = base_dir.as_ref().join(keyspace_id.to_string());
+    for file_id in file_ids {
+        let filename = format!("{:016x}.schema", file_id);
+        let file_path = dir.join(filename);
+        fs::remove_file(file_path.as_path())?;
+    }
+    Ok(())
+}
+
 fn write_meta_file_to_local<P: AsRef<Path>>(dir: P, data: Bytes) -> Result<()> {
     let tmp_file = format!("{}.tmp", META_FILE_NAME);
     let file_path = dir.as_ref().join(META_FILE_NAME);
@@ -856,7 +892,7 @@ fn write_meta_file_to_local<P: AsRef<Path>>(dir: P, data: Bytes) -> Result<()> {
     Ok(())
 }
 
-async fn broadcast_schema_update_to_all_stores(
+pub async fn broadcast_schema_update_to_all_stores(
     stores: &[Store],
     security_mgr: Arc<SecurityManager>,
     timeout: Duration,
