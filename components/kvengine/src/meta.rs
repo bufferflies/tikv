@@ -939,6 +939,7 @@ impl ShardMeta {
         let parent = self.clone();
         self.ver += 1;
         self.seq = sequence;
+        self.data_sequence = sequence;
         self.parent = Some(Box::new(parent));
     }
 
@@ -1021,6 +1022,7 @@ impl ShardMeta {
         let source_mem_tbl_version = source.base_version + source.seq;
         let target_mem_tbl_version = self.base_version + sequence;
         self.base_version = max(source_mem_tbl_version, target_mem_tbl_version) - sequence;
+        self.data_sequence = sequence;
         self.parent = Some(Box::new(parent));
         self.seq = sequence;
     }

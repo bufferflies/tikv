@@ -21,7 +21,7 @@ use rfengine::{
     TRUNCATE_ALL_INDEX,
 };
 use slog_global::info;
-use tikv_util::warn;
+use tikv_util::{debug, warn};
 
 use crate::store::{
     is_property_change_set, load_raft_truncated_state, load_region_state, rlog, Applier,
@@ -474,6 +474,7 @@ pub fn apply_custom_log_in_recover(
     let mut applier = Applier::new_for_recover(store_id, region_meta, snap, apply_state);
     ctx.exec_log_index = applied_index + 1;
     ctx.exec_log_term = applied_index_term;
+    debug!("{} apply_custom_log_in_recover", shard.tag(); "log_index" => ctx.exec_log_index);
     let _ = applier.exec_custom_log(&mut ctx, &custom)?;
     Ok(())
 }

@@ -50,7 +50,7 @@ impl SimpleIterator {
         for i in 0..100 {
             last_offs.push(keys.len());
             let key = Bytes::from(format!("key{:03}", i));
-            for j in (min_ver..=max_ver).rev() {
+            for j in (min_ver..max_ver).rev() {
                 keys.push(key.clone());
                 let val = Value::encode_buf(0, &[], j, key.chunk());
                 vals.push(val);

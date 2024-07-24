@@ -1069,8 +1069,14 @@ impl BackupCluster {
         store_id: u64,
         region_id: u64,
         peer_id: u64,
-        meta: kvenginepb::ChangeSet,
+        mut meta: kvenginepb::ChangeSet,
     ) -> BackupShard {
+        // Fix backups before pull/1732 in which the `data_sequence` in meta is not
+        // correct.
+        if meta.has_parent() {
+            meta.mut_snapshot().data_sequence = meta.sequence;
+        }
+
         let snap = meta.get_snapshot();
         let raft_last_index = rf.get_last_index(peer_id);
         let need_flush_mem_table = raft_last_index.map_or(false, |last_idx| {

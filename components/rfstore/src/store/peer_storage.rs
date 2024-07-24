@@ -536,7 +536,10 @@ impl PeerStorage {
     /// The last index of raft logs that have been applied and persisted to the
     /// state machine.
     pub(crate) fn data_persisted_log_index(&self) -> Option<u64> {
-        self.shard_meta.as_ref().map(|meta| meta.data_sequence)
+        self.shard_meta.as_ref().map(|meta| match &meta.parent {
+            Some(parent) if parent.id == meta.id => parent.data_sequence,
+            _ => meta.data_sequence,
+        })
     }
 
     pub(crate) fn get_preprocessed_region(&self) -> &metapb::Region {
