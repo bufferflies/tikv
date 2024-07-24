@@ -20,6 +20,7 @@ jobs:
       RUST_BACKTRACE: "1"
       LOG_LEVEL: INFO
       EXTRA_CARGO_ARGS: --no-run
+      CARGO_UNSTABLE_SPARSE_REGISTRY: true
     steps:
       - uses: actions/checkout@v3
         with:
@@ -37,6 +38,15 @@ jobs:
         with:
           toolchain: nightly-2022-11-15
           components: clippy, rustfmt
+      - name: Set crates.io mirror # https://developer.aliyun.com/mirror/crates.io-index
+        run: |
+          mkdir -vp ${CARGO_HOME:-$HOME/.cargo}
+          cat << EOF | tee ${CARGO_HOME:-$HOME/.cargo}/config.toml
+          [source.crates-io]
+          replace-with = 'aliyun'
+          [source.aliyun]
+          registry = "sparse+https://mirrors.aliyun.com/crates.io-index/"
+          EOF
       - name: Check format
         working-directory: ./
         run: |
