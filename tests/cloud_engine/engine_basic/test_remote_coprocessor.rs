@@ -2329,8 +2329,10 @@ impl<'a> DagTest<'a> {
         mut req: Request,
     ) -> Result<coppb::Response, tikv::coprocessor::Error> {
         req.mut_context().set_api_version(ApiVersion::V2);
+        let tag = cloud_worker::get_cop_req_tag(&req);
         let f = async {
             let snap_access = SnapAccess::construct_snapshot(
+                tag,
                 self.cluster.get_dfs().unwrap(),
                 &snapshot.memtable_rows,
                 &snapshot.cs,

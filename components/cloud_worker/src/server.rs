@@ -173,23 +173,9 @@ async fn handle_remote_coprocessor(
     }
     let cop_ctx = cop_req.get_context();
     let keyspace_id = cop_ctx.keyspace_id;
-    let start_ts = cop_req.get_start_ts();
     let handle_start = Instant::now();
+    let tag = get_cop_req_tag(&cop_req);
     let req_type = cop_req.get_tp();
-    let req_type_str = match req_type {
-        REQ_TYPE_DAG => "dag".to_string(),
-        REQ_TYPE_ANALYZE => "analyze".to_string(),
-        REQ_TYPE_CHECKSUM => "checksum".to_string(),
-        _ => "".to_string(),
-    };
-    let tag = format!(
-        "{} ks{}:{}:{}:{}",
-        req_type_str,
-        keyspace_id,
-        cop_ctx.get_region_id(),
-        cop_ctx.get_region_epoch().get_version(),
-        start_ts,
-    );
     let timeout = Duration::from_millis(cop_ctx.get_max_execution_duration_ms());
     if !ctx
         .cop_limiter
@@ -205,6 +191,7 @@ async fn handle_remote_coprocessor(
         _ => ctx.s3fs.clone(),
     };
     let snap_access_res = SnapAccess::construct_snapshot(
+        tag.clone(),
         dfs,
         mem_data,
         snap_data,
@@ -271,6 +258,27 @@ async fn handle_remote_coprocessor(
         .status(200)
         .body(response_data.into())
         .unwrap())
+}
+
+pub fn get_cop_req_tag(cop_req: &kvproto::coprocessor::Request) -> String {
+    let cop_ctx = cop_req.get_context();
+    let keyspace_id = cop_ctx.keyspace_id;
+    let start_ts = cop_req.get_start_ts();
+    let req_type = cop_req.get_tp();
+    let req_type_str = match req_type {
+        REQ_TYPE_DAG => "dag".to_string(),
+        REQ_TYPE_ANALYZE => "analyze".to_string(),
+        REQ_TYPE_CHECKSUM => "checksum".to_string(),
+        _ => "".to_string(),
+    };
+    format!(
+        "{} ks{}:{}:{}:{}",
+        req_type_str,
+        keyspace_id,
+        cop_ctx.get_region_id(),
+        cop_ctx.get_region_epoch().get_version(),
+        start_ts,
+    )
 }
 
 async fn handle_get_metrics(req: Request<Body>) -> hyper::Result<Response<Body>> {

@@ -263,6 +263,7 @@ impl Shard {
     }
 
     pub async fn from_change_set(
+        tag: String,
         dfs: Arc<dyn dfs::Dfs>,
         change_set: pb::ChangeSet,
         wb: Option<&mut WriteBatch>,
@@ -317,11 +318,12 @@ impl Shard {
                 let fs = dfs.clone();
                 let tx = result_tx.clone();
                 let fm = fm.clone();
+                let tag = tag.clone();
                 runtime.spawn(async move {
                     let res = fs.read_file(id, opts).await;
-                    tx.send(res.map(|data| (id, fm, Some(data))))
-                        .map_err(|_| "send file data failed")
-                        .unwrap();
+                    if tx.send(res.map(|data| (id, fm, Some(data)))).is_err() {
+                        error!("failed to send result"; "tag" => tag, "file_id" => id);
+                    }
                 });
             }
             msg_count += 1;

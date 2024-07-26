@@ -36,6 +36,7 @@ use pd_client::PdClient;
 pub use schema_manager::broadcast_schema_update_to_all_stores;
 use schema_manager::{SchemaManager, SchemaManagerConfig};
 use security::{SecurityConfig, SecurityManager};
+pub use server::get_cop_req_tag;
 use slog_global::{error, info};
 use tikv_util::{
     config::{ReadableDuration, ReadableSize},

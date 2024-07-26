@@ -91,6 +91,7 @@ impl SnapAccess {
     }
 
     pub async fn from_change_set(
+        tag: String,
         dfs: Arc<dyn dfs::Dfs>,
         change_set: pb::ChangeSet,
         ignore_lock: bool,
@@ -99,6 +100,7 @@ impl SnapAccess {
     ) -> Self {
         let core = Arc::new(
             SnapAccessCore::from_change_set(
+                tag,
                 dfs,
                 change_set,
                 None,
@@ -112,6 +114,7 @@ impl SnapAccess {
     }
 
     async fn from_change_set_and_memtable_data(
+        tag: String,
         dfs: Arc<dyn dfs::Dfs>,
         change_set: pb::ChangeSet,
         wb: &mut WriteBatch,
@@ -120,13 +123,22 @@ impl SnapAccess {
     ) -> Self {
         let wb = if wb.is_empty() { None } else { Some(wb) };
         let core = Arc::new(
-            SnapAccessCore::from_change_set(dfs, change_set, wb, true, master_key, block_cache)
-                .await,
+            SnapAccessCore::from_change_set(
+                tag,
+                dfs,
+                change_set,
+                wb,
+                true,
+                master_key,
+                block_cache,
+            )
+            .await,
         );
         Self { core }
     }
 
     pub async fn construct_snapshot<'a>(
+        tag: String,
         dfs: Arc<dyn dfs::Dfs>,
         mut mem_table_data: &[u8],
         snapshot: &[u8],
@@ -154,6 +166,7 @@ impl SnapAccess {
             }
         }
         Ok(Self::from_change_set_and_memtable_data(
+            tag,
             dfs,
             change_set,
             &mut wb,
@@ -215,6 +228,7 @@ impl SnapAccessCore {
     }
 
     pub async fn from_change_set(
+        tag: String,
         dfs: Arc<dyn dfs::Dfs>,
         change_set: pb::ChangeSet,
         wb: Option<&mut WriteBatch>,
@@ -222,8 +236,16 @@ impl SnapAccessCore {
         master_key: &MasterKey,
         block_cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
     ) -> Self {
-        let shard =
-            Shard::from_change_set(dfs, change_set, wb, ignore_lock, master_key, block_cache).await;
+        let shard = Shard::from_change_set(
+            tag,
+            dfs,
+            change_set,
+            wb,
+            ignore_lock,
+            master_key,
+            block_cache,
+        )
+        .await;
         Self::new(&shard)
     }
 

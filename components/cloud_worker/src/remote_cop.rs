@@ -17,7 +17,7 @@ use kvproto::{
 use tikv::coprocessor::parse_request_and_handle_remote_cop;
 use tikv_util::{thd_name, warn};
 
-use crate::server::Context;
+use crate::server::{get_cop_req_tag, Context};
 
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq, Debug)]
 #[serde(default)]
@@ -107,6 +107,7 @@ impl Tikv for CopService {
             );
             return;
         }
+        let tag = get_cop_req_tag(&req);
         let client = client_res.unwrap();
         let mut delegate_req = DelegateRequest::new();
         let key_ranges = req.get_ranges().to_vec();
@@ -123,6 +124,7 @@ impl Tikv for CopService {
                 .await
                 .map_err(|e| tikv::coprocessor::Error::Other(format!("{:?}", e)))?;
             let snap_access = kvengine::SnapAccess::construct_snapshot(
+                tag,
                 m_ctx.cache_fs.clone(),
                 &resp.take_mem_table_data(),
                 &resp.take_snapshot(),

@@ -520,7 +520,9 @@ impl BackupReader {
             }
         }
         let runtime = self.s3fs.get_runtime();
+        let tag = format!("backup_reader_{}", meta.tag());
         let snap = runtime.block_on(SnapAccess::from_change_set(
+            tag,
             self.s3fs.clone(),
             meta.to_change_set(),
             false,
