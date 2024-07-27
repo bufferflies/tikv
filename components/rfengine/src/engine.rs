@@ -354,8 +354,7 @@ impl RfEngineCore {
             .meta
             .states
             .range(range)
-            .rev()
-            .next()
+            .next_back()
             .map(|(_, v)| v.clone())
     }
 

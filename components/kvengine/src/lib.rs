@@ -1,7 +1,8 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-#![feature(hash_drain_filter)]
+#![feature(hash_extract_if)]
 #![feature(is_sorted)]
+#![allow(clippy::diverging_sub_expression)]
 #![cfg_attr(test, feature(test))]
 #[cfg(test)]
 extern crate test;

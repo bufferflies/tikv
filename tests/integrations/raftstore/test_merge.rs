@@ -704,8 +704,8 @@ fn test_node_merge_update_region() {
     let new_leader = left
         .get_peers()
         .iter()
+        .find(|&p| p.get_id() != origin_leader.get_id())
         .cloned()
-        .find(|p| p.get_id() != origin_leader.get_id())
         .unwrap();
 
     // Make sure merge is done in the new_leader.

@@ -75,7 +75,7 @@ impl BlackList {
 
     pub fn add_regions(&mut self, region_ids: Vec<u64>) {
         BLACKLIST_REGION_GAUGE.add(region_ids.len() as i64);
-        self.region_ids.extend(region_ids.into_iter());
+        self.region_ids.extend(region_ids);
     }
 }
 

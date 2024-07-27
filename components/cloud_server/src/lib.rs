@@ -3,6 +3,7 @@
 #![feature(box_patterns)]
 #![recursion_limit = "400"]
 #![feature(type_alias_impl_trait)]
+#![feature(impl_trait_in_assoc_type)]
 
 #[macro_use(fail_point)]
 extern crate fail;

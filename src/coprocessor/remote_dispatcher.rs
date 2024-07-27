@@ -15,7 +15,7 @@ use protobuf::Message;
 use security::SecurityManager;
 use tidb_query_common::execute_stats::ExecSummary;
 use tikv_alloc::MemoryTraceGuard;
-use tikv_kv::{Engine, Statistics};
+use tikv_kv::Statistics;
 use tikv_util::{deadline::Deadline, time::Instant, timer::GLOBAL_TIMER_HANDLE};
 use tipb::DagRequest;
 use txn_types::{TimeStamp, TsSet};
@@ -225,7 +225,7 @@ impl RemoteContext {
     }
 }
 
-pub(crate) fn try_remote_dag_handler<E: Engine>(
+pub(crate) fn try_remote_dag_handler(
     snap: Option<&kvengine::SnapAccess>,
     dag: &DagRequest,
     req_ctx: &ReqContext,

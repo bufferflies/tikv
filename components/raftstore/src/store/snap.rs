@@ -1265,7 +1265,7 @@ impl Write for Snapshot {
             }
 
             assert!(cf_file.size[self.cf_file_index] != 0);
-            let mut file_for_recving = cf_file
+            let file_for_recving = cf_file
                 .file_for_recving
                 .get_mut(self.cf_file_index)
                 .unwrap();
@@ -1973,7 +1973,9 @@ impl TabletSnapManager {
 
     pub fn delete_snapshot(&self, key: &TabletSnapKey) -> bool {
         let path = self.tablet_gen_path(key);
-        if path.exists() && let Err(e) = fs::remove_dir_all(path.as_path()) {
+        if path.exists()
+            && let Err(e) = fs::remove_dir_all(path.as_path())
+        {
             error!(
                 "delete snapshot failed";
                 "path" => %path.display(),

@@ -699,8 +699,7 @@ pub async fn get_archived_object(s3fs: &S3Fs, archive_addr: ArchiveAddress) -> R
         start_off: archive_addr.object_addr.offset,
         end_off: Some(archive_addr.object_addr.offset + archive_addr.object_addr.length),
     };
-    return s3fs
-        .get_object(package_key.clone(), package_key, opts)
+    s3fs.get_object(package_key.clone(), package_key, opts)
         .await
         .map_err(|e| {
             error!(
@@ -709,7 +708,7 @@ pub async fn get_archived_object(s3fs: &S3Fs, archive_addr: ArchiveAddress) -> R
                 e.to_string()
             );
             Error::DfsError(e)
-        });
+        })
 }
 
 pub fn get_archived_wals(
@@ -1353,10 +1352,10 @@ impl ArchiveReader {
                     Ok(cluster_backup_meta)
                 });
         }
-        return Err(Error::ArchiveError(format!(
+        Err(Error::ArchiveError(format!(
             "failed to find archive meta file on {}",
             self.start_date
-        )));
+        )))
     }
 
     pub fn get_store_wal_rlog_meta(&self, store_id: u64) -> Result<StoreMeta> {
@@ -1413,10 +1412,10 @@ impl ArchiveReader {
                     e
                 });
         }
-        return Err(Error::ArchiveError(format!(
+        Err(Error::ArchiveError(format!(
             "failed to find archive file {}",
             file_id,
-        )));
+        )))
     }
 
     pub fn restore_file(&self, file_id: u64) -> Result<()> {

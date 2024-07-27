@@ -1477,9 +1477,7 @@ fn test_before_propose_deadline() {
         .unwrap();
     assert!(matches!(
         rx.recv().unwrap(),
-        Err(StorageError(box StorageErrorInner::Kv(KvError(
-            box KvErrorInner::Request(_),
-        ))))
+        Err(StorageError(box StorageErrorInner::Kv(KvError(box KvErrorInner::Request(_)))))
     ));
 }
 

@@ -132,7 +132,7 @@ impl EngineCore {
         let mut encryption_key = encryption_key;
         if let Some(snap) = snap {
             self.collect_snap_ids(snap, &mut ids);
-            lock_txn_file_refs.extend(collect_snap_lock_txn_file_refs(snap).into_iter());
+            lock_txn_file_refs.extend(collect_snap_lock_txn_file_refs(snap));
             encryption_key = get_shard_property(ENCRYPTION_KEY, snap.get_properties())
                 .map(|v| self.master_key.decrypt_encryption_key(&v).unwrap());
             if snap.has_schema_meta() {
@@ -159,7 +159,7 @@ impl EngineCore {
                 "ids" => ?ids.keys(),
             );
             cs.unloaded_tables = ids
-                .drain_filter(|_, tb| !table_filter(cs.shard_id, tb)) // !table_filter: table will not load
+                .extract_if(|_, tb| !table_filter(cs.shard_id, tb)) // !table_filter: table will not load
                 .collect();
         }
 

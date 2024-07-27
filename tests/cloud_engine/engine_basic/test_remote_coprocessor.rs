@@ -2035,20 +2035,16 @@ impl DagTestSnapshot {
 }
 
 #[cfg(test)]
+#[derive(Default)]
 enum Dml<'a> {
     Ins(Insert<'a>),
     #[allow(dead_code)]
     Del(Delete<'a>),
+    #[default]
     Empty,
 }
 
 #[cfg(test)]
-impl<'a> Default for Dml<'a> {
-    fn default() -> Self {
-        Dml::Empty
-    }
-}
-
 #[cfg(test)]
 struct Txn<'a> {
     started: bool,
@@ -2279,7 +2275,7 @@ impl<'a> DagTest<'a> {
         start_ts: u64,
         key_ranges: Vec<coppb::KeyRange>,
     ) -> DagTestSnapshot {
-        let dag_test_snapshot = match self
+        match self
             .client
             .get_memtable_snapshot(None, start_ts, key_ranges)
         {
@@ -2289,8 +2285,7 @@ impl<'a> DagTest<'a> {
                 ctx,
             },
             Err(e) => panic!("get_memtable_snapshot failed: {}", e),
-        };
-        dag_test_snapshot
+        }
     }
 
     fn execute_select_all_generic(

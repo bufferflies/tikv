@@ -1,6 +1,6 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{convert::TryFrom, mem, ops::Deref, slice};
+use std::{convert::TryFrom, mem, ops::Deref};
 
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, BufMut};
@@ -315,7 +315,7 @@ impl Builder {
         } else {
             MAGIC_NUMBER
         };
-        data_buf.extend_from_slice(footer.marshal());
+        footer.marshal(data_buf);
 
         BuildResult {
             id: self.sst_fid,
@@ -442,14 +442,28 @@ impl Footer {
         table_size - self.properties_offset as usize - FOOTER_SIZE
     }
 
-    pub fn unmarshal(&mut self, data: &[u8]) {
-        let footer_ptr = data.as_ptr() as *const Footer;
-        *self = unsafe { *footer_ptr };
+    pub fn unmarshal(&mut self, mut data: &[u8]) {
+        self.old_data_offset = data.get_u32_le();
+        self.index_offset = data.get_u32_le();
+        self.old_index_offset = data.get_u32_le();
+        self.aux_index_offset = data.get_u32_le();
+        self.properties_offset = data.get_u32_le();
+        self.compression_type = data.get_u8();
+        self.checksum_type = data.get_u8();
+        self.table_format_version = data.get_u16_le();
+        self.magic = data.get_u32_le();
     }
 
-    pub fn marshal(&self) -> &[u8] {
-        let footer_ptr = self as *const Footer as *const u8;
-        unsafe { slice::from_raw_parts(footer_ptr, FOOTER_SIZE) }
+    pub fn marshal(&self, buf: &mut Vec<u8>) {
+        buf.put_u32_le(self.old_data_offset);
+        buf.put_u32_le(self.index_offset);
+        buf.put_u32_le(self.old_index_offset);
+        buf.put_u32_le(self.aux_index_offset);
+        buf.put_u32_le(self.properties_offset);
+        buf.put_u8(self.compression_type);
+        buf.put_u8(self.checksum_type);
+        buf.put_u16_le(self.table_format_version);
+        buf.put_u32_le(self.magic);
     }
 }
 

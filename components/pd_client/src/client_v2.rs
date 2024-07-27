@@ -820,13 +820,13 @@ impl PdClient for RpcClient {
     ) -> PdFuture<HashMap<String, Vec<u8>>> {
         let mut req = LoadGlobalConfigRequest::new();
         req.set_names(list.into());
-        return self.load_global_config(req);
+        self.load_global_config(req)
     }
 
     fn load_global_config_by_path(&mut self, path: String) -> PdFuture<HashMap<String, Vec<u8>>> {
         let mut req = LoadGlobalConfigRequest::new();
         req.set_config_path(path);
-        return self.load_global_config(req);
+        self.load_global_config(req)
     }
 
     fn load_global_config(

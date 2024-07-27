@@ -406,7 +406,9 @@ impl Engine for RaftKv {
             self.router.send_command(cmd, cb);
         }
         rx.inspect(move |ev| {
-            let WriteEvent::Finished(res) = ev else { return };
+            let WriteEvent::Finished(res) = ev else {
+                return;
+            };
             match res {
                 Ok(()) => {
                     ASYNC_REQUESTS_COUNTER_VEC.write.success.inc();
@@ -480,7 +482,7 @@ impl Engine for RaftKv {
             match res {
                 Ok(CmdRes::Resp(mut r)) => {
                     let e = if r
-                        .get(0)
+                        .first()
                         .map(|resp| resp.get_read_index().has_locked())
                         .unwrap_or(false)
                     {

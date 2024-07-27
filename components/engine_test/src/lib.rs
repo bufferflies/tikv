@@ -270,10 +270,16 @@ pub mod kv {
 
             let mut reg = self.registry.lock().unwrap();
             if let Some(suffix) = suffix {
-                if let Some((cached_tablet, cached_suffix)) = reg.get(&id) && *cached_suffix == suffix {
+                if let Some((cached_tablet, cached_suffix)) = reg.get(&id)
+                    && *cached_suffix == suffix
+                {
                     // Target tablet exist in the cache
                     if options.create_new() {
-                        return Err(box_err!("region {} {} already exists", id, cached_tablet.path()));
+                        return Err(box_err!(
+                            "region {} {} already exists",
+                            id,
+                            cached_tablet.path()
+                        ));
                     }
                     return Ok(cached_tablet.clone());
                 } else if !options.cache_only() {
@@ -355,7 +361,9 @@ pub mod kv {
             let _ = std::fs::File::create(path);
             {
                 let mut reg = self.registry.lock().unwrap();
-                if let Some((cached_tablet, cached_suffix)) = reg.remove(&region_id) && cached_suffix != suffix {
+                if let Some((cached_tablet, cached_suffix)) = reg.remove(&region_id)
+                    && cached_suffix != suffix
+                {
                     reg.insert(region_id, (cached_tablet, cached_suffix));
                 }
             }
@@ -373,7 +381,9 @@ pub mod kv {
             let path = self.tablet_path(region_id, suffix);
             {
                 let mut reg = self.registry.lock().unwrap();
-                if let Some((cached_tablet, cached_suffix)) = reg.remove(&region_id) && cached_suffix != suffix {
+                if let Some((cached_tablet, cached_suffix)) = reg.remove(&region_id)
+                    && cached_suffix != suffix
+                {
                     reg.insert(region_id, (cached_tablet, cached_suffix));
                 }
             }
@@ -385,8 +395,14 @@ pub mod kv {
         fn load_tablet(&self, path: &Path, region_id: u64, suffix: u64) -> Result<KvTestEngine> {
             {
                 let reg = self.registry.lock().unwrap();
-                if let Some((db, db_suffix)) = reg.get(&region_id) && *db_suffix == suffix {
-                    return Err(box_err!("region {} {} already exists", region_id, db.path()));
+                if let Some((db, db_suffix)) = reg.get(&region_id)
+                    && *db_suffix == suffix
+                {
+                    return Err(box_err!(
+                        "region {} {} already exists",
+                        region_id,
+                        db.path()
+                    ));
                 }
             }
 

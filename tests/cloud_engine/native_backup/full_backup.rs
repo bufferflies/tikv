@@ -29,7 +29,7 @@ fn start_cluster_and_backup(
     dfs_config: DFSConfig,
     lightweight: bool,
 ) -> (rfenginepb::ClusterBackupMeta, client::RefStore) {
-    let nodes = Vec::from_iter((0..NODES_SIZE).into_iter().map(|_| alloc_node_id()));
+    let nodes = Vec::from_iter((0..NODES_SIZE).map(|_| alloc_node_id()));
     let pd = PdWrapper::new_test(0, &SecurityConfig::default(), Some(CLUSTER_ID));
     let mut cluster = ServerCluster::new_opt(
         nodes,

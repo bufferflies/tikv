@@ -131,6 +131,7 @@ impl WriteBatchEntry {
     }
 }
 
+#[repr(C)]
 pub struct Node {
     pub addr: ArenaAddr,
     pub value_addr: AtomicU64,

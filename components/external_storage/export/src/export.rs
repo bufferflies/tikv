@@ -256,35 +256,6 @@ pub fn make_cloud_backend(config: CloudDynamic) -> StorageBackend {
     backend
 }
 
-#[cfg(test)]
-mod tests {
-    use tempfile::Builder;
-
-    use super::*;
-
-    #[test]
-    fn test_create_storage() {
-        let temp_dir = Builder::new().tempdir().unwrap();
-        let path = temp_dir.path();
-        let backend = make_local_backend(&path.join("not_exist"));
-        match create_storage(&backend, Default::default()) {
-            Ok(_) => panic!("must be NotFound error"),
-            Err(e) => {
-                assert_eq!(e.kind(), io::ErrorKind::NotFound);
-            }
-        }
-
-        let backend = make_local_backend(path);
-        create_storage(&backend, Default::default()).unwrap();
-
-        let backend = make_noop_backend();
-        create_storage(&backend, Default::default()).unwrap();
-
-        let backend = StorageBackend::default();
-        assert!(create_storage(&backend, Default::default()).is_err());
-    }
-}
-
 pub struct BlobStore<Blob: BlobStorage>(Blob);
 
 impl<Blob: BlobStorage> BlobStore<Blob> {
@@ -382,5 +353,34 @@ impl<Blob: BlobStorage> ExternalStorage for BlobStore<Blob> {
 
     fn read_part(&self, name: &str, off: u64, len: u64) -> ExternalData<'_> {
         (**self).get_part(name, off, len)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::Builder;
+
+    use super::*;
+
+    #[test]
+    fn test_create_storage() {
+        let temp_dir = Builder::new().tempdir().unwrap();
+        let path = temp_dir.path();
+        let backend = make_local_backend(&path.join("not_exist"));
+        match create_storage(&backend, Default::default()) {
+            Ok(_) => panic!("must be NotFound error"),
+            Err(e) => {
+                assert_eq!(e.kind(), io::ErrorKind::NotFound);
+            }
+        }
+
+        let backend = make_local_backend(path);
+        create_storage(&backend, Default::default()).unwrap();
+
+        let backend = make_noop_backend();
+        create_storage(&backend, Default::default()).unwrap();
+
+        let backend = StorageBackend::default();
+        assert!(create_storage(&backend, Default::default()).is_err());
     }
 }

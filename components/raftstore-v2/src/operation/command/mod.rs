@@ -263,7 +263,9 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         if !queue.is_empty() {
             for e in committed_entries {
                 let mut proposal = queue.find_proposal(e.term, e.index, current_term);
-                if let Some(p) = &mut proposal && p.must_pass_epoch_check {
+                if let Some(p) = &mut proposal
+                    && p.must_pass_epoch_check
+                {
                     // In this case the apply can be guaranteed to be successful. Invoke the
                     // on_committed callback if necessary.
                     p.cb.notify_committed();
@@ -502,7 +504,9 @@ impl<EK: KvEngine, R: ApplyResReporter> Apply<EK, R> {
 
     #[inline]
     pub fn flush(&mut self) {
-        if let Some(wb) = self.write_batch_mut() && !wb.is_empty() {
+        if let Some(wb) = self.write_batch_mut()
+            && !wb.is_empty()
+        {
             let mut write_opt = WriteOptions::default();
             write_opt.set_disable_wal(true);
             if let Err(e) = wb.write_opt(&write_opt) {

@@ -161,7 +161,7 @@ impl ShardMeta {
     }
 
     fn move_down_file(&mut self, id: u64, cf: i32, level: u32) {
-        let mut fm = self.files.get_mut(&id).unwrap();
+        let fm = self.files.get_mut(&id).unwrap();
         assert_eq!(
             fm.get_level() + 1,
             level,
@@ -1473,7 +1473,7 @@ mod tests {
         }
 
         {
-            let files = (1..=7).into_iter().map(|id| (id, FileMeta::default()));
+            let files = (1..=7).map(|id| (id, FileMeta::default()));
             let meta = ShardMeta {
                 files: HashMap::from_iter(files),
                 ..Default::default()
@@ -1485,7 +1485,7 @@ mod tests {
         }
 
         {
-            let files = (1..=7).into_iter().map(|id| (id, FileMeta::default()));
+            let files = (1..=7).map(|id| (id, FileMeta::default()));
             let meta = ShardMeta {
                 files: HashMap::from_iter(files),
                 ..Default::default()

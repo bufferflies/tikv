@@ -244,7 +244,6 @@ impl<ER: RaftEngine, T: RaftExtension + 'static> debugpb::Debug for Service<ER, 
         let debugger = self.debugger.clone();
 
         let res = self.pool.spawn(async move {
-            let req = req;
             debugger
                 .compact(
                     req.get_db(),

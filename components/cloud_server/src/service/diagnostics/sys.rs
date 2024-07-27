@@ -725,6 +725,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn test_hardware_info() {
         let mut collector = vec![];
         hardware_info(&mut collector);

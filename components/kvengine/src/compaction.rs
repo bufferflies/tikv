@@ -1802,8 +1802,8 @@ fn local_compact(ctx: &CompactionCtx) -> Result<pb::ChangeSet> {
 fn compact_destroy_range(
     ctx: &CompactionCtx,
     block_size: usize,
-    files: &Vec<(u64, u32, i32)>,
-    del_prefix: &Vec<u8>,
+    files: &[(u64, u32, i32)],
+    del_prefix: &[u8],
 ) -> Result<pb::TableChange> {
     let req = &ctx.req;
     let dfs = &ctx.dfs;
@@ -1928,7 +1928,7 @@ fn compact_destroy_range(
 fn compact_truncate_ts(
     ctx: &CompactionCtx,
     block_size: usize,
-    files: &Vec<(u64, u32, i32)>,
+    files: &[(u64, u32, i32)],
     truncate_ts: u64,
 ) -> Result<pb::TableChange> {
     let req = &ctx.req;
@@ -2058,7 +2058,7 @@ fn compact_truncate_ts(
 fn compact_trim_over_bound(
     ctx: &CompactionCtx,
     block_size: usize,
-    files: &Vec<(u64, u32, i32)>,
+    files: &[(u64, u32, i32)],
 ) -> Result<pb::TableChange> {
     let req = &ctx.req;
     let dfs = &ctx.dfs;

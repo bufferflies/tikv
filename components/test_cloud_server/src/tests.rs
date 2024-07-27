@@ -146,7 +146,7 @@ fn test_split_regions() {
             })
             .collect::<Vec<_>>();
         region_keys.sort();
-        keys1.drain_filter(|k| keys0.contains(k));
+        keys1.retain(|k| !keys0.contains(k));
         assert_eq!(region_keys, keys1);
 
         let mut all_regions = block_on(pd_client.scan_regions(vec![], vec![], 100))

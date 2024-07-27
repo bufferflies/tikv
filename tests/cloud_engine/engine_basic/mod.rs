@@ -256,7 +256,7 @@ fn test_cloud_store_reset_range_with_opt(enable_inner_key: bool) {
     }
 
     // test lock.
-    let keys_nums = vec![21, 31, 51];
+    let keys_nums = [21, 31, 51];
     let mutations: Vec<Mutation> = keys_nums
         .iter()
         .map(|&k_num| {

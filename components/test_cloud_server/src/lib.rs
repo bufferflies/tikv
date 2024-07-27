@@ -1,8 +1,7 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
-#![feature(drain_filter)]
-#![feature(trait_upcasting)]
 #![feature(slice_pattern)]
+#![feature(extract_if)]
 
 pub mod client;
 pub mod cluster;

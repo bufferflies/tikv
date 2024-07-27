@@ -278,6 +278,7 @@ pub const INVALID_ID: u64 = 0;
 /// cluster id in trait interface every time, so passing the cluster id when
 /// creating the PdClient is enough and the PdClient will use this cluster id
 /// all the time.
+#[allow(clippy::diverging_sub_expression)]
 #[async_trait]
 pub trait PdClient: GetSecurityManager + Send + Sync {
     /// Load GlobalConfig from PD by name

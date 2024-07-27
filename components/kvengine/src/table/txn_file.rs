@@ -220,7 +220,7 @@ impl TxnFile {
             lhs.chunks
                 .clone()
                 .into_iter()
-                .merge_join_by(rhs.chunks.clone().into_iter(), |m, n| {
+                .merge_join_by(rhs.chunks.clone(), |m, n| {
                     if m.id() == n.id() {
                         cmp::Ordering::Equal
                     } else {
@@ -1435,7 +1435,7 @@ impl TxnChunkBuilder {
             format_version: TXN_FILE_FORMAT,
             magic: TXN_FILE_MAGIC,
         };
-        data_buf.extend_from_slice(footer.marshal());
+        footer.marshal(data_buf);
     }
 }
 
@@ -1479,14 +1479,24 @@ struct TxnChunkFooter {
 }
 
 impl TxnChunkFooter {
-    pub fn marshal(&self) -> &[u8] {
-        let footer_ptr = self as *const TxnChunkFooter as *const u8;
-        unsafe { std::slice::from_raw_parts(footer_ptr, TXN_FILE_CHUNK_FOOTER_SIZE) }
+    pub fn marshal(&self, buf: &mut Vec<u8>) {
+        buf.put_u32_le(self.index_offset);
+        buf.put_u32_le(self.hash_index_offset);
+        buf.put_u32_le(self.properties_offset);
+        buf.put_u8(self.reserved);
+        buf.put_u8(self.checksum_type);
+        buf.put_u16_le(self.format_version);
+        buf.put_u32_le(self.magic);
     }
 
-    pub fn unmarshal(&mut self, data: &[u8]) {
-        let footer_ptr = data.as_ptr() as *const TxnChunkFooter;
-        *self = unsafe { *footer_ptr };
+    pub fn unmarshal(&mut self, mut data: &[u8]) {
+        self.index_offset = data.get_u32_le();
+        self.hash_index_offset = data.get_u32_le();
+        self.properties_offset = data.get_u32_le();
+        self.reserved = data.get_u8();
+        self.checksum_type = data.get_u8();
+        self.format_version = data.get_u16_le();
+        self.magic = data.get_u32_le();
     }
 }
 

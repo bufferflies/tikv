@@ -107,7 +107,7 @@ impl<S: Snapshot> super::Store for CloudStore<S> {
 impl<S: Snapshot> CloudStore<S> {
     pub fn new(snapshot: S, start_ts: u64, bypass_locks: TsSet, fill_cache: bool) -> Self {
         Self {
-            marker: PhantomData::default(),
+            marker: PhantomData,
             snapshot: snapshot.get_kvengine_snap().unwrap().clone(),
             start_ts,
             bypass_locks,
@@ -369,9 +369,7 @@ impl CloudStoreScanner {
     }
 
     pub fn next_with_user_meta(&mut self) -> Result<Option<(Key, UserMeta, Value)>> {
-        Ok(self
-            .next_inner()?
-            .map(|(key, user_meta, val)| (key, user_meta, val)))
+        self.next_inner()
     }
 }
 

@@ -251,7 +251,7 @@ impl KeyspaceManagerCore {
             .get_mut(&keyspace_id)
             .unwrap()
             .pending_destroy_range
-            .drain_filter(|task| task.ts < gc_safepoint)
+            .extract_if(|task| task.ts < gc_safepoint)
             .collect()
     }
 }

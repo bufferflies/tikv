@@ -472,14 +472,13 @@ where
                 let mut req_write_size = 0_u64;
                 let mut range: Option<Range> = None;
                 let ext_storage = {
-                    let inner = importer.wrap_kms(
+                    importer.wrap_kms(
                         importer.external_storage_or_cache(
                             req.get_storage_backend(),
                             req.get_storage_cache_id(),
                         )?,
                         false,
-                    );
-                    inner
+                    )
                 };
 
                 for (i, meta) in metas.iter().enumerate() {

@@ -641,11 +641,11 @@ fn init_last_term(
         let term = shard.get_property(TERM_KEY).unwrap().get_u64_le();
         return Ok(term);
     }
-    return Err(box_err!(
+    Err(box_err!(
         "region {} at index {} doesn't exists, may lost data",
         region.get_id(),
         last_index
-    ));
+    ))
 }
 
 // When we bootstrap the region we must call this to initialize region local

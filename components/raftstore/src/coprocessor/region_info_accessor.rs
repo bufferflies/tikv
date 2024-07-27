@@ -700,7 +700,9 @@ impl RegionInfoProvider for RegionInfoAccessor {
         self.seek_region(
             key,
             Box::new(move |iter| {
-                if let Some(info) = iter.next() && info.region.get_start_key() <= key_in_vec.as_slice() {
+                if let Some(info) = iter.next()
+                    && info.region.get_start_key() <= key_in_vec.as_slice()
+                {
                     if let Err(e) = tx.send(info.region.clone()) {
                         warn!("failed to send find_region_by_key result: {:?}", e);
                     }

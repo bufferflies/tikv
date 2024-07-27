@@ -298,7 +298,7 @@ fn test_build_schema_dag() {
 
     let dag = build_dag("select c1, c3 from t1", &schema);
     assert_eq!(dag.get_executors().len(), 1);
-    let exec = dag.get_executors().get(0).unwrap();
+    let exec = dag.get_executors().first().unwrap();
     let tbl_scan = exec.get_tbl_scan();
     tbl_scan.get_columns().iter().for_each(|col| {
         let col_id = col.get_column_id();

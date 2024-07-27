@@ -66,16 +66,12 @@ pub trait Iterator: Send {
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[derive(Default)]
 pub enum ChecksumType {
     None,
+    #[default]
     Crc32c,
     Crc32,
-}
-
-impl Default for ChecksumType {
-    fn default() -> Self {
-        ChecksumType::Crc32c
-    }
 }
 
 impl ChecksumType {

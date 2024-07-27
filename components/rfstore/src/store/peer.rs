@@ -3158,7 +3158,7 @@ impl Peer {
                         let max_lease = ctx.cfg.raft_store_max_leader_lease();
                         let is_read_index_request = req
                             .get_requests()
-                            .get(0)
+                            .first()
                             .map(|req| req.has_read_index())
                             .unwrap_or_default();
                         // A read index request or a read with addition request always needs the

@@ -172,7 +172,6 @@ fn extract_metrics(tag: &str, stdout: &[u8]) -> Result<HashMap<String, f64>> {
     let stdout = String::from_utf8_lossy(stdout);
     let final_line = stdout
         .split('\n')
-        .into_iter()
         .rev()
         .find(|x| x.starts_with("tpmC:"))
         .ok_or_else(|| format!("{} tpmC line not found in stdout {:?}", tag, stdout))?;

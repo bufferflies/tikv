@@ -1,9 +1,9 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{mem, ops::Deref, slice};
+use std::{mem, ops::Deref};
 
 use byteorder::{ByteOrder, LittleEndian};
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use super::BlobRef;
 use crate::table::{
@@ -51,6 +51,7 @@ pub const PROP_KEY_SMALLEST: &str = "smallest_key";
 #[derive(Default, Clone, Copy)]
 pub struct BlobFooter {
     pub properties_offset: u32,
+    pub padding: u32,
     pub version: u64,
     pub total_blob_size: u64,
     pub compression_type: u8,
@@ -75,14 +76,30 @@ impl BlobFooter {
         table_size - BLOB_TABLE_FOOTER_SIZE - self.properties_offset as usize
     }
 
-    pub fn unmarshal(&mut self, data: &[u8]) {
-        let footer_ptr = data.as_ptr() as *const BlobFooter;
-        *self = unsafe { *footer_ptr };
+    pub fn unmarshal(&mut self, mut data: &[u8]) {
+        self.properties_offset = data.get_u32_le();
+        self.padding = data.get_u32_le();
+        self.version = data.get_u64_le();
+        self.total_blob_size = data.get_u64_le();
+        self.compression_type = data.get_u8();
+        self.checksum_type = data.get_u8();
+        self.blob_format_version = data.get_u16_le();
+        self.compression_lvl = data.get_i32_le();
+        self.min_blob_size = data.get_u32_le();
+        self.magic = data.get_u32_le();
     }
 
-    pub fn marshal(&self) -> &[u8] {
-        let footer_ptr = self as *const BlobFooter as *const u8;
-        unsafe { slice::from_raw_parts(footer_ptr, BLOB_TABLE_FOOTER_SIZE) }
+    pub fn marshal(&self, buf: &mut BytesMut) {
+        buf.put_u32_le(self.properties_offset);
+        buf.put_u32_le(self.padding);
+        buf.put_u64_le(self.version);
+        buf.put_u64_le(self.total_blob_size);
+        buf.put_u8(self.compression_type);
+        buf.put_u8(self.checksum_type);
+        buf.put_u16_le(self.blob_format_version);
+        buf.put_i32_le(self.compression_lvl);
+        buf.put_u32_le(self.min_blob_size);
+        buf.put_u32_le(self.magic);
     }
 }
 
@@ -262,6 +279,7 @@ impl BlobTableBuilder {
 
         let mut footer = BlobFooter::default();
         footer.properties_offset = properties_offset as u32;
+        footer.version = BLOB_FORMAT_V1 as u64;
         footer.total_blob_size = self.total_blob_size;
         footer.compression_type = self.compression_tp;
         footer.checksum_type = self.checksum_tp;
@@ -269,7 +287,7 @@ impl BlobTableBuilder {
         footer.compression_lvl = self.compression_lvl;
         footer.min_blob_size = self.min_blob_size;
         footer.magic = BLOB_MAGIC_NUMBER;
-        buf.extend_from_slice(footer.marshal());
+        footer.marshal(&mut buf);
         buf.freeze()
     }
 

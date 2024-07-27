@@ -210,7 +210,7 @@ impl From<Error> for errorpb::Error {
                     .set_reason(reason.to_string());
                 errorpb.mut_read_index_not_ready().set_region_id(region_id);
             }
-            Error::Transport(reason) if reason == DiscardReason::Full => {
+            Error::Transport(DiscardReason::Full) => {
                 let mut server_is_busy_err = errorpb::ServerIsBusy::default();
                 server_is_busy_err.set_reason(RAFTSTORE_IS_BUSY.to_owned());
                 errorpb.set_server_is_busy(server_is_busy_err);

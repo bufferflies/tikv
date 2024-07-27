@@ -501,11 +501,10 @@ impl<S: EngineSnapshot> MvccReader<S> {
                             } else {
                                 let commit_ts = write.last_change_ts;
                                 let key_with_ts = key.clone().append_ts(commit_ts);
-                                let Some(value) = self
-                                    .snapshot
-                                    .get_cf(CF_WRITE, &key_with_ts)? else {
-                                        return Ok(None);
-                                    };
+                                let Some(value) = self.snapshot.get_cf(CF_WRITE, &key_with_ts)?
+                                else {
+                                    return Ok(None);
+                                };
                                 self.statistics.write.get += 1;
                                 let write = WriteRef::parse(&value)?.to_owned();
                                 assert!(
@@ -1204,7 +1203,7 @@ pub mod tests {
             (Bound::Unbounded, Bound::Excluded(8), vec![2u64, 4, 6, 8]),
         ];
 
-        for (_, &(min, max, ref res)) in tests.iter().enumerate() {
+        for &(min, max, ref res) in tests.iter() {
             let mut iopt = IterOptions::default();
             iopt.set_hint_min_ts(min);
             iopt.set_hint_max_ts(max);
@@ -2452,7 +2451,7 @@ pub mod tests {
         engine.commit(k, 1, 2);
 
         // Write enough LOCK recrods
-        for start_ts in (6..30).into_iter().step_by(2) {
+        for start_ts in (6..30).step_by(2) {
             engine.lock(k, start_ts, start_ts + 1);
         }
 
@@ -2461,7 +2460,7 @@ pub mod tests {
         engine.commit(k, 45, 46);
 
         // Write enough LOCK recrods
-        for start_ts in (50..80).into_iter().step_by(2) {
+        for start_ts in (50..80).step_by(2) {
             engine.lock(k, start_ts, start_ts + 1);
         }
 
@@ -2514,7 +2513,7 @@ pub mod tests {
         let k = b"k";
 
         // Write enough LOCK recrods
-        for start_ts in (6..30).into_iter().step_by(2) {
+        for start_ts in (6..30).step_by(2) {
             engine.lock(k, start_ts, start_ts + 1);
         }
 

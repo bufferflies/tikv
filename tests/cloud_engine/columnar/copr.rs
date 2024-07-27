@@ -127,7 +127,7 @@ fn test_coprocessor() {
         let tbl_id = schema.table_id;
         let dag_columns = dag
             .get_executors()
-            .get(0)
+            .first()
             .unwrap()
             .get_tbl_scan()
             .get_columns()

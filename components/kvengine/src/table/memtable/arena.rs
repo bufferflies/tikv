@@ -274,7 +274,6 @@ impl ArenaSegment {
 
     fn panic_with_debug_info(&self, msg: &str) {
         let blocks = (0..self.blocks.len())
-            .into_iter()
             .map(|idx| {
                 unsafe { self.blocks[idx].load(Ordering::Acquire).as_ref() }
                     .map(|block| (block.len.load(Ordering::Acquire), block.cap))

@@ -144,7 +144,7 @@ impl BlobTable {
         if checksum != got_checksum {
             return Err(Error::InvalidChecksum("blob checkusm mismatch".to_owned()));
         }
-        return match self.footer.compression_type {
+        match self.footer.compression_type {
             NO_COMPRESSION => Ok(false), // in place decoding
             LZ4_COMPRESSION => {
                 decompressed_buf.resize(original_len as usize, 0);
@@ -168,7 +168,7 @@ impl BlobTable {
                 Ok(true)
             },
             _ => panic!("unknown compression type {}", self.footer.compression_type),
-        };
+        }
     }
 
     pub fn id(&self) -> u64 {

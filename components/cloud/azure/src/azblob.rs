@@ -25,7 +25,7 @@ use futures_util::{
     stream::StreamExt,
     TryStreamExt,
 };
-pub use kvproto::brpb::{AzureBlobStorage as InputConfig, Bucket as InputBucket, CloudDynamic};
+pub use kvproto::brpb::{AzureBlobStorage as InputConfig, CloudDynamic};
 use oauth2::{ClientId, ClientSecret};
 use tikv_util::{
     debug,
@@ -739,7 +739,7 @@ mod tests {
     }
 
     fn cloud_dynamic_from_input(mut azure: InputConfig) -> CloudDynamic {
-        let mut bucket = InputBucket::default();
+        let mut bucket = kvproto::brpb::Bucket::default();
         if !azure.endpoint.is_empty() {
             bucket.endpoint = azure.take_endpoint();
         }

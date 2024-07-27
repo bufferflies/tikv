@@ -700,12 +700,11 @@ mod tests {
             ChangeDataRequestKvApi::TiDb,
             false,
         );
-        let check_result = || loop {
+        let check_result = || {
             let task = rx.recv().unwrap();
             match task {
                 Task::ResolverReady { resolver, .. } => {
                     assert_eq!(resolver.locks(), &expected_locks);
-                    return;
                 }
                 t => panic!("unexpected task {} received", t),
             }
@@ -732,13 +731,11 @@ mod tests {
         initializer.build_resolver = false;
         block_on(initializer.async_incremental_scan(snap.clone(), region.clone())).unwrap();
 
-        loop {
-            let task = rx.recv_timeout(Duration::from_millis(100));
-            match task {
-                Ok(t) => panic!("unexpected task {} received", t),
-                Err(RecvTimeoutError::Timeout) => break,
-                Err(e) => panic!("unexpected err {:?}", e),
-            }
+        let task = rx.recv_timeout(Duration::from_millis(100));
+        match task {
+            Ok(t) => panic!("unexpected task {} received", t),
+            Err(RecvTimeoutError::Timeout) => (),
+            Err(e) => panic!("unexpected err {:?}", e),
         }
 
         // Test cancellation.

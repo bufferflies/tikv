@@ -638,19 +638,11 @@ impl Shard {
             }
             TRIM_OVER_BOUND => {
                 let mut pending_ops = self.pending_ops.write().unwrap();
-                if !val.is_empty() {
-                    pending_ops.trim_over_bound = true;
-                } else {
-                    pending_ops.trim_over_bound = false;
-                }
+                pending_ops.trim_over_bound = !val.is_empty();
             }
             MANUAL_MAJOR_COMPACTION => {
                 let mut pending_ops = self.pending_ops.write().unwrap();
-                if !val.is_empty() {
-                    pending_ops.manual_major_compaction = true;
-                } else {
-                    pending_ops.manual_major_compaction = false;
-                }
+                pending_ops.manual_major_compaction = !val.is_empty();
             }
             _ => {}
         }

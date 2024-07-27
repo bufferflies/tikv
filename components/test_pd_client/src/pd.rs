@@ -1379,7 +1379,7 @@ impl TestPdClient {
     pub fn switch_replication_mode(&self, state: DrAutoSyncState, available_stores: Vec<u64>) {
         let mut cluster = self.cluster.wl();
         let status = cluster.replication_status.as_mut().unwrap();
-        let mut dr = status.mut_dr_auto_sync();
+        let dr = status.mut_dr_auto_sync();
         dr.state_id += 1;
         dr.set_state(state);
         dr.available_stores = available_stores;
@@ -1793,7 +1793,7 @@ impl PdClient for TestPdClient {
     // Since split_regions is not an atomic operation, a latter splitted region
     // would has the same region id with a former one.
     fn split_regions(&self, keys: Vec<Vec<u8>>) -> PdFuture<Vec<u64>> {
-        let mut keys_set: HashSet<Vec<u8>> = HashSet::from_iter(keys.into_iter());
+        let mut keys_set: HashSet<Vec<u8>> = HashSet::from_iter(keys);
         let mut region_ids: HashSet<u64> = HashSet::default();
 
         let start = Instant::now();

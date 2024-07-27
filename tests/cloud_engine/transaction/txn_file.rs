@@ -1068,7 +1068,7 @@ fn test_txn_file_merge(#[case] enable_inner_key_off: bool) {
 }
 
 fn test_txn_file_merge_impl(ranges: Vec<Range<usize>>, enable_inner_key_off: bool) {
-    let mut cluster = ServerCluster::new(alloc_node_id_vec(3), |_, mut conf| {
+    let mut cluster = ServerCluster::new(alloc_node_id_vec(3), |_, conf| {
         conf.enable_inner_key_offset = enable_inner_key_off;
     });
     let dfs = cluster.get_dfs().unwrap();

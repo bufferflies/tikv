@@ -1373,8 +1373,9 @@ impl LoadTaskWorker {
         verify_regions_boundary(&outer_first_key, &outer_last_key, &regions)?;
         debug!("scanned regions {:?}", regions);
         if !success_ranges.is_empty() {
-            regions.drain_filter(|region| {
-                success_ranges.covered(&region.get_region().start_key, &region.get_region().end_key)
+            regions.retain(|region| {
+                !success_ranges
+                    .covered(&region.get_region().start_key, &region.get_region().end_key)
             });
         }
         info!(
@@ -1607,6 +1608,7 @@ pub async fn get_shard_meta(
     }
 }
 
+#[allow(clippy::unnecessary_unwrap)]
 async fn get_leader_store(
     pd: Arc<dyn PdClient>,
     region_id: u64,

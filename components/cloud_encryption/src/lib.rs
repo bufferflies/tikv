@@ -32,11 +32,10 @@ impl std::fmt::Debug for EncryptionKey {
         f.debug_struct("encryption_key")
             .field(
                 "export",
-                &self
-                    .export()
-                    .iter()
-                    .map(|&num| format!("{:02X}", num))
-                    .collect::<String>(),
+                &self.export().iter().fold(String::new(), |mut acc, byte| {
+                    acc.push_str(format!("{:02X}", byte).as_str());
+                    acc
+                }),
             )
             .finish()
     }

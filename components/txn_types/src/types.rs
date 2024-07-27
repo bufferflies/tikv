@@ -449,7 +449,7 @@ impl From<kvrpcpb::Mutation> for Mutation {
 
 /// `OldValue` is used by cdc to read the previous value associated with some
 /// key during the prewrite process.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum OldValue {
     /// A real `OldValue`.
     Value { value: Value },
@@ -458,16 +458,11 @@ pub enum OldValue {
     /// `None` means we don't found a previous value.
     None,
     /// The user doesn't care about the previous value.
+    #[default]
     Unspecified,
     /// Not sure whether the old value exists or not. users can seek CF_WRITE to
     /// the give position to take a look.
     SeekWrite(Key),
-}
-
-impl Default for OldValue {
-    fn default() -> Self {
-        OldValue::Unspecified
-    }
 }
 
 impl OldValue {
@@ -520,8 +515,9 @@ impl OldValue {
 // MutationType is the type of mutation of the current write.
 pub type OldValues = HashMap<Key, (OldValue, Option<MutationType>)>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ReqType {
+    #[default]
     Noop,
     PessimisticLock,
     Prewrite,
@@ -532,12 +528,6 @@ pub enum ReqType {
     Rollback,
     ResolveLock,
     Heartbeat,
-}
-
-impl Default for ReqType {
-    fn default() -> Self {
-        ReqType::Noop
-    }
 }
 
 pub fn insert_old_value_if_resolved(

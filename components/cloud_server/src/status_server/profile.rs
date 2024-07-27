@@ -7,8 +7,6 @@ use tikv_alloc::dump_prof;
 
 #[cfg(test)]
 use self::test_utils::dump_prof;
-#[cfg(test)]
-pub use self::test_utils::TEST_PROFILE_MUTEX;
 
 /// Trigger a heap profile and return the content.
 pub fn dump_one_heap_profile() -> Result<NamedTempFile, String> {

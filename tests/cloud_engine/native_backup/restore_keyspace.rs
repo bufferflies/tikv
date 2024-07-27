@@ -140,8 +140,7 @@ impl Default for TestRestoreKeyspaceOptions {
 }
 
 fn test_restore_keyspace_opt(options: TestRestoreKeyspaceOptions) {
-    let cases = vec![
-        // keyspace_id, data_count, shuffle_regions, has_learner, loop_count
+    let cases = [
         (1, 1, None, false, 1),
         (
             1,
@@ -520,12 +519,7 @@ fn test_restore_keyspace_impl(
 }
 
 fn test_restore_archived_keyspace_opt(options: TestRestoreKeyspaceOptions) {
-    let cases = vec![
-        // keyspace_id, data_count, loop_count
-        (1, 1, 1),
-        (1, 100, options.loop_count),
-        (2, 1, 1),
-    ];
+    let cases = [(1, 1, 1), (1, 100, options.loop_count), (2, 1, 1)];
 
     let (_temp_dir, mut oss, dfs_config) = prepare_dfs("test_restore_keyspace_");
     let mut cluster = ServerCluster::new(
@@ -920,7 +914,7 @@ fn test_restore_keyspace_with_resolve_locks(async_commit: bool) {
     // Delete data without committing secondary keys, to simulate the case that if
     // we don't resolve locks during restoration, the secondary keys will be rolled
     // back unexpectedly after deletion of primary key is compacted.
-    for range in vec![0..25, 25..50, 50..100] {
+    for range in [0..25, 25..50, 50..100] {
         let commit_action = if async_commit {
             CommitAction::AsyncCommit(Duration::MAX)
         } else {
