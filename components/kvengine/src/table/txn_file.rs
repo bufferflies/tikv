@@ -151,8 +151,30 @@ impl TxnFile {
             chunk.index.smallest() < txn_ctx.upper_bound()
                 && txn_ctx.lower_bound() <= chunk.index.biggest()
         });
+        if chunks.is_empty() {
+            return Ok(Self {
+                inner: Arc::new(TxnFileInner::new(id, chunks, txn_ctx, 0)),
+            });
+        }
+        let mut total_size = 0;
+        let mut total_blocks = 0;
+        for chunk in &chunks {
+            total_size += chunk.size();
+            total_blocks += chunk.index.num_blocks;
+        }
+        let avg_block_size = total_size / total_blocks;
+        let first_chunk = chunks.first().unwrap();
+        let first_block_idx = first_chunk
+            .index
+            .seek_block(txn_ctx.lower_bound().deref())
+            .saturating_sub(1);
+        let last_chunk = chunks.last().unwrap();
+        let last_block_idx = last_chunk.index.seek_block(txn_ctx.upper_bound().deref());
+        let overlapped_num_blocks =
+            total_blocks - first_block_idx - (last_chunk.index.num_blocks - last_block_idx);
+        let size = avg_block_size * overlapped_num_blocks;
         Ok(Self {
-            inner: Arc::new(TxnFileInner::new(id, chunks, txn_ctx)),
+            inner: Arc::new(TxnFileInner::new(id, chunks, txn_ctx, size)),
         })
     }
 
@@ -296,8 +318,7 @@ pub struct TxnFileInner {
 }
 
 impl TxnFileInner {
-    fn new(id: TxnFileId, chunks: Vec<TxnChunk>, txn_ctx: TxnCtx) -> Self {
-        let size = chunks.iter().map(|chunk| chunk.size()).sum();
+    fn new(id: TxnFileId, chunks: Vec<TxnChunk>, txn_ctx: TxnCtx, size: usize) -> Self {
         Self {
             id,
             chunks,
@@ -2075,6 +2096,49 @@ mod tests {
                 .map(|(start, end)| (start.as_ref(), end.as_ref()))
                 .collect::<Vec<_>>();
             assert_eq!(txn_file.chunk_ids_in_ranges(&ranges), expect_ids);
+        }
+    }
+
+    #[rstest]
+    #[case::enable_key_off(true)]
+    #[case::disable_key_off(false)]
+    fn test_txn_file_size(#[case] enable_inner_key_off: bool) {
+        let kb = new_key_builder(enable_inner_key_off);
+        let chunk_1 = build_txn_chunk(50, 100, 1, |_| OP_PUT, None, enable_inner_key_off);
+        let chunk_2 = build_txn_chunk(100, 150, 2, |_| OP_PUT, None, enable_inner_key_off);
+        let chunk_5 = build_txn_chunk(250, 300, 5, |_| OP_PUT, None, enable_inner_key_off);
+        let id = TxnFileId::new(10, 1, 3);
+        let cases: Vec<(
+            (usize /* start */, usize /* end */), // range
+            (usize, usize),                       // txn file size inner_key_off on/off.
+        )> = vec![
+            ((50, 301), (2394, 2448)),
+            ((75, 301), (2128, 2176)),
+            ((75, 281), (1862, 1904)),
+            ((100, 281), (1345, 1375)),
+            ((100, 170), (807, 825)),
+            ((100, 149), (807, 825)),
+            ((119, 121), (538, 550)),
+            ((120, 121), (269, 275)),
+            ((160, 170), (0, 0)),
+        ];
+        let chunks = vec![chunk_1, chunk_2, chunk_5];
+        for ((start, end), (txn_file_size_enable, txn_file_size_disable)) in cases {
+            let lower_bound = kb.i_to_inner_key(start);
+            let upper_bound = kb.i_to_inner_key(end);
+            let txn_ctx = TxnCtx::new(
+                UserMeta::new(3, 5).to_array().to_vec().into(),
+                Default::default(),
+                3,
+                lower_bound.as_ref(),
+                upper_bound.as_ref(),
+            );
+            let txn_file = TxnFile::new(id, chunks.clone(), txn_ctx).unwrap();
+            if enable_inner_key_off {
+                assert_eq!(txn_file.size(), txn_file_size_enable);
+            } else {
+                assert_eq!(txn_file.size(), txn_file_size_disable);
+            }
         }
     }
 
