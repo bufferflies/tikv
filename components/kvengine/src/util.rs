@@ -352,6 +352,15 @@ pub mod test_util {
             format!("{}key{:06}", self.prefix, i).into_bytes()
         }
 
+        #[inline]
+        pub fn i_to_val(&self, i: usize) -> String {
+            format!("val{:06}", i)
+        }
+
+        pub fn get_enable_inner_key_off(&self) -> bool {
+            self.enable_inner_key_off
+        }
+
         pub fn gen_row_inner_key(&self, table_id: i64, i: usize) -> OwnedInnerKey {
             let v = if self.enable_inner_key_off {
                 self.gen_row_key(table_id, i)

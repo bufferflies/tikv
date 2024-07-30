@@ -27,6 +27,7 @@ use ::native_br::{backup::BackupConfig, restore::RestoreConfig};
 use kvengine::{
     dfs::{DFSConfig, Dfs, S3Fs},
     table::ChecksumType,
+    txn_chunk_manager::{with_pool_handle, TxnChunkManager},
     BLOCK_CACHE_KEY_SIZE,
 };
 use kvproto::metapb::Store;
@@ -110,7 +111,7 @@ fn start_server(
     config_file_path: Option<PathBuf>,
     thread_pool: Arc<Runtime>,
     pd: Arc<dyn PdClient>,
-) -> Box<dyn Future<Output = hyper::Result<()>> + Send + Unpin> {
+) -> ServerFuture {
     let dfs_config = config.dfs.clone();
     let s3fs = Arc::new(kvengine::dfs::S3Fs::new(
         dfs_config.prefix,
@@ -212,6 +213,16 @@ fn start_server(
 
     let cop_limiter = CopLimiter::new(config.cop_limiter.clone());
 
+    // Create `TxnChunkManager` using `thread_pool`. Otherwise, as `TxnChunkManager`
+    // is hold in async context, we will meet the panic of dropping tokio
+    // runtime in async context.
+    let txn_chunk_manager = TxnChunkManager::new(
+        None,
+        s3fs.clone(),
+        block_cache.clone(),
+        with_pool_handle(thread_pool.handle().clone()),
+    );
+
     let ctx = Arc::new(server::Context {
         compression_lvl,
         checksum_type,
@@ -225,6 +236,7 @@ fn start_server(
         quota_limiter: Arc::new(QuotaLimiter::default()),
         block_cache,
         cop_limiter,
+        txn_chunk_manager,
     });
     let acceptor = security_mgr.acceptor(incoming).unwrap();
     let server = start_serve!(ctx.clone(), acceptor);
@@ -282,7 +294,7 @@ fn start_server(
         }
     });
 
-    Box::new(ServerFuture::new(server, cop_server_opt))
+    ServerFuture::new(server, cop_server_opt)
 }
 
 pub struct CloudWorker {

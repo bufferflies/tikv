@@ -23,6 +23,7 @@ use kvengine::{
     dfs,
     dfs::{CacheFs, S3Fs},
     table::{sstable::BlockCacheKey, ChecksumType},
+    txn_chunk_manager::TxnChunkManager,
     SnapAccess,
 };
 use pd_client::PdClient;
@@ -70,6 +71,7 @@ pub(crate) struct Context {
     pub quota_limiter: Arc<QuotaLimiter>,
     pub block_cache: Option<moka::sync::SegmentedCache<BlockCacheKey, Bytes>>,
     pub cop_limiter: CopLimiter,
+    pub txn_chunk_manager: TxnChunkManager,
 }
 
 #[macro_export]
@@ -197,6 +199,7 @@ async fn handle_remote_coprocessor(
         snap_data,
         &ctx.master_key,
         ctx.block_cache.clone(),
+        ctx.txn_chunk_manager.clone(),
     )
     .await;
     if let Err(err) = snap_access_res.as_ref() {

@@ -59,9 +59,10 @@ impl CfTable {
         }
     }
 
-    pub fn add_write_cf_txn_files(&self, txn_file: TxnFile) -> Self {
+    #[must_use]
+    pub fn add_write_cf_txn_files(&self, txn_files: &[TxnFile]) -> Self {
         let mut tbls = self.core.tbls.clone();
-        tbls[WRITE_CF] = tbls[WRITE_CF].add_txn_file(txn_file);
+        tbls[WRITE_CF] = tbls[WRITE_CF].add_txn_files(txn_files);
         let arena = self.core.arena.clone();
         let ver = AtomicU64::new(self.ver.load(Ordering::Acquire));
         let force_switch = AtomicBool::new(self.force_switch.load(Ordering::Acquire));

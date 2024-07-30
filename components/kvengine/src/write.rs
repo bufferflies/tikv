@@ -290,7 +290,7 @@ impl Engine {
         if is_commit {
             mem_tbls[0] = old_data
                 .get_writable_mem_table()
-                .add_write_cf_txn_files(txn_file);
+                .add_write_cf_txn_files(&[txn_file]);
         }
         let data = ShardData::new(
             old_data.range.clone(),

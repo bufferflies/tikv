@@ -31,19 +31,18 @@ impl SkipListExt {
         }
     }
 
-    pub fn add_txn_file(&self, txn_file: TxnFile) -> Self {
-        info!(
-            "add txn_file id: {:?}, smallest: {:?}, biggest: {:?}",
-            txn_file.id(),
-            txn_file.smallest(),
-            txn_file.biggest()
+    // Note: `txn_files` must be order by version DESC.
+    pub fn add_txn_files(&self, txn_files: &[TxnFile]) -> Self {
+        debug!(
+            "add txn_files: {:?}",
+            txn_files.iter().map(|x| x.id()).collect::<Vec<_>>(),
         );
-        let mut txn_files = Vec::with_capacity(self.txn_files.len() + 1);
-        txn_files.push(txn_file);
-        txn_files.extend_from_slice(&self.txn_files);
+        let mut new_txn_files = Vec::with_capacity(self.txn_files.len() + txn_files.len());
+        new_txn_files.extend_from_slice(txn_files);
+        new_txn_files.extend_from_slice(&self.txn_files);
         Self {
             skl: self.skl.clone(),
-            txn_files,
+            txn_files: new_txn_files,
         }
     }
 
@@ -145,6 +144,10 @@ impl SkipListExt {
     pub fn get_txn_files(&self) -> Vec<TxnFile> {
         self.txn_files.clone()
     }
+
+    pub fn get_skl(&self) -> SkipList {
+        self.skl.clone()
+    }
 }
 
 #[cfg(test)]
@@ -237,7 +240,7 @@ mod tests {
         );
         let txn_file_id = TxnFileId::new(1, 1, 102);
         let txn_file = TxnFile::new(txn_file_id, vec![txn_file_chunk], txn_ctx).unwrap();
-        let skl_ext = SkipListExt::new(skl).add_txn_file(txn_file);
+        let skl_ext = SkipListExt::new(skl).add_txn_files(&[txn_file]);
 
         // test find key in skl.
         let key = kb.i_to_inner_key(5);

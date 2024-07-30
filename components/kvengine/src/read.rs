@@ -3,6 +3,7 @@
 use core::panic;
 use std::{
     fmt::{Debug, Formatter},
+    iter::Iterator as _,
     marker::PhantomData,
     ops::Deref,
     sync::{Arc, Mutex},
@@ -11,8 +12,14 @@ use std::{
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use cloud_encryption::{EncryptionKey, MasterKey};
 use kvenginepb as pb;
+use kvenginepb::TxnFileRefs;
+use log_wrappers::Value as LogValue;
 use moka::sync::SegmentedCache;
 use protobuf::Message;
+use tikv_util::{
+    box_try,
+    codec::number::{U32_SIZE, U64_SIZE},
+};
 use tipb::ColumnInfo;
 use txn_types::Lock;
 
@@ -24,14 +31,19 @@ use crate::{
             ColumnarMergeReader, ColumnarMvccReader, ColumnarReader, ColumnarRowTableReader,
             ColumnarTableReader, Schema, HANDLE_COL_ID,
         },
-        memtable::{Hint, WriteBatch},
+        memtable::{CfTable, Hint, SkipList, WriteBatch},
         sstable::BlockCacheKey,
         table, InnerKey, SkipOpTxnFileIterator, TableExt, TxnFile, TxnFileIterator,
     },
+    txn_chunk_manager::TxnChunkManager,
     *,
 };
 
+/// Mem data format V1: format_ver,skls_data
 const MEM_DATA_FORMAT_V1: u32 = 1;
+/// Mem data format V2:
+/// format_ver,skls_length,skls_data,txn_file_refs_length,txn_file_refs_data
+const MEM_DATA_FORMAT_V2: u32 = 2;
 
 pub struct Item<'a> {
     val: table::Value,
@@ -97,16 +109,18 @@ impl SnapAccess {
         ignore_lock: bool,
         master_key: &MasterKey,
         block_cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
+        txn_chunk_manager: TxnChunkManager,
     ) -> Self {
         let core = Arc::new(
             SnapAccessCore::from_change_set(
                 tag,
                 dfs,
                 change_set,
-                None,
+                vec![],
                 ignore_lock,
                 master_key,
                 block_cache,
+                txn_chunk_manager,
             )
             .await,
         );
@@ -117,20 +131,21 @@ impl SnapAccess {
         tag: String,
         dfs: Arc<dyn dfs::Dfs>,
         change_set: pb::ChangeSet,
-        wb: &mut WriteBatch,
+        mem_tbls: Vec<CfTable>,
         master_key: &MasterKey,
         block_cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
+        txn_chunk_manager: TxnChunkManager,
     ) -> Self {
-        let wb = if wb.is_empty() { None } else { Some(wb) };
         let core = Arc::new(
             SnapAccessCore::from_change_set(
                 tag,
                 dfs,
                 change_set,
-                wb,
+                mem_tbls,
                 true,
                 master_key,
                 block_cache,
+                txn_chunk_manager,
             )
             .await,
         );
@@ -140,40 +155,143 @@ impl SnapAccess {
     pub async fn construct_snapshot<'a>(
         tag: String,
         dfs: Arc<dyn dfs::Dfs>,
-        mut mem_table_data: &[u8],
+        mem_table_data: &[u8],
         snapshot: &[u8],
         master_key: &MasterKey,
         block_cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
+        txn_chunk_manager: TxnChunkManager,
     ) -> Result<Self> {
         let mut change_set = kvenginepb::ChangeSet::default();
         change_set.merge_from_bytes(snapshot).unwrap();
-        let inner_key_off = change_set.get_snapshot().get_inner_key_off() as usize;
-        let mut wb = crate::table::memtable::WriteBatch::new();
-        if !mem_table_data.is_empty() {
-            let format_version = mem_table_data.get_u32_le();
-            if format_version != MEM_DATA_FORMAT_V1 {
-                return Err(Error::RemoteRead(format!(
-                    "unsupported mem data format {}",
-                    format_version
-                )));
-            }
-            let rows: Vec<table::Row> = bincode::deserialize(mem_table_data).map_err(|e| {
-                Error::RemoteRead(format!("failed to deserialize mem table data: {}", e))
-            })?;
-            for row in rows {
-                let key = InnerKey::from_outer_key(&row.key, inner_key_off);
-                wb.put(key, 0, &row.user_meta.to_array(), 0, &row.value);
-            }
+        if !change_set.has_snapshot() {
+            error!("no snapshot in change set: {:?}", change_set);
+            return Err(Error::RemoteRead("no snapshot in change set".to_string()));
         }
+
+        let snap = change_set.get_snapshot();
+        let inner_key_off = snap.get_inner_key_off() as usize;
+        let encryption_key = get_shard_property(ENCRYPTION_KEY, snap.get_properties())
+            .map(|v| master_key.decrypt_encryption_key(&v).unwrap());
+
+        let shard_id = change_set.shard_id;
+        let shard_ver = change_set.shard_ver;
+        let mem_tbls = Self::construct_memtables(
+            shard_id,
+            shard_ver,
+            mem_table_data,
+            inner_key_off,
+            txn_chunk_manager.clone(),
+            encryption_key,
+        )
+        .await?;
         Ok(Self::from_change_set_and_memtable_data(
             tag,
             dfs,
             change_set,
-            &mut wb,
+            mem_tbls,
             master_key,
             block_cache,
+            txn_chunk_manager,
         )
         .await)
+    }
+
+    async fn construct_memtables(
+        shard_id: u64,
+        shard_ver: u64,
+        mut mem_table_data: &[u8],
+        inner_key_off: usize,
+        txn_chunk_manager: TxnChunkManager,
+        encryption_key: Option<EncryptionKey>,
+    ) -> Result<Vec<CfTable>> {
+        if mem_table_data.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let format_version = mem_table_data.get_u32_le();
+        if format_version == MEM_DATA_FORMAT_V1 {
+            let mut mem_tbl = CfTable::new();
+            Self::construct_skip_list(mem_table_data, inner_key_off, &mut mem_tbl)?;
+            Ok(vec![mem_tbl])
+        } else if format_version == MEM_DATA_FORMAT_V2 {
+            Self::construct_memtables_format_v2(
+                shard_id,
+                shard_ver,
+                mem_table_data,
+                inner_key_off,
+                txn_chunk_manager,
+                encryption_key,
+            )
+            .await
+        } else {
+            Err(Error::RemoteRead(format!(
+                "unsupported mem data format {}",
+                format_version
+            )))
+        }
+    }
+
+    fn construct_skip_list(
+        skl_data: &[u8],
+        inner_key_off: usize,
+        mem_tbl: &mut CfTable,
+    ) -> Result<()> {
+        let mut wb = WriteBatch::new();
+        let rows: Vec<table::Row> = bincode::deserialize(skl_data).map_err(|e| {
+            Error::RemoteRead(format!("failed to deserialize mem table data: {}", e))
+        })?;
+        for row in rows {
+            let key = InnerKey::from_outer_key(&row.key, inner_key_off);
+            wb.put(key, 0, &row.user_meta.to_array(), 0, &row.value);
+        }
+        mem_tbl.get_cf(WRITE_CF).put_batch(&mut wb, None, WRITE_CF);
+        Ok(())
+    }
+
+    async fn construct_memtables_format_v2(
+        shard_id: u64,
+        shard_ver: u64,
+        mut mem_data: &[u8],
+        inner_key_off: usize,
+        txn_chunk_manager: TxnChunkManager,
+        encryption_key: Option<EncryptionKey>,
+    ) -> Result<Vec<CfTable>> {
+        let mut mem_tbl = CfTable::new();
+
+        // Skiplists:
+        let mem_size = mem_data.get_u64_le() as usize;
+        let skl_data = &mem_data[..mem_size];
+        mem_data.advance(mem_size);
+        Self::construct_skip_list(skl_data, inner_key_off, &mut mem_tbl)?;
+
+        // Txn file refs:
+        let msg_len = mem_data.get_u32_le() as usize;
+        let msg_data = &mem_data[..msg_len];
+        mem_data.advance(msg_len);
+
+        let mut txn_file_refs = TxnFileRefs::default();
+        box_try!(txn_file_refs.merge_from_bytes(msg_data));
+
+        let worker_pool = txn_chunk_manager.worker_pool().clone();
+        let txn_files = worker_pool
+            .spawn_blocking(move || {
+                txn_chunk_manager.load_txn_files_from_refs(
+                    shard_id,
+                    shard_ver,
+                    txn_file_refs.get_txn_file_refs(),
+                    encryption_key,
+                )
+            })
+            .await
+            .unwrap()?;
+        mem_tbl = mem_tbl.add_write_cf_txn_files(&txn_files);
+
+        debug_assert!(
+            mem_data.is_empty(),
+            "mem_data: {:?}",
+            LogValue::value(mem_data)
+        );
+        Ok(vec![mem_tbl])
     }
 }
 
@@ -231,19 +349,21 @@ impl SnapAccessCore {
         tag: String,
         dfs: Arc<dyn dfs::Dfs>,
         change_set: pb::ChangeSet,
-        wb: Option<&mut WriteBatch>,
+        mem_tbls: Vec<CfTable>,
         ignore_lock: bool,
         master_key: &MasterKey,
         block_cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
+        txn_chunk_manager: TxnChunkManager,
     ) -> Self {
         let shard = Shard::from_change_set(
             tag,
             dfs,
             change_set,
-            wb,
+            mem_tbls,
             ignore_lock,
             master_key,
             block_cache,
+            txn_chunk_manager,
         )
         .await;
         Self::new(&shard)
@@ -758,8 +878,63 @@ impl SnapAccessCore {
         (key, cs.write_to_bytes().unwrap())
     }
 
-    pub fn build_mem_data(&self, ranges: &[(Bytes, Bytes)], start_ts: u64) -> Vec<u8> {
-        let mut mem_iterator = self.new_memtable_iterator(0, false, false, Some(start_ts));
+    pub fn build_mem_data(&self, outer_ranges: &[(Bytes, Bytes)], start_ts: u64) -> Vec<u8> {
+        let inner_ranges: Vec<(InnerKey<'_>, InnerKey<'_>)> = outer_ranges
+            .iter()
+            .map(|range| {
+                (
+                    InnerKey::from_outer_key(&range.0, self.data.inner_key_off),
+                    InnerKey::from_outer_key(&range.1, self.data.inner_key_off),
+                )
+            })
+            .collect();
+
+        let mut mem_data = Vec::with_capacity(U32_SIZE /* format */);
+        let (skls, txn_file_refs) = self.get_mem_tables_group_by_type(WRITE_CF, &inner_ranges);
+
+        if txn_file_refs.get_txn_file_refs().is_empty() {
+            // For backward compatible.
+            // TODO: remove after all tikv-workers are upgraded.
+            mem_data.put_u32_le(MEM_DATA_FORMAT_V1);
+            self.build_skl_data(outer_ranges, start_ts, skls, &mut mem_data, false);
+            return mem_data;
+        }
+
+        mem_data.put_u32_le(MEM_DATA_FORMAT_V2);
+        self.build_skl_data(outer_ranges, start_ts, skls, &mut mem_data, true);
+        self.build_txn_file_data(txn_file_refs, &mut mem_data);
+        mem_data
+    }
+
+    fn build_skl_data(
+        &self,
+        ranges: &[(Bytes, Bytes)],
+        start_ts: u64,
+        skls: Vec<SkipList>,
+        mem_data: &mut Vec<u8>,
+        encode_meta: bool,
+    ) {
+        let skl_iters = skls
+            .iter()
+            .map(|skl| Box::new(skl.new_iterator(false)) as _)
+            .collect();
+        let merge_iter = table::new_merge_iterator(skl_iters, false);
+
+        let data = self.data.clone();
+        let mut key = BytesMut::new();
+        key.extend_from_slice(data.prefix());
+        let mut mem_iterator = Iterator {
+            all_versions: false,
+            reversed: false,
+            read_ts: start_ts,
+            key,
+            val: table::Value::new(),
+            inner: merge_iter,
+            blob_prefetcher: None,
+            data,
+            range: None,
+        };
+
         let mut rows = vec![];
         for (range_start, range_end) in ranges {
             mem_iterator.seek(range_start.chunk());
@@ -779,10 +954,46 @@ impl SnapAccessCore {
         let mem_size = bincode::serialized_size(&rows)
             .map_err(|e| Error::Other(e))
             .unwrap();
-        let mut mem_data = Vec::with_capacity(mem_size as usize + 4);
-        mem_data.put_u32_le(MEM_DATA_FORMAT_V1);
-        bincode::serialize_into(&mut mem_data, &rows).unwrap();
-        mem_data
+        if encode_meta {
+            mem_data.reserve(U64_SIZE /* mem_size */ + mem_size as usize);
+            mem_data.put_u64_le(mem_size);
+        } else {
+            mem_data.reserve(mem_size as usize);
+        }
+        bincode::serialize_into(mem_data, &rows).unwrap();
+    }
+
+    fn build_txn_file_data(&self, txn_file_refs: TxnFileRefs, mem_data: &mut Vec<u8>) {
+        let msg_len = txn_file_refs.compute_size();
+        mem_data.reserve(U32_SIZE /* msg_len */ + msg_len as usize);
+        mem_data.put_u32_le(msg_len);
+        txn_file_refs.write_to_vec(mem_data).unwrap();
+    }
+
+    fn get_mem_tables_group_by_type(
+        &self,
+        cf: usize,
+        ranges: &[(InnerKey<'_>, InnerKey<'_>)],
+    ) -> (Vec<SkipList>, TxnFileRefs) {
+        let mut skls = Vec::new();
+        let mut txn_file_refs = TxnFileRefs::default();
+        for mem_tbl in &self.data.mem_tbls {
+            let skl_ext = mem_tbl.get_cf(cf);
+
+            for txn_file_ref in skl_ext
+                .get_txn_files()
+                .into_iter()
+                .filter_map(|txn_file| txn_file.to_txn_file_ref(Some(ranges)))
+            {
+                txn_file_refs.mut_txn_file_refs().push(txn_file_ref);
+            }
+
+            let skl = skl_ext.get_skl();
+            if !skl.is_empty() {
+                skls.push(skl);
+            }
+        }
+        (skls, txn_file_refs)
     }
 
     pub fn get_all_files(&self) -> Vec<u64> {
@@ -1278,12 +1489,41 @@ impl Iterator {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, iter::Iterator};
+    use std::{
+        collections::{BTreeMap, HashMap},
+        iter::Iterator,
+        ops::Deref,
+        sync::Arc,
+    };
 
+    use api_version::{api_v2::KEYSPACE_PREFIX_LEN, ApiV2};
+    use bytes::{Buf, Bytes};
+    use cloud_encryption::{EncryptionKey, MasterKey};
+    use futures::executor::block_on;
     use kvenginepb::TableCreate;
+    use proptest::prelude::*;
+    use protobuf::Message;
 
-    use super::*;
-    use crate::table::{memtable::CfTable, sstable::build_test_table_with_kvs};
+    use crate::{
+        apply::create_snapshot_tables,
+        dfs::{self, Dfs, InMemFs},
+        limiter::RegionLimiter,
+        read::MEM_DATA_FORMAT_V1,
+        shard::{ShardData, NEW_DATA_UPDATE_COUNTER},
+        table::{
+            self,
+            memtable::CfTable,
+            sstable::{build_test_table_with_kvs, InMemFile},
+            InnerKey, NoPrefixKey, OwnedInnerKey, TxnChunk, TxnChunkBuilder, TxnCtx, TxnFile,
+            TxnFileId, OP_PUT,
+        },
+        txn_chunk_manager::{with_pool_size, TxnChunkManager},
+        util::test_util::KeyBuilder,
+        ChangeSet, Shard, ShardDataBuilder, ShardRange, SnapAccess, UserMeta, ENCRYPTION_KEY,
+        GLOBAL_SHARD_END_KEY, WRITE_CF,
+    };
+
+    const KEYSPACE_ID: u32 = 42;
 
     #[test]
     fn test_estimated_range_blocks_size() {
@@ -1389,5 +1629,291 @@ mod tests {
         ]);
         // each range on each level access one block.
         assert_eq!(blocks_size, 42172);
+    }
+
+    const MAX_I: usize = 100;
+
+    fn mem_table_op_strategy() -> impl Strategy<Value = MemTableOp> {
+        prop_oneof![
+            (prop::collection::vec(1..MAX_I, 0..=20usize), any::<bool>())
+                .prop_map(|(batch, switch)| MemTableOp::WriteBatch(batch, switch)),
+            (prop::collection::vec(1..MAX_I, 0..=20usize), any::<bool>())
+                .prop_map(|(batch, switch)| MemTableOp::WriteTxnFile(batch, switch)),
+        ]
+    }
+
+    prop_compose! {
+        fn arb_mem_table_ops(size: usize)
+            (ops in prop::collection::vec(mem_table_op_strategy(), 0..=size))
+            -> Vec<MemTableOp> {
+            ops
+        }
+    }
+
+    // [10, 20, 30, 40, 50] -> [(10, 20), (30, 40)]
+    fn query_ranges() -> impl Strategy<Value = Vec<(usize, usize)>> {
+        prop::collection::vec(0..MAX_I + 1, 0..=10usize).prop_map(|mut is| -> Vec<(usize, usize)> {
+            is.sort();
+            let ranges = is
+                .chunks_exact(2)
+                .filter_map(|chunk| (chunk[0] != chunk[1]).then_some((chunk[0], chunk[1])))
+                .collect::<Vec<_>>();
+            if ranges.is_empty() {
+                vec![(0, MAX_I)]
+            } else {
+                ranges
+            }
+        })
+    }
+
+    proptest! {
+        #[test]
+        fn test_serde_mem_tables(
+            ops in arb_mem_table_ops(10),
+            ranges in query_ranges(),
+            enable_enc in any::<bool>(),
+            enable_inner_key_off in any::<bool>(),
+        ) {
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let _enter = runtime.enter();
+
+            let engine_id = 1;
+            let shard_id = 1;
+            let shard_ver = 10;
+
+            let kb = KeyBuilder::new(KEYSPACE_ID, enable_inner_key_off, "t_");
+            let dfs: Arc<dyn crate::dfs::Dfs> = Arc::new(InMemFs::new());
+            let txn_chunk_manager = TxnChunkManager::new(None, dfs.clone(), None, with_pool_size(2));
+
+            let master_key = MasterKey::new(&[1u8; 32]);
+            let enc_key = enable_enc.then(||master_key.generate_encryption_key());
+
+            let has_txn_file = ops.iter().any(|op| matches!(op, MemTableOp::WriteTxnFile(is, _) if !is.is_empty()));
+            let (mem_tbls, ref_store) = make_mem_tables(ops, &kb, dfs.clone(), enc_key.as_ref());
+            verify_mem_tables(&mem_tbls, &ref_store, &[(kb.i_to_inner_key(0).as_ref(), kb.i_to_inner_key(MAX_I).as_ref())])?;
+
+            let (outer_start, outer_end) = ApiV2::get_txn_keyspace_range(KEYSPACE_ID);
+            let range = ShardRange::new(&outer_start, &outer_end, KEYSPACE_PREFIX_LEN * enable_inner_key_off as usize);
+            let opt = Arc::new(crate::options::Options::default());
+
+            let inner_ranges = ranges.iter().map(|&(start, end)| {
+                (kb.i_to_inner_key(start), kb.i_to_inner_key(end))
+            }).collect::<Vec<_>>();
+            let outer_ranges = ranges.into_iter().map(|(start, end)| {
+                (Bytes::from(kb.i_to_outer_key(start)), Bytes::from(kb.i_to_outer_key(end)))
+            }).collect::<Vec<_>>();
+
+            // Serialize
+            let mem_bin = {
+                let mut props = kvenginepb::Properties {
+                    shard_id,
+                    ..Default::default()
+                };
+                if let Some(enc_key) = &enc_key {
+                    props.mut_keys().push(ENCRYPTION_KEY.to_string());
+                    props.mut_values().push(enc_key.export());
+                }
+                let shard = Shard::new(
+                    engine_id,
+                    &props,
+                    shard_ver,
+                    range,
+                    opt,
+                    &master_key,
+                );
+                let data = ShardDataBuilder::new(shard.range.clone()).mem_tbls(mem_tbls).build();
+                shard.set_data(data);
+                let snap_access = shard.new_snap_access();
+
+                snap_access.build_mem_data(&outer_ranges, u64::MAX)
+            };
+            if !has_txn_file {
+                let format_ver = mem_bin.as_slice().get_u32_le();
+                prop_assert_eq!(format_ver, MEM_DATA_FORMAT_V1);
+            }
+
+            // Deserialize
+            let mut snap_pb = kvenginepb::Snapshot::default();
+            snap_pb.set_inner_key_off(KEYSPACE_PREFIX_LEN as u32 * enable_inner_key_off as u32);
+            let props = snap_pb.mut_properties();
+            if let Some(enc_key) = &enc_key {
+                props.mut_keys().push(ENCRYPTION_KEY.to_string());
+                props.mut_values().push(enc_key.export());
+            }
+            let mut cs = kvenginepb::ChangeSet::default();
+            cs.set_shard_id(shard_id);
+            cs.set_shard_ver(shard_ver);
+            cs.set_snapshot(snap_pb);
+            let snap_bin = cs.write_to_bytes().unwrap();
+            let remote_snap = block_on(SnapAccess::construct_snapshot("test".to_owned(), dfs, &mem_bin, &snap_bin, &master_key, None, txn_chunk_manager)).unwrap();
+
+            let inner_ranges = inner_ranges.iter().map(|(start, end)| (start.as_ref(), end.as_ref())).collect::<Vec<_>>();
+            let ref_store_in_ranges = ref_store.new_in_ranges(&inner_ranges);
+            verify_mem_tables(remote_snap.data.mem_tbls.as_slice(), &ref_store_in_ranges, &inner_ranges)?;
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    enum MemTableOp {
+        WriteBatch(Vec<usize>, bool /* switch */),
+        WriteTxnFile(Vec<usize>, bool /* switch */),
+    }
+
+    #[derive(Default, Debug)]
+    struct RefStore {
+        inner: BTreeMap<Bytes, String>,
+    }
+
+    impl RefStore {
+        fn put(&mut self, key: OwnedInnerKey, val: String) {
+            self.inner.insert(key.into_inner(), val);
+        }
+
+        fn get_value(&self, key: InnerKey<'_>) -> Option<&String> {
+            self.inner.get(key.deref())
+        }
+
+        fn new_in_ranges(&self, ranges: &[(InnerKey<'_>, InnerKey<'_>)]) -> Self {
+            let mut new_store = RefStore::default();
+            for &(start, end) in ranges {
+                let start = Bytes::copy_from_slice(start.deref());
+                let end = Bytes::copy_from_slice(end.deref());
+                for (k, v) in self.inner.range::<Bytes, _>(&start..&end) {
+                    new_store.inner.insert(k.clone(), v.clone());
+                }
+            }
+            new_store
+        }
+
+        fn len(&self) -> usize {
+            self.inner.len()
+        }
+    }
+
+    fn make_mem_tables(
+        ops: Vec<MemTableOp>,
+        kb: &KeyBuilder,
+        dfs: Arc<dyn Dfs>,
+        enc_key: Option<&EncryptionKey>,
+    ) -> (Vec<CfTable>, RefStore) {
+        let mut mem_tbls = vec![CfTable::new()];
+        let mut ref_store = RefStore::default();
+        let mut wb = crate::table::memtable::WriteBatch::new();
+        let mut next_txn_chunk_id = 1000;
+
+        let switch_mem_table = |mem_tbls: &mut Vec<CfTable>| {
+            let mut new_mem_tbls = Vec::with_capacity(mem_tbls.len() + 1);
+            new_mem_tbls.push(CfTable::new());
+            new_mem_tbls.append(mem_tbls);
+            *mem_tbls = new_mem_tbls;
+        };
+
+        for (idx, op) in ops.into_iter().enumerate() {
+            let start_ts = idx as u64 * 100;
+            let commit_ts = (idx as u64 + 1) * 100;
+            let user_meta = UserMeta::new(start_ts, commit_ts);
+
+            match op {
+                MemTableOp::WriteBatch(is, switch) => {
+                    for i in is {
+                        let key = kb.i_to_inner_key(i);
+                        let val = kb.i_to_val(i);
+                        wb.put(
+                            key.as_ref(),
+                            0,
+                            &user_meta.to_array(),
+                            commit_ts,
+                            val.as_bytes(),
+                        );
+                        ref_store.put(key, val);
+                    }
+                    let mem_tbl = mem_tbls[0].get_cf(WRITE_CF);
+                    mem_tbl.put_batch(&mut wb, None, WRITE_CF);
+                    wb.reset();
+
+                    if switch {
+                        switch_mem_table(&mut mem_tbls);
+                    }
+                }
+                MemTableOp::WriteTxnFile(mut is, switch) => {
+                    is.sort();
+                    is.dedup();
+                    let mut txn_chunks = vec![];
+                    for chunk in is.chunks(3) {
+                        next_txn_chunk_id += 1;
+                        let mut builder = TxnChunkBuilder::new(
+                            next_txn_chunk_id,
+                            10,
+                            enc_key.cloned(),
+                            KEYSPACE_ID,
+                            kb.get_enable_inner_key_off(),
+                        );
+                        for &i in chunk {
+                            let key = kb.i_to_inner_key(i);
+                            let val = kb.i_to_val(i);
+                            builder.add_entry(NoPrefixKey(&kb.i_to_key(i)), OP_PUT, val.as_bytes());
+                            ref_store.put(key, val);
+                        }
+                        let mut chunk_data = vec![];
+                        builder.finish(&mut chunk_data);
+
+                        let opts = dfs::Options::default().with_type(dfs::FileType::TxnChunk);
+                        block_on(dfs.create(next_txn_chunk_id, chunk_data.clone().into(), opts))
+                            .unwrap();
+
+                        let chunk_file =
+                            Arc::new(InMemFile::new(next_txn_chunk_id, chunk_data.into()));
+                        let txn_chunk = TxnChunk::new(chunk_file, None, enc_key.cloned()).unwrap();
+                        txn_chunks.push(txn_chunk);
+                    }
+
+                    if !txn_chunks.is_empty() {
+                        let id = TxnFileId::new(1, 1, start_ts);
+                        let lower_bound = InnerKey::from_inner_buf(b"");
+                        let upper_bound = InnerKey::from_inner_buf(GLOBAL_SHARD_END_KEY);
+                        let txn_ctx = TxnCtx::new(
+                            user_meta.to_array().to_vec().into(),
+                            Default::default(),
+                            commit_ts,
+                            lower_bound,
+                            upper_bound,
+                        );
+                        let txn_file = TxnFile::new(id, txn_chunks, txn_ctx).unwrap();
+                        mem_tbls[0] = mem_tbls[0].add_write_cf_txn_files(&[txn_file]);
+                        if switch {
+                            switch_mem_table(&mut mem_tbls);
+                        }
+                    }
+                }
+            }
+        }
+        (mem_tbls, ref_store)
+    }
+
+    fn verify_mem_tables(
+        mem_tbls: &[CfTable],
+        ref_store: &RefStore,
+        ranges: &[(InnerKey<'_>, InnerKey<'_>)],
+    ) -> std::result::Result<(), TestCaseError> {
+        let mem_iters = mem_tbls
+            .iter()
+            .map(|m| m.get_cf(WRITE_CF).new_iterator(false))
+            .collect();
+        let mut iter = table::new_merge_iterator(mem_iters, false);
+        let mut count = 0;
+        for &(start, end) in ranges {
+            iter.seek(start);
+            while iter.valid() && iter.key() < end {
+                count += 1;
+                let expect = ref_store.get_value(iter.key());
+                prop_assert!(expect.is_some(), "key: {:?}", iter.key());
+                let val = iter.value();
+                prop_assert_eq!(val.get_value(), expect.unwrap().as_bytes());
+
+                iter.next();
+            }
+        }
+        prop_assert_eq!(count, ref_store.len());
+        Ok(())
     }
 }

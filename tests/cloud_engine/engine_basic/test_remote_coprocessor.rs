@@ -4,15 +4,24 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use cloud_encryption::MasterKey;
 use codec::prelude::NumberEncoder;
-use kvengine::{table::table::Row, SnapAccess};
+use futures::executor::block_on;
+use kvengine::{
+    table::table::Row,
+    txn_chunk_manager::{with_pool_size, TxnChunkManager},
+    SnapAccess,
+};
 use kvproto::{
     coprocessor::{self as coppb, Request},
     kvrpcpb::{ApiVersion, Context},
 };
 use protobuf::Message;
 use rfstore::store::RegionSnapshot;
+use rstest::rstest;
+use security::SecurityConfig;
+use tempfile::TempDir;
 use test_cloud_server::{
-    client::{ClusterClient, TxnMutations},
+    client::{ClusterClient, ClusterClientOptions, TxnMutations, TxnWriteMethod},
+    oss::{prepare_dfs, ObjectStorageService},
     util::Mutation,
     ServerCluster,
 };
@@ -20,6 +29,7 @@ use test_coprocessor::{
     next_id, offset_for_column, Column, ColumnBuilder, DagChunkSpliter, DagSelect, Table,
     TableBuilder, TYPE_LONG, TYPE_VAR_CHAR,
 };
+use test_pd_client::PdWrapper;
 use tidb_query_datatype::{
     codec::{datum, table, Datum},
     expr::EvalContext,
@@ -229,23 +239,36 @@ fn test_stack_guard() {
     }
 }
 
-#[test]
-fn test_select_all_scan() {
+#[rstest]
+#[case(false)]
+#[case::txn_file(true)]
+fn test_select_all_scan(#[case] use_txn_file: bool) {
     test_util::init_log_for_test();
 
-    let rows = vec![
-        (1, Some("v:1"), 1),
-        (2, Some("v:2"), 1),
-        (3, Some("v:3"), 1),
-        (4, Some("v:4"), 1),
-        (5, Some("v:5"), 1),
-        (6, Some("v:6"), 1),
-    ];
+    let make_row = |i| -> (i64, Option<String>, i64) {
+        let id = i;
+        let name = format!("v:{i}");
+        let count = 1;
+        (id, Some(name), count)
+    };
+
+    let write_rows = |dag_test: &mut DagTest<'_>, i, j, use_txn_file| {
+        let rows: Vec<_> = (i..j).map(make_row).collect();
+        let rows_ref: Vec<_> = rows
+            .iter()
+            .map(|(id, name, count)| (*id, name.as_deref(), *count))
+            .collect();
+        dag_test.insert_and_commit_opt(&rows_ref, use_txn_file);
+        rows
+    };
 
     let product = ProductTable::new();
     let mut dag_test = DagTest::new(&product);
+    let _enter = dag_test.enter_runtime();
 
-    dag_test.insert_and_commit(&rows);
+    let mut rows = write_rows(&mut dag_test, 1, 7, false);
+    rows.append(&mut write_rows(&mut dag_test, 11, 17, use_txn_file));
+    rows.append(&mut write_rows(&mut dag_test, 21, 27, false));
 
     let select_key_range = dag_test.get_key_range_all();
     let snapshot = dag_test.fetch_snapshot(dag_test.get_ts().into_inner(), vec![select_key_range]);
@@ -275,7 +298,7 @@ fn test_select_all_scan() {
 
     let spliter = DagChunkSpliter::new(resp.take_chunks().into(), 3);
     for (row, (id, name, cnt)) in spliter.zip(rows) {
-        let name_datum = name.map(|s| s.as_bytes()).into();
+        let name_datum = name.map(|s| s.into_bytes()).into();
         let expected_encoded = datum::encode_value(
             &mut EvalContext::default(),
             &[Datum::I64(id), name_datum, cnt.into()],
@@ -1858,18 +1881,22 @@ impl<'a> RowCache<'a> {
 #[cfg(test)]
 pub struct Insert<'a> {
     client: &'a mut ClusterClient,
+    use_txn_file: bool,
 }
 
 impl<'a> Insert<'a> {
-    pub fn new(client: &'a mut ClusterClient) -> Self {
-        Self { client }
+    pub fn new(client: &'a mut ClusterClient, use_txn_file: bool) -> Self {
+        Self {
+            client,
+            use_txn_file,
+        }
     }
 
     fn prewrite(
         &mut self,
         start_ts: txn_types::TimeStamp,
         mut row_cache: RowCache<'_>,
-    ) -> Vec<Mutation> {
+    ) -> TxnMutations {
         assert!(!row_cache.rows().is_empty());
 
         let mut mutations = vec![];
@@ -1910,18 +1937,33 @@ impl<'a> Insert<'a> {
             }
         }
 
-        let txn_muts = TxnMutations::from_normal(mutations.clone());
-        self.client
-            .kv_prewrite(txn_muts.primary(), None, txn_muts, start_ts)
-            .expect("kv_prewrite");
+        mutations.sort_by(|a, b| a.key.cmp(&b.key));
 
-        mutations
+        let write_method = if self.use_txn_file {
+            TxnWriteMethod::FileBased
+        } else {
+            TxnWriteMethod::Normal
+        };
+        let txn_muts = block_on(TxnMutations::build(
+            mutations,
+            write_method,
+            self.client.txn_file_helper(),
+        ))
+        .unwrap();
+        self.client
+            .kv_prewrite(txn_muts.primary(), None, txn_muts.clone(), start_ts)
+            .expect("kv_prewrite");
+        txn_muts
     }
 
     fn execute(mut self, row_cache: RowCache<'_>) -> txn_types::TimeStamp {
         let start_ts = self.client.get_ts();
-        let mutations = self.prewrite(start_ts, row_cache);
-        self.client.put_commit(start_ts, &mutations).unwrap()
+        let txn_muts = self.prewrite(start_ts, row_cache);
+
+        let commit_ts = self.client.get_ts();
+        self.client
+            .kv_commit(txn_muts, start_ts, commit_ts)
+            .unwrap()
     }
 
     pub fn commit(
@@ -1929,6 +1971,9 @@ impl<'a> Insert<'a> {
         start_ts: txn_types::TimeStamp,
         mutations: &[Mutation],
     ) -> txn_types::TimeStamp {
+        // TODO: support txn file
+        assert!(!self.use_txn_file);
+
         self.client.put_commit(start_ts, mutations).unwrap()
     }
 }
@@ -2086,7 +2131,10 @@ impl<'a> Txn<'a> {
 
     fn prewrite_execute(&self, dml: &mut Dml<'a>, row_cache: RowCache<'_>) -> Vec<Mutation> {
         match dml {
-            Dml::Ins(inserter) => inserter.prewrite(self.start_ts, row_cache),
+            Dml::Ins(inserter) => match inserter.prewrite(self.start_ts, row_cache) {
+                TxnMutations::Muts { muts } => muts,
+                TxnMutations::Chunks { .. } => unreachable!(),
+            },
             Dml::Del(deleter) => deleter.prewrite(self.start_ts, row_cache),
             Dml::Empty => panic!("Dml can't be Empty"),
         }
@@ -2122,38 +2170,78 @@ impl<'a> Txn<'a> {
     }
 }
 
+struct DagTestContext {
+    _temp_dir: TempDir,
+    _oss: ObjectStorageService,
+    rt: tokio::runtime::Runtime,
+}
+
+impl DagTestContext {
+    fn new() -> (Self, kvengine::dfs::DFSConfig) {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (temp_dir, oss, dfs_cfg) = prepare_dfs("oss_");
+        (
+            Self {
+                _temp_dir: temp_dir,
+                _oss: oss,
+                rt,
+            },
+            dfs_cfg,
+        )
+    }
+}
+
 #[cfg(test)]
 struct DagTest<'a> {
     table: &'a ProductTable,
     cluster: ServerCluster,
     pub client: ClusterClient,
     master_key: MasterKey,
+    txn_chunk_manager: TxnChunkManager,
+    ctx: DagTestContext,
 }
 
 #[cfg(test)]
 impl<'a> DagTest<'a> {
     pub fn new(table: &'a ProductTable) -> Self {
         let node_id = alloc_node_id();
-        let mut dfs_cfg = kvengine::dfs::DFSConfig::default();
 
-        dfs_cfg.s3_endpoint = "memory".to_owned();
-        dfs_cfg.zstd_compression_level = "3".to_string();
+        let (ctx, dfs_cfg) = DagTestContext::new();
+        let security_conf = SecurityConfig::default();
 
-        let cluster = ServerCluster::new(vec![node_id], |_, conf| {
-            conf.dfs = dfs_cfg.clone();
-            conf.enable_inner_key_offset = node_id % 2 == 0;
+        let pd = PdWrapper::new_test(1, &security_conf, None);
+        let mut cluster = ServerCluster::new_opt(
+            vec![node_id],
+            |_, conf| {
+                conf.dfs = dfs_cfg.clone();
+                conf.enable_inner_key_offset = node_id % 2 == 0;
+                conf.security = security_conf.clone();
+            },
+            pd,
+        );
+        cluster.start_tikv_workers(1, 2, false);
+
+        let mut client = cluster.new_client_opt(ClusterClientOptions {
+            txn_file_max_chunk_size: Some(1024),
+            ..Default::default()
         });
-
-        let mut client = cluster.new_client();
         client.split_keyspace(1);
         let master_key = cluster.get_kvengine(node_id).get_master_key();
+        let txn_chunk_manager =
+            TxnChunkManager::new(None, cluster.get_dfs().unwrap(), None, with_pool_size(2));
 
         Self {
             table,
             cluster,
             client,
             master_key,
+            txn_chunk_manager,
+            ctx,
         }
+    }
+
+    pub fn enter_runtime(&self) -> tokio::runtime::EnterGuard<'_> {
+        self.ctx.rt.enter()
     }
 
     pub fn get_ts(&self) -> txn_types::TimeStamp {
@@ -2161,7 +2249,11 @@ impl<'a> DagTest<'a> {
     }
 
     fn get_inserter(&mut self) -> Dml<'_> {
-        Dml::Ins(Insert::new(&mut self.client))
+        self.get_inserter_opt(false)
+    }
+
+    fn get_inserter_opt(&mut self, use_txn_file: bool) -> Dml<'_> {
+        Dml::Ins(Insert::new(&mut self.client, use_txn_file))
     }
 
     #[allow(dead_code)]
@@ -2219,9 +2311,13 @@ impl<'a> DagTest<'a> {
     }
 
     pub fn insert_and_commit(&mut self, rows: &[(i64, Option<&str>, i64)]) {
+        self.insert_and_commit_opt(rows, false);
+    }
+
+    pub fn insert_and_commit_opt(&mut self, rows: &[(i64, Option<&str>, i64)], use_txn_file: bool) {
         let mut row_cache = self.get_row_cache();
         row_cache.add_rows(rows);
-        Txn::auto_commit(self.get_inserter(), row_cache);
+        Txn::auto_commit(self.get_inserter_opt(use_txn_file), row_cache);
     }
 
     pub fn insert_rows(&mut self, count: i64) {
@@ -2333,6 +2429,7 @@ impl<'a> DagTest<'a> {
                 &snapshot.cs,
                 &self.master_key,
                 None,
+                self.txn_chunk_manager.clone(),
             )
             .await
             .unwrap();

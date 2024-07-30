@@ -29,11 +29,12 @@ use crate::{
         blobtable::blobtable::BlobTable,
         columnar::{ColumnarFile, SchemaFile},
         get_tables_in_range,
-        memtable::{self, CfTable, WriteBatch},
+        memtable::{self, CfTable},
         search,
         sstable::{BlockCacheKey, InMemFile, L0Table, SsTable},
         InnerKey, TableExt, TxnFile,
     },
+    txn_chunk_manager::TxnChunkManager,
     util::{evenly_distribute, TxnFileRefPropertyHelper},
     *,
 };
@@ -269,22 +270,17 @@ impl Shard {
         tag: String,
         dfs: Arc<dyn dfs::Dfs>,
         change_set: pb::ChangeSet,
-        wb: Option<&mut WriteBatch>,
+        mut mem_tbls: Vec<CfTable>,
         ignore_lock: bool,
         master_key: &MasterKey,
         block_cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
+        _txn_chunk_manager: TxnChunkManager,
     ) -> Self {
         let mut cs = ChangeSet::new(change_set);
         let mut ids = HashMap::new();
         let mut _txn_file_refs: Vec<TxnFileRef> = vec![];
-        let mem_tbls = vec![CfTable::new()];
-        // FIXME: Iterate over all memtables
-        if let Some(wb) = wb {
-            let mem_tbl = mem_tbls[0].get_cf(WRITE_CF);
-            mem_tbl.put_batch(wb, None, WRITE_CF);
-            // Insert a dummy record, that should be ignored, so that we
-            // don't have to fiddle too much with the code below.
-            ids.insert(0, FileMeta::default());
+        if mem_tbls.is_empty() {
+            mem_tbls.push(CfTable::new());
         }
         let encryption_key = if cs.has_snapshot() {
             let snap = cs.get_snapshot();
@@ -1425,6 +1421,54 @@ impl ShardDataCore {
                 .levels
                 .iter()
                 .any(|l| !l.tables.is_empty())
+    }
+}
+
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct ShardDataBuilder {
+    range: ShardRange,
+    mem_tbls: Vec<memtable::CfTable>,
+    l0_tbls: Vec<L0Table>,
+    blob_tbl_map: Arc<HashMap<u64, BlobTable>>,
+    cfs: Option<[ShardCf; 3]>,
+    unloaded_tbls: HashMap<u64, FileMeta>,
+    lock_txn_files: Vec<TxnFile>,
+    limiter: Option<RegionLimiter>,
+    update_counter: Option<u64>,
+    schema_file: Option<SchemaFile>,
+    col_levels: Option<ColumnarLevels>,
+}
+
+#[cfg(test)]
+impl ShardDataBuilder {
+    pub fn new(range: ShardRange) -> Self {
+        Self {
+            range,
+            ..Default::default()
+        }
+    }
+
+    pub fn build(self) -> ShardData {
+        ShardData::new(
+            self.range,
+            self.mem_tbls,
+            self.l0_tbls,
+            self.blob_tbl_map,
+            self.cfs
+                .unwrap_or_else(|| [ShardCf::new(0), ShardCf::new(1), ShardCf::new(2)]),
+            self.unloaded_tbls,
+            self.lock_txn_files,
+            self.limiter.unwrap_or_else(|| RegionLimiter::dummy()),
+            self.update_counter.unwrap_or(1),
+            self.schema_file,
+            self.col_levels.unwrap_or_else(|| ColumnarLevels::new()),
+        )
+    }
+
+    pub fn mem_tbls(mut self, mem_tbls: Vec<CfTable>) -> Self {
+        self.mem_tbls = mem_tbls;
+        self
     }
 }
 

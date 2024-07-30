@@ -17,6 +17,7 @@ use cloud_encryption::MasterKey;
 use futures::executor::block_on;
 use kvengine::{
     dfs::{DFSConfig, Dfs, S3Fs},
+    txn_chunk_manager::{with_pool_size, TxnChunkManager},
     Engine, Shard, ShardMeta, SnapAccess, UserMeta,
 };
 use kvproto::keyspacepb::{KeyspaceMeta, KeyspaceState};
@@ -43,6 +44,8 @@ use tikv_util::{
 use txn_types::KvPair;
 
 use crate::check_table::Handle::{Common, Int};
+
+const TXN_CHUNK_WORKER_POOL_SIZE: usize = 2;
 
 #[derive(Args)]
 pub struct CheckTableArgs {
@@ -121,6 +124,12 @@ pub(crate) fn execute_check_table(args: CheckTableArgs) {
     let master_key = s3fs
         .get_runtime()
         .block_on(config.security.new_master_key());
+    let txn_chunk_manager = TxnChunkManager::new(
+        None,
+        s3fs.clone(),
+        None,
+        with_pool_size(TXN_CHUNK_WORKER_POOL_SIZE),
+    );
     let cluster_backup = get_cluster_backup_meta(&s3fs, config.backup_name.clone());
     let keyspace_ids = if config.all {
         let mut all_keyspace_ids = vec![];
@@ -178,6 +187,7 @@ pub(crate) fn execute_check_table(args: CheckTableArgs) {
             shards,
             s3fs.clone(),
             master_key.clone(),
+            txn_chunk_manager.clone(),
         ));
         let keyspace_prefix = api_version::ApiV2::get_txn_keyspace_prefix(keyspace_id);
         let dbs = block_on(schema::load_schema(backup_reader.clone(), &keyspace_prefix)).unwrap();
@@ -441,6 +451,7 @@ pub(crate) struct BackupReader {
     s3fs: Arc<S3Fs>,
     snap_cache: Arc<Mutex<Option<SnapAccess>>>,
     master_key: MasterKey,
+    txn_chunk_manager: TxnChunkManager,
 }
 
 impl BackupReader {
@@ -450,6 +461,7 @@ impl BackupReader {
         metas: Vec<ShardMeta>,
         s3fs: Arc<S3Fs>,
         master_key: MasterKey,
+        txn_chunk_manager: TxnChunkManager,
     ) -> Self {
         Self {
             ts,
@@ -458,6 +470,7 @@ impl BackupReader {
             s3fs,
             snap_cache: Arc::new(Mutex::new(None)),
             master_key,
+            txn_chunk_manager,
         }
     }
 
@@ -528,6 +541,7 @@ impl BackupReader {
             false,
             &self.master_key,
             None,
+            self.txn_chunk_manager.clone(),
         ));
         let mut guard = self.snap_cache.lock().unwrap();
         *guard = Some(snap.clone());
