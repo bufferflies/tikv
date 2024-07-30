@@ -2,7 +2,7 @@
 
 use std::{
     cmp,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fmt,
     iter::Iterator,
     ops::Deref,
@@ -153,6 +153,9 @@ pub const MANUAL_MAJOR_COMPACTION_DISABLE: &[u8] = b"";
 
 pub(crate) const INITIAL_UPDATE_COUNTER: u64 = 0;
 pub(crate) const NEW_DATA_UPDATE_COUNTER: u64 = 1;
+
+const MAX_COL_L0_FILE_COUNTS: usize = 32;
+const MAX_COL_L1_FILE_COUNTS: usize = 64;
 
 impl Deref for Shard {
     type Target = ShardRange;
@@ -437,6 +440,11 @@ impl Shard {
         let mut lv_stats = data.get_l0_stats();
         data.for_each_level(|cf, l| {
             lv_stats.add(&data.get_level_stats(cf, l), cf);
+            false
+        });
+
+        data.for_each_columnar_level(|cl| {
+            lv_stats.add(&data.get_columnar_level_stats(cl.level), WRITE_CF);
             false
         });
 
@@ -807,6 +815,12 @@ impl Shard {
                 return;
             }
         }
+        if data.has_files_need_major_compact() && self.get_columnar_snap_version() == 0 {
+            let mut lock = self.compaction_priority.write().unwrap();
+            *lock = Some(CompactionPriority::ColumnarMajor { score: f64::MAX });
+            return;
+        }
+        // ColumnarMajor compaction must be done before converting L0 to columnar.
         if data.schema_file.is_some() && !data.col_levels.unconverted_l0s.is_empty() {
             let mut lock = self.compaction_priority.write().unwrap();
             *lock = Some(CompactionPriority::L0ToColumnar);
@@ -854,16 +868,35 @@ impl Shard {
             };
             Some(max_pri)
         } else {
-            let handle_priority_none = || -> Option<CompactionPriority> {
-                if !data.l0_tbls.is_empty() {
-                    // Trigger L0 compaction for test purpose.
-                    fail::fail_point!("refresh_compaction_priority_for_l0", |_| {
-                        Some(CompactionPriority::L0 { score: 2.0 })
-                    });
-                }
-                None
-            };
-            handle_priority_none()
+            // TODO: use dependent base_size for columnar
+            let col_l0_score =
+                data.get_columnar_level_stats(0).columnar_size as f64 / self.opt.base_size as f64;
+            let col_l1_score = data.get_columnar_level_stats(1).columnar_size as f64
+                / (10 * self.opt.base_size) as f64;
+            if data.get_col_table_counts(0) > MAX_COL_L0_FILE_COUNTS
+                || (col_l0_score >= col_l1_score && col_l0_score > 1.0)
+            {
+                Some(CompactionPriority::ColumnarL0 {
+                    score: col_l0_score,
+                })
+            } else if data.get_col_table_counts(1) > MAX_COL_L1_FILE_COUNTS
+                || (col_l0_score < col_l1_score && col_l1_score > 1.0)
+            {
+                Some(CompactionPriority::ColumnarL1 {
+                    score: col_l1_score,
+                })
+            } else {
+                let handle_priority_none = || -> Option<CompactionPriority> {
+                    if !data.l0_tbls.is_empty() {
+                        // Trigger L0 compaction for test purpose.
+                        fail::fail_point!("refresh_compaction_priority_for_l0", |_| {
+                            Some(CompactionPriority::L0 { score: 2.0 })
+                        });
+                    }
+                    None
+                };
+                handle_priority_none()
+            }
         };
         let mut lock = self.compaction_priority.write().unwrap();
         *lock = priority;
@@ -1224,6 +1257,22 @@ impl ShardDataCore {
         }
     }
 
+    pub(crate) fn for_each_columnar_level<F>(&self, mut f: F)
+    where
+        F: FnMut(&ColumnarLevel) -> bool, // stopped
+    {
+        for cl in self.col_levels.levels.iter() {
+            if f(cl) {
+                return;
+            }
+        }
+    }
+
+    pub(crate) fn get_col_table_counts(&self, level: usize) -> usize {
+        assert!(level < 3);
+        self.col_levels.levels[level].files.len()
+    }
+
     // Return (max_ts).
     pub(crate) fn get_mem_table_max_ts(&self) -> u64 {
         let mut max_ts = 0;
@@ -1290,6 +1339,15 @@ impl ShardDataCore {
         stats
     }
 
+    pub(crate) fn get_columnar_level_stats(&self, level: usize) -> LevelStatsLite {
+        let level = &self.col_levels.levels[level];
+        let mut stats = LevelStatsLite::default();
+        level.files.iter().for_each(|tbl| {
+            stats.columnar_size += tbl.size();
+        });
+        stats
+    }
+
     fn is_over_bound_table(&self, level: &LevelHandler, i: usize, tbl: &SsTable) -> bool {
         let is_bound = i == 0 || i == level.tables.len() - 1;
         is_bound && !self.cover_full_table(tbl.smallest(), tbl.biggest())
@@ -1346,6 +1404,27 @@ impl ShardDataCore {
     pub fn refresh_for_limiter(&self, tag: &ShardTag) {
         let mem_table_size = self.get_mem_table_size();
         self.limiter.update_usage(tag, mem_table_size);
+    }
+
+    pub fn has_files_need_major_compact(&self) -> bool {
+        if self.schema_file.is_none() {
+            return false;
+        }
+        let unconverted_l0s: HashSet<u64> = self
+            .col_levels
+            .unconverted_l0s
+            .iter()
+            .map(|l0| l0.id())
+            .collect();
+        self.l0_tbls
+            .iter()
+            .filter(|tbl| tbl.get_cf(WRITE_CF).is_some())
+            .any(|tbl| !unconverted_l0s.contains(&tbl.id()))
+            || self
+                .get_cf(WRITE_CF)
+                .levels
+                .iter()
+                .any(|l| !l.tables.is_empty())
     }
 }
 

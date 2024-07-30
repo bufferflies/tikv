@@ -7,6 +7,7 @@ use std::{
     sync::Arc,
 };
 
+use api_version::api_v2::{KEYSPACE_ID_LEN, TXN_KEY_PREFIX};
 use bytes::Buf;
 use tidb_query_datatype::{
     codec::{
@@ -81,10 +82,7 @@ impl ColumnarTableReader {
             columns,
             pk_col_ids: table_meta.pk_col_ids.clone(),
         };
-        let handle_column_id = schema.handle_column.get_column_id();
-        schema
-            .columns
-            .retain(|col| col.get_column_id() != handle_column_id);
+        schema.remove_pk_col_from_columns();
         let handle_reader =
             ColumnarColumnReader::new(file.clone(), table_meta.handle_column.clone(), false);
         let version_reader =
@@ -596,7 +594,13 @@ impl ColumnarMergeReader {
             return;
         }
         let mut second_handle = if self.heap.len() >= 3 {
-            if self.heap[1].handle() < self.heap[2].handle() {
+            if first.block.handles.fixed_size > 0 {
+                if self.heap[1].int_handle() < self.heap[2].int_handle() {
+                    self.heap[1].handle()
+                } else {
+                    self.heap[2].handle()
+                }
+            } else if self.heap[1].handle() < self.heap[2].handle() {
                 self.heap[1].handle()
             } else {
                 self.heap[2].handle()
@@ -719,17 +723,31 @@ pub struct ColumnarRowTableReader {
     check_schema: bool,
     keyspace_id: u32,
     max_col_id: i32,
+    inner_key_off: usize,
 }
 
 impl ColumnarRowTableReader {
     pub fn new(
         keyspace_id: u32,
-        schema: Schema,
+        inner_key_off: usize,
+        mut schema: Schema,
         iter: Box<dyn table::Iterator>,
         check_schema: bool,
     ) -> ColumnarRowTableReader {
-        let mut prefix = encode_row_key(schema.table_id, 0);
-        prefix.truncate(PREFIX_LEN);
+        schema.remove_pk_col_from_columns();
+        let mut prefix = if inner_key_off > 0 {
+            encode_row_key(schema.table_id, 0)
+        } else {
+            let mut keyspace_prefix = api_version::ApiV2::get_txn_keyspace_prefix(keyspace_id);
+            let row_key = encode_row_key(schema.table_id, 0);
+            keyspace_prefix.extend_from_slice(&row_key);
+            keyspace_prefix
+        };
+        prefix.truncate(if inner_key_off > 0 {
+            PREFIX_LEN
+        } else {
+            KEYSPACE_ID_LEN + PREFIX_LEN
+        });
         let is_int_handle = get_fixed_size(&schema.handle_column) > 0;
         let default_vals = schema
             .columns
@@ -751,6 +769,7 @@ impl ColumnarRowTableReader {
             is_int_handle,
             check_schema,
             max_col_id,
+            inner_key_off,
         }
     }
 
@@ -908,11 +927,16 @@ impl ColumnarReader for ColumnarRowTableReader {
             if !key.deref().starts_with(&self.prefix) {
                 break;
             }
+            let table_key = if self.inner_key_off == 0 && key[0] == TXN_KEY_PREFIX {
+                &key.deref()[4..]
+            } else {
+                key.deref()
+            };
             if self.is_int_handle {
-                let int_handle = decode_int_handle(key.deref()).unwrap();
+                let int_handle = decode_int_handle(table_key).unwrap();
                 block.handles.push_value(&int_handle.to_le_bytes());
             } else {
-                let common_handle = decode_common_handle(key.deref()).unwrap();
+                let common_handle = decode_common_handle(table_key).unwrap();
                 block.handles.push_value(common_handle);
             }
             let value = self.iter.value();
@@ -927,6 +951,12 @@ impl ColumnarReader for ColumnarRowTableReader {
                     um.start_ts
                 };
                 txn_id_col.push_value(&txn_id.to_le_bytes());
+            }
+            // TODO: support blob value.
+            if value.is_blob_ref() {
+                return Err(table::Error::Other(
+                    "blob value is not supported".to_string(),
+                ));
             }
             let row_value = value.get_value();
             let is_deleted = row_value.is_empty();
@@ -950,7 +980,7 @@ impl ColumnarReader for ColumnarRowTableReader {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use std::sync::Arc;
 
     use rand::Rng;
@@ -981,7 +1011,7 @@ mod tests {
     };
 
     #[derive(Default, Clone)]
-    struct RefRow {
+    pub struct RefRow {
         handle: Vec<u8>,
         is_common_handle: bool,
         version: u64,
@@ -992,7 +1022,7 @@ mod tests {
     }
 
     impl RefRow {
-        fn in_bound(&self, mut start: &[u8], mut end: &[u8]) -> bool {
+        pub fn in_bound(&self, mut start: &[u8], mut end: &[u8]) -> bool {
             if self.is_common_handle {
                 self.handle.as_slice() >= start && self.handle.as_slice() < end
             } else {
@@ -1001,7 +1031,7 @@ mod tests {
             }
         }
 
-        fn cmp(&self, other: &Self) -> Ordering {
+        pub fn cmp(&self, other: &Self) -> Ordering {
             let order = if self.is_common_handle {
                 self.handle.cmp(&other.handle)
             } else {
@@ -1024,7 +1054,7 @@ mod tests {
         col_info
     }
 
-    fn new_schema(table_id: i64, common_handle: bool) -> Schema {
+    pub fn new_schema(table_id: i64, common_handle: bool) -> Schema {
         let mut schema = Schema::default();
         schema.table_id = table_id;
         if common_handle {
@@ -1044,7 +1074,7 @@ mod tests {
         schema
     }
 
-    fn build_table(
+    pub fn build_table(
         file_id: u64,
         schema: &Schema,
         start: i32,
@@ -1086,7 +1116,7 @@ mod tests {
         let cf_tbl = CfTable::new();
         cf_tbl.get_cf(WRITE_CF).put_batch(&mut wb, None, WRITE_CF);
         let iter = cf_tbl.get_cf(WRITE_CF).new_iterator(false);
-        let mut row_tbl_reader = ColumnarRowTableReader::new(1, schema.clone(), iter, false);
+        let mut row_tbl_reader = ColumnarRowTableReader::new(1, 4, schema.clone(), iter, false);
         let mut block = Block::new(schema);
         let mut opts = ColumnarTableBuildOptions::default();
         opts.pack_max_row_count = 8;
@@ -1111,7 +1141,10 @@ mod tests {
         let mut file_builder = ColumnarFileBuilder::new(file_id, None);
         file_builder.add_table(table_builder);
         let file_data = file_builder.build();
-        (Arc::new(InMemFile::new(1, file_data.into())), ref_rows)
+        (
+            Arc::new(InMemFile::new(file_id, file_data.into())),
+            ref_rows,
+        )
     }
 
     fn new_ref_row(i: i32, version: u64, is_common_handle: bool) -> RefRow {
@@ -1142,7 +1175,7 @@ mod tests {
             .into_bytes()
     }
 
-    fn i_to_common_handle(i: i32) -> Vec<u8> {
+    pub fn i_to_common_handle(i: i32) -> Vec<u8> {
         format!("{:08x}", i).into_bytes()
     }
 
@@ -1182,7 +1215,7 @@ mod tests {
         ColumnarMvccReader::new(Box::new(merge_reader), schema, read_ts)
     }
 
-    fn verify_with_ref_rows(block: &Block, ref_rows: &[RefRow]) {
+    pub fn verify_with_ref_rows(block: &Block, ref_rows: &[RefRow]) {
         for i in 0..ref_rows.len() {
             let ref_row = &ref_rows[i];
             assert_eq!(ref_row.handle, block.handles.get_not_null_value(i), "{}", i);
@@ -1199,7 +1232,7 @@ mod tests {
         }
     }
 
-    fn merge_refs(
+    pub fn merge_refs(
         refs: Vec<Vec<RefRow>>,
         read_ts: Option<u64>,
         bound: Option<(Vec<u8>, Vec<u8>)>,

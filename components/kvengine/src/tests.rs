@@ -7,10 +7,13 @@ use std::{
     ops::Deref,
     path::Path,
     rc::Rc,
-    sync::{atomic::AtomicU64, Arc},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
     thread,
     time::Duration,
-    vec,
+    u64, vec,
 };
 
 use api_version::{api_v2::KEYSPACE_PREFIX_LEN, ApiV2};
@@ -23,7 +26,12 @@ use protobuf::Message;
 use rand::prelude::*;
 use rstest::rstest;
 use security::SecurityManager;
+use table::columnar::{
+    tests::{i_to_common_handle, merge_refs},
+    Block, ColumnarFile, ColumnarReader, ColumnarRowTableReader,
+};
 use tempfile::TempDir;
+use tidb_query_datatype::expr::EvalContext;
 use tikv_util::{mpsc, time::Instant};
 use util::test_util::KeyBuilder;
 
@@ -31,6 +39,11 @@ use crate::{
     dfs::{FileType, InMemFs},
     limiter::{RegionLimiter, StoreLimiter},
     table::{
+        columnar::{
+            build_schema_file,
+            tests::{build_table, new_schema, verify_with_ref_rows},
+            SchemaFile,
+        },
         memtable::CfTable,
         sstable::{File, InMemFile, L0Builder, L0Table, SsTable},
         ChecksumType, InnerKey, NoPrefixKey, TxnChunkBuilder, TxnCtx, TxnFile, TxnFileId,
@@ -1230,6 +1243,451 @@ fn new_tidb_key_builder(enable_inner_key_off: bool) -> KeyBuilder {
 }
 
 #[rstest]
+#[case::inner_key_off_enable(true)]
+#[case::inner_key_off_disable(false)]
+fn test_columnar_l0_compaction(#[case] enable_inner_key_off: bool) {
+    ::test_util::init_log_for_test();
+    let keyspace_id = 1;
+    let table_id = 30;
+    let mut file_id = 100;
+    let mut allocate_id = || {
+        file_id += 1;
+        file_id
+    };
+    let (engine, apply_tx) = new_test_engine_opt(enable_inner_key_off, DEF_BLOCK_SIZE);
+    let shard_id = prepare_table_region(&engine, &apply_tx, keyspace_id, table_id);
+    let shard = engine.get_shard(shard_id).unwrap();
+    let schema = new_schema(table_id, true);
+    let schemas = vec![schema.clone()];
+    let schema_version = 10;
+    let schema_file_data = build_schema_file(keyspace_id, schema_version, schemas);
+    let fs = engine.fs.clone();
+    let schema_raw_file = Arc::new(InMemFile::new(allocate_id(), Bytes::from(schema_file_data)));
+    fs.get_runtime()
+        .block_on(
+            fs.create(
+                schema_raw_file.id(),
+                schema_raw_file
+                    .read(0, schema_raw_file.size() as usize)
+                    .unwrap(),
+                dfs::Options::default().with_type(FileType::Schema),
+            ),
+        )
+        .unwrap();
+    let schema_file = SchemaFile::open(schema_raw_file).unwrap();
+    let opts = dfs::Options::default().with_type(FileType::Columnar);
+    let (l0_tbl_0, l0_tbl_0_ref) = build_table(allocate_id(), &schema, 0, 600, 300);
+    let (l0_tbl_1, l0_tbl_1_ref) = build_table(allocate_id(), &schema, 300, 900, 400);
+    let (l0_tbl_2, l0_tbl_2_ref) = build_table(allocate_id(), &schema, 1000, 2000, 400);
+    let (l1_tbl_0, l1_tbl_0_ref) = build_table(allocate_id(), &schema, 0, 100, 100);
+    for file in [&l0_tbl_0, &l0_tbl_1, &l0_tbl_2, &l1_tbl_0] {
+        info!("build file_id: {}, file size: {}", file.id(), file.size());
+        fs.get_runtime()
+            .block_on(fs.create(file.id(), file.read(0, file.size() as usize).unwrap(), opts))
+            .unwrap()
+    }
+
+    let mut col_levels = ColumnarLevels::new();
+    col_levels.add_file(0, ColumnarFile::open(l0_tbl_0).unwrap());
+    col_levels.add_file(0, ColumnarFile::open(l0_tbl_1).unwrap());
+    col_levels.add_file(0, ColumnarFile::open(l0_tbl_2).unwrap());
+    col_levels.add_file(1, ColumnarFile::open(l1_tbl_0).unwrap());
+
+    let data = ShardData::new(
+        shard.range.clone(),
+        vec![CfTable::new()],
+        vec![],
+        Arc::new(HashMap::default()),
+        [
+            ShardCf::new(WRITE_CF),
+            ShardCf::new(LOCK_CF),
+            ShardCf::new(EXTRA_CF),
+        ],
+        HashMap::new(),
+        vec![],
+        RegionLimiter::dummy(),
+        shard.get_data().update_counter + 1,
+        Some(schema_file),
+        col_levels,
+    );
+    shard.set_data(data);
+    shard.initial_flushed.store(true, Ordering::SeqCst);
+    let id_ver = shard.id_ver();
+    *shard.compaction_priority.write().unwrap() =
+        Some(CompactionPriority::ColumnarL0 { score: 2.0 });
+    engine.trigger_compact(id_ver);
+    info!("trigger columnar l0 compaction {}", shard.tag());
+    let ok = try_wait(
+        || {
+            info!(
+                "wait columnar l0 compaction {} l0 files: {}, l1 files: {}",
+                shard.tag(),
+                shard.get_data().col_levels.levels[0].files.len(),
+                shard.get_data().col_levels.levels[1].files.len()
+            );
+            shard.get_data().col_levels.levels[0].files.is_empty()
+        },
+        5,
+    );
+    assert!(ok, "columnar l0 compaction failed");
+    let snap = shard.new_snap_access();
+    let mut mvcc_reader = snap
+        .new_columnar_mvcc_reader(table_id, &schema.columns, 500)
+        .unwrap();
+    mvcc_reader
+        .set_handle_range(&i_to_common_handle(0), &i_to_common_handle(2100))
+        .unwrap();
+    let mut without_txn_id_schema = schema;
+    without_txn_id_schema.txn_id_column = None;
+    let mut block = Block::new(&without_txn_id_schema);
+    mvcc_reader.read_block(&mut block, usize::MAX).unwrap();
+    let tbl_refs = merge_refs(
+        vec![l0_tbl_0_ref, l0_tbl_1_ref, l0_tbl_2_ref, l1_tbl_0_ref],
+        Some(500),
+        Some((i_to_common_handle(0), i_to_common_handle(2100))),
+    );
+    assert_eq!(block.length(), tbl_refs.len());
+    verify_with_ref_rows(&block, &tbl_refs);
+}
+
+#[rstest]
+#[case::inner_key_off_enable(true)]
+#[case::inner_key_off_disable(false)]
+fn test_columnar_l1_compaction(#[case] enable_inner_key_off: bool) {
+    ::test_util::init_log_for_test();
+    let keyspace_id = 1;
+    let table_id = 30;
+    let mut file_id = 100;
+    let mut allocate_id = || {
+        file_id += 1;
+        file_id
+    };
+    let (engine, apply_tx) = new_test_engine_opt(enable_inner_key_off, DEF_BLOCK_SIZE);
+    let shard_id = prepare_table_region(&engine, &apply_tx, keyspace_id, table_id);
+    let shard = engine.get_shard(shard_id).unwrap();
+    let schema = new_schema(table_id, true);
+    let schemas = vec![schema.clone()];
+    let schema_version = 10;
+    let schema_file_data = build_schema_file(keyspace_id, schema_version, schemas);
+    let fs = engine.fs.clone();
+    let schema_raw_file = Arc::new(InMemFile::new(allocate_id(), Bytes::from(schema_file_data)));
+    fs.get_runtime()
+        .block_on(
+            fs.create(
+                schema_raw_file.id(),
+                schema_raw_file
+                    .read(0, schema_raw_file.size() as usize)
+                    .unwrap(),
+                dfs::Options::default().with_type(FileType::Schema),
+            ),
+        )
+        .unwrap();
+    let schema_file = SchemaFile::open(schema_raw_file).unwrap();
+    let opts = dfs::Options::default().with_type(FileType::Columnar);
+    let (l1_tbl_0, l1_tbl_0_ref) = build_table(allocate_id(), &schema, 0, 600, 300);
+    let (l1_tbl_1, l1_tbl_1_ref) = build_table(allocate_id(), &schema, 300, 900, 400);
+    let (l1_tbl_2, l1_tbl_2_ref) = build_table(allocate_id(), &schema, 1000, 1500, 400);
+    let (l2_tbl_0, l2_tbl_0_ref) = build_table(allocate_id(), &schema, 0, 1000, 100);
+    let (l2_tbl_1, l2_tbl_1_ref) = build_table(allocate_id(), &schema, 1000, 2000, 100);
+    for file in [&l1_tbl_0, &l1_tbl_1, &l1_tbl_2, &l2_tbl_0, &l2_tbl_1] {
+        info!("build file_id: {}, file size: {}", file.id(), file.size());
+        fs.get_runtime()
+            .block_on(fs.create(file.id(), file.read(0, file.size() as usize).unwrap(), opts))
+            .unwrap()
+    }
+
+    let mut col_levels = ColumnarLevels::new();
+    col_levels.add_file(1, ColumnarFile::open(l1_tbl_0).unwrap());
+    col_levels.add_file(1, ColumnarFile::open(l1_tbl_1).unwrap());
+    col_levels.add_file(1, ColumnarFile::open(l1_tbl_2).unwrap());
+    col_levels.add_file(2, ColumnarFile::open(l2_tbl_0).unwrap());
+    col_levels.add_file(2, ColumnarFile::open(l2_tbl_1).unwrap());
+
+    let data = ShardData::new(
+        shard.range.clone(),
+        vec![CfTable::new()],
+        vec![],
+        Arc::new(HashMap::default()),
+        [
+            ShardCf::new(WRITE_CF),
+            ShardCf::new(LOCK_CF),
+            ShardCf::new(EXTRA_CF),
+        ],
+        HashMap::new(),
+        vec![],
+        RegionLimiter::dummy(),
+        shard.get_data().update_counter + 1,
+        Some(schema_file),
+        col_levels,
+    );
+    shard.set_data(data);
+    shard.initial_flushed.store(true, Ordering::SeqCst);
+    let id_ver = shard.id_ver();
+    *shard.compaction_priority.write().unwrap() =
+        Some(CompactionPriority::ColumnarL1 { score: 2.0 });
+    engine.trigger_compact(id_ver);
+    info!("trigger columnar l1 compaction {}", shard.tag());
+    let ok = try_wait(
+        || {
+            info!(
+                "wait columnar l1 compaction {} l1 files: {}, l2 files: {}",
+                shard.tag(),
+                shard.get_data().col_levels.levels[1].files.len(),
+                shard.get_data().col_levels.levels[2].files.len()
+            );
+            shard.get_data().col_levels.levels[1].files.is_empty()
+        },
+        5,
+    );
+    assert!(ok, "columnar l1 compaction failed");
+    let snap = shard.new_snap_access();
+    let mut mvcc_reader = snap
+        .new_columnar_mvcc_reader(table_id, &schema.columns, 500)
+        .unwrap();
+    mvcc_reader
+        .set_handle_range(&i_to_common_handle(0), &i_to_common_handle(2100))
+        .unwrap();
+    let mut without_txn_id_schema = schema;
+    without_txn_id_schema.txn_id_column = None;
+    let mut block = Block::new(&without_txn_id_schema);
+    mvcc_reader.read_block(&mut block, usize::MAX).unwrap();
+    let tbl_refs = merge_refs(
+        vec![
+            l1_tbl_0_ref,
+            l1_tbl_1_ref,
+            l1_tbl_2_ref,
+            l2_tbl_0_ref,
+            l2_tbl_1_ref,
+        ],
+        Some(500),
+        Some((i_to_common_handle(0), i_to_common_handle(2100))),
+    );
+    assert_eq!(block.length(), tbl_refs.len());
+    verify_with_ref_rows(&block, &tbl_refs);
+}
+
+#[rstest]
+#[case::inner_key_off_enable(true)]
+#[case::inner_key_off_disable(false)]
+fn test_columnar_major_compaction(#[case] enable_inner_key_off: bool) {
+    use table::columnar::{ColumnarMergeReader, ColumnarMvccReader};
+
+    ::test_util::init_log_for_test();
+    let keyspace_id = KEYSPACE_ID;
+    let table_id = 30;
+    let mut file_id = 100;
+    let mut allocate_id = || {
+        file_id += 1;
+        file_id
+    };
+    let (engine, apply_tx) = new_test_engine_opt(enable_inner_key_off, DEF_BLOCK_SIZE);
+    let shard_id = prepare_table_region(&engine, &apply_tx, keyspace_id, table_id);
+    let shard = engine.get_shard(shard_id).unwrap();
+    let schema = new_schema(table_id, false);
+    let schemas = vec![schema.clone()];
+    let schema_version = 10;
+    let schema_file_data = build_schema_file(keyspace_id, schema_version, schemas);
+    let fs = engine.fs.clone();
+    let schema_raw_file = Arc::new(InMemFile::new(allocate_id(), Bytes::from(schema_file_data)));
+    fs.get_runtime()
+        .block_on(
+            fs.create(
+                schema_raw_file.id(),
+                schema_raw_file
+                    .read(0, schema_raw_file.size() as usize)
+                    .unwrap(),
+                dfs::Options::default().with_type(FileType::Schema),
+            ),
+        )
+        .unwrap();
+    let schema_file = SchemaFile::open(schema_raw_file).unwrap();
+    let mut saved_vals = vec![];
+    let l1_tbl_0 = new_sst_table_for_columnar(
+        &engine,
+        allocate_id(),
+        table_id,
+        300,
+        900,
+        350,
+        &mut saved_vals,
+    );
+    let l1_tbl_1 = new_sst_table_for_columnar(
+        &engine,
+        allocate_id(),
+        table_id,
+        1000,
+        1500,
+        350,
+        &mut saved_vals,
+    );
+    let l2_tbl_0 = new_sst_table_for_columnar(
+        &engine,
+        allocate_id(),
+        table_id,
+        0,
+        1000,
+        100,
+        &mut saved_vals,
+    );
+    let l2_tbl_1 = new_sst_table_for_columnar(
+        &engine,
+        allocate_id(),
+        table_id,
+        1000,
+        2000,
+        100,
+        &mut saved_vals,
+    );
+
+    let level_handler_1 = LevelHandler::new(1, vec![l1_tbl_0.clone(), l1_tbl_1.clone()]);
+    let level_handler_2 = LevelHandler::new(2, vec![l2_tbl_0.clone(), l2_tbl_1.clone()]);
+    let mut write_cf = ShardCf::new(WRITE_CF);
+    write_cf.set_level(level_handler_1);
+    write_cf.set_level(level_handler_2);
+
+    let data = ShardData::new(
+        shard.range.clone(),
+        vec![CfTable::new()],
+        vec![],
+        Arc::new(HashMap::default()),
+        [write_cf, ShardCf::new(LOCK_CF), ShardCf::new(EXTRA_CF)],
+        HashMap::new(),
+        vec![],
+        RegionLimiter::dummy(),
+        shard.get_data().update_counter + 1,
+        Some(schema_file),
+        ColumnarLevels::new(),
+    );
+    shard.set_data(data);
+    shard.initial_flushed.store(true, Ordering::SeqCst);
+    let id_ver = shard.id_ver();
+    *shard.compaction_priority.write().unwrap() =
+        Some(CompactionPriority::ColumnarMajor { score: 2.0 });
+    engine.trigger_compact(id_ver);
+    info!("trigger columnar major compaction {}", shard.tag());
+    let ok = try_wait(
+        || {
+            info!(
+                "wait columnar major compaction {} l0 files: {}, l1 files: {}, l2 files: {}",
+                shard.tag(),
+                shard.get_data().col_levels.levels[0].files.len(),
+                shard.get_data().col_levels.levels[1].files.len(),
+                shard.get_data().col_levels.levels[2].files.len()
+            );
+            !shard.get_data().col_levels.levels[2].files.is_empty()
+        },
+        5,
+    );
+    assert!(ok, "columnar major compaction failed");
+    let snap = shard.new_snap_access();
+    let mut mvcc_reader = snap
+        .new_columnar_mvcc_reader(table_id, &schema.columns, 500)
+        .unwrap();
+    // Use a random end int handle
+    let end_handle = thread_rng().gen_range(500..2100);
+    mvcc_reader
+        .set_int_handle_range(0, Some(end_handle))
+        .unwrap();
+    let mut no_txn_id_schema = schema;
+    no_txn_id_schema.txn_id_column = None;
+    let mut block = Block::new(&no_txn_id_schema);
+    let mvcc_reader_counts = mvcc_reader.read_block(&mut block, usize::MAX).unwrap();
+    info!("mvcc_reader read block with {} rows", mvcc_reader_counts);
+    let inner_key_off = if enable_inner_key_off { 4 } else { 0 };
+    let mut columnar_readers: Vec<Box<dyn ColumnarReader>> = vec![];
+    for tbl in [l1_tbl_0, l1_tbl_1, l2_tbl_0, l2_tbl_1] {
+        let iter = tbl.new_iterator(false, false);
+        let reader = ColumnarRowTableReader::new(
+            keyspace_id,
+            inner_key_off,
+            no_txn_id_schema.clone(),
+            iter,
+            false,
+        );
+        columnar_readers.push(Box::new(reader));
+    }
+    let merged_reader = ColumnarMergeReader::new(no_txn_id_schema.clone(), columnar_readers);
+    let mut mvcc_row_reader =
+        ColumnarMvccReader::new(Box::new(merged_reader), &no_txn_id_schema, 500);
+    mvcc_row_reader
+        .set_int_handle_range(0, Some(end_handle))
+        .unwrap();
+    let mut row_block = Block::new(&no_txn_id_schema);
+    let merge_reader_counts = mvcc_row_reader
+        .read_block(&mut row_block, usize::MAX)
+        .unwrap();
+    info!("merge_reader read block with {} rows", merge_reader_counts);
+    verify_columnar_with_blocks(&row_block, &block);
+}
+
+fn verify_columnar_with_blocks(b1: &Block, b2: &Block) {
+    assert_eq!(b1.length(), b2.length());
+    let len = b1.length();
+    for i in 0..len {
+        assert_eq!(
+            b1.handles.get_not_null_value(i),
+            b2.handles.get_not_null_value(i),
+            "{}",
+            i
+        );
+        assert_eq!(b1.versions.get_version(i), b2.versions.get_version(i));
+        assert_eq!(b1.versions.is_null(i), b2.versions.is_null(i));
+        assert_eq!(b1.columns[0].is_null(i), b2.columns[0].is_null(i));
+        assert_eq!(b1.columns[1].is_null(i), b2.columns[1].is_null(i));
+        assert_eq!(
+            b1.columns[0].get_value(i).unwrap().get_i64_le(),
+            b2.columns[0].get_value(i).unwrap().get_i64_le()
+        );
+        assert_eq!(
+            b1.columns[1].get_value(i).unwrap(),
+            b2.columns[1].get_value(i).unwrap()
+        );
+    }
+}
+
+fn new_sst_table_for_columnar(
+    engine: &TestEngine,
+    id: u64,
+    table_id: i64,
+    begin: usize,
+    end: usize,
+    version: u64,
+    saved_vals: &mut Vec<Rc<Vec<u8>>>,
+) -> SsTable {
+    let block_size = engine.opts.table_builder_options.block_size;
+    let comp_tp = engine.opts.table_builder_options.compression_tps[0];
+    let comp_lvl = engine.opts.table_builder_options.compression_lvl;
+    let fs = engine.fs.clone();
+
+    let mut builder = table::sstable::builder::Builder::new(
+        id,
+        block_size,
+        comp_tp,
+        comp_lvl,
+        ChecksumType::Crc32c,
+        None,
+    );
+    let ctx = Mutex::new(EvalContext::default());
+    for i in begin..end {
+        let key = engine.key_builder.gen_row_inner_key(table_id, i);
+        let val = Rc::new(engine.key_builder.gen_row_val(&ctx, i));
+        // Save the val with Rc, make sure the val_rc stay valid during the iterator
+        // lifecycle.
+        saved_vals.push(val.clone());
+        let val = table::Value::new_with_meta_version(0, version, 0, &val);
+        builder.add(key.as_ref(), &val, None);
+    }
+    let mut data_buf = Vec::new();
+    builder.finish(0, &mut data_buf);
+    let data = Bytes::from(data_buf);
+    let opts = dfs::Options::default();
+    let runtime = fs.get_runtime();
+    runtime.block_on(fs.create(id, data.clone(), opts)).unwrap();
+    let file = InMemFile::new(id, data);
+    SsTable::new(Arc::new(file), None, true, None).unwrap()
+}
+
+#[rstest]
 #[case::base(None, true)]
 #[case::enc(Some(generate_encryption_key()), true)]
 #[case::disable_key_off(None, false)]
@@ -1583,6 +2041,55 @@ fn verify_write(engine: &TestEngine, start: usize, end: usize, kb: &KeyBuilder) 
     assert_eq!(i, end);
 }
 
+fn keyspace_prefix(keyspace_id: u32) -> Vec<u8> {
+    let mut prefix = keyspace_id.to_be_bytes().to_vec();
+    prefix[0] = b'x';
+    prefix
+}
+
+#[inline]
+fn encode_i64_to_comparable_u64(v: i64) -> u64 {
+    (v as u64) ^ 1 << 63_u64
+}
+
+fn prepare_table_region(
+    engine: &TestEngine,
+    apply_tx: &mpsc::Sender<ApplyTask>,
+    keyspace_id: u32,
+    table_id: i64,
+) -> u64 {
+    // Split keyspace
+    let keyspace_1_prefix = keyspace_prefix(keyspace_id);
+    let mut table_1_prefix = keyspace_1_prefix.clone();
+    table_1_prefix.extend_from_slice(&[b't']);
+    table_1_prefix.extend_from_slice(
+        encode_i64_to_comparable_u64(table_id)
+            .to_be_bytes()
+            .as_slice(),
+    );
+    let mut table_2_prefix = keyspace_1_prefix;
+    table_2_prefix.extend_from_slice(&[b't']);
+    table_2_prefix.extend_from_slice(
+        encode_i64_to_comparable_u64(table_id + 1)
+            .to_be_bytes()
+            .as_slice(),
+    );
+    let split_keys = vec![
+        keyspace_prefix(keyspace_id),
+        table_1_prefix,
+        table_2_prefix,
+        keyspace_prefix(keyspace_id + 1),
+    ];
+    let mut splitter = Splitter::new(split_keys, apply_tx.clone());
+    let handle = thread::spawn(move || {
+        splitter.run();
+    });
+    let ok = try_wait(|| engine.shards.len() == 5, 2);
+    assert!(ok, "split failed");
+    handle.join().unwrap();
+    4
+}
+
 #[derive(Clone)]
 struct TestMetaChangeListener {
     sender: mpsc::Sender<pb::ChangeSet>,
@@ -1818,7 +2325,7 @@ impl Splitter {
         cs.set_shard_id(1);
         cs.set_shard_ver(self.shard_ver);
         let mut finish_split = pb::Split::new();
-        finish_split.set_keys(protobuf::RepeatedField::from_vec(vec![key.clone()]));
+        finish_split.set_keys(protobuf::RepeatedField::from_vec(vec![key]));
         let mut new_shards = Vec::new();
         for new_id in &new_ids {
             let mut new_shard = pb::Properties::new();
@@ -1828,11 +2335,6 @@ impl Splitter {
         finish_split.set_new_shards(protobuf::RepeatedField::from_vec(new_shards));
         cs.set_split(finish_split);
         self.send_task(cs);
-        info!(
-            "splitter sent split task to applier, ids {:?} key {}",
-            new_ids,
-            String::from_utf8_lossy(key.as_slice())
-        );
         self.shard_ver += 1;
     }
 }
@@ -1880,6 +2382,8 @@ fn new_test_options(
     opts.table_builder_options.block_size = block_size;
     opts.table_builder_options.max_table_size = 8 << 10;
     opts.table_builder_options.flush_split_l0 = true;
+    opts.columnar_build_options.max_columnar_table_size = 1024;
+    opts.columnar_build_options.pack_max_row_count = 9;
     opts.max_mem_table_size = 32 << 10; // mem-table size should be much larger than max_table_size.
     opts.num_compactors = 2;
     opts.blob_table_build_options.min_blob_size = min_blob_size;
@@ -1926,7 +2430,7 @@ fn new_table(
         } else {
             let val = Rc::new(key.as_ref().repeat(2));
             // Save the val with Rc, make sure the val_rc stay valid during the iterator
-            // liftcycle.
+            // lifecycle.
             saved_vals.push(val.clone());
             table::Value::new_with_meta_version(0, version, 0, &val)
         };

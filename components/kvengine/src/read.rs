@@ -1016,16 +1016,26 @@ impl SnapAccessCore {
             let skl = mem.get_cf(WRITE_CF);
             if !skl.is_empty() {
                 let iter = skl.new_iterator(false);
-                let row_reader =
-                    ColumnarRowTableReader::new(self.data.keyspace_id, schema.clone(), iter, false);
+                let row_reader = ColumnarRowTableReader::new(
+                    self.data.keyspace_id,
+                    self.data.inner_key_off,
+                    schema.clone(),
+                    iter,
+                    false,
+                );
                 readers.push(Box::new(row_reader));
             }
         }
         for l0 in &self.data.col_levels.unconverted_l0s {
             if let Some(l0_write) = l0.get_cf(WRITE_CF) {
                 let iter = l0_write.new_iterator(false, true);
-                let row_reader =
-                    ColumnarRowTableReader::new(self.data.keyspace_id, schema.clone(), iter, false);
+                let row_reader = ColumnarRowTableReader::new(
+                    self.data.keyspace_id,
+                    self.data.inner_key_off,
+                    schema.clone(),
+                    iter,
+                    false,
+                );
                 readers.push(Box::new(row_reader));
             }
         }

@@ -186,6 +186,7 @@ pub struct ShardStats {
     pub l0_table_size: u64,
     pub l0_cf_table_size: [u64; NUM_CFS],
     pub cfs: Vec<CfStats>,
+    pub col_levels_stats: Vec<LevelStats>,
 
     pub index_size: u64,
     pub in_mem_index_size: u64,
@@ -281,6 +282,8 @@ pub struct LevelStatsLite {
     pub entries_write_cf: u64,
     // The following is for WRITE_CF & EXTRA_CF
     pub max_ts: u64,
+    // The following is for Columnar.
+    pub columnar_size: u64,
 }
 
 impl LevelStatsLite {
@@ -292,6 +295,7 @@ impl LevelStatsLite {
             self.kv_size += other.kv_size;
             self.tombs += other.tombs;
             self.entries_write_cf += other.entries_write_cf;
+            self.columnar_size += other.columnar_size;
         }
         self.max_ts = max_ts_by_cf(self.max_ts, cf, other.max_ts);
     }
@@ -314,6 +318,7 @@ pub struct LevelStats {
     pub tombs: usize,
     pub kv_size: u64,
     pub in_use_blob_size: u64,
+    pub columnar_size: u64,
 }
 
 #[derive(Default, Serialize, Deserialize, Debug)]
@@ -459,6 +464,15 @@ impl super::Shard {
             }
             cfs.push(cf_stat);
         }
+        let mut col_levels_stats = vec![];
+        for cl in data.col_levels.levels.as_slice() {
+            let mut level_stats = LevelStats::default();
+            level_stats.level = cl.level;
+            for tbl in cl.files.as_slice() {
+                level_stats.columnar_size += tbl.size();
+            }
+            col_levels_stats.push(level_stats);
+        }
         total_size += in_use_blob_size;
         let priority = self.compaction_priority.read().unwrap().clone();
         let compaction_cf = priority.as_ref().map_or(0, |x| x.cf());
@@ -494,6 +508,7 @@ impl super::Shard {
             total_blob_size,
             in_use_blob_size,
             cfs,
+            col_levels_stats,
             base_version: self.get_base_version(),
             meta_sequence: self.get_meta_sequence(),
             write_sequence: self.get_write_sequence(),
@@ -566,6 +581,7 @@ mod tests {
             tombs: 1000,
             entries_write_cf: 1500,
             max_ts: 100,
+            columnar_size: 30000,
         };
         let mut stats2 = stats1.clone();
 
@@ -581,6 +597,7 @@ mod tests {
                 tombs: 2000,
                 entries_write_cf: 3000,
                 max_ts: 110,
+                columnar_size: 60000,
             }
         );
 
@@ -596,6 +613,7 @@ mod tests {
                 tombs: 2000,            // unchanged
                 entries_write_cf: 3000, // unchanged
                 max_ts: 110,            // unchanged
+                columnar_size: 60000,
             }
         );
 
@@ -611,6 +629,24 @@ mod tests {
                 tombs: 2000,            // unchanged
                 entries_write_cf: 3000, // unchanged
                 max_ts: 130,
+                columnar_size: 60000,
+            }
+        );
+
+        let mut stats3 = LevelStatsLite::default();
+        stats3.columnar_size = 10000;
+        stats1.add(&stats3, WRITE_CF);
+        assert_eq!(
+            stats1,
+            LevelStatsLite {
+                data_size: 40000,       // unchanged
+                blob_size: 80000,       // unchanged
+                kv_size: 16000,         // unchanged
+                entries: 8000,          // unchanged
+                tombs: 2000,            // unchanged
+                entries_write_cf: 3000, // unchanged
+                max_ts: 130,            // unchanged
+                columnar_size: 70000,
             }
         );
     }

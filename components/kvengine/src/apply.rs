@@ -302,7 +302,7 @@ impl EngineCore {
             new_l0_tbls.extend_from_slice(l0s.as_slice());
             new_l0_tbls.extend_from_slice(old_data.l0_tbls.as_slice());
             let mut col_levels = old_data.col_levels.clone();
-            if old_data.schema_file.is_some() {
+            if old_data.schema_file.is_some() && shard.get_columnar_snap_version() > 0 {
                 col_levels.unconverted_l0s.extend_from_slice(l0s.as_slice());
             }
 
@@ -980,6 +980,15 @@ impl EngineCore {
         new_col_levels
             .unconverted_l0s
             .retain(|l0| !col_comp.row_l0s.contains(&l0.id()));
+        if shard.get_columnar_snap_version() == 0 {
+            let new_flushed_l0_tbls: Vec<L0Table> = old_data
+                .l0_tbls
+                .iter()
+                .filter(|tbl| !col_comp.get_row_l0s().contains(&tbl.id()))
+                .cloned()
+                .collect();
+            new_col_levels.unconverted_l0s.extend(new_flushed_l0_tbls);
+        }
         let new_data = ShardData::new(
             old_data.range.clone(),
             old_data.mem_tbls.clone(),

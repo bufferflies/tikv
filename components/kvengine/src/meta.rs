@@ -515,7 +515,7 @@ impl ShardMeta {
             self.add_file(l0.id, FileMeta::from_l0_table(l0));
             new_l0s.push(l0.id);
         }
-        if self.schema_file_id > 0 {
+        if self.schema_file_id > 0 && self.columnar_snap_version > 0 {
             self.unconverted_l0s.extend_from_slice(&new_l0s);
         }
         let new_data_seq = flush.get_version() - self.base_version;
@@ -788,6 +788,15 @@ impl ShardMeta {
         }
         self.unconverted_l0s
             .retain(|unconverted_l0| !comp.row_l0s.contains(unconverted_l0));
+        if self.columnar_snap_version == 0 {
+            let new_flushed_l0s: Vec<u64> = self
+                .files
+                .iter()
+                .filter(|(id, fm)| fm.get_level() == 0 && !comp.row_l0s.contains(id))
+                .map(|(id, _)| *id)
+                .collect();
+            self.unconverted_l0s.extend(new_flushed_l0s);
+        }
         self.columnar_snap_version = self.columnar_snap_version.max(comp.snap_version);
     }
 

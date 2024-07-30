@@ -302,8 +302,17 @@ impl TxnFileLocks {
 
 #[cfg(any(test, feature = "testexport"))]
 pub mod test_util {
+    use std::sync::Mutex;
+
     use api_version::ApiV2;
     use bytes::Bytes;
+    use tidb_query_datatype::{
+        codec::{
+            row::v2::encoder_for_test::{Column, RowEncoder},
+            table::encode_row_key,
+        },
+        expr::EvalContext,
+    };
 
     use crate::table::OwnedInnerKey;
 
@@ -341,6 +350,38 @@ pub mod test_util {
         #[inline]
         pub fn i_to_key(&self, i: usize) -> Vec<u8> {
             format!("{}key{:06}", self.prefix, i).into_bytes()
+        }
+
+        pub fn gen_row_inner_key(&self, table_id: i64, i: usize) -> OwnedInnerKey {
+            let v = if self.enable_inner_key_off {
+                self.gen_row_key(table_id, i)
+            } else {
+                self.gen_row_outer_key(table_id, i)
+            };
+            OwnedInnerKey::new(Bytes::from(v))
+        }
+
+        pub fn gen_row_outer_key(&self, table_id: i64, i: usize) -> Vec<u8> {
+            let table_key = self.gen_row_key(table_id, i);
+            let mut key = ApiV2::get_txn_keyspace_prefix(self.keyspace_id);
+            key.extend_from_slice(&table_key);
+            key
+        }
+
+        pub fn gen_row_key(&self, table_id: i64, i: usize) -> Vec<u8> {
+            encode_row_key(table_id, i as i64)
+        }
+
+        pub fn gen_row_val(&self, ctx: &Mutex<EvalContext>, i: usize) -> Vec<u8> {
+            let mut row_val = vec![];
+            let str_val = format!("abc_{}", 1).repeat(1 + i % 16).into_bytes();
+            let cols = vec![
+                Column::new(1, Some(i as i64)),
+                Column::new(2, Some(str_val)),
+            ];
+            let mut guard = ctx.lock().unwrap();
+            row_val.write_row(&mut guard, cols).unwrap();
+            row_val
         }
     }
 }

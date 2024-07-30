@@ -48,6 +48,11 @@ impl Schema {
         }
         None
     }
+
+    pub fn remove_pk_col_from_columns(&mut self) {
+        let handle_col_id = self.handle_column.get_column_id();
+        self.columns.retain(|c| c.get_column_id() != handle_col_id);
+    }
 }
 
 #[repr(C)]
@@ -437,6 +442,10 @@ impl ColumnarFile {
     pub fn get_l0_version(&self) -> Option<u64> {
         self.core.l0_version
     }
+
+    pub fn size(&self) -> u64 {
+        self.core.file.size()
+    }
 }
 
 struct ColumnarFileCore {
@@ -706,6 +715,9 @@ impl Block {
             .map(|x| ColumnBuffer::new_from_col_info(x));
         let mut columns = vec![];
         for col_info in &schema.columns {
+            if col_info.get_column_id() == schema.handle_column.get_column_id() {
+                continue;
+            }
             columns.push(ColumnBuffer::new_from_col_info(col_info));
         }
         Self {
