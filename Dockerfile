@@ -73,7 +73,7 @@ WORKDIR /tikv
 COPY rust-toolchain.toml ./
 RUN rustup self update \
   && rustup set profile minimal \
-  && rustup default $(cat "rust-toolchain")
+  && rustup default $(awk -F '"' '/channel/{print $2}' rust-toolchain.toml)
 
 # For cargo
 COPY scripts ./scripts
