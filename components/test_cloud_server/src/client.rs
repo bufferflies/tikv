@@ -1489,6 +1489,7 @@ impl ClusterClient {
     /// Try to merge and wait for regions merged.
     /// Return true: merged.
     /// Return false: timeout.
+    #[must_use]
     pub fn try_merge_and_wait(
         &mut self,
         source_key: &[u8],

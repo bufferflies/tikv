@@ -626,6 +626,7 @@ fn test_txn_file_split_merge(#[case] enable_inner_key_off: bool) {
     assert!(!ok, "source region having locks merged");
 
     // Succeed to merge when target region has locks
+    // [, 80), [80, 100), or [,50), [50,80), [80, 100)
     let ok = client.try_merge_and_wait(&gen_key(0), &gen_key(45), 5);
     assert!(ok, "source region having no lock not merged");
 
@@ -644,7 +645,7 @@ fn test_txn_file_split_merge(#[case] enable_inner_key_off: bool) {
         .unwrap();
 
     // Succeed to merge:
-    client.try_merge_and_wait(&gen_key(50), &gen_key(100), 5);
+    let ok = client.try_merge_and_wait(&gen_key(50), &gen_key(80), 5);
     assert!(ok, "region having no lock not merged");
 
     // Verify:
