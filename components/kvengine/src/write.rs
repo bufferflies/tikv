@@ -240,10 +240,7 @@ impl Engine {
                     shard.properties.set(k.as_str(), v.chunk());
                 }
                 TXN_FILE_REF => {
-                    let need_switch = self.write_txn_file_ref(&shard, v.chunk());
-                    if need_switch {
-                        wb.set_switch_mem_table();
-                    }
+                    self.write_txn_file_ref(&shard, v.chunk());
                     need_refresh_shard_states = true;
 
                     data = shard.get_data();
@@ -270,7 +267,7 @@ impl Engine {
         }
     }
 
-    fn write_txn_file_ref(&self, shard: &Shard, v: &[u8]) -> bool {
+    fn write_txn_file_ref(&self, shard: &Shard, v: &[u8]) {
         let mut txn_file_refs = TxnFileRefs::new();
         txn_file_refs.merge_from_bytes(v).unwrap();
         debug_assert_eq!(txn_file_refs.txn_file_refs.len(), 1);
@@ -309,7 +306,6 @@ impl Engine {
             old_data.col_levels.clone(),
         );
         shard.set_data(data);
-        is_commit
     }
 
     fn merge_txn_file_ref(
@@ -321,7 +317,7 @@ impl Engine {
             TxnFileRefPropertyHelper::from_property(shard.get_property(TXN_FILE_REF)).unwrap();
         let (is_commit, is_rollback) = prop.merge_txn_file_ref(&tag, &wb_ref);
         shard.properties.set(TXN_FILE_REF, &prop.marshall());
-        info!("{} merge txn file ref", tag; "wb_ref" => ?wb_ref, "prop" => ?prop);
+        debug!("{} merge txn file ref", tag; "wb_ref" => ?wb_ref, "prop" => ?prop);
         (is_commit, is_rollback)
     }
 

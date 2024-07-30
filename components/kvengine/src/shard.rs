@@ -1225,7 +1225,7 @@ impl ShardDataCore {
         }
         for mem_tbl in &self.mem_tbls {
             let skl = mem_tbl.get_cf(WRITE_CF);
-            if let Some(txn_file) = skl.get_txn_file() {
+            for txn_file in skl.get_txn_files() {
                 files.extend_from_slice(&txn_file.chunk_ids());
             }
         }

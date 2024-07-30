@@ -1059,7 +1059,7 @@ impl ShardMeta {
                 tag, wb_ref, log_index, self.txn_file_locks
             );
         }
-        info!("{} ShardMeta merge txn file ref", tag;
+        debug!("{} ShardMeta merge txn file ref", tag;
             "wb_ref" => ?wb_ref,
             "log_index" => log_index,
             "locks" => ?self.txn_file_locks);
@@ -1078,7 +1078,7 @@ impl ShardMeta {
             shard.get_write_sequence(),
             shard.get_data().get_lock_txn_files(),
         );
-        info!("{} recover txn file locks from shard", self.tag(); "locks" => ?self.txn_file_locks);
+        debug!("{} recover txn file locks from shard", self.tag(); "locks" => ?self.txn_file_locks);
     }
 }
 

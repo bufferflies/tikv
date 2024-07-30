@@ -1834,20 +1834,6 @@ fn test_txn_file(#[case] enc_key: Option<EncryptionKey>, #[case] enable_inner_ke
     assert!(snap.get_txn_file_conflict_write(&empty_txn_file).is_none());
     assert!(snap.get_txn_file_conflict_lock(&empty_txn_file).is_none());
 
-    let mut flushed = false;
-    for _ in 0..10 {
-        let shard = engine.get_shard(1).unwrap();
-        let prop_val = shard.get_property(TXN_FILE_REF).unwrap();
-        let mut txn_file_refs = TxnFileRefs::default();
-        txn_file_refs.merge_from_bytes(&prop_val).unwrap();
-        if txn_file_refs.get_txn_file_refs().len() == 1 {
-            assert_eq!(txn_file_refs.get_txn_file_refs()[0].start_ts, txn2_start_ts);
-            flushed = true;
-            break;
-        }
-        thread::sleep(Duration::from_secs(1));
-    }
-    assert!(flushed);
     verify_write(&engine, 200, 300, &kb);
     verify_lock(&engine, 300, 400, &kb);
 
@@ -1860,18 +1846,6 @@ fn test_txn_file(#[case] enc_key: Option<EncryptionKey>, #[case] enable_inner_ke
     let mut wb = WriteBatch::new(1, 0);
     wb.set_property(TXN_FILE_REF, &txn2_commit);
     write_data(wb, &tx);
-    verify_write(&engine, 200, 400, &kb);
-    flushed = false;
-    for _ in 0..10 {
-        let shard = engine.get_shard(1).unwrap();
-        let prop_val = shard.get_property(TXN_FILE_REF).unwrap();
-        if prop_val.is_empty() {
-            flushed = true;
-            break;
-        }
-        thread::sleep(Duration::from_secs(1));
-    }
-    assert!(flushed);
     verify_write(&engine, 200, 400, &kb);
 }
 

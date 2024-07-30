@@ -1,6 +1,6 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::ops::Deref;
+use std::{iter::Iterator as StdIterator, ops::Deref};
 
 use crate::{
     table::{
@@ -20,14 +20,14 @@ use crate::{
 #[derive(Clone)]
 pub struct SkipListExt {
     skl: SkipList,
-    txn_file: Option<TxnFile>,
+    txn_files: Vec<TxnFile>,
 }
 
 impl SkipListExt {
     pub fn new(skl: SkipList) -> Self {
         Self {
             skl,
-            txn_file: None,
+            txn_files: vec![],
         }
     }
 
@@ -38,14 +38,17 @@ impl SkipListExt {
             txn_file.smallest(),
             txn_file.biggest()
         );
+        let mut txn_files = Vec::with_capacity(self.txn_files.len() + 1);
+        txn_files.push(txn_file);
+        txn_files.extend_from_slice(&self.txn_files);
         Self {
             skl: self.skl.clone(),
-            txn_file: Some(txn_file),
+            txn_files,
         }
     }
 
     pub fn size(&self) -> usize {
-        self.skl.size() as usize + self.txn_file.as_ref().map_or(0, |x| x.size())
+        self.skl.size() as usize + self.txn_files.iter().map(|t| t.size()).sum::<usize>()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -58,12 +61,16 @@ impl SkipListExt {
 
     pub fn new_iterator(&self, reverse: bool) -> Box<dyn Iterator> {
         let skl_iter = Box::new(self.skl.new_iterator(reverse));
-        if self.txn_file.is_none() {
+        if self.txn_files.is_empty() {
             return skl_iter;
         }
-        let txn_file_iter = TxnFileIterator::new(self.txn_file.clone().unwrap(), reverse);
-        let skip_op_iter = Box::new(SkipOpTxnFileIterator::new(txn_file_iter, true, true));
-        new_merge_iterator(vec![skip_op_iter, skl_iter], reverse)
+        let mut iterators: Vec<Box<dyn Iterator>> = vec![skl_iter];
+        for txn_file in &self.txn_files {
+            let txn_file_iter = TxnFileIterator::new(txn_file.clone(), reverse);
+            let skip_op_iter = Box::new(SkipOpTxnFileIterator::new(txn_file_iter, true, true));
+            iterators.push(skip_op_iter);
+        }
+        new_merge_iterator(iterators, reverse)
     }
 
     fn try_get_from_txn_file(
@@ -72,9 +79,9 @@ impl SkipListExt {
         version: u64,
         outer_owner: &mut Vec<u8>,
     ) -> Option<Value> {
-        if let Some(txn_file) = self.txn_file.as_ref() {
+        for txn_file in &self.txn_files {
             if txn_file.version() > version {
-                return None;
+                continue;
             }
             let (op, val) = txn_file.get_value(key, outer_owner);
             if val.is_valid() && op != OP_LOCK && op != OP_CHECK_NOT_EXIST {
@@ -113,7 +120,7 @@ impl SkipListExt {
     }
 
     pub fn get_newer(&self, key: InnerKey<'_>, version: u64, outer_owner: &mut Vec<u8>) -> Value {
-        if let Some(txn_file) = self.txn_file.as_ref() {
+        for txn_file in &self.txn_files {
             let (op, val) = txn_file.get_value(key, outer_owner);
             if val.is_valid() && val.version >= version && op != OP_LOCK && op != OP_CHECK_NOT_EXIST
             {
@@ -129,14 +136,14 @@ impl SkipListExt {
 
     pub fn data_max_ts(&self) -> u64 {
         let mut max_ts = self.skl.data_max_ts();
-        if let Some(txn_file) = self.txn_file.as_ref() {
+        if let Some(txn_file) = self.txn_files.first() {
             max_ts = std::cmp::max(max_ts, txn_file.version())
         }
         max_ts
     }
 
-    pub fn get_txn_file(&self) -> Option<TxnFile> {
-        self.txn_file.clone()
+    pub fn get_txn_files(&self) -> Vec<TxnFile> {
+        self.txn_files.clone()
     }
 }
 

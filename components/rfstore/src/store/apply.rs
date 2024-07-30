@@ -521,7 +521,7 @@ impl Applier {
         wb: &mut kvengine::WriteBatch,
         txn_file_ref: TxnFileRef,
     ) {
-        info!("{} apply txn file ref {:?}", self.tag(), txn_file_ref);
+        debug!("{} apply txn file ref {:?}", self.tag(), txn_file_ref);
         if !txn_file_ref.user_meta.is_empty() {
             let txn_file_um = UserMeta::from_slice(&txn_file_ref.user_meta);
             let snap = engine

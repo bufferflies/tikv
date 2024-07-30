@@ -49,7 +49,7 @@ impl TxnFileCommand {
         } else {
             Some(txn_types::Lock::parse(&txn_file_ref.lock_val_prefix).unwrap())
         };
-        info!(
+        debug!(
             "new txn file command {:?}, txn_file_ref {:?}, lock {:?}",
             inner_cmd, txn_file_ref, lock_prefix
         );
@@ -301,7 +301,7 @@ impl TxnFileCommand {
             let new_txn_file = TxnFile::new(self.txn_file.id(), merged_chunks, txn_ctx)?;
             new_txn_file.validate()?;
 
-            info!("merge txn file locks"; "start_ts" => self.ts(), "req" => ?self.txn_file, "existed" => ?existed, "merged" => ?new_txn_file);
+            debug!("merge txn file locks"; "start_ts" => self.ts(), "req" => ?self.txn_file, "existed" => ?existed, "merged" => ?new_txn_file);
             self.txn_file = new_txn_file;
             self.txn_file_ref.set_chunk_ids(self.txn_file.chunk_ids());
             self.txn_file_ref
@@ -773,7 +773,7 @@ impl<S: Snapshot, L: LockManager> WriteCommand<S, L> for TxnFileCommand {
         let snap = snapshot.get_kvengine_snap().unwrap();
         let cmd = mem::take(&mut self.inner_cmd).unwrap();
         let ctx = cmd.ctx().clone();
-        info!("txn file process write"; "cmd" => ?cmd, "txn_file_ref" => ?self.txn_file_ref, "ctx" => ?ctx, "snap" => ?snap);
+        debug!("txn file process write"; "cmd" => ?cmd, "txn_file_ref" => ?self.txn_file_ref, "ctx" => ?ctx, "snap" => ?snap);
 
         let pr = match *cmd {
             Command::Prewrite(_) => self.process_prewrite(snap)?,

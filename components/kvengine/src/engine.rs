@@ -922,7 +922,7 @@ fn free_mem(free_rx: mpsc::Receiver<FreeMemMsg>) {
         for _ in 0..cnt {
             match free_rx.recv().unwrap() {
                 FreeMemMsg::FreeMem(tbl) => {
-                    if let Some(txn_file) = tbl.get_cf(WRITE_CF).get_txn_file() {
+                    for txn_file in tbl.get_cf(WRITE_CF).get_txn_files() {
                         txn_files.push(txn_file);
                     }
                     tables.push(tbl);
