@@ -9,6 +9,7 @@ mod test_tidb;
 mod test_txn_file;
 
 use std::{
+    collections::HashSet,
     str::FromStr,
     sync::{
         atomic::{AtomicU16, AtomicUsize, Ordering},
@@ -23,27 +24,21 @@ use cloud_encryption::KeyspaceEncryptionConfig;
 use futures::executor::block_on;
 use http::{Request, StatusCode, Uri};
 use hyper::Body;
-use kvproto::{metapb::Store, pdpb::CheckPolicy};
+use kvproto::metapb::Store;
 use pd_client::PdClient;
 use rand::prelude::*;
 use security::SecurityConfig;
 use test_cloud_server::{
-    client::{ClusterClient, ClusterTxnClient},
+    client::ClusterTxnClient,
     keyspace::{ClusterKeyspaceClient, KeyspaceManager},
     scheduler::Scheduler,
     tidb::TidbCluster,
-    try_wait, ServerCluster,
+    try_wait_result, ServerCluster,
 };
-use test_pd_client::{PdClientExt, TestPdClient};
+use test_pd_client::TestPdClient;
 use tikv::config::TikvConfig;
 use tikv_client::TimestampExt;
-use tikv_util::{
-    box_err,
-    config::{ReadableDuration, ReadableSize},
-    error, info,
-    time::Instant,
-    warn,
-};
+use tikv_util::{box_err, error, info, time::Instant, warn};
 use tokio::sync::{OwnedRwLockWriteGuard, Semaphore};
 use txn_types::Key;
 
@@ -97,128 +92,6 @@ pub(crate) fn alloc_node_id_vec(count: usize) -> Vec<u16> {
     let mut nodes = vec![];
     nodes.resize_with(count, || alloc_node_id());
     nodes
-}
-
-#[test]
-fn test_random_merge() {
-    test_util::init_log_for_test();
-    // use 4 nodes for easier schedule merge.
-    let nodes = vec![
-        alloc_node_id(),
-        alloc_node_id(),
-        alloc_node_id(),
-        alloc_node_id(),
-    ];
-    let bucket_size_kb = 64;
-    let update_conf_fn = |_, conf: &mut TikvConfig| {
-        conf.coprocessor.region_split_size = ReadableSize::kb(192);
-        conf.coprocessor.region_bucket_size = ReadableSize::kb(bucket_size_kb);
-        conf.raft_store.peer_stale_state_check_interval = ReadableDuration::secs(1);
-        conf.raft_store.abnormal_leader_missing_duration = ReadableDuration::secs(3);
-        conf.raft_store.max_leader_missing_duration = ReadableDuration::secs(5);
-        conf.rocksdb.writecf.target_file_size_base = ReadableSize::kb(16);
-        conf.rocksdb.writecf.write_buffer_size = ReadableSize::kb(96);
-        conf.rfengine.target_file_size = ReadableSize::mb(1);
-        conf.rfengine.batch_compression_threshold =
-            ReadableSize::kb(rand::thread_rng().gen_range(0..2));
-        conf.kvengine.compaction_tombs_count = 100;
-    };
-    let mut cluster = ServerCluster::new(nodes.clone(), update_conf_fn);
-    cluster.wait_region_replicated(&[], 3);
-    cluster.get_pd_client().disable_default_operator();
-    let region = cluster
-        .get_pd_client()
-        .get_all_regions()
-        .first()
-        .unwrap()
-        .clone();
-    let mut keys = vec![];
-    for i in 0..20 {
-        let key = i_to_key(i * 100);
-        keys.push(Key::from_raw(&key).into_encoded());
-    }
-    cluster
-        .get_pd_client()
-        .must_split_region(region, CheckPolicy::Usekey, keys);
-    let move_scheduler = cluster.new_scheduler();
-    for _ in 0..20 {
-        move_scheduler.move_random_region();
-    }
-    let handles = vec![
-        spawn_write(0, cluster.new_client()),
-        spawn_merge(cluster.new_scheduler(), true),
-        spawn_transfer(cluster.new_scheduler()),
-        spawn_move(cluster.new_scheduler(), Arc::new(RwLock::new(()))),
-    ];
-    let start_time = Instant::now();
-    let pd_client = cluster.get_pd_client();
-    while start_time.saturating_elapsed() < TIMEOUT {
-        let ts = block_on(pd_client.get_tso()).unwrap();
-        let mut rng = rand::thread_rng();
-        let node_idx = rng.gen_range(0..nodes.len());
-        let node_id = nodes[node_idx];
-        info!("stop node {}", node_id);
-        cluster.stop_node(node_id);
-        info!("finish stop node {}", node_id);
-        let sleep_sec = rng.gen_range(1..5);
-        sleep(Duration::from_secs(sleep_sec));
-        info!("start node {}", node_id);
-        cluster.start_node(node_id, update_conf_fn);
-        sleep(Duration::from_secs(10));
-        let _ = pd_client.set_gc_safe_point(ts.into_inner()).unwrap();
-    }
-    info!("stop node thread exit");
-    for handle in handles {
-        handle.join().unwrap();
-    }
-    let ok = try_wait(
-        || {
-            let data_stats = cluster.get_data_stats();
-            data_stats.check_data().is_ok()
-        },
-        10,
-    );
-    let data_stats = cluster.get_data_stats();
-    if !ok {
-        data_stats.check_data().unwrap();
-    }
-
-    cluster.wait_region_version_match();
-    data_stats
-        .check_buckets(pd_client.as_ref(), bucket_size_kb * 1024)
-        .unwrap();
-    let mut client = cluster.new_client();
-    client.verify_data_with_ref_store();
-    cluster.stop();
-    let total_write_count = WRITE_COUNTER.load(Ordering::SeqCst);
-    let total_merge_count = MERGE_COUNTER.load(Ordering::SeqCst);
-    let total_move_count = MOVE_COUNTER.load(Ordering::SeqCst);
-    let total_transfer_count = TRANSFER_COUNTER.load(Ordering::SeqCst);
-    let region_number = pd_client.get_regions_number();
-    info!(
-        "TEST SUCCEED: total_write_count {}, region number {}, merge count {}, move count {}, transfer count {}",
-        total_write_count, region_number, total_merge_count, total_move_count, total_transfer_count,
-    );
-}
-
-pub(crate) fn spawn_write(idx: usize, mut client: ClusterClient) -> JoinHandle<()> {
-    std::thread::spawn(move || {
-        // Make sure each write thread don't conflict with others.
-        let begin = idx * 2000;
-        let end = begin + 2000 - 10;
-        let start_time = Instant::now();
-        let mut rng = rand::thread_rng();
-        while start_time.saturating_elapsed() < TIMEOUT {
-            let i = rng.gen_range(begin..end);
-            if rng.gen_ratio(2, 3) {
-                client.put_kv(i..(i + 10), i_to_key, i_to_val);
-            } else {
-                client.del_kv(i..(i + 10), i_to_key);
-            }
-            WRITE_COUNTER.fetch_add(10, Ordering::SeqCst);
-        }
-        info!("write thread {} exit", idx);
-    })
 }
 
 pub(crate) fn spawn_move(scheduler: Scheduler, two_node_down: Arc<RwLock<()>>) -> JoinHandle<()> {
@@ -622,13 +495,6 @@ pub(crate) fn i_to_key(i: usize) -> Vec<u8> {
     format!("xkey{:08}", i).into_bytes()
 }
 
-pub(crate) fn i_to_val(i: usize) -> Vec<u8> {
-    let mut rng = rand::thread_rng();
-    let mut buf = vec![0; i % 512 + 1];
-    rng.fill_bytes(&mut buf);
-    buf
-}
-
 pub(crate) fn generate_keyspace_key(keyspace_id: u32) -> impl Fn(usize) -> Vec<u8> {
     move |i: usize| -> Vec<u8> {
         let mut key = ApiV2::get_txn_keyspace_prefix(keyspace_id);
@@ -664,4 +530,49 @@ pub(crate) fn env_switch(env_key: &str) -> bool {
         .map(|s| s.parse().unwrap())
         .unwrap_or(1)
         > 0
+}
+
+pub(crate) fn verify_cluster_stats(cluster: &ServerCluster, bucket_size: u64, timeout: Duration) {
+    let mut success_shards = HashSet::new();
+    try_wait_result(
+        || {
+            let stats = cluster.get_data_stats_ext(Some(&success_shards));
+            stats.check_data().map_err(|(errs, this_success_shards)| {
+                success_shards.extend(this_success_shards);
+                (errs, stats)
+            })
+        },
+        timeout.as_secs() as usize,
+    )
+    .unwrap_or_else(|(err, stats)| {
+        stats.log_all();
+        panic!("check_data failed: {:?}", err);
+    });
+
+    let mut starts_from_encoded_key = vec![];
+    try_wait_result(
+        || {
+            let data_stats = cluster.get_data_stats();
+            let res = data_stats.check_buckets(
+                cluster.get_pd_client_ext().as_ref(),
+                bucket_size,
+                &starts_from_encoded_key,
+            );
+            if let Err((reason, region)) = &res {
+                warn!(
+                    "check_buckets failed, region {:?}, reason {:?}",
+                    region, reason
+                );
+                if let Some(region) = region {
+                    starts_from_encoded_key = region.start_key.clone();
+                }
+            }
+            res.map_err(|err| (err, data_stats))
+        },
+        timeout.as_secs() as usize,
+    )
+    .unwrap_or_else(|(err, stats)| {
+        stats.log_all();
+        panic!("check_buckets failed: {:?}", err);
+    });
 }

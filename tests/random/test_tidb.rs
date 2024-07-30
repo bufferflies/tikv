@@ -14,9 +14,7 @@ use pd_client::{
 };
 use rand::prelude::*;
 use security::SecurityConfig;
-use test_cloud_server::{
-    oss::prepare_dfs, tidb::*, tpc::*, try_wait_async, try_wait_result, ServerCluster,
-};
+use test_cloud_server::{oss::prepare_dfs, tidb::*, tpc::*, try_wait_async, ServerCluster};
 use test_pd_client::PdWrapper;
 use tikv::config::TikvConfig;
 use tikv_util::{
@@ -481,32 +479,7 @@ async fn verify_cluster(cluster: &mut ServerCluster, tpc_switch_on: bool, jepsen
     // Check statistics.
     // Check after verify data, to ensure that PD heartbeat have updated region
     // stats.
-    try_wait_result(
-        || {
-            let stats = cluster.get_data_stats();
-            stats.check_data().map_err(|err| (err, stats))
-        },
-        20,
-    )
-    .expect("check_data failed");
-    cluster.wait_region_version_match();
-    try_wait_result(
-        || {
-            // There are still region changes after all schedulers & operators stopped, as
-            // tikv-server can also initiate region splits. So during retry, get cluster
-            // stats again.
-            // TODO: retry from last failed region.
-            let data_stats = cluster.get_data_stats();
-            let res = data_stats
-                .check_buckets(cluster.get_pd_client_ext().as_ref(), REGION_BUCKET_SIZE.0);
-            if res.is_err() {
-                warn!("check_buckets failed, err {:?}", res);
-            }
-            res.map_err(|err| (err, data_stats))
-        },
-        10,
-    )
-    .expect("check_buckets failed");
+    verify_cluster_stats(cluster, REGION_BUCKET_SIZE.0, Duration::from_secs(60));
 
     if tpc_switch_on {
         check_tpc();

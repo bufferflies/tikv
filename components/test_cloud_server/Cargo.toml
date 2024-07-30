@@ -5,6 +5,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+anyhow = "1.0"
 api_version = { path = "../api_version" }
 bstr = "0.2.17"
 bytes = "1"

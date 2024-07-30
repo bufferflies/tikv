@@ -7826,6 +7826,7 @@ dependencies = [
 name = "test_cloud_server"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "api_version",
  "bstr",
  "bytes",

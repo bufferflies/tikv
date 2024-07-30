@@ -1,6 +1,6 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::cmp;
+use std::{cmp, collections::HashSet};
 
 use bytes::Bytes;
 
@@ -62,9 +62,18 @@ impl EngineStats {
 
 impl super::Engine {
     pub fn get_all_shard_stats(&self) -> Vec<ShardStats> {
+        self.get_all_shard_stats_ext(None)
+    }
+
+    pub fn get_all_shard_stats_ext(&self, skip_shards: Option<&HashSet<IdVer>>) -> Vec<ShardStats> {
         self.get_all_shard_id_vers()
             .into_iter()
-            .filter_map(|id_ver| self.get_shard(id_ver.id).map(|shard| shard.get_stats()))
+            .filter_map(|id_ver| {
+                if skip_shards.is_some_and(|skip_shards| skip_shards.contains(&id_ver)) {
+                    return None;
+                }
+                self.get_shard(id_ver.id).map(|shard| shard.get_stats())
+            })
             .collect()
     }
 

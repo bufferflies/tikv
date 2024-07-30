@@ -19,8 +19,7 @@ use pd_client::PdClient;
 use rand::prelude::*;
 use security::SecurityConfig;
 use test_cloud_server::{
-    client::ClusterClientOptions, oss::prepare_dfs, tidb::TidbCluster, try_wait_result,
-    ServerCluster,
+    client::ClusterClientOptions, oss::prepare_dfs, tidb::TidbCluster, ServerCluster,
 };
 use test_pd_client::{PdClientExt, PdWrapper};
 use tikv_util::{
@@ -446,21 +445,7 @@ async fn verify_cluster(cluster: &mut ServerCluster) -> usize /* records count i
     // Check statistics.
     // Check after verify data, to ensure that PD heartbeat have updated region
     // stats.
-    let data_stats = try_wait_result(
-        || {
-            let stats = cluster.get_data_stats();
-            match stats.check_data() {
-                Ok(()) => Ok(stats),
-                Err(err) => Err((err, stats)),
-            }
-        },
-        20,
-    )
-    .expect("check_data failed");
-    cluster.wait_region_version_match();
-    data_stats
-        .check_buckets(cluster.get_pd_client_ext().as_ref(), REGION_BUCKET_SIZE.0)
-        .expect("check_buckets failed");
+    verify_cluster_stats(cluster, REGION_BUCKET_SIZE.0, Duration::from_secs(30));
 
     check_br();
     check_load_data();
