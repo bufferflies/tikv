@@ -216,6 +216,7 @@ impl RfEngineCore {
                     // If panic_mark_dfs_worker_file exists, skip init dfs worker thread and mark
                     // dfs worker unhealthy.
                     dfs_worker_healthy.store(false, Ordering::Release);
+                    RFENGINE_DFS_WORKER_HEALTHY_GAUGE.set(0);
                     error!(
                         "lightweight backup is enabled, but panic_mark_dfs_worker_file exists, skip init dfs worker thread"
                     );

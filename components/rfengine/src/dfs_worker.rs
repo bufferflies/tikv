@@ -17,7 +17,8 @@ use slog_global::*;
 use tikv_util::mpsc::{Receiver, Sender};
 
 use crate::{
-    compress_lz4, decompress_lz4, last_wal_chunk_file_key, parse_wal_chunk_key, wal_chunk_file_key,
+    compress_lz4, decompress_lz4, last_wal_chunk_file_key,
+    metrics::RFENGINE_DFS_WORKER_HEALTHY_GAUGE, parse_wal_chunk_key, wal_chunk_file_key,
     wal_chunk_file_prefix, wal_file_name, Error, Result, Task,
 };
 
@@ -98,6 +99,7 @@ impl ObjectStorageWorker {
     // found in the epoch range from `epoch_id - 3` to `epoch_id`, trigger an
     // instant rfengine snapshot.
     fn init(&mut self) -> Result<bool> {
+        self.set_healthy();
         let mut need_snapshot = false;
         // Wait for node bootstrapped.
         info!("dfs worker wait for store bootstrapped.");
@@ -424,12 +426,13 @@ impl ObjectStorageWorker {
         self.engine_id.load(Ordering::Acquire)
     }
 
-    #[allow(dead_code)]
     fn set_healthy(&mut self) {
+        RFENGINE_DFS_WORKER_HEALTHY_GAUGE.set(1);
         self.healthy.store(true, Ordering::Release)
     }
 
     fn set_unhealthy(&mut self) {
+        RFENGINE_DFS_WORKER_HEALTHY_GAUGE.set(0);
         self.healthy.store(false, Ordering::Release)
     }
 

@@ -96,4 +96,8 @@ lazy_static! {
         &["status"], // success or fail
     )
     .unwrap();
+    pub static ref RFENGINE_DFS_WORKER_HEALTHY_GAUGE: IntGauge = register_int_gauge!(
+        "raft_engine_dfs_worker_healthy",
+        "Status of healthy dfs worker",
+    ).unwrap();
 }
