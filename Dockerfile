@@ -70,7 +70,7 @@ ENV PATH /root/.cargo/bin/:$PATH
 
 # Install the Rust toolchain
 WORKDIR /tikv
-COPY rust-toolchain ./
+COPY rust-toolchain.toml ./
 RUN rustup self update \
   && rustup set profile minimal \
   && rustup default $(cat "rust-toolchain")
