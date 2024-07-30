@@ -637,25 +637,34 @@ impl ClusterKeyspaceClient {
     }
 }
 
+// Ref: tidb_query_datatype::codec::table::{append_table_record_prefix,
+// append_table_index_prefix}
 const TABLE_PREFIX: &[u8] = b"t";
 const RECORD_PREFIX_SEP: &[u8] = b"_r";
+const INDEX_PREFIX_SEP: &[u8] = b"_i";
 
-// Ref: tidb_query_datatype::codec::table::append_table_record_prefix
-pub fn make_key(keyspace_id: u32, table_id: i64, user_key: &[u8]) -> Vec<u8> {
+pub fn make_key_ext(keyspace_id: u32, table_id: i64, sep: &[u8], user_key: &[u8]) -> Vec<u8> {
     let mut buf = BytesMut::with_capacity(
-        4 + TABLE_PREFIX.len()
-            + mem::size_of_val(&table_id)
-            + RECORD_PREFIX_SEP.len()
-            + user_key.len(),
+        4 + TABLE_PREFIX.len() + mem::size_of_val(&table_id) + sep.len() + user_key.len(),
     );
     buf.extend_from_slice(&ApiV2::get_txn_keyspace_prefix(keyspace_id));
     buf.put_slice(TABLE_PREFIX);
     buf.put_i64(table_id);
     if !user_key.is_empty() {
-        buf.put_slice(RECORD_PREFIX_SEP);
+        buf.put_slice(sep);
         buf.put_slice(user_key);
     }
     buf.freeze().to_vec()
+}
+
+#[inline]
+pub fn make_key(keyspace_id: u32, table_id: i64, user_key: &[u8]) -> Vec<u8> {
+    make_key_ext(keyspace_id, table_id, RECORD_PREFIX_SEP, user_key)
+}
+
+#[inline]
+pub fn make_index_key(keyspace_id: u32, table_id: i64, user_key: &[u8]) -> Vec<u8> {
+    make_key_ext(keyspace_id, table_id, INDEX_PREFIX_SEP, user_key)
 }
 
 #[derive(Clone)]

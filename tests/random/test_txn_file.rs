@@ -2,11 +2,13 @@
 
 use std::{sync::atomic::Ordering, time::Duration};
 
+use bytes::Bytes;
 use rand::Rng;
 use test_cloud_server::{
     client::{ClusterClient, CommitAction, MutateOptions, RequestOptions, TxnWriteMethod},
     keyspace,
     keyspace::KeyspaceManager,
+    util::Mutation,
 };
 use tikv_util::{debug, info, time::Instant};
 
@@ -59,14 +61,22 @@ pub(crate) fn spawn_txn_file_write(
 
                 let start_ts = client.get_ts();
                 info!(
-                    "[{}] thread txn file write on keyspace {}, start_ts {}, put_kv {}",
-                    thread_idx, keyspace_id, start_ts, put_kv
+                    "[{}] thread txn file write on keyspace {}, table {} start_ts {}, put_kv {}",
+                    thread_idx, keyspace_id, table_id, start_ts, put_kv
                 );
 
                 let gen_key = |i| {
                     let mut user_key = i_to_key(i);
                     user_key.extend_from_slice(format!("{:02}", thread_idx).as_bytes());
                     keyspace::make_key(keyspace_id, table_id, &user_key)
+                };
+                // Generate index: start_ts -> first_key
+                let gen_index = move |start_ts: u64, muts: &[Mutation]| -> Vec<(Bytes, Bytes)> {
+                    let key =
+                        keyspace::make_index_key(keyspace_id, table_id, &start_ts.to_be_bytes())
+                            .into();
+                    let value = muts.first().unwrap().key.clone();
+                    vec![(key, value)]
                 };
                 let ref_store = keyspace_manager
                     .ref_stores()
@@ -85,6 +95,7 @@ pub(crate) fn spawn_txn_file_write(
                                     Duration::ZERO,
                                 ),
                                 write_method: TxnWriteMethod::FileBased,
+                                gen_index: Some(Box::new(gen_index)),
                             },
                         )
                         .unwrap();
@@ -99,6 +110,7 @@ pub(crate) fn spawn_txn_file_write(
                                     Duration::ZERO,
                                 ),
                                 write_method: TxnWriteMethod::FileBased,
+                                ..Default::default()
                             },
                         )
                         .unwrap();

@@ -19,6 +19,7 @@ use api_version::{
     api_v2::{self, TXN_KEY_PREFIX},
     ApiV2, KvFormat,
 };
+use bstr::ByteSlice;
 use bytes::Bytes;
 use futures::executor::block_on;
 use grpcio::Channel;
@@ -219,11 +220,14 @@ pub enum CommitAction {
     AsyncCommit(Duration /* delay */),
 }
 
-#[derive(Clone)]
+// Note: the index keys should be global unique to make ref store deterministic.
+pub type GenIndexFn = Box<dyn Fn(u64 /* start_ts */, &[Mutation]) -> Vec<(Bytes, Bytes)>>;
+
 pub struct MutateOptions {
     pub start_ts: Option<TimeStamp>,
     pub commit_action: CommitAction,
     pub write_method: TxnWriteMethod,
+    pub gen_index: Option<GenIndexFn>,
 }
 
 impl Default for MutateOptions {
@@ -232,6 +236,7 @@ impl Default for MutateOptions {
             start_ts: None,
             commit_action: CommitAction::SyncCommit,
             write_method: TxnWriteMethod::Normal,
+            gen_index: None,
         }
     }
 }
@@ -393,6 +398,18 @@ impl ClusterClient {
             m.set_key(gen_key(i));
             m.set_value(gen_val(i));
             mutations.push(m)
+        }
+        if let Some(gen_index) = options.gen_index {
+            let index_kv = gen_index(start_ts.into_inner(), &mutations);
+            for (key, value) in index_kv {
+                mutations.push(Mutation {
+                    op: Op::Put,
+                    key,
+                    value,
+                });
+            }
+
+            mutations.sort_by(|a, b| a.key.cmp(&b.key));
         }
         let first = mutations.first().unwrap().clone();
         let txn_muts = block_on(TxnMutations::build(
@@ -2218,7 +2235,7 @@ impl TxnMutations {
     pub fn primary(&self) -> Bytes {
         match self {
             Self::Muts { muts } => muts.first().unwrap().key.clone(),
-            Self::Chunks { chunks, .. } => chunks.first().unwrap().outer_smallest.clone(),
+            Self::Chunks { chunks, .. } => chunks.first().unwrap().outer_smallest().clone(),
         }
     }
 
@@ -2305,7 +2322,7 @@ impl TxnMutations {
         region_chunks.sort_by(|a, b| {
             a.0.start_key()
                 .cmp(b.0.start_key())
-                .then_with(|| a.1[0].outer_smallest.cmp(&b.1[0].outer_smallest))
+                .then_with(|| a.1[0].outer_smallest().cmp(b.1[0].outer_smallest()))
         });
         info!("group_txn_chunks_by_regions"; "region_chunks" => ?region_chunks);
         region_chunks
@@ -2313,12 +2330,14 @@ impl TxnMutations {
 
     fn get_txn_chunks_regions(chunk: &TxnFileChunk, client: &mut ClusterClient) -> Vec<RawRegion> {
         let mut regions = vec![];
-        let mut start_key = chunk.outer_smallest.to_vec();
-        while start_key <= chunk.outer_biggest {
+        let mut start_key = chunk.outer_smallest().to_vec();
+        while start_key.as_slice() <= chunk.outer_biggest().as_bytes() {
             let region = client.get_region_by_key(&start_key);
             start_key.clear();
             start_key.extend_from_slice(region.end_key());
-            regions.push(region);
+            if chunk.has_data_in_range(region.start_key(), region.end_key()) {
+                regions.push(region);
+            }
         }
         regions
     }
@@ -2348,7 +2367,7 @@ impl TxnMutations {
             Self::Chunks { chunks, .. } => {
                 let keys = chunks
                     .iter()
-                    .map(|c| c.outer_smallest.to_vec())
+                    .map(|c| c.outer_smallest().to_vec())
                     .collect::<Vec<_>>();
                 req.set_keys(keys.into());
                 req.set_is_txn_file(true);
@@ -2365,7 +2384,7 @@ impl TxnMutations {
             Self::Chunks { chunks, .. } => {
                 let keys = chunks
                     .iter()
-                    .map(|c| c.outer_smallest.to_vec())
+                    .map(|c| c.outer_smallest().to_vec())
                     .collect::<Vec<_>>();
                 req.set_keys(keys.into());
                 req.set_is_txn_file(true);

@@ -7,6 +7,7 @@ use api_version::ApiV2;
 use bytes::{BufMut, Bytes, BytesMut};
 use cloud_worker::CreateTxnChunkResp;
 use hyper::Method;
+use kvengine::table::search;
 use log_wrappers::Value;
 use security::{RestfulClient, SecurityManager};
 
@@ -53,10 +54,10 @@ impl TxnFileHelper {
             + TXN_CHUNK_OVERHEAD;
         let mut buf = BytesMut::with_capacity(total_size.min(self.max_chunk_size));
 
-        let mut outer_smallest = None;
         let mut chunks = vec![];
+        let mut keys = vec![];
 
-        for (i, m) in muts.iter().enumerate() {
+        for m in muts {
             let key = m.key.slice(DEFAULT_INNER_KEY_OFFSET..);
             if !buf.is_empty()
                 && buf.len() + key.len() + m.value.len() + TXN_ENTRY_OVERHEAD + TXN_CHUNK_OVERHEAD
@@ -67,27 +68,22 @@ impl TxnFileHelper {
                 let chunk_id = self.flush_to_tikv_worker(keyspace_id, buf_to_flush).await?;
                 chunks.push(TxnFileChunk {
                     chunk_id,
-                    outer_smallest: outer_smallest.take().unwrap(),
-                    outer_biggest: muts[i - 1].key.clone(),
+                    keys: mem::take(&mut keys),
                 });
             }
 
-            outer_smallest.get_or_insert_with(|| m.key.clone());
+            keys.push(m.key.clone());
 
             buf.put_u16_le(key.len() as u16);
             buf.put(key);
             buf.put_u8(m.op as u8);
             buf.put_u32_le(m.value.len() as u32);
-            buf.put(m.value.clone());
+            buf.put(m.value);
         }
 
         if !buf.is_empty() {
             let chunk_id = self.flush_to_tikv_worker(keyspace_id, buf).await?;
-            chunks.push(TxnFileChunk {
-                chunk_id,
-                outer_smallest: outer_smallest.unwrap(),
-                outer_biggest: muts.last().unwrap().key.clone(),
-            });
+            chunks.push(TxnFileChunk { chunk_id, keys });
         }
 
         Ok(chunks)
@@ -109,19 +105,33 @@ impl TxnFileHelper {
     }
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 pub struct TxnFileChunk {
     pub chunk_id: u64,
-    pub outer_smallest: Bytes,
-    pub outer_biggest: Bytes,
+    pub keys: Vec<Bytes>,
 }
 
 impl fmt::Debug for TxnFileChunk {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TxnFileChunk")
             .field("chunk_id", &self.chunk_id)
-            .field("outer_smallest", &Value::key(&self.outer_smallest))
-            .field("outer_biggest", &Value::key(&self.outer_biggest))
+            .field("outer_smallest", &Value::key(self.outer_smallest()))
+            .field("outer_biggest", &Value::key(self.outer_biggest()))
             .finish()
+    }
+}
+
+impl TxnFileChunk {
+    pub fn outer_smallest(&self) -> &Bytes {
+        self.keys.first().unwrap()
+    }
+
+    pub fn outer_biggest(&self) -> &Bytes {
+        self.keys.last().unwrap()
+    }
+
+    pub fn has_data_in_range(&self, start: &[u8], end: &[u8]) -> bool {
+        let pos = search(self.keys.len(), |i| self.keys[i].as_ref() >= start);
+        pos < self.keys.len() && self.keys[pos].as_ref() < end
     }
 }

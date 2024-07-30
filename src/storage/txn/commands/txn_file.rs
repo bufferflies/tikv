@@ -315,6 +315,15 @@ impl TxnFileCommand {
         snap_access: &SnapAccess,
     ) -> crate::storage::mvcc::Result<ProcessResult> {
         self.txn_file.validate()?;
+
+        if !self
+            .txn_file
+            .has_data_in_range(snap_access.get_inner_start(), snap_access.get_inner_end())
+        {
+            error!("process_prewrite: txn file has no data in region"; "start_ts" => self.ts());
+            return Err(box_err!("txn file has no data in region"));
+        }
+
         let lock_is_existed_and_equal = self.try_merge_txn_file_locks(snap_access)?;
         if lock_is_existed_and_equal {
             info!("process_prewrite: ignore duplicated prewrite"; "start_ts" => self.ts());

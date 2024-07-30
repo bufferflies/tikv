@@ -289,6 +289,12 @@ impl TxnFile {
         txn_file_ref.set_chunk_ids(chunk_ids);
         Some(txn_file_ref)
     }
+
+    pub fn has_data_in_range(&self, start: InnerKey<'_>, end: InnerKey<'_>) -> bool {
+        let mut iter = TxnFileIterator::new(self.clone(), false);
+        iter.seek(start);
+        iter.valid() && iter.key() < end
+    }
 }
 
 impl fmt::Debug for TxnFile {
@@ -2195,6 +2201,18 @@ mod tests {
             (lower_bound, upper_bound, reverse, keys)
         }
     }
+    prop_compose! {
+        fn arb_range_args(chunk_start: usize, chunk_end: usize)
+            (lower_bound in chunk_start-1..=chunk_end+1)
+            (
+                lower_bound in Just(lower_bound),
+                upper_bound in lower_bound+1..=chunk_end+2,
+            )
+            -> (usize, usize)
+        {
+            (lower_bound, upper_bound)
+        }
+    }
     proptest! {
         #[test]
         fn test_txn_file_bounded( ArbitraryChunks { chunks_start, chunks_end, chunks, chunk_ref, enable_inner_key_off } in arb_chunks(50, 5)) {
@@ -2262,6 +2280,29 @@ mod tests {
             });
         }
 
+        #[test]
+        fn test_txn_file_has_data_in_range( ArbitraryChunks { chunks_start, chunks_end, chunks, chunk_ref, enable_inner_key_off } in arb_chunks(50, 5)) {
+            proptest!(|(
+                (lower_bound, upper_bound) in arb_range_args(chunks_start, chunks_end)
+            )| {
+                let kb = new_key_builder(enable_inner_key_off);
+                let lower_bound_key = kb.i_to_inner_key(lower_bound);
+                let upper_bound_key = kb.i_to_inner_key(upper_bound);
+
+                let id = TxnFileId::new(10, 1, 3);
+                let txn_ctx = TxnCtx::new(
+                    UserMeta::new(3, 5).to_array().to_vec().into(),
+                    Default::default(),
+                    3,
+                    InnerKey::from_inner_buf(b""),
+                    InnerKey::from_inner_buf(GLOBAL_SHARD_END_KEY),
+                );
+                let txn_file = TxnFile::new(id, chunks.clone(), txn_ctx).unwrap();
+
+                let chunk_ref = chunk_ref.slice(lower_bound_key.as_ref(), upper_bound_key.as_ref());
+                prop_assert_eq!(txn_file.has_data_in_range(lower_bound_key.as_ref(), upper_bound_key.as_ref()), !chunk_ref.is_empty());
+            });
+        }
     }
 
     #[derive(Debug)]
@@ -2362,6 +2403,10 @@ mod tests {
             self.seek_pos(key, false)
                 .filter(|&x| self.slice[x].key.as_ref() == key)
                 .map(|x| &self.slice[x])
+        }
+
+        pub fn is_empty(&self) -> bool {
+            self.slice.is_empty()
         }
     }
 }
