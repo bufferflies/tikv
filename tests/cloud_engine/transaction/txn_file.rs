@@ -273,7 +273,7 @@ fn test_txn_file_commands(#[case] enable_inner_key_off: bool) {
         resp
     );
 
-    verify_range(&mut client, 0, 300);
+    verify_range(&mut client, 0, 300, commit_ts);
     cluster.stop();
 }
 
@@ -1133,7 +1133,7 @@ fn test_txn_file_merge_impl(ranges: Vec<Range<usize>>, enable_inner_key_off: boo
         resp
     );
 
-    verify_range(&mut client, 0, 500);
+    verify_range(&mut client, 0, 500, commit_ts);
     cluster.stop();
 }
 
@@ -1168,7 +1168,7 @@ fn build_txn_files(
     chunk_ids
 }
 
-fn verify_range(client: &mut ClusterClient, start: usize, end: usize) {
+fn verify_range(client: &mut ClusterClient, start: usize, end: usize, version: u64) {
     let put_time = Instant::now();
     let gen_key = generate_keyspace_key(KEYSPACE_ID);
     for i in start..end {
@@ -1176,7 +1176,7 @@ fn verify_range(client: &mut ClusterClient, start: usize, end: usize) {
         let val = i_to_val(i);
         let opt = RequestOptions::default();
         client
-            .verify_key_value(&key, Some(&val), put_time, &opt)
+            .verify_key_value(&key, Some(&val), version, put_time, &opt)
             .unwrap();
     }
 }

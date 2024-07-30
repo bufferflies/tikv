@@ -83,7 +83,7 @@ pub(crate) fn spawn_txn_file_write(
                     .get_keyspace_ref_store(keyspace_id);
                 client.replace_ref_store(ref_store.clone());
                 let put_time = Instant::now();
-                if put_kv {
+                let commit_ts = if put_kv {
                     client
                         .try_put_kv(
                             i..(i + 10),
@@ -98,7 +98,7 @@ pub(crate) fn spawn_txn_file_write(
                                 gen_index: Some(Box::new(gen_index)),
                             },
                         )
-                        .unwrap();
+                        .unwrap()
                 } else {
                     client
                         .try_del_kv(
@@ -113,7 +113,7 @@ pub(crate) fn spawn_txn_file_write(
                                 ..Default::default()
                             },
                         )
-                        .unwrap();
+                        .unwrap()
                 };
 
                 debug!(
@@ -131,7 +131,7 @@ pub(crate) fn spawn_txn_file_write(
                     let empty: Option<Vec<u8>> = None;
                     let expect_val = ref_store.get(&key).unwrap_or(&empty);
                     client
-                        .verify_key_value(&key, expect_val.as_ref(), put_time, &req_opts)
+                        .verify_key_value(&key, expect_val.as_ref(), commit_ts, put_time, &req_opts)
                         .unwrap_or_else(|err| {
                             panic!(
                                 "[{}] verify_key_value failed (after txn-file-write): {:?}",

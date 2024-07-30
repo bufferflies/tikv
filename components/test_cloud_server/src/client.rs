@@ -303,7 +303,7 @@ impl ClusterClient {
         rng: Range<usize>,
         gen_key: F,
         options: MutateOptions,
-    ) -> Result<()>
+    ) -> Result<u64 /* commit_ts */>
     where
         F: Fn(usize) -> Vec<u8>,
     {
@@ -332,7 +332,7 @@ impl ClusterClient {
 
         match options.commit_action {
             CommitAction::NoCommit => {
-                return Ok(());
+                return Ok(0);
             }
             commit_action => {
                 self.kv_commit_ext(txn_muts, start_ts, commit_ts, commit_action)?;
@@ -340,8 +340,9 @@ impl ClusterClient {
         }
 
         self.del_kv_in_ref_store(mutations);
-        self.set_max_ts(commit_ts.into_inner());
-        Ok(())
+        let commit_ts = commit_ts.into_inner();
+        self.set_max_ts(commit_ts);
+        Ok(commit_ts)
     }
 
     fn del_kv_in_ref_store(&mut self, mutations: Vec<Mutation>) {
@@ -361,6 +362,7 @@ impl ClusterClient {
         self.verify_key_value(
             first.get_key(),
             Some(first.get_value()),
+            commit_ts.into_inner(),
             put_time,
             &RequestOptions::default(),
         )?;
@@ -384,7 +386,7 @@ impl ClusterClient {
         gen_key: F,
         gen_val: G,
         options: MutateOptions,
-    ) -> Result<()>
+    ) -> Result<u64 /* commit_ts */>
     where
         F: Fn(usize) -> Vec<u8>,
         G: Fn(usize) -> Vec<u8>,
@@ -430,22 +432,24 @@ impl ClusterClient {
 
         match options.commit_action {
             CommitAction::NoCommit => {
-                return Ok(());
+                return Ok(0);
             }
             commit_action => {
                 self.kv_commit_ext(txn_muts, start_ts, commit_ts, commit_action)?;
             }
         }
 
+        let commit_ts = commit_ts.into_inner();
         self.verify_key_value(
             first.get_key(),
             Some(first.get_value()),
+            commit_ts,
             put_time,
             &RequestOptions::default(),
         )?;
         self.put_kv_in_ref_store(mutations);
-        self.set_max_ts(commit_ts.into_inner());
-        Ok(())
+        self.set_max_ts(commit_ts);
+        Ok(commit_ts)
     }
 
     pub fn put_kv_in_ref_store(&mut self, mutations: Vec<Mutation>) {
@@ -1747,7 +1751,7 @@ impl ClusterClient {
                     continue;
                 }
             }
-            self.verify_key_value(k, v.as_ref(), start_time, options)?;
+            self.verify_key_value(k, v.as_ref(), u64::MAX, start_time, options)?;
             if v.is_some() {
                 existed_cnt += 1;
             } else {
@@ -1767,17 +1771,19 @@ impl ClusterClient {
         &mut self,
         key: &[u8],
         expect_val: Option<&T>,
+        version: u64,
         put_time: Instant,
         options: &RequestOptions,
     ) -> Result<()> {
-        let (val, ctx) = self.get_key_version_opt(key, u64::MAX, put_time, options)?;
+        let (val, ctx) = self.get_key_version_opt(key, version, put_time, options)?;
         let val = val.as_deref();
         let expect_val = expect_val.map(|v| v.as_ref());
         if val != expect_val {
             return Err(box_err!(
-                "{} val not equal for key {}, db: {:?}, ref store {:?}",
+                "{} val not equal for key {}, ver {}, db: {:?}, ref store {:?}",
                 Self::tag_from_ctx(&ctx),
                 log_wrappers::hex_encode_upper(key),
+                version,
                 val.map(|v| (v.len(), tikv_util::escape(v))),
                 expect_val.map(|v| (v.len(), tikv_util::escape(v)))
             ));
@@ -1897,7 +1903,7 @@ impl ClusterTxnClient {
                     tikv_util::escape(kv.value()),
                     ref_val
                 );
-                self.log_verify_error(key, None, &err);
+                self.log_verify_error(key, None, u64::MAX, &err);
                 return Err(err);
             }
 
@@ -1912,7 +1918,7 @@ impl ClusterTxnClient {
                     tikv_util::escape(ref_val),
                     ref_val.len()
                 );
-                self.log_verify_error(key, Some(ref_val), &err);
+                self.log_verify_error(key, Some(ref_val), u64::MAX, &err);
                 return Err(err);
             }
         }
@@ -1941,7 +1947,12 @@ impl ClusterTxnClient {
                         log_wrappers::hex_encode_upper(key),
                         tikv_util::escape(ref_val.as_ref().unwrap())
                     );
-                    self.log_verify_error(key, ref_val.as_ref().map(|x| x.as_slice()), &err);
+                    self.log_verify_error(
+                        key,
+                        ref_val.as_ref().map(|x| x.as_slice()),
+                        u64::MAX,
+                        &err,
+                    );
 
                     diff_cnt += 1;
                     if diff_cnt >= ref_cnt - db_cnt {
@@ -2163,10 +2174,17 @@ impl ClusterTxnClient {
         }
     }
 
-    fn log_verify_error(&mut self, key: &[u8], expect_val: Option<&[u8]>, err: &Error) {
+    fn log_verify_error(
+        &mut self,
+        key: &[u8],
+        expect_val: Option<&[u8]>,
+        version: u64,
+        err: &Error,
+    ) {
         let res = self.cluster_client.verify_key_value(
             key,
             expect_val,
+            version,
             Instant::now(),
             &RequestOptions::default(),
         );
