@@ -1,8 +1,9 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{cmp::Ordering::*, ops::Deref};
+use std::{cmp::Ordering::*, iter::Iterator as _, mem, ops::Deref};
 
 use bytes::{Buf, Bytes};
+use proptest::prelude::*;
 use rand::Rng;
 
 use super::table::*;
@@ -18,7 +19,6 @@ struct SimpleIterator {
     ver_idx: usize,
 }
 
-#[allow(dead_code)]
 impl SimpleIterator {
     fn new(keys: Vec<&'static str>, vals: Vec<&'static str>, reversed: bool, version: u64) -> Self {
         let length = keys.len();
@@ -85,7 +85,7 @@ impl Iterator for SimpleIterator {
     }
 
     fn next_version(&mut self) -> bool {
-        let mut next_entry_off = self.latest_offsets.len();
+        let mut next_entry_off = self.keys.len();
         if self.idx + 1 < self.latest_offsets.len() as i32 {
             next_entry_off = self.latest_offsets[self.idx as usize + 1];
         }
@@ -130,7 +130,6 @@ impl Iterator for SimpleIterator {
     }
 }
 
-#[allow(dead_code)]
 fn get_all(mut it: Box<dyn Iterator>) -> (Vec<Bytes>, Vec<Bytes>) {
     let mut keys = vec![];
     let mut vals = vec![];
@@ -402,6 +401,123 @@ fn test_multi_version_merge_iterator() {
             }
             assert_eq!(cur_ver <= 70, true);
         }
+    }
+}
+
+prop_compose! {
+    fn arb_keys(max_iters_count: usize, max_keys_count: usize, max_versions_count: usize)
+    (iters_count in 2..=max_iters_count, versions_count in 1..=max_versions_count)
+    (
+        iters_count in Just(iters_count),
+        keys in prop::collection::vec(0..max_keys_count, versions_count),
+        keys_pos in prop::collection::vec(0..iters_count, versions_count),
+    ) -> (usize, Vec<usize>, Vec<usize>) {
+        (iters_count, keys, keys_pos)
+    }
+}
+proptest! {
+    #[test]
+    fn test_multi_version_merge_iterator_rnd((iters_count, keys, keys_pos) in arb_keys(2, 5, 10), reversed in any::<bool>()) {
+        // println!("iters_count: {}, keys: {:?}, keys_pos: {:?}, reversed: {}", iters_count, keys, keys_pos, reversed);
+
+        let i_to_key = |i| format!("{i:04}");
+        let i_to_val = |i, ver| format!("{i:04}-{ver:04}");
+
+        let versions_count = keys.len();
+
+        let mut iters_data = Vec::with_capacity(iters_count);
+        let mut iters_last_offs = Vec::with_capacity(iters_count);
+        let mut iters_keys = Vec::with_capacity(iters_count);
+        let mut iters_vals = Vec::with_capacity(iters_count);
+        for _ in 0..iters_count {
+            iters_data.push(vec![]);
+            iters_last_offs.push(vec![]);
+            iters_keys.push(vec![]);
+            iters_vals.push(vec![]);
+        }
+
+        for (idx, (k, pos)) in keys.into_iter().zip(keys_pos.into_iter()).enumerate() {
+            let ver = versions_count - idx;
+            let key = i_to_key(k);
+            let val = i_to_val(k, ver);
+            let value = Value::encode_buf(0, &[], ver as u64, val.as_bytes());
+            iters_data[pos].push((Bytes::from(key), value))
+        }
+        for (pos, mut iter_data) in iters_data.into_iter().enumerate() {
+            // Must be stable sort.
+            iter_data.sort_by(|a, b| a.0.cmp(&b.0));
+
+            let mut prev_key = None;
+            for (key, value) in iter_data {
+                let same_key = prev_key.as_ref().is_some_and(|x| x == &key);
+                if !same_key {
+                    iters_last_offs[pos].push(iters_keys[pos].len());
+                    prev_key = Some(key.clone());
+                }
+                iters_keys[pos].push(key);
+                iters_vals[pos].push(value);
+            }
+        }
+
+
+        let mut iters: Vec<Box<dyn Iterator>> = Vec::with_capacity(iters_count);
+        for _ in 0..iters_count {
+            let mut iter = SimpleIterator {
+                keys: iters_keys.pop().unwrap(),
+                vals: iters_vals.pop().unwrap(),
+                idx: 0,
+                reversed,
+                latest_offsets: iters_last_offs.pop().unwrap(),
+                ver_idx: 0,
+            };
+            println!("iter {:?}", iter);
+            iter.rewind();
+            while iter.valid() {
+                println!("{:?}: {}", iter.key(), iter.value().version);
+                while iter.next_version() {
+                    println!("ver: {:?}: {}", iter.key(), iter.value().version);
+                }
+                iter.next();
+            }
+            iters.push(Box::new(iter));
+        }
+
+        let mut merge_it = new_merge_iterator(iters, reversed);
+        merge_it.rewind();
+
+        let mut keys = Vec::with_capacity(versions_count);
+        let mut vers = Vec::with_capacity(versions_count);
+        while merge_it.valid() {
+            keys.push(merge_it.key().to_vec());
+
+            let mut cur_ver = merge_it.value().version;
+            vers.push(cur_ver);
+
+            while merge_it.next_version() {
+                let key = merge_it.key();
+                prop_assert_eq!(keys.last().unwrap().as_slice(), key.deref());
+
+                let prev_ver = mem::replace(&mut cur_ver, merge_it.value().version);
+                prop_assert!(prev_ver > cur_ver);
+                vers.push(cur_ver);
+            }
+            merge_it.next();
+        }
+
+        let keys_is_sorted = keys.is_sorted_by(|a, b| {
+            let r = a.cmp(b);
+            Some(if reversed {
+                r.reverse()
+            } else {
+                r
+            })
+        });
+        prop_assert!(keys_is_sorted);
+
+        prop_assert_eq!(vers.len(), versions_count);
+        vers.sort();
+        let expected_vers = (1..=versions_count as u64).collect::<Vec<_>>();
+        prop_assert_eq!(vers, expected_vers);
     }
 }
 

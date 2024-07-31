@@ -6,8 +6,10 @@ pub mod memtable;
 pub mod merge_iterator;
 pub mod sstable;
 pub mod table;
-mod tests;
 pub mod txn_file;
+
+#[cfg(test)]
+mod tests;
 
 pub use merge_iterator::*;
 pub use table::*;

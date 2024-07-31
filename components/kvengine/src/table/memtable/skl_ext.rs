@@ -1,6 +1,6 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{iter::Iterator as StdIterator, ops::Deref};
+use std::{intrinsics::likely, iter::Iterator as StdIterator, ops::Deref};
 
 use crate::{
     table::{
@@ -31,7 +31,7 @@ impl SkipListExt {
         }
     }
 
-    // Note: `txn_files` must be order by version DESC.
+    #[must_use]
     pub fn add_txn_files(&self, txn_files: &[TxnFile]) -> Self {
         debug!(
             "add txn_files: {:?}",
@@ -40,6 +40,7 @@ impl SkipListExt {
         let mut new_txn_files = Vec::with_capacity(self.txn_files.len() + txn_files.len());
         new_txn_files.extend_from_slice(txn_files);
         new_txn_files.extend_from_slice(&self.txn_files);
+        new_txn_files.sort_by(|a, b| b.version().cmp(&a.version()));
         Self {
             skl: self.skl.clone(),
             txn_files: new_txn_files,
@@ -90,6 +91,30 @@ impl SkipListExt {
         None
     }
 
+    #[inline]
+    fn merge_skl_and_txn_file_value(
+        &self,
+        skl_val: Value,
+        txn_val: Option<Value>,
+        outer_owner: &mut Vec<u8>,
+    ) -> Value {
+        let skl_is_valid = skl_val.is_valid();
+        if likely(txn_val.is_none()) {
+            return if skl_is_valid {
+                encode_val_to_outer_val_owner(skl_val, outer_owner)
+            } else {
+                Value::new()
+            };
+        }
+
+        let txn_val = txn_val.unwrap();
+        if skl_is_valid && skl_val.version > txn_val.version {
+            encode_val_to_outer_val_owner(skl_val, outer_owner)
+        } else {
+            txn_val
+        }
+    }
+
     pub fn get_with_hint(
         &self,
         key: InnerKey<'_>,
@@ -97,33 +122,26 @@ impl SkipListExt {
         h: &mut Hint,
         outer_owner: &mut Vec<u8>,
     ) -> Value {
-        if let Some(v) = self.try_get_from_txn_file(key, version, outer_owner) {
-            return v;
-        }
-        let v = self.skl.get_with_hint(key.deref(), version, h);
-        if v.is_valid() {
-            return encode_val_to_outer_val_owner(v, outer_owner);
-        }
-        Value::new()
+        let txn_val = self.try_get_from_txn_file(key, version, outer_owner);
+        let skl_val = self.skl.get_with_hint(key.deref(), version, h);
+        self.merge_skl_and_txn_file_value(skl_val, txn_val, outer_owner)
     }
 
     pub fn get(&self, key: InnerKey<'_>, version: u64, outer_owner: &mut Vec<u8>) -> Value {
-        if let Some(v) = self.try_get_from_txn_file(key, version, outer_owner) {
-            return v;
-        }
-        let v = self.skl.get(key.deref(), version);
-        if v.is_valid() {
-            return encode_val_to_outer_val_owner(v, outer_owner);
-        }
-        Value::new()
+        let txn_val = self.try_get_from_txn_file(key, version, outer_owner);
+        let skl_val = self.skl.get(key.deref(), version);
+        self.merge_skl_and_txn_file_value(skl_val, txn_val, outer_owner)
     }
 
+    // `get_newer` is not necessary to return the entry of latest version.
     pub fn get_newer(&self, key: InnerKey<'_>, version: u64, outer_owner: &mut Vec<u8>) -> Value {
         for txn_file in &self.txn_files {
             let (op, val) = txn_file.get_value(key, outer_owner);
-            if val.is_valid() && val.version >= version && op != OP_LOCK && op != OP_CHECK_NOT_EXIST
-            {
-                return val;
+            if val.is_valid() && op != OP_LOCK && op != OP_CHECK_NOT_EXIST {
+                if val.version >= version {
+                    return val;
+                }
+                break;
             }
         }
         let v = self.skl.get_newer(key.deref(), version);
@@ -220,12 +238,11 @@ mod tests {
     fn test_skl_ext_write_cf(#[case] enable_inner_key_off: bool) {
         let skl = SkipList::new(None);
         let kb = KeyBuilder::new(KEYSPACE_ID, enable_inner_key_off, "t_");
-        write_skl_write_cf(&skl, vec![5, 10, 15], 100, 101, &kb);
-        // write CF skip list data will always written before txn file data, because
-        // mem-table will instantly switch after apply TxnFile commit.
+        write_skl_write_cf(&skl, vec![5, 10, 15, 20], 100, 101, &kb);
+
         let chunk_id = 1;
         let txn_file_chunk_data =
-            build_txn_file_chunk_data(chunk_id, vec![10, 12, 18], enable_inner_key_off, &kb);
+            build_txn_file_chunk_data(chunk_id, vec![10, 12, 18, 20], enable_inner_key_off, &kb);
         let txn_file_chunk_file = Arc::new(InMemFile::new(chunk_id, txn_file_chunk_data));
         let txn_file_chunk = TxnChunk::new(txn_file_chunk_file, None, None).unwrap();
         let user_meta = UserMeta::new(102, 103).to_array().to_vec();
@@ -241,6 +258,8 @@ mod tests {
         let txn_file_id = TxnFileId::new(1, 1, 102);
         let txn_file = TxnFile::new(txn_file_id, vec![txn_file_chunk], txn_ctx).unwrap();
         let skl_ext = SkipListExt::new(skl).add_txn_files(&[txn_file]);
+
+        write_skl_write_cf(&skl_ext.get_skl(), vec![20], 104, 105, &kb);
 
         // test find key in skl.
         let key = kb.i_to_inner_key(5);
@@ -258,6 +277,14 @@ mod tests {
         assert_eq!(val.user_meta(), &UserMeta::new(102, 103).to_array());
         assert_eq!(val.version, 103);
 
+        // test find key in skl newer than txn file.
+        let key = kb.i_to_inner_key(20);
+        let mut outer_key_owner = vec![];
+        let val = skl_ext.get(key.as_ref(), u64::MAX, &mut outer_key_owner);
+        assert_eq!(val.get_value(), new_val(20).as_bytes());
+        assert_eq!(val.user_meta(), &UserMeta::new(104, 105).to_array());
+        assert_eq!(val.version, 105);
+
         // test get newer.
         let key = kb.i_to_inner_key(10);
         let mut outer_key_owner = vec![];
@@ -269,6 +296,14 @@ mod tests {
         assert_eq!(val.version, 103);
         val = skl_ext.get_newer(key.as_ref(), 104, &mut outer_key_owner);
         assert!(!val.is_valid());
+
+        let key = kb.i_to_inner_key(20);
+        val = skl_ext.get_newer(key.as_ref(), 102, &mut outer_key_owner);
+        assert!(val.is_valid());
+        assert_eq!(val.version, 103); // not necessary to return the latest version.
+        val = skl_ext.get_newer(key.as_ref(), 104, &mut outer_key_owner);
+        assert!(val.is_valid());
+        assert_eq!(val.version, 105);
 
         // test iterator.
         let mut iter = skl_ext.new_iterator(false);
@@ -288,6 +323,6 @@ mod tests {
             prev_version = iter.value().version;
             iter.next_all_version();
         }
-        assert_eq!(count, 6);
+        assert_eq!(count, 9);
     }
 }

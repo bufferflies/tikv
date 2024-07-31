@@ -58,8 +58,16 @@ impl Iterator for MergeIterator<'_> {
     }
 
     fn next_version(&mut self) -> bool {
+        let curr_version = self.smaller.ver;
         if self.smaller.iter.next_version() {
             self.smaller.reset();
+            if self.same_key
+                && self.bigger.valid
+                && self.bigger.ver < curr_version
+                && self.bigger.ver > self.smaller.ver
+            {
+                self.swap();
+            }
             return true;
         }
         if !self.same_key {
