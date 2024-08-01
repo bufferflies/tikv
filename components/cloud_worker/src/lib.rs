@@ -1,7 +1,6 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
 mod common;
-mod cop_limiter;
 mod error;
 mod load_data;
 mod metrics;
@@ -10,6 +9,7 @@ mod remote_cop;
 mod schema_manager;
 mod server;
 mod txn_chunk;
+mod worker_limiter;
 mod worker_scaler;
 
 use std::{
@@ -49,11 +49,11 @@ use tokio::{runtime::Runtime, task::JoinHandle};
 pub use txn_chunk::CreateTxnChunkResp;
 
 use crate::{
-    cop_limiter::{CopLimiter, CopLimiterConfig},
     load_data::{LoadDataManager, MAX_IN_MEM_SIZE},
     native_br::{NativeBrConfig, NativeBrManager},
     remote_cop::RemoteCopServer,
     txn_chunk::TxnChunkHandler,
+    worker_limiter::{WorkerLimiter, WorkerLimiterConfig},
     worker_scaler::{WorkerScaler, WorkerScalerConfig, LOAD_DATA_WORKER_ENV},
 };
 
@@ -211,7 +211,7 @@ fn start_server(
     spawn_br_background_worker(br_manager.clone(), config_file_path);
     let txn_chunk_handler = Arc::new(TxnChunkHandler::default());
 
-    let cop_limiter = CopLimiter::new(config.cop_limiter.clone());
+    let worker_limiter = WorkerLimiter::new(config.worker_limiter.clone());
 
     // Create `TxnChunkManager` using `thread_pool`. Otherwise, as `TxnChunkManager`
     // is hold in async context, we will meet the panic of dropping tokio
@@ -235,7 +235,7 @@ fn start_server(
         master_key,
         quota_limiter: Arc::new(QuotaLimiter::default()),
         block_cache,
-        cop_limiter,
+        worker_limiter,
         txn_chunk_manager,
     });
     let acceptor = security_mgr.acceptor(incoming).unwrap();
@@ -524,7 +524,7 @@ pub struct Config {
     pub report_wru: bool,
     pub enable_load_data_check_point: bool,
     pub checksum_type: ChecksumType,
-    pub cop_limiter: CopLimiterConfig,
+    pub worker_limiter: WorkerLimiterConfig,
     pub schema_manager: SchemaManagerConfig,
 }
 
@@ -550,7 +550,7 @@ impl Default for Config {
             report_wru: false,
             enable_load_data_check_point: false,
             checksum_type: ChecksumType::Crc32c,
-            cop_limiter: CopLimiterConfig::default(),
+            worker_limiter: WorkerLimiterConfig::default(),
             schema_manager: SchemaManagerConfig::default(),
         }
     }
@@ -585,7 +585,7 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<(), Box<dyn std::error::Error>> {
-        self.cop_limiter.validate()?;
+        self.worker_limiter.validate()?;
         Ok(())
     }
 }

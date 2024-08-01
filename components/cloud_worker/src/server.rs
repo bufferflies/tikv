@@ -46,7 +46,6 @@ use tikv_util::{
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::{
-    cop_limiter::CopLimiter,
     load_data::{self, LoadDataManager},
     metrics::{
         REMOTE_ANALYZE_REQ_COUNTER, REMOTE_ANALYZE_RESP_SIZE, REMOTE_CHECKSUM_REQ_COUNTER,
@@ -56,6 +55,7 @@ use crate::{
     },
     native_br::{self, NativeBrManager},
     txn_chunk::{handle_txn_chunk, TxnChunkHandler},
+    worker_limiter::WorkerLimiter,
 };
 
 pub(crate) struct Context {
@@ -70,7 +70,7 @@ pub(crate) struct Context {
     pub master_key: MasterKey,
     pub quota_limiter: Arc<QuotaLimiter>,
     pub block_cache: Option<moka::sync::SegmentedCache<BlockCacheKey, Bytes>>,
-    pub cop_limiter: CopLimiter,
+    pub worker_limiter: WorkerLimiter,
     pub txn_chunk_manager: TxnChunkManager,
 }
 
@@ -157,6 +157,8 @@ where
     Box::new(server)
 }
 
+const DEFAULT_COP_TIMEOUT: Duration = Duration::from_secs(20);
+
 async fn handle_remote_coprocessor(
     ctx: Arc<Context>,
     req: hyper::Request<hyper::Body>,
@@ -177,16 +179,21 @@ async fn handle_remote_coprocessor(
     let keyspace_id = cop_ctx.keyspace_id;
     let handle_start = Instant::now();
     let tag = get_cop_req_tag(&cop_req);
-    let req_type = cop_req.get_tp();
-    let timeout = Duration::from_millis(cop_ctx.get_max_execution_duration_ms());
-    if !ctx
-        .cop_limiter
-        .wait_for_high_mem_usage(keyspace_id, &tag, timeout)
-        .await
-    {
-        let body = hyper::Body::from("memory pressure is too high");
+    let mut timeout = Duration::from_millis(cop_ctx.get_max_execution_duration_ms());
+    if timeout.is_zero() {
+        timeout = DEFAULT_COP_TIMEOUT;
+    }
+    let res = tokio::time::timeout(timeout, ctx.worker_limiter.acquire_permit(keyspace_id)).await;
+    if res.is_err() {
+        info!(
+            "wait permit timeout";
+            "tag" => tag,
+        );
+        let body = hyper::Body::from("wait permit timeout");
         return Ok(hyper::Response::builder().status(500).body(body).unwrap());
     }
+    let _permit = res.unwrap();
+    let req_type = cop_req.get_tp();
     let snap_start = Instant::now();
     let dfs: Arc<dyn dfs::Dfs> = match req_type {
         REQ_TYPE_DAG => ctx.cache_fs.clone(),
@@ -206,8 +213,14 @@ async fn handle_remote_coprocessor(
         let body = hyper::Body::from(format!("{:?}", err));
         return Ok(hyper::Response::builder().status(500).body(body).unwrap());
     }
-    let snap_duration = snap_start.saturating_elapsed();
-    REMOTE_COPR_SNAPSHOT_HISTOGRAM.observe(snap_duration.as_secs_f64());
+    if handle_start.saturating_elapsed() > timeout {
+        info!(
+            "construct snapshot timeout";
+            "tag" => tag,
+        );
+        let body = hyper::Body::from("construct snapshot timeout");
+        return Ok(hyper::Response::builder().status(500).body(body).unwrap());
+    }
     let snap_access = snap_access_res.unwrap();
     let snap = RegionSnapshot::from_snapshot(snap_access);
     let process_start = Instant::now();
@@ -224,8 +237,12 @@ async fn handle_remote_coprocessor(
         let body = hyper::Body::from(format!("{:?}", err));
         return Ok(hyper::Response::builder().status(500).body(body).unwrap());
     }
-    let process_duration = process_start.saturating_elapsed();
-    let handle_duration = handle_start.saturating_elapsed();
+    let finish_time = Instant::now();
+    let permit_wait_duration = snap_start.saturating_duration_since(handle_start);
+    let snap_duration = process_start.saturating_duration_since(snap_start);
+    let process_duration = finish_time.saturating_duration_since(process_start);
+    let handle_duration = finish_time.saturating_duration_since(handle_start);
+    REMOTE_COPR_SNAPSHOT_HISTOGRAM.observe(snap_duration.as_secs_f64());
     REMOTE_COPR_REQ_HANDLE_HISTOGRAM.observe(handle_duration.as_secs_f64());
     let response = result.unwrap();
     info!(
@@ -234,6 +251,7 @@ async fn handle_remote_coprocessor(
         "req_size" => req_body.len(),
         "resp_size" => response.data.len(),
         "timeout" => ?timeout,
+        "permit_wait_duration" => ?permit_wait_duration,
         "snap_duration" => ?snap_duration,
         "process_duration" => ?process_duration,
         "handle_duration" => ?handle_duration,
@@ -254,8 +272,6 @@ async fn handle_remote_coprocessor(
         }
         _ => {}
     }
-    ctx.cop_limiter
-        .add_sample(keyspace_id, response.data.len() as u64, Instant::now());
     let response_data = response.write_to_bytes().unwrap();
     Ok(hyper::Response::builder()
         .status(200)
