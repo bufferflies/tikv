@@ -152,7 +152,9 @@ fn handle_qe_response(
                 resp.mut_range().set_start(range.lower_inclusive);
                 resp.mut_range().set_end(range.upper_exclusive);
             }
-            resp.set_data(box_try!(sel_resp.write_to_bytes()));
+            let mut data = Vec::with_capacity(sel_resp.compute_size() as usize);
+            box_try!(sel_resp.write_to_vec(&mut data));
+            resp.set_data(data);
             resp.set_can_be_cached(can_be_cached);
             resp.set_is_cache_hit(false);
             if let Some(v) = data_version {
