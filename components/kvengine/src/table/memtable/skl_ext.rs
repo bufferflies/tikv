@@ -166,6 +166,14 @@ impl SkipListExt {
     pub fn get_skl(&self) -> SkipList {
         self.skl.clone()
     }
+
+    pub fn has_over_bound_data(&self, start: InnerKey<'_>, end: InnerKey<'_>) -> bool {
+        self.skl.has_over_bound_data(start, end)
+            || self
+                .txn_files
+                .iter()
+                .any(|txn_file| txn_file.has_over_bound_data(start, end))
+    }
 }
 
 #[cfg(test)]

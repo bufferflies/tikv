@@ -201,6 +201,20 @@ impl SkipList {
             reversed,
         }
     }
+
+    pub fn has_over_bound_data(&self, start: InnerKey<'_>, end: InnerKey<'_>) -> bool {
+        let mut iter = self.new_iterator(false);
+        iter.rewind();
+        if iter.valid() && iter.key() < start {
+            return true;
+        }
+        let mut rev_iter = self.new_iterator(true);
+        rev_iter.rewind();
+        if rev_iter.valid() && rev_iter.key() >= end {
+            return true;
+        }
+        false
+    }
 }
 
 pub struct SkipListCore {
@@ -213,7 +227,6 @@ pub struct SkipListCore {
     user_data_size: AtomicU64,
 }
 
-#[allow(dead_code)]
 impl SkipListCore {
     pub fn new(arena: Option<Arc<Arena>>) -> Self {
         let a = arena.unwrap_or_else(|| Arc::new(Arena::new()));
@@ -229,6 +242,7 @@ impl SkipListCore {
         }
     }
 
+    #[allow(dead_code)]
     fn get_head(&self) -> *mut Node {
         self.arena.get_node(self.head)
     }
@@ -300,6 +314,7 @@ impl SkipListCore {
         }
     }
 
+    #[allow(dead_code)]
     fn put(&self, buf: &[u8], entry: &WriteBatchEntry) {
         let h = &mut Hint::new();
         self.put_with_hint(buf, entry, h)
@@ -1427,6 +1442,54 @@ mod tests {
                 new_key.store(i, Ordering::Release);
                 wb.reset();
             }
+        }
+    }
+
+    #[test]
+    fn test_has_over_bound_data() {
+        let l = SkipList::new(None);
+        assert!(!l.has_over_bound_data(
+            InnerKey::from_inner_buf(b"0"),
+            InnerKey::from_inner_buf(b"1"),
+        ));
+
+        let val = new_value(42);
+        let mut wb = WriteBatch::new();
+        wb.put(
+            InnerKey::from_inner_buf("k10".as_bytes()),
+            0,
+            &[0],
+            0,
+            val.as_bytes(),
+        );
+        wb.put(
+            InnerKey::from_inner_buf("k19".as_bytes()),
+            0,
+            &[0],
+            0,
+            val.as_bytes(),
+        );
+        l.put_batch_impl(&mut wb, None, 0);
+
+        let cases = [
+            ("k00", "k99", false),
+            ("k10", "k20", false),
+            ("k11", "k20", true),
+            ("k10", "k19", true),
+            ("k11", "k19", true),
+        ];
+        for (start, end, expect) in cases {
+            assert_eq!(
+                l.has_over_bound_data(
+                    InnerKey::from_inner_buf(start.as_bytes()),
+                    InnerKey::from_inner_buf(end.as_bytes()),
+                ),
+                expect,
+                "start: {}, end: {}, expect {}",
+                start,
+                end,
+                expect,
+            );
         }
     }
 }

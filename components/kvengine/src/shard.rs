@@ -1361,14 +1361,7 @@ impl ShardDataCore {
         for mem_tbl in &self.mem_tbls {
             for cf in 0..NUM_CFS {
                 let skl = mem_tbl.get_cf(cf);
-                let mut iter = skl.new_iterator(false);
-                iter.rewind();
-                if iter.valid() && iter.key() < self.inner_start() {
-                    return true;
-                }
-                let mut rev_iter = skl.new_iterator(true);
-                rev_iter.rewind();
-                if rev_iter.valid() && rev_iter.key() >= self.inner_end() {
+                if skl.has_over_bound_data(self.inner_start(), self.inner_end()) {
                     return true;
                 }
             }

@@ -295,6 +295,10 @@ impl TxnFile {
         iter.seek(start);
         iter.valid() && iter.key() < end
     }
+
+    pub fn has_over_bound_data(&self, start: InnerKey<'_>, end: InnerKey<'_>) -> bool {
+        self.lower_bound() < start || self.upper_bound() > end
+    }
 }
 
 impl fmt::Debug for TxnFile {
@@ -2302,6 +2306,44 @@ mod tests {
                 let chunk_ref = chunk_ref.slice(lower_bound_key.as_ref(), upper_bound_key.as_ref());
                 prop_assert_eq!(txn_file.has_data_in_range(lower_bound_key.as_ref(), upper_bound_key.as_ref()), !chunk_ref.is_empty());
             });
+        }
+    }
+
+    #[rstest]
+    #[case::enable_key_off(true)]
+    #[case::disable_key_off(false)]
+    fn test_txn_file_has_over_bound_data(#[case] enable_inner_key_off: bool) {
+        let kb = new_key_builder(enable_inner_key_off);
+        let chunk = build_txn_chunk(0, 50, 1, |_| OP_PUT, None, enable_inner_key_off);
+        let id = TxnFileId::new(10, 1, 3);
+        let txn_ctx = TxnCtx::new(
+            UserMeta::new(3, 5).to_array().to_vec().into(),
+            Default::default(),
+            3,
+            kb.i_to_inner_key(10).as_ref(),
+            kb.i_to_inner_key(20).as_ref(),
+        );
+        let txn_file = TxnFile::new(id, vec![chunk], txn_ctx).unwrap();
+
+        let cases = [
+            (0, 99, false),
+            (10, 20, false),
+            (11, 20, true),
+            (10, 19, true),
+            (11, 19, true),
+        ];
+        for (start, end, expect) in cases {
+            assert_eq!(
+                txn_file.has_over_bound_data(
+                    kb.i_to_inner_key(start).as_ref(),
+                    kb.i_to_inner_key(end).as_ref()
+                ),
+                expect,
+                "start: {}, end: {}, expect {}",
+                start,
+                end,
+                expect
+            );
         }
     }
 
