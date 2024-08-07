@@ -1303,7 +1303,7 @@ dependencies = [
  "log",
  "log_wrappers",
  "mime",
- "nix 0.11.1",
+ "nix 0.24.1",
  "nom 7.1.0",
  "num_cpus",
  "online_config",
@@ -1333,7 +1333,7 @@ dependencies = [
  "serde_derive",
  "serde_ignored",
  "serde_json",
- "signal",
+ "signal-hook",
  "slog",
  "slog-global",
  "sst_importer",
@@ -4393,19 +4393,6 @@ dependencies = [
 
 [[package]]
 name = "nix"
-version = "0.11.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "becb657d662f1cd2ef38c7ad480ec6b8cf9e96b27adb543e594f9cf0f2e6065c"
-dependencies = [
- "bitflags 1.3.2",
- "cc",
- "cfg-if 0.1.10",
- "libc 0.2.149",
- "void",
-]
-
-[[package]]
-name = "nix"
 version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "83450fe6a6142ddd95fb064b746083fc4ef1705fe81f64a64e1d4b39f54a1055"
@@ -7076,16 +7063,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "43b2853a4d09f215c24cc5489c992ce46052d359b5109343cbafbf26bc62f8a3"
 
 [[package]]
-name = "signal"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "106428d9d96840ecdec5208c13ab8a4e28c38da1e0ccf2909fb44e41b992f897"
-dependencies = [
- "libc 0.2.149",
- "nix 0.11.1",
-]
-
-[[package]]
 name = "signal-hook"
 version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9445,12 +9422,6 @@ name = "vlog"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2266fcb904c50fb17fda4c9a751a1715629ecf8b21f4c9d78b4890fb71525d71"
-
-[[package]]
-name = "void"
-version = "1.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a02e4885ed3bc0f2de90ea6dd45ebcbb66dacffe03547fadbb0eeae2770887d"
 
 [[package]]
 name = "wait-timeout"

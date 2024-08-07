@@ -63,7 +63,7 @@ libc = "0.2"
 log = { version = "0.4", features = ["max_level_trace", "release_max_level_debug"] }
 log_wrappers = { path = "../log_wrappers" }
 mime = "0.3.13"
-nix = "0.11"
+nix = "0.24"
 nom = { version = "7.1.0", default-features = false, features = ["std"] }
 num_cpus = "1"
 online_config = { path = "../online_config" }
@@ -119,4 +119,4 @@ walkdir = "2"
 yatp = { git = "https://github.com/tikv/yatp.git", branch = "master" }
 
 [target.'cfg(unix)'.dependencies]
-signal = "0.6"
+signal-hook = "0.3"
