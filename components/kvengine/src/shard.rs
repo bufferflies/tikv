@@ -1311,8 +1311,7 @@ impl ShardDataCore {
         let mut stats = LevelStatsLite::default();
         level.tables.iter().enumerate().for_each(|(i, tbl)| {
             if self.is_over_bound_table(level, i, tbl) {
-                stats.data_size +=
-                    tbl.estimated_size_in_range(self.inner_start(), self.inner_end());
+                stats.data_size += tbl.size() / 2;
                 stats.blob_size += tbl.in_use_total_blob_size / 2;
                 stats.entries += tbl.entries as u64 / 2;
                 if cf == WRITE_CF {

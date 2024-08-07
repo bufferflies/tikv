@@ -488,14 +488,6 @@ impl SsTableCore {
         self.end_off - self.start_off
     }
 
-    /// Get estimated size in [start, end) by number of blocks.
-    pub fn estimated_size_in_range(&self, start: InnerKey<'_>, end: InnerKey<'_>) -> u64 {
-        let idx = self.load_index();
-        let left = idx.seek_block_bigger_or_equal(start.deref());
-        let right = idx.seek_block_bigger_or_equal(end.deref());
-        self.file.size() * (right - left) as u64 / idx.num_blocks() as u64
-    }
-
     pub fn index_size(&self) -> u64 {
         (self.footer.index_len() + self.footer.old_index_len()) as u64
     }
@@ -884,7 +876,7 @@ mod tests {
     use rand::Rng;
 
     use super::*;
-    use crate::{Iterator, GLOBAL_SHARD_END_KEY};
+    use crate::Iterator;
 
     fn create_multi_version_sst(mut kvs: Vec<(String, String)>) -> (SsTable, usize) {
         let sst_fid = TEST_ID_ALLOC.fetch_add(1, Ordering::Relaxed) + 1;
@@ -1368,57 +1360,6 @@ mod tests {
                 suggest_split_key,
                 "{}",
                 i
-            );
-        }
-    }
-
-    #[test]
-    fn test_estimated_size_in_range() {
-        let cases = vec![
-            (
-                10000, // number of kvs
-                49,    // expected number of blocks, about 200 kvs per block
-                None,  // range start,
-                None,  // range end,
-                1.0,   // expect ratio of estimated size to file size.
-            ),
-            (10000, 49, Some(2000), Some(8000), 0.6),
-            (10000, 49, Some(2000), None, 0.8),
-            (10000, 49, None, Some(2000), 0.2),
-            (1, 1, None, None, 1.0), // 1 block
-            (1, 1, Some(0), None, 1.0),
-            (1, 1, None, Some(1), 1.0),
-            (1, 1, None, Some(0), 0.0),
-            (300, 2, None, None, 1.0), // 2 blocks
-            (300, 2, Some(100), None, 0.5),
-            (300, 2, Some(200), None, 0.5),
-            (300, 2, Some(250), None, 0.0),
-            (2000, 10, None, None, 1.0), // 10 blocks
-            (2000, 10, Some(2000), Some(3000), 0.0),
-            (2000, 10, Some(1000), Some(3000), 0.5),
-        ];
-
-        let prefix = "key";
-        for (i, (n, blocks, start, end, ratio)) in cases.into_iter().enumerate() {
-            let (sst, _) = create_sst_table(prefix, n, true);
-            assert_eq!(sst.load_index().num_blocks(), blocks);
-
-            let start = start.map_or(b"".to_vec(), |x| get_test_key(prefix, x).into_bytes());
-            let start = InnerKey::from_inner_buf(&start);
-            let end = end.map_or(GLOBAL_SHARD_END_KEY.to_vec(), |x| {
-                get_test_key(prefix, x).into_bytes()
-            });
-            let end = InnerKey::from_inner_buf(&end);
-
-            let estimated_size = sst.estimated_size_in_range(start, end) as f64;
-            let expect = sst.size() as f64 * ratio;
-            assert!(
-                (estimated_size - expect).abs() <= 0.05 * expect,
-                "case {}, estimated_size {}, expect {}, sst.size {}",
-                i,
-                estimated_size,
-                expect,
-                sst.size(),
             );
         }
     }
