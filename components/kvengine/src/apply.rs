@@ -977,6 +977,7 @@ impl EngineCore {
             let col_file = cs.col_files.get(&create.get_id()).unwrap().clone();
             new_col_levels.add_file(create.get_level() as usize, col_file);
         }
+        new_col_levels.sort();
         new_col_levels
             .unconverted_l0s
             .retain(|l0| !col_comp.row_l0s.contains(&l0.id()));

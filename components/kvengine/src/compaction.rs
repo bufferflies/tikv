@@ -34,7 +34,7 @@ use crate::{
             builder::{BlobTableBuildOptions, BlobTableBuilder},
         },
         columnar::{
-            Block, ColumnarFileBuilder, ColumnarMergeReader, ColumnarReader,
+            Block, ColumnarConcatReader, ColumnarFileBuilder, ColumnarMergeReader, ColumnarReader,
             ColumnarRowTableReader, ColumnarTableBuildOptions, ColumnarTableBuilder, SchemaFile,
         },
         get_tables_in_range,
@@ -52,7 +52,6 @@ use crate::{
 };
 
 const MAJOR_COMPACTION_MIN_REQUEST_VERSION: u32 = 3;
-const COLUMNAR_COMPACTION_MOVE_DOWN_FILE_SIZE: u64 = 16 * 1024 * 1024;
 
 // Do not skip L1 tables if there are too many small L1 tables.
 const MAX_SKIP_L1_TABLES: usize = 16;
@@ -3390,31 +3389,14 @@ fn compact_columnar_l0_files(
         false,
     )?;
     let col_tbls = files_to_columnar_tables(col_files);
-    let (need_move_down, need_compact): (Vec<ColumnarFile>, Vec<ColumnarFile>) = col_tbls
-        .into_iter()
-        .partition(|f| f.get_file().size() > COLUMNAR_COMPACTION_MOVE_DOWN_FILE_SIZE);
-    info!(
-        "{} need_move_down: {}, need_compact: {}",
-        tag,
-        need_move_down.len(),
-        need_compact.len()
-    );
-
-    for columnar_file in &need_move_down {
-        let mut tbl_create = TableCreate::default();
-        tbl_create.set_id(columnar_file.get_file().id());
-        tbl_create.set_level(1);
-        tbl_create.set_smallest(columnar_file.get_smallest().deref().to_vec());
-        tbl_create.set_biggest(columnar_file.get_biggest().deref().to_vec());
-        tbl_changes.mut_table_creates().push(tbl_create);
-    }
-
-    if need_compact.is_empty() {
-        return Ok(ret);
-    }
-    let mut smallest = need_compact[0].get_smallest();
-    let mut biggest = need_compact[0].get_biggest();
-    for columnar_file in &need_compact {
+    let snap_version = col_tbls
+        .iter()
+        .map(|f| f.get_l0_version().unwrap())
+        .max()
+        .unwrap();
+    let mut smallest = col_tbls[0].get_smallest();
+    let mut biggest = col_tbls[0].get_biggest();
+    for columnar_file in &col_tbls {
         if smallest > columnar_file.get_smallest() {
             smallest = columnar_file.get_smallest();
         }
@@ -3426,13 +3408,13 @@ fn compact_columnar_l0_files(
     if overlap_tables.is_empty() {
         return Ok(ret);
     }
-    let mut file_builder = ColumnarFileBuilder::new(allocate_id(), None);
+    let mut file_builder = ColumnarFileBuilder::new(allocate_id(), Some(snap_version));
     let (tx, rx) = mpsc::bounded(ctx.req.file_ids.len());
     let mut cnt = 0;
     for table_id in overlap_tables {
         let schema = schema_file.get_table(table_id).unwrap();
         let mut readers: Vec<Box<dyn ColumnarReader>> = vec![];
-        for columnar_file in &need_compact {
+        for columnar_file in &col_tbls {
             let reader = ColumnarTableReader::new(
                 columnar_file,
                 table_id,
@@ -3521,8 +3503,8 @@ fn compact_columnar_l1_files(
         return Ok(ret);
     }
     let l1_tbls = files_to_columnar_tables(l1_tbl_files);
-    let smallest = l1_tbls.iter().map(|f| f.get_smallest()).min().unwrap();
-    let biggest = l1_tbls.iter().map(|f| f.get_biggest()).max().unwrap();
+    let mut smallest = l1_tbls.iter().map(|f| f.get_smallest()).min().unwrap();
+    let mut biggest = l1_tbls.iter().map(|f| f.get_biggest()).max().unwrap();
     for tbl in &l1_tbls {
         let mut tbl_delete = pb::TableDelete::default();
         tbl_delete.set_id(tbl.get_file().id());
@@ -3538,8 +3520,10 @@ fn compact_columnar_l1_files(
         false,
     )?;
     let mut l2_tbls = files_to_columnar_tables(l2_tbl_files);
-    l2_tbls.retain(|t| t.get_smallest() >= smallest && t.get_biggest() <= biggest);
+    l2_tbls.sort_by(|a, b| a.get_smallest().cmp(&b.get_smallest()));
     for tbl in &l2_tbls {
+        smallest = smallest.min(tbl.get_smallest());
+        biggest = biggest.max(tbl.get_biggest());
         let mut tbl_delete = pb::TableDelete::default();
         tbl_delete.set_id(tbl.get_file().id());
         tbl_delete.set_level(2);
@@ -3565,15 +3549,8 @@ fn compact_columnar_l1_files(
             );
             readers.push(Box::new(reader));
         }
-        for columnar_file in &l2_tbls {
-            let reader = ColumnarTableReader::new(
-                columnar_file,
-                table_id,
-                schema.columns.clone(),
-                schema.txn_id_column.is_some(),
-            );
-            readers.push(Box::new(reader));
-        }
+        let concat_reader = ColumnarConcatReader::new(&l2_tbls, schema.clone());
+        readers.push(Box::new(concat_reader));
         let mut merge_reader = ColumnarMergeReader::new(schema.clone(), readers);
         compact_table_for_columnar(
             ctx,

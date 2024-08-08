@@ -28,8 +28,8 @@ use crate::{
     table::{
         blobtable::blobtable::BlobPrefetcher,
         columnar::{
-            ColumnarMergeReader, ColumnarMvccReader, ColumnarReader, ColumnarRowTableReader,
-            ColumnarTableReader, Schema, HANDLE_COL_ID,
+            ColumnarConcatReader, ColumnarMergeReader, ColumnarMvccReader, ColumnarReader,
+            ColumnarRowTableReader, ColumnarTableReader, Schema, HANDLE_COL_ID,
         },
         memtable::{CfTable, Hint, SkipList, WriteBatch},
         sstable::BlockCacheKey,
@@ -1257,14 +1257,20 @@ impl SnapAccessCore {
             }
         }
         for columnar_level in &self.data.col_levels.levels {
-            for col_file in &columnar_level.files {
-                let col_reader = ColumnarTableReader::new(
-                    col_file,
-                    schema.table_id,
-                    schema.columns.clone(),
-                    false,
-                );
-                readers.push(Box::new(col_reader));
+            if columnar_level.level == 2 {
+                let concat_reader =
+                    ColumnarConcatReader::new(&columnar_level.files, schema.clone());
+                readers.push(Box::new(concat_reader));
+            } else {
+                for col_file in &columnar_level.files {
+                    let col_reader = ColumnarTableReader::new(
+                        col_file,
+                        schema.table_id,
+                        schema.columns.clone(),
+                        false,
+                    );
+                    readers.push(Box::new(col_reader));
+                }
             }
         }
         let merged_reader = ColumnarMergeReader::new(schema.clone(), readers);

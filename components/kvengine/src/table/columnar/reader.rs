@@ -7,7 +7,10 @@ use std::{
     sync::Arc,
 };
 
-use api_version::api_v2::{KEYSPACE_ID_LEN, TXN_KEY_PREFIX};
+use api_version::{
+    api_v2::{KEYSPACE_ID_LEN, TXN_KEY_PREFIX},
+    ApiV2,
+};
 use bytes::Buf;
 use tidb_query_datatype::{
     codec::{
@@ -123,7 +126,9 @@ impl ColumnarReader for ColumnarTableReader {
         let pack_idx = self.table_meta.handle_index.search_pack_idx(handle);
         self.handle_reader.load_pack(pack_idx)?;
         let handle_buffer = &self.handle_reader.pack_buffer;
-        let row_idx_in_pack = if self.handle_reader.col_meta.fixed_size > 0 {
+        let row_idx_in_pack = if handle.is_empty() {
+            0
+        } else if self.handle_reader.col_meta.fixed_size > 0 {
             let int_handle = (&handle[..]).get_i64_le();
             search(handle_buffer.length(), |i| {
                 handle_buffer.get_int_handle_value(i) >= int_handle
@@ -979,10 +984,100 @@ impl ColumnarReader for ColumnarRowTableReader {
     }
 }
 
+pub struct ColumnarConcatReader {
+    schema: Schema,
+    files: Vec<ColumnarFile>,
+    reader: Option<ColumnarTableReader>,
+    idx: usize,
+}
+
+impl ColumnarConcatReader {
+    pub fn new(files: &[ColumnarFile], schema: Schema) -> ColumnarConcatReader {
+        let mut reader_files = vec![];
+        for file in files {
+            if file.has_table(schema.table_id) {
+                reader_files.push(file.clone());
+            }
+        }
+        ColumnarConcatReader {
+            schema,
+            files: reader_files,
+            reader: None,
+            idx: 0,
+        }
+    }
+}
+
+impl ColumnarReader for ColumnarConcatReader {
+    fn schema(&self) -> &Schema {
+        &self.schema
+    }
+
+    fn seek(&mut self, handle: &[u8]) -> table::Result<()> {
+        if self.files.is_empty() {
+            return Ok(());
+        }
+        let mut row_key = if get_fixed_size(&self.schema.handle_column) > 0 {
+            encode_row_key(self.schema.table_id, (&handle[..]).get_i64_le())
+        } else {
+            encode_common_handle_for_test(self.schema.table_id, handle)
+        };
+        if let Some(prefix) = ApiV2::get_keyspace_prefix(self.files[0].get_smallest().deref()) {
+            let mut buf = Vec::with_capacity(prefix.len() + row_key.len());
+            buf.extend_from_slice(prefix);
+            buf.extend_from_slice(&row_key);
+            row_key = buf;
+        }
+        for (i, file) in self.files.iter().enumerate() {
+            if file.get_biggest().deref() < row_key.as_slice() {
+                continue;
+            }
+            let mut reader = ColumnarTableReader::new(
+                file,
+                self.schema.table_id,
+                self.schema.columns.clone(),
+                self.schema.txn_id_column.is_some(),
+            );
+            reader.seek(handle)?;
+            self.reader = Some(reader);
+            self.idx = i;
+            return Ok(());
+        }
+        self.idx = self.files.len();
+        Ok(())
+    }
+
+    fn read(&mut self, block: &mut Block, limit: usize) -> table::Result<usize> {
+        let mut read_rows = 0;
+        while self.idx < self.files.len() && read_rows < limit {
+            let reader = self.reader.as_mut().unwrap();
+            let cnt = reader.read(block, limit - read_rows)?;
+            if cnt == 0 {
+                self.idx += 1;
+                if self.idx < self.files.len() {
+                    let file = &self.files[self.idx];
+                    let mut reader = ColumnarTableReader::new(
+                        file,
+                        self.schema.table_id,
+                        self.schema.columns.clone(),
+                        self.schema.txn_id_column.is_some(),
+                    );
+                    reader.seek(&[])?;
+                    self.reader = Some(reader);
+                }
+                continue;
+            }
+            read_rows += cnt;
+        }
+        Ok(read_rows)
+    }
+}
+
 #[cfg(test)]
 pub mod tests {
     use std::sync::Arc;
 
+    use proptest::{arbitrary::any, proptest};
     use rand::Rng;
     use test_util::init_log_for_test;
     use tidb_query_datatype::{
@@ -1138,7 +1233,7 @@ pub mod tests {
             block_off = table_builder.append_block(&block, block_off);
             append_rows += block.length() - block_off;
         }
-        let mut file_builder = ColumnarFileBuilder::new(file_id, None);
+        let mut file_builder = ColumnarFileBuilder::new(file_id, Some(version));
         file_builder.add_table(table_builder);
         let file_data = file_builder.build();
         (
@@ -1300,6 +1395,55 @@ pub mod tests {
                     )
                 };
                 let merged_refs = merge_refs(ref_rows.clone(), Some(read_ts), Some(range_bound));
+                verify_with_ref_rows(&block, &merged_refs);
+            }
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn test_concat_reader(
+            common_handle in any::<bool>(),
+        ) {
+            init_log_for_test();
+            let schema = new_schema(1, common_handle);
+            let (file_1, ref_1) = build_table(1, &schema, 100, 150, 100);
+            let (file_2, ref_2) = build_table(2, &schema, 160, 190, 100);
+            let (file_3, ref_3) = build_table(3, &schema, 191, 240, 100);
+            let files = vec![file_1, file_2, file_3];
+            let ref_rows = vec![ref_1, ref_2, ref_3];
+            let col_files: Vec<ColumnarFile> = files.iter().map(|f| ColumnarFile::open(f.clone()).unwrap()).collect();
+            for _ in 0..50 {
+                let mut rng = rand::thread_rng();
+                let start_handle = rng.gen_range(90i64..170i64);
+                let end_handle = start_handle + rng.gen_range(1i64..200i64);
+                let mut block = Block::new(&schema);
+                let concat_reader = ColumnarConcatReader::new(&col_files, schema.clone());
+                let mut mvcc_reader = ColumnarMvccReader::new(Box::new(concat_reader), &schema, 100);
+                if common_handle {
+                    let common_start_handle = i_to_common_handle(start_handle as i32);
+                    let common_end_handle = i_to_common_handle(end_handle as i32);
+                    mvcc_reader
+                        .set_handle_range(&common_start_handle, &common_end_handle)
+                        .unwrap();
+                } else {
+                    mvcc_reader
+                        .set_int_handle_range(start_handle, Some(end_handle))
+                        .unwrap();
+                }
+                mvcc_reader.read_block(&mut block, 500).unwrap();
+                let range_bound = if common_handle {
+                    (
+                        i_to_common_handle(start_handle as i32),
+                        i_to_common_handle(end_handle as i32),
+                    )
+                } else {
+                    (
+                        start_handle.to_le_bytes().to_vec(),
+                        end_handle.to_le_bytes().to_vec(),
+                    )
+                };
+                let merged_refs = merge_refs(ref_rows.clone(), Some(100), Some(range_bound));
                 verify_with_ref_rows(&block, &merged_refs);
             }
         }

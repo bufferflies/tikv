@@ -107,7 +107,9 @@ impl HandleIndex {
     }
 
     pub(crate) fn search_pack_idx(&self, mut handle: &[u8]) -> usize {
-        let idx = if self.buf.fixed_size > 0 {
+        let idx = if handle.is_empty() {
+            0
+        } else if self.buf.fixed_size > 0 {
             let int_handle = handle.get_i64_le();
             search(self.buf.length(), |i| {
                 self.buf.get_int_handle_value(i) > int_handle
@@ -421,6 +423,10 @@ impl ColumnarFile {
 
     pub(crate) fn get_table(&self, table_id: i64) -> Arc<TableMeta> {
         self.core.tables.get(&table_id).unwrap().clone()
+    }
+
+    pub(crate) fn has_table(&self, table_id: i64) -> bool {
+        self.core.tables.contains_key(&table_id)
     }
 
     pub fn get_file(&self) -> Arc<dyn File> {
