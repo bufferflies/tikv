@@ -2,7 +2,7 @@
 
 use std::{
     collections::HashMap,
-    env,
+    env, fmt,
     fmt::{Debug, Display, Formatter},
     iter::{FromIterator, Iterator},
     ops::Deref,
@@ -512,13 +512,17 @@ impl EngineCore {
         }
         let data = shard.get_data();
         let mut mem_tbls = data.mem_tbls.clone();
+        let mut tasks = Vec::with_capacity(mem_tbls.len() - 1);
         while let Some(mem_tbl) = mem_tbls.pop() {
             // writable mem-table's version is 0.
             if mem_tbl.get_version() != 0 {
-                self.send_flush_msg(FlushMsg::Task(Box::new(FlushTask::new_normal(
-                    shard, mem_tbl,
-                ))));
+                tasks.push(FlushTask::new_normal(shard, mem_tbl));
             }
+        }
+        if !tasks.is_empty() {
+            // Send all flush tasks in one message to avoid interleaving with clear.
+            // See https://github.com/tidbcloud/cloud-storage-engine/issues/1764.
+            self.send_flush_msg(FlushMsg::Tasks(tasks));
         }
         Ok(())
     }
@@ -560,7 +564,7 @@ impl EngineCore {
                 }
             }
         }
-        self.send_flush_msg(FlushMsg::Task(Box::new(FlushTask::new_initial(
+        self.send_flush_msg(FlushMsg::Tasks(vec![FlushTask::new_initial(
             shard,
             InitialFlush {
                 mem_tbls,
@@ -570,7 +574,7 @@ impl EngineCore {
                 max_ts,
                 properties,
             },
-        ))));
+        )]));
         Ok(())
     }
 
@@ -875,6 +879,12 @@ impl Display for ShardTag {
 pub struct IdVer {
     pub id: u64,
     pub ver: u64,
+}
+
+impl fmt::Display for IdVer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}", self.id, self.ver)
+    }
 }
 
 impl IdVer {

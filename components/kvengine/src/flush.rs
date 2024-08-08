@@ -448,8 +448,9 @@ impl Engine {
 }
 
 pub(crate) enum FlushMsg {
-    /// Task is send when trigger_flush is called.
-    Task(Box<FlushTask>),
+    /// Tasks is send when trigger_flush is called.
+    /// Flush tasks must be in ascending order by version of mem tables.
+    Tasks(Vec<FlushTask>),
 
     /// Result is sent from the background flush thread when a flush task is
     /// finished.
@@ -480,11 +481,13 @@ impl FlushWorker {
     fn run(&mut self) {
         while let Ok(msg) = self.receiver.recv() {
             match msg {
-                FlushMsg::Task(task) => {
-                    let task_manager = self.get_shard_task_manager(task.id_ver.id);
-                    if task_manager.enqueue_task(&task) {
-                        let term = task_manager.term;
-                        self.spawn_flush_task(*task, term);
+                FlushMsg::Tasks(tasks) => {
+                    for task in tasks {
+                        let task_manager = self.get_shard_task_manager(task.id_ver.id);
+                        if task_manager.enqueue_task(&task) {
+                            let term = task_manager.term;
+                            self.spawn_flush_task(task, term);
+                        }
                     }
                 }
                 FlushMsg::Result(res) => {
@@ -581,6 +584,12 @@ impl ShardTaskManager {
 
     fn enqueue_task(&mut self, task: &FlushTask) -> bool {
         if task.table_version() <= self.last_enqueued_table_version() {
+            debug!("{} flush task dropped", task.id_ver;
+                "task.table_version" => task.table_version(),
+                "last_task" => self.task_queue.back().map(|t| t.table_version()),
+                "notified" => self.notified.as_ref().map(|cs| change_set_table_version(cs)),
+                "committed" => self.committed_table_version,
+            );
             return false;
         }
         self.task_queue.push_back(task.clone());
