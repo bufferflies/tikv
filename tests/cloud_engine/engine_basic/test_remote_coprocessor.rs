@@ -277,7 +277,8 @@ fn test_select_all_scan(#[case] use_txn_file: bool) {
         DagSelect::from(&product)
             .output_offsets(Some(vec![0, 1, 2]))
             .key_ranges(vec![dag_test.get_key_range_all()])
-            .build_with_start_ts(dag_test.client.get_ts())
+            .start_ts(dag_test.get_ts())
+            .build()
     };
 
     let quota_limiter = Arc::new(QuotaLimiter::default());
@@ -334,7 +335,9 @@ fn test_batch_row_limit() {
     // let mut cfg = Config::default();
     // cfg.end_point_batch_row_limit = batch_row_limit;
 
-    let req = DagSelect::from(&product).build();
+    let req = DagSelect::from(&product)
+        .start_ts(dag_test.get_ts())
+        .build();
 
     let mut resp = dag_test.select_all(req, None);
 
@@ -374,6 +377,7 @@ fn test_group_by() {
     let req = DagSelect::from(&product)
         .group_by(&[&product["name"]])
         .output_offsets(Some(vec![0]))
+        .start_ts(dag_test.get_ts())
         .build();
 
     let mut resp = dag_test.select_all(req, None);
@@ -424,6 +428,7 @@ fn test_aggr_count() {
         .count(&product["count"])
         .group_by(&[&product["name"]])
         .output_offsets(Some(vec![0, 1]))
+        .start_ts(dag_test.get_ts())
         .build();
 
     let mut resp = dag_test.select_all(req, None);
@@ -455,6 +460,7 @@ fn test_aggr_count() {
     let req = DagSelect::from(&product)
         .count(&product["id"])
         .group_by(&[&product["name"], &product["count"]])
+        .start_ts(dag_test.get_ts())
         .build();
 
     let mut resp = dag_test.select_all(req, None);
@@ -510,6 +516,7 @@ fn test_aggr_first() {
         .first(&product["id"])
         .group_by(&[&product["name"]])
         .output_offsets(Some(vec![0, 1]))
+        .start_ts(dag_test.get_ts())
         .build();
 
     let mut resp = dag_test.select_all(req, None);
@@ -543,6 +550,7 @@ fn test_aggr_first() {
         .first(&product["name"])
         .group_by(&[&product["count"]])
         .output_offsets(Some(vec![0, 1]))
+        .start_ts(dag_test.get_ts())
         .build();
 
     let mut resp = dag_test.select_all(req, None);
@@ -608,6 +616,7 @@ fn test_aggr_avg() {
     let req = DagSelect::from(&product)
         .avg(&product["count"])
         .group_by(&[&product["name"]])
+        .start_ts(dag_test.get_ts())
         .build();
 
     let mut resp = dag_test.select_all(req, None);
@@ -657,6 +666,7 @@ fn test_aggr_sum() {
         .sum(&product["count"])
         .group_by(&[&product["name"]])
         .output_offsets(Some(vec![0, 1]))
+        .start_ts(dag_test.get_ts())
         .build();
     let mut resp = dag_test.select_all(req, None);
     let mut row_count = 0;
@@ -740,6 +750,7 @@ fn test_aggr_extra() {
         .max(&product["count"])
         .min(&product["count"])
         .group_by(&[&product["name"]])
+        .start_ts(dag_test.get_ts())
         .build();
 
     let mut resp = dag_test.select_all(req, None);
@@ -835,6 +846,7 @@ fn test_aggr_bit_ops() {
         .bit_xor(&product["count"])
         .group_by(&[&product["name"]])
         .output_offsets(Some(vec![0, 1, 2, 3]))
+        .start_ts(dag_test.get_ts())
         .build();
     let mut resp = dag_test.select_all(req, None);
     let mut row_count = 0;
@@ -885,6 +897,7 @@ fn test_order_by_column() {
         .order_by(&product["count"], true)
         .order_by(&product["name"], false)
         .limit(5)
+        .start_ts(dag_test.get_ts())
         .build();
     let mut resp = dag_test.select_all(req, None);
     let mut row_count = 0;
@@ -923,7 +936,10 @@ fn test_limit() {
 
     let expect: Vec<_> = rows.drain(..5).collect();
     // for dag
-    let req = DagSelect::from(&product).limit(5).build();
+    let req = DagSelect::from(&product)
+        .limit(5)
+        .start_ts(dag_test.get_ts())
+        .build();
     let mut resp = dag_test.select_all(req, None);
     let mut row_count = 0;
     let spliter = DagChunkSpliter::new(resp.take_chunks().into(), 3);
@@ -966,6 +982,7 @@ fn test_reverse() {
     let req = DagSelect::from(&product)
         .limit(5)
         .order_by(&product["id"], true)
+        .start_ts(dag_test.get_ts())
         .build();
     let mut resp = dag_test.select_all(req, None);
     let mut row_count = 0;
@@ -1004,6 +1021,7 @@ fn test_limit_oom() {
     // for dag
     let req = DagSelect::from_index(&product, &product["id"])
         .limit(100000000)
+        .start_ts(dag_test.get_ts())
         .build();
     let mut resp = dag_test.select_all(req, Some(product["id"].index));
     let mut row_count = 0;
@@ -1043,6 +1061,7 @@ fn test_order_by_pk_with_select_from_index() {
     let req = DagSelect::from_index(&product, &product["name"])
         .order_by(&product["id"], true)
         .limit(5)
+        .start_ts(dag_test.get_ts())
         .build();
     let mut resp = dag_test.select_all(req, Some(product["name"].index));
     let mut row_count = 0;
@@ -1079,7 +1098,9 @@ fn test_index() {
     dag_test.insert_and_commit(&rows);
 
     // for dag
-    let req = DagSelect::from_index(&product, &product["id"]).build();
+    let req = DagSelect::from_index(&product, &product["id"])
+        .start_ts(dag_test.get_ts())
+        .build();
     let mut resp = dag_test.select_all(req, Some(product["id"].index));
     let mut row_count = 0;
     let spliter = DagChunkSpliter::new(resp.take_chunks().into(), 1);
@@ -1117,6 +1138,7 @@ fn test_index_reverse_limit() {
     let req = DagSelect::from_index(&product, &product["id"])
         .limit(5)
         .order_by(&product["id"], true)
+        .start_ts(dag_test.get_ts())
         .build();
 
     let mut resp = dag_test.select_all(req, Some(product["id"].index));
@@ -1151,6 +1173,7 @@ fn test_index_group_by() {
     let req = DagSelect::from_index(&product, &product["name"])
         .group_by(&[&product["name"]])
         .output_offsets(Some(vec![0]))
+        .start_ts(dag_test.get_ts())
         .build();
 
     let mut resp = dag_test.select_all(req, Some(product["name"].index));
@@ -1193,6 +1216,7 @@ fn test_index_aggr_count() {
     let req = DagSelect::from_index(&product, &product["name"])
         .count(&product["id"])
         .output_offsets(Some(vec![0]))
+        .start_ts(dag_test.get_ts())
         .build();
     let mut resp = dag_test.select_all(req, Some(product["name"].index));
     let mut spliter = DagChunkSpliter::new(resp.take_chunks().into(), 1);
@@ -1219,6 +1243,7 @@ fn test_index_aggr_count() {
         .count(&product["id"])
         .group_by(&[&product["name"]])
         .output_offsets(Some(vec![0, 1]))
+        .start_ts(dag_test.get_ts())
         .build();
     resp = dag_test.select_all(req, Some(product["name"].index));
     let mut row_count = 0;
@@ -1246,6 +1271,7 @@ fn test_index_aggr_count() {
     let req = DagSelect::from_index(&product, &product["name"])
         .count(&product["id"])
         .group_by(&[&product["name"], &product["count"]])
+        .start_ts(dag_test.get_ts())
         .build();
     resp = dag_test.select_all(req, Some(product["name"].index));
     let mut row_count = 0;
@@ -1294,6 +1320,7 @@ fn test_index_aggr_first() {
         .first(&product["id"])
         .group_by(&[&product["name"]])
         .output_offsets(Some(vec![0, 1]))
+        .start_ts(dag_test.get_ts())
         .build();
     let mut resp = dag_test.select_all(req, Some(product["name"].index));
     let mut row_count = 0;
@@ -1366,6 +1393,7 @@ fn test_index_aggr_avg() {
     let req = DagSelect::from_index(&product, &product["name"])
         .avg(&product["count"])
         .group_by(&[&product["name"]])
+        .start_ts(dag_test.get_ts())
         .build();
     let mut resp = dag_test.select_all(req, Some(product["name"].index));
     let mut row_count = 0;
@@ -1413,6 +1441,7 @@ fn test_index_aggr_sum() {
         .sum(&product["count"])
         .group_by(&[&product["name"]])
         .output_offsets(Some(vec![0, 1]))
+        .start_ts(dag_test.get_ts())
         .build();
     let mut resp = dag_test.select_all(req, Some(product["name"].index));
     let mut row_count = 0;
@@ -1491,6 +1520,7 @@ fn test_index_aggr_extre() {
         .max(&product["count"])
         .min(&product["count"])
         .group_by(&[&product["name"]])
+        .start_ts(dag_test.get_ts())
         .build();
     let mut resp = handle_select(&mut dag_test, req, Some(product["name"].index));
     let mut row_count = 0;
@@ -1560,7 +1590,10 @@ fn test_where() {
         cond
     };
 
-    let req = DagSelect::from(&product).where_expr(cond).build();
+    let req = DagSelect::from(&product)
+        .where_expr(cond)
+        .start_ts(endpoint.get_ts())
+        .build();
     let mut resp = handle_select(&mut endpoint, req, None);
     let mut spliter = DagChunkSpliter::new(resp.take_chunks().into(), 3);
     let row = spliter.next().unwrap();
@@ -1691,10 +1724,12 @@ fn test_handle_truncate() {
         },
     ];
 
+    let start_ts = endpoint.get_ts();
     for cond in cases {
         // Ignore truncate error.
         let req = DagSelect::from(&product)
             .where_expr(cond.clone())
+            .start_ts(start_ts)
             .build_with(Context::default(), &[FLAG_IGNORE_TRUNCATE]);
         let resp = handle_select(&mut endpoint, req, None);
         assert!(!resp.has_error());
@@ -1703,6 +1738,7 @@ fn test_handle_truncate() {
         // truncate as warning
         let req = DagSelect::from(&product)
             .where_expr(cond.clone())
+            .start_ts(start_ts)
             .build_with(Context::default(), &[FLAG_TRUNCATE_AS_WARNING]);
         let mut resp = handle_select(&mut endpoint, req, None);
         assert!(!resp.has_error());
@@ -1722,7 +1758,10 @@ fn test_handle_truncate() {
         assert_eq!(spliter.next().is_none(), true);
 
         // Do NOT ignore truncate error.
-        let req = DagSelect::from(&product).where_expr(cond.clone()).build();
+        let req = DagSelect::from(&product)
+            .where_expr(cond.clone())
+            .start_ts(start_ts)
+            .build();
         let resp = handle_select(&mut endpoint, req, None);
         assert!(resp.has_error());
         assert!(resp.get_warnings().is_empty());
@@ -1755,7 +1794,10 @@ fn test_default_val() {
 
     let mut endpoint = init_with_data(&product, &rows);
     let expect: Vec<_> = rows.drain(..5).collect();
-    let req = DagSelect::from(&tbl).limit(5).build();
+    let req = DagSelect::from(&tbl)
+        .limit(5)
+        .start_ts(endpoint.get_ts())
+        .build();
     let mut resp = handle_select(&mut endpoint, req, None);
     let mut row_count = 0;
     let spliter = DagChunkSpliter::new(resp.take_chunks().into(), 4);
@@ -1787,6 +1829,7 @@ fn test_output_offsets() {
 
     let req = DagSelect::from(&product)
         .output_offsets(Some(vec![1]))
+        .start_ts(endpoint.get_ts())
         .build();
     let mut resp = handle_select(&mut endpoint, req, None);
     let spliter = DagChunkSpliter::new(resp.take_chunks().into(), 1);
@@ -1811,7 +1854,9 @@ fn test_output_counts() {
     let product = ProductTable::new();
     let mut endpoint = init_with_data(&product, &rows);
 
-    let req = DagSelect::from(&product).build();
+    let req = DagSelect::from(&product)
+        .start_ts(endpoint.get_ts())
+        .build();
     let resp = handle_select(&mut endpoint, req, None);
     assert_eq!(resp.get_output_counts(), &[rows.len() as i64]);
 }

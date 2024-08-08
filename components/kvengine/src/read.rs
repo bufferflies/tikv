@@ -242,7 +242,13 @@ impl SnapAccess {
         })?;
         for row in rows {
             let key = InnerKey::from_outer_key(&row.key, inner_key_off);
-            wb.put(key, 0, &row.user_meta.to_array(), 0, &row.value);
+            wb.put(
+                key,
+                0,
+                &row.user_meta.to_array(),
+                row.user_meta.commit_ts,
+                &row.value,
+            );
         }
         mem_tbl.get_cf(WRITE_CF).put_batch(&mut wb, None, WRITE_CF);
         Ok(())
@@ -1817,7 +1823,7 @@ mod tests {
                 MemTableOp::WriteBatch(is, switch) => {
                     for i in is {
                         let key = kb.i_to_inner_key(i);
-                        let val = kb.i_to_val(i);
+                        let val = kb.i_to_val(start_ts as usize + i);
                         wb.put(
                             key.as_ref(),
                             0,
@@ -1850,7 +1856,7 @@ mod tests {
                         );
                         for &i in chunk {
                             let key = kb.i_to_inner_key(i);
-                            let val = kb.i_to_val(i);
+                            let val = kb.i_to_val(start_ts as usize + i);
                             builder.add_entry(NoPrefixKey(&kb.i_to_key(i)), OP_PUT, val.as_bytes());
                             ref_store.put(key, val);
                         }

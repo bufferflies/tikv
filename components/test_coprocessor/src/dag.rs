@@ -27,6 +27,7 @@ pub struct DagSelect {
     pub key_ranges: Vec<KeyRange>,
     pub output_offsets: Option<Vec<u32>>,
     pub paging_size: Option<u64>,
+    pub start_ts: Option<u64>,
 }
 
 impl DagSelect {
@@ -50,6 +51,7 @@ impl DagSelect {
             key_ranges: vec![table.get_record_range_all()],
             output_offsets: None,
             paging_size: None,
+            start_ts: None,
         }
     }
 
@@ -77,6 +79,7 @@ impl DagSelect {
             key_ranges: vec![range],
             output_offsets: None,
             paging_size: None,
+            start_ts: None,
         }
     }
 
@@ -215,16 +218,24 @@ impl DagSelect {
         self
     }
 
-    pub fn build(self) -> Request {
-        self.build_impl(Context::default(), &[0], next_id().try_into().unwrap())
+    #[must_use]
+    pub fn start_ts(mut self, start_ts: txn_types::TimeStamp) -> DagSelect {
+        self.start_ts = Some(start_ts.into_inner());
+        self
     }
 
-    pub fn build_with_start_ts(self, start_ts: txn_types::TimeStamp) -> Request {
-        self.build_impl(Context::default(), &[0], start_ts.into_inner())
+    pub fn build(self) -> Request {
+        let start_ts = self
+            .start_ts
+            .unwrap_or_else(|| next_id().try_into().unwrap());
+        self.build_impl(Context::default(), &[0], start_ts)
     }
 
     pub fn build_with(self, ctx: Context, flags: &[u64]) -> Request {
-        self.build_impl(ctx, flags, next_id().try_into().unwrap())
+        let start_ts = self
+            .start_ts
+            .unwrap_or_else(|| next_id().try_into().unwrap());
+        self.build_impl(ctx, flags, start_ts)
     }
 
     fn build_impl(mut self, ctx: Context, flags: &[u64], start_ts: u64) -> Request {
