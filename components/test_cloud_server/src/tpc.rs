@@ -4,7 +4,7 @@ use std::{collections::HashMap, path::PathBuf, process, time::Duration};
 
 use lazy_static::lazy_static;
 use regex::Regex;
-use tikv_util::{box_err, info};
+use tikv_util::{box_err, info, warn};
 use tokio::process::Command;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -139,24 +139,45 @@ impl Tpc {
     }
 
     async fn execute(&self, cmd_name: &str, mut cmd: Command) -> Result<process::Output> {
-        info!("{} tpc {}", self.tag, cmd_name; "cmd" => ?cmd);
+        // Log for both start & finished to help looking for relevant txn requests.
+        info!("{} tpc {} start", self.tag, cmd_name; "cmd" => ?cmd);
         let output = cmd.output().await.unwrap();
+        info!("{} tpc {} finished", self.tag, cmd_name; "output" => ?output);
 
         // Filter the warning "maxprocs: Leaving GOMAXPROCS=xx: CPU quota undefined".
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let mut stderr = stderr
+        let stderr = stderr
             .split('\n')
-            .filter(|x| !x.is_empty() && !x.contains("maxprocs"));
+            .filter(|x| !x.is_empty() && !x.contains("maxprocs"))
+            .collect::<Vec<_>>();
 
-        if output.status.success() && stderr.next().is_none() {
-            info!("{} tpc {} success", self.tag, cmd_name; "output" => ?output);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // "[DATA ERROR]" exists in https://github.com/pingyu/go-tpc/tree/small-size only.
+        let data_errs = stdout
+            .split('\n')
+            .filter(|x| x.contains("[DATA ERROR]"))
+            .collect::<Vec<_>>();
+
+        let stdout_failed = stdout
+            .split('\n')
+            .filter(|x| x.contains("fail"))
+            .collect::<Vec<_>>();
+        if !stdout_failed.is_empty() {
+            warn!(
+                "{} tpc {} meet error: {:?}",
+                self.tag, cmd_name, stdout_failed
+            );
+        }
+
+        if output.status.success() && data_errs.is_empty() && stderr.is_empty() {
             Ok(output)
         } else {
             Err(box_err!(
-                "{} tpc {} failed: {:?}",
+                "{} tpc {} data_errs: {:?}, stderr {:?}",
                 self.tag,
                 cmd_name,
-                output
+                data_errs,
+                stderr
             ))
         }
     }
