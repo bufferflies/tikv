@@ -6,7 +6,10 @@ use std::{
     io::Write,
     iter::Iterator,
     path::PathBuf,
-    sync::{atomic::Ordering::Relaxed, Arc},
+    sync::{
+        atomic::{AtomicU64, Ordering::Relaxed},
+        Arc,
+    },
 };
 
 use bytes::{Buf, Bytes};
@@ -415,15 +418,11 @@ impl EngineCore {
             file.sync_data()
                 .table_ctx(id, "write_local_file.sync_tmp")?;
         }
-        std::fs::rename(&tmp_file_name, &local_file_name).table_ctx(
-            id,
-            format!("write_local_file.rename {tmp_file_name:?} -> {local_file_name:?}"),
-        )?;
+        std::fs::rename(tmp_file_name, local_file_name).table_ctx(id, "write_local_file.rename")?;
         info!(
             "write local file {} takes {:?}",
             id,
-            start.saturating_elapsed();
-            "tmp_file_name" => ?tmp_file_name,
+            start.saturating_elapsed()
         );
         Ok(())
     }
@@ -507,9 +506,10 @@ impl EngineCore {
     }
 
     fn tmp_file_path(&self, file_id: u64) -> PathBuf {
-        let tmp_id = self
-            .tmp_file_id
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        lazy_static::lazy_static! {
+            static ref TMP_FILE_ID: AtomicU64 = AtomicU64::default();
+        }
+        let tmp_id = TMP_FILE_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.opts.local_dir.join(new_tmp_filename(file_id, tmp_id))
     }
 }
