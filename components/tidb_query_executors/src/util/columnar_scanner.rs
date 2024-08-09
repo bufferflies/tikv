@@ -7,7 +7,7 @@ use std::{
 
 use api_version::{api_v2::KEYSPACE_PREFIX_LEN, KeyMode, KvFormat};
 use bytes::buf::Buf;
-use kvengine::table::columnar::{Block, ColumnarMvccReader, HANDLE_COL_ID};
+use kvengine::table::columnar::{Block, ColumnarFilterReader, ColumnarMvccReader, HANDLE_COL_ID};
 use kvproto::coprocessor::KeyRange;
 use tidb_query_common::Result;
 use tidb_query_datatype::{

@@ -14,7 +14,7 @@ use kvengine::{
         columnar,
         columnar::{
             build_schema_file, new_int_handle_column_info, new_txn_id_column_info,
-            new_version_column_info, Schema,
+            new_version_column_info, ColumnarFilterReader, Schema,
         },
     },
 };

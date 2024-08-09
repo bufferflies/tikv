@@ -42,7 +42,7 @@ use crate::{
         columnar::{
             build_schema_file,
             tests::{build_table, new_schema, verify_with_ref_rows},
-            SchemaFile,
+            ColumnarFilterReader, SchemaFile,
         },
         memtable::CfTable,
         sstable::{File, InMemFile, L0Builder, L0Table, SsTable},
@@ -1276,10 +1276,20 @@ fn test_columnar_l0_compaction(#[case] enable_inner_key_off: bool) {
         .unwrap();
     let schema_file = SchemaFile::open(schema_raw_file).unwrap();
     let opts = dfs::Options::default().with_type(FileType::Columnar);
-    let (l0_tbl_0, l0_tbl_0_ref) = build_table(allocate_id(), &schema, 0, 600, 300);
-    let (l0_tbl_1, l0_tbl_1_ref) = build_table(allocate_id(), &schema, 300, 900, 400);
-    let (l0_tbl_2, l0_tbl_2_ref) = build_table(allocate_id(), &schema, 1000, 2000, 400);
-    let (l1_tbl_0, l1_tbl_0_ref) = build_table(allocate_id(), &schema, 0, 100, 100);
+    let (l0_tbl_0, l0_tbl_0_ref) =
+        build_table(allocate_id(), enable_inner_key_off, &schema, 0, 600, 300);
+    let (l0_tbl_1, l0_tbl_1_ref) =
+        build_table(allocate_id(), enable_inner_key_off, &schema, 300, 900, 400);
+    let (l0_tbl_2, l0_tbl_2_ref) = build_table(
+        allocate_id(),
+        enable_inner_key_off,
+        &schema,
+        1000,
+        2000,
+        400,
+    );
+    let (l1_tbl_0, l1_tbl_0_ref) =
+        build_table(allocate_id(), enable_inner_key_off, &schema, 0, 100, 100);
     for file in [&l0_tbl_0, &l0_tbl_1, &l0_tbl_2, &l1_tbl_0] {
         info!("build file_id: {}, file size: {}", file.id(), file.size());
         fs.get_runtime()
@@ -1343,7 +1353,9 @@ fn test_columnar_l0_compaction(#[case] enable_inner_key_off: bool) {
     mvcc_reader.read_block(&mut block, usize::MAX).unwrap();
     let tbl_refs = merge_refs(
         vec![l0_tbl_0_ref, l0_tbl_1_ref, l0_tbl_2_ref, l1_tbl_0_ref],
+        1,
         Some(500),
+        None,
         Some((i_to_common_handle(0), i_to_common_handle(2100))),
     );
     assert_eq!(block.length(), tbl_refs.len());
@@ -1384,11 +1396,28 @@ fn test_columnar_l1_compaction(#[case] enable_inner_key_off: bool) {
         .unwrap();
     let schema_file = SchemaFile::open(schema_raw_file).unwrap();
     let opts = dfs::Options::default().with_type(FileType::Columnar);
-    let (l1_tbl_0, l1_tbl_0_ref) = build_table(allocate_id(), &schema, 0, 600, 300);
-    let (l1_tbl_1, l1_tbl_1_ref) = build_table(allocate_id(), &schema, 300, 900, 400);
-    let (l1_tbl_2, l1_tbl_2_ref) = build_table(allocate_id(), &schema, 1000, 1500, 400);
-    let (l2_tbl_0, l2_tbl_0_ref) = build_table(allocate_id(), &schema, 0, 1000, 100);
-    let (l2_tbl_1, l2_tbl_1_ref) = build_table(allocate_id(), &schema, 1000, 2000, 100);
+    let (l1_tbl_0, l1_tbl_0_ref) =
+        build_table(allocate_id(), enable_inner_key_off, &schema, 0, 600, 300);
+    let (l1_tbl_1, l1_tbl_1_ref) =
+        build_table(allocate_id(), enable_inner_key_off, &schema, 300, 900, 400);
+    let (l1_tbl_2, l1_tbl_2_ref) = build_table(
+        allocate_id(),
+        enable_inner_key_off,
+        &schema,
+        1000,
+        1500,
+        400,
+    );
+    let (l2_tbl_0, l2_tbl_0_ref) =
+        build_table(allocate_id(), enable_inner_key_off, &schema, 0, 1000, 100);
+    let (l2_tbl_1, l2_tbl_1_ref) = build_table(
+        allocate_id(),
+        enable_inner_key_off,
+        &schema,
+        1000,
+        2000,
+        100,
+    );
     for file in [&l1_tbl_0, &l1_tbl_1, &l1_tbl_2, &l2_tbl_0, &l2_tbl_1] {
         info!("build file_id: {}, file size: {}", file.id(), file.size());
         fs.get_runtime()
@@ -1459,7 +1488,9 @@ fn test_columnar_l1_compaction(#[case] enable_inner_key_off: bool) {
             l2_tbl_0_ref,
             l2_tbl_1_ref,
         ],
+        2,
         Some(500),
+        None,
         Some((i_to_common_handle(0), i_to_common_handle(2100))),
     );
     assert_eq!(block.length(), tbl_refs.len());

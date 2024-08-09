@@ -323,6 +323,21 @@ impl PackLoader {
     }
 }
 
+pub trait ColumnarFilterReader: Send {
+    fn set_handle_range(
+        &mut self,
+        start_handle: &[u8],
+        end_handle: &[u8],
+    ) -> crate::table::Result<()>;
+    fn set_int_handle_range(
+        &mut self,
+        start_handle: i64,
+        end_handle: Option<i64>,
+    ) -> crate::table::Result<()>;
+    fn get_schema(&self) -> &Schema;
+    fn read_block(&mut self, block: &mut Block, limit: usize) -> crate::table::Result<usize>;
+}
+
 pub struct ColumnarMvccReader {
     src: Box<dyn ColumnarReader>,
     read_ts: u64,
@@ -332,9 +347,10 @@ pub struct ColumnarMvccReader {
     filter_block: Block,
     end_handle: Vec<u8>,
     end_int_handle: Option<i64>,
+    prev_int_handle: Option<i64>,
+    prev_common_handle: Vec<u8>,
 }
 
-#[allow(dead_code)]
 impl ColumnarMvccReader {
     pub fn new(src: Box<dyn ColumnarReader>, schema: &Schema, read_ts: u64) -> ColumnarMvccReader {
         ColumnarMvccReader {
@@ -346,12 +362,14 @@ impl ColumnarMvccReader {
             range_start: 0,
             end_handle: vec![],
             end_int_handle: None,
+            prev_int_handle: None,
+            prev_common_handle: vec![],
         }
     }
 }
 
-impl ColumnarMvccReader {
-    pub fn set_handle_range(
+impl ColumnarFilterReader for ColumnarMvccReader {
+    fn set_handle_range(
         &mut self,
         start_handle: &[u8],
         end_handle: &[u8],
@@ -362,7 +380,7 @@ impl ColumnarMvccReader {
         Ok(())
     }
 
-    pub fn set_int_handle_range(
+    fn set_int_handle_range(
         &mut self,
         start_handle: i64,
         end_handle: Option<i64>,
@@ -373,26 +391,30 @@ impl ColumnarMvccReader {
         Ok(())
     }
 
-    pub fn get_schema(&self) -> &Schema {
+    fn get_schema(&self) -> &Schema {
         self.src.schema()
     }
 
-    pub fn read_block(&mut self, block: &mut Block, limit: usize) -> crate::table::Result<usize> {
+    fn read_block(&mut self, block: &mut Block, limit: usize) -> crate::table::Result<usize> {
         self.ranges.clear();
         self.in_range = false;
         block.reset();
         let read_row = self.src.read(block, limit)?;
+        if read_row == 0 {
+            return Ok(0);
+        }
         if block.handles.fixed_size > 0 {
-            let mut prev_handle = 0;
             for i in 0..block.handles.length() {
                 let handle = block.handles.get_int_handle_value(i);
                 let version = block.versions.get_version(i);
-                if version > self.read_ts || (i > 0 && handle == prev_handle) {
+                if version > self.read_ts
+                    || (self.prev_int_handle.is_some() && handle == self.prev_int_handle.unwrap())
+                {
                     self.finish_range(i);
                     continue;
                 }
                 if block.versions.is_null(i) {
-                    prev_handle = handle;
+                    self.prev_int_handle = Some(handle);
                     self.finish_range(i);
                     continue;
                 }
@@ -401,22 +423,21 @@ impl ColumnarMvccReader {
                     break;
                 }
                 self.start_range(i);
-                prev_handle = handle;
+                self.prev_int_handle = Some(handle);
             }
         } else {
-            let mut prev_handle = [].as_slice();
             let length = block.handles.length();
             let last_handle = block.handles.get_not_null_value(length - 1);
             let check_handle = last_handle >= self.end_handle.as_slice();
             for i in 0..block.handles.length() {
                 let handle = block.handles.get_not_null_value(i);
                 let version = block.versions.get_version(i);
-                if version > self.read_ts || handle == prev_handle {
+                if version > self.read_ts || handle == self.prev_common_handle {
                     self.finish_range(i);
                     continue;
                 }
                 if block.versions.is_null(i) {
-                    prev_handle = handle;
+                    self.prev_common_handle = handle.to_vec();
                     self.finish_range(i);
                     continue;
                 }
@@ -425,7 +446,7 @@ impl ColumnarMvccReader {
                     break;
                 }
                 self.start_range(i);
-                prev_handle = handle;
+                self.prev_common_handle = handle.to_vec();
             }
         }
         self.finish_range(read_row);
@@ -460,7 +481,325 @@ impl ColumnarMvccReader {
         mem::swap(block, &mut self.filter_block);
         Ok(filtered_rows)
     }
+}
 
+impl ColumnarMvccReader {
+    fn finish_range(&mut self, i: usize) {
+        if self.in_range {
+            self.ranges.push((self.range_start, i));
+            self.in_range = false;
+        }
+    }
+
+    fn start_range(&mut self, i: usize) {
+        if !self.in_range {
+            self.range_start = i;
+            self.in_range = true;
+        }
+    }
+}
+
+pub struct ColumnarCompactReader {
+    src: Box<dyn ColumnarReader>,
+    level: u32,
+    safe_ts: u64,
+    ranges: Vec<(usize, usize)>,
+    in_range: bool,
+    range_start: usize,
+    filter_block: Block,
+    end_handle: Vec<u8>,
+    end_int_handle: Option<i64>,
+    prev_int_handle: Option<i64>,
+    prev_common_handle: Vec<u8>,
+}
+
+impl ColumnarCompactReader {
+    pub fn new(
+        src: Box<dyn ColumnarReader>,
+        level: u32,
+        schema: &Schema,
+        safe_ts: u64,
+    ) -> ColumnarCompactReader {
+        ColumnarCompactReader {
+            src,
+            level,
+            filter_block: Block::new(schema),
+            safe_ts,
+            ranges: vec![],
+            in_range: false,
+            range_start: 0,
+            end_handle: vec![],
+            end_int_handle: None,
+            prev_int_handle: None,
+            prev_common_handle: vec![],
+        }
+    }
+}
+
+impl ColumnarFilterReader for ColumnarCompactReader {
+    fn set_handle_range(
+        &mut self,
+        start_handle: &[u8],
+        end_handle: &[u8],
+    ) -> crate::table::Result<()> {
+        self.end_handle = end_handle.to_vec();
+        self.src.seek(start_handle)?;
+        self.ranges.clear();
+        Ok(())
+    }
+
+    fn set_int_handle_range(
+        &mut self,
+        start_handle: i64,
+        end_handle: Option<i64>,
+    ) -> crate::table::Result<()> {
+        self.end_int_handle = end_handle;
+        self.src.seek(&start_handle.to_le_bytes())?;
+        self.ranges.clear();
+        Ok(())
+    }
+
+    fn get_schema(&self) -> &Schema {
+        self.src.schema()
+    }
+
+    fn read_block(&mut self, block: &mut Block, limit: usize) -> crate::table::Result<usize> {
+        self.ranges.clear();
+        self.in_range = false;
+        block.reset();
+        let read_row = self.src.read(block, limit)?;
+        if read_row == 0 {
+            return Ok(0);
+        }
+        if block.handles.fixed_size > 0 {
+            for i in 0..block.handles.length() {
+                let handle = block.handles.get_int_handle_value(i);
+                let version = block.versions.get_version(i);
+                if self.prev_int_handle.is_some()
+                    && handle == self.prev_int_handle.unwrap()
+                    && version < self.safe_ts
+                {
+                    self.finish_range(i);
+                    continue;
+                }
+                if self.level == 2 && version < self.safe_ts && block.versions.is_null(i) {
+                    self.prev_int_handle = Some(handle);
+                    self.finish_range(i);
+                    continue;
+                }
+                if self.end_int_handle.is_some() && handle >= self.end_int_handle.unwrap() {
+                    self.finish_range(i);
+                    break;
+                }
+                self.start_range(i);
+                self.prev_int_handle = Some(handle);
+            }
+        } else {
+            let length = block.handles.length();
+            let last_handle = block.handles.get_not_null_value(length - 1);
+            let check_handle = last_handle >= self.end_handle.as_slice();
+            for i in 0..block.handles.length() {
+                let handle = block.handles.get_not_null_value(i);
+                let version = block.versions.get_version(i);
+                if handle == self.prev_common_handle && version < self.safe_ts {
+                    self.finish_range(i);
+                    continue;
+                }
+                if self.level == 2 && version < self.safe_ts && block.versions.is_null(i) {
+                    self.prev_common_handle = handle.to_vec();
+                    self.finish_range(i);
+                    continue;
+                }
+                if check_handle && handle >= self.end_handle.as_slice() {
+                    self.finish_range(i);
+                    break;
+                }
+                self.start_range(i);
+                self.prev_common_handle = handle.to_vec();
+            }
+        }
+        self.finish_range(read_row);
+        if self.ranges.len() == 1 {
+            let (start, end) = self.ranges[0];
+            if start == 0 {
+                return if end == read_row {
+                    // All rows are valid, no need to filter.
+                    Ok(read_row)
+                } else {
+                    block.truncate(end);
+                    Ok(end)
+                };
+            }
+        }
+        // filter invalid rows.
+        self.filter_block.reset();
+        let mut filtered_rows = 0;
+        for &(start, end) in &self.ranges {
+            self.filter_block.handles.append(&block.handles, start, end);
+            self.filter_block
+                .versions
+                .append(&block.versions, start, end);
+            if let Some(filter_txn_ids) = &mut self.filter_block.txn_ids {
+                filter_txn_ids.append(block.txn_ids.as_ref().unwrap(), start, end);
+            }
+            for (i, col) in self.filter_block.columns.iter_mut().enumerate() {
+                col.append(&block.columns[i], start, end);
+            }
+            filtered_rows += end - start;
+        }
+        mem::swap(block, &mut self.filter_block);
+        Ok(filtered_rows)
+    }
+}
+
+impl ColumnarCompactReader {
+    fn finish_range(&mut self, i: usize) {
+        if self.in_range {
+            self.ranges.push((self.range_start, i));
+            self.in_range = false;
+        }
+    }
+
+    fn start_range(&mut self, i: usize) {
+        if !self.in_range {
+            self.range_start = i;
+            self.in_range = true;
+        }
+    }
+}
+
+pub struct ColumnarTruncateTsReader {
+    src: Box<dyn ColumnarReader>,
+    truncate_ts: u64,
+    ranges: Vec<(usize, usize)>,
+    in_range: bool,
+    range_start: usize,
+    filter_block: Block,
+    end_handle: Vec<u8>,
+    end_int_handle: Option<i64>,
+}
+
+impl ColumnarTruncateTsReader {
+    pub fn new(
+        src: Box<dyn ColumnarReader>,
+        schema: &Schema,
+        truncate_ts: u64,
+    ) -> ColumnarTruncateTsReader {
+        ColumnarTruncateTsReader {
+            src,
+            filter_block: Block::new(schema),
+            truncate_ts,
+            ranges: vec![],
+            in_range: false,
+            range_start: 0,
+            end_handle: vec![],
+            end_int_handle: None,
+        }
+    }
+}
+
+impl ColumnarFilterReader for ColumnarTruncateTsReader {
+    fn set_handle_range(
+        &mut self,
+        start_handle: &[u8],
+        end_handle: &[u8],
+    ) -> crate::table::Result<()> {
+        self.end_handle = end_handle.to_vec();
+        self.src.seek(start_handle)?;
+        self.ranges.clear();
+        Ok(())
+    }
+
+    fn set_int_handle_range(
+        &mut self,
+        start_handle: i64,
+        end_handle: Option<i64>,
+    ) -> crate::table::Result<()> {
+        self.end_int_handle = end_handle;
+        self.src.seek(&start_handle.to_le_bytes())?;
+        self.ranges.clear();
+        Ok(())
+    }
+
+    fn get_schema(&self) -> &Schema {
+        self.src.schema()
+    }
+
+    fn read_block(&mut self, block: &mut Block, limit: usize) -> crate::table::Result<usize> {
+        self.ranges.clear();
+        self.in_range = false;
+        block.reset();
+        let read_row = self.src.read(block, limit)?;
+        if read_row == 0 {
+            return Ok(0);
+        }
+        if block.handles.fixed_size > 0 {
+            for i in 0..block.handles.length() {
+                let handle = block.handles.get_int_handle_value(i);
+                let version = block.versions.get_version(i);
+                if version > self.truncate_ts {
+                    self.finish_range(i);
+                    continue;
+                }
+                if self.end_int_handle.is_some() && handle >= self.end_int_handle.unwrap() {
+                    self.finish_range(i);
+                    break;
+                }
+                self.start_range(i);
+            }
+        } else {
+            let length = block.handles.length();
+            let last_handle = block.handles.get_not_null_value(length - 1);
+            let check_handle = last_handle >= self.end_handle.as_slice();
+            for i in 0..block.handles.length() {
+                let handle = block.handles.get_not_null_value(i);
+                let version = block.versions.get_version(i);
+                if version > self.truncate_ts {
+                    self.finish_range(i);
+                    continue;
+                }
+                if check_handle && handle >= self.end_handle.as_slice() {
+                    self.finish_range(i);
+                    break;
+                }
+                self.start_range(i);
+            }
+        }
+        self.finish_range(read_row);
+        if self.ranges.len() == 1 {
+            let (start, end) = self.ranges[0];
+            if start == 0 {
+                return if end == read_row {
+                    // All rows are valid, no need to filter.
+                    Ok(read_row)
+                } else {
+                    block.truncate(end);
+                    Ok(end)
+                };
+            }
+        }
+        // filter invalid rows.
+        self.filter_block.reset();
+        let mut filtered_rows = 0;
+        for &(start, end) in &self.ranges {
+            self.filter_block.handles.append(&block.handles, start, end);
+            self.filter_block
+                .versions
+                .append(&block.versions, start, end);
+            if let Some(filter_txn_ids) = &mut self.filter_block.txn_ids {
+                filter_txn_ids.append(block.txn_ids.as_ref().unwrap(), start, end);
+            }
+            for (i, col) in self.filter_block.columns.iter_mut().enumerate() {
+                col.append(&block.columns[i], start, end);
+            }
+            filtered_rows += end - start;
+        }
+        mem::swap(block, &mut self.filter_block);
+        Ok(filtered_rows)
+    }
+}
+
+impl ColumnarTruncateTsReader {
     fn finish_range(&mut self, i: usize) {
         if self.in_range {
             self.ranges.push((self.range_start, i));
@@ -1171,6 +1510,7 @@ pub mod tests {
 
     pub fn build_table(
         file_id: u64,
+        enable_inner_key_off: bool,
         schema: &Schema,
         start: i32,
         end: i32,
@@ -1178,6 +1518,9 @@ pub mod tests {
     ) -> (Arc<dyn File>, Vec<RefRow>) {
         let mut rng = rand::thread_rng();
         let mut ref_rows: Vec<RefRow> = vec![];
+        let inner_key_off = if enable_inner_key_off { 4 } else { 0 };
+        let keyspace_id = 1;
+        let keyspace_prefix = api_version::ApiV2::get_txn_keyspace_prefix(keyspace_id);
         let is_common_handle = get_fixed_size(&schema.handle_column) == 0;
         for i in start..end {
             ref_rows.push(new_ref_row(i, version, is_common_handle));
@@ -1196,7 +1539,12 @@ pub mod tests {
             } else {
                 encode_row_key(schema.table_id, ref_row.handle.as_slice().get_i64_le())
             };
-            let inner_key = InnerKey::from_inner_buf(&row_key);
+            let inner_buf = if enable_inner_key_off {
+                row_key
+            } else {
+                [keyspace_prefix.clone(), row_key].concat()
+            };
+            let inner_key = InnerKey::from_inner_buf(&inner_buf);
             let mut row_val = vec![];
             let cols = vec![
                 Column::new(1, ref_row.c0),
@@ -1211,7 +1559,8 @@ pub mod tests {
         let cf_tbl = CfTable::new();
         cf_tbl.get_cf(WRITE_CF).put_batch(&mut wb, None, WRITE_CF);
         let iter = cf_tbl.get_cf(WRITE_CF).new_iterator(false);
-        let mut row_tbl_reader = ColumnarRowTableReader::new(1, 4, schema.clone(), iter, false);
+        let mut row_tbl_reader =
+            ColumnarRowTableReader::new(1, inner_key_off, schema.clone(), iter, false);
         let mut block = Block::new(schema);
         let mut opts = ColumnarTableBuildOptions::default();
         opts.pack_max_row_count = 8;
@@ -1233,7 +1582,12 @@ pub mod tests {
             block_off = table_builder.append_block(&block, block_off);
             append_rows += block.length() - block_off;
         }
-        let mut file_builder = ColumnarFileBuilder::new(file_id, Some(version));
+        let mut file_builder = ColumnarFileBuilder::new(
+            file_id,
+            keyspace_id,
+            inner_key_off,
+            Some(version), // use version as l0_version for test
+        );
         file_builder.add_table(table_builder);
         let file_data = file_builder.build();
         (
@@ -1279,7 +1633,7 @@ pub mod tests {
         init_log_for_test();
         for common_handle in [true, true] {
             let schema = new_schema(1, common_handle);
-            let (file, ref_rows) = build_table(1, &schema, 100, 150, 100);
+            let (file, ref_rows) = build_table(1, true, &schema, 100, 150, 100);
             let columnar_file = ColumnarFile::open(file).unwrap();
             let mut reader =
                 ColumnarTableReader::new(&columnar_file, 1, schema.columns.clone(), true);
@@ -1310,6 +1664,27 @@ pub mod tests {
         ColumnarMvccReader::new(Box::new(merge_reader), schema, read_ts)
     }
 
+    fn new_compact_reader(
+        schema: &Schema,
+        level: u32,
+        files: &[Arc<dyn File>],
+        safe_ts: u64,
+    ) -> ColumnarCompactReader {
+        let mut readers: Vec<Box<dyn ColumnarReader>> = vec![];
+        for file in files {
+            let columnar_file = ColumnarFile::open(file.clone()).unwrap();
+            let reader = ColumnarTableReader::new(
+                &columnar_file,
+                schema.table_id,
+                schema.columns.clone(),
+                schema.txn_id_column.is_some(),
+            );
+            readers.push(Box::new(reader));
+        }
+        let merge_reader = ColumnarMergeReader::new(schema.clone(), readers);
+        ColumnarCompactReader::new(Box::new(merge_reader), level, schema, safe_ts)
+    }
+
     pub fn verify_with_ref_rows(block: &Block, ref_rows: &[RefRow]) {
         for i in 0..ref_rows.len() {
             let ref_row = &ref_rows[i];
@@ -1329,7 +1704,9 @@ pub mod tests {
 
     pub fn merge_refs(
         refs: Vec<Vec<RefRow>>,
+        level: u32,
         read_ts: Option<u64>,
+        safe_ts: Option<u64>,
         bound: Option<(Vec<u8>, Vec<u8>)>,
     ) -> Vec<RefRow> {
         let mut merged = vec![];
@@ -1347,6 +1724,24 @@ pub mod tests {
             merged.dedup_by(|a, b| a.handle == b.handle);
             merged.retain(|r| !r.is_deleted);
         }
+        if safe_ts.is_some() {
+            let mut new_merged = vec![];
+            let mut prev_handle = vec![];
+            for r in merged.iter_mut() {
+                let handle = r.handle.clone();
+                let version = r.version;
+                if prev_handle == handle && version < safe_ts.unwrap() {
+                    continue;
+                }
+                if level == 2 && version < safe_ts.unwrap() && r.is_deleted {
+                    prev_handle = handle;
+                    continue;
+                }
+                prev_handle = handle;
+                new_merged.push(r.clone());
+            }
+            merged = new_merged;
+        }
         merged
     }
 
@@ -1360,9 +1755,9 @@ pub mod tests {
         }
         for common_handle in options {
             let schema = new_schema(1, common_handle);
-            let (file_1, ref_1) = build_table(1, &schema, 100, 150, 100);
-            let (file_2, ref_2) = build_table(2, &schema, 140, 190, 110);
-            let (file_3, ref_3) = build_table(3, &schema, 185, 240, 120);
+            let (file_1, ref_1) = build_table(1, true, &schema, 100, 150, 100);
+            let (file_2, ref_2) = build_table(2, true, &schema, 140, 190, 110);
+            let (file_3, ref_3) = build_table(3, true, &schema, 185, 240, 120);
             let files = vec![file_1, file_2, file_3];
             let ref_rows = vec![ref_1, ref_2, ref_3];
             let mut block = Block::new(&schema);
@@ -1394,7 +1789,8 @@ pub mod tests {
                         end_handle.to_le_bytes().to_vec(),
                     )
                 };
-                let merged_refs = merge_refs(ref_rows.clone(), Some(read_ts), Some(range_bound));
+                let merged_refs =
+                    merge_refs(ref_rows.clone(), 0, Some(read_ts), None, Some(range_bound));
                 verify_with_ref_rows(&block, &merged_refs);
             }
         }
@@ -1407,9 +1803,9 @@ pub mod tests {
         ) {
             init_log_for_test();
             let schema = new_schema(1, common_handle);
-            let (file_1, ref_1) = build_table(1, &schema, 100, 150, 100);
-            let (file_2, ref_2) = build_table(2, &schema, 160, 190, 100);
-            let (file_3, ref_3) = build_table(3, &schema, 191, 240, 100);
+            let (file_1, ref_1) = build_table(1, true, &schema, 100, 150, 100);
+            let (file_2, ref_2) = build_table(2, true, &schema, 160, 190, 100);
+            let (file_3, ref_3) = build_table(3, true, &schema, 191, 240, 100);
             let files = vec![file_1, file_2, file_3];
             let ref_rows = vec![ref_1, ref_2, ref_3];
             let col_files: Vec<ColumnarFile> = files.iter().map(|f| ColumnarFile::open(f.clone()).unwrap()).collect();
@@ -1443,7 +1839,55 @@ pub mod tests {
                         end_handle.to_le_bytes().to_vec(),
                     )
                 };
-                let merged_refs = merge_refs(ref_rows.clone(), Some(100), Some(range_bound));
+                let merged_refs = merge_refs(ref_rows.clone(), 0, Some(100), None, Some(range_bound));
+                verify_with_ref_rows(&block, &merged_refs);
+            }
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn test_compact_reader(
+            common_handle in any::<bool>(),
+            enable_inner_key_off in any::<bool>(),
+        ) {
+            init_log_for_test();
+            let schema = new_schema(1, common_handle);
+            let (file_1, ref_1) = build_table(1, enable_inner_key_off, &schema, 100, 200, 100);
+            let (file_2, ref_2) = build_table(2, enable_inner_key_off, &schema, 150, 250, 200);
+            let (file_3, ref_3) = build_table(3, enable_inner_key_off, &schema, 200, 300, 300);
+            let files = vec![file_1, file_2, file_3];
+            let ref_rows = vec![ref_1, ref_2, ref_3];
+            for _ in 0..50 {
+                let mut rng = rand::thread_rng();
+                let start_handle = rng.gen_range(90i64..170i64);
+                let end_handle = start_handle + rng.gen_range(1i64..200i64);
+                let mut block = Block::new(&schema);
+                let mut compact_reader = new_compact_reader(&schema, 2, &files, 250);
+                if common_handle {
+                    let common_start_handle = i_to_common_handle(start_handle as i32);
+                    let common_end_handle = i_to_common_handle(end_handle as i32);
+                    compact_reader
+                        .set_handle_range(&common_start_handle, &common_end_handle)
+                        .unwrap();
+                } else {
+                    compact_reader
+                        .set_int_handle_range(start_handle, Some(end_handle))
+                        .unwrap();
+                }
+                compact_reader.read_block(&mut block, 1000).unwrap();
+                let range_bound = if common_handle {
+                    (
+                        i_to_common_handle(start_handle as i32),
+                        i_to_common_handle(end_handle as i32),
+                    )
+                } else {
+                    (
+                        start_handle.to_le_bytes().to_vec(),
+                        end_handle.to_le_bytes().to_vec(),
+                    )
+                };
+                let merged_refs = merge_refs(ref_rows.clone(), 2, None, Some(250), Some(range_bound));
                 verify_with_ref_rows(&block, &merged_refs);
             }
         }

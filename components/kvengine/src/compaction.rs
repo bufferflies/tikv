@@ -3066,7 +3066,8 @@ fn transform_for_columnar(
         .with_type(FileType::Columnar);
     let (tx, rx) = tikv_util::mpsc::bounded(ctx.req.file_ids.len());
     let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(&ctx.req.outer_start).unwrap_or_default();
-    let mut file_builder = ColumnarFileBuilder::new(allocate_id(), None);
+    let mut file_builder =
+        ColumnarFileBuilder::new(allocate_id(), keyspace_id, ctx.req.inner_key_off, None);
     let mut cnt = 0;
     for table_id in overlap_tables {
         let schema = schema_file.get_table(table_id).unwrap();
@@ -3278,8 +3279,12 @@ fn convert_row_file_to_columnar_file(
         return Ok(ret);
     }
     let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(&ctx.req.outer_start).unwrap_or_default();
-    let mut file_builder =
-        ColumnarFileBuilder::new(allocate_id(), Some(columnar_compaction.snap_version));
+    let mut file_builder = ColumnarFileBuilder::new(
+        allocate_id(),
+        keyspace_id,
+        ctx.req.inner_key_off,
+        Some(columnar_compaction.snap_version),
+    );
     let mut cnt = 0;
     let (tx, rx) = mpsc::bounded(ctx.req.file_ids.len());
     for overlap_table in overlap_tables {
@@ -3408,7 +3413,13 @@ fn compact_columnar_l0_files(
     if overlap_tables.is_empty() {
         return Ok(ret);
     }
-    let mut file_builder = ColumnarFileBuilder::new(allocate_id(), Some(snap_version));
+    let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(&ctx.req.outer_start).unwrap_or_default();
+    let mut file_builder = ColumnarFileBuilder::new(
+        allocate_id(),
+        keyspace_id,
+        ctx.req.inner_key_off,
+        Some(snap_version),
+    );
     let (tx, rx) = mpsc::bounded(ctx.req.file_ids.len());
     let mut cnt = 0;
     for table_id in overlap_tables {
@@ -3534,7 +3545,9 @@ fn compact_columnar_l1_files(
     if overlap_tables.is_empty() {
         return Ok(ret);
     }
-    let mut file_builder = ColumnarFileBuilder::new(allocate_id(), None);
+    let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(&ctx.req.outer_start).unwrap_or_default();
+    let mut file_builder =
+        ColumnarFileBuilder::new(allocate_id(), keyspace_id, ctx.req.inner_key_off, None);
     let (tx, rx) = mpsc::bounded(ctx.req.file_ids.len());
     let mut cnt = 0;
     for table_id in overlap_tables {

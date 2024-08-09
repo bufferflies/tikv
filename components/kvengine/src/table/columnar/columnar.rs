@@ -543,7 +543,7 @@ impl ColumnBuffer {
     }
 
     // version is not 0 and delete is true represents mvcc delete.
-    // version is 0 and delete is true represents tombstone.
+    // version < safe_ts when delete is true represents tombstone.
     #[allow(dead_code)]
     pub(crate) fn push_version(&mut self, version: u64, is_delete: bool) {
         debug_assert_eq!(self.col_id, VERSION_COL_ID);
