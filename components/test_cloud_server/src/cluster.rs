@@ -808,6 +808,10 @@ fn tikv_worker_addr(idx: u16) -> String {
     format!("127.0.0.1:{}", 19000 + idx)
 }
 
+pub fn tikv_worker_cop_url(idx: u16) -> String {
+    format!("http://{}/coprocessor", tikv_worker_addr(idx))
+}
+
 pub fn put_mut(key: &str, val: &str) -> Mutation {
     let mut mutation = Mutation::new();
     mutation.op = Op::Put;

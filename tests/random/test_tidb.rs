@@ -14,7 +14,9 @@ use pd_client::{
 };
 use rand::prelude::*;
 use security::SecurityConfig;
-use test_cloud_server::{oss::prepare_dfs, tidb::*, tpc::*, try_wait_async, ServerCluster};
+use test_cloud_server::{
+    oss::prepare_dfs, tidb::*, tikv_worker_cop_url, tpc::*, try_wait_async, ServerCluster,
+};
 use test_pd_client::PdWrapper;
 use tikv::config::TikvConfig;
 use tikv_util::{
@@ -82,6 +84,8 @@ const VERIFY_HEALTHY_TIMEOUT: Duration = Duration::from_secs(120);
 
 const ENABLE_INNER_KEY_OFF_RATIO: f64 = 0.8; // 80% chance to enable inner key offset
 
+const USE_REMOTE_COP_ENV_KEY: &str = "USE_REMOTE_COP";
+
 #[test]
 fn test_random_with_tidb() {
     let _logger_guard = test_util::init_log_for_test_async();
@@ -94,7 +98,11 @@ fn test_random_with_tidb() {
     let _guard = runtime.enter();
 
     let enable_inner_key_off: bool = thread_rng().gen_bool(ENABLE_INNER_KEY_OFF_RATIO);
-    info!("enable_inner_key_off: {}", enable_inner_key_off);
+    let use_remote_cop = env_switch(USE_REMOTE_COP_ENV_KEY);
+    info!("switches";
+        "enable_inner_key_off" => enable_inner_key_off,
+        "use_remote_cop" => use_remote_cop,
+    );
 
     // Prepare.
     let (_temp_dir, _oss, dfs_config) = prepare_dfs("oss_");
@@ -106,6 +114,7 @@ fn test_random_with_tidb() {
         NODES_COUNT,
         INITIAL_KEYSPACE_COUNT,
         enable_inner_key_off,
+        use_remote_cop,
         Some(&tc),
     );
     let pd_client = cluster.get_pd_client_ext();
@@ -336,12 +345,13 @@ fn prepare_cluster(
     nodes_count: usize,
     initial_keyspace_count: usize,
     enable_inner_key_off: bool,
+    use_remote_cop: bool,
     tc: Option<&TidbCluster>,
 ) -> ServerCluster {
     let mut rng = rand::thread_rng();
     let nodes = alloc_node_id_vec(nodes_count);
     let dfs_config = Arc::new(dfs_config.clone());
-    let update_conf_fn = move |_, conf: &mut TikvConfig| {
+    let update_conf_fn = move |node_id: u16, conf: &mut TikvConfig| {
         conf.dfs = (*dfs_config).clone();
         conf.coprocessor.region_split_size = REGION_SIZE;
         conf.coprocessor.region_bucket_size = REGION_BUCKET_SIZE;
@@ -361,6 +371,13 @@ fn prepare_cluster(
         conf.kvengine.compaction_tombs_count = 100;
         conf.kvengine.max_del_range_delay = ReadableDuration(Duration::from_secs(3));
         conf.storage.flow_control.enable = true;
+
+        if use_remote_cop {
+            let cop_worker_url = tikv_worker_cop_url(node_id % TIKV_WORKERS_COUNT as u16);
+            conf.kvengine.remote_worker_addr = cop_worker_url.clone();
+            conf.kvengine.remote_coprocessor_addr = cop_worker_url;
+            conf.kvengine.remote_coprocessor_min_blocks_size = 1024 * 1024;
+        }
     };
 
     let pd_wrapper = match tc {
