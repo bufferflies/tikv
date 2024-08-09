@@ -75,7 +75,6 @@ pub(crate) async fn prepare_jepsen_bank(
     info!("{} prepare_jepsen_bank", tag);
 
     let mut sqls = vec![
-        "SET GLOBAL tidb_enable_txn_file = 'ON'".to_string(),
         format!("drop database if exists `{BANK_DB_NAME}`"),
         format!("create database `{BANK_DB_NAME}`"),
         format!(
@@ -120,6 +119,7 @@ pub(crate) async fn run_jepsen_bank(
     use_tiflash: bool,
     timeout: Duration,
 ) {
+    info!("run_jepsen_bank"; "use_txn_file" => jepsen_use_txn_file, "use_tiflash" => use_tiflash);
     let keyspace_name = keyspace_manager
         .get_keyspace_meta(keyspace_id)
         .unwrap()

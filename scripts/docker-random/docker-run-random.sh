@@ -72,6 +72,9 @@ while [[ $# -gt 0 ]]; do
 	--no-tiflash)
 		RUN_ARGS+=("--no-tiflash")
 		;;
+	--no-txn-file)
+		RUN_ARGS+=("--no-txn-file")
+		;;
 	--no-remote-cop)
 		RUN_ARGS+=("--no-remote-cop")
 		;;

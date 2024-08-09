@@ -13,6 +13,7 @@ LOG_PATH="/random"
 MEMORY_PROFILE=0
 
 USE_TIFLASH=1
+GLOBAL_TXN_FILE=1
 USE_REMOTE_COP=1
 
 TPC_WORKLOAD=1
@@ -33,6 +34,9 @@ while [ $# -gt 0 ]; do
         ;;
     --no-tiflash)
         USE_TIFLASH=0
+        ;;
+    --no-txn-file)
+        GLOBAL_TXN_FILE=0
         ;;
     --no-remote-cop)
         USE_REMOTE_COP=0
@@ -62,7 +66,9 @@ export RUST_LOG="info"
 export MEMORY_PROFILE
 
 export USE_TIFLASH
+export GLOBAL_TXN_FILE
 export USE_REMOTE_COP
+
 export TPC_WORKLOAD
 export JEPSEN_WORKLOAD
 export JEPSEN_TXN_FILE

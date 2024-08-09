@@ -69,7 +69,6 @@ const TIFLASH_HEALTHY_TIMEOUT: Duration = Duration::from_secs(120);
 
 const TPC_WORKLOAD_SWITCH_ENV_KEY: &str = "TPC_WORKLOAD";
 const TPC_BIN_ENV_KEY: &str = "TPC_BIN";
-const TPC_USE_TXN_FILE_RATIO: f64 = 0.5;
 const TPCC_WAREHOUSES: usize = 2;
 const TPCC_MAX_PROCS: usize = 1;
 const TPCC_THREADS: usize = 4; // Number of threads for each TPCC workload.
@@ -82,7 +81,10 @@ const JEPSEN_WORKLOAD_KEYSPACE: u32 = 1; // Keyspace starts from 1.
 
 const VERIFY_HEALTHY_TIMEOUT: Duration = Duration::from_secs(120);
 
-const ENABLE_INNER_KEY_OFF_RATIO: f64 = 0.8; // 80% chance to enable inner key offset
+const ENABLE_INNER_KEY_OFF_RATIO: f64 = 0.8; // 80% chance to enable inner key offset.
+
+const ENABLE_GLOBAL_TXN_FILE_RATIO: f64 = 0.8; // 80% chance enable txn file globally.
+const ENABLE_GLOBAL_TXN_FILE_ENV_KEY: &str = "GLOBAL_TXN_FILE";
 
 const USE_REMOTE_COP_ENV_KEY: &str = "USE_REMOTE_COP";
 
@@ -160,9 +162,23 @@ fn test_random_with_tidb() {
     let tpc_switch_on = env_switch(TPC_WORKLOAD_SWITCH_ENV_KEY);
     let jepsen_switch_on = env_switch(JEPSEN_WORKLOAD_SWITCH_ENV_KEY);
     let jepsen_use_txn_file = env_switch(JEPSEN_WORKLOAD_USE_TXN_FILE_ENV_KEY);
+    let global_use_txn_file = env_switch(ENABLE_GLOBAL_TXN_FILE_ENV_KEY);
 
     let mut rng = thread_rng();
-    let tpc_use_txn_file = rng.gen_bool(TPC_USE_TXN_FILE_RATIO);
+    let global_use_txn_file = global_use_txn_file && rng.gen_bool(ENABLE_GLOBAL_TXN_FILE_RATIO);
+
+    info!("global_use_txn_file: {}", global_use_txn_file);
+    if global_use_txn_file {
+        runtime.block_on(async {
+            for keyspace_id in keyspace_manager.get_all_keyspaces() {
+                let pool = connect_tidb(&tc, &keyspace_manager, keyspace_id).await;
+                sqlx::query("SET GLOBAL tidb_enable_txn_file = 'ON'")
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+        });
+    }
 
     let mut prepare_tasks = vec![];
     if tpc_switch_on {
@@ -172,7 +188,7 @@ fn test_random_with_tidb() {
             keyspace_manager.clone(),
             tpc_bin.clone(),
             all_keyspaces,
-            tpc_use_txn_file,
+            global_use_txn_file,
         )));
     }
     if jepsen_switch_on {
@@ -203,7 +219,7 @@ fn test_random_with_tidb() {
             tc.clone(),
             keyspace_manager,
             JEPSEN_WORKLOAD_KEYSPACE,
-            jepsen_use_txn_file,
+            global_use_txn_file && jepsen_use_txn_file,
             tiflash_switch_on,
             TEST_DURATION,
         )));
@@ -549,7 +565,6 @@ async fn prepare_tpcc(
                 let mut sqls = vec![format!("CREATE DATABASE IF NOT EXISTS `{}`", db)];
                 if use_txn_file {
                     sqls.push("SET GLOBAL tidb_txn_mode = 'optimistic'".to_string());
-                    sqls.push("SET GLOBAL tidb_enable_txn_file = 'ON'".to_string());
                 }
                 for sql in sqls {
                     info!("{} executing sql", tag; "sql" => &sql);
@@ -702,4 +717,19 @@ fn spawn_restart_tso_svc(
         }
     };
     tokio::spawn(task)
+}
+
+async fn connect_tidb(
+    tc: &TidbCluster,
+    keyspace_manager: &KeyspaceManager,
+    keyspace_id: u32,
+) -> sqlx::Pool<sqlx::MySql> {
+    let keyspace_name = keyspace_manager
+        .get_keyspace_meta(keyspace_id)
+        .unwrap()
+        .name();
+    let tidb_idx = TidbCluster::get_idx_by_keyspace_name(&keyspace_name);
+    let params = tc.tidb.conn_params(tidb_idx);
+    let conn_string = params.conn_string("test");
+    sqlx::MySqlPool::connect(&conn_string).await.unwrap()
 }
