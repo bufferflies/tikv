@@ -26,9 +26,10 @@ use protobuf::Message;
 use security::SecurityManager;
 use slog_global::error;
 use table::columnar::{ColumnarFile, ColumnarTableReader, Schema};
+use tidb_query_common::util::convert_to_prefix_next;
 use tidb_query_datatype::codec::table::{
-    decode_common_handle, decode_int_handle, decode_table_id, encode_common_handle_for_test,
-    encode_row_key, encode_row_key_prefix, ID_LEN, TABLE_PREFIX_LEN,
+    decode_common_handle, decode_int_handle, decode_table_id, encode_row_key,
+    encode_row_key_prefix, ID_LEN, TABLE_PREFIX_LEN,
 };
 use tikv_util::mpsc;
 
@@ -2965,6 +2966,21 @@ fn compact_trim_over_bound_for_columnar(
         if overlap_tables.is_empty() {
             continue;
         }
+        let bound_start =
+            if let Some(keyspace_prefix) = ApiV2::get_keyspace_prefix(&req.outer_start) {
+                &req.outer_start[keyspace_prefix.len()..]
+            } else {
+                &req.outer_start
+            };
+        let bound_end = if let Some(keyspace_prefix) = ApiV2::get_keyspace_prefix(&req.outer_end) {
+            if req.outer_end.len() == keyspace_prefix.len() {
+                GLOBAL_SHARD_END_KEY
+            } else {
+                &req.outer_end[keyspace_prefix.len()..]
+            }
+        } else {
+            &req.outer_end
+        };
         let mut file_builder = ColumnarFileBuilder::new(
             allocate_id(),
             keyspace_id,
@@ -2972,6 +2988,15 @@ fn compact_trim_over_bound_for_columnar(
             columnar_file.get_l0_version(),
         );
         for table_id in overlap_tables {
+            let row_key_prefix = encode_row_key_prefix(table_id);
+            let mut row_key_prefix_next = row_key_prefix.clone();
+            convert_to_prefix_next(&mut row_key_prefix_next);
+            if bound_start >= row_key_prefix_next.as_slice()
+                || bound_end <= row_key_prefix.as_slice()
+            {
+                // The whole table is over bound.
+                continue;
+            }
             let schema = schema_file.get_table(table_id).unwrap();
             let reader = ColumnarTableReader::new(
                 &columnar_file,
@@ -2982,67 +3007,29 @@ fn compact_trim_over_bound_for_columnar(
             let mut compact_reader =
                 ColumnarCompactReader::new(Box::new(reader), level, schema, req.safe_ts);
             if schema.is_common_handle() {
-                let min_row_key = encode_common_handle_for_test(table_id, &[]);
-                let max_row_key = encode_common_handle_for_test(table_id, GLOBAL_COMMON_HANDLE_END);
-                let mut bound_start = if req.outer_start[0] == TXN_KEY_PREFIX {
-                    &req.outer_start[KEYSPACE_PREFIX_LEN..]
+                let start_handle = if bound_start > row_key_prefix.as_slice() {
+                    decode_common_handle(bound_start).unwrap()
                 } else {
-                    &req.outer_start
+                    &[]
                 };
-                let mut bound_end = if req.outer_end[0] == TXN_KEY_PREFIX {
-                    if req.outer_end.len() == KEYSPACE_PREFIX_LEN {
-                        GLOBAL_SHARD_END_KEY
-                    } else {
-                        &req.outer_end[KEYSPACE_PREFIX_LEN..]
-                    }
+                let end_handle = if bound_end < row_key_prefix_next.as_slice() {
+                    decode_common_handle(bound_end).unwrap()
                 } else {
-                    &req.outer_end
+                    GLOBAL_COMMON_HANDLE_END
                 };
-                if bound_start >= max_row_key.as_slice() || bound_end < min_row_key.as_slice() {
-                    continue;
-                }
-                if bound_start < min_row_key.as_slice() {
-                    bound_start = min_row_key.as_slice();
-                }
-                if bound_end > max_row_key.as_slice() {
-                    bound_end = max_row_key.as_slice();
-                }
-                let start_handle = decode_common_handle(bound_start).unwrap();
-                let end_handle = decode_common_handle(bound_end).unwrap();
                 compact_reader.set_handle_range(start_handle, end_handle)?;
             } else {
-                let mut min_handle = i64::MIN;
-                let mut max_handle = i64::MAX;
-                let row_key_prefix = encode_row_key_prefix(table_id);
-                let next_row_key_prefix = encode_row_key_prefix(table_id + 1);
-                let bound_start = if req.outer_start[0] == TXN_KEY_PREFIX {
-                    &req.outer_start[KEYSPACE_PREFIX_LEN..]
+                let start_handle = if bound_start > row_key_prefix.as_slice() {
+                    decode_int_handle(bound_start).unwrap()
                 } else {
-                    &req.outer_start
+                    i64::MIN
                 };
-                let bound_end = if req.outer_end[0] == TXN_KEY_PREFIX {
-                    if req.outer_end.len() == KEYSPACE_PREFIX_LEN {
-                        GLOBAL_SHARD_END_KEY
-                    } else {
-                        &req.outer_end[KEYSPACE_PREFIX_LEN..]
-                    }
+                let end_handle = if bound_end < row_key_prefix_next.as_slice() {
+                    Some(decode_int_handle(bound_end).unwrap())
                 } else {
-                    &req.outer_end
+                    None
                 };
-                if bound_start >= next_row_key_prefix.as_slice()
-                    || bound_end < row_key_prefix.as_slice()
-                {
-                    continue;
-                }
-                if bound_start > row_key_prefix.as_slice() {
-                    let handle = decode_int_handle(bound_start).unwrap();
-                    min_handle = handle;
-                }
-                if bound_end < next_row_key_prefix.as_slice() {
-                    let handle = decode_int_handle(bound_end).unwrap();
-                    max_handle = handle;
-                }
-                compact_reader.set_int_handle_range(min_handle, Some(max_handle))?;
+                compact_reader.set_int_handle_range(start_handle, end_handle)?;
             }
             compact_table_for_columnar(
                 ctx,

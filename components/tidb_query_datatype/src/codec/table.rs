@@ -173,9 +173,8 @@ pub fn encode_row(ctx: &mut EvalContext, row: Vec<Datum>, col_ids: &[i64]) -> Re
 }
 
 pub fn encode_row_key_prefix(table_id: i64) -> Vec<u8> {
-    let mut key = Vec::with_capacity(TABLE_PREFIX_KEY_LEN);
-    key.write_bytes(TABLE_PREFIX).unwrap();
-    key.write_i64(table_id).unwrap();
+    let mut key = Vec::with_capacity(PREFIX_LEN);
+    key.append_table_record_prefix(table_id).unwrap();
     key
 }
 

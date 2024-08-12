@@ -338,15 +338,89 @@ pub trait ColumnarFilterReader: Send {
     ) -> crate::table::Result<()>;
     fn get_schema(&self) -> &Schema;
     fn read_block(&mut self, block: &mut Block, limit: usize) -> crate::table::Result<usize>;
+    fn set_unbounded_handle_range(&mut self) -> crate::table::Result<()> {
+        if self.get_schema().is_common_handle() {
+            self.set_handle_range(&[], GLOBAL_COMMON_HANDLE_END)?;
+        } else {
+            self.set_int_handle_range(i64::MIN, None)?;
+        }
+        Ok(())
+    }
+}
+
+struct ColumnarFilter {
+    ranges: Vec<(usize, usize)>,
+    in_range: bool,
+    range_start: usize,
+    filter_block: Block,
+}
+
+impl ColumnarFilter {
+    fn new(schema: &Schema) -> Self {
+        Self {
+            ranges: vec![],
+            in_range: false,
+            range_start: 0,
+            filter_block: Block::new(schema),
+        }
+    }
+
+    fn finish_range(&mut self, i: usize) {
+        if self.in_range {
+            self.ranges.push((self.range_start, i));
+            self.in_range = false;
+        }
+    }
+
+    fn start_range(&mut self, i: usize) {
+        if !self.in_range {
+            self.range_start = i;
+            self.in_range = true;
+        }
+    }
+
+    fn clear(&mut self) {
+        self.ranges.clear();
+        self.in_range = false;
+    }
+
+    fn do_filter(&mut self, read_row: usize, block: &mut Block) -> usize {
+        if self.ranges.len() == 1 {
+            let (start, end) = self.ranges[0];
+            if start == 0 {
+                return if end == read_row {
+                    // All rows are valid, no need to filter.
+                    read_row
+                } else {
+                    block.truncate(end);
+                    end
+                };
+            }
+        }
+        self.filter_block.reset();
+        let mut filtered_rows = 0;
+        for &(start, end) in &self.ranges {
+            self.filter_block.handles.append(&block.handles, start, end);
+            self.filter_block
+                .versions
+                .append(&block.versions, start, end);
+            if let Some(filter_txn_ids) = &mut self.filter_block.txn_ids {
+                filter_txn_ids.append(block.txn_ids.as_ref().unwrap(), start, end);
+            }
+            for (i, col) in self.filter_block.columns.iter_mut().enumerate() {
+                col.append(&block.columns[i], start, end);
+            }
+            filtered_rows += end - start;
+        }
+        mem::swap(block, &mut self.filter_block);
+        filtered_rows
+    }
 }
 
 pub struct ColumnarMvccReader {
     src: Box<dyn ColumnarReader>,
     read_ts: u64,
-    ranges: Vec<(usize, usize)>,
-    in_range: bool,
-    range_start: usize,
-    filter_block: Block,
+    filter: ColumnarFilter,
     end_handle: Vec<u8>,
     end_int_handle: Option<i64>,
     prev_int_handle: Option<i64>,
@@ -357,11 +431,8 @@ impl ColumnarMvccReader {
     pub fn new(src: Box<dyn ColumnarReader>, schema: &Schema, read_ts: u64) -> ColumnarMvccReader {
         ColumnarMvccReader {
             src,
-            filter_block: Block::new(schema),
+            filter: ColumnarFilter::new(schema),
             read_ts,
-            ranges: vec![],
-            in_range: false,
-            range_start: 0,
             end_handle: vec![],
             end_int_handle: None,
             prev_int_handle: None,
@@ -378,7 +449,7 @@ impl ColumnarFilterReader for ColumnarMvccReader {
     ) -> crate::table::Result<()> {
         self.end_handle = end_handle.to_vec();
         self.src.seek(start_handle)?;
-        self.ranges.clear();
+        self.filter.clear();
         Ok(())
     }
 
@@ -389,7 +460,7 @@ impl ColumnarFilterReader for ColumnarMvccReader {
     ) -> crate::table::Result<()> {
         self.end_int_handle = end_handle;
         self.src.seek(&start_handle.to_le_bytes())?;
-        self.ranges.clear();
+        self.filter.clear();
         Ok(())
     }
 
@@ -398,8 +469,7 @@ impl ColumnarFilterReader for ColumnarMvccReader {
     }
 
     fn read_block(&mut self, block: &mut Block, limit: usize) -> crate::table::Result<usize> {
-        self.ranges.clear();
-        self.in_range = false;
+        self.filter.clear();
         block.reset();
         let read_row = self.src.read(block, limit)?;
         if read_row == 0 {
@@ -412,19 +482,19 @@ impl ColumnarFilterReader for ColumnarMvccReader {
                 if version > self.read_ts
                     || (self.prev_int_handle.is_some() && handle == self.prev_int_handle.unwrap())
                 {
-                    self.finish_range(i);
+                    self.filter.finish_range(i);
                     continue;
                 }
                 if block.versions.is_null(i) {
                     self.prev_int_handle = Some(handle);
-                    self.finish_range(i);
+                    self.filter.finish_range(i);
                     continue;
                 }
                 if self.end_int_handle.is_some() && handle >= self.end_int_handle.unwrap() {
-                    self.finish_range(i);
+                    self.filter.finish_range(i);
                     break;
                 }
-                self.start_range(i);
+                self.filter.start_range(i);
                 self.prev_int_handle = Some(handle);
             }
         } else {
@@ -435,69 +505,24 @@ impl ColumnarFilterReader for ColumnarMvccReader {
                 let handle = block.handles.get_not_null_value(i);
                 let version = block.versions.get_version(i);
                 if version > self.read_ts || handle == self.prev_common_handle {
-                    self.finish_range(i);
+                    self.filter.finish_range(i);
                     continue;
                 }
                 if block.versions.is_null(i) {
                     self.prev_common_handle = handle.to_vec();
-                    self.finish_range(i);
+                    self.filter.finish_range(i);
                     continue;
                 }
                 if check_handle && handle >= self.end_handle.as_slice() {
-                    self.finish_range(i);
+                    self.filter.finish_range(i);
                     break;
                 }
-                self.start_range(i);
+                self.filter.start_range(i);
                 self.prev_common_handle = handle.to_vec();
             }
         }
-        self.finish_range(read_row);
-        if self.ranges.len() == 1 {
-            let (start, end) = self.ranges[0];
-            if start == 0 {
-                return if end == read_row {
-                    // All rows are valid, no need to filter.
-                    Ok(read_row)
-                } else {
-                    block.truncate(end);
-                    Ok(end)
-                };
-            }
-        }
-        // filter invalid rows.
-        self.filter_block.reset();
-        let mut filtered_rows = 0;
-        for &(start, end) in &self.ranges {
-            self.filter_block.handles.append(&block.handles, start, end);
-            self.filter_block
-                .versions
-                .append(&block.versions, start, end);
-            if let Some(filter_txn_ids) = &mut self.filter_block.txn_ids {
-                filter_txn_ids.append(block.txn_ids.as_ref().unwrap(), start, end);
-            }
-            for (i, col) in self.filter_block.columns.iter_mut().enumerate() {
-                col.append(&block.columns[i], start, end);
-            }
-            filtered_rows += end - start;
-        }
-        mem::swap(block, &mut self.filter_block);
-        Ok(filtered_rows)
-    }
-}
-
-impl ColumnarMvccReader {
-    fn finish_range(&mut self, i: usize) {
-        if self.in_range {
-            self.ranges.push((self.range_start, i));
-            self.in_range = false;
-        }
-    }
-
-    fn start_range(&mut self, i: usize) {
-        if !self.in_range {
-            self.range_start = i;
-            self.in_range = true;
-        }
+        self.filter.finish_range(read_row);
+        Ok(self.filter.do_filter(read_row, block))
     }
 }
 
@@ -505,10 +530,7 @@ pub struct ColumnarCompactReader {
     src: Box<dyn ColumnarReader>,
     level: u32,
     safe_ts: u64,
-    ranges: Vec<(usize, usize)>,
-    in_range: bool,
-    range_start: usize,
-    filter_block: Block,
+    filter: ColumnarFilter,
     end_handle: Vec<u8>,
     end_int_handle: Option<i64>,
     prev_int_handle: Option<i64>,
@@ -525,11 +547,8 @@ impl ColumnarCompactReader {
         ColumnarCompactReader {
             src,
             level,
-            filter_block: Block::new(schema),
+            filter: ColumnarFilter::new(schema),
             safe_ts,
-            ranges: vec![],
-            in_range: false,
-            range_start: 0,
             end_handle: vec![],
             end_int_handle: None,
             prev_int_handle: None,
@@ -546,7 +565,7 @@ impl ColumnarFilterReader for ColumnarCompactReader {
     ) -> crate::table::Result<()> {
         self.end_handle = end_handle.to_vec();
         self.src.seek(start_handle)?;
-        self.ranges.clear();
+        self.filter.clear();
         Ok(())
     }
 
@@ -557,7 +576,7 @@ impl ColumnarFilterReader for ColumnarCompactReader {
     ) -> crate::table::Result<()> {
         self.end_int_handle = end_handle;
         self.src.seek(&start_handle.to_le_bytes())?;
-        self.ranges.clear();
+        self.filter.clear();
         Ok(())
     }
 
@@ -566,8 +585,7 @@ impl ColumnarFilterReader for ColumnarCompactReader {
     }
 
     fn read_block(&mut self, block: &mut Block, limit: usize) -> crate::table::Result<usize> {
-        self.ranges.clear();
-        self.in_range = false;
+        self.filter.clear();
         block.reset();
         let read_row = self.src.read(block, limit)?;
         if read_row == 0 {
@@ -581,19 +599,19 @@ impl ColumnarFilterReader for ColumnarCompactReader {
                     && handle == self.prev_int_handle.unwrap()
                     && version < self.safe_ts
                 {
-                    self.finish_range(i);
+                    self.filter.finish_range(i);
                     continue;
                 }
                 if self.level == 2 && version < self.safe_ts && block.versions.is_null(i) {
                     self.prev_int_handle = Some(handle);
-                    self.finish_range(i);
+                    self.filter.finish_range(i);
                     continue;
                 }
                 if self.end_int_handle.is_some() && handle >= self.end_int_handle.unwrap() {
-                    self.finish_range(i);
+                    self.filter.finish_range(i);
                     break;
                 }
-                self.start_range(i);
+                self.filter.start_range(i);
                 self.prev_int_handle = Some(handle);
             }
         } else {
@@ -604,88 +622,31 @@ impl ColumnarFilterReader for ColumnarCompactReader {
                 let handle = block.handles.get_not_null_value(i);
                 let version = block.versions.get_version(i);
                 if handle == self.prev_common_handle && version < self.safe_ts {
-                    self.finish_range(i);
+                    self.filter.finish_range(i);
                     continue;
                 }
                 if self.level == 2 && version < self.safe_ts && block.versions.is_null(i) {
                     self.prev_common_handle = handle.to_vec();
-                    self.finish_range(i);
+                    self.filter.finish_range(i);
                     continue;
                 }
                 if check_handle && handle >= self.end_handle.as_slice() {
-                    self.finish_range(i);
+                    self.filter.finish_range(i);
                     break;
                 }
-                self.start_range(i);
+                self.filter.start_range(i);
                 self.prev_common_handle = handle.to_vec();
             }
         }
-        self.finish_range(read_row);
-        if self.ranges.len() == 1 {
-            let (start, end) = self.ranges[0];
-            if start == 0 {
-                return if end == read_row {
-                    // All rows are valid, no need to filter.
-                    Ok(read_row)
-                } else {
-                    block.truncate(end);
-                    Ok(end)
-                };
-            }
-        }
-        // filter invalid rows.
-        self.filter_block.reset();
-        let mut filtered_rows = 0;
-        for &(start, end) in &self.ranges {
-            self.filter_block.handles.append(&block.handles, start, end);
-            self.filter_block
-                .versions
-                .append(&block.versions, start, end);
-            if let Some(filter_txn_ids) = &mut self.filter_block.txn_ids {
-                filter_txn_ids.append(block.txn_ids.as_ref().unwrap(), start, end);
-            }
-            for (i, col) in self.filter_block.columns.iter_mut().enumerate() {
-                col.append(&block.columns[i], start, end);
-            }
-            filtered_rows += end - start;
-        }
-        mem::swap(block, &mut self.filter_block);
-        Ok(filtered_rows)
-    }
-}
-
-impl ColumnarCompactReader {
-    pub fn set_unbounded_handle_range(&mut self) -> crate::table::Result<()> {
-        if self.get_schema().is_common_handle() {
-            self.set_handle_range(&[], GLOBAL_COMMON_HANDLE_END)?;
-        } else {
-            self.set_int_handle_range(i64::MIN, None)?;
-        }
-        Ok(())
-    }
-
-    fn finish_range(&mut self, i: usize) {
-        if self.in_range {
-            self.ranges.push((self.range_start, i));
-            self.in_range = false;
-        }
-    }
-
-    fn start_range(&mut self, i: usize) {
-        if !self.in_range {
-            self.range_start = i;
-            self.in_range = true;
-        }
+        self.filter.finish_range(read_row);
+        Ok(self.filter.do_filter(read_row, block))
     }
 }
 
 pub struct ColumnarTruncateTsReader {
     src: Box<dyn ColumnarReader>,
     truncate_ts: u64,
-    ranges: Vec<(usize, usize)>,
-    in_range: bool,
-    range_start: usize,
-    filter_block: Block,
+    filter: ColumnarFilter,
     end_handle: Vec<u8>,
     end_int_handle: Option<i64>,
 }
@@ -698,11 +659,8 @@ impl ColumnarTruncateTsReader {
     ) -> ColumnarTruncateTsReader {
         ColumnarTruncateTsReader {
             src,
-            filter_block: Block::new(schema),
+            filter: ColumnarFilter::new(schema),
             truncate_ts,
-            ranges: vec![],
-            in_range: false,
-            range_start: 0,
             end_handle: vec![],
             end_int_handle: None,
         }
@@ -717,7 +675,7 @@ impl ColumnarFilterReader for ColumnarTruncateTsReader {
     ) -> crate::table::Result<()> {
         self.end_handle = end_handle.to_vec();
         self.src.seek(start_handle)?;
-        self.ranges.clear();
+        self.filter.clear();
         Ok(())
     }
 
@@ -728,7 +686,7 @@ impl ColumnarFilterReader for ColumnarTruncateTsReader {
     ) -> crate::table::Result<()> {
         self.end_int_handle = end_handle;
         self.src.seek(&start_handle.to_le_bytes())?;
-        self.ranges.clear();
+        self.filter.clear();
         Ok(())
     }
 
@@ -737,8 +695,7 @@ impl ColumnarFilterReader for ColumnarTruncateTsReader {
     }
 
     fn read_block(&mut self, block: &mut Block, limit: usize) -> crate::table::Result<usize> {
-        self.ranges.clear();
-        self.in_range = false;
+        self.filter.clear();
         block.reset();
         let read_row = self.src.read(block, limit)?;
         if read_row == 0 {
@@ -749,14 +706,14 @@ impl ColumnarFilterReader for ColumnarTruncateTsReader {
                 let handle = block.handles.get_int_handle_value(i);
                 let version = block.versions.get_version(i);
                 if version > self.truncate_ts {
-                    self.finish_range(i);
+                    self.filter.finish_range(i);
                     continue;
                 }
                 if self.end_int_handle.is_some() && handle >= self.end_int_handle.unwrap() {
-                    self.finish_range(i);
+                    self.filter.finish_range(i);
                     break;
                 }
-                self.start_range(i);
+                self.filter.start_range(i);
             }
         } else {
             let length = block.handles.length();
@@ -766,72 +723,18 @@ impl ColumnarFilterReader for ColumnarTruncateTsReader {
                 let handle = block.handles.get_not_null_value(i);
                 let version = block.versions.get_version(i);
                 if version > self.truncate_ts {
-                    self.finish_range(i);
+                    self.filter.finish_range(i);
                     continue;
                 }
                 if check_handle && handle >= self.end_handle.as_slice() {
-                    self.finish_range(i);
+                    self.filter.finish_range(i);
                     break;
                 }
-                self.start_range(i);
+                self.filter.start_range(i);
             }
         }
-        self.finish_range(read_row);
-        if self.ranges.len() == 1 {
-            let (start, end) = self.ranges[0];
-            if start == 0 {
-                return if end == read_row {
-                    // All rows are valid, no need to filter.
-                    Ok(read_row)
-                } else {
-                    block.truncate(end);
-                    Ok(end)
-                };
-            }
-        }
-        // filter invalid rows.
-        self.filter_block.reset();
-        let mut filtered_rows = 0;
-        for &(start, end) in &self.ranges {
-            self.filter_block.handles.append(&block.handles, start, end);
-            self.filter_block
-                .versions
-                .append(&block.versions, start, end);
-            if let Some(filter_txn_ids) = &mut self.filter_block.txn_ids {
-                filter_txn_ids.append(block.txn_ids.as_ref().unwrap(), start, end);
-            }
-            for (i, col) in self.filter_block.columns.iter_mut().enumerate() {
-                col.append(&block.columns[i], start, end);
-            }
-            filtered_rows += end - start;
-        }
-        mem::swap(block, &mut self.filter_block);
-        Ok(filtered_rows)
-    }
-}
-
-impl ColumnarTruncateTsReader {
-    pub fn set_unbounded_handle_range(&mut self) -> crate::table::Result<()> {
-        if self.get_schema().is_common_handle() {
-            self.set_handle_range(&[], GLOBAL_COMMON_HANDLE_END)?;
-        } else {
-            self.set_int_handle_range(i64::MIN, None)?;
-        }
-        Ok(())
-    }
-
-    fn finish_range(&mut self, i: usize) {
-        if self.in_range {
-            self.ranges.push((self.range_start, i));
-            self.in_range = false;
-        }
-    }
-
-    fn start_range(&mut self, i: usize) {
-        if !self.in_range {
-            self.range_start = i;
-            self.in_range = true;
-        }
+        self.filter.finish_range(read_row);
+        Ok(self.filter.do_filter(read_row, block))
     }
 }
 
