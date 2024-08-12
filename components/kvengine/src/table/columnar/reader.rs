@@ -69,29 +69,15 @@ pub(crate) struct ColumnarTableReader {
 
 #[allow(dead_code)]
 impl ColumnarTableReader {
-    pub fn new(
-        columnar_file: &ColumnarFile,
-        table_id: i64,
-        columns: Vec<ColumnInfo>,
-        need_txn_id: bool,
-    ) -> ColumnarTableReader {
-        let table_meta = columnar_file.get_table(table_id);
-        debug_assert_eq!(table_meta.table_id, table_id);
+    pub fn new(columnar_file: &ColumnarFile, schema: Schema) -> ColumnarTableReader {
+        let table_meta = columnar_file.get_table(schema.table_id);
+        debug_assert_eq!(table_meta.table_id, schema.table_id);
         let file = columnar_file.get_file();
-        let mut schema = Schema {
-            table_id,
-            handle_column: table_meta.handle_column.col_info.clone(),
-            version_column: table_meta.version_column.col_info.clone(),
-            txn_id_column: need_txn_id.then(|| table_meta.txn_id_column.col_info.clone()),
-            columns,
-            pk_col_ids: table_meta.pk_col_ids.clone(),
-        };
-        schema.remove_pk_col_from_columns();
         let handle_reader =
             ColumnarColumnReader::new(file.clone(), table_meta.handle_column.clone(), false);
         let version_reader =
             ColumnarColumnReader::new(file.clone(), table_meta.version_column.clone(), false);
-        let txn_id_reader = need_txn_id.then(|| {
+        let txn_id_reader = schema.txn_id_column.is_some().then(|| {
             ColumnarColumnReader::new(file.clone(), table_meta.txn_id_column.clone(), false)
         });
         let columns_readers = schema
@@ -996,11 +982,10 @@ impl ColumnarRowTableReader {
     pub fn new(
         keyspace_id: u32,
         inner_key_off: usize,
-        mut schema: Schema,
+        schema: Schema,
         iter: Box<dyn table::Iterator>,
         check_schema: bool,
     ) -> ColumnarRowTableReader {
-        schema.remove_pk_col_from_columns();
         let mut prefix = if inner_key_off > 0 {
             encode_row_key(schema.table_id, 0)
         } else {
@@ -1293,12 +1278,7 @@ impl ColumnarReader for ColumnarConcatReader {
             if file.get_biggest().deref() < row_key.as_slice() {
                 continue;
             }
-            let mut reader = ColumnarTableReader::new(
-                file,
-                self.schema.table_id,
-                self.schema.columns.clone(),
-                self.schema.txn_id_column.is_some(),
-            );
+            let mut reader = ColumnarTableReader::new(file, self.schema.clone());
             reader.seek(handle)?;
             self.reader = Some(reader);
             self.idx = i;
@@ -1317,12 +1297,7 @@ impl ColumnarReader for ColumnarConcatReader {
                 self.idx += 1;
                 if self.idx < self.files.len() {
                     let file = &self.files[self.idx];
-                    let mut reader = ColumnarTableReader::new(
-                        file,
-                        self.schema.table_id,
-                        self.schema.columns.clone(),
-                        self.schema.txn_id_column.is_some(),
-                    );
+                    let mut reader = ColumnarTableReader::new(file, self.schema.clone());
                     reader.seek(&[])?;
                     self.reader = Some(reader);
                 }
@@ -1359,6 +1334,7 @@ pub mod tests {
                 },
                 columnar::ColumnarFile,
                 reader::{ColumnarMvccReader, ColumnarReader, ColumnarTableReader},
+                SchemaBuf,
             },
             file::{File, InMemFile},
             memtable::{CfTable, WriteBatch},
@@ -1411,23 +1387,23 @@ pub mod tests {
     }
 
     pub fn new_schema(table_id: i64, common_handle: bool) -> Schema {
-        let mut schema = Schema::default();
-        schema.table_id = table_id;
+        let mut schema_buf = SchemaBuf::default();
+        schema_buf.table_id = table_id;
         if common_handle {
-            schema.handle_column = new_common_handle_column_info();
+            schema_buf.handle_column = new_common_handle_column_info();
         } else {
-            schema.handle_column = new_int_handle_column_info();
+            schema_buf.handle_column = new_int_handle_column_info();
         }
-        schema.version_column = new_version_column_info();
-        schema.txn_id_column = Some(new_txn_id_column_info());
+        schema_buf.version_column = new_version_column_info();
+        schema_buf.txn_id_column = Some(new_txn_id_column_info());
         let mut col_1 = new_column_info(1);
         col_1.set_tp(FieldTypeTp::LongLong as i32);
         let mut col_2 = new_column_info(2);
         col_2.set_tp(FieldTypeTp::VarChar as i32);
         col_2.set_collation(Utf8Mb4GeneralCi as i32);
-        schema.columns.push(col_1);
-        schema.columns.push(col_2);
-        schema
+        schema_buf.columns.push(col_1);
+        schema_buf.columns.push(col_2);
+        Schema::new(schema_buf)
     }
 
     pub fn build_table(
@@ -1557,8 +1533,7 @@ pub mod tests {
             let schema = new_schema(1, common_handle);
             let (file, ref_rows) = build_table(1, true, &schema, 100, 150, 100);
             let columnar_file = ColumnarFile::open(file).unwrap();
-            let mut reader =
-                ColumnarTableReader::new(&columnar_file, 1, schema.columns.clone(), true);
+            let mut reader = ColumnarTableReader::new(&columnar_file, schema.clone());
             reader.seek(&0u64.to_le_bytes()).unwrap();
             let mut block = Block::new(&schema);
             reader.read(&mut block, 100).unwrap();
@@ -1574,12 +1549,7 @@ pub mod tests {
         let mut readers: Vec<Box<dyn ColumnarReader>> = vec![];
         for file in files {
             let columnar_file = ColumnarFile::open(file.clone()).unwrap();
-            let reader = ColumnarTableReader::new(
-                &columnar_file,
-                schema.table_id,
-                schema.columns.clone(),
-                schema.txn_id_column.is_some(),
-            );
+            let reader = ColumnarTableReader::new(&columnar_file, schema.clone());
             readers.push(Box::new(reader));
         }
         let merge_reader = ColumnarMergeReader::new(schema.clone(), readers);
@@ -1595,12 +1565,7 @@ pub mod tests {
         let mut readers: Vec<Box<dyn ColumnarReader>> = vec![];
         for file in files {
             let columnar_file = ColumnarFile::open(file.clone()).unwrap();
-            let reader = ColumnarTableReader::new(
-                &columnar_file,
-                schema.table_id,
-                schema.columns.clone(),
-                schema.txn_id_column.is_some(),
-            );
+            let reader = ColumnarTableReader::new(&columnar_file, schema.clone());
             readers.push(Box::new(reader));
         }
         let merge_reader = ColumnarMergeReader::new(schema.clone(), readers);

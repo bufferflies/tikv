@@ -14,7 +14,7 @@ use kvengine::{
         columnar,
         columnar::{
             build_schema_file, new_int_handle_column_info, new_txn_id_column_info,
-            new_version_column_info, ColumnarFilterReader, Schema,
+            new_version_column_info, ColumnarFilterReader, Schema, SchemaBuf,
         },
     },
 };
@@ -154,8 +154,9 @@ fn test_covert_row_to_columnar() {
         .block_on(create_keyspace_and_split_tables(&mut cluster, keyspace_id));
     let table_id = table_ids[1];
     let schemas = build_schemas(vec![table_id]);
-    let mut schema = schemas[0].clone();
-    schema.txn_id_column = None;
+    let mut schema_buf = schemas[0].to_schema_buf();
+    schema_buf.txn_id_column = None;
+    let schema = Schema::new(schema_buf);
     let schema_version = 10;
     let schema_file_data = build_schema_file(keyspace_id, schema_version, schemas);
     let schema_file_id = 100;
@@ -272,14 +273,15 @@ fn build_schemas(table_ids: Vec<i64>) -> Vec<Schema> {
         c2.set_tp(FieldTypeTp::VarChar.to_u8().unwrap() as i32);
         c2.set_column_len(255);
         c2.set_collation(Collation::Utf8Mb4Bin as i32);
-        let schema = Schema {
+        let schema = SchemaBuf {
             table_id: columnar_table_id,
             handle_column: new_int_handle_column_info(),
             version_column: new_version_column_info(),
             txn_id_column: Some(new_txn_id_column_info()),
             columns: vec![c1, c2],
             pk_col_ids: vec![],
-        };
+        }
+        .into();
         schemas.push(schema);
     }
     schemas

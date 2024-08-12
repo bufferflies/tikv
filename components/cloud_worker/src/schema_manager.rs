@@ -22,7 +22,7 @@ use kvengine::{
         columnar,
         columnar::{
             new_common_handle_column_info, new_int_handle_column_info, new_txn_id_column_info,
-            new_version_column_info, Schema, SchemaFile,
+            new_version_column_info, Schema, SchemaBuf, SchemaFile,
         },
         file::{File, LocalFile},
         ChecksumType, NO_COMPRESSION,
@@ -668,11 +668,13 @@ fn table_info_to_schema(ti: &TableInfo) -> Schema {
     let handle_column = if ti.is_common_handle {
         new_common_handle_column_info()
     } else if ti.pk_is_handle {
-        columns.iter().find(|c| c.get_pk_handle()).unwrap().clone()
+        let pk_handle_col = columns.iter().find(|c| c.get_pk_handle()).unwrap().clone();
+        columns.retain(|c| !c.get_pk_handle());
+        pk_handle_col
     } else {
         new_int_handle_column_info()
     };
-    Schema {
+    SchemaBuf {
         table_id: ti.id,
         handle_column,
         version_column: new_version_column_info(),
@@ -680,6 +682,7 @@ fn table_info_to_schema(ti: &TableInfo) -> Schema {
         columns,
         pk_col_ids,
     }
+    .into()
 }
 
 pub struct SchemaManagerCore {
@@ -943,7 +946,7 @@ mod tests {
     use bytes::Bytes;
     use kvengine::table::{
         columnar::{
-            build_schema_file, new_int_handle_column_info, new_version_column_info, Schema,
+            build_schema_file, new_int_handle_column_info, new_version_column_info, SchemaBuf,
         },
         file::LocalFile,
     };
@@ -980,26 +983,30 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut schemas = vec![];
         for i in 0..=10 {
-            let schema = Schema {
+            let schema = SchemaBuf {
                 table_id: i,
                 handle_column: new_int_handle_column_info(),
                 version_column: new_version_column_info(),
                 txn_id_column: None,
                 columns: vec![new_int_handle_column_info()],
                 pk_col_ids: vec![],
-            };
+            }
+            .into();
             schemas.push(schema);
         }
         let schema_file_data = build_schema_file(1234, 100, schemas.clone());
         write_schema_file_to_local(dir.path(), 1234, 1000, Bytes::from(schema_file_data)).unwrap();
-        schemas.push(Schema {
-            table_id: 11,
-            handle_column: new_int_handle_column_info(),
-            version_column: new_version_column_info(),
-            txn_id_column: None,
-            columns: vec![new_int_handle_column_info()],
-            pk_col_ids: vec![],
-        });
+        schemas.push(
+            SchemaBuf {
+                table_id: 11,
+                handle_column: new_int_handle_column_info(),
+                version_column: new_version_column_info(),
+                txn_id_column: None,
+                columns: vec![new_int_handle_column_info()],
+                pk_col_ids: vec![],
+            }
+            .into(),
+        );
         let schema_file_data = build_schema_file(1234, 201, schemas);
         write_schema_file_to_local(dir.path(), 1234, 1001, Bytes::from(schema_file_data)).unwrap();
 

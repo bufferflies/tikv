@@ -29,7 +29,7 @@ use crate::{
         blobtable::blobtable::BlobPrefetcher,
         columnar::{
             ColumnarConcatReader, ColumnarMergeReader, ColumnarMvccReader, ColumnarReader,
-            ColumnarRowTableReader, ColumnarTableReader, Schema, HANDLE_COL_ID,
+            ColumnarRowTableReader, ColumnarTableReader, Schema, SchemaBuf, HANDLE_COL_ID,
         },
         memtable::{CfTable, Hint, SkipList, WriteBatch},
         sstable::BlockCacheKey,
@@ -1217,7 +1217,7 @@ impl SnapAccessCore {
         }
         let schema_file = self.data.schema_file.as_ref()?;
         let table_schema = schema_file.get_table(table_id)?;
-        let mut schema = Schema {
+        let mut schema_buf = SchemaBuf {
             table_id,
             handle_column: table_schema.handle_column.clone(),
             version_column: table_schema.version_column.clone(),
@@ -1225,9 +1225,10 @@ impl SnapAccessCore {
             columns: columns.to_vec(),
             pk_col_ids: table_schema.pk_col_ids.clone(),
         };
-        schema
+        schema_buf
             .columns
             .retain(|c| !c.get_pk_handle() && c.get_column_id() != HANDLE_COL_ID as i64);
+        let schema = Schema::new(schema_buf);
         let mut readers: Vec<Box<dyn ColumnarReader>> = vec![];
         for mem in &self.data.mem_tbls {
             let skl = mem.get_cf(WRITE_CF);
@@ -1263,12 +1264,7 @@ impl SnapAccessCore {
                 readers.push(Box::new(concat_reader));
             } else {
                 for col_file in &columnar_level.files {
-                    let col_reader = ColumnarTableReader::new(
-                        col_file,
-                        schema.table_id,
-                        schema.columns.clone(),
-                        false,
-                    );
+                    let col_reader = ColumnarTableReader::new(col_file, schema.clone());
                     readers.push(Box::new(col_reader));
                 }
             }

@@ -42,7 +42,7 @@ use crate::{
         columnar::{
             build_schema_file,
             tests::{build_table, new_schema, verify_with_ref_rows},
-            ColumnarFilterReader, SchemaFile,
+            ColumnarFilterReader, Schema, SchemaFile,
         },
         file::{File, InMemFile},
         memtable::CfTable,
@@ -1348,8 +1348,9 @@ fn test_columnar_l0_compaction(#[case] enable_inner_key_off: bool) {
     mvcc_reader
         .set_handle_range(&i_to_common_handle(0), &i_to_common_handle(2100))
         .unwrap();
-    let mut without_txn_id_schema = schema;
-    without_txn_id_schema.txn_id_column = None;
+    let mut without_txn_id_schema_buf = schema.to_schema_buf();
+    without_txn_id_schema_buf.txn_id_column = None;
+    let without_txn_id_schema = without_txn_id_schema_buf.into();
     let mut block = Block::new(&without_txn_id_schema);
     mvcc_reader.read_block(&mut block, usize::MAX).unwrap();
     let tbl_refs = merge_refs(
@@ -1477,9 +1478,9 @@ fn test_columnar_l1_compaction(#[case] enable_inner_key_off: bool) {
     mvcc_reader
         .set_handle_range(&i_to_common_handle(0), &i_to_common_handle(2100))
         .unwrap();
-    let mut without_txn_id_schema = schema;
+    let mut without_txn_id_schema = schema.to_schema_buf();
     without_txn_id_schema.txn_id_column = None;
-    let mut block = Block::new(&without_txn_id_schema);
+    let mut block = Block::new(&without_txn_id_schema.into());
     mvcc_reader.read_block(&mut block, usize::MAX).unwrap();
     let tbl_refs = merge_refs(
         vec![
@@ -1620,8 +1621,9 @@ fn test_columnar_major_compaction(#[case] enable_inner_key_off: bool) {
     mvcc_reader
         .set_int_handle_range(0, Some(end_handle))
         .unwrap();
-    let mut no_txn_id_schema = schema;
-    no_txn_id_schema.txn_id_column = None;
+    let mut no_txn_id_schema_buf = schema.to_schema_buf();
+    no_txn_id_schema_buf.txn_id_column = None;
+    let no_txn_id_schema = Schema::new(no_txn_id_schema_buf);
     let mut block = Block::new(&no_txn_id_schema);
     let mvcc_reader_counts = mvcc_reader.read_block(&mut block, usize::MAX).unwrap();
     info!("mvcc_reader read block with {} rows", mvcc_reader_counts);
@@ -1898,9 +1900,9 @@ fn test_columnar_truncate_ts(#[case] enable_inner_key_off: bool) {
         .new_columnar_mvcc_reader(table_id, &schema.columns, u64::MAX)
         .unwrap();
     mvcc_reader.set_int_handle_range(0, Some(3000)).unwrap();
-    let mut no_txn_id_schema = schema;
-    no_txn_id_schema.txn_id_column = None;
-    let mut block = Block::new(&no_txn_id_schema);
+    let mut no_txn_id_schema_buf = schema.to_schema_buf();
+    no_txn_id_schema_buf.txn_id_column = None;
+    let mut block = Block::new(&no_txn_id_schema_buf.into());
     let counts = mvcc_reader.read_block(&mut block, usize::MAX).unwrap();
     for i in 0..counts {
         assert_eq!(100, block.versions.get_version(i));
@@ -2026,8 +2028,9 @@ fn test_columnar_trim_over_bound(#[case] enable_inner_key_off: bool) {
         .new_columnar_mvcc_reader(table_id, &schema.columns, u64::MAX)
         .unwrap();
     mvcc_reader.set_int_handle_range(0, Some(3000)).unwrap();
-    let mut no_txn_id_schema = schema.clone();
-    no_txn_id_schema.txn_id_column = None;
+    let mut no_txn_id_schema_buf = schema.to_schema_buf();
+    no_txn_id_schema_buf.txn_id_column = None;
+    let no_txn_id_schema = Schema::new(no_txn_id_schema_buf);
     let mut block = Block::new(&no_txn_id_schema);
     let read_before_trim = mvcc_reader.read_block(&mut block, usize::MAX).unwrap();
 

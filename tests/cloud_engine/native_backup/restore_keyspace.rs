@@ -14,7 +14,7 @@ use engine_traits::ObjectStorage;
 use kvengine::{
     dfs::{DFSConfig, Dfs, FileType, Options, S3Fs},
     table::columnar::{
-        build_schema_file, new_int_handle_column_info, new_version_column_info, Schema,
+        build_schema_file, new_int_handle_column_info, new_version_column_info, SchemaBuf,
     },
     ShardStats, WRITE_CF,
 };
@@ -1168,14 +1168,15 @@ fn test_restore_keyspace_with_schema() {
     // Set schema file
     let mut schemas = vec![];
     for i in 0..=10 {
-        let schema = Schema {
+        let schema = SchemaBuf {
             table_id: i,
             handle_column: new_int_handle_column_info(),
             version_column: new_version_column_info(),
             txn_id_column: None,
             columns: vec![new_int_handle_column_info()],
             pk_col_ids: vec![],
-        };
+        }
+        .into();
         schemas.push(schema);
     }
     let schema_version = 100;

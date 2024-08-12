@@ -2415,12 +2415,7 @@ fn compact_destroy_range_for_columnar(
                 continue;
             }
             let schema = schema_file.get_table(table_id).unwrap();
-            let reader = ColumnarTableReader::new(
-                &columnar_file,
-                table_id,
-                schema.columns.clone(),
-                schema.txn_id_column.is_some(),
-            );
+            let reader = ColumnarTableReader::new(&columnar_file, schema.clone());
             let mut compact_reader =
                 ColumnarCompactReader::new(Box::new(reader), level, schema, req.safe_ts);
             compact_reader.set_unbounded_handle_range()?;
@@ -2658,12 +2653,7 @@ fn compact_truncate_ts_for_columnar(
         );
         for table_id in overlap_tables {
             let schema = schema_file.get_table(table_id).unwrap();
-            let reader = ColumnarTableReader::new(
-                &columnar_file,
-                table_id,
-                schema.columns.clone(),
-                schema.txn_id_column.is_some(),
-            );
+            let reader = ColumnarTableReader::new(&columnar_file, schema.clone());
             let mut truncate_ts_reader =
                 ColumnarTruncateTsReader::new(Box::new(reader), schema, truncate_ts);
             truncate_ts_reader.set_unbounded_handle_range()?;
@@ -2924,12 +2914,7 @@ fn compact_trim_over_bound_for_columnar(
                 continue;
             }
             let schema = schema_file.get_table(table_id).unwrap();
-            let reader = ColumnarTableReader::new(
-                &columnar_file,
-                table_id,
-                schema.columns.clone(),
-                schema.txn_id_column.is_some(),
-            );
+            let reader = ColumnarTableReader::new(&columnar_file, schema.clone());
             let mut compact_reader =
                 ColumnarCompactReader::new(Box::new(reader), level, schema, req.safe_ts);
             if schema.is_common_handle() {
@@ -3960,12 +3945,7 @@ fn compact_columnar_l0_files(
         let schema = schema_file.get_table(table_id).unwrap();
         let mut readers: Vec<Box<dyn ColumnarReader>> = vec![];
         for columnar_file in &col_tbls {
-            let reader = ColumnarTableReader::new(
-                columnar_file,
-                table_id,
-                schema.columns.clone(),
-                schema.txn_id_column.is_some(),
-            );
+            let reader = ColumnarTableReader::new(columnar_file, schema.clone());
             readers.push(Box::new(reader));
         }
         let merge_reader = ColumnarMergeReader::new(schema.clone(), readers);
@@ -4091,12 +4071,7 @@ fn compact_columnar_l1_files(
         let schema = schema_file.get_table(table_id).unwrap();
         let mut readers: Vec<Box<dyn ColumnarReader>> = vec![];
         for columnar_file in &l1_tbls {
-            let reader = ColumnarTableReader::new(
-                columnar_file,
-                table_id,
-                schema.columns.clone(),
-                schema.txn_id_column.is_some(),
-            );
+            let reader = ColumnarTableReader::new(columnar_file, schema.clone());
             readers.push(Box::new(reader));
         }
         let concat_reader = ColumnarConcatReader::new(&l2_tbls, schema.clone());

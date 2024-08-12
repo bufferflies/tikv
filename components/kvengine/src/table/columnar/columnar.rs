@@ -1,6 +1,6 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::sync::Arc;
+use std::{ops::Deref, sync::Arc};
 
 use bytes::{Buf, BufMut};
 use collections::HashMap;
@@ -24,7 +24,7 @@ pub(crate) const TXN_ID_COL_ID: i32 = -1034;
 pub const COLUMNAR_MAGIC: u32 = 0xc01e32ae;
 
 #[derive(Default, Clone, Debug, PartialEq)]
-pub struct Schema {
+pub struct SchemaBuf {
     pub table_id: i64,
     pub handle_column: ColumnInfo,
     pub version_column: ColumnInfo,
@@ -33,7 +33,39 @@ pub struct Schema {
     pub pk_col_ids: Vec<i64>,
 }
 
+impl SchemaBuf {
+    pub fn remove_pk_col_from_columns(&mut self) {
+        let handle_col_id = self.handle_column.get_column_id();
+        self.columns.retain(|c| c.get_column_id() != handle_col_id);
+    }
+}
+
+#[derive(Default, Clone, Debug, PartialEq)]
+pub struct Schema {
+    core: Arc<SchemaBuf>,
+}
+
+impl Deref for Schema {
+    type Target = SchemaBuf;
+
+    fn deref(&self) -> &Self::Target {
+        &self.core
+    }
+}
+
+impl From<SchemaBuf> for Schema {
+    fn from(buf: SchemaBuf) -> Self {
+        Self::new(buf)
+    }
+}
+
 impl Schema {
+    pub fn new(buf: SchemaBuf) -> Self {
+        Self {
+            core: Arc::new(buf),
+        }
+    }
+
     pub fn is_common_handle(&self) -> bool {
         get_fixed_size(&self.handle_column) == 0
     }
@@ -48,9 +80,8 @@ impl Schema {
         None
     }
 
-    pub fn remove_pk_col_from_columns(&mut self) {
-        let handle_col_id = self.handle_column.get_column_id();
-        self.columns.retain(|c| c.get_column_id() != handle_col_id);
+    pub fn to_schema_buf(&self) -> SchemaBuf {
+        self.deref().clone()
     }
 }
 
@@ -129,7 +160,6 @@ pub(crate) struct TableMeta {
     pub(crate) version_column: Arc<ColumnMeta>,
     pub(crate) txn_id_column: Arc<ColumnMeta>,
     pub(crate) columns: HashMap<i32, Arc<ColumnMeta>>,
-    pub(crate) pk_col_ids: Vec<i64>,
 }
 
 impl TableMeta {
@@ -173,7 +203,6 @@ impl TableMeta {
             version_column: Arc::new(version_column),
             txn_id_column: Arc::new(txn_id_column),
             columns,
-            pk_col_ids,
         }
     }
 }

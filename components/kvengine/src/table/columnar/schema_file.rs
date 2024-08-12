@@ -15,7 +15,7 @@ use crate::table::{
     columnar::{
         builder::{new_txn_id_column_info, new_version_column_info},
         columnar::Schema,
-        get_primary_key,
+        get_primary_key, SchemaBuf,
     },
     file::File,
     ChecksumType, InnerKey, NO_COMPRESSION,
@@ -117,7 +117,7 @@ impl SchemaFile {
                 .map(|c| c.get_column_id())
                 .collect();
             let handle_column = columns.pop().unwrap();
-            let schema = Schema {
+            let schema_buf = SchemaBuf {
                 table_id,
                 handle_column,
                 version_column: new_version_column_info(),
@@ -125,7 +125,7 @@ impl SchemaFile {
                 columns,
                 pk_col_ids,
             };
-            tables.insert(table_id, schema);
+            tables.insert(table_id, Schema::new(schema_buf));
         }
         let core = SchemaFileCore {
             file_id,
@@ -299,22 +299,22 @@ mod tests {
     fn test_schema_file() {
         let keyspace_id = 1;
         let schema_version = 1234i64;
-        let schema_1 = Schema {
+        let schema_1 = Schema::new(SchemaBuf {
             table_id: 10,
             handle_column: new_common_handle_column_info(),
             version_column: new_version_column_info(),
             txn_id_column: Some(new_txn_id_column_info()),
             columns: vec![new_column_info(3, true), new_column_info(4, false)],
             pk_col_ids: vec![],
-        };
-        let schema_2 = Schema {
+        });
+        let schema_2 = Schema::new(SchemaBuf {
             table_id: 20,
             handle_column: new_int_handle_column_info(),
             version_column: new_version_column_info(),
             txn_id_column: Some(new_txn_id_column_info()),
             columns: vec![new_column_info(3, false), new_column_info(4, true)],
             pk_col_ids: vec![],
-        };
+        });
         let schemas = vec![schema_1, schema_2];
         let data = build_schema_file(keyspace_id, schema_version, schemas.clone());
         let file = Arc::new(InMemFile::new(100, data.into()));
@@ -393,30 +393,30 @@ mod tests {
     fn test_contains_schema() {
         let keyspace_id = 1;
         let schema_version = 1234i64;
-        let schema_1 = Schema {
+        let schema_1 = Schema::new(SchemaBuf {
             table_id: 10,
             handle_column: new_common_handle_column_info(),
             version_column: new_version_column_info(),
             txn_id_column: Some(new_txn_id_column_info()),
             columns: vec![new_column_info(3, true), new_column_info(4, false)],
             pk_col_ids: vec![],
-        };
-        let schema_2 = Schema {
+        });
+        let schema_2 = Schema::new(SchemaBuf {
             table_id: 20,
             handle_column: new_int_handle_column_info(),
             version_column: new_version_column_info(),
             txn_id_column: Some(new_txn_id_column_info()),
             columns: vec![new_column_info(3, false), new_column_info(4, true)],
             pk_col_ids: vec![],
-        };
-        let schema_3 = Schema {
+        });
+        let schema_3 = Schema::new(SchemaBuf {
             table_id: 30,
             handle_column: new_int_handle_column_info(),
             version_column: new_version_column_info(),
             txn_id_column: Some(new_txn_id_column_info()),
             columns: vec![new_column_info(3, false), new_column_info(4, true)],
             pk_col_ids: vec![],
-        };
+        });
         let schemas = vec![schema_1.clone(), schema_2.clone()];
         let data = build_schema_file(keyspace_id, schema_version, schemas.clone());
         let file = Arc::new(InMemFile::new(100, data.into()));
