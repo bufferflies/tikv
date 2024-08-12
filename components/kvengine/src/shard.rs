@@ -670,6 +670,18 @@ impl Shard {
         data.get_txn_chunks()
     }
 
+    pub fn get_all_col_files(&self) -> Vec<u64> {
+        let data = self.get_data();
+        let mut col_ids = vec![];
+        data.for_each_columnar_level(|cl| {
+            for tbl in cl.files.iter() {
+                col_ids.push(tbl.id());
+            }
+            false
+        });
+        col_ids
+    }
+
     #[inline]
     pub fn has_txn_file_locks(&self) -> bool {
         self.get_data().has_txn_file_locks()
@@ -2286,6 +2298,12 @@ impl ColumnarLevel {
     pub(crate) fn sort(&mut self) {
         if self.level < 2 {
             self.files.sort_by(|a, b| {
+                if a.get_l0_version().is_none() {
+                    info!("columnar file {} has no l0 version", a.id());
+                }
+                if b.get_l0_version().is_none() {
+                    info!("columnar file {} has no l0 version", b.id());
+                }
                 let a_l0_version = a.get_l0_version().unwrap();
                 let b_l0_version = b.get_l0_version().unwrap();
                 b_l0_version.cmp(&a_l0_version)

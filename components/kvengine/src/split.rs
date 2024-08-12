@@ -193,12 +193,14 @@ impl Engine {
                 self.shards.insert(id, shard.clone());
             }
             let all_files = shard.get_all_files();
+            let all_col_files = shard.get_all_col_files();
             info!(
-                "split new shard {}, start {:x}, end {:x}, all files {:?}",
+                "split new shard {}, start {:x}, end {:x}, all files {:?}, all col_files: {:?}",
                 shard.tag(),
                 shard.outer_start,
                 shard.outer_end,
-                all_files
+                all_files,
+                all_col_files,
             );
         }
         Ok(())

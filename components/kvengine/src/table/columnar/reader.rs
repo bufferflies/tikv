@@ -51,6 +51,8 @@ use crate::{
     UserMeta,
 };
 
+pub const GLOBAL_COMMON_HANDLE_END: &[u8] = &[255];
+
 pub trait ColumnarReader: Send {
     fn schema(&self) -> &Schema;
     fn seek(&mut self, handle: &[u8]) -> crate::table::Result<()>;
@@ -653,6 +655,15 @@ impl ColumnarFilterReader for ColumnarCompactReader {
 }
 
 impl ColumnarCompactReader {
+    pub fn set_unbounded_handle_range(&mut self) -> crate::table::Result<()> {
+        if self.get_schema().is_common_handle() {
+            self.set_handle_range(&[], GLOBAL_COMMON_HANDLE_END)?;
+        } else {
+            self.set_int_handle_range(i64::MIN, None)?;
+        }
+        Ok(())
+    }
+
     fn finish_range(&mut self, i: usize) {
         if self.in_range {
             self.ranges.push((self.range_start, i));
@@ -800,6 +811,15 @@ impl ColumnarFilterReader for ColumnarTruncateTsReader {
 }
 
 impl ColumnarTruncateTsReader {
+    pub fn set_unbounded_handle_range(&mut self) -> crate::table::Result<()> {
+        if self.get_schema().is_common_handle() {
+            self.set_handle_range(&[], GLOBAL_COMMON_HANDLE_END)?;
+        } else {
+            self.set_int_handle_range(i64::MIN, None)?;
+        }
+        Ok(())
+    }
+
     fn finish_range(&mut self, i: usize) {
         if self.in_range {
             self.ranges.push((self.range_start, i));

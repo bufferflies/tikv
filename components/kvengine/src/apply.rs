@@ -584,7 +584,11 @@ impl EngineCore {
         let mut all_deletes = HashSet::new();
         for deleted in tc.get_table_deletes() {
             grouped
-                .entry((deleted.get_cf() as usize, deleted.get_level() as usize))
+                .entry((
+                    deleted.get_cf(),
+                    deleted.get_level() as usize,
+                    deleted.columnar_tables > 0,
+                ))
                 .or_insert_with(|| (Vec::new(), Vec::new()))
                 .0
                 .push(deleted.get_id());
@@ -602,14 +606,24 @@ impl EngineCore {
                 continue;
             }
             grouped
-                .entry((created.get_cf() as usize, created.get_level() as usize))
+                .entry((
+                    created.get_cf(),
+                    created.get_level() as usize,
+                    created.columnar_tables > 0,
+                ))
                 .or_insert_with(|| (Vec::new(), Vec::new()))
                 .1
                 .push(created.get_id());
         }
         new_col_levels.sort();
 
-        for ((cf, level), (deletes, creates)) in grouped {
+        for ((cf, level, is_columnar), (deletes, creates)) in grouped {
+            if is_columnar {
+                new_col_levels.levels[level]
+                    .files
+                    .retain(|col| !deletes.contains(&col.id()));
+                continue;
+            }
             if level == 0 {
                 new_l0s.retain(|l0| {
                     let is_deleted = deletes.contains(&l0.id());
@@ -627,7 +641,7 @@ impl EngineCore {
                 );
                 new_l0s.sort_by(|a, b| b.version().cmp(&a.version()));
             } else {
-                let old_level = new_cfs[cf].get_level(level);
+                let old_level = new_cfs[cf as usize].get_level(level);
                 let mut new_level_tables = old_level.tables.as_ref().clone();
                 new_level_tables.retain(|t| {
                     let is_deleted = deletes.contains(&t.id());
@@ -643,7 +657,7 @@ impl EngineCore {
                 );
                 new_level_tables.sort_by(|a, b| a.smallest().cmp(&b.smallest()));
                 let new_level = LevelHandler::new(level, new_level_tables);
-                new_cfs[cf].set_level(new_level);
+                new_cfs[cf as usize].set_level(new_level);
             }
         }
 

@@ -172,6 +172,13 @@ pub fn encode_row(ctx: &mut EvalContext, row: Vec<Datum>, col_ids: &[i64]) -> Re
     datum::encode_value(ctx, &values)
 }
 
+pub fn encode_row_key_prefix(table_id: i64) -> Vec<u8> {
+    let mut key = Vec::with_capacity(TABLE_PREFIX_KEY_LEN);
+    key.write_bytes(TABLE_PREFIX).unwrap();
+    key.write_i64(table_id).unwrap();
+    key
+}
+
 /// `encode_row_key` encodes the table id and record handle into a byte array.
 pub fn encode_row_key(table_id: i64, handle: i64) -> Vec<u8> {
     let mut key = Vec::with_capacity(RECORD_ROW_KEY_LEN);

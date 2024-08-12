@@ -433,12 +433,20 @@ impl ColumnarFile {
         self.core.file.clone()
     }
 
+    pub fn id(&self) -> u64 {
+        self.core.file.id()
+    }
+
     pub fn get_smallest(&self) -> InnerKey<'_> {
         InnerKey::from_inner_buf(&self.core.smallest_key)
     }
 
     pub fn get_biggest(&self) -> InnerKey<'_> {
         InnerKey::from_inner_buf(&self.core.biggest_key)
+    }
+
+    pub fn has_data_in_range(&self, start_key: InnerKey<'_>, end_key: InnerKey<'_>) -> bool {
+        self.get_smallest() < end_key && self.get_biggest() >= start_key
     }
 
     pub fn get_max_version(&self) -> u64 {
@@ -451,6 +459,10 @@ impl ColumnarFile {
 
     pub fn size(&self) -> u64 {
         self.core.file.size()
+    }
+
+    pub fn table_count(&self) -> usize {
+        self.core.tables.len()
     }
 }
 
