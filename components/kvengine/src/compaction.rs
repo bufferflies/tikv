@@ -359,37 +359,7 @@ pub struct CompactionRequest {
     /// Must be set to `CURRENT_COMPACTOR_VERSION`.
     pub compactor_version: u32,
 
-    /// All following fields belong to v2 compaction, will be deprecated in v3.
-    pub cf: isize,
-    pub level: usize,
-    pub tops: Vec<u64>,
-    /// If `destroy_range` is true, `in_place_compact_files` will be compacted
-    /// in place to filter out data that covered by `del_prefixes`.
-    pub destroy_range: bool,
-    pub del_prefixes: Vec<u8>,
-    // Vec<(id, level, cf)>
-    pub in_place_compact_files: Vec<(u64, u32, i32)>,
-
-    /// If `truncate_ts` is some, `in_place_compact_files` will be compacted in
-    /// place to filter out data with version > `truncated_ts`.
-    pub truncate_ts: Option<u64>,
-
-    /// Requires `compactor_version >= 1`.
-    /// If `trim_over_bound` is true, `in_place_compact_files` will be compacted
-    /// in place to filter out data out of shard bound.
-    pub trim_over_bound: bool,
-
-    // Used for L1+ compaction.
-    pub bottoms: Vec<u64>,
-
-    // Used for L0 compaction.
-    pub multi_cf_bottoms: Vec<Vec<u64>>,
-    // End of deprecating members
-    pub overlap: bool,
     pub safe_ts: u64,
-    pub block_size: usize,
-    pub max_table_size: usize,
-    pub compression_tp: u8,
     pub exported_encryption_key: Vec<u8>,
 }
 
@@ -620,12 +590,7 @@ impl Engine {
         req.file_ids = ids;
     }
 
-    pub(crate) fn new_compact_request_with_shard(
-        &self,
-        shard: &Shard,
-        cf: isize,
-        level: usize,
-    ) -> CompactionRequest {
+    pub(crate) fn new_compact_request_with_shard(&self, shard: &Shard) -> CompactionRequest {
         let exported_encryption_key = shard
             .properties
             .get(ENCRYPTION_KEY)
@@ -636,18 +601,11 @@ impl Engine {
             shard.id,
             shard.ver,
             shard.range.clone(),
-            cf,
-            level,
             exported_encryption_key,
         )
     }
 
-    pub(crate) fn new_compact_request_with_meta(
-        &self,
-        meta: &ShardMeta,
-        cf: isize,
-        level: usize,
-    ) -> CompactionRequest {
+    pub(crate) fn new_compact_request_with_meta(&self, meta: &ShardMeta) -> CompactionRequest {
         let exported_encryption_key = meta
             .properties
             .get(ENCRYPTION_KEY)
@@ -658,8 +616,6 @@ impl Engine {
             meta.id,
             meta.ver,
             meta.range.clone(),
-            cf,
-            level,
             exported_encryption_key,
         )
     }
@@ -670,8 +626,6 @@ impl Engine {
         shard_id: u64,
         shard_ver: u64,
         range: ShardRange,
-        cf: isize,
-        level: usize,
         exported_encryption_key: Vec<u8>,
     ) -> CompactionRequest {
         CompactionRequest {
@@ -684,22 +638,7 @@ impl Engine {
             file_ids: vec![],
             compaction_tp: CompactionType::Unknown,
             compactor_version: self.opts.compaction_request_version,
-            // all fields below will be deprecated in v3.
-            destroy_range: false,
-            del_prefixes: vec![],
-            in_place_compact_files: vec![],
-            truncate_ts: None,
-            trim_over_bound: false,
-            cf,
-            level,
             safe_ts: self.get_keyspace_gc_safepoint_v2(range.keyspace_id),
-            block_size: self.opts.table_builder_options.block_size,
-            max_table_size: self.opts.table_builder_options.max_table_size,
-            compression_tp: self.opts.table_builder_options.compression_tps[level],
-            overlap: level == 0,
-            tops: vec![],
-            bottoms: vec![],
-            multi_cf_bottoms: vec![],
             exported_encryption_key,
         }
     }
@@ -802,9 +741,7 @@ impl Engine {
             cs.mut_destroy_range().set_table_deletes(deletes.into());
             cs
         } else {
-            let mut req = self.new_compact_request_with_shard(shard, 0, 0);
-            req.destroy_range = true;
-            req.del_prefixes = del_prefixes.marshal();
+            let mut req = self.new_compact_request_with_shard(shard);
             req.file_ids = self
                 .id_allocator
                 .alloc_id(overlaps.len() + col_overlaps.len())
@@ -884,8 +821,7 @@ impl Engine {
             cs.set_truncate_ts(pb::TableChange::default());
             cs
         } else {
-            let mut req = self.new_compact_request_with_shard(shard, 0, 0);
-            req.truncate_ts = Some(truncate_ts.inner());
+            let mut req = self.new_compact_request_with_shard(shard);
             req.file_ids = self
                 .id_allocator
                 .alloc_id(overlaps.len() + col_overlaps.len())
@@ -991,8 +927,7 @@ impl Engine {
             cs.mut_trim_over_bound().set_table_deletes(deletes.into());
             cs
         } else {
-            let mut req = self.new_compact_request_with_shard(shard, 0, 0);
-            req.trim_over_bound = true;
+            let mut req = self.new_compact_request_with_shard(shard);
             req.file_ids = self
                 .id_allocator
                 .alloc_id(overlaps.len() + col_overlaps.len())
@@ -1051,8 +986,7 @@ impl Engine {
             }
             cs
         } else {
-            let mut req = self.new_compact_request_with_meta(meta, 0, 0);
-            req.trim_over_bound = true;
+            let mut req = self.new_compact_request_with_meta(meta);
             req.file_ids = self.id_allocator.alloc_id(overlaps.len()).unwrap();
             let in_place_compaction_ctx = InPlaceCompactionCtx {
                 file_ids: overlaps,
@@ -1098,7 +1032,7 @@ impl Engine {
             info!("{} move down l0", tag);
             return Some(Ok(res));
         }
-        let mut req = self.new_compact_request_with_shard(shard, -1, 0);
+        let mut req = self.new_compact_request_with_shard(shard);
         let mut l0_tbls = vec![];
         let mut multi_cfs_l1_tbls = vec![];
         let mut total_size = 0;
@@ -1120,7 +1054,6 @@ impl Engine {
             total_size += l0.size();
         }
 
-        req.tops.extend(l0_tbls.clone());
         for cf in 0..NUM_CFS {
             let lh = data.get_cf(cf).get_level(1);
             let mut l1_tbls = vec![];
@@ -1149,7 +1082,6 @@ impl Engine {
                             * self.opts.blob_table_build_options.min_blob_size as u64;
                 }
             }
-            req.multi_cf_bottoms.push(l1_tbls.clone());
             multi_cfs_l1_tbls.push(l1_tbls);
         }
         let sst_config = self.opts.table_builder_options;
@@ -1391,12 +1323,7 @@ impl Engine {
                 has_overlap = true;
             }
         }
-        let mut req = self.new_compact_request_with_shard(shard, cf, level);
-        req.overlap = has_overlap;
-        req.tops = upper_level_table_ids.clone();
-        req.bottoms = lower_level_table_ids.clone();
-        req.cf = cf;
-        req.level = level;
+        let mut req = self.new_compact_request_with_shard(shard);
         let sst_config = self.opts.table_builder_options;
         let estimated_num_files = (upper_size + lower_size) as usize / sst_config.max_table_size;
         self.set_alloc_ids_for_request(
@@ -1432,7 +1359,7 @@ impl Engine {
                 MAJOR_COMPACTION_MIN_REQUEST_VERSION
             ))));
         }
-        let mut req = self.new_compact_request_with_shard(shard, 0, 0);
+        let mut req = self.new_compact_request_with_shard(shard);
         let mut ln_tables: HashMap<usize, Vec<(usize, Vec<u64>)>> = HashMap::new();
         let mut total_size = 0;
         let data = shard.get_data();
@@ -1489,7 +1416,7 @@ impl Engine {
             return None;
         }
         let schema_file = shard.get_schema_file()?;
-        let mut req = self.new_compact_request_with_shard(shard, 0, 0);
+        let mut req = self.new_compact_request_with_shard(shard);
         let mut source_row_tables = vec![];
         let mut snap_version = 0;
         for l0 in &data.col_levels.unconverted_l0s {
@@ -1520,7 +1447,7 @@ impl Engine {
         shard: &Shard,
     ) -> Option<Result<pb::ChangeSet>> {
         info!("trigger_major_compaction for {}", shard.tag());
-        let mut req = self.new_compact_request_with_shard(shard, WRITE_CF as isize, 0);
+        let mut req = self.new_compact_request_with_shard(shard);
         let data = shard.get_data();
         if data.schema_file.is_none() {
             warn!(
@@ -1610,7 +1537,7 @@ impl Engine {
             store_bool(&shard.compacting, false);
             return None;
         }
-        let mut req = self.new_compact_request_with_shard(shard, WRITE_CF as isize, 0);
+        let mut req = self.new_compact_request_with_shard(shard);
         let mut total_size = 0;
         let mut smallest = l0_tbls[0].get_smallest();
         let mut biggest = l0_tbls[0].get_biggest();
@@ -1705,7 +1632,7 @@ impl Engine {
             total_size += tbl.get_file().size();
         }
 
-        let mut req = self.new_compact_request_with_shard(shard, -1, 1);
+        let mut req = self.new_compact_request_with_shard(shard);
 
         let columnar_config = self.opts.columnar_build_options;
         let estimated_num_files = total_size as usize / columnar_config.max_columnar_table_size;
