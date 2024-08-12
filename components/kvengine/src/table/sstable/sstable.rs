@@ -17,7 +17,7 @@ use xorf::{BinaryFuse8, Filter};
 use super::{builder::*, iterator::TableIterator};
 use crate::{
     table::{
-        sstable::{File, TtlCache},
+        file::{File, TtlCache},
         table::{Iterator, Result},
         *,
     },
@@ -821,7 +821,7 @@ pub(crate) fn build_test_table_with_kvs(kvs: &Vec<(String, String)>, load_filter
 
     let mut buf = Vec::with_capacity(sst_builder.estimated_size());
     sst_builder.finish(0, &mut buf);
-    let sst_file = sstable::InMemFile::new(sst_fid, buf.into());
+    let sst_file = file::InMemFile::new(sst_fid, buf.into());
 
     SsTable::new(Arc::new(sst_file), new_test_cache(), load_filter, None).unwrap()
 }
@@ -908,7 +908,7 @@ mod tests {
         }
         let mut sst_buf = Vec::with_capacity(sst_builder.estimated_size());
         sst_builder.finish(0, &mut sst_buf);
-        let sst_file = Arc::new(sstable::InMemFile::new(sst_fid, sst_buf.into()));
+        let sst_file = Arc::new(file::InMemFile::new(sst_fid, sst_buf.into()));
         (
             SsTable::new(sst_file, new_test_cache(), true, None).unwrap(),
             all_cnt,

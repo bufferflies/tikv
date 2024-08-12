@@ -13,9 +13,8 @@ use crate::table::{
         TableOffset, ENCODING_TYPE_NONE, PACK_FORMAT, PROP_KEY_BIGGEST, PROP_KEY_MAX_VERSION,
         PROP_KEY_SMALLEST, PROP_KEY_SNAP_VERSION,
     },
-    parse_prop_data, search,
-    sstable::{File, LZ4_COMPRESSION},
-    InnerKey,
+    file::File,
+    parse_prop_data, search, InnerKey, LZ4_COMPRESSION,
 };
 
 pub const HANDLE_COL_ID: i32 = -1;

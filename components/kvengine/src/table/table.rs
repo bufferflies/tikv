@@ -64,6 +64,10 @@ pub trait Iterator: Send {
     }
 }
 
+pub const NO_COMPRESSION: u8 = 0;
+pub const LZ4_COMPRESSION: u8 = 1;
+pub const ZSTD_COMPRESSION: u8 = 2;
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 #[derive(Default)]

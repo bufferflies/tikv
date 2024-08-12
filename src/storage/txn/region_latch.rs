@@ -187,8 +187,8 @@ mod tests {
     use api_version::ApiV2;
     use kvengine::{
         table::{
-            sstable::InMemFile, InnerKey, NoPrefixKey, TxnChunk, TxnChunkBuilder, TxnCtx,
-            TxnFileId, OP_PUT,
+            file::InMemFile, InnerKey, NoPrefixKey, TxnChunk, TxnChunkBuilder, TxnCtx, TxnFileId,
+            OP_PUT,
         },
         util::test_util::KeyBuilder,
         UserMeta, GLOBAL_SHARD_END_KEY,

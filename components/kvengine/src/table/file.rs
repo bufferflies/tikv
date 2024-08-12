@@ -190,7 +190,7 @@ impl<T> TtlCache<T> {
 mod tests {
     use std::time::Duration;
 
-    use crate::table::sstable::TtlCache;
+    use crate::table::file::TtlCache;
 
     #[test]
     fn test_ttl_cache() {

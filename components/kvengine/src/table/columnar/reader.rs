@@ -44,9 +44,8 @@ use crate::{
             },
             get_primary_key,
         },
-        search,
-        sstable::File,
-        InnerKey,
+        file::File,
+        search, InnerKey,
     },
     UserMeta,
 };
@@ -1361,8 +1360,8 @@ pub mod tests {
                 columnar::ColumnarFile,
                 reader::{ColumnarMvccReader, ColumnarReader, ColumnarTableReader},
             },
+            file::{File, InMemFile},
             memtable::{CfTable, WriteBatch},
-            sstable::InMemFile,
         },
         UserMeta, WRITE_CF,
     };

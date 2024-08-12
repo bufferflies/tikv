@@ -529,11 +529,9 @@ mod tests {
     use super::*;
     use crate::table::{
         blobtable::{blobtable::BlobTable, builder::BlobTableBuilder, BlobRef},
+        file::InMemFile,
         sstable::{
-            file::InMemFile,
-            sstable::{
-                get_test_key, new_table_builder_for_test, new_test_cache, SsTable, TEST_ID_ALLOC,
-            },
+            get_test_key, new_table_builder_for_test, new_test_cache, SsTable, TEST_ID_ALLOC,
         },
         Iterator,
     };
@@ -579,8 +577,6 @@ mod tests {
         kvs: &Vec<(String, String)>,
         load_filter: bool,
     ) -> (SsTable, BlobTable) {
-        use crate::table::sstable::NO_COMPRESSION;
-
         let sst_fid = TEST_ID_ALLOC.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         let blob_fid = TEST_ID_ALLOC.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         let mut sst_builder = new_table_builder_for_test(sst_fid);

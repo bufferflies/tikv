@@ -8,7 +8,7 @@ use std::{
 
 use cloud_encryption::MasterKey;
 use futures::executor::block_on;
-use kvengine::{dfs, dfs::DFSConfig, table::sstable::ZSTD_COMPRESSION};
+use kvengine::{dfs, dfs::DFSConfig, table::ZSTD_COMPRESSION};
 use load_data::task::{LoadDataConfig, LoadDataContext};
 use pd_client::PdClient;
 use rand::{rngs::ThreadRng, Rng};

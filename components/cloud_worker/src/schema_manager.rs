@@ -24,8 +24,8 @@ use kvengine::{
             new_common_handle_column_info, new_int_handle_column_info, new_txn_id_column_info,
             new_version_column_info, Schema, SchemaFile,
         },
-        sstable::{File, LocalFile, NO_COMPRESSION},
-        ChecksumType,
+        file::{File, LocalFile},
+        ChecksumType, NO_COMPRESSION,
     },
     ShardStatsLite,
 };
@@ -945,7 +945,7 @@ mod tests {
         columnar::{
             build_schema_file, new_int_handle_column_info, new_version_column_info, Schema,
         },
-        sstable::LocalFile,
+        file::LocalFile,
     };
     use tikv_util::info;
 

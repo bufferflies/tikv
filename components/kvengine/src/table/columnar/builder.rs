@@ -15,8 +15,7 @@ use crate::table::{
         compress_pack, get_unsigned, Block, ColumnBuffer, ColumnMeta, ColumnarFileFooter, Schema,
         COLUMNAR_MAGIC, HANDLE_COL_ID, TXN_ID_COL_ID, VERSION_COL_ID,
     },
-    sstable::LZ4_COMPRESSION,
-    ChecksumType,
+    ChecksumType, LZ4_COMPRESSION,
 };
 
 pub const PACK_MAX_ROW_COUNT: usize = 8192;

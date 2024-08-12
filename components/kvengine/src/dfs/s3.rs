@@ -1121,7 +1121,10 @@ mod tests {
     use super::*;
     use crate::{
         dfs::test_util::new_test_s3fs,
-        table::sstable::{new_filename, File, LocalFile},
+        table::{
+            file::{File, LocalFile},
+            sstable::new_filename,
+        },
     };
 
     #[test]

@@ -10,7 +10,8 @@ use xorf::BinaryFuse8;
 
 use super::super::table::Value;
 use crate::table::{
-    blobtable::BlobRef, ChecksumType, InnerKey, BIT_HAS_OLD_VERSION, VALUE_VERSION_LEN,
+    blobtable::BlobRef, ChecksumType, InnerKey, BIT_HAS_OLD_VERSION, LZ4_COMPRESSION,
+    NO_COMPRESSION, VALUE_VERSION_LEN, ZSTD_COMPRESSION,
 };
 pub const PROP_KEY_SMALLEST: &str = "smallest";
 pub const PROP_KEY_BIGGEST: &str = "biggest";
@@ -25,9 +26,6 @@ pub const PROP_KEY_L0_VERSION: &str = "l0_ver";
 pub const AUX_INDEX_BINARY_FUSE8: u32 = 1;
 pub const INDEX_FORMAT_V1: u32 = 1;
 pub const BLOCK_FORMAT_V1: u32 = 1;
-pub const NO_COMPRESSION: u8 = 0;
-pub const LZ4_COMPRESSION: u8 = 1;
-pub const ZSTD_COMPRESSION: u8 = 2;
 pub const TABLE_FORMAT_V1: u16 = 1;
 pub const MAGIC_NUMBER: u32 = 2940551257;
 pub const MAGIC_NUMBER_SPLIT_L0: u32 = 2940551258;

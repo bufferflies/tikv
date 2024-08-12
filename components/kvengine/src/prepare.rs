@@ -27,7 +27,7 @@ use crate::{
     metrics::ENGINE_LEVEL_WRITE_VEC,
     table::{
         columnar::SchemaFile,
-        sstable::{InMemFile, LocalFile},
+        file::{InMemFile, LocalFile},
         table::TableExt,
     },
     EngineCore, *,

@@ -47,10 +47,9 @@ use crate::{
             ColumnarTableBuildOptions, ColumnarTableBuilder, ColumnarTruncateTsReader, SchemaFile,
             GLOBAL_COMMON_HANDLE_END,
         },
+        file::{File, InMemFile, LocalFile},
         get_tables_in_range,
-        sstable::{
-            self, builder::TableBuilderOptions, File, InMemFile, L0Builder, LocalFile, SsTable,
-        },
+        sstable::{self, builder::TableBuilderOptions, L0Builder, SsTable},
         table::TableExt,
         ChecksumType, InnerKey,
     },

@@ -2,6 +2,7 @@
 
 pub mod blobtable;
 pub mod columnar;
+pub mod file;
 pub mod memtable;
 pub mod merge_iterator;
 pub mod sstable;

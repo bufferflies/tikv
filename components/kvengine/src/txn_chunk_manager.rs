@@ -17,7 +17,8 @@ use crate::{
     error::IoContext,
     table,
     table::{
-        sstable::{BlockCacheKey, InMemFile, LocalFile},
+        file::{InMemFile, LocalFile},
+        sstable::BlockCacheKey,
         txn_file::TxnChunk,
         TxnCtx, TxnFile, TxnFileId,
     },

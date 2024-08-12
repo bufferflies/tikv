@@ -8,7 +8,8 @@ use kvengine::{
     dfs::{DFSConfig, S3Fs},
     table::{
         blobtable::blobtable::BlobTable,
-        sstable::{InMemFile, L0Table, SsTable},
+        file::InMemFile,
+        sstable::{L0Table, SsTable},
     },
 };
 use native_br::{

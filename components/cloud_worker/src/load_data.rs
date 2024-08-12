@@ -9,10 +9,7 @@ use http::{header, Method, Response, StatusCode};
 use hyper::Body;
 use kvengine::{
     dfs,
-    table::{
-        sstable::{LZ4_COMPRESSION, NO_COMPRESSION, ZSTD_COMPRESSION},
-        ChecksumType,
-    },
+    table::{ChecksumType, LZ4_COMPRESSION, NO_COMPRESSION, ZSTD_COMPRESSION},
 };
 use load_data::{
     check_point_storage,

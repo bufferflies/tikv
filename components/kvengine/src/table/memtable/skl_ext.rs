@@ -185,8 +185,8 @@ mod tests {
 
     use crate::{
         table::{
+            file::InMemFile,
             memtable::{skl_ext::SkipListExt, SkipList, WriteBatch},
-            sstable::InMemFile,
             txn_file::{TxnChunk, TxnChunkBuilder, TxnCtx, TxnFile, TxnFileId, OP_PUT},
             InnerKey, NoPrefixKey,
         },

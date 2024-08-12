@@ -20,11 +20,7 @@ use tikv_util::{
 
 use crate::{
     table::{
-        memtable,
-        memtable::CfTable,
-        sstable,
-        sstable::{Builder, NO_COMPRESSION},
-        InnerKey, TableExt,
+        memtable, memtable::CfTable, sstable, sstable::Builder, InnerKey, TableExt, NO_COMPRESSION,
     },
     util::TxnFileRefPropertyHelper,
     *,

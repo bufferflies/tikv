@@ -18,8 +18,9 @@ use crate::{
     table::{
         blobtable::blobtable::BlobTable,
         columnar::{ColumnarFile, SchemaFile},
+        file::LocalFile,
         memtable::CfTable,
-        sstable::{BlockCacheKey, L0Table, LocalFile, SsTable},
+        sstable::{BlockCacheKey, L0Table, SsTable},
         InnerKey, TableExt, TxnFile,
     },
     *,

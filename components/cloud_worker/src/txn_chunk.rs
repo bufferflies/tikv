@@ -226,9 +226,7 @@ mod tests {
     use kvengine::{
         dfs,
         dfs::{Dfs, FileType, InMemFs},
-        table::{
-            sstable::InMemFile, InnerKey, TxnChunk, TxnCtx, TxnFile, TxnFileId, TxnFileIterator,
-        },
+        table::{file::InMemFile, InnerKey, TxnChunk, TxnCtx, TxnFile, TxnFileId, TxnFileIterator},
         Iterator, UserMeta, GLOBAL_SHARD_END_KEY,
     };
 

@@ -8,7 +8,7 @@ use cloud_encryption::KeyspaceEncryptionConfig;
 use futures::executor::block_on;
 use kvengine::{
     dfs::DFSConfig,
-    table::{sstable::ZSTD_COMPRESSION, ChecksumType},
+    table::{ChecksumType, ZSTD_COMPRESSION},
 };
 use kvenginepb::ChangeSet;
 use load_data::task::{LoadDataConfig, LoadDataContext};

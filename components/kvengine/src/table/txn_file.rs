@@ -13,8 +13,10 @@ use tikv_util::codec::number::NumberEncoder;
 use crate::{
     table,
     table::{
-        encode_val_to_outer_val_owner, search,
-        sstable::{key_diff_idx, BlockCacheKey, EntrySlice, File, TtlCache},
+        encode_val_to_outer_val_owner,
+        file::{File, TtlCache},
+        search,
+        sstable::{key_diff_idx, BlockCacheKey, EntrySlice},
         ChecksumType, Error, InnerKey, Iterator, NoPrefixKey, Result, Value,
     },
     UserMeta, USER_META_SIZE,
@@ -1639,7 +1641,8 @@ mod tests {
 
     use crate::{
         table::{
-            sstable::{get_test_value, InMemFile},
+            file::InMemFile,
+            sstable::get_test_value,
             txn_file::{
                 TxnChunk, TxnChunkBuilder, TxnChunkIterator, OP_CHECK_NOT_EXIST, OP_INSERT, OP_PUT,
             },

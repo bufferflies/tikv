@@ -36,8 +36,8 @@ use crate::{
     table::{
         columnar::SchemaFile,
         memtable::CfTable,
-        sstable::{BlockCacheKey, MAGIC_NUMBER, ZSTD_COMPRESSION},
-        InnerKey,
+        sstable::{BlockCacheKey, MAGIC_NUMBER},
+        InnerKey, ZSTD_COMPRESSION,
     },
     txn_chunk_manager::TxnChunkManager,
     *,

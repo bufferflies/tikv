@@ -17,8 +17,8 @@ use crate::table::{
         columnar::Schema,
         get_primary_key,
     },
-    sstable::{File, NO_COMPRESSION},
-    ChecksumType, InnerKey,
+    file::File,
+    ChecksumType, InnerKey, NO_COMPRESSION,
 };
 
 pub const SCHEMA_FILE_MAGIC: u32 = 0x5353484D;
@@ -280,7 +280,7 @@ mod tests {
     use super::*;
     use crate::table::{
         columnar::builder::{new_common_handle_column_info, new_int_handle_column_info},
-        sstable::InMemFile,
+        file::InMemFile,
     };
 
     fn new_column_info(id: i64, is_int: bool) -> tipb::ColumnInfo {

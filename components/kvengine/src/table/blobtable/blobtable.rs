@@ -8,8 +8,8 @@ use super::{builder::*, BlobRef};
 use crate::{
     error::IoContext,
     table::{
-        sstable::{File, LZ4_COMPRESSION, NO_COMPRESSION, ZSTD_COMPRESSION},
-        ChecksumType, Error, InnerKey, Result,
+        file::File, ChecksumType, Error, InnerKey, Result, LZ4_COMPRESSION, NO_COMPRESSION,
+        ZSTD_COMPRESSION,
     },
 };
 
@@ -298,7 +298,7 @@ mod tests {
     use rand::{distributions::Alphanumeric, rngs::ThreadRng, Rng};
 
     use super::BlobTable;
-    use crate::table::{blobtable::BlobRef, sstable, InnerKey, Value};
+    use crate::table::{blobtable::BlobRef, file::InMemFile, InnerKey, Value, NO_COMPRESSION};
 
     fn get_blob_text(max_len: usize, rng: &mut ThreadRng) -> String {
         let len = rng.gen_range(1..max_len);
@@ -316,7 +316,7 @@ mod tests {
     #[test]
     fn test_basic() {
         let mut rng = rand::thread_rng();
-        let mut builder = super::BlobTableBuilder::new(0, sstable::builder::NO_COMPRESSION, 0, 0);
+        let mut builder = super::BlobTableBuilder::new(0, NO_COMPRESSION, 0, 0);
         let mut test_data = Vec::new();
         let meta: u8 = 0;
 
@@ -330,7 +330,7 @@ mod tests {
             test_data.push(TestData { blob, blob_ref });
         }
 
-        let file = sstable::InMemFile::new(1, builder.finish());
+        let file = InMemFile::new(1, builder.finish());
         let table = super::BlobTable::new(Arc::new(file)).unwrap();
 
         for td in test_data {
@@ -344,7 +344,7 @@ mod tests {
 
     #[test]
     fn test_prefetcher() {
-        let mut builder = super::BlobTableBuilder::new(1, sstable::builder::NO_COMPRESSION, 0, 0);
+        let mut builder = super::BlobTableBuilder::new(1, NO_COMPRESSION, 0, 0);
         let mut offsets = Vec::new();
         for i in 0..100 {
             let key_str = format!("key_{:03}", i);
@@ -356,7 +356,7 @@ mod tests {
             );
             offsets.push(blob_ref);
         }
-        let file = sstable::InMemFile::new(1, builder.finish());
+        let file = InMemFile::new(1, builder.finish());
         let table = super::BlobTable::new(Arc::new(file)).unwrap();
         let blob_tables: HashMap<u64, BlobTable> = [(1, table)].into();
         let mut prefetcher = super::BlobPrefetcher::new(Arc::new(blob_tables), 1000);

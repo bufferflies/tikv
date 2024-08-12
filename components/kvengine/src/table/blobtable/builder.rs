@@ -7,8 +7,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use super::BlobRef;
 use crate::table::{
-    sstable::{LZ4_COMPRESSION, NO_COMPRESSION, ZSTD_COMPRESSION},
-    ChecksumType, InnerKey, Value,
+    ChecksumType, InnerKey, Value, LZ4_COMPRESSION, NO_COMPRESSION, ZSTD_COMPRESSION,
 };
 
 pub type ValueLength = u32; // Max value length is 4GB
