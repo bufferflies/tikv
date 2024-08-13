@@ -105,6 +105,10 @@ pub struct Shard {
     pub(crate) compaction_priority: RwLock<Option<CompactionPriority>>,
 
     pub(crate) encryption_key: Option<EncryptionKey>,
+
+    // outdated_schema_ver is used to record the last schema outdated error in convert L0 to
+    // columnar if the schema is not updated, we skip retrying the convert.
+    pub(crate) outdated_schema_ver: AtomicI64,
 }
 
 // Note: when add new property, consider whether to add it to following process:
@@ -158,6 +162,7 @@ pub(crate) const NEW_DATA_UPDATE_COUNTER: u64 = 1;
 
 const MAX_COL_L0_FILE_COUNTS: usize = 32;
 const MAX_COL_L1_FILE_COUNTS: usize = 64;
+const MAX_UNCONVERTED_L0_FILE_COUNTS: usize = 32;
 
 impl Deref for Shard {
     type Target = ShardRange;
@@ -206,6 +211,7 @@ impl Shard {
             col_snap_version: Default::default(),
             compaction_priority: RwLock::new(None),
             encryption_key,
+            outdated_schema_ver: Default::default(),
         };
         {
             let mut pending_ops = shard.pending_ops.write().unwrap();
@@ -829,8 +835,30 @@ impl Shard {
             *lock = Some(CompactionPriority::ColumnarMajor { score: f64::MAX });
             return;
         }
+        if data.schema_file.is_none() && self.get_columnar_snap_version() > 0 {
+            let mut lock = self.compaction_priority.write().unwrap();
+            *lock = Some(CompactionPriority::ColumnarClear);
+            return;
+        }
         // ColumnarMajor compaction must be done before converting L0 to columnar.
         if data.schema_file.is_some() && !data.col_levels.unconverted_l0s.is_empty() {
+            // Schema is outdated, wait for update or clear columnar if there are too many
+            // unconverted L0.
+            if self.get_outdated_schema_ver() == data.schema_file.as_ref().unwrap().get_version() {
+                if data.col_levels.unconverted_l0s.len() > MAX_UNCONVERTED_L0_FILE_COUNTS {
+                    warn!(
+                        "{} schema is outdated and has {} unconverted L0 files, clear schema file and columnar files.",
+                        self.tag(),
+                        data.col_levels.unconverted_l0s.len()
+                    );
+                    let mut lock = self.compaction_priority.write().unwrap();
+                    *lock = Some(CompactionPriority::ColumnarClear);
+                    return;
+                } else {
+                    // Do nothing, give it a chance to update schema file.
+                    return;
+                }
+            }
             let mut lock = self.compaction_priority.write().unwrap();
             *lock = Some(CompactionPriority::L0ToColumnar);
             return;
@@ -1096,6 +1124,14 @@ impl Shard {
             self.set_property(TXN_FILE_REF, &prop.marshall());
             info!("{} clear finished txn file ref", self.tag(); "prop" => ?prop, "version" => version);
         }
+    }
+
+    pub(crate) fn get_outdated_schema_ver(&self) -> i64 {
+        self.outdated_schema_ver.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn set_outdated_schema_ver(&self, ver: i64) {
+        self.outdated_schema_ver.store(ver, Ordering::Release);
     }
 }
 

@@ -55,7 +55,7 @@ use crate::{
     },
     Error::{
         CompactionNotRetryable, FallbackLocalCompactorDisabled, IncompatibleRemoteCompactor,
-        RemoteCompaction,
+        RemoteCompaction, TableError,
     },
     Iterator, EXTRA_CF, LOCK_CF, WRITE_CF, *,
 };
@@ -567,6 +567,9 @@ impl Engine {
             }
             Some(CompactionPriority::ColumnarMajor { .. }) => {
                 self.trigger_columnar_major_compaction(&shard)
+            }
+            Some(CompactionPriority::ColumnarClear) => {
+                self.trigger_remove_columnar_compaction(&shard)
             }
             None => {
                 info!("Shard {} is not urgent for compaction", tag);
@@ -1407,6 +1410,38 @@ impl Engine {
         Some(self.comp_client.compact(req))
     }
 
+    pub(crate) fn trigger_remove_columnar_compaction(
+        &self,
+        shard: &Shard,
+    ) -> Option<Result<pb::ChangeSet>> {
+        let tag = shard.tag();
+        let data = shard.get_data();
+        if data.col_levels.levels.iter().all(|l| l.files.is_empty()) {
+            store_bool(&shard.compacting, false);
+            return None;
+        }
+        let mut old_columnar_tables = vec![];
+        data.col_levels.levels.iter().for_each(|l| {
+            l.files.iter().for_each(|f| {
+                old_columnar_tables.push((l.level, f.id()));
+            })
+        });
+        let mut req = self.new_compact_request_with_shard(shard);
+        let columnar_major_compaction = ColumnarMajorCompaction {
+            safe_ts: 0,
+            l0_tables: vec![],
+            ln_tables: vec![],
+            blob_tables: vec![],
+            old_columnar_tables,
+            schema_file_id: 0,
+            snap_version: 0,
+            columnar_config: self.opts.columnar_build_options,
+        };
+        req.compaction_tp = CompactionType::ColumnarMajor(columnar_major_compaction);
+        info!("start remove columnar for {}", tag);
+        Some(self.comp_client.compact(req))
+    }
+
     pub(crate) fn trigger_l0_to_columnar(&self, shard: &Shard) -> Option<Result<pb::ChangeSet>> {
         let tag = shard.tag();
         let data = shard.get_data();
@@ -1449,6 +1484,7 @@ impl Engine {
         let mut req = self.new_compact_request_with_shard(shard);
         let data = shard.get_data();
         if data.schema_file.is_none() {
+            store_bool(&shard.compacting, false);
             warn!(
                 "trigger_major_compaction: no schema file found for {}, skip",
                 shard.tag()
@@ -1679,6 +1715,7 @@ pub(crate) enum CompactionPriority {
     ColumnarL0 { score: f64 },
     ColumnarL1 { score: f64 },
     ColumnarMajor { score: f64 },
+    ColumnarClear,
 }
 
 impl CompactionPriority {
@@ -1694,6 +1731,7 @@ impl CompactionPriority {
             CompactionPriority::ColumnarL0 { score } => *score,
             CompactionPriority::ColumnarL1 { score } => *score,
             CompactionPriority::ColumnarMajor { score } => *score,
+            CompactionPriority::ColumnarClear => f64::MAX,
         }
     }
 
@@ -1709,6 +1747,7 @@ impl CompactionPriority {
             CompactionPriority::ColumnarL0 { .. } => 0,
             CompactionPriority::ColumnarL1 { .. } => 1,
             CompactionPriority::ColumnarMajor { .. } => -1,
+            CompactionPriority::ColumnarClear => -1,
         }
     }
 
@@ -1724,6 +1763,7 @@ impl CompactionPriority {
             CompactionPriority::ColumnarL0 { .. } => -1,
             CompactionPriority::ColumnarL1 { .. } => -1,
             CompactionPriority::ColumnarMajor { .. } => -1,
+            CompactionPriority::ColumnarClear => -1,
         }
     }
 }
@@ -3641,6 +3681,17 @@ fn columnar_major_compact(
 ) -> Result<pb::ColumnarCompaction> {
     let mut ret = pb::ColumnarCompaction::new();
     ret.set_snap_version(major_compaction.snap_version);
+    if major_compaction.snap_version == 0 {
+        let columnar_changes = ret.mut_columnar_change();
+        for &(level, file_id) in major_compaction.old_columnar_tables.iter() {
+            let mut tbl_delete = pb::TableDelete::new();
+            tbl_delete.set_cf(0);
+            tbl_delete.set_level(level as u32);
+            tbl_delete.set_id(file_id);
+            columnar_changes.mut_table_deletes().push(tbl_delete);
+        }
+        return Ok(ret);
+    }
     // Set row l0s for filter the new flushed l0 tables during apply major
     // compaction
     ret.set_row_l0s(major_compaction.l0_tables.clone());
@@ -4297,6 +4348,14 @@ impl CompactRunner {
             }
             Some(Err(CompactionNotRetryable(e))) => {
                 error!("shard {} compaction failed {}, not retryable", tag, e);
+            }
+            Some(Err(TableError(table::Error::SchemaOutOfDate(e)))) => {
+                error!("shard {} decode row to columnar failed {}", tag, e);
+                if let Ok(shard) = self.engine.get_shard_with_ver(id_ver.id, id_ver.ver) {
+                    if let Some(schema_file) = shard.get_schema_file() {
+                        shard.set_outdated_schema_ver(schema_file.get_version());
+                    }
+                }
             }
             Some(Err(e)) => {
                 error!("shard {} compaction failed {}, retrying", tag, e);

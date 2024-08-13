@@ -1005,6 +1005,12 @@ impl EngineCore {
                 .collect();
             new_col_levels.unconverted_l0s.extend(new_flushed_l0_tbls);
         }
+        let schema_file = if col_comp.get_snap_version() == 0 {
+            new_col_levels.unconverted_l0s.clear();
+            None
+        } else {
+            old_data.schema_file.clone()
+        };
         let new_data = ShardData::new(
             old_data.range.clone(),
             old_data.mem_tbls.clone(),
@@ -1015,7 +1021,7 @@ impl EngineCore {
             old_data.lock_txn_files.clone(),
             old_data.limiter.clone(),
             old_data.update_counter + 1,
-            old_data.schema_file.clone(),
+            schema_file,
             new_col_levels,
         );
         shard.set_data(new_data);

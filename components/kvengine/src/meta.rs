@@ -797,7 +797,14 @@ impl ShardMeta {
                 .collect();
             self.unconverted_l0s.extend(new_flushed_l0s);
         }
-        self.columnar_snap_version = self.columnar_snap_version.max(comp.snap_version);
+        if comp.snap_version == 0 {
+            self.schema_file_id = 0;
+            self.schema_file_ver = 0;
+            self.columnar_snap_version = 0;
+            self.unconverted_l0s.clear();
+        } else {
+            self.columnar_snap_version = self.columnar_snap_version.max(comp.snap_version);
+        }
     }
 
     pub fn to_change_set(&self) -> pb::ChangeSet {

@@ -1652,6 +1652,42 @@ fn test_columnar_major_compaction(#[case] enable_inner_key_off: bool) {
         .unwrap();
     info!("merge_reader read block with {} rows", merge_reader_counts);
     verify_columnar_with_blocks(&row_block, &block);
+
+    // Remove columnar compaction.
+    let data = shard.get_data();
+    let new_data = ShardData::new(
+        data.range.clone(),
+        data.mem_tbls.clone(),
+        data.l0_tbls.clone(),
+        data.blob_tbl_map.clone(),
+        data.cfs.clone(),
+        data.unloaded_tbls.clone(),
+        data.lock_txn_files.clone(),
+        data.limiter.clone(),
+        data.update_counter + 1,
+        data.schema_file.clone(), // schema file will be cleared after compaction
+        data.col_levels.clone(),
+    );
+    shard.set_data(new_data);
+    *shard.compaction_priority.write().unwrap() = Some(CompactionPriority::ColumnarClear);
+    engine.trigger_compact(id_ver);
+    info!("trigger remove columnar compaction {}", shard.tag());
+    let ok = try_wait(
+        || {
+            info!(
+                "wait remove columnar compaction {} l0 files: {}, l1 files: {}, l2 files: {}",
+                shard.tag(),
+                shard.get_data().col_levels.levels[0].files.len(),
+                shard.get_data().col_levels.levels[1].files.len(),
+                shard.get_data().col_levels.levels[2].files.len()
+            );
+            shard.get_data().col_levels.levels[2].files.is_empty()
+        },
+        5,
+    );
+    assert!(ok);
+    assert_eq!(shard.get_columnar_snap_version(), 0);
+    assert!(shard.get_data().schema_file.is_none());
 }
 
 #[rstest]
