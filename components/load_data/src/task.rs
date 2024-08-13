@@ -164,6 +164,7 @@ pub struct LoadTaskStates {
     pub flushed_files: usize,
     pub created_files: usize,
     pub ingested_regions: usize,
+    pub total_kvs: usize,
     pub duplicated_entries: Vec<DuplicateEntry>,
 }
 
@@ -322,6 +323,11 @@ impl LoadTaskScheduler {
     pub(crate) fn set_flushed_files(&self, flushed_files: usize) {
         let mut states = self.states.lock().unwrap();
         states.flushed_files = flushed_files;
+    }
+
+    pub(crate) fn set_total_kvs(&self, total_kvs: usize) {
+        let mut states = self.states.lock().unwrap();
+        states.total_kvs = total_kvs;
     }
 
     pub(crate) fn get_handled_chunks(&self) -> HashMap<u64, u64> {
@@ -872,7 +878,6 @@ impl LoadTaskWorker {
             if check_point_store_guard.check_point_ctx.get_is_recover() {
                 sst_metas = check_point_store_guard.get_sst_meta();
             }
-            let mut data_size = 0;
             let keyspace_id = if !sst_metas.is_empty() {
                 let key = if self.task_ctx.key_prefix.is_empty() {
                     sst_metas.first().unwrap().smallest.as_slice()
@@ -884,9 +889,13 @@ impl LoadTaskWorker {
                 "".to_string()
             };
 
+            let mut data_size = 0;
+            let mut total_kvs = 0;
             for sst_meta in sst_metas.iter() {
                 data_size += sst_meta.uncompressed_size;
+                total_kvs += sst_meta.keys;
             }
+            self.scheduler.set_total_kvs(total_kvs);
             self.ingest(
                 sst_metas,
                 check_point_store_guard
