@@ -247,7 +247,7 @@ async fn handle_remote_coprocessor(
     let response = result.unwrap();
     info!(
         "finished remote coprocessor";
-        "tag" => tag,
+        "tag" => tag.clone(),
         "req_size" => req_body.len(),
         "resp_size" => response.data.len(),
         "timeout" => ?timeout,
@@ -272,11 +272,20 @@ async fn handle_remote_coprocessor(
         }
         _ => {}
     }
-    let response_data = response.write_to_bytes().unwrap();
-    Ok(hyper::Response::builder()
-        .status(200)
-        .body(response_data.into())
-        .unwrap())
+    match response.write_to_bytes() {
+        Ok(response_data) => {
+            let resp = hyper::Response::builder()
+                .status(200)
+                .body(response_data.into())
+                .unwrap();
+            Ok(resp)
+        }
+        Err(err) => {
+            error!("{} serialize response failed, error {:?}", tag, err);
+            let body = hyper::Body::from(format!("{:?}", err));
+            Ok(hyper::Response::builder().status(500).body(body).unwrap())
+        }
+    }
 }
 
 pub fn get_cop_req_tag(cop_req: &kvproto::coprocessor::Request) -> String {

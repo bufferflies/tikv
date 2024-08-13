@@ -511,6 +511,7 @@ impl<SS: 'static> BatchExecutorsRunner<SS> {
         let mut warnings = self.config.new_eval_warnings();
         let mut ctx = EvalContext::new(self.config.clone());
         let mut record_all = 0;
+        let mut chunks_size = 0u64;
 
         loop {
             let mut chunk = Chunk::default();
@@ -540,6 +541,15 @@ impl<SS: 'static> BatchExecutorsRunner<SS> {
             }
 
             if record_len > 0 {
+                chunks_size += chunk.compute_size() as u64;
+                if chunks_size > i32::MAX as u64 {
+                    // The size is to large, to prevent OOM, we return error for now.
+                    // TODO: support paging to avoid exceeds 4GB panic and OOM.
+                    return Err(other_err!(
+                        "response size is too large, total_size: {}",
+                        chunks_size
+                    ));
+                }
                 chunks.push(chunk);
                 record_all += record_len;
             }
