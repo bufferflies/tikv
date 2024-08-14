@@ -1,6 +1,15 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{default::Default, fs, ops::Deref, path::PathBuf, sync::Arc};
+use std::{
+    default::Default,
+    fs,
+    ops::Deref,
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+};
 
 use bytes::{Buf, Bytes};
 use cloud_encryption::EncryptionKey;
@@ -181,8 +190,7 @@ impl TxnChunkManagerCore {
         let file_data = runtime.block_on(self.dfs.read_file(txn_chunk_id, opts))?;
 
         let txn_chunk = if let Some(local_path) = self.local_path.as_ref() {
-            let file_name = txn_chunk_id.to_string();
-            let txn_file_tmp_path = local_path.join(format!("{}.tmp", file_name));
+            let txn_file_tmp_path = local_path.join(Self::tmp_file_name(txn_chunk_id));
             fs::write(&txn_file_tmp_path, file_data.chunk())
                 .table_ctx(txn_chunk_id, "txn_chunk_mgr.prepare.write_tmp")?;
             let local_file_path = self.local_file_path(txn_chunk_id).unwrap();
@@ -264,8 +272,7 @@ impl TxnChunkManagerCore {
         let txn_chunk = if let Some(local_path) = self.local_path.as_ref() {
             let local_file_path = self.local_file_path(chunk_id).unwrap();
             if !local_file_path.exists() {
-                let file_name = chunk_id.to_string();
-                let txn_file_tmp_path = local_path.join(format!("{}.tmp", file_name));
+                let txn_file_tmp_path = local_path.join(Self::tmp_file_name(chunk_id));
                 fs::write(&txn_file_tmp_path, file_data.chunk())
                     .table_ctx(chunk_id, "txn_chunk_mgr.recv_chunk.write_tmp")?;
                 fs::rename(&txn_file_tmp_path, &local_file_path)
@@ -374,6 +381,14 @@ impl TxnChunkManagerCore {
                 self.load_txn_file_from_ref(shard_id, shard_ver, txn_file_ref, true, None)
             })
             .collect()
+    }
+
+    fn tmp_file_name(chunk_id: u64) -> String {
+        lazy_static::lazy_static! {
+            static ref TMP_FILE_ID: AtomicU64 = AtomicU64::default();
+        }
+        let tmp_id = TMP_FILE_ID.fetch_add(1, Ordering::Relaxed);
+        format!("{}.{}.tmp", chunk_id, tmp_id)
     }
 }
 
