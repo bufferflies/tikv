@@ -2,6 +2,7 @@
 
 use std::{
     cmp::{min, Ordering},
+    collections::HashMap,
     mem,
     ops::Deref,
     sync::Arc,
@@ -35,8 +36,9 @@ use tikv_util::codec::{
 use tipb::ColumnInfo;
 
 use crate::{
-    table,
     table::{
+        self,
+        blobtable::blobtable::BlobTable,
         columnar::{
             columnar::{
                 decompress_pack, get_fixed_size, Block, ColumnBuffer, ColumnMeta, ColumnarFile,
@@ -969,6 +971,7 @@ fn parse_default_val(col_info: &ColumnInfo) -> Option<Vec<u8>> {
 pub struct ColumnarRowTableReader {
     schema: Schema,
     iter: Box<dyn table::Iterator>,
+    blob_tbls: Option<Arc<HashMap<u64, BlobTable>>>,
     prefix: Vec<u8>,
     default_vals: Vec<Option<Vec<u8>>>,
     is_int_handle: bool,
@@ -984,6 +987,7 @@ impl ColumnarRowTableReader {
         inner_key_off: usize,
         schema: Schema,
         iter: Box<dyn table::Iterator>,
+        blob_tbls: Option<Arc<HashMap<u64, BlobTable>>>,
         check_schema: bool,
     ) -> ColumnarRowTableReader {
         let mut prefix = if inner_key_off > 0 {
@@ -1015,6 +1019,7 @@ impl ColumnarRowTableReader {
             keyspace_id,
             schema,
             iter,
+            blob_tbls,
             prefix,
             default_vals,
             is_int_handle,
@@ -1203,26 +1208,31 @@ impl ColumnarReader for ColumnarRowTableReader {
                 };
                 txn_id_col.push_value(&txn_id.to_le_bytes());
             }
-            // TODO: support blob value.
-            if value.is_blob_ref() {
-                return Err(table::Error::Other(
-                    "blob value is not supported".to_string(),
-                ));
-            }
-            let row_value = value.get_value();
-            let is_deleted = row_value.is_empty();
-            block.versions.push_version(version, is_deleted);
-            if is_deleted {
-                for col in &mut block.columns {
-                    if col.nullable {
-                        col.push_null();
-                    } else {
-                        col.push_zero();
+            let mut handle_row_value = |row_value: &[u8]| -> table::Result<()> {
+                let is_deleted = row_value.is_empty();
+                block.versions.push_version(version, is_deleted);
+                if is_deleted {
+                    for col in &mut block.columns {
+                        if col.nullable {
+                            col.push_null();
+                        } else {
+                            col.push_zero();
+                        }
                     }
+                } else {
+                    self.decode_row_columns(block, row_value)?;
                 }
+                Ok(())
+            };
+            if value.is_blob_ref() {
+                let blob_ref = value.get_blob_ref();
+                let blob_tbl = self.blob_tbls.as_ref().unwrap().get(&blob_ref.fid).unwrap();
+                let row_value = blob_tbl.get(&blob_ref).unwrap();
+                handle_row_value(&row_value)?
             } else {
-                self.decode_row_columns(block, row_value)?;
-            }
+                let row_value = value.get_value();
+                handle_row_value(row_value)?
+            };
             read_rows += 1;
             self.iter.next_all_version();
         }
@@ -1458,7 +1468,7 @@ pub mod tests {
         cf_tbl.get_cf(WRITE_CF).put_batch(&mut wb, None, WRITE_CF);
         let iter = cf_tbl.get_cf(WRITE_CF).new_iterator(false);
         let mut row_tbl_reader =
-            ColumnarRowTableReader::new(1, inner_key_off, schema.clone(), iter, false);
+            ColumnarRowTableReader::new(1, inner_key_off, schema.clone(), iter, None, false);
         let mut block = Block::new(schema);
         let mut opts = ColumnarTableBuildOptions::default();
         opts.pack_max_row_count = 8;

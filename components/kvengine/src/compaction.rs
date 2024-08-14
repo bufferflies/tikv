@@ -3608,6 +3608,7 @@ fn compact_table_for_columnar(
 fn transform_for_columnar(
     ctx: &CompactionCtx,
     tbls: &Vec<SsTable>,
+    blob_tbls: Option<Arc<HashMap<u64, BlobTable>>>,
     overlap_tables: Vec<i64>,
     schema_file: &SchemaFile,
     target_lvl: u32,
@@ -3633,6 +3634,7 @@ fn transform_for_columnar(
                 ctx.req.inner_key_off,
                 schema.clone(),
                 iter,
+                blob_tbls.clone(),
                 true,
             );
             columnar_readers.push(Box::new(reader));
@@ -3710,9 +3712,7 @@ fn columnar_major_compact(
     .unwrap();
     let schema_file = SchemaFile::open(schema_file_data)?;
     let columnar_changes = ret.mut_columnar_change();
-    // TODO: support blob table
-    // let _blob_tables = load_blob_tables(fs.clone(),
-    // &major_compaction.blob_tables, opts)?;
+    let blob_tbls = load_blob_tables(fs.clone(), &major_compaction.blob_tables, opts)?;
     let l0_files = load_table_files(
         &major_compaction.l0_tables,
         fs.clone(),
@@ -3778,6 +3778,7 @@ fn columnar_major_compact(
     let columnar_creates = transform_for_columnar(
         ctx,
         &tbls,
+        Some(Arc::new(blob_tbls)),
         overlap_tables,
         &schema_file,
         2,
@@ -3865,6 +3866,7 @@ fn convert_row_file_to_columnar_file(
                     ctx.req.inner_key_off,
                     schema.clone(),
                     iter,
+                    None,
                     true,
                 );
                 columnar_readers.push(Box::new(reader));

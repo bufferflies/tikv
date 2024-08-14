@@ -1636,6 +1636,7 @@ fn test_columnar_major_compaction(#[case] enable_inner_key_off: bool) {
             inner_key_off,
             no_txn_id_schema.clone(),
             iter,
+            None,
             false,
         );
         columnar_readers.push(Box::new(reader));

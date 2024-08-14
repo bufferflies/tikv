@@ -1239,6 +1239,7 @@ impl SnapAccessCore {
                     self.data.inner_key_off,
                     schema.clone(),
                     iter,
+                    None,
                     false,
                 );
                 readers.push(Box::new(row_reader));
@@ -1252,6 +1253,7 @@ impl SnapAccessCore {
                     self.data.inner_key_off,
                     schema.clone(),
                     iter,
+                    None,
                     false,
                 );
                 readers.push(Box::new(row_reader));
