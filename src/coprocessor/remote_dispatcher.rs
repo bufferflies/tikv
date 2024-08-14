@@ -272,6 +272,9 @@ pub(crate) fn try_remote_dag_handler(
     cop_req.start_ts = req_ctx.txn_start_ts.into_inner();
     cop_req.data = dag.write_to_bytes().unwrap();
     cop_req.ranges = req_ctx.ranges.clone().into();
+    // Set the `paging_size` to a large enough value to reduce the number of
+    // requests.
+    cop_req.paging_size = u32::MAX as u64;
     Some(
         RemoteDagDispatcher::new(
             cop_req,

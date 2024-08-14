@@ -37,6 +37,10 @@ use super::{
 // may consider accepting this value from TiDB side.
 const BATCH_INITIAL_SIZE: usize = 32;
 
+// When the response reached the MAX_RESPONSE_SIZE, we update paging_size to
+// return early.
+const MAX_RESPONSE_SIZE: u64 = 256 * 1024 * 1024;
+
 // TODO: This value is chosen based on MonetDB/X100's research without our own
 // benchmarks.
 pub use tidb_query_expr::types::BATCH_MAX_SIZE;
@@ -542,16 +546,12 @@ impl<SS: 'static> BatchExecutorsRunner<SS> {
 
             if record_len > 0 {
                 chunks_size += chunk.compute_size() as u64;
-                if chunks_size > i32::MAX as u64 {
-                    // The size is to large, to prevent OOM, we return error for now.
-                    // TODO: support paging to avoid exceeds 4GB panic and OOM.
-                    return Err(other_err!(
-                        "response size is too large, total_size: {}",
-                        chunks_size
-                    ));
-                }
                 chunks.push(chunk);
                 record_all += record_len;
+                if chunks_size > MAX_RESPONSE_SIZE {
+                    tikv_util::info!("reach max response size, row count {}", record_all);
+                    self.paging_size = Some(record_all as u64);
+                }
             }
 
             if drained.stop() || self.paging_size.map_or(false, |p| record_all >= p as usize) {
