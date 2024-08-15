@@ -1674,11 +1674,12 @@ impl Applier {
             .pause(entry_index, &format!("{} txn file", tag));
         let txn_chunk_manager = ctx.engine.get_txn_chunk_manager();
         let router = ctx.router.clone().unwrap();
-        let id = self.region_id();
+        let region_id = self.region_id();
+        let peer_id = self.id();
         let worker_pool = txn_chunk_manager.worker_pool().clone();
         let start = Instant::now();
         worker_pool.spawn_blocking(move || {
-            tikv_util::set_current_region(id);
+            tikv_util::set_current_region(region_id);
             PREPARE_TASK_WAIT_TIME_HISTOGRAM
                 .with_label_values(&["txn"])
                 .observe(duration_to_sec(start.saturating_elapsed()));
@@ -1691,7 +1692,13 @@ impl Applier {
                     tag, err, txn_file_ref, entry_index
                 );
             }
-            router.send(id, PeerMsg::PrepareTxnFileResult(entry_index));
+            router.send(
+                region_id,
+                PeerMsg::PrepareTxnFileResult {
+                    entry_index,
+                    peer_id,
+                },
+            );
         });
     }
 

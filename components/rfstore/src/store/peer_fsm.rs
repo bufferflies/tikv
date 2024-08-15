@@ -276,8 +276,11 @@ impl<'a> PeerMsgHandler<'a> {
                 PeerMsg::PrepareCommitMergeResult(res, commit_index) => {
                     self.on_prepared_commit_merge(res, commit_index);
                 }
-                PeerMsg::PrepareTxnFileResult(entry_index) => {
-                    self.on_prepared_txn_file(entry_index);
+                PeerMsg::PrepareTxnFileResult {
+                    entry_index,
+                    peer_id,
+                } => {
+                    self.on_prepared_txn_file(entry_index, peer_id);
                 }
             }
         }
@@ -1780,7 +1783,18 @@ impl<'a> PeerMsgHandler<'a> {
         });
     }
 
-    pub(crate) fn on_prepared_txn_file(&mut self, entry_index: u64) {
+    pub(crate) fn on_prepared_txn_file(&mut self, entry_index: u64, peer_id: u64) {
+        // Ignore peer_msg from a stale peer.
+        if peer_id != self.peer_id() {
+            warn!(
+                "{} peer id not match {} != {}, skip on_prepared_txn_file, entry_index {}",
+                self.peer.tag(),
+                peer_id,
+                self.peer_id(),
+                entry_index,
+            );
+            return;
+        }
         self.ctx
             .apply_msgs
             .msgs

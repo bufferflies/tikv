@@ -45,7 +45,10 @@ pub enum PeerMsg {
         kvengine::Result<kvengine::ChangeSet>,
         u64, // commit index
     ),
-    PrepareTxnFileResult(u64 /* entry index */),
+    PrepareTxnFileResult {
+        entry_index: u64,
+        peer_id: u64,
+    },
     Persisted(PersistReady),
 }
 
