@@ -328,9 +328,7 @@ impl RemoteDagDispatcher {
 
     fn check_locks(&self) -> Result<()> {
         let mut stats = Statistics::default();
-        let mut lock_iter =
-            self.snap
-                .new_iterator(LOCK_CF, false, false, Some(self.req.start_ts), true);
+        let mut lock_iter = self.snap.new_iterator(LOCK_CF, false, false, None, true);
         for (start, end) in &self.ranges {
             lock_iter.set_range(start.clone(), end.clone());
             check_locks(

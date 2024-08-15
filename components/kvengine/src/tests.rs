@@ -74,6 +74,8 @@ const DEF_MIN_BLOB_SIZE: u32 = 64;
 // starts from NEW_DATA_UPDATE_COUNTER + 1.
 const TEST_ENGINE_NEW_DATA_UPDATE_COUNTER: u64 = NEW_DATA_UPDATE_COUNTER + 1;
 
+const TABLE_KEY_PREFIX: &str = "t_";
+
 /// Wrap `Engine` to make sure that it will be closed after the test, and not
 /// interfere with other tests.
 struct TestEngine {
@@ -95,13 +97,24 @@ impl Drop for TestEngine {
     }
 }
 
+impl TestEngine {
+    fn inner_key_off(&self) -> usize {
+        KEYSPACE_PREFIX_LEN * self.key_builder.get_enable_inner_key_off() as usize
+    }
+
+    fn key_builder(&self) -> &KeyBuilder {
+        &self.key_builder
+    }
+}
+
 fn new_test_engine() -> (TestEngine, mpsc::Sender<ApplyTask>) {
-    new_test_engine_opt(false, DEF_BLOCK_SIZE)
+    new_test_engine_opt(false, DEF_BLOCK_SIZE, "")
 }
 
 fn new_test_engine_opt(
     enable_inner_key_off: bool,
     block_size: usize,
+    key_prefix: &str,
 ) -> (TestEngine, mpsc::Sender<ApplyTask>) {
     let (listener_tx, listener_rx) = mpsc::unbounded();
     let tester = EngineTester::new(enable_inner_key_off, block_size);
@@ -139,7 +152,7 @@ fn new_test_engine_opt(
     thread::spawn(move || {
         applier.run();
     });
-    let key_builder = KeyBuilder::new(KEYSPACE_ID, enable_inner_key_off, "");
+    let key_builder = KeyBuilder::new(KEYSPACE_ID, enable_inner_key_off, key_prefix);
     (
         TestEngine {
             engine,
@@ -743,12 +756,147 @@ fn test_read_iterator_all_versions() {
     }
 }
 
+#[test]
+fn test_lock_cf_repeatable_read() {
+    let enable_inner_key_off = true;
+
+    ::test_util::init_log_for_test();
+    let (engine, applier_tx) =
+        new_test_engine_opt(enable_inner_key_off, DEF_BLOCK_SIZE, TABLE_KEY_PREFIX);
+    let kb = engine.key_builder();
+    let shard = engine.get_shard(1).unwrap();
+
+    let verify_locks = |snap: &SnapAccess, start: usize, end: usize, version: u64, del: bool| {
+        let tag = format!("{start}->{end}, {version}, {del}");
+        let mut it = snap.new_iterator(LOCK_CF, false, false, None, false);
+        it.seek(&kb.i_to_outer_key(start));
+
+        if del {
+            assert!(
+                !it.valid() || it.key() >= kb.i_to_outer_key(end).as_slice(),
+                "{}",
+                tag
+            );
+            return;
+        }
+
+        for i in start..end {
+            assert!(it.valid(), "{}", tag);
+            assert_eq!(it.key(), kb.i_to_outer_key(i).as_slice(), "{}", tag);
+            assert_eq!(it.version(), version, "{}", tag);
+            assert_eq!(table::is_deleted(it.meta()), del, "{}", tag);
+            it.next();
+        }
+    };
+
+    // Prepare level data.
+    {
+        let mut cf_builder = ShardCfBuilder::new(LOCK_CF);
+        let mut saved_vals: Vec<Rc<Vec<u8>>> = Vec::new();
+        cf_builder.add_table(
+            new_table(&engine, 1000, 100, 300, 1000, false, &mut saved_vals),
+            2,
+        );
+        cf_builder.add_table(
+            new_table(&engine, 2000, 110, 300, 2000, true, &mut saved_vals),
+            1,
+        );
+
+        let l0_file3 = new_l0table_file(
+            &engine,
+            3000,
+            [0, 120, 0],
+            [0, 300, 0],
+            3000,
+            [false, false, false],
+        );
+        let l0_tbl3 = L0Table::new(l0_file3, None, false, None).unwrap().unwrap();
+        let l0_file4 = new_l0table_file(
+            &engine,
+            4000,
+            [0, 130, 0],
+            [0, 300, 0],
+            4000,
+            [false, true, false],
+        );
+        let l0_tbl4 = L0Table::new(l0_file4, None, false, None).unwrap().unwrap();
+
+        let data = ShardDataBuilder::from_data(shard.get_data())
+            .lv_tables(LOCK_CF, cf_builder.build())
+            .l0_tables(vec![l0_tbl4, l0_tbl3])
+            .build();
+        shard.set_data(data);
+        shard.set_base_version(10000);
+    }
+
+    let base_ver = shard.get_base_version();
+
+    // Write mem table.
+    let mem_tbl_ver5 = load_data_ext(
+        &engine,
+        [0, 140, 0],
+        [0, 300, 0],
+        5000, // useless
+        [false, false, false],
+        &applier_tx,
+    ) + base_ver;
+
+    // Write txn file lock.
+    let txn_file_ver6 = {
+        let chunk_id = 6000;
+        build_txn_chunk(&engine, 150, 300, chunk_id, None, enable_inner_key_off);
+        let primary = kb.i_to_outer_key(150);
+        let mut wb = WriteBatch::new(1, engine.inner_key_off());
+        let txn_file_refs = make_txn_file_refs(
+            6000, // useless
+            vec![chunk_id],
+            make_lock_prefix(primary.clone(), 6000),
+            vec![],
+        );
+        wb.set_property(TXN_FILE_REF, &txn_file_refs);
+        engine.txn_chunk_mgr.prepare(chunk_id, None).unwrap();
+        write_data(wb, &applier_tx)
+    } + base_ver;
+
+    let snap = shard.new_snap_access();
+    print_locks(&snap, false, None);
+    verify_locks(&snap, 100, 110, 1000, false);
+    verify_locks(&snap, 110, 120, 2000, true);
+    verify_locks(&snap, 120, 130, 3000, false);
+    verify_locks(&snap, 130, 140, 4000, true);
+    verify_locks(&snap, 140, 150, mem_tbl_ver5, false);
+    verify_locks(&snap, 150, 300, snap.get_mem_table_version(), false);
+
+    // Write more mem table data.
+    {
+        switch_mem_table(&engine, &applier_tx);
+        load_data_ext(
+            &engine,
+            [0, 160, 0],
+            [0, 300, 0],
+            7000, // useless
+            [false, false, false],
+            &applier_tx,
+        );
+    }
+
+    // Verify repeatable read.
+    verify_locks(&snap, 140, 150, mem_tbl_ver5, false);
+    verify_locks(&snap, 150, 300, snap.get_mem_table_version(), false);
+
+    // Check latest snapshot.
+    let snap = shard.new_snap_access();
+    verify_locks(&snap, 140, 150, mem_tbl_ver5, false);
+    verify_locks(&snap, 150, 160, txn_file_ver6, false);
+    verify_locks(&snap, 160, 300, snap.get_mem_table_version(), false);
+}
+
 #[rstest]
 #[case::enable_key_off(true)]
 #[case::disable_key_off(false)]
 fn test_level_overlapping_tables(#[case] enable_inner_key_off: bool) {
     ::test_util::init_log_for_test();
-    let (engine, _) = new_test_engine_opt(enable_inner_key_off, DEF_BLOCK_SIZE);
+    let (engine, _) = new_test_engine_opt(enable_inner_key_off, DEF_BLOCK_SIZE, "");
     let shard = engine.get_shard(1).unwrap();
 
     let mut cf_builder = ShardCfBuilder::new(0);
@@ -833,7 +981,7 @@ fn test_level_overlapping_tables(#[case] enable_inner_key_off: bool) {
 #[case::disable_key_off(false)]
 fn test_get_suggest_split_key(#[case] enable_inner_key_off: bool) {
     ::test_util::init_log_for_test();
-    let (engine, _) = new_test_engine_opt(enable_inner_key_off, 4096);
+    let (engine, _) = new_test_engine_opt(enable_inner_key_off, 4096, "");
     let shard = engine.get_shard(1).unwrap();
 
     let range = ShardRange::new(
@@ -965,7 +1113,7 @@ fn test_get_suggest_split_key(#[case] enable_inner_key_off: bool) {
 #[case::disable_key_off(false)]
 fn test_get_evenly_split_keys(#[case] enable_inner_key_off: bool) {
     ::test_util::init_log_for_test();
-    let (engine, _) = new_test_engine_opt(enable_inner_key_off, 4096);
+    let (engine, _) = new_test_engine_opt(enable_inner_key_off, 4096, "");
     let shard = engine.get_shard(1).unwrap();
 
     let range = ShardRange::new(
@@ -1157,7 +1305,7 @@ fn test_get_evenly_split_keys(#[case] enable_inner_key_off: bool) {
 #[test]
 fn test_refresh_stats() {
     ::test_util::init_log_for_test();
-    let (engine, _) = new_test_engine_opt(true, DEF_BLOCK_SIZE);
+    let (engine, _) = new_test_engine_opt(true, DEF_BLOCK_SIZE, "");
     let shard = engine.get_shard(1).unwrap();
 
     let mut saved_vals: Vec<Rc<Vec<u8>>> = Vec::new();
@@ -1239,10 +1387,6 @@ fn test_l0table_ignore_lock() {
     assert!(l0table_ignore_lock.is_none());
 }
 
-fn new_tidb_key_builder(enable_inner_key_off: bool) -> KeyBuilder {
-    KeyBuilder::new(KEYSPACE_ID, enable_inner_key_off, "t_")
-}
-
 #[rstest]
 #[case::inner_key_off_enable(true)]
 #[case::inner_key_off_disable(false)]
@@ -1255,7 +1399,7 @@ fn test_columnar_l0_compaction(#[case] enable_inner_key_off: bool) {
         file_id += 1;
         file_id
     };
-    let (engine, apply_tx) = new_test_engine_opt(enable_inner_key_off, DEF_BLOCK_SIZE);
+    let (engine, apply_tx) = new_test_engine_opt(enable_inner_key_off, DEF_BLOCK_SIZE, "");
     let shard_id = prepare_table_region(&engine, &apply_tx, keyspace_id, table_id);
     let shard = engine.get_shard(shard_id).unwrap();
     let schema = new_schema(table_id, true);
@@ -1376,7 +1520,7 @@ fn test_columnar_l1_compaction(#[case] enable_inner_key_off: bool) {
         file_id += 1;
         file_id
     };
-    let (engine, apply_tx) = new_test_engine_opt(enable_inner_key_off, DEF_BLOCK_SIZE);
+    let (engine, apply_tx) = new_test_engine_opt(enable_inner_key_off, DEF_BLOCK_SIZE, "");
     let shard_id = prepare_table_region(&engine, &apply_tx, keyspace_id, table_id);
     let shard = engine.get_shard(shard_id).unwrap();
     let schema = new_schema(table_id, true);
@@ -1513,7 +1657,7 @@ fn test_columnar_major_compaction(#[case] enable_inner_key_off: bool) {
         file_id += 1;
         file_id
     };
-    let (engine, apply_tx) = new_test_engine_opt(enable_inner_key_off, DEF_BLOCK_SIZE);
+    let (engine, apply_tx) = new_test_engine_opt(enable_inner_key_off, DEF_BLOCK_SIZE, "");
     let shard_id = prepare_table_region(&engine, &apply_tx, keyspace_id, table_id);
     let shard = engine.get_shard(shard_id).unwrap();
     let schema = new_schema(table_id, false);
@@ -1703,7 +1847,7 @@ fn test_columnar_destroy_range(#[case] enable_inner_key_off: bool) {
         file_id += 1;
         file_id
     };
-    let (engine, apply_tx) = new_test_engine_opt(enable_inner_key_off, DEF_BLOCK_SIZE);
+    let (engine, apply_tx) = new_test_engine_opt(enable_inner_key_off, DEF_BLOCK_SIZE, "");
     let shard_id = prepare_table_region(&engine, &apply_tx, keyspace_id, table_id);
     let shard = engine.get_shard(shard_id).unwrap();
     let schema = new_schema(table_id, true);
@@ -1828,7 +1972,7 @@ fn test_columnar_truncate_ts(#[case] enable_inner_key_off: bool) {
         file_id += 1;
         file_id
     };
-    let (engine, apply_tx) = new_test_engine_opt(enable_inner_key_off, DEF_BLOCK_SIZE);
+    let (engine, apply_tx) = new_test_engine_opt(enable_inner_key_off, DEF_BLOCK_SIZE, "");
     let shard_id = prepare_table_region(&engine, &apply_tx, keyspace_id, table_id);
     let shard = engine.get_shard(shard_id).unwrap();
     let schema = new_schema(table_id, false);
@@ -1958,7 +2102,7 @@ fn test_columnar_trim_over_bound(#[case] enable_inner_key_off: bool) {
         file_id += 1;
         file_id
     };
-    let (engine, apply_tx) = new_test_engine_opt(enable_inner_key_off, DEF_BLOCK_SIZE);
+    let (engine, apply_tx) = new_test_engine_opt(enable_inner_key_off, DEF_BLOCK_SIZE, "");
     let shard_id = prepare_table_region(&engine, &apply_tx, keyspace_id, table_id);
     let shard = engine.get_shard(shard_id).unwrap();
     let schema = new_schema(table_id, false);
@@ -2197,8 +2341,8 @@ fn new_sst_table_for_columnar(
 fn test_txn_file(#[case] enc_key: Option<EncryptionKey>, #[case] enable_inner_key_off: bool) {
     ::test_util::init_log_for_test();
     let enc_key = enc_key.as_ref();
-    let kb = new_tidb_key_builder(enable_inner_key_off);
-    let (engine, tx) = new_test_engine_opt(enable_inner_key_off, DEF_BLOCK_SIZE);
+    let (engine, tx) = new_test_engine_opt(enable_inner_key_off, DEF_BLOCK_SIZE, TABLE_KEY_PREFIX);
+    let kb = engine.key_builder();
     let chunk_id = 200;
     build_txn_chunk(&engine, 200, 300, chunk_id, enc_key, enable_inner_key_off);
     let primary = kb.i_to_outer_key(0);
@@ -2215,7 +2359,7 @@ fn test_txn_file(#[case] enc_key: Option<EncryptionKey>, #[case] enable_inner_ke
         .prepare(chunk_id, enc_key.cloned())
         .unwrap();
     write_data(wb, &tx);
-    verify_lock(&engine, 200, 300, &kb);
+    verify_lock(&engine, 200, 300, kb);
 
     // rollback the txn file.
     let txn_file_refs = make_txn_file_refs(1000, vec![chunk_id], vec![], make_user_meta(1000, 0));
@@ -2273,7 +2417,7 @@ fn test_txn_file(#[case] enc_key: Option<EncryptionKey>, #[case] enable_inner_ke
         .prepare_txn_chunks(vec![txn2_chunk_id], enc_key.cloned())
         .unwrap();
     write_data(wb, &tx);
-    verify_lock(&engine, 200, 400, &kb);
+    verify_lock(&engine, 200, 400, kb);
 
     let txn1_commit = make_txn_file_refs(
         txn1_start_ts,
@@ -2284,8 +2428,8 @@ fn test_txn_file(#[case] enc_key: Option<EncryptionKey>, #[case] enable_inner_ke
     let mut wb = WriteBatch::new(1, 0);
     wb.set_property(TXN_FILE_REF, &txn1_commit);
     write_data(wb, &tx);
-    verify_write(&engine, 200, 300, &kb);
-    verify_lock(&engine, 300, 400, &kb);
+    verify_write(&engine, 200, 300, kb);
+    verify_lock(&engine, 300, 400, kb);
 
     let conflict_chunk_id = 203;
     let conflict_start_ts = 999;
@@ -2336,8 +2480,8 @@ fn test_txn_file(#[case] enc_key: Option<EncryptionKey>, #[case] enable_inner_ke
     assert!(snap.get_txn_file_conflict_write(&empty_txn_file).is_none());
     assert!(snap.get_txn_file_conflict_lock(&empty_txn_file).is_none());
 
-    verify_write(&engine, 200, 300, &kb);
-    verify_lock(&engine, 300, 400, &kb);
+    verify_write(&engine, 200, 300, kb);
+    verify_lock(&engine, 300, 400, kb);
 
     let txn2_commit = make_txn_file_refs(
         txn2_start_ts,
@@ -2348,7 +2492,7 @@ fn test_txn_file(#[case] enc_key: Option<EncryptionKey>, #[case] enable_inner_ke
     let mut wb = WriteBatch::new(1, 0);
     wb.set_property(TXN_FILE_REF, &txn2_commit);
     write_data(wb, &tx);
-    verify_write(&engine, 200, 400, &kb);
+    verify_write(&engine, 200, 400, kb);
 }
 
 #[rstest]
@@ -2362,8 +2506,8 @@ fn test_txn_file_multiple(
 ) {
     ::test_util::init_log_for_test();
     let enc_key = enc_key.as_ref();
-    let kb = new_tidb_key_builder(enable_inner_key_off);
-    let (engine, tx) = new_test_engine_opt(enable_inner_key_off, DEF_BLOCK_SIZE);
+    let (engine, tx) = new_test_engine_opt(enable_inner_key_off, DEF_BLOCK_SIZE, TABLE_KEY_PREFIX);
+    let kb = engine.key_builder();
 
     let chunks_id: Vec<u64> = (100..500).step_by(10).collect();
     let primary = kb.i_to_outer_key(0);
@@ -2392,7 +2536,7 @@ fn test_txn_file_multiple(
         .prepare_txn_chunks(chunks_id.clone(), enc_key.cloned())
         .unwrap();
     write_data(wb, &tx);
-    verify_lock(&engine, 100, 500, &kb);
+    verify_lock(&engine, 100, 500, kb);
 
     let txn4_commit = make_txn_file_refs(
         start_ts,
@@ -2403,7 +2547,7 @@ fn test_txn_file_multiple(
     let mut wb = WriteBatch::new(1, 0);
     wb.set_property(TXN_FILE_REF, &txn4_commit);
     write_data(wb, &tx);
-    verify_write(&engine, 100, 500, &kb);
+    verify_write(&engine, 100, 500, kb);
 }
 
 fn build_txn_chunk(
@@ -2414,7 +2558,7 @@ fn build_txn_chunk(
     enc_key: Option<&EncryptionKey>,
     enable_inner_key_off: bool,
 ) {
-    let kb = new_tidb_key_builder(enable_inner_key_off);
+    let kb = engine.key_builder();
     let mut chunk_builder =
         TxnChunkBuilder::new(id, 10, enc_key.cloned(), KEYSPACE_ID, enable_inner_key_off);
     for i in start..end {
@@ -2515,6 +2659,20 @@ fn verify_write(engine: &TestEngine, start: usize, end: usize, kb: &KeyBuilder) 
         i += 1;
     }
     assert_eq!(i, end);
+}
+
+fn print_locks(snap: &SnapAccess, all_versions: bool, read_ts: Option<u64>) {
+    let mut it = snap.new_iterator(LOCK_CF, false, all_versions, read_ts, false);
+    it.rewind();
+    while it.valid() {
+        debug!(
+            "key: {:?}, version: {:?}, meta: {:?}",
+            tikv_util::escape(it.key()),
+            it.version(),
+            it.meta()
+        );
+        it.next();
+    }
 }
 
 fn keyspace_prefix(keyspace_id: u32) -> Vec<u8> {
@@ -2728,7 +2886,7 @@ impl Applier {
                     );
                 }
             }
-            task.result_tx.send(Ok(())).unwrap();
+            task.result_tx.send(Ok(seq)).unwrap();
         }
     }
 }
@@ -2736,11 +2894,11 @@ impl Applier {
 struct ApplyTask {
     wb: Option<WriteBatch>,
     cs: Option<pb::ChangeSet>,
-    result_tx: mpsc::Sender<Result<()>>,
+    result_tx: mpsc::Sender<Result<u64 /* write_sequence */>>,
 }
 
 impl ApplyTask {
-    fn new_cs(cs: pb::ChangeSet, result_tx: mpsc::Sender<Result<()>>) -> Self {
+    fn new_cs(cs: pb::ChangeSet, result_tx: mpsc::Sender<Result<u64>>) -> Self {
         Self {
             wb: None,
             cs: Some(cs),
@@ -2748,7 +2906,7 @@ impl ApplyTask {
         }
     }
 
-    fn new_wb(wb: WriteBatch, result_tx: mpsc::Sender<Result<()>>) -> Self {
+    fn new_wb(wb: WriteBatch, result_tx: mpsc::Sender<Result<u64>>) -> Self {
         Self {
             wb: Some(wb),
             cs: None,
@@ -2988,13 +3146,47 @@ fn load_data(
     }
 }
 
-fn write_data(wb: WriteBatch, applier_tx: &mpsc::Sender<ApplyTask>) {
+fn load_data_ext(
+    engine: &TestEngine,
+    begin: [usize; NUM_CFS],
+    end: [usize; NUM_CFS],
+    version: u64,
+    del: [bool; NUM_CFS],
+    tx: &mpsc::Sender<ApplyTask>,
+) -> u64 {
+    let mut wb = WriteBatch::new(1, engine.inner_key_off());
+    for cf in 0..NUM_CFS {
+        for i in begin[cf]..end[cf] {
+            let key = engine.key_builder.i_to_outer_key(i);
+            let version = if cf == 1 { 0 } else { version };
+            if del[cf] {
+                wb.put(cf, &key, &[], BIT_DELETE, &[], version);
+            } else {
+                let val = key.repeat(2);
+                wb.put(cf, &key, &val, 0, &[], version);
+            }
+        }
+    }
+    if wb.num_entries() > 0 {
+        write_data(wb, tx)
+    } else {
+        0
+    }
+}
+
+fn switch_mem_table(engine: &TestEngine, tx: &mpsc::Sender<ApplyTask>) {
+    let mut wb = WriteBatch::new(1, engine.inner_key_off());
+    wb.set_switch_mem_table();
+    write_data(wb, tx);
+}
+
+fn write_data(wb: WriteBatch, applier_tx: &mpsc::Sender<ApplyTask>) -> u64 /* write_sequence */ {
     let (result_tx, result_rx) = mpsc::bounded(1);
     let task = ApplyTask::new_wb(wb, result_tx);
     if let Err(err) = applier_tx.send(task) {
         panic!("{:?}", err);
     }
-    result_rx.recv().unwrap().unwrap();
+    result_rx.recv().unwrap().unwrap()
 }
 
 fn check_get(

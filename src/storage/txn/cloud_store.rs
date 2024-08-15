@@ -126,7 +126,7 @@ impl<S: Snapshot> CloudStore<S> {
         tikv_util::set_current_region(snap.get_id());
 
         let raw_key = user_key.to_raw()?;
-        let item = snap.get(LOCK_CF, &raw_key, 0);
+        let item = snap.get(LOCK_CF, &raw_key, snap.get_mem_table_version());
         statistics.lock.get += 1;
         statistics.lock.flow_stats.read_keys += 1;
         statistics.lock.flow_stats.read_bytes += raw_key.len() + item.value_len();
@@ -166,9 +166,9 @@ impl<S: Snapshot> CloudStore<S> {
         let upper_bound = Some(Key::from_raw(upper_bound));
         let (lower_bound, upper_bound) = verify_range(&self.snapshot, lower_bound, upper_bound)?;
         let mut stats = Statistics::default();
-        let mut iter =
-            self.snapshot
-                .new_iterator(LOCK_CF, false, false, Some(self.start_ts), self.fill_cache);
+        let mut iter = self
+            .snapshot
+            .new_iterator(LOCK_CF, false, false, None, self.fill_cache);
         if iter.set_range(lower_bound, upper_bound) {
             stats.lock.seek += 1;
         }

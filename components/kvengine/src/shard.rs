@@ -710,6 +710,12 @@ impl Shard {
         self.base_version.load(Ordering::Acquire)
     }
 
+    // For test only.
+    #[cfg(test)]
+    pub fn set_base_version(&self, ver: u64) {
+        self.base_version.store(ver, Ordering::Release);
+    }
+
     pub fn get_write_sequence(&self) -> u64 {
         self.write_sequence.load(Ordering::Acquire)
     }
@@ -1490,7 +1496,27 @@ impl ShardDataBuilder {
         }
     }
 
-    pub fn build(self) -> ShardData {
+    pub fn from_data(data: ShardData) -> Self {
+        Self {
+            range: data.range.clone(),
+            mem_tbls: data.mem_tbls.clone(),
+            l0_tbls: data.l0_tbls.clone(),
+            blob_tbl_map: data.blob_tbl_map.clone(),
+            cfs: Some(data.cfs.clone()),
+            unloaded_tbls: data.unloaded_tbls.clone(),
+            lock_txn_files: data.lock_txn_files.clone(),
+            limiter: Some(data.limiter.clone()),
+            update_counter: Some(data.update_counter + 1),
+            schema_file: data.schema_file.clone(),
+            col_levels: Some(data.col_levels.clone()),
+        }
+    }
+
+    pub fn build(mut self) -> ShardData {
+        if self.mem_tbls.is_empty() {
+            self.mem_tbls = vec![CfTable::new()];
+        }
+
         ShardData::new(
             self.range,
             self.mem_tbls,
@@ -1507,8 +1533,21 @@ impl ShardDataBuilder {
         )
     }
 
-    pub fn mem_tbls(mut self, mem_tbls: Vec<CfTable>) -> Self {
+    pub fn mem_tables(mut self, mem_tbls: Vec<CfTable>) -> Self {
         self.mem_tbls = mem_tbls;
+        self
+    }
+
+    pub fn l0_tables(mut self, l0_tbls: Vec<L0Table>) -> Self {
+        self.l0_tbls = l0_tbls;
+        self
+    }
+
+    pub(crate) fn lv_tables(mut self, cf: usize, shard_cf: ShardCf) -> Self {
+        let cfs = self
+            .cfs
+            .get_or_insert_with(|| [ShardCf::new(0), ShardCf::new(1), ShardCf::new(2)]);
+        cfs[cf] = shard_cf;
         self
     }
 }

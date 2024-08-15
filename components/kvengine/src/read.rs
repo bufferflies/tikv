@@ -318,7 +318,7 @@ impl Debug for SnapAccess {
 pub struct SnapAccessCore {
     tag: ShardTag,
     managed_ts: u64,
-    _base_version: u64,
+    base_version: u64,
     meta_seq: u64,
     write_sequence: u64,
     columnar_snap_version: u64,
@@ -341,7 +341,7 @@ impl SnapAccessCore {
             write_sequence,
             columnar_snap_version,
             meta_seq,
-            _base_version: base_version,
+            base_version,
             managed_ts: 0,
             data,
             get_hint: Mutex::new(Hint::new()),
@@ -462,6 +462,8 @@ impl SnapAccessCore {
             ts
         } else if CF_MANAGED[cf] && self.managed_ts != 0 {
             self.managed_ts
+        } else if !CF_MANAGED[cf] {
+            self.get_mem_table_version()
         } else {
             u64::MAX
         }
@@ -539,6 +541,9 @@ impl SnapAccessCore {
     ) -> table::Value {
         if cf == LOCK_CF && !ignore_txn_file {
             for txn_file in &self.data.lock_txn_files {
+                if txn_file.version() > version {
+                    continue;
+                }
                 let (_, val) = txn_file.get_value(inner_key, out_val_owner);
                 if val.is_valid() {
                     return val;
@@ -680,6 +685,10 @@ impl SnapAccessCore {
 
     pub fn get_write_sequence(&self) -> u64 {
         self.write_sequence
+    }
+
+    pub fn get_mem_table_version(&self) -> u64 {
+        self.base_version + self.write_sequence
     }
 
     pub fn get_start_key(&self) -> &[u8] {
@@ -1310,6 +1319,10 @@ impl Iterator {
         self.val.get_value()
     }
 
+    pub fn version(&self) -> u64 {
+        self.val.version
+    }
+
     pub fn meta(&self) -> u8 {
         self.val.meta
     }
@@ -1729,7 +1742,7 @@ mod tests {
                     opt,
                     &master_key,
                 );
-                let data = ShardDataBuilder::new(shard.range.clone()).mem_tbls(mem_tbls).build();
+                let data = ShardDataBuilder::new(shard.range.clone()).mem_tables(mem_tbls).build();
                 shard.set_data(data);
                 let snap_access = shard.new_snap_access();
 
