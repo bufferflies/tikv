@@ -3,13 +3,14 @@ use std::{cmp, collections::HashMap, sync::Arc};
 
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, Bytes};
+use cloud_encryption::EncryptionKey;
 
 use super::{builder::*, BlobRef};
 use crate::{
     error::IoContext,
     table::{
-        file::File, ChecksumType, Error, InnerKey, Result, LZ4_COMPRESSION, NO_COMPRESSION,
-        ZSTD_COMPRESSION,
+        file::File, sstable::PROP_KEY_ENCRYPTION_VER, ChecksumType, Error, InnerKey, Result,
+        LZ4_COMPRESSION, NO_COMPRESSION, ZSTD_COMPRESSION,
     },
 };
 
@@ -20,6 +21,7 @@ pub struct BlobTable {
     footer: BlobFooter,
     smallest_key: Bytes,
     biggest_key: Bytes,
+    pub(crate) encryption_ver: u32,
 }
 
 impl BlobTable {
@@ -39,6 +41,7 @@ impl BlobTable {
         let mut prop_slice = props_data.chunk();
         let mut smallest_key = Bytes::new();
         let mut biggest_key = Bytes::new();
+        let mut encryption_ver = 0;
         while !prop_slice.is_empty() {
             let (key, val, remain) = parse_prop_data(prop_slice);
             prop_slice = remain;
@@ -46,6 +49,8 @@ impl BlobTable {
                 smallest_key = Bytes::copy_from_slice(val);
             } else if key == PROP_KEY_BIGGEST.as_bytes() {
                 biggest_key = Bytes::copy_from_slice(val);
+            } else if key == PROP_KEY_ENCRYPTION_VER.as_bytes() {
+                encryption_ver = LittleEndian::read_u32(val);
             }
         }
         Ok(Self {
@@ -54,6 +59,7 @@ impl BlobTable {
             footer,
             smallest_key,
             biggest_key,
+            encryption_ver,
         })
     }
 
@@ -69,6 +75,7 @@ impl BlobTable {
             ..footer.properties_offset as usize + footer.properties_len(size)];
         let mut smallest_key = Bytes::new();
         let mut biggest_key = Bytes::new();
+        let mut encryption_ver = 0;
         while !props_data.is_empty() {
             let (key, val, remain) = parse_prop_data(props_data);
             props_data = remain;
@@ -76,6 +83,8 @@ impl BlobTable {
                 smallest_key = Bytes::copy_from_slice(val);
             } else if key == PROP_KEY_BIGGEST.as_bytes() {
                 biggest_key = Bytes::copy_from_slice(val);
+            } else if key == PROP_KEY_ENCRYPTION_VER.as_bytes() {
+                encryption_ver = LittleEndian::read_u32(val);
             }
         }
         Ok(Self {
@@ -84,10 +93,16 @@ impl BlobTable {
             footer,
             smallest_key,
             biggest_key,
+            encryption_ver,
         })
     }
 
-    pub fn get(&self, blob_ref: &BlobRef) -> Result<Vec<u8>> {
+    pub fn get(
+        &self,
+        blob_ref: &BlobRef,
+        decryption_buf: &mut Vec<u8>,
+        encryption_key: Option<EncryptionKey>,
+    ) -> Result<Vec<u8>> {
         let data = self
             .file
             .as_ref()
@@ -96,16 +111,31 @@ impl BlobTable {
                 blob_ref.offset as u64,
                 blob_ref.len as usize + BLOB_ENTRY_META_SIZE,
             )?;
-        let mut decompressed = Vec::with_capacity(blob_ref.original_len as usize);
-        if self.decompress(
-            &data,
-            blob_ref.len,
-            blob_ref.original_len,
-            &mut decompressed,
-        )? {
+        let meta_slice = &data.chunk()[..BLOB_ENTRY_META_SIZE];
+        let mut data_slice = &data.chunk()[BLOB_ENTRY_META_SIZE..];
+        if let Some(encryption_key) = &encryption_key {
+            decryption_buf.clear();
+            encryption_key.decrypt(
+                data_slice,
+                self.id(),
+                blob_ref.offset,
+                self.encryption_ver,
+                decryption_buf,
+            );
+            data_slice = decryption_buf;
+        }
+        if self.footer.compression_type != NO_COMPRESSION {
+            let mut decompressed = Vec::with_capacity(blob_ref.original_len as usize);
+            self.decompress(
+                meta_slice,
+                data_slice,
+                blob_ref.len,
+                blob_ref.original_len,
+                &mut decompressed,
+            )?;
             Ok(decompressed)
         } else {
-            Ok(data[BLOB_ENTRY_VALUE_OFFSET..].to_vec())
+            Ok(data_slice.to_vec())
         }
     }
 
@@ -117,32 +147,57 @@ impl BlobTable {
         &'a self,
         blob_ref: &BlobRef,
         need_decompress: bool,
+        need_decrypt: bool,
         buf: &'a mut Vec<u8>,
+        decryption_buf: &'a mut Vec<u8>,
+        encryption_key: Option<EncryptionKey>,
     ) -> Result<&[u8]> {
         let data = &self.preloaded_data.as_ref().unwrap()[blob_ref.offset as usize
             ..blob_ref.offset as usize + BLOB_ENTRY_VALUE_OFFSET + blob_ref.len as usize];
-        if need_decompress && self.decompress(data, blob_ref.len, blob_ref.original_len, buf)? {
+        let meta_slice = &data[..BLOB_ENTRY_META_SIZE];
+        let mut data_slice = &data[BLOB_ENTRY_META_SIZE..];
+        if let Some(encryption_key) = &encryption_key {
+            if need_decrypt {
+                decryption_buf.clear();
+                encryption_key.decrypt(
+                    data_slice,
+                    self.id(),
+                    blob_ref.offset,
+                    self.encryption_ver,
+                    decryption_buf,
+                );
+                data_slice = decryption_buf;
+            }
+        }
+        if need_decompress
+            && self.decompress(
+                meta_slice,
+                data_slice,
+                blob_ref.len,
+                blob_ref.original_len,
+                buf,
+            )?
+        {
             Ok(buf.as_slice())
         } else {
-            Ok(&data[BLOB_ENTRY_VALUE_OFFSET..])
+            Ok(data_slice)
         }
     }
 
     pub fn decompress(
         &self,
-        data: &[u8],
+        meta_slice: &[u8],
+        compressed_data: &[u8],
         size: u32,
         original_len: u32,
         decompressed_buf: &mut Vec<u8>,
     ) -> Result<bool> {
-        let checksum = LittleEndian::read_u32(data);
-        let compressed_len = LittleEndian::read_u32(&data[BLOB_ENTRY_LENGTH_OFFSET..]);
+        let checksum = LittleEndian::read_u32(meta_slice);
+        let compressed_len = LittleEndian::read_u32(&meta_slice[BLOB_ENTRY_LENGTH_OFFSET..]);
         assert_eq!(compressed_len, size);
-        let compressed_data =
-            &data[BLOB_ENTRY_VALUE_OFFSET..BLOB_ENTRY_VALUE_OFFSET + size as usize];
         let got_checksum = ChecksumType::from(self.footer.checksum_type).checksum(compressed_data);
         if checksum != got_checksum {
-            return Err(Error::InvalidChecksum("blob checkusm mismatch".to_owned()));
+            return Err(Error::InvalidChecksum("blob checksum mismatch".to_owned()));
         }
         match self.footer.compression_type {
             NO_COMPRESSION => Ok(false), // in place decoding
@@ -234,15 +289,23 @@ pub struct BlobPrefetcher {
     tbl_buffers: HashMap<u64, (u32, Vec<u8>)>,
     prefetch_size: usize,
     decompressed_buffer: Vec<u8>,
+    decryption_buffer: Vec<u8>,
+    encryption_key: Option<EncryptionKey>,
 }
 
 impl BlobPrefetcher {
-    pub fn new(tables: Arc<HashMap<u64, BlobTable>>, prefetch_size: usize) -> Self {
+    pub fn new(
+        tables: Arc<HashMap<u64, BlobTable>>,
+        prefetch_size: usize,
+        encryption_key: Option<EncryptionKey>,
+    ) -> Self {
         Self {
             tables,
             tbl_buffers: Default::default(),
             prefetch_size,
             decompressed_buffer: vec![],
+            decryption_buffer: vec![],
+            encryption_key,
         }
     }
 
@@ -275,19 +338,32 @@ impl BlobPrefetcher {
             file.read_at(buffer, blob_ref.offset as u64)?;
             *buffer_offset = blob_ref.offset;
         }
-        let data = &buffer[(blob_ref.offset - *buffer_offset) as usize..];
+        let start_off = (blob_ref.offset - *buffer_offset) as usize;
+        let data = &buffer[start_off..start_off + BLOB_ENTRY_VALUE_OFFSET + blob_ref.len as usize];
+        let meta_slice = &data[..BLOB_ENTRY_META_SIZE];
+        let mut data_slice = &data[BLOB_ENTRY_META_SIZE..];
+        if let Some(encryption_key) = &self.encryption_key {
+            let encryption_ver = blob_table.encryption_ver;
+            self.decryption_buffer.clear();
+            encryption_key.decrypt(
+                data_slice,
+                blob_table.id(),
+                blob_ref.offset,
+                encryption_ver,
+                &mut self.decryption_buffer,
+            );
+            data_slice = &self.decryption_buffer;
+        }
         if blob_table.decompress(
-            data,
+            meta_slice,
+            data_slice,
             blob_ref.len,
             blob_ref.original_len,
             &mut self.decompressed_buffer,
         )? {
             return Ok(&self.decompressed_buffer);
         }
-        Ok(
-            &buffer[(blob_ref.offset - *buffer_offset) as usize + BLOB_ENTRY_VALUE_OFFSET
-                ..(blob_ref.offset - *buffer_offset) as usize + data_size],
-        )
+        Ok(data_slice)
     }
 }
 
@@ -295,7 +371,10 @@ impl BlobPrefetcher {
 mod tests {
     use std::{collections::HashMap, sync::Arc};
 
+    use cloud_encryption::EncryptionKey;
     use rand::{distributions::Alphanumeric, rngs::ThreadRng, Rng};
+    use rstest::rstest;
+    use test_util::init_log_for_test;
 
     use super::BlobTable;
     use crate::table::{blobtable::BlobRef, file::InMemFile, InnerKey, Value, NO_COMPRESSION};
@@ -313,10 +392,19 @@ mod tests {
         blob_ref: BlobRef,
     }
 
-    #[test]
-    fn test_basic() {
+    #[rstest]
+    #[case::enable_encryption(true)]
+    #[case::disable_encryption(false)]
+    fn test_basic(#[case] enable_encryption: bool) {
+        init_log_for_test();
         let mut rng = rand::thread_rng();
-        let mut builder = super::BlobTableBuilder::new(0, NO_COMPRESSION, 0, 0);
+        let encryption_key = if enable_encryption {
+            Some(new_test_encryption_key())
+        } else {
+            None
+        };
+        let mut builder =
+            super::BlobTableBuilder::new(1, NO_COMPRESSION, 0, 0, encryption_key.clone());
         let mut test_data = Vec::new();
         let meta: u8 = 0;
 
@@ -332,9 +420,11 @@ mod tests {
 
         let file = InMemFile::new(1, builder.finish());
         let table = super::BlobTable::new(Arc::new(file)).unwrap();
-
+        let mut decryption_buf = vec![];
         for td in test_data {
-            let blob = table.get(&td.blob_ref).unwrap();
+            let blob = table
+                .get(&td.blob_ref, &mut decryption_buf, encryption_key.clone())
+                .unwrap();
             assert_eq!(td.blob.as_bytes(), blob);
         }
 
@@ -342,9 +432,22 @@ mod tests {
         assert_eq!(table.biggest_key, format!("key_{:03}", 127));
     }
 
-    #[test]
-    fn test_prefetcher() {
-        let mut builder = super::BlobTableBuilder::new(1, NO_COMPRESSION, 0, 0);
+    fn new_test_encryption_key() -> EncryptionKey {
+        EncryptionKey::new(b"cipher".to_vec(), b"plain".to_vec(), 0)
+    }
+
+    #[rstest]
+    #[case::enable_encryption(true)]
+    #[case::disable_encryption(false)]
+    fn test_prefetcher(#[case] enable_encryption: bool) {
+        init_log_for_test();
+        let encryption_key = if enable_encryption {
+            Some(new_test_encryption_key())
+        } else {
+            None
+        };
+        let mut builder =
+            super::BlobTableBuilder::new(1, NO_COMPRESSION, 0, 0, encryption_key.clone());
         let mut offsets = Vec::new();
         for i in 0..100 {
             let key_str = format!("key_{:03}", i);
@@ -359,7 +462,8 @@ mod tests {
         let file = InMemFile::new(1, builder.finish());
         let table = super::BlobTable::new(Arc::new(file)).unwrap();
         let blob_tables: HashMap<u64, BlobTable> = [(1, table)].into();
-        let mut prefetcher = super::BlobPrefetcher::new(Arc::new(blob_tables), 1000);
+        let mut prefetcher =
+            super::BlobPrefetcher::new(Arc::new(blob_tables), 1000, encryption_key);
         for i in 0..100 {
             let expected_val = format!("val_{:03}", i);
             let val = prefetcher.get(&offsets[i]).unwrap();

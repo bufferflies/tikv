@@ -2441,6 +2441,7 @@ fn compact_destroy_range_for_columnar(
             keyspace_id,
             req.inner_key_off,
             columnar_file.get_l0_version(),
+            ctx.encryption_key.clone(),
         );
         for table_id in overlap_tables {
             let table_row_key_prefix = [
@@ -2455,7 +2456,11 @@ fn compact_destroy_range_for_columnar(
                 continue;
             }
             let schema = schema_file.get_table(table_id).unwrap();
-            let reader = ColumnarTableReader::new(&columnar_file, schema.clone());
+            let reader = ColumnarTableReader::new(
+                &columnar_file,
+                schema.clone(),
+                ctx.encryption_key.clone(),
+            );
             let mut compact_reader =
                 ColumnarCompactReader::new(Box::new(reader), level, schema, req.safe_ts);
             compact_reader.set_unbounded_handle_range()?;
@@ -2690,10 +2695,15 @@ fn compact_truncate_ts_for_columnar(
             keyspace_id,
             req.inner_key_off,
             columnar_file.get_l0_version(),
+            ctx.encryption_key.clone(),
         );
         for table_id in overlap_tables {
             let schema = schema_file.get_table(table_id).unwrap();
-            let reader = ColumnarTableReader::new(&columnar_file, schema.clone());
+            let reader = ColumnarTableReader::new(
+                &columnar_file,
+                schema.clone(),
+                ctx.encryption_key.clone(),
+            );
             let mut truncate_ts_reader =
                 ColumnarTruncateTsReader::new(Box::new(reader), schema, truncate_ts);
             truncate_ts_reader.set_unbounded_handle_range()?;
@@ -2942,6 +2952,7 @@ fn compact_trim_over_bound_for_columnar(
             keyspace_id,
             req.inner_key_off,
             columnar_file.get_l0_version(),
+            ctx.encryption_key.clone(),
         );
         for table_id in overlap_tables {
             let row_key_prefix = encode_row_key_prefix(table_id);
@@ -2954,7 +2965,11 @@ fn compact_trim_over_bound_for_columnar(
                 continue;
             }
             let schema = schema_file.get_table(table_id).unwrap();
-            let reader = ColumnarTableReader::new(&columnar_file, schema.clone());
+            let reader = ColumnarTableReader::new(
+                &columnar_file,
+                schema.clone(),
+                ctx.encryption_key.clone(),
+            );
             let mut compact_reader =
                 ColumnarCompactReader::new(Box::new(reader), level, schema, req.safe_ts);
             if schema.is_common_handle() {
@@ -3143,6 +3158,7 @@ fn compact_for_cf(
     // Owns the decompressed blob value while reading from the orginal blob
     // table, to reduce the memory re-allocation.
     let mut decompressed_blob_buf = vec![];
+    let mut decryption_buf = vec![];
     let mut blob_table_builder = if let Some(config) = bt_config {
         cur_blob_table_id = allocate_id();
         Some((
@@ -3152,6 +3168,7 @@ fn compact_for_cf(
                 config.compression_type,
                 compression_lvl,
                 config.min_blob_size,
+                ctx.encryption_key.clone(),
             ),
         ))
     } else {
@@ -3259,6 +3276,13 @@ fn compact_for_cf(
                             shard_id, blob_ref.fid, key,
                         )
                     });
+                    // If the encryption ver is changed, we should decrypt the blob value and
+                    // encrypt with the new encryption ver.
+                    let need_re_encrypt = if let Some(encryption_key) = &ctx.encryption_key {
+                        blob_table.encryption_ver != encryption_key.current_ver
+                    } else {
+                        false
+                    };
                     if blob_table.compression_tp() != bt_config.compression_type
                         || blob_table.compression_lvl() != compression_lvl
                         || blob_table.min_blob_size() != bt_config.min_blob_size
@@ -3271,7 +3295,10 @@ fn compact_for_cf(
                         .get_from_preloaded(
                             &blob_ref,
                             need_recompress_blob,
+                            need_re_encrypt,
                             &mut decompressed_blob_buf,
+                            &mut decryption_buf,
+                            ctx.encryption_key.clone(),
                         )
                         .unwrap();
                     // The value needs to be added to the blob table, if:
@@ -3287,6 +3314,7 @@ fn compact_for_cf(
                             key,
                             blob_or_compressed_blob,
                             Some(blob_ref.original_len),
+                            need_re_encrypt,
                         );
                         sst_builder.add(key, &val, Some(new_blob_ref));
                     } else {
@@ -3578,7 +3606,13 @@ fn compact_table_for_columnar(
     let mut block = Block::new(schema);
     let mut res = reader.read_block(&mut block, columnar_config.pack_max_row_count)?;
     let mut row_count = 0;
-    let mut tbl_builder = ColumnarTableBuilder::new(schema.clone(), *columnar_config, false);
+    let mut tbl_builder = ColumnarTableBuilder::new(
+        schema.clone(),
+        *columnar_config,
+        false,
+        ctx.encryption_key.clone(),
+        file_builder.file_id,
+    );
     let mut block_offset = 0;
     while res > 0 {
         row_count += res;
@@ -3591,7 +3625,13 @@ fn compact_table_for_columnar(
                 *cnt += 1;
                 persist_columnar_file(target_lvl, file_builder, tx.clone(), fs.clone(), opts);
                 file_builder.reset(allocate_id());
-                tbl_builder = ColumnarTableBuilder::new(schema.clone(), *columnar_config, false);
+                tbl_builder = ColumnarTableBuilder::new(
+                    schema.clone(),
+                    *columnar_config,
+                    false,
+                    ctx.encryption_key.clone(),
+                    file_builder.file_id,
+                );
             }
         } else {
             block.reset();
@@ -3621,8 +3661,13 @@ fn transform_for_columnar(
         .with_type(FileType::Columnar);
     let (tx, rx) = tikv_util::mpsc::bounded(ctx.req.file_ids.len());
     let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(&ctx.req.outer_start).unwrap_or_default();
-    let mut file_builder =
-        ColumnarFileBuilder::new(allocate_id(), keyspace_id, ctx.req.inner_key_off, None);
+    let mut file_builder = ColumnarFileBuilder::new(
+        allocate_id(),
+        keyspace_id,
+        ctx.req.inner_key_off,
+        None,
+        ctx.encryption_key.clone(),
+    );
     let mut cnt = 0;
     for table_id in overlap_tables {
         let schema = schema_file.get_table(table_id).unwrap();
@@ -3636,6 +3681,7 @@ fn transform_for_columnar(
                 iter,
                 blob_tbls.clone(),
                 true,
+                ctx.encryption_key.clone(),
             );
             columnar_readers.push(Box::new(reader));
         }
@@ -3852,6 +3898,7 @@ fn convert_row_file_to_columnar_file(
         keyspace_id,
         ctx.req.inner_key_off,
         Some(columnar_compaction.snap_version),
+        ctx.encryption_key.clone(),
     );
     let mut cnt = 0;
     let (tx, rx) = mpsc::bounded(ctx.req.file_ids.len());
@@ -3868,6 +3915,7 @@ fn convert_row_file_to_columnar_file(
                     iter,
                     None,
                     true,
+                    ctx.encryption_key.clone(),
                 );
                 columnar_readers.push(Box::new(reader));
             }
@@ -3991,6 +4039,7 @@ fn compact_columnar_l0_files(
         keyspace_id,
         ctx.req.inner_key_off,
         Some(snap_version),
+        ctx.encryption_key.clone(),
     );
     let (tx, rx) = mpsc::bounded(ctx.req.file_ids.len());
     let mut cnt = 0;
@@ -3998,7 +4047,8 @@ fn compact_columnar_l0_files(
         let schema = schema_file.get_table(table_id).unwrap();
         let mut readers: Vec<Box<dyn ColumnarReader>> = vec![];
         for columnar_file in &col_tbls {
-            let reader = ColumnarTableReader::new(columnar_file, schema.clone());
+            let reader =
+                ColumnarTableReader::new(columnar_file, schema.clone(), ctx.encryption_key.clone());
             readers.push(Box::new(reader));
         }
         let merge_reader = ColumnarMergeReader::new(schema.clone(), readers);
@@ -4116,18 +4166,25 @@ fn compact_columnar_l1_files(
         return Ok(ret);
     }
     let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(&ctx.req.outer_start).unwrap_or_default();
-    let mut file_builder =
-        ColumnarFileBuilder::new(allocate_id(), keyspace_id, ctx.req.inner_key_off, None);
+    let mut file_builder = ColumnarFileBuilder::new(
+        allocate_id(),
+        keyspace_id,
+        ctx.req.inner_key_off,
+        None,
+        ctx.encryption_key.clone(),
+    );
     let (tx, rx) = mpsc::bounded(ctx.req.file_ids.len());
     let mut cnt = 0;
     for table_id in overlap_tables {
         let schema = schema_file.get_table(table_id).unwrap();
         let mut readers: Vec<Box<dyn ColumnarReader>> = vec![];
         for columnar_file in &l1_tbls {
-            let reader = ColumnarTableReader::new(columnar_file, schema.clone());
+            let reader =
+                ColumnarTableReader::new(columnar_file, schema.clone(), ctx.encryption_key.clone());
             readers.push(Box::new(reader));
         }
-        let concat_reader = ColumnarConcatReader::new(&l2_tbls, schema.clone());
+        let concat_reader =
+            ColumnarConcatReader::new(&l2_tbls, schema.clone(), ctx.encryption_key.clone());
         readers.push(Box::new(concat_reader));
         let merge_reader = ColumnarMergeReader::new(schema.clone(), readers);
         let mut compact_reader =

@@ -558,7 +558,7 @@ mod tests {
         assert!(v.is_blob_ref());
         let blob_ref = v.get_blob_ref();
         assert_eq!(bt.id(), blob_ref.fid);
-        bt.get(&blob_ref)
+        bt.get(&blob_ref, &mut vec![], None)
     }
 
     #[cfg(test)]
@@ -580,7 +580,7 @@ mod tests {
         let sst_fid = TEST_ID_ALLOC.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         let blob_fid = TEST_ID_ALLOC.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         let mut sst_builder = new_table_builder_for_test(sst_fid);
-        let mut blob_builder = BlobTableBuilder::new(blob_fid, NO_COMPRESSION, 0, 0);
+        let mut blob_builder = BlobTableBuilder::new(blob_fid, NO_COMPRESSION, 0, 0, None);
         let meta = 0u8;
 
         for (k, v) in kvs {

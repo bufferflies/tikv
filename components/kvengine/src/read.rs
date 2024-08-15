@@ -417,6 +417,7 @@ impl SnapAccessCore {
         let blob_prefetcher = Some(BlobPrefetcher::new(
             self.data.blob_tbl_map.clone(),
             self.blob_table_prefetch_size,
+            self.encryption_key.clone(),
         ));
         let data = self.data.clone();
         let mut key = BytesMut::new();
@@ -482,8 +483,10 @@ impl SnapAccessCore {
                     self.tag, key, blob_ref.fid
                 )
             });
+        // TODO: avoid reallocation
+        let mut decryption_buf = vec![];
         blob_table
-            .get(&blob_ref)
+            .get(&blob_ref, &mut decryption_buf, self.encryption_key.clone())
             .unwrap_or_else(|e| panic!("[{}] blob table get failed {:?} {:?}", self.tag, key, e))
     }
 
@@ -1250,6 +1253,7 @@ impl SnapAccessCore {
                     iter,
                     None,
                     false,
+                    self.encryption_key.clone(),
                 );
                 readers.push(Box::new(row_reader));
             }
@@ -1264,18 +1268,26 @@ impl SnapAccessCore {
                     iter,
                     None,
                     false,
+                    self.encryption_key.clone(),
                 );
                 readers.push(Box::new(row_reader));
             }
         }
         for columnar_level in &self.data.col_levels.levels {
             if columnar_level.level == 2 {
-                let concat_reader =
-                    ColumnarConcatReader::new(&columnar_level.files, schema.clone());
+                let concat_reader = ColumnarConcatReader::new(
+                    &columnar_level.files,
+                    schema.clone(),
+                    self.encryption_key.clone(),
+                );
                 readers.push(Box::new(concat_reader));
             } else {
                 for col_file in &columnar_level.files {
-                    let col_reader = ColumnarTableReader::new(col_file, schema.clone());
+                    let col_reader = ColumnarTableReader::new(
+                        col_file,
+                        schema.clone(),
+                        self.encryption_key.clone(),
+                    );
                     readers.push(Box::new(col_reader));
                 }
             }

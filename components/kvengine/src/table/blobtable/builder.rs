@@ -4,10 +4,12 @@ use std::{mem, ops::Deref};
 
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use cloud_encryption::EncryptionKey;
 
 use super::BlobRef;
 use crate::table::{
-    ChecksumType, InnerKey, Value, LZ4_COMPRESSION, NO_COMPRESSION, ZSTD_COMPRESSION,
+    sstable::PROP_KEY_ENCRYPTION_VER, ChecksumType, InnerKey, Value, LZ4_COMPRESSION,
+    NO_COMPRESSION, ZSTD_COMPRESSION,
 };
 
 pub type ValueLength = u32; // Max value length is 4GB
@@ -135,10 +137,18 @@ pub struct BlobTableBuilder {
     total_blob_size: u64,
     smallest_key: Vec<u8>,
     biggest_key: Vec<u8>,
+    encryption_key: Option<EncryptionKey>,
+    compressed_buf: Vec<u8>,
 }
 
 impl BlobTableBuilder {
-    pub fn new(fid: u64, compression_tp: u8, compression_lvl: i32, min_blob_size: u32) -> Self {
+    pub fn new(
+        fid: u64,
+        compression_tp: u8,
+        compression_lvl: i32,
+        min_blob_size: u32,
+        encryption_key: Option<EncryptionKey>,
+    ) -> Self {
         Self {
             fid,
             buf: vec![],
@@ -149,6 +159,8 @@ impl BlobTableBuilder {
             total_blob_size: 0,
             smallest_key: vec![],
             biggest_key: vec![],
+            encryption_key,
+            compressed_buf: vec![],
         }
     }
 
@@ -159,6 +171,7 @@ impl BlobTableBuilder {
         self.smallest_key.clear();
         self.biggest_key.clear();
         self.smallest_key.clear();
+        self.compressed_buf.clear();
     }
 
     pub fn add_blob(
@@ -166,6 +179,7 @@ impl BlobTableBuilder {
         inner_key: InnerKey<'_>,
         blob: &[u8],
         already_compressed: Option<ValueLength>,
+        need_encrypt: bool,
     ) -> BlobRef {
         let key = inner_key.deref();
         assert!(blob.len() <= ValueLength::max_value() as usize);
@@ -183,41 +197,55 @@ impl BlobTableBuilder {
         let begin_off = self.buf.len();
         self.buf.resize(self.buf.len() + BLOB_ENTRY_META_SIZE, 0);
         let mut original_len = blob.len() as ValueLength;
-        let compressed_len = if let Some(len) = already_compressed {
-            self.buf.extend_from_slice(blob);
+
+        let compressed_blob = if let Some(len) = already_compressed {
             original_len = len;
-            blob.len() as ValueLength
+            blob
         } else {
             match self.compression_tp {
-                NO_COMPRESSION => {
-                    self.buf.extend_from_slice(blob);
-                    blob.len() as ValueLength
+                NO_COMPRESSION => blob,
+                LZ4_COMPRESSION => {
+                    self.compressed_buf.clear();
+                    let _ = Self::compress_lz4(blob, &mut self.compressed_buf);
+                    &self.compressed_buf
                 }
-                LZ4_COMPRESSION => Self::compress_lz4(blob, &mut self.buf) as ValueLength,
                 ZSTD_COMPRESSION => {
-                    Self::compress_zstd(blob, self.compression_lvl, &mut self.buf) as ValueLength
+                    self.compressed_buf.clear();
+                    let _ =
+                        Self::compress_zstd(blob, self.compression_lvl, &mut self.compressed_buf);
+                    &self.compressed_buf
                 }
                 _ => panic!("unexpected compression type {}", self.compression_tp),
             }
         };
+        if let Some(encryption_key) = &self.encryption_key {
+            if need_encrypt {
+                encryption_key.encrypt(compressed_blob, self.fid, begin_off as u32, &mut self.buf);
+            } else {
+                self.buf.extend_from_slice(compressed_blob);
+            }
+        } else {
+            self.buf.extend_from_slice(compressed_blob);
+        }
+        let data_len = self.buf.len() - begin_off - BLOB_ENTRY_VALUE_OFFSET;
         let checksum = ChecksumType::from(self.checksum_tp)
             .checksum(&self.buf[(begin_off + BLOB_ENTRY_VALUE_OFFSET)..]);
         let slice = self.buf.as_mut_slice();
         LittleEndian::write_u32(&mut slice[begin_off..], checksum); // put checksum at the reserved place.
         LittleEndian::write_u32(
             &mut slice[begin_off + BLOB_ENTRY_LENGTH_OFFSET..],
-            compressed_len as ValueLength,
+            data_len as ValueLength,
         ); // put compressed length at the reserved place.
         BlobRef::new(
             self.fid,
             begin_off as BlobOffset,
-            compressed_len,
+            data_len as u32,
             original_len,
         )
     }
 
     pub fn add(&mut self, key: InnerKey<'_>, value: &Value) -> BlobRef {
-        self.add_blob(key, value.get_value(), None)
+        self.add_blob(key, value.get_value(), None, true)
     }
 
     fn compress_lz4(uncompressed: &[u8], compressed_buf: &mut Vec<u8>) -> usize {
@@ -275,6 +303,13 @@ impl BlobTableBuilder {
         let properties_offset = buf.len();
         BlobTableBuilder::add_property(&mut buf, PROP_KEY_SMALLEST.as_bytes(), &self.smallest_key);
         BlobTableBuilder::add_property(&mut buf, PROP_KEY_BIGGEST.as_bytes(), &self.biggest_key);
+        if let Some(encryption_key) = &self.encryption_key {
+            BlobTableBuilder::add_property(
+                &mut buf,
+                PROP_KEY_ENCRYPTION_VER.as_bytes(),
+                &encryption_key.current_ver.to_le_bytes(),
+            )
+        }
 
         let mut footer = BlobFooter::default();
         footer.properties_offset = properties_offset as u32;

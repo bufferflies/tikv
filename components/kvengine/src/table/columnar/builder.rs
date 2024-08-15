@@ -3,6 +3,7 @@
 use std::cmp::max;
 
 use bytes::{Buf, BufMut};
+use cloud_encryption::EncryptionKey;
 use tidb_query_datatype::{
     codec::table::{encode_common_handle_for_test, encode_row_key},
     Collation, FieldTypeFlag, FieldTypeTp,
@@ -15,6 +16,7 @@ use crate::table::{
         compress_pack, get_unsigned, Block, ColumnBuffer, ColumnMeta, ColumnarFileFooter, Schema,
         COLUMNAR_MAGIC, HANDLE_COL_ID, TXN_ID_COL_ID, VERSION_COL_ID,
     },
+    sstable::PROP_KEY_ENCRYPTION_VER,
     ChecksumType, LZ4_COMPRESSION,
 };
 
@@ -72,6 +74,7 @@ pub struct ColumnarFileBuilder {
     pub(crate) biggest: Vec<u8>,
     pub(crate) keyspace_prefix: Vec<u8>,
     pub(crate) inner_key_off: usize,
+    encryption_key: Option<EncryptionKey>,
 }
 
 #[derive(Debug)]
@@ -149,6 +152,7 @@ impl ColumnarFileBuilder {
         keyspace_id: u32,
         inner_key_off: usize,
         snap_version: Option<u64>,
+        encryption_key: Option<EncryptionKey>,
     ) -> Self {
         ColumnarFileBuilder {
             file_id,
@@ -159,6 +163,7 @@ impl ColumnarFileBuilder {
             biggest: vec![],
             keyspace_prefix: api_version::ApiV2::get_txn_keyspace_prefix(keyspace_id),
             inner_key_off,
+            encryption_key,
         }
     }
 
@@ -209,6 +214,13 @@ impl ColumnarFileBuilder {
                 &mut property_buf,
                 PROP_KEY_SNAP_VERSION.as_bytes(),
                 &snap_version.to_le_bytes(),
+            );
+        }
+        if let Some(encryption_key) = &self.encryption_key {
+            add_property(
+                &mut property_buf,
+                PROP_KEY_ENCRYPTION_VER.as_bytes(),
+                &encryption_key.current_ver.to_le_bytes(),
             );
         }
         total_size += property_buf.len();
@@ -286,11 +298,19 @@ pub struct ColumnarTableBuilder {
     compressed_handle_index: Vec<u8>,
     properties: Vec<u8>,
     max_version: u64,
+    encryption_key: Option<EncryptionKey>,
+    file_id: u64, // Used for encryption
 }
 
 #[allow(dead_code)]
 impl ColumnarTableBuilder {
-    pub fn new(schema: Schema, opts: ColumnarTableBuildOptions, need_min_max: bool) -> Self {
+    pub fn new(
+        schema: Schema,
+        opts: ColumnarTableBuildOptions,
+        need_min_max: bool,
+        encryption_key: Option<EncryptionKey>,
+        file_id: u64,
+    ) -> Self {
         let pack_max_row_count = opts.pack_max_row_count;
         let pack_max_size = opts.pack_max_size;
         let mut column_builders = vec![];
@@ -324,6 +344,8 @@ impl ColumnarTableBuilder {
             compressed_handle_index: vec![],
             properties: vec![],
             max_version: 0,
+            encryption_key,
+            file_id,
         }
     }
 
@@ -409,7 +431,11 @@ impl ColumnarTableBuilder {
             .pack_offsets
             .update_base(output_buf.len() as u32);
         for pack in &self.handle_builder.compressed_packs {
-            output_buf.extend_from_slice(pack);
+            if let Some(encryption_key) = &self.encryption_key {
+                encryption_key.encrypt(pack, self.file_id, output_buf.len() as u32, output_buf);
+            } else {
+                output_buf.extend_from_slice(pack);
+            }
         }
 
         self.version_builder
@@ -417,7 +443,11 @@ impl ColumnarTableBuilder {
             .pack_offsets
             .update_base(output_buf.len() as u32);
         for pack in &self.version_builder.compressed_packs {
-            output_buf.extend_from_slice(pack);
+            if let Some(encryption_key) = &self.encryption_key {
+                encryption_key.encrypt(pack, self.file_id, output_buf.len() as u32, output_buf);
+            } else {
+                output_buf.extend_from_slice(pack);
+            }
         }
 
         self.txn_id_builder
@@ -425,7 +455,11 @@ impl ColumnarTableBuilder {
             .pack_offsets
             .update_base(output_buf.len() as u32);
         for pack in &self.txn_id_builder.compressed_packs {
-            output_buf.extend_from_slice(pack);
+            if let Some(encryption_key) = &self.encryption_key {
+                encryption_key.encrypt(pack, self.file_id, output_buf.len() as u32, output_buf);
+            } else {
+                output_buf.extend_from_slice(pack);
+            }
         }
 
         for column in &mut self.column_builders {
@@ -434,7 +468,11 @@ impl ColumnarTableBuilder {
                 .pack_offsets
                 .update_base(output_buf.len() as u32);
             for pack in &column.compressed_packs {
-                output_buf.extend_from_slice(pack);
+                if let Some(encryption_key) = &self.encryption_key {
+                    encryption_key.encrypt(pack, self.file_id, output_buf.len() as u32, output_buf);
+                } else {
+                    output_buf.extend_from_slice(pack);
+                }
             }
         }
 

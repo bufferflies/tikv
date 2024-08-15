@@ -14,7 +14,9 @@ use crate::table::{
         PROP_KEY_SMALLEST, PROP_KEY_SNAP_VERSION,
     },
     file::File,
-    parse_prop_data, search, InnerKey, LZ4_COMPRESSION,
+    parse_prop_data, search,
+    sstable::PROP_KEY_ENCRYPTION_VER,
+    InnerKey, LZ4_COMPRESSION,
 };
 
 pub const HANDLE_COL_ID: i32 = -1;
@@ -412,6 +414,7 @@ impl ColumnarFile {
         let mut biggest_key = vec![];
         let mut max_version = 0;
         let mut l0_version = None;
+        let mut encryption_ver = 0;
         let property_offset = table_offsets_offset - footer.properties_size as u64;
         let mut property_buf = vec![0; footer.properties_size as usize];
         file.read_at(&mut property_buf, property_offset)?;
@@ -426,6 +429,8 @@ impl ColumnarFile {
                 max_version = val.get_u64_le();
             } else if key == PROP_KEY_SNAP_VERSION.as_bytes() {
                 l0_version = Some(val.get_u64_le());
+            } else if key == PROP_KEY_ENCRYPTION_VER.as_bytes() {
+                encryption_ver = val.get_u32_le();
             }
             prop_remain = remain;
         }
@@ -445,6 +450,7 @@ impl ColumnarFile {
                 max_version,
                 l0_version,
                 tables,
+                encryption_ver,
             }),
         })
     }
@@ -492,6 +498,10 @@ impl ColumnarFile {
     pub fn table_count(&self) -> usize {
         self.core.tables.len()
     }
+
+    pub fn get_encryption_ver(&self) -> u32 {
+        self.core.encryption_ver
+    }
 }
 
 struct ColumnarFileCore {
@@ -501,6 +511,7 @@ struct ColumnarFileCore {
     max_version: u64,
     l0_version: Option<u64>,
     tables: HashMap<i64, Arc<TableMeta>>,
+    encryption_ver: u32,
 }
 
 pub struct ColumnBuffer {

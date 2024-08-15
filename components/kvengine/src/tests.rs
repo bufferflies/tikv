@@ -1782,6 +1782,7 @@ fn test_columnar_major_compaction(#[case] enable_inner_key_off: bool) {
             iter,
             None,
             false,
+            None,
         );
         columnar_readers.push(Box::new(reader));
     }

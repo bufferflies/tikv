@@ -13,6 +13,7 @@ use api_version::{
     ApiV2,
 };
 use bytes::Buf;
+use cloud_encryption::EncryptionKey;
 use tidb_query_datatype::{
     codec::{
         datum,
@@ -71,16 +72,37 @@ pub(crate) struct ColumnarTableReader {
 
 #[allow(dead_code)]
 impl ColumnarTableReader {
-    pub fn new(columnar_file: &ColumnarFile, schema: Schema) -> ColumnarTableReader {
+    pub fn new(
+        columnar_file: &ColumnarFile,
+        schema: Schema,
+        encryption_key: Option<EncryptionKey>,
+    ) -> ColumnarTableReader {
         let table_meta = columnar_file.get_table(schema.table_id);
         debug_assert_eq!(table_meta.table_id, schema.table_id);
         let file = columnar_file.get_file();
-        let handle_reader =
-            ColumnarColumnReader::new(file.clone(), table_meta.handle_column.clone(), false);
-        let version_reader =
-            ColumnarColumnReader::new(file.clone(), table_meta.version_column.clone(), false);
+        let encryption_ver = columnar_file.get_encryption_ver();
+        let handle_reader = ColumnarColumnReader::new(
+            file.clone(),
+            table_meta.handle_column.clone(),
+            false,
+            encryption_key.clone(),
+            encryption_ver,
+        );
+        let version_reader = ColumnarColumnReader::new(
+            file.clone(),
+            table_meta.version_column.clone(),
+            false,
+            encryption_key.clone(),
+            encryption_ver,
+        );
         let txn_id_reader = schema.txn_id_column.is_some().then(|| {
-            ColumnarColumnReader::new(file.clone(), table_meta.txn_id_column.clone(), false)
+            ColumnarColumnReader::new(
+                file.clone(),
+                table_meta.txn_id_column.clone(),
+                false,
+                encryption_key.clone(),
+                encryption_ver,
+            )
         });
         let columns_readers = schema
             .columns
@@ -88,10 +110,22 @@ impl ColumnarTableReader {
             .map(|col| {
                 let col_id = col.get_column_id() as i32;
                 if let Some(col_meta) = table_meta.columns.get(&col_id) {
-                    ColumnarColumnReader::new(file.clone(), col_meta.clone(), false)
+                    ColumnarColumnReader::new(
+                        file.clone(),
+                        col_meta.clone(),
+                        false,
+                        encryption_key.clone(),
+                        encryption_ver,
+                    )
                 } else {
                     let col_meta = ColumnMeta::new(col.clone(), false);
-                    ColumnarColumnReader::new(file.clone(), Arc::new(col_meta), true)
+                    ColumnarColumnReader::new(
+                        file.clone(),
+                        Arc::new(col_meta),
+                        true,
+                        encryption_key.clone(),
+                        encryption_ver,
+                    )
                 }
             })
             .collect();
@@ -162,6 +196,7 @@ pub(crate) struct ColumnarColumnReader {
     row_idx_in_pack: usize,
     is_default_val: bool,
     default_val: Option<Vec<u8>>,
+    decryption_buf: Vec<u8>,
 }
 
 impl ColumnarColumnReader {
@@ -169,8 +204,10 @@ impl ColumnarColumnReader {
         file: Arc<dyn File>,
         col_meta: Arc<ColumnMeta>,
         is_default_val: bool,
+        encryption_key: Option<EncryptionKey>,
+        encryption_ver: u32,
     ) -> ColumnarColumnReader {
-        let pack_loader = PackLoader::new(file);
+        let pack_loader = PackLoader::new(file, encryption_key, encryption_ver);
         let pack_buffer = ColumnBuffer::new_from_col_info(&col_meta.col_info);
         let default_val = if is_default_val {
             parse_default_val(&col_meta.col_info)
@@ -187,6 +224,7 @@ impl ColumnarColumnReader {
             row_idx_in_pack: 0,
             is_default_val,
             default_val,
+            decryption_buf: vec![],
         }
     }
 
@@ -272,8 +310,12 @@ impl ColumnarColumnReader {
         }
         let ((pack_start, pack_row_start), (pack_end, pack_row_end)) =
             self.col_meta.get_pack_offset(pack_idx);
-        self.pack_loader
-            .load_pack(&mut self.pack_buffer, pack_start, pack_end)?;
+        self.pack_loader.load_pack(
+            &mut self.pack_buffer,
+            pack_start,
+            pack_end,
+            &mut self.decryption_buf,
+        )?;
         self.pack_idx = pack_idx;
         self.pack_row_start = pack_row_start as usize;
         self.pack_row_end = pack_row_end as usize;
@@ -285,12 +327,20 @@ struct PackLoader {
     file: Arc<dyn File>,
     compressed_buf: Vec<u8>,
     uncompressed_buf: Vec<u8>,
+    encryption_key: Option<EncryptionKey>,
+    encryption_ver: u32,
 }
 
 impl PackLoader {
-    pub fn new(file: Arc<dyn File>) -> PackLoader {
+    pub fn new(
+        file: Arc<dyn File>,
+        encryption_key: Option<EncryptionKey>,
+        encryption_ver: u32,
+    ) -> PackLoader {
         PackLoader {
             file,
+            encryption_key,
+            encryption_ver,
             compressed_buf: vec![],
             uncompressed_buf: vec![],
         }
@@ -301,11 +351,25 @@ impl PackLoader {
         col_buf: &mut ColumnBuffer,
         pack_offset: u32,
         pack_end_offset: u32,
+        decryption_buf: &mut Vec<u8>,
     ) -> crate::table::Result<()> {
         let length = (pack_end_offset - pack_offset) as usize;
-        self.compressed_buf.resize(length, 0);
-        self.file
-            .read_at(&mut self.compressed_buf, pack_offset as u64)?;
+        if let Some(encryption_key) = &self.encryption_key {
+            decryption_buf.resize(length, 0);
+            self.file.read_at(decryption_buf, pack_offset as u64)?;
+            self.compressed_buf.clear();
+            encryption_key.decrypt(
+                decryption_buf,
+                self.file.id(),
+                pack_offset,
+                self.encryption_ver,
+                &mut self.compressed_buf,
+            );
+        } else {
+            self.compressed_buf.resize(length, 0);
+            self.file
+                .read_at(&mut self.compressed_buf, pack_offset as u64)?;
+        }
         decompress_pack(&self.compressed_buf, &mut self.uncompressed_buf);
         col_buf.parse(&self.uncompressed_buf);
         Ok(())
@@ -979,6 +1043,8 @@ pub struct ColumnarRowTableReader {
     keyspace_id: u32,
     max_col_id: i32,
     inner_key_off: usize,
+    encryption_key: Option<EncryptionKey>,
+    decryption_buf: Vec<u8>,
 }
 
 impl ColumnarRowTableReader {
@@ -989,6 +1055,7 @@ impl ColumnarRowTableReader {
         iter: Box<dyn table::Iterator>,
         blob_tbls: Option<Arc<HashMap<u64, BlobTable>>>,
         check_schema: bool,
+        encryption_key: Option<EncryptionKey>,
     ) -> ColumnarRowTableReader {
         let mut prefix = if inner_key_off > 0 {
             encode_row_key(schema.table_id, 0)
@@ -1026,6 +1093,8 @@ impl ColumnarRowTableReader {
             check_schema,
             max_col_id,
             inner_key_off,
+            encryption_key,
+            decryption_buf: vec![],
         }
     }
 
@@ -1208,7 +1277,7 @@ impl ColumnarReader for ColumnarRowTableReader {
                 };
                 txn_id_col.push_value(&txn_id.to_le_bytes());
             }
-            let mut handle_row_value = |row_value: &[u8]| -> table::Result<()> {
+            let mut handle_row_value = |reader: &mut Self, row_value: &[u8]| -> table::Result<()> {
                 let is_deleted = row_value.is_empty();
                 block.versions.push_version(version, is_deleted);
                 if is_deleted {
@@ -1220,18 +1289,24 @@ impl ColumnarReader for ColumnarRowTableReader {
                         }
                     }
                 } else {
-                    self.decode_row_columns(block, row_value)?;
+                    reader.decode_row_columns(block, row_value)?;
                 }
                 Ok(())
             };
             if value.is_blob_ref() {
                 let blob_ref = value.get_blob_ref();
                 let blob_tbl = self.blob_tbls.as_ref().unwrap().get(&blob_ref.fid).unwrap();
-                let row_value = blob_tbl.get(&blob_ref).unwrap();
-                handle_row_value(&row_value)?
+                let row_value = blob_tbl
+                    .get(
+                        &blob_ref,
+                        &mut self.decryption_buf,
+                        self.encryption_key.clone(),
+                    )
+                    .unwrap();
+                handle_row_value(self, &row_value)?
             } else {
                 let row_value = value.get_value();
-                handle_row_value(row_value)?
+                handle_row_value(self, row_value)?
             };
             read_rows += 1;
             self.iter.next_all_version();
@@ -1245,10 +1320,15 @@ pub struct ColumnarConcatReader {
     files: Vec<ColumnarFile>,
     reader: Option<ColumnarTableReader>,
     idx: usize,
+    encryption_key: Option<EncryptionKey>,
 }
 
 impl ColumnarConcatReader {
-    pub fn new(files: &[ColumnarFile], schema: Schema) -> ColumnarConcatReader {
+    pub fn new(
+        files: &[ColumnarFile],
+        schema: Schema,
+        encryption_key: Option<EncryptionKey>,
+    ) -> ColumnarConcatReader {
         let mut reader_files = vec![];
         for file in files {
             if file.has_table(schema.table_id) {
@@ -1260,6 +1340,7 @@ impl ColumnarConcatReader {
             files: reader_files,
             reader: None,
             idx: 0,
+            encryption_key,
         }
     }
 }
@@ -1288,7 +1369,8 @@ impl ColumnarReader for ColumnarConcatReader {
             if file.get_biggest().deref() < row_key.as_slice() {
                 continue;
             }
-            let mut reader = ColumnarTableReader::new(file, self.schema.clone());
+            let mut reader =
+                ColumnarTableReader::new(file, self.schema.clone(), self.encryption_key.clone());
             reader.seek(handle)?;
             self.reader = Some(reader);
             self.idx = i;
@@ -1307,7 +1389,11 @@ impl ColumnarReader for ColumnarConcatReader {
                 self.idx += 1;
                 if self.idx < self.files.len() {
                     let file = &self.files[self.idx];
-                    let mut reader = ColumnarTableReader::new(file, self.schema.clone());
+                    let mut reader = ColumnarTableReader::new(
+                        file,
+                        self.schema.clone(),
+                        self.encryption_key.clone(),
+                    );
                     reader.seek(&[])?;
                     self.reader = Some(reader);
                 }
@@ -1325,6 +1411,7 @@ pub mod tests {
 
     use proptest::{arbitrary::any, proptest};
     use rand::Rng;
+    use rstest::rstest;
     use test_util::init_log_for_test;
     use tidb_query_datatype::{
         codec::row::v2::encoder_for_test::{Column, RowEncoder},
@@ -1424,6 +1511,30 @@ pub mod tests {
         end: i32,
         version: u64,
     ) -> (Arc<dyn File>, Vec<RefRow>) {
+        build_table_with_encryption(
+            file_id,
+            enable_inner_key_off,
+            schema,
+            start,
+            end,
+            version,
+            None,
+        )
+    }
+
+    fn new_test_encryption_key() -> EncryptionKey {
+        EncryptionKey::new(b"cipher".to_vec(), b"plain".to_vec(), 0)
+    }
+
+    pub fn build_table_with_encryption(
+        file_id: u64,
+        enable_inner_key_off: bool,
+        schema: &Schema,
+        start: i32,
+        end: i32,
+        version: u64,
+        encryption_key: Option<EncryptionKey>,
+    ) -> (Arc<dyn File>, Vec<RefRow>) {
         let mut rng = rand::thread_rng();
         let mut ref_rows: Vec<RefRow> = vec![];
         let inner_key_off = if enable_inner_key_off { 4 } else { 0 };
@@ -1468,12 +1579,13 @@ pub mod tests {
         cf_tbl.get_cf(WRITE_CF).put_batch(&mut wb, None, WRITE_CF);
         let iter = cf_tbl.get_cf(WRITE_CF).new_iterator(false);
         let mut row_tbl_reader =
-            ColumnarRowTableReader::new(1, inner_key_off, schema.clone(), iter, None, false);
+            ColumnarRowTableReader::new(1, inner_key_off, schema.clone(), iter, None, false, None);
         let mut block = Block::new(schema);
         let mut opts = ColumnarTableBuildOptions::default();
         opts.pack_max_row_count = 8;
         opts.pack_max_size = 256;
-        let mut table_builder = ColumnarTableBuilder::new(schema.clone(), opts, true);
+        let mut table_builder =
+            ColumnarTableBuilder::new(schema.clone(), opts, true, encryption_key, file_id);
         row_tbl_reader.seek(&ref_rows[0].handle).unwrap();
         let mut append_rows = 0;
         let mut block_off = 0;
@@ -1495,6 +1607,7 @@ pub mod tests {
             keyspace_id,
             inner_key_off,
             Some(version), // use version as l0_version for test
+            None,
         );
         file_builder.add_table(table_builder);
         let file_data = file_builder.build();
@@ -1543,7 +1656,7 @@ pub mod tests {
             let schema = new_schema(1, common_handle);
             let (file, ref_rows) = build_table(1, true, &schema, 100, 150, 100);
             let columnar_file = ColumnarFile::open(file).unwrap();
-            let mut reader = ColumnarTableReader::new(&columnar_file, schema.clone());
+            let mut reader = ColumnarTableReader::new(&columnar_file, schema.clone(), None);
             reader.seek(&0u64.to_le_bytes()).unwrap();
             let mut block = Block::new(&schema);
             reader.read(&mut block, 100).unwrap();
@@ -1555,11 +1668,13 @@ pub mod tests {
         schema: &Schema,
         files: &[Arc<dyn File>],
         read_ts: u64,
+        encryption_key: Option<EncryptionKey>,
     ) -> ColumnarMvccReader {
         let mut readers: Vec<Box<dyn ColumnarReader>> = vec![];
         for file in files {
             let columnar_file = ColumnarFile::open(file.clone()).unwrap();
-            let reader = ColumnarTableReader::new(&columnar_file, schema.clone());
+            let reader =
+                ColumnarTableReader::new(&columnar_file, schema.clone(), encryption_key.clone());
             readers.push(Box::new(reader));
         }
         let merge_reader = ColumnarMergeReader::new(schema.clone(), readers);
@@ -1575,7 +1690,7 @@ pub mod tests {
         let mut readers: Vec<Box<dyn ColumnarReader>> = vec![];
         for file in files {
             let columnar_file = ColumnarFile::open(file.clone()).unwrap();
-            let reader = ColumnarTableReader::new(&columnar_file, schema.clone());
+            let reader = ColumnarTableReader::new(&columnar_file, schema.clone(), None);
             readers.push(Box::new(reader));
         }
         let merge_reader = ColumnarMergeReader::new(schema.clone(), readers);
@@ -1642,9 +1757,16 @@ pub mod tests {
         merged
     }
 
-    #[test]
-    fn test_reader() {
+    #[rstest]
+    #[case::enable_encryption(true)]
+    #[case::disable_encryption(false)]
+    fn test_reader(#[case] enable_encryption: bool) {
         init_log_for_test();
+        let encryption_key = if enable_encryption {
+            Some(new_test_encryption_key())
+        } else {
+            None
+        };
         let mut options = vec![];
         let mut rng = rand::thread_rng();
         for _ in 0..100 {
@@ -1652,9 +1774,33 @@ pub mod tests {
         }
         for common_handle in options {
             let schema = new_schema(1, common_handle);
-            let (file_1, ref_1) = build_table(1, true, &schema, 100, 150, 100);
-            let (file_2, ref_2) = build_table(2, true, &schema, 140, 190, 110);
-            let (file_3, ref_3) = build_table(3, true, &schema, 185, 240, 120);
+            let (file_1, ref_1) = build_table_with_encryption(
+                1,
+                true,
+                &schema,
+                100,
+                150,
+                100,
+                encryption_key.clone(),
+            );
+            let (file_2, ref_2) = build_table_with_encryption(
+                2,
+                true,
+                &schema,
+                140,
+                190,
+                110,
+                encryption_key.clone(),
+            );
+            let (file_3, ref_3) = build_table_with_encryption(
+                3,
+                true,
+                &schema,
+                185,
+                240,
+                120,
+                encryption_key.clone(),
+            );
             let files = vec![file_1, file_2, file_3];
             let ref_rows = vec![ref_1, ref_2, ref_3];
             let mut block = Block::new(&schema);
@@ -1662,7 +1808,8 @@ pub mod tests {
             for read_ts in [90, 100, 110, 120] {
                 let start_handle = rng.gen_range(90i64..170i64);
                 let end_handle = start_handle + rng.gen_range(1i64..200i64);
-                let mut mvcc_reader = new_mvcc_reader(&schema, &files, read_ts);
+                let mut mvcc_reader =
+                    new_mvcc_reader(&schema, &files, read_ts, encryption_key.clone());
                 if common_handle {
                     let common_start_handle = i_to_common_handle(start_handle as i32);
                     let common_end_handle = i_to_common_handle(end_handle as i32);
@@ -1711,7 +1858,7 @@ pub mod tests {
                 let start_handle = rng.gen_range(90i64..170i64);
                 let end_handle = start_handle + rng.gen_range(1i64..200i64);
                 let mut block = Block::new(&schema);
-                let concat_reader = ColumnarConcatReader::new(&col_files, schema.clone());
+                let concat_reader = ColumnarConcatReader::new(&col_files, schema.clone(), None);
                 let mut mvcc_reader = ColumnarMvccReader::new(Box::new(concat_reader), &schema, 100);
                 if common_handle {
                     let common_start_handle = i_to_common_handle(start_handle as i32);
