@@ -1,6 +1,6 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{collections::HashMap, fs, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, fs, path::PathBuf, sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use cloud_encryption::MasterKey;
@@ -20,7 +20,7 @@ use load_data::{
         CLEAN_CHECK_POINT_FILE_INTERVAL_SEC,
     },
     task::{
-        FlushResult, LoadDataConfig, LoadDataContext, LoadTaskMsg, LoadTaskScheduler,
+        FlushResult, FlushStates, LoadDataConfig, LoadDataContext, LoadTaskMsg, LoadTaskScheduler,
         LoadTaskStates, LoadTaskWorker, PutChunkResult, ResourceGroupConfig, TaskContext,
     },
 };
@@ -458,9 +458,30 @@ impl LoadDataManager {
 
     pub(crate) async fn flush(&self, task_id: &str) -> FlushResult {
         let scheduler = self.running_tasks.get(task_id).unwrap().clone();
-        let (cb, fut) = tikv_util::future::paired_future_callback();
-        scheduler.sender.send(LoadTaskMsg::Flush { cb }).unwrap();
-        fut.await.unwrap()
+
+        let interval = Duration::from_secs(3);
+        let mut ticker = tokio::time::interval(interval);
+        let mut file_count: Option<usize> = None;
+        loop {
+            let (cb, fut) = tikv_util::future::paired_future_callback();
+            scheduler
+                .sender
+                .send(LoadTaskMsg::Flush {
+                    flush_file_count: file_count,
+                    cb,
+                })
+                .unwrap();
+            let flush_states = fut.await.unwrap();
+            match flush_states {
+                FlushStates::FlushFileCount { flush_file_count } => {
+                    file_count = Some(flush_file_count);
+                    ticker.tick().await;
+                }
+                FlushStates::FlushResult { flush_result } => {
+                    return flush_result;
+                }
+            }
+        }
     }
 
     pub(crate) async fn put_chunk(

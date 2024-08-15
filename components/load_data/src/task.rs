@@ -115,13 +115,19 @@ pub enum LoadTaskMsg {
         compression_type: u8,
     },
     Flush {
-        cb: Box<dyn FnOnce(FlushResult) + Send>,
+        flush_file_count: Option<usize>,
+        cb: Box<dyn FnOnce(FlushStates) + Send>,
     },
     Cleanup,
     QueryUnhandledChunks {
         chunk_ids: HashMap<u64 /* writer_id */, u64 /* chunk_id */>,
         cb: Box<dyn FnOnce(HashMap<u64, u64>) + Send>,
     },
+}
+
+pub enum FlushStates {
+    FlushFileCount { flush_file_count: usize },
+    FlushResult { flush_result: FlushResult },
 }
 
 #[derive(Default, Debug, Serialize, Deserialize, Clone)]
@@ -488,16 +494,7 @@ impl LoadTaskWorker {
                             let check_point_store_mutex = Arc::clone(&self.check_point_store);
                             let mut check_point_store_guard =
                                 check_point_store_mutex.lock().unwrap();
-                            let recv_res =
-                                self.recv_reader(recv_count, &mut check_point_store_guard);
-                            if recv_res.is_err() || !self.reader_errs.is_empty() {
-                                let err_msg = if let Err(recv_err) = recv_res {
-                                    recv_err.to_string()
-                                } else {
-                                    self.reader_errs.first().unwrap().to_string()
-                                };
-                                self.scheduler.cancel(err_msg);
-                            }
+                            let _ = self.recv_reader(recv_count, &mut check_point_store_guard);
                         }
                     }
                     let elapsed = start_time.elapsed();
@@ -521,35 +518,12 @@ impl LoadTaskWorker {
                         error!("build failed {:?}", err);
                         self.scheduler.cancel(err.to_string());
                     }
-                    continue;
                 }
-                LoadTaskMsg::Flush { cb } => {
-                    let mut flush_res = FlushResult::default();
-                    if self.scheduler.is_canceled() {
-                        warn!("task {} is canceled, do not build", self.task_ctx.task_id);
-                        flush_res.canceled = true;
-                        flush_res.error = self.scheduler.error_msg();
-                        cb(flush_res);
-                        continue;
-                    }
-                    if self.scheduler.is_finished() {
-                        warn!("task {} is finished, skip flush", self.task_ctx.task_id);
-                        flush_res.finished = true;
-                        flush_res.error = self.scheduler.error_msg();
-                        flush_res.flushed_chunk_ids = self.scheduler.get_flushed_chunks();
-                        cb(flush_res);
-                        continue;
-                    }
-                    let check_point_store_mutex = Arc::clone(&self.check_point_store);
-                    let mut check_point_store_guard = check_point_store_mutex.lock().unwrap();
-                    if let Err(err) = self.flush(&mut check_point_store_guard) {
-                        error!("flush failed {:?}", err);
-                        self.scheduler.cancel(err.to_string());
-                    }
-                    flush_res.error = self.scheduler.error_msg();
-                    flush_res.flushed_chunk_ids = self.scheduler.get_flushed_chunks();
-                    cb(flush_res);
-                    continue;
+                LoadTaskMsg::Flush {
+                    flush_file_count,
+                    cb,
+                } => {
+                    self.handle_flush_msg(flush_file_count, cb);
                 }
                 LoadTaskMsg::Cleanup => {
                     self.remove_local_files();
@@ -591,6 +565,87 @@ impl LoadTaskWorker {
                 });
         }
         Ok(())
+    }
+
+    pub(crate) fn handle_flush_msg(
+        &mut self,
+        flush_file_count: Option<usize>,
+        cb: Box<dyn FnOnce(FlushStates) + Send>,
+    ) {
+        if self.scheduler.is_canceled() {
+            warn!("{} is canceled, skip flush", self.task_ctx.task_id);
+            let flush_result = FlushResult {
+                flushed_chunk_ids: HashMap::new(),
+                canceled: true,
+                finished: false,
+                error: self.scheduler.error_msg(),
+            };
+            cb(FlushStates::FlushResult { flush_result });
+            return;
+        }
+
+        if self.scheduler.is_finished() {
+            warn!("{} is finished, skip flush", self.task_ctx.task_id);
+            let flush_result = FlushResult {
+                flushed_chunk_ids: self.scheduler.get_flushed_chunks(),
+                canceled: false,
+                finished: true,
+                error: self.scheduler.error_msg(),
+            };
+            cb(FlushStates::FlushResult { flush_result });
+            return;
+        }
+
+        let file_count;
+        match flush_file_count {
+            Some(flush_file_count) => {
+                let checkpoint_store_mutex = Arc::clone(&self.check_point_store);
+                let mut checkpoint_store_guard = checkpoint_store_mutex.lock().unwrap();
+                let result = if self.file_idx < flush_file_count {
+                    self.flush(&mut checkpoint_store_guard)
+                } else {
+                    self.try_recv_reader(&mut checkpoint_store_guard)
+                };
+                if let Err(err) = result {
+                    error!("{} failed to flush {:?}", self.task_ctx.task_id, err);
+                    self.scheduler.cancel(err.to_string());
+                    let flush_result = FlushResult {
+                        flushed_chunk_ids: HashMap::new(),
+                        canceled: true,
+                        finished: false,
+                        error: self.scheduler.error_msg(),
+                    };
+                    cb(FlushStates::FlushResult { flush_result });
+                    return;
+                }
+                file_count = flush_file_count;
+            }
+            None => {
+                file_count = self.file_idx + if self.kv_pairs.is_empty() { 0 } else { 1 };
+                info!(
+                    "{} flush memory buffer, got file count {}",
+                    self.task_ctx.task_id, file_count
+                );
+            }
+        }
+
+        if self.readers.len() + self.reader_errs.len() >= file_count {
+            info!(
+                "{} has flushed file count {}",
+                self.task_ctx.task_id, file_count
+            );
+            let flush_result = FlushResult {
+                flushed_chunk_ids: self.scheduler.get_flushed_chunks(),
+                canceled: false,
+                finished: false,
+                error: self.scheduler.error_msg(),
+            };
+            cb(FlushStates::FlushResult { flush_result });
+        } else {
+            cb(FlushStates::FlushFileCount {
+                flush_file_count: file_count,
+            });
+        }
     }
 
     pub(crate) fn handle_add_chunk(
@@ -719,7 +774,6 @@ impl LoadTaskWorker {
             {
                 self.recv_reader(1, &mut check_point_store_guard)?;
             }
-            self.in_mem_size = 0;
         }
         self.try_recv_reader(&mut check_point_store_guard)?;
         Ok(())
@@ -851,13 +905,7 @@ impl LoadTaskWorker {
 
         let check_point_store_mutex = Arc::clone(&self.check_point_store);
         let mut check_point_store_guard = check_point_store_mutex.lock().unwrap();
-
-        // to be compatible with old remote backend, we need to flush all kv pairs
-        // before build. TODO: remove it after all remote backend upgraded.
-        self.flush(&mut check_point_store_guard)?;
-
         let mut sst_metas = vec![];
-
         if check_point_store_guard.get_state() < LoadDataWorkerState::BuildingSst {
             check_point_store_guard.update_build_msg(compression_type)?;
         }
@@ -947,6 +995,7 @@ impl LoadTaskWorker {
         let in_mem_size = self.in_mem_size;
         let handled_chunk_ids = self.scheduler.get_handled_chunks();
         let file_idx = self.file_idx;
+        self.in_mem_size = 0;
         self.file_idx += 1;
         self.scheduler.set_flushed_files(self.file_idx);
         std::thread::spawn(move || {
@@ -981,27 +1030,11 @@ impl LoadTaskWorker {
         if !self.kv_pairs.is_empty() {
             self.flush_mem_buf();
         }
-        if self.readers.len() + self.reader_errs.len() < self.file_idx {
-            let recv_count = self.file_idx
-                - self.readers.len()
-                - self.reader_errs.len()
-                - self.unhandled_readers.len();
-            info!(
-                "{} still needs to receive {} readers, file_idx: {}, readers count: {}, reader_errs count: {}, unhandled_readers count: {}",
-                self.task_ctx.task_id,
-                recv_count,
-                self.file_idx,
-                self.readers.len(),
-                self.reader_errs.len(),
-                self.unhandled_readers.len()
-            );
-            self.recv_reader(recv_count, check_point_store_guard)?;
-        }
+
+        self.try_recv_reader(check_point_store_guard)?;
         if !self.reader_errs.is_empty() {
             return Err(self.reader_errs.pop().unwrap());
         }
-
-        self.in_mem_size = 0;
         Ok(())
     }
 

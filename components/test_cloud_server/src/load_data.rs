@@ -7,8 +7,8 @@ use futures::executor::block_on;
 use load_data::{
     check_point_storage::LoadDataCheckPointCtx,
     task::{
-        LoadDataConfig, LoadDataContext, LoadTaskMsg, LoadTaskScheduler, LoadTaskWorker,
-        TaskContext,
+        FlushStates, LoadDataConfig, LoadDataContext, LoadTaskMsg, LoadTaskScheduler,
+        LoadTaskWorker, TaskContext,
     },
 };
 use tikv_util::{error, time::Instant};
@@ -144,6 +144,7 @@ where
         );
     }
 
+    let mut file_count: Option<usize> = None;
     let ok = try_wait(
         || {
             assert!(
@@ -152,12 +153,26 @@ where
                 scheduler.error_msg()
             );
             let (cb, fut) = tikv_util::future::paired_future_callback();
-            scheduler.sender.send(LoadTaskMsg::Flush { cb }).unwrap();
-            let flushed_res = block_on(fut).unwrap();
-            !flushed_res.canceled
-                && !flushed_res.finished
-                && flushed_res.error.is_empty()
-                && flushed_res.flushed_chunk_ids.eq(&chunk_ids)
+            scheduler
+                .sender
+                .send(LoadTaskMsg::Flush {
+                    flush_file_count: file_count,
+                    cb,
+                })
+                .unwrap();
+            let flush_states = block_on(fut).unwrap();
+            match flush_states {
+                FlushStates::FlushFileCount { flush_file_count } => {
+                    file_count = Some(flush_file_count);
+                    false
+                }
+                FlushStates::FlushResult { flush_result } => {
+                    !flush_result.canceled
+                        && !flush_result.finished
+                        && flush_result.error.is_empty()
+                        && flush_result.flushed_chunk_ids.eq(&chunk_ids)
+                }
+            }
         },
         timeout.as_secs() as usize,
     );
