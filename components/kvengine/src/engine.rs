@@ -39,7 +39,7 @@ use crate::{
         sstable::{BlockCacheKey, MAGIC_NUMBER},
         InnerKey, ZSTD_COMPRESSION,
     },
-    txn_chunk_manager::TxnChunkManager,
+    txn_chunk_manager::{TxnChunkManager, TxnChunkManagerConfig},
     *,
 };
 
@@ -120,6 +120,7 @@ impl Engine {
             fs.clone(),
             Some(cache.clone()),
             with_pool_size(opts.txn_file_worker_pool_size),
+            TxnChunkManagerConfig::default(),
         );
         let (metas, files_in_blacklist) = EngineCore::read_meta(meta_iter)?;
         let core = EngineCore {

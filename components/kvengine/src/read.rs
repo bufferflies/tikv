@@ -1550,7 +1550,7 @@ mod tests {
             NoPrefixKey, OwnedInnerKey, TxnChunk, TxnChunkBuilder, TxnCtx, TxnFile, TxnFileId,
             OP_PUT,
         },
-        txn_chunk_manager::{with_pool_size, TxnChunkManager},
+        txn_chunk_manager::{with_pool_size, TxnChunkManager, TxnChunkManagerConfig},
         util::test_util::KeyBuilder,
         ChangeSet, Shard, ShardDataBuilder, ShardRange, SnapAccess, UserMeta, ENCRYPTION_KEY,
         GLOBAL_SHARD_END_KEY, WRITE_CF,
@@ -1716,7 +1716,7 @@ mod tests {
 
             let kb = KeyBuilder::new(KEYSPACE_ID, enable_inner_key_off, "t_");
             let dfs: Arc<dyn crate::dfs::Dfs> = Arc::new(InMemFs::new());
-            let txn_chunk_manager = TxnChunkManager::new(None, dfs.clone(), None, with_pool_size(2));
+            let txn_chunk_manager = TxnChunkManager::new(None, dfs.clone(), None, with_pool_size(2), TxnChunkManagerConfig::default());
 
             let master_key = MasterKey::new(&[1u8; 32]);
             let enc_key = enable_enc.then(||master_key.generate_encryption_key());

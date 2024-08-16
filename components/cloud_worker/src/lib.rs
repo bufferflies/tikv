@@ -27,7 +27,7 @@ use ::native_br::{backup::BackupConfig, restore::RestoreConfig};
 use kvengine::{
     dfs::{DFSConfig, Dfs, S3Fs},
     table::ChecksumType,
-    txn_chunk_manager::{with_pool_handle, TxnChunkManager},
+    txn_chunk_manager::{with_pool_handle, TxnChunkManager, TxnChunkManagerConfig},
     BLOCK_CACHE_KEY_SIZE,
 };
 use kvproto::metapb::Store;
@@ -221,6 +221,7 @@ fn start_server(
         s3fs.clone(),
         block_cache.clone(),
         with_pool_handle(thread_pool.handle().clone()),
+        config.txn_chunk_manager,
     );
 
     let ctx = Arc::new(server::Context {
@@ -526,6 +527,7 @@ pub struct Config {
     pub checksum_type: ChecksumType,
     pub worker_limiter: WorkerLimiterConfig,
     pub schema_manager: SchemaManagerConfig,
+    pub txn_chunk_manager: TxnChunkManagerConfig,
 }
 
 impl Default for Config {
@@ -552,6 +554,7 @@ impl Default for Config {
             checksum_type: ChecksumType::Crc32c,
             worker_limiter: WorkerLimiterConfig::default(),
             schema_manager: SchemaManagerConfig::default(),
+            txn_chunk_manager: TxnChunkManagerConfig::default(),
         }
     }
 }

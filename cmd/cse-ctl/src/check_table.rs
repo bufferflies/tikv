@@ -17,7 +17,7 @@ use cloud_encryption::MasterKey;
 use futures::executor::block_on;
 use kvengine::{
     dfs::{DFSConfig, Dfs, S3Fs},
-    txn_chunk_manager::{with_pool_size, TxnChunkManager},
+    txn_chunk_manager::{with_pool_size, TxnChunkManager, TxnChunkManagerConfig},
     Engine, Shard, ShardMeta, SnapAccess, UserMeta,
 };
 use kvproto::keyspacepb::{KeyspaceMeta, KeyspaceState};
@@ -129,6 +129,7 @@ pub(crate) fn execute_check_table(args: CheckTableArgs) {
         s3fs.clone(),
         None,
         with_pool_size(TXN_CHUNK_WORKER_POOL_SIZE),
+        TxnChunkManagerConfig::default(),
     );
     let cluster_backup = get_cluster_backup_meta(&s3fs, config.backup_name.clone());
     let keyspace_ids = if config.all {

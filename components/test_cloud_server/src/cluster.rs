@@ -17,7 +17,7 @@ use cloud_worker::CloudWorker;
 use dashmap::DashMap;
 use futures::executor::block_on;
 use grpcio::{Channel, ChannelBuilder, EnvBuilder, Environment};
-use kvengine::{dfs::Dfs, ShardStats};
+use kvengine::{dfs::Dfs, txn_chunk_manager::TxnChunkManagerConfig, ShardStats};
 use kvproto::{
     kvrpcpb::{Mutation, Op},
     metapb,
@@ -56,6 +56,9 @@ use crate::{
 const REGION_MEM_LIMIT_RATIO: f64 = 0.2;
 static TIKV_WORKER_IDX_ALLOCATOR: AtomicU16 = AtomicU16::new(0);
 const TIKV_WORKER_UPDATE_INTERVAL: ReadableDuration = ReadableDuration::secs(10);
+
+const TXN_CHUNK_MGR_GC_INTERVAL: ReadableDuration = ReadableDuration::secs(10);
+const TXN_CHUNK_MGR_GC_TTL: ReadableDuration = ReadableDuration::secs(10);
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 
@@ -698,6 +701,10 @@ impl ServerCluster {
                 security: tikv_config.security.clone(),
                 dfs: tikv_config.dfs.clone(),
                 register,
+                txn_chunk_manager: TxnChunkManagerConfig {
+                    gc_interval: TXN_CHUNK_MGR_GC_INTERVAL,
+                    gc_ttl: TXN_CHUNK_MGR_GC_TTL,
+                },
                 ..Default::default()
             };
 

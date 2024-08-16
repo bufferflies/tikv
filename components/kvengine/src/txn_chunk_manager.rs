@@ -9,6 +9,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
+    time::Duration,
 };
 
 use bytes::{Buf, Bytes};
@@ -17,7 +18,7 @@ use dashmap::DashMap;
 use futures::executor::block_on;
 use moka::sync::SegmentedCache;
 use regex::Regex;
-use tikv_util::box_err;
+use tikv_util::{box_err, config::ReadableDuration, time::Instant};
 use tokio::sync::{OwnedRwLockWriteGuard, RwLock};
 
 use crate::{
@@ -47,13 +48,20 @@ impl TxnChunkManager {
         dfs: Arc<dyn Dfs>,
         cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
         worker_pool: WorkerPool,
+        config: TxnChunkManagerConfig,
     ) -> Self {
         info!("create txn chunk manager"; "worker_pool" => ?worker_pool);
+        let txn_chunks = Arc::new(DashMap::new());
+        if local_path.is_none() {
+            worker_pool
+                .handle()
+                .spawn(run_gc_worker(txn_chunks.clone(), config));
+        }
         let manager = Self {
             core: Arc::new(TxnChunkManagerCore {
                 local_path,
                 dfs,
-                txn_chunks: DashMap::new(),
+                txn_chunks,
                 cache,
                 worker_pool,
             }),
@@ -68,6 +76,24 @@ impl Deref for TxnChunkManager {
 
     fn deref(&self) -> &Self::Target {
         &self.core
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+pub struct TxnChunkManagerConfig {
+    // For memory based only.
+    pub gc_interval: ReadableDuration,
+    pub gc_ttl: ReadableDuration,
+}
+
+impl Default for TxnChunkManagerConfig {
+    fn default() -> Self {
+        Self {
+            gc_interval: ReadableDuration::minutes(1),
+            gc_ttl: ReadableDuration::minutes(10),
+        }
     }
 }
 
@@ -93,7 +119,7 @@ pub fn with_pool_size(pool_size: usize) -> WorkerPool {
     WorkerPool::Pool(
         tokio::runtime::Builder::new_multi_thread()
             .thread_name("txn-chunk-worker")
-            .worker_threads(1) // currently not used.
+            .worker_threads(1) // for gc worker.
             .max_blocking_threads(pool_size)
             .enable_all()
             .build()
@@ -111,14 +137,36 @@ pub fn with_pool_handle(handle: tokio::runtime::Handle) -> WorkerPool {
 pub struct TxnChunkManagerCore {
     local_path: Option<PathBuf>,
     dfs: Arc<dyn Dfs>,
-    txn_chunks: DashMap<u64, TxnChunkEntry>,
+    txn_chunks: Arc<DashMap<u64, TxnChunkEntry>>,
     cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
     worker_pool: WorkerPool,
 }
 
+struct TxnChunkEntryData {
+    chunk: TxnChunk,
+    prepare_time: Instant,
+}
+
+impl TxnChunkEntryData {
+    fn new(chunk: TxnChunk) -> Self {
+        Self {
+            chunk,
+            prepare_time: Instant::now_coarse(),
+        }
+    }
+
+    fn touch(&mut self) {
+        self.prepare_time = Instant::now_coarse();
+    }
+
+    fn touch_with(&mut self, time: Instant) {
+        self.prepare_time = time;
+    }
+}
+
 #[derive(Clone)]
 struct TxnChunkEntry {
-    chunk_data: Arc<RwLock<Option<TxnChunk>>>,
+    chunk_data: Arc<RwLock<Option<TxnChunkEntryData>>>,
 }
 
 impl Default for TxnChunkEntry {
@@ -137,6 +185,7 @@ impl TxnChunkManagerCore {
             }
             if local_path.is_dir() {
                 let read_dir = fs::read_dir(local_path).ctx("txn_chunk_mgr.init.read_dir")?;
+                let now = Instant::now_coarse();
                 for entry in read_dir.flatten() {
                     let file_name = entry.file_name();
                     if let Some(txn_file_id) = parse_txn_chunk_id(file_name.to_str().unwrap()) {
@@ -153,7 +202,10 @@ impl TxnChunkManagerCore {
                         };
                         let files_entry = self.txn_chunks.entry(txn_file_id).or_default().clone();
                         let mut guard = block_on(files_entry.chunk_data.write());
-                        *guard = Some(txn_chunk)
+                        *guard = Some(TxnChunkEntryData {
+                            chunk: txn_chunk,
+                            prepare_time: now,
+                        })
                     }
                 }
             }
@@ -172,15 +224,16 @@ impl TxnChunkManagerCore {
     ) -> Result<TxnChunk> {
         let entry = self.txn_chunks.entry(txn_chunk_id).or_default().clone();
         let mut guard = block_on(entry.chunk_data.write());
-        if let Some(txn_chunk) = guard.as_ref() {
-            return Ok(txn_chunk.clone());
+        if let Some(txn_chunk) = guard.as_mut() {
+            txn_chunk.touch();
+            return Ok(txn_chunk.chunk.clone());
         }
 
         if let Some(local_file_path) = self.local_file_path(txn_chunk_id) {
             if local_file_path.exists() {
                 let txn_chunk =
                     self.load_txn_chunk(txn_chunk_id, local_file_path, encryption_key)?;
-                *guard = Some(txn_chunk.clone());
+                *guard = Some(TxnChunkEntryData::new(txn_chunk.clone()));
                 return Ok(txn_chunk);
             }
         }
@@ -201,7 +254,7 @@ impl TxnChunkManagerCore {
             let file = InMemFile::new(txn_chunk_id, file_data);
             TxnChunk::new(Arc::new(file), self.cache.clone(), encryption_key)?
         };
-        *guard = Some(txn_chunk.clone());
+        *guard = Some(TxnChunkEntryData::new(txn_chunk.clone()));
         Ok(txn_chunk)
     }
 
@@ -217,10 +270,12 @@ impl TxnChunkManagerCore {
         let (tx, rx) = tikv_util::mpsc::bounded(READ_DFS_CONCURRENCY);
         let runtime = self.dfs.get_runtime();
         let mut msg_count: usize = 0;
+        let now = Instant::now_coarse();
         for chunk_id in txn_chunks_id {
             let entry = self.txn_chunks.entry(chunk_id).or_default().clone();
             let mut guard = block_on(entry.chunk_data.write_owned());
-            if guard.is_some() {
+            if let Some(txn_chunk) = guard.as_mut() {
+                txn_chunk.touch_with(now);
                 continue;
             }
 
@@ -228,7 +283,7 @@ impl TxnChunkManagerCore {
                 if local_file_path.exists() {
                     let txn_chunk =
                         self.load_txn_chunk(chunk_id, local_file_path, encryption_key.clone())?;
-                    *guard = Some(txn_chunk);
+                    *guard = Some(TxnChunkEntryData::new(txn_chunk));
                     continue;
                 }
             }
@@ -261,7 +316,7 @@ impl TxnChunkManagerCore {
         rx: &tikv_util::mpsc::Receiver<(
             u64,
             crate::dfs::Result<Bytes>,
-            OwnedRwLockWriteGuard<Option<TxnChunk>>,
+            OwnedRwLockWriteGuard<Option<TxnChunkEntryData>>,
         )>,
         encryption_key: Option<EncryptionKey>,
     ) -> Result<()> {
@@ -283,7 +338,7 @@ impl TxnChunkManagerCore {
             let file = InMemFile::new(chunk_id, file_data);
             TxnChunk::new(Arc::new(file), self.cache.clone(), encryption_key)?
         };
-        *guard = Some(txn_chunk);
+        *guard = Some(TxnChunkEntryData::new(txn_chunk));
         Ok(())
     }
 
@@ -320,7 +375,7 @@ impl TxnChunkManagerCore {
     pub fn get(&self, txn_chunk_id: u64) -> Option<TxnChunk> {
         let entry = self.txn_chunks.get(&txn_chunk_id)?.clone();
         let guard = block_on(entry.chunk_data.read());
-        guard.clone()
+        guard.as_ref().map(|x| x.chunk.clone())
     }
 
     pub fn remove(&self, txn_chunk_id: u64) -> bool {
@@ -401,6 +456,62 @@ pub fn parse_txn_chunk_id(txn_chunk_name: &str) -> Option<u64> {
     Some(chunk_id)
 }
 
+async fn run_gc_worker(
+    txn_chunks: Arc<DashMap<u64, TxnChunkEntry>>,
+    config: TxnChunkManagerConfig,
+) {
+    info!("run gc worker"; "config" => ?config);
+    loop {
+        tokio::time::sleep(config.gc_interval.0).await;
+        let chunk_ids: Vec<_> = txn_chunks.iter().map(|x| *x.key()).collect();
+
+        let mut expired_count = 0;
+        let mut expired_size = 0;
+        let total_count = chunk_ids.len();
+        let mut total_size = 0;
+        let now = Instant::now_coarse();
+        for chunk_id in chunk_ids {
+            let (is_expired, size) =
+                gc_single_txn_chunk(&txn_chunks, chunk_id, config.gc_ttl.0, now).await;
+            total_size += size;
+            if is_expired {
+                expired_count += 1;
+                expired_size += size;
+            }
+        }
+
+        if total_count > 0 {
+            info!(
+                "run gc worker: total: {total_count}/{total_size}, expired: {expired_count}/{expired_size} (count/size)"
+            );
+        }
+    }
+}
+
+async fn gc_single_txn_chunk(
+    txn_chunks: &DashMap<u64, TxnChunkEntry>,
+    chunk_id: u64,
+    ttl: Duration,
+    now: Instant,
+) -> (bool /* is_expired */, u64 /* size */) {
+    let Some(entry_ref) = txn_chunks.get(&chunk_id) else {
+        return (false, 0);
+    };
+    let entry = entry_ref.clone();
+    drop(entry_ref); // Release the lock. Otherwise, it will cause deadlock when remove entry.
+    let txn_chunk = entry.chunk_data.read().await;
+    let (is_expired, size) = txn_chunk.as_ref().map_or((true, 0), |x| {
+        (
+            now.saturating_duration_since(x.prepare_time) >= ttl,
+            x.chunk.size() as u64,
+        )
+    });
+    if is_expired {
+        txn_chunks.remove(&chunk_id);
+    }
+    (is_expired, size)
+}
+
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
@@ -428,6 +539,7 @@ mod tests {
             dfs.clone(),
             Some(cache.clone()),
             with_pool_size(2),
+            TxnChunkManagerConfig::default(),
         );
         let runtime = dfs.get_runtime();
         let opts = dfs::Options::default().with_type(FileType::TxnChunk);
@@ -457,8 +569,13 @@ mod tests {
         assert!(txn_chunk_manager.get(1).is_none());
         drop(txn_chunk_manager);
 
-        let txn_chunk_manager =
-            TxnChunkManager::new(local_path.clone(), dfs, Some(cache), with_pool_size(2));
+        let txn_chunk_manager = TxnChunkManager::new(
+            local_path.clone(),
+            dfs,
+            Some(cache),
+            with_pool_size(2),
+            TxnChunkManagerConfig::default(),
+        );
         if local_path.is_some() {
             // After process restart, the remained txn chunks are all loaded.
             assert!(txn_chunk_manager.get(1).is_none());

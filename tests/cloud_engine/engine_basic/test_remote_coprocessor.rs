@@ -7,7 +7,7 @@ use codec::prelude::NumberEncoder;
 use futures::executor::block_on;
 use kvengine::{
     table::table::Row,
-    txn_chunk_manager::{with_pool_size, TxnChunkManager},
+    txn_chunk_manager::{with_pool_size, TxnChunkManager, TxnChunkManagerConfig},
     SnapAccess,
 };
 use kvproto::{
@@ -35,7 +35,11 @@ use tidb_query_datatype::{
     expr::EvalContext,
 };
 use tikv::coprocessor::{REQ_TYPE_ANALYZE, REQ_TYPE_CHECKSUM, REQ_TYPE_DAG};
-use tikv_util::{config::ReadableSize, info, quota_limiter::QuotaLimiter};
+use tikv_util::{
+    config::{ReadableDuration, ReadableSize},
+    info,
+    quota_limiter::QuotaLimiter,
+};
 use tipb::{Chunk, Executor, Expr, ExprType, ScalarFuncSig};
 
 use crate::alloc_node_id;
@@ -2272,8 +2276,16 @@ impl<'a> DagTest<'a> {
         });
         client.split_keyspace(1);
         let master_key = cluster.get_kvengine(node_id).get_master_key();
-        let txn_chunk_manager =
-            TxnChunkManager::new(None, cluster.get_dfs().unwrap(), None, with_pool_size(2));
+        let txn_chunk_manager = TxnChunkManager::new(
+            None,
+            cluster.get_dfs().unwrap(),
+            None,
+            with_pool_size(2),
+            TxnChunkManagerConfig {
+                gc_interval: ReadableDuration::secs(1),
+                gc_ttl: ReadableDuration::secs(1),
+            },
+        );
 
         Self {
             table,
