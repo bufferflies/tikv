@@ -33,6 +33,7 @@ use test_cloud_server::{
     must_wait,
     oss::prepare_dfs,
     try_wait,
+    txn::txn_file::TxnFileHelper,
     util::Mutation,
     ServerCluster,
 };
@@ -734,23 +735,15 @@ fn test_txn_file_abnormal_impl(data_count: usize, use_txn_file: bool, enable_inn
     }
 
     let txn_file_helper = client.txn_file_helper();
-    let make_mutations = |value: &str| -> (Vec<Mutation>, TxnMutations) {
-        let gen_val = i_to_val_opt(value, 3);
-        let mut mutations = vec![];
-        for i in 0..data_count {
-            let mut m = Mutation::default();
-            m.set_op(kvrpcpb::Op::Put);
-            m.set_key(gen_key(i));
-            m.set_value(gen_val(i));
-            mutations.push(m);
-        }
-        let txn_muts = block_on(TxnMutations::build(
-            mutations.clone(),
+    let make_mutations = |value| {
+        make_txn_mutations(
+            value,
+            0,
+            data_count,
+            &gen_key,
             write_method,
             txn_file_helper.clone(),
-        ))
-        .unwrap();
-        (mutations, txn_muts)
+        )
     };
 
     // Commit without prewrite:
@@ -1136,6 +1129,109 @@ fn test_txn_file_merge_impl(ranges: Vec<Range<usize>>, enable_inner_key_off: boo
 
     verify_range(&mut client, 0, 500, commit_ts);
     cluster.stop();
+}
+
+// Test for commit "not primary" lock to primary region.
+// See https://github.com/tidbcloud/cloud-storage-engine/issues/1800.
+#[test]
+fn test_commit_primary_region() {
+    test_util::init_log_for_test();
+    let (_temp_dir, mut oss, dfs_config) = prepare_dfs("test");
+
+    let node_ids = alloc_node_id_vec(NODES_COUNT);
+    let pd_wrapper = PdWrapper::new_test(1, &SecurityConfig::default(), None);
+    let mut cluster = ServerCluster::new_opt(
+        node_ids,
+        |_, conf| {
+            conf.dfs = dfs_config.clone();
+            conf.enable_inner_key_offset = true;
+        },
+        pd_wrapper,
+    );
+    cluster.start_tikv_workers(1, 2, false);
+    cluster.wait_region_replicated(&[], 3);
+
+    let gen_key = generate_keyspace_key(KEYSPACE_ID);
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _enter = rt.enter();
+
+    let mut client = cluster.new_client_opt(ClusterClientOptions {
+        txn_file_max_chunk_size: Some(1024),
+        ..Default::default()
+    });
+    let txn_file_helper = client.txn_file_helper();
+    let make_mutations = |value, start, end| {
+        make_txn_mutations(
+            value,
+            start,
+            end,
+            &gen_key,
+            TxnWriteMethod::FileBased,
+            txn_file_helper.clone(),
+        )
+    };
+    client.split_keyspace(KEYSPACE_ID);
+
+    // Prewrite to two regions.
+    client.try_split(&gen_key(100), 5).unwrap();
+    let (_, txn_muts) = make_mutations("value_", 0, 200);
+    let start_ts = client.get_ts();
+    client
+        .kv_prewrite(txn_muts.primary(), None, txn_muts.clone(), start_ts)
+        .unwrap();
+
+    // Rollback the primary region.
+    let (_, txn_muts0) = make_mutations("value0_", 0, 1);
+    client.kv_rollback(txn_muts0, start_ts).unwrap();
+    let ok = client.try_merge_and_wait(&gen_key(0), &gen_key(100), 5);
+    assert!(ok);
+
+    // Commit must fail.
+    let commit_ts = client.get_ts();
+    let err = client.kv_commit(txn_muts, start_ts, commit_ts).unwrap_err();
+    expect_err_msg(&err, "TxnLockNotFound");
+
+    {
+        // To work around that data not existed in ref store will not be checked.
+        let guard = client.ref_store();
+        let mut ref_store = guard.lock().unwrap();
+        for k in 0..200 {
+            ref_store.del_kv(gen_key(k));
+        }
+    }
+    client.verify_data_with_ref_store();
+    cluster.stop();
+    oss.shutdown();
+}
+
+fn make_txn_mutations<F>(
+    value: &str,
+    start: usize,
+    end: usize,
+    gen_key: F,
+    write_method: TxnWriteMethod,
+    txn_file_helper: Option<Arc<TxnFileHelper>>,
+) -> (Vec<Mutation>, TxnMutations)
+where
+    F: Fn(usize) -> Vec<u8>,
+{
+    let gen_val = i_to_val_opt(value, 3);
+    let mut mutations = vec![];
+    for i in start..end {
+        let mut m = Mutation::default();
+        m.set_op(kvrpcpb::Op::Put);
+        m.set_key(gen_key(i));
+        m.set_value(gen_val(i));
+        mutations.push(m);
+    }
+    let txn_muts = block_on(TxnMutations::build(
+        mutations.clone(),
+        write_method,
+        txn_file_helper,
+    ))
+    .unwrap();
+    (mutations, txn_muts)
 }
 
 fn build_txn_files(

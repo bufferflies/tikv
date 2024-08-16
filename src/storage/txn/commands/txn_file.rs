@@ -4,7 +4,10 @@ use std::{cmp::Ordering, iter::Iterator as StdIterator, mem, ops::Deref};
 
 use api_version::ApiV2;
 use kvengine::{
-    table::txn_file::{TxnCtx, TxnFile, TxnFileId, TxnFileIterator, OP_CHECK_NOT_EXIST, OP_INSERT},
+    table::{
+        txn_file::{TxnCtx, TxnFile, TxnFileId, TxnFileIterator, OP_CHECK_NOT_EXIST, OP_INSERT},
+        InnerKey,
+    },
     txn_chunk_manager::TxnChunkManager,
     Iterator, SnapAccess, UserMeta, LOCK_CF, WRITE_CF,
 };
@@ -448,6 +451,57 @@ impl TxnFileCommand {
         Ok(None)
     }
 
+    /// Check the transaction status when a "not primary txn file lock" commit
+    /// to primary region (i.e. the region contains primary key).
+    ///
+    /// This condition will happen when the primary txn file lock is committed
+    /// or rollback, and then the primary region is merged.
+    ///
+    /// See https://github.com/tidbcloud/cloud-storage-engine/issues/1800.
+    fn check_commit_primary_region(
+        &self,
+        lock: &txn_types::Lock,
+        lock_txn_file: &TxnFile,
+        start_ts: TimeStamp,
+        commit_ts: TimeStamp,
+        snap_access: &SnapAccess,
+    ) -> crate::storage::mvcc::Result<()> {
+        let is_primary_txn_file = || {
+            let primary_inner =
+                InnerKey::from_outer_key(&lock.primary, snap_access.get_inner_key_offset());
+            lock_txn_file.lower_bound() <= primary_inner
+                && primary_inner < lock_txn_file.upper_bound()
+        };
+
+        if snap_access.key_is_in_range(&lock.primary) && !is_primary_txn_file() {
+            let txn_lock_not_found = || -> mvcc::Error {
+                ErrorInner::TxnLockNotFound {
+                    start_ts,
+                    commit_ts,
+                    key: vec![],
+                }
+                .into()
+            };
+
+            let mut cloud_reader = CloudReader::new(snap_access.clone(), true);
+            let record = cloud_reader
+                .get_txn_commit_record(&Key::from_raw(&lock.primary), start_ts)?
+                .info();
+            return match record {
+                Some((_, WriteType::Rollback)) | None => Err(txn_lock_not_found()),
+                Some((committed_ts, WriteType::Put | WriteType::Delete | WriteType::Lock)) => {
+                    debug_assert_eq!(
+                        committed_ts, commit_ts,
+                        "commit_ts mismatch: start_ts {}, commit_ts {}, committed_ts {}",
+                        start_ts, commit_ts, committed_ts
+                    );
+                    Ok(())
+                }
+            };
+        }
+        Ok(())
+    }
+
     fn process_commit(
         &mut self,
         snap_access: &SnapAccess,
@@ -462,6 +516,14 @@ impl TxnFileCommand {
         }
         if let Some(lock_txn_file) = snap_access.get_lock_txn_file(self.txn_file_ref.start_ts) {
             let lock = txn_types::Lock::parse(lock_txn_file.get_lock_val_prefix())?;
+            self.check_commit_primary_region(
+                &lock,
+                &lock_txn_file,
+                start_ts,
+                commit_ts,
+                snap_access,
+            )?;
+
             debug_assert_eq!(lock.ts, self.ts());
             if commit_ts < lock.min_commit_ts {
                 info!(

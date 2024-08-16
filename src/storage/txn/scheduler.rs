@@ -777,14 +777,13 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
     where
         StorageError: From<ER>,
     {
-        debug!("write command finished with error"; "cid" => cid);
+        let err = StorageError::from(err);
+        debug!("write command finished with error"; "cid" => cid, "err" => ?err);
         let tctx = self.inner.dequeue_task_context(cid);
 
         SCHED_STAGE_COUNTER_VEC.get(tctx.tag).error.inc();
 
-        let pr = ProcessResult::Failed {
-            err: StorageError::from(err),
-        };
+        let pr = ProcessResult::Failed { err };
         if let Some(cb) = tctx.cb {
             cb.execute(pr);
         }

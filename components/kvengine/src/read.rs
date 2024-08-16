@@ -702,6 +702,10 @@ impl SnapAccessCore {
         self.data.outer_end.chunk()
     }
 
+    pub fn key_is_in_range(&self, key: &[u8]) -> bool {
+        self.get_start_key() <= key && key < self.get_end_key()
+    }
+
     pub fn get_inner_start(&self) -> InnerKey<'_> {
         self.data.inner_start()
     }
