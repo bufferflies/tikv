@@ -81,7 +81,6 @@ where
                 None,
             )
             .unwrap()
-            .0
         })
         .bench(b);
     }

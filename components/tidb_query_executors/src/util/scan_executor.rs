@@ -136,10 +136,6 @@ impl<S: Storage, I: ScanExecutorImpl, F: KvFormat> ScanExecutor<S, I, F> {
         // Not drained
         Ok(false)
     }
-
-    pub fn is_columnar(&self) -> bool {
-        self.columnar_scanner.is_some()
-    }
 }
 
 /// Extracts `FieldType` from `ColumnInfo`.
@@ -236,6 +232,9 @@ impl<S: Storage, I: ScanExecutorImpl, F: KvFormat> BatchExecutor for ScanExecuto
 
     #[inline]
     fn take_scanned_range(&mut self) -> IntervalRange {
+        if self.columnar_scanner.is_some() {
+            return self.columnar_scanner.as_mut().unwrap().take_scanned_range();
+        }
         // TODO: check if there is a better way to reuse this method impl.
         self.scanner.take_scanned_range()
     }

@@ -120,10 +120,6 @@ impl<S: Storage, F: KvFormat> BatchTableScanExecutor<S, F> {
         )?;
         Ok(Self(wrapper))
     }
-
-    pub fn is_columnar(&self) -> bool {
-        self.0.is_columnar()
-    }
 }
 
 #[async_trait]

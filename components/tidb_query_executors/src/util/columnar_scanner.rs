@@ -9,14 +9,14 @@ use api_version::{api_v2::KEYSPACE_PREFIX_LEN, KeyMode, KvFormat};
 use bytes::buf::Buf;
 use kvengine::table::columnar::{Block, ColumnarFilterReader, ColumnarMvccReader, HANDLE_COL_ID};
 use kvproto::coprocessor::KeyRange;
-use tidb_query_common::Result;
+use tidb_query_common::{storage::IntervalRange, util::convert_to_prefix_next, Result};
 use tidb_query_datatype::{
     codec::{
         batch::{LazyBatchColumn, LazyBatchColumnVec},
         data_type::{ChunkedVec, Enum, Real, VectorValue},
         mysql::{DecimalDecoder, Duration, JsonDecoder, Set, Time, VectorFloat32Decoder},
         table,
-        table::PREFIX_LEN,
+        table::{encode_common_handle_for_test, encode_row_key, PREFIX_LEN},
     },
     expr::EvalContext,
     EvalType, FieldTypeTp,
@@ -27,15 +27,23 @@ use tipb::ColumnInfo;
 pub struct ColumnarScanner {
     // The current scan position.
     reader: ColumnarMvccReader,
+    keyspace_id: u32,
     output_offsets: Vec<i32>,
     eval_types: Vec<EvalType>,
     block: Block,
+    start_range: Vec<u8>,
+    working_end_handle: Option<Vec<u8>>,
     // TODO: support backward scan
     _scan_backward_in_range: bool,
 }
 
 impl ColumnarScanner {
-    pub fn new(reader: ColumnarMvccReader, output_offsets: Vec<i32>) -> Self {
+    pub fn new(
+        reader: ColumnarMvccReader,
+        output_offsets: Vec<i32>,
+        keyspace_id: u32,
+        start_range: Vec<u8>,
+    ) -> Self {
         let schema = reader.get_schema();
         let mut eval_types = vec![];
         for &offset in &output_offsets {
@@ -51,11 +59,44 @@ impl ColumnarScanner {
         let block = Block::new(schema);
         Self {
             reader,
+            keyspace_id,
             output_offsets,
             eval_types,
             block,
+            start_range,
+            working_end_handle: None,
             _scan_backward_in_range: false,
         }
+    }
+
+    pub fn take_scanned_range(&mut self) -> IntervalRange {
+        let mut range = IntervalRange::default();
+        range.lower_inclusive = self.start_range.clone();
+        let schema = self.reader.get_schema();
+        let keyspace_prefix = api_version::ApiV2::get_txn_keyspace_prefix(self.keyspace_id);
+        let table_id = schema.table_id;
+        let mut upper = if schema.is_common_handle() {
+            let end = encode_common_handle_for_test(
+                table_id,
+                self.working_end_handle.as_ref().unwrap_or(&vec![]),
+            );
+            [keyspace_prefix.as_slice(), end.as_slice()].concat()
+        } else {
+            let end_handle = if self.working_end_handle.is_none() {
+                i64::MIN
+            } else {
+                i64::from_le_bytes(
+                    self.working_end_handle.as_ref().unwrap()[..8]
+                        .try_into()
+                        .unwrap(),
+                )
+            };
+            let end = encode_row_key(table_id, end_handle);
+            [keyspace_prefix.as_slice(), end.as_slice()].concat()
+        };
+        convert_to_prefix_next(&mut upper);
+        range.upper_exclusive = upper;
+        range
     }
 
     pub async fn scan(&mut self, scan_rows: usize) -> (LazyBatchColumnVec, Result<bool>) {
@@ -68,6 +109,9 @@ impl ColumnarScanner {
         if read_size > 0 {
             let schema = self.reader.get_schema();
             let mut eval_ctx = EvalContext::default();
+            let col_buf = self.block.get_handle_buf();
+            let end = col_buf.get_value(read_size - 1);
+            self.working_end_handle = end.map(|v| v.to_vec());
             for (i, &output_off) in self.output_offsets.iter().enumerate() {
                 let (column_buf, column_info) = if output_off < 0 {
                     (self.block.get_handle_buf(), &schema.handle_column)
@@ -198,6 +242,7 @@ pub fn build_columnar_scanner(
     if api_version::ApiV2::parse_key_mode(&key_range.start) != KeyMode::Txn {
         return None;
     }
+    let keyspace_id = api_version::ApiV2::get_u32_keyspace_id_by_key(&key_range.start).unwrap();
     let start = &key_range.start[KEYSPACE_PREFIX_LEN..];
     let end = &key_range.end[KEYSPACE_PREFIX_LEN..];
 
@@ -239,6 +284,11 @@ pub fn build_columnar_scanner(
             }
         };
         reader.set_int_handle_range(start_handle, end_handle).ok()?;
-    }
-    Some(ColumnarScanner::new(reader, output_offsets))
+    };
+    Some(ColumnarScanner::new(
+        reader,
+        output_offsets,
+        keyspace_id,
+        key_range.start.clone(),
+    ))
 }

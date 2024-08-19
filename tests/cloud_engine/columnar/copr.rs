@@ -134,8 +134,6 @@ fn test_coprocessor() {
             .to_vec();
         let mut req = kvproto::coprocessor::Request::new();
         req.set_tp(REQ_TYPE_DAG);
-        // the paging size will be ignored.
-        req.set_paging_size(3);
         let ts = client.get_ts().into_inner();
         req.set_start_ts(ts);
         req.set_data(dag.write_to_bytes().unwrap());
@@ -151,8 +149,8 @@ fn test_coprocessor() {
         }
         key_range.set_start(start_key);
         key_range.set_end(end_key);
-        req.set_ranges(vec![key_range].into());
-        let cop_resp = client.simple_cop_request(req);
+        req.set_ranges(vec![key_range.clone()].into());
+        let cop_resp = client.simple_cop_request(req.clone());
         let mut resp = tipb::SelectResponse::default();
         resp.merge_from_bytes(cop_resp.get_data()).unwrap();
         let chunk_splitter = DagChunkSpliter::new(resp.take_chunks().into(), dag_columns.len());
@@ -172,6 +170,42 @@ fn test_coprocessor() {
                 }
             }
             count += 1;
+        }
+        assert_eq!(count, total_cnt);
+
+        // Enable paging
+        req.set_paging_size(32);
+        let mut count = 0;
+        let mut paging_count = 0;
+        loop {
+            let cop_resp = client.simple_cop_request(req.clone());
+            let mut resp = tipb::SelectResponse::default();
+            resp.merge_from_bytes(cop_resp.get_data()).unwrap();
+            let chunk_splitter = DagChunkSpliter::new(resp.take_chunks().into(), dag_columns.len());
+            for (row_i, row) in chunk_splitter.enumerate() {
+                let row_i = row_i + paging_count * 32;
+                for (col_i, col_info) in dag_columns.iter().enumerate() {
+                    if row_i % 5 == 0 && !col_info.flag().contains(FieldTypeFlag::NOT_NULL) {
+                        assert_eq!(row[col_i], Datum::Null);
+                    } else {
+                        assert_eq!(
+                            row[col_i],
+                            col_val_datum(col_info, row_i),
+                            "row_i: {}, col_id: {}",
+                            row_i,
+                            col_info.get_column_id()
+                        );
+                    }
+                }
+                count += 1;
+            }
+            paging_count += 1;
+            let scanned_range = cop_resp.get_range();
+            if scanned_range.get_end().is_empty() && scanned_range.get_start().is_empty() {
+                break;
+            }
+            key_range.set_start(scanned_range.get_end().to_vec());
+            req.set_ranges(vec![key_range.clone()].into());
         }
         assert_eq!(count, total_cnt);
     }
