@@ -158,7 +158,6 @@ pub const MANUAL_MAJOR_COMPACTION_ENABLE: &[u8] = &[1];
 pub const MANUAL_MAJOR_COMPACTION_DISABLE: &[u8] = b"";
 
 pub(crate) const INITIAL_UPDATE_COUNTER: u64 = 0;
-pub(crate) const NEW_DATA_UPDATE_COUNTER: u64 = 1;
 
 const MAX_COL_L0_FILE_COUNTS: usize = 32;
 const MAX_COL_L1_FILE_COUNTS: usize = 64;
@@ -384,23 +383,12 @@ impl Shard {
         // TODO: load lock_txn_files
 
         let mut shard = Shard::new_for_ingest(0, &cs, Arc::new(Options::default()), master_key);
-        let (l0s, blob_tbls, scfs, lock_txn_files, col_levels) =
-            create_snapshot_tables(cs.get_snapshot(), &cs, ignore_lock);
-        let data = ShardData::new(
-            shard.range.clone(),
-            mem_tbls,
-            l0s,
-            Arc::new(blob_tbls),
-            scfs,
-            HashMap::new(),
-            lock_txn_files,
-            RegionLimiter::new((&shard.opt.flow_control).into()), // Note: limiter is disabled here
-            NEW_DATA_UPDATE_COUNTER,
-            cs.schema_file.clone(),
-            col_levels,
-        );
+        let mut builder = ShardDataBuilder::new(shard.get_data());
+        builder.set_mem_tbls(mem_tbls);
+        create_snapshot_tables(&mut builder, cs.get_snapshot(), &cs, ignore_lock);
+        builder.set_schema_file(cs.schema_file.clone());
         shard.id = cs.shard_id;
-        shard.set_data(data);
+        shard.set_data(builder.build());
         shard
     }
 
@@ -1079,20 +1067,10 @@ impl Shard {
             "mem-tables" => ?mem_tbl_vers,
             "lock_txn_files" => ?lock_txn_files.iter().map(|x| x.start_ts()).collect::<Vec<_>>(),
             "properties" => ?self.properties.multi_get(PROPERTIES_COPY_FROM_PARENT_IN_RECOVERY));
-        let new_data = ShardData::new(
-            shard_data.range.clone(),
-            mem_tbls,
-            shard_data.l0_tbls.clone(),
-            shard_data.blob_tbl_map.clone(),
-            shard_data.cfs.clone(),
-            shard_data.unloaded_tbls.clone(),
-            lock_txn_files,
-            shard_data.limiter.clone(),
-            shard_data.update_counter + 1,
-            shard_data.schema_file.clone(),
-            shard_data.col_levels.clone(),
-        );
-        self.set_data(new_data);
+        let mut builder = ShardDataBuilder::new(shard_data);
+        builder.set_mem_tbls(mem_tbls);
+        builder.set_lock_txn_files(lock_txn_files);
+        self.set_data(builder.build());
     }
 
     pub(crate) fn inner_start(&self) -> InnerKey<'_> {
@@ -1138,6 +1116,102 @@ impl Shard {
 
     pub(crate) fn set_outdated_schema_ver(&self, ver: i64) {
         self.outdated_schema_ver.store(ver, Ordering::Release);
+    }
+}
+
+pub(crate) struct ShardDataBuilder {
+    old: ShardData,
+    range: Option<ShardRange>,
+    mem_tbls: Option<Vec<CfTable>>,
+    l0_tbls: Option<Vec<L0Table>>,
+    cfs: Option<[ShardCf; 3]>,
+    unloaded_tbls: Option<HashMap<u64, FileMeta>>,
+    blob_tbls: Option<Arc<HashMap<u64, BlobTable>>>,
+    lock_txn_files: Option<Vec<TxnFile>>,
+    schema_file: Option<Option<SchemaFile>>,
+    columnar_levels: Option<ColumnarLevels>,
+}
+
+impl ShardDataBuilder {
+    pub(crate) fn new(old: ShardData) -> Self {
+        Self {
+            old,
+            range: None,
+            mem_tbls: None,
+            l0_tbls: None,
+            cfs: None,
+            unloaded_tbls: None,
+            blob_tbls: None,
+            lock_txn_files: None,
+            schema_file: None,
+            columnar_levels: None,
+        }
+    }
+
+    pub(crate) fn set_range(&mut self, range: ShardRange) {
+        self.range = Some(range);
+    }
+
+    pub(crate) fn set_mem_tbls(&mut self, mem_tbls: Vec<CfTable>) {
+        self.mem_tbls = Some(mem_tbls);
+    }
+
+    pub(crate) fn set_l0_tbls(&mut self, l0_tbls: Vec<L0Table>) {
+        self.l0_tbls = Some(l0_tbls);
+    }
+
+    pub(crate) fn set_cfs(&mut self, cfs: [ShardCf; 3]) {
+        self.cfs = Some(cfs);
+    }
+
+    pub(crate) fn set_unloaded_tbls(&mut self, unloaded_tbls: HashMap<u64, FileMeta>) {
+        self.unloaded_tbls = Some(unloaded_tbls);
+    }
+
+    pub(crate) fn set_blob_tbls(&mut self, blob_tbls: HashMap<u64, BlobTable>) {
+        self.blob_tbls = Some(Arc::new(blob_tbls));
+    }
+
+    pub(crate) fn set_lock_txn_files(&mut self, lock_txn_files: Vec<TxnFile>) {
+        self.lock_txn_files = Some(lock_txn_files);
+    }
+
+    pub(crate) fn set_schema_file(&mut self, schema_file: Option<SchemaFile>) {
+        self.schema_file = Some(schema_file);
+    }
+
+    pub(crate) fn set_columnar_levels(&mut self, columnar_levels: ColumnarLevels) {
+        self.columnar_levels = Some(columnar_levels);
+    }
+
+    pub(crate) fn build(mut self) -> ShardData {
+        ShardData::new(
+            self.range.take().unwrap_or_else(|| self.old.range.clone()),
+            self.mem_tbls
+                .take()
+                .unwrap_or_else(|| self.old.mem_tbls.clone()),
+            self.l0_tbls
+                .take()
+                .unwrap_or_else(|| self.old.l0_tbls.clone()),
+            self.blob_tbls
+                .take()
+                .unwrap_or_else(|| self.old.blob_tbl_map.clone()),
+            self.cfs.take().unwrap_or_else(|| self.old.cfs.clone()),
+            self.unloaded_tbls
+                .take()
+                .unwrap_or_else(|| self.old.unloaded_tbls.clone()),
+            self.lock_txn_files
+                .take()
+                .unwrap_or_else(|| self.old.lock_txn_files.clone()),
+            self.old.limiter.clone(),
+            self.old.update_counter + 1,
+            self.schema_file
+                .take()
+                .unwrap_or_else(|| self.old.schema_file.clone()),
+            self.columnar_levels
+                .take()
+                .unwrap_or_else(|| self.old.col_levels.clone()),
+        )
     }
 }
 
@@ -1468,87 +1542,6 @@ impl ShardDataCore {
                 .levels
                 .iter()
                 .any(|l| !l.tables.is_empty())
-    }
-}
-
-#[cfg(test)]
-#[derive(Default)]
-pub(crate) struct ShardDataBuilder {
-    range: ShardRange,
-    mem_tbls: Vec<memtable::CfTable>,
-    l0_tbls: Vec<L0Table>,
-    blob_tbl_map: Arc<HashMap<u64, BlobTable>>,
-    cfs: Option<[ShardCf; 3]>,
-    unloaded_tbls: HashMap<u64, FileMeta>,
-    lock_txn_files: Vec<TxnFile>,
-    limiter: Option<RegionLimiter>,
-    update_counter: Option<u64>,
-    schema_file: Option<SchemaFile>,
-    col_levels: Option<ColumnarLevels>,
-}
-
-#[cfg(test)]
-impl ShardDataBuilder {
-    pub fn new(range: ShardRange) -> Self {
-        Self {
-            range,
-            ..Default::default()
-        }
-    }
-
-    pub fn from_data(data: ShardData) -> Self {
-        Self {
-            range: data.range.clone(),
-            mem_tbls: data.mem_tbls.clone(),
-            l0_tbls: data.l0_tbls.clone(),
-            blob_tbl_map: data.blob_tbl_map.clone(),
-            cfs: Some(data.cfs.clone()),
-            unloaded_tbls: data.unloaded_tbls.clone(),
-            lock_txn_files: data.lock_txn_files.clone(),
-            limiter: Some(data.limiter.clone()),
-            update_counter: Some(data.update_counter + 1),
-            schema_file: data.schema_file.clone(),
-            col_levels: Some(data.col_levels.clone()),
-        }
-    }
-
-    pub fn build(mut self) -> ShardData {
-        if self.mem_tbls.is_empty() {
-            self.mem_tbls = vec![CfTable::new()];
-        }
-
-        ShardData::new(
-            self.range,
-            self.mem_tbls,
-            self.l0_tbls,
-            self.blob_tbl_map,
-            self.cfs
-                .unwrap_or_else(|| [ShardCf::new(0), ShardCf::new(1), ShardCf::new(2)]),
-            self.unloaded_tbls,
-            self.lock_txn_files,
-            self.limiter.unwrap_or_else(|| RegionLimiter::dummy()),
-            self.update_counter.unwrap_or(1),
-            self.schema_file,
-            self.col_levels.unwrap_or_else(|| ColumnarLevels::new()),
-        )
-    }
-
-    pub fn mem_tables(mut self, mem_tbls: Vec<CfTable>) -> Self {
-        self.mem_tbls = mem_tbls;
-        self
-    }
-
-    pub fn l0_tables(mut self, l0_tbls: Vec<L0Table>) -> Self {
-        self.l0_tbls = l0_tbls;
-        self
-    }
-
-    pub(crate) fn lv_tables(mut self, cf: usize, shard_cf: ShardCf) -> Self {
-        let cfs = self
-            .cfs
-            .get_or_insert_with(|| [ShardCf::new(0), ShardCf::new(1), ShardCf::new(2)]);
-        cfs[cf] = shard_cf;
-        self
     }
 }
 

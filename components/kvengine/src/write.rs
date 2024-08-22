@@ -131,19 +131,9 @@ impl Engine {
         let mut new_mem_tbls = Vec::with_capacity(data.mem_tbls.len() + 1);
         new_mem_tbls.push(new_tbl);
         new_mem_tbls.extend_from_slice(data.mem_tbls.as_slice());
-        let new_data = ShardData::new(
-            data.range.clone(),
-            new_mem_tbls,
-            data.l0_tbls.clone(),
-            data.blob_tbl_map.clone(),
-            data.cfs.clone(),
-            data.unloaded_tbls.clone(),
-            data.lock_txn_files.clone(),
-            data.limiter.clone(),
-            data.update_counter + 1,
-            data.schema_file.clone(),
-            data.col_levels.clone(),
-        );
+        let mut builder = ShardDataBuilder::new(data.clone());
+        builder.set_mem_tbls(new_mem_tbls);
+        let new_data = builder.build();
         new_data.refresh_for_limiter(&shard.tag());
         shard.set_data(new_data);
         info!(
@@ -292,20 +282,10 @@ impl Engine {
                 .get_writable_mem_table()
                 .add_write_cf_txn_files(&[txn_file]);
         }
-        let data = ShardData::new(
-            old_data.range.clone(),
-            mem_tbls,
-            old_data.l0_tbls.clone(),
-            old_data.blob_tbl_map.clone(),
-            old_data.cfs.clone(),
-            old_data.unloaded_tbls.clone(),
-            lock_txn_files,
-            old_data.limiter.clone(),
-            old_data.update_counter + 1,
-            old_data.schema_file.clone(),
-            old_data.col_levels.clone(),
-        );
-        shard.set_data(data);
+        let mut builder = ShardDataBuilder::new(old_data);
+        builder.set_mem_tbls(mem_tbls);
+        builder.set_lock_txn_files(lock_txn_files);
+        shard.set_data(builder.build());
     }
 
     fn merge_txn_file_ref(

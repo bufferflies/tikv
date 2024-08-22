@@ -1528,12 +1528,7 @@ impl Iterator {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::{BTreeMap, HashMap},
-        iter::Iterator,
-        ops::Deref,
-        sync::Arc,
-    };
+    use std::{collections::BTreeMap, iter::Iterator, ops::Deref, sync::Arc};
 
     use api_version::{api_v2::KEYSPACE_PREFIX_LEN, ApiV2};
     use bytes::{Buf, Bytes};
@@ -1546,9 +1541,8 @@ mod tests {
     use crate::{
         apply::create_snapshot_tables,
         dfs::{self, Dfs, InMemFs},
-        limiter::RegionLimiter,
         read::MEM_DATA_FORMAT_V1,
-        shard::{ShardData, NEW_DATA_UPDATE_COUNTER},
+        shard::ShardDataBuilder,
         table::{
             self, file::InMemFile, memtable::CfTable, sstable::build_test_table_with_kvs, InnerKey,
             NoPrefixKey, OwnedInnerKey, TxnChunk, TxnChunkBuilder, TxnCtx, TxnFile, TxnFileId,
@@ -1556,8 +1550,8 @@ mod tests {
         },
         txn_chunk_manager::{with_pool_size, TxnChunkManager, TxnChunkManagerConfig},
         util::test_util::KeyBuilder,
-        ChangeSet, Shard, ShardDataBuilder, ShardRange, SnapAccess, UserMeta, ENCRYPTION_KEY,
-        GLOBAL_SHARD_END_KEY, WRITE_CF,
+        ChangeSet, Shard, ShardRange, SnapAccess, UserMeta, ENCRYPTION_KEY, GLOBAL_SHARD_END_KEY,
+        WRITE_CF,
     };
 
     const KEYSPACE_ID: u32 = 42;
@@ -1602,23 +1596,10 @@ mod tests {
             opt,
             &master_key,
         );
-
-        let (l0s, blob_tbls, scfs, lock_txn_files, col_lvls) =
-            create_snapshot_tables(cs.get_snapshot(), &cs, false);
-        let data = ShardData::new(
-            shard.range.clone(),
-            vec![CfTable::new()],
-            l0s,
-            Arc::new(blob_tbls),
-            scfs,
-            HashMap::new(),
-            lock_txn_files,
-            RegionLimiter::dummy(),
-            NEW_DATA_UPDATE_COUNTER,
-            cs.schema_file.clone(),
-            col_lvls,
-        );
-        shard.set_data(data);
+        let mut builder = ShardDataBuilder::new(shard.get_data());
+        create_snapshot_tables(&mut builder, cs.get_snapshot(), &cs, false);
+        builder.set_schema_file(cs.schema_file.clone());
+        shard.set_data(builder.build());
         let snap = shard.new_snap_access();
 
         let build_range_fn = |start: i32, end: i32| {
@@ -1758,8 +1739,9 @@ mod tests {
                     opt,
                     &master_key,
                 );
-                let data = ShardDataBuilder::new(shard.range.clone()).mem_tables(mem_tbls).build();
-                shard.set_data(data);
+                let mut builder = ShardDataBuilder::new(shard.get_data());
+                builder.set_mem_tbls(mem_tbls);
+                shard.set_data(builder.build());
                 let snap_access = shard.new_snap_access();
 
                 snap_access.build_mem_data(&outer_ranges, u64::MAX)

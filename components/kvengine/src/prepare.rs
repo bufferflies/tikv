@@ -297,6 +297,7 @@ impl EngineCore {
         let shard = self.shards.get(&shard_id).unwrap();
         let mut cs = ChangeSet::new(kvenginepb::ChangeSet::default());
         let data = shard.get_data();
+        let mut builder = ShardDataBuilder::new(data.clone());
 
         let load_tables = data
             .unloaded_tbls
@@ -362,20 +363,12 @@ impl EngineCore {
         }
         new_columnar_levels.sort();
 
-        let new_data = ShardData::new(
-            data.range.clone(),
-            data.mem_tbls.clone(),
-            new_l0s,
-            Arc::new(new_blob_tbl_map),
-            scfs,
-            HashMap::new(),
-            data.lock_txn_files.clone(),
-            data.limiter.clone(),
-            data.update_counter + 1,
-            data.schema_file.clone(),
-            new_columnar_levels,
-        );
-        shard.set_data(new_data);
+        builder.set_l0_tbls(new_l0s);
+        builder.set_blob_tbls(new_blob_tbl_map);
+        builder.set_cfs(scfs);
+        builder.set_unloaded_tbls(HashMap::new());
+        builder.set_columnar_levels(new_columnar_levels);
+        shard.set_data(builder.build());
         Ok(())
     }
 

@@ -1,7 +1,6 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    collections::HashMap,
     env,
     iter::Iterator,
     ops::Deref,
@@ -37,7 +36,7 @@ use util::test_util::KeyBuilder;
 
 use crate::{
     dfs::{FileType, InMemFs},
-    limiter::{RegionLimiter, StoreLimiter},
+    limiter::StoreLimiter,
     table::{
         columnar::{
             build_schema_file,
@@ -45,7 +44,6 @@ use crate::{
             ColumnarFilterReader, Schema, SchemaFile,
         },
         file::{File, InMemFile},
-        memtable::CfTable,
         sstable::{L0Builder, L0Table, SsTable},
         ChecksumType, InnerKey, NoPrefixKey, TxnChunkBuilder, TxnCtx, TxnFile, TxnFileId,
         BIT_DELETE, OP_PUT,
@@ -69,10 +67,6 @@ const KEYSPACE_ID: u32 = 1;
 
 const DEF_BLOCK_SIZE: usize = 4 << 10;
 const DEF_MIN_BLOB_SIZE: u32 = 64;
-
-// The shard get from TestEngine has been ingest once, so the update counter
-// starts from NEW_DATA_UPDATE_COUNTER + 1.
-const TEST_ENGINE_NEW_DATA_UPDATE_COUNTER: u64 = NEW_DATA_UPDATE_COUNTER + 1;
 
 const TABLE_KEY_PREFIX: &str = "t_";
 
@@ -648,20 +642,9 @@ fn test_lost_tombstone_issue() {
         new_table(&engine, 13, 120, 200, 103, false, &mut saved_vals),
         1,
     );
-    let data = ShardData::new(
-        shard.range.clone(),
-        vec![CfTable::new()],
-        vec![],
-        Arc::new(HashMap::default()),
-        [cf_builder.build(), ShardCf::new(1), ShardCf::new(2)],
-        HashMap::new(),
-        vec![],
-        RegionLimiter::dummy(),
-        TEST_ENGINE_NEW_DATA_UPDATE_COUNTER,
-        None,
-        ColumnarLevels::new(),
-    );
-    shard.set_data(data);
+    let mut builder = ShardDataBuilder::new(shard.get_data());
+    builder.set_cfs([cf_builder.build(), ShardCf::new(1), ShardCf::new(2)]);
+    shard.set_data(builder.build());
     let pri = CompactionPriority::L1Plus {
         cf: 0,
         score: 2.0,
@@ -707,20 +690,9 @@ fn test_read_iterator_all_versions() {
         1,
     );
 
-    let data = ShardData::new(
-        shard.range.clone(),
-        vec![CfTable::new()],
-        vec![],
-        Arc::new(HashMap::default()),
-        [cf_builder.build(), ShardCf::new(1), ShardCf::new(2)],
-        HashMap::new(),
-        vec![],
-        RegionLimiter::dummy(),
-        TEST_ENGINE_NEW_DATA_UPDATE_COUNTER,
-        None,
-        ColumnarLevels::new(),
-    );
-    shard.set_data(data);
+    let mut builder = ShardDataBuilder::new(shard.get_data());
+    builder.set_cfs([cf_builder.build(), ShardCf::new(1), ShardCf::new(2)]);
+    shard.set_data(builder.build());
 
     let snap = SnapAccess::new(&shard);
     let mut iter = snap.new_iterator(cf, false, true, None, false);
@@ -821,11 +793,12 @@ fn test_lock_cf_repeatable_read() {
         );
         let l0_tbl4 = L0Table::new(l0_file4, None, false, None).unwrap().unwrap();
 
-        let data = ShardDataBuilder::from_data(shard.get_data())
-            .lv_tables(LOCK_CF, cf_builder.build())
-            .l0_tables(vec![l0_tbl4, l0_tbl3])
-            .build();
-        shard.set_data(data);
+        let mut cfs = shard.get_data().cfs.clone();
+        cfs[LOCK_CF] = cf_builder.build();
+        let mut builder = ShardDataBuilder::new(shard.get_data());
+        builder.set_l0_tbls(vec![l0_tbl4, l0_tbl3]);
+        builder.set_cfs(cfs);
+        shard.set_data(builder.build());
         shard.set_base_version(10000);
     }
 
@@ -917,19 +890,9 @@ fn test_level_overlapping_tables(#[case] enable_inner_key_off: bool) {
             1, // level
         );
     }
-    let data = ShardData::new(
-        shard.range.clone(),
-        vec![CfTable::new()],
-        vec![],
-        Arc::new(HashMap::default()),
-        [cf_builder.build(), ShardCf::new(1), ShardCf::new(2)],
-        HashMap::new(),
-        vec![],
-        RegionLimiter::dummy(),
-        TEST_ENGINE_NEW_DATA_UPDATE_COUNTER,
-        None,
-        ColumnarLevels::new(),
-    );
+    let mut builder = ShardDataBuilder::new(shard.get_data());
+    builder.set_cfs([cf_builder.build(), ShardCf::new(1), ShardCf::new(2)]);
+    let data = builder.build();
 
     let cf0 = data.get_cf(0);
     let level1 = cf0.get_level(1);
@@ -1077,21 +1040,11 @@ fn test_get_suggest_split_key(#[case] enable_inner_key_off: bool) {
                 1,
             );
         }
-
-        let data = ShardData::new(
-            range.clone(),
-            vec![CfTable::new()],
-            l0_tables,
-            Arc::new(HashMap::default()),
-            [cf_builder.build(), ShardCf::new(1), ShardCf::new(2)],
-            HashMap::new(),
-            vec![],
-            RegionLimiter::dummy(),
-            TEST_ENGINE_NEW_DATA_UPDATE_COUNTER,
-            None,
-            ColumnarLevels::new(),
-        );
-        shard.set_data_opt(data, false);
+        let mut builder = ShardDataBuilder::new(shard.get_data());
+        builder.set_range(range.clone());
+        builder.set_l0_tbls(l0_tables);
+        builder.set_cfs([cf_builder.build(), ShardCf::new(1), ShardCf::new(2)]);
+        shard.set_data_opt(builder.build(), false);
 
         let key = shard.get_suggest_split_key();
         let expect_split_key = if enable_inner_key_off {
@@ -1268,21 +1221,11 @@ fn test_get_evenly_split_keys(#[case] enable_inner_key_off: bool) {
                 1, // level
             );
         }
-
-        let data = ShardData::new(
-            range.clone(),
-            vec![CfTable::new()],
-            l0_tables,
-            Arc::new(HashMap::default()),
-            [cf_builder.build(), ShardCf::new(1), ShardCf::new(2)],
-            HashMap::new(),
-            vec![],
-            RegionLimiter::dummy(),
-            TEST_ENGINE_NEW_DATA_UPDATE_COUNTER,
-            None,
-            ColumnarLevels::new(),
-        );
-        shard.set_data_opt(data, false);
+        let mut builder = ShardDataBuilder::new(shard.get_data());
+        builder.set_range(range.clone());
+        builder.set_l0_tbls(l0_tables);
+        builder.set_cfs([cf_builder.build(), ShardCf::new(1), ShardCf::new(2)]);
+        shard.set_data_opt(builder.build(), false);
 
         let split_keys = shard.get_evenly_split_keys(split_count);
         let expect_split_keys = if enable_inner_key_off {
@@ -1335,25 +1278,13 @@ fn test_refresh_stats() {
         new_table(&engine, 31, 50, 150, 150, false, &mut saved_vals),
         1,
     );
-
-    let data = ShardData::new(
-        shard.range.clone(),
-        vec![CfTable::new()],
-        vec![],
-        Arc::new(HashMap::default()),
-        [
-            write_cf_builder.build(),
-            lock_cf_builder.build(),
-            extra_cf_builder.build(),
-        ],
-        HashMap::new(),
-        vec![],
-        RegionLimiter::dummy(),
-        TEST_ENGINE_NEW_DATA_UPDATE_COUNTER,
-        None,
-        ColumnarLevels::new(),
-    );
-    shard.set_data(data);
+    let mut builder = ShardDataBuilder::new(shard.get_data());
+    builder.set_cfs([
+        write_cf_builder.build(),
+        lock_cf_builder.build(),
+        extra_cf_builder.build(),
+    ]);
+    shard.set_data(builder.build());
     shard.refresh_states();
 
     // size per entry: key 9, value 18
@@ -1448,24 +1379,10 @@ fn test_columnar_l0_compaction(#[case] enable_inner_key_off: bool) {
     col_levels.add_file(0, ColumnarFile::open(l0_tbl_2).unwrap());
     col_levels.add_file(1, ColumnarFile::open(l1_tbl_0).unwrap());
 
-    let data = ShardData::new(
-        shard.range.clone(),
-        vec![CfTable::new()],
-        vec![],
-        Arc::new(HashMap::default()),
-        [
-            ShardCf::new(WRITE_CF),
-            ShardCf::new(LOCK_CF),
-            ShardCf::new(EXTRA_CF),
-        ],
-        HashMap::new(),
-        vec![],
-        RegionLimiter::dummy(),
-        shard.get_data().update_counter + 1,
-        Some(schema_file),
-        col_levels,
-    );
-    shard.set_data(data);
+    let mut builder = ShardDataBuilder::new(shard.get_data());
+    builder.set_schema_file(Some(schema_file));
+    builder.set_columnar_levels(col_levels);
+    shard.set_data(builder.build());
     shard.initial_flushed.store(true, Ordering::SeqCst);
     let id_ver = shard.id_ver();
     *shard.compaction_priority.write().unwrap() =
@@ -1578,24 +1495,10 @@ fn test_columnar_l1_compaction(#[case] enable_inner_key_off: bool) {
     col_levels.add_file(2, ColumnarFile::open(l2_tbl_0).unwrap());
     col_levels.add_file(2, ColumnarFile::open(l2_tbl_1).unwrap());
 
-    let data = ShardData::new(
-        shard.range.clone(),
-        vec![CfTable::new()],
-        vec![],
-        Arc::new(HashMap::default()),
-        [
-            ShardCf::new(WRITE_CF),
-            ShardCf::new(LOCK_CF),
-            ShardCf::new(EXTRA_CF),
-        ],
-        HashMap::new(),
-        vec![],
-        RegionLimiter::dummy(),
-        shard.get_data().update_counter + 1,
-        Some(schema_file),
-        col_levels,
-    );
-    shard.set_data(data);
+    let mut builder = ShardDataBuilder::new(shard.get_data());
+    builder.set_schema_file(Some(schema_file));
+    builder.set_columnar_levels(col_levels);
+    shard.set_data(builder.build());
     shard.initial_flushed.store(true, Ordering::SeqCst);
     let id_ver = shard.id_ver();
     *shard.compaction_priority.write().unwrap() =
@@ -1722,20 +1625,10 @@ fn test_columnar_major_compaction(#[case] enable_inner_key_off: bool) {
     write_cf.set_level(level_handler_1);
     write_cf.set_level(level_handler_2);
 
-    let data = ShardData::new(
-        shard.range.clone(),
-        vec![CfTable::new()],
-        vec![],
-        Arc::new(HashMap::default()),
-        [write_cf, ShardCf::new(LOCK_CF), ShardCf::new(EXTRA_CF)],
-        HashMap::new(),
-        vec![],
-        RegionLimiter::dummy(),
-        shard.get_data().update_counter + 1,
-        Some(schema_file),
-        ColumnarLevels::new(),
-    );
-    shard.set_data(data);
+    let mut builder = ShardDataBuilder::new(shard.get_data());
+    builder.set_cfs([write_cf, ShardCf::new(LOCK_CF), ShardCf::new(EXTRA_CF)]);
+    builder.set_schema_file(Some(schema_file));
+    shard.set_data(builder.build());
     shard.initial_flushed.store(true, Ordering::SeqCst);
     let id_ver = shard.id_ver();
     *shard.compaction_priority.write().unwrap() =
@@ -1801,20 +1694,7 @@ fn test_columnar_major_compaction(#[case] enable_inner_key_off: bool) {
 
     // Remove columnar compaction.
     let data = shard.get_data();
-    let new_data = ShardData::new(
-        data.range.clone(),
-        data.mem_tbls.clone(),
-        data.l0_tbls.clone(),
-        data.blob_tbl_map.clone(),
-        data.cfs.clone(),
-        data.unloaded_tbls.clone(),
-        data.lock_txn_files.clone(),
-        data.limiter.clone(),
-        data.update_counter + 1,
-        data.schema_file.clone(), // schema file will be cleared after compaction
-        data.col_levels.clone(),
-    );
-    shard.set_data(new_data);
+    shard.set_data(ShardDataBuilder::new(data).build());
     *shard.compaction_priority.write().unwrap() = Some(CompactionPriority::ColumnarClear);
     engine.trigger_compact(id_ver);
     info!("trigger remove columnar compaction {}", shard.tag());
@@ -1917,25 +1797,10 @@ fn test_columnar_destroy_range(#[case] enable_inner_key_off: bool) {
     col_levels.add_file(1, ColumnarFile::open(l1_tbl_2).unwrap());
     col_levels.add_file(2, ColumnarFile::open(l2_tbl_0).unwrap());
     col_levels.add_file(2, ColumnarFile::open(l2_tbl_1).unwrap());
-
-    let data = ShardData::new(
-        shard.range.clone(),
-        vec![CfTable::new()],
-        vec![],
-        Arc::new(HashMap::default()),
-        [
-            ShardCf::new(WRITE_CF),
-            ShardCf::new(LOCK_CF),
-            ShardCf::new(EXTRA_CF),
-        ],
-        HashMap::new(),
-        vec![],
-        RegionLimiter::dummy(),
-        shard.get_data().update_counter + 1,
-        Some(schema_file),
-        col_levels,
-    );
-    shard.set_data(data);
+    let mut builder = ShardDataBuilder::new(shard.get_data());
+    builder.set_schema_file(Some(schema_file));
+    builder.set_columnar_levels(col_levels);
+    shard.set_data(builder.build());
     let mut del_prefixes = DeletePrefixes::new_with_inner_key_off(shard.inner_key_off);
     let mut table_prefix = api_version::ApiV2::get_txn_keyspace_prefix(keyspace_id);
     table_prefix.extend_from_slice(b"t");
@@ -2042,25 +1907,10 @@ fn test_columnar_truncate_ts(#[case] enable_inner_key_off: bool) {
     col_levels.add_file(1, ColumnarFile::open(l1_tbl_2).unwrap());
     col_levels.add_file(2, ColumnarFile::open(l2_tbl_0).unwrap());
     col_levels.add_file(2, ColumnarFile::open(l2_tbl_1).unwrap());
-
-    let data = ShardData::new(
-        shard.range.clone(),
-        vec![CfTable::new()],
-        vec![],
-        Arc::new(HashMap::default()),
-        [
-            ShardCf::new(WRITE_CF),
-            ShardCf::new(LOCK_CF),
-            ShardCf::new(EXTRA_CF),
-        ],
-        HashMap::new(),
-        vec![],
-        RegionLimiter::dummy(),
-        shard.get_data().update_counter + 1,
-        Some(schema_file),
-        col_levels,
-    );
-    shard.set_data(data);
+    let mut builder = ShardDataBuilder::new(shard.get_data());
+    builder.set_schema_file(Some(schema_file));
+    builder.set_columnar_levels(col_levels);
+    shard.set_data(builder.build());
     shard.initial_flushed.store(true, Ordering::SeqCst);
     let id_ver = shard.id_ver();
     shard.pending_ops.write().unwrap().truncate_ts = Some(TruncateTs::from(200));
@@ -2173,24 +2023,10 @@ fn test_columnar_trim_over_bound(#[case] enable_inner_key_off: bool) {
     col_levels.add_file(2, ColumnarFile::open(l2_tbl_0).unwrap());
     col_levels.add_file(2, ColumnarFile::open(l2_tbl_1).unwrap());
 
-    let data = ShardData::new(
-        shard.range.clone(),
-        vec![CfTable::new()],
-        vec![],
-        Arc::new(HashMap::default()),
-        [
-            ShardCf::new(WRITE_CF),
-            ShardCf::new(LOCK_CF),
-            ShardCf::new(EXTRA_CF),
-        ],
-        HashMap::new(),
-        vec![],
-        RegionLimiter::dummy(),
-        shard.get_data().update_counter + 1,
-        Some(schema_file),
-        col_levels,
-    );
-    shard.set_data(data);
+    let mut builder = ShardDataBuilder::new(shard.get_data());
+    builder.set_schema_file(Some(schema_file));
+    builder.set_columnar_levels(col_levels);
+    shard.set_data(builder.build());
     // Split shard by handle key 800
     let split_key = [keyspace_prefix(keyspace_id), encode_row_key(table_id, 800)].concat();
     let mut splitter = Splitter::new(vec![split_key], IdVer::new(4, 4), 5, apply_tx);

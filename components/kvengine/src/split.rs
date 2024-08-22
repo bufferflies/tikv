@@ -20,7 +20,7 @@ use dashmap::mapref::entry::Entry;
 use kvenginepb as pb;
 use slog_global::info;
 
-use crate::{limiter::RegionLimiter, table::TableExt, *};
+use crate::{table::TableExt, *};
 
 #[derive(Debug)]
 pub struct CheckMergeResult {
@@ -160,20 +160,15 @@ impl Engine {
                     }
                 }
             }
-            let new_data = ShardData::new(
-                new_shard.range.clone(),
-                new_mem_tbls,
-                new_l0s,
-                Arc::new(new_blob_tbl_map),
-                new_cfs,
-                old_data.unloaded_tbls.clone(),
-                vec![],
-                RegionLimiter::new_from(&old_data.limiter),
-                NEW_DATA_UPDATE_COUNTER,
-                schema_file,
-                new_col_levels,
-            );
-            new_shard.set_data(new_data);
+            let mut builder = ShardDataBuilder::new(new_shard.get_data());
+            builder.set_mem_tbls(new_mem_tbls);
+            builder.set_l0_tbls(new_l0s);
+            builder.set_blob_tbls(new_blob_tbl_map);
+            builder.set_cfs(new_cfs);
+            builder.set_unloaded_tbls(old_data.unloaded_tbls.clone());
+            builder.set_schema_file(schema_file);
+            builder.set_columnar_levels(new_col_levels);
+            new_shard.set_data(builder.build());
         }
         for shard in new_shards.drain(..) {
             self.refresh_shard_states(&shard);
@@ -445,19 +440,16 @@ impl Engine {
                 columnar_levels.add_file(columnar_create.level as usize, col);
             }
             columnar_levels.sort();
-            ShardData::new(
-                new_shard.range.clone(),
-                mem_tbls,
-                l0_tbls,
-                Arc::new(blob_tbl_map),
-                new_cfs,
-                unloaded_tbls,
-                lock_txn_files,
-                old_data.limiter.clone(),
-                old_data.update_counter + 1,
-                old_data.schema_file.clone(),
-                columnar_levels,
-            )
+            let mut builder = ShardDataBuilder::new(old_data);
+            builder.set_range(new_shard.range.clone());
+            builder.set_mem_tbls(mem_tbls);
+            builder.set_l0_tbls(l0_tbls);
+            builder.set_blob_tbls(blob_tbl_map);
+            builder.set_cfs(new_cfs);
+            builder.set_unloaded_tbls(unloaded_tbls);
+            builder.set_lock_txn_files(lock_txn_files);
+            builder.set_columnar_levels(columnar_levels);
+            builder.build()
         } else {
             info!(
                 "{} clear data of source shard on merge, source start: {}, end: {}",
@@ -467,19 +459,9 @@ impl Engine {
             );
 
             let old_data = old_shard.get_data();
-            ShardData::new(
-                new_shard.range.clone(),
-                old_data.mem_tbls.clone(),
-                old_data.l0_tbls.clone(),
-                old_data.blob_tbl_map.clone(),
-                old_data.cfs.clone(),
-                old_data.unloaded_tbls.clone(),
-                old_data.lock_txn_files.clone(),
-                old_data.limiter.clone(),
-                old_data.update_counter + 1,
-                old_data.schema_file.clone(),
-                old_data.col_levels.clone(),
-            )
+            let mut builder = ShardDataBuilder::new(old_data);
+            builder.set_range(new_shard.range.clone());
+            builder.build()
         };
         new_shard.set_data(data);
         debug_assert_eq!(new_shard.range, new_shard.get_data().range);

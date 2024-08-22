@@ -31,7 +31,7 @@ use txn_chunk_manager::with_pool_size;
 use crate::{
     apply::ChangeSet,
     config::PerKeyspaceConfig,
-    limiter::{RegionLimiter, StoreLimiter},
+    limiter::StoreLimiter,
     meta::ShardMeta,
     table::{
         columnar::SchemaFile,
@@ -393,8 +393,8 @@ impl EngineCore {
             shard.load_mem_table_version(),
             &cs,
         );
-        let (l0s, blob_tbls, scfs, lock_txn_files, col_lvls) =
-            create_snapshot_tables(cs.get_snapshot(), &cs, self.opts.for_restore);
+        let mut builder = ShardDataBuilder::new(shard.get_data());
+        create_snapshot_tables(&mut builder, cs.get_snapshot(), &cs, self.opts.for_restore);
         let schema_file = cs.get_snapshot().has_schema_meta().then(|| {
             let schema_file_id = cs.get_snapshot().get_schema_meta().get_file_id();
             let runtime = self.fs.get_runtime();
@@ -402,20 +402,9 @@ impl EngineCore {
                 .block_on(self.load_schema_file(schema_file_id))
                 .unwrap()
         });
-        let data = ShardData::new(
-            shard.range.clone(),
-            vec![CfTable::new()],
-            l0s,
-            Arc::new(blob_tbls),
-            scfs,
-            cs.unloaded_tables,
-            lock_txn_files,
-            RegionLimiter::new((&shard.opt.flow_control).into()),
-            NEW_DATA_UPDATE_COUNTER,
-            schema_file,
-            col_lvls,
-        );
-        shard.set_data(data);
+        builder.set_schema_file(schema_file);
+        builder.set_unloaded_tbls(cs.unloaded_tables);
+        shard.set_data(builder.build());
         shard
     }
 
