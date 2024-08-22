@@ -110,7 +110,7 @@ impl SnapAccess {
         master_key: &MasterKey,
         block_cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
         txn_chunk_manager: TxnChunkManager,
-    ) -> Self {
+    ) -> Result<Self> {
         let core = Arc::new(
             SnapAccessCore::from_change_set(
                 tag,
@@ -122,9 +122,9 @@ impl SnapAccess {
                 block_cache,
                 txn_chunk_manager,
             )
-            .await,
+            .await?,
         );
-        Self { core }
+        Ok(Self { core })
     }
 
     async fn from_change_set_and_memtable_data(
@@ -135,7 +135,7 @@ impl SnapAccess {
         master_key: &MasterKey,
         block_cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
         txn_chunk_manager: TxnChunkManager,
-    ) -> Self {
+    ) -> Result<Self> {
         let core = Arc::new(
             SnapAccessCore::from_change_set(
                 tag,
@@ -147,9 +147,9 @@ impl SnapAccess {
                 block_cache,
                 txn_chunk_manager,
             )
-            .await,
+            .await?,
         );
-        Self { core }
+        Ok(Self { core })
     }
 
     pub async fn construct_snapshot<'a>(
@@ -184,7 +184,7 @@ impl SnapAccess {
             encryption_key,
         )
         .await?;
-        Ok(Self::from_change_set_and_memtable_data(
+        Self::from_change_set_and_memtable_data(
             tag,
             dfs,
             change_set,
@@ -193,7 +193,7 @@ impl SnapAccess {
             block_cache,
             txn_chunk_manager,
         )
-        .await)
+        .await
     }
 
     async fn construct_memtables(
@@ -360,7 +360,7 @@ impl SnapAccessCore {
         master_key: &MasterKey,
         block_cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
         txn_chunk_manager: TxnChunkManager,
-    ) -> Self {
+    ) -> Result<Self> {
         let shard = Shard::from_change_set(
             tag,
             dfs,
@@ -371,8 +371,8 @@ impl SnapAccessCore {
             block_cache,
             txn_chunk_manager,
         )
-        .await;
-        Self::new(&shard)
+        .await?;
+        Ok(Self::new(&shard))
     }
 
     pub fn new_iterator_skip_blob(

@@ -535,15 +535,17 @@ impl BackupReader {
         }
         let runtime = self.s3fs.get_runtime();
         let tag = format!("backup_reader_{}", meta.tag());
-        let snap = runtime.block_on(SnapAccess::from_change_set(
-            tag,
-            self.s3fs.clone(),
-            meta.to_change_set(),
-            false,
-            &self.master_key,
-            None,
-            self.txn_chunk_manager.clone(),
-        ));
+        let snap = runtime
+            .block_on(SnapAccess::from_change_set(
+                tag,
+                self.s3fs.clone(),
+                meta.to_change_set(),
+                false,
+                &self.master_key,
+                None,
+                self.txn_chunk_manager.clone(),
+            ))
+            .unwrap();
         let mut guard = self.snap_cache.lock().unwrap();
         *guard = Some(snap.clone());
         snap

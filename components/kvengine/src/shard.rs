@@ -20,7 +20,7 @@ use kvenginepb::{self as pb, TxnFileRef};
 use moka::sync::SegmentedCache;
 use rand::Rng;
 use slog_global::*;
-use tikv_util::codec::number::U64_SIZE;
+use tikv_util::{box_err, box_try, codec::number::U64_SIZE};
 
 use crate::{
     limiter::RegionLimiter,
@@ -280,11 +280,11 @@ impl Shard {
         ignore_lock: bool,
         master_key: &MasterKey,
         block_cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
-        _txn_chunk_manager: TxnChunkManager,
-    ) -> Self {
+        txn_chunk_manager: TxnChunkManager,
+    ) -> Result<Self> {
         let mut cs = ChangeSet::new(change_set);
         let mut ids = HashMap::new();
-        let mut _txn_file_refs: Vec<TxnFileRef> = vec![];
+        let mut lock_txn_file_refs: Vec<TxnFileRef> = vec![];
         if mem_tbls.is_empty() {
             mem_tbls.push(CfTable::new());
         }
@@ -302,12 +302,14 @@ impl Shard {
             for columnar in snap.get_columnar_creates() {
                 ids.insert(columnar.id, FileMeta::from_table(columnar));
             }
-            // TODO: load lock_txn_files
-            // if !ignore_lock {
-            //     _txn_file_refs = collect_snap_lock_txn_file_refs(snap);
-            // }
-            get_shard_property(ENCRYPTION_KEY, snap.get_properties())
-                .map(|v| master_key.decrypt_encryption_key(&v).unwrap())
+            if !ignore_lock {
+                lock_txn_file_refs = collect_snap_lock_txn_file_refs(snap);
+            }
+            box_try!(
+                get_shard_property(ENCRYPTION_KEY, snap.get_properties())
+                    .map(|v| master_key.decrypt_encryption_key(&v))
+                    .transpose()
+            )
         } else {
             None
         };
@@ -318,7 +320,7 @@ impl Shard {
         for (&id, fm) in &ids {
             let tx = result_tx.clone();
             if id == 0 {
-                tx.send(Ok((0, FileMeta::default(), None))).unwrap();
+                box_try!(tx.send(Ok((0, FileMeta::default(), None))));
             } else {
                 let fs = dfs.clone();
                 let tx = result_tx.clone();
@@ -343,30 +345,28 @@ impl Shard {
                     assert!(id != 0);
                     let file = InMemFile::new(id, data);
                     if fm.is_columnar_file() {
-                        let columnar_file = ColumnarFile::open(Arc::new(file)).unwrap();
+                        let columnar_file = box_try!(ColumnarFile::open(Arc::new(file)));
                         cs.col_files.insert(id, columnar_file);
                     } else if fm.is_blob_file() {
-                        let blob_table = BlobTable::new(Arc::new(file)).unwrap();
+                        let blob_table = box_try!(BlobTable::new(Arc::new(file)));
                         cs.blob_tables.insert(id, blob_table);
                     } else if fm.get_level() == 0 {
-                        let l0_table = L0Table::new(
+                        let l0_table = box_try!(L0Table::new(
                             Arc::new(file),
                             block_cache.clone(),
                             ignore_lock,
                             encryption_key.clone(),
-                        )
-                        .unwrap();
+                        ));
                         if let Some(l0_table) = l0_table {
                             cs.l0_tables.insert(id, l0_table);
                         }
                     } else {
-                        let ln_table = SsTable::new(
+                        let ln_table = box_try!(SsTable::new(
                             Arc::new(file),
                             block_cache.clone(),
                             fm.get_level() == 1,
                             encryption_key.clone(),
-                        )
-                        .unwrap();
+                        ));
                         cs.ln_tables.insert(id, ln_table);
                     }
                 }
@@ -377,10 +377,28 @@ impl Shard {
             }
         }
         if !errors.is_empty() {
-            panic!("errors is not empty: {:?}", errors);
+            return Err(box_err!("errors is not empty: {:?}", errors));
         }
 
-        // TODO: load lock_txn_files
+        // Load lock_txn_files:
+        if !lock_txn_file_refs.is_empty() {
+            let worker_pool = txn_chunk_manager.worker_pool().clone();
+            let shard_id = cs.shard_id;
+            let shard_ver = cs.shard_ver;
+            cs.lock_txn_files = box_try!(
+                worker_pool
+                    .spawn_blocking(move || {
+                        txn_chunk_manager.load_txn_files_from_refs(
+                            shard_id,
+                            shard_ver,
+                            &lock_txn_file_refs,
+                            encryption_key,
+                        )
+                    })
+                    .await
+                    .unwrap()
+            );
+        }
 
         let mut shard = Shard::new_for_ingest(0, &cs, Arc::new(Options::default()), master_key);
         let mut builder = ShardDataBuilder::new(shard.get_data());
@@ -389,7 +407,7 @@ impl Shard {
         builder.set_schema_file(cs.schema_file.clone());
         shard.id = cs.shard_id;
         shard.set_data(builder.build());
-        shard
+        Ok(shard)
     }
 
     pub fn get_cf_total_size(&self, cf: usize) -> u64 {
