@@ -348,9 +348,7 @@ impl EngineCore {
         });
         builder.set_mem_tbls(mem_tbls);
         let new_data = builder.build();
-        info!("{} apply_initial_flush", shard.tag();
-            "seq" => cs.sequence,
-            "lock_txn_files" => ?new_data.lock_txn_files);
+        info!("{} apply_initial_flush", shard.tag(); "seq" => cs.sequence);
         shard.set_data(new_data);
         shard.clear_finished_txn_file_refs(max_flushed_mem_tbl_version);
 

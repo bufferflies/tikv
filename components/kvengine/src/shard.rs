@@ -1124,7 +1124,7 @@ impl Shard {
             let mut prop = TxnFileRefPropertyHelper::from_property(Some(val)).unwrap();
             prop.clear_finished(version);
             self.set_property(TXN_FILE_REF, &prop.marshall());
-            info!("{} clear finished txn file ref", self.tag(); "prop" => ?prop, "version" => version);
+            debug!("{} clear finished txn file ref", self.tag(); "prop" => ?prop, "version" => version);
         }
     }
 

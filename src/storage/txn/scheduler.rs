@@ -1831,6 +1831,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
                                 return;
                             }
                         };
+                        txn_file_cmd.incr_cmd_metric();
                         sched.schedule_command(Some(cid), txn_file_cmd, callback, prepared_latches);
                     }
                     Err(err) => {

@@ -545,8 +545,7 @@ impl ShardMeta {
         info!("{} apply_initial_flush", self.tag();
             "prop" => ?new_meta.properties,
             "data_seq" => new_meta.data_sequence,
-            "max_ts" => new_meta.max_ts,
-            "txn_file_locks" => ?new_meta.txn_file_locks);
+            "max_ts" => new_meta.max_ts);
         *self = new_meta;
     }
 

@@ -677,7 +677,7 @@ pub(crate) fn change_set_table_version(cs: &kvenginepb::ChangeSet) -> u64 {
 pub(crate) fn clear_finished_txn_files(tag: &ShardTag, v: Vec<u8>, version: u64) -> Vec<u8> {
     let mut prop = TxnFileRefPropertyHelper::from_property(Some(Bytes::from(v))).unwrap();
     prop.clear_finished(version);
-    info!("{} flush mem-table: clear finished txn files", tag; "prop" => ?prop, "version" => version);
+    debug!("{} flush mem-table: clear finished txn files", tag; "prop" => ?prop, "version" => version);
     prop.marshall()
 }
 
