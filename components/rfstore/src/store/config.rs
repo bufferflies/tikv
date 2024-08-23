@@ -234,6 +234,8 @@ impl Config {
                 cfg.local_file_gc_tick_interval.0 = cfg.raft_base_tick_interval.0 * 60 * 10;
             }
         }
+
+        cfg.capacity = old.capacity;
         cfg
     }
 }
