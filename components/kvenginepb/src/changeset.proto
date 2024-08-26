@@ -40,6 +40,7 @@ message ChangeSet {
   MajorCompaction major_compaction = 22;
   SchemaMeta update_schema_meta = 23;
   ColumnarCompaction columnar_compaction = 24;
+  UpdateVectorIndex update_vector_index = 25;
 }
 
 message Compaction {
@@ -71,6 +72,13 @@ message ColumnarCompaction {
   repeated uint64 row_l0s = 3;
 }
 
+message UpdateVectorIndex {
+  int64 table_id = 1;
+  int64 index_id = 2;
+  repeated VectorIndexFile added = 3;
+  repeated uint64 removed = 4;
+}
+
 message Flush {
   L0Create l0Create = 1;
   Properties properties = 2;
@@ -95,6 +103,7 @@ message Snapshot {
   SchemaMeta schema_meta = 13;
   uint64 columnar_snap_version = 14;
   repeated uint64 unconverted_l0s = 15;
+  repeated VectorIndex vector_indexes = 16;
 }
 
 message L0Create {
@@ -171,4 +180,36 @@ message TxnFileRef {
   bytes inner_lower_bound = 7;
   // Upper bound (exclusive) without keyspace prefix.
   bytes inner_upper_bound = 8;
+}
+
+message Schema {
+  int64 table_id = 1;
+  // serialized tipb::ColumnInfo.
+  repeated bytes columns = 2;
+  repeated int64 pk_col_ids = 3;
+  repeated VectorIndexDef vector_indexes = 4;
+}
+
+message VectorIndex {
+  int64 table_id = 1;
+  int64 index_id = 2;
+  repeated VectorIndexFile files = 3;
+}
+
+message VectorIndexFile {
+  uint64 id = 1;
+  uint64 snap_version = 2;
+
+  // Lower bound without keyspace prefix.
+  bytes inner_lower_bound = 3;
+  // Upper bound (exclusive) without keyspace prefix.
+  bytes inner_upper_bound = 4;
+}
+
+message VectorIndexDef {
+  int64 index_id = 1;
+  int64 col_id = 2;
+  string index_kind = 3;
+  repeated string spec_keys = 4;
+  repeated bytes spec_values = 5;
 }
