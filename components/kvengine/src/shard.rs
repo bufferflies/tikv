@@ -1651,6 +1651,13 @@ impl ShardCf {
         let level_idx = level_handler.level - 1;
         self.levels[level_idx] = level_handler
     }
+
+    pub(crate) fn size(&self) -> u64 {
+        self.levels
+            .iter()
+            .map(|lh| lh.tables.iter().map(|tbl| tbl.size()).sum::<u64>())
+            .sum()
+    }
 }
 
 #[derive(Default, Clone)]

@@ -33,7 +33,8 @@ use crate::{
         },
         memtable::{CfTable, Hint, SkipList, WriteBatch},
         sstable::BlockCacheKey,
-        table, InnerKey, SkipOpTxnFileIterator, TableExt, TxnFile, TxnFileIterator,
+        table, InnerKey, Iterator as TableIterator, SkipOpTxnFileIterator, TableExt, TxnFile,
+        TxnFileIterator,
     },
     txn_chunk_manager::TxnChunkManager,
     *,
@@ -509,7 +510,7 @@ impl SnapAccessCore {
             version,
             &mut item.path,
             item.owned_val.as_mut().unwrap(),
-            false,
+            &self.data.lock_txn_files,
         );
         if item.val.is_blob_ref() {
             item.owned_blob = Some(self.fetch_blob(inner_key, &item.val));
@@ -528,7 +529,7 @@ impl SnapAccessCore {
             u64::MAX,
             &mut item.path,
             item.owned_val.as_mut().unwrap(),
-            true,
+            &[],
         );
         item
     }
@@ -540,10 +541,10 @@ impl SnapAccessCore {
         version: u64,
         path: &mut AccessPath,
         out_val_owner: &mut Vec<u8>,
-        ignore_txn_file: bool,
+        with_lock_txn_files: &[TxnFile],
     ) -> table::Value {
-        if cf == LOCK_CF && !ignore_txn_file {
-            for txn_file in &self.data.lock_txn_files {
+        if cf == LOCK_CF {
+            for txn_file in with_lock_txn_files {
                 if txn_file.version() > version {
                     continue;
                 }
@@ -1137,6 +1138,35 @@ impl SnapAccessCore {
 
     pub fn get_txn_file_conflict_lock(&self, txn_file: &TxnFile) -> Option<(Vec<u8>, Lock)> {
         if txn_file.is_empty() {
+            return None;
+        }
+        if txn_file.size() < self.data.get_cf(LOCK_CF).size() as usize {
+            // It is more efficient to iterate the txn file when it is small.
+            let mut other_lock_txn_files = self.data.lock_txn_files.clone();
+            other_lock_txn_files.retain(|f| f.start_ts() != txn_file.start_ts());
+            let mut txn_file_iter = TxnFileIterator::new(txn_file.clone(), false);
+            txn_file_iter.rewind();
+            while txn_file_iter.valid() {
+                let mut val = vec![];
+                let txn_file_key = txn_file_iter.key();
+                let version = self.get_mem_table_version();
+                let lock_val = self.get_value(
+                    LOCK_CF,
+                    txn_file_key,
+                    version,
+                    &mut AccessPath::default(),
+                    &mut val,
+                    &other_lock_txn_files,
+                );
+                if lock_val.is_valid() && !lock_val.is_deleted() {
+                    let conflict_lock = Lock::parse(lock_val.get_value()).unwrap();
+                    // Return outer key.
+                    let mut key = self.data.prefix().to_vec();
+                    key.extend_from_slice(txn_file_key.deref());
+                    return Some((key, conflict_lock));
+                }
+                txn_file_iter.next();
+            }
             return None;
         }
         let mut lock_iter =
