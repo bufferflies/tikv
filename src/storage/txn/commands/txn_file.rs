@@ -546,6 +546,15 @@ impl TxnFileCommand {
                 txn_status: TxnStatus::committed(commit_ts),
             });
         } else if let Some(keys) = keys.as_ref() {
+            if keys.is_empty() {
+                // There is no way to check committed when there is no key in commit request.
+                // So we just return committed.
+                info!("process_commit: no keys in txn file commit request"; "start_ts" => self.ts(), "commit_ts" => commit_ts);
+                return Ok(ProcessResult::TxnStatus {
+                    txn_status: TxnStatus::committed(commit_ts),
+                });
+            }
+
             if let Some(_new_commit_ts) = self.check_txn_commit_record_by_keys(
                 keys.as_slice(),
                 start_ts,

@@ -2220,7 +2220,9 @@ pub enum TxnMutations {
         muts: Vec<Mutation>,
     },
     Chunks {
+        primary: Bytes,
         chunks: Vec<TxnFileChunk>,
+        sample_keys: Option<Vec<Bytes>>, // Filled by `group_by_regions`.
         helper: Arc<TxnFileHelper>,
     },
 }
@@ -2240,9 +2242,15 @@ impl TxnMutations {
         match write_method {
             TxnWriteMethod::Normal => Ok(TxnMutations::Muts { muts }),
             TxnWriteMethod::FileBased => {
+                let primary = muts.first().unwrap().key.clone();
                 let helper = txn_file_helper.unwrap();
                 let chunks = helper.build_txn_chunks(muts).await?;
-                Ok(TxnMutations::Chunks { chunks, helper })
+                Ok(TxnMutations::Chunks {
+                    primary,
+                    chunks,
+                    sample_keys: None,
+                    helper,
+                })
             }
         }
     }
@@ -2254,7 +2262,7 @@ impl TxnMutations {
     pub fn primary(&self) -> Bytes {
         match self {
             Self::Muts { muts } => muts.first().unwrap().key.clone(),
-            Self::Chunks { chunks, .. } => chunks.first().unwrap().outer_smallest().clone(),
+            Self::Chunks { primary, .. } => primary.clone(),
         }
     }
 
@@ -2290,20 +2298,27 @@ impl TxnMutations {
                     .map(|(r, muts)| (r, TxnMutations::Muts { muts }))
                     .collect()
             }
-            Self::Chunks { chunks, helper } => {
+            Self::Chunks {
+                primary,
+                chunks,
+                helper,
+                ..
+            } => {
                 let chunks = match primary_filter {
                     PrimaryFilter::All => Cow::from(chunks),
                     PrimaryFilter::PrimaryOnly => Cow::from(vec![chunks[0].clone()]),
                     PrimaryFilter::Secondaries => Cow::from(chunks),
                 };
 
-                let region_muts = Self::group_txn_chunks_by_regions(&chunks, client)
+                let region_muts = Self::group_txn_chunks_by_regions(primary, &chunks, client)
                     .into_iter()
-                    .map(|(r, chunks)| {
+                    .map(|(r, chunks, sample_keys)| {
                         (
                             r.id_ver(),
                             TxnMutations::Chunks {
+                                primary: primary.clone(),
                                 chunks,
+                                sample_keys: Some(sample_keys),
                                 helper: helper.clone(),
                             },
                         )
@@ -2318,18 +2333,21 @@ impl TxnMutations {
     }
 
     fn group_txn_chunks_by_regions(
+        primary: &Bytes,
         chunks: &[TxnFileChunk],
         client: &mut ClusterClient,
-    ) -> Vec<(RawRegion, Vec<TxnFileChunk>)> {
+    ) -> Vec<(RawRegion, Vec<TxnFileChunk>, Vec<Bytes>)> {
         let mut region_chunks = HashMap::new();
         for chunk in chunks {
-            let regions = Self::get_txn_chunks_regions(chunk, client);
-            for region in regions {
-                region_chunks
+            let regions = Self::get_txn_chunks_regions(primary, chunk, client);
+            for (region, sample_key) in regions {
+                let (_, chunks, sample_keys) = region_chunks
                     .entry(region.id_ver())
-                    .or_insert_with(|| (region, vec![]))
-                    .1
-                    .push(chunk.clone());
+                    .or_insert_with(|| (region, vec![], vec![]));
+                chunks.push(chunk.clone());
+                if let Some(sample_key) = sample_key {
+                    sample_keys.push(sample_key);
+                }
             }
         }
         let mut region_chunks = region_chunks.into_values().collect::<Vec<_>>();
@@ -2347,15 +2365,21 @@ impl TxnMutations {
         region_chunks
     }
 
-    fn get_txn_chunks_regions(chunk: &TxnFileChunk, client: &mut ClusterClient) -> Vec<RawRegion> {
+    fn get_txn_chunks_regions(
+        primary: &Bytes,
+        chunk: &TxnFileChunk,
+        client: &mut ClusterClient,
+    ) -> Vec<(RawRegion, Option<Bytes>)> {
         let mut regions = vec![];
         let mut start_key = chunk.outer_smallest().to_vec();
         while start_key.as_slice() <= chunk.outer_biggest().as_bytes() {
             let region = client.get_region_by_key(&start_key);
             start_key.clear();
             start_key.extend_from_slice(region.end_key());
-            if chunk.has_data_in_range(region.start_key(), region.end_key()) {
-                regions.push(region);
+            let (first_data_key, ok) =
+                chunk.has_data_in_range(primary, region.start_key(), region.end_key());
+            if ok {
+                regions.push((region, first_data_key));
             }
         }
         regions
@@ -2383,10 +2407,12 @@ impl TxnMutations {
                 let keys = muts.iter().map(|m| m.key.to_vec()).collect::<Vec<_>>();
                 req.set_keys(keys.into());
             }
-            Self::Chunks { chunks, .. } => {
-                let keys = chunks
+            Self::Chunks { sample_keys, .. } => {
+                let keys = sample_keys
+                    .as_ref()
+                    .unwrap()
                     .iter()
-                    .map(|c| c.outer_smallest().to_vec())
+                    .map(|x| x.to_vec())
                     .collect::<Vec<_>>();
                 req.set_keys(keys.into());
                 req.set_is_txn_file(true);
@@ -2400,10 +2426,12 @@ impl TxnMutations {
                 let keys = muts.iter().map(|m| m.key.to_vec()).collect::<Vec<_>>();
                 req.set_keys(keys.into());
             }
-            Self::Chunks { chunks, .. } => {
-                let keys = chunks
+            Self::Chunks { sample_keys, .. } => {
+                let keys = sample_keys
+                    .as_ref()
+                    .unwrap()
                     .iter()
-                    .map(|c| c.outer_smallest().to_vec())
+                    .map(|x| x.to_vec())
                     .collect::<Vec<_>>();
                 req.set_keys(keys.into());
                 req.set_is_txn_file(true);

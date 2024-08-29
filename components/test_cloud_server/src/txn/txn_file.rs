@@ -8,6 +8,7 @@ use bytes::{BufMut, Bytes, BytesMut};
 use cloud_worker::CreateTxnChunkResp;
 use hyper::Method;
 use kvengine::table::search;
+use kvproto::kvrpcpb;
 use log_wrappers::Value;
 use security::{RestfulClient, SecurityManager};
 
@@ -56,6 +57,7 @@ impl TxnFileHelper {
 
         let mut chunks = vec![];
         let mut keys = vec![];
+        let mut ops = vec![];
 
         for m in muts {
             let key = m.key.slice(DEFAULT_INNER_KEY_OFFSET..);
@@ -69,10 +71,12 @@ impl TxnFileHelper {
                 chunks.push(TxnFileChunk {
                     chunk_id,
                     keys: mem::take(&mut keys),
+                    ops: mem::take(&mut ops),
                 });
             }
 
             keys.push(m.key.clone());
+            ops.push(m.op);
 
             buf.put_u16_le(key.len() as u16);
             buf.put(key);
@@ -83,7 +87,11 @@ impl TxnFileHelper {
 
         if !buf.is_empty() {
             let chunk_id = self.flush_to_tikv_worker(keyspace_id, buf).await?;
-            chunks.push(TxnFileChunk { chunk_id, keys });
+            chunks.push(TxnFileChunk {
+                chunk_id,
+                keys,
+                ops,
+            });
         }
 
         Ok(chunks)
@@ -108,7 +116,9 @@ impl TxnFileHelper {
 #[derive(Clone)]
 pub struct TxnFileChunk {
     pub chunk_id: u64,
+    // `keys` of `ops` must be of the same length.
     pub keys: Vec<Bytes>,
+    pub ops: Vec<kvrpcpb::Op>,
 }
 
 impl fmt::Debug for TxnFileChunk {
@@ -130,8 +140,38 @@ impl TxnFileChunk {
         self.keys.last().unwrap()
     }
 
-    pub fn has_data_in_range(&self, start: &[u8], end: &[u8]) -> bool {
-        let pos = search(self.keys.len(), |i| self.keys[i].as_ref() >= start);
-        pos < self.keys.len() && self.keys[pos].as_ref() < end
+    pub fn has_data_in_range(
+        &self,
+        primary: &Bytes,
+        start: &[u8],
+        end: &[u8],
+    ) -> (Option<Bytes> /* first data key */, bool) {
+        let is_in_range = |pos| self.keys.get(pos).is_some_and(|k: &Bytes| k.as_ref() < end);
+        let is_primary = |pos| pos == 0 && self.keys[pos] == primary;
+        let is_op_for_write = |op| {
+            op != kvrpcpb::Op::CheckNotExists
+                && op != kvrpcpb::Op::Lock
+                && op != kvrpcpb::Op::PessimisticLock
+        };
+
+        let mut pos = search(self.keys.len(), |i| self.keys[i].as_ref() >= start);
+        if is_in_range(pos) {
+            let mut first_data_key = None;
+            loop {
+                // Always return primary as first data key if it's in range.
+                // The `op` of primary would not be for write.
+                if is_primary(pos) || is_op_for_write(self.ops[pos]) {
+                    first_data_key = Some(self.keys[pos].clone());
+                    break;
+                }
+                pos += 1;
+                if !is_in_range(pos) {
+                    break;
+                }
+            }
+            (first_data_key, true)
+        } else {
+            (None, false)
+        }
     }
 }
