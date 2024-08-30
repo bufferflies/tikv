@@ -11,6 +11,7 @@ use api_version::ApiV2;
 use http::Uri;
 use hyper::{Body, Request};
 use kvproto::{kvrpcpb::UnsafeDestroyRangeRequest, metapb::Store};
+use security::SecurityConfig;
 use test_cloud_server::client::ClusterClient;
 use tidb_query_common::util::convert_to_prefix_next;
 use tikv_util::info;
@@ -141,4 +142,11 @@ pub(crate) fn destroy_range(client: &mut ClusterClient, store_id: u64, prefix: &
     let resp = kv_client.unsafe_destroy_range(&req).unwrap();
     assert!(resp.get_error().is_empty(), "{:?}", resp.get_error());
     assert!(!resp.has_region_error());
+}
+
+pub(crate) fn new_security_config() -> SecurityConfig {
+    let mut conf = SecurityConfig::default();
+    conf.master_key.vendor = "test".to_string();
+    conf.master_key.key_id = "random".to_string();
+    conf
 }

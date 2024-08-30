@@ -868,25 +868,12 @@ impl Applier {
     }
 
     pub(crate) fn parse_cmd(&mut self, entry: &eraftpb::Entry) -> RaftCmdRequest {
-        let mut data = entry.get_data();
-        let proposal_ctx = ProposalContext::from_bytes(entry.get_context());
-        let index = entry.index;
-        let tag = self.tag();
-        if proposal_ctx.contains(ProposalContext::ENCRYPTED) {
-            let encryption_key = self.encryption_key.as_ref().unwrap();
-            let key_ver = data.get_u32();
-            self.decryption_buf.truncate(0);
-            encryption_key.decrypt(
-                data,
-                tag.id_ver.id(),
-                entry.index as u32,
-                key_ver,
-                &mut self.decryption_buf,
-            );
-            parse_data_at(&self.decryption_buf, index, tag)
-        } else {
-            parse_data_at(data, index, tag)
-        }
+        parse_raft_cmd(
+            &self.tag(),
+            entry,
+            self.encryption_key.as_ref(),
+            &mut self.decryption_buf,
+        )
     }
 
     fn handle_raft_entry_normal(
@@ -1024,7 +1011,7 @@ impl Applier {
         // ApplyResult::Yield
         // });
         let index = entry.get_index();
-        let (cmd, conf_change) = parse_conf_change_cmd(entry, self.tag());
+        let (cmd, conf_change) = parse_conf_change_cmd(entry, &self.tag());
         let (resp, result) = self.apply_raft_log(ctx, &cmd);
         self.handle_apply_result(ctx, resp, &result, true);
         match result {
@@ -2088,7 +2075,7 @@ pub(crate) fn build_split_pb(
 
 pub(crate) fn parse_conf_change_cmd(
     entry: &eraftpb::Entry,
-    tag: PeerTag,
+    tag: &PeerTag,
 ) -> (RaftCmdRequest, ConfChangeV2) {
     let (index, _) = (entry.get_index(), entry.get_term());
     let conf_change: ConfChangeV2 = match entry.get_entry_type() {

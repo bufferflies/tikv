@@ -9,6 +9,7 @@ use std::{
 };
 
 use bytes::Bytes;
+use cloud_encryption::KeyspaceEncryptionConfig;
 use cloud_worker::broadcast_schema_update_to_all_stores;
 use engine_traits::ObjectStorage;
 use kvengine::{
@@ -28,7 +29,7 @@ use native_br::{
     step,
 };
 use pd_client::PdClient;
-use rand::{seq::SliceRandom, Rng};
+use rand::prelude::*;
 use security::{SecurityConfig, SecurityManager};
 use test_cloud_server::{
     client::{
@@ -50,7 +51,7 @@ use tikv_util::{
 use tokio::runtime::Runtime;
 use txn_types::TimeStamp;
 
-use crate::{alloc_node_id_vec, request_major_compact_on_store};
+use crate::{alloc_node_id_vec, new_security_config, request_major_compact_on_store};
 
 const BASIC_DATA_COUNT: usize = 10;
 const RANDOM_VALUE_LEN: usize = 64;
@@ -86,6 +87,7 @@ fn test_restore_keyspace() {
         target_regions,
         enable_inner_key_off: true,
         lightweight: true,
+        ..Default::default()
     });
 }
 
@@ -105,17 +107,18 @@ fn test_restore_keyspace_regression() {
     });
 }
 
-#[test]
-fn test_restore_keyspace_with_archive() {
-    // Test archiving without `inner_key_off`.
+#[rstest::rstest]
+#[case::disable_inner_key_off(false, false)]
+#[case::enable_inner_key_off(true, false)]
+#[case::encrytion(true, true)]
+fn test_restore_keyspace_with_archive(
+    #[case] enable_inner_key_off: bool,
+    #[case] enable_encryption: bool,
+) {
+    test_util::init_log_for_test();
     test_restore_archived_keyspace_opt(TestRestoreKeyspaceOptions {
-        enable_inner_key_off: false,
-        lightweight: true,
-        ..Default::default()
-    });
-    // Test archiving with `inner_key_off`.
-    test_restore_archived_keyspace_opt(TestRestoreKeyspaceOptions {
-        enable_inner_key_off: true,
+        enable_inner_key_off,
+        enable_encryption,
         lightweight: true,
         ..Default::default()
     });
@@ -125,6 +128,7 @@ struct TestRestoreKeyspaceOptions {
     loop_count: usize,
     target_regions: usize,
     enable_inner_key_off: bool,
+    enable_encryption: bool,
     lightweight: bool,
 }
 
@@ -134,6 +138,7 @@ impl Default for TestRestoreKeyspaceOptions {
             loop_count: DEFAULT_LOOP_COUNT,
             target_regions: DEFAULT_TARGET_REGIONS,
             enable_inner_key_off: true,
+            enable_encryption: false,
             lightweight: true,
         }
     }
@@ -519,10 +524,18 @@ fn test_restore_keyspace_impl(
 }
 
 fn test_restore_archived_keyspace_opt(options: TestRestoreKeyspaceOptions) {
-    let cases = [(1, 1, 1), (1, 100, options.loop_count), (2, 1, 1)];
+    let cases = [
+        // keyspace_id, data_count, loop_count
+        (1, 1, 1),
+        (1, 100, options.loop_count),
+        (2, 1, 1),
+    ];
+    let max_data_count = cases.iter().map(|x| x.1).max().unwrap();
 
     let (_temp_dir, mut oss, dfs_config) = prepare_dfs("test_restore_keyspace_");
-    let mut cluster = ServerCluster::new(
+    let security_config = new_security_config();
+    let pd_wrapper = PdWrapper::new_test(1, &security_config, None);
+    let mut cluster = ServerCluster::new_opt(
         alloc_node_id_vec(NODES_COUNT),
         |_, conf: &mut TikvConfig| {
             conf.dfs = dfs_config.clone();
@@ -535,8 +548,11 @@ fn test_restore_archived_keyspace_opt(options: TestRestoreKeyspaceOptions) {
             conf.rfengine.lightweight_backup = options.lightweight;
             conf.rfengine.wal_chunk_target_file_size = ReadableSize::kb(32);
             conf.enable_inner_key_offset = options.enable_inner_key_off;
+            conf.security = security_config.clone();
         },
+        pd_wrapper,
     );
+    cluster.start_tikv_workers(1, 2, false);
     cluster.wait_region_replicated(&[], 3);
     let pd_client = cluster.get_pd_client();
     let mut client = cluster.new_client();
@@ -547,21 +563,30 @@ fn test_restore_archived_keyspace_opt(options: TestRestoreKeyspaceOptions) {
     ));
 
     // Split keyspaces.
-    for keyspace_id in 0..=KEYSPACE_COUNT {
-        client.split(&get_keyspace_prefix(keyspace_id as u32));
+    for keyspace_id in 0..=KEYSPACE_COUNT as u32 {
+        if options.enable_encryption {
+            let cfg = KeyspaceEncryptionConfig { enabled: true };
+            pd_client.set_keyspace_encryption(keyspace_id, cfg).unwrap();
+        }
+        client.split(&get_keyspace_prefix(keyspace_id));
     }
     cluster.wait_pd_region_count(KEYSPACE_COUNT + 2);
 
-    // Import basic data.
     for keyspace_id in 0..KEYSPACE_COUNT {
-        client.put_kv(
-            0..BASIC_DATA_COUNT,
-            gen_keyspace_key(keyspace_id as u32),
-            i_to_val(BASIC_DATA_LEN),
-        );
+        let i_to_key = gen_keyspace_key(keyspace_id as u32);
+
+        // To make secondary keys in another region.
+        if max_data_count >= 10 {
+            client.try_split(&i_to_key(max_data_count / 3), 5).unwrap();
+            client.try_split(&i_to_key(max_data_count / 2), 5).unwrap();
+        }
+
+        // Import basic data.
+        client.put_kv(0..BASIC_DATA_COUNT, &i_to_key, i_to_val(BASIC_DATA_LEN));
     }
 
     let runtime = Runtime::new().unwrap();
+    let _enter = runtime.enter();
 
     // Run cases.
     for (case_idx, &(keyspace_id, data_count, loop_count)) in cases.iter().enumerate() {
@@ -575,6 +600,7 @@ fn test_restore_archived_keyspace_opt(options: TestRestoreKeyspaceOptions) {
                 loop_idx,
                 &mut cluster,
                 &dfs_config,
+                security_config.clone(),
                 keyspace_id,
                 data_count,
                 options.lightweight,
@@ -592,17 +618,23 @@ fn test_restore_archived_keyspace_impl(
     loop_idx: usize,
     cluster: &mut ServerCluster,
     dfs_config: &DFSConfig,
+    security_config: SecurityConfig,
     keyspace_id: u32,
     data_count: usize,
     lightweight: bool,
     runtime: &Runtime,
 ) {
     step!("case: {}:{}", case_idx, loop_idx);
-    let mut client = cluster.new_client();
+    let mut rng = thread_rng();
+    let mut client = cluster.new_client_opt(ClusterClientOptions {
+        txn_file_max_chunk_size: Some(1024),
+        ..Default::default()
+    });
     let i_to_key = gen_keyspace_key(keyspace_id);
 
     let backup_config = backup::BackupConfig {
         dfs: dfs_config.clone(),
+        security: security_config.clone(),
         skip_keyspace_meta: true,
         ..Default::default()
     };
@@ -621,6 +653,7 @@ fn test_restore_archived_keyspace_impl(
         dfs: dfs_config.clone(),
         max_archive_file_size: 1024 * 32,
         dry_run: false,
+        security: security_config.clone(),
         ..Default::default()
     };
     archive_config.check_data_dir();
@@ -634,7 +667,22 @@ fn test_restore_archived_keyspace_impl(
     let mut last_ref_store = client.dump_ref_store();
     for idx in 0..BACKUP_DAYS {
         // Import data.
-        client.put_kv(0..data_count, &i_to_key, i_to_val(IMPORT_DATA_LEN + idx));
+        let commit_action = CommitAction::AsyncCommitSecondaryKeys(Duration::MAX);
+        let write_method = [TxnWriteMethod::Normal, TxnWriteMethod::FileBased]
+            .choose(&mut rng)
+            .unwrap();
+        client
+            .try_put_kv(
+                0..data_count,
+                &i_to_key,
+                i_to_val(IMPORT_DATA_LEN + idx),
+                MutateOptions {
+                    commit_action,
+                    write_method: *write_method,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         step!("write done on {}", date_time.date());
 
         client.verify_data_with_ref_store();
@@ -740,7 +788,6 @@ fn test_restore_archived_keyspace_impl(
             }
         }
         let old_file_ids = archive_reader.get_file_ids();
-        let old_file_ids_len = old_file_ids.len();
         let mut deleted_old_wal_rlog_cnt = 0;
         s3fs.get_runtime().block_on(async {
             for idx in 0..BACKUP_DAYS - 1 {
@@ -768,18 +815,33 @@ fn test_restore_archived_keyspace_impl(
                 }
             }
 
-            for file_id in old_file_ids {
-                s3fs.delete_object(s3fs.file_key(file_id, FileType::Sst), file_id.to_string())
-                    .await
-                    .unwrap();
+            for &file_id in &old_file_ids {
+                let mut errs = vec![];
+                // There is no file type in archive, so we try all types.
+                for ftype in [FileType::Sst, FileType::TxnChunk] {
+                    match s3fs
+                        .delete_object(
+                            s3fs.file_key(file_id, ftype),
+                            format!("{}.{}", file_id, ftype.suffix()),
+                        )
+                        .await
+                    {
+                        Ok(_) => {
+                            errs.clear();
+                            break;
+                        }
+                        Err(e) => errs.push(e),
+                    }
+                }
+                assert!(errs.is_empty(), "errs: {:?}", errs);
             }
         });
         let old_rlog_len = (deleted_old_wal_rlog_cnt - old_wal_chunks_len) / 2;
         step!(
-            "delete old backup meta, snap rlog {}, wal chunks {} and sst files {} done. case: {}:{}",
+            "delete old backup meta, snap rlog {}, wal chunks {} and table files {:?} done. case: {}:{}",
             old_rlog_len,
             old_wal_chunks_len,
-            old_file_ids_len,
+            old_file_ids,
             case_idx,
             loop_idx,
         );
@@ -791,13 +853,17 @@ fn test_restore_archived_keyspace_impl(
             let snapshot_backup_ts = backup_ts_list[idx];
             let snapshot_backup_name =
                 backup::IncrementalBackupFile::from_backup_ts(snapshot_backup_ts).into_name();
+            let restore_config = RestoreConfig {
+                security: security_config.clone(),
+                ..Default::default()
+            };
             restore_keyspace::restore_keyspace(
                 keyspace_id,
                 keyspace_id,
                 &snapshot_backup_name,
                 None,
                 s3fs.clone(),
-                RestoreConfig::default(),
+                restore_config,
                 cluster.get_pd_client(),
                 runtime,
                 None,

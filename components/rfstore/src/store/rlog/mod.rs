@@ -9,7 +9,7 @@ use kvproto::raft_cmdpb::{CustomRequest, RaftCmdRequest};
 use protobuf::Message;
 use tikv_util::codec::number::U64_SIZE;
 
-pub(crate) fn get_custom_log(req: &RaftCmdRequest) -> Option<CustomRaftLog<'_>> {
+pub fn get_custom_log(req: &RaftCmdRequest) -> Option<CustomRaftLog<'_>> {
     if !req.has_custom_request() {
         return None;
     }
@@ -190,7 +190,11 @@ impl<'a> CustomRaftLog<'a> {
         TrimOverBoundParameter::unmarshal(bin)
     }
 
-    pub(crate) fn get_txn_file_ref(&self) -> crate::Result<kvenginepb::TxnFileRef> {
+    pub fn is_txn_file_ref(&self) -> bool {
+        is_txn_file_ref(self.data)
+    }
+
+    pub fn get_txn_file_ref(&self) -> crate::Result<kvenginepb::TxnFileRef> {
         let mut txn_file_ref = kvenginepb::TxnFileRef::new();
         txn_file_ref.merge_from_bytes(&self.data[HEADER_SIZE..])?;
         Ok(txn_file_ref)

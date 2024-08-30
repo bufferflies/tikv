@@ -21,7 +21,7 @@ use tikv_util::{error, info, mpsc::Receiver, time::Instant, warn};
 use crate::{
     backup::{backup_file_full_path, IncrementalBackupFile},
     common::{
-        collect_store_wal_rlog_files, create_pd_client, StoreWalRlog,
+        collect_store_wal_rlog_files, create_pd_client, StoreWalRlog, TableFile,
         INCREMENTAL_BACKUP_FOLDER_FORMAT,
     },
     error::{Error, Result},
@@ -270,11 +270,11 @@ impl ArchiveConfig {
 pub struct ArchiveBackup {
     pub date: NaiveDate,
     pub meta_data: Bytes,
-    pub files: HashSet<u64>,
+    pub files: HashMap<u64, FileType>,
 }
 
 impl ArchiveBackup {
-    pub fn new(date: NaiveDate, meta_data: Bytes, files: HashSet<u64>) -> Self {
+    pub fn new(date: NaiveDate, meta_data: Bytes, files: HashMap<u64, FileType>) -> Self {
         Self {
             date,
             meta_data,
@@ -404,7 +404,7 @@ fn write_archive_packages_and_index(
     config: ArchiveConfig,
     s3fs: Arc<S3Fs>,
     archive_backup: ArchiveBackup,
-    next_day_files: &HashSet<u64>,
+    next_day_files: &HashMap<u64, FileType>,
 ) -> Result<()> {
     let deleted = get_sorted_deleted_files(&archive_backup.files, next_day_files);
     info!(
@@ -460,15 +460,23 @@ fn write_archive_packages_and_index(
         for _ in 0..msg_count {
             recv_store_wal_rlog_files(&result_rx)?;
         }
-        writer.append_sst_files(deleted)?;
+        writer.append_table_files(deleted)?;
         writer.finish();
     }
     Ok(())
 }
 
-fn get_sorted_deleted_files(old: &HashSet<u64>, new: &HashSet<u64>) -> Vec<u64> {
-    let mut deleted: Vec<u64> = old.iter().filter(|x| !new.contains(*x)).copied().collect();
-    deleted.sort();
+fn get_sorted_deleted_files(
+    old: &HashMap<u64, FileType>,
+    new: &HashMap<u64, FileType>,
+) -> Vec<TableFile> {
+    let mut deleted: Vec<_> = old
+        .iter()
+        .filter_map(|(&file_id, &ftype)| {
+            (!new.contains_key(&file_id)).then_some(TableFile { id: file_id, ftype })
+        })
+        .collect();
+    deleted.sort_by_key(|f| f.id);
     deleted
 }
 
@@ -481,7 +489,7 @@ fn get_cluster_backup_files(
     skip_shards: Option<HashSet<u64>>,
     path: PathBuf,
     security_conf: SecurityConfig,
-) -> Result<HashSet<u64>> {
+) -> Result<HashMap<u64, FileType>> {
     if cluster_backup.cluster_id != cluster_id {
         return Err(Error::ArchiveError(format!(
             "cluster id not match, pd cluster id {}, meta cluster id {}",
@@ -511,7 +519,12 @@ fn get_cluster_backup_files(
         true,
         None,
     )?;
-    let all_files = HashSet::from_iter(cluster.get_all_shard_files(skip_shards).drain(..));
+    let all_files = HashMap::from_iter(
+        cluster
+            .get_all_shard_files(skip_shards)
+            .into_iter()
+            .map(|f| (f.id, f.ftype)),
+    );
     let shards_count = cluster.shards_count();
     drop(cluster);
     info!(
@@ -769,27 +782,30 @@ pub fn get_archived_wals(
     Ok(wals)
 }
 
-pub fn get_not_found_files(s3fs: &S3Fs, file_ids: Vec<u64>) -> Result<Vec<u64>> {
-    let (result_tx, result_rx) = tikv_util::mpsc::bounded(file_ids.len());
+pub fn get_not_found_files(s3fs: &S3Fs, files: Vec<TableFile>) -> Result<Vec<TableFile>> {
+    let (result_tx, result_rx) = tikv_util::mpsc::bounded(files.len());
     let mut not_found_files = Vec::default();
-    let recv_sst_existence = |not_found_files: &mut Vec<u64>,
-                              result_tx: &Receiver<dfs::Result<(u64, bool)>>|
+    let recv_sst_existence = |not_found_files: &mut Vec<TableFile>,
+                              result_tx: &Receiver<dfs::Result<(TableFile, bool)>>|
      -> Result<()> {
-        let (file_id, exist) = result_tx.recv().unwrap()?;
+        let (f, exist) = result_tx.recv().unwrap()?;
         if !exist {
-            not_found_files.push(file_id);
+            not_found_files.push(f);
         }
         Ok(())
     };
     let mut msg_count = 0;
-    for file_id in file_ids {
+    for f in files {
         let dfs = s3fs.clone();
         let tx = result_tx.clone();
         s3fs.get_runtime().spawn(async move {
             let res = dfs
-                .exist(dfs.file_key(file_id, FileType::Sst), format!("{}", file_id))
+                .exist(
+                    dfs.file_key(f.id, f.ftype),
+                    format!("{}.{}", f.id, f.ftype.suffix()),
+                )
                 .await;
-            let _ = tx.send(res.map(|exist| (file_id, exist)));
+            let _ = tx.send(res.map(|exist| (f, exist)));
         });
         if msg_count < LOAD_FILE_CONCURRENCY {
             msg_count += 1;
@@ -959,8 +975,8 @@ pub struct ArchiveIndex {
     version: u32,
     meta_address: ObjectAddress,
     store_metas: Vec<StoreMeta>,
-    sst_file_ids: Vec<u64>,
-    sst_addresses: Vec<ObjectAddress>,
+    table_file_ids: Vec<u64>,
+    table_file_addrs: Vec<ObjectAddress>,
 }
 
 #[allow(dead_code)]
@@ -970,8 +986,8 @@ impl ArchiveIndex {
             version,
             meta_address,
             store_metas: Vec::new(),
-            sst_file_ids: Vec::new(),
-            sst_addresses: Vec::new(),
+            table_file_ids: Vec::new(),
+            table_file_addrs: Vec::new(),
         }
     }
 
@@ -979,9 +995,9 @@ impl ArchiveIndex {
         self.store_metas.push(store_meta);
     }
 
-    pub fn append_sst_meta(&mut self, file_id: u64, file_address: ObjectAddress) {
-        self.sst_file_ids.push(file_id);
-        self.sst_addresses.push(file_address);
+    pub fn append_table_file_meta(&mut self, f: TableFile, file_address: ObjectAddress) {
+        self.table_file_ids.push(f.id);
+        self.table_file_addrs.push(file_address);
     }
 
     pub fn marshal(&self, buf: &mut Vec<u8>) {
@@ -1006,13 +1022,13 @@ impl ArchiveIndex {
 
     pub fn marshal_v1(&self, buf: &mut Vec<u8>) {
         self.meta_address.marshal(buf);
-        let num_file_ids = self.sst_file_ids.len();
+        let num_file_ids = self.table_file_ids.len();
         buf.put_u32_le(num_file_ids as u32);
         for i in 0..num_file_ids {
-            buf.put_u64_le(self.sst_file_ids[i]);
+            buf.put_u64_le(self.table_file_ids[i]);
         }
         for i in 0..num_file_ids {
-            self.sst_addresses[i].marshal(buf);
+            self.table_file_addrs[i].marshal(buf);
         }
     }
 
@@ -1035,13 +1051,13 @@ impl ArchiveIndex {
         for i in 0..num_store_metas {
             length_buf.put_u32_le(lengths[i] as u32);
         }
-        let num_file_ids = self.sst_file_ids.len();
+        let num_file_ids = self.table_file_ids.len();
         buf.put_u32_le(num_file_ids as u32);
         for i in 0..num_file_ids {
-            buf.put_u64_le(self.sst_file_ids[i]);
+            buf.put_u64_le(self.table_file_ids[i]);
         }
         for i in 0..num_file_ids {
-            self.sst_addresses[i].marshal(buf);
+            self.table_file_addrs[i].marshal(buf);
         }
     }
 
@@ -1067,21 +1083,21 @@ impl ArchiveIndex {
         let meta_address = ObjectAddress::unmarshal(buf);
         buf.advance(OBJECT_ADDR_SIZE);
         let num_file_ids = buf.get_u32_le();
-        let mut sst_file_ids = Vec::new();
+        let mut table_file_ids = Vec::new();
         for _i in 0..num_file_ids {
-            sst_file_ids.push(buf.get_u64_le());
+            table_file_ids.push(buf.get_u64_le());
         }
-        let mut sst_addresses = Vec::new();
+        let mut table_file_addrs = Vec::new();
         for _i in 0..num_file_ids {
-            sst_addresses.push(ObjectAddress::unmarshal(buf));
+            table_file_addrs.push(ObjectAddress::unmarshal(buf));
             buf.advance(OBJECT_ADDR_SIZE);
         }
         Ok(Self {
             version: ARCHIVE_INDEX_FORMAT_V1,
             meta_address,
             store_metas: Vec::new(),
-            sst_file_ids,
-            sst_addresses,
+            table_file_ids,
+            table_file_addrs,
         })
     }
 
@@ -1100,21 +1116,21 @@ impl ArchiveIndex {
             buf.advance(lengths[i]);
         }
         let num_file_ids = buf.get_u32_le();
-        let mut sst_file_ids = Vec::new();
+        let mut table_file_ids = Vec::new();
         for _i in 0..num_file_ids {
-            sst_file_ids.push(buf.get_u64_le());
+            table_file_ids.push(buf.get_u64_le());
         }
-        let mut sst_addresses = Vec::new();
+        let mut table_file_addrs = Vec::new();
         for _i in 0..num_file_ids {
-            sst_addresses.push(ObjectAddress::unmarshal(buf));
+            table_file_addrs.push(ObjectAddress::unmarshal(buf));
             buf.advance(OBJECT_ADDR_SIZE);
         }
         Ok(Self {
             version: ARCHIVE_INDEX_FORMAT_V2,
             meta_address,
             store_metas,
-            sst_file_ids,
-            sst_addresses,
+            table_file_ids,
+            table_file_addrs,
         })
     }
 }
@@ -1155,13 +1171,13 @@ impl ArchiveWriter {
 
     fn append_store_wal_rlog_files(&mut self, store_wal_rlog: StoreWalRlog) {
         info!("append {}", store_wal_rlog);
-        let snap_meta_address = self.append_file(store_wal_rlog.snap_meta);
-        let snap_rlog_address = self.append_file(store_wal_rlog.snap_rlog);
+        let snap_meta_address = self.append_file_data(store_wal_rlog.snap_meta);
+        let snap_rlog_address = self.append_file_data(store_wal_rlog.snap_rlog);
         let mut wal_metas: Vec<WalMeta> = Vec::with_capacity(store_wal_rlog.wals.len());
         for (epoch_id, wal_chunks) in store_wal_rlog.wals {
             let mut wal_chunk_addresses = Vec::with_capacity(wal_chunks.len());
             for wal_chunk in wal_chunks {
-                let wal_chunk_address = self.append_file(wal_chunk);
+                let wal_chunk_address = self.append_file_data(wal_chunk);
                 wal_chunk_addresses.push(wal_chunk_address);
             }
             let wal_meta = WalMeta::new(epoch_id, wal_chunk_addresses);
@@ -1177,40 +1193,45 @@ impl ArchiveWriter {
         self.index.append_store_meta(store_meta);
     }
 
-    fn append_sst_files(&mut self, file_ids: Vec<u64>) -> Result<()> {
-        let (result_tx, result_rx) = tikv_util::mpsc::bounded(file_ids.len());
+    fn append_table_files(&mut self, files: Vec<TableFile>) -> Result<()> {
+        let (result_tx, result_rx) = tikv_util::mpsc::bounded(files.len());
         let mut msg_count = 0;
-        for file_id in file_ids {
+        for f in files {
             let s3fs = self.s3fs.clone();
             let tx = result_tx.clone();
             self.s3fs.get_runtime().spawn(async move {
-                let res = s3fs.read_file(file_id, Options::default()).await;
-                let _ = tx.send(res.map(|sst_data| (file_id, sst_data)));
+                let res = s3fs
+                    .read_file(f.id, Options::default().with_type(f.ftype))
+                    .await;
+                let _ = tx.send(res.map(|sst_data| (f, sst_data)));
             });
             if msg_count < self.concurrency {
                 msg_count += 1;
             } else {
-                self.recv_sst_data(&result_rx)?;
+                self.recv_table_file_data(&result_rx)?;
             }
         }
         for _ in 0..msg_count {
-            self.recv_sst_data(&result_rx)?;
+            self.recv_table_file_data(&result_rx)?;
         }
         Ok(())
     }
 
-    fn recv_sst_data(&mut self, result_tx: &Receiver<dfs::Result<(u64, Bytes)>>) -> Result<()> {
+    fn recv_table_file_data(
+        &mut self,
+        result_tx: &Receiver<dfs::Result<(TableFile, Bytes)>>,
+    ) -> Result<()> {
         let (file_id, sst_data) = result_tx.recv().unwrap()?;
-        self.append_sst_file(file_id, sst_data);
+        self.append_table_file(file_id, sst_data);
         Ok(())
     }
 
-    fn append_sst_file(&mut self, file_id: u64, sst_data: Bytes) {
-        let object_address = self.append_file(sst_data);
-        self.index.append_sst_meta(file_id, object_address);
+    fn append_table_file(&mut self, f: TableFile, sst_data: Bytes) {
+        let object_address = self.append_file_data(sst_data);
+        self.index.append_table_file_meta(f, object_address);
     }
 
-    fn append_file(&mut self, file_data: Bytes) -> ObjectAddress {
+    fn append_file_data(&mut self, file_data: Bytes) -> ObjectAddress {
         if self.should_rotate() {
             self.rotate();
         }
@@ -1310,11 +1331,11 @@ impl ArchiveReader {
                 store_metas = archive_index.store_metas;
             }
 
-            let num_file_ids = archive_index.sst_addresses.len();
+            let num_file_ids = archive_index.table_file_addrs.len();
             for i in 0..num_file_ids {
                 archive_addresses.insert(
-                    archive_index.sst_file_ids[i],
-                    ArchiveAddress::new(date.clone(), archive_index.sst_addresses[i]),
+                    archive_index.table_file_ids[i],
+                    ArchiveAddress::new(date.clone(), archive_index.table_file_addrs[i]),
                 );
             }
         }
@@ -1418,42 +1439,40 @@ impl ArchiveReader {
         )))
     }
 
-    pub fn restore_file(&self, file_id: u64) -> Result<()> {
-        let date = self.read_file(file_id)?;
-        return self
-            .s3fs
+    pub fn restore_file(&self, f: TableFile) -> Result<()> {
+        let date = self.read_file(f.id)?;
+        self.s3fs
             .get_runtime()
-            .block_on(self.s3fs.create(file_id, date, Options::default()))
+            .block_on(
+                self.s3fs
+                    .create(f.id, date, Options::default().with_type(f.ftype)),
+            )
             .map_err(|e| {
-                error!(
-                    "failed to restore archive file {}, err {}",
-                    file_id,
-                    e.to_string()
-                );
+                error!("failed to restore archive file {:?}, err {:?}", f, e);
                 Error::DfsError(e)
-            });
+            })
     }
 
-    pub fn restore_files(&self, file_ids: Vec<u64>) -> Result<()> {
+    pub fn restore_files(&self, files: Vec<TableFile>) -> Result<()> {
         let mut archive_addrs = Vec::default();
-        for file_id in file_ids {
-            if let Some(archive_addr) = self.get_file_archive_addr(file_id) {
-                archive_addrs.push((file_id, archive_addr));
+        for f in files {
+            if let Some(archive_addr) = self.get_file_archive_addr(f.id) {
+                archive_addrs.push((f, archive_addr));
             } else {
                 return Err(Error::ArchiveError(format!(
-                    "failed to find archive file {}",
-                    file_id,
+                    "failed to find archive file {:?}",
+                    f,
                 )));
             }
         }
-        let recv_restore_file = |result_tx: &Receiver<Result<u64>>| -> Result<()> {
-            let file_id = result_tx.recv().unwrap()?;
-            info!("restore archived sst {} done", file_id);
+        let recv_restore_file = |result_tx: &Receiver<Result<TableFile>>| -> Result<()> {
+            let f = result_tx.recv().unwrap()?;
+            info!("restore archived table file {:?} done", f);
             Ok(())
         };
         let (result_tx, result_rx) = tikv_util::mpsc::bounded(archive_addrs.len());
         let mut msg_count = 0;
-        for (file_id, archive_addr) in archive_addrs {
+        for (f, archive_addr) in archive_addrs {
             let s3fs = self.s3fs.clone();
             let tx = result_tx.clone();
             self.s3fs.get_runtime().spawn(async move {
@@ -1461,31 +1480,27 @@ impl ArchiveReader {
                     .await
                     .map_err(|e| {
                         error!(
-                            "{}, file id {}, archive addr {:?}",
-                            e.to_string(),
-                            file_id,
-                            archive_addr
+                            "get archived object failed: {:?}, file {:?}, archive addr {:?}",
+                            e, f, archive_addr
                         );
                         e
                     });
                 if res.is_err() {
-                    let _ = tx.send(res.map(|_| file_id));
+                    let _ = tx.send(res.map(|_| f));
                     return;
                 }
                 let data = res.unwrap();
                 let res = s3fs
-                    .create(file_id, data, Options::default())
+                    .create(f.id, data, Options::default().with_type(f.ftype))
                     .await
                     .map_err(|e| {
                         error!(
-                            "{}, file id {}, archive addr {:?}",
-                            e.to_string(),
-                            file_id,
-                            archive_addr
+                            "create file failed: {:?}, file {:?}, archive addr {:?}",
+                            e, f, archive_addr
                         );
                         Error::DfsError(e)
                     });
-                let _ = tx.send(res.map(|_| file_id));
+                let _ = tx.send(res.map(|_| f));
             });
             if msg_count < LOAD_FILE_CONCURRENCY {
                 msg_count += 1;
@@ -1562,12 +1577,13 @@ mod tests {
             "bkt".to_string(),
         ));
         let get_file_id = |i: u64| i;
-        let get_sst_data = |file_id: u64| Bytes::from(b"x".repeat(100 + file_id as usize).to_vec());
+        let get_file_data =
+            |file_id: u64| Bytes::from(b"x".repeat(100 + file_id as usize).to_vec());
         s3fs.get_runtime().block_on(async {
             for i in 0..NUM_FILE_IDS {
                 let file_id = get_file_id(i);
-                let opts = dfs::Options::default();
-                let sst_data = get_sst_data(file_id);
+                let opts = dfs::Options::default().with_type(get_file_type(file_id));
+                let sst_data = get_file_data(file_id);
                 s3fs.create(file_id, sst_data, opts).await.unwrap();
             }
         });
@@ -1607,25 +1623,28 @@ mod tests {
             writer.append_store_wal_rlog_files(store_wal_rlog_files)
         }
 
-        let mut file_ids = Vec::with_capacity(NUM_FILE_IDS as usize);
+        let mut files = Vec::with_capacity(NUM_FILE_IDS as usize);
         for file_id in 0..NUM_FILE_IDS {
-            file_ids.push(file_id)
+            files.push(TableFile {
+                id: file_id,
+                ftype: get_file_type(file_id),
+            });
         }
-        writer.append_sst_files(file_ids).unwrap();
+        writer.append_table_files(files).unwrap();
         writer.finish();
         let num_packages = writer.package_id;
         s3fs.get_runtime().block_on(async {
             let (objects, ..) = s3fs.list("", None, None).await.unwrap();
             assert_eq!(
                 objects.len(),
-                NUM_FILE_IDS as usize + 1 /* archive_index */+ num_packages as usize
+                NUM_FILE_IDS as usize + 1 /* archive_index */ + num_packages as usize
             );
         });
         let (archive_index, data) = get_archive_index(&s3fs, format_date.clone()).unwrap();
         assert!(!data.is_empty());
         assert_eq!(archive_index.version, ARCHIVE_INDEX_FORMAT_V2);
         assert_eq!(archive_index.store_metas.len(), NUM_STORES as usize);
-        assert_eq!(archive_index.sst_file_ids.len(), NUM_FILE_IDS as usize);
+        assert_eq!(archive_index.table_file_ids.len(), NUM_FILE_IDS as usize);
         {
             let meta_address = archive_index.meta_address;
             let archive_address = ArchiveAddress::new(format_date.clone(), meta_address);
@@ -1655,16 +1674,16 @@ mod tests {
         }
 
         for i in 0..NUM_FILE_IDS as usize {
-            let file_id = archive_index.sst_file_ids[i];
-            let address = archive_index.sst_addresses[i];
+            let file_id = archive_index.table_file_ids[i];
+            let address = archive_index.table_file_addrs[i];
             let archive_address = ArchiveAddress::new(format_date.clone(), address);
             let data = s3fs
                 .get_runtime()
                 .block_on(get_archived_object(&s3fs, archive_address))
                 .unwrap();
             assert_eq!(data.len(), address.length as usize);
-            let sst_data = get_sst_data(file_id);
-            assert!(data.eq(&sst_data));
+            let file_data = get_file_data(file_id);
+            assert!(data.eq(&file_data));
         }
 
         oss.shutdown();
@@ -1702,15 +1721,15 @@ mod tests {
         let get_wal_chunk = |j: u64| Bytes::from(b"r".repeat(j as usize + 11).to_vec());
         let get_num_file_ids = |j: u64| j + 3;
         let get_file_id = |j: u64, i: u64| j * 1000 + i + 200;
-        let get_sst_data =
+        let get_file_data =
             |file_id: u64| Bytes::from(b"x".repeat(file_id as usize % 1000).to_vec());
         for j in 0..NUM_DATES {
             let num_file_ids = get_num_file_ids(j);
             s3fs.get_runtime().block_on(async {
                 for i in 0..num_file_ids {
                     let file_id = get_file_id(j, i);
-                    let opts = dfs::Options::default();
-                    let sst_data = get_sst_data(file_id);
+                    let opts = dfs::Options::default().with_type(get_file_type(file_id));
+                    let sst_data = get_file_data(file_id);
                     s3fs.create(file_id, sst_data, opts).await.unwrap();
                 }
             });
@@ -1743,12 +1762,15 @@ mod tests {
                 writer.append_store_wal_rlog_files(store_wal_rlog_files)
             }
 
-            let mut file_ids = Vec::with_capacity(num_file_ids as usize);
+            let mut files = Vec::with_capacity(num_file_ids as usize);
             for i in 0..num_file_ids {
                 let file_id = get_file_id(j, i);
-                file_ids.push(file_id)
+                files.push(TableFile {
+                    id: file_id,
+                    ftype: get_file_type(get_file_id(j, i)),
+                });
             }
-            writer.append_sst_files(file_ids).unwrap();
+            writer.append_table_files(files).unwrap();
             writer.finish();
         }
         let start_date = get_date(0);
@@ -1790,8 +1812,8 @@ mod tests {
             for i in 0..num_file_ids {
                 let file_id = get_file_id(j, i);
                 let data = reader.read_file(file_id).unwrap();
-                let sst_data = get_sst_data(file_id);
-                assert!(data.eq(&sst_data));
+                let file_data = get_file_data(file_id);
+                assert!(data.eq(&file_data));
             }
         }
 
@@ -1843,5 +1865,9 @@ mod tests {
         });
 
         oss.shutdown();
+    }
+
+    fn get_file_type(file_id: u64) -> FileType {
+        FileType::from_u8(file_id as u8 % 2).unwrap()
     }
 }

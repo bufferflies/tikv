@@ -21,7 +21,7 @@ use http::Request;
 use hyper::Body;
 use itertools::Itertools;
 use kvengine::{
-    dfs::{self, S3Fs},
+    dfs::{self, Dfs, FileType, S3Fs},
     limiter::StoreLimiter,
     table::{InnerKey, TableExt},
     IdVer, ShardMeta, ShardRange, ShardStats, ShardTag, ENCRYPTION_KEY, GLOBAL_SHARD_END_KEY,
@@ -33,12 +33,15 @@ use protobuf::Message;
 use raft::eraftpb;
 use rfengine::RfEngine;
 use rfenginepb::ClusterBackupMeta;
-use rfstore::store::{state::RaftState, ApplyMsgs, PreprocessContext, StoreMsg};
+use rfstore::store::{
+    parse_raft_cmd, rlog, state::RaftState, ApplyMsgs, PeerTag, PreprocessContext, RegionIdVer,
+    StoreMsg,
+};
 use security::SecurityConfig;
 use slog_global::{debug, error, info, warn};
 use tempdir::TempDir;
 use tikv::{config::TikvConfig, storage::mvcc::Key};
-use tikv_util::{box_err, merge_range::MergeRanges, mpsc, time::Instant, HandyRwLock};
+use tikv_util::{box_err, box_try, merge_range::MergeRanges, mpsc, time::Instant, HandyRwLock};
 use tokio::runtime::Runtime;
 
 use crate::{
@@ -49,7 +52,7 @@ use crate::{
     common::{
         collect_store_wal_rlog_files, load_peer_raft_state, load_rf_engine_meta, now,
         replay_wal_logs, retain_sst_files, send_request_to_store, RawRegion, RegionMetaGetter,
-        StorePeer,
+        StorePeer, TableFile,
     },
     error::{
         Error,
@@ -630,6 +633,9 @@ pub struct BackupCluster {
     meta_sender: Option<mpsc::Sender<StoreMsg>>,
 
     tolerated_err: usize,
+
+    // Wrap by `Option` to detect use before filled.
+    txn_chunk_ids_in_wal: Option<Vec<u64>>,
     // new members need to check if need to clear in reset_keyspace.
 }
 
@@ -682,6 +688,7 @@ impl BackupCluster {
             meta_applier: None,
             meta_sender: None,
             tolerated_err: 0,
+            txn_chunk_ids_in_wal: None,
         };
 
         let mut store_configs = HashMap::with_capacity(cluster_meta.stores.len());
@@ -789,6 +796,7 @@ impl BackupCluster {
         cluster.raft_engines = raft_engines;
         cluster.tolerated_err = cluster_tolerated_err;
         cluster.load_shards()?;
+        cluster.collect_txn_chunks_in_wal()?;
 
         if archiving {
             return Ok(cluster);
@@ -1211,8 +1219,8 @@ impl BackupCluster {
         self.verify_shards()
     }
 
-    // Should be called after load_shard.
-    pub fn get_all_shard_files(&self, skip_shards: Option<HashSet<u64>>) -> Vec<u64> {
+    // Should be called after load_shard & collect_txn_chunks_in_wal.
+    pub fn get_all_shard_files(&self, skip_shards: Option<HashSet<u64>>) -> Vec<TableFile> {
         let mut files = vec![];
         for shard in self.shards.values() {
             if let Some(skip_shards) = &skip_shards {
@@ -1220,8 +1228,31 @@ impl BackupCluster {
                     continue;
                 }
             }
-            files.append(&mut shard.meta.all_file_keys());
+            files.extend(shard.meta.all_file_keys().into_iter().map(|id| TableFile {
+                id,
+                ftype: FileType::Sst,
+            }));
+            files.extend(
+                shard
+                    .meta
+                    .all_txn_chunk_ids()
+                    .into_iter()
+                    .map(|id| TableFile {
+                        id,
+                        ftype: FileType::TxnChunk,
+                    }),
+            );
         }
+        files.extend(
+            self.txn_chunk_ids_in_wal
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(|&id| TableFile {
+                    id,
+                    ftype: FileType::TxnChunk,
+                }),
+        );
         files
     }
 
@@ -1924,6 +1955,7 @@ impl BackupCluster {
         self.shards_need_flush.clear();
         self.shards_need_truncate.clear();
         self.tolerated_err = 0;
+        self.txn_chunk_ids_in_wal = None;
 
         let mut store_configs = HashMap::with_capacity(cluster_meta.stores.len());
         for store in &cluster_meta.stores {
@@ -1932,6 +1964,7 @@ impl BackupCluster {
             store_configs.insert(store_id, store_config);
         }
         self.load_shards()?;
+        self.collect_txn_chunks_in_wal()?;
 
         self.check_all_shard_files()?;
 
@@ -1951,6 +1984,94 @@ impl BackupCluster {
 
     fn tolerated_err(&self) -> usize {
         self.tolerated_err
+    }
+
+    // Should be called after `load_shards`.
+    fn collect_txn_chunks_in_wal(&mut self) -> Result<()> {
+        let mut total_chunk_ids = Vec::new();
+
+        let master_key = self
+            .dfs
+            .get_runtime()
+            .block_on(self.security_conf.new_master_key());
+        let mut decryption_buf = Vec::new();
+
+        for store_id in self.get_all_stores_id() {
+            let rf_engine = self.raft_engines.get(&store_id).unwrap();
+            for &shard_id in self.store_shards.get(&store_id).unwrap() {
+                let shard = self.get_shard(shard_id).unwrap();
+
+                let meta = self.raw_metas.get(&shard_id).unwrap();
+                let snap = meta.get_snapshot();
+
+                let encryption_key =
+                    kvengine::get_shard_property(ENCRYPTION_KEY, snap.get_properties()).map(
+                        |exported_key| master_key.decrypt_encryption_key(&exported_key).unwrap(),
+                    );
+
+                let tag = ShardTag::new(store_id, IdVer::from_change_set(meta));
+                let peer_tag =
+                    PeerTag::new(store_id, RegionIdVer::new(meta.shard_id, meta.shard_ver));
+
+                let applied_index = snap.get_data_sequence();
+                let commit_index = shard.raft_state.get_commit();
+                let low_idx = applied_index + 1;
+                let high_idx = commit_index + 1;
+                debug_assert!(
+                    low_idx <= high_idx,
+                    "invalid entry index, low_idx {}, high_idx {}",
+                    low_idx,
+                    high_idx
+                );
+                if low_idx >= high_idx {
+                    continue;
+                }
+
+                let mut entries = Vec::with_capacity((high_idx.saturating_sub(low_idx)) as usize);
+                rf_engine
+                    .fetch_raft_entries_to(shard.peer_id, low_idx, high_idx, None, &mut entries)
+                    .map_err(|e| -> Error {
+                        box_err!(
+                            "{} entries unavailable err: {:?}, low: {}, high {}",
+                            tag,
+                            e,
+                            low_idx,
+                            high_idx
+                        )
+                    })?;
+
+                let mut chunk_ids = Vec::new();
+                for e in entries {
+                    if e.data.is_empty() || e.entry_type != eraftpb::EntryType::EntryNormal {
+                        continue;
+                    }
+
+                    let req =
+                        parse_raft_cmd(&peer_tag, &e, encryption_key.as_ref(), &mut decryption_buf);
+                    if req.get_header().get_region_epoch().version != meta.shard_ver {
+                        continue;
+                    }
+
+                    if let Some(custom) = rlog::get_custom_log(&req) {
+                        if custom.is_txn_file_ref() {
+                            let mut txn_file_ref = box_try!(custom.get_txn_file_ref());
+                            chunk_ids.extend(txn_file_ref.take_chunk_ids());
+                        }
+                    }
+                }
+
+                if !chunk_ids.is_empty() {
+                    info!("{} collect txn chunks in wal [{}, {})", tag, low_idx, high_idx;
+                        "chunk_ids" => ?chunk_ids);
+                    total_chunk_ids.extend(chunk_ids);
+                }
+            }
+        }
+
+        total_chunk_ids.sort();
+        total_chunk_ids.dedup();
+        self.txn_chunk_ids_in_wal = Some(total_chunk_ids);
+        Ok(())
     }
 }
 

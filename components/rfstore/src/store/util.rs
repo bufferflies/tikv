@@ -9,14 +9,16 @@ use std::{
 };
 
 use bytes::{Buf, BufMut};
+use cloud_encryption::EncryptionKey;
 use futures::executor::block_on;
 use kvproto::{metapb, raft_cmdpb::RaftCmdRequest};
 use protobuf::Message;
+use raft_proto::eraftpb;
 use slog::{Key, Record, Serializer};
 use tikv_util::{box_err, codec::bytes::decode_bytes, debug, error, time::Instant};
 
 use crate::{
-    store::{StoreMsg, SPLIT_FLAG_ENCRYPTION_KEYS},
+    store::{ProposalContext, StoreMsg, SPLIT_FLAG_ENCRYPTION_KEYS},
     Error, RaftRouter, Result,
 };
 
@@ -191,12 +193,37 @@ pub fn cf_name_to_num(cf_name: &str) -> usize {
 /// If `data` is corrupted, this function will panic.
 // TODO: make sure received entries are not corrupted
 #[inline]
-pub fn parse_data_at<T: Message + Default>(data: &[u8], index: u64, tag: PeerTag) -> T {
+pub fn parse_data_at<T: Message + Default>(data: &[u8], index: u64, tag: &PeerTag) -> T {
     let mut result = T::default();
     result.merge_from_bytes(data).unwrap_or_else(|e| {
         panic!("{} data is corrupted at {}: {:?}", tag, index, e);
     });
     result
+}
+
+pub fn parse_raft_cmd(
+    tag: &PeerTag,
+    entry: &eraftpb::Entry,
+    encryption_key: Option<&EncryptionKey>,
+    decryption_buf: &mut Vec<u8>,
+) -> RaftCmdRequest {
+    let mut data = entry.get_data();
+    let proposal_ctx = ProposalContext::from_bytes(entry.get_context());
+    let index = entry.index;
+    if proposal_ctx.contains(ProposalContext::ENCRYPTED) {
+        let key_ver = data.get_u32();
+        decryption_buf.truncate(0);
+        encryption_key.unwrap().decrypt(
+            data,
+            tag.id_ver.id(),
+            entry.index as u32,
+            key_ver,
+            decryption_buf,
+        );
+        parse_data_at(decryption_buf, index, tag)
+    } else {
+        parse_data_at(data, index, tag)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]

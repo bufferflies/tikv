@@ -900,7 +900,7 @@ impl Dfs for S3Fs {
     async fn read_file(&self, file_id: u64, opts: Options) -> crate::dfs::Result<Bytes> {
         self.get_object(
             self.file_key(file_id, opts.file_type),
-            file_id.to_string(),
+            format!("{}.{}", file_id, opts.file_type.suffix()),
             GetObjectOptions::default(),
         )
         .await
@@ -918,7 +918,7 @@ impl Dfs for S3Fs {
         self.put_object_with_options(
             self.file_key(file_id, opts.file_type),
             data,
-            file_id.to_string(),
+            format!("{}.{}", file_id, opts.file_type.suffix()),
             None,
             Some(STORAGE_CLASS_INTELLIGENT_TIERING),
             checksum,

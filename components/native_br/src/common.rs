@@ -16,7 +16,7 @@ use etcd_client::{ConnectOptions, OpenSslClientConfig};
 use grpcio::EnvBuilder;
 use http::Request;
 use hyper::Body;
-use kvengine::dfs::{self, Dfs, FileType, S3Fs};
+use kvengine::dfs::{self, Dfs, S3Fs};
 use kvproto::{metapb, metapb::Store};
 use pd_client::{PdClient, RpcClient};
 use protobuf::Message;
@@ -279,24 +279,24 @@ macro_rules! step_error( ($($args:tt)+) => {
     }
 };);
 
-pub fn retain_sst_files(file_ids: Vec<u64>, s3fs: &S3Fs) -> Result<usize> {
+pub fn retain_sst_files(files: Vec<TableFile>, s3fs: &S3Fs) -> Result<usize> {
     let mut idx = 0;
     let mut total_cnt = 0;
-    while idx < file_ids.len() {
-        let end_idx = std::cmp::min(file_ids.len(), idx + MAX_S3_REQ_BATCH_SIZE);
-        total_cnt += retain_sst_files_in_batch(&file_ids[idx..end_idx], s3fs, idx == 0)?;
+    while idx < files.len() {
+        let end_idx = std::cmp::min(files.len(), idx + MAX_S3_REQ_BATCH_SIZE);
+        total_cnt += retain_sst_files_in_batch(&files[idx..end_idx], s3fs, idx == 0)?;
         idx = end_idx;
     }
     Ok(total_cnt)
 }
 
-fn retain_sst_files_in_batch(file_ids: &[u64], s3fs: &S3Fs, first_batch: bool) -> Result<usize> {
+fn retain_sst_files_in_batch(files: &[TableFile], s3fs: &S3Fs, first_batch: bool) -> Result<usize> {
     let runtime = s3fs.get_runtime();
-    let file_cnt = file_ids.len();
+    let file_cnt = files.len();
     let mut handles = Vec::with_capacity(file_cnt);
-    for &id in file_ids {
+    for f in files {
         let s3fs = s3fs.clone();
-        let file_key = s3fs.file_key(id, FileType::Sst);
+        let file_key = s3fs.file_key(f.id, f.ftype);
         handles.push(runtime.spawn(async move { s3fs.retain_file(&file_key).await }));
     }
     // To avoid too much request to cause s3 SlowDown issue.
@@ -304,10 +304,10 @@ fn retain_sst_files_in_batch(file_ids: &[u64], s3fs: &S3Fs, first_batch: bool) -
         std::thread::sleep(Duration::from_secs(1));
     }
     let mut succeed_cnt = 0;
-    for (handle, &file_id) in handles.into_iter().zip(file_ids) {
+    for (handle, f) in handles.into_iter().zip(files) {
         match runtime.block_on(handle).unwrap() {
             Ok(_) => succeed_cnt += 1,
-            Err(e) => error!("Retain file {} fail {:?}", file_id, e),
+            Err(e) => error!("Retain file {:?} fail {:?}", f, e),
         }
     }
     if succeed_cnt != file_cnt {
@@ -920,4 +920,10 @@ impl RegionMetaGetter {
             })
         })
     }
+}
+
+#[derive(Debug)]
+pub struct TableFile {
+    pub(crate) id: u64,
+    pub(crate) ftype: kvengine::dfs::FileType,
 }

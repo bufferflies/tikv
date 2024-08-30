@@ -227,6 +227,20 @@ impl TxnFileRefPropertyHelper {
             .collect();
         TxnFileLocks { seq, inner: locks }
     }
+
+    pub fn get_all_chunk_ids(&self) -> Vec<u64> {
+        let mut chunk_ids = self
+            .txn_file_refs
+            .txn_file_refs
+            .iter()
+            .flat_map(|r| r.chunk_ids.clone())
+            .collect::<Vec<_>>();
+        // Txn files in properties contains transactions of both prewrite and commit. So
+        // there would be duplicated txn chunks.
+        chunk_ids.sort();
+        chunk_ids.dedup();
+        chunk_ids
+    }
 }
 
 #[derive(Debug, Default, Clone)]

@@ -2318,7 +2318,7 @@ impl<'a> PreprocessRef<'a> {
         ctx: &mut PreprocessContext<'_>,
         entry: &Entry,
     ) {
-        let (cmd, _) = parse_conf_change_cmd(entry, self.tag());
+        let (cmd, _) = parse_conf_change_cmd(entry, &self.tag());
         if let Err(err) = check_region_epoch(&cmd, self.get_preprocessed_region(), false) {
             warn!("preprocess pending conf change failed {:?}", err);
             return;

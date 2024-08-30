@@ -122,12 +122,34 @@ impl Dfs for InMemFs {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[repr(u8)]
 pub enum FileType {
-    Sst,
-    TxnChunk,
-    Schema,
-    Columnar,
+    Sst = 0,
+    TxnChunk = 1,
+    Schema = 2,
+    Columnar = 3,
+}
+
+impl FileType {
+    pub fn from_u8(t: u8) -> Option<FileType> {
+        match t {
+            0 => Some(FileType::Sst),
+            1 => Some(FileType::TxnChunk),
+            2 => Some(FileType::Schema),
+            3 => Some(FileType::Columnar),
+            _ => None,
+        }
+    }
+
+    pub fn suffix(&self) -> &'static str {
+        match self {
+            FileType::Sst => "sst",
+            FileType::TxnChunk => "txn",
+            FileType::Schema => "schema",
+            FileType::Columnar => "col",
+        }
+    }
 }
 
 #[derive(Clone)]

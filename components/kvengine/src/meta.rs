@@ -878,6 +878,12 @@ impl ShardMeta {
         &self.files
     }
 
+    pub fn all_txn_chunk_ids(&self) -> Vec<u64> {
+        TxnFileRefPropertyHelper::from_property(self.properties.get(TXN_FILE_REF))
+            .unwrap()
+            .get_all_chunk_ids()
+    }
+
     pub fn overlap_table(&self, smallest: InnerKey<'_>, biggest: InnerKey<'_>) -> bool {
         // [start-----smallest-----biggest-----end)
         // smallest-----[start-----biggest-----end)
