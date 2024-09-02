@@ -239,7 +239,9 @@ impl TxnFile {
         self.chunks.last().unwrap().index.biggest()
     }
 
+    // The chunks are expected to belong to the same transaction.
     pub fn merge_chunks(lhs: &Self, rhs: &Self) -> Vec<TxnChunk> {
+        debug_assert!(lhs.start_ts() == rhs.start_ts());
         let merge_iter =
             lhs.chunks
                 .clone()
@@ -1775,6 +1777,50 @@ mod tests {
         assert!(iter.valid());
         assert_eq!(kb.i_to_inner_key(98).as_ref(), iter.key());
         assert_eq!(get_test_value(98).as_bytes(), iter.get_value());
+    }
+
+    #[test]
+    fn test_txn_chunk_merge_chunks() {
+        let chunks = (0..5)
+            .map(|i| build_txn_chunk(i * 10, (i + 1) * 10, i as u64, |_| OP_PUT, None, true))
+            .collect::<Vec<_>>();
+
+        let id = TxnFileId::new(10, 1, 3);
+        let lower_bound = InnerKey::from_inner_buf(b"");
+        let upper_bound = InnerKey::from_inner_buf(GLOBAL_SHARD_END_KEY);
+        let txn_ctx = TxnCtx::new(
+            UserMeta::new(3, 5).to_array().to_vec().into(),
+            Default::default(),
+            3,
+            lower_bound,
+            upper_bound,
+        );
+
+        let tf = TxnFile::new(id, chunks[1..=2].to_vec(), txn_ctx.clone()).unwrap();
+
+        let cases: &[(&[usize], &[u64])] = &[
+            (&[0], &[0, 1, 2]),
+            (&[0, 1], &[0, 1, 2]),
+            (&[0, 1, 2], &[0, 1, 2]),
+            (&[0, 1, 3], &[0, 1, 2, 3]),
+            (&[1, 3], &[1, 2, 3]),
+            (&[2, 3], &[1, 2, 3]),
+            (&[4], &[1, 2, 4]),
+            (&[0, 1, 2, 3, 4], &[0, 1, 2, 3, 4]),
+        ];
+        for (other, expected) in cases {
+            let tf_other = TxnFile::new(
+                id,
+                other.iter().map(|&i| chunks[i].clone()).collect(),
+                txn_ctx.clone(),
+            )
+            .unwrap();
+            let merge_chunks = TxnFile::merge_chunks(&tf, &tf_other);
+            assert_eq!(
+                expected,
+                &merge_chunks.iter().map(|c| c.id()).collect::<Vec<_>>()
+            );
+        }
     }
 
     #[rstest]

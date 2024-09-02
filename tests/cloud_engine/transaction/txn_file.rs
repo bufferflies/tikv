@@ -1053,6 +1053,8 @@ fn test_txn_file_merge(#[case] enable_inner_key_off: bool) {
     let cases = vec![
         vec![1..2, 3..5, 0..1, 2..3],
         vec![1..3, 2..4, 3..5, 0..2],
+        vec![0..1, 1..2, 2..3, 3..4, 4..5],
+        vec![0..2, 2..5],
         vec![0..5; 3],
     ];
 
@@ -1064,17 +1066,19 @@ fn test_txn_file_merge(#[case] enable_inner_key_off: bool) {
 fn test_txn_file_merge_impl(ranges: Vec<Range<usize>>, enable_inner_key_off: bool) {
     let mut cluster = ServerCluster::new(alloc_node_id_vec(3), |_, conf| {
         conf.enable_inner_key_offset = enable_inner_key_off;
+        conf.storage.scheduler_worker_pool_size = 8;
+        conf.kvengine.txn_file_worker_pool_size = Some(16);
     });
     let dfs = cluster.get_dfs().unwrap();
     cluster.wait_region_replicated(&[], 3);
 
-    let mut client = cluster.new_client();
-    let mut prepare_ctx = |key: &[u8]| -> (u64, kvrpcpb::Context, TikvClient) {
-        let region_id = client.get_region_id(key);
-        let ctx = client.new_rpc_ctx(region_id).unwrap();
-        let kv_client = client.get_kv_client(ctx.get_peer().get_store_id());
-        (region_id, ctx, kv_client)
-    };
+    let prepare_ctx =
+        |client: &mut ClusterClient, key: &[u8]| -> (u64, kvrpcpb::Context, TikvClient) {
+            let region_id = client.get_region_id(key);
+            let ctx = client.new_rpc_ctx(region_id).unwrap();
+            let kv_client = client.get_kv_client(ctx.get_peer().get_store_id());
+            (region_id, ctx, kv_client)
+        };
 
     let mut client = cluster.new_client();
     client.split_keyspace(KEYSPACE_ID);
@@ -1085,35 +1089,49 @@ fn test_txn_file_merge_impl(ranges: Vec<Range<usize>>, enable_inner_key_off: boo
 
     let gen_key = generate_keyspace_key(KEYSPACE_ID);
     let primary_lock = gen_key(0);
-    let (mut region_id, mut ctx, mut kv_client) = prepare_ctx(&primary_lock);
 
+    // Note: the primary key should be prewrite first. But it's OK here, as long as
+    // there is no other command on primary.
+    let mut handles = Vec::with_capacity(ranges.len());
     for range in ranges {
-        let mut req = PrewriteRequest::new();
-        req.set_context(ctx.clone());
-        req.set_txn_file_chunks(chunk_ids[range].to_vec());
-        req.set_primary_lock(primary_lock.clone());
-        req.set_lock_ttl(6000);
-        req.set_start_version(start_ts);
-        req.set_min_commit_ts(start_ts + 1);
+        let mut client = cluster.new_client();
+        let sub_chunk_ids = chunk_ids[range].to_vec();
+        let primary_lock = primary_lock.clone();
+        let handle = std::thread::spawn(move || {
+            let (mut region_id, mut ctx, mut kv_client) = prepare_ctx(&mut client, &primary_lock);
 
-        let ok = try_wait(
-            || {
-                let resp = kv_client.kv_prewrite(&req).unwrap();
-                assert!(resp.get_errors().is_empty(), "resp {:?}", resp);
-                if resp.has_region_error() {
-                    warn!("prewrite got region error {:?}", resp.get_region_error());
-                    (region_id, ctx, kv_client) = prepare_ctx(&primary_lock);
-                    req.set_context(ctx.clone());
-                    false
-                } else {
-                    true
-                }
-            },
-            10,
-        );
-        assert!(ok);
+            let mut req = PrewriteRequest::new();
+            req.set_context(ctx.clone());
+            req.set_txn_file_chunks(sub_chunk_ids);
+            req.set_primary_lock(primary_lock.clone());
+            req.set_lock_ttl(6000);
+            req.set_start_version(start_ts);
+            req.set_min_commit_ts(start_ts + 1);
+
+            let ok = try_wait(
+                || {
+                    let resp = kv_client.kv_prewrite(&req).unwrap();
+                    assert!(resp.get_errors().is_empty(), "resp {:?}", resp);
+                    if resp.has_region_error() {
+                        warn!("prewrite got region error {:?}", resp.get_region_error());
+                        (region_id, ctx, kv_client) = prepare_ctx(&mut client, &primary_lock);
+                        req.set_context(ctx.clone());
+                        false
+                    } else {
+                        true
+                    }
+                },
+                10,
+            );
+            assert!(ok);
+        });
+        handles.push(handle);
+    }
+    for h in handles {
+        h.join().unwrap();
     }
 
+    let (_, ctx, kv_client) = prepare_ctx(&mut client, &primary_lock);
     let mut req = CommitRequest::new();
     req.set_context(ctx);
     req.set_start_version(start_ts);

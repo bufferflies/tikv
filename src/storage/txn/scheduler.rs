@@ -1783,6 +1783,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
                 {
                     Ok(snapshot) => {
                         SCHED_STAGE_COUNTER_VEC.get(tag).snapshot_ok.inc();
+                        let start_ts = cmd.ts();
                         let chunks_id = txn_file::command_chunks_to_load(&cmd);
                         if !chunks_id.is_empty() && !manager.all_chunks_exists(chunks_id) {
                             let snap = snapshot.get_kvengine_snap().unwrap();
@@ -1815,9 +1816,11 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
                                 .await;
                             tikv_util::set_current_region(region_id);
                             if let Err(err) = prepare_res.unwrap() {
-                                callback.execute(ProcessResult::Failed {
-                                    err: StorageErrorInner::Other(box_err!(err)).into(),
-                                });
+                                error!("txn file: prepare failed";
+                                    "start_ts" => start_ts,
+                                    "cid" => cid,
+                                    "err" => ?err);
+                                callback.execute(ProcessResult::Failed { err: box_err!(err) });
                                 return;
                             }
                         }
@@ -1825,9 +1828,11 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
                         let txn_file_cmd = match TxnFileCommand::try_from(cmd, snapshot, manager) {
                             Ok(txn_file_cmd) => txn_file_cmd,
                             Err(err) => {
-                                callback.execute(ProcessResult::Failed {
-                                    err: StorageError::from(err),
-                                });
+                                error!("txn file: build cmd failed";
+                                    "start_ts" => start_ts,
+                                    "cid" => cid,
+                                    "err" => ?err);
+                                callback.execute(ProcessResult::Failed { err: err.into() });
                                 return;
                             }
                         };

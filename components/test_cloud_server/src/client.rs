@@ -2351,15 +2351,18 @@ impl TxnMutations {
             }
         }
         let mut region_chunks = region_chunks.into_values().collect::<Vec<_>>();
-        // Sort by both chunks and region, to make sure that primary key is in the first
-        // batch:
-        // * Different batches may contain the same chunks.
-        // * Different batches may have regions with same start key (if region merge
-        //   happens during grouping).
+        // Sort by chunks first, and then by region, to make sure that primary
+        // key is in the first batch:
+        // 1. Different batches may contain the same chunks.
+        // 2. Different batches may have regions with same start key (if region merge
+        //    happens during grouping).
+        // 3. Bigger batches may have regions with smaller start key (if region merge
+        //    happens during grouping).
         region_chunks.sort_by(|a, b| {
-            a.0.start_key()
-                .cmp(b.0.start_key())
-                .then_with(|| a.1[0].outer_smallest().cmp(b.1[0].outer_smallest()))
+            a.1[0]
+                .outer_smallest()
+                .cmp(b.1[0].outer_smallest())
+                .then_with(|| a.0.start_key().cmp(b.0.start_key()))
         });
         info!("group_txn_chunks_by_regions"; "region_chunks" => ?region_chunks);
         region_chunks
