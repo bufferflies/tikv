@@ -32,8 +32,6 @@ use crate::{
     worker_scaler::{WorkerScaler, WorkerScalerConfig},
 };
 
-pub(crate) const MAX_IN_MEM_SIZE: usize = 256 * 1024 * 1024;
-
 /// Remote load data worker API:
 ///
 /// 1. init task:
@@ -279,7 +277,6 @@ impl LoadDataManager {
         dir: PathBuf,
         dfs: Arc<dyn dfs::Dfs>,
         runtime: Arc<tokio::runtime::Runtime>,
-        max_in_mem_size: usize,
         checksum_type: ChecksumType,
         master_key: MasterKey,
         worker_scaler: Option<WorkerScaler>,
@@ -296,7 +293,6 @@ impl LoadDataManager {
             dir,
             dfs,
             runtime,
-            max_in_mem_size,
             master_key,
         };
         Self {

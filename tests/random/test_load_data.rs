@@ -22,7 +22,6 @@ use tokio::runtime::Runtime;
 
 use crate::{generate_random_string, i_to_key, LOAD_DATA_COUNTER, TABLE_COUNTER};
 
-const MAX_IN_MEM_SIZE: usize = 10 * 1024; // 10KiB
 const COMPRESSION_TYPE: u8 = ZSTD_COMPRESSION;
 const LOAD_DATA_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -145,7 +144,6 @@ fn do_load_data(
         dfs,
         pd: pd_client.clone(),
         runtime: runtime.clone(),
-        max_in_mem_size: MAX_IN_MEM_SIZE,
         master_key,
     };
     let (scheduler, worker_handle) = init_task(config, load_data_ctx, start_ts, commit_ts);

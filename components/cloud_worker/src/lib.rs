@@ -49,7 +49,7 @@ use tokio::{runtime::Runtime, task::JoinHandle};
 pub use txn_chunk::CreateTxnChunkResp;
 
 use crate::{
-    load_data::{LoadDataManager, MAX_IN_MEM_SIZE},
+    load_data::LoadDataManager,
     native_br::{NativeBrConfig, NativeBrManager},
     remote_cop::RemoteCopServer,
     txn_chunk::TxnChunkHandler,
@@ -193,7 +193,6 @@ fn start_server(
         config.data_dir.clone().into(),
         s3fs.clone(),
         thread_pool.clone(),
-        MAX_IN_MEM_SIZE,
         checksum_type,
         master_key.clone(),
         worker_scaler_opt,

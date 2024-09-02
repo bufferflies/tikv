@@ -96,6 +96,8 @@ fn impl_test_load_data(enable_inner_key_off: bool) {
     // Init task.
     // Total data size is about 1.3MB = 10000 * (23 + 120)
     let load_data_config = LoadDataConfig {
+        max_in_mem_size: 1024, // 1KB
+        flush_batch_size: 512,
         block_size: 1024,
         sst_file_size: 4 * 1024,
         region_size: 16 * 1024,
@@ -123,7 +125,6 @@ fn impl_test_load_data(enable_inner_key_off: bool) {
         dfs,
         pd: pd_client,
         runtime,
-        max_in_mem_size: 1024, // 1KB
         master_key,
     };
 
@@ -257,6 +258,8 @@ fn test_load_data_overlap() {
     client.split_keyspace(KEYSPACE_ID);
 
     let load_data_config = LoadDataConfig {
+        max_in_mem_size: 1024, // 1KB
+        flush_batch_size: 512,
         block_size: 1024,
         sst_file_size: 4 * 1024,
         region_size: 16 * 1024,
@@ -285,7 +288,6 @@ fn test_load_data_overlap() {
             dfs: dfs.clone(),
             pd: pd_client.clone(),
             runtime: runtime.clone(),
-            max_in_mem_size: 1024, // 1KB
             master_key: master_key.clone(),
         };
         let (scheduler, worker_handle) =

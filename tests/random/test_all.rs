@@ -34,6 +34,9 @@ use crate::{
     test_drop_table::*, test_load_data::*, test_native_br::*, test_txn_file::*, TikvConfig, *,
 };
 
+const MAX_IN_MEM_SIZE: usize = 10 * 1024; // 10KiB
+const FLUSH_BATCH_SIZE: usize = 4 * 1024; // 4KiB
+
 const INITIAL_KEYSPACE_COUNT: usize = 10;
 const BIG_REGION_SIZE_KEYSPACE_COUNT: usize = 2;
 const BIG_REGION_SIZE_FACTOR_OPTIONS: &[f64] = &[2.0, 3.0, 4.0];
@@ -98,6 +101,8 @@ fn test_random_all() {
         let tikv_config = cluster.get_node_config(cluster.get_nodes()[0]);
         let region_size = tikv_config.coprocessor.region_split_size.0 as usize;
         LoadDataConfig {
+            max_in_mem_size: MAX_IN_MEM_SIZE,
+            flush_batch_size: FLUSH_BATCH_SIZE,
             block_size: tikv_config.rocksdb.writecf.block_size.0 as usize,
             sst_file_size: tikv_config.rocksdb.writecf.target_file_size_base.0 as usize,
             region_size,

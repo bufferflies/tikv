@@ -24,6 +24,8 @@ lazy_static = { version = "1.4", features = [] }
 pd_client = { path = "../pd_client" }
 prometheus = { version = "0.13", features = ["nightly"] }
 protobuf = "2.8"
+rand = "0.8"
+rfengine = { path = "../rfengine" }
 rfstore = { path = "../rfstore" }
 security = { workspace = true }
 serde = { version = "1.0", features = ["derive"] }
@@ -34,6 +36,7 @@ slog = { version = "2.3", features = [
     "release_max_level_debug",
 ] }
 slog-global = { version = "0.1", git = "https://github.com/breeswish/slog-global.git", rev = "d592f88e4dbba5eb439998463054f1a44fbf17b9" }
+tempfile = "3.0"
 test_pd_client = { workspace = true }
 thiserror = "1.0"
 tidb_query_datatype = { path = "../tidb_query_datatype" }

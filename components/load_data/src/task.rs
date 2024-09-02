@@ -25,11 +25,12 @@ use kvengine::{
     dfs::Options,
     get_shard_property,
     table::{sstable::Builder, ChecksumType, InnerKey, Value},
-    IdVer, ShardTag, ENCRYPTION_KEY, WRITE_CF, WRITE_CF_BOTTOM_LEVEL,
+    IdVer, ShardTag, UserMeta, ENCRYPTION_KEY, WRITE_CF, WRITE_CF_BOTTOM_LEVEL,
 };
 use kvproto::{encryptionpb::EncryptionMethod, metapb, pdpb};
 use pd_client::PdClient;
 use protobuf::Message;
+use rfengine::compress_lz4;
 use rfstore::store::{raw_end_key, raw_start_key};
 use serde_derive::{Deserialize, Serialize};
 use tidb_query_datatype::codec::table;
@@ -56,6 +57,8 @@ use crate::{
     },
 };
 
+const DEFAULT_MAX_IN_MEM_SIZE: usize = 256 * 1024 * 1024; // 256MB
+const DEFAULT_FLUSH_BATCH_SIZE: usize = 8 * 1024 * 1024; // 8MB
 const DEFAULT_BLOCK_SIZE: usize = 64 * 1024; // 64KB
 const DEFAULT_SST_FILE_SIZE: usize = 48 * 1024 * 1024; // 48MB
 const DEFAULT_REGION_SIZE: usize = 750 * 1024 * 1024; // 750MB
@@ -63,7 +66,7 @@ const DEFAULT_COARSE_SPLIT_SIZE: usize = 32 * 1024 * 1024 * 1024; // 32GB
 const DEFAULT_ENABLE_CHECK_POINT: bool = false;
 
 const ZSTD_COMPRESSION_LEVEL: i32 = 3;
-const FLUSH_FILE_CONCURRENCY: usize = 4;
+const FLUSH_FILE_CONCURRENCY: usize = 8;
 const CREATE_FILE_CONCURRENCY: usize = 32;
 const INGEST_CONCURRENCY: usize = 4;
 
@@ -176,6 +179,8 @@ pub struct LoadTaskStates {
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 pub struct LoadDataConfig {
+    pub max_in_mem_size: usize,
+    pub flush_batch_size: usize,
     pub block_size: usize,
     pub sst_file_size: usize,
     pub region_size: usize,
@@ -188,6 +193,8 @@ pub struct LoadDataConfig {
 impl Default for LoadDataConfig {
     fn default() -> Self {
         Self {
+            max_in_mem_size: DEFAULT_MAX_IN_MEM_SIZE,
+            flush_batch_size: DEFAULT_FLUSH_BATCH_SIZE,
             block_size: DEFAULT_BLOCK_SIZE,
             sst_file_size: DEFAULT_SST_FILE_SIZE,
             region_size: DEFAULT_REGION_SIZE,
@@ -221,7 +228,6 @@ pub struct LoadDataContext {
     pub dfs: Arc<dyn dfs::Dfs>,
     pub pd: Arc<dyn PdClient>,
     pub runtime: Arc<tokio::runtime::Runtime>,
-    pub max_in_mem_size: usize,
     pub master_key: MasterKey,
 }
 
@@ -616,6 +622,15 @@ impl LoadTaskWorker {
                         error: self.scheduler.error_msg(),
                     };
                     cb(FlushStates::FlushResult { flush_result });
+                    if self.file_idx > self.reader_errs.len() + self.readers.len() {
+                        let recv_count = self.file_idx
+                            - self.reader_errs.len()
+                            - self.readers.len()
+                            - self.unhandled_readers.len();
+                        let check_point_store_mutex = Arc::clone(&self.check_point_store);
+                        let mut check_point_store_guard = check_point_store_mutex.lock().unwrap();
+                        let _ = self.recv_reader(recv_count, &mut check_point_store_guard);
+                    }
                     return;
                 }
                 file_count = flush_file_count;
@@ -764,7 +779,7 @@ impl LoadTaskWorker {
 
         let check_point_store_mutex = Arc::clone(&self.check_point_store);
         let mut check_point_store_guard = check_point_store_mutex.lock().unwrap();
-        if self.in_mem_size > self.ctx.max_in_mem_size {
+        if self.in_mem_size > self.config.max_in_mem_size {
             self.flush_mem_buf();
             if self.file_idx
                 > self.readers.len()
@@ -992,7 +1007,7 @@ impl LoadTaskWorker {
         let tx = self.file_tx.clone();
         let task_ctx = self.task_ctx.clone();
         let file_path = self.file_path(self.file_idx);
-        let in_mem_size = self.in_mem_size;
+        let batch_size = self.config.flush_batch_size;
         let handled_chunk_ids = self.scheduler.get_handled_chunks();
         let file_idx = self.file_idx;
         self.in_mem_size = 0;
@@ -1001,7 +1016,7 @@ impl LoadTaskWorker {
         std::thread::spawn(move || {
             let start = Instant::now();
             let task_id = task_ctx.task_id.clone();
-            let res = flush_to_local_file(kv_pairs, task_ctx, file_path.clone(), in_mem_size);
+            let res = flush_to_local_file(kv_pairs, task_ctx, file_path.clone(), batch_size);
             info!(
                 "{} flush to local file {} takes {:?}",
                 task_id,
@@ -1045,7 +1060,7 @@ impl LoadTaskWorker {
         compression_type: u8,
     ) -> Result<()> {
         if !self.kv_pairs.is_empty() || self.readers.len() < self.file_idx {
-            debug!(
+            error!(
                 "{} has {} not yet flushed kv pairs, {} unhandled files",
                 self.task_ctx.task_id,
                 self.kv_pairs.len(),
@@ -1071,7 +1086,7 @@ impl LoadTaskWorker {
         let mut recv_count = 0;
         let readers = mem::take(&mut self.readers);
         let mut merge_iter =
-            MergeIterator::new(readers, &self.task_ctx.key_prefix, self.task_ctx.new_client);
+            MergeIterator::new(readers, &self.task_ctx.key_prefix, self.task_ctx.new_client)?;
 
         let mut errs = vec![];
         while merge_iter.valid() {
@@ -1144,6 +1159,9 @@ impl LoadTaskWorker {
         let task_id = self.task_ctx.task_id.clone();
         let checksum_type = self.config.checksum_type;
         let encryption_key = self.task_ctx.encryption_key.clone();
+        let um = UserMeta::new(self.task_ctx.start_ts, self.task_ctx.commit_ts);
+        let mut val_buf = Value::encode_buf(0, &um.to_array(), self.task_ctx.commit_ts, &[]);
+        let base_val_len = val_buf.len();
 
         self.ctx.runtime.spawn(async move {
             info!("{} start build sst file {}", task_id, file_id);
@@ -1169,9 +1187,12 @@ impl LoadTaskWorker {
                 let val = &batch[offset..offset + val_len];
                 offset += val_len;
                 uncompressed_size += val_len;
+                val_buf.resize(base_val_len, 0);
+                val_buf.extend_from_slice(val);
+
                 // The key is already trimmed prefix, so we can use `from_inner_buf` here.
                 let inner_key = InnerKey::from_inner_buf(key);
-                builder.add(inner_key, &Value::decode(val), None);
+                builder.add(inner_key, &Value::decode(&val_buf), None);
                 entries += 1;
             }
             batch.clear();
@@ -1759,11 +1780,11 @@ fn get_ssts_in_range(ssts: &[SstMeta], start: InnerKey<'_>, end: InnerKey<'_>) -
     matched
 }
 
-fn flush_to_local_file(
+pub fn flush_to_local_file(
     mut kv_pairs: Vec<KvPair>,
     task_ctx: TaskContext,
     path: PathBuf,
-    in_mem_size: usize,
+    batch_size: usize,
 ) -> Result<KvPairsReader> {
     kv_pairs.sort_by(|a, b| {
         let order = a.key.cmp(&b.key);
@@ -1779,7 +1800,8 @@ fn flush_to_local_file(
         .write(true)
         .read(true)
         .open(path.as_path())?;
-    let mut buf: Vec<u8> = Vec::with_capacity(in_mem_size);
+    let mut buf: Vec<u8> = Vec::with_capacity(batch_size + batch_size / 8);
+    let mut compressed_buf: Vec<u8> = Vec::with_capacity(batch_size + batch_size / 8);
     let iv = if task_ctx.encryption_key.is_some() {
         let mut iv_buf = Vec::with_capacity(16);
         iv_buf.put_u64(task_ctx.start_ts);
@@ -1801,23 +1823,24 @@ fn flush_to_local_file(
         buf.extend_from_slice(pair.val.chunk());
         buf.put_u16_le(pair.row_id.len() as u16);
         buf.extend_from_slice(pair.row_id.chunk());
-        if buf.len() >= 128 * 1024 {
-            writer.write_all(&buf)?;
+
+        if buf.len() >= batch_size {
+            let compressed_size = compress_lz4(&buf, &mut compressed_buf)? as u32;
+            writer.write_all(&compressed_size.to_le_bytes())?;
+            writer.write_all(&compressed_buf)?;
             buf.clear();
+            compressed_buf.clear();
         }
     }
     if !buf.is_empty() {
-        writer.write_all(&buf)?;
+        let compressed_size = compress_lz4(&buf, &mut compressed_buf)? as u32;
+        writer.write_all(&compressed_size.to_le_bytes())?;
+        writer.write_all(&compressed_buf)?;
     }
     writer.flush()?;
     let file = fs::File::open(path)?;
     let reader = DecrypterReader::new(file, method, key, iv).unwrap();
-    Ok(KvPairsReader::new(
-        task_ctx.start_ts,
-        task_ctx.commit_ts,
-        kv_pairs.len(),
-        reader,
-    ))
+    Ok(KvPairsReader::new(kv_pairs.len(), reader))
 }
 
 fn reload_reader(local_file_info: &LocalFileInfo, task_ctx: TaskContext) -> KvPairsReader {
@@ -1839,12 +1862,7 @@ fn reload_reader(local_file_info: &LocalFileInfo, task_ctx: TaskContext) -> KvPa
     };
 
     let reader = DecrypterReader::new(file, method, key, iv).unwrap();
-    KvPairsReader::new(
-        task_ctx.clone().start_ts,
-        task_ctx.clone().commit_ts,
-        local_file_info.kv_count,
-        reader,
-    )
+    KvPairsReader::new(local_file_info.kv_count, reader)
 }
 
 fn verify_regions_boundary(

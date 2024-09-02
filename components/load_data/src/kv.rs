@@ -2,18 +2,21 @@
 
 use std::{
     fs::File,
-    io::{BufReader, Read},
+    io::{ErrorKind, Read},
+    thread,
 };
 
 use bytes::Bytes;
 use encryption::DecrypterReader;
-use kvengine::{table::Value, UserMeta};
+use rfengine::decompress_lz4;
 use serde_derive::{Deserialize, Serialize};
+use tikv_util::mpsc::{bounded, Receiver};
 
-use crate::error::Error;
+use crate::error::{Error, Result};
 
 const MAX_DUP_SIZE: usize = 64 * 1024 * 1024;
 
+#[derive(Clone)]
 pub struct KvPair {
     pub key: Bytes,
     pub val: Bytes,
@@ -27,68 +30,109 @@ impl KvPair {
 }
 
 pub struct KvPairsReader {
-    key_buf: Vec<u8>,
-    val_buf: Vec<u8>,
-    row_id_buf: Vec<u8>,
-    val_base_len: usize,
+    key_buf_len: usize,
+    val_buf_len: usize,
+    row_id_buf_len: usize,
     count: usize,
     idx: usize,
-    buf_reader: BufReader<DecrypterReader<File>>,
+    buf: Vec<u8>,
+    offset: usize,
+    next_offset: usize,
+    buf_rx: Receiver<Result<Vec<u8>>>,
 }
 
 impl KvPairsReader {
-    pub fn new(start_ts: u64, commit_ts: u64, count: usize, reader: DecrypterReader<File>) -> Self {
-        let buf_reader = BufReader::with_capacity(64 * 1024, reader);
-        let um = UserMeta::new(start_ts, commit_ts);
-        let val_buf = Value::encode_buf(0, &um.to_array(), commit_ts, &[]);
-        let val_base_len = val_buf.len();
+    pub fn new(count: usize, mut reader: DecrypterReader<File>) -> Self {
+        let (buf_tx, buf_rx) = bounded(1);
+        thread::spawn(move || {
+            let mut compressed_size_buf = [0u8; 4];
+            let mut compressed_buf: Vec<u8> = vec![];
+            loop {
+                if let Err(err) = reader.read_exact(&mut compressed_size_buf[..]) {
+                    if err.kind() != ErrorKind::UnexpectedEof {
+                        let _ = buf_tx.send(Err(Error::IoError(err)));
+                    }
+                    return;
+                }
+
+                let compressed_size = u32::from_le_bytes(compressed_size_buf) as usize;
+                compressed_buf.resize(compressed_size, 0);
+                if let Err(err) = reader.read_exact(&mut compressed_buf) {
+                    let _ = buf_tx.send(Err(Error::IoError(err)));
+                    return;
+                }
+                let buf = decompress_lz4(&compressed_buf[0..compressed_size]).unwrap();
+
+                if buf_tx.send(Ok(buf)).is_err() {
+                    return;
+                }
+            }
+        });
+
         Self {
-            key_buf: vec![],
-            val_buf,
-            row_id_buf: vec![],
-            val_base_len,
+            key_buf_len: 0,
+            val_buf_len: 0,
+            row_id_buf_len: 0,
             count,
             idx: 0,
-            buf_reader,
+            // lazy init
+            buf: vec![],
+            offset: 0,
+            next_offset: 0,
+            buf_rx,
         }
     }
 
     fn key(&self) -> &[u8] {
-        &self.key_buf
+        &self.buf[self.offset + 2..self.offset + 2 + self.key_buf_len]
+    }
+
+    fn value(&self) -> &[u8] {
+        let offset = self.offset + 2 + self.key_buf_len + 4;
+        &self.buf[offset..offset + self.val_buf_len]
     }
 
     fn row_id(&self) -> &[u8] {
-        &self.row_id_buf
+        let offset = self.offset + 2 + self.key_buf_len + 4 + self.val_buf_len + 2;
+        &self.buf[offset..offset + self.row_id_buf_len]
     }
 
     fn valid(&self) -> bool {
         self.idx <= self.count
     }
 
-    fn next(&mut self) {
+    fn next(&mut self) -> Result<()> {
         self.idx += 1;
         if self.idx > self.count {
-            return;
+            return Ok(());
         }
-        let mut key_len_buf = [0u8; 2];
-        self.buf_reader.read_exact(&mut key_len_buf[..]).unwrap();
-        let key_len = u16::from_le_bytes(key_len_buf);
-        self.key_buf.resize(key_len as usize, 0);
-        self.buf_reader.read_exact(&mut self.key_buf[..]).unwrap();
-        let mut val_len_buf = [0u8; 4];
-        self.buf_reader.read_exact(&mut val_len_buf[..]).unwrap();
-        let val_len = u32::from_le_bytes(val_len_buf);
-        self.val_buf.resize(self.val_base_len + val_len as usize, 0);
-        self.buf_reader
-            .read_exact(&mut self.val_buf[self.val_base_len..])
-            .unwrap();
-        let mut row_id_len_buf = [0u8; 2];
-        self.buf_reader.read_exact(&mut row_id_len_buf[..]).unwrap();
-        let row_id_len = u16::from_le_bytes(row_id_len_buf);
-        self.row_id_buf.resize(row_id_len as usize, 0);
-        self.buf_reader
-            .read_exact(&mut self.row_id_buf[..])
-            .unwrap();
+
+        self.offset = self.next_offset;
+        if self.offset == self.buf.len() {
+            let buf = self.buf_rx.recv().unwrap();
+            match buf {
+                Ok(buf) => {
+                    self.buf = buf;
+                }
+                Err(err) => {
+                    return Err(err);
+                }
+            }
+            self.offset = 0;
+        }
+
+        let mut offset = self.offset;
+        let buf = &self.buf;
+        self.key_buf_len = u16::from_le_bytes(buf[offset..offset + 2].try_into().unwrap()) as usize;
+        offset += 2 + self.key_buf_len;
+        self.val_buf_len = u32::from_le_bytes(buf[offset..offset + 4].try_into().unwrap()) as usize;
+        offset += 4 + self.val_buf_len;
+        self.row_id_buf_len =
+            u16::from_le_bytes(buf[offset..offset + 2].try_into().unwrap()) as usize;
+        offset += 2 + self.row_id_buf_len;
+        self.next_offset = offset;
+
+        Ok(())
     }
 }
 
@@ -128,10 +172,10 @@ pub struct DuplicateEntry {
 }
 
 impl MergeIterator {
-    pub fn new(readers: Vec<KvPairsReader>, key_prefix: &[u8], new_client: bool) -> Self {
+    pub fn new(readers: Vec<KvPairsReader>, key_prefix: &[u8], new_client: bool) -> Result<Self> {
         let mut heap = Vec::with_capacity(readers.len());
         for mut reader in readers {
-            reader.next();
+            reader.next()?;
             heap.push(Box::new(reader));
         }
         let mut it = Self {
@@ -150,7 +194,7 @@ impl MergeIterator {
         it.prev_key = it.key().to_vec();
         it.prev_val = it.value().to_vec();
         it.prev_row_id = it.row_id().to_vec();
-        it
+        Ok(it)
     }
 
     fn init_heap(&mut self) {
@@ -195,7 +239,7 @@ impl MergeIterator {
     }
 
     pub fn value(&self) -> &[u8] {
-        &self.heap[0].val_buf
+        self.heap[0].value()
     }
 
     pub fn row_id(&self) -> &[u8] {
@@ -206,7 +250,7 @@ impl MergeIterator {
         !self.heap.is_empty()
     }
 
-    pub fn next(&mut self) -> crate::Result<()> {
+    pub fn next(&mut self) -> Result<()> {
         loop {
             let dup = self.next_maybe_dup()?;
             if !dup {
@@ -215,13 +259,13 @@ impl MergeIterator {
         }
     }
 
-    pub fn next_maybe_dup(&mut self) -> crate::Result<bool> {
+    pub fn next_maybe_dup(&mut self) -> Result<bool> {
         let heap_len = self.heap.len();
         if heap_len == 0 {
             return Ok(false);
         }
         let first = &mut self.heap[0];
-        first.next();
+        first.next()?;
         if !first.valid() {
             self.heap.swap(0, heap_len - 1);
             self.heap.pop();
@@ -231,9 +275,8 @@ impl MergeIterator {
         }
         self.down(0);
         let key = self.heap[0].key();
-        let val = self.heap[0].val_buf.as_slice();
+        let val = self.heap[0].value();
         let row_id = self.heap[0].row_id();
-        let val_base_len = self.heap[0].val_base_len;
         if key == self.prev_key.as_slice() {
             // For old load data client, the row_id is empty. So we only need
             // to compare row_id when it's not empty.
@@ -248,7 +291,7 @@ impl MergeIterator {
                     self.duplicated_entries.len().to_string(),
                 ));
             }
-            let val_str = hex::encode(&val[val_base_len..]);
+            let val_str = hex::encode(val);
             if let Some(entry) = self.duplicated_entries.last_mut() {
                 // For old client, the row_id always is empty, and no repeated keys in
                 // KvPairsReader. So we don't need to compare row_id.
@@ -271,7 +314,7 @@ impl MergeIterator {
             dup_key.extend_from_slice(key);
             let dup_entry = DuplicateEntry {
                 key: hex::encode(dup_key),
-                values: vec![hex::encode(&self.prev_val[val_base_len..]), val_str],
+                values: vec![hex::encode(&self.prev_val), val_str],
             };
             self.duplicated_entries.push(dup_entry);
             self.last_dup_entry_key = key.to_vec();
@@ -285,5 +328,127 @@ impl MergeIterator {
         self.prev_row_id.truncate(0);
         self.prev_row_id.extend_from_slice(row_id);
         Ok(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{path::PathBuf, thread::sleep, time::Duration};
+
+    use bytes::Bytes;
+    use chrono::Utc;
+    use rand::{seq::SliceRandom, thread_rng};
+    use tempfile::TempDir;
+    use tidb_query_datatype::codec::table;
+
+    use super::*;
+    use crate::task::{flush_to_local_file, TaskContext};
+
+    #[test]
+    fn test_kv_pairs_reader() {
+        let kv_pair_size = get_kv_pair_size();
+        let kv_count = 5;
+        let mut ids: Vec<usize> = (0..kv_count).collect();
+        ids.shuffle(&mut thread_rng());
+
+        let mut kv_pairs = Vec::with_capacity(ids.len());
+        for id in ids.iter() {
+            kv_pairs.push(KvPair::new(
+                Bytes::from(i_to_key(1, id)),
+                Bytes::from(i_to_val(id)),
+                Bytes::from(i_to_row_id(id)),
+            ));
+        }
+        let tmp_dir = TempDir::new().unwrap();
+        let path = tmp_dir.path().join(format!(
+            "test_kv_pairs_reader_{}",
+            Utc::now().timestamp_millis()
+        ));
+
+        let mut reader = generate_reader(kv_pairs, path.clone(), kv_pair_size);
+        ids.sort();
+        for id in ids.iter() {
+            reader.next().unwrap();
+            assert_eq!(i_to_key(1, id).as_slice(), reader.key());
+            assert_eq!(i_to_val(id).as_slice(), reader.value());
+            assert_eq!(i_to_row_id(id).as_slice(), reader.row_id());
+        }
+        reader.next().unwrap();
+        assert!(!reader.valid());
+    }
+
+    #[test]
+    fn test_merge_iterator() {
+        let reader_count = 3;
+        let kv_count_per_reader = 5;
+        let kv_pair_size = get_kv_pair_size();
+        let mut ids: Vec<usize> = (0..reader_count * kv_count_per_reader).collect();
+        ids.shuffle(&mut thread_rng());
+
+        let mut kv_pairs = Vec::with_capacity(ids.len());
+        for id in ids.iter() {
+            kv_pairs.push(KvPair::new(
+                Bytes::from(i_to_key(1, id)),
+                Bytes::from(i_to_val(id)),
+                Bytes::from(i_to_row_id(id)),
+            ));
+        }
+
+        let tmp_dir = TempDir::new().unwrap();
+        let mut readers = vec![];
+        for i in 0..reader_count {
+            let kv_pairs_part =
+                kv_pairs[i * kv_count_per_reader..(i + 1) * kv_count_per_reader].to_vec();
+            let path = tmp_dir.path().join(format!(
+                "test_merge_iterator_{}",
+                Utc::now().timestamp_millis()
+            ));
+            let reader = generate_reader(
+                kv_pairs_part,
+                path.clone(),
+                kv_pair_size * (kv_count_per_reader / 2),
+            );
+            readers.push(reader);
+            sleep(Duration::from_millis(3));
+        }
+        let mut merge_iter = MergeIterator::new(readers, "".as_bytes(), true).unwrap();
+
+        ids.sort();
+        for id in ids.iter() {
+            assert_eq!(i_to_key(1, id).as_slice(), merge_iter.key());
+            assert_eq!(i_to_val(id).as_slice(), merge_iter.value());
+            assert_eq!(i_to_row_id(id).as_slice(), merge_iter.row_id());
+            merge_iter.next().unwrap();
+        }
+        assert!(!merge_iter.valid());
+    }
+
+    fn generate_reader(kv_pairs: Vec<KvPair>, path: PathBuf, batch_size: usize) -> KvPairsReader {
+        let mock_task_ctx = TaskContext {
+            task_id: "mock_load_data_id".to_string(),
+            start_ts: 0,
+            commit_ts: 0,
+            inner_key_off: None,
+            key_prefix: vec![],
+            encryption_key: None,
+            new_client: true,
+        };
+        flush_to_local_file(kv_pairs, mock_task_ctx, path, batch_size).unwrap()
+    }
+
+    fn i_to_key(table_id: i64, i: &usize) -> Vec<u8> {
+        table::encode_row_key(table_id, *i as i64) // 19 bytes
+    }
+
+    fn i_to_val(i: &usize) -> Vec<u8> {
+        format!("val_{:08}", i).repeat(10).into_bytes() // 120 bytes
+    }
+
+    fn i_to_row_id(i: &usize) -> Vec<u8> {
+        format!("row_{:08}", i).into_bytes() // 12 bytes
+    }
+
+    fn get_kv_pair_size() -> usize {
+        19 + 120 + 12
     }
 }
