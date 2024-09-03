@@ -169,6 +169,7 @@ pub(crate) fn execute_check_table(args: CheckTableArgs) {
         cluster_backup.backup_ts,
         false,
         None,
+        true,
     )
     .unwrap();
     let check_table_ts = if config.timestamp > 0 {

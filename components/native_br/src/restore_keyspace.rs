@@ -24,7 +24,8 @@ use kvengine::{
     dfs::{self, Dfs, FileType, S3Fs},
     limiter::StoreLimiter,
     table::{BoundedDataSet, DataBound, InnerKey},
-    IdVer, ShardMeta, ShardRange, ShardStats, ShardTag, ENCRYPTION_KEY, GLOBAL_SHARD_END_KEY,
+    IdVer, LoadTableFilterFn, ShardMeta, ShardRange, ShardStats, ShardTag, ENCRYPTION_KEY,
+    GLOBAL_SHARD_END_KEY,
 };
 use kvenginepb as pb;
 use kvproto::{metapb, metapb::PeerRole, raft_serverpb::MergeState};
@@ -281,6 +282,7 @@ pub fn restore_keyspace(
         truncate_ts,
         false,
         archive_reader,
+        false,
     )?;
     step!(
         "Keyspace {} restore {} shards from backup",
@@ -642,7 +644,11 @@ pub struct BackupCluster {
 
     // Wrap by `Option` to detect use before filled.
     txn_chunk_ids_in_wal: Option<Vec<u64>>,
-    // new members need to check if need to clear in reset_keyspace.
+
+    // `false` for restoration.
+    // `true` for "check_table" to read data from backup directly.
+    load_all_tables: bool,
+    // NOTE: New members need to check if need to clear in reset_keyspace.
 }
 
 impl Drop for BackupCluster {
@@ -663,6 +669,7 @@ impl BackupCluster {
         truncate_ts: u64,
         archiving: bool,
         archive_reader: Option<ArchiveReader>,
+        load_all_tables: bool, // `true` for "check_table" ONLY.
     ) -> Result<BackupCluster> {
         let (keyspace_start, keyspace_end) = if archiving {
             (Vec::default(), GLOBAL_SHARD_END_KEY.to_vec())
@@ -695,6 +702,7 @@ impl BackupCluster {
             meta_sender: None,
             tolerated_err: 0,
             txn_chunk_ids_in_wal: None,
+            load_all_tables,
         };
 
         let mut store_configs = HashMap::with_capacity(cluster_meta.stores.len());
@@ -959,15 +967,19 @@ impl BackupCluster {
                 metas.len()
             );
 
-            // Load the following tables from DFS:
-            // 1. Tables of shards need truncate, to get the `max_ts`.
-            // 2. Tables has locks (L0 & LOCK_CF) to replay commit requests.
-            let shard_need_truncate = self.shards_need_truncate.clone();
-            let table_filter = move |shard_id: u64, tb: &kvengine::FileMeta| -> bool {
-                shard_need_truncate.contains(&shard_id) || tb.has_locks()
+            let table_filter: Option<LoadTableFilterFn> = if self.load_all_tables {
+                None
+            } else {
+                // Load the following tables from DFS:
+                // 1. Tables of shards need truncate, to get the `max_ts`.
+                // 2. Tables has locks (L0 or LOCK_CF) to replay commit requests.
+                let shard_need_truncate = self.shards_need_truncate.clone();
+                let table_filter = move |shard_id: u64, tb: &kvengine::FileMeta| -> bool {
+                    shard_need_truncate.contains(&shard_id) || tb.has_locks()
+                };
+                Some(Arc::new(table_filter))
             };
-
-            kv_engine.load_shards(metas, recoverer, Some(Arc::new(table_filter)))?;
+            kv_engine.load_shards(metas, recoverer, table_filter)?;
         }
         Ok(())
     }

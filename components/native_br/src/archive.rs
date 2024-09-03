@@ -518,6 +518,7 @@ fn get_cluster_backup_files(
         cluster_backup.backup_ts,
         true,
         None,
+        false,
     )?;
     let all_files = HashMap::from_iter(
         cluster
