@@ -56,24 +56,28 @@ impl FileSystemInspector for EngineFileSystemInspector {
     }
 }
 
+/// Note:
+/// * `start_off` is `None` & `end_off` is `Some(n)`: read last n bytes.
+/// * Both `start_off` & `end_off` are `None`: read total object.
 #[derive(Debug, Default)]
 pub struct GetObjectOptions {
-    pub start_off: u64,
+    pub start_off: Option<u64>,
     pub end_off: Option<u64>,
 }
 
 impl GetObjectOptions {
     pub fn is_full_range(&self) -> bool {
-        self.start_off == 0 && self.end_off.is_none()
+        self.start_off.unwrap_or_default() == 0 && self.end_off.is_none()
     }
 
     pub fn range_string(&self) -> String {
         // https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObject.html
-        // For example, the first 10 bytes:
-        // Range: bytes=0-9
+        // For example:
+        // The first 10 bytes: Range: bytes=0-9
+        // The last 10 bytes: Range: bytes=-10
         format!(
             "{}-{}",
-            self.start_off,
+            self.start_off.map_or(String::new(), |s| format!("{}", s)),
             self.end_off.map_or(String::new(), |e| format!("{}", e - 1))
         )
     }

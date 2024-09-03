@@ -7808,6 +7808,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "api_version",
+ "async-stream 0.2.0",
  "bstr",
  "bytes",
  "chrono",

@@ -13,7 +13,7 @@ use bytes::{Buf, Bytes};
 use engine_traits::{GetObjectOptions, ListObjectContent, ObjectStorage};
 use farmhash::fingerprint64;
 use futures::StreamExt;
-use http::StatusCode;
+use http::{header::CONTENT_RANGE, StatusCode};
 use hyper_tls::HttpsConnector;
 use regex::Regex;
 use rusoto_core::{
@@ -309,8 +309,8 @@ impl S3FsCore {
             req.set_params(params);
             let mut result = self.dispatch(req, ListObjectsV2Error::from_response).await;
             if result.is_ok() {
-                let response = result.unwrap();
-                let body_res = self.read_body(response).await;
+                let mut response = result.unwrap();
+                let body_res = self.read_body(&mut response).await;
                 if body_res.is_ok() {
                     let body = body_res.unwrap();
                     let body_str = body.to_str().unwrap();
@@ -358,8 +358,8 @@ impl S3FsCore {
             req.set_params(params);
             let mut result = self.dispatch(req, ListObjectsV2Error::from_response).await;
             if result.is_ok() {
-                let response = result.unwrap();
-                let body_res = self.read_body(response).await;
+                let mut response = result.unwrap();
+                let body_res = self.read_body(&mut response).await;
                 if body_res.is_ok() {
                     let body = body_res.unwrap();
                     let body_str = body.to_str().unwrap();
@@ -399,8 +399,8 @@ impl S3FsCore {
                 .dispatch(req, GetObjectTaggingError::from_response)
                 .await;
             if result.is_ok() {
-                let resp = result.unwrap();
-                let body_res = self.read_body(resp).await;
+                let mut resp = result.unwrap();
+                let body_res = self.read_body(&mut resp).await;
                 if body_res.is_ok() {
                     let body = body_res.unwrap();
                     let body_str = body.to_str().unwrap();
@@ -499,7 +499,7 @@ impl S3FsCore {
         Ok(Response { resp })
     }
 
-    async fn read_body(&self, mut resp: Response) -> Result<Bytes, HttpDispatchError> {
+    async fn read_body(&self, resp: &mut Response) -> Result<Bytes, HttpDispatchError> {
         let cap = resp
             .headers
             .remove("Content-Length")
@@ -522,6 +522,17 @@ impl S3FsCore {
         file_name: String,
         opts: GetObjectOptions,
     ) -> crate::dfs::Result<Bytes> {
+        let (data, _) = self.get_object_ext(key, file_name, opts, false).await?;
+        Ok(data)
+    }
+
+    pub async fn get_object_ext(
+        &self,
+        key: String,
+        file_name: String,
+        opts: GetObjectOptions,
+        need_complete_length: bool,
+    ) -> crate::dfs::Result<(Bytes, Option<u64> /* complete_length */)> {
         let mut retry_cnt = 0;
         let start_time = Instant::now_coarse();
         loop {
@@ -532,8 +543,8 @@ impl S3FsCore {
             let mut result = self.dispatch(req, GetObjectError::from_response).await;
 
             if result.is_ok() {
-                let resp = result.unwrap();
-                let body = self.read_body(resp).await;
+                let mut resp = result.unwrap();
+                let body = self.read_body(&mut resp).await;
                 match body {
                     Ok(data) => {
                         info!(
@@ -543,13 +554,24 @@ impl S3FsCore {
                             start_time.saturating_elapsed(),
                             retry_cnt
                         );
+
+                        let complete_length = if need_complete_length {
+                            if opts.is_full_range() {
+                                Some(data.len() as u64)
+                            } else {
+                                parse_content_range(resp.headers.get(CONTENT_RANGE))
+                            }
+                        } else {
+                            None
+                        };
+
                         KVENGINE_DFS_THROUGHPUT_VEC
                             .with_label_values(&["read"])
                             .inc_by(data.len() as u64);
                         KVENGINE_DFS_LATENCY_VEC
                             .with_label_values(&["read"])
                             .observe(start_time.saturating_elapsed().as_millis() as f64);
-                        return Ok(data);
+                        return Ok((data, complete_length));
                     }
                     Err(err) => result = Err(err.into()),
                 }
@@ -1086,6 +1108,25 @@ impl Debug for Response {
     }
 }
 
+/// Ref: https://www.rfc-editor.org/rfc/rfc9110.html#section-14.4, Content-Range
+///
+/// Examples:
+///
+/// - bytes 0-499/1234
+/// - bytes 42-1233/*
+/// - bytes */1234 (when response with 416 Range Not Satisfiable)
+fn parse_content_range<S: AsRef<str>>(content_range: Option<S>) -> Option<u64> {
+    let content_range = content_range?;
+    let content_range = content_range.as_ref();
+    if content_range.starts_with("bytes ") {
+        let parts: Vec<&str> = content_range.split('/').collect();
+        if parts.len() == 2 {
+            return parts[1].parse::<u64>().ok();
+        }
+    }
+    None
+}
+
 #[cfg(any(test, feature = "testexport"))]
 pub mod test_util {
     use std::str;
@@ -1294,5 +1335,20 @@ mod tests {
             tagging_deleted.tag_set.tag,
             Tagging::from_url_encoded("deleted=true").tag_set.tag
         );
+    }
+
+    #[test]
+    fn test_parse_content_range() {
+        let cases = [
+            (None, None),
+            (Some(""), None),
+            (Some("bytes"), None),
+            (Some("bytes 0-499/1234"), Some(1234)),
+            (Some("bytes 42-1233/*"), None),
+            (Some("bytes */1234"), Some(1234)),
+        ];
+        for (content_range, expected) in cases {
+            assert_eq!(parse_content_range(content_range), expected);
+        }
     }
 }

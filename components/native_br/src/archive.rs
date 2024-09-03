@@ -709,7 +709,7 @@ pub async fn get_archived_object(s3fs: &S3Fs, archive_addr: ArchiveAddress) -> R
         archive_addr.object_addr.package_id,
     );
     let opts = GetObjectOptions {
-        start_off: archive_addr.object_addr.offset,
+        start_off: Some(archive_addr.object_addr.offset),
         end_off: Some(archive_addr.object_addr.offset + archive_addr.object_addr.length),
     };
     s3fs.get_object(package_key.clone(), package_key, opts)

@@ -709,7 +709,7 @@ fn restore_keyspace_raft_logs(
     let raft_file_key = snapshot_rlog
         .unwrap_or_else(|| store_raft_log_file_key(store_id, store_meta.get_manifest().epoch_id));
     let option = GetObjectOptions {
-        start_off: store_meta.raft_meta_start_off,
+        start_off: Some(store_meta.raft_meta_start_off),
         end_off: None,
     };
     let raft_meta_data = object_storage
@@ -733,7 +733,7 @@ fn restore_keyspace_raft_logs(
         return;
     }
     let option = GetObjectOptions {
-        start_off: raft_files.first().unwrap().start_off,
+        start_off: Some(raft_files.first().unwrap().start_off),
         end_off: Some(raft_files.last().unwrap().end_off),
     };
     let keyspace_raft_data = object_storage

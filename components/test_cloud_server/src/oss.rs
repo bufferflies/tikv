@@ -14,18 +14,22 @@ use std::{
     time::Duration,
 };
 
-use bytes::Buf;
+use anyhow::{anyhow, bail, Context};
+use async_stream::{try_stream, AsyncStream};
+use bytes::{Buf, Bytes};
 use chrono::{DateTime, Utc};
 use engine_traits::ListObjectContent;
 use futures::{future::ok, StreamExt, TryStreamExt};
 use glob::glob;
 use hyper::{
+    header,
     header::HeaderValue,
     service::{make_service_fn, service_fn},
     Body, HeaderMap, Method, Request, Response, Server, StatusCode,
 };
 use kvengine::dfs::{CommonPrefix, DFSConfig, ListObjects, Tagging, STORAGE_CLASS_DEFAULT};
 use rand::Rng;
+use regex::Regex;
 use tempfile::TempDir;
 use tikv_util::{debug, error, info, time::Instant};
 use tokio::{
@@ -39,7 +43,9 @@ use tokio::{
 use tokio_util::codec::{BytesCodec, FramedRead};
 use url::form_urlencoded;
 
-type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+const GET_OBJECT_BATCH_SIZE: usize = 16 * 1024;
+
+type Result<T> = std::result::Result<T, anyhow::Error>;
 type HttpResult = std::result::Result<Response<Body>, hyper::Error>;
 
 struct ServiceContext {
@@ -132,11 +138,11 @@ impl ObjectStorageService {
         let file_path = Self::make_file_path(&ctx.store_path, parts.uri.path());
         let parent = file_path
             .parent()
-            .ok_or(format!("fail to get parent for {:?}", file_path))?;
+            .ok_or(anyhow!("fail to get parent for {:?}", file_path))?;
         let tmp_file_path = {
             let file_name = file_path
                 .file_name()
-                .ok_or(format!("fail to get file name for {:?}", file_path))?
+                .ok_or(anyhow!("fail to get file name for {:?}", file_path))?
                 .to_str()
                 .unwrap();
             parent.to_path_buf().join(format!(
@@ -176,24 +182,34 @@ impl ObjectStorageService {
         Ok(resp)
     }
 
-    // Return none means get all content in file.
-    // End is none means read to end.
-    fn parse_get_object_req_range(headers: &HeaderMap<HeaderValue>) -> Option<(u64, Option<u64>)> {
-        if let Some(v) = headers.get("Range") {
-            let regex = regex::Regex::new(r"bytes=(\d+)-(\d*)").unwrap();
-            let matches = regex.captures(v.to_str().unwrap()).unwrap();
-            let start_str = matches.get(1).unwrap().as_str();
-            let start = start_str.parse::<u64>().unwrap();
-            let end_str = matches.get(2).unwrap().as_str();
-            let end = if end_str.is_empty() {
-                None
-            } else {
-                Some(end_str.parse::<u64>().unwrap())
-            };
-            Some((start, end))
-        } else {
-            None
+    /// Parse header "Range" and return the range to read.
+    ///
+    /// Note that the return `end` is exclusive, i.e. [start, end), while the
+    /// "end" in "Range" header is inclusive.
+    ///
+    /// When `start` is None, it means read the last `end` bytes.
+    ///
+    /// Ref: https://www.rfc-editor.org/rfc/rfc9110.html#section-14.1.2, Byte Ranges.
+    fn parse_get_object_req_range(
+        headers: &HeaderMap<HeaderValue>,
+    ) -> Result<(Option<u64>, Option<u64>)> {
+        lazy_static::lazy_static! {
+            static ref RE: Regex = Regex::new(r"bytes=(\d*)-(\d*)").unwrap();
         }
+
+        let Some(v) = headers.get(header::RANGE) else {
+            return Ok((None, None));
+        };
+        let Some(matches) = RE.captures(v.to_str().unwrap()) else {
+            bail!("bad range: {:?}", v);
+        };
+
+        let start_str = matches.get(1).unwrap().as_str();
+        let start = start_str.parse::<u64>().ok();
+        let end_str = matches.get(2).unwrap().as_str();
+        // Convert to exclusive end.
+        let end = end_str.parse::<u64>().map(|x| x + 1).ok();
+        Ok((start, end))
     }
 
     async fn handle_head_object(
@@ -242,34 +258,70 @@ impl ObjectStorageService {
     ) -> Result<Response<Body>> {
         let (parts, _) = req.into_parts();
         let file_path = Self::make_file_path(&ctx.store_path, parts.uri.path());
-        let range = Self::parse_get_object_req_range(&parts.headers);
+        let Ok((start, end)) = Self::parse_get_object_req_range(&parts.headers) else {
+            return Ok(Self::bad_request("bad range".to_string()));
+        };
         info!(
-            "handle_get_object: file_path {}",
-            file_path.to_str().unwrap()
+            "handle_get_object: file_path {}, range [{:?}, {:?})",
+            file_path.to_str().unwrap(),
+            start,
+            end
         );
         let res = if let Ok(mut file) = File::open(file_path).await {
             ctx.do_delay().await;
 
-            let body = match range {
-                None => {
+            let (body, content_range) = match (start, end) {
+                (None, None) => {
                     let stream = FramedRead::new(file, BytesCodec::new());
-                    Body::wrap_stream(stream)
+                    (Body::wrap_stream(stream), None)
                 }
-                Some(r) => {
-                    let end = if r.1.is_none() {
-                        file.metadata().await.unwrap().len()
-                    } else {
-                        r.1.unwrap() + 1
+                (start, end) => {
+                    let file_len = file.metadata().await.context("metadata")?.len();
+                    let (start, end) = match (start, end) {
+                        (Some(s), Some(e)) => (s, cmp::min(e, file_len)),
+                        (Some(s), None) => (s, file_len),
+                        (None, Some(e)) => (file_len.saturating_sub(e), file_len),
+                        (None, None) => unreachable!(),
                     };
-                    assert!(end > r.0);
-                    // TODO: implement range read with FramedRead.
-                    file.seek(SeekFrom::Start(r.0)).await.unwrap();
-                    let mut buf = vec![0u8; (end - r.0) as usize];
-                    file.read_exact(&mut buf).await.unwrap();
-                    Body::from(buf)
+
+                    if start >= end {
+                        // Note: S3 accept "start >= end" and return the whole object. We are more
+                        // strict here.
+                        return Ok(Self::bad_request(format!(
+                            "invalid range: [{}, {})",
+                            start, end
+                        )));
+                    }
+
+                    file.seek(SeekFrom::Start(start)).await.context("seek")?;
+                    let read_total = end - start;
+                    let batch_size = cmp::min(GET_OBJECT_BATCH_SIZE, read_total as usize);
+                    let mut buf = vec![0u8; batch_size];
+
+                    let stream: AsyncStream<Result<Bytes>, _> = try_stream! {
+                        let mut offset = 0;
+                        while offset < read_total {
+                            let read_size = cmp::min(batch_size, (read_total - offset) as usize);
+                            let read = file.read(&mut buf[..read_size]).await.context("read")?;
+                            if read == 0 {
+                                break;
+                            }
+                            yield Bytes::from(buf[..read].to_vec());
+                            offset += read as u64;
+                        }
+                    };
+
+                    // Ref: https://www.rfc-editor.org/rfc/rfc9110.html#section-14.4, Content-Range.
+                    let range_resp = format!("bytes {start}-{end}/{file_len}");
+
+                    (Body::wrap_stream(stream), Some(range_resp))
                 }
             };
-            Response::new(body)
+            let mut resp = Response::builder();
+            if let Some(content_range) = content_range {
+                resp = resp.header("Content-Range", content_range);
+            }
+            resp.status(StatusCode::OK).body(body).unwrap()
         } else {
             info!("handle_get_object: path not found: {}", parts.uri.path());
             Self::not_found()
@@ -315,16 +367,16 @@ impl ObjectStorageService {
         let copy_source = parts
             .headers
             .get("x-amz-copy-source")
-            .ok_or("x-amz-copy-source is missing")?
+            .ok_or(anyhow!("x-amz-copy-source is missing"))?
             .to_str()
             .unwrap();
         let target = parts.uri.path().strip_prefix('/').unwrap();
         if copy_source != target {
-            return Err(format!(
+            return Err(anyhow!(
                 "support copy from same source only, source {}, target {}",
-                copy_source, target
-            )
-            .into());
+                copy_source,
+                target
+            ));
         }
 
         let file_path = Self::make_file_path(&ctx.store_path, parts.uri.path());
@@ -339,7 +391,7 @@ impl ObjectStorageService {
             let tagging_str = parts
                 .headers
                 .get("x-amz-tagging")
-                .ok_or("x-amz-tagging is missing")?;
+                .ok_or(anyhow!("x-amz-tagging is missing"))?;
             let tagging = Tagging::from_url_encoded(tagging_str.to_str().unwrap());
             info!("Copy object {} with replacing tagging: {:?}", file, tagging);
             ctx.insert_tagging(file, tagging);
@@ -542,6 +594,13 @@ impl ObjectStorageService {
             .unwrap()
     }
 
+    fn bad_request(msg: String) -> Response<Body> {
+        Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .body(Body::from(msg))
+            .unwrap()
+    }
+
     pub fn start_server(&mut self) {
         assert!(self.svc_handle.is_none(), "server has started");
 
@@ -652,7 +711,8 @@ mod tests {
         dfs,
         dfs::{Dfs, FileType, Options, S3Fs},
     };
-    use rand::prelude::ThreadRng;
+    use rand::prelude::*;
+    use tikv_util::codec::number::U64_SIZE;
 
     use super::*;
 
@@ -712,7 +772,7 @@ mod tests {
                 let exist = fs.exist(key.clone(), file_id.to_string()).await.unwrap();
                 assert!(exist);
                 let opts = engine_traits::GetObjectOptions {
-                    start_off: range.0 as u64,
+                    start_off: Some(range.0 as u64),
                     end_off: Some(range.1 as u64),
                 };
                 let read_data = fs
@@ -721,7 +781,7 @@ mod tests {
                     .unwrap();
                 assert_eq!(write_data.slice(range.0..range.1), read_data);
                 let opts = engine_traits::GetObjectOptions {
-                    start_off: range.0 as u64,
+                    start_off: Some(range.0 as u64),
                     end_off: None,
                 };
                 let read_data = fs
@@ -1001,6 +1061,65 @@ mod tests {
                 // list with prefix and delimiter
                 let folders = s3fs.list_folders("B/", None).await.unwrap();
                 assert_eq!(folders.len(), 0);
+            }
+        });
+
+        oss.graceful_shutdown();
+    }
+
+    #[test]
+    fn test_oss_get_object() {
+        test_util::init_log_for_test();
+
+        let base_dir = tempfile::Builder::new()
+            .prefix("test_oss_")
+            .tempdir()
+            .unwrap();
+
+        let mut oss = ObjectStorageService::new(base_dir.path());
+        oss.start_server();
+
+        let s3fs = S3Fs::new(
+            "oss_test".to_string(),
+            format!("http://127.0.0.1:{}", oss.port()),
+            "admin".to_string(),
+            "admin".to_string(),
+            "local".to_string(),
+            "cse_test".to_string(),
+        );
+
+        let mut rng = thread_rng();
+        let data: Vec<u8> = (0..GET_OBJECT_BATCH_SIZE * 4 / U64_SIZE)
+            .flat_map(|_| rng.gen::<u64>().to_be_bytes())
+            .collect();
+        let data = Bytes::from(data);
+        let data_len = data.len();
+        assert_eq!(data_len, GET_OBJECT_BATCH_SIZE * 4);
+
+        let runtime = s3fs.get_runtime();
+        runtime.block_on(async {
+            s3fs.create(1, data.clone(), Options::default())
+                .await
+                .unwrap();
+            assert_eq!(s3fs.read_file(1, Options::default()).await.unwrap(), data);
+
+            let cases = [
+                // start_off, end_off, expected
+                (Some(10), None, data.slice(10..)),
+                (Some(10), Some(20), data.slice(10..20)),
+                (None, None, data.clone()),
+                (None, Some(100), data.slice(data_len - 100..data_len)),
+                (None, Some(data_len as u64 + 1), data.clone()),
+            ];
+
+            for (start_off, end_off, expected) in cases {
+                let opts = engine_traits::GetObjectOptions { start_off, end_off };
+                let (read_data, complete_length) = s3fs
+                    .get_object_ext(s3fs.file_key(1, FileType::Sst), "1".to_string(), opts, true)
+                    .await
+                    .unwrap();
+                assert_eq!(read_data, expected);
+                assert_eq!(complete_length.unwrap(), data_len as u64);
             }
         });
 
