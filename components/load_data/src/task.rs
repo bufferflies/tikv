@@ -838,19 +838,20 @@ impl LoadTaskWorker {
                 kv_count: unhandled_reader.kv_count,
             })
         }
-        for (writer_id, chunk_id) in handled_chunk_ids.clone() {
-            self.scheduler.update_flushed_chunk(writer_id, chunk_id);
-        }
 
         // Due to flush is async,
         // we need to update handled_chunk_ids and max_file_idx in handle_readers,
         // to make sure the value of handled_chunk_ids and max_file_idx are always
         // increasing.
         check_point_store_guard.update_flushed_info(
-            handled_chunk_ids,
+            handled_chunk_ids.clone(),
             max_file_idx,
             local_file_infos,
         )?;
+
+        for (writer_id, chunk_id) in handled_chunk_ids {
+            self.scheduler.update_flushed_chunk(writer_id, chunk_id);
+        }
 
         info!("{} handle {} readers", self.task_ctx.task_id, need_handled);
         Ok(())

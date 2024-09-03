@@ -273,6 +273,7 @@ impl LocalFileCheckPointStorage {
             .create(true)
             .open(&tmp_file)?;
         file.write_all(content)?;
+        file.flush()?;
 
         fs::rename(tmp_file, self.get_file_path())?;
         Ok(())
