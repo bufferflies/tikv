@@ -6,7 +6,7 @@ use api_version::ApiV2;
 use kvengine::{
     table::{
         txn_file::{TxnCtx, TxnFile, TxnFileId, TxnFileIterator, OP_CHECK_NOT_EXIST, OP_INSERT},
-        InnerKey,
+        BoundedDataSet, InnerKey,
     },
     txn_chunk_manager::TxnChunkManager,
     Iterator, SnapAccess, UserMeta, LOCK_CF, WRITE_CF,
@@ -319,10 +319,7 @@ impl TxnFileCommand {
     ) -> crate::storage::mvcc::Result<ProcessResult> {
         self.txn_file.validate()?;
 
-        if !self
-            .txn_file
-            .has_data_in_range(snap_access.get_inner_start(), snap_access.get_inner_end())
-        {
+        if !self.txn_file.has_data_in_bound(snap_access.data_bound()) {
             error!("process_prewrite: txn file has no data in region"; "start_ts" => self.ts());
             return Err(box_err!("txn file has no data in region"));
         }

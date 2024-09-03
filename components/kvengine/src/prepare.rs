@@ -28,7 +28,7 @@ use crate::{
     table::{
         columnar::SchemaFile,
         file::{InMemFile, LocalFile},
-        table::TableExt,
+        BoundedDataSet,
     },
     EngineCore, *,
 };
@@ -302,7 +302,7 @@ impl EngineCore {
         let load_tables = data
             .unloaded_tbls
             .iter()
-            .filter(|&(_, tbl)| shard.overlap_table(tbl.smallest(), tbl.biggest()))
+            .filter(|&(_, tbl)| shard.overlap_bound(tbl.data_bound()))
             .map(|(id, tbl)| (*id, tbl.clone()))
             .collect();
         info!("{} load_unloaded_tables: {:?}", shard.tag(), load_tables);

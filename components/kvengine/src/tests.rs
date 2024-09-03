@@ -45,8 +45,8 @@ use crate::{
         },
         file::{File, InMemFile},
         sstable::{L0Builder, L0Table, SsTable},
-        ChecksumType, InnerKey, NoPrefixKey, TxnChunkBuilder, TxnCtx, TxnFile, TxnFileId,
-        BIT_DELETE, OP_PUT,
+        BoundedDataSet, ChecksumType, DataBound, InnerKey, NoPrefixKey, TxnChunkBuilder, TxnCtx,
+        TxnFile, TxnFileId, BIT_DELETE, OP_PUT,
     },
     *,
 };
@@ -897,10 +897,10 @@ fn test_level_overlapping_tables(#[case] enable_inner_key_off: bool) {
     let cf0 = data.get_cf(0);
     let level1 = cf0.get_level(1);
     let get_overlapping_tables = |start: usize, end: usize| -> (usize, usize) {
-        level1.overlapping_tables_exclusive_end(
-            engine.key_builder.i_to_inner_key(start).as_ref(),
-            engine.key_builder.i_to_inner_key(end).as_ref(),
-        )
+        let inner_start = engine.key_builder.i_to_inner_key(start);
+        let inner_end = engine.key_builder.i_to_inner_key(end);
+        let bound = DataBound::new(inner_start.as_ref(), inner_end.as_ref(), false);
+        bound.get_overlap_data_sets(&level1.tables)
     };
 
     assert_eq!(get_overlapping_tables(0, 10), (0, 0));
@@ -3100,7 +3100,10 @@ fn check_iterater(begin: usize, end: usize, en: &Engine) {
 fn get_shard_for_key(key: &[u8], en: &Engine) -> Arc<Shard> {
     for id in 1_u64..=5 {
         if let Some(shard) = en.get_shard(id) {
-            if shard.overlap_key(InnerKey::from_inner_buf(key)) {
+            if shard
+                .data_bound()
+                .overlap_key(InnerKey::from_inner_buf(key))
+            {
                 return shard;
             }
         }

@@ -16,7 +16,7 @@ use crate::table::{
     file::File,
     parse_prop_data, search,
     sstable::PROP_KEY_ENCRYPTION_VER,
-    InnerKey, LZ4_COMPRESSION,
+    BoundedDataSet, DataBound, InnerKey, LZ4_COMPRESSION,
 };
 
 pub const HANDLE_COL_ID: i32 = -1;
@@ -501,6 +501,12 @@ impl ColumnarFile {
 
     pub fn get_encryption_ver(&self) -> u32 {
         self.core.encryption_ver
+    }
+}
+
+impl BoundedDataSet for ColumnarFile {
+    fn data_bound(&self) -> DataBound<'_> {
+        DataBound::new(self.get_smallest(), self.get_biggest(), true)
     }
 }
 

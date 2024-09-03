@@ -120,29 +120,16 @@ impl SsTable {
         Value::decode(out_val_owner.as_slice())
     }
 
-    pub fn has_overlap(&self, start: InnerKey<'_>, end: InnerKey<'_>, include_end: bool) -> bool {
-        if start > self.biggest() {
+    pub fn has_overlap(&self, data_bound: DataBound<'_>) -> bool {
+        if !self.data_bound().overlap_bound(data_bound) {
             return false;
         }
-        match end.cmp(&self.smallest()) {
-            Ordering::Less => {
-                return false;
-            }
-            Ordering::Equal => {
-                return include_end;
-            }
-            _ => {}
-        }
         let mut it = self.new_iterator(false, true);
-        it.seek(start);
+        it.seek(data_bound.lower_bound);
         if !it.valid() {
             return it.error().is_some();
         }
-        match it.key().cmp(&end) {
-            Ordering::Greater => false,
-            Ordering::Equal => include_end,
-            _ => true,
-        }
+        !data_bound.less_than_key(it.key())
     }
 
     pub fn get_newer(
@@ -172,13 +159,9 @@ impl SsTable {
     }
 }
 
-impl TableExt for SsTable {
-    fn smallest(&self) -> InnerKey<'_> {
-        self.core.smallest()
-    }
-
-    fn biggest(&self) -> InnerKey<'_> {
-        self.core.biggest()
+impl BoundedDataSet for SsTable {
+    fn data_bound(&self) -> DataBound<'_> {
+        DataBound::new(self.smallest(), self.biggest(), true)
     }
 }
 

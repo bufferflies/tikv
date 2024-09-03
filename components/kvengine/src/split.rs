@@ -20,7 +20,7 @@ use dashmap::mapref::entry::Entry;
 use kvenginepb as pb;
 use slog_global::info;
 
-use crate::{table::TableExt, *};
+use crate::{table::BoundedDataSet, *};
 
 #[derive(Debug)]
 pub struct CheckMergeResult {
@@ -122,7 +122,7 @@ impl Engine {
             let mut new_l0s = vec![];
             let mut new_unconverted_l0s = vec![];
             for l0 in &old_data.l0_tbls {
-                if new_shard.overlap_table(l0.smallest(), l0.biggest()) {
+                if new_shard.range.data_bound().overlap_bound(l0.data_bound()) {
                     new_l0s.push(l0.clone());
                     if unconverted_l0s.contains(&l0.id()) {
                         new_unconverted_l0s.push(l0.clone());
@@ -131,7 +131,7 @@ impl Engine {
             }
             let mut new_blob_tbl_map = HashMap::new();
             for blob_tbl in old_data.blob_tbl_map.values() {
-                if new_shard.overlap_table(blob_tbl.smallest_key(), blob_tbl.biggest_key()) {
+                if new_shard.overlap_bound(blob_tbl.data_bound()) {
                     new_blob_tbl_map.insert(blob_tbl.id(), blob_tbl.clone());
                 }
             }
@@ -141,7 +141,7 @@ impl Engine {
                 for lh in &old_scf.levels {
                     let mut new_level_tbls = vec![];
                     for tbl in lh.tables.as_slice() {
-                        if new_shard.overlap_table(tbl.smallest(), tbl.biggest()) {
+                        if new_shard.overlap_bound(tbl.data_bound()) {
                             new_level_tbls.push(tbl.clone());
                         }
                     }
@@ -155,7 +155,7 @@ impl Engine {
             for col_level in &old_data.col_levels.levels {
                 let new_col_level = &mut new_col_levels.levels[col_level.level];
                 for col_file in &col_level.files {
-                    if new_shard.overlap_table(col_file.get_smallest(), col_file.get_biggest()) {
+                    if new_shard.overlap_bound(col_file.data_bound()) {
                         new_col_level.files.push(col_file.clone());
                     }
                 }

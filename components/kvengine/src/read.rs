@@ -33,8 +33,8 @@ use crate::{
         },
         memtable::{CfTable, Hint, SkipList, WriteBatch},
         sstable::BlockCacheKey,
-        table, InnerKey, Iterator as TableIterator, SkipOpTxnFileIterator, TableExt, TxnFile,
-        TxnFileIterator,
+        table, BoundedDataSet, DataBound, InnerKey, Iterator as TableIterator,
+        SkipOpTxnFileIterator, TxnFile, TxnFileIterator,
     },
     txn_chunk_manager::TxnChunkManager,
     *,
@@ -313,6 +313,12 @@ impl Deref for SnapAccess {
 impl Debug for SnapAccess {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "snap access {}, seq: {}", self.tag, self.write_sequence,)
+    }
+}
+
+impl BoundedDataSet for SnapAccess {
+    fn data_bound(&self) -> DataBound<'_> {
+        self.data.range.data_bound()
     }
 }
 
@@ -809,7 +815,8 @@ impl SnapAccessCore {
                     InnerKey::from_outer_key(outer_start, self.data.range.inner_key_off);
                 let inner_end =
                     InnerKey::from_outer_end_key(outer_end, self.data.range.inner_key_off);
-                if v.has_data_in_range(inner_start, inner_end) {
+                let bound = DataBound::new(inner_start, inner_end, false);
+                if v.has_data_in_bound(bound) {
                     overlap = true;
                     break;
                 }
@@ -849,7 +856,8 @@ impl SnapAccessCore {
                         InnerKey::from_outer_key(outer_start, self.data.range.inner_key_off);
                     let inner_end =
                         InnerKey::from_outer_end_key(outer_end, self.data.range.inner_key_off);
-                    if v.has_overlap(inner_start, inner_end, false) {
+                    let data_bound = DataBound::new(inner_start, inner_end, false);
+                    if v.has_overlap(data_bound) {
                         overlap = true;
                         break;
                     }
@@ -902,18 +910,19 @@ impl SnapAccessCore {
     }
 
     pub fn build_mem_data(&self, outer_ranges: &[(Bytes, Bytes)], start_ts: u64) -> Vec<u8> {
-        let inner_ranges: Vec<(InnerKey<'_>, InnerKey<'_>)> = outer_ranges
+        let data_bounds: Vec<DataBound<'_>> = outer_ranges
             .iter()
             .map(|range| {
-                (
+                DataBound::new(
                     InnerKey::from_outer_key(&range.0, self.data.inner_key_off),
                     InnerKey::from_outer_key(&range.1, self.data.inner_key_off),
+                    false,
                 )
             })
             .collect();
 
         let mut mem_data = Vec::with_capacity(U32_SIZE /* format */);
-        let (skls, txn_file_refs) = self.get_mem_tables_group_by_type(WRITE_CF, &inner_ranges);
+        let (skls, txn_file_refs) = self.get_mem_tables_group_by_type(WRITE_CF, &data_bounds);
 
         if txn_file_refs.get_txn_file_refs().is_empty() {
             // For backward compatible.
@@ -996,7 +1005,7 @@ impl SnapAccessCore {
     fn get_mem_tables_group_by_type(
         &self,
         cf: usize,
-        ranges: &[(InnerKey<'_>, InnerKey<'_>)],
+        bounds: &[DataBound<'_>],
     ) -> (Vec<SkipList>, TxnFileRefs) {
         let mut skls = Vec::new();
         let mut txn_file_refs = TxnFileRefs::default();
@@ -1006,7 +1015,7 @@ impl SnapAccessCore {
             for txn_file_ref in skl_ext
                 .get_txn_files()
                 .into_iter()
-                .filter_map(|txn_file| txn_file.to_txn_file_ref(Some(ranges)))
+                .filter_map(|txn_file| txn_file.to_txn_file_ref(Some(bounds)))
             {
                 txn_file_refs.mut_txn_file_refs().push(txn_file_ref);
             }

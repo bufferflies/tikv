@@ -12,8 +12,8 @@ use super::*;
 use crate::{
     max_ts_by_cf,
     table::{
-        blobtable::BlobRef, file::File, table::Result, ChecksumType, Error, InnerKey, TableExt,
-        Value, NO_COMPRESSION,
+        blobtable::BlobRef, file::File, table::Result, BoundedDataSet, ChecksumType, DataBound,
+        Error, InnerKey, Value, NO_COMPRESSION,
     },
     LOCK_CF, NUM_CFS, WRITE_CF,
 };
@@ -256,14 +256,14 @@ impl L0TableCore {
         self.footer.version
     }
 
-    pub fn has_data_in_range(&self, start: InnerKey<'_>, end: InnerKey<'_>) -> bool {
-        if self.smallest() >= end || self.biggest() < start {
+    pub fn has_data_in_bound(&self, bound: DataBound<'_>) -> bool {
+        if !self.data_bound().overlap_bound(bound) {
             return false;
         }
         self.cfs
             .iter()
             .filter_map(|t| t.as_ref())
-            .any(|t| t.has_overlap(start, end, false))
+            .any(|t| t.has_overlap(bound))
     }
 
     pub fn total_blob_size(&self) -> u64 {
@@ -272,6 +272,12 @@ impl L0TableCore {
 
     pub fn is_write_cf_only(&self) -> bool {
         self.footer.magic == MAGIC_NUMBER_SPLIT_L0
+    }
+}
+
+impl BoundedDataSet for L0TableCore {
+    fn data_bound(&self) -> DataBound<'_> {
+        DataBound::new(self.smallest(), self.biggest(), true)
     }
 }
 

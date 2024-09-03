@@ -1,6 +1,7 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
+    cmp::Ordering,
     fmt::{self, Debug, Formatter},
     iter::Iterator as StdIterator,
     mem::size_of,
@@ -614,61 +615,120 @@ impl<'a> NoPrefixKey<'a> {
     }
 }
 
-/// `TableExt` is used to make "table like" types (e.g. `TableCreate`,
-/// `FileMeta`, `SsTable`) comparable, and being able to check overlap with
-/// different types.
-pub trait TableExt: Sized {
-    fn smallest(&self) -> InnerKey<'_>;
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DataBound<'a> {
+    pub lower_bound: InnerKey<'a>,
+    pub upper_bound: InnerKey<'a>,
+    pub upper_inclusive: bool,
+}
 
-    fn biggest(&self) -> InnerKey<'_>;
-
-    /// Check whether the table overlaps with another one.
-    fn is_overlap_with<T: TableExt>(&self, other: &T) -> bool {
-        self.smallest() <= other.biggest() && other.smallest() <= self.biggest()
+impl<'a> DataBound<'a> {
+    pub fn new(
+        lower_bound: InnerKey<'a>,
+        upper_bound: InnerKey<'a>,
+        upper_inclusive: bool,
+    ) -> Self {
+        Self {
+            lower_bound,
+            upper_bound,
+            upper_inclusive,
+        }
     }
 
-    /// Find for the first one of `tables` that overlaps with the given table.
+    pub fn overlap_key(&self, key: InnerKey<'_>) -> bool {
+        self.lower_bound <= key && !self.less_than_key(key)
+    }
+
+    pub fn overlap_bound(&self, bound: DataBound<'_>) -> bool {
+        !self.less_than_key(bound.lower_bound) && !bound.less_than_key(self.lower_bound)
+    }
+
+    pub fn contains_bound(&self, other: DataBound<'_>) -> bool {
+        self.lower_bound <= other.lower_bound
+            && match other.upper_bound.cmp(&self.upper_bound) {
+                Ordering::Less => true,
+                Ordering::Equal => !other.upper_inclusive || self.upper_inclusive,
+                Ordering::Greater => false,
+            }
+    }
+
+    pub fn less_than_key(&self, key: InnerKey<'_>) -> bool {
+        match self.upper_bound.cmp(&key) {
+            Ordering::Less => true,
+            Ordering::Equal => !self.upper_inclusive,
+            Ordering::Greater => false,
+        }
+    }
+
+    /// Find for the first one of `data_sets` that overlaps with self.
     ///
     /// Pass `is_sorted` to `None` if it's not sure whether `tables` is sorted
     /// or not.
     ///
-    /// Caller should ensure that `tables` should have no overlapped tables.
-    fn find_overlap<T: TableExt>(&self, tables: &[T], is_sorted: bool) -> Option<usize> {
+    /// Caller should ensure that `data_sets` should have no overlapped bounds.
+    pub fn find_overlap<T: BoundedDataSet>(
+        &self,
+        data_sets: &[T],
+        is_sorted: bool,
+    ) -> Option<usize> {
         if is_sorted {
-            let (left, right) = get_tables_in_range(tables, self.smallest(), self.biggest());
+            let (left, right) = self.get_overlap_data_sets(data_sets);
             (left < right).then_some(left)
         } else {
-            linear_search_overlap(self, tables)
+            for (i, table) in data_sets.iter().enumerate() {
+                if self.overlap_bound(table.data_bound()) {
+                    return Some(i);
+                }
+            }
+            None
         }
     }
-}
 
-fn linear_search_overlap<T1: TableExt, T2: TableExt>(t: &T1, tables: &[T2]) -> Option<usize> {
-    for (i, table) in tables.iter().enumerate() {
-        if table.is_overlap_with(t) {
-            return Some(i);
-        }
+    pub fn get_overlap_data_sets<T: BoundedDataSet>(&self, data_sets: &[T]) -> (usize, usize) {
+        let left = search(data_sets.len(), |i| {
+            !data_sets[i].data_bound().less_than_key(self.lower_bound)
+        });
+        let right = search(data_sets.len(), |i| {
+            self.less_than_key(data_sets[i].lower_bound())
+        });
+        (left, right)
     }
-    None
 }
 
-pub fn get_tables_in_range<T: TableExt>(
-    tables: &[T],
-    start: InnerKey<'_>,
-    end: InnerKey<'_>,
-) -> (usize, usize) {
-    let left = search(tables.len(), |i| start <= tables[i].biggest());
-    let right = search(tables.len(), |i| end < tables[i].smallest());
-    (left, right)
-}
+/// `RangedDataSet` is used to get the bound of the data set.
+pub trait BoundedDataSet: Sized {
+    fn data_bound(&self) -> DataBound<'_>;
 
-impl TableExt for kvenginepb::TableCreate {
-    fn smallest(&self) -> InnerKey<'_> {
-        InnerKey::from_inner_buf(self.get_smallest())
+    fn lower_bound(&self) -> InnerKey<'_> {
+        self.data_bound().lower_bound
     }
 
-    fn biggest(&self) -> InnerKey<'_> {
-        InnerKey::from_inner_buf(self.get_biggest())
+    fn overlap_bound(&self, bound: DataBound<'_>) -> bool {
+        self.data_bound().overlap_bound(bound)
+    }
+
+    fn contains_bound(&self, bound: DataBound<'_>) -> bool {
+        self.data_bound().contains_bound(bound)
+    }
+}
+
+impl BoundedDataSet for kvenginepb::TableCreate {
+    fn data_bound(&self) -> DataBound<'_> {
+        DataBound::new(
+            InnerKey::from_inner_buf(self.get_smallest()),
+            InnerKey::from_inner_buf(self.get_biggest()),
+            true,
+        )
+    }
+}
+
+impl BoundedDataSet for kvenginepb::BlobCreate {
+    fn data_bound(&self) -> DataBound<'_> {
+        DataBound::new(
+            InnerKey::from_inner_buf(self.get_smallest()),
+            InnerKey::from_inner_buf(self.get_biggest()),
+            true,
+        )
     }
 }
 
@@ -690,7 +750,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_table_ext_is_overlap_with() {
+    fn test_data_bound_overlap() {
         let cases = vec![
             (
                 (1, 2), // t1,
@@ -713,13 +773,23 @@ mod tests {
         for (idx, (t1, t2, expected)) in cases.into_iter().enumerate() {
             let t1 = make_table(t1);
             let t2 = make_table(t2);
-            assert_eq!(t1.is_overlap_with(&t2), expected, "case {}", idx);
-            assert_eq!(t2.is_overlap_with(&t1), expected, "case {}", idx);
+            assert_eq!(
+                t1.data_bound().overlap_bound(t2.data_bound()),
+                expected,
+                "case {}",
+                idx
+            );
+            assert_eq!(
+                t2.data_bound().overlap_bound(t1.data_bound()),
+                expected,
+                "case {}",
+                idx
+            );
         }
     }
 
     #[test]
-    fn test_table_ext_search_overlap() {
+    fn test_data_bound_search_overlap() {
         let sorted_tables = vec![(1, 1), (2, 5), (10, 10), (20, 30)]
             .into_iter()
             .map(make_table)
@@ -757,13 +827,13 @@ mod tests {
         for (idx, (t, expect_sorted, expect_unsorted)) in cases.into_iter().enumerate() {
             let t = make_table(t);
             assert_eq!(
-                t.find_overlap(&sorted_tables, true),
+                t.data_bound().find_overlap(&sorted_tables, true),
                 expect_sorted,
                 "case {}",
                 idx
             );
             assert_eq!(
-                t.find_overlap(&unsorted_tables, false),
+                t.data_bound().find_overlap(&unsorted_tables, false),
                 expect_unsorted,
                 "case {}",
                 idx

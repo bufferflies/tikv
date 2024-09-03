@@ -4,7 +4,7 @@ use crate::{
     table::{
         search,
         sstable::{SsTable, TableIterator},
-        InnerKey, Iterator, TableExt, Value,
+        InnerKey, Iterator, Value,
     },
     LevelHandler,
 };

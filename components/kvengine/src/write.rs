@@ -181,8 +181,8 @@ impl Engine {
                         DeletePrefixes::new_with_inner_key_off(shard.inner_key_off);
                     del_prefixes.merge_prefix_in_place(prefix);
                     if del_prefixes
-                        .inner_delete_ranges()
-                        .any(|(start, end)| mem_tbl.has_data_in_range(start, end))
+                        .inner_delete_bounds()
+                        .any(|bound| mem_tbl.has_data_in_bound(bound))
                     {
                         info!(
                             "{} kvengine::write set_switch_mem_table for del_prefixes, prefix {:?}",

@@ -37,7 +37,7 @@ use crate::{
         columnar::SchemaFile,
         memtable::CfTable,
         sstable::{BlockCacheKey, MAGIC_NUMBER},
-        InnerKey, ZSTD_COMPRESSION,
+        BoundedDataSet, DataBound, InnerKey, ZSTD_COMPRESSION,
     },
     txn_chunk_manager::{TxnChunkManager, TxnChunkManagerConfig},
     *,
@@ -546,7 +546,7 @@ impl EngineCore {
                         "data_seq" => data_sequence,
                         "base_ver" => base_version);
                 }
-                if mem_tbl.has_data_in_range(shard.inner_start(), shard.inner_end()) {
+                if mem_tbl.has_data_in_bound(shard.data_bound()) {
                     max_ts = std::cmp::max(max_ts, mem_tbl.data_max_ts());
                     mem_tbls.push(mem_tbl.clone());
                 }
@@ -623,10 +623,11 @@ impl EngineCore {
                     info!("builder estimated_size {}", builder.estimated_size());
                     let mut buf = Vec::with_capacity(builder.estimated_size());
                     let res = builder.finish(0, &mut buf);
-                    let level = meta.get_ingest_level(
+                    let level = meta.get_ingest_level(DataBound::new(
                         InnerKey::from_inner_buf(&res.smallest),
                         InnerKey::from_inner_buf(&res.biggest),
-                    );
+                        true,
+                    ));
                     assert!(!is_blob_file(level));
                     if level == 0 {
                         let mut offsets = vec![buf.len() as u32; NUM_CFS];

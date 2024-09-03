@@ -23,7 +23,7 @@ use itertools::Itertools;
 use kvengine::{
     dfs::{self, Dfs, FileType, S3Fs},
     limiter::StoreLimiter,
-    table::{InnerKey, TableExt},
+    table::{BoundedDataSet, DataBound, InnerKey},
     IdVer, ShardMeta, ShardRange, ShardStats, ShardTag, ENCRYPTION_KEY, GLOBAL_SHARD_END_KEY,
 };
 use kvenginepb as pb;
@@ -586,6 +586,12 @@ impl BackupShard {
 
     pub fn table_version(&self) -> u64 {
         self.meta.base_version + self.meta.data_sequence
+    }
+}
+
+impl BoundedDataSet for BackupShard {
+    fn data_bound(&self) -> DataBound<'_> {
+        self.meta.range.data_bound()
     }
 }
 
@@ -1703,7 +1709,7 @@ impl BackupCluster {
         // a new keyspace.
         let key_in_shard = |key: &[u8], shard: &BackupShard| {
             let inner_key = InnerKey::from_outer_key(key, inner_key_off);
-            inner_key >= shard.inner_start() && inner_key < shard.inner_end()
+            shard.data_bound().overlap_key(inner_key)
         };
 
         let get_backup_shard =
@@ -1801,7 +1807,7 @@ impl BackupCluster {
             for shard_id in region.backup_shards_id {
                 let shard = self.get_shard(shard_id).unwrap();
                 for (&file_id, file_meta) in shard.meta.all_files() {
-                    if meta.overlap_table(file_meta.smallest(), file_meta.biggest()) {
+                    if meta.overlap_bound(file_meta.data_bound()) {
                         meta.add_file(file_id, file_meta.clone());
                         sstables_cnt += 1;
                     }

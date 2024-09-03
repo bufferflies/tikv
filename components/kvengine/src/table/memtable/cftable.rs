@@ -12,7 +12,7 @@ use std::{
 
 use super::{Arena, SkipList};
 use crate::{
-    table::{memtable::skl_ext::SkipListExt, InnerKey, TxnFile},
+    table::{memtable::skl_ext::SkipListExt, DataBound, TxnFile},
     EXTRA_CF, NUM_CFS, WRITE_CF,
 };
 
@@ -150,15 +150,15 @@ impl CfTableCore {
         self.force_switch.load(Ordering::Acquire)
     }
 
-    pub fn has_data_in_range(&self, start: InnerKey<'_>, end: InnerKey<'_>) -> bool {
+    pub fn has_data_in_bound(&self, bound: DataBound<'_>) -> bool {
         if self.is_empty() {
             return false;
         }
         for cf in 0..NUM_CFS {
             let tbl = &self.tbls[cf];
             let mut iter = tbl.new_iterator(false);
-            iter.seek(start);
-            if iter.valid() && iter.key() < end {
+            iter.seek(bound.lower_bound);
+            if iter.valid() && !bound.less_than_key(iter.key()) {
                 return true;
             }
         }

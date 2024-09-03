@@ -9,8 +9,8 @@ use super::{builder::*, BlobRef};
 use crate::{
     error::IoContext,
     table::{
-        file::File, sstable::PROP_KEY_ENCRYPTION_VER, ChecksumType, Error, InnerKey, Result,
-        LZ4_COMPRESSION, NO_COMPRESSION, ZSTD_COMPRESSION,
+        file::File, sstable::PROP_KEY_ENCRYPTION_VER, BoundedDataSet, ChecksumType, DataBound,
+        Error, InnerKey, Result, LZ4_COMPRESSION, NO_COMPRESSION, ZSTD_COMPRESSION,
     },
 };
 
@@ -269,6 +269,12 @@ impl BlobTable {
 
     pub fn min_blob_size(&self) -> u32 {
         self.footer.min_blob_size
+    }
+}
+
+impl BoundedDataSet for BlobTable {
+    fn data_bound(&self) -> DataBound<'_> {
+        DataBound::new(self.smallest_key(), self.biggest_key(), true)
     }
 }
 

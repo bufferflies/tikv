@@ -48,10 +48,8 @@ use crate::{
             GLOBAL_COMMON_HANDLE_END,
         },
         file::{File, InMemFile, LocalFile},
-        get_tables_in_range,
         sstable::{self, builder::TableBuilderOptions, L0Builder, SsTable},
-        table::TableExt,
-        ChecksumType, InnerKey,
+        BoundedDataSet, ChecksumType, DataBound, InnerKey,
     },
     Error::{
         CompactionNotRetryable, FallbackLocalCompactorDisabled, IncompatibleRemoteCompactor,
@@ -668,8 +666,8 @@ impl Engine {
                 delete.set_cf(-1);
                 deletes.push(delete);
             } else if del_prefixes
-                .inner_delete_ranges()
-                .any(|(start, end)| t.has_data_in_range(start, end))
+                .inner_delete_bounds()
+                .any(|bound| t.has_data_in_bound(bound))
             {
                 overlaps.push((t.id(), 0, -1));
             }
@@ -683,8 +681,8 @@ impl Engine {
                     delete.set_cf(cf as i32);
                     deletes.push(delete);
                 } else if del_prefixes
-                    .inner_delete_ranges()
-                    .any(|(start, end)| t.has_overlap(start, end, false))
+                    .inner_delete_bounds()
+                    .any(|bound| t.has_overlap(bound))
                 {
                     overlaps.push((t.id(), lh.level as u32, cf as i32));
                 }
@@ -701,7 +699,8 @@ impl Engine {
                     delete.set_cf(WRITE_CF as i32);
                     delete.set_columnar_tables(t.table_count() as u32);
                     deletes.push(delete);
-                } else if del_prefixes.inner_delete_ranges().any(|(start, _)| {
+                } else if del_prefixes.inner_delete_bounds().any(|bound| {
+                    let start = bound.lower_bound;
                     let trim_keyspace_start =
                         if shard.inner_key_off == 0 && start[0] == TXN_KEY_PREFIX {
                             &start[KEYSPACE_PREFIX_LEN..]
@@ -864,8 +863,10 @@ impl Engine {
         // Tables that are partially over bound.
         let mut overlaps = vec![];
         let mut col_overlaps = vec![];
+        let shard_bound = shard.data_bound();
         for t in &data.l0_tbls {
-            if t.biggest() < data.inner_start() || t.smallest() >= data.inner_end() {
+            let table_bound = t.data_bound();
+            if !shard_bound.overlap_bound(table_bound) {
                 // -----smallest-----biggest-----[start----------end)
                 // [start----------end)-----smallest-----biggest-----
                 let mut delete = pb::TableDelete::default();
@@ -873,14 +874,15 @@ impl Engine {
                 delete.set_level(0);
                 delete.set_cf(-1);
                 deletes.push(delete);
-            } else if t.smallest() < data.inner_start() || t.biggest() >= data.inner_end() {
+            } else if !shard_bound.contains_bound(table_bound) {
                 // -----smallest-----[start----------end)-----biggest-----
                 overlaps.push((t.id(), 0, -1));
             }
         }
         data.for_each_level(|cf, lh| {
             for t in lh.tables.iter() {
-                if t.biggest() < data.inner_start() || t.smallest() >= data.inner_end() {
+                let table_bound = t.data_bound();
+                if !shard_bound.overlap_bound(table_bound) {
                     // -----smallest-----biggest-----[start----------end)
                     // [start----------end)-----smallest-----biggest-----
                     let mut delete = pb::TableDelete::default();
@@ -888,7 +890,7 @@ impl Engine {
                     delete.set_level(lh.level as u32);
                     delete.set_cf(cf as i32);
                     deletes.push(delete);
-                } else if t.smallest() < data.inner_start() || t.biggest() >= data.inner_end() {
+                } else if !shard_bound.contains_bound(table_bound) {
                     // -----smallest-----[start----------end)-----biggest-----
                     overlaps.push((t.id(), lh.level as u32, cf as i32));
                 }
@@ -897,7 +899,8 @@ impl Engine {
         });
         data.for_each_columnar_level(|cl| {
             for t in cl.files.iter() {
-                if t.get_biggest() < data.inner_start() || t.get_smallest() >= data.inner_end() {
+                let table_bound = t.data_bound();
+                if !shard_bound.overlap_bound(table_bound) {
                     // -----smallest-----biggest-----[start----------end)
                     // [start----------end)-----smallest-----biggest-----
                     let mut delete = pb::TableDelete::default();
@@ -906,9 +909,7 @@ impl Engine {
                     delete.set_cf(WRITE_CF as i32);
                     delete.set_columnar_tables(t.table_count() as u32);
                     deletes.push(delete);
-                } else if t.get_smallest() < data.inner_start()
-                    || t.get_biggest() >= data.inner_end()
-                {
+                } else if !shard_bound.contains_bound(table_bound) {
                     // -----smallest-----[start----------end)-----biggest-----
                     col_overlaps.push((t.id(), cl.level as u32));
                 }
@@ -960,16 +961,18 @@ impl Engine {
         // Tables that are entirely over bound.
         let mut deletes = vec![];
         // Tables that are partially over bound.
-        let mut overlaps = vec![];
+        let mut over_bounds = vec![];
         for (&id, f) in &meta.files {
-            if meta.entirely_over_bound_table(f.smallest(), f.biggest()) {
+            let shard_bound = meta.range.data_bound();
+            let file_bound = f.data_bound();
+            if !shard_bound.overlap_bound(file_bound) {
                 let mut delete = pb::TableDelete::default();
                 delete.set_id(id);
                 delete.set_level(f.level as u32);
                 delete.set_cf(f.cf as i32);
                 deletes.push(delete);
-            } else if meta.partially_over_bound_table(f.smallest(), f.biggest()) {
-                overlaps.push((id, f.level as u32, f.cf as i32));
+            } else if !shard_bound.contains_bound(file_bound) {
+                over_bounds.push((id, f.level as u32, f.cf as i32));
             }
         }
 
@@ -978,10 +981,10 @@ impl Engine {
             meta.id,
             meta.ver,
             deletes.len(),
-            overlaps.len()
+            over_bounds.len()
         );
 
-        let mut res_cs = if overlaps.is_empty() {
+        let mut res_cs = if over_bounds.is_empty() {
             let mut cs = pb::ChangeSet::default();
             if !deletes.is_empty() {
                 cs.mut_trim_over_bound().set_table_deletes(deletes.into());
@@ -989,9 +992,9 @@ impl Engine {
             cs
         } else {
             let mut req = self.new_compact_request_with_meta(meta);
-            req.file_ids = self.id_allocator.alloc_id(overlaps.len()).unwrap();
+            req.file_ids = self.id_allocator.alloc_id(over_bounds.len()).unwrap();
             let in_place_compaction_ctx = InPlaceCompactionCtx {
-                file_ids: overlaps,
+                file_ids: over_bounds,
                 col_file_ids: vec![],
                 block_size: self.opts.table_builder_options.block_size,
                 columnar_build_opts: self.opts.columnar_build_options,
@@ -1130,9 +1133,10 @@ impl Engine {
                 continue;
             }
             let l0_write_cf_tbl = l0_tbl.get_cf(WRITE_CF).as_ref().unwrap();
+            let l0_write_cf_bound = l0_write_cf_tbl.data_bound();
             let overlap_below_l0 = shard_data.l0_tbls[i + 1..].iter().any(|below_l0| {
                 if let Some(below_write_cf) = below_l0.get_cf(WRITE_CF) {
-                    return below_write_cf.is_overlap_with(l0_write_cf_tbl);
+                    return below_write_cf.data_bound().overlap_bound(l0_write_cf_bound);
                 }
                 false
             });
@@ -1140,7 +1144,7 @@ impl Engine {
                 continue;
             }
             let l1 = shard_data.cfs[WRITE_CF].get_level(1);
-            if l0_write_cf_tbl
+            if l0_write_cf_bound
                 .find_overlap(l1.tables.as_slice(), true)
                 .is_some()
             {
@@ -1186,16 +1190,17 @@ impl Engine {
             store_bool(&shard.compacting, false);
             return None;
         }
-        let upper_level_candidates =
-            if upper_level.has_over_bound_data(shard.inner_start(), shard.inner_end()) {
-                if upper_level.tables.first().unwrap().smallest() < shard.inner_start() {
-                    Arc::new(vec![upper_level.tables.first().unwrap().clone()])
-                } else {
-                    Arc::new(vec![upper_level.tables.last().unwrap().clone()])
-                }
+        let shard_bound = shard.data_bound();
+        let upper_level_bound = upper_level.get_data_bound().unwrap();
+        let upper_level_candidates = if !shard_bound.contains_bound(upper_level_bound) {
+            if upper_level.tables.first().unwrap().smallest() < shard_bound.lower_bound {
+                Arc::new(vec![upper_level.tables.first().unwrap().clone()])
             } else {
-                upper_level.tables.clone()
-            };
+                Arc::new(vec![upper_level.tables.last().unwrap().clone()])
+            }
+        } else {
+            upper_level.tables.clone()
+        };
 
         let sum_tbl_size = |tbls: &[sstable::SsTable]| tbls.iter().map(|tbl| tbl.size()).sum();
 
@@ -1214,8 +1219,7 @@ impl Engine {
         let mut lower_right_idx = 0;
         let mut lower_size = 0;
         for (i, tbl) in upper_level_candidates.iter().enumerate() {
-            let (left, right) =
-                get_tables_in_range(&lower_level.tables, tbl.smallest(), tbl.biggest());
+            let (left, right) = tbl.data_bound().get_overlap_data_sets(&lower_level.tables);
             let new_lower_size: u64 = sum_tbl_size(&lower_level.tables[left..right]);
             let ratio = calc_ratio(tbl.size(), new_lower_size);
             if candidate_ratio < ratio {
@@ -1237,7 +1241,7 @@ impl Engine {
         let cur_upper_left_idx = upper_left_idx;
         for i in (0..cur_upper_left_idx).rev() {
             let t = &upper_level_candidates[i];
-            let (left, right) = get_tables_in_range(&lower_level.tables, t.smallest(), t.biggest());
+            let (left, right) = t.data_bound().get_overlap_data_sets(&lower_level.tables);
             if right < lower_left_idx {
                 // A bottom table is skipped, we can compact in another run.
                 break;
@@ -1260,7 +1264,7 @@ impl Engine {
         let cur_upper_right_idx = upper_right_idx;
         for i in cur_upper_right_idx..upper_level_candidates.len() {
             let t = &upper_level_candidates[i];
-            let (left, right) = get_tables_in_range(&lower_level.tables, t.smallest(), t.biggest());
+            let (left, right) = t.data_bound().get_overlap_data_sets(&lower_level.tables);
             if left > lower_right_idx {
                 // A bottom table is skipped, we can compact in another run.
                 break;
@@ -1320,7 +1324,7 @@ impl Engine {
         kr.update(&lower_level.tables[lower_left_idx..lower_right_idx]);
         for lvl_idx in (level + 1)..scf.levels.len() {
             let lh = &scf.levels[lvl_idx];
-            let (left, right) = lh.overlapping_tables(&kr);
+            let (left, right) = kr.data_bound().get_overlap_data_sets(&lh.tables);
             if left < right {
                 has_overlap = true;
             }
@@ -1817,6 +1821,12 @@ impl KeyRange {
         if lower_biggest > self.right_key() {
             self.right = Bytes::copy_from_slice(lower_biggest.deref());
         }
+    }
+}
+
+impl BoundedDataSet for KeyRange {
+    fn data_bound(&self) -> DataBound<'_> {
+        DataBound::new(self.left_key(), self.right_key(), true)
     }
 }
 

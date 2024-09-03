@@ -5,7 +5,7 @@ use std::{cmp, collections::HashSet};
 use bytes::Bytes;
 
 use crate::{
-    metrics::ENGINE_OPEN_FILES, table::TableExt, IdVer, COLUMNAR_LEVELS, EXTRA_CF, NUM_CFS,
+    metrics::ENGINE_OPEN_FILES, table::BoundedDataSet, IdVer, COLUMNAR_LEVELS, EXTRA_CF, NUM_CFS,
     WRITE_CF,
 };
 
@@ -371,8 +371,9 @@ impl super::Shard {
         let blob_table_count = data.blob_tbl_map.len();
         // FIXME: Calculate the total size of blob files.
         let mut blob_table_size = 0;
+        let shard_bound = self.data_bound();
         for v in data.blob_tbl_map.values() {
-            if self.cover_full_table(v.smallest_key(), v.biggest_key()) {
+            if shard_bound.contains_bound(v.data_bound()) {
                 blob_table_size += v.size();
             } else {
                 blob_table_size += v.size() / 2;
@@ -381,7 +382,7 @@ impl super::Shard {
         }
         total_blob_size += blob_table_size;
         for l0_tbl in data.l0_tbls.as_slice() {
-            if self.cover_full_table(l0_tbl.smallest(), l0_tbl.biggest()) {
+            if shard_bound.contains_bound(l0_tbl.data_bound()) {
                 l0_table_size += l0_tbl.size();
             } else {
                 // TODO: estimate size by number of blocks in table.
@@ -406,7 +407,7 @@ impl super::Shard {
                     }
                     in_use_blob_size += cf_tbl.total_blob_size();
 
-                    if self.cover_full_table(cf_tbl.smallest(), cf_tbl.biggest()) {
+                    if shard_bound.contains_bound(cf_tbl.data_bound()) {
                         l0_cf_table_size[cf] += cf_tbl.size();
                     } else {
                         l0_cf_table_size[cf] += cf_tbl.size() / 2;
@@ -429,7 +430,7 @@ impl super::Shard {
                     if t.has_open_file() {
                         open_files += 1;
                     }
-                    if data.cover_full_table(t.smallest(), t.biggest()) {
+                    if shard_bound.contains_bound(t.data_bound()) {
                         level_stats.data_size += t.size();
                         level_stats.index_size += t.index_size();
                         level_stats.in_mem_index_size += t.in_mem_index_size();

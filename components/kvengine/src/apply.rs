@@ -20,7 +20,7 @@ use crate::{
         columnar::{ColumnarFile, SchemaFile},
         file::LocalFile,
         sstable::{BlockCacheKey, L0Table, SsTable},
-        InnerKey, TableExt, TxnFile,
+        BoundedDataSet, TxnFile,
     },
     *,
 };
@@ -309,9 +309,7 @@ impl EngineCore {
             // It's possible that the mem-table is not empty but doesn't have any data.
             // So we need to use has_data_in_range to check.
             let last = new_mem_tbls.last().unwrap();
-            if new_mem_tbls.len() > 1
-                && !last.has_data_in_range(shard.inner_start(), shard.inner_end())
-            {
+            if new_mem_tbls.len() > 1 && !last.has_data_in_bound(shard.data_bound()) {
                 let last = new_mem_tbls.pop().unwrap();
                 let mut builder = ShardDataBuilder::new(old_data);
                 builder.set_mem_tbls(new_mem_tbls);
@@ -368,10 +366,7 @@ impl EngineCore {
                 return;
             }
             for create in comp.get_table_creates() {
-                let cover = shard.cover_full_table(
-                    InnerKey::from_inner_buf(&create.smallest),
-                    InnerKey::from_inner_buf(&create.biggest),
-                );
+                let cover = shard.contains_bound(create.data_bound());
                 del_files.insert(create.id, cover);
             }
             self.remove_dfs_files(shard, del_files);
@@ -387,7 +382,7 @@ impl EngineCore {
             new_l0s.retain(|x| {
                 let is_deleted = comp.get_top_deletes().contains(&x.id());
                 if is_deleted && !is_move_down {
-                    del_files.insert(x.id(), shard.cover_full_table(x.smallest(), x.biggest()));
+                    del_files.insert(x.id(), shard.contains_bound(x.data_bound()));
                 }
                 !is_deleted
             });
@@ -421,17 +416,11 @@ impl EngineCore {
         let mut del_file_is_subrange = HashMap::new();
         if comp.conflicted {
             for sst_create in comp.get_sstable_change().get_table_creates() {
-                let is_subrange = shard.cover_full_table(
-                    InnerKey::from_inner_buf(sst_create.get_smallest()),
-                    InnerKey::from_inner_buf(sst_create.get_biggest()),
-                );
+                let is_subrange = shard.contains_bound(sst_create.data_bound());
                 del_file_is_subrange.insert(sst_create.get_id(), is_subrange);
             }
             for blob_tbl_create in comp.get_new_blob_tables() {
-                let is_subrange = shard.cover_full_table(
-                    InnerKey::from_inner_buf(blob_tbl_create.get_smallest()),
-                    InnerKey::from_inner_buf(blob_tbl_create.get_biggest()),
-                );
+                let is_subrange = shard.contains_bound(blob_tbl_create.data_bound());
                 del_file_is_subrange.insert(blob_tbl_create.get_id(), is_subrange);
             }
             self.remove_dfs_files(shard, del_file_is_subrange);
@@ -452,18 +441,14 @@ impl EngineCore {
         new_l0s.retain(|x| {
             let del = to_be_deleted.contains(&x.id());
             if del {
-                del_file_is_subrange
-                    .insert(x.id(), shard.cover_full_table(x.smallest(), x.biggest()));
+                del_file_is_subrange.insert(x.id(), shard.contains_bound(x.data_bound()));
             }
             !del
         });
         new_blob_tbl_map.retain(|id, v| {
             let del = to_be_deleted.contains(id);
             if del {
-                del_file_is_subrange.insert(
-                    *id,
-                    shard.cover_full_table(v.smallest_key(), v.biggest_key()),
-                );
+                del_file_is_subrange.insert(*id, shard.contains_bound(v.data_bound()));
             }
             !del
         });
@@ -483,8 +468,7 @@ impl EngineCore {
                 tables.retain(|x| {
                     let del = to_be_deleted.contains(&x.id());
                     if del {
-                        del_file_is_subrange
-                            .insert(x.id(), shard.cover_full_table(x.smallest(), x.biggest()));
+                        del_file_is_subrange.insert(x.id(), shard.contains_bound(x.data_bound()));
                     }
                     !del
                 });
@@ -570,8 +554,7 @@ impl EngineCore {
                 new_l0s.retain(|l0| {
                     let is_deleted = deletes.contains(&l0.id());
                     if is_deleted {
-                        del_files
-                            .insert(l0.id(), data.cover_full_table(l0.smallest(), l0.biggest()));
+                        del_files.insert(l0.id(), data.contains_bound(l0.data_bound()));
                     }
                     !is_deleted
                 });
@@ -588,7 +571,7 @@ impl EngineCore {
                 new_level_tables.retain(|t| {
                     let is_deleted = deletes.contains(&t.id());
                     if is_deleted {
-                        del_files.insert(t.id(), data.cover_full_table(t.smallest(), t.biggest()));
+                        del_files.insert(t.id(), data.contains_bound(t.data_bound()));
                     }
                     !is_deleted
                 });
@@ -680,7 +663,7 @@ impl EngineCore {
         new_level_tables.retain(|x| {
             let is_deleted = deletes.contains(&x.id());
             if is_deleted {
-                del_files.insert(x.id(), shard.cover_full_table(x.smallest(), x.biggest()));
+                del_files.insert(x.id(), shard.contains_bound(x.data_bound()));
             }
             !is_deleted
         });

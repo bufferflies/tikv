@@ -20,7 +20,8 @@ use tikv_util::{
 
 use crate::{
     table::{
-        memtable, memtable::CfTable, sstable, sstable::Builder, InnerKey, TableExt, NO_COMPRESSION,
+        memtable, memtable::CfTable, sstable, sstable::Builder, BoundedDataSet, InnerKey,
+        NO_COMPRESSION,
     },
     util::TxnFileRefPropertyHelper,
     *,
@@ -218,7 +219,7 @@ impl Engine {
         }
         for l0 in &flush.shard_data.l0_tbls {
             if task.table_double_overbound(l0.smallest(), l0.biggest())
-                && !l0.has_data_in_range(task.inner_start(), task.inner_end())
+                && !l0.has_data_in_bound(task.range.data_bound())
             {
                 // only double overbound tables may not have any data in the shard range.
                 continue;
@@ -232,7 +233,7 @@ impl Engine {
         flush.shard_data.for_each_level(|cf, lvl| {
             for tbl in lvl.tables.iter() {
                 if task.table_double_overbound(tbl.smallest(), tbl.biggest())
-                    && !tbl.has_overlap(task.inner_start(), task.inner_end(), false)
+                    && !tbl.has_overlap(task.range.data_bound())
                 {
                     // only double overbound tables may not have any data in the shard range.
                     continue;

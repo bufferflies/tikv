@@ -15,7 +15,7 @@ use util::TxnFileRefExt as _;
 
 use super::*;
 use crate::{
-    table::{InnerKey, TableExt},
+    table::{BoundedDataSet, DataBound, InnerKey},
     util::{TxnFileLocks, TxnFileRefPropertyHelper},
 };
 
@@ -489,13 +489,17 @@ impl ShardMeta {
     )> {
         let ingest_tables = ingest_files.get_table_creates();
         // Ingest tables should be sorted, but we still check here for safety.
-        let is_sorted = ingest_tables.is_sorted_by(|x, y| x.smallest().partial_cmp(&y.smallest()));
+        let is_sorted =
+            ingest_tables.is_sorted_by(|x, y| x.lower_bound().partial_cmp(&y.lower_bound()));
 
         // Ingest files of load data will be in bottom level of WRITE_CF only.
         for (&existed_file_id, existed_file) in self.files.iter().filter(|(_, f)| {
             f.get_cf() == WRITE_CF as i32 && f.get_level() == WRITE_CF_BOTTOM_LEVEL
         }) {
-            if let Some(i) = existed_file.find_overlap(ingest_tables, is_sorted) {
+            if let Some(i) = existed_file
+                .data_bound()
+                .find_overlap(ingest_tables, is_sorted)
+            {
                 return Some((existed_file_id, ingest_tables[i].id));
             }
         }
@@ -761,8 +765,9 @@ impl ShardMeta {
             new_shards.push(meta);
         }
         for new_shard in &mut new_shards {
+            let new_shard_bound = new_shard.range.data_bound();
             for (fid, fm) in &old.files {
-                if new_shard.overlap_table(fm.smallest(), fm.biggest()) {
+                if new_shard_bound.overlap_bound(fm.data_bound()) {
                     if fm.get_level() == 0
                         && new_shard.schema_file_id > 0
                         && old.unconverted_l0s.contains(fid)
@@ -884,14 +889,6 @@ impl ShardMeta {
             .get_all_chunk_ids()
     }
 
-    pub fn overlap_table(&self, smallest: InnerKey<'_>, biggest: InnerKey<'_>) -> bool {
-        // [start-----smallest-----biggest-----end)
-        // smallest-----[start-----biggest-----end)
-        // [start-----smallest-----end)-----biggest
-        // smallest-----[start-----end)-----biggest
-        self.range.inner_start() <= biggest && smallest < self.range.inner_end()
-    }
-
     pub(crate) fn get_blob_files(&self) -> Vec<(u64, Vec<u8>, Vec<u8>)> {
         let mut blob_files = vec![];
         for (id, file) in &self.files {
@@ -903,33 +900,11 @@ impl ShardMeta {
         blob_files
     }
 
-    pub(crate) fn entirely_over_bound_table(
-        &self,
-        smallest: InnerKey<'_>,
-        biggest: InnerKey<'_>,
-    ) -> bool {
-        // smallest-----biggest-----[start----------end)
-        // [start----------end)-----smallest-----biggest
-        !self.overlap_table(smallest, biggest)
-    }
-
-    pub(crate) fn partially_over_bound_table(
-        &self,
-        smallest: InnerKey<'_>,
-        biggest: InnerKey<'_>,
-    ) -> bool {
-        // smallest-----[start-----end)-----biggest
-        // smallest-----[start-----biggest-----end)
-        // [start-----smallest-----end)-----biggest
-        self.overlap_table(smallest, biggest)
-            && (smallest < self.range.inner_start() || self.range.inner_end() <= biggest)
-    }
-
     // the ingest level never skip to lower level if upper level file exists, this
     // may not be optimal but prevent compaction generate conflicting files.
     // It find the top most existing file's level as ingest level, if there is
     // overlap with existing files, it will use the one level upper.
-    pub(crate) fn get_ingest_level(&self, smallest: InnerKey<'_>, biggest: InnerKey<'_>) -> u32 {
+    pub(crate) fn get_ingest_level(&self, table_bound: DataBound<'_>) -> u32 {
         // find the top most level as ingest level.
         let mut ingest_level = self
             .files
@@ -945,7 +920,7 @@ impl ShardMeta {
             .files
             .values()
             .filter(|f| f.level == ingest_level && f.cf == 0)
-            .any(|file| file.smallest() <= biggest && smallest <= file.biggest());
+            .any(|file| table_bound.overlap_bound(file.data_bound()));
         if overlap {
             ingest_level -= 1;
         }
@@ -1094,6 +1069,12 @@ impl ShardMeta {
     }
 }
 
+impl BoundedDataSet for ShardMeta {
+    fn data_bound(&self) -> DataBound<'_> {
+        self.range.data_bound()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct FileMeta {
     pub cf: i8,
@@ -1162,13 +1143,13 @@ impl FileMeta {
     }
 }
 
-impl TableExt for FileMeta {
-    fn smallest(&self) -> InnerKey<'_> {
-        InnerKey::from_inner_buf(&self.smallest)
-    }
-
-    fn biggest(&self) -> InnerKey<'_> {
-        InnerKey::from_inner_buf(&self.biggest)
+impl BoundedDataSet for FileMeta {
+    fn data_bound(&self) -> DataBound<'_> {
+        DataBound::new(
+            InnerKey::from_inner_buf(&self.smallest),
+            InnerKey::from_inner_buf(&self.biggest),
+            true,
+        )
     }
 }
 
@@ -1227,10 +1208,11 @@ mod tests {
             assert_eq!(meta.max_ts, 100);
             let assert_get_ingest_level = |smallest: &str, biggest: &str, level| {
                 assert_eq!(
-                    meta.get_ingest_level(
+                    meta.get_ingest_level(DataBound::new(
                         InnerKey::from_inner_buf(smallest.as_bytes()),
-                        InnerKey::from_inner_buf(biggest.as_bytes())
-                    ),
+                        InnerKey::from_inner_buf(biggest.as_bytes()),
+                        true
+                    )),
                     level
                 );
             };
@@ -1408,46 +1390,39 @@ mod tests {
             ..Default::default()
         };
 
-        let cases: Vec<(u8, u8, bool, bool, bool)> = vec![
-            // smallest, biggest, overlap, entirely_over_bound, partially_over_bound
-            (3, 5, false, true, false),
-            (3, 10, true, false, true),
-            (3, 15, true, false, true),
-            (3, 20, true, false, true),
-            (3, 25, true, false, true),
-            (10, 15, true, false, false),
-            (10, 20, true, false, true),
-            (10, 25, true, false, true),
-            (13, 15, true, false, false),
-            (13, 20, true, false, true),
-            (13, 25, true, false, true),
-            (20, 25, false, true, false),
-            (23, 25, false, true, false),
+        let cases: Vec<(u8, u8, bool, bool)> = vec![
+            // smallest, biggest, overlap, contains
+            (3, 5, false, false),
+            (3, 10, true, false),
+            (3, 15, true, false),
+            (3, 20, true, false),
+            (3, 25, true, false),
+            (10, 15, true, true),
+            (10, 20, true, false),
+            (10, 25, true, false),
+            (13, 15, true, true),
+            (13, 20, true, false),
+            (13, 25, true, false),
+            (20, 25, false, false),
+            (23, 25, false, false),
         ];
 
-        for (idx, (smallest, biggest, overlap, entirely_over_bound, partially_over_bound)) in
-            cases.into_iter().enumerate()
-        {
+        for (idx, (smallest, biggest, overlap, contains_bound)) in cases.into_iter().enumerate() {
             let smallest_buf = [smallest];
             let smallest = InnerKey::from_inner_buf(&smallest_buf);
             let biggest_buf = [biggest];
             let biggest = InnerKey::from_inner_buf(&biggest_buf);
-
+            let table_bound = DataBound::new(smallest, biggest, true);
+            let shard_bound = meta.range.data_bound();
             assert_eq!(
-                meta.overlap_table(smallest, biggest),
+                shard_bound.overlap_bound(table_bound),
                 overlap,
                 "case {}",
                 idx
             );
             assert_eq!(
-                meta.entirely_over_bound_table(smallest, biggest),
-                entirely_over_bound,
-                "case {}",
-                idx
-            );
-            assert_eq!(
-                meta.partially_over_bound_table(smallest, biggest),
-                partially_over_bound,
+                shard_bound.contains_bound(table_bound),
+                contains_bound,
                 "case {}",
                 idx
             );

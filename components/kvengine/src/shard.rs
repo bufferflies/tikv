@@ -29,11 +29,10 @@ use crate::{
         blobtable::blobtable::BlobTable,
         columnar::{ColumnarFile, SchemaFile},
         file::InMemFile,
-        get_tables_in_range,
         memtable::{self, CfTable},
         search,
         sstable::{BlockCacheKey, L0Table, SsTable},
-        InnerKey, TableExt, TxnFile,
+        BoundedDataSet, DataBound, InnerKey, TxnFile,
     },
     txn_chunk_manager::TxnChunkManager,
     util::{evenly_distribute, TxnFileRefPropertyHelper},
@@ -621,19 +620,6 @@ impl Shard {
         Some(split_keys)
     }
 
-    pub(crate) fn overlap_table(&self, smallest: InnerKey<'_>, biggest: InnerKey<'_>) -> bool {
-        self.inner_start() <= biggest && smallest < self.inner_end()
-    }
-
-    pub(crate) fn cover_full_table(&self, smallest: InnerKey<'_>, biggest: InnerKey<'_>) -> bool {
-        self.inner_start() <= smallest && biggest < self.inner_end()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn overlap_key(&self, inner_key: InnerKey<'_>) -> bool {
-        self.inner_start() <= inner_key && inner_key < self.inner_end()
-    }
-
     pub fn get_property(&self, key: &str) -> Option<Bytes> {
         self.properties.get(key)
     }
@@ -703,9 +689,7 @@ impl Shard {
     pub(crate) fn split_mem_tables(&self, parent_mem_tbls: &[CfTable]) -> Vec<CfTable> {
         let mut new_mem_tbls = vec![CfTable::new()];
         for old_mem_tbl in parent_mem_tbls {
-            if old_mem_tbl.is_force_switch()
-                || old_mem_tbl.has_data_in_range(self.inner_start(), self.inner_end())
-            {
+            if old_mem_tbl.is_force_switch() || old_mem_tbl.has_data_in_bound(self.data_bound()) {
                 new_mem_tbls.push(old_mem_tbl.new_split());
             }
         }
@@ -775,8 +759,8 @@ impl Shard {
         // No memtable contains data covered by deleted prefixes.
         && !shard_data.mem_tbls.iter().any(|mem_tbl| {
             del_prefixes
-                .inner_delete_ranges()
-                .any(|(start, end)| mem_tbl.has_data_in_range(start, end))
+                .inner_delete_bounds()
+                .any(|bound| mem_tbl.has_data_in_bound(bound))
         })
     }
 
@@ -883,8 +867,9 @@ impl Shard {
             let num_tbl_score = data.l0_tbls.len() as f64 / 4.0;
             score = size_score * 0.6 + num_tbl_score * 0.4;
         }
+        let shard_bound = data.data_bound();
         for l0 in &data.l0_tbls {
-            if !data.cover_full_table(l0.smallest(), l0.biggest()) {
+            if !shard_bound.contains_bound(l0.data_bound()) {
                 // set highest priority for newly split L0.
                 score += 2.0;
                 let mut lock = self.compaction_priority.write().unwrap();
@@ -1091,14 +1076,6 @@ impl Shard {
         self.set_data(builder.build());
     }
 
-    pub(crate) fn inner_start(&self) -> InnerKey<'_> {
-        InnerKey::from_outer_key(&self.outer_start, self.inner_key_off)
-    }
-
-    pub(crate) fn inner_end(&self) -> InnerKey<'_> {
-        InnerKey::from_outer_end_key(&self.outer_end, self.inner_key_off)
-    }
-
     pub(crate) fn key_prefix(&self) -> &[u8] {
         if self.inner_key_off > 0 {
             return &self.outer_start[0..self.inner_key_off];
@@ -1134,6 +1111,12 @@ impl Shard {
 
     pub(crate) fn set_outdated_schema_ver(&self, ver: i64) {
         self.outdated_schema_ver.store(ver, Ordering::Release);
+    }
+}
+
+impl BoundedDataSet for Shard {
+    fn data_bound(&self) -> DataBound<'_> {
+        self.range.data_bound()
     }
 }
 
@@ -1258,6 +1241,12 @@ impl Deref for ShardData {
 
     fn deref(&self) -> &Self::Target {
         &self.core
+    }
+}
+
+impl BoundedDataSet for ShardData {
+    fn data_bound(&self) -> DataBound<'_> {
+        self.range.data_bound()
     }
 }
 
@@ -1436,7 +1425,7 @@ impl ShardDataCore {
     pub(crate) fn get_l0_stats(&self) -> LevelStatsLite {
         let mut stats = LevelStatsLite::default();
         self.l0_tbls.iter().for_each(|l0| {
-            if self.cover_full_table(l0.smallest(), l0.biggest()) {
+            if self.data_bound().contains_bound(l0.data_bound()) {
                 stats.data_size += l0.size();
                 stats.entries += l0.entries();
                 stats.kv_size += l0.kv_size();
@@ -1492,11 +1481,7 @@ impl ShardDataCore {
 
     fn is_over_bound_table(&self, level: &LevelHandler, i: usize, tbl: &SsTable) -> bool {
         let is_bound = i == 0 || i == level.tables.len() - 1;
-        is_bound && !self.cover_full_table(tbl.smallest(), tbl.biggest())
-    }
-
-    pub(crate) fn cover_full_table(&self, smallest: InnerKey<'_>, biggest: InnerKey<'_>) -> bool {
-        self.inner_start() <= smallest && biggest < self.inner_end()
+        is_bound && !self.data_bound().contains_bound(tbl.data_bound())
     }
 
     pub fn all_presisted(&self) -> bool {
@@ -1516,16 +1501,19 @@ impl ShardDataCore {
     }
 
     pub(crate) fn has_file_over_bound_data(&self) -> bool {
+        let shard_bound = self.data_bound();
         for l0 in &self.l0_tbls {
-            if l0.smallest() < self.inner_start() || l0.biggest() >= self.inner_end() {
+            if !shard_bound.contains_bound(l0.data_bound()) {
                 return true;
             }
         }
         for cf in 0..NUM_CFS {
             let scf = &self.cfs[cf];
             for level in &scf.levels {
-                if level.has_over_bound_data(self.inner_start(), self.inner_end()) {
-                    return true;
+                if let Some(level_bound) = level.get_data_bound() {
+                    if !shard_bound.contains_bound(level_bound) {
+                        return true;
+                    }
                 }
             }
         }
@@ -1682,22 +1670,6 @@ impl LevelHandler {
         }
     }
 
-    pub(crate) fn overlapping_tables(&self, key_range: &KeyRange) -> (usize, usize) {
-        get_tables_in_range(&self.tables, key_range.left_key(), key_range.right_key())
-    }
-
-    pub(crate) fn overlapping_tables_exclusive_end(
-        &self,
-        start: InnerKey<'_>,
-        exclusive_end: InnerKey<'_>,
-    ) -> (usize, usize) {
-        let left = search(self.tables.len(), |i| start <= self.tables[i].biggest());
-        let right = search(self.tables.len(), |i| {
-            exclusive_end <= self.tables[i].smallest()
-        });
-        (left, right)
-    }
-
     pub fn get(
         &self,
         key: InnerKey<'_>,
@@ -1785,13 +1757,13 @@ impl LevelHandler {
         table::Value::new()
     }
 
-    pub(crate) fn has_over_bound_data(&self, start: InnerKey<'_>, end: InnerKey<'_>) -> bool {
+    pub(crate) fn get_data_bound(&self) -> Option<DataBound<'_>> {
         if self.tables.is_empty() {
-            return false;
+            return None;
         }
         let first = self.tables.first().unwrap();
         let last = self.tables.last().unwrap();
-        first.smallest() < start || last.biggest() >= end
+        Some(DataBound::new(first.smallest(), last.biggest(), true))
     }
 
     pub(crate) fn range_blocks_size(
@@ -1805,7 +1777,8 @@ impl LevelHandler {
         for ran in ranges {
             let start_key = InnerKey::from_outer_key(&ran.0, inner_key_off);
             let end_key = InnerKey::from_outer_end_key(&ran.1, inner_key_off);
-            let (left, right) = self.overlapping_tables_exclusive_end(start_key, end_key);
+            let bound = DataBound::new(start_key, end_key, false);
+            let (left, right) = bound.get_overlap_data_sets(&self.tables);
             if left == right {
                 continue;
             }
@@ -2196,24 +2169,26 @@ impl DeletePrefixes {
         })
     }
 
-    pub(crate) fn inner_delete_ranges(&self) -> impl Iterator<Item = (InnerKey<'_>, InnerKey<'_>)> {
+    pub(crate) fn inner_delete_bounds(&self) -> impl Iterator<Item = DataBound<'_>> {
         let inner_key_off = self.inner_key_off;
         self.prefixes
             .iter()
-            .map(move |p| {
+            .zip(self.prefixes_nexts.iter())
+            .map(move |(p, p_n)| {
                 if inner_key_off >= p.len() {
-                    InnerKey::from_inner_buf(&[])
+                    DataBound::new(
+                        InnerKey::from_inner_buf(&[]),
+                        InnerKey::from_inner_buf(GLOBAL_SHARD_END_KEY),
+                        false,
+                    )
                 } else {
-                    InnerKey::from_outer_key(p, inner_key_off)
+                    DataBound::new(
+                        InnerKey::from_outer_key(p, inner_key_off),
+                        InnerKey::from_outer_end_key(p_n, inner_key_off),
+                        false,
+                    )
                 }
             })
-            .zip(self.prefixes_nexts.iter().map(move |p| {
-                if inner_key_off >= p.len() {
-                    InnerKey::from_inner_buf(GLOBAL_SHARD_END_KEY)
-                } else {
-                    InnerKey::from_outer_end_key(p, inner_key_off)
-                }
-            }))
     }
 
     /// Get ranges that are not covered by the delete prefixes.
@@ -2322,6 +2297,12 @@ pub struct ShardRange {
     pub outer_end: Bytes,
     pub inner_key_off: usize,
     pub keyspace_id: u32,
+}
+
+impl BoundedDataSet for ShardRange {
+    fn data_bound(&self) -> DataBound<'_> {
+        DataBound::new(self.inner_start(), self.inner_end(), false)
+    }
 }
 
 impl ShardRange {
@@ -2451,12 +2432,12 @@ mod tests {
                 assert_eq!(del_prefix.prefixes.len(), del_prefix.prefixes_nexts.len());
                 assert_eq!(
                     del_prefix.prefixes.len(),
-                    del_prefix.inner_delete_ranges().count()
+                    del_prefix.inner_delete_bounds().count()
                 );
-                assert!(del_prefix.inner_delete_ranges().all(|(p, p_n)| {
-                    let mut p_c = p.to_vec();
+                assert!(del_prefix.inner_delete_bounds().all(|bound| {
+                    let mut p_c = bound.lower_bound.to_vec();
                     tidb_query_common::util::convert_to_prefix_next(&mut p_c);
-                    p_c == p_n.deref()
+                    p_c == bound.upper_bound.deref()
                 }));
             };
 

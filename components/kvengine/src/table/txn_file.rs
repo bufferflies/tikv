@@ -17,7 +17,8 @@ use crate::{
         file::{File, TtlCache},
         search,
         sstable::{key_diff_idx, BlockCacheKey, EntrySlice},
-        ChecksumType, Error, InnerKey, Iterator, NoPrefixKey, Result, Value,
+        BoundedDataSet, ChecksumType, DataBound, Error, InnerKey, Iterator, NoPrefixKey, Result,
+        Value,
     },
     UserMeta, USER_META_SIZE,
 };
@@ -275,10 +276,10 @@ impl TxnFile {
 
     pub fn to_txn_file_ref(
         &self,
-        ranges: Option<&[(InnerKey<'_>, InnerKey<'_>)]>,
+        bounds: Option<&[DataBound<'_>]>,
     ) -> Option<kvenginepb::TxnFileRef> {
-        let chunk_ids = if let Some(ranges) = ranges {
-            self.chunk_ids_in_ranges(ranges)
+        let chunk_ids = if let Some(bounds) = bounds {
+            self.chunk_ids_in_bounds(bounds)
         } else {
             self.chunk_ids()
         };
@@ -294,10 +295,10 @@ impl TxnFile {
         Some(txn_file_ref)
     }
 
-    pub fn has_data_in_range(&self, start: InnerKey<'_>, end: InnerKey<'_>) -> bool {
+    pub fn has_data_in_bound(&self, bound: DataBound<'_>) -> bool {
         let mut iter = TxnFileIterator::new(self.clone(), false);
-        iter.seek(start);
-        iter.valid() && iter.key() < end
+        iter.seek(bound.lower_bound);
+        iter.valid() && !bound.less_than_key(iter.key())
     }
 
     pub fn has_over_bound_data(&self, start: InnerKey<'_>, end: InnerKey<'_>) -> bool {
@@ -365,10 +366,13 @@ impl TxnFileInner {
         self.chunks.iter().map(|chunk| chunk.id()).collect()
     }
 
-    pub fn chunk_ids_in_ranges(&self, ranges: &[(InnerKey<'_>, InnerKey<'_>)]) -> Vec<u64> {
+    pub fn chunk_ids_in_bounds(&self, bounds: &[DataBound<'_>]) -> Vec<u64> {
         self.chunks
             .iter()
-            .filter(|chunk| ranges.iter().any(|range| chunk.in_range(*range)))
+            .filter(|chunk| {
+                let chunk_bound = chunk.data_bound();
+                bounds.iter().any(|bound| bound.overlap_bound(chunk_bound))
+            })
             .map(|chunk| chunk.id())
             .collect()
     }
@@ -460,6 +464,12 @@ impl Deref for TxnChunk {
 
     fn deref(&self) -> &Self::Target {
         &self.inner
+    }
+}
+
+impl BoundedDataSet for TxnChunk {
+    fn data_bound(&self) -> DataBound<'_> {
+        DataBound::new(self.index.smallest(), self.index.biggest(), true)
     }
 }
 
@@ -1648,8 +1658,8 @@ mod tests {
             txn_file::{
                 TxnChunk, TxnChunkBuilder, TxnChunkIterator, OP_CHECK_NOT_EXIST, OP_INSERT, OP_PUT,
             },
-            InnerKey, Iterator, NoPrefixKey, OwnedInnerKey, SkipOpTxnFileIterator, TxnCtx, TxnFile,
-            TxnFileId, TxnFileIterator, OP_DELETE, OP_LOCK,
+            DataBound, InnerKey, Iterator, NoPrefixKey, OwnedInnerKey, SkipOpTxnFileIterator,
+            TxnCtx, TxnFile, TxnFileId, TxnFileIterator, OP_DELETE, OP_LOCK,
         },
         tests::generate_encryption_key,
         util::test_util::KeyBuilder,
@@ -2150,11 +2160,11 @@ mod tests {
                 .into_iter()
                 .map(|(start, end)| (kb.i_to_inner_key(start), kb.i_to_inner_key(end)))
                 .collect::<Vec<_>>();
-            let ranges = owned_ranges
+            let bounds = owned_ranges
                 .iter()
-                .map(|(start, end)| (start.as_ref(), end.as_ref()))
+                .map(|(start, end)| DataBound::new(start.as_ref(), end.as_ref(), false))
                 .collect::<Vec<_>>();
-            assert_eq!(txn_file.chunk_ids_in_ranges(&ranges), expect_ids);
+            assert_eq!(txn_file.chunk_ids_in_bounds(&bounds), expect_ids);
         }
     }
 
@@ -2341,6 +2351,7 @@ mod tests {
                 let kb = new_key_builder(enable_inner_key_off);
                 let lower_bound_key = kb.i_to_inner_key(lower_bound);
                 let upper_bound_key = kb.i_to_inner_key(upper_bound);
+                let data_bound = DataBound::new(lower_bound_key.as_ref(), upper_bound_key.as_ref(), false);
 
                 let id = TxnFileId::new(10, 1, 3);
                 let txn_ctx = TxnCtx::new(
@@ -2353,7 +2364,7 @@ mod tests {
                 let txn_file = TxnFile::new(id, chunks.clone(), txn_ctx).unwrap();
 
                 let chunk_ref = chunk_ref.slice(lower_bound_key.as_ref(), upper_bound_key.as_ref());
-                prop_assert_eq!(txn_file.has_data_in_range(lower_bound_key.as_ref(), upper_bound_key.as_ref()), !chunk_ref.is_empty());
+                prop_assert_eq!(txn_file.has_data_in_bound(data_bound), !chunk_ref.is_empty());
             });
         }
     }
