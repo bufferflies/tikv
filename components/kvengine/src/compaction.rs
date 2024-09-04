@@ -1862,10 +1862,12 @@ fn load_table_files_from_local(
     let mut files_failed: Vec<u64> = vec![];
     for &id in tbl_ids {
         let file_name = match opts.file_type {
-            dfs::FileType::Sst => new_sst_filename(id),
-            dfs::FileType::Schema => new_schema_filename(id),
-            dfs::FileType::Columnar => new_columnar_filename(id),
-            dfs::FileType::TxnChunk => unreachable!("txn chunk should not be loaded from local"),
+            FileType::Sst => new_sst_filename(id),
+            FileType::Schema => new_schema_filename(id),
+            FileType::Columnar => new_columnar_filename(id),
+            FileType::TxnChunk => unreachable!("txn chunk should not be loaded from local"),
+            FileType::VectorIndex => new_vector_index_filename(id),
+            FileType::Blob => new_blob_filename(id),
         };
         let file_path = local_dir.join(file_name);
         match LocalFile::open(id, file_path.as_path(), false) {
@@ -1943,7 +1945,7 @@ fn files_to_tables(
 ) -> Vec<sstable::SsTable> {
     files
         .into_iter()
-        .map(|f| sstable::SsTable::new(f, None, false, encryption_key.clone()).unwrap())
+        .map(|f| sstable::SsTable::new(f, None, encryption_key.clone()).unwrap())
         .collect()
 }
 
@@ -2327,7 +2329,7 @@ fn compact_destroy_range(
             let (mut l0_create, data) = builder.finish();
             (data, l0_create.take_smallest(), l0_create.take_biggest())
         } else {
-            let t = sstable::SsTable::new(file, None, false, ctx.encryption_key.clone()).unwrap();
+            let t = sstable::SsTable::new(file, None, ctx.encryption_key.clone()).unwrap();
             let mut builder = sstable::Builder::new(
                 new_id,
                 block_size,
@@ -2581,7 +2583,7 @@ fn compact_truncate_ts(
             let (mut l0_create, data) = builder.finish();
             (data, l0_create.take_smallest(), l0_create.take_biggest())
         } else {
-            let t = sstable::SsTable::new(file, None, false, ctx.encryption_key.clone()).unwrap();
+            let t = sstable::SsTable::new(file, None, ctx.encryption_key.clone()).unwrap();
             let mut builder = sstable::Builder::new(
                 new_id,
                 block_size,
@@ -2830,7 +2832,7 @@ fn compact_trim_over_bound(
             let (mut l0_create, data) = builder.finish();
             (data, l0_create.take_smallest(), l0_create.take_biggest())
         } else {
-            let t = sstable::SsTable::new(file, None, false, ctx.encryption_key.clone()).unwrap();
+            let t = sstable::SsTable::new(file, None, ctx.encryption_key.clone()).unwrap();
             let mut builder = sstable::Builder::new(
                 new_id,
                 block_size,

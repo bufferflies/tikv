@@ -317,57 +317,24 @@ impl Shard {
         let opts = dfs::Options::default().with_shard(cs.shard_id, cs.shard_ver);
         let mut msg_count = 0;
         for (&id, fm) in &ids {
+            let fs = dfs.clone();
             let tx = result_tx.clone();
-            if id == 0 {
-                box_try!(tx.send(Ok((0, FileMeta::default(), None))));
-            } else {
-                let fs = dfs.clone();
-                let tx = result_tx.clone();
-                let fm = fm.clone();
-                let tag = tag.clone();
-                runtime.spawn(async move {
-                    let res = fs.read_file(id, opts).await;
-                    if tx.send(res.map(|data| (id, fm, Some(data)))).is_err() {
-                        error!("failed to send result"; "tag" => tag, "file_id" => id);
-                    }
-                });
-            }
+            let fm = fm.clone();
+            let tag = tag.clone();
+            runtime.spawn(async move {
+                let res = fs.read_file(id, opts).await;
+                if tx.send(res.map(|data| (id, fm, data))).is_err() {
+                    error!("failed to send result"; "tag" => tag, "file_id" => id);
+                }
+            });
             msg_count += 1;
         }
         let mut errors = vec![];
         for _ in 0..msg_count {
             match result_rx.recv().await.unwrap() {
-                Ok((id, _, None)) => {
-                    assert_eq!(id, 0);
-                }
-                Ok((id, fm, Some(data))) => {
-                    assert!(id != 0);
-                    let file = InMemFile::new(id, data);
-                    if fm.is_columnar_file() {
-                        let columnar_file = box_try!(ColumnarFile::open(Arc::new(file)));
-                        cs.col_files.insert(id, columnar_file);
-                    } else if fm.is_blob_file() {
-                        let blob_table = box_try!(BlobTable::new(Arc::new(file)));
-                        cs.blob_tables.insert(id, blob_table);
-                    } else if fm.get_level() == 0 {
-                        let l0_table = box_try!(L0Table::new(
-                            Arc::new(file),
-                            block_cache.clone(),
-                            ignore_lock,
-                            encryption_key.clone(),
-                        ));
-                        if let Some(l0_table) = l0_table {
-                            cs.l0_tables.insert(id, l0_table);
-                        }
-                    } else {
-                        let ln_table = box_try!(SsTable::new(
-                            Arc::new(file),
-                            block_cache.clone(),
-                            fm.get_level() == 1,
-                            encryption_key.clone(),
-                        ));
-                        cs.ln_tables.insert(id, ln_table);
-                    }
+                Ok((id, fm, data)) => {
+                    let file = Arc::new(InMemFile::new(id, data));
+                    cs.add_file(id, file, &fm, block_cache.clone(), encryption_key.clone())?;
                 }
                 Err(err) => {
                     error!("prefetch failed {:?}", &err);

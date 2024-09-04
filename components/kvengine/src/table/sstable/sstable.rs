@@ -46,7 +46,6 @@ impl SsTable {
     pub fn new(
         file: Arc<dyn File>,
         cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
-        _load_filter: bool,
         encryption_key: Option<EncryptionKey>,
     ) -> Result<Self> {
         let size = file.size();
@@ -791,7 +790,7 @@ pub(crate) fn generate_key_values(prefix: &str, n: usize) -> Vec<(String, String
 }
 
 #[cfg(test)]
-pub(crate) fn build_test_table_with_kvs(kvs: &Vec<(String, String)>, load_filter: bool) -> SsTable {
+pub(crate) fn build_test_table_with_kvs(kvs: &Vec<(String, String)>) -> SsTable {
     let sst_fid = TEST_ID_ALLOC.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
     let mut sst_builder = new_table_builder_for_test(sst_fid);
     let meta = 0u8;
@@ -806,7 +805,7 @@ pub(crate) fn build_test_table_with_kvs(kvs: &Vec<(String, String)>, load_filter
     sst_builder.finish(0, &mut buf);
     let sst_file = file::InMemFile::new(sst_fid, buf.into());
 
-    SsTable::new(Arc::new(sst_file), new_test_cache(), load_filter, None).unwrap()
+    SsTable::new(Arc::new(sst_file), new_test_cache(), None).unwrap()
 }
 
 #[cfg(test)]
@@ -825,10 +824,9 @@ pub(crate) fn new_table_builder_for_test(sst_fid: u64) -> Builder {
 pub(crate) fn build_test_table_with_prefix(
     prefix: &str,
     n: usize,
-    load_filter: bool,
 ) -> (SsTable, Vec<(String, String)>) {
     let kvs = generate_key_values(prefix, n);
-    (build_test_table_with_kvs(&kvs, load_filter), kvs)
+    (build_test_table_with_kvs(&kvs), kvs)
 }
 
 #[cfg(test)]
@@ -842,13 +840,9 @@ pub(crate) fn get_test_key(prefix: &str, i: usize) -> String {
 }
 
 #[cfg(test)]
-pub(crate) fn create_sst_table(
-    prefix: &str,
-    n: usize,
-    load_filter: bool,
-) -> (SsTable, Vec<(String, String)>) {
+pub(crate) fn create_sst_table(prefix: &str, n: usize) -> (SsTable, Vec<(String, String)>) {
     let kvs = generate_key_values(prefix, n);
-    (build_test_table_with_kvs(&kvs, load_filter), kvs)
+    (build_test_table_with_kvs(&kvs), kvs)
 }
 
 #[cfg(test)]
@@ -893,7 +887,7 @@ mod tests {
         sst_builder.finish(0, &mut sst_buf);
         let sst_file = Arc::new(file::InMemFile::new(sst_fid, sst_buf.into()));
         (
-            SsTable::new(sst_file, new_test_cache(), true, None).unwrap(),
+            SsTable::new(sst_file, new_test_cache(), None).unwrap(),
             all_cnt,
         )
     }
@@ -901,7 +895,7 @@ mod tests {
     #[test]
     fn test_table_iterator() {
         for n in 99..=101 {
-            let (t, _) = create_sst_table("key", n, true);
+            let (t, _) = create_sst_table("key", n);
             let mut it = t.new_iterator(false, true);
             let mut count = 0;
             it.rewind();
@@ -918,7 +912,7 @@ mod tests {
 
     #[test]
     fn test_point_get() {
-        let (t, _) = create_sst_table("key", 8000, true);
+        let (t, _) = create_sst_table("key", 8000);
         for i in 0..8000 {
             let k = get_test_key("key", i);
             let k_h = farmhash::fingerprint64(k.as_bytes());
@@ -951,7 +945,7 @@ mod tests {
     fn test_seek_to_first() {
         let nums = &[99, 100, 101, 199, 200, 250, 9999, 10000];
         for n in nums {
-            let (t, _) = create_sst_table("key", *n, true);
+            let (t, _) = create_sst_table("key", *n);
             let mut it = t.new_iterator(false, true);
             it.rewind();
             assert!(it.valid());
@@ -980,7 +974,7 @@ mod tests {
     fn test_seek_to_last() {
         let nums = vec![99, 100, 101, 199, 200, 250, 9999, 10000];
         for n in nums {
-            let (t, _) = create_sst_table("key", n, true);
+            let (t, _) = create_sst_table("key", n);
             let mut it = t.new_iterator(true, true);
             it.rewind();
             assert!(it.valid());
@@ -1008,7 +1002,7 @@ mod tests {
             TestData::new("k9999", true, "k9999"),
             TestData::new("z", false, ""),
         ];
-        let (t, _) = create_sst_table("k", 10000, true);
+        let (t, _) = create_sst_table("k", 10000);
         let mut it = t.new_iterator(false, true);
         for td in test_datas {
             it.seek(InnerKey::from_inner_buf(td.input.as_bytes()));
@@ -1032,7 +1026,7 @@ mod tests {
             TestData::new("k9999", true, "k9999"),
             TestData::new("z", true, "k9999"),
         ];
-        let (t, _) = create_sst_table("k", 10000, true);
+        let (t, _) = create_sst_table("k", 10000);
         let mut it = t.new_iterator(true, true);
         for td in test_datas {
             it.seek(InnerKey::from_inner_buf(td.input.as_bytes()));
@@ -1049,7 +1043,7 @@ mod tests {
     fn test_iterate_from_start() {
         let nums = vec![99, 100, 101, 199, 200, 250, 9999, 10000];
         for n in nums {
-            let (t, _) = create_sst_table("key", n, true);
+            let (t, _) = create_sst_table("key", n);
             let mut it = t.new_iterator(false, true);
             let mut count = 0;
             it.rewind();
@@ -1070,7 +1064,7 @@ mod tests {
     fn test_iterate_from_end() {
         let nums = vec![99, 100, 101, 199, 200, 250, 9999, 10000];
         for n in nums {
-            let (t, _) = create_sst_table("key", n, true);
+            let (t, _) = create_sst_table("key", n);
             let mut it = t.new_iterator(true, true);
             it.seek(InnerKey::from_inner_buf("zzzzzz".as_bytes())); // Seek to end, an invalid element.
             assert!(it.valid());
@@ -1089,7 +1083,7 @@ mod tests {
 
     #[test]
     fn test_table() {
-        let (t, _) = create_sst_table("key", 10000, true);
+        let (t, _) = create_sst_table("key", 10000);
         let mut it = t.new_iterator(false, true);
         let mut kid = 1010_usize;
         let seek = get_test_key("key", kid);
@@ -1113,7 +1107,7 @@ mod tests {
 
     #[test]
     fn test_iterate_back_and_forth() {
-        let (t, _) = create_sst_table("key", 10000, true);
+        let (t, _) = create_sst_table("key", 10000);
         let seek = get_test_key("key", 1010);
         let mut it = t.new_iterator(false, true);
         it.seek(InnerKey::from_inner_buf(seek.as_bytes()));
@@ -1212,7 +1206,7 @@ mod tests {
 
     #[test]
     fn test_uni_iterator() {
-        let (t, _) = create_sst_table("key", 10000, true);
+        let (t, _) = create_sst_table("key", 10000);
         {
             let mut it = t.new_iterator(false, true);
             let mut cnt = 0;
@@ -1315,7 +1309,7 @@ mod tests {
         for (i, (n, blocks, start, end, count, evenly_split_keys, suggest_split_key)) in
             cases.into_iter().enumerate()
         {
-            let (sst, _) = create_sst_table(prefix, n, true);
+            let (sst, _) = create_sst_table(prefix, n);
             assert_eq!(sst.load_index().num_blocks(), blocks);
 
             let start = start.map(|x| get_test_key(prefix, x));
@@ -1349,7 +1343,7 @@ mod tests {
 
     #[bench]
     fn bench_decode_filter(b: &mut test::Bencher) {
-        let (t, _) = create_sst_table("key", 10000, true);
+        let (t, _) = create_sst_table("key", 10000);
         let data = t.read_filter_data_from_file().unwrap();
         b.iter(|| {
             test::black_box(t.decode_filter(&data).unwrap());

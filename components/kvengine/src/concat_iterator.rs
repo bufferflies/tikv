@@ -173,13 +173,10 @@ mod tests {
 
     #[test]
     fn test_concat_iterator_one_table() {
-        let tables = vec![build_test_table_with_kvs(
-            &vec![
-                ("k1".to_string(), "a1".to_string()),
-                ("k2".to_string(), "a2".to_string()),
-            ],
-            true,
-        )];
+        let tables = vec![build_test_table_with_kvs(&vec![
+            ("k1".to_string(), "a1".to_string()),
+            ("k2".to_string(), "a2".to_string()),
+        ])];
         let mut it = ConcatIterator::new_with_tables(tables, false, true);
         it.rewind();
         assert_eq!(it.valid(), true);
@@ -190,9 +187,9 @@ mod tests {
 
     #[test]
     fn test_concat_iterator() {
-        let (t1, _) = build_test_table_with_prefix("keya", 10000, true);
-        let (t2, _) = build_test_table_with_prefix("keyb", 10000, true);
-        let (t3, _) = build_test_table_with_prefix("keyc", 10000, true);
+        let (t1, _) = build_test_table_with_prefix("keya", 10000);
+        let (t2, _) = build_test_table_with_prefix("keyb", 10000);
+        let (t3, _) = build_test_table_with_prefix("keyc", 10000);
         let tables = vec![t1, t2, t3];
         {
             let mut it = ConcatIterator::new_with_tables(tables.clone(), false, true);

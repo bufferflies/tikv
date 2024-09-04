@@ -33,12 +33,7 @@ use crate::{
     EngineCore, *,
 };
 
-pub const BLOB_LEVEL: u32 = 1 << 31;
 pub const LOAD_FILE_CONCURRENCY: usize = 8;
-
-pub fn is_blob_file(flags: u32) -> bool {
-    flags == BLOB_LEVEL
-}
 
 impl EngineCore {
     pub fn prepare_change_set(
@@ -225,32 +220,23 @@ impl EngineCore {
         let runtime = self.fs.get_runtime();
         let opts = dfs::Options::default().with_shard(shard_id, shard_ver);
         let mut msg_count = 0;
-        for (&id, tb) in ids {
-            if tb.is_blob_file() {
-                if let Ok(file) = self.open_blob_table_file(id) {
-                    cs.add_file(id, file, tb, self.cache.clone(), encryption_key.clone())?;
-                    continue;
-                }
-            } else if tb.columnar_tables > 0 {
-                if let Ok(file) = self.open_columnar_file(id) {
-                    cs.add_file(id, file, tb, self.cache.clone(), encryption_key.clone())?;
-                    continue;
-                }
-            } else if let Ok(file) = self.open_sstable_file(id) {
-                cs.add_file(id, file, tb, self.cache.clone(), encryption_key.clone())?;
+        for (&id, fm) in ids {
+            if let Ok(local_file) = self.open_local_file(id, fm) {
+                cs.add_file(
+                    id,
+                    Arc::new(local_file),
+                    fm,
+                    Some(self.cache.clone()),
+                    encryption_key.clone(),
+                )?;
                 continue;
             }
             let fs = self.fs.clone();
             let tx = result_tx.clone();
-            let file_meta = tb.clone();
-            let file_type = if tb.is_columnar_file() {
-                FileType::Columnar
-            } else {
-                FileType::Sst
-            };
+            let fm = fm.clone();
             runtime.spawn(async move {
-                let res = fs.read_file(id, opts.with_type(file_type)).await;
-                let _ = tx.send(res.map(|data| (id, file_meta, data)));
+                let res = fs.read_file(id, opts.with_type(fm.file_type)).await;
+                let _ = tx.send(res.map(|data| (id, fm, data)));
             });
             if msg_count < LOAD_FILE_CONCURRENCY {
                 msg_count += 1;
@@ -274,14 +260,14 @@ impl EngineCore {
         let (id, meta, data) = result_tx.recv().unwrap()?;
         let data_len = data.len();
         self.write_local_file(id, data, use_direct_io, &meta)?;
-        let file = if meta.is_columnar_file() {
-            self.open_columnar_file(id)?
-        } else if meta.is_blob_file() {
-            self.open_blob_table_file(id)?
-        } else {
-            self.open_sstable_file(id)?
-        };
-        cs.add_file(id, file, &meta, self.cache.clone(), encryption_key)?;
+        let file = self.open_local_file(id, &meta)?;
+        cs.add_file(
+            id,
+            Arc::new(file),
+            &meta,
+            Some(self.cache.clone()),
+            encryption_key,
+        )?;
         ENGINE_LEVEL_WRITE_VEC
             .with_label_values(&[&meta.get_level().to_string()])
             .inc_by(data_len as u64);
@@ -318,16 +304,9 @@ impl EngineCore {
 
         // level 0
         let mut new_l0s = data.l0_tbls.clone();
-        for (_, tbl) in cs.l0_tables.drain() {
-            new_l0s.push(tbl);
-        }
-        new_l0s.sort_by(|a, b| b.version().cmp(&a.version()));
-
         // blob
         let mut new_blob_tbl_map = data.blob_tbl_map.as_ref().clone();
-        for (id, tbl) in cs.blob_tables.drain() {
-            new_blob_tbl_map.insert(id, tbl);
-        }
+        // columnar
         let mut new_columnar_levels = data.col_levels.clone();
         // level n
         let mut scf_builders = vec![];
@@ -343,26 +322,40 @@ impl EngineCore {
                 }
             }
         }
-        for (id, tbl) in load_tables
-            .into_iter()
-            .filter(|(_, tbl)| tbl.get_level() > 0 && !tbl.is_blob_file())
-        {
-            if tbl.is_columnar_file() {
-                let col_file = cs.col_files.get(&id).unwrap().clone();
-                new_columnar_levels.add_file(tbl.level as usize, col_file);
-                continue;
+        for (id, tbl) in load_tables.into_iter() {
+            match tbl.file_type {
+                FileType::Sst => {
+                    if tbl.level == 0 {
+                        let l0 = cs.l0_tables.get(&id).unwrap().clone();
+                        new_l0s.push(l0);
+                    } else {
+                        let sst = cs.ln_tables.get(&id).unwrap().clone();
+                        let scf = &mut scf_builders.as_mut_slice()[tbl.get_cf() as usize];
+                        scf.add_table(sst, tbl.get_level() as usize);
+                    }
+                }
+                FileType::Columnar => {
+                    let col_file = cs.col_files.get(&id).unwrap().clone();
+                    new_columnar_levels.add_file(tbl.level as usize, col_file);
+                }
+                FileType::Blob => {
+                    let blob_file = cs.blob_tables.get(&id).unwrap().clone();
+                    new_blob_tbl_map.insert(id, blob_file);
+                }
+                FileType::TxnChunk | FileType::Schema => unreachable!("not supported"),
+                FileType::VectorIndex => {
+                    // TODO: implement vector index file loading
+                    unreachable!("todo")
+                }
             }
-            let sst = cs.ln_tables.get(&id).unwrap();
-            let scf = &mut scf_builders.as_mut_slice()[tbl.get_cf() as usize];
-            scf.add_table(sst.clone(), tbl.get_level() as usize);
         }
+        new_l0s.sort_by(|a, b| b.version().cmp(&a.version()));
         let mut scfs = [ShardCf::new(0), ShardCf::new(1), ShardCf::new(2)];
         for cf in 0..NUM_CFS {
             let scf = &mut scf_builders.as_mut_slice()[cf];
             scfs[cf] = scf.build();
         }
         new_columnar_levels.sort();
-
         builder.set_l0_tbls(new_l0s);
         builder.set_blob_tbls(new_blob_tbl_map);
         builder.set_cfs(scfs);
@@ -377,17 +370,10 @@ impl EngineCore {
         id: u64,
         data: Bytes,
         use_direct_io: bool,
-        meta: &FileMeta,
+        file_meta: &FileMeta,
     ) -> Result<()> {
         let start = Instant::now();
-        let local_file_name = if meta.is_columnar_file() {
-            self.local_columnar_file_path(id)
-        } else if meta.is_blob_file() {
-            self.local_blob_file_path(id)
-        } else {
-            self.local_sst_file_path(id)
-        };
-
+        let local_file_name = self.local_file_path(id, file_meta);
         let tmp_file_name = self.tmp_file_path(id);
         if use_direct_io {
             let mut writer =
@@ -420,29 +406,12 @@ impl EngineCore {
         Ok(())
     }
 
-    fn open_sstable_file(&self, id: u64) -> Result<LocalFile> {
+    fn open_local_file(&self, id: u64, fm: &FileMeta) -> Result<LocalFile> {
         let _guard = self.lock_file(id);
+        let path = self.local_file_path(id, fm);
         Ok(LocalFile::open(
             id,
-            self.local_sst_file_path(id).as_path(),
-            self.loaded.load(Relaxed),
-        )?)
-    }
-
-    fn open_blob_table_file(&self, id: u64) -> Result<LocalFile> {
-        let _guard = self.lock_file(id);
-        Ok(LocalFile::open(
-            id,
-            self.local_blob_file_path(id).as_path(),
-            self.loaded.load(Relaxed),
-        )?)
-    }
-
-    fn open_columnar_file(&self, id: u64) -> Result<LocalFile> {
-        let _guard = self.lock_file(id);
-        Ok(LocalFile::open(
-            id,
-            self.local_columnar_file_path(id).as_path(),
+            path.as_path(),
             self.loaded.load(Relaxed),
         )?)
     }
@@ -482,6 +451,17 @@ impl EngineCore {
         Ok(schema_file)
     }
 
+    pub(crate) fn local_file_path(&self, file_id: u64, fm: &FileMeta) -> PathBuf {
+        match fm.file_type {
+            FileType::Sst => self.local_sst_file_path(file_id),
+            FileType::Blob => self.local_blob_file_path(file_id),
+            FileType::Schema => self.local_schema_file_path(file_id),
+            FileType::Columnar => self.local_columnar_file_path(file_id),
+            FileType::TxnChunk => panic!("TxnChunk files are managed by TxnChunkManager"),
+            FileType::VectorIndex => self.local_vector_index_file_path(file_id),
+        }
+    }
+
     pub(crate) fn local_sst_file_path(&self, file_id: u64) -> PathBuf {
         self.opts.local_dir.join(new_sst_filename(file_id))
     }
@@ -496,6 +476,10 @@ impl EngineCore {
 
     pub(crate) fn local_columnar_file_path(&self, file_id: u64) -> PathBuf {
         self.opts.local_dir.join(new_columnar_filename(file_id))
+    }
+
+    pub(crate) fn local_vector_index_file_path(&self, file_id: u64) -> PathBuf {
+        self.opts.local_dir.join(new_vector_index_filename(file_id))
     }
 
     fn tmp_file_path(&self, file_id: u64) -> PathBuf {

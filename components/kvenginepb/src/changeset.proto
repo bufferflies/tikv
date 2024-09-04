@@ -200,10 +200,10 @@ message VectorIndexFile {
   uint64 id = 1;
   uint64 snap_version = 2;
 
-  // Lower bound without keyspace prefix.
-  bytes inner_lower_bound = 3;
-  // Upper bound (exclusive) without keyspace prefix.
-  bytes inner_upper_bound = 4;
+  // smallest handle of the file.
+  bytes smallest = 3;
+  // biggest handle of the file.
+  bytes biggest = 4;
 }
 
 message VectorIndexDef {

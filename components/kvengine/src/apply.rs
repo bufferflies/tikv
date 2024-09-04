@@ -14,11 +14,12 @@ use kvenginepb as pb;
 use moka::sync::SegmentedCache;
 
 use crate::{
+    dfs::FileType,
     meta::is_move_down,
     table::{
         blobtable::blobtable::BlobTable,
         columnar::{ColumnarFile, SchemaFile},
-        file::LocalFile,
+        file::File,
         sstable::{BlockCacheKey, L0Table, SsTable},
         BoundedDataSet, TxnFile,
     },
@@ -68,28 +69,29 @@ impl ChangeSet {
     pub fn add_file(
         &mut self,
         id: u64,
-        file: LocalFile,
+        file: Arc<dyn File>,
         meta: &FileMeta,
-        cache: SegmentedCache<BlockCacheKey, Bytes>,
+        cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
         encryption_key: Option<EncryptionKey>,
     ) -> Result<()> {
-        if meta.is_blob_file() {
-            let blob_table = BlobTable::new(Arc::new(file))?;
-            self.blob_tables.insert(id, blob_table);
-        } else if meta.is_columnar_file() {
-            self.col_files
-                .insert(id, ColumnarFile::open(Arc::new(file))?);
-        } else if meta.get_level() == 0 {
-            let l0_table = L0Table::new(Arc::new(file), Some(cache), false, encryption_key)?;
-            self.l0_tables.insert(id, l0_table.unwrap());
-        } else {
-            let ln_table = SsTable::new(
-                Arc::new(file),
-                Some(cache),
-                meta.get_level() == 1,
-                encryption_key,
-            )?;
-            self.ln_tables.insert(id, ln_table);
+        match meta.file_type {
+            FileType::Sst => {
+                if meta.level == 0 {
+                    let l0_table = L0Table::new(file, cache, false, encryption_key)?;
+                    self.l0_tables.insert(id, l0_table.unwrap());
+                } else {
+                    let ln_table = SsTable::new(file, cache, encryption_key)?;
+                    self.ln_tables.insert(id, ln_table);
+                }
+            }
+            FileType::Blob => {
+                let blob_table = BlobTable::new(file)?;
+                self.blob_tables.insert(id, blob_table);
+            }
+            FileType::Columnar => {
+                self.col_files.insert(id, ColumnarFile::open(file)?);
+            }
+            file_type => unreachable!("unexpected file type {:?}", file_type),
         }
         Ok(())
     }
@@ -376,7 +378,6 @@ impl EngineCore {
         let mut new_cfs = data.cfs.clone();
         let mut new_l0s = data.l0_tbls.clone();
         let mut new_blob_tbl_map = data.blob_tbl_map.as_ref().clone();
-        assert!(!is_blob_file(comp.level));
         if comp.level == 0 {
             let is_move_down = is_move_down(comp);
             new_l0s.retain(|x| {

@@ -2234,7 +2234,7 @@ fn new_sst_table_for_columnar(
     let runtime = fs.get_runtime();
     runtime.block_on(fs.create(id, data.clone(), opts)).unwrap();
     let file = InMemFile::new(id, data);
-    SsTable::new(Arc::new(file), None, true, None).unwrap()
+    SsTable::new(Arc::new(file), None, None).unwrap()
 }
 
 #[rstest]
@@ -2988,7 +2988,7 @@ fn new_table(
     let runtime = fs.get_runtime();
     runtime.block_on(fs.create(id, data.clone(), opts)).unwrap();
     let file = InMemFile::new(id, data);
-    SsTable::new(Arc::new(file), None, true, None).unwrap()
+    SsTable::new(Arc::new(file), None, None).unwrap()
 }
 
 fn new_l0table_file(

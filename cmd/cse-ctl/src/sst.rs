@@ -82,7 +82,7 @@ pub fn execute_show_sst(args: ShowSstArgs) {
         let blob = BlobTable::new(file).unwrap();
         print_blob_table(&blob);
     } else {
-        let ln = SsTable::new(file, None, false, None).unwrap();
+        let ln = SsTable::new(file, None, None).unwrap();
         println!("[SST {}, level {}]", ln.id(), args.level);
         print_sstable(&ln, 2);
     }

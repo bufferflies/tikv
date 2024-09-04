@@ -7710,8 +7710,8 @@ pub struct VectorIndexFile {
     // message fields
     pub id: u64,
     pub snap_version: u64,
-    pub inner_lower_bound: ::std::vec::Vec<u8>,
-    pub inner_upper_bound: ::std::vec::Vec<u8>,
+    pub smallest: ::std::vec::Vec<u8>,
+    pub biggest: ::std::vec::Vec<u8>,
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
     pub cached_size: ::protobuf::CachedSize,
@@ -7758,56 +7758,56 @@ impl VectorIndexFile {
         self.snap_version = v;
     }
 
-    // bytes inner_lower_bound = 3;
+    // bytes smallest = 3;
 
 
-    pub fn get_inner_lower_bound(&self) -> &[u8] {
-        &self.inner_lower_bound
+    pub fn get_smallest(&self) -> &[u8] {
+        &self.smallest
     }
-    pub fn clear_inner_lower_bound(&mut self) {
-        self.inner_lower_bound.clear();
+    pub fn clear_smallest(&mut self) {
+        self.smallest.clear();
     }
 
     // Param is passed by value, moved
-    pub fn set_inner_lower_bound(&mut self, v: ::std::vec::Vec<u8>) {
-        self.inner_lower_bound = v;
+    pub fn set_smallest(&mut self, v: ::std::vec::Vec<u8>) {
+        self.smallest = v;
     }
 
     // Mutable pointer to the field.
     // If field is not initialized, it is initialized with default value first.
-    pub fn mut_inner_lower_bound(&mut self) -> &mut ::std::vec::Vec<u8> {
-        &mut self.inner_lower_bound
+    pub fn mut_smallest(&mut self) -> &mut ::std::vec::Vec<u8> {
+        &mut self.smallest
     }
 
     // Take field
-    pub fn take_inner_lower_bound(&mut self) -> ::std::vec::Vec<u8> {
-        ::std::mem::replace(&mut self.inner_lower_bound, ::std::vec::Vec::new())
+    pub fn take_smallest(&mut self) -> ::std::vec::Vec<u8> {
+        ::std::mem::replace(&mut self.smallest, ::std::vec::Vec::new())
     }
 
-    // bytes inner_upper_bound = 4;
+    // bytes biggest = 4;
 
 
-    pub fn get_inner_upper_bound(&self) -> &[u8] {
-        &self.inner_upper_bound
+    pub fn get_biggest(&self) -> &[u8] {
+        &self.biggest
     }
-    pub fn clear_inner_upper_bound(&mut self) {
-        self.inner_upper_bound.clear();
+    pub fn clear_biggest(&mut self) {
+        self.biggest.clear();
     }
 
     // Param is passed by value, moved
-    pub fn set_inner_upper_bound(&mut self, v: ::std::vec::Vec<u8>) {
-        self.inner_upper_bound = v;
+    pub fn set_biggest(&mut self, v: ::std::vec::Vec<u8>) {
+        self.biggest = v;
     }
 
     // Mutable pointer to the field.
     // If field is not initialized, it is initialized with default value first.
-    pub fn mut_inner_upper_bound(&mut self) -> &mut ::std::vec::Vec<u8> {
-        &mut self.inner_upper_bound
+    pub fn mut_biggest(&mut self) -> &mut ::std::vec::Vec<u8> {
+        &mut self.biggest
     }
 
     // Take field
-    pub fn take_inner_upper_bound(&mut self) -> ::std::vec::Vec<u8> {
-        ::std::mem::replace(&mut self.inner_upper_bound, ::std::vec::Vec::new())
+    pub fn take_biggest(&mut self) -> ::std::vec::Vec<u8> {
+        ::std::mem::replace(&mut self.biggest, ::std::vec::Vec::new())
     }
 }
 
@@ -7835,10 +7835,10 @@ impl ::protobuf::Message for VectorIndexFile {
                     self.snap_version = tmp;
                 },
                 3 => {
-                    ::protobuf::rt::read_singular_proto3_bytes_into(wire_type, is, &mut self.inner_lower_bound)?;
+                    ::protobuf::rt::read_singular_proto3_bytes_into(wire_type, is, &mut self.smallest)?;
                 },
                 4 => {
-                    ::protobuf::rt::read_singular_proto3_bytes_into(wire_type, is, &mut self.inner_upper_bound)?;
+                    ::protobuf::rt::read_singular_proto3_bytes_into(wire_type, is, &mut self.biggest)?;
                 },
                 _ => {
                     ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
@@ -7858,11 +7858,11 @@ impl ::protobuf::Message for VectorIndexFile {
         if self.snap_version != 0 {
             my_size += ::protobuf::rt::value_size(2, self.snap_version, ::protobuf::wire_format::WireTypeVarint);
         }
-        if !self.inner_lower_bound.is_empty() {
-            my_size += ::protobuf::rt::bytes_size(3, &self.inner_lower_bound);
+        if !self.smallest.is_empty() {
+            my_size += ::protobuf::rt::bytes_size(3, &self.smallest);
         }
-        if !self.inner_upper_bound.is_empty() {
-            my_size += ::protobuf::rt::bytes_size(4, &self.inner_upper_bound);
+        if !self.biggest.is_empty() {
+            my_size += ::protobuf::rt::bytes_size(4, &self.biggest);
         }
         my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
         self.cached_size.set(my_size);
@@ -7876,11 +7876,11 @@ impl ::protobuf::Message for VectorIndexFile {
         if self.snap_version != 0 {
             os.write_uint64(2, self.snap_version)?;
         }
-        if !self.inner_lower_bound.is_empty() {
-            os.write_bytes(3, &self.inner_lower_bound)?;
+        if !self.smallest.is_empty() {
+            os.write_bytes(3, &self.smallest)?;
         }
-        if !self.inner_upper_bound.is_empty() {
-            os.write_bytes(4, &self.inner_upper_bound)?;
+        if !self.biggest.is_empty() {
+            os.write_bytes(4, &self.biggest)?;
         }
         os.write_unknown_fields(self.get_unknown_fields())?;
         ::std::result::Result::Ok(())
@@ -7935,14 +7935,14 @@ impl ::protobuf::Message for VectorIndexFile {
                     |m: &mut VectorIndexFile| { &mut m.snap_version },
                 ));
                 fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeBytes>(
-                    "inner_lower_bound",
-                    |m: &VectorIndexFile| { &m.inner_lower_bound },
-                    |m: &mut VectorIndexFile| { &mut m.inner_lower_bound },
+                    "smallest",
+                    |m: &VectorIndexFile| { &m.smallest },
+                    |m: &mut VectorIndexFile| { &mut m.smallest },
                 ));
                 fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeBytes>(
-                    "inner_upper_bound",
-                    |m: &VectorIndexFile| { &m.inner_upper_bound },
-                    |m: &mut VectorIndexFile| { &mut m.inner_upper_bound },
+                    "biggest",
+                    |m: &VectorIndexFile| { &m.biggest },
+                    |m: &mut VectorIndexFile| { &mut m.biggest },
                 ));
                 ::protobuf::reflect::MessageDescriptor::new::<VectorIndexFile>(
                     "VectorIndexFile",
@@ -7968,8 +7968,8 @@ impl ::protobuf::Clear for VectorIndexFile {
     fn clear(&mut self) {
         self.id = 0;
         self.snap_version = 0;
-        self.inner_lower_bound.clear();
-        self.inner_upper_bound.clear();
+        self.smallest.clear();
+        self.biggest.clear();
         self.unknown_fields.clear();
     }
 }
@@ -7981,8 +7981,8 @@ impl ::protobuf::PbPrint for VectorIndexFile {
         let old_len = buf.len();
         ::protobuf::PbPrint::fmt(&self.id, "id", buf);
         ::protobuf::PbPrint::fmt(&self.snap_version, "snap_version", buf);
-        ::protobuf::PbPrint::fmt(&self.inner_lower_bound, "inner_lower_bound", buf);
-        ::protobuf::PbPrint::fmt(&self.inner_upper_bound, "inner_upper_bound", buf);
+        ::protobuf::PbPrint::fmt(&self.smallest, "smallest", buf);
+        ::protobuf::PbPrint::fmt(&self.biggest, "biggest", buf);
         if old_len < buf.len() {
           buf.push(' ');
         }
@@ -7995,8 +7995,8 @@ impl ::std::fmt::Debug for VectorIndexFile {
         let mut s = String::new();
         ::protobuf::PbPrint::fmt(&self.id, "id", &mut s);
         ::protobuf::PbPrint::fmt(&self.snap_version, "snap_version", &mut s);
-        ::protobuf::PbPrint::fmt(&self.inner_lower_bound, "inner_lower_bound", &mut s);
-        ::protobuf::PbPrint::fmt(&self.inner_upper_bound, "inner_upper_bound", &mut s);
+        ::protobuf::PbPrint::fmt(&self.smallest, "smallest", &mut s);
+        ::protobuf::PbPrint::fmt(&self.biggest, "biggest", &mut s);
         write!(f, "{}", s)
     }
 }
@@ -8442,14 +8442,14 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     \x03(\x03B\0\x122\n\x0evector_indexes\x18\x04\x20\x03(\x0b2\x18.enginepb\
     .VectorIndexDefB\0:\0\"c\n\x0bVectorIndex\x12\x12\n\x08table_id\x18\x01\
     \x20\x01(\x03B\0\x12\x12\n\x08index_id\x18\x02\x20\x01(\x03B\0\x12*\n\
-    \x05files\x18\x03\x20\x03(\x0b2\x19.enginepb.VectorIndexFileB\0:\0\"s\n\
+    \x05files\x18\x03\x20\x03(\x0b2\x19.enginepb.VectorIndexFileB\0:\0\"`\n\
     \x0fVectorIndexFile\x12\x0c\n\x02id\x18\x01\x20\x01(\x04B\0\x12\x16\n\
-    \x0csnap_version\x18\x02\x20\x01(\x04B\0\x12\x1b\n\x11inner_lower_bound\
-    \x18\x03\x20\x01(\x0cB\0\x12\x1b\n\x11inner_upper_bound\x18\x04\x20\x01(\
-    \x0cB\0:\0\"z\n\x0eVectorIndexDef\x12\x12\n\x08index_id\x18\x01\x20\x01(\
-    \x03B\0\x12\x10\n\x06col_id\x18\x02\x20\x01(\x03B\0\x12\x14\n\nindex_kin\
-    d\x18\x03\x20\x01(\tB\0\x12\x13\n\tspec_keys\x18\x04\x20\x03(\tB\0\x12\
-    \x15\n\x0bspec_values\x18\x05\x20\x03(\x0cB\0:\0B\0b\x06proto3\
+    \x0csnap_version\x18\x02\x20\x01(\x04B\0\x12\x12\n\x08smallest\x18\x03\
+    \x20\x01(\x0cB\0\x12\x11\n\x07biggest\x18\x04\x20\x01(\x0cB\0:\0\"z\n\
+    \x0eVectorIndexDef\x12\x12\n\x08index_id\x18\x01\x20\x01(\x03B\0\x12\x10\
+    \n\x06col_id\x18\x02\x20\x01(\x03B\0\x12\x14\n\nindex_kind\x18\x03\x20\
+    \x01(\tB\0\x12\x13\n\tspec_keys\x18\x04\x20\x03(\tB\0\x12\x15\n\x0bspec_\
+    values\x18\x05\x20\x03(\x0cB\0:\0B\0b\x06proto3\
 ";
 
 static mut file_descriptor_proto_lazy: ::protobuf::lazy::Lazy<::protobuf::descriptor::FileDescriptorProto> = ::protobuf::lazy::Lazy {

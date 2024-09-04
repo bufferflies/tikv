@@ -575,7 +575,6 @@ mod tests {
     #[cfg(test)]
     pub(crate) fn build_blob_test_table_with_kvs(
         kvs: &Vec<(String, String)>,
-        load_filter: bool,
     ) -> (SsTable, BlobTable) {
         let sst_fid = TEST_ID_ALLOC.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         let blob_fid = TEST_ID_ALLOC.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
@@ -600,7 +599,7 @@ mod tests {
         let blob_file = InMemFile::new(blob_fid, bytes);
 
         (
-            SsTable::new(Arc::new(sst_file), new_test_cache(), load_filter, None).unwrap(),
+            SsTable::new(Arc::new(sst_file), new_test_cache(), None).unwrap(),
             BlobTable::new(Arc::new(blob_file)).unwrap(),
         )
     }
@@ -609,15 +608,14 @@ mod tests {
     pub(crate) fn create_blob_sst_table(
         prefix: &str,
         n: usize,
-        load_filter: bool,
     ) -> ((SsTable, BlobTable), Vec<(String, String)>) {
         let kvs = generate_key_values(prefix, n);
-        (build_blob_test_table_with_kvs(&kvs, load_filter), kvs)
+        (build_blob_test_table_with_kvs(&kvs), kvs)
     }
 
     #[test]
     fn test_value_external_storage() {
-        let ((t, bt), _) = create_blob_sst_table("key", 10000, true);
+        let ((t, bt), _) = create_blob_sst_table("key", 10000);
         let mut it = t.new_iterator(false, true);
         let mut count = 0;
         it.rewind();

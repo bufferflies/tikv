@@ -129,6 +129,8 @@ pub enum FileType {
     TxnChunk = 1,
     Schema = 2,
     Columnar = 3,
+    Blob = 4,
+    VectorIndex = 5,
 }
 
 impl FileType {
@@ -138,6 +140,8 @@ impl FileType {
             1 => Some(FileType::TxnChunk),
             2 => Some(FileType::Schema),
             3 => Some(FileType::Columnar),
+            4 => Some(FileType::Blob),
+            5 => Some(FileType::VectorIndex),
             _ => None,
         }
     }
@@ -148,6 +152,8 @@ impl FileType {
             FileType::TxnChunk => "txn",
             FileType::Schema => "schema",
             FileType::Columnar => "col",
+            FileType::Blob => "blob",
+            FileType::VectorIndex => "vec",
         }
     }
 }
@@ -236,6 +242,9 @@ impl LocalFs {
     pub fn local_columnar_file_path(&self, file_id: u64) -> PathBuf {
         self.dir.join(self.columnar_filename(file_id))
     }
+    pub fn local_vector_index_file_path(&self, file_id: u64) -> PathBuf {
+        self.dir.join(self.vector_index_filename(file_id))
+    }
     pub fn sst_filename(&self, file_id: u64) -> PathBuf {
         PathBuf::from(format!("{:016x}.sst", file_id))
     }
@@ -244,6 +253,9 @@ impl LocalFs {
     }
     pub fn columnar_filename(&self, file_id: u64) -> PathBuf {
         PathBuf::from(format!("{:016x}.col", file_id))
+    }
+    pub fn vector_index_filename(&self, file_id: u64) -> PathBuf {
+        PathBuf::from(format!("{:016x}.vec", file_id))
     }
     pub fn tmp_file_path(&self, file_id: u64) -> PathBuf {
         let tmp_id = self
@@ -266,6 +278,8 @@ impl LocalFs {
             FileType::TxnChunk => self.local_txn_chunk_path(file_id),
             FileType::Schema => self.local_schema_file_path(file_id),
             FileType::Columnar => self.local_columnar_file_path(file_id),
+            FileType::Blob => self.local_blob_file_path(file_id),
+            FileType::VectorIndex => self.local_vector_index_file_path(file_id),
         }
     }
 }

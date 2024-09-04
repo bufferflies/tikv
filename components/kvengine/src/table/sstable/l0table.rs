@@ -151,7 +151,7 @@ impl L0TableCore {
         cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
         encryption_key: Option<EncryptionKey>,
     ) -> Result<Option<Self>> {
-        let tbl = SsTable::new(file.clone(), cache, false, encryption_key)?;
+        let tbl = SsTable::new(file.clone(), cache, encryption_key)?;
         let entries = tbl.entries as u64;
         let kv_size = tbl.kv_size;
         let mut footer = L0Footer::default();

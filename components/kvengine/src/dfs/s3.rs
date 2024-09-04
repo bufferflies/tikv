@@ -189,6 +189,9 @@ impl S3FsCore {
             FileType::Sst => {
                 format!("{}/{:02x}/{:016x}.sst", self.prefix, idx, file_id)
             }
+            FileType::Blob => {
+                format!("{}/blob/{:02x}/{:016x}.blob", self.prefix, idx, file_id)
+            }
             FileType::TxnChunk => {
                 format!("{}/txn/{:02x}/{:016x}.txn", self.prefix, idx, file_id)
             }
@@ -197,6 +200,9 @@ impl S3FsCore {
             }
             FileType::Columnar => {
                 format!("{}/col/{:02x}/{:016x}.col", self.prefix, idx, file_id)
+            }
+            FileType::VectorIndex => {
+                format!("{}/vec/{:02x}/{:016x}.vec", self.prefix, idx, file_id)
             }
         }
     }

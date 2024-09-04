@@ -1611,7 +1611,7 @@ mod tests {
                     let val = key.repeat(10);
                     kvs.push((key, val));
                     if kvs.len() == tbl_entries {
-                        let tbl = build_test_table_with_kvs(&kvs, false);
+                        let tbl = build_test_table_with_kvs(&kvs);
                         let mut tbl_create = TableCreate::default();
                         tbl_create.id = tbl.id();
                         tbl_create.level = level;

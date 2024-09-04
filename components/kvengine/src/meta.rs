@@ -15,6 +15,7 @@ use util::TxnFileRefExt as _;
 
 use super::*;
 use crate::{
+    dfs::FileType,
     table::{BoundedDataSet, DataBound, InnerKey},
     util::{TxnFileLocks, TxnFileRefPropertyHelper},
 };
@@ -329,7 +330,7 @@ impl ShardMeta {
         let blobs_already_deleted = comp
             .get_old_blob_tables()
             .iter()
-            .any(|blob_tbl_delete| !self.has_file_at_level(*blob_tbl_delete, BLOB_LEVEL));
+            .any(|blob_tbl_delete| !self.has_file_at_level(*blob_tbl_delete, 0));
         if ssts_already_deleted || blobs_already_deleted {
             info!("{} skip duplicated major compaction {:?}", self.tag(), comp);
             // set compaction to be conflicted, so that newly created files will be GCed.
@@ -582,7 +583,7 @@ impl ShardMeta {
             self.add_file(create.id, FileMeta::from_table(create));
         }
         for delete in comp.get_old_blob_tables() {
-            self.delete_file(*delete, BLOB_LEVEL);
+            self.delete_file(*delete, 0);
         }
         for create in comp.get_new_blob_tables() {
             self.add_file(create.get_id(), FileMeta::from_blob_table(create));
@@ -824,32 +825,43 @@ impl ShardMeta {
         snap.set_max_ts(self.max_ts);
         snap.set_columnar_snap_version(self.columnar_snap_version);
         for (k, v) in self.files.iter() {
-            if v.is_blob_file() {
-                let mut blob = pb::BlobCreate::new();
-                blob.set_id(*k);
-                blob.set_smallest(v.smallest.to_vec());
-                blob.set_biggest(v.biggest.to_vec());
-                snap.mut_blob_creates().push(blob);
-            } else if v.is_columnar_file() {
-                let mut col_file = pb::TableCreate::new();
-                col_file.set_id(*k);
-                col_file.set_level(v.get_level());
-                col_file.set_columnar_tables(v.columnar_tables);
-                snap.mut_columnar_creates().push(col_file);
-            } else if v.get_level() == 0 {
-                let mut l0 = pb::L0Create::new();
-                l0.set_id(*k);
-                l0.set_smallest(v.smallest.to_vec());
-                l0.set_biggest(v.biggest.to_vec());
-                snap.mut_l0_creates().push(l0);
-            } else {
-                let mut tbl = pb::TableCreate::new();
-                tbl.set_id(*k);
-                tbl.set_cf(v.cf as i32);
-                tbl.set_level(v.get_level());
-                tbl.set_smallest(v.smallest.to_vec());
-                tbl.set_biggest(v.biggest.to_vec());
-                snap.mut_table_creates().push(tbl);
+            match v.file_type {
+                FileType::Sst => {
+                    if v.get_level() == 0 {
+                        let mut l0 = pb::L0Create::new();
+                        l0.set_id(*k);
+                        l0.set_smallest(v.smallest.to_vec());
+                        l0.set_biggest(v.biggest.to_vec());
+                        snap.mut_l0_creates().push(l0);
+                    } else {
+                        let mut tbl = pb::TableCreate::new();
+                        tbl.set_id(*k);
+                        tbl.set_cf(v.cf as i32);
+                        tbl.set_level(v.get_level());
+                        tbl.set_smallest(v.smallest.to_vec());
+                        tbl.set_biggest(v.biggest.to_vec());
+                        snap.mut_table_creates().push(tbl);
+                    }
+                }
+                FileType::TxnChunk | FileType::Schema => unreachable!("not loaded to file meta"),
+                FileType::Columnar => {
+                    let mut col_file = pb::TableCreate::new();
+                    col_file.set_id(*k);
+                    col_file.set_level(v.get_level());
+                    col_file.set_columnar_tables(v.columnar_tables);
+                    snap.mut_columnar_creates().push(col_file);
+                }
+                FileType::Blob => {
+                    let mut blob = pb::BlobCreate::new();
+                    blob.set_id(*k);
+                    blob.set_smallest(v.smallest.to_vec());
+                    blob.set_biggest(v.biggest.to_vec());
+                    snap.mut_blob_creates().push(blob);
+                }
+                FileType::VectorIndex => {
+                    // TODO: support vector index
+                    unreachable!("todo")
+                }
             }
         }
         if self.schema_file_ver > 0 {
@@ -892,10 +904,9 @@ impl ShardMeta {
     pub(crate) fn get_blob_files(&self) -> Vec<(u64, Vec<u8>, Vec<u8>)> {
         let mut blob_files = vec![];
         for (id, file) in &self.files {
-            if !file.is_blob_file() {
-                continue;
+            if file.file_type == FileType::Blob {
+                blob_files.push((*id, file.smallest.to_vec(), file.biggest.to_vec()));
             }
-            blob_files.push((*id, file.smallest.to_vec(), file.biggest.to_vec()));
         }
         blob_files
     }
@@ -909,7 +920,7 @@ impl ShardMeta {
         let mut ingest_level = self
             .files
             .values()
-            .filter(|f| !f.is_blob_file())
+            .filter(|f| f.file_type == FileType::Sst)
             .map(|f| f.level)
             .min()
             .unwrap_or(3);
@@ -1079,41 +1090,33 @@ impl BoundedDataSet for ShardMeta {
 pub struct FileMeta {
     pub cf: i8,
     pub level: u8,
+    pub file_type: FileType,
     pub columnar_tables: u32,
     pub smallest: Bytes,
     pub biggest: Bytes,
 }
 
 impl FileMeta {
-    fn new(cf: i32, level: u32, smallest: &[u8], biggest: &[u8], columnar_tables: u32) -> Self {
-        let meta_level = if is_blob_file(level) {
-            1u8 << 7
-        } else {
-            level as u8
-        };
+    fn new(
+        cf: i32,
+        level: u32,
+        file_type: FileType,
+        smallest: &[u8],
+        biggest: &[u8],
+        columnar_tables: u32,
+    ) -> Self {
         Self {
             cf: cf as i8,
-            level: meta_level,
+            level: level as u8,
+            file_type,
             columnar_tables,
             smallest: Bytes::copy_from_slice(smallest),
             biggest: Bytes::copy_from_slice(biggest),
         }
     }
 
-    pub fn is_blob_file(&self) -> bool {
-        (self.level & (1u8 << 7)) > 0
-    }
-
-    pub fn is_columnar_file(&self) -> bool {
-        self.columnar_tables > 0
-    }
-
     pub fn get_level(&self) -> u32 {
-        if self.is_blob_file() {
-            BLOB_LEVEL
-        } else {
-            self.level as u32
-        }
+        self.level as u32
     }
 
     pub fn get_cf(&self) -> i32 {
@@ -1125,13 +1128,26 @@ impl FileMeta {
     }
 
     pub fn from_l0_table(table: &kvenginepb::L0Create) -> Self {
-        Self::new(-1, 0, table.get_smallest(), table.get_biggest(), 0)
+        Self::new(
+            -1,
+            0,
+            FileType::Sst,
+            table.get_smallest(),
+            table.get_biggest(),
+            0,
+        )
     }
 
     pub fn from_table(table: &kvenginepb::TableCreate) -> Self {
+        let file_type = if table.columnar_tables > 0 {
+            FileType::Columnar
+        } else {
+            FileType::Sst
+        };
         Self::new(
             table.cf,
             table.level,
+            file_type,
             table.get_smallest(),
             table.get_biggest(),
             table.columnar_tables,
@@ -1139,7 +1155,25 @@ impl FileMeta {
     }
 
     pub fn from_blob_table(table: &kvenginepb::BlobCreate) -> Self {
-        Self::new(-1, BLOB_LEVEL, table.get_smallest(), table.get_biggest(), 0)
+        Self::new(
+            -1,
+            0,
+            FileType::Blob,
+            table.get_smallest(),
+            table.get_biggest(),
+            0,
+        )
+    }
+
+    pub fn from_vector_index_file(table: &kvenginepb::VectorIndexFile) -> Self {
+        Self::new(
+            0,
+            0,
+            FileType::VectorIndex,
+            table.get_smallest(),
+            table.get_biggest(),
+            0,
+        )
     }
 }
 
@@ -1155,7 +1189,7 @@ impl BoundedDataSet for FileMeta {
 
 impl Default for FileMeta {
     fn default() -> Self {
-        Self::new(0, 0, b"", b"", 0)
+        Self::new(0, 0, FileType::Sst, b"", b"", 0)
     }
 }
 
@@ -1233,13 +1267,13 @@ mod tests {
     fn test_delete_file_with_level() {
         let files = vec![
             // L0:
-            (1, FileMeta::new(0, 0, b"", b"", 0)),
+            (1, FileMeta::new(0, 0, FileType::Sst, b"", b"", 0)),
             // L1:
-            (101, FileMeta::new(0, 1, b"", b"", 0)),
-            (102, FileMeta::new(0, 1, b"", b"", 0)),
+            (101, FileMeta::new(0, 1, FileType::Sst, b"", b"", 0)),
+            (102, FileMeta::new(0, 1, FileType::Sst, b"", b"", 0)),
             // L2:
-            (201, FileMeta::new(0, 2, b"", b"", 0)),
-            (202, FileMeta::new(0, 2, b"", b"", 0)),
+            (201, FileMeta::new(0, 2, FileType::Sst, b"", b"", 0)),
+            (202, FileMeta::new(0, 2, FileType::Sst, b"", b"", 0)),
         ];
 
         // comp_level, top_deletes, bottom_deletes, is_duplicated, result_files
@@ -1524,7 +1558,7 @@ mod tests {
                 let (smallest, biggest) = make_smallest_biggest(t);
                 meta.files.insert(
                     id as u64,
-                    FileMeta::new(WRITE_CF as i32, 3, &smallest, &biggest, 0),
+                    FileMeta::new(WRITE_CF as i32, 3, FileType::Sst, &smallest, &biggest, 0),
                 );
             }
             meta

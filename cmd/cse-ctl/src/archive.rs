@@ -164,7 +164,7 @@ pub fn execute_show_archive(args: ShowArchiveArgs) {
             let blob = BlobTable::new(file).unwrap();
             print_blob_table(&blob);
         } else {
-            let ln = SsTable::new(file, None, false, None).unwrap();
+            let ln = SsTable::new(file, None, None).unwrap();
             println!("[SST {}, level {}]", ln.id(), level);
             print_sstable(&ln, 2);
         }

@@ -628,7 +628,6 @@ impl EngineCore {
                         InnerKey::from_inner_buf(&res.biggest),
                         true,
                     ));
-                    assert!(!is_blob_file(level));
                     if level == 0 {
                         let mut offsets = vec![buf.len() as u32; NUM_CFS];
                         offsets[0] = 0;
@@ -904,6 +903,10 @@ pub fn new_schema_filename(file_id: u64) -> PathBuf {
 
 pub fn new_columnar_filename(file_id: u64) -> PathBuf {
     PathBuf::from(format!("{:016x}.col", file_id))
+}
+
+pub fn new_vector_index_filename(file_id: u64) -> PathBuf {
+    PathBuf::from(format!("{:016x}.vec", file_id))
 }
 
 pub(crate) enum FreeMemMsg {
