@@ -817,8 +817,7 @@ impl BackupCluster {
         }
         cluster.check_all_shard_files()?;
 
-        let stores_id: Vec<_> = cluster.get_all_stores_id().collect();
-        for store_id in stores_id {
+        for store_id in cluster.get_all_stores_id() {
             cluster.setup_kv_engine(store_id, store_configs.get(&store_id).unwrap())?;
         }
         Ok(cluster)
@@ -1628,9 +1627,14 @@ impl BackupCluster {
         }
     }
 
-    #[inline]
-    fn get_all_stores_id(&self) -> impl ExactSizeIterator<Item = u64> + '_ {
-        self.store_shards.keys().copied()
+    // The returned id of stores are sorted.
+    // This will help to reuse downloaded table files when re-running the
+    // restoration process.
+    // See `BackupCluster::setup_kv_engine`.
+    fn get_all_stores_id(&self) -> Vec<u64> {
+        let mut stores_id: Vec<_> = self.store_shards.keys().copied().collect();
+        stores_id.sort();
+        stores_id
     }
 
     pub fn add_shards_need_flush(&mut self, shard_ids: &[u64]) {
@@ -1986,8 +1990,7 @@ impl BackupCluster {
 
         self.check_all_shard_files()?;
 
-        let stores_ids: Vec<_> = self.get_all_stores_id().collect();
-        for store_id in stores_ids {
+        for store_id in self.get_all_stores_id() {
             self.setup_kv_engine(store_id, store_configs.get(&store_id).unwrap())?;
         }
         Ok(())
