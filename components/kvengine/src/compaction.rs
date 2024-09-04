@@ -2465,6 +2465,9 @@ fn compact_destroy_range_for_columnar(
             if del_prefixes.cover_prefix(inner_key) {
                 continue;
             }
+            if columnar_file.has_table(table_id) {
+                continue;
+            }
             let schema = schema_file.get_table(table_id).unwrap();
             let reader = ColumnarTableReader::new(
                 &columnar_file,
@@ -2709,6 +2712,9 @@ fn compact_truncate_ts_for_columnar(
         );
         for table_id in overlap_tables {
             let schema = schema_file.get_table(table_id).unwrap();
+            if !columnar_file.has_table(table_id) {
+                continue;
+            }
             let reader = ColumnarTableReader::new(
                 &columnar_file,
                 schema.clone(),
@@ -2972,6 +2978,9 @@ fn compact_trim_over_bound_for_columnar(
                 || bound_end <= row_key_prefix.as_slice()
             {
                 // The whole table is over bound.
+                continue;
+            }
+            if !columnar_file.has_table(table_id) {
                 continue;
             }
             let schema = schema_file.get_table(table_id).unwrap();
@@ -4057,9 +4066,15 @@ fn compact_columnar_l0_files(
         let schema = schema_file.get_table(table_id).unwrap();
         let mut readers: Vec<Box<dyn ColumnarReader>> = vec![];
         for columnar_file in &col_tbls {
+            if !columnar_file.has_table(table_id) {
+                continue;
+            }
             let reader =
                 ColumnarTableReader::new(columnar_file, schema.clone(), ctx.encryption_key.clone());
             readers.push(Box::new(reader));
+        }
+        if readers.is_empty() {
+            continue;
         }
         let merge_reader = ColumnarMergeReader::new(schema.clone(), readers);
         let mut compact_reader =
@@ -4171,10 +4186,11 @@ fn compact_columnar_l1_files(
         tbl_changes.mut_table_deletes().push(tbl_delete);
     }
 
-    let overlap_tables = schema_file.overlap_tables(smallest, biggest);
+    let mut overlap_tables = schema_file.overlap_tables(smallest, biggest);
     if overlap_tables.is_empty() {
         return Ok(ret);
     }
+    overlap_tables.sort();
     let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(&ctx.req.outer_start).unwrap_or_default();
     let mut file_builder = ColumnarFileBuilder::new(
         allocate_id(),
@@ -4189,9 +4205,15 @@ fn compact_columnar_l1_files(
         let schema = schema_file.get_table(table_id).unwrap();
         let mut readers: Vec<Box<dyn ColumnarReader>> = vec![];
         for columnar_file in &l1_tbls {
+            if !columnar_file.has_table(table_id) {
+                continue;
+            }
             let reader =
                 ColumnarTableReader::new(columnar_file, schema.clone(), ctx.encryption_key.clone());
             readers.push(Box::new(reader));
+        }
+        if readers.is_empty() {
+            continue;
         }
         let concat_reader =
             ColumnarConcatReader::new(&l2_tbls, schema.clone(), ctx.encryption_key.clone());

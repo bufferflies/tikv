@@ -1326,6 +1326,9 @@ impl SnapAccessCore {
                 readers.push(Box::new(concat_reader));
             } else {
                 for col_file in &columnar_level.files {
+                    if !col_file.has_table(schema.table_id) {
+                        continue;
+                    }
                     let col_reader = ColumnarTableReader::new(
                         col_file,
                         schema.clone(),

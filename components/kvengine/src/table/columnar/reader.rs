@@ -848,7 +848,7 @@ impl ColumnarMergeReader {
                 })
             })
             .collect();
-        let is_int_handle = heap[0].block.handles.fixed_size > 0;
+        let is_int_handle = !schema.is_common_handle();
         ColumnarMergeReader {
             schema,
             heap,
@@ -861,7 +861,9 @@ impl ColumnarMergeReader {
         for i in (0..self.heap.len() / 2).rev() {
             self.down(i);
         }
-        self.update_first_block_end_row_idx();
+        if !self.heap.is_empty() {
+            self.update_first_block_end_row_idx();
+        }
     }
 
     fn down(&mut self, i0: usize) -> bool {
@@ -1690,6 +1692,9 @@ pub mod tests {
         let mut readers: Vec<Box<dyn ColumnarReader>> = vec![];
         for file in files {
             let columnar_file = ColumnarFile::open(file.clone()).unwrap();
+            if !columnar_file.has_table(schema.table_id) {
+                continue;
+            }
             let reader = ColumnarTableReader::new(&columnar_file, schema.clone(), None);
             readers.push(Box::new(reader));
         }

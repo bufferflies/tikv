@@ -1325,6 +1325,7 @@ fn test_columnar_l0_compaction(#[case] enable_inner_key_off: bool) {
     ::test_util::init_log_for_test();
     let keyspace_id = 1;
     let table_id = 30;
+    let table_id2 = 31;
     let mut file_id = 100;
     let mut allocate_id = || {
         file_id += 1;
@@ -1334,7 +1335,8 @@ fn test_columnar_l0_compaction(#[case] enable_inner_key_off: bool) {
     let shard_id = prepare_table_region(&engine, &apply_tx, keyspace_id, table_id);
     let shard = engine.get_shard(shard_id).unwrap();
     let schema = new_schema(table_id, true);
-    let schemas = vec![schema.clone()];
+    let schema2 = new_schema(table_id2, true);
+    let schemas = vec![schema.clone(), schema2.clone()];
     let schema_version = 10;
     let schema_file_data = build_schema_file(keyspace_id, schema_version, schemas);
     let fs = engine.fs.clone();
@@ -1364,9 +1366,15 @@ fn test_columnar_l0_compaction(#[case] enable_inner_key_off: bool) {
         2000,
         400,
     );
+    let (l0_tbl_3, l0_tbl_3_ref) =
+        build_table(allocate_id(), enable_inner_key_off, &schema2, 0, 600, 300);
     let (l1_tbl_0, l1_tbl_0_ref) =
         build_table(allocate_id(), enable_inner_key_off, &schema, 0, 100, 100);
-    for file in [&l0_tbl_0, &l0_tbl_1, &l0_tbl_2, &l1_tbl_0] {
+    let (l1_tbl_1, l1_tbl_1_ref) =
+        build_table(allocate_id(), enable_inner_key_off, &schema2, 0, 100, 100);
+    for file in [
+        &l0_tbl_0, &l0_tbl_1, &l0_tbl_2, &l0_tbl_3, &l1_tbl_0, &l1_tbl_1,
+    ] {
         info!("build file_id: {}, file size: {}", file.id(), file.size());
         fs.get_runtime()
             .block_on(fs.create(file.id(), file.read(0, file.size() as usize).unwrap(), opts))
@@ -1377,7 +1385,9 @@ fn test_columnar_l0_compaction(#[case] enable_inner_key_off: bool) {
     col_levels.add_file(0, ColumnarFile::open(l0_tbl_0).unwrap());
     col_levels.add_file(0, ColumnarFile::open(l0_tbl_1).unwrap());
     col_levels.add_file(0, ColumnarFile::open(l0_tbl_2).unwrap());
+    col_levels.add_file(0, ColumnarFile::open(l0_tbl_3).unwrap());
     col_levels.add_file(1, ColumnarFile::open(l1_tbl_0).unwrap());
+    col_levels.add_file(1, ColumnarFile::open(l1_tbl_1).unwrap());
 
     let mut builder = ShardDataBuilder::new(shard.get_data());
     builder.set_schema_file(Some(schema_file));
@@ -1423,6 +1433,27 @@ fn test_columnar_l0_compaction(#[case] enable_inner_key_off: bool) {
     );
     assert_eq!(block.length(), tbl_refs.len());
     verify_with_ref_rows(&block, &tbl_refs);
+
+    let mut mvcc_reader2 = snap
+        .new_columnar_mvcc_reader(table_id2, &schema2.columns, 500)
+        .unwrap();
+    mvcc_reader2
+        .set_handle_range(&i_to_common_handle(0), &i_to_common_handle(2100))
+        .unwrap();
+    let mut without_txn_id_schema_buf2 = schema2.to_schema_buf();
+    without_txn_id_schema_buf2.txn_id_column = None;
+    let without_txn_id_schema2 = without_txn_id_schema_buf2.into();
+    let mut block2 = Block::new(&without_txn_id_schema2);
+    mvcc_reader2.read_block(&mut block2, usize::MAX).unwrap();
+    let tbl_refs2 = merge_refs(
+        vec![l0_tbl_3_ref, l1_tbl_1_ref],
+        1,
+        Some(500),
+        None,
+        Some((i_to_common_handle(0), i_to_common_handle(2100))),
+    );
+    assert_eq!(block2.length(), tbl_refs2.len());
+    verify_with_ref_rows(&block2, &tbl_refs2);
 }
 
 #[rstest]
@@ -1432,6 +1463,7 @@ fn test_columnar_l1_compaction(#[case] enable_inner_key_off: bool) {
     ::test_util::init_log_for_test();
     let keyspace_id = 1;
     let table_id = 30;
+    let table_id2 = 31;
     let mut file_id = 100;
     let mut allocate_id = || {
         file_id += 1;
@@ -1441,7 +1473,8 @@ fn test_columnar_l1_compaction(#[case] enable_inner_key_off: bool) {
     let shard_id = prepare_table_region(&engine, &apply_tx, keyspace_id, table_id);
     let shard = engine.get_shard(shard_id).unwrap();
     let schema = new_schema(table_id, true);
-    let schemas = vec![schema.clone()];
+    let schema2 = new_schema(table_id2, true);
+    let schemas = vec![schema.clone(), schema2.clone()];
     let schema_version = 10;
     let schema_file_data = build_schema_file(keyspace_id, schema_version, schemas);
     let fs = engine.fs.clone();
@@ -1471,6 +1504,14 @@ fn test_columnar_l1_compaction(#[case] enable_inner_key_off: bool) {
         1500,
         400,
     );
+    let (l1_tbl_3, l1_tbl_3_ref) = build_table(
+        allocate_id(),
+        enable_inner_key_off,
+        &schema2,
+        300,
+        1200,
+        500,
+    );
     let (l2_tbl_0, l2_tbl_0_ref) =
         build_table(allocate_id(), enable_inner_key_off, &schema, 0, 1000, 100);
     let (l2_tbl_1, l2_tbl_1_ref) = build_table(
@@ -1481,7 +1522,11 @@ fn test_columnar_l1_compaction(#[case] enable_inner_key_off: bool) {
         2000,
         100,
     );
-    for file in [&l1_tbl_0, &l1_tbl_1, &l1_tbl_2, &l2_tbl_0, &l2_tbl_1] {
+    let (l2_tbl_2, l2_tbl_2_ref) =
+        build_table(allocate_id(), enable_inner_key_off, &schema2, 0, 1000, 200);
+    for file in [
+        &l1_tbl_0, &l1_tbl_1, &l1_tbl_2, &l1_tbl_3, &l2_tbl_0, &l2_tbl_1, &l2_tbl_2,
+    ] {
         info!("build file_id: {}, file size: {}", file.id(), file.size());
         fs.get_runtime()
             .block_on(fs.create(file.id(), file.read(0, file.size() as usize).unwrap(), opts))
@@ -1492,8 +1537,10 @@ fn test_columnar_l1_compaction(#[case] enable_inner_key_off: bool) {
     col_levels.add_file(1, ColumnarFile::open(l1_tbl_0).unwrap());
     col_levels.add_file(1, ColumnarFile::open(l1_tbl_1).unwrap());
     col_levels.add_file(1, ColumnarFile::open(l1_tbl_2).unwrap());
+    col_levels.add_file(1, ColumnarFile::open(l1_tbl_3).unwrap());
     col_levels.add_file(2, ColumnarFile::open(l2_tbl_0).unwrap());
     col_levels.add_file(2, ColumnarFile::open(l2_tbl_1).unwrap());
+    col_levels.add_file(2, ColumnarFile::open(l2_tbl_2).unwrap());
 
     let mut builder = ShardDataBuilder::new(shard.get_data());
     builder.set_schema_file(Some(schema_file));
@@ -1544,6 +1591,26 @@ fn test_columnar_l1_compaction(#[case] enable_inner_key_off: bool) {
     );
     assert_eq!(block.length(), tbl_refs.len());
     verify_with_ref_rows(&block, &tbl_refs);
+
+    let mut mvcc_reader2 = snap
+        .new_columnar_mvcc_reader(table_id2, &schema2.columns, 600)
+        .unwrap();
+    mvcc_reader2
+        .set_handle_range(&i_to_common_handle(0), &i_to_common_handle(2100))
+        .unwrap();
+    let mut without_txn_id_schema2 = schema2.to_schema_buf();
+    without_txn_id_schema2.txn_id_column = None;
+    let mut block2 = Block::new(&without_txn_id_schema2.into());
+    mvcc_reader2.read_block(&mut block2, usize::MAX).unwrap();
+    let tbl_refs2 = merge_refs(
+        vec![l1_tbl_3_ref, l2_tbl_2_ref],
+        2,
+        Some(600),
+        None,
+        Some((i_to_common_handle(0), i_to_common_handle(2100))),
+    );
+    assert_eq!(block2.length(), tbl_refs2.len());
+    verify_with_ref_rows(&block2, &tbl_refs2);
 }
 
 #[rstest]
