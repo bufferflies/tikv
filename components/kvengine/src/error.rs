@@ -18,7 +18,7 @@ pub enum Error {
     KeyNotFound,
     #[error("shard not found")]
     ShardNotFound,
-    #[error("key not match")]
+    #[error("shard version not match")]
     ShardNotMatch,
     #[error("already splitting")]
     AlreadySplitting,

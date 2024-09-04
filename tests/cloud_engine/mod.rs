@@ -8,6 +8,7 @@
 use std::{str::FromStr, sync::atomic::AtomicU16};
 
 use api_version::ApiV2;
+use bytes::Bytes;
 use http::Uri;
 use hyper::{Body, Request};
 use kvproto::{kvrpcpb::UnsafeDestroyRangeRequest, metapb::Store};
@@ -142,6 +143,28 @@ pub(crate) fn destroy_range(client: &mut ClusterClient, store_id: u64, prefix: &
     let resp = kv_client.unsafe_destroy_range(&req).unwrap();
     assert!(resp.get_error().is_empty(), "{:?}", resp.get_error());
     assert!(!resp.has_region_error());
+}
+
+pub(crate) async fn request_dump_snapshot_on_store(
+    store: &Store,
+    shard_id: u64,
+    shard_ver: u64,
+    start_ts: u64,
+) -> Bytes {
+    let uri = Uri::from_str(&format!(
+        "http://{}/kvengine/snapshot/{}?start_ts={}&shard_ver={}",
+        &store.status_address, shard_id, start_ts, shard_ver,
+    ))
+    .unwrap();
+    let req = Request::get(uri).body(Body::empty()).unwrap();
+    let client = hyper::Client::new();
+    let resp: http::Response<Body> = client.request(req).await.unwrap();
+    assert!(
+        resp.status().is_success(),
+        "{:?}",
+        hyper::body::to_bytes(resp.into_body()).await.unwrap()
+    );
+    hyper::body::to_bytes(resp.into_body()).await.unwrap()
 }
 
 pub(crate) fn new_security_config() -> SecurityConfig {

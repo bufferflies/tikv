@@ -36,7 +36,7 @@ use hyper::{
     Body, Method, Request, Response, Server, StatusCode,
 };
 use kvengine::{dfs::DFSConfig, Shard, ShardStats};
-use kvproto::raft_serverpb::StoreIdent;
+use kvproto::{coprocessor::DelegateResponse, raft_serverpb::StoreIdent};
 use online_config::OnlineConfig;
 use openssl::{
     ssl::{Ssl, SslAcceptor, SslFiletype, SslMethod, SslVerifyMode},
@@ -54,7 +54,8 @@ use rfstore::{
     store::{
         peer_storage::{collect_prefix_regions, load_raft_engine_meta, load_region_state},
         state::RaftState,
-        Callback, CasualMessage, StoreMsg, RAFT_INIT_LOG_INDEX, RAFT_INIT_LOG_TERM, TERM_KEY,
+        Callback, CasualMessage, RegionSnapshot, StoreMsg, RAFT_INIT_LOG_INDEX, RAFT_INIT_LOG_TERM,
+        TERM_KEY,
     },
     RaftRouter, RaftStoreRouter,
 };
@@ -63,6 +64,7 @@ use serde_json::Value;
 use tikv::{
     config::{ConfigController, LogLevel},
     server::status_server::profile::start_one_cpu_profile,
+    storage::CloudStore,
 };
 use tikv_util::{
     codec::bytes::decode_bytes,
@@ -79,6 +81,7 @@ use tokio::{
     sync::oneshot::{self, Receiver, Sender},
 };
 use tokio_openssl::SslStream;
+use txn_types::TsSet;
 
 use crate::{
     server::Result, status_server::metrics::STATUS_REQ_HISTOGRAM_STATIC,
@@ -506,6 +509,107 @@ impl StatusServer {
             }
             Err(err) => Ok(make_response(StatusCode::BAD_REQUEST, err.to_string())),
         }
+    }
+
+    // URI: /kvengine/snapshot/<shard_id>?start_ts=xxx&shard_ver=xxx
+    // dump kvengine shard snapshot with start_ts
+    async fn dump_kvengine_snapshot(
+        req: Request<Body>,
+        engine: kvengine::Engine,
+        router: RaftRouter,
+    ) -> hyper::Result<Response<Body>> {
+        let path = req.uri().path();
+        let last = get_last_path_segment(path);
+        let query = req.uri().query().unwrap_or("");
+        let query_pairs: HashMap<_, _> = url::form_urlencoded::parse(query.as_bytes()).collect();
+        if !query_pairs.contains_key("start_ts") {
+            return Ok(make_response(
+                StatusCode::BAD_REQUEST,
+                "start_ts is required".to_string(),
+            ));
+        }
+        if !query_pairs.contains_key("shard_ver") {
+            return Ok(make_response(
+                StatusCode::BAD_REQUEST,
+                "shard_ver is required".to_string(),
+            ));
+        }
+        let shard_ver = match u64::from_str(query_pairs.get("shard_ver").unwrap()) {
+            Ok(ver) => ver,
+            Err(err) => return Ok(make_response(StatusCode::BAD_REQUEST, err.to_string())),
+        };
+        let shard_id = match u64::from_str(last) {
+            Ok(id) => id,
+            Err(err) => return Ok(make_response(StatusCode::BAD_REQUEST, err.to_string())),
+        };
+        let (cb, fut) = paired_future_callback();
+        let callback = Callback::Read(Box::new(move |res| {
+            cb(res);
+        }));
+        router.send_casual_msg(
+            shard_id,
+            CasualMessage::CheckLeader {
+                shard_ver,
+                callback,
+            },
+        );
+        let mut res = match fut.await {
+            Ok(res) => res,
+            Err(e) => {
+                let err_msg = format!("{} check leader channel error: {:?}", shard_id, e);
+                error!("{}", err_msg);
+                return Ok(make_response(StatusCode::INTERNAL_SERVER_ERROR, err_msg));
+            }
+        };
+        let make_ok_response = |body: Vec<u8>| -> Response<Body> {
+            Response::builder().body(Body::from(body)).unwrap()
+        };
+        let mut delegate_resp = DelegateResponse::default();
+        let mut err = res.response.take_header().take_error();
+        if err.has_not_leader() {
+            delegate_resp
+                .mut_region_error()
+                .set_not_leader(err.take_not_leader());
+            let body = delegate_resp.write_to_bytes().unwrap();
+            return Ok(make_ok_response(body));
+        } else if err.has_epoch_not_match() {
+            delegate_resp
+                .mut_region_error()
+                .set_epoch_not_match(err.take_epoch_not_match());
+            let body = delegate_resp.write_to_bytes().unwrap();
+            return Ok(make_ok_response(body));
+        }
+        Ok(match engine.get_shard_with_ver(shard_id, shard_ver) {
+            Ok(shard) => {
+                let snap_access = shard.new_snap_access();
+                let outer_ranges = vec![(shard.outer_start.clone(), shard.outer_end.clone())];
+                let start_ts = u64::from_str(query_pairs.get("start_ts").unwrap()).unwrap();
+                let region_snapshot = RegionSnapshot::from_snapshot(snap_access.clone());
+                let cloud_store =
+                    CloudStore::new(region_snapshot, start_ts, TsSet::default(), true);
+                // Check if the shard contains locks belongs to the ranges. If there is any
+                // lock, return the first key as LockInfo. The client should retry in this case.
+                if let Err(tikv::coprocessor::Error::Locked(lock_info)) = cloud_store
+                    .check_locks_in_range(&shard.outer_start, &shard.outer_end)
+                    .map_err(tikv::coprocessor::Error::from)
+                {
+                    delegate_resp.set_locked(lock_info);
+                    let body = delegate_resp.write_to_bytes().unwrap();
+                    return Ok(make_ok_response(body));
+                }
+                let mem_data = snap_access.build_mem_data(&outer_ranges, start_ts);
+                let (_, snap_data) = shard.new_snap_access().marshal(
+                    &[(shard.outer_start.clone(), shard.outer_end.clone())],
+                    false,
+                    false,
+                );
+                delegate_resp.set_mem_table_data(mem_data);
+                delegate_resp.set_snapshot(snap_data);
+                let body = delegate_resp.write_to_bytes().unwrap();
+                make_ok_response(body)
+            }
+            Err(e) => make_response(StatusCode::NOT_FOUND, e.to_string()),
+        })
     }
 
     async fn dump_kvengine_meta(
@@ -1677,7 +1781,9 @@ impl StatusServer {
                                 Self::change_log_level(req).await
                             }
                             (Method::GET, path) if path.starts_with("/kvengine") => {
-                                if path.starts_with("/kvengine/meta/") {
+                                if path.starts_with("/kvengine/snapshot/") {
+                                    Self::dump_kvengine_snapshot(req, engine, router).await
+                                } else if path.starts_with("/kvengine/meta/") {
                                     Self::dump_kvengine_meta(req, engine).await
                                 } else {
                                     Self::dump_kvengine_stats(req, engine).await

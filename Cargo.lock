@@ -7836,6 +7836,7 @@ dependencies = [
  "reqwest",
  "rfengine",
  "rfstore",
+ "rstest",
  "security",
  "serde",
  "serde_derive",

@@ -17,9 +17,15 @@ use kvengine::{
             new_version_column_info, ColumnarFilterReader, Schema, SchemaBuf,
         },
     },
+    SnapAccess, WRITE_CF,
 };
+use kvproto::coprocessor::DelegateResponse;
 use pd_client::PdClient;
-use test_cloud_server::{must_wait, ServerCluster};
+use protobuf::Message;
+use test_cloud_server::{
+    client::{CommitAction, MutateOptions},
+    must_wait, ServerCluster,
+};
 use tidb_query_datatype::{
     codec::{
         row::v2::encoder_for_test::{Column, RowEncoder},
@@ -28,11 +34,14 @@ use tidb_query_datatype::{
     expr::EvalContext,
     Collation, FieldTypeTp,
 };
-use tikv_util::codec::{bytes::encode_bytes, number::NumberEncoder};
+use tikv_util::{
+    codec::{bytes::encode_bytes, number::NumberEncoder},
+    info,
+};
 use tipb::ColumnInfo;
 use txn_types::Key;
 
-use crate::alloc_node_id;
+use crate::{alloc_node_id, request_dump_snapshot_on_store};
 
 #[test]
 fn test_schema_file() {
@@ -215,7 +224,21 @@ fn test_covert_row_to_columnar() {
             false
         },
         10,
-        || "failed to build columnar file".to_string(),
+        || {
+            // dump shard info
+            let all_id_vers = kvengine.get_all_shard_id_vers();
+            for id_ver in all_id_vers {
+                if let Ok(shard) = kvengine.get_shard_with_ver(id_ver.id, id_ver.ver) {
+                    let snap_version = shard.get_snap_version();
+                    let columnar_snap_version = shard.get_columnar_snap_version();
+                    info!(
+                        "shard: {:?}, snap_version: {}, columnar_snap_version: {}",
+                        id_ver, snap_version, columnar_snap_version
+                    );
+                }
+            }
+            "failed to build columnar file".to_string()
+        },
     );
     let shard_id = shard_id.unwrap();
     let shard = kvengine.get_shard(shard_id).unwrap();
@@ -236,6 +259,133 @@ fn test_covert_row_to_columnar() {
         let str_val = gen_str_val(i);
         assert_eq!(columns[1].get_not_null_value(i), &str_val);
     }
+}
+
+#[test]
+fn test_get_snapshot_from_leader_by_status_api() {
+    test_util::init_log_for_test();
+    let node_id = alloc_node_id();
+    let mut cluster = ServerCluster::new(vec![node_id], |_, conf| {
+        conf.enable_inner_key_offset = true;
+        conf.kvengine
+            .columnar_table_build_options
+            .max_columnar_table_size = 1024;
+        conf.kvengine
+            .columnar_table_build_options
+            .pack_max_row_count = 9;
+    });
+    let dfs = cluster.get_dfs().unwrap();
+    let keyspace_id = 7;
+    let table_ids = dfs
+        .get_runtime()
+        .block_on(create_keyspace_and_split_tables(&mut cluster, keyspace_id));
+    let table_id = table_ids[1];
+    let kvengine = cluster.get_kvengine(node_id);
+    let master_key = kvengine.get_master_key();
+    let mut client = cluster.new_client();
+    let ctx = Mutex::new(EvalContext::default());
+    client.put_kv(
+        0..100,
+        |i: usize| gen_row_key(keyspace_id, table_id, i),
+        |i: usize| gen_row_val(&ctx, i),
+    );
+    client.put_kv(
+        100..200,
+        |i: usize| gen_row_key(keyspace_id, table_id, i),
+        |i: usize| gen_row_val(&ctx, i),
+    );
+    let pd_client = cluster.get_pd_client();
+    let shard = pd_client
+        .get_region(&encode_bytes(&gen_row_key(keyspace_id, table_id, 0)))
+        .unwrap();
+
+    let store_id = kvengine.get_engine_id();
+    let store = pd_client.get_store(store_id).unwrap();
+    let start_ts = client.get_ts().into_inner();
+
+    // return region epoch not match in header
+    let snapshot_from_remote = dfs.get_runtime().block_on(request_dump_snapshot_on_store(
+        &store,
+        shard.id,
+        shard.region_epoch.as_ref().unwrap().version - 1,
+        start_ts,
+    ));
+    let mut delegate_resp = DelegateResponse::default();
+    delegate_resp
+        .merge_from_bytes(&snapshot_from_remote)
+        .unwrap();
+    assert!(delegate_resp.get_region_error().has_epoch_not_match());
+    assert!(delegate_resp.get_mem_table_data().is_empty());
+    assert!(delegate_resp.get_snapshot().is_empty());
+
+    let snapshot_from_remote = dfs.get_runtime().block_on(request_dump_snapshot_on_store(
+        &store,
+        shard.id,
+        shard.region_epoch.as_ref().unwrap().version,
+        start_ts,
+    ));
+    delegate_resp
+        .merge_from_bytes(&snapshot_from_remote)
+        .unwrap();
+    let snap_access = dfs
+        .get_runtime()
+        .block_on(SnapAccess::construct_snapshot(
+            "test".to_owned(),
+            dfs.clone(),
+            delegate_resp.get_mem_table_data(),
+            delegate_resp.get_snapshot(),
+            &master_key,
+            None,
+            kvengine.get_txn_chunk_manager(),
+        ))
+        .unwrap();
+
+    let mut iter = snap_access.new_iterator(WRITE_CF, false, true, Some(start_ts), false);
+    iter.rewind();
+    let mut i = 0;
+    while iter.valid() {
+        assert_eq!(iter.key(), &gen_row_key(keyspace_id, table_id, i));
+        assert_eq!(iter.val(), &gen_row_val(&ctx, i));
+        iter.next();
+        i += 1;
+    }
+    assert_eq!(i, 200);
+
+    // write some locks
+    let mut opts = MutateOptions::default();
+    opts.commit_action = CommitAction::NoCommit;
+    client
+        .try_put_kv(
+            0..100,
+            |i: usize| gen_row_key(keyspace_id, table_id, i),
+            |i: usize| gen_row_val(&ctx, i),
+            opts,
+        )
+        .unwrap();
+    // use old start_ts should not return error
+    let snapshot_from_remote = dfs.get_runtime().block_on(request_dump_snapshot_on_store(
+        &store,
+        shard.id,
+        shard.region_epoch.as_ref().unwrap().version,
+        start_ts,
+    ));
+    let mut delegate_resp = DelegateResponse::default();
+    delegate_resp
+        .merge_from_bytes(&snapshot_from_remote)
+        .unwrap();
+    assert!(!delegate_resp.has_locked());
+    // use new start_ts should return lock error
+    let snapshot_from_remote = dfs.get_runtime().block_on(request_dump_snapshot_on_store(
+        &store,
+        shard.id,
+        shard.region_epoch.unwrap().version,
+        client.get_ts().into_inner(),
+    ));
+    let mut delegate_resp = DelegateResponse::default();
+    delegate_resp
+        .merge_from_bytes(&snapshot_from_remote)
+        .unwrap();
+    assert!(delegate_resp.has_locked());
 }
 
 fn gen_row_key(keyspace_id: u32, table_id: i64, i: usize) -> Vec<u8> {

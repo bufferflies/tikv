@@ -35,6 +35,7 @@ regex = "1.5"
 reqwest = { version = "0.11", default-features = false, features = ["blocking", "json"] }
 rfengine = { path = "../rfengine" }
 rfstore = { path = "../rfstore" }
+rstest = "0.18"
 security = { path = "../security", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_derive = "1.0"

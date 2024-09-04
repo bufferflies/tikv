@@ -915,7 +915,7 @@ pub async fn broadcast_schema_update_to_all_stores(
         if let Err(err) = send_request_to_store_with_retry(req, store, security_mgr, timeout).await
         {
             return Err(box_err!(
-                "broadcase schema update to store {} failed: {:?}",
+                "broadcast schema update to store {} failed: {:?}",
                 status_addr,
                 err
             ));

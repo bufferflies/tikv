@@ -45,6 +45,7 @@ use tikv_util::{
 };
 use txn_types::{Key, WriteBatchFlags};
 
+use super::RequestInspector;
 use crate::{
     store::{
         cmd_resp::{bind_term, message_error, new_error, new_with_key_error},
@@ -323,6 +324,10 @@ impl<'a> PeerMsgHandler<'a> {
                 callback,
             } => self.on_manual_major_compact(major_compact, callback),
             CasualMessage::UpdateSchemaFile(schema_file) => self.on_update_schema_file(schema_file),
+            CasualMessage::CheckLeader {
+                shard_ver,
+                callback,
+            } => self.on_check_leader(shard_ver, callback),
         }
     }
 
@@ -1527,6 +1532,32 @@ impl<'a> PeerMsgHandler<'a> {
             schema_file.get_file_id()
         );
         self.propose_change_set(change_set);
+    }
+
+    fn on_check_leader(&mut self, shard_ver: u64, callback: Callback) {
+        let mut resp = RaftCmdResponse::default();
+        // If the peer is not leader or not applied to current term, return not_leader
+        // error. The client should sleep and retry.
+        if !self.peer.is_leader() || !self.peer.has_applied_to_current_term() {
+            let header = resp.mut_header();
+            let error = header.mut_error();
+            let not_leader = error.mut_not_leader();
+            not_leader.set_region_id(self.region_id());
+            let leader_id = self.peer.leader_id();
+            if leader_id != 0 {
+                if let Some(p) = self.region().get_peers().iter().find(|p| p.id == leader_id) {
+                    not_leader.set_leader(p.clone());
+                }
+            }
+        } else if self.region().get_region_epoch().version != shard_ver {
+            let header = resp.mut_header();
+            let error = header.mut_error();
+            let epoch_not_match = error.mut_epoch_not_match();
+            epoch_not_match
+                .mut_current_regions()
+                .push(self.region().clone());
+        }
+        callback.invoke_with_response(resp);
     }
 
     fn on_ingest_files(&mut self, cs: kvenginepb::ChangeSet, callback: Callback) {

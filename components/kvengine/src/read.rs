@@ -15,6 +15,7 @@ use kvenginepb as pb;
 use kvenginepb::TxnFileRefs;
 use log_wrappers::Value as LogValue;
 use moka::sync::SegmentedCache;
+use pb::SchemaMeta;
 use protobuf::Message;
 use tikv_util::{
     box_try,
@@ -876,6 +877,43 @@ impl SnapAccessCore {
             }
             false
         });
+        self.data.for_each_columnar_level(|cl| {
+            for col_file in cl.files.iter() {
+                // check overlap
+                let mut overlap = false;
+                for (outer_start, outer_end) in outer_ranges {
+                    let inner_start =
+                        InnerKey::from_outer_key(outer_start, self.data.range.inner_key_off);
+                    let inner_end =
+                        InnerKey::from_outer_end_key(outer_end, self.data.range.inner_key_off);
+                    if col_file.has_data_in_range(inner_start, inner_end) {
+                        overlap = true;
+                        break;
+                    }
+                }
+                if !overlap {
+                    continue;
+                }
+                overlapped_count += 1;
+                let mut tbl = pb::TableCreate::new();
+                tbl.set_id(col_file.id());
+                tbl.set_cf(WRITE_CF as i32);
+                tbl.set_level(cl.level as u32);
+                tbl.set_smallest(col_file.get_smallest().to_vec());
+                tbl.set_biggest(col_file.get_biggest().to_vec());
+                snap.mut_columnar_creates().push(tbl);
+            }
+            false
+        });
+        if let Some(schema_file) = &self.data.schema_file {
+            let mut schema_meta = SchemaMeta::default();
+            schema_meta.set_file_id(schema_file.get_file_id());
+            schema_meta.set_keyspace_id(self.get_keyspace_id());
+            schema_meta.set_version(schema_file.get_version());
+            snap.set_schema_meta(schema_meta);
+        }
+        snap.set_columnar_snap_version(self.columnar_snap_version);
+
         info!(
             "convert snap access to change set for {}, total files {}, overlapped files {}",
             self.get_tag(),

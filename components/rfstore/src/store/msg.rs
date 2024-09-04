@@ -458,6 +458,10 @@ pub enum CasualMessage {
         callback: Callback,
     },
     UpdateSchemaFile(SchemaFile),
+    CheckLeader {
+        shard_ver: u64,
+        callback: Callback,
+    },
 }
 
 impl fmt::Debug for CasualMessage {
@@ -501,6 +505,9 @@ impl fmt::Debug for CasualMessage {
                     schema_file.get_file_id(),
                     schema_file.get_version()
                 )
+            }
+            CasualMessage::CheckLeader { shard_ver, .. } => {
+                write!(fmt, "check leader with version {}", shard_ver)
             }
         }
     }
