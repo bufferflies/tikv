@@ -36,6 +36,7 @@ use test_cloud_server::{
         ClusterClientOptions, CommitAction, MutateOptions, RequestOptions, RequestPeerRole,
         TxnWriteMethod,
     },
+    must_wait,
     oss::prepare_dfs,
     try_wait, ServerCluster,
 };
@@ -1267,16 +1268,22 @@ fn test_restore_keyspace_with_schema() {
         ))
         .unwrap();
     // Check the schema file already installed.
-    let data_stats = cluster.get_data_stats();
-    let mut schema_file_installed = false;
-    data_stats.iter_shard_stats(|_, shard_stats| {
-        if shard_stats.schema_version > 0 {
-            schema_file_installed = true;
-            return true;
-        }
-        false
-    });
-    assert!(schema_file_installed);
+    must_wait(
+        || {
+            let data_stats = cluster.get_data_stats();
+            let mut schema_file_exists = false;
+            data_stats.iter_shard_stats(|_, shard_stats| {
+                if shard_stats.schema_version > 0 {
+                    schema_file_exists = true;
+                    return true;
+                }
+                false
+            });
+            schema_file_exists
+        },
+        10,
+        || "failed to install schema file".to_string(),
+    );
 
     // Perform backup.
     let snapshot_backup_name = generate_backup_name();
@@ -1314,20 +1321,23 @@ fn test_restore_keyspace_with_schema() {
     )
     .unwrap();
 
-    // Wait a while for apply.
-    std::thread::sleep(Duration::from_secs(2));
-
     // Check if the schema file is cleared after restoration.
-    let data_stats = cluster.get_data_stats();
-    let mut schema_file_installed = false;
-    data_stats.iter_shard_stats(|_, shard_stats| {
-        if shard_stats.schema_version > 0 {
-            schema_file_installed = true;
-            return true;
-        }
-        false
-    });
-    assert!(!schema_file_installed);
+    must_wait(
+        || {
+            let data_stats = cluster.get_data_stats();
+            let mut schema_file_exists = false;
+            data_stats.iter_shard_stats(|_, shard_stats| {
+                if shard_stats.schema_version > 0 {
+                    schema_file_exists = true;
+                    return true;
+                }
+                false
+            });
+            !schema_file_exists
+        },
+        10,
+        || "failed to clear schema file".to_string(),
+    );
 
     // Verify restored data.
     client.verify_data_with_ref_store();
