@@ -229,6 +229,11 @@ fn create_check_table_tasks(dbs: &[DbInfo]) -> Vec<CheckTableTask> {
                 if (tbl.is_common_handle || tbl.pk_is_handle) && idx_info.is_primary {
                     continue;
                 }
+                if idx_info.mv_index == Some(true) {
+                    // Multi value index may have multiple or no entries points to a single
+                    // handle, we should ignore it.
+                    continue;
+                }
                 if idx_info.state == STATE_PUBLIC {
                     indices.push((idx_info.id, idx_info.idx_cols.len()));
                 }
