@@ -321,6 +321,12 @@ impl RfEngineCore {
             .and_then(|data| data.read().unwrap().term(index))
     }
 
+    pub fn get_truncated_index(&self, peer_id: u64) -> Option<u64> {
+        let peer_data_ref = self.peers.get(&peer_id)?;
+        let data = peer_data_ref.read().unwrap();
+        Some(data.truncated_idx)
+    }
+
     pub fn get_last_index(&self, peer_id: u64) -> Option<u64> {
         self.peers
             .get(&peer_id)

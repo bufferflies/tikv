@@ -24,6 +24,7 @@ log_wrappers = { workspace = true }
 native_br = { workspace = true }
 pd_client = { workspace = true }
 protobuf = "2.8"
+raft-proto = { version = "0.7.0", default-features = false }
 rfengine = { workspace = true }
 rfenginepb = { workspace = true }
 rfstore = { workspace = true }

@@ -1792,6 +1792,7 @@ dependencies = [
  "native_br",
  "pd_client",
  "protobuf",
+ "raft-proto",
  "rfengine",
  "rfenginepb",
  "rfstore",

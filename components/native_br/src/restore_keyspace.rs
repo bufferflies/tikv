@@ -827,7 +827,7 @@ impl BackupCluster {
         &self.tag
     }
 
-    fn setup_raft_engine(
+    pub fn setup_raft_engine(
         store_id: u64,
         cluster_backup: &ClusterBackupMeta,
         conf: &TikvConfig,
@@ -1618,6 +1618,10 @@ impl BackupCluster {
 
     pub fn get_kvengine(&self) -> kvengine::Engine {
         self.kv_engine.as_ref().unwrap().clone()
+    }
+
+    pub fn get_rfengine(&self, store_id: u64) -> Option<RfEngine> {
+        self.raft_engines.get(&store_id).cloned()
     }
 
     pub fn get_shard_meta_getter(&self) -> RegionMetaGetter {
