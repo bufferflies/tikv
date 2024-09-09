@@ -349,9 +349,12 @@ impl ObjectStorageWorker {
         if snapshot_objects.is_empty() {
             return Ok(());
         }
-        if let Err(err) = self.s3fs.put_objects(snapshot_objects) {
-            error!("put snapshot objects failed"; "err" => ?err);
-            return Err(Error::Other(err));
+        // Snapshot objects should be put in order.
+        for obj in snapshot_objects {
+            if let Err(err) = self.s3fs.put_objects(vec![obj]) {
+                error!("put snapshot object failed"; "err" => ?err);
+                return Err(Error::Other(err));
+            }
         }
 
         Ok(())

@@ -395,34 +395,34 @@ impl Worker {
     fn snapshot_backup(&mut self) -> Result<Vec<(String, Bytes)>> {
         let engine_id = self.manifest.get_engine_id();
         info!("{}: start snapshot task", engine_id);
-        let mut objects = vec![];
         let mut backup_meta = StoreBackupMeta::default();
         backup_meta.set_store_id(engine_id);
 
         let manifest = self.manifest.to_change_set(true); // Exclude tombstone peers.
-        match self.backup_raft_log_files(&manifest, &mut backup_meta, true) {
-            Ok(obj) => objects.push(obj),
+        let rlog_obj = match self.backup_raft_log_files(&manifest, &mut backup_meta, true) {
+            Ok(obj) => obj,
             Err(e) => {
                 return Err(Error::Other(format!("backup raft log failed {:?}", e)));
             }
-        }
+        };
         // manifest epoch id already increased by 1.
         let epoch_id = manifest.get_epoch_id();
         backup_meta.set_manifest(manifest);
-        let total_size: usize = objects.iter().map(|(_, data)| data.len()).sum();
         info!(
-            "snapshot backup write file count: {}, size: {}, raft meta offset {}",
-            objects.len(),
-            total_size,
+            "snapshot backup write file size: {}, raft meta offset {}",
+            rlog_obj.1.len(),
             backup_meta.raft_meta_start_off,
         );
 
         // Also need snapshot backup_meta.
         let meta_key = snapshot_store_meta_key(engine_id, epoch_id);
         let meta_data = backup_meta.write_to_bytes().unwrap();
-        objects.push((meta_key, Bytes::from(meta_data)));
+        let meta_obj = (meta_key, Bytes::from(meta_data));
 
-        Ok(objects)
+        // `rlog_obj` should be written to DFS at the end, as we scan for latest
+        // snapshot by the rlog object.
+        // See https://github.com/tidbcloud/cloud-storage-engine/issues/1840.
+        Ok(vec![meta_obj, rlog_obj])
     }
 
     fn full_backup(&mut self, task: BackupTask) {

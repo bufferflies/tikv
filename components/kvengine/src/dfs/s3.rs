@@ -837,10 +837,7 @@ impl S3FsCore {
 
 impl ObjectStorage for S3Fs {
     fn put_objects(&self, objects: Vec<(String, Bytes)>) -> Result<(), String> {
-        let runtime = self.get_runtime();
-        let len = objects.len();
-        let mut handles = Vec::with_capacity(len);
-        for (key, data) in objects {
+        let put_object = |key: String, data: Bytes| {
             let full_key = format!("{}/{}", self.prefix, key);
             let fs = self.clone();
             let checksum = if self.is_on_aws() {
@@ -848,7 +845,7 @@ impl ObjectStorage for S3Fs {
             } else {
                 None
             };
-            handles.push(runtime.spawn(async move {
+            async move {
                 fs.put_object_with_options(
                     full_key,
                     data,
@@ -859,7 +856,20 @@ impl ObjectStorage for S3Fs {
                 )
                 .await
                 .map_err(|err| format!("put {} failed {:?}", &key, err))
-            }));
+            }
+        };
+
+        let runtime = self.get_runtime();
+        let len = objects.len();
+
+        if len == 1 {
+            let (key, data) = objects.into_iter().next().unwrap();
+            return runtime.block_on(put_object(key, data));
+        }
+
+        let mut handles = Vec::with_capacity(len);
+        for (key, data) in objects {
+            handles.push(runtime.spawn(put_object(key, data)));
         }
 
         let errs: Vec<_> = runtime
