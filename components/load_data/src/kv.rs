@@ -39,6 +39,7 @@ pub struct KvPairsReader {
     offset: usize,
     next_offset: usize,
     buf_rx: Receiver<Result<Vec<u8>>>,
+    key_comm_prefix_len: usize,
 }
 
 impl KvPairsReader {
@@ -80,11 +81,20 @@ impl KvPairsReader {
             offset: 0,
             next_offset: 0,
             buf_rx,
+            key_comm_prefix_len: 0,
         }
+    }
+
+    fn init(&mut self, key_comm_prefix_len: usize) {
+        self.key_comm_prefix_len = key_comm_prefix_len;
     }
 
     fn key(&self) -> &[u8] {
         &self.buf[self.offset + 2..self.offset + 2 + self.key_buf_len]
+    }
+
+    fn key_suffix(&self) -> &[u8] {
+        &self.buf[self.offset + 2 + self.key_comm_prefix_len..self.offset + 2 + self.key_buf_len]
     }
 
     fn value(&self) -> &[u8] {
@@ -154,7 +164,7 @@ pub struct MergeIterator {
     prev_key: Vec<u8>,
     prev_val: Vec<u8>,
     prev_row_id: Vec<u8>,
-    key_prefix: Vec<u8>,
+    outer_key_prefix: Vec<u8>,
     pub(crate) duplicated_entries: Vec<DuplicateEntry>,
     pub(crate) duplicated_entries_size: usize,
     last_dup_entry_key: Vec<u8>,
@@ -172,18 +182,25 @@ pub struct DuplicateEntry {
 }
 
 impl MergeIterator {
-    pub fn new(readers: Vec<KvPairsReader>, key_prefix: &[u8], new_client: bool) -> Result<Self> {
+    pub fn new(
+        readers: Vec<KvPairsReader>,
+        outer_key_prefix: &[u8],
+        key_comm_prefix_len: usize,
+        new_client: bool,
+    ) -> Result<Self> {
         let mut heap = Vec::with_capacity(readers.len());
         for mut reader in readers {
+            reader.init(key_comm_prefix_len);
             reader.next()?;
             heap.push(Box::new(reader));
         }
+
         let mut it = Self {
             heap,
             prev_key: vec![],
             prev_val: vec![],
             prev_row_id: vec![],
-            key_prefix: key_prefix.to_vec(),
+            outer_key_prefix: outer_key_prefix.to_vec(),
             duplicated_entries: vec![],
             duplicated_entries_size: 0,
             last_dup_entry_key: vec![],
@@ -227,7 +244,7 @@ impl MergeIterator {
     }
 
     fn less(&mut self, a: usize, b: usize) -> bool {
-        match self.heap[a].key().cmp(self.heap[b].key()) {
+        match self.heap[a].key_suffix().cmp(self.heap[b].key_suffix()) {
             std::cmp::Ordering::Less => true,
             std::cmp::Ordering::Equal => self.heap[a].row_id() < self.heap[b].row_id(),
             std::cmp::Ordering::Greater => false,
@@ -265,6 +282,7 @@ impl MergeIterator {
             return Ok(false);
         }
         let first = &mut self.heap[0];
+
         first.next()?;
         if !first.valid() {
             self.heap.swap(0, heap_len - 1);
@@ -274,6 +292,7 @@ impl MergeIterator {
             }
         }
         self.down(0);
+
         let key = self.heap[0].key();
         let val = self.heap[0].value();
         let row_id = self.heap[0].row_id();
@@ -310,7 +329,7 @@ impl MergeIterator {
                 }
             }
             self.duplicated_entries_size += key.len() + self.prev_val.len() + val.len();
-            let mut dup_key = self.key_prefix.clone();
+            let mut dup_key = self.outer_key_prefix.clone();
             dup_key.extend_from_slice(key);
             let dup_entry = DuplicateEntry {
                 key: hex::encode(dup_key),
@@ -321,6 +340,7 @@ impl MergeIterator {
             self.last_dup_entry_row_id = row_id.to_vec();
             return Ok(true);
         }
+
         self.prev_key.truncate(0);
         self.prev_key.extend_from_slice(key);
         self.prev_val.truncate(0);
@@ -342,7 +362,7 @@ mod tests {
     use tidb_query_datatype::codec::table;
 
     use super::*;
-    use crate::task::{flush_to_local_file, TaskContext};
+    use crate::task::{flush_to_local_file, get_common_prefix, TaskContext};
 
     #[test]
     fn test_kv_pairs_reader() {
@@ -365,11 +385,19 @@ mod tests {
             Utc::now().timestamp_millis()
         ));
 
-        let mut reader = generate_reader(kv_pairs, path.clone(), kv_pair_size);
+        let (mut reader, key_comm_prefix) = generate_reader(kv_pairs, path.clone(), kv_pair_size);
+        let key_comm_prefix_len = key_comm_prefix.len();
+        let mut key_buf = key_comm_prefix;
+
+        reader.init(key_comm_prefix_len);
         ids.sort();
         for id in ids.iter() {
             reader.next().unwrap();
-            assert_eq!(i_to_key(1, id).as_slice(), reader.key());
+            key_buf.resize(key_comm_prefix_len, 0);
+            key_buf.extend_from_slice(reader.key_suffix());
+            let key = i_to_key(1, id);
+            assert_eq!(key.as_slice(), reader.key());
+            assert_eq!(key.as_slice(), key_buf.as_slice());
             assert_eq!(i_to_val(id).as_slice(), reader.value());
             assert_eq!(i_to_row_id(id).as_slice(), reader.row_id());
         }
@@ -382,11 +410,11 @@ mod tests {
         let reader_count = 3;
         let kv_count_per_reader = 5;
         let kv_pair_size = get_kv_pair_size();
-        let mut ids: Vec<usize> = (0..reader_count * kv_count_per_reader).collect();
-        ids.shuffle(&mut thread_rng());
+        let mut key_ids: Vec<usize> = (0..reader_count * kv_count_per_reader).collect();
+        key_ids.shuffle(&mut thread_rng());
 
-        let mut kv_pairs = Vec::with_capacity(ids.len());
-        for id in ids.iter() {
+        let mut kv_pairs = Vec::with_capacity(key_ids.len());
+        for id in key_ids.iter() {
             kv_pairs.push(KvPair::new(
                 Bytes::from(i_to_key(1, id)),
                 Bytes::from(i_to_val(id)),
@@ -396,6 +424,7 @@ mod tests {
 
         let tmp_dir = TempDir::new().unwrap();
         let mut readers = vec![];
+        let mut last_key_comm_prefix = i_to_key(1, &key_ids[0]);
         for i in 0..reader_count {
             let kv_pairs_part =
                 kv_pairs[i * kv_count_per_reader..(i + 1) * kv_count_per_reader].to_vec();
@@ -403,19 +432,24 @@ mod tests {
                 "test_merge_iterator_{}",
                 Utc::now().timestamp_millis()
             ));
-            let reader = generate_reader(
+            let (reader, key_comm_prefix) = generate_reader(
                 kv_pairs_part,
                 path.clone(),
                 kv_pair_size * (kv_count_per_reader / 2),
             );
             readers.push(reader);
+            last_key_comm_prefix = get_common_prefix(&last_key_comm_prefix, &key_comm_prefix);
+
             sleep(Duration::from_millis(3));
         }
-        let mut merge_iter = MergeIterator::new(readers, "".as_bytes(), true).unwrap();
 
-        ids.sort();
-        for id in ids.iter() {
-            assert_eq!(i_to_key(1, id).as_slice(), merge_iter.key());
+        let key_comm_prefix_len = last_key_comm_prefix.len();
+        let mut merge_iter =
+            MergeIterator::new(readers, "".as_bytes(), key_comm_prefix_len, true).unwrap();
+
+        key_ids.sort();
+        for id in key_ids.iter() {
+            assert_eq!(i_to_key(1, id), merge_iter.key());
             assert_eq!(i_to_val(id).as_slice(), merge_iter.value());
             assert_eq!(i_to_row_id(id).as_slice(), merge_iter.row_id());
             merge_iter.next().unwrap();
@@ -423,13 +457,17 @@ mod tests {
         assert!(!merge_iter.valid());
     }
 
-    fn generate_reader(kv_pairs: Vec<KvPair>, path: PathBuf, batch_size: usize) -> KvPairsReader {
+    fn generate_reader(
+        kv_pairs: Vec<KvPair>,
+        path: PathBuf,
+        batch_size: usize,
+    ) -> (KvPairsReader, Vec<u8>) {
         let mock_task_ctx = TaskContext {
             task_id: "mock_load_data_id".to_string(),
             start_ts: 0,
             commit_ts: 0,
             inner_key_off: None,
-            key_prefix: vec![],
+            outer_key_prefix: vec![],
             encryption_key: None,
             new_client: true,
         };

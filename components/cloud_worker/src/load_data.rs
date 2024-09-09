@@ -209,7 +209,7 @@ pub(crate) async fn handle_load_data(
                     start_ts,
                     commit_ts,
                     inner_key_off: None,
-                    key_prefix: vec![],
+                    outer_key_prefix: vec![],
                     encryption_key: None,
                     new_client,
                 };
@@ -385,7 +385,7 @@ impl LoadDataManager {
             start_ts: check_point_ctx.get_start_ts(),
             commit_ts: check_point_ctx.get_commit_ts(),
             inner_key_off: None,
-            key_prefix: vec![],
+            outer_key_prefix: vec![],
             encryption_key: None,
             new_client: check_point_ctx.new_client,
         };

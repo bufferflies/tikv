@@ -27,7 +27,7 @@ pub fn init_task(
         start_ts,
         commit_ts,
         inner_key_off: None,
-        key_prefix: vec![],
+        outer_key_prefix: vec![],
         encryption_key: None,
         new_client: true,
     };
@@ -98,7 +98,7 @@ where
                 // Repeated key is the same as the original key with some row_id.
                 // Repeated key is caused by resending some data after the client restarts.
                 let repeated_key = i_to_key(idx);
-                let repeated_val = i_to_val(idx + k);
+                let repeated_val = i_to_val(idx);
                 let repeated_row_id = i_to_row_id(idx);
                 buf.put_u16_le(repeated_key.len() as u16);
                 buf.put_slice(&repeated_key);

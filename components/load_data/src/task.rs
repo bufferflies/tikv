@@ -97,10 +97,11 @@ pub struct LoadTaskWorker {
     file_tx: Sender<UnhandledReader>,
     file_rx: Receiver<UnhandledReader>,
     check_point_store: Arc<Mutex<LocalFileCheckPointStorage>>,
+    key_comm_prefix: Vec<u8>,
 }
 
 pub struct UnhandledReader {
-    pub reader: Result<KvPairsReader>,
+    pub reader: Result<(KvPairsReader, Vec<u8>)>,
     pub handled_chunk_ids: HashMap<u64 /* writer_id */, u64 /* chunk_id */>,
     pub file_idx: usize, // used to keep readers in order as kv pairs are flush asynchronously.
     pub path: PathBuf,   // It is recorded in checkpoint, and used to recover the reader.
@@ -237,7 +238,7 @@ pub struct TaskContext {
     pub start_ts: u64,
     pub commit_ts: u64,
     pub inner_key_off: Option<usize>,
-    pub key_prefix: Vec<u8>,
+    pub outer_key_prefix: Vec<u8>,
     pub encryption_key: Option<EncryptionKey>,
     // TODO(zeminzhou): remove new_client field when the old client is deprecated.
     pub new_client: bool,
@@ -407,13 +408,15 @@ impl LoadTaskWorker {
         let mut states = LoadTaskStates::default();
         let mut writers = WritersStates::default();
         let mut file_idx = 0;
+        let mut key_comm_prefix = vec![];
         if check_point_ctx.get_is_recover() {
             if check_point_ctx.get_state() > LoadDataWorkerState::InitTask {
                 writers.flushed_chunk_ids = check_point_ctx.get_flushed_chunk_ids();
                 writers.handled_chunk_ids = check_point_ctx.get_flushed_chunk_ids();
                 file_idx = check_point_ctx.get_flushed_file_idx() + 1;
+                key_comm_prefix = check_point_ctx.get_key_comm_prefix();
                 info!(
-                    "{} [check point] recover: writers.flushed_chunk_ids:{:?},writers.handled_chunk_ids:{:?},file_idx:{}",
+                    "{} [checkpoint] recover: writers.flushed_chunk_ids: {:?}, writers.handled_chunk_ids: {:?}, file_idx: {}",
                     task_ctx.task_id,
                     writers.flushed_chunk_ids,
                     writers.handled_chunk_ids,
@@ -431,6 +434,7 @@ impl LoadTaskWorker {
             states.created_files = check_point_ctx.get_sst_metas().len();
             states.duplicated_entries = check_point_ctx.get_duplicated_entries();
         }
+
         // Init checkpoint info.
         let mut check_point_store =
             LocalFileCheckPointStorage::new(check_point_ctx.clone(), context.dir.clone()).unwrap();
@@ -470,6 +474,7 @@ impl LoadTaskWorker {
             file_tx,
             file_rx,
             check_point_store: Arc::clone(&check_point_store_arc),
+            key_comm_prefix,
         }
     }
 
@@ -561,7 +566,8 @@ impl LoadTaskWorker {
             ))?;
             let snapshot = shard_meta.get_snapshot();
             self.task_ctx.inner_key_off = Some(snapshot.inner_key_off as usize);
-            self.task_ctx.key_prefix = first_key.slice(..snapshot.inner_key_off as usize).to_vec();
+            self.task_ctx.outer_key_prefix =
+                first_key.slice(..snapshot.inner_key_off as usize).to_vec();
             self.task_ctx.encryption_key =
                 get_shard_property(ENCRYPTION_KEY, snapshot.get_properties()).map(|exported_key| {
                     self.ctx
@@ -738,9 +744,13 @@ impl LoadTaskWorker {
             let key_len = (&chunk_data[0..]).get_u16_le();
             let first_key = chunk_data.slice(2..2 + key_len as usize);
             self.set_inner_key_off_and_encryption_key(first_key.clone())?;
-            let check_point_store_mutex = Arc::clone(&self.check_point_store);
-            let mut check_point_store_guard = check_point_store_mutex.lock().unwrap();
-            check_point_store_guard.update_first_key(first_key)?;
+
+            self.key_comm_prefix = first_key
+                .slice(self.task_ctx.inner_key_off.unwrap()..)
+                .to_vec();
+            let mut checkpoint_store_gurad = self.check_point_store.lock().unwrap();
+            checkpoint_store_gurad
+                .update_first_key_and_prefix(first_key, self.key_comm_prefix.clone())?;
         }
         let inner_key_off = self.task_ctx.inner_key_off.unwrap();
         let mut offset = 0;
@@ -760,13 +770,13 @@ impl LoadTaskWorker {
                 row_id = chunk_data.slice(offset..offset + row_id_len as usize);
                 offset += row_id_len as usize;
             }
-            let key_prefix = key.slice(..inner_key_off);
-            if key_prefix.chunk() != self.task_ctx.key_prefix.as_slice() {
+            let outer_key_prefix = key.slice(..inner_key_off);
+            if outer_key_prefix.chunk() != self.task_ctx.outer_key_prefix.as_slice() {
                 let err_msg = format!(
                     "{} chunk data key prefix inconsistent, first chunk: {:?}, chunk: {:?}",
                     self.task_ctx.task_id,
-                    self.task_ctx.key_prefix,
-                    key_prefix.chunk()
+                    self.task_ctx.outer_key_prefix,
+                    outer_key_prefix.chunk()
                 );
                 error!("{}", err_msg);
                 return Err(Error::CheckError(err_msg));
@@ -817,11 +827,14 @@ impl LoadTaskWorker {
         let mut handled_chunk_ids: HashMap<u64, u64> = HashMap::new();
         let mut max_file_idx = 0;
         let mut local_file_infos = vec![];
+        let mut last_key_comm_prefix = self.key_comm_prefix.clone();
         for mut unhandled_reader in self.unhandled_readers.drain(0..need_handled) {
             match unhandled_reader.reader {
-                Ok(reader) => {
+                Ok((reader, key_comm_prefix)) => {
                     self.readers.push(reader);
                     handled_chunk_ids = mem::take(&mut unhandled_reader.handled_chunk_ids);
+                    last_key_comm_prefix =
+                        get_common_prefix(&last_key_comm_prefix, &key_comm_prefix)
                 }
                 Err(err) => {
                     let err_str = err.to_string();
@@ -847,13 +860,18 @@ impl LoadTaskWorker {
             handled_chunk_ids.clone(),
             max_file_idx,
             local_file_infos,
+            last_key_comm_prefix.clone(),
         )?;
 
         for (writer_id, chunk_id) in handled_chunk_ids {
             self.scheduler.update_flushed_chunk(writer_id, chunk_id);
         }
+        self.key_comm_prefix = last_key_comm_prefix;
 
-        info!("{} handle {} readers", self.task_ctx.task_id, need_handled);
+        info!(
+            "{} handle {} readers, current key common prefix: {:?}",
+            self.task_ctx.task_id, need_handled, self.key_comm_prefix
+        );
         Ok(())
     }
 
@@ -943,10 +961,10 @@ impl LoadTaskWorker {
                 sst_metas = check_point_store_guard.get_sst_meta();
             }
             let keyspace_id = if !sst_metas.is_empty() {
-                let key = if self.task_ctx.key_prefix.is_empty() {
+                let key = if self.task_ctx.outer_key_prefix.is_empty() {
                     sst_metas.first().unwrap().smallest.as_slice()
                 } else {
-                    self.task_ctx.key_prefix.as_slice()
+                    self.task_ctx.outer_key_prefix.as_slice()
                 };
                 ApiV2::get_keyspace_id_str(key)
             } else {
@@ -1081,13 +1099,20 @@ impl LoadTaskWorker {
             return Ok(());
         }
 
-        info!("{} start build sst", self.task_ctx.task_id);
+        info!(
+            "{} start build sst with key common prefix: {:?}",
+            self.task_ctx.task_id, self.key_comm_prefix
+        );
         let (tx, rx) = tikv_util::mpsc::unbounded();
         let mut sent_count = 0;
         let mut recv_count = 0;
         let readers = mem::take(&mut self.readers);
-        let mut merge_iter =
-            MergeIterator::new(readers, &self.task_ctx.key_prefix, self.task_ctx.new_client)?;
+        let mut merge_iter = MergeIterator::new(
+            readers,
+            &self.task_ctx.outer_key_prefix,
+            self.key_comm_prefix.len(),
+            self.task_ctx.new_client,
+        )?;
 
         let mut errs = vec![];
         while merge_iter.valid() {
@@ -1187,7 +1212,7 @@ impl LoadTaskWorker {
                 offset += 4;
                 let val = &batch[offset..offset + val_len];
                 offset += val_len;
-                uncompressed_size += val_len;
+                uncompressed_size += base_val_len + val_len;
                 val_buf.resize(base_val_len, 0);
                 val_buf.extend_from_slice(val);
 
@@ -1253,6 +1278,7 @@ impl LoadTaskWorker {
                 return Ok(buf);
             }
             pre_table_id = table_id;
+
             buf.put_u16_le(key_len as u16);
             buf.extend_from_slice(key);
             buf.put_u32_le(val_len as u32);
@@ -1328,10 +1354,14 @@ impl LoadTaskWorker {
         }
         info!("{} start ingest", self.task_ctx.task_id);
         sst_metas.sort_by(|a, b| a.id.cmp(&b.id));
-        let key_prefix = self.task_ctx.key_prefix.to_vec();
+        let outer_key_prefix = self.task_ctx.outer_key_prefix.to_vec();
         let inner_key_off = self.task_ctx.inner_key_off.unwrap();
-        let coarse_split_keys =
-            gen_split_keys(&key_prefix, &sst_metas, self.config.coarse_split_size, true);
+        let coarse_split_keys = gen_split_keys(
+            &outer_key_prefix,
+            &sst_metas,
+            self.config.coarse_split_size,
+            true,
+        );
         let new_regions_id = self.split_regions(&coarse_split_keys)?;
         let result = self.ctx.pd.scatter_regions_by_id(new_regions_id);
         if let Err(err) = result {
@@ -1377,24 +1407,31 @@ impl LoadTaskWorker {
     }
 
     fn ingest_group(&self, sst_metas: Vec<SstMeta>) -> Result<()> {
-        let key_prefix = self.task_ctx.key_prefix.to_vec();
-        let split_keys = gen_split_keys(&key_prefix, &sst_metas, self.config.region_size, false);
+        let outer_key_prefix = self.task_ctx.outer_key_prefix.to_vec();
+        let split_keys = gen_split_keys(
+            &outer_key_prefix,
+            &sst_metas,
+            self.config.region_size,
+            false,
+        );
         if !split_keys.is_empty() {
             self.split_regions(&split_keys)?;
         }
-        let outer_first_key =
-            new_region_key(&key_prefix, sst_metas.first().unwrap().smallest.as_slice());
+        let outer_first_key = new_region_key(
+            &outer_key_prefix,
+            sst_metas.first().unwrap().smallest.as_slice(),
+        );
         let outer_last_key = {
             let mut last_key = sst_metas.last().unwrap().biggest.clone();
             last_key.push(0);
-            new_region_key(&key_prefix, &last_key)
+            new_region_key(&outer_key_prefix, &last_key)
         };
 
         let mut success_ranges = MergeRanges::default(); // keys of `success_ranges` are encoded.
         let mut last_error: Option<Error> = None;
         for retry in 0..MAX_RETRY_TIMES {
             match self.ingest_group_to_range(
-                &key_prefix,
+                &outer_key_prefix,
                 &sst_metas,
                 outer_first_key.clone(),
                 outer_last_key.clone(),
@@ -1423,7 +1460,7 @@ impl LoadTaskWorker {
 
     fn ingest_group_to_range(
         &self,
-        key_prefix: &[u8],
+        outer_key_prefix: &[u8],
         sst_metas: &[SstMeta],
         outer_first_key: Vec<u8>,
         outer_last_key: Vec<u8>,
@@ -1462,8 +1499,12 @@ impl LoadTaskWorker {
         let mut msg_cnt = 0;
         for mut pd_region in regions {
             let region = pd_region.get_region();
-            let cs =
-                build_ingest_files(key_prefix.len(), region, sst_metas, self.task_ctx.commit_ts);
+            let cs = build_ingest_files(
+                outer_key_prefix.len(),
+                region,
+                sst_metas,
+                self.task_ctx.commit_ts,
+            );
             if cs.get_ingest_files().get_table_creates().is_empty() {
                 continue;
             }
@@ -1730,7 +1771,7 @@ fn build_ingest_files(
 }
 
 fn gen_split_keys(
-    key_prefix: &[u8],
+    outer_key_prefix: &[u8],
     ssts: &[SstMeta],
     split_size: usize,
     include_bound: bool,
@@ -1738,14 +1779,14 @@ fn gen_split_keys(
     let mut keys = vec![];
     if include_bound {
         keys.push(new_region_key(
-            key_prefix,
+            outer_key_prefix,
             ssts.first().unwrap().smallest.as_slice(),
         ));
     }
     let mut size = 0;
     for sst in ssts {
         if size > split_size {
-            keys.push(new_region_key(key_prefix, sst.smallest.as_slice()));
+            keys.push(new_region_key(outer_key_prefix, sst.smallest.as_slice()));
             size = 0;
         }
         size += sst.size;
@@ -1755,13 +1796,13 @@ fn gen_split_keys(
         // load_data and get epoch not match error.
         let mut last_key = ssts.last().unwrap().biggest.to_vec();
         last_key.push(0);
-        keys.push(new_region_key(key_prefix, last_key.as_slice()));
+        keys.push(new_region_key(outer_key_prefix, last_key.as_slice()));
     }
     keys
 }
 
-fn new_region_key(key_prefix: &[u8], raw_key: &[u8]) -> Vec<u8> {
-    let mut key = key_prefix.to_vec();
+fn new_region_key(outer_key_prefix: &[u8], raw_key: &[u8]) -> Vec<u8> {
+    let mut key = outer_key_prefix.to_vec();
     key.extend_from_slice(raw_key);
     encode_bytes(&key)
 }
@@ -1781,12 +1822,24 @@ fn get_ssts_in_range(ssts: &[SstMeta], start: InnerKey<'_>, end: InnerKey<'_>) -
     matched
 }
 
+pub fn get_common_prefix(k1: &[u8], k2: &[u8]) -> Vec<u8> {
+    let len = std::cmp::min(k1.len(), k2.len());
+    let mut offset = len;
+    for i in 0..len {
+        if k1[i] != k2[i] {
+            offset = i;
+            break;
+        }
+    }
+    k1[..offset].to_vec()
+}
+
 pub fn flush_to_local_file(
     mut kv_pairs: Vec<KvPair>,
     task_ctx: TaskContext,
     path: PathBuf,
     batch_size: usize,
-) -> Result<KvPairsReader> {
+) -> Result<(KvPairsReader, Vec<u8>)> {
     kv_pairs.sort_by(|a, b| {
         let order = a.key.cmp(&b.key);
         if order == Ordering::Equal {
@@ -1794,6 +1847,10 @@ pub fn flush_to_local_file(
         }
         order
     });
+
+    let first = &kv_pairs.first().unwrap().key;
+    let last = &kv_pairs.last().unwrap().key;
+    let key_comm_prefix = get_common_prefix(first.chunk(), last.chunk());
 
     let file = fs::OpenOptions::new()
         .create(true)
@@ -1841,7 +1898,7 @@ pub fn flush_to_local_file(
     writer.flush()?;
     let file = fs::File::open(path)?;
     let reader = DecrypterReader::new(file, method, key, iv).unwrap();
-    Ok(KvPairsReader::new(kv_pairs.len(), reader))
+    Ok((KvPairsReader::new(kv_pairs.len(), reader), key_comm_prefix))
 }
 
 fn reload_reader(local_file_info: &LocalFileInfo, task_ctx: TaskContext) -> KvPairsReader {
@@ -1938,5 +1995,22 @@ mod tests {
             let res = verify_regions_boundary(&make_key(start), &make_key(end), regions);
             assert_eq!(res.is_ok(), expect_is_ok, "case {}: {:?}", idx, res);
         }
+    }
+
+    #[test]
+    fn test_get_common_prefix() {
+        let keys = vec![
+            vec![b't', 128, 0, 0, 0, 0, 0, 0, 1, b'_', 1],
+            vec![b't', 128, 0, 0, 0, 0, 0, 0, 1, b'_', 2],
+            vec![b't', 128, 0, 0, 0, 0, 0, 0, 1, b'_', 3],
+        ];
+        let mut key_comm_prefix = keys[0].clone();
+
+        for key in keys.iter() {
+            key_comm_prefix = get_common_prefix(&key_comm_prefix, key);
+        }
+
+        let target_key_comm_prefix = vec![b't', 128, 0, 0, 0, 0, 0, 0, 1, b'_'];
+        assert_eq!(key_comm_prefix, target_key_comm_prefix);
     }
 }

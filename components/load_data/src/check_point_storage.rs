@@ -134,6 +134,7 @@ pub struct LoadDataCheckPointCtx {
 
     flushed_chunk_ids: HashMap<u64 /* writer_id */, u64 /* chunk_id */>,
     flushed_file_idx: usize,
+    key_comm_prefix: Vec<u8>,
 
     // TODO(zeminzhou): remove new_client field when the old client is deprecated.
     pub new_client: bool,
@@ -171,6 +172,7 @@ impl LoadDataCheckPointCtx {
             first_key: Default::default(),
             flushed_chunk_ids: Default::default(),
             flushed_file_idx: 0,
+            key_comm_prefix: vec![],
             new_client: task_ctx.new_client,
             canceled: false,
             error: "".to_string(),
@@ -207,6 +209,10 @@ impl LoadDataCheckPointCtx {
 
     pub fn get_flushed_file_idx(&self) -> usize {
         self.flushed_file_idx
+    }
+
+    pub fn get_key_comm_prefix(&self) -> Vec<u8> {
+        self.key_comm_prefix.clone()
     }
 
     pub fn get_is_recover(&self) -> bool {
@@ -343,6 +349,7 @@ impl LocalFileCheckPointStorage {
         handled_chunk_ids: HashMap<u64, u64>,
         file_idx: usize,
         local_file_infos: Vec<LocalFileInfo>,
+        key_comm_prefix: Vec<u8>,
     ) -> Result<()> {
         // Update flushed chunk ids.
         for (writer_id, chunk_id) in handled_chunk_ids {
@@ -367,13 +374,19 @@ impl LocalFileCheckPointStorage {
                 self.check_point_ctx.local_file_infos.clone()
             );
         }
+        self.check_point_ctx.key_comm_prefix = key_comm_prefix;
 
         self.flush_check_point_ctx_with_state(LoadDataWorkerState::AddingChunks)?;
         Ok(())
     }
 
-    pub fn update_first_key(&mut self, first_key: Bytes) -> Result<()> {
+    pub fn update_first_key_and_prefix(
+        &mut self,
+        first_key: Bytes,
+        key_comm_prefix: Vec<u8>,
+    ) -> Result<()> {
         self.check_point_ctx.first_key = first_key;
+        self.check_point_ctx.key_comm_prefix = key_comm_prefix;
         self.flush_check_point_ctx()?;
         Ok(())
     }
@@ -536,7 +549,7 @@ mod tests {
             start_ts: 1_u64,
             commit_ts: 1_u64,
             inner_key_off: None,
-            key_prefix: vec![],
+            outer_key_prefix: vec![],
             encryption_key: None,
             new_client: true,
         };
@@ -567,7 +580,9 @@ mod tests {
 
         // update_first_key
         let expect_first_key = Bytes::from_static(b"test_first_key");
-        store.update_first_key(expect_first_key.clone()).unwrap();
+        store
+            .update_first_key_and_prefix(expect_first_key.clone(), expect_first_key.to_vec())
+            .unwrap();
         let loaddata_checkpoint_msg = store.load_check_point_ctx();
         assert_eq!(expect_first_key, loaddata_checkpoint_msg.first_key);
 
@@ -599,9 +614,15 @@ mod tests {
                 kv_count: 30,
             },
         ];
+        let key_comm_prefix = "test_".as_bytes().to_vec();
 
         store
-            .update_flushed_info(handled_chunk_ids, max_file_idx, local_file_infos.clone())
+            .update_flushed_info(
+                handled_chunk_ids,
+                max_file_idx,
+                local_file_infos.clone(),
+                key_comm_prefix.clone(),
+            )
             .unwrap();
         let loaddata_checkpoint_msg = store.load_check_point_ctx();
         assert_eq!(max_file_idx, loaddata_checkpoint_msg.flushed_file_idx);
@@ -616,6 +637,7 @@ mod tests {
                 get_local_file_infos[i].kv_count
             );
         }
+        assert_eq!(key_comm_prefix, loaddata_checkpoint_msg.key_comm_prefix);
 
         // build sst
         let compression_type = 1;
@@ -726,7 +748,7 @@ mod tests {
             start_ts: 1_u64,
             commit_ts: 1_u64,
             inner_key_off: None,
-            key_prefix: vec![],
+            outer_key_prefix: vec![],
             encryption_key: None,
             new_client: true,
         };
