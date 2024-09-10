@@ -71,7 +71,7 @@ pub struct TiFlashReplica {
     #[serde(rename = "Count")]
     pub count: u64,
     #[serde(rename = "LocationLabels")]
-    pub location_labels: Vec<String>,
+    pub location_labels: Option<Vec<String>>,
     #[serde(rename = "Available")]
     pub available: bool,
     #[serde(rename = "AvailablePartitionIDs")]
@@ -418,4 +418,28 @@ fn parse_duration(input: &str, fsp: i8) -> tidb_query_datatype::codec::Result<Du
     };
 
     Duration::from_secs(secs, fsp)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tiflash_replica() {
+        let str =
+            r#"{"Count":1,"LocationLabels":["host"],"Available":true,"AvailablePartitionIDs":[1]}"#;
+        let replica: TiFlashReplica = serde_json::from_str(str).unwrap();
+        assert_eq!(replica.count, 1);
+        assert_eq!(replica.location_labels, Some(vec!["host".to_string()]));
+        assert_eq!(replica.available, true);
+        assert_eq!(replica.available_partition_ids, Some(vec![1]));
+
+        let str =
+            r#"{"Count":2,"LocationLabels":null,"Available":true,"AvailablePartitionIDs":null}"#;
+        let replica: TiFlashReplica = serde_json::from_str(str).unwrap();
+        assert_eq!(replica.count, 2);
+        assert_eq!(replica.location_labels, None);
+        assert_eq!(replica.available, true);
+        assert_eq!(replica.available_partition_ids, None);
+    }
 }
