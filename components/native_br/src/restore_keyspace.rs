@@ -618,6 +618,8 @@ pub struct BackupCluster {
 
     // store_id -> rf_engine.
     raft_engines: HashMap<u64, RfEngine>,
+    // store_id -> store_config.
+    store_configs: HashMap<u64, TikvConfig>,
     // must be `Some` after `new()`.
     kv_engine: Option<kvengine::Engine>,
 
@@ -692,6 +694,7 @@ impl BackupCluster {
             shards: Default::default(),
             raw_metas: Default::default(),
             raft_engines: Default::default(),
+            store_configs: Default::default(),
             kv_engine: Default::default(),
             store_shards: Default::default(),
             shards_store_map: Default::default(),
@@ -808,6 +811,7 @@ impl BackupCluster {
             recv_restore_rfengine(&result_rx)?;
         }
         cluster.raft_engines = raft_engines;
+        cluster.store_configs = store_configs;
         cluster.tolerated_err = cluster_tolerated_err;
         cluster.load_shards()?;
         cluster.collect_txn_chunks_in_wal()?;
@@ -818,7 +822,7 @@ impl BackupCluster {
         cluster.check_all_shard_files()?;
 
         for store_id in cluster.get_all_stores_id() {
-            cluster.setup_kv_engine(store_id, store_configs.get(&store_id).unwrap())?;
+            cluster.setup_kv_engine(store_id)?;
         }
         Ok(cluster)
     }
@@ -899,7 +903,8 @@ impl BackupCluster {
             .collect()
     }
 
-    fn setup_kv_engine(&mut self, store_id: u64, conf: &TikvConfig) -> Result<()> {
+    fn setup_kv_engine(&mut self, store_id: u64) -> Result<()> {
+        let conf = self.store_configs.get(&store_id).unwrap();
         let rf_engine = self.raft_engines.get(&store_id).unwrap();
         let recoverer = rfstore::store::RecoverHandler::new(rf_engine.clone());
 
@@ -1952,12 +1957,7 @@ impl BackupCluster {
         self.keyspace_id == self.target_keyspace_id
     }
 
-    pub fn reset_keyspace(
-        &mut self,
-        cluster_meta: &ClusterBackupMeta,
-        keyspace_id: u32,
-        target_keyspace_id: u32,
-    ) -> Result<()> {
+    pub fn reset_keyspace(&mut self, keyspace_id: u32, target_keyspace_id: u32) -> Result<()> {
         let (keyspace_start, keyspace_end) = ApiV2::get_txn_keyspace_range(keyspace_id);
         self.tag = make_keyspace_tag(keyspace_id, target_keyspace_id);
         self.keyspace_id = keyspace_id;
@@ -1982,20 +1982,13 @@ impl BackupCluster {
         self.shards_need_truncate.clear();
         self.tolerated_err = 0;
         self.txn_chunk_ids_in_wal = None;
-
-        let mut store_configs = HashMap::with_capacity(cluster_meta.stores.len());
-        for store in &cluster_meta.stores {
-            let store_id = store.get_store_id();
-            let store_config = self.generate_store_config(store_id);
-            store_configs.insert(store_id, store_config);
-        }
         self.load_shards()?;
         self.collect_txn_chunks_in_wal()?;
 
         self.check_all_shard_files()?;
 
         for store_id in self.get_all_stores_id() {
-            self.setup_kv_engine(store_id, store_configs.get(&store_id).unwrap())?;
+            self.setup_kv_engine(store_id)?;
         }
         Ok(())
     }

@@ -178,9 +178,7 @@ pub(crate) fn execute_check_table(args: CheckTableArgs) {
         cluster_backup.backup_ts
     };
     for keyspace_id in keyspace_ids {
-        cluster
-            .reset_keyspace(&cluster_backup, keyspace_id, keyspace_id)
-            .unwrap();
+        cluster.reset_keyspace(keyspace_id, keyspace_id).unwrap();
         let kv = cluster.get_kvengine();
         let shards = cluster.get_shard_metas_before_flush();
         let backup_reader = Arc::new(BackupReader::new(
