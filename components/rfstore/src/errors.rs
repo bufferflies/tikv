@@ -7,7 +7,7 @@ use kvproto::{errorpb, metapb};
 use protobuf::ProtobufError;
 use raftstore::coprocessor::Error as CopError;
 use thiserror::Error;
-use tikv_util::codec;
+use tikv_util::{codec, deadline::set_deadline_exceeded_busy_error};
 
 use crate::store::PeerMsg;
 
@@ -259,6 +259,9 @@ impl From<Error> for errorpb::Error {
                     "{}: region has overlap data, region {}, existed file {}, ingest file {}",
                     INGEST_OVERLAP_ERROR_TAG, region_id, existed_file_id, ingest_file_id,
                 ));
+            }
+            Error::DeadlineExceeded => {
+                set_deadline_exceeded_busy_error(&mut errorpb);
             }
             _ => {}
         };
