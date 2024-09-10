@@ -1290,7 +1290,7 @@ impl ClusterClient {
         }
 
         // TODO: handle already_exist error
-        Err(box_err!("{} unexpected key error {:?}", tag, key_err))
+        Err(Error::KeyError(key_err))
     }
 
     pub fn get_kv_client(&self, store_id: u64) -> TikvClient {
