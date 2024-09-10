@@ -257,7 +257,7 @@ impl StatusServer {
         raft_state
     }
 
-    fn dump_heap_prof_to_resp(req: Request<Body>) -> hyper::Result<Response<Body>> {
+    pub fn dump_heap_prof_to_resp(req: Request<Body>) -> hyper::Result<Response<Body>> {
         let query = req.uri().query().unwrap_or("");
         let query_pairs: HashMap<_, _> = url::form_urlencoded::parse(query.as_bytes()).collect();
 
@@ -333,7 +333,7 @@ impl StatusServer {
         })
     }
 
-    fn get_cmdline(_req: Request<Body>) -> hyper::Result<Response<Body>> {
+    pub fn get_cmdline(_req: Request<Body>) -> hyper::Result<Response<Body>> {
         let args = args().fold(String::new(), |mut a, b| {
             a.push_str(&b);
             a.push('\x00');
@@ -347,7 +347,7 @@ impl StatusServer {
         Ok(response)
     }
 
-    fn get_symbol_count(req: Request<Body>) -> hyper::Result<Response<Body>> {
+    pub fn get_symbol_count(req: Request<Body>) -> hyper::Result<Response<Body>> {
         assert_eq!(req.method(), Method::GET);
         // We don't know how many symbols we have, but we
         // do have symbol information. pprof only cares whether
@@ -366,7 +366,7 @@ impl StatusServer {
     // https://gperftools.github.io/gperftools/pprof_remote_servers.html
     // Here is the go pprof implementation:
     // https://github.com/golang/go/blob/3857a89e7eb872fa22d569e70b7e076bec74ebbb/src/net/http/pprof/pprof.go#L191
-    async fn get_symbol(req: Request<Body>) -> hyper::Result<Response<Body>> {
+    pub async fn get_symbol(req: Request<Body>) -> hyper::Result<Response<Body>> {
         assert_eq!(req.method(), Method::POST);
         let mut text = String::new();
         let body_bytes = hyper::body::to_bytes(req.into_body()).await?;

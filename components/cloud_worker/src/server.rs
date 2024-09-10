@@ -9,10 +9,11 @@ use std::{
 
 use bytes::{Buf, Bytes};
 use cloud_encryption::MasterKey;
+use cloud_server::StatusServer as CloudStatusServer;
 use flate2::{write::GzEncoder, Compression};
 use http::{
     header::{ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_TYPE},
-    HeaderValue, Request, Response,
+    HeaderValue, Method, Request, Response,
 };
 use hyper::{
     server::accept::Accept,
@@ -137,6 +138,20 @@ where
                         "/metrics" => handle_get_metrics(req).await,
                         "/debug/pprof/profile" => {
                             StatusServer::<u8, u8>::dump_cpu_prof_to_resp(req).await
+                        }
+                        "/debug/pprof/heap" => CloudStatusServer::dump_heap_prof_to_resp(req),
+                        "/debug/pprof/cmdline" => CloudStatusServer::get_cmdline(req),
+                        "/debug/pprof/symbol" => {
+                            if req.method() == Method::GET {
+                                CloudStatusServer::get_symbol_count(req)
+                            } else if req.method() == Method::POST {
+                                CloudStatusServer::get_symbol(req).await
+                            } else {
+                                Ok(hyper::Response::builder()
+                                    .status(404)
+                                    .body(hyper::Body::from("Not Found"))
+                                    .unwrap())
+                            }
                         }
                         native_br::BACKUPS_API_PATH => {
                             native_br::handle_backup(ctx.br_manager.clone(), req).await

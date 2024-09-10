@@ -1370,6 +1370,7 @@ dependencies = [
  "bytes",
  "chrono",
  "cloud_encryption",
+ "cloud_server",
  "crc32c",
  "crc32fast",
  "dashmap 4.0.2",

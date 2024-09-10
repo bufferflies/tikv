@@ -14,6 +14,7 @@ bincode = "1.3"
 bytes = "1.1"
 chrono = "0.4"
 cloud_encryption = { workspace = true }
+cloud_server = { path = "../../components/cloud_server" }
 crc32c = { workspace = true }
 crc32fast = "1.4.0"
 dashmap = "4.0"
