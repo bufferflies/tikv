@@ -22,7 +22,7 @@ use std::{
     time::Duration,
 };
 
-use ::load_data::task::ResourceGroupConfig;
+use ::load_data::task::{LoadDataConfig, ResourceGroupConfig};
 use ::native_br::{backup::BackupConfig, restore::RestoreConfig};
 use kvengine::{
     dfs::{DFSConfig, Dfs, S3Fs},
@@ -54,7 +54,10 @@ use crate::{
     remote_cop::RemoteCopServer,
     txn_chunk::TxnChunkHandler,
     worker_limiter::{WorkerLimiter, WorkerLimiterConfig},
-    worker_scaler::{WorkerScaler, WorkerScalerConfig, LOAD_DATA_WORKER_ENV},
+    worker_scaler::{
+        WorkerScaler, WorkerScalerConfig, LOAD_DATA_WORKER_ENV,
+        LOAD_DATA_WORKER_MAX_IN_MEM_SIZE_ENV,
+    },
 };
 
 const BACKGROUND_WORKER_INTERVAL: Duration = Duration::from_secs(60); //1min
@@ -160,7 +163,15 @@ fn start_server(
         .block_on(config.security.new_master_key());
     let is_load_data_worker = std::env::var(LOAD_DATA_WORKER_ENV).is_ok();
     let mut worker_scaler_opt: Option<WorkerScaler> = None;
-    if config.worker_scaler.run && !is_load_data_worker {
+    let mut load_data_config = LoadDataConfig::default();
+    load_data_config.enable_check_point = config.enable_load_data_check_point;
+    load_data_config.checksum_type = checksum_type;
+    if is_load_data_worker {
+        load_data_config.max_in_mem_size = std::env::var(LOAD_DATA_WORKER_MAX_IN_MEM_SIZE_ENV)
+            .unwrap()
+            .parse()
+            .unwrap();
+    } else if config.worker_scaler.run {
         let scaler_cfg = config.worker_scaler.clone();
         let cluster_id = pd.get_cluster_id().unwrap();
         let worker_scaler = thread_pool
@@ -188,17 +199,16 @@ fn start_server(
     } else {
         None
     };
+    load_data_config.rg_config = rg_config;
     let load_manager = Arc::new(LoadDataManager::new(
         pd.clone(),
         config.data_dir.clone().into(),
         s3fs.clone(),
         thread_pool.clone(),
-        checksum_type,
         master_key.clone(),
         worker_scaler_opt,
         config.worker_scaler.clone(),
-        config.enable_load_data_check_point,
-        rg_config,
+        load_data_config,
     ));
     let br_manager = Arc::new(NativeBrManager::new(
         thread_pool.clone(),

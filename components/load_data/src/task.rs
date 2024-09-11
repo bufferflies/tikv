@@ -57,8 +57,8 @@ use crate::{
     },
 };
 
-const DEFAULT_MAX_IN_MEM_SIZE: usize = 256 * 1024 * 1024; // 256MB
-const DEFAULT_FLUSH_BATCH_SIZE: usize = 8 * 1024 * 1024; // 8MB
+pub const DEFAULT_MAX_IN_MEM_SIZE: usize = 256 * 1024 * 1024; // 256MB
+const DEFAULT_FLUSH_BATCH_SIZE: usize = 2 * 1024 * 1024; // 2MB
 const DEFAULT_BLOCK_SIZE: usize = 64 * 1024; // 64KB
 const DEFAULT_SST_FILE_SIZE: usize = 48 * 1024 * 1024; // 48MB
 const DEFAULT_REGION_SIZE: usize = 750 * 1024 * 1024; // 750MB

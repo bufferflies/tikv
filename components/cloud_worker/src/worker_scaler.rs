@@ -17,7 +17,7 @@ use kube::{
     api::{Api, AttachParams, AttachedProcess, ListParams, PostParams, ResourceExt},
     Client as KubeClient,
 };
-use load_data::task::LoadTaskStates;
+use load_data::task::{LoadTaskStates, DEFAULT_MAX_IN_MEM_SIZE};
 use security::SecurityManager;
 use serde_json::json;
 use tikv_util::{box_err, config::ReadableSize, error, info, time::Instant, warn};
@@ -46,6 +46,7 @@ const K8S_NAMESPACE_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/
 const NETWORK_PROTOCOL: &str = "TCP";
 
 pub const LOAD_DATA_WORKER_ENV: &str = "TIKV_LOAD_DATA_WORKER";
+pub const LOAD_DATA_WORKER_MAX_IN_MEM_SIZE_ENV: &str = "TIKV_LOAD_DATA_WORKER_MAX_IN_MEM_SIZE";
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 #[serde(default)]
@@ -461,6 +462,12 @@ impl WorkerScaler {
             value: Some("true".to_string()),
             value_from: None,
         });
+        let max_in_mem_size = calculate_max_in_mem_size(num_cores * 2.0);
+        env.push(EnvVar {
+            name: LOAD_DATA_WORKER_MAX_IN_MEM_SIZE_ENV.to_string(),
+            value: Some(max_in_mem_size.to_string()),
+            value_from: None,
+        });
         let pvc_template = spec
             .volume_claim_templates
             .as_mut()
@@ -567,7 +574,7 @@ impl WorkerScaler {
         worker_pod_name: &str,
         worker_addr: &str,
     ) -> Option<Vec<LoadTaskStates>> {
-        for _ in 0..6 {
+        for _ in 0..18 {
             let tasks = self.get_pod_task_states(worker_pod_name, worker_addr).await;
             if tasks.is_some() {
                 return tasks;
@@ -761,8 +768,12 @@ async fn get_proc_output(mut attached: AttachedProcess) -> String {
 
 fn calculate_num_cores(data_size_gb: usize, max_cores: f64) -> f64 {
     let cores: f64 = if data_size_gb > 100 {
-        4.0
+        50.0
+    } else if data_size_gb > 50 {
+        8.0
     } else if data_size_gb > 10 {
+        4.0
+    } else if data_size_gb > 5 {
         2.0
     } else if data_size_gb > 1 {
         1.0
@@ -770,6 +781,15 @@ fn calculate_num_cores(data_size_gb: usize, max_cores: f64) -> f64 {
         0.5
     };
     cores.min(max_cores)
+}
+
+fn calculate_max_in_mem_size(pod_mem: f64) -> usize {
+    if pod_mem >= 28.0 {
+        // align with calculate_num_cores
+        DEFAULT_MAX_IN_MEM_SIZE * 2
+    } else {
+        DEFAULT_MAX_IN_MEM_SIZE
+    }
 }
 
 #[cfg(test)]

@@ -9,7 +9,7 @@ use http::{header, Method, Response, StatusCode};
 use hyper::Body;
 use kvengine::{
     dfs,
-    table::{ChecksumType, LZ4_COMPRESSION, NO_COMPRESSION, ZSTD_COMPRESSION},
+    table::{LZ4_COMPRESSION, NO_COMPRESSION, ZSTD_COMPRESSION},
 };
 use load_data::{
     check_point_storage,
@@ -21,7 +21,7 @@ use load_data::{
     },
     task::{
         FlushResult, FlushStates, LoadDataConfig, LoadDataContext, LoadTaskMsg, LoadTaskScheduler,
-        LoadTaskStates, LoadTaskWorker, PutChunkResult, ResourceGroupConfig, TaskContext,
+        LoadTaskStates, LoadTaskWorker, PutChunkResult, TaskContext,
     },
 };
 use pd_client::PdClient;
@@ -277,17 +277,11 @@ impl LoadDataManager {
         dir: PathBuf,
         dfs: Arc<dyn dfs::Dfs>,
         runtime: Arc<tokio::runtime::Runtime>,
-        checksum_type: ChecksumType,
         master_key: MasterKey,
         worker_scaler: Option<WorkerScaler>,
         worker_scaler_conf: WorkerScalerConfig,
-        enable_check_point: bool,
-        rg_config: Option<ResourceGroupConfig>,
+        config: LoadDataConfig,
     ) -> Self {
-        let mut config = LoadDataConfig::default();
-        config.enable_check_point = enable_check_point;
-        config.rg_config = rg_config;
-        config.checksum_type = checksum_type;
         let context = LoadDataContext {
             pd,
             dir,
