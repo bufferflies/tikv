@@ -768,7 +768,7 @@ async fn get_proc_output(mut attached: AttachedProcess) -> String {
 
 fn calculate_num_cores(data_size_gb: usize, max_cores: f64) -> f64 {
     let cores: f64 = if data_size_gb > 100 {
-        50.0
+        14.0
     } else if data_size_gb > 50 {
         8.0
     } else if data_size_gb > 10 {
