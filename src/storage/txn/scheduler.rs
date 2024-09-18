@@ -394,7 +394,11 @@ impl<L: LockManager> SchedulerInner<L> {
             // Check deadline early.
             // TODO: implement a fast path to release without acquiring the latch.
             if let Err(e) = tctx.task.as_ref().unwrap().cmd.deadline().check() {
-                info!("acquire_lock_on_wakeup: deadline exceeded"; "cid" => cid, "lock" => ?tctx.lock);
+                SCHED_STAGE_COUNTER_VEC
+                    .get(tctx.tag)
+                    .wakeup_deadline_exceeded
+                    .inc();
+                debug!("acquire_lock_on_wakeup: deadline exceeded"; "cid" => cid, "lock" => ?tctx.lock);
                 return Err((tctx.lock.region_id, e.into()));
             }
             tctx.on_schedule();
@@ -764,7 +768,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
                     Err(err) => {
                         SCHED_STAGE_COUNTER_VEC.get(tag).snapshot_err.inc();
 
-                        info!("get snapshot failed"; "cid" => task.cid, "err" => ?err);
+                        debug!("get snapshot failed"; "cid" => task.cid, "err" => ?err);
                         sched.finish_with_err(task.cid, Error::from(err));
                     }
                 }
