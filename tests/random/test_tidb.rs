@@ -22,6 +22,7 @@ use tikv::config::TikvConfig;
 use tikv_util::{
     config::{ReadableDuration, ReadableSize},
     info,
+    sys::SysQuota,
     time::Instant,
 };
 
@@ -367,6 +368,7 @@ fn prepare_cluster(
     let mut rng = rand::thread_rng();
     let nodes = alloc_node_id_vec(nodes_count);
     let dfs_config = Arc::new(dfs_config.clone());
+    let cpu_cores = SysQuota::cpu_cores_quota() as usize;
     let update_conf_fn = move |node_id: u16, conf: &mut TikvConfig| {
         conf.dfs = (*dfs_config).clone();
         conf.coprocessor.region_split_size = REGION_SIZE;
@@ -387,6 +389,7 @@ fn prepare_cluster(
         conf.kvengine.compaction_tombs_count = 100;
         conf.kvengine.max_del_range_delay = ReadableDuration(Duration::from_secs(3));
         conf.storage.flow_control.enable = true;
+        conf.storage.scheduler_worker_pool_size = cpu_cores;
 
         if use_remote_cop {
             let cop_worker_url = tikv_worker_cop_url(node_id % TIKV_WORKERS_COUNT as u16);

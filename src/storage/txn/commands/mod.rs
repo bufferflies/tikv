@@ -753,6 +753,9 @@ impl Command {
         if self.command_ext().is_sys_cmd() {
             return CommandPri::High;
         }
+        if let Command::TxnFile(txn_file) = self {
+            return txn_file.priority();
+        }
         self.command_ext().get_ctx().get_priority()
     }
 

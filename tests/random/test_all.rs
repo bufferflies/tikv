@@ -25,6 +25,7 @@ use test_pd_client::{PdClientExt, PdWrapper};
 use tikv_util::{
     config::{ReadableDuration, ReadableSize},
     info,
+    sys::SysQuota,
     time::Instant,
     warn,
 };
@@ -317,6 +318,7 @@ fn prepare_cluster(
     let mut rng = rand::thread_rng();
     let nodes = alloc_node_id_vec(nodes_count);
     let dfs_config = Arc::new(dfs_config.clone());
+    let cpu_cores = SysQuota::cpu_cores_quota() as usize;
 
     let big_region_size_keyspaces = (0..initial_keyspace_count as u32)
         .choose_multiple(&mut rng, BIG_REGION_SIZE_KEYSPACE_COUNT);
@@ -355,6 +357,7 @@ fn prepare_cluster(
         conf.kvengine.flush_split_l0 = true;
         conf.kvengine.per_keyspace_configs = per_keyspace_configs.clone();
         conf.storage.flow_control.enable = true;
+        conf.storage.scheduler_worker_pool_size = cpu_cores;
     };
     let pd_wrapper = PdWrapper::new_test(1, security_conf, None);
     let mut cluster = ServerCluster::new_opt(nodes, update_conf_fn, pd_wrapper);

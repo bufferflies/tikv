@@ -268,6 +268,10 @@ struct SchedulerInner<L: LockManager> {
     // high priority commands and system commands will be delivered to this pool
     high_priority_pool: SchedPool,
 
+    // low priority pool for high throughput but latency insensitive workloads.
+    // TODO: Remove `Option`.
+    low_priority_pool: Option<SchedPool>,
+
     // used to control write flow
     running_write_bytes: CachePadded<AtomicUsize>,
 
@@ -453,6 +457,19 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
 
         let lock_wait_queues = LockWaitQueues::new(lock_mgr.clone());
 
+        let low_priority_pool_size = config
+            .scheduler_low_priority_worker_pool_size
+            .unwrap_or_default();
+        let low_priority_pool = (low_priority_pool_size > 0).then(|| {
+            SchedPool::new(
+                engine.clone(),
+                low_priority_pool_size,
+                reporter.clone(),
+                feature_gate.clone(),
+                "sched-low-pri-pool",
+            )
+        });
+
         let inner = Arc::new(SchedulerInner {
             task_slots,
             id_alloc: AtomicU64::new(0).into(),
@@ -474,6 +491,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
                 feature_gate.clone(),
                 "sched-high-pri-pool",
             ),
+            low_priority_pool,
             lock_mgr,
             concurrency_manager,
             pipelined_pessimistic_lock: dynamic_configs.pipelined_pessimistic_lock,
@@ -691,10 +709,14 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
 
     // pub for test
     pub fn get_sched_pool(&self, priority: CommandPri) -> &SchedPool {
-        if priority == CommandPri::High {
-            &self.inner.high_priority_pool
-        } else {
-            &self.inner.worker_pool
+        match priority {
+            CommandPri::Normal => &self.inner.worker_pool,
+            CommandPri::High => &self.inner.high_priority_pool,
+            CommandPri::Low => self
+                .inner
+                .low_priority_pool
+                .as_ref()
+                .unwrap_or(&self.inner.worker_pool),
         }
     }
 

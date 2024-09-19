@@ -12,7 +12,7 @@ use kvengine::{
     Iterator, SnapAccess, UserMeta, LOCK_CF, WRITE_CF,
 };
 use kvenginepb::TxnFileRef;
-use kvproto::kvrpcpb::WriteConflictReason;
+use kvproto::kvrpcpb::{CommandPri, WriteConflictReason};
 use log_wrappers::Value as LogValue;
 use protobuf::Message;
 use tikv_kv::{Snapshot, WriteData};
@@ -63,6 +63,15 @@ impl TxnFileCommand {
             lock_prefix,
             txn_file,
         })
+    }
+
+    pub fn priority(&self) -> CommandPri {
+        // Force to low priority for prewrite as it's of high throughput but latency
+        // insensitive.
+        match self.inner_cmd.as_ref().unwrap() {
+            box Command::Prewrite(_) => CommandPri::Low,
+            cmd => cmd.priority(),
+        }
     }
 
     fn build_prewrite_txn_file_ref(req: &Prewrite, snap: &SnapAccess) -> TxnFileRef {
