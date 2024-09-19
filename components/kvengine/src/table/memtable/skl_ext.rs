@@ -73,6 +73,26 @@ impl SkipListExt {
         new_merge_iterator(iterators, reverse)
     }
 
+    pub fn new_delta_write_iterator(&self, since_ts: u64) -> Box<dyn Iterator> {
+        let skl_iter = Box::new(self.skl.new_iterator(false));
+        if self.txn_files.is_empty() {
+            return skl_iter;
+        }
+        let mut iterators: Vec<Box<dyn Iterator>> = vec![skl_iter];
+        for txn_file in &self.txn_files {
+            // Txn files are sorted by version in descending order.
+            // See `add_txn_files`.
+            if txn_file.version() > since_ts {
+                let txn_file_iter = TxnFileIterator::new(txn_file.clone(), false);
+                let skip_op_iter = Box::new(SkipOpTxnFileIterator::new(txn_file_iter, true, true));
+                iterators.push(skip_op_iter);
+            } else {
+                break;
+            }
+        }
+        new_merge_iterator(iterators, false)
+    }
+
     fn try_get_from_txn_file(
         &self,
         key: InnerKey<'_>,

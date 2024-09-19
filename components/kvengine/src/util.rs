@@ -318,7 +318,7 @@ impl TxnFileLocks {
 pub mod test_util {
     use std::sync::Mutex;
 
-    use api_version::ApiV2;
+    use api_version::{api_v2::KEYSPACE_PREFIX_LEN, ApiV2};
     use bytes::Bytes;
     use tidb_query_datatype::{
         codec::{
@@ -373,6 +373,10 @@ pub mod test_util {
 
         pub fn get_enable_inner_key_off(&self) -> bool {
             self.enable_inner_key_off
+        }
+
+        pub fn inner_key_off(&self) -> usize {
+            KEYSPACE_PREFIX_LEN * self.enable_inner_key_off as usize
         }
 
         pub fn gen_row_inner_key(&self, table_id: i64, i: usize) -> OwnedInnerKey {

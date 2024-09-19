@@ -670,7 +670,7 @@ impl SnapAccessCore {
         let mut iters: Vec<Box<dyn table::Iterator>> = Vec::new();
         for mem_tbl in &self.data.mem_tbls {
             if mem_tbl.data_max_ts() > since_ts {
-                iters.push(mem_tbl.get_cf(WRITE_CF).new_iterator(false));
+                iters.push(mem_tbl.get_cf(WRITE_CF).new_delta_write_iterator(since_ts));
             }
         }
         for l0 in &self.data.l0_tbls {
@@ -1244,6 +1244,9 @@ impl SnapAccessCore {
         None
     }
 
+    // Get writes with `commit_ts` LARGER than `txn_file.start_ts()`.
+    // These writes are not seen by clients and should be considered as conflicts.
+    // Ref: `SnapAccessCore::get_newer`.
     pub fn get_txn_file_conflict_write(&self, txn_file: &TxnFile) -> Option<(Vec<u8>, UserMeta)> {
         if txn_file.is_empty() {
             return None;
