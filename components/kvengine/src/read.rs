@@ -879,6 +879,7 @@ impl SnapAccessCore {
         });
         self.data.for_each_columnar_level(|cl| {
             for col_file in cl.files.iter() {
+                count += 1;
                 // check overlap
                 let mut overlap = false;
                 for (outer_start, outer_end) in outer_ranges {
@@ -901,6 +902,7 @@ impl SnapAccessCore {
                 tbl.set_level(cl.level as u32);
                 tbl.set_smallest(col_file.get_smallest().to_vec());
                 tbl.set_biggest(col_file.get_biggest().to_vec());
+                tbl.set_columnar_tables(col_file.table_count() as u32);
                 snap.mut_columnar_creates().push(tbl);
             }
             false

@@ -24,7 +24,9 @@ use pd_client::PdClient;
 use protobuf::Message;
 use test_cloud_server::{
     client::{CommitAction, MutateOptions},
-    must_wait, ServerCluster,
+    must_wait,
+    oss::prepare_dfs,
+    ServerCluster,
 };
 use tidb_query_datatype::{
     codec::{
@@ -265,6 +267,9 @@ fn test_covert_row_to_columnar() {
 fn test_get_snapshot_from_leader_by_status_api() {
     test_util::init_log_for_test();
     let node_id = alloc_node_id();
+    // prepare dfs
+    let (_temp_dir, mut oss, dfs_config) =
+        prepare_dfs("test_get_snapshot_from_leader_by_status_api");
     let mut cluster = ServerCluster::new(vec![node_id], |_, conf| {
         conf.enable_inner_key_offset = true;
         conf.kvengine
@@ -273,6 +278,7 @@ fn test_get_snapshot_from_leader_by_status_api() {
         conf.kvengine
             .columnar_table_build_options
             .pack_max_row_count = 9;
+        conf.dfs = dfs_config.clone();
     });
     let dfs = cluster.get_dfs().unwrap();
     let keyspace_id = 7;
@@ -280,7 +286,38 @@ fn test_get_snapshot_from_leader_by_status_api() {
         .get_runtime()
         .block_on(create_keyspace_and_split_tables(&mut cluster, keyspace_id));
     let table_id = table_ids[1];
+    let schemas = build_schemas(vec![table_id]);
+    let mut schema_buf = schemas[0].to_schema_buf();
+    schema_buf.txn_id_column = None;
+    let schema_version = 10;
+    let schema_file_data = build_schema_file(keyspace_id, schema_version, schemas);
+    let schema_file_id = 100;
+    let opts = dfs::Options::default().with_type(FileType::Schema);
+    dfs.get_runtime()
+        .block_on(dfs.create(schema_file_id, schema_file_data.into(), opts))
+        .unwrap();
+    let status_addr = cluster.status_addr(node_id);
+    dfs.get_runtime().block_on(send_schema_file_request(
+        &status_addr,
+        keyspace_id,
+        schema_file_id,
+    ));
     let kvengine = cluster.get_kvengine(node_id);
+    must_wait(
+        || {
+            let all_id_vers = kvengine.get_all_shard_id_vers();
+            for id_ver in all_id_vers {
+                if let Ok(shard) = kvengine.get_shard_with_ver(id_ver.id, id_ver.ver) {
+                    if shard.get_schema_file().is_some() {
+                        return true;
+                    }
+                }
+            }
+            false
+        },
+        10,
+        || "failed to build schema file".to_string(),
+    );
     let master_key = kvengine.get_master_key();
     let mut client = cluster.new_client();
     let ctx = Mutex::new(EvalContext::default());
@@ -294,6 +331,24 @@ fn test_get_snapshot_from_leader_by_status_api() {
         |i: usize| gen_row_key(keyspace_id, table_id, i),
         |i: usize| gen_row_val(&ctx, i),
     );
+    must_wait(
+        || {
+            let all_id_vers = kvengine.get_all_shard_id_vers();
+            for id_ver in all_id_vers {
+                if let Ok(shard) = kvengine.get_shard_with_ver(id_ver.id, id_ver.ver) {
+                    let snap_version = shard.get_snap_version();
+                    let columnar_snap_version = shard.get_columnar_snap_version();
+                    if snap_version == columnar_snap_version && columnar_snap_version >= 29 {
+                        return true;
+                    }
+                }
+            }
+            false
+        },
+        10,
+        || "failed to build columnar file".to_string(),
+    );
+
     let pd_client = cluster.get_pd_client();
     let shard = pd_client
         .get_region(&encode_bytes(&gen_row_key(keyspace_id, table_id, 0)))
@@ -386,6 +441,9 @@ fn test_get_snapshot_from_leader_by_status_api() {
         .merge_from_bytes(&snapshot_from_remote)
         .unwrap();
     assert!(delegate_resp.has_locked());
+
+    cluster.stop();
+    oss.shutdown();
 }
 
 fn gen_row_key(keyspace_id: u32, table_id: i64, i: usize) -> Vec<u8> {

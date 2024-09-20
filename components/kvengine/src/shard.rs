@@ -322,7 +322,7 @@ impl Shard {
             let fm = fm.clone();
             let tag = tag.clone();
             runtime.spawn(async move {
-                let res = fs.read_file(id, opts).await;
+                let res = fs.read_file(id, opts.with_type(fm.file_type)).await;
                 if tx.send(res.map(|data| (id, fm, data))).is_err() {
                     error!("failed to send result"; "tag" => tag, "file_id" => id);
                 }
