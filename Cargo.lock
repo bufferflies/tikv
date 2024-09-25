@@ -1303,7 +1303,7 @@ dependencies = [
  "log",
  "log_wrappers",
  "mime",
- "nix 0.24.2",
+ "nix 0.24.3",
  "nom 7.1.0",
  "num_cpus",
  "online_config",
@@ -2441,7 +2441,7 @@ dependencies = [
  "libc 0.2.149",
  "libloading",
  "matches",
- "nix 0.24.2",
+ "nix 0.24.3",
  "once_cell",
  "protobuf",
  "rust-ini",
@@ -4410,9 +4410,9 @@ dependencies = [
 
 [[package]]
 name = "nix"
-version = "0.24.2"
+version = "0.24.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "195cdbc1741b8134346d515b3a56a1c94b0912758009cfd53f99ea0f57b065fc"
+checksum = "fa52e972a9a719cecb6864fb88568781eb706bac2cd1d4f04a648542dbf78069"
 dependencies = [
  "bitflags 1.3.2",
  "cfg-if 1.0.0",
@@ -5202,7 +5202,7 @@ dependencies = [
  "inferno",
  "libc 0.2.149",
  "log",
- "nix 0.24.2",
+ "nix 0.24.3",
  "once_cell",
  "parking_lot 0.12.0",
  "protobuf",
@@ -8703,7 +8703,7 @@ dependencies = [
  "log",
  "log_wrappers",
  "mnt",
- "nix 0.24.2",
+ "nix 0.24.3",
  "num-traits",
  "num_cpus",
  "online_config",
