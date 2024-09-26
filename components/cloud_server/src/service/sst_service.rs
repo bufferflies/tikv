@@ -50,7 +50,7 @@ pub struct ImportSstService<Router> {
     cfg: Config,
     engine: kvengine::Engine,
     router: Router,
-    threads: Arc<Runtime>,
+    threads: tokio::runtime::Handle,
     importer: Arc<SstImporter>,
     limiter: Limiter,
     task_slots: Arc<Mutex<HashSet<PathBuf>>>,
@@ -73,7 +73,7 @@ where
         router: Router,
         engine: kvengine::Engine,
         importer: Arc<SstImporter>,
-    ) -> ImportSstService<Router> {
+    ) -> (ImportSstService<Router>, Runtime) {
         let props = tikv_util::thread_group::current_properties();
         let threads = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(cfg.num_threads)
@@ -89,16 +89,19 @@ where
             .unwrap();
         importer.start_switch_mode_check(threads.handle(), engine.clone());
         threads.spawn(Self::tick(importer.clone()));
-        ImportSstService {
-            cfg,
-            engine,
-            threads: Arc::new(threads),
-            router,
-            importer,
-            limiter: Limiter::new(f64::INFINITY),
-            task_slots: Arc::new(Mutex::new(HashSet::default())),
-            raft_entry_max_size,
-        }
+        (
+            ImportSstService {
+                cfg,
+                engine,
+                threads: threads.handle().clone(),
+                router,
+                importer,
+                limiter: Limiter::new(f64::INFINITY),
+                task_slots: Arc::new(Mutex::new(HashSet::default())),
+                raft_entry_max_size,
+            },
+            threads,
+        )
     }
 
     async fn tick(importer: Arc<SstImporter>) {

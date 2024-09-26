@@ -12,6 +12,7 @@
 //! explicitly stopped. We keep these components in the `TiKVServer` struct.
 
 use std::{
+    cell::RefCell,
     env, fmt,
     fs::{self, File},
     net::SocketAddr,
@@ -773,7 +774,7 @@ impl TikvServer {
         let engines = self.engines.as_ref().unwrap();
 
         // Import SST service.
-        let import_service = ImportSstService::new(
+        let (import_service, threads_pool) = ImportSstService::new(
             self.config.import.clone(),
             self.config.raft_store.raft_entry_max_size,
             self.router.clone(),
@@ -787,6 +788,8 @@ impl TikvServer {
         {
             fatal!("failed to register import service");
         }
+        self.to_stop
+            .push(Box::new(RefCell::new(Some(threads_pool))));
 
         // Lock manager.
         if servers
@@ -1391,5 +1394,16 @@ impl Stop for Worker {
 impl<T: fmt::Display + Send + 'static> Stop for LazyWorker<T> {
     fn stop(self: Box<Self>) {
         self.stop_worker();
+    }
+}
+
+const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
+
+impl Stop for RefCell<Option<tokio::runtime::Runtime>> {
+    fn stop(self: Box<Self>) {
+        self.borrow_mut()
+            .take()
+            .unwrap()
+            .shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT);
     }
 }
