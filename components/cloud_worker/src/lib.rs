@@ -24,6 +24,7 @@ use std::{
 
 use ::load_data::task::{LoadDataConfig, ResourceGroupConfig};
 use ::native_br::{backup::BackupConfig, restore::RestoreConfig};
+use dashmap::DashMap;
 use kvengine::{
     dfs::{DFSConfig, Dfs, S3Fs},
     table::ChecksumType,
@@ -245,6 +246,7 @@ fn start_server(
         master_key,
         quota_limiter: Arc::new(QuotaLimiter::default()),
         block_cache,
+        schema_files: Some(Arc::new(DashMap::new())),
         worker_limiter,
         txn_chunk_manager,
     });

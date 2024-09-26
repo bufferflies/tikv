@@ -1127,6 +1127,10 @@ impl FileMeta {
         self.level == 0 || self.cf == LOCK_CF as i8
     }
 
+    pub fn is_schema_file(&self) -> bool {
+        self.file_type == FileType::Schema
+    }
+
     pub fn from_l0_table(table: &kvenginepb::L0Create) -> Self {
         Self::new(
             -1,
@@ -1174,6 +1178,10 @@ impl FileMeta {
             table.get_biggest(),
             0,
         )
+    }
+
+    pub fn from_schema_meta() -> Self {
+        Self::new(0, 0, FileType::Schema, &[], &[], 0)
     }
 }
 

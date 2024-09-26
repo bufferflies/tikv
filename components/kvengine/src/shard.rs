@@ -279,6 +279,7 @@ impl Shard {
         ignore_lock: bool,
         master_key: &MasterKey,
         block_cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
+        schema_files: Option<Arc<DashMap<u64, SchemaFile>>>,
         txn_chunk_manager: TxnChunkManager,
     ) -> Result<Self> {
         let mut cs = ChangeSet::new(change_set);
@@ -301,6 +302,12 @@ impl Shard {
             for columnar in snap.get_columnar_creates() {
                 ids.insert(columnar.id, FileMeta::from_table(columnar));
             }
+            if snap.has_schema_meta() {
+                ids.insert(
+                    snap.get_schema_meta().get_file_id(),
+                    FileMeta::from_schema_meta(),
+                );
+            }
             if !ignore_lock {
                 lock_txn_file_refs = collect_snap_lock_txn_file_refs(snap);
             }
@@ -317,6 +324,13 @@ impl Shard {
         let opts = dfs::Options::default().with_shard(cs.shard_id, cs.shard_ver);
         let mut msg_count = 0;
         for (&id, fm) in &ids {
+            if fm.is_schema_file() && schema_files.is_some() {
+                if let Some(schema_file) = schema_files.as_ref().unwrap().get(&id) {
+                    cs.set_schema_file(Some(schema_file.clone()));
+                    continue;
+                }
+            }
+
             let fs = dfs.clone();
             let tx = result_tx.clone();
             let fm = fm.clone();
@@ -335,6 +349,11 @@ impl Shard {
                 Ok((id, fm, data)) => {
                     let file = Arc::new(InMemFile::new(id, data));
                     cs.add_file(id, file, &fm, block_cache.clone(), encryption_key.clone())?;
+                    if fm.is_schema_file() {
+                        if let Some(schema_files) = schema_files.as_ref() {
+                            schema_files.insert(id, cs.get_schema_file().unwrap());
+                        }
+                    }
                 }
                 Err(err) => {
                     error!("prefetch failed {:?}", &err);

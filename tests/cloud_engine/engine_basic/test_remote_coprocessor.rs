@@ -2486,6 +2486,7 @@ impl<'a> DagTest<'a> {
                 &snapshot.cs,
                 &self.master_key,
                 None,
+                None,
                 self.txn_chunk_manager.clone(),
             )
             .await

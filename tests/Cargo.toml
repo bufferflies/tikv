@@ -100,6 +100,7 @@ cloud_worker = { workspace = true }
 collections = { workspace = true }
 crc64fast = "0.1"
 crossbeam = "0.8"
+dashmap = "4.0"
 encryption = { workspace = true }
 engine_rocks_helper = { workspace = true }
 error_code = { workspace = true }

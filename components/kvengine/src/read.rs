@@ -11,6 +11,7 @@ use std::{
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use cloud_encryption::{EncryptionKey, MasterKey};
+use dashmap::DashMap;
 use kvenginepb as pb;
 use kvenginepb::TxnFileRefs;
 use log_wrappers::Value as LogValue;
@@ -30,7 +31,8 @@ use crate::{
         blobtable::blobtable::BlobPrefetcher,
         columnar::{
             ColumnarConcatReader, ColumnarMergeReader, ColumnarMvccReader, ColumnarReader,
-            ColumnarRowTableReader, ColumnarTableReader, Schema, SchemaBuf, HANDLE_COL_ID,
+            ColumnarRowTableReader, ColumnarTableReader, Schema, SchemaBuf, SchemaFile,
+            HANDLE_COL_ID,
         },
         memtable::{CfTable, Hint, SkipList, WriteBatch},
         sstable::BlockCacheKey,
@@ -111,6 +113,7 @@ impl SnapAccess {
         ignore_lock: bool,
         master_key: &MasterKey,
         block_cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
+        schema_files: Option<Arc<DashMap<u64, SchemaFile>>>,
         txn_chunk_manager: TxnChunkManager,
     ) -> Result<Self> {
         let core = Arc::new(
@@ -122,6 +125,7 @@ impl SnapAccess {
                 ignore_lock,
                 master_key,
                 block_cache,
+                schema_files,
                 txn_chunk_manager,
             )
             .await?,
@@ -136,6 +140,7 @@ impl SnapAccess {
         mem_tbls: Vec<CfTable>,
         master_key: &MasterKey,
         block_cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
+        schema_files: Option<Arc<DashMap<u64, SchemaFile>>>,
         txn_chunk_manager: TxnChunkManager,
     ) -> Result<Self> {
         let core = Arc::new(
@@ -147,6 +152,7 @@ impl SnapAccess {
                 true,
                 master_key,
                 block_cache,
+                schema_files,
                 txn_chunk_manager,
             )
             .await?,
@@ -161,6 +167,7 @@ impl SnapAccess {
         snapshot: &[u8],
         master_key: &MasterKey,
         block_cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
+        schema_files: Option<Arc<DashMap<u64, SchemaFile>>>, // schema files cache
         txn_chunk_manager: TxnChunkManager,
     ) -> Result<Self> {
         let mut change_set = kvenginepb::ChangeSet::default();
@@ -193,6 +200,7 @@ impl SnapAccess {
             mem_tbls,
             master_key,
             block_cache,
+            schema_files,
             txn_chunk_manager,
         )
         .await
@@ -367,6 +375,7 @@ impl SnapAccessCore {
         ignore_lock: bool,
         master_key: &MasterKey,
         block_cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
+        schema_files: Option<Arc<DashMap<u64, SchemaFile>>>,
         txn_chunk_manager: TxnChunkManager,
     ) -> Result<Self> {
         let shard = Shard::from_change_set(
@@ -377,6 +386,7 @@ impl SnapAccessCore {
             ignore_lock,
             master_key,
             block_cache,
+            schema_files,
             txn_chunk_manager,
         )
         .await?;
@@ -1070,6 +1080,10 @@ impl SnapAccessCore {
 
     pub fn get_all_files(&self) -> Vec<u64> {
         self.data.get_all_files()
+    }
+
+    pub fn has_schema_file(&self) -> bool {
+        self.data.schema_file.is_some()
     }
 
     pub fn get_newer(&self, cf: usize, key: &[u8], version: u64) -> Item<'_> {
@@ -1849,7 +1863,7 @@ mod tests {
             cs.set_shard_ver(shard_ver);
             cs.set_snapshot(snap_pb);
             let snap_bin = cs.write_to_bytes().unwrap();
-            let remote_snap = block_on(SnapAccess::construct_snapshot("test".to_owned(), dfs, &mem_bin, &snap_bin, &master_key, None, txn_chunk_manager)).unwrap();
+            let remote_snap = block_on(SnapAccess::construct_snapshot("test".to_owned(), dfs, &mem_bin, &snap_bin, &master_key, None, None, txn_chunk_manager)).unwrap();
 
             let inner_ranges = inner_ranges.iter().map(|(start, end)| (start.as_ref(), end.as_ref())).collect::<Vec<_>>();
             let ref_store_in_ranges = ref_store.new_in_ranges(&inner_ranges);

@@ -10,6 +10,7 @@ use std::{
 use bytes::{Buf, Bytes};
 use cloud_encryption::MasterKey;
 use cloud_server::StatusServer as CloudStatusServer;
+use dashmap::DashMap;
 use flate2::{write::GzEncoder, Compression};
 use http::{
     header::{ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_TYPE},
@@ -23,7 +24,7 @@ use hyper::{
 use kvengine::{
     dfs,
     dfs::{CacheFs, S3Fs},
-    table::{sstable::BlockCacheKey, ChecksumType},
+    table::{columnar::SchemaFile, sstable::BlockCacheKey, ChecksumType},
     txn_chunk_manager::TxnChunkManager,
     SnapAccess,
 };
@@ -71,6 +72,7 @@ pub(crate) struct Context {
     pub master_key: MasterKey,
     pub quota_limiter: Arc<QuotaLimiter>,
     pub block_cache: Option<moka::sync::SegmentedCache<BlockCacheKey, Bytes>>,
+    pub schema_files: Option<Arc<DashMap<u64, SchemaFile>>>,
     pub worker_limiter: WorkerLimiter,
     pub txn_chunk_manager: TxnChunkManager,
 }
@@ -221,6 +223,7 @@ async fn handle_remote_coprocessor(
         snap_data,
         &ctx.master_key,
         ctx.block_cache.clone(),
+        ctx.schema_files.clone(),
         ctx.txn_chunk_manager.clone(),
     )
     .await;

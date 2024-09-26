@@ -130,6 +130,7 @@ impl Tikv for CopService {
                 &resp.take_snapshot(),
                 &m_ctx.master_key,
                 m_ctx.block_cache.clone(),
+                m_ctx.schema_files.clone(),
                 m_ctx.txn_chunk_manager.clone(),
             )
             .await

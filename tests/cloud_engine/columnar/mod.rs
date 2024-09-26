@@ -2,10 +2,14 @@
 
 mod copr;
 
-use std::{sync::Mutex, time::Duration};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use api_version::ApiV2;
 use bytes::Buf;
+use dashmap::DashMap;
 use hyper::Body;
 use kvengine::{
     dfs,
@@ -382,6 +386,7 @@ fn test_get_snapshot_from_leader_by_status_api() {
     delegate_resp
         .merge_from_bytes(&snapshot_from_remote)
         .unwrap();
+    let schema_files = Arc::new(DashMap::new());
     let snap_access = dfs
         .get_runtime()
         .block_on(SnapAccess::construct_snapshot(
@@ -391,9 +396,12 @@ fn test_get_snapshot_from_leader_by_status_api() {
             delegate_resp.get_snapshot(),
             &master_key,
             None,
+            Some(schema_files.clone()),
             kvengine.get_txn_chunk_manager(),
         ))
         .unwrap();
+    assert!(snap_access.has_schema_file());
+    assert!(schema_files.contains_key(&schema_file_id));
 
     let mut iter = snap_access.new_iterator(WRITE_CF, false, true, Some(start_ts), false);
     iter.rewind();

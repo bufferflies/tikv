@@ -91,9 +91,20 @@ impl ChangeSet {
             FileType::Columnar => {
                 self.col_files.insert(id, ColumnarFile::open(file)?);
             }
+            FileType::Schema => {
+                self.schema_file = Some(SchemaFile::open(file)?);
+            }
             file_type => unreachable!("unexpected file type {:?}", file_type),
         }
         Ok(())
+    }
+
+    pub fn set_schema_file(&mut self, schema_file: Option<SchemaFile>) {
+        self.schema_file = schema_file
+    }
+
+    pub fn get_schema_file(&self) -> Option<SchemaFile> {
+        self.schema_file.clone()
     }
 }
 
