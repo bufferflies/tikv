@@ -711,30 +711,46 @@ impl WorkerScaler {
 
 fn parse_task_id_by_pod_name(pod_name: &str) -> String {
     // pod name format: load-data-worker-{task-id}-0
-    // task-id: {lightning-task-id}-{table-id}-{engine-id}
-    // example:
-    //  load-data-worker-1701753296955293956-139-0-0 or
-    //  load-data-worker-1701753296955293956-139--1-0
+    // task-id(old format): {lightning-task-id}-{table-id}-{engine-id}
+    // task-id:             {keyspace-id}-{lightning-task-id}-{table-id}-{engine-id}
     //
+    // TODO(zeminzhou): remove old format
     let fields: Vec<&str> = pod_name.split('-').collect();
     if fields.len() == 7 {
         // load-data-worker-1701753296955293956-139-0-0
         return format!("{}-{}-{}", fields[3], fields[4], fields[5]);
     } else if fields.len() == 8 {
-        //  load-data-worker-1701753296955293956-139--1-0
-        return format!("{}-{}--{}", fields[3], fields[4], fields[6]);
+        if fields[5].is_empty() {
+            //  load-data-worker-1701753296955293956-139--1-0
+            return format!("{}-{}--{}", fields[3], fields[4], fields[6]);
+        } else {
+            // load-data-worker-1-1701753296955293956-139-0-0
+            return format!("{}-{}-{}-{}", fields[3], fields[4], fields[5], fields[6]);
+        }
+    } else if fields.len() == 9 {
+        //  load-data-worker-1-11701753296955293956-139--1-0
+        return format!("{}-{}-{}--{}", fields[3], fields[4], fields[5], fields[7]);
     }
     "".to_string()
 }
 
 fn parse_task_id_by_pvc_name(pvc_name: &str, pvc_template_name: &str) -> String {
     // pvc name format: {pvc-template-name}-load-data-worker-{task-id}-0
-    // task-id: {lightning-task-id}-{table-id}-{engine-id}
+    // task-id(old format): {lightning-task-id}-{table-id}-{engine-id}
+    // task-id:             {keyspace-id}-{lightning-task-id}-{table-id}-{engine-id}
+    //
+    // TODO(zeminzhou): remove old format
     let fields: Vec<&str> = pvc_name[pvc_template_name.len()..].split('-').collect();
     if fields.len() == 8 {
         return format!("{}-{}-{}", fields[4], fields[5], fields[6]);
     } else if fields.len() == 9 {
-        return format!("{}-{}--{}", fields[4], fields[5], fields[7]);
+        if fields[6].is_empty() {
+            return format!("{}-{}--{}", fields[4], fields[5], fields[7]);
+        } else {
+            return format!("{}-{}-{}-{}", fields[4], fields[5], fields[6], fields[7]);
+        }
+    } else if fields.len() == 10 {
+        return format!("{}-{}-{}--{}", fields[4], fields[5], fields[6], fields[8]);
     }
     "".to_string()
 }
@@ -872,7 +888,7 @@ mod tests {
 
     #[test]
     fn test_parse_task_id() {
-        let task_ids = vec!["taskid-1-0", "taskid-1--0"];
+        let task_ids = vec!["taskid-1-0", "taskid-1--0", "1-taskid-1-0", "1-taskid-1--0"];
         for task_id in task_ids {
             let pvc_template_name = "data0";
             let pod_name = new_worker_pod_name(task_id);
