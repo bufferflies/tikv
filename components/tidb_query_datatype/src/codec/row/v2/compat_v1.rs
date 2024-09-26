@@ -24,7 +24,7 @@ pub fn decode_v2_u64(v: &[u8]) -> Result<u64> {
 }
 
 #[inline]
-fn decode_v2_i64(v: &[u8]) -> Result<i64> {
+pub fn decode_v2_i64(v: &[u8]) -> Result<i64> {
     // See `decodeUint` in TiDB.
     match v.len() {
         1 => Ok(i64::from(v[0] as i8)),

@@ -22,13 +22,13 @@ use tidb_query_datatype::{
             JSON_FLAG, NIL_FLAG, UINT_FLAG, VAR_INT_FLAG, VAR_UINT_FLAG, VECTOR_FLOAT32_FLAG,
         },
         mysql::{DecimalDecoder, DecimalEncoder},
-        row::v2::{decode_v2_u64, RowSlice},
+        row::v2::{decode_v2_i64, decode_v2_u64, RowSlice},
         table::{
             decode_common_handle, decode_int_handle, encode_common_handle_for_test, encode_row_key,
             PREFIX_LEN,
         },
     },
-    FieldTypeTp,
+    FieldTypeFlag, FieldTypeTp,
 };
 use tikv_util::codec::{
     bytes::{decode_bytes, decode_compact_bytes},
@@ -1144,6 +1144,11 @@ impl ColumnarRowTableReader {
         Ok(())
     }
 
+    fn is_unsigned(col_info: &ColumnInfo) -> bool {
+        let flag = FieldTypeFlag::from_bits(col_info.get_flag() as u32).unwrap();
+        flag.contains(FieldTypeFlag::UNSIGNED)
+    }
+
     fn push_col_buf_with_field_type(
         col_buf: &mut ColumnBuffer,
         col_info: &ColumnInfo,
@@ -1155,22 +1160,37 @@ impl ColumnarRowTableReader {
             | FieldTypeTp::Short
             | FieldTypeTp::Int24
             | FieldTypeTp::Long
-            | FieldTypeTp::LongLong
-            | FieldTypeTp::Date
+            | FieldTypeTp::LongLong => {
+                if Self::is_unsigned(col_info) {
+                    let v = decode_v2_u64(col_val).unwrap();
+                    col_buf.push_value(&v.to_le_bytes());
+                } else {
+                    let v = decode_v2_i64(col_val).unwrap();
+                    col_buf.push_value(&v.to_le_bytes());
+                }
+            }
+            FieldTypeTp::Date
             | FieldTypeTp::DateTime
             | FieldTypeTp::Timestamp
             | FieldTypeTp::Enum
             | FieldTypeTp::Bit
-            | FieldTypeTp::Set
-            | FieldTypeTp::Year
-            | FieldTypeTp::Duration => {
+            | FieldTypeTp::Set => {
                 let v = decode_v2_u64(col_val).unwrap();
                 col_buf.push_value(&v.to_le_bytes());
             }
+            FieldTypeTp::Year | FieldTypeTp::Duration => {
+                let v = decode_v2_i64(col_val).unwrap();
+                col_buf.push_value(&v.to_le_bytes());
+            }
+            FieldTypeTp::Float | FieldTypeTp::Double => {
+                let mut val = col_val;
+                let v = decode_f64(&mut val).unwrap();
+                col_buf.push_value(&v.to_le_bytes());
+            }
+            FieldTypeTp::Null => {
+                col_buf.push_null();
+            }
             FieldTypeTp::Unspecified
-            | FieldTypeTp::Float
-            | FieldTypeTp::Double
-            | FieldTypeTp::Null
             | FieldTypeTp::NewDate
             | FieldTypeTp::VarChar
             | FieldTypeTp::Json

@@ -844,8 +844,8 @@ impl Block {
 pub(crate) fn get_fixed_size(col_info: &ColumnInfo) -> usize {
     let tp = FieldTypeTp::from_u8(col_info.get_tp() as u8).unwrap();
     match tp {
-        FieldTypeTp::Float => 4,
-        FieldTypeTp::Tiny
+        FieldTypeTp::Float
+        | FieldTypeTp::Tiny
         | FieldTypeTp::Short
         | FieldTypeTp::Int24
         | FieldTypeTp::Long

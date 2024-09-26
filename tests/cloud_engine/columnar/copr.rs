@@ -51,7 +51,7 @@ fn test_coprocessor() {
     );
     let t2 = table_ids[1];
     let ddl_t2 = format!(
-        "create table t{} (c1 int, c2 varchar, c3 int, c4 varchar, pk(c3, c2))",
+        "create table t{} (c1 int, c2 varchar, c3 int, c4 varchar, c5 float, pk(c3, c2))",
         t2
     );
     let schema_t1 = test_cloud_server::copr::build_schema(&ddl_t1);
@@ -121,6 +121,7 @@ fn test_coprocessor() {
         ("select c3, c2 from t1", schema_t1.clone()),
         ("select c3, c4 from t2", schema_t2.clone()),
         ("select c2, c1 from t2", schema_t2.clone()),
+        ("select c5 from t2", schema_t2.clone()),
     ];
     for (stmt, schema) in statements {
         let dag = build_dag(stmt, &schema);
