@@ -56,8 +56,8 @@ TARGET_BIN="$PWD"/random-bin
 
 TARGET_PATH="target/debug/deps"
 if [ "$RELEASE" -eq 1 ]; then
-	BUILD_FLAG+=("--release")
-	TARGET_PATH="target/release/deps"
+	BUILD_FLAG+=("--profile" "random-test")
+	TARGET_PATH="target/random-test/deps"
 fi
 
 cd ../..

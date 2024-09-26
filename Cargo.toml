@@ -452,6 +452,13 @@ debug-assertions = true
 overflow-checks = true
 rpath = false
 
+[profile.random-test]
+inherits = "release"
+codegen-units = 16
+incremental = true
+debug-assertions = true
+overflow-checks = true
+
 # The benchmark profile is identical to release, except that lto = false
 [profile.bench]
 opt-level = 3
