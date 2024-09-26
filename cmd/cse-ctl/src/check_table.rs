@@ -27,7 +27,7 @@ use native_br::{
     restore_keyspace::BackupCluster,
 };
 use protobuf::Message;
-use schema::schema::{DbInfo, STATE_PUBLIC};
+use schema::schema::{DbInfo, TableInfo, STATE_PUBLIC};
 use security::SecurityConfig;
 use tidb_query_datatype::codec::{
     datum,
@@ -63,6 +63,12 @@ pub struct CheckTableArgs {
     pub keyspace_id: u32,
     #[clap(long, default_value_t = 0)]
     pub timestamp: u64,
+    /// Effective only when `all` is true.
+    #[clap(long)]
+    pub starts_from_keyspace_id: Option<u32>,
+    /// Effective only on first keyspace. Used as partition id as well.
+    #[clap(long)]
+    pub starts_from_table_id: Option<i64>,
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug, Default)]
@@ -132,7 +138,7 @@ pub(crate) fn execute_check_table(args: CheckTableArgs) {
         TxnChunkManagerConfig::default(),
     );
     let cluster_backup = get_cluster_backup_meta(&s3fs, config.backup_name.clone());
-    let keyspace_ids = if config.all {
+    let mut keyspace_ids = if config.all {
         let mut all_keyspace_ids = vec![];
         let skip_keyspace_ids: HashSet<u32> =
             HashSet::from_iter(config.skip_keyspace_ids.iter().copied());
@@ -144,6 +150,9 @@ pub(crate) fn execute_check_table(args: CheckTableArgs) {
                 if res.is_ok()
                     && keyspace_meta.state == KeyspaceState::Enabled
                     && !skip_keyspace_ids.contains(&keyspace_meta.id)
+                    && args
+                        .starts_from_keyspace_id
+                        .map_or(true, |id| keyspace_meta.id >= id)
                 {
                     all_keyspace_ids.push(keyspace_meta.id);
                 }
@@ -153,6 +162,7 @@ pub(crate) fn execute_check_table(args: CheckTableArgs) {
     } else {
         config.keyspace_ids.clone()
     };
+    keyspace_ids.sort_unstable();
     let keyspace_id = keyspace_ids[0];
     let restore_conf = RestoreConfig {
         security: config.security.clone(),
@@ -177,7 +187,7 @@ pub(crate) fn execute_check_table(args: CheckTableArgs) {
     } else {
         cluster_backup.backup_ts
     };
-    for keyspace_id in keyspace_ids {
+    for (idx, keyspace_id) in keyspace_ids.into_iter().enumerate() {
         cluster.reset_keyspace(keyspace_id, keyspace_id).unwrap();
         let kv = cluster.get_kvengine();
         let shards = cluster.get_shard_metas_before_flush();
@@ -191,7 +201,12 @@ pub(crate) fn execute_check_table(args: CheckTableArgs) {
         ));
         let keyspace_prefix = api_version::ApiV2::get_txn_keyspace_prefix(keyspace_id);
         let dbs = block_on(schema::load_schema(backup_reader.clone(), &keyspace_prefix)).unwrap();
-        let tasks = create_check_table_tasks(&dbs);
+        let starts_from_table_id = if idx == 0 {
+            args.starts_from_table_id
+        } else {
+            None
+        };
+        let tasks = create_check_table_tasks(dbs, starts_from_table_id);
         for task in tasks {
             info!("check table {:?}", task);
             run_task(
@@ -212,12 +227,16 @@ struct CheckTableTask {
     table_id: i64,
     partition_id: Option<i64>,
     indices: Vec<(i64, usize)>,
+    table_info: TableInfo,
 }
 
-fn create_check_table_tasks(dbs: &[DbInfo]) -> Vec<CheckTableTask> {
+fn create_check_table_tasks(
+    dbs: Vec<DbInfo>,
+    starts_from_table_id: Option<i64>,
+) -> Vec<CheckTableTask> {
     let mut tasks = vec![];
     for db in dbs {
-        for tbl in &db.tables {
+        for tbl in db.tables {
             if tbl.index_info.is_none() {
                 continue;
             }
@@ -243,21 +262,29 @@ fn create_check_table_tasks(dbs: &[DbInfo]) -> Vec<CheckTableTask> {
             indices.sort_by(|a, b| a.0.cmp(&b.0));
             if let Some(partition) = &tbl.partition {
                 for partition_def in &partition.definitions {
+                    if starts_from_table_id.is_some_and(|id| partition_def.id < id) {
+                        continue;
+                    }
                     tasks.push(CheckTableTask {
                         table_name: tbl.name.o.clone(),
                         table_id: tbl.id,
                         is_common_handle: tbl.is_common_handle,
                         partition_id: Some(partition_def.id),
                         indices: indices.clone(),
+                        table_info: tbl.clone(),
                     })
                 }
             } else {
+                if starts_from_table_id.is_some_and(|id| tbl.id < id) {
+                    continue;
+                }
                 tasks.push(CheckTableTask {
                     table_name: tbl.name.o.clone(),
                     table_id: tbl.id,
                     is_common_handle: tbl.is_common_handle,
                     partition_id: None,
                     indices,
+                    table_info: tbl,
                 })
             }
         }
@@ -330,32 +357,43 @@ fn run_task(
     );
     let invalid_path = invalid_path(&data_dir_path, keyspace_id);
     fs::create_dir_all(&invalid_path).unwrap();
-    let row_file_path = invalid_path.join(format!("{}.row", table_id));
-    let row_file = File::create(row_file_path).unwrap();
-    let mut row_writer = BufWriter::new(row_file);
-    for (handle, meta) in invalid_rows {
-        let row_str = format!(
-            "{}|{:?}|{}|{}\n",
-            handle, meta.idx_ids, meta.user_meta.start_ts, meta.user_meta.commit_ts
-        );
-        row_writer.write_all(row_str.as_bytes()).unwrap();
+
+    if !invalid_rows.is_empty() {
+        let row_file_path = invalid_path.join(format!("{}.row", table_id));
+        let row_file = File::create(row_file_path).unwrap();
+        let mut row_writer = BufWriter::new(row_file);
+        for (handle, meta) in invalid_rows {
+            let row_str = format!(
+                "{}|{:?}|{}|{}\n",
+                handle, meta.idx_ids, meta.user_meta.start_ts, meta.user_meta.commit_ts
+            );
+            row_writer.write_all(row_str.as_bytes()).unwrap();
+        }
+        row_writer.flush().unwrap();
     }
-    row_writer.flush().unwrap();
-    let idx_file_path = invalid_path.join(format!("{}.idx", table_id));
-    let idx_file = File::create(idx_file_path).unwrap();
-    let mut idx_writer = BufWriter::new(idx_file);
-    for (idx_id, index_meta) in invalid_indices {
-        let idx_str = format!(
-            "{}|{}|{}|{}|{}\n",
-            idx_id,
-            index_meta.handle,
-            index_meta.unique,
-            index_meta.user_meta.start_ts,
-            index_meta.user_meta.commit_ts,
-        );
-        idx_writer.write_all(idx_str.as_bytes()).unwrap();
+
+    if !invalid_indices.is_empty() {
+        let idx_file_path = invalid_path.join(format!("{}.idx", table_id));
+        let idx_file = File::create(idx_file_path).unwrap();
+        let mut idx_writer = BufWriter::new(idx_file);
+        for (idx_id, index_meta) in invalid_indices {
+            let idx_str = format!(
+                "{}|{}|{}|{}|{}\n",
+                idx_id,
+                index_meta.handle,
+                index_meta.unique,
+                index_meta.user_meta.start_ts,
+                index_meta.user_meta.commit_ts,
+            );
+            idx_writer.write_all(idx_str.as_bytes()).unwrap();
+        }
+        idx_writer.flush().unwrap();
     }
-    idx_writer.flush().unwrap();
+
+    let schema_file_path = invalid_path.join(format!("{}.schema", table_id));
+    let mut schema_file = File::create(schema_file_path).unwrap();
+    let schema_str = serde_json::to_string_pretty(&task.table_info).unwrap();
+    schema_file.write_all(schema_str.as_bytes()).unwrap();
 }
 
 fn table_path(dir: &Path, keyspace_id: u32, table_id: i64) -> PathBuf {

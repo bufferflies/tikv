@@ -23,6 +23,7 @@ use std::{
 };
 
 use api_version::{dispatch_api_version, KvFormat};
+use cloud_encryption::MasterKey;
 use concurrency_manager::ConcurrencyManager;
 use engine_rocks::from_rocks_compression_type;
 use engine_traits::{KvEngine, RaftEngine, CF_DEFAULT, CF_WRITE};
@@ -238,12 +239,14 @@ impl TikvServer {
         let io_rate_limiter = Arc::new(IoRateLimiter::new(IoRateLimitMode::WriteOnly, true, true));
         io_rate_limiter
             .set_io_rate_limit(config.storage.io_rate_limit.max_bytes_per_sec.0 as usize);
+        let master_key = dfs.get_runtime().block_on(config.security.new_master_key());
         let raw_engines = Self::init_raw_engines(
             pd_client.clone(),
             &config,
             dfs,
             io_rate_limiter.clone(),
             store_limiter,
+            master_key,
             security_mgr.clone(),
         );
 
@@ -985,6 +988,7 @@ impl TikvServer {
         meta_iter: &mut impl kvengine::MetaIterator,
         recoverer: impl kvengine::RecoverHandler + 'static,
         for_restore: bool,
+        master_key: MasterKey,
         security_mgr: Arc<SecurityManager>,
     ) -> kvengine::Result<(
         kvengine::Engine,
@@ -1065,7 +1069,6 @@ impl TikvServer {
         if conf.gc.enable_safe_point_v2 {
             opt_ks_gc_sp_cache = Some(pd.get_keyspace_gc_safepoint_v2_cache());
         }
-        let master_key = dfs.get_runtime().block_on(conf.security.new_master_key());
         let kv_engine = kvengine::Engine::open(
             dfs,
             opts,
@@ -1089,6 +1092,7 @@ impl TikvServer {
         dfs: Arc<dyn Dfs>,
         rate_limiter: Arc<IoRateLimiter>,
         store_limiter: Arc<StoreLimiter>,
+        master_key: MasterKey,
         security_mgr: Arc<SecurityManager>,
     ) -> Engines {
         let panic_regions = Self::load_panic_regions(&conf.storage.data_dir);
@@ -1120,6 +1124,7 @@ impl TikvServer {
             &mut meta_iter,
             recoverer,
             false,
+            master_key,
             security_mgr,
         )
         .unwrap();

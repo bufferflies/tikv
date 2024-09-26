@@ -14,7 +14,7 @@ use std::{
 };
 
 use api_version::ApiV2;
-use cloud_encryption::EncryptionKey;
+use cloud_encryption::{EncryptionKey, MasterKey};
 use cloud_server::{RestoreShardResponse, TikvServer};
 use file_system::{IoRateLimitMode, IoRateLimiter};
 use http::Request;
@@ -609,6 +609,7 @@ pub struct BackupCluster {
     pd_client: Arc<dyn PdClient>,
     dfs: Arc<S3Fs>,
     security_conf: SecurityConfig,
+    master_key: MasterKey,
     keyspace_id: u32,
     target_keyspace_id: u32,
     keyspace_start: Vec<u8>,
@@ -679,12 +680,14 @@ impl BackupCluster {
             ApiV2::get_txn_keyspace_range(keyspace_id)
         };
         let security_conf = restore_conf.security.clone();
+        let master_key = dfs.get_runtime().block_on(security_conf.new_master_key());
         let mut cluster = Self {
             tag: make_keyspace_tag(keyspace_id, target_keyspace_id),
             path,
             pd_client,
             dfs,
             security_conf,
+            master_key,
             keyspace_id,
             target_keyspace_id,
             keyspace_start,
@@ -926,6 +929,7 @@ impl BackupCluster {
                 &mut meta_iter,
                 recoverer.clone(),
                 true,
+                self.master_key.clone(),
                 self.pd_client.get_security_mgr(),
             )?;
 
@@ -1306,14 +1310,19 @@ impl BackupCluster {
         for (&shard_id, peers) in shard_peers.iter_mut() {
             // Since we enabled raft pre-vote, the correct leader must have the max term and
             // then max last index.
+            // Also sort by store_id (descending) to get peer with smallest store id as
+            // leader, to make the result determined and improve efficiency for
+            // retry.
             peers.sort_by(|a, b| {
                 let term_last_a = (
                     a.raft_state.get_hard_state().get_term(),
                     a.raft_state.get_last_index(),
+                    !a.store_id,
                 );
                 let term_last_b = (
                     b.raft_state.get_hard_state().get_term(),
                     b.raft_state.get_last_index(),
+                    !b.store_id,
                 );
                 term_last_a.cmp(&term_last_b)
             });
