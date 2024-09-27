@@ -68,8 +68,6 @@ impl WorkerLimiter {
 
 impl WorkerLimiter {
     pub(crate) async fn acquire_permit(&self, keyspace_id: u32) -> Permit {
-        let global_semaphore = self.global_semaphore.clone();
-        let _global_permit = global_semaphore.acquire_owned().await.unwrap();
         let semaphore = self
             .keyspace_semaphores
             .entry(keyspace_id)
@@ -81,6 +79,8 @@ impl WorkerLimiter {
             })
             .clone();
         let _keyspace_permit = semaphore.acquire_owned().await.unwrap();
+        let global_semaphore = self.global_semaphore.clone();
+        let _global_permit = global_semaphore.acquire_owned().await.unwrap();
         Permit {
             _global_permit,
             _keyspace_permit,
