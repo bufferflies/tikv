@@ -1420,10 +1420,6 @@ impl Engine {
     ) -> Option<Result<pb::ChangeSet>> {
         let tag = shard.tag();
         let data = shard.get_data();
-        if data.col_levels.levels.iter().all(|l| l.files.is_empty()) {
-            store_bool(&shard.compacting, false);
-            return None;
-        }
         let mut old_columnar_tables = vec![];
         data.col_levels.levels.iter().for_each(|l| {
             l.files.iter().for_each(|f| {
@@ -1450,6 +1446,7 @@ impl Engine {
         let tag = shard.tag();
         let data = shard.get_data();
         if data.col_levels.unconverted_l0s.is_empty() {
+            info!("{} no unconverted l0s to convert to columnar", tag);
             store_bool(&shard.compacting, false);
             return None;
         }
