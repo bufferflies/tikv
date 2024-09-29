@@ -712,6 +712,10 @@ impl TxnChunkInner {
         self.inserts
     }
 
+    pub fn get_check_constraint_blocks(&self) -> &BlockBitmap {
+        &self.check_constraint_blocks
+    }
+
     fn has_constraint(&self) -> bool {
         self.inserts + self.check_non_exists > 0
     }
@@ -1754,6 +1758,17 @@ impl HashIndexBuilder {
 #[derive(Debug, PartialEq, Clone, Default)]
 pub struct BlockBitmap {
     data: Vec<u8>,
+}
+
+impl fmt::Display for BlockBitmap {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s: String = self
+            .data
+            .iter()
+            .map(|&x| if x == 0 { '0' } else { '1' })
+            .collect();
+        write!(f, "{}", s)
+    }
 }
 
 impl BlockBitmap {

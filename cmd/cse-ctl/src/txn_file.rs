@@ -93,6 +93,11 @@ pub(crate) fn print_txn_chunk(txn_chunk: &TxnChunk, indent: usize) {
         indent,
         txn_chunk.get_check_non_exists()
     );
+    println!(
+        "{}check_constraint_blocks: {}",
+        indent,
+        txn_chunk.get_check_constraint_blocks()
+    );
     let chunk_index = txn_chunk.get_index();
     println!("{}num_blocks: {}", indent, chunk_index.num_blocks());
     println!(
