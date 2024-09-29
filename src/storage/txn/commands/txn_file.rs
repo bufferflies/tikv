@@ -233,7 +233,24 @@ impl TxnFileCommand {
         None
     }
 
+    // TODO: choose best match algorithm based on stats.
     fn check_constraint(&self, snap_access: &SnapAccess) -> crate::storage::mvcc::Result<()> {
+        if let Some(already_exist_key) =
+            snap_access.check_txn_file_constraint(&self.txn_file, self.ts().into_inner())
+        {
+            return Err(ErrorInner::AlreadyExist {
+                key: already_exist_key,
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    fn check_constraint_by_linear_match(
+        &self,
+        snap_access: &SnapAccess,
+    ) -> crate::storage::mvcc::Result<()> {
         let mut txn_file_iter = TxnFileIterator::new(self.txn_file.clone(), false);
         let prefix = if snap_access.get_keyspace_id() > 0 {
             ApiV2::get_keyspace_prefix(snap_access.get_start_key()).unwrap()

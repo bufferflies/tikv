@@ -1301,6 +1301,39 @@ impl SnapAccessCore {
         None
     }
 
+    pub fn check_txn_file_constraint(
+        &self,
+        txn_file: &TxnFile,
+        read_ts: u64,
+    ) -> Option<Vec<u8> /* already_exist_key */> {
+        let mut already_exist_key: Option<Vec<u8>> = None;
+
+        let mut item = Item::new();
+        item.owned_val = Some(vec![]);
+        let cb = |key: InnerKey<'_>| -> bool {
+            item.path = AccessPath::default();
+            item.val = self.get_value(
+                WRITE_CF,
+                key,
+                read_ts,
+                &mut item.path,
+                item.owned_val.as_mut().unwrap(),
+                &[],
+            );
+            // Blob value is not needed here.
+
+            if item.value_len() > 0 {
+                let outer_key = self.data.to_outer_key(key);
+                already_exist_key = Some(outer_key);
+                return false; // Return false to stop iteration.
+            }
+            true
+        };
+
+        txn_file.iter_check_constraint_keys(self.data.data_bound(), cb);
+        already_exist_key
+    }
+
     pub fn get_lock_txn_file(&self, start_ts: u64) -> Option<TxnFile> {
         for txn_file in &self.data.lock_txn_files {
             if txn_file.start_ts() == start_ts {

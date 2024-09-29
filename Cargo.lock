@@ -3660,6 +3660,7 @@ dependencies = [
 name = "kvengine"
 version = "0.0.1"
 dependencies = [
+ "anyhow",
  "api_version",
  "async-trait",
  "aws",

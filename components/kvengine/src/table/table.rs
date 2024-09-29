@@ -554,6 +554,7 @@ impl Deref for InnerKey<'_> {
     }
 }
 
+#[derive(Clone)]
 pub struct OwnedInnerKey {
     inner: bytes::Bytes,
 }
@@ -575,6 +576,10 @@ impl OwnedInnerKey {
 
     pub fn into_inner(self) -> bytes::Bytes {
         self.inner
+    }
+
+    pub fn to_vec(&self) -> Vec<u8> {
+        self.inner.to_vec()
     }
 }
 

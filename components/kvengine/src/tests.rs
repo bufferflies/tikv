@@ -15,6 +15,7 @@ use std::{
     u64, vec,
 };
 
+use anyhow::bail;
 use api_version::{api_v2::KEYSPACE_PREFIX_LEN, ApiV2};
 use bytes::{Buf, Bytes};
 use cloud_encryption::{EncryptionKey, MasterKey};
@@ -46,7 +47,7 @@ use crate::{
         file::{File, InMemFile},
         sstable::{L0Builder, L0Table, SsTable},
         BoundedDataSet, ChecksumType, DataBound, InnerKey, NoPrefixKey, TxnChunkBuilder, TxnCtx,
-        TxnFile, TxnFileId, BIT_DELETE, OP_PUT,
+        TxnFile, TxnFileId, BIT_DELETE, OP_CHECK_NOT_EXIST, OP_INSERT, OP_PUT,
     },
     *,
 };
@@ -817,7 +818,15 @@ fn test_lock_cf_repeatable_read() {
     // Write txn file lock.
     let txn_file_ver6 = {
         let chunk_id = 6000;
-        build_txn_chunk(&engine, 150, 300, chunk_id, None, enable_inner_key_off);
+        build_txn_chunk(
+            &engine,
+            150,
+            300,
+            chunk_id,
+            |_| OP_PUT,
+            None,
+            enable_inner_key_off,
+        );
         let primary = kb.i_to_outer_key(150);
         let mut wb = WriteBatch::new(1, engine.inner_key_off());
         let txn_file_refs = make_txn_file_refs(
@@ -2247,8 +2256,49 @@ fn test_txn_file(#[case] enc_key: Option<EncryptionKey>, #[case] enable_inner_ke
     let enc_key = enc_key.as_ref();
     let (engine, tx) = new_test_engine_opt(enable_inner_key_off, DEF_BLOCK_SIZE, TABLE_KEY_PREFIX);
     let kb = engine.key_builder();
+
+    let build_chunk = |start, end, chunk_id| {
+        build_txn_chunk(
+            &engine,
+            start,
+            end,
+            chunk_id,
+            |_| OP_PUT,
+            enc_key,
+            enable_inner_key_off,
+        )
+    };
+    let check_constraint = |start, end, start_ts, expected: Option<usize>| -> anyhow::Result<()> {
+        let op_fn = |i| {
+            if i % 4 == 0 {
+                OP_INSERT
+            } else {
+                OP_CHECK_NOT_EXIST
+            }
+        };
+        let already_exist_key = check_txn_file_constraint(
+            &engine,
+            start,
+            end,
+            start_ts,
+            op_fn,
+            enc_key,
+            enable_inner_key_off,
+        );
+        let expected = expected.map(|i| kb.i_to_outer_key(i));
+        if already_exist_key != expected {
+            bail!(
+                "check_constraint failed, already_exist_key: {:?}, expected: {:?}",
+                already_exist_key,
+                expected
+            );
+        }
+        Ok(())
+    };
+    check_constraint(200, 400, 1000, None).unwrap();
+
     let chunk_id = 200;
-    build_txn_chunk(&engine, 200, 300, chunk_id, enc_key, enable_inner_key_off);
+    build_chunk(200, 300, chunk_id);
     let primary = kb.i_to_outer_key(0);
     let mut wb = WriteBatch::new(1, kb.inner_key_off());
     let txn_file_refs = make_txn_file_refs(
@@ -2265,6 +2315,7 @@ fn test_txn_file(#[case] enc_key: Option<EncryptionKey>, #[case] enable_inner_ke
     // prewrite: [200,300), start_ts: 1000
     write_data(wb, &tx);
     verify_lock(&engine, 200, 300, kb);
+    check_constraint(200, 400, 1000, None).unwrap();
 
     // rollback: start_ts: 1000
     let txn_file_refs = make_txn_file_refs(1000, vec![chunk_id], vec![], make_user_meta(1000, 0));
@@ -2274,17 +2325,11 @@ fn test_txn_file(#[case] enc_key: Option<EncryptionKey>, #[case] enable_inner_ke
     let shard = engine.get_shard(1).unwrap();
     assert!(shard.get_property(TXN_FILE_REF).unwrap().is_empty());
     assert!(shard.get_txn_chunks().is_empty());
+    check_constraint(200, 400, 1000, None).unwrap();
 
     // concurrent txn files.
     let txn1_chunk_id = 201;
-    build_txn_chunk(
-        &engine,
-        200,
-        300,
-        txn1_chunk_id,
-        enc_key,
-        enable_inner_key_off,
-    );
+    build_chunk(200, 300, txn1_chunk_id);
     let txn1_start_ts = 1003;
     let txn1_lock = make_txn_file_refs(
         txn1_start_ts,
@@ -2301,14 +2346,7 @@ fn test_txn_file(#[case] enc_key: Option<EncryptionKey>, #[case] enable_inner_ke
     // prewrite: [200, 300), start_ts: 1003
     write_data(wb, &tx);
     let txn2_chunk_id = 202;
-    build_txn_chunk(
-        &engine,
-        300,
-        400,
-        txn2_chunk_id,
-        enc_key,
-        enable_inner_key_off,
-    );
+    build_chunk(300, 400, txn2_chunk_id);
     let txn2_start_ts = 1004;
     let txn2_lock = make_txn_file_refs(
         txn2_start_ts,
@@ -2338,17 +2376,18 @@ fn test_txn_file(#[case] enc_key: Option<EncryptionKey>, #[case] enable_inner_ke
     write_data(wb, &tx);
     verify_write(&engine, 200, 300, kb);
     verify_lock(&engine, 300, 400, kb);
+    for (start, end, start_ts, expected) in [
+        (250, 400, 1004, None),
+        (100, 400, 1006, Some(200)),
+        (250, 350, 1006, Some(250)),
+        (300, 400, 1006, None),
+    ] {
+        check_constraint(start, end, start_ts, expected).unwrap();
+    }
 
     let conflict_chunk_id = 203;
     let conflict_start_ts = 999;
-    build_txn_chunk(
-        &engine,
-        250,
-        350,
-        conflict_chunk_id,
-        enc_key,
-        enable_inner_key_off,
-    );
+    build_chunk(250, 350, conflict_chunk_id);
     engine
         .txn_chunk_mgr
         .prepare(conflict_chunk_id, enc_key.cloned())
@@ -2402,20 +2441,22 @@ fn test_txn_file(#[case] enc_key: Option<EncryptionKey>, #[case] enable_inner_ke
     // commit: [300, 400), 1004 -> 1006
     write_data(wb, &tx);
     verify_write(&engine, 200, 400, kb);
+    for (start, end, start_ts, expected) in [
+        (250, 400, 1004, None),
+        (100, 400, 1006, Some(200)),
+        (250, 350, 1006, Some(250)),
+        (300, 400, 1005, None),
+        (300, 400, 1007, Some(300)),
+    ] {
+        check_constraint(start, end, start_ts, expected).unwrap();
+    }
 
     // Test for get_txn_file_conflict_write
     {
         let snap = engine.get_snap_access(1).unwrap();
 
         let conflict_chunk_id = 204;
-        build_txn_chunk(
-            &engine,
-            250,
-            350,
-            conflict_chunk_id,
-            enc_key,
-            enable_inner_key_off,
-        );
+        build_chunk(250, 350, conflict_chunk_id);
         engine
             .txn_chunk_mgr
             .prepare(conflict_chunk_id, enc_key.cloned())
@@ -2484,6 +2525,7 @@ fn test_txn_file_multiple(
             start,
             start + 10,
             chunk_id,
+            |_| OP_PUT,
             enc_key,
             enable_inner_key_off,
         );
@@ -2515,11 +2557,12 @@ fn test_txn_file_multiple(
     verify_write(&engine, 100, 500, kb);
 }
 
-fn build_txn_chunk(
+fn build_txn_chunk<OpF: Fn(usize) -> u8>(
     engine: &TestEngine,
     start: usize,
     end: usize,
     id: u64,
+    op_fn: OpF,
     enc_key: Option<&EncryptionKey>,
     enable_inner_key_off: bool,
 ) {
@@ -2528,7 +2571,7 @@ fn build_txn_chunk(
         TxnChunkBuilder::new(id, 10, enc_key.cloned(), KEYSPACE_ID, enable_inner_key_off);
     for i in start..end {
         let key = kb.i_to_key(i);
-        chunk_builder.add_entry(NoPrefixKey(&key), OP_PUT, &key);
+        chunk_builder.add_entry(NoPrefixKey(&key), op_fn(i), &key);
     }
     let mut buf = vec![];
     chunk_builder.finish(&mut buf);
@@ -2536,6 +2579,51 @@ fn build_txn_chunk(
     let fs = engine.fs.clone();
     let opts = dfs::Options::default().with_type(FileType::TxnChunk);
     runtime.block_on(fs.create(id, buf.into(), opts)).unwrap();
+}
+
+fn build_txn_file<OpF: Fn(usize) -> u8>(
+    engine: &TestEngine,
+    start: usize,
+    end: usize,
+    start_ts: u64,
+    commit_ts: Option<u64>, // None for prewrite, Some(commit_ts) for commit, Some(0) for rollback
+    op_fn: OpF,
+    enc_key: Option<&EncryptionKey>,
+    enable_inner_key_off: bool,
+) -> TxnFile {
+    static CHUNK_ID: AtomicU64 = AtomicU64::new(1_000_000);
+
+    let chunk_id = CHUNK_ID.fetch_add(1, Ordering::Relaxed);
+    build_txn_chunk(
+        engine,
+        start,
+        end,
+        chunk_id,
+        op_fn,
+        enc_key,
+        enable_inner_key_off,
+    );
+    engine
+        .txn_chunk_mgr
+        .prepare(chunk_id, enc_key.cloned())
+        .unwrap();
+    let chunk = engine.txn_chunk_mgr.get(chunk_id).unwrap();
+    let lower_bound = InnerKey::from_inner_buf(b"");
+    let upper_bound = InnerKey::from_inner_buf(GLOBAL_SHARD_END_KEY);
+
+    let um = if let Some(commit_ts) = commit_ts {
+        UserMeta::new(start_ts, commit_ts).to_array().to_vec()
+    } else {
+        vec![]
+    };
+    let ctx = TxnCtx::new(
+        um.into(),
+        make_lock_prefix(engine.key_builder().i_to_outer_key(start), start_ts).into(),
+        start_ts,
+        lower_bound,
+        upper_bound,
+    );
+    TxnFile::new(TxnFileId::new(1, 1, start_ts), vec![chunk], ctx).unwrap()
 }
 
 fn make_txn_file_refs(
@@ -2575,6 +2663,29 @@ fn make_lock_prefix(primary: Vec<u8>, start_ts: u64) -> Vec<u8> {
     );
     lock.is_txn_file = true;
     lock.to_bytes()
+}
+
+fn check_txn_file_constraint<F: Fn(usize) -> u8>(
+    engine: &TestEngine,
+    start: usize,
+    end: usize,
+    start_ts: u64,
+    op_fn: F,
+    enc_key: Option<&EncryptionKey>,
+    enable_inner_key_off: bool,
+) -> Option<Vec<u8> /* already_exist_key */> {
+    let txn_file = build_txn_file(
+        engine,
+        start,
+        end,
+        start_ts,
+        None,
+        op_fn,
+        enc_key,
+        enable_inner_key_off,
+    );
+    let snap = engine.get_snap_access(1).unwrap();
+    snap.check_txn_file_constraint(&txn_file, start_ts)
 }
 
 fn make_user_meta(start_ts: u64, commit_ts: u64) -> Vec<u8> {

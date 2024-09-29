@@ -735,16 +735,47 @@ fn test_txn_file_abnormal_impl(data_count: usize, use_txn_file: bool, enable_inn
     }
 
     let txn_file_helper = client.txn_file_helper();
-    let make_mutations = |value| {
+    let make_mutations_impl = |value, insert: bool| {
+        let op_fn = if insert {
+            |_: usize| kvrpcpb::Op::Insert
+        } else {
+            |_: usize| kvrpcpb::Op::Put
+        };
         make_txn_mutations(
             value,
             0,
             data_count,
             &gen_key,
+            op_fn,
             write_method,
             txn_file_helper.clone(),
         )
     };
+    let make_mutations = |value| make_mutations_impl(value, false);
+    let make_insert_mutations = |value| make_mutations_impl(value, true);
+
+    // Already exist.
+    {
+        let (muts0, txn_muts0) = make_insert_mutations("already_exist");
+        let start_ts0 = client.get_ts();
+        client
+            .kv_prewrite(txn_muts0.primary(), None, txn_muts0.clone(), start_ts0)
+            .unwrap();
+        let commit_ts0 = client.get_ts();
+        client
+            .kv_commit(txn_muts0.clone(), start_ts0, commit_ts0)
+            .unwrap();
+        client.put_kv_in_ref_store(muts0);
+        client.verify_data_with_ref_store();
+
+        let (_, txn_muts1) = make_insert_mutations("already_exist_1");
+        let start_ts1 = client.get_ts();
+        let err = client
+            .kv_prewrite(txn_muts1.primary(), None, txn_muts1, start_ts1)
+            .unwrap_err();
+        expect_err_msg(&err, "already_exist");
+        client.verify_data_with_ref_store();
+    }
 
     // Commit without prewrite:
     {
@@ -1185,6 +1216,7 @@ fn test_commit_primary_region() {
             start,
             end,
             &gen_key,
+            |_| kvrpcpb::Op::Put,
             TxnWriteMethod::FileBased,
             txn_file_helper.clone(),
         )
@@ -1223,22 +1255,24 @@ fn test_commit_primary_region() {
     oss.shutdown();
 }
 
-fn make_txn_mutations<F>(
+fn make_txn_mutations<KeyF, OpF>(
     value: &str,
     start: usize,
     end: usize,
-    gen_key: F,
+    gen_key: KeyF,
+    gen_op: OpF,
     write_method: TxnWriteMethod,
     txn_file_helper: Option<Arc<TxnFileHelper>>,
 ) -> (Vec<Mutation>, TxnMutations)
 where
-    F: Fn(usize) -> Vec<u8>,
+    KeyF: Fn(usize) -> Vec<u8>,
+    OpF: Fn(usize) -> kvrpcpb::Op,
 {
     let gen_val = i_to_val_opt(value, 3);
     let mut mutations = vec![];
     for i in start..end {
         let mut m = Mutation::default();
-        m.set_op(kvrpcpb::Op::Put);
+        m.set_op(gen_op(i));
         m.set_key(gen_key(i));
         m.set_value(gen_val(i));
         mutations.push(m);

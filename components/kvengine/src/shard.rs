@@ -2323,6 +2323,10 @@ impl ShardRange {
     pub(crate) fn prefix(&self) -> &[u8] {
         &self.outer_start[..self.inner_key_off]
     }
+
+    pub fn to_outer_key(&self, inner_key: InnerKey<'_>) -> Vec<u8> {
+        [self.prefix(), inner_key.deref()].concat()
+    }
 }
 
 impl fmt::Debug for ShardRange {

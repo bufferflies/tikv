@@ -25,6 +25,7 @@ use crate::{
 
 const TXN_FILE_PROP_CHECK_NON_EXIST_COUNT: &str = "check_ne";
 const TXN_FILE_PROP_INSERT_COUNT: &str = "insert";
+const TXN_FILE_PROP_CHECK_CONSTRAINT_BLOCKS: &str = "check_blks";
 const TXN_FILE_PROP_ENCRYPTION_VER: &str = "encryption_ver";
 
 const TXN_FILE_FORMAT: u16 = 1;
@@ -304,6 +305,28 @@ impl TxnFile {
     pub fn has_over_bound_data(&self, start: InnerKey<'_>, end: InnerKey<'_>) -> bool {
         self.lower_bound() < start || self.upper_bound() > end
     }
+
+    /// `f`: Return false to stop iteration.
+    pub fn iter_check_constraint_keys<F>(&self, bound: DataBound<'_>, mut f: F)
+    where
+        F: FnMut(InnerKey<'_>) -> bool,
+    {
+        if self.is_empty() {
+            return;
+        }
+        let mut seek_key = Some(bound.lower_bound);
+        for chunk in &self.chunks {
+            if bound.less_than_key(chunk.index.smallest()) {
+                break;
+            }
+            if !chunk.has_constraint() || chunk.data_bound().less_than_key(bound.lower_bound) {
+                continue;
+            }
+            if !chunk.iter_check_constraint_keys(seek_key.take(), bound, &mut f) {
+                return;
+            }
+        }
+    }
 }
 
 impl fmt::Debug for TxnFile {
@@ -457,6 +480,53 @@ impl TxnChunk {
     pub fn in_range(&self, range: (InnerKey<'_>, InnerKey<'_>)) -> bool {
         self.index.smallest() < range.1 && range.0 <= self.index.biggest()
     }
+
+    /// Return false to stop outer iteration.
+    ///
+    /// `f`: Return false to stop iteration.
+    pub fn iter_check_constraint_keys<F>(
+        &self,
+        mut seek_key: Option<InnerKey<'_>>,
+        bound: DataBound<'_>,
+        mut f: F,
+    ) -> bool
+    where
+        F: FnMut(InnerKey<'_>) -> bool,
+    {
+        let mut iter = TxnChunkIterator::new(self.clone(), false);
+        let start_block = if let Some(key) = seek_key {
+            self.index.seek_block(key.deref()).saturating_sub(1)
+        } else {
+            0
+        };
+        for block_pos in start_block..self.index.num_blocks {
+            if !self.check_constraint_blocks.get(block_pos) {
+                continue;
+            }
+
+            iter.block_pos = block_pos;
+            iter.load_block();
+            if let Some(key) = seek_key.take() {
+                iter.block_iter.seek(key.deref());
+            } else {
+                iter.block_iter.set_idx(0);
+            }
+            while iter.block_iter.valid() {
+                if bound.less_than_key(iter.key()) {
+                    return false;
+                }
+
+                if (iter.block_iter.op == OP_INSERT || iter.block_iter.op == OP_CHECK_NOT_EXIST)
+                    && !f(iter.key())
+                {
+                    return false;
+                }
+
+                iter.block_iter.next();
+            }
+        }
+        true
+    }
 }
 
 impl Deref for TxnChunk {
@@ -483,6 +553,15 @@ pub struct TxnChunkInner {
     check_non_exists: u32,
     encryption_key: Option<EncryptionKey>,
     encryption_ver: u32,
+
+    /// Bitmap of block_pos indicate that the block have entries of constraint
+    /// op.
+    ///
+    /// Used to filter blocks for check constraint.
+    ///
+    /// When it's empty, the chunk was of old format built without bitmap
+    /// property, then all blocks should be read.
+    check_constraint_blocks: BlockBitmap,
 }
 
 #[derive(Clone)]
@@ -558,6 +637,7 @@ impl TxnChunkInner {
             Self::validate_and_trim_checksum(file.as_ref(), raw_properties, footer.checksum_type)?;
         let mut inserts = 0;
         let mut check_non_exists = 0;
+        let mut check_constraint_blocks = BlockBitmap::default();
         let mut encryption_ver = 0;
         let mut prop_slice = properties.chunk();
         while !prop_slice.is_empty() {
@@ -574,6 +654,8 @@ impl TxnChunkInner {
                         encryption_ver,
                     });
                 }
+            } else if key == TXN_FILE_PROP_CHECK_CONSTRAINT_BLOCKS.as_bytes() {
+                check_constraint_blocks = BlockBitmap::unmarshall(val.to_vec());
             }
             prop_slice = remained;
         }
@@ -588,6 +670,7 @@ impl TxnChunkInner {
             inserts,
             encryption_key,
             encryption_ver,
+            check_constraint_blocks,
         };
         chunk.load_hash_index()?;
         Ok(chunk)
@@ -627,6 +710,10 @@ impl TxnChunkInner {
 
     pub fn get_inserts(&self) -> u32 {
         self.inserts
+    }
+
+    fn has_constraint(&self) -> bool {
+        self.inserts + self.check_non_exists > 0
     }
 
     pub fn get_index(&self) -> &TxnChunkIndex {
@@ -1282,6 +1369,7 @@ pub struct TxnChunkBuilder {
     hash_idx_builder: HashIndexBuilder,
     insert_count: u32,
     check_not_exist_count: u32,
+    check_constraint_blocks: BlockBitmap, // Bitmap of block_pos which has constraint op.
     checksum_type: ChecksumType,
     encryption_key: Option<EncryptionKey>,
 
@@ -1348,6 +1436,11 @@ impl TxnChunkBuilder {
                 &self.insert_count.to_le_bytes(),
             );
         }
+        Self::add_property(
+            buf,
+            TXN_FILE_PROP_CHECK_CONSTRAINT_BLOCKS.as_bytes(),
+            &self.check_constraint_blocks.marshall(),
+        );
         if let Some(encryption_key) = &self.encryption_key {
             Self::add_property(
                 buf,
@@ -1375,6 +1468,7 @@ impl TxnChunkBuilder {
         self.data_buf.put_u32_le(num_entries as u32);
         self.data_buf.put_u16_le(common_prefix_len as u16);
         let mut entry_offset = 0u32;
+        let mut has_constraint = false;
         for i in 0..num_entries {
             self.data_buf.put_u32_le(entry_offset);
             let key = self.block.tmp_keys.get_entry(i);
@@ -1389,8 +1483,14 @@ impl TxnChunkBuilder {
             self.data_buf.extend_from_slice(&key[common_prefix_len..]);
             let op = self.block.tmp_ops[i];
             match op {
-                OP_INSERT => self.insert_count += 1,
-                OP_CHECK_NOT_EXIST => self.check_not_exist_count += 1,
+                OP_INSERT => {
+                    self.insert_count += 1;
+                    has_constraint = true;
+                }
+                OP_CHECK_NOT_EXIST => {
+                    self.check_not_exist_count += 1;
+                    has_constraint = true;
+                }
                 _ => {}
             }
             self.data_buf.push(op);
@@ -1402,6 +1502,7 @@ impl TxnChunkBuilder {
         self.biggest_key.truncate(0);
         self.biggest_key
             .extend_from_slice(self.block.tmp_keys.get_last());
+        self.check_constraint_blocks.push(has_constraint);
         self.block.reset();
     }
 
@@ -1449,6 +1550,9 @@ impl TxnChunkBuilder {
         if self.block.length() > 0 {
             self.finish_block();
         }
+
+        debug_assert_eq!(self.check_constraint_blocks.len(), self.block_keys.length());
+
         self.build_index();
         let (bucket_buf, entry_buf) = self.hash_idx_builder.build();
         let mut hash_index_checksum = self.checksum_type.checksum(&bucket_buf);
@@ -1641,6 +1745,65 @@ impl HashIndexBuilder {
     }
 }
 
+/// Block Bitmap
+///
+/// The index of vector is the block_pos of blocks in TxnChunk.
+///
+/// The bits are represented by u8 and not compressed, as the number of blocks
+/// in a chunk is small.
+#[derive(Debug, PartialEq, Clone, Default)]
+pub struct BlockBitmap {
+    data: Vec<u8>,
+}
+
+impl BlockBitmap {
+    pub fn push(&mut self, value: bool) {
+        self.data.push(value as u8);
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    /// Return when the idx-th bit is set.
+    ///
+    /// NOTE: When empty, ALWAYS return true to be backward compatible to
+    /// old txn chunks without the bitmap property.
+    ///
+    /// ```
+    /// use kvengine::table::BlockBitmap;
+    ///
+    /// let mut bm = BlockBitmap::default();
+    /// assert!(bm.get(256));
+    ///
+    /// (0..20).for_each(|_| bm.push(false));
+    /// (20..40).for_each(|_| bm.push(true));
+    ///
+    /// assert!(!bm.get(0) && !bm.get(19));
+    /// assert!(bm.get(20) && bm.get(39));
+    /// ```
+    #[inline]
+    pub fn get(&self, idx: usize) -> bool {
+        if self.is_empty() {
+            return true;
+        }
+        self.data[idx] != 0
+    }
+
+    pub fn marshall(&self) -> Vec<u8> {
+        self.data.clone()
+    }
+
+    pub fn unmarshall(data: Vec<u8>) -> Self {
+        Self { data }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{collections::HashSet, iter::Iterator as StdIterator, sync::Arc};
@@ -1648,6 +1811,7 @@ mod tests {
     use bstr::ByteSlice;
     use cloud_encryption::EncryptionKey;
     use proptest::prelude::*;
+    use rand::prelude::*;
     use rstest::rstest;
     use txn_types::LockType;
 
@@ -1658,8 +1822,8 @@ mod tests {
             txn_file::{
                 TxnChunk, TxnChunkBuilder, TxnChunkIterator, OP_CHECK_NOT_EXIST, OP_INSERT, OP_PUT,
             },
-            DataBound, InnerKey, Iterator, NoPrefixKey, OwnedInnerKey, SkipOpTxnFileIterator,
-            TxnCtx, TxnFile, TxnFileId, TxnFileIterator, OP_DELETE, OP_LOCK,
+            BlockBitmap, DataBound, InnerKey, Iterator, NoPrefixKey, OwnedInnerKey,
+            SkipOpTxnFileIterator, TxnCtx, TxnFile, TxnFileId, TxnFileIterator, OP_DELETE, OP_LOCK,
         },
         tests::generate_encryption_key,
         util::test_util::KeyBuilder,
@@ -1687,23 +1851,17 @@ mod tests {
             let kb = new_key_builder_prefix(enable_inner_key_off, prefix);
             kb.i_to_inner_key(i)
         };
+        let get_op = |i| {
+            if i < 50 {
+                OP_INSERT
+            } else if i < 60 {
+                OP_CHECK_NOT_EXIST
+            } else {
+                OP_PUT
+            }
+        };
 
-        let chunk = build_txn_chunk(
-            0,
-            100,
-            1,
-            |i| {
-                if i < 50 {
-                    OP_INSERT
-                } else if i < 60 {
-                    OP_CHECK_NOT_EXIST
-                } else {
-                    OP_PUT
-                }
-            },
-            enc_key.as_ref(),
-            enable_inner_key_off,
-        );
+        let chunk = build_txn_chunk(0, 100, 1, get_op, enc_key.as_ref(), enable_inner_key_off);
         assert_eq!(chunk.id(), 1);
         assert_eq!(chunk.get_inserts(), 25);
         assert_eq!(chunk.get_check_non_exists(), 5);
@@ -1716,6 +1874,8 @@ mod tests {
 
         assert_eq!(chunk.index.smallest(), kb.i_to_inner_key(0).as_ref());
         assert_eq!(chunk.index.biggest(), kb.i_to_inner_key(98).as_ref());
+
+        // Test get.
         for i in 0..100 {
             let key = kb.i_to_inner_key(i);
             let iter_opt = chunk.get_value(key.as_ref());
@@ -1734,6 +1894,8 @@ mod tests {
                 assert!(iter_opt.is_none());
             }
         }
+
+        // Test iterator: reverse=false.
         let mut iter = TxnChunkIterator::new(chunk.clone(), false);
         iter.rewind();
         let mut i = 0;
@@ -1761,6 +1923,7 @@ mod tests {
         iter.seek(get_inner_key("c", 0).as_ref());
         assert!(!iter.valid());
 
+        // Test iterator: reverse=true.
         iter = TxnChunkIterator::new(chunk, true);
         iter.rewind();
         i = 98;
@@ -2181,14 +2344,14 @@ mod tests {
             (usize /* start */, usize /* end */), // range
             (usize, usize),                       // txn file size inner_key_off on/off.
         )> = vec![
-            ((50, 301), (2394, 2448)),
-            ((75, 301), (2128, 2176)),
-            ((75, 281), (1862, 1904)),
-            ((100, 281), (1345, 1375)),
-            ((100, 170), (807, 825)),
-            ((100, 149), (807, 825)),
-            ((119, 121), (538, 550)),
-            ((120, 121), (269, 275)),
+            ((50, 301), (2457, 2502)),
+            ((75, 301), (2184, 2224)),
+            ((75, 281), (1911, 1946)),
+            ((100, 281), (1380, 1405)),
+            ((100, 170), (828, 843)),
+            ((100, 149), (828, 843)),
+            ((119, 121), (552, 562)),
+            ((120, 121), (276, 281)),
             ((160, 170), (0, 0)),
         ];
         let chunks = vec![chunk_1, chunk_2, chunk_5];
@@ -2235,10 +2398,19 @@ mod tests {
             let mut chunks = Vec::with_capacity(chunks_size.len());
             let mut chunk_ref = TxnFileRefStore::new(enable_inner_key_off);
             let enc_key = enable_enc.then(generate_encryption_key);
+            let mut rng = thread_rng();
             for chunk_size in chunks_size {
-                let chunk = build_txn_chunk(next_chunk, next_chunk + chunk_size, next_chunk as u64, |_| OP_PUT, enc_key.as_ref(), enable_inner_key_off);
+                // It's not easy to generate strategy for vector of vector. So use manual random here.
+                let ops = match rng.gen_range(0..=2) {
+                    0 => vec![OP_PUT; chunk_size],
+                    1 => vec![OP_INSERT; chunk_size],
+                    _ => (0..chunk_size).map(|_| *[OP_PUT, OP_INSERT, OP_CHECK_NOT_EXIST].choose(&mut rng).unwrap()).collect(),
+                };
+                let get_op = |i| ops[i - next_chunk];
+
+                let chunk = build_txn_chunk(next_chunk, next_chunk + chunk_size, next_chunk as u64, get_op, enc_key.as_ref(), enable_inner_key_off);
                 chunks.push(chunk);
-                chunk_ref.put_batch(next_chunk, next_chunk + chunk_size, |_| OP_PUT);
+                chunk_ref.put_batch(next_chunk, next_chunk + chunk_size, get_op);
                 next_chunk += chunk_size;
             }
             ArbitraryChunks {
@@ -2279,12 +2451,15 @@ mod tests {
     proptest! {
         #[test]
         fn test_txn_file_bounded( ArbitraryChunks { chunks_start, chunks_end, chunks, chunk_ref, enable_inner_key_off } in arb_chunks(50, 5)) {
+            let chunk_ref_check_constraint = chunk_ref.filter_check_constraint();
+
             proptest!(|(
                 (lower_bound, upper_bound, reverse, keys) in arb_bounded_args(chunks_start, chunks_end)
             )| {
                 let kb = new_key_builder(enable_inner_key_off);
                 let lower_bound_key = kb.i_to_inner_key(lower_bound);
                 let upper_bound_key = kb.i_to_inner_key(upper_bound);
+                let bound = DataBound::new(lower_bound_key.as_ref(), upper_bound_key.as_ref(), false);
 
                 let id = TxnFileId::new(10, 1, 3);
                 let txn_ctx = TxnCtx::new(
@@ -2339,6 +2514,21 @@ mod tests {
                         }
                         prop_assert!(!iter.valid(), "case {}, key {:?}, iter {:?}", i, key, iter);
                     }
+                }
+
+                // Test check_constraint
+                {
+                    let mut entries = vec![];
+                    let cb = |key: InnerKey<'_>| -> bool {
+                        entries.push(key.to_vec());
+                        true
+                    };
+
+                    txn_file.iter_check_constraint_keys(bound, cb);
+
+                    let chunk_ref = chunk_ref_check_constraint.slice(lower_bound_key.as_ref(), upper_bound_key.as_ref());
+                    let expected: Vec<_> = chunk_ref.iter(false).map(|r| r.key.to_vec()).collect();
+                    prop_assert_eq!(entries, expected);
                 }
             });
         }
@@ -2407,7 +2597,7 @@ mod tests {
         }
     }
 
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     struct TxnFileRefStoreItem {
         key: OwnedInnerKey,
         op: u8,
@@ -2457,6 +2647,18 @@ mod tests {
                 .unwrap_or_else(|x| x);
             TxnFileRefStoreSlice {
                 slice: &self.vec[lower_bound..upper_bound],
+            }
+        }
+
+        pub fn filter_check_constraint(&self) -> TxnFileRefStore {
+            TxnFileRefStore {
+                vec: self
+                    .vec
+                    .iter()
+                    .filter(|x| x.op == OP_INSERT || x.op == OP_CHECK_NOT_EXIST)
+                    .cloned()
+                    .collect(),
+                key_builder: self.key_builder.clone(),
             }
         }
     }
@@ -2510,5 +2712,31 @@ mod tests {
         pub fn is_empty(&self) -> bool {
             self.slice.is_empty()
         }
+    }
+
+    #[test]
+    fn test_block_bitmap() {
+        let mut x = BlockBitmap::default();
+        assert_eq!(x.get(255), true);
+
+        x.push(false);
+        x.push(true);
+        assert_eq!(x.get(0), false);
+        assert_eq!(x.get(1), true);
+
+        (2..20).for_each(|_| x.push(false));
+        (20..40).for_each(|_| x.push(true));
+        (40..60).for_each(|_| x.push(false));
+
+        let buf = x.marshall();
+        let x1 = BlockBitmap::unmarshall(buf);
+        assert_eq!(x, x1);
+
+        assert_eq!(x1.get(0), false);
+        assert_eq!(x1.get(1), true);
+        assert_eq!(x1.get(2), false);
+        assert_eq!(x1.get(20), true);
+        assert_eq!(x1.get(40), false);
+        assert_eq!(x1.get(59), false);
     }
 }
