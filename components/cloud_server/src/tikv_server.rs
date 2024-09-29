@@ -41,6 +41,7 @@ use kvproto::{
     brpb::create_backup, deadlock::create_deadlock, diagnosticspb_grpc::create_diagnostics,
     import_sstpb_grpc::create_import_sst, raft_serverpb::StoreIdent,
 };
+use nix::NixPath;
 use overload_protector::{OverloadProtector, OverloadProtectorWorker};
 use pd_client::{pd_control::PdControl, PdClient, RpcClient, INVALID_ID};
 use protobuf::Message;
@@ -61,6 +62,7 @@ use rfstore::{
 };
 use security::SecurityManager;
 use sst_importer::SstImporter;
+use sysinfo::{DiskExt, System as Sys, SystemExt};
 use tikv::{
     config::{ConfigController, TikvConfig},
     coprocessor, coprocessor_v2,
@@ -79,7 +81,7 @@ use tikv::{
 use tikv_kv::Engine;
 use tikv_util::{
     check_environment_variables,
-    config::{ensure_dir_exist, ReadableDuration, VersionTrack},
+    config::{ensure_dir_exist, ReadableDuration, ReadableSize, VersionTrack},
     get_panic_region_count, mpsc,
     quota_limiter::{QuotaLimitConfigManager, QuotaLimiter},
     sys::{register_memory_usage_high_water, thread::ThreadBuildWrapper, SysQuota},
@@ -107,6 +109,8 @@ const DEFAULT_METRICS_FLUSH_INTERVAL: Duration = Duration::from_millis(10_000);
 const ZSTD_COMPRESSION_LEVEL_FOR_LOCAL: &str = "3";
 
 const PD_CLIENT_RETRY_COUNT: usize = 10;
+const ENV_K8S_HOST: &str = "KUBERNETES_SERVICE_HOST";
+const K8S_MIN_DISK_CAPACITY: u64 = ReadableSize::gb(50).0;
 
 /// A complete TiKV server.
 pub struct TikvServer {
@@ -1095,6 +1099,7 @@ impl TikvServer {
         master_key: MasterKey,
         security_mgr: Arc<SecurityManager>,
     ) -> Engines {
+        Self::check_disk_capacity_on_k8s(&conf.storage.data_dir);
         let panic_regions = Self::load_panic_regions(&conf.storage.data_dir);
         let black_list_regions = panic_regions
             .into_iter()
@@ -1134,6 +1139,43 @@ impl TikvServer {
             (sender, receiver),
             meta_iter.take_black_list(),
         )
+    }
+
+    // check the system disk capacity on k8s.
+    // It is used to avoid the situation that the local disk is not mounted before
+    // pod start.
+    fn check_disk_capacity_on_k8s(data_dir: &str) {
+        if env::var(ENV_K8S_HOST).is_err() {
+            // It is not running on K8S, skip disk capacity check.
+            return;
+        }
+        let data_path = PathBuf::from(data_dir);
+        let sys = Sys::new_all();
+        // find the mounted disk of the data dir.
+        let mut data_disk = None;
+        let mut mount_point_len = 0;
+        for disk in sys.disks() {
+            let mp = disk.mount_point();
+            if data_path.starts_with(mp) && mp.len() > mount_point_len {
+                data_disk = Some(disk);
+                mount_point_len = mp.len();
+            }
+        }
+        match data_disk {
+            Some(disk) => {
+                let total_space = disk.total_space();
+                if total_space < K8S_MIN_DISK_CAPACITY {
+                    fatal!(
+                        "insufficient disk space for k8s deploy, at least {} bytes required, but got {} bytes",
+                        K8S_MIN_DISK_CAPACITY,
+                        total_space
+                    );
+                }
+            }
+            None => {
+                fatal!("Unable to find the disk for data directory: {}", data_dir);
+            }
+        }
     }
 
     fn load_panic_regions<P: AsRef<Path>>(data_dir: P) -> Vec<(u64, usize)> {
