@@ -59,6 +59,7 @@ const TIKV_WORKER_UPDATE_INTERVAL: ReadableDuration = ReadableDuration::secs(10)
 
 const TXN_CHUNK_MGR_GC_INTERVAL: ReadableDuration = ReadableDuration::secs(10);
 const TXN_CHUNK_MGR_GC_TTL: ReadableDuration = ReadableDuration::secs(10);
+const TXN_CHUNK_TARGET_BLOCK_ENTRIES: usize = 64;
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 
@@ -705,6 +706,7 @@ impl ServerCluster {
                     gc_interval: TXN_CHUNK_MGR_GC_INTERVAL,
                     gc_ttl: TXN_CHUNK_MGR_GC_TTL,
                 },
+                txn_chunk_target_block_entries: TXN_CHUNK_TARGET_BLOCK_ENTRIES,
                 ..Default::default()
             };
 

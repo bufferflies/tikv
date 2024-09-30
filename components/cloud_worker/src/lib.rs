@@ -219,7 +219,7 @@ fn start_server(
         config.clone(),
     ));
     spawn_br_background_worker(br_manager.clone(), config_file_path);
-    let txn_chunk_handler = Arc::new(TxnChunkHandler::default());
+    let txn_chunk_handler = Arc::new(TxnChunkHandler::new(config.txn_chunk_target_block_entries));
 
     let worker_limiter = WorkerLimiter::new(config.worker_limiter.clone());
 
@@ -538,7 +538,9 @@ pub struct Config {
     pub checksum_type: ChecksumType,
     pub worker_limiter: WorkerLimiterConfig,
     pub schema_manager: SchemaManagerConfig,
+
     pub txn_chunk_manager: TxnChunkManagerConfig,
+    pub txn_chunk_target_block_entries: usize,
 }
 
 impl Default for Config {
@@ -566,6 +568,7 @@ impl Default for Config {
             worker_limiter: WorkerLimiterConfig::default(),
             schema_manager: SchemaManagerConfig::default(),
             txn_chunk_manager: TxnChunkManagerConfig::default(),
+            txn_chunk_target_block_entries: txn_chunk::TARGET_BLOCK_ENTRIES_DEF,
         }
     }
 }

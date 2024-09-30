@@ -24,6 +24,7 @@ use crate::{
 };
 
 const GET_SHARD_META_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const TARGET_BLOCK_ENTRIES_DEF: usize = 4096;
 
 /// Txn Chunk API
 ///
@@ -87,7 +88,15 @@ pub(crate) async fn handle_txn_chunk(
             ));
         }
     };
-    create_txn_chunk(chunk_id, ctx.s3fs.clone(), req, keyspace_id, &keyspace_info).await
+    create_txn_chunk(
+        chunk_id,
+        ctx.s3fs.clone(),
+        req,
+        keyspace_id,
+        &keyspace_info,
+        ctx.txn_chunk_handler.target_block_entries,
+    )
+    .await
 }
 
 #[derive(Default, Serialize, Deserialize, Debug)]
@@ -108,6 +117,7 @@ pub(crate) async fn create_txn_chunk(
     req: Request<Body>,
     keyspace_id: u32,
     keyspace_info: &KeyspaceInfo,
+    target_block_entries: usize,
 ) -> hyper::Result<Response<Body>> {
     if *req.method() != http::Method::POST {
         return Ok(make_response(StatusCode::BAD_REQUEST, "invalid method"));
@@ -124,7 +134,7 @@ pub(crate) async fn create_txn_chunk(
     }
     let mut txn_chunk_builder = TxnChunkBuilder::new(
         chunk_id,
-        4096,
+        target_block_entries,
         keyspace_info.encryption_key.clone(),
         keyspace_id,
         keyspace_info.enable_inner_key_off,
@@ -163,12 +173,19 @@ pub(crate) struct KeyspaceInfo {
     encryption_key: Option<EncryptionKey>,
 }
 
-#[derive(Default)]
 pub(crate) struct TxnChunkHandler {
+    target_block_entries: usize,
     keyspaces: DashMap<u32 /* keyspace_id */, KeyspaceInfo>,
 }
 
 impl TxnChunkHandler {
+    pub(crate) fn new(target_block_entries: usize) -> Self {
+        Self {
+            target_block_entries,
+            keyspaces: DashMap::new(),
+        }
+    }
+
     async fn acquire_keyspace_info(
         &self,
         ctx: Arc<Context>,
@@ -230,7 +247,9 @@ mod tests {
         Iterator, UserMeta, GLOBAL_SHARD_END_KEY,
     };
 
-    use crate::txn_chunk::{create_txn_chunk, CreateTxnChunkResp, KeyspaceInfo};
+    use crate::txn_chunk::{
+        create_txn_chunk, CreateTxnChunkResp, KeyspaceInfo, TARGET_BLOCK_ENTRIES_DEF,
+    };
 
     #[test]
     fn test_create_txn_chunk() {
@@ -265,6 +284,7 @@ mod tests {
                 req,
                 0,
                 &keyspace_info,
+                TARGET_BLOCK_ENTRIES_DEF,
             ))
             .unwrap();
         assert!(res.status().is_success());

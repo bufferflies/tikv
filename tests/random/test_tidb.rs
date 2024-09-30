@@ -29,6 +29,7 @@ use tikv_util::{
 use crate::{
     test_jepsen::*,
     test_txn_file::{TXN_CHUNK_MAX_SIZE, TXN_FILE_MIN_SIZE},
+    test_unique::*,
     *,
 };
 
@@ -79,6 +80,9 @@ const TPCC_WORKLOAD_CONCURRENCY: usize = 1;
 const JEPSEN_WORKLOAD_SWITCH_ENV_KEY: &str = "JEPSEN_WORKLOAD";
 const JEPSEN_WORKLOAD_USE_TXN_FILE_ENV_KEY: &str = "JEPSEN_TXN_FILE";
 const JEPSEN_WORKLOAD_KEYSPACE: u32 = 1; // Keyspace starts from 1.
+
+const UNIQUE_WORKLOAD_SWITCH_ENV_KEY: &str = "UNIQUE_WORKLOAD";
+const UNIQUE_WORKLOAD_KEYSPACE: u32 = 1; // Keyspace starts from 1.
 
 const VERIFY_HEALTHY_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -163,6 +167,7 @@ fn test_random_with_tidb() {
     let tpc_switch_on = env_switch(TPC_WORKLOAD_SWITCH_ENV_KEY);
     let jepsen_switch_on = env_switch(JEPSEN_WORKLOAD_SWITCH_ENV_KEY);
     let jepsen_use_txn_file = env_switch(JEPSEN_WORKLOAD_USE_TXN_FILE_ENV_KEY);
+    let unique_workload_switch_on = env_switch_opt(UNIQUE_WORKLOAD_SWITCH_ENV_KEY, 0);
     let global_use_txn_file = env_switch(ENABLE_GLOBAL_TXN_FILE_ENV_KEY);
 
     let mut rng = thread_rng();
@@ -200,6 +205,13 @@ fn test_random_with_tidb() {
             tiflash_switch_on.then_some(TIFLASH_SERVER_COUNT),
         )));
     }
+    if unique_workload_switch_on {
+        prepare_tasks.push(runtime.spawn(prepare_unique_workload(
+            tc.clone(),
+            keyspace_manager.clone(),
+            UNIQUE_WORKLOAD_KEYSPACE,
+        )));
+    }
     runtime.block_on(futures::future::join_all(prepare_tasks));
 
     let mut async_handles = vec![];
@@ -218,10 +230,19 @@ fn test_random_with_tidb() {
     if jepsen_switch_on {
         async_handles.push(runtime.spawn(run_jepsen_bank(
             tc.clone(),
-            keyspace_manager,
+            keyspace_manager.clone(),
             JEPSEN_WORKLOAD_KEYSPACE,
             global_use_txn_file && jepsen_use_txn_file,
             tiflash_switch_on,
+            TEST_DURATION,
+        )));
+    }
+    if unique_workload_switch_on {
+        async_handles.push(runtime.spawn(run_unique_workload(
+            tc.clone(),
+            keyspace_manager,
+            UNIQUE_WORKLOAD_KEYSPACE,
+            global_use_txn_file,
             TEST_DURATION,
         )));
     }
@@ -281,9 +302,11 @@ fn test_random_with_tidb() {
     let total_tpcc_txns = TPCC_COUNTER.load(Ordering::SeqCst);
     let total_jepsen_bank = JEPSEN_BANK_TXN_COUNTER.load(Ordering::SeqCst);
     let total_jepsen_bank_retry = JEPSEN_BANK_TXN_RETRY_COUNTER.load(Ordering::SeqCst);
+    let total_unique_workload = UNIQUE_WORKLOAD_TXN_COUNTER.load(Ordering::SeqCst);
+    let total_unique_conflict = UNIQUE_WORKLOAD_CONFLICT_COUNTER.load(Ordering::SeqCst);
     let region_number = pd_client.get_regions_number();
     info!(
-        "TEST SUCCEED: write {}, keyspace {}, table {}, drop table {}, region {}, merge {}, move {}, transfer {}, node restart {}, backup {}, restore {}, load_data {}, manual_major_compact {}, gc {}, tpcc {}, jepsen_bank {} (retry {})",
+        "TEST SUCCEED: write {}, keyspace {}, table {}, drop table {}, region {}, merge {}, move {}, transfer {}, node restart {}, backup {}, restore {}, load_data {}, manual_major_compact {}, gc {}, tpcc {}, jepsen_bank {} (retry {}), unique_workload {} (conflict {})",
         total_write_count,
         total_keyspace_count,
         total_table_count,
@@ -301,6 +324,8 @@ fn test_random_with_tidb() {
         total_tpcc_txns,
         total_jepsen_bank,
         total_jepsen_bank_retry,
+        total_unique_workload,
+        total_unique_conflict,
     );
 
     tc.pd.stop_all();

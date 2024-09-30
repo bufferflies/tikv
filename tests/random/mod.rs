@@ -1,5 +1,6 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
+mod sql_util;
 mod test_all;
 mod test_drop_table;
 mod test_jepsen;
@@ -7,6 +8,7 @@ mod test_load_data;
 mod test_native_br;
 mod test_tidb;
 mod test_txn_file;
+mod test_unique;
 
 use std::{
     collections::HashSet,
@@ -65,6 +67,8 @@ lazy_static::lazy_static! {
     pub static ref TPCC_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref JEPSEN_BANK_TXN_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref JEPSEN_BANK_TXN_RETRY_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    pub static ref UNIQUE_WORKLOAD_TXN_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    pub static ref UNIQUE_WORKLOAD_CONFLICT_COUNTER: AtomicUsize = AtomicUsize::new(0);
 }
 
 pub const TIMEOUT: Duration = Duration::from_secs(90);
@@ -526,9 +530,13 @@ pub(crate) fn new_security_config() -> SecurityConfig {
 
 // Switch acquired from env variable, `0` for false, `>0` for true.
 pub(crate) fn env_switch(env_key: &str) -> bool {
+    env_switch_opt(env_key, 1)
+}
+
+pub(crate) fn env_switch_opt(env_key: &str, default: i32) -> bool {
     std::env::var(env_key)
         .map(|s| s.parse().unwrap())
-        .unwrap_or(1)
+        .unwrap_or(default)
         > 0
 }
 

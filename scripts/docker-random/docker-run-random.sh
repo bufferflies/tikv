@@ -87,6 +87,9 @@ while [[ $# -gt 0 ]]; do
 	--jepsen-no-txn-file)
 		RUN_ARGS+=("--jepsen-no-txn-file")
 		;;
+	--unique-workload)
+		RUN_ARGS+=("--unique-workload")
+		;;
 	--help)
 		show_help
 		exit 0

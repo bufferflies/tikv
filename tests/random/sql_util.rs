@@ -1,0 +1,188 @@
+// Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
+
+//! Common utilities for building workload run by SQLs.
+
+use anyhow::Context;
+use rand::{
+    prelude::{SliceRandom, ThreadRng},
+    Rng,
+};
+use sqlx::{Connection, Row};
+use tikv_util::error;
+
+use crate::test_txn_file::{TXN_CHUNK_MAX_SIZE, TXN_FILE_MIN_SIZE};
+
+// Ref: https://github.com/tidbcloud/tidb-cse/blob/release-7.1-keyspace/kv/error.go, TxnRetryableMark
+const TIDB_TXN_RETRYABLE_MARK: &str = "[try again later]";
+pub(crate) const DEADLOCK_ERR_MSG: &str = "Deadlock found";
+const RETRYABLE_DB_ERR_MSGS: &[&str] = &[
+    TIDB_TXN_RETRYABLE_MARK,
+    "Write conflict",
+    "Region is unavailable", // Happens when region merged but PD is low.
+    // TODO: verify following errors.
+    DEADLOCK_ERR_MSG,
+    "Information schema is out of date",
+    "Lock wait timeout exceeded",
+    "Region epoch not match for region",
+    "Region epoch not match after retries",
+    "tikv aborts txn",
+    "Resolve lock timeout",
+];
+
+pub(crate) fn is_db_error_retryable(err: &sqlx::Error) -> bool {
+    match err {
+        sqlx::Error::Database(db_err) => RETRYABLE_DB_ERR_MSGS
+            .iter()
+            .any(|msg| db_err.message().contains(msg)),
+        sqlx::Error::Io(_) => true,
+        _ => false,
+    }
+}
+
+pub(crate) fn is_error_retryable(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<sqlx::Error>()
+        .is_some_and(is_db_error_retryable)
+}
+
+macro_rules! retry_or_panic {
+    ($expr:expr) => {{
+        match $expr {
+            Ok(r) => r,
+            Err(e) if is_error_retryable(&e) => {
+                info!("meet error, retry: {:?}", e);
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+            Err(e) => panic!("meet error: {:?}", e),
+        }
+    }};
+}
+
+pub(crate) use retry_or_panic;
+
+const DUPLICATE_ENTRY_ERR_MSGS: &[&str] = &["Duplicate entry"];
+
+fn is_db_error_duplicate_entry(err: &sqlx::Error) -> bool {
+    match err {
+        sqlx::Error::Database(db_err) => DUPLICATE_ENTRY_ERR_MSGS
+            .iter()
+            .any(|msg| db_err.message().contains(msg)),
+        sqlx::Error::Io(_) => true,
+        _ => false,
+    }
+}
+
+pub(crate) fn is_duplicate_entry_err(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<sqlx::Error>()
+        .is_some_and(is_db_error_duplicate_entry)
+}
+
+pub(crate) const MAX_PADDING_SIZE: usize = TXN_CHUNK_MAX_SIZE * 2;
+
+/// Generate padding to meet transaction size requirement of txn file.
+pub(crate) fn gen_padding(rows: usize, rng: &mut ThreadRng, buf: &mut [u8]) -> usize {
+    static TRANSACTION_SIZE: [usize; 4] = [
+        TXN_FILE_MIN_SIZE,
+        TXN_CHUNK_MAX_SIZE / 2,
+        TXN_CHUNK_MAX_SIZE,
+        MAX_PADDING_SIZE,
+    ];
+    let trans_size = *TRANSACTION_SIZE.choose(rng).unwrap();
+    let row_size = (trans_size + rows - 1) / rows;
+    rng.fill(&mut buf[..row_size]);
+    row_size
+}
+
+pub struct Transaction {
+    conn: Option<sqlx::MySqlConnection>,
+    tag: String,
+    start_ts: u64,
+    committed: bool,
+}
+
+impl Transaction {
+    pub async fn begin(tag: &str, conn_string: &str, optimistic_txn: bool) -> anyhow::Result<Self> {
+        let mut conn = sqlx::MySqlConnection::connect(conn_string)
+            .await
+            .context("connect")?;
+
+        let txn_mode = if optimistic_txn {
+            "optimistic"
+        } else {
+            "pessimistic"
+        };
+        sqlx::query(&format!("begin {txn_mode}"))
+            .execute(&mut conn)
+            .await
+            .context("begin")?;
+
+        let tso: i64 = sqlx::query("select TIDB_CURRENT_TSO() as tso")
+            .fetch_one(&mut conn)
+            .await
+            .context("select_current_tso")?
+            .get("tso");
+
+        let tag = format!("{}:{}", tag, tso);
+        Ok(Self {
+            tag,
+            conn: Some(conn),
+            start_ts: tso as u64,
+            committed: false,
+        })
+    }
+
+    pub async fn commit(&mut self) -> anyhow::Result<()> {
+        match sqlx::query("commit").execute(self.conn()).await {
+            Ok(_) => {
+                self.committed = true;
+                Ok(())
+            }
+            Err(err) => {
+                error!("{} commit failed", self.tag; "err" => ?err);
+                Err(err).context("commit")
+            }
+        }
+    }
+
+    pub fn conn(&mut self) -> &mut sqlx::MySqlConnection {
+        self.conn.as_mut().unwrap()
+    }
+
+    pub fn start_ts(&self) -> u64 {
+        self.start_ts
+    }
+}
+
+impl Drop for Transaction {
+    fn drop(&mut self) {
+        if !self.committed {
+            let tag = self.tag.clone();
+            let mut conn = self.conn.take().unwrap();
+            let task = async move {
+                let res = sqlx::query("rollback").execute(&mut conn).await;
+                if let Err(err) = res {
+                    error!("{} rollback failed", tag; "err" => ?err);
+                }
+                let _ = conn.close().await;
+            };
+            let _ = tokio::spawn(task);
+        }
+    }
+}
+
+mod tests {
+    use std::io;
+
+    use super::*;
+
+    #[test]
+    fn test_is_error_retryable() {
+        let res: anyhow::Result<()> = Err(sqlx::Error::Io(io::Error::new(
+            io::ErrorKind::Other,
+            "test",
+        )))
+        .context("io");
+        let Err(err) = res else { panic!("unexpected") };
+        assert!(is_error_retryable(&err));
+    }
+}

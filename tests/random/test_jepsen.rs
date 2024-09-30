@@ -10,7 +10,7 @@ use test_cloud_server::{keyspace::KeyspaceManager, tidb::TidbCluster};
 use tikv_util::{error, info, time::Instant};
 
 use crate::{
-    test_txn_file::{TXN_CHUNK_MAX_SIZE, TXN_FILE_MIN_SIZE},
+    sql_util::{gen_padding, is_db_error_retryable, DEADLOCK_ERR_MSG, MAX_PADDING_SIZE},
     JEPSEN_BANK_TXN_COUNTER, JEPSEN_BANK_TXN_RETRY_COUNTER,
 };
 
@@ -20,40 +20,7 @@ const ACCOUNTS_TABLE_NAME: &str = "accounts";
 const BANK_ACCOUNTS: usize = 10;
 const BANK_TXN_FILE_RATIO: f64 = 0.5;
 
-const MAX_PADDING_SIZE: usize = TXN_CHUNK_MAX_SIZE * 2;
-
-// Ref: https://github.com/tidbcloud/tidb-cse/blob/release-7.1-keyspace/kv/error.go, TxnRetryableMark
-const TIDB_TXN_RETRYABLE_MARK: &str = "[try again later]";
-const DEADLOCK_ERR_MSG: &str = "Deadlock found";
-const WRITE_CONFLICT_ERR_MSG: &str = "Write conflict";
-const RETRYABLE_DB_ERR_MSGS: &[&str] = &[
-    TIDB_TXN_RETRYABLE_MARK,
-    WRITE_CONFLICT_ERR_MSG,
-    DEADLOCK_ERR_MSG,
-];
-
 const TIFLASH_REPLICAS_AVAILABLE_TIMEOUT: Duration = Duration::from_secs(30);
-
-fn is_db_error_retryable(err: &sqlx::Error) -> bool {
-    match err {
-        sqlx::Error::Database(db_err) => RETRYABLE_DB_ERR_MSGS
-            .iter()
-            .any(|msg| db_err.message().contains(msg)),
-        _ => false,
-    }
-}
-
-fn gen_padding(rng: &mut ThreadRng, buf: &mut [u8]) -> usize {
-    static PADDING_LENS: [usize; 4] = [
-        TXN_FILE_MIN_SIZE,
-        TXN_CHUNK_MAX_SIZE / 2,
-        TXN_CHUNK_MAX_SIZE,
-        MAX_PADDING_SIZE,
-    ];
-    let len = PADDING_LENS.choose(rng).unwrap();
-    rng.fill(&mut buf[..*len]);
-    *len
-}
 
 pub(crate) async fn prepare_jepsen_bank(
     tc: TidbCluster,
@@ -142,7 +109,7 @@ pub(crate) async fn run_jepsen_bank(
                     let mut rng = thread_rng();
                     let from_to = (0..BANK_ACCOUNTS).choose_multiple(&mut rng, 2);
                     let amount = rng.gen_range(0..100);
-                    let padding_len = gen_padding(&mut rng, &mut padding);
+                    let padding_len = gen_padding(2, &mut rng, &mut padding);
                     let use_txn_file = if jepsen_use_txn_file {
                         rng.gen_bool(BANK_TXN_FILE_RATIO)
                     } else {

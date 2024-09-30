@@ -19,6 +19,7 @@ USE_REMOTE_COP=1
 TPC_WORKLOAD=1
 JEPSEN_WORKLOAD=1
 JEPSEN_TXN_FILE=1
+UNIQUE_WORKLOAD=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -50,6 +51,9 @@ while [ $# -gt 0 ]; do
     --jepsen-no-txn-file)
         JEPSEN_TXN_FILE=0
         ;;
+    --unique-workload)
+        UNIQUE_WORKLOAD=1
+        ;;
     *)
         echo "Usage: $0 DOCKER_ID TESTNAME [--keep-tmp-on-error] [--log-path LOG_PATH] [--memory-profile]"
         exit 1
@@ -72,6 +76,7 @@ export USE_REMOTE_COP
 export TPC_WORKLOAD
 export JEPSEN_WORKLOAD
 export JEPSEN_TXN_FILE
+export UNIQUE_WORKLOAD
 
 mkdir -p "$LOG_PATH"/logs "$LOG_PATH"/error-logs
 for i in $(seq -w 1 100000); do
