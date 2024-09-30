@@ -421,10 +421,13 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
                     for region in &regions {
                         let res = kv.get_shard_with_ver(region.id(), region.ver());
                         if res.is_err() {
-                            resp.set_error(format!(
+                            let mut errpb = kvproto::errorpb::Error::default();
+                            errpb.set_message(format!(
                                 "region {} changed during delete range",
                                 region.id()
                             ));
+                            errpb.set_epoch_not_match(kvproto::errorpb::EpochNotMatch::default());
+                            resp.set_region_error(errpb);
                             break;
                         }
                     }

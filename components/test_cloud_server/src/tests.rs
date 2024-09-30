@@ -14,7 +14,7 @@ use pd_client::{
 };
 use security::{RestfulClient, SecurityConfig, SecurityManager};
 use test_pd_client::PdWrapper;
-use tikv_client::{IntoOwnedRange, TimestampExt};
+use tikv_client::TimestampExt;
 use tikv_util::{codec::bytes::encode_bytes, config::ReadableDuration, info};
 use tokio::runtime::Runtime;
 
@@ -267,7 +267,7 @@ fn test_txn_client() {
             let prefix1 = &key100.as_slice()[..key100.len() - 2];
             let prefix2 = &key200.as_slice()[..key200.len() - 2];
             txn_client
-                .unsafe_destroy_range((prefix1, prefix2).into_owned())
+                .kv_unsafe_destroy_range(prefix1, prefix2, Duration::from_secs(10))
                 .await
                 .unwrap();
             ref_store.destroy_range(&key100, &key200);
@@ -559,7 +559,7 @@ fn test_tikv_worker() {
             let prefix08 = &key80.as_slice()[..key80.len() - 1];
             let prefix09 = &key90.as_slice()[..key90.len() - 1];
             txn_client
-                .unsafe_destroy_range((prefix08, prefix09).into_owned())
+                .kv_unsafe_destroy_range(prefix08, prefix09, Duration::from_secs(10))
                 .await
                 .unwrap();
             ref_store.destroy_range(&key80, &key90);
