@@ -26,14 +26,17 @@ use std::{cmp::Ordering, collections::HashMap, ops::Deref, sync::Arc, time::Dura
 use async_trait::async_trait;
 use cloud_encryption::KeyspaceEncryptionConfig;
 use dashmap::DashMap;
-use futures::future::BoxFuture;
+use futures::{compat::Future01CompatExt, future::BoxFuture};
 use grpcio::ClientSStreamReceiver;
 use kvproto::{
     metapb, pdpb,
     replication_modepb::{RegionReplicationStatus, ReplicationStatus, StoreDrAutoSyncStatus},
 };
 use pdpb::{LoadGlobalConfigRequest, QueryStats, WatchGlobalConfigResponse};
-use tikv_util::time::{Instant, UnixSecs};
+use tikv_util::{
+    time::{Instant, UnixSecs},
+    timer::GLOBAL_TIMER_HANDLE,
+};
 use txn_types::TimeStamp;
 
 pub use self::{
@@ -272,6 +275,9 @@ impl BucketStat {
 }
 
 pub const INVALID_ID: u64 = 0;
+
+const SPLIT_REGIONS_INIT_RETRY_INTERVAL_MS: u64 = 100;
+const SPLIT_REGIONS_MAX_RETRY_INTERVAL_MS: u64 = 3000;
 
 /// PdClient communicates with Placement Driver (PD).
 /// Because now one PD only supports one cluster, so it is no need to pass
@@ -567,8 +573,34 @@ pub trait PdClient: GetSecurityManager + Send + Sync {
     }
 
     /// tikv-worker uses this to load data.
-    fn split_regions(&self, _keys: Vec<Vec<u8>>) -> PdFuture<Vec<u64>> {
+    fn split_regions(&self, _keys: Vec<Vec<u8>>) -> BoxFuture<'_, Result<Vec<u64>>> {
         unimplemented!();
+    }
+
+    fn split_regions_with_retry(
+        &self,
+        keys: Vec<Vec<u8>>,
+        timeout: Duration,
+    ) -> BoxFuture<'_, Result<Vec<u64>>> {
+        let timer = GLOBAL_TIMER_HANDLE.clone();
+        let start = Instant::now_coarse();
+        let mut retry_ms = SPLIT_REGIONS_INIT_RETRY_INTERVAL_MS;
+        Box::pin(async move {
+            loop {
+                match self.split_regions(keys.clone()).await {
+                    Ok(region_ids) => return Ok(region_ids),
+                    Err(e) => {
+                        if start.saturating_elapsed() >= timeout {
+                            return Err(e);
+                        }
+                        let deadline = std::time::Instant::now() + Duration::from_millis(retry_ms);
+                        timer.delay(deadline).compat().await.unwrap();
+                        retry_ms =
+                            std::cmp::min(SPLIT_REGIONS_MAX_RETRY_INTERVAL_MS, retry_ms << 1);
+                    }
+                }
+            }
+        })
     }
 
     fn split_and_scatter_regions(&self, _keys: Vec<Vec<u8>>) -> PdFuture<()> {

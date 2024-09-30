@@ -472,7 +472,10 @@ async fn must_split_region_for_keyspace(
         .iter()
         .map(|k| Key::from_raw(k).into_encoded())
         .collect::<Vec<_>>();
-    pd_client.split_regions(split_keys).await.unwrap();
+    pd_client
+        .split_regions_with_retry(split_keys, Duration::from_secs(60))
+        .await
+        .unwrap();
     let new_region = pd_client.get_region(&keys[0]).unwrap();
     info!(
         "split region for keyspace {}: {:?}",

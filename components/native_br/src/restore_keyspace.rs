@@ -373,6 +373,7 @@ pub fn restore_keyspace(
                 &target_regions,
                 &keyspace_tag,
                 pd_client.clone(),
+                config.timeout_split_regions.0,
                 runtime,
             )?;
             need_split_regions = false;
@@ -489,6 +490,7 @@ fn split_target_keyspace(
     target_regions: &[RawRegion],
     keyspace_tag: &str,
     pd_client: Arc<dyn PdClient>,
+    timeout: Duration,
     runtime: &Runtime,
 ) -> Result<()> {
     if split_keys.is_empty() {
@@ -512,7 +514,7 @@ fn split_target_keyspace(
         .map(|key| Key::from_raw(key.as_slice()).into_encoded())
         .collect::<Vec<_>>();
     if !enc_split_keys.is_empty() {
-        runtime.block_on(pd_client.split_regions(enc_split_keys))?;
+        runtime.block_on(pd_client.split_regions_with_retry(enc_split_keys, timeout))?;
     }
 
     Ok(())

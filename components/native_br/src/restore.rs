@@ -453,6 +453,7 @@ const DEFAULT_WAL_TARGET_SIZE: ReadableSize = ReadableSize::mb(512);
 pub const DEFAULT_TIMEOUT_WAIT_FLUSH: ReadableDuration = ReadableDuration::minutes(10);
 pub const DEFAULT_TIMEOUT_RESTORE_SNAPSHOT: ReadableDuration = ReadableDuration::minutes(10);
 pub const DEFAULT_TIMEOUT_FETCH_WAL: ReadableDuration = ReadableDuration::secs(30);
+pub const DEFAULT_TIMEOUT_SPLIT_REGIONS: ReadableDuration = ReadableDuration::secs(30);
 pub const DEFAULT_RESTORE_MAX_RETRY: usize = 30;
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
@@ -483,6 +484,8 @@ pub struct RestoreConfig {
     pub strict_tolerate: bool,
     /// The timeout for retrying fetch wal chunk from store.
     pub timeout_fetch_wal: ReadableDuration,
+    /// The timeout for split regions of target keyspace.
+    pub timeout_split_regions: ReadableDuration,
 }
 
 impl Default for RestoreConfig {
@@ -497,6 +500,7 @@ impl Default for RestoreConfig {
             timeout_wait_flush: DEFAULT_TIMEOUT_WAIT_FLUSH,
             timeout_restore_snapshot: DEFAULT_TIMEOUT_RESTORE_SNAPSHOT,
             timeout_fetch_wal: DEFAULT_TIMEOUT_FETCH_WAL,
+            timeout_split_regions: DEFAULT_TIMEOUT_SPLIT_REGIONS,
             max_retry: DEFAULT_RESTORE_MAX_RETRY,
             tolerate_err: 0,
             strict_tolerate: false,

@@ -56,6 +56,8 @@ use super::*;
 pub const INIT_EPOCH_CONF_VER: u64 = 1;
 pub const INIT_EPOCH_VER: u64 = 1;
 
+const LEADER_CHANGE_RETRY: usize = 10; // Ref: pd_client::LEADER_CHANGE_RETRY.
+
 struct Store {
     store: metapb::Store,
     region_ids: HashSet<u64>,
@@ -1792,42 +1794,58 @@ impl PdClient for TestPdClient {
     // The number of returned region_ids would be less then number of keys.
     // Since split_regions is not an atomic operation, a latter splitted region
     // would has the same region id with a former one.
-    fn split_regions(&self, keys: Vec<Vec<u8>>) -> PdFuture<Vec<u64>> {
+    fn split_regions(&self, keys: Vec<Vec<u8>>) -> BoxFuture<'_, Result<Vec<u64>>> {
         let mut keys_set: HashSet<Vec<u8>> = HashSet::from_iter(keys);
         let mut region_ids: HashSet<u64> = HashSet::default();
 
-        let start = Instant::now();
-        while !keys_set.is_empty() && start.saturating_elapsed() < Duration::from_secs(20) {
-            let mut region_map: HashMap<
-                u64, // region_id
-                (metapb::Region, Vec<Vec<u8>> /* keys */),
-            > = HashMap::default();
-            for key in keys_set.clone() {
-                let region = self.get_region(&key).unwrap();
-                if key.as_slice() == region.get_start_key() {
-                    keys_set.remove(&key);
-                    region_ids.insert(region.get_id());
-                    continue;
+        let timer = self.timer.clone();
+        let start = Instant::now_coarse();
+        let mut retry = 0;
+        Box::pin(async move {
+            while !keys_set.is_empty() && retry < LEADER_CHANGE_RETRY {
+                retry += 1;
+                let mut region_map: HashMap<
+                    u64, // region_id
+                    (metapb::Region, Vec<Vec<u8>> /* keys */),
+                > = HashMap::default();
+                for key in keys_set.clone() {
+                    let Ok(region) = self.get_region_async(&key).await else {
+                        continue;
+                    };
+                    if key.as_slice() == region.get_start_key() {
+                        keys_set.remove(&key);
+                        region_ids.insert(region.get_id());
+                        continue;
+                    }
+
+                    // Group split keys by region.
+                    region_map
+                        .entry(region.get_id())
+                        .or_insert((region, vec![]))
+                        .1
+                        .push(key);
                 }
-                // Group split keys by region.
-                region_map
-                    .entry(region.get_id())
-                    .or_insert((region, vec![]))
-                    .1
-                    .push(key);
+
+                for (region, keys) in region_map.into_values() {
+                    self.split_region(region, CheckPolicy::Usekey, keys);
+                }
+                timer
+                    .delay(std::time::Instant::now() + Duration::from_millis(100))
+                    .compat()
+                    .await
+                    .unwrap();
             }
 
-            for (region, keys) in region_map.into_values() {
-                self.split_region(region, CheckPolicy::Usekey, keys);
+            if !keys_set.is_empty() {
+                return Err(box_err!(
+                    "split_regions timeout, rest of keys: {:?}, elapsed: {:?}",
+                    keys_set,
+                    start.saturating_elapsed()
+                ));
             }
-            std::thread::sleep(Duration::from_millis(100));
-        }
 
-        if !keys_set.is_empty() {
-            panic!("split_regions timeout, rest of keys: {:?}", keys_set);
-        }
-
-        Box::pin(ok(region_ids.into_iter().collect()))
+            Ok(region_ids.into_iter().collect())
+        })
     }
 
     fn store_heartbeat(

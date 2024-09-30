@@ -413,7 +413,7 @@ fn prepare_cluster(
         initial_keyspace_count * INITIAL_TABLE_COUNT,
         Ordering::Relaxed,
     );
-    let res = block_on(pd_client.split_regions(data_keys));
+    let res = block_on(pd_client.split_regions_with_retry(data_keys, Duration::from_secs(60)));
     if let Err(err) = res {
         warn!("split regions failed: {:?}", err);
     }
