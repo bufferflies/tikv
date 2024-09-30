@@ -128,12 +128,22 @@ impl<S: EngineSnapshot> SnapshotReader<S> {
         ts: TimeStamp,
     ) -> Result<Option<(Write, TimeStamp)>> {
         if self.cloud_reader.is_some() {
-            return self
-                .cloud_reader
-                .as_mut()
-                .unwrap()
-                .seek_write(key, ts)
-                .map(|opt| opt.map(|(ts, write)| (write, ts)));
+            return match self.cloud_reader.as_mut().unwrap().seek_write(key, ts)? {
+                Some((commit_ts, write)) => Ok(match write.write_type {
+                    WriteType::Put => Some((write, commit_ts)),
+                    WriteType::Delete => None,
+                    _ => {
+                        debug_assert!(
+                            false,
+                            "unexpected write type: key {:?}, write {:?}",
+                            key, write
+                        );
+                        error!("unexpected write type"; "key" => ?key, "write" => ?write);
+                        None
+                    }
+                }),
+                None => Ok(None),
+            };
         }
         self.reader
             .get_write_with_commit_ts(key, ts, Some(self.start_ts))
