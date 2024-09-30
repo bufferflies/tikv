@@ -117,14 +117,17 @@ fn test_coprocessor() {
         );
     }
     let statements = vec![
-        ("select c1, c2, c3, c4 from t1", schema_t1.clone()),
-        ("select c3, c2 from t1", schema_t1.clone()),
-        ("select c3, c4 from t2", schema_t2.clone()),
-        ("select c2, c1 from t2", schema_t2.clone()),
-        ("select c5 from t2", schema_t2.clone()),
+        (
+            format!("select c1, c2, c3, c4 from t{t1}"),
+            schema_t1.clone(),
+        ),
+        (format!("select c3, c2 from t{t1}"), schema_t1.clone()),
+        (format!("select c3, c4 from t{t2}"), schema_t2.clone()),
+        (format!("select c2, c1 from t{t2}"), schema_t2.clone()),
+        (format!("select c5 from t{t2}"), schema_t2.clone()),
     ];
     for (stmt, schema) in statements {
-        let dag = build_dag(stmt, &schema);
+        let dag = build_dag(&stmt, &schema);
         let tbl_id = schema.table_id;
         let dag_columns = dag
             .get_executors()
