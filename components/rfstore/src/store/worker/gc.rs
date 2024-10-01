@@ -2,18 +2,15 @@
 
 use std::{
     ffi::OsStr,
-    fmt::{Display, Formatter, Write},
+    fmt::{Display, Formatter},
     fs,
     fs::Metadata,
     path::{Path, PathBuf},
-    sync::Arc,
     time::Duration,
 };
 
 use collections::HashSet;
 use kvengine::{table::sstable, IoContext};
-use kvproto::import_sstpb::SwitchMode;
-use sst_importer::SstImporter;
 use tikv_util::{error, info, warn, worker::Runnable};
 
 pub struct GcTask {}
@@ -28,7 +25,6 @@ impl Display for GcTask {
 /// resource.
 pub struct GcRunner {
     kv: kvengine::Engine,
-    importer: Arc<SstImporter>,
     timeout: Duration,
 }
 
@@ -39,19 +35,12 @@ impl Runnable for GcRunner {
         if let Err(err) = self.gc_kv_files() {
             error!("local file gc kv files failed {:?}", err);
         }
-        if let Err(err) = self.gc_importer_files() {
-            error!("local file gc importer files failed {:?}", err);
-        }
     }
 }
 
 impl GcRunner {
-    pub fn new(kv: kvengine::Engine, importer: Arc<SstImporter>, timeout: Duration) -> Self {
-        Self {
-            kv,
-            importer,
-            timeout,
-        }
+    pub fn new(kv: kvengine::Engine, timeout: Duration) -> Self {
+        Self { kv, timeout }
     }
 
     fn gc_kv_files(&self) -> kvengine::Result<()> {
@@ -145,30 +134,6 @@ impl GcRunner {
     fn remove_file(store_id: u64, file: &Path) -> std::io::Result<()> {
         info!("{} local file GC remove file {:?}", store_id, file);
         fs::remove_file(file)
-    }
-
-    fn gc_importer_files(&self) -> sst_importer::Result<()> {
-        if self.importer.get_mode() == SwitchMode::Import {
-            return Ok(());
-        }
-        let store_id = self.kv.get_engine_id();
-        let ssts = self.importer.list_ssts()?;
-        for sst_meta in &ssts {
-            let path = self.importer.get_path(sst_meta);
-            let meta = fs::metadata(&path)?;
-            if self.is_old_file(meta) {
-                self.importer.delete(sst_meta)?;
-                let mut uuid = String::new();
-                for &b in sst_meta.get_uuid() {
-                    write!(uuid, "{:X}", b).expect("Unable to write");
-                }
-                info!(
-                    "{} gc runner delete sst uuid {} file {:?} timeout {:?}",
-                    store_id, uuid, path, self.timeout
-                );
-            }
-        }
-        Ok(())
     }
 
     fn remove_kv_garbage_txn_files(

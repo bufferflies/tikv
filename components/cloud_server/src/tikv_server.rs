@@ -25,8 +25,7 @@ use std::{
 use api_version::{dispatch_api_version, KvFormat};
 use cloud_encryption::MasterKey;
 use concurrency_manager::ConcurrencyManager;
-use engine_rocks::from_rocks_compression_type;
-use engine_traits::{KvEngine, RaftEngine, CF_DEFAULT, CF_WRITE};
+use engine_traits::{KvEngine, RaftEngine};
 use file_system::{
     BytesFetcher, IoRateLimitMode, IoRateLimiter, MetricsManager as IoMetricsManager,
 };
@@ -38,8 +37,7 @@ use kvengine::{
     limiter::{LimiterOptions, StoreLimiter},
 };
 use kvproto::{
-    brpb::create_backup, deadlock::create_deadlock, diagnosticspb_grpc::create_diagnostics,
-    import_sstpb_grpc::create_import_sst, raft_serverpb::StoreIdent,
+    deadlock::create_deadlock, diagnosticspb_grpc::create_diagnostics, raft_serverpb::StoreIdent,
 };
 use nix::NixPath;
 use overload_protector::{OverloadProtector, OverloadProtectorWorker};
@@ -61,7 +59,6 @@ use rfstore::{
     RaftRouter, ServerRaftStoreRouter,
 };
 use security::SecurityManager;
-use sst_importer::SstImporter;
 use sysinfo::{DiskExt, System as Sys, SystemExt};
 use tikv::{
     config::{ConfigController, TikvConfig},
@@ -78,7 +75,6 @@ use tikv::{
         SCHED_WRITE_FLOW_GAUGE,
     },
 };
-use tikv_kv::Engine;
 use tikv_util::{
     check_environment_variables,
     config::{ensure_dir_exist, ReadableDuration, ReadableSize, VersionTrack},
@@ -97,7 +93,7 @@ use crate::{
     raftkv::*,
     resolve,
     server::Server,
-    service::{DiagnosticsService, ImportSstService},
+    service::DiagnosticsService,
     setup::{initial_logger, initial_metric, validate_and_persist_config},
     status_server::StatusServer,
 };
@@ -147,7 +143,6 @@ struct Servers {
     lock_mgr: LockManager,
     server: Server<RaftRouter, resolve::PdStoreAddrResolver>,
     node: Node,
-    importer: Arc<SstImporter>,
 }
 
 impl TikvServer {
@@ -715,28 +710,6 @@ impl TikvServer {
         )
         .unwrap_or_else(|e| fatal!("failed to create server: {}", e));
 
-        let import_path = self.store_path.join("import");
-        let mut importer = SstImporter::new(
-            &self.config.import,
-            import_path,
-            None,
-            self.config.storage.api_version(),
-        )
-        .unwrap();
-        for (cf_name, compression_type) in &[
-            (
-                CF_DEFAULT,
-                self.config.rocksdb.defaultcf.bottommost_level_compression,
-            ),
-            (
-                CF_WRITE,
-                self.config.rocksdb.writecf.bottommost_level_compression,
-            ),
-        ] {
-            importer.set_compression_type(cf_name, from_rocks_compression_type(*compression_type));
-        }
-        let importer = Arc::new(importer);
-
         // `ConsistencyCheckObserver` must be registered before `Node::start`.
         let safe_point = Arc::new(AtomicU64::new(0));
         let observer = match self.config.coprocessor.consistency_check_method {
@@ -759,7 +732,6 @@ impl TikvServer {
             pd_worker,
             engines.store_meta.take().unwrap(),
             self.coprocessor_host.clone().unwrap(),
-            importer.clone(),
             self.concurrency_manager.clone(),
         )
         .unwrap_or_else(|e| panic!("failed to start node: {:?}", e));
@@ -770,7 +742,6 @@ impl TikvServer {
             lock_mgr,
             server,
             node,
-            importer,
         });
 
         server_config
@@ -778,25 +749,6 @@ impl TikvServer {
 
     fn register_services(&mut self) {
         let servers = self.servers.as_mut().unwrap();
-        let engines = self.engines.as_ref().unwrap();
-
-        // Import SST service.
-        let (import_service, threads_pool) = ImportSstService::new(
-            self.config.import.clone(),
-            self.config.raft_store.raft_entry_max_size,
-            self.router.clone(),
-            engines.engine.kv_engine().unwrap(),
-            servers.importer.clone(),
-        );
-        if servers
-            .server
-            .register_service(create_import_sst(import_service))
-            .is_some()
-        {
-            fatal!("failed to register import service");
-        }
-        self.to_stop
-            .push(Box::new(RefCell::new(Some(threads_pool))));
 
         // Lock manager.
         if servers
@@ -817,34 +769,6 @@ impl TikvServer {
                 &self.config.pessimistic_txn,
             )
             .unwrap_or_else(|e| fatal!("failed to start lock manager: {}", e));
-
-        // Backup service.
-        let mut backup_worker = Box::new(self.background_worker.lazy_build("backup-endpoint"));
-        let backup_scheduler = backup_worker.scheduler();
-        let backup_service = backup::Service::<kvengine::Engine>::new(backup_scheduler);
-        if servers
-            .server
-            .register_service(create_backup(backup_service))
-            .is_some()
-        {
-            fatal!("failed to register backup service");
-        }
-
-        let backup_endpoint = backup::Endpoint::new(
-            servers.node.id(),
-            engines.engine.clone(),
-            self.region_info_accessor.clone(),
-            engines.engine.kv_engine().unwrap(),
-            self.config.backup.clone(),
-            self.concurrency_manager.clone(),
-            self.config.storage.api_version(),
-            None,
-        );
-        self.cfg_controller.as_mut().unwrap().register(
-            tikv::config::Module::Backup,
-            Box::new(backup_endpoint.get_config_manager()),
-        );
-        backup_worker.start(backup_endpoint);
 
         let diag_service = DiagnosticsService::new(
             servers.server.get_debug_thread_pool().clone(),
@@ -958,10 +882,6 @@ impl TikvServer {
 
     pub fn get_store_id(&self) -> u64 {
         self.servers.as_ref().unwrap().node.id()
-    }
-
-    pub fn get_sst_importer(&self) -> Arc<SstImporter> {
-        self.servers.as_ref().unwrap().importer.clone()
     }
 
     pub fn get_raft_router(&self) -> RaftRouter {

@@ -27,7 +27,6 @@ crc32fast = "1.4.0"
 dashmap = "4.0"
 dyn-clone = "1.0"
 engine_panic = { path = "../engine_panic" }
-engine_rocks = { workspace = true }
 engine_traits = { path = "../engine_traits", default-features = false }
 fail = "0.5"
 farmhash = "1.1.5"
@@ -85,11 +84,6 @@ xorf = { git = "https://github.com/youjiali1995/xorf", branch = "0.8.0-custom-se
     "serde",
 ] }
 zstd-sys = "2.0.9"
-
-[dependencies.rocksdb]
-git = "https://github.com/tikv/rust-rocksdb.git"
-package = "rocksdb"
-features = ["encryption"]
 
 [dev-dependencies]
 anyhow = "1.0.26"

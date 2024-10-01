@@ -20,7 +20,6 @@ dashmap = "4.0"
 derivative = "2"
 dyn-clone = "1.0"
 encryption = { path = "../encryption", default-features = false }
-engine_rocks = { path = "../engine_rocks", default-features = false }
 engine_traits = { path = "../engine_traits", default-features = false }
 error_code = { path = "../error_code", default-features = false }
 fail = "0.5"

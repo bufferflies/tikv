@@ -5,7 +5,6 @@ pub mod bootstrap;
 pub mod cmd_resp;
 pub mod config;
 pub mod engine;
-pub mod ingest;
 pub mod io_limiter;
 pub mod msg;
 pub mod pd_handler;

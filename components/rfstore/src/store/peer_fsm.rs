@@ -21,7 +21,6 @@ use kvengine::{
     TRUNCATE_TS_KEY,
 };
 use kvproto::{
-    import_sstpb::SwitchMode,
     metapb::{self, Region, RegionEpoch},
     pdpb::CheckPolicy,
     raft_cmdpb::{
@@ -49,7 +48,6 @@ use super::RequestInspector;
 use crate::{
     store::{
         cmd_resp::{bind_term, message_error, new_error, new_with_key_error},
-        ingest::convert_sst,
         load_last_peer_state,
         msg::Callback,
         notify_req_region_removed,
@@ -61,7 +59,7 @@ use crate::{
         PEER_TICK_RAFT, PEER_TICK_RAFT_LOG_GC, PEER_TICK_SPLIT_CHECK,
         PEER_TICK_SWITCH_MEM_TABLE_CHECK,
     },
-    DiscardReason, Error, RaftStoreRouter, Result, MERGE_REGION_WITH_TXN_FILE_LOCKS_ERR_MSG,
+    DiscardReason, Error, Result, MERGE_REGION_WITH_TXN_FILE_LOCKS_ERR_MSG,
 };
 
 /// Limits the maximum number of regions returned by error.
@@ -1063,7 +1061,12 @@ impl<'a> PeerMsgHandler<'a> {
             return;
         }
         if !msg.get_requests().is_empty() && msg.get_requests()[0].has_ingest_sst() {
-            self.propose_ingest_sst(msg, cb);
+            warn!(
+                "ingest rocksdb sst is not supported";
+                "tag" => self.peer.tag(),
+                "peer_id" => self.fsm.peer_id(),
+            );
+            cb.invoke_with_response(new_error(box_err!("ingest rocksdb sst is not supported")));
             return;
         }
 
@@ -1080,32 +1083,6 @@ impl<'a> PeerMsgHandler<'a> {
 
         // TODO: add timeout, if the command is not applied after timeout,
         // we will call the callback with timeout error.
-    }
-
-    fn propose_ingest_sst(&mut self, msg: RaftCmdRequest, cb: Callback) {
-        // This is a ingest sst request, we need to redirect to worker thread and
-        // convert it to cloud engine format.
-        let importer = self.ctx.global.importer.clone();
-        let router = self.ctx.global.router.clone();
-        let kv = self.ctx.global.engines.kv.clone();
-        let shard_meta = self.peer.get_store().shard_meta.as_ref().unwrap().clone();
-        std::thread::spawn(move || {
-            tikv_util::set_current_region(shard_meta.id);
-            match convert_sst(kv, importer, &msg, shard_meta) {
-                Ok(cs) => {
-                    // Make ingest command.
-                    let mut cmd = RaftCmdRequest::default();
-                    cmd.set_header(msg.get_header().clone());
-                    let mut custom_builder = CustomBuilder::new();
-                    custom_builder.set_change_set(&cs);
-                    cmd.set_custom_request(custom_builder.build());
-                    router.send_command(cmd, cb);
-                }
-                Err(e) => {
-                    cb.invoke_with_response(new_error(e));
-                }
-            }
-        });
     }
 
     fn on_schedule_half_split_region(
@@ -1186,12 +1163,6 @@ impl<'a> PeerMsgHandler<'a> {
                 return false;
             }
             if !shard.get_initial_flushed() {
-                return false;
-            }
-            // When Lightning or BR is importing data to TiKV, their ingest-request may fail
-            // because of region-epoch not matched. So we hope TiKV do not check
-            // region size and split region during importing.
-            if self.ctx.global.importer.get_mode() == SwitchMode::Import {
                 return false;
             }
             if self.ctx.cfg.region_split_keys < 10 {
