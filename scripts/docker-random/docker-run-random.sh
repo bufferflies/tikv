@@ -81,11 +81,23 @@ while [[ $# -gt 0 ]]; do
 	--no-tpc)
 		RUN_ARGS+=("--no-tpc")
 		;;
+	--tpcc-txns-threshold)
+		RUN_ARGS+=("--tpcc-txns-threshold" "$2")
+		shift
+		;;
 	--no-jepsen)
 		RUN_ARGS+=("--no-jepsen")
 		;;
 	--jepsen-no-txn-file)
 		RUN_ARGS+=("--jepsen-no-txn-file")
+		;;
+	--jepsen-txns-threshold)
+		RUN_ARGS+=("--jepsen-txns-threshold" "$2")
+		shift
+		;;
+	--load-data-task-timeout-sec)
+		RUN_ARGS+=("--load-data-task-timeout-sec" "$2")
+		shift
 		;;
 	--unique-workload)
 		RUN_ARGS+=("--unique-workload")

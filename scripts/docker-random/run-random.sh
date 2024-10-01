@@ -17,8 +17,14 @@ GLOBAL_TXN_FILE=1
 USE_REMOTE_COP=1
 
 TPC_WORKLOAD=1
+TPCC_TXNS_THRESHOLD=100
+
 JEPSEN_WORKLOAD=1
 JEPSEN_TXN_FILE=1
+JEPSEN_TXNS_THRESHOLD=100
+
+LOAD_DATA_TASK_TIMEOUT_SEC=60
+
 UNIQUE_WORKLOAD=0
 
 while [ $# -gt 0 ]; do
@@ -45,11 +51,23 @@ while [ $# -gt 0 ]; do
     --no-tpc)
         TPC_WORKLOAD=0
         ;;
+    --tpcc-txns-threshold)
+        TPCC_TXNS_THRESHOLD="$2"
+        shift
+        ;;
     --no-jepsen)
         JEPSEN_WORKLOAD=0
         ;;
     --jepsen-no-txn-file)
         JEPSEN_TXN_FILE=0
+        ;;
+    --jepsen-txns-threshold)
+        JEPSEN_TXNS_THRESHOLD="$2"
+        shift
+        ;;
+    --load-data-task-timeout-sec)
+        LOAD_DATA_TASK_TIMEOUT_SEC="$2"
+        shift
         ;;
     --unique-workload)
         UNIQUE_WORKLOAD=1
@@ -74,8 +92,14 @@ export GLOBAL_TXN_FILE
 export USE_REMOTE_COP
 
 export TPC_WORKLOAD
+export TPCC_TXNS_THRESHOLD
+
 export JEPSEN_WORKLOAD
 export JEPSEN_TXN_FILE
+export JEPSEN_TXNS_THRESHOLD
+
+export LOAD_DATA_TASK_TIMEOUT_SEC
+
 export UNIQUE_WORKLOAD
 
 mkdir -p "$LOG_PATH"/logs "$LOG_PATH"/error-logs

@@ -543,6 +543,16 @@ pub(crate) fn env_switch_opt(env_key: &str, default: i32) -> bool {
         > 0
 }
 
+pub(crate) fn env_param<T>(env_key: &str, default: T) -> T
+where
+    T: FromStr,
+    <T as FromStr>::Err: std::fmt::Debug,
+{
+    std::env::var(env_key)
+        .map(|s| s.parse::<T>().unwrap())
+        .unwrap_or(default)
+}
+
 pub(crate) fn verify_cluster_stats(cluster: &ServerCluster, bucket_size: u64, timeout: Duration) {
     let mut success_shards = HashSet::new();
     try_wait_result(

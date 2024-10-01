@@ -695,19 +695,21 @@ fn check_tpc_binary(tpc_bin: &str) {
 
 fn check_tpc() {
     let tpc_txns = TPCC_COUNTER.load(Ordering::Relaxed);
+    let threshold = env_param("TPCC_TXNS_THRESHOLD", 100);
     assert!(
-        tpc_txns >= 100,
-        "TPC-C transactions are too few: {}",
-        tpc_txns
+        tpc_txns >= threshold,
+        "TPC-C transactions are too few: {} (threshold: {})",
+        tpc_txns,
+        threshold
     );
 }
 
 fn check_jepsen() {
     let jepsen_txns = JEPSEN_BANK_TXN_COUNTER.load(Ordering::Relaxed);
-    let threshold = 100;
+    let threshold = env_param("JEPSEN_TXNS_THRESHOLD", 100);
     assert!(
         jepsen_txns >= threshold,
-        "Jepsen transactions are too few: {}, threshold: {}",
+        "Jepsen transactions are too few: {} (threshold: {})",
         jepsen_txns,
         threshold
     );

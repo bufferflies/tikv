@@ -164,6 +164,7 @@ fn test_random_all() {
             TIMEOUT,
         ));
     }
+    let load_data_task_timeout = Duration::from_secs(env_param("LOAD_DATA_TASK_TIMEOUT_SEC", 30));
     for _ in 0..LOAD_DATA_CONCURRENCY {
         handles.push(spawn_load_data(
             cluster.get_pd_client(),
@@ -172,6 +173,7 @@ fn test_random_all() {
             security_conf.clone(),
             load_data_config.clone(),
             keyspace_manager.clone(),
+            load_data_task_timeout,
             Duration::from_secs(15),
             TIMEOUT,
         ));

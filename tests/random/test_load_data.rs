@@ -23,7 +23,6 @@ use tokio::runtime::Runtime;
 use crate::{generate_random_string, i_to_key, LOAD_DATA_COUNTER, TABLE_COUNTER};
 
 const COMPRESSION_TYPE: u8 = ZSTD_COMPRESSION;
-const LOAD_DATA_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(crate) fn spawn_load_data(
     pd_client: Arc<dyn PdClient>,
@@ -32,6 +31,7 @@ pub(crate) fn spawn_load_data(
     security_config: SecurityConfig,
     load_data_config: LoadDataConfig,
     keyspace_manager: KeyspaceManager,
+    task_timeout: Duration,
     interval: Duration,
     timeout: Duration,
 ) -> JoinHandle<()> {
@@ -76,6 +76,7 @@ pub(crate) fn spawn_load_data(
                 &mut rng,
                 master_key.clone(),
                 load_data_config.clone(),
+                task_timeout,
             );
             if !success {
                 // table is removed by restore.
@@ -102,6 +103,7 @@ fn do_load_data(
     rng: &mut ThreadRng,
     master_key: MasterKey,
     config: LoadDataConfig,
+    task_timeout: Duration,
 ) -> bool /* success */ {
     let temp_dir = tempfile::Builder::new()
         .prefix("load_data_")
@@ -166,7 +168,7 @@ fn do_load_data(
         generate_key,
         generate_random_string(format!("ingest-{}-", commit_ts)),
         generate_row_id,
-        LOAD_DATA_TIMEOUT,
+        task_timeout,
         |_| 0,
     );
     info!(
@@ -175,7 +177,7 @@ fn do_load_data(
     );
 
     // Build.
-    build(&scheduler, COMPRESSION_TYPE, LOAD_DATA_TIMEOUT).unwrap();
+    build(&scheduler, COMPRESSION_TYPE, task_timeout).unwrap();
     info!(
         "load_data: build finished, keyspace {}, table {}",
         keyspace_id, table_id
