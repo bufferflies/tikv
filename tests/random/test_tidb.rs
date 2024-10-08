@@ -398,10 +398,13 @@ fn prepare_cluster(
         conf.dfs = (*dfs_config).clone();
         conf.coprocessor.region_split_size = REGION_SIZE;
         conf.coprocessor.region_bucket_size = REGION_BUCKET_SIZE;
-        conf.raft_store.peer_stale_state_check_interval = ReadableDuration::secs(1);
-        conf.raft_store.abnormal_leader_missing_duration = ReadableDuration::secs(3);
-        conf.raft_store.max_leader_missing_duration = ReadableDuration::secs(5);
-        conf.raft_store.pd_heartbeat_tick_interval = ReadableDuration::secs(1);
+        conf.raft_store.peer_stale_state_check_interval = ReadableDuration::secs(5);
+        conf.raft_store.abnormal_leader_missing_duration = ReadableDuration::secs(15);
+        conf.raft_store.max_leader_missing_duration = ReadableDuration::secs(25);
+        conf.raft_store.split_region_check_tick_interval = ReadableDuration::millis(500);
+        conf.raft_store.raft_log_gc_tick_interval = ReadableDuration::millis(500);
+        conf.raft_store.pd_heartbeat_tick_interval = ReadableDuration::secs(5);
+        conf.raft_store.pd_store_heartbeat_tick_interval = ReadableDuration::millis(500);
         conf.rocksdb.writecf.block_size = ReadableSize::kb(4);
         conf.rocksdb.writecf.target_file_size_base = ReadableSize::kb(16);
         conf.rfengine.target_file_size = ReadableSize::mb(8);
