@@ -934,7 +934,7 @@ fn new_sst_table_for_columnar(
         block_size,
         comp_tp,
         comp_lvl,
-        ChecksumType::Crc32c,
+        ChecksumType::Crc32,
         None,
     );
     let ctx = Mutex::new(EvalContext::default());

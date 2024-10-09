@@ -564,7 +564,7 @@ impl Default for Config {
             worker_scaler: WorkerScalerConfig::default(),
             report_wru: false,
             enable_load_data_check_point: false,
-            checksum_type: ChecksumType::Crc32c,
+            checksum_type: ChecksumType::Crc32,
             worker_limiter: WorkerLimiterConfig::default(),
             schema_manager: SchemaManagerConfig::default(),
             txn_chunk_manager: TxnChunkManagerConfig::default(),

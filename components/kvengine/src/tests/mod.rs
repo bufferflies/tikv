@@ -1714,7 +1714,7 @@ fn new_table(
         block_size,
         comp_tp,
         comp_lvl,
-        ChecksumType::Crc32c,
+        ChecksumType::Crc32,
         None,
     );
     for i in begin..end {
@@ -1751,7 +1751,7 @@ fn new_l0table_file(
     let block_size = engine.opts.table_builder_options.block_size;
     let fs = engine.fs.clone();
 
-    let mut builder = L0Builder::new(id, block_size, version, ChecksumType::Crc32c, None);
+    let mut builder = L0Builder::new(id, block_size, version, ChecksumType::Crc32, None);
     for cf in 0..NUM_CFS {
         for i in begin[cf]..end[cf] {
             let key = engine.key_builder.i_to_inner_key(i);

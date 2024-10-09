@@ -202,7 +202,7 @@ impl Default for LoadDataConfig {
             coarse_split_size: DEFAULT_COARSE_SPLIT_SIZE,
             enable_check_point: DEFAULT_ENABLE_CHECK_POINT,
             rg_config: None,
-            checksum_type: ChecksumType::Crc32c,
+            checksum_type: ChecksumType::Crc32,
         }
     }
 }

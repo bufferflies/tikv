@@ -117,6 +117,7 @@ impl From<u8> for ChecksumType {
             2 => ChecksumType::Crc32,
             _ => {
                 error!("unknown checksum type {}", v);
+                debug_assert!(false, "unknown checksum type {}", v);
                 ChecksumType::None
             }
         }

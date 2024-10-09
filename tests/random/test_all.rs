@@ -110,7 +110,7 @@ fn test_random_all() {
             coarse_split_size: region_size * 4,
             enable_check_point: false,
             rg_config: None,
-            checksum_type: ChecksumType::Crc32c,
+            checksum_type: ChecksumType::Crc32,
         }
     };
 
