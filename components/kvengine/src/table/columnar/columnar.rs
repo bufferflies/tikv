@@ -860,7 +860,7 @@ pub(crate) fn get_fixed_size(col_info: &ColumnInfo) -> usize {
         | FieldTypeTp::Enum
         | FieldTypeTp::Set
         | FieldTypeTp::Bit => 8,
-        FieldTypeTp::NewDecimal => 40,
+        FieldTypeTp::NewDecimal => 0,
         _ => 0,
     }
 }
