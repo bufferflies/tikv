@@ -91,7 +91,7 @@ fn test_schema_file() {
         || "failed to wait schema file".to_string(),
     );
 
-    // test schema_file will be convert to tombstone if not longer overlap.
+    // test schema_file will be set to None if not longer overlap.
     let new_schemas = build_schemas(vec![table_ids[1]]);
     let new_schema_version = 11;
     let new_schema_file_data = build_schema_file(keyspace_id, new_schema_version, new_schemas);
@@ -107,21 +107,15 @@ fn test_schema_file() {
     must_wait(
         || {
             let mut shard_with_schema_file_ids = vec![];
-            let mut tombstone_count = 0;
             for &id_ver in &all_ids_vers {
                 let shard = kvengine.get_shard(id_ver.id).unwrap();
                 if shard.get_schema_file().is_some() {
                     let schema_file_id = shard.get_schema_file().unwrap().get_file_id();
-                    if schema_file_id == 0 {
-                        tombstone_count += 1;
-                    } else {
-                        shard_with_schema_file_ids.push(schema_file_id);
-                    }
+                    shard_with_schema_file_ids.push(schema_file_id);
                 }
             }
             shard_with_schema_file_ids.len() == 1
                 && shard_with_schema_file_ids[0] == new_schema_file_id
-                && tombstone_count == 1
         },
         10,
         || "failed to wait schema file".to_string(),

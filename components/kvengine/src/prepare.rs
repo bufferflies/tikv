@@ -141,7 +141,8 @@ impl EngineCore {
         if let Some(schema_meta) = schema_meta {
             let schema_file_id = schema_meta.get_file_id();
             if schema_file_id == 0 {
-                schema_file = Some(SchemaFile::new_tombstone(schema_meta.get_version()));
+                // Set schema_file to None if schema file id is 0, no need to mark tombstone.
+                schema_file = None;
             } else {
                 schema_file = Some(
                     self.fs

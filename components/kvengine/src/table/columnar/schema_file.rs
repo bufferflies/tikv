@@ -138,17 +138,6 @@ impl SchemaFile {
         })
     }
 
-    pub fn new_tombstone(schema_version: i64) -> SchemaFile {
-        Self {
-            core: Arc::new(SchemaFileCore {
-                file_id: 0,
-                keyspace_id: 0,
-                version: schema_version,
-                tables: HashMap::new(),
-            }),
-        }
-    }
-
     pub fn get_table(&self, table_id: i64) -> Option<&Schema> {
         self.core.tables.get(&table_id)
     }

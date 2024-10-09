@@ -804,7 +804,6 @@ impl ShardMeta {
         }
         if comp.snap_version == 0 {
             self.schema_file_id = 0;
-            self.schema_file_ver = 0;
             self.columnar_snap_version = 0;
             self.unconverted_l0s.clear();
         } else {

@@ -893,14 +893,16 @@ impl Shard {
                 data.get_columnar_level_stats(0).columnar_size as f64 / self.opt.base_size as f64;
             let col_l1_score = data.get_columnar_level_stats(1).columnar_size as f64
                 / (10 * self.opt.base_size) as f64;
-            if data.get_col_table_counts(0) > MAX_COL_L0_FILE_COUNTS
-                || (col_l0_score >= col_l1_score && col_l0_score > 1.0)
+            if data.schema_file.is_some()
+                && (data.get_col_table_counts(0) > MAX_COL_L0_FILE_COUNTS
+                    || (col_l0_score >= col_l1_score && col_l0_score > 1.0))
             {
                 Some(CompactionPriority::ColumnarL0 {
                     score: col_l0_score,
                 })
-            } else if data.get_col_table_counts(1) > MAX_COL_L1_FILE_COUNTS
-                || (col_l0_score < col_l1_score && col_l1_score > 1.0)
+            } else if data.schema_file.is_some()
+                && (data.get_col_table_counts(1) > MAX_COL_L1_FILE_COUNTS
+                    || (col_l0_score < col_l1_score && col_l1_score > 1.0))
             {
                 Some(CompactionPriority::ColumnarL1 {
                     score: col_l1_score,
