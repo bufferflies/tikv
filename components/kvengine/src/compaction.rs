@@ -3620,7 +3620,9 @@ fn compact_table_for_columnar(
     allocate_id: &mut dyn FnMut() -> u64,
 ) -> Result<()> {
     let fs = &ctx.dfs;
-    let opts = dfs::Options::default().with_type(FileType::Columnar);
+    let opts = dfs::Options::default()
+        .with_type(FileType::Columnar)
+        .with_shard(ctx.req.shard_id, ctx.req.shard_ver);
     let mut block = Block::new(schema);
     let mut res = reader.read_block(&mut block, columnar_config.pack_max_row_count)?;
     let mut row_count = 0;
@@ -3885,7 +3887,9 @@ fn convert_row_file_to_columnar_file(
         .map(|(_, id)| *id)
         .collect();
     ret.set_row_l0s(row_l0s);
-    let opts = dfs::Options::default().with_type(FileType::Schema);
+    let opts = dfs::Options::default()
+        .with_type(FileType::Schema)
+        .with_shard(ctx.req.shard_id, ctx.req.shard_ver);
     let runtime = ctx.dfs.get_runtime();
     let schema_file_id = columnar_compaction.schema_file_id;
     let schema_file_data = runtime.block_on(ctx.dfs.read_file(schema_file_id, opts))?;
@@ -4008,7 +4012,9 @@ fn compact_columnar_l0_files(
     .pop()
     .unwrap();
     let schema_file = SchemaFile::open(schema_file_data)?;
-    let opts = dfs::Options::default().with_type(FileType::Columnar);
+    let opts = dfs::Options::default()
+        .with_type(FileType::Columnar)
+        .with_shard(ctx.req.shard_id, ctx.req.shard_ver);
     let tbl_changes = ret.mut_columnar_change();
     let col_file_ids: Vec<u64> = columnar_compaction
         .source_columnar_files
@@ -4133,7 +4139,9 @@ fn compact_columnar_l1_files(
     .pop()
     .unwrap();
     let schema_file = SchemaFile::open(schema_file_data)?;
-    let opts = dfs::Options::default().with_type(FileType::Columnar);
+    let opts = dfs::Options::default()
+        .with_type(FileType::Columnar)
+        .with_shard(ctx.req.shard_id, ctx.req.shard_ver);
     let tbl_changes = ret.mut_columnar_change();
     let (l1_col_file_ids, l2_col_file_ids): (Vec<u64>, Vec<u64>) = columnar_compaction
         .source_columnar_files

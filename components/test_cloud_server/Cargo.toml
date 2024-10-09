@@ -9,6 +9,7 @@ anyhow = "1.0"
 api_version = { path = "../api_version" }
 async-stream = "0.2"
 bstr = "0.2.17"
+builtin_dfs = { path = "../builtin_dfs" }
 bytes = "1"
 chrono = "0.4"
 cloud_server = { path = "../cloud_server" }

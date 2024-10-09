@@ -35,7 +35,10 @@ use hyper::{
     service::{make_service_fn, service_fn},
     Body, Method, Request, Response, Server, StatusCode,
 };
-use kvengine::{dfs::DFSConfig, Shard, ShardStats};
+use kvengine::{
+    dfs::{DFSConfig, FileType},
+    Shard, ShardStats,
+};
 use kvproto::{coprocessor::DelegateResponse, raft_serverpb::StoreIdent};
 use online_config::OnlineConfig;
 use openssl::{
@@ -1157,6 +1160,83 @@ impl StatusServer {
         ))
     }
 
+    fn get_dfs_file_id(req: &Request<Body>) -> Option<u64> {
+        let path = req.uri().path();
+        let last = get_last_path_segment(path);
+        u64::from_str(last).ok()
+    }
+
+    fn get_dfs_file_type(req: &Request<Body>) -> FileType {
+        if let Some(query) = req.uri().query() {
+            let query_pairs: HashMap<_, _> =
+                url::form_urlencoded::parse(query.as_bytes()).collect();
+            if let Some(file_type_str) = query_pairs.get("file_type") {
+                return file_type_str.as_ref().into();
+            }
+        }
+        FileType::Sst
+    }
+
+    async fn handle_dfs_file_read(
+        req: Request<Body>,
+        engine: kvengine::Engine,
+    ) -> hyper::Result<Response<Body>> {
+        let id_opt = Self::get_dfs_file_id(&req);
+        if id_opt.is_none() {
+            return Ok(make_response(StatusCode::BAD_REQUEST, "invalid file id"));
+        }
+        let id = id_opt.unwrap();
+        let file_type = Self::get_dfs_file_type(&req);
+        let (callback, future) = paired_future_callback();
+        std::thread::spawn(move || {
+            let res = match file_type {
+                FileType::TxnChunk => engine.get_txn_chunk_manager().read_local_chunk(id),
+                _ => engine.read_local_file(id, file_type),
+            };
+            callback(res);
+        });
+        let res = future.await.unwrap();
+        Ok(match res {
+            Ok(data) => Response::builder()
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .body(Body::from(data))
+                .unwrap(),
+            Err(err) => make_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Internal Server Error {}", err),
+            ),
+        })
+    }
+
+    async fn handle_dfs_file_create(
+        req: Request<Body>,
+        engine: kvengine::Engine,
+    ) -> hyper::Result<Response<Body>> {
+        let id_opt = Self::get_dfs_file_id(&req);
+        if id_opt.is_none() {
+            return Ok(make_response(StatusCode::BAD_REQUEST, "invalid file id"));
+        }
+        let id = id_opt.unwrap();
+        let file_type = Self::get_dfs_file_type(&req);
+        let data = hyper::body::to_bytes(req.into_body()).await?;
+        let (callback, future) = paired_future_callback();
+        std::thread::spawn(move || {
+            let res = match file_type {
+                FileType::TxnChunk => engine.get_txn_chunk_manager().write_local_chunk(id, data),
+                _ => engine.write_local_file_if_not_exists(id, data, file_type),
+            };
+            callback(res);
+        });
+        let res = future.await.unwrap();
+        Ok(match res {
+            Ok(_) => make_response(StatusCode::OK, ""),
+            Err(err) => make_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Internal Server Error {}", err),
+            ),
+        })
+    }
+
     async fn backup_rfengine(
         req: Request<Body>,
         engine: rfengine::RfEngine,
@@ -1825,6 +1905,12 @@ impl StatusServer {
                             }
                             (Method::POST, path) if path.starts_with("/schema_file") => {
                                 Self::handle_schema_file(req, router, engine).await
+                            }
+                            (Method::GET, path) if path.starts_with("/dfs/") => {
+                                Self::handle_dfs_file_read(req, engine).await
+                            }
+                            (Method::POST, path) if path.starts_with("/dfs/") => {
+                                Self::handle_dfs_file_create(req, engine).await
                             }
                             _ => Ok(make_response(StatusCode::NOT_FOUND, "path not found")),
                         }

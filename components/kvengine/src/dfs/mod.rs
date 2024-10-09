@@ -5,7 +5,7 @@ mod metrics;
 mod s3;
 
 use std::{
-    fmt::Debug,
+    fmt::{Debug, Display, Formatter},
     io::{self, BufReader, Read, Write},
     ops::Deref,
     path::{Path, PathBuf},
@@ -154,6 +154,26 @@ impl FileType {
             FileType::Columnar => "col",
             FileType::Blob => "blob",
             FileType::VectorIndex => "vec",
+        }
+    }
+}
+
+impl Display for FileType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.suffix())
+    }
+}
+
+impl From<&str> for FileType {
+    fn from(value: &str) -> Self {
+        match value {
+            "sst" => FileType::Sst,
+            "txn" => FileType::TxnChunk,
+            "schema" => FileType::Schema,
+            "col" => FileType::Columnar,
+            "blob" => FileType::Blob,
+            "vec" => FileType::VectorIndex,
+            _ => FileType::Sst,
         }
     }
 }
@@ -420,12 +440,21 @@ pub enum Error {
     Other(String),
     #[error("The specified key {0} does not exist.")]
     NoSuchKey(String),
+    #[error("hyper error {0}")]
+    Hyper(String),
 }
 
 impl From<io::Error> for Error {
     #[inline]
     fn from(e: io::Error) -> Error {
         Error::Io(e.to_string())
+    }
+}
+
+impl From<hyper::Error> for Error {
+    #[inline]
+    fn from(e: hyper::Error) -> Error {
+        Error::Hyper(e.to_string())
     }
 }
 

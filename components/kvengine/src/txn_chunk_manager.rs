@@ -353,6 +353,31 @@ impl TxnChunkManagerCore {
         Ok(txn_chunk)
     }
 
+    pub fn write_local_chunk(&self, chunk_id: u64, file_data: Bytes) -> Result<()> {
+        if self.local_path.is_none() {
+            return Err(Error::Other(box_err!("local_path is None")));
+        }
+        let local_file_path = self.local_file_path(chunk_id).unwrap();
+        if !local_file_path.exists() {
+            let local_path = self.local_path.as_ref().unwrap();
+            let txn_file_tmp_path = local_path.join(Self::tmp_file_name(chunk_id));
+            fs::write(&txn_file_tmp_path, file_data.chunk())
+                .table_ctx(chunk_id, "write_local_chunk")?;
+            fs::rename(&txn_file_tmp_path, &local_file_path)
+                .table_ctx(chunk_id, "rename_local_chunk")?;
+        }
+        Ok(())
+    }
+
+    pub fn read_local_chunk(&self, chunk_id: u64) -> Result<Bytes> {
+        if self.local_path.is_none() {
+            return Err(Error::Other(box_err!("local_path is None")));
+        }
+        let local_file_path = self.local_file_path(chunk_id).unwrap();
+        let data = fs::read(local_file_path).table_ctx(chunk_id, "read_local_chunk")?;
+        Ok(data.into())
+    }
+
     pub fn all_chunks_exists(&self, chunk_ids: &[u64]) -> bool {
         for chunk_id in chunk_ids {
             if let Some(entry) = self.txn_chunks.get(chunk_id) {

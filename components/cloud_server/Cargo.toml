@@ -27,6 +27,7 @@ test-engines-panic = [
 api_version = { path = "../api_version" }
 async-stream = "0.2"
 backtrace = "0.3"
+builtin_dfs = { path = "../builtin_dfs" }
 bytes = "1.0"
 chrono = "0.4"
 clap = "2.32"

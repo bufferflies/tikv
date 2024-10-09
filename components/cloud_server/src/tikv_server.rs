@@ -204,10 +204,9 @@ impl TikvServer {
 
         let dfs_conf = &config.dfs;
         let dfs: Arc<dyn Dfs> = if dfs_conf.s3_bucket.is_empty() && dfs_conf.s3_endpoint.is_empty()
-            || dfs_conf.s3_endpoint == "local"
         {
-            let local_path = PathBuf::from(&config.storage.data_dir).join(Path::new("local"));
-            Arc::new(kvengine::dfs::LocalFs::new(&local_path))
+            let builtin_dfs = builtin_dfs::BuiltinDfs::new(pd_client.clone());
+            Arc::new(builtin_dfs)
         } else if dfs_conf.s3_endpoint == "memory" {
             Arc::new(kvengine::dfs::InMemFs::new())
         } else {
@@ -902,6 +901,10 @@ impl TikvServer {
         )
     }
 
+    pub fn kv_engine_path(conf: &TikvConfig) -> PathBuf {
+        PathBuf::from(conf.storage.data_dir.clone()).join(Path::new("db"))
+    }
+
     // This method is also used by cse-ctl for cluster restore.
     pub fn init_kv_engine(
         pd: Arc<dyn PdClient>,
@@ -919,7 +922,7 @@ impl TikvServer {
         mpsc::Sender<StoreMsg>,
         mpsc::Receiver<StoreMsg>,
     )> {
-        let kv_engine_path = PathBuf::from(&conf.storage.data_dir).join(Path::new("db"));
+        let kv_engine_path = Self::kv_engine_path(conf);
         let mut kv_opts = kvengine::Options::default();
         let total_mem = SysQuota::memory_limit_in_bytes();
         let capacity = match conf.storage.block_cache.capacity {

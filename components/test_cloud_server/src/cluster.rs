@@ -2,7 +2,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    path::{Path, PathBuf},
+    path::Path,
     sync::{
         atomic::{AtomicU16, Ordering::Relaxed},
         Arc, Mutex,
@@ -133,13 +133,13 @@ impl ServerCluster {
         self.dfs.clone()
     }
 
-    fn prepare_dfs(config: &TikvConfig) -> Arc<dyn Dfs> {
+    fn prepare_dfs(config: &TikvConfig, pd_client: Arc<dyn PdClient>) -> Arc<dyn Dfs> {
         let dfs_conf = &config.dfs;
         if dfs_conf.s3_bucket.is_empty() && dfs_conf.s3_endpoint.is_empty()
             || dfs_conf.s3_endpoint == "local"
         {
-            let local_path = PathBuf::from(&config.storage.data_dir).join(Path::new("local"));
-            Arc::new(kvengine::dfs::LocalFs::new(&local_path))
+            let builtin_dfs = builtin_dfs::BuiltinDfs::new(pd_client.clone());
+            Arc::new(builtin_dfs)
         } else if dfs_conf.s3_endpoint == "memory" {
             Arc::new(kvengine::dfs::InMemFs::new())
         } else {
@@ -170,7 +170,9 @@ impl ServerCluster {
         std::fs::create_dir_all(&config.storage.data_dir).unwrap();
         let pd_client = self.pd.new_client(); // Different nodes must not share PD client.
         config.server.cluster_id = pd_client.get_cluster_id().unwrap();
-        let dfs = self.dfs.get_or_insert_with(|| Self::prepare_dfs(&config));
+        let dfs = self
+            .dfs
+            .get_or_insert_with(|| Self::prepare_dfs(&config, pd_client.clone()));
         let mut server = TikvServer::setup(
             config,
             self.security_mgr.clone(),
@@ -745,7 +747,6 @@ pub fn new_test_config(base_dir: &Path, node_id: u16, nodes_count: usize) -> Tik
     config.server.status_addr = node_status_addr(node_id);
     config.server.grpc_keepalive_time = ReadableDuration::secs(1);
     config.server.grpc_keepalive_timeout = ReadableDuration::secs(1);
-    config.dfs.s3_endpoint = "memory".to_string();
     config.dfs.zstd_compression_level = "3".to_string();
     config.raft_store.raft_base_tick_interval = ReadableDuration::millis(50);
     config.raft_store.raft_election_timeout_ticks = 10;

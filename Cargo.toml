@@ -236,6 +236,7 @@ members = [
   "components/backup",
   "components/backup-stream",
   "components/batch-system",
+  "components/builtin_dfs",
   "components/case_macros",
   "components/causal_ts",
   "components/cdc",

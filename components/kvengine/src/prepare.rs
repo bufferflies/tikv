@@ -5,6 +5,7 @@ use std::{
     fs,
     io::Write,
     iter::Iterator,
+    os::unix::fs::MetadataExt,
     path::PathBuf,
     sync::{
         atomic::{AtomicU64, Ordering::Relaxed},
@@ -221,7 +222,7 @@ impl EngineCore {
         let opts = dfs::Options::default().with_shard(shard_id, shard_ver);
         let mut msg_count = 0;
         for (&id, fm) in ids {
-            if let Ok(local_file) = self.open_local_file(id, fm) {
+            if let Ok(local_file) = self.open_local_file(id, fm.file_type) {
                 cs.add_file(
                     id,
                     Arc::new(local_file),
@@ -259,8 +260,8 @@ impl EngineCore {
     ) -> Result<()> {
         let (id, meta, data) = result_tx.recv().unwrap()?;
         let data_len = data.len();
-        self.write_local_file(id, data, use_direct_io, &meta)?;
-        let file = self.open_local_file(id, &meta)?;
+        self.write_local_file(id, data, use_direct_io, meta.file_type)?;
+        let file = self.open_local_file(id, meta.file_type)?;
         cs.add_file(
             id,
             Arc::new(file),
@@ -370,10 +371,10 @@ impl EngineCore {
         id: u64,
         data: Bytes,
         use_direct_io: bool,
-        file_meta: &FileMeta,
+        file_type: FileType,
     ) -> Result<()> {
         let start = Instant::now();
-        let local_file_name = self.local_file_path(id, file_meta);
+        let local_file_name = self.local_file_path(id, file_type);
         let tmp_file_name = self.tmp_file_path(id);
         if use_direct_io {
             let mut writer =
@@ -406,9 +407,35 @@ impl EngineCore {
         Ok(())
     }
 
-    fn open_local_file(&self, id: u64, fm: &FileMeta) -> Result<LocalFile> {
+    pub fn write_local_file_if_not_exists(
+        &self,
+        id: u64,
+        data: Bytes,
+        file_type: FileType,
+    ) -> Result<()> {
+        let file_path = self.local_file_path(id, file_type);
         let _guard = self.lock_file(id);
-        let path = self.local_file_path(id, fm);
+        if !file_path.exists() {
+            self.write_local_file(id, data, false, file_type)?;
+        } else {
+            let meta = file_path.metadata().table_ctx(id, "metadata")?;
+            if meta.size() != data.len() as u64 {
+                return Err(table::Error::InvalidFileSize.into());
+            }
+        }
+        Ok(())
+    }
+
+    pub fn read_local_file(&self, id: u64, file_type: FileType) -> Result<Bytes> {
+        let _guard = self.lock_file(id);
+        let path = self.local_file_path(id, file_type);
+        let data = fs::read(path).table_ctx(id, "read_local_file")?;
+        Ok(data.into())
+    }
+
+    fn open_local_file(&self, id: u64, file_type: FileType) -> Result<LocalFile> {
+        let _guard = self.lock_file(id);
+        let path = self.local_file_path(id, file_type);
         Ok(LocalFile::open(
             id,
             path.as_path(),
@@ -451,8 +478,8 @@ impl EngineCore {
         Ok(schema_file)
     }
 
-    pub(crate) fn local_file_path(&self, file_id: u64, fm: &FileMeta) -> PathBuf {
-        match fm.file_type {
+    pub(crate) fn local_file_path(&self, file_id: u64, file_type: FileType) -> PathBuf {
+        match file_type {
             FileType::Sst => self.local_sst_file_path(file_id),
             FileType::Blob => self.local_blob_file_path(file_id),
             FileType::Schema => self.local_schema_file_path(file_id),

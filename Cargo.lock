@@ -904,6 +904,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "builtin_dfs"
+version = "0.1.0"
+dependencies = [
+ "api_version",
+ "async-trait",
+ "bytes",
+ "http",
+ "hyper",
+ "kvengine",
+ "kvproto",
+ "pd_client",
+ "rand 0.8.5",
+ "slog",
+ "slog-global",
+ "tikv-client",
+ "tikv_util",
+ "tokio",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1269,6 +1289,7 @@ dependencies = [
  "api_version",
  "async-stream 0.2.0",
  "backtrace",
+ "builtin_dfs",
  "bytes",
  "chrono",
  "clap 2.33.0",
@@ -7817,6 +7838,7 @@ dependencies = [
  "api_version",
  "async-stream 0.2.0",
  "bstr",
+ "builtin_dfs",
  "bytes",
  "chrono",
  "cloud_server",
