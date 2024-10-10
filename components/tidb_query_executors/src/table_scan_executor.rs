@@ -23,7 +23,7 @@ use tidb_query_datatype::{
 use tipb::{FieldType, TableScan};
 
 use super::util::scan_executor::*;
-use crate::{interface::*, util::columnar_scanner::build_columnar_scanner};
+use crate::{interface::*, util::columnar_scanner::build_advanced_scanner};
 
 pub struct BatchTableScanExecutor<S: Storage, F>(ScanExecutor<S, TableScanExecutorImpl, F>);
 
@@ -49,7 +49,7 @@ impl<S: Storage, F: KvFormat> BatchTableScanExecutor<S, F> {
         is_scanned_range_aware: bool,
         snap: Option<SnapAccess>,
     ) -> Result<Self> {
-        let columnar_scanner = build_columnar_scanner(
+        let advanced_scanner = build_advanced_scanner(
             snap.as_ref(),
             &key_ranges,
             &table_scan,
@@ -116,7 +116,7 @@ impl<S: Storage, F: KvFormat> BatchTableScanExecutor<S, F> {
                 accept_point_range: no_common_handle,
                 is_scanned_range_aware,
             },
-            columnar_scanner,
+            advanced_scanner,
         )?;
         Ok(Self(wrapper))
     }

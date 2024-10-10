@@ -6,6 +6,7 @@ use std::{
 };
 
 use api_version::{api_v2::KEYSPACE_PREFIX_LEN, KeyMode, KvFormat};
+use async_trait::async_trait;
 use bytes::buf::Buf;
 use kvengine::table::columnar::{Block, ColumnarFilterReader, ColumnarMvccReader, HANDLE_COL_ID};
 use kvproto::coprocessor::KeyRange;
@@ -23,6 +24,8 @@ use tidb_query_datatype::{
 };
 use tikv_util::buffer_vec::BufferVec;
 use tipb::TableScan;
+
+use crate::util::AdvancedScanner;
 
 pub struct ColumnarScanner {
     // The current scan position.
@@ -68,8 +71,11 @@ impl ColumnarScanner {
             _scan_backward_in_range: false,
         }
     }
+}
 
-    pub fn take_scanned_range(&mut self) -> IntervalRange {
+#[async_trait]
+impl AdvancedScanner for ColumnarScanner {
+    fn take_scanned_range(&mut self) -> IntervalRange {
         let mut range = IntervalRange::default();
         range.lower_inclusive = self.start_range.clone();
         let schema = self.reader.get_schema();
@@ -99,7 +105,7 @@ impl ColumnarScanner {
         range
     }
 
-    pub async fn scan(&mut self, scan_rows: usize) -> (LazyBatchColumnVec, Result<bool>) {
+    async fn scan(&mut self, scan_rows: usize) -> (LazyBatchColumnVec, Result<bool>) {
         let mut column_vec: Vec<LazyBatchColumn> = Vec::with_capacity(self.output_offsets.len());
         for &eval_type in &self.eval_types {
             let vec_val = LazyBatchColumn::decoded_with_capacity_and_tp(scan_rows, eval_type);
@@ -228,12 +234,12 @@ impl ColumnarScanner {
     }
 }
 
-pub fn build_columnar_scanner(
+pub fn build_advanced_scanner(
     snap: Option<&kvengine::SnapAccess>,
     key_ranges: &[KeyRange],
     table_scan: &TableScan,
     start_ts: u64,
-) -> Option<ColumnarScanner> {
+) -> Option<Box<dyn AdvancedScanner>> {
     let snap = snap?;
     if key_ranges.len() != 1 {
         return None;
@@ -285,10 +291,10 @@ pub fn build_columnar_scanner(
         };
         reader.set_int_handle_range(start_handle, end_handle).ok()?;
     };
-    Some(ColumnarScanner::new(
+    Some(Box::new(ColumnarScanner::new(
         reader,
         output_offsets,
         keyspace_id,
         key_range.start.clone(),
-    ))
+    )))
 }
