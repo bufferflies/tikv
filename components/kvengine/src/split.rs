@@ -99,6 +99,10 @@ impl Engine {
                 store_u64(&new_shard.write_sequence, initial_seq);
             }
             store_u64(&new_shard.snap_version, old_shard.get_snap_version());
+            store_u64(
+                &new_shard.col_snap_version,
+                old_shard.get_columnar_snap_version(),
+            );
             if !old_del_prefixes.is_empty() {
                 // We need to use the old shard's DEL_PREFIXES_KEY to overwrite the new shard's
                 // DEL_PREFIXES_KEY. because the destroy_range compaction may have not
@@ -504,6 +508,14 @@ impl Engine {
         store_u64(
             &new_shard.estimated_kv_size,
             old_shard.get_estimated_kv_size(),
+        );
+        store_u64(
+            &new_shard.snap_version,
+            new_shard.get_base_version() + sequence,
+        );
+        store_u64(
+            &new_shard.col_snap_version,
+            old_shard.get_columnar_snap_version(),
         );
         new_shard
     }

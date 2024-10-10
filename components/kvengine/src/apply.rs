@@ -819,6 +819,8 @@ impl EngineCore {
         store_u64(&new_shard.write_sequence, cs.sequence);
         debug_assert!(!cs.has_parent());
         store_bool(&new_shard.initial_flushed, true);
+        store_u64(&new_shard.snap_version, snap.base_version + cs.sequence);
+        store_u64(&new_shard.col_snap_version, snap.columnar_snap_version);
 
         let mut old_mem_tbls = old_shard.get_data().mem_tbls.clone();
         for mem_tbl in old_mem_tbls.drain(..) {

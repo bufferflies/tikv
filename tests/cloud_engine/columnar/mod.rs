@@ -216,7 +216,7 @@ fn test_covert_row_to_columnar() {
                 if let Ok(shard) = kvengine.get_shard_with_ver(id_ver.id, id_ver.ver) {
                     let snap_version = shard.get_snap_version();
                     let columnar_snap_version = shard.get_columnar_snap_version();
-                    if snap_version == columnar_snap_version && columnar_snap_version >= 29 {
+                    if snap_version == columnar_snap_version {
                         shard_id = Some(id_ver.id);
                         return true;
                     }
@@ -337,7 +337,7 @@ fn test_get_snapshot_from_leader_by_status_api() {
                 if let Ok(shard) = kvengine.get_shard_with_ver(id_ver.id, id_ver.ver) {
                     let snap_version = shard.get_snap_version();
                     let columnar_snap_version = shard.get_columnar_snap_version();
-                    if snap_version == columnar_snap_version && columnar_snap_version >= 28 {
+                    if snap_version == columnar_snap_version {
                         return true;
                     }
                 }
