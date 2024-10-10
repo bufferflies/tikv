@@ -303,12 +303,10 @@ impl ChangeSetType {
         }
     }
 
-    fn should_pause_for_split_merge(&self) -> bool {
+    fn should_pause_for_split(&self) -> bool {
         matches!(
             self,
-            ChangeSetType::TrimOverBound
-                | ChangeSetType::InitialFlush
-                | ChangeSetType::DestroyRange
+            ChangeSetType::InitialFlush | ChangeSetType::DestroyRange
         )
     }
 }
@@ -1556,8 +1554,7 @@ impl Applier {
         source: kvenginepb::ChangeSet,
         commit_index: u64,
     ) {
-        let shard = ctx.engine.get_shard(self.region_id()).unwrap();
-        self.maybe_pause_for_split_merge(shard.has_over_bound_data());
+        self.maybe_pause_for_merge();
         let is_leader = self.is_leader();
         let engine = ctx.engine.clone();
 
@@ -1577,23 +1574,29 @@ impl Applier {
         });
     }
 
-    // When split or merge, the leader must have already initial flushed, but the
+    // When region split, the leader must have already initial flushed, but the
     // follower may not. To avoid the follower diverge too much from the leader,
     // we need to make sure the follower already initial flushed before apply
-    // split or merge. For commit merge, we also need to make sure the trim over
-    // bound has already applied, or we may have overlapping sst in the LSM
-    // tree.
-    // If the shard has overbound, the overbound table maybe removed by a
-    // compaction, So we need to wait for all change sets.
-    fn maybe_pause_for_split_merge(&mut self, has_over_bound_data: bool) {
+    // split.
+    // TODO: Confirm that destroy range can be skipped or not.
+    fn maybe_pause_for_split(&mut self) {
         for &(seq, cs_tp) in &self.scheduled_change_sets {
-            if cs_tp.should_pause_for_split_merge() || has_over_bound_data {
+            if cs_tp.should_pause_for_split() {
                 self.paused_apply_queue
                     .pause(seq, &format!("{} {:?}", self.tag(), cs_tp));
             }
         }
-        self.paused_apply_queue.paused_sequences.sort_unstable();
-        self.paused_apply_queue.paused_sequences.dedup();
+        self.paused_apply_queue.sort_and_dedup_paused_seqs();
+    }
+
+    // For prepare & commit merge, we must wait for all change sets as any of them
+    // may remove over bound data.
+    fn maybe_pause_for_merge(&mut self) {
+        if let Some(&(seq, cs_tp)) = &self.scheduled_change_sets.back() {
+            self.paused_apply_queue
+                .pause(seq, &format!("{} {:?}", self.tag(), cs_tp));
+            self.paused_apply_queue.sort_and_dedup_paused_seqs();
+        }
     }
 
     fn last_scheduled_compaction(&self) -> Option<(u64 /* seq */, u64 /* shard_ver */)> {
@@ -1734,7 +1737,7 @@ impl Applier {
             ApplyMsg::PendingSplit(pending_split) => {
                 self.pending_split
                     .insert(pending_split.sequence, pending_split);
-                self.maybe_pause_for_split_merge(false);
+                self.maybe_pause_for_split();
             }
             ApplyMsg::PrepareChangeSet { cs, encryption_key } => {
                 self.handle_prepare_change_set(ctx, cs, encryption_key);
@@ -1746,8 +1749,7 @@ impl Applier {
                 self.handle_check_switch_mem_table(ctx, region_id);
             }
             ApplyMsg::PrepareMerge => {
-                let shard = ctx.engine.get_shard(self.region_id()).unwrap();
-                self.maybe_pause_for_split_merge(shard.has_over_bound_data());
+                self.maybe_pause_for_merge();
             }
             ApplyMsg::PrepareCommitMerge {
                 source,
@@ -2406,6 +2408,11 @@ impl PausedApplyQueue {
         R: RangeBounds<usize>,
     {
         self.queue.drain(range)
+    }
+
+    pub fn sort_and_dedup_paused_seqs(&mut self) {
+        self.paused_sequences.sort();
+        self.paused_sequences.dedup();
     }
 }
 
