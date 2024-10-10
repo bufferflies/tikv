@@ -189,6 +189,7 @@ pub fn build_dag(select: &str, schema: &Schema) -> tipb::DagRequest {
     let mut tbl_scan = TableScan::default();
     tbl_scan.set_table_id(schema.table_id);
     tbl_scan.set_columns(columns.into());
+    tbl_scan.set_primary_column_ids(schema.pk_col_ids.clone());
     exec.set_tbl_scan(tbl_scan);
     let mut dag = tipb::DagRequest::new();
     dag.set_executors(vec![exec].into());
