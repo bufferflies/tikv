@@ -32,7 +32,7 @@ use crate::{
     limiter::StoreLimiter,
     table::{
         file::{File, InMemFile},
-        sstable::{L0Builder, L0Table, SsTable},
+        sstable::{BlockCache, L0Builder, L0Table, SsTable},
         BoundedDataSet, ChecksumType, DataBound, InnerKey, BIT_DELETE, OP_PUT,
     },
     tests::test_txn_file::{build_txn_chunk, make_lock_prefix, make_txn_file_refs},
@@ -770,7 +770,9 @@ fn test_lock_cf_repeatable_read() {
             3000,
             [false, false, false],
         );
-        let l0_tbl3 = L0Table::new(l0_file3, None, false, None).unwrap().unwrap();
+        let l0_tbl3 = L0Table::new(l0_file3, BlockCache::None, false, None)
+            .unwrap()
+            .unwrap();
         let l0_file4 = new_l0table_file(
             &engine,
             4000,
@@ -779,7 +781,9 @@ fn test_lock_cf_repeatable_read() {
             4000,
             [false, true, false],
         );
-        let l0_tbl4 = L0Table::new(l0_file4, None, false, None).unwrap().unwrap();
+        let l0_tbl4 = L0Table::new(l0_file4, BlockCache::None, false, None)
+            .unwrap()
+            .unwrap();
 
         let mut cfs = shard.get_data().cfs.clone();
         cfs[LOCK_CF] = cf_builder.build();
@@ -1016,7 +1020,9 @@ fn test_get_suggest_split_key(#[case] enable_inner_key_off: bool) {
                 ([0, start, 0], [0, end, 0])
             };
             let l0_file = new_l0table_file(&engine, id, begins, ends, id, [false, false, false]);
-            let l0_tbl = L0Table::new(l0_file, None, false, None).unwrap().unwrap();
+            let l0_tbl = L0Table::new(l0_file, BlockCache::None, false, None)
+                .unwrap()
+                .unwrap();
             l0_tables.push(l0_tbl);
         }
         let mut cf_builder = ShardCfBuilder::new(idx % 2);
@@ -1197,7 +1203,9 @@ fn test_get_evenly_split_keys(#[case] enable_inner_key_off: bool) {
                 ([0, start, 0], [0, end, 0])
             };
             let l0_file = new_l0table_file(&engine, id, begins, ends, id, [false, false, false]);
-            let l0_tbl = L0Table::new(l0_file, None, false, None).unwrap().unwrap();
+            let l0_tbl = L0Table::new(l0_file, BlockCache::None, false, None)
+                .unwrap()
+                .unwrap();
             l0_tables.push(l0_tbl);
         }
         let mut cf_builder = ShardCfBuilder::new(idx % 2);
@@ -1305,12 +1313,12 @@ fn test_l0table_ignore_lock() {
         [false, false, false],
     );
 
-    let l0table = L0Table::new(file.clone(), None, false, None).unwrap();
+    let l0table = L0Table::new(file.clone(), BlockCache::None, false, None).unwrap();
     assert!(l0table.is_some());
 
     // l0table would be none when `ignore_lock` is true and only LOCK_CF has data.
     // See https://github.com/tidbcloud/cloud-storage-engine/issues/1026.
-    let l0table_ignore_lock = L0Table::new(file, None, true, None).unwrap();
+    let l0table_ignore_lock = L0Table::new(file, BlockCache::None, true, None).unwrap();
     assert!(l0table_ignore_lock.is_none());
 }
 
@@ -1737,7 +1745,7 @@ fn new_table(
     let runtime = fs.get_runtime();
     runtime.block_on(fs.create(id, data.clone(), opts)).unwrap();
     let file = InMemFile::new(id, data);
-    SsTable::new(Arc::new(file), None, None).unwrap()
+    SsTable::new(Arc::new(file), BlockCache::None, None).unwrap()
 }
 
 fn new_l0table_file(

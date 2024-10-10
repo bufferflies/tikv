@@ -21,7 +21,7 @@ use tokio::runtime::Runtime;
 use crate::{
     client::{CommitAction, MutateOptions},
     oss::prepare_dfs,
-    try_wait, try_wait_result_async, ServerCluster,
+    try_wait, try_wait_result_async, ServerCluster, TikvWorkerOptions,
 };
 
 #[test]
@@ -520,7 +520,7 @@ fn test_tikv_worker() {
         },
         pd_wrapper,
     );
-    cluster.start_tikv_workers(2, 2, true);
+    cluster.start_tikv_workers(2, TikvWorkerOptions::default());
 
     let rt = Runtime::new().unwrap();
 

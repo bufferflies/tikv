@@ -27,9 +27,11 @@ use ::native_br::{backup::BackupConfig, restore::RestoreConfig};
 use dashmap::DashMap;
 use kvengine::{
     dfs::{DFSConfig, Dfs, S3Fs},
-    table::ChecksumType,
+    table::{
+        sstable::{BlockCache, BlockCacheType},
+        ChecksumType,
+    },
     txn_chunk_manager::{with_pool_handle, TxnChunkManager, TxnChunkManagerConfig},
-    BLOCK_CACHE_KEY_SIZE,
 };
 use kvproto::metapb::Store;
 #[cfg(feature = "testexport")]
@@ -134,15 +136,11 @@ fn start_server(
         ))
     };
 
-    let block_cache = if config.cop_block_cache_size.0 == 0 {
-        None
-    } else {
-        let cache = moka::sync::SegmentedCache::builder(256)
-            .weigher(|_k, v: &bytes::Bytes| (BLOCK_CACHE_KEY_SIZE + v.len()) as u32)
-            .max_capacity(config.cop_block_cache_size.0)
-            .build();
-        Some(cache)
-    };
+    let block_cache = BlockCache::new(
+        config.cop_block_cache_type,
+        config.cop_block_cache_size.0,
+        config.cop_block_size.0 as usize,
+    );
 
     let addr = config.addr.parse().expect("Unable to parse socket address");
 
@@ -532,6 +530,9 @@ pub struct Config {
     pub cop_addr: String,
     pub cop_cache_size: ReadableSize,
     pub cop_block_cache_size: ReadableSize,
+    pub cop_block_cache_type: BlockCacheType,
+    // Used to calculate block cache capacity of items. Should be the same as tikv-server.
+    pub cop_block_size: ReadableSize,
     pub worker_scaler: WorkerScalerConfig,
     pub report_wru: bool,
     pub enable_load_data_check_point: bool,
@@ -561,6 +562,8 @@ impl Default for Config {
             cop_addr: String::from("0.0.0.0:9500"),
             cop_cache_size: ReadableSize::gb(1),
             cop_block_cache_size: ReadableSize::default(),
+            cop_block_cache_type: BlockCacheType::Moka,
+            cop_block_size: ReadableSize::kb(32),
             worker_scaler: WorkerScalerConfig::default(),
             report_wru: false,
             enable_load_data_check_point: false,

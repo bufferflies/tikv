@@ -8,7 +8,8 @@ use std::{
 use tikv_util::config::ReadableDuration;
 
 use crate::table::{
-    blobtable::builder::BlobTableBuildOptions, columnar::ColumnarTableBuildOptions, ChecksumType,
+    blobtable::builder::BlobTableBuildOptions, columnar::ColumnarTableBuildOptions,
+    sstable::BlockCacheType, ChecksumType,
 };
 
 pub(crate) const DEFAULT_COMPACTION_REQUEST_VERSION: u32 = 3;
@@ -78,13 +79,16 @@ pub struct Config {
 
     pub checksum_type: ChecksumType,
 
+    pub block_cache_type: BlockCacheType,
+
     pub per_keyspace_configs: Vec<PerKeyspaceConfig>,
-    // Note: `blob_table_build_options` must be the last field. Otherwise serializing the config
-    // will meet a "ValueAfterTable" error.
-    // See https://docs.rs/toml/0.5.11/toml/ser/enum.Error.html#variant.ValueAfterTable.
+
     pub blob_table_build_options: BlobTableBuildOptions,
 
     pub columnar_table_build_options: ColumnarTableBuildOptions,
+    // Note: Fields of simple (not structure) type can not be the last. Otherwise serializing the
+    // config will meet the "ValueAfterTable" error.
+    // See https://docs.rs/toml/0.5.11/toml/ser/enum.Error.html#variant.ValueAfterTable.
 }
 
 impl Default for Config {
@@ -100,6 +104,7 @@ impl Default for Config {
             flush_split_l0: true,
             txn_file_worker_pool_size: None,
             checksum_type: ChecksumType::Crc32,
+            block_cache_type: BlockCacheType::Moka,
             blob_table_build_options: Default::default(),
             per_keyspace_configs: vec![],
             columnar_table_build_options: Default::default(),

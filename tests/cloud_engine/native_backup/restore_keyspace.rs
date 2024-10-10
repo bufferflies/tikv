@@ -38,7 +38,7 @@ use test_cloud_server::{
     },
     must_wait,
     oss::prepare_dfs,
-    try_wait, ServerCluster,
+    try_wait, ServerCluster, TikvWorkerOptions,
 };
 use test_pd_client::{PdWrapper, TestPdClient};
 use tikv::config::TikvConfig;
@@ -553,7 +553,7 @@ fn test_restore_archived_keyspace_opt(options: TestRestoreKeyspaceOptions) {
         },
         pd_wrapper,
     );
-    cluster.start_tikv_workers(1, 2, false);
+    cluster.start_tikv_workers(1, TikvWorkerOptions::default());
     cluster.wait_region_replicated(&[], 3);
     let pd_client = cluster.get_pd_client();
     let mut client = cluster.new_client();
@@ -962,7 +962,7 @@ fn test_restore_keyspace_with_resolve_locks(async_commit: bool) {
         },
         pd_wrapper,
     );
-    cluster.start_tikv_workers(1, 2, false);
+    cluster.start_tikv_workers(1, TikvWorkerOptions::default());
     cluster.wait_region_replicated(&[], 3);
     let pd_client = cluster.get_pd_client();
     let mut client = cluster.new_client_opt(ClusterClientOptions {

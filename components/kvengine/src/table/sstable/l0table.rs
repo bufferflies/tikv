@@ -6,7 +6,6 @@ use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use cloud_encryption::EncryptionKey;
 use kvenginepb::L0Create;
-use moka::sync::SegmentedCache;
 
 use super::*;
 use crate::{
@@ -52,7 +51,7 @@ impl L0Table {
     /// Would return `None` only when `ignore_lock` is `true`.
     pub fn new(
         file: Arc<dyn File>,
-        cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
+        cache: BlockCache,
         ignore_lock: bool,
         encryption_key: Option<EncryptionKey>,
     ) -> Result<Option<Self>> {
@@ -78,7 +77,7 @@ pub struct L0TableCore {
 impl L0TableCore {
     pub fn new(
         file: Arc<dyn File>,
-        cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
+        cache: BlockCache,
         ignore_lock: bool,
         encryption_key: Option<EncryptionKey>,
     ) -> Result<Option<Self>> {
@@ -148,7 +147,7 @@ impl L0TableCore {
 
     fn new_write_cf_l0(
         file: Arc<dyn File>,
-        cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
+        cache: BlockCache,
         encryption_key: Option<EncryptionKey>,
     ) -> Result<Option<Self>> {
         let tbl = SsTable::new(file.clone(), cache, encryption_key)?;

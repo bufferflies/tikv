@@ -8,7 +8,7 @@ use kvengine::{
     table::{
         blobtable::blobtable::BlobTable,
         file::InMemFile,
-        sstable::{L0Table, SsTable},
+        sstable::{BlockCache, L0Table, SsTable},
     },
 };
 
@@ -76,13 +76,15 @@ pub fn execute_show_sst(args: ShowSstArgs) {
     };
     let file = Arc::new(InMemFile::new(args.id, data));
     if args.level == 0 {
-        let l0 = L0Table::new(file, None, false, None).unwrap().unwrap();
+        let l0 = L0Table::new(file, BlockCache::None, false, None)
+            .unwrap()
+            .unwrap();
         print_l0_table(&l0);
     } else if args.level == BLOB_LEVEL_FLAG {
         let blob = BlobTable::new(file).unwrap();
         print_blob_table(&blob);
     } else {
-        let ln = SsTable::new(file, None, None).unwrap();
+        let ln = SsTable::new(file, BlockCache::None, None).unwrap();
         println!("[SST {}, level {}]", ln.id(), args.level);
         print_sstable(&ln, 2);
     }

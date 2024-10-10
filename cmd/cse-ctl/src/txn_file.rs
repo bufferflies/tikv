@@ -6,7 +6,7 @@ use clap::Args;
 use kvengine::{
     dfs,
     dfs::{DFSConfig, Dfs, S3Fs},
-    table::{file::InMemFile, TxnChunk, TxnChunkIterator},
+    table::{file::InMemFile, sstable::BlockCache, TxnChunk, TxnChunkIterator},
 };
 use log_wrappers::Value;
 
@@ -48,7 +48,8 @@ pub fn execute_show_txn_chunk(args: ShowTxnChunkArgs) {
         None => get_txn_chunk_data_from_dfs(args.id, config),
     };
     let file = Arc::new(InMemFile::new(args.id, data));
-    let txn_chunk = TxnChunk::new(file, None, None).expect("failed to create txn chunk");
+    let txn_chunk =
+        TxnChunk::new(file, BlockCache::None, None).expect("failed to create txn chunk");
     print_txn_chunk(&txn_chunk, 0);
 
     if let Some(mut head) = args.head {

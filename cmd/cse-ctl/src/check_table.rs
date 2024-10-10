@@ -17,6 +17,7 @@ use cloud_encryption::MasterKey;
 use futures::executor::block_on;
 use kvengine::{
     dfs::{DFSConfig, Dfs, S3Fs},
+    table::sstable::BlockCache,
     txn_chunk_manager::{with_pool_size, TxnChunkManager, TxnChunkManagerConfig},
     Engine, Shard, ShardMeta, SnapAccess, UserMeta,
 };
@@ -133,7 +134,7 @@ pub(crate) fn execute_check_table(args: CheckTableArgs) {
     let txn_chunk_manager = TxnChunkManager::new(
         None,
         s3fs.clone(),
-        None,
+        BlockCache::None,
         with_pool_size(TXN_CHUNK_WORKER_POOL_SIZE),
         TxnChunkManagerConfig::default(),
     );
@@ -584,7 +585,7 @@ impl BackupReader {
                 meta.to_change_set(),
                 false,
                 &self.master_key,
-                None,
+                BlockCache::None,
                 None,
                 self.txn_chunk_manager.clone(),
             ))

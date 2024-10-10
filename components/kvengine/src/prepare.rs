@@ -228,7 +228,7 @@ impl EngineCore {
                     id,
                     Arc::new(local_file),
                     fm,
-                    Some(self.cache.clone()),
+                    self.cache.clone(),
                     encryption_key.clone(),
                 )?;
                 continue;
@@ -267,7 +267,7 @@ impl EngineCore {
             id,
             Arc::new(file),
             &meta,
-            Some(self.cache.clone()),
+            self.cache.clone(),
             encryption_key,
         )?;
         ENGINE_LEVEL_WRITE_VEC

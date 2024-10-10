@@ -8,10 +8,9 @@ use std::{
     sync::Arc,
 };
 
-use bytes::{Buf, Bytes};
+use bytes::Buf;
 use cloud_encryption::EncryptionKey;
 use kvenginepb as pb;
-use moka::sync::SegmentedCache;
 
 use crate::{
     dfs::FileType,
@@ -20,7 +19,7 @@ use crate::{
         blobtable::blobtable::BlobTable,
         columnar::{ColumnarFile, SchemaFile},
         file::File,
-        sstable::{BlockCacheKey, L0Table, SsTable},
+        sstable::{BlockCache, L0Table, SsTable},
         BoundedDataSet, TxnFile,
     },
     *,
@@ -71,7 +70,7 @@ impl ChangeSet {
         id: u64,
         file: Arc<dyn File>,
         meta: &FileMeta,
-        cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
+        cache: BlockCache,
         encryption_key: Option<EncryptionKey>,
     ) -> Result<()> {
         match meta.file_type {

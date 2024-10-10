@@ -17,7 +17,9 @@ use cloud_worker::CloudWorker;
 use dashmap::DashMap;
 use futures::executor::block_on;
 use grpcio::{Channel, ChannelBuilder, EnvBuilder, Environment};
-use kvengine::{dfs::Dfs, txn_chunk_manager::TxnChunkManagerConfig, ShardStats};
+use kvengine::{
+    dfs::Dfs, table::sstable::BlockCacheType, txn_chunk_manager::TxnChunkManagerConfig, ShardStats,
+};
 use kvproto::{
     kvrpcpb::{Mutation, Op},
     metapb,
@@ -683,7 +685,7 @@ impl ServerCluster {
             .collect()
     }
 
-    pub fn start_tikv_workers(&mut self, workers_cnt: usize, threads_cnt: usize, register: bool) {
+    pub fn start_tikv_workers(&mut self, workers_cnt: usize, opts: TikvWorkerOptions) {
         assert!(
             self.tikv_workers.is_empty(),
             "start tikv workers more than once is not supported"
@@ -698,19 +700,22 @@ impl ServerCluster {
                 update_interval: TIKV_WORKER_UPDATE_INTERVAL,
                 security: tikv_config.security.clone(),
                 dfs: tikv_config.dfs.clone(),
-                register,
+                register: opts.register,
                 txn_chunk_manager: TxnChunkManagerConfig {
                     gc_interval: TXN_CHUNK_MGR_GC_INTERVAL,
                     gc_ttl: TXN_CHUNK_MGR_GC_TTL,
                 },
                 txn_chunk_target_block_entries: TXN_CHUNK_TARGET_BLOCK_ENTRIES,
+                cop_block_cache_size: opts.cop_block_cache_size,
+                cop_block_cache_type: opts.cop_block_cache_type,
+                cop_block_size: tikv_config.rocksdb.writecf.block_size,
                 ..Default::default()
             };
 
             let mut worker = CloudWorker::new(
                 tikv_worker_conf,
                 None,
-                threads_cnt,
+                opts.threads_cnt,
                 self.get_pure_pd_client(),
             );
             worker.start();
@@ -764,6 +769,7 @@ pub fn new_test_config(base_dir: &Path, node_id: u16, nodes_count: usize) -> Tik
     config.rocksdb.max_sub_compactions = 1;
     config.rfengine.target_file_size = ReadableSize::kb(128);
     config.rfengine.wal_sync_dir = format!("{}/{}/wal", base_dir.to_str().unwrap(), node_id);
+    config.kvengine.block_cache_type = BlockCacheType::Quick;
 
     // Work around https://github.com/tidbcloud/cloud-storage-engine/issues/882.
     config.server.raft_client_initial_reconnect_backoff = ReadableDuration::millis(100);
@@ -815,6 +821,24 @@ fn tikv_worker_addr(idx: u16) -> String {
 
 pub fn tikv_worker_cop_url(idx: u16) -> String {
     format!("http://{}/coprocessor", tikv_worker_addr(idx))
+}
+
+pub struct TikvWorkerOptions {
+    pub threads_cnt: usize,
+    pub cop_block_cache_size: ReadableSize,
+    pub cop_block_cache_type: BlockCacheType,
+    pub register: bool,
+}
+
+impl Default for TikvWorkerOptions {
+    fn default() -> Self {
+        Self {
+            threads_cnt: 2,
+            cop_block_cache_size: ReadableSize::mb(8),
+            cop_block_cache_type: BlockCacheType::Quick,
+            register: true,
+        }
+    }
 }
 
 pub fn put_mut(key: &str, val: &str) -> Mutation {

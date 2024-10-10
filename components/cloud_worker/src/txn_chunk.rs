@@ -243,7 +243,10 @@ mod tests {
     use kvengine::{
         dfs,
         dfs::{Dfs, FileType, InMemFs},
-        table::{file::InMemFile, InnerKey, TxnChunk, TxnCtx, TxnFile, TxnFileId, TxnFileIterator},
+        table::{
+            file::InMemFile, sstable::BlockCache, InnerKey, TxnChunk, TxnCtx, TxnFile, TxnFileId,
+            TxnFileIterator,
+        },
         Iterator, UserMeta, GLOBAL_SHARD_END_KEY,
     };
 
@@ -301,8 +304,12 @@ mod tests {
             .block_on(dfs.read_file(chunk_id, opts))
             .unwrap();
         assert!(!chunk_data.is_empty());
-        let txn_chunk =
-            TxnChunk::new(Arc::new(InMemFile::new(155, chunk_data)), None, None).unwrap();
+        let txn_chunk = TxnChunk::new(
+            Arc::new(InMemFile::new(155, chunk_data)),
+            BlockCache::None,
+            None,
+        )
+        .unwrap();
         let user_meta = UserMeta::new(1, 2).to_array().to_vec();
         let lower_bound = InnerKey::from_inner_buf(b"");
         let upper_bound = InnerKey::from_inner_buf(GLOBAL_SHARD_END_KEY);

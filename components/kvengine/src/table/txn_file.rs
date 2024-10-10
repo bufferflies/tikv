@@ -7,7 +7,6 @@ use bytes::{Buf, BufMut, Bytes};
 use cloud_encryption::EncryptionKey;
 use itertools::Itertools;
 use log_wrappers::Value as LogValue;
-use moka::sync::SegmentedCache;
 use tikv_util::codec::number::NumberEncoder;
 
 use crate::{
@@ -16,7 +15,7 @@ use crate::{
         encode_val_to_outer_val_owner,
         file::{File, TtlCache},
         search,
-        sstable::{key_diff_idx, BlockCacheKey, EntrySlice},
+        sstable::{key_diff_idx, BlockCache, BlockCacheKey, EntrySlice},
         BoundedDataSet, ChecksumType, DataBound, Error, InnerKey, Iterator, NoPrefixKey, Result,
         Value,
     },
@@ -440,7 +439,7 @@ impl fmt::Debug for TxnChunk {
 impl TxnChunk {
     pub fn new(
         file: Arc<dyn File>,
-        cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
+        cache: BlockCache,
         encryption_key: Option<EncryptionKey>,
     ) -> Result<Self> {
         let inner = TxnChunkInner::new(file, cache, encryption_key)?;
@@ -545,7 +544,7 @@ impl BoundedDataSet for TxnChunk {
 
 pub struct TxnChunkInner {
     file: Arc<dyn File>,
-    cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
+    cache: BlockCache,
     footer: TxnChunkFooter,
     index: TxnChunkIndex,
     hash_index: TtlCache<TxnChunkHashIndex>,
@@ -622,7 +621,7 @@ impl TxnChunkIndex {
 impl TxnChunkInner {
     pub fn new(
         file: Arc<dyn File>,
-        cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
+        cache: BlockCache,
         encryption_key: Option<EncryptionKey>,
     ) -> Result<Self> {
         let footer = Self::load_footer(&file)?;
@@ -728,18 +727,11 @@ impl TxnChunkInner {
         let block_off = self.index.get_block_off(pos);
         let next_block_off = self.index.get_block_off(pos + 1);
         let length = next_block_off - block_off;
-        match &self.cache {
-            Some(cache) => {
-                let cache_key = BlockCacheKey::new(self.file.id(), block_off as u32);
-                cache
-                    .try_get_with(cache_key, || {
-                        crate::metrics::ENGINE_CACHE_MISS.inc_by(1);
-                        self.read_block_from_file(block_off as u64, length, decryption_buf)
-                    })
-                    .map_err(|err| err.as_ref().clone())
-            }
-            None => self.read_block_from_file(block_off as u64, length, decryption_buf),
-        }
+
+        let cache_key = BlockCacheKey::new(self.file.id(), block_off as u32);
+        self.cache.try_get_with(cache_key, || {
+            self.read_block_from_file(block_off as u64, length, decryption_buf)
+        })
     }
 
     fn read_block_from_file(
@@ -1833,7 +1825,7 @@ mod tests {
     use crate::{
         table::{
             file::InMemFile,
-            sstable::get_test_value,
+            sstable::{get_test_value, BlockCache},
             txn_file::{
                 TxnChunk, TxnChunkBuilder, TxnChunkIterator, OP_CHECK_NOT_EXIST, OP_INSERT, OP_PUT,
             },
@@ -2068,7 +2060,7 @@ mod tests {
         let mut chunk_data = vec![];
         chunk_builder.finish(&mut chunk_data);
         let chunk_file = Arc::new(InMemFile::new(id, chunk_data.into()));
-        TxnChunk::new(chunk_file, None, enc_key.cloned()).unwrap()
+        TxnChunk::new(chunk_file, BlockCache::None, enc_key.cloned()).unwrap()
     }
 
     #[rstest]

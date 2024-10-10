@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use kvengine::dfs::DFSConfig;
+use kvengine::{dfs::DFSConfig, table::sstable::BlockCacheType};
 use pd_client::{
     pd_control,
     pd_control::{OpKind, PdScheduleConfig},
@@ -16,6 +16,7 @@ use rand::prelude::*;
 use security::SecurityConfig;
 use test_cloud_server::{
     oss::prepare_dfs, tidb::*, tikv_worker_cop_url, tpc::*, try_wait_async, ServerCluster,
+    TikvWorkerOptions,
 };
 use test_pd_client::PdWrapper;
 use tikv::config::TikvConfig;
@@ -47,7 +48,6 @@ const NODES_COUNT: usize = 4;
 const TEST_DURATION: Duration = Duration::from_secs(120); // Test for longer as TiDB bootstrap may cost 30s+.
 
 const TIKV_WORKERS_COUNT: usize = 2;
-const TIKV_WORKERS_THREADS_COUNT: usize = 2;
 
 const PD_COUNT: usize = 1;
 const PD_BIN_ENV_KEY: &str = "PD_BIN";
@@ -92,6 +92,7 @@ const ENABLE_GLOBAL_TXN_FILE_RATIO: f64 = 0.8; // 80% chance enable txn file glo
 const ENABLE_GLOBAL_TXN_FILE_ENV_KEY: &str = "GLOBAL_TXN_FILE";
 
 const USE_REMOTE_COP_ENV_KEY: &str = "USE_REMOTE_COP";
+const COP_BLOCK_CACHE_SIZE: ReadableSize = ReadableSize::mb(16); // Small size to make eviction more frequent.
 
 #[test]
 fn test_random_with_tidb() {
@@ -103,12 +104,19 @@ fn test_random_with_tidb() {
         .build()
         .unwrap();
     let _guard = runtime.enter();
+    let mut rng = thread_rng();
 
-    let enable_inner_key_off: bool = thread_rng().gen_bool(ENABLE_INNER_KEY_OFF_RATIO);
+    let enable_inner_key_off: bool = rng.gen_bool(ENABLE_INNER_KEY_OFF_RATIO);
     let use_remote_cop = env_switch(USE_REMOTE_COP_ENV_KEY);
+    let block_cache_type = if rng.gen_ratio(1, 5) {
+        BlockCacheType::Moka
+    } else {
+        BlockCacheType::Quick
+    };
     info!("switches";
         "enable_inner_key_off" => enable_inner_key_off,
         "use_remote_cop" => use_remote_cop,
+        "block_cache_type" => ?block_cache_type,
     );
 
     // Prepare.
@@ -122,6 +130,7 @@ fn test_random_with_tidb() {
         INITIAL_KEYSPACE_COUNT,
         enable_inner_key_off,
         use_remote_cop,
+        block_cache_type,
         Some(&tc),
     );
     let pd_client = cluster.get_pd_client_ext();
@@ -388,6 +397,7 @@ fn prepare_cluster(
     initial_keyspace_count: usize,
     enable_inner_key_off: bool,
     use_remote_cop: bool,
+    block_cache_type: BlockCacheType,
     tc: Option<&TidbCluster>,
 ) -> ServerCluster {
     let mut rng = rand::thread_rng();
@@ -416,6 +426,7 @@ fn prepare_cluster(
         conf.security = security_conf.clone();
         conf.kvengine.compaction_tombs_count = 100;
         conf.kvengine.max_del_range_delay = ReadableDuration(Duration::from_secs(3));
+        conf.kvengine.block_cache_type = block_cache_type;
         conf.storage.flow_control.enable = true;
         conf.storage.scheduler_worker_pool_size = cpu_cores;
 
@@ -432,7 +443,14 @@ fn prepare_cluster(
         None => PdWrapper::new_test(1, security_conf, None),
     };
     let mut cluster = ServerCluster::new_opt(nodes, update_conf_fn, pd_wrapper);
-    cluster.start_tikv_workers(TIKV_WORKERS_COUNT, TIKV_WORKERS_THREADS_COUNT, true);
+    cluster.start_tikv_workers(
+        TIKV_WORKERS_COUNT,
+        TikvWorkerOptions {
+            cop_block_cache_size: COP_BLOCK_CACHE_SIZE,
+            cop_block_cache_type: block_cache_type,
+            ..Default::default()
+        },
+    );
     cluster.wait_region_replicated(&[], 3);
 
     let mut keyspaces: Vec<u32> = vec![];

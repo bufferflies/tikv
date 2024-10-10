@@ -20,6 +20,7 @@ use kvengine::{
             build_schema_file, new_int_handle_column_info, new_txn_id_column_info,
             new_version_column_info, ColumnarFilterReader, Schema, SchemaBuf,
         },
+        sstable::BlockCache,
     },
     SnapAccess, WRITE_CF,
 };
@@ -389,7 +390,7 @@ fn test_get_snapshot_from_leader_by_status_api() {
             delegate_resp.get_mem_table_data(),
             delegate_resp.get_snapshot(),
             &master_key,
-            None,
+            BlockCache::None,
             Some(schema_files.clone()),
             kvengine.get_txn_chunk_manager(),
         ))

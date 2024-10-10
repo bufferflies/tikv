@@ -15,7 +15,6 @@ use dashmap::DashMap;
 use kvenginepb as pb;
 use kvenginepb::TxnFileRefs;
 use log_wrappers::Value as LogValue;
-use moka::sync::SegmentedCache;
 use pb::SchemaMeta;
 use protobuf::Message;
 use tikv_util::{
@@ -35,7 +34,7 @@ use crate::{
             HANDLE_COL_ID,
         },
         memtable::{CfTable, Hint, SkipList, WriteBatch},
-        sstable::BlockCacheKey,
+        sstable::BlockCache,
         table, BoundedDataSet, DataBound, InnerKey, Iterator as TableIterator,
         SkipOpTxnFileIterator, TxnFile, TxnFileIterator,
     },
@@ -112,7 +111,7 @@ impl SnapAccess {
         change_set: pb::ChangeSet,
         ignore_lock: bool,
         master_key: &MasterKey,
-        block_cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
+        block_cache: BlockCache,
         schema_files: Option<Arc<DashMap<u64, SchemaFile>>>,
         txn_chunk_manager: TxnChunkManager,
     ) -> Result<Self> {
@@ -139,7 +138,7 @@ impl SnapAccess {
         change_set: pb::ChangeSet,
         mem_tbls: Vec<CfTable>,
         master_key: &MasterKey,
-        block_cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
+        block_cache: BlockCache,
         schema_files: Option<Arc<DashMap<u64, SchemaFile>>>,
         txn_chunk_manager: TxnChunkManager,
     ) -> Result<Self> {
@@ -166,7 +165,7 @@ impl SnapAccess {
         mem_table_data: &[u8],
         snapshot: &[u8],
         master_key: &MasterKey,
-        block_cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
+        block_cache: BlockCache,
         schema_files: Option<Arc<DashMap<u64, SchemaFile>>>, // schema files cache
         txn_chunk_manager: TxnChunkManager,
     ) -> Result<Self> {
@@ -374,7 +373,7 @@ impl SnapAccessCore {
         mem_tbls: Vec<CfTable>,
         ignore_lock: bool,
         master_key: &MasterKey,
-        block_cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
+        block_cache: BlockCache,
         schema_files: Option<Arc<DashMap<u64, SchemaFile>>>,
         txn_chunk_manager: TxnChunkManager,
     ) -> Result<Self> {
@@ -1676,9 +1675,12 @@ mod tests {
         read::MEM_DATA_FORMAT_V1,
         shard::ShardDataBuilder,
         table::{
-            self, file::InMemFile, memtable::CfTable, sstable::build_test_table_with_kvs, InnerKey,
-            NoPrefixKey, OwnedInnerKey, TxnChunk, TxnChunkBuilder, TxnCtx, TxnFile, TxnFileId,
-            OP_PUT,
+            self,
+            file::InMemFile,
+            memtable::CfTable,
+            sstable::{build_test_table_with_kvs, BlockCache},
+            InnerKey, NoPrefixKey, OwnedInnerKey, TxnChunk, TxnChunkBuilder, TxnCtx, TxnFile,
+            TxnFileId, OP_PUT,
         },
         txn_chunk_manager::{with_pool_size, TxnChunkManager, TxnChunkManagerConfig},
         util::test_util::KeyBuilder,
@@ -1833,7 +1835,7 @@ mod tests {
 
             let kb = KeyBuilder::new(KEYSPACE_ID, enable_inner_key_off, "t_");
             let dfs: Arc<dyn crate::dfs::Dfs> = Arc::new(InMemFs::new());
-            let txn_chunk_manager = TxnChunkManager::new(None, dfs.clone(), None, with_pool_size(2), TxnChunkManagerConfig::default());
+            let txn_chunk_manager = TxnChunkManager::new(None, dfs.clone(), BlockCache::None, with_pool_size(2), TxnChunkManagerConfig::default());
 
             let master_key = MasterKey::new(&[1u8; 32]);
             let enc_key = enable_enc.then(||master_key.generate_encryption_key());
@@ -1896,7 +1898,7 @@ mod tests {
             cs.set_shard_ver(shard_ver);
             cs.set_snapshot(snap_pb);
             let snap_bin = cs.write_to_bytes().unwrap();
-            let remote_snap = block_on(SnapAccess::construct_snapshot("test".to_owned(), dfs, &mem_bin, &snap_bin, &master_key, None, None, txn_chunk_manager)).unwrap();
+            let remote_snap = block_on(SnapAccess::construct_snapshot("test".to_owned(), dfs, &mem_bin, &snap_bin, &master_key, BlockCache::None, None, txn_chunk_manager)).unwrap();
 
             let inner_ranges = inner_ranges.iter().map(|(start, end)| (start.as_ref(), end.as_ref())).collect::<Vec<_>>();
             let ref_store_in_ranges = ref_store.new_in_ranges(&inner_ranges);
@@ -2014,7 +2016,8 @@ mod tests {
 
                         let chunk_file =
                             Arc::new(InMemFile::new(next_txn_chunk_id, chunk_data.into()));
-                        let txn_chunk = TxnChunk::new(chunk_file, None, enc_key.cloned()).unwrap();
+                        let txn_chunk =
+                            TxnChunk::new(chunk_file, BlockCache::None, enc_key.cloned()).unwrap();
                         txn_chunks.push(txn_chunk);
                     }
 

@@ -52,6 +52,7 @@ prometheus = { version = "0.13", features = ["nightly"] }
 prometheus-static-metric = "0.5"
 protobuf = "2.8"
 quick-xml = { version = "0.23.1", features = ["serialize"] }
+quick_cache = "0.6.9"
 rand = "0.8"
 regex = "1"
 rusoto_core = "0.46.0"

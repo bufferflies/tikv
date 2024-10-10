@@ -207,6 +207,7 @@ mod tests {
         table::{
             file::InMemFile,
             memtable::{skl_ext::SkipListExt, SkipList, WriteBatch},
+            sstable::BlockCache,
             txn_file::{TxnChunk, TxnChunkBuilder, TxnCtx, TxnFile, TxnFileId, OP_PUT},
             InnerKey, NoPrefixKey,
         },
@@ -272,7 +273,7 @@ mod tests {
         let txn_file_chunk_data =
             build_txn_file_chunk_data(chunk_id, vec![10, 12, 18, 20], enable_inner_key_off, &kb);
         let txn_file_chunk_file = Arc::new(InMemFile::new(chunk_id, txn_file_chunk_data));
-        let txn_file_chunk = TxnChunk::new(txn_file_chunk_file, None, None).unwrap();
+        let txn_file_chunk = TxnChunk::new(txn_file_chunk_file, BlockCache::None, None).unwrap();
         let user_meta = UserMeta::new(102, 103).to_array().to_vec();
         let lower_bound = InnerKey::from_inner_buf(b"");
         let upper_bound = InnerKey::from_inner_buf(GLOBAL_SHARD_END_KEY);

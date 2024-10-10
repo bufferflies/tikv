@@ -187,8 +187,8 @@ mod tests {
     use api_version::ApiV2;
     use kvengine::{
         table::{
-            file::InMemFile, InnerKey, NoPrefixKey, TxnChunk, TxnChunkBuilder, TxnCtx, TxnFileId,
-            OP_PUT,
+            file::InMemFile, sstable::BlockCache, InnerKey, NoPrefixKey, TxnChunk, TxnChunkBuilder,
+            TxnCtx, TxnFileId, OP_PUT,
         },
         util::test_util::KeyBuilder,
         UserMeta, GLOBAL_SHARD_END_KEY,
@@ -343,7 +343,7 @@ mod tests {
         let mut buf = vec![];
         txn_chunk_builder.finish(&mut buf);
         let in_mem_file = Arc::new(InMemFile::new(chunk_id, buf.into()));
-        TxnChunk::new(in_mem_file, None, None).unwrap()
+        TxnChunk::new(in_mem_file, BlockCache::None, None).unwrap()
     }
 
     fn make_normal_lock(raw_key: &[u8], start_ts: u64) -> Lock {

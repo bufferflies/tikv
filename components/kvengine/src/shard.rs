@@ -17,7 +17,6 @@ use bytes::{Buf, BufMut, Bytes};
 use cloud_encryption::{EncryptionKey, MasterKey};
 use dashmap::DashMap;
 use kvenginepb::{self as pb, TxnFileRef};
-use moka::sync::SegmentedCache;
 use rand::Rng;
 use slog_global::*;
 use tikv_util::{box_err, box_try, codec::number::U64_SIZE};
@@ -31,7 +30,7 @@ use crate::{
         file::InMemFile,
         memtable::{self, CfTable},
         search,
-        sstable::{BlockCacheKey, L0Table, SsTable},
+        sstable::{BlockCache, L0Table, SsTable},
         BoundedDataSet, DataBound, InnerKey, TxnFile,
     },
     txn_chunk_manager::TxnChunkManager,
@@ -278,7 +277,7 @@ impl Shard {
         mut mem_tbls: Vec<CfTable>,
         ignore_lock: bool,
         master_key: &MasterKey,
-        block_cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
+        block_cache: BlockCache,
         schema_files: Option<Arc<DashMap<u64, SchemaFile>>>,
         txn_chunk_manager: TxnChunkManager,
     ) -> Result<Self> {

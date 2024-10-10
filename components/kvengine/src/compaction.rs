@@ -48,7 +48,7 @@ use crate::{
             GLOBAL_COMMON_HANDLE_END,
         },
         file::{File, InMemFile, LocalFile},
-        sstable::{self, builder::TableBuilderOptions, L0Builder, SsTable},
+        sstable::{self, builder::TableBuilderOptions, BlockCache, L0Builder, SsTable},
         BoundedDataSet, ChecksumType, DataBound, InnerKey,
     },
     Error::{
@@ -1929,7 +1929,7 @@ fn files_to_l0_tables(
     files
         .into_iter()
         .map(|f| {
-            sstable::L0Table::new(f, None, false, encryption_key.clone())
+            sstable::L0Table::new(f, BlockCache::None, false, encryption_key.clone())
                 .unwrap()
                 .unwrap()
         })
@@ -1942,7 +1942,7 @@ fn files_to_tables(
 ) -> Vec<sstable::SsTable> {
     files
         .into_iter()
-        .map(|f| sstable::SsTable::new(f, None, encryption_key.clone()).unwrap())
+        .map(|f| sstable::SsTable::new(f, BlockCache::None, encryption_key.clone()).unwrap())
         .collect()
 }
 
@@ -2294,9 +2294,10 @@ fn compact_destroy_range(
         deletes.push(delete);
         let file = table_files.remove(&id).unwrap();
         let (data, smallest, biggest) = if level == 0 {
-            let t = sstable::L0Table::new(file, None, false, ctx.encryption_key.clone())
-                .unwrap()
-                .unwrap();
+            let t =
+                sstable::L0Table::new(file, BlockCache::None, false, ctx.encryption_key.clone())
+                    .unwrap()
+                    .unwrap();
             let mut builder = L0Builder::new(
                 new_id,
                 block_size,
@@ -2326,7 +2327,8 @@ fn compact_destroy_range(
             let (mut l0_create, data) = builder.finish();
             (data, l0_create.take_smallest(), l0_create.take_biggest())
         } else {
-            let t = sstable::SsTable::new(file, None, ctx.encryption_key.clone()).unwrap();
+            let t =
+                sstable::SsTable::new(file, BlockCache::None, ctx.encryption_key.clone()).unwrap();
             let mut builder = sstable::Builder::new(
                 new_id,
                 block_size,
@@ -2548,9 +2550,10 @@ fn compact_truncate_ts(
         deletes.push(delete);
 
         let (data, smallest, biggest) = if level == 0 {
-            let t = sstable::L0Table::new(file, None, false, ctx.encryption_key.clone())
-                .unwrap()
-                .unwrap();
+            let t =
+                sstable::L0Table::new(file, BlockCache::None, false, ctx.encryption_key.clone())
+                    .unwrap()
+                    .unwrap();
             let mut builder = L0Builder::new(
                 new_id,
                 block_size,
@@ -2580,7 +2583,8 @@ fn compact_truncate_ts(
             let (mut l0_create, data) = builder.finish();
             (data, l0_create.take_smallest(), l0_create.take_biggest())
         } else {
-            let t = sstable::SsTable::new(file, None, ctx.encryption_key.clone()).unwrap();
+            let t =
+                sstable::SsTable::new(file, BlockCache::None, ctx.encryption_key.clone()).unwrap();
             let mut builder = sstable::Builder::new(
                 new_id,
                 block_size,
@@ -2799,9 +2803,10 @@ fn compact_trim_over_bound(
         deletes.push(delete);
 
         let (data, smallest, biggest) = if level == 0 {
-            let t = sstable::L0Table::new(file, None, false, ctx.encryption_key.clone())
-                .unwrap()
-                .unwrap();
+            let t =
+                sstable::L0Table::new(file, BlockCache::None, false, ctx.encryption_key.clone())
+                    .unwrap()
+                    .unwrap();
             let mut builder = L0Builder::new(
                 new_id,
                 block_size,
@@ -2829,7 +2834,8 @@ fn compact_trim_over_bound(
             let (mut l0_create, data) = builder.finish();
             (data, l0_create.take_smallest(), l0_create.take_biggest())
         } else {
-            let t = sstable::SsTable::new(file, None, ctx.encryption_key.clone()).unwrap();
+            let t =
+                sstable::SsTable::new(file, BlockCache::None, ctx.encryption_key.clone()).unwrap();
             let mut builder = sstable::Builder::new(
                 new_id,
                 block_size,

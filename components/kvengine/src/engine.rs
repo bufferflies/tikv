@@ -16,13 +16,12 @@ use std::{
     time::Duration,
 };
 
-use bytes::{BufMut, Bytes};
+use bytes::BufMut;
 use cloud_encryption::MasterKey;
 use collections::HashSet;
 use dashmap::{mapref::entry::Entry, DashMap};
 use file_system::IoRateLimiter;
 use fslock;
-use moka::sync::SegmentedCache;
 use security::SecurityManager;
 use slog_global::info;
 use tikv_util::{box_err, mpsc, sys::thread::StdThreadBuildWrapper};
@@ -36,7 +35,7 @@ use crate::{
     table::{
         columnar::SchemaFile,
         memtable::CfTable,
-        sstable::{BlockCacheKey, MAGIC_NUMBER},
+        sstable::{BlockCache, MAGIC_NUMBER},
         BoundedDataSet, DataBound, InnerKey, ZSTD_COMPRESSION,
     },
     txn_chunk_manager::{TxnChunkManager, TxnChunkManagerConfig},
@@ -67,7 +66,6 @@ impl Debug for Engine {
 }
 
 const FILE_LOCK_SLOTS: usize = 1024;
-pub const BLOCK_CACHE_KEY_SIZE: usize = std::mem::size_of::<BlockCacheKey>();
 
 /// LoadTableFilterFn is used to filter tables which are not necessary to load
 /// from DFS to local disks during restoration.
@@ -103,10 +101,11 @@ impl Engine {
         if max_capacity < 512 * opts.table_builder_options.block_size {
             max_capacity = 512 * opts.table_builder_options.block_size;
         }
-        let cache: SegmentedCache<BlockCacheKey, Bytes> = SegmentedCache::builder(256)
-            .weigher(|_k: &BlockCacheKey, v: &Bytes| (BLOCK_CACHE_KEY_SIZE + v.len()) as u32)
-            .max_capacity(max_capacity as u64)
-            .build();
+        let cache = BlockCache::new(
+            config.block_cache_type,
+            max_capacity as u64,
+            opts.table_builder_options.block_size,
+        );
         let (flush_tx, flush_rx) = mpsc::unbounded();
         let (compact_tx, compact_rx) = mpsc::unbounded();
         let (free_tx, free_rx) = mpsc::unbounded();
@@ -118,7 +117,7 @@ impl Engine {
         let txn_chunk_mgr = TxnChunkManager::new(
             Some(opts.local_dir.join("txn")),
             fs.clone(),
-            Some(cache.clone()),
+            cache.clone(),
             with_pool_size(opts.txn_file_worker_pool_size),
             TxnChunkManagerConfig::default(),
         );
@@ -295,7 +294,7 @@ pub struct EngineCore {
     pub(crate) flush_tx: mpsc::Sender<FlushMsg>,
     pub(crate) compact_tx: mpsc::Sender<CompactMsg>,
     pub(crate) fs: Arc<dyn dfs::Dfs>,
-    pub(crate) cache: SegmentedCache<BlockCacheKey, Bytes>,
+    pub(crate) cache: BlockCache,
     pub comp_client: CompactionClient,
     pub(crate) id_allocator: Arc<dyn IdAllocator>,
     pub(crate) managed_safe_ts: AtomicU64,

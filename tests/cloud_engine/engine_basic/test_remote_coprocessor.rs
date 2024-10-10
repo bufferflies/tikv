@@ -6,7 +6,7 @@ use cloud_encryption::MasterKey;
 use codec::prelude::NumberEncoder;
 use futures::executor::block_on;
 use kvengine::{
-    table::table::Row,
+    table::{sstable::BlockCache, table::Row},
     txn_chunk_manager::{with_pool_size, TxnChunkManager, TxnChunkManagerConfig},
     SnapAccess,
 };
@@ -23,7 +23,7 @@ use test_cloud_server::{
     client::{ClusterClient, ClusterClientOptions, TxnMutations, TxnWriteMethod},
     oss::{prepare_dfs, ObjectStorageService},
     util::Mutation,
-    ServerCluster,
+    ServerCluster, TikvWorkerOptions,
 };
 use test_coprocessor::{
     next_id, offset_for_column, Column, ColumnBuilder, DagChunkSpliter, DagSelect, Table,
@@ -2268,7 +2268,7 @@ impl<'a> DagTest<'a> {
             },
             pd,
         );
-        cluster.start_tikv_workers(1, 2, false);
+        cluster.start_tikv_workers(1, TikvWorkerOptions::default());
 
         let mut client = cluster.new_client_opt(ClusterClientOptions {
             txn_file_max_chunk_size: Some(1024),
@@ -2279,7 +2279,7 @@ impl<'a> DagTest<'a> {
         let txn_chunk_manager = TxnChunkManager::new(
             None,
             cluster.get_dfs().unwrap(),
-            None,
+            BlockCache::None,
             with_pool_size(2),
             TxnChunkManagerConfig {
                 gc_interval: ReadableDuration::secs(1),
@@ -2485,7 +2485,7 @@ impl<'a> DagTest<'a> {
                 &snapshot.memtable_rows,
                 &snapshot.cs,
                 &self.master_key,
-                None,
+                BlockCache::None,
                 None,
                 self.txn_chunk_manager.clone(),
             )

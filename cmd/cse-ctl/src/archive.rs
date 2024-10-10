@@ -9,7 +9,7 @@ use kvengine::{
     table::{
         blobtable::blobtable::BlobTable,
         file::InMemFile,
-        sstable::{L0Table, SsTable},
+        sstable::{BlockCache, L0Table, SsTable},
     },
 };
 use native_br::{
@@ -158,13 +158,15 @@ pub fn execute_show_archive(args: ShowArchiveArgs) {
         let file = Arc::new(InMemFile::new(id, data));
         let level = args.file_level.unwrap_or(1);
         if level == 0 {
-            let l0 = L0Table::new(file, None, false, None).unwrap().unwrap();
+            let l0 = L0Table::new(file, BlockCache::None, false, None)
+                .unwrap()
+                .unwrap();
             print_l0_table(&l0);
         } else if level == BLOB_LEVEL_FLAG {
             let blob = BlobTable::new(file).unwrap();
             print_blob_table(&blob);
         } else {
-            let ln = SsTable::new(file, None, None).unwrap();
+            let ln = SsTable::new(file, BlockCache::None, None).unwrap();
             println!("[SST {}, level {}]", ln.id(), level);
             print_sstable(&ln, 2);
         }

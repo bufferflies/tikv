@@ -2,6 +2,7 @@
 
 use std::{
     cmp::Ordering,
+    future::Future,
     iter::Iterator as StdIterator,
     ops::Deref,
     path::{Path, PathBuf},
@@ -45,7 +46,7 @@ impl Deref for SsTable {
 impl SsTable {
     pub fn new(
         file: Arc<dyn File>,
-        cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
+        cache: BlockCache,
         encryption_key: Option<EncryptionKey>,
     ) -> Result<Self> {
         let size = file.size();
@@ -59,7 +60,7 @@ impl SsTable {
         file: Arc<dyn File>,
         start: u64,
         end: u64,
-        cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
+        cache: BlockCache,
         encryption_key: Option<EncryptionKey>,
     ) -> Result<Self> {
         let core = SsTableCore::new(file, start, end, cache, encryption_key)?;
@@ -166,7 +167,7 @@ impl BoundedDataSet for SsTable {
 
 pub struct SsTableCore {
     file: Arc<dyn File>,
-    cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
+    cache: BlockCache,
     filter: TtlCache<BinaryFuse8>,
     start_off: u64,
     end_off: u64,
@@ -191,7 +192,7 @@ impl SsTableCore {
         file: Arc<dyn File>,
         start_off: u64,
         end_off: u64,
-        cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
+        cache: BlockCache,
         encryption_key: Option<EncryptionKey>,
     ) -> Result<Self> {
         let size = end_off - start_off;
@@ -333,25 +334,12 @@ impl SsTableCore {
         decryption_buf: &mut Vec<u8>,
         fill_cache: bool,
     ) -> Result<Bytes> {
-        match &self.cache {
-            Some(cache) => {
-                let cache_key = BlockCacheKey::new(addr.origin_fid, addr.origin_off);
-                if fill_cache {
-                    return cache
-                        .try_get_with(cache_key, || {
-                            crate::metrics::ENGINE_CACHE_MISS.inc_by(1);
-                            self.read_block_from_file(addr, length, buf, decryption_buf)
-                        })
-                        .map_err(|err| err.as_ref().clone());
-                }
-                if let Some(block) = cache.get(&cache_key) {
-                    return Ok(block);
-                }
-                crate::metrics::ENGINE_CACHE_MISS.inc_by(1);
-                self.read_block_from_file(addr, length, buf, decryption_buf)
-            }
-            None => self.read_block_from_file(addr, length, buf, decryption_buf),
-        }
+        let cache_key = BlockCacheKey::new(addr.origin_fid, addr.origin_off);
+        self.cache.try_get_with_ext(
+            cache_key,
+            || self.read_block_from_file(addr, length, buf, decryption_buf),
+            fill_cache,
+        )
     }
 
     fn read_block_from_file(
@@ -690,6 +678,151 @@ impl BlockCacheKey {
     }
 }
 
+const BLOCK_CACHE_KEY_SIZE: usize = std::mem::size_of::<BlockCacheKey>();
+const BLOCK_CACHE_SHARDS: usize = 256;
+
+#[inline]
+fn block_weight(_k: &BlockCacheKey, v: &Bytes) -> usize {
+    BLOCK_CACHE_KEY_SIZE + v.len()
+}
+
+#[repr(u8)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug, Copy, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum BlockCacheType {
+    #[default]
+    Moka = 0,
+    Quick = 1,
+    None = 2,
+}
+
+#[derive(Clone)]
+pub enum BlockCache {
+    Moka(SegmentedCache<BlockCacheKey, Bytes>),
+    Quick(Arc<quick_cache::sync::Cache<BlockCacheKey, Bytes, BlockWeighter>>),
+    None,
+}
+
+impl BlockCache {
+    pub fn new(tp: BlockCacheType, max_capacity: u64, block_size: usize) -> Self {
+        if max_capacity == 0 {
+            return BlockCache::None;
+        }
+
+        match tp {
+            BlockCacheType::Moka => {
+                let cache = SegmentedCache::builder(BLOCK_CACHE_SHARDS)
+                    .weigher(|k, v| block_weight(k, v) as u32)
+                    .max_capacity(max_capacity)
+                    .build();
+                Self::Moka(cache)
+            }
+            BlockCacheType::Quick => {
+                let opts = quick_cache::OptionsBuilder::new()
+                    .shards(BLOCK_CACHE_SHARDS)
+                    .weight_capacity(max_capacity)
+                    .estimated_items_capacity(
+                        max_capacity as usize / (BLOCK_CACHE_KEY_SIZE + block_size),
+                    )
+                    .build()
+                    .unwrap();
+                let cache = quick_cache::sync::Cache::with_options(
+                    opts,
+                    BlockWeighter,
+                    quick_cache::DefaultHashBuilder::default(),
+                    quick_cache::sync::DefaultLifecycle::default(),
+                );
+                Self::Quick(Arc::new(cache))
+            }
+            BlockCacheType::None => Self::None,
+        }
+    }
+
+    pub fn get(&self, key: &BlockCacheKey) -> Option<Bytes> {
+        match self {
+            Self::Moka(cache) => cache.get(key),
+            Self::Quick(cache) => cache.get(key),
+            Self::None => None,
+        }
+    }
+
+    pub fn try_get_with(
+        &self,
+        key: BlockCacheKey,
+        init: impl FnOnce() -> Result<Bytes>,
+    ) -> Result<Bytes> {
+        let init = || {
+            self.report_cache_miss();
+            init()
+        };
+        match self {
+            Self::Moka(cache) => cache
+                .try_get_with(key, init)
+                .map_err(|err| err.as_ref().clone()),
+            Self::Quick(cache) => cache.get_or_insert_with(&key, init),
+            Self::None => init(),
+        }
+    }
+
+    pub fn try_get_with_ext(
+        &self,
+        key: BlockCacheKey,
+        init: impl FnOnce() -> Result<Bytes>,
+        fill_cache: bool,
+    ) -> Result<Bytes> {
+        if fill_cache {
+            self.try_get_with(key, init)
+        } else if let Some(block) = self.get(&key) {
+            Ok(block)
+        } else {
+            self.report_cache_miss();
+            init()
+        }
+    }
+
+    pub async fn try_get_with_async(
+        &self,
+        key: BlockCacheKey,
+        init: impl Future<Output = Result<Bytes>>,
+    ) -> Result<Bytes> {
+        let init = async {
+            self.report_cache_miss();
+            init.await
+        };
+        match self {
+            Self::Moka(_) | Self::None => {
+                // Moka does not support async.
+                init.await
+            }
+            Self::Quick(cache) => cache.get_or_insert_async(&key, init).await,
+        }
+    }
+
+    pub fn weighted_size(&self) -> u64 {
+        match self {
+            Self::Moka(cache) => cache.weighted_size(),
+            Self::Quick(cache) => cache.weight(),
+            Self::None => 0,
+        }
+    }
+
+    fn report_cache_miss(&self) {
+        match self {
+            Self::Moka(_) | Self::Quick(_) => crate::metrics::ENGINE_CACHE_MISS.inc_by(1),
+            Self::None => {}
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct BlockWeighter;
+
+impl quick_cache::Weighter<BlockCacheKey, Bytes> for BlockWeighter {
+    fn weight(&self, key: &BlockCacheKey, val: &Bytes) -> u64 {
+        block_weight(key, val) as u64
+    }
+}
+
 fn validate_checksum(data: &[u8], checksum_type: ChecksumType) -> Result<()> {
     if data.len() < 4 {
         return Err(table::Error::InvalidChecksum(String::from(
@@ -830,8 +963,8 @@ pub(crate) fn build_test_table_with_prefix(
 }
 
 #[cfg(test)]
-pub(crate) fn new_test_cache() -> Option<SegmentedCache<BlockCacheKey, Bytes>> {
-    Some(SegmentedCache::new(1024, 4))
+pub(crate) fn new_test_cache() -> BlockCache {
+    BlockCache::new(BlockCacheType::Quick, 1024, 16)
 }
 
 #[cfg(test)]

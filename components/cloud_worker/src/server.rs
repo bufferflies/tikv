@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use bytes::{Buf, Bytes};
+use bytes::Buf;
 use cloud_encryption::MasterKey;
 use cloud_server::StatusServer as CloudStatusServer;
 use dashmap::DashMap;
@@ -24,7 +24,7 @@ use hyper::{
 use kvengine::{
     dfs,
     dfs::{CacheFs, S3Fs},
-    table::{columnar::SchemaFile, sstable::BlockCacheKey, ChecksumType},
+    table::{columnar::SchemaFile, sstable::BlockCache, ChecksumType},
     txn_chunk_manager::TxnChunkManager,
     SnapAccess,
 };
@@ -71,7 +71,7 @@ pub(crate) struct Context {
     pub pd: Arc<dyn PdClient>,
     pub master_key: MasterKey,
     pub quota_limiter: Arc<QuotaLimiter>,
-    pub block_cache: Option<moka::sync::SegmentedCache<BlockCacheKey, Bytes>>,
+    pub block_cache: BlockCache,
     pub schema_files: Option<Arc<DashMap<u64, SchemaFile>>>,
     pub worker_limiter: WorkerLimiter,
     pub txn_chunk_manager: TxnChunkManager,

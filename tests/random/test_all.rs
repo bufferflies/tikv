@@ -10,7 +10,7 @@ use cloud_encryption::KeyspaceEncryptionConfig;
 use futures::executor::block_on;
 use kvengine::{
     dfs::{DFSConfig, S3Fs},
-    table::ChecksumType,
+    table::{sstable::BlockCacheType, ChecksumType},
 };
 use kvproto::pdpb::CheckPolicy;
 use load_data::task::LoadDataConfig;
@@ -20,6 +20,7 @@ use rand::prelude::*;
 use security::SecurityConfig;
 use test_cloud_server::{
     client::ClusterClientOptions, oss::prepare_dfs, tidb::TidbCluster, ServerCluster,
+    TikvWorkerOptions,
 };
 use test_pd_client::{PdClientExt, PdWrapper};
 use tikv_util::{
@@ -45,7 +46,6 @@ const INITIAL_TABLE_COUNT: usize = 3;
 
 const NODES_COUNT: usize = 4;
 const TIKV_WORKERS_COUNT: usize = 2;
-const TIKV_WORKERS_THREADS_COUNT: usize = 2;
 
 const RESTORE_CONCURRENCY: usize = 2;
 const LOAD_DATA_CONCURRENCY: usize = 2;
@@ -55,6 +55,8 @@ const INSTANT_BACKUP_INTERVAL: Duration = Duration::from_millis(1050);
 
 const REGION_BUCKET_SIZE: ReadableSize = ReadableSize::kb(64);
 const ENABLE_INNER_KEY_OFF_RATIO: f64 = 0.8; // 80% chance to enable inner key offset
+
+const COP_BLOCK_CACHE_SIZE: ReadableSize = ReadableSize::mb(4); // Small size to make eviction more frequent.
 
 #[test]
 fn test_random_all() {
@@ -67,9 +69,18 @@ fn test_random_all() {
         .build()
         .unwrap();
     let _guard = runtime.enter();
+    let mut rng = thread_rng();
 
-    let enable_inner_key_off: bool = thread_rng().gen_bool(ENABLE_INNER_KEY_OFF_RATIO);
-    info!("enable_inner_key_off: {}", enable_inner_key_off);
+    let enable_inner_key_off: bool = rng.gen_bool(ENABLE_INNER_KEY_OFF_RATIO);
+    let block_cache_type: BlockCacheType = if rng.gen_ratio(1, 5) {
+        BlockCacheType::Moka
+    } else {
+        BlockCacheType::Quick
+    };
+    info!(
+        "enable_inner_key_off: {}, block_cache_type: {:?}",
+        enable_inner_key_off, block_cache_type
+    );
 
     // Prepare.
     let (_temp_dir, _oss, dfs_config) = prepare_dfs("oss_");
@@ -80,6 +91,7 @@ fn test_random_all() {
         NODES_COUNT,
         INITIAL_KEYSPACE_COUNT,
         enable_inner_key_off,
+        block_cache_type,
     );
     let pd_client = cluster.get_pd_client();
     let keyspace_manager = cluster.keyspace_manager().clone();
@@ -316,6 +328,7 @@ fn prepare_cluster(
     nodes_count: usize,
     initial_keyspace_count: usize,
     enable_inner_key_off: bool,
+    block_cache_type: BlockCacheType,
 ) -> ServerCluster {
     let mut rng = rand::thread_rng();
     let nodes = alloc_node_id_vec(nodes_count);
@@ -358,12 +371,20 @@ fn prepare_cluster(
         conf.kvengine.max_del_range_delay = ReadableDuration(Duration::from_secs(3));
         conf.kvengine.flush_split_l0 = true;
         conf.kvengine.per_keyspace_configs = per_keyspace_configs.clone();
+        conf.kvengine.block_cache_type = block_cache_type;
         conf.storage.flow_control.enable = true;
         conf.storage.scheduler_worker_pool_size = cpu_cores;
     };
     let pd_wrapper = PdWrapper::new_test(1, security_conf, None);
     let mut cluster = ServerCluster::new_opt(nodes, update_conf_fn, pd_wrapper);
-    cluster.start_tikv_workers(TIKV_WORKERS_COUNT, TIKV_WORKERS_THREADS_COUNT, true);
+    cluster.start_tikv_workers(
+        TIKV_WORKERS_COUNT,
+        TikvWorkerOptions {
+            cop_block_cache_size: COP_BLOCK_CACHE_SIZE,
+            cop_block_cache_type: block_cache_type,
+            ..Default::default()
+        },
+    );
     cluster.wait_region_replicated(&[], 3);
     let pd_client = cluster.get_pd_client();
     pd_client.disable_default_operator();

@@ -16,7 +16,6 @@ use bytes::{Buf, Bytes};
 use cloud_encryption::EncryptionKey;
 use dashmap::DashMap;
 use futures::executor::block_on;
-use moka::sync::SegmentedCache;
 use regex::Regex;
 use tikv_util::{box_err, config::ReadableDuration, time::Instant};
 use tokio::sync::{OwnedRwLockWriteGuard, RwLock};
@@ -28,7 +27,7 @@ use crate::{
     table,
     table::{
         file::{InMemFile, LocalFile},
-        sstable::BlockCacheKey,
+        sstable::BlockCache,
         txn_file::TxnChunk,
         TxnCtx, TxnFile, TxnFileId,
     },
@@ -46,7 +45,7 @@ impl TxnChunkManager {
     pub fn new(
         local_path: Option<PathBuf>,
         dfs: Arc<dyn Dfs>,
-        cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
+        cache: BlockCache,
         worker_pool: WorkerPool,
         config: TxnChunkManagerConfig,
     ) -> Self {
@@ -138,7 +137,7 @@ pub struct TxnChunkManagerCore {
     local_path: Option<PathBuf>,
     dfs: Arc<dyn Dfs>,
     txn_chunks: Arc<DashMap<u64, TxnChunkEntry>>,
-    cache: Option<SegmentedCache<BlockCacheKey, Bytes>>,
+    cache: BlockCache,
     worker_pool: WorkerPool,
 }
 
@@ -545,8 +544,7 @@ mod tests {
     use super::*;
     use crate::{
         dfs::InMemFs,
-        table::{NoPrefixKey, TxnChunkBuilder, OP_PUT},
-        BLOCK_CACHE_KEY_SIZE,
+        table::{sstable::BlockCacheType, NoPrefixKey, TxnChunkBuilder, OP_PUT},
     };
 
     #[rstest]
@@ -555,14 +553,11 @@ mod tests {
     fn test_txn_chunk_manager(#[case] tmp_dir: Option<TempDir>) {
         let local_path = tmp_dir.as_ref().map(|dir| dir.path().to_path_buf());
         let dfs: Arc<dyn Dfs> = Arc::new(InMemFs::new());
-        let cache: SegmentedCache<BlockCacheKey, Bytes> = SegmentedCache::builder(256)
-            .weigher(|_k: &BlockCacheKey, v: &Bytes| (BLOCK_CACHE_KEY_SIZE + v.len()) as u32)
-            .max_capacity(1024 * 1024u64)
-            .build();
+        let cache = BlockCache::new(BlockCacheType::Quick, 1024 * 1024, 4 * 1024);
         let txn_chunk_manager = TxnChunkManager::new(
             local_path.clone(),
             dfs.clone(),
-            Some(cache.clone()),
+            cache.clone(),
             with_pool_size(2),
             TxnChunkManagerConfig::default(),
         );
@@ -597,7 +592,7 @@ mod tests {
         let txn_chunk_manager = TxnChunkManager::new(
             local_path.clone(),
             dfs,
-            Some(cache),
+            cache,
             with_pool_size(2),
             TxnChunkManagerConfig::default(),
         );
