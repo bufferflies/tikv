@@ -3,6 +3,7 @@
 #![feature(hash_extract_if)]
 #![feature(is_sorted)]
 #![feature(core_intrinsics)]
+#![feature(assert_matches)]
 #![allow(clippy::diverging_sub_expression)]
 #![allow(internal_features)]
 #![cfg_attr(test, feature(test))]
@@ -22,8 +23,10 @@ pub mod engine;
 pub mod engine_trait;
 mod error;
 pub mod flush;
+pub mod ia;
 pub mod limiter;
 pub mod meta;
+mod metrics;
 pub mod mvcc;
 pub mod options;
 pub mod prepare;
@@ -44,7 +47,6 @@ extern crate slog_global;
 #[allow(unused_extern_crates)]
 extern crate tikv_alloc;
 
-mod metrics;
 #[cfg(test)]
 mod tests;
 

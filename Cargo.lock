@@ -3696,6 +3696,7 @@ dependencies = [
  "collections",
  "crc32c",
  "crc32fast",
+ "crossbeam-queue",
  "dashmap 4.0.2",
  "dyn-clone",
  "engine_panic",
