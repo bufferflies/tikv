@@ -20,7 +20,7 @@ use tidb_query_datatype::{
     expr::{EvalConfig, EvalContext},
     EvalType, FieldTypeAccessor,
 };
-use tipb::{ColumnInfo, FieldType, TableScan};
+use tipb::{FieldType, TableScan};
 
 use super::util::scan_executor::*;
 use crate::{interface::*, util::columnar_scanner::build_columnar_scanner};
@@ -44,21 +44,21 @@ impl<S: Storage, F: KvFormat> BatchTableScanExecutor<S, F> {
     pub fn new(
         storage: S,
         config: Arc<EvalConfig>,
-        columns_info: Vec<ColumnInfo>,
+        mut table_scan: TableScan,
         key_ranges: Vec<KeyRange>,
-        primary_column_ids: Vec<i64>,
-        is_backward: bool,
         is_scanned_range_aware: bool,
-        primary_prefix_column_ids: Vec<i64>,
         snap: Option<SnapAccess>,
     ) -> Result<Self> {
         let columnar_scanner = build_columnar_scanner(
             snap.as_ref(),
             &key_ranges,
-            &columns_info,
+            &table_scan,
             storage.get_read_ts(),
         );
-
+        let columns_info = table_scan.take_columns();
+        let primary_column_ids = table_scan.get_primary_column_ids().to_vec();
+        let primary_prefix_column_ids = table_scan.get_primary_prefix_column_ids().to_vec();
+        let is_backward = table_scan.get_desc();
         let is_column_filled = vec![false; columns_info.len()];
         let mut is_key_only = true;
         let mut handle_indices = HandleIndicesVec::new();
@@ -706,6 +706,12 @@ mod tests {
         }
     }
 
+    fn new_table_scan(columns_info: Vec<ColumnInfo>) -> TableScan {
+        let mut table_scan = TableScan::default();
+        table_scan.set_columns(columns_info.into());
+        table_scan
+    }
+
     /// test basic `tablescan` with ranges,
     /// `col_idxs`: idxs of columns used in scan.
     /// `batch_expect_rows`: `expect_rows` used in `next_batch`.
@@ -716,15 +722,13 @@ mod tests {
         batch_expect_rows: &[usize],
     ) {
         let columns_info = helper.columns_info_by_idx(col_idxs);
+        let table_scan = new_table_scan(columns_info);
         let mut executor = BatchTableScanExecutor::<_, ApiV1>::new(
             helper.store(),
             Arc::new(EvalConfig::default()),
-            columns_info,
+            table_scan,
             ranges,
-            vec![],
             false,
-            false,
-            vec![],
             None,
         )
         .unwrap();
@@ -800,16 +804,13 @@ mod tests {
     #[test]
     fn test_execution_summary() {
         let helper = TableScanTestHelper::new();
-
+        let table_scan = new_table_scan(helper.columns_info.clone());
         let mut executor = BatchTableScanExecutor::<_, ApiV1>::new(
             helper.store(),
             Arc::new(EvalConfig::default()),
-            helper.columns_info_by_idx(&[0]),
+            table_scan,
             vec![helper.whole_table_range()],
-            vec![],
             false,
-            false,
-            vec![],
             None,
         )
         .unwrap()
@@ -941,19 +942,17 @@ mod tests {
         // For row 0 + row 1 + (row 2 ~ row 4), we should only get row 0, row 1 and an
         // error.
         for corrupted_row_index in 2..=4 {
+            let table_scan = new_table_scan(columns_info.clone());
             let mut executor = BatchTableScanExecutor::<_, ApiV1>::new(
                 store.clone(),
                 Arc::new(EvalConfig::default()),
-                columns_info.clone(),
+                table_scan,
                 vec![
                     key_range_point[0].clone(),
                     key_range_point[1].clone(),
                     key_range_point[corrupted_row_index].clone(),
                 ],
-                vec![],
                 false,
-                false,
-                vec![],
                 None,
             )
             .unwrap();
@@ -1049,19 +1048,17 @@ mod tests {
         // We should get row 0 and error because no further rows should be scanned when
         // there is an error.
         {
+            let table_scan = new_table_scan(columns_info.clone());
             let mut executor = BatchTableScanExecutor::<_, ApiV1>::new(
                 store.clone(),
                 Arc::new(EvalConfig::default()),
-                columns_info.clone(),
+                table_scan,
                 vec![
                     key_range_point[0].clone(),
                     key_range_point[1].clone(),
                     key_range_point[2].clone(),
                 ],
-                vec![],
                 false,
-                false,
-                vec![],
                 None,
             )
             .unwrap();
@@ -1098,19 +1095,17 @@ mod tests {
             });
             let mut schema = schema.clone();
             schema.push(FieldTypeTp::LongLong.into());
+            let table_scan = new_table_scan(columns_info);
             let mut executor = BatchTableScanExecutor::<_, ApiV1>::new(
                 store.clone(),
                 Arc::new(EvalConfig::default()),
-                columns_info,
+                table_scan,
                 vec![
                     key_range_point[0].clone(),
                     key_range_point[1].clone(),
                     key_range_point[2].clone(),
                 ],
-                vec![],
                 false,
-                false,
-                vec![],
                 None,
             )
             .unwrap();
@@ -1141,19 +1136,17 @@ mod tests {
 
         // Let's also repeat case 1 for smaller batch size
         {
+            let table_scan = new_table_scan(columns_info.clone());
             let mut executor = BatchTableScanExecutor::<_, ApiV1>::new(
                 store.clone(),
                 Arc::new(EvalConfig::default()),
-                columns_info.clone(),
+                table_scan,
                 vec![
                     key_range_point[0].clone(),
                     key_range_point[1].clone(),
                     key_range_point[2].clone(),
                 ],
-                vec![],
                 false,
-                false,
-                vec![],
                 None,
             )
             .unwrap();
@@ -1185,15 +1178,13 @@ mod tests {
         // Case 2: row 1 + row 2
         // We should get error and no row, for the same reason as above.
         {
+            let table_scan = new_table_scan(columns_info.clone());
             let mut executor = BatchTableScanExecutor::<_, ApiV1>::new(
                 store.clone(),
                 Arc::new(EvalConfig::default()),
-                columns_info.clone(),
+                table_scan,
                 vec![key_range_point[1].clone(), key_range_point[2].clone()],
-                vec![],
                 false,
-                false,
-                vec![],
                 None,
             )
             .unwrap();
@@ -1207,15 +1198,13 @@ mod tests {
         // Case 3: row 2 + row 0
         // We should get row 2 and row 0. There is no error.
         {
+            let table_scan = new_table_scan(columns_info.clone());
             let mut executor = BatchTableScanExecutor::<_, ApiV1>::new(
                 store.clone(),
                 Arc::new(EvalConfig::default()),
-                columns_info.clone(),
+                table_scan,
                 vec![key_range_point[2].clone(), key_range_point[0].clone()],
-                vec![],
                 false,
-                false,
-                vec![],
                 None,
             )
             .unwrap();
@@ -1242,15 +1231,13 @@ mod tests {
         // Case 4: row 1
         // We should get error.
         {
+            let table_scan = new_table_scan(columns_info.clone());
             let mut executor = BatchTableScanExecutor::<_, ApiV1>::new(
                 store,
                 Arc::new(EvalConfig::default()),
-                columns_info,
+                table_scan,
                 vec![key_range_point[1].clone()],
-                vec![],
                 false,
-                false,
-                vec![],
                 None,
             )
             .unwrap();
@@ -1293,15 +1280,13 @@ mod tests {
 
         let store = FixtureStorage::new(iter::once((key, (Ok(value)))).collect());
 
+        let table_scan = new_table_scan(columns_info);
         let mut executor = BatchTableScanExecutor::<_, ApiV1>::new(
             store,
             Arc::new(EvalConfig::default()),
-            columns_info,
+            table_scan,
             vec![key_range],
-            vec![],
             false,
-            false,
-            vec![],
             None,
         )
         .unwrap();
@@ -1401,16 +1386,15 @@ mod tests {
         key_range.set_end(end);
 
         let store = FixtureStorage::new(iter::once((key, (Ok(value)))).collect());
-
+        let mut table_scan = new_table_scan(columns_info);
+        table_scan.set_primary_column_ids(primary_column_ids);
+        table_scan.set_primary_prefix_column_ids(primary_prefix_column_ids);
         let mut executor = BatchTableScanExecutor::<_, ApiV1>::new(
             store,
             Arc::new(EvalConfig::default()),
-            columns_info,
+            table_scan,
             vec![key_range],
-            primary_column_ids,
             false,
-            false,
-            primary_prefix_column_ids,
             None,
         )
         .unwrap();
@@ -1583,16 +1567,14 @@ mod tests {
         key_range.set_end(end);
 
         let store = FixtureStorage::new(iter::once((key, (Ok(value)))).collect());
-
+        let mut table_scan = new_table_scan(columns_info.clone());
+        table_scan.set_primary_column_ids(primary_column_ids);
         let mut executor = BatchTableScanExecutor::<_, ApiV1>::new(
             store,
             Arc::new(EvalConfig::default()),
-            columns_info.clone(),
+            table_scan,
             vec![key_range],
-            primary_column_ids,
             false,
-            false,
-            vec![],
             None,
         )
         .unwrap();

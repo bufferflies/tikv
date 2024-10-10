@@ -205,21 +205,15 @@ pub fn build_executors<S: Storage + 'static, F: KvFormat>(
         ExecType::TypeTableScan => {
             EXECUTOR_COUNT_METRICS.batch_table_scan.inc();
 
-            let mut descriptor = first_ed.take_tbl_scan();
-            let columns_info = descriptor.take_columns().into();
-            let primary_column_ids = descriptor.take_primary_column_ids();
-            let primary_prefix_column_ids = descriptor.take_primary_prefix_column_ids();
+            let table_scan = first_ed.take_tbl_scan();
 
             Box::new(
                 BatchTableScanExecutor::<_, F>::new(
                     storage,
                     config.clone(),
-                    columns_info,
+                    table_scan,
                     ranges,
-                    primary_column_ids,
-                    descriptor.get_desc(),
                     is_scanned_range_aware,
-                    primary_prefix_column_ids,
                     snap,
                 )?
                 .collect_summary(summary_slot_index),

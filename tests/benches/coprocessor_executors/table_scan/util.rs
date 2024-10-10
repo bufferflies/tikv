@@ -13,7 +13,7 @@ use tikv::{
     coprocessor::{dag::TikvStorage, RequestHandler},
     storage::{RocksEngine, Statistics, Store as TxnStore},
 };
-use tipb::ColumnInfo;
+use tipb::{ColumnInfo, TableScan};
 
 use crate::util::{executor_descriptor::table_scan, scan_bencher};
 
@@ -34,18 +34,17 @@ impl<T: TxnStore + 'static> scan_bencher::ScanExecutorBuilder for BatchTableScan
         store: &Store<RocksEngine>,
         _: (),
     ) -> Self::E {
+        let mut table_scan = TableScan::default();
+        table_scan.set_columns(columns.to_vec().into());
         let mut executor = BatchTableScanExecutor::<_, ApiV1>::new(
             black_box(TikvStorage::new(
                 ToTxnStore::<Self::T>::to_store(store),
                 false,
             )),
             black_box(Arc::new(EvalConfig::default())),
-            black_box(columns.to_vec()),
+            black_box(table_scan),
             black_box(ranges.to_vec()),
-            black_box(vec![]),
             black_box(false),
-            black_box(false),
-            black_box(vec![]),
             None,
         )
         .unwrap();

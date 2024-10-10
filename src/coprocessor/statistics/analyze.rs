@@ -39,7 +39,9 @@ use tikv_util::{
     quota_limiter::QuotaLimiter,
     time::Instant,
 };
-use tipb::{self, AnalyzeColumnsReq, AnalyzeIndexReq, AnalyzeReq, AnalyzeType};
+use tipb::{
+    self, AnalyzeColumnsReq, AnalyzeIndexReq, AnalyzeReq, AnalyzeType, ColumnInfo, TableScan,
+};
 
 use super::{cmsketch::CmSketch, fmsketch::FmSketch, histogram::Histogram};
 use crate::{
@@ -426,15 +428,17 @@ impl<S: Snapshot, F: KvFormat> RowSampleBuilder<S, F> {
         }
         let common_handle_ids = req.take_primary_column_ids();
         let snap = storage.get_kvengine_snap();
+        let table_scan = new_table_scan(
+            columns_info.clone(),
+            common_handle_ids.clone(),
+            req.take_primary_prefix_column_ids(),
+        );
         let table_scanner = BatchTableScanExecutor::new(
             storage,
             Arc::new(EvalConfig::default()),
-            columns_info.clone(),
+            table_scan,
             ranges,
-            common_handle_ids,
-            false,
             false, // Streaming mode is not supported in Analyze request, always false here
-            req.take_primary_prefix_column_ids(),
             snap,
         )?;
         Ok(Self {
@@ -918,15 +922,17 @@ impl<S: Snapshot, F: KvFormat> SampleBuilder<S, F> {
         }
         let common_handle_ids = req.take_primary_column_ids();
         let snap = storage.get_kvengine_snap();
+        let table_scan = new_table_scan(
+            columns_info.clone(),
+            common_handle_ids.clone(),
+            req.take_primary_prefix_column_ids(),
+        );
         let table_scanner = BatchTableScanExecutor::new(
             storage,
             Arc::new(EvalConfig::default()),
-            columns_info.clone(),
+            table_scan,
             ranges,
-            common_handle_ids.clone(),
-            false,
             false, // Streaming mode is not supported in Analyze request, always false here
-            req.take_primary_prefix_column_ids(),
             snap,
         )?;
         Ok(Self {
@@ -1290,6 +1296,18 @@ impl AnalyzeMixedResult {
         res.set_columns_resp(self.col_res.into_proto());
         res
     }
+}
+
+fn new_table_scan(
+    columns_info: Vec<ColumnInfo>,
+    primary_column_ids: Vec<i64>,
+    primary_prefix_column_ids: Vec<i64>,
+) -> TableScan {
+    let mut table_scan = TableScan::default();
+    table_scan.set_columns(columns_info.clone().into());
+    table_scan.set_primary_column_ids(primary_column_ids);
+    table_scan.set_primary_prefix_column_ids(primary_prefix_column_ids);
+    table_scan
 }
 
 #[cfg(test)]

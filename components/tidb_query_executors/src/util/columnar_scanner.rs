@@ -22,7 +22,7 @@ use tidb_query_datatype::{
     EvalType, FieldTypeTp,
 };
 use tikv_util::buffer_vec::BufferVec;
-use tipb::ColumnInfo;
+use tipb::TableScan;
 
 pub struct ColumnarScanner {
     // The current scan position.
@@ -231,7 +231,7 @@ impl ColumnarScanner {
 pub fn build_columnar_scanner(
     snap: Option<&kvengine::SnapAccess>,
     key_ranges: &[KeyRange],
-    column_info: &[ColumnInfo],
+    table_scan: &TableScan,
     start_ts: u64,
 ) -> Option<ColumnarScanner> {
     let snap = snap?;
@@ -256,10 +256,10 @@ pub fn build_columnar_scanner(
             return None;
         }
     };
-    let mut reader = snap.new_columnar_mvcc_reader(table_id, column_info, start_ts)?;
+    let mut reader = snap.new_columnar_mvcc_reader(table_id, table_scan.get_columns(), start_ts)?;
     let mut output_offsets = vec![];
     let mut col_offset = 0;
-    for col in column_info.iter() {
+    for col in table_scan.get_columns() {
         if col.get_column_id() == HANDLE_COL_ID as i64 || col.get_pk_handle() {
             output_offsets.push(-1);
         } else {
