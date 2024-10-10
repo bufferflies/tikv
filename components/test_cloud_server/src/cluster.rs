@@ -36,7 +36,7 @@ use security::{SecurityConfig, SecurityManager};
 use tempfile::TempDir;
 use test_pd_client::{PdClientExt, PdWrapper, TestPdClient};
 use test_raftstore::find_peer;
-use tikv::config::TikvConfig;
+use tikv::{config::TikvConfig, import::SstImporter};
 use tikv_util::{
     box_err,
     codec::bytes::encode_bytes,
@@ -303,6 +303,11 @@ impl ServerCluster {
         let region = self.pd_client.get_region(&encode_bytes(key)).unwrap();
         let snap = self.get_active_shard(region.id)?.new_snap_access();
         Some(snap)
+    }
+
+    pub fn get_sst_importer(&self, node_id: u16) -> Arc<SstImporter> {
+        let server = self.servers.get(&node_id).unwrap();
+        server.get_sst_importer()
     }
 
     /// Return `None` when peer with specified `store_id` is not found.

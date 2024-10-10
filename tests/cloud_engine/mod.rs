@@ -16,6 +16,7 @@ use security::SecurityConfig;
 use test_cloud_server::client::ClusterClient;
 use tidb_query_common::util::convert_to_prefix_next;
 use tikv_util::info;
+mod backup;
 mod columnar;
 mod delete_range;
 mod engine_basic;

@@ -2,7 +2,6 @@
 
 use std::{collections::BTreeMap, ops::Deref, path::Path};
 
-use engine_panic::{PanicSstReader, PanicSstWriter};
 use engine_traits::{
     CfNamesExt, CfOptionsExt, Checkpointable, Checkpointer, CompactExt, CompactedEvent, DbOptions,
     DbOptionsExt, DbVector, DeleteStrategy, FlowControlFactorsExt, ImportExt,
@@ -24,13 +23,15 @@ impl CfNamesExt for Engine {
 }
 
 impl CfOptionsExt for Engine {
-    type CfOptions = engine_panic::PanicCfOptions;
+    type CfOptions = engine_rocks::RocksCfOptions;
 
     fn get_options_cf(&self, _cf: &str) -> TraitsResult<Self::CfOptions> {
-        panic!()
+        Ok(engine_rocks::RocksCfOptions::from_raw(
+            rocksdb::ColumnFamilyOptions::default(),
+        ))
     }
     fn set_options_cf(&self, _cf: &str, _options: &[(&str, &str)]) -> TraitsResult<()> {
-        panic!()
+        Ok(())
     }
 }
 
@@ -592,34 +593,44 @@ impl engine_traits::Iterator for PanicSnapshotIterator {
 }
 
 impl SstExt for Engine {
-    type SstReader = PanicSstReader;
-    type SstWriter = PanicSstWriter;
+    type SstReader = engine_rocks::RocksSstReader;
+    type SstWriter = engine_rocks::RocksSstWriter;
     type SstWriterBuilder = EngineSstWriterBuilder;
 }
 
-pub struct EngineSstWriterBuilder;
+pub struct EngineSstWriterBuilder {
+    builder: engine_rocks::RocksSstWriterBuilder,
+}
 
 impl SstWriterBuilder<Engine> for EngineSstWriterBuilder {
     fn new() -> Self {
-        panic!()
+        Self {
+            builder: engine_rocks::RocksSstWriterBuilder::new(),
+        }
     }
-    fn set_db(self, _: &Engine) -> Self {
-        panic!()
+    fn set_db(self, _db: &Engine) -> Self {
+        // TODO(x): need to find a way to pass RocksDB Env and CFOptions to the builder.
+        self
     }
-    fn set_cf(self, _: &str) -> Self {
-        panic!()
+    fn set_cf(mut self, cf: &str) -> Self {
+        self.builder = self.builder.set_cf(cf);
+        self
     }
-    fn set_in_memory(self, _: bool) -> Self {
-        panic!()
+    fn set_in_memory(mut self, in_memory: bool) -> Self {
+        self.builder = self.builder.set_in_memory(in_memory);
+        self
     }
-    fn set_compression_type(self, _: Option<SstCompressionType>) -> Self {
-        panic!()
+    fn set_compression_type(mut self, compression: Option<SstCompressionType>) -> Self {
+        self.builder = self.builder.set_compression_type(compression);
+        self
     }
-    fn set_compression_level(self, _: i32) -> Self {
-        panic!()
+    fn set_compression_level(mut self, level: i32) -> Self {
+        self.builder = self.builder.set_compression_level(level);
+        self
     }
-    fn build(self, _: &str) -> engine_traits::Result<PanicSstWriter> {
-        panic!()
+
+    fn build(self, path: &str) -> TraitsResult<engine_rocks::RocksSstWriter> {
+        self.builder.build(path)
     }
 }
 

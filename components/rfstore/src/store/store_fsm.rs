@@ -38,6 +38,7 @@ use raftstore::{
     },
 };
 use rfengine::{REGION_META_KEY_BYTE, TRUNCATE_ALL_INDEX};
+use sst_importer::SstImporter;
 use tikv_util::{
     box_err,
     codec::bytes::encode_bytes,
@@ -106,6 +107,7 @@ impl RaftBatchSystem {
         pd_worker: LazyWorker<PdTask>,
         mut store_meta: StoreMeta,
         mut coprocessor_host: CoprocessorHost<kvengine::Engine>,
+        importer: Arc<SstImporter>,
         concurrency_manager: ConcurrencyManager,
     ) -> Result<()> {
         assert!(self.workers.is_none());
@@ -117,7 +119,11 @@ impl RaftBatchSystem {
             .register_admin_observer(100, BoxAdminObserver::new(SplitObserver));
 
         let mut gc_worker = LazyWorker::new("gc-worker");
-        let gc_runner = GcRunner::new(engines.kv.clone(), cfg.value().local_file_gc_timeout.0);
+        let gc_runner = GcRunner::new(
+            engines.kv.clone(),
+            importer.clone(),
+            cfg.value().local_file_gc_timeout.0,
+        );
         gc_worker.start(gc_runner);
         let gc_scheduler = gc_worker.scheduler();
 
@@ -137,6 +143,7 @@ impl RaftBatchSystem {
             pd_scheduler,
             gc_scheduler,
             coprocessor_host,
+            importer,
             destroying: HashSet::default(),
             engine_total_bytes_written: Arc::new(AtomicU64::new(0)),
             engine_total_keys_written: Arc::new(AtomicU64::new(0)),
@@ -517,6 +524,7 @@ pub(crate) struct GlobalContext {
     pub(crate) pd_scheduler: Scheduler<PdTask>,
     pub(crate) gc_scheduler: Scheduler<GcTask>,
     pub(crate) coprocessor_host: CoprocessorHost<kvengine::Engine>,
+    pub(crate) importer: Arc<SstImporter>,
     /// Saves destroying regions in one loop. It's used to solve the race
     /// between peer gc and split, i.e., split won't create a destroying
     /// region if they are in the same loop with checking it.
