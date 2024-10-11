@@ -16,3 +16,4 @@
 pub mod file_segment;
 mod queue;
 pub mod types;
+mod util;
