@@ -1846,7 +1846,7 @@ impl<'a> PreprocessRef<'a> {
         let last_no_kv_idx = *self.last_no_kv_idx;
         let peer_id = self.peer_id();
         let shard_meta = self.mut_shard_meta();
-        if shard_meta.parent.is_none()
+        if shard_meta.initial_flushed()
             && shard_meta.data_sequence + 1 >= first_no_kv_idx
             && shard_meta.data_sequence != last_no_kv_idx
         {

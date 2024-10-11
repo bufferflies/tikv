@@ -545,7 +545,7 @@ impl RfEngineCore {
         self.engine_id.load(Ordering::Acquire)
     }
 
-    pub fn get_region_peer_map(&self) -> HashMap<u64, u64> {
+    pub fn get_region_peer_map(&self) -> HashMap<u64 /* region_id */, u64 /* peer_id */> {
         let mut region_to_peer = HashMap::with_capacity(self.peers.len());
         let mut id_pairs = Vec::with_capacity(self.peers.len());
         for peer_ref in self.peers.iter() {

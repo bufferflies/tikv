@@ -26,16 +26,24 @@ pub struct ShardMeta {
     pub id: u64,
     pub ver: u64,
     pub range: ShardRange,
-    // sequence is the raft log index of the applied change set.
-    // Should be updated and ONLY be updated when LSM is changed.
+
+    /// `seq` is the raft log index of the applied change set.
+    ///
+    /// Should be updated and ONLY be updated when LSM is changed.
     pub seq: u64,
     pub(crate) files: HashMap<u64, FileMeta>,
 
     pub(crate) properties: Properties,
     pub base_version: u64,
-    // data_sequence is the raft log index of data included in the latest L0 file.
+
+    /// `data_sequence` is the raft log index of data included in the latest L0
+    /// file.
+    ///
+    /// Note: if meta is not initial flushed, the data persisted log index
+    /// should be got from parent. Use `ShardMeta::data_persisted_log_index`.
     pub data_sequence: u64,
-    // max_ts is the max ts in all sst files.
+
+    /// `max_ts` is the max ts in all sst files.
     pub max_ts: u64,
     pub parent: Option<Box<ShardMeta>>,
     pub schema_file_id: u64,
@@ -128,6 +136,11 @@ impl ShardMeta {
 
     pub fn tag(&self) -> ShardTag {
         ShardTag::new(self.engine_id, IdVer::new(self.id, self.ver))
+    }
+
+    #[inline]
+    pub fn initial_flushed(&self) -> bool {
+        self.parent.is_none()
     }
 
     pub fn new_split(
@@ -352,7 +365,7 @@ impl ShardMeta {
             );
             return true;
         }
-        if cs.has_initial_flush() && self.parent.is_none() {
+        if cs.has_initial_flush() && self.initial_flushed() {
             info!(
                 "{} skip duplicated initial flush, already flushed",
                 self.tag()
@@ -941,6 +954,13 @@ impl ShardMeta {
         self.base_version + self.data_sequence
     }
 
+    pub fn data_persisted_log_index(&self) -> u64 {
+        match &self.parent {
+            Some(parent) if parent.id == self.id => parent.data_sequence,
+            _ => self.data_sequence,
+        }
+    }
+
     pub fn prepare_merge(&mut self, sequence: u64) {
         let parent = self.clone();
         self.ver += 1;
@@ -1035,12 +1055,13 @@ impl ShardMeta {
 
     pub fn merge_txn_file_ref(&mut self, wb_ref: &TxnFileRef, log_index: u64) {
         let tag = self.tag();
+        let current_seq = self.txn_file_locks.seq();
 
         debug_assert!(
-            self.txn_file_locks.seq() < log_index,
+            current_seq < log_index,
             "{} duplicated merge txn file ref, seq {}, log_index {}, wb_ref {:?}",
             tag,
-            self.txn_file_locks.seq(),
+            current_seq,
             log_index,
             wb_ref
         );
@@ -1050,11 +1071,12 @@ impl ShardMeta {
                 .insert(log_index, wb_ref.start_ts, wb_ref.get_lock_val_prefix());
         } else {
             let existed = self.txn_file_locks.remove(log_index, wb_ref.start_ts);
-            debug_assert!(
-                existed,
-                "{} unexpected txn not existed, wb_ref {:?}, log_index {}, current locks {:?}",
-                tag, wb_ref, log_index, self.txn_file_locks
-            );
+            if !existed {
+                warn!(
+                    "{} unexpected txn not existed, wb_ref {:?}, log_index {}, last_seq {}, current locks {:?}",
+                    tag, wb_ref, log_index, current_seq, self.txn_file_locks
+                );
+            }
         }
         debug!("{} ShardMeta merge txn file ref", tag;
             "wb_ref" => ?wb_ref,

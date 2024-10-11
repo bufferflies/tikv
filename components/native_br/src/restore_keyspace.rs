@@ -1036,7 +1036,7 @@ impl BackupCluster {
         rf: &RfEngine,
         keyspace_start: &[u8],
         keyspace_end: &[u8],
-    ) -> Vec<BackupShard> {
+    ) -> Result<Vec<BackupShard>> {
         let region_peers = rf.get_region_peer_map();
         let mut prefix_shards = vec![];
         let mut first_inner_key_off = None;
@@ -1064,14 +1064,14 @@ impl BackupCluster {
                     first_inner_key_off = Some(snap.inner_key_off);
                 }
 
-                let shard = Self::create_backup_shard(rf, store_id, region_id, peer_id, meta);
+                let shard = Self::create_backup_shard(rf, store_id, region_id, peer_id, meta)?;
                 prefix_shards.push(shard);
             }
         }
-        prefix_shards
+        Ok(prefix_shards)
     }
 
-    fn collect_full_shards(store_id: u64, rf: &RfEngine) -> Vec<BackupShard> {
+    fn collect_full_shards(store_id: u64, rf: &RfEngine) -> Result<Vec<BackupShard>> {
         let region_peers = rf.get_region_peer_map();
         let mut prefix_shards = vec![];
         for (region_id, peer_id) in region_peers {
@@ -1090,10 +1090,10 @@ impl BackupCluster {
             };
             assert_eq!(region_id, meta.shard_id);
 
-            let shard = Self::create_backup_shard(rf, store_id, region_id, peer_id, meta);
+            let shard = Self::create_backup_shard(rf, store_id, region_id, peer_id, meta)?;
             prefix_shards.push(shard);
         }
-        prefix_shards
+        Ok(prefix_shards)
     }
 
     pub fn is_full_range(&self) -> bool {
@@ -1106,7 +1106,7 @@ impl BackupCluster {
         region_id: u64,
         peer_id: u64,
         mut meta: kvenginepb::ChangeSet,
-    ) -> BackupShard {
+    ) -> Result<BackupShard> {
         // Fix backups before pull/1732 in which the `data_sequence` in meta is not
         // correct.
         if meta.has_parent() {
@@ -1121,7 +1121,20 @@ impl BackupCluster {
         });
         let need_initial_flush = meta.has_parent();
 
-        let raft_state = load_peer_raft_state(rf, peer_id, meta.shard_ver).unwrap();
+        let raft_state = load_peer_raft_state(rf, peer_id, meta.shard_ver).ok_or_else(|| -> Error {
+            let mut states = vec![];
+            rf.iterate_peer_states(peer_id, false, |k, v| {
+                states.push((k.to_vec(), v.to_vec()));
+            });
+            error!(
+                "failed to load peer raft state, store_id: {}, region_id: {}, peer_id: {}, state: {:?}",
+                store_id, region_id, peer_id, states
+            );
+
+            box_err!("failed to load peer raft state, store_id: {}, region_id: {} peer_id: {}",
+                store_id, region_id, peer_id)
+        })?;
+
         let shard = BackupShard {
             region_id,
             store_id,
@@ -1135,7 +1148,7 @@ impl BackupCluster {
             "create_backup_shard: raft_last_index {:?}, {:?}",
             raft_last_index, shard
         );
-        shard
+        Ok(shard)
     }
 
     fn load_shards(&mut self) -> Result<()> {
@@ -1143,23 +1156,22 @@ impl BackupCluster {
         // after preprocess.
         let mut leader_shards = HashMap::new();
         let mut retry = 0_usize;
+        let is_full_range = self.is_full_range();
         loop {
-            let all_shards =
-                HashMap::from_iter(self.raft_engines.iter().map(|(store_id, rf_engine)| {
-                    if self.is_full_range() {
-                        (*store_id, Self::collect_full_shards(*store_id, rf_engine))
-                    } else {
-                        (
-                            *store_id,
-                            Self::collect_keyspace_shards(
-                                *store_id,
-                                rf_engine,
-                                &self.keyspace_start,
-                                &self.keyspace_end,
-                            ),
-                        )
-                    }
-                }));
+            let mut all_shards = HashMap::new();
+            for (&store_id, rf_engine) in &self.raft_engines {
+                let store_shards = if is_full_range {
+                    Self::collect_full_shards(store_id, rf_engine)?
+                } else {
+                    Self::collect_keyspace_shards(
+                        store_id,
+                        rf_engine,
+                        &self.keyspace_start,
+                        &self.keyspace_end,
+                    )?
+                };
+                all_shards.insert(store_id, store_shards);
+            }
 
             // Check whether backup is empty (for this keyspace).
             // Empty backup should be invalid or before the creation of this
@@ -1486,6 +1498,8 @@ impl BackupCluster {
         for entry in &entries {
             preprocess_ref.preprocess_committed_entry(&mut ctx, entry);
         }
+
+        // Apply to rf_engine
         preprocess_ref
             .raft_state
             .set_last_preprocessed_index(*preprocess_ref.preprocessed_index);
@@ -1501,7 +1515,7 @@ impl BackupCluster {
             old_shard.region_id,
             peer_id,
             meta,
-        );
+        )?;
         info!(
             "Keyspace {} preprocessed shard {}, old {:?}, new {:?}",
             self.tag(),
@@ -2475,6 +2489,13 @@ impl PeerPreprocessor {
         // Set `preprocessed_index` to the `data_sequence` to replay from last flush and
         // restore memory-based fields of `ShardMeta`.
         // See https://github.com/tidbcloud/cloud-storage-engine/issues/1680.
+        //
+        // Also note that when the shard is not yet initial flushed, in theory we should
+        // preprocess from parent. But the only memory field `txn_file_locks` so far is
+        // used for ignore split/merge, which will not happen when the shard is not
+        // initial flushed. So currently we do not preprocess from parent for
+        // simplicity.
+        // See https://github.com/tidbcloud/cloud-storage-engine/issues/1862.
         let preprocessed_index = shard.meta.data_sequence;
 
         Self {
