@@ -74,13 +74,17 @@ impl SchemaFileFooter {
         data.put_u16_le(self.format_version);
         data.put_u32_le(self.magic);
     }
+
+    pub const fn footer_size() -> usize {
+        std::mem::size_of::<Self>()
+    }
 }
 
 impl SchemaFile {
     pub fn open(file: Arc<dyn File>) -> table::Result<Self> {
         let file_id = file.id();
         let file_data = file.read(0, file.size() as usize)?;
-        let footer_size = std::mem::size_of::<SchemaFileFooter>();
+        let footer_size = SchemaFileFooter::footer_size();
         if file_data.len() < footer_size {
             return Err(table::Error::InvalidFileSize);
         }

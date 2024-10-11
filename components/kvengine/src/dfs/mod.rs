@@ -29,6 +29,13 @@ use thiserror::Error;
 use tikv_util::time::Instant;
 use tokio::runtime::Runtime;
 
+use crate::table::{
+    blobtable::blobtable::BlobTable,
+    columnar::{ColumnarFileFooter, SchemaFileFooter},
+    sstable::{L0Table, SsTable},
+    TxnChunk,
+};
+
 // DFS represents a distributed file system.
 #[async_trait]
 pub trait Dfs: Sync + Send {
@@ -154,6 +161,17 @@ impl FileType {
             FileType::Columnar => "col",
             FileType::Blob => "blob",
             FileType::VectorIndex => "vec",
+        }
+    }
+
+    pub fn footer_size(&self) -> usize {
+        match self {
+            FileType::Sst => std::cmp::max(SsTable::footer_size(), L0Table::footer_size()),
+            FileType::TxnChunk => TxnChunk::footer_size(),
+            FileType::Schema => SchemaFileFooter::footer_size(),
+            FileType::Columnar => ColumnarFileFooter::compute_size(),
+            FileType::Blob => BlobTable::footer_size(),
+            FileType::VectorIndex => unimplemented!(), // TODO
         }
     }
 }

@@ -157,6 +157,10 @@ impl SsTable {
     pub(crate) fn clone_biggest(&self) -> Bytes {
         self.biggest_buf.clone()
     }
+
+    pub const fn footer_size() -> usize {
+        FOOTER_SIZE
+    }
 }
 
 impl BoundedDataSet for SsTable {
@@ -197,10 +201,14 @@ impl SsTableCore {
     ) -> Result<Self> {
         let size = end_off - start_off;
         let mut footer = Footer::default();
-        if size < FOOTER_SIZE as u64 {
-            return Err(table::Error::InvalidFileSize);
-        }
-        let footer_data = file.read(end_off - FOOTER_SIZE as u64, FOOTER_SIZE)?;
+        let footer_data = if end_off == file.size() {
+            file.read_footer(FOOTER_SIZE)?
+        } else {
+            if size < FOOTER_SIZE as u64 {
+                return Err(table::Error::InvalidFileSize);
+            }
+            file.read(end_off - FOOTER_SIZE as u64, FOOTER_SIZE)?
+        };
         footer.unmarshal(footer_data.chunk());
         if footer.magic != MAGIC_NUMBER && footer.magic != MAGIC_NUMBER_SPLIT_L0 {
             return Err(table::Error::InvalidMagicNumber);

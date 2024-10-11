@@ -3,11 +3,18 @@
 // TODO: remote this
 #![allow(dead_code)]
 
-use std::{fmt, hash::Hash, sync::Arc};
+use std::{fmt, hash::Hash, ops, sync::Arc};
 
+use bytes::{Buf, BufMut, Bytes};
+use dashmap::{mapref::entry::Entry, DashMap};
+use tikv_util::codec::number::{U64_SIZE, U8_SIZE};
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
-use crate::ia::queue::FifoItemPos;
+use crate::{
+    dfs::FileType,
+    ia::{queue::FifoItemPos, util::LocalStore},
+    table::{Error, Result},
+};
 
 /// The identifier of a file segment.
 #[repr(C)]
@@ -112,9 +119,130 @@ impl FileSegmentInfo {
     }
 }
 
+#[derive(Default)]
+pub(crate) struct GuardMap<K: Eq + Hash, V> {
+    core: DashMap<K, Arc<Mutex<V>>>,
+}
+
+impl<K, V> ops::Deref for GuardMap<K, V>
+where
+    K: Eq + Hash,
+{
+    type Target = DashMap<K, Arc<Mutex<V>>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.core
+    }
+}
+
+impl<K, V> GuardMap<K, V>
+where
+    K: Eq + Hash,
+    V: Default,
+{
+    pub(crate) async fn get_locked(&self, key: K) -> OwnedMutexGuard<V> {
+        match self.core.entry(key) {
+            Entry::Occupied(entry) => {
+                let value = entry.get().clone();
+                drop(entry);
+                value.lock_owned().await
+            }
+            Entry::Vacant(entry) => {
+                let value = Arc::new(Mutex::new(Default::default()));
+                let guard = value.clone().try_lock_owned().unwrap();
+                entry.insert(value);
+                guard
+            }
+        }
+    }
+}
+
+/// Version tag used to marshall footer info. Reserved for future use.
+const FOOTER_INFO_VER: u8 = 0;
+/// It's a hint for the footer length which should be enough for most cases.
+const FOOTER_LEN_HINT: u64 = 64;
+
+#[derive(PartialEq, Debug)]
+pub(crate) struct FooterInfo {
+    pub(crate) file_id: u64,
+    pub(crate) ftype: FileType,
+    pub(crate) file_total_size: u64,
+}
+
+impl FooterInfo {
+    pub(crate) async fn read_from_local(
+        store: Arc<dyn LocalStore>,
+        file_id: u64,
+    ) -> Result<(Self, Bytes)> {
+        let mut data = Vec::with_capacity(FOOTER_LEN_HINT as usize);
+        store
+            .read_all(file_id, &Self::local_filename(file_id), &mut data)
+            .await?;
+        let data = Bytes::from(data);
+
+        // ver + ftype + total_size
+        let footer = data.slice(U8_SIZE + U8_SIZE + U64_SIZE..);
+
+        let mut header = data.as_ref();
+        let ver = header.get_u8();
+        if ver != FOOTER_INFO_VER {
+            return Err(Error::Other(format!(
+                "invalid footer version, expect {}, got {}, file_id {}, data {:?}",
+                FOOTER_INFO_VER, ver, file_id, data
+            )));
+        }
+        let Some(ftype) = FileType::from_u8(header.get_u8()) else {
+            return Err(Error::Other(format!(
+                "invalid file type, file_id {}, data {:?}",
+                file_id, data
+            )));
+        };
+        let file_total_size = header.get_u64_le();
+        let footer_info = Self {
+            file_id,
+            ftype,
+            file_total_size,
+        };
+
+        Ok((footer_info, footer))
+    }
+
+    pub(crate) async fn save_to_local(
+        &self,
+        store: Arc<dyn LocalStore>,
+        footer: &[u8],
+    ) -> Result<()> {
+        // ver + ftype + total_size + footer
+        let mut data = Vec::with_capacity(U8_SIZE + U8_SIZE + U64_SIZE + footer.len());
+        data.put_u8(FOOTER_INFO_VER);
+        data.put_u8(self.ftype as u8);
+        data.put_u64_le(self.file_total_size);
+        data.put(footer);
+
+        store
+            .save(
+                self.file_id,
+                &Self::local_filename(self.file_id),
+                Bytes::from(data),
+            )
+            .await
+    }
+
+    fn local_filename(file_id: u64) -> String {
+        format!("{}.footer", file_id)
+    }
+
+    pub(crate) fn parse_local_filename(filename: &str) -> Option<u64> {
+        filename
+            .strip_suffix(".footer")
+            .and_then(|s| s.parse().ok())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ia::util::LocalMemoryStore;
 
     #[test]
     fn test_file_segment_ident() {
@@ -150,5 +278,27 @@ mod tests {
             .fingerprint(),
             fingerprint
         );
+    }
+
+    #[tokio::test]
+    async fn test_footer_info() {
+        assert_eq!(FooterInfo::local_filename(1), "1.footer");
+        assert_eq!(FooterInfo::parse_local_filename("1.footer"), Some(1));
+
+        let store = Arc::new(LocalMemoryStore::default());
+        let footer_info = FooterInfo {
+            file_id: 1,
+            ftype: FileType::Sst,
+            file_total_size: 100,
+        };
+        let footer = b"footer";
+        footer_info
+            .save_to_local(store.clone(), footer)
+            .await
+            .unwrap();
+
+        let (footer_info1, footer1) = FooterInfo::read_from_local(store, 1).await.unwrap();
+        assert_eq!(footer_info, footer_info1);
+        assert_eq!(footer, footer1.as_ref());
     }
 }

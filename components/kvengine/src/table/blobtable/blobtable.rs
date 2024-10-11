@@ -28,11 +28,7 @@ impl BlobTable {
     pub fn new(file: Arc<dyn File>) -> Result<Self> {
         let mut footer = BlobFooter::default();
         let size = file.size();
-        if size < BLOB_TABLE_FOOTER_SIZE as u64 {
-            return Err(Error::InvalidFileSize);
-        }
-        let footer_data =
-            file.read(size - BLOB_TABLE_FOOTER_SIZE as u64, BLOB_TABLE_FOOTER_SIZE)?;
+        let footer_data = file.read_footer(Self::footer_size())?;
         footer.unmarshal(&footer_data);
         let props_data = file.read(
             footer.properties_offset as u64,
@@ -269,6 +265,10 @@ impl BlobTable {
 
     pub fn min_blob_size(&self) -> u32 {
         self.footer.min_blob_size
+    }
+
+    pub const fn footer_size() -> usize {
+        BLOB_TABLE_FOOTER_SIZE
     }
 }
 

@@ -526,6 +526,10 @@ impl TxnChunk {
         }
         true
     }
+
+    pub const fn footer_size() -> usize {
+        TXN_FILE_CHUNK_FOOTER_SIZE
+    }
 }
 
 impl Deref for TxnChunk {
@@ -687,8 +691,7 @@ impl TxnChunkInner {
 
     fn load_footer(file: &Arc<dyn File>) -> Result<TxnChunkFooter> {
         let mut footer = TxnChunkFooter::default();
-        let footer_off = file.size() - TXN_FILE_CHUNK_FOOTER_SIZE as u64;
-        let footer_buf = file.read(footer_off, TXN_FILE_CHUNK_FOOTER_SIZE)?;
+        let footer_buf = file.read_footer(TxnChunk::footer_size())?;
         footer.unmarshal(&footer_buf);
         assert_eq!(footer.magic, TXN_FILE_MAGIC);
         assert_eq!(footer.format_version, TXN_FILE_FORMAT);

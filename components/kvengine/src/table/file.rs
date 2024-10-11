@@ -20,22 +20,35 @@ pub trait File: Sync + Send {
     // id returns the id of the file.
     fn id(&self) -> u64;
 
-    // size returns the size of the file.
+    /// `size` returns the size of the file.
     fn size(&self) -> u64;
 
-    // path returns the file path.
+    /// `path` returns the file path.
     fn path(&self) -> Option<PathBuf> {
         None
     }
 
-    // read reads the data at given offset.
+    /// `read` reads the data at given offset.
     fn read(&self, off: u64, length: usize) -> table::Result<Bytes>;
 
-    // read_at reads the data to the buffer.
+    /// `read_at` reads the data to the buffer.
     fn read_at(&self, buf: &mut [u8], offset: u64) -> table::Result<()>;
 
-    // expire_open_file closes the file if it's idle for a long time.
-    // It will be reopened and cached on next read.
+    /// `read_footer` reads last `footer_length` bytes of the file by default.
+    ///
+    /// Some implementation can have better performance (e.g. `IaFile`).
+    fn read_footer(&self, footer_length: usize) -> table::Result<Bytes> {
+        let size = self.size();
+        if size < footer_length as u64 {
+            error!("invalid file size"; "file_id" => self.id(), "size" => size, "footer_length" => footer_length);
+            return Err(table::Error::InvalidFileSize);
+        }
+        self.read(size - footer_length as u64, footer_length)
+    }
+
+    /// `expire_open_file` closes the file if it's idle for a long time.
+    ///
+    /// It will be reopened and cached on next read.
     fn expire_open_file(&self) {}
 
     fn is_open(&self) -> bool {

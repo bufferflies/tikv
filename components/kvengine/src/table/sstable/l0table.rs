@@ -60,6 +60,10 @@ impl L0Table {
             core: Arc::new(core),
         }))
     }
+
+    pub const fn footer_size() -> usize {
+        L0_FOOTER_SIZE
+    }
 }
 
 pub struct L0TableCore {
@@ -83,7 +87,7 @@ impl L0TableCore {
     ) -> Result<Option<Self>> {
         let footer_off = file.size() - L0_FOOTER_SIZE as u64;
         let mut footer = L0Footer::default();
-        let footer_buf = file.read(footer_off, L0_FOOTER_SIZE)?;
+        let footer_buf = file.read_footer(L0_FOOTER_SIZE)?;
         footer.unmarshal(footer_buf.chunk());
         if footer.magic == MAGIC_NUMBER_SPLIT_L0 {
             return Self::new_write_cf_l0(file, cache, encryption_key);

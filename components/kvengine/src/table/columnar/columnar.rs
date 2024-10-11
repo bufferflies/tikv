@@ -124,7 +124,7 @@ impl ColumnarFileFooter {
         buf.put_u32_le(self.magic);
     }
 
-    pub fn compute_size() -> usize {
+    pub const fn compute_size() -> usize {
         4 + 4 + 1 + 1 + 2 + 4
     }
 }
@@ -396,13 +396,13 @@ impl ColumnarFile {
     pub fn open(file: Arc<dyn File>) -> crate::table::Result<Self> {
         let file_len = file.size();
         let footer_len = ColumnarFileFooter::compute_size();
-        let mut buf = vec![0; footer_len];
         let footer_offset = file_len - footer_len as u64;
-        file.read_at(&mut buf, footer_offset)?;
-        let footer = ColumnarFileFooter::parse(&buf);
+        let footer_data = file.read_footer(footer_len)?;
+        let footer = ColumnarFileFooter::parse(&footer_data);
+
         let table_offsets_size = footer.number_tables as u64 * TableOffset::compute_size() as u64;
         let table_offsets_offset = footer_offset - table_offsets_size;
-        buf.resize(table_offsets_size as usize, 0);
+        let mut buf = vec![0; table_offsets_size as usize];
         file.read_at(&mut buf, table_offsets_offset)?;
         let mut table_offsets = vec![];
         for i in 0..footer.number_tables {
