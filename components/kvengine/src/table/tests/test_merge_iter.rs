@@ -1,159 +1,13 @@
-// Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
+// Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{cmp::Ordering::*, iter::Iterator as _, mem, ops::Deref};
+use std::{iter::Iterator as _, mem, ops::Deref};
 
 use bytes::{Buf, Bytes};
 use proptest::prelude::*;
 use rand::Rng;
 
-use super::table::*;
-
-#[derive(Debug)]
-struct SimpleIterator {
-    keys: Vec<Bytes>,
-    vals: Vec<Vec<u8>>,
-    idx: i32,
-    reversed: bool,
-
-    latest_offsets: Vec<usize>,
-    ver_idx: usize,
-}
-
-impl SimpleIterator {
-    fn new(keys: Vec<&'static str>, vals: Vec<&'static str>, reversed: bool, version: u64) -> Self {
-        let length = keys.len();
-        let mut ks: Vec<Bytes> = vec![];
-        let mut vs = vec![];
-        let mut latest_off = vec![];
-        for i in 0..length {
-            ks.push(Bytes::from(keys[i]));
-            let val = Value::encode_buf(0, &[], version, vals[i].as_bytes());
-            vs.push(val);
-            latest_off.push(i);
-        }
-        Self {
-            keys: ks,
-            vals: vs,
-            idx: 0,
-            reversed,
-            latest_offsets: latest_off,
-            ver_idx: 0,
-        }
-    }
-
-    fn new_multi_version(max_ver: u64, min_ver: u64, reversed: bool) -> Self {
-        let mut last_offs = vec![];
-        let mut keys = vec![];
-        let mut vals = vec![];
-
-        let mut rng = rand::thread_rng();
-        for i in 0..100 {
-            last_offs.push(keys.len());
-            let key = Bytes::from(format!("key{:03}", i));
-            for j in (min_ver..max_ver).rev() {
-                keys.push(key.clone());
-                let val = Value::encode_buf(0, &[], j, key.chunk());
-                vals.push(val);
-                if rng.gen_range(0..4) == 0 {
-                    break;
-                }
-            }
-        }
-        Self {
-            keys,
-            vals,
-            idx: 0,
-            reversed,
-            latest_offsets: last_offs,
-            ver_idx: 0,
-        }
-    }
-
-    fn entry_idx(&self) -> usize {
-        self.latest_offsets[self.idx as usize] + self.ver_idx
-    }
-}
-
-impl Iterator for SimpleIterator {
-    fn next(&mut self) {
-        if !self.reversed {
-            self.idx += 1;
-        } else {
-            self.idx -= 1;
-        }
-        self.ver_idx = 0;
-    }
-
-    fn next_version(&mut self) -> bool {
-        let mut next_entry_off = self.keys.len();
-        if self.idx + 1 < self.latest_offsets.len() as i32 {
-            next_entry_off = self.latest_offsets[self.idx as usize + 1];
-        }
-        if self.entry_idx() + 1 < next_entry_off {
-            self.ver_idx += 1;
-            return true;
-        }
-        false
-    }
-
-    fn rewind(&mut self) {
-        if !self.reversed {
-            self.idx = 0;
-            self.ver_idx = 0;
-        } else {
-            self.idx = self.latest_offsets.len() as i32 - 1;
-            self.ver_idx = 0;
-        }
-    }
-
-    fn seek(&mut self, key: InnerKey<'_>) {
-        self.idx = search(self.latest_offsets.len(), |idx| {
-            self.keys[self.latest_offsets[idx]].chunk().cmp(key.deref()) != Less
-        }) as i32;
-        self.ver_idx = 0;
-        if self.reversed && (!self.valid() || self.key().cmp(&key) != Equal) {
-            self.idx -= 1;
-        }
-    }
-
-    fn key(&self) -> InnerKey<'_> {
-        InnerKey::from_inner_buf(self.keys[self.entry_idx()].as_ref())
-    }
-
-    fn value(&self) -> Value {
-        let buf = self.vals[self.entry_idx()].as_slice();
-        Value::decode(buf)
-    }
-
-    fn valid(&self) -> bool {
-        self.idx >= 0 && self.idx < self.latest_offsets.len() as i32
-    }
-}
-
-fn get_all(mut it: Box<dyn Iterator>) -> (Vec<Bytes>, Vec<Bytes>) {
-    let mut keys = vec![];
-    let mut vals = vec![];
-    while it.valid() {
-        let key_b = Bytes::copy_from_slice(it.key().deref());
-        keys.push(key_b);
-        vals.push(Bytes::copy_from_slice(it.value().get_value()));
-        it.next();
-    }
-    (keys, vals)
-}
-
-#[test]
-fn test_simple_iterator() {
-    let keys = vec!["1", "2", "3"];
-    let vals = vec!["v1", "v2", "v3"];
-    let mut it = Box::new(SimpleIterator::new(keys.clone(), vals.clone(), false, 1));
-    it.rewind();
-    let (n_keys, n_vals) = get_all(it);
-    for i in 0..keys.len() {
-        assert_eq!(keys[i].as_bytes(), n_keys[i]);
-        assert_eq!(vals[i].as_bytes(), n_vals[i]);
-    }
-}
+use super::{get_all, SimpleIterator};
+use crate::table::*;
 
 #[test]
 fn test_merge_single() {
@@ -418,8 +272,6 @@ prop_compose! {
 proptest! {
     #[test]
     fn test_multi_version_merge_iterator_rnd((iters_count, keys, keys_pos) in arb_keys(2, 5, 10), reversed in any::<bool>()) {
-        // println!("iters_count: {}, keys: {:?}, keys_pos: {:?}, reversed: {}", iters_count, keys, keys_pos, reversed);
-
         let i_to_key = |i| format!("{i:04}");
         let i_to_val = |i, ver| format!("{i:04}-{ver:04}");
 
@@ -462,7 +314,7 @@ proptest! {
 
         let mut iters: Vec<Box<dyn Iterator>> = Vec::with_capacity(iters_count);
         for _ in 0..iters_count {
-            let mut iter = SimpleIterator {
+            let iter = SimpleIterator {
                 keys: iters_keys.pop().unwrap(),
                 vals: iters_vals.pop().unwrap(),
                 idx: 0,
@@ -470,15 +322,6 @@ proptest! {
                 latest_offsets: iters_last_offs.pop().unwrap(),
                 ver_idx: 0,
             };
-            println!("iter {:?}", iter);
-            iter.rewind();
-            while iter.valid() {
-                println!("{:?}: {}", iter.key(), iter.value().version);
-                while iter.next_version() {
-                    println!("ver: {:?}: {}", iter.key(), iter.value().version);
-                }
-                iter.next();
-            }
             iters.push(Box::new(iter));
         }
 
@@ -518,114 +361,5 @@ proptest! {
         vers.sort();
         let expected_vers = (1..=versions_count as u64).collect::<Vec<_>>();
         prop_assert_eq!(vers, expected_vers);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-
-    use std::{mem::size_of, sync::Arc};
-
-    use super::*;
-    use crate::table::{
-        blobtable::{blobtable::BlobTable, builder::BlobTableBuilder, BlobRef},
-        file::InMemFile,
-        sstable::{
-            get_test_key, new_table_builder_for_test, new_test_cache, SsTable, TEST_ID_ALLOC,
-        },
-        Iterator,
-    };
-
-    #[cfg(test)]
-    pub(crate) fn get_blob_test_value(n: usize) -> String {
-        format!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa - {}", n)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn generate_key_values(prefix: &str, n: usize) -> Vec<(String, String)> {
-        assert!(n <= 10000);
-        let mut results = Vec::with_capacity(n);
-        for i in 0..n {
-            let k = get_test_key(prefix, i);
-            let v = get_blob_test_value(i);
-            results.push((k, v));
-        }
-        results
-    }
-
-    #[cfg(test)]
-    fn test_fetch_value_from_blob_table(bt: &BlobTable, v: Value) -> Result<Vec<u8>> {
-        assert!(v.is_blob_ref());
-        let blob_ref = v.get_blob_ref();
-        assert_eq!(bt.id(), blob_ref.fid);
-        bt.get(&blob_ref, &mut vec![], None)
-    }
-
-    #[cfg(test)]
-    fn test_store_value_in_blob_table(
-        blob_builder: &mut BlobTableBuilder,
-        k: &String,
-        v: &mut Value,
-    ) -> BlobRef {
-        assert!(v.value_len() > size_of::<BlobRef>() + v.user_meta_len());
-        v.set_blob_ref();
-        blob_builder.add(InnerKey::from_inner_buf(k.as_bytes()), v)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn build_blob_test_table_with_kvs(
-        kvs: &Vec<(String, String)>,
-    ) -> (SsTable, BlobTable) {
-        let sst_fid = TEST_ID_ALLOC.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-        let blob_fid = TEST_ID_ALLOC.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-        let mut sst_builder = new_table_builder_for_test(sst_fid);
-        let mut blob_builder = BlobTableBuilder::new(blob_fid, NO_COMPRESSION, 0, 0, None);
-        let meta = 0u8;
-
-        for (k, v) in kvs {
-            let value_buf = Value::encode_buf(meta, &[0], 0, v.as_bytes());
-            let mut v = Value::decode(value_buf.as_slice());
-            let blob_ref = test_store_value_in_blob_table(&mut blob_builder, k, &mut v);
-            sst_builder.add(InnerKey::from_inner_buf(k.as_bytes()), &v, Some(blob_ref));
-        }
-
-        let mut buf = Vec::with_capacity(sst_builder.estimated_size());
-
-        sst_builder.finish(0, &mut buf);
-
-        let bytes = blob_builder.finish();
-
-        let sst_file = InMemFile::new(sst_fid, buf.into());
-        let blob_file = InMemFile::new(blob_fid, bytes);
-
-        (
-            SsTable::new(Arc::new(sst_file), new_test_cache(), None).unwrap(),
-            BlobTable::new(Arc::new(blob_file)).unwrap(),
-        )
-    }
-
-    #[cfg(test)]
-    pub(crate) fn create_blob_sst_table(
-        prefix: &str,
-        n: usize,
-    ) -> ((SsTable, BlobTable), Vec<(String, String)>) {
-        let kvs = generate_key_values(prefix, n);
-        (build_blob_test_table_with_kvs(&kvs), kvs)
-    }
-
-    #[test]
-    fn test_value_external_storage() {
-        let ((t, bt), _) = create_blob_sst_table("key", 10000);
-        let mut it = t.new_iterator(false, true);
-        let mut count = 0;
-        it.rewind();
-        while it.valid() {
-            let k = it.key();
-            assert_eq!(k.deref(), get_test_key("key", count).as_bytes());
-            let value = test_fetch_value_from_blob_table(&bt, it.value());
-            assert_eq!(value.unwrap(), get_blob_test_value(count).as_bytes());
-            count += 1;
-            it.next()
-        }
     }
 }
