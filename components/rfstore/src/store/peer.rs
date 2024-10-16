@@ -2210,6 +2210,13 @@ impl<'a> PreprocessRef<'a> {
                 "txn_file_locks" => ?self.shard_meta().txn_file_locks());
             return;
         }
+        if !shard_meta.unconverted_l0s.is_empty() {
+            warn!(
+                "{} preprocess_prepare_merge denied, unconverted l0s : {:?}",
+                tag, shard_meta.unconverted_l0s
+            );
+            return;
+        }
 
         let prepare_merge = req.get_admin_request().get_prepare_merge();
         let mut region = self.get_preprocessed_region().clone();
@@ -3385,7 +3392,7 @@ impl Peer {
                     return Err(Error::ProposalInMergingMode(self.region_id));
                 }
                 let cs = custom_log.get_change_set().unwrap();
-                if !cs.has_initial_flush() {
+                if !cs.has_initial_flush() && !cs.has_columnar_compaction() {
                     return Err(Error::ProposalInMergingMode(self.region_id));
                 }
             }

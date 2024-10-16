@@ -183,8 +183,13 @@ pub(crate) fn create_snapshot_tables(
         }
     }
     for &l0_id in snap.get_unconverted_l0s() {
-        let unconverted_l0 = l0_tbls.iter().find(|l0| l0.id() == l0_id).unwrap().clone();
-        col_levels.unconverted_l0s.push(unconverted_l0);
+        let l0 = match l0_tbls.iter().find(|l0| l0.id() == l0_id) {
+            Some(l0) => l0.clone(),
+            None => {
+                panic!("l0_id: {}, l0 tables: {:?}", l0_id, snap);
+            }
+        };
+        col_levels.unconverted_l0s.push(l0.clone());
     }
     col_levels.sort();
     builder.set_l0_tbls(l0_tbls);

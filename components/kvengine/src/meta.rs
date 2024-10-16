@@ -563,6 +563,7 @@ impl ShardMeta {
         info!("{} apply_initial_flush", self.tag();
             "prop" => ?new_meta.properties,
             "data_seq" => new_meta.data_sequence,
+            "columnar_snap_version" => new_meta.columnar_snap_version,
             "max_ts" => new_meta.max_ts);
         *self = new_meta;
     }
@@ -771,6 +772,7 @@ impl ShardMeta {
                 meta.data_sequence = initial_seq;
                 meta.seq = initial_seq;
             }
+            meta.columnar_snap_version = old.columnar_snap_version;
             // Although `max_ts` will be updated in initial flush again, still set here to
             // avoid issue in unexpected corner case.
             meta.max_ts = self.max_ts;

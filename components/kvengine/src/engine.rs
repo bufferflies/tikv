@@ -394,13 +394,16 @@ impl EngineCore {
         );
         let mut builder = ShardDataBuilder::new(shard.get_data());
         create_snapshot_tables(&mut builder, cs.get_snapshot(), &cs, self.opts.for_restore);
-        let schema_file = cs.get_snapshot().has_schema_meta().then(|| {
-            let schema_file_id = cs.get_snapshot().get_schema_meta().get_file_id();
-            let runtime = self.fs.get_runtime();
-            runtime
-                .block_on(self.load_schema_file(schema_file_id))
-                .unwrap()
-        });
+        // schema_file_id may be 0 after the columnar removed.
+        let schema_file = (cs.get_snapshot().has_schema_meta()
+            && cs.get_snapshot().get_schema_meta().get_file_id() != 0)
+            .then(|| {
+                let schema_file_id = cs.get_snapshot().get_schema_meta().get_file_id();
+                let runtime = self.fs.get_runtime();
+                runtime
+                    .block_on(self.load_schema_file(schema_file_id))
+                    .unwrap()
+            });
         builder.set_schema_file(schema_file);
         builder.set_unloaded_tbls(cs.unloaded_tables);
         shard.set_data(builder.build());
@@ -558,6 +561,7 @@ impl EngineCore {
                 base_version,
                 data_sequence,
                 shard_data: data,
+                columnar_snap_version: shard.get_columnar_snap_version(),
                 max_ts,
                 properties,
             },
@@ -723,7 +727,8 @@ impl EngineCore {
                 || cs.has_destroy_range()
                 || cs.has_truncate_ts()
                 || cs.has_trim_over_bound()
-                || cs.has_major_compaction())
+                || cs.has_major_compaction()
+                || cs.has_columnar_compaction())
         {
             // This compaction may be conflicted with initial flush, so we have to trigger
             // next compaction if needed.

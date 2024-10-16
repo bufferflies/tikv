@@ -97,6 +97,7 @@ pub(crate) struct InitialFlush {
     pub(crate) base_version: u64,
     pub(crate) data_sequence: u64,
     pub(crate) shard_data: ShardData,
+    pub(crate) columnar_snap_version: u64,
     pub(crate) max_ts: u64,
     pub(crate) properties: Option<kvenginepb::Properties>,
 }
@@ -188,11 +189,12 @@ impl Engine {
         let flush = task.initial.take().unwrap();
         let tag = ShardTag::new(self.get_engine_id(), task.id_ver);
         info!(
-            "{} initial flush {} mem-tables, base_version {}, data_sequence {}",
+            "{} initial flush {} mem-tables, base_version {}, data_sequence {}, columnar_snap_version {}",
             tag,
             flush.mem_tbls.len(),
             flush.base_version,
-            flush.data_sequence
+            flush.data_sequence,
+            flush.columnar_snap_version
         );
         let mut cs = new_change_set(task.id_ver.id, task.id_ver.ver);
         let initial_flush = cs.mut_initial_flush();
@@ -248,6 +250,7 @@ impl Engine {
             }
             false
         });
+
         for blob in flush.shard_data.blob_tbl_map.values() {
             let mut blob_create = pb::BlobCreate::new();
             blob_create.set_id(blob.id());
@@ -275,8 +278,25 @@ impl Engine {
                     .map(|l0| l0.id())
                     .collect();
                 initial_flush.set_unconverted_l0s(unconverted_l0s);
+
+                flush.shard_data.for_each_columnar_level(|cl| {
+                    for col_file in cl.files.iter() {
+                        // TODO: check col_file has_overlap with task.range to avoid useless flush.
+                        let mut tbl = pb::TableCreate::new();
+                        tbl.set_id(col_file.id());
+                        tbl.set_cf(WRITE_CF as i32);
+                        tbl.set_level(cl.level as u32);
+                        tbl.set_smallest(col_file.get_smallest().to_vec());
+                        tbl.set_biggest(col_file.get_biggest().to_vec());
+                        tbl.set_columnar_tables(col_file.table_count() as u32);
+                        initial_flush.mut_columnar_creates().push(tbl);
+                    }
+                    false
+                });
             }
         }
+        initial_flush.set_columnar_snap_version(flush.columnar_snap_version);
+
         let (tx, rx) = mpsc::unbounded();
         let mut send_cnt = 0;
         for m in &flush.mem_tbls {

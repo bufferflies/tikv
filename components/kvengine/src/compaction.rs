@@ -1044,7 +1044,12 @@ impl Engine {
         let mut smallest = data.l0_tbls[0].smallest();
         let mut biggest = data.l0_tbls[0].biggest();
         let mut estimated_blob_size = 0;
+        let columnar_snap_version = shard.get_columnar_snap_version();
         for l0 in &data.l0_tbls {
+            // Skip unconverted l0s.
+            if columnar_snap_version > 0 && l0.version() > columnar_snap_version {
+                continue;
+            }
             if smallest > l0.smallest() {
                 smallest = l0.smallest();
             }
@@ -1057,6 +1062,10 @@ impl Engine {
                     - l0.entries() * self.opts.blob_table_build_options.min_blob_size as u64;
             }
             total_size += l0.size();
+        }
+        if l0_tbls.is_empty() {
+            store_bool(&shard.compacting, false);
+            return None;
         }
 
         for cf in 0..NUM_CFS {
@@ -1128,8 +1137,13 @@ impl Engine {
             return None;
         }
         let mut move_down_l0s = vec![];
+        let columnar_snap_version = shard.get_columnar_snap_version();
         for (i, l0_tbl) in shard_data.l0_tbls.iter().enumerate() {
             if !l0_tbl.is_write_cf_only() {
+                continue;
+            }
+            // Avoid unconverted l0s compaction.
+            if columnar_snap_version > 0 && l0_tbl.version() > columnar_snap_version {
                 continue;
             }
             let l0_write_cf_tbl = l0_tbl.get_cf(WRITE_CF).as_ref().unwrap();

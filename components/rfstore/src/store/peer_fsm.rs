@@ -837,6 +837,7 @@ impl<'a> PeerMsgHandler<'a> {
                     target_region.get_peers()
                 ));
             }
+
             let id = self.region_id();
             let version = msg.get_header().get_region_epoch().get_version();
             let target_id = target_region.get_id();
@@ -899,6 +900,17 @@ impl<'a> PeerMsgHandler<'a> {
                     target_region,
                 ))
                 .into());
+            }
+
+            if let Some(source_meta) = self.fsm.get_peer().get_store().shard_meta.as_ref() {
+                // NOTE: source shard meta maybe stale, so we should also check unconverted_l0s
+                // after propose.
+                if !source_meta.unconverted_l0s.is_empty() {
+                    return Err(box_err!(
+                        "failed to merge source region with {} unconverted l0s",
+                        source_meta.unconverted_l0s.len()
+                    ));
+                }
             }
         } else if admin_req.has_commit_merge() {
             let source_region = msg.get_admin_request().get_commit_merge().get_source();
@@ -2166,6 +2178,15 @@ impl<'a> PeerMsgHandler<'a> {
                         tag,
                         MERGE_REGION_WITH_TXN_FILE_LOCKS_ERR_MSG
                     ));
+                }
+
+                if !source_meta.unconverted_l0s.is_empty() {
+                    let tag = self.peer.tag();
+                    info!("{} fail to schedule merge: source region has unconverted l0s", tag;
+                        "target" => ?expect_region,
+                        "unconverted_l0s" => ?source_meta.unconverted_l0s,
+                    );
+                    return Ok(());
                 }
             }
 

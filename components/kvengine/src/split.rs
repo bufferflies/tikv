@@ -472,12 +472,14 @@ impl Engine {
 
         new_shard.parent_id = shard_id;
         let all_files = new_shard.get_all_files();
+        let all_col_files = new_shard.get_all_col_files();
         info!(
-            "merged new shard {}, start {:x}, end {:x}, all files {:?}",
+            "merged new shard {}, start {:x}, end {:x}, all files {:?}, all columnar files {:?}",
             new_shard.tag(),
             new_shard.outer_start,
             new_shard.outer_end,
-            all_files
+            all_files,
+            all_col_files,
         );
         self.refresh_shard_states(&new_shard);
         self.shards.insert(shard_id, Arc::new(new_shard));

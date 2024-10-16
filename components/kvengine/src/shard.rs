@@ -1214,6 +1214,7 @@ impl fmt::Debug for ShardData {
             .field("range", &self.range)
             .field("files", &self.get_all_files())
             .field("txn_chunks", &self.get_txn_chunks())
+            .field("columnar_files", &self.get_all_columnar_files())
             .field("mem_table_max_ts", &self.get_mem_table_max_ts())
             .field("mem_table_size", &self.get_mem_table_size())
             .field("l0_total_size", &self.get_l0_total_size())
@@ -1390,6 +1391,17 @@ impl ShardDataCore {
     pub(crate) fn get_col_table_counts(&self, level: usize) -> usize {
         assert!(level < 3);
         self.col_levels.levels[level].files.len()
+    }
+
+    pub(crate) fn get_all_columnar_files(&self) -> Vec<u64> {
+        let mut files = Vec::new();
+        for cl in self.col_levels.levels.iter() {
+            for f in cl.files.iter() {
+                files.push(f.id());
+            }
+        }
+        files.sort_unstable();
+        files
     }
 
     // Return (max_ts).
