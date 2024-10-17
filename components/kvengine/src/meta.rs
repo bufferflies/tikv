@@ -812,7 +812,9 @@ impl ShardMeta {
             let new_flushed_l0s: Vec<u64> = self
                 .files
                 .iter()
-                .filter(|(id, fm)| fm.get_level() == 0 && !comp.row_l0s.contains(id))
+                .filter(|(id, fm)| {
+                    fm.get_level() == 0 && fm.is_sst_file() && !comp.row_l0s.contains(id)
+                })
                 .map(|(id, _)| *id)
                 .collect();
             self.unconverted_l0s.extend(new_flushed_l0s);
@@ -1152,6 +1154,10 @@ impl FileMeta {
 
     pub fn is_schema_file(&self) -> bool {
         self.file_type == FileType::Schema
+    }
+
+    pub fn is_sst_file(&self) -> bool {
+        self.file_type == FileType::Sst
     }
 
     pub fn from_l0_table(table: &kvenginepb::L0Create) -> Self {
