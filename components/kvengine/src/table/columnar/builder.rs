@@ -5,7 +5,7 @@ use std::cmp::max;
 use bytes::{Buf, BufMut};
 use cloud_encryption::EncryptionKey;
 use tidb_query_datatype::{
-    codec::table::{encode_common_handle_for_test, encode_row_key},
+    codec::table::{encode_common_handle_row_key, encode_row_key},
     Collation, FieldTypeFlag, FieldTypeTp,
 };
 use tipb::ColumnInfo;
@@ -256,7 +256,7 @@ impl ColumnarFileBuilder {
             let smallest_int_handle = smallest_handle.get_i64_le();
             encode_row_key(smallest_table_id, smallest_int_handle)
         } else {
-            encode_common_handle_for_test(smallest_table_id, smallest_handle)
+            encode_common_handle_row_key(smallest_table_id, smallest_handle)
         };
         let last_table = self.tables.last().unwrap();
         let biggest_table_id = last_table.schema.table_id;
@@ -266,7 +266,7 @@ impl ColumnarFileBuilder {
             let biggest_int_handle = biggest_handle.get_i64_le();
             encode_row_key(biggest_table_id, biggest_int_handle)
         } else {
-            encode_common_handle_for_test(biggest_table_id, biggest_handle)
+            encode_common_handle_row_key(biggest_table_id, biggest_handle)
         };
         if self.inner_key_off == 0 {
             (
@@ -662,7 +662,7 @@ impl ColumnarColumnBuilder {
     }
 
     fn compute_min_max(&self) -> Option<(Vec<u8>, Vec<u8>)> {
-        let tp = FieldTypeTp::from_u8(self.col_meta.col_info.get_tp() as u8).unwrap();
+        let tp = FieldTypeTp::from_i32(self.col_meta.col_info.get_tp()).unwrap();
         let is_unsigned = get_unsigned(&self.col_meta.col_info);
         if self.pack_buffer.nullable && self.pack_buffer.nulls.iter().all(|&x| x == 1) {
             return None;

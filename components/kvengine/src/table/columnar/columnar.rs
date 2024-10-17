@@ -842,7 +842,7 @@ impl Block {
 }
 
 pub(crate) fn get_fixed_size(col_info: &ColumnInfo) -> usize {
-    let tp = FieldTypeTp::from_u8(col_info.get_tp() as u8).unwrap();
+    let tp = FieldTypeTp::from_i32(col_info.get_tp()).unwrap();
     match tp {
         FieldTypeTp::Float
         | FieldTypeTp::Tiny
@@ -866,7 +866,7 @@ pub(crate) fn get_fixed_size(col_info: &ColumnInfo) -> usize {
 }
 
 pub(crate) fn can_build_min_max(col_info: &ColumnInfo) -> bool {
-    let tp = FieldTypeTp::from_u8(col_info.get_tp() as u8).unwrap();
+    let tp = FieldTypeTp::from_i32(col_info.get_tp()).unwrap();
     matches!(
         tp,
         FieldTypeTp::Tiny

@@ -9,7 +9,7 @@ use tidb_query_datatype::{
     codec::{
         datum::encode_key,
         row::v2::encoder_for_test::{Column, RowEncoder},
-        table::{encode_common_handle_for_test, encode_row_key},
+        table::{encode_common_handle_row_key, encode_row_key},
         Datum,
     },
     expr::EvalContext,
@@ -118,7 +118,7 @@ pub fn build_row_key(
             handle_datums.push(col_val_datum(col, i));
         }
         let common_handle = encode_key(ctx, &handle_datums).unwrap();
-        let row_key = encode_common_handle_for_test(schema.table_id, &common_handle);
+        let row_key = encode_common_handle_row_key(schema.table_id, &common_handle);
         key.extend_from_slice(&row_key);
     } else {
         key.extend_from_slice(&encode_row_key(schema.table_id, i as i64));

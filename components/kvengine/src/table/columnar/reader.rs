@@ -24,7 +24,7 @@ use tidb_query_datatype::{
         mysql::{DecimalDecoder, DecimalEncoder},
         row::v2::{decode_v2_i64, decode_v2_u64, RowSlice},
         table::{
-            decode_common_handle, decode_int_handle, encode_common_handle_for_test, encode_row_key,
+            decode_common_handle, decode_int_handle, encode_common_handle_row_key, encode_row_key,
             PREFIX_LEN,
         },
     },
@@ -1154,7 +1154,7 @@ impl ColumnarRowTableReader {
         col_info: &ColumnInfo,
         col_val: &[u8],
     ) {
-        let ft = FieldTypeTp::from_u8(col_info.get_tp() as u8).unwrap();
+        let ft = FieldTypeTp::from_i32(col_info.get_tp()).unwrap();
         match ft {
             FieldTypeTp::Tiny
             | FieldTypeTp::Short
@@ -1261,7 +1261,7 @@ impl ColumnarReader for ColumnarRowTableReader {
         let row_key = if self.is_int_handle && !handle.is_empty() {
             encode_row_key(self.schema.table_id, (&handle[..]).get_i64_le())
         } else {
-            encode_common_handle_for_test(self.schema.table_id, handle)
+            encode_common_handle_row_key(self.schema.table_id, handle)
         };
         self.iter.seek(InnerKey::from_inner_buf(&row_key));
         Ok(())
@@ -1379,7 +1379,7 @@ impl ColumnarReader for ColumnarConcatReader {
         let mut row_key = if get_fixed_size(&self.schema.handle_column) > 0 {
             encode_row_key(self.schema.table_id, (&handle[..]).get_i64_le())
         } else {
-            encode_common_handle_for_test(self.schema.table_id, handle)
+            encode_common_handle_row_key(self.schema.table_id, handle)
         };
         if let Some(prefix) = ApiV2::get_keyspace_prefix(self.files[0].get_smallest().deref()) {
             let mut buf = Vec::with_capacity(prefix.len() + row_key.len());
@@ -1576,7 +1576,7 @@ pub mod tests {
         let mut wb = WriteBatch::new();
         for ref_row in ref_rows.iter().rev() {
             let row_key = if is_common_handle {
-                encode_common_handle_for_test(schema.table_id, ref_row.handle.as_slice())
+                encode_common_handle_row_key(schema.table_id, ref_row.handle.as_slice())
             } else {
                 encode_row_key(schema.table_id, ref_row.handle.as_slice().get_i64_le())
             };

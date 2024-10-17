@@ -135,10 +135,10 @@ pub struct IndexColumn {
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct FieldType {
-    pub tp: i64,
-    pub flag: u64,
-    pub flen: i64,
-    pub decimal: i64,
+    pub tp: i32,
+    pub flag: i32,
+    pub flen: i32,
+    pub decimal: i32,
     pub charset: String,
     pub collate: String,
     pub elems: Option<Vec<String>>, // replace `()` with the appropriate type
@@ -232,10 +232,10 @@ pub fn convert_column_infos_to_tipb(
     for column_info in column_infos {
         let mut ci = tipb::ColumnInfo::new();
         ci.set_column_id(column_info.id);
-        ci.set_tp(column_info.field_type.tp as i32);
-        ci.set_flag(column_info.field_type.flag as i32);
-        ci.set_column_len(column_info.field_type.flen as i32);
-        ci.set_decimal(column_info.field_type.decimal as i32);
+        ci.set_tp(column_info.field_type.tp);
+        ci.set_flag(column_info.field_type.flag);
+        ci.set_column_len(column_info.field_type.flen);
+        ci.set_decimal(column_info.field_type.decimal);
         ci.set_elems(
             column_info
                 .field_type
@@ -272,7 +272,7 @@ fn decode_default_value_to_datum(ctx: &mut EvalContext, c: &ColumnInfo) -> Optio
     // return None if origin_default is none.
     c.origin_default.as_ref()?;
 
-    let field_type_tp = FieldTypeTp::from_u8(c.field_type.tp as u8).unwrap();
+    let field_type_tp = FieldTypeTp::from_i32(c.field_type.tp).unwrap();
     let field_flag = c.field_type.flag;
 
     let default = c.origin_default.as_ref().unwrap();

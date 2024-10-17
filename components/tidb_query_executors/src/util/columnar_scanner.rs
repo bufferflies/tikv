@@ -17,7 +17,7 @@ use tidb_query_datatype::{
         data_type::{ChunkedVec, Enum, Real, VectorValue},
         mysql::{DecimalDecoder, Duration, JsonDecoder, Set, Time, VectorFloat32Decoder},
         table,
-        table::{encode_common_handle_for_test, encode_row_key, PREFIX_LEN},
+        table::{encode_common_handle_row_key, encode_row_key, PREFIX_LEN},
     },
     expr::EvalContext,
     EvalType, FieldTypeTp,
@@ -55,7 +55,7 @@ impl ColumnarScanner {
             } else {
                 schema.columns[offset as usize].get_tp()
             };
-            let tp = FieldTypeTp::from_u8(col_tp as u8).unwrap();
+            let tp = FieldTypeTp::from_i32(col_tp).unwrap();
             let eval_type = EvalType::try_from(tp).unwrap();
             eval_types.push(eval_type);
         }
@@ -82,7 +82,7 @@ impl AdvancedScanner for ColumnarScanner {
         let keyspace_prefix = api_version::ApiV2::get_txn_keyspace_prefix(self.keyspace_id);
         let table_id = schema.table_id;
         let mut upper = if schema.is_common_handle() {
-            let end = encode_common_handle_for_test(
+            let end = encode_common_handle_row_key(
                 table_id,
                 self.working_end_handle.as_ref().unwrap_or(&vec![]),
             );
@@ -165,7 +165,7 @@ impl AdvancedScanner for ColumnarScanner {
                     }
                     VectorValue::DateTime(cv) => {
                         let fsp = column_info.get_decimal() as i8;
-                        let time_type = FieldTypeTp::from_u8(column_info.get_tp() as u8)
+                        let time_type = FieldTypeTp::from_i32(column_info.get_tp())
                             .unwrap()
                             .try_into()
                             .unwrap();

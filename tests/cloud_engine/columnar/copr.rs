@@ -13,7 +13,7 @@ use test_cloud_server::{
 use test_coprocessor::DagChunkSpliter;
 use tidb_query_datatype::{
     codec::{
-        table::{encode_common_handle_for_test, encode_row_key},
+        table::{encode_common_handle_row_key, encode_row_key},
         Datum,
     },
     expr::EvalContext,
@@ -145,8 +145,8 @@ fn test_coprocessor() {
         let mut end_key = ApiV2::get_txn_keyspace_prefix(keyspace_id);
         let mut key_range = KeyRange::new();
         if schema.is_common_handle() {
-            start_key.extend_from_slice(&encode_common_handle_for_test(tbl_id, &[]));
-            end_key.extend_from_slice(&encode_common_handle_for_test(tbl_id, GLOBAL_SHARD_END_KEY));
+            start_key.extend_from_slice(&encode_common_handle_row_key(tbl_id, &[]));
+            end_key.extend_from_slice(&encode_common_handle_row_key(tbl_id, GLOBAL_SHARD_END_KEY));
         } else {
             start_key.extend_from_slice(&encode_row_key(tbl_id, 0));
             end_key.extend_from_slice(&encode_row_key(tbl_id, i64::MAX));

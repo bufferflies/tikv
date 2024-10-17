@@ -1,6 +1,7 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
+    ops::Deref,
     os::unix::fs::{FileExt, MetadataExt},
     path::{Path, PathBuf},
     sync::{
@@ -10,6 +11,7 @@ use std::{
 };
 
 use bytes::Bytes;
+use memmap2::Mmap;
 
 use crate::{error::IoContext, table::table};
 
@@ -54,6 +56,24 @@ pub trait File: Sync + Send {
     fn is_open(&self) -> bool {
         false
     }
+
+    fn mmap(&self) -> table::Result<MmapData>;
+}
+
+pub enum MmapData {
+    Local(Arc<Mmap>),
+    InMem(Bytes),
+}
+
+impl Deref for MmapData {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        match self {
+            MmapData::Local(mmap) => mmap.deref(),
+            MmapData::InMem(data) => data.deref(),
+        }
+    }
 }
 
 pub struct LocalFile {
@@ -61,6 +81,7 @@ pub struct LocalFile {
     size: u64,
     path: PathBuf,
     fd: TtlCache<std::fs::File>,
+    mmap: Mutex<Option<Arc<Mmap>>>,
 }
 
 impl LocalFile {
@@ -75,6 +96,7 @@ impl LocalFile {
             size: meta.size(),
             path: path.to_path_buf(),
             fd: TtlCache::default(),
+            mmap: Mutex::new(None),
         };
         Ok(local_file)
     }
@@ -120,6 +142,17 @@ impl File for LocalFile {
     fn is_open(&self) -> bool {
         self.fd.is_loaded()
     }
+
+    fn mmap(&self) -> table::Result<MmapData> {
+        let mut gurad = self.mmap.lock().unwrap();
+        if gurad.is_none() {
+            let fd = self.get_file()?;
+            let mmap = unsafe { Mmap::map(&fd).table_ctx(self.id(), "local.mmap")? };
+            *gurad = Some(Arc::new(mmap));
+        }
+        let mmap = gurad.as_ref().unwrap().clone();
+        Ok(MmapData::Local(mmap))
+    }
 }
 
 #[derive(Clone)]
@@ -155,6 +188,10 @@ impl File for InMemFile {
         let length = buf.len();
         buf.copy_from_slice(&self.data[off_usize..off_usize + length]);
         Ok(())
+    }
+
+    fn mmap(&self) -> table::Result<MmapData> {
+        Ok(MmapData::InMem(self.data.clone()))
     }
 }
 

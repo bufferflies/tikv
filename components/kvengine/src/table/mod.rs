@@ -8,6 +8,7 @@ pub mod merge_iterator;
 pub mod sstable;
 pub mod table;
 pub mod txn_file;
+pub mod vector_index;
 
 #[cfg(test)]
 mod tests;

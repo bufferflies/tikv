@@ -51,7 +51,7 @@ pub enum FieldTypeTp {
 }
 
 impl FieldTypeTp {
-    fn from_i32(i: i32) -> Option<FieldTypeTp> {
+    pub fn from_i32(i: i32) -> Option<FieldTypeTp> {
         if (i >= FieldTypeTp::Unspecified as i32 && i <= FieldTypeTp::Bit as i32)
             || (i >= FieldTypeTp::Json as i32 && i <= FieldTypeTp::Geometry as i32)
             || (i == FieldTypeTp::TiDbVectorFloat32 as i32)
