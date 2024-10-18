@@ -2027,10 +2027,11 @@ fn tls_incoming(
             };
             match tokio_openssl::SslStream::new(ssl, stream) {
                 Ok(mut ssl_stream) => match Pin::new(&mut ssl_stream).accept().await {
-                    Err(_) => {
+                    Err(e) => {
                         error!(
                             "Status server error: TLS handshake error";
-                            "remote_addr" => ssl_stream.get_ref().remote_addr()
+                            "remote_addr" => ssl_stream.get_ref().remote_addr(),
+                            "err" => e.to_string()
                         );
                         continue;
                     },
