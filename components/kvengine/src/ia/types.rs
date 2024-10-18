@@ -84,6 +84,7 @@ pub(crate) type FileSegmentGuard = OwnedMutexGuard<FileSegmentStatus>;
 #[derive(Debug, Default)]
 pub(crate) struct FileSegmentQueueInfo {
     pub(crate) freq: u8,
+    pub(crate) access_time: u64,
     pub(crate) pos: FifoItemPos,
 }
 

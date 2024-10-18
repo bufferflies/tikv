@@ -51,9 +51,11 @@ use std::{
     assert_matches::debug_assert_matches,
     cmp, fmt,
     sync::atomic::{AtomicI64, Ordering::Relaxed},
+    time::Duration,
 };
 
 use crossbeam_queue::SegQueue;
+use tikv_util::time::UnixSecs;
 use tokio::sync::{mpsc, Mutex};
 
 use crate::{
@@ -105,13 +107,21 @@ pub(crate) struct S3Fifo {
     small_queue: Queue,
     ghost_queue: Vec<Mutex<Option<FileSegmentIdent>>>,
     pub(crate) evict_tx: mpsc::Sender<EvictTask>,
+
+    /// Minimum interval to update `FileSegmentQueueInfo.freq`.
+    freq_update_interval: Duration,
 }
 
 impl S3Fifo {
     /// `queue_len` is the length of Fifo queue. Currently it is used to
     /// calculate length of ghost queue. Normally it can be `capacity /
     /// average item size`.
-    pub(crate) fn new(capacity: i64, queue_len: usize, evict_tx: mpsc::Sender<EvictTask>) -> Self {
+    pub(crate) fn new(
+        capacity: i64,
+        queue_len: usize,
+        evict_tx: mpsc::Sender<EvictTask>,
+        freq_update_interval: Duration,
+    ) -> Self {
         let small_cap = capacity / 10;
         let small_len = queue_len / 10;
         let mut ghost_queue = vec![];
@@ -121,6 +131,7 @@ impl S3Fifo {
             small_queue: Queue::new(small_cap),
             ghost_queue,
             evict_tx,
+            freq_update_interval,
         }
     }
 
@@ -141,7 +152,11 @@ impl S3Fifo {
         }
         let mut queue_info = item.segment.lock_queue_info().await;
         if matches!(queue_info.pos, FifoItemPos::Main | FifoItemPos::Small) {
-            queue_info.freq = cmp::min(queue_info.freq + 1, 3);
+            let now = UnixSecs::now().into_inner();
+            if now.saturating_sub(queue_info.access_time) >= self.freq_update_interval.as_secs() {
+                queue_info.freq = cmp::min(queue_info.freq + 1, 3);
+                queue_info.access_time = now;
+            }
         } else {
             queue_info.freq = 0;
             if self.is_in_ghost(&item.ident).await {
