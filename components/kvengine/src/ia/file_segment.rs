@@ -85,7 +85,7 @@ impl FileSegmentManagerCore {
         for k in keys {
             if let Some(file_id) = FooterInfo::parse_local_filename(&k) {
                 let (footer_info, _) =
-                    FooterInfo::read_from_local(self.store.clone(), file_id).await?;
+                    FooterInfo::read_from_local(self.store.clone(), file_id, None::<fn()>).await?;
                 self.footers.get_locked(file_id).await.replace(footer_info);
             }
         }
@@ -98,15 +98,21 @@ impl FileSegmentManagerCore {
         ftype: FileType,
     ) -> Result<(Bytes, u64 /* total_size */)> {
         let mut guard = self.footers.get_locked(file_id).await;
-        if let Some(footer_info) = guard.as_ref() {
-            match FooterInfo::read_from_local(self.store.clone(), footer_info.file_id).await {
+        if let Some(footer_info) = guard.clone() {
+            match FooterInfo::read_from_local(
+                self.store.clone(),
+                footer_info.file_id,
+                Some(|| drop(guard)),
+            )
+            .await
+            {
                 Ok((local_info, footer)) => {
-                    debug_assert_eq!(local_info, *footer_info);
+                    debug_assert_eq!(local_info, footer_info);
                     Ok((footer, footer_info.file_total_size))
                 }
                 Err(err) => {
                     error!("read footer from local failed"; "file_id" => file_id, "err" => ?err);
-                    *guard = None;
+                    let _ = self.drop_footer_from_local(file_id).await;
                     Err(err)
                 }
             }
@@ -133,6 +139,24 @@ impl FileSegmentManagerCore {
                 *guard = Some(footer_info);
             }
             Ok((footer, total_size))
+        }
+    }
+
+    /// Use when meet error on opening/reading local footer.
+    async fn drop_footer_from_local(&self, file_id: u64) -> Result<()> {
+        let mut guard = self.footers.get_locked(file_id).await;
+        if let Some(footer_info) = guard.clone() {
+            let res = footer_info.drop_from_local(self.store.clone()).await;
+            *guard = None;
+
+            if let Err(err) = res.as_ref() {
+                warn!("drop footer from local failed";
+                    "footer" => ?footer_info,
+                    "err" => ?err);
+            }
+            res
+        } else {
+            Ok(())
         }
     }
 

@@ -2,7 +2,7 @@
 
 use std::{
     collections::HashMap,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering::Relaxed},
 };
 
@@ -22,17 +22,40 @@ use crate::{
 /// LocalStore is used to provide uniform access to both local disk and memory.
 #[async_trait]
 pub(crate) trait LocalStore: Send + Sync {
+    /// Return the path of store. Will be `None` when it's in memory.
+    fn path(&self) -> Option<&Path>;
+
     /// Return the existed keys & suffixes in the store from last startup.
     async fn init(&self) -> Result<HashMap<String /* suffix */, Vec<String> /* keys */>>;
 
     async fn save(&self, file_id: u64, key: &str, data: Bytes) -> Result<()>;
 
     /// Read exactly `buf.len()` bytes into `buf` starting at `offset`.
-    async fn read_at(&self, file_id: u64, key: &str, buf: &mut [u8], offset: u64) -> Result<()>;
+    async fn read_at(
+        &self,
+        file_id: u64,
+        key: &str,
+        buf: &mut [u8],
+        offset: u64,
+        on_open: Option<Box<dyn FnOnce() + Send>>,
+    ) -> Result<()>;
 
-    async fn read(&self, file_id: u64, key: &str, start_off: u64, end_off: u64) -> Result<Bytes>;
+    async fn read(
+        &self,
+        file_id: u64,
+        key: &str,
+        start_off: u64,
+        end_off: u64,
+        on_open: Option<Box<dyn FnOnce() + Send>>,
+    ) -> Result<Bytes>;
 
-    async fn read_all(&self, file_id: u64, key: &str, buf: &mut Vec<u8>) -> Result<()>;
+    async fn read_all(
+        &self,
+        file_id: u64,
+        key: &str,
+        buf: &mut Vec<u8>,
+        on_open: Option<Box<dyn FnOnce() + Send>>,
+    ) -> Result<()>;
 
     async fn remove(&self, file_id: u64, key: &str) -> Result<()>;
 }
@@ -65,6 +88,10 @@ impl LocalFileStore {
 
 #[async_trait]
 impl LocalStore for LocalFileStore {
+    fn path(&self) -> Option<&Path> {
+        Some(&self.dir)
+    }
+
     async fn init(&self) -> Result<HashMap<String /* suffix */, Vec<String> /* keys */>> {
         fs::create_dir_all(&self.dir)
             .await
@@ -96,12 +123,24 @@ impl LocalStore for LocalFileStore {
         Ok(())
     }
 
-    async fn read_at(&self, file_id: u64, key: &str, buf: &mut [u8], offset: u64) -> Result<()> {
+    async fn read_at(
+        &self,
+        file_id: u64,
+        key: &str,
+        buf: &mut [u8],
+        offset: u64,
+        on_open: Option<Box<dyn FnOnce() + Send>>,
+    ) -> Result<()> {
         let path = self.dir.join(key);
         debug!("FileDataStore.read_at"; "file_id" => file_id, "key" => key, "path" => ?path);
-        let mut f = fs::File::open(&path)
+        let f = fs::File::open(&path)
             .await
-            .table_ctx(file_id, format!("open.{key}"))?;
+            .table_ctx(file_id, format!("open.{key}"));
+        if let Some(cb) = on_open {
+            cb();
+        }
+
+        let mut f = f?;
         if offset > 0 {
             f.seek(SeekFrom::Start(offset))
                 .await
@@ -113,17 +152,36 @@ impl LocalStore for LocalFileStore {
         Ok(())
     }
 
-    async fn read(&self, file_id: u64, key: &str, start_off: u64, end_off: u64) -> Result<Bytes> {
+    async fn read(
+        &self,
+        file_id: u64,
+        key: &str,
+        start_off: u64,
+        end_off: u64,
+        on_open: Option<Box<dyn FnOnce() + Send>>,
+    ) -> Result<Bytes> {
         let mut buf = vec![0; (end_off - start_off) as usize];
-        self.read_at(file_id, key, &mut buf, start_off).await?;
+        self.read_at(file_id, key, &mut buf, start_off, on_open)
+            .await?;
         Ok(Bytes::from(buf))
     }
 
-    async fn read_all(&self, file_id: u64, key: &str, buf: &mut Vec<u8>) -> Result<()> {
+    async fn read_all(
+        &self,
+        file_id: u64,
+        key: &str,
+        buf: &mut Vec<u8>,
+        on_open: Option<Box<dyn FnOnce() + Send>>,
+    ) -> Result<()> {
         let path = self.dir.join(key);
-        let mut f = fs::File::open(&path)
+        let f = fs::File::open(&path)
             .await
-            .table_ctx(file_id, format!("open.{key}"))?;
+            .table_ctx(file_id, format!("open.{key}"));
+        if let Some(cb) = on_open {
+            cb();
+        }
+
+        let mut f = f?;
         f.read_to_end(buf)
             .await
             .table_ctx(file_id, format!("read_to_end.{key}"))?;
@@ -169,6 +227,10 @@ impl LocalMemoryStore {
 
 #[async_trait]
 impl LocalStore for LocalMemoryStore {
+    fn path(&self) -> Option<&Path> {
+        None
+    }
+
     async fn init(&self) -> Result<HashMap<String /* suffix */, Vec<String> /* keys */>> {
         Ok(HashMap::new())
     }
@@ -178,26 +240,57 @@ impl LocalStore for LocalMemoryStore {
         Ok(())
     }
 
-    async fn read_at(&self, _file_id: u64, key: &str, buf: &mut [u8], offset: u64) -> Result<()> {
+    async fn read_at(
+        &self,
+        _file_id: u64,
+        key: &str,
+        buf: &mut [u8],
+        offset: u64,
+        on_open: Option<Box<dyn FnOnce() + Send>>,
+    ) -> Result<()> {
         let end_off = offset + buf.len() as u64;
-        let data = self.get_with_check(key, end_off)?;
+        let data = self.get_with_check(key, end_off);
+        if let Some(cb) = on_open {
+            cb();
+        }
+
+        let data = data?;
         buf.copy_from_slice(&data[offset as usize..end_off as usize]);
         Ok(())
     }
 
-    async fn read(&self, _file_id: u64, key: &str, start_off: u64, end_off: u64) -> Result<Bytes> {
-        let data = self.get_with_check(key, end_off)?;
+    async fn read(
+        &self,
+        _file_id: u64,
+        key: &str,
+        start_off: u64,
+        end_off: u64,
+        on_open: Option<Box<dyn FnOnce() + Send>>,
+    ) -> Result<Bytes> {
+        let data = self.get_with_check(key, end_off);
+        if let Some(cb) = on_open {
+            cb();
+        }
+
+        let data = data?;
         Ok(Bytes::copy_from_slice(
             data.slice(start_off as usize..end_off as usize).chunk(),
         ))
     }
 
-    async fn read_all(&self, _file_id: u64, key: &str, buf: &mut Vec<u8>) -> Result<()> {
-        let data = self
-            .m
-            .get(key)
-            .ok_or_else(|| Error::Io(format!("key not found in store: {}", key)))?
-            .clone();
+    async fn read_all(
+        &self,
+        _file_id: u64,
+        key: &str,
+        buf: &mut Vec<u8>,
+        on_open: Option<Box<dyn FnOnce() + Send>>,
+    ) -> Result<()> {
+        let data = self.m.get(key).map(|r| r.value().clone());
+        if let Some(cb) = on_open {
+            cb();
+        }
+
+        let data = data.ok_or_else(|| Error::Io(format!("key not found in store: {}", key)))?;
         buf.extend_from_slice(&data);
         Ok(())
     }

@@ -163,7 +163,7 @@ const FOOTER_INFO_VER: u8 = 0;
 /// It's a hint for the footer length which should be enough for most cases.
 const FOOTER_LEN_HINT: u64 = 64;
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Clone)]
 pub(crate) struct FooterInfo {
     pub(crate) file_id: u64,
     pub(crate) ftype: FileType,
@@ -174,10 +174,12 @@ impl FooterInfo {
     pub(crate) async fn read_from_local(
         store: Arc<dyn LocalStore>,
         file_id: u64,
+        on_open: Option<impl FnOnce() + Send + 'static>,
     ) -> Result<(Self, Bytes)> {
+        let on_open = on_open.map(|f| Box::new(f) as _);
         let mut data = Vec::with_capacity(FOOTER_LEN_HINT as usize);
         store
-            .read_all(file_id, &Self::local_filename(file_id), &mut data)
+            .read_all(file_id, &Self::local_filename(file_id), &mut data, on_open)
             .await?;
         let data = Bytes::from(data);
 
@@ -226,6 +228,12 @@ impl FooterInfo {
                 &Self::local_filename(self.file_id),
                 Bytes::from(data),
             )
+            .await
+    }
+
+    pub(crate) async fn drop_from_local(&self, store: Arc<dyn LocalStore>) -> Result<()> {
+        store
+            .remove(self.file_id, &Self::local_filename(self.file_id))
             .await
     }
 
@@ -298,7 +306,9 @@ mod tests {
             .await
             .unwrap();
 
-        let (footer_info1, footer1) = FooterInfo::read_from_local(store, 1).await.unwrap();
+        let (footer_info1, footer1) = FooterInfo::read_from_local(store, 1, None::<fn()>)
+            .await
+            .unwrap();
         assert_eq!(footer_info, footer_info1);
         assert_eq!(footer, footer1.as_ref());
     }
