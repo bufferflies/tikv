@@ -54,6 +54,7 @@ pub mod merge_range;
 pub mod metrics;
 pub mod mpsc;
 pub mod quota_limiter;
+pub mod retry;
 pub mod store;
 pub mod stream;
 pub mod sys;

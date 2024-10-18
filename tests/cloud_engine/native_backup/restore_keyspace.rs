@@ -173,6 +173,7 @@ fn test_restore_keyspace_opt(options: TestRestoreKeyspaceOptions) {
             conf.rfengine.lightweight_backup = options.lightweight;
             conf.rfengine.wal_chunk_target_file_size = ReadableSize::kb(128);
             conf.enable_inner_key_offset = options.enable_inner_key_off;
+            conf.memory.enable_heap_profiling = false;
         },
     );
     cluster.wait_region_replicated(&[], 3);

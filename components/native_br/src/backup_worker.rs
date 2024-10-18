@@ -5,7 +5,10 @@ use std::{fmt, mem, sync::Arc, time::Duration};
 use pd_client::PdClient;
 use rfenginepb::ClusterBackupMeta;
 use tikv_util::{
+    config::ReadableDuration,
     debug, error, info,
+    retry::try_wait_result_async,
+    warn,
     worker::{Builder as WorkerBuilder, Runnable, RunnableWithTimer, Scheduler, Worker},
 };
 
@@ -14,6 +17,8 @@ use crate::{
     backup::{BackupConfig, BackupType, IncrementalBackupFile, Result, SharedResult},
     error::{Error, SharedError},
 };
+
+pub const DEFAULT_TIMEOUT_INSTANT_BACKUP: ReadableDuration = ReadableDuration::secs(30);
 
 type InstantBackupCallback = Box<dyn FnOnce(SharedResult<Arc<IncrementalBackupFile>>) + Send>;
 
@@ -64,7 +69,24 @@ impl BackupWorker {
             BackupTask::InstantBackup { cb }
         };
         self.scheduler.schedule(task).unwrap();
-        fut.await.unwrap().map_err(|e| e.into())
+        fut.await.unwrap().map_err(|e| {
+            warn!("instant backup failed"; "error" => ?e);
+            e.into()
+        })
+    }
+
+    pub async fn instant_backup_with_retry(
+        &self,
+        lightweight: bool,
+        timeout: Duration,
+    ) -> Result<Arc<IncrementalBackupFile>> {
+        // TODO: retry only when the error is retryable
+        try_wait_result_async(
+            || Box::pin(self.instant_backup(lightweight)),
+            timeout,
+            || Duration::from_millis(500),
+        )
+        .await
     }
 }
 

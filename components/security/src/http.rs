@@ -10,6 +10,7 @@ use std::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     },
+    time::Duration,
 };
 
 use bstr::ByteSlice;
@@ -19,7 +20,7 @@ use hyper::{client::HttpConnector, server::conn::AddrIncoming, Body, Uri};
 use hyper_rustls::{HttpsConnector, TlsAcceptor};
 use rustls::server::AllowAnyAnonymousOrAuthenticatedClient;
 use rustls_pemfile::Item;
-use tikv_util::{box_err, debug, Either};
+use tikv_util::{box_err, debug, time::Instant, Either};
 
 use crate::SecurityManager;
 
@@ -147,6 +148,7 @@ pub struct RestfulClient {
     security_mgr: Arc<SecurityManager>,
     endpoints: Vec<String>,
     last_endpoint_idx: Option<AtomicUsize>,
+    retry_timeout: Duration,
 }
 
 impl Clone for RestfulClient {
@@ -159,6 +161,7 @@ impl Clone for RestfulClient {
                 .last_endpoint_idx
                 .as_ref()
                 .map(|idx| AtomicUsize::new(idx.load(Ordering::Relaxed))),
+            retry_timeout: self.retry_timeout,
         }
     }
 }
@@ -175,7 +178,12 @@ impl RestfulClient {
             endpoints: Self::trim_schema(endpoints),
             security_mgr,
             last_endpoint_idx: endpoint_idx,
+            retry_timeout: Duration::from_secs(3),
         })
+    }
+
+    pub fn set_retry_timeout(&mut self, timeout: Duration) {
+        self.retry_timeout = timeout;
     }
 
     pub async fn request(
@@ -188,8 +196,11 @@ impl RestfulClient {
         let client = self.security_mgr.http_client(hyper::Client::builder())?;
         let mut err = None;
         let last_ep_idx = self.last_endpoint_idx();
-        for idx in 0..self.endpoints.len() {
+        let mut idx = 0;
+        let start_time = Instant::now_coarse();
+        while start_time.saturating_elapsed() < self.retry_timeout {
             let current_ep_idx = (last_ep_idx + idx) % self.endpoints.len();
+            idx += 1;
             let endpoint = &self.endpoints[current_ep_idx];
 
             let uri = self.security_mgr.build_uri(format!("{endpoint}/{path}"))?;
@@ -214,6 +225,11 @@ impl RestfulClient {
                             self.set_last_endpoint_idx(current_ep_idx);
                         }
                         return Ok(body);
+                    } else if status.is_client_error() {
+                        return Err(box_err!(
+                            "{tag}: return error: {status}: {}",
+                            body.to_str_lossy()
+                        ));
                     } else {
                         err = Some(box_err!(
                             "{tag}: return error: {status}: {}",

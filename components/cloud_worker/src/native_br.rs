@@ -15,6 +15,7 @@ use hyper::{Body, Response};
 use kvengine::dfs::S3Fs;
 use native_br::{
     backup::IncrementalBackupFile,
+    backup_worker,
     backup_worker::BackupWorker,
     common::get_all_incremental_backups,
     restore,
@@ -706,9 +707,12 @@ impl BrContext {
         // restored by PiTR.
         progress_reporter.report_step(RestoreStep::InstantBackup);
         let lightweight = config.native_br.enable_lightweight_backup;
-        let instant_backup = self
-            .runtime
-            .block_on(self.backup_worker.instant_backup(lightweight))?;
+        let instant_backup =
+            self.runtime
+                .block_on(self.backup_worker.instant_backup_with_retry(
+                    lightweight,
+                    config.native_br.instant_backup_timeout.0,
+                ))?;
 
         let get_truncate_ts =
             |utc_time: Option<DateTime<Utc>>, restore_type: RestoreType| -> Option<u64> {
@@ -846,6 +850,9 @@ pub struct NativeBrConfig {
     /// restore snapshots.
     pub restore_max_retry: usize,
 
+    /// The timeout for instant backup.
+    pub instant_backup_timeout: ReadableDuration,
+
     /// Whether to tolerate unavailability of no more than one store when
     /// backup.
     pub backup_tolerate_err: bool,
@@ -863,6 +870,7 @@ impl Default for NativeBrConfig {
             restore_timeout_restore_snapshot: restore::DEFAULT_TIMEOUT_RESTORE_SNAPSHOT,
             restore_timeout_fetch_wal: restore::DEFAULT_TIMEOUT_FETCH_WAL,
             restore_max_retry: restore::DEFAULT_RESTORE_MAX_RETRY,
+            instant_backup_timeout: backup_worker::DEFAULT_TIMEOUT_INSTANT_BACKUP,
             backup_tolerate_err: false,
             restore_tolerate_err: false,
         }

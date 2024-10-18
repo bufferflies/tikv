@@ -64,6 +64,10 @@ impl PdControl {
         Ok(Self { client })
     }
 
+    pub fn set_retry_timeout(&mut self, timeout: Duration) {
+        self.client.set_retry_timeout(timeout);
+    }
+
     pub async fn get_config(&self) -> Result<PdConfigFromApi> {
         self.client.get(PD_CONFIG_PATH).await
     }

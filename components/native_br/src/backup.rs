@@ -20,7 +20,7 @@ use rfenginepb::{ClusterBackupMeta, StoreBackupMeta};
 use security::{SecurityConfig, SecurityManager};
 use slog_global::{error, info, warn};
 use tikv::storage::mvcc::TimeStamp;
-use tikv_util::timer::GLOBAL_TIMER_HANDLE;
+use tikv_util::{retry::try_wait_result_async, timer::GLOBAL_TIMER_HANDLE};
 
 use crate::{
     common::{
@@ -503,14 +503,36 @@ pub fn need_full_backup(err: &Error) -> bool {
     matches!(err, Error::TopoChanged(_) | Error::MetaNotFound(_))
 }
 
+async fn connect_etcd(config: &BackupConfig) -> Result<etcd_client::Client> {
+    let option = generate_etcd_connect_opt(&config.security).unwrap();
+    etcd_client::Client::connect(&config.pd.endpoints, Some(option))
+        .await
+        .map_err(|err| {
+            warn!("connect etcd failed"; "err" => ?err);
+            Error::EtcdError(err)
+        })
+}
+
 // Get keyspace meta from etcd and populate them to ClusterBackupMeta
 async fn backup_pd_keyspace_meta(
     config: &BackupConfig,
     cluster_backup_meta: &mut ClusterBackupMeta,
 ) -> Result<()> {
     let cluster_id = cluster_backup_meta.cluster_id;
-    let option = generate_etcd_connect_opt(&config.security).unwrap();
-    let mut etcd_client = etcd_client::Client::connect(&config.pd.endpoints, Some(option)).await?;
+
+    let mut etcd_client = {
+        let mut backoff = Duration::ZERO;
+        try_wait_result_async(
+            || Box::pin(connect_etcd(config)),
+            Duration::from_secs(10),
+            move || {
+                backoff += Duration::from_millis(200);
+                backoff
+            },
+        )
+        .await?
+    };
+
     let old_revision = cluster_backup_meta.meta_revision;
     // Keyspace meta will not be deleted even keyspace is deleted
     // So incremental backup can be used.

@@ -454,6 +454,7 @@ pub const DEFAULT_TIMEOUT_WAIT_FLUSH: ReadableDuration = ReadableDuration::minut
 pub const DEFAULT_TIMEOUT_RESTORE_SNAPSHOT: ReadableDuration = ReadableDuration::minutes(10);
 pub const DEFAULT_TIMEOUT_FETCH_WAL: ReadableDuration = ReadableDuration::secs(30);
 pub const DEFAULT_TIMEOUT_SPLIT_REGIONS: ReadableDuration = ReadableDuration::secs(30);
+pub const DEFAULT_TIMEOUT_PD_CONTROL: ReadableDuration = ReadableDuration::secs(10);
 pub const DEFAULT_RESTORE_MAX_RETRY: usize = 30;
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
@@ -486,6 +487,8 @@ pub struct RestoreConfig {
     pub timeout_fetch_wal: ReadableDuration,
     /// The timeout for split regions of target keyspace.
     pub timeout_split_regions: ReadableDuration,
+    /// The timeout for PD control.
+    pub timeout_pd_control: ReadableDuration,
 }
 
 impl Default for RestoreConfig {
@@ -501,6 +504,7 @@ impl Default for RestoreConfig {
             timeout_restore_snapshot: DEFAULT_TIMEOUT_RESTORE_SNAPSHOT,
             timeout_fetch_wal: DEFAULT_TIMEOUT_FETCH_WAL,
             timeout_split_regions: DEFAULT_TIMEOUT_SPLIT_REGIONS,
+            timeout_pd_control: DEFAULT_TIMEOUT_PD_CONTROL,
             max_retry: DEFAULT_RESTORE_MAX_RETRY,
             tolerate_err: 0,
             strict_tolerate: false,
