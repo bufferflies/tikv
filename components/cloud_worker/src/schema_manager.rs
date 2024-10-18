@@ -27,10 +27,11 @@ use kvengine::{
         file::{File, LocalFile},
         ChecksumType, NO_COMPRESSION,
     },
-    ShardStatsLite,
+    IdAllocator, ShardStatsLite,
 };
 use kvproto::metapb::Store;
 use native_br::common::send_request_to_store_with_retry;
+use rfstore::store::PdIdAllocator;
 use schema::schema::{convert_column_infos_to_tipb, TableInfo};
 use security::SecurityManager;
 use tikv_client::{BoundRange, Key, TransactionOptions, Value};
@@ -473,7 +474,12 @@ impl SchemaManager {
 
                 let new_schema_file_data =
                     columnar::build_schema_file(keyspace_id, schema_version, schemas.unwrap());
-                let file_id = self.ctx.pd.alloc_id()?;
+                let file_id = *self
+                    .id_allocator
+                    .alloc_id(1)
+                    .map_err(|e| crate::error::Error::Other(box_err!(e.to_string())))?
+                    .first()
+                    .unwrap();
                 let dfs = self.ctx.s3fs.clone();
                 let tx_clone = tx.clone();
                 spawn_task_count += 1;
@@ -691,6 +697,7 @@ pub struct SchemaManagerCore {
     config: SchemaManagerConfig,
     txn_client: TxnClient,
     meta_file: MetaFile,
+    id_allocator: Arc<dyn IdAllocator>,
 }
 
 impl SchemaManagerCore {
@@ -706,12 +713,14 @@ impl SchemaManagerCore {
         } else {
             MetaFile::new()
         };
+        let id_allocator = Arc::new(PdIdAllocator::new(ctx.pd.clone()));
         Self {
             ctx,
             security_mgr,
             config,
             txn_client,
             meta_file,
+            id_allocator,
         }
     }
 }

@@ -223,13 +223,6 @@ impl S3FsCore {
         suffix.to_string()
     }
 
-    pub fn parse_file_id(&self, key: &str) -> u64 {
-        let end_idx = key.len() - 4;
-        let start_idx = end_idx - 16;
-        let file_part = &key[start_idx..end_idx];
-        u64::from_str_radix(file_part, 16).unwrap()
-    }
-
     // Try to parse the sst file id from file key.
     // Expected file key format: "/{prefix}/{idx}/{file_id}.sst".
     // Note: do NOT use in performance critical path as regex is used.

@@ -16,12 +16,26 @@ use kvproto::import_sstpb::SwitchMode;
 use sst_importer::SstImporter;
 use tikv_util::{error, info, warn, worker::Runnable};
 
+const COLUMNAR_FILE_SUFFIX: &str = ".col";
+const SCHEMA_FILE_SUFFIX: &str = ".schema";
+
 pub struct GcTask {}
 
 impl Display for GcTask {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "GcTask")
     }
+}
+
+/// Collect file ids that should be gc.
+#[derive(Default)]
+pub struct CollectFileIds {
+    pub kv_file_ids: HashSet<u64>,
+    pub blacklist_file_ids: Arc<HashSet<u64>>,
+    pub txn_chunk_ids: HashSet<u64>,
+    pub col_file_ids: HashSet<u64>,
+    pub schema_file_ids: HashSet<u64>,
+    pub vec_idx_file_ids: HashSet<u64>,
 }
 
 /// The GC worker periodically removes unused sst files to release storage
@@ -55,55 +69,66 @@ impl GcRunner {
     }
 
     fn gc_kv_files(&self) -> kvengine::Result<()> {
-        let kv_file_ids = self.collect_kv_file_ids();
-        let blacklist_file_ids = self.kv.get_files_in_blacklist();
-        let kv_txn_chunk_ids = self.collect_kv_txn_chunk_ids();
-        self.remove_kv_garbage_files(&kv_file_ids, blacklist_file_ids.as_ref(), &kv_txn_chunk_ids)?;
+        let collect_file_ids = self.collect_file_ids();
+        self.remove_garbage_files(&collect_file_ids)?;
         Ok(())
     }
 
-    fn collect_kv_file_ids(&self) -> HashSet<u64> {
+    fn collect_file_ids(&self) -> CollectFileIds {
         loop {
-            if let Some(all_file_ids) = self.try_collect_kv_file_ids() {
-                return all_file_ids;
+            if let Some(collect_file_ids) = self.try_collect_file_ids() {
+                return collect_file_ids;
             }
         }
     }
 
-    fn try_collect_kv_file_ids(&self) -> Option<HashSet<u64>> {
+    fn try_collect_file_ids(&self) -> Option<CollectFileIds> {
+        let mut collect_file_ids = CollectFileIds::default();
         let shard_id_vers = self.kv.get_all_shard_id_vers();
-        let mut all_file_ids = HashSet::default();
+        collect_file_ids.blacklist_file_ids = self.kv.get_files_in_blacklist();
         for &id_ver in &shard_id_vers {
             let shard = self.kv.get_shard_with_ver(id_ver.id, id_ver.ver).ok()?;
-            all_file_ids.extend(shard.get_all_files());
+            collect_file_ids.kv_file_ids.extend(shard.get_all_files());
+            collect_file_ids
+                .txn_chunk_ids
+                .extend(shard.get_txn_chunks());
+            collect_file_ids
+                .col_file_ids
+                .extend(shard.get_all_col_files());
+            shard
+                .get_schema_file()
+                .map(|f| collect_file_ids.schema_file_ids.insert(f.get_file_id()));
         }
-        Some(all_file_ids)
+        Some(collect_file_ids)
     }
 
-    fn collect_kv_txn_chunk_ids(&self) -> HashSet<u64> {
-        loop {
-            if let Some(all_file_ids) = self.try_collect_kv_txn_chunk_ids() {
-                return all_file_ids;
-            }
+    /// Parse file id from file name. filename is like
+    /// 0000000000000000000.sst/.col/.vec/.tmp/.schema
+    /// suffix_len is 4 for .sst/.col/.vec/.tmp
+    /// suffix_len is 7 for .schema
+    fn parse_file_id(path: &Path, suffix_len: usize) -> kvengine::Result<u64> {
+        let key = path.file_name().unwrap().to_str().unwrap();
+        if key.len() < 20 {
+            return Err(kvengine::Error::Other(
+                format!("invalid file name {}", key).into(),
+            ));
         }
+        let end_idx = key.len() - suffix_len;
+        let start_idx = end_idx - 16;
+        let file_part = &key[start_idx..end_idx];
+        u64::from_str_radix(file_part, 16)
+            .map_err(|_| kvengine::Error::Other(format!("invalid file name {}", key).into()))
     }
 
-    fn try_collect_kv_txn_chunk_ids(&self) -> Option<HashSet<u64>> {
-        let shard_id_vers = self.kv.get_all_shard_id_vers();
-        let mut all_file_ids = HashSet::default();
-        for &id_ver in &shard_id_vers {
-            let shard = self.kv.get_shard_with_ver(id_ver.id, id_ver.ver).ok()?;
-            all_file_ids.extend(shard.get_txn_chunks());
-        }
-        Some(all_file_ids)
-    }
-
-    fn remove_kv_garbage_files(
-        &self,
-        kv_file_ids: &HashSet<u64>,
-        blacklist_file_ids: &HashSet<u64>,
-        txn_chunk_ids: &HashSet<u64>,
-    ) -> kvengine::Result<()> {
+    fn remove_garbage_files(&self, collect_file_ids: &CollectFileIds) -> kvengine::Result<()> {
+        let CollectFileIds {
+            kv_file_ids,
+            blacklist_file_ids,
+            txn_chunk_ids,
+            col_file_ids,
+            schema_file_ids,
+            ..
+        } = collect_file_ids;
         let store_id = self.kv.get_engine_id();
         let entries = fs::read_dir(&self.kv.opts.local_dir).ctx("gc.read_dir")?;
         for e in entries {
@@ -133,6 +158,29 @@ impl GcRunner {
                     let meta = fs::metadata(&path).table_ctx(id, "gc.sst.metadata")?;
                     if self.is_old_file(meta) {
                         Self::remove_file(store_id, &path).table_ctx(id, "gc.sst.remove_file")?;
+                    }
+                }
+            } else if path_str.ends_with(COLUMNAR_FILE_SUFFIX) {
+                let id = Self::parse_file_id(&path, COLUMNAR_FILE_SUFFIX.len())?;
+                if !col_file_ids.contains(&id) {
+                    let _guard = self.kv.lock_file(id);
+                    if blacklist_file_ids.contains(&id) {
+                        continue;
+                    }
+
+                    let meta = fs::metadata(&path).table_ctx(id, "gc.col.metadata")?;
+                    if self.is_old_file(meta) {
+                        Self::remove_file(store_id, &path).table_ctx(id, "gc.col.remove_file")?;
+                    }
+                }
+            } else if path_str.ends_with(SCHEMA_FILE_SUFFIX) {
+                let id = Self::parse_file_id(&path, SCHEMA_FILE_SUFFIX.len())?;
+                if !schema_file_ids.contains(&id) {
+                    let _guard = self.kv.lock_file(id);
+                    let meta = fs::metadata(&path).table_ctx(id, "gc.schema.metadata")?;
+                    if self.is_old_file(meta) {
+                        Self::remove_file(store_id, &path)
+                            .table_ctx(id, "gc.schema.remove_file")?;
                     }
                 }
             } else if !path_str.ends_with("LOCK") {

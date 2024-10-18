@@ -398,6 +398,9 @@ impl kvengine::MetaIterator for RecoverHandler {
                         snap.get_blob_creates().iter().for_each(|f| {
                             self.files_in_blacklist.push(f.get_id());
                         });
+                        snap.get_columnar_creates().iter().for_each(|f| {
+                            self.files_in_blacklist.push(f.get_id());
+                        });
                         continue;
                     }
                 }
