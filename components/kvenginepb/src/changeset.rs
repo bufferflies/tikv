@@ -2350,6 +2350,7 @@ pub struct ColumnarCompaction {
     pub columnar_change: ::protobuf::SingularPtrField<TableChange>,
     pub snap_version: u64,
     pub row_l0s: ::std::vec::Vec<u64>,
+    pub target_level: u32,
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
     pub cached_size: ::protobuf::CachedSize,
@@ -2438,6 +2439,21 @@ impl ColumnarCompaction {
     pub fn take_row_l0s(&mut self) -> ::std::vec::Vec<u64> {
         ::std::mem::replace(&mut self.row_l0s, ::std::vec::Vec::new())
     }
+
+    // uint32 target_level = 4;
+
+
+    pub fn get_target_level(&self) -> u32 {
+        self.target_level
+    }
+    pub fn clear_target_level(&mut self) {
+        self.target_level = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_target_level(&mut self, v: u32) {
+        self.target_level = v;
+    }
 }
 
 impl ::protobuf::Message for ColumnarCompaction {
@@ -2467,6 +2483,13 @@ impl ::protobuf::Message for ColumnarCompaction {
                 3 => {
                     ::protobuf::rt::read_repeated_uint64_into(wire_type, is, &mut self.row_l0s)?;
                 },
+                4 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint32()?;
+                    self.target_level = tmp;
+                },
                 _ => {
                     ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
                 },
@@ -2489,6 +2512,9 @@ impl ::protobuf::Message for ColumnarCompaction {
         for value in &self.row_l0s {
             my_size += ::protobuf::rt::value_size(3, *value, ::protobuf::wire_format::WireTypeVarint);
         };
+        if self.target_level != 0 {
+            my_size += ::protobuf::rt::value_size(4, self.target_level, ::protobuf::wire_format::WireTypeVarint);
+        }
         my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
         self.cached_size.set(my_size);
         my_size
@@ -2506,6 +2532,9 @@ impl ::protobuf::Message for ColumnarCompaction {
         for v in &self.row_l0s {
             os.write_uint64(3, *v)?;
         };
+        if self.target_level != 0 {
+            os.write_uint32(4, self.target_level)?;
+        }
         os.write_unknown_fields(self.get_unknown_fields())?;
         ::std::result::Result::Ok(())
     }
@@ -2563,6 +2592,11 @@ impl ::protobuf::Message for ColumnarCompaction {
                     |m: &ColumnarCompaction| { &m.row_l0s },
                     |m: &mut ColumnarCompaction| { &mut m.row_l0s },
                 ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint32>(
+                    "target_level",
+                    |m: &ColumnarCompaction| { &m.target_level },
+                    |m: &mut ColumnarCompaction| { &mut m.target_level },
+                ));
                 ::protobuf::reflect::MessageDescriptor::new::<ColumnarCompaction>(
                     "ColumnarCompaction",
                     fields,
@@ -2588,6 +2622,7 @@ impl ::protobuf::Clear for ColumnarCompaction {
         self.columnar_change.clear();
         self.snap_version = 0;
         self.row_l0s.clear();
+        self.target_level = 0;
         self.unknown_fields.clear();
     }
 }
@@ -2600,6 +2635,7 @@ impl ::protobuf::PbPrint for ColumnarCompaction {
         ::protobuf::PbPrint::fmt(&self.columnar_change, "columnar_change", buf);
         ::protobuf::PbPrint::fmt(&self.snap_version, "snap_version", buf);
         ::protobuf::PbPrint::fmt(&self.row_l0s, "row_l0s", buf);
+        ::protobuf::PbPrint::fmt(&self.target_level, "target_level", buf);
         if old_len < buf.len() {
           buf.push(' ');
         }
@@ -2613,6 +2649,7 @@ impl ::std::fmt::Debug for ColumnarCompaction {
         ::protobuf::PbPrint::fmt(&self.columnar_change, "columnar_change", &mut s);
         ::protobuf::PbPrint::fmt(&self.snap_version, "snap_version", &mut s);
         ::protobuf::PbPrint::fmt(&self.row_l0s, "row_l0s", &mut s);
+        ::protobuf::PbPrint::fmt(&self.target_level, "target_level", &mut s);
         write!(f, "{}", s)
     }
 }
@@ -2628,6 +2665,7 @@ pub struct UpdateVectorIndex {
     // message fields
     pub table_id: i64,
     pub index_id: i64,
+    pub col_id: i64,
     pub added: ::protobuf::RepeatedField<VectorIndexFile>,
     pub removed: ::std::vec::Vec<u64>,
     // special fields
@@ -2676,7 +2714,22 @@ impl UpdateVectorIndex {
         self.index_id = v;
     }
 
-    // repeated .enginepb.VectorIndexFile added = 3;
+    // int64 col_id = 3;
+
+
+    pub fn get_col_id(&self) -> i64 {
+        self.col_id
+    }
+    pub fn clear_col_id(&mut self) {
+        self.col_id = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_col_id(&mut self, v: i64) {
+        self.col_id = v;
+    }
+
+    // repeated .enginepb.VectorIndexFile added = 4;
 
 
     pub fn get_added(&self) -> &[VectorIndexFile] {
@@ -2701,7 +2754,7 @@ impl UpdateVectorIndex {
         ::std::mem::replace(&mut self.added, ::protobuf::RepeatedField::new())
     }
 
-    // repeated uint64 removed = 4;
+    // repeated uint64 removed = 5;
 
 
     pub fn get_removed(&self) -> &[u64] {
@@ -2756,9 +2809,16 @@ impl ::protobuf::Message for UpdateVectorIndex {
                     self.index_id = tmp;
                 },
                 3 => {
-                    ::protobuf::rt::read_repeated_message_into(wire_type, is, &mut self.added)?;
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_int64()?;
+                    self.col_id = tmp;
                 },
                 4 => {
+                    ::protobuf::rt::read_repeated_message_into(wire_type, is, &mut self.added)?;
+                },
+                5 => {
                     ::protobuf::rt::read_repeated_uint64_into(wire_type, is, &mut self.removed)?;
                 },
                 _ => {
@@ -2779,12 +2839,15 @@ impl ::protobuf::Message for UpdateVectorIndex {
         if self.index_id != 0 {
             my_size += ::protobuf::rt::value_size(2, self.index_id, ::protobuf::wire_format::WireTypeVarint);
         }
+        if self.col_id != 0 {
+            my_size += ::protobuf::rt::value_size(3, self.col_id, ::protobuf::wire_format::WireTypeVarint);
+        }
         for value in &self.added {
             let len = value.compute_size();
             my_size += 1 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
         };
         for value in &self.removed {
-            my_size += ::protobuf::rt::value_size(4, *value, ::protobuf::wire_format::WireTypeVarint);
+            my_size += ::protobuf::rt::value_size(5, *value, ::protobuf::wire_format::WireTypeVarint);
         };
         my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
         self.cached_size.set(my_size);
@@ -2798,13 +2861,16 @@ impl ::protobuf::Message for UpdateVectorIndex {
         if self.index_id != 0 {
             os.write_int64(2, self.index_id)?;
         }
+        if self.col_id != 0 {
+            os.write_int64(3, self.col_id)?;
+        }
         for v in &self.added {
-            os.write_tag(3, ::protobuf::wire_format::WireTypeLengthDelimited)?;
+            os.write_tag(4, ::protobuf::wire_format::WireTypeLengthDelimited)?;
             os.write_raw_varint32(v.get_cached_size())?;
             v.write_to_with_cached_sizes(os)?;
         };
         for v in &self.removed {
-            os.write_uint64(4, *v)?;
+            os.write_uint64(5, *v)?;
         };
         os.write_unknown_fields(self.get_unknown_fields())?;
         ::std::result::Result::Ok(())
@@ -2858,6 +2924,11 @@ impl ::protobuf::Message for UpdateVectorIndex {
                     |m: &UpdateVectorIndex| { &m.index_id },
                     |m: &mut UpdateVectorIndex| { &mut m.index_id },
                 ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeInt64>(
+                    "col_id",
+                    |m: &UpdateVectorIndex| { &m.col_id },
+                    |m: &mut UpdateVectorIndex| { &mut m.col_id },
+                ));
                 fields.push(::protobuf::reflect::accessor::make_repeated_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<VectorIndexFile>>(
                     "added",
                     |m: &UpdateVectorIndex| { &m.added },
@@ -2892,6 +2963,7 @@ impl ::protobuf::Clear for UpdateVectorIndex {
     fn clear(&mut self) {
         self.table_id = 0;
         self.index_id = 0;
+        self.col_id = 0;
         self.added.clear();
         self.removed.clear();
         self.unknown_fields.clear();
@@ -2905,6 +2977,7 @@ impl ::protobuf::PbPrint for UpdateVectorIndex {
         let old_len = buf.len();
         ::protobuf::PbPrint::fmt(&self.table_id, "table_id", buf);
         ::protobuf::PbPrint::fmt(&self.index_id, "index_id", buf);
+        ::protobuf::PbPrint::fmt(&self.col_id, "col_id", buf);
         ::protobuf::PbPrint::fmt(&self.added, "added", buf);
         ::protobuf::PbPrint::fmt(&self.removed, "removed", buf);
         if old_len < buf.len() {
@@ -2919,6 +2992,7 @@ impl ::std::fmt::Debug for UpdateVectorIndex {
         let mut s = String::new();
         ::protobuf::PbPrint::fmt(&self.table_id, "table_id", &mut s);
         ::protobuf::PbPrint::fmt(&self.index_id, "index_id", &mut s);
+        ::protobuf::PbPrint::fmt(&self.col_id, "col_id", &mut s);
         ::protobuf::PbPrint::fmt(&self.added, "added", &mut s);
         ::protobuf::PbPrint::fmt(&self.removed, "removed", &mut s);
         write!(f, "{}", s)
@@ -7445,6 +7519,7 @@ pub struct VectorIndex {
     // message fields
     pub table_id: i64,
     pub index_id: i64,
+    pub col_id: i64,
     pub files: ::protobuf::RepeatedField<VectorIndexFile>,
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
@@ -7492,7 +7567,22 @@ impl VectorIndex {
         self.index_id = v;
     }
 
-    // repeated .enginepb.VectorIndexFile files = 3;
+    // int64 col_id = 3;
+
+
+    pub fn get_col_id(&self) -> i64 {
+        self.col_id
+    }
+    pub fn clear_col_id(&mut self) {
+        self.col_id = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_col_id(&mut self, v: i64) {
+        self.col_id = v;
+    }
+
+    // repeated .enginepb.VectorIndexFile files = 4;
 
 
     pub fn get_files(&self) -> &[VectorIndexFile] {
@@ -7547,6 +7637,13 @@ impl ::protobuf::Message for VectorIndex {
                     self.index_id = tmp;
                 },
                 3 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_int64()?;
+                    self.col_id = tmp;
+                },
+                4 => {
                     ::protobuf::rt::read_repeated_message_into(wire_type, is, &mut self.files)?;
                 },
                 _ => {
@@ -7567,6 +7664,9 @@ impl ::protobuf::Message for VectorIndex {
         if self.index_id != 0 {
             my_size += ::protobuf::rt::value_size(2, self.index_id, ::protobuf::wire_format::WireTypeVarint);
         }
+        if self.col_id != 0 {
+            my_size += ::protobuf::rt::value_size(3, self.col_id, ::protobuf::wire_format::WireTypeVarint);
+        }
         for value in &self.files {
             let len = value.compute_size();
             my_size += 1 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
@@ -7583,8 +7683,11 @@ impl ::protobuf::Message for VectorIndex {
         if self.index_id != 0 {
             os.write_int64(2, self.index_id)?;
         }
+        if self.col_id != 0 {
+            os.write_int64(3, self.col_id)?;
+        }
         for v in &self.files {
-            os.write_tag(3, ::protobuf::wire_format::WireTypeLengthDelimited)?;
+            os.write_tag(4, ::protobuf::wire_format::WireTypeLengthDelimited)?;
             os.write_raw_varint32(v.get_cached_size())?;
             v.write_to_with_cached_sizes(os)?;
         };
@@ -7640,6 +7743,11 @@ impl ::protobuf::Message for VectorIndex {
                     |m: &VectorIndex| { &m.index_id },
                     |m: &mut VectorIndex| { &mut m.index_id },
                 ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeInt64>(
+                    "col_id",
+                    |m: &VectorIndex| { &m.col_id },
+                    |m: &mut VectorIndex| { &mut m.col_id },
+                ));
                 fields.push(::protobuf::reflect::accessor::make_repeated_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<VectorIndexFile>>(
                     "files",
                     |m: &VectorIndex| { &m.files },
@@ -7669,6 +7777,7 @@ impl ::protobuf::Clear for VectorIndex {
     fn clear(&mut self) {
         self.table_id = 0;
         self.index_id = 0;
+        self.col_id = 0;
         self.files.clear();
         self.unknown_fields.clear();
     }
@@ -7681,6 +7790,7 @@ impl ::protobuf::PbPrint for VectorIndex {
         let old_len = buf.len();
         ::protobuf::PbPrint::fmt(&self.table_id, "table_id", buf);
         ::protobuf::PbPrint::fmt(&self.index_id, "index_id", buf);
+        ::protobuf::PbPrint::fmt(&self.col_id, "col_id", buf);
         ::protobuf::PbPrint::fmt(&self.files, "files", buf);
         if old_len < buf.len() {
           buf.push(' ');
@@ -7694,6 +7804,7 @@ impl ::std::fmt::Debug for VectorIndex {
         let mut s = String::new();
         ::protobuf::PbPrint::fmt(&self.table_id, "table_id", &mut s);
         ::protobuf::PbPrint::fmt(&self.index_id, "index_id", &mut s);
+        ::protobuf::PbPrint::fmt(&self.col_id, "col_id", &mut s);
         ::protobuf::PbPrint::fmt(&self.files, "files", &mut s);
         write!(f, "{}", s)
     }
@@ -8384,72 +8495,74 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     Tables\x18\x03\x20\x03(\x04B\0\x12\x14\n\nconflicted\x18\x04\x20\x01(\
     \x08B\0:\0\"K\n\nSchemaMeta\x12\x15\n\x0bkeyspace_id\x18\x01\x20\x01(\rB\
     \0\x12\x11\n\x07file_id\x18\x02\x20\x01(\x04B\0\x12\x11\n\x07version\x18\
-    \x03\x20\x01(\x03B\0:\0\"s\n\x12ColumnarCompaction\x120\n\x0fcolumnar_ch\
-    ange\x18\x01\x20\x01(\x0b2\x15.enginepb.TableChangeB\0\x12\x16\n\x0csnap\
-    _version\x18\x02\x20\x01(\x04B\0\x12\x11\n\x07row_l0s\x18\x03\x20\x03(\
-    \x04B\0:\0\"|\n\x11UpdateVectorIndex\x12\x12\n\x08table_id\x18\x01\x20\
-    \x01(\x03B\0\x12\x12\n\x08index_id\x18\x02\x20\x01(\x03B\0\x12*\n\x05add\
-    ed\x18\x03\x20\x03(\x0b2\x19.enginepb.VectorIndexFileB\0\x12\x11\n\x07re\
-    moved\x18\x04\x20\x03(\x04B\0:\0\"\xab\x01\n\x05Flush\x12&\n\x08l0Create\
-    \x18\x01\x20\x01(\x0b2\x12.enginepb.L0CreateB\0\x12*\n\nproperties\x18\
-    \x02\x20\x01(\x0b2\x14.enginepb.PropertiesB\0\x12\x11\n\x07version\x18\
-    \x03\x20\x01(\x04B\0\x12\x10\n\x06max_ts\x18\x05\x20\x01(\x04B\0\x12'\n\
-    \tl0Creates\x18\x06\x20\x03(\x0b2\x12.enginepb.L0CreateB\0:\0\"\x90\x04\
-    \n\x08Snapshot\x12\x15\n\x0bouter_start\x18\x01\x20\x01(\x0cB\0\x12\x13\
-    \n\touter_end\x18\x02\x20\x01(\x0cB\0\x12*\n\nproperties\x18\x03\x20\x01\
-    (\x0b2\x14.enginepb.PropertiesB\0\x12'\n\tl0Creates\x18\x05\x20\x03(\x0b\
-    2\x12.enginepb.L0CreateB\0\x12-\n\x0ctableCreates\x18\x06\x20\x03(\x0b2\
-    \x15.enginepb.TableCreateB\0\x12\x15\n\x0bbaseVersion\x18\x07\x20\x01(\
-    \x04B\0\x12\x17\n\rdata_sequence\x18\x08\x20\x01(\x04B\0\x12+\n\x0bBlobC\
-    reates\x18\t\x20\x03(\x0b2\x14.enginepb.BlobCreateB\0\x12\x10\n\x06max_t\
-    s\x18\n\x20\x01(\x04B\0\x12\x17\n\rinner_key_off\x18\x0b\x20\x01(\rB\0\
-    \x120\n\x0fcolumnarCreates\x18\x0c\x20\x03(\x0b2\x15.enginepb.TableCreat\
-    eB\0\x12+\n\x0bschema_meta\x18\r\x20\x01(\x0b2\x14.enginepb.SchemaMetaB\
-    \0\x12\x1f\n\x15columnar_snap_version\x18\x0e\x20\x01(\x04B\0\x12\x19\n\
-    \x0funconverted_l0s\x18\x0f\x20\x03(\x04B\0\x12/\n\x0evector_indexes\x18\
-    \x10\x20\x03(\x0b2\x15.enginepb.VectorIndexB\0:\0\"A\n\x08L0Create\x12\
-    \x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\x12\x12\n\x08smallest\x18\x02\x20\
-    \x01(\x0cB\0\x12\x11\n\x07biggest\x18\x03\x20\x01(\x0cB\0:\0\"C\n\nBlobC\
-    reate\x12\x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\x12\x12\n\x08smallest\x18\
-    \x02\x20\x01(\x0cB\0\x12\x11\n\x07biggest\x18\x03\x20\x01(\x0cB\0:\0\"~\
-    \n\x0bTableCreate\x12\x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\x12\x0f\n\x05l\
-    evel\x18\x02\x20\x01(\rB\0\x12\x0c\n\x02CF\x18\x03\x20\x01(\x05B\0\x12\
-    \x12\n\x08smallest\x18\x04\x20\x01(\x0cB\0\x12\x11\n\x07biggest\x18\x05\
-    \x20\x01(\x0cB\0\x12\x19\n\x0fcolumnar_tables\x18\x06\x20\x01(\rB\0:\0\"\
-    W\n\x0bTableDelete\x12\x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\x12\x0f\n\x05\
-    level\x18\x02\x20\x01(\rB\0\x12\x0c\n\x02CF\x18\x03\x20\x01(\x05B\0\x12\
-    \x19\n\x0fcolumnar_tables\x18\x04\x20\x01(\rB\0:\0\"D\n\x05Split\x12)\n\
-    \tnewShards\x18\x01\x20\x03(\x0b2\x14.enginepb.PropertiesB\0\x12\x0e\n\
-    \x04Keys\x18\x03\x20\x03(\x0cB\0:\0\"\xd2\x01\n\x0bIngestFiles\x12'\n\tl\
-    0Creates\x18\x01\x20\x03(\x0b2\x12.enginepb.L0CreateB\0\x12-\n\x0ctableC\
-    reates\x18\x02\x20\x03(\x0b2\x15.enginepb.TableCreateB\0\x12*\n\npropert\
-    ies\x18\x03\x20\x01(\x0b2\x14.enginepb.PropertiesB\0\x12+\n\x0bBlobCreat\
-    es\x18\x04\x20\x03(\x0b2\x14.enginepb.BlobCreateB\0\x12\x10\n\x06max_ts\
-    \x18\x05\x20\x01(\x04B\0:\0\"C\n\nProperties\x12\x11\n\x07shardID\x18\
-    \x01\x20\x01(\x04B\0\x12\x0e\n\x04keys\x18\x02\x20\x03(\tB\0\x12\x10\n\
-    \x06values\x18\x03\x20\x03(\x0cB\0:\0\"m\n\x0bTableChange\x12-\n\x0ctabl\
-    eDeletes\x18\x01\x20\x03(\x0b2\x15.enginepb.TableDeleteB\0\x12-\n\x0ctab\
-    leCreates\x18\x02\x20\x03(\x0b2\x15.enginepb.TableCreateB\0:\0\">\n\x0bT\
-    xnFileRefs\x12-\n\rtxn_file_refs\x18\x01\x20\x03(\x0b2\x14.enginepb.TxnF\
-    ileRefB\0:\0\"\xc9\x01\n\nTxnFileRef\x12\x12\n\x08start_ts\x18\x01\x20\
-    \x01(\x04B\0\x12\x13\n\tchunk_ids\x18\x02\x20\x03(\x04B\0\x12\x11\n\x07v\
-    ersion\x18\x03\x20\x01(\x04B\0\x12\x13\n\tuser_meta\x18\x04\x20\x01(\x0c\
-    B\0\x12\x19\n\x0flock_val_prefix\x18\x05\x20\x01(\x0cB\0\x12\x13\n\tshar\
-    d_ver\x18\x06\x20\x01(\x04B\0\x12\x1b\n\x11inner_lower_bound\x18\x07\x20\
-    \x01(\x0cB\0\x12\x1b\n\x11inner_upper_bound\x18\x08\x20\x01(\x0cB\0:\0\"\
-    {\n\x06Schema\x12\x12\n\x08table_id\x18\x01\x20\x01(\x03B\0\x12\x11\n\
-    \x07columns\x18\x02\x20\x03(\x0cB\0\x12\x14\n\npk_col_ids\x18\x03\x20\
-    \x03(\x03B\0\x122\n\x0evector_indexes\x18\x04\x20\x03(\x0b2\x18.enginepb\
-    .VectorIndexDefB\0:\0\"c\n\x0bVectorIndex\x12\x12\n\x08table_id\x18\x01\
-    \x20\x01(\x03B\0\x12\x12\n\x08index_id\x18\x02\x20\x01(\x03B\0\x12*\n\
-    \x05files\x18\x03\x20\x03(\x0b2\x19.enginepb.VectorIndexFileB\0:\0\"`\n\
-    \x0fVectorIndexFile\x12\x0c\n\x02id\x18\x01\x20\x01(\x04B\0\x12\x16\n\
-    \x0csnap_version\x18\x02\x20\x01(\x04B\0\x12\x12\n\x08smallest\x18\x03\
-    \x20\x01(\x0cB\0\x12\x11\n\x07biggest\x18\x04\x20\x01(\x0cB\0:\0\"z\n\
-    \x0eVectorIndexDef\x12\x12\n\x08index_id\x18\x01\x20\x01(\x03B\0\x12\x10\
-    \n\x06col_id\x18\x02\x20\x01(\x03B\0\x12\x14\n\nindex_kind\x18\x03\x20\
-    \x01(\tB\0\x12\x13\n\tspec_keys\x18\x04\x20\x03(\tB\0\x12\x15\n\x0bspec_\
-    values\x18\x05\x20\x03(\x0cB\0:\0B\0b\x06proto3\
+    \x03\x20\x01(\x03B\0:\0\"\x8b\x01\n\x12ColumnarCompaction\x120\n\x0fcolu\
+    mnar_change\x18\x01\x20\x01(\x0b2\x15.enginepb.TableChangeB\0\x12\x16\n\
+    \x0csnap_version\x18\x02\x20\x01(\x04B\0\x12\x11\n\x07row_l0s\x18\x03\
+    \x20\x03(\x04B\0\x12\x16\n\x0ctarget_level\x18\x04\x20\x01(\rB\0:\0\"\
+    \x8e\x01\n\x11UpdateVectorIndex\x12\x12\n\x08table_id\x18\x01\x20\x01(\
+    \x03B\0\x12\x12\n\x08index_id\x18\x02\x20\x01(\x03B\0\x12\x10\n\x06col_i\
+    d\x18\x03\x20\x01(\x03B\0\x12*\n\x05added\x18\x04\x20\x03(\x0b2\x19.engi\
+    nepb.VectorIndexFileB\0\x12\x11\n\x07removed\x18\x05\x20\x03(\x04B\0:\0\
+    \"\xab\x01\n\x05Flush\x12&\n\x08l0Create\x18\x01\x20\x01(\x0b2\x12.engin\
+    epb.L0CreateB\0\x12*\n\nproperties\x18\x02\x20\x01(\x0b2\x14.enginepb.Pr\
+    opertiesB\0\x12\x11\n\x07version\x18\x03\x20\x01(\x04B\0\x12\x10\n\x06ma\
+    x_ts\x18\x05\x20\x01(\x04B\0\x12'\n\tl0Creates\x18\x06\x20\x03(\x0b2\x12\
+    .enginepb.L0CreateB\0:\0\"\x90\x04\n\x08Snapshot\x12\x15\n\x0bouter_star\
+    t\x18\x01\x20\x01(\x0cB\0\x12\x13\n\touter_end\x18\x02\x20\x01(\x0cB\0\
+    \x12*\n\nproperties\x18\x03\x20\x01(\x0b2\x14.enginepb.PropertiesB\0\x12\
+    '\n\tl0Creates\x18\x05\x20\x03(\x0b2\x12.enginepb.L0CreateB\0\x12-\n\x0c\
+    tableCreates\x18\x06\x20\x03(\x0b2\x15.enginepb.TableCreateB\0\x12\x15\n\
+    \x0bbaseVersion\x18\x07\x20\x01(\x04B\0\x12\x17\n\rdata_sequence\x18\x08\
+    \x20\x01(\x04B\0\x12+\n\x0bBlobCreates\x18\t\x20\x03(\x0b2\x14.enginepb.\
+    BlobCreateB\0\x12\x10\n\x06max_ts\x18\n\x20\x01(\x04B\0\x12\x17\n\rinner\
+    _key_off\x18\x0b\x20\x01(\rB\0\x120\n\x0fcolumnarCreates\x18\x0c\x20\x03\
+    (\x0b2\x15.enginepb.TableCreateB\0\x12+\n\x0bschema_meta\x18\r\x20\x01(\
+    \x0b2\x14.enginepb.SchemaMetaB\0\x12\x1f\n\x15columnar_snap_version\x18\
+    \x0e\x20\x01(\x04B\0\x12\x19\n\x0funconverted_l0s\x18\x0f\x20\x03(\x04B\
+    \0\x12/\n\x0evector_indexes\x18\x10\x20\x03(\x0b2\x15.enginepb.VectorInd\
+    exB\0:\0\"A\n\x08L0Create\x12\x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\x12\
+    \x12\n\x08smallest\x18\x02\x20\x01(\x0cB\0\x12\x11\n\x07biggest\x18\x03\
+    \x20\x01(\x0cB\0:\0\"C\n\nBlobCreate\x12\x0c\n\x02ID\x18\x01\x20\x01(\
+    \x04B\0\x12\x12\n\x08smallest\x18\x02\x20\x01(\x0cB\0\x12\x11\n\x07bigge\
+    st\x18\x03\x20\x01(\x0cB\0:\0\"~\n\x0bTableCreate\x12\x0c\n\x02ID\x18\
+    \x01\x20\x01(\x04B\0\x12\x0f\n\x05level\x18\x02\x20\x01(\rB\0\x12\x0c\n\
+    \x02CF\x18\x03\x20\x01(\x05B\0\x12\x12\n\x08smallest\x18\x04\x20\x01(\
+    \x0cB\0\x12\x11\n\x07biggest\x18\x05\x20\x01(\x0cB\0\x12\x19\n\x0fcolumn\
+    ar_tables\x18\x06\x20\x01(\rB\0:\0\"W\n\x0bTableDelete\x12\x0c\n\x02ID\
+    \x18\x01\x20\x01(\x04B\0\x12\x0f\n\x05level\x18\x02\x20\x01(\rB\0\x12\
+    \x0c\n\x02CF\x18\x03\x20\x01(\x05B\0\x12\x19\n\x0fcolumnar_tables\x18\
+    \x04\x20\x01(\rB\0:\0\"D\n\x05Split\x12)\n\tnewShards\x18\x01\x20\x03(\
+    \x0b2\x14.enginepb.PropertiesB\0\x12\x0e\n\x04Keys\x18\x03\x20\x03(\x0cB\
+    \0:\0\"\xd2\x01\n\x0bIngestFiles\x12'\n\tl0Creates\x18\x01\x20\x03(\x0b2\
+    \x12.enginepb.L0CreateB\0\x12-\n\x0ctableCreates\x18\x02\x20\x03(\x0b2\
+    \x15.enginepb.TableCreateB\0\x12*\n\nproperties\x18\x03\x20\x01(\x0b2\
+    \x14.enginepb.PropertiesB\0\x12+\n\x0bBlobCreates\x18\x04\x20\x03(\x0b2\
+    \x14.enginepb.BlobCreateB\0\x12\x10\n\x06max_ts\x18\x05\x20\x01(\x04B\0:\
+    \0\"C\n\nProperties\x12\x11\n\x07shardID\x18\x01\x20\x01(\x04B\0\x12\x0e\
+    \n\x04keys\x18\x02\x20\x03(\tB\0\x12\x10\n\x06values\x18\x03\x20\x03(\
+    \x0cB\0:\0\"m\n\x0bTableChange\x12-\n\x0ctableDeletes\x18\x01\x20\x03(\
+    \x0b2\x15.enginepb.TableDeleteB\0\x12-\n\x0ctableCreates\x18\x02\x20\x03\
+    (\x0b2\x15.enginepb.TableCreateB\0:\0\">\n\x0bTxnFileRefs\x12-\n\rtxn_fi\
+    le_refs\x18\x01\x20\x03(\x0b2\x14.enginepb.TxnFileRefB\0:\0\"\xc9\x01\n\
+    \nTxnFileRef\x12\x12\n\x08start_ts\x18\x01\x20\x01(\x04B\0\x12\x13\n\tch\
+    unk_ids\x18\x02\x20\x03(\x04B\0\x12\x11\n\x07version\x18\x03\x20\x01(\
+    \x04B\0\x12\x13\n\tuser_meta\x18\x04\x20\x01(\x0cB\0\x12\x19\n\x0flock_v\
+    al_prefix\x18\x05\x20\x01(\x0cB\0\x12\x13\n\tshard_ver\x18\x06\x20\x01(\
+    \x04B\0\x12\x1b\n\x11inner_lower_bound\x18\x07\x20\x01(\x0cB\0\x12\x1b\n\
+    \x11inner_upper_bound\x18\x08\x20\x01(\x0cB\0:\0\"{\n\x06Schema\x12\x12\
+    \n\x08table_id\x18\x01\x20\x01(\x03B\0\x12\x11\n\x07columns\x18\x02\x20\
+    \x03(\x0cB\0\x12\x14\n\npk_col_ids\x18\x03\x20\x03(\x03B\0\x122\n\x0evec\
+    tor_indexes\x18\x04\x20\x03(\x0b2\x18.enginepb.VectorIndexDefB\0:\0\"u\n\
+    \x0bVectorIndex\x12\x12\n\x08table_id\x18\x01\x20\x01(\x03B\0\x12\x12\n\
+    \x08index_id\x18\x02\x20\x01(\x03B\0\x12\x10\n\x06col_id\x18\x03\x20\x01\
+    (\x03B\0\x12*\n\x05files\x18\x04\x20\x03(\x0b2\x19.enginepb.VectorIndexF\
+    ileB\0:\0\"`\n\x0fVectorIndexFile\x12\x0c\n\x02id\x18\x01\x20\x01(\x04B\
+    \0\x12\x16\n\x0csnap_version\x18\x02\x20\x01(\x04B\0\x12\x12\n\x08smalle\
+    st\x18\x03\x20\x01(\x0cB\0\x12\x11\n\x07biggest\x18\x04\x20\x01(\x0cB\0:\
+    \0\"z\n\x0eVectorIndexDef\x12\x12\n\x08index_id\x18\x01\x20\x01(\x03B\0\
+    \x12\x10\n\x06col_id\x18\x02\x20\x01(\x03B\0\x12\x14\n\nindex_kind\x18\
+    \x03\x20\x01(\tB\0\x12\x13\n\tspec_keys\x18\x04\x20\x03(\tB\0\x12\x15\n\
+    \x0bspec_values\x18\x05\x20\x03(\x0cB\0:\0B\0b\x06proto3\
 ";
 
 static mut file_descriptor_proto_lazy: ::protobuf::lazy::Lazy<::protobuf::descriptor::FileDescriptorProto> = ::protobuf::lazy::Lazy {

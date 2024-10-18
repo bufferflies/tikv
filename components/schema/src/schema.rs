@@ -106,6 +106,7 @@ pub struct ColumnInfo {
     // fix bug in version 0. For compatibility with version 0, we add version field in column info
     // struct.
     pub version: u64,
+    pub vector_index: Option<VectorIndexInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,6 +121,14 @@ pub struct IndexInfo {
     pub is_invisible: bool,
     pub is_global: bool,
     pub mv_index: Option<bool>,
+    pub vector_index: Option<VectorIndexInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VectorIndexInfo {
+    pub kind: String,
+    pub dimension: u64,
+    pub distance_metric: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

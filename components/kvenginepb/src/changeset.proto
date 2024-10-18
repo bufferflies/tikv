@@ -70,13 +70,15 @@ message ColumnarCompaction {
   TableChange columnar_change = 1;
   uint64 snap_version = 2;
   repeated uint64 row_l0s = 3;
+  uint32 target_level = 4;
 }
 
 message UpdateVectorIndex {
   int64 table_id = 1;
   int64 index_id = 2;
-  repeated VectorIndexFile added = 3;
-  repeated uint64 removed = 4;
+  int64 col_id = 3;
+  repeated VectorIndexFile added = 4;
+  repeated uint64 removed = 5;
 }
 
 message Flush {
@@ -193,7 +195,8 @@ message Schema {
 message VectorIndex {
   int64 table_id = 1;
   int64 index_id = 2;
-  repeated VectorIndexFile files = 3;
+  int64 col_id = 3;
+  repeated VectorIndexFile files = 4;
 }
 
 message VectorIndexFile {
