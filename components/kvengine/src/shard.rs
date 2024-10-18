@@ -747,6 +747,8 @@ impl Shard {
                 .inner_delete_bounds()
                 .any(|bound| mem_tbl.has_data_in_bound(bound))
         })
+        // No unconverted_l0s in the shard.
+        && !shard_data.has_unconverted_l0s()
     }
 
     fn ready_to_truncate_ts(truncate_ts: &Option<TruncateTs>, shard_data: &ShardData) -> bool {
@@ -755,10 +757,14 @@ impl Shard {
         && !shard_data.mem_tbls.iter().any(|mem_tbl| {
             mem_tbl.data_max_ts() > truncate_ts.unwrap().inner()
         })
+        // No unconverted_l0s in the shard.
+        && !shard_data.has_unconverted_l0s()
     }
 
     fn ready_to_trim_over_bound(trim_over_bound: bool, shard_data: &ShardData) -> bool {
-        trim_over_bound && !shard_data.has_mem_over_bound_data()
+        trim_over_bound
+            && !shard_data.has_mem_over_bound_data()
+            && !shard_data.has_unconverted_l0s_over_bound_data()
     }
 
     fn refresh_compaction_priority(&self) {
@@ -774,7 +780,7 @@ impl Shard {
         } else if Self::ready_to_trim_over_bound(pending_ops.trim_over_bound, &data) {
             *self.compaction_priority.write().unwrap() = Some(CompactionPriority::TrimOverBound);
             return;
-        } else if pending_ops.manual_major_compaction {
+        } else if pending_ops.manual_major_compaction && !data.has_unconverted_l0s() {
             // Set major compaction priority to 2.0 to make it less likely to be picked up
             // when there are other shards waiting to be compacted.
             *self.compaction_priority.write().unwrap() =
@@ -1499,6 +1505,16 @@ impl ShardDataCore {
         false
     }
 
+    pub(crate) fn has_unconverted_l0s_over_bound_data(&self) -> bool {
+        let shard_bound = self.data_bound();
+        for l0 in &self.col_levels.unconverted_l0s {
+            if !shard_bound.contains_bound(l0.data_bound()) {
+                return true;
+            }
+        }
+        false
+    }
+
     pub(crate) fn has_file_over_bound_data(&self) -> bool {
         let shard_bound = self.data_bound();
         for l0 in &self.l0_tbls {
@@ -1547,6 +1563,18 @@ impl ShardDataCore {
                 .levels
                 .iter()
                 .any(|l| !l.tables.is_empty())
+    }
+
+    pub fn get_unconverted_l0s(&self) -> Vec<u64> {
+        self.col_levels
+            .unconverted_l0s
+            .iter()
+            .map(|l0| l0.id())
+            .collect()
+    }
+
+    pub fn has_unconverted_l0s(&self) -> bool {
+        !self.col_levels.unconverted_l0s.is_empty()
     }
 }
 

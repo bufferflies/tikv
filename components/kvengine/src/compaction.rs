@@ -1045,11 +1045,28 @@ impl Engine {
         let mut biggest = data.l0_tbls[0].biggest();
         let mut estimated_blob_size = 0;
         let columnar_snap_version = shard.get_columnar_snap_version();
+        let unconverted_l0s: HashSet<u64> = data.get_unconverted_l0s().iter().cloned().collect();
         for l0 in &data.l0_tbls {
             // Skip unconverted l0s.
-            if columnar_snap_version > 0 && l0.version() > columnar_snap_version {
+            // After region merge there may have l0s with l0.version() <
+            // columnar_snap_version already converted exists and will not be added
+            // to unconverted_l0s. So we need check the unconverted_l0s and
+            // assert the l0.version().
+            if unconverted_l0s.contains(&l0.id()) {
+                info!("{} skip unconverted l0 {}", tag, l0.id());
+                assert!(
+                    l0.version() > columnar_snap_version,
+                    "{} unconverted l0 {} snap_version: {} columnar_snap_version: {} l0 version: {}, unconverted_l0s: {:?}",
+                    tag,
+                    l0.id(),
+                    shard.get_snap_version(),
+                    columnar_snap_version,
+                    l0.version(),
+                    data.get_unconverted_l0s()
+                );
                 continue;
             }
+
             if smallest > l0.smallest() {
                 smallest = l0.smallest();
             }
@@ -1065,6 +1082,10 @@ impl Engine {
         }
         if l0_tbls.is_empty() {
             store_bool(&shard.compacting, false);
+            info!(
+                "{} trigger_l0_compaction, none l0 table after filtering",
+                tag
+            );
             return None;
         }
 
@@ -1138,12 +1159,26 @@ impl Engine {
         }
         let mut move_down_l0s = vec![];
         let columnar_snap_version = shard.get_columnar_snap_version();
+        let tag = shard.tag();
+        let unconverted_l0s: HashSet<u64> =
+            shard_data.get_unconverted_l0s().iter().cloned().collect();
         for (i, l0_tbl) in shard_data.l0_tbls.iter().enumerate() {
             if !l0_tbl.is_write_cf_only() {
                 continue;
             }
             // Avoid unconverted l0s compaction.
-            if columnar_snap_version > 0 && l0_tbl.version() > columnar_snap_version {
+            if unconverted_l0s.contains(&l0_tbl.id()) {
+                info!("{} skip unconverted l0 {}", tag, l0_tbl.id());
+                assert!(
+                    l0_tbl.version() > columnar_snap_version,
+                    "{} unconverted l0 {} snap_version: {} columnar_snap_version: {} l0 version: {}, unconverted_l0s: {:?}",
+                    tag,
+                    l0_tbl.id(),
+                    shard.get_snap_version(),
+                    columnar_snap_version,
+                    l0_tbl.version(),
+                    shard_data.get_unconverted_l0s()
+                );
                 continue;
             }
             let l0_write_cf_tbl = l0_tbl.get_cf(WRITE_CF).as_ref().unwrap();
@@ -1173,6 +1208,7 @@ impl Engine {
             move_down_l0s.push(table_create);
         }
         if move_down_l0s.is_empty() {
+            info!("{} no l0 to move down", tag);
             return None;
         }
         let mut cs = new_change_set(shard.id, shard.ver);
@@ -1202,6 +1238,7 @@ impl Engine {
         let lower_level = &scf.levels[level];
         if upper_level.tables.len() == 0 {
             store_bool(&shard.compacting, false);
+            info!("{} no upper level {} table", tag, level - 1);
             return None;
         }
         let shard_bound = shard.data_bound();
@@ -1248,6 +1285,7 @@ impl Engine {
         }
         if upper_left_idx == upper_right_idx {
             store_bool(&shard.compacting, false);
+            info!("{} no candidate for l1_plus_compaction", tag);
             return None;
         }
         // Expand to left to include more tops as long as the ratio doesn't decrease and
@@ -2916,7 +2954,7 @@ fn compact_trim_over_bound_for_columnar(
     let req = &ctx.req;
     let dfs = &ctx.dfs;
     assert!(!files.is_empty());
-    assert_eq!(files.len(), req.file_ids.len());
+    assert!(files.len() <= req.file_ids.len());
 
     let opts = dfs::Options::default()
         .with_shard(req.shard_id, req.shard_ver)
