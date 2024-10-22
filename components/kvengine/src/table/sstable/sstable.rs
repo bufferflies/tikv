@@ -218,12 +218,7 @@ impl SsTableCore {
             footer.properties_len(size as usize),
         )?;
         let mut prop_slice = props_data.chunk();
-        validate_checksum_with_fix(
-            prop_slice,
-            footer.checksum_type,
-            file.clone(),
-            encryption_key.as_ref(),
-        )?;
+        validate_checksum_with_fix(prop_slice, &footer, file.clone(), encryption_key.as_ref())?;
         prop_slice = &prop_slice[4..];
         let mut smallest_buf = Bytes::new();
         let mut biggest_buf = Bytes::new();
@@ -289,7 +284,7 @@ impl SsTableCore {
             .file
             .read(self.start_off + offset as u64, length)
             .unwrap();
-        self.validate_checksum_with_fix(idx_data.chunk(), self.footer.checksum_type)?;
+        self.validate_checksum_with_fix(idx_data.chunk())?;
         Index::new(idx_data)
     }
 
@@ -371,7 +366,7 @@ impl SsTableCore {
                 );
                 raw_block = Bytes::from(block)
             }
-            self.validate_checksum_with_fix(raw_block.chunk(), self.footer.checksum_type)?;
+            self.validate_checksum_with_fix(raw_block.chunk())?;
             return Ok(raw_block.slice(4..));
         }
         buf.resize(length, 0);
@@ -389,7 +384,7 @@ impl SsTableCore {
         } else {
             self.file.read_at(buf, addr.curr_off as u64)?;
         }
-        self.validate_checksum_with_fix(buf, self.footer.checksum_type)?;
+        self.validate_checksum_with_fix(buf)?;
         let content = &buf[4..];
         match compression_type {
             LZ4_COMPRESSION => {
@@ -443,7 +438,7 @@ impl SsTableCore {
         let mut data = self
             .file
             .read(self.filter_offset() as u64, self.filter_size() as usize)?;
-        self.validate_checksum_with_fix(data.chunk(), self.footer.checksum_type)?;
+        self.validate_checksum_with_fix(data.chunk())?;
         data.get_u32_le();
         assert_eq!(data.get_u32_le(), AUX_INDEX_BINARY_FUSE8);
         let len = data.get_u32_le();
@@ -561,10 +556,10 @@ impl SsTableCore {
     }
 
     #[inline]
-    fn validate_checksum_with_fix(&self, data: &[u8], checksum_type: u8) -> Result<()> {
+    fn validate_checksum_with_fix(&self, data: &[u8]) -> Result<()> {
         validate_checksum_with_fix(
             data,
-            checksum_type,
+            &self.footer,
             self.file.clone(),
             self.encryption_key.as_ref(),
         )
@@ -831,16 +826,23 @@ impl quick_cache::Weighter<BlockCacheKey, Bytes> for BlockWeighter {
     }
 }
 
-fn validate_checksum(data: &[u8], checksum_type: ChecksumType) -> Result<()> {
+fn validate_checksum(file: &dyn File, data: &[u8], footer: &Footer) -> Result<()> {
     if data.len() < 4 {
         return Err(table::Error::InvalidChecksum(String::from(
             "data is too short",
         )));
     }
+    let checksum_type: ChecksumType = footer.checksum_type.into();
     let checksum = LittleEndian::read_u32(data);
     let content = &data[4..];
     let got_checksum = checksum_type.checksum(content);
     if checksum != got_checksum {
+        error!("checksum mismatch";
+            "file" => file.id(),
+            "expect" => checksum,
+            "got" => got_checksum,
+            "footer" => ?footer,
+        );
         return Err(table::Error::InvalidChecksum(format!(
             "{:?} checksum mismatch expect {} got {}",
             checksum_type, checksum, got_checksum
@@ -852,11 +854,11 @@ fn validate_checksum(data: &[u8], checksum_type: ChecksumType) -> Result<()> {
 #[inline]
 fn validate_checksum_with_fix(
     data: &[u8],
-    checksum_type: u8,
+    footer: &Footer,
     file: Arc<dyn File>,
     encryption_key: Option<&EncryptionKey>,
 ) -> Result<()> {
-    match validate_checksum(data, checksum_type.into()) {
+    match validate_checksum(file.as_ref(), data, footer) {
         Ok(()) => Ok(()),
         Err(err) => {
             if let Some(file_path) = file.path() {

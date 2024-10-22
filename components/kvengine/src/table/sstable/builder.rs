@@ -402,7 +402,7 @@ impl Builder {
 pub const FOOTER_SIZE: usize = mem::size_of::<Footer>();
 
 #[repr(C)]
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone, Copy, Debug)]
 pub struct Footer {
     pub old_data_offset: u32,
     pub index_offset: u32,
