@@ -3142,6 +3142,11 @@ impl TikvConfig {
             return Err("raft_engine.config.dir can't be same as raft_store.raftdb_path".into());
         }
 
+        self.rfengine.wal_sync_dir = self
+            .rfengine
+            .wal_sync_dir
+            .replace("{data-dir}", &self.storage.data_dir);
+
         let kv_db_path = self.infer_kv_engine_path(None)?;
         if kv_db_path == self.raft_store.raftdb_path {
             return Err("raft_store.raftdb_path can't be same as storage.data_dir/db".into());
