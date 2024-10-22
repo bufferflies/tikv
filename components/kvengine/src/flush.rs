@@ -1,7 +1,7 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     iter::Iterator as StdIterator,
     mem,
     ops::Deref,
@@ -219,6 +219,7 @@ impl Engine {
             }
             initial_flush.set_properties(filtered_props);
         }
+        let mut l0_ids = HashSet::new();
         for l0 in &flush.shard_data.l0_tbls {
             if task.table_double_overbound(l0.smallest(), l0.biggest())
                 && !l0.has_data_in_bound(task.range.data_bound())
@@ -228,6 +229,7 @@ impl Engine {
             }
             let mut l0_create = L0Create::new();
             l0_create.set_id(l0.id());
+            l0_ids.insert(l0.id());
             l0_create.set_smallest(l0.smallest().to_vec());
             l0_create.set_biggest(l0.biggest().to_vec());
             initial_flush.mut_l0_creates().push(l0_create);
@@ -270,12 +272,19 @@ impl Engine {
                 schema_meta.set_version(schema_file.get_version());
                 schema_meta.set_keyspace_id(schema_file.get_keyspace_id());
                 initial_flush.set_schema_meta(schema_meta);
+                // Filter out the unconverted_l0s not in the l0s created in this flush.
                 let unconverted_l0s = flush
                     .shard_data
                     .col_levels
                     .unconverted_l0s
                     .iter()
-                    .map(|l0| l0.id())
+                    .filter_map(|l0| {
+                        if l0_ids.contains(&l0.id()) {
+                            Some(l0.id())
+                        } else {
+                            None
+                        }
+                    })
                     .collect();
                 initial_flush.set_unconverted_l0s(unconverted_l0s);
 
