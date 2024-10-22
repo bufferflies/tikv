@@ -1545,6 +1545,13 @@ impl ShardDataCore {
                 }
             }
         }
+        for cl in &self.col_levels.levels {
+            for col_file in &cl.files {
+                if !shard_bound.contains_bound(col_file.data_bound()) {
+                    return true;
+                }
+            }
+        }
         false
     }
 
