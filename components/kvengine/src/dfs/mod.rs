@@ -5,6 +5,7 @@ mod metrics;
 mod s3;
 
 use std::{
+    convert::TryFrom,
     fmt::{Debug, Display, Formatter},
     io::{self, BufReader, Read, Write},
     ops::Deref,
@@ -129,7 +130,7 @@ impl Dfs for InMemFs {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum FileType {
     Sst = 0,
@@ -182,17 +183,21 @@ impl Display for FileType {
     }
 }
 
-impl From<&str> for FileType {
-    fn from(value: &str) -> Self {
-        match value {
+impl TryFrom<&str> for FileType {
+    type Error = String;
+
+    fn try_from(value: &str) -> std::result::Result<Self, Self::Error> {
+        Ok(match value {
             "sst" => FileType::Sst,
             "txn" => FileType::TxnChunk,
             "schema" => FileType::Schema,
             "col" => FileType::Columnar,
             "blob" => FileType::Blob,
             "vec" => FileType::VectorIndex,
-            _ => FileType::Sst,
-        }
+            _ => {
+                return Err(format!("invalid suffix: {value}"));
+            }
+        })
     }
 }
 

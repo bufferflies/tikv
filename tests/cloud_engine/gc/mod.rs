@@ -38,7 +38,7 @@ fn test_local_file_gc() {
     for _ in 0..10 {
         for shard_id in &shard_ids {
             let snap = kv.get_snap_access(shard_id.id).unwrap();
-            all_files.extend(snap.get_all_files());
+            all_files.extend(snap.get_all_sst_files());
         }
         if !all_files.is_empty() {
             break;

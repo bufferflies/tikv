@@ -1,7 +1,7 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fmt,
     fmt::{Debug, Formatter},
     path::PathBuf,
@@ -13,7 +13,7 @@ use bytes::Buf;
 use chrono::DateTime;
 use clap::Args;
 use kvengine::dfs::{
-    DFSConfig, Dfs, S3Fs, STORAGE_CLASS_GLACIER_IR, STORAGE_CLASS_INTELLIGENT_TIERING,
+    DFSConfig, Dfs, FileType, S3Fs, STORAGE_CLASS_GLACIER_IR, STORAGE_CLASS_INTELLIGENT_TIERING,
     STORAGE_CLASS_STANDARD, STORAGE_CLASS_STANDARD_IA,
 };
 use kvproto::metapb::Store;
@@ -146,7 +146,7 @@ struct StatsWorker {
     concurrency: usize,
 }
 
-#[derive(Default, Copy, Clone)]
+#[derive(Default, Clone)]
 struct StatContent {
     num_of_objs: u64,
     storage: u64,
@@ -170,7 +170,7 @@ impl fmt::Display for StatContent {
     }
 }
 
-#[derive(Default, Copy, Clone)]
+#[derive(Default, Clone)]
 struct ObjectStat {
     checked: StatContent,
     in_a_day: StatContent,
@@ -225,11 +225,11 @@ impl fmt::Display for ObjectStat {
     }
 }
 
-#[derive(Default, Copy, Clone)]
+#[derive(Default, Clone)]
 struct Stats {
     all_stat: ObjectStat,
-    sst_stat: ObjectStat,
-    in_used_sst_stat: ObjectStat,
+    file_stat: HashMap<FileType, ObjectStat>,
+    in_used_file_stat: HashMap<FileType, ObjectStat>,
     wal_stat: ObjectStat,
     rlog_stat: ObjectStat,
     meta_stat: ObjectStat,
@@ -242,10 +242,17 @@ struct Stats {
 }
 
 impl Stats {
-    fn append(&mut self, stats: Stats) {
+    fn append(&mut self, mut stats: Stats) {
         self.all_stat.append(stats.all_stat);
-        self.sst_stat.append(stats.sst_stat);
-        self.in_used_sst_stat.append(stats.in_used_sst_stat);
+        for (ftype, stat) in stats.file_stat.drain() {
+            self.file_stat.entry(ftype).or_default().append(stat);
+        }
+        for (ftype, stat) in stats.in_used_file_stat.drain() {
+            self.in_used_file_stat
+                .entry(ftype)
+                .or_default()
+                .append(stat);
+        }
         self.wal_stat.append(stats.wal_stat);
         self.rlog_stat.append(stats.rlog_stat);
         self.meta_stat.append(stats.meta_stat);
@@ -359,12 +366,16 @@ impl StatsWorker {
             "finished in {:?}: all files valid, {}",
             elapsed, stats.all_stat
         );
-        info!("finished: sst files valid, {}", stats.sst_stat);
+        for (ftype, stat) in stats.file_stat.iter() {
+            info!("finished: {} files valid, {}", ftype.suffix(), stat);
+        }
         info!(
-            "finished: {} in-used sst files valid, {}",
+            "finished: total {} in-used files valid",
             self.valid_files.len(),
-            stats.in_used_sst_stat
         );
+        for (ftype, stat) in stats.in_used_file_stat.iter() {
+            info!("finished: in-used {} files valid, {}", ftype.suffix(), stat);
+        }
         info!("finished: wal files valid, {}", stats.wal_stat);
         info!("finished: rlog files valid, {}", stats.rlog_stat);
         info!("finished: meta files valid, {}", stats.meta_stat);
@@ -438,11 +449,19 @@ impl StatsWorker {
                     stats.meta_stat.add(duration, size);
                 } else if obj.key.ends_with(".pack") {
                     stats.pack_stat.add(duration, size);
-                } else if let Some(file_id) = self.s3fs.try_parse_file_id(&obj.key) {
+                } else if let Some((file_id, ftype)) = self.s3fs.try_parse_all_file_id(&obj.key) {
                     if self.valid_files.contains(&file_id) {
-                        stats.in_used_sst_stat.add(duration, size);
+                        stats
+                            .in_used_file_stat
+                            .entry(ftype)
+                            .or_insert_with(ObjectStat::default)
+                            .add(duration, size);
                     }
-                    stats.sst_stat.add(duration, size);
+                    stats
+                        .file_stat
+                        .entry(ftype)
+                        .or_insert_with(ObjectStat::default)
+                        .add(duration, size);
                 }
                 stats.all_stat.add(duration, size);
             }
@@ -457,14 +476,22 @@ impl StatsWorker {
             "finished in {:?}: all files with prefix {} valid, {}",
             elapsed, prefix, stats.all_stat
         );
-        info!(
-            "finished: sst files with prefix {} valid, {}",
-            prefix, stats.sst_stat
-        );
-        info!(
-            "finished: in-used sst files with prefix {} valid, {}",
-            prefix, stats.in_used_sst_stat
-        );
+        for (ftype, stat) in &stats.file_stat {
+            info!(
+                "finished: {} files with prefix {} valid, {}",
+                ftype.suffix(),
+                prefix,
+                stat
+            );
+        }
+        for (ftype, stat) in &stats.in_used_file_stat {
+            info!(
+                "finished: in-used {} files with prefix {} valid, {}",
+                ftype.suffix(),
+                prefix,
+                stat
+            );
+        }
         info!(
             "finished: wal files with prefix {} valid, {}",
             prefix, stats.wal_stat

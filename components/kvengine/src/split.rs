@@ -194,7 +194,7 @@ impl Engine {
             let all_files = shard.get_all_files();
             let all_col_files = shard.get_all_col_files();
             info!(
-                "split new shard {}, start {:x}, end {:x}, all files {:?}, all col_files: {:?}",
+                "split new shard {}, start {:x}, end {:x}, all files {:?} (columnar {:?})",
                 shard.tag(),
                 shard.outer_start,
                 shard.outer_end,
@@ -474,7 +474,7 @@ impl Engine {
         let all_files = new_shard.get_all_files();
         let all_col_files = new_shard.get_all_col_files();
         info!(
-            "merged new shard {}, start {:x}, end {:x}, all files {:?}, all columnar files {:?}",
+            "merged new shard {}, start {:x}, end {:x}, all files {:?} (columnar {:?})",
             new_shard.tag(),
             new_shard.outer_start,
             new_shard.outer_end,

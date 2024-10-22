@@ -1,6 +1,7 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
+    convert::TryFrom,
     fmt::{Debug, Formatter},
     ops::{Deref, DerefMut},
     sync::Arc,
@@ -224,14 +225,39 @@ impl S3FsCore {
     }
 
     // Try to parse the sst file id from file key.
-    // Expected file key format: "/{prefix}/{idx}/{file_id}.sst".
     // Note: do NOT use in performance critical path as regex is used.
-    pub fn try_parse_file_id(&self, key: &str) -> Option<u64> {
+    pub fn try_parse_all_file_id(&self, key: &str) -> Option<(u64, FileType)> {
+        self.try_parse_sst_file_id(key)
+            .or_else(|| self.try_parse_other_file_id(key))
+    }
+
+    // Expected file key format: "/{prefix}/{idx}/{file_id}.sst".
+    pub fn try_parse_sst_file_id(&self, key: &str) -> Option<(u64, FileType)> {
+        if !key.ends_with(".sst") {
+            return None;
+        }
+
         lazy_static::lazy_static! {
             static ref RE: Regex = Regex::new(r"/[0-9a-f]{2}/([0-9a-f]{16})\.sst$").unwrap();
         }
         let caps = RE.captures(key)?;
-        Some(u64::from_str_radix(&caps[1], 16).unwrap())
+        Some((u64::from_str_radix(&caps[1], 16).unwrap(), FileType::Sst))
+    }
+
+    // Expected file key format:
+    // "/{prefix}/{file_type}/{idx}/{file_id}.{file_type}".
+    pub fn try_parse_other_file_id(&self, key: &str) -> Option<(u64, FileType)> {
+        lazy_static::lazy_static! {
+            static ref RE: Regex = Regex::new(r"/(?<subdir>[a-z]+)/[0-9a-f]{2}/(?<fileid>[0-9a-f]{16})\.(?<filetype>[a-z]+)$").unwrap();
+        }
+        let caps = RE.captures(key)?;
+
+        if caps["filetype"] != caps["subdir"] {
+            return None;
+        }
+        let file_type = FileType::try_from(&caps["filetype"]).ok()?;
+        let file_id = u64::from_str_radix(&caps["fileid"], 16).ok()?;
+        Some((file_id, file_type))
     }
 
     fn is_err_retryable<T>(&self, rustoto_err: &RusotoError<T>) -> bool {
@@ -1309,7 +1335,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_sst_file() {
+    fn test_parse_file_id() {
         let s3fs = new_test_s3fs(b"abcdefgh");
 
         let file_key = s3fs.file_key(random(), FileType::Sst);
@@ -1320,14 +1346,50 @@ mod tests {
 
         for file_id in [0, 42, 0x1_0000_0000, 0xffff_ffff_ffff_ffff] {
             let file_key = s3fs.file_key(file_id, FileType::Sst);
-            assert_eq!(s3fs.try_parse_file_id(&file_key), Some(file_id));
+            assert_eq!(
+                s3fs.try_parse_sst_file_id(&file_key),
+                Some((file_id, FileType::Sst))
+            );
+            assert_eq!(
+                s3fs.try_parse_all_file_id(&file_key),
+                Some((file_id, FileType::Sst))
+            );
+        }
+
+        for file_type in [
+            FileType::Blob,
+            FileType::TxnChunk,
+            FileType::Schema,
+            FileType::Columnar,
+            FileType::VectorIndex,
+        ] {
+            for file_key in [
+                "".to_string(),
+                "cse/0000000000000001/e00000001/0000000000800000_00000000008e9000.wal".to_string(),
+                s3fs.file_key(42, file_type),
+            ] {
+                assert_eq!(s3fs.try_parse_sst_file_id(&file_key), None);
+            }
+
+            for file_id in [0, 42, 0x1_0000_0000, 0xffff_ffff_ffff_ffff] {
+                let file_key = s3fs.file_key(file_id, file_type);
+                assert_eq!(
+                    s3fs.try_parse_other_file_id(&file_key),
+                    Some((file_id, file_type))
+                );
+                assert_eq!(
+                    s3fs.try_parse_all_file_id(&file_key),
+                    Some((file_id, file_type))
+                );
+            }
         }
 
         for file_key in [
-            "",
-            "cse/0000000000000001/e00000001/0000000000800000_00000000008e9000.wal",
+            "".to_string(),
+            "cse/0000000000000001/e00000001/0000000000800000_00000000008e9000.wal".to_string(),
+            s3fs.file_key(42, FileType::Sst),
         ] {
-            assert_eq!(s3fs.try_parse_file_id(file_key), None);
+            assert_eq!(s3fs.try_parse_other_file_id(&file_key), None);
         }
     }
 

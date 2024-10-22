@@ -6,6 +6,7 @@ use std::{
     fmt::{Debug, Formatter},
     fs,
     path::PathBuf,
+    result::Result as StdResult,
     sync::Arc,
     thread,
     time::{Duration, Instant},
@@ -17,7 +18,7 @@ use clap::Args;
 use engine_traits::ListObjectContent;
 use kvengine::{
     dfs,
-    dfs::{DFSConfig, Dfs, S3Fs},
+    dfs::{DFSConfig, Dfs, FileType, S3Fs},
 };
 use kvproto::metapb::Store;
 use native_br::{
@@ -89,6 +90,11 @@ pub struct DfsGcArgs {
     #[clap(long, default_value = "1h")]
     pub start_time_safe_interval: ReadableDuration,
 
+    /// File types whitelist, only files with these file types will be GCed.
+    /// Use `,` to separate multiple file types. E.g. "sst,txn".
+    #[clap(long, value_delimiter = ',', default_value = "sst")]
+    pub file_types_whitelist: Vec<String>,
+
     /// PD endpoints, use `,` to separate multiple PDs
     #[clap(long, default_value_t = String::new())]
     pub pd: String,
@@ -101,6 +107,10 @@ pub struct DfsGcArgs {
     /// Path of file that contains X509 key in PEM format
     #[clap(long, default_value = "")]
     pub key: PathBuf,
+}
+
+fn convert_file_types(file_types: &[String]) -> StdResult<Vec<FileType>, String> {
+    file_types.iter().map(|s| s.as_str().try_into()).collect()
 }
 
 pub(crate) fn execute_dfsgc(arg: DfsGcArgs) {
@@ -120,12 +130,17 @@ pub(crate) fn execute_dfsgc(arg: DfsGcArgs) {
     let start_time_safe_interval =
         chrono::Duration::from_std(Duration::from(arg.start_time_safe_interval)).unwrap();
     let progress_file_path = PathBuf::from(format!("{}/{}", &config.data_dir, "dfsgc.progress"));
+
+    let file_types_whitelist =
+        convert_file_types(&arg.file_types_whitelist).expect("invalid file types whitelist");
+
     let mut gc_worker = GcWorker::new(
         pd_client,
         s3fs,
         progress_file_path,
         config.gc_lifetime,
         arg.concurrency,
+        file_types_whitelist,
     );
 
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -227,6 +242,7 @@ struct GcWorker {
     valid_files: Arc<HashSet<u64>>,
     gc_lifetime: Option<chrono::Duration>,
     concurrency: usize,
+    file_types_whitelist: Vec<FileType>,
 }
 
 #[derive(Default)]
@@ -255,6 +271,7 @@ impl fmt::Display for GcStat {
 #[derive(Debug)]
 struct S3Object {
     pub file_id: u64,
+    pub ftype: FileType,
     pub key: String,
     pub last_modified: DateTime<chrono::Utc>,
     pub storage_class: String,
@@ -262,9 +279,10 @@ struct S3Object {
 }
 
 impl S3Object {
-    pub fn from_list_object_content(file_id: u64, obj: ListObjectContent) -> Self {
+    pub fn from_list_object_content(file_id: u64, ftype: FileType, obj: ListObjectContent) -> Self {
         Self {
             file_id,
+            ftype,
             key: obj.key,
             last_modified: DateTime::parse_from_rfc3339(&obj.last_modified)
                 .expect("parse last_modified")
@@ -282,6 +300,7 @@ impl GcWorker {
         progress_file_path: PathBuf,
         gc_lifetime: Option<Duration>,
         concurrency: usize,
+        file_types_whitelist: Vec<FileType>,
     ) -> Self {
         Self {
             pd,
@@ -290,6 +309,7 @@ impl GcWorker {
             valid_files: Arc::new(HashSet::default()),
             gc_lifetime: gc_lifetime.map(|d| chrono::Duration::from_std(d).unwrap()),
             concurrency,
+            file_types_whitelist,
         }
     }
 
@@ -384,14 +404,22 @@ impl GcWorker {
                 .into_iter()
                 .filter_map(|obj| {
                     self.s3fs
-                        .try_parse_file_id(&obj.key)
-                        .map(|file_id| S3Object::from_list_object_content(file_id, obj))
+                        .try_parse_all_file_id(&obj.key)
+                        .map(|(file_id, ftype)| {
+                            S3Object::from_list_object_content(file_id, ftype, obj)
+                        })
                         .filter(|obj| obj.last_modified < start_time)
                 })
                 .collect::<Vec<_>>();
-            let objs_len = file_objs.len();
 
+            let mut objs_len = 0;
             for s3_obj in file_objs {
+                let in_whitelist = self.file_types_whitelist.contains(&s3_obj.ftype);
+                if !in_whitelist {
+                    continue;
+                }
+
+                objs_len += 1;
                 self.spawn_remove_file_task(
                     tx.clone(),
                     stat.clone(),
@@ -482,7 +510,7 @@ impl GcWorker {
         start_time: &DateTime<chrono::Utc>,
         stat: &mut Arc<Mutex<GcStat>>,
     ) -> Result<()> {
-        let opts = dfs::Options::default();
+        let opts = dfs::Options::default().with_type(s3_obj.ftype);
         let removed = match self.is_file_removed(s3_obj).await {
             Ok(removed) => removed,
             Err(e) => {
@@ -496,7 +524,10 @@ impl GcWorker {
                 .remove(s3_obj.file_id, Some(s3_obj.size), opts)
                 .await;
             stat.lock().await.removed += 1;
-            info!("{} is removed", s3_obj.file_id);
+            info!(
+                "{}.{} ({}) is removed",
+                s3_obj.file_id, s3_obj.ftype, &s3_obj.key
+            );
         } else if let Some(gc_lifetime) = self.gc_lifetime {
             let duration = *start_time - s3_obj.last_modified;
 
@@ -506,8 +537,10 @@ impl GcWorker {
                     return Err(Error::DfsError(err));
                 } else {
                     info!(
-                        "{} is permanently removed, removed at {} ({:.2} min)",
+                        "{}.{} ({}) is permanently removed, removed at {} ({:.2} min)",
                         s3_obj.file_id,
+                        s3_obj.ftype,
+                        &s3_obj.key,
                         s3_obj.last_modified,
                         duration.num_seconds() as f64 / 60.0
                     );

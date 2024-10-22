@@ -1077,8 +1077,8 @@ impl SnapAccessCore {
         (skls, txn_file_refs)
     }
 
-    pub fn get_all_files(&self) -> Vec<u64> {
-        self.data.get_all_files()
+    pub fn get_all_sst_files(&self) -> Vec<u64> {
+        self.data.get_all_sst_files()
     }
 
     pub fn has_schema_file(&self) -> bool {

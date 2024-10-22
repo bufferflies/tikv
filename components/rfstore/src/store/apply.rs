@@ -457,7 +457,7 @@ impl Applier {
                     "{} failed to load unloaded tables, snap_write_sequence: {}, snap_files: {:?}, log_index:{}, err:{:?}",
                     snap.get_tag(),
                     snap.get_write_sequence(),
-                    snap.get_all_files(),
+                    snap.get_all_sst_files(),
                     log_index,
                     err,
                 );
@@ -477,7 +477,7 @@ impl Applier {
                 snap.get_tag(),
                 key,
                 snap.get_write_sequence(),
-                snap.get_all_files(),
+                snap.get_all_sst_files(),
                 log_index,
             );
         }

@@ -4,6 +4,7 @@ mod profile;
 
 use std::{
     borrow::Cow,
+    convert::TryInto,
     env::args,
     error::Error as StdError,
     net::SocketAddr,
@@ -1171,7 +1172,7 @@ impl StatusServer {
             let query_pairs: HashMap<_, _> =
                 url::form_urlencoded::parse(query.as_bytes()).collect();
             if let Some(file_type_str) = query_pairs.get("file_type") {
-                return file_type_str.as_ref().into();
+                return file_type_str.as_ref().try_into().unwrap_or(FileType::Sst);
             }
         }
         FileType::Sst

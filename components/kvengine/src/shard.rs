@@ -646,7 +646,16 @@ impl Shard {
 
     pub fn get_all_files(&self) -> Vec<u64> {
         let data = self.get_data();
-        data.get_all_files()
+        let mut files = data.get_all_sst_files();
+        files.extend(data.get_txn_chunks());
+        files.extend(data.get_all_col_files());
+        files.extend(self.get_schema_file().map(|f| f.get_file_id()));
+        files
+    }
+
+    pub fn get_all_sst_files(&self) -> Vec<u64> {
+        let data = self.get_data();
+        data.get_all_sst_files()
     }
 
     pub fn get_txn_chunks(&self) -> Vec<u64> {
@@ -656,14 +665,7 @@ impl Shard {
 
     pub fn get_all_col_files(&self) -> Vec<u64> {
         let data = self.get_data();
-        let mut col_ids = vec![];
-        data.for_each_columnar_level(|cl| {
-            for tbl in cl.files.iter() {
-                col_ids.push(tbl.id());
-            }
-            false
-        });
-        col_ids
+        data.get_all_col_files()
     }
 
     #[inline]
@@ -1218,7 +1220,7 @@ impl fmt::Debug for ShardData {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ShardData")
             .field("range", &self.range)
-            .field("files", &self.get_all_files())
+            .field("sst_files", &self.get_all_sst_files())
             .field("txn_chunks", &self.get_txn_chunks())
             .field("columnar_files", &self.get_all_columnar_files())
             .field("mem_table_max_ts", &self.get_mem_table_max_ts())
@@ -1326,7 +1328,7 @@ impl ShardDataCore {
         &self.cfs[cf]
     }
 
-    pub(crate) fn get_all_files(&self) -> Vec<u64> {
+    pub(crate) fn get_all_sst_files(&self) -> Vec<u64> {
         let mut files = Vec::new();
         for l0 in &self.l0_tbls {
             files.push(l0.id());
@@ -1357,6 +1359,17 @@ impl ShardDataCore {
         }
         files.sort_unstable();
         files
+    }
+
+    pub(crate) fn get_all_col_files(&self) -> Vec<u64> {
+        let mut col_ids = vec![];
+        self.for_each_columnar_level(|cl| {
+            for tbl in cl.files.iter() {
+                col_ids.push(tbl.id());
+            }
+            false
+        });
+        col_ids
     }
 
     #[inline]

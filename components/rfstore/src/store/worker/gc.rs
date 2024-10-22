@@ -30,7 +30,7 @@ impl Display for GcTask {
 /// Collect file ids that should be gc.
 #[derive(Default)]
 pub struct CollectFileIds {
-    pub kv_file_ids: HashSet<u64>,
+    pub sst_file_ids: HashSet<u64>,
     pub blacklist_file_ids: Arc<HashSet<u64>>,
     pub txn_chunk_ids: HashSet<u64>,
     pub col_file_ids: HashSet<u64>,
@@ -88,7 +88,9 @@ impl GcRunner {
         collect_file_ids.blacklist_file_ids = self.kv.get_files_in_blacklist();
         for &id_ver in &shard_id_vers {
             let shard = self.kv.get_shard_with_ver(id_ver.id, id_ver.ver).ok()?;
-            collect_file_ids.kv_file_ids.extend(shard.get_all_files());
+            collect_file_ids
+                .sst_file_ids
+                .extend(shard.get_all_sst_files());
             collect_file_ids
                 .txn_chunk_ids
                 .extend(shard.get_txn_chunks());
@@ -122,7 +124,7 @@ impl GcRunner {
 
     fn remove_garbage_files(&self, collect_file_ids: &CollectFileIds) -> kvengine::Result<()> {
         let CollectFileIds {
-            kv_file_ids,
+            sst_file_ids,
             blacklist_file_ids,
             txn_chunk_ids,
             col_file_ids,
@@ -150,7 +152,7 @@ impl GcRunner {
                     .with_ctx(|| format!("gc.tmp.remove_file: {path_str}"))?;
             } else if path_str.ends_with(".sst") {
                 let id = sstable::parse_file_id(&path)?;
-                if !kv_file_ids.contains(&id) {
+                if !sst_file_ids.contains(&id) {
                     let _guard = self.kv.lock_file(id);
                     if blacklist_file_ids.contains(&id) {
                         continue;
