@@ -146,7 +146,7 @@ pub struct IndexColumn {
 pub struct FieldType {
     pub tp: i32,
     pub flag: i32,
-    pub flen: i32,
+    pub flen: i64,
     pub decimal: i32,
     pub charset: String,
     pub collate: String,
@@ -243,7 +243,7 @@ pub fn convert_column_infos_to_tipb(
         ci.set_column_id(column_info.id);
         ci.set_tp(column_info.field_type.tp);
         ci.set_flag(column_info.field_type.flag);
-        ci.set_column_len(column_info.field_type.flen);
+        ci.set_column_len(column_info.field_type.flen.min(i32::MAX as i64) as i32);
         ci.set_decimal(column_info.field_type.decimal);
         ci.set_elems(
             column_info
