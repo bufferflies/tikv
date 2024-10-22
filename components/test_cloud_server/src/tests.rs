@@ -106,7 +106,9 @@ fn test_split_regions() {
         .map(|i| encode_bytes(&i_to_key(i)))
         .collect();
     {
-        let new_regions = block_on(pd_client.split_regions(keys0.clone())).unwrap();
+        let new_regions =
+            block_on(pd_client.split_regions_with_retry(keys0.clone(), Duration::from_secs(10)))
+                .unwrap();
         cluster.wait_pd_region_count(keys0.len() + 1);
         let mut region_keys = new_regions
             .into_iter()
@@ -134,7 +136,9 @@ fn test_split_regions() {
         .map(|i| encode_bytes(&i_to_key(i)))
         .collect();
     {
-        let new_regions = block_on(pd_client.split_regions(keys1.clone())).unwrap();
+        let new_regions =
+            block_on(pd_client.split_regions_with_retry(keys1.clone(), Duration::from_secs(10)))
+                .unwrap();
         cluster.wait_pd_region_count(keys1.len() + 1 + 1); // The `1` is 20 of keys0.
         let mut region_keys = new_regions
             .into_iter()

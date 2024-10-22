@@ -654,11 +654,17 @@ async fn create_keyspace_and_split_tables(
         .await;
     let keyspace_split_keys = get_keyspace_split_keys(keyspace_id);
     let pd_client = cluster.get_pd_client();
-    pd_client.split_regions(keyspace_split_keys).await.unwrap();
+    pd_client
+        .split_regions_with_retry(keyspace_split_keys, Duration::from_secs(10))
+        .await
+        .unwrap();
     let ks_meta = km.get_keyspace_meta(keyspace_id).unwrap();
     let table_ids = ks_meta.get_all_available_tables();
     let table_split_keys = get_table_split_keys(keyspace_id, &table_ids);
-    pd_client.split_regions(table_split_keys).await.unwrap();
+    pd_client
+        .split_regions_with_retry(table_split_keys, Duration::from_secs(10))
+        .await
+        .unwrap();
     table_ids
 }
 
