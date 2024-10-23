@@ -233,6 +233,7 @@ impl TableIterator {
         self.b_pos = 0;
         self.err = None;
         self.iter_state = IterState::NewVersion;
+        self.old_bi.reset_current_entry();
     }
 
     pub fn error(&self) -> &Option<table::Error> {

@@ -1393,6 +1393,27 @@ mod tests {
         }
     }
 
+    // For https://github.com/tidbcloud/cloud-storage-engine/issues/1957
+    #[test]
+    fn test_reset_old_block_iter() {
+        let kvs = generate_key_values("key", 10);
+        let (t, _) = create_multi_version_sst(kvs.clone());
+        let mut it = t.new_iterator(false, true);
+
+        for (k, _) in kvs {
+            it.seek(InnerKey::from_inner_buf(k.as_bytes()));
+            assert!(it.valid());
+            it.next_version();
+            it.next_version(); // Reach the second version in old block.
+
+            it.seek(InnerKey::from_inner_buf(k.as_bytes()));
+            assert!(it.valid());
+            // If old block iterator is not reset, it will point to the second version and
+            // panic for version not match.
+            it.next_version();
+        }
+    }
+
     #[test]
     fn test_get_split_keys() {
         let cases = vec![
