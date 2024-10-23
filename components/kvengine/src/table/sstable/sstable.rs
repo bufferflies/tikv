@@ -2,6 +2,7 @@
 
 use std::{
     cmp::Ordering,
+    fmt,
     future::Future,
     iter::Iterator as StdIterator,
     ops::Deref,
@@ -40,6 +41,21 @@ impl Deref for SsTable {
     type Target = SsTableCore;
     fn deref(&self) -> &Self::Target {
         &self.core
+    }
+}
+
+impl fmt::Debug for SsTable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SsTable")
+            .field("id", &self.id())
+            .field("size", &self.size())
+            .field("entries", &self.entries)
+            .field("old_entries", &self.old_entries)
+            .field("tombs", &self.tombs)
+            .field("max_ts", &self.max_ts)
+            .field("kv_size", &self.kv_size)
+            .field("l0_version", &self.l0_version)
+            .finish()
     }
 }
 

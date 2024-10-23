@@ -1,6 +1,6 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{mem, ops::Deref, sync::Arc};
+use std::{fmt, mem, ops::Deref, sync::Arc};
 
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, Bytes, BytesMut};
@@ -194,6 +194,18 @@ pub struct TableIterator {
     iter_state: IterState,
     block_buf: Vec<u8>,
     decryption_buf: Vec<u8>,
+}
+
+impl fmt::Debug for TableIterator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TableIterator")
+            .field("b_pos", &self.b_pos)
+            .field("old_b_pos", &self.old_b_pos)
+            .field("reversed", &self.reversed)
+            .field("err", &self.err)
+            .field("key_buf", &self.key_buf)
+            .finish()
+    }
 }
 
 impl TableIterator {
