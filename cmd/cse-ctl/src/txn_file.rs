@@ -44,7 +44,7 @@ pub fn execute_show_txn_chunk(args: ShowTxnChunkArgs) {
     config.dfs.override_from_env();
 
     let data = match args.local {
-        Some(local) => crate::sst::get_file_data_from_local(local),
+        Some(local) => crate::sst::get_file_data_from_local(&local),
         None => get_txn_chunk_data_from_dfs(args.id, config),
     };
     let file = Arc::new(InMemFile::new(args.id, data));

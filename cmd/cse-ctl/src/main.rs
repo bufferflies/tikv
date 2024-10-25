@@ -28,7 +28,7 @@ use crate::{
     check_table::{execute_check_table, CheckTableArgs},
     dfsgc::{execute_dfsgc, DfsGcArgs},
     restore::{execute_restore_command, RestoreCommand},
-    sst::{execute_show_sst, ShowSstArgs},
+    sst::{execute_scan_bad_table, execute_show_sst, ScanBadTableFileArgs, ShowSstArgs},
     stats::{execute_stats, StatsArgs},
     truncate_ts::{execute_truncate_ts, TruncateTsArgs},
     txn_file::{execute_show_txn_chunk, ShowTxnChunkArgs},
@@ -145,6 +145,7 @@ enum ShowCommands {
     Backup(ShowBackupArgs),
     BackupList(ShowBackupListArgs),
     Sst(ShowSstArgs),
+    ScanBadTableFile(ScanBadTableFileArgs),
     Archive(ShowArchiveArgs),
     TxnChunk(ShowTxnChunkArgs),
     TxnLog(ShowTxnLogArgs),
@@ -160,6 +161,9 @@ fn execute_show(args: ShowArgs) {
         }
         ShowCommands::Sst(args) => {
             execute_show_sst(args);
+        }
+        ShowCommands::ScanBadTableFile(args) => {
+            execute_scan_bad_table(args);
         }
         ShowCommands::Archive(args) => {
             execute_show_archive(args);

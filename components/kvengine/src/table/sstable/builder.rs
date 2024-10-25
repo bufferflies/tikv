@@ -463,6 +463,19 @@ impl Footer {
         buf.put_u16_le(self.table_format_version);
         buf.put_u32_le(self.magic);
     }
+
+    /// Note:
+    ///
+    /// - As L0 tables also use the same value of magic, L1+ SST tables should
+    ///   be checked first when detecting SST type.
+    ///
+    /// - The correctness depends on the `table_format_version` field, which is
+    ///   not very reliable as it's overlapped with `num_cfs` field of L0
+    ///   footer.
+    pub fn is_match(&self) -> bool {
+        (self.magic == MAGIC_NUMBER || self.magic == MAGIC_NUMBER_SPLIT_L0)
+            && self.table_format_version == TABLE_FORMAT_V1
+    }
 }
 
 #[derive(Default)]

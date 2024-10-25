@@ -1,18 +1,24 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{ops::Deref, path::PathBuf, sync::Arc};
-
-use clap::Args;
-use kvengine::{
-    dfs::{DFSConfig, Dfs, Options, S3Fs},
-    table::{
-        blobtable::blobtable::BlobTable,
-        file::InMemFile,
-        sstable::{BlockCache, L0Table, SsTable},
-    },
+use std::{
+    ffi::OsStr,
+    fs,
+    ops::Deref,
+    path::{Path, PathBuf},
+    sync::Arc,
 };
 
-const BLOB_LEVEL_FLAG: u32 = 255;
+use clap::Args;
+use futures::future::join_all;
+use kvengine::{
+    dfs::{DFSConfig, Dfs, FileType, Options, S3Fs},
+    table::{
+        blobtable::{blobtable::BlobTable, builder::BlobFooter},
+        file::{File, InMemFile},
+        sstable::{BlockCache, Footer, L0Footer, L0Table, SsTable},
+    },
+    IoContext,
+};
 
 #[derive(Args)]
 pub struct ShowSstArgs {
@@ -20,14 +26,12 @@ pub struct ShowSstArgs {
     #[clap(long, default_value = "")]
     pub config: PathBuf,
     /// The id of the SST file.
-    #[clap(long)]
+    #[clap(long, default_value_t = 0)]
     pub id: u64,
-    /// The level of the SST file. 255 for BLOB.
-    #[clap(long)]
-    pub level: u32,
     /// The path of local SST file.
     ///
-    /// If specified, the SST file will be get from the path instead of DFS.
+    /// If specified, the SST file will be retrieved from the path instead of
+    /// DFS.
     #[clap(long)]
     pub local: Option<PathBuf>,
 }
@@ -39,8 +43,8 @@ pub struct ShowSstConfig {
     pub dfs: DFSConfig,
 }
 
-pub(crate) fn get_file_data_from_local(local: PathBuf) -> bytes::Bytes {
-    let data = std::fs::read(&local).unwrap_or_else(|err| {
+pub(crate) fn get_file_data_from_local(local: &Path) -> bytes::Bytes {
+    let data = std::fs::read(local).unwrap_or_else(|err| {
         panic!("failed to read local file from {:?}: {:?}", local, err);
     });
     bytes::Bytes::from(data)
@@ -58,8 +62,44 @@ fn get_file_data_from_dfs(id: u64, config: ShowSstConfig) -> bytes::Bytes {
 
     let runtime = s3fs.get_runtime();
     runtime
-        .block_on(s3fs.read_file(id, Options::default()))
+        .block_on(s3fs.read_file(id, Options::default().with_type(FileType::Sst)))
         .expect("failed to read file from dfs")
+}
+
+#[derive(Debug)]
+enum SstType {
+    Unknown,
+    L0,
+    L1Plus,
+    Blob,
+}
+
+fn detect_sst_type(file: &dyn File) -> SstType {
+    // L1+ tables should be checked before L0 tables.
+    if file.size() >= SsTable::footer_size() as u64 {
+        let mut footer = Footer::default();
+        footer.unmarshal(&file.read_footer(SsTable::footer_size()).unwrap());
+        if footer.is_match() {
+            return SstType::L1Plus;
+        }
+    }
+
+    if file.size() >= L0Table::footer_size() as u64 {
+        let mut footer = L0Footer::default();
+        footer.unmarshal(&file.read_footer(L0Table::footer_size()).unwrap());
+        if footer.is_match() {
+            return SstType::L0;
+        }
+    }
+
+    if file.size() >= BlobTable::footer_size() as u64 {
+        let mut footer = BlobFooter::default();
+        footer.unmarshal(&file.read_footer(BlobTable::footer_size()).unwrap());
+        if footer.is_match() {
+            return SstType::Blob;
+        }
+    }
+    SstType::Unknown
 }
 
 pub fn execute_show_sst(args: ShowSstArgs) {
@@ -71,27 +111,35 @@ pub fn execute_show_sst(args: ShowSstArgs) {
     config.dfs.override_from_env();
 
     let data = match args.local {
-        Some(local) => get_file_data_from_local(local),
+        Some(local) => get_file_data_from_local(&local),
         None => get_file_data_from_dfs(args.id, config),
     };
     let file = Arc::new(InMemFile::new(args.id, data));
-    if args.level == 0 {
-        let l0 = L0Table::new(file, BlockCache::None, false, None)
-            .unwrap()
-            .unwrap();
-        print_l0_table(&l0);
-    } else if args.level == BLOB_LEVEL_FLAG {
-        let blob = BlobTable::new(file).unwrap();
-        print_blob_table(&blob);
-    } else {
-        let ln = SsTable::new(file, BlockCache::None, None).unwrap();
-        println!("[SST {}, level {}]", ln.id(), args.level);
-        print_sstable(&ln, 2);
+    let sst_type = detect_sst_type(file.as_ref());
+    match sst_type {
+        SstType::L0 => {
+            let l0 = L0Table::new(file, BlockCache::None, false, None)
+                .unwrap()
+                .unwrap();
+            print_l0_table(&l0);
+        }
+        SstType::Blob => {
+            let blob = BlobTable::new(file).unwrap();
+            print_blob_table(&blob);
+        }
+        SstType::L1Plus => {
+            let ln = SsTable::new(file, BlockCache::None, None).unwrap();
+            println!("[SST {}, level 1+]", ln.id());
+            print_sstable(&ln, 2);
+        }
+        SstType::Unknown => {
+            eprintln!("Not a valid SST file");
+        }
     }
 }
 
 pub(crate) fn print_l0_table(l0: &L0Table) {
-    println!("[SST {}, level {}]", l0.id(), 0);
+    println!("[SST {}, level 0]", l0.id());
     println!("  size: {}", l0.size());
     println!("  max_ts: {}", l0.max_ts());
     println!("  entries: {}", l0.entries());
@@ -163,4 +211,72 @@ pub(crate) fn print_sstable(tbl: &SsTable, indent: usize) {
 
     let idx = tbl.load_index();
     println!("{}num_blocks: {}", indent, idx.num_blocks());
+}
+
+#[derive(Args)]
+pub struct ScanBadTableFileArgs {
+    /// The local path to scan SST files.
+    #[clap(long)]
+    pub path: PathBuf,
+    #[clap(long, default_value_t = 4)]
+    pub concurrency: usize,
+}
+
+pub fn execute_scan_bad_table(args: ScanBadTableFileArgs) {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .max_blocking_threads(args.concurrency + 1)
+        .enable_all()
+        .build()
+        .unwrap();
+    if args.path.is_dir() {
+        let handles = iterate_dir(&args.path, &rt);
+        rt.block_on(join_all(handles));
+    } else {
+        eprintln!("{} is not a directory", args.path.display());
+    }
+}
+
+fn iterate_dir(path: &Path, rt: &tokio::runtime::Runtime) -> Vec<tokio::task::JoinHandle<()>> {
+    let mut handles = vec![];
+    let read_dir = fs::read_dir(path).ctx("read_dir").unwrap();
+    for entry in read_dir.flatten() {
+        let sub_path = entry.path();
+        if sub_path.is_dir() {
+            handles.extend(iterate_dir(&sub_path, rt));
+        } else {
+            let h = rt.spawn_blocking(move || handle_table_file(&sub_path));
+            handles.push(h)
+        }
+    }
+    handles
+}
+
+fn handle_table_file(path: &Path) {
+    if !path.extension().is_some_and(|ext| ext == OsStr::new("sst")) {
+        // TODO: support other file types
+        return;
+    }
+    let filename = path.file_name().unwrap().to_string_lossy();
+    let data = get_file_data_from_local(path);
+    let file = Arc::new(InMemFile::new(0, data));
+    let sst_type = detect_sst_type(file.as_ref());
+    match sst_type {
+        SstType::L0 => {
+            let _ = L0Table::new(file, BlockCache::None, false, None)
+                .unwrap_or_else(|err| panic!("{}({:?}) is invalid: {:?}", filename, sst_type, err))
+                .unwrap();
+        }
+        SstType::Blob => {
+            let _ = BlobTable::new(file)
+                .unwrap_or_else(|err| panic!("{}({:?}) is invalid {:?}", filename, sst_type, err));
+        }
+        SstType::L1Plus => {
+            let _ = SsTable::new(file, BlockCache::None, None)
+                .unwrap_or_else(|err| panic!("{}({:?}) is invalid: {:?}", filename, sst_type, err));
+        }
+        SstType::Unknown => {
+            panic!("{} is not a SST file", filename);
+        }
+    }
+    println!("{filename}({sst_type:?}) is OK");
 }

@@ -20,17 +20,21 @@ use crate::{
 const L0_FOOTER_SIZE: usize = std::mem::size_of::<L0Footer>();
 
 #[derive(Default, Clone)]
-struct L0Footer {
+pub struct L0Footer {
     version: u64,
     num_cfs: u32,
     magic: u32,
 }
 
 impl L0Footer {
-    fn unmarshal(&mut self, bin: &[u8]) {
+    pub fn unmarshal(&mut self, bin: &[u8]) {
         self.version = LittleEndian::read_u64(bin);
         self.num_cfs = LittleEndian::read_u32(&bin[8..]);
         self.magic = LittleEndian::read_u32(&bin[12..]);
+    }
+
+    pub fn is_match(&self) -> bool {
+        self.magic == MAGIC_NUMBER || self.magic == MAGIC_NUMBER_SPLIT_L0
     }
 }
 

@@ -102,6 +102,10 @@ impl BlobFooter {
         buf.put_u32_le(self.min_blob_size);
         buf.put_u32_le(self.magic);
     }
+
+    pub fn is_match(&self) -> bool {
+        self.magic == BLOB_MAGIC_NUMBER
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
