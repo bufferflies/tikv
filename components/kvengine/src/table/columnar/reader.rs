@@ -12,6 +12,7 @@ use api_version::{
     api_v2::{KEYSPACE_ID_LEN, TXN_KEY_PREFIX},
     ApiV2,
 };
+use arrow_buffer::i256;
 use bytes::Buf;
 use cloud_encryption::EncryptionKey;
 use tidb_query_datatype::{
@@ -21,7 +22,7 @@ use tidb_query_datatype::{
             BYTES_FLAG, COMPACT_BYTES_FLAG, DECIMAL_FLAG, DURATION_FLAG, FLOAT_FLAG, INT_FLAG,
             JSON_FLAG, NIL_FLAG, UINT_FLAG, VAR_INT_FLAG, VAR_UINT_FLAG, VECTOR_FLOAT32_FLAG,
         },
-        mysql::{DecimalDecoder, DecimalEncoder},
+        mysql::{Decimal, DecimalDecoder},
         row::v2::{decode_v2_i64, decode_v2_u64, RowSlice},
         table::{
             decode_common_handle, decode_int_handle, encode_common_handle_row_key, encode_row_key,
@@ -1013,7 +1014,7 @@ fn parse_default_val(col_info: &ColumnInfo) -> Option<Vec<u8>> {
             return None;
         }
         FLOAT_FLAG => decode_f64(&mut default_val).unwrap().to_le_bytes().to_vec(),
-        DECIMAL_FLAG | JSON_FLAG => default_val.to_vec(),
+        JSON_FLAG => default_val.to_vec(),
         VAR_INT_FLAG => decode_var_i64(&mut default_val)
             .unwrap()
             .to_le_bytes()
@@ -1022,6 +1023,10 @@ fn parse_default_val(col_info: &ColumnInfo) -> Option<Vec<u8>> {
             .unwrap()
             .to_le_bytes()
             .to_vec(),
+        DECIMAL_FLAG => {
+            warn!("unimplemented decimal default");
+            return None;
+        }
         VECTOR_FLOAT32_FLAG => {
             warn!("unimplemented vector default");
             return None;
@@ -1149,6 +1154,29 @@ impl ColumnarRowTableReader {
         flag.contains(FieldTypeFlag::UNSIGNED)
     }
 
+    fn decode_decimal_as_int(col_info: &ColumnInfo, decimal: &Decimal) -> Vec<u8> {
+        let mut buf = vec![];
+        let mut decimal_str = decimal.to_string();
+        decimal_str.retain(|c| c != '.');
+        let prec = col_info.get_column_len();
+        if prec <= 9 {
+            let val = decimal_str.parse::<i32>().unwrap_or_default();
+            buf.extend_from_slice(&val.to_le_bytes());
+        } else if prec <= 18 {
+            let val = decimal_str.parse::<i64>().unwrap_or_default();
+            buf.extend_from_slice(&val.to_le_bytes());
+        } else if prec <= 38 {
+            let val = decimal_str.parse::<i128>().unwrap_or_default();
+            buf.extend_from_slice(&val.to_le_bytes());
+        } else if prec <= 65 {
+            let val = decimal_str.parse::<i256>().unwrap_or_default();
+            buf.extend_from_slice(&val.to_le_bytes());
+        } else {
+            panic!("unsupported precision: {}", prec);
+        }
+        buf
+    }
+
     fn push_col_buf_with_field_type(
         col_buf: &mut ColumnBuffer,
         col_info: &ColumnInfo,
@@ -1190,11 +1218,16 @@ impl ColumnarRowTableReader {
             FieldTypeTp::Null => {
                 col_buf.push_null();
             }
+            FieldTypeTp::NewDecimal => {
+                // Marshal decimal in TiFlash compatible format.
+                let mut val = col_val;
+                let decimal = val.read_decimal().unwrap();
+                col_buf.push_value(&Self::decode_decimal_as_int(col_info, &decimal));
+            }
             FieldTypeTp::Unspecified
             | FieldTypeTp::NewDate
             | FieldTypeTp::VarChar
             | FieldTypeTp::Json
-            | FieldTypeTp::NewDecimal
             | FieldTypeTp::TinyBlob
             | FieldTypeTp::MediumBlob
             | FieldTypeTp::LongBlob
@@ -1235,12 +1268,16 @@ impl ColumnarRowTableReader {
                 col_buf.push_value(&v.to_le_bytes());
             }
             DECIMAL_FLAG => {
-                let v = datum.read_decimal().unwrap();
-                let mut buf = vec![];
-                let prec = col_info.get_column_len() as u8;
-                let frac = col_info.get_decimal() as u8;
-                buf.write_decimal(&v, prec, frac).unwrap();
-                col_buf.push_value(&buf);
+                // let v = datum.read_decimal().unwrap();
+                // let mut buf = vec![];
+                // let prec = col_info.get_column_len() as u8;
+                // let frac = col_info.get_decimal() as u8;
+                // buf.write_decimal(&v, prec, frac).unwrap();
+                // col_buf.push_value(&buf);
+                //
+                // Marshal decimal to TiFlash compatible format.
+                let decimal = datum.read_decimal().unwrap();
+                col_buf.push_value(&Self::decode_decimal_as_int(col_info, &decimal));
             }
             JSON_FLAG | VECTOR_FLOAT32_FLAG | VAR_UINT_FLAG | VAR_INT_FLAG | COMPACT_BYTES_FLAG => {
                 unreachable!("invalid flag {} in common handle", flag)

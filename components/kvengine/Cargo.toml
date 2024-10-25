@@ -12,6 +12,7 @@ testexport = []
 
 [dependencies]
 api_version = { path = "../api_version" }
+arrow-buffer = "53.1.0"
 async-trait = "0.1"
 aws = { path = "../cloud/aws" }
 base64 = "0.13"

@@ -248,6 +248,18 @@ pub fn build_advanced_scanner(
     if api_version::ApiV2::parse_key_mode(&key_range.start) != KeyMode::Txn {
         return None;
     }
+
+    // Decimal encoding in columnar is for TiFlash only. It is not supported TiKV
+    // yet.
+    if table_scan
+        .get_columns()
+        .iter()
+        .any(|col_info| col_info.get_tp() == FieldTypeTp::NewDecimal.to_u8().unwrap() as i32)
+    {
+        warn!("build_columnar_scanner, decimal is not supported yet");
+        return None;
+    }
+
     let keyspace_id = api_version::ApiV2::get_u32_keyspace_id_by_key(&key_range.start).unwrap();
     let start = &key_range.start[KEYSPACE_PREFIX_LEN..];
     let end = &key_range.end[KEYSPACE_PREFIX_LEN..];
