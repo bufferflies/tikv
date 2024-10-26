@@ -6,24 +6,13 @@ FROM hub-new.pingcap.net/keyspace/pd:${VERSION} as pd
 FROM hub-new.pingcap.net/keyspace/tiflash:${TIFLASH_VERSION} as tiflash
 FROM hub-new.pingcap.net/kvaas/go-tpc:small-size as go-tpc
 
-FROM amazonlinux:2022.0.20220504.1
-RUN yum update -y && yum install -y procps
-
-# Uncomment following lines to use ubuntu >= 22.04 for profiling.
-# It's not easy to install jemalloc-dev on amazonlinux.
-#
-# FROM ubuntu:22.04
-# ARG DEBIAN_FRONTEND=noninteractive
-# ENV TZ=UTC
-# RUN sed -i s@/archive.ubuntu.com/@/apt.ksyun.cn/@g /etc/apt/sources.list && \
-#     sed -i s@/security.ubuntu.com/@/apt.ksyun.cn/@g /etc/apt/sources.list && \
-#     apt-get update -y && apt-get install -y \
-#     tzdata \
-#     binutils \
-#     libjemalloc-dev \
-#     graphviz \
-#     ghostscript \
-#     curl
+FROM amazonlinux:2023.5.20241001.1
+RUN dnf update -y && dnf install -y \
+    procps \
+    binutils \
+    jemalloc-devel \
+    graphviz \
+    ghostscript
 
 COPY --from=tidb /tidb-server /tidb-server
 COPY --from=pd /pd-server /pd-server
