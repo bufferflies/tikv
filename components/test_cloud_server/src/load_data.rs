@@ -29,7 +29,6 @@ pub fn init_task(
         inner_key_off: None,
         outer_key_prefix: vec![],
         encryption_key: None,
-        new_client: true,
     };
     let check_point_ctx = LoadDataCheckPointCtx::new(task_ctx.clone());
 

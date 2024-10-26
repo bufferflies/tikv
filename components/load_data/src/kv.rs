@@ -169,8 +169,6 @@ pub struct MergeIterator {
     pub(crate) duplicated_entries_size: usize,
     last_dup_entry_key: Vec<u8>,
     last_dup_entry_row_id: Vec<u8>,
-    // TODO(zeminzhou): remove this field after all clients are updated.
-    new_client: bool,
 }
 
 #[derive(Default, Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -186,7 +184,6 @@ impl MergeIterator {
         readers: Vec<KvPairsReader>,
         outer_key_prefix: &[u8],
         key_comm_prefix_len: usize,
-        new_client: bool,
     ) -> Result<Self> {
         let mut heap = Vec::with_capacity(readers.len());
         for mut reader in readers {
@@ -205,7 +202,6 @@ impl MergeIterator {
             duplicated_entries_size: 0,
             last_dup_entry_key: vec![],
             last_dup_entry_row_id: vec![],
-            new_client,
         };
         it.init_heap();
         it.prev_key = it.key().to_vec();
@@ -297,11 +293,7 @@ impl MergeIterator {
         let val = self.heap[0].value();
         let row_id = self.heap[0].row_id();
         if key == self.prev_key.as_slice() {
-            // For old load data client, the row_id is empty. So we only need
-            // to compare row_id when it's not empty.
-            //
-            // TODO(zeminzhou): remove this check after all clients are updated.
-            if self.new_client && row_id == self.prev_row_id.as_slice() {
+            if row_id == self.prev_row_id.as_slice() {
                 return Ok(true);
             }
 
@@ -312,16 +304,8 @@ impl MergeIterator {
             }
             let val_str = hex::encode(val);
             if let Some(entry) = self.duplicated_entries.last_mut() {
-                // For old client, the row_id always is empty, and no repeated keys in
-                // KvPairsReader. So we don't need to compare row_id.
-                //
-                // For new client, the row_id is not empty, and there may be repeated keys in
-                // KvPairsReader. So we need to compare row_id to avoid adding the repeated
-                // values.
-                //
-                // TODO(zeminzhou): remove this check after all clients are updated.
                 if self.last_dup_entry_key.as_slice() == key {
-                    if row_id.is_empty() || self.last_dup_entry_row_id.as_slice() != row_id {
+                    if self.last_dup_entry_row_id.as_slice() != row_id {
                         self.duplicated_entries_size += val.len();
                         entry.values.push(val_str);
                     }
@@ -445,7 +429,7 @@ mod tests {
 
         let key_comm_prefix_len = last_key_comm_prefix.len();
         let mut merge_iter =
-            MergeIterator::new(readers, "".as_bytes(), key_comm_prefix_len, true).unwrap();
+            MergeIterator::new(readers, "".as_bytes(), key_comm_prefix_len).unwrap();
 
         key_ids.sort();
         for id in key_ids.iter() {
@@ -469,7 +453,6 @@ mod tests {
             inner_key_off: None,
             outer_key_prefix: vec![],
             encryption_key: None,
-            new_client: true,
         };
         flush_to_local_file(kv_pairs, mock_task_ctx, path, batch_size).unwrap()
     }

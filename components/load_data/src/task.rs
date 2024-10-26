@@ -240,8 +240,6 @@ pub struct TaskContext {
     pub inner_key_off: Option<usize>,
     pub outer_key_prefix: Vec<u8>,
     pub encryption_key: Option<EncryptionKey>,
-    // TODO(zeminzhou): remove new_client field when the old client is deprecated.
-    pub new_client: bool,
 }
 
 #[derive(Clone)]
@@ -763,13 +761,11 @@ impl LoadTaskWorker {
             offset += 4;
             let val = chunk_data.slice(offset..offset + val_len as usize);
             offset += val_len as usize;
-            let mut row_id = Bytes::default();
-            if self.task_ctx.new_client {
-                let row_id_len = (&chunk_data[offset..]).get_u16_le();
-                offset += 2;
-                row_id = chunk_data.slice(offset..offset + row_id_len as usize);
-                offset += row_id_len as usize;
-            }
+            let row_id_len = (&chunk_data[offset..]).get_u16_le();
+            offset += 2;
+            let row_id = chunk_data.slice(offset..offset + row_id_len as usize);
+            offset += row_id_len as usize;
+
             let outer_key_prefix = key.slice(..inner_key_off);
             if outer_key_prefix.chunk() != self.task_ctx.outer_key_prefix.as_slice() {
                 let err_msg = format!(
@@ -1111,7 +1107,6 @@ impl LoadTaskWorker {
             readers,
             &self.task_ctx.outer_key_prefix,
             self.key_comm_prefix.len(),
-            self.task_ctx.new_client,
         )?;
 
         let mut errs = vec![];

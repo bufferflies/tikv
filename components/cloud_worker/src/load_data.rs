@@ -144,7 +144,6 @@ pub(crate) async fn handle_load_data(
                 let start_ts = get_param::<u64>(&query_pairs, "start_ts").unwrap_or_default();
                 let commit_ts = get_param::<u64>(&query_pairs, "commit_ts").unwrap_or_default();
                 let data_size = get_param::<u64>(&query_pairs, "data_size").unwrap_or_default();
-                let new_client = get_param::<bool>(&query_pairs, "new_client").unwrap_or_default();
                 if data_size > manager.worker_scaler_conf.max_size.0 {
                     return Ok(make_response(
                         StatusCode::BAD_REQUEST,
@@ -211,7 +210,6 @@ pub(crate) async fn handle_load_data(
                     inner_key_off: None,
                     outer_key_prefix: vec![],
                     encryption_key: None,
-                    new_client,
                 };
                 // step 1: on start, client call init task
                 manager.init_task(task_ctx);
@@ -381,7 +379,6 @@ impl LoadDataManager {
             inner_key_off: None,
             outer_key_prefix: vec![],
             encryption_key: None,
-            new_client: check_point_ctx.new_client,
         };
         let mut worker = LoadTaskWorker::new(
             self.config.clone(),

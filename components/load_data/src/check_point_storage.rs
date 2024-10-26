@@ -136,9 +136,6 @@ pub struct LoadDataCheckPointCtx {
     flushed_file_idx: usize,
     key_comm_prefix: Vec<u8>,
 
-    // TODO(zeminzhou): remove new_client field when the old client is deprecated.
-    pub new_client: bool,
-
     // Used to recover LoadTaskStates.The lightning service periodically obtains the execution
     // progress from LoadTaskStates.
     pub canceled: bool,
@@ -173,7 +170,6 @@ impl LoadDataCheckPointCtx {
             flushed_chunk_ids: Default::default(),
             flushed_file_idx: 0,
             key_comm_prefix: vec![],
-            new_client: task_ctx.new_client,
             canceled: false,
             error: "".to_string(),
         }
@@ -551,7 +547,6 @@ mod tests {
             inner_key_off: None,
             outer_key_prefix: vec![],
             encryption_key: None,
-            new_client: true,
         };
         let check_point = LoadDataCheckPointCtx::new(task_ctx);
 
@@ -750,7 +745,6 @@ mod tests {
             inner_key_off: None,
             outer_key_prefix: vec![],
             encryption_key: None,
-            new_client: true,
         };
 
         let mut check_point = LoadDataCheckPointCtx::new(task_ctx);
